@@ -1282,6 +1282,45 @@ def local_only_scope_offered() -> bool:
     return not subjectless_run_active()
 
 
+def unsafe_scope_restricted(retrieval) -> bool:
+    """Whether non-source-partitioned channels must be disabled.
+
+    The user's checkbox source ceiling is request-local.  Channels that
+    cannot be proven safe to pre-filter by source (graph/PPR/community
+    expansion, chains, exact-section lookup) are skipped whenever it is
+    narrowed; source-addressable KG/element search keeps running and lets
+    candidate retrieval intersect that ceiling.
+
+    Typed collection enumeration and ``read_document`` are NOT gated here
+    (user ruling 2026-09-29): both are source-addressable reads, so they
+    stay available under narrowing and drift and the executor filters
+    their rows and denominators by the ceiling.  For them this predicate
+    answers a DISCLOSURE question instead -- ``_enumeration_scope`` reads
+    it to stamp ``source_scoped`` on the listing, ``reflect`` reads it
+    to tell the model its listings cover only the ticked sources, and the
+    chunk engine's catalog overview (``AskService._try_document_overview``)
+    reads it for the same stamp on its directory card.
+
+    A module function rather than only a method so those readers share ONE
+    definition; ``retrieval`` is whatever carries the drift probe
+    (``unsafe_source_scope_restricted``), absent in narrow test doubles.
+    """
+    from app.services.source_scope import (
+        current_source_scope,
+        source_scope_restricted,
+    )
+
+    if source_scope_restricted():
+        return True
+    scope = current_source_scope()
+    drift_probe = getattr(retrieval, "unsafe_source_scope_restricted", None)
+    return bool(
+        scope is not None
+        and callable(drift_probe)
+        and drift_probe(scope.notebook_id)
+    )
+
+
 def document_source_admitted(notebook_id: str, source_id: str) -> bool:
     """按篇读取的来源级兜底:这一篇在不在本 run 的来源天花板与参与集之内。
 
@@ -3503,38 +3542,9 @@ class ReasoningRetriever:
         )
 
     def _unsafe_scope_restricted(self) -> bool:
-        """Whether non-source-partitioned channels must be disabled.
-
-        The user's checkbox source ceiling is request-local.  Channels that
-        cannot be proven safe to pre-filter by source (graph/PPR/community
-        expansion, chains, exact-section lookup) are skipped whenever it is
-        narrowed; source-addressable KG/element search keeps running and lets
-        candidate retrieval intersect that ceiling.
-
-        Typed collection enumeration and ``read_document`` are NOT gated here
-        (user ruling 2026-09-29): both are source-addressable reads, so they
-        stay available under narrowing and drift and the executor filters
-        their rows and denominators by the ceiling.  For them this predicate
-        answers a DISCLOSURE question instead -- ``_enumeration_scope`` reads
-        it to stamp ``source_scoped`` on the listing, and ``reflect`` reads it
-        to tell the model its listings cover only the ticked sources.
-        """
-        from app.services.source_scope import (
-            current_source_scope,
-            source_scope_restricted,
-        )
-
-        if source_scope_restricted():
-            return True
-        scope = current_source_scope()
-        drift_probe = getattr(
-            self.retrieval, "unsafe_source_scope_restricted", None
-        )
-        return bool(
-            scope is not None
-            and callable(drift_probe)
-            and drift_probe(scope.notebook_id)
-        )
+        """See ``unsafe_scope_restricted`` (the one definition, shared with
+        the chunk-engine catalog overview's ``source_scoped`` disclosure)."""
+        return unsafe_scope_restricted(self.retrieval)
 
     # --- 原文段落检索通道的总闸 ---
     def chunk_search_active(self) -> bool:

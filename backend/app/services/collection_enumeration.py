@@ -44,7 +44,7 @@ Six contracts this module owns:
    directly: absence from the plan means "the map counted zero", and a source
    the user named by hand is worth one index-seeked query rather than an answer
    derived from a cached zero — provided it is inside the source ceiling
-   (contract 6).
+   (contract 6); outside it the id is refused exactly like a non-member one.
 4. **The KG listable predicate is the counting predicate.**  Both sides
    evaluate the very same ``USABLE_STATUSES`` object (defined once in
    ``app.services.knowledge_contracts``) and subtract/skip the very same
@@ -76,7 +76,8 @@ Six contracts this module owns:
    evidence references an object carries (filtered before truncation).  A
    source uploaded after the freeze is outside it — neither listed, nor cited,
    nor a ``concurrent_change``.  A source named explicitly but outside the
-   ceiling is refused with the classified ``source_out_of_scope`` outcome.
+   ceiling is refused with the very ``ValueError`` a non-member id gets, so
+   the refusal cannot be used to probe whether an unticked document exists.
    Under a ceiling a KG object with no evidence is not listed (it is supported
    by no ticked source).  Without a ceiling nothing here differs by a byte.
 
@@ -145,7 +146,11 @@ from app.services.retrieval_participants import (
     resolve_retrieval_participants,
 )
 from app.services.source_display import source_display_title
-from app.services.source_scope import scoped_participants, source_allowed
+from app.services.source_scope import (
+    scoped_participants,
+    source_allowed,
+    subjectless_run_active,
+)
 
 
 # ``truncated_reason`` vocabulary.  "budget" covers both row and page ceilings
@@ -155,17 +160,6 @@ from app.services.source_scope import scoped_participants, source_allowed
 TRUNCATED_BUDGET = "budget"
 TRUNCATED_PAYLOAD = "payload"
 TRUNCATED_CONCURRENT_CHANGE = "concurrent_change"
-# Not a truncation but a REFUSAL, carried in the same field so the result keeps
-# the ``complete=False ⟹ non-empty reason`` shape every consumer relies on: the
-# caller named a source (``enumerate_elements(source_id=...)``) that exists in a
-# participant library but is outside this run's source ceiling — unticked, or
-# uploaded after the scope was frozen.  Nothing was read and nothing can be
-# continued (no cursor).  A classified OUTCOME rather than an exception on
-# purpose: under a narrowed scope this is an expected answer the reflect loop
-# must be able to tell apart from "the executor broke" and from "no such
-# source", and one the user can be told in words ("that document is not among
-# the ticked sources").
-TRUNCATED_SOURCE_OUT_OF_SCOPE = "source_out_of_scope"
 
 # 「这个数是从多大的一片资料里数出来的」——``local_only`` 清单的范围后缀,**唯一
 # 定义点**。同一个 run 现在可以同时产出 ``scope:"current_notebook"`` 与
@@ -955,9 +949,8 @@ class CollectionEnumerationService:
         paged DIRECTLY.  Its absence from the map's plan is not read as "it has
         none": one explicitly named source is worth an index-seeked query
         rather than an answer inferred from a cached zero.  A named source
-        that is in scope but outside the run's source ceiling is refused with
-        the classified ``source_out_of_scope`` outcome (no items, no cursor),
-        never walked — see ``_explicit_source_plan``.
+        outside the run's source ceiling raises exactly what a non-member
+        source raises, and is never walked — see ``_explicit_source_plan``.
         """
         if kind not in ENUMERABLE_ELEMENT_KINDS:
             raise ValueError(f"unknown enumerable element kind: {kind!r}")
@@ -979,12 +972,9 @@ class CollectionEnumerationService:
             total: Optional[int] = plan.total
             preloaded: Dict[str, Any] = {}
             if source_id:
-                explicit = self._explicit_source_plan(
+                sources, total, preloaded = self._explicit_source_plan(
                     db, notebook_ids, plan, source_id
                 )
-                if explicit is None:
-                    return _element_out_of_scope(kind, walk)
-                sources, total, preloaded = explicit
 
             scope_id = (tuple(notebook_ids), plan.fingerprint)
             if cursor is not None:
@@ -1204,8 +1194,18 @@ class CollectionEnumerationService:
         exactly one batched primary-key hydration.  That is also why no lookahead
         row is needed here — "is there more?" is ``position < len(plan)``, an
         exact answer rather than an inferred one.
+
+        ``local_only`` means "the current notebook's own documents", and a
+        subjectless (global) run has no current notebook: its nominal active is
+        only the first of the selected libraries, a naming anchor the user never
+        singled out.  Narrowing to it would list one arbitrary library and call
+        it "the current notebook", so in that mode the flag is ignored and the
+        roster covers every selected library (audit E-5).  The callers own the
+        matching disclosure: they must not record or render a local-only scope
+        for such a run.
         """
         raise_if_cancelled(cancel_event)
+        local_only = local_only and not subjectless_run_active()
         walk = _Walk(budget, cursor.returned_before if cursor else 0)
         items: List[SourceItem] = []
         resume: Optional[SourceCursor] = None
@@ -1489,7 +1489,8 @@ class CollectionEnumerationService:
                                 notebook_id=notebook_id,
                                 tier=tier,
                                 evidence_element_ids=_evidence_refs(
-                                    _row_get(row, "evidence"), ceiling
+                                    _row_get(row, "evidence"), ceiling,
+                                    memory_ids[notebook_id],
                                 ),
                             )
                             walk.admit(item)
@@ -1651,17 +1652,19 @@ class CollectionEnumerationService:
         notebook_ids: Sequence[str],
         plan: ScopeElementPlan,
         source_id: str,
-    ) -> Optional[Tuple[Tuple[ScopeSource, ...], Optional[int], Dict[str, Any]]]:
+    ) -> Tuple[Tuple[ScopeSource, ...], Optional[int], Dict[str, Any]]:
         """Scope-check and plan a single explicitly requested source.
 
-        ``None`` = the source exists in a participant library but is OUTSIDE
-        this run's source ceiling (``source_allowed`` — unticked, or uploaded
-        after the scope was frozen).  That used to be walked, because only
-        library membership was checked, so a model that named an unticked
-        document's id got its elements listed and cited (audit E-4).  It is
-        now the classified ``source_out_of_scope`` outcome at the caller, not
-        an exception: under a narrowed scope it is an expected answer, not a
-        malformed request.  The two malformed cases below keep raising.
+        The source must also be inside this run's source ceiling
+        (``source_allowed``, judged against the ceiling of the row's OWN
+        library — in a global run every participant carries its own frozen
+        visible-source list).  That used to be skipped: only library membership
+        was checked, so a model that named an unticked document's id, or one
+        uploaded after the scope was frozen, got its elements listed and cited
+        (audit E-4).  An out-of-ceiling id raises the SAME sentence as a
+        non-member id, deliberately: the caller's skip step then reads exactly
+        what it reads for an id that does not exist, so the refusal cannot be
+        used to learn that an unticked document is there.
 
         One primary-key read proves three things at once: that the source
         exists, that it belongs to a participant notebook, and that it is not a
@@ -1689,7 +1692,11 @@ class CollectionEnumerationService:
         """
         rows = self._source_display(db, [source_id])
         row = rows.get(source_id)
-        if row is None or str(row["notebook_id"]) not in set(notebook_ids):
+        if (
+            row is None
+            or str(row["notebook_id"]) not in set(notebook_ids)
+            or not source_allowed(str(row["notebook_id"]), source_id)
+        ):
             raise ValueError(
                 f"source is not in scope: {source_id!r}")
         owner_notebook_id = str(row["notebook_id"])
@@ -1697,14 +1704,6 @@ class CollectionEnumerationService:
             self._sources.memory_source_ids(db, owner_notebook_id)
         ):
             raise ValueError(f"source is not enumerable: {source_id!r}")
-        # Judged against the ceiling of the row's OWN library — in a global run
-        # every participant carries its own frozen visible-source list — and
-        # AFTER the Memory check, so a private Memory keeps answering exactly
-        # what it answered before (another member's Memory is outside every
-        # ceiling too, and must not become distinguishable from "not
-        # enumerable" by the new outcome).
-        if not source_allowed(owner_notebook_id, source_id):
-            return None
         planned = next(
             (entry for entry in plan.sources if entry.source_id == source_id), None
         )
@@ -1953,34 +1952,6 @@ def _resume_source_plan(
     return None
 
 
-def _element_out_of_scope(kind: str, walk: _Walk) -> ElementEnumeration:
-    """The classified refusal for a named source outside the source ceiling.
-
-    Nothing was read, so every count is zero and the denominator is unknown
-    (``None``, never a confident 0: the ceiling says nothing about how many
-    items the source holds, only that this run may not list them).
-    ``has_more=False`` because there is nothing to continue — the cursor
-    contract (``_resumable``) returns no cursor for this reason.
-    """
-    return ElementEnumeration(
-        kind=kind,
-        items=(),
-        coverage=EnumerationCoverage(
-            returned=0,
-            returned_total=walk.returned_total,
-            scanned=0,
-            total=None,
-            has_more=False,
-            complete=False,
-            truncated_reason=TRUNCATED_SOURCE_OUT_OF_SCOPE,
-            overflow_semantics=EXPLICIT_PARTIAL_OVERFLOW,
-        ),
-        cursor=None,
-        extra_pages=0,
-        payload_chars=0,
-    )
-
-
 def _resumable(coverage: EnumerationCoverage, resume: Optional[Any]) -> Optional[Any]:
     """The cursor contract, in one place.
 
@@ -1988,8 +1959,6 @@ def _resumable(coverage: EnumerationCoverage, resume: Optional[Any]) -> Optional
     tell "ran out of budget, ask again" from "cannot be continued" — and the
     sole exception is ``concurrent_change``, where continuing would mean
     resuming into a world that no longer matches the one already reported.
-    (The ``source_out_of_scope`` refusal never reaches here: nothing was
-    started, and ``_element_out_of_scope`` builds it without a cursor.)
     """
     if coverage.complete:
         return None
@@ -2064,23 +2033,33 @@ def _evidence_supported(value: Any, ceiling: SourceCeiling) -> bool:
 
 
 def _evidence_refs(
-    value: Any, ceiling: Optional[SourceCeiling] = None
+    value: Any,
+    ceiling: Optional[SourceCeiling] = None,
+    memory_source_ids: frozenset = frozenset(),
 ) -> Tuple[str, ...]:
     """Bounded, deduplicated element ids from an object's evidence column.
 
-    Under a source ceiling the entries are filtered BEFORE the
-    ``MAX_EVIDENCE_REFS`` truncation, never after: an object whose first
-    three evidence items come from unticked documents but whose fourth comes
-    from a ticked one must still hand the citation step an element it may
-    cite.  Truncating first would leave it with three unusable ids, and the
-    object would be listed with no citable evidence at all.  Without a
-    ceiling the result is exactly what it always was.
+    Two filters, both applied BEFORE the ``MAX_EVIDENCE_REFS`` truncation,
+    never after — an object whose first three evidence items are unusable but
+    whose fourth is fine must still hand the citation step an element it may
+    cite, and truncating first would leave it with three dead ids:
+
+    * the source ceiling: only in-ceiling evidence is referenced;
+    * private Memory, with or without a ceiling: an object owned by a visible
+      source can still carry evidence merged in from a Memory synthetic source
+      (another member's, or the asker's own), and "a listing never contains
+      private Memory" (contract 5) covers the text a citation would quote
+      from it, not just the rows.  ``memory_source_ids`` is the same list the
+      row drop and the denominator use.  Without a ceiling this is the one
+      place the refs can differ from before, and only for an object that
+      actually cites a Memory element.
     """
     out: List[str] = []
     for entry in _evidence_entries(value):
-        if ceiling is not None and not ceiling.allows(
-            str(entry.get("source_id") or "")
-        ):
+        source_id = str(entry.get("source_id") or "")
+        if source_id in memory_source_ids:
+            continue
+        if ceiling is not None and not ceiling.allows(source_id):
             continue
         element_id = str(entry.get("element_id") or "")
         if element_id and element_id not in out:

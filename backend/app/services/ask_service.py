@@ -3493,7 +3493,9 @@ class AskService:
         from app.services.document_catalog_overview import catalog_coverage_note, prepare_catalog_overview, supplement_missing_summaries
         from app.services.document_source_overview import prepare_source_overview
         from app.services.document_guide import GUIDE_SCHEMA_HINT, guide_style_instruction, render_document_guide
-        from app.services.reasoning_retrieval import document_source_admitted
+        from app.services.reasoning_retrieval import (
+            document_source_admitted, unsafe_scope_restricted,
+        )
 
         intent = overview_intent(payload.question)
         if intent is None or self.collection_enumeration is None:
@@ -3505,6 +3507,7 @@ class AskService:
             # 对等模式没有「当前笔记本」:锚点只是命名锚,只列它是一份与问题无关的偏窄目录。
             local_only=(intent.kind == "catalog" and not intent.include_reference_libraries
                         and not subjectless_run_active()),
+            source_scoped=unsafe_scope_restricted(getattr(self, "retrieval", None)),
         )
         prepared = catalog
         notice = ""

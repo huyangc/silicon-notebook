@@ -364,6 +364,12 @@ def render_collection_map(collection_map: CollectionMap) -> str:
     the element spread above: "the two numbers happen to be equal" and "this
     build does not report the second number" must not look the same, and the
     equal case is exactly the one where picking either scope is safe.
+
+    In peer (subjectless) runs the parenthesised share is omitted, because
+    the ``current_notebook`` enumeration scope is not offered there (and
+    ``enumerate_sources`` ignores ``local_only``); the single predicate is
+    ``not subjectless_run_active()``, shared with the prompts and
+    ``reasoning_retrieval.local_only_scope_offered()``.
     """
     elements = ", ".join(
         f"{item.kind} {item.count}"
@@ -378,8 +384,9 @@ def render_collection_map(collection_map: CollectionMap) -> str:
         f"elements: {elements} | "
         f"KG objects: {kg_objects} | "
         f"knowhow tables: {collection_map.knowhow_tables} | "
-        f"sources: {collection_map.sources} "
-        f"(current notebook: {collection_map.active_sources})"
+        f"sources: {collection_map.sources}"
+        + ("" if subjectless_run_active() else
+           f" (current notebook: {collection_map.active_sources})")
     )
     if len(text) > COLLECTION_MAP_MAX_CHARS:
         return text[: COLLECTION_MAP_MAX_CHARS - 1] + "…"
