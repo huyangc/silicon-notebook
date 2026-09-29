@@ -1696,6 +1696,115 @@ class GovernanceStore:
             (reason, reviewer_id, normalize_timestamp(now), candidate_id),
         )
 
+    @staticmethod
+    def withdraw_memory_promotions_on(
+        connection: Any,
+        notebook_id: str,
+        memory_ids: List[str],
+        reason: str,
+        reviewer_id: str,
+        now: str,
+    ) -> int:
+        """Reject the still-active proposals of Memory rows the caller is
+        about to hard-delete, inside the caller's delete transaction.
+
+        ``promotion_candidates.object_id`` has no foreign key to
+        ``memory_items``: a proposal outliving its Memory stays in the curator
+        queue forever and can never be approved (the pinned snapshot is gone).
+        Withdrawal is ``status='rejected'`` because the queue has no other
+        terminal state for "never reviewed"; an already approved proposal is
+        left alone — its base object is independent of the Memory row.
+
+        Scoped by notebook AND the Memory ids; the caller already holds the
+        Memory rows ``FOR UPDATE`` (same Memory-then-candidate lock order as
+        ``approve_promotion`` / ``reject_promotion``), so a concurrent
+        proposal either committed before this statement or fails on the
+        missing row afterwards."""
+        if not memory_ids:
+            return 0
+        cursor = connection.execute(
+            "UPDATE promotion_candidates "
+            "SET status='rejected', reason=%s, reviewed_by=%s, updated_at=%s "
+            "WHERE notebook_id=%s AND object_type='memory' AND object_id=ANY(%s) "
+            "AND status IN ('proposed','under_review')",
+            (
+                reason,
+                reviewer_id,
+                normalize_timestamp(now),
+                notebook_id,
+                list(memory_ids),
+            ),
+        )
+        return int(cursor.rowcount or 0)
+
+    @staticmethod
+    def strip_source_evidence_on(
+        connection: Any, notebook_id: str, source_id: str, now: str
+    ) -> List[str]:
+        """Detach one source's evidence from the objects ANOTHER source owns.
+
+        Deleting a source removes every object whose evidence references it
+        (``clear_source_graph_state``). For an object minted by that source
+        this is right; for an object minted by a different source that merely
+        gained this source's evidence (a manual ``merge_knowledge`` of a
+        Memory-derived object into a shared one), it deletes the shared
+        object with everything its own source contributed. Run this first,
+        in its own transaction, and the delete that follows only reaches the
+        rows this source minted: the foreign object keeps its payload and its
+        other evidence, and loses exactly the items citing ``source_id``.
+
+        "Owned" is the object's primary ``source_id`` column — the same
+        classification the Memory isolation work uses everywhere. The two
+        lookups mirror ``_stale_object_ids_for_source_batch`` branch for branch
+        (reverse index when backfilled, evidence containment otherwise), so
+        this finds exactly the foreign objects that delete would have found.
+        Every write is scoped by ``notebook_id`` and ``source_id``. Returns the
+        stripped object ids."""
+        if KnowledgeStore.source_index_backfilled(connection, notebook_id):
+            rows = connection.execute(
+                "SELECT ko.id, ko.evidence FROM knowledge_objects ko "
+                "JOIN knowledge_object_sources kos ON kos.object_id = ko.id "
+                "WHERE kos.source_id = %s AND kos.notebook_id = %s "
+                "AND ko.notebook_id = %s AND ko.source_id IS DISTINCT FROM %s "
+                "ORDER BY ko.id COLLATE \"C\" FOR UPDATE OF ko",
+                (source_id, notebook_id, notebook_id, source_id),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT id, evidence FROM knowledge_objects "
+                "WHERE notebook_id = %s AND source_id IS DISTINCT FROM %s "
+                "AND evidence @> jsonb_build_array("
+                "jsonb_build_object('source_id', %s::text)) "
+                "ORDER BY id COLLATE \"C\" FOR UPDATE",
+                (notebook_id, source_id, source_id),
+            ).fetchall()
+        stripped: List[str] = []
+        for row in rows:
+            kept = [
+                item
+                for item in json_value(row["evidence"], [])
+                if not (isinstance(item, dict) and item.get("source_id") == source_id)
+            ]
+            connection.execute(
+                "UPDATE knowledge_objects SET evidence = %s, updated_at = %s "
+                "WHERE id = %s AND notebook_id = %s",
+                (
+                    jsonb(_json_document(
+                        kept, expected=list, field="knowledge evidence"
+                    )),
+                    normalize_timestamp(now),
+                    row["id"],
+                    notebook_id,
+                ),
+            )
+            connection.execute(
+                "DELETE FROM knowledge_object_sources "
+                "WHERE object_id = %s AND source_id = %s AND notebook_id = %s",
+                (row["id"], source_id, notebook_id),
+            )
+            stripped.append(row["id"])
+        return stripped
+
     # -------------------------------------------------- knowledge mutation
     @staticmethod
     def update_object_in_transaction(

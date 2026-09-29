@@ -51,6 +51,10 @@ class MemoryEmbeddingJob:
 
 _AGENT_TOKEN_RE = re.compile(r"^snm_([^.]+)\.(.+)$")
 _TOKEN_TOUCH_SECONDS = 300
+# Page width of a member-exit purge: how many Memory rows one pass lists,
+# strips and deletes. A page size, not a cap — the purge loops until empty.
+# Matches ``bulk_delete_memories``' own 200-id bound.
+_EXIT_PURGE_BATCH = 200
 
 
 def _parse_time(value: str) -> datetime:
@@ -141,6 +145,14 @@ class MemoryService:
         self.owner_eligible = owner_eligible
         self.promotion_service: Any | None = None
         self.memory_kg: Any | None = None
+        # A member leaving a notebook loses their Memory there (exit purge).
+        # The access service owns membership, so it has to call back into this
+        # service before it drops the row; it is the ``notebooks`` dependency
+        # itself in production, so register here. A double without the hook
+        # (tests, older roots) simply has no exit purge.
+        bind_exit_purge = getattr(notebooks, "bind_member_memory_purge", None)
+        if callable(bind_exit_purge):
+            bind_exit_purge(self)
 
     def set_promotion_service(self, service: Any) -> None:
         self.promotion_service = service
@@ -798,13 +810,77 @@ class MemoryService:
             self.memory_kg.remove_memory_source(item.id)
         return item
 
+    def _remove_derived_rows(self, memory_id: str, user_id: str) -> None:
+        """Remove everything projected from one Memory, BEFORE its row goes.
+
+        Same order as ``transfer``'s move: ``sources.memory_id`` is not a
+        foreign key, so a derived source whose Memory row is already gone is
+        an orphan nothing can find again. First detach the projection: strip
+        this Memory's evidence from objects another source owns (a manually
+        merged shared object loses that evidence and stays) and drop the
+        index rows the generic source delete does not reach (SQLite's KG
+        lexical index). Then remove the hidden source through
+        the one removal path, ``remove_memory_source`` — its elements,
+        element vectors, KG objects, relations, facts, cluster member rows and
+        reverse-index rows, with the notebook's graph marked dirty. Both are
+        idempotent: a Memory that never had a derived source is a no-op."""
+        if self.memory_kg is None:
+            return
+        self.store.detach_memory_projection(memory_id, user_id)
+        self.memory_kg.remove_memory_source(memory_id)
+
     def delete(self, memory_id: str, user_id: str) -> None:
         item = self.get(memory_id, user_id)
+        self._remove_derived_rows(item.id, user_id)
         self.store.delete_memory(memory_id, user_id)
         self._event("memory_lifecycle", item, action="deleted")
 
     def bulk_delete(self, user_id: str, memory_ids: Sequence[str]) -> int:
-        return self.store.bulk_delete_memories(user_id, memory_ids)
+        # The store reads the same owned subset its delete will remove
+        # (creator only, not read access), so no derived row survives a
+        # deleted Memory and no other user's projection is ever touched.
+        owned = self.store.owned_memory_ids(user_id, memory_ids)
+        for memory_id in owned:
+            self._remove_derived_rows(memory_id, user_id)
+        return self.store.bulk_delete_memories(user_id, owned)
+
+    def exiting_member_ids(self, notebook_id: str) -> list[str]:
+        """Members of this notebook who own Memory in it — the candidates a
+        notebook-wide kick has to purge (``purge_exiting_member`` still
+        decides per user whether they really lose read access)."""
+        return self.store.member_memory_creators(notebook_id)
+
+    def purge_exiting_member(self, notebook_id: str, user_id: str) -> int:
+        """Hard-delete every Memory ``user_id`` owns in ``notebook_id``, with
+        every row derived from it, when leaving drops their LAST read path.
+
+        Memory is private to its creator; a member who leaves (or is removed)
+        takes nothing of theirs along, and rejoining starts empty. Someone who
+        can still read the notebook through a grant, or its owner, has not
+        left: the store's exit query lists nothing for them. A revoked grant
+        or an unshared notebook never comes through here at all — access is
+        often temporary, and those Memory rows stay (invisible to everyone)
+        until access returns.
+
+        Called by the sharing service before it deletes the membership row,
+        and once more after it (catching a Memory saved in between). Pages
+        until the exit query is empty; returns the rows deleted."""
+        removed = 0
+        previous: list[str] = []
+        while True:
+            batch = self.store.exit_memory_ids(
+                notebook_id, user_id, limit=_EXIT_PURGE_BATCH
+            )
+            if not batch:
+                return removed
+            if batch == previous:
+                raise RuntimeError(
+                    f"member exit purge made no progress in notebook {notebook_id}"
+                )
+            for memory_id in batch:
+                self._remove_derived_rows(memory_id, user_id)
+            removed += self.store.bulk_delete_memories(user_id, batch)
+            previous = batch
 
     def get(self, memory_id: str, user_id: str) -> MemoryRecord:
         return self.store.memory_for_user(memory_id, user_id)

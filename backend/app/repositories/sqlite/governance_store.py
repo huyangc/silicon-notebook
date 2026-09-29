@@ -1523,6 +1523,89 @@ class GovernanceStore:
             (reason, reviewer_id, now, candidate_id),
         )
 
+    @staticmethod
+    def withdraw_memory_promotions_on(
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        memory_ids: List[str],
+        reason: str,
+        reviewer_id: str,
+        now: str,
+    ) -> int:
+        """Reject the still-active proposals of Memory rows the caller is
+        about to hard-delete, inside the caller's delete transaction.
+
+        Mirror of the PostgreSQL twin (see its docstring for why a proposal
+        must not outlive its Memory and why ``rejected`` is the withdrawal
+        state). Here the process-wide write lock the caller holds already
+        serializes this against proposal and approval writers."""
+        if not memory_ids:
+            return 0
+        placeholders = ",".join("?" for _ in memory_ids)
+        cursor = connection.execute(
+            "UPDATE promotion_candidates "
+            "SET status='rejected', reason=?, reviewed_by=?, updated_at=? "
+            f"WHERE notebook_id=? AND object_type='memory' AND object_id IN ({placeholders}) "
+            "AND status IN ('proposed','under_review')",
+            (reason, reviewer_id, now, notebook_id, *memory_ids),
+        )
+        return int(cursor.rowcount or 0)
+
+    @staticmethod
+    def strip_source_evidence_on(
+        connection: sqlite3.Connection, notebook_id: str, source_id: str, now: str
+    ) -> List[str]:
+        """Detach one source's evidence from the objects ANOTHER source owns.
+
+        Mirror of the PostgreSQL twin (its docstring carries the full
+        argument): run before a source is deleted so the delete reaches only
+        the objects that source minted, never a foreign object that merely
+        gained its evidence through a manual merge. The two lookups mirror
+        ``_stale_object_ids_for_source_batch`` branch for branch; every write
+        is scoped by ``notebook_id`` and ``source_id``."""
+        if KnowledgeStore.source_index_backfilled(connection, notebook_id):
+            rows = connection.execute(
+                "SELECT ko.id, ko.evidence FROM knowledge_objects ko "
+                "JOIN knowledge_object_sources kos ON kos.object_id = ko.id "
+                "WHERE kos.source_id = ? AND kos.notebook_id = ? "
+                "AND ko.notebook_id = ? AND ko.source_id IS NOT ? "
+                "ORDER BY ko.id",
+                (source_id, notebook_id, notebook_id, source_id),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT DISTINCT ko.id, ko.evidence "
+                "FROM knowledge_objects AS ko "
+                "JOIN json_each(CASE WHEN json_valid(ko.evidence) THEN "
+                "CASE WHEN json_type(ko.evidence) = 'array' "
+                "THEN ko.evidence ELSE '[]' END ELSE '[]' END) AS item "
+                "WHERE ko.notebook_id = ? AND ko.source_id IS NOT ? "
+                "AND item.type = 'object' "
+                "AND json_extract(CASE WHEN item.type = 'object' "
+                "THEN item.value ELSE '{}' END, '$.source_id') = ? "
+                "ORDER BY ko.id",
+                (notebook_id, source_id, source_id),
+            ).fetchall()
+        stripped: List[str] = []
+        for row in rows:
+            kept = [
+                item
+                for item in json.loads(row["evidence"] or "[]")
+                if not (isinstance(item, dict) and item.get("source_id") == source_id)
+            ]
+            connection.execute(
+                "UPDATE knowledge_objects SET evidence = ?, updated_at = ? "
+                "WHERE id = ? AND notebook_id = ?",
+                (json.dumps(kept, ensure_ascii=False), now, row["id"], notebook_id),
+            )
+            connection.execute(
+                "DELETE FROM knowledge_object_sources "
+                "WHERE object_id = ? AND source_id = ? AND notebook_id = ?",
+                (row["id"], source_id, notebook_id),
+            )
+            stripped.append(row["id"])
+        return stripped
+
     # -------------------------------------------------- knowledge mutation
     @staticmethod
     def update_object_in_transaction(
