@@ -353,9 +353,11 @@ def test_cancellation_during_a_terminal_read_propagates():
         label="l", source_id="s1", element_id="e1", location_label="", quoted_span="q",
         notebook_id="nb",
     )])
+    # The library is outside the ceiling, so the fingerprint read is the ONLY
+    # read: no later read's own cancellation poll can mask a swallowed one.
     with pytest.raises(AskCancelled):
         GlobalCitationCheck(_Sources(), notebook_timeout_seconds=5).run(
-            response, evidence={}, siblings={}, source_ceiling={"nb": {"s1"}},
+            response, evidence={}, siblings={}, source_ceiling={},
             event=cancel,
         )
 

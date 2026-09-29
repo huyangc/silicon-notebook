@@ -652,12 +652,17 @@ def _ask_reasoning(repo, notebook, result, llm):
         )
 
 
-def test_synthesis_step_carries_the_bound_anchor_ids(rrepo):
+def test_synthesis_step_carries_the_bound_anchor_ids(rrepo, monkeypatch):
     """synthesis 步的 anchor_evidence_ids == 真正绑上的 [k] 锚点(不是全部候选)。
 
     喂两个元素、只引用其中一个 —— 断言 anchor_evidence_ids 只有 e1,不含 e2,
     证明它读的是 ``anchors``(接地信号)而不是 ``elements``(候选池)。
+    ``e1`` 是没有 ``source_elements`` 行的合成 id;J2 的存活检查
+    (``test_reference_liveness.py``)会正确地丢掉它的卡片,与本用例无关,故关掉。
     """
+    from app.services.ask_service import AskService
+
+    monkeypatch.setattr(AskService, "_drop_dangling_references", lambda self, response: None)
     nb = _minimal_notebook_with_source(rrepo)
     result = ReasoningResult(elements=[_element("e1"), _element("e2", text="另一条")])
     response = _ask_reasoning(rrepo, nb, result, _CaptureAnswerLLM("结论[k4001]"))
