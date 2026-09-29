@@ -69,6 +69,82 @@ BOUND = [label for label, ceiling in CEILINGS.items() if ceiling is not None]
 
 
 # ------------------------------------------------------------------ fixture
+# ``sqlite_stat1`` measured on the 49k-source notebook of the hazard ledger
+# (98k chunks, 49k objects).  The fixture holds a hundred rows, but plan pins
+# are about the plan production gets, and SQLite plans by these statistics:
+# on raw small-table statistics a ceiling-driven plan can look no cheaper than
+# the correct one, and a pin would pass for the wrong reason.
+PRODUCTION_STATS = [
+    ("chunk_questions", "idx_chunk_questions_nb", "98058 49029 1"),
+    ("chunk_questions", "idx_chunk_questions_source", "98058 2 1"),
+    ("chunk_questions", "sqlite_autoindex_chunk_questions_1", "98058 1"),
+    ("chunk_questions", "sqlite_autoindex_chunk_questions_2", "98058 1 1"),
+    ("chunks", "idx_chunks_nb", "98058 49029"),
+    ("chunks", "idx_chunks_nb_created", "98058 49029 49029"),
+    ("chunks", "idx_chunks_source", "98058 2"),
+    ("chunks", "sqlite_autoindex_chunks_1", "98058 1"),
+    ("community_members", "idx_commmem_nb_can", "9800 9800 1"),
+    ("community_members", "idx_commmem_nb_comm", "9800 9800 490"),
+    ("community_members", "uq_community_members_sync_key", "9800 490 1"),
+    ("concept_clusters", "idx_clusters_member", "49000 1"),
+    ("concept_clusters", "idx_clusters_nb_canonical_member_gen", "49000 49000 5 1 1"),
+    ("concept_clusters", "idx_clusters_nb_canonical_name_lower", "49000 49000 5"),
+    ("concept_clusters", "idx_clusters_nb_created_gen", "49000 49000 49000 49000"),
+    ("concept_clusters", "sqlite_autoindex_concept_clusters_1", "49000 1"),
+    ("concept_clusters", "uq_clusters_nb_type_member_generation", "49000 49000 49000 1 1"),
+    ("concept_comentions", "idx_comentions_nb_b", "5000 5000 1"),
+    ("concept_comentions", "sqlite_autoindex_concept_comentions_1", "5000 5000 5000 1"),
+    ("knowledge_object_sources", "idx_kos_notebook", "49008 49008"),
+    ("knowledge_object_sources", "idx_kos_object", "49008 1"),
+    ("knowledge_object_sources", "idx_kos_source", "49008 1"),
+    ("knowledge_object_sources", "idx_kos_source_object", "49008 1 1"),
+    ("knowledge_object_sources", "uq_knowledge_object_sources_sync_key", "49008 1 1"),
+    ("knowledge_objects", "idx_knowledge_objects_nb_status", "49008 49008 49008"),
+    ("knowledge_objects", "idx_knowledge_objects_nb_type_created", "49008 49008 49008 49008 1"),
+    ("knowledge_objects", "idx_knowledge_objects_nb_type_status", "49008 49008 49008 49008"),
+    ("knowledge_objects", "idx_knowledge_objects_nb_updated", "49008 49008 49008"),
+    ("knowledge_objects", "idx_knowledge_objects_source", "49008 1"),
+    ("knowledge_objects", "idx_knowledge_objects_source_id", "49008 1 1"),
+    ("knowledge_objects", "sqlite_autoindex_knowledge_objects_1", "49008 1"),
+    ("memory_items", "idx_memory_agent_candidate", "20 20 20 20 20"),
+    ("memory_items", "idx_memory_answer_once", "0 0 0"),
+    ("memory_items", "idx_memory_items_notebook", "20 20"),
+    ("memory_items", "idx_memory_owner_notebook_status", "20 20 20 20 20"),
+    ("memory_items", "sqlite_autoindex_memory_items_1", "20 1"),
+    ("sources", "idx_sources_memory_id", "20 1"),
+    ("sources", "idx_sources_nb_hidden_type", "20 20 20"),
+    ("sources", "idx_sources_nb_parse_status", "49078 24539 24539"),
+    ("sources", "idx_sources_nb_parse_status_type", "49078 24539 24539 16360"),
+    ("sources", "idx_sources_notebook_created", "49078 24539 24539"),
+    ("sources", "idx_sources_notebook_file_hash", "49078 24539 24539"),
+    ("sources", "idx_sources_notebook_status", "49078 24539 24539"),
+    ("sources", "idx_sources_uploaded_by_created", "0 0 0 0"),
+    ("sources", "idx_sources_visible_identity", "49058 24529 24529 1"),
+    ("sources", "sqlite_autoindex_sources_1", "49078 1"),
+]
+
+
+def _install_production_stats(db: sqlite3.Connection) -> None:
+    db.execute("ANALYZE")
+    tables = sorted({table for table, _index, _stat in PRODUCTION_STATS})
+    marks = ",".join("?" * len(tables))
+    db.execute(f"DELETE FROM sqlite_stat1 WHERE tbl IN ({marks})", tables)
+    has_stat4 = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='sqlite_stat4'"
+    ).fetchone()
+    if has_stat4:
+        db.execute(f"DELETE FROM sqlite_stat4 WHERE tbl IN ({marks})", tables)
+    known = {
+        row[0] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        )
+    }
+    db.executemany(
+        "INSERT INTO sqlite_stat1(tbl, idx, stat) VALUES (?,?,?)",
+        [row for row in PRODUCTION_STATS if row[1] in known],
+    )
+
+
 def _seed(db: sqlite3.Connection) -> None:
     db.executemany(
         "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
@@ -165,7 +241,7 @@ def _seed(db: sqlite3.Connection) -> None:
         [(NB, "can-000", can, 1 + n % 4) for n, can in enumerate(canonicals[1:])],
     )
     db.execute("DELETE FROM sync_change_log")
-    db.execute("ANALYZE")
+    _install_production_stats(db)
 
 
 @pytest.fixture(scope="module")
@@ -572,10 +648,7 @@ def test_s5_contribution_rows_are_driven_by_candidate_keys(conn, captured):
     ceiling = CEILINGS["49k"]
     for mode in ("include", "exclude"):
         ChunkStore.retrieval_contribution_rows(
-            # A handful of keys out of ~100 chunks: the production ratio
-            # (<= 64 candidates in a notebook of tens of thousands), so the
-            # planner's choice on this small fixture is the production one.
-            conn, NB, _candidate_chunks(conn)[::30], actor_id=USER,
+            conn, NB, _candidate_chunks(conn)[:64], actor_id=USER,
             source_mode=mode, source_ids=ceiling,
         )
     _single_ceiling_param(captured, ceiling, bounded=64)
