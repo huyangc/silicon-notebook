@@ -23,6 +23,17 @@ from app.services.report_execution import (
     ReportGenerationGate,
     ReportExecutionCoordinator,
 )
+from app.services.source_scope import CeilingReaders
+
+# A notebook with no mounts and no sources: enough for the workers' default
+# ceiling to install without a repository (the ceiling itself is pinned in
+# test_report_api.py and test_report_default_ceiling.py).
+_READERS = CeilingReaders(
+    participants=lambda notebook_id: [notebook_id],
+    visible=lambda notebook_id: [],
+    hidden=lambda notebook_id, owner_id: [],
+    memory_sources=lambda notebook_id: [],
+)
 
 
 class _Reports:
@@ -91,6 +102,7 @@ def _coordinator(reports=None, engine=None, registry=None, submitter=None):
         reports=reports if reports is not None else _Reports(),
         engine_factory=factory,
         cancellations=registry,
+        ceiling_readers=_READERS,
         job_submitter=submitter if submitter is not None else (
             lambda fn, *a, name=None, notify_pending=False, **k: fn()),
     )
@@ -384,6 +396,7 @@ def test_coordinator_submits_through_background_jobs_with_copied_context():
         reports=_Reports(),
         engine_factory=lambda *, user_id, cancel_event: _CtxEngine(),
         cancellations=ReportCancellationRegistry(),
+        ceiling_readers=_READERS,
         job_submitter=background_jobs.submit,
     )
     coord.start_plan("nb", "rid-ctx", "q", user_id="u")
@@ -417,6 +430,7 @@ def test_committed_report_hook_runs_before_cancel_unregister_after_scope_exit():
         reports=_Reports(),
         engine_factory=lambda **_kwargs: _CommittedEngine(),
         cancellations=registry,
+        ceiling_readers=_READERS,
         job_submitter=lambda fn, **_kwargs: fn(),
         after_completed=after,
     )
@@ -442,6 +456,7 @@ def test_auto_generate_plan_and_manual_generate_share_one_completion_hook():
         reports=_Reports(),
         engine_factory=lambda **_kwargs: _CommittedEngine(),
         cancellations=ReportCancellationRegistry(),
+        ceiling_readers=_READERS,
         job_submitter=lambda fn, **_kwargs: fn(),
         after_completed=lambda committed: calls.append(committed.report_id),
     )
@@ -479,6 +494,7 @@ def test_completion_hook_runs_after_generation_gate_is_released():
         reports=_Reports(),
         engine_factory=lambda **_kwargs: _GatedEngine(),
         cancellations=ReportCancellationRegistry(),
+        ceiling_readers=_READERS,
         job_submitter=submitter,
         after_completed=after,
     )

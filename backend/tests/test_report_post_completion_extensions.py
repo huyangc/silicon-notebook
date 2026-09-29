@@ -245,6 +245,7 @@ def test_composed_terminal_cas_drives_exactly_one_profile_signal(
         reports=runtime.report_store,
         engine_factory=lambda **_kwargs: Engine(lose_next["value"]),
         cancellations=ReportCancellationRegistry(),
+        ceiling_readers=runtime.ceiling_readers(),
         job_submitter=lambda fn, **_kwargs: fn(),
         after_completed=runtime._after_report_completed,
     )

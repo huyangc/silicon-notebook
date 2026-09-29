@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import threading
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 from app.application.report_pipeline import CommittedReport
@@ -27,6 +27,7 @@ from app.services.model_work import ModelPriority, model_work_scope
 
 if TYPE_CHECKING:
     from app.core.config import Settings
+    from app.services.source_scope import CeilingReaders
 
 
 class BackgroundJobSubmitter(Protocol):
@@ -119,12 +120,16 @@ class ReportExecutionCoordinator:
     def __init__(self, *, reports, engine_factory: ReportEngineFactory,
                  cancellations: ReportCancellationRegistry,
                  job_submitter: BackgroundJobSubmitter,
+                 ceiling_readers: "CeilingReaders",
                  after_completed: Callable[[CommittedReport], None] | None = None,
                  ) -> None:
         self.reports = reports
         self.engine_factory = engine_factory
         self.cancellations = cancellations
         self.job_submitter = job_submitter
+        # Required: a worker with no readers could only run unscoped, and an
+        # unscoped report reads every member's Memory projections.
+        self.ceiling_readers = ceiling_readers
         self.after_completed = after_completed
 
     def _after_completed(self, committed: CommittedReport | None) -> None:
@@ -136,6 +141,47 @@ class ReportExecutionCoordinator:
             # The durable report already won its terminal CAS. Optional
             # post-terminal work can never rewrite that outcome.
             return
+
+    def _default_ceiling(self, notebook_id: str, report_id: str, user_id: str,
+                         cancel: threading.Event, source_scope, base_scope,
+                         progress: str) -> ExitStack:
+        """Enter the phase's retrieval ceiling; return the stack that holds it.
+
+        ``default_ceiling_context`` with the phase's scope dimensions: a
+        persisted (route re-frozen) dimension is used as-is, an omitted one is
+        frozen here -- the notebook's visible sources plus the creator's own
+        hidden half, every mounted library to its visible sources only -- so a
+        report created without any scope no longer reads other members'
+        Memory projections.  The built local dimension is not a user choice
+        (``source_provided`` stays False), so ``understanding.source_scope``
+        is still persisted as None.
+
+        A reader failure FAILS the phase (report marked failed, exception
+        re-raised): the worker never falls back to running unscoped.  A stop
+        during the reads propagates as ``AskCancelled`` for the caller to end
+        the worker quietly, as it already does for a cancelled report.
+        """
+        from app.services.source_scope import default_ceiling_context
+
+        stack = ExitStack()
+        try:
+            stack.enter_context(default_ceiling_context(
+                notebook_id, user_id, self.ceiling_readers,
+                local_scope=source_scope, base_scope=base_scope,
+                cancel_event=cancel,
+            ))
+        except AskCancelled:
+            raise
+        except Exception as exc:
+            try:
+                self.reports.update_report(
+                    notebook_id, report_id, status="failed",
+                    error=f"{type(exc).__name__}: {exc}", progress=progress,
+                )
+            except Exception:
+                pass
+            raise
+        return stack
 
     def start_plan(self, notebook_id: str, report_id: str, question: str,
                    history: str = "", auto_generate: bool = False, *,
@@ -172,17 +218,20 @@ class ReportExecutionCoordinator:
                     question=question,
                 ):
                     engine = self.engine_factory(user_id=user_id, cancel_event=cancel)
-                    from app.services.source_scope import source_scope_context
-
                     effective_scope = source_scope
                     if effective_scope is None and isinstance(intent_contract, dict):
                         effective_scope = intent_contract.get("source_scope")
                     effective_base_scope = base_scope
                     if effective_base_scope is None and isinstance(intent_contract, dict):
                         effective_base_scope = intent_contract.get("base_scope")
-                    with source_scope_context(
-                        notebook_id, effective_scope, effective_base_scope
-                    ):
+                    try:
+                        ceiling = self._default_ceiling(
+                            notebook_id, report_id, user_id, cancel,
+                            effective_scope, effective_base_scope, "规划失败",
+                        )
+                    except AskCancelled:
+                        return
+                    with ceiling:
                         if intent_contract is None:
                             committed = engine.run(
                                 notebook_id, report_id, question, history, depth=depth,
@@ -258,11 +307,14 @@ class ReportExecutionCoordinator:
                     notebook_id=notebook_id,
                     question=question,
                 ):
-                    from app.services.source_scope import source_scope_context
-
-                    with source_scope_context(
-                        notebook_id, effective_scope, effective_base_scope
-                    ):
+                    try:
+                        ceiling = self._default_ceiling(
+                            notebook_id, report_id, user_id, cancel,
+                            effective_scope, effective_base_scope, "失败",
+                        )
+                    except AskCancelled:
+                        return
+                    with ceiling:
                         committed = self.engine_factory(user_id=user_id, cancel_event=cancel).generate(
                             notebook_id, report_id, question, depth=depth)
                 self._after_completed(committed)
