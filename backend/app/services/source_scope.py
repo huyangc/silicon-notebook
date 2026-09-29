@@ -146,12 +146,19 @@ def _frozen_source_ids(source_ids: Any) -> "CeilingSet":
     the only question a ceiling answers).  Only a ``CeilingSet`` is reused: a
     plain frozenset is copied into one, so the enumeration's bound-form memo
     (``CeilingSet.bound_forms``) lives on every installed ceiling.
+
+    Both the check and the coercion iterate in C (``map``): a default ceiling
+    passes every mounted library's set through here twice per install, and a
+    per-element Python generator cost ~8 ms per 49k-id library each time.
+    ``type(sid) is str`` is stricter than ``isinstance`` -- a ``str`` subclass
+    is simply coerced, as any non-canonical input is.
     """
-    if isinstance(source_ids, CeilingSet) and all(
-        isinstance(sid, str) for sid in source_ids
-    ):
+    if isinstance(source_ids, CeilingSet) and set(map(type, source_ids)) <= _STR_TYPE:
         return source_ids
-    return CeilingSet(str(sid) for sid in source_ids)
+    return CeilingSet(map(str, source_ids))
+
+
+_STR_TYPE = frozenset({str})
 
 
 @dataclass(frozen=True)
