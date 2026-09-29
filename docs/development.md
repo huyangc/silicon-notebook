@@ -454,6 +454,13 @@ For every task that will write repository code, tests, documentation, or configu
 
 Identify the requested outcome and authorized scope before acting. Review and design tasks deliver findings or proposals; implementation tasks deliver verified changes. A review request does not authorize code changes or remote delivery, and a local implementation request does not authorize deployment, external messages, PR creation, merging, or other remote mutations. Within the authorized scope, make routine implementation decisions and continue until the requested outcome is complete; state material assumptions. Ask only when missing information materially changes correctness, scope, compatibility, or authorization and cannot be resolved from available evidence. Continue independent work while awaiting an answer. Existing authorization remains valid within its stated scope; do not request the same approval again.
 
+**When implementing a feature, no part of it may be left to be implemented later.**
+
+- The scope a plan writes in is finished in that round; a large scope is split into several PRs **delivered back to back**, never cut.
+- A gap found during implementation or review that belongs to closing the feature's effect loop is filled in the same round, not registered in `fangan_todo.md`.
+- Points that need a product ruling are settled before work starts, never bypassed by "doing half first".
+- A subagent must not register an in-scope gap as deferred on its own; it reports the gap on discovery and fills it.
+
 For approved multi-step implementation plans, use subagent-driven development by default: assign each task to a fresh implementation subagent and require task-scoped specification and code-quality review before moving on. Small tasks, research, design, status, and review-only work do not require subagents. Delegate only bounded work with clear file/task ownership, acceptance criteria, and explicit verification responsibility. Independent tasks may run concurrently when their ownership does not conflict; do not split a small task merely to use more agents. Review delegated results against acceptance criteria and specific concerns instead of repeating the entire task.
 
 Run focused checks while editing and the required standard gate before claiming implementation complete. Once both pass, stop verification unless subsequent edits, failures, or a specific unresolved risk justify another run. This stopping rule does not waive required verification lanes or the PR review and CI checks below. Do not add tests that merely mirror implementation details. Read-only review inspects the diff and the submitter's verification evidence; it does not mutate the tree or rerun the full gate unless explicitly requested.

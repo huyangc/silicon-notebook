@@ -1,4 +1,5 @@
 import { requestJson } from "../../app/api-client.ts";
+import { httpErrorStatus } from "../../app/errors.ts";
 import type { UnifiedKgRebuildStatus } from "./kg-rebuild-status.ts";
 import type { KgDeleteStatus } from "./kg-delete-status.ts";
 import type { RelinkStatus } from "./kg-relink-status.ts";
@@ -17,6 +18,14 @@ import type {
 } from "../../app/workspace-model.ts";
 
 const options = { tag: "api", unauthorized: "clear-and-reload" as const };
+
+/**
+ * A KG detail read (`/objects/{id}/context`, `/concepts/{id}/detail`) that
+ * answers 404: the node does not exist FOR THIS VIEWER — deleted, or derived
+ * only from another member's private Memory (PR-A·A5). Callers present it
+ * like an absent detail (nothing to show), never as an error banner.
+ */
+export const isKgNodeAbsent = (error: unknown): boolean => httpErrorStatus(error) === 404;
 
 export type KgBuildStartResponse = {
   status: string;
