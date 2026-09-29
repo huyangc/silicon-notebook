@@ -84,7 +84,7 @@ const autoEnroll = {
 test("auto enrollment names the employee number and warns that old data is not carried over", async () => {
   const actor = userEvent.setup();
   const onConfirm = vi.fn();
-  render(<IdentityBindingConfirmation pending={autoEnroll} busy={false} onConfirm={onConfirm} onCancel={() => undefined} localLoginAllowed />);
+  render(<IdentityBindingConfirmation pending={autoEnroll} busy={false} onConfirm={onConfirm} onCancel={() => undefined} localLogin="allowed" />);
   expect(screen.getByRole("heading", { name: "确认新建账号" })).toBeInTheDocument();
   expect(screen.getByText(/系统中没有与工号 e12345678 关联的账号。继续将为你新建一个本站账号/)).toBeInTheDocument();
   expect(screen.getByText(/之前在本站的笔记本等数据不会出现在新账号里/)).toBeInTheDocument();
@@ -96,7 +96,7 @@ test("an existing old account is sent to local sign-in when local login is allow
   const actor = userEvent.setup();
   const onConfirm = vi.fn();
   const onCancel = vi.fn();
-  render(<IdentityBindingConfirmation pending={autoEnroll} busy={false} onConfirm={onConfirm} onCancel={onCancel} localLoginAllowed />);
+  render(<IdentityBindingConfirmation pending={autoEnroll} busy={false} onConfirm={onConfirm} onCancel={onCancel} localLogin="allowed" />);
   await actor.click(screen.getByRole("button", { name: "我已有本站旧账号" }));
   expect(screen.getByText(/用本站旧账号登录，登录后在右上角账户菜单选择「关联统一身份」/)).toBeInTheDocument();
   await actor.click(screen.getByRole("button", { name: "去本站登录" }));
@@ -108,7 +108,7 @@ test("an existing old account is sent to an administrator when local login is cl
   const actor = userEvent.setup();
   const onConfirm = vi.fn();
   const onCancel = vi.fn();
-  render(<IdentityBindingConfirmation pending={autoEnroll} busy={false} onConfirm={onConfirm} onCancel={onCancel} localLoginAllowed={false} />);
+  render(<IdentityBindingConfirmation pending={autoEnroll} busy={false} onConfirm={onConfirm} onCancel={onCancel} localLogin="closed" />);
   await actor.click(screen.getByRole("button", { name: "我已有本站旧账号" }));
   expect(screen.getByRole("status")).toHaveTextContent("请联系管理员迁移旧账号");
   expect(screen.queryByRole("button", { name: "去本站登录" })).not.toBeInTheDocument();
@@ -116,4 +116,23 @@ test("an existing old account is sent to an administrator when local login is cl
   expect(screen.getByRole("button", { name: "确认新建账号" })).toBeInTheDocument();
   expect(onConfirm).not.toHaveBeenCalled();
   expect(onCancel).not.toHaveBeenCalled();
+});
+
+test.each([
+  ["loading", "正在确认本站登录是否可用…"],
+  ["unknown", "暂时无法确认本站登录是否可用，请稍后重试或联系管理员迁移旧账号。"],
+] as const)("an unresolved local-login state (%s) neither claims passwords are closed nor offers local sign-in", async (state, copy) => {
+  const actor = userEvent.setup();
+  const onRetry = vi.fn();
+  render(<IdentityBindingConfirmation pending={autoEnroll} busy={false} onConfirm={() => undefined} onCancel={() => undefined} localLogin={state} onRetryLocalLogin={onRetry} />);
+  await actor.click(screen.getByRole("button", { name: "我已有本站旧账号" }));
+  expect(screen.getByRole("status")).toHaveTextContent(copy);
+  expect(screen.queryByText(/本站密码登录已停用/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "去本站登录" })).not.toBeInTheDocument();
+  if (state === "unknown") {
+    await actor.click(screen.getByRole("button", { name: "重试" }));
+    expect(onRetry).toHaveBeenCalledOnce();
+  } else {
+    expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+  }
 });

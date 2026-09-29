@@ -1941,6 +1941,13 @@ class Settings(BaseSettings):
         from urllib.parse import urlsplit
 
         if self.auth_allow_insecure_http:
+            # The browser-proof cookie follows the public scheme; an http
+            # frontend never receives a Secure one, so every login would fail.
+            frontend = self.auth_frontend_base_url or self.auth_public_base_url
+            if self.auth_public_base_url and urlsplit(frontend).scheme != urlsplit(self.auth_public_base_url).scheme:
+                raise ValueError(
+                    "AUTH_PUBLIC_BASE_URL and AUTH_FRONTEND_BASE_URL must use the same scheme"
+                )
             return self
         for value in (self.auth_public_base_url, self.auth_frontend_base_url):
             parsed = urlsplit(value)

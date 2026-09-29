@@ -13,21 +13,31 @@ type ConfirmationProps = {
   onCancel: () => void;
   /** Only read for auto_enroll: whether the old account can still sign in with
    * its local password (then it can bind itself instead of being migrated). */
-  localLoginAllowed?: boolean | null;
+  localLogin?: LocalLoginState;
+  onRetryLocalLogin?: () => void;
 };
 
+/** "unknown" means the capabilities read failed; it says nothing about the policy. */
+export type LocalLoginState = "loading" | "allowed" | "closed" | "unknown";
+
+function legacyAccountCopy(state: LocalLoginState): string {
+  if (state === "allowed") return "请用本站旧账号登录，登录后在右上角账户菜单选择「关联统一身份」完成关联。你原有的笔记本等数据都在旧账号里，不会新建账号。";
+  if (state === "closed") return "本站密码登录已停用，请联系管理员迁移旧账号。";
+  if (state === "unknown") return "暂时无法确认本站登录是否可用，请稍后重试或联系管理员迁移旧账号。";
+  return "正在确认本站登录是否可用…";
+}
+
 /** 自动开户前的确认：先说清新账号是空的，并给已有旧账号的人一条不新建的路。 */
-function AutoEnrollConfirmation({ pending, busy, onConfirm, onCancel, localLoginAllowed }: ConfirmationProps) {
+function AutoEnrollConfirmation({ pending, busy, onConfirm, onCancel, localLogin = "loading", onRetryLocalLogin }: ConfirmationProps) {
   const [legacy, setLegacy] = useState(false);
   if (legacy) {
     return <>
       <h1 className="auth-title">使用本站旧账号</h1>
-      {localLoginAllowed
-        ? <p className="auth-copy">请用本站旧账号登录，登录后在右上角账户菜单选择「关联统一身份」完成关联。你原有的笔记本等数据都在旧账号里，不会新建账号。</p>
-        : <p className="auth-copy" role="status">本站密码登录已停用，请联系管理员迁移旧账号。</p>}
+      <p className="auth-copy" role="status">{legacyAccountCopy(localLogin)}</p>
       <div className="auth-actions">
         <button type="button" className="auth-cancel" onClick={() => setLegacy(false)}>返回</button>
-        {localLoginAllowed && <button type="button" className="auth-submit" disabled={busy} onClick={onCancel}>{busy ? "处理中…" : "去本站登录"}</button>}
+        {localLogin === "unknown" && onRetryLocalLogin && <button type="button" className="auth-cancel" onClick={onRetryLocalLogin}>重试</button>}
+        {localLogin === "allowed" && <button type="button" className="auth-submit" disabled={busy} onClick={onCancel}>{busy ? "处理中…" : "去本站登录"}</button>}
       </div>
     </>;
   }

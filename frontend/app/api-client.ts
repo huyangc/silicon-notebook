@@ -48,6 +48,9 @@ export async function performApiRequest(
     ...init
   } = options;
   const headers = new Headers(inputHeaders);
+  // A 401 only speaks for the token that was sent: a session switched in the
+  // meantime (e.g. identity migration) must not be cleared by a stale reply.
+  const sentToken = auth === "required" ? getToken() : null;
   if (auth === "required") {
     for (const [name, value] of Object.entries(authHeaders())) headers.set(name, value);
   }
@@ -66,7 +69,8 @@ export async function performApiRequest(
     auth === "required"
     && unauthorized === "clear-and-reload"
     && response.status === 401
-    && getToken()
+    && sentToken
+    && getToken() === sentToken
   ) {
     clearToken();
     if (typeof window !== "undefined") window.location.reload();

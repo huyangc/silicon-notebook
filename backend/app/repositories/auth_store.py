@@ -13,7 +13,7 @@ import json
 import secrets
 import time
 
-from app.domain.auth_utils import normalize_username, verify_password
+from app.domain.auth_utils import PASSWORD_HASH_ITERATIONS, normalize_username, verify_password
 from app.domain.auth_policy import (
     AUTH_MODES, AuthStoreError, AUTH_CUTOVER_MIN_ADMINS,
     AUTH_INVENTORY_PAGE_SIZE, AUTH_INVENTORY_PAGE_MAX,
@@ -26,6 +26,7 @@ from app.repositories.auth_ports import AuthGrantPreview
 
 AUTH_TOKEN_BYTES = 32
 LOCAL_SESSION_SECONDS = 30 * 24 * 60 * 60
+_DUMMY_PASSWORD = ("0" * 64, "00" * 16, PASSWORD_HASH_ITERATIONS)
 _INITIAL_POLICY = dict(id=1,mode="local",revision=0,provider_id="",provider_namespace="",config_generation="",plugin_id="",retired_at=None,updated_by="")
 
 
@@ -512,6 +513,8 @@ class AuthStore:
             raise AuthStoreError("stale_transaction")
 
     def _is_auto_account(self, db, user_id):
+        # This audit row authorizes migration/recover takeover: never prune it,
+        # and a copy of users/identities without it loses the auto marking.
         return self._execute(
             db,"SELECT 1 FROM auth_identity_audit WHERE action='sso_auto_enrolled' AND target_user_id=?",
             (user_id,),
@@ -549,12 +552,16 @@ class AuthStore:
             if not self._migration_open(policy):
                 raise AuthStoreError("migration_local_disabled")
             old = self._execute(db,"SELECT * FROM users WHERE local_login_name=?",(normalize_username(login_name),)).fetchone()
-            if not old or not verify_password(password,old["password_hash"],old["password_salt"],old["password_iterations"]):
+            if not old or not old["password_hash"]:
+                # Same PBKDF2 cost as a real account, so timing does not reveal the name.
+                verify_password(password,*_DUMMY_PASSWORD)
+                raise AuthStoreError("migration_verification_failed")
+            if not verify_password(password,old["password_hash"],old["password_salt"],old["password_iterations"]):
                 raise AuthStoreError("migration_verification_failed")
             if old["id"] in (caller["id"],"user-local"):
                 raise AuthStoreError("migration_target_invalid")
             if old["status"] != "active":
-                raise AuthStoreError("account_inactive")
+                raise AuthStoreError("migration_target_inactive")
             if self._execute(db,"SELECT 1 FROM external_identities WHERE user_id=? AND provider_namespace=?",(old["id"],namespace)).fetchone():
                 raise AuthStoreError("migration_target_linked")
             self._migrate_identity(db,caller["id"],old["id"],namespace,current["subject"],old["id"])

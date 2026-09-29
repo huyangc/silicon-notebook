@@ -149,6 +149,18 @@ test("clear-and-reload 401 policy clears the token before reloading", async () =
   assert.equal(reloads, 1);
 });
 
+test("a 401 for a token that was replaced in flight keeps the new session", async () => {
+  setToken("auto-account");
+  globalThis.fetch = async () => {
+    setToken("migrated-account");
+    return new Response(null, { status: 401 });
+  };
+
+  await performApiRequest("/me", { tag: "auth" });
+  assert.equal(getToken(), "migrated-account");
+  assert.equal(reloads, 0);
+});
+
 test("fetch rejections propagate without being rewritten", async () => {
   const failure = new TypeError("network down");
   globalThis.fetch = async () => { throw failure; };
