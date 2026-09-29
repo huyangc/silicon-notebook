@@ -1219,16 +1219,9 @@ class KnowledgeStore:
         ).fetchone() is not None
 
     @staticmethod
-    def relation_endpoint_rows(db: sqlite3.Connection, notebook_id: str,
-                               source_ids=None):
-        if source_ids:
-            values = list(source_ids)
-            ph = ",".join("?" for _ in values)
-            return db.execute(
-                f"SELECT source_object_id, target_object_id FROM knowledge_relations "
-                f"WHERE notebook_id=? AND source_id IN ({ph})",
-                (notebook_id, *values),
-            ).fetchall()
+    def relation_endpoint_rows(db: sqlite3.Connection, notebook_id: str):
+        """Every relation endpoint of the notebook (the isolated-object probe).
+        There is deliberately no source-list form."""
         return db.execute(
             "SELECT source_object_id, target_object_id FROM knowledge_relations "
             "WHERE notebook_id = ?", (notebook_id,),

@@ -9,6 +9,7 @@ in ``tests/postgres/test_id_list_binding_pins.py``.
 """
 from __future__ import annotations
 
+import inspect
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -225,26 +226,47 @@ def test_source_store_list_statements_bind_unprepared():
     store = SourceStore(_database(connection), now=lambda: "2026-09-01T00:00:00+00:00")
 
     SourceStore.retrieval_element_rows(connection, "nb")
-    SourceStore.retrieval_element_rows(connection, "nb", ["s-1"])
     store.element_type_count_rows(connection, ["s-1", "s-2"], ["paragraph", "table"])
 
     recorded = connection.options_by_statement()
     assert [options for _statement, options in recorded] == [
-        {}, {"prepare": False}, {"prepare": False}, {"prepare": False},
+        {}, {"prepare": False}, {"prepare": False},
     ]
-    assert f"e.source_id=ANY({TEXT_ARRAY})" in recorded[1][0]
-    assert all(f"source_id=ANY({TEXT_ARRAY})" in s for s, _ in recorded[2:])
+    assert all(f"source_id=ANY({TEXT_ARRAY})" in s for s, _ in recorded[1:])
 
 
-def test_relation_endpoints_bind_a_list_as_one_parameter():
+def test_whole_notebook_reads_have_no_source_list_form():
+    """The element fallback and the isolated-object probe read the whole
+    notebook; a source list reaches neither (``_retrieve_elements`` routes a
+    list to the chunk path; the probe's only caller passes none), so neither
+    method takes one on either backend or on the port."""
+    from app.repositories.ports import (
+        RetrievalKnowledgeStorePort,
+        SourceStorePort,
+    )
+    from app.repositories.sqlite.knowledge_store import (
+        KnowledgeStore as SqliteKnowledgeStore,
+    )
+    from app.repositories.sqlite.source_store import (
+        SourceStore as SqliteSourceStore,
+    )
+
     connection = _Recorder()
     KnowledgeStore.relation_endpoint_rows(connection, "nb")
-    KnowledgeStore.relation_endpoint_rows(connection, "nb", [])
-    KnowledgeStore.relation_endpoint_rows(connection, "nb", ["s-1", "s-2"])
-
-    (plain, _p1, o1), (empty, _p2, o2), (bound, params, o3) = connection.calls
-    # No list and an empty list both read the whole notebook, as before.
-    assert o1 == o2 == {} and plain == empty
-    assert o3 == {"prepare": False}
-    assert f"source_id=ANY({TEXT_ARRAY})" in bound and " IN (" not in bound
-    assert params == ("nb", "s-1\x1fs-2")
+    SourceStore.retrieval_element_rows(connection, "nb")
+    assert [options for _s, _p, options in connection.calls] == [{}, {}]
+    assert [params for _s, params, _o in connection.calls] == [("nb",), ("nb",)]
+    for method in (
+        KnowledgeStore.relation_endpoint_rows,
+        SqliteKnowledgeStore.relation_endpoint_rows,
+        SourceStore.retrieval_element_rows,
+        SqliteSourceStore.retrieval_element_rows,
+    ):
+        with pytest.raises(TypeError):
+            method(connection, "nb", ["s-1"])
+    for port, name in (
+        (RetrievalKnowledgeStorePort, "relation_endpoint_rows"),
+        (SourceStorePort, "retrieval_element_rows"),
+    ):
+        parameters = list(inspect.signature(getattr(port, name)).parameters)
+        assert parameters[-2:] == ["db", "notebook_id"], (port, parameters)

@@ -1413,9 +1413,7 @@ def test_element_producer_never_reads_another_members_memory_unfiltered(
     candidates = repo.retrieval.candidates
     monkeypatch.setattr(
         candidates, "_gather_elements",
-        lambda db, nb_id, with_vectors=True, allowed_source_ids=None: (
-            unbounded.append(allowed_source_ids) or []
-        ),
+        lambda db, nb_id, with_vectors=True: (unbounded.append(nb_id) or []),
     )
     monkeypatch.setattr(
         candidates, "_retrieve_chunks",

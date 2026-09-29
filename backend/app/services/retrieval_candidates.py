@@ -1183,20 +1183,16 @@ class CandidateRetrievalService(_RetrievalState):
             cache[key] = vec
         return vec
     def _gather_elements(self, db: object, notebook_id: str,
-                         with_vectors: bool = True,
-                         allowed_source_ids=None) -> List[dict]:
+                         with_vectors: bool = True) -> List[dict]:
         # 运行时截断旁路(计划 §1.2 旁路 1):element 兜底不走 build_matrix,逐向量
         # 进 retrieval.cosine 与 _embed_query(已截断,T2)比较 —— cosine 对 len 不等
         # 静默返 0.0,漏截 = 全部 element 静默零相似度。
         from app.services.vector_index import decode_vector, resolve_runtime_dim, truncate_vec
 
         rd = resolve_runtime_dim(self.settings)
-        if allowed_source_ids is None:
-            rows = self.sources.retrieval_element_rows(db, notebook_id)
-        else:
-            rows = self.sources.retrieval_element_rows(
-                db, notebook_id, allowed_source_ids
-            )
+        # Whole-notebook read only: a source ceiling never reaches here (see
+        # ``_retrieve_elements``, which routes any list to the chunk path).
+        rows = self.sources.retrieval_element_rows(db, notebook_id)
         elements: List[dict] = []
         for row in rows:
             vector = None
@@ -2713,14 +2709,8 @@ class CandidateRetrievalService(_RetrievalState):
             return elements
         query_vector = self._embed_query(query)
         with self._connect() as db:
-            elements = (
-                self._gather_elements(db, notebook_id, with_vectors=True)
-                if allowed_source_ids is None
-                else self._gather_elements(
-                    db, notebook_id, with_vectors=True,
-                    allowed_source_ids=allowed_source_ids,
-                )
-            )
+            # Reached only with no ceiling: any list returned above.
+            elements = self._gather_elements(db, notebook_id, with_vectors=True)
         return score_elements(query, elements, query_vector, limit=limit)
 
     def _retrieve_elements_from_chunks(
