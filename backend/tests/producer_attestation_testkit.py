@@ -98,6 +98,7 @@ def global_run(sources, notebook_id: str):
         executor=None, window=lambda: 1, cancel=None,
         on_library=lambda *_: None, on_evidence=state.record_evidence,
         on_evidence_groups=state.record_evidence_groups,
+        evidence_registered=state.is_registered,
     )
     with source_scope_context(
         notebook_id, None, None,

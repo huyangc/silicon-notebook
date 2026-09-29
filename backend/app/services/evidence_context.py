@@ -268,7 +268,10 @@ def _attest_collection_citations(
     KG row only ever picks a candidate the hydration found, so it is live by
     construction. An element row, though, stays citable when its hydration
     missed; in a global run such an id is asked about once more and a
-    confirmed-dead one is dropped (J2) instead of being minted.
+    confirmed-dead one is dropped (J2) instead of being minted. An element the
+    run already registered (the executor's listing-time ``attest_read``)
+    answers ``attested`` rather than dead even if it was deleted since: that
+    card is kept and the terminal check reports it ``source_gone``.
     """
     attest_read(COLLECTION_PRODUCER, {
         citation.element_id: (

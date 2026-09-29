@@ -126,6 +126,7 @@ def global_run(sources, notebook_id: str):
         executor=None, window=lambda: 1, cancel=None,
         on_library=lambda *_: None, on_evidence=state.record_evidence,
         on_evidence_groups=state.record_evidence_groups,
+        evidence_registered=state.is_registered,
     )
     with source_scope_context(
         notebook_id, None, None,
@@ -556,9 +557,13 @@ def collection_race(sources, database, marker, notebook_id, mutation):
 
 
 def collection_dangling_element_row(sources, database, marker, notebook_id):
-    """J2: element rows whose elements were already gone are asked about in
-    ONE batched read and not minted in a global run; outside one they are
-    minted exactly as before (single-notebook asks are unchanged, J8)."""
+    """J2, never registered: element rows whose elements were already gone
+    before the question -- no producer registered them in this run -- are asked
+    about in ONE batched read and not minted in a global run. (Registered
+    earlier in the run and deleted since: ``collection_registered_row_deleted_
+    before_minting``.) Outside a global run this producer mints them as before;
+    the single-notebook J2 pass runs at the reasoning commit boundary
+    (``reference_liveness``), not here."""
     seed(database, marker, notebook_id)
     items = [
         element_row(notebook_id, DANGLING), element_row(notebook_id, OTHER),
@@ -575,3 +580,74 @@ def collection_dangling_element_row(sources, database, marker, notebook_id):
     assert response.citation_check is None
     outside, _anchors = collection_references(sources, notebook_id, items)
     assert list(outside) == [DANGLING, OTHER, DANGLING_2]
+
+
+# ---------------------------------------------------------------------------
+# Registered earlier in the run, deleted before the pointer read: the card is
+# KEPT and judged source_gone -- J2 drops only ids dangling BEFORE the question
+# ---------------------------------------------------------------------------
+
+def _registered_then_deleted(database, marker, notebook_id):
+    """A reading producer registers ``CITED`` (its full text in hand), then the
+    element is deleted before a pointer producer asks about it."""
+    from app.services.evidence_attestation import attest_read
+
+    attest_read("collection_enumeration", {CITED: (SOURCE, TEXTS[CITED])})
+    mutate(database, marker, "delete")
+
+
+def _assert_partial_source_gone(response, references) -> None:
+    assert [_verification(reference) for reference in references] == ["source_gone"] * len(references)
+    assert response.citation_check is not None
+    assert response.citation_check.outcome == "partial"
+    assert response.citation_check.source_gone == 1
+
+
+def collection_registered_row_deleted_before_minting(sources, database, marker, notebook_id):
+    """Listed (registered at listing time), then deleted before minting: the
+    card is minted -- no pointer read is spent on a registered id -- and the
+    terminal check judges it source_gone. The answer lists the item; the user
+    is told its source is gone instead of the card silently disappearing."""
+    seed(database, marker, notebook_id)
+    items = [element_row(notebook_id, CITED), element_row(notebook_id, OTHER)]
+    with global_run(sources, notebook_id) as run:
+        _registered_then_deleted(database, marker, notebook_id)
+        citations, anchors = collection_references(sources, notebook_id, items)
+    assert list(citations) == [CITED, OTHER]
+    assert run.reader.reads == []
+    response = terminal_check(
+        sources, run, notebook_id, citations=citations.values(), anchors=anchors,
+    )
+    _assert_partial_source_gone(response, [
+        c for c in response.citations if c.element_id == CITED
+    ] + [a for a in response.anchors if a.element_id == CITED])
+
+
+def kg_registered_element_deleted_before_the_pointer_read(sources, database, marker, notebook_id):
+    """The KG evidence card and the object's anchor keep ``CITED`` (registered
+    by a reading producer earlier in the run) and are judged source_gone."""
+    seed(database, marker, notebook_id)
+    with global_run(sources, notebook_id) as run:
+        _registered_then_deleted(database, marker, notebook_id)
+        citations, anchors, _id_map = kg_object_references(sources, notebook_id)
+    assert [c.element_id for c in citations] == [CITED]
+    assert [a.element_id for a in anchors] == [CITED]
+    assert run.reader.reads == []
+    response = terminal_check(
+        sources, run, notebook_id, citations=citations, anchors=anchors,
+    )
+    _assert_partial_source_gone(response, [*response.citations, *response.anchors])
+
+
+def chain_registered_element_deleted_before_the_pointer_read(sources, database, marker, notebook_id):
+    """The hop keeps its locator on the registered, since-deleted ``CITED`` and
+    is judged source_gone; the other hop is read and passes."""
+    seed(database, marker, notebook_id)
+    with global_run(sources, notebook_id) as run:
+        _registered_then_deleted(database, marker, notebook_id)
+        anchors, _id_map = chain_anchors(sources, notebook_id)
+    assert [a.element_id for a in anchors] == [CITED, OTHER]
+    assert run.reader.reads == [(OTHER,)]
+    response = terminal_check(sources, run, notebook_id, anchors=anchors)
+    assert [_verification(a) for a in response.anchors] == ["source_gone", None]
+    assert response.citation_check.outcome == "partial"

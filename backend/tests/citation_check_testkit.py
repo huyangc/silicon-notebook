@@ -127,6 +127,7 @@ def passage_race(sources, database, marker: str, notebook_id: str, mutation: str
     plan = SimpleNamespace(
         on_evidence=state.record_evidence,
         on_evidence_groups=state.record_evidence_groups,
+        evidence_registered=state.is_registered,
         notebook_timeout_seconds=10.0, cancel=None,
     )
     candidates = SimpleNamespace(sources=sources, event_log=None)

@@ -256,6 +256,15 @@ class _RunState:
                     continue
                 self.evidence[element_id] = snapshot
 
+    def is_registered(self, element_id) -> bool:
+        """Has a producer published anything for ``element_id`` in this run?
+
+        A real snapshot or a declared ``None`` both count: either way the run
+        READ this element (``FederatedRunPlan.evidence_registered``).
+        """
+        with self.lock:
+            return element_id in self.evidence
+
     def record_evidence_groups(self, groups) -> None:
         """Merge one federated call's multi-element passages into the sibling map.
 
@@ -1711,6 +1720,7 @@ class GlobalAskService:
             ),
             on_evidence=state.record_evidence,
             on_evidence_groups=state.record_evidence_groups,
+            evidence_registered=state.is_registered,
             # The fair share is per FAN-OUT, and a reasoning run has many in
             # flight at once. See ``_retrieval_window``.
             call_scope=self._federated_call,
