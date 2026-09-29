@@ -16,7 +16,7 @@ from app.models.sso import (
     AuthenticationAccountUpdate, AuthenticationPolicyUpdate,
     AuthenticationGrantCreate, AuthenticationGrantStart,
     AuthenticationConfigurationUpdate,
-    BindingConfirm, BindingStart, SsoComplete,
+    BindingConfirm, BindingStart, IdentityMigration, SsoComplete,
 )
 from app.services.auth_flow import AUTH_BROWSER_PROOF_BYTES, AuthFlowService
 
@@ -45,6 +45,12 @@ def _error(exc):
         "migration_incomplete": "迁移条件尚未满足，请检查用户和管理员迁移清单。",
         "stale_policy": "迁移状态已更新，请刷新后重试。",
         "invalid_transition": "不支持此阶段切换，请按迁移顺序操作。",
+        "migration_requires_sso": "请先通过统一认证登录，再迁移旧账号。",
+        "migration_not_available": "当前账号不是统一认证自动开通的账号，无需迁移旧账号；如有疑问请联系管理员。",
+        "migration_local_disabled": "本站密码已停用，请联系管理员迁移。",
+        "migration_verification_failed": "旧账号登录名或密码不正确。",
+        "migration_target_invalid": "该账号不能作为迁移目标，请联系管理员。",
+        "migration_target_linked": "旧账号已关联统一账号，不能再迁移，请联系管理员核实。",
     }
     return user_error(409 if not isinstance(exc, AuthProviderError) else 503,
                       messages.get(code, "认证操作未完成，请重新尝试或联系管理员检查配置。"))
@@ -183,6 +189,20 @@ def identities(request: Request, response: Response):
     user = _actor(request, flow)
     _private(response)
     return flow.store.identities(user.id)
+
+
+@sso_router.post("/me/identity-migration", response_model=AuthResult)
+def identity_migration(payload: IdentityMigration, request: Request, response: Response):
+    flow = auth_flow()
+    _origin(request, flow)
+    _private(response)
+    _actor(request, flow)
+    try:
+        user, token = flow.store.migrate_auto_account(
+            _bearer_token(request), payload.login_name, payload.password)
+    except ValueError as exc:
+        raise _error(exc) from None
+    return AuthResult(user=user, token=token)
 
 
 @sso_router.get("/admin/auth/policy")

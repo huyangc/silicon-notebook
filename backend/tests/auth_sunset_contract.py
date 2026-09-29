@@ -633,3 +633,241 @@ class AuthSunsetContract:
         assert user.role == "user"
         assert identity.resolve_session(sso).id == user.id
         assert identity.auth.identities(user.id)["local_login_name"] is None
+
+    # --- employee-number auto accounts (AUTH_SSO_AUTO_ACCOUNTS) ---
+
+    def test_auto_link_by_username_ignores_case_and_keeps_old_id(self, identity, monkeypatch):
+        monkeypatch.setattr(identity.auth.settings,"auth_sso_auto_accounts",True)
+        user, local = identity.register_user_with_session("z00000001","pw")
+        dual(identity)
+        result = login_sso(identity,"emp-1","Z00000001")
+        assert result["status"] == "authenticated"
+        assert result["user"].id == user.id and result["user"].role == "user"
+        assert identity.resolve_session(result["token"]).id == user.id
+        assert identity.auth.identities(user.id)["linked"]
+        assert identity.auth.identities(user.id)["local_login_name"] == "z00000001"
+        audit = [row for row in identity.auth.audit_page()["items"] if row["action"]=="sso_auto_linked"]
+        assert [(row["actor_id"],row["target_user_id"]) for row in audit] == [(user.id,user.id)]
+        assert login_sso(identity,"emp-1","Z00000001")["user"].id == user.id
+
+    def test_auto_link_matches_local_login_name_when_username_differs(self, identity, monkeypatch):
+        monkeypatch.setattr(identity.auth.settings,"auth_sso_auto_accounts",True)
+        user, _ = identity.register_user_with_session("z00000001","pw")
+        dual(identity)
+        with identity.auth._write() as (db, _):
+            identity.auth._execute(db,"UPDATE users SET username='renamed' WHERE id=?",(user.id,))
+        result = login_sso(identity,"emp-1","Z00000001")
+        assert result["user"].id == user.id
+        assert result["user"].username == "Z00000001"
+
+    def test_auto_link_to_admin_keeps_role(self, identity, monkeypatch):
+        monkeypatch.setattr(identity.auth.settings,"auth_sso_auto_accounts",True)
+        user, _ = identity.register_user_with_session("z00000001","pw")
+        identity.set_user_role("user-local",user.id,"admin")
+        dual(identity)
+        assert login_sso(identity,"emp-1","z00000001")["user"].role == "admin"
+
+    @pytest.mark.parametrize("history", ["active", "disabled"])
+    def test_auto_link_refuses_candidate_with_namespace_identity(self, identity, monkeypatch, history):
+        user, local = identity.register_user_with_session("z00000001","pw")
+        dual(identity)
+        bind(identity,user,local,username="z00000001")
+        if history == "disabled":
+            with identity.auth._write() as (db, _):
+                identity.auth._execute(db,"UPDATE external_identities SET status='disabled' WHERE user_id=?",(user.id,))
+        monkeypatch.setattr(identity.auth.settings,"auth_sso_auto_accounts",True)
+        with pytest.raises(AuthStoreError,match="identity_conflict"):
+            login_sso(identity,"another-subject","z00000001")
+        with identity.database.connect() as db:
+            rows = identity.auth._execute(db,"SELECT subject FROM external_identities").fetchall()
+        assert [row["subject"] for row in rows] == ["stable-1"]
+
+    def test_auto_link_refuses_inactive_and_ambiguous_candidates(self, identity, monkeypatch):
+        monkeypatch.setattr(identity.auth.settings,"auth_sso_auto_accounts",True)
+        first, _ = identity.register_user_with_session("z00000001","pw")
+        second, _ = identity.register_user_with_session("z00000002","pw")
+        dual(identity)
+        identity.auth.set_account_status(first.id,"disabled",actor_id="user-local")
+        with pytest.raises(AuthStoreError,match="account_inactive"):
+            login_sso(identity,"emp-1","z00000001")
+        with identity.auth._write() as (db, _):
+            identity.auth._execute(db,"UPDATE users SET username='Z00000002' WHERE id=?",(first.id,))
+        with pytest.raises(AuthStoreError,match="identity_conflict"):
+            login_sso(identity,"emp-2","z00000002")
+        assert not identity.auth.identities(second.id)["linked"]
+
+    @staticmethod
+    def _counts(identity):
+        with identity.database.connect() as db:
+            users = identity.auth._execute(db,"SELECT count(*) AS n FROM users").fetchone()["n"]
+            mappings = identity.auth._execute(db,"SELECT count(*) AS n FROM external_identities").fetchone()["n"]
+        return users, mappings
+
+    def test_auto_enroll_waits_for_confirmation_and_cancel_creates_nothing(self, identity, monkeypatch):
+        monkeypatch.setattr(identity.auth.settings,"auth_sso_auto_accounts",True)
+        dual(identity)
+        before = self._counts(identity)
+        preview = login_sso(identity,"emp-new","e12345678")
+        assert preview["status"] == "confirmation_required"
+        assert (preview["purpose"],preview["external_username"],preview["display_name"]) == ("auto_enroll","e12345678","Test User")
+        assert preview["target_user_id"] is None
+        assert self._counts(identity) == before
+        identity.auth.cancel(preview["pending_id"],PROOF,session_token="")
+        assert self._counts(identity) == before
+        with pytest.raises(AuthStoreError,match="invalid_transaction"):
+            identity.auth.confirm(preview["pending_id"],PROOF,session_seconds=600)
+        assert self._counts(identity) == before
+        assert "sso_auto_enrolled" not in {row["action"] for row in identity.auth.audit_page()["items"]}
+
+    def test_auto_enroll_confirmation_rechecks_switch_and_name(self, identity, monkeypatch):
+        monkeypatch.setattr(identity.auth.settings,"auth_sso_auto_accounts",True)
+        dual(identity)
+        before = self._counts(identity)
+        preview = login_sso(identity,"emp-new","e12345678")
+        monkeypatch.setattr(identity.auth.settings,"auth_sso_auto_accounts",False)
+        with pytest.raises(AuthStoreError,match="identity_not_linked"):
+            identity.auth.confirm(preview["pending_id"],PROOF,session_seconds=600)
+        assert self._counts(identity) == before
+        monkeypatch.setattr(identity.auth.settings,"auth_sso_auto_accounts",True)
+        preview = login_sso(identity,"emp-new","e12345678")
+        identity.register_user_with_session("e12345678","pw")
+        users, mappings = self._counts(identity)
+        with pytest.raises(AuthStoreError,match="stale_transaction"):
+            identity.auth.confirm(preview["pending_id"],PROOF,session_seconds=600)
+        assert self._counts(identity) == (users, mappings) == (before[0] + 1, before[1])
+
+    def test_auto_enroll_creates_ordinary_user_once(self, identity, monkeypatch):
+        monkeypatch.setattr(identity.auth.settings,"auth_sso_auto_accounts",True)
+        dual(identity)
+        preview = login_sso(identity,"emp-new","e12345678")
+        created, token = identity.auth.confirm(preview["pending_id"],PROOF,session_seconds=600)
+        assert identity.resolve_session(token).id == created.id
+        assert (created.role,created.username,created.display_name) == ("user","e12345678","Test User")
+        assert identity.auth.identities(created.id)["local_login_name"] is None
+        second = login_sso(identity,"emp-new","e12345678")
+        assert second["status"] == "authenticated" and second["user"].id == created.id
+        actions = [row["action"] for row in identity.auth.audit_page()["items"]]
+        assert actions.count("sso_auto_enrolled") == 1
+        assert identity.auth.inventory_page()["total"] == 2
+
+    def test_auto_accounts_switch_is_read_at_stage_and_completion(self, identity, monkeypatch):
+        dual(identity)
+        code = stage_sso(identity,"emp-new","e12345678")
+        monkeypatch.setattr(identity.auth.settings,"auth_sso_auto_accounts",True)
+        with pytest.raises(AuthStoreError,match="identity_not_linked"):
+            identity.auth.inspect_completion(code,PROOF,session_seconds=600)
+        code = stage_sso(identity,"emp-new","e12345678")
+        monkeypatch.setattr(identity.auth.settings,"auth_sso_auto_accounts",False)
+        with pytest.raises(AuthStoreError,match="identity_not_linked"):
+            identity.auth.inspect_completion(code,PROOF,session_seconds=600)
+        assert identity.auth.inventory_page()["total"] == 1
+
+    def test_staged_auto_decision_is_rechecked_not_retargeted(self, identity, monkeypatch):
+        monkeypatch.setattr(identity.auth.settings,"auth_sso_auto_accounts",True)
+        user, _ = identity.register_user_with_session("z00000001","pw")
+        dual(identity)
+        code = stage_sso(identity,"emp-1","z00000001")
+        identity.admin_reset_user_password("user-local",user.id,"changed")
+        with pytest.raises(AuthStoreError,match="stale_transaction"):
+            identity.auth.inspect_completion(code,PROOF,session_seconds=600)
+        code = stage_sso(identity,"emp-2","z00000002")
+        identity.register_user_with_session("z00000002","pw")
+        with pytest.raises(AuthStoreError,match="stale_transaction"):
+            identity.auth.inspect_completion(code,PROOF,session_seconds=600)
+        with identity.database.connect() as db:
+            assert identity.auth._execute(db,"SELECT count(*) AS n FROM external_identities").fetchone()["n"] == 0
+
+    def _auto_account(self, identity, monkeypatch, *, subject="emp-9", username="e12345678"):
+        monkeypatch.setattr(identity.auth.settings,"auth_sso_auto_accounts",True)
+        preview = login_sso(identity,subject,username)
+        assert preview["purpose"] == "auto_enroll"
+        return identity.auth.confirm(preview["pending_id"],PROOF,session_seconds=600)
+
+    def test_self_service_migration_moves_identity_to_old_account(self, identity, monkeypatch):
+        old, old_local = identity.register_user_with_session("z00000001","pw")
+        dual(identity)
+        auto, auto_token = self._auto_account(identity,monkeypatch)
+        assert identity.auth.identities(auto.id)["migration_available"] is True
+        assert identity.auth.identities(old.id)["migration_available"] is False
+        with identity.database.connect() as db:
+            before = identity.auth._execute(db,"SELECT absolute_expires_at FROM auth_sessions WHERE token=?",(auto_token,)).fetchone()["absolute_expires_at"]
+        migrated, token = identity.auth.migrate_auto_account(auto_token,"Z00000001","pw")
+        assert (migrated.id,migrated.username,migrated.display_name) == (old.id,"e12345678","Test User")
+        assert identity.resolve_session(auto_token) is None
+        assert identity.resolve_session(old_local) is None
+        assert identity.resolve_session(token).id == old.id
+        with identity.database.connect() as db:
+            session = identity.auth._execute(db,"SELECT auth_source,absolute_expires_at,expires_at FROM auth_sessions WHERE token=?",(token,)).fetchone()
+            retired = identity.auth._user(db,auto.id)
+            mapping = identity.auth._execute(db,"SELECT user_id FROM external_identities WHERE subject='emp-9'").fetchone()
+        assert session["auth_source"] == "sso"
+        assert session["absolute_expires_at"] == before and session["expires_at"] <= before
+        assert (retired["status"],retired["username"]) == ("disabled","")
+        assert mapping["user_id"] == old.id
+        assert identity.login_with_password("z00000001","pw")[0].id == old.id
+        assert login_sso(identity,"emp-9","e12345678")["user"].id == old.id
+        actions = {(row["action"],row["actor_id"],row["target_user_id"]) for row in identity.auth.audit_page()["items"]}
+        assert ("identity_migrated",old.id,old.id) in actions
+        assert ("sso_auto_account_retired",old.id,auto.id) in actions
+        assert identity.auth.identities(old.id)["migration_available"] is False
+
+    def test_self_service_migration_rejections_leave_accounts_unchanged(self, identity, monkeypatch):
+        old, old_local = identity.register_user_with_session("z00000001","pw")
+        linked, linked_local = identity.register_user_with_session("z00000002","pw")
+        dual(identity)
+        bind(identity,linked,linked_local,subject="linked-subject",username="linked-uid")
+        auto, auto_token = self._auto_account(identity,monkeypatch)
+        migrate = identity.auth.migrate_auto_account
+        with pytest.raises(AuthStoreError,match="migration_verification_failed"):
+            migrate(auto_token,"z00000001","wrong")
+        with pytest.raises(AuthStoreError,match="migration_verification_failed"):
+            migrate(auto_token,"z09999999","pw")
+        with pytest.raises(AuthStoreError,match="migration_target_linked"):
+            migrate(auto_token,"z00000002","pw")
+        with pytest.raises(AuthStoreError,match="migration_requires_sso"):
+            migrate(old_local,"z00000001","pw")
+        linked_sso = login_sso(identity,"linked-subject","linked-uid")["token"]
+        with pytest.raises(AuthStoreError,match="migration_not_available"):
+            migrate(linked_sso,"z00000001","pw")
+        identity.auth.set_account_status(old.id,"disabled",actor_id="user-local")
+        with pytest.raises(AuthStoreError,match="account_inactive"):
+            migrate(auto_token,"z00000001","pw")
+        identity.auth.set_account_status(old.id,"active",actor_id="user-local")
+        with identity.auth._write() as (db, _):
+            identity.auth._execute(db,"UPDATE auth_policy SET mode='sso_only'")
+        assert identity.auth.identities(auto.id)["migration_available"] is False
+        with pytest.raises(AuthStoreError,match="migration_local_disabled"):
+            migrate(auto_token,"z00000001","pw")
+        assert identity.resolve_session(auto_token).id == auto.id
+        assert identity.auth.identities(auto.id)["linked"]
+
+    def test_recovery_grant_migrates_identity_from_auto_account(self, identity, monkeypatch):
+        old, _ = identity.register_user_with_session("z00000001","pw")
+        dual(identity)
+        auto, auto_token = self._auto_account(identity,monkeypatch)
+        grant = identity.auth.issue_grant("recover","emp-9",actor_id="user-local",target_user_id=old.id,ttl_seconds=600)
+        state = identity.auth.begin("recover",PROOF,ttl_seconds=600,grant_token=grant)
+        code = identity.auth.stage_identity(identity.auth.claim(state,PROOF),ExternalIdentity("test:tenant","emp-9","e12345678","Test User"),PROOF,ttl_seconds=600)
+        preview = identity.auth.inspect_completion(code,PROOF,session_seconds=600)
+        assert preview["target_user_id"] == old.id
+        restored, token = identity.auth.confirm(preview["pending_id"],PROOF,session_seconds=600)
+        assert (restored.id,restored.username) == (old.id,"e12345678")
+        assert identity.resolve_session(auto_token) is None
+        assert identity.resolve_session(token).id == old.id
+        with identity.database.connect() as db:
+            retired = identity.auth._user(db,auto.id)
+        assert (retired["status"],retired["username"]) == ("disabled","")
+        rows = identity.auth.audit_page()["items"]
+        migrated = [row for row in rows if row["action"] in ("identity_migrated","sso_auto_account_retired")]
+        assert {(row["action"],row["actor_id"],row["target_user_id"]) for row in migrated} == {
+            ("identity_migrated","user-local",old.id),("sso_auto_account_retired","user-local",auto.id)}
+        assert all(row["grant_reference"] for row in migrated)
+        assert "grant_completed:recover" in {row["action"] for row in rows}
+
+    def test_recovery_grant_still_refuses_subject_of_ordinary_account(self, identity):
+        user, local = identity.register_user_with_session("z00000001","pw")
+        other, _ = identity.register_user_with_session("z00000002","pw")
+        dual(identity)
+        bind(identity,user,local)
+        with pytest.raises(AuthStoreError,match="identity_conflict"):
+            identity.auth.issue_grant("recover","stable-1",actor_id="user-local",target_user_id=other.id,ttl_seconds=600)

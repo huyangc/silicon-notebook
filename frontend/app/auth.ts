@@ -49,6 +49,8 @@ export type IdentityInfo = {
   local_login_name: string | null;
   external_username: string | null;
   display_name: string | null;
+  /** True only for an SSO auto-enrolled account while local passwords still work. */
+  migration_available?: boolean;
 };
 
 export type SsoCompletion =
@@ -65,7 +67,8 @@ export type SsoCompletion =
     pending_id: string;
     external_username: string;
     display_name: string;
-    purpose: "enroll" | "recover" | "replace";
+    /** auto_enroll: an unmapped SSO login whose employee number matches no account. */
+    purpose: "enroll" | "recover" | "replace" | "auto_enroll";
     target_user_id: string | null;
     target_username: string | null;
     previous_external_username?: string | null;
@@ -196,6 +199,19 @@ export async function confirmIdentityBinding(pendingId: string): Promise<{ token
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ pending_id: pendingId }),
+    credentials: "include",
+  });
+  return { ...result, user: normalizeAuthUser(result.user) };
+}
+
+/** Moves the current SSO identity from this auto-enrolled account onto the
+ * older password account; the response session belongs to that older account. */
+export async function migrateToLegacyAccount(loginName: string, password: string): Promise<{ token: string; user: AuthUser }> {
+  const result = await requestJson<{ token: string; user: AuthUser }>("/me/identity-migration", {
+    tag: "auth",
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ login_name: loginName, password }),
     credentials: "include",
   });
   return { ...result, user: normalizeAuthUser(result.user) };

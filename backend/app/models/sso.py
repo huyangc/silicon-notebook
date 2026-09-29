@@ -14,6 +14,12 @@ class BindingStart(BaseModel):
     current_password: str
 
 
+class IdentityMigration(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    login_name: str
+    password: str
+
+
 class SsoComplete(BaseModel):
     model_config = ConfigDict(extra="forbid")
     code: str = Field(min_length=1)

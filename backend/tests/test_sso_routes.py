@@ -394,3 +394,108 @@ def test_production_http_intranet_origin_needs_explicit_opt_in(setup):
     assert params["redirect_uri"] == ["http://notebook.corp.example/api/auth/sso/callback"]
     flow.settings.auth_frontend_base_url = "http://other.corp.example"
     assert client.get("/api/auth/capabilities").status_code == 503
+
+
+def _auto_enrolled(client, identity, flow):
+    """Legacy account a12345678 plus an SSO auto account for employee b87654321."""
+    legacy = _local_user(client)
+    _dual(identity)
+    flow.settings.auth_sso_auto_accounts = True
+    completed = _complete(client, client.post("/api/auth/sso/start"))
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["purpose"] == "auto_enroll"
+    confirmed = client.post("/api/me/identity-binding/confirm",
+        json={"pending_id": completed.json()["pending_id"]})
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["user"]["id"] != legacy["user"]["id"]
+    return legacy, confirmed.json()
+
+
+def test_auto_enroll_route_requires_confirmation_without_local_session(setup):
+    client, identity, provider, flow = setup
+    _dual(identity)
+    flow.settings.auth_sso_auto_accounts = True
+    total = identity.auth.inventory_page()["total"]
+    completed = _complete(client, client.post("/api/auth/sso/start"))
+    assert completed.status_code == 200, completed.text
+    assert completed.headers["cache-control"] == "no-store"
+    body = completed.json()
+    assert (body["status"], body["purpose"], body["external_username"], body["display_name"]) == (
+        "confirmation_required", "auto_enroll", "b87654321", "统一姓名")
+    assert "token" not in body and identity.auth.inventory_page()["total"] == total
+    assert client.post("/api/me/identity-binding/cancel",
+        json={"pending_id": body["pending_id"]}).status_code == 204
+    assert identity.auth.inventory_page()["total"] == total
+    retry = _complete(client, client.post("/api/auth/sso/start")).json()
+    confirmed = client.post("/api/me/identity-binding/confirm", json={"pending_id": retry["pending_id"]})
+    assert confirmed.status_code == 200, confirmed.text
+    assert (confirmed.json()["user"]["username"], confirmed.json()["user"]["role"]) == ("b87654321", "user")
+    assert identity.auth.inventory_page()["total"] == total + 1
+
+
+def test_auto_accounts_link_existing_employee_number_without_confirmation(setup):
+    client, identity, provider, flow = setup
+    legacy = _local_user(client, "b87654321")
+    _dual(identity)
+    flow.settings.auth_sso_auto_accounts = True
+    completed = _complete(client, client.post("/api/auth/sso/start"))
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["status"] == "authenticated"
+    assert completed.json()["user"]["id"] == legacy["user"]["id"]
+    assert completed.json()["user"]["display_name"] == "统一姓名"
+
+
+def test_auto_account_conflict_uses_fixed_message(setup):
+    client, identity, provider, flow = setup
+    first = _local_user(client, "b87654321")
+    _dual(identity)
+    admin = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()
+    client.patch(f"/api/admin/auth/accounts/{first['user']['id']}", json={"status": "disabled"},
+        headers={"Authorization": "Bearer " + admin["token"]})
+    flow.settings.auth_sso_auto_accounts = True
+    response = _complete(client, client.post("/api/auth/sso/start"))
+    assert response.status_code == 409
+    assert response.json()["detail"] == "账号已停用，请联系管理员。"
+
+
+def test_identity_migration_route_swaps_to_legacy_account(setup):
+    client, identity, provider, flow = setup
+    legacy, auto = _auto_enrolled(client, identity, flow)
+    headers = {"Authorization": "Bearer " + auto["token"]}
+    info = client.get("/api/me/identities", headers=headers)
+    assert info.status_code == 200 and info.json()["migration_available"] is True
+    assert client.post("/api/me/identity-migration", headers={**headers, "Origin": "https://other.test"},
+        json={"login_name": "a12345678", "password": "local-password"}).status_code == 403
+    assert client.post("/api/me/identity-migration", headers=headers,
+        json={"login_name": "a12345678", "password": "local-password", "extra": 1}).status_code == 422
+    migrated = client.post("/api/me/identity-migration", headers={**headers, "Origin": "http://localhost:3000"},
+        json={"login_name": "a12345678", "password": "local-password"})
+    assert migrated.status_code == 200, migrated.text
+    assert migrated.headers["cache-control"] == "no-store"
+    body = migrated.json()
+    assert set(body) == {"token", "user"}
+    assert body["user"]["id"] == legacy["user"]["id"] and body["user"]["username"] == "b87654321"
+    assert client.get("/api/me/identities", headers=headers).status_code == 401
+    fresh = client.get("/api/me/identities", headers={"Authorization": "Bearer " + body["token"]})
+    assert fresh.json()["linked"] is True and fresh.json()["migration_available"] is False
+
+
+def test_identity_migration_route_rejections(setup):
+    client, identity, provider, flow = setup
+    legacy, auto = _auto_enrolled(client, identity, flow)
+    headers = {"Authorization": "Bearer " + auto["token"]}
+    wrong = client.post("/api/me/identity-migration", headers=headers,
+        json={"login_name": "a12345678", "password": "wrong"})
+    missing = client.post("/api/me/identity-migration", headers=headers,
+        json={"login_name": "a99999999", "password": "local-password"})
+    assert wrong.status_code == missing.status_code == 409
+    assert wrong.json()["detail"] == missing.json()["detail"] == "旧账号登录名或密码不正确。"
+    local = client.post("/api/auth/login", json={"username": "a12345678", "password": "local-password"}).json()
+    by_local = client.post("/api/me/identity-migration", headers={"Authorization": "Bearer " + local["token"]},
+        json={"login_name": "a12345678", "password": "local-password"})
+    assert by_local.status_code == 409 and "统一认证登录" in by_local.json()["detail"]
+    assert client.get("/api/me/identities",
+        headers={"Authorization": "Bearer " + local["token"]}).json()["migration_available"] is False
+    assert client.post("/api/me/identity-migration",
+        json={"login_name": "a12345678", "password": "local-password"}).status_code == 401
+    assert client.get("/api/me/identities", headers=headers).json()["migration_available"] is True

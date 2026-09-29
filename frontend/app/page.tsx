@@ -111,6 +111,7 @@ import {
   fetchMyIdentities,
   LOCAL_AUTH_CAPABILITIES,
   logoutUser,
+  migrateToLegacyAccount,
   startIdentityBinding,
   updateUiMode,
   type AuthCapabilities,
@@ -143,7 +144,7 @@ import {
 import { KG_RANGE_DEFAULT, kgCanvasState } from "./kg-workspace-model.ts";
 import { refreshKgDeleteDependents } from "./kg-delete-dependents.ts";
 import { API_BASE } from "./api-config";
-import { clearToken, getToken } from "./auth-session";
+import { clearToken, getToken, setToken } from "./auth-session";
 import { copyTextSafely } from "./copy-text";
 import { useCopyResult } from "./copy-result";
 import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors.ts";
@@ -4780,6 +4781,13 @@ export default function Home() {
     window.location.assign(authorizationUrl);
   }
 
+  // 迁移后会话属于另一个 user_id；整页重载，不让自动账号的界面状态混进旧账号。
+  async function handleMigrateIdentity(loginName: string, password: string) {
+    const result = await migrateToLegacyAccount(loginName, password);
+    setToken(result.token);
+    window.location.reload();
+  }
+
   function openModelPanel(serviceId: string | null = null) {
     if (!rootModals.open("model-service", rootModals.captureActorOwner())) return;
     setHighlightedModelServiceId(serviceId);
@@ -5108,6 +5116,8 @@ export default function Home() {
             }}
             onChangePassword={() => { rootModals.open("password-change", rootModals.captureActorOwner()); }}
             onStartIdentityBinding={handleStartIdentityBinding}
+            canMigrateIdentity={Boolean(identityInfo?.migration_available)}
+            onMigrateIdentity={handleMigrateIdentity}
             onLogout={() => handleLogout().catch(reportError)}
           />
         </div>

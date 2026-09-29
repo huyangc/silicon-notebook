@@ -13,7 +13,7 @@ import json
 import secrets
 import time
 
-from app.domain.auth_utils import verify_password
+from app.domain.auth_utils import normalize_username, verify_password
 from app.domain.auth_policy import (
     AUTH_MODES, AuthStoreError, AUTH_CUTOVER_MIN_ADMINS,
     AUTH_INVENTORY_PAGE_SIZE, AUTH_INVENTORY_PAGE_MAX,
@@ -169,9 +169,10 @@ class AuthStore:
             raise AuthStoreError("local_auth_disabled")
         return self._insert_session(db, user_id, "local", LOCAL_SESSION_SECONDS)
 
-    def _insert_session(self, db, user_id, source, seconds, namespace="", subject=""):
+    def _insert_session(self, db, user_id, source, seconds, namespace="", subject="", expires_at=None):
         token = secrets.token_urlsafe(AUTH_TOKEN_BYTES)
-        now, expires = self._now(), self._expires(seconds)
+        now = self._now()
+        expires = expires_at if expires_at is not None else self._expires(seconds)
         absolute = expires if source == "sso" else None
         self._execute(db, "INSERT INTO auth_sessions(token,user_id,created_at,expires_at,last_seen_at,auth_source,absolute_expires_at,provider_namespace,external_subject) VALUES (?,?,?,?,?,?,?,?,?)", (token,user_id,now,expires,now,source,absolute,namespace,subject))
         self._execute(db, "UPDATE users SET last_seen_at=? WHERE id=? AND (last_seen_at IS NULL OR last_seen_at<?)", (now,user_id,now))
@@ -206,6 +207,9 @@ class AuthStore:
             # target_user_id, which requires proof of the original local session.
             if "identity_user_id" not in payload or "identity_auth_revision" not in payload:
                 raise AuthStoreError("stale_transaction")
+            if "auto" in payload:
+                self._recheck_auto_account(db, payload, policy)
+                return
             if payload["identity_user_id"] is None:
                 raise AuthStoreError("identity_not_linked")
             values = payload["identity"]
@@ -255,6 +259,13 @@ class AuthStore:
                 existing = self._execute(db,"SELECT 1 FROM external_identities WHERE user_id=?",(target_user_id,)).fetchone()
                 if not user or target_user_id == "user-local" or existing:
                     raise AuthStoreError("invalid_recovery_target")
+                reserved = self._execute(
+                    db,
+                    "SELECT user_id,status FROM external_identities WHERE provider_namespace=? AND subject=?",
+                    (policy["provider_namespace"],subject),
+                ).fetchone()
+                if reserved and (reserved["status"] != "active" or not self._is_auto_account(db,reserved["user_id"])):
+                    raise AuthStoreError("identity_conflict")
             if purpose == "replace":
                 user = self._user(db,target_user_id)
                 current = self._active_identity(db,target_user_id,policy["provider_namespace"])
@@ -337,6 +348,8 @@ class AuthStore:
                 user = self._user(db,mapping["user_id"]) if mapping else None
                 payload["identity_user_id"] = user["id"] if user else None
                 payload["identity_auth_revision"] = user["auth_revision"] if user else None
+                if not mapping and self._auto_accounts():
+                    payload.update(self._auto_account_plan(db, values["username"], policy["provider_namespace"]))
             payload.pop("pkce_verifier",None)
             payload["identity"] = values
             payload["authenticated_at"] = int(time.time())
@@ -350,12 +363,15 @@ class AuthStore:
                 pending = self._put_transaction(db,"confirmation",browser_proof,payload,self.settings.auth_transaction_ttl_seconds)
                 user = self._user(db,payload["target_user_id"])
                 return {"status":"binding_required","pending_id":pending,"local_login_name":user["local_login_name"],"external_username":payload["identity"]["username"],"display_name":payload["identity"]["display_name"]}
-            if payload["purpose"] in ("enroll","recover","replace"):
+            # A new account is created only after the person confirms, so an
+            # employee with an older account can go bind that one instead.
+            auto_enroll = payload["purpose"] == "login" and payload.get("auto") == "enroll"
+            if payload["purpose"] in ("enroll","recover","replace") or auto_enroll:
                 pending = self._put_transaction(db,"confirmation",browser_proof,payload,self.settings.auth_transaction_ttl_seconds)
                 target = self._user(db,payload["target_user_id"]) if payload.get("target_user_id") else None
                 preview: AuthGrantPreview = {
                     "status":"confirmation_required", "pending_id":pending,
-                    "purpose":payload["purpose"],
+                    "purpose":"auto_enroll" if auto_enroll else payload["purpose"],
                     "external_username":payload["identity"]["username"],
                     "display_name":payload["identity"]["display_name"],
                     "previous_external_username":payload.get("previous_external_username"),
@@ -379,17 +395,21 @@ class AuthStore:
         values = payload["identity"]
         mapping = self._execute(db,"SELECT * FROM external_identities WHERE provider_namespace=? AND subject=?",(values["provider_namespace"],values["subject"])).fetchone()
         target = payload.get("target_user_id")
-        if payload["purpose"] == "enroll":
+        auto = payload.get("auto") if payload["purpose"] == "login" and not mapping and self._auto_accounts() else None
+        if payload["purpose"] == "enroll" or auto == "enroll":
             if mapping:
                 raise AuthStoreError("identity_conflict")
-            self.check_name(db,values["username"])
-            target = "user-" + secrets.token_hex(AUTH_TOKEN_BYTES)
-            now = self._now()
-            self._execute(db,"INSERT INTO users(id,email,display_name,role,status,username,created_at,updated_at) VALUES (?,?,?,'user','active',?,?,?)",(target,target+"@users.silicon-notebook.local",values["display_name"],values["username"],now,now))
-            self._execute(db,"INSERT INTO user_profiles(id,user_id,memory_mode,domain_focus,created_at,updated_at) VALUES (?,?,'manual',?,?,?)",("profile-"+target,target,"[]",now,now))
+            target = self._create_sso_user(db, values)
+        elif auto == "link":
+            target = payload["identity_user_id"]
         elif payload["purpose"] == "recover":
-            if mapping or self._execute(db,"SELECT 1 FROM external_identities WHERE user_id=?",(target,)).fetchone():
+            if self._execute(db,"SELECT 1 FROM external_identities WHERE user_id=?",(target,)).fetchone():
                 raise AuthStoreError("identity_conflict")
+            if mapping:
+                if mapping["user_id"] == target or mapping["status"] != "active" or not self._is_auto_account(db, mapping["user_id"]):
+                    raise AuthStoreError("identity_conflict")
+                self._migrate_identity(db, mapping["user_id"], target, values["provider_namespace"], values["subject"], payload["grant_actor_id"], payload["grant_reference"])
+                mapping = self._execute(db,"SELECT * FROM external_identities WHERE provider_namespace=? AND subject=?",(values["provider_namespace"],values["subject"])).fetchone()
             self._execute(db,"UPDATE users SET status='active',auth_revision=auth_revision+1 WHERE id=?",(target,))
             self._execute(db,"DELETE FROM auth_sessions WHERE user_id=?",(target,))
         elif payload["purpose"] == "replace":
@@ -420,6 +440,9 @@ class AuthStore:
                 db,payload["grant_actor_id"],user_id,"grant_completed:"+payload["purpose"],
                 values["provider_namespace"],values["subject"],payload["grant_reference"],
             )
+        elif auto:
+            action = "sso_auto_linked" if auto == "link" else "sso_auto_enrolled"
+            self._audit_identity(db,user_id,user_id,action,values["provider_namespace"],values["subject"])
         elif payload["purpose"] == "bind" or user["username"] != values["username"]:
             action = "identity_bound" if payload["purpose"]=="bind" else "identity_renamed"
             self._audit_identity(db,user_id,user_id,action,values["provider_namespace"],values["subject"])
@@ -435,6 +458,111 @@ class AuthStore:
             "WHERE user_id=? AND provider_namespace=? AND status='active'",
             (user_id,namespace),
         ).fetchone()
+
+    def _auto_accounts(self):
+        return bool(getattr(self.settings, "auth_sso_auto_accounts", False))
+
+    def _create_sso_user(self, db, values):
+        """Create a passwordless ordinary user named after the external identity."""
+        self.check_name(db,values["username"])
+        target = "user-" + secrets.token_hex(AUTH_TOKEN_BYTES)
+        now = self._now()
+        self._execute(db,"INSERT INTO users(id,email,display_name,role,status,username,created_at,updated_at) VALUES (?,?,?,'user','active',?,?,?)",(target,target+"@users.silicon-notebook.local",values["display_name"],values["username"],now,now))
+        self._execute(db,"INSERT INTO user_profiles(id,user_id,memory_mode,domain_focus,created_at,updated_at) VALUES (?,?,'manual',?,?,?)",("profile-"+target,target,"[]",now,now))
+        return target
+
+    def _auto_account_plan(self, db, username, namespace):
+        """Decide how an unmapped login is linked by employee number.
+
+        The decision is staged and later recomputed inside the completing
+        write; a different answer then is stale rather than a new target.
+        """
+        rows = self._execute(
+            db,
+            "SELECT id,status,auth_revision FROM users WHERE id<>'user-local' "
+            "AND (lower(username)=lower(?) OR lower(local_login_name)=lower(?))",
+            (username,username),
+        ).fetchall()
+        plan = {"auto":"enroll","identity_user_id":None,"identity_auth_revision":None}
+        if len(rows) > 1:
+            plan["auto"] = "identity_conflict"
+        elif rows:
+            row = rows[0]
+            plan.update(identity_user_id=row["id"],identity_auth_revision=row["auth_revision"])
+            reserved = self._execute(
+                db,"SELECT 1 FROM external_identities WHERE user_id=? AND provider_namespace=?",
+                (row["id"],namespace),
+            ).fetchone()
+            plan["auto"] = "identity_conflict" if reserved else "account_inactive" if row["status"] != "active" else "link"
+        return plan
+
+    def _recheck_auto_account(self, db, payload, policy):
+        if not self._auto_accounts():
+            raise AuthStoreError("identity_not_linked")
+        values = payload["identity"]
+        if self._execute(
+            db,"SELECT 1 FROM external_identities WHERE provider_namespace=? AND subject=?",
+            (values["provider_namespace"],values["subject"]),
+        ).fetchone():
+            raise AuthStoreError("stale_transaction")
+        plan = self._auto_account_plan(db, values["username"], policy["provider_namespace"])
+        if plan["auto"] not in ("link","enroll"):
+            raise AuthStoreError(plan["auto"])
+        if any(payload.get(key) != value for key, value in plan.items()):
+            raise AuthStoreError("stale_transaction")
+
+    def _is_auto_account(self, db, user_id):
+        return self._execute(
+            db,"SELECT 1 FROM auth_identity_audit WHERE action='sso_auto_enrolled' AND target_user_id=?",
+            (user_id,),
+        ).fetchone() is not None
+
+    def _migrate_identity(self, db, source_id, target_id, namespace, subject, actor_id, grant_reference=""):
+        """Move an auto-enrolled account's subject onto an older account.
+
+        The older account keeps its id and data; the auto account is disabled
+        and releases its name so the older account can take it.
+        """
+        source = self._user(db,source_id)
+        now = self._now()
+        self._execute(db,"UPDATE external_identities SET user_id=?,updated_at=? WHERE provider_namespace=? AND subject=?",(target_id,now,namespace,subject))
+        self._execute(db,"UPDATE users SET status='disabled',username='',auth_revision=auth_revision+1,updated_at=? WHERE id=?",(now,source_id))
+        self._execute(db,"DELETE FROM auth_sessions WHERE user_id=?",(source_id,))
+        self.check_name(db,source["username"],target_id)
+        self._execute(db,"UPDATE users SET username=?,display_name=?,auth_revision=auth_revision+1,updated_at=? WHERE id=?",(source["username"],source["display_name"],now,target_id))
+        self._execute(db,"DELETE FROM auth_sessions WHERE user_id=?",(target_id,))
+        self._audit_identity(db,actor_id,target_id,"identity_migrated",namespace,subject,grant_reference)
+        self._audit_identity(db,actor_id,source_id,"sso_auto_account_retired",namespace,subject,grant_reference)
+
+    def _migration_open(self, policy):
+        return policy["mode"] in ("dual","binding_required") and not policy["retired_at"]
+
+    def migrate_auto_account(self, session_token, login_name, password):
+        with self._write() as (db, policy):
+            caller = self._session(db,session_token,policy)
+            if not caller or caller["auth_source"] != "sso" or caller["id"] == "user-local":
+                raise AuthStoreError("migration_requires_sso")
+            namespace = policy["provider_namespace"]
+            current = self._active_identity(db,caller["id"],namespace)
+            if not current or not self._is_auto_account(db,caller["id"]):
+                raise AuthStoreError("migration_not_available")
+            if not self._migration_open(policy):
+                raise AuthStoreError("migration_local_disabled")
+            old = self._execute(db,"SELECT * FROM users WHERE local_login_name=?",(normalize_username(login_name),)).fetchone()
+            if not old or not verify_password(password,old["password_hash"],old["password_salt"],old["password_iterations"]):
+                raise AuthStoreError("migration_verification_failed")
+            if old["id"] in (caller["id"],"user-local"):
+                raise AuthStoreError("migration_target_invalid")
+            if old["status"] != "active":
+                raise AuthStoreError("account_inactive")
+            if self._execute(db,"SELECT 1 FROM external_identities WHERE user_id=? AND provider_namespace=?",(old["id"],namespace)).fetchone():
+                raise AuthStoreError("migration_target_linked")
+            self._migrate_identity(db,caller["id"],old["id"],namespace,current["subject"],old["id"])
+            token = self._insert_session(
+                db,old["id"],"sso",0,namespace,current["subject"],
+                expires_at=caller["session_absolute_expires_at"],
+            )
+            return self._profile(db,self._user(db,old["id"])),token
 
     def _replace_identity(self, db, policy, payload, mapping):
         """Replace a grant-fixed mapping while retaining old subject ownership."""
@@ -512,7 +640,8 @@ class AuthStore:
             policy = self._read_policy(db)
             user = self._user(db,user_id)
             row = self._active_identity(db,user_id,policy["provider_namespace"])
-            return {"linked":bool(row and row["status"]=="active"),"local_login_name":user["local_login_name"] if user else None,"external_username":user["username"] if user and row else None,"display_name":user["display_name"] if user else ""}
+            migration = bool(row and self._migration_open(policy) and self._is_auto_account(db,user_id))
+            return {"linked":bool(row and row["status"]=="active"),"local_login_name":user["local_login_name"] if user else None,"external_username":user["username"] if user and row else None,"display_name":user["display_name"] if user else "","migration_available":migration}
 
     def preflight(self):
         with self.database.connect() as db:
