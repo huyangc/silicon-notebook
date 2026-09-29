@@ -50,7 +50,11 @@ from app.core.model_json import (
     parse_model_json_object,
     validate_model_json_shape,
 )
-from app.core.model_safety import safe_model_error_code, safe_model_error_detail
+from app.core.model_safety import (
+    safe_model_error_code,
+    safe_model_error_detail,
+    safe_model_finish_reason,
+)
 from app.domain.extensions import RetrievalContributorHostPort
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 # Only the NAME, from the dependency-free domain layer: these modules are
@@ -205,6 +209,37 @@ def _section_attempt_failure(exc: BaseException) -> tuple[str, str]:
     # than the vocabulary's ``upstream_error`` fallback, which would guess.
     code = getattr(exc, "code", "")
     return "error", safe_model_error_code(code) if code else ""
+
+
+def _loggable_section_failure(
+    status: str, reason: str, error: Optional[BaseException],
+) -> Exception:
+    """What ``note_model_error`` may see for a failed section.
+
+    ``model_error`` events carry ``str(exc)``. The scheduler's
+    ``ModelInvocationError`` is built credential-safe (service label,
+    workload, code, support id) and names the runtime the banner shows, so
+    it passes through. Anything else -- a direct client's exception, a
+    parse error quoting the reply -- is replaced by a stand-in that keeps
+    only the classified code (codex #795 r1).
+    """
+    from app.services.model_provider import ModelInvocationError
+    from app.services.model_work import MalformedModelResponse, ModelProviderError
+
+    if isinstance(error, ModelInvocationError):
+        return error
+    if status in {"empty", "malformed"} and reason:
+        return MalformedModelResponse(
+            reason=reason,
+            finish_reason=safe_model_finish_reason(
+                getattr(error, "finish_reason", "")
+            ),
+        )
+    if status == "error" and error is not None:
+        return ModelProviderError(
+            "report section model call failed", code=reason or "provider_error"
+        )
+    return RuntimeError("report section produced empty content after retry")
 
 
 def audit_high_risk_assertions(markdown: str, id_map: dict[str, dict], *,
@@ -2517,11 +2552,11 @@ class ReportEngine:
     def _section_attempts(
         self, ask_model: Any, schema_hint: str, *,
         report_id: Optional[str], section_index: int,
-    ) -> tuple[str, bool, Any, tuple[str, Optional[Exception]]]:
+    ) -> tuple[str, bool, Any, tuple[str, str, Optional[Exception]]]:
         """Draft one section with one bounded retry.
 
-        Returns ``(markdown, grounded, raw_claims, (failure_status, error))``;
-        the failure pair describes the LAST attempt -- the outcome the retry
+        Returns ``(markdown, grounded, raw_claims, (status, reason, error))``;
+        the failure triple describes the LAST attempt -- the outcome the retry
         left standing -- and is meaningless when markdown is non-empty.
         """
         # 思考型模型(deepseek-v4-pro)偶发把输出预算耗在 reasoning_content(思维链,被
@@ -2532,7 +2567,7 @@ class ReportEngine:
         # 无法解析)、error(调用本身失败)。只有 empty 沿用思维链提示;原因码记在
         # report_section_attempt 事件里,不写进文案猜原因。
         markdown, llm_grounded, raw_claims = "", False, None
-        failure: tuple[str, Optional[Exception]] = ("empty", None)
+        failure: tuple[str, str, Optional[Exception]] = ("empty", "", None)
         for attempt in range(1, 3):
             attempt_started = time.monotonic()
             attempt_status, attempt_reason = "error", ""
@@ -2563,20 +2598,18 @@ class ReportEngine:
                     )
             if markdown:
                 break
-            failure = (attempt_status, failure_error)
+            failure = (attempt_status, attempt_reason, failure_error)
         return markdown, llm_grounded, raw_claims, failure
 
     def _mark_section_failed(
-        self, base: dict, failure: tuple[str, Optional[Exception]],
+        self, base: dict, failure: tuple[str, str, Optional[Exception]],
     ) -> None:
         """Flag a section with no body and note why, without guessing a cause."""
-        status, error = failure
+        status, reason, error = failure
         try:
             self.dependencies.model_errors.note_model_error(
                 "report_section",
-                error or RuntimeError(
-                    f"report section '{base['title']}' produced empty content after retry"
-                ),
+                _loggable_section_failure(status, reason, error),
                 workload_id="report_section",
             )
         except Exception:
