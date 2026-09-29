@@ -76,6 +76,7 @@ import { appSourceModules, findFunction, parseModule, parseText } from "../../te
 // not a place to silently opt a hook out of coverage.
 const NOT_A_VIEW_OWNER = new Map([
   ["use-floating-window.ts", "拖动窗口几何状态，不持有 notebook/actor 视图"],
+  ["use-identity-migration.ts", "账号迁移的 single-flight 布尔与提交命令，不持有 notebook/actor 视图或集合"],
   [
     "use-kg-owner.ts",
     "KG 三个领域 owner 共用的 actor/notebook/generation 门。它只返回判定函数与生命周期"

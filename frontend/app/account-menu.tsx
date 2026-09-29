@@ -16,7 +16,7 @@ import {
   Wand2,
 } from "lucide-react";
 
-import { IdentityMigrationForm } from "./identity-migration-form";
+import { IdentityMigrationForm, type IdentityMigrationOutcome } from "./identity-migration-form";
 
 
 type AccountMenuProps = {
@@ -46,7 +46,9 @@ type AccountMenuProps = {
   onStartIdentityBinding: (currentPassword: string) => Promise<void>;
   /** 统一认证自动开户账号在本地密码仍有效时，可把统一身份迁回自己的旧账号。 */
   canMigrateIdentity?: boolean;
-  onMigrateIdentity?: (loginName: string, password: string) => Promise<void>;
+  onMigrateIdentity?: (loginName: string, password: string) => Promise<IdentityMigrationOutcome>;
+  /** 页面持有的迁移进行中标记；表单或菜单关闭都不释放。 */
+  migrationInFlight?: boolean;
   onLogout: () => void | Promise<void>;
 };
 
@@ -71,6 +73,7 @@ export function AccountMenu({
   onStartIdentityBinding,
   canMigrateIdentity = false,
   onMigrateIdentity,
+  migrationInFlight = false,
   onLogout,
 }: AccountMenuProps) {
   const [open, setOpen] = useState(false);
@@ -294,7 +297,7 @@ export function AccountMenu({
                 <span>迁移旧账号</span>
               </button>
               {migrationOpen && (
-                <IdentityMigrationForm onSubmit={onMigrateIdentity} onClose={() => setMigrationOpen(false)} />
+                <IdentityMigrationForm inFlight={migrationInFlight} onSubmit={onMigrateIdentity} onClose={() => setMigrationOpen(false)} />
               )}
             </div>
           )}
