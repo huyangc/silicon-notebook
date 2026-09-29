@@ -215,24 +215,30 @@ class _StubEnumeration:
             raise result
         return result
 
+    # ``ceiling_binds`` 是**必填**关键字(没有默认值):生产执行器的默认值会按天花板
+    # 过度过滤,推理侧的每个调用点都必须显式传本 run 的判词。替身不给默认值,漏传的
+    # 调用点在这里就是一个 TypeError,而不是一次静默的过度过滤。
     def enumerate_elements(self, notebook_id, kind, *, source_id="", budget,
-                           cursor=None, cancel_event=None):
+                           cursor=None, cancel_event=None, ceiling_binds):
         return self._next({"collection": "elements", "kind": kind,
                            "source_id": source_id, "budget": budget,
-                           "cursor": cursor, "cancel_event": cancel_event})
+                           "cursor": cursor, "cancel_event": cancel_event,
+                           "ceiling_binds": ceiling_binds})
 
     def enumerate_kg_objects(self, notebook_id, object_type, *, budget,
-                             cursor=None, cancel_event=None):
+                             cursor=None, cancel_event=None, ceiling_binds):
         return self._next({"collection": "kg_objects", "kind": object_type,
                            "budget": budget, "cursor": cursor,
-                           "cancel_event": cancel_event})
+                           "cancel_event": cancel_event,
+                           "ceiling_binds": ceiling_binds})
 
     def enumerate_sources(self, notebook_id, *, budget, cursor=None,
-                          cancel_event=None, local_only=False):
+                          cancel_event=None, local_only=False, ceiling_binds):
         return self._next({"collection": "sources", "kind": "",
                            "budget": budget, "cursor": cursor,
                            "cancel_event": cancel_event,
-                           "local_only": local_only})
+                           "local_only": local_only,
+                           "ceiling_binds": ceiling_binds})
 
 
 def _coverage(**overrides):

@@ -118,6 +118,8 @@ def test_tool_stays_offered_under_narrowing_and_drift(repo, kind):  # noqa: F811
     assert step.detail["source_scoped"] is True
     [outcome] = result.enumerations
     assert outcome.source_scoped is True
+    # 披露就是传给执行器的判词:执行器按天花板过滤了这份清单。
+    assert retriever.collection_enumeration.calls[0]["ceiling_binds"] is True
     # reflect prompt:第一轮起就说「清单只含勾选的来源」,第二轮的账目带同一个后缀。
     assert all(SCOPED_SENTENCE in p for p in llm.reflect_prompts)
     assert (
@@ -142,6 +144,105 @@ def test_unnarrowed_run_carries_no_scoped_disclosure(repo):  # noqa: F811
     assert result.enumerations[0].source_scoped is False
     assert all(SELECTED_SOURCES_SCOPE_SUFFIX not in p for p in llm.reflect_prompts)
     assert all(SCOPED_SENTENCE not in p for p in llm.reflect_prompts)
+
+
+def _seed_evidenced(repo):
+    """与 ``_seed`` 同形,但那个知识对象带着来自 s1 的证据——候选检索在冻结天花板下
+    按证据过滤(既有行为,与枚举无关),没有证据的对象会让两次 run 的候选摘要不同。"""
+    from app.models.schemas import NotebookCreate
+
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    with repo._write() as db:
+        for source_id, title in (("s1", "论文一"), ("s2", "论文二")):
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+                "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (source_id, notebook.id, title, "pdf", "extracted", "extracted",
+                 "2026-09-29", "2026-09-29"),
+            )
+        db.execute(
+            "INSERT INTO source_elements (id,source_id,element_type,"
+            "location_label,text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("el-001", "s1", "formula", "p1", "公式 1", "{}", "2026-09-29"),
+        )
+    repo.store_kg(notebook.id, None, [{
+        "local_id": "C1", "object_type": "claim",
+        "payload": {"name": "版图设计要点", "section_path": "1"},
+        "evidence": [{
+            "source_id": "s1", "source_title": "论文一", "element_id": "el-001",
+            "element_type": "formula", "location_label": "p1",
+            "quoted_span": "公式 1", "confidence": 1.0,
+        }],
+    }], [])
+    repo.collection_catalog.invalidate()
+    return notebook
+
+
+def test_an_all_ticked_frozen_scope_discloses_nothing(repo):  # noqa: F811
+    """全选的冻结天花板(每个 UI 请求的默认形态)不是收窄:没有任何披露,且模型看到
+    的 prompt 与不带范围的 run **逐字节相同**,地图照常注入。
+
+    这条路径是回归面最大的一条——把 ``source_scoped`` 判成「有天花板就算」会让每个
+    UI 请求的每份清单都带上后缀,而此前没有任何测试会红。
+    """
+    notebook = _seed_evidenced(repo)
+
+    stubs = []
+
+    def run(scope):
+        llm = _SeqLLM([_enumerate_sources_action(), ANSWER])
+        retriever, limits = _retriever(repo, llm)
+        retriever.collection_enumeration = _StubEnumeration(
+            [_one_source_listing(notebook.id)])
+        stubs.append(retriever.collection_enumeration)
+        if scope is None:
+            return llm, retriever.run(notebook.id, "有哪几篇", "", limits=limits)
+        with source_scope_context(notebook.id, scope):
+            assert retriever._unsafe_scope_restricted() is False
+            return llm, retriever.run(notebook.id, "有哪几篇", "", limits=limits)
+
+    all_ticked = {"mode": "include", "source_ids": ["s1", "s2"],
+                  "narrowed": False, "hidden_source_ids": [], "owner_id": ""}
+    ticked_llm, ticked = run(all_ticked)
+    plain_llm, plain = run(None)
+
+    [step] = _steps(ticked, "enumerate")
+    assert step.summary == "枚举来源清单: 已全部列出 1 条"
+    assert "source_scoped" not in step.detail
+    assert ticked.enumerations[0].source_scoped is False
+    assert all(SELECTED_SOURCES_SCOPE_SUFFIX not in p
+               for p in ticked_llm.reflect_prompts + ticked_llm.plan_prompts)
+    assert all(SCOPED_SENTENCE not in p for p in ticked_llm.reflect_prompts)
+    [card] = typed_collection_results(ticked.enumerations, payload_chars=100_000)
+    assert "source_scoped" not in json.loads(card.model_dump_json())
+    assert ticked.collection_map_text.startswith("[Collections in scope]")
+    assert ticked.collection_map_text == plain.collection_map_text
+    assert ticked_llm.reflect_prompts == plain_llm.reflect_prompts
+    assert ticked_llm.plan_prompts == plain_llm.plan_prompts
+    # 判词如实传给执行器:全选不约束集合读取(与没有天花板时同一种读法)。
+    assert stubs[0].calls[0]["ceiling_binds"] is False
+
+
+def test_the_map_binds_the_ceiling_only_when_the_scope_is_narrowed(repo):  # noqa: F811
+    """集合地图读的是本 run 的判词:全选冻结时与没有天花板逐字节相同(没有证据的
+    知识对象照样计数),真收窄时才按天花板计(它不在任何勾选来源里,计为 0)。"""
+    notebook = _seed(repo, formulas=1)
+    _add_source_row(repo, notebook.id, "s2", "论文二")
+
+    def map_text(scope):
+        retriever, limits = _retriever(repo, _SeqLLM([ANSWER]))
+        if scope is None:
+            return retriever.run(notebook.id, "q", "", limits=limits).collection_map_text
+        with source_scope_context(notebook.id, scope):
+            return retriever.run(notebook.id, "q", "", limits=limits).collection_map_text
+
+    plain = map_text(None)
+    ticked = map_text({"mode": "include", "source_ids": ["s1", "s2"],
+                       "narrowed": False, "hidden_source_ids": [], "owner_id": ""})
+    narrowed = map_text(SourceScope(mode="include", source_ids=["s1"]))
+    assert "claim 1" in plain
+    assert ticked == plain
+    assert "claim 0" in narrowed
 
 
 def test_defense_in_depth_skip_follows_the_same_gate(repo):  # noqa: F811
@@ -195,30 +296,43 @@ def test_synthesis_header_carries_the_selected_sources_suffix():
     assert SELECTED_SOURCES_SCOPE_SUFFIX not in plain.text
 
 
-def test_trace_and_ledger_use_the_same_order_for_both_suffixes():
-    coverage = _coverage()
-    summary = rr._enumeration_step_summary(
-        "来源清单", coverage, "", local_only=True, source_scoped=True)
-    assert summary.endswith(LOCAL_ONLY_SCOPE_SUFFIX + SELECTED_SOURCES_SCOPE_SUFFIX)
-    chain = rr._EnumChain(_outcome(local_only=True, source_scoped=True),
-                          state="complete")
-    note = rr._enumeration_note({("sources", "", "", True, True): chain})
-    assert (f"「来源清单」已完整列出 1 条{LOCAL_ONLY_SCOPE_SUFFIX}"
-            f"{SELECTED_SOURCES_SCOPE_SUFFIX}") in note
-    # 单一来源的元素清单只说「限指定来源」,不叠第二个括号。
-    assert rr._enumeration_step_summary(
-        "公式清单", coverage, "s1", source_scoped=True
-    ).endswith("（限指定来源）")
+def test_every_reader_takes_its_suffix_from_the_one_function():
+    """同一份清单在上屏摘要、回喂账目、合成分区标题三处说出**同一串**后缀,顺序
+    固定:「(限指定来源)」→「(仅当前笔记本)」→「(仅勾选的来源)」;「(仅勾选的来源)」
+    只要 ``source_scoped`` 为真就无条件追加(与前端结果卡同一判据),单一来源的元素
+    清单也不例外。"""
+    cases = [
+        (_outcome(local_only=True, source_scoped=True),
+         LOCAL_ONLY_SCOPE_SUFFIX + SELECTED_SOURCES_SCOPE_SUFFIX),
+        (_outcome(collection="elements", kind="formula", source_id="s1",
+                  items=[], source_scoped=True),
+         rr.SINGLE_SOURCE_SCOPE_SUFFIX + SELECTED_SOURCES_SCOPE_SUFFIX),
+        (_outcome(collection="elements", kind="formula", source_id="s1",
+                  items=[]),
+         rr.SINGLE_SOURCE_SCOPE_SUFFIX),
+        (_outcome(), ""),
+    ]
+    for outcome, expected in cases:
+        assert rr.enumeration_scope_suffix(outcome) == expected
+        summary = rr._enumeration_step_summary("清单", outcome.coverage, outcome)
+        assert summary.endswith(f"条{expected}"), summary
+        note = rr._enumeration_note(
+            {("k",): rr._EnumChain(outcome, state="complete")})
+        assert f"已完整列出 1 条{expected}" in note, note
+        header = enumeration_prompt_block(
+            [outcome], inline_rows=10, budget_chars=10_000).text
+        assert f"{expected}, listed" in header, header
+    assert rr.SINGLE_SOURCE_SCOPE_SUFFIX == "（限指定来源）"
 
 
 def test_four_readers_share_the_one_literal():
-    """四个服务端读者共用执行器模块的那一份字面,不许出现第二份字符串。"""
+    """服务端读者共用一份实现与一份字面,不许出现第二份字符串。"""
     from app.services import collection_enumeration_answer as answer
     from app.services import prompts
 
     assert SELECTED_SOURCES_SCOPE_SUFFIX == "（仅勾选的来源）"
+    assert answer.enumeration_scope_suffix is rr.enumeration_scope_suffix
     assert rr.SELECTED_SOURCES_SCOPE_SUFFIX is SELECTED_SOURCES_SCOPE_SUFFIX
-    assert answer.SELECTED_SOURCES_SCOPE_SUFFIX is SELECTED_SOURCES_SCOPE_SUFFIX
     assert prompts.SELECTED_SOURCES_SCOPE_SUFFIX is SELECTED_SOURCES_SCOPE_SUFFIX
     prompt = reflect_prompt("q", "c", element_kinds=("formula",),
                             source_scoped=True)
@@ -242,11 +356,13 @@ def test_typed_result_carries_source_scoped_and_omits_it_when_false():
     assert "source_scoped" not in plain.model_dump()
 
 
-def test_source_scoped_is_part_of_the_continuation_key(repo):  # noqa: F811
-    """run 中途来源集合漂移 ⇒ ``source_scoped`` 翻转 ⇒ 新开一条链,不续旧游标。
+def test_drift_mid_run_resumes_the_same_listing_and_marks_it(repo):  # noqa: F811
+    """run 中途来源集合漂移 ⇒ **同一条链**从游标续列,标记粘性地变成真。
 
-    两种天花板下读出来的条目拼成一份清单,既不完整也无法向用户解释;键里带着它,
-    第二次请求拿到的是一条从头开始、带「(仅勾选的来源)」的新清单。
+    天花板在 run 内冻结,漂移只让「清单只含勾选的来源」这句话变得成立,执行器读到
+    的集合不变。所以:第二次请求续上第一次的游标(不从第 1 页重列)、结果里只有一份
+    清单、行预算只按两页的真实条数扣一次;这份清单的一部分是在漂移之后列出的,所以
+    整份清单(摘要、账目、结果卡)都带「(仅勾选的来源)」。
     """
     notebook = _seed(repo, formulas=1)
     partial = SourceEnumeration(
@@ -255,7 +371,11 @@ def test_source_scoped_is_part_of_the_continuation_key(repo):  # noqa: F811
         coverage=_coverage(returned=1, returned_total=1, complete=False,
                            has_more=True, total=2, truncated_reason="budget"),
     )
-    fresh = _one_source_listing(notebook.id)
+    rest = SourceEnumeration(
+        items=(_source_item("s2", "论文二", notebook.id),), cursor=None,
+        extra_pages=0, payload_chars=10,
+        coverage=_coverage(returned=1, returned_total=2, total=2),
+    )
     drifted = {"now": False}
 
     class _DriftingStub(_StubEnumeration):
@@ -265,17 +385,67 @@ def test_source_scoped_is_part_of_the_continuation_key(repo):  # noqa: F811
             finally:
                 drifted["now"] = True
 
-    stub = _DriftingStub([partial, fresh])
+    stub = _DriftingStub([partial, rest])
     llm = _SeqLLM([_enumerate_sources_action(), _enumerate_sources_action(),
                    ANSWER])
     retriever, limits = _retriever(repo, llm)
     retriever.collection_enumeration = stub
-    retriever._unsafe_scope_restricted = lambda: drifted["now"]
+    retriever._run_ceiling_binds = lambda: drifted["now"]
 
     result = retriever.run(notebook.id, "有哪几篇", "", limits=limits)
 
-    assert stub.calls[1]["cursor"] is None
-    assert [o.source_scoped for o in result.enumerations] == [False, True]
+    assert stub.calls[1]["cursor"] == "cursor-1"
+    assert [call["ceiling_binds"] for call in stub.calls] == [False, True]
+    [outcome] = result.enumerations
+    assert [item.source_id for item in outcome.items] == ["s1", "s2"]
+    assert outcome.source_scoped is True
+    first, second = _steps(result, "enumerate")
+    assert not first.summary.endswith(SELECTED_SOURCES_SCOPE_SUFFIX)
+    assert "source_scoped" not in first.detail
+    assert second.summary == (
+        f"枚举来源清单: 已全部列出 2 条{SELECTED_SOURCES_SCOPE_SUFFIX}")
+    assert second.detail["source_scoped"] is True
+    [answer_step] = _steps(result, "answer")
+    assert answer_step.detail["enumerated_items"] == 2
+    [card] = typed_collection_results(result.enumerations, payload_chars=100_000)
+    assert card.source_scoped is True
+
+
+def test_the_scoped_mark_stays_once_set(repo):  # noqa: F811
+    """粘性的另一半:第一页在收窄/漂移下列出,之后探针转回假,标记也不会掉。"""
+    notebook = _seed(repo, formulas=1)
+    partial = SourceEnumeration(
+        items=(_source_item(notebook_id=notebook.id),), cursor="cursor-1",
+        extra_pages=0, payload_chars=10,
+        coverage=_coverage(returned=1, returned_total=1, complete=False,
+                           has_more=True, total=2, truncated_reason="budget"),
+    )
+    rest = SourceEnumeration(
+        items=(_source_item("s2", "论文二", notebook.id),), cursor=None,
+        extra_pages=0, payload_chars=10,
+        coverage=_coverage(returned=1, returned_total=2, total=2),
+    )
+    bound = {"now": True}
+
+    class _ReleasingStub(_StubEnumeration):
+        def enumerate_sources(self, *args, **kwargs):
+            try:
+                return super().enumerate_sources(*args, **kwargs)
+            finally:
+                bound["now"] = False
+
+    llm = _SeqLLM([_enumerate_sources_action(), _enumerate_sources_action(),
+                   ANSWER])
+    retriever, limits = _retriever(repo, llm)
+    retriever.collection_enumeration = _ReleasingStub([partial, rest])
+    retriever._run_ceiling_binds = lambda: bound["now"]
+
+    result = retriever.run(notebook.id, "有哪几篇", "", limits=limits)
+
+    [outcome] = result.enumerations
+    assert outcome.source_scoped is True
+    assert _steps(result, "enumerate")[-1].summary.endswith(
+        SELECTED_SOURCES_SCOPE_SUFFIX)
 
 
 # --------------------------------------------------------- B7 read_document
@@ -298,15 +468,27 @@ class _NoReads:
         return _boom
 
 
-def _assert_refused(state, title):
+def _unresolved_step(retriever, notebook_id, title):
+    """同一个标题、清单里根本没有它时的那条 skip——越界拒绝必须与它逐字段相同。"""
+    state = _roster_state(retriever, notebook_id, [
+        _source_item("s-other", "另一篇", notebook_id)])
+    retriever._action_read_document(state, ReflectDecision(
+        next_action=READ_DOCUMENT_ACTION, read_document_source=title))
+    return state.trace[-1]
+
+
+def _assert_refused(state, unresolved):
+    """越界拒绝与「清单里没有这个标题」不可区分(同一句话、同一 detail),且这一篇的
+    任何东西都没有往下走。"""
     skip = state.trace[-1]
     assert skip.step_type == "skip"
-    assert skip.detail == {"reason": "document_read_out_of_scope"}
+    assert skip.summary == unresolved.summary
+    assert skip.detail == unresolved.detail
+    assert skip.detail["reason"] == "document_read_unresolved"
+    assert skip.detail["matches"] == 0
     assert state.document_reads == []
     assert state.document_reads_done == 0
     assert not state.document_reads_by_id
-    assert all(title not in step.summary and title not in json.dumps(
-        step.detail, ensure_ascii=False) for step in state.trace)
 
 
 def test_read_document_refuses_a_document_outside_the_ceiling(repo):  # noqa: F811
@@ -323,8 +505,9 @@ def test_read_document_refuses_a_document_outside_the_ceiling(repo):  # noqa: F8
         retriever._action_read_document(state, ReflectDecision(
             next_action=READ_DOCUMENT_ACTION,
             read_document_source="无摘要文档"))
+        unresolved = _unresolved_step(retriever, notebook.id, "无摘要文档")
 
-    _assert_refused(state, "无摘要文档")
+    _assert_refused(state, unresolved)
 
 
 def test_read_document_still_reads_a_document_inside_the_ceiling(repo):  # noqa: F811
@@ -363,8 +546,9 @@ def test_read_document_refuses_a_library_outside_the_participant_set(repo):  # n
         retriever._action_read_document(state, ReflectDecision(
             next_action=READ_DOCUMENT_ACTION,
             read_document_source="别的库的文档"))
+        unresolved = _unresolved_step(retriever, notebook.id, "别的库的文档")
 
-    _assert_refused(state, "别的库的文档")
+    _assert_refused(state, unresolved)
 
 
 def test_document_source_admitted_predicate():
@@ -642,3 +826,150 @@ def test_a_knowhow_projection_source_created_after_the_freeze_is_drift(repo):  #
             )
         assert AskService._knowhow_completeness_in_scope(
             service, notebook.id) is False
+
+
+
+# ------------------------------------------- 集合读取判词:每个入口显式传、每 run 一次
+
+
+_CEILING_ENTRY_POINTS = frozenset({
+    "enumerate_elements", "enumerate_kg_objects", "enumerate_sources",
+    "resolve_source_title", "collection_map", "collection_map_text",
+})
+_CEILING_CALLER_FILES = (
+    "backend/app/services/reasoning_retrieval.py",
+    "backend/app/services/ask_service.py",
+)
+# 以 getattr 取出入口、再在同一个函数里带着判词调用的座位。
+_CEILING_GETATTR_SEATS = frozenset({"_plugin_collection_overview"})
+
+
+def test_every_collection_entry_call_passes_the_ceiling_verdict():
+    """推理/问答侧对执行器与目录服务的每一次调用都**显式**传 ``ceiling_binds``。
+
+    入口的默认值是 True(过度过滤而不是泄漏),所以漏传不会报错,只会让浏览器默认
+    的全选请求按整份天花板下推、把没有证据的知识对象从地图和清单里悄悄丢掉。这条
+    守卫按 AST 数:属性调用必须带这个关键字;以 ``getattr(x, "<入口>")`` 取出的入口
+    只许出现在登记过的座位里,且那个座位自己必须带着关键字调用它。
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    offenders, seen_calls, seen_seats = [], 0, set()
+    for relative in _CEILING_CALLER_FILES:
+        tree = ast.parse((root / relative).read_text(encoding="utf-8"))
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(func):
+                if not isinstance(node, ast.Call):
+                    continue
+                keywords = {kw.arg for kw in node.keywords}
+                if (isinstance(node.func, ast.Attribute)
+                        and node.func.attr in _CEILING_ENTRY_POINTS):
+                    seen_calls += 1
+                    if "ceiling_binds" not in keywords:
+                        offenders.append(f"{relative}:{node.lineno} {func.name}")
+                if (isinstance(node.func, ast.Name) and node.func.id == "getattr"
+                        and len(node.args) >= 2
+                        and isinstance(node.args[1], ast.Constant)
+                        and node.args[1].value in _CEILING_ENTRY_POINTS):
+                    if func.name not in _CEILING_GETATTR_SEATS:
+                        offenders.append(
+                            f"{relative}:{node.lineno} getattr in {func.name}")
+                        continue
+                    seen_seats.add(func.name)
+                    if not any(
+                        isinstance(inner, ast.Call)
+                        and any(kw.arg == "ceiling_binds" for kw in inner.keywords)
+                        for inner in ast.walk(func)
+                    ):
+                        offenders.append(f"{relative}:{node.lineno} {func.name}")
+    assert offenders == []
+    # 活性:守卫真的看见了调用点(枚举三动作 + 标题解析 + 首轮地图 + 无图早退)。
+    assert seen_calls >= 6
+    assert seen_seats == _CEILING_GETATTR_SEATS
+
+
+def test_the_ceiling_verdict_is_computed_once_per_retrieval_run():
+    """同一个检索 run 里判词只探一次(集合读取的所有读者说同一件事);run 之外现算。"""
+    from app.services.retrieval_run import retrieval_run
+
+    class _Probe:
+        def __init__(self, answers):
+            self.answers = list(answers)
+            self.calls = 0
+
+        def unsafe_source_scope_restricted(self, notebook_id):
+            self.calls += 1
+            return self.answers.pop(0)
+
+    frozen = {"mode": "include", "source_ids": ["s1"], "narrowed": False,
+              "hidden_source_ids": [], "owner_id": ""}
+    probe = _Probe([False, True])
+    with retrieval_run(run_kind="ask_chunk", actor_id="u"):
+        with source_scope_context("nb", frozen):
+            assert rr.ceiling_binds_for_run(probe) is False
+            assert rr.ceiling_binds_for_run(probe) is False
+            assert rr.knowhow_completeness_reachable(probe, "nb") is True
+    assert probe.calls == 1
+    with source_scope_context("nb", frozen):
+        assert rr.ceiling_binds_for_run(probe) is True
+    assert probe.calls == 2
+
+
+def test_plugin_collection_overview_carries_the_run_verdict():
+    """插件引擎的地图回调带着判词读,而不是落到入口的默认值。"""
+    from types import SimpleNamespace
+
+    from app.services.ask_service import AskService
+
+    received = []
+    service = SimpleNamespace(
+        collection_catalog=SimpleNamespace(
+            collection_map_text=lambda nb, **kw: received.append(kw) or "map"),
+        retrieval=SimpleNamespace(
+            unsafe_source_scope_restricted=lambda nb: False),
+    )
+    overview = AskService._plugin_collection_overview(service)
+    with source_scope_context("nb", SourceScope(mode="include", source_ids=["s1"])):
+        assert overview("nb") == "map"
+    assert overview("nb") == "map"
+    assert received == [{"ceiling_binds": True}, {"ceiling_binds": False}]
+    assert AskService._plugin_collection_overview(
+        SimpleNamespace(collection_catalog=object())) is None
+
+
+def test_chunk_engine_overviews_pass_the_run_verdict(monkeypatch):
+    """chunk 引擎的目录概览把同一个判词作为 ``source_scoped`` 交给目录拼装(拼装方
+    把它原样作为 ``ceiling_binds`` 交给执行器),无图早退读地图时同样带着它。"""
+    from types import SimpleNamespace
+
+    from app.services.ask_service import AskService
+    from app.services.document_overview import OverviewIntent
+
+    intent = OverviewIntent("catalog")
+    with source_scope_context("nb", SourceScope(mode="include", source_ids=["s1"])):
+        assert _catalog_kwargs(monkeypatch, intent)["source_scoped"] is True
+    assert _catalog_kwargs(monkeypatch, intent)["source_scoped"] is False
+
+    received = []
+
+    class _Catalog:
+        def collection_map(self, notebook_id, **kwargs):
+            received.append(kwargs)
+            raise RuntimeError("stop after the call")
+
+    service = SimpleNamespace(
+        settings=SimpleNamespace(reasoning_enum_tools_enabled=True,
+                                 reasoning_chunk_search_enabled=True),
+        collection_catalog=_Catalog(), collection_enumeration=object(),
+        retrieval=SimpleNamespace(
+            unsafe_source_scope_restricted=lambda nb: True),
+    )
+    frozen = {"mode": "include", "source_ids": ["s1"], "narrowed": False,
+              "hidden_source_ids": [], "owner_id": ""}
+    with source_scope_context("nb", frozen):
+        assert AskService._no_kg_scope_admits_run(service, "nb") is False
+    assert received == [{"ceiling_binds": True}]
