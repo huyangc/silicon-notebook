@@ -24,6 +24,16 @@ The SQLite specifics:
 * There is no plan cache or parallel query to steer, so
   ``execute_with_ceiling`` is a plain execute; it exists so both backends'
   stores read the same.
+
+Delegation to ``sqlite/id_binding.py`` (branch ``claude/ceiling-sql-binding``,
+merging first) is mechanical, as in the PostgreSQL twin: the ceiling layer
+(``normalise_ceiling``, the evidence predicate text, the identity cache)
+stays; ``BoundCeiling.sql`` becomes that module's ``JSON_IDS``, the JSON
+builder under the cache becomes ``ids_param`` — which must keep writing the
+ids SORTED (the measurement in ``ceiling_param``) — and
+``+kos.source_id IN {bound.sql}`` becomes ``member_of("kos.source_id")``
+provided that helper emits the non-driving (unary ``+``) membership test;
+a driving form (``drive_by``) here would reintroduce the per-ceiling-id seek.
 """
 from __future__ import annotations
 

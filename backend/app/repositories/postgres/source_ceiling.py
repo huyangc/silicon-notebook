@@ -51,6 +51,28 @@ ceiling) no longer gets parallel workers — none-4k page 27 → 28 ms, sparse-4
 89 → 36 ms, i.e. it never lost what the workers' copies of the constant cost.
 The ceiling is still one bind per statement; normalise it once per run (hand
 the scope's own frozenset down) so ``ceiling_param``'s cache serves every page.
+
+Two layers, and where they will live
+====================================
+
+This module is written as two layers so the binding half can move to the
+repository-wide id-binding home (``postgres/id_binding.py``, branch
+``claude/ceiling-sql-binding``, merging first) by mechanical replacement:
+
+* CEILING layer — stays here: ``normalise_ceiling``, ``EVIDENCE_ITEM_SOURCE``,
+  ``ATTRIBUTABLE_SOURCE``, ``evidence_items``, ``evidence_source_exists``,
+  ``evidence_support_sql`` and the identity cache inside ``ceiling_param``
+  (it is keyed by the run's ceiling object, a ceiling concern).
+* BINDING layer — delegates after that merge: the body of ``ceiling_param``
+  below the cache (joined text / ``%b`` fallback, i.e. the ``BoundCeiling``
+  it builds) becomes that module's id-list parameter builder, and
+  ``_run`` becomes its ``execute_ids`` (always ``prepare=False``).  The
+  statement-local ``_STATEMENT_SETTINGS`` stay here unless that module owns
+  an equivalent, in which case ``_apply_settings`` / ``_restore_settings``
+  are deleted and ``execute_with_ceiling`` becomes a thin alias.
+  ``BoundCeiling`` is only the pair (SQL expression, value); any builder that
+  returns such a pair drops in without touching ``evidence_support_sql`` or
+  the stores.
 """
 from __future__ import annotations
 
