@@ -111,13 +111,13 @@ import {
   fetchMyIdentities,
   LOCAL_AUTH_CAPABILITIES,
   logoutUser,
-  migrateToLegacyAccount,
   startIdentityBinding,
   updateUiMode,
   type AuthCapabilities,
   type AuthUser,
   type IdentityInfo,
 } from "./auth";
+import { useIdentityMigration } from "./use-identity-migration";
 import { autoModeAskPlaceholder, isAdvanced, normalizeUiMode, type UiMode } from "./ui-mode.ts";
 import {
   describeIndexingPipelineState,
@@ -144,7 +144,7 @@ import {
 import { KG_RANGE_DEFAULT, kgCanvasState } from "./kg-workspace-model.ts";
 import { refreshKgDeleteDependents } from "./kg-delete-dependents.ts";
 import { API_BASE } from "./api-config";
-import { clearToken, getToken, setToken } from "./auth-session";
+import { clearToken, getToken } from "./auth-session";
 import { copyTextSafely } from "./copy-text";
 import { useCopyResult } from "./copy-result";
 import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors.ts";
@@ -639,6 +639,7 @@ export default function Home() {
   const [authRestoreError, setAuthRestoreError] = useState("");
   const [authRestoreRetry, setAuthRestoreRetry] = useState(0);
   const [identityInfo, setIdentityInfo] = useState<IdentityInfo | null>(null);
+  const identityMigration = useIdentityMigration();
   const [health, setHealth] = useState<Health | null>(null);
   const [currentNotebookId, setCurrentNotebookId] = useState<string | null>(null);
   const [currentNotebook, setCurrentNotebook] = useState<NotebookSummary | null>(null);
@@ -4781,13 +4782,6 @@ export default function Home() {
     window.location.assign(authorizationUrl);
   }
 
-  // 迁移后会话属于另一个 user_id；整页重载，不让自动账号的界面状态混进旧账号。
-  async function handleMigrateIdentity(loginName: string, password: string) {
-    const result = await migrateToLegacyAccount(loginName, password);
-    setToken(result.token);
-    window.location.reload();
-  }
-
   function openModelPanel(serviceId: string | null = null) {
     if (!rootModals.open("model-service", rootModals.captureActorOwner())) return;
     setHighlightedModelServiceId(serviceId);
@@ -5117,7 +5111,8 @@ export default function Home() {
             onChangePassword={() => { rootModals.open("password-change", rootModals.captureActorOwner()); }}
             onStartIdentityBinding={handleStartIdentityBinding}
             canMigrateIdentity={Boolean(identityInfo?.migration_available)}
-            onMigrateIdentity={handleMigrateIdentity}
+            onMigrateIdentity={identityMigration.run}
+            migrationInFlight={identityMigration.inFlight}
             onLogout={() => handleLogout().catch(reportError)}
           />
         </div>
