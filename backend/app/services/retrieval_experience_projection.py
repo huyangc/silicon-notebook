@@ -90,7 +90,8 @@ from app.domain.retrieval_experience import (
 #: entry's primary key untouched, and only lets the new channel's
 #: invocation/zero-hit statistics (and the ``consult_memory`` advice built from
 #: them) cover it at all. Leaving it out would make the ONE first-class passage
-#: channel a no-graph run has a blind spot in the experience library — the same
+#: channel (the main one on a no-graph run) a blind spot in the experience
+#: library — the same
 #: hole ``search_elements`` still has, where a ``fallback`` step is dropped
 #: whole by the projection.
 RETRIEVAL_ACTIONS: tuple[str, ...] = (

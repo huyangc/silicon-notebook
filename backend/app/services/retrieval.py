@@ -1103,15 +1103,35 @@ def promote_bounded_prefix(
 def interleave_by_lane(
     ordered: Sequence["RetrievedChunk"],
     in_graph_lane: Callable[["RetrievedChunk"], bool],
+    *,
+    anchored: Optional[Callable[["RetrievedChunk"], bool]] = None,
 ) -> List["RetrievedChunk"]:
     """Stably split a relevance-sorted list into two lanes and alternate them.
 
-    ``ordered`` is already sorted by relevance descending. The chunks for which
-    ``in_graph_lane`` holds form one lane, every other chunk the other; each lane
-    keeps its input order. The result takes one chunk from each lane in turn,
-    starting with the lane that holds ``ordered[0]``; once a lane runs out, the
-    rest of the other lane follows as one block. If either lane is empty the
-    result is a same-order copy -- byte-for-byte neutral downstream.
+    ``ordered`` is already sorted by relevance descending. Chunks for which
+    ``anchored`` holds are set aside first (see below). Of the rest, the chunks
+    for which ``in_graph_lane`` holds form one lane, every other chunk the other;
+    each lane keeps its input order. The result takes one chunk from each lane in
+    turn, starting with the lane that holds the first non-anchored chunk; once a
+    lane runs out, the rest of the other lane follows as one block. If either
+    lane is empty the result is a same-order copy of ``ordered`` -- anchored
+    chunks included, byte-for-byte neutral downstream. That is what keeps a run
+    with no PPR passage (every no-graph run) and a graph run with no retrieved
+    passage (the passage-search switch off) exactly on the pre-interleave order.
+
+    Anchored chunks (reasoning passes the exact-lookup passages) do not take
+    part in the alternation. Each goes back in front of the first interleaved
+    chunk whose relevance is STRICTLY lower than its own; the anchored block is
+    already descending, so insertion points never move backwards, and a tie
+    keeps the interleaved chunk first -- as the stable sort did, where a 1.0
+    PPR passage fetched earlier sat ahead of a 1.0 exact passage fetched later.
+    Why: the exact prefix seat (``promote_bounded_prefix_by_library``) only
+    protects the first ``reserve`` passages of a named section; the rest of the
+    section (a 10-chunk command page against a reserve of 4) has always stayed
+    whole because relevance 1.0 sorts it to the front. Alternating those
+    passages with the PPR lane would scatter them past the tail of the PPR lane,
+    and an overview budget would then cut the Arguments table the channel
+    exists to deliver.
 
     Why: a reasoning run's passage partition mixes two relevance scales that
     cannot be compared. Concept-walk (PPR) passages carry a PER-RUN min-max
@@ -1135,19 +1155,68 @@ def interleave_by_lane(
     ranking them on one incomparable score.
     """
     items = list(ordered)
-    graph = [chunk for chunk in items if in_graph_lane(chunk)]
-    if not graph or len(graph) == len(items):
+    held = [chunk for chunk in items if anchored is not None and anchored(chunk)]
+    held_ids = {id(chunk) for chunk in held}
+    free = [chunk for chunk in items if id(chunk) not in held_ids]
+    graph = [chunk for chunk in free if in_graph_lane(chunk)]
+    if not graph or len(graph) == len(free):
         return items
     graph_ids = {id(chunk) for chunk in graph}
-    other = [chunk for chunk in items if id(chunk) not in graph_ids]
-    first, second = (graph, other) if id(items[0]) in graph_ids else (other, graph)
-    result: List["RetrievedChunk"] = []
+    other = [chunk for chunk in free if id(chunk) not in graph_ids]
+    first, second = (graph, other) if id(free[0]) in graph_ids else (other, graph)
+    mixed: List["RetrievedChunk"] = []
     for index in range(max(len(first), len(second))):
         if index < len(first):
-            result.append(first[index])
+            mixed.append(first[index])
         if index < len(second):
-            result.append(second[index])
-    return result
+            mixed.append(second[index])
+    result: List["RetrievedChunk"] = []
+    position = 0
+    for chunk in held:
+        own = getattr(chunk, "relevance", 0.0)
+        while position < len(mixed) and not (
+            getattr(mixed[position], "relevance", 0.0) < own
+        ):
+            result.append(mixed[position])
+            position += 1
+        result.append(chunk)
+    return result + mixed[position:]
+
+
+def is_exact_lookup_chunk(chunk: "RetrievedChunk") -> bool:
+    """Whether a passage came through the exact-identifier channel."""
+    return bool(getattr(chunk, "exact_lookup", False))
+
+
+def order_reasoning_passages(
+    chunks: Sequence["RetrievedChunk"], *, exact_reserve: int,
+) -> List["RetrievedChunk"]:
+    """The order a reasoning passage partition is rendered in, against a
+    character budget. One definition for both consumers: Ask synthesis
+    (``AskService._answer_reasoning``) and deep-report section drafting
+    (``ReportEngine._draft_section``, for the passages no outline item bound).
+
+    Three steps, and the order carries weight:
+
+    1. relevance descending, stable -- ties keep insertion order (retrieval
+       order / document order inside an exact section) instead of a random
+       128-bit chunk id deciding who makes the budget;
+    2. ``interleave_by_lane`` -- concept-walk passages (per-run normalized
+       relevance, ``relevance_on_ppr_scale``) alternate with retrieved passages
+       (absolute fused relevance), exact passages anchored at their relevance
+       position;
+    3. ``promote_bounded_prefix_by_library`` -- the first ``exact_reserve``
+       exact passages move to the very front (seats split per library in a
+       peer run). Last, so exact passages keep the highest priority; running
+       the interleave after it would scatter the promoted block again.
+
+    A reordering only: nothing is dropped, ``relevance`` is never rewritten.
+    """
+    ordered = sorted(chunks, key=lambda chunk: -chunk.relevance)
+    ordered = interleave_by_lane(
+        ordered, relevance_on_ppr_scale, anchored=is_exact_lookup_chunk)
+    return promote_bounded_prefix_by_library(
+        ordered, is_exact_lookup_chunk, exact_reserve)
 
 
 def relevance_on_ppr_scale(chunk: "RetrievedChunk") -> bool:

@@ -1011,8 +1011,8 @@ class Settings(BaseSettings):
         3, ge=0, validation_alias="REASONING_MAX_FOLLOW_CHAIN_ACTIONS"
     )
     # reflect 动作 search_chunks(按语义+关键词检索来源原文段落)的每 run 次数
-    # 上限。默认与 PPR/精确查找一致;首轮的无图原文播种是确定性兜底、不是 agent
-    # 动作,与 PPR/精确 seed 同口径**不**计入这个上限。
+    # 上限。默认与 PPR/精确查找一致;首轮原文播种(不看知识图谱)是确定性召回、
+    # 不是 agent 动作,与 PPR/精确 seed 同口径**不**计入这个上限。
     reasoning_max_chunk_searches: int = Field(
         3, ge=0, validation_alias="REASONING_MAX_CHUNK_SEARCHES"
     )
@@ -1096,10 +1096,14 @@ class Settings(BaseSettings):
     # 每次调用的成本由档位表的 enum_* 预算(每 run 行数/额外翻页)封死,不是这里。
     reasoning_enum_tools_enabled: bool = Field(
         True, validation_alias="REASONING_ENUM_TOOLS_ENABLED")
-    # 逐步推理的原文段落检索动作(reflect 动作 search_chunks)与无图首轮原文播种的
-    # 总开关。与上面那把枚举闸同一「off 就是旧行为」契约:关掉即完全回到接入前
-    # ——动作不进 schema/prompt/白名单、首轮不播种、`REASONING_MAX_CHUNK_SEARCHES`
-    # 无消费者,零额外检索。
+    # 逐步推理的原文段落检索动作(reflect 动作 search_chunks)、首轮原文播种与
+    # 补种 / add_subquery 原文半的总开关(不看知识图谱,有图与无图 run 同闸)。与
+    # 上面那把枚举闸同一「off 就是旧行为」契约:关掉即完全回到接入前——动作不进
+    # schema/prompt/白名单、首轮不播种、不叠原文补检索、`REASONING_MAX_CHUNK_SEARCHES`
+    # 无消费者,零额外检索;没有检索段时合成装配的交错也不起作用,问答合成的
+    # 顺序回到「相关度排序 + 精确前缀席位」。例外:深度报告撰写的未绑定段从
+    # 插入序改成了同一套排序(`ReportEngine._section_passage_order`),这一点
+    # 不随本开关回退。
     #
     # ⚠ 关闭态**不是**零额外查询:`kg_in_scope`(本库或勾选的参考库有没有图)这对
     # EXISTS 照付一次。它不归这把闸管——`ask_service` 的 `no_usable_kg` 早退本来

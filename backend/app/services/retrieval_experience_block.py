@@ -197,9 +197,9 @@ ADOPTION_ACTIONS: dict[str, str] = {
     "enumerate_kg_objects": "enumerate",
     "update_outline": "outline",
     # Unlike the initial retrieval and the PPR/exact-lookup seed passes, the
-    # no-graph first-round passage seed emits its OWN ``phase="seed"`` step and
-    # this table is only consulted for what reflect actually CHOSE, so counting
-    # it as adoption stays honest.
+    # first-round passage seed (graph or not, since 2026-09-29) emits its OWN
+    # ``phase="seed"`` step and this table is only consulted for what reflect
+    # actually CHOSE, so counting it as adoption stays honest.
     "search_chunks": "search_chunks",
     # PR-A: ``read_document`` has no deterministic seed pass of its own -- every
     # occurrence is the model reaching for it -- so it maps straight through.

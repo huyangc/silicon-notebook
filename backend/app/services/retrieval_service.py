@@ -251,6 +251,20 @@ class RetrievalService:
     def chunk_plan(self, notebook_id, queries):
         return self.candidates._build_chunk_retrieval_plan(notebook_id, queries)
 
+    def chunk_participant_count(self, notebook_id):
+        """How many libraries one passage search fans out over (>= 1).
+
+        Same seat, library filter and ``CHUNK_FEDERATION_MAX_PARTICIPANTS``
+        bound as the fan-out itself (``federation_participant_ids``, the silent
+        form -- no truncation event). One un-memoized participant read.
+        Deliberately NOT on ``RetrievalPort``: the reasoning seed pass is its
+        only consumer and reads it with ``getattr``, so a retrieval double
+        without it simply counts as one library.
+        """
+        from app.services.chunk_federation import federation_participant_ids
+
+        return max(1, len(federation_participant_ids(self.candidates, notebook_id)))
+
     def keyword_chunk_candidates(self, notebook_id, keywords):
         return filter_retrieval_items(
             notebook_id, "chunk",
@@ -432,7 +446,9 @@ class RetrievalService:
         ``reasoning_retrieval.kg_in_scope_for`` short-circuits on ``has_kg``
         first). That helper is now the SINGLE evaluation point -- both
         consumers of this fact (``ask_service``'s ``no_usable_kg`` early exit
-        and ``ReasoningRetriever``'s no-graph seeding) read it through the same
+        and ``ReasoningRetriever``'s graph gates -- the no-graph disclosure,
+        the planner's KG type vocabulary, the five graph actions; since
+        2026-09-29 the passage seed no longer reads it) read it through the same
         request-level memo, so the pair is computed at most once per request
         rather than once per call site.
 

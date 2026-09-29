@@ -2171,6 +2171,33 @@ class ReportEngine:
                 "unresolved_source_ids": list(claim_source_ids),
             }
 
+    def _section_passage_order(self, chunks: list, bound_keys) -> list:
+        """本节来源分区里原文段的装配顺序:大纲绑定段在最前,其余按问答同一套顺序。
+
+        绑定段排最前(codex PR#418 R4):`chunk_context` 按输入序渲染、预算用尽即
+        停,绑定是模型自己的判断,不能让它们被别的段挤出预算;绑定段之间保持
+        插入序。
+
+        未绑定段走 `retrieval.order_reasoning_passages`(与
+        `AskService._answer_reasoning` 同一个函数):相关度降序 → 概念漫游段与
+        检索段两道交错(精确段锚定)→ 前 `reasoning_exact_reserve` 个精确段提前。
+        此前这里按 `result.chunks` 的**插入序**装配——那不是一个有理由的选择,
+        只是最初实现把 run 的证据池原样交给渲染器(当时有图 run 的池子基本只有
+        概念漫游段,本身已按分数降序)。首轮原文播种与知识图谱脱钩之后,插入序
+        意味着首轮播种段(standard 档至多约 48 段)整批排在反思阶段模型定向检索
+        拿到的段(`exact_lookup` / `search_chunks` / `add_subquery`)之前,把后者
+        整体挤出预算;概念漫游段与播种段的量纲不可比这件事在这里同样成立。
+        影响:未绑定段的相对顺序变了,入选集合随之变化;绑定段、预算与元素预留
+        都不变。
+        """
+        from app.services.retrieval import order_reasoning_passages
+        bound = [chunk for chunk in chunks
+                 if str(getattr(chunk, "chunk_id", "") or "") in bound_keys]
+        unbound = [chunk for chunk in chunks
+                   if str(getattr(chunk, "chunk_id", "") or "") not in bound_keys]
+        return bound + order_reasoning_passages(
+            unbound, exact_reserve=self.settings.reasoning_exact_reserve)
+
     def _draft_section(self, notebook_id: str, section: dict, question: str, result,
                        depth=None, *, report_frame: Optional[dict] = None,
                        synthesis: Optional[dict] = None,
@@ -2213,14 +2240,7 @@ class ReportEngine:
             element for element in elements
             if str(getattr(element, "element_id", "") or "") in bound_keys
         ]
-        if bound_keys:
-            chunks = [
-                chunk for chunk in chunks
-                if str(getattr(chunk, "chunk_id", "") or "") in bound_keys
-            ] + [
-                chunk for chunk in chunks
-                if str(getattr(chunk, "chunk_id", "") or "") not in bound_keys
-            ]
+        chunks = self._section_passage_order(chunks, bound_keys)
         element_reserve = min(
             chunk_budget // _OUTLINE_KG_BUDGET_DIVISOR,
             # 每条 ≈ 正文 + 前缀(`k4001: [source-element][tier] 标题 · 位置 — `)。

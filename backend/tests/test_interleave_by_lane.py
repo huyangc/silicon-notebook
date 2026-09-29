@@ -5,8 +5,11 @@ whose `relevance` values live on different scales: concept-walk (PPR) passages
 carry a per-run min-max normalized score (the top one is always 1.0), seeded /
 searched passages an absolute fused score. `_answer_reasoning` therefore sorts by
 relevance and then alternates the two lanes (`interleave_by_lane`), so neither
-lane can evict the other wholesale under the character budget. The exact-lookup
-prefix seat is applied AFTER the interleave and stays in front.
+lane can evict the other wholesale under the character budget. Exact-lookup
+passages are anchored at their relevance position (they do not alternate), and
+the exact prefix seat is applied AFTER the interleave and stays in front. The
+whole order lives in `retrieval.order_reasoning_passages`, shared with deep-report
+section drafting.
 """
 from __future__ import annotations
 
@@ -15,7 +18,9 @@ import pytest
 from app.domain.retrieval import RetrievalSupport, RetrievedChunk
 from app.services.retrieval import (
     interleave_by_lane,
+    is_exact_lookup_chunk,
     prefer_stronger_chunk_candidate,
+    promote_bounded_prefix_by_library,
     relevance_on_ppr_scale,
 )
 from tests.test_exact_lookup import repo  # noqa: F401  (repo fixture)
@@ -166,22 +171,91 @@ def test_exact_passages_still_take_the_front_seats_after_the_interleave(
     assert _object_ids(baseline["id_map"]) == {"exact1", "exact2", "ppr1", "seed1"}
 
 
+def _pre_interleave_order(chunks, reserve):
+    """The assembly order before this change, rebuilt locally as the control:
+    stable relevance sort, then the exact prefix seat. Nothing else."""
+    ordered = sorted(chunks, key=lambda chunk: -chunk.relevance)
+    return _ids(promote_bounded_prefix_by_library(
+        ordered, is_exact_lookup_chunk, reserve))
+
+
 @pytest.mark.parametrize("ppr", [False, True])
-def test_a_single_lane_partition_assembles_exactly_as_without_the_interleave(
+def test_a_single_lane_partition_assembles_exactly_as_before_the_interleave(
     repo, monkeypatch, ppr
 ):
-    """No-graph runs (no PPR passage) and PPR-only partitions: the block is
-    byte-for-byte the pre-interleave assembly."""
-    def _chunks():
-        return [_passage(f"c{i}", 1.0 - i / 10, ppr=ppr) for i in range(6)]
-
+    """No-graph runs (no PPR passage) and PPR-only partitions: the order handed
+    to the renderer is item-for-item the pre-interleave order."""
+    chunks = [_passage(f"c{i}", 1.0 - i / 10, ppr=ppr) for i in range(6)]
     captured, _baseline = _assemble(
-        repo, monkeypatch, chunks=_chunks(), chunk_context_chars=_FOUR_LINES)
-    with monkeypatch.context() as patch:
-        patch.setattr("app.services.ask_service.interleave_by_lane",
-                      lambda ordered, _pred: list(ordered))
-        before, _ = _assemble(
-            repo, patch, chunks=_chunks(), chunk_context_chars=_FOUR_LINES)
+        repo, monkeypatch, chunks=list(chunks), chunk_context_chars=_FOUR_LINES)
 
-    assert captured["block"] == before["block"]
-    assert captured["chunks"] == before["chunks"]
+    assert captured["chunks"] == _pre_interleave_order(
+        chunks, repo.settings.reasoning_exact_reserve)
+
+
+# --------------------------------------- exact passages beyond the prefix seat
+def _named_section_with_ppr(seeded):
+    """A graph run that named an identifier: a 10-chunk exact section (all 1.0,
+    fetched after the PPR seed), 20 PPR passages, and ``seeded`` retrieved ones."""
+    ppr = [_passage(f"p{i:02d}", round(1.0 - i * 0.03, 2), ppr=True)
+           for i in range(20)]
+    exact = [_passage(f"e{i:02d}", 1.0, ppr=False, exact=True) for i in range(10)]
+    seeds = [_passage(f"s{i:02d}", round(0.5 - i * 0.05, 2), ppr=False)
+             for i in range(seeded)]
+    return ppr[:1] + exact + ppr[1:] + seeds
+
+
+def test_a_whole_exact_section_beyond_the_seat_stays_in_front(repo, monkeypatch):
+    """Reserve 4 < section of 10: the six unseated exact passages are anchored at
+    relevance 1.0, so all ten sit in the first eleven positions (the top PPR
+    passage ties at 1.0 and was fetched first). Seeded passages still alternate
+    with the PPR lane after them."""
+    captured, _baseline = _assemble(
+        repo, monkeypatch, chunks=_named_section_with_ppr(3),
+        chunk_context_chars=_FOUR_LINES)
+
+    assert repo.settings.reasoning_exact_reserve == 4
+    order = captured["chunks"]
+    assert {f"e{i:02d}" for i in range(10)} <= set(order[:11])
+    assert order[:5] == ["e00", "e01", "e02", "e03", "p00"]
+    assert order[11:17] == ["s00", "p01", "s01", "p02", "s02", "p03"]
+
+
+def test_switch_off_graph_run_keeps_the_pre_interleave_order(repo, monkeypatch):
+    """Passage-search switch off on a graph run: no retrieved passage, exact
+    section larger than the seat, PPR present. The order is item-for-item the
+    pre-interleave order (sort + exact seat) -- the switch still restores the
+    old assembly."""
+    chunks = _named_section_with_ppr(0)
+    captured, _baseline = _assemble(
+        repo, monkeypatch, chunks=list(chunks), chunk_context_chars=_FOUR_LINES)
+
+    assert captured["chunks"] == _pre_interleave_order(
+        chunks, repo.settings.reasoning_exact_reserve)
+
+
+def test_an_anchored_chunk_goes_back_before_the_first_strictly_lower_one():
+    """A tie keeps the interleaved chunk first (strictly lower, not lower-or-
+    equal): the 1.0 PPR passage fetched earlier stays ahead of the 1.0 exact
+    passage, as the stable sort had it. A lower-relevance anchored chunk lands
+    in front of the first interleaved chunk below it, even mid-lane."""
+    ordered = [
+        _passage("p1", 1.0, ppr=True), _passage("e1", 1.0, ppr=False, exact=True),
+        _passage("p2", 0.9, ppr=True), _passage("s1", 0.5, ppr=False),
+        _passage("e2", 0.45, ppr=False, exact=True), _passage("s2", 0.4, ppr=False),
+        _passage("p3", 0.3, ppr=True),
+    ]
+    result = interleave_by_lane(
+        ordered, relevance_on_ppr_scale, anchored=is_exact_lookup_chunk)
+    # interleaved: p1 s1 p2 s2 p3; e1 goes before s1 (first < 1.0), e2 before s2.
+    assert _ids(result) == ["p1", "e1", "s1", "p2", "e2", "s2", "p3"]
+
+
+def test_anchored_chunks_do_not_count_as_a_lane():
+    """Only exact passages besides the PPR lane: the retrieval lane is empty, so
+    the result is a same-order copy -- exact passages keep their sorted spot."""
+    ordered = [_passage("p1", 1.0, ppr=True), _passage("e1", 1.0, ppr=False, exact=True),
+               _passage("p2", 0.9, ppr=True)]
+    result = interleave_by_lane(
+        ordered, relevance_on_ppr_scale, anchored=is_exact_lookup_chunk)
+    assert result == ordered and result is not ordered

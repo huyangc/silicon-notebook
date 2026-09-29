@@ -2102,8 +2102,10 @@ def complete_row(
         # JSON-envelope query, so turn it off explicitly for the same
         # defense-in-depth reason as its neighbors above.
         reasoning_retriever.allow_consult_memory = False
-        # Raw-passage retrieval (the `search_chunks` action AND the no-graph
-        # first-round seed) is off here for three independent reasons, any one
+        # Raw-passage retrieval (the `search_chunks` action, the first-round
+        # passage seed and the coverage / add_subquery passage backfill -- none
+        # of which looks at the knowledge graph) is off here for three
+        # independent reasons, any one
         # of which is enough:
         #   1. The retrieval string is the same JSON envelope that already
         #      disqualified exact lookup above (table_title/known_cells/

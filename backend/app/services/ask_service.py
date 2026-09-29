@@ -131,12 +131,10 @@ from app.services.retrieval import (
     RetrievedKnowledge,
     classify_evidence,
     exact_query_groups,
-    interleave_by_lane,
     is_generated_question_only_chunk,
     merge_retrieval_supports,
+    order_reasoning_passages,
     prefer_stronger_chunk_candidate,
-    promote_bounded_prefix_by_library,
-    relevance_on_ppr_scale,
 )
 from app.services.search_profile import render_style_block
 from app.services.source_graph_activation import (
@@ -2923,44 +2921,32 @@ class AskService:
                 budget_chars=chunk_budget, admission_sink=baseline_admission,
             )
         if chunks:
-            # 按相关度降序(_chunk_answer_context 自带 char 预算,保留最相关;跨 PPR run
-            # 的归一分仅大致可比,只影响预算边缘取舍,不破坏 [0,1]);chunk 段 k1..N + KG 段
-            # k1001+,合并 id_map,两段都可 [k] 引用。无需 _answer_mix 的 base-1 截断:chunk
-            # 数 ≤ ppr_top_chunks×(1 seed + _MAX_PPR_RETRIEVES) + 精确查找通道贡献(每次
-            # 调用至多 max_sections×max_chunks_per_section=3×12=36,run 内至多 1 seed +
-            # _MAX_EXACT_LOOKUPS=3 次调用 → ≤144)≪ _MIX_KG_KEY_BASE(1000)。
-            # 同分不再按 chunk_id 打破平手:chunk id 是随机 128 位代理键,而精确
-            # 通道整节取齐后那一节的每一块都是 1.0 同分——按 id 排等于在同分组内
-            # 随机洗牌,而 `_chunk_answer_context` 的字符预算恰好切在这个组里,
-            # 于是「参数表进不进 prompt」成了掷骰子。Python 的稳定排序保留插入序
-            # (= 检索序 / 节内文档序),这既是确定的,也正好是该节该被读的顺序。
-            ordered = sorted(chunks, key=lambda c: -c.relevance)
-            # 再按来源两道交错(见 `interleave_by_lane`):概念漫游段的 relevance 是
-            # run 内 min-max 归一(第 1 名恒 1.0),播种/检索段是绝对融合分,两者不
-            # 可比,单键排序会让前者系统性挤掉后者。每道内部仍按自己的相关度,
-            # relevance 数值不动(它还参与接地阈值)。判道按 relevance 的量纲
-            # (`relevance_on_ppr_scale`),不按「PPR 碰过没有」。
-            # 顺序承重:交错在前、精确席位在后——精确段优先级最高,最后一步提前
-            # 才保证它们仍在最前;反过来,交错会把刚提前的精确段重新拆散到两道里。
-            ordered = interleave_by_lane(ordered, relevance_on_ppr_scale)
-            # 精确通道的块再往前提一小段(见 `promote_bounded_prefix_by_library`,跨库按库分席位)。相关度
-            # 降序**不足以**保住它们,两条具体风险:①同分 1.0 洗牌——PPR / 词法
-            # 通道也会给出 relevance 1.0 的块,稳定排序下它们按插入序排在精确块
-            # **之前**,于是一次 PPR 丰收就能把整节命令表挤到预算之外;②切点落在
-            # 精确小节中间——主描述进了 prompt,`Arguments` 参数表没进,而「参数
-            # 表也要在」正是这条通道存在的理由。前缀席位把这两件事一起解掉。
-            # 残余是刻意的:一节 12 块时只有前 reserve 块拿到席位,其余照常按相关
-            # 度竞争——与 chunk 模式 `exact_section_reserve` 的 4/12 同义。席位
-            # 救不了的第三种形态:structured_block / collection_map_block 先于
-            # 原文段消费同一份预算,整表够大时原文段拿到 0 字符——已登记
-            # fangan_todo「结构化块挤空 reasoning 原文段」,本处不夹下限。
-            # 按节合成注入的未绑定精确块**不**走这里:它们不在 `chunks` 里,而是
-            # 经 `trailing_chunks` 单独成段装在本节全部绑定证据之后。
-            ordered = promote_bounded_prefix_by_library(
-                ordered,
-                lambda chunk: getattr(chunk, "exact_lookup", False),
-                self.settings.reasoning_exact_reserve,
-            )
+            # 装配顺序单点在 `retrieval.order_reasoning_passages`(深度报告撰写的未绑定
+            # 段走同一个函数):相关度降序(稳定,同分保留插入序 = 检索序 / 节内文档
+            # 序,不按随机 chunk_id 洗牌)→ 按来源两道交错(概念漫游段是 run 内
+            # min-max 归一分、播种/检索段是绝对融合分,不可比;精确段锚定在自己的
+            # 相关度位置不参与交错)→ 前 reserve 个精确段提前(优先级最高,放最后
+            # 才保证它们仍在最前)。relevance 数值不改写,它还参与接地阈值。
+            # 精确前缀席位救的两条风险:①同分 1.0——PPR / 词法通道也会给出 1.0 的
+            # 块,稳定排序下按插入序排在精确块之前,一次 PPR 丰收就能把整节命令表挤
+            # 出预算;②切点落在精确小节中间,主描述进了 prompt、`Arguments` 参数表
+            # 没进。残余是刻意的:一节 12 块时只有前 reserve 块拿到席位,其余靠
+            # 1.0 相关度自然靠前(交错锚定精确段正是为了不破坏这一点)——与 chunk
+            # 模式 `exact_section_reserve` 的 4/12 同义。席位救不了的第三种形态:
+            # structured_block / collection_map_block 先于原文段消费同一份预算,
+            # 整表够大时原文段拿到 0 字符——已登记 fangan_todo「结构化块挤空
+            # reasoning 原文段」,本处不夹下限。按节合成注入的未绑定精确块**不**走
+            # 这里:它们不在 `chunks` 里,而是经 `trailing_chunks` 单独成段装在本节
+            # 全部绑定证据之后。
+            # 号段:chunk 段 k1..N、KG 段 k1001+,合并 id_map,两段都可 [k] 引用。
+            # 只有**渲染进预算**的段才拿到号,所以撞号的界是「字符预算能装下几行」
+            # 而不是证据池大小:池子本身是 PPR ≤ ppr_top_chunks×(1 seed + 3 次动作)、
+            # 精确 ≤144、首轮播种 ≤ 首轮子查询数×每查询纳入数 + 词法臂一份、补种与
+            # add_subquery 每步至多一份 chunk_mmr_k、search_chunks ≤3 次——最深档
+            # 可以上千,但 120k 字符的最大分区按本地语料 p10 段长(约 210 字)也只
+            # 装得下约 550 行,< 1000。只有大量极短段的库才可能逼近(已登记)。
+            ordered = order_reasoning_passages(
+                chunks, exact_reserve=self.settings.reasoning_exact_reserve)
             chunk_block, chunk_id_map = self._chunk_answer_context(
                 ordered, notebook_id=notebook_id, id_offset=key_offset,
                 budget_chars=max(0, chunk_budget - len(source_context)))

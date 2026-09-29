@@ -220,7 +220,8 @@ class CollectionMap:
     # model choosing between them needs both numbers, not one.  And it exists
     # in the first place because ``AskService._no_kg_scope_admits_run`` had to
     # judge a channel whose reach was narrower than the map's: source-passage
-    # retrieval (``search_chunks`` / the no-graph first-round seed) rides chunk
+    # retrieval (``search_chunks`` / the first-round passage seed, which since
+    # 2026-09-29 runs whether or not the scope has a graph) rides chunk
     # mode's own primitives, and those used to be active-notebook-local.  They
     # are federated now (``chunk_federation``), so that gate reads ``sources``
     # whenever ``CHUNK_FEDERATION_ENABLED`` is on and falls back to this number
