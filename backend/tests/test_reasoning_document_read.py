@@ -1118,7 +1118,7 @@ def _run_reads(repo, notebook, reads, effort="overview"):
 def _depth_rejected_sentence(*values):
     shown = "、".join(f"「{v}」" for v in values)
     return (f"read_document.depth 只接受 brief 或 thorough,{shown}"
-            "不是可选值,那几次已按 brief 读取。")
+            "不是可选值,那几次已按 brief 份额处理。")
 
 
 @pytest.mark.parametrize("effort, depth, elements, chars", [
@@ -1184,8 +1184,10 @@ def test_a_thorough_read_after_a_brief_one_gets_what_is_left_minus_the_reserve(
 def test_after_a_thorough_read_the_next_read_is_a_budget_skip(
     repo, monkeypatch,  # noqa: F811
 ):
-    """thorough 的代价:它把剩余预算用完之后,下一次读取走既有的
-    `document_read_budget` skip(零 I/O),而不是再读出一份空壳。"""
+    """thorough 的代价:它把剩余预算用完之后,还剩几次可读时接一次 brief,均分
+    出来的份额已经 <= 0,走既有的 `document_read_budget` skip(零 I/O)。
+
+    份额只剩零头(0 < 份额 < 一个元素的计费行)的那两种接法见下面两条用例。"""
     notebook = _long_documents(repo, "长文档甲", "长文档乙")
     calls = _spy_overview_calls(monkeypatch)
     result, _llm = _run_reads(repo, notebook, [
@@ -1197,6 +1199,53 @@ def test_after_a_thorough_read_the_next_read_is_a_budget_skip(
     assert [o.source_title for o in result.document_reads] == ["长文档甲"]
     skip = _skips(result)["document_read_budget"]
     assert "预算已经用完" in skip.summary
+
+
+def _assert_second_read_is_a_budget_skip(result, calls):
+    """第二篇零 I/O、不进账目,且**没有**被记成读过:紧接着再请求它一次,拿到的
+    仍是 budget skip 而不是 `document_read_repeat`(它没进 `document_reads_by_id`)。"""
+    assert len(calls) == 1
+    assert [o.source_title for o in result.document_reads] == ["长文档甲"]
+    reasons = [s.detail.get("reason") for s in _steps(result, "skip")
+               if str(s.detail.get("reason", "")).startswith("document_read")]
+    assert reasons == ["document_read_budget", "document_read_budget"]
+    assert len(_steps(result, "read_document")) == 1
+
+
+def test_a_thorough_read_after_a_thorough_one_is_a_budget_skip_not_a_husk(
+    repo, monkeypatch,  # noqa: F811
+):
+    """codex/质量评审 P1:thorough 接 thorough,第二篇的份额 = 剩余量 − 包头预留,
+    只剩零头(实测 1 字)。按 `<= 0` 判会发起一次 1 字、1 个元素的读取:白发 I/O、
+    占掉一次上限、这一篇进 `document_reads_by_id` 本 run 再也读不了,账目还会让
+    模型把一篇有正文的文档说成「暂无依据」。与总闸同口径的下界把它拦成 skip。"""
+    notebook = _long_documents(repo, "长文档甲", "长文档乙")
+    calls = _spy_overview_calls(monkeypatch)
+    result, _llm = _run_reads(repo, notebook, [
+        _read_action("长文档甲", depth="thorough"),
+        _read_action("长文档乙", depth="thorough"),
+        _read_action("长文档乙"),
+    ])
+
+    _assert_second_read_is_a_budget_skip(result, calls)
+
+
+def test_a_brief_last_read_after_a_thorough_one_is_a_budget_skip_not_a_husk(
+    repo, monkeypatch,  # noqa: F811
+):
+    """只剩最后一次时 thorough 之后接 brief:均分的除数是 1,份额同样只剩零头,
+    同样必须是零 I/O 的 budget skip。"""
+    notebook = _long_documents(repo, "长文档甲", "长文档乙")
+    # 上限 2:thorough 用掉一次之后,brief 的除数(剩余可读次数)恰好是 1。
+    repo.settings.reasoning_max_document_reads = 2
+    calls = _spy_overview_calls(monkeypatch)
+    result, _llm = _run_reads(repo, notebook, [
+        _read_action("长文档甲", depth="thorough"),
+        _read_action("长文档乙"),
+        _read_action("长文档乙"),
+    ])
+
+    _assert_second_read_is_a_budget_skip(result, calls)
 
 
 @pytest.mark.parametrize("extra", [
@@ -1227,9 +1276,18 @@ def test_brief_and_an_absent_depth_read_exactly_as_before(
     assert "只接受 brief 或 thorough" not in llm.reflect_prompts[2]
 
 
-@pytest.mark.parametrize("depth", ["deep", "全文", True, 7])
+@pytest.mark.parametrize("depth, shown", [
+    ("deep", "deep"),
+    ("全文", "全文"),
+    # 非字符串按 JSON 回显成模型写过的样子,不是 Python repr(`True`)。
+    (True, "true"),
+    (7, "7"),
+    (["thorough"], '["thorough"]'),
+    # 内部空白(换行、连续空白)折叠成单个空格,账目那一句不会被拆成几行。
+    ("very\n  deep\tplease", "very deep please"),
+])
 def test_an_illegal_depth_reads_as_brief_and_the_ledger_says_so(
-    repo, monkeypatch, depth,  # noqa: F811
+    repo, monkeypatch, depth, shown,  # noqa: F811
 ):
     """非法值:校验层只记注记不拒收,解析器按 brief 读,账目在「已读」之后单列一句
     教学文案——模型按「以为自己花了多少预算」规划后续读取,不告诉它那一次其实
@@ -1243,11 +1301,11 @@ def test_an_illegal_depth_reads_as_brief_and_the_ledger_says_so(
     step = next(s for s in _steps(result, "read_document"))
     assert "depth" not in step.detail
     outcome = result.document_reads[0]
-    assert (outcome.depth, outcome.depth_rejected) == ("brief", str(depth))
+    assert (outcome.depth, outcome.depth_rejected) == ("brief", shown)
     ledger = rr_module.legacy_action_ledger_note(
         [], {}, {}, 8, {}, [], result.document_reads)
     assert ledger == ("\n\n（已按篇读取过原文的文档,勿重复请求: 《长文档》。"
-                      + _depth_rejected_sentence(depth) + "）")
+                      + _depth_rejected_sentence(shown) + "）")
     assert ledger in llm.reflect_prompts[2]
 
 
@@ -1274,7 +1332,11 @@ def test_case_and_whitespace_variants_of_thorough_read_as_thorough(
     ("x" * 100, "brief", "x" * 60),       # 非法原值截 60 字
     ("  deep  ", "brief", "deep"),        # 先 strip 再留原值
     (" Thorough", "thorough", ""),
-    (["thorough"], "brief", "['thorough']"),
+    (["thorough"], "brief", '["thorough"]'),
+    (False, "brief", "false"),
+    ({"level": "deep"}, "brief", '{"level": "deep"}'),
+    ("a\n\nb", "brief", "a b"),
+    ("   ", "brief", ""),                  # 纯空白 == 留空,不教学
 ])
 def test_the_parser_normalises_depth_and_truncates_the_rejected_value(
     repo, depth, depth_value, rejected,  # noqa: F811
