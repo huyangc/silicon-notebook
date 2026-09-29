@@ -322,10 +322,12 @@ def _regressed_shapes() -> dict[str, dict[str, str]]:
             pg_mount_sql.MOUNT_VIEWER_JOIN,
             " AND (" + valid + " AND " + mounter_arm + ")",
         ),
-        # 拿公开布尔列 `MOUNT_EFFECTIVE_FOR_VIEWER_EXPR`(COALESCE 版)当正向过滤条件。
+        # 拿 COALESCE 包住的整个谓词(即公开布尔列 `MOUNT_EFFECTIVE_FOR_VIEWER_EXPR`
+        # 的写法)当正向过滤条件。就地拼出,不引用那个常量:正对照必须是固定的坏写法,
+        # 不能随被测常量一起变。
         "coalesce_filter": _shapes(
             pg_mount_sql.MOUNT_VIEWER_JOIN,
-            " AND " + pg_mount_sql.MOUNT_EFFECTIVE_FOR_VIEWER_EXPR,
+            " AND COALESCE(" + pg_mount_sql._MOUNT_EFFECTIVE_FOR_VIEWER_PRED + ", FALSE)",
         ),
     }
 
