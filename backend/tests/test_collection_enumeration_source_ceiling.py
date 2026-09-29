@@ -478,6 +478,27 @@ def test_an_out_of_ceiling_upload_mid_walk_is_not_a_concurrent_change(
     assert "sLate" not in {item.source_id for item in result.items}
 
 
+def test_without_a_binding_ceiling_an_upload_mid_walk_is_a_concurrent_change(
+    repo, monkeypatch,
+):
+    """天花板不生效(全选、首次读集合时未漂移,``ceiling_binds=False``)时,指纹与
+    引入天花板之前一样哈希全部信号行:清单进行中上传一份来源,这条清单报
+    ``concurrent_change``(之后新开的清单会列出它)。"""
+    nb = _library(repo)
+    _hook_first_page(
+        monkeypatch, repo._runtime.source_store, "element_page_rows",
+        lambda: _src(repo, nb, "sLate", formulas=4),
+    )
+    with _all_ticked(repo, nb):
+        result = repo.collection_enumeration.enumerate_elements(
+            nb, "formula", budget=_budget(page_size=1), ceiling_binds=False)
+        fresh = repo.collection_enumeration.enumerate_elements(
+            nb, "formula", budget=_budget(), ceiling_binds=False)
+    assert result.coverage.complete is False
+    assert result.coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE
+    assert "sLate" in {item.source_id for item in fresh.items}
+
+
 def test_an_in_ceiling_reparse_mid_walk_is_still_a_concurrent_change(
     repo, monkeypatch,
 ):
@@ -892,9 +913,23 @@ def test_the_catalog_overview_card_discloses_a_narrowed_scope(tmp_path):
         seed(overview_repo, nb, "a", "手册", "可见摘要")
         seed(overview_repo, nb, "b", "未选文档", "不应出现")
         bind_chat_client(overview_repo, "ask_answer", AnswerClient())
+        enumeration = overview_repo.collection_enumeration
+        original = enumeration.enumerate_sources
+        forwarded: list = []
+
+        def spy(*args, **kwargs):
+            forwarded.append(kwargs.get("ceiling_binds", "absent"))
+            return original(*args, **kwargs)
+
+        enumeration.enumerate_sources = spy
         narrowed = ask(
             overview_repo, nb, "这个库中的文档分别介绍了什么",
             source_scope=SourceScope(mode="include", source_ids=["a"]),
+        )
+        ticked = ask(
+            overview_repo, nb, "这个库中的文档分别介绍了什么",
+            source_scope=SourceScope(
+                mode="include", source_ids=["a", "b"], narrowed=False),
         )
         whole = ask(overview_repo, nb, "这个库中的文档分别介绍了什么")
     finally:
@@ -904,6 +939,10 @@ def test_the_catalog_overview_card_discloses_a_narrowed_scope(tmp_path):
     assert [item.source_id for item in narrowed.result_sets[0].items] == ["a"]
     assert "source_scoped" not in whole.result_sets[0].model_dump()
     assert whole.result_sets[0].coverage.total == 2
+    # 全选、未收窄、未漂移:与不带范围逐字相同,且判词原样转给了执行器
+    # (不转就会落到执行器的安全默认值「施加天花板」)。
+    assert ticked.result_sets[0].model_dump() == whole.result_sets[0].model_dump()
+    assert forwarded == [True, False, False]
 
 
 # ------------------------------------------------ section_path 只取自可读的属主

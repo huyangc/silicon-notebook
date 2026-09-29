@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Optional
 
 from app.core.ask_retrieval_policy import AskRetrievalLimits
 from app.models.ask import Citation, TypedCollectionResult
@@ -58,7 +58,7 @@ def prepare_catalog_overview(
     cancel_event: CancelEvent = None,
     *,
     local_only: bool = False,
-    source_scoped: bool = False,
+    source_scoped: Optional[bool] = None,
 ) -> CatalogOverview:
     """List authorized sources and project the delivered list into bounded context.
 
@@ -67,13 +67,17 @@ def prepare_catalog_overview(
     ``citations`` is keyed by source identity; ``id_map`` preserves the preview's
     k5001+ namespace for the answer citation binder.
 
-    ``source_scoped`` is the caller's answer to "does this listing cover only
-    the ticked sources?" — ``reasoning_retrieval.unsafe_scope_restricted``, the
-    predicate the reasoning engine stamps its own listings with — and is
-    recorded on the outcome so the directory card and the synthesis header
-    disclose it the same way (``SELECTED_SOURCES_SCOPE_SUFFIX``).  The roster
-    itself is already filtered by the ceiling inside the executor; this flag
-    only says so.
+    ``source_scoped`` is the caller's once-per-run verdict "this run's source
+    scope is narrowed or has drifted" (``reasoning_retrieval
+    .ceiling_binds_for_run``, the value the reasoning engine uses for its own
+    listings).  It does two things, and they must stay one value: it is
+    FORWARDED to the executor as ``ceiling_binds`` — so an all-ticked,
+    un-drifted catalog lists exactly what an unscoped one lists, and a
+    narrowed or drifted one is filtered — and it is recorded on the outcome so
+    the directory card and the synthesis header disclose the filtering
+    (``SELECTED_SOURCES_SCOPE_SUFFIX``).  ``None`` means the caller supplied no
+    verdict: the executor then applies its safe default (bind) and nothing is
+    disclosed, which over-filters rather than leaks.
     """
     raise_if_cancelled(cancel_event)
     listing = enumeration.enumerate_sources(
@@ -87,12 +91,13 @@ def prepare_catalog_overview(
         ),
         cancel_event=cancel_event,
         local_only=local_only,
+        **({} if source_scoped is None else {"ceiling_binds": source_scoped}),
     )
     raise_if_cancelled(cancel_event)
     outcomes = [CollectionEnumerationOutcome(
         collection="sources", kind="", source_id="", local_only=local_only,
         items=list(listing.items), coverage=listing.coverage,
-        source_scoped=source_scoped,
+        source_scoped=bool(source_scoped),
     )]
     citations = evidence_context.collection_item_citations(
         listing.items, active_notebook_id=notebook_id,
