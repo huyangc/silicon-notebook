@@ -48,6 +48,7 @@ from app.repositories.postgres.cluster_lock import (
     lock_cluster_artifact_types,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.id_binding import bind_ids, execute_ids
 from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
 from app.repositories.postgres.search import (
     drop_mention_scan,
@@ -91,8 +92,11 @@ _PUBLISHED_COMMUNITY_GEN = (
 # sqlite/unified_kg_store.py 同名段落 —— 两侧读的是同一张
 # ``knowledge_object_sources`` 反向索引,以及同一个
 # ``unified_kg_state.source_index_backfilled`` 完整性凭证;只有方言不同
-# (清单走 ``=ANY(%s)`` 一个数组参数,不是逐个占位符)。
-def _object_support_exists(cluster_ref: str, *, authoritative: bool) -> str:
+# (清单走 ``id_binding.bind_ids`` 的一个参数,不是逐个占位符;``ids_sql`` 是它的
+# ``array_sql``,语句必须经 ``execute_ids`` 执行)。
+def _object_support_exists(
+    cluster_ref: str, *, authoritative: bool, ids_sql: str,
+) -> str:
     """该簇某个成员对象是否被清单内来源支撑(相关子查询,关联到 cluster_ref)。"""
     if authoritative:
         return (
@@ -102,27 +106,36 @@ def _object_support_exists(cluster_ref: str, *, authoritative: bool) -> str:
             "AND EXISTS (SELECT 1 FROM jsonb_array_elements("
             "CASE WHEN jsonb_typeof(ko.evidence)='array' "
             "THEN ko.evidence ELSE '[]'::jsonb END) ev "
-            "WHERE ev->>'source_id'=ANY(%s)))"
+            f"WHERE ev->>'source_id'=ANY({ids_sql})))"
         )
     return (
         "EXISTS (SELECT 1 FROM knowledge_object_sources kos "
         f"WHERE kos.notebook_id={cluster_ref}.notebook_id "
         f"AND kos.object_id={cluster_ref}.member_object_id "
-        "AND kos.source_id=ANY(%s))"
+        f"AND kos.source_id=ANY({ids_sql}))"
     )
 
 
 def _canonical_support_exists(
-    row_ref: str, *, authoritative: bool, canonical_expr: str | None = None,
+    row_ref: str, *, authoritative: bool, ids_sql: str,
+    canonical_expr: str | None = None,
 ) -> str:
     """``row_ref`` 那一行的 canonical_id 是否还有天花板内来源支撑。"""
+    member_supported = _object_support_exists(
+        "kc", authoritative=authoritative, ids_sql=ids_sql,
+    )
     return (
         "EXISTS (SELECT 1 FROM concept_clusters kc "
         f"WHERE kc.notebook_id={row_ref}.notebook_id "
         f"AND kc.canonical_id={canonical_expr or row_ref + '.canonical_id'} "
         f"AND kc.generation = {_PUBLISHED_CLUSTER_GEN} "
-        f"AND {_object_support_exists('kc', authoritative=authoritative)})"
+        f"AND {member_supported})"
     )
+
+
+def _plain_execute(db: Any, statement: str, params: Sequence[Any]):
+    """``execute_ids`` 的无清单孪生:不绑天花板的语句保留计划缓存。"""
+    return db.execute(statement, params)
 
 
 def _json_document(value: Any, *, expected: type, field: str):
@@ -1465,17 +1478,20 @@ class UnifiedKgStore:
             source_ids = list(dict.fromkeys(allowed_source_ids))
             if not source_ids:
                 return []
+            ceiling = bind_ids(source_ids)
             gate = _canonical_support_exists(
                 "community_members",
                 authoritative=not self._source_index_backfilled(db, notebook_id),
+                ids_sql=ceiling.array_sql,
             )
-            return db.execute(
+            return execute_ids(
+                db,
                 f"SELECT canonical_name, centrality FROM community_members "
                 f"WHERE notebook_id=%s AND community_id=%s AND canonical_id!=%s "
                 f"AND generation = {_PUBLISHED_COMMUNITY_GEN} AND {gate} "
                 f"ORDER BY centrality DESC, canonical_id COLLATE \"C\" ASC LIMIT %s",
                 (notebook_id, community_id, exclude_canonical_id, notebook_id,
-                 notebook_id, source_ids, limit)
+                 notebook_id, ceiling.param, limit)
             ).fetchall()
 
     def comention_peers(
@@ -1495,24 +1511,32 @@ class UnifiedKgStore:
             gate = limit_gate = ""
             gate_params: tuple = ()
             limit_params: tuple = ()
+            # 无闸时两条语句都不绑清单(取名那条只绑 ≤limit 个对端 id),保持普通
+            # execute;有闸时天花板经 id_binding,恒 custom plan。
+            execute = _plain_execute
             if allowed_source_ids is not None:
                 source_ids = list(dict.fromkeys(allowed_source_ids))
                 if not source_ids:
                     return []
+                ceiling = bind_ids(source_ids)
+                execute = execute_ids
                 authoritative = not self._source_index_backfilled(db, notebook_id)
                 gate = "AND " + _object_support_exists(
                     "concept_clusters", authoritative=authoritative,
+                    ids_sql=ceiling.array_sql,
                 ) + " "
-                gate_params = (source_ids,)
+                gate_params = (ceiling.param,)
                 # SQLite 孪生同注记:闸还要压在 LIMIT 之前,否则无支撑的高位对端
                 # 会占满名额、把合格的低位对端挤出去。
                 limit_gate = "AND " + _canonical_support_exists(
                     "cm", authoritative=authoritative,
+                    ids_sql=ceiling.array_sql,
                     canonical_expr="CASE WHEN cm.canonical_a=%s "
                                    "THEN cm.canonical_b ELSE cm.canonical_a END",
                 ) + " "
-                limit_params = (canonical_id, notebook_id, source_ids)
-            rows = db.execute(
+                limit_params = (canonical_id, notebook_id, ceiling.param)
+            rows = execute(
+                db,
                 "SELECT canonical_a, canonical_b, bridge_claims FROM concept_comentions cm "
                 "WHERE notebook_id=%s AND (canonical_a=%s OR canonical_b=%s) AND bridge_claims>=%s "
                 f"{limit_gate}"
@@ -1531,7 +1555,8 @@ class UnifiedKgStore:
                 return []
             names = {
                 str(row["canonical_id"]): str(row["canonical_name"] or "")
-                for row in db.execute(
+                for row in execute(
+                    db,
                     f"SELECT canonical_id, MIN(canonical_name) AS canonical_name "
                     f"FROM concept_clusters WHERE notebook_id=%s "
                     f"AND canonical_id=ANY(%s) "
