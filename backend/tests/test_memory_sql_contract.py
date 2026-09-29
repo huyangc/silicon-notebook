@@ -1,37 +1,57 @@
-# backend/tests/test_memory_sql_contract.py
 """Memory SQL 片段唯一定义点(`repositories/sqlite/memory_sql.py`)的行为契约(SQLite)。
 
-E0 把「这条 Memory 派生行能不能给这个人看」与「这行知识算不算派生自 Memory」收进唯一
+E0 把「这条 Memory 派生行能不能给这个人看」与「这行知识算不算派生自 Memory」收进共享
 定义点。这份矩阵钉住的是**哪一格该翻、哪一格绝不许翻**(判定表在
 `memory_sql_cases.py`,PostgreSQL 侧 `postgres/test_memory_sql_contract_pg.py` 吃同一张表):
 
 * 本人的 Memory 来源可读,别人的不可读;孤儿 Memory 来源(``memory_id`` 指向不存在的行)
-  与无 ``memory_id`` 的 Memory 来源对所有人失败即关;空查看者读不到任何 Memory 来源。
+  与无 ``memory_id`` 的 Memory 来源对所有人失败即关;空查看者与 NULL 查看者读不到任何
+  Memory 来源。
 * Knowhow 与普通来源不受本谓词影响——**每个人**都可读。
-* 每个片段消费**固定个数**的位置参数:readable / foreign 各 1 个,derived / cluster 各 0 个
-  ——参数个数随别名或实现而变,调用方在更大语句里就会静默错绑。
-* 嵌进更大的查询(参数夹在别的参数中间、与其他表 join)结果与独立执行一致。
+* **参数契约**:每个片段在语句文本里**它所在的位置**恰好消费固定个数的位置参数——
+  readable / foreign 各 1 个(查看者),derived / cluster 各 0 个。参数个数随别名或实现而
+  变、或片段被放到语句里别的位置,调用方在更大语句里就会静默错绑;所以这里既断言个数,
+  也断言「参数夹在别的参数中间」的嵌入结果与独立执行一致。
+* 簇片段的两条相关条件各有用例:不同笔记本可以撞同一个 canonical_id(簇 id 是
+  ``K-<规范化种子名>``),笔记本一里的 Memory 成员不得让笔记本二的同名簇消失;building 代
+  里的 Memory 成员不得让 published 代的簇消失。
+* 外层别名校验:不分大小写地拒绝撞内层别名(``MC`` 会让簇片段退化成恒真的
+  ``mc.x = mc.x``,静默排除所有笔记本的所有簇)、拒绝尾部换行、带引号与带 schema 的写法。
+* 两个后端的片段文本在把 ``%s`` 换成 ``?`` 后逐字相同;``'memory'`` 字面量与
+  ``source_store.MEMORY_SOURCE_TYPE_PREDICATE`` 不漂移。
 * 旧 `query_store._NOT_MEMORY_OWNED_SQL` 改为引用 `memory_derived_object` 后,取代码里的
   真聚合在同一份数据上给出硬编码的黄金结果,且新片段的否定与 E0 之前的手写文本逐行同义。
 """
+import re
+
 import pytest
 
 from app.core.config import Settings
 from app.domain.knowledge_contracts import USABLE_STATUSES
-from app.repositories.sqlite import memory_sql, query_store as sqlite_query_store
-from app.repositories.sqlite.database import SqliteDatabase
-from app.repositories.sqlite.migrations import SqliteMigrator
+from app.repositories.postgres import (
+    memory_sql as pg_memory_sql,
+    source_store as pg_source_store,
+)
+from app.repositories.sqlite import (
+    memory_sql,
+    query_store as sqlite_query_store,
+    source_store as sqlite_source_store,
+)
 from app.repositories.sqlite.query_store import QueryStore
+from app.services.sqlite_repository import SQLiteRepository
 from tests import memory_sql_cases as cases
 
 NOW = "2026-09-29T00:00:00+00:00"
 
 
 @pytest.fixture
-def world(tmp_path):
-    settings = Settings(database_url=f"sqlite:///{tmp_path / 'test.db'}")
-    database = SqliteDatabase(settings, tmp_path)
-    assert SqliteMigrator(database, settings).migrate()
+def world(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    repo = SQLiteRepository(Settings())
+    database = repo._runtime.database
     with database.write() as db:
         for uid in cases.USERS:
             db.execute(
@@ -39,11 +59,12 @@ def world(tmp_path):
                 "VALUES (?,?,?,?,?,?,?)",
                 (uid, f"{uid}@example.test", uid, "user", "active", NOW, NOW),
             )
-        db.execute(
-            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
-            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
-            (cases.NOTEBOOK, "NB", "", "Semiconductor", "draft", cases.OWNER, NOW, NOW),
-        )
+        for notebook in (cases.NOTEBOOK, cases.NOTEBOOK2):
+            db.execute(
+                "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+                "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (notebook, "NB", "", "Semiconductor", "draft", cases.OWNER, NOW, NOW),
+            )
         for memory_id, created_by in cases.MEMORY_ITEMS:
             db.execute(
                 "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
@@ -51,18 +72,26 @@ def world(tmp_path):
                 (memory_id, cases.NOTEBOOK, created_by, "ask_answer", "confirmed",
                  memory_id, "x", NOW, NOW),
             )
-        for source_id, source_type, memory_id in cases.SOURCES:
-            db.execute(
-                "INSERT INTO sources(id,notebook_id,title,source_type,memory_id,created_at,"
-                "updated_at) VALUES (?,?,?,?,?,?,?)",
-                (source_id, cases.NOTEBOOK, source_id, source_type, memory_id, NOW, NOW),
-            )
-        for object_id, source_id, object_type in cases.OBJECTS:
-            db.execute(
-                "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,source_id,"
-                "created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
-                (object_id, cases.NOTEBOOK, object_type, "approved", source_id, NOW, NOW),
-            )
+        for notebook, sources in (
+            (cases.NOTEBOOK, cases.SOURCES),
+            (cases.NOTEBOOK2, cases.SOURCES_NB2),
+        ):
+            for source_id, source_type, memory_id in sources:
+                db.execute(
+                    "INSERT INTO sources(id,notebook_id,title,source_type,memory_id,"
+                    "created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                    (source_id, notebook, source_id, source_type, memory_id, NOW, NOW),
+                )
+        for notebook, objects in (
+            (cases.NOTEBOOK, cases.OBJECTS),
+            (cases.NOTEBOOK2, cases.OBJECTS_NB2),
+        ):
+            for object_id, source_id, object_type in objects:
+                db.execute(
+                    "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
+                    "source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                    (object_id, notebook, object_type, "approved", source_id, NOW, NOW),
+                )
         for relation_id, source_id in cases.RELATIONS:
             db.execute(
                 "INSERT INTO knowledge_relations(id,notebook_id,source_id,source_object_id,"
@@ -70,14 +99,14 @@ def world(tmp_path):
                 (relation_id, cases.NOTEBOOK, source_id, "ko-upload", "ko-knowhow",
                  "related_to", NOW),
             )
-        for canonical_id, name, members in cases.CLUSTERS:
+        for notebook, canonical_id, name, generation, members in cases.CLUSTERS:
             for member in members:
                 db.execute(
                     "INSERT INTO concept_clusters(id,notebook_id,canonical_id,"
-                    "member_object_id,canonical_name,object_type,created_at) "
-                    "VALUES (?,?,?,?,?,?,?)",
-                    (f"cc-{canonical_id}-{member}", cases.NOTEBOOK, canonical_id, member,
-                     name, "concept", NOW),
+                    "member_object_id,canonical_name,object_type,created_at,generation) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (f"cc-{canonical_id}-{generation}-{member}", notebook, canonical_id,
+                     member, name, "concept", NOW, generation),
                 )
     return database
 
@@ -87,7 +116,7 @@ def _ids(database, sql: str, params: tuple = ()) -> set[str]:
         return {row[0] for row in db.execute(sql, params).fetchall()}
 
 
-def _sources(database, viewer: str) -> set[str]:
+def _sources(database, viewer) -> set[str]:
     return _ids(
         database,
         f"SELECT s.id FROM sources s WHERE {memory_sql.memory_source_readable('s')}",
@@ -95,7 +124,7 @@ def _sources(database, viewer: str) -> set[str]:
     )
 
 
-def _objects_kept(database, viewer: str) -> set[str]:
+def _objects_kept(database, viewer) -> set[str]:
     return _ids(
         database,
         "SELECT o.id FROM knowledge_objects o "
@@ -104,7 +133,7 @@ def _objects_kept(database, viewer: str) -> set[str]:
     )
 
 
-def _relations_kept(database, viewer: str) -> set[str]:
+def _relations_kept(database, viewer) -> set[str]:
     return _ids(
         database,
         "SELECT r.id FROM knowledge_relations r "
@@ -136,28 +165,39 @@ def test_every_fragment_consumes_a_fixed_number_of_positional_parameters():
         assert "%s" not in fragment
 
 
-def test_outer_alias_that_would_capture_an_inner_table_is_refused():
-    """外层别名与内层子查询别名相同会把相关引用绑到内层表上,静默改变语义 —— 直接拒绝。"""
-    for bad in ("rm", "1x", "a b", "s; DROP TABLE sources", ""):
-        with pytest.raises(ValueError):
-            memory_sql.memory_source_readable(bad)
-    for bad in ("fs", "fm"):
-        with pytest.raises(ValueError):
-            memory_sql.foreign_memory_object_excluded(bad)
-        with pytest.raises(ValueError):
-            memory_sql.foreign_memory_relation_excluded(bad)
-    for bad in ("ds", "d s"):
-        with pytest.raises(ValueError):
-            memory_sql.memory_derived_object(bad)
-        with pytest.raises(ValueError):
-            memory_sql.memory_derived_relation(bad)
-    for bad in ("mc", "mo", "ms"):
-        with pytest.raises(ValueError):
-            memory_sql.no_memory_member_cluster(bad)
+# ------------------------------------------------------------------ 外层别名校验
+def _alias_calls():
+    return {
+        "readable": (memory_sql.memory_source_readable,),
+        "foreign": (
+            memory_sql.foreign_memory_object_excluded,
+            memory_sql.foreign_memory_relation_excluded,
+        ),
+        "derived": (
+            memory_sql.memory_derived_object,
+            memory_sql.memory_derived_relation,
+        ),
+        "cluster": (memory_sql.no_memory_member_cluster,),
+    }
+
+
+@pytest.mark.parametrize("family", sorted(cases.BAD_ALIASES))
+def test_outer_alias_that_would_capture_an_inner_table_or_is_not_a_bare_identifier_is_refused(
+    family,
+):
+    """SQL 标识符不区分大小写:``MC`` 会绑到内层表上、``mc.x = mc.x`` 恒真;``re.match`` 的
+    ``$`` 还会放过尾部换行。带引号与带 schema 的写法也不是裸标识符。"""
+    for fragment in _alias_calls()[family]:
+        for bad in cases.BAD_ALIASES[family]:
+            with pytest.raises(ValueError):
+                fragment(bad)
+        # 合法别名(含大写、下划线、数字)照常通过。
+        for good in ("o", "O1", "_x", "outer_1"):
+            assert fragment(good)
 
 
 # --------------------------------------------------------------------- 行为矩阵
-@pytest.mark.parametrize("viewer", sorted(cases.READABLE_SOURCES))
+@pytest.mark.parametrize("viewer", list(cases.READABLE_SOURCES))
 def test_source_readability_matrix(world, viewer):
     assert _sources(world, viewer) == cases.READABLE_SOURCES[viewer]
 
@@ -181,12 +221,13 @@ def test_knowhow_and_ordinary_sources_are_readable_by_everyone(world):
         assert {"src-knowhow", "src-upload"} <= readable, "ordinary source readable"
 
 
-def test_empty_viewer_reads_no_memory_source(world):
+@pytest.mark.parametrize("viewer", ["", None])
+def test_empty_or_null_viewer_reads_no_memory_source(world, viewer):
     memory_ids = {s[0] for s in cases.SOURCES if s[1] == "memory"}
-    assert _sources(world, "") & memory_ids == set()
+    assert _sources(world, viewer) & memory_ids == set()
 
 
-@pytest.mark.parametrize("viewer", sorted(cases.FOREIGN_EXCLUDED_KEEPS_OBJECTS))
+@pytest.mark.parametrize("viewer", list(cases.FOREIGN_EXCLUDED_KEEPS_OBJECTS))
 def test_foreign_memory_exclusion_matrix(world, viewer):
     assert _objects_kept(world, viewer) == cases.FOREIGN_EXCLUDED_KEEPS_OBJECTS[viewer]
     assert _relations_kept(world, viewer) == cases.FOREIGN_EXCLUDED_KEEPS_RELATIONS[viewer]
@@ -212,13 +253,35 @@ def test_memory_derived_classifier_ignores_the_viewer_and_covers_orphans(world):
     assert derived_relations == cases.MEMORY_DERIVED_RELATIONS
 
 
+_CLUSTER_KEPT_SQL = (
+    "SELECT DISTINCT c.notebook_id || '/' || c.canonical_id || '/' || "
+    "CAST(c.generation AS TEXT) FROM concept_clusters c "
+    f"WHERE {memory_sql.no_memory_member_cluster('c')}"
+)
+
+
 def test_no_memory_member_cluster_excludes_the_whole_cluster(world):
-    kept = _ids(
-        world,
-        "SELECT DISTINCT c.canonical_id FROM concept_clusters c "
-        f"WHERE {memory_sql.no_memory_member_cluster('c')}",
+    assert _ids(world, _CLUSTER_KEPT_SQL) == cases.NO_MEMORY_MEMBER_CLUSTERS
+
+
+def test_no_memory_member_cluster_is_scoped_to_its_own_notebook(world):
+    """簇 id 是 ``K-<规范化种子名>``:两个笔记本可以有同一个 canonical_id。笔记本一的
+    ``can-mixed`` 含 alice 的 Memory 成员,笔记本二的同名簇只含普通对象,必须保留。"""
+    kept = _ids(world, _CLUSTER_KEPT_SQL)
+    assert f"{cases.NOTEBOOK}/can-mixed/0" not in kept
+    assert f"{cases.NOTEBOOK2}/can-mixed/0" in kept, (
+        "another notebook's Memory member hid this notebook's same-named cluster"
     )
-    assert kept == cases.NO_MEMORY_MEMBER_CLUSTERS
+
+
+def test_no_memory_member_cluster_is_scoped_to_its_own_generation(world):
+    """building 代(generation 1)里的 Memory 成员只让**这一代**的簇被排除,published 代
+    (generation 0)的同名簇必须保留。"""
+    kept = _ids(world, _CLUSTER_KEPT_SQL)
+    assert f"{cases.NOTEBOOK}/can-gen/1" not in kept
+    assert f"{cases.NOTEBOOK}/can-gen/0" in kept, (
+        "a Memory member in the building generation hid the published cluster"
+    )
 
 
 # --------------------------------------------------------------- 嵌进更大的查询
@@ -228,13 +291,16 @@ def test_fragment_embedded_in_a_larger_query_agrees_with_the_standalone_result(w
         got = _ids(
             world,
             "SELECT s.id FROM sources s JOIN notebooks n ON n.id = s.notebook_id "
-            "WHERE n.id = ? AND "
+            "WHERE n.id IN (?, ?) AND "
             f"{memory_sql.memory_source_readable('s')} "
             "AND s.status = ? AND s.id IN (SELECT source_id FROM knowledge_objects "
-            "WHERE notebook_id = ?)",
-            (cases.NOTEBOOK, viewer, "uploaded", cases.NOTEBOOK),
+            "WHERE notebook_id IN (?, ?))",
+            (cases.NOTEBOOK, cases.NOTEBOOK2, viewer, "uploaded",
+             cases.NOTEBOOK, cases.NOTEBOOK2),
         )
-        objects_owned_by_a_source = {o[1] for o in cases.OBJECTS if o[1]}
+        objects_owned_by_a_source = {
+            o[1] for o in cases.OBJECTS + cases.OBJECTS_NB2 if o[1]
+        }
         assert got == expected & objects_owned_by_a_source, viewer
 
     for viewer, expected in cases.FOREIGN_EXCLUDED_KEEPS_OBJECTS.items():
@@ -242,11 +308,60 @@ def test_fragment_embedded_in_a_larger_query_agrees_with_the_standalone_result(w
             world,
             "SELECT o.id FROM knowledge_objects o "
             "LEFT JOIN concept_clusters c ON c.member_object_id = o.id "
-            "WHERE o.notebook_id = ? AND o.status = ? AND "
+            "WHERE o.status = ? AND "
             f"{memory_sql.foreign_memory_object_excluded('o')} AND o.object_type IN (?, ?)",
-            (cases.NOTEBOOK, "approved", viewer, "concept", "claim"),
+            ("approved", viewer, "concept", "claim"),
         )
         assert got == expected, viewer
+
+
+# ------------------------------------------------------ 两个后端与既有常量不漂移
+_PUBLIC_FRAGMENTS = (
+    "memory_source_readable",
+    "foreign_memory_object_excluded",
+    "foreign_memory_relation_excluded",
+    "memory_derived_object",
+    "memory_derived_relation",
+    "no_memory_member_cluster",
+)
+
+
+def _public_names(module) -> set[str]:
+    return {
+        name
+        for name, member in vars(module).items()
+        if not name.startswith("_")
+        and getattr(member, "__module__", module.__name__) == module.__name__
+        and (callable(member) or name.isupper())
+    }
+
+
+def test_both_backends_declare_the_same_fragments_with_identical_text():
+    """双后端同修(仿 `test_access_sql_contract.py` 的镜像守卫):public 符号集合相等,
+    每个片段把 `%s` 换成 `?` 后逐字相同 —— 一侧漏改而 PG 泳道又没跑,就是两种部署
+    对「谁能读 Memory」给出不同答案,而这种分叉在单后端测试里看不见。"""
+    assert _public_names(memory_sql) == _public_names(pg_memory_sql)
+    assert memory_sql.MEMORY_SOURCE_TYPE == pg_memory_sql.MEMORY_SOURCE_TYPE
+    for name in _PUBLIC_FRAGMENTS:
+        for alias in ("x1", "Outer_2"):
+            pg_text = getattr(pg_memory_sql, name)(alias)
+            assert "?" not in pg_text
+            assert pg_text.replace("%s", "?") == getattr(memory_sql, name)(alias), name
+    assert pg_memory_sql.memory_source_type_predicate() == memory_sql.memory_source_type_predicate()
+    assert pg_memory_sql.memory_source_type_predicate("t.k") == memory_sql.memory_source_type_predicate("t.k")
+
+
+def test_memory_type_literal_is_single_sourced_and_matches_source_store():
+    """`'memory'` 只在 `MEMORY_SOURCE_TYPE` 出现一次:每个片段里所有带引号的字面量都是它;
+    且它渲染出的未限定谓词与两个 `source_store` 各自的常量相同 —— 在 `source_store`
+    改为 import 本模块之前,任何一边改了 Memory 来源的类型判据,这里当场红。"""
+    quoted = re.compile(r"'([^']*)'")
+    for module in (memory_sql, pg_memory_sql):
+        for name in _PUBLIC_FRAGMENTS:
+            text = getattr(module, name)("x1")
+            assert set(quoted.findall(text)) == {module.MEMORY_SOURCE_TYPE}, (module, name)
+    assert sqlite_source_store.MEMORY_SOURCE_TYPE_PREDICATE == memory_sql.memory_source_type_predicate()
+    assert pg_source_store.MEMORY_SOURCE_TYPE_PREDICATE == pg_memory_sql.memory_source_type_predicate()
 
 
 # ------------------------------------------------------ query_store 旧常量归一

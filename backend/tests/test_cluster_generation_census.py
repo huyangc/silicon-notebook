@@ -20,8 +20,10 @@ B·目标代写者(PR-2 参数化)/C·跨代维护(显式豁免+理由)。本守
 tables/KG_STATE_TABLES/_COPY_TABLES/kg_build_job_store 的表名字符串常量)
 不进正则——它们全是 C 类整表维护,行为由各自套件钉;②同文件内把谓词从
 LEFT JOIN 的 ON 挪进 WHERE 计数不变——由本文件的 ON 结构守卫单列检查;
-③`memory_sql.no_memory_member_cluster` 内层 `mc.generation = c.generation` 相关
-对齐无可计数 token——由其行为测试(memory 排除语义)兜;④source_subgraph_projection 的局部
+③`memory_sql.no_memory_member_cluster` 内层 `mc.notebook_id = c.notebook_id` 与
+`mc.generation = c.generation` 相关对齐无可计数 token——由 `test_memory_sql_contract.py`
+的 `test_no_memory_member_cluster_is_scoped_to_its_own_notebook` /
+`..._own_generation`(及 PG 侧同名用例)兜;④source_subgraph_projection 的局部
 模板被两分支复用,删一个分支的引用计数不变——由该模块行为测试兜。
 """
 from __future__ import annotations
