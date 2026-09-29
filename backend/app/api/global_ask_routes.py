@@ -25,7 +25,6 @@ from app.models.global_ask import (
     GlobalAskFeedbackRequest, GlobalAskIntentPreviewRequest, GlobalAskRequest, GlobalAskJob,
     GlobalConversationSummary, GlobalConversationDetail,
     GlobalConversationRename, GLOBAL_ASK_PAGE_SIZE, GLOBAL_ASK_PAGE_MAX,
-    FLAGGED_CITATION_MESSAGE, global_citation_flagged,
 )
 from app.models.sources import SourceElement
 from app.services.cancellation import AskCancelled
@@ -221,22 +220,10 @@ def submit_global_ask_feedback(job_id: str, payload: GlobalAskFeedbackRequest, u
 
 @router.get("/jobs/{job_id}/citations/{element_id}", response_model=SourceElement)
 def global_cited_element(job_id: str, element_id: str, user: UserProfile = Depends(get_current_user)):
-    return _call(_open_cited_element, job_id, element_id, user_id=user.id)
-
-
-def _open_cited_element(job_id: str, element_id: str, *, user_id: str) -> SourceElement:
-    """The drill-down, closed for a citation that failed the terminal check.
-
-    ``get_job`` first, so a foreign or missing job keeps the 404 it always had
-    before anything about its citations is looked at; a flagged citation is
-    then the same 404 shape with its own sentence. The card itself stays in the
-    answer with its stored excerpt -- only this way into the original closes.
-    """
-    service = global_ask_service()
-    job = service.get_job(job_id, user_id=user_id)
-    if global_citation_flagged(job, element_id):
-        raise GlobalAskError(404, FLAGGED_CITATION_MESSAGE)
-    return service.cited_element(job_id, element_id, user_id=user_id)
+    # A citation that failed the terminal check is refused INSIDE the service
+    # (``GlobalAskService.cited_element``); ``_call`` translates that 404 like
+    # any other.
+    return _call(global_ask_service().cited_element, job_id, element_id, user_id=user.id)
 
 
 @router.get("/conversations", response_model=list[GlobalConversationSummary])

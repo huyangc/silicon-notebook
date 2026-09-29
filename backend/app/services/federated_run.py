@@ -133,6 +133,20 @@ class DetachedAskTurn:
     user_history: str = ""
 
 
+class PointerSnapshot(tuple):
+    """A ``(source_id, fingerprint)`` snapshot read BY ID, blind to any text.
+
+    Published by ``evidence_attestation.attest_pointers`` for elements a
+    producer cites without having read. It compares equal to the plain tuple a
+    reading producer publishes, so the terminal check needs no special case;
+    the type is what the consumer's merge reads (rule 3): a pointer snapshot
+    never replaces an existing entry, including a declared ``None``. Internal
+    to a run -- nothing about it is persisted or serialised.
+    """
+
+    __slots__ = ()
+
+
 @dataclass(frozen=True)
 class FederatedRunPlan:
     """The process-level retrieval budget a global run lends to the federation.
@@ -205,8 +219,13 @@ class FederatedRunPlan:
        ``None`` is not attestable: a citation resting on it is reported
        ``unverifiable`` rather than accepted unverified, which is what makes a
        failed read fail CLOSED element by element.  The FIRST real snapshot is
-       never overwritten -- neither by ``None`` nor by a later snapshot -- and a
-       real snapshot replaces an earlier ``None``.  ABSENCE means no producer
+       never overwritten -- neither by ``None`` nor by a later snapshot.  Only a
+       snapshot from a producer that READ the text (the federated chunk channel,
+       ``attest_read``) may replace an earlier ``None``; a ``PointerSnapshot``
+       -- a blind by-id read from ``attest_pointers`` -- never replaces any
+       existing entry, because the text it describes may be the text that
+       replaced what the run read, and the ``None`` was the declaration of
+       exactly that.  ABSENCE means no producer
        registered the element at all; the consumer reports such a citation
        ``unverifiable`` too (internal reason ``unattested``), never as changed
        and never as passed.  Producers outside the federated channel (document

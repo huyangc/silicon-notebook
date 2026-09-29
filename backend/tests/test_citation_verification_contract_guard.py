@@ -54,3 +54,41 @@ def test_a_stale_copy_hidden_in_a_comment_does_not_count(tmp_path):
         '/* changed: "原文已改动" */ changed: "原文变了"',
     )
     assert guard.check(path)
+
+
+def test_a_decoy_elsewhere_does_not_keep_a_moved_template_green(tmp_path):
+    """Moving the wording out of ``citationCheckNotice`` into a decoy constant
+    while the function's real lead changes must fail: the fragments are
+    anchored to the function bodies, not to the file."""
+    path = _drifted(
+        tmp_path, '"本次回答有部分引用未通过核对"', '"本次回答有引用未通过核对"',
+    )
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + '\nexport const _DECOY = "本次回答有部分引用未通过核对";\n'
+        + 'export const _DECOY_TAIL = `${lead}：${citationCheckReasonText(check)}。'
+        + '回答内容照常保留，带标记的引用可点开查看原因。`;\n',
+        encoding="utf-8",
+    )
+    problems = guard.check(path)
+    assert any("citationCheckNotice" in problem for problem in problems)
+    assert guard.main(path) == 1
+
+
+def test_a_reason_clause_moved_to_another_function_fails(tmp_path):
+    path = _drifted(tmp_path, '.join("、")', '.join("")')
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + '\nexport function decoy(parts: string[]): string { return parts.join("、"); }\n',
+        encoding="utf-8",
+    )
+    assert any("citationCheckReasonText" in problem for problem in guard.check(path))
+
+
+def test_a_second_notice_declaration_is_undecidable(tmp_path):
+    path = tmp_path / "citation-verification.ts"
+    path.write_text(
+        SOURCE + '\nexport function citationCheckNotice(): string { return ""; }\n',
+        encoding="utf-8",
+    )
+    assert any("无法判定" in problem for problem in guard.check(path))

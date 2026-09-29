@@ -61,6 +61,17 @@ class _SeqLLM:
         return json.dumps(self._answer)
 
 
+@pytest.fixture(autouse=True)
+def _synthetic_elements_are_not_dangling(monkeypatch):
+    """The stubbed retrieval here cites synthetic element ids that have no
+    ``source_elements`` row; J2's liveness pass (``reference_liveness``, pinned
+    in ``test_reference_liveness.py``) would rightly drop those cards and this
+    file is about how cards are minted, not about liveness."""
+    from app.services.ask_service import AskService
+
+    monkeypatch.setattr(AskService, "_drop_dangling_references", lambda self, response: None)
+
+
 @pytest.fixture
 def arepo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")

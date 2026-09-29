@@ -13,8 +13,11 @@ because both hash the UTF-8 encoding of the stored text with no normalization
 of any kind: no Unicode normalization (a decomposed ``é`` and a precomposed one
 are different evidence), no newline folding (CRLF stays CRLF), no trimming.
 ``convert_to(..., 'UTF8')`` converts from the database encoding, so the digest
-does not depend on the server encoding either. ``test_evidence_fingerprint_twin``
-pins the two spellings against each other on both backends.
+does not depend on the server encoding either.
+``tests/postgres/test_global_citation_race_pg.py::test_postgres_prints_equal_the_shared_digest_and_the_sqlite_twin``
+pins the two spellings against each other on both backends (and
+``test_the_sql_digest_ignores_a_non_utf8_server_encoding`` pins the SQL
+expression on a non-UTF8 database).
 
 Pure leaf: imports nothing from ``app``.
 """
