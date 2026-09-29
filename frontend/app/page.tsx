@@ -88,7 +88,6 @@ import {
   previewShared,
   copyShared,
   joinShared,
-  leaveNotebook,
   sharedByMe,
   shareModeLabel,
   shareLinkCopyToast,
@@ -134,6 +133,8 @@ import { useReportWorkspace } from "./use-report-workspace.ts";
 import { useKgWorkspace } from "./use-kg-workspace.ts";
 import { useNotebookCollection, type NotebookEditorPatch } from "./use-notebook-collection.ts";
 import { useNotebookTitleDraft } from "./use-notebook-title-draft.ts";
+import { useNotebookExit, type ExitAnchor } from "./use-notebook-exit.ts";
+import { NotebookExitPanel } from "./notebook-exit-panel";
 import {
   useRootModalCoordinator,
   type RootModalCloseReason,
@@ -960,8 +961,9 @@ export default function Home() {
   // 接收分享(拷贝侧):sharedPreview 存预览并驱动预览弹窗;copyBusy 覆盖拷贝/加入请求
   const [sharedPreview, setSharedPreview] = useState<SharedPreview | null>(null);
   const [copyBusy, setCopyBusy] = useState(false);
-  // 只读共享(Phase 2):退出共享请求覆盖;已分享总览 modal 的数据与开关
-  const [leaveBusy, setLeaveBusy] = useState(false);
+  // 只读共享(Phase 2):「退出共享」是唯一一份流程(读条数→确认→DELETE),两个入口共用,
+  // 见 use-notebook-exit.ts;已分享总览 modal 的数据与开关
+  const notebookExit = useNotebookExit({ onToast: setToast, onError: reportError });
   const [sharedByMeList, setSharedByMeList] = useState<SharedByMeItem[] | null>(null);
   // 总览里正在被撤销的那一本(codex #631 R2 P2)。`shareBusy` 是全局的忙碌闸,拿它当**文案**
   // 判据会让每一行的按钮都写「取消中…」——分享得多的用户读到的是「全都在取消」。闸(disabled)
@@ -1822,6 +1824,12 @@ export default function Home() {
     const timer = window.setTimeout(() => setToast(""), 2200);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  // 换库/回主页:上一个入口留下的退出确认面板不该悬在别的页面上。取消只收起面板,
+  // 已在飞的 DELETE 不受影响(它落地后照样刷新列表并出提示)。
+  useEffect(() => {
+    notebookExit.cancel();
+  }, [currentNotebook?.id, notebookExit.cancel]);
 
   // Example prompts / placeholders adapt to the open notebook's imported sources,
   // so a new notebook never shows demo examples.
@@ -3067,13 +3075,10 @@ export default function Home() {
     return () => { void presentNotebookDelete(notebookId); notebookCollection.closeMenu(); };
   }
 
-  function leaveMenuNotebook(notebookId: string) {
+  function leaveMenuNotebook(notebookId: string, anchor: ExitAnchor) {
     return () => {
       notebookCollection.closeMenu();
-      leaveNotebook(notebookId)
-        .then(() => loadNotebookCollection())
-        .then(() => setToast("已退出只读共享"))
-        .catch(reportError);
+      notebookExit.start(notebookId, anchor, () => loadNotebookCollection());
     };
   }
 
@@ -4470,20 +4475,16 @@ export default function Home() {
     }
   }
 
-  async function handleLeaveShared() {
+  function handleLeaveShared(anchor: ExitAnchor) {
     if (!currentNotebook) return;
-    const leftId = currentNotebook.id;
     const navEpoch = workspaceEpochRef.current;
-    setLeaveBusy(true);
-    try {
-      await leaveNotebook(leftId);
-      // 走同一条收口:重取、请求世代闸、对账都别再抄一份(抄一份就会漏掉其中一道闸——
-      // 这次漏的正是请求世代)。
-      await notebookCollection.refreshAfterAccessChange(navEpoch);
-      setToast("已退出只读共享");
-    } finally {
-      setLeaveBusy(false);
-    }
+    // 退出成功之后走同一条收口:重取、请求世代闸、对账都别再抄一份(抄一份就会漏掉其中
+    // 一道闸——这次漏的正是请求世代)。
+    notebookExit.start(
+      currentNotebook.id,
+      anchor,
+      () => notebookCollection.refreshAfterAccessChange(navEpoch),
+    );
   }
 
   // E. owner「已分享总览」:拉取所有我 owner 且已分享的库 → 打开 modal
@@ -5269,8 +5270,8 @@ export default function Home() {
                 {isReader ? (
                   <ReaderNotebookBadge
                     notebook={currentNotebook}
-                    leaveBusy={leaveBusy}
-                    onLeave={() => { handleLeaveShared().catch(reportError); }}
+                    leaveBusy={notebookExit.busyId === currentNotebook.id}
+                    onLeave={handleLeaveShared}
                     // 组管理员(can_manage_content)可在顶栏改名(PATCH-only,notebook:manage)。
                     // 徽章按 can_manage_content 才渲染成可编辑;纯只读成员传了也只显示 h1。
                     // 镜像上 canManageNotebook 为假 → 连承接方都不下发,徽章退回只读标题,
@@ -6133,12 +6134,16 @@ export default function Home() {
             // 它们按下去,写死在组件里的「镜像…」就成了一句说谎的话。
             manageDisabledNote={menuNotebookCapabilities.mirrored ? MIRROR_NOTEBOOK_MANAGE_NOTE : ""}
             deleteDisabledNote={menuNotebookCapabilities.mirrored ? MIRROR_NOTEBOOK_DELETE_NOTE : ""}
-            onLeave={leaveMenuNotebook(notebookCollection.menu.notebook.id)}
+            onLeave={leaveMenuNotebook(notebookCollection.menu.notebook.id, notebookCollection.menu.position)}
             onEdit={editMenuNotebook(notebookCollection.menu.notebook.id)}
             onDelete={deleteMenuNotebook(notebookCollection.menu.notebook.id)}
           />
         </div>
       )}
+
+      {/* 「退出共享」的确认面板:顶栏按钮与卡片菜单两个入口共用这一个实例。菜单一点就关,
+          所以面板不能长在菜单里,自己按落点浮在按下的位置旁。 */}
+      <NotebookExitPanel exit={notebookExit} />
 
       {rootModals.view("notebook-share").open && shareModal && currentNotebook && (
         <section className="utility-modal" role="dialog" aria-modal={rootModals.view("notebook-share").topmost} aria-hidden={!rootModals.view("notebook-share").topmost} inert={rootModals.view("notebook-share").topmost ? undefined : true} style={{ zIndex: rootModals.view("notebook-share").zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("notebook-share", "backdrop"); }}>

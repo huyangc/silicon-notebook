@@ -4,6 +4,7 @@ import { useRef } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent } from "react";
 
 import { grantedViaLabel, isGroupGranted } from "./group-api.ts";
+import { anchorBelow, type ExitAnchor } from "./use-notebook-exit.ts";
 import type { NotebookSummary } from "./workspace-model.ts";
 
 /**
@@ -13,11 +14,11 @@ import type { NotebookSummary } from "./workspace-model.ts";
  *
  *   经**群组**共享进来的库不给「退出共享」。
  *
- * 那个按钮打的是 `DELETE /notebooks/{id}/membership`,它只删 `notebook_members` 行,
- * 对群组授权边一点作用都没有——点了会弹一句「已退出」,而库还在列表里,是一个必然
- * 发生的假失败。它在 `page.tsx` 里时只能靠「源码文本里有没有那个三元」来守,而那种
- * 守卫挡不住把按钮平移出条件分支的变异(改动之后文本仍在)。搬到这里,组件测试可以
- * 直接渲染两种笔记本、断言按钮在与不在。
+ * 那个按钮打的是 `DELETE /notebooks/{id}/membership`:它删 `notebook_members` 行(以及
+ * 成员自己在这本库里的记忆,见 `use-notebook-exit.ts`),对群组授权边一点作用都没有——
+ * 点了会弹一句「已退出」,而库还在列表里,是一个必然发生的假失败。它在 `page.tsx`
+ * 里时只能靠「源码文本里有没有那个三元」来守,而那种守卫挡不住把按钮平移出条件分支的
+ * 变异(改动之后文本仍在)。搬到这里,组件测试可以直接渲染两种笔记本、断言按钮在与不在。
  *
  * 判据是 `granted_via` 非空而不是 `access` —— 只读共享同样是 reader,但它有「退出
  * 共享」这个用户自己能按的出口,群组共享没有。
@@ -54,7 +55,8 @@ type BadgeRenameProps = {
 type ReaderNotebookBadgeProps = {
   notebook: NotebookSummary;
   leaveBusy: boolean;
-  onLeave: () => void;
+  /** 按下「退出共享」。参数是确认面板的落点(按钮正下方);流程本身见 `use-notebook-exit.ts`。 */
+  onLeave: (anchor: ExitAnchor) => void;
   /** 组管理员改名(可选);仅当 `notebook.can_manage_content` 时真正渲染成可编辑。 */
   rename?: BadgeRenameProps;
   /**
@@ -168,8 +170,8 @@ export function ReaderNotebookBadge({
         <button
           className="sort-button reader-badge-action"
           disabled={leaveBusy}
-          title="退出该只读共享（仅移除你自己的访问）"
-          onClick={onLeave}
+          title="退出该共享笔记本"
+          onClick={(event) => onLeave(anchorBelow(event.currentTarget))}
         >
           {leaveBusy ? "退出中…" : "退出共享"}
         </button>

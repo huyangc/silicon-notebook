@@ -244,7 +244,7 @@ test("两个只读入口都由 notebook-reader-actions 提供,page 不自己再�
   assert.equal(menuActions.length, 1);
   assert.equal(
     menuActions[0].bindings.onLeave,
-    "leaveMenuNotebook(notebookCollection.menu.notebook.id)",
+    "leaveMenuNotebook(notebookCollection.menu.notebook.id, notebookCollection.menu.position)",
     "菜单的退出共享回调没有绑到 leaveMenuNotebook 工厂",
   );
   // leaveMenuNotebook 是把「读 notebookCollection.menu.notebook.id」挪到 JSX 渲染层
@@ -253,7 +253,14 @@ test("两个只读入口都由 notebook-reader-actions 提供,page 不自己再�
   const leaveFactory = findFunction(page, "leaveMenuNotebook");
   assert.ok(leaveFactory, "缺 leaveMenuNotebook 工厂函数");
   const leaveFactoryText = leaveFactory.getText(page);
-  assert.match(leaveFactoryText, /leaveNotebook\(notebookId\)/);
+  // 退出不再直接打 DELETE:它进「读条数→确认→DELETE」那唯一一份流程(退出会永久删掉
+  // 成员自己的记忆,必须先告知)。page 自己不许再持有 leaveNotebook。
+  assert.match(leaveFactoryText, /notebookExit\.start\(notebookId,/);
+  assert.equal(
+    importsFrom(page, "./notebook-share").some((item) => item.imported === "leaveNotebook"),
+    false,
+    "page.tsx 又导入了 leaveNotebook —— 它会绕开退出共享的记忆删除告知流程",
+  );
   assert.match(
     leaveFactoryText,
     /loadNotebookCollection\(\)/,
@@ -269,6 +276,23 @@ test("两个只读入口都由 notebook-reader-actions 提供,page 不自己再�
     [],
     "page.tsx 又自己渲染了退出共享按钮 —— 它绕开了组件测试守着的那条分流",
   );
+});
+
+// 「退出共享」的两个入口(顶栏按钮、卡片菜单)必须进同一份流程、共用同一个确认面板。
+// 组件测试(notebook-exit.component.test.tsx)证明流程本身正确;这里只钉 page 的接线:
+// 两个入口都调 `notebookExit.start`,面板只渲染一份,顶栏按钮的忙碌态来自流程而不是
+// 另一个本地 state。
+test("退出共享的两个入口共用 use-notebook-exit 的同一份流程与同一个确认面板", () => {
+  assert.equal(jsxElements(page, "NotebookExitPanel").length, 1, "确认面板必须恰好渲染一份");
+  assert.equal(jsxElements(page, "NotebookExitPanel")[0].bindings.exit, "notebookExit");
+  const badge = jsxElements(page, "ReaderNotebookBadge")[0];
+  assert.equal(badge.bindings.onLeave, "handleLeaveShared");
+  assert.equal(badge.bindings.leaveBusy, "notebookExit.busyId === currentNotebook.id");
+  const bar = findFunction(page, "handleLeaveShared");
+  assert.ok(bar, "缺 handleLeaveShared");
+  assert.match(bar.getText(page), /notebookExit\.start\(/);
+  assert.match(bar.getText(page), /refreshAfterAccessChange\(navEpoch\)/);
+  assert.equal((pageText.match(/\bleaveNotebook\(/g) ?? []).length, 0);
 });
 
 test("笔记本列表有独立的「群组」分区,且那一区的角色列不写「所有者」", async () => {
