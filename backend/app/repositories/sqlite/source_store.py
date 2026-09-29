@@ -30,6 +30,7 @@ from app.repositories.ports import (
     SourceElementWrite,
 )
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.id_binding import drive_by, ids_param
 
 
 # Sentinel distinguishing "paper_meta not passed" (source_from_row should
@@ -1080,17 +1081,19 @@ class SourceStore:
         allowed_source_ids: Sequence[str] | None = None,
     ):
         if allowed_source_ids is not None:
-            source_ids = list(dict.fromkeys(allowed_source_ids))
-            if not source_ids:
+            # 今天不可达(``_retrieve_elements`` 一有清单就改走 chunk 召回),但
+            # 端口仍收这个参数,所以绑定形状照样安全:天花板一个参数;整份
+            # 清单来源的全部元素就是答案,按 id seek 与输出成正比(``drive_by``)。
+            source_payload = ids_param(allowed_source_ids)
+            if source_payload == "[]":
                 return []
-            placeholders = ",".join("?" for _ in source_ids)
             return db.execute(
                 "SELECT e.id,e.source_id,e.element_type,e.location_label,e.text,"
                 "s.title AS source_title,em.vector AS vector "
                 "FROM source_elements e JOIN sources s ON s.id=e.source_id "
                 "LEFT JOIN element_embeddings em ON em.element_id=e.id "
-                f"WHERE s.notebook_id=? AND e.source_id IN ({placeholders})",
-                (notebook_id, *source_ids),
+                f"WHERE s.notebook_id=? AND {drive_by('e.source_id')}",
+                (notebook_id, source_payload),
             ).fetchall()
         return db.execute(
             """

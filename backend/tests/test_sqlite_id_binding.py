@@ -28,6 +28,7 @@ import pytest
 
 from app.core.config import Settings
 from app.repositories.sqlite import database as sqlite_database
+from app.repositories.sqlite.chunk_store import ChunkStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.id_binding import (
     JSON_IDS,
@@ -37,6 +38,7 @@ from app.repositories.sqlite.id_binding import (
     not_member_of,
 )
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
+from app.repositories.sqlite.source_store import SourceStore
 from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
 
 DEPLOYMENT_VARIABLE_LIMIT = 32_766
@@ -237,17 +239,20 @@ def _chunk_sources(db) -> dict[str, str]:
 def _plan(db, sql: str, params: tuple) -> list[str]:
     return [
         row[3] for row in
-        sqlite_database._Conn.execute(db, "EXPLAIN QUERY PLAN " + sql, params)
+        # The base class: EXPLAIN must not land in ``captured`` itself.
+        sqlite3.Connection.execute(db, "EXPLAIN QUERY PLAN " + sql, params)
     ]
 
 
-def _single_ceiling_param(statements, ceiling) -> None:
-    """Exactly one parameter carries the ceiling, as one JSON array."""
+def _single_ceiling_param(statements, ceiling, *, bounded: int = 0) -> None:
+    """Exactly one parameter carries the ceiling, as one JSON array; the rest
+    is a handful of scalars plus ``bounded`` batched keys (S5's candidate
+    window), never a count that grows with the ceiling."""
     assert statements, "the ceiling statement was not captured"
     payload = ids_param(ceiling)
     for sql, params in statements:
         assert sum(p == payload for p in params) == 1, sql
-        assert len(params) < 16, (len(params), sql[:200])
+        assert len(params) < 16 + bounded, (len(params), sql[:200])
 
 
 # ------------------------------------------------------------ module API
@@ -495,3 +500,145 @@ def test_s7_s8_support_probe_goes_by_object_only(database, conn, captured):
         plan = " / ".join(_plan(conn, sql, params))
         assert re.search(r"SEARCH kos (EXISTS )?USING INDEX \S+ \(object_id=\?\)", plan), plan
         assert "(object_id=? AND source_id=?)" not in plan, plan
+
+
+# ------------------------------------------- S4-S6 chunk-store ceilings
+def _rows(rows) -> list[dict]:
+    return [dict(row) for row in rows]
+
+
+def _by_id(rows) -> list[dict]:
+    return sorted(_rows(rows), key=lambda row: row["id"])
+
+
+@pytest.mark.parametrize("label", list(CEILINGS))
+def test_s4_question_rows_match_reference_under_deployment_limit(
+    database, conn, label
+):
+    ceiling = CEILINGS[label]
+    store = ChunkStore(database)
+    everything = _rows(store.question_index_rows(
+        NB, actor_id=USER, allowed_source_ids=None, limit=10_000
+    ))
+    got = _rows(store.question_index_rows(
+        NB, actor_id=USER, allowed_source_ids=ceiling, limit=7
+    ))
+    allowed = None if ceiling is None else set(ceiling)
+    expected = [
+        row for row in everything
+        if allowed is None or row["source_id"] in allowed
+    ][:7]
+    assert got == expected
+    assert OTHER_MEMORY not in {row["source_id"] for row in got}
+
+
+def _candidate_chunks(db) -> list[str]:
+    return sorted(_chunk_sources(db))
+
+
+@pytest.mark.parametrize("mode", ["include", "exclude"])
+@pytest.mark.parametrize("label", BOUND)
+def test_s5_contribution_rows_match_reference_under_deployment_limit(
+    conn, label, mode
+):
+    ceiling = CEILINGS[label]
+    candidates = _candidate_chunks(conn)
+    everything = _by_id(ChunkStore.retrieval_contribution_rows(
+        conn, NB, candidates, actor_id=USER, source_mode=None, source_ids=(),
+    ))
+    got = _by_id(ChunkStore.retrieval_contribution_rows(
+        conn, NB, candidates, actor_id=USER, source_mode=mode,
+        source_ids=ceiling,
+    ))
+    allowed = set(ceiling)
+    if mode == "include":
+        expected = [row for row in everything if row["source_id"] in allowed]
+    else:
+        expected = [row for row in everything if row["source_id"] not in allowed]
+    # The statement has no ORDER BY: row order is the plan's, never a contract.
+    assert got == expected
+
+
+def test_s5_contribution_rows_are_driven_by_candidate_keys(conn, captured):
+    """S5: the <= 900 candidate primary keys drive; a driving ceiling walked
+    ``idx_chunks_source`` for every ceiling id instead (49k: 48 ms)."""
+    ceiling = CEILINGS["49k"]
+    for mode in ("include", "exclude"):
+        ChunkStore.retrieval_contribution_rows(
+            # A handful of keys out of ~100 chunks: the production ratio
+            # (<= 64 candidates in a notebook of tens of thousands), so the
+            # planner's choice on this small fixture is the production one.
+            conn, NB, _candidate_chunks(conn)[::30], actor_id=USER,
+            source_mode=mode, source_ids=ceiling,
+        )
+    _single_ceiling_param(captured, ceiling, bounded=64)
+    assert len(captured) == 2
+    for sql, params in captured:
+        plan = " / ".join(_plan(conn, sql, params))
+        assert "SEARCH c USING INDEX sqlite_autoindex_chunks_1 (id=?)" in plan, plan
+        assert "idx_chunks_source" not in plan, plan
+
+
+def test_s4_question_rows_bind_once_and_walk_question_order(
+    database, conn, captured
+):
+    ceiling = CEILINGS["49k"]
+    ChunkStore(database).question_index_rows(
+        NB, actor_id=USER, allowed_source_ids=ceiling, limit=7
+    )
+    _single_ceiling_param(captured, ceiling)
+    plan = " / ".join(_plan(conn, *captured[-1]))
+    assert "idx_chunks_source" not in plan, plan
+
+
+@pytest.mark.parametrize("presence_only", [False, True])
+@pytest.mark.parametrize("label", BOUND)
+def test_s6_ids_for_sources_match_reference_under_deployment_limit(
+    conn, label, presence_only
+):
+    ceiling = CEILINGS[label]
+    sources = _chunk_sources(conn)
+    got = [
+        tuple(row) for row in ChunkStore.ids_for_sources(
+            conn, NB, ceiling, presence_only=presence_only
+        )
+    ]
+    allowed = set(ceiling)
+    if presence_only:
+        present = set(sources.values())
+        assert got == [(s,) for s in dict.fromkeys(ceiling) if s in present]
+    else:
+        assert sorted(got) == sorted(
+            (chunk_id,) for chunk_id, source in sources.items() if source in allowed
+        )
+
+
+def test_s6_ids_for_sources_bind_the_ceiling_once(conn, captured):
+    """S6 is the intended ``drive_by`` (every chunk of the listed sources is
+    the answer); whether the planner seeks or scans is its cost call."""
+    ceiling = CEILINGS["49k"]
+    for presence_only in (False, True):
+        ChunkStore.ids_for_sources(
+            conn, NB, ceiling, presence_only=presence_only
+        )
+    _single_ceiling_param(captured, ceiling)
+    assert len(captured) == 2
+
+
+# ------------------------------------------ S9 element rows with a list
+@pytest.mark.parametrize("label", list(CEILINGS))
+def test_s9_element_rows_match_reference_under_deployment_limit(conn, label):
+    ceiling = CEILINGS[label]
+    everything = _by_id(SourceStore.retrieval_element_rows(conn, NB))
+    got = _by_id(SourceStore.retrieval_element_rows(conn, NB, ceiling))
+    allowed = None if ceiling is None else set(ceiling)
+    assert got == [
+        row for row in everything
+        if allowed is None or row["source_id"] in allowed
+    ]
+
+
+def test_s9_element_rows_bind_the_ceiling_once(conn, captured):
+    ceiling = CEILINGS["49k"]
+    SourceStore.retrieval_element_rows(conn, NB, ceiling)
+    _single_ceiling_param(captured, ceiling)
