@@ -16,7 +16,12 @@ What a public reader gets, and why:
   internal flag;
 * per reference — the display key, title, original file name, location, and the
   stored excerpt, so the ``[k]`` markers in the answer body can actually be
-  checked against something.
+  checked against something;
+* for a global Ask turn whose terminal citation check found failures — the
+  turn's ``citation_check`` counts and each failed reference's
+  ``verification`` (``changed``/``source_gone``/``unverifiable``). Part of the
+  answer's stated credibility, like the evidence level; both are absent on a
+  clean turn, which therefore projects exactly as before.
 
 What never crosses, and why:
 
@@ -103,6 +108,16 @@ MAX_CAPTION_CHARS = 500
 # both constants and fails if a future cap bump breaks the invariant, so the two
 # can never silently drift. Registered in docs (T6).
 MAX_REFERENCED_ASSETS = 6000
+
+# Global Ask's terminal citation check (PR-D). A failed check never voids the
+# answer: the turn is shared whole, each failed reference keeps its card and its
+# stored excerpt, and the page states -- in the past tense, because the snapshot
+# is the moment the answer was produced -- how many references did not pass.
+# These are the ONLY public values; an internal reason code (unattested /
+# unreadable / unattributed / out_of_ceiling) never reaches the stored answer
+# and, should one ever appear, is dropped here rather than disclosed.
+CITATION_VERIFICATION_VALUES = frozenset({"changed", "source_gone", "unverifiable"})
+_CITATION_CHECK_COUNTS = ("checked", "failed", "changed", "source_gone", "unverifiable")
 
 
 def conversation_asset_alias(token: str, asset_id: str) -> str:
@@ -404,7 +419,40 @@ def public_reference(key: str, reference: Any) -> dict[str, Any]:
         # addressable" is this projection's whole rule — the marker plus the
         # title and excerpt is the disclosure, not the destination.
         "is_external": str(row.get("tier") or "") == "external",
+        # Absent for a reference that passed (or was never checked), so a clean
+        # answer's reference keeps exactly the keys it always had.
+        **_verification_field(row),
     }
+
+
+def _verification_field(row: dict) -> dict[str, str]:
+    """``{"verification": value}`` for a flagged reference, else ``{}``.
+
+    Only the three public values cross; anything else is treated as absent."""
+    value = row.get("verification")
+    public = isinstance(value, str) and value in CITATION_VERIFICATION_VALUES
+    return {"verification": value} if public else {}
+
+
+def _citation_check_field(payload: dict) -> dict[str, Any]:
+    """``{"citation_check": summary}`` when the stored answer records at least
+    one failed citation, else ``{}`` -- so a clean turn projects byte for byte
+    what it did before the check existed.
+
+    An allowlist like everything else here: the five counts (non-negative ints;
+    a bool or a malformed value reads as 0) and ``outcome``, whose only value
+    is ``partial`` (``models.ask.CitationCheckSummary``: a failed check never
+    voids an answer), so a hand-edited label cannot reach the response model."""
+    summary = payload.get("citation_check")
+    if not isinstance(summary, dict):
+        return {}
+    counts = {
+        key: value if type(value) is int and value > 0 else 0
+        for key, value in ((key, summary.get(key)) for key in _CITATION_CHECK_COUNTS)
+    }
+    if counts["failed"] <= 0:
+        return {}
+    return {"citation_check": {"outcome": "partial", **counts}}
 
 
 def public_turn(
@@ -450,6 +498,7 @@ def public_turn(
         # projected to an opaque alias. Never the raw ``asset_id``/``element_id``.
         # Off when the deployment stores no images.
         "images": _public_images(selected, share_token, images_enabled),
+        **_citation_check_field(payload),
     }
 
 
@@ -496,10 +545,18 @@ def _selected_images(
     set the page discloses, never a superset (codex #522 R5). Reads only
     ``asset_id`` (for dedup / alias); the image dict is yielded so the caller can
     pull its public ``caption``, and every other key is dropped by
-    construction."""
+    construction.
+
+    A reference that failed global Ask's citation check contributes no image:
+    its card stays (title, excerpt, marker) but every way of opening what it
+    points at is closed, and an attached image is one of them. Skipping it here
+    closes both halves at once -- the page shows no image for it and the
+    endpoint's reverse index can no longer resolve its alias."""
     rows: dict[str, tuple[dict, list[str]]] = {}
     for key, reference in selected:
         row = reference if isinstance(reference, dict) else {}
+        if _verification_field(row):
+            continue
         for image in _as_list(row.get("images")):
             if not isinstance(image, dict):
                 continue

@@ -9,9 +9,11 @@ from pydantic import ValidationError
 
 from app.models.ask import ASK_UNDERSTANDING_MS_MAX, AskIntentConfirmation
 from app.models.global_ask import (
-    GlobalAskIntentPreviewRequest, GlobalAskJob, GlobalAskRequest,
+    FLAGGED_CITATION_MESSAGE, GlobalAskIntentPreviewRequest, GlobalAskJob, GlobalAskRequest,
     global_answer_citations, global_answer_text, global_answer_trace,
+    global_citation_flagged,
 )
+from app.services.global_citation_check import global_answer_check
 from ._shared import (
     RESULT_LIMIT, TEXT_LIMIT, _budget_response, _live_principal,
     _owner_request_context, _record_agent_call, _run_with_progress,
@@ -119,6 +121,16 @@ def _plain_citation(item: Any) -> dict[str, Any]:
     return item.model_dump(mode="json") if hasattr(item, "model_dump") else item
 
 
+def _citation_check_field(job: Any) -> dict[str, Any]:
+    """``{"citation_check": summary}`` for a partly failed answer, else ``{}``.
+
+    The one projection every global surface reads the stored summary through
+    (``global_answer_check``); a legacy ``response`` answer predates the check.
+    """
+    summary = global_answer_check(job)
+    return {"citation_check": summary} if summary else {}
+
+
 def _job_page(job: Any, answer_offset: int = 0, citation_offset: int = 0,
               coverage_offset: int = 0, trace_offset: int = 0) -> dict[str, Any]:
     """Keep independent text, citation, coverage and trace pages exact and resumable."""
@@ -185,6 +197,11 @@ def _job_page(job: Any, answer_offset: int = 0, citation_offset: int = 0,
                 "skipped": len(skipped), "degraded": len(degraded),
                 "skipped_notebooks": skipped_page,
                 "degraded_notebook_ids": degraded_page,
+                # Nested here, not a 21st top-level key: the page sits at
+                # ``OUTPUT_MAPPING_LIMIT`` exactly (see ``trace`` above).
+                # Present only when the terminal check failed a citation;
+                # each failed citation carries its own ``verification``.
+                **_citation_check_field(job),
             },
             "error": data.get("error", ""),
             "completeness_notice": legacy.get("completeness_notice", ""),
@@ -381,6 +398,9 @@ def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[],
         "trace_offset, then follow trace.next_offset (null at the end); trace.total is "
         "the step count regardless of mode (0 outside reasoning). Each trace step is "
         "bounded (kind/summary/duration plus a capped, flagged slice of its detail). "
+        "When some citations failed the answer's citation check, coverage.citation_check "
+        "counts them (checked/failed/changed/source_gone/unverifiable) and each failed "
+        "citation carries verification; the answer is still delivered whole. "
         "Each call rechecks token and historical scope authorization. "
         "Requires ask:execute and knowledge:read."
     ))
@@ -425,7 +445,9 @@ def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[],
     @server.tool(description=(
         "Read original text of an element cited by an owned global Ask job. Pass job_id "
         "and element_id from its citations. Follow next_offset for complete text. "
-        "Checks citation membership, live read rights and token allowlist. Requires knowledge:read."
+        "Checks citation membership, live read rights and token allowlist. A citation that "
+        "carries verification (it failed the answer's citation check) cannot be opened; its "
+        "stored quoted_span in get_global_ask is what the answer read. Requires knowledge:read."
     ))
     @_safe_errors
     async def get_global_cited_element(
@@ -437,7 +459,17 @@ def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[],
         def load() -> Any:
             principal = _authorize(repo, answer=False)
             with _owner_request_context(principal):
-                return global_ask_service().cited_element(
+                service = global_ask_service()
+                # Same order and refusal as the HTTP drill-down: the job's own
+                # authority first, then a citation that failed the terminal
+                # check is closed (its stored excerpt is in get_global_ask).
+                job = service.get_job(
+                    job_id, user_id=principal.owner_id,
+                    allowed_notebook_ids=principal.notebook_ids,
+                )
+                if global_citation_flagged(job, element_id):
+                    raise _ToolInputError(FLAGGED_CITATION_MESSAGE)
+                return service.cited_element(
                     job_id, element_id, user_id=principal.owner_id,
                     allowed_notebook_ids=principal.notebook_ids,
                 )

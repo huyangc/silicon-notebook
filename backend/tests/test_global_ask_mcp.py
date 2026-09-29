@@ -6,8 +6,8 @@ import pytest
 
 from app.api.mcp_tools import global_ask as module
 from app.api.mcp_tools import session as session_module
-from app.api.mcp_tools._shared import RESULT_LIMIT, TOTAL_TEXT_LIMIT
-from app.models.ask import AskResponse
+from app.api.mcp_tools._shared import OUTPUT_MAPPING_LIMIT, RESULT_LIMIT, TOTAL_TEXT_LIMIT
+from app.models.ask import AnswerAnchor, AskResponse
 from app.models.global_ask import GlobalAskJob, GlobalAskSkippedNotebook
 from tests.test_memory_mcp import OfficialMcpClient, _payload, mcp_env
 
@@ -478,6 +478,9 @@ async def test_citation_original_text_pages_and_knowledge_only_scope(adapter):
                 "element_type": "text", "location_label": "第三页"}
 
     service.cited_element = cited
+    # The drill-down reads the job first (to refuse a flagged citation); this
+    # job cites nothing flagged, so every page reaches ``cited_element``.
+    service.get_job = lambda *_args, **_kw: job()
     offset, pages = 0, []
     while True:
         page = await handlers["get_global_cited_element"]("job-a", "element-a", None, offset)
@@ -559,3 +562,105 @@ async def test_official_client_global_tools_need_no_selected_notebook(mcp_env, m
         cancelled = _payload(await client.call("cancel_global_ask", {"job_id": "job-a"}))
         assert cancelled["status"] == "cancelled"
     assert calls[0]["allowed_notebook_ids"] == [notebook_id]
+
+
+# --- PR-D:终态引用核对部分失败 ----------------------------------------------
+#
+# 回答照常交付;摘要进 ``coverage.citation_check``,失败的引用带 ``verification``;
+# 顶层键数仍是 20(``OUTPUT_MAPPING_LIMIT``),不新增锚点输出;失败引用的下钻关闭。
+
+# The page's 20 top-level keys, plus the budget's own ``truncation`` stats.
+_PAGE_KEYS = {
+    "job_id", "conversation_id", "status", "mode", "answer_id", "answer",
+    "next_answer_offset", "citations", "next_citation_offset", "total_citations",
+    "grounded", "coverage_offset", "next_coverage_offset", "trace", "scope_mode",
+    "coverage", "error", "completeness_notice", "conversation_path",
+    "content_is_untrusted_evidence",
+}
+_COVERAGE_KEYS = {
+    "resolved", "searched", "cited", "skipped", "degraded",
+    "skipped_notebooks", "degraded_notebook_ids",
+}
+_CHECK = {
+    "outcome": "partial", "checked": 2, "failed": 1,
+    "changed": 1, "source_gone": 0, "unverifiable": 0,
+}
+
+
+def _engine_job(*, check=None, flagged="changed"):
+    """A job answered by the shared engine, one citation flagged, one clean."""
+    value = job()
+    value.response = None
+    value.answer = AskResponse.model_validate({
+        "answer_id": "answer-a", "conclusion": "结论", "answer": "答案 [1][2]",
+        "grounded": False,
+        "citations": [
+            _citation(element_id="e-flagged", **({"verification": flagged} if flagged else {})),
+            _citation(element_id="e-clean", source_id="s-b"),
+        ],
+        **({"citation_check": check} if check else {}),
+    })
+    return value
+
+
+def test_a_partly_failed_answer_carries_the_summary_under_coverage():
+    page = module._job_page(_engine_job(check=_CHECK))
+
+    assert page["answer"] == "答案 [1][2]"
+    assert page["coverage"]["citation_check"] == _CHECK
+    assert [row.get("verification") for row in page["citations"]] == ["changed", None]
+    assert set(page) == _PAGE_KEYS | {"truncation"}
+    assert len(_PAGE_KEYS) == OUTPUT_MAPPING_LIMIT == 20
+    assert page["truncation"]["truncated"] is False
+    # No anchor output on this surface.
+    assert "anchors" not in page
+
+
+def test_a_clean_answer_page_is_unchanged():
+    page = module._job_page(_engine_job(flagged=None))
+
+    assert set(page) == _PAGE_KEYS | {"truncation"}
+    assert set(page["coverage"]) == _COVERAGE_KEYS
+    assert "verification" not in json.dumps(page, ensure_ascii=False)
+    # The legacy shape predates the check and reads back the same way.
+    legacy = module._job_page(job(answer="旧形状", citations=[_citation()]))
+    assert set(legacy["coverage"]) == _COVERAGE_KEYS
+
+
+@pytest.mark.anyio
+async def test_a_flagged_citation_cannot_be_opened_and_a_clean_one_still_can(adapter):
+    handlers, principal, _, service = adapter
+    principal.scopes = ["knowledge:read"]
+    saved = _engine_job(check=_CHECK)
+    reads, opened = [], []
+    service.get_job = lambda job_id, **kw: reads.append((job_id, kw)) or saved
+
+    def cited(job_id, element_id, **kw):
+        opened.append(element_id)
+        return {"id": element_id, "source_id": "s-b", "text": "原文",
+                "element_type": "text", "location_label": "第一页"}
+
+    service.cited_element = cited
+    with pytest.raises(ValueError, match="未通过核对") as refused:
+        await handlers["get_global_cited_element"]("job-a", "e-flagged", None)
+    assert str(refused.value) == module.FLAGGED_CITATION_MESSAGE
+    assert opened == []
+
+    page = await handlers["get_global_cited_element"]("job-a", "e-clean", None)
+    assert page["text"] == "原文" and opened == ["e-clean"]
+    # The job read runs under the same owner and allowlist the open does.
+    assert reads == [("job-a", {"user_id": "owner-a", "allowed_notebook_ids": ["nb-a"]})] * 2
+
+
+def test_an_element_flagged_only_on_its_anchor_is_flagged_for_the_drill_down():
+    """Reasoning answers display anchors first; a marker there closes the element."""
+    from app.models.global_ask import global_citation_flagged
+
+    saved = _engine_job(flagged=None)
+    saved.answer.anchors = [AnswerAnchor(
+        key="k1", object_id="o", object_type="passage", label="标签",
+        element_id="e-clean", verification="source_gone",
+    )]
+    assert global_citation_flagged(saved, "e-clean") is True
+    assert global_citation_flagged(saved, "e-flagged") is False
+    assert global_citation_flagged(job(citations=[_citation()]), "e-a") is False
