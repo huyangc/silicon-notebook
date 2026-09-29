@@ -4,15 +4,15 @@ const TOKEN_KEY = "silicon_notebook_token";
 // Shared with every tab through the same storage as the token itself: while one
 // tab migrates this session, the server revokes it before the response installs
 // the new token, and no tab may treat the resulting 401s as a logout.
-const HANDOFF_KEY = "silicon_notebook_session_handoff";
+// One key per in-flight request (prefix + handle): registering and retiring are
+// single-key writes, so concurrent tabs never read-modify-write a shared value.
+const HANDOFF_PREFIX = "silicon_notebook_session_handoff:";
 // api-client has no request timeout; the migration request is one short
 // transaction (a PBKDF2 check plus a few row updates). One minute bounds how
 // long a crashed tab's marker can keep suppressing a genuine 401.
 export const SESSION_HANDOFF_MAX_MS = 60_000;
 
-// One entry per in-flight migration request, so a request that fails (in this
-// or another tab) retires only its own protection, never a sibling's.
-type SessionHandoff = { id: string; token: string; expiresAt: number };
+type SessionHandoff = { token: string; expiresAt: number };
 
 // The token this tab last wrote or subscribed with. `storage` events fire only
 // in other tabs, so this is what another tab's write is compared against.
@@ -36,7 +36,7 @@ export function clearToken(): void {
   window.localStorage.removeItem(TOKEN_KEY);
   pageToken = "";
   try {
-    window.localStorage.removeItem(HANDOFF_KEY);
+    for (const key of handoffKeys()) window.localStorage.removeItem(key);
   } catch {
     // The token itself is gone; a stale marker expires on its own.
   }
@@ -47,25 +47,21 @@ export function authHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-function readHandoffs(): SessionHandoff[] {
-  try {
-    const raw = window.localStorage.getItem(HANDOFF_KEY);
-    const parsed: unknown = raw ? JSON.parse(raw) : [];
-    if (!Array.isArray(parsed)) return [];
-    const now = Date.now();
-    return parsed.filter((entry): entry is SessionHandoff => (
-      typeof entry?.id === "string" && typeof entry?.token === "string"
-      && typeof entry?.expiresAt === "number" && entry.expiresAt > now
-    ));
-  } catch {
-    // Unreadable storage protects nothing: callers fall back to the plain 401 rule.
-    return [];
+function handoffKeys(): string[] {
+  const keys: string[] = [];
+  for (let index = 0; index < window.localStorage.length; index += 1) {
+    const key = window.localStorage.key(index);
+    if (key?.startsWith(HANDOFF_PREFIX)) keys.push(key);
   }
+  return keys;
 }
 
-function writeHandoffs(entries: SessionHandoff[]): void {
-  if (entries.length) window.localStorage.setItem(HANDOFF_KEY, JSON.stringify(entries));
-  else window.localStorage.removeItem(HANDOFF_KEY);
+function readHandoff(key: string): SessionHandoff | null {
+  const raw = window.localStorage.getItem(key);
+  const parsed = raw ? JSON.parse(raw) as Partial<SessionHandoff> : null;
+  return parsed && typeof parsed.token === "string" && typeof parsed.expiresAt === "number"
+    ? { token: parsed.token, expiresAt: parsed.expiresAt }
+    : null;
 }
 
 /** Registers one in-flight handoff of `token`; returns its handle for `endSessionHandoff`. */
@@ -73,7 +69,8 @@ export function beginSessionHandoff(token: string): string {
   if (typeof window === "undefined" || !token) return "";
   const id = newClientRequestId();
   try {
-    writeHandoffs([...readHandoffs(), { id, token, expiresAt: Date.now() + SESSION_HANDOFF_MAX_MS }]);
+    const marker: SessionHandoff = { token, expiresAt: Date.now() + SESSION_HANDOFF_MAX_MS };
+    window.localStorage.setItem(HANDOFF_PREFIX + id, JSON.stringify(marker));
   } catch {
     // Without storage the handoff is simply unprotected (the previous behaviour).
     return "";
@@ -85,9 +82,7 @@ export function beginSessionHandoff(token: string): string {
 export function endSessionHandoff(handle: string): void {
   if (typeof window === "undefined" || !handle) return;
   try {
-    const entries = readHandoffs();
-    const kept = entries.filter((entry) => entry.id !== handle);
-    if (kept.length !== entries.length) writeHandoffs(kept);
+    window.localStorage.removeItem(HANDOFF_PREFIX + handle);
   } catch {
     // Expiry retires it.
   }
@@ -95,7 +90,20 @@ export function endSessionHandoff(handle: string): void {
 
 export function sessionHandoffActive(token: string): boolean {
   if (typeof window === "undefined" || !token) return false;
-  return readHandoffs().some((entry) => entry.token === token);
+  try {
+    const now = Date.now();
+    let active = false;
+    for (const key of handoffKeys()) {
+      const marker = readHandoff(key);
+      // A crashed tab's marker is swept here once it can no longer protect anything.
+      if (!marker || marker.expiresAt <= now) window.localStorage.removeItem(key);
+      else if (marker.token === token) active = true;
+    }
+    return active;
+  } catch {
+    // Unreadable storage protects nothing: callers fall back to the plain 401 rule.
+    return false;
+  }
 }
 
 /**

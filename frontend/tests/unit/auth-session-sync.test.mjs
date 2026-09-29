@@ -10,6 +10,8 @@ globalThis.window = {
     getItem: (key) => storage.get(key) ?? null,
     setItem: (key, value) => storage.set(key, String(value)),
     removeItem: (key) => storage.delete(key),
+    get length() { return storage.size; },
+    key: (index) => [...storage.keys()][index] ?? null,
   },
   addEventListener: (type, handler) => { if (type === "storage") listeners.add(handler); },
   removeEventListener: (type, handler) => { if (type === "storage") listeners.delete(handler); },
@@ -55,7 +57,7 @@ for (const [label, key, value] of [
 
 test("the handoff marker and unrelated keys never reload", () => {
   const tab = subscribed();
-  otherTabWrites("silicon_notebook_session_handoff", JSON.stringify([{ id: "h", token: "auto-account", expiresAt: 1 }]));
+  otherTabWrites("silicon_notebook_session_handoff:h", JSON.stringify({ token: "auto-account", expiresAt: 1 }));
   otherTabWrites("some_other_key", "value");
   beginSessionHandoff("auto-account");
   assert.equal(tab.reloads(), 0);
