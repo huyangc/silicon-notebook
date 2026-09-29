@@ -1,4 +1,5 @@
-import { requestBlob, requestJson, requestVoid } from "./api-client.ts";
+import { performApiRequest, requestBlob, requestJson, requestVoid } from "./api-client.ts";
+import { throwHumanizedHttpError } from "./errors.ts";
 import type { ReportDetailT, ReportFrameT, ReportSummaryT } from "./report-model.ts";
 import type { BaseScopePayload, SourceScopePayload } from "./source-scope.ts";
 
@@ -80,11 +81,76 @@ export const deleteReport = (nb: string, id: string) =>
     method: "DELETE",
   });
 
-export const shareReport = (nb: string, id: string) =>
-  requestJson<{ share_token: string }>(`/notebooks/${nb}/reports/${id}/share`, {
+/** 分享前的披露:公开页会带上作者本人多少条个人记忆摘录(服务端按即将公开的确切范围数)。 */
+export const getReportShareDisclosure = (nb: string, id: string) =>
+  requestJson<{ memory_count: number }>(`/notebooks/${nb}/reports/${id}/share/disclosure`, options);
+
+// 409 `share_disclosure_required`:作者确认的条数与服务端此刻数出来的不相等(或根本没带确认
+// 而库里有 Memory 引用)。数字由服务端给,前端只负责把确认条就地更新成它——所以这里不走通用
+// 人话层(那只会把它压成「操作有冲突」),而是转成类型化异常,`memoryCount` 就是新的确数。
+export class ShareDisclosureRequired extends Error {
+  readonly memoryCount: number;
+  readonly newMemoryCount: number;
+
+  constructor(memoryCount: number, newMemoryCount: number) {
+    super("share_disclosure_required");
+    this.name = "ShareDisclosureRequired";
+    this.memoryCount = memoryCount;
+    this.newMemoryCount = newMemoryCount;
+  }
+}
+
+/** 从 409 正文里认出 `share_disclosure_required`;认不出返回 null(落回通用错误路径)。
+ *  code 与状态码成对匹配,且 `memory_count` 必须是非负整数。结构在 `detail` 下(FastAPI 形状),
+ *  也容忍根层同形状。 */
+export const parseShareDisclosureRequired = (
+  status: number,
+  body: unknown,
+): { memoryCount: number; newMemoryCount: number } | null => {
+  if (status !== 409 || typeof body !== "object" || body === null) return null;
+  const root = body as Record<string, unknown>;
+  const detail = typeof root.detail === "object" && root.detail !== null
+    ? root.detail as Record<string, unknown>
+    : root;
+  if (detail.code !== "share_disclosure_required") return null;
+  const count = detail.memory_count;
+  if (typeof count !== "number" || !Number.isInteger(count) || count < 0) return null;
+  const added = detail.new_memory_count;
+  return {
+    memoryCount: count,
+    newMemoryCount: typeof added === "number" && Number.isInteger(added) && added >= 0 ? added : 0,
+  };
+};
+
+// `acknowledgedMemoryCount` 缺省时不带 body:零个 Memory 引用的报告分享,请求与今天逐字节相同。
+export const shareReport = async (
+  nb: string,
+  id: string,
+  acknowledgedMemoryCount?: number,
+): Promise<{ share_token: string }> => {
+  const res = await performApiRequest(`/notebooks/${nb}/reports/${id}/share`, {
     ...options,
     method: "POST",
+    ...(acknowledgedMemoryCount === undefined
+      ? {}
+      : { body: JSON.stringify({ acknowledged_memory_count: acknowledgedMemoryCount }) }),
   });
+  if (!res.ok) {
+    if (res.status === 409) {
+      // body 只能消费一次:探测读克隆,真正的报错仍交给原始 res 走人话层。
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await res.clone().text());
+      } catch {
+        parsed = undefined;
+      }
+      const required = parseShareDisclosureRequired(res.status, parsed);
+      if (required) throw new ShareDisclosureRequired(required.memoryCount, required.newMemoryCount);
+    }
+    await throwHumanizedHttpError(res, options.tag);
+  }
+  return res.json() as Promise<{ share_token: string }>;
+};
 
 export const getReportShare = (nb: string, id: string) =>
   requestJson<{ share_token: string }>(`/notebooks/${nb}/reports/${id}/share`, options);

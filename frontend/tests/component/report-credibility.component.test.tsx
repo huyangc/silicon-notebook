@@ -499,7 +499,7 @@ test("分享完成后落到发起时那份报告，且剪贴板失败不谎报�
   const second = detail({ id: "rep-b", status: "done", content_md: "B", shared: false });
 
   // 分享请求悬挂：期间把面板切到另一份报告，完成时不得把分享态按到它头上。
-  const toggleShare = vi.fn();
+  const toggleShare = vi.fn(async () => null);
 
   render(
     <ReportsPanel
