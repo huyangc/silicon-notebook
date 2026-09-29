@@ -2319,12 +2319,8 @@ class KnowledgeStorePort(Protocol):
     @staticmethod
     def relink_object_rows_for_source(
         db: object, notebook_id: str, source_id: str = "",
-        *, source_ids: Sequence[str] | None = None,
+        *, source_ids: Sequence[str] | None = None, with_citing: bool = False,
     ) -> list[Any]: ...
-    @staticmethod
-    def object_ids_citing_sources(
-        db: object, notebook_id: str, source_ids: Sequence[str]
-    ) -> list[str] | None: ...
     @staticmethod
     def relink_relation_rows_for_objects(
         db: object, notebook_id: str, object_ids: object

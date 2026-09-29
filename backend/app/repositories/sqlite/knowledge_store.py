@@ -1020,6 +1020,7 @@ class KnowledgeStore:
         source_id: str = "",
         *,
         source_ids: Optional[Sequence[str]] = None,
+        with_citing: bool = False,
     ):
         """Every non-deprecated object of ONE source, in insertion (rowid) order.
 
@@ -1051,11 +1052,46 @@ class KnowledgeStore:
         tests/test_kg_viewer_scope_rules.py). The JSON list is the only bound
         collection, so the statement switches to the shared ``id_binding``
         helpers mechanically.
+
+        ``with_citing`` (with ``source_ids``; codex #806 r1, the KG viewer
+        rule's suspect set): the SAME statement also returns, from the P0-4
+        reverse index, the objects whose evidence CITES any listed source, and
+        whether that index is certified complete for the notebook. Rows are
+        ``(id, kind)``, unordered: ``kind='owned'`` for the rows above,
+        ``'citing'`` for reverse-index rows (they may include deprecated
+        objects' rows — callers use them as a superset), and ONE
+        ``(NULL, 'certified')`` row when ``source_index_backfilled`` is set.
+        Uncertified (``source_index_backfilled`` false means "unknown", never
+        "no rows") → no ``'citing'`` rows and no marker, and the caller must
+        treat every object as possibly citing the sources. The id list is
+        still ONE JSON parameter; the citing leg seeks
+        ``idx_kos_source_object`` per listed id (named for the same reason as
+        above: the planner would otherwise walk ``idx_kos_notebook``). EXPLAIN
+        pin: tests/test_kg_viewer_scope_identities.py.
         """
         if source_ids is not None:
             values = sorted({str(value) for value in source_ids if value})
             if not values:
                 return []
+            if with_citing:
+                ids = json.dumps(values)
+                return db.execute(
+                    "SELECT id, 'owned' AS kind FROM knowledge_objects "
+                    "INDEXED BY idx_knowledge_objects_source "
+                    "WHERE notebook_id = ? AND source_id IN "
+                    "(SELECT CAST(value AS TEXT) FROM json_each(?)) "
+                    "AND status != 'deprecated' "
+                    "UNION ALL "
+                    "SELECT object_id, 'citing' FROM knowledge_object_sources "
+                    "INDEXED BY idx_kos_source_object "
+                    "WHERE source_id IN (SELECT CAST(value AS TEXT) FROM json_each(?)) "
+                    "AND notebook_id = ? AND EXISTS (SELECT 1 FROM unified_kg_state "
+                    "WHERE notebook_id = ? AND source_index_backfilled = 1) "
+                    "UNION ALL "
+                    "SELECT NULL, 'certified' FROM unified_kg_state "
+                    "WHERE notebook_id = ? AND source_index_backfilled = 1",
+                    (notebook_id, ids, ids, notebook_id, notebook_id, notebook_id),
+                ).fetchall()
             return db.execute(
                 "SELECT id FROM knowledge_objects "
                 "INDEXED BY idx_knowledge_objects_source "
@@ -1070,35 +1106,6 @@ class KnowledgeStore:
             "ORDER BY rowid",
             (notebook_id, source_id),
         ).fetchall()
-
-    @staticmethod
-    def object_ids_citing_sources(
-        db: sqlite3.Connection, notebook_id: str, source_ids: Sequence[str],
-    ) -> Optional[List[str]]:
-        """Ids of the objects whose evidence cites any of ``source_ids``, read
-        from the P0-4 reverse index in ONE statement (the ids are ONE JSON
-        parameter driving ``idx_kos_source_object``), or ``None`` when that
-        index is not certified complete for the notebook
-        (``source_index_backfilled`` false = "unknown", never "no rows") — the
-        caller must then treat every object as possibly citing them. An empty
-        list answers ``[]`` with no statement. Deprecated objects' rows may be
-        included: callers use this as a SUPERSET (PR-A·A5, codex #806 r1: the
-        clusters the KG viewer rule must examine; EXPLAIN pin in
-        tests/test_kg_viewer_scope_identities.py)."""
-        values = sorted({str(value) for value in source_ids if value})
-        if not values:
-            return []
-        if not KnowledgeStore.source_index_backfilled(db, notebook_id):
-            return None
-        return [
-            str(row["object_id"]) for row in db.execute(
-                "SELECT DISTINCT object_id FROM knowledge_object_sources "
-                "INDEXED BY idx_kos_source_object "
-                "WHERE source_id IN (SELECT CAST(value AS TEXT) FROM json_each(?)) "
-                "AND notebook_id = ? ORDER BY object_id",
-                (json.dumps(values), notebook_id),
-            ).fetchall()
-        ]
 
     @staticmethod
     def relink_relation_rows_for_objects(
