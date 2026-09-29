@@ -12324,6 +12324,11 @@
               "title": "Kind",
               "type": "string"
             },
+            "notebook_id": {
+              "default": "",
+              "title": "Notebook Id",
+              "type": "string"
+            },
             "operation": {
               "title": "Operation",
               "type": "string"
@@ -12355,6 +12360,11 @@
             "source_title": {
               "default": "",
               "title": "Source Title",
+              "type": "string"
+            },
+            "tier": {
+              "default": "personal",
+              "title": "Tier",
               "type": "string"
             },
             "unresolved_formula_cells": {

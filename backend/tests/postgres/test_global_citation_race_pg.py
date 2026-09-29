@@ -185,3 +185,10 @@ def test_postgres_live_references_are_byte_identical_after_one_read(pg_sources):
         drop_dangling_references(response, pg_sources.evidence_fingerprints)
     assert len(statements) == 1
     assert response.model_dump_json() == before
+
+
+@pytest.mark.parametrize("mutation", ["none", "update", "delete"])
+def test_postgres_overlay_passage_race_before_the_terminal_read(pg_sources, mutation):
+    from tests.citation_check_testkit import overlay_passage_race
+
+    overlay_passage_race(pg_sources, pg_sources.database, "%s", _NOTEBOOK, mutation)

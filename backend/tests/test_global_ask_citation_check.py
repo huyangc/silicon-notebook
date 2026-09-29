@@ -556,3 +556,20 @@ def test_liveness_propagates_cancellation():
 
     with pytest.raises(AskCancelled):
         drop_dangling_references(dangling_response("el-live", "s"), cancelled)
+
+
+@pytest.mark.parametrize("mutation", ["none", "update", "delete"])
+def test_sqlite_overlay_passage_race_before_the_terminal_read(sqlite_store, mutation):
+    """Closing item 16: a passage only the mix KG-overlay leg recalled is
+    registered like a federated one, so a clean run passes and an edit or a
+    deletion before the terminal read is reported."""
+    from tests.citation_check_testkit import overlay_passage_race
+
+    sources, database, notebook_id = sqlite_store
+    overlay_passage_race(sources, database, "?", notebook_id, mutation)
+
+
+def test_overlay_registration_is_a_no_op_outside_a_global_run():
+    from tests.citation_check_testkit import overlay_is_a_no_op_outside_a_global_run
+
+    overlay_is_a_no_op_outside_a_global_run(None)

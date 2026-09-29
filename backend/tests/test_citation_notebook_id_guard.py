@@ -143,15 +143,17 @@ BUILDER_SITES: Registry = {
         "used for exactly this write.",
     ),
     (SPREADSHEET, "spreadsheet_prompt_block"): (
-        ("citation.notebook_id if citation else ''",),
+        ("citation.notebook_id if citation else result.notebook_id",),
         "Workbook receipts DO cross notebooks (the ask lane loads one manifest "
         "per participant `(notebook_id, source_id)` ref), but this renderer is "
         "handed only the results — no active notebook id — so it copies the "
         "value `SpreadsheetAnalysisService._citation` already normalised "
         "through the helper for the very same result, rather than "
-        "re-implementing the rule a seventh time.  The `else ''` arm is the "
-        "degenerate no-delivered-rows case, where there is no citation to "
-        "copy and the model field's own default is the answer.",
+        "re-implementing the rule a seventh time.  The `else` arm is the "
+        "no-delivered-rows case (a filter that matches nothing): there is no "
+        "row citation to copy, so it copies `SpreadsheetAnalysisResult."
+        "notebook_id`, which `_execute` sets from that SAME normalised "
+        "citation -- a blank there left a global run's anchor unattributable.",
     ),
     (DOC_OVERVIEW, "prepare_source_overview"): (
         ("foreign_notebook_id(source_item.notebook_id, active_notebook_id)",),
