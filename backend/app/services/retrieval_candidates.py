@@ -3669,7 +3669,10 @@ class CandidateRetrievalService(_RetrievalState):
         # scale_auto_fold_on_add 排增量 fold 把 delta 收进索引。普通 Ask / 报告质量
         # 回滚闸仍由下方 FTS 覆盖全部 chunk；报告默认 ANN-only 时依赖及时 fold。
         # True 时保持强一致的暴力补召回(慢)。
-        delta_covered_sources = frozenset()
+        # 暴力补召回实际产出语义候选的 chunk id。下方词法半失败时,按这些 chunk
+        # 水合后的 source_id 判断哪些未 fold 来源真有语义候选——不按「请求过的
+        # 来源」算:缺 chunk_embeddings 的新来源在这里零行、不报错。
+        delta_semantic_ids = frozenset()
         if self.settings.scale_search_include_delta:
             try:
                 delta = self._index_delta(notebook_id)
@@ -3692,9 +3695,7 @@ class CandidateRetrievalService(_RetrievalState):
                         if cid not in chunk_sims:
                             cand_ids.append(cid)
                         chunk_sims[cid] = s
-                # 只有暴力补召回整段成功,这些来源才有语义候选;下方词法半失败时
-                # 据此判断它是不是某些来源的唯一召回。
-                delta_covered_sources = frozenset(delta_sources)
+                    delta_semantic_ids = frozenset(d_sims)
             except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮检索,退回仅核候选
                 self._note_model_error(
                     "chunk_ann_delta",
@@ -3706,6 +3707,7 @@ class CandidateRetrievalService(_RetrievalState):
 
         semantic_ids = set(chunk_sims)
         lexical_ids = set()
+        lexical_failure = None
         fts_leaf_ms = 0
         # A scope-complete ANN generation is the scalable Deep Report default.
         # If its source sidecar misses an authorized source, keep the indexed
@@ -3772,33 +3774,19 @@ class CandidateRetrievalService(_RetrievalState):
             except (AskCancelled, RetrievalControlError):
                 raise
             except Exception as exc:  # noqa: BLE001 — 词法失败不拖垮检索
-                # 其它词法失败要看词法半是不是某些来源的唯一召回。在范围内但
-                # 不在这一代 ANN 里的来源(sidecar 缺席、也没被 delta 暴力补上)
-                # 只能靠词法命中:它们会整体缺席,答案真受影响,照旧记
-                # model_error 上横幅。ANN 已覆盖全部在范围来源时,语义半照常
-                # 产出候选,词法只是补召回,不上横幅。两种都记事件:内容无关,
-                # 只带异常类名;site 与叶子事件(site=chunk_fts,带耗时)分开,
-                # 免得延迟诊断重复计数。
-                lexical_only_sources = unindexed_allowed_sources.difference(
-                    delta_covered_sources
-                )
-                self.event_log.emit({
-                    "kind": "ask_stage",
-                    "stage": "chunk_fts",
-                    "site": "chunk_ann_union",
-                    "notebook_id": notebook_id,
-                    "status": "failed_open",
-                    "lexical_mode": lexical_mode,
-                    "recall_role": (
-                        "sole" if lexical_only_sources else "supplement"
-                    ),
-                    "error_type": type(exc).__name__,
-                })
-                if lexical_only_sources:
-                    self._note_model_error("chunk_fts", "", exc)
+                # 其它词法失败是否上横幅,要等下方水合拿到 delta chunk 的来源
+                # 后才能判断,见 ``_note_ann_union_lexical_failure``。
+                lexical_failure = exc
         t_fts = time.perf_counter()
 
         if not cand_ids:
+            if lexical_failure is not None:
+                self._note_ann_union_lexical_failure(
+                    notebook_id, lexical_mode, lexical_failure,
+                    allowed=allowed,
+                    unindexed_allowed_sources=unindexed_allowed_sources,
+                    delta_covered_sources=frozenset(),
+                )
             total_ms = round((time.perf_counter() - t0) * 1000)
             self.event_log.emit({
                 "kind": "ask_stage",
@@ -3824,6 +3812,16 @@ class CandidateRetrievalService(_RetrievalState):
             return [], [], None
         chunks, ids, mat = self._hydrate_chunk_candidates(cand_ids)
         t_hydrate = time.perf_counter()
+        if lexical_failure is not None:
+            self._note_ann_union_lexical_failure(
+                notebook_id, lexical_mode, lexical_failure,
+                allowed=allowed,
+                unindexed_allowed_sources=unindexed_allowed_sources,
+                delta_covered_sources=frozenset(
+                    str(chunk["source_id"]) for chunk in chunks
+                    if chunk["chunk_id"] in delta_semantic_ids
+                ),
+            )
         if allowed is not None:
             chunks = [chunk for chunk in chunks if chunk["source_id"] in allowed]
             kept_ids = {chunk["chunk_id"] for chunk in chunks}
@@ -3869,6 +3867,47 @@ class CandidateRetrievalService(_RetrievalState):
             "candidates": len(cand_ids),
         })
         return scored, ids, mat
+
+    def _note_ann_union_lexical_failure(
+        self, notebook_id, lexical_mode, exc, *,
+        allowed, unindexed_allowed_sources, delta_covered_sources,
+    ):
+        """ANN∪FTS 联合检索里词法半的非超时失败:是否上横幅取决于词法半是不是
+        某些来源的唯一召回。
+
+        * ``sole``:范围内有来源不在这一代 ANN sidecar 里,也没被 delta 暴力
+          补召回**实际取回**语义候选(``delta_covered_sources`` 由调用方按水合
+          后 delta chunk 的 source_id 算;缺 chunk_embeddings 的新来源零行,
+          不算覆盖)。这些来源只能靠词法命中,会整体缺席——照旧记
+          ``chunk_fts`` model_error 上横幅。
+        * ``unknown``:没有来源范围(``allowed`` 为 None,直接的服务调用方
+          不给范围、也不是报告运行)。此时 ANN 跑全库、不对 sidecar 做范围
+          规划,无法知道 ANN 建好后有没有新来源——按 sole 处理,照旧上横幅。
+          不为此新增查询;HTTP 请求总会冻结出 include 范围,不走这条。
+        * ``supplement``:ANN(连同 delta)已覆盖全部在范围来源,语义半照常
+          产出候选,词法只是补召回,不上横幅。
+
+        三种都记一条内容无关的事件,只带异常类名;site 与叶子事件
+        (site=chunk_fts,带耗时)分开,免得延迟诊断重复计数。"""
+        if allowed is None:
+            recall_role = "unknown"
+        elif unindexed_allowed_sources.difference(delta_covered_sources):
+            recall_role = "sole"
+        else:
+            recall_role = "supplement"
+        self.event_log.emit({
+            "kind": "ask_stage",
+            "stage": "chunk_fts",
+            "site": "chunk_ann_union",
+            "notebook_id": notebook_id,
+            "status": "failed_open",
+            "lexical_mode": lexical_mode,
+            "recall_role": recall_role,
+            "error_type": type(exc).__name__,
+        })
+        if recall_role != "supplement":
+            self._note_model_error("chunk_fts", "", exc)
+
     def hydrate_chunk_candidates(self, cand_ids):
         """按候选 id 有界取数:chunk 文本行 + 归一化向量矩阵。候选界定之后的
         hydrate,ANN 路径与大库 FTS 降级路径共用,绝不全表。返回 (chunks, ids, mat)。

@@ -1427,9 +1427,15 @@ timing sample (present when the leaf query itself raised), and uses its own `sit
 `diag_retrieval_latency.py` does not count the leaf failure twice. `recall_role=supplement`
 means the ANN index covers every in-scope source: their semantic candidates are unaffected,
 so the failure records no model error and shows no banner. `recall_role=sole` means the
-scope also holds sources not yet in the vector index (and not covered by the opt-in delta
-brute force), which only lexical search can recall; the failure leaves them out, so it still
-records the `chunk_fts` model error and raises the banner.
+scope also holds sources not yet in the vector index and for which the opt-in delta brute
+force returned no semantic candidate (coverage counts only the sources whose delta rows came
+back; a new source with no chunk embeddings returns zero rows and stays uncovered), which only
+lexical search can recall; the failure leaves them out, so it still records the `chunk_fts`
+model error and raises the banner. `recall_role=unknown` means the call carried no source
+scope (a direct service caller outside a report run; HTTP requests always freeze an
+`include` scope), so the ANN ran over the whole library with no per-source coverage plan and
+whether sources were added after the index was built cannot be told; it is treated like
+`sole` and still raises the banner.
 
 A `chunk_scale_index` event from the federated borrow-only lane additionally carries
 `lane=peek`: it timed one dictionary lookup rather than an index load, so `diag_slow.py`

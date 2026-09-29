@@ -1133,8 +1133,11 @@ chunk 上），所以 `chunk_bruteforce_skipped(large_library_no_ann)` 出现在
 自己那条 `site=chunk_fts`、`status=failed_open` 的耗时样本（叶子查询本身抛错时才有）之上，用
 独立的 `site`，免得 `diag_retrieval_latency.py` 把叶子失败计两次。`recall_role=supplement`
 表示 ANN 已覆盖全部在范围来源：它们的语义候选不受影响，所以不记 model_error、不上横幅。
-`recall_role=sole` 表示范围里还有尚未进入向量索引（也没被可选的 delta 暴力补召回覆盖）、只能
-靠词法召回的来源：这一失败会让它们缺席，所以照旧记 `chunk_fts` model_error 并上横幅。
+`recall_role=sole` 表示范围里还有尚未进入向量索引、可选的 delta 暴力补召回也没取回语义候选
+（覆盖只按实际取回 delta 行的来源算；缺 chunk 向量的新来源零行，仍算未覆盖）、只能靠词法召回的
+来源：这一失败会让它们缺席，所以照旧记 `chunk_fts` model_error 并上横幅。`recall_role=unknown`
+表示这次调用没带来源范围（报告运行之外的直接服务调用；HTTP 请求总会冻结出 `include` 范围），
+ANN 跑全库、没有逐来源的覆盖规划，无法判断索引建好后有没有新加来源：按 `sole` 处理，照旧上横幅。
 
 联邦「只借不加载」腿发出的
 `chunk_scale_index` 事件额外带 `lane=peek`：它量的是一次字典查找而不是一次索引加载，所以
