@@ -426,6 +426,36 @@ def test_a_block_inside_the_sub_budget_binds_evidence_and_citations(repo):  # no
     assert list(citations) == ["e1"]
 
 
+@pytest.mark.parametrize("effort", ["overview", "standard"])
+def test_a_thorough_read_still_fits_the_synthesis_partition(repo, effort):  # noqa: F811
+    """PR-4:`depth="thorough"` 把整份取样预算给一篇,它读出的块经装配后仍整块装进
+    ——所有读取共用 `chunk_context_chars // 4` 字符池,thorough 只是不均分,不越过
+    装配侧的共享上限与分区容量。"""
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.collection_enumeration_answer import (
+        COLLECTION_MAP_BLOCK_MAX_CHARS,
+    )
+    from tests.test_reasoning_document_read import _long_documents, _run_reads
+
+    notebook = _long_documents(repo, "长文档")
+    result, _llm = _run_reads(
+        repo, notebook, [_read_action("长文档", depth="thorough")], effort)
+    assert result.document_reads[0].depth == "thorough"
+    chunk_context_chars = ask_retrieval_limits(effort).chunk_context_chars
+    service = repo._runtime.ask_service()
+    structured_map: dict = {}
+
+    block, dropped = service._assemble_document_read_block(
+        result.document_reads, "", structured_map, {}, _AnswerClient(),
+        chunk_context_chars)
+
+    assert dropped is False
+    assert block and any(key.startswith("k7") for key in structured_map)
+    assert len(block) <= min(
+        chunk_context_chars // 2,
+        chunk_context_chars - COLLECTION_MAP_BLOCK_MAX_CHARS - 4)
+
+
 def test_a_rendering_failure_leaves_no_half_state_and_is_logged(repo, monkeypatch):  # noqa: F811
     """④ 渲染中途抛错时,两个字典一个字都没被写过(它们是调用方的,撤不回来)。
 

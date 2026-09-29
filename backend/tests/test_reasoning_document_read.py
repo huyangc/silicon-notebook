@@ -1067,3 +1067,281 @@ def test_an_unparsed_document_reports_its_own_reason_not_a_reparse_story(repo): 
     assert "没有可读取的原文" in ledger
     assert "正在重新解析" not in ledger
     assert "《未解析文档》——" in ledger
+
+
+# ------------------------------------------------ depth: brief / thorough(PR-4)
+#
+# 份额口径(默认部署:元素池 64、每 run 最多 4 次、包头预留 200、每元素下界 320):
+#
+#   档位      字符池(cc//4)  brief 首读(元素/字符)  thorough 首读(元素/字符)
+#   overview      3000              1 / 550                8 / 2800
+#   standard      7500              5 / 1675              22 / 7300
+
+
+def _long_documents(repo, *titles):
+    """每篇 40 个长元素(每条约 470 字):任何一档的份额都读不完,取样会被份额
+    夹满——这样「用掉了多少」由份额决定,而不是由文档本身有多短决定。"""
+    notebook = repo.create_notebook(NotebookCreate(name="资料"))
+    for index, title in enumerate(titles):
+        _seed_document(repo, notebook.id, f"s-long{index}", title, "", tuple(
+            f"第{n + 1}节正文:" + "版图设计的取样方法与实验结论。" * 30
+            for n in range(40)))
+    return notebook
+
+
+def _spy_overview_calls(monkeypatch):
+    calls: list[dict] = []
+    original = rr_module.prepare_source_overview
+
+    def _spy(*args, **kwargs):
+        calls.append(dict(kwargs))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(rr_module, "prepare_source_overview", _spy)
+    return calls
+
+
+def _run_reads(repo, notebook, reads, effort="overview"):
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+
+    llm = _ValidatingLLM(
+        [_enumerate_sources_action(), *reads, ANSWER],
+        plan={"sub_queries": [{"query": "版图设计"}]})
+    result = _reader(repo, llm).run(
+        notebook.id, "介绍一下这篇文档", "",
+        limits=ask_retrieval_limits(effort))
+    assert not [s for s in _steps(result, "reflect")
+                if "fallback_reason" in s.detail]
+    return result, llm
+
+
+def _depth_rejected_sentence(*values):
+    shown = "、".join(f"「{v}」" for v in values)
+    return (f"read_document.depth 只接受 brief 或 thorough,{shown}"
+            "不是可选值,那几次已按 brief 读取。")
+
+
+@pytest.mark.parametrize("effort, depth, elements, chars", [
+    ("overview", "thorough", 8, 2800),
+    ("overview", "brief", 1, 550),
+    ("standard", "thorough", 22, 7300),
+    ("standard", "brief", 5, 1675),
+])
+def test_a_thorough_first_read_takes_the_whole_remaining_budget(
+    repo, monkeypatch, effort, depth, elements, chars,  # noqa: F811
+):
+    """thorough 把剩余预算整份给这一篇(除数取 1),brief 按剩余次数均分。
+
+    两档的数字都钉死:只读一篇时,brief 在 overview 档每次只拿到 1 个元素、550 字
+    ——这正是 depth 要解决的问题。字符份额仍扣包头预留,元素数仍由字符份额按
+    `DOCUMENT_READ_MIN_CHARS_PER_ELEMENT` 反推。
+    """
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+
+    notebook = _long_documents(repo, "长文档")
+    calls = _spy_overview_calls(monkeypatch)
+    result, _llm = _run_reads(
+        repo, notebook, [_read_action("长文档", depth=depth)], effort)
+
+    assert (calls[0]["max_elements"], calls[0]["budget_chars"]) == (
+        elements, chars)
+    divisor = 1 if depth == "thorough" else int(
+        repo.settings.reasoning_max_document_reads)
+    assert chars == (ask_retrieval_limits(effort).chunk_context_chars // 4
+                     // divisor - rr_module.DOCUMENT_READ_HEADER_RESERVE_CHARS)
+    outcome = result.document_reads[0]
+    assert outcome.depth == depth and outcome.depth_rejected == ""
+    assert len(outcome.id_map) == elements
+    assert len(outcome.context_block) <= chars
+
+
+def test_a_thorough_read_after_a_brief_one_gets_what_is_left_minus_the_reserve(
+    repo, monkeypatch,  # noqa: F811
+):
+    """先 brief 读一篇、再 thorough 读另一篇:第二篇拿到的是**剩余量**减包头预留,
+    不是整池——已用掉的那份不会被 thorough 再发一遍。"""
+    notebook = _long_documents(repo, "长文档甲", "长文档乙")
+    calls = _spy_overview_calls(monkeypatch)
+    result, _llm = _run_reads(repo, notebook, [
+        _read_action("长文档甲"),
+        _read_action("长文档乙", depth="thorough"),
+    ])
+
+    first, second = result.document_reads
+    assert (first.depth, second.depth) == ("brief", "thorough")
+    reserve = rr_module.DOCUMENT_READ_HEADER_RESERVE_CHARS
+    chars_left = 12_000 // 4 - len(first.context_block)
+    elements_left = (int(repo.settings.document_overview_max_elements)
+                     - len(first.id_map))
+    assert len(first.context_block) > 0
+    assert calls[1]["budget_chars"] == chars_left - reserve
+    assert calls[1]["max_elements"] == min(
+        elements_left,
+        (chars_left - reserve) // rr_module.DOCUMENT_READ_MIN_CHARS_PER_ELEMENT)
+    assert calls[1]["budget_chars"] > calls[0]["budget_chars"]
+
+
+def test_after_a_thorough_read_the_next_read_is_a_budget_skip(
+    repo, monkeypatch,  # noqa: F811
+):
+    """thorough 的代价:它把剩余预算用完之后,下一次读取走既有的
+    `document_read_budget` skip(零 I/O),而不是再读出一份空壳。"""
+    notebook = _long_documents(repo, "长文档甲", "长文档乙")
+    calls = _spy_overview_calls(monkeypatch)
+    result, _llm = _run_reads(repo, notebook, [
+        _read_action("长文档甲", depth="thorough"),
+        _read_action("长文档乙"),
+    ])
+
+    assert len(calls) == 1
+    assert [o.source_title for o in result.document_reads] == ["长文档甲"]
+    skip = _skips(result)["document_read_budget"]
+    assert "预算已经用完" in skip.summary
+
+
+@pytest.mark.parametrize("extra", [
+    {},                    # depth 整个缺省
+    {"depth": ""},         # 显式留空
+    {"depth": None},       # JSON null
+    {"depth": "brief"},    # 显式 brief
+])
+def test_brief_and_an_absent_depth_read_exactly_as_before(
+    repo, monkeypatch, extra,  # noqa: F811
+):
+    """brief / 缺省:份额、轨迹 detail 的键集合、回喂账目都与接入 depth 之前逐字节
+    相同——detail 里没有 `depth` 键,账目里没有教学句。"""
+    notebook = _long_documents(repo, "长文档")
+    calls = _spy_overview_calls(monkeypatch)
+    result, llm = _run_reads(
+        repo, notebook, [_read_action("长文档", **extra)])
+
+    assert (calls[0]["max_elements"], calls[0]["budget_chars"]) == (1, 550)
+    step = next(s for s in _steps(result, "read_document"))
+    assert set(step.detail) == {"source", "coverage", "found", "result_ids"}
+    outcome = result.document_reads[0]
+    assert (outcome.depth, outcome.depth_rejected) == ("brief", "")
+    ledger = rr_module.legacy_action_ledger_note(
+        [], {}, {}, 8, {}, [], result.document_reads)
+    assert ledger == "\n\n（已按篇读取过原文的文档,勿重复请求: 《长文档》。）"
+    assert ledger in llm.reflect_prompts[2]
+    assert "只接受 brief 或 thorough" not in llm.reflect_prompts[2]
+
+
+@pytest.mark.parametrize("depth", ["deep", "全文", True, 7])
+def test_an_illegal_depth_reads_as_brief_and_the_ledger_says_so(
+    repo, monkeypatch, depth,  # noqa: F811
+):
+    """非法值:校验层只记注记不拒收,解析器按 brief 读,账目在「已读」之后单列一句
+    教学文案——模型按「以为自己花了多少预算」规划后续读取,不告诉它那一次其实
+    按 brief 读了,它会以为整份预算已经花光。已读列表本身不变。"""
+    notebook = _long_documents(repo, "长文档")
+    calls = _spy_overview_calls(monkeypatch)
+    result, llm = _run_reads(
+        repo, notebook, [_read_action("长文档", depth=depth)])
+
+    assert (calls[0]["max_elements"], calls[0]["budget_chars"]) == (1, 550)
+    step = next(s for s in _steps(result, "read_document"))
+    assert "depth" not in step.detail
+    outcome = result.document_reads[0]
+    assert (outcome.depth, outcome.depth_rejected) == ("brief", str(depth))
+    ledger = rr_module.legacy_action_ledger_note(
+        [], {}, {}, 8, {}, [], result.document_reads)
+    assert ledger == ("\n\n（已按篇读取过原文的文档,勿重复请求: 《长文档》。"
+                      + _depth_rejected_sentence(depth) + "）")
+    assert ledger in llm.reflect_prompts[2]
+
+
+@pytest.mark.parametrize("depth", ["Thorough", " thorough ", "THOROUGH"])
+def test_case_and_whitespace_variants_of_thorough_read_as_thorough(
+    repo, monkeypatch, depth,  # noqa: F811
+):
+    """大小写/首尾空白只有一种读法:按 harness「可接受的偏差做兼容」视为 thorough,
+    没有教学句(不是非法值)。只作用于 depth,coverage 保持精确匹配。"""
+    notebook = _long_documents(repo, "长文档")
+    calls = _spy_overview_calls(monkeypatch)
+    result, llm = _run_reads(
+        repo, notebook, [_read_action("长文档", depth=depth)])
+
+    assert (calls[0]["max_elements"], calls[0]["budget_chars"]) == (8, 2800)
+    step = next(s for s in _steps(result, "read_document"))
+    assert step.detail["depth"] == "thorough"
+    outcome = result.document_reads[0]
+    assert (outcome.depth, outcome.depth_rejected) == ("thorough", "")
+    assert "只接受 brief 或 thorough" not in llm.reflect_prompts[2]
+
+
+@pytest.mark.parametrize("depth, depth_value, rejected", [
+    ("x" * 100, "brief", "x" * 60),       # 非法原值截 60 字
+    ("  deep  ", "brief", "deep"),        # 先 strip 再留原值
+    (" Thorough", "thorough", ""),
+    (["thorough"], "brief", "['thorough']"),
+])
+def test_the_parser_normalises_depth_and_truncates_the_rejected_value(
+    repo, depth, depth_value, rejected,  # noqa: F811
+):
+    """纵深防御:绕过校验层直达解析器时,depth 同样不抛(连 fail_closed 也不抛)。"""
+    from tests.test_reasoning_enumeration_tools import _SeqLLM
+
+    _notebook_with_documents(repo)
+    llm = _SeqLLM([_read_action("无摘要文档", depth=depth)],
+                  plan={"sub_queries": [{"query": "版图设计"}]})
+    retriever = _reader(repo, llm)
+    retriever.fail_closed = True
+
+    decision = retriever.reflect("q", "candidates")
+
+    assert decision.next_action == READ_DOCUMENT_ACTION
+    assert decision.read_document_depth == depth_value
+    assert decision.read_document_depth_rejected == rejected
+
+
+def test_several_illegal_depths_are_listed_once_each_in_one_sentence():
+    """多次读取各填了非法值:同一句里去重保序列出,不是每次一句。"""
+    outcome = rr_module.DocumentReadOutcome
+    reads = [
+        outcome(source_id=f"s{i}", source_title=title, notebook_id="nb",
+                tier="notebook", key_offset=7000, context_block="k7001: \"x\"",
+                id_map={}, citations=[], coverage_note="", coverage="spread",
+                summary_was_empty=True, depth_rejected=rejected)
+        for i, (title, rejected) in enumerate(
+            [("甲", "deep"), ("乙", ""), ("丙", "deep"), ("丁", "全文")])
+    ]
+    ledger = rr_module.legacy_action_ledger_note([], {}, {}, 8, {}, [], reads)
+    assert ledger == ("\n\n（已按篇读取过原文的文档,勿重复请求: 《甲》《乙》《丙》《丁》。"
+                      + _depth_rejected_sentence("deep", "全文") + "）")
+
+
+def test_a_failed_thorough_read_carries_depth_in_its_zero_hit_step(repo):  # noqa: F811
+    """空产物那条零命中步同样带稀疏的 `depth`(thorough 时)。"""
+    notebook = repo.create_notebook(NotebookCreate(name="资料"))
+    _seed_document(repo, notebook.id, "s-none", "未解析文档", "", ())
+    result, _llm = _run_reads(
+        repo, notebook, [_read_action("未解析文档", depth="thorough")])
+
+    step = next(s for s in _steps(result, "read_document"))
+    assert step.detail["found"] == 0
+    assert step.detail["depth"] == "thorough"
+
+
+@pytest.mark.parametrize("depth, deviations", [
+    ("thorough", []),
+    ("deep", [("read_document.depth", "invalid_enum")]),
+])
+def test_the_depth_enum_goes_through_the_real_shape_validator(
+    repo, depth, deviations,  # noqa: F811
+):
+    """schema 提示里 depth 是字符串枚举 `brief|thorough`:合法值零注记,非法值只记
+    一条 `invalid_enum` 注记、回复照常交付(不拒收,不废掉整轮)。"""
+    from app.core.model_json import validate_model_json_shape
+
+    notebook = _notebook_with_documents(repo)
+    action = _read_action("无摘要文档", depth=depth)
+    result, llm = _run_reads(repo, notebook, [action])
+
+    hint = next(h for h in llm.schema_hints if '"read_document"' in h)
+    assert ('"read_document":{"source":"","coverage":"spread|opening",'
+            '"depth":"brief|thorough"}') in hint
+    shape = validate_model_json_shape(json.dumps(action), hint)
+    assert [(d.path, d.reason) for d in shape.deviations] == deviations
+    assert result.document_reads[0].depth == (
+        "thorough" if depth == "thorough" else "brief")
