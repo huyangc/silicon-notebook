@@ -692,6 +692,38 @@ def test_evidence_context_authorization_site_keeps_mount_predicate():
     )
 
 
+def test_evidence_context_authorization_site_has_a_frozen_peer_branch():
+    """鉴权那处的**第二支**:对等(subjectless)运行问本 run 冻结的参与集。
+
+    全局问答的名义 active 只是第一个被选中的库,它的挂载表与这次授权无关:只问
+    挂载谓词,会让选中却没挂在锚点上的库「列得出、引不到」,也会放进挂在锚点上
+    却没被选中的库。所以 ``collection_item_citations`` 里必须同时有:
+
+    * ``subjectless_run_active`` 的调用(分支判据);
+    * 对 ``notebook_source_ceilings`` 的读取(成员资格 = 该库有一条逐库天花板;
+      刻意不是 ``notebook_in_scope``——对等模式下它对集合外的库也答 True)。
+
+    上一条用例钉单库那一支(直调挂载谓词、不经覆盖解析);两条一起,删掉任一支
+    都会红。**变异锚点**:删掉对等分支 -> 本条红;把单库分支也改成读天花板 ->
+    上一条红。
+    """
+    calls = _evidence_context_scopes("call")
+    attributes = _evidence_context_scopes("attribute")
+    in_scope = _EVIDENCE_CONTEXT_AUTHORIZATION_SCOPE
+    assert any(
+        scope.startswith(in_scope) and target == "subjectless_run_active"
+        for scope, target in calls
+    ), f"{_EVIDENCE_CONTEXT_PATH}::{in_scope} 不再按 subjectless 分支。"
+    assert any(
+        scope.startswith(in_scope)
+        and target.rsplit(".", 1)[-1] == "notebook_source_ceilings"
+        for scope, target in attributes
+    ), (
+        f"{_EVIDENCE_CONTEXT_PATH}::{in_scope} 的对等分支不再以冻结的逐库天花板"
+        f"判定成员资格。"
+    )
+
+
 # 第 2 层的第二半(A2):注入式谓词的**来源**。
 #
 # ``knowledge_query`` / ``knowledge_lifecycle`` / ``plugin_ask_engine`` 上面那条

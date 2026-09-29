@@ -233,16 +233,6 @@
       `_require_ask_available` / 前端三处同源口径；默认配置下
       `enumeration_wired and collection_map.sources > 0` 已先放行，所以这条缺口只在枚举
       工具被关掉时单独暴露。刻意不在联邦 PR 里扩范围。
-- [ ] **全局（对等）模式下集合枚举的引用卡只给到命名锚点挂载得到的库**（codex #755 第 6 轮
-      P2）。`evidence_context.collection_item_citations` 在元素水合前复核成员资格，走的是
-      **真实挂载谓词**（`self.notebooks.participant_notebook_ids(active)`）——那是鉴权座位，
-      守卫按函数作用域钉着它不得出现任何 `resolve_*`（见 `docs/development*.md` 守卫一节）。
-      全局 run 里参与库之间通常互不挂载，于是锚点之外的库枚举出来的行拿不到引用卡，它们的
-      来源定位与库归属也进不了合成绑定。方向是**少给**（不是泄漏）：答案里仍会列出这些行，
-      只是没有可点开的依据。修法是给这一处新开一条「已由全局准入鉴权过的参与集」通道
-      （`can_read_many` 在 `global_ask._execute` 里对同一组 id 刚复核过），而不是放宽共享的
-      挂载谓词；它改的是被守卫钉住的鉴权作用域，要单独立 PR、单独做安全评审，连同守卫的
-      作用域断言一起改。
 - [ ] **全局（对等）模式的元素检索臂联邦化**。`retrieval_candidates.retrieve_elements`
       是第三条 **active-only** 补召回腿（前两条见上一条）：它只对传进来的那一个 notebook
       发一次元素检索，没有联邦通道。对等模式下留着它，等于凭空给**名义 active** 多一条
