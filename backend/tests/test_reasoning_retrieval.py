@@ -6510,7 +6510,8 @@ def test_corpus_languages_are_not_probed_with_the_keyword_gate_closed(
 
 def test_chunks_keywords_list_form_is_joined_and_leading_blanks_are_free(rrepo):
     """模型把 `chunks_keywords` 写成列表:取字符串元素、空格拼接;开头空白不占
-    300 字符的预算(先 lstrip 再截断)。"""
+    300 字符的预算——这一格钉的是 `as_text` / `as_text_list` 先去首尾空白的
+    性质(`chunks_keywords_text` 在其后截断再 strip)。"""
     class _Keywords:
         configured = True
 
