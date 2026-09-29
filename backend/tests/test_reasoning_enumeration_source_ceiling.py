@@ -839,9 +839,29 @@ _CEILING_ENTRY_POINTS = frozenset({
 _CEILING_CALLER_FILES = (
     "backend/app/services/reasoning_retrieval.py",
     "backend/app/services/ask_service.py",
+    # chunk 引擎的目录概览:它替 ``_try_document_overview`` 调执行器,判词经它转交。
+    "backend/app/services/document_catalog_overview.py",
 )
 # 以 getattr 取出入口、再在同一个函数里带着判词调用的座位。
 _CEILING_GETATTR_SEATS = frozenset({"_plugin_collection_overview"})
+
+
+def _passed_keywords(call) -> set:
+    """一次调用显式传了哪些关键字。``**{...}`` 展开也算,只要展开的字典字面里写着
+    这个键(目录概览按「调用方给了判词才转交」的形状写成条件展开,省略时落到执行器
+    的安全默认值)。"""
+    import ast
+
+    names = {kw.arg for kw in call.keywords if kw.arg is not None}
+    for kw in call.keywords:
+        if kw.arg is None:
+            names.update(
+                key.value for node in ast.walk(kw.value)
+                if isinstance(node, ast.Dict)
+                for key in node.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            )
+    return names
 
 
 def test_every_collection_entry_call_passes_the_ceiling_verdict():
@@ -865,7 +885,7 @@ def test_every_collection_entry_call_passes_the_ceiling_verdict():
             for node in ast.walk(func):
                 if not isinstance(node, ast.Call):
                     continue
-                keywords = {kw.arg for kw in node.keywords}
+                keywords = _passed_keywords(node)
                 if (isinstance(node.func, ast.Attribute)
                         and node.func.attr in _CEILING_ENTRY_POINTS):
                     seen_calls += 1
@@ -882,13 +902,14 @@ def test_every_collection_entry_call_passes_the_ceiling_verdict():
                     seen_seats.add(func.name)
                     if not any(
                         isinstance(inner, ast.Call)
-                        and any(kw.arg == "ceiling_binds" for kw in inner.keywords)
+                        and "ceiling_binds" in _passed_keywords(inner)
                         for inner in ast.walk(func)
                     ):
                         offenders.append(f"{relative}:{node.lineno} {func.name}")
     assert offenders == []
-    # 活性:守卫真的看见了调用点(枚举三动作 + 标题解析 + 首轮地图 + 无图早退)。
-    assert seen_calls >= 6
+    # 活性:守卫真的看见了调用点(枚举三动作 + 标题解析 + 首轮地图 + 无图早退 +
+    # 目录概览的来源清单)。
+    assert seen_calls >= 7
     assert seen_seats == _CEILING_GETATTR_SEATS
 
 

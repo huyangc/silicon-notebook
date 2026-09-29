@@ -84,6 +84,14 @@ contributor constraints, not a second implementation history.
   `_bounded_participants` must validate outside those handlers. Mode checks
   (`subjectless_run_active`) and filtering checks (`peer_scope_ceiling_active`) remain
   separate. `test_participant_override_guard.py` owns this security boundary.
+  Enumerated-item citations in a subjectless run use the run's frozen participant
+  set, which the global-ask manager authorised with that read predicate.
+- Every caller of the enumeration and catalog entry points (`enumerate_elements`,
+  `enumerate_kg_objects`, `enumerate_sources`, `resolve_source_title`,
+  `collection_map`, `collection_map_text`) passes `ceiling_binds` explicitly, with
+  the run's verdict from `reasoning_retrieval.ceiling_binds_for_run`; the default
+  binds and over-filters. `test_every_collection_entry_call_passes_the_ceiling_verdict`
+  pins the Ask, reasoning and catalog-overview callers.
 - `RepositoryRuntime` owns mutable operational state; `REPORT_CANCELLATIONS` is the
   explicit process-global exception shared by identity with the coordinator and
   compatibility functions. Domain builders take earlier frozen bundles, never the

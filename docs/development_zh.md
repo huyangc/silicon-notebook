@@ -68,7 +68,13 @@
   fail-soft handler 必须登记到 `_SEAT_FAILSOFT_SITES`；`_bounded_participants`
   必须在这些 handler 外先验证。模式问题 `subjectless_run_active` 与过滤问题
   `peer_scope_ceiling_active` 分开判断。安全边界由
-  `test_participant_override_guard.py` 守住。
+  `test_participant_override_guard.py` 守住。无主体 run 里枚举条目的引用按本次冻结的
+  参与库集合复核，该集合由全局问答管理器按同一读权限判据授权。
+- 枚举与目录入口（`enumerate_elements`、`enumerate_kg_objects`、`enumerate_sources`、
+  `resolve_source_title`、`collection_map`、`collection_map_text`）的每个调用方都显式
+  传入 `ceiling_binds`，取值为本次 run 的判词 `reasoning_retrieval.ceiling_binds_for_run`；
+  默认值会过度过滤。问答、推理与目录概览侧的调用方由
+  `test_every_collection_entry_call_passes_the_ceiling_verdict` 钉住。
 - 可变运行态归 `RepositoryRuntime`，`REPORT_CANCELLATIONS` 是刻意保留的进程全局
   例外，与 coordinator 和兼容函数共享同一身份。领域 builder 只接较早的 frozen
   bundle，不接 runtime 本身；保留窄迟绑定 accessor 与启动副作用顺序。组合后受支持
