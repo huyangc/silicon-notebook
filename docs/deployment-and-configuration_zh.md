@@ -1032,7 +1032,7 @@ KG_CANONICAL_FOLD_ENABLED    # 检索时折叠同 canonical 的碎片化 KG 节�
 KG_ABOUT_DOWNWEIGHT_ENABLED  # 关系检索里对弱 about 边降权排序（默认 false）
 KNOWHOW_KG_NODE_RETRIEVAL_ENABLED # Knowhow 格子对象进入 reasoning/graph 节点检索（默认 true；false 只关闭直接节点路径，不影响格子 chunk 检索）
 REASONING_ENUM_TOOLS_ENABLED # 逐步推理的类型化集合枚举 reflect 工具，enumerate_elements/enumerate_kg_objects（默认 true；false 同时关闭两个工具与集合地图，零额外查询）
-REASONING_CHUNK_SEARCH_ENABLED # 逐步推理的原文段落检索一等动作 search_chunks 及首轮确定性原文播种、已确认方向补种与 add_subquery 原文半的总闸（不看知识图谱，有图与无图 run 同闸；默认 true；false 时动作不进 schema/prompt/白名单、播种与原文补检索不跑、REASONING_MAX_CHUNK_SEARCHES 无消费者，逐字回到接入前——但仍会在请求级 memo 内为判定图是否在范围内付一次图存在性 EXISTS 查询，这与总闸开关无关）
+REASONING_CHUNK_SEARCH_ENABLED # 逐步推理的原文段落检索一等动作 search_chunks 及首轮确定性原文播种、已确认方向补种与 add_subquery 原文半的总闸（不看知识图谱，有图与无图 run 同闸；默认 true；false 时动作不进 schema/prompt/白名单、播种与原文补检索不跑、REASONING_MAX_CHUNK_SEARCHES 无消费者，逐字回到接入前，问答合成的原文装配顺序也回到改动前（没有检索段时两道交错不起作用，只剩相关度排序 + 精确前缀席位）——但仍会在请求级 memo 内为判定图是否在范围内付一次图存在性 EXISTS 查询，这与总闸开关无关；另外深度报告撰写的未绑定段已改为同一套排序而非插入序，这一点不随总闸回退）
 REASONING_OUTLINE_ENABLED    # 逐步推理的大纲便签 reflect 动作，update_outline（默认 true；不论此开关，仅「穷尽」检索档位提供该动作；false 关闭该动作与按节合成，回到接入前逐字一致的行为）；同一个开关也管深度报告每节深挖在穷尽档（depth 16，见下方 REPORT_MAX_SECTIONS）的启用，不另设报告专属开关
 REASONING_OUTLINE_KG_GAP_ENABLED # 大纲便签的 KG 弱支撑边回喂：每次被接受的 update_outline 之后附带弱支撑关系提示（默认 true；叠在 REASONING_OUTLINE_ENABLED 之上；false 关闭后大纲便签不再附带弱支撑关系提示，零额外查询）；深度报告每节深挖到达穷尽档时同样生效
 AGENT_PROFILE_ENABLED        # 「AI 对这个库的理解」总闸：同时管住 plan/reflect 注入、后台巡固触发与两个 API 面的可见性（默认 true；false 处处逐字回到接入前——不注入、不记 trace 步、不排巡固，API 返回 enabled=false 而非 404）

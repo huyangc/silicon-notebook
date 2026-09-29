@@ -859,6 +859,10 @@ _SEAT_FAILSOFT_SITES = (
     ("app/services/ask_service.py", "AskService._answer_with_retry", "synth"),
     ("app/services/reasoning_retrieval.py",
      "ReasoningRetriever._chunk_seed_search", "search_chunks"),
+    # 首轮播种外层并发度按参与库数收紧:``chunk_participant_count`` ->
+    # ``federation_participant_ids`` -> 参与集座位。
+    ("app/services/reasoning_retrieval.py",
+     "ReasoningRetriever._chunk_seed_workers", "count"),
     ("app/services/reasoning_retrieval.py",
      "ReasoningRetriever._first_round_search", "search"),
     ("app/services/reasoning_retrieval.py",

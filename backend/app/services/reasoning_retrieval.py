@@ -3260,8 +3260,10 @@ class ReasoningRetriever:
         self.allow_consult_memory = True
         # Authoring-flow policy hook mirroring allow_ppr/allow_exact_lookup:
         # True (Ask's and the report engine's behavior) keeps BOTH halves of the
-        # raw-passage channel live — the no-graph first-round seed and the
-        # reflect ``search_chunks`` action; False takes both away through the
+        # raw-passage channel live — the first-round passage seed (with the
+        # coverage / add_subquery passage backfill; none of it looks at the
+        # knowledge graph) and the reflect ``search_chunks`` action; False
+        # takes both away through the
         # same single gate the deployment kill switch uses
         # (``chunk_search_active``), so the action never reaches the schema, the
         # prompt or the allowed-action whitelist and the seed never runs.
@@ -5109,6 +5111,38 @@ class ReasoningRetriever:
                 raise
             return []
 
+    def _chunk_seed_workers(self, notebook_id: str, subquery_count: int) -> int:
+        """首轮播种的外层并发度:`max(1, min(N, 8, 8 // P))`。
+
+        每条子查询的 `search_chunks` 在 `chunk_federation` 里还会按参与库再扇出
+        `min(P, 8)` 条腿,每条腿各取一个数据库连接。外层若按子查询数开满 8 个
+        线程,N=5、P=4 就是约 20 个并发取连接的请求——PG 连接池默认 10、取连接
+        超时 10 秒,首轮播种会自己把池子挤爆。所以外层 × 内层的乘积压在 8 以内:
+        这个 8 与报告检索的扇出上限 `REPORT_RETRIEVAL_FANOUT`(默认 8)同量级,
+        并低于 PG 池的 10,留出给同一请求其它读的余量。
+        P 取参与库数(`RetrievalService.chunk_participant_count`,与扇出同一个
+        座位与上限);检索端口替身没有这个方法时按 1 计(单库,形状不变)。
+
+        读参与集是一次触达座位的调用,失败语义与 `_chunk_seed_search` 同形:
+        身份复核失败(`RetrievalControlError`)与取消照抛,其余故障按 1 个库
+        继续——并发度估不准不该拖垮整轮播种,`fail_closed` 下照抛。
+        """
+        participants = 1
+        count = getattr(self.retrieval, "chunk_participant_count", None)
+        if count is not None:
+            try:
+                participants = max(1, int(count(notebook_id)))
+            except AskCancelled:
+                raise
+            except RetrievalControlError:
+                # 登记的 fail-soft handler(`test_participant_override_guard`
+                # 的 `_SEAT_FAILSOFT_SITES`):座位对身份错配是 raise,不许吞。
+                raise
+            except Exception:
+                if self.fail_closed:
+                    raise
+        return max(1, min(subquery_count, 8, 8 // participants))
+
     def _keyword_seed_search(
         self, notebook_id: str, keywords: str,
     ) -> Tuple[List, bool]:
@@ -5229,7 +5263,8 @@ class ReasoningRetriever:
         seen_chunks = state.seen_chunks
         take = state.per_query_take
         raise_if_cancelled(self.cancel_event)
-        with ThreadPoolExecutor(max_workers=min(len(subqueries), 8)) as ex:
+        workers = self._chunk_seed_workers(notebook_id, len(subqueries))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
             # Context must be copied once PER task (见 `_first_round_initial_
             # search` 的同款注释):一个 Context 不能被并发进入,而裸执行器会
             # 丢掉 per-user 的模型/日志路由。

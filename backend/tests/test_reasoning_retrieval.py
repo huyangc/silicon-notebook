@@ -4048,6 +4048,81 @@ def test_empty_chunk_seed_still_lets_the_empty_evidence_fallback_fire(rrepo):
                for t in res.trace if t.step_type == "fallback")
 
 
+@pytest.mark.parametrize("participants, subqueries, expected", [
+    (1, 5, 5), (1, 12, 8), (4, 5, 2), (8, 5, 1), (9, 5, 1), (2, 1, 1),
+])
+def test_chunk_seed_outer_workers_shrink_with_the_participant_count(
+    rrepo, participants, subqueries, expected,
+):
+    """P2:外层并发 × 联邦腿数压在 8 以内——`max(1, min(N, 8, 8 // P))`。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    rr.retrieval.chunk_participant_count = lambda notebook_id: participants
+    assert rr._chunk_seed_workers("nb", subqueries) == expected
+
+
+def test_chunk_seed_workers_fall_back_to_one_library(rrepo):
+    """检索替身没有 `chunk_participant_count`、或读座位时普通故障 ⇒ 按 1 个库。"""
+    from types import SimpleNamespace
+
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    real = rr.retrieval
+    rr.retrieval = SimpleNamespace()
+    assert rr._chunk_seed_workers("nb", 5) == 5
+
+    def _broken(notebook_id):
+        raise RuntimeError("db hiccup")
+
+    rr.retrieval = real
+    rr.retrieval.chunk_participant_count = _broken
+    assert rr._chunk_seed_workers("nb", 5) == 5
+
+
+def test_first_round_seed_runs_two_outer_workers_over_four_libraries(
+    rrepo, monkeypatch,
+):
+    """端到端:参与库 4 个、首轮 5 条子查询 ⇒ 播种线程池只开 2 个 worker。"""
+    import app.services.reasoning_retrieval as module
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    queries = ["布局", "布线", "时序", "功耗", "面积"]
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": q} for q in queries]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    rr.retrieval.chunk_participant_count = lambda notebook_id: 4
+    calls: list = []
+    _stub_search_chunks(rr, calls, {None: [_chunk_hit("ck-1")]})
+    sizes: list = []
+    real_pool = module.ThreadPoolExecutor
+
+    def _recording_pool(*args, **kwargs):
+        sizes.append(kwargs.get("max_workers"))
+        return real_pool(*args, **kwargs)
+
+    monkeypatch.setattr(module, "ThreadPoolExecutor", _recording_pool)
+    rr.run(nb.id, "布局布线怎么做", "", limits=ask_retrieval_limits("exhaustive"))
+
+    assert sorted(query for query, _k in calls) == sorted(queries)
+    assert 2 in sizes
+    assert sizes.count(2) == 1
+
+
+def test_chunk_participant_count_counts_the_checked_reference_library(rrepo):
+    """真实 `RetrievalService`:本库 + 一个挂载的参考库 ⇒ 2(与联邦扇出同一个座位)。"""
+    nb = _seed_notebook_without_kg(rrepo)
+    assert rrepo.retrieval.chunk_participant_count(nb.id) == 1
+    base = _seed_two_nodes(rrepo)
+    rrepo.replace_notebook_bases(nb.id, [base.id], "user-local")
+    assert rrepo.retrieval.chunk_participant_count(nb.id) == 2
+
+
 def test_chunk_search_kill_switch_removes_the_first_round_seed_entirely(rrepo):
     """验收 10 的播种半:关掉即零 I/O、零轨迹步——逐字节回到接入前。"""
     from app.services.reasoning_retrieval import ReasoningRetriever

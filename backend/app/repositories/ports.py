@@ -3056,7 +3056,8 @@ class RetrievalPort(Protocol):
     def retrieve_chunk_candidates(self, notebook_id: str, query: str) -> tuple[list[RetrievedChunk], list[str], np.ndarray | None]: ...
     def select_chunk_candidates(self, scored: list[RetrievedChunk], ids: list[str], matrix: np.ndarray | None, k: int, lambda_: float) -> list[RetrievedChunk]: ...
     # The lexical (FTS) half of the raw-passage surface, spelled here for the
-    # same reason as the pair above: reasoning's no-graph first round reaches it
+    # same reason as the pair above: reasoning's first-round passage seed (graph
+    # or not, since 2026-09-29) reaches it
     # through its own ``RetrievalPort`` handle (``ReasoningRetriever.
     # keyword_chunks``), while ask's chunk mode reaches the identical channel
     # through ``AskCandidatePort``. Two owners, two declarations.
@@ -3102,7 +3103,7 @@ class AskCandidatePort(Protocol):
     def select_chunk_candidates(self, scored: list[RetrievedChunk], ids: list[str], matrix: np.ndarray | None, k: int, lambda_: float) -> list[RetrievedChunk]: ...
     # has_kg / any_base_has_kg moved to ``RetrievalPort`` when the KG-availability
     # fact got a single evaluation point (``reasoning_retrieval.kg_in_scope_for``,
-    # which both ask's no-KG early exit and reasoning's no-graph seeding read):
+    # which both ask's no-KG early exit and reasoning's graph gates read):
     # nothing reaches them through the candidate-producer seat any more, and the
     # protocol-coverage guard requires every declared member to have a live
     # service/route call -- same reason merge_chunk_candidates was dropped above.

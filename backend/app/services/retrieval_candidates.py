@@ -343,7 +343,9 @@ class _RetrievalState:
         这个座位不再是「一次 ask 三条腿各一次」:``_gather_vector_chunks`` /
         ``retrieve_chunk_candidates`` / ``retrieve_chunk_candidates_multi`` 三个
         chunk 入口各走一次,reasoning 的 ``search_chunks`` 每个 reflect 动作一次、
-        无图首轮每条子查询一次,而且**没挂任何参考库的笔记本同样要付**(参与集
+        首轮原文播种每条子查询一次、补种 / add_subquery 的原文半每个方向一次——
+        2026-09-29 起这些**每个 reasoning run 都付**(不再只有无图 run),而且
+        **没挂任何参考库的笔记本同样要付**(参与集
         ≤1 的短路判断在查询之后)。每一次都是一条 ``_connect()`` + 一次 mount
         查询。
 
