@@ -424,7 +424,7 @@ Agent profile、opaque token、scope/allowlist/过期与撤销、公开 onboardi
 
 **已交付，2026-09-29；方案 §5.2、§11。** 关掉第 38 节登记的残余口：`node_context` 的定义带上归属（`definition_basis` / `definition_source_id` / `definition_element_id`），`defines` 证据有序、有界地回落到第一条范围内证据，概念簇融合描述只在能证明全部成员来源都在范围内时使用（用户裁决 Q1，严格；超出成员上限的簇在绑定的范围下不用），流程步骤与章节路径先归因再显示。来源范围只在它能排除东西时才绑定这次重查，全选、未变化、没有读不到的隐藏来源的运行与不带范围的运行逐字节相同。知识图谱面板的对象详情、概念详情与邻域补全按查看者的可读来源过滤（用户裁决 Q4 / M1）：另一位成员的私有 Memory 抽出的对象、出处、定义与簇标签不再出现在这三个读取里。
 
-当前合同与数值上限见[检索模式][retrieval]与[产品/API][product]的 KG 详情一节；回归入口：[对象上下文](backend/tests/test_node_context.py)、[知识上下文范围](backend/tests/test_knowledge_context_source_ceiling.py)、[范围绑定裁决](backend/tests/test_ceiling_binds_verdict.py)、[查看者规则](backend/tests/test_kg_viewer_scope_rules.py)、[两用户端到端](backend/tests/test_kg_viewer_scope_routes.py)。实施计划：[来源范围与引用可信度修复计划](docs/superpowers/plans/2026-09-29-scope-ceiling-remediation.md)。
+当前合同与数值上限见[检索模式][retrieval]与[产品/API][product]的 KG 详情一节；回归入口：[对象上下文](backend/tests/test_node_context.py)、[知识上下文范围](backend/tests/test_knowledge_context_source_ceiling.py)、[范围绑定裁决](backend/tests/test_ceiling_binds_verdict.py)、[查看者规则](backend/tests/test_kg_viewer_scope_rules.py)、[逐身份判定](backend/tests/test_kg_viewer_scope_identities.py)、[两用户端到端](backend/tests/test_kg_viewer_scope_routes.py)。实施计划：[来源范围与引用可信度修复计划](docs/superpowers/plans/2026-09-29-scope-ceiling-remediation.md)。
 
 [product]: docs/product-and-api_zh.md
 [flow]: docs/product-and-api_zh.md#产品流程
