@@ -259,11 +259,15 @@ class ActiveSourceScope:
     ceilings_total: bool = False
     # The asker's OWN Memory projection sources that ``default_ceiling_context``
     # deliberately left OUT of ``hidden_source_ids`` because the Memory channel
-    # was closed (``memory_access_context(False)``).  Consulted by exactly one
-    # reader, the drift probe, and never by a gate: the live hidden read it
-    # compares against is the raw owner-scoped set, so without this the probe
-    # would report drift on every run of a user holding one confirmed Memory
-    # and silently switch the whole-graph channels off for them.
+    # was closed (``memory_access_context(False)``).  Read in exactly two
+    # places, neither of them a gate: the drift probe
+    # (``source_scope_visible_universe_matches``), whose live hidden read is the
+    # raw owner-scoped set, so without this it would report drift on every run
+    # of a user holding one confirmed Memory and silently switch the
+    # whole-graph channels off for them; and ``refreshed_ceiling_context``
+    # (via ``_refreshed_local``), which carries the set over when it inherits
+    # the local dimension so the refreshed scope's probe keeps matching.  No
+    # gate admits a withheld id.
     withheld_hidden_source_ids: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
@@ -1724,6 +1728,14 @@ class CeilingReaders:
 # ``GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS``, the per-library allowance federation
 # already applies to a library read inside a global run.
 DEFAULT_MOUNTED_READ_SECONDS = 5.0
+# Budget for ALL mounted-library reads of one freeze together, derived once
+# before the first of them.  Each library reads under ``min(this stage
+# deadline, now + DEFAULT_MOUNTED_READ_SECONDS)`` -- the pairing
+# ``chunk_federation._federated_tasks`` gives ``_prepared_peer`` -- so M slow
+# libraries cost at most this long, not M x 5 s, before the run starts.  Two
+# per-library allowances: 6 x 49k visible sources read in 0.3-0.5 s measured,
+# so the stage bound only ever bites a database that is already failing.
+DEFAULT_MOUNTED_TOTAL_SECONDS = 2 * DEFAULT_MOUNTED_READ_SECONDS
 
 
 def partition_memory_sources(
@@ -1802,35 +1814,63 @@ def _emit_ceiling_event(readers: CeilingReaders, event: dict) -> None:
         pass
 
 
+def _effective_cancel_event(cancel_event: Any) -> Any:
+    """The caller's cancel token, else the one on the read budget it holds.
+
+    A caller that passes no ``cancel_event`` but runs inside a cancellable
+    ``read_budget`` has still asked to be stoppable: ``read_budget`` already
+    inherits that token, so a Stop interrupts the mounted read in flight, and
+    without this fallback the resulting driver error would be recorded as a
+    skipped library (``timeout``) instead of propagating as the user's stop.
+    """
+    if cancel_event is not None:
+        return cancel_event
+    from app.repositories.read_budget import current_read_budget
+
+    budget = current_read_budget()
+    return None if budget is None else budget.cancel_event
+
+
 def _mounted_library_ceilings(
     libraries: Iterable[str],
     readers: CeilingReaders,
     cancel_event: Any,
     seconds: float,
+    total_seconds: float,
 ) -> dict[str, frozenset[str]]:
     """Each mounted library's VISIBLE sources, read one library at a time.
 
-    Every read runs under its OWN ``read_budget`` of ``seconds`` (nested inside
-    any budget the caller already holds, so it can only get shorter), and a
-    library whose read fails or exceeds it is frozen to ``frozenset()`` -- an
-    explicit deny -- with a content-free event, instead of failing the request.
-    That is the fault isolation federation already gives a library it cannot
-    enumerate (``chunk_federation_skipped``), and it is fail-CLOSED: the
-    library is not searched at all, never searched without a ceiling.
+    Every read runs under its OWN ``read_budget`` ending at ``min(stage
+    deadline, now + seconds)``, the stage deadline being ``total_seconds``
+    after the first read starts (and each nested inside any budget the caller
+    already holds, so it can only get shorter).  A library whose read fails or
+    exceeds its budget -- or whose turn comes after the stage deadline, when
+    it is not read at all (``queue_deadline``) -- is frozen to ``frozenset()``,
+    an explicit deny, with a content-free event, instead of failing the
+    request.  That is the fault isolation federation already gives a library
+    it cannot enumerate (``chunk_federation_skipped``), and it is fail-CLOSED:
+    the library is not searched at all, never searched without a ceiling.
 
-    A stop is not a library failure: cancellation is checked before each read
-    and again after a failed one, and ``AskCancelled`` (like the participant
-    override's control error) propagates.
+    A stop is not a library failure: cancellation (the caller's token, else the
+    one on its read budget) is checked before each read and again after a
+    failed one, and ``AskCancelled`` (like the participant override's control
+    error, which an injected reader may raise) propagates.
     """
     from app.domain.retrieval_control import RetrievalControlError
     from app.repositories.read_budget import classify_read_failure, read_budget
     from app.services.cancellation import AskCancelled, raise_if_cancelled
 
+    cancel_event = _effective_cancel_event(cancel_event)
+    stage_deadline = time.monotonic() + float(total_seconds)
     ceilings: dict[str, frozenset[str]] = {}
     for library in libraries:
         raise_if_cancelled(cancel_event)
+        started = time.monotonic()
+        deadline = min(stage_deadline, started + float(seconds))
         try:
-            with read_budget(time.monotonic() + float(seconds), cancel_event):
+            if started >= stage_deadline:
+                raise _StageDeadline()
+            with read_budget(deadline, cancel_event):
                 ceilings[library] = _frozen_source_ids(readers.visible(library))
         except (AskCancelled, RetrievalControlError):
             raise
@@ -1840,9 +1880,19 @@ def _mounted_library_ceilings(
             _emit_ceiling_event(readers, {
                 "kind": "default_ceiling_library_skipped",
                 "notebook_id": library,
-                "reason": classify_read_failure(exc) or "unavailable",
+                "reason": (
+                    "queue_deadline" if isinstance(exc, _StageDeadline)
+                    else classify_read_failure(exc) or (
+                        "timeout" if time.monotonic() >= deadline
+                        else "unavailable"
+                    )
+                ),
             })
     return ceilings
+
+
+class _StageDeadline(Exception):
+    """This library's turn came after the stage deadline: nothing was read."""
 
 
 @contextmanager
@@ -1855,6 +1905,7 @@ def default_ceiling_context(
     base_scope: Any = None,
     cancel_event: Any = None,
     mounted_read_seconds: float = DEFAULT_MOUNTED_READ_SECONDS,
+    mounted_total_seconds: float = DEFAULT_MOUNTED_TOTAL_SECONDS,
 ) -> Iterator[None]:
     """Install the retrieval ceiling EVERY entry point runs under.
 
@@ -1888,9 +1939,14 @@ def default_ceiling_context(
        library's Memory/Knowhow projections belong to its own members -- and
        ``ceilings_total`` is set, so a library mounted after this freeze (or
        otherwise unnamed) participates in nothing.  Each mounted library is read
-       under its own ``mounted_read_seconds`` budget and ``cancel_event``; one
-       whose read fails is frozen to ``frozenset()`` (deny) with a content-free
-       ``default_ceiling_library_skipped`` event.  The ACTIVE notebook's own
+       under its own budget -- ``min(stage deadline, now +
+       mounted_read_seconds)``, the stage deadline being
+       ``mounted_total_seconds`` after the first mounted read -- and
+       ``cancel_event`` (else the cancel token of the read budget the caller
+       holds); one whose read fails, overruns, or never gets a turn before the
+       stage deadline is frozen to ``frozenset()`` (deny) with a content-free
+       ``default_ceiling_library_skipped`` event.  A Stop propagates as
+       ``AskCancelled``, never as a skipped library.  The ACTIVE notebook's own
        reads are not isolated: if they fail the request fails -- a run never
        proceeds unscoped.  ``chunk_federation._peer_visible_sources`` hands the
        frozen ceiling back to every federated leg, so each mounted library's
@@ -1921,6 +1977,7 @@ def default_ceiling_context(
         notebook_id, owner_id, readers,
         local_scope=local_scope, base_scope=base_scope,
         cancel_event=cancel_event, mounted_read_seconds=mounted_read_seconds,
+        mounted_total_seconds=mounted_total_seconds,
     ):
         yield
 
@@ -1935,40 +1992,58 @@ def _fresh_default_ceiling(
     base_scope: Any,
     cancel_event: Any,
     mounted_read_seconds: float,
+    mounted_total_seconds: float,
 ) -> Iterator[None]:
     """Steps 2-4 of ``default_ceiling_context``, whatever is installed outside."""
     from app.services.cancellation import raise_if_cancelled
 
+    cancel_event = _effective_cancel_event(cancel_event)
     raise_if_cancelled(cancel_event)
     peers = tuple(dict.fromkeys(
         str(value) for value in readers.participants(notebook_id)
         if value and str(value) != notebook_id
     ))
     synthesize_local = local_scope is None
-    local = local_scope
-    if synthesize_local:
-        local = {
-            "mode": "include",
-            "source_ids": readers.visible(notebook_id),
-            "hidden_source_ids": tuple(
-                str(value) for value in readers.hidden(notebook_id, owner_id)
-            ),
-            "narrowed": False,
-            "owner_id": owner_id,
-        }
+    local = (
+        _synthesised_local(notebook_id, owner_id, readers)
+        if synthesize_local else local_scope
+    )
     local, withheld = _without_memory(local, readers, notebook_id)
     with source_scope_context(
         notebook_id,
         local,
         base_scope,
         _mounted_library_ceilings(
-            peers, readers, cancel_event, mounted_read_seconds
+            peers, readers, cancel_event, mounted_read_seconds,
+            mounted_total_seconds,
         ),
         ceilings_total=True,
         local_synthesized=synthesize_local,
         _withheld_hidden_source_ids=withheld,
     ):
         yield
+
+
+def _synthesised_local(
+    notebook_id: str, owner_id: str, readers: CeilingReaders,
+) -> dict[str, Any]:
+    """The all-selected local freeze: ``visible ∪ hidden(owner)``, not narrowed.
+
+    Both reader results are materialised HERE, where they enter: a reader that
+    returns a generator would otherwise be consumed by ``_without_memory``'s
+    disjointness check and leave the ceiling empty.  The visible set becomes
+    the frozenset the scope keeps (``_frozen_source_ids`` reuses it downstream,
+    so it is still built exactly once).
+    """
+    return {
+        "mode": "include",
+        "source_ids": _frozen_source_ids(readers.visible(notebook_id)),
+        "hidden_source_ids": tuple(
+            str(value) for value in readers.hidden(notebook_id, owner_id)
+        ),
+        "narrowed": False,
+        "owner_id": owner_id,
+    }
 
 
 @contextmanager
@@ -1981,6 +2056,7 @@ def refreshed_ceiling_context(
     base_scope: Any = None,
     cancel_event: Any = None,
     mounted_read_seconds: float = DEFAULT_MOUNTED_READ_SECONDS,
+    mounted_total_seconds: float = DEFAULT_MOUNTED_TOTAL_SECONDS,
 ) -> Iterator[None]:
     """Re-install a REFRESHED freeze inside a run that already has a ceiling.
 
@@ -1993,57 +2069,61 @@ def refreshed_ceiling_context(
     ``ceilings_total``, reopening mounted libraries' hidden projections and any
     library mounted mid-run.
 
+    * An outer scope for ANOTHER notebook -> ``ValueError``, before anything
+      else is decided (a subjectless outer included).
     * Outer scope SUBJECTLESS (a global run) -> pass through; a global run has
       no local or library dimension to refresh.
-    * Outer scope is a default ceiling (``ceilings_total``, same notebook) ->
-      the refreshed ``local_scope`` / ``base_scope`` replace those dimensions;
-      a dimension passed as ``None`` keeps the outer one (the report never
-      scoped it, so the run's default freeze stands).  The outer
-      ``notebook_source_ceilings`` and ``ceilings_total`` are INHERITED
-      unchanged -- no library frozen by the outer scope is read again -- and a
-      library mounted since then gets its own visible-only ceiling, under the
-      constructor's per-library budget and isolation, only if the refreshed
-      library dimension admits it; otherwise it has no entry and stays refused.
-    * No outer scope, or one that is not a default ceiling -> a fresh default
-      ceiling over the refreshed dimensions (never a narrower guarantee than
-      the constructor's).
+    * No outer scope -> a fresh default ceiling over the refreshed dimensions.
+    * Any other outer scope -- a default ceiling (``ceilings_total``) or an
+      older-style scope installed by ``source_scope_context`` -> the refreshed
+      ``local_scope`` / ``base_scope`` replace those dimensions, and a
+      dimension passed as ``None`` keeps the OUTER one (the report did not
+      scope it, so the run's freeze stands).  A refresh is therefore never
+      wider than the outer scope on a dimension the caller did not refresh.
+      The single exception is narrowing-only: an older-style outer whose local
+      dimension binds nothing (no include list, no exclusion, no per-notebook
+      entry of its own) gets the constructor's synthesised
+      ``visible ∪ hidden(owner)`` instead, because every ceiling this function
+      installs binds the local dimension.  The outer
+      ``notebook_source_ceilings`` are INHERITED unchanged -- no library they
+      name is read again -- and ``ceilings_total`` is set.  Every other
+      participant that the refreshed library dimension admits is read once
+      now, visible sources only, under the constructor's per-library budget,
+      stage bound and isolation; that is also what happens to a library
+      mounted between the outer freeze and this refresh, whether or not
+      ``base_scope`` was passed (an unsubmitted library dimension admits every
+      live mount, exactly as the report path's unscoped library dimension did,
+      and each such library still exposes only its visible sources).  A
+      participant the refreshed library dimension does not admit gets no entry
+      and is refused.
 
-    Reads: participants plus one visible read per newly admitted library.
+    Reads: participants plus one visible read per newly admitted library (plus
+    the notebook's visible and hidden sets in the narrowing-only case above).
     """
     outer = current_source_scope()
+    if outer is not None and outer.notebook_id != notebook_id:
+        raise ValueError(
+            "a refreshed ceiling must be installed for the run's own notebook"
+        )
     if outer is not None and outer.subjectless:
         yield
         return
-    if outer is None or not outer.ceilings_total:
+    if outer is None:
         with _fresh_default_ceiling(
             notebook_id, owner_id, readers,
             local_scope=local_scope, base_scope=base_scope,
             cancel_event=cancel_event, mounted_read_seconds=mounted_read_seconds,
+            mounted_total_seconds=mounted_total_seconds,
         ):
             yield
         return
-    if outer.notebook_id != notebook_id:
-        raise ValueError(
-            "a refreshed ceiling must be installed for the run's own notebook"
-        )
     from app.services.cancellation import raise_if_cancelled
 
+    cancel_event = _effective_cancel_event(cancel_event)
     raise_if_cancelled(cancel_event)
-    if local_scope is None:
-        local: Any = {
-            "mode": outer.mode,
-            "source_ids": outer.source_ids,
-            "hidden_source_ids": outer.hidden_source_ids,
-            "narrowed": outer.narrowed,
-            "owner_id": outer.owner_id,
-        }
-        local_synthesized = not outer.source_provided
-        local, withheld = _without_memory(
-            local, readers, notebook_id, outer.withheld_hidden_source_ids,
-        )
-    else:
-        local_synthesized = False
-        local, withheld = _without_memory(local_scope, readers, notebook_id)
+    local, local_synthesized, withheld = _refreshed_local(
+        outer, local_scope, readers, owner_id,
+    )
     base = base_scope
     if base is None and outer.base_provided:
         base = {
@@ -2065,14 +2145,21 @@ def refreshed_ceiling_context(
         ),
         base_provided=base_raw is not None,
     ).covers_notebook
-    inherited = dict(outer.notebook_source_ceilings)
+    # An older-style outer may bind its OWN notebook through a per-notebook
+    # entry instead of the local dimension; that entry is the local dimension
+    # and survives only while the local dimension is inherited as it.
+    inherited = {
+        library: ceiling for library, ceiling in outer.notebook_source_ceilings
+        if library != notebook_id or local is None
+    }
     added = tuple(dict.fromkeys(
         str(value) for value in readers.participants(notebook_id)
         if value and str(value) != notebook_id
         and str(value) not in inherited and admits(str(value))
     ))
     inherited.update(_mounted_library_ceilings(
-        added, readers, cancel_event, mounted_read_seconds
+        added, readers, cancel_event, mounted_read_seconds,
+        mounted_total_seconds,
     ))
     with source_scope_context(
         notebook_id,
@@ -2084,3 +2171,39 @@ def refreshed_ceiling_context(
         _withheld_hidden_source_ids=withheld,
     ):
         yield
+
+
+def _refreshed_local(
+    outer: ActiveSourceScope,
+    local_scope: Any,
+    readers: CeilingReaders,
+    owner_id: str,
+) -> tuple[Any, bool, tuple[str, ...]]:
+    """``(local, local_synthesized, withheld)`` for a refresh inside ``outer``.
+
+    ``local`` is None only when the outer scope binds its own notebook through
+    a per-notebook entry and the caller did not refresh the local dimension:
+    that entry then keeps binding it (see ``refreshed_ceiling_context``).
+    """
+    notebook_id = outer.notebook_id
+    if local_scope is not None:
+        local, withheld = _without_memory(local_scope, readers, notebook_id)
+        return local, False, withheld
+    if outer.ceilings_total or outer.ceiling_active:
+        local, withheld = _without_memory(
+            {
+                "mode": outer.mode,
+                "source_ids": outer.source_ids,
+                "hidden_source_ids": outer.hidden_source_ids,
+                "narrowed": outer.narrowed,
+                "owner_id": outer.owner_id,
+            },
+            readers, notebook_id, outer.withheld_hidden_source_ids,
+        )
+        return local, not outer.source_provided, withheld
+    if outer.source_ceiling_for(notebook_id) is not None:
+        return None, False, ()
+    local, withheld = _without_memory(
+        _synthesised_local(notebook_id, owner_id, readers), readers, notebook_id,
+    )
+    return local, True, withheld

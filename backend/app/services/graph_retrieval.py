@@ -1534,8 +1534,9 @@ class GraphRetrievalService(_RetrievalState):
         """``{peer_notebook_id: frozenset(source_id)}`` —— 每个参考库自己的天花板。
 
         ⛔ 不是鉴权谓词,是消费边界的成本/范围闸,与 ``chunk_federation`` 的 peer
-        腿同一条规则,而且**刻意复用同一个 memo key**(``_peer_visible_sources``):
-        一次 ask 里两条腿看到的参考库来源清单必须是同一份冻结快照,否则
+        腿同一条规则,而且**刻意走同一个取值入口**(``_peer_visible_sources``):
+        单库运行在默认天花板下拿到的是 scope 里冻结的那一份(不读库),其余运行
+        走同一个 run 级 memo key。一次 ask 里两条腿看到的参考库来源清单必须是同一份冻结快照,否则
         「向量腿引得到、KG 腿引不到」这种不对称会随运行中途的上传/auto-fold 漂移。
 
         三层,顺序不许换:
@@ -1562,9 +1563,11 @@ class GraphRetrievalService(_RetrievalState):
         到 ``elem_owner`` 之后就要把 ``_kg_source_chunks`` 拆成两段连接作用域——那
         是这条通道明令不做的重构。代价在一次 run 里恰好是零:调用方
         (``_kg_object_owners``)已经把 owner 集与 chunk 腿的参与集求过交,而联邦
-        向量腿在同一次 ``_mix_retrieve`` 里**先跑**,且会为每个 peer 参与库按同一个
-        memo key 枚举一次可见来源——所以这里每一次都是 memo 命中。没有 ambient run
-        时(memo 直通)会真读,但那种场景本来就没有任何东西被冻结。
+        向量腿在同一次 ``_mix_retrieve`` 里**先跑**,且经同一个入口为每个 peer
+        参与库取过一次可见来源——所以这里不会再读库:默认天花板下的单库运行直接
+        拿 scope 里冻结的天花板(排序结果按 run 缓存),其余运行是 memo 命中。没有
+        ambient run 时(memo 直通)无 scope 的运行会真读,但那种场景本来就没有任何
+        东西被冻结。
         """
         from app.services.cancellation import AskCancelled
         from app.services.chunk_federation import _emit, _peer_visible_sources
