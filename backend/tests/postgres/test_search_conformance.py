@@ -84,6 +84,10 @@ def test_multi_term_candidates_use_one_lateral_query_with_exact_quota():
 
 
 def test_source_scope_is_inside_each_postgres_candidate_limit():
+    """The ceiling predicate sits inside every per-term LIMIT, is bound as ONE
+    text parameter split by the planner, and runs unprepared (a custom plan);
+    the unscoped statement keeps its plain execute call (see
+    ``app.repositories.postgres.id_binding``)."""
     class _Result:
         @staticmethod
         def fetchall():
@@ -93,23 +97,34 @@ def test_source_scope_is_inside_each_postgres_candidate_limit():
         def __init__(self):
             self.calls = []
 
-        def execute(self, statement, params):
-            self.calls.append((statement, params))
+        def execute(self, statement, params, **options):
+            self.calls.append((statement, params, options))
             return _Result()
+
+    ceiling = "A\x1fB"
+    array_sql = "string_to_array(%s,E'\\x1f')"
+
+    connection = _Connection()
+    knowledge_candidate_rows_for_terms(
+        connection, "nb", ["target command"], per_term_limit=2,
+    )
+    assert connection.calls[0][2] == {}, "unscoped probes keep the plan cache"
 
     connection = _Connection()
     knowledge_candidate_rows_for_terms(
         connection, "nb", ["target command"], per_term_limit=2,
         allowed_source_ids=["A", "B"],
     )
-    statement, params = connection.calls[0]
+    statement, params, options = connection.calls[0]
+    assert options == {"prepare": False}
     lateral = statement.split("CROSS JOIN LATERAL", 1)[1]
     assert "EXISTS (SELECT 1 FROM knowledge_object_sources" in lateral
+    assert f"kos.source_id=ANY({array_sql})" in lateral
     assert lateral.index("knowledge_object_sources") < lateral.index("LIMIT %s")
     assert params == [
         0, "target command", "%target command%",
-        "nb", ["A", "B"], 2,
-        "nb", ["A", "B"], 2,
+        "nb", ceiling, 2,
+        "nb", ceiling, 2,
         2,
     ]
 
@@ -118,15 +133,17 @@ def test_source_scope_is_inside_each_postgres_candidate_limit():
         connection, "nb", ["target command"], per_term_limit=2,
         allowed_source_ids=["A", "B"], authoritative_source_filter=True,
     )
-    statement, params = connection.calls[0]
+    statement, params, options = connection.calls[0]
+    assert options == {"prepare": False}
     lateral = statement.split("CROSS JOIN LATERAL", 1)[1]
     assert "jsonb_array_elements" in lateral
+    assert f"ev->>'source_id'=ANY({array_sql})" in lateral
     assert "knowledge_object_sources" not in lateral
     assert lateral.index("jsonb_array_elements") < lateral.index("LIMIT %s")
     assert params == [
         0, "target command", "%target command%",
-        "nb", ["A", "B"], 2,
-        "nb", ["A", "B"], 2,
+        "nb", ceiling, 2,
+        "nb", ceiling, 2,
         2,
     ]
 
@@ -135,13 +152,20 @@ def test_source_scope_is_inside_each_postgres_candidate_limit():
         connection, "nb", ["target command"], per_term_limit=2,
         allowed_source_ids=["A", "B"],
     )
-    statement, params = connection.calls[0]
+    statement, params, options = connection.calls[0]
+    assert options == {"prepare": False}
     lateral = statement.split("CROSS JOIN LATERAL", 1)[1]
-    assert '"chunks".source_id=ANY(%s)' in lateral
-    assert lateral.index("source_id=ANY(%s)") < lateral.index("LIMIT %s")
+    assert f'"chunks".source_id=ANY({array_sql})' in lateral
+    assert lateral.index("source_id=ANY(") < lateral.index("LIMIT %s")
     assert params == [
-        0, "target command", "%target command%", "nb", ["A", "B"], 2
+        0, "target command", "%target command%", "nb", ceiling, 2
     ]
+
+    connection = _Connection()
+    chunk_candidate_rows_for_terms(
+        connection, "nb", ["target command"], per_term_limit=2,
+    )
+    assert connection.calls[0][2] == {}, "unscoped probes keep the plan cache"
 
 
 def test_like_contains_pattern_keeps_metacharacters_literal():
