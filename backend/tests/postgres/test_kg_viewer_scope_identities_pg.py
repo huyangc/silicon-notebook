@@ -210,3 +210,32 @@ def test_pg_evidence_items_are_judged_on_named_and_actual_source(repo):
         assert secret not in repr(ctx) + repr(detail), secret
     owner = as_user(s.a, repo.concept_detail, s.nb, canonical)
     assert len(owner["members"][0]["evidence"]) == 3
+
+
+def test_pg_owned_and_citing_sets_come_from_one_statement(repo):
+    """``relink_object_rows_for_source(..., with_citing=True)`` on
+    PostgreSQL: owned rows, citing rows and the certificate marker; an
+    uncertified reverse index yields owned rows only; an empty list issues
+    nothing (same contract as the SQLite twin)."""
+    s = build_scenario(repo, b_memory=False)
+    knowledge = repo._runtime.knowledge
+
+    def kinds():
+        with repo._runtime.database.connect() as db:
+            out: dict = {}
+            for row in knowledge.relink_object_rows_for_source(
+                db, s.nb, source_ids=["src-ma", "src-none"], with_citing=True
+            ):
+                out.setdefault(row["kind"], set()).add(row["id"])
+            return out
+
+    got = kinds()
+    assert got["owned"] == {s.ids.engram_ma, s.ids.secret, s.ids.definer_ma}
+    assert {s.ids.engram_ma, s.ids.secret, s.ids.definer_ma} <= got["citing"]
+    assert s.ids.engram_s not in got["citing"]
+    assert got["certified"] == {None}
+    _certify(repo, s.nb, False)
+    assert set(kinds()) == {"owned"}
+    with repo._runtime.database.connect() as db:
+        assert knowledge.relink_object_rows_for_source(
+            db, s.nb, source_ids=[], with_citing=True) == []

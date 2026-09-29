@@ -1251,6 +1251,7 @@ class KnowledgeStore:
         source_id: str = "",
         *,
         source_ids: Optional[Sequence[str]] = None,
+        with_citing: bool = False,
     ):
         """Every non-deprecated object of ONE source, in insertion (ordinal) order.
 
@@ -1275,6 +1276,28 @@ class KnowledgeStore:
             values = sorted({str(value) for value in source_ids if value})
             if not values:
                 return []
+            if with_citing:
+                # SQLite twin's docstring is canonical for ``with_citing``:
+                # owned rows, reverse-index citing rows (only when the index is
+                # certified) and one certificate marker row, in ONE statement,
+                # unordered, one array parameter per leg (each call planned
+                # with the listed ids' statistics; EXPLAIN pin in
+                # tests/postgres/test_cluster_generation_explain_pins.py).
+                return db.execute(
+                    "SELECT id, 'owned' AS kind FROM knowledge_objects "
+                    "WHERE notebook_id = %s AND source_id = ANY(%s) "
+                    "AND status != 'deprecated' "
+                    "UNION ALL "
+                    "SELECT object_id, 'citing' FROM knowledge_object_sources "
+                    "WHERE source_id = ANY(%s) AND notebook_id = %s "
+                    "AND EXISTS (SELECT 1 FROM unified_kg_state "
+                    "WHERE notebook_id = %s AND source_index_backfilled = 1) "
+                    "UNION ALL "
+                    "SELECT NULL::text, 'certified' FROM unified_kg_state "
+                    "WHERE notebook_id = %s AND source_index_backfilled = 1",
+                    (notebook_id, values, values, notebook_id, notebook_id, notebook_id),
+                    prepare=False,
+                ).fetchall()
             return db.execute(
                 "SELECT id FROM knowledge_objects "
                 "WHERE notebook_id = %s AND source_id = ANY(%s) "
@@ -1292,34 +1315,6 @@ class KnowledgeStore:
             payload=True,
             evidence=True,
         )
-
-    @staticmethod
-    def object_ids_citing_sources(
-        db: Any, notebook_id: str, source_ids: Sequence[str],
-    ) -> Optional[List[str]]:
-        """SQLite twin's docstring is canonical: reverse-index ids citing any of
-        ``source_ids`` in ONE statement (``= ANY(%s)``, one array parameter,
-        unprepared like the other set-valued reads, so each call is planned
-        with the listed ids' statistics — Memory sources cite a sliver of a
-        library, and ``idx_kos_source_object`` is the seek; EXPLAIN pin in
-        tests/postgres/test_cluster_generation_explain_pins.py), ``None`` when
-        the index is not certified, ``[]`` for an empty list with no
-        statement."""
-        values = sorted({str(value) for value in source_ids if value})
-        if not values:
-            return []
-        if not KnowledgeStore.source_index_backfilled(db, notebook_id):
-            return None
-        return [
-            str(row["object_id"]) for row in db.execute(
-                "SELECT DISTINCT object_id COLLATE \"C\" AS object_id "
-                "FROM knowledge_object_sources "
-                "WHERE source_id = ANY(%s) AND notebook_id = %s "
-                "ORDER BY object_id COLLATE \"C\"",
-                (values, notebook_id),
-                prepare=False,
-            ).fetchall()
-        ]
 
     @staticmethod
     def relink_relation_rows_for_objects(db: Any, notebook_id: str, object_ids):

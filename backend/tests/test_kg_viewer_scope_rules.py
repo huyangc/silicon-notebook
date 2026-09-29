@@ -327,9 +327,9 @@ def test_statement_count_is_constant_in_the_number_of_unreadable_sources(
 ):
     """Each endpoint issues the same number of statements with 31 and with 301
     unreadable Memory sources: the owned-object set is ONE statement
-    (``relink_object_rows_for_source(source_ids=...)``), the citing set is
-    the certificate plus ONE reverse-index statement
-    (``object_ids_citing_sources``), the clusters of a neighbourhood that
+    (``relink_object_rows_for_source(source_ids=..., with_citing=True)``,
+    which also returns the citing set and the reverse-index certificate),
+    the clusters of a neighbourhood that
     need a check are read in ONE batched statement, and nothing issues a
     per-source read or a per-cluster COUNT. (The suspect objects here stay
     under one 900-id fold batch.)"""

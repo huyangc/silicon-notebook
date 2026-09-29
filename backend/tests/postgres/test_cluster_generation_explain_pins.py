@@ -281,12 +281,14 @@ def test_concept_clusters_count_skip_gate_leg_stays_index_only(postgres_database
     assert "Seq Scan on concept_clusters" not in plan, plan
 
 
-def test_viewer_scope_citing_read_seeks_the_source_index(postgres_database):
-    """PR-A·A5, codex #806 r1: ``object_ids_citing_sources`` (the KG viewer
-    rule's suspect set) is ONE statement over the reverse index whatever the
-    number of unreadable sources — the id array drives a seek on the
-    ``source_id``-leading index, never a scan of the notebook's rows. The
-    statement pinned is the one the store actually issues."""
+def test_viewer_scope_owned_and_citing_read_seeks_the_source_indexes(postgres_database):
+    """PR-A·A5, codex #806 r1: ``relink_object_rows_for_source(source_ids=...,
+    with_citing=True)`` (the KG viewer rule's owned and suspect sets plus the
+    reverse-index certificate) is ONE statement whatever the number of
+    unreadable sources — each id array drives a seek on a ``source_id``-leading
+    index (knowledge objects' owner column, the reverse index), never a scan of
+    the notebook's rows. The statement pinned is the one the store actually
+    issues."""
     from app.repositories.postgres.knowledge_store import KnowledgeStore
 
     assert PostgresMigrator(postgres_database).migrate() == 66
@@ -296,13 +298,17 @@ def test_viewer_scope_citing_read_seeks_the_source_index(postgres_database):
         db.execute(
             "UPDATE unified_kg_state SET source_index_backfilled=1 WHERE notebook_id=%s",
             (notebook_id,))
-        # Memory sources are a sliver of a library's reverse index: a few
-        # objects each among thousands cited by the documents.
+        # Memory sources are a sliver of a library: a few objects each among
+        # thousands owned and cited by the documents.
         db.execute(
             "INSERT INTO knowledge_object_sources(object_id,source_id,notebook_id) "
             "SELECT 'ko-'||g, 'src-mem-'||(g%%3), %s FROM generate_series(0, 8) g",
             (notebook_id,))
+        db.execute(
+            "UPDATE knowledge_objects SET source_id='src-mem-'||(substr(id, 4)::int %% 3) "
+            "WHERE notebook_id=%s AND substr(id, 4)::int < 6", (notebook_id,))
         db.execute("ANALYZE knowledge_object_sources")
+        db.execute("ANALYZE knowledge_objects")
     issued = []
 
     class _Spy:
@@ -314,11 +320,14 @@ def test_viewer_scope_citing_read_seeks_the_source_index(postgres_database):
             return self._inner.execute(sql, params, **kwargs)
 
     with postgres_database.connect() as connection:
-        ids = KnowledgeStore.object_ids_citing_sources(
-            _Spy(connection), notebook_id, ["src-mem-0", "src-mem-2"])
-        assert len(ids) == len(set(ids)) > 0
-        citing = [entry for entry in issued if "knowledge_object_sources" in entry[0]]
-        assert len(citing) == 1, issued
-        plan = _plan(connection, *citing[0])
-    assert "Seq Scan on knowledge_object_sources" not in plan, plan
+        rows = KnowledgeStore.relink_object_rows_for_source(
+            _Spy(connection), notebook_id, source_ids=["src-mem-0", "src-mem-2"],
+            with_citing=True)
+        kinds = {row["kind"] for row in rows}
+        assert kinds == {"owned", "citing", "certified"}, rows
+        assert len(issued) == 1, issued
+        plan = _plan(connection, *issued[0])
+    assert "Seq Scan" not in plan, plan
     assert "idx_kos_source" in plan, plan
+    assert "idx_knowledge_objects_source" in plan, plan
+    assert "idx_kos_notebook" not in plan, plan

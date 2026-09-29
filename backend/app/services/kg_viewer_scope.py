@@ -43,10 +43,10 @@ access check).  A filtered read then builds, lazily and at most once per
 request: the readable set (one visible-universe read) for evidence items, and
 — only for concept detail and neighbours — the set of objects OWNED by an
 unreadable hidden source (ONE statement whatever the number of such sources,
-``relink_object_rows_for_source(source_ids=...)``) and the set of objects
-CITING one (the reverse-index certificate plus ONE statement,
-``object_ids_citing_sources``), folded to clusters in batches of 900 object
-ids.  Neighbours then read the first members of every cluster of the
+``relink_object_rows_for_source(source_ids=..., with_citing=True)``), which
+also returns the objects CITING one from the reverse evidence index and that
+index's completeness certificate, folded to clusters in batches of 900
+object ids.  Neighbours then read the first members of every cluster of the
 response that needs a check in one batched statement
 (``concept_cluster_detail_rows(canonical_ids=...)``).  Everything else is
 decided on the rows the response already carries.
@@ -148,15 +148,16 @@ class KgViewerScope:
     def _owned_state(self) -> tuple:
         """``(owned, owned per cluster, suspects per cluster)``.
 
-        ``owned``: live objects OWNED by an unreadable hidden source — ONE
-        statement whatever the number of such sources. ``suspects``: those plus
-        every object whose evidence CITES one (``object_ids_citing_sources``,
-        one reverse-index statement) — the only objects either half of the
+        ``owned``: live objects OWNED by an unreadable hidden source.
+        ``suspects``: those plus every object whose evidence CITES one (the
+        P0-4 reverse index) — the only objects either half of the
         rule can hide, so a cluster with no suspect member provably has no
         hidden member, and ``suspects + 1`` member rows always hold a visible
         one if any exists. ``None`` when the reverse index is not certified:
-        then every cluster is examined (fail closed). Folds run in batches of
-        900 ids."""
+        then every cluster is examined (fail closed). Both sets and the
+        certificate come back from ONE statement whatever the number of such
+        sources (``relink_object_rows_for_source(source_ids=...,
+        with_citing=True)``); the folds run in batches of 900 ids."""
         if self._owned is not None:
             return self._owned
         reader = self._reader
@@ -164,14 +165,15 @@ class KgViewerScope:
         notebook_id = self.notebook_id
         foreign = sorted(self.foreign)
         with reader.connect() as db:
-            owned = frozenset(
-                str(row["id"])
-                for row in knowledge.relink_object_rows_for_source(
-                    db, notebook_id, source_ids=foreign
-                )
+            rows = knowledge.relink_object_rows_for_source(
+                db, notebook_id, source_ids=foreign, with_citing=True
             )
-            citing = knowledge.object_ids_citing_sources(db, notebook_id, foreign)
-            fold = sorted(owned if citing is None else owned | {str(i) for i in citing})
+            owned = frozenset(str(r["id"]) for r in rows if r["kind"] == "owned")
+            citing = (
+                {str(r["id"]) for r in rows if r["kind"] == "citing"}
+                if any(r["kind"] == "certified" for r in rows) else None
+            )
+            fold = sorted(owned if citing is None else owned | citing)
             per_owned: Counter = Counter()
             per_suspect: Counter = Counter()
             for start in range(0, len(fold), _ID_BATCH):
