@@ -20,7 +20,11 @@
    收尾大括号），原因顺序按 `REASON_ORDER` 的数组字面量逐项比较。所以把片段挪到文件里别处
    的诱饵常量、同时改掉函数里真正用到的文案，守卫照样报红。注释先剥离，写在注释里的旧文案
    不算数。
-3. 不钉行号：只认源码结构与片段本身。
+3. 行为：计数对不上 ``failed`` 时退回「共 N 条」这类分支，片段表达不了。所以两边各自对
+   同一份用例表 ``backend/tests/fixtures/citation_check_notice_cases.json`` 逐字断言：
+   本脚本断言后端孪生，前端单测断言 ``citationCheckNotice``；本脚本同时要求前端单测仍在读
+   这份表。
+4. 不钉行号：只认源码结构与片段本身。
 """
 from __future__ import annotations
 
@@ -34,10 +38,14 @@ DEFAULT_TS = ROOT / "frontend/app/citation-verification.ts"
 sys.path.insert(0, str(ROOT / "backend"))
 from app.services.global_citation_check import (  # noqa: E402
     NOTICE_LEADS, NOTICE_TAIL, REASON_CLAUSE, REASON_FALLBACK, REASON_JOINER,
-    VERIFICATION_LABELS,
+    VERIFICATION_LABELS, citation_check_notice,
 )
 
 FRONTEND_LABELS_CONST = "CITATION_VERIFICATION_LABELS"
+# The shared case table both twins assert verbatim: this script checks the
+# backend side against it, the frontend unit test checks the frontend side.
+SHARED_CASES = ROOT / "backend/tests/fixtures/citation_check_notice_cases.json"
+FRONTEND_CASE_TEST = ROOT / "frontend/tests/unit/citation-verification.test.mjs"
 # The wire / display order of the three kinds; the frontend's REASON_ORDER.
 WIRE_ORDER = ("changed", "source_gone", "unverifiable")
 
@@ -67,7 +75,7 @@ def reason_fragments() -> dict[str, str]:
             label="${CITATION_VERIFICATION_LABELS[reason]}",
         ),
         "reason joiner": f'.join("{REASON_JOINER}")',
-        "reason fallback": REASON_FALLBACK.format(count="${count(check.failed)}"),
+        "reason fallback": REASON_FALLBACK.format(count="${failed}"),
     }
 
 
@@ -150,6 +158,31 @@ def check(path: Path | None = None) -> list[str]:
         for name, fragment in fragments.items():
             if fragment not in body:
                 problems.append(f"说明句 {name} 未逐字出现在 {function} 的函数体里: {fragment}")
+    problems.extend(shared_case_problems())
+    return problems
+
+
+def shared_case_problems(cases_path: Path | None = None, test_path: Path | None = None) -> list[str]:
+    """The backend twin against the shared case table, and the frontend unit
+    test still reading that table (so both twins are held to the same rows,
+    including the malformed-summary fallback the fragments cannot express)."""
+    import json
+
+    cases_path = cases_path or SHARED_CASES
+    test_path = test_path or FRONTEND_CASE_TEST
+    problems: list[str] = []
+    try:
+        cases = json.loads(cases_path.read_text(encoding="utf-8"))["cases"]
+    except (OSError, ValueError, KeyError) as exc:
+        return [f"共享用例表无法读取 {cases_path.name}: {type(exc).__name__}"]
+    if len(cases) < 8:
+        problems.append(f"共享用例表只有 {len(cases)} 条,至少 8 条")
+    for case in cases:
+        actual = citation_check_notice(case["check"], case.get("tense", "live"))
+        if actual != case["notice"]:
+            problems.append(f"后端说明句与共享用例「{case['name']}」不一致: {actual!r}")
+    if cases_path.name not in test_path.read_text(encoding="utf-8"):
+        problems.append(f"{test_path.name} 不再读取共享用例表 {cases_path.name}")
     return problems
 
 

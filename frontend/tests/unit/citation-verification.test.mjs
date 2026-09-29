@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   citationCheckNotice,
@@ -69,4 +70,18 @@ test("the source_gone explanation also covers a surviving document whose cited p
   // 所以解释句不能只说「资料已被删除」。标签是跨侧契约,保持原样。
   assert.equal(verificationExplanation("source_gone"), "这份资料或这段原文已被删除，下面是回答时引用的摘录。");
   assert.equal(verificationLabel("source_gone"), "资料已删除");
+});
+
+// One table shared with the backend twin (global_citation_check.citation_check_notice),
+// which scripts/check_citation_verification_contract.py asserts against the same file.
+const SHARED_CASES = JSON.parse(
+  readFileSync(new URL("../../../backend/tests/fixtures/citation_check_notice_cases.json", import.meta.url), "utf8"),
+).cases;
+
+test("the notice matches the shared backend/frontend case table verbatim", () => {
+  assert.ok(SHARED_CASES.length >= 8);
+  for (const { name, check: summary, tense, notice } of SHARED_CASES) {
+    const actual = hasFailedCitationCheck(summary) ? citationCheckNotice(summary, tense) : "";
+    assert.equal(actual, notice, name);
+  }
 });

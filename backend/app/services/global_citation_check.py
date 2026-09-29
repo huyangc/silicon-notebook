@@ -414,14 +414,20 @@ def check_trace_summary(outcome: CitationCheckOutcome) -> str:
 
 
 def check_count(value) -> int:
-    """One stored count, coerced: a positive ``int`` or 0. Never raises.
+    """One stored count, coerced: a positive whole number or 0. Never raises.
 
     The single coercion every reader of a stored summary applies -- the public
     projection (``conversation_public_view``), ``global_answer_check`` and the
     notice -- so a malformed or hand-edited value (a string, a list, a bool, a
-    negative number) reads as 0 on every surface alike.
+    negative number) reads as 0 on every surface alike. A finite fraction is
+    floored, exactly as the frontend's ``count`` does, so the two twins agree
+    on every input of ``backend/tests/fixtures/citation_check_notice_cases.json``.
     """
-    return value if type(value) is int and value > 0 else 0
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    if value != value or value in (float("inf"), float("-inf")) or value <= 0:
+        return 0
+    return int(value)
 
 
 def coerce_check_summary(value) -> dict | None:
