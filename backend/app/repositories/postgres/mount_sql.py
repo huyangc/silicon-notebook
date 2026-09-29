@@ -1,14 +1,21 @@
 """Canonical PostgreSQL reference-library mount SQL fragments.
 
 `sqlite/mount_sql.py` 的镜像。完整理由(四支可挂范围、P1「读权 ⇒ 可挂载」这条显式
-行为变更、以及第 4 支「借入挂载」为什么要额外挂一道未共享门)写在 SQLite 那一份的
-模块 docstring 里,两份必须同修。
+行为变更、第 4 支「借入挂载」为什么要额外挂一道未共享门、以及 M3「挂载仅对挂载人
+生效」的带查看者片段)写在 SQLite 那一份的模块 docstring 里,两份必须同修。
+
+PG 侧独有的事实只有一条:查看者行写成 `(SELECT NULLIF(CAST(%s AS text), '') AS uid)`。
+显式 CAST 让 `None` 绑定也有确定类型(否则 `NULLIF(unknown, unknown)` 靠隐式推断);
+比较时 `v.uid` 取默认排序规则,与 `COLLATE "C"` 的列相遇时让位给列的隐式排序规则,
+所以成员/授权边的主键索引照常可用(EXPLAIN pin 在
+`tests/postgres/test_mount_sql_viewer_pg.py`)。
 """
 
 from app.repositories.postgres.access_sql import (
     NOTEBOOK_LIVE_SQL,
     everyone_grant_expr,
     member_exists_expr,
+    read_access_clause,
     restricted_grant_access_expr,
 )
 
@@ -63,3 +70,40 @@ MOUNT_ORDER = (
 )
 
 MOUNTED_BASE_IDS_SUBQUERY = "SELECT b.id " + MOUNT_JOIN + MOUNT_VALID
+
+
+# ---------------------------------------------------------------- 带查看者(M3)
+#
+# 镜像 sqlite/mount_sql.py 的同名片段,理由写在那份。恰好两个位置参数,顺序
+# (viewer_id, notebook_id)。
+
+MOUNT_VIEWER_JOIN = (
+    "FROM notebook_bases e "
+    "JOIN notebooks b ON b.id = e.base_notebook_id "
+    "JOIN notebooks a ON a.id = e.notebook_id "
+    "CROSS JOIN (SELECT NULLIF(CAST(%s AS text), '') AS uid) v "
+    "WHERE e.notebook_id = %s AND b.id != e.notebook_id"
+)
+
+_VIEWER_REACHES_MOUNT_EXPR = (
+    "(b.tier = 'base' OR v.uid = a.created_by OR "
+    + read_access_clause(
+        "b",
+        "vm",
+        user_ref="v.uid",
+        grant_alias="vg",
+        group_alias="vgm",
+        group_admin_alias="vga",
+    )
+    + ")"
+)
+
+MOUNT_EFFECTIVE_FOR_VIEWER_EXPR = (
+    "(" + MOUNT_VALID_EXPR + " AND " + _VIEWER_REACHES_MOUNT_EXPR + ")"
+)
+
+MOUNT_EFFECTIVE_FOR_VIEWER = " AND " + MOUNT_EFFECTIVE_FOR_VIEWER_EXPR
+
+MOUNTED_BASE_IDS_FOR_VIEWER_SUBQUERY = (
+    "SELECT b.id " + MOUNT_VIEWER_JOIN + MOUNT_EFFECTIVE_FOR_VIEWER
+)
