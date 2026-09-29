@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 
 import { API_BASE } from "../../app/api-config.ts";
 import { clearToken, getToken, setToken } from "../../app/auth-session.ts";
-import { performApiRequest, requestBlob, requestJson, requestVoid } from "../../app/api-client.ts";
+import {
+  beginSessionHandoff,
+  endSessionHandoff,
+  performApiRequest,
+  requestBlob,
+  requestJson,
+  requestVoid,
+} from "../../app/api-client.ts";
 
 const storage = new Map();
 let reloads = 0;
@@ -159,6 +166,56 @@ test("a 401 for a token that was replaced in flight keeps the new session", asyn
   await performApiRequest("/me", { tag: "auth" });
   assert.equal(getToken(), "migrated-account");
   assert.equal(reloads, 0);
+});
+
+test("a 401 during a session handoff fails the request without logging out", async () => {
+  setToken("auto-account");
+  beginSessionHandoff("auto-account");
+  globalThis.fetch = async () => new Response(null, { status: 401 });
+  try {
+    const response = await performApiRequest("/reports", { tag: "report" });
+    assert.equal(response.status, 401);
+    assert.equal(getToken(), "auto-account");
+    assert.equal(reloads, 0);
+    await assert.rejects(requestJson("/reports", { tag: "report" }));
+    assert.equal(getToken(), "auto-account");
+    assert.equal(reloads, 0);
+  } finally {
+    endSessionHandoff("auto-account");
+  }
+
+  await performApiRequest("/reports", { tag: "report" });
+  assert.equal(getToken(), "");
+  assert.equal(reloads, 1);
+});
+
+test("a handoff for one token does not shield a different current token", async () => {
+  setToken("other-login");
+  beginSessionHandoff("auto-account");
+  globalThis.fetch = async () => new Response(null, { status: 401 });
+  try {
+    await performApiRequest("/me", { tag: "auth" });
+    assert.equal(getToken(), "");
+    assert.equal(reloads, 1);
+  } finally {
+    endSessionHandoff("auto-account");
+  }
+});
+
+test("a handed-over token replaced in flight keeps the new session", async () => {
+  setToken("auto-account");
+  beginSessionHandoff("auto-account");
+  globalThis.fetch = async () => {
+    setToken("another-login");
+    return new Response(null, { status: 401 });
+  };
+  try {
+    await performApiRequest("/me", { tag: "auth" });
+    assert.equal(getToken(), "another-login");
+    assert.equal(reloads, 0);
+  } finally {
+    endSessionHandoff("auto-account");
+  }
 });
 
 test("fetch rejections propagate without being rewritten", async () => {

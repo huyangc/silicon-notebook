@@ -10,6 +10,19 @@ export type ApiRequestOptions = RequestInit & {
   unauthorized?: "preserve" | "clear-and-reload";
 };
 
+// Tokens whose session is being handed over to another one (identity
+// migration revokes the old session before its response installs the new
+// token). A 401 on such a token is an ordinary failure, not a logout.
+const sessionHandoffs = new Set<string>();
+
+export function beginSessionHandoff(token: string): void {
+  if (token) sessionHandoffs.add(token);
+}
+
+export function endSessionHandoff(token: string): void {
+  sessionHandoffs.delete(token);
+}
+
 function resolveApiUrl(pathOrUrl: string): string {
   try {
     let base: URL;
@@ -71,6 +84,7 @@ export async function performApiRequest(
     && response.status === 401
     && sentToken
     && getToken() === sentToken
+    && !sessionHandoffs.has(sentToken)
   ) {
     clearToken();
     if (typeof window !== "undefined") window.location.reload();

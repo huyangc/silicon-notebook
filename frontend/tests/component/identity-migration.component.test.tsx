@@ -3,13 +3,14 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { AccountMenu } from "../../app/account-menu";
+import { performApiRequest } from "../../app/api-client";
 import { getToken, setToken, clearToken } from "../../app/auth-session";
 import type { AuthUser } from "../../app/auth";
 import { IdentityBindingConfirmation } from "../../app/identity-binding-confirmation";
 import { IdentityMigrationForm } from "../../app/identity-migration-form";
 import { useIdentityMigration } from "../../app/use-identity-migration";
 
-afterEach(() => { clearToken(); });
+afterEach(() => { clearToken(); vi.unstubAllGlobals(); });
 
 type MigrationResult = { token: string; user: AuthUser };
 
@@ -138,6 +139,60 @@ test("a failure is reported inside the form and releases the in-flight guard", a
   expect(screen.getByRole("button", { name: "迁移" })).toBeEnabled();
   expect(getToken()).toBe("auto-account-token");
   expect(reload).not.toHaveBeenCalled();
+});
+
+/** Background requests (report polling etc.) answer 401 once the server has revoked the old session. */
+function revokedBackend() {
+  const browser = window;
+  const pageReload = vi.fn();
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 401 })));
+  vi.stubGlobal("window", new Proxy(browser, {
+    get(target, key) {
+      if (key === "location") return { ...browser.location, reload: pageReload };
+      return Reflect.get(target, key);
+    },
+  }));
+  return pageReload;
+}
+
+test("a background 401 while the migration is in flight neither logs out nor reloads", async () => {
+  const actor = userEvent.setup();
+  setToken("auto-account-token");
+  const pending = deferred<MigrationResult>();
+  const reload = vi.fn();
+  render(<MigrationHarness migrate={() => pending.promise} reload={reload} />);
+  await openMigrationForm(actor);
+  await submitMigration(actor);
+  const pageReload = revokedBackend();
+  const polled = await performApiRequest("/notebooks/n1/reports", { tag: "report" });
+  expect(polled.status).toBe(401);
+  expect(getToken()).toBe("auto-account-token");
+  expect(pageReload).not.toHaveBeenCalled();
+  pending.resolve(migrated);
+  await waitFor(() => expect(reload).toHaveBeenCalledOnce());
+  expect(getToken()).toBe("legacy-account-token");
+});
+
+test.each(["failed", "discarded"] as const)("a %s migration ends the handoff so later 401s clear the old session", async (ending) => {
+  const actor = userEvent.setup();
+  setToken("auto-account-token");
+  const pending = deferred<MigrationResult>();
+  render(<MigrationHarness migrate={() => pending.promise} reload={vi.fn()} />);
+  const form = await openMigrationForm(actor);
+  await submitMigration(actor);
+  if (ending === "failed") {
+    pending.reject(new Error("boom"));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("迁移失败，请稍后重试"));
+  } else {
+    setToken("another-tab-account-token");
+    pending.resolve(migrated);
+    await waitFor(() => expect(form).toHaveTextContent("本次结果未应用到此页面"));
+    setToken("auto-account-token");
+  }
+  const pageReload = revokedBackend();
+  await performApiRequest("/me", { tag: "auth" });
+  expect(getToken()).toBe("");
+  expect(pageReload).toHaveBeenCalledOnce();
 });
 
 test("the form's close control stays available while the page reports a migration in flight", async () => {
