@@ -4092,6 +4092,8 @@ class ReasoningRetriever:
                 target_object_id=target_object_id, direction=direction)
         result.inferences = self._filter_candidates("chain", result.inferences)
         result.nodes = self._filter_candidates("knowledge", result.nodes)
+        from app.services.retrieval_service import attest_chain_evidence
+        result.inferences = attest_chain_evidence(result.inferences)
         return result
 
     # --- LLM 决策点 ---
