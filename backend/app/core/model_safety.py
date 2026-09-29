@@ -84,6 +84,9 @@ _MODEL_ERROR_STAGES = frozenset({
     "chunk_ann_delta",
     "chunk_ann_query",
     "chunk_fts",
+    # No producer since 2026-09-29 (the keyword arm's failures became an
+    # ``ask_stage`` event, never a banner); kept so historically persisted
+    # responses carrying this stage still pass the display whitelist.
     "chunk_keyword_union",
     "embed",
     "kg_obj_ann",

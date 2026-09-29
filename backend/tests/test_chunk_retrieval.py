@@ -330,6 +330,60 @@ def test_lexical_timeout_is_not_a_model_error(repo, monkeypatch):
         ("chunk_keyword_union", "failed_open", "RuntimeError")]
 
 
+def test_single_path_keyword_arm_reads_no_vectors_and_scores_as_before(
+    repo, monkeypatch,
+):
+    """单库关键词臂只取文本行(2026-09-29):与改前「连向量矩阵一起 hydrate、再
+    丢掉矩阵」逐项同结果——同一批 FTS 命中,chunk 字段与关键词打分一个不差——
+    而且整个调用不再读 ``chunk_embeddings``。"""
+    from app.services.retrieval import score_chunks
+
+    nb, _ = _seed_chunks(repo, [
+        "engram memory architecture overview " * 25,
+        "kv cache compression and engram lookup " * 25,
+        "unrelated routing table text " * 25,
+    ])
+    candidates = repo.retrieval.candidates
+    needle = "engram memory"
+    recall = candidates.settings.chunk_recall
+
+    fts_hits = []
+    real_fts = candidates._chunk_fts_hits
+
+    def _capture_fts(*args, **kwargs):
+        hits = real_fts(*args, **kwargs)
+        fts_hits.append([h["chunk_id"] for h in hits])
+        return hits
+
+    vector_tables = []
+    real_rows_by_ids = candidates.embeddings.rows_by_ids
+
+    def _spy_rows_by_ids(db, table, *args, **kwargs):
+        vector_tables.append(table)
+        return real_rows_by_ids(db, table, *args, **kwargs)
+
+    monkeypatch.setattr(candidates, "_chunk_fts_hits", _capture_fts)
+    monkeypatch.setattr(candidates.embeddings, "rows_by_ids", _spy_rows_by_ids)
+    after = candidates._keyword_chunk_candidates(nb.id, needle)
+
+    assert vector_tables == []                       # 不再读 chunk_embeddings
+    [hit_ids] = fts_hits
+    assert len(hit_ids) >= 2 and after
+    # 改前的形状:hydrate_chunk_candidates(文本 + 向量)→ 丢矩阵 → 同一个打分。
+    before_rows, _ids, _mat = candidates.hydrate_chunk_candidates(hit_ids)
+    # 探针本身有效:改前那条 hydrate 确实会读 chunk_embeddings。
+    assert vector_tables and set(vector_tables) == {"chunk_embeddings"}
+    before = score_chunks(needle, before_rows, None, None, limit=recall)
+    assert candidates._hydrate_chunk_texts(hit_ids) == before_rows
+
+    def _fields(chunk):
+        return (chunk.chunk_id, chunk.source_id, chunk.source_title,
+                chunk.section_path, chunk.text, list(chunk.element_ids),
+                chunk.score, chunk.relevance)
+
+    assert [_fields(c) for c in after] == [_fields(c) for c in before]
+
+
 def test_ann_union_lexical_timeout_is_not_a_model_error(repo, monkeypatch):
     """ANN∪FTS 联合检索里词法臂超时:ANN 候选照常返回,不记 model_error(同上一条,
     这是横幅里那 27 条「模型服务调用失败」真正走的路径)。"""

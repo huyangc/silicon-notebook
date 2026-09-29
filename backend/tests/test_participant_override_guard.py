@@ -863,6 +863,10 @@ _SEAT_FAILSOFT_SITES = (
     # ``federation_participant_ids`` -> 参与集座位。
     ("app/services/reasoning_retrieval.py",
      "ReasoningRetriever._chunk_seed_workers", "count"),
+    # PR-3 语料语言探测:对等模式取参与库语言并集,
+    # ``keyword_corpus_languages`` -> ``federation_participant_ids`` -> 座位。
+    ("app/services/reasoning_retrieval.py",
+     "ReasoningRetriever._corpus_langs", "memoized_retrieval_value"),
     ("app/services/reasoning_retrieval.py",
      "ReasoningRetriever._first_round_search", "search"),
     ("app/services/reasoning_retrieval.py",

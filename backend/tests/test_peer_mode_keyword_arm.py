@@ -528,14 +528,16 @@ def test_keyword_arm_availability_is_the_switch_in_peer_mode_only(enabled):
 # ---------------------------------------------------------------------------
 
 def _single_path_steps(allowed, *, source_scoped=False):
-    """改动前那条函数体发出的逐步调用,一字不差。"""
+    """改动前那条函数体发出的逐步调用,一字不差——唯一的例外是最后一步:
+    2026-09-29 起单库路径与对等腿一样只取文本行(``hydrate_texts``),不再读随后
+    就被丢弃的向量矩阵(关键词打分不读向量)。"""
     return [
         ("restricted_probe", "nb-a"),
         ("gate", "nb-a", allowed, False, False, source_scoped),
         ("corpus_langs", "nb-a", source_scoped),
         ("chunk_fts", "nb-a", _NEEDLE, _RECALL, allowed,
          None if source_scoped else ["en", "zh"]),
-        ("hydrate", ("a1", "a2")),
+        ("hydrate_texts", ("a1", "a2")),
     ]
 
 
