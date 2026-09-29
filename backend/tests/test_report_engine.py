@@ -2397,7 +2397,7 @@ def test_draft_section_unparseable_reply_fails_as_malformed_not_empty(
     assert attempts == [("malformed", "invalid_json"), ("malformed", "invalid_json")]
     assert out["error"] == "模型返回的本节内容无法解析,已重试"
     assert "思维链" not in out["error"]
-    assert len(notes) == 1 and not isinstance(notes[0], RuntimeError)
+    assert [getattr(note, "reason", "") for note in notes] == ["invalid_json"]
 
 
 def test_draft_section_scheduler_rejection_keeps_its_reason_code(
@@ -2425,7 +2425,12 @@ def test_draft_section_scheduler_rejection_keeps_its_reason_code(
 def test_draft_section_call_failure_is_an_error_not_empty(repo, monkeypatch):
     from app.services.model_work import ModelProviderError
 
-    failure = ModelProviderError("down", code="provider_unavailable")
+    # A direct client's message may carry an endpoint or a key; only the
+    # classified code may reach the ``model_error`` event (codex #795 r1).
+    failure = ModelProviderError(
+        "POST https://llm.internal/v1 sk-secret-0123456789 refused",
+        code="provider_unavailable",
+    )
     out, attempts, notes, _calls = _draft_with(
         repo, monkeypatch, [failure, failure]
     )
@@ -2434,7 +2439,52 @@ def test_draft_section_call_failure_is_an_error_not_empty(repo, monkeypatch):
         ("error", "provider_unavailable"), ("error", "provider_unavailable"),
     ]
     assert out["error"] == "本节模型调用失败,已重试"
-    assert notes == [failure]
+    [noted] = notes
+    assert noted is not failure
+    assert noted.code == "provider_unavailable"
+    assert "sk-secret" not in str(noted) and "llm.internal" not in str(noted)
+
+
+def test_draft_section_scheduler_error_reaches_the_banner_unchanged(
+    repo, monkeypatch
+):
+    # The scheduler's typed error is credential-safe by construction and
+    # names the runtime the Ask banner shows; it must not be flattened.
+    from app.services.model_provider import ModelInvocationError
+    from app.services.model_registry import ModelServiceDefinition, WorkloadSpec
+
+    typed = ModelInvocationError(
+        service=ModelServiceDefinition(
+            id="chat", display_name="安全服务", kind="chat",
+            protocol="openai_chat", base_url="https://model.invalid/v1",
+            model="safe-model", api_key_env="MODEL_KEY", api_key="secret",
+            max_concurrency=2, fingerprint="fp",
+        ),
+        workload=WorkloadSpec(
+            id="report_section", kind="chat", default_priority="report",
+            display_label="报告章节",
+        ),
+        code="malformed_response", support_id="mdl-support-safe",
+        detail="incomplete_object",
+    )
+    out, attempts, notes, _calls = _draft_with(repo, monkeypatch, [typed, typed])
+
+    assert attempts == [("malformed", "incomplete_object")] * 2
+    assert notes == [typed]
+    assert out["error"] == "模型返回的本节内容无法解析,已重试"
+
+
+def test_draft_section_parse_failure_notes_only_the_reason(repo, monkeypatch):
+    # A local parse error's message would quote the reply text.
+    broken = '{"markdown": "PRIVATE-REPLY"} trailing prose'
+    out, _attempts, notes, _calls = _draft_with(
+        repo, monkeypatch, [broken, broken]
+    )
+
+    [noted] = notes
+    assert getattr(noted, "reason", "") == "invalid_json"
+    assert "PRIVATE-REPLY" not in str(noted)
+    assert out["error"] == "模型返回的本节内容无法解析,已重试"
 
 
 def test_draft_section_empty_reply_keeps_the_empty_copy(repo, monkeypatch):
