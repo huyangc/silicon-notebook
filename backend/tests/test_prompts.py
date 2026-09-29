@@ -492,18 +492,19 @@ def test_chunks_keywords_sentence_names_the_corpus_languages():
     # 字面命中的用途与「不填就只按 chunks_query」都要说。
     for line in (zh, en, both):
         assert "model numbers, terms, command names, code identifiers" in line
-        assert "leave it empty to search by chunks_query alone" in line
+        assert "Leave it empty to search by chunks_query alone" in line
         # 真模型抽问(PR #799):模型会把候选里见过的兄弟型号与猜测的答案值塞进
         # 关键词串,整串覆盖率被稀释到把金段挤出 RELEVANCE_FLOOR。只许问题点名
         # 的词及其对应写法,这句约束必须随关键词说明一起出现。
-        # 第一版措辞(「only terms the question names」)让模型把跨语言写法也
-        # 省掉了(复核:中英两种写法都在的比例 69% → 48%),而跨语言对应词正是
-        # #799 最大的收益来源。所以约束必须同时重申「每个点名的词仍带其它语言
-        # 写法与缩写/全称」。
-        assert "build it from the terms the question names" in line
-        assert "each still with its forms in the other listed languages" in line
-        assert "add no other identifiers seen in the candidates" in line
-        assert "no guessed answer values" in line
+        # 措辞经过三轮真模型复核:第一版(「only terms the question names」)
+        # 让跨语言写法一起消失(中英两种写法都在 69% → 48%);第二版把排除项放在
+        # 「每个词带全写法」之后的 but 从句里,模型把相邻型号当成同一型号的另一
+        # 种写法(兄弟型号 30% → 61%)。现在排除项在前,并点明不同型号/命令是
+        # 不同的东西;随后仍要求点名的词带其它语言写法与缩写/全称。
+        assert "Do not add identifiers the question does not name" in line
+        assert "a different model number or command is a different thing" in line
+        assert "do not add guessed answer values" in line
+        assert "should still carry its forms in the other listed languages" in line
     # 没探测到语言 = zh/en 回退,与 expand_query_prompt 的缺省同一对。
     assert _line() == both
     assert _line(corpus_langs=[]) == both
