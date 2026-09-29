@@ -22,14 +22,29 @@ from app.repositories.sqlite.access_sql import (
     GRANT_PROBE_SQL,
     MEMBER_PROBE_SQL,
     NOTEBOOK_READ_SQL,
+    grant_access_expr,
     grant_probe_params,
+    member_exists_expr,
     read_access_clause,
     read_access_exists_clause,
     read_access_params,
 )
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.governance_store import GovernanceStore
 from app.repositories.sqlite.id_binding import bind_ids, drive_by
 from app.domain.vector_index import encode_vector
+
+# ``promotion_candidates.reason`` for a proposal withdrawn because its Memory
+# was hard-deleted — same literal as the PostgreSQL twin.
+MEMORY_DELETED_PROMOTION_REASON = "withdrawn_memory_deleted"
+
+
+def _bulk_memory_ids(memory_ids: Sequence[str]) -> list[str]:
+    """De-duplicated, bounded id list shared by bulk delete and its pre-read."""
+    unique = list(dict.fromkeys(str(m) for m in memory_ids if m))
+    if len(unique) > 200:
+        raise ValueError("memory_ids may contain at most 200 unique values")
+    return unique
 
 
 def _json_object(raw: Any) -> dict[str, Any]:
@@ -1443,11 +1458,8 @@ class MemoryStore:
 
     def delete_memory(self, memory_id: str, user_id: str) -> None:
         with self.database.write() as db:
-            cursor = db.execute(
-                "DELETE FROM memory_items WHERE id=? AND created_by=?",
-                (memory_id, user_id),
-            )
-        if cursor.rowcount != 1:
+            deleted = self._hard_delete_on(db, user_id, [memory_id])
+        if len(deleted) != 1:
             raise KeyError(memory_id)
 
     def delete_memory_if_unchanged(
@@ -1535,23 +1547,125 @@ class MemoryStore:
         return cursor.rowcount == 1
 
     def bulk_delete_memories(self, user_id: str, memory_ids: Sequence[str]) -> int:
-        unique = list(dict.fromkeys(str(m) for m in memory_ids if m))
+        unique = _bulk_memory_ids(memory_ids)
         if not unique:
             return 0
-        if len(unique) > 200:
-            raise ValueError("memory_ids may contain at most 200 unique values")
-        placeholders = ",".join("?" for _ in unique)
         with self.database.write() as db:
+            return len(self._hard_delete_on(db, user_id, unique))
+
+    def _hard_delete_on(
+        self, db: sqlite3.Connection, user_id: str, memory_ids: Sequence[str]
+    ) -> list[str]:
+        """Delete the caller's own Memory rows and withdraw their live proposals.
+
+        Mirror of the PostgreSQL twin (its docstring carries the lock-order
+        argument; here the process-wide write lock serializes the writers).
+        Revisions, provenance and embeddings go with the row through their
+        cascading foreign keys; the derived source and KG rows are removed by
+        ``MemoryService`` before this runs."""
+        placeholders = ",".join("?" for _ in memory_ids)
+        rows = db.execute(
+            "SELECT id,notebook_id FROM memory_items "
+            f"WHERE created_by=? AND id IN ({placeholders}) ORDER BY id",
+            (user_id, *memory_ids),
+        ).fetchall()
+        by_notebook: dict[str, list[str]] = {}
+        for row in rows:
+            by_notebook.setdefault(row["notebook_id"], []).append(row["id"])
+        now = self.now()
+        for notebook_id, ids in by_notebook.items():
+            GovernanceStore.withdraw_memory_promotions_on(
+                db, notebook_id, ids, MEMORY_DELETED_PROMOTION_REASON, user_id, now
+            )
+            id_placeholders = ",".join("?" for _ in ids)
+            db.execute(
+                "DELETE FROM memory_items WHERE notebook_id=? AND created_by=? "
+                f"AND id IN ({id_placeholders})",
+                (notebook_id, user_id, *ids),
+            )
+        return [row["id"] for row in rows]
+
+    def owned_memory_ids(
+        self, user_id: str, memory_ids: Sequence[str]
+    ) -> list[str]:
+        """Mirror of the PostgreSQL twin: the ids ``bulk_delete_memories``
+        would delete, read first so their derived rows can go before them."""
+        unique = _bulk_memory_ids(memory_ids)
+        if not unique:
+            return []
+        placeholders = ",".join("?" for _ in unique)
+        with self.database.connect() as db:
             rows = db.execute(
-                f"SELECT id FROM memory_items WHERE created_by=? AND id IN ({placeholders})",
+                "SELECT id FROM memory_items "
+                f"WHERE created_by=? AND id IN ({placeholders}) ORDER BY id",
                 (user_id, *unique),
             ).fetchall()
-            ids = [r["id"] for r in rows]
-            db.executemany(
-                "DELETE FROM memory_items WHERE id=? AND created_by=?",
-                [(i, user_id) for i in ids],
-            )
-        return len(ids)
+        return [row["id"] for row in rows]
+
+    def exit_memory_ids(
+        self, notebook_id: str, user_id: str, *, limit: int
+    ) -> list[str]:
+        """Mirror of the PostgreSQL twin: this user's Memory ids in this
+        notebook, only while the membership row is (or was) their last read
+        path — not the owner, no grant."""
+        grant = grant_access_expr("nb.id", "m.created_by", "xg", "xgm", "xga")
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT m.id FROM memory_items m "
+                "JOIN notebooks nb ON nb.id=m.notebook_id "
+                "WHERE m.notebook_id=? AND m.created_by=? "
+                "AND nb.created_by<>m.created_by "
+                f"AND NOT {grant} "
+                "ORDER BY m.id LIMIT ?",
+                (notebook_id, user_id, max(1, int(limit))),
+            ).fetchall()
+        return [row["id"] for row in rows]
+
+    def member_memory_creators(self, notebook_id: str) -> list[str]:
+        """Mirror of the PostgreSQL twin: members of this notebook who own
+        at least one Memory in it."""
+        member = member_exists_expr("m.notebook_id", "m.created_by", "xm")
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT DISTINCT m.created_by FROM memory_items m "
+                f"WHERE m.notebook_id=? AND {member} ORDER BY m.created_by",
+                (notebook_id,),
+            ).fetchall()
+        return [row["created_by"] for row in rows]
+
+    def detach_memory_projection(self, memory_id: str, user_id: str) -> list[str]:
+        """Mirror of the PostgreSQL twin: strip this Memory's derived-source
+        evidence from objects another source owns before the source goes.
+
+        SQLite only: also drop the ``kg_objects_fts`` rows of the objects the
+        Memory's source minted. The generic source delete removes those
+        objects but not their lexical-index rows, which would keep the
+        private Memory's object names on disk after a hard delete. Scoped by
+        notebook and by the Memory's source id."""
+        with self.database.write() as db:
+            sources = db.execute(
+                "SELECT s.id,s.notebook_id FROM sources s "
+                "JOIN memory_items m ON m.id=s.memory_id "
+                "AND m.notebook_id=s.notebook_id "
+                "WHERE s.memory_id=? AND s.source_type='memory' "
+                "AND m.created_by=?",
+                (memory_id, user_id),
+            ).fetchall()
+            now = self.now()
+            stripped: list[str] = []
+            for source in sources:
+                stripped.extend(
+                    GovernanceStore.strip_source_evidence_on(
+                        db, source["notebook_id"], source["id"], now
+                    )
+                )
+                db.execute(
+                    "DELETE FROM kg_objects_fts WHERE notebook_id=? AND object_id IN "
+                    "(SELECT id FROM knowledge_objects WHERE notebook_id=? "
+                    "AND source_id=?)",
+                    (source["notebook_id"], source["notebook_id"], source["id"]),
+                )
+        return stripped
 
     def list_memories(
         self,

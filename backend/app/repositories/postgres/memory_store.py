@@ -29,12 +29,15 @@ from app.repositories.postgres._store_utils import (
 from app.repositories.postgres.access_sql import (
     GRANT_PROBE_FOR_SHARE_SQL,
     MEMBER_PROBE_FOR_SHARE_SQL,
+    grant_access_expr,
     grant_probe_params,
+    member_exists_expr,
     read_access_clause,
     read_access_exists_clause,
     read_access_params,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.governance_store import GovernanceStore
 from app.repositories.postgres.search import (
     MemoryCandidateScope,
     memory_candidate_ids,
@@ -62,6 +65,19 @@ def _json_list(raw: Any) -> list[str]:
     except (TypeError, ValueError):
         return []
     return [str(item) for item in value] if isinstance(value, list) else []
+
+
+# ``promotion_candidates.reason`` for a proposal withdrawn because its Memory
+# was hard-deleted (single delete, bulk delete, or a member's exit purge).
+MEMORY_DELETED_PROMOTION_REASON = "withdrawn_memory_deleted"
+
+
+def _bulk_memory_ids(memory_ids: Sequence[str]) -> list[str]:
+    """De-duplicated, bounded id list shared by bulk delete and its pre-read."""
+    unique = list(dict.fromkeys(str(m) for m in memory_ids if m))
+    if len(unique) > 200:
+        raise ValueError("memory_ids may contain at most 200 unique values")
+    return unique
 
 
 def _strict_json_value(value: Any, *, field: str) -> Any:
@@ -1573,11 +1589,8 @@ class MemoryStore:
 
     def delete_memory(self, memory_id: str, user_id: str) -> None:
         with self.database.write() as db:
-            cursor = db.execute(
-                "DELETE FROM memory_items WHERE id=%s AND created_by=%s",
-                (memory_id, user_id),
-            )
-        if cursor.rowcount != 1:
+            deleted = self._hard_delete_on(db, user_id, [memory_id])
+        if len(deleted) != 1:
             raise KeyError(memory_id)
 
     def delete_memory_if_unchanged(
@@ -1665,24 +1678,134 @@ class MemoryStore:
         return cursor.rowcount == 1
 
     def bulk_delete_memories(self, user_id: str, memory_ids: Sequence[str]) -> int:
-        unique = list(dict.fromkeys(str(m) for m in memory_ids if m))
+        unique = _bulk_memory_ids(memory_ids)
         if not unique:
             return 0
-        if len(unique) > 200:
-            raise ValueError("memory_ids may contain at most 200 unique values")
-        placeholders = ",".join("%s" for _ in unique)
         with self.database.write() as db:
-            rows = db.execute(
-                f"SELECT id FROM memory_items WHERE created_by=%s AND id IN ({placeholders})",
-                (user_id, *unique),
-            ).fetchall()
-            ids = [r["id"] for r in rows]
-            execute_many(
-                db,
-                "DELETE FROM memory_items WHERE id=%s AND created_by=%s",
-                [(i, user_id) for i in ids],
+            return len(self._hard_delete_on(db, user_id, unique))
+
+    def _hard_delete_on(
+        self, db: object, user_id: str, memory_ids: Sequence[str]
+    ) -> list[str]:
+        """Delete the caller's own Memory rows and withdraw their live proposals.
+
+        One transaction: lock the rows in id order, reject every still-active
+        promotion proposal pointing at them, then delete them (revisions,
+        provenance and embeddings go with the row through their cascading
+        foreign keys). Locking the Memory rows first gives the same
+        Memory-then-candidate order ``approve_promotion`` uses, and it makes a
+        proposal racing this delete either visible to the withdrawal or fail
+        on the vanished row. Every statement is scoped by owner, notebook and
+        id. The derived source and KG rows are NOT touched here —
+        ``MemoryService`` removes them first, before this row disappears."""
+        rows = db.execute(
+            "SELECT id,notebook_id FROM memory_items "
+            "WHERE created_by=%s AND id=ANY(%s) ORDER BY id FOR UPDATE",
+            (user_id, list(memory_ids)),
+        ).fetchall()
+        by_notebook: dict[str, list[str]] = {}
+        for row in rows:
+            by_notebook.setdefault(row["notebook_id"], []).append(row["id"])
+        now = self.now()
+        for notebook_id, ids in by_notebook.items():
+            GovernanceStore.withdraw_memory_promotions_on(
+                db, notebook_id, ids, MEMORY_DELETED_PROMOTION_REASON, user_id, now
             )
-        return len(ids)
+            db.execute(
+                "DELETE FROM memory_items "
+                "WHERE notebook_id=%s AND created_by=%s AND id=ANY(%s)",
+                (notebook_id, user_id, ids),
+            )
+        return [row["id"] for row in rows]
+
+    def owned_memory_ids(
+        self, user_id: str, memory_ids: Sequence[str]
+    ) -> list[str]:
+        """The subset of ``memory_ids`` this user created, whatever their
+        current read access — exactly the rows ``bulk_delete_memories`` would
+        delete, so the service can remove their derived rows first. Same
+        de-duplication and 200-id bound as that method."""
+        unique = _bulk_memory_ids(memory_ids)
+        if not unique:
+            return []
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT id FROM memory_items WHERE created_by=%s AND id=ANY(%s) "
+                "ORDER BY id",
+                (user_id, unique),
+            ).fetchall()
+        return [row["id"] for row in rows]
+
+    def exit_memory_ids(
+        self, notebook_id: str, user_id: str, *, limit: int
+    ) -> list[str]:
+        """Memory ids a member's exit must purge: the rows this user created
+        in this notebook, but only while the membership row is (or was) the
+        user's LAST read path — not the owner and holding no grant.
+
+        Evaluated on the user's other read paths only, so it answers the same
+        way before the membership row is deleted (the service purges first)
+        and after (the post-exit sweep): someone still able to read through a
+        group or direct grant has not actually left, and keeps every Memory.
+        The membership row itself is the caller's precondition, checked
+        separately. Bounded by ``limit`` in id order."""
+        grant = grant_access_expr("nb.id", "m.created_by", "xg", "xgm", "xga")
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT m.id FROM memory_items m "
+                "JOIN notebooks nb ON nb.id=m.notebook_id "
+                "WHERE m.notebook_id=%s AND m.created_by=%s "
+                "AND nb.created_by<>m.created_by "
+                f"AND NOT {grant} "
+                "ORDER BY m.id LIMIT %s",
+                (notebook_id, user_id, max(1, int(limit))),
+            ).fetchall()
+        return [row["id"] for row in rows]
+
+    def member_memory_creators(self, notebook_id: str) -> list[str]:
+        """Users who hold a membership row in this notebook AND own at least
+        one Memory in it — the only members a notebook-wide kick can make
+        lose Memory. ``exit_memory_ids`` still decides, per user, whether
+        the membership row was their last read path."""
+        member = member_exists_expr("m.notebook_id", "m.created_by", "xm")
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT DISTINCT m.created_by FROM memory_items m "
+                f"WHERE m.notebook_id=%s AND {member} ORDER BY m.created_by",
+                (notebook_id,),
+            ).fetchall()
+        return [row["created_by"] for row in rows]
+
+    def detach_memory_projection(self, memory_id: str, user_id: str) -> list[str]:
+        """Prepare this Memory's derived source for removal: strip its
+        evidence from objects another source owns, so the source removal that
+        follows deletes only what the Memory itself minted (N-1: a manual
+        merge of a Memory-derived object into a shared one must not take the
+        shared object with it).
+
+        The source is resolved through the Memory row — same notebook, this
+        user as creator — so a call can never reach another user's Memory or
+        another notebook. No derived source: a no-op. Returns the stripped
+        object ids. (The SQLite twin also drops its KG lexical-index rows;
+        PostgreSQL searches ``knowledge_objects`` itself, nothing to drop.)"""
+        with self.database.write() as db:
+            sources = db.execute(
+                "SELECT s.id,s.notebook_id FROM sources s "
+                "JOIN memory_items m ON m.id=s.memory_id "
+                "AND m.notebook_id=s.notebook_id "
+                "WHERE s.memory_id=%s AND s.source_type='memory' "
+                "AND m.created_by=%s",
+                (memory_id, user_id),
+            ).fetchall()
+            now = self.now()
+            stripped: list[str] = []
+            for source in sources:
+                stripped.extend(
+                    GovernanceStore.strip_source_evidence_on(
+                        db, source["notebook_id"], source["id"], now
+                    )
+                )
+        return stripped
 
     def list_memories(
         self,
