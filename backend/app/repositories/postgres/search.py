@@ -13,6 +13,7 @@ from app.repositories.postgres.access_sql import (
     read_access_exists_clause,
     read_access_params,
 )
+from app.repositories.postgres.id_binding import bind_ids, execute_ids
 
 
 PAYLOAD_NAME_EXPRESSION = '(payload ->> \'name\') COLLATE "C"'
@@ -497,28 +498,39 @@ def _candidate_rows_for_terms(
     if live_only:
         scope_predicates.append(target.live_predicate)
     source_params: list[object] = []
+    # A source ceiling can list every source of the notebook: it goes through
+    # the id-binding module (one parameter, always a custom plan); an unscoped
+    # probe keeps its plain, plan-cached execute.
+    execute = connection.execute
     if allowed_source_ids is not None:
         if not allowed_source_ids:
             return []
+        ceiling = bind_ids(allowed_source_ids)
         if target.table == "knowledge_objects":
             if authoritative_source_filter:
                 scope_predicates.append(
                     f"EXISTS (SELECT 1 FROM jsonb_array_elements("
                     f"CASE WHEN jsonb_typeof({table_sql}.evidence)='array' "
                     f"THEN {table_sql}.evidence ELSE '[]'::jsonb END) ev "
-                    f"WHERE ev->>'source_id'=ANY(%s))"
+                    f"WHERE ev->>'source_id'=ANY({ceiling.array_sql}))"
                 )
             else:
                 scope_predicates.append(
                     f"EXISTS (SELECT 1 FROM knowledge_object_sources kos "
                     f"WHERE kos.notebook_id={table_sql}.notebook_id "
-                    f"AND kos.object_id={table_sql}.{id_sql} AND kos.source_id=ANY(%s))"
+                    f"AND kos.object_id={table_sql}.{id_sql} "
+                    f"AND kos.source_id=ANY({ceiling.array_sql}))"
                 )
         elif target.table == "chunks":
-            scope_predicates.append(f"{table_sql}.source_id=ANY(%s)")
+            scope_predicates.append(
+                f"{table_sql}.source_id=ANY({ceiling.array_sql})"
+            )
         else:
             raise ValueError("source-scoped lexical search target is unsupported")
-        source_params.append(allowed_source_ids)
+        source_params.append(ceiling.param)
+
+        def execute(statement, params):
+            return execute_ids(connection, statement, params)
     term_values = ",".join("(%s,%s,%s)" for _ in ranked_terms)
     term_params = [
         value
@@ -549,7 +561,7 @@ def _candidate_rows_for_terms(
             "candidate.candidate_id COLLATE \"C\""
         )
         params = [*term_params, notebook_id, *source_params, int(per_term_limit)]
-        return connection.execute(statement, params).fetchall()
+        return execute(statement, params).fetchall()
 
     # Keep `%` and ILIKE in independent bounded KG-name scans. PostgreSQL can
     # then use the best trigram access path for each predicate instead of
@@ -595,7 +607,7 @@ def _candidate_rows_for_terms(
     params.extend(source_params)
     params.append(int(per_term_limit))
     params.append(int(per_term_limit))
-    return connection.execute(statement, params).fetchall()
+    return execute(statement, params).fetchall()
 
 
 def knowledge_candidate_rows_for_terms(
