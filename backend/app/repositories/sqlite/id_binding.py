@@ -84,19 +84,25 @@ def ids_param(values: Iterable[str | int]) -> str:
         raise TypeError(
             "ids_param() takes a collection of ids, not a single string"
         )
-    cleaned = dict.fromkeys(_clean(value) for value in values)
-    cleaned.pop(None, None)
-    ordered = list(cleaned)
+    unique = dict.fromkeys(values)
+    # Fast path for the common all-``str`` ceiling (tens of thousands of ids,
+    # once per statement): one comprehension, no per-item function call.
+    kept: list[str | int] = [
+        value for value in unique
+        if type(value) is str and value and not value.isspace()
+    ]
+    if len(kept) != len(unique):
+        kept = [value for value in map(_clean, unique) if value is not None]
     if isinstance(values, (set, frozenset)):
-        ordered.sort(key=lambda value: (isinstance(value, int), value))
-    return json.dumps(ordered, ensure_ascii=False, separators=(",", ":"))
+        kept.sort(key=lambda value: (isinstance(value, int), value))
+    return json.dumps(kept, ensure_ascii=False)
 
 
 def _clean(value: object) -> str | int | None:
     if value is None:
         return None
     if isinstance(value, str):
-        return value if value.strip() else None
+        return value if value and not value.isspace() else None
     if isinstance(value, int) and not isinstance(value, bool):
         return value
     raise TypeError(f"id must be str or int, got {type(value).__name__}")
