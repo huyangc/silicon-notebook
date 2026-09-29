@@ -51,7 +51,10 @@
   用 `scripts/audit_facade_callers.py` 复现，并同步 ownership/surface fixture：
   `scripts/generate_repository_contract_fixtures.py --rebaseline-surface`。
 - 两种 adapter 的 `access_sql.py`、`mount_sql.py` 与 `memory_sql.py` 判据同步维护；
-  `memory_sql.py` 是「谁能读 Memory 派生来源」与「哪些 KG 行算派生自 Memory」的唯一定义。新的 notebook 写
+  `memory_sql.py` 是「谁能读 Memory 派生来源」与「哪些 KG 行算派生自 Memory」的共享
+  定义点，新读者一律 import；早于它的读者（`source_store.hidden_source_ids`、
+  `postgres/chunk_store.py` 里的 Memory 属主判断）仍自带手写谓词，在改动它们的变更里
+  迁入。新的 notebook 写
   端点走 `require_notebook_capability(...)`；在 body 中才解析身份的路径也使用同一
   capability 表及独立 mirror-write fence。先授权再返回镜像写错误，保留已登记的
   报告创建者私有权限例外。不得根据空/null principal id 猜 grant 种类或绕过实时读权；

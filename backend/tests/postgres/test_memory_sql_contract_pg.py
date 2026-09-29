@@ -1,10 +1,12 @@
-"""Memory SQL 片段唯一定义点(`repositories/postgres/memory_sql.py`)的行为契约(PostgreSQL)。
+"""Memory SQL 片段共享定义点(`repositories/postgres/memory_sql.py`)的行为契约(PostgreSQL)。
 
 `tests/test_memory_sql_contract.py`(SQLite)的镜像,**吃同一张判定表**
 (`tests/memory_sql_cases.py`):本人 Memory 来源可读、别人的不可读、孤儿与无 memory_id 的
-Memory 来源对所有人失败即关、空查看者读不到任何 Memory 来源、Knowhow 与普通来源人人可读;
-每个片段消费固定个数的 `%s`(readable / foreign 各 1,derived / cluster 各 0);嵌进更大
-查询结果一致;`query_store` 旧常量改为引用片段后,真聚合给出硬编码的黄金结果。
+Memory 来源对所有人失败即关、空查看者与 NULL 查看者读不到任何 Memory 来源、Knowhow 与普通
+来源人人可读;每个片段在语句文本里它所在的位置消费固定个数的 `%s`(readable / foreign
+各 1,derived / cluster 各 0);簇片段的两条相关条件(同笔记本、同代)各有用例;外层别名
+校验不分大小写、只收裸标识符;嵌进更大查询结果一致;`query_store` 旧常量改为引用片段后,
+真聚合给出硬编码的黄金结果。
 """
 from __future__ import annotations
 
@@ -32,12 +34,13 @@ def world(postgres_database):
                 "VALUES (%s,%s,%s,'user','active',%s,%s,%s,'','',0)",
                 (uid, f"{uid}@example.test", uid, NOW, NOW, f"m{index:08d}"),
             )
-        db.execute(
-            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
-            "created_at,updated_at,tier) "
-            "VALUES (%s,'NB','','','ready',%s,%s,%s,'personal')",
-            (cases.NOTEBOOK, cases.OWNER, NOW, NOW),
-        )
+        for notebook in (cases.NOTEBOOK, cases.NOTEBOOK2):
+            db.execute(
+                "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+                "created_at,updated_at,tier) "
+                "VALUES (%s,'NB','','','ready',%s,%s,%s,'personal')",
+                (notebook, cases.OWNER, NOW, NOW),
+            )
         for memory_id, created_by in cases.MEMORY_ITEMS:
             db.execute(
                 "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
@@ -45,18 +48,27 @@ def world(postgres_database):
                 "VALUES (%s,%s,%s,'ask_answer','confirmed',%s,'x',%s,%s)",
                 (memory_id, cases.NOTEBOOK, created_by, memory_id, NOW, NOW),
             )
-        for source_id, source_type, memory_id in cases.SOURCES:
-            db.execute(
-                "INSERT INTO sources(id,notebook_id,title,source_type,memory_id,created_at,"
-                "updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                (source_id, cases.NOTEBOOK, source_id, source_type, memory_id, NOW, NOW),
-            )
-        for object_id, source_id, object_type in cases.OBJECTS:
-            db.execute(
-                "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,source_id,"
-                "created_at,updated_at) VALUES (%s,%s,%s,'approved',%s,%s,%s)",
-                (object_id, cases.NOTEBOOK, object_type, source_id, NOW, NOW),
-            )
+        for notebook, sources in (
+            (cases.NOTEBOOK, cases.SOURCES),
+            (cases.NOTEBOOK2, cases.SOURCES_NB2),
+        ):
+            for source_id, source_type, memory_id in sources:
+                db.execute(
+                    "INSERT INTO sources(id,notebook_id,title,source_type,memory_id,"
+                    "created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                    (source_id, notebook, source_id, source_type, memory_id, NOW, NOW),
+                )
+        for notebook, objects in (
+            (cases.NOTEBOOK, cases.OBJECTS),
+            (cases.NOTEBOOK2, cases.OBJECTS_NB2),
+        ):
+            for object_id, source_id, object_type in objects:
+                db.execute(
+                    "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
+                    "source_id,created_at,updated_at) "
+                    "VALUES (%s,%s,%s,'approved',%s,%s,%s)",
+                    (object_id, notebook, object_type, source_id, NOW, NOW),
+                )
         for relation_id, source_id in cases.RELATIONS:
             db.execute(
                 "INSERT INTO knowledge_relations(id,notebook_id,source_id,source_object_id,"
@@ -64,14 +76,14 @@ def world(postgres_database):
                 (relation_id, cases.NOTEBOOK, source_id, "ko-upload", "ko-knowhow",
                  "related_to", NOW),
             )
-        for canonical_id, name, members in cases.CLUSTERS:
+        for notebook, canonical_id, name, generation, members in cases.CLUSTERS:
             for member in members:
                 db.execute(
                     "INSERT INTO concept_clusters(id,notebook_id,canonical_id,"
-                    "member_object_id,canonical_name,object_type,created_at) "
-                    "VALUES (%s,%s,%s,%s,%s,'concept',%s)",
-                    (f"cc-{canonical_id}-{member}", cases.NOTEBOOK, canonical_id, member,
-                     name, NOW),
+                    "member_object_id,canonical_name,object_type,created_at,generation) "
+                    "VALUES (%s,%s,%s,%s,%s,'concept',%s,%s)",
+                    (f"cc-{canonical_id}-{generation}-{member}", notebook, canonical_id,
+                     member, name, NOW, generation),
                 )
     return postgres_database
 
@@ -81,7 +93,7 @@ def _ids(database, sql: str, params: tuple = ()) -> set[str]:
         return {row["id"] for row in db.execute(sql, params).fetchall()}
 
 
-def _sources(database, viewer: str) -> set[str]:
+def _sources(database, viewer) -> set[str]:
     return _ids(
         database,
         f"SELECT s.id FROM sources s WHERE {memory_sql.memory_source_readable('s')}",
@@ -89,7 +101,7 @@ def _sources(database, viewer: str) -> set[str]:
     )
 
 
-def _objects_kept(database, viewer: str) -> set[str]:
+def _objects_kept(database, viewer) -> set[str]:
     return _ids(
         database,
         "SELECT o.id FROM knowledge_objects o "
@@ -98,7 +110,7 @@ def _objects_kept(database, viewer: str) -> set[str]:
     )
 
 
-def _relations_kept(database, viewer: str) -> set[str]:
+def _relations_kept(database, viewer) -> set[str]:
     return _ids(
         database,
         "SELECT r.id FROM knowledge_relations r "
@@ -129,27 +141,36 @@ def test_every_fragment_consumes_a_fixed_number_of_positional_parameters():
         assert "?" not in fragment
 
 
-def test_outer_alias_that_would_capture_an_inner_table_is_refused():
-    for bad in ("rm", "1x", "a b", "s; DROP TABLE sources", ""):
-        with pytest.raises(ValueError):
-            memory_sql.memory_source_readable(bad)
-    for bad in ("fs", "fm"):
-        with pytest.raises(ValueError):
-            memory_sql.foreign_memory_object_excluded(bad)
-        with pytest.raises(ValueError):
-            memory_sql.foreign_memory_relation_excluded(bad)
-    for bad in ("ds", "d s"):
-        with pytest.raises(ValueError):
-            memory_sql.memory_derived_object(bad)
-        with pytest.raises(ValueError):
-            memory_sql.memory_derived_relation(bad)
-    for bad in ("mc", "mo", "ms"):
-        with pytest.raises(ValueError):
-            memory_sql.no_memory_member_cluster(bad)
+# ------------------------------------------------------------------ 外层别名校验
+def _alias_calls():
+    return {
+        "readable": (memory_sql.memory_source_readable,),
+        "foreign": (
+            memory_sql.foreign_memory_object_excluded,
+            memory_sql.foreign_memory_relation_excluded,
+        ),
+        "derived": (
+            memory_sql.memory_derived_object,
+            memory_sql.memory_derived_relation,
+        ),
+        "cluster": (memory_sql.no_memory_member_cluster,),
+    }
+
+
+@pytest.mark.parametrize("family", sorted(cases.BAD_ALIASES))
+def test_outer_alias_that_would_capture_an_inner_table_or_is_not_a_bare_identifier_is_refused(
+    family,
+):
+    for fragment in _alias_calls()[family]:
+        for bad in cases.BAD_ALIASES[family]:
+            with pytest.raises(ValueError):
+                fragment(bad)
+        for good in ("o", "O1", "_x", "outer_1"):
+            assert fragment(good)
 
 
 # --------------------------------------------------------------------- 行为矩阵
-@pytest.mark.parametrize("viewer", sorted(cases.READABLE_SOURCES))
+@pytest.mark.parametrize("viewer", list(cases.READABLE_SOURCES))
 def test_source_readability_matrix(world, viewer):
     assert _sources(world, viewer) == cases.READABLE_SOURCES[viewer]
 
@@ -173,12 +194,13 @@ def test_knowhow_and_ordinary_sources_are_readable_by_everyone(world):
         assert {"src-knowhow", "src-upload"} <= readable, "ordinary source readable"
 
 
-def test_empty_viewer_reads_no_memory_source(world):
+@pytest.mark.parametrize("viewer", ["", None])
+def test_empty_or_null_viewer_reads_no_memory_source(world, viewer):
     memory_ids = {s[0] for s in cases.SOURCES if s[1] == "memory"}
-    assert _sources(world, "") & memory_ids == set()
+    assert _sources(world, viewer) & memory_ids == set()
 
 
-@pytest.mark.parametrize("viewer", sorted(cases.FOREIGN_EXCLUDED_KEEPS_OBJECTS))
+@pytest.mark.parametrize("viewer", list(cases.FOREIGN_EXCLUDED_KEEPS_OBJECTS))
 def test_foreign_memory_exclusion_matrix(world, viewer):
     assert _objects_kept(world, viewer) == cases.FOREIGN_EXCLUDED_KEEPS_OBJECTS[viewer]
     assert _relations_kept(world, viewer) == cases.FOREIGN_EXCLUDED_KEEPS_RELATIONS[viewer]
@@ -204,13 +226,31 @@ def test_memory_derived_classifier_ignores_the_viewer_and_covers_orphans(world):
     assert derived_relations == cases.MEMORY_DERIVED_RELATIONS
 
 
+_CLUSTER_KEPT_SQL = (
+    "SELECT DISTINCT c.notebook_id || '/' || c.canonical_id || '/' || "
+    "CAST(c.generation AS TEXT) AS id FROM concept_clusters c "
+    f"WHERE {memory_sql.no_memory_member_cluster('c')}"
+)
+
+
 def test_no_memory_member_cluster_excludes_the_whole_cluster(world):
-    kept = _ids(
-        world,
-        "SELECT DISTINCT c.canonical_id AS id FROM concept_clusters c "
-        f"WHERE {memory_sql.no_memory_member_cluster('c')}",
+    assert _ids(world, _CLUSTER_KEPT_SQL) == cases.NO_MEMORY_MEMBER_CLUSTERS
+
+
+def test_no_memory_member_cluster_is_scoped_to_its_own_notebook(world):
+    kept = _ids(world, _CLUSTER_KEPT_SQL)
+    assert f"{cases.NOTEBOOK}/can-mixed/0" not in kept
+    assert f"{cases.NOTEBOOK2}/can-mixed/0" in kept, (
+        "another notebook's Memory member hid this notebook's same-named cluster"
     )
-    assert kept == cases.NO_MEMORY_MEMBER_CLUSTERS
+
+
+def test_no_memory_member_cluster_is_scoped_to_its_own_generation(world):
+    kept = _ids(world, _CLUSTER_KEPT_SQL)
+    assert f"{cases.NOTEBOOK}/can-gen/1" not in kept
+    assert f"{cases.NOTEBOOK}/can-gen/0" in kept, (
+        "a Memory member in the building generation hid the published cluster"
+    )
 
 
 # --------------------------------------------------------------- 嵌进更大的查询
@@ -219,13 +259,16 @@ def test_fragment_embedded_in_a_larger_query_agrees_with_the_standalone_result(w
         got = _ids(
             world,
             "SELECT s.id FROM sources s JOIN notebooks n ON n.id = s.notebook_id "
-            "WHERE n.id = %s AND "
+            "WHERE n.id = ANY(%s) AND "
             f"{memory_sql.memory_source_readable('s')} "
             "AND s.status = %s AND s.id IN (SELECT source_id FROM knowledge_objects "
-            "WHERE notebook_id = %s)",
-            (cases.NOTEBOOK, viewer, "uploaded", cases.NOTEBOOK),
+            "WHERE notebook_id = ANY(%s))",
+            ([cases.NOTEBOOK, cases.NOTEBOOK2], viewer, "uploaded",
+             [cases.NOTEBOOK, cases.NOTEBOOK2]),
         )
-        objects_owned_by_a_source = {o[1] for o in cases.OBJECTS if o[1]}
+        objects_owned_by_a_source = {
+            o[1] for o in cases.OBJECTS + cases.OBJECTS_NB2 if o[1]
+        }
         assert got == expected & objects_owned_by_a_source, viewer
 
     for viewer, expected in cases.FOREIGN_EXCLUDED_KEEPS_OBJECTS.items():
@@ -233,10 +276,10 @@ def test_fragment_embedded_in_a_larger_query_agrees_with_the_standalone_result(w
             world,
             "SELECT o.id FROM knowledge_objects o "
             "LEFT JOIN concept_clusters c ON c.member_object_id = o.id "
-            "WHERE o.notebook_id = %s AND o.status = %s AND "
+            "WHERE o.status = %s AND "
             f"{memory_sql.foreign_memory_object_excluded('o')} "
             "AND o.object_type = ANY(%s)",
-            (cases.NOTEBOOK, "approved", viewer, ["concept", "claim"]),
+            ("approved", viewer, ["concept", "claim"]),
         )
         assert got == expected, viewer
 
