@@ -744,15 +744,16 @@ def chunks_keywords_text(value) -> str:
 
     宽松边界(harness 原则:可接受的偏差做兼容):模型把它写成 JSON 列表时,取
     其中的字符串元素、用空格拼接(`as_text_list`,非字符串元素丢弃),与字符串
-    形态等价;其它类型读作空串。顺序是 `lstrip` → 截断到
-    `CHUNKS_KEYWORDS_MAX_CHARS` → `strip`:开头的空白不占预算,截断点落在空格上
-    时也不留尾随空白——执行体的「非空才跑」判据与轨迹里记的串因此是同一个值。
+    形态等价;其它类型读作空串。`as_text` / `as_text_list` 已去掉首尾空白,所以
+    开头的空白不占预算;截断到 `CHUNKS_KEYWORDS_MAX_CHARS` 后再 `strip`,截断点
+    落在空格上时也不留尾随空白——执行体的「非空才跑」判据与轨迹里记的串因此是
+    同一个值。
     """
     if isinstance(value, list):
         text = " ".join(as_text_list(value))
     else:
         text = as_text(value)
-    return text.lstrip()[:CHUNKS_KEYWORDS_MAX_CHARS].strip()
+    return text[:CHUNKS_KEYWORDS_MAX_CHARS].strip()
 
 
 _TITLE_WRAPPING_PAIRS = (

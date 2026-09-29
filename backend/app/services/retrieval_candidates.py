@@ -4075,7 +4075,8 @@ class CandidateRetrievalService(_RetrievalState):
         sub-query: chunk mode calls it once per ask; reasoning calls it once in
         the first-round seed (when ``plan()`` produced keywords) plus once per
         ``search_chunks`` action that carries ``chunks_keywords`` (so at most
-        ``1 + REASONING_MAX_CHUNK_SEARCHES`` per run). The caller merges these into whatever candidate set its branch built
+        ``1 + REASONING_MAX_CHUNK_SEARCHES`` per run). The caller merges these
+        into whatever candidate set its branch built
         (dedup by chunk_id), so a chunk that matches only a 2nd-language keyword —
         never the question-language sub_queries — is still retrieved. fail-open:
         FTS/hydrate errors (e.g. legacy lib missing chunks_fts) → [].
