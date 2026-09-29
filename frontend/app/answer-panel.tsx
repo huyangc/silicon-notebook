@@ -303,6 +303,12 @@ const SOURCE_LIST_LABELS: Record<string, string> = {
 // collection 取键,塞进去会让那条守卫比一张它读不懂的表。
 const LOCAL_ONLY_SCOPE_SUFFIX = "（仅当前笔记本）";
 
+// 勾选过来源的清单的标题后缀:这份清单只覆盖用户勾选的那部分来源,而不是检索范围内
+// 全部来源。与 LOCAL_ONLY_SCOPE_SUFFIX 是两件事(一个是笔记本范围,一个是来源勾选范围),
+// 所以是另一个后缀、另一个字段(`source_scoped`);两者同时成立时都说,本库范围在前。
+// 界面没有多语言表(全站文案是内联中文),这里不新造一套。
+const SOURCE_SCOPED_SUFFIX = "（仅勾选的来源）";
+
 function collectionResultTitle(resultSet: TypedCollectionResult): string {
   if (resultSet.collection === "elements") {
     return label(ELEMENT_KIND_LIST_LABELS, resultSet.element_kind ?? "", "条目清单");
@@ -318,6 +324,13 @@ function collectionResultTitle(resultSet: TypedCollectionResult): string {
     return `${label(SOURCE_LIST_LABELS, resultSet.collection, "来源清单")}${scopeSuffix}`;
   }
   return label(KG_OBJECT_LIST_LABELS, resultSet.object_type ?? "", "知识对象清单");
+}
+
+function collectionResultCardTitle(resultSet: TypedCollectionResult): string {
+  // 判据是 `=== true`:字段可缺席(旧后端/历史回答),缺席与 false 都是「覆盖全部来源」,
+  // 标题与没有这个字段之前逐字节相同。
+  const sourceSuffix = resultSet.source_scoped === true ? SOURCE_SCOPED_SUFFIX : "";
+  return `${collectionResultTitle(resultSet)}${sourceSuffix}`;
 }
 
 /**
@@ -607,7 +620,7 @@ function CollectionResultCard({
   const hasMoreLoadedItems = resultSet.items.length > visibleLimit;
   const coverage = resultSet.coverage;
   const status = collectionCoverageStatus(coverage);
-  const title = collectionResultTitle(resultSet);
+  const title = collectionResultCardTitle(resultSet);
   // "仅限来源"标注(design doc §2.6):取首个条目的 source_title,查不到就不显示——
   // 宁可不标注也不吐裸 source_id。
   const scopedSourceTitle = resultSet.source_id ? resultSet.items[0]?.source_title : "";
@@ -773,10 +786,11 @@ function KnowhowResultSets({
             // ——不带 scope 时两者的 key 逐字相同(`collection-sources--`)。重复 key
             // 下 React 无法把每张卡认回它自己,展开/收起这类 useState 会串到另一张
             // 卡上。scope 进 key 的判据与它进续跑键的判据是同一条:范围是清单身份的
-            // 一部分。缺席时读成 "all",所以带不带这个字段的同一张卡拿到同一个 key
+            // 一部分。source_scoped 同理:勾选范围内与全部来源的两份同集合清单是两张卡。
+            // 缺席时读成 "all",所以带不带这个字段的同一张卡拿到同一个 key
             // (历史回答重开不会因为少一个键就换成另一张卡)。
             <CollectionResultCard
-              key={`collection-${resultSet.collection}-${resultSet.element_kind || resultSet.object_type}-${resultSet.source_id || ""}-${resultSet.scope || "all"}`}
+              key={`collection-${resultSet.collection}-${resultSet.element_kind || resultSet.object_type}-${resultSet.source_id || ""}-${resultSet.scope || "all"}-${resultSet.source_scoped === true ? "ticked" : "all"}`}
               resultSet={resultSet}
               notebookId={notebookId}
               notebookNames={notebookNames}
