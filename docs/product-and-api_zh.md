@@ -260,7 +260,8 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 与三类计数，只在 `failed > 0` 时出现），`grounded` 置为 false，`evidence_level` 封顶 `overview`（`inferred`
 不抬升）。读者在答案下方看到一句说明——「本次回答有部分引用未通过核对：{N 条原文已改动、N 条资料已删除、
 N 条无法核对}。回答内容照常保留，带标记的引用可点开查看原因。」——每张带标记的卡片有一行原因；reasoning
-轨迹末尾追加一步 `citation_check`，如实写已核对条数与未通过条数。两个字段都是 additive、空则不序列化，
+轨迹末尾追加一步 `citation_check`，如实写已核对条数与未通过条数（回答里有可核对的引用时才有这一步；
+只引用库外材料或记忆条目的回答没有）。两个字段都是 additive、空则不序列化，
 单库响应逐字节不变。它们随作业 payload 落库、无迁移；被旧复核整份作废的行保留原来的重试句。部分失败的
 回答照常进入完成后的学习链。
 
@@ -357,6 +358,10 @@ HTTP 入口均位于 `/api/global-ask`，要求登录：`POST /ask` 返回可轮
 反馈存在该任务 `payload_json` 的 `feedback` 字段里，不进笔记本内问答的 `feedback` 表，
 因此不出现在笔记本分析面板或按笔记本聚合的反馈统计中。
 `GET /jobs/{job_id}/citations/{element_id}` 只读取该任务实际引用的原文元素。
+在本回答任一引用或锚点上被终态引用核对标记的元素返回 404 与可展示的中文提示（拒绝写在
+`GlobalAskService.cited_element` 里，所有下钻入口共用这一处），同一回答里未带标记的引用照常可打开；
+带标记的卡片保留回答时存下的摘录。作业读取、会话详情、推送流终态帧（取自库）与管理员活动详情原样
+带出 `citation_check` 与 `verification`；干净的回答两者都不出现，会话列表不加角标。
 `GET /conversations` 与 `GET /conversations/{id}` 支持 `limit`/`offset` 分页，
 后者返回 `has_more`/`next_offset`；`PATCH /conversations/{id}` 重命名，`DELETE` 删除。
 会话仅属于发起用户，网页和 MCP 可凭同一 `conversation_id` 接续；MCP 仍复核完整历史范围的
@@ -463,7 +468,9 @@ durable 行，直接返回 `{"status": "needs_clarification", "intent", "underst
 标记的 detail）；为守住 20 个顶层键的上限，纯回声字段 `answer_offset` 与 `citation_offset` 已被
 去掉，`next_answer_offset`、`next_citation_offset` 与
 `next_coverage_offset` 分别延续正文、引用和检索回执分页；回执保留完整数量，未检索和降级
-库列表共用 `coverage_offset` 继续读取。引用元数据可按 MCP 共用预算披露压缩，原文点查则通过 `next_offset`
+库列表共用 `coverage_offset` 继续读取。部分失败的回答把引用核对汇总放在 `coverage.citation_check`
+（结果顶层仍为 20 个键），每条未通过的引用带 `verification`，不新增锚点输出；`get_global_cited_element`
+对带标记的元素返回工具错误，文案与 HTTP 下钻同一句，引用里存下的 `quoted_span` 就是回答读到的内容。引用元数据可按 MCP 共用预算披露压缩，原文点查则通过 `next_offset`
 取回完整文本。正文页、标识和后续分页游标不得静默截断。结果附带网页会话路径
 `/ask?conversation_id=...`。`list_notebooks` 新增 `offset`/`query`，返回 `total`/`next_offset`，
 搜索遍历完整实时白名单，不能把第一页误当成全局范围。
@@ -2559,7 +2566,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 发布沿用 token 并推进 `shared_through_at`／`shared_through_id`。body 的 `expected_through_id` 精确绑定用户已审阅的答案，排除其后到达的回答；边界已删除返回 409。空／缺省 body 取最新答案。快照按边界答案的 `(created_at, rowid/ordinal)` keyset 划界，同刻但排序在后的答案仍排除；边界答案无法解析时才退回时间区间。尚无答案行的进行中任务不公开。
 
-载荷采用报告式白名单与渲染，另移除 `reasoning_trace`、`intent`、`retrieval_scope`、`retrieval_query` 及含 `memory_id` 在内的全部可寻址 id。被引用的私有 Memory 摘录会公开，分享前显示数量。结果卡不投影，以 `PublicTurn.omitted_result_sets` 披露省略数。图片使用每 token 的 HMAC `conversation_asset_alias`，不暴露真实资产 id；仅快照引用的图片可读，返回 `Cache-Control: no-store`，撤销即失效，不同 token 的别名不同。
+载荷采用报告式白名单与渲染，另移除 `reasoning_trace`、`intent`、`retrieval_scope`、`retrieval_query` 及含 `memory_id` 在内的全部可寻址 id。被引用的私有 Memory 摘录会公开，分享前显示数量。结果卡不投影，以 `PublicTurn.omitted_result_sets` 披露省略数。图片使用每 token 的 HMAC `conversation_asset_alias`，不暴露真实资产 id；仅快照引用的图片可读，返回 `Cache-Control: no-store`，撤销即失效，不同 token 的别名不同。终态引用核对有失败的全局轮次以回答时刻快照的口径给出 `PublicTurn.citation_check`（只在 `failed > 0` 时出现，计数收敛为非负整数，`outcome` 恒为 `partial`）与 `PublicReference.verification`（只取三个公开值），页面用过去时陈述；只挂在带标记引用上的附图既不列出、也不能再按别名取到，带标记的卡片不提供打开原文的入口。
 
 历史卡按钮以当前最后答案为界；回答复制按钮后的分享入口发送该答案 id。详情加载失败绝不把显式边界退化为空 body。水位只能前进：点击早于已发布水位的答案时不提供发布动作，显示链接还包含后续 N 轮，并按完整现有范围计算披露数量。缩小范围必须先撤销再分享。数值护栏如下。
 

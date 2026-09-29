@@ -149,3 +149,111 @@ def passage_race(sources, database, marker: str, notebook_id: str, mutation: str
     )
     apply_outcome(response, outcome)
     return response
+
+
+class _CountingConnection:
+    """Delegates to a real connection and records every statement."""
+
+    def __init__(self, inner, statements: list):
+        self._inner = inner
+        self._statements = statements
+        self._entered = None
+
+    def __enter__(self):
+        self._entered = self._inner.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._inner.__exit__(*exc)
+
+    def execute(self, sql, *args, **kwargs):
+        self._statements.append(sql)
+        return (self._entered or self._inner).execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._entered or self._inner, name)
+
+
+class count_statements:
+    """``with count_statements(database) as statements:`` -- every statement
+    any read issues through ``database.connect()`` inside the block."""
+
+    def __init__(self, database):
+        self.database = database
+        self.statements: list = []
+
+    def __enter__(self):
+        self._connect = self.database.connect
+        self.database.connect = lambda *a, **k: _CountingConnection(
+            self._connect(*a, **k), self.statements,
+        )
+        return self.statements
+
+    def __exit__(self, *exc):
+        self.database.connect = self._connect
+        return False
+
+
+def seed_libraries(database, marker: str, notebook_ids) -> dict:
+    """One source + one element per library; returns ``{notebook: element_id}``."""
+    elements = {}
+    with database.write() as db:
+        for notebook_id in notebook_ids:
+            element_id = f"el-{notebook_id}"
+            seed_source(db, marker, notebook_id=notebook_id, source_id=f"src-{notebook_id}",
+                        elements={element_id: f"正文 {notebook_id} 🔋"})
+            elements[notebook_id] = element_id
+    return elements
+
+
+def terminal_check_statements(sources, database, marker: str, notebook_ids) -> tuple:
+    """Run the terminal check over one citation per library; ``(statements, outcome)``."""
+    from app.models.ask import AskResponse, Citation
+    from app.services.global_citation_check import GlobalCitationCheck
+
+    elements = seed_libraries(database, marker, notebook_ids)
+    evidence = dict(sources.evidence_fingerprints(list(elements.values())))
+    response = AskResponse(conclusion="结论", answer="答案", citations=[
+        Citation(label="l", source_id=f"src-{nb}", element_id=element_id,
+                 location_label="p0", quoted_span="q", notebook_id=nb)
+        for nb, element_id in elements.items()
+    ])
+    with count_statements(database) as statements:
+        outcome = GlobalCitationCheck(sources, notebook_timeout_seconds=10.0).run(
+            response, evidence=evidence, siblings={},
+            source_ceiling={nb: frozenset({f"src-{nb}"}) for nb in notebook_ids},
+        )
+    return list(statements), outcome
+
+
+def dangling_response(live_id: str, source_id: str):
+    """Citations/anchors mixing a live element with dead ones (J2 tests)."""
+    from app.models.ask import AnswerAnchor, AskResponse, Citation
+
+    def citation(element_id):
+        return Citation(label="l", source_id=source_id, element_id=element_id,
+                        location_label="p0", quoted_span="q")
+
+    return AskResponse(
+        conclusion="A B [k2] C [k1, k3].", answer="A [k1] B [k2] C [k1, k3].",
+        citations=[citation(live_id), citation("el-dead")],
+        anchors=[
+            AnswerAnchor(key="k1", object_id="el-dead", object_type="element",
+                         label="dead", source_id=source_id, element_id="el-dead"),
+            AnswerAnchor(key="k2", object_id="obj-1", object_type="claim",
+                         label="claim", source_id=source_id, element_id="el-dead-2"),
+            AnswerAnchor(key="k3", object_id=live_id, object_type="element",
+                         label="live", source_id=source_id, element_id=live_id),
+        ],
+    )
+
+
+def assert_dangling_dropped(response, live_id: str) -> None:
+    assert response.answer == "A B [k2] C [k3]."
+    assert response.conclusion == "A B [k2] C [k3]."
+    assert [row.element_id for row in response.citations] == [live_id]
+    assert [(row.key, row.element_id) for row in response.anchors] == [
+        ("k2", ""), ("k3", live_id),
+    ]
+    assert "verification" not in response.model_dump_json()
+    assert response.citation_check is None

@@ -199,3 +199,175 @@ def test_a_real_snapshot_replaces_an_earlier_unreadable_one():
     state.record_evidence({"e-1": None})
     state.record_evidence({"e-1": ("s", "later")})
     assert state.evidence == {"e-1": ("s", "fp")}
+
+
+# ---------------------------------------------------------------------------
+# A blind pointer read never launders a declared failure (fix round item 1)
+# ---------------------------------------------------------------------------
+
+def _state_plan():
+    state = _RunState(("nb",))
+    plan = FederatedRunPlan(
+        phase_timeout_seconds=30.0, notebook_timeout_seconds=5.0, executor=None,
+        window=lambda: 1, cancel=None, on_library=lambda *_: None,
+        on_evidence=state.record_evidence,
+    )
+    return state, plan
+
+
+def test_a_pointer_snapshot_is_published_as_a_pointer_snapshot():
+    from app.services.federated_run import PointerSnapshot
+
+    published: list = []
+    with federated_run_plan(_plan(published)), evidence_attestation_seat(
+        _Reader({"e-1": ("s", "fp")}),
+    ):
+        attest_pointers("kg_objects", ["e-1"])
+    assert isinstance(published[0]["e-1"], PointerSnapshot)
+    assert published[0]["e-1"] == ("s", "fp")
+
+
+def test_a_pointer_read_does_not_replace_a_declared_none():
+    """Federated channel: passage text changed under the run -> ``None``. A
+    later blind pointer read sees the NEW text; it must not replace the None,
+    or the terminal check compares new with new and passes."""
+    state, plan = _state_plan()
+    state.record_evidence({"e-1": None})
+    with federated_run_plan(plan), evidence_attestation_seat(
+        _Reader({"e-1": ("s", element_text_sha("new text"))}),
+    ):
+        assert attest_pointers("kg_objects", ["e-1"]) == {"e-1": LIVE}
+    assert state.evidence == {"e-1": None}
+
+
+def test_pointer_first_then_a_read_based_none_keeps_the_pointer_snapshot():
+    state, plan = _state_plan()
+    with federated_run_plan(plan), evidence_attestation_seat(
+        _Reader({"e-1": ("s", "fp-pointer")}),
+    ):
+        attest_pointers("kg_objects", ["e-1"])
+    state.record_evidence({"e-1": None})
+    assert state.evidence == {"e-1": ("s", "fp-pointer")}
+
+
+def test_pointer_first_then_a_read_based_snapshot_keeps_the_first():
+    """First real snapshot wins whichever kind it is: a later read-based
+    snapshot with a different digest means the text changed during the run,
+    which the terminal check must still see."""
+    state, plan = _state_plan()
+    with federated_run_plan(plan), evidence_attestation_seat(
+        _Reader({"e-1": ("s", "fp-pointer")}),
+    ):
+        attest_pointers("kg_objects", ["e-1"])
+    state.record_evidence({"e-1": ("s", "fp-read")})
+    assert state.evidence == {"e-1": ("s", "fp-pointer")}
+
+
+def test_a_read_based_snapshot_still_replaces_a_declared_none():
+    state, plan = _state_plan()
+    state.record_evidence({"e-1": None})
+    with federated_run_plan(plan), evidence_attestation_seat(_Reader()):
+        attest_read("document_overview", {"e-1": ("s", "text")})
+    assert state.evidence == {"e-1": ("s", element_text_sha("text"))}
+
+
+def test_a_second_read_based_snapshot_does_not_replace_the_first():
+    state, _plan_ = _state_plan()
+    state.record_evidence({"e-1": ("s", "listing")})
+    state.record_evidence({"e-1": ("s", "minting")})
+    assert state.evidence == {"e-1": ("s", "listing")}
+
+
+def test_a_cancelled_run_propagates_out_of_the_pointer_read():
+    """The read budget polls the run's cancel token and surfaces as its own
+    timeout; that is the run stopping, not a failed read, so it raises."""
+    from app.repositories.read_budget import ReadBudgetExceeded
+
+    cancel = threading.Event()
+    published: list = []
+
+    class _Cancelling(_Reader):
+        def evidence_fingerprints(self, element_ids):
+            cancel.set()
+            raise ReadBudgetExceeded("read budget exhausted")
+
+    with federated_run_plan(_plan(published, cancel=cancel)), evidence_attestation_seat(
+        _Cancelling(),
+    ):
+        with pytest.raises(AskCancelled):
+            attest_pointers("table_analysis", ["e-1"])
+    assert published == []
+
+
+# ---------------------------------------------------------------------------
+# The table-analysis lane lets control flow through (fix round item 12)
+# ---------------------------------------------------------------------------
+
+def _table_lane_service(analyze):
+    from types import SimpleNamespace
+
+    from app.services.ask_service import AskService
+
+    warnings: list = []
+    service = object.__new__(AskService)
+    service.spreadsheet_analysis = SimpleNamespace(analyze=analyze)
+    service.ask_engine_hidden_sources = lambda notebook_id, user_id: []
+    service.ask_engine_participant_notebooks = lambda notebook_id: []
+    service.ask_engine_visible_sources = lambda notebook_id: ["src-table"]
+    service._tier_map_for = lambda ids: {}
+    service.model_clients = SimpleNamespace(chat=lambda workload: None)
+    service.event_log = SimpleNamespace(logger=SimpleNamespace(
+        warning=lambda *args: warnings.append(args),
+    ))
+    prepared = SimpleNamespace(notebook_id="nb", user_id="u", research_question="q")
+    runtime = SimpleNamespace(scope=None, cancellation=None, trace_sink=None)
+    return service, prepared, runtime, warnings
+
+
+def test_a_cancel_during_the_table_registration_read_cancels_the_run():
+    """Not an empty lane: the pointer read the table producer spends inside a
+    global run is stopped by the run's cancel token, and that cancellation
+    must leave the lane."""
+    from app.models.ask import Citation
+    from app.repositories.read_budget import ReadBudgetExceeded
+    from app.services.spreadsheet_analysis import _attested_row_citation
+
+    cancel = threading.Event()
+
+    class _Cancelling(_Reader):
+        def evidence_fingerprints(self, element_ids):
+            cancel.set()
+            raise ReadBudgetExceeded("read budget exhausted")
+
+    def analyze(**kwargs):
+        _attested_row_citation(Citation(
+            label="表 · Sheet1!A1:B2", source_id="src-table", element_id="e-row",
+            location_label="Sheet1!A1:B2", quoted_span="q",
+        ))
+        return [], None
+
+    service, prepared, runtime, warnings = _table_lane_service(analyze)
+    with federated_run_plan(_plan([], cancel=cancel)), evidence_attestation_seat(_Cancelling()):
+        with pytest.raises(AskCancelled):
+            service._spreadsheet_reasoning_results(prepared, runtime, [])
+    assert warnings == []
+
+
+def test_a_retrieval_control_error_leaves_the_table_lane():
+    from app.domain.retrieval_control import RetrievalControlError
+
+    def analyze(**kwargs):
+        raise RetrievalControlError("participant attestation failed")
+
+    service, prepared, runtime, _warnings = _table_lane_service(analyze)
+    with pytest.raises(RetrievalControlError):
+        service._spreadsheet_reasoning_results(prepared, runtime, [])
+
+
+def test_an_ordinary_table_lane_failure_stays_fail_soft():
+    def analyze(**kwargs):
+        raise RuntimeError("store hiccup")
+
+    service, prepared, runtime, warnings = _table_lane_service(analyze)
+    assert service._spreadsheet_reasoning_results(prepared, runtime, []) == []
+    assert warnings and warnings[0][1] == "RuntimeError"
