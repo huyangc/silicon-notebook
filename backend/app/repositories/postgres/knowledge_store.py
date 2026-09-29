@@ -1385,12 +1385,18 @@ class KnowledgeStore:
     def relation_endpoint_rows(db: Any, notebook_id: str,
                                source_ids=None):
         if source_ids:
-            values = list(source_ids)
-            ph = ",".join("%s" for _ in values)
-            return db.execute(
-                f"SELECT source_object_id, target_object_id FROM knowledge_relations "
-                f"WHERE notebook_id=%s AND source_id IN ({ph})",
-                (notebook_id, *values),
+            # No production caller passes a list today (the isolated-object
+            # probe reads the whole notebook).  A list here is a source
+            # ceiling, so it binds as ONE parameter through id_binding rather
+            # than one placeholder per id (65 535-parameter cap, generic plan).
+            from app.repositories.postgres.id_binding import bind_ids, execute_ids
+
+            sources = bind_ids(list(source_ids))
+            return execute_ids(
+                db,
+                "SELECT source_object_id, target_object_id FROM knowledge_relations "
+                f"WHERE notebook_id=%s AND source_id=ANY({sources.array_sql})",
+                (notebook_id, sources.param),
             ).fetchall()
         return db.execute(
             "SELECT source_object_id, target_object_id FROM knowledge_relations "

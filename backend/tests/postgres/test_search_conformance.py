@@ -1264,10 +1264,10 @@ class _KnnCountingConnection:
         self._connection = connection
         self.knn_statements = 0
 
-    def execute(self, statement, params=None):
+    def execute(self, statement, params=None, **options):
         if "OPERATOR(public.<->)" in statement:
             self.knn_statements += 1
-        return (self._connection.execute(statement, params)
+        return (self._connection.execute(statement, params, **options)
                 if params is not None else self._connection.execute(statement))
 
     def __getattr__(self, name):

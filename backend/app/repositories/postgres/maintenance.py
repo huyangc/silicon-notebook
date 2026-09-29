@@ -106,8 +106,9 @@ def _raise_statement_timeout_floor(db) -> None:
 # idx_source_elements_nonblank 分部索引谓词逐字节一致,并且让这个不变式**不依赖
 # PostgreSQL 的 plan cache 状态**:证明「查询谓词蕴含分部索引谓词」需要 planner 在
 # plan 时把两边都常量折叠成同一个值。``%s`` 绑定参数在 PostgreSQL 走 custom plan
-# (逐次按实际取值重新规划,psycopg 默认行为、也是本模块所有调用点的实际路径)时,
-# planner 确实能看到本次调用的实际取值并据此证明蕴含,与内联字面量表现一致——
+# (逐次按实际取值重新规划;psycopg 在同一连接上的前 4 次执行、以及 PG 预备语句的前
+# 5 次执行都是这样)时,planner 确实能看到本次调用的实际取值并据此证明蕴含,与内联
+# 字面量表现一致——
 # 本地 PostgreSQL 16 实测已确认这一点(两种写法在 custom plan 下都选中该索引)。差异
 # 只在 PostgreSQL 退化到 generic/cached plan(取值对 planner 不再可见)时才会显现:
 # 此时绑定参数写法无法证明蕴含,退化为对 source_elements 的全表顺序扫描,而内联字面量
@@ -117,9 +118,12 @@ def _raise_statement_timeout_floor(db) -> None:
 # 内联字面量走 Index Only Scan),见
 # backend/tests/postgres/test_hotpath_indexes_batch2_live.py。这次改动因此是一次
 # **面向最坏情况的加固**而非修复一个默认路径下就会发生的已知回归——生产 diag 里 H5
-# 冷算 2.6s 的成因是「批 2 之前完全没有这条索引」(批 1 的解决部分),不是绑定参数本身;
-# 具体是否有生产连接池行为(如常驻连接上的重复调用、或 PgBouncer 等中间件)会把这条
-# 查询推向 generic plan 尚未实测确认,留给运维按 diag 工具持续观察。
+# 冷算 2.6s 的成因是「批 2 之前完全没有这条索引」(批 1 的解决部分),不是绑定参数本身。
+# 常驻连接上的重复调用会把语句推向 generic plan,这一点已经实测确认(2026-09-29,
+# PG 16 + psycopg 3.3):psycopg 在同一连接上第 5 次执行时预备语句,PG 从约第 11 次
+# 执行起改用 generic plan,绑定参数从此对 planner 不可见。来源天花板这类大 id 清单
+# 因此一律经 ``postgres/id_binding.py`` 以 ``prepare=False`` 执行(恒 custom plan);
+# 这里的内联字面量正是为了不依赖那种计划状态。
 #
 # ⚠ SQLite 侧的孪生查询(sqlite/maintenance.py)刻意不做这个改动,继续用
 # ``TRIM(e.text, ?)`` 绑定参数:SQLite 没有「部分索引谓词蕴含」这个收益点可拿,两侧的
