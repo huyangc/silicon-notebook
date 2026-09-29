@@ -169,6 +169,49 @@ def test_active_reserve_still_pulls_an_active_passage_back():
     assert retrieval.select_calls == []
 
 
+def test_the_reserve_runs_after_rerank_cut_to_k_with_the_real_id():
+    """Order of operations: rerank cuts to k (its order, not relevance), then
+    the reserve swaps the strongest own passage into the tail -- nothing is
+    reranked after it.  The own rows carry the notebook's RAW id (a lane that
+    stamps its owner): only the real id passed down from ``search_chunks``
+    reads them as the active notebook's."""
+    peers = _descending(6, prefix="p", notebook_id="nb-peer")
+    active = [_hit("a00", 0.30, notebook_id="nb"), _hit("a01", 0.20)]
+    # Window order is fused-desc: p00..p05, a00, a01.  Put every peer first,
+    # reversed, so rerank's top 4 is all foreign.
+    models = _Models(_Rerank(order=lambda n: [5, 4, 3, 2, 1, 0, 6, 7][:n]))
+    rr, retrieval = _retriever(peers + active, models)
+
+    selected = rr.search_chunks("nb", "q", k=4)
+
+    assert _ids(selected) == ["p05", "p04", "p03", "a00"]
+    assert retrieval.select_calls == []
+
+
+def test_first_round_passages_survive_with_rerank_configured(rrepo):
+    """The seed path swallows exceptions into an empty result, so a broken
+    reserve call after rerank would silently drop every first-round passage."""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo, texts=_TEXTS)
+    rrepo.settings.graph_ppr_enabled = False
+    rrepo.settings.reasoning_per_query_limit = 1     # pool > k: rerank runs
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    client = _Rerank()
+    bind_rerank_client(rrepo, client)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    rr.model_clients = rrepo._runtime.models
+
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    assert client.calls, "rerank must actually run on the seed"
+    assert res.chunks, "first-round passages vanished"
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert seed.detail["phase"] == "seed" and seed.detail["found"] >= 1
+
+
 # --------------------------------------------------------------------------- #
 # 2. 候选窗口
 # --------------------------------------------------------------------------- #
