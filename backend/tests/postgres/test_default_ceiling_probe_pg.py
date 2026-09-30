@@ -8,10 +8,11 @@ is the property this file exists for; the drift matrix, the one-read budget,
 the push-down verdict and verify-on-read run unchanged.
 
 EXPLAIN pin (style of ``test_memory_sql_explain_pins.py``: seqscan and
-bitmapscan off, assert an index path exists): the visible half starts from
-the partial index ``idx_sources_visible_identity`` and the hidden half from
-``idx_sources_nb_hidden_type``; the owner test is a hashed SubPlan on
-``idx_memory_owner_notebook_status``, not a per-row probe.
+bitmapscan off, assert an index path exists): both halves start from a
+``notebook_id`` index condition -- never a walk of the primary key across
+every notebook -- the hidden half from ``idx_sources_nb_hidden_type``; the
+owner test is a hashed SubPlan on ``idx_memory_owner_notebook_status``, not a
+per-row probe.
 """
 from __future__ import annotations
 
@@ -82,10 +83,20 @@ def test_digest_statement_keeps_its_index_paths(postgres_database):
                 "VALUES (%s,%s,%s,'user','active',%s,%s,%s,'','',0)",
                 (user, f"{user}@example.test", user, now, now, user),
             )
+        for notebook in ("nb", "nb-other"):
+            db.execute(
+                "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+                "created_at,updated_at,tier) "
+                "VALUES (%s,'N','','','ready','u-a',%s,%s,'personal')",
+                (notebook, now, now),
+            )
+        # Another notebook's sources, so "this notebook" is selective, as in
+        # production (a single-notebook table makes a primary-key walk as
+        # cheap as the notebook index and hides the plan being pinned).
         db.execute(
-            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
-            "created_at,updated_at,tier) "
-            "VALUES ('nb','N','','','ready','u-a',%s,%s,'personal')",
+            "INSERT INTO sources(id,notebook_id,title,source_type,created_at,updated_at) "
+            "SELECT 'other-'||g,'nb-other','t','upload',%s,%s "
+            "FROM generate_series(0,39999) g",
             (now, now),
         )
         db.execute(
@@ -114,7 +125,11 @@ def test_digest_statement_keeps_its_index_paths(postgres_database):
         digests = connection.execute(_UNIVERSE_DIGEST_SQL, ("nb", "nb", "u-a")).fetchone()
     plan = "\n".join(str(row["QUERY PLAN"]) for row in rows)
     assert "Seq Scan" not in plan, plan
-    assert "idx_sources_visible_identity" in plan, plan
+    # Both halves start from a notebook_id index condition on ``sources``
+    # (the visible half from whichever (notebook_id, ...) index the planner
+    # prefers, the hidden half from the hidden-type partial index).
+    assert "on sources v" in plan and "on sources s" in plan, plan
+    assert plan.count("Index Cond: (notebook_id = 'nb'::text)") >= 2, plan
     assert "idx_sources_nb_hidden_type" in plan, plan
     assert "idx_memory_owner_notebook_status" in plan and "hashed SubPlan" in plan, plan
     assert digests["visible_digest"] and digests["hidden_digest"]
