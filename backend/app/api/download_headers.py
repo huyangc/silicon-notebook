@@ -19,7 +19,9 @@ def safe_download_name(name: str, *, fallback: str, max_chars: int = 120) -> str
     return cleaned[:max_chars] or fallback
 
 
-def attachment_content_disposition(filename: str, *, fallback: str) -> str:
+def attachment_content_disposition(
+    filename: str, *, fallback: str, require_letter: bool = True
+) -> str:
     """RFC 5987/6266 ``Content-Disposition`` value for a (possibly non-ASCII)
     download filename: an ASCII-sanitized ``filename=`` for clients that do
     not understand the extended form, plus the real UTF-8 name via
@@ -29,13 +31,16 @@ def attachment_content_disposition(filename: str, *, fallback: str) -> str:
     title in a bare ``filename="..."`` would 500 (UnicodeEncodeError). When
     the ASCII form's stem keeps no Latin letter (an all-Chinese title leaves
     only separators and digits), the caller's ``fallback`` is used for it
-    instead."""
+    instead; with ``require_letter=False`` only an EMPTY ASCII form falls
+    back (the Knowhow template download's long-standing rule)."""
     ascii_name = re.sub(
         r'[\\"/\r\n\x00-\x1f]',
         "_",
         filename.encode("ascii", "ignore").decode("ascii"),
     ).strip()
-    if not re.search(r"[A-Za-z]", os.path.splitext(ascii_name)[0]):
+    if not ascii_name or (
+        require_letter and not re.search(r"[A-Za-z]", os.path.splitext(ascii_name)[0])
+    ):
         ascii_name = fallback
     # safe="" so a literal "/" is %2F-escaped too — quote's default
     # (safe="/") would leave it raw, which violates RFC 5987's attr-char

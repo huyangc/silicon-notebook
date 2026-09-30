@@ -751,7 +751,11 @@ def _template_content_disposition(filename: str) -> str:
     for the two-form encoding and why a bare Chinese ``filename=`` would 500.
     export_reports_endpoint's sibling zip download above never needed this:
     "reports.zip" is a fixed ASCII literal, never a user-supplied title."""
-    return attachment_content_disposition(filename, fallback="template.xlsx")
+    # Only an EMPTY ASCII form falls back here (the rule this endpoint has
+    # always had); the letter rule of the Memory export does not apply.
+    return attachment_content_disposition(
+        filename, fallback="template.xlsx", require_letter=False
+    )
 
 
 @router.get(
