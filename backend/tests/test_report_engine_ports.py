@@ -221,9 +221,20 @@ class _EventLog:
         self.events.append(payload)
 
 
+class _NoMemorySources:
+    """No cited source is anyone's Memory (the engine's M4 record seat)."""
+
+    def memory_sources_for_source_ids(self, source_ids, owner_id):
+        return {}
+
+    def foreign_memory_sources_for_source_ids(self, source_ids, member_id):
+        return {}
+
+
 def _deps(**over):
     from app.services.report_engine import ReportEngineDependencies
     base = dict(
+        memory_sources=_NoMemorySources(),
         reports=_Reports(),
         retrieval=_Retrieval(),
         evidence_context=_Evidence(),
@@ -236,6 +247,24 @@ def _deps(**over):
     )
     base.update(over)
     return ReportEngineDependencies(**base)
+
+
+def test_the_memory_record_seat_is_checked_when_the_engine_is_wired():
+    """M4: a store (or double) without the two reads fails at construction,
+    never in the middle of a report."""
+    class _OnlyOwnReads:
+        def memory_sources_for_source_ids(self, source_ids, owner_id):
+            return {}
+
+    with pytest.raises(TypeError, match="memory_sources"):
+        _deps(memory_sources=_OnlyOwnReads())
+    with pytest.raises(TypeError):
+        from app.services.report_engine import ReportEngineDependencies
+
+        ReportEngineDependencies(**{
+            key: value for key, value in _deps().__dict__.items()
+            if key != "memory_sources"
+        })
 
 
 def _engine(deps=None, cancel_event=None):

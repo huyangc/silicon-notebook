@@ -2431,6 +2431,7 @@ class RepositoryRuntime:
                 communities=retrieval_port.community_queries(engine_settings),
                 settings=engine_settings,
                 event_log=self.event_log,
+                memory_sources=self.memory_store,
                 memory_retriever=self.memory_retriever,
                 corpus_profile=ReportCorpusProfileService(self.source_store),
                 generation_gate=generation_gate,
