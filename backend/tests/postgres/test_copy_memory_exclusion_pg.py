@@ -97,6 +97,23 @@ def _mk_user(repo, uid):
         )
 
 
+def _insert_rows(repo, rows):
+    with repo._runtime.database.write() as db:
+        for row in rows:
+            values = dict(row.values)
+            if row.table == "users":
+                values.update(
+                    username=values["id"], password_hash="", password_salt="",
+                    password_iterations=0,
+                )
+            columns = list(values)
+            db.execute(
+                f"INSERT INTO {row.table} ({','.join(columns)}) "
+                f"VALUES ({','.join('%s' for _ in columns)})",
+                [Jsonb(values[c]) if c in cases.JSON_COLUMNS else values[c] for c in columns],
+            )
+
+
 def test_deep_copy_of_a_notebook_with_memories_carries_none_of_them(pg_app):
     repo, _client = pg_app
     _seed(repo)
@@ -106,12 +123,14 @@ def test_deep_copy_of_a_notebook_with_memories_carries_none_of_them(pg_app):
 
     new = repo.copy_notebook(cases.NOTEBOOK, new_owner_id="user-deep-copy")
 
-    cases.assert_copy_has_no_memory(cases.read_copy(fetch, "%s", new.id))
+    view = cases.read_copy(fetch, "%s", new.id)
+    cases.assert_copy_has_no_memory(view)
+    cases.assert_kept_rows_lost_only_the_lent_evidence(view)
     repo._runtime.sharing_store.validate_copy(cases.NOTEBOOK, new.id)
     state = _kg_state(repo, new.id)
-    assert state is not None and state["dirty"] is not None and int(state["dirty"]) == 1
+    assert state is not None and int(state["dirty"]) == 1
     source = cases.read_copy(fetch, "%s", cases.NOTEBOOK)
-    assert source.counts["sources"] == 4 and source.counts["concept_clusters"] == 7
+    assert source.counts["sources"] == 4 and source.counts["concept_clusters"] == 10
     assert _kg_state(repo, cases.NOTEBOOK) is None
 
 
@@ -123,48 +142,78 @@ def test_share_link_copy_route_of_a_notebook_with_memories_carries_none_of_them(
     token = shared.json()["share_token"]
     preview = client.get(f"/api/shared/{token}")
     assert preview.status_code == 200
-    # 预览的节点/边数与拷贝同口径:不含成员 Memory 派生的 8-4 个对象、5-4 条关系
-    assert (preview.json()["node_count"], preview.json()["edge_count"]) == (4, 1)
-    assert preview.json()["size"]["nodes"] == 4 and preview.json()["size"]["edges"] == 1
-    assert (shared.json()["size"]["nodes"], shared.json()["size"]["edges"]) == (4, 1)
-    assert repo._runtime.sharing_store.memory_derived_kg_counts(cases.NOTEBOOK) == (4, 4)
+    cases.assert_share_sizes_exclude_memory(shared.json(), preview.json())
+    assert repo._runtime.sharing_store.memory_derived_kg_counts(cases.NOTEBOOK) == (3, 4, 4)
+    state_view = client.get(f"/api/notebooks/{cases.NOTEBOOK}/share")
+    assert state_view.status_code == 200 and state_view.json()["size"] == preview.json()["size"]
 
     copied = client.post(f"/api/shared/{token}/copy")
     assert copied.status_code == 200, copied.text
     new_id = copied.json()["id"]
 
-    cases.assert_copy_has_no_memory(cases.read_copy(_fetch(repo), "%s", new_id))
+    view = cases.read_copy(_fetch(repo), "%s", new_id)
+    cases.assert_copy_has_no_memory(view)
+    cases.assert_kept_rows_lost_only_the_lent_evidence(view)
     state = _kg_state(repo, new_id)
     assert state is not None and int(state["dirty"]) == 1
+    listing = client.get(f"/api/notebooks/{new_id}/knowledge?type=concept")
+    assert listing.status_code == 200 and listing.json()["items"], listing.text
+    assert cases.MARK not in listing.text
 
 
-def test_copy_of_a_notebook_without_memory_is_unchanged_and_not_marked_dirty(
+def test_copy_of_a_clean_notebook_without_memory_runs_the_pre_m2_statements_verbatim(
     pg_app, monkeypatch
 ):
-    """没有 Memory 的笔记本:快照的每一行都与 M2 之前的语句原文一致,有 ORDER BY 的三张表
-    连顺序也一致;副本仍然没有 unified_kg_state 行——这条路径字节不变。"""
+    """没有 Memory、也不脏的笔记本:快照、上限计数与 validate_copy 用 M2 之前的语句原文;把
+    Memory 那套语句换成执行即报错的文本,拷贝照样成功;副本没有 unified_kg_state 行。"""
     from app.repositories.postgres import sharing_store as store_module
+
+    current = dict(store_module._COPY_SNAPSHOT_QUERIES)
+    for table, legacy in cases.LEGACY_SNAPSHOT_PG.items():
+        assert current[table] == legacy, table
+    assert dict(store_module._COPY_VALIDATED_TABLES) == cases.LEGACY_VALIDATED_PG
 
     repo, _client = pg_app
     _seed(repo, cases.NOTEBOOK_PLAIN, with_memory=False)
-    store = repo._runtime.sharing_store
-    now_rows = store.snapshot_copy_rows(cases.NOTEBOOK_PLAIN)
-    assert all(now_rows[t] for t in cases.LEGACY_SNAPSHOT_PG), "fixture covers each table"
-    assert store_module._MEMORY_EXCLUDED_MARK not in now_rows["notebooks"][0]
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            store_module,
-            "_COPY_SNAPSHOT_QUERIES",
-            cases.legacy_snapshot_queries(
-                store_module._COPY_SNAPSHOT_QUERIES, cases.LEGACY_SNAPSHOT_PG
-            ),
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, dirty, kg_mutation_seq, updated_at) "
+            "VALUES (%s, 0, 3, %s)", (cases.NOTEBOOK_PLAIN, cases.NOW),
         )
-        legacy = store.snapshot_copy_rows(cases.NOTEBOOK_PLAIN)
-    cases.assert_snapshots_equal(now_rows, legacy, ordered=cases.PG_ORDERED_TABLES)
-
+    monkeypatch.setattr(
+        store_module, "_MEMORY_COPY_SNAPSHOT_QUERIES",
+        cases.poisoned(store_module._MEMORY_COPY_SNAPSHOT_QUERIES),
+    )
+    monkeypatch.setattr(
+        store_module, "_MEMORY_COPY_VALIDATED_TABLES",
+        cases.poisoned(store_module._MEMORY_COPY_VALIDATED_TABLES),
+    )
+    store = repo._runtime.sharing_store
+    assert store.snapshot_copy_within_limits(cases.NOTEBOOK_PLAIN)
+    assert store_module._COPY_DIRTY_MARK not in (
+        store.snapshot_copy_rows(cases.NOTEBOOK_PLAIN)["notebooks"][0]
+    )
     _mk_user(repo, "user-plain-copy")
     new = repo.copy_notebook(cases.NOTEBOOK_PLAIN, new_owner_id="user-plain-copy")
     assert _kg_state(repo, new.id) is None
+    fetch = _fetch(repo)
+    assert cases.read_copy(fetch, "%s", new.id).counts == (
+        cases.read_copy(fetch, "%s", cases.NOTEBOOK_PLAIN).counts
+    )
+
+
+def test_copy_of_a_dirty_notebook_without_memory_starts_dirty(pg_app):
+    repo, _client = pg_app
+    _seed(repo, cases.NOTEBOOK_PLAIN, with_memory=False)
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, dirty, kg_mutation_seq, updated_at) "
+            "VALUES (%s, 1, 5, %s)", (cases.NOTEBOOK_PLAIN, cases.NOW),
+        )
+    _mk_user(repo, "user-dirty-copy")
+    new = repo.copy_notebook(cases.NOTEBOOK_PLAIN, new_owner_id="user-dirty-copy")
+    state = _kg_state(repo, new.id)
+    assert state is not None and int(state["dirty"]) == 1 and int(state["kg_mutation_seq"]) == 1
     fetch = _fetch(repo)
     assert cases.read_copy(fetch, "%s", new.id).counts == (
         cases.read_copy(fetch, "%s", cases.NOTEBOOK_PLAIN).counts
@@ -182,21 +231,17 @@ def test_memory_notebook_snapshot_is_the_legacy_snapshot_minus_the_memory_rows(
     now_rows = store.snapshot_copy_rows(cases.NOTEBOOK)
     with monkeypatch.context() as patch:
         patch.setattr(
-            store_module,
-            "_COPY_SNAPSHOT_QUERIES",
-            cases.legacy_snapshot_queries(
-                store_module._COPY_SNAPSHOT_QUERIES, cases.LEGACY_SNAPSHOT_PG
-            ),
+            store_module, "_MEMORY_COPY_SNAPSHOT_QUERIES", store_module._COPY_SNAPSHOT_QUERIES
         )
+        patch.setattr(store_module, "strip_memory_evidence", lambda *_args: 0)
         legacy = store.snapshot_copy_rows(cases.NOTEBOOK)
     assert len(legacy["sources"]) == 4 and len(legacy["knowledge_relations"]) == 5
     assert {r["id"] for r in now_rows["sources"]} == {"src-doc"}
     assert {r["id"] for r in now_rows["knowledge_relations"]} == {"kr-shared"}
-    assert {r["id"] for r in now_rows["knowledge_objects"]} == {
-        "ko-shared-1", "ko-shared-2", "ko-shared-3", "ko-shared-4",
-    }
+    assert {r["id"] for r in now_rows["knowledge_objects"]} == cases.SHARED_OBJECTS
     assert {r["canonical_id"] for r in now_rows["concept_clusters"]} == {"K-shared"}
-    assert now_rows["notebooks"][0][store_module._MEMORY_EXCLUDED_MARK] is True
+    assert now_rows["notebooks"][0][store_module._COPY_DIRTY_MARK] is True
+    cases.assert_snapshot_is_legacy_minus_memory(now_rows, legacy)
 
 
 def test_validate_copy_compares_like_with_like_and_still_detects_a_short_copy(pg_app):
@@ -219,172 +264,243 @@ def test_share_preview_of_a_notebook_without_memory_counts_every_row(pg_app):
     shared = client.post(f"/api/notebooks/{cases.NOTEBOOK_PLAIN}/share")
     assert shared.status_code == 200
     preview = client.get(f"/api/shared/{shared.json()['share_token']}").json()
-    assert (preview["node_count"], preview["edge_count"]) == (4, 1)
+    assert (preview["node_count"], preview["edge_count"]) == (6, 1)
+    assert preview["size"]["sources"] == preview["source_count"] == 1
+    assert repo._runtime.sharing_store.memory_derived_kg_counts(cases.NOTEBOOK_PLAIN) == (0, 0, 0)
+
+
+def test_a_memory_object_merged_into_a_shared_one_leaves_no_memory_text_in_the_copy(pg_app):
+    from app.models.knowledge import MergeRequest
+
+    repo, client = pg_app
+    nb = cases.PROBE_NOTEBOOK
+    _insert_rows(repo, cases.probe_world(nb))
+    repo.merge_knowledge(nb, "ko-mem-p", MergeRequest(into_id="ko-shared-p"))
+    merged = _fetch(repo)(
+        "SELECT evidence::text AS e FROM knowledge_objects WHERE id='ko-shared-p'", ()
+    )[0]["e"]
+    assert cases.PROBE_MEMORY_TEXT in merged, "fixture: the merge carried the text"
+
+    _mk_user(repo, "user-probe-copy")
+    new = repo.copy_notebook(nb, new_owner_id="user-probe-copy")
+    view = cases.read_copy(_fetch(repo), "%s", new.id)
+    cases.assert_copy_objects_carry_no_memory_text(view)
+    assert view.counts["knowledge_objects"] == 1
+
+    token = client.post(f"/api/notebooks/{nb}/share").json()["share_token"]
+    preview = client.get(f"/api/shared/{token}").json()
+    assert preview["size"]["sources"] == preview["source_count"] == 1
+    copied = client.post(f"/api/shared/{token}/copy")
+    assert copied.status_code == 200, copied.text
+    listing = client.get(f"/api/notebooks/{copied.json()['id']}/knowledge?type=concept")
+    assert listing.status_code == 200 and listing.json()["items"], listing.text
+    assert cases.MARK not in listing.text and "src-mem-p" not in listing.text
+
+
+@pytest.mark.parametrize("canonical", sorted(cases.STALE_CLUSTER_CASES))
+def test_a_cluster_seeded_by_a_since_deleted_memory(pg_app, canonical):
+    repo, _client = pg_app
+    nb = cases.PROBE_NOTEBOOK
+    _insert_rows(repo, cases.probe_world(nb, cluster_canonical=canonical))
+    repo.delete_source("src-mem-p")
+    source_state = _kg_state(repo, nb)
+    assert source_state is not None and int(source_state["dirty"]) == 1
+    left = _fetch(repo)(
+        "SELECT member_object_id FROM concept_clusters WHERE notebook_id=%s", (nb,)
+    )
+    assert [r["member_object_id"] for r in left] == ["ko-shared-p"]
+
+    _mk_user(repo, "user-stale-copy")
+    new = repo.copy_notebook(nb, new_owner_id="user-stale-copy")
+    state = _kg_state(repo, new.id)
+    assert state is not None and int(state["dirty"]) == 1
+    view = cases.read_copy(_fetch(repo), "%s", new.id)
+    carried = cases.STALE_CLUSTER_CASES[canonical]
+    assert view.counts["concept_clusters"] == (1 if carried else 0)
+
+
+def test_schema_induction_sample_reads_no_memory_element(pg_app):
+    repo, _client = pg_app
+    _seed(repo)
+    sample = repo._runtime.source_store.notebook_element_sample(cases.NOTEBOOK)
+    texts = [item["text"] for item in sample]
+    assert texts and all(cases.MARK not in text for text in texts), texts
+    assert {"shared element el-doc-1", "shared element el-doc-2"} <= set(texts)
+
+
+def test_share_size_of_a_notebook_without_memory_costs_one_statement(pg_app, monkeypatch):
+    """没有 Memory 的笔记本,分享尺寸的 Memory 扣减只跑一条探测就返回 (0, 0, 0)。"""
+    repo, _client = pg_app
+    _seed(repo, cases.NOTEBOOK_PLAIN, with_memory=False)
     store = repo._runtime.sharing_store
-    assert store.memory_derived_kg_counts(cases.NOTEBOOK_PLAIN) == (0, 0)
+    executed: list[str] = []
+    original = store.database.connect
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def counting_connect(*args, **kwargs):
+        with original(*args, **kwargs) as connection:
+            real = connection.execute
+
+            def execute(query, *rest, **kw):
+                executed.append(str(query))
+                return real(query, *rest, **kw)
+
+            connection.execute = execute
+            try:
+                yield connection
+            finally:
+                connection.execute = real
+
+    monkeypatch.setattr(store.database, "connect", counting_connect)
+    assert store.memory_derived_kg_counts(cases.NOTEBOOK_PLAIN) == (0, 0, 0)
+    work = [q for q in executed if q.lstrip().upper().startswith("SELECT")]
+    assert len(work) == 1, executed
 
 
 def test_snapshot_table_set_is_pinned_and_memory_carriers_are_not_in_it():
     from app.repositories.postgres import sharing_store as store_module
 
-    tables = {table for table, _query in store_module._COPY_SNAPSHOT_QUERIES}
-    assert tables == cases.SNAPSHOT_TABLES
-    assert not cases.MEMORY_CARRIERS_NOT_COPIED & tables
+    for queries in (store_module._COPY_SNAPSHOT_QUERIES, store_module._MEMORY_COPY_SNAPSHOT_QUERIES):
+        tables = {table for table, _query in queries}
+        assert tables == cases.SNAPSHOT_TABLES
+        assert not cases.MEMORY_CARRIERS_NOT_COPIED & tables
 
 
 # ------------------------------------------------------------------ EXPLAIN pins
+# The distribution the pins run on: the target notebook (nb-big) is a thin slice of
+# every big table and holds 40 Memory sources; ONE other notebook (nb-memheavy)
+# holds 1,500 Memory sources and 30,000 Memory objects, relations and vectors — far
+# more Memory than the target. A Memory set built deployment-wide shows up here as a
+# Seq Scan / hashed SubPlan over the big tables; a set built from this notebook does
+# not. Every statement production executes on the Memory-aware path is pinned, under
+# the custom plan and the generic plan: the snapshot SELECTs, the COUNT wrappers the
+# copy-size limit runs, the validate_copy extras, the share-size counts, the probes,
+# and the schema-induction sample.
 _BIG_TABLES = (
     "knowledge_relations", "source_elements", "chunks", "knowledge_objects",
     "concept_clusters", "element_embeddings", "chunk_embeddings", "knowledge_embeddings",
-    "relation_embeddings", "chunk_questions", "sources",
+    "relation_embeddings", "chunk_questions", "sources", "knowledge_source_facts",
+    "knowledge_source_fact_elements",
 )
 
 
 def _seed_scale(database) -> None:
-    """目标笔记本 nb-big 只占各大表约 1/20;含 Memory 来源(前 40 个)及其派生行。"""
+    NOW = cases.NOW
     with database.write() as db:
         db.execute("SET LOCAL statement_timeout = '0'")
         db.execute(
             "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
             "username,password_hash,password_salt,password_iterations) "
             "VALUES ('u-a','a@x.test','a','user','active',%s,%s,'u-a','','',0) "
-            "ON CONFLICT DO NOTHING",
-            (cases.NOW, cases.NOW),
-        )
+            "ON CONFLICT DO NOTHING", (NOW, NOW))
+        # nb-big = notebook 0 (the target, 40 of its 400 sources are Memory);
+        # notebook 20 = nb-memheavy (every source is Memory: 3000 sources, 60k objects).
         db.execute(
             "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
-            "created_at,updated_at,tier) SELECT CASE WHEN g=0 THEN 'nb-big' ELSE 'nb-'||g END,"
-            "'N','','','ready','u-a',%s,%s,'personal' FROM generate_series(0,19) g",
-            (cases.NOW, cases.NOW),
-        )
+            "created_at,updated_at,tier) SELECT CASE WHEN g=0 THEN 'nb-big' WHEN g=20 THEN "
+            "'nb-memheavy' ELSE 'nb-'||g END,'N','','','ready','u-a',%s,%s,'personal' "
+            "FROM generate_series(0,20) g", (NOW, NOW))
+        nb = "CASE WHEN n=0 THEN 'nb-big' WHEN n=20 THEN 'nb-memheavy' ELSE 'nb-'||n END"
         db.execute(
             "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,content_md,"
-            "created_at,updated_at) SELECT 'mem-'||g,'nb-big','u-a','ask_answer','confirmed',"
-            "'t','x',%s,%s FROM generate_series(0,39) g",
-            (cases.NOW, cases.NOW),
-        )
-        # 20 笔记本 × 400 来源;笔记本 g 的第 k 个来源 id = src-g-k;nb-big = 笔记本 0。
+            "created_at,updated_at) SELECT 'mem-'||n||'-'||k,"
+            f"{nb},'u-a','ask_answer','confirmed','t','x',%s,%s "
+            "FROM generate_series(0,20) n, generate_series(0,1499) k "
+            "WHERE (n=0 AND k<40) OR n=20", (NOW, NOW))
         db.execute(
             "INSERT INTO sources(id,notebook_id,title,source_type,memory_id,created_at,updated_at) "
-            "SELECT 'src-'||n||'-'||k,CASE WHEN n=0 THEN 'nb-big' ELSE 'nb-'||n END,'t',"
-            "CASE WHEN n=0 AND k<40 THEN 'memory' ELSE 'document' END,"
-            "CASE WHEN n=0 AND k<40 THEN 'mem-'||k END,%s,%s "
-            "FROM generate_series(0,19) n, generate_series(0,399) k",
-            (cases.NOW, cases.NOW),
-        )
-        nb = "CASE WHEN n=0 THEN 'nb-big' ELSE 'nb-'||n END"
-        each = "generate_series(0,19) n, generate_series(0,3999) g"
+            f"SELECT 's-'||n||'-'||k,{nb},'t',"
+            "CASE WHEN (n=0 AND k<40) OR n=20 THEN 'memory' ELSE 'document' END,"
+            "CASE WHEN (n=0 AND k<40) OR n=20 THEN 'mem-'||n||'-'||k END,%s,%s "
+            "FROM generate_series(0,20) n, generate_series(0,1499) k WHERE n=20 OR k<400",
+            (NOW, NOW))
+        # per notebook: 4000 rows per table for n<20; nb-memheavy 60k objects/relations.
+        each = ("generate_series(0,20) n, generate_series(0,29999) g "
+                "WHERE (n<20 AND g<4000) OR n=20")
+        src = "'s-'||n||'-'||(CASE WHEN n=20 THEN g%%1500 ELSE g%%400 END)"
+        doc_src = "'s-'||n||'-'||(40+g%%360)"
         db.execute(
             "INSERT INTO source_elements(id,source_id,element_type,location_label,text,created_at) "
-            f"SELECT 'el-'||n||'-'||g,'src-'||n||'-'||(g%%400),'para','p','t',%s FROM {each}",
-            (cases.NOW,),
-        )
+            f"SELECT 'el-'||n||'-'||g,{src},'para','p','t',%s FROM {each}", (NOW,))
         db.execute(
             "INSERT INTO element_embeddings(element_id,source_id,notebook_id,vector,created_at) "
-            f"SELECT 'el-'||n||'-'||g,'src-'||n||'-'||(g%%400),{nb},'\\x00'::bytea,%s FROM {each}",
-            (cases.NOW,),
-        )
+            f"SELECT 'el-'||n||'-'||g,{src},{nb},'\\x00'::bytea,%s FROM {each}", (NOW,))
         db.execute(
             "INSERT INTO chunks(id,notebook_id,source_id,text,element_ids,created_at) "
-            f"SELECT 'ck-'||n||'-'||g,{nb},'src-'||n||'-'||(40+g%%360),'t','[]'::jsonb,%s FROM {each}",
-            (cases.NOW,),
-        )
+            f"SELECT 'ck-'||n||'-'||g,{nb},{doc_src},'t','[]'::jsonb,%s FROM {each} AND n<20",
+            (NOW,))
         db.execute(
             "INSERT INTO chunk_embeddings(chunk_id,notebook_id,vector,created_at) "
-            f"SELECT 'ck-'||n||'-'||g,{nb},'\\x00'::bytea,%s FROM {each}",
-            (cases.NOW,),
-        )
+            f"SELECT 'ck-'||n||'-'||g,{nb},'\\x00'::bytea,%s FROM {each} AND n<20", (NOW,))
         db.execute(
-            "INSERT INTO chunk_questions(id,chunk_id,notebook_id,source_id,question,vector,created_at) "
-            f"SELECT 'cq-'||n||'-'||g,'ck-'||n||'-'||g,{nb},'src-'||n||'-'||(40+g%%360),'q',"
-            f"'\\x00'::bytea,%s FROM {each}",
-            (cases.NOW,),
-        )
+            "INSERT INTO chunk_questions(id,chunk_id,notebook_id,source_id,question,vector,"
+            f"created_at) SELECT 'cq-'||n||'-'||g,'ck-'||n||'-'||g,{nb},{doc_src},'q',"
+            f"'\\x00'::bytea,%s FROM {each} AND n<20", (NOW,))
         db.execute(
             "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,source_id,payload,"
-            "evidence,created_at,updated_at) "
-            f"SELECT 'ko-'||n||'-'||g,{nb},'concept','approved','src-'||n||'-'||(g%%400),"
-            f"'{{}}'::jsonb,'[]'::jsonb,%s,%s FROM {each}",
-            (cases.NOW, cases.NOW),
-        )
+            f"evidence,created_at,updated_at) SELECT 'ko-'||n||'-'||g,{nb},'concept',"
+            f"'approved',{src},'{{}}'::jsonb,'[]'::jsonb,%s,%s FROM {each}", (NOW, NOW))
         db.execute(
             "INSERT INTO knowledge_embeddings(object_id,notebook_id,vector,created_at) "
-            f"SELECT 'ko-'||n||'-'||g,{nb},'\\x00'::bytea,%s FROM {each}",
-            (cases.NOW,),
-        )
+            f"SELECT 'ko-'||n||'-'||g,{nb},'\\x00'::bytea,%s FROM {each}", (NOW,))
+        span = "CASE WHEN n=20 THEN 30000 ELSE 4000 END"
         db.execute(
             "INSERT INTO knowledge_relations(id,notebook_id,source_id,source_object_id,"
-            "target_object_id,edge_type,evidence,created_at) "
-            f"SELECT 'kr-'||n||'-'||g,{nb},'src-'||n||'-'||(g%%400),'ko-'||n||'-'||g,"
-            f"'ko-'||n||'-'||((g*7+1)%%4000),'r','[]'::jsonb,%s FROM {each}",
-            (cases.NOW,),
-        )
+            f"target_object_id,edge_type,evidence,created_at) SELECT 'kr-'||n||'-'||g,{nb},"
+            f"{src},'ko-'||n||'-'||g,'ko-'||n||'-'||((g*7+1)%%({span})),'r','[]'::jsonb,%s "
+            f"FROM {each}", (NOW,))
         db.execute(
             "INSERT INTO relation_embeddings(relation_id,notebook_id,vector,created_at) "
-            f"SELECT 'kr-'||n||'-'||g,{nb},'\\x00'::bytea,%s FROM {each}",
-            (cases.NOW,),
-        )
+            f"SELECT 'kr-'||n||'-'||g,{nb},'\\x00'::bytea,%s FROM {each}", (NOW,))
         db.execute(
             "INSERT INTO concept_clusters(id,notebook_id,canonical_id,member_object_id,"
-            "canonical_name,object_type,created_at,generation) "
-            f"SELECT 'cc-'||n||'-'||g,{nb},'K-'||n||'-'||(g/3),'ko-'||n||'-'||g,'n','concept',%s,0 "
-            f"FROM {each}",
-            (cases.NOW,),
-        )
+            f"canonical_name,object_type,created_at,generation) SELECT 'cc-'||n||'-'||g,{nb},"
+            "CASE WHEN g%%50=0 THEN 'K-~ko-'||n||'-'||g ELSE 'K-'||n||'-'||(g/3) END,"
+            f"'ko-'||n||'-'||g,'n','concept',%s,0 FROM {each}", (NOW,))
         db.execute(
             "INSERT INTO knowledge_source_facts(id,notebook_id,source_id,source_generation,"
-            "local_object_id,object_type,created_at,updated_at) "
-            f"SELECT 'f-'||n||'-'||g,{nb},'src-'||n||'-'||(g%%400),'gen','l'||g,'concept',%s,%s "
-            f"FROM generate_series(0,19) n, generate_series(0,1999) g",
-            (cases.NOW, cases.NOW),
-        )
-        for table in _BIG_TABLES + ("knowledge_source_facts", "memory_items"):
+            f"local_object_id,object_type,created_at,updated_at) SELECT 'f-'||n||'-'||g,{nb},"
+            f"{src},'gen','l'||g,'concept',%s,%s FROM {each}", (NOW, NOW))
+        db.execute(
+            "INSERT INTO knowledge_source_fact_elements(fact_id,notebook_id,source_id,"
+            f"source_generation,element_id,created_at) SELECT 'f-'||n||'-'||g,{nb},{src},'gen',"
+            f"'el-'||n||'-'||g,%s FROM {each}", (NOW,))
+        for table in _BIG_TABLES + ("memory_items", "unified_kg_state"):
             db.execute(f"ANALYZE {table}")
-    import psycopg
-
-    with psycopg.connect(database.settings.database_url, autocommit=True) as raw:
-        for table in _BIG_TABLES:
-            raw.execute(f"VACUUM (ANALYZE) {table}")
 
 
 _SCAN = re.compile(r"(Seq Scan|Index Only Scan|Index Scan|Bitmap Heap Scan) (?:using \S+ )?on (\w+)")
+_UNHASHED_SUBPLAN_USE = re.compile(r"(?<!hashed )SubPlan \d+")
 
-
-def _scans(plan: str) -> dict[str, str]:
-    """table -> scan kind of its FIRST occurrence in the plan text. The driving (outer) scan
-    is printed before any inner probe of the same table, so this is the scan that reads the
-    notebook's rows, not the correlated probes the Memory predicate adds."""
-    first: dict[str, str] = {}
-    for kind, table in _SCAN.findall(plan):
-        first.setdefault(table, kind)
-    return first
+#: Memory anti-joins each Memory-aware statement must plan (a Memory NOT EXISTS that
+#: turns into a hashed SubPlan instead is a set built over the whole deployment).
+_EXPECTED_ANTI_JOINS = {
+    "sources": 0, "source_paper_meta": 0, "source_authors": 0, "source_elements": 0,
+    "chunks": 1, "knowledge_objects": 1, "knowledge_source_facts": 1,
+    "knowledge_source_fact_elements": 2, "knowledge_source_fact_backfills": 1,
+    "knowledge_relations": 3, "chunk_embeddings": 1, "chunk_questions": 2,
+    "element_embeddings": 0, "knowledge_embeddings": 1, "relation_embeddings": 3,
+    "concept_clusters": 2,
+}
+#: The validate_copy extras judge per-source tables by their own source_id (an
+#: anti-join) where the snapshot joins `sources` (a filter).
+_EXPECTED_VALIDATE_ANTI_JOINS = {
+    **_EXPECTED_ANTI_JOINS, "source_paper_meta": 1, "source_authors": 1,
+}
+#: Per-row probes a Memory-aware statement may add over its pre-M2 text: the element
+#: probe (element_embeddings, fact elements) and the minted-seed probe (clusters).
+_EXTRA_ROW_PROBES = {
+    "knowledge_source_fact_elements": 1, "element_embeddings": 1, "concept_clusters": 1,
+}
 
 
 def _seq_scanned(plan: str) -> set[str]:
     return {table for kind, table in _SCAN.findall(plan) if kind == "Seq Scan"}
 
 
-def _plan(database, query: str) -> str:
-    with database.connect() as db:
-        rows = db.execute(f"EXPLAIN (COSTS OFF) {query}", ("nb-big",)).fetchall()
-    return "\n".join(str(r["QUERY PLAN"]) for r in rows)
-
-
-#: 每条快照语句的驱动表(外层按笔记本取行的那张表)。
-_DRIVING_TABLE = {
-    "source_paper_meta": "source_paper_meta", "source_authors": "source_authors",
-    "knowledge_source_facts": "knowledge_source_facts",
-    "knowledge_source_fact_elements": "knowledge_source_fact_elements",
-    "knowledge_source_fact_backfills": "knowledge_source_fact_backfills",
-}
-
-
-_UNHASHED_SUBPLAN_USE = re.compile(r"(?<!hashed )SubPlan \d+")
-
-
 def _correlated_subplans(plan: str) -> int:
-    """Uses of a per-row (not hashed) SubPlan. The `SubPlan N` definition lines that head an
-    uncorrelated subplan's body do not count; a hashed SubPlan is evaluated once."""
     return sum(
         len(_UNHASHED_SUBPLAN_USE.findall(line))
         for line in plan.splitlines()
@@ -392,38 +508,171 @@ def _correlated_subplans(plan: str) -> int:
     )
 
 
-def test_changed_snapshot_statements_keep_their_scan_shape_and_use_anti_joins(
-    postgres_database,
-):
-    """新增的 Memory 谓词不许把大表的扫描改成新的顺序扫描:对每条被改动的快照语句,驱动表的
-    **扫描种类**与 M2 之前的语句原文在同一份数据(目标笔记本只占各大表约 1/20)上给出的计划
-    一致,且任何大表(`knowledge_relations` / `source_elements` 在内)都不许出现新的 Seq Scan;Memory 谓词渲染
-    成去相关的反连接,而不是逐行执行的相关子查询(原本就有的 knowhow `hashed SubPlan` 除外)。"""
-    from app.repositories.postgres import sharing_store as store_module
-    from app.repositories.postgres.migrator import PostgresMigrator
+def _plans(database, query: str, params: tuple) -> dict[str, str]:
+    """EXPLAIN under a custom plan and under a forced generic plan."""
+    out = {}
+    with database.connect() as db:
+        rows = db.execute(f"EXPLAIN (COSTS OFF) {query}", params).fetchall()
+        out["custom"] = "\n".join(str(r["QUERY PLAN"]) for r in rows)
+        counter = iter(range(1, len(params) + 1))
+        numbered = re.sub(r"%s", lambda _m: f"${next(counter)}", query)
+        db.execute("SET plan_cache_mode = force_generic_plan")
+        db.execute(f"PREPARE pin_stmt AS {numbered}")
+        literals = ",".join("'" + str(p).replace("'", "''") + "'" for p in params)
+        rows = db.execute(f"EXPLAIN (COSTS OFF) EXECUTE pin_stmt({literals})").fetchall()
+        db.execute("DEALLOCATE pin_stmt")
+        db.execute("RESET plan_cache_mode")
+        out["generic"] = "\n".join(str(r["QUERY PLAN"]) for r in rows)
+    return out
 
-    assert PostgresMigrator(postgres_database).migrate()
-    _seed_scale(postgres_database)
-    new_queries = dict(store_module._COPY_SNAPSHOT_QUERIES)
-    for table, legacy_sql in cases.LEGACY_SNAPSHOT_PG.items():
-        new_plan = _plan(postgres_database, new_queries[table])
-        legacy_plan = _plan(postgres_database, legacy_sql)
-        driving = _DRIVING_TABLE.get(table, table)
-        new_kind = _scans(new_plan).get(driving)
-        legacy_kind = _scans(legacy_plan).get(driving)
-        assert new_kind == legacy_kind, (
-            f"{table}: the scan of {driving} changed from {legacy_kind} to {new_kind}\n"
-            f"--- new\n{new_plan}\n--- legacy\n{legacy_plan}"
+
+def _assert_notebook_scoped(label, new_plan, legacy_plan="", *, anti_joins=None, extra_probes=0):
+    """No new Seq Scan on a big table, no hashed SubPlan beyond the pre-M2 text's (the
+    knowhow NOT IN), no per-row SubPlan beyond the registered probes, and — when given —
+    exactly the expected number of Memory anti-joins."""
+    assert (_seq_scanned(new_plan) & set(_BIG_TABLES)) <= _seq_scanned(legacy_plan), (
+        f"{label}: a new sequential scan\n--- new\n{new_plan}\n--- legacy\n{legacy_plan}"
+    )
+    assert new_plan.count("hashed SubPlan") <= legacy_plan.count("hashed SubPlan"), (
+        f"{label}: a hashed SubPlan the pre-M2 text did not have\n{new_plan}"
+    )
+    assert _correlated_subplans(new_plan) <= _correlated_subplans(legacy_plan) + extra_probes, (
+        f"{label}: an unregistered per-row SubPlan\n{new_plan}"
+    )
+    if anti_joins is not None:
+        assert new_plan.count("Anti Join") == anti_joins, (
+            f"{label}: expected {anti_joins} Memory anti-joins\n{new_plan}"
         )
-        assert _correlated_subplans(new_plan) <= _correlated_subplans(legacy_plan), new_plan
-        # 任何位置的顺序扫描都不许是新增的(大表)
-        assert (_seq_scanned(new_plan) & set(_BIG_TABLES)) <= _seq_scanned(legacy_plan), (
-            f"{table}: a new sequential scan\n--- new\n{new_plan}\n--- legacy\n{legacy_plan}"
+
+
+@pytest.fixture(scope="module")
+def scale_database(tmp_path_factory):
+    """One seeded scale world for all the pins (module-scoped: seeding is the cost)."""
+    import os
+
+    from app.core.config import Settings
+    from app.repositories.postgres.database import PostgresDatabase
+    from app.repositories.postgres.migrator import PostgresMigrator
+    from pathlib import Path
+
+    from tests.postgres.conftest import _isolated_postgres_scope
+
+    base = os.environ.get("TEST_POSTGRES_URL")
+    if not base:
+        pytest.skip("TEST_POSTGRES_URL is not configured")
+    with _isolated_postgres_scope(base) as scope:
+        database = PostgresDatabase(
+            Settings(database_url=scope.url, postgres_statement_timeout_seconds=600),
+            Path(__file__).resolve().parents[3],
         )
-    # Memory 谓词是「集合只建一次」的形态:反连接或哈希子计划,而不是逐行相关子查询。
-    # 关系语句:原有的 knowhow 集合 + Memory 三条臂(自身来源 / 两个端点)= 至少 4 个哈希子计划。
-    relations_plan = _plan(postgres_database, new_queries["knowledge_relations"])
-    assert relations_plan.count("hashed SubPlan") >= 4, relations_plan
-    for table in ("chunks", "knowledge_objects", "concept_clusters", "relation_embeddings"):
-        plan = _plan(postgres_database, new_queries[table])
-        assert "Anti Join" in plan or "hashed SubPlan" in plan, (table, plan)
+        try:
+            assert PostgresMigrator(database).migrate()
+            _seed_scale(database)
+            yield database
+        finally:
+            database.close()
+
+
+def test_memory_aware_snapshot_statements_and_their_counts_build_every_set_per_notebook(
+    scale_database,
+):
+    from app.repositories.postgres import sharing_store as store_module
+
+    legacy = dict(store_module._COPY_SNAPSHOT_QUERIES)
+    for table, query in store_module._MEMORY_COPY_SNAPSHOT_QUERIES:
+        if table not in store_module._MEMORY_SNAPSHOT_TEXT:
+            assert query == legacy[table]
+            continue
+        for wrap in ("{q}", "SELECT COUNT(*) AS n FROM ({q}) AS _c"):
+            new = _plans(scale_database, wrap.format(q=query), ("nb-big",))
+            old = _plans(scale_database, wrap.format(q=legacy[table]), ("nb-big",))
+            for mode in ("custom", "generic"):
+                _assert_notebook_scoped(
+                    f"{table} {mode} {wrap[:6]}", new[mode], old[mode],
+                    anti_joins=_EXPECTED_ANTI_JOINS[table],
+                    extra_probes=_EXTRA_ROW_PROBES.get(table, 0),
+                )
+
+
+def test_memory_aware_validate_extras_build_every_set_per_notebook(scale_database):
+    from app.repositories.postgres import sharing_store as store_module
+
+    legacy = dict(store_module._COPY_VALIDATED_TABLES)
+    for table, extra in store_module._MEMORY_COPY_VALIDATED_TABLES:
+        if table not in store_module._MEMORY_VALIDATED_EXTRAS:
+            continue
+        statement = f"SELECT COUNT(*) AS c FROM {table} WHERE notebook_id=%s "
+        new = _plans(scale_database, statement + extra, ("nb-big",))
+        old = _plans(scale_database, statement + legacy[table], ("nb-big",))
+        for mode in ("custom", "generic"):
+            _assert_notebook_scoped(
+                f"validate {table} {mode}", new[mode], old[mode],
+                anti_joins=_EXPECTED_VALIDATE_ANTI_JOINS[table],
+                extra_probes=_EXTRA_ROW_PROBES.get(table, 0),
+            )
+
+
+def test_share_size_counts_and_probes_build_every_set_per_notebook(scale_database):
+    from app.repositories.postgres import sharing_store as store_module
+
+    for name, params in (
+        ("_MEMORY_PRESENT_SQL", ("nb-big",)),
+        ("_MEMORY_SOURCES_SQL", ("nb-big",)),
+        ("_MEMORY_SOURCE_IDS_SQL", ("nb-big",)),
+        ("_COPY_DIRTY_SQL", ("nb-big",) * 2),
+        ("_COPY_FILTERED_SQL", ("nb-big",)),
+        ("_MEMORY_NODES_SQL", ("nb-big",)),
+        ("_MEMORY_EDGES_SQL", ("nb-big",) * 3),
+    ):
+        plans = _plans(scale_database, getattr(store_module, name), params)
+        for mode, plan in plans.items():
+            _assert_notebook_scoped(f"{name} {mode}", plan)
+
+
+def test_schema_induction_sample_keeps_its_scan_shape(scale_database, monkeypatch):
+    """The sample statement production executes (captured from the real method), against
+    its pre-E5-1 text: no new scan, no new SubPlan."""
+    from contextlib import contextmanager
+
+    from app.repositories.postgres.source_store import SourceStore
+
+    captured: list[tuple[str, tuple]] = []
+    original = scale_database.connect
+
+    @contextmanager
+    def capture(*args, **kwargs):
+        with original(*args, **kwargs) as connection:
+            real = connection.execute
+
+            def execute(query, params=None, *rest, **kw):
+                if "source_elements" in str(query):
+                    captured.append((str(query), tuple(params or ())))
+                return real(query, params, *rest, **kw)
+
+            connection.execute = execute
+            try:
+                yield connection
+            finally:
+                connection.execute = real
+
+    store = SourceStore.__new__(SourceStore)
+    store.database = scale_database
+    monkeypatch.setattr(scale_database, "connect", capture)
+    store.notebook_element_sample("nb-big", max_chars=200)
+    monkeypatch.undo()
+    query, params = captured[0]
+    legacy = re.sub(r"AND NOT \(s\.source_type = 'memory'\) ", "", query)
+    assert legacy != query
+    new = _plans(scale_database, query, params)
+    old = _plans(scale_database, legacy, params)
+    for mode in ("custom", "generic"):
+        _assert_notebook_scoped(f"sample {mode}", new[mode], old[mode])
+
+
+def test_child_rows_are_judged_by_their_memory_parent_too(pg_app):
+    repo, _client = pg_app
+    _seed(repo)
+    _insert_rows(repo, cases.ADVERSARIAL_ROWS)
+    _mk_user(repo, "user-adv-copy")
+    new = repo.copy_notebook(cases.NOTEBOOK, new_owner_id="user-adv-copy")
+    cases.assert_copy_has_no_memory(cases.read_copy(_fetch(repo), "%s", new.id))
