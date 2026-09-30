@@ -102,16 +102,18 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "memory_sql.no_memory_member_cluster(见下条),本文件只剩外层这一处读"),
     "backend/app/repositories/sqlite/query_store.py": (1, 0, 0, 1, 0,
         "PG 孪生同注记"),
-    "backend/app/repositories/postgres/memory_sql.py": (1, 0, 0, 0, 0,
+    "backend/app/repositories/postgres/memory_sql.py": (2, 0, 0, 0, 0,
         "A:no_memory_member_cluster 的内层 NOT EXISTS,用 mc.generation="
         "{外层}.generation 相关对齐(零新参数,不计入谓词计数;外层行的 published "
-        "谓词由调用方持有)"),
-    "backend/app/repositories/sqlite/memory_sql.py": (1, 0, 0, 0, 0,
+        "谓词由调用方持有);C:memory_member_cluster_keys 按 (canonical_id, generation) "
+        "成对读出各代含 Memory 成员的簇,调用方按同一对键在自己那一代上做差,不需代次谓词"),
+    "backend/app/repositories/sqlite/memory_sql.py": (2, 0, 0, 0, 0,
         "PG 孪生同注记"),
-    "backend/app/repositories/postgres/sharing_store.py": (2, 0, 0, 4, 0,
-        "C→§1.6:拷贝快照只取 published 代 + 校验两侧同谓词口径;E5-1(M2)给这两处"
-        "各加一份 Memory 感知的孪生文本(源库含 Memory 或已标脏时才用),代次谓词逐字相同"),
-    "backend/app/repositories/sqlite/sharing_store.py": (2, 0, 0, 4, 0,
+    "backend/app/repositories/postgres/sharing_store.py": (2, 0, 0, 3, 0,
+        "C→§1.6:拷贝快照只取 published 代 + 校验两侧同谓词口径;E5-1(M2)给快照加一份"
+        "Memory 感知的孪生文本(源库含 Memory 或已标脏时才用),代次谓词逐字相同;validate "
+        "副本侧沿用原口径,源侧按快照的决定计数"),
+    "backend/app/repositories/sqlite/sharing_store.py": (2, 0, 0, 3, 0,
         "PG 孪生同注记"),
     "backend/app/repositories/postgres/unified_kg_store.py": (27, 10, 7, 24, 13,
         "A 大头(30 站点已配谓词,含 codex #671 R1 补的 mention_seed_rows;LEFT JOIN 入 ON);B 已参数化:写新代三原语"
