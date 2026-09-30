@@ -17,7 +17,7 @@
 // 键盘:出现时焦点落进条里(落在「取消」上,不把公开这个动作当默认落点);Esc 等同「取消」;
 // 条收起时焦点回到「分享」按钮,结果也正落在那颗按钮上。
 
-import { useLayoutEffect, useRef, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 
 export const shareDisclosureSentence = (count: number, added: number | null): string => {
   const sentence = `公开页可能包含来自 ${count} 条个人记忆的内容。`;
@@ -78,6 +78,12 @@ export function ReportShareConfirm({
   }, []);
 
   const text = refusal ?? (count === null ? "" : shareDisclosureSentence(count, added));
+  // 读屏只播报「已挂载的状态区里的变化」:状态区先以空文字挂上,句子在挂载之后才填进去,
+  // 所以条一出现就会被读出来(同时挂上的文字可能不播)。
+  const [spoken, setSpoken] = useState("");
+  useEffect(() => {
+    setSpoken(text);
+  }, [text]);
   return (
     <div
       ref={groupRef}
@@ -91,7 +97,7 @@ export function ReportShareConfirm({
         }
       }}
     >
-      <span className="report-share-confirm-text" role="status">{text}</span>
+      <span className="report-share-confirm-text" role="status">{spoken}</span>
       {refusal === null && (
         <button className="report-action" type="button" disabled={busy} onClick={onConfirm}>
           确认公开
