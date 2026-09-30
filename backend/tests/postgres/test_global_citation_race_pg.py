@@ -156,6 +156,24 @@ def test_postgres_terminal_check_over_eight_libraries_issues_two_statements(pg_s
     )
     assert len(statements) == 2, statements
     assert outcome.checked == 8 and outcome.failed == 0
+    # P3-7: the visibility read is by id over the cited sources, not per library.
+    assert "s.id = ANY(ARRAY(SELECT jsonb_array_elements_text(" in statements[1]
+    assert "notebook_id" not in statements[1].split("WHERE", 1)[1]
+
+
+def test_postgres_by_id_visibility_judges_a_deleted_and_a_hidden_source_gone(pg_sources):
+    from tests.citation_check_testkit import terminal_check_statements
+
+    notebook_ids = _pg_libraries(pg_sources.database, 4)
+    statements, outcome = terminal_check_statements(
+        pg_sources, pg_sources.database, "%s", notebook_ids,
+        delete_source_of=notebook_ids[1], hide_source_of=notebook_ids[2],
+    )
+    assert len(statements) == 2, statements
+    assert {key[0]: verdict for key, verdict in outcome.verdicts.items()} == {
+        notebook_ids[1]: ("source_gone", "source_gone"),
+        notebook_ids[2]: ("source_gone", "source_gone"),
+    }
 
 
 def test_postgres_single_notebook_liveness_is_one_read_and_drops_dead_cards(pg_sources):

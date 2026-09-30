@@ -346,7 +346,7 @@ def test_cancellation_during_a_terminal_read_propagates():
             cancel.set()
             raise ReadBudgetExceeded("read budget exhausted")
 
-        def visible_source_ids_by_notebook(self, ids):  # pragma: no cover
+        def visible_source_owners(self, ids):  # pragma: no cover
             raise AssertionError("must not be reached")
 
     response = AskResponse(conclusion="c", citations=[Citation(
@@ -362,33 +362,46 @@ def test_cancellation_during_a_terminal_read_propagates():
         )
 
 
-def test_visibility_is_read_once_for_libraries_in_the_ceiling_only():
+def test_visibility_is_read_once_by_id_over_the_cited_sources_in_the_ceiling():
+    """P3-7: ONE by-id read over exactly the sources the judgement looks up --
+    the citations' own sources and their passage siblings' snapshot sources,
+    inside the frozen ceiling -- never every visible source of each library.
+    A source that left its library's visible set (or sits in another library)
+    is source_gone, as before."""
     from app.services.global_citation_check import GlobalCitationCheck
 
-    batched: list = []
-    single: list = []
+    reads: list = []
 
     class _Sources:
         def evidence_fingerprints(self, ids):
-            return {}
+            return {"e-a": ("s-a", "fp"), "e-sib": ("s-a2", "fp")}
 
-        def visible_source_ids_by_notebook(self, ids):
-            batched.append(tuple(ids))
-            return {nb: [f"s-{nb}"] for nb in ids}
+        def visible_source_owners(self, ids):
+            reads.append(tuple(ids))
+            return {"s-a": "a", "s-a2": "a", "s-b": "elsewhere"}
 
-        def all_visible_source_ids(self, nb):  # pragma: no cover
-            single.append(nb)
-            return []
-
-    citations = [Citation(label="l", source_id=f"s-{nb}", element_id="",
-                          location_label="", quoted_span="q", notebook_id=nb)
-                 for nb in ("a", "b", "stray")]
+    citations = [
+        Citation(label="l", source_id="s-a", element_id="e-a",
+                 location_label="", quoted_span="q", notebook_id="a"),
+        Citation(label="l", source_id="s-b", element_id="",
+                 location_label="", quoted_span="q", notebook_id="b"),
+        Citation(label="l", source_id="s-c", element_id="",
+                 location_label="", quoted_span="q", notebook_id="b"),
+        Citation(label="l", source_id="s-stray", element_id="",
+                 location_label="", quoted_span="q", notebook_id="stray"),
+    ]
     outcome = GlobalCitationCheck(_Sources(), notebook_timeout_seconds=5).run(
-        AskResponse(conclusion="c", citations=citations), evidence={}, siblings={},
-        source_ceiling={"a": {"s-a"}, "b": {"s-b"}},
+        AskResponse(conclusion="c", citations=citations),
+        evidence={"e-a": ("s-a", "fp"), "e-sib": ("s-a2", "fp")},
+        siblings={"e-a": ("e-sib",)},
+        source_ceiling={"a": {"s-a", "s-a2", "s-unused"}, "b": {"s-b", "s-c"}},
     )
-    assert batched == [("a", "b")] and single == []
-    assert list(outcome.reasons()) == ["out_of_ceiling"]
+    assert reads == [("s-a", "s-a2", "s-b", "s-c")]
+    assert dict(outcome.verdicts) == {
+        ("b", "s-b", ""): ("source_gone", "source_gone"),
+        ("b", "s-c", ""): ("source_gone", "source_gone"),
+        ("stray", "s-stray", ""): ("unverifiable", "out_of_ceiling"),
+    }
 
 
 def test_a_failed_batched_visibility_read_is_retried_per_library():
@@ -402,13 +415,12 @@ def test_a_failed_batched_visibility_read_is_retried_per_library():
         def evidence_fingerprints(self, ids):
             return {}
 
-        def visible_source_ids_by_notebook(self, ids):
-            raise RuntimeError("batch failed")
-
-        def all_visible_source_ids(self, nb):
-            if nb == "b":
+        def visible_source_owners(self, ids):
+            if len(ids) > 1:
+                raise RuntimeError("batch failed")
+            if ids == ["s-b"]:
                 raise RuntimeError("b failed")
-            return [f"s-{nb}"]
+            return {source_id: source_id.removeprefix("s-") for source_id in ids}
 
     citations = [Citation(label="l", source_id=f"s-{nb}", element_id="",
                           location_label="", quoted_span="q", notebook_id=nb)
@@ -492,6 +504,41 @@ def test_sqlite_terminal_check_over_eight_libraries_issues_two_statements(sqlite
     statements, outcome = terminal_check_statements(sources, database, "?", notebook_ids)
     assert len(statements) == 2, statements
     assert outcome.checked == 8 and outcome.failed == 0
+    # P3-7: the visibility read is by id over the cited sources, not per library.
+    assert "WHERE s.id IN" in statements[1] and "notebook_id IN" not in statements[1]
+
+
+def test_sqlite_by_id_visibility_judges_a_deleted_and_a_hidden_source_gone(sqlite_libraries):
+    from tests.citation_check_testkit import terminal_check_statements
+
+    sources, database, notebook_ids = sqlite_libraries
+    statements, outcome = terminal_check_statements(
+        sources, database, "?", notebook_ids,
+        delete_source_of=notebook_ids[1], hide_source_of=notebook_ids[2],
+    )
+    assert len(statements) == 2, statements
+    assert {key[0]: verdict for key, verdict in outcome.verdicts.items()} == {
+        notebook_ids[1]: ("source_gone", "source_gone"),
+        notebook_ids[2]: ("source_gone", "source_gone"),
+    }
+
+
+def test_sqlite_by_id_visibility_read_probes_the_primary_key(sqlite_libraries):
+    """Plan check without ANALYZE: every id of the JSON list is one probe of
+    ``sources``' primary key, never a scan of the table."""
+    sources, database, _notebook_ids = sqlite_libraries
+    with database.connect() as db:
+        plan = [
+            " ".join(str(value) for value in tuple(row))
+            for row in db.execute(
+                "EXPLAIN QUERY PLAN SELECT s.id,s.notebook_id FROM sources s WHERE s.id IN ("
+                "SELECT value FROM json_each(?)) AND s.source_type NOT IN ('memory', 'knowhow')",
+                ('["a","b"]',),
+            ).fetchall()
+        ]
+    text = "\n".join(plan)
+    assert "SCAN s" not in text, text
+    assert "SEARCH s USING INDEX sqlite_autoindex_sources_1 (id=?)" in text, text
 
 
 def test_sqlite_single_notebook_liveness_is_one_read_and_drops_dead_cards(sqlite_libraries):

@@ -165,6 +165,27 @@ class SourceStore:
             result[row["notebook_id"]].append(row["id"])
         return result
 
+    def visible_source_owners(self, source_ids: Sequence[str]) -> dict[str, str]:
+        """``{source_id: notebook_id}`` for those of ``source_ids`` that are
+        visible sources NOW; a deleted or hidden one is absent.
+
+        The PostgreSQL twin's contract: ONE statement over the sources an
+        answer cites (bounded by its checkable references), the id list as ONE
+        JSON parameter (``json_each``) so the variable limit never applies,
+        each id a primary-key probe.
+        """
+        ids = list(dict.fromkeys(str(value) for value in source_ids if value))
+        if not ids:
+            return {}
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT s.id,s.notebook_id FROM sources s WHERE s.id IN ("
+                "SELECT value FROM json_each(?)) "
+                f"AND s.{VISIBLE_SOURCE_TYPES_PREDICATE}",
+                (json.dumps(ids),),
+            ).fetchall()
+        return {row["id"]: row["notebook_id"] for row in rows}
+
     def hidden_source_ids(self, notebook_id: str, owner_id: str) -> list[str]:
         """Hidden Memory/Knowhow projection participants **for one user**, in
         stable id order.

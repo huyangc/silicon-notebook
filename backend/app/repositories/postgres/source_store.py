@@ -200,6 +200,35 @@ class SourceStore:
             result[row["notebook_id"]].append(row["id"])
         return result
 
+    def visible_source_owners(self, source_ids: Sequence[str]) -> dict[str, str]:
+        """``{source_id: notebook_id}`` for those of ``source_ids`` that are
+        visible sources NOW; a deleted or hidden one is absent.
+
+        The terminal citation check's by-id visibility read: ONE statement over
+        the sources an answer cites, so its cost follows the answer and not the
+        size of the cited libraries. The id list is bounded by the answer's
+        checkable references (one id per distinct cited source) and travels as
+        ONE jsonb parameter -- never one placeholder per id, never ``= ANY``
+        over a bound Python list -- so the statement text and its plan do not
+        vary with the list's length; the ids probe the primary key
+        (``test_global_citation_check_explain_pins``).
+        """
+        ids = list(dict.fromkeys(str(value) for value in source_ids if value))
+        if not ids:
+            return {}
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                # ``= ANY(ARRAY(subquery))``: the list is unnested ONCE (an
+                # InitPlan) and the primary key is probed with it, in the
+                # custom and the generic plan alike; an ``IN (SELECT ...)``
+                # semi-join may instead hash a full index scan.
+                "SELECT s.id,s.notebook_id FROM sources s WHERE s.id = ANY(ARRAY("
+                "SELECT jsonb_array_elements_text(%s::jsonb))) "
+                f"AND s.{VISIBLE_SOURCE_TYPES_PREDICATE}",
+                (json.dumps(ids),),
+            ).fetchall()
+        return {row["id"]: row["notebook_id"] for row in rows}
+
     def hidden_source_ids(self, notebook_id: str, owner_id: str) -> list[str]:
         """Hidden Memory/Knowhow projection participants **for one user**, in
         stable id order — see the SQLite adapter for why the Memory owner
