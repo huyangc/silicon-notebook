@@ -1426,10 +1426,11 @@ class GraphRetrievalService(_RetrievalState):
         cut = False  # the extended ranking stops at the budget's reach
         while slots > 0:
             if position >= len(items) and rank_further is not None:
+                # One past the budget's reach tells "cut" from "ended there".
                 reach = prefix + _PPR_CEILING_WALK_WINDOWS * self._IN_CHUNK
-                further = rank_further(reach, skip)
-                cut = len(further) >= reach
-                items = [item for item in further if item[0] not in seen]
+                further = rank_further(reach + 1, skip)
+                cut = len(further) > reach
+                items = [item for item in further[:reach] if item[0] not in seen]
                 rank_further, position, budget_from = None, 0, 0
                 continue
             if position >= budget_from and windows == _PPR_CEILING_WALK_WINDOWS:

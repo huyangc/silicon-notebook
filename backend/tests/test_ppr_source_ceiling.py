@@ -39,6 +39,9 @@ from tests.model_testkit import bind_all_embedding_clients
 
 NOW = "2026-09-30T00:00:00"
 TOP = 3
+# How far the ceiling walk reaches down the ranking: its over-ranked prefix
+# plus its budget of 900-candidate windows.
+REACH = TOP * _PPR_CEILING_OVERFETCH + _PPR_CEILING_WALK_WINDOWS * 900
 
 
 @pytest.fixture
@@ -215,8 +218,7 @@ def test_window_exhaustion_ranks_further_and_still_fills(repo, monkeypatch):
         out = repo._ppr_retrieve(active, "q")
     assert [c.chunk_id for c in out] == ["c-b1", "c-a1", "c-b2"]
     assert fake.calls == [TOP * _PPR_CEILING_OVERFETCH]
-    assert fake.further == [
-        (TOP * _PPR_CEILING_OVERFETCH + _PPR_CEILING_WALK_WINDOWS * 900, False)]
+    assert fake.further == [(REACH + 1, False)]
 
 
 def test_a_passage_kept_in_the_prefix_takes_one_slot_after_ranking_further(
@@ -331,8 +333,7 @@ def test_a_wholly_refused_library_is_dropped_in_memory_before_the_walk(
         out = repo.retrieval.graph._ppr_retrieve(active, "q")
     assert [c.chunk_id for c in out] == ["c-a1", "c-a2"]
     assert len(_hydrations(statements)) == 1
-    assert fake.further == [
-        (TOP * _PPR_CEILING_OVERFETCH + _PPR_CEILING_WALK_WINDOWS * 900, True)]
+    assert fake.further == [(REACH + 1, True)]
 
 
 def test_without_a_chunk_map_the_walk_stops_at_its_budget(repo, monkeypatch):
@@ -360,11 +361,28 @@ def test_without_a_chunk_map_the_walk_stops_at_its_budget(repo, monkeypatch):
         "top_chunks": TOP,
         "kept": 0,
         "windows": _PPR_CEILING_WALK_WINDOWS,
-        "candidates_walked": TOP * _PPR_CEILING_OVERFETCH
-        + _PPR_CEILING_WALK_WINDOWS * 900,
+        "candidates_walked": REACH,
         "libraries_dropped": 0,
         "libraries_unmapped": 1,
     }]
+
+
+@pytest.mark.parametrize("beyond_reach, announced", [(0, False), (1, True)])
+def test_exhaustion_is_announced_only_when_candidates_were_left(
+    repo, monkeypatch, beyond_reach, announced,
+):
+    """A ranking whose last candidate is the last one the budget reaches has
+    been walked completely: nothing to announce.  One candidate more, and the
+    walk stopped short of it."""
+    active, base = _seed(repo)
+    ranking = _bulk_rows(repo, base, REACH + beyond_reach)
+    _install(repo, monkeypatch, ranking, mapped=False)
+    events = _events(repo, monkeypatch)
+    with source_scope_context(active, None, EXCLUDED):
+        out = repo.retrieval.graph._ppr_retrieve(active, "q")
+    assert out == []
+    kinds = [e.get("kind") for e in events]
+    assert ("ppr_ceiling_walk_exhausted" in kinds) is announced
 
 
 def test_ranking_further_reuses_the_score_vector(repo, monkeypatch):
