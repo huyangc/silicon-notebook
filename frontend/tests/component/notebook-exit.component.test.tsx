@@ -739,7 +739,7 @@ test("面板开着时焦点掉到 body(按下的按钮被禁用或卸载)就收�
   expect(cancel).toHaveFocus();
 });
 
-test("代理超时(500)同样是「不知道」;重读到仍是成员且条数没变:说都还在、没有被删除", async () => {
+test("代理超时(500)同样是「不知道」;重读到仍是成员且条数没变:只说还剩几条,不说「都还在」——确认过的被删、同时又新存了几条,总数照样不变", async () => {
   const user = userEvent.setup();
   installServer([
     disclosure(3, 3),
@@ -752,13 +752,13 @@ test("代理超时(500)同样是「不知道」;重读到仍是成员且条数�
   await user.click(within(await panel()).getByRole("button", { name: "确认退出并删除" }));
 
   const dialog = await panel();
-  await within(dialog).findByText("退出的结果没有收到，重新核对后：你仍是成员，还有 3 条记忆，都还在，没有被删除。可以重试。");
+  await within(dialog).findByText("退出的结果没有收到，重新核对后：你仍是成员，还有 3 条记忆。可以重试。");
   expect(within(dialog).getByRole("button", { name: "确认退出并删除" })).toBeEnabled();
   expect(onToast).not.toHaveBeenCalled();
   expect(onError).not.toHaveBeenCalled();
 });
 
-test("网络中断后重读到条数变少:只说还剩几条、另有一部分已被删除,不自己算差值", async () => {
+test("网络中断后重读到条数变少:只说还剩几条,不推断「删了一部分」,也不自己算差值", async () => {
   const user = userEvent.setup();
   installServer([
     disclosure(5, 2),
@@ -771,7 +771,7 @@ test("网络中断后重读到条数变少:只说还剩几条、另有一部分�
   await user.click(within(await panel()).getByRole("button", { name: "确认退出并删除" }));
 
   const dialog = await panel();
-  await within(dialog).findByText("退出的结果没有收到，重新核对后：你仍是成员，还有 2 条记忆，另有一部分已经被删除。可以重试。");
+  await within(dialog).findByText("退出的结果没有收到，重新核对后：你仍是成员，还有 2 条记忆。可以重试。");
   expect(within(dialog).getByText("退出后，你在这个笔记本里的 2 条记忆会被永久删除，无法恢复。")).toBeInTheDocument();
 });
 
@@ -825,7 +825,7 @@ test("面板已被取消之后才到的结果照样告知:409 未完成、503、
     ["网络中断,核对出已退出", () => Promise.reject(new TypeError("Failed to fetch")),
       "已退出共享", [notebooksList(false)]],
     ["网络中断,核对出仍是成员", () => Promise.reject(new TypeError("Failed to fetch")),
-      "退出的结果没有收到，重新核对后：你仍是成员，还有 3 条记忆，都还在，没有被删除。可以重试。", [notebooksList(true)]],
+      "退出的结果没有收到，重新核对后：你仍是成员，还有 3 条记忆。可以重试。", [notebooksList(true)]],
     ["网络中断,核对不出", () => Promise.reject(new TypeError("Failed to fetch")),
       "暂时无法确认是否已经退出，请刷新页面查看笔记本列表。",
       [(call) => (call.path === "/api/notebooks" ? json({}, 500) : undefined)]],

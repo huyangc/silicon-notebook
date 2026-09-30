@@ -33,16 +33,12 @@ export const incompleteLateText = (deleted: number, remaining: number): string =
     : `退出没有完成：期间又新增了 ${remaining} 条记忆，你仍是成员。`;
 
 /**
- * 网络中断/超时之后重读到「仍是成员」:只陈述重读到的剩余条数;和确认时的条数比较只
- * 用来判断「有没有删过」,不把差值当数字说出来。
+ * 网络中断/超时之后重读到「仍是成员」:只陈述重读到的剩余条数。服务端不提供那次丢失的
+ * 请求删了几条,所以既不说「删了一部分」也不说「都还在」——和确认时的条数比较证明不了
+ * 什么(确认过的被删掉、同时又新存了几条,总数可以不变;少了的也可能是别处移走的)。
  */
-export function stillMemberText(remaining: number, acknowledged: number): string {
+export function stillMemberText(remaining: number): string {
   const lead = "退出的结果没有收到，重新核对后：你仍是成员，";
   if (remaining === 0) return `${lead}没有需要删除的记忆。可以重试。`;
-  const trail = remaining < acknowledged
-    ? "，另有一部分已经被删除"
-    : remaining === acknowledged
-      ? "，都还在，没有被删除"
-      : "";
-  return `${lead}还有 ${remaining} 条记忆${trail}。可以重试。`;
+  return `${lead}还有 ${remaining} 条记忆。可以重试。`;
 }
