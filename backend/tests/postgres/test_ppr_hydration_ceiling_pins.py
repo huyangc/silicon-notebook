@@ -314,13 +314,14 @@ def _seed_mounted(repository) -> tuple[str, str]:
 
 
 def _rank(repository, monkeypatch, ranking) -> None:
-    """``scale_ppr`` replaced by a fixed ranking (a plain list: complete, no
-    chunk map), ``ppr_top_chunks`` = 3."""
+    """``scale_ppr`` replaced by a fixed ranking (a plain list: complete, and
+    it leaves no library out, whatever ``refuse_library`` says -- so a
+    refused library's rows reach the store), ``ppr_top_chunks`` = 3."""
     graph = repository.retrieval.graph
     monkeypatch.setattr(graph.settings, "ppr_top_chunks", 3)
     monkeypatch.setattr(
         graph, "scale_ppr",
-        lambda nb, q, max_results=None: [
+        lambda nb, q, max_results=None, refuse_library=None: [
             (cid, 1.0 - i / 10) for i, cid in enumerate(ranking)
         ][:max_results],
     )

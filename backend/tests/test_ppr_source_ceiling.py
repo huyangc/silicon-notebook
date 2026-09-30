@@ -113,10 +113,11 @@ class _Ranking:
     whose ``rank_further`` re-cuts the same ranking (no second ``scale_ppr``
     call, like the real continuation over the same score vector).
 
-    ``mapped`` models the scale index's chunk-id set per library
-    (``_ppr_chunk_ids``, read here from the ``chunks`` table): with it a
-    library the run refuses wholly can be dropped in memory; without it the
-    walk has to refuse that library's candidates through the store."""
+    ``mapped`` models the scale path's per-library chunk-id sets (read here
+    from the ``chunks`` table): with them a library ``refuse_library`` refuses
+    leaves the ranking in its first pass, as ``scale_ppr`` does; without them
+    (the rustworkx ranking has none) the walk has to refuse that library's
+    candidates through the store."""
 
     def __init__(self, repo, chunk_ids, *, mapped=True):
         n = len(chunk_ids)
@@ -132,26 +133,28 @@ class _Ranking:
         out: dict = {}
         for row in rows:
             out.setdefault(row[0], set()).add(row[1])
-        return {
-            nb: frozenset(ids) if self.mapped else None
-            for nb, ids in out.items()
-        }
+        return out
 
-    def __call__(self, notebook_id, question, max_results=None):
+    def __call__(self, notebook_id, question, max_results=None, refuse_library=None):
         self.calls.append(max_results)
         if max_results is None:
             return list(self.ranking)
+        dropped: tuple = ()
+        ranking = self.ranking
+        if self.mapped and refuse_library is not None:
+            libraries = self._library_chunk_ids()
+            dropped = tuple(nb for nb in libraries if refuse_library(nb))
+            gone = set().union(*(libraries[nb] for nb in dropped))
+            ranking = [item for item in ranking if item[0] not in gone]
 
-        def rank_further(limit, skip=None):
-            self.further.append((limit, skip is not None))
-            return [
-                item for item in self.ranking if skip is None or not skip(item[0])
-            ][:limit]
+        def rank_further(limit):
+            self.further.append(limit)
+            return ranking[:limit]
 
         return PprRanking(
-            self.ranking[:max_results],
-            rank_further=rank_further if len(self.ranking) > max_results else None,
-            library_chunk_ids=self._library_chunk_ids(),
+            ranking[:max_results],
+            rank_further=rank_further if len(ranking) > max_results else None,
+            libraries_dropped=dropped,
         )
 
 
@@ -218,7 +221,7 @@ def test_window_exhaustion_ranks_further_and_still_fills(repo, monkeypatch):
         out = repo._ppr_retrieve(active, "q")
     assert [c.chunk_id for c in out] == ["c-b1", "c-a1", "c-b2"]
     assert fake.calls == [TOP * _PPR_CEILING_OVERFETCH]
-    assert fake.further == [(REACH + 1, False)]
+    assert fake.further == [REACH + 1]
 
 
 def test_a_passage_kept_in_the_prefix_takes_one_slot_after_ranking_further(
@@ -323,8 +326,8 @@ def test_a_wholly_refused_library_is_dropped_in_memory_before_the_walk(
     repo, monkeypatch,
 ):
     """20,000 chunks of an unticked library outrank the active library's two.
-    The ranking maps that library to its chunks, so they leave the ranking
-    before any hydration: one statement, both in-ceiling passages."""
+    The ranking leaves that library out in its first pass: one hydration
+    statement, both in-ceiling passages, no second ranking pass."""
     active, base = _seed(repo)
     ahead = _bulk_rows(repo, base, 20_000)
     fake, _ = _install(repo, monkeypatch, ahead + ["c-a1", "c-a2"])
@@ -333,11 +336,12 @@ def test_a_wholly_refused_library_is_dropped_in_memory_before_the_walk(
         out = repo.retrieval.graph._ppr_retrieve(active, "q")
     assert [c.chunk_id for c in out] == ["c-a1", "c-a2"]
     assert len(_hydrations(statements)) == 1
-    assert fake.further == [(REACH + 1, True)]
+    assert fake.further == []
 
 
 def test_without_a_chunk_map_the_walk_stops_at_its_budget(repo, monkeypatch):
-    """The same 20,000 refused candidates with no chunk map: the walk spends
+    """The same 20,000 refused candidates on a ranking that cannot leave the
+    library out (the rustworkx ranking has no per-library chunk sets): the walk spends
     its prefix windows (3, 6, 12, 24 and 48 ids at TOP=3: five statements)
     and then exactly ``_PPR_CEILING_WALK_WINDOWS`` windows of 900, gives up
     on the slots it could not fill, and says so."""
@@ -363,7 +367,6 @@ def test_without_a_chunk_map_the_walk_stops_at_its_budget(repo, monkeypatch):
         "windows": _PPR_CEILING_WALK_WINDOWS,
         "candidates_walked": REACH,
         "libraries_dropped": 0,
-        "libraries_unmapped": 1,
     }]
 
 
@@ -444,6 +447,54 @@ def test_ranking_further_reuses_the_score_vector(repo, monkeypatch):
     assert iterations["n"] == 1
     assert [e["kind"] for e in events if e.get("kind") == "scale_ppr_done"] == [
         "scale_ppr_done"]
+
+
+def test_an_index_loaded_without_preload_still_drops_a_refused_library(
+    repo, monkeypatch,
+):
+    """The base library's scale index is loaded lazily (no startup preload,
+    so it carries no ``_ppr_chunk_ids``) and the run unticks that library,
+    whose chunks outrank the active library's.  The scale ranking computes
+    the chunk-id set once, caches it on the index and leaves the library out
+    in its single ranking pass: one hydration statement, both active
+    passages kept, no second ranking pass."""
+    import app.services.graph_retrieval as graph_module
+    from types import SimpleNamespace
+    from tests.test_ppr_retrieve import _seed_two_doc_moe
+
+    base = _seed_two_doc_moe(repo)
+    repo.rebuild_unified_kg(base.id)
+    repo.build_scale_index(base.id)
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (base.id,))
+    active = _seed_two_doc_moe(repo, suffix="-act")
+    repo.rebuild_unified_kg(active.id)
+    repo.replace_notebook_bases(active.id, [base.id], "user-local")
+    graph = repo.retrieval.graph
+    index = graph._scale_index(base.id, allow_stale=True)
+    assert getattr(index, "_ppr_chunk_ids", None) is None
+    seeds = [
+        SimpleNamespace(chunk_id=cid, relevance=weight)
+        for cid, weight in (("cA", 0.9), ("cB", 0.8), ("cA-act", 0.2), ("cB-act", 0.1))
+    ]
+    monkeypatch.setattr(graph, "_retrieve_chunks", lambda *a, **k: (seeds, [], None))
+    monkeypatch.setattr(graph.settings, "ppr_top_chunks", 2)
+    monkeypatch.setattr(graph_module, "_PPR_CEILING_OVERFETCH", 1)
+    passes = {"n": 0}
+    real_ranking = graph_module._normalized_score_ranking
+
+    def counting_ranking(*args, **kwargs):
+        passes["n"] += 1
+        return real_ranking(*args, **kwargs)
+
+    monkeypatch.setattr(graph_module, "_normalized_score_ranking", counting_ranking)
+    statements = _trace_hydrations(repo)
+    with source_scope_context(active.id, None, EXCLUDED):
+        out = graph._ppr_retrieve(active.id, "Mixture of Experts")
+    assert {c.chunk_id for c in out} == {"cA-act", "cB-act"}
+    assert len(_hydrations(statements)) == 1
+    assert passes["n"] == 1
+    assert graph._scale_index(base.id, allow_stale=True)._ppr_chunk_ids == {"cA", "cB"}
 
 
 def test_a_skipped_chunk_still_sets_the_score_range():

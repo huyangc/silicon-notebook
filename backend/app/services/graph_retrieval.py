@@ -7,15 +7,19 @@ per-library source ceilings are applied before the ``ppr_top_chunks`` cut
 those slots.  Reaching past refused candidates has a price -- one hydration
 statement per window -- and it is bounded, deliberately:
 
-* a library the run admits nothing of is dropped from the ranking in memory
-  when its scale index carries its chunk-id set (``PprRanking``), which is the
-  expensive case (a small notebook with an unticked 1M-chunk library);
-* otherwise the walk spends at most ``_PPR_CEILING_WALK_WINDOWS`` windows of
-  900 candidates past its over-ranked prefix, ranked further from the SAME
-  score vector (no second PPR, one ``scale_ppr_done`` event); in-ceiling
-  passages ranked below that reach are not found by PPR on this run, the call
-  returns fewer than ``ppr_top_chunks`` passages and emits
-  ``ppr_ceiling_walk_exhausted``.  The other retrieval legs are unaffected.
+* a library the run admits nothing of is left out of the scale ranking in
+  its own heap pass, by its scale index's chunk-id set (``PprRanking``); that
+  is the expensive case (a small notebook with an unticked 1M-chunk library),
+  and it costs no hydration statement at all;
+* every other refused candidate -- a partially admitted library's Knowhow
+  rows, late uploads, and on the rustworkx ranking any refused library -- is
+  refused by the store, and the walk spends at most
+  ``_PPR_CEILING_WALK_WINDOWS`` windows of 900 candidates past its
+  over-ranked prefix, ranked further from the SAME score vector (no second
+  PPR, one ``scale_ppr_done`` event); in-ceiling passages ranked below that
+  reach are not found by PPR on this run, the call returns fewer than
+  ``ppr_top_chunks`` passages and emits ``ppr_ceiling_walk_exhausted``.  The
+  other retrieval legs are unaffected.
 """
 from __future__ import annotations
 
@@ -142,14 +146,14 @@ _PPR_CEILING_OVERFETCH = 16
 #: Hydration windows (``_IN_CHUNK`` = 900 candidates each) the ceiling walk may
 #: spend past the over-ranked prefix before it gives up on the remaining slots
 #: (``ppr_ceiling_walk_exhausted``).  Measured per window on PostgreSQL 16
-#: (900 ids, host load ~30): a wholly denied library 4.1 ms, a listed 49k-id
-#: ceiling 21.4 ms, nothing listed 7.3 ms -- so the walk costs at most
-#: 8 x 21.4 ms ~= 0.17 s per PPR call beyond its <= 5 prefix windows, below the
-#: ranking's own cost at the sizes where the walk can get long (1M chunks:
-#: power iteration 0.16 s + ranking 0.2-0.4 s), and reaches 7,200 candidates
-#: past the prefix (360 x the default 20 slots).  Before the bound a small
-#: notebook with an unticked 1M-chunk library walked ~1,111 windows (4.5-24 s)
-#: per call.
+#: (900 ids; lower / higher host load): a wholly denied library 3.6-13.3 ms,
+#: a listed 49k-id ceiling 21-38 ms, nothing listed 7.1-16.3 ms -- so the walk
+#: costs at most 8 x 21-38 ms ~= 0.17-0.30 s per PPR call beyond its <= 5
+#: prefix windows, plus one bounded re-rank of the same scores (1M chunks:
+#: 0.3-0.8 s), and reaches 7,200 candidates past the prefix (360 x the default
+#: 20 slots).  Before the bound a small notebook with an unticked 1M-chunk
+#: library walked ~1,111 windows (4.5-24 s) per call; that case now costs no
+#: walk at all (the library leaves the ranking, ``PprRanking``).
 _PPR_CEILING_WALK_WINDOWS = 8
 
 
@@ -158,29 +162,32 @@ class PprRanking(list):
     was -- plus what the PPR ceiling walk needs to rank further without a
     second PPR (``_PprCeiling``).
 
-    ``rank_further(limit, skip)`` re-ranks the SAME score vector (no ANN, no
-    chunk seeds, no power iteration, no second ``scale_ppr_done`` event) into
-    its first ``limit`` entries, leaving out every chunk id ``skip`` answers
-    True for; scores stay the unskipped ones (``_normalized_score_ranking``).
-    It is ``None`` when this ranking is already complete.
-    ``library_chunk_ids`` maps each participant library with a scale index to
-    that index's chunk-id set when the index carries one
-    (``ScaleArtifactRuntime._prepare_ppr_core``'s ``_ppr_chunk_ids``, prepared
-    for every published index at startup preload), else to ``None``.
+    ``libraries_dropped`` names the participant libraries ``scale_ppr`` left
+    out of the ranking because the caller's ``refuse_library`` admits nothing
+    of them: their chunks were skipped in the ranking's own heap pass (their
+    scores still set the normalisation range), using each library's scale
+    index chunk-id set -- prepared at startup preload, otherwise computed once
+    per loaded index (``GraphRetrievalService._scale_chunk_id_set``).
+    ``rank_further(limit)`` re-ranks the SAME score vector (no ANN, no chunk
+    seeds, no power iteration, no second ``scale_ppr_done`` event) into its
+    first ``limit`` entries, with the same libraries left out; it is ``None``
+    when this ranking is already complete.  An empty ``PprRanking`` with
+    libraries dropped is a successful ranking with nothing admissible, not a
+    scale failure.
 
     A plain list -- the rustworkx ranking, a test's stand-in -- reads as a
-    complete ranking with no library map."""
+    complete ranking that dropped nothing."""
 
     def __init__(
         self,
         items: Iterable[Tuple[str, float]],
         *,
-        rank_further: Optional[Callable[..., List[Tuple[str, float]]]] = None,
-        library_chunk_ids: Optional[Mapping[str, Optional[frozenset]]] = None,
+        rank_further: Optional[Callable[[int], List[Tuple[str, float]]]] = None,
+        libraries_dropped: Tuple[str, ...] = (),
     ) -> None:
         super().__init__(items)
         self.rank_further = rank_further
-        self.library_chunk_ids = dict(library_chunk_ids or {})
+        self.libraries_dropped = tuple(libraries_dropped)
 
 
 class _PprCeiling:
@@ -216,10 +223,11 @@ class _PprCeiling:
     issues exactly the statements it issued before this class existed.
 
     A library the run admits nothing of (``refuses_library``: excluded in the
-    library dimension, or frozen to zero sources) is dropped from the ranking
-    in memory before the walk when the ranking knows its chunks
-    (``PprRanking.library_chunk_ids``); without that map its candidates are
-    refused by the store window by window, within the walk's budget.
+    library dimension, or frozen to zero sources) is dropped from the scale
+    ranking itself (``scale_ppr(refuse_library=...)``, ``PprRanking``); on
+    the rustworkx ranking, which has no per-library chunk sets, its
+    candidates are refused by the store window by window, within the walk's
+    budget.
     """
 
     def __init__(self, scope, active_notebook_id: str) -> None:
@@ -301,7 +309,7 @@ def _normalized_score_ranking(
 
     ``skip`` leaves a chunk out of the SELECTION only: its score still takes
     part in the global min/max, so every kept chunk carries the score it has
-    in the unskipped ranking (``PprRanking.extend``'s continuation relies on
+    in the unskipped ranking (``PprRanking.rank_further``'s continuation relies on
     that to stay consistent with the prefix already walked).
     """
     if limit is not None and limit <= 0:
@@ -1054,8 +1062,33 @@ class GraphRetrievalService(_RetrievalState):
             _participant_graph_cache_key(notebook_id, "scale_combined"),
             version, _load)
 
+    def _scale_chunk_id_set(self, index):
+        """``index``'s chunk-id set, computed at most once per loaded index.
+
+        Startup preload prepares it (``ScaleArtifactRuntime._prepare_ppr_core``
+        sets ``_ppr_chunk_ids``); an index loaded later -- republished after a
+        KG rebuild, built after startup, reloaded after an LRU eviction, or
+        with preload disabled -- does not carry it, so it is computed here the
+        way ``_scale_combined_graph`` does and cached on the same attribute.
+        Two threads may compute it concurrently; each stores a complete,
+        equal set (one attribute assignment)."""
+        ids = getattr(index, "_ppr_chunk_ids", None)
+        if ids is None:
+            ids = {
+                index.node_ids[int(position)]
+                for position in index.chunk_index
+                if 0 <= int(position) < len(index.node_ids)
+            }
+            setattr(index, "_ppr_chunk_ids", ids)
+        return ids
+
     def _scale_ppr_impl(
-        self, notebook_id: str, question: str, *, max_results: int | None = None
+        self,
+        notebook_id: str,
+        question: str,
+        *,
+        max_results: int | None = None,
+        refuse_library: Optional[Callable[[str], bool]] = None,
     ) -> List[Tuple[str, float]]:
         """规模化 PPR:base 有持久化 scale 索引时,用 ANN 取 base KG 种子(避免
         4GB 暴力 matmul)+ 把 active 增量 splice 进 base CSR 图 → personalized_ppr
@@ -1247,9 +1280,24 @@ class GraphRetrievalService(_RetrievalState):
                 if (ci := combined_index.get(cid)) is not None
             )
 
+        # A library the run admits nothing of (``refuse_library``, the PPR
+        # ceiling's verdict) leaves the ranking here, in the same heap pass:
+        # its chunk-id set comes from its scale index (``_scale_chunk_id_set``).
+        dropped = [
+            bid for bid, _idx in base_indexes
+            if refuse_library is not None and refuse_library(bid)
+        ] if max_results is not None else []
+        drop_sets = [
+            self._scale_chunk_id_set(idx)
+            for bid, idx in base_indexes if bid in dropped
+        ]
+        skip = (
+            (lambda chunk_id: any(chunk_id in ids for ids in drop_sets))
+            if drop_sets else None
+        )
         try:
             norm, chunks_considered = _normalized_score_ranking(
-                chunk_scores(), limit=max_results,
+                chunk_scores(), limit=max_results, skip=skip,
             )
         except ValueError as exc:
             if str(exc) != "non_finite_ppr_score":
@@ -1260,7 +1308,7 @@ class GraphRetrievalService(_RetrievalState):
                 "reason": "non_finite_chunk_score",
             })
             return []
-        if not norm:
+        if not norm and not (dropped and chunks_considered):
             self.event_log.emit({
                 "kind": "scale_ppr_bailout",
                 "notebook_id": notebook_id,
@@ -1278,18 +1326,15 @@ class GraphRetrievalService(_RetrievalState):
         if max_results is None:
             return norm
 
-        def rank_further(limit: int, skip=None) -> List[Tuple[str, float]]:
+        def rank_further(limit: int) -> List[Tuple[str, float]]:
             # Every score already passed the finiteness check above.
             return _normalized_score_ranking(
                 chunk_scores(), limit=limit, skip=skip)[0]
 
         return PprRanking(
             norm,
-            rank_further=rank_further if chunks_considered > len(norm) else None,
-            library_chunk_ids={
-                bid: getattr(idx, "_ppr_chunk_ids", None)
-                for bid, idx in base_indexes
-            },
+            rank_further=rank_further if len(norm) >= max_results else None,
+            libraries_dropped=tuple(dropped),
         )
     def _ppr_retrieve(self, notebook_id: str, question: str) -> List["RetrievedChunk"]:
         """HippoRAG 式 PPR 检索:KG 种子 + chunk 种子 → reset 向量 → PPR →
@@ -1328,7 +1373,13 @@ class GraphRetrievalService(_RetrievalState):
             # empty/negative-prefix result, rather than treating the setting as
             # a scale failure and constructing the fallback graph.
             max_results=window if top_chunks > 0 else None,
+            # Libraries the run admits nothing of leave the ranking itself.
+            **({} if ceiling is None
+               else {"refuse_library": ceiling.refuses_library}),
         )
+        if not ranked and getattr(ranked, "libraries_dropped", ()):
+            # The scale ranking succeeded; only refused libraries ranked.
+            return []
         if not ranked:
             if self._federated_graph_is_large(notebook_id):
                 self.event_log.emit({
@@ -1385,9 +1436,9 @@ class GraphRetrievalService(_RetrievalState):
         ``top_chunks`` in-ceiling passages are kept, the ranking ends, or the
         walk's budget is spent.
 
-        * Libraries the run admits nothing of are dropped in memory first,
-          when the ranking maps them to their chunks (``PprRanking
-          .library_chunk_ids``).
+        * Libraries the run admits nothing of never reach this walk on the
+          scale path: ``scale_ppr`` left them out of the ranking
+          (``PprRanking.libraries_dropped``).
         * The over-ranked prefix (``_PPR_CEILING_OVERFETCH x top_chunks``) is
           walked in windows of ``top_chunks``, doubling.  Past it -- after
           ``rank_further`` on the same score vector, or further down a
@@ -1408,16 +1459,10 @@ class GraphRetrievalService(_RetrievalState):
         whose sources did not change hydrates one window of the first
         ``top_chunks`` ids with the historical statement and returns its rows
         unchanged."""
-        chunk_sets = getattr(ranked, "library_chunk_ids", None) or {}
-        refused = [nb for nb in chunk_sets if ceiling.refuses_library(nb)]
-        dropped = [chunk_sets[nb] for nb in refused if chunk_sets[nb] is not None]
-        skip = (
-            (lambda chunk_id: any(chunk_id in ids for ids in dropped))
-            if dropped else None
-        )
+        dropped = getattr(ranked, "libraries_dropped", ())
         rank_further = getattr(ranked, "rank_further", None)
         prefix = top_chunks * _PPR_CEILING_OVERFETCH
-        items = [item for item in ranked if skip is None or not skip(item[0])]
+        items = list(ranked)
         kept: list = []
         score_map: Dict[str, float] = {}
         slots = top_chunks
@@ -1428,7 +1473,7 @@ class GraphRetrievalService(_RetrievalState):
             if position >= len(items) and rank_further is not None:
                 # One past the budget's reach tells "cut" from "ended there".
                 reach = prefix + _PPR_CEILING_WALK_WINDOWS * self._IN_CHUNK
-                further = rank_further(reach + 1, skip)
+                further = rank_further(reach + 1)
                 cut = len(further) > reach
                 items = [item for item in further[:reach] if item[0] not in seen]
                 rank_further, position, budget_from = None, 0, 0
@@ -1443,7 +1488,6 @@ class GraphRetrievalService(_RetrievalState):
                         "windows": windows,
                         "candidates_walked": len(seen),
                         "libraries_dropped": len(dropped),
-                        "libraries_unmapped": len(refused) - len(dropped),
                     })
                 break
             if position >= len(items):
