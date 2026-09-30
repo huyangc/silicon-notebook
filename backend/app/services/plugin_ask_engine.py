@@ -638,9 +638,13 @@ class PluginRetrievalAccess:
             issued: list[EngineEvidence] = []
             with state.data_lock:
                 for hit in hits:
-                    origin = state.source_origin.get(
-                        hit.source_id, state.active_notebook_id
-                    )
+                    origin = state.source_origin.get(hit.source_id)
+                    if origin is None:
+                        # Fail closed, like ``_bound_evidence``: a hit whose
+                        # source is outside the frozen universe this port was
+                        # built with is never issued -- it is not attributed to
+                        # the active notebook by default (audit D-5).
+                        continue
                     identity = (origin, hit.element_id)
                     key = state.reverse.get(identity)
                     if key is None:
