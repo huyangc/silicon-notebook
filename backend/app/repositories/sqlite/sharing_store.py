@@ -205,6 +205,18 @@ def _visible_fact_element(alias: str) -> str:
     )
 
 
+def _source_clustering_current(alias: str) -> str:
+    """The notebook of cluster row `alias` is not dirty. A dirty notebook's clustering
+    is out of date by definition — it may still carry the name and description a
+    since-deleted Memory seeded under a real name (`K-<name>`), which nothing can
+    recognise once the Memory is gone — so a copy of it carries NO cluster row: it
+    starts unclustered and marked 「待重建」, and its owner's rebuild clusters it."""
+    return (
+        "NOT EXISTS (SELECT 1 FROM unified_kg_state ud "
+        f"WHERE ud.notebook_id = {alias}.notebook_id AND ud.dirty = 1)"
+    )
+
+
 def _visible_cluster(alias: str) -> str:
     """Not a cluster of a Memory (`memory_sql.no_memory_cluster`: no Memory-derived
     member, canonical id not minted from a Memory-derived object — the canonical
@@ -607,7 +619,7 @@ _MEMORY_SNAPSHOT_TEXT: dict[str, str] = {
         f"SELECT c.* FROM concept_clusters c WHERE c.notebook_id = ? "
         "AND c.generation = COALESCE((SELECT cluster_generation "
         "FROM unified_kg_state u WHERE u.notebook_id = c.notebook_id), 0) "
-        f"AND {_visible_cluster('c')}"
+        f"AND {_visible_cluster('c')} AND {_source_clustering_current('c')}"
     ),
 }
 _MEMORY_COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = tuple(
@@ -662,6 +674,15 @@ _MEMORY_VALIDATED_EXTRAS: dict[str, str] = {
 _MEMORY_COPY_VALIDATED_TABLES: tuple[tuple[str, str], ...] = tuple(
     (table, _MEMORY_VALIDATED_EXTRAS.get(table, extra)) for table, extra in _COPY_VALIDATED_TABLES
 )
+# The one predicate `validate_copy` applies to the SOURCE side only: a dirty source's
+# clusters are not copied (`_source_clustering_current`), and the copy itself always
+# starts dirty on this path, so the same term on the copy side would count none of the
+# rows a clean source with Memory did copy. Consequence: if the source turns dirty, or
+# is rebuilt, between the snapshot and this check, the counts differ and the copy fails
+# and is compensated — the same outcome as any concurrent write to the source today.
+_MEMORY_VALIDATED_SOURCE_ONLY: dict[str, str] = {
+    "concept_clusters": f"AND {_source_clustering_current('concept_clusters')}",
+}
 
 # knowhow_columns/rows/cells/cell_code carry no notebook_id column of their
 # own (see migrations.py _migration_16/_migration_17) — validate_copy's
@@ -1429,8 +1450,11 @@ class SharingStore:
                     f"SELECT COUNT(*) FROM {table} WHERE notebook_id = ? {extra}",
                     (new_id,),
                 ).fetchone()[0]
+                source_extra = (
+                    f"{extra} {_MEMORY_VALIDATED_SOURCE_ONLY.get(table, '')}" if filtered else extra
+                )
                 source_count = db.execute(
-                    f"SELECT COUNT(*) FROM {table} WHERE notebook_id = ? {extra}",
+                    f"SELECT COUNT(*) FROM {table} WHERE notebook_id = ? {source_extra}",
                     (source_notebook_id,),
                 ).fetchone()[0]
                 if copied_count != source_count:

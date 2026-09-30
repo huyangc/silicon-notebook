@@ -1872,9 +1872,11 @@ def test_copy_of_a_dirty_notebook_without_memory_starts_dirty(repo, monkeypatch)
     state = _kg_state(repo, new.id)
     assert state is not None and state["dirty"] == 1 and state["kg_mutation_seq"] == 1
     fetch = _fetch(repo)
-    assert memory_cases.read_copy(fetch, "?", new.id).counts == (
-        memory_cases.read_copy(fetch, "?", memory_cases.NOTEBOOK_PLAIN).counts
-    )
+    copied = memory_cases.read_copy(fetch, "?", new.id).counts
+    source = memory_cases.read_copy(fetch, "?", memory_cases.NOTEBOOK_PLAIN).counts
+    # 脏源库的成簇已过时:副本不带簇行,其余逐表相同。
+    assert source["concept_clusters"] > 0 and copied["concept_clusters"] == 0
+    assert {**copied, "concept_clusters": 0} == {**source, "concept_clusters": 0}
 
 
 def test_memory_notebook_snapshot_is_the_legacy_snapshot_minus_the_memory_rows(
@@ -2003,8 +2005,9 @@ def test_a_cluster_seeded_by_a_since_deleted_memory(repo, canonical):
     state = _kg_state(repo, new.id)
     assert state is not None and state["dirty"] == 1
     view = memory_cases.read_copy(_fetch(repo), "?", new.id)
-    carried = memory_cases.STALE_CLUSTER_CASES[canonical]
-    assert view.counts["concept_clusters"] == (1 if carried else 0)
+    assert view.counts["concept_clusters"] == memory_cases.STALE_CLUSTER_CASES[canonical] == 0
+    # 副本里任何一张表、任何一列都没有 Memory 的文本(簇名与描述随簇一起没带)。
+    assert not [leaf for leaf in view.leaves if memory_cases.MARK in leaf], view.dump
     assert view.counts["knowledge_objects"] == 1
 
 
