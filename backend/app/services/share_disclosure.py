@@ -19,9 +19,11 @@ page may carry — cited or merely used — the union of:
   author on the stored citation) — counted from the record, so deleting the
   Memory or its projection later does not hide them;
 * the author's Memory recorded as USED while the report was produced
-  (``report["memory_used"]``): what the outline planner was shown, and what
-  entered each section's drafting prompt (the confirmed-Memory block and any
-  evidence from the author's Memory projection, cited or not).  The body can
+  (``report["memory_used"]``): the planner's Memory lines, each section's
+  confirmed-Memory block, and the Memory behind every source retrieval handed
+  the planning and generation runs (corpus map and probes, the section
+  deep-dive agent's observations, the synthesis payload, the section
+  contexts — cited or not; ``app.services.report_memory_use``).  The body can
   restate any of it without a citation marker, so the count covers it;
 * for citations without a record (reports generated before recording
   existed): cited ``source_id``s that are, right now, the author's Memory
@@ -41,7 +43,9 @@ A report that cites another member's Memory source (recorded with
 ``memory_owner_id`` not the author, or — without a record — a cited source
 that is right now a Memory source of another member,
 ``memory_store.foreign_memory_sources_for_source_ids``) is never published:
-the other member was never asked.  ``foreign_memory_ids`` carries those
+the other member was never asked — and a link issued before this rule stops
+serving it: the anonymous page asks ``report_foreign_memory_ids`` on every
+open.  ``foreign_memory_ids`` carries those
 Memory ids; the author already reads the excerpts inside their own report, so
 refusing reveals nothing new.  Body text restating another member's Memory
 without a citation cannot be recognised in a report generated before the
@@ -91,6 +95,7 @@ __all__ = [
     "ShareDisclosure",
     "ShareDisclosureRequired",
     "ShareMemoryGuard",
+    "report_foreign_memory_ids",
     "report_share_disclosure",
     "require_publishable",
     "share_memory_guard",
@@ -142,11 +147,29 @@ class ForeignMemoryShareRefused(Exception):
     The user-facing sentence belongs to the route (``user_error`` literal)."""
 
 
-def report_share_disclosure(
+def report_foreign_memory_ids(
     memory_reader: MemoryIdReader, report: Mapping[str, Any]
-) -> ShareDisclosure:
-    """Count the author's Memory a stored report carries, and find any other
-    member's Memory it cites."""
+) -> tuple[str, ...]:
+    """Other members' Memory a stored report cites: recorded citations whose
+    owner is not the author, and — for unrecorded citations — cited sources
+    that are right now another member's Memory sources.
+
+    The anonymous report page asks this on every open, so a link issued before
+    the rule stops serving such a report (the same 404 as a revoked link)."""
+    author_id, _known, foreign, live_sources = _classified_references(report)
+    if live_sources and author_id:
+        foreign.update(
+            memory_id for memory_id, _owner in memory_reader
+            .foreign_memory_sources_for_source_ids(live_sources, author_id).values()
+        )
+    return tuple(sorted(foreign))
+
+
+def _classified_references(
+    report: Mapping[str, Any],
+) -> tuple[str, set[str], set[str], list[str]]:
+    """(author, the author's known Memory ids, other members' recorded Memory
+    ids, cited sources without a record) of a stored report."""
     author_id = str(report.get("created_by") or "")
     known: set[str] = {
         str(item) for item in report.get(REPORT_MEMORY_USED_FIELD) or ()
@@ -170,7 +193,15 @@ def report_share_disclosure(
         source_id = str(reference.get("source_id") or "")
         if source_id:
             live_sources.append(source_id)
-    live_sources = list(dict.fromkeys(live_sources))
+    return author_id, known, foreign, list(dict.fromkeys(live_sources))
+
+
+def report_share_disclosure(
+    memory_reader: MemoryIdReader, report: Mapping[str, Any]
+) -> ShareDisclosure:
+    """Count the author's Memory a stored report carries, and find any other
+    member's Memory it cites."""
+    author_id, known, foreign, live_sources = _classified_references(report)
     memory_ids = set(known)
     if live_sources and author_id:
         memory_ids.update(memory_reader.memory_ids_for_source_ids(live_sources, author_id))

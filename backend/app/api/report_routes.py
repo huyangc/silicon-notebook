@@ -29,6 +29,7 @@ from app.services.share_disclosure import (
     ForeignMemoryShareRefused,
     NonAuthorShareRefused,
     ShareDisclosureRequired,
+    report_foreign_memory_ids,
     report_share_disclosure,
     require_publishable,
     share_memory_guard,
@@ -786,5 +787,10 @@ def public_report_route(token: str) -> PublicReport:
     if not repo.user_can_read_notebook(
         str(row.get("notebook_id") or ""), str(row.get("created_by") or "")
     ):
+        raise HTTPException(status_code=404, detail="shared report not found")
+    # M4: a report that cites another member's Memory is never public — also
+    # when its link was issued before that rule.  Re-checked on every open,
+    # like the creator's read access above, with the same 404.
+    if report_foreign_memory_ids(repo._runtime.memory_store, row):  # type: ignore[attr-defined]
         raise HTTPException(status_code=404, detail="shared report not found")
     return PublicReport(**public_report_payload(row, row.get("references") or []))
