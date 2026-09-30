@@ -365,6 +365,65 @@ def test_memory_type_literal_is_single_sourced_and_matches_source_store():
 
 
 # ------------------------------------------------------ query_store 旧常量归一
+class _RecordingDatabase:
+    """Stands in for either backend's database: records each statement and
+    answers no rows, so a store method's SQL text can be checked offline."""
+
+    def __init__(self):
+        self.statements: list = []
+
+    def connect(self):
+        recorder = self
+
+        class _Rows:
+            def fetchall(self):
+                return []
+
+        class _Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, sql, params=()):
+                recorder.statements.append((sql, tuple(params)))
+                return _Rows()
+
+        return _Connection()
+
+
+def test_source_stores_decide_memory_readability_with_the_shared_fragment():
+    """PR-A (#806 r1): ``hidden_source_ids`` — the read the KG viewer rule
+    derives "another member's Memory" from — renders
+    ``memory_source_readable('s')`` on both backends instead of a hand-written
+    copy, and the Memory type predicate is the fragment's rendering."""
+    for store_module, fragments in (
+        (sqlite_source_store, memory_sql), (pg_source_store, pg_memory_sql),
+    ):
+        database = _RecordingDatabase()
+        store = store_module.SourceStore(database, now=lambda: NOW)
+        assert store.hidden_source_ids("nb", "u-alice") == []
+        (sql, params), = database.statements
+        assert fragments.memory_source_readable("s") in sql, (store_module, sql)
+        assert "memory_items m " not in sql, sql
+        assert params == ("nb", "u-alice")
+        assert store_module.MEMORY_SOURCE_TYPE_PREDICATE == (
+            fragments.memory_source_type_predicate())
+
+
+@pytest.mark.parametrize("viewer", list(cases.READABLE_SOURCES))
+def test_hidden_source_ids_follow_the_readability_matrix(world, viewer):
+    """The same golden matrix as the fragment itself: a viewer's hidden
+    sources are the notebook's Knowhow projections plus exactly the Memory
+    sources ``memory_source_readable`` admits for that viewer (orphans and
+    Memory without an owner row for nobody)."""
+    store = sqlite_source_store.SourceStore(world, now=lambda: NOW)
+    hidden_types = {s[0] for s in cases.SOURCES if s[1] in ("memory", "knowhow")}
+    assert set(store.hidden_source_ids(cases.NOTEBOOK, viewer)) == (
+        hidden_types & cases.READABLE_SOURCES[viewer])
+
+
 def test_query_store_constants_reference_the_shared_fragments():
     assert sqlite_query_store._NOT_MEMORY_OWNED_SQL == (
         "NOT " + memory_sql.memory_derived_object("o")

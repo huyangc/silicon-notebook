@@ -7,11 +7,13 @@
 所以这两条判据在这里定义,新读者一律 import,不再手写。`postgres/memory_sql.py` 是它的
 PostgreSQL 镜像(占位符 `%s`),两份必须同修,与 `access_sql.py` / `mount_sql.py` 一样。
 
-现状要说清:这个模块之前就存在的读者(`source_store.hidden_source_ids`、
-`postgres/chunk_store.py` 里两处 Memory 属主判断)仍各自带着一份手写谓词,它们随改动
-该读者的变更迁入本模块;在此之前 `MEMORY_SOURCE_TYPE`/`memory_source_type_predicate`
-与 `source_store.MEMORY_SOURCE_TYPE_PREDICATE` 的一致性由
-`test_memory_sql_contract.py` 的漂移守卫钉住。
+现状要说清:两个 `source_store` 已迁入本模块——`hidden_source_ids` 的「对该用户可读」
+就是 `memory_source_readable('s')`(KG 查看者规则据此判定「另一位成员的 Memory」),
+`MEMORY_SOURCE_TYPE_PREDICATE` 由 `memory_source_type_predicate()` 渲染;
+`postgres/chunk_store.py` 里两处 Memory 属主判断仍各自带着一份手写谓词,随改动该读者的
+变更迁入本模块。`MEMORY_SOURCE_TYPE`/`memory_source_type_predicate` 与
+`source_store.MEMORY_SOURCE_TYPE_PREDICATE` 的一致性仍由 `test_memory_sql_contract.py`
+的漂移守卫钉住。
 
 ## 两类判据,两种形状
 

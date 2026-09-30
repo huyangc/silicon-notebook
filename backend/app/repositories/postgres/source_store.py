@@ -39,6 +39,10 @@ from app.repositories.postgres._store_utils import (
     placeholders,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.memory_sql import (
+    memory_source_readable,
+    memory_source_type_predicate,
+)
 
 
 _UNSET = SOURCE_PAPER_META_UNSET
@@ -61,7 +65,16 @@ VISIBLE_SOURCE_TYPES_PREDICATE = "source_type NOT IN ('memory','knowhow')"
 # ``source_store.MEMORY_SOURCE_TYPE_PREDICATE`` 逐字同义;两侧的理由与用法边界写在
 # 那一份注释里(简述:底座聚合把 Memory 排除压进语句内,跨查询的相减/排除清单在
 # READ COMMITTED 下会被并发的 Memory 增删漏掉,而漏掉的东西里包含概念名称)。
-MEMORY_SOURCE_TYPE_PREDICATE = "source_type = 'memory'"
+# 文本由 `memory_sql.memory_source_type_predicate()` 渲染(共享定义点)。
+MEMORY_SOURCE_TYPE_PREDICATE = memory_source_type_predicate()
+
+# ``SourceStore.hidden_source_ids``;SQLite 侧 ``_HIDDEN_SOURCE_IDS_SQL`` 的孪生。
+_HIDDEN_SOURCE_IDS_SQL = (
+    "SELECT s.id FROM sources s WHERE s.notebook_id=%s "
+    "AND s.source_type IN ('memory','knowhow') "
+    f"AND {memory_source_readable('s')} "
+    "ORDER BY s.id"
+)
 
 
 # 论文元数据补抽候选谓词(接在 ``FROM sources s`` 且已按 ``s.notebook_id`` 过滤之后)。
@@ -234,16 +247,11 @@ class SourceStore:
         stable id order — see the SQLite adapter for why the Memory owner
         filter lives in the SQL rather than on the result, and why this stays
         a separate read (Knowhow projections are notebook-wide, a Memory
-        projection belongs to its ``memory_items.created_by``)."""
+        projection belongs to its ``memory_items.created_by``). "Readable by
+        this user" is ``memory_sql.memory_source_readable``, not a copy."""
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT s.id FROM sources s WHERE s.notebook_id=%s "
-                "AND s.source_type IN ('memory','knowhow') "
-                "AND (s.source_type <> 'memory' OR EXISTS ("
-                "SELECT 1 FROM memory_items m "
-                "WHERE m.id = s.memory_id AND m.created_by = %s)) "
-                "ORDER BY s.id",
-                (notebook_id, owner_id),
+                _HIDDEN_SOURCE_IDS_SQL, (notebook_id, owner_id),
             ).fetchall()
         return [row["id"] for row in rows]
 
