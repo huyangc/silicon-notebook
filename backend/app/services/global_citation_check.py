@@ -34,11 +34,11 @@ blanked or trimmed (user ruling Q3).
 EVERY reference is judged -- no early exit on the first failure -- because the
 reader is shown a per-card reason and a per-kind count.
 
-The source-level half reads each library's CURRENT source list only to learn
-whether a cited source still exists: in a global run the frozen ceiling is every
-visible source of each participant, and a source leaves that list only by being
-deleted (notebook-level access loss is ``GlobalAskService._check``'s job and
-fails the whole job before this runs).
+The source-level half reads, BY ID over the cited sources only, whether each
+is still a visible source of its library: in a global run the frozen ceiling is
+every visible source of each participant, and a source leaves that list only by
+being deleted (notebook-level access loss is ``GlobalAskService._check``'s job
+and fails the whole job before this runs).
 """
 from __future__ import annotations
 
@@ -179,9 +179,10 @@ class CitationCheckOutcome:
 class GlobalCitationCheck:
     """One run's terminal check: two bounded reads, then pure judgement.
 
-    ``sources`` needs ``evidence_fingerprints`` and ``all_visible_source_ids``
-    (``GlobalAskSourceStorePort`` plus the visibility read the service already
-    holds). Reads are bounded by the per-library budget and poll ``event``;
+    ``sources`` needs ``evidence_fingerprints`` and ``visible_source_owners``
+    (``GlobalAskSourceStorePort``). Both reads are BY ID over what the answer
+    cites, so their cost follows the answer, never the size of the cited
+    libraries. Reads are bounded by the per-library budget and poll ``event``;
     a cancellation propagates, any other read failure turns the references it
     would have decided into ``unverifiable`` (``unreadable``) -- the answer is
     delivered either way.
@@ -199,9 +200,9 @@ class GlobalCitationCheck:
         if not references:
             return CitationCheckOutcome(checked=0)
         current = self._read_current(references, siblings, event)
-        visible = self._read_visible(sorted({
-            key[0] for key in references if key[0] and key[0] in source_ceiling
-        }), event)
+        visible = self._read_visible(
+            judged_sources(references, evidence, siblings, source_ceiling), event,
+        )
         verdicts: dict = {}
         for key, reference in references.items():
             notebook_id = key[0]
@@ -228,40 +229,50 @@ class GlobalCitationCheck:
             lambda: dict(self.sources.evidence_fingerprints(wanted)),
         )
 
-    def _read_visible(self, notebook_ids: list, event) -> dict:
-        """``{notebook_id: current visible source ids | None}`` in ONE statement.
+    def _read_visible(self, wanted: Mapping[str, set], event) -> dict:
+        """``{notebook_id: those of its judged sources still visible in it |
+        None}`` in ONE by-id statement over the cited sources.
 
-        Only libraries inside the frozen ceiling are read: a reference naming
-        any other library is ``out_of_ceiling`` before visibility matters, so
-        reading it would only cost a statement per stray id. The batched port
-        is the one the run froze its ceiling with, so both halves share one
-        visibility rule. Failure stays PER LIBRARY: if the batched statement
-        fails, each library is re-read on its own under one shared deadline,
-        and a library whose own read also fails is the only one whose
-        references become ``unreadable``.
+        ``wanted`` is ``judged_sources``: per library inside the frozen
+        ceiling, exactly the source ids the judgement will look up, so the
+        verdict is the one the whole visible list would give -- a source that
+        left the visible set of its library (deleted, or moved out of it) is
+        ``source_gone`` -- while the read is bounded by the answer's
+        references (one id per distinct cited source) instead of returning
+        every visible source of every cited library. Failure stays PER
+        LIBRARY: if the statement fails, each library's own ids are re-read on
+        their own under one shared deadline, and a library whose read also
+        fails is the only one whose references become ``unreadable``.
         """
-        if not notebook_ids:
+        if not wanted:
             return {}
-        batched = self._bounded(
-            "visible_sources", event,
-            lambda: self.sources.visible_source_ids_by_notebook(notebook_ids),
-        )
-        if batched is not None:
+
+        def owned(owners, notebook_id):
             return {
-                notebook_id: set(batched.get(notebook_id) or ())
-                for notebook_id in notebook_ids
+                source_id for source_id in wanted[notebook_id]
+                if owners.get(source_id) == notebook_id
             }
+
+        owners = self._bounded(
+            "visible_sources", event,
+            lambda: dict(self.sources.visible_source_owners(
+                sorted({source_id for ids in wanted.values() for source_id in ids}),
+            )),
+        )
+        if owners is not None:
+            return {notebook_id: owned(owners, notebook_id) for notebook_id in wanted}
         deadline = time.monotonic() + self.notebook_timeout_seconds
-        return {
-            notebook_id: self._bounded(
+        result: dict = {}
+        for notebook_id in sorted(wanted):
+            own = self._bounded(
                 "visible_sources", event,
-                lambda notebook_id=notebook_id: set(
-                    self.sources.all_visible_source_ids(notebook_id)
+                lambda notebook_id=notebook_id: dict(
+                    self.sources.visible_source_owners(sorted(wanted[notebook_id])),
                 ),
                 deadline=deadline,
             )
-            for notebook_id in notebook_ids
-        }
+            result[notebook_id] = None if own is None else owned(own, notebook_id)
+        return result
 
     def _bounded(self, read: str, event, call, *, deadline: float | None = None):
         """Run one read under the per-library budget; ``None`` when it failed."""
@@ -288,6 +299,37 @@ class GlobalCitationCheck:
             self.emit(event)
         except Exception:  # noqa: BLE001 - observability is fail-open
             pass
+
+
+def judged_sources(references: Mapping, evidence: Mapping, siblings: Mapping,
+                   source_ceiling: Mapping) -> dict[str, set]:
+    """``{notebook_id: source ids}`` whose visibility ``judge_reference`` will
+    look up -- the reference's own source (or the one its snapshot names) and
+    the snapshot sources of its passage siblings -- per library, limited to
+    the library's frozen ceiling: a source outside it is ``out_of_ceiling``
+    before visibility is consulted. Mirrors ``judge_reference`` /
+    ``_sibling_verdict`` exactly, so the by-id read answers every lookup."""
+    wanted: dict = {}
+    for key, reference in references.items():
+        notebook_id, _source_id, element_id = key
+        ceiling = source_ceiling.get(notebook_id) if notebook_id else None
+        if not ceiling:
+            continue
+        before = evidence.get(element_id) if element_id else None
+        candidates = [
+            str(getattr(reference, "source_id", "") or "")
+            or (before[0] if isinstance(before, tuple) else ""),
+        ]
+        if element_id:
+            candidates += [
+                snapshot[0]
+                for snapshot in (evidence.get(sibling) for sibling in siblings.get(element_id, ()))
+                if isinstance(snapshot, tuple)
+            ]
+        found = {source_id for source_id in candidates if source_id and source_id in ceiling}
+        if found:
+            wanted.setdefault(notebook_id, set()).update(found)
+    return wanted
 
 
 def judge_reference(reference, *, evidence: Mapping, current, siblings: Iterable[str],

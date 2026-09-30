@@ -164,6 +164,11 @@ def setup(tmp_path, request):
     sources.visible_source_ids_by_notebook = lambda ids: {
         nb: sources.all_visible_source_ids(nb) for nb in ids
     }
+    # ``s-<notebook>`` is that notebook's one visible source.
+    sources.visible_source_owners = lambda ids: {
+        sid: sid.removeprefix("s-") for sid in ids if sid.startswith("s-")
+        and sid in sources.all_visible_source_ids(sid.removeprefix("s-"))
+    }
     engine = _EngineDouble(sources)
     service = GlobalAskService(
         store=repo._runtime.global_ask_store,

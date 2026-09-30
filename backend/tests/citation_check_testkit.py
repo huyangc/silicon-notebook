@@ -207,13 +207,29 @@ def seed_libraries(database, marker: str, notebook_ids) -> dict:
     return elements
 
 
-def terminal_check_statements(sources, database, marker: str, notebook_ids) -> tuple:
-    """Run the terminal check over one citation per library; ``(statements, outcome)``."""
+def terminal_check_statements(sources, database, marker: str, notebook_ids, *,
+                              delete_source_of: str | None = None,
+                              hide_source_of: str | None = None) -> tuple:
+    """Run the terminal check over one citation per library; ``(statements, outcome)``.
+
+    ``delete_source_of`` deletes that library's source after retrieval (its
+    citation must come back ``source_gone``); ``hide_source_of`` turns that
+    library's source into a hidden (Memory) source -- it leaves the visible set
+    without being deleted, which the by-id read must judge exactly like the
+    whole visible list did."""
     from app.models.ask import AskResponse, Citation
     from app.services.global_citation_check import GlobalCitationCheck
 
     elements = seed_libraries(database, marker, notebook_ids)
     evidence = dict(sources.evidence_fingerprints(list(elements.values())))
+    with database.write() as db:
+        if delete_source_of is not None:
+            db.execute(f"DELETE FROM source_elements WHERE source_id={marker}",
+                       (f"src-{delete_source_of}",))
+            db.execute(f"DELETE FROM sources WHERE id={marker}", (f"src-{delete_source_of}",))
+        if hide_source_of is not None:
+            db.execute(f"UPDATE sources SET source_type='memory' WHERE id={marker}",
+                       (f"src-{hide_source_of}",))
     response = AskResponse(conclusion="结论", answer="答案", citations=[
         Citation(label="l", source_id=f"src-{nb}", element_id=element_id,
                  location_label="p0", quoted_span="q", notebook_id=nb)

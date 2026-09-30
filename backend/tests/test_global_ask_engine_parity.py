@@ -223,6 +223,9 @@ def service(tmp_path):
     sources.visible_source_ids_by_notebook = lambda ids: {
         nb: sorted(visible.get(nb, ())) for nb in ids
     }
+    sources.visible_source_owners = lambda ids: {
+        sid: nb for nb, owned in visible.items() for sid in owned if sid in set(ids)
+    }
     events: list = []
     built = GlobalAskService(
         store=repo._runtime.global_ask_store,
