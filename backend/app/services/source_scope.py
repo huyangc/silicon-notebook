@@ -1859,6 +1859,12 @@ DEFAULT_MOUNTED_READ_SECONDS = 5.0
 # load (see the COST section of ``default_ceiling_context``), so the stage
 # bound only ever bites a database that is already failing.
 DEFAULT_MOUNTED_TOTAL_SECONDS = 2 * DEFAULT_MOUNTED_READ_SECONDS
+# How many mounted libraries are read at once (``_mounted_library_ceilings``).
+# Each concurrent read holds one database connection for its duration, so this
+# stays well under the PostgreSQL pool (``POSTGRES_POOL_MAX_SIZE``, default 10)
+# and under federation's own fan-out bound (``DEFAULT_CHUNK_FANOUT_MAX_WORKERS``
+# = 8), which runs after this freeze, never at the same time.
+DEFAULT_MOUNTED_READ_WORKERS = 4
 
 
 def partition_memory_sources(
@@ -1985,22 +1991,30 @@ def _mounted_library_ceilings(
     cancel_event: Any,
     seconds: float,
     total_seconds: float,
+    workers: int = 1,
 ) -> _MountedCeilings:
-    """Each mounted library's VISIBLE sources, read one library at a time.
+    """Each mounted library's VISIBLE sources, at most ``workers`` at a time.
 
     Every read runs under its OWN ``read_budget`` ending at ``min(stage
     deadline, now + seconds)``, the stage deadline being ``total_seconds``
-    after the first read starts (and each nested inside any budget the caller
-    already holds, so it can only get shorter).  A library whose read fails or
-    exceeds its budget -- or whose turn comes after the stage deadline, when
-    it is not read at all (``queue_deadline``) -- is frozen to ``frozenset()``,
-    an explicit deny, with a content-free event, instead of failing the
-    request.  That is the fault isolation federation already gives a library
-    it cannot enumerate (``chunk_federation_skipped``), and it is fail-CLOSED:
-    the library is not searched at all, never searched without a ceiling.
-    The skip is also recorded with its reason (``_MountedCeilings.skipped``),
-    so the installed scope can report it (``skipped_mounted_libraries``).
-    A healthy library keeps the reader's order for the hand-out.
+    after the reads start (and each nested inside any budget the caller
+    already holds -- the caller's context is copied into each worker -- so it
+    can only get shorter).  A library whose read fails or exceeds its budget
+    -- or whose turn comes after the stage deadline, when it is not read at
+    all (``queue_deadline``) -- is frozen to ``frozenset()``, an explicit
+    deny, with a content-free event, instead of failing the request.  That is
+    the fault isolation federation already gives a library it cannot
+    enumerate (``chunk_federation_skipped``), and it is fail-CLOSED: the
+    library is not searched at all, never searched without a ceiling.  The
+    skip is also recorded with its reason (``_MountedCeilings.skipped``), so
+    the installed scope can report it (``skipped_mounted_libraries``).  A
+    healthy library keeps the reader's order for the hand-out.
+
+    Bounded parallelism (``_run_bounded``): up to ``workers`` libraries are
+    read at once, each on its own connection, so M healthy libraries cost
+    about the slowest wave rather than the sum; a library's "turn" is the
+    moment a worker picks it up.  Results and events are assembled in the
+    order ``libraries`` was given, whatever order the reads finished in.
 
     Reason codes: ``queue_deadline`` (no turn before the stage deadline);
     else whatever ``classify_read_failure`` names (``timeout`` for the budget
@@ -2012,16 +2026,18 @@ def _mounted_library_ceilings(
     A stop is not a library failure: cancellation (the caller's token, else the
     one on its read budget) is checked before each read and again after a
     failed one, and ``AskCancelled`` (like the participant override's control
-    error, which an injected reader may raise) propagates.
+    error, which an injected reader may raise) propagates -- before any event
+    is emitted.
     """
     from app.domain.retrieval_control import RetrievalControlError
     from app.repositories.read_budget import classify_read_failure, read_budget
     from app.services.cancellation import AskCancelled, raise_if_cancelled
 
     cancel_event = _effective_cancel_event(cancel_event)
+    libraries = tuple(libraries)
     stage_deadline = time.monotonic() + float(total_seconds)
-    result = _MountedCeilings()
-    for library in libraries:
+
+    def read_one(library: str) -> tuple[Any, str | None]:
         raise_if_cancelled(cancel_event)
         started = time.monotonic()
         deadline = min(stage_deadline, started + float(seconds))
@@ -2029,28 +2045,71 @@ def _mounted_library_ceilings(
             if started >= stage_deadline:
                 raise _StageDeadline()
             with read_budget(deadline, cancel_event):
-                order, frozen = _ordered_source_ids(readers.visible(library))
+                return _ordered_source_ids(readers.visible(library)), None
         except (AskCancelled, RetrievalControlError):
             raise
         except Exception as exc:  # noqa: BLE001 - one library must not fail the run
             raise_if_cancelled(cancel_event)
-            result.ceilings[library] = frozenset()
-            reason = result.skipped[library] = (
+            return None, (
                 "queue_deadline" if isinstance(exc, _StageDeadline)
                 else classify_read_failure(exc) or (
                     "timeout" if time.monotonic() >= deadline
                     else "unavailable"
                 )
             )
-            _emit_ceiling_event(readers, {
-                "kind": "default_ceiling_library_skipped",
-                "notebook_id": library,
-                "reason": reason,
-            })
-        else:
+
+    result = _MountedCeilings()
+    for library, (read, reason) in zip(
+        libraries, _run_bounded(read_one, libraries, workers),
+    ):
+        if reason is None:
+            order, frozen = read
             result.ceilings[library] = frozen
             result.read_order[library] = (frozen, order)
+            continue
+        result.ceilings[library] = frozenset()
+        result.skipped[library] = reason
+        _emit_ceiling_event(readers, {
+            "kind": "default_ceiling_library_skipped",
+            "notebook_id": library,
+            "reason": reason,
+        })
     return result
+
+
+def _run_bounded(
+    fn: Callable[[str], Any], items: Sequence[str], workers: int,
+) -> list[Any]:
+    """``[fn(item) for item in items]``, up to ``workers`` at a time.
+
+    Inline (no thread) for a single item or ``workers <= 1``.  Otherwise an
+    executor owned by this call -- the pattern of
+    ``chunk_federation._run_tasks`` without a plan -- each submission running
+    in a COPY of the caller's context (the read budget, the request user),
+    since two threads cannot share one context.  The first exception
+    propagates in item order; items not yet started are cancelled and the
+    ones in flight are awaited (each is bounded by its own read budget), so
+    no read outlives this call.
+    """
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    if len(items) <= 1 or workers <= 1:
+        return [fn(item) for item in items]
+    with ThreadPoolExecutor(
+        max_workers=min(int(workers), len(items)),
+        thread_name_prefix="default-ceiling-read",
+    ) as pool:
+        futures = [
+            pool.submit(contextvars.copy_context().run, fn, item)
+            for item in items
+        ]
+        try:
+            return [future.result() for future in futures]
+        except BaseException:
+            for future in futures:
+                future.cancel()
+            raise
 
 
 class _StageDeadline(Exception):
@@ -2068,6 +2127,7 @@ def default_ceiling_context(
     cancel_event: Any = None,
     mounted_read_seconds: float = DEFAULT_MOUNTED_READ_SECONDS,
     mounted_total_seconds: float = DEFAULT_MOUNTED_TOTAL_SECONDS,
+    mounted_read_workers: int = DEFAULT_MOUNTED_READ_WORKERS,
 ) -> Iterator[None]:
     """Install the retrieval ceiling EVERY entry point runs under.
 
@@ -2097,13 +2157,15 @@ def default_ceiling_context(
     3. LIBRARY dimension.  ``base_scope`` submitted -> as-is; omitted ->
        unsubmitted (``base_provided=False``), no library is filtered by it.
     4. PER-LIBRARY CEILINGS.  Every mounted participant other than
-       ``notebook_id`` is frozen to its VISIBLE sources only -- a mounted
-       library's Memory/Knowhow projections belong to its own members -- and
-       ``ceilings_total`` is set, so a library mounted after this freeze (or
-       otherwise unnamed) participates in nothing.  Each mounted library is read
-       under its own budget -- ``min(stage deadline, now +
-       mounted_read_seconds)``, the stage deadline being
-       ``mounted_total_seconds`` after the first mounted read -- and
+       ``notebook_id`` that the library dimension admits is frozen to its
+       VISIBLE sources only -- a mounted library's Memory/Knowhow projections
+       belong to its own members -- and ``ceilings_total`` is set, so a library
+       mounted after this freeze, or one the library dimension excludes (it
+       is never read), participates in nothing.  Up to
+       ``mounted_read_workers`` mounted libraries are read at once, each under
+       its own budget -- ``min(stage deadline, now + mounted_read_seconds)``,
+       the stage deadline being ``mounted_total_seconds`` after the mounted
+       reads start -- and
        ``cancel_event`` (else the cancel token of the read budget the caller
        holds); one whose read fails, overruns, or never gets a turn before the
        stage deadline is frozen to ``frozenset()`` (deny) with a content-free
@@ -2183,6 +2245,7 @@ def default_ceiling_context(
         local_scope=local_scope, base_scope=base_scope,
         cancel_event=cancel_event, mounted_read_seconds=mounted_read_seconds,
         mounted_total_seconds=mounted_total_seconds,
+        mounted_read_workers=mounted_read_workers,
     ):
         yield
 
@@ -2198,15 +2261,23 @@ def _fresh_default_ceiling(
     cancel_event: Any,
     mounted_read_seconds: float,
     mounted_total_seconds: float,
+    mounted_read_workers: int = DEFAULT_MOUNTED_READ_WORKERS,
 ) -> Iterator[None]:
-    """Steps 2-4 of ``default_ceiling_context``, whatever is installed outside."""
+    """Steps 2-4 of ``default_ceiling_context``, whatever is installed outside.
+
+    Only participants the library dimension admits are read (the same
+    ``_library_admits`` predicate the refresh uses): an excluded library would
+    otherwise spend a read -- and, when slow, the stage budget a selected
+    library needed -- on a ceiling no gate ever consults.
+    """
     from app.services.cancellation import raise_if_cancelled
 
     cancel_event = _effective_cancel_event(cancel_event)
     raise_if_cancelled(cancel_event)
+    admits = _library_admits(notebook_id, base_scope)
     peers = tuple(dict.fromkeys(
         str(value) for value in readers.participants(notebook_id)
-        if value and str(value) != notebook_id
+        if value and str(value) != notebook_id and admits(str(value))
     ))
     synthesize_local = local_scope is None
     local = (
@@ -2216,7 +2287,7 @@ def _fresh_default_ceiling(
     local, withheld = _without_memory(local, readers, notebook_id)
     mounted = _mounted_library_ceilings(
         peers, readers, cancel_event, mounted_read_seconds,
-        mounted_total_seconds,
+        mounted_total_seconds, mounted_read_workers,
     )
     with source_scope_context(
         notebook_id,
@@ -2230,6 +2301,25 @@ def _fresh_default_ceiling(
         _ceiling_read_order=mounted.read_order,
     ):
         yield
+
+
+def _library_admits(notebook_id: str, base_scope: Any) -> Callable[[str], bool]:
+    """The library question alone -- "does this library dimension admit that
+    library?" -- answered by the one predicate that owns it
+    (``ActiveSourceScope.covers_notebook`` of a scope carrying only this
+    library dimension).  Used by both constructors to decide which mounted
+    libraries are read at all."""
+    base_raw = _scope_dict(base_scope) or {}
+    named = base_raw.get("notebook_ids") or ()
+    return ActiveSourceScope(
+        notebook_id=notebook_id,
+        mode="exclude",
+        source_ids=frozenset(),
+        source_provided=False,
+        base_mode=str(base_raw.get("mode") or "exclude"),
+        base_notebook_ids=_frozen_source_ids(named) if named else frozenset(),
+        base_provided=_scope_dict(base_scope) is not None,
+    ).covers_notebook
 
 
 def _synthesised_local(
@@ -2265,6 +2355,7 @@ def refreshed_ceiling_context(
     cancel_event: Any = None,
     mounted_read_seconds: float = DEFAULT_MOUNTED_READ_SECONDS,
     mounted_total_seconds: float = DEFAULT_MOUNTED_TOTAL_SECONDS,
+    mounted_read_workers: int = DEFAULT_MOUNTED_READ_WORKERS,
 ) -> Iterator[None]:
     """Re-install a REFRESHED freeze inside a run that already has a ceiling.
 
@@ -2331,6 +2422,7 @@ def refreshed_ceiling_context(
             local_scope=local_scope, base_scope=base_scope,
             cancel_event=cancel_event, mounted_read_seconds=mounted_read_seconds,
             mounted_total_seconds=mounted_total_seconds,
+            mounted_read_workers=mounted_read_workers,
         ):
             yield
         return
@@ -2348,20 +2440,7 @@ def refreshed_ceiling_context(
             "notebook_ids": outer.base_notebook_ids,
             "narrowed": outer.base_narrowed,
         }
-    base_raw = _scope_dict(base)
-    # The library question alone ("does the refreshed library dimension admit
-    # this library?"), answered by the one predicate that owns it.
-    admits = ActiveSourceScope(
-        notebook_id=notebook_id,
-        mode="exclude",
-        source_ids=frozenset(),
-        source_provided=False,
-        base_mode=str((base_raw or {}).get("mode") or "exclude"),
-        base_notebook_ids=_frozen_source_ids(
-            (base_raw or {}).get("notebook_ids") or ()
-        ),
-        base_provided=base_raw is not None,
-    ).covers_notebook
+    admits = _library_admits(notebook_id, base)
     # An outer may bind its OWN notebook through a per-notebook entry instead
     # of the local dimension; that entry is the local dimension, and
     # ``_refreshed_local`` hands it back (Memory-stripped) only while the local
@@ -2392,7 +2471,7 @@ def refreshed_ceiling_context(
     ))
     mounted = _mounted_library_ceilings(
         added, readers, cancel_event, mounted_read_seconds,
-        mounted_total_seconds,
+        mounted_total_seconds, mounted_read_workers,
     )
     inherited.update(mounted.ceilings)
     read_order.update(mounted.read_order)
