@@ -2054,8 +2054,10 @@ class ChunkStorePort(Protocol):
     def hydrate_rows(db: object, chunk_ids: Sequence[str]) -> list[Any]: ...
     @staticmethod
     # ``allowed_source_ids`` (PR-E2, E2-3 implements): ``None`` = unrestricted,
-    # byte-identical; a collection = only chunks of those sources (empty = []).
-    def graph_hydrate_rows(db: object, chunk_ids: Sequence[str], *, allowed_source_ids: Sequence[str] | None = None) -> list[Any]: ...
+    # byte-identical; otherwise a per-library mapping, library id -> its allowed
+    # source ids, or ``None`` = no ceiling for that library; an empty collection
+    # rejects that library's chunks.
+    def graph_hydrate_rows(db: object, chunk_ids: Sequence[str], *, allowed_source_ids: Mapping[str, Iterable[str] | None] | None = None) -> list[Any]: ...
     @staticmethod
     def retrieval_contribution_rows(
         db: object,
