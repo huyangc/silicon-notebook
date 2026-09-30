@@ -22,11 +22,25 @@ from app.repositories.sqlite.memory_sql import (
     memory_derived_object,
     memory_derived_relation,
 )
+from app.repositories.sqlite.id_binding import (
+    bind_ids as id_bind_ids,
+    drive_by as id_drive_by,
+    member_of as id_member_of,
+)
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER
+from app.domain.kg_merge_seed import CANONICAL_ID_PREFIXES
 from app.domain.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
     USABLE_STATUSES,
     PromotionApproval,
+)
+
+# One row per canonical-id prefix, as a SQL constant (see the PostgreSQL
+# twin): the purge derives minted ids in SQL instead of binding a list.
+if not all(prefix.replace("-", "").isalpha() for prefix in CANONICAL_ID_PREFIXES):
+    raise ValueError("canonical-id prefixes must be plain letters and '-'")
+_PREFIX_ROWS = "({}) AS p".format(
+    " UNION ALL ".join(f"SELECT '{prefix}' AS prefix" for prefix in CANONICAL_ID_PREFIXES)
 )
 
 _REVIEW_STATUSES = frozenset({"pending", "verified", "rejected"})
@@ -1561,70 +1575,66 @@ class GovernanceStore:
         notebook_id: str,
         source_ids: List[str],
         *,
-        minted_canonical_ids: List[str],
         bridge_canonical_ids: List[str],
-    ) -> List[str]:
+    ) -> int:
         """Mirror of the PostgreSQL twin (its docstring carries the rules):
-        whole clusters of the Memory sources' objects, the merge candidates
-        naming them (or naming a bridge canonical id no cluster carries any
-        more), and the conflict candidates referencing the objects or
-        relations. Id lists are page-bounded."""
+        the merge candidates naming the Memory's clusters, its minted ids or a
+        bridge id no cluster carries; the whole clusters; the conflict
+        candidates referencing its objects or relations. Minted ids are
+        derived in SQL from the owned objects; the source ids are one purge
+        page (at most 200); the bridge ids go through ``id_binding``.
+        Returns the number of cluster rows removed."""
         ids = sorted(set(source_ids))
         if not ids:
-            return []
+            return 0
         marks = ",".join("?" for _ in ids)
-        owned_objects = (
-            "SELECT ko.id FROM knowledge_objects ko "
+        owned = (
+            "owned AS (SELECT ko.id FROM knowledge_objects ko "
             f"WHERE ko.notebook_id = ? AND ko.source_id IN ({marks}) "
-            f"AND {memory_derived_object('ko')}"
+            f"AND {memory_derived_object('ko')}), "
+            "minted AS (SELECT o.id AS cid FROM owned o UNION ALL "
+            f"SELECT p.prefix || '~' || o.id FROM owned o CROSS JOIN {_PREFIX_ROWS})"
         )
-        minted = sorted(set(minted_canonical_ids))
-        minted_marks = ",".join("?" for _ in minted) or "NULL"
-        doomed = sorted({
-            row["canonical_id"]
-            for row in connection.execute(
-                "SELECT DISTINCT mc.canonical_id FROM concept_clusters mc "
-                f"WHERE mc.notebook_id = ? AND (mc.member_object_id IN ({owned_objects}) "
-                f"OR mc.canonical_id IN ({minted_marks}))",
-                (notebook_id, notebook_id, *ids, *minted),
-            ).fetchall()
-        })
-        if doomed:
-            doomed_marks = ",".join("?" for _ in doomed)
-            connection.execute(
-                "DELETE FROM concept_clusters WHERE notebook_id = ? "
-                f"AND canonical_id IN ({doomed_marks})",
-                (notebook_id, *doomed),
-            )
-        named = sorted({*doomed, *minted})
-        bridge = sorted(set(bridge_canonical_ids))
-        named_marks = ",".join("?" for _ in named) or "NULL"
-        bridge_marks = ",".join("?" for _ in bridge) or "NULL"
+        doomed = (
+            "SELECT mc.canonical_id FROM concept_clusters mc WHERE mc.notebook_id = ? "
+            "AND (mc.member_object_id IN (SELECT id FROM owned) "
+            "OR mc.canonical_id IN (SELECT cid FROM minted))"
+        )
+        bridge = id_bind_ids(sorted(set(bridge_canonical_ids)), sort=True)
         connection.execute(
+            f"WITH {owned}, named AS (SELECT cid FROM minted UNION {doomed}) "
             "DELETE FROM concept_merge_candidates WHERE notebook_id = ? AND ("
-            f"canonical_a IN ({named_marks}) OR canonical_b IN ({named_marks}) "
-            f"OR (canonical_a IN ({bridge_marks}) AND NOT EXISTS (SELECT 1 FROM "
-            "concept_clusters xa WHERE xa.notebook_id = concept_merge_candidates.notebook_id "
+            "canonical_a IN (SELECT cid FROM named) "
+            "OR canonical_b IN (SELECT cid FROM named) "
+            f"OR ({id_member_of('canonical_a', bridge)} AND NOT EXISTS ("
+            "SELECT 1 FROM concept_clusters xa "
+            "WHERE xa.notebook_id = concept_merge_candidates.notebook_id "
             "AND xa.canonical_id = concept_merge_candidates.canonical_a)) "
-            f"OR (canonical_b IN ({bridge_marks}) AND NOT EXISTS (SELECT 1 FROM "
-            "concept_clusters xb WHERE xb.notebook_id = concept_merge_candidates.notebook_id "
+            f"OR ({id_member_of('canonical_b', bridge)} AND NOT EXISTS ("
+            "SELECT 1 FROM concept_clusters xb "
+            "WHERE xb.notebook_id = concept_merge_candidates.notebook_id "
             "AND xb.canonical_id = concept_merge_candidates.canonical_b)))",
-            (notebook_id, *named, *named, *bridge, *bridge),
+            (notebook_id, *ids, notebook_id, notebook_id, bridge.param, bridge.param),
         )
-        refs = (
-            f"{owned_objects} UNION ALL SELECT kr.id FROM knowledge_relations kr "
-            f"WHERE kr.notebook_id = ? AND kr.source_id IN ({marks}) "
-            f"AND {memory_derived_relation('kr')}"
-        )
+        removed = connection.execute(
+            f"WITH {owned} DELETE FROM concept_clusters WHERE notebook_id = ? "
+            f"AND canonical_id IN ({doomed})",
+            (notebook_id, *ids, notebook_id, notebook_id),
+        ).rowcount
         connection.execute(
-            f"WITH refs AS ({refs}) "
+            "WITH refs AS (SELECT ko.id FROM knowledge_objects ko "
+            f"WHERE ko.notebook_id = ? AND ko.source_id IN ({marks}) "
+            f"AND {memory_derived_object('ko')} UNION ALL "
+            "SELECT kr.id FROM knowledge_relations kr "
+            f"WHERE kr.notebook_id = ? AND kr.source_id IN ({marks}) "
+            f"AND {memory_derived_relation('kr')}) "
             "DELETE FROM kg_conflict_candidates WHERE notebook_id = ? "
             "AND (left_ref IN (SELECT id FROM refs) "
             "OR right_ref IN (SELECT id FROM refs) "
             "OR winner_ref IN (SELECT id FROM refs))",
             (notebook_id, *ids, notebook_id, *ids, notebook_id),
         )
-        return doomed
+        return int(removed or 0)
 
     @staticmethod
     def strip_sources_evidence_on(
@@ -1683,11 +1693,11 @@ class GovernanceStore:
             )
             stripped.append(row["id"])
         if stripped:
-            object_marks = ",".join("?" for _ in stripped)
+            objects = id_bind_ids(stripped, sort=True)
             connection.execute(
                 "DELETE FROM knowledge_object_sources WHERE notebook_id = ? "
-                f"AND object_id IN ({object_marks}) AND source_id IN ({marks})",
-                (notebook_id, *stripped, *ids),
+                f"AND {id_drive_by('object_id', objects)} AND source_id IN ({marks})",
+                (notebook_id, objects.param, *ids),
             )
         return stripped
 

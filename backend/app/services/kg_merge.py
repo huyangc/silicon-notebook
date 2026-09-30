@@ -72,33 +72,18 @@ def bridge_canonical_id(name: str, object_id: str) -> str:
     return "K-" + seed_or_unique(_norm(name or ""), object_id)
 
 
-#: Canonical-id prefixes by object type (concept / claim / formula /
-#: procedure), as the placement and rebuild paths mint them
-#: (``knowledge_lifecycle``'s ``_TYPES`` / ``_SEEDS`` maps use these literals).
-CANONICAL_ID_PREFIXES = ("K-", "KL-", "KF-", "KP-")
-
-
-def minted_canonical_ids(object_id: str) -> List[str]:
-    """Every canonical id that can only have been minted from ``object_id``:
-    the unique-seed sentinel ``<prefix>~<object_id>`` for each prefix
-    (``seed_or_unique``) and the object id itself (a singleton's canonical
-    is its own id). No other object's cluster can carry one of these."""
-    return [object_id, *(f"{prefix}~{object_id}" for prefix in CANONICAL_ID_PREFIXES)]
-
-
-def purge_canonical_ids(objects: Iterable[dict]) -> tuple[List[str], List[str]]:
+def purge_bridge_canonical_ids(objects: Iterable[dict]) -> List[str]:
     """For objects ``[{object_id, object_type, name}]`` about to be purged:
-    ``(minted, bridge)`` — the canonical ids minted from them
-    (``minted_canonical_ids``) and the bridge ids of the concept objects
-    (``bridge_canonical_id``), which may also be carried by a live shared
-    cluster and are therefore only acted on when no cluster carries them."""
-    minted: List[str] = []
-    bridge: List[str] = []
-    for item in objects:
-        minted.extend(minted_canonical_ids(item["object_id"]))
-        if item.get("object_type") == "concept":
-            bridge.append(bridge_canonical_id(item.get("name") or "", item["object_id"]))
-    return sorted(set(minted)), sorted(set(bridge))
+    the bridge ids of the concept objects (``bridge_canonical_id``). They may
+    also be carried by a live shared cluster, so the purge acts on a merge
+    candidate naming one only when no cluster row carries it. (The ids that
+    can only have been minted from a purged object — ``<prefix>~<id>`` and
+    the id itself — are derived in SQL from ``CANONICAL_ID_PREFIXES``.)"""
+    return sorted({
+        bridge_canonical_id(item.get("name") or "", item["object_id"])
+        for item in objects
+        if item.get("object_type") == "concept"
+    })
 
 
 def build_acronym_alias_map(names: Iterable[str]) -> Dict[str, str]:
