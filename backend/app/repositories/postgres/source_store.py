@@ -39,6 +39,7 @@ from app.repositories.postgres._store_utils import (
     normalize_timestamp,
     placeholders,
 )
+from app.repositories.postgres import memory_sql
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.memory_sql import (
     memory_source_readable,
@@ -76,6 +77,8 @@ _HIDDEN_SOURCE_IDS_SQL = (
     f"AND {memory_source_readable('s')} "
     "ORDER BY s.id"
 )
+#: Schema-induction sample: no Memory element (``notebook_element_sample``).
+_SAMPLE_NOT_MEMORY = f"NOT ({memory_sql.memory_source_type_predicate('s.source_type')})"
 
 
 # 论文元数据补抽候选谓词(接在 ``FROM sources s`` 且已按 ``s.notebook_id`` 过滤之后)。
@@ -1212,6 +1215,11 @@ class SourceStore:
     def notebook_element_sample(
         self, notebook_id: str, *, max_chars: int = 8000
     ) -> list[dict]:
+        """Deterministic, character-bounded schema-induction sample (SQLite twin's
+        docstring). Memory elements are left out (M2, E5-1): the model paraphrases
+        the sample into ``notebook_object_schemas`` (description, rationale, labels),
+        a notebook-level row every member sees and every copy carries, so a Memory
+        read here would reach both."""
         budget = max(0, int(max_chars))
         if budget == 0:
             return []
@@ -1225,6 +1233,7 @@ class SourceStore:
                     "substring(e.text FROM 1 FOR %s) AS text "
                     "FROM source_elements e JOIN sources s ON s.id=e.source_id "
                     "WHERE s.notebook_id=%s AND e.ordinal>%s "
+                    f"AND {_SAMPLE_NOT_MEMORY} "
                     "ORDER BY e.ordinal LIMIT %s",
                     (budget, notebook_id, after_ordinal, 32),
                 ).fetchall()
