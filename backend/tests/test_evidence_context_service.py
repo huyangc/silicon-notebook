@@ -709,6 +709,135 @@ def test_evidence_context_relation_support_groups_by_relation_source_notebook():
         f"got: {block!r}")
 
 
+class _CeilingRelationKnowledge(_Knowledge):
+    """A store double with the in-ceiling ``GROUP BY`` semantics of
+    ``in_network_relation_rows``: raw rows ``(src, edge, tgt, source)``;
+    canonical support (all sources) is 5, so a suffix of 5 can only come from
+    the unbound path."""
+
+    RAW = [
+        ("o1", "supports", "o2", "s-in-1"),
+        ("o1", "supports", "o2", "s-in-2"),
+        ("o1", "supports", "o2", "s-out"),
+        ("o2", "related_to", "o1", "s-out"),
+    ]
+
+    def __init__(self):
+        self.relation_calls: list[dict] = []
+        self.support_calls: list[str] = []
+
+    def node_context(self, notebook_id, object_id, *, allowed_source_ids=None):
+        return {
+            "occurrences": [{"source_id": "s-in-1", "element_text": "x",
+                             "source_title": "S", "section_path": "§1"}],
+            "definition": None, "definition_basis": None,
+            "definition_source_id": None, "definition_element_id": None,
+            "steps": None,
+        }
+
+    def in_network_relations(self, participant_ids, object_ids, **kwargs):
+        self.relation_calls.append(dict(kwargs))
+        ceilings = kwargs.get("source_ceilings") or {}
+        rows = []
+        for notebook_id in participant_ids:
+            if notebook_id != "active":
+                continue
+            if notebook_id not in ceilings:
+                seen = []
+                for src, edge, tgt, _source in self.RAW:
+                    if (src, edge, tgt) not in seen:
+                        seen.append((src, edge, tgt))
+                rows += [{"source_object_id": s, "edge_type": e, "target_object_id": t,
+                          "notebook_id": notebook_id} for s, e, t in seen]
+                continue
+            counts: dict = {}
+            for src, edge, tgt, source in self.RAW:
+                if source in ceilings[notebook_id]:
+                    counts.setdefault((src, edge, tgt), set()).add(source)
+            rows += [{"source_object_id": s, "edge_type": e, "target_object_id": t,
+                      "notebook_id": notebook_id, "source_count": len(found)}
+                     for (s, e, t), found in counts.items()]
+        return rows
+
+    def relation_support_counts(self, notebook_id, triples):
+        self.support_calls.append(notebook_id)
+        return {triple: 5 for triple in triples}
+
+
+def _relation_hits():
+    return [
+        RetrievedKnowledge(object_id="o1", object_type="concept", payload={"name": "A"},
+                           evidence=[], tier="personal", notebook_id="active"),
+        RetrievedKnowledge(object_id="o2", object_type="concept", payload={"name": "B"},
+                           evidence=[], tier="personal", notebook_id="active"),
+    ]
+
+
+def test_relation_support_without_a_binding_ceiling_is_the_canonical_count():
+    """No scope: the call carries no ceiling keyword at all (byte-identical to
+    before E2-4) and the suffix is the canonical support count."""
+    knowledge = _CeilingRelationKnowledge()
+    service = EvidenceContextService(
+        notebooks=_Notebooks(), sources=_Sources(), knowledge=knowledge,
+        settings=Settings(),
+    )
+    block, _ = service.knowledge_context("active", _relation_hits())
+    assert knowledge.relation_calls == [{}]
+    assert knowledge.support_calls == ["active"]
+    assert "k1 -[supports]-> k2 (×5源)" in block
+    assert "k2 -[related_to]-> k1 (×5源)" in block
+
+
+def test_relation_support_under_a_binding_ceiling_counts_in_ceiling_sources():
+    """PR-E2·E2-4(台账 B-6):天花板起约束作用时,关系行只来自界内来源,
+    「×N源」是界内不同来源数;只有界外行撑着的边整条消失;canonical 支持表
+    (按全部来源计)不再被查。"""
+    from app.services.source_scope import source_scope_context
+
+    knowledge = _CeilingRelationKnowledge()
+    service = EvidenceContextService(
+        notebooks=_Notebooks(), sources=_Sources(), knowledge=knowledge,
+        settings=Settings(),
+    )
+    with source_scope_context(
+        "active",
+        {"mode": "include", "source_ids": ["s-in-1", "s-in-2"], "narrowed": True},
+        None,
+    ):
+        block, _ = service.knowledge_context("active", _relation_hits())
+    (call,) = knowledge.relation_calls
+    assert set(call["source_ceilings"]) == {"active"}
+    assert call["source_ceilings"]["active"] == frozenset({"s-in-1", "s-in-2"})
+    assert knowledge.support_calls == []
+    assert "k1 -[supports]-> k2 (×2源)" in block
+    assert "related_to" not in block
+    assert "×5" not in block
+
+
+def test_citation_source_info_keeps_foreign_sources_out_when_asked():
+    """``owner_notebook_ids`` leaves a listed source owned by another library
+    out of the result (the caller keeps its stored title); unlisted sources and
+    ones without an owner resolve as before."""
+    from app.services.evidence_context import foreign_source_owners
+
+    service = _service(source_metadata={
+        "s-own": {"title": "Own", "file_name": "own.md", "notebook_id": "pub"},
+        "s-priv": {"title": "Private Now", "file_name": "p.md", "notebook_id": "priv"},
+        "s-free": {"title": "Free", "file_name": "f.md", "notebook_id": "priv"},
+    })
+    info = service.citation_source_info(
+        ["s-own", "s-priv", "s-free"],
+        owner_notebook_ids={"s-own": "pub", "s-priv": "pub"},
+    )
+    assert set(info) == {"s-own", "s-free"}
+    assert service.citation_source_info(["s-priv"], owner_notebook_ids={"s-priv": ""}) == {}
+    assert foreign_source_owners([
+        {"source_id": "s-priv", "source_foreign": True},
+        {"source_id": "s-own"},
+    ]) == {"s-priv": ""}
+    assert foreign_source_owners([{"source_id": "s-own"}]) == {}
+
+
 # ---- T4:外部证据(ask.reflect_action 插件动作带回的库外材料) --------------
 #
 # 设计文档 docs/superpowers/specs/2026-09-13-reflect-plugin-action-design_zh.md
