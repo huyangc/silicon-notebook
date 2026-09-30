@@ -22,8 +22,8 @@ Two layers
 ==========
 
 * CEILING layer — this module: ``normalise_ceiling`` (the one domain
-  normalisation: blanks dropped, empty = deny all), the identity cache inside
-  ``ceiling_param`` (keyed by the run's ceiling object), the evidence
+  normalisation: blanks dropped, empty = deny all), the per-object memo in
+  ``ceiling_param`` (on the run's ``CeilingSet``), the evidence
   fragments and ``evidence_support_sql``, and the enumeration page's own
   statement-local settings (``_STATEMENT_SETTINGS``).
 * BINDING layer — the repository-wide ``postgres/id_binding.py``:
@@ -67,12 +67,10 @@ trade-off: a page that scans a whole type (nothing or little inside the
 ceiling) no longer gets parallel workers — none-4k page 27 → 28 ms, sparse-49k
 89 → 36 ms, i.e. it never lost what the workers' copies of the constant cost.
 The ceiling is still one bind per statement; normalise it once per run (hand
-the scope's own frozenset down) so ``ceiling_param``'s cache serves every page.
+the scope's own frozenset down) so ``ceiling_param``'s per-object memo serves every page.
 """
 from __future__ import annotations
 
-import threading
-from collections import OrderedDict
 from typing import Any, Iterable, Optional, Sequence
 
 from psycopg.pq import TransactionStatus
@@ -98,9 +96,6 @@ ATTRIBUTABLE_SOURCE = f"COALESCE({EVIDENCE_ITEM_SOURCE},'')<>''"
 # unavailable the setting is a no-op.
 _STATEMENT_SETTINGS = (("max_parallel_workers_per_gather", "0"), ("jit", "off"))
 
-_CACHE_LIMIT = 8
-_cache_lock = threading.Lock()
-_cache: "OrderedDict[int, tuple[frozenset, BoundIds]]" = OrderedDict()
 
 
 def normalise_ceiling(source_ids: Optional[Iterable[str]]) -> Optional[frozenset]:
@@ -129,34 +124,26 @@ def normalise_ceiling(source_ids: Optional[Iterable[str]]) -> Optional[frozenset
 
 def ceiling_param(ceiling: frozenset) -> BoundIds:
     """The bound form (``id_binding.bind_ids``) of a NON-EMPTY normalised
-    ceiling, computed once per ceiling object.
+    ceiling, built once per ceiling OBJECT.
 
     The ids are bound sorted: a frozenset iterates in the per-process string
     hash order, and a sorted binding keeps the statement text and parameter
     identical for equal ceilings.  Membership ignores order.
 
-    Keyed by the frozenset's identity with a small LRU bound.  Identity is safe
-    here because a frozenset cannot change after it is built, and each entry
-    holds a strong reference to its key object: while the entry lives, no
-    other object can be allocated at that address, and the ``is`` check makes
-    a stale id harmless anyway.  A run hands every page the scope's one
-    memoised frozenset, so one join serves the whole enumeration; a caller that
-    passes a fresh collection per call simply misses (the result is the same,
-    only recomputed).  ``id_binding`` deliberately keeps no such cache (its
-    callers build a fresh list per call); this ceiling object is long-lived.
+    The form is memoised on the ceiling itself when it can carry one
+    (``source_scope.CeilingSet.bound_forms`` -- the run's ceiling objects
+    are built that way), so a run hands every page and count the same object
+    and pays the ~10 ms build once, and the form dies with the run.  There is
+    no process-level cache: it would keep megabyte-sized ceilings of runs long
+    gone (codex #817 r1 / review P3).  A plain frozenset still binds, only
+    without the memo.
     """
-    key = id(ceiling)
-    with _cache_lock:
-        hit = _cache.get(key)
-        if hit is not None and hit[0] is ceiling:
-            _cache.move_to_end(key)
-            return hit[1]
-    bound = bind_ids(sorted(ceiling))
-    with _cache_lock:
-        _cache[key] = (ceiling, bound)
-        _cache.move_to_end(key)
-        while len(_cache) > _CACHE_LIMIT:
-            _cache.popitem(last=False)
+    forms = getattr(ceiling, "bound_forms", None)
+    if forms is None:
+        return bind_ids(sorted(ceiling))
+    bound = forms.get("postgres")
+    if bound is None:
+        bound = forms["postgres"] = bind_ids(sorted(ceiling))
     return bound
 
 

@@ -437,7 +437,6 @@ def test_pg_a_49k_ceiling_binds_once_across_pages_and_counts(
         return original(values)
 
     monkeypatch.setattr(store_ceiling, "bind_ids", counting)
-    monkeypatch.setattr(store_ceiling, "_cache", type(store_ceiling._cache)())
     ticks = ["sA", "sC"] + [f"absent-{index:05d}" for index in range(49_000)]
     items, cursor, calls = [], None, 0
     with retrieval_run(run_kind="ask_reasoning", actor_id="user-local"):

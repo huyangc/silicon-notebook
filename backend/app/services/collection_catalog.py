@@ -134,6 +134,7 @@ from app.services.retrieval_participants import (
 )
 from app.services.retrieval_run import memoized_retrieval_value
 from app.services.source_scope import (
+    CeilingSet,
     collection_ceiling_drifted,
     current_source_scope,
     record_collection_ceiling_drift,
@@ -240,7 +241,7 @@ class SourceCeiling:
 
 
 def _make_ceiling(source_ids) -> SourceCeiling:
-    return SourceCeiling(members=frozenset(str(value) for value in source_ids if value))
+    return SourceCeiling(members=CeilingSet(str(value) for value in source_ids if value))
 
 
 def _scope_ceiling(scope, notebook_id: str) -> SourceCeiling:
@@ -254,7 +255,8 @@ def _scope_ceiling(scope, notebook_id: str) -> SourceCeiling:
         return SourceCeiling(members=ceiling)
     if not scope.hidden_source_ids:
         return SourceCeiling(members=scope.source_ids)
-    return SourceCeiling(members=scope.source_ids | scope.hidden_source_ids)
+    return SourceCeiling(
+        members=CeilingSet(scope.source_ids | scope.hidden_source_ids))
 
 
 def _local_freeze(scope: Any, notebook_id: str) -> bool:

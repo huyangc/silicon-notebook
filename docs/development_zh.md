@@ -75,7 +75,11 @@
   默认值会过度过滤。问答、推理与目录概览侧的调用方由
   `test_every_collection_entry_call_passes_the_ceiling_verdict` 钉住。知识重读用的
   孪生判词 `source_scope.ceiling_binds` 多一条分支（库里有别人的 Memory）；清单对
-  私有 Memory 是无条件剔除的，所以不需要它。两个判词的其余分支要保持一致。
+  私有 Memory 是无条件剔除的，所以不需要它。两个判词的其余分支要保持一致。两者都只有
+  配合读后核验才可以按 run 记住：走不绑天花板快路径的集合读取，要拿手里的来源行
+  （signal 行、按绑定路径判据逐条核对的 KG 行、Knowhow 目录里各表的投影源）对冻结天花板
+  核对，出现天花板外的来源就记下漂移（`source_scope.record_collection_ceiling_drift`），
+  这次读取与之后的每次读取都改为绑定。
 - 可变运行态归 `RepositoryRuntime`，`REPORT_CANCELLATIONS` 是刻意保留的进程全局
   例外，与 coordinator 和兼容函数共享同一身份。领域 builder 只接较早的 frozen
   bundle，不接 runtime 本身；保留窄迟绑定 accessor 与启动副作用顺序。组合后受支持

@@ -1612,6 +1612,39 @@ class AskService:
             getattr(self, "retrieval", None), notebook_id
         )
 
+    @staticmethod
+    def _knowhow_catalog_in_ceiling(notebook_id: str, catalog: dict) -> dict:
+        """Verify-on-read for the Knowhow complete enumeration's catalog.
+
+        The gate above is a memoised verdict (all-selected and not drifted when
+        it was taken); a Knowhow table whose projection source appeared after
+        the freeze would still be walked.  Each catalogued table's
+        ``hidden_source_id`` must be inside the frozen ceiling (ticks plus the
+        asker's own hidden sources, ``ActiveSourceScope.allows``); one that is
+        not records the drift on the run (``record_collection_ceiling_drift``,
+        the same record every collection read consults) and the catalog comes
+        back with no tables, so the path steps aside exactly as it does when no
+        table matches (``completeness_unavailable``) and the reasoning path,
+        which filters row by row, answers instead.  A run without a local
+        include freeze has nothing to verify against and is returned as is."""
+        from app.services.source_scope import (
+            current_source_scope,
+            record_collection_ceiling_drift,
+        )
+
+        scope = current_source_scope()
+        if not (
+            scope is not None and scope.ceiling_active
+            and scope.mode == "include" and notebook_id == scope.notebook_id
+        ):
+            return catalog
+        for table in catalog.get("tables") or ():
+            hidden = str(table.get("hidden_source_id") or "")
+            if hidden and not scope.allows(notebook_id, hidden):
+                record_collection_ceiling_drift(scope, notebook_id)
+                return {**catalog, "tables": []}
+        return catalog
+
     def _memory_hits(self, user_id: str, notebook_id: str, query: str):
         # Memory/Knowhow projection sources are intentionally absent from the
         # checkbox list. Once the user narrows that list, only selected imported
@@ -5005,11 +5038,11 @@ class AskService:
                 self.knowhow_store, "knowhow_enumeration_catalog", None
             )
             if callable(catalog_loader):
-                knowhow_catalog = catalog_loader(
+                knowhow_catalog = self._knowhow_catalog_in_ceiling(notebook_id, catalog_loader(
                     notebook_id,
                     limit=limits.structured_max_tables,
                     query=scope_question,
-                )
+                ))
             else:  # narrow compatibility doubles; production ports implement it
                 legacy_tables = list(
                     self.knowhow_store.list_knowhow_tables(notebook_id) or []
