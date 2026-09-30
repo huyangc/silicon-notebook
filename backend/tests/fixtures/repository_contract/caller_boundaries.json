@@ -301,14 +301,6 @@
     {
       "count": 1,
       "kind": "independent_private",
-      "path": "backend/app/api/mcp_tools/memory_context.py",
-      "reason": "MCP ask binds the runtime's one production default-ceiling readers",
-      "scope": "<module>._run_ask_notebook",
-      "target": "_runtime"
-    },
-    {
-      "count": 1,
-      "kind": "independent_private",
       "path": "backend/app/api/report_routes.py",
       "reason": "API readiness checks the process-owned model provider",
       "scope": "<module>._report_llm_ready",
