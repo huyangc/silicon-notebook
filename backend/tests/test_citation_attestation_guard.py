@@ -788,6 +788,11 @@ def test_a_new_site_cannot_hide_behind_inherited():
     site = ("services/new_producer.py", "mint", "Citation")
     entry = ("inherited", (), "copies something", 1)
     assert classification_problems(site, entry)
+    # Even with a well-formed id_map proof, `inherited` is reserved for
+    # parse_anchors: a new producer must register its evidence instead.
+    proven = ("inherited", (("reads-param", "services/new_producer.py", "mint", "id_map"),),
+              "copies an id_map entry", 1)
+    assert any("reserved" in problem for problem in classification_problems(site, proven))
 
 
 def test_inherited_must_copy_its_locator_from_the_id_map(tmp_path, monkeypatch):
