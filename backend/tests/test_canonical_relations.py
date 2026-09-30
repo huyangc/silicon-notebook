@@ -394,6 +394,181 @@ def test_relation_support_lookup_folds_boundedly_and_never_scans_full_support_ta
         f"support_count=2 must render the ×N源 suffix, got: {block!r}")
 
 
+def _mk_nb_with_three_source_edge(repo):
+    """One A--kind_of-->B edge carried by raw rows of three sources (s1 made
+    the objects; s2/s3 rows stand in for later extractions or merges), both
+    objects evidenced by s1 only.  canonical support after the rebuild = 3."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    for sid in ("s1", "s2", "s3"):
+        _mk_src(repo, nb.id, sid)
+    repo.store_kg(nb.id, "s1", [
+        {"local_id": "A", "object_type": "concept",
+         "payload": {"name": "cascode", "section_path": "1"}, "evidence": []},
+        {"local_id": "B", "object_type": "concept",
+         "payload": {"name": "gain", "section_path": "1"}, "evidence": []},
+    ], [
+        {"source_local_id": "A", "target_local_id": "B", "edge_type": "kind_of", "evidence": []},
+    ])
+    a_id = _ids_by_name(repo, nb.id, "cascode")[0]
+    b_id = _ids_by_name(repo, nb.id, "gain")[0]
+    evidence = json.dumps([{"source_id": "s1", "element_id": "", "quoted_span": "q"}])
+    with repo._write() as db:
+        db.execute("UPDATE knowledge_objects SET evidence=? WHERE id IN (?,?)",
+                   (evidence, a_id, b_id))
+        for n, sid in enumerate(("s2", "s3")):
+            db.execute(
+                "INSERT INTO knowledge_relations(id,notebook_id,source_id,source_object_id,"
+                "target_object_id,edge_type,evidence,created_at,review_status) "
+                "VALUES (?,?,?,?,?,'kind_of','[]','2026-01-01T00:00:00Z','pending')",
+                (f"kr-extra-{n}", nb.id, sid, a_id, b_id))
+    repo.rebuild_unified_kg(nb.id)
+    repo.rebuild_canonical_relations(nb.id, force=True)
+    return nb, a_id, b_id
+
+
+def _two_hits(a_id, b_id):
+    from app.services.retrieval import RetrievedKnowledge
+
+    return [
+        RetrievedKnowledge(object_id=a_id, object_type="concept",
+                           payload={"name": "cascode"}, evidence=[]),
+        RetrievedKnowledge(object_id=b_id, object_type="concept",
+                           payload={"name": "gain"}, evidence=[]),
+    ]
+
+
+@pytest.mark.parametrize(("ceiling", "suffix"), [
+    (None, "(×3源)"),                 # no ceiling: canonical support, as before
+    (["s1", "s2"], "(×2源)"),        # binding ceiling: in-ceiling sources only
+    (["s1"], None),                   # one in-ceiling source: edge kept, no suffix
+])
+def test_relation_support_counts_only_in_ceiling_sources(repo, ceiling, suffix):
+    """PR-E2·E2-4(台账 B-6):天花板起约束作用时,「×N源」只数天花板内的来源,
+    天花板外来源的关系行既不计数、也不单独撑起一条边。
+
+    变异锚点:``in_network_relation_rows`` 忽略 ``allowed_source_ids``(去掉
+    ``member_of`` 谓词)→ 第二格渲染 ``(×3源)``,红。"""
+    from app.services.source_scope import source_scope_context
+
+    nb, a_id, b_id = _mk_nb_with_three_source_edge(repo)
+    hits = _two_hits(a_id, b_id)
+    if ceiling is None:
+        block, _ = repo._answer_context(nb.id, hits)
+    else:
+        with source_scope_context(
+            nb.id, {"mode": "include", "source_ids": ceiling, "narrowed": True}, None,
+        ):
+            block, _ = repo._answer_context(nb.id, hits)
+    assert "kind_of" in block, block
+    if suffix is None:
+        assert "(×" not in block, block
+    else:
+        assert suffix in block, block
+        assert block.count("(×") == 1, block
+
+
+def test_relation_with_no_in_ceiling_row_is_not_rendered(repo):
+    """An edge whose every row comes from out-of-ceiling sources disappears,
+    although both endpoints are admitted (their evidence is in the ceiling)."""
+    from app.services.source_scope import source_scope_context
+
+    nb, a_id, b_id = _mk_nb_with_three_source_edge(repo)
+    with repo._write() as db:
+        db.execute("UPDATE knowledge_relations SET source_id='s2' "
+                   "WHERE notebook_id=? AND source_id='s1'", (nb.id,))
+    with source_scope_context(
+        nb.id, {"mode": "include", "source_ids": ["s1"], "narrowed": True}, None,
+    ):
+        block, id_map = repo._answer_context(nb.id, _two_hits(a_id, b_id))
+    assert len(id_map) == 2, block
+    assert "relations:" not in block and "kind_of" not in block, block
+
+
+def test_promoted_object_never_shows_the_promoters_private_text_or_title(repo):
+    """PR-E2·E2-4(台账 B-11):一个晋升进公共库的对象,证据仍指向推广者私有库的
+    元素与来源。提示词、引用锚点与引用卡里只能出现存储时的片段与标题,绝不出现
+    私有库元素的现文、也不出现私有来源的现名。
+
+    变异锚点:``_enrich_evidence`` 去掉 ``owner_notebook_id`` 的库谓词 → 提示词
+    与锚点片段变成私有现文,红;``knowledge_context`` 去掉 ``_foreign_owned``
+    判定 → 锚点标题变成私有现名,红。"""
+    from app.models.schemas import Evidence
+    from app.services.retrieval import RetrievedKnowledge
+
+    public = repo.create_notebook(NotebookCreate(name="public"))
+    private = repo.create_notebook(NotebookCreate(name="private"))
+    _mk_src(repo, private.id, "s-priv")
+    with repo._write() as db:
+        db.execute("UPDATE sources SET title='Private Current Name' WHERE id='s-priv'")
+        db.execute(
+            "INSERT INTO source_elements(id,source_id,element_type,location_label,text,"
+            "created_at) VALUES ('el-priv','s-priv','paragraph','p1',"
+            "'PRIVATE CURRENT TEXT','2026-01-01T00:00:00Z')")
+        db.execute(
+            "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,payload,"
+            "evidence,source_id,created_at,updated_at) VALUES "
+            "('ko-prom',?,'concept','approved',?,?,'',"
+            "'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+            (public.id, json.dumps({"name": "promoted"}), json.dumps([{
+                "source_id": "s-priv", "element_id": "el-priv",
+                "quoted_span": "stored snapshot", "source_title": "Stored Title",
+            }])))
+
+    hit = RetrievedKnowledge(
+        object_id="ko-prom", object_type="concept", payload={"name": "promoted"},
+        evidence=[Evidence(
+            source_id="s-priv", source_title="Stored Title", element_id="el-priv",
+            element_type="paragraph", location_label="p1",
+            quoted_span="stored snapshot", confidence=1.0,
+        )],
+    )
+    block, id_map = repo._answer_context(public.id, [hit])
+    (key,) = id_map
+    anchors = repo._parse_answer_anchors(f"claim [{key}]", id_map)
+    cards = repo._runtime.evidence_context_component.citations_from(
+        [hit], {"el-priv"}, "fallback", notebook_id=public.id,
+    )
+    rendered = json.dumps(
+        [block, {k: {f: str(v) for f, v in value.items()} for k, value in id_map.items()},
+         [anchor.model_dump() for anchor in anchors],
+         [card.model_dump() for card in cards]],
+        ensure_ascii=False,
+    )
+    assert "PRIVATE CURRENT TEXT" not in rendered
+    assert "Private Current Name" not in rendered
+    assert "stored snapshot" in block
+    assert id_map[key]["source_title"] == "Stored Title"
+    assert anchors[0].source_title == "Stored Title"
+    assert anchors[0].snippet == "stored snapshot"
+    assert cards[0].label.startswith("Stored Title")
+
+
+def test_own_library_titles_still_resolve_live(repo):
+    """The B-11 rule leaves an ordinary object untouched: its source's current
+    name still replaces the stored one, and no marker is added."""
+    from app.services.retrieval import RetrievedKnowledge
+
+    nb = repo.create_notebook(NotebookCreate(name="own"))
+    _mk_src(repo, nb.id, "s-own")
+    with repo._write() as db:
+        db.execute("UPDATE sources SET title='Renamed Title' WHERE id='s-own'")
+        db.execute(
+            "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,payload,"
+            "evidence,source_id,created_at,updated_at) VALUES "
+            "('ko-own',?,'concept','approved',?,?,'s-own',"
+            "'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+            (nb.id, json.dumps({"name": "own"}), json.dumps([{
+                "source_id": "s-own", "element_id": "", "quoted_span": "q",
+                "source_title": "Old Title",
+            }])))
+    hit = RetrievedKnowledge(object_id="ko-own", object_type="concept",
+                             payload={"name": "own"}, evidence=[])
+    _block, id_map = repo._answer_context(nb.id, [hit])
+    (value,) = id_map.values()
+    assert value["source_title"] == "Renamed Title"
+    assert "source_foreign" not in value
+
+
 def test_annotate_edge_support_folds_only_edge_endpoints(repo, monkeypatch):
     """OOM audit P1-5: annotating edges must fold endpoints via the BOUNDED
     cluster_fold_rows (≤2·#edges ids), never the full 8M-entry cluster_map (which

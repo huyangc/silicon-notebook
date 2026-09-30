@@ -527,6 +527,46 @@ def test_assemble_builds_report_body_only(repo):
     assert gaps == ["「B」库内证据不足,内容偏推断/通识"]
 
 
+def test_assemble_keeps_the_stored_title_of_a_foreign_library_source(repo):
+    """PR-E2·E2-4(台账 B-11):``knowledge_context`` 把出处属于别库的条目标成
+    ``source_foreign``;报告参考文献列表不得再按全局 id 用那一库来源的现名覆盖
+    条目存储的标题(也不按它的归属判「来自参考库」)。同一份报告里本库条目的
+    标题照旧现读。
+
+    变异锚点:``_assemble`` 不传 ``owner_notebook_ids`` → 第一条参考文献变成
+    私有现名,红。"""
+    nb = _mk_nb(repo)
+    private = _mk_nb(repo)
+    with repo._write() as db:
+        for sid, owner, title in (("s-priv", private.id, "Private Current Name"),
+                                  ("s-own", nb.id, "Own Live Title")):
+            db.execute(
+                "INSERT INTO sources(id,notebook_id,title,source_type,created_at,updated_at) "
+                "VALUES (?,?,?,'markdown','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+                (sid, owner, title))
+    eng = _mk_engine(repo, _OutlineLLM())
+    outline = [{"title": "A", "scope": "sa", "sub_queries": ["qa"]}]
+    sections = [{
+        "title": "A", "scope": "sa", "markdown": "## A\nx [k1] y [k2]", "grounded": True,
+        "id_map": {
+            "k1": {"object_id": "ko-prom", "object_type": "concept", "name": "P",
+                   "source_id": "s-priv", "source_title": "Stored Title",
+                   "location_label": "p1", "tier": "base", "source_foreign": True},
+            "k2": {"object_id": "ko-own", "object_type": "concept", "name": "O",
+                   "source_id": "s-own", "source_title": "Old Title",
+                   "location_label": "p1", "tier": "personal"},
+        },
+        "attempted": [],
+    }]
+    rid = repo.create_report(nb.id, "q")
+    md, _gaps, references = eng._assemble(nb.id, rid, "q", outline, sections)
+    by_object = {ref["object_id"]: ref for ref in references}
+    assert by_object["ko-prom"]["source_title"] == "Stored Title"
+    assert by_object["ko-own"]["source_title"] == "Own Live Title"
+    assert "Private Current Name" not in md
+    assert "Private Current Name" not in json.dumps(references, ensure_ascii=False)
+
+
 def test_assemble_multikey_citation_renumbered(repo):
     """LLM 常吐逗号复合引用 [k1, k3](而非 prompt 要求的 [k1][k3]):_assemble 须逐 key
     全局重编号、登记两条 reference,正文输出仍是逗号复合 [k1, k2](全局编号)。"""
