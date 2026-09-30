@@ -152,6 +152,8 @@ from app.services.retrieval_participants import (
 )
 from app.services.source_display import source_display_title
 from app.services.source_scope import (
+    current_source_scope,
+    record_collection_ceiling_drift,
     scoped_participants,
     source_allowed,
     subjectless_run_active,
@@ -663,6 +665,29 @@ class EnumerationInvariantError(RuntimeError):
     failure — one skipped action, fail-open — so a breach costs a list, never
     a request.
     """
+
+
+class _FastPathDrift(Exception):
+    """Internal: a row read on the un-bound fast path came from a source
+    outside the frozen ceiling; the drift is already recorded on the run."""
+
+
+def _verify_fast_path_owner(
+    row: Any, frozen: Optional[frozenset], notebook_id: str,
+) -> None:
+    """Verify-on-read for one KG row listed WITHOUT a ceiling (``frozen`` is
+    the library's frozen ceiling, ``None`` when the read is bound or there is
+    nothing to verify against).  The owner column is the source the object
+    was extracted from; one outside the freeze is a source added after the
+    run's verdict.  Plain frozenset membership, nothing normalised."""
+    if frozen is None:
+        return
+    owner = str(_row_get(row, "source_id") or "")
+    if owner and owner not in frozen:
+        scope = current_source_scope()
+        if scope is not None:
+            record_collection_ceiling_drift(scope, notebook_id)
+        raise _FastPathDrift(notebook_id)
 
 
 class _Stop(Exception):
@@ -1423,6 +1448,36 @@ class CollectionEnumerationService:
     ) -> KgObjectEnumeration:
         """List usable knowledge objects of one type across the scope.
 
+        On the un-bound fast path (``ceiling_binds`` False) every returned
+        row's owner is checked against the frozen ceiling
+        (``CollectionCatalogService.fast_path_members``).  A row owned by a
+        source outside it means the source set drifted after the run's verdict
+        was taken: the drift is recorded on the run and THIS read is run again,
+        now bound (``_walk_kg_objects`` sees the recorded drift through
+        ``source_ceiling``).  A cursor cut on the fast path then no longer
+        matches the bound ceiling digest and reports ``concurrent_change``.
+        """
+        call = dict(
+            budget=budget, cursor=cursor, cancel_event=cancel_event,
+            ceiling_binds=ceiling_binds,
+        )
+        try:
+            return self._walk_kg_objects(active_notebook_id, object_type, **call)
+        except _FastPathDrift:
+            return self._walk_kg_objects(active_notebook_id, object_type, **call)
+
+    def _walk_kg_objects(
+        self,
+        active_notebook_id: str,
+        object_type: str,
+        *,
+        budget: EnumerationBudget,
+        cursor: Optional[KgObjectCursor],
+        cancel_event: CancelEvent,
+        ceiling_binds: bool,
+    ) -> KgObjectEnumeration:
+        """The walk behind ``enumerate_kg_objects``.
+
         The status predicate is ``USABLE_STATUSES`` — the same object the
         catalog's per-type counting uses.  This is the whole reason the map and
         the list can be shown side by side: "concept 89" and a list of 89 come
@@ -1445,6 +1500,11 @@ class CollectionEnumerationService:
 
         with self._database.connect() as db:
             notebook_ids, tiers = self._participants(db, active_notebook_id)
+            # Verify the un-bound fast path BEFORE the count and the digest,
+            # which hold no rows to check (one signal read, fast path only).
+            self._catalog.confirm_fast_path(
+                db, notebook_ids, ceiling_binds=ceiling_binds,
+            )
             opening_seqs = self._kg_seqs(db, notebook_ids)
             opening_ceiling = self._catalog.scope_ceiling_digest(
                 db, notebook_ids, ceiling_binds=ceiling_binds,
@@ -1512,6 +1572,9 @@ class CollectionEnumerationService:
                     ceiling = self._catalog.source_ceiling(
                         db, notebook_id, ceiling_binds=ceiling_binds,
                     )
+                    frozen = self._catalog.fast_path_members(
+                        notebook_id, ceiling_binds=ceiling_binds,
+                    )
                     resume = _kg_cursor(
                         object_type, notebook_id, after, opening_seqs, walk,
                         opening_ceiling,
@@ -1530,6 +1593,7 @@ class CollectionEnumerationService:
                         lookahead = len(usable) > allowance
                         page = usable[:allowance]
                         for row in page:
+                            _verify_fast_path_owner(row, frozen, notebook_id)
                             payload = _json_object(_row_get(row, "payload"))
                             item = KgObjectItem(
                                 object_id=str(_row_get(row, "id")),
@@ -1675,7 +1739,7 @@ class CollectionEnumerationService:
             rows = self._knowledge.knowledge_object_page_rows(
                 db, notebook_id, object_type, scan_after, fetch,
                 **({} if ceiling is None
-                   else {"allowed_source_ids": ceiling.source_ids}),
+                   else {"allowed_source_ids": ceiling.members}),
             )
             within_ceiling = walk.scan_raw(len(rows))
             for row in rows:

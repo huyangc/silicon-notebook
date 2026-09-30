@@ -33,6 +33,7 @@ from app.models.schemas import NotebookCreate
 from app.services import collection_catalog
 from app.services.collection_enumeration import (
     MAX_EVIDENCE_REFS,
+    SELECTED_SOURCES_SCOPE_SUFFIX,
     TRUNCATED_CONCURRENT_CHANGE,
     EnumerationBudget,
     KgObjectItem,
@@ -479,25 +480,29 @@ def test_an_out_of_ceiling_upload_mid_walk_is_not_a_concurrent_change(
     assert "sLate" not in {item.source_id for item in result.items}
 
 
-def test_without_a_binding_ceiling_an_upload_mid_walk_is_a_concurrent_change(
+def test_without_a_binding_ceiling_an_upload_mid_walk_stays_outside(
     repo, monkeypatch,
 ):
-    """天花板不生效(全选、首次读集合时未漂移,``ceiling_binds=False``)时,指纹与
-    引入天花板之前一样哈希全部信号行:清单进行中上传一份来源,这条清单报
-    ``concurrent_change``(之后新开的清单会列出它)。"""
+    """天花板不生效(全选、首次读集合时未漂移,``ceiling_binds=False``)时读取走快
+    路径,但每次读取都拿手里的来源行对冻结天花板做读后核验(codex #817 r1):清单
+    进行中上传的来源由收尾读取发现,记下漂移、这次读取改为绑定——清单仍是冻结集合
+    的完整清单,之后新开的清单也不含它。"""
     nb = _library(repo)
     _hook_first_page(
         monkeypatch, repo._runtime.source_store, "element_page_rows",
         lambda: _src(repo, nb, "sLate", formulas=4),
     )
-    with _all_ticked(repo, nb):
-        result = repo.collection_enumeration.enumerate_elements(
-            nb, "formula", budget=_budget(page_size=1), ceiling_binds=False)
-        fresh = repo.collection_enumeration.enumerate_elements(
-            nb, "formula", budget=_budget(), ceiling_binds=False)
-    assert result.coverage.complete is False
-    assert result.coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE
-    assert "sLate" in {item.source_id for item in fresh.items}
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
+        with _all_ticked(repo, nb):
+            result = repo.collection_enumeration.enumerate_elements(
+                nb, "formula", budget=_budget(page_size=1), ceiling_binds=False)
+            fresh = repo.collection_enumeration.enumerate_elements(
+                nb, "formula", budget=_budget(), ceiling_binds=False)
+    assert result.coverage.complete is True
+    assert result.coverage.returned_total == result.coverage.total == 6
+    assert "sLate" not in {item.source_id for item in result.items}
+    assert "sLate" not in {item.source_id for item in fresh.items}
+    assert fresh.coverage.complete is True and fresh.coverage.total == 6
 
 
 def test_an_in_ceiling_reparse_mid_walk_is_still_a_concurrent_change(
@@ -1318,6 +1323,141 @@ def test_an_excluded_library_is_denied_whatever_ceiling_binds_says(repo):
             None, first, ceiling_binds=False)
     assert ceiling is not None and not ceiling.members
     assert own is None
+
+
+# ----------------- 读后核验:判词算出之后新增的来源永远在冻结天花板之外(#817 r1)
+
+def _drifted(notebook_id):
+    from app.services.source_scope import (
+        collection_ceiling_drifted,
+        current_source_scope,
+    )
+
+    return collection_ceiling_drifted(current_source_scope(), notebook_id)
+
+
+def test_an_upload_after_the_verdict_is_never_counted_listed_or_complete(repo):
+    """codex #817 r1 的复现:全选 run 的首次集合读取把判词记成「不约束」,之后上传
+    一份来源(带元素与它自己的知识对象)。之后的每次集合读取都不许数它、列它,
+    ``complete`` 与分母都按冻结集合;第一个看见它的读取把漂移记在 run 上。"""
+    nb = _library(repo)
+    with retrieval_run(run_kind="ask_reasoning", actor_id=_ACTOR):
+        with _all_ticked(repo, nb):
+            before = repo.collection_catalog.collection_map(nb, ceiling_binds=False)
+            assert not _drifted(nb)
+            _src(repo, nb, "sLate", formulas=4)
+            _kg(repo, nb, "oLate", [("sLate", "el-sLate-001")],
+                owner_source_id="sLate")
+            elements = repo.collection_enumeration.enumerate_elements(
+                nb, "formula", budget=_budget(), ceiling_binds=False)
+            assert _drifted(nb)
+            roster = repo.collection_enumeration.enumerate_sources(
+                nb, budget=_budget(), ceiling_binds=False)
+            kg = repo.collection_enumeration.enumerate_kg_objects(
+                nb, "concept", budget=_budget(), ceiling_binds=False)
+            after = repo.collection_catalog.collection_map(nb, ceiling_binds=False)
+    assert "sLate" not in {item.source_id for item in elements.items}
+    assert elements.coverage.complete is True
+    assert elements.coverage.total == before.element_count("formula") == 6
+    assert "sLate" not in {item.source_id for item in roster.items}
+    assert roster.coverage.complete is True and roster.coverage.total == 3
+    assert "oLate" not in {item.object_id for item in kg.items}
+    assert kg.coverage.complete is True
+    assert after.element_count("formula") == 6 and after.sources == 3
+
+
+def test_a_kg_read_alone_detects_the_upload(repo):
+    """KG 读取手里没有来源行:入口先做一次快路径确认(一次 signal 读),所以没有
+    任何元素 / 来源读取在先时,新来源的对象也不会被列出或计入分母。"""
+    nb = _library(repo)
+    with retrieval_run(run_kind="ask_reasoning", actor_id=_ACTOR):
+        with _all_ticked(repo, nb):
+            _src(repo, nb, "sLate", formulas=1)
+            _kg(repo, nb, "oLate", [("sLate", "el-sLate-001")],
+                owner_source_id="sLate")
+            kg = repo.collection_enumeration.enumerate_kg_objects(
+                nb, "concept", budget=_budget(), ceiling_binds=False)
+            assert _drifted(nb)
+    assert "oLate" not in {item.object_id for item in kg.items}
+    assert kg.coverage.complete is True
+    assert kg.coverage.total == len(kg.items)
+
+
+def test_a_kg_row_owned_outside_the_freeze_flips_the_read_to_bound(repo):
+    """行级读后核验:来源行里看不见、属主却在冻结天花板之外的对象(这里是属主
+    来源已不在来源表里的孤儿对象——与「确认之后才落库的新对象」同形)。快路径
+    返回它的那次读取记下漂移、改为绑定重读,清单里没有它。"""
+    nb = _library(repo)
+    _kg(repo, nb, "oGhost", [("sGhost", "el-sGhost-001")],
+        owner_source_id="sGhost")
+    with retrieval_run(run_kind="ask_reasoning", actor_id=_ACTOR):
+        with _all_ticked(repo, nb):
+            kg = repo.collection_enumeration.enumerate_kg_objects(
+                nb, "concept", budget=_budget(), ceiling_binds=False)
+            assert _drifted(nb)
+    assert "oGhost" not in {item.object_id for item in kg.items}
+    assert sorted(item.object_id for item in kg.items) == ["oA", "oB", "oMix"]
+
+
+def test_a_49k_ceiling_binds_once_across_pages_and_counts(repo, monkeypatch):
+    """codex #817 r1 P2:执行器与目录把 run 的那一个 frozenset(``members``)交给
+    store,store 按对象身份缓存绑定形态——4.9 万 id 的天花板在整条清单的每一页和
+    每个计数里只序列化一次(传排序后的 tuple 时每次调用都会重新归一、排序、序列化)。"""
+    from app.repositories.sqlite import source_ceiling as store_ceiling
+
+    nb = _library(repo)
+    bound = []
+    original = store_ceiling.bind_ids
+
+    def counting(ids, **kwargs):
+        values = list(ids)
+        if len(values) > 40_000:
+            bound.append(len(values))
+        return original(values, **kwargs)
+
+    monkeypatch.setattr(store_ceiling, "bind_ids", counting)
+    monkeypatch.setattr(store_ceiling, "_cache", type(store_ceiling._cache)())
+    ticks = ["sA", "sC"] + [f"absent-{index:05d}" for index in range(49_000)]
+    with retrieval_run(run_kind="ask_reasoning", actor_id=_ACTOR):
+        with _ticked(nb, ticks):
+            counts = dict(repo.collection_catalog.collection_map(nb).kg_objects)
+            items, coverage, calls = _walk_all(
+                lambda cursor: repo.collection_enumeration.enumerate_kg_objects(
+                    nb, "concept", budget=_budget(page_size=1, max_rows=1),
+                    cursor=cursor))
+    assert counts["concept"] == 2
+    assert calls == 2 and coverage.complete is True
+    assert sorted(item.object_id for item in items) == ["oA", "oMix"]
+    assert bound == [49_002]
+
+
+def test_the_listing_that_saw_the_upload_is_disclosed_as_source_scoped(
+    rrepo, monkeypatch,
+):
+    """推理一侧:清单进行中上传的来源由那次读取发现,清单改为绑定并如实带上
+    「(仅勾选的来源)」(读后读取的漂移,``_read_drifted``)。"""
+    notebook = _reasoning_seed(rrepo, formulas=2)
+    _hook_first_page(
+        monkeypatch, rrepo._runtime.source_store, "element_page_rows",
+        lambda: _src(rrepo, notebook.id, "sLate", formulas=3),
+    )
+    llm = _SeqLLM([
+        {"next_action": "enumerate_elements",
+         "enumerate": {"kind": "formula"}},
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(rrepo, llm)
+    with retrieval_run(run_kind="ask_reasoning", actor_id=_ACTOR):
+        visible = rrepo._runtime.source_store.all_visible_source_ids(notebook.id)
+        with _frozen_all_selected(rrepo, notebook.id, visible):
+            result = retriever.run(notebook.id, "有哪些公式", "", limits=limits)
+    [outcome] = result.enumerations
+    assert "sLate" not in {item.source_id for item in outcome.items}
+    assert outcome.coverage.complete is True
+    assert outcome.source_scoped is True
+    [step] = [s for s in result.trace if s.step_type == "enumerate"]
+    assert step.summary.endswith(SELECTED_SOURCES_SCOPE_SUFFIX)
+    assert step.detail["source_scoped"] is True
 
 
 # ------------------------------------------------- 成本:L4 与 scope 无关、零语句

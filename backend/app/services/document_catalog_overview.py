@@ -15,6 +15,7 @@ from app.services.collection_enumeration_answer import (
     typed_collection_results,
 )
 from app.services.reasoning_retrieval import CollectionEnumerationOutcome
+from app.services.source_scope import collection_ceiling_drifted, current_source_scope
 
 
 _SUMMARY_GUIDANCE = (
@@ -97,7 +98,10 @@ def prepare_catalog_overview(
     outcomes = [CollectionEnumerationOutcome(
         collection="sources", kind="", source_id="", local_only=local_only,
         items=list(listing.items), coverage=listing.coverage,
-        source_scoped=bool(source_scoped),
+        # The executor may have found a source added after the run's verdict
+        # and bound this very read (verify-on-read): disclose what it applied.
+        source_scoped=bool(source_scoped) or (
+            source_scoped is not None and _collection_drifted(notebook_id)),
     )]
     citations = evidence_context.collection_item_citations(
         listing.items, active_notebook_id=notebook_id,
@@ -178,3 +182,8 @@ def supplement_missing_summaries(
             catalog.id_map.update(original.id_map)
             catalog.citations.update({c.element_id: c for c in original.citations})
         catalog.coverage_note += "\n目录中缺少摘要的文档：" + original.coverage_note
+
+
+def _collection_drifted(notebook_id: str) -> bool:
+    scope = current_source_scope()
+    return scope is not None and collection_ceiling_drifted(scope, notebook_id)
