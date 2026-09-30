@@ -215,13 +215,16 @@ class ReportExecutionCoordinator:
         during the reads propagates as ``AskCancelled`` for the caller to end
         the worker quietly, as it already does for a cancelled report; every
         read runs under a budget carrying ``cancel``
-        (``cancellable_ceiling_readers``), so a Stop does not wait for it.
+        (``cancellable_ceiling_readers``), so a Stop interrupts a SQLite read
+        at once and waits at most one statement's 3 s cap on PostgreSQL.
 
         COST, measured by the quality review on this branch (real stores,
-        49k visible sources, no mounted library, median of 3; SQLite at
-        machine load 4 to tens): the constructor itself is 3 reads (4 with
-        the Memory channel closed), 24-27 ms.  What dominates is that an
-        installed ceiling turns on the per-call drift probe (two full reads
+        49k visible sources, no mounted library, a 6-section report, two runs
+        per condition with both results shown; machine load 4 to tens, so
+        PostgreSQL's numbers are noisy): the constructor itself is 3 reads
+        per phase, 24-45 ms on SQLite and 26-405 ms on PostgreSQL.  What
+        dominates is that an installed ceiling turns on the per-call drift
+        probe (two full reads
         of the notebook's visible set and hidden half per probe) for every
         retrieval inside the phase, where the unscoped worker used to probe
         nothing: a 6-section report probes 0 times in intent understanding,

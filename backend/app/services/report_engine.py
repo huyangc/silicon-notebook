@@ -3528,7 +3528,8 @@ class ReportEngine:
         A reader failure (or no readers wired) fails the report; a stop
         cancels it -- every read runs under a budget carrying the engine's
         cancel event (``cancellable_ceiling_readers``), so a Stop does not
-        wait for it.  Neither falls back to planning without a ceiling.
+        wait for a read to finish (on PostgreSQL, at most one statement's
+        3 s cap).  Neither falls back to planning without a ceiling.
         """
         from app.services.source_scope import refreshed_ceiling_context
 
