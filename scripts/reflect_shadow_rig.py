@@ -1123,7 +1123,7 @@ def _run_reports(
     from app.core.config import Settings
     from app.core.request_context import reset_request_user, set_request_user
     from app.services.model_work import ModelPriority, model_work_scope
-    from app.services.source_scope import source_scope_context
+    from app.services.source_scope import default_ceiling_context
 
     engine_class = _tracing_engine_class()
     repo = create_application_repository(Settings())
@@ -1146,7 +1146,7 @@ def _run_reports(
                     repo, engine_class, profile, notebook, report_id, item,
                     model_work_scope=model_work_scope,
                     model_priority=ModelPriority.REPORT,
-                    source_scope_context=source_scope_context,
+                    default_ceiling_context=default_ceiling_context,
                 )
                 for row in _report_rows(
                     repo, notebook, report_id, item, captured,
@@ -1180,14 +1180,17 @@ def _run_reports(
 def _generate_report(
     repo: Any, engine_class: type, profile: Any, notebook: str, report_id: str,
     item: dict, *, model_work_scope: Any, model_priority: Any,
-    source_scope_context: Any,
+    default_ceiling_context: Any,
 ) -> tuple[dict[int, list[dict]], str | None]:
     """跑一份报告,返回(`{节号: [步, ...]}`, 门控失败原因或 `None`)。
 
-    两层 scope 与 `report_execution.ReportExecutionCoordinator.start_plan` 逐字
-    同形:`model_work_scope`(模型调用的归属与优先级)+ `source_scope_context`
-    (范围冻结)。少哪一层都不是「少记一点日志」——模型调度会按另一份归属排队,
-    检索会在另一份范围上跑,那就不是生产接线下的行为了。
+    两层 scope 与 `report_execution.ReportExecutionCoordinator.start_plan` 对
+    未带范围的报告同形:`model_work_scope`(模型调用的归属与优先级)+
+    `default_ceiling_context(notebook, 属主, runtime.ceiling_readers())`(默认
+    检索天花板:本库可见来源 + 属主本人的隐藏来源,挂载库只取可见来源)。少哪一层
+    都不是「少记一点日志」——模型调度会按另一份归属排队,检索会在另一份范围上跑,
+    那就不是生产接线下的行为了。天花板这一层尤其影响 A/B 计时:装上它之后,报告里
+    每次检索都会跑一次漂移探针,这笔开销必须算进 rig 的墙钟。
 
     入口选 `run(..., auto_generate=True, require_intent_review=True)` 而不是
     `generate(...)`:`generate` 要一份已确认的大纲,报告行是空的时候直接调它没有
@@ -1234,7 +1237,9 @@ def _generate_report(
         actor_id=str(profile.id), notebook_id=notebook,
         question=item["question"],
     ):
-        with source_scope_context(notebook, None, None):
+        with default_ceiling_context(
+            notebook, str(profile.id), repo._runtime.ceiling_readers()
+        ):
             engine.run(
                 notebook, report_id, item["question"], "",
                 depth=item["depth"], auto_generate=True,
@@ -1803,7 +1808,8 @@ def run_search_once(
       预算,`kg_in_scope_for` 的 memo 也挂在它上面。**`event_log=None`**:那个
       事件汇是这条路上唯一会往库里写的旁路,主库只读,所以刻意不接;
     * `source_scope_context(notebook, scope, None)` —— `scope_source_ids` 为空
-      时 `scope=None`,是个 no-op,与 `_generate_report` 那半程同形;非空时
+      时 `scope=None`,是个 no-op,与今天的 `AskService.ask` 同形(报告那半程
+      `_generate_report` 已与报告 worker 一样装默认天花板,不再是 no-op);非空时
       装配成 `mode="include"` 的本地范围(与生产 `AskRequest.source_scope` /
       `SourceScope` 同一形状),调用方(`_search_loop`)已经用
       `resolve_scope_source_ids` 把题集声明的来源标题解析成这里的 id 列表
