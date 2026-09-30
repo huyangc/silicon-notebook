@@ -122,6 +122,14 @@ export function isRepairing(entry: RepairRelease | undefined, currentCount: numb
   return entry.count === currentCount;
 }
 
+/**
+ * 这一项有没有用户可点的修复动作。只读项(fix="none",如 H12 无主的记忆来源)只显示
+ * 数量,看板不给它画修复按钮——系统自己处理。
+ */
+export function hasRepairAction(fix: string): boolean {
+  return fix !== "none";
+}
+
 /** 某个体检项的命中计数(未命中/无该项时 0)。H7/H8 由 page.tsx 用它判定索引可信度。 */
 export function checkupCount(checkup: CheckupResponse | null, code: string): number {
   if (!checkup) return 0;

@@ -5,6 +5,7 @@ import {
   sourceHealthGroups,
   checkupCount,
   checkupAlertSignature,
+  hasRepairAction,
   repairRelease,
   isRepairing,
 } from "../../app/checkup-view.ts";
@@ -81,6 +82,13 @@ test("H12 → 残留的记忆来源 / none(只读) / 篇,排在其余源级项�
     key: "H12", label: "残留的记忆来源（重启后自动清理）", count: 3, unit: "篇", fix: "none", sample: [],
   });
   assert.deepEqual(sourceHealthGroups(checkup([item("H12", 0, [], "none")])), []);
+});
+
+test("只读项(fix=none)没有修复按钮,其余都有", () => {
+  assert.equal(hasRepairAction("none"), false);
+  for (const fix of ["reparse", "backfill_vectors", "extract_kg", "fold_index", "rebuild_index"]) {
+    assert.equal(hasRepairAction(fix), true, fix);
+  }
 });
 
 test("H7/H8 是索引级,不进源级分组", () => {

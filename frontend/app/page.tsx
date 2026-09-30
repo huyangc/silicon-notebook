@@ -170,7 +170,7 @@ import {
 } from "./bundle-intake.ts";
 import { BundleChoicePanel, BundleReceiptsPanel, type BundleReceiptEntry } from "./bundle-upload-panels.tsx";
 import type { BundleFile, InlineReceipt } from "./md-bundle.ts";
-import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
+import { sourceHealthGroups, checkupCount, checkupAlertSignature, hasRepairAction, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { askQuestionLimitHint, fetchAnswerMemoryLinks } from "./ask-api";
 import { buildPublicReportLink } from "./public-report";
 import { cancelScaleIndex, fetchIndexStatus, fetchScaleIndexStatus, rebuildScaleIndex, type IndexStatus } from "../features/kg-maintenance/kg-api";
@@ -7309,7 +7309,7 @@ export default function Home() {
                               <div className="index-sub">{titles.join("、")}{g.count > titles.length ? " 等" : ""}</div>
                             )}
                           </div>
-                          {!readOnlyWorkspace && g.fix !== "none" && (
+                          {!readOnlyWorkspace && hasRepairAction(g.fix) && (
                             <div className="index-ctas">
                               {/* extract_kg 走 startKgBuild,删除知识图谱期间它会早退——按钮同口径
                                   禁用(文案仍由 repairing 决定:删除不是这一组的修复在跑)。 */}
