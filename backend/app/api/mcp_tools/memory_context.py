@@ -206,9 +206,16 @@ def _strip_memory_items(answer: Any, allow_memory: bool) -> tuple[list, list]:
     """``(anchors, citations)`` of ``answer`` that this token may receive.
 
     Without ``memory:read`` every Memory-backed item goes: a citation with a
-    ``memory_id`` and an anchor whose ``object_type`` is ``'memory'``.  The run
-    already executed with the Memory channel closed, so neither should exist;
-    this is the wire-side backstop for any path that still mints one.
+    ``memory_id`` and an anchor whose ``object_type`` is ``'memory'``.
+
+    NOT an enforcement point.  Enforcement is the closed Memory channel
+    (``memory_access_context``, whose ``MemoryRetriever`` returns nothing)
+    and the retrieval ceiling; on the real path no such item exists by the
+    time the answer gets here, because Memory citations and anchors are only
+    minted from ``MemoryRetriever`` hits.  This only keeps the two structured
+    lists consistent with the token.  It does NOT touch the answer body
+    (``answer`` / ``conclusion`` text), so it could never hide Memory content
+    that retrieval had let through.
 
     Filtered BEFORE any ``[:RESULT_LIMIT]`` slice, and the caller counts
     omissions from THESE lists: slicing first, or counting the unfiltered
@@ -460,8 +467,11 @@ def _run_ask_notebook(
 
     ``allow_memory`` (the token's ``memory:read``) opens or closes the
     private-Memory channel for everything run here.  It is entered HERE, in
-    the worker thread that executes retrieval, because a context variable set
-    on the event loop does not follow the work into this thread.  The ask
+    the worker thread that executes retrieval, on purpose: anyio's
+    ``to_thread.run_sync`` does copy the event loop's context into the
+    worker, but entering the channel (and the ceiling below) inside the
+    function that runs the retrieval keeps it correct whatever hop brings the
+    work here, and scopes it exactly to this call.  The ask
     itself runs under the default retrieval ceiling built for the token's
     owner -- never under a submitted ``local_scope``: this surface has no
     source picker, and its hidden half follows the channel (no Memory when
@@ -800,6 +810,12 @@ def register_memory_context_tools(
         def load() -> list[dict[str, Any]]:
             # The channel is closed IN this worker thread, before the search
             # runs: without memory:read the Memory retriever is never called.
+            # That covers Memory ITEMS only.  This search installs no
+            # retrieval ceiling, and its knowledge-graph leg does not filter
+            # Memory-derived objects (the owner's or another member's): the
+            # channel does not reach that leg's store query.  The
+            # per-row ``memory_id`` check below is not an enforcement point
+            # either: with the channel closed no Memory item reaches it.
             allow_memory = _memory_read_allowed(repo, principal, notebook_id)
             with _owner_request_context(principal), memory_access_context(
                 allow_memory
