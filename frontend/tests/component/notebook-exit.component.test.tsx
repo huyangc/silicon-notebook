@@ -681,6 +681,21 @@ test("网络中断:重读列表与告知——已经退出了就说已退出,不
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 
+test("网络中断后列表里这本库只剩群组授权:算已退出(靠授权继续读),不说失败", async () => {
+  const user = userEvent.setup();
+  installServer([
+    disclosure(3),
+    leave(() => Promise.reject(new TypeError("Failed to fetch"))),
+    notebooksList(true, true),
+  ]);
+  const { onToast } = mount("bar");
+
+  await pressLeave(user);
+  await user.click(within(await panel()).getByRole("button", { name: "确认退出并删除" }));
+
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("已退出共享"));
+});
+
 test("代理超时(500)同样是「不知道」;重读到仍是成员且条数没变:说都还在、没有被删除", async () => {
   const user = userEvent.setup();
   installServer([

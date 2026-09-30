@@ -325,6 +325,16 @@ test("页面的提示由 ToastRegion 渲染,退出共享的提示走加长停留
   assert.equal(jsxElements(page, "ToastRegion").length, 1);
   assert.equal(jsxElements(page, "ToastRegion")[0].bindings.message, "toast");
   assert.match(pageText, /useNotebookExit\(\{ onToast: showExitToast,/);
+  // 只有「退出共享」自己的提示按加长时长计时,其余提示仍是默认时长。
+  assert.equal(
+    jsxElements(page, "ToastRegion")[0].bindings.lingerMs,
+    "toast && toast === exitToast ? TOAST_EXIT_MS : TOAST_DEFAULT_MS",
+  );
+  assert.match(
+    pageText,
+    /const showExitToast = useCallback\(\(message: string\) => \{\s*setExitToast\(message\);\s*setToast\(message\);\s*\}, \[\]\);/,
+    "showExitToast 必须同时记下这条提示(setExitToast)并显示它(setToast)",
+  );
   assert.equal(
     jsxElements(page, "div").filter((element) => element.attributes?.className === "toast").length,
     0,
