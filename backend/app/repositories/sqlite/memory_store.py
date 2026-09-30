@@ -2290,3 +2290,39 @@ class MemoryStore:
     ) -> list[str]:
         """Sorted distinct Memory ids behind ``memory_sources_for_source_ids``."""
         return sorted(set(self.memory_sources_for_source_ids(source_ids, owner_id).values()))
+
+    @staticmethod
+    def foreign_memory_sources_for_source_ids_sql() -> str:
+        """SQLite mirror of the PostgreSQL statement; see its docstring there.
+        Two scalar parameters: the id list as ONE JSON array text, and the member."""
+        from app.repositories.sqlite import memory_sql
+
+        return (
+            "SELECT s.id AS source_id, s.memory_id AS memory_id, "
+            "fo.created_by AS owner_id "
+            "FROM json_each(?) AS wanted "
+            "JOIN sources s ON s.id = wanted.value "
+            "JOIN memory_items fo ON fo.id = s.memory_id "
+            f"WHERE {memory_sql.memory_source_type_predicate('s.source_type')} "
+            f"AND NOT {memory_sql.memory_source_readable('s')}"
+        )
+
+    def foreign_memory_sources_for_source_ids(
+        self, source_ids: Sequence[str], member_id: str
+    ) -> dict[str, tuple[str, str]]:
+        """Mirrors the PostgreSQL store: ``{source_id: (memory_id, owner_id)}``
+        for the ids that are Memory sources of someone other than ``member_id``
+        (orphaned Memory sources map to nothing)."""
+        wanted = list(dict.fromkeys(str(item) for item in source_ids if item))
+        member = str(member_id or "")
+        if not wanted or not member:
+            return {}
+        with self.database.connect() as db:
+            rows = db.execute(
+                self.foreign_memory_sources_for_source_ids_sql(),
+                (json.dumps(wanted), member),
+            ).fetchall()
+        return {
+            str(row["source_id"]): (str(row["memory_id"]), str(row["owner_id"]))
+            for row in rows
+        }

@@ -19,12 +19,29 @@ from typing import Callable, Iterator
 
 from app.core.capability_tokens import new_capability_token
 from app.domain.report_export import ReportExportSource
-from app.domain.share_disclosure import ShareMemoryGuard
+from app.domain.share_disclosure import (
+    REPORT_MEMORY_USED_FIELD,
+    REPORT_PLANNING_MEMORY_KEY,
+    ShareMemoryGuard,
+    split_report_memory_use,
+)
 from app.repositories.sqlite.memory_store import MemoryStore
 from app.models.ask import StoredSubmittedVia
 from app.repositories.sqlite.access_sql import NOTEBOOK_READ_SQL, read_access_params
 from app.repositories.sqlite.database import SqliteDatabase
 from app.core.internal_observability import public_report_sections
+
+
+def _keep_planning_memory(column: str, value: str) -> str:
+    """``value`` (a JSON object expression) with ``column``'s stored planner
+    Memory record copied over, when there is one.  Every ``?`` in ``value``
+    appears twice in the result, in order: bind its arguments twice."""
+    key = f"'$.{REPORT_PLANNING_MEMORY_KEY}'"
+    return (
+        f"CASE WHEN json_type({column}, {key}) IS NOT NULL"
+        f" THEN json_set({value}, {key}, json(json_extract({column}, {key})))"
+        f" ELSE {value} END"
+    )
 
 
 class ReportStore:
@@ -79,15 +96,21 @@ class ReportStore:
                 # contract.  A plain assignment here erases it, which is exactly
                 # what happened on every terminal write: finished reports — the
                 # ones whose duration matters — could never show one.
-                sets.append(
-                    f"{col} = CASE WHEN json_extract({col},"
+                value = (
+                    f"CASE WHEN json_extract({col},"
                     f" '$._generation_started_at') IS NOT NULL"
                     f" THEN json_set(?, '$._generation_started_at',"
                     f" json_extract({col}, '$._generation_started_at'))"
                     f" ELSE ? END"
                 )
                 payload = json.dumps(val, ensure_ascii=False)
-                args.extend([payload, payload])
+                copies = 2
+                if REPORT_PLANNING_MEMORY_KEY not in val:
+                    # The planner's Memory record (M4) is the store's too: a
+                    # write that does not carry it keeps the stored one.
+                    value, copies = _keep_planning_memory(col, value), 4
+                sets.append(f"{col} = {value}")
+                args.extend([payload] * copies)
                 continue
             sets.append(f"{col} = ?")
             args.append(json.dumps(val, ensure_ascii=False) if dump else val)
@@ -125,17 +148,24 @@ class ReportStore:
         report_id: str,
         understanding: dict | None = None,
     ) -> bool:
-        """Atomically claim an outline-ready or failed report for generation."""
+        """Atomically claim an outline-ready or failed report for generation.
+
+        A replacement ``understanding`` keeps the planner's stored Memory record
+        (M4, ``REPORT_PLANNING_MEMORY_KEY``): the outline it planned is kept.
+        """
         now = self.now()
         understanding_sql = (
-            "json_set(json_remove(?, '$.credibility'),"
-            "'$._generation_started_at',?)"
+            _keep_planning_memory(
+                "understanding_json",
+                "json_set(json_remove(?, '$.credibility'),"
+                "'$._generation_started_at',?)",
+            )
             if understanding is not None
             else "json_set(json_remove(understanding_json, '$.credibility'),"
             "'$._generation_started_at',?)"
         )
         understanding_args = (
-            [json.dumps(understanding, ensure_ascii=False), now]
+            [json.dumps(understanding, ensure_ascii=False), now] * 2
             if understanding is not None
             else [now]
         )
@@ -202,10 +232,13 @@ class ReportStore:
              "updated_at": row["updated_at"], "depth": row["depth"],
              "section_count": len(json.loads(row["outline_json"] or "[]"))}
         if full:
+            understanding, sections, memory_used = split_report_memory_use(
+                understanding, json.loads(row["sections_json"] or "[]")
+            )
+            if memory_used:
+                d[REPORT_MEMORY_USED_FIELD] = memory_used
             d.update(outline=json.loads(row["outline_json"] or "[]"),
-                     sections=public_report_sections(
-                         json.loads(row["sections_json"] or "[]")
-                     ),
+                     sections=public_report_sections(sections),
                      gaps=json.loads(row["gaps_json"] or "[]"),
                      references=json.loads(row["references_json"] or "[]"),
                      section_status=json.loads(row["section_status_json"] or "[]"),

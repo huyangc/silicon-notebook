@@ -12,6 +12,49 @@ from typing import Any, Iterable
 
 SHARE_DISCLOSURE_REQUIRED = "share_disclosure_required"
 
+# Where a report records the author's Memory whose content entered a prompt
+# while it was produced (M4).  Both keys are written only when non-empty, so a
+# report that used no Memory keeps its stored bytes.
+#
+# * ``understanding_json[REPORT_PLANNING_MEMORY_KEY]``: Memory shown to the
+#   outline planner (the corpus map).  Planning happens before generation,
+#   possibly days before, and ``understanding_json`` is the only report column
+#   that survives from planning to the finished report.  The key is owned by
+#   the report store: every later understanding write that does not carry it
+#   keeps the stored value (like ``_generation_started_at``), and ``row_to_dict``
+#   takes it out of ``understanding``.  A new intent claim starts a new plan and
+#   drops it with the rest of the old understanding.
+# * ``sections_json[i][SECTION_MEMORY_KEY]``: Memory that entered section i's
+#   drafting prompt, written atomically with the finished report.
+#
+# ``row_to_dict`` removes both from what it returns and hands the union over as
+# ``report["memory_used"]``; the report detail API and the public page never
+# carry it (neither names the field).
+REPORT_PLANNING_MEMORY_KEY = "_memory_used"
+SECTION_MEMORY_KEY = "memory_used"
+REPORT_MEMORY_USED_FIELD = "memory_used"
+
+
+def _memory_ids(value: object) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(item) for item in value if isinstance(item, str) and item]
+
+
+def split_report_memory_use(
+    understanding: dict, sections: list
+) -> tuple[dict, list, list[str]]:
+    """Take the recorded Memory use out of a stored report's understanding and
+    sections; return both without it plus the sorted distinct Memory ids."""
+    used = set(_memory_ids(understanding.pop(REPORT_PLANNING_MEMORY_KEY, None)))
+    visible: list = []
+    for section in sections:
+        if isinstance(section, dict) and SECTION_MEMORY_KEY in section:
+            section = dict(section)
+            used.update(_memory_ids(section.pop(SECTION_MEMORY_KEY)))
+        visible.append(section)
+    return understanding, visible, sorted(used)
+
 
 class ShareDisclosureRequired(Exception):
     """The acknowledgement is missing or no longer matches the current count."""
@@ -44,8 +87,9 @@ class ShareMemoryGuard:
     """What the report store re-counts inside the share transaction.
 
     ``known_memory_ids`` are facts stored on the report itself (citations that
-    are a Memory, and citations recorded at generation time as coming from the
-    author's Memory); they cannot change.  ``live_source_ids`` are the cited
+    are a Memory, citations recorded at generation time as coming from the
+    author's Memory, and the Memory recorded as used while the report was
+    produced); they cannot change.  ``live_source_ids`` are the cited
     sources without such a record, looked up as the author's Memory sources
     on the store's own connection, in the same transaction as the flag flip.
     """
