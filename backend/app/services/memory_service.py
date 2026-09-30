@@ -166,6 +166,40 @@ def _provenance_line(item: MemoryRecord) -> str:
     return "；".join(parts)
 
 
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _self_contained_markdown(markdown: str) -> str:
+    """``markdown`` closed so that it cannot change how the NEXT export entry
+    renders: a code fence left open (```` ``` ```` or ``~~~``, CommonMark: the
+    closing fence uses the same character, at least as long, with nothing
+    after it) is closed with the matching fence, and an unterminated HTML
+    comment is terminated. Nothing else is changed."""
+    text = str(markdown or "").rstrip()
+    open_fence: str | None = None
+    outside: list[str] = []
+    for line in text.split("\n"):
+        match = _FENCE_RE.match(line)
+        if match is None:
+            if open_fence is None:
+                outside.append(line)
+            continue
+        marker, rest = match.group(1), match.group(2)
+        if open_fence is None:
+            if marker[0] == "`" and "`" in rest:
+                continue  # a backtick info string cannot contain backticks
+            open_fence = marker
+        elif marker[0] == open_fence[0] and len(marker) >= len(open_fence) and not rest.strip():
+            open_fence = None
+    if open_fence is not None:
+        text += "\n" + open_fence
+    else:
+        prose = "\n".join(outside)
+        if prose.rfind("<!--") > prose.rfind("-->"):
+            text += "\n-->"
+    return text
+
+
 def _export_section(index: int, item: MemoryRecord) -> str:
     lines = [
         f"\n---\n\n## {index}. {_one_line(item.title) or '（无标题）'}\n",
@@ -179,7 +213,7 @@ def _export_section(index: int, item: MemoryRecord) -> str:
     provenance = _provenance_line(item)
     if provenance:
         lines.append(f"- 来源：{provenance}")
-    return "\n".join(lines) + f"\n\n{item.content_md.rstrip()}\n"
+    return "\n".join(lines) + f"\n\n{_self_contained_markdown(item.content_md)}\n"
 
 
 class ExitDisclosureRequired(Exception):
@@ -924,32 +958,45 @@ class MemoryService:
         ``refs`` are ``(memory_id, notebook_id)`` pairs the caller already
         verified belong to the acting user. One read resolves which of them
         have a hidden derived source; a Memory without one costs nothing more.
-        For those that do, in this order:
+        The sources that exist are removed in ONE transaction by
+        ``remove_memory_sources`` — the same teardown ``delete_source`` runs,
+        over the whole page — with the Memory-specific steps inside it:
 
-        1. detach, in one write transaction for the page: strip each source's
-           evidence from objects another source owns (a manually merged shared
-           object loses that evidence and stays) and delete the review
-           candidates naming the source's own objects or relations;
-        2. remove the sources through ``remove_memory_sources`` — elements,
-           element vectors, KG objects, relations, facts, cluster member rows,
-           reverse-index rows — in one transaction, marking each notebook's
-           graph dirty once; a source a concurrent purge already removed
-           counts as removed;
-        3. drop the lexical-index rows of the objects that step 2 deleted
-           (SQLite; only rows whose object is gone).
+        1. ``detach_memory_projection_on``, right after the sources are
+           locked: strip their evidence from objects another source owns (a
+           manually merged shared object loses that evidence and stays; the
+           foreign rows are locked in one id-ordered statement), and remove
+           the WHOLE concept clusters of their objects plus the merge and
+           conflict candidates naming them;
+        2. the teardown: elements, element vectors, KG objects, relations,
+           facts, cluster member rows, reverse-index rows, the source rows;
+           each notebook's graph marked dirty once; a source a concurrent
+           purge already removed counts as removed;
+        3. ``drop_memory_lexical_rows_on``: the lexical-index rows of the
+           objects step 2 deleted (SQLite; only rows whose object is gone).
 
-        Runs BEFORE the Memory rows are deleted (``sources.memory_id`` is not
-        a foreign key: a source whose Memory row is gone is an orphan nothing
-        can find again), and once more after (see ``_purge_page``). No KG
-        service wired means this service never created a projection."""
+        Statements per page do not grow with the page's Memory count beyond
+        the object-delete pages (one per 500 objects). Runs BEFORE the Memory
+        rows are deleted (``sources.memory_id`` is not a foreign key: a source
+        whose Memory row is gone is an orphan nothing can find again), and
+        once more after (see ``_purge_page``). No KG service wired means this
+        service never created a projection."""
         if self.memory_kg is None:
             return
         sources = self.store.derived_memory_sources(refs)
         if not sources:
             return
-        owned_objects = self.store.detach_memory_projection(sources)
-        self.memory_kg.remove_memory_sources([source_id for _, source_id, _ in sources])
-        self.store.drop_memory_lexical_rows(owned_objects)
+        from app.services.kg_merge import purge_canonical_ids
+
+        self.memory_kg.remove_memory_sources(
+            [source_id for _, source_id, _ in sources],
+            detach=lambda db, rows: self.store.detach_memory_projection_on(
+                db, rows, canonical_ids_of=purge_canonical_ids
+            ),
+            after_teardown=lambda db, owned: self.store.drop_memory_lexical_rows_on(
+                db, owned
+            ),
+        )
 
     def _purge_page(self, user_id: str, refs: Sequence[tuple[str, str]]) -> int:
         """Hard-delete one page (at most ``_PURGE_PAGE``) of the user's Memory
@@ -1040,7 +1087,8 @@ class MemoryService:
            A failure part-way raises ``MemberExitFailed(d, r)``: still a
            member, d gone for good, r counted now; a retry is safe.
         4. Finish, under the membership row lock again: end the membership
-           only if none of the leaver's Memory is left there. A Memory saved
+           this exit claimed (same ``added_at`` — never one re-created while
+           the purge ran) only if none of the leaver's Memory is left there. A Memory saved
            while the purge ran is never deleted unacknowledged: the
            membership stays, and the caller learns both numbers —
            ``MemberExitIncomplete(d, r)``, or ``ExitDisclosureRequired(r)``
@@ -1071,7 +1119,9 @@ class MemoryService:
                 deleted, self._remaining_after_failure(notebook_id, user_id, claimed - deleted)
             ) from exc
         try:
-            remaining = self.store.finish_member_exit(notebook_id, user_id)
+            remaining, ended = self.store.finish_member_exit(
+                notebook_id, user_id, snapshot.membership_token
+            )
         except Exception as exc:
             self._audit_exit(notebook_id, user_id, deleted, finished=False)
             raise MemberExitFailed(
@@ -1082,6 +1132,12 @@ class MemoryService:
             if deleted:
                 raise MemberExitIncomplete(deleted, remaining)
             raise ExitDisclosureRequired(remaining)
+        if not ended:
+            # The claimed membership was ended by someone else meanwhile (the
+            # owner removed the member — and may have added them back: that
+            # new membership is theirs to keep). Its per-member state was
+            # cleaned by that removal.
+            return deleted
         try:
             self.membership.forget_member_state(notebook_id, user_id)
         except Exception as exc:  # noqa: BLE001 - the exit itself has finished

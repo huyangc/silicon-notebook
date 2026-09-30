@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, ContextManager, Iterable, List, Optional
+from typing import Any, Callable, ContextManager, Iterable, List, Optional, Sequence
 from urllib.parse import urlparse
 
 from app.core.config import Settings
@@ -265,6 +265,10 @@ class SourceIngestionService:
         effective_object_types: Callable[[str], Iterable[str]] = lambda _notebook_id: (),
         analysis_artifacts: Any = None,
         spreadsheet_analysis: Any = None,
+        # The batch form of ``clear_source_extraction_state`` (several sources
+        # of one notebook in one set of statements); ``None`` falls back to
+        # the one-source form, which is the same implementation per id.
+        clear_sources_extraction_state: Optional[Callable[..., None]] = None,
     ) -> None:
         self.settings = settings
         self.notebooks = notebooks
@@ -293,6 +297,7 @@ class SourceIngestionService:
         self.normalize_doc_type = normalize_doc_type
         self.default_notebook_names = default_notebook_names
         self.clear_source_extraction_state = clear_source_extraction_state
+        self.clear_sources_extraction_state = clear_sources_extraction_state
         self.begin_extraction_run = begin_extraction_run
         self.finish_extraction_run = finish_extraction_run
         self.notebook_tier = notebook_tier
@@ -2099,14 +2104,11 @@ class SourceIngestionService:
             # ``ingest_memory_source``'s reparse branch (memory sources are
             # tiny and this teardown is microsecond-scale there) — this
             # change is scoped to the delete path only.
-            if self.sources.source_exists_for_update_tx(db, source_id):
-                self.clear_source_extraction_state(
-                    db,
-                    source_id,
-                    source.notebook_id,
-                    clear_embeddings=True,
-                )
-                self.sources.delete_source_row(db, source_id)
+            # One teardown implementation (``_teardown_sources_tx``): this
+            # single delete and the batched Memory purge
+            # (``remove_memory_sources``) run the same statements, so they
+            # cannot drift apart.
+            self._teardown_sources_tx(db, [source_id])
             # codex #638 R5: this transaction DELETES knowledge_objects /
             # knowledge_relations / concept_clusters rows (via
             # clear_source_extraction_state → clear_source_graph_state), so its
@@ -2122,19 +2124,16 @@ class SourceIngestionService:
             self.kg_mutations.mark_unified_kg_dirty_in_tx(db, source.notebook_id)
         if source.type not in HIDDEN_SYNTHETIC_SOURCE_TYPES:
             self._try_augment_notebook_metadata(hooks, source)
-        if self.analysis_artifacts is not None:
-            try:
-                self.analysis_artifacts.redact_source(
-                    source.notebook_id, source_id, occurred_at=self.now()
-                )
-            except Exception as redact_error:  # noqa: BLE001 - source row is already deleted
-                self.event_log.logger.warning(
-                    "analysis artifact redaction failed (%s)",
-                    type(redact_error).__name__,
-                )
-        self.source_files.delete(source.file_path)
-        self.delete_source_images(source_id)  # Task 9: cascade-clean MinerU image assets
-        self.kg_mutations.invalidate_unified_cache(source.notebook_id)
+        self._after_sources_removed(
+            [
+                {
+                    "id": source_id,
+                    "notebook_id": source.notebook_id,
+                    "file_path": source.file_path,
+                    "is_memory": False,
+                }
+            ]
+        )
         # A deletion changes the corpus exactly as much as an addition does —
         # and it is the event that most often invalidates an existing
         # understanding block (the document a claim cited is gone). Last step,
@@ -2323,60 +2322,119 @@ class SourceIngestionService:
         if source_id is not None:
             self.remove_memory_sources([source_id])
 
-    def remove_memory_sources(self, source_ids: Iterable[str]) -> int:
+    def remove_memory_sources(
+        self,
+        source_ids: Iterable[str],
+        *,
+        detach: Optional[Callable[[Any, List[dict]], Any]] = None,
+        after_teardown: Optional[Callable[[Any, Any], None]] = None,
+    ) -> int:
         """Delete Memory-derived sources in ONE write transaction.
 
-        The per-source ``delete_source`` teardown (graph rows, facts, element
-        vectors, extraction runs, the source row with its elements), batched:
-        rows are locked and deleted in source-id order, so two concurrent
-        removers of overlapping sets cannot deadlock, and each notebook's
-        graph is marked dirty — one ``kg_mutation_seq`` bump — once per batch
-        instead of once per source. Readers key on that seq; every deleted
-        row commits in this same transaction, so one bump invalidates exactly
-        what one bump per source did.
+        The same teardown as ``delete_source`` (``_teardown_sources_tx``:
+        graph rows, facts, element vectors, extraction runs, the source rows
+        with their elements), over a whole page of sources: the rows are
+        locked in one id-ordered statement, so two concurrent removers of
+        overlapping sets cannot deadlock, every statement takes the whole id
+        list, and each notebook's graph is marked dirty — one
+        ``kg_mutation_seq`` bump — once per batch. Readers key on that seq;
+        every deleted row commits in this same transaction, so one bump
+        invalidates exactly what one bump per source did.
+
+        ``detach(db, rows)`` runs in the same transaction after the lock and
+        before the teardown (the Memory purge strips the sources' evidence
+        from foreign objects and removes the clusters and review candidates
+        naming their objects); whatever it returns is handed to
+        ``after_teardown(db, value)`` at the end of the transaction. The
+        post-commit steps are ``delete_source``'s (``_after_sources_removed``).
 
         Idempotent: a source that is already gone (a concurrent exit or
         delete removed it between the lookup and here) counts as deleted.
-        Only ``memory`` sources are accepted — this is not a general source
-        delete. Returns how many sources this call removed."""
-        live = []
-        for source_id in sorted(set(source_ids)):
-            try:
-                source = self.sources.get_source(source_id)
-            except KeyError:
-                continue
-            if source.type != "memory":
-                raise ValueError(f"not a Memory-derived source: {source_id}")
-            live.append(source)
-        if not live:
+        Only Memory sources are accepted (``is_memory``, computed by
+        ``memory_sql``'s predicate) — this is not a general source delete.
+        Returns how many sources this call removed."""
+        ids = sorted({str(source_id) for source_id in source_ids if source_id})
+        if not ids:
             return 0
-        removed = []
         with self.write() as db:
-            for source in live:
-                if self.sources.source_exists_for_update_tx(db, source.id):
-                    self.clear_source_extraction_state(
-                        db, source.id, source.notebook_id, clear_embeddings=True
-                    )
-                    self.sources.delete_source_row(db, source.id)
-                    removed.append(source)
-            for notebook_id in sorted({source.notebook_id for source in live}):
+            rows = self.sources.lock_sources_for_teardown_tx(db, ids)
+            foreign = [row["id"] for row in rows if not row["is_memory"]]
+            if foreign:
+                raise ValueError(f"not a Memory-derived source: {foreign[0]}")
+            if not rows:
+                return 0
+            detached = detach(db, rows) if detach is not None else None
+            self._teardown_sources_tx(db, [row["id"] for row in rows], locked=rows)
+            for notebook_id in sorted({row["notebook_id"] for row in rows}):
                 self.kg_mutations.mark_unified_kg_dirty_in_tx(db, notebook_id)
-        for source in removed:
+            if after_teardown is not None:
+                after_teardown(db, detached)
+        self._after_sources_removed(rows)
+        return len(rows)
+
+    def _teardown_sources_tx(
+        self,
+        db: Any,
+        source_ids: Sequence[str],
+        *,
+        locked: Optional[List[dict]] = None,
+    ) -> List[dict]:
+        """The one source-teardown transaction body, shared by
+        ``delete_source`` (one id) and ``remove_memory_sources`` (a page).
+
+        Takes the aggregate lock first (``FOR UPDATE`` on the existing source
+        rows, in id order — unless the caller already holds it and passes the
+        ``locked`` rows), then per notebook clears every derived row in
+        batched statements (``clear_sources_extraction_state``) and deletes
+        the source rows (their elements go by cascade). A source already gone
+        is skipped. Returns the rows it tore down."""
+        rows = (
+            locked
+            if locked is not None
+            else self.sources.lock_sources_for_teardown_tx(db, source_ids)
+        )
+        by_notebook: dict[str, List[str]] = {}
+        for row in rows:
+            by_notebook.setdefault(row["notebook_id"], []).append(row["id"])
+        for notebook_id in sorted(by_notebook):
+            ids = by_notebook[notebook_id]
+            if self.clear_sources_extraction_state is not None:
+                self.clear_sources_extraction_state(
+                    db, ids, notebook_id, clear_embeddings=True
+                )
+            else:  # narrow test doubles: the one-source form is the same code
+                for source_id in ids:
+                    self.clear_source_extraction_state(
+                        db, source_id, notebook_id, clear_embeddings=True
+                    )
+        self.sources.delete_source_rows(db, [row["id"] for row in rows])
+        return rows
+
+    def _after_sources_removed(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        """Post-commit steps of a teardown, shared by ``delete_source`` and
+        ``remove_memory_sources``: analysis-artifact redaction per source,
+        the source file and its image assets, then the unified-graph cache of
+        each notebook once. A Memory source (``is_memory``) is created with
+        no file and parsed without an image persister
+        (``ingest_memory_source``), so it has neither to remove — skipping
+        them saves a write transaction per Memory on a purge page."""
+        for row in rows:
             if self.analysis_artifacts is not None:
                 try:
                     self.analysis_artifacts.redact_source(
-                        source.notebook_id, source.id, occurred_at=self.now()
+                        row["notebook_id"], row["id"], occurred_at=self.now()
                     )
                 except Exception as redact_error:  # noqa: BLE001 - row already deleted
                     self.event_log.logger.warning(
                         "analysis artifact redaction failed (%s)",
                         type(redact_error).__name__,
                     )
-            self.source_files.delete(source.file_path)
-            self.delete_source_images(source.id)
-        for notebook_id in sorted({source.notebook_id for source in live}):
+            if row["is_memory"]:
+                continue
+            self.source_files.delete(row["file_path"])
+            self.delete_source_images(row["id"])  # Task 9: cascade-clean MinerU image assets
+        for notebook_id in sorted({row["notebook_id"] for row in rows}):
             self.kg_mutations.invalidate_unified_cache(notebook_id)
-        return len(removed)
 
     # ----------------------------------------------------------- extraction
     @staticmethod

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from psycopg.errors import DeadlockDetected, SerializationFailure
 
@@ -38,6 +38,10 @@ from app.repositories.postgres.access_sql import (
 )
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.governance_store import GovernanceStore
+from app.repositories.postgres.memory_sql import (
+    memory_derived_object,
+    memory_source_type_predicate,
+)
 from app.repositories.postgres.search import (
     MemoryCandidateScope,
     memory_candidate_ids,
@@ -1741,7 +1745,7 @@ class MemoryStore:
     @staticmethod
     def _member_exit_state_on(
         db: object, notebook_id: str, user_id: str, *, lock: bool
-    ) -> tuple[bool, bool]:
+    ) -> tuple[Any, bool]:
         """``(is_member, keeps_access)`` for one user and notebook.
 
         ``lock`` takes the membership row ``FOR UPDATE``: every Memory write
@@ -1751,7 +1755,7 @@ class MemoryStore:
         user's read path WITHOUT the membership row: ownership or any grant
         (the same ``grant_access_expr`` the read predicate uses)."""
         member = db.execute(
-            "SELECT user_id FROM notebook_members WHERE notebook_id=%s AND user_id=%s"
+            "SELECT added_at FROM notebook_members WHERE notebook_id=%s AND user_id=%s"
             + (" FOR UPDATE" if lock else ""),
             (notebook_id, user_id),
         ).fetchone()
@@ -1761,7 +1765,10 @@ class MemoryStore:
             f"{grant} AS keeps_access FROM notebooks nb WHERE nb.id=%s",
             (user_id, *(user_id,) * grant.count("%s"), notebook_id),
         ).fetchone()
-        return member is not None, bool(access and access["keeps_access"])
+        return (
+            member["added_at"] if member is not None else None,
+            bool(access and access["keeps_access"]),
+        )
 
     def member_exit_snapshot(
         self, notebook_id: str, user_id: str, *, claim: bool
@@ -1777,11 +1784,11 @@ class MemoryStore:
         deprecated rows too."""
         if claim:
             with self.database.write() as db:
-                is_member, keeps = self._member_exit_state_on(
+                token, keeps = self._member_exit_state_on(
                     db, notebook_id, user_id, lock=True
                 )
                 ids: tuple[str, ...] = ()
-                if is_member and not keeps:
+                if token is not None and not keeps:
                     ids = tuple(
                         row["id"]
                         for row in db.execute(
@@ -1791,69 +1798,90 @@ class MemoryStore:
                             (notebook_id, user_id),
                         ).fetchall()
                     )
-            return MemberExitSnapshot(is_member, keeps, len(ids), ids)
+            return MemberExitSnapshot(
+                token is not None, keeps, len(ids), ids, membership_token=token
+            )
         with self.database.connect() as db:
-            is_member, keeps = self._member_exit_state_on(
+            token, keeps = self._member_exit_state_on(
                 db, notebook_id, user_id, lock=False
             )
             count = 0
-            if is_member and not keeps:
+            if token is not None and not keeps:
                 count = int(db.execute(
                     "SELECT COUNT(*) AS c FROM memory_items "
                     "WHERE notebook_id=%s AND created_by=%s",
                     (notebook_id, user_id),
                 ).fetchone()["c"])
-        return MemberExitSnapshot(is_member, keeps, count)
+        return MemberExitSnapshot(token is not None, keeps, count)
 
-    def finish_member_exit(self, notebook_id: str, user_id: str) -> int:
-        """End a membership whose Memory has been purged — atomically with
-        the check that none is left.
+    def finish_member_exit(
+        self, notebook_id: str, user_id: str, membership_token: Any
+    ) -> tuple[int, bool]:
+        """End the membership this exit claimed — atomically with the check
+        that none of the leaver's Memory is left.
 
-        One transaction under the membership row lock: count the user's
-        Memory still in the notebook; if any exists (saved while the purge
-        ran) return that count and keep the membership, so nothing the
-        leaver did not acknowledge is ever deleted; otherwise delete the
-        membership row and return 0. No membership row: already left, 0.
+        One transaction under the membership row lock. Returns
+        ``(remaining, ended)``:
+
+        * the row is gone, or is not the claimed one (its ``added_at`` differs
+          from ``membership_token``: someone removed the member and added
+          them back while the purge ran) → ``(0, False)``: the claimed
+          membership has already ended, and a membership created after it
+          is never touched — nor counted;
+        * the claimed row, and Memory of the leaver exists here (saved while
+          the purge ran) → ``(count, False)``: the membership stays, nothing
+          unacknowledged is ever deleted;
+        * otherwise the row is deleted → ``(0, True)``.
+
         The row delete lives here, not in the sharing store, because it must
         commit together with that count."""
         with self.database.write() as db:
             member = db.execute(
-                "SELECT user_id FROM notebook_members "
+                "SELECT added_at FROM notebook_members "
                 "WHERE notebook_id=%s AND user_id=%s FOR UPDATE",
                 (notebook_id, user_id),
             ).fetchone()
-            if member is None:
-                return 0
+            if member is None or member["added_at"] != membership_token:
+                return 0, False
             remaining = int(db.execute(
                 "SELECT COUNT(*) AS c FROM memory_items "
                 "WHERE notebook_id=%s AND created_by=%s",
                 (notebook_id, user_id),
             ).fetchone()["c"])
             if remaining:
-                return remaining
+                return remaining, False
             db.execute(
                 "DELETE FROM notebook_members WHERE notebook_id=%s AND user_id=%s",
                 (notebook_id, user_id),
             )
-        return 0
+        return 0, True
 
     def derived_memory_sources(
         self, refs: Sequence[tuple[str, str]]
     ) -> list[tuple[str, str, str]]:
         """``(memory_id, source_id, notebook_id)`` of the hidden sources
         projected from these ``(memory_id, notebook_id)`` refs — one read for
-        a whole page. Keyed on the ref pairs rather than a join with
-        ``memory_items``, so it also finds a source whose Memory row is
-        already gone (the post-delete sweep for an ingest that finished in
-        between). A Memory without a derived source simply has no row."""
+        a whole page (at most ``_PURGE_PAGE`` ids). Keyed on the ref pairs
+        rather than a join with ``memory_items``, so it also finds a source
+        whose Memory row is already gone (the post-delete sweep for an ingest
+        that finished in between). A Memory without a derived source simply
+        has no row.
+
+        The predicate repeats ``idx_sources_memory_id``'s partial-index
+        condition (``memory_id IS NOT NULL AND memory_id <> ''``): PostgreSQL
+        cannot infer ``memory_id <> ''`` from ``memory_id = ANY($1)``, so
+        without it both the custom and the generic plan scan the whole
+        ``sources`` table (measured 36 ms vs 0.46 ms at 300k rows)."""
         if not refs:
             return []
         wanted = {(memory_id, notebook_id) for memory_id, notebook_id in refs}
         with self.database.connect() as db:
             rows = db.execute(
                 "SELECT id,notebook_id,memory_id FROM sources "
-                "WHERE memory_id=ANY(%s) AND source_type='memory' ORDER BY id",
-                ([memory_id for memory_id, _ in refs],),
+                "WHERE memory_id = ANY(%s) AND memory_id IS NOT NULL "
+                f"AND memory_id <> '' AND {memory_source_type_predicate()} "
+                "ORDER BY id",
+                (sorted({memory_id for memory_id, _ in refs}),),
             ).fetchall()
         return [
             (row["memory_id"], row["id"], row["notebook_id"])
@@ -1861,56 +1889,64 @@ class MemoryStore:
             if (row["memory_id"], row["notebook_id"]) in wanted
         ]
 
-    def detach_memory_projection(
-        self, sources: Sequence[tuple[str, str, str]]
+    def detach_memory_projection_on(
+        self,
+        db: object,
+        sources: Sequence[Mapping[str, Any]],
+        *,
+        canonical_ids_of: Callable[[list[dict]], tuple[list[str], list[str]]],
     ) -> dict[str, list[str]]:
-        """Prepare derived sources for removal, in ONE write transaction.
+        """The Memory-specific half of a purge page, inside the teardown's
+        transaction (``SourceIngestionService.remove_memory_sources`` calls it
+        after locking ``sources`` — rows of ``{id, notebook_id}`` — and before
+        the generic teardown). Per notebook, in batched statements:
 
-        For each ``(memory_id, source_id, notebook_id)``:
-        * strip its evidence from objects ANOTHER source owns, so the removal
-          that follows deletes only what the Memory itself minted (N-1: a
-          manual merge into a shared object must not take that object along);
-        * delete the review candidates naming the source's own objects or
-          relations (``kg_conflict_candidates``, pending
-          ``concept_merge_candidates``), which would otherwise outlive them.
-        Returns the source's own object ids per notebook, for the lexical
-        index cleanup after the removal. Every statement is scoped by
-        notebook and source id."""
+        * strip the sources' evidence from objects ANOTHER source owns
+          (``strip_sources_evidence_on``: one id-ordered lock statement), so
+          the teardown deletes only what the Memory itself minted;
+        * read the sources' own objects (``memory_derived_object``);
+        * remove the whole clusters of those objects and the merge and
+          conflict candidates naming them
+          (``purge_memory_review_rows_on``).
+
+        Returns the own object ids per notebook, for the lexical-index
+        cleanup after the teardown. ``canonical_ids_of`` maps the objects
+        ``[{object_id, object_type, name}]`` to ``(minted, bridge)`` canonical
+        ids (``kg_merge.purge_canonical_ids``)."""
         owned: dict[str, list[str]] = {}
-        if not sources:
-            return owned
+        by_notebook: dict[str, list[str]] = {}
+        for row in sources:
+            by_notebook.setdefault(row["notebook_id"], []).append(row["id"])
         now = self.now()
-        with self.database.write() as db:
-            for _memory_id, source_id, notebook_id in sorted(
-                sources, key=lambda item: item[1]
-            ):
-                GovernanceStore.strip_source_evidence_on(
-                    db, notebook_id, source_id, now
-                )
-                object_ids = [
-                    row["id"]
-                    for row in db.execute(
-                        "SELECT id FROM knowledge_objects "
-                        "WHERE notebook_id=%s AND source_id=%s",
-                        (notebook_id, source_id),
-                    ).fetchall()
-                ]
-                relation_ids = [
-                    row["id"]
-                    for row in db.execute(
-                        "SELECT id FROM knowledge_relations "
-                        "WHERE notebook_id=%s AND source_id=%s",
-                        (notebook_id, source_id),
-                    ).fetchall()
-                ]
-                GovernanceStore.delete_candidates_for_objects_on(
-                    db, notebook_id, object_ids, relation_ids
-                )
-                owned.setdefault(notebook_id, []).extend(object_ids)
+        for notebook_id in sorted(by_notebook):
+            source_ids = sorted(by_notebook[notebook_id])
+            GovernanceStore.strip_sources_evidence_on(db, notebook_id, source_ids, now)
+            objects = db.execute(
+                "SELECT ko.id,ko.object_type,ko.payload->>'name' AS name "
+                "FROM knowledge_objects ko "
+                "WHERE ko.notebook_id=%s AND ko.source_id = ANY(%s) "
+                f"AND {memory_derived_object('ko')} ORDER BY ko.id",
+                (notebook_id, source_ids),
+            ).fetchall()
+            object_ids = [row["id"] for row in objects]
+            minted, bridge = canonical_ids_of([
+                {"object_id": row["id"], "object_type": row["object_type"],
+                 "name": row["name"] or ""}
+                for row in objects
+            ])
+            GovernanceStore.purge_memory_review_rows_on(
+                db,
+                notebook_id,
+                source_ids,
+                minted_canonical_ids=minted,
+                bridge_canonical_ids=bridge,
+            )
+            owned[notebook_id] = object_ids
         return owned
 
-    def drop_memory_lexical_rows(
-        self, owned_objects: Mapping[str, Sequence[str]]
+    @staticmethod
+    def drop_memory_lexical_rows_on(
+        db: object, owned_objects: Mapping[str, Sequence[str]] | None
     ) -> int:
         """PostgreSQL searches ``knowledge_objects`` itself; there is no
         separate lexical-index table to clean (see the SQLite twin)."""

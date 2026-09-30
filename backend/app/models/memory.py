@@ -58,13 +58,17 @@ class MemberExitSnapshot:
     ``memory_count`` is the number of Memory rows (every status) the exit
     would delete: zero when the user is not a member, or would keep reading
     the notebook through its ownership or a grant (``keeps_access``). The
-    ids are filled only for a claiming read taken under the membership lock.
+    ids and the membership token are filled only for a claiming read taken
+    under the membership lock.
     """
 
     is_member: bool
     keeps_access: bool
     memory_count: int
     memory_ids: tuple[str, ...] = ()
+    # What identifies the claimed membership row (its ``added_at``): the
+    # finish ends only THAT membership, never one re-created meanwhile.
+    membership_token: Any = None
 
 
 class MemoryExitDisclosure(BaseModel):

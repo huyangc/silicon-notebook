@@ -25,6 +25,10 @@ from app.repositories.postgres._store_utils import (
 from app.repositories.postgres.cluster_lock import lock_cluster_artifact_type
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.knowledge_store import KnowledgeStore
+from app.repositories.postgres.memory_sql import (
+    memory_derived_object,
+    memory_derived_relation,
+)
 from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER
 from app.domain.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
@@ -1739,89 +1743,150 @@ class GovernanceStore:
         return int(cursor.rowcount or 0)
 
     @staticmethod
-    def delete_candidates_for_objects_on(
+    def purge_memory_review_rows_on(
         connection: Any,
         notebook_id: str,
-        object_ids: List[str],
-        relation_ids: List[str],
-    ) -> int:
-        """Delete the review candidates that name objects or relations about
-        to be deleted with their source, in the caller's transaction.
+        source_ids: List[str],
+        *,
+        minted_canonical_ids: List[str],
+        bridge_canonical_ids: List[str],
+    ) -> List[str]:
+        """Remove what names the objects of Memory sources about to be torn
+        down, in the caller's transaction (before the objects go):
 
-        ``kg_conflict_candidates`` (any status: ``rationale`` and
-        ``resolved_payload`` may quote the deleted text, and pending rows are
-        served to every reader by ``pending_conflicts``) whose left, right or
-        winner reference is one of these ids, and the PENDING
-        ``concept_merge_candidates`` seeded by one of the objects. Decided
-        merge rows are curator decisions keyed by seed names and stay. Rows
-        that outlive their objects would otherwise escape every later cleanup
-        keyed on the (now gone) objects. Scoped by notebook and the ids."""
-        refs = list(dict.fromkeys([*object_ids, *relation_ids]))
-        deleted = 0
-        if refs:
-            cursor = connection.execute(
-                "DELETE FROM kg_conflict_candidates WHERE notebook_id=%s "
-                "AND (left_ref=ANY(%s) OR right_ref=ANY(%s) OR winner_ref=ANY(%s))",
-                (notebook_id, refs, refs, refs),
-            )
-            deleted += int(cursor.rowcount or 0)
-        if object_ids:
-            cursor = connection.execute(
-                "DELETE FROM concept_merge_candidates WHERE notebook_id=%s "
-                "AND status='pending' "
-                "AND (canonical_a=ANY(%s) OR canonical_b=ANY(%s))",
-                (notebook_id, list(object_ids), list(object_ids)),
-            )
-            deleted += int(cursor.rowcount or 0)
-        return deleted
+        1. every concept cluster that contains one of those objects as a
+           member, or whose canonical id was minted from one of them
+           (``minted_canonical_ids``: ``<prefix>~<object id>`` and the object
+           id itself) — the WHOLE cluster, every generation, all member
+           rows: its canonical id, name and description may carry the
+           Memory's text on every shared member's row (plan §3 step 3; the
+           notebook is marked dirty by the teardown, so the rebuild
+           re-clusters the surviving members);
+        2. the merge candidates (any status) naming one of those clusters,
+           or naming a bridge canonical id of one of the objects
+           (``bridge_canonical_ids``) that no cluster row carries any more —
+           a name that only the deleted Memory gave;
+        3. the conflict candidates (any status: ``rationale`` and
+           ``resolved_payload`` may quote the Memory) whose left, right or
+           winner reference is one of the objects or relations. A candidate
+           between shared objects only is never touched: its references are
+           shared object or relation ids.
+
+        "Object of a Memory source" is ``memory_sql``'s
+        ``memory_derived_object`` over the given sources; "a cluster of a
+        Memory" is a cluster with such a member — the same member test as
+        ``no_memory_member_cluster``. Returns the removed canonical ids."""
+        ids = sorted(set(source_ids))
+        if not ids:
+            return []
+        owned_objects = (
+            "SELECT ko.id FROM knowledge_objects ko "
+            "WHERE ko.notebook_id = %s AND ko.source_id = ANY(%s) "
+            f"AND {memory_derived_object('ko')}"
+        )
+        removed = sorted({
+            row["canonical_id"]
+            for row in connection.execute(
+                "DELETE FROM concept_clusters c WHERE c.notebook_id = %s "
+                "AND c.canonical_id IN (SELECT mc.canonical_id FROM concept_clusters mc "
+                "WHERE mc.notebook_id = %s AND (mc.member_object_id IN ("
+                f"{owned_objects}) OR mc.canonical_id = ANY(%s))) "
+                "RETURNING c.canonical_id",
+                (
+                    notebook_id, notebook_id, notebook_id, ids,
+                    list(minted_canonical_ids),
+                ),
+            ).fetchall()
+        })
+        named = sorted({*removed, *minted_canonical_ids})
+        bridge = sorted(set(bridge_canonical_ids))
+        connection.execute(
+            "DELETE FROM concept_merge_candidates m WHERE m.notebook_id = %s AND ("
+            "m.canonical_a = ANY(%s) OR m.canonical_b = ANY(%s) "
+            "OR (m.canonical_a = ANY(%s) AND NOT EXISTS (SELECT 1 FROM concept_clusters xa "
+            "WHERE xa.notebook_id = m.notebook_id AND xa.canonical_id = m.canonical_a)) "
+            "OR (m.canonical_b = ANY(%s) AND NOT EXISTS (SELECT 1 FROM concept_clusters xb "
+            "WHERE xb.notebook_id = m.notebook_id AND xb.canonical_id = m.canonical_b)))",
+            (notebook_id, named, named, bridge, bridge),
+        )
+        connection.execute(
+            f"WITH refs AS ({owned_objects} UNION ALL "
+            "SELECT kr.id FROM knowledge_relations kr "
+            "WHERE kr.notebook_id = %s AND kr.source_id = ANY(%s) "
+            f"AND {memory_derived_relation('kr')}) "
+            "DELETE FROM kg_conflict_candidates c WHERE c.notebook_id = %s "
+            "AND (c.left_ref IN (SELECT id FROM refs) "
+            "OR c.right_ref IN (SELECT id FROM refs) "
+            "OR c.winner_ref IN (SELECT id FROM refs))",
+            (notebook_id, ids, notebook_id, ids, notebook_id),
+        )
+        return removed
 
     @staticmethod
-    def strip_source_evidence_on(
-        connection: Any, notebook_id: str, source_id: str, now: str
+    def strip_sources_evidence_on(
+        connection: Any, notebook_id: str, source_ids: List[str], now: str
     ) -> List[str]:
-        """Detach one source's evidence from the objects ANOTHER source owns.
+        """Detach several sources' evidence from the objects ANOTHER source
+        owns, in the caller's transaction.
 
         Deleting a source removes every object whose evidence references it
-        (``clear_source_graph_state``). For an object minted by that source
+        (``clear_sources_graph_state``). For an object minted by that source
         this is right; for an object minted by a different source that merely
         gained this source's evidence (a manual ``merge_knowledge`` of a
         Memory-derived object into a shared one), it deletes the shared
-        object with everything its own source contributed. Run this first,
-        in its own transaction, and the delete that follows only reaches the
-        rows this source minted: the foreign object keeps its payload and its
-        other evidence, and loses exactly the items citing ``source_id``.
+        object with everything its own source contributed. Run this first
+        and the teardown that follows only reaches the rows these sources
+        minted: the foreign object keeps its payload and its other evidence,
+        and loses exactly the items citing one of ``source_ids``.
 
-        "Owned" is the object's primary ``source_id`` column — the same
-        classification the Memory isolation work uses everywhere. The two
-        lookups mirror ``_stale_object_ids_for_source_batch`` branch for branch
-        (reverse index when backfilled, evidence containment otherwise), so
-        this finds exactly the foreign objects that delete would have found.
-        Every write is scoped by ``notebook_id`` and ``source_id``. Returns the
+        "Owned" is the object's primary ``source_id`` column. The candidate
+        lookup mirrors the teardown's (reverse index when backfilled,
+        evidence containment per source otherwise). Every foreign object is
+        then locked in ONE statement, in id order: two members leaving at
+        once whose objects were merged into the same shared objects take
+        those row locks in the same global order, so they queue instead of
+        deadlocking. Writes are scoped by ``notebook_id``. Returns the
         stripped object ids."""
+        ids = sorted(set(source_ids))
+        if not ids:
+            return []
         if KnowledgeStore.source_index_backfilled(connection, notebook_id):
             rows = connection.execute(
                 "SELECT ko.id, ko.evidence FROM knowledge_objects ko "
-                "JOIN knowledge_object_sources kos ON kos.object_id = ko.id "
-                "WHERE kos.source_id = %s AND kos.notebook_id = %s "
-                "AND ko.notebook_id = %s AND ko.source_id IS DISTINCT FROM %s "
+                "WHERE ko.notebook_id = %s "
+                "AND (ko.source_id IS NULL OR ko.source_id <> ALL(%s)) "
+                "AND ko.id IN (SELECT kos.object_id FROM knowledge_object_sources kos "
+                "WHERE kos.source_id = ANY(%s) AND kos.notebook_id = %s) "
                 "ORDER BY ko.id COLLATE \"C\" FOR UPDATE OF ko",
-                (source_id, notebook_id, notebook_id, source_id),
+                (notebook_id, ids, ids, notebook_id),
             ).fetchall()
         else:
+            candidates: set[str] = set()
+            for source_id in ids:
+                candidates.update(
+                    row["id"]
+                    for row in connection.execute(
+                        "SELECT id FROM knowledge_objects "
+                        "WHERE notebook_id = %s AND source_id IS DISTINCT FROM %s "
+                        "AND evidence @> jsonb_build_array("
+                        "jsonb_build_object('source_id', %s::text))",
+                        (notebook_id, source_id, source_id),
+                    ).fetchall()
+                )
             rows = connection.execute(
                 "SELECT id, evidence FROM knowledge_objects "
-                "WHERE notebook_id = %s AND source_id IS DISTINCT FROM %s "
-                "AND evidence @> jsonb_build_array("
-                "jsonb_build_object('source_id', %s::text)) "
+                "WHERE notebook_id = %s AND id = ANY(%s) "
+                "AND (source_id IS NULL OR source_id <> ALL(%s)) "
                 "ORDER BY id COLLATE \"C\" FOR UPDATE",
-                (notebook_id, source_id, source_id),
-            ).fetchall()
+                (notebook_id, sorted(candidates), ids),
+            ).fetchall() if candidates else []
+        wanted = set(ids)
         stripped: List[str] = []
         for row in rows:
             kept = [
                 item
                 for item in json_value(row["evidence"], [])
-                if not (isinstance(item, dict) and item.get("source_id") == source_id)
+                if not (isinstance(item, dict) and item.get("source_id") in wanted)
             ]
             connection.execute(
                 "UPDATE knowledge_objects SET evidence = %s, updated_at = %s "
@@ -1835,12 +1900,13 @@ class GovernanceStore:
                     notebook_id,
                 ),
             )
+            stripped.append(row["id"])
+        if stripped:
             connection.execute(
                 "DELETE FROM knowledge_object_sources "
-                "WHERE object_id = %s AND source_id = %s AND notebook_id = %s",
-                (row["id"], source_id, notebook_id),
+                "WHERE notebook_id = %s AND object_id = ANY(%s) AND source_id = ANY(%s)",
+                (notebook_id, stripped, ids),
             )
-            stripped.append(row["id"])
         return stripped
 
     # -------------------------------------------------- knowledge mutation
