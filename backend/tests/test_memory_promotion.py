@@ -512,11 +512,15 @@ def _shared_member_proposal(repo, *, via_grant: bool):
     return notebook, base, memory_owner, memory, proposal
 
 
-def test_admin_approval_fails_closed_after_member_loses_notebook_access(repo):
-    """A revoked grant keeps the Memory and its proposal, and approval fails
-    closed while the creator cannot read the notebook."""
+@pytest.mark.parametrize("access_loss", ["owner_removes_member", "grant_revoked"])
+def test_admin_approval_fails_closed_after_member_loses_notebook_access(
+    repo, access_loss
+):
+    """The OWNER removing the member, or a revoked grant: both take access
+    away without deleting anything, so the Memory and its proposal stay, and
+    approval fails closed while the creator cannot read the notebook."""
     notebook, base, memory_owner, memory, proposal = _shared_member_proposal(
-        repo, via_grant=True
+        repo, via_grant=access_loss == "grant_revoked"
     )
     with repo._connect() as db:
         before_revision_count = db.execute(
@@ -528,8 +532,11 @@ def test_admin_approval_fails_closed_after_member_loses_notebook_access(repo):
             (memory.id,),
         ).fetchone()["payload_json"]
 
-    with repo._write() as db:
-        db.execute("DELETE FROM notebook_grants WHERE id='gnt-member'")
+    if access_loss == "owner_removes_member":
+        repo.remove_member(notebook.id, memory_owner.id)
+    else:
+        with repo._write() as db:
+            db.execute("DELETE FROM notebook_grants WHERE id='gnt-member'")
     with pytest.raises(PermissionError):
         repo.approve_promotion(proposal["id"])
 
@@ -903,11 +910,15 @@ def test_promotion_routes_record_the_authenticated_admin_reviewer(tmp_path, monk
     }
 
 
-def test_memory_promotion_routes_hide_revoked_member_candidates(tmp_path, monkeypatch):
+@pytest.mark.parametrize("access_loss", ["owner_removes_member", "grant_revoked"])
+def test_memory_promotion_routes_hide_revoked_member_candidates(
+    tmp_path, monkeypatch, access_loss
+):
     """Approve and reject use the same 404 boundary after creator access loss.
 
-    Access is lost by revoking the creator's grant — a revocation keeps the
-    Memory and its proposals (a member EXIT deletes both; see
+    Access is lost by the owner removing the member or by revoking the
+    creator's grant — both keep the Memory and its proposals (only the
+    member's own EXIT deletes them; see
     ``test_member_exit_withdraws_the_proposal_and_the_memory_never_returns``)."""
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'revoked-routes.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
@@ -938,13 +949,16 @@ def test_memory_promotion_routes_hide_revoked_member_candidates(tmp_path, monkey
     base = repo_api.create_notebook(NotebookCreate(name="Revoked member base"))
     repo_api.mark_notebook_base(base.id)
     repo_api.replace_notebook_bases(notebook_id, [base.id], owner_id)
-    with repo_api._write() as db:
-        db.execute(
-            "INSERT INTO notebook_grants "
-            "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
-            "VALUES ('gnt-revoked',?,'user',?,'reader',?,'t')",
-            (notebook_id, member_id, owner_id),
-        )
+    if access_loss == "owner_removes_member":
+        repo_api.add_member(notebook_id, member_id)
+    else:
+        with repo_api._write() as db:
+            db.execute(
+                "INSERT INTO notebook_grants "
+                "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+                "VALUES ('gnt-revoked',?,'user',?,'reader',?,'t')",
+                (notebook_id, member_id, owner_id),
+            )
     with repo_api._write() as db:
         db.execute(
             "UPDATE users SET role='admin' WHERE id=?",
@@ -959,8 +973,11 @@ def test_memory_promotion_routes_hide_revoked_member_candidates(tmp_path, monkey
         )
         memory = repo_api.confirm_memory(memory.id, member_id)
         proposals.append(repo_api.propose_memory_promotion(memory.id, member_id))
-    with repo_api._write() as db:
-        db.execute("DELETE FROM notebook_grants WHERE id='gnt-revoked'")
+    if access_loss == "owner_removes_member":
+        repo_api.remove_member(notebook_id, member_id)
+    else:
+        with repo_api._write() as db:
+            db.execute("DELETE FROM notebook_grants WHERE id='gnt-revoked'")
 
     approve = client.post(
         f"/api/promotion-queue/{proposals[0]['id']}/approve",
