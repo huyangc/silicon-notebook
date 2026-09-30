@@ -823,6 +823,12 @@ def case_memory_shown_to_the_outline_planner_counts(world: World) -> None:
     models = _Models(outline_title=MEMORY_TEXT,
                      section_markdown=f"## {MEMORY_TEXT}\n正文")
     engine = _engine(world, world.alice, models)
+    # Retrieval hands the planner nothing (it would otherwise find the Memory
+    # projection by its text and record it): only the Memory lines carry it.
+    for method in ("federated_retrieve", "retrieve_elements", "ppr_retrieve"):
+        world.monkeypatch.setattr(
+            engine.dependencies.retrieval, method, lambda *a, **k: []
+        )
     rid = _new_report(world, world.alice)
     memory_ids = _serve_memory(world, ["a1"])
     engine.plan_outline(world.notebook, rid, "环路为什么稳定？")
