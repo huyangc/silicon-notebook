@@ -108,10 +108,19 @@ const optimisticGenerating = (
   understanding: { ...report.understanding, credibility: undefined },
 });
 
-// 公开前的确认条状态。`count` 是服务端数出来的「公开页会带上几条作者本人的个人记忆摘录」
-// (取数失败、靠 409 才拿到确数之前为 null);`refusal` 非 null 表示服务端拒绝了这次公开
-// (非作者)——`refusal` 是那句中文原因,就地显示,不再给「确认公开」。
-export type ReportShareConfirmState = { count: number | null; refusal: string | null };
+// 公开前的确认条状态。`count` 是服务端数出来的「公开页可能包含来自几条作者本人个人记忆的
+// 内容」(取数失败、靠 409 才拿到确数之前为 null);`added` 非 null 表示这是 409 带回的新数字
+// (值为比确认时多出的条数),条上先说「条数有变化」;`refusal` 非 null 表示这份报告不能公开
+// (引用了其他成员的个人记忆,或服务端拒绝了这次公开)——那句中文原因就地显示,不再给
+// 「确认公开」。
+/** 披露端点说报告引用了其他成员的个人记忆时,不发请求、就地显示的原因(与服务端 403 同句)。 */
+export const FOREIGN_MEMORY_REFUSAL = "报告引用了其他成员的个人记忆，不能公开";
+
+export type ReportShareConfirmState = {
+  count: number | null;
+  added: number | null;
+  refusal: string | null;
+};
 
 export type ReportWorkspace = ReturnType<typeof useReportWorkspace>;
 
@@ -568,12 +577,18 @@ export function useReportWorkspace({
     } catch (error) {
       if (!owns(owner) || activeReportRef.current?.id !== report.id) return null;
       if (error instanceof ShareDisclosureRequired) {
-        // 服务端此刻的确数与作者确认的不等:确认条就地换成确数,由作者重新决定。
-        setShareConfirm({ count: error.memoryCount, refusal: null });
+        // 服务端此刻的确数与作者确认的不等:确认条就地换成确数,由作者重新决定。作者已经
+        // 看过一个数字时,条上先说「条数有变化」;取披露失败、这是第一次拿到数字时不说。
+        const { memoryCount, newMemoryCount } = error;
+        setShareConfirm((prev) => ({
+          count: memoryCount,
+          added: prev?.count != null ? newMemoryCount : null,
+          refusal: null,
+        }));
       } else if (httpErrorStatus(error) === 403) {
-        // 非作者不得公开引用了作者个人记忆的报告:那句原因就地显示在确认条里。
+        // 服务端拒绝公开(非作者、或引用了其他成员的个人记忆):那句原因就地显示在确认条里。
         const refusal = toUserMessage(error, "只有作者可以公开分享这份报告");
-        setShareConfirm((prev) => ({ count: prev?.count ?? null, refusal }));
+        setShareConfirm((prev) => ({ count: prev?.count ?? null, added: null, refusal }));
       } else {
         surfaceError(error, "分享操作失败");
       }
@@ -597,20 +612,28 @@ export function useReportWorkspace({
         effectsRef.current.notify("已取消分享，原链接立即失效");
         return null;
       }
-      // 先取披露:公开页会带上几条作者本人的个人记忆摘录。0 条 → 直接公开(与从前逐字节
-      // 相同的那一发 POST);>0 → 展开确认条等作者决定。取数失败不拦公开:POST 不带确认值,
-      // 服务端 409 会把确数带回来。
+      // 先取披露:公开页可能包含来自几条作者本人个人记忆的内容,以及有没有引用其他成员的
+      // 个人记忆。引用了别人的 → 不发 POST,确认条就地说明不能公开;0 条 → 直接公开(与从前
+      // 逐字节相同的那一发 POST);>0 → 展开确认条等作者决定。取数失败不拦公开:POST 不带
+      // 确认值,服务端 409 / 403 会把确数或原因带回来。
       let count: number | undefined;
+      let foreign = 0;
       try {
         const disclosure = await getReportShareDisclosure(owner.notebookId, report.id);
         const value = disclosure?.memory_count;
         count = Number.isInteger(value) && value >= 0 ? value : undefined;
+        const others = disclosure?.foreign_memory_count;
+        foreign = typeof others === "number" && Number.isInteger(others) && others > 0 ? others : 0;
       } catch (error) {
         logDiagnostic("report", error);
       }
       if (!owns(owner) || activeReportRef.current?.id !== report.id) return null;
+      if (foreign > 0) {
+        setShareConfirm({ count: null, added: null, refusal: FOREIGN_MEMORY_REFUSAL });
+        return null;
+      }
       if (count !== undefined && count > 0) {
-        setShareConfirm({ count, refusal: null });
+        setShareConfirm({ count, added: null, refusal: null });
         return null;
       }
       return await publishReport(owner, report, undefined);
