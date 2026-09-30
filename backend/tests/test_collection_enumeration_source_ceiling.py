@@ -1375,12 +1375,19 @@ def test_a_kg_read_alone_detects_the_upload(repo):
             _src(repo, nb, "sLate", formulas=1)
             _kg(repo, nb, "oLate", [("sLate", "el-sLate-001")],
                 owner_source_id="sLate")
+            first = repo.collection_enumeration.enumerate_kg_objects(
+                nb, "concept", budget=_budget(page_size=1, max_rows=1),
+                ceiling_binds=False)
+            assert _drifted(nb)
             kg = repo.collection_enumeration.enumerate_kg_objects(
                 nb, "concept", budget=_budget(), ceiling_binds=False)
-            assert _drifted(nb)
+    # The first page holds no row of the new source, so only the entry check
+    # can keep its object out of the denominator: frozen set = oA, oB, oMix.
+    assert [item.object_id for item in first.items] == ["oA"]
+    assert first.coverage.total == 3
     assert "oLate" not in {item.object_id for item in kg.items}
     assert kg.coverage.complete is True
-    assert kg.coverage.total == len(kg.items)
+    assert kg.coverage.total == len(kg.items) == 3
 
 
 def test_a_kg_row_owned_outside_the_freeze_flips_the_read_to_bound(repo):
