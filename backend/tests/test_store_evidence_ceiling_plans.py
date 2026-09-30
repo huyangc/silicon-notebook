@@ -4,14 +4,18 @@ The contract itself lives in ``store_evidence_cases`` and runs unchanged on
 PostgreSQL (``postgres/test_store_evidence_ceiling_explain_pins.py``).  This
 file adds what only SQLite has:
 
-* **both planner-statistics states** -- ``no_stats`` is production (the
+* **three planner-statistics states** -- ``no_stats`` is production (the
   repository never runs ``ANALYZE``); ``stats_prod`` installs row counts of a
   large production notebook, so a small fixture cannot make a list-driven plan
-  look as cheap as the intended one.  A plan pin must hold in both;
-* **plan shape** (``EXPLAIN QUERY PLAN`` of the captured statement): the
-  ceiling filters and never drives (``+col IN json_each``); the owner-library
-  read of ``_enrich_evidence`` / ``_element_texts`` goes element → source →
-  notebook by primary key and never scans a library's sources;
+  look as cheap as the intended one; ``stats_thin`` is the same notebook with
+  one or two rows per source on the source indexes -- the state in which a
+  list-driven plan (one seek per listed id) looks cheapest.  A plan pin must
+  hold in all three;
+* **plan shape** (``EXPLAIN QUERY PLAN`` of the captured statement): a
+  ceiling filters and never drives (``+col IN json_each``); the relation read
+  binds no list and is driven by its 40 endpoint ids; the owner-library read
+  of ``_enrich_evidence`` / ``_element_texts`` goes element → source by
+  primary key and never scans a library's sources;
 * **one parameter** per ceiling and the deployment variable limit (32,766):
   a 49k-id ceiling runs.
 """
@@ -32,7 +36,14 @@ from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from tests import store_evidence_cases as cases
 
 DEPLOYMENT_VARIABLE_LIMIT = 32_766
-STATS_STATES = ("no_stats", "stats_prod")
+STATS_STATES = ("no_stats", "stats_prod", "stats_thin")
+# ``stats_thin``: one or two rows per source id on the source indexes.
+THIN_STATS = {
+    "idx_knowledge_relations_source": "8350000 1",
+    "idx_chunks_source": "98058 2",
+}
+# 40 admitted objects, the size of a real answer context.
+FORTY = ["ko-a", "ko-b", "ko-c"] + [f"ko-none-{n:02d}" for n in range(37)]
 PRODUCTION_STATS = [
     ("knowledge_relations", "idx_knowledge_relations_nb_source_target_edge", "8350000 8350000 4 2 1"),
     ("knowledge_relations", "idx_knowledge_relations_nb_source", "8350000 8350000 4"),
@@ -86,7 +97,7 @@ def _seed(db: sqlite3.Connection) -> None:
     db.execute("DELETE FROM sync_change_log")
 
 
-def _install_production_stats(db: sqlite3.Connection) -> None:
+def _install_production_stats(db: sqlite3.Connection, *, thin: bool = False) -> None:
     db.execute("ANALYZE")
     tables = sorted({table for table, _index, _stat in PRODUCTION_STATS})
     marks = ",".join("?" * len(tables))
@@ -94,7 +105,9 @@ def _install_production_stats(db: sqlite3.Connection) -> None:
     if db.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_stat4'").fetchone():
         db.execute(f"DELETE FROM sqlite_stat4 WHERE tbl IN ({marks})", tables)
     db.executemany(
-        "INSERT INTO sqlite_stat1(tbl, idx, stat) VALUES (?,?,?)", PRODUCTION_STATS,
+        "INSERT INTO sqlite_stat1(tbl, idx, stat) VALUES (?,?,?)",
+        [(table, index, THIN_STATS.get(index, stat) if thin else stat)
+         for table, index, stat in PRODUCTION_STATS],
     )
 
 
@@ -106,8 +119,8 @@ def database(request, tmp_path_factory, _sqlite_schema_template) -> SqliteDataba
     database = SqliteDatabase(settings, root)
     with database.write() as db:
         _seed(db)
-        if request.param == "stats_prod":
-            _install_production_stats(db)
+        if request.param in ("stats_prod", "stats_thin"):
+            _install_production_stats(db, thin=request.param == "stats_thin")
         elif db.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_stat1'").fetchone():
             db.execute("DELETE FROM sqlite_stat1")
     database.close_local()
@@ -117,7 +130,7 @@ def database(request, tmp_path_factory, _sqlite_schema_template) -> SqliteDataba
     ).fetchone()[0] and database.connect().execute(
         "SELECT COUNT(*) FROM sqlite_stat1"
     ).fetchone()[0]
-    assert bool(has_stats) == (request.param == "stats_prod")
+    assert bool(has_stats) == (request.param != "no_stats")
     yield database
     database.close_local()
 
@@ -181,6 +194,12 @@ def test_node_context_reads_elements_only_from_the_objects_own_library(store):
     )
 
 
+def test_element_texts_read_texts_and_ordinals_from_the_owner_library(store, conn):
+    cases.check_element_texts_owner(
+        lambda ids, **kwargs: store._element_texts(conn, ids, **kwargs)
+    )
+
+
 def test_follow_relation_evidence_titles_come_from_the_relations_own_library(store, conn):
     cases.check_follow_relation_evidence(
         lambda ids, **kwargs: store.follow_relation_evidence_rows(conn, ids, **kwargs)
@@ -225,18 +244,17 @@ def test_without_a_ceiling_the_statements_are_the_historical_ones(store, conn, s
 
 
 # ------------------------------------------------------------------ plans
-def test_relation_ceiling_filters_and_the_endpoints_drive(store, conn, statements):
-    rows = store.in_network_relation_rows(
-        conn, cases.NB, ["ko-a", "ko-b", "ko-c"], allowed_source_ids=WIDE,
-    )
-    assert cases.edges(rows)[("ko-a", "supports", "ko-b")] == 3
-    sql, params = _only(statements, "COUNT(DISTINCT r.source_id)")
-    # One parameter carries the whole 49k ceiling.
-    assert sum(isinstance(p, str) and p.startswith("[") for p in params) == 1
-    assert len(params) == 1 + 3 + 3 + 1
+def test_sourced_relation_read_binds_no_list_and_the_endpoints_drive(store, conn, statements):
+    """The relation read a covered library makes (``with_source_ids``) binds
+    nothing but its 40 endpoint ids twice, and those drive -- never the
+    ``source_id`` index, in any statistics state."""
+    rows = store.in_network_relation_rows(conn, cases.NB, FORTY, with_source_ids=True)
+    assert {dict(row)["source_id"] for row in rows} >= {"s-01", "s-02", "s-03"}
+    sql, params = _only(statements, "r.source_id FROM knowledge_relations")
+    assert "json_each" not in sql
+    assert len(params) == 1 + 40 + 40
     plan = _plan(conn, sql, params)
-    assert "SEARCH r USING INDEX idx_knowledge_relations_nb_source" in plan, plan
-    assert "(notebook_id=? AND source_object_id=?" in plan, plan
+    assert "SEARCH r USING INDEX idx_knowledge_relations_nb_" in plan, plan
     assert "idx_knowledge_relations_source " not in plan, plan
     assert "idx_knowledge_relations_source)" not in plan, plan
     assert "SCAN r" not in plan, plan
@@ -249,6 +267,7 @@ def test_exact_probe_ceiling_filters_the_text_match(store, conn, statements):
     sql, params = _only(statements, "chunks_fts MATCH")
     assert sum(isinstance(p, str) and p.startswith("[") for p in params) == 1
     plan = _plan(conn, sql, params)
+    assert "SEARCH c USING INDEX idx_chunks_source" not in plan, plan
     assert "SCAN chunks_fts VIRTUAL TABLE" in plan, plan
     assert "SEARCH c USING INDEX sqlite_autoindex_chunks_1 (id=?)" in plan, plan
     assert "idx_chunks_source" not in plan, plan
@@ -265,7 +284,6 @@ def test_owner_library_reads_go_by_primary_keys(store, conn, statements):
         plan = _plan(conn, sql, params)
         assert "USING INDEX sqlite_autoindex_source_elements_1 (id=?)" in plan, plan
         assert "SEARCH os USING INDEX sqlite_autoindex_sources_1 (id=?)" in plan, plan
-        assert "SEARCH onb USING" in plan and "(id=?)" in plan, plan
         assert "SCAN" not in plan, plan
         assert "idx_sources_" not in plan, plan
 

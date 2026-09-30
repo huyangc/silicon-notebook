@@ -36,10 +36,10 @@ from app.services.citation_markers import MARKER_RE, marker_keys
 from app.services.source_display import source_display_title
 from app.services.source_element_selection import deduplicate_source_chunks_in_order
 from app.services.source_scope import (
-    citation_active_id, current_source_scope, node_context_row_within_ceiling,
-    notebook_in_scope, record_ceiling_drift, scoped_node_context_row,
-    scoped_source_ceiling, source_allowed, source_ceiling_exists,
-    subjectless_run_active,
+    citation_active_id, current_source_scope, library_source_ceiling,
+    node_context_row_within_ceiling, notebook_in_scope, record_ceiling_drift,
+    scoped_node_context_row, scoped_source_ceiling, source_allowed,
+    source_ceiling_exists, subjectless_run_active,
 )
 
 
@@ -262,66 +262,36 @@ def _live_kg_evidence(filtered: list[tuple[str, str, Any]]) -> list[tuple[str, s
 
 
 # Marker a ``knowledge_context`` entry carries (only then) when the source its
-# first occurrence names is owned by another library than the object's own
-# (ledger B-11: a KG object promoted into a public library still points at the
-# promoter's private source).  Readers that re-resolve an entry's source --
-# ``parse_anchors``, the report's reference list -- pass such sources through
-# ``foreign_source_owners`` so the stored title stays.
+# first occurrence names is owned by another library than the object's own.
 FOREIGN_SOURCE_KEY = "source_foreign"
 
 
 def _foreign_owned(row: Mapping[str, Any], owner_notebook_id: str) -> bool:
     """THE rule "this source row belongs to another library than the citing
-    entry's": the row names an owning library and it is not
-    ``owner_notebook_id``.  An expected owner of ``""`` matches no library (a
-    source cited from two libraries that disagree, or an entry marked
-    ``FOREIGN_SOURCE_KEY``).  A row without an owner (a vanished source) is
-    not called foreign -- there is nothing to resolve from it anyway."""
+    entry's" (ledger B-11): the row names an owning library and it is not
+    ``owner_notebook_id``.  A row without an owner (a vanished source) is not
+    called foreign -- there is nothing to resolve from it anyway."""
     owner = str(row.get("notebook_id") or "")
     return bool(owner) and owner != owner_notebook_id
 
 
-def _add_owner(owners: dict[str, str], source_id: str, notebook_id: str) -> None:
-    """Record that ``source_id`` is cited from ``notebook_id``; a second,
-    different citing library makes it ``""`` (resolve nothing for it)."""
-    if not source_id:
-        return
-    if owners.get(source_id, notebook_id) != notebook_id:
-        owners[source_id] = ""
-    else:
-        owners[source_id] = notebook_id
+def _snapshot_foreign_entry(value: MutableMapping[str, Any]) -> None:
+    """Turn a ``knowledge_context`` entry whose source belongs to another
+    library into a pure snapshot (ledger B-11: a KG object promoted into a
+    public library still points at the promoter's private source and element).
 
-
-def foreign_source_owners(
-    entries: Iterable[Mapping[str, Any]],
-) -> dict[str, str]:
-    """``citation_source_info(owner_notebook_ids=...)`` for id-map entries
-    re-resolved downstream: every source of an entry marked
-    ``FOREIGN_SOURCE_KEY`` maps to ``""`` (never resolved).  Empty when no
-    entry is marked -- then callers pass nothing and their reads are
+    The stored title and excerpt stay; the pointers into the other library go
+    -- ``source_id``, ``element_id`` and the payload's knowhow locator -- so no
+    later reader of this entry (the answer anchor, its images and table jump,
+    the report's reference list, titles and image candidates) can re-read that
+    library by a global id.  The decision is per entry, so another entry citing
+    the same source from its own library still resolves live.  The marker
+    ``FOREIGN_SOURCE_KEY`` is added only here; an ordinary entry's id map is
     unchanged."""
-    return {
-        str(entry.get("source_id") or ""): ""
-        for entry in entries
-        if entry.get(FOREIGN_SOURCE_KEY) and entry.get("source_id")
-    }
-
-
-def foreign_source_kwargs(
-    sections: Iterable[Mapping[str, Any]],
-) -> dict[str, dict[str, str]]:
-    """``citation_source_info`` keyword arguments for a report's reference
-    list (``ReportEngine._assemble``), built from every section's id map
-    (ledger B-11): ``{"owner_notebook_ids": ...}`` when an entry is marked
-    ``FOREIGN_SOURCE_KEY``, so that source keeps the entry's stored title and
-    is not counted as "from a reference library" by its owner; ``{}``
-    otherwise, leaving the call exactly as before."""
-    owners = foreign_source_owners(
-        context
-        for section in sections
-        for context in (section.get("id_map") or {}).values()
-    )
-    return {"owner_notebook_ids": owners} if owners else {}
+    value["source_id"] = ""
+    value["element_id"] = ""
+    value["knowhow"] = None
+    value[FOREIGN_SOURCE_KEY] = True
 
 
 def _attest_collection_citations(
@@ -405,30 +375,90 @@ class EvidenceContextService:
             origin, context, ceiling_pushed=allowed_source_ids is not None,
         )
 
-    def _relation_source_ceilings(
-        self, origins: Iterable[str],
-    ) -> dict[str, frozenset[str]]:
-        """``in_network_relations(source_ceilings=...)`` for ``knowledge_context``:
-        the libraries of the admitted objects whose source ceiling BINDS on this
-        run, each with its frozen ceiling.
+    def _bounded_relation_rows(
+        self,
+        participants: Sequence[str],
+        object_ids: list[str],
+        origins: Iterable[str],
+    ) -> tuple[list[dict[str, Any]], dict[tuple[str, str, str, str], int]]:
+        """``knowledge_context``'s relation rows, judged against the source
+        ceiling of each library (ledger B-6).  Returns the rows -- one per edge,
+        the shape ``in_network_relations`` always returned -- and
+        ``{(notebook, src, edge, tgt): in-ceiling support}`` for the edges of
+        libraries whose ceiling binds.
 
-        Same verdict as the object re-reads (``self.ceiling_binds``, memoised
-        per run and library, already asked for every origin by ``_node_context
-        _row``, so this adds no probe); a verdict turned True by a drifted
-        re-read earlier in the same call binds the relations too.  A relation
-        needs both endpoints admitted, and an object is admitted only from its
-        own library, so other participants cannot contribute a surviving edge
-        and are not asked.  A binding ceiling with nothing to materialise (the
-        legacy local ``exclude`` shape, unreachable from the entry points that
-        freeze an ``include``) is treated as empty: that library's relation
-        lines are dropped rather than read unbounded."""
-        ceilings: dict[str, frozenset[str]] = {}
-        for origin in dict.fromkeys(origins):
-            if not self.ceiling_binds(origin):
+        Without a scope, or when no admitted object's library is covered by a
+        source ceiling (``ActiveSourceScope.source_ceiling_binds``), the call is
+        today's, byte for byte.  Only the libraries of admitted objects are
+        asked: a relation needs both endpoints admitted, and an object is
+        admitted only from its own library.
+
+        A covered library reads its rows WITH ``source_id`` (one row per edge
+        and source; no id list is bound -- the candidates are the relations
+        among a few dozen admitted objects) and each row is judged in Python
+        against ``library_source_ceiling`` (``scope.allows`` for the legacy
+        local ``exclude`` shape, which materialises no list):
+
+        * the verdict (``self.ceiling_binds``, memoised per run and library and
+          already asked by every ``_node_context_row``) is True: rows outside
+          the ceiling are dropped, an edge left with no row disappears, and the
+          edge's support is its number of DISTINCT in-ceiling sources.  Not
+          cluster-folded: it counts the rows between these two shown objects;
+        * the verdict is False: verify-on-read.  Every row inside -> the edges
+          are used as read with the canonical support, exactly as without a
+          scope.  One row outside -> the ceiling drifted after the verdict
+          (``record_ceiling_drift``, the rest of the run binds this library)
+          and the rows are judged as if the verdict had been True.
+
+        The window left: a relation row written between these rows being read
+        and the answer being drafted is not seen -- as for every other read of
+        the run; nothing outside the frozen ceiling is admitted by it."""
+        scope = current_source_scope()
+        sourced = [] if scope is None else [
+            origin for origin in dict.fromkeys(origins)
+            if scope.source_ceiling_binds(origin)
+        ]
+        if not sourced:
+            return self.knowledge.in_network_relations(participants, object_ids), {}
+        rows = self.knowledge.in_network_relations(
+            participants, object_ids, with_source_ids=sourced,
+        )
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["notebook_id"]), []).append(dict(row))
+        out: list[dict[str, Any]] = []
+        support: dict[tuple[str, str, str, str], int] = {}
+        for notebook_id, library_rows in grouped.items():
+            if notebook_id not in sourced:
+                out.extend(library_rows)
                 continue
-            ceiling = scoped_source_ceiling(origin)
-            ceilings[origin] = frozenset() if ceiling is None else ceiling
-        return ceilings
+            ceiling = library_source_ceiling(scope, notebook_id)
+
+            def inside(source_id: str, _ceiling=ceiling, _nb=notebook_id) -> bool:
+                if _ceiling is not None:
+                    return source_id in _ceiling
+                return scope.allows(_nb, source_id)
+
+            binds = self.ceiling_binds(notebook_id)
+            if not binds and not all(
+                inside(str(row.get("source_id") or "")) for row in library_rows
+            ):
+                record_ceiling_drift(scope, notebook_id)
+                binds = True
+            edges: dict[tuple[str, str, str], dict[str, Any]] = {}
+            sources: dict[tuple[str, str, str], set[str]] = {}
+            for row in library_rows:
+                source_id = str(row.pop("source_id", "") or "")
+                if binds and not inside(source_id):
+                    continue
+                edge = (row["source_object_id"], row["edge_type"], row["target_object_id"])
+                edges.setdefault(edge, row)
+                sources.setdefault(edge, set()).add(source_id)
+            out.extend(edges.values())
+            if binds:
+                for (src, edge_type, tgt), found in sources.items():
+                    support[(notebook_id, src, edge_type, tgt)] = len(found)
+        return out, support
 
     def tier_map(self, notebook_ids: Sequence[str]) -> dict[str, str]:
         return self.notebooks.tier_map(notebook_ids)
@@ -471,7 +501,6 @@ class EvidenceContextService:
         source_ids: Iterable[str],
         *,
         metadata: Mapping[str, Mapping[str, Any]] | None = None,
-        owner_notebook_ids: Mapping[str, str] | None = None,
     ) -> dict[str, dict[str, str]]:
         """Resolve citation display titles and original upload names together.
 
@@ -480,25 +509,14 @@ class EvidenceContextService:
         provenance must not double the number of source queries.  ``file_name``
         is the persisted upload name; MinerU's temporary/output Markdown names
         are never stored in this column.
-
-        ``owner_notebook_ids`` (PR-E2 E2-4, ledger B-11): ``{source_id: the
-        library whose entry cites it}``.  A listed source owned by another
-        library (``_foreign_owned``) is left out of the result, so the caller
-        keeps the title and file name stored with its entry instead of that
-        other library's CURRENT name -- the case is a KG object promoted into a
-        public library, whose evidence still points at the promoter's private
-        source.  Sources not listed, and ``None``, resolve as before.
         """
         ids = list(dict.fromkeys(str(source_id) for source_id in source_ids if source_id))
         if not ids:
             return {}
         rows = metadata if metadata is not None else self.source_metadata(ids)
-        owners = owner_notebook_ids or {}
         result: dict[str, dict[str, str]] = {}
         for source_id in ids:
             row = rows.get(source_id) or {}
-            if source_id in owners and _foreign_owned(row, owners[source_id]):
-                continue
             title = source_display_title(row)
             file_name = str(row.get("file_name") or "").strip()
             if title or file_name:
@@ -1305,11 +1323,7 @@ class EvidenceContextService:
             source_id = str(value.get("source_id") or "")
             source_info = citation_source_info.get(source_id) or {}
             if _foreign_owned(source_info, origin_by_key[key]):
-                # 台账 B-11:出处来源属于**别的库**(晋升进公共库的对象,证据仍
-                # 指向推广者的私有库)。保留存储时的标题与片段,不用那一库来源的
-                # 现名覆盖;打标记,让下游再解析这条来源的读者(锚点、报告引用
-                # 列表)同样不覆盖(``foreign_source_owners``)。
-                value[FOREIGN_SOURCE_KEY] = True
+                _snapshot_foreign_entry(value)
                 continue
             if source_info.get("title"):
                 value["source_title"] = source_info["title"]
@@ -1326,29 +1340,16 @@ class EvidenceContextService:
             # and an excluded library's objects were never admitted into
             # ``evidence_by_id`` in the first place -- so this is pure query cost
             # for excluded libraries, never a content leak.
-            # PR-E2·E2-4(台账 B-6):天花板**起约束作用**的库(与上面每条
-            # node_context 重读同一个 ``ceiling_binds`` 裁决、同一份备忘)只读
-            # 天花板内来源的关系行,每条边带界内的不同来源数;没有界内行的边
-            # 不返回。一个都不约束时调用与今天逐字节相同。
-            source_ceilings = self._relation_source_ceilings(origin_by_key.values())
-            relation_rows = (
-                self.knowledge.in_network_relations(
-                    participants, list(object_to_key),
-                    source_ceilings=source_ceilings,
-                )
-                if source_ceilings else
-                self.knowledge.in_network_relations(
-                    participants, list(object_to_key)
-                )
+            # PR-E2·E2-4(台账 B-6):天花板覆盖的库按界内来源过滤、计数并读后
+            # 核验(``_bounded_relation_rows``);没有 scope 时调用与今天逐字节相同。
+            relation_rows, bound_support = self._bounded_relation_rows(
+                participants, list(object_to_key), origin_by_key.values(),
             )
             seen_relations: set[tuple[str, str, str]] = set()
             # (source_key, edge_type, target_key, notebook_id, source_object_id,
             #  target_object_id) — support count filled in below, in one batch
             # per notebook group instead of one query per surviving row.
             survivors: list[tuple[str, str, str, str, str, str]] = []
-            # 约束库的边:支持数就是那条行自己带的界内来源数,不再查 canonical
-            # 支持表(那张表按全部来源计,含天花板外的)。
-            bound_support: dict[tuple[str, str, str, str], int] = {}
             for row in relation_rows:
                 source_key = object_to_key.get(row["source_object_id"])
                 target_key = object_to_key.get(row["target_object_id"])
@@ -1356,11 +1357,6 @@ class EvidenceContextService:
                 if not source_key or not target_key or source_key == target_key or identity in seen_relations:
                     continue
                 seen_relations.add(identity)
-                if row["notebook_id"] in source_ceilings:
-                    bound_support[(
-                        row["notebook_id"], row["source_object_id"],
-                        row["edge_type"], row["target_object_id"],
-                    )] = int(row["source_count"])
                 survivors.append((
                     source_key, row["edge_type"], target_key,
                     row["notebook_id"], row["source_object_id"], row["target_object_id"],
@@ -1385,7 +1381,9 @@ class EvidenceContextService:
             # 查询,但从「每条关系一次」降到「每 300 条关系一次」。
             triples_by_notebook: dict[str, list[tuple[str, str, str]]] = {}
             for _src_key, edge_type, _tgt_key, nb_id, source_object_id, target_object_id in survivors:
-                if nb_id in source_ceilings:
+                if (nb_id, source_object_id, edge_type, target_object_id) in bound_support:
+                    # 约束库的边:支持数是界内不同来源数,不查 canonical 支持表
+                    # (那张表按全部来源计,含天花板外的)。
                     continue
                 triples_by_notebook.setdefault(nb_id, []).append(
                     (source_object_id, edge_type, target_object_id)
@@ -1443,16 +1441,8 @@ class EvidenceContextService:
             for key in marker_keys(marker_group)
             if key in evidence_by_id
         ))
-        foreign = foreign_source_owners(evidence_by_id[key] for key in cited_keys)
-        citation_source_info = (
-            self.citation_source_info(
-                (str(evidence_by_id[key].get("source_id") or "") for key in cited_keys),
-                owner_notebook_ids=foreign,
-            )
-            if foreign else
-            self.citation_source_info(
-                str(evidence_by_id[key].get("source_id") or "") for key in cited_keys
-            )
+        citation_source_info = self.citation_source_info(
+            str(evidence_by_id[key].get("source_id") or "") for key in cited_keys
         )
         for marker_group in marker_groups:
             keys = marker_keys(marker_group)
@@ -1717,8 +1707,7 @@ class EvidenceContextService:
         *,
         notebook_id: str,
     ) -> list[Citation]:
-        filtered: list[tuple[str, str, Any]] = []
-        owners: dict[str, str] = {}
+        filtered: list[tuple[str, str, Any, str]] = []
         for hit in hits:
             tier = getattr(hit, "tier", "personal") or "personal"
             # Task 14 codex r4 fix: hit.notebook_id 的原始值同样会被联邦检索
@@ -1739,28 +1728,34 @@ class EvidenceContextService:
             for evidence in hit.evidence:
                 if evidence.element_id and evidence.element_id not in valid_element_ids:
                     continue
-                filtered.append((tier, hit_notebook_id, evidence))
-                # 台账 B-11:卡片标题只从对象自己那一库的来源现读。
-                _add_owner(owners, str(evidence.source_id or ""), hit_origin)
+                # The row's own library travels with it: the B-11 decision below
+                # is per row, never pooled by source id.
+                filtered.append((tier, hit_notebook_id, evidence, hit_origin))
         filtered = _live_kg_evidence(filtered)
 
+        citation_source_info = self.citation_source_info(
+            row[2].source_id for row in filtered
+        )
+        # 台账 B-11:来源属于别的库(晋升进公共库的对象,证据仍指向推广者的私有库)
+        # 的那几行做成快照卡——证据存储的标题与片段,不带来源 / 元素指针,于是
+        # 既不按全局 id 现读那一库来源的现名,也不给附图与 knowhow 定位候选。
+        foreign = [
+            _foreign_owned(citation_source_info.get(evidence.source_id) or {}, origin)
+            for _tier, _nb, evidence, origin in filtered
+        ]
         # Task 12（引用跳转）: 批量按 element_id 查一次 knowhow 定位标签，不管
         # 本次要建多少条引用——绝不逐条引用各查一次(运行效率是一等约束)。
         knowhow_refs = self.knowhow_refs_for(
-            evidence.element_id for _tier, _nb, evidence in filtered
-        )
-        citation_source_info = self.citation_source_info(
-            evidence.source_id for _tier, _nb, evidence in filtered
+            row[2].element_id for row, is_foreign in zip(filtered, foreign)
+            if not is_foreign
         )
 
         citations: list[Citation] = []
-        for tier, hit_notebook_id, evidence in filtered:
-            source_info = citation_source_info.get(evidence.source_id) or {}
-            if evidence.source_id in owners and _foreign_owned(
-                source_info, owners[evidence.source_id],
-            ):
-                # 台账 B-11:别的库的来源——用证据存储时的标题,不用那一库的现名。
-                source_info = {"title": str(evidence.source_title or "")}
+        for (tier, hit_notebook_id, evidence, _origin), is_foreign in zip(filtered, foreign):
+            source_info = (
+                {"title": str(evidence.source_title or "")} if is_foreign
+                else citation_source_info.get(evidence.source_id) or {}
+            )
             source_title = source_info.get("title", "")
             citation_label = (
                 f"{source_title} · {evidence.location_label}".strip(" ·")
@@ -1768,14 +1763,14 @@ class EvidenceContextService:
             )
             citations.append(Citation(
                 label=citation_label,
-                source_id=evidence.source_id,
-                element_id=evidence.element_id,
+                source_id="" if is_foreign else evidence.source_id,
+                element_id="" if is_foreign else evidence.element_id,
                 location_label=evidence.location_label,
                 quoted_span=evidence.quoted_span,
                 source_file_name=source_info.get("file_name", ""),
                 tier=tier,
                 notebook_id=hit_notebook_id,
-                knowhow=knowhow_refs.get(evidence.element_id),
+                knowhow=None if is_foreign else knowhow_refs.get(evidence.element_id),
             ))
         return citations
 

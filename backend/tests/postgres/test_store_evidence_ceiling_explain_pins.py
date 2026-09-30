@@ -5,14 +5,16 @@ ledger B-6, B-9, B-11, N-4).
   SQLite store answers in ``tests/test_store_evidence_ceiling_plans.py``.
 * **Byte identity** -- without a ceiling each statement is the historical one,
   sent the historical way (a plain ``execute``: it keeps the plan cache).
-* **Plan cache** -- with a ceiling the statement is sent unprepared
+* **Plan cache** -- with a ceiling the exact probe is sent unprepared
   (``id_binding.execute_ids``) and never reaches ``pg_prepared_statements``
   after 15 executions on one connection (psycopg prepares on the 5th; a
   generic plan from about the 11th turns the ceiling into an opaque
   parameter).
-* **Plans** -- the ceiling is a folded constant that filters; the endpoints
-  (relations) or the trigram text match (exact probe) drive; the owner-library
-  evidence read goes element -> source -> notebook by primary key.
+* **Plans** -- the exact probe's ceiling is a folded constant that filters
+  the trigram match; the relation read of a covered library
+  (``with_source_ids``) binds no list and is driven by its 40 endpoint ids;
+  the owner-library evidence read goes element -> source by primary key; the
+  follow-chain evidence read goes by relation primary key.
 
 A bulk of 12 000 sources / objects / chunks and 36 000 relations sits next to
 the contract rows so the planner costs a realistic notebook
@@ -184,6 +186,14 @@ def test_node_context_owner_library_contract(database):
     )
 
 
+def test_element_texts_owner_contract(database):
+    store = KnowledgeStore(database, _seams())
+    cases.check_element_texts_owner(_on_connection(
+        database,
+        lambda db, ids, **kwargs: store._element_texts(db, ids, **kwargs),
+    ))
+
+
 def test_follow_relation_evidence_contract(database):
     store = KnowledgeStore(database, _seams())
     cases.check_follow_relation_evidence(_on_connection(
@@ -225,8 +235,6 @@ def test_ceiling_statements_stay_out_of_the_plan_cache(database, monkeypatch):
     store = KnowledgeStore(database, _seams())
     recorder = _Recorder(monkeypatch)
     calls = {
-        "relations": lambda db: store.in_network_relation_rows(
-            db, cases.NB, ["ko-a", "ko-b", "ko-c"], allowed_source_ids=WIDE),
         "exact": lambda db: store.chunk_exact_search(
             db, cases.NB, cases.NEEDLE, 5, allowed_source_ids=sorted(WIDE)),
     }
@@ -248,26 +256,39 @@ def test_ceiling_statements_stay_out_of_the_plan_cache(database, monkeypatch):
 
 
 # ------------------------------------------------------------------ plans
-def test_relation_ceiling_is_a_constant_filter_and_the_endpoints_drive(database, monkeypatch):
+FORTY = ["ko-a", "ko-b", "ko-c"] + [f"kob-{n:05d}" for n in range(0, 37 * 300, 300)]
+
+
+def test_sourced_relation_read_binds_no_list_and_the_endpoints_drive(database, monkeypatch):
     store = KnowledgeStore(database, _seams())
     recorder = _Recorder(monkeypatch)
     with database.connect() as db:
-        rows = store.in_network_relation_rows(
-            db, cases.NB, ["ko-a", "ko-b", "ko-c", "kob-00001", "kob-00002"],
-            allowed_source_ids=WIDE,
-        )
-    assert cases.edges(rows)[("ko-a", "supports", "ko-b")] == 3
-    sql, params, _options = recorder.only("COUNT(DISTINCT r.source_id)")
+        rows = store.in_network_relation_rows(db, cases.NB, FORTY, with_source_ids=True)
+    assert {dict(row)["source_id"] for row in rows} >= {"s-01", "s-02", "s-03"}
+    sql, params, options = recorder.only("r.source_id FROM knowledge_relations")
+    assert "string_to_array" not in sql and "ANY(" not in sql
+    assert len(params) == 1 + 40 + 40 and options == {}
     plan = _plan(database, sql, params)
-    assert "idx_knowledge_relations_nb_source" in plan or "idx_knowledge_relations_nb_target" in plan, plan
-    assert "r.source_id = ANY ('{" in plan, plan
-    assert "string_to_array" not in plan, plan
+    assert ("idx_knowledge_relations_nb_source" in plan
+            or "idx_knowledge_relations_nb_target" in plan), plan
     assert "idx_knowledge_relations_source " not in plan, plan
-    assert "Index Cond: (r.source_id" not in plan, plan
     assert not any(
         "Seq Scan on" in line and ".knowledge_relations" in line
         for line in plan.splitlines()
     ), plan
+
+
+def test_follow_relation_evidence_goes_by_relation_primary_keys(database, monkeypatch):
+    store = KnowledgeStore(database, _seams())
+    recorder = _Recorder(monkeypatch)
+    relation_ids = ["kr-1", "kr-7"] + [f"krb-{n}-0" for n in range(0, BULK, 400)]
+    with database.connect() as db:
+        store.follow_relation_evidence_rows(db, relation_ids, notebook_id=cases.NB)
+    sql, params, _options = recorder.only("FROM knowledge_relations r LEFT JOIN sources s")
+    plan = _plan(database, sql, params)
+    assert "pk_knowledge_relations" in plan, plan
+    assert "pk_sources" in plan, plan
+    assert "Seq Scan on" not in plan, plan
 
 
 def test_exact_probe_ceiling_is_a_constant_filter_on_the_trigram_match(database, monkeypatch):
@@ -303,9 +324,6 @@ def test_owner_library_evidence_read_goes_by_primary_keys(database, monkeypatch)
         plan = _plan(database, sql, params)
         assert "pk_source_elements" in plan, plan
         assert "Index Scan using pk_sources" in plan, plan
-        # The two-row notebooks table may be scanned; the element and source
-        # tables never are, and no notebook-wide source index is walked.
-        for line in plan.splitlines():
-            if "Seq Scan on" in line:
-                assert line.rstrip().endswith(" onb"), plan
+        assert "Seq Scan on" not in plan, plan
+        assert "notebooks" not in plan, plan
         assert "idx_sources_" not in plan, plan

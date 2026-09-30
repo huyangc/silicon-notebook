@@ -484,68 +484,93 @@ def test_relation_with_no_in_ceiling_row_is_not_rendered(repo):
     assert "relations:" not in block and "kind_of" not in block, block
 
 
-def test_promoted_object_never_shows_the_promoters_private_text_or_title(repo):
-    """PR-E2·E2-4(台账 B-11):一个晋升进公共库的对象,证据仍指向推广者私有库的
-    元素与来源。提示词、引用锚点与引用卡里只能出现存储时的片段与标题,绝不出现
-    私有库元素的现文、也不出现私有来源的现名。
-
-    变异锚点:``_enrich_evidence`` 去掉 ``owner_notebook_id`` 的库谓词 → 提示词
-    与锚点片段变成私有现文,红;``knowledge_context`` 去掉 ``_foreign_owned``
-    判定 → 锚点标题变成私有现名,红。"""
+def _mk_promoted_object(repo):
+    """A public library holding ``ko-prom``, promoted from a private library:
+    its evidence still points at the private IMAGE element ``el-priv`` (with
+    an asset and a caption) of the private source ``s-priv``, and its payload
+    at a private knowhow row.  Returns ``(public notebook, hit)``."""
     from app.models.schemas import Evidence
     from app.services.retrieval import RetrievedKnowledge
 
     public = repo.create_notebook(NotebookCreate(name="public"))
     private = repo.create_notebook(NotebookCreate(name="private"))
     _mk_src(repo, private.id, "s-priv")
+    payload = {"name": "promoted", "table_id": "kt-priv", "rows": ["row-priv"]}
     with repo._write() as db:
         db.execute("UPDATE sources SET title='Private Current Name' WHERE id='s-priv'")
         db.execute(
             "INSERT INTO source_elements(id,source_id,element_type,location_label,text,"
-            "created_at) VALUES ('el-priv','s-priv','paragraph','p1',"
-            "'PRIVATE CURRENT TEXT','2026-01-01T00:00:00Z')")
+            "metadata,created_at) VALUES ('el-priv','s-priv','image','p1',"
+            "'PRIVATE CURRENT TEXT',?,'2026-01-01T00:00:00Z')",
+            (json.dumps({"asset_id": "asset-priv", "caption": "PRIVATE CAPTION"}),))
         db.execute(
             "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,payload,"
             "evidence,source_id,created_at,updated_at) VALUES "
             "('ko-prom',?,'concept','approved',?,?,'',"
             "'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
-            (public.id, json.dumps({"name": "promoted"}), json.dumps([{
+            (public.id, json.dumps(payload), json.dumps([{
                 "source_id": "s-priv", "element_id": "el-priv",
                 "quoted_span": "stored snapshot", "source_title": "Stored Title",
             }])))
-
     hit = RetrievedKnowledge(
-        object_id="ko-prom", object_type="concept", payload={"name": "promoted"},
+        object_id="ko-prom", object_type="concept", payload=payload,
         evidence=[Evidence(
             source_id="s-priv", source_title="Stored Title", element_id="el-priv",
-            element_type="paragraph", location_label="p1",
+            element_type="image", location_label="p1",
             quoted_span="stored snapshot", confidence=1.0,
         )],
     )
+    return public, hit
+
+
+def test_promoted_object_never_shows_the_promoters_private_text_or_title(repo):
+    """PR-E2·E2-4(台账 B-11):一个晋升进公共库的对象,证据仍指向推广者私有库的
+    元素与来源。提示词、引用锚点与引用卡里只出现存储时的片段与标题:不出现私有
+    元素的现文、私有来源的现名,也不带私有库的来源 / 元素指针,于是没有私有图片、
+    图注与 knowhow 定位。
+
+    变异锚点:``_enrich_evidence`` 去掉库谓词 → 提示词与片段变成私有现文;
+    ``knowledge_context`` 不做外库快照 → 锚点标题是私有现名、锚点带私有图;
+    ``citations_from`` 不按条目判外库 → 卡片带私有图与现名。都红。"""
+    public, hit = _mk_promoted_object(repo)
+    evidence_context = repo._runtime.evidence_context_component
     block, id_map = repo._answer_context(public.id, [hit])
     (key,) = id_map
     anchors = repo._parse_answer_anchors(f"claim [{key}]", id_map)
-    cards = repo._runtime.evidence_context_component.citations_from(
+    cards = evidence_context.citations_from(
         [hit], {"el-priv"}, "fallback", notebook_id=public.id,
     )
+    evidence_context.attach_citation_images([
+        *((anchor, (anchor.element_id,)) for anchor in anchors),
+        *((card, (card.element_id,)) for card in cards),
+    ])
     rendered = json.dumps(
         [block, {k: {f: str(v) for f, v in value.items()} for k, value in id_map.items()},
          [anchor.model_dump() for anchor in anchors],
          [card.model_dump() for card in cards]],
         ensure_ascii=False,
     )
-    assert "PRIVATE CURRENT TEXT" not in rendered
-    assert "Private Current Name" not in rendered
+    for private in ("PRIVATE CURRENT TEXT", "Private Current Name", "PRIVATE CAPTION",
+                    "asset-priv", "kt-priv", "el-priv", "s-priv"):
+        assert private not in rendered, private
     assert "stored snapshot" in block
     assert id_map[key]["source_title"] == "Stored Title"
+    assert id_map[key]["source_foreign"] is True
     assert anchors[0].source_title == "Stored Title"
     assert anchors[0].snippet == "stored snapshot"
+    assert anchors[0].knowhow is None and not anchors[0].images
     assert cards[0].label.startswith("Stored Title")
+    assert cards[0].knowhow is None and not cards[0].images
 
 
-def test_own_library_titles_still_resolve_live(repo):
-    """The B-11 rule leaves an ordinary object untouched: its source's current
-    name still replaces the stored one, and no marker is added."""
+def test_own_library_titles_images_and_pointers_still_resolve_live(repo):
+    """The B-11 rule leaves an ordinary object untouched: the id map, the
+    anchor and the citation card all take its source's CURRENT name, keep the
+    source / element pointers, attach its image, and carry no marker.
+
+    Mutation anchor: judging the card by the display notebook (``""`` for the
+    active library) instead of the row's library turns this red."""
+    from app.models.schemas import Evidence
     from app.services.retrieval import RetrievedKnowledge
 
     nb = repo.create_notebook(NotebookCreate(name="own"))
@@ -553,20 +578,43 @@ def test_own_library_titles_still_resolve_live(repo):
     with repo._write() as db:
         db.execute("UPDATE sources SET title='Renamed Title' WHERE id='s-own'")
         db.execute(
+            "INSERT INTO source_elements(id,source_id,element_type,location_label,text,"
+            "metadata,created_at) VALUES ('el-own','s-own','image','p1','own text',?,"
+            "'2026-01-01T00:00:00Z')",
+            (json.dumps({"asset_id": "asset-own", "caption": "own caption"}),))
+        db.execute(
             "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,payload,"
             "evidence,source_id,created_at,updated_at) VALUES "
             "('ko-own',?,'concept','approved',?,?,'s-own',"
             "'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
             (nb.id, json.dumps({"name": "own"}), json.dumps([{
-                "source_id": "s-own", "element_id": "", "quoted_span": "q",
+                "source_id": "s-own", "element_id": "el-own", "quoted_span": "q",
                 "source_title": "Old Title",
             }])))
-    hit = RetrievedKnowledge(object_id="ko-own", object_type="concept",
-                             payload={"name": "own"}, evidence=[])
+    hit = RetrievedKnowledge(
+        object_id="ko-own", object_type="concept", payload={"name": "own"},
+        evidence=[Evidence(
+            source_id="s-own", source_title="Old Title", element_id="el-own",
+            element_type="image", location_label="p1", quoted_span="q", confidence=1.0,
+        )],
+    )
+    evidence_context = repo._runtime.evidence_context_component
     _block, id_map = repo._answer_context(nb.id, [hit])
-    (value,) = id_map.values()
+    (key, value), = id_map.items()
     assert value["source_title"] == "Renamed Title"
+    assert (value["source_id"], value["element_id"]) == ("s-own", "el-own")
     assert "source_foreign" not in value
+    anchors = repo._parse_answer_anchors(f"claim [{key}]", id_map)
+    cards = evidence_context.citations_from([hit], {"el-own"}, "fallback", notebook_id=nb.id)
+    evidence_context.attach_citation_images([
+        *((anchor, (anchor.element_id,)) for anchor in anchors),
+        *((card, (card.element_id,)) for card in cards),
+    ])
+    assert anchors[0].source_title == "Renamed Title"
+    assert cards[0].label.startswith("Renamed Title")
+    assert (cards[0].source_id, cards[0].element_id) == ("s-own", "el-own")
+    assert [image.asset_id for image in anchors[0].images] == ["asset-own"]
+    assert [image.asset_id for image in cards[0].images] == ["asset-own"]
 
 
 def test_annotate_edge_support_folds_only_edge_endpoints(repo, monkeypatch):

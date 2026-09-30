@@ -418,15 +418,15 @@ def _definition_from_defines(
     return {} if hit is None else _defines_evidence_fields(hit)
 
 
-# 「元素属于对象所在的那一库,且该库存活」(台账 B-11,PR-E2·E2-4):
-# ``_enrich_evidence`` / ``_element_texts`` 的 ``owner_notebook_id`` 形态接在
-# ``source_elements se`` 后面,谓词 ``os.notebook_id=%s``。三次主键探测
-# (元素 → 来源 → 笔记本),与元素 id 清单的长度成正比、与库大小无关;
-# EXPLAIN pin 在 tests/postgres/test_store_evidence_ceiling_explain_pins.py。
-_OWN_ELEMENT_JOIN = (
-    " JOIN sources os ON os.id=se.source_id"
-    " JOIN notebooks onb ON onb.id=os.notebook_id"
-)
+# 「元素属于对象所在的那一库」(台账 B-11,PR-E2·E2-4):``_enrich_evidence`` /
+# ``_element_texts`` 的 ``owner_notebook_id`` 形态接在 ``source_elements se``
+# 后面,谓词 ``os.notebook_id=%s``。元素 → 来源两次主键探测;库本身的存在由
+# ``sources.notebook_id`` 的外键(CASCADE)保证,不另查 ``notebooks``。一条语句,
+# 元素 ≤ 约 500 个时是主键嵌套循环(与库大小无关);更多时 PG 改用 Merge / Hash
+# Join 扫该库的来源(实测 49k 来源:1000 个元素约 15 ms,3000 个约 30 ms),仍是
+# 一条语句、不绑清单。EXPLAIN pin 在
+# tests/postgres/test_store_evidence_ceiling_explain_pins.py。
+_OWN_ELEMENT_JOIN = " JOIN sources os ON os.id=se.source_id"
 
 
 def _element_rows(db: Any, element_ids: Iterable[Any]) -> dict:
@@ -2149,54 +2149,26 @@ class KnowledgeStore:
 
     @staticmethod
     def in_network_relation_rows(db: Any, notebook_id: str,
-                                 object_ids, *,
-                                 allowed_source_ids: Optional[Iterable[str]] = None):
+                                 object_ids, *, with_source_ids: bool = False):
         """SQLite 侧同名方法的 parity 实现;T2(批 1 热点整改)的 ``DISTINCT``/
-        ``ORDER BY`` 理由与 ``allowed_source_ids`` 的语义见那侧 docstring——两侧
-        逐字同一套语义。
-
-        天花板形态在这里的写法:``source_ceiling.ceiling_param``(一个参数,
-        备忘在 run 的 ``CeilingSet`` 上)+ ``id_binding.member_of``(``= ANY``,
-        关系行由 ``idx_knowledge_relations_nb_source_target_edge`` 驱动、清单
-        只过滤)+
-        ``execute_ids``(每次都是 custom plan,绕开第 5 次 prepare / 约第 11 次
-        generic plan 的悬崖)。"""
+        ``ORDER BY`` 理由与 ``with_source_ids`` 的语义见那侧 docstring——两侧
+        逐字同一套语义。"""
         ids = list(object_ids)
         if len(ids) < 2:
             return []
         ph = ",".join("%s" for _ in ids)
-        ceiling = source_ceiling.normalise_ceiling(allowed_source_ids)
-        if ceiling is not None:
-            if not ceiling:
-                return []
-            bound = source_ceiling.ceiling_param(ceiling)
-            return execute_ids(
-                db,
-                f"SELECT r.source_object_id, r.target_object_id, r.edge_type, "
-                f"src.object_type AS source_type, tgt.object_type AS target_type, "
-                f"COUNT(DISTINCT r.source_id) AS source_count "
-                f"FROM knowledge_relations AS r "
-                f"JOIN knowledge_objects AS src ON src.id=r.source_object_id "
-                f"JOIN knowledge_objects AS tgt ON tgt.id=r.target_object_id "
-                f"WHERE r.notebook_id=%s AND r.review_status!='rejected' "
-                f"AND r.source_object_id IN ({ph}) "
-                f"AND r.target_object_id IN ({ph}) "
-                f"AND {member_of('r.source_id', bound)} "
-                f"GROUP BY r.source_object_id, r.target_object_id, r.edge_type, "
-                f"src.object_type, tgt.object_type "
-                f"ORDER BY r.source_object_id, r.edge_type, r.target_object_id",
-                [notebook_id, *ids, *ids, bound.param],
-            ).fetchall()
         return db.execute(
             f"SELECT DISTINCT r.source_object_id, r.target_object_id, r.edge_type, "
-            f"src.object_type AS source_type, tgt.object_type AS target_type "
+            f"src.object_type AS source_type, tgt.object_type AS target_type"
+            f"{', r.source_id' if with_source_ids else ''} "
             f"FROM knowledge_relations AS r "
             f"JOIN knowledge_objects AS src ON src.id=r.source_object_id "
             f"JOIN knowledge_objects AS tgt ON tgt.id=r.target_object_id "
             f"WHERE r.notebook_id=%s AND r.review_status!='rejected' "
             f"AND r.source_object_id IN ({ph}) "
             f"AND r.target_object_id IN ({ph}) "
-            f"ORDER BY r.source_object_id, r.edge_type, r.target_object_id",
+            f"ORDER BY r.source_object_id, r.edge_type, r.target_object_id"
+            f"{', r.source_id' if with_source_ids else ''}",
             [notebook_id, *ids, *ids],
         ).fetchall()
 

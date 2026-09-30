@@ -63,7 +63,7 @@ class _Knowledge:
     def node_context(self, notebook_id, object_id, *, allowed_source_ids=None):
         return {}
 
-    def in_network_relations(self, participant_ids, object_ids, *, source_ceilings=None):
+    def in_network_relations(self, participant_ids, object_ids, *, with_source_ids=None):
         return []
 
     def relation_support_count(self, notebook_id, source_id, edge_type, target_id):

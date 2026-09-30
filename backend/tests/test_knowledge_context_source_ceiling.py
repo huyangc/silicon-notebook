@@ -65,10 +65,14 @@ class _Sources:
         return {}
 
     def source_metadata(self, source_ids):
+        # No owning library: the same source ids stand for the active and the
+        # peer library's sources here, and ownership (ledger B-11, a source of
+        # ANOTHER library than the object's) is pinned by
+        # test_canonical_relations / test_evidence_context_service, not here.
         return {
             source_id: {
                 "title": source_id, "file_name": source_id,
-                "notebook_id": ACTIVE, "is_paper": False, "paper_title": "",
+                "notebook_id": "", "is_paper": False, "paper_title": "",
             }
             for source_id in source_ids if source_id
         }
@@ -126,7 +130,7 @@ class _Knowledge:
             "steps": [dict(step) for step in self.steps] if self.steps else self.steps,
         }
 
-    def in_network_relations(self, participant_ids, object_ids, *, source_ceilings=None):
+    def in_network_relations(self, participant_ids, object_ids, *, with_source_ids=None):
         return []
 
     def relation_support_counts(self, notebook_id, triples):

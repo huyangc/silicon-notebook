@@ -54,7 +54,7 @@ class _Knowledge:
             "steps": None,
         }
 
-    def in_network_relations(self, participant_ids, object_ids, *, source_ceilings=None):
+    def in_network_relations(self, participant_ids, object_ids, *, with_source_ids=None):
         return []
 
     def relation_support_count(self, notebook_id, source_id, edge_type, target_id):
@@ -674,7 +674,7 @@ def test_evidence_context_relation_support_groups_by_relation_source_notebook():
     的归属)换成外层调用方的 ``notebook_id``(active),这条测试必须报红
     ——挂载库关系在 active 库查不到,×N源 后缀会消失。"""
     class _MultiNotebookKnowledge(_Knowledge):
-        def in_network_relations(self, participant_ids, object_ids, *, source_ceilings=None):
+        def in_network_relations(self, participant_ids, object_ids, *, with_source_ids=None):
             return [{
                 "source_object_id": "o1", "edge_type": "supports",
                 "target_object_id": "o2", "notebook_id": "base",
@@ -710,26 +710,32 @@ def test_evidence_context_relation_support_groups_by_relation_source_notebook():
 
 
 class _CeilingRelationKnowledge(_Knowledge):
-    """A store double with the in-ceiling ``GROUP BY`` semantics of
-    ``in_network_relation_rows``: raw rows ``(src, edge, tgt, source)``;
-    canonical support (all sources) is 5, so a suffix of 5 can only come from
-    the unbound path."""
+    """A store double with the ``with_source_ids`` semantics of
+    ``in_network_relations``: ``RAW`` rows ``(notebook, src, edge, tgt,
+    source)``; a listed notebook returns one row per edge and source, any other
+    one row per edge.  Canonical support (all sources) is 5, so a suffix of 5
+    can only come from the canonical path."""
 
     RAW = [
-        ("o1", "supports", "o2", "s-in-1"),
-        ("o1", "supports", "o2", "s-in-2"),
-        ("o1", "supports", "o2", "s-out"),
-        ("o2", "related_to", "o1", "s-out"),
+        ("active", "o1", "supports", "o2", "s-in-1"),
+        ("active", "o1", "supports", "o2", "s-in-2"),
+        ("active", "o1", "supports", "o2", "s-out"),
+        ("active", "o2", "related_to", "o1", "s-out"),
+        ("base", "o3", "supports", "o4", "s-base-in"),
+        ("base", "o3", "supports", "o4", "s-base-out"),
+        ("base", "o4", "related_to", "o3", "s-base-out"),
     ]
 
-    def __init__(self):
+    def __init__(self, occurrence_sources=None):
         self.relation_calls: list[dict] = []
         self.support_calls: list[str] = []
+        self.occurrence_sources = occurrence_sources or {}
 
     def node_context(self, notebook_id, object_id, *, allowed_source_ids=None):
+        source = self.occurrence_sources.get(object_id, "s-in-1")
         return {
-            "occurrences": [{"source_id": "s-in-1", "element_text": "x",
-                             "source_title": "S", "section_path": "§1"}],
+            "occurrences": [{"source_id": source, "element_text": "x",
+                             "source_title": "Stored", "section_path": "§1"}],
             "definition": None, "definition_basis": None,
             "definition_source_id": None, "definition_element_id": None,
             "steps": None,
@@ -737,26 +743,20 @@ class _CeilingRelationKnowledge(_Knowledge):
 
     def in_network_relations(self, participant_ids, object_ids, **kwargs):
         self.relation_calls.append(dict(kwargs))
-        ceilings = kwargs.get("source_ceilings") or {}
+        sourced = set(kwargs.get("with_source_ids") or ())
         rows = []
         for notebook_id in participant_ids:
-            if notebook_id != "active":
-                continue
-            if notebook_id not in ceilings:
-                seen = []
-                for src, edge, tgt, _source in self.RAW:
-                    if (src, edge, tgt) not in seen:
-                        seen.append((src, edge, tgt))
-                rows += [{"source_object_id": s, "edge_type": e, "target_object_id": t,
-                          "notebook_id": notebook_id} for s, e, t in seen]
-                continue
-            counts: dict = {}
-            for src, edge, tgt, source in self.RAW:
-                if source in ceilings[notebook_id]:
-                    counts.setdefault((src, edge, tgt), set()).add(source)
-            rows += [{"source_object_id": s, "edge_type": e, "target_object_id": t,
-                      "notebook_id": notebook_id, "source_count": len(found)}
-                     for (s, e, t), found in counts.items()]
+            seen = []
+            for nb, src, edge, tgt, source in self.RAW:
+                if nb != notebook_id or src not in object_ids or tgt not in object_ids:
+                    continue
+                row = {"source_object_id": src, "edge_type": edge,
+                       "target_object_id": tgt, "notebook_id": nb}
+                if notebook_id in sourced:
+                    row["source_id"] = source
+                if row not in seen:
+                    seen.append(row)
+            rows += seen
         return rows
 
     def relation_support_counts(self, notebook_id, triples):
@@ -764,24 +764,27 @@ class _CeilingRelationKnowledge(_Knowledge):
         return {triple: 5 for triple in triples}
 
 
-def _relation_hits():
+def _relation_hits(notebook_id="active", ids=("o1", "o2")):
     return [
-        RetrievedKnowledge(object_id="o1", object_type="concept", payload={"name": "A"},
-                           evidence=[], tier="personal", notebook_id="active"),
-        RetrievedKnowledge(object_id="o2", object_type="concept", payload={"name": "B"},
-                           evidence=[], tier="personal", notebook_id="active"),
+        RetrievedKnowledge(object_id=object_id, object_type="concept",
+                           payload={"name": object_id.upper()}, evidence=[],
+                           tier="personal", notebook_id=notebook_id)
+        for object_id in ids
     ]
 
 
-def test_relation_support_without_a_binding_ceiling_is_the_canonical_count():
-    """No scope: the call carries no ceiling keyword at all (byte-identical to
-    before E2-4) and the suffix is the canonical support count."""
-    knowledge = _CeilingRelationKnowledge()
-    service = EvidenceContextService(
-        notebooks=_Notebooks(), sources=_Sources(), knowledge=knowledge,
+def _relation_service(knowledge, **kwargs):
+    return EvidenceContextService(
+        notebooks=_Notebooks(), sources=_Sources(**kwargs), knowledge=knowledge,
         settings=Settings(),
     )
-    block, _ = service.knowledge_context("active", _relation_hits())
+
+
+def test_relation_support_without_a_scope_is_the_canonical_count():
+    """No scope: the call carries no keyword at all (byte-identical to before
+    E2-4) and the suffix is the canonical support count."""
+    knowledge = _CeilingRelationKnowledge()
+    block, _ = _relation_service(knowledge).knowledge_context("active", _relation_hits())
     assert knowledge.relation_calls == [{}]
     assert knowledge.support_calls == ["active"]
     assert "k1 -[supports]-> k2 (×5源)" in block
@@ -795,47 +798,134 @@ def test_relation_support_under_a_binding_ceiling_counts_in_ceiling_sources():
     from app.services.source_scope import source_scope_context
 
     knowledge = _CeilingRelationKnowledge()
-    service = EvidenceContextService(
-        notebooks=_Notebooks(), sources=_Sources(), knowledge=knowledge,
-        settings=Settings(),
-    )
     with source_scope_context(
         "active",
         {"mode": "include", "source_ids": ["s-in-1", "s-in-2"], "narrowed": True},
         None,
     ):
-        block, _ = service.knowledge_context("active", _relation_hits())
-    (call,) = knowledge.relation_calls
-    assert set(call["source_ceilings"]) == {"active"}
-    assert call["source_ceilings"]["active"] == frozenset({"s-in-1", "s-in-2"})
+        block, _ = _relation_service(knowledge).knowledge_context("active", _relation_hits())
+    assert knowledge.relation_calls == [{"with_source_ids": ["active"]}]
     assert knowledge.support_calls == []
     assert "k1 -[supports]-> k2 (×2源)" in block
     assert "related_to" not in block
     assert "×5" not in block
 
 
-def test_citation_source_info_keeps_foreign_sources_out_when_asked():
-    """``owner_notebook_ids`` leaves a listed source owned by another library
-    out of the result (the caller keeps its stored title); unlisted sources and
-    ones without an owner resolve as before."""
-    from app.services.evidence_context import foreign_source_owners
+def test_relation_rows_are_verified_when_the_verdict_says_the_ceiling_does_not_bind():
+    """Verify-on-read (``ceiling_binds`` False, e.g. an un-narrowed frozen
+    run): rows all inside the frozen ceiling are used as read with the
+    canonical count; one row from a source outside it (added after the freeze)
+    records the drift and the rows are judged as if the ceiling bound."""
+    from app.services.source_scope import current_source_scope, source_scope_context
 
-    service = _service(source_metadata={
-        "s-own": {"title": "Own", "file_name": "own.md", "notebook_id": "pub"},
-        "s-priv": {"title": "Private Now", "file_name": "p.md", "notebook_id": "priv"},
-        "s-free": {"title": "Free", "file_name": "f.md", "notebook_id": "priv"},
-    })
-    info = service.citation_source_info(
-        ["s-own", "s-priv", "s-free"],
-        owner_notebook_ids={"s-own": "pub", "s-priv": "pub"},
+    inside = _CeilingRelationKnowledge()
+    inside.RAW = [row for row in inside.RAW if row[4] != "s-out"]
+    frozen = {"mode": "include", "source_ids": ["s-in-1", "s-in-2"], "narrowed": False}
+    with source_scope_context("active", frozen, None):
+        service = EvidenceContextService(
+            notebooks=_Notebooks(), sources=_Sources(), knowledge=inside,
+            settings=Settings(), ceiling_verdict=lambda _nb: False,
+        )
+        block, _ = service.knowledge_context("active", _relation_hits())
+    assert inside.relation_calls == [{"with_source_ids": ["active"]}]
+    assert inside.support_calls == ["active"]
+    assert "k1 -[supports]-> k2 (×5源)" in block
+
+    drifted = _CeilingRelationKnowledge()
+    with source_scope_context("active", frozen, None):
+        service = EvidenceContextService(
+            notebooks=_Notebooks(), sources=_Sources(), knowledge=drifted,
+            settings=Settings(), ceiling_verdict=lambda _nb: False,
+        )
+        block, _ = service.knowledge_context("active", _relation_hits())
+        assert current_source_scope()._ceiling_binds_memo.get("active") is True
+    assert drifted.support_calls == []
+    assert "k1 -[supports]-> k2 (×2源)" in block
+    assert "related_to" not in block
+
+
+def test_legacy_exclude_scope_judges_relation_rows_one_by_one():
+    """The legacy local ``exclude`` shape materialises no list: each row is
+    judged by ``scope.allows`` -- the excluded source's rows go, the rest stay
+    (the library's relation lines are not dropped wholesale)."""
+    from app.services.source_scope import source_scope_context
+
+    knowledge = _CeilingRelationKnowledge()
+    with source_scope_context(
+        "active", {"mode": "exclude", "source_ids": ["s-out"], "narrowed": True}, None,
+    ):
+        block, _ = _relation_service(knowledge).knowledge_context("active", _relation_hits())
+    assert "k1 -[supports]-> k2 (×2源)" in block
+    assert "related_to" not in block
+
+
+def test_mounted_library_relations_count_its_ceiling_and_active_ones_stay_canonical():
+    """Two libraries, the ceiling covers only the mounted one (a per-library
+    freeze).  The mounted library's edge counts its in-ceiling sources; the
+    active library's edge keeps the canonical count; the mounted object's
+    source title still resolves live and is not marked foreign.
+
+    Mutation anchors: asking only the active library for ceilings, or taking
+    the caller's notebook as every object's origin, turns this red."""
+    from app.services.source_scope import source_scope_context
+
+    knowledge = _CeilingRelationKnowledge(
+        occurrence_sources={"o3": "s-base-in", "o4": "s-base-in"},
     )
-    assert set(info) == {"s-own", "s-free"}
-    assert service.citation_source_info(["s-priv"], owner_notebook_ids={"s-priv": ""}) == {}
-    assert foreign_source_owners([
-        {"source_id": "s-priv", "source_foreign": True},
-        {"source_id": "s-own"},
-    ]) == {"s-priv": ""}
-    assert foreign_source_owners([{"source_id": "s-own"}]) == {}
+    service = _relation_service(knowledge, metadata={
+        "s-in-1": {"title": "Active Live", "file_name": "a.md", "notebook_id": "active"},
+        "s-base-in": {"title": "Base Live", "file_name": "b.md", "notebook_id": "base"},
+    })
+    hits = _relation_hits("active", ("o1", "o2")) + _relation_hits("base", ("o3", "o4"))
+    with source_scope_context(
+        "active", None, None, notebook_source_ceilings={"base": ["s-base-in"]},
+    ):
+        block, id_map = service.knowledge_context("active", hits)
+    assert knowledge.relation_calls == [{"with_source_ids": ["base"]}]
+    assert knowledge.support_calls == ["active"]
+    assert "k1 -[supports]-> k2 (×5源)" in block
+    assert "k3 -[supports]-> k4" in block and "k3 -[supports]-> k4 (×" not in block
+    assert "k4 -[related_to]-> k3" not in block
+    for key in ("k3", "k4"):
+        assert id_map[key]["source_title"] == "Base Live"
+        assert id_map[key]["source_id"] == "s-base-in"
+        assert "source_foreign" not in id_map[key]
+
+
+def test_citation_cards_judge_each_row_by_its_own_library():
+    """B-11 per row, never pooled by source id: the same source cited by the
+    active library's object (its own source) and by a mounted library's
+    promoted object.  The first card resolves the live title and keeps its
+    pointers; the second is a snapshot -- stored title, no source or element
+    pointer, no knowhow locator.
+
+    Mutation anchor: deciding by source id (any library that owns it) turns
+    this red."""
+    service = _service(
+        source_metadata={
+            "s-own": {"title": "Live Title", "file_name": "own.md", "notebook_id": "active"},
+        },
+        elements={"el-own": {"source_id": "s-own", "metadata": "{}"}},
+    )
+    evidence = Evidence(
+        source_id="s-own", source_title="Stored Title", element_id="el-own",
+        element_type="paragraph", location_label="p1", quoted_span="q",
+        confidence=1.0,
+    )
+    hits = [
+        RetrievedKnowledge(object_id="o-own", object_type="concept",
+                           payload={"name": "own"}, evidence=[evidence],
+                           notebook_id="active"),
+        RetrievedKnowledge(object_id="o-prom", object_type="concept",
+                           payload={"name": "promoted"}, evidence=[evidence],
+                           notebook_id="base"),
+    ]
+    own, promoted = service.citations_from(hits, {"el-own"}, "fallback", notebook_id="active")
+    assert own.label.startswith("Live Title")
+    assert (own.source_id, own.element_id) == ("s-own", "el-own")
+    assert promoted.label.startswith("Stored Title")
+    assert (promoted.source_id, promoted.element_id) == ("", "")
+    assert promoted.knowhow is None
 
 
 # ---- T4:外部证据(ask.reflect_action 插件动作带回的库外材料) --------------
