@@ -61,6 +61,7 @@ from app.domain.share_disclosure import (
     SECTION_MEMORY_KEY,
     MemorySourceReader,
 )
+from app.services.report_memory_use import RetrievalSourceLog
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 # Only the NAME, from the dependency-free domain layer: these modules are
 # not on the participant override's frozen reader whitelist, but their
@@ -681,6 +682,11 @@ class ReportEngineDependencies:
     # ``MemorySourceReader`` 核对——缺了这两个读法的 store 或测试替身在构造引擎时失败,
     # 而不是在一份报告写到一半时失败;与 ``memory_retriever`` 是否接线无关。
     memory_sources: MemorySourceReader
+    # M4:本引擎的检索/证据端口交出过哪些来源(``RetrievalSourceLog.watch`` 包在
+    # ``retrieval``/``evidence_context`` 等端口外面)。规划与生成收尾时据它记下
+    # 可能进过任何提示词的作者个人记忆——深挖 Agent 的中间观察、全篇综合载荷
+    # 都由这些端口供给。
+    retrieval_sources: RetrievalSourceLog
     memory_retriever: Any = None
     corpus_profile: Any = None
     generation_gate: Any = None
@@ -708,6 +714,10 @@ class ReportEngineDependencies:
             raise TypeError(
                 "ReportEngineDependencies.memory_sources must provide "
                 "memory_sources_for_source_ids and foreign_memory_sources_for_source_ids"
+            )
+        if not isinstance(self.retrieval_sources, RetrievalSourceLog):
+            raise TypeError(
+                "ReportEngineDependencies.retrieval_sources must be a RetrievalSourceLog"
             )
 
 
@@ -1733,17 +1743,7 @@ class ReportEngine:
                     notebook_id, research_question
                 )
             raise_if_cancelled(self.cancel_event)
-            # M4: the author's Memory shown to the outline planner is recorded
-            # on the report (a store-owned key of ``understanding_json``; a copy
-            # of the contract, which itself still goes into the planner prompt).
-            planning_memory = list(self._planning_memory_ids)
-            reports.update_report(
-                notebook_id, rid, progress="多视角规划大纲中",
-                understanding=(
-                    {**intent_contract, REPORT_PLANNING_MEMORY_KEY: planning_memory}
-                    if planning_memory else None
-                ),
-            )
+            reports.update_report(notebook_id, rid, progress="多视角规划大纲中")
             with observe_stage(
                 self.dependencies.event_log,
                 report_id=rid,
@@ -1793,9 +1793,23 @@ class ReportEngine:
                 sections = self._judge_sufficiency(
                     research_question, sections, probe, use_llm=sufficiency_llm
                 )
+            # M4: the author's Memory that planning prompts may have carried —
+            # the corpus map's Memory lines, and every Memory source retrieval
+            # handed the planner (corpus map, coverage and sufficiency probes)
+            # — is recorded on the report, in a store-owned key of
+            # ``understanding_json`` (a copy of the contract: the contract
+            # itself goes into prompts).  A failed lookup fails the planning.
+            planning_memory = sorted(
+                set(self._planning_memory_ids) | self._author_memory_seen()
+            )
             reports.update_report(notebook_id, rid, outline=sections,
                                   status="outline_ready",
-                                  progress=f"大纲就绪({len(sections)} 节),待确认")
+                                  progress=f"大纲就绪({len(sections)} 节),待确认",
+                                  understanding=(
+                                      {**intent_contract,
+                                       REPORT_PLANNING_MEMORY_KEY: planning_memory}
+                                      if planning_memory else None
+                                  ))
             return sections
         except AskCancelled:
             reports.update_report(notebook_id, rid, status="cancelled", progress="已取消")
@@ -3145,7 +3159,9 @@ class ReportEngine:
         self._assert_report_stage_runtime(
             generation, runtime, run_kind="report_generation"
         )
-        references, section_memory = self._record_memory_use(references, sections)
+        references, section_memory, run_memory = self._record_memory_use(
+            references, sections
+        )
         persisted_sections: list[Mapping[str, object]] = []
         for section, memory_used in zip(sections, section_memory):
             clean = dict(section)
@@ -3161,11 +3177,22 @@ class ReportEngine:
             content_md=content_md,
             gaps=tuple(gaps),
             references=tuple(MappingProxyType(row) for row in references),
+            memory_used=tuple(run_memory),
         )
+
+    def _author_memory_seen(self) -> set[str]:
+        """The author's Memory behind every source retrieval has handed this
+        engine so far (``RetrievalSourceLog``)."""
+        source_ids = self.dependencies.retrieval_sources.source_ids()
+        if not source_ids:
+            return set()
+        return set(self.dependencies.memory_sources.memory_sources_for_source_ids(
+            source_ids, self.user_id
+        ).values())
 
     def _record_memory_use(
         self, references, sections
-    ) -> tuple[list[dict], list[list[str]]]:
+    ) -> tuple[list[dict], list[list[str]], list[str]]:
         """Record, on the stored report, which Memory it carries (M4).
 
         * Each citation whose ``source_id`` is a Memory projection source gets
@@ -3178,6 +3205,12 @@ class ReportEngine:
           'memory'`` in its id map) and every id-map entry whose source is one
           of the author's Memory projection sources, cited or not — the
           model may restate evidence without a marker.
+        * The run gets the author's Memory behind every source retrieval
+          handed this generation (``RetrievalSourceLog``): what the section
+          deep-dive agent observed while planning and reflecting (including
+          evidence it later dropped) and what the report-wide synthesis
+          payload was built from.  Stored by ``_generate_run`` in the
+          report's store-owned understanding key.
 
         Additive only: other citations and sections are stored exactly as
         before, and neither the report detail API nor the public projection
@@ -3196,12 +3229,13 @@ class ReportEngine:
         ]
         cited = [str(row.get("source_id") or "") for row in rows]
         drafted = [str(ctx.get("source_id") or "") for group in contexts for ctx in group]
+        retrieved = self.dependencies.retrieval_sources.source_ids()
         memory_sources = self.dependencies.memory_sources
         own: Mapping[str, str] = {}
         foreign: Mapping[str, tuple[str, str]] = {}
-        if any(cited + drafted):
+        if any(cited + drafted + retrieved):
             own = memory_sources.memory_sources_for_source_ids(
-                cited + drafted, self.user_id
+                cited + drafted + retrieved, self.user_id
             )
             foreign = memory_sources.foreign_memory_sources_for_source_ids(
                 cited, self.user_id
@@ -3220,7 +3254,8 @@ class ReportEngine:
             used.update(own[str(ctx.get("source_id") or "")] for ctx in group
                         if str(ctx.get("source_id") or "") in own)
             section_memory.append(sorted(used))
-        return rows, section_memory
+        run_memory = sorted({own[source_id] for source_id in retrieved if source_id in own})
+        return rows, section_memory, run_memory
 
     def _generate_run(
         self,
@@ -3294,6 +3329,18 @@ class ReportEngine:
                     )
                     return
                 raise_if_cancelled(self.cancel_event)
+                if artifact.memory_used:
+                    # M4: the run-level record joins the planner's in the
+                    # store-owned understanding key before the report is
+                    # published as done; a failed write fails the report.
+                    current = reports.get_report(notebook_id, rid)
+                    reports.update_report(notebook_id, rid, understanding={
+                        **dict(current.get("understanding") or {}),
+                        REPORT_PLANNING_MEMORY_KEY: sorted(
+                            set(current.get("memory_used") or ())
+                            | set(artifact.memory_used)
+                        ),
+                    })
                 if not reports.complete_report_generation(
                     notebook_id,
                     rid,

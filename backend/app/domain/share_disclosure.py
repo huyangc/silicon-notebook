@@ -16,10 +16,14 @@ SHARE_DISCLOSURE_REQUIRED = "share_disclosure_required"
 # while it was produced (M4).  Both keys are written only when non-empty, so a
 # report that used no Memory keeps its stored bytes.
 #
-# * ``understanding_json[REPORT_PLANNING_MEMORY_KEY]``: Memory shown to the
-#   outline planner (the corpus map).  Planning happens before generation,
-#   possibly days before, and ``understanding_json`` is the only report column
-#   that survives from planning to the finished report.  The key is owned by
+# * ``understanding_json[REPORT_PLANNING_MEMORY_KEY]``: Memory the planning
+#   prompts may have carried (the corpus map's Memory lines, and every Memory
+#   source retrieval handed the planner), joined before completion by the
+#   generation run's own (every Memory source retrieval handed the run: the
+#   deep-dive agent's observations, the synthesis payload).  Planning happens
+#   before generation, possibly days before, and ``understanding_json`` is the
+#   only report column that survives from planning to the finished report.
+#   The key is owned by
 #   the report store: every later understanding write that does not carry it
 #   keeps the stored value (like ``_generation_started_at``), and ``row_to_dict``
 #   takes it out of ``understanding``.  A new intent claim starts a new plan and
