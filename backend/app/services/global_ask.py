@@ -256,14 +256,19 @@ class _RunState:
                     continue
                 self.evidence[element_id] = snapshot
 
-    def is_registered(self, element_id) -> bool:
+    def is_registered(self, element_id) -> str:
         """Has a producer published anything for ``element_id`` in this run?
 
         A real snapshot or a declared ``None`` both count: either way the run
-        READ this element (``FederatedRunPlan.evidence_registered``).
+        READ this element (``FederatedRunPlan.evidence_registered``). Truthy
+        iff registered; the value says which: ``"snapshot"`` or
+        ``"unreadable"`` (a declared ``None``), ``""`` when nothing was
+        published -- so a caller's telemetry can tell the two apart.
         """
         with self.lock:
-            return element_id in self.evidence
+            if element_id not in self.evidence:
+                return ""
+            return "unreadable" if self.evidence[element_id] is None else "snapshot"
 
     def record_evidence_groups(self, groups) -> None:
         """Merge one federated call's multi-element passages into the sibling map.

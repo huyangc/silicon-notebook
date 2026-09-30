@@ -141,7 +141,8 @@ that skipped attribution or leaked past the frozen ceiling) and need a fix; the 
 editing user. `global_ask_citation_check_read_failed` (`read`, `error_type`) reports a terminal read that
 failed, whose references are then reported unverifiable. `producer_evidence_attested` (`producer`;
 `method` = `read` with an `elements` count, `pointers` with `elements`, `read` and the `attested` / `live` /
-`dead` / `unknown` counts, or `passages` with a `passages` count for the mix branch's KG-overlay passages,
+`dead` / `unknown` / `already_unknown` counts — `attested` counts ids this run already registered with a real
+snapshot, `already_unknown` ids it already declared unreadable, which are not read again — or `passages` with a `passages` count for the mix branch's KG-overlay passages,
 producer `kg_overlay_passages`) and `producer_evidence_unavailable` (`producer`, `reason` =
 `read_failed`/`no_reader`, `elements`, optional `error_type`) cover the retrieval-time registration outside
 the federated fan-out; a cancelled run raises its cancellation and emits neither. Rows written before this change that the old recheck voided keep their stored

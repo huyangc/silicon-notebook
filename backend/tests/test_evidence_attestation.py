@@ -97,6 +97,7 @@ def test_attest_pointers_reads_once_publishes_live_and_reports_dead():
     assert events == [{
         "kind": "producer_evidence_attested", "producer": "kg_objects",
         "method": "pointers", "elements": 2, "read": 2, "attested": 0, "live": 1, "dead": 1, "unknown": 0,
+        "already_unknown": 0,
     }]
 
 
@@ -126,6 +127,31 @@ def test_a_failed_pointer_read_is_stated_unreadable_and_retried():
         "reason": "read_failed", "elements": 1, "error_type": "RuntimeError",
     }
     assert "secret" not in repr(events)
+
+
+def test_under_a_run_state_an_unknown_id_is_not_retried_and_not_counted_attested():
+    """PR-D P3-5. With the real run state answering "registered?", the ``None``
+    a failed read published registers the id: the next call spends no read
+    (a pointer snapshot could not replace the ``None`` anyway), and its event
+    counts the id as ``already_unknown``, not as ``attested``."""
+    from app.services.evidence_attestation import ATTESTED
+
+    state, plan = _state_plan()
+    events: list = []
+    reader = _Reader({"e-1": ("s", "a"), "e-2": ("s", "b")},
+                     error=RuntimeError("secret sql text"))
+    with federated_run_plan(plan), evidence_attestation_seat(reader, emit=events.append):
+        assert attest_pointers("kg_objects", ["e-1"]) == {"e-1": UNKNOWN}
+        reader.error = None
+        attest_pointers("kg_objects", ["e-2"])
+        assert attest_pointers("kg_objects", ["e-1", "e-2"]) == {"e-1": ATTESTED, "e-2": ATTESTED}
+    assert reader.reads == [("e-1",), ("e-2",)]
+    assert state.evidence["e-1"] is None
+    assert events[-1] == {
+        "kind": "producer_evidence_attested", "producer": "kg_objects",
+        "method": "pointers", "elements": 2, "read": 0, "attested": 1, "live": 0,
+        "dead": 0, "unknown": 0, "already_unknown": 1,
+    }
 
 
 def test_cancellation_propagates_out_of_a_pointer_read():

@@ -167,10 +167,16 @@ def attest_pointers(producer: str, element_ids: Iterable[str]) -> dict[str, str]
     read failed or ran out of budget, and those ids were published as ``None``.
 
     One read per call at most, over the ids this run has not settled yet;
-    ``live`` and ``dead`` are memoised for the rest of the run, ``unknown`` is
-    retried by the next call. Cancellation (including a read budget stopped by
-    the run's cancel token) and participant-attestation failures re-raise; any
-    other read failure is fail-soft in the closed direction.
+    ``live`` and ``dead`` are memoised for the rest of the run. An ``unknown``
+    id is NOT retried: it was published as ``None``, which registers it, so a
+    later call answers ``attested`` for it without a read -- and a read would
+    change nothing, because a pointer snapshot never replaces a declared
+    ``None``; the terminal check reports it ``unverifiable`` either way. The
+    call's event counts such ids as ``already_unknown``, never as
+    ``attested`` (which counts only ids registered with a real snapshot).
+    Cancellation (including a read budget stopped by the run's cancel token)
+    and participant-attestation failures re-raise; any other read failure is
+    fail-soft in the closed direction.
     """
     plan = current_federated_run_plan()
     if plan is None:
@@ -179,9 +185,9 @@ def attest_pointers(producer: str, element_ids: Iterable[str]) -> dict[str, str]
     if not ids:
         return {}
     registered = getattr(plan, "evidence_registered", None)
-    states = {
-        key: ATTESTED for key in ids if registered is not None and registered(key)
-    }
+    marks = {key: registered(key) for key in ids} if registered is not None else {}
+    states = {key: ATTESTED for key in ids if marks.get(key)}
+    already_unknown = sum(1 for key in states if marks[key] == "unreadable")
     unregistered = [key for key in ids if key not in states]
     seat = _SEAT.get()
     if seat is None:
@@ -194,11 +200,13 @@ def attest_pointers(producer: str, element_ids: Iterable[str]) -> dict[str, str]
     if pending:
         states.update(_read_pointers(plan, seat, producer, pending))
     result = {key: states[key] for key in ids}
+    counts = {state: sum(1 for value in result.values() if value == state)
+              for state in (ATTESTED, LIVE, DEAD, UNKNOWN)}
+    counts[ATTESTED] -= already_unknown
     _emit({
         "kind": "producer_evidence_attested", "producer": _code(producer),
         "method": "pointers", "elements": len(ids), "read": len(pending),
-        **{state: sum(1 for value in result.values() if value == state)
-           for state in (ATTESTED, LIVE, DEAD, UNKNOWN)},
+        **counts, "already_unknown": already_unknown,
     })
     return result
 
