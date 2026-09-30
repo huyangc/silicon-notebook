@@ -204,7 +204,6 @@ export function useNotebookExit(handlers: {
 
   const settle = useCallback(async (
     id: string,
-    acknowledged: number,
     outcome: LeaveOutcome | { kind: "failed"; cause: unknown },
     state: ExitState | null,
   ) => {
@@ -252,7 +251,7 @@ export function useNotebookExit(handlers: {
       return;
     }
     if (state) {
-      const text = stillMemberText(state.remaining, acknowledged);
+      const text = stillMemberText(state.remaining);
       if (!attached) toast(text);
       else reopen({ count: state.remaining, changed: false, failure: "", notice: text });
       return;
@@ -288,7 +287,7 @@ export function useNotebookExit(handlers: {
     }
     leavingRef.current.delete(id);
     bump();
-    await settle(id, acknowledged, outcome, state);
+    await settle(id, outcome, state);
   }, [settle, update, updateFor]);
 
   sendLeaveRef.current = sendLeave;
