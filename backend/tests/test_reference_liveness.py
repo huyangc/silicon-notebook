@@ -4,8 +4,8 @@ gone are dropped at the commit boundary with ONE batched by-id read.
 The pure rule and its statement count are pinned in
 ``test_global_ask_citation_check.py`` (SQLite) and
 ``tests/postgres/test_global_citation_race_pg.py`` (PostgreSQL); this file pins
-the wiring: the real engine calls it for a single-notebook reasoning answer,
-and a global run (plan installed) never does.
+the wiring: the real engine calls it for single-notebook answers and for a
+deep report's final audit, and a global run (plan installed) never does.
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from app.models.ask import AskRequest
 from app.services import reference_liveness
 from app.services.ask_service import AskService
 from app.services.federated_run import FederatedRunPlan, federated_run_plan
+from tests.test_report_reference_images import repo  # noqa: F401 - pytest fixture
 
 
 def _service(reads):
@@ -72,7 +73,7 @@ def test_end_to_end_single_notebook_reasoning_drops_a_dead_locator(tmp_path, mon
         original = reference_liveness.drop_dangling_references
         seen: dict = {}
 
-        def remove_then_check(response, read):
+        def remove_then_check(response, read, **_kwargs):
             victim = next(ref.element_id for ref in response.anchors if ref.element_id)
             seen["victim"] = victim
             with database.write() as db:
@@ -153,7 +154,7 @@ def test_end_to_end_single_notebook_chunk_answer_drops_a_dead_locator(tmp_path, 
         original = reference_liveness.drop_dangling_references
         seen: dict = {}
 
-        def remove_then_check(response, read):
+        def remove_then_check(response, read, **_kwargs):
             victim = next(
                 (a.element_id for a in response.anchors if a.object_type == "concept"),
                 None,
@@ -180,3 +181,107 @@ def test_end_to_end_single_notebook_chunk_answer_drops_a_dead_locator(tmp_path, 
         assert response.citation_check is None
     finally:
         repo.close()
+
+
+def test_a_failed_single_notebook_read_keeps_every_card_and_is_visible():
+    """P3-6: the pass fails open, and the service hands its event sink over so
+    a broken adapter shows up as one content-free event (no ids, no text)."""
+    events: list = []
+    service = object.__new__(AskService)
+
+    def broken(ids):
+        raise RuntimeError("adapter regression")
+
+    service.evidence_context = SimpleNamespace(sources=SimpleNamespace(
+        evidence_fingerprints=broken,
+    ))
+    service.event_log = SimpleNamespace(emit=events.append)
+    response = _response()
+    before = response.model_dump_json()
+    service._drop_dangling_references(response)
+    assert response.model_dump_json() == before
+    assert events == [{
+        "kind": "reference_liveness_read_failed", "surface": "answer",
+        "error_type": "RuntimeError", "elements": 3,
+    }]
+
+
+# --- deep reports (item 3): the same rule where a report's references become final
+
+
+def _report_audit(repo, monkeypatch, *, dead: bool):
+    """A drafted one-section report citing a live text element (k1) and a
+    figure element (k2), the figure deleted after drafting when ``dead``; the
+    real final-audit stage is run and every existence read is counted."""
+    from app.application.report_pipeline import (
+        GeneratedReportSections, ReportFinalAuditInput, ReportGenerationInput,
+    )
+    from tests.test_report_reference_images import (
+        _mk_engine, _mk_nb, _seed_source_with_a_figure,
+    )
+
+    class _Summary:
+        configured = True
+        model = "m"
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return '{"summary": "摘要", "coverage": [], "contradictions": []}'
+
+    nb = _mk_nb(repo)
+    engine = _mk_engine(repo, _Summary())
+    source_id, text_id, figure_id = _seed_source_with_a_figure(repo, nb.id)
+
+    def element(element_id):
+        return {"object_id": element_id, "object_type": "element", "element_id": element_id,
+                "source_id": source_id, "snippet": "s"}
+
+    section = {"title": "A", "markdown": "甲 [k1] 乙 [k1, k2]。", "grounded": True,
+               "id_map": {"k1": element(text_id), "k2": element(figure_id)}}
+    if dead:
+        with repo._write() as db:
+            db.execute("DELETE FROM source_elements WHERE id=?", (figure_id,))
+    rid = repo.create_report(nb.id, "q")
+    generation = ReportGenerationInput.create(
+        notebook_id=nb.id, report_id=rid, original_question="q", display_question="q",
+        research_question="q", depth=2, actor_id="actor",
+        understanding={"resolved_question": "q"}, outline=[{"title": "A"}],
+    )
+    stage = ReportFinalAuditInput(GeneratedReportSections.create(generation, [section]))
+    monkeypatch.setattr(type(engine), "_assert_report_stage_runtime", lambda *a, **k: None)
+    sources = engine.dependencies.evidence_context.sources
+    reads: list = []
+    original = sources.evidence_fingerprints
+    monkeypatch.setattr(
+        sources, "evidence_fingerprints", lambda ids: reads.append(list(ids)) or original(ids),
+    )
+    return engine, stage, reads, text_id, figure_id
+
+
+def test_a_report_stores_no_card_for_an_element_gone_since_drafting(repo, monkeypatch):
+    engine, stage, reads, text_id, figure_id = _report_audit(repo, monkeypatch, dead=True)
+    artifact = engine.run_final_audit_stage(stage, None)
+    assert reads == [[text_id, figure_id]]  # one batched read for the whole report
+    assert [ref["element_id"] for ref in artifact.references] == [text_id]
+    assert "[k2]" not in artifact.content_md and "k1, k" not in artifact.content_md
+    assert artifact.sections[0]["markdown"] == "甲 [k1] 乙 [k1]。"
+
+
+def test_a_report_with_live_elements_is_unchanged_after_one_read(repo, monkeypatch):
+    engine, stage, reads, text_id, figure_id = _report_audit(repo, monkeypatch, dead=False)
+    artifact = engine.run_final_audit_stage(stage, None)
+    assert reads == [[text_id, figure_id]]
+    assert [ref["element_id"] for ref in artifact.references] == [text_id, figure_id]
+    assert artifact.sections[0]["markdown"] == "甲 [k1] 乙 [k1, k2]。"
+
+
+def test_a_report_under_a_global_run_plan_takes_no_read(repo, monkeypatch):
+    engine, stage, reads, text_id, figure_id = _report_audit(repo, monkeypatch, dead=True)
+    plan = FederatedRunPlan(
+        phase_timeout_seconds=1.0, notebook_timeout_seconds=1.0, executor=None,
+        window=lambda: 1, cancel=None, on_library=lambda *_: None,
+        on_evidence=lambda *_: None,
+    )
+    with federated_run_plan(plan):
+        artifact = engine.run_final_audit_stage(stage, None)
+    assert reads == []
+    assert len(artifact.references) == 2

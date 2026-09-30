@@ -4263,7 +4263,9 @@ class AskService:
         an element, none otherwise. Only outside a global run: there the
         producers already applied J2 at retrieval time, and an element deleted
         DURING the answer must reach the terminal citation check as
-        ``source_gone`` rather than vanish here.
+        ``source_gone`` rather than vanish here. A failed read keeps every card
+        and emits one content-free event. Deep reports take the same rule in
+        ``ReportEngine._sections_without_dead_elements``.
         """
         from app.services.federated_run import current_federated_run_plan
         from app.services.reference_liveness import drop_dangling_references
@@ -4271,7 +4273,9 @@ class AskService:
         sources = getattr(getattr(self, "evidence_context", None), "sources", None)
         read = getattr(sources, "evidence_fingerprints", None)
         if read is not None and current_federated_run_plan() is None:
-            drop_dangling_references(response, read)
+            drop_dangling_references(
+                response, read, emit=getattr(getattr(self, "event_log", None), "emit", None),
+            )
 
     def _optimize_gap_consult_queries(
         self, question: str, gaps: tuple[str, ...],

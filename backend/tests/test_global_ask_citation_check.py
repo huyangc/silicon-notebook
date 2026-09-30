@@ -542,8 +542,65 @@ def test_liveness_without_element_references_reads_nothing_and_a_failed_read_kee
     def broken(ids):
         raise RuntimeError("database went away")
 
-    drop_dangling_references(response, broken)
+    events: list = []
+    drop_dangling_references(response, broken, emit=events.append)
     assert response.model_dump_json() == before
+    # P3-6: a broken adapter is visible -- one content-free event, no ids or text
+    assert events == [{
+        "kind": "reference_liveness_read_failed", "surface": "answer",
+        "error_type": "RuntimeError", "elements": 3,
+    }]
+    drop_dangling_references(response, broken)  # no sink: still fail-open
+    assert response.model_dump_json() == before
+
+
+def test_sqlite_report_liveness_is_one_read_per_report_and_prunes_dead_cards(sqlite_libraries):
+    """Item 3: J2 for deep reports -- ONE batched read for the whole report,
+    over the elements its sections actually cite, on the real store."""
+    from app.services.reference_liveness import prune_dead_report_elements
+    from tests.citation_check_testkit import (
+        assert_report_pruned, count_statements, dangling_report_sections, seed_libraries,
+    )
+
+    sources, database, notebook_ids = sqlite_libraries
+    live_id = seed_libraries(database, "?", notebook_ids[:1])[notebook_ids[0]]
+    sections = dangling_report_sections(live_id, f"src-{notebook_ids[0]}")
+    with count_statements(database) as statements:
+        pruned = prune_dead_report_elements(sections, sources.evidence_fingerprints)
+    assert len(statements) == 1, statements
+    assert_report_pruned(sections, pruned, live_id)
+
+    live_only = [sections[1]]
+    with count_statements(database) as statements:
+        assert prune_dead_report_elements(live_only, sources.evidence_fingerprints)[0] is live_only[0]
+    assert len(statements) == 1
+
+
+def test_report_liveness_reads_nothing_without_cited_elements_and_fails_open():
+    from app.services.reference_liveness import prune_dead_report_elements
+    from tests.citation_check_testkit import dangling_report_sections
+
+    reads: list = []
+    uncited = [{"title": "A", "markdown": "no markers", "id_map": {
+        "k1": {"object_type": "element", "element_id": "el-dead"}}}]
+    assert prune_dead_report_elements(uncited, lambda ids: reads.append(ids) or {}) == uncited
+    assert reads == []
+
+    sections = dangling_report_sections("el-live", "s")
+    prune_dead_report_elements(sections, lambda ids: reads.append(list(ids)) or {"el-live": 1})
+    assert reads == [["el-dead", "el-dead-2", "el-live"]]  # k4 is not cited: not read
+
+    events: list = []
+
+    def broken(ids):
+        raise RuntimeError("database went away")
+
+    kept = prune_dead_report_elements(sections, broken, emit=events.append)
+    assert [a is b for a, b in zip(kept, sections)] == [True, True]
+    assert events == [{
+        "kind": "reference_liveness_read_failed", "surface": "report",
+        "error_type": "RuntimeError", "elements": 3,
+    }]
 
 
 def test_liveness_propagates_cancellation():
@@ -556,6 +613,16 @@ def test_liveness_propagates_cancellation():
 
     with pytest.raises(AskCancelled):
         drop_dangling_references(dangling_response("el-live", "s"), cancelled)
+
+    from app.services.reference_liveness import prune_dead_report_elements
+    from tests.citation_check_testkit import dangling_report_sections
+
+    events: list = []
+    with pytest.raises(AskCancelled):
+        prune_dead_report_elements(
+            dangling_report_sections("el-live", "s"), cancelled, emit=events.append,
+        )
+    assert events == []
 
 
 @pytest.mark.parametrize("mutation", ["none", "update", "delete"])

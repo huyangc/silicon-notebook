@@ -3070,7 +3070,9 @@ class ReportEngine:
         self._assert_report_stage_runtime(
             generation, runtime, run_kind="report_generation"
         )
-        sections = [dict(section) for section in generated.sections]
+        sections = self._sections_without_dead_elements(
+            [dict(section) for section in generated.sections]
+        )
         body_signature = tuple(
             str(section.get("markdown") or "") for section in sections
         )
@@ -3384,6 +3386,34 @@ class ReportEngine:
         return None
 
     # --- Stage D:汇总——执行摘要 + 章节 + 参考文献 +(结尾)局限 ---
+    def _sections_without_dead_elements(self, sections):
+        """J2 for deep reports: no stored card for an element already gone.
+
+        Called by ``run_final_audit_stage`` once every section is drafted and
+        before ``_assemble`` turns each section's cited keys into the report's
+        stored references: an element deleted since its section was drafted
+        (a re-ingest that produced fewer elements, a row-level Knowhow
+        deletion) must not become a stored card that opens on nothing -- the
+        same rule ``AskService._drop_dangling_references`` applies to answers.
+        ONE batched by-id read per report (``reference_liveness.
+        prune_dead_report_elements``), only when a cited context names an
+        element; skipped while a global run plan is installed. Returns copies
+        of the affected sections (dead element contexts and their marker keys
+        removed), never rewrites the ones it was given.
+        """
+        from app.services.federated_run import current_federated_run_plan
+        from app.services.reference_liveness import prune_dead_report_elements
+
+        dependencies = getattr(self, "dependencies", None)
+        sources = getattr(getattr(dependencies, "evidence_context", None), "sources", None)
+        read = getattr(sources, "evidence_fingerprints", None)
+        if read is None or current_federated_run_plan() is not None:
+            return sections
+        return prune_dead_report_elements(
+            sections, read,
+            emit=getattr(getattr(dependencies, "event_log", None), "emit", None),
+        )
+
     def _assemble(self, notebook_id, rid, question, outline, sections, *,
                   display_question: str | None = None):
         from app.services.prompts import (

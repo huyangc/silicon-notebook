@@ -260,6 +260,43 @@ def assert_dangling_dropped(response, live_id: str) -> None:
     assert response.citation_check is None
 
 
+def dangling_report_sections(live_id: str, source_id: str) -> list:
+    """Two drafted report sections: the first cites a dead element context
+    (k1), a chunk whose starting element is dead (k2) and a live element (k3),
+    and carries an UNCITED dead context (k4); the second cites only the live
+    element (J2 for deep reports)."""
+    def element(element_id):
+        return {"object_id": element_id, "object_type": "element", "element_id": element_id,
+                "source_id": source_id, "snippet": "s"}
+
+    return [
+        {"title": "A", "markdown": "A [k1] B [k2] C [k1, k3].", "id_map": {
+            "k1": element("el-dead"),
+            "k2": {"object_id": "chunk-1", "object_type": "chunk", "element_id": "el-dead-2",
+                   "element_ids": ["el-dead-2", live_id], "source_id": source_id},
+            "k3": element(live_id),
+            "k4": element("el-dead-3"),
+        }},
+        {"title": "B", "markdown": "E [k1].", "id_map": {"k1": element(live_id)}},
+    ]
+
+
+def assert_report_pruned(original: list, pruned: list, live_id: str) -> None:
+    assert pruned[1] is original[1]
+    first = pruned[0]
+    assert first is not original[0]
+    assert first["markdown"] == "A B [k2] C [k3]."
+    assert sorted(first["id_map"]) == ["k2", "k3", "k4"]
+    assert first["id_map"]["k2"]["element_id"] == ""
+    assert first["id_map"]["k2"]["object_id"] == "chunk-1"
+    assert first["id_map"]["k3"]["element_id"] == live_id
+    assert first["id_map"]["k4"] is original[0]["id_map"]["k4"]
+    # the caller's own section is never rewritten (it compares markdown after assembly)
+    assert original[0]["markdown"] == "A [k1] B [k2] C [k1, k3]."
+    assert sorted(original[0]["id_map"]) == ["k1", "k2", "k3", "k4"]
+    assert original[0]["id_map"]["k2"]["element_id"] == "el-dead-2"
+
+
 #: mutation -> verdict for a passage recalled ONLY by the mix branch's
 #: KG-overlay leg (registered through ``attest_selected_passages``).
 OVERLAY_EXPECTATIONS = {"none": None, "update": "changed", "delete": "source_gone"}

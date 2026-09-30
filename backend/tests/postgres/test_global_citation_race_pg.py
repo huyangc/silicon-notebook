@@ -172,6 +172,27 @@ def test_postgres_single_notebook_liveness_is_one_read_and_drops_dead_cards(pg_s
     assert_dangling_dropped(response, live_id)
 
 
+def test_postgres_report_liveness_is_one_read_per_report_and_prunes_dead_cards(pg_sources):
+    from app.services.reference_liveness import prune_dead_report_elements
+    from tests.citation_check_testkit import (
+        assert_report_pruned, count_statements, dangling_report_sections, seed_libraries,
+    )
+
+    live_id = seed_libraries(pg_sources.database, "%s", [_NOTEBOOK])[_NOTEBOOK]
+    sections = dangling_report_sections(live_id, f"src-{_NOTEBOOK}")
+    with count_statements(pg_sources.database) as statements:
+        pruned = prune_dead_report_elements(sections, pg_sources.evidence_fingerprints)
+    assert len(statements) == 1, statements
+    assert_report_pruned(sections, pruned, live_id)
+
+    live_only = [sections[1]]
+    with count_statements(pg_sources.database) as statements:
+        assert prune_dead_report_elements(
+            live_only, pg_sources.evidence_fingerprints,
+        )[0] is live_only[0]
+    assert len(statements) == 1
+
+
 def test_postgres_live_references_are_byte_identical_after_one_read(pg_sources):
     from app.services.reference_liveness import drop_dangling_references
     from tests.citation_check_testkit import count_statements, dangling_response, seed_libraries
