@@ -261,13 +261,111 @@ def test_memory_ids_for_source_ids_explain_pin_pg(world):
     assert "Index Scan using pk_sources on sources s" in many, many
     assert "Seq Scan" not in many, many
 
-    # The share transaction's locking read: the same probe, plus the cited
-    # rows' memory_items by primary key, under LockRows.
+    # The share transaction's locking reads: the source rows by primary key,
+    # and first the Memory rows behind them by primary key, both under LockRows.
     locked = _plan(world, wanted, lock=True)
     assert "LockRows" in locked, locked
     assert "Index Scan using pk_sources on sources s" in locked, locked
-    assert "pk_memory_items on memory_items lm" in locked, locked
     assert "Seq Scan" not in locked, locked
+    store = world.repo._runtime.memory_store
+    assert store.memory_rows_lock_sql().count("%s") == 2
+    with world.repo._runtime.database.connect() as db:
+        db.execute("SET LOCAL enable_seqscan=off")
+        db.execute("SET LOCAL enable_bitmapscan=off")
+        memory_rows = "\n".join(
+            str(row["QUERY PLAN"])
+            for row in db.execute(
+                "EXPLAIN (COSTS OFF) " + store.memory_rows_lock_sql(),
+                (json.dumps(wanted), world.alice.id),
+            ).fetchall()
+        )
+    assert "LockRows" in memory_rows, memory_rows
+    assert "pk_memory_items on memory_items lm" in memory_rows, memory_rows
+    assert "Seq Scan" not in memory_rows, memory_rows
+
+
+def test_share_and_purge_of_the_same_author_never_deadlock_pg(world):
+    """A share and a Memory purge of the same author, interleaved so that the
+    purge holds its first Memory row while the share starts locking: both lock
+    Memory rows in Memory-id order, so the share waits for the purge and both
+    finish — no deadlock abort.  The two cited projections are given source
+    ids in the OPPOSITE order of their Memory ids, so locking Memory rows in
+    source-id order would form a cycle here."""
+    import threading
+    import time
+
+    import app.repositories.postgres.memory_store as pg_memory_store
+    from tests.report_share_disclosure_cases import (
+        _KEYS, make_report, share, source_ref,
+    )
+
+    service = world.repo._runtime.memory_service
+    ingestion = world.repo._runtime.source_ingestion
+    memories = []
+    for key in ("d1", "d2"):
+        candidate = service.create_candidate(
+            world.notebook, world.alice.id, None, f"req-{key}-{next(_KEYS)}",
+            f"记忆 {key}", f"记忆 {key}：环路补偿保持稳定。", [], "reason", {}, [],
+        )
+        memories.append(service.confirm(candidate.id, world.alice.id))
+    low, high = sorted(memories, key=lambda memory: memory.id)
+    minted = ingestion.new_id
+    projections = {}
+    for memory, source_id in ((low, f"src-z-{next(_KEYS)}"), (high, f"src-a-{next(_KEYS)}")):
+        world.monkeypatch.setattr(
+            ingestion, "new_id",
+            lambda prefix, _sid=source_id: _sid if prefix == "src" else minted(prefix),
+        )
+        projections[memory.id] = ingestion.ingest_memory_source(
+            world.notebook, memory.id, memory.title, memory.content_md
+        )
+    world.monkeypatch.setattr(ingestion, "new_id", minted)
+    assert projections[low.id] > projections[high.id]
+    rid = make_report(world, world.alice, [
+        source_ref(projections[low.id], "k1"), source_ref(projections[high.id], "k2"),
+    ])
+
+    holds_first, go_on = threading.Event(), threading.Event()
+    real_execute_many = pg_memory_store.execute_many
+
+    def pausing_execute_many(db, sql, rows):
+        rows = list(rows)
+        if not sql.startswith("DELETE FROM memory_items") or len(rows) < 2:
+            return real_execute_many(db, sql, rows)
+        real_execute_many(db, sql, rows[:1])     # the purge holds the lower row
+        holds_first.set()
+        assert go_on.wait(30)
+        return real_execute_many(db, sql, rows[1:])
+
+    world.monkeypatch.setattr(pg_memory_store, "execute_many", pausing_execute_many)
+    results: dict[str, object] = {}
+
+    def purge():
+        try:
+            results["purged"] = world.repo._runtime.memory_store.bulk_delete_memories(
+                world.alice.id, [high.id, low.id]
+            )
+        except Exception as exc:  # noqa: BLE001 — the assertion reports it
+            results["purge_error"] = repr(exc)
+
+    def publish():
+        try:
+            results["share"] = share(world, world.alice, rid, 2).status_code
+        except Exception as exc:  # noqa: BLE001 — the assertion reports it
+            results["share_error"] = repr(exc)
+
+    purger = threading.Thread(target=purge)
+    purger.start()
+    assert holds_first.wait(30), "the purge never took its first Memory row"
+    publisher = threading.Thread(target=publish)
+    publisher.start()
+    time.sleep(1.5)            # the share is now waiting inside its locking read
+    go_on.set()
+    purger.join(30)
+    publisher.join(30)
+    assert "purge_error" not in results and "share_error" not in results, results
+    assert results["purged"] == 2
+    assert results["share"] == 200
 
 
 def test_foreign_memory_sources_map_only_other_members_memory_sources_pg(world):

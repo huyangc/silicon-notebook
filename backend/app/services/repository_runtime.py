@@ -2406,6 +2406,7 @@ class RepositoryRuntime:
         at its last persisted status."""
         from app.services.report_engine import ReportEngine, ReportEngineDependencies
         from app.services.report_execution import ReportGenerationGate
+        from app.services.report_memory_use import RetrievalSourceLog
         from app.services.report_corpus_profile import ReportCorpusProfileService
 
         generation_gate = ReportGenerationGate(
@@ -2421,17 +2422,24 @@ class RepositoryRuntime:
                 raise RuntimeError(
                     "wire_report_execution engine factory requires wired retrieval"
                 )
+            # M4: every retrieval/evidence port this engine reads is watched, so
+            # the report can record which of the author's Memory reached its
+            # prompts (``app.services.report_memory_use``).
+            source_log = RetrievalSourceLog()
             dependencies = ReportEngineDependencies(
                 reports=self.report_store,
-                retrieval=retrieval_port,
-                evidence_context=self.evidence_context,
+                retrieval=source_log.watch(retrieval_port),
+                evidence_context=source_log.watch(self.evidence_context),
                 model_clients=self.models,
                 model_errors=self.models,
                 source_query=self.source_store,
-                communities=retrieval_port.community_queries(engine_settings),
+                communities=source_log.watch(
+                    retrieval_port.community_queries(engine_settings)
+                ),
                 settings=engine_settings,
                 event_log=self.event_log,
                 memory_sources=self.memory_store,
+                retrieval_sources=source_log,
                 memory_retriever=self.memory_retriever,
                 corpus_profile=ReportCorpusProfileService(self.source_store),
                 generation_gate=generation_gate,
@@ -2443,15 +2451,15 @@ class RepositoryRuntime:
                 selected_source_graph=self.selected_source_graph,
                 retrieval_contributors=self.retrieval_contributors,
                 retrieval_connection_probe=self.database,
-                retrieval_contributor_hydrate=(
+                retrieval_contributor_hydrate=source_log.watch_call(
                     retrieval_port.hydrate_retrieval_contribution_chunks
                 ),
                 scale_version=lambda nb: tuple(self.scale_artifacts.version(nb)),
-                selected_graph_hydrate=lambda ids: (
+                selected_graph_hydrate=source_log.watch_call(lambda ids: (
                     hydrate_selected_graph_chunk_rows(
                         retrieval_port.hydrate_chunk_candidates(ids)[0]
                     )
-                ),
+                )),
             )
             return ReportEngine(
                 dependencies, user_id=user_id, cancel_event=cancel_event

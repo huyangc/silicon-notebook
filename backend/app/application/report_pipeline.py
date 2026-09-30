@@ -226,6 +226,10 @@ class FinalizedReportArtifact:
     content_md: str
     gaps: tuple[str, ...]
     references: tuple[Mapping[str, object], ...]
+    # M4: the author's Memory behind every source retrieval handed the run
+    # (``app.services.report_memory_use``); recorded on the report before the
+    # completion write.  Empty for runs that retrieved none.
+    memory_used: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

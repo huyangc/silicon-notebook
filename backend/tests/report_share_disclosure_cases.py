@@ -293,10 +293,29 @@ def case_another_members_memory_is_never_published(world: World) -> None:
     # be recognised (documented): that old report publishes.
     assert disclosure(world, world.owner, rid).json() == counts(0, 0)
 
-    # A link issued before this rule can still be revoked.
+    # A link issued before this rule: the anonymous page refuses it on every
+    # open (the same 404 as a revoked link), and it can still be revoked.
     make_memory(world, world.alice, "a2")
     earlier = make_report(world, world.owner, [source_ref(world.memories["a2"][1], "k1")])
     token = world.repo.share_report(world.notebook, earlier)
+    gone = world.client.get(f"/api/public/reports/{token}")
+    assert gone.status_code == 404
+    assert gone.json() == {"detail": "shared report not found"}
+    recorded_earlier = make_report(world, world.owner, [
+        recorded(source_ref("src-gone", "k1"), "mem-gone", world.alice),
+    ])
+    recorded_token = world.repo.share_report(world.notebook, recorded_earlier)
+    assert world.client.get(f"/api/public/reports/{recorded_token}").status_code == 404
+    # A link to a report carrying only its author's Memory keeps serving.
+    make_memory(world, world.owner, "o1")
+    own = make_report(world, world.owner, [
+        recorded(source_ref(world.memories["o1"][1], "k1", "主人自己的记忆"),
+                 world.memories["o1"][0], world.owner),
+    ])
+    own_token = world.repo.share_report(world.notebook, own)
+    served = world.client.get(f"/api/public/reports/{own_token}")
+    assert served.status_code == 200
+    assert [ref["snippet"] for ref in served.json()["references"]] == ["主人自己的记忆"]
     assert disclosure(world, world.owner, earlier).json() == counts(0, 1)
     # Re-sharing it is refused too (it does not hand the link out again).
     _refused_as_foreign(share(world, world.owner, earlier))
@@ -682,10 +701,13 @@ class _Models:
         self.outline_title = outline_title
         self.section_markdown = section_markdown
         self.prompts: list[str] = []
+        self.synthesis_prompts: list[str] = []
 
     def chat_json(self, messages, schema_hint, **kwargs):
         content = messages[-1]["content"]
         self.prompts.append(content)
+        if "must_contrast" in str(schema_hint):
+            self.synthesis_prompts.append(content)
         if "ONLY this section" in content:
             return json.dumps(
                 {"markdown": self.section_markdown, "grounded": True}, ensure_ascii=False
@@ -884,6 +906,141 @@ def case_compound_marker_keeps_its_known_memory_citation(world: World) -> None:
     assert [ref["snippet"] for ref in public["references"]] == [
         f"记忆 a1：{MEMORY_TEXT}。"
     ]
+
+
+def _projection_elements(world: World, key: str) -> list:
+    from app.domain.retrieval import RetrievedElement
+
+    projection = world.memories[key][1]
+    elements = [
+        RetrievedElement(
+            element_id=element.id, source_id=projection, source_title=f"记忆 {key}",
+            location_label=element.location_label or "段落",
+            element_type=element.element_type, text=element.text, score=1.0,
+        )
+        for element in world.repo.source_elements(projection)
+    ]
+    assert elements, "the Memory projection has elements"
+    return elements
+
+
+def case_memory_retrieved_for_the_outline_planner_counts(world: World) -> None:
+    """Planning sites fed by retrieval: the corpus map's knowledge lines and the
+    coverage / sufficiency probes that share its calls.  A knowledge hit whose
+    evidence is the author's Memory projection reaches the planner by name;
+    there is no Memory line and no citation.  Generation runs in a separate
+    engine (a separate job in production), so only the planning record can
+    carry it."""
+    from app.domain.retrieval import RetrievedKnowledge
+    from app.models.common import Evidence
+
+    mid = make_memory(world, world.alice, "a1")
+    projection = world.memories["a1"][1]
+    hit = RetrievedKnowledge(
+        object_id="ko-memory", object_type="concept",
+        payload={"name": MEMORY_TEXT, "source_id": projection},
+        evidence=[Evidence(
+            source_id=projection, source_title="记忆 a1", element_id="",
+            element_type="paragraph", location_label="段落",
+            quoted_span=MEMORY_TEXT, confidence=1.0,
+        )],
+        score=1.0, relevance=1.0,
+    )
+    models = _Models(outline_title=MEMORY_TEXT, section_markdown=f"## {MEMORY_TEXT}\n正文")
+    planner = _engine(world, world.alice, models)
+    rid = _new_report(world, world.alice)
+    _serve_memory(world, [])
+    world.monkeypatch.setattr(
+        planner.dependencies.retrieval, "federated_retrieve", lambda *a, **k: [hit]
+    )
+    planner.plan_outline(world.notebook, rid, "环路为什么稳定？")
+    assert world.repo.get_report(world.notebook, rid)["status"] == "outline_ready"
+    assert any("PRE-WRITING" in p and MEMORY_TEXT in p for p in models.prompts)
+    world.monkeypatch.setattr(
+        planner.dependencies.retrieval, "federated_retrieve", lambda *a, **k: []
+    )
+    _generate(world, _engine(world, world.alice, models), rid)
+    _published_only_after_acknowledging(world, rid, [mid])
+
+
+def case_memory_the_deep_dive_observed_counts_even_if_dropped(world: World) -> None:
+    """Section deep-dive agent: it retrieves the author's Memory projection
+    through the engine's retrieval port (what its planning and reflection
+    turns are shown) and ends up keeping nothing, so no section context, no
+    synthesis payload and no citation carries it.  The report still records
+    it."""
+    from app.services.reasoning_retrieval import ReasoningResult
+
+    mid = make_memory(world, world.alice, "a1")
+    elements = _projection_elements(world, "a1")
+    models = _Models(section_markdown=f"## 结论\n{MEMORY_TEXT}。")
+    observed: list[int] = []
+
+    def observe_then_drop(*args, **kwargs):
+        found = engine.dependencies.retrieval.retrieve_elements(
+            world.notebook, "环路补偿", limit=5
+        )
+        observed.append(len(found))
+        return ReasoningResult()
+
+    engine = _engine(world, world.alice, models, deep_dive=observe_then_drop)
+    world.monkeypatch.setattr(
+        engine.dependencies.retrieval, "retrieve_elements",
+        lambda *a, **k: list(elements),
+    )
+    rid = _new_report(world, world.alice)
+    _outline_ready(world, rid)
+    _serve_memory(world, [])
+    _generate(world, engine, rid)
+    assert observed and observed[0] > 0
+    assert not any("[source-element]" in p for p in models.prompts)
+    _published_only_after_acknowledging(world, rid, [mid])
+
+
+def case_memory_in_the_synthesis_payload_counts(world: World) -> None:
+    """Report-wide synthesis: two sections, the deep dive keeps the author's
+    Memory projection element, the synthesis prompt carries it, and section
+    drafting (replaced here) sees no evidence at all — the synthesis payload
+    is the only prompt that read it."""
+    from app.services.reasoning_retrieval import ReasoningResult
+
+    mid = make_memory(world, world.alice, "a1")
+    elements = _projection_elements(world, "a1")
+    models = _Models()
+
+    def keep_the_memory(*args, **kwargs):
+        return ReasoningResult(elements=list(
+            engine.dependencies.retrieval.retrieve_elements(
+                world.notebook, "环路补偿", limit=5
+            )
+        ))
+
+    def draft_without_evidence(notebook_id, section, question, result, depth=None, **kw):
+        return {
+            "title": section["title"], "scope": section["scope"],
+            "markdown": f"## {section['title']}\n{MEMORY_TEXT}。", "grounded": True,
+            "id_map": {}, "attempted": [], "claims": [],
+            "claim_ledger_status": "missing", "synthesis_used": True,
+            "synthesis_requested": True,
+        }
+
+    engine = _engine(world, world.alice, models, deep_dive=keep_the_memory)
+    world.monkeypatch.setattr(engine, "_draft_section", draft_without_evidence)
+    world.monkeypatch.setattr(
+        engine.dependencies.retrieval, "retrieve_elements",
+        lambda *a, **k: list(elements),
+    )
+    rid = _new_report(world, world.alice)
+    world.repo.update_report(
+        world.notebook, rid, status="outline_ready",
+        outline=[{"title": "结论", "scope": "s", "sub_queries": ["环路补偿"]},
+                 {"title": "对比", "scope": "c", "sub_queries": ["环路稳定"]}],
+    )
+    _serve_memory(world, [])
+    _generate(world, engine, rid)
+    assert any(MEMORY_TEXT in p for p in models.synthesis_prompts), \
+        "the synthesis prompt never carried the Memory"
+    _published_only_after_acknowledging(world, rid, [mid])
 
 
 def case_planner_record_is_kept_by_the_store(world: World) -> None:

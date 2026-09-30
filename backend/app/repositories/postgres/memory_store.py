@@ -1672,8 +1672,11 @@ class MemoryStore:
             raise ValueError("memory_ids may contain at most 200 unique values")
         placeholders = ",".join("%s" for _ in unique)
         with self.database.write() as db:
+            # Deleted in Memory-id order: the order a report share locks the
+            # same author's Memory rows in, so the two never wait in a cycle.
             rows = db.execute(
-                f"SELECT id FROM memory_items WHERE created_by=%s AND id IN ({placeholders})",
+                f"SELECT id FROM memory_items WHERE created_by=%s AND id IN ({placeholders}) "
+                "ORDER BY id",
                 (user_id, *unique),
             ).fetchall()
             ids = [r["id"] for r in rows]
@@ -2062,22 +2065,11 @@ class MemoryStore:
         value, so the custom and generic plans are the same and a prepared
         statement cannot flip to a worse plan.
 
-        ``lock=True`` (the report share transaction) adds ``FOR SHARE`` on the
-        matching rows, so the count and the token are one snapshot.  Each half
-        guards one input of the count: ``s`` the source row (its removal or a
-        change of its type / ``memory_id``), ``lm`` the Memory row (its hard
-        delete or a change of its owner) — ``sources.memory_id`` carries no
-        foreign key, so neither lock implies the other.  A concurrent write to
-        exactly those rows waits for the share transaction, or — when it
-        committed first — is seen by this statement (READ COMMITTED re-checks a
-        row it waited for).  Rows are locked in one fixed order (``s.id``), not
-        in citation order, so a writer that locks the same sources in id order
-        cannot form a cycle with a share; a writer locking them in another
-        order still can, and PostgreSQL resolves that by aborting one side
-        (a share aborted that way publishes nothing).  Nothing
-        else is locked: other users' Memory and the author's uncited Memory are
-        untouched.  The ``memory_items`` join only takes the lock; readability
-        is decided by ``memory_source_readable``.
+        ``lock=True`` (the report share transaction) adds ``FOR SHARE OF s`` on
+        the matching source rows, taken in ``s.id`` order; the share takes the
+        matching Memory rows first, in Memory-id order, with
+        ``memory_rows_lock_sql`` (see there and ``memory_sources_on``).
+        Readability is decided by ``memory_source_readable`` alone.
         """
         from app.repositories.postgres import memory_sql
 
@@ -2085,10 +2077,41 @@ class MemoryStore:
             "SELECT s.id AS source_id, s.memory_id AS memory_id "
             "FROM jsonb_array_elements_text(%s::jsonb) AS wanted(id) "
             "JOIN sources s ON s.id = wanted.id "
-            + ("JOIN memory_items lm ON lm.id = s.memory_id " if lock else "")
-            + f"WHERE {memory_sql.memory_source_type_predicate('s.source_type')} "
+            f"WHERE {memory_sql.memory_source_type_predicate('s.source_type')} "
             f"AND {memory_sql.memory_source_readable('s')}"
-            + (" ORDER BY s.id FOR SHARE OF s, lm" if lock else "")
+            + (" ORDER BY s.id FOR SHARE OF s" if lock else "")
+        )
+
+    @staticmethod
+    def memory_rows_lock_sql() -> str:
+        """The share transaction's first lock: ``FOR SHARE`` on the Memory rows
+        behind the cited sources that are the owner's Memory sources, in
+        Memory-id order (also EXPLAIN-pinned).  Same two scalar parameters as
+        ``memory_sources_for_source_ids_sql``.
+
+        The count and the token are one snapshot: each lock guards one input of
+        the count — this one the Memory row (its hard delete or a change of its
+        owner), the source lock the source row (its removal, or a change of its
+        type / ``memory_id``); ``sources.memory_id`` carries no foreign key, so
+        neither implies the other.  A concurrent write to exactly those rows
+        waits for the share transaction, or — when it committed first — is
+        seen (READ COMMITTED re-checks a row it waited for).  Memory rows are
+        locked in Memory-id order, the order the Memory purge deletes in
+        (``bulk_delete_memories``), and before any source row, so a share and
+        a purge of the same author cannot wait on each other in a cycle.
+        Nothing else is locked: other users' Memory and the author's uncited
+        Memory are untouched.
+        """
+        from app.repositories.postgres import memory_sql
+
+        return (
+            "SELECT lm.id FROM memory_items lm WHERE lm.id IN ("
+            "SELECT s.memory_id "
+            "FROM jsonb_array_elements_text(%s::jsonb) AS wanted(id) "
+            "JOIN sources s ON s.id = wanted.id "
+            f"WHERE {memory_sql.memory_source_type_predicate('s.source_type')} "
+            f"AND {memory_sql.memory_source_readable('s')}"
+            ") ORDER BY lm.id FOR SHARE OF lm"
         )
 
     @staticmethod
@@ -2096,11 +2119,17 @@ class MemoryStore:
         db: object, source_ids: Sequence[str], owner_id: str, *, lock: bool = False
     ) -> dict[str, str]:
         """``{source_id: memory_id}`` for the given ids that are ``owner_id``'s
-        Memory sources, read on the caller's connection (see the SQL builder)."""
+        Memory sources, read on the caller's connection (see the SQL builder).
+        ``lock=True``: the Memory rows first (Memory-id order), then the source
+        rows (source-id order); see ``memory_rows_lock_sql``."""
         wanted = list(dict.fromkeys(str(item) for item in source_ids if item))
         owner = str(owner_id or "")
         if not wanted or not owner:
             return {}
+        if lock:
+            db.execute(
+                MemoryStore.memory_rows_lock_sql(), (json.dumps(wanted), owner)
+            ).fetchall()
         rows = db.execute(
             MemoryStore.memory_sources_for_source_ids_sql(lock=lock),
             (json.dumps(wanted), owner),

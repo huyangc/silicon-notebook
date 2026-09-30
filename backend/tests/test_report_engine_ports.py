@@ -233,8 +233,11 @@ class _NoMemorySources:
 
 def _deps(**over):
     from app.services.report_engine import ReportEngineDependencies
+    from app.services.report_memory_use import RetrievalSourceLog
+
     base = dict(
         memory_sources=_NoMemorySources(),
+        retrieval_sources=RetrievalSourceLog(),
         reports=_Reports(),
         retrieval=_Retrieval(),
         evidence_context=_Evidence(),
@@ -258,6 +261,8 @@ def test_the_memory_record_seat_is_checked_when_the_engine_is_wired():
 
     with pytest.raises(TypeError, match="memory_sources"):
         _deps(memory_sources=_OnlyOwnReads())
+    with pytest.raises(TypeError, match="retrieval_sources"):
+        _deps(retrieval_sources=set())
     with pytest.raises(TypeError):
         from app.services.report_engine import ReportEngineDependencies
 
