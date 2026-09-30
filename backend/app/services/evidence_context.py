@@ -307,6 +307,23 @@ def foreign_source_owners(
     }
 
 
+def foreign_source_kwargs(
+    sections: Iterable[Mapping[str, Any]],
+) -> dict[str, dict[str, str]]:
+    """``citation_source_info`` keyword arguments for a report's reference
+    list (``ReportEngine._assemble``), built from every section's id map
+    (ledger B-11): ``{"owner_notebook_ids": ...}`` when an entry is marked
+    ``FOREIGN_SOURCE_KEY``, so that source keeps the entry's stored title and
+    is not counted as "from a reference library" by its owner; ``{}``
+    otherwise, leaving the call exactly as before."""
+    owners = foreign_source_owners(
+        context
+        for section in sections
+        for context in (section.get("id_map") or {}).values()
+    )
+    return {"owner_notebook_ids": owners} if owners else {}
+
+
 def _attest_collection_citations(
     citations: MutableMapping[str, Citation],
     hydrated: Mapping[str, Mapping[str, Any]],
