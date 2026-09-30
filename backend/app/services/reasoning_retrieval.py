@@ -3929,9 +3929,11 @@ class ReasoningRetriever:
         values = list(items)
         if self.candidate_filter is not None:
             values = list(self.candidate_filter(kind, values))
-        # Transient graph chains are not source-addressable evidence.  They are
-        # disabled before I/O for a selected source scope; in all-source mode
-        # they must retain the historical candidate-filter behavior.
+        # Chains reach here already source-filtered: ``RetrievalService
+        # .follow_chain`` passes every hop's evidence through the run's ceiling
+        # on every run and drops a chain whose hop is left without evidence.
+        # What this branch adds is the CHANNEL rule, the twin of the pre-I/O
+        # skip in ``run``: a narrowed (or drifted) scope gets no chains at all.
         if kind == "chain":
             return [] if self._unsafe_scope_restricted() else values
         return values

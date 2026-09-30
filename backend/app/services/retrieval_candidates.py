@@ -931,7 +931,9 @@ class CandidateRetrievalService(_RetrievalState):
         )
 
     def weak_support_relations(
-        self, notebook_id: str, object_ids: Iterable[str]
+        self, notebook_id: str, object_ids: Iterable[str], *,
+        allowed_source_ids: Optional[Iterable[str]] = None,
+        sample_source_inside: Any = None,
     ) -> List[GapRelationRow]:
         """给定一批 KG 对象 id,取它们在 canonical 层上**支撑薄弱**的出边。
 
@@ -957,7 +959,16 @@ class CandidateRetrievalService(_RetrievalState):
         否则「同一份库两次跑出两份提示」会让回归用例只能测长度。SQL 的 `ORDER BY`
         不能代替这一步:它的次键是 `canonical_tgt`(为的是让 LIMIT 截断本身确定),
         与这里的 `(src, tgt)` 展示序在真并列上给出不同结果。
+
+        来源天花板由 ``RetrievalService.weak_support_relations`` 决定、这里只转交:
+        ``allowed_source_ids`` 原样交给两条 store 读(缺省 → 两条语句逐字不变);
+        ``sample_source_inside(source_id) -> bool`` 是快路径的读时核验,样本关系
+        出自它不认的来源时这条边不解析名字(丢弃)。
         """
+        ceiling = (
+            {} if allowed_source_ids is None
+            else {"allowed_source_ids": allowed_source_ids}
+        )
         seeds = [
             text for text in dict.fromkeys(str(oid) for oid in object_ids) if text
         ][:_KG_GAP_MAX_SEEDS]
@@ -980,7 +991,7 @@ class CandidateRetrievalService(_RetrievalState):
             ))
             edges = self.unified_kg.weak_support_relation_rows(
                 database, notebook_id, canonical_ids,
-                _KG_GAP_SOURCE_MAX, _KG_GAP_PROBE_LIMIT,
+                _KG_GAP_SOURCE_MAX, _KG_GAP_PROBE_LIMIT, **ceiling,
             )
             if not edges:
                 return []
@@ -994,12 +1005,14 @@ class CandidateRetrievalService(_RetrievalState):
                     )] = sample
             name_rows = self.unified_kg.relation_endpoint_name_rows(
                 database, notebook_id,
-                list(dict.fromkeys(sample_by_edge.values())),
+                list(dict.fromkeys(sample_by_edge.values())), **ceiling,
             )
         names_by_relation = {
             row["rid"]: ((row["src_name"] or "").strip(),
                          (row["tgt_name"] or "").strip())
             for row in name_rows
+            if sample_source_inside is None
+            or sample_source_inside(str(row["source_id"] or ""))
         }
         rows: List[GapRelationRow] = []
         for edge in edges:
