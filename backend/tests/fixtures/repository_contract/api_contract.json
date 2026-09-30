@@ -10870,7 +10870,13 @@
           "type": "object"
         },
         "ReportShareDisclosure": {
+          "description": "``memory_count``: distinct Memory entries of the author whose content\nthe public page may carry (cited or used).  ``foreign_memory_count``:\ndistinct Memory entries of OTHER members the report cites; above zero the\nreport cannot be published at all.",
           "properties": {
+            "foreign_memory_count": {
+              "default": 0,
+              "title": "Foreign Memory Count",
+              "type": "integer"
+            },
             "memory_count": {
               "title": "Memory Count",
               "type": "integer"
@@ -25486,7 +25492,7 @@
           "summary": "Get Report Share Route"
         },
         "post": {
-          "description": "Publish one finished report behind an unguessable link.\n\nOnly `done` reports can be shared: a link to a running or failed report\nwould show an empty or half-written body to whoever it was sent to.\n\nM4: a report citing the author's own Memory is published only by the\nauthor and only with ``acknowledged_memory_count`` equal to the count —\nnever a number from an earlier request.  The count is taken here (which\ndecides the 403 and refuses early without a write) and taken again by\n``share_report`` inside the transaction that sets the token\n(``memory_guard``), so a Memory change committed in between is refused\ntoo.  A mismatch is a 409 whose ``detail`` carries\n``share_disclosure_required`` and the current count; no token is issued.\nA report citing none publishes exactly as before (no body needed).  A\n``done`` report is frozen (it cannot be regenerated), so what the author\nconfirms is the content the link serves.",
+          "description": "Publish one finished report behind an unguessable link.\n\nOnly `done` reports can be shared: a link to a running or failed report\nwould show an empty or half-written body to whoever it was sent to.\n\nM4: a report citing another member's Memory is never published (403).\nA report carrying the author's own Memory is published only by the\nauthor and only with ``acknowledged_memory_count`` equal to the count —\nnever a number from an earlier request.  The count is taken here (which\ndecides the 403 and refuses early without a write) and taken again by\n``share_report`` inside the transaction that sets the token\n(``memory_guard``), so a Memory change committed in between is refused\ntoo.  A mismatch is a 409 whose ``detail`` carries\n``share_disclosure_required`` and the current count; no token is issued.\nA report citing none publishes exactly as before (no body needed).  A\n``done`` report is frozen (it cannot be regenerated), so what the author\nconfirms is the content the link serves.",
           "operationId": "share_report_route_api_notebooks__notebook_id__reports__report_id__share_post",
           "parameters": [
             {
@@ -25552,7 +25558,7 @@
       },
       "/api/notebooks/{notebook_id}/reports/{report_id}/share/disclosure": {
         "get": {
-          "description": "How many of the author's own Memory entries the public page would carry.\n\nRead before sharing so the author can be asked first (M4).  Row-level gated\nlike every operation on an existing report.  The number is advisory: the\nshare POST counts again and refuses an acknowledgement that no longer\nmatches.",
+          "description": "How many of the author's own Memory entries the public page may carry,\nand how many of other members' Memory entries the report cites.\n\nRead before sharing so the author can be asked first (M4), or told before\ntrying that the report cannot be published.  Row-level gated like every\noperation on an existing report.  The numbers are advisory: the share POST\ncounts again and refuses an acknowledgement that no longer matches.",
           "operationId": "report_share_disclosure_route_api_notebooks__notebook_id__reports__report_id__share_disclosure_get",
           "parameters": [
             {

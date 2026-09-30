@@ -26,6 +26,7 @@ from app.models.reports import (
 )
 from app.services.report_public_view import public_report_payload
 from app.services.share_disclosure import (
+    ForeignMemoryShareRefused,
     NonAuthorShareRefused,
     ShareDisclosureRequired,
     report_share_disclosure,
@@ -612,7 +613,13 @@ class ReportShareRequest(BaseModel):
 
 
 class ReportShareDisclosure(BaseModel):
+    """``memory_count``: distinct Memory entries of the author whose content
+    the public page may carry (cited or used).  ``foreign_memory_count``:
+    distinct Memory entries of OTHER members the report cites; above zero the
+    report cannot be published at all."""
+
     memory_count: int
+    foreign_memory_count: int = 0
 
 
 def _share_disclosure(repo, report: dict):
@@ -630,17 +637,20 @@ def _share_disclosure(repo, report: dict):
 def report_share_disclosure_route(
     notebook_id: str, report_id: str
 ) -> ReportShareDisclosure:
-    """How many of the author's own Memory entries the public page would carry.
+    """How many of the author's own Memory entries the public page may carry,
+    and how many of other members' Memory entries the report cites.
 
-    Read before sharing so the author can be asked first (M4).  Row-level gated
-    like every operation on an existing report.  The number is advisory: the
-    share POST counts again and refuses an acknowledgement that no longer
-    matches.
+    Read before sharing so the author can be asked first (M4), or told before
+    trying that the report cannot be published.  Row-level gated like every
+    operation on an existing report.  The numbers are advisory: the share POST
+    counts again and refuses an acknowledgement that no longer matches.
     """
     repo = repository()
     report = _own_report_or_404(repo, notebook_id, report_id)
+    disclosure = _share_disclosure(repo, report)
     return ReportShareDisclosure(
-        memory_count=_share_disclosure(repo, report).memory_count
+        memory_count=disclosure.memory_count,
+        foreign_memory_count=disclosure.foreign_memory_count,
     )
 
 
@@ -657,7 +667,8 @@ def share_report_route(
     Only `done` reports can be shared: a link to a running or failed report
     would show an empty or half-written body to whoever it was sent to.
 
-    M4: a report citing the author's own Memory is published only by the
+    M4: a report citing another member's Memory is never published (403).
+    A report carrying the author's own Memory is published only by the
     author and only with ``acknowledged_memory_count`` equal to the count —
     never a number from an earlier request.  The count is taken here (which
     decides the 403 and refuses early without a write) and taken again by
@@ -685,6 +696,8 @@ def share_report_route(
             notebook_id, report_id,
             memory_guard=share_memory_guard(disclosure, acknowledged),
         )
+    except ForeignMemoryShareRefused:
+        raise user_error(403, "报告引用了其他成员的个人记忆，不能公开") from None
     except NonAuthorShareRefused:
         raise user_error(
             403, "报告引用了作者本人的个人记忆，只有作者可以公开分享。"

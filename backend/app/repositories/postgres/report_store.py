@@ -12,12 +12,28 @@ from app.repositories.postgres._store_utils import (
 )
 from app.core.capability_tokens import new_capability_token
 from app.domain.report_export import ReportExportSource
-from app.domain.share_disclosure import ShareMemoryGuard
+from app.domain.share_disclosure import (
+    REPORT_MEMORY_USED_FIELD,
+    REPORT_PLANNING_MEMORY_KEY,
+    ShareMemoryGuard,
+    split_report_memory_use,
+)
 from app.repositories.postgres.memory_store import MemoryStore
 from app.models.ask import StoredSubmittedVia
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.read_authority_lock import lock_reader_access_on
 from app.core.internal_observability import public_report_sections
+
+
+def _keep_planning_memory(column: str) -> str:
+    """`` || <column's stored planner Memory record, or {}>`` — appended to a
+    jsonb expression so the record survives a write that does not carry it."""
+    key = f"'{REPORT_PLANNING_MEMORY_KEY}'"
+    return (
+        f" || (CASE WHEN {column} ? {key}"
+        f" THEN jsonb_build_object({key}, {column} -> {key})"
+        f" ELSE '{{}}'::jsonb END)"
+    )
 
 
 class ReportStore:
@@ -77,6 +93,10 @@ class ReportStore:
                     f" THEN jsonb_build_object('_generation_started_at',"
                     f" {col} -> '_generation_started_at')"
                     f" ELSE '{{}}'::jsonb END)"
+                    # The planner's Memory record (M4) is the store's too: a
+                    # write that does not carry it keeps the stored one.
+                    + ("" if REPORT_PLANNING_MEMORY_KEY in val
+                       else _keep_planning_memory(col))
                 )
             else:
                 sets.append(f"{col} = %s")
@@ -123,9 +143,13 @@ class ReportStore:
         Prior generated artifacts are cleared in the same CAS transaction.
         """
         now = normalize_timestamp(self.now())
+        # A replacement ``understanding`` keeps the planner's stored Memory
+        # record (M4, ``REPORT_PLANNING_MEMORY_KEY``): the outline it planned is
+        # kept.
         understanding_sql = (
             "jsonb_set(%s::jsonb - 'credibility',"
             "'{_generation_started_at}',%s,true)"
+            + _keep_planning_memory("understanding_json")
             if understanding is not None
             else "jsonb_set(understanding_json - 'credibility',"
             "'{_generation_started_at}',%s,true)"
@@ -213,10 +237,13 @@ class ReportStore:
              "updated_at": iso_timestamp(row["updated_at"]), "depth": row["depth"],
              "section_count": len(json_value(row["outline_json"], []))}
         if full:
+            understanding, sections, memory_used = split_report_memory_use(
+                understanding, list(json_value(row["sections_json"], []))
+            )
+            if memory_used:
+                d[REPORT_MEMORY_USED_FIELD] = memory_used
             d.update(outline=json_value(row["outline_json"], []),
-                     sections=public_report_sections(
-                         json_value(row["sections_json"], [])
-                     ),
+                     sections=public_report_sections(sections),
                      gaps=json_value(row["gaps_json"], []),
                      references=json_value(row["references_json"], []),
                      section_status=json_value(row["section_status_json"], []),

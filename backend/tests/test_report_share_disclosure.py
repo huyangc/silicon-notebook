@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.services.share_disclosure import (
+    ForeignMemoryShareRefused,
     NonAuthorShareRefused,
     ShareDisclosure,
     ShareDisclosureRequired,
@@ -103,6 +104,67 @@ def test_memory_ids_for_source_ids_probes_sources_by_primary_key(world):
     assert "SCAN s" not in joined, joined
 
 
+def test_foreign_memory_sources_map_only_other_members_memory_sources(world):
+    store = world.repo._runtime.memory_store
+    a1 = make_memory(world, world.alice, "a1")
+    o1 = make_memory(world, world.owner, "o1")
+    alice_source = world.memories["a1"][1]
+    owner_source = world.memories["o1"][1]
+    wanted = [alice_source, owner_source, world.doc_source, "src-unknown", owner_source]
+    assert store.foreign_memory_sources_for_source_ids(wanted, world.alice.id) == {
+        owner_source: (o1, world.owner.id)
+    }
+    assert store.foreign_memory_sources_for_source_ids(wanted, world.owner.id) == {
+        alice_source: (a1, world.alice.id)
+    }
+    assert store.foreign_memory_sources_for_source_ids(wanted, "") == {}
+    assert store.foreign_memory_sources_for_source_ids([], world.alice.id) == {}
+    # An orphaned Memory source has no known owner: it maps to nothing.
+    with world.repo._runtime.database.write() as db:
+        db.execute("DELETE FROM memory_items WHERE id=?", (o1,))
+    assert store.foreign_memory_sources_for_source_ids(wanted, world.alice.id) == {}
+    long = [f"src-missing-{index}" for index in range(40_000)] + [alice_source]
+    assert store.foreign_memory_sources_for_source_ids(long, world.owner.id) == {
+        alice_source: (a1, world.alice.id)
+    }
+    assert store.foreign_memory_sources_for_source_ids_sql().count("?") == 2
+
+
+def test_foreign_memory_sources_probe_sources_by_primary_key(world):
+    store = world.repo._runtime.memory_store
+    with world.repo._runtime.database.connect() as db:
+        plan = [
+            str(row["detail"])
+            for row in db.execute(
+                "EXPLAIN QUERY PLAN " + store.foreign_memory_sources_for_source_ids_sql(),
+                (json.dumps(["a", "b"]), world.alice.id),
+            ).fetchall()
+        ]
+    joined = "\n".join(plan)
+    assert "SCAN wanted" in joined, joined
+    assert any(
+        line.startswith("SEARCH s USING INDEX") and "(id=?)" in line for line in plan
+    ), joined
+    assert any(line.startswith("SEARCH fo USING") for line in plan), joined
+    assert "SCAN s" not in joined and "SCAN fo" not in joined, joined
+
+
+def test_understanding_bytes_of_a_report_without_memory_are_unchanged(world):
+    """The planner-record preservation only acts when a record exists: a
+    report without one stores exactly the JSON text it stored before."""
+    from tests.report_share_disclosure_cases import _new_report
+
+    repo, nb = world.repo, world.notebook
+    rid = _new_report(world, world.alice)
+    understanding = {"objective": "环路", "note": None, "list": [1, 2]}
+    repo.update_report(nb, rid, understanding=understanding)
+    with repo._runtime.database.connect() as db:
+        raw = db.execute(
+            "SELECT understanding_json FROM reports WHERE id=?", (rid,)
+        ).fetchone()[0]
+    assert raw == json.dumps(understanding, ensure_ascii=False)
+
+
 # --- the service rule ------------------------------------------------------------
 
 
@@ -114,11 +176,16 @@ class _NoMemorySources:
         self.calls.append((list(source_ids), owner_id))
         return []
 
+    def foreign_memory_sources_for_source_ids(self, source_ids, member_id):
+        self.calls.append(("foreign", list(source_ids), member_id))
+        return {}
+
 
 def test_disclosure_counts_distinct_memory_objects_and_asks_the_store_as_author():
     reader = _NoMemorySources()
     disclosure = report_share_disclosure(reader, {
         "created_by": "u-author",
+        "memory_used": ["mem-1", "mem-4"],
         "references": [
             {"object_type": "memory", "object_id": "mem-1"},
             {"object_type": "memory", "object_id": "mem-1"},
@@ -131,12 +198,17 @@ def test_disclosure_counts_distinct_memory_objects_and_asks_the_store_as_author(
         ],
     })
     assert disclosure == ShareDisclosure(
-        "u-author", ("mem-1", "mem-2"),
-        known_memory_ids=frozenset({"mem-1", "mem-2"}),
+        "u-author", ("mem-1", "mem-2", "mem-4"),
+        known_memory_ids=frozenset({"mem-1", "mem-2", "mem-4"}),
         live_source_ids=("src-1",),
+        foreign_memory_ids=("mem-3",),
     )
     # Recorded citations are never looked up again; only unrecorded ones are.
-    assert reader.calls == [(["src-1"], "u-author")]
+    assert reader.calls == [
+        (["src-1"], "u-author"), ("foreign", ["src-1"], "u-author"),
+    ]
+    with pytest.raises(ForeignMemoryShareRefused):
+        require_publishable(disclosure, requester_id="u-author", acknowledged=3)
 
 
 def test_only_the_author_may_publish_their_memory():
