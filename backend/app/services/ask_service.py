@@ -2240,7 +2240,7 @@ class AskService:
         if receipt is not None:
             response.retrieval_scope = receipt
         # Same sink: a mounted library the ceiling had to leave out.
-        response.skipped_libraries = self._skipped_libraries(notebook_id)
+        response.skipped_libraries = AskService._skipped_libraries(self, notebook_id)
         response.asked_at = asked_at or response.asked_at
         AskService._drop_dangling_references(self, response)
         # A DETACHED turn owns its own persistence. The three assignments above
