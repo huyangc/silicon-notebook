@@ -245,15 +245,17 @@ def _attest_kg_anchor_evidence(evidence_by_id: Mapping[str, dict[str, Any]]) -> 
             value["element_id"] = ""
 
 
-def _live_kg_evidence(filtered: list[tuple[str, str, Any]]) -> list[tuple[str, str, Any]]:
+def _live_kg_evidence(filtered: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
     """``citations_from``'s evidence rows, registered, minus dead pointers (PR-D).
 
     One batched pointer read over the rows that are about to become cards; a
     card whose element was already gone at retrieval time is not minted (J2).
     Rows without an element id stay: they are source-level references (J3).
+    Each row's evidence is its third field (``citations_from`` appends the
+    row's own library after it).
     """
     states = attest_pointers(KG_OBJECTS_PRODUCER, (
-        str(evidence.element_id or "") for _tier, _nb, evidence in filtered
+        str(row[2].element_id or "") for row in filtered
     ))
     return [
         row for row in filtered
