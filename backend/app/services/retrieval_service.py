@@ -7,8 +7,10 @@ from typing import Any
 from app.services.evidence_attestation import DEAD, attest_pointers
 from app.services.retrieval import NeighborExpansion
 from app.services.source_scope import (
-    current_source_scope, filter_retrieval_items, scoped_node_context_row,
-    scoped_source_ceiling, source_ceiling_exists, subjectless_run_active,
+    current_source_scope, filter_retrieval_items,
+    node_context_row_within_ceiling, record_ceiling_drift,
+    scoped_node_context_row, scoped_source_ceiling, source_ceiling_exists,
+    subjectless_run_active,
 )
 
 
@@ -207,7 +209,11 @@ class RetrievalService:
         judged on its ``occurrences`` -- the key real store rows carry (an
         earlier version filtered a nonexistent ``evidence`` key, so every run
         with a binding ceiling got ``{}`` and the trace fell back to raw object
-        ids).  A row with no in-ceiling occurrence left → ``{}``.
+        ids).  A row with no in-ceiling occurrence left → ``{}``.  When the
+        run's verdict says the ceiling does not bind, the row is read without
+        one and returned as is only if ``node_context_row_within_ceiling``
+        verifies it; otherwise the drift is recorded and the row is re-read
+        and judged as above.
 
         The row is judged against ``notebook_id``, the library it was READ from:
         the downstream store (``graph.node_context`` passes straight through to
@@ -232,9 +238,15 @@ class RetrievalService:
         if not scope.covers_notebook(notebook_id):
             return {}
         if not self._ceiling_binds(notebook_id):
-            # The ceiling cannot exclude anything this read would return (see
-            # ``source_scope.ceiling_binds``): the unbounded read, as is.
-            return self.graph.node_context(*args, **kwargs)
+            # The ceiling could not exclude anything when the verdict was taken
+            # (``source_scope.ceiling_binds``): the unbounded read, as is --
+            # but only once verified on read.  A row naming a source outside
+            # the frozen ceiling means the library changed after the verdict:
+            # the rest of the run binds, and this row is re-read bound below.
+            row = self.graph.node_context(*args, **kwargs)
+            if node_context_row_within_ceiling(scope, notebook_id, row):
+                return row
+            record_ceiling_drift(scope, notebook_id)
         allowed = scoped_source_ceiling(notebook_id)
         if allowed is not None:
             kwargs = {**kwargs, "allowed_source_ids": allowed}

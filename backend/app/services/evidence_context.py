@@ -35,7 +35,8 @@ from app.services.citation_markers import MARKER_RE, marker_keys
 from app.services.source_display import source_display_title
 from app.services.source_element_selection import deduplicate_source_chunks_in_order
 from app.services.source_scope import (
-    citation_active_id, notebook_in_scope, scoped_node_context_row,
+    citation_active_id, current_source_scope, node_context_row_within_ceiling,
+    notebook_in_scope, record_ceiling_drift, scoped_node_context_row,
     scoped_source_ceiling, source_ceiling_exists,
 )
 
@@ -309,6 +310,35 @@ class EvidenceContextService:
         # ``kg_viewer_scope.NodeContextCeilingVerdict``).  Without one, every
         # existing ceiling binds -- the conservative historical answer.
         self.ceiling_binds = ceiling_verdict or source_ceiling_exists
+
+    def _node_context_row(
+        self, origin: str, object_id: str,
+    ) -> dict[str, Any] | None:
+        """``knowledge_context`` 对一个 KG 命中的重查 + 来源闸(``KeyError`` 原样
+        抛出 = 召回之后对象被删)。``None`` = 天花板绑住该库、却没有一条天花板内
+        occurrence,整条丢掉。
+
+        裁决为 False 时不带天花板读、读后核验(``node_context_row_within_
+        ceiling``):通过即原样交回;不通过 = 裁决之后天花板漂了,记下漂移
+        (``record_ceiling_drift``,本次 run 该库余下的命中都走绑定路径),本条
+        落到下面的绑定路径重读——与裁决一开始就是 True 时同一条代码。"""
+        if not self.ceiling_binds(origin):
+            context = self.knowledge.node_context(origin, object_id)
+            scope = current_source_scope()
+            if node_context_row_within_ceiling(scope, origin, context):
+                return context
+            record_ceiling_drift(scope, origin)
+        allowed_source_ids = scoped_source_ceiling(origin)
+        context = (
+            self.knowledge.node_context(origin, object_id)
+            if allowed_source_ids is None
+            else self.knowledge.node_context(
+                origin, object_id, allowed_source_ids=allowed_source_ids,
+            )
+        )
+        return scoped_node_context_row(
+            origin, context, ceiling_pushed=allowed_source_ids is not None,
+        )
 
     def tier_map(self, notebook_ids: Sequence[str]) -> dict[str, str]:
         return self.notebooks.tier_map(notebook_ids)
@@ -1031,29 +1061,22 @@ class EvidenceContextService:
                 # (``source_scope.ceiling_binds``):全选、冻结后没变、库里也
                 # 没有提问者读不到的隐藏来源时,天花板排除不了任何东西——store
                 # 不收天花板、行原样用,与没有 scope 的 run 逐字节相同(hub 簇的
-                # 融合描述也在)。
-                binds = self.ceiling_binds(origin)
-                allowed_source_ids = scoped_source_ceiling(origin) if binds else None
+                # 融合描述也在)。但裁决只在**做出那一刻**成立:之后并发的上传或
+                # Memory 写入可以把新来源的证据并进一个已被召回的对象,召回时的
+                # 候选过滤管不到召回之后的变化。所以这条快路径**读后核验**
+                # (``node_context_row_within_ceiling``,见 ``_node_context_row``):
+                # 每条 occurrence 的 ``source_id``、``defines_evidence`` 定义的
+                # ``definition_source_id`` 都在冻结天花板内才原样用;有一个不在,
+                # 就说明天花板在裁决之后漂了——该库本次 run 余下的命中一律改走
+                # 绑定路径(``record_ceiling_drift`` 把备忘翻成 True,不再探测),
+                # **这一条**也按绑定路径重读、复核,与裁决一开始就是 True 时逐字
+                # 相同。
                 try:
-                    context = (
-                        self.knowledge.node_context(origin, hit.object_id)
-                        if allowed_source_ids is None
-                        else self.knowledge.node_context(
-                            origin, hit.object_id,
-                            allowed_source_ids=allowed_source_ids,
-                        )
-                    )
+                    scoped_context = self._node_context_row(origin, hit.object_id)
                 except KeyError:
                     # 召回之后对象被删:簇记为已见,与改动前逐字相同。
                     seen_clusters.add(cluster_id)
                     continue
-                scoped_context = (
-                    scoped_node_context_row(
-                        origin, context,
-                        ceiling_pushed=allowed_source_ids is not None,
-                    )
-                    if binds else context
-                )
                 if scoped_context is None:
                     # FAIL-CLOSED,与 ``filter_retrieval_items`` 的 knowledge 支同
                     # 口径:天花板绑住该库、却没有一条天花板内 occurrence 的对象

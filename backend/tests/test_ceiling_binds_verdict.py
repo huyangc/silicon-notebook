@@ -294,3 +294,223 @@ def test_all_ticked_run_keeps_the_hub_description_and_a_narrowed_run_does_not(
     assert "HUB fused description" not in narrowed[0]
     assert "HUB definition text" in narrowed[0]
     assert pushed[-1] == frozenset([src])
+
+
+# ------------------------------------------- verify-on-read (codex #806 r4)
+# A False verdict is memoised per run and library, but the library can change
+# after it: a concurrent upload or Memory write merges evidence of a source
+# outside the frozen ceiling into an object recall already admitted.  A row
+# read without a ceiling is used as read only when every source it attributes
+# text to is inside the ceiling; the first one that is not flips the memo and
+# is itself re-read bound.
+NEW_SOURCE = "doc-uploaded-after-the-verdict"   # outside the frozen ceiling
+NEW_TEXT = "NEW upload text that arrived after the freeze"
+DEF_TEXT = "definition quoted from the new upload"
+
+
+def _row(object_id, occurrences, **extra):
+    return {"id": object_id, "name": object_id,
+            "occurrences": [dict(item) for item in occurrences],
+            "definition": None, "definition_basis": None,
+            "definition_source_id": None, "definition_element_id": None,
+            "steps": None, **extra}
+
+
+class _Drifting:
+    """A store whose rows are fixed per object and which IGNORES
+    ``allowed_source_ids`` (the service backstop is what these tests pin; the
+    push itself is pinned by ``pushed``).  ``fold`` puts objects in clusters."""
+
+    def __init__(self, rows, fold=None):
+        self.rows, self.fold = rows, dict(fold or {})
+        self.pushed: list[object] = []
+
+    def cluster_fold(self, notebook_id, object_ids):
+        return {oid: self.fold[oid] for oid in object_ids if oid in self.fold}
+
+    def node_context(self, notebook_id, object_id, **kwargs):
+        self.pushed.append(kwargs.get("allowed_source_ids", "<absent>"))
+        row = self.rows[object_id]
+        return {**row, "occurrences": [dict(item) for item in row["occurrences"]]}
+
+    def in_network_relations(self, participant_ids, object_ids):
+        return []
+
+    def relation_support_counts(self, notebook_id, triples):
+        return {triple: 1 for triple in triples}
+
+
+def _hub_row(object_id):
+    return _row(object_id, [_occurrence(OPEN_SOURCE, OPEN_TEXT)],
+                definition="HUB fused description",
+                definition_basis="cluster_description")
+
+
+def _real_verdict(probes):
+    return lambda notebook_id: _verdict(notebook_id, probes)
+
+
+def test_a_row_inside_the_ceiling_is_used_as_read_and_the_verdict_stands():
+    rows = {"ko-hub": _hub_row("ko-hub"), "ko-two": _hub_row("ko-two")}
+    hits = [_cluster_hit("ko-hub"), _cluster_hit("ko-two")]
+    plain = _service(_Drifting(rows), lambda _nb: False).knowledge_context(ACTIVE, hits)
+    probes, knowledge = _Probes(), _Drifting(rows)
+    with _all_ticked():
+        scoped = _service(knowledge, _real_verdict(probes)).knowledge_context(ACTIVE, hits)
+        assert current_source_scope()._ceiling_binds_memo == {ACTIVE: False}
+    assert scoped == plain and "HUB fused description" in scoped[0]
+    assert knowledge.pushed == ["<absent>", "<absent>"]
+    assert probes.calls == ["drifted", "foreign"]
+
+
+def test_an_occurrence_outside_the_ceiling_flips_the_verdict_and_rereads_bound():
+    rows = {
+        "ko-merged": _row("ko-merged", [_occurrence(OPEN_SOURCE, OPEN_TEXT),
+                                        _occurrence(NEW_SOURCE, NEW_TEXT)]),
+        "ko-next": _hub_row("ko-next"),
+    }
+    probes, knowledge = _Probes(), _Drifting(rows)
+    with _all_ticked():
+        block, id_map = _service(knowledge, _real_verdict(probes)).knowledge_context(
+            ACTIVE, [_cluster_hit("ko-merged"), _cluster_hit("ko-next")])
+        assert current_source_scope()._ceiling_binds_memo == {ACTIVE: True}
+    assert NEW_TEXT not in block and NEW_SOURCE not in str(id_map)
+    assert [entry["object_id"] for entry in id_map.values()] == ["ko-merged", "ko-next"]
+    assert id_map["k1"]["snippet"] == OPEN_TEXT
+    # This hit: read unbounded, then re-read bound.  The next hit goes bound
+    # directly, and the probes are not consulted again.
+    assert knowledge.pushed == ["<absent>", frozenset(ALL), frozenset(ALL)]
+    assert probes.calls == ["drifted", "foreign"]
+
+
+def test_a_drifted_hit_with_nothing_inside_is_dropped_and_its_cluster_stays_open():
+    rows = {
+        "ko-first": _row("ko-first", [_occurrence(NEW_SOURCE, NEW_TEXT)]),
+        "ko-second": _row("ko-second", [_occurrence(OPEN_SOURCE, OPEN_TEXT)]),
+    }
+    knowledge = _Drifting(rows, fold={"ko-first": "K", "ko-second": "K"})
+    with _all_ticked():
+        block, id_map = _service(knowledge, _real_verdict(_Probes())).knowledge_context(
+            ACTIVE, [_cluster_hit("ko-first"), _cluster_hit("ko-second")])
+    assert NEW_TEXT not in block
+    assert [entry["object_id"] for entry in id_map.values()] == ["ko-second"]
+    assert knowledge.pushed == ["<absent>", frozenset(ALL), frozenset(ALL)]
+
+
+def test_a_definition_outside_the_ceiling_is_dropped_as_under_the_bound_path():
+    rows = {"ko-defined": _row(
+        "ko-defined", [_occurrence(OPEN_SOURCE, OPEN_TEXT)],
+        definition=DEF_TEXT, definition_basis="defines_evidence",
+        definition_source_id=NEW_SOURCE, definition_element_id=f"el-{NEW_SOURCE}")}
+    knowledge = _Drifting(rows)
+    with _all_ticked():
+        block, id_map = _service(knowledge, _real_verdict(_Probes())).knowledge_context(
+            ACTIVE, [_cluster_hit("ko-defined")])
+        assert current_source_scope()._ceiling_binds_memo == {ACTIVE: True}
+    assert DEF_TEXT not in block
+    # Falls back to the first in-ceiling occurrence, as the bound path does.
+    assert id_map["k1"]["definition"] == OPEN_TEXT
+    assert knowledge.pushed == ["<absent>", frozenset(ALL)]
+
+
+def _retrieval_service(rows, probes):
+    from app.services.retrieval_service import RetrievalService
+
+    seen = []
+
+    class _Graph:
+        def node_context(self, notebook_id, object_id, **kwargs):
+            seen.append(kwargs)
+            row = rows[object_id]
+            return {**row, "occurrences": [dict(item) for item in row["occurrences"]]}
+
+    service = RetrievalService(candidates=None, graph=_Graph(), community_queries=None,
+                               ceiling_verdict=_real_verdict(probes))
+    return service, seen
+
+
+def test_retrieval_service_uses_a_row_inside_the_ceiling_as_read():
+    rows = {"ko-hub": _hub_row("ko-hub")}
+    probes = _Probes()
+    service, seen = _retrieval_service(rows, probes)
+    with _all_ticked():
+        row = service.node_context(ACTIVE, "ko-hub")
+        assert current_source_scope()._ceiling_binds_memo == {ACTIVE: False}
+    assert row == rows["ko-hub"] and seen == [{}]
+
+
+def test_retrieval_service_flips_on_a_drifted_row_and_rereads_it_bound():
+    rows = {
+        "ko-merged": _row("ko-merged", [_occurrence(OPEN_SOURCE, OPEN_TEXT),
+                                        _occurrence(NEW_SOURCE, NEW_TEXT)]),
+        "ko-gone": _row("ko-gone", [_occurrence(NEW_SOURCE, NEW_TEXT)]),
+        "ko-defined": _row(
+            "ko-defined", [_occurrence(OPEN_SOURCE, OPEN_TEXT)],
+            definition=DEF_TEXT, definition_basis="defines_evidence",
+            definition_source_id=NEW_SOURCE),
+        "ko-next": _hub_row("ko-next"),
+    }
+    bound = {"allowed_source_ids": frozenset(ALL)}
+    for object_id in ("ko-merged", "ko-gone", "ko-defined"):
+        probes = _Probes()
+        service, seen = _retrieval_service(rows, probes)
+        with _all_ticked():
+            row = service.node_context(ACTIVE, object_id)
+            assert current_source_scope()._ceiling_binds_memo == {ACTIVE: True}
+            following = service.node_context(ACTIVE, "ko-next")
+        assert NEW_TEXT not in str(row) and DEF_TEXT not in str(row)
+        assert seen == [{}, bound, bound], object_id
+        assert probes.calls == ["drifted", "foreign"]
+        assert following["definition"] == "HUB fused description"
+    assert row["definition"] is None and row["occurrences"][0]["source_id"] == OPEN_SOURCE
+
+
+def test_retrieval_service_drops_a_drifted_row_with_nothing_inside():
+    service, _seen = _retrieval_service(
+        {"ko-gone": _row("ko-gone", [_occurrence(NEW_SOURCE, NEW_TEXT)])}, _Probes())
+    with _all_ticked():
+        assert service.node_context(ACTIVE, "ko-gone") == {}
+
+
+def test_a_merge_after_the_verdict_is_caught_on_a_real_store(repo, monkeypatch):
+    """The production verdict and SQLite store: the first re-read of the run
+    takes the verdict (False: all ticked, nothing drifted); then a new source is
+    uploaded and its evidence merged into the recalled hub.  The next re-read of
+    the same run must not carry the new source's text or locator."""
+    import datetime
+    import json
+
+    from tests.test_node_context import _nc_ev, _seed_hub
+
+    nb, hub, src = _seed_hub(repo, 2)
+    runtime = repo._runtime
+    service = runtime.evidence_context_component
+    pushed = []
+    original = runtime.knowledge.node_context
+
+    def spy(*args, **kwargs):
+        pushed.append(kwargs.get("allowed_source_ids", "<absent>"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(runtime.knowledge, "node_context", spy)
+    hit = RetrievedKnowledge(object_id=hub, object_type="concept", payload={"name": "Hub"},
+                             evidence=[], notebook_id=nb, tier="personal", relevance=0.9)
+    visible = runtime.source_store.all_visible_source_ids(nb)
+    new_src, new_el = f"src-new-{nb}", f"el-new-{nb}"
+    with source_scope_context(nb, {"mode": "include", "source_ids": visible,
+                                   "narrowed": False, "owner_id": "u-asker"}, None):
+        before = service.knowledge_context(nb, [hit], budget_chars=10_000)
+        assert current_source_scope()._ceiling_binds_memo == {nb: False}
+        now = datetime.datetime.now().isoformat()
+        with repo._connect() as db:
+            db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) VALUES (?,?,'new','markdown','extracted','parsed','n.md','',0,'','','academic_paper',?,?)", (new_src, nb, now, now))
+            db.execute("INSERT INTO source_elements (id,source_id,element_type,location_label,text,metadata,created_at) VALUES (?,?,'paragraph','p',?,'{}',?)", (new_el, new_src, NEW_TEXT, now))
+            db.execute("UPDATE knowledge_objects SET evidence=? WHERE id=?",
+                       (json.dumps([_nc_ev(new_el, new_src), _nc_ev(f"el-{nb}", src)]), hub))
+            db.execute("INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id) VALUES (?,?,?)", (hub, new_src, nb))
+        after = service.knowledge_context(nb, [hit], budget_chars=10_000)
+        assert current_source_scope()._ceiling_binds_memo == {nb: True}
+    assert "HUB fused description" in before[0] and pushed[0] == "<absent>"
+    assert NEW_TEXT not in after[0] and new_src not in json.dumps(after[1])
+    assert pushed[1:] == ["<absent>", frozenset(visible)]
+    assert after[1]["k1"]["source_id"] == src
