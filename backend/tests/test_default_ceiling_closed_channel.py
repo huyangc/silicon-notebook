@@ -45,7 +45,9 @@ def seeded(tmp_path, monkeypatch):
     Memory projected as ``src-mem`` with two Memory-derived concepts (e2 in
     e1's cluster, e3 "ZEBRAQUARTZ plan"), a Memory-derived relation e1 -> e3,
     a Memory passage, and a Memory section named ``zebra_quartz_cmd``."""
-    from app.services.sqlite_repository import SQLiteRepository, set_request_user
+    from app.services.sqlite_repository import (
+        SQLiteRepository, reset_request_user, set_request_user,
+    )
 
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'closed.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
@@ -54,7 +56,10 @@ def seeded(tmp_path, monkeypatch):
     repo = SQLiteRepository(Settings(_env_file=None))
     bind_all_embedding_clients(repo, FakeEmbedder(dim=16))
     bob = repo.create_user("b00654321", "password-12")
-    set_request_user(bob)
+    # Reset in teardown: the request user is a context variable, and leaking
+    # it makes every later test in this worker write rows as a user its own
+    # database does not have (FOREIGN KEY failures far away from here).
+    token = set_request_user(bob)
     nb = repo.create_notebook(NotebookCreate(name="kb")).id
     with repo._write() as db:
         db.execute(
@@ -119,7 +124,10 @@ def seeded(tmp_path, monkeypatch):
             ("rM", nb, "src-mem", "e1", "e3", "kind_of",
              _evidence("src-mem", "elM", "SECRETMEMO ZEBRAQUARTZ"), NOW),
         )
-    return repo, nb, bob.id
+    try:
+        yield repo, nb, bob.id
+    finally:
+        reset_request_user(token)
 
 
 def _leaks(value) -> list[str]:
