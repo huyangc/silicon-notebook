@@ -1605,6 +1605,16 @@ def test_peer_visible_sources_returns_the_frozen_ceiling_without_reading():
                 candidates, "nb-lib"
             ) == ("lib-000", "lib-001"), "no reader order -> sorted once"
         assert chunk_federation._peer_visible_sources(candidates, "nb-lib") is handed
+    # A read order is kept only for the very frozenset it was read into: an
+    # order paired with a different set is never handed out.
+    stale = frozenset({"lib-000", "lib-001", "lib-gone"})
+    with source_scope_context(
+        NB, None, None, {"nb-lib": frozenset({"lib-001", "lib-000"})},
+        _ceiling_read_order={"nb-lib": (stale, ("lib-gone", "lib-001", "lib-000"))},
+    ):
+        assert current_source_scope().ceiling_hand_out("nb-lib") == (
+            "lib-000", "lib-001",
+        )
     with default_ceiling_context(NB, "bob", store.readers()):
         assert chunk_federation._peer_visible_sources(candidates, "nb-lib") == (
             "lib-1",
