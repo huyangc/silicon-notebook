@@ -24,6 +24,12 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 from app.application.report_pipeline import CommittedReport
 from app.services.cancellation import AskCancelled, raise_if_cancelled
 from app.services.model_work import ModelPriority, model_work_scope
+# The helper lives with ``CeilingReaders`` (every entry point wraps its readers
+# the same way); re-exported here for the report engine's refresh.
+from app.services.source_scope import (  # noqa: F401 - re-export
+    CEILING_READ_SECONDS,
+    cancellable_ceiling_readers,
+)
 
 if TYPE_CHECKING:
     from app.core.config import Settings
@@ -77,60 +83,6 @@ class ReportCancellationRegistry:
 
 # 进程全局唯一所有者(见模块 docstring;runtime 按身份引用,不建副本)。
 REPORT_CANCELLATIONS = ReportCancellationRegistry()
-
-
-# Deadline of each ceiling read's budget: PostgreSQL's default
-# ``statement_timeout`` (30 s), i.e. no shorter than what a read had before.
-CEILING_READ_SECONDS = 30.0
-
-
-def cancellable_ceiling_readers(
-    readers: "CeilingReaders | None",
-    cancel_event: Any,
-    *,
-    seconds: float = CEILING_READ_SECONDS,
-) -> "CeilingReaders | None":
-    """``readers`` whose every read runs under a budget carrying ``cancel_event``.
-
-    ``default_ceiling_context`` reads the ACTIVE notebook (participants, its
-    visible set, its hidden half, its Memory sources) with no ``read_budget``
-    of its own, so without this a Stop pressed during those reads waited for
-    them to finish.  Each call here enters ``read_budget(now + seconds,
-    cancel_event)``: on SQLite the progress handler interrupts the statement
-    as soon as the event is set; on PostgreSQL the budget is checked before
-    each statement and a budgeted connection caps every statement at
-    ``postgres_chunk_fts_timeout_seconds`` (3 s by default), so a Stop waits
-    at most that long instead of up to the 30 s ``statement_timeout``.  (The
-    same cap already applies to each mounted library's read, which runs under
-    a budget inside the constructor; nested budgets only get shorter.)
-
-    This only makes the read stoppable; it does not decide what an
-    interrupted read means.  The constructor still gets ``cancel_event`` and
-    turns an interrupted MOUNTED read into ``AskCancelled`` (rather than a
-    skipped library); the entry point turns an interrupted ACTIVE-notebook
-    read into ``AskCancelled`` (rather than a failed report).  ``None``
-    readers or no cancel event -> ``readers`` unchanged.
-    """
-    if readers is None or cancel_event is None:
-        return readers
-    import dataclasses
-    import time
-
-    from app.repositories.read_budget import read_budget
-
-    def bounded(read: Callable) -> Callable:
-        def call(*args):
-            with read_budget(time.monotonic() + float(seconds), cancel_event):
-                return read(*args)
-        return call
-
-    return dataclasses.replace(
-        readers,
-        participants=bounded(readers.participants),
-        visible=bounded(readers.visible),
-        hidden=bounded(readers.hidden),
-        memory_sources=bounded(readers.memory_sources),
-    )
 
 
 class ReportGenerationGate:

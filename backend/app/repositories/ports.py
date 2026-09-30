@@ -1045,7 +1045,9 @@ class AdminQueryRepository(Protocol):
 class AskExecutionPort(Protocol):
     def preview_reasoning_intent(
         self, notebook_id: str, question: str, history: str = "",
-        cancel_event: CancelEvent = None
+        cancel_event: CancelEvent = None, *,
+        source_scope: Any = None, base_scope: Any = None,
+        user_id: str | None = None,
     ) -> QueryIntentContract: ...
     def validate_reasoning_submission(
         self, notebook_id: str, payload: AskRequest
@@ -1699,7 +1701,9 @@ class CatalogStorePort(Protocol):
 
 @runtime_checkable
 class SourceStorePort(Protocol):
-    def all_visible_source_ids(self, notebook_id: str) -> list[str]: ...
+    def all_visible_source_ids(
+        self, notebook_id: str, *, digest_for_owner: str | None = None,
+    ) -> list[str]: ...
     def hidden_source_ids(
         self, notebook_id: str, owner_id: str
     ) -> list[str]: ...

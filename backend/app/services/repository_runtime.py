@@ -49,7 +49,11 @@ from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService
 from app.services.knowledge_query import KnowledgeQueryService
-from app.services.kg_viewer_scope import KgViewerScopeReader, NodeContextCeilingVerdict
+from app.services.kg_viewer_scope import (
+    KgViewerScopeReader,
+    NodeContextCeilingVerdict,
+    foreign_memory_source_ids,
+)
 from app.services.evidence_context import EvidenceContextService
 from app.services.graph_retrieval import GraphRetrievalService
 from app.services.model_provider import (
@@ -2405,15 +2409,22 @@ class RepositoryRuntime:
         """THE production ``CeilingReaders`` for ``default_ceiling_context``.
 
         The one place the four store reads behind a default retrieval ceiling
-        are bound, so every entry point that installs one (the report worker,
-        MCP ``ask_notebook``, the Ask service and its route prechecks) freezes
-        from the same reads: the participant set (``mount_sql.py``), ONE
+        are bound, so both installers -- the report worker and the Ask
+        service (``AskService._retrieval_ceiling``, which every Ask entry
+        reaches: HTTP, stream, MCP ``ask_notebook``, extension engines and the
+        intent prechecks) -- freeze from the same reads: the participant set (``mount_sql.py``), ONE
         library's visible sources, the raw owner-scoped hidden half, and the
         notebook's Memory source ids.  ``memory_source_ids`` takes the caller's
         connection, so it is bound here as a closure that opens one per call;
         the constructor reads it only while the Memory channel is closed.
-        Building it does no I/O (four bound methods)."""
-        from app.services.source_scope import CeilingReaders
+        Building it does no I/O (bound methods and closures).  Also bound
+        here: the two probes of the run's ceiling verdict
+        (``CeilingVerdictProbes``) and how many mounted libraries the store
+        reads at once (``ceiling_read_workers``)."""
+        from app.services.source_scope import (
+            CeilingReaders,
+            CeilingVerdictProbes,
+        )
 
         database = self.database
         sources = self.source_store
@@ -2422,12 +2433,30 @@ class RepositoryRuntime:
             with database.connect() as db:
                 return sources.memory_source_ids(db, notebook_id)
 
+        def foreign_hidden(notebook_id: str, owner_id: str) -> bool:
+            return bool(foreign_memory_source_ids(
+                sources, database.connect, notebook_id, owner_id)[1])
+
+        def universe_digests(notebook_id: str, owner_id: str) -> list[str]:
+            return sources.all_visible_source_ids(
+                notebook_id, digest_for_owner=owner_id)
+
         return CeilingReaders(
             participants=self.notebook_store.participant_notebook_ids,
             visible=sources.all_visible_source_ids,
             hidden=sources.hidden_source_ids,
             memory_sources=memory_sources,
             emit=self.event_log.emit,
+            # The store states its own concurrency: PostgreSQL
+            # ``POSTGRES_MOUNTED_READ_WORKERS``, SQLite 1.
+            read_workers=int(getattr(sources, "ceiling_read_workers", 1)),
+            # The run verdict's two probes (``run_ceiling_binds``): with them
+            # an un-narrowed, undrifted run over a notebook holding no other
+            # member's Memory binds no source list in its SQL.
+            verdict_probes=CeilingVerdictProbes(
+                universe_digests=universe_digests,
+                foreign_hidden=foreign_hidden,
+            ),
         )
 
     def wire_report_execution(
@@ -2679,6 +2708,10 @@ class RepositoryRuntime:
                 # bound method、同一条边界;交的是 `_note_ask_completed` 本身,
                 # `ask_current` 只负责在答案交付之后把它交给后台跑一次。
                 note_ask_completed=self._note_ask_completed,
+                # The one installation of every Ask entry's default retrieval
+                # ceiling (``AskService._retrieval_ceiling``) reads through
+                # these -- the same readers the report worker uses.
+                ceiling_readers=self.ceiling_readers(),
             )
         return self.ask
 

@@ -307,7 +307,9 @@ def test_chunk_candidate_host_anchor_stays_between_baseline_and_selection():
     retrieve = next(
         node for node in owner.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "_retrieve_chunks"
+        # ``_retrieve_chunks`` itself is the verify-on-read wrapper around
+        # this one call (E1-2 push-down); the anchor order lives here.
+        and node.name == "_retrieve_chunks_once"
     )
     calls = [
         node.func.attr

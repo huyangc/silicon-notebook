@@ -275,10 +275,43 @@ class _MinimalEvidence:
         return None
 
 
+def static_ceiling_readers(
+    *,
+    participants=lambda notebook_id: (notebook_id,),
+    visible=lambda _notebook_id: (),
+    hidden=lambda _notebook_id, _owner_id: (),
+    memory_sources=lambda _notebook_id: (),
+):
+    """``CeilingReaders`` over fixed callables, for services built without a
+    store.  Every Ask entry installs its default ceiling from these
+    (``AskService._retrieval_ceiling``); an unwired service refuses to ask."""
+    from app.services.source_scope import CeilingReaders
+
+    return CeilingReaders(
+        participants=participants, visible=visible, hidden=hidden,
+        memory_sources=memory_sources,
+    )
+
+
 def _minimal_ask_service(**overrides):
     """Narrow AskService double.  ``overrides`` reaches the real constructor so
     a caller can exercise a construction-time seam (the injectable
-    ``response_draft_stage``, a connection probe) without a second factory."""
+    ``response_draft_stage``, a connection probe) without a second factory.
+
+    Unless ``ceiling_readers`` is given, the ceiling readers mirror the
+    extension-engine universe overrides (the production wiring binds both to
+    the same store reads), with no Memory sources."""
+    overrides.setdefault("ceiling_readers", static_ceiling_readers(
+        **{
+            name: overrides[key]
+            for name, key in (
+                ("participants", "ask_engine_participant_notebooks"),
+                ("visible", "ask_engine_visible_sources"),
+                ("hidden", "ask_engine_hidden_sources"),
+            )
+            if key in overrides
+        }
+    ))
     return AskService(
         ask_state=_MinimalAskState(), retrieval=_MinimalRetrieval(),
         candidates=_MinimalCandidates(),

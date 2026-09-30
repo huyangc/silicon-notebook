@@ -70,6 +70,7 @@ from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Seq
 from app.services.source_scope import (
     ceiling_binds,
     current_source_scope,
+    live_universe_digests,
     source_scope_visible_universe_matches,
 )
 
@@ -443,6 +444,13 @@ class NodeContextCeilingVerdict:
         library = notebook_id or scope.notebook_id
 
         def drifted() -> bool:
+            # The one-row fingerprint (``universe_digest``), as the drift
+            # probe reads it; a store without the keyword reads both sets.
+            digests = live_universe_digests(
+                self.sources.all_visible_source_ids, library, scope.owner_id)
+            if digests is not None:
+                return not source_scope_visible_universe_matches(
+                    library, current_digests=digests)
             return not source_scope_visible_universe_matches(
                 library,
                 self.sources.all_visible_source_ids(library),

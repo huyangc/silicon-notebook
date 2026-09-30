@@ -12,7 +12,7 @@ import itertools
 import logging
 import re
 import time
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from app.core.ask_context import _ASK_EMBED_CACHE
 from app.core.config import (
@@ -583,6 +583,7 @@ class _RetrievalState:
         """
         from app.services.source_scope import (
             current_source_scope,
+            live_universe_digests,
             source_scope_restricted,
             source_scope_visible_universe_matches,
         )
@@ -606,6 +607,18 @@ class _RetrievalState:
         # snapshot against an unfiltered (or differently-scoped) live read
         # would report drift forever in any shared notebook holding another
         # member's Memory, silently disabling these channels for good.
+        #
+        # One statement, one row (E1-2): the store's fingerprint of both
+        # halves (``universe_digest``), compared with the freeze's own
+        # digests.  Still a fresh read on EVERY call -- only its size changed
+        # (at 49k sources the two full reads cost 30-50 ms and a reasoning ask
+        # made 14 of them).  A double without the keyword falls back to the
+        # two set reads.
+        digests = live_universe_digests(visible_ids, notebook_id, scope.owner_id)
+        if digests is not None:
+            return not source_scope_visible_universe_matches(
+                notebook_id, current_digests=digests,
+            )
         hidden_ids = getattr(self.sources, "hidden_source_ids", None)
         return not source_scope_visible_universe_matches(
             notebook_id,
@@ -800,6 +813,26 @@ def _attest_overlay_passages(candidates, merged: list, kg_chunks: list) -> None:
     attest_selected_passages(
         candidates, [chunk for chunk in merged if chunk.chunk_id in overlay_ids],
     )
+
+
+def _bound_on_drift(notebook_id: str, produce: Callable[[], Any]) -> Any:
+    """Run one producer call whose source list may have been pushed down
+    (``source_scope.scoped_allowed_source_ids`` returns ``None`` when the
+    run's verdict says the ceiling binds nothing) and re-run it BOUND when
+    reading it flipped that verdict.
+
+    ``produce`` must include its boundary filter (``filter_retrieval_items``),
+    which is where an item from outside the freeze flips the verdict
+    (verify-on-read).  The outsider is already dropped there; the re-run makes
+    sure it did not also take a top-K slot a source inside the freeze should
+    have had.  At most one re-run: after the flip the call binds its list."""
+    from app.services.source_scope import unbound_ceiling
+
+    unbound = unbound_ceiling(notebook_id) is not None
+    result = produce()
+    if unbound and unbound_ceiling(notebook_id) is None:
+        result = produce()
+    return result
 
 
 class CandidateRetrievalService(_RetrievalState):
@@ -2859,6 +2892,32 @@ class CandidateRetrievalService(_RetrievalState):
         allowed_source_ids=None, producer_explicit: bool = False,
         drifted: Optional[bool] = None,
     ):
+        """Every chunk recall lane behind one ceiling (``_chunk_source_ceiling``).
+
+        When that ceiling was pushed down (no list: the run's verdict says it
+        binds nothing, ``source_scope.scoped_allowed_source_ids``), the rows
+        are verified on read and a row from outside the freeze flips the
+        verdict and re-runs this call bound (``verify_unbound_read``)."""
+        from app.services.source_scope import verify_unbound_read
+
+        result = self._retrieve_chunks_once(
+            notebook_id, query, recall, allowed_source_ids=allowed_source_ids,
+            producer_explicit=producer_explicit, drifted=drifted,
+        )
+        if allowed_source_ids is None and not verify_unbound_read(
+            notebook_id, (chunk.source_id for chunk in result[0]),
+        ):
+            result = self._retrieve_chunks_once(
+                notebook_id, query, recall,
+                producer_explicit=producer_explicit, drifted=drifted,
+            )
+        return result
+
+    def _retrieve_chunks_once(
+        self, notebook_id: str, query: str, recall: int = 0, *,
+        allowed_source_ids=None, producer_explicit: bool = False,
+        drifted: Optional[bool] = None,
+    ):
         effective_allowed = self._chunk_source_ceiling(
             notebook_id, allowed_source_ids
         )
@@ -2891,11 +2950,19 @@ class CandidateRetrievalService(_RetrievalState):
         the ScaleIndex object: an auto-fold/reload must not widen a report that
         is already in flight.
         """
-        from app.services.source_scope import scoped_allowed_source_ids
+        from app.services.source_scope import (
+            current_source_scope,
+            scoped_allowed_source_ids,
+        )
 
         scoped = scoped_allowed_source_ids(notebook_id, allowed_source_ids)
         if scoped is not None:
             return tuple(dict.fromkeys(str(value) for value in scoped))
+        if current_source_scope() is not None:
+            # The run's ceiling was pushed down (its verdict binds nothing
+            # here): no list, the caller verifies what it read.  Never the
+            # report fallback below, which exists for runs with NO scope.
+            return None
         run = current_retrieval_run()
         if run is None or run.run_kind not in {
             "report_planning", "report_generation"
@@ -4002,7 +4069,10 @@ class CandidateRetrievalService(_RetrievalState):
         """
         from app.services.source_scope import (
             current_source_scope,
+            run_ceiling_binds,
             scoped_allowed_source_ids,
+            unbound_ceiling,
+            verify_unbound_read,
         )
 
         scope = current_source_scope()
@@ -4023,13 +4093,19 @@ class CandidateRetrievalService(_RetrievalState):
             # short-circuit ``include`` with no ids to zero rows.
             source_mode = "include"
             source_ids = tuple(scoped_allowed_source_ids(notebook_id) or ())
-        elif scope is not None and scope.ceiling_active:
+        elif (
+            scope is not None and scope.ceiling_active
+            and run_ceiling_binds(scope, notebook_id)
+        ):
             source_mode = scope.mode
             values = (
                 scope.source_ids | scope.hidden_source_ids
                 if source_mode == "include" else scope.source_ids
             )
             source_ids = tuple(sorted(values))
+        # Pushed down (the run's verdict binds nothing here): no list in the
+        # SQL, the rows are checked against the freeze below.
+        unbound = None if source_mode is not None else unbound_ceiling(notebook_id)
 
         rows = []
         with self._connect() as db:
@@ -4042,7 +4118,7 @@ class CandidateRetrievalService(_RetrievalState):
                     source_mode=source_mode,
                     source_ids=source_ids,
                 ))
-        return [RetrievedChunk(
+        chunks = [RetrievedChunk(
             chunk_id=str(row["id"]),
             source_id=str(row["source_id"]),
             source_title=str(row["source_title"]),
@@ -4051,6 +4127,13 @@ class CandidateRetrievalService(_RetrievalState):
             element_ids=list(json.loads(row["element_ids"] or "[]")),
             notebook_id=str(row["chunk_notebook_id"]),
         ) for row in rows]
+        if unbound is not None and not verify_unbound_read(
+            notebook_id, (chunk.source_id for chunk in chunks),
+        ):
+            # A by-id hydrate has no top-K to protect: dropping the rows from
+            # outside the freeze is the bound read's answer.
+            chunks = [chunk for chunk in chunks if chunk.source_id in unbound]
+        return chunks
 
     # Compatibility for internal subclasses and older tests.  Composition
     # boundaries use the public RetrievalPort method above.
@@ -4210,12 +4293,25 @@ class CandidateRetrievalService(_RetrievalState):
         if not needle:
             return []
         recall = recall or self.settings.chunk_recall
-        from app.services.source_scope import scoped_allowed_source_ids
-
-        return self._keyword_chunk_candidates_one(
-            notebook_id, needle, recall,
-            allowed_source_ids=scoped_allowed_source_ids(notebook_id),
+        from app.services.source_scope import (
+            scoped_allowed_source_ids,
+            verify_unbound_read,
         )
+
+        def keyword_arm():
+            return self._keyword_chunk_candidates_one(
+                notebook_id, needle, recall,
+                allowed_source_ids=scoped_allowed_source_ids(notebook_id),
+            )
+
+        hits = keyword_arm()
+        # A pushed-down ceiling (no list) is verified on read; an outsider
+        # flips the run's verdict and this call re-runs bound.
+        if not verify_unbound_read(
+            notebook_id, (getattr(hit, "source_id", "") for hit in hits),
+        ):
+            hits = keyword_arm()
+        return hits
 
     def _peer_keyword_leg(self, needle: str, recall: int):
         """One library's keyword leg for the peer-mode fan-out.
@@ -5091,10 +5187,10 @@ class CandidateRetrievalService(_RetrievalState):
         from app.services.source_scope import filter_retrieval_items
 
         notebook_id = str(args[0] if args else kwargs.get("active_notebook_id", ""))
-        return filter_retrieval_items(
+        return _bound_on_drift(notebook_id, lambda: filter_retrieval_items(
             notebook_id, "knowledge",
             self._federated_retrieve_impl(*args, **kwargs),
-        )
+        ))
 
     def federated_retrieve_relations(self, *args, **kwargs):
         from app.services.source_scope import filter_retrieval_items
@@ -5144,6 +5240,6 @@ class CandidateRetrievalService(_RetrievalState):
         if federated_ask_active():
             return []
         notebook_id = str(args[0] if args else kwargs.get("notebook_id", ""))
-        return filter_retrieval_items(
+        return _bound_on_drift(notebook_id, lambda: filter_retrieval_items(
             notebook_id, "element", self._retrieve_elements(*args, **kwargs)
-        )
+        ))

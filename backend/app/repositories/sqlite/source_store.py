@@ -81,6 +81,33 @@ _HIDDEN_SOURCE_IDS_SQL = (
 #: Schema-induction sample: no Memory element (``notebook_element_sample``).
 _SAMPLE_NOT_MEMORY = f"NOT ({memory_sql.memory_source_type_predicate('s.source_type')})"
 
+# The drift probe's fingerprint, the PostgreSQL ``_UNIVERSE_DIGEST_SQL`` twin:
+# each half's ids in ``id`` order (BINARY collation == Python's code-point
+# ``sorted`` for UTF-8) joined by char(30), in ONE statement.  The order comes
+# from a subquery's ``ORDER BY`` feeding ``group_concat`` -- the idiom
+# ``knowhow_fingerprint.FINGERPRINT_SQL`` already relies on, not the
+# version-sensitive ``group_concat(x ORDER BY y)`` -- and md5 is taken in
+# Python (``_universe_digest``).  Parameters: (notebook_id, notebook_id,
+# owner_id).  An empty half is NULL.
+_UNIVERSE_DIGEST_SQL = (
+    "SELECT (SELECT group_concat(id, char(30)) FROM ("
+    "SELECT v.id FROM sources v WHERE v.notebook_id=? "
+    "AND v.source_type NOT IN ('memory','knowhow') ORDER BY v.id)) AS visible_ids, "
+    "(SELECT group_concat(id, char(30)) FROM ("
+    "SELECT s.id FROM sources s WHERE s.notebook_id=? "
+    "AND s.source_type IN ('memory','knowhow') "
+    f"AND {memory_source_readable('s')} ORDER BY s.id)) AS hidden_ids"
+)
+
+
+def _universe_digest(joined: str | None) -> str:
+    """md5 hex of an already ``id``-ordered, U+001E-joined id list; ``""`` for
+    an empty half -- the same value ``source_scope.universe_digest`` gives the
+    frozen set."""
+    if not joined:
+        return ""
+    return hashlib.md5(joined.encode("utf-8")).hexdigest()
+
 
 # 论文元数据补抽候选的 SQL 谓词(接在 ``FROM sources s`` 且已按 ``s.notebook_id``
 # 过滤之后)。三个消费方共用:sources_missing_paper_meta(补抽排队)、
@@ -117,6 +144,13 @@ class SourceStore:
     # IN(...) batching bound for the batched hydration lookups — mirrors the
     # facade's `_IN_CHUNK` (well under SQLite's default 999-variable limit).
     IN_CHUNK = 900
+
+    # Mounted-library reads of a default retrieval ceiling stay serial on this
+    # store (``CeilingReaders.read_workers``): ``sqlite3`` releases and
+    # re-takes the GIL around every row, so parallel reads in one process
+    # convoy on it and measured slower (170 ms serial vs 320 ms on 4 threads
+    # for six 49k-row reads).
+    ceiling_read_workers = 1
 
     # A ``table`` element whose ``location_label`` ends in " part N" (N >= 2) is
     # a continuation of an overlong table that parsing split into several
@@ -160,8 +194,25 @@ class SourceStore:
         self.current_user_id = current_user_id
 
     # ------------------------------------------------------------------ reads
-    def all_visible_source_ids(self, notebook_id: str) -> list[str]:
-        """Return the current visible-source universe for graph drift checks."""
+    def all_visible_source_ids(
+        self, notebook_id: str, *, digest_for_owner: str | None = None,
+    ) -> list[str]:
+        """Return the current visible-source universe for graph drift checks.
+
+        ``digest_for_owner`` given -> the drift probe's fingerprint instead:
+        ``[visible digest, hidden digest]`` for this universe and for
+        ``hidden_source_ids(notebook_id, digest_for_owner)``, one statement,
+        one row (see the PostgreSQL twin)."""
+        if digest_for_owner is not None:
+            with self.database.connect() as db:
+                row = db.execute(
+                    _UNIVERSE_DIGEST_SQL,
+                    (notebook_id, notebook_id, str(digest_for_owner)),
+                ).fetchone()
+            return [
+                _universe_digest(row["visible_ids"]),
+                _universe_digest(row["hidden_ids"]),
+            ]
         with self.database.connect() as db:
             return [row["id"] for row in db.execute(
                 "SELECT id FROM sources WHERE notebook_id=? "

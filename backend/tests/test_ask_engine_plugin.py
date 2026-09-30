@@ -61,7 +61,10 @@ from app.services.sqlite_repository import (
     reset_request_user,
     set_request_user,
 )
-from tests.test_ask_service_boundary import _minimal_ask_service
+from tests.test_ask_service_boundary import (
+    _minimal_ask_service,
+    static_ceiling_readers,
+)
 
 
 @dataclass(frozen=True)
@@ -1817,7 +1820,9 @@ def test_plugin_port_universe_excludes_the_callers_memory_projections():
     """codex #603 R4 P1:MCP 的 memory:read 过滤只认 `Citation.memory_id`,而
     插件引用没有渠道携带 Memory 身份——所以调用者自己的 Memory 投影源在
     ask_service 接线处就被结构性排除出冻结宇宙,Knowhow 投影保留(表格是
-    notebook 级共享内容)。删掉接线处的 source_type 过滤必须让本用例变红。"""
+    notebook 级共享内容)。「哪些是 Memory」按天花板同一份判据
+    (``partition_memory_sources`` 对笔记本 Memory 来源 id);删掉接线处的剔除
+    必须让本用例变红。Memory 通道开着(默认)也照样剔除。"""
     seen_keys: list[tuple[str, str]] = []
 
     def capture_elements(_nb, _query, *, allowed_source_keys, limit):
@@ -1832,20 +1837,19 @@ def test_plugin_port_universe_excludes_the_callers_memory_projections():
     runtime = build_extension_runtime((
         _bundle("alpha", _Provider("alpha.kg", answer=answer)),
     ))
+    hidden = lambda _nb, _actor: ("hidden-knowhow", "hidden-memory")  # noqa: E731
     service = _minimal_ask_service(
         ask_engine_host=runtime.ask_engines,
         ask_engine_participant_notebooks=lambda _nb: ("nb",),
         ask_engine_visible_sources=lambda _nb: ("source-doc",),
-        ask_engine_hidden_sources=lambda _nb, _actor: (
-            "hidden-knowhow", "hidden-memory",
+        ask_engine_hidden_sources=hidden,
+        ceiling_readers=static_ceiling_readers(
+            visible=lambda _nb: ("source-doc",), hidden=hidden,
+            memory_sources=lambda _nb: ("hidden-memory",),
         ),
     )
     service.retrieval.federated_retrieve_elements = capture_elements
     service.evidence_context.evidence_elements = _all_live
-    service.evidence_context.source_metadata = lambda _ids: {
-        "hidden-knowhow": {"source_type": "knowhow"},
-        "hidden-memory": {"source_type": "memory"},
-    }
     service.evidence_context.citation_source_info = lambda _ids: {}
     service.collection_catalog = SimpleNamespace(
         collection_map_text=lambda _nb: ""
@@ -1894,15 +1898,11 @@ def test_search_kg_slices_after_the_seams_ranking_and_pushes_no_limit_down():
     )
 
 
-def test_plugin_ask_synthesizes_an_unnarrowed_ceiling_for_scopeless_callers():
-    """MCP 与旧直调不带 scope。若不合成天花板,未收窄 run 传 None 时接缝就没有
-    任何 hydrate 上限——所以 ask_plugin_engine 为无 scope 的调用合成与浏览器冻结
-    快照同形状的 include 天花板(narrowed=False、hidden 半是已剔除 Memory 的插件
-    宇宙),让 KG 接缝在每个调用面上行为一致。展示回执是另一个只由 API 路由在真
-    收窄时设置的 ContextVar,合成不产生任何用户可见 scope。"""
+def _scope_capturing_plugin_service(captured: list[object]):
+    """A plugin-mode service whose KG seat records the scope it runs under;
+    ``nb`` mounts ``base-1`` (visible ``base-doc``), and the asker's hidden
+    half holds a Knowhow and a Memory projection."""
     from app.services.source_scope import current_source_scope
-
-    captured: list[object] = []
 
     def capture_scope(_nb, _query, **_kwargs):
         captured.append(current_source_scope())
@@ -1915,155 +1915,136 @@ def test_plugin_ask_synthesizes_an_unnarrowed_ceiling_for_scopeless_callers():
     runtime = build_extension_runtime((
         _bundle("alpha", _Provider("alpha.kg", answer=answer)),
     ))
+    participants = lambda _nb: ("nb", "base-1")  # noqa: E731
+    visible = lambda nb: ("base-doc",) if nb == "base-1" else ("source-doc",)  # noqa: E731
+    hidden = lambda _nb, _actor: ("hidden-knowhow", "hidden-memory")  # noqa: E731
     service = _minimal_ask_service(
         ask_engine_host=runtime.ask_engines,
-        ask_engine_participant_notebooks=lambda _nb: ("nb", "base-1"),
-        ask_engine_visible_sources=lambda _nb: ("source-doc",),
-        ask_engine_hidden_sources=lambda _nb, _actor: (
-            "hidden-knowhow", "hidden-memory",
+        ask_engine_participant_notebooks=participants,
+        ask_engine_visible_sources=visible,
+        ask_engine_hidden_sources=hidden,
+        ceiling_readers=static_ceiling_readers(
+            participants=participants, visible=visible, hidden=hidden,
+            memory_sources=lambda _nb: ("hidden-memory",),
         ),
     )
     service.retrieval.federated_retrieve = capture_scope
     service.retrieval.federated_retrieve_elements = lambda *_a, **_k: []
     service.evidence_context.evidence_elements = _all_live
-    service.evidence_context.source_metadata = lambda _ids: {
-        "hidden-knowhow": {"source_type": "knowhow"},
-        "hidden-memory": {"source_type": "memory"},
-    }
     service.evidence_context.citation_source_info = lambda _ids: {}
     service.collection_catalog = SimpleNamespace(
         collection_map_text=lambda _nb: ""
     )
+    return service
 
+
+def test_plugin_ask_runs_under_the_default_ceiling_ask_installs():
+    """E1-2: an extension engine has no scope synthesis of its own any more.
+    ``AskService.ask`` installs the default ceiling for every mode
+    (``_retrieval_ceiling``), so a scope-less plugin ask retrieves under the
+    same freeze a built-in one does -- the asker's all-selected include with
+    its RAW hidden half, each mounted library frozen to its visible sources,
+    ``ceilings_total`` set -- while nothing user-visible is fabricated.
+    Before, the plugin's own synthesis replaced it with a scope carrying no
+    per-library ceiling at all."""
+    from app.services.source_scope import current_source_scope_payload
+
+    captured: list[object] = []
+    service = _scope_capturing_plugin_service(captured)
     response = service.ask(
         "nb", AskRequest(question="问题", mode="alpha.kg"), user_id="user"
     )
 
     scope = captured[0]
-    assert scope is not None, (
-        "a scope-less caller must retrieve under a synthesized frozen ceiling"
-    )
-    assert scope.mode == "include"
-    assert "source-doc" in scope.source_ids
+    assert scope is not None, "a scope-less plugin ask must retrieve under a ceiling"
+    assert scope.mode == "include" and scope.source_ids == {"source-doc"}
     assert scope.hidden_source_ids == {"hidden-knowhow", "hidden-memory"}, (
-        "the ceiling's hidden half must be the RAW set (Memory included, the "
-        "exact browser-snapshot shape): the seam's universe-drift probe "
-        "compares it against the live hidden_source_ids read, and a "
-        "Memory-stripped copy never matches -- which would silently re-close "
-        "the ANN arm for every user holding one confirmed Memory (P2-1)"
+        "the channel is open: the hidden half is the RAW owner-scoped set the "
+        "drift probe re-reads (the plugin's port universe still drops the "
+        "Memory projection -- a separate rule)"
     )
-    assert not scope.restricted, (
-        "the synthesized ceiling is a FILTERING snapshot, never a narrowing -- "
-        "restricted would wrongly close graph channels"
+    assert scope.owner_id == "user" and scope.narrowed is False
+    assert not scope.restricted
+    assert not scope.source_provided and not scope.base_provided
+    assert scope.ceilings_total
+    assert scope.source_ceiling_for("base-1") == {"base-doc"}, (
+        "a mounted library contributes its visible sources only"
     )
-    # The library half freezes too (codex #604 R1 P2): a None base scope
-    # leaves base_ceiling_active false, letting a base mounted mid-run join
-    # the un-narrowed seam path. include of the mounted-at-synthesis set.
-    assert scope.base_mode == "include"
-    assert scope.base_notebook_ids == {"base-1"}
     assert scope.covers_notebook("base-1")
     assert not scope.covers_notebook("drifted-base"), (
-        "a reference library mounted after synthesis must stay outside the "
-        "frozen run"
-    )
-    assert not scope.base_restricted, (
-        "an all-mounted include freeze must not read as a base narrowing"
+        "a reference library mounted after the freeze stays outside the run"
     )
     assert response.retrieval_scope is None, (
-        "synthesis must not fabricate a user-visible scope receipt"
+        "the default ceiling must not fabricate a user-visible scope receipt"
     )
+    assert current_source_scope_payload() is None
 
 
-def test_plugin_ask_synthesizes_each_omitted_scope_dimension_independently():
-    """codex #604 R2 P2:两个维度各自可选,只提交一维时 `current_source_scope()`
-    非空、整体合成分支会跳过,缺的那一维留着不冻结。现在按维度独立合成:已提交
-    的半逐字段忠实透传(不得走会丢 hidden ids 的持久化 payload helper),缺失的
-    半按浏览器快照形状补齐。"""
-    from app.services.source_scope import current_source_scope
-
+def test_plugin_ask_uses_submitted_dimensions_as_is_and_freezes_the_rest():
+    """A dimension the route froze (carried on the payload) is used as-is;
+    an omitted local dimension is synthesised, an omitted library dimension
+    stays unsubmitted while ``ceilings_total`` still denies any library the
+    freeze does not name.  The plugin engine adds nothing of its own."""
     captured: list[object] = []
-
-    def capture_scope(_nb, _query, **_kwargs):
-        captured.append(current_source_scope())
-        return []
-
-    def answer(_context, retrieval, _model, _trace):
-        retrieval.search_kg("查询", 1)
-        return AskEngineResult("无引用回答", ())
-
-    def build_service():
-        runtime = build_extension_runtime((
-            _bundle("alpha", _Provider("alpha.kg", answer=answer)),
-        ))
-        service = _minimal_ask_service(
-            ask_engine_host=runtime.ask_engines,
-            ask_engine_participant_notebooks=lambda _nb: ("nb", "base-1"),
-            ask_engine_visible_sources=lambda _nb: ("source-doc",),
-            ask_engine_hidden_sources=lambda _nb, _actor: (
-                "hidden-knowhow", "hidden-memory",
+    service = _scope_capturing_plugin_service(captured)
+    service.ask(
+        "nb",
+        AskRequest(
+            question="问题", mode="alpha.kg",
+            base_scope=BaseNotebookScope(
+                mode="include", notebook_ids=["base-1"], narrowed=True,
             ),
-        )
-        service.retrieval.federated_retrieve = capture_scope
-        service.retrieval.federated_retrieve_elements = lambda *_a, **_k: []
-        service.evidence_context.evidence_elements = _all_live
-        service.evidence_context.source_metadata = lambda _ids: {
-            "hidden-knowhow": {"source_type": "knowhow"},
-            "hidden-memory": {"source_type": "memory"},
-        }
-        service.evidence_context.citation_source_info = lambda _ids: {}
-        service.collection_catalog = SimpleNamespace(
-            collection_map_text=lambda _nb: ""
-        )
-        return service
-
-    # 只提交库维度(本地半省略):本地半被合成,库半逐字段保留(含 narrowed=True
-    # 的收窄语义)。
-    service = build_service()
-    base_only = BaseNotebookScope(
-        mode="include", notebook_ids=["base-1"], narrowed=True
+        ),
+        user_id="user",
     )
-    with source_scope_context("nb", None, base_only):
-        service.ask(
-            "nb", AskRequest(question="问题", mode="alpha.kg"), user_id="user"
-        )
     scope = captured[-1]
-    assert scope is not None
+    assert scope.source_ids == {"source-doc"}
     assert scope.hidden_source_ids == {"hidden-knowhow", "hidden-memory"}
-    assert not scope.restricted
-    assert scope.base_mode == "include"
-    assert scope.base_notebook_ids == {"base-1"}
-    assert scope.base_restricted, (
-        "a supplied base narrowing must survive the local-half synthesis "
-        "field-faithfully"
-    )
+    assert not scope.restricted and not scope.source_provided
+    assert scope.base_mode == "include" and scope.base_notebook_ids == {"base-1"}
+    assert scope.base_restricted, "a submitted library narrowing survives as-is"
+    assert scope.source_ceiling_for("base-1") == {"base-doc"}
 
-    # 只提交本地维度(库半省略):本地半逐字段保留(含 hidden ids),库半被合成
-    # 为「合成时已挂载集合」的 include 冻结。
-    service = build_service()
     local_only = ResolvedSourceScope(
         mode="include", source_ids=["source-doc"], narrowed=False,
     )
-    # 生产接线（ask_routes）就是这样附着隐藏半与 owner 的：私有属性直赋，
-    # 公开序列化刻意不带它们，_scope_dict 再从属性读回。
+    # The route attaches the hidden half and owner this way (private
+    # attributes; the public serialisation deliberately omits them).
     local_only._hidden_source_ids = ["hidden-knowhow", "hidden-memory"]
     local_only._scope_owner_id = "user"
-    with source_scope_context("nb", local_only, None):
+    service = _scope_capturing_plugin_service(captured)
+    service.ask(
+        "nb",
+        AskRequest(question="问题", mode="alpha.kg", source_scope=local_only),
+        user_id="user",
+    )
+    scope = captured[-1]
+    assert scope.source_provided and scope.source_ids == {"source-doc"}
+    assert scope.hidden_source_ids == {"hidden-knowhow", "hidden-memory"}
+    assert not scope.base_provided and scope.ceilings_total
+    assert scope.source_ceiling_for("base-1") == {"base-doc"}
+    assert not scope.covers_notebook("drifted-base")
+
+
+def test_plugin_ask_passes_an_outer_scope_through_untouched():
+    """Inside an outer scope (a global run, a nested call) the ask installs
+    nothing and reads nothing: the plugin retrieves under that scope."""
+    captured: list[object] = []
+    service = _scope_capturing_plugin_service(captured)
+    service.ceiling_readers = static_ceiling_readers(
+        participants=lambda _nb: pytest.fail("an outer scope must not be re-read"),
+    )
+    outer = ResolvedSourceScope(
+        mode="include", source_ids=["source-doc"], narrowed=True,
+    )
+    with source_scope_context("nb", outer, None):
+        from app.services.source_scope import current_source_scope
+
+        installed = current_source_scope()
         service.ask(
             "nb", AskRequest(question="问题", mode="alpha.kg"), user_id="user"
         )
-    scope = captured[-1]
-    assert scope is not None
-    assert scope.source_ids == {"source-doc"}
-    assert scope.hidden_source_ids == {"hidden-knowhow", "hidden-memory"}, (
-        "the supplied local half must pass through with its hidden ids intact "
-        "-- the persistence payload helpers drop them and would re-break the "
-        "drift-probe equality"
-    )
-    assert scope.base_mode == "include"
-    assert scope.base_notebook_ids == {"base-1"}
-    assert not scope.covers_notebook("drifted-base"), (
-        "the omitted library half must freeze to the mounted-at-synthesis set"
-    )
+    assert captured[-1] is installed
 
 
 def test_kg_budget_is_shared_and_early_exits_never_spend_it():

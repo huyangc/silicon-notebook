@@ -69,6 +69,7 @@ changing persisted scale-index artifacts.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from contextlib import contextmanager
@@ -213,13 +214,12 @@ class ActiveSourceScope:
     # submitted "all local sources" selection. No GATE consults these flags --
     # gating (``restricted``, ``allows``, ``covers_notebook``) must stay
     # value-driven, because a neutral default and an explicit "all" have to
-    # filter identically.  Their readers are the two payload accessors below,
-    # ``refreshed_ceiling_context`` (keeps a synthesised local dimension
-    # synthesised when it inherits it), and ``AskService.ask_plugin_engine``,
-    # which reads "not provided" as "synthesise this dimension myself".  A
-    # default ceiling's local dimension binds while ``source_provided`` is
-    # False, so that last reader must stop synthesising once the default
-    # ceiling is installed in front of it.
+    # filter identically.  Their readers are the two payload accessors below
+    # and ``refreshed_ceiling_context`` (keeps a synthesised local dimension
+    # synthesised when it inherits it).  A default ceiling's local dimension
+    # binds while ``source_provided`` is False; nothing reads "not provided"
+    # as "synthesise this dimension myself" any more (the extension-engine
+    # path runs under ``AskService._retrieval_ceiling`` like every Ask).
     #
     # They exist because ``current_source_scope_payload()`` is re-persisted by
     # report_engine.prepare_intent into the report's understanding contract and
@@ -230,14 +230,17 @@ class ActiveSourceScope:
     source_provided: bool = True
     base_provided: bool = True
     # PER-NOTEBOOK CEILING: a hard include list for ANY notebook id, the
-    # nominal ``self.notebook_id`` included.  Absent (the default) means every
-    # gate below behaves exactly as it did before this field existed, which is
-    # what keeps every single-notebook run byte-identical.
+    # nominal ``self.notebook_id`` included.  Absent means every gate below
+    # behaves exactly as it did before this field existed.
     #
-    # It exists for the federated/global run, where "the active notebook" is a
-    # naming anchor with no retrieval privilege and each participant carries
-    # its OWN frozen visible-source list.  ``mode``/``source_ids`` cannot
-    # express that: they are singular and bind ``self.notebook_id`` only.
+    # Two writers.  The federated/global run, where "the active notebook" is
+    # a naming anchor with no retrieval privilege and each participant
+    # carries its OWN frozen visible-source list (``mode``/``source_ids``
+    # cannot express that: they are singular and bind ``self.notebook_id``
+    # only).  And every single-notebook run: ``default_ceiling_context``
+    # freezes each mounted library to its visible sources here, so a
+    # single-notebook run is byte-identical to before only when it has no
+    # mounted library (and no other member's Memory to leave out).
     #
     # STORED AS SORTED PAIRS, NOT A MAPPING, although ``__post_init__`` accepts
     # a Mapping so callers may write the obvious thing.  This dataclass is
@@ -316,6 +319,12 @@ class ActiveSourceScope:
     _skipped_libraries: tuple[tuple[str, str], ...] = field(
         default=(), compare=False,
     )
+    # The two store probes ``run_ceiling_binds`` needs for the scope's own
+    # notebook (``CeilingVerdictProbes``), handed over by the constructor
+    # that built this scope from store readers.  ``None`` (every other
+    # installer, every direct construction) keeps the conservative answer:
+    # the ceiling binds wherever one exists.  Not a gate and not compared.
+    _verdict_probes: Any = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -438,6 +447,21 @@ class ActiveSourceScope:
         that can repeat work but never exposes a torn value.
         """
         return {}
+
+    @cached_property
+    def _frozen_universe_digests(self) -> tuple[str, str]:
+        """``(visible, hidden)`` digests of this freeze, in the shape the drift
+        probe's one-row store read returns (``universe_digest``): the
+        submitted/synthesised include list, and the hidden half plus the ids
+        withheld from it.  A pure function of frozen fields, computed at most
+        once per scope -- a value, not a cached verdict: every probe still
+        re-reads the live side."""
+        return (
+            universe_digest(self.source_ids),
+            universe_digest(
+                self.hidden_source_ids | self.withheld_hidden_source_ids
+            ),
+        )
 
     @cached_property
     def _ceiling_binds_memo(self) -> dict[str, bool]:
@@ -638,6 +662,7 @@ def source_scope_context(
     _skipped_libraries: Mapping[str, str] | None = None,
     _ceiling_read_order: Mapping[str, tuple[frozenset[str], tuple[str, ...]]]
     | None = None,
+    _verdict_probes: Any = None,
 ) -> Iterator[None]:
     """Install this run's retrieval scope, if it has one at all.
 
@@ -658,6 +683,7 @@ def source_scope_context(
     for a library whose effective ceiling (``_library_ceiling_uncached``) IS
     that frozenset object, so an order can never be handed out for a
     different set, nor for a library the library dimension excludes.
+    ``_verdict_probes`` becomes ``ActiveSourceScope._verdict_probes``.
 
     ``notebook_source_ceilings`` is the third, independently optional input: a
     ``{notebook_id: source ids}`` mapping (see ``ActiveSourceScope``).  Supplying
@@ -721,6 +747,7 @@ def source_scope_context(
             str(value) for value in _withheld_hidden_source_ids
         ),
         _skipped_libraries=tuple((_skipped_libraries or {}).items()),
+        _verdict_probes=_verdict_probes,
     )
     for library, (frozen, order) in (_ceiling_read_order or {}).items():
         # Only where the library's effective ceiling IS that set: an excluded
@@ -1114,8 +1141,20 @@ def scoped_allowed_source_ids(
       freeze, which is precisely the "concurrent uploads cannot widen an
       in-flight run" guarantee the freeze exists to provide.
 
-    So the list is always materialized here, and the performance question it
-    was trying to answer is answered where it belongs: producers that must
+    So a list is materialized here whenever the ceiling can exclude something.
+    What changed (E1-2, P2-C2) is that "can it?" is now ANSWERED instead of
+    assumed: ``run_ceiling_binds`` probes the two premises above -- another
+    member's Memory in the notebook (``foreign_hidden``) and a universe that
+    no longer digests to the freeze (``drifted``) -- once per run, plus the
+    narrowed and withheld bits; only when all say "nothing to exclude" does
+    the no-``explicit`` call return ``None``.  The concurrent-upload window
+    after that verdict is closed by verify-on-read: a producer that read
+    without the list checks its rows (``verify_unbound_read``), flips the
+    verdict on the first outsider and re-runs bound.  A scope without probes
+    (every installer but the store-wired default ceiling) keeps the list.
+
+    The performance question it was trying to answer is otherwise answered
+    where it belongs: producers that must
     choose a LANE (the lexical corpus-language gate above all) ask
     ``retrieval_candidates._lexical_gate_source_scoped`` -- "did this run
     genuinely narrow, so its predicate actually bounds the scan?" -- instead of
@@ -1134,8 +1173,14 @@ def scoped_allowed_source_ids(
     scope = current_source_scope()
     if explicit is None:
         # The common producer call: memoised per run and library, see
-        # ``library_source_ceiling``.
-        return None if scope is None else _sorted_library_ceiling(scope, notebook_id)
+        # ``library_source_ceiling``.  PUSH-DOWN (E1-2): where the run's
+        # verdict says the ceiling binds nothing (``run_ceiling_binds`` --
+        # the scope's own notebook, not narrowed, nothing withheld, no drift,
+        # no other member's Memory), producers get NO list and read what an
+        # unscoped run reads; they verify it (``verify_unbound_read``).
+        if scope is None or not run_ceiling_binds(scope, notebook_id):
+            return None
+        return _sorted_library_ceiling(scope, notebook_id)
     allowed = tuple(dict.fromkeys(str(value) for value in explicit if str(value)))
     if scope is None:
         return allowed
@@ -1271,7 +1316,8 @@ def ceiling_binds(
     True when a ceiling exists for the library (``source_ceiling_binds``) AND
     it can exclude something the store would otherwise read:
 
-    * it denies everything (an excluded library, a zero-source freeze);
+    * it denies everything to ANOTHER library (an excluded or skipped one; the
+      scope's own empty freeze is judged by the arms below like any other);
     * the run is subjectless (global: each library carries its own frozen
       ceiling), or the library carries a per-notebook freeze outside peer mode
       -- nothing proves that freeze equals the library's current sources;
@@ -1347,7 +1393,11 @@ def _ceiling_binds_uncached(
     foreign_hidden: Callable[[], bool],
 ) -> bool:
     ceiling = library_source_ceiling(scope, notebook_id)
-    if ceiling is not None and not ceiling:
+    if ceiling is not None and not ceiling and notebook_id != scope.notebook_id:
+        # An excluded library, or a mounted/peer one frozen to nothing.  The
+        # scope's OWN empty freeze is judged like any other below: an empty
+        # notebook that is not narrowed, not drifted and holds no other
+        # member's Memory has nothing a read could add.
         return True
     if scope.subjectless or scope.source_ceiling_for(notebook_id) is not None:
         return True
@@ -1485,10 +1535,16 @@ def filter_retrieval_items(
             # known.
             if scope.allows(active_notebook_id, str(getattr(item, "source_id", "") or "")):
                 out.append(item)
+            elif unbound_ceiling(active_notebook_id) is not None:
+                # Read without its list and outside the freeze: the verdict
+                # flips (verify-on-read, see ``verify_unbound_read``).
+                record_ceiling_drift(scope, active_notebook_id)
             continue
         if kind == "chunk":
             if scope.allows(origin, str(getattr(item, "source_id", "") or "")):
                 out.append(item)
+            elif unbound_ceiling(origin) is not None:
+                record_ceiling_drift(scope, origin)
             continue
         if kind in {"knowledge", "relation"}:
             if not scope.covers_notebook(origin):
@@ -1505,6 +1561,21 @@ def filter_retrieval_items(
                 else getattr(item, "evidence", ())
             ) or ()
             evidence = filter_evidence(origin, raw_evidence)
+            if (
+                len(evidence) == len(list(raw_evidence))
+                and unbound_ceiling(origin) is not None
+            ):
+                # The run's verdict says this library's ceiling binds nothing
+                # (``run_ceiling_binds``) and the item names no source outside
+                # it: kept exactly as an unscoped run keeps it -- an
+                # evidence-less object included, as it always was without a
+                # scope.  An item whose evidence DID lose an entry falls
+                # through below: that is a source outside the freeze (or no
+                # attributable source at all), so the verdict flips first.
+                out.append(item)
+                continue
+            if len(evidence) < len(list(raw_evidence)) and unbound_ceiling(origin) is not None:
+                record_ceiling_drift(scope, origin)
             # "No surviving evidence" disqualifies a node whenever A SOURCE
             # CEILING IS WHAT EMPTIED IT.  The question is asked about the
             # node's OWN library, never about the nominal active one: the
@@ -1666,9 +1737,10 @@ def scoped_subgraph_nodes(subgraph: Iterable[Any]) -> list[Any]:
     non-restricted branch: it drops every node no in-ceiling source of its own
     library supports (one batched evidence read, bounded by the walk) and
     narrows each surviving edge's evidence to that ceiling.  Nothing here
-    changed -- this function still answers the library question only -- and the
-    per-notebook shape stays unreachable in production until a writer
-    constructs ``notebook_source_ceilings``.
+    changed -- this function still answers the library question only.  Both
+    production installers write per-notebook ceilings (a global run for every
+    participant; ``default_ceiling_context`` for every mounted library of a
+    single-notebook run), so that walk check runs on every run with a mount.
 
     ONE STATED PREMISE, because the filter fails OPEN on it: a node carrying no
     ``notebook_id`` is kept.  That is safe only because every node the walk can
@@ -1716,10 +1788,32 @@ def evidence_json_allowed(notebook_id: str, raw: Any) -> bool:
     return bool(filter_evidence(notebook_id, raw or []))
 
 
+def universe_digest(source_ids: Iterable[str]) -> str:
+    """THE drift-probe fingerprint of a source-id set: md5 hex of the ids in
+    code-point order joined by U+001E, ``""`` for the empty set.
+
+    The stores compute the same value over the LIVE universe in one statement
+    (``SourceStore.all_visible_source_ids(..., digest_for_owner=)``:
+    PostgreSQL ``md5(string_agg(id, E'\\x1e' ORDER BY id))`` over COLLATE
+    "C" ids, SQLite an ordered ``group_concat`` hashed in Python), so equal
+    digests mean equal sets -- ids are server-minted, not adversarial -- and a
+    probe ships one row instead of every id.  Deliberately NOT ``(count,
+    max(created_at))`` or ``(count, max(rowid))``: deleting one source and
+    adding another with an older timestamp, or re-using a freed rowid, leaves
+    both unchanged while the set changed.
+    """
+    ids = sorted(set(map(str, source_ids)))
+    if not ids:
+        return ""
+    return hashlib.md5("\x1e".join(ids).encode("utf-8")).hexdigest()
+
+
 def source_scope_visible_universe_matches(
     notebook_id: str,
-    current_visible_source_ids: Iterable[str],
+    current_visible_source_ids: Iterable[str] | None = None,
     current_hidden_source_ids: Iterable[str] | None = None,
+    *,
+    current_digests: Sequence[str] | None = None,
 ) -> bool:
     """Check whether an all-selected graph run still sees frozen participants.
 
@@ -1730,11 +1824,18 @@ def source_scope_visible_universe_matches(
     channels before I/O. ``None`` keeps compatibility for bounded test doubles
     that predate the hidden-participant probe; production supplies both sets.
 
-    Both sets must be read for the SAME identity the freeze used — the hidden
-    half is owner-scoped (Memory is private to its creator), so a live read
-    taken as a different user, or with no owner filter at all, would differ
-    from the frozen snapshot on every request in a shared notebook and pin
-    these channels off permanently.  The caller owns that: it passes
+    Production passes ``current_digests`` instead of the sets: the store's
+    one-row fingerprint ``(visible digest, hidden digest)`` of the live
+    universe (``universe_digest``), compared against the freeze's own digests
+    (``ActiveSourceScope._frozen_universe_digests``).  Still a live read on
+    every call -- only its size changed (one statement, one row, where the
+    two full reads shipped ~49k ids each and cost 30-50 ms at 49k sources).
+
+    Both halves must be read for the SAME identity the freeze used — the
+    hidden half is owner-scoped (Memory is private to its creator), so a live
+    read taken as a different user, or with no owner filter at all, would
+    differ from the frozen snapshot on every request in a shared notebook and
+    pin these channels off permanently.  The caller owns that: it passes
     ``ActiveSourceScope.owner_id``.
 
     ⛔ ``notebook_source_ceilings`` deliberately plays no part here, and adding
@@ -1749,6 +1850,20 @@ def source_scope_visible_universe_matches(
     scope = current_source_scope()
     if scope is None or notebook_id != scope.notebook_id:
         return True
+    return _universe_matches(
+        scope, current_visible_source_ids, current_hidden_source_ids,
+        current_digests,
+    )
+
+
+def _universe_matches(
+    scope: ActiveSourceScope,
+    current_visible_source_ids: Iterable[str] | None,
+    current_hidden_source_ids: Iterable[str] | None,
+    current_digests: Sequence[str] | None,
+) -> bool:
+    """``source_scope_visible_universe_matches`` for a given scope's own
+    notebook (the probe body, shared with ``run_ceiling_binds``)."""
     if scope.withheld_hidden_source_ids:
         # Fail-closed until E2-2 (see ``withheld_hidden_source_ids``): the
         # asker's own Memory was withheld because the Memory channel is
@@ -1758,8 +1873,12 @@ def source_scope_visible_universe_matches(
         return False
     if scope.narrowed is None or scope.narrowed or scope.mode != "include":
         return True
+    if current_digests is not None:
+        visible_digest, hidden_digest = (str(value) for value in current_digests)
+        frozen_visible, frozen_hidden = scope._frozen_universe_digests
+        return visible_digest == frozen_visible and hidden_digest == frozen_hidden
     visible_matches = set(
-        str(value) for value in current_visible_source_ids
+        str(value) for value in (current_visible_source_ids or ())
     ) == set(scope.source_ids)
     if not visible_matches or current_hidden_source_ids is None:
         return visible_matches
@@ -1768,6 +1887,100 @@ def source_scope_visible_universe_matches(
     return set(str(value) for value in current_hidden_source_ids) == set(
         scope.hidden_source_ids | scope.withheld_hidden_source_ids
     )
+
+
+def live_universe_digests(
+    visible_reader: Callable[..., Any], notebook_id: str, owner_id: str,
+) -> Sequence[str] | None:
+    """The store's one-row drift fingerprint through ``visible_reader``
+    (``SourceStore.all_visible_source_ids``), or ``None`` for a reader that
+    predates the ``digest_for_owner`` keyword (bounded test doubles), whose
+    callers then fall back to comparing the two full sets."""
+    try:
+        digests = visible_reader(notebook_id, digest_for_owner=str(owner_id or ""))
+    except TypeError:
+        return None
+    return tuple(str(value) for value in digests)
+
+
+@dataclass(frozen=True)
+class CeilingVerdictProbes:
+    """The two store reads behind ``run_ceiling_binds`` for a scope's own
+    notebook, bound by the wiring that binds ``CeilingReaders``:
+
+    * ``universe_digests(notebook_id, owner_id)`` -- the drift fingerprint
+      (``SourceStore.all_visible_source_ids(..., digest_for_owner=)``);
+    * ``foreign_hidden(notebook_id, owner_id)`` -- does the notebook hold a
+      hidden source ``owner_id`` may not read (another member's Memory)?
+    """
+
+    universe_digests: Callable[[str, str], Sequence[str]]
+    foreign_hidden: Callable[[str, str], bool]
+
+
+def run_ceiling_binds(scope: ActiveSourceScope, notebook_id: str) -> bool:
+    """``ceiling_binds`` for this run with the probes the scope carries.
+
+    A scope built by ``default_ceiling_context`` from production readers
+    carries ``CeilingVerdictProbes``; for its own notebook the verdict is
+    False -- nothing a producer could read is outside the ceiling -- when the
+    run is not narrowed, no Memory was withheld, the live universe still
+    digests to the freeze (``_universe_matches``) and no other member's
+    Memory sits in the notebook.  Memoised per run and library
+    (``_ceiling_binds_memo``, shared with ``NodeContextCeilingVerdict``) and
+    therefore sound only with verify-on-read: every producer that reads
+    without the list checks what it read (``verify_unbound_read``,
+    ``filter_retrieval_items``) and flips the verdict on the first row from
+    outside the freeze.  No probes -> ``source_ceiling_binds``: the ceiling
+    binds wherever one exists, today's conservative answer.
+    """
+    probes = scope._verdict_probes
+    if probes is None:
+        return scope.source_ceiling_binds(notebook_id)
+    library = notebook_id or scope.notebook_id
+    return ceiling_binds(
+        scope,
+        notebook_id,
+        drifted=lambda: not _universe_matches(
+            scope, None, None, probes.universe_digests(library, scope.owner_id),
+        ),
+        foreign_hidden=lambda: bool(
+            probes.foreign_hidden(library, scope.owner_id)
+        ),
+    )
+
+
+def unbound_ceiling(notebook_id: str) -> frozenset[str] | None:
+    """The frozen ceiling this run did NOT hand ``notebook_id``'s producers.
+
+    ``scoped_allowed_source_ids(notebook_id)`` returns ``None`` -- no source
+    list in the SQL -- when ``run_ceiling_binds`` says the ceiling binds
+    nothing there; this returns that ceiling so a producer can verify what it
+    read (``verify_unbound_read``).  ``None`` when the list WAS handed out (or
+    no ceiling exists): nothing to verify."""
+    scope = current_source_scope()
+    if scope is None:
+        return None
+    ceiling = library_source_ceiling(scope, notebook_id)
+    if ceiling is None or run_ceiling_binds(scope, notebook_id):
+        return None
+    return ceiling
+
+
+def verify_unbound_read(notebook_id: str, source_ids: Iterable[Any]) -> bool:
+    """Verify-on-read for a producer that read ``notebook_id`` without its
+    source list: True when every source it returned is inside the frozen
+    ceiling (or the list was bound anyway).  The first source outside it
+    means the library changed after the run's verdict: the verdict flips
+    (``record_ceiling_drift``), every later call binds, and the caller
+    re-runs this call bound so no outsider occupies its top-K."""
+    ceiling = unbound_ceiling(notebook_id)
+    if ceiling is None:
+        return True
+    if all(str(value or "") in ceiling for value in source_ids):
+        return True
+    record_ceiling_drift(current_source_scope(), notebook_id)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1833,6 +2046,12 @@ class CeilingReaders:
     ``emit`` receives the content-free ``default_ceiling_library_skipped``
     event (``notebook_id`` and ``reason`` only); optional, and fail-open.
 
+    ``verdict_probes`` (optional) are the two store reads the installed scope
+    keeps for ``run_ceiling_binds``: with them, an un-narrowed, undrifted run
+    over a notebook holding no other member's Memory hands its producers no
+    source list at all (``scoped_allowed_source_ids``); without them the
+    ceiling binds wherever it exists.
+
     ``read_workers`` is how many mounted libraries these readers can read at
     once to advantage -- a property of the STORE behind them, so the wiring
     that binds the store states it (``_mounted_library_ceilings``).  Measured
@@ -1854,6 +2073,7 @@ class CeilingReaders:
     memory_sources: Callable[[str], Iterable[str]]
     emit: Callable[[dict], Any] | None = None
     read_workers: int = 1
+    verdict_probes: "CeilingVerdictProbes | None" = None
 
 
 # Per-library budget for a mounted library's visible read.  The same default as
@@ -1876,6 +2096,62 @@ DEFAULT_MOUNTED_TOTAL_SECONDS = 2 * DEFAULT_MOUNTED_READ_SECONDS
 # (``DEFAULT_CHUNK_FANOUT_MAX_WORKERS`` = 8), which runs after this freeze,
 # never at the same time.
 POSTGRES_MOUNTED_READ_WORKERS = 4
+
+# Deadline of each ceiling read's budget: PostgreSQL's default
+# ``statement_timeout`` (30 s), i.e. no shorter than what a read had before.
+CEILING_READ_SECONDS = 30.0
+
+
+def cancellable_ceiling_readers(
+    readers: "CeilingReaders | None",
+    cancel_event: Any,
+    *,
+    seconds: float = CEILING_READ_SECONDS,
+) -> "CeilingReaders | None":
+    """``readers`` whose every read runs under a budget carrying ``cancel_event``.
+
+    ``default_ceiling_context`` reads the ACTIVE notebook (participants, its
+    visible set, its hidden half, its Memory sources) with no ``read_budget``
+    of its own, so without this a Stop pressed during those reads waited for
+    them to finish.  Each call here enters ``read_budget(now + seconds,
+    cancel_event)``: on SQLite the progress handler interrupts the statement
+    as soon as the event is set; on PostgreSQL the budget is checked before
+    each statement and a budgeted connection caps every statement at
+    ``postgres_chunk_fts_timeout_seconds`` (3 s by default), so a Stop waits
+    at most that long instead of up to the 30 s ``statement_timeout``.  (The
+    same cap already applies to each mounted library's read, which runs under
+    a budget inside the constructor; nested budgets only get shorter.)  The
+    active notebook's reads measure ~11 ms of server time at 49k sources, so
+    the 3 s cap is kept rather than widened in the PostgreSQL adapter.
+
+    Used by every entry point that has a cancel event: the report worker and
+    its refresh (``report_execution``, ``report_engine``) and the Ask service
+    (``AskService._retrieval_ceiling``).
+
+    This only makes the read stoppable; it does not decide what an
+    interrupted read means.  The constructor still gets ``cancel_event`` and
+    turns an interrupted MOUNTED read into ``AskCancelled`` (rather than a
+    skipped library); the entry point turns an interrupted ACTIVE-notebook
+    read into ``AskCancelled`` (rather than a failed report or ask).  ``None``
+    readers or no cancel event -> ``readers`` unchanged.
+    """
+    if readers is None or cancel_event is None:
+        return readers
+    from app.repositories.read_budget import read_budget
+
+    def bounded(read: Callable) -> Callable:
+        def call(*args):
+            with read_budget(time.monotonic() + float(seconds), cancel_event):
+                return read(*args)
+        return call
+
+    return replace(
+        readers,
+        participants=bounded(readers.participants),
+        visible=bounded(readers.visible),
+        hidden=bounded(readers.hidden),
+        memory_sources=bounded(readers.memory_sources),
+    )
 
 
 def partition_memory_sources(
@@ -2325,6 +2601,7 @@ def _fresh_default_ceiling(
         _withheld_hidden_source_ids=withheld,
         _skipped_libraries=mounted.skipped,
         _ceiling_read_order=mounted.read_order,
+        _verdict_probes=readers.verdict_probes,
     ):
         yield
 
@@ -2516,6 +2793,8 @@ def refreshed_ceiling_context(
         _withheld_hidden_source_ids=withheld,
         _skipped_libraries=skipped,
         _ceiling_read_order=read_order,
+        # The refresh's readers first; else the outer's (same store).
+        _verdict_probes=readers.verdict_probes or outer._verdict_probes,
     ):
         yield
 
