@@ -285,13 +285,19 @@ def _source_ceiling_kwargs(notebook_id: str) -> dict:
       · 有天花板 → ``allowed_source_ids=<清单>``,空集即 deny all(该库一个
         名字都不出),store 侧对空清单直接返回 []。
     """
-    from app.services.source_scope import current_source_scope
+    from app.services.source_scope import _sorted_library_ceiling, current_source_scope
 
     scope = current_source_scope()
     ceiling = None if scope is None else scope.source_ceiling_for(notebook_id)
     if ceiling is None:
         return {}
-    return {"allowed_source_ids": sorted(ceiling)}
+    # The per-scope ordered hand-out (``_library_ceiling_memo``): a default
+    # ceiling's mounted library comes back in the order its one read produced,
+    # anything else is sorted once per scope -- never ``sorted`` of ~49k ids
+    # on every call, which is what this function used to pay per peer query.
+    # ``_sorted_library_ceiling`` answers ``frozenset()`` for a library the
+    # library dimension excludes; ``mounted_base_ids`` never hands one here.
+    return {"allowed_source_ids": list(_sorted_library_ceiling(scope, notebook_id) or ())}
 
 
 def _norm(s: str) -> str:
