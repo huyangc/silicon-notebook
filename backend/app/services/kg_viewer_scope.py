@@ -48,7 +48,9 @@ also returns the objects CITING one from the reverse evidence index and that
 index's completeness certificate, folded to clusters in batches of 900
 object ids.  Neighbours then read the first members of every cluster of the
 response that needs a check in one batched statement
-(``concept_cluster_detail_rows(canonical_ids=...)``).  Everything else is
+(``concept_cluster_detail_rows(canonical_ids=...)``), at most
+``_NEIGHBOUR_MEMBER_WINDOW`` per cluster; only a cluster none of whose first
+members is visible is paged further, on its own.  Everything else is
 decided on the rows the response already carries.
 
 Identities.  Each id a read returns is judged on what it is (codex #806 r1):
@@ -72,6 +74,13 @@ from app.services.source_scope import (
 )
 
 _ID_BATCH = 900
+
+# Neighbour hydration's first member window per checked cluster (codex #806
+# r3): every checked cluster of a response reads at most this many member rows
+# in the one batched statement, whatever any cluster's suspect count; only a
+# cluster whose window is full and holds nothing visible is widened, on its
+# own (``_scan_members``).
+_NEIGHBOUR_MEMBER_WINDOW = 8
 
 
 class KgViewerScope:
@@ -267,47 +276,73 @@ class KgViewerScope:
         A bounded read of ``hidden_member_bound + 1`` member rows (no COUNT),
         widened by doubling only while a full window holds nothing visible
         (possible only without a certified reverse index)."""
-        window = self.hidden_member_bound(canonical_id) + 1
-        after = ""
         with self._reader.connect() as db:
-            while True:
-                rows, _stored = self._reader.knowledge.concept_cluster_detail_rows(
-                    db, self.notebook_id, canonical_id, limit=window, after=after
-                )
-                for row in rows:
-                    if not self.member_hidden(row):
-                        return row
-                if len(rows) < window:
-                    return None
-                after = str(rows[-1]["member_object_id"])
-                window *= 2
+            return self._scan_members(
+                db, canonical_id, after="",
+                window=self.hidden_member_bound(canonical_id) + 1)
+
+    def _scan_members(
+        self, db: Any, canonical_id: str, *, after: str, window: int,
+    ) -> Optional[Dict[str, Any]]:
+        """The first visible member of ``canonical_id`` after the keyset
+        cursor ``after`` (member-id order), or ``None``.  Pages of ``window``
+        rows, doubling while a full page holds nothing visible.  Terminates:
+        each full page moves the cursor strictly forward over a finite member
+        list, and a short page is the end of it.  A cluster with no visible
+        member is therefore read to its end and answered ``None`` (hidden,
+        fail closed), never assumed visible."""
+        while True:
+            rows, _stored = self._reader.knowledge.concept_cluster_detail_rows(
+                db, self.notebook_id, canonical_id, limit=window, after=after
+            )
+            for row in rows:
+                if not self.member_hidden(row):
+                    return row
+            if len(rows) < window:
+                return None
+            after = str(rows[-1]["member_object_id"])
+            window *= 2
 
     def _first_visible_members(
         self, canonical_ids: List[str],
     ) -> Dict[str, Optional[Dict[str, Any]]]:
-        """``visible_member`` for many clusters with ONE batched read: the
-        first ``max(hidden_member_bound) + 1`` members of every listed cluster
-        (so at most ``len(canonical_ids) × (max bound + 1)`` rows). A cluster
-        whose window is full yet holds nothing visible falls back to
-        ``visible_member``'s widening scan. An id with no live member row maps
-        to ``None``."""
+        """``visible_member`` for many clusters: ONE batched read of the first
+        ``window`` members of every listed cluster, where ``window`` is
+        ``_NEIGHBOUR_MEMBER_WINDOW`` (lower when no listed cluster's
+        ``hidden_member_bound + 1`` reaches it) -- at most
+        ``len(canonical_ids) × _NEIGHBOUR_MEMBER_WINDOW`` rows, however large
+        one cluster's suspect count is (codex #806 r3: a shared
+        ``max(bound) + 1`` let one suspect hub size every cluster's window).
+
+        Same answer as ``visible_member``: the first visible member in
+        member-id order.  A cluster whose window is full yet holds nothing
+        visible -- and only such a cluster -- is widened on its own from its
+        last row (``_scan_members``, pages doubling from ``2 × window``), so
+        it reads rows up to the page holding its first visible member, or its
+        whole member list when it has none and is answered ``None`` (hidden).
+        An id with no live member row maps to ``None``."""
         if not canonical_ids:
             return {}
-        window = max(self.hidden_member_bound(cid) for cid in canonical_ids) + 1
+        window = min(
+            _NEIGHBOUR_MEMBER_WINDOW,
+            max(self.hidden_member_bound(cid) for cid in canonical_ids) + 1,
+        )
+        found: Dict[str, Optional[Dict[str, Any]]] = {}
         with self._reader.connect() as db:
             rows, _unused = self._reader.knowledge.concept_cluster_detail_rows(
                 db, self.notebook_id, "", limit=window, canonical_ids=canonical_ids,
             )
-        by_cluster: Dict[str, list] = {cid: [] for cid in canonical_ids}
-        for row in rows:
-            by_cluster.setdefault(str(row["canonical_id"]), []).append(row)
-        found: Dict[str, Optional[Dict[str, Any]]] = {}
-        for cid in canonical_ids:
-            members = by_cluster.get(cid, [])
-            visible = next((r for r in members if not self.member_hidden(r)), None)
-            if visible is None and len(members) >= window:
-                visible = self.visible_member(cid)
-            found[cid] = visible
+            by_cluster: Dict[str, list] = {cid: [] for cid in canonical_ids}
+            for row in rows:
+                by_cluster.setdefault(str(row["canonical_id"]), []).append(row)
+            for cid in canonical_ids:
+                members = by_cluster.get(cid, [])
+                visible = next((r for r in members if not self.member_hidden(r)), None)
+                if visible is None and len(members) >= window:
+                    visible = self._scan_members(
+                        db, cid, after=str(members[-1]["member_object_id"]),
+                        window=2 * window)
+                found[cid] = visible
         return found
 
     def cluster_display_name(self, canonical_id: str, name: str) -> str:

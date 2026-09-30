@@ -374,3 +374,144 @@ def test_legacy_step_text_comes_from_the_elements_actual_source(repo, section):
     owner = as_user(s.a, repo.node_context, s.nb, target)
     assert ("mislabelled sibling", "A-PRIVATE step text") in [
         (st["name"], st["element_text"]) for st in owner["steps"]]
+
+
+# ---------------------------------- neighbour member windows (codex #806 r3)
+# One suspect hub used to size EVERY checked cluster's member window
+# (``max(hidden_member_bound) + 1``), so a response holding a hub hydrated its
+# whole member list for every other cluster too.  Now each cluster reads at
+# most ``_NEIGHBOUR_MEMBER_WINDOW`` rows in the batched statement, and only a
+# cluster whose window holds nothing visible is paged further, on its own.
+# Member kinds, in member-id order: ``v`` visible, ``s`` suspect but visible
+# (owned by the visible source, cites A's Memory and the visible source), ``h``
+# hidden from B (owned by and citing only A's Memory).
+_MEMBER_KINDS = {
+    "v": ("src-s", [_ev("src-s", "el-s-occ")]),
+    "s": ("src-s", [_ev("src-ma", "el-ma-occ"), _ev("src-s", "el-s-occ")]),
+    "h": ("src-ma", [_ev("src-ma", "el-ma-occ")]),
+}
+
+
+def seed_member_clusters(repo, nb, specs, *, ph="?", cast=""):
+    """``specs``: ``{canonical_id: kinds}``.  Members are test objects whose ids
+    are sorted after insertion, so ``kinds[i]`` is the i-th member in member-id
+    order; hidden members are named ``A-PRIVATE ...``.  Rows go into the
+    published cluster generation with the reverse index kept in step.
+    Backend-agnostic: ``ph`` is the placeholder, ``cast`` the JSON cast."""
+    names = {}
+    for canonical, kinds in specs.items():
+        ids = sorted(repo._test_insert_object(nb, "concept", {"name": "tmp"}, source_id="src-s")
+                     for _ in kinds)
+        with repo._runtime.database.write() as db:
+            generation = db.execute(
+                f"SELECT COALESCE(MAX(cluster_generation), 0) AS g FROM unified_kg_state "
+                f"WHERE notebook_id={ph}", (nb,)).fetchone()["g"]
+            for rank, (oid, kind) in enumerate(zip(ids, kinds)):
+                owner, evidence = _MEMBER_KINDS[kind]
+                name = f"{'A-PRIVATE ' if kind == 'h' else ''}{canonical} {kind}{rank}"
+                names[oid] = name
+                raw = json.dumps(evidence)
+                db.execute(
+                    f"UPDATE knowledge_objects SET source_id={ph}, evidence={ph}{cast}, "
+                    f"payload={ph}{cast} WHERE id={ph}",
+                    (owner, raw, json.dumps({"name": name}), oid))
+                repo._runtime.knowledge.replace_object_sources(db, oid, nb, raw)
+                db.execute(
+                    "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,"
+                    "canonical_name,object_type,canonical_description,created_at,generation) "
+                    f"VALUES ({','.join([ph] * 9)})",
+                    (f"cc-{oid}", nb, canonical, oid, f"A-PRIVATE {canonical}", "concept", "",
+                     "2026-09-01T00:00:00", generation))
+    return names
+
+
+# A 60-member suspect hub, five ordinary clusters (one suspect member, then
+# visible ones), a cluster whose first visible member is the 13th (12 hidden
+# members first) and a cluster with no visible member at all.
+HUB = "K-hub"
+ORDINARY = [f"K-ord{index}" for index in range(5)]
+DEEP = "K-deep"
+DARK = "K-dark"
+MEMBER_SPECS = {
+    HUB: "s" * 60,
+    **{cid: "s" + "v" * 19 for cid in ORDINARY},
+    DEEP: "h" * 12 + "v" * 5,
+    DARK: "h" * 20,
+}
+
+
+def neighbour_nodes(focus, cluster_ids):
+    nodes = [{"id": cid, "object_type": "concept", "payload": {"name": f"baked {cid}"}}
+             for cid in cluster_ids]
+    edges = [{"source_object_id": focus, "target_object_id": cid, "edge_type": "related_to"}
+             for cid in cluster_ids]
+    return nodes, edges
+
+
+def count_hydrated_member_rows(knowledge, monkeypatch):
+    """Member rows the store hands back through ``concept_cluster_detail_rows``."""
+    hydrated = []
+    original = knowledge.concept_cluster_detail_rows
+
+    def spy(*args, **kwargs):
+        rows, stored = original(*args, **kwargs)
+        hydrated.append(len(rows))
+        return rows, stored
+
+    monkeypatch.setattr(knowledge, "concept_cluster_detail_rows", spy)
+    return hydrated
+
+
+def test_a_suspect_hub_no_longer_sizes_every_clusters_member_window(repo, monkeypatch):
+    from app.services.kg_viewer_scope import _NEIGHBOUR_MEMBER_WINDOW as window
+
+    s = build_scenario(repo, b_memory=False)
+    seed_member_clusters(repo, s.nb, MEMBER_SPECS)
+    certify(repo, s.nb, True)
+    reader = reader_of(repo)
+    scope = as_user(s.b, reader.for_notebook, s.nb)
+    assert scope.hidden_member_bound(HUB) == 60
+    hydrated = count_hydrated_member_rows(reader.knowledge, monkeypatch)
+    clusters = [HUB, *ORDINARY, DEEP]
+    nodes, edges = neighbour_nodes(s.ids.engram_canonical, clusters)
+    kept, _edges = as_user(s.b, scope.filter_neighbourhood, nodes, edges,
+                           (s.ids.engram_canonical,))
+    assert [n["id"] for n in kept] == clusters
+    # One batched read of ``window`` rows per listed cluster (plus the focus
+    # Engram cluster's two members: it is checked too), then the one widened
+    # cluster's own page (members 9..17 of DEEP, one page of 16).  Before r3
+    # the shared window was 61: 60 + 5 × 20 + 17 + 2 = 179 rows in one read.
+    assert hydrated == [len(clusters) * window + 2, len(MEMBER_SPECS[DEEP]) - window]
+    assert sum(hydrated) <= (len(clusters) + 1) * window + len(MEMBER_SPECS[DEEP])
+
+
+@pytest.mark.parametrize("certified", [True, False])
+def test_a_cluster_is_labelled_by_a_visible_member_beyond_the_first_window(
+    repo, monkeypatch, certified,
+):
+    s = build_scenario(repo, b_memory=False)
+    names = seed_member_clusters(repo, s.nb, MEMBER_SPECS)
+    certify(repo, s.nb, certified)
+    scope = as_user(s.b, reader_of(repo).for_notebook, s.nb)
+    nodes, edges = neighbour_nodes(s.ids.engram_canonical, [HUB, DEEP])
+    kept, kept_edges = as_user(s.b, scope.filter_neighbourhood, nodes, edges,
+                               (s.ids.engram_canonical,))
+    labels = {n["id"]: n["payload"]["name"] for n in kept}
+    assert labels[DEEP] == f"{DEEP} v12" and f"{DEEP} v12" in names.values()
+    assert labels[HUB] == f"{HUB} s0"
+    assert len(kept_edges) == 2 and "A-PRIVATE" not in repr(kept)
+
+
+@pytest.mark.parametrize("certified", [True, False])
+def test_a_cluster_with_no_visible_member_anywhere_is_hidden(repo, certified):
+    s = build_scenario(repo, b_memory=False)
+    seed_member_clusters(repo, s.nb, MEMBER_SPECS)
+    certify(repo, s.nb, certified)
+    scope = as_user(s.b, reader_of(repo).for_notebook, s.nb)
+    nodes, edges = neighbour_nodes(s.ids.engram_canonical, [DARK, ORDINARY[0]])
+    kept, kept_edges = as_user(s.b, scope.filter_neighbourhood, nodes, edges,
+                               (s.ids.engram_canonical,))
+    assert [n["id"] for n in kept] == [ORDINARY[0]]
+    assert [e["target_object_id"] for e in kept_edges] == [ORDINARY[0]]
+    assert "A-PRIVATE" not in repr(kept)
+    assert as_user(s.b, scope.filter_neighbourhood, *neighbour_nodes(DARK, []), (DARK,)) is None
