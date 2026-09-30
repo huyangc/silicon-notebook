@@ -68,7 +68,7 @@ import {
 } from "./ask-retrieval-effort";
 import { shouldShowIndexRequiredBanner, type ScaleIndexStatus } from "./scale-index";
 import { assetNotebookId, sourceImageAssetUrl } from "./source-image";
-import { retrievalScopeSummary } from "./source-scope";
+import { retrievalScopeSummary, skippedLibrariesNotice } from "./source-scope";
 import type {
   AskResponse,
   Citation,
@@ -1347,6 +1347,14 @@ export function AnswerView({
       {/* 全局问答终态引用核对有没通过的条目(PR-D)。回答**照常**整份上屏，这里只补一句
           如实的说明；逐条原因在带标记的引用卡上。没有这个字段(单库回答、全部通过、
           历史回答)时一个节点都不多。 */}
+      {/* 提问开始时没能及时读出的挂载参考库：它们没有参与本次回答，结果因此不同，
+          所以在回答下方如实说一句（全局问答「部分笔记本未完成检索」的单库对应）。
+          只说现象，不猜原因；没有这个字段（健康的回答、历史回答）时一个节点都不多。 */}
+      {(answer.skipped_libraries?.length ?? 0) > 0 && (
+        <p className="answer-skipped-libraries-notice" role="note">
+          {skippedLibrariesNotice(answer.skipped_libraries ?? [])}
+        </p>
+      )}
       {hasFailedCitationCheck(answer.citation_check) && (
         <p className="answer-citation-check-notice" role="note">
           {citationCheckNotice(answer.citation_check)}

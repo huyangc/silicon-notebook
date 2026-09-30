@@ -690,6 +690,9 @@ export type AskResponse = {
   retrieval_effort?: import("./ask-retrieval-effort").AskRetrievalEffortId;
   /** 本轮实际获准的检索范围；后端只在确有收窄时下发，缺席即不渲染。 */
   retrieval_scope?: RetrievalScopeReceipt | null;
+  /** 提问开始时没能及时读出来源清单、因而没有参与本次回答的挂载参考库（名称是
+   *  当时的快照）；健康的回答整键缺席。 */
+  skipped_libraries?: { notebook_id: string; name: string }[];
   /**
    * complete / aggregate / hybrid 查询的可验证行集，独立于 Markdown 摘要。
    * kind 判别的 union（PR-2 T5/T6）：Knowhow 的整表批次（kind="knowhow"）与

@@ -4424,9 +4424,11 @@ button.chat-session-card {
 }
 
 /* 全局问答终态引用核对的说明(PR-D)：与完整性提示同一种左边线提示条，但用中性的
-   警示色——它说的是「有几条引用没通过核对」，回答本身照常交付。 */
+   警示色——它说的是「有几条引用没通过核对」，回答本身照常交付。单库回答里「某个
+   挂载参考库没有参与」的说明（skipped_libraries）用同一种提示条。 */
 .answer-citation-check-notice,
-.answer-markdown p.answer-citation-check-notice {
+.answer-markdown p.answer-citation-check-notice,
+.answer-skipped-libraries-notice {
   margin: 0;
   padding-left: 10px;
   border-left: 3px solid var(--warning-border);
