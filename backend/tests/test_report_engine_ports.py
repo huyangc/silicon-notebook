@@ -272,6 +272,24 @@ def test_the_memory_record_seat_is_checked_when_the_engine_is_wired():
         })
 
 
+def test_section_context_memory_is_recorded_without_any_retrieval_record():
+    """The section id-map path records on its own: with an empty retrieval
+    record (an engine whose ports are not watched), evidence from the author's
+    Memory projection in a section context still marks that section."""
+    class _AuthorMemorySource(_NoMemorySources):
+        def memory_sources_for_source_ids(self, source_ids, owner_id):
+            return {"src-mem": "mem-1"} if "src-mem" in source_ids else {}
+
+    engine = _engine(_deps(memory_sources=_AuthorMemorySource()))
+    rows, section_memory, run_memory = engine._record_memory_use([], [
+        {"id_map": {"k1": {"object_type": "element", "source_id": "src-mem"}}},
+        {"id_map": {"k2": {"object_type": "element", "source_id": "src-doc"}}},
+    ])
+    assert rows == []
+    assert section_memory == [["mem-1"], []]
+    assert run_memory == []
+
+
 def _engine(deps=None, cancel_event=None):
     from app.services.report_engine import ReportEngine
     return ReportEngine(deps or _deps(), user_id="user-x", cancel_event=cancel_event)
