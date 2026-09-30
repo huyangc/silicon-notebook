@@ -1879,6 +1879,16 @@ def assert_default_ceiling_over_real_stores(repo, ids) -> None:
     Memory leaves the ceiling without the drift probe reporting drift."""
     sources = repo._runtime.source_store
     nb, lib, late, bob = ids["nb"], ids["lib"], ids["late"], ids["bob"]
+    # Ids whose store order (``ORDER BY id`` under the database's collation)
+    # need not match a Python sort: the hand-out must be the store's order.
+    extra = ("lib2-Zeta", "lib2-alpha", "lib2_beta", "lib2-10", "lib2-9")
+    for source_id in extra:
+        sources.insert_source(
+            source_id=source_id, notebook_id=ids["lib2"], title=source_id,
+            source_type="pdf", status="active", parse_status="parsed",
+            file_name="", file_path="", file_size=0, file_hash="",
+            summary="", doc_type="", memory_id="",
+        )
     readers = real_readers(repo)
     with default_ceiling_context(nb, bob, readers):
         scope = current_source_scope()
@@ -1889,7 +1899,12 @@ def assert_default_ceiling_over_real_stores(repo, ids) -> None:
         )
         assert source_allowed(nb, "src-memory-alice") is False
         assert scope.source_ceiling_for(lib) == frozenset({"lib-visible"})
-        assert scope.source_ceiling_for(ids["lib2"]) == frozenset({"lib2-visible"})
+        assert scope.source_ceiling_for(ids["lib2"]) == frozenset(
+            {"lib2-visible", *extra}
+        )
+        assert scope.ceiling_hand_out(ids["lib2"]) == tuple(
+            sources.all_visible_source_ids(ids["lib2"])
+        )
         assert source_allowed(lib, "lib-memory") is False
         assert source_allowed(lib, "lib-knowhow") is False
         assert current_source_scope_payload() is None
