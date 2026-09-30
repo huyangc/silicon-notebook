@@ -297,6 +297,14 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(PG_EXP, NOT_IDS, "the allowed memory statuses"),
         s(ANY, BOUNDED, "lexical candidates capped at lexical_limit (<= 200)"),
     ),
+    ("postgres/memory_store.py", "MemoryStore.memory_sources_for_source_ids_sql"): (
+        s(JSONB, DRIVEN,
+          "a report run's cited, drafted and retrieved source ids; one parameter, pk_sources probe"),),
+    ("postgres/memory_store.py", "MemoryStore.foreign_memory_sources_for_source_ids_sql"): (
+        s(JSONB, DRIVEN, "one report's cited source ids; one parameter, pk_sources probe"),),
+    ("postgres/memory_store.py", "MemoryStore.memory_rows_lock_sql"): (
+        s(JSONB, DRIVEN,
+          "one report's cited source ids without a record; one parameter, pk_sources probe"),),
     ("postgres/notebook_delete_job_store.py", "NotebookDeleteJobStore.recreate_for_deleting_notebook"): (
         s(ANY, BOUNDED, "one notebook's failed delete jobs"),
         s(ANY, BOUNDED, "one notebook's failed delete jobs"),
@@ -607,6 +615,11 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(SQ_EXP, BOUNDED, "capped at 200 memory ids"),),
     ("sqlite/memory_store.py", "MemoryStore.memory_retrieval_rows"): (
         s(SQ_EXP, NOT_IDS, "the allowed memory statuses"),),
+    ("sqlite/memory_store.py", "MemoryStore.memory_sources_for_source_ids_sql"): (
+        s(JSON, DRIVEN,
+          "a report run's cited, drafted and retrieved source ids; one parameter, pk probe"),),
+    ("sqlite/memory_store.py", "MemoryStore.foreign_memory_sources_for_source_ids_sql"): (
+        s(JSON, DRIVEN, "one report's cited source ids; one parameter, primary-key probe"),),
     ("sqlite/notebook_delete_job_store.py", "NotebookDeleteJobStore.recreate_for_deleting_notebook"): (
         s(SQ_EXP, BOUNDED, "one notebook's failed delete jobs"),),
     ("sqlite/notebook_delete_job_store.py", "NotebookDeleteJobStore.delete_fts_shadow_page"): (
