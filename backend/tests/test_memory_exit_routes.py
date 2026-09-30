@@ -332,3 +332,18 @@ def test_transfer_is_the_other_way_out_for_a_member_and_carries_confirmed_only(
         f"/api/notebooks/{w['own_notebook']}/memories", headers=w["reader"]
     ).json()["items"]
     assert [item["title"] for item in listed] == ["Reader confirmed"]
+
+
+def test_the_exit_runs_to_completion_whether_or_not_the_client_listens():
+    """Item 2: the production frontend proxies ``/api`` through Next's
+    rewrite, whose proxy gives up after 30 s (Next 15.5 ``proxyTimeout``
+    default; ``next.config.mjs`` sets none). The route is a plain ``def``:
+    Starlette runs it in the threadpool and a disconnect cannot cancel a
+    running thread, so the purge finishes and the next disclosure reports
+    what is left (contract v2: the client then reports "unknown" and
+    re-reads)."""
+    import inspect
+
+    from app.api.notebook_routes import leave_notebook_route
+
+    assert not inspect.iscoroutinefunction(leave_notebook_route)

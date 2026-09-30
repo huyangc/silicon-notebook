@@ -1047,6 +1047,51 @@ def case_export_needs_read_access_and_is_lazy(world: World) -> None:
     assert text.rstrip().endswith("共导出 1 条记忆。")
 
 
+_TEARDOWN_TABLES = (
+    "sources", "source_elements", "element_embeddings", "extraction_runs",
+    "knowledge_objects", "knowledge_relations", "knowledge_object_sources",
+    "knowledge_source_facts", "knowledge_source_fact_elements",
+    "kg_relation_completion_state", "knowledge_embeddings", "relation_embeddings",
+    "concept_clusters",
+)
+
+
+def _table_counts(world: World) -> dict[str, int]:
+    return {
+        table: world.sql.count(f"SELECT COUNT(*) AS c FROM {table}")
+        for table in _TEARDOWN_TABLES
+    }
+
+
+def case_single_and_batched_teardown_have_the_same_outcome(world: World) -> None:
+    """Item 8: ``delete_source`` (one source) and ``remove_memory_sources``
+    (a page) are one implementation. On a mixed fixture — three Memory
+    projections removed as one batch, three removed one ``delete_source`` at
+    a time — every table loses exactly the same number of rows, and each
+    projection is gone entirely."""
+    ingestion = world.repo._runtime.source_ingestion
+    batch = [make_memory(world, f"batch-{n}", world.shared, world.alice) for n in range(3)]
+    single = [make_memory(world, f"single-{n}", world.shared, world.alice) for n in range(3)]
+    before = _table_counts(world)
+    assert ingestion.remove_memory_sources([p.source_id for p in batch]) == 3
+    middle = _table_counts(world)
+    for projection in single:
+        world.repo.delete_source(projection.source_id)
+    after = _table_counts(world)
+    batch_delta = {table: before[table] - middle[table] for table in _TEARDOWN_TABLES}
+    single_delta = {table: middle[table] - after[table] for table in _TEARDOWN_TABLES}
+    assert batch_delta == single_delta, (batch_delta, single_delta)
+    assert batch_delta["sources"] == 3 and batch_delta["knowledge_objects"] > 0
+    for projection in (*batch, *single):
+        counts = derived_counts(world, projection)
+        for table in ("sources", "source_elements", "knowledge_objects_by_id",
+                      "knowledge_relations_by_id", "knowledge_embeddings",
+                      "relation_embeddings", "concept_clusters",
+                      "knowledge_object_sources", "knowledge_source_facts",
+                      "extraction_runs", "element_embeddings"):
+            assert counts[table] == 0, (projection.memory_id, table, counts)
+
+
 CASES: dict[str, Callable[..., None]] = {
     "hard_delete": case_hard_delete_removes_every_derived_row,
     "hard_delete_unbackfilled": case_hard_delete_on_an_unbackfilled_notebook,
@@ -1066,6 +1111,7 @@ CASES: dict[str, Callable[..., None]] = {
     "review_candidates_deleted": case_review_candidates_of_deleted_objects_are_deleted,
     "merge_candidates_real_writer": case_merge_candidates_written_by_fusion_are_deleted,
     "whole_memory_clusters_removed": case_whole_clusters_of_the_memory_are_removed,
+    "one_teardown_same_outcome": case_single_and_batched_teardown_have_the_same_outcome,
     "mixed_statuses": case_mixed_statuses_are_counted_exported_and_deleted_together,
     "export_scope": case_export_needs_read_access_and_is_lazy,
     "contract_200_counts": case_contract_a_finished_exit_reports_what_it_deleted,
