@@ -479,6 +479,40 @@ def test_the_run_scores_the_carried_bindings_with_the_final_rerank(
     assert [hit.relevance for hit in result.top_hits] == [0.11]
 
 
+def test_a_carried_binding_keeps_the_library_its_hit_was_stamped_with(
+    repo, monkeypatch
+):
+    """PR-D P3-1 -- the outline call site of ``_rescored_keeping_origin``.
+
+    In a global (peer) run every collected hit carries its library, while the
+    closing rerank's ``retrieve_scored`` returns unstamped hits. A binding cut
+    from the selection and carried out through the rerank map must keep the
+    collected hit's ``notebook_id`` / ``tier``: without them its KG card and
+    anchor reach the terminal check with no library ("无法核对" on a healthy
+    answer). The candidate search is made to stamp as the federated legs do;
+    the run takes the real non-quota closing rerank.
+
+    (A global Ask today clamps its effort to the default, so the exhaustive-
+    only outline never runs there; this pins the call site for the day that
+    clamp is lifted, together with the closing-rerank case in
+    ``test_global_citation_producers_e2e``.)"""
+    from app.services.retrieval_service import RetrievalService
+
+    original = RetrievalService.federated_retrieve
+
+    def stamped(self, notebook_id, *args, **kwargs):
+        return [replace(hit, notebook_id=notebook_id, tier="base")
+                for hit in original(self, notebook_id, *args, **kwargs)]
+
+    monkeypatch.setattr(RetrievalService, "federated_retrieve", stamped)
+    result = _run_with_one_outline_round(repo, monkeypatch)
+    assert result.outline_evidence, "the case needs a truncated binding"
+    origins = {(hit.notebook_id, hit.tier)
+               for hit in [*result.top_hits, *result.outline_evidence]}
+    assert len(origins) == 1 and next(iter(origins))[0], origins
+    assert next(iter(origins))[1] == "base"
+
+
 def test_the_quota_run_clamps_the_carried_bindings_to_the_selection_floor(
     repo, monkeypatch
 ):
