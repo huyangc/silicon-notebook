@@ -332,8 +332,8 @@ class CheckupService:
             CheckupItem("H8", self._h8_index_integrity(notebook_id), [], "rebuild_index"),
             CheckupItem("H12", self._h12_orphan_memory_sources(notebook_id), [], "none"),
         ]
-        # 只读项(fix="none":H9/H10)单列报告、不计入 healthy——它们没有用户修复动作,
-        # H10 甚至长期存在;计进来会让 healthy 恒 false、修复轮询跑满窗口。
+        # 只读项(fix="none")单列报告、不计入 healthy——它们没有用户修复动作,
+        # 有的会长期存在;计进来会让 healthy 恒 false、修复轮询跑满窗口。
         healthy = all(item.count == 0 for item in checks if item.fix != "none")
         return CheckupResult(
             notebook_id=notebook_id,
