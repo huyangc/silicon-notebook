@@ -1137,6 +1137,18 @@ export function AnswerView({
     reference: AnswerReference;
     rect: DOMRect;
   } | null>(null);
+  // 换了一条回答、或宿主的 dismissSignal 变了，就收起开着的引用卡。收起在**渲染期**
+  // 对比上一次的值完成（React「随 prop 调整 state」的写法），刻意不用
+  // `useEffect(() => setCitePopover(null), [...])`：effect 在挂载时也会跑，而被动
+  // effect 排在提交之后的另一个宏任务里——行内标记已经上屏、那两个挂载 effect 还没
+  // 冲刷的空档里点下的一次，会被随后冲刷的 `setCitePopover(null)` 排在它后面整个
+  // 吞掉：卡片根本不打开，用户点了没反应。渲染期对比只在值真的变了时才收，没有这个
+  // 空档（全局问答引用卡用例在 CI 上四次「找不到 dialog」即此）。
+  const [popoverOwner, setPopoverOwner] = useState({ answerId: answer.answer_id, dismissSignal });
+  if (popoverOwner.answerId !== answer.answer_id || !Object.is(popoverOwner.dismissSignal, dismissSignal)) {
+    setPopoverOwner({ answerId: answer.answer_id, dismissSignal });
+    setCitePopover(null);
+  }
   const answerText = answer.answer || answer.conclusion || "";
   // 后端把完整性提示附在答案末尾。模型正文可能以未闭合的 Markdown 代码围栏
   // 结束；把已知的服务端提示单独渲染，避免它被吞进代码块。复制仍使用原文。
@@ -1192,8 +1204,6 @@ export function AnswerView({
       onPreviewImage={previewImage}
     />
   );
-  useEffect(() => setCitePopover(null), [answer.answer_id]);
-  useEffect(() => setCitePopover(null), [dismissSignal]);
   useEffect(() => {
     if (!copied) return;
     const timer = window.setTimeout(() => setCopied(false), 1400);

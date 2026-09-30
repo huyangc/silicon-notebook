@@ -1,5 +1,6 @@
 import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { NotebookScopePicker } from "../../app/ask/notebook-scope-picker.tsx";
 import { GlobalConversationList } from "../../app/ask/conversation-list.tsx";
@@ -2002,10 +2003,10 @@ test("a failed re-send brings the stopped record back and returns the new questi
   expect(input).toHaveValue("另一个问题");
 });
 
-// 并行门禁（scripts/check.sh 三泳道抢 CPU）下这条曾三次在默认 1s 查询窗口/5s 用例上限内
-// 等不到引用弹窗（单独跑恒绿）：查询与用例上限都放宽，断言本身不变。
+// 这条曾在并行门禁与 CI 上四次「找不到 dialog」，放宽等待无效：真根因是 AnswerView
+// 挂载时的收起 effect 吞掉了落在「提交之后、被动 effect 冲刷之前」的那次点击（产品
+// 缺陷，已改为渲染期收起）。确定性回归见下一条用例。
 test("citation badge shows the owning notebook for every citation", async () => {
-  const slow = { timeout: 5000 };
   window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
   api.list.mockResolvedValue([conversation()]);
   api.detail.mockResolvedValue(detail("conv-a", [{
@@ -2035,14 +2036,83 @@ test("citation badge shows the owning notebook for every citation", async () => 
     ["[1]", "材料研究", "/#notebook=nb-0&source=source-1"],
     ["[2]", "热管理", "/#notebook=nb-1&source=source-2"],
   ] as const) {
-    fireEvent.click(await screen.findByRole("button", { name: marker }, slow));
-    const card = await screen.findByRole("dialog", {}, slow);
+    fireEvent.click(await screen.findByRole("button", { name: marker }));
+    const card = await screen.findByRole("dialog");
     expect(card).toHaveTextContent(`来自「${name}」（个人知识库）`);
     expect(within(card).getByRole("link", { name: "打开笔记本" })).toHaveAttribute("href", href);
     await act(async () => { document.body.dispatchEvent(new Event("pointerdown", { bubbles: true })); });
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull(), slow);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   }
-}, 30000);
+});
+
+/** 一次提交的被动 effect 冲刷完时回调——同一次提交里排在它前面的兄弟节点的 effect
+ *  （以及它们排进队列的更新）此时都已经跑过。 */
+function OnCommitted({ onCommitted }: { onCommitted: () => void }) {
+  useEffect(onCommitted);
+  return null;
+}
+
+test("a citation click that lands before the answer's effects have flushed still opens the card", async () => {
+  // 要的正是浏览器里的真实调度：act() 会在提交后同步冲刷 effect，把这个空档抹掉。
+  const actEnvironment = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+  const previousActEnvironment = actEnvironment.IS_REACT_ACT_ENVIRONMENT;
+  actEnvironment.IS_REACT_ACT_ENVIRONMENT = false;
+  const answer = standardAnswer();
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  const view = (onCommitted: () => void) => <>
+    <AnswerView answer={answer} feedbackSent="" notebookId={null} notebookNames={{ "nb-0": "材料研究" }}
+      buildingScaleIndex={false} memorySaved={false} dismissSignal />
+    <OnCommitted onCommitted={onCommitted} />
+  </>;
+  try {
+    // 提交时 React 请求重绘，调度器因此先让出宿主，被动 effect 排在**下一个**宏任务；
+    // MutationObserver 回调是提交之后的微任务，恒落在这个空档里——不靠计时，每次都是。
+    const clicked = new Promise<void>((resolve) => {
+      const observer = new MutationObserver(() => {
+        const badge = within(host).queryByRole("button", { name: "[1]" });
+        if (!badge) return;
+        observer.disconnect();
+        badge.click();
+        resolve();
+      });
+      observer.observe(host, { childList: true, subtree: true });
+    });
+    root.render(view(() => {}));
+    await clicked;
+    await waitFor(() => expect(within(host).getByRole("dialog")).toHaveTextContent("来自「材料研究」"));
+    // 再提交一次同样的视图并等它的 effect 跑完：此前排进队列的任何「收起」都已生效。
+    await new Promise<void>((resolve) => root.render(view(resolve)));
+    expect(within(host).getByRole("dialog")).toBeTruthy();
+  } finally {
+    root.unmount();
+    host.remove();
+    actEnvironment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+  }
+});
+
+test("the AnswerView card still closes when the answer or the host's dismiss signal changes", () => {
+  const props = { feedbackSent: "", notebookId: null, notebookNames: { "nb-0": "材料研究" }, buildingScaleIndex: false, memorySaved: false };
+  const first = standardAnswer();
+  const { rerender } = render(<AnswerView {...props} answer={first} dismissSignal />);
+  fireEvent.click(screen.getByRole("button", { name: "[1]" }));
+  expect(screen.getByRole("dialog")).toBeTruthy();
+  // 同一条回答、同一个信号重渲染：卡片留着。
+  rerender(<AnswerView {...props} answer={first} dismissSignal />);
+  expect(screen.getByRole("dialog")).toBeTruthy();
+  // 换了一条回答：收起。
+  const second = standardAnswer({ answer_id: "answer-second" });
+  rerender(<AnswerView {...props} answer={second} dismissSignal />);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  // 宿主的信号变了（浮窗收起 / 分享弹窗打开）：收起；信号回来也不把旧卡片带回来。
+  fireEvent.click(screen.getByRole("button", { name: "[1]" }));
+  expect(screen.getByRole("dialog")).toBeTruthy();
+  rerender(<AnswerView {...props} answer={second} dismissSignal={false} />);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  rerender(<AnswerView {...props} answer={second} dismissSignal />);
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
 
 // --- 回答里的附图 -------------------------------------------------------------
 //
