@@ -27,6 +27,7 @@ from app.domain.retrieval import RetrievedChunk
 from app.models.common import Evidence
 from app.services.retrieval import RetrievedKnowledge
 from app.services.source_scope import (
+    _sorted_library_ceiling,
     ActiveSourceScope,
     CeilingReaders,
     current_base_scope_payload,
@@ -415,7 +416,7 @@ _VERDICT_AVAILABLE = hasattr(source_scope_module, "ceiling_binds")
 
 
 def test_source_ceiling_binds_honours_ceilings_total():
-    """FEATURE-DETECTED, and meant to go live at rebase time.
+    """FEATURE-DETECTED; live since the rebase onto #806.
 
     ``ActiveSourceScope.source_ceiling_binds`` and
     ``source_scope.scoped_node_context_row`` arrive with branch
@@ -429,8 +430,7 @@ def test_source_ceiling_binds_honours_ceilings_total():
     Second probed assertion (spec re-review F-1): with the Memory channel
     closed and the asker's own Memory withheld from the freeze, the
     ``node_context`` verdict ``source_scope.ceiling_binds`` must answer "binds".
-    The drift probe matches there by design (it folds the withheld ids in) and
-    no FOREIGN hidden source exists, so without an explicit
+    With no drift reported and no FOREIGN hidden source, without an explicit
     ``withheld_hidden_source_ids`` arm the verdict would let the store read the
     library unbounded and hand Bob's own Memory back into a run that may not
     read it.
@@ -474,17 +474,12 @@ def test_source_ceiling_binds_honours_ceilings_total():
     ):
         scope = current_source_scope()
         assert scope.withheld_hidden_source_ids == frozenset({"src-memory-bob"})
-        live_visible = ["src-a", "src-b"]
-        live_hidden = ["src-knowhow", "src-memory-bob"]
-        assert source_scope_visible_universe_matches(
-            NB, live_visible, live_hidden,
-        ) is True, "the probe matches here by design"
+        # ``drifted`` is given as "no drift" on purpose: until E2-2 the drift
+        # probe itself fails closed on withheld ids, and this pin must keep
+        # holding once E2-2 removes that line -- the verdict's own withheld
+        # arm is what answers here.
         assert source_scope_module.ceiling_binds(
-            scope, NB,
-            drifted=lambda: not source_scope_visible_universe_matches(
-                NB, live_visible, live_hidden,
-            ),
-            foreign_hidden=lambda: False,
+            scope, NB, drifted=lambda: False, foreign_hidden=lambda: False,
         ) is True, "own Memory withheld -> the ceiling must bind the re-read"
 
 
@@ -1272,7 +1267,10 @@ def test_mounted_libraries_are_read_in_parallel_up_to_the_worker_bound():
         scope = current_source_scope()
         for lib in libraries:
             assert scope.source_ceiling_for(lib) == frozenset({f"{lib}-1"})
-        assert list(scope._ceiling_hand_out_memo) == libraries
+        assert [
+            library for (library, ordered) in scope._library_ceiling_memo
+            if ordered
+        ] == libraries
     elapsed = _time.monotonic() - started
     assert in_flight["max"] == 2, in_flight
     assert elapsed < 0.9, elapsed  # serial would be >= 1.0 s
@@ -1338,7 +1336,7 @@ def test_a_reader_returning_non_string_ids_is_coerced():
     ):
         scope = current_source_scope()
         assert scope.source_ceiling_for("nb-lib") == frozenset({"1", "2", "3"})
-        assert scope.ceiling_hand_out("nb-lib") == ("3", "1", "2")
+        assert _sorted_library_ceiling(scope, "nb-lib") == ("3", "1", "2")
         assert source_allowed("nb-lib", "1") is True
 
 
@@ -1804,7 +1802,7 @@ def test_peer_visible_sources_returns_the_frozen_ceiling_without_reading():
         NB, None, None, {"nb-lib": frozenset({"lib-001", "lib-000"})},
         _ceiling_read_order={"nb-lib": (stale, ("lib-gone", "lib-001", "lib-000"))},
     ):
-        assert current_source_scope().ceiling_hand_out("nb-lib") == (
+        assert _sorted_library_ceiling(current_source_scope(), "nb-lib") == (
             "lib-000", "lib-001",
         )
     with default_ceiling_context(NB, "bob", store.readers()):
@@ -1933,7 +1931,7 @@ def test_ceiling_is_built_once_and_nothing_is_sorted(monkeypatch):
         assert isinstance(scope.source_ceiling_for("nb-lib"), frozenset)
         assert len(scope.source_ceiling_for("nb-lib")) == 49_000
         # The hand-out is the reader's own order, not a sort of the set.
-        assert scope.ceiling_hand_out("nb-lib") == tuple(big)
+        assert _sorted_library_ceiling(scope, "nb-lib") == tuple(big)
     assert max(sorted_sizes, default=0) <= 2, sorted_sizes
     assert max(set_sizes, default=0) < 49_000, set_sizes
     # One build per id list -- the active notebook's visible (49k) and hidden
@@ -2097,7 +2095,7 @@ def assert_default_ceiling_over_real_stores(repo, ids, read_workers: int = 1) ->
         assert scope.source_ceiling_for(ids["lib2"]) == frozenset(
             {"lib2-visible", *extra}
         )
-        assert scope.ceiling_hand_out(ids["lib2"]) == tuple(
+        assert _sorted_library_ceiling(scope, ids["lib2"]) == tuple(
             sources.all_visible_source_ids(ids["lib2"])
         )
         assert source_allowed(lib, "lib-memory") is False

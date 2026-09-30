@@ -403,8 +403,13 @@ class ActiveSourceScope:
         A blank ``notebook_id`` is callers' stand-in for the scope's own
         notebook -- exactly as ``covers_notebook`` and ``allows`` read it -- so
         the local ceiling binds it (fail-closed).  The library dimension is not
-        this question: an excluded library is answered by ``covers_notebook``.
+        this question: an excluded library is answered by ``covers_notebook``
+        -- and asked FIRST here: a library the scope does not cover (an
+        excluded one, or one ``ceilings_total`` does not name) has no admitted
+        source at all, so a ceiling binds it (fail-closed).
         """
+        if not self.covers_notebook(notebook_id):
+            return True
         if self.source_ceiling_for(notebook_id) is not None:
             return True
         return self.ceiling_active and (
@@ -414,7 +419,12 @@ class ActiveSourceScope:
     @cached_property
     def _library_ceiling_memo(self) -> dict[tuple[str, bool], Any]:
         """Per-run memo behind ``library_source_ceiling`` / ``scoped_allowed_
-        source_ids``: ``(notebook_id, sorted?) -> ceiling``.
+        source_ids``: ``(notebook_id, ordered?) -> ceiling``.  ``False`` keys
+        hold the frozenset, ``True`` keys the ordered tuple SQL producers bind:
+        the store's own ``ORDER BY id`` order (its collation, not Python's) for
+        a per-library ceiling a default-ceiling constructor read -- pre-filled
+        by ``source_scope_context`` from that read -- and ``sorted`` for every
+        other ceiling, computed on first use.
 
         A scope is frozen for the run, so each library's normalised ceiling is
         a fixed value; a whole-library include list is ~49k ids and re-deriving
@@ -443,39 +453,6 @@ class ActiveSourceScope:
         argument holds (a racing reader sees the drift now or on its next
         read, never a torn value)."""
         return set()
-
-    @cached_property
-    def _ceiling_hand_out_memo(self) -> dict[str, tuple[str, ...]]:
-        """Per-scope memo behind ``ceiling_hand_out``: ``notebook_id -> ids``.
-
-        ``cached_property`` writes the instance ``__dict__`` directly, so the
-        frozen dataclass stays frozen and its generated ``__eq__`` /
-        ``__hash__`` / ``__repr__`` (fields only) are untouched; a scope built by
-        ``dataclasses.replace`` starts with an empty memo, so a hand-out can
-        never outlive the ceiling it was taken from.  Shared by worker threads
-        through ``copy_context()``: each store is one dict assignment of a
-        complete immutable tuple, a benign race that may repeat work but never
-        exposes a torn value.
-        """
-        return {}
-
-    def ceiling_hand_out(self, notebook_id: str) -> tuple[str, ...] | None:
-        """``source_ceiling_for`` as an ordered tuple, or None without an entry.
-
-        The order is the READER'S when a default-ceiling constructor built this
-        ceiling (the production visible read is ``ORDER BY id``, and its list is
-        already materialised, so nothing is sorted); any other ceiling is sorted
-        once per scope.  Either way it never depends on hash order
-        (``PYTHONHASHSEED``).
-        """
-        ceiling = self.source_ceiling_for(notebook_id)
-        if ceiling is None:
-            return None
-        memo = self._ceiling_hand_out_memo
-        order = memo.get(notebook_id)
-        if order is None:
-            order = memo[notebook_id] = tuple(sorted(ceiling))
-        return order
 
     def skipped_mounted_libraries(self) -> dict[str, str]:
         """``{library id: reason code}`` for each mounted library this run
@@ -677,8 +654,10 @@ def source_scope_context(
     passed in notebook_source_ceilings, the reader's ordered ids)``) are private
     to the same constructors: the first becomes
     ``ActiveSourceScope._skipped_libraries``, the second pre-fills
-    ``ceiling_hand_out`` -- but only for a library whose stored ceiling IS that
-    frozenset object, so an order can never be handed out for a different set.
+    ``_library_ceiling_memo`` (``(lib, False)`` / ``(lib, True)``) -- but only
+    for a library whose effective ceiling (``_library_ceiling_uncached``) IS
+    that frozenset object, so an order can never be handed out for a
+    different set, nor for a library the library dimension excludes.
 
     ``notebook_source_ceilings`` is the third, independently optional input: a
     ``{notebook_id: source ids}`` mapping (see ``ActiveSourceScope``).  Supplying
@@ -744,8 +723,11 @@ def source_scope_context(
         _skipped_libraries=tuple((_skipped_libraries or {}).items()),
     )
     for library, (frozen, order) in (_ceiling_read_order or {}).items():
-        if current.source_ceiling_for(library) is frozen:
-            current._ceiling_hand_out_memo[library] = order
+        # Only where the library's effective ceiling IS that set: an excluded
+        # library (``frozenset()`` there) or a different set never gets it.
+        if frozen is not None and _library_ceiling_uncached(current, library) is frozen:
+            current._library_ceiling_memo[(library, False)] = frozen
+            current._library_ceiling_memo[(library, True)] = order
     token = _CURRENT_SOURCE_SCOPE.set(current)
     try:
         yield
@@ -1230,7 +1212,8 @@ def library_source_ceiling(
 
     Same value as ``scoped_allowed_source_ids(notebook_id)`` as a set: callers
     that only test membership (``node_context``'s store takes a frozenset) get
-    it without the sort; SQL producers keep the sorted tuple, also memoised."""
+    it without ordering it; SQL producers keep the ordered tuple
+    (``_sorted_library_ceiling``), also memoised."""
     memo = scope._library_ceiling_memo
     key = (notebook_id, False)
     if key not in memo:
@@ -1239,6 +1222,14 @@ def library_source_ceiling(
 
 
 def _sorted_library_ceiling(scope: ActiveSourceScope, notebook_id: str) -> tuple[str, ...] | None:
+    """``library_source_ceiling`` as a deterministic tuple, memoised per scope.
+
+    Despite the name, not always a Python sort: for a per-library ceiling a
+    default-ceiling constructor read, ``source_scope_context`` pre-fills this
+    entry with that read's own order -- the store's ``ORDER BY id`` under the
+    database's collation, already materialised -- so nothing is sorted; any
+    other ceiling is ``sorted`` once on first use.  Either way it never
+    depends on hash order (``PYTHONHASHSEED``)."""
     memo = scope._library_ceiling_memo
     key = (notebook_id, True)
     if key not in memo:
@@ -1361,6 +1352,10 @@ def _ceiling_binds_uncached(
     if scope.subjectless or scope.source_ceiling_for(notebook_id) is not None:
         return True
     if notebook_id != scope.notebook_id or scope.restricted:
+        return True
+    if scope.withheld_hidden_source_ids:
+        # The Memory channel is closed and the asker's own Memory was left out
+        # of the freeze: an unbounded read would include it (E1-1).
         return True
     return bool(drifted()) or bool(foreign_hidden())
 
@@ -2482,14 +2477,18 @@ def refreshed_ceiling_context(
     }
     if own_entry is not None:
         inherited[notebook_id] = own_entry
-    # Paired with the OUTER's frozenset: ``source_scope_context`` keeps an order
-    # only where the new scope stores that very object (a Memory-stripped own
-    # entry is a different set and gets its own hand-out).
+    # Only orders the outer memo already holds (non-None ``(lib, True)``
+    # entries), each paired with the set it was taken from -- the outer's
+    # ``(lib, False)`` entry.  ``source_scope_context`` keeps an order only
+    # where the new scope's effective ceiling IS that object: a library the
+    # outer excluded paired ``frozenset()`` and never matches, and a
+    # Memory-stripped own entry is a different set.  ``copy()``: worker
+    # threads may be filling the outer memo right now.
+    outer_memo = outer._library_ceiling_memo.copy()
     read_order = {
-        library: (outer.source_ceiling_for(library), order)
-        # ``copy()``: worker threads may be filling the outer memo right now.
-        for library, order in outer._ceiling_hand_out_memo.copy().items()
-        if library in inherited
+        library: (outer_memo.get((library, False)), order)
+        for (library, ordered), order in outer_memo.items()
+        if ordered and order is not None and library in inherited
     }
     skipped = {
         library: reason for library, reason in outer._skipped_libraries
