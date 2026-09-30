@@ -5,6 +5,8 @@ request without enforcing it. Keep valid JSON byte-for-byte unchanged and use
 the repair parser only for complete object-shaped replies. Repaired string
 values are accepted only when they remain verbatim in the raw response, so
 syntax recovery cannot silently rewrite an answer, query, or action argument.
+A backslash that starts no JSON escape (LaTeX ``\\mathrm``, ``50\\%``) is read
+as the literal characters written, which keeps them verbatim.
 """
 from __future__ import annotations
 
@@ -100,6 +102,98 @@ def _mask_quoted_strings(raw: str) -> str:
         elif char == quote:
             quote = None
     return "".join(chars)
+
+
+#: What may follow a backslash inside a JSON string (``u`` only with four hex
+#: digits after it, see ``_starts_json_escape``).
+_JSON_ESCAPE_CHARS = frozenset('"\\/bfnrt')
+_HEX4_RE = re.compile(r"[0-9a-fA-F]{4}")
+
+
+def _starts_json_escape(text: str, index: int) -> bool:
+    char = text[index:index + 1]
+    if char == "u":
+        return bool(_HEX4_RE.fullmatch(text[index + 1:index + 5]))
+    return bool(char) and char in _JSON_ESCAPE_CHARS
+
+
+def _escape_stray_backslashes(raw: str) -> str:
+    r"""Read a backslash that starts no JSON escape as a literal backslash.
+
+    Models writing LaTeX or Markdown into a JSON string emit ``\mathrm{V}``,
+    ``50\%`` or ``a\_b`` although the prompt asks for ``\\``. JSON rejects
+    those escapes, and their only reading is the characters as written, so
+    each such backslash inside a double-quoted string is doubled: the decoded
+    text is then exactly what the model wrote. Valid escapes (``\n``, ``\"``,
+    ``\\``, ``\u`` with four hex digits) are left to the JSON decoder, and
+    text outside double-quoted strings is untouched (deepseek-flash,
+    2026-09-29: an answer mixing ``\n`` paragraph breaks with ``50\%`` was
+    rejected as ``string_changed`` on both synthesis attempts).
+    """
+    if "\\" not in raw:
+        return raw
+    out: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if quote is None:
+            if char in {'"', "'"}:
+                quote = char
+        elif char == "\\":
+            if quote == '"' and not _starts_json_escape(raw, index + 1):
+                out.append("\\\\")
+                index += 1
+                continue
+            out.append(raw[index:index + 2])
+            index += 2
+            continue
+        elif char == quote:
+            quote = None
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _decoded_string_surface(raw: str) -> str:
+    """``raw`` with each double-quoted string's body replaced by its decoding.
+
+    The decoding is the one ``_escape_stray_backslashes`` defines: JSON
+    escapes as JSON reads them, stray backslashes literally. A body JSON still
+    cannot decode (a raw control character, say) stays as written, so a
+    repair of that kind is judged exactly as before. Delimiters and text
+    outside double-quoted strings are kept as written, so a match can span
+    only text the model itself wrote, as with ``raw``.
+    """
+    text = _escape_stray_backslashes(raw)
+    out: list[str] = []
+    copied = 0
+    quote: str | None = None
+    escaped = False
+    start = 0
+    for index, char in enumerate(text):
+        if quote is None:
+            if char in {'"', "'"}:
+                quote = char
+                start = index
+            continue
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == quote:
+            quote = None
+            if char != '"':
+                continue
+            try:
+                decoded = json.loads(text[start:index + 1])
+            except ValueError:
+                continue
+            out.append(text[copied:start + 1])
+            out.append(decoded)
+            copied = index
+    out.append(text[copied:])
+    return "".join(out)
 
 
 def _validate_complete_structure(raw: str) -> None:
@@ -546,13 +640,20 @@ def _validate_repaired_shape(
 
     # Repair may restore delimiters, never author semantic text. Apply this to
     # nested planning queries/actions too, not only the final answer field.
+    # A string whose raw spelling mixes JSON escapes with stray backslashes
+    # (``\n`` next to ``50\%``) matches neither ``raw`` nor its canonical
+    # escaping; it is still verbatim when it appears in the decoded surface.
+    surface: str | None = None
     pending = list(value.values())
     while pending:
         item = pending.pop()
         if isinstance(item, str) and item:
             escaped = json.dumps(item, ensure_ascii=False)[1:-1]
             if item not in raw and escaped not in raw:
-                raise ModelJsonRepairError("string_changed")
+                if surface is None:
+                    surface = _decoded_string_surface(raw)
+                if item not in surface:
+                    raise ModelJsonRepairError("string_changed")
         if isinstance(item, list):
             pending.extend(item)
         elif isinstance(item, dict):
@@ -614,10 +715,17 @@ def parse_model_json_object(
     if not (stripped.startswith("{") and stripped.endswith("}")):
         raise ModelJsonRepairError("incomplete_object")
     _validate_complete_structure(stripped)
+    # Stray backslashes get their one reading here rather than whatever the
+    # repair library does with them; when that was the only fault, the text
+    # is strict JSON now and the library is not needed at all.
+    unescaped = _escape_stray_backslashes(stripped)
     try:
-        repaired = json_repair.loads(stripped, skip_json_loads=True)
-    except Exception as exc:  # json-repair exposes several ValueError variants
-        raise ModelJsonRepairError("repair_failed") from exc
+        repaired = json.loads(unescaped)
+    except (ValueError, RecursionError):
+        try:
+            repaired = json_repair.loads(unescaped, skip_json_loads=True)
+        except Exception as exc:  # json-repair exposes several ValueError variants
+            raise ModelJsonRepairError("repair_failed") from exc
     if not isinstance(repaired, dict):
         raise ModelJsonRepairError("non_object")
     _validate_repaired_shape(stripped, repaired, schema_hint)
