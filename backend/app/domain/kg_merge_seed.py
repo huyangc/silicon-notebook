@@ -23,6 +23,13 @@ import re
 import unicodedata
 
 
+#: Canonical-id prefixes by object type (concept / claim / formula /
+#: procedure), as fusion and the rebuild mint them (``K-<seed>``, and
+#: ``<prefix>~<object id>`` for an object whose seed normalizes to nothing).
+#: The Memory purge derives, in SQL, every canonical id that can only have
+#: been minted from a purged object from this tuple.
+CANONICAL_ID_PREFIXES = ("K-", "KL-", "KF-", "KP-")
+
 _ALIASES = {
     "vco": "voltage controlled oscillator",
     "pll": "phase locked loop",

@@ -81,7 +81,19 @@ def test_the_seat_scan_finds_the_known_consumers():
     assert {"knowledge_governance.py"} <= calls["promotion_rows_on"]
 
 
-@pytest.mark.parametrize("method", sorted(_seat_calls()))
+# Store methods the composition root wires as ``SourceIngestionService``'s
+# Memory-removal hooks (``repository_runtime.wire_source_ingestion``) rather
+# than a service calling them through its seat: pinned here by name.
+_COMPOSITION_WIRED = {"detach_memory_projection_on", "drop_memory_lexical_rows_on"}
+
+
+def test_the_composition_wires_the_memory_removal_hooks():
+    runtime = (SERVICES / "repository_runtime.py").read_text(encoding="utf-8")
+    for name in _COMPOSITION_WIRED:
+        assert f"self.memory_store.{name}" in runtime, name
+
+
+@pytest.mark.parametrize("method", sorted({*_seat_calls(), *_COMPOSITION_WIRED}))
 def test_both_backends_implement_every_called_seat_method(method):
     sqlite_method = getattr(SqliteMemoryStore, method, None)
     postgres_method = getattr(PostgresMemoryStore, method, None)

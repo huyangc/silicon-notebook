@@ -113,6 +113,37 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(ANY, BATCHED, "delta source ids, callers batch with _in_batches (<= 900)"),),
     ("postgres/embedding_store.py", "EmbeddingStore.rows_by_ids"): (
         s(ANY, DRIVEN, "vector primary keys (a knowhow table's unchanged chunks)"),),
+    # ---- Memory purge (member exit, hard / bulk delete, deprecate, move):
+    # every list below is one purge page; lists that grow with the KG
+    # (minted canonical ids, foreign objects, stripped objects, bridge ids)
+    # are derived in SQL or bound through id_binding.
+    ("postgres/governance_store.py", "GovernanceStore.withdraw_memory_promotions_on"): (
+        s(ANY, BOUNDED, "one purge page: <= 200 memory ids (_PURGE_PAGE, bulk-delete cap)"),),
+    ("postgres/governance_store.py", "GovernanceStore.purge_memory_review_rows_on"): (
+        s(ANY, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source (owned-objects CTE)"),
+        s(ANY, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source (conflict refs: objects)"),
+        s(ANY, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source (conflict refs: relations)"),),
+    ("postgres/governance_store.py", "GovernanceStore.strip_sources_evidence_on"): (
+        s("ALL(%s)", BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source (not owned by a purged source)"),
+        s("ALL(%s)", BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source (unbackfilled lock leg)"),
+        s(ANY, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source (reverse-index lookup)"),
+        s(ANY, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source (reverse-index rows removed)"),),
+    ("postgres/knowledge_store.py", "KnowledgeStore.clear_sources_graph_state"): tuple(
+        s(ANY, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source") for _ in range(6)),
+    ("postgres/knowledge_store.py", "KnowledgeStore.clear_sources_extraction_state"): tuple(
+        s(ANY, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source") for _ in range(2)),
+    ("postgres/memory_store.py", "MemoryStore._hard_delete_on"): tuple(
+        s(ANY, BOUNDED, "one purge page: <= 200 memory ids (_PURGE_PAGE, bulk-delete cap)") for _ in range(2)),
+    ("postgres/memory_store.py", "MemoryStore.owned_memory_refs"): (
+        s(ANY, BOUNDED, "one purge page: <= 200 memory ids (_PURGE_PAGE, bulk-delete cap)"),),
+    ("postgres/memory_store.py", "MemoryStore.derived_memory_sources"): (
+        s(ANY, BOUNDED, "one purge page: <= 200 memory ids (_PURGE_PAGE, bulk-delete cap)"),),
+    ("postgres/memory_store.py", "MemoryStore.detach_memory_projection_on"): (
+        s(ANY, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source"),),
+    ("postgres/source_store.py", "SourceStore.delete_source_rows"): (
+        s(ANY, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source"),),
+    ("postgres/source_store.py", "SourceStore.lock_sources_for_teardown_tx"): (
+        s(ANY, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source"),),
     ("postgres/governance_store.py", "GovernanceStore.sweep_orphan_clusters_page"): (
         s(ANY, BOUNDED, "cluster ids of the page just read under LIMIT"),),
     ("postgres/governance_store.py", "GovernanceStore.merge_candidate_pairs_for_canonicals"): (
@@ -289,8 +320,6 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(ANY, DRIVEN, "the promotion queue's memory primary keys"),),
     ("postgres/memory_store.py", "MemoryStore.transition"): (
         s(PG_EXP, NOT_IDS, "the expected lifecycle statuses"),),
-    ("postgres/memory_store.py", "MemoryStore.bulk_delete_memories"): (
-        s(PG_EXP, BOUNDED, "capped at 200 memory ids"),),
     ("postgres/memory_store.py", "MemoryStore.list_memories"): (
         s(ANY, BOUNDED, "candidate ids of one page"),),
     ("postgres/memory_store.py", "MemoryStore.memory_retrieval_rows"): (
@@ -601,10 +630,33 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(SQ_EXP, BOUNDED, "capped at 200 answer ids"),),
     ("sqlite/memory_store.py", "MemoryStore._mutate_with_revision"): (
         s(SQ_EXP, NOT_IDS, "the expected lifecycle statuses"),),
+    # ---- Memory purge: see the PostgreSQL block; one page per statement.
+    ("sqlite/governance_store.py", "GovernanceStore.withdraw_memory_promotions_on"): (
+        s(SQ_EXP, BOUNDED, "one purge page: <= 200 memory ids (_PURGE_PAGE, bulk-delete cap)"),),
+    ("sqlite/governance_store.py", "GovernanceStore.purge_memory_review_rows_on"): (
+        s(SQ_EXP, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source"),),
+    ("sqlite/governance_store.py", "GovernanceStore.strip_sources_evidence_on"): (
+        s(SQ_EXP, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source"),),
+    ("sqlite/knowledge_store.py", "KnowledgeStore.clear_sources_graph_state"): (
+        s(SQ_EXP, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source"),),
+    ("sqlite/knowledge_store.py", "KnowledgeStore.clear_sources_extraction_state"): (
+        s(SQ_EXP, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source"),),
+    ("sqlite/memory_store.py", "MemoryStore._hard_delete_on"): tuple(
+        s(SQ_EXP, BOUNDED, "one purge page: <= 200 memory ids (_PURGE_PAGE, bulk-delete cap)") for _ in range(2)),
+    ("sqlite/memory_store.py", "MemoryStore.owned_memory_refs"): (
+        s(SQ_EXP, BOUNDED, "one purge page: <= 200 memory ids (_PURGE_PAGE, bulk-delete cap)"),),
+    ("sqlite/memory_store.py", "MemoryStore.derived_memory_sources"): (
+        s(SQ_EXP, BOUNDED, "one purge page: <= 200 memory ids (_PURGE_PAGE, bulk-delete cap)"),),
+    ("sqlite/memory_store.py", "MemoryStore.detach_memory_projection_on"): (
+        s(SQ_EXP, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source"),),
+    ("sqlite/memory_store.py", "MemoryStore.drop_memory_lexical_rows_on"): (
+        s(SQ_EXP, BATCHED, "the purge page's own object ids, 500 per statement"),),
+    ("sqlite/source_store.py", "SourceStore.delete_source_rows"): (
+        s(SQ_EXP, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source"),),
+    ("sqlite/source_store.py", "SourceStore.lock_sources_for_teardown_tx"): (
+        s(SQ_EXP, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source"),),
     ("sqlite/memory_store.py", "MemoryStore.transition"): (
         s(SQ_EXP, NOT_IDS, "the expected lifecycle statuses"),),
-    ("sqlite/memory_store.py", "MemoryStore.bulk_delete_memories"): (
-        s(SQ_EXP, BOUNDED, "capped at 200 memory ids"),),
     ("sqlite/memory_store.py", "MemoryStore.memory_retrieval_rows"): (
         s(SQ_EXP, NOT_IDS, "the allowed memory statuses"),),
     ("sqlite/notebook_delete_job_store.py", "NotebookDeleteJobStore.recreate_for_deleting_notebook"): (

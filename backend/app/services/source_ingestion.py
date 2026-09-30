@@ -270,6 +270,17 @@ class SourceIngestionService:
         # of one notebook in one set of statements); ``None`` falls back to
         # the one-source form, which is the same implementation per id.
         clear_sources_extraction_state: Optional[Callable[..., None]] = None,
+        # The Memory-specific halves of every Memory-source removal, wired at
+        # composition (``RepositoryRuntime.wire_source_ingestion``) so EVERY
+        # path that removes a Memory-derived source — the purge, deprecate,
+        # a transfer's move, the post-ingest cleanup, an orphan sweep — strips
+        # foreign evidence and removes the Memory's whole clusters and review
+        # candidates. ``memory_detach(db, rows)`` runs after the source lock
+        # and before the teardown; ``memory_after_teardown(db, value)`` gets
+        # what it returned, at the end of the same transaction. ``None``
+        # (narrow test doubles) removes the sources only.
+        memory_detach: Optional[Callable[[Any, List[dict]], Any]] = None,
+        memory_after_teardown: Optional[Callable[[Any, Any], None]] = None,
     ) -> None:
         self.settings = settings
         self.notebooks = notebooks
@@ -299,6 +310,8 @@ class SourceIngestionService:
         self.default_notebook_names = default_notebook_names
         self.clear_source_extraction_state = clear_source_extraction_state
         self.clear_sources_extraction_state = clear_sources_extraction_state
+        self.memory_detach = memory_detach
+        self.memory_after_teardown = memory_after_teardown
         self.begin_extraction_run = begin_extraction_run
         self.finish_extraction_run = finish_extraction_run
         self.notebook_tier = notebook_tier
@@ -2325,13 +2338,7 @@ class SourceIngestionService:
         if source_id is not None:
             self.remove_memory_sources([source_id])
 
-    def remove_memory_sources(
-        self,
-        source_ids: Iterable[str],
-        *,
-        detach: Optional[Callable[[Any, List[dict]], Any]] = None,
-        after_teardown: Optional[Callable[[Any, Any], None]] = None,
-    ) -> int:
+    def remove_memory_sources(self, source_ids: Iterable[str]) -> int:
         """Delete Memory-derived sources in ONE write transaction.
 
         The same teardown as ``delete_source`` (``_teardown_sources_tx``:
@@ -2344,12 +2351,15 @@ class SourceIngestionService:
         every deleted row commits in this same transaction, so one bump
         invalidates exactly what one bump per source did.
 
-        ``detach(db, rows)`` runs in the same transaction after the lock and
-        before the teardown (the Memory purge strips the sources' evidence
-        from foreign objects and removes the clusters and review candidates
-        naming their objects); whatever it returns is handed to
-        ``after_teardown(db, value)`` at the end of the transaction. The
-        post-commit steps are ``delete_source``'s (``_after_sources_removed``).
+        The composition-wired ``memory_detach(db, rows)`` runs in the same
+        transaction after the lock and before the teardown (it strips the
+        sources' evidence from foreign objects and removes the whole clusters
+        and review candidates naming their objects); whatever it returns is
+        handed to ``memory_after_teardown(db, value)`` at the end of the
+        transaction. Every caller gets both — ``remove_memory_source`` (one
+        Memory: deprecate, a transfer's move, the post-ingest cleanup) and a
+        page of the member-exit purge alike. The post-commit steps are
+        ``delete_source``'s (``_after_sources_removed``).
 
         Idempotent: a source that is already gone (a concurrent exit or
         delete removed it between the lookup and here) counts as deleted.
@@ -2366,12 +2376,14 @@ class SourceIngestionService:
                 raise ValueError(f"not a Memory-derived source: {foreign[0]}")
             if not rows:
                 return 0
-            detached = detach(db, rows) if detach is not None else None
+            detached = (
+                self.memory_detach(db, rows) if self.memory_detach is not None else None
+            )
             self._teardown_sources_tx(db, [row["id"] for row in rows], locked=rows)
             for notebook_id in sorted({row["notebook_id"] for row in rows}):
                 self.kg_mutations.mark_unified_kg_dirty_in_tx(db, notebook_id)
-            if after_teardown is not None:
-                after_teardown(db, detached)
+            if self.memory_after_teardown is not None:
+                self.memory_after_teardown(db, detached)
         self._after_sources_removed(rows)
         return len(rows)
 

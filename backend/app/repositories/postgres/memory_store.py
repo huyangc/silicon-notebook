@@ -1894,7 +1894,7 @@ class MemoryStore:
         db: object,
         sources: Sequence[Mapping[str, Any]],
         *,
-        canonical_ids_of: Callable[[list[dict]], tuple[list[str], list[str]]],
+        bridge_canonical_ids_of: Callable[[list[dict]], list[str]],
     ) -> dict[str, list[str]]:
         """The Memory-specific half of a purge page, inside the teardown's
         transaction (``SourceIngestionService.remove_memory_sources`` calls it
@@ -1910,9 +1910,10 @@ class MemoryStore:
           (``purge_memory_review_rows_on``).
 
         Returns the own object ids per notebook, for the lexical-index
-        cleanup after the teardown. ``canonical_ids_of`` maps the objects
-        ``[{object_id, object_type, name}]`` to ``(minted, bridge)`` canonical
-        ids (``kg_merge.purge_canonical_ids``)."""
+        cleanup after the teardown. ``bridge_canonical_ids_of`` maps the
+        objects ``[{object_id, object_type, name}]`` to their bridge canonical
+        ids (``kg_merge.purge_bridge_canonical_ids``); the ids minted from
+        them are derived in SQL."""
         owned: dict[str, list[str]] = {}
         by_notebook: dict[str, list[str]] = {}
         for row in sources:
@@ -1929,7 +1930,7 @@ class MemoryStore:
                 (notebook_id, source_ids),
             ).fetchall()
             object_ids = [row["id"] for row in objects]
-            minted, bridge = canonical_ids_of([
+            bridge = bridge_canonical_ids_of([
                 {"object_id": row["id"], "object_type": row["object_type"],
                  "name": row["name"] or ""}
                 for row in objects
@@ -1938,7 +1939,6 @@ class MemoryStore:
                 db,
                 notebook_id,
                 source_ids,
-                minted_canonical_ids=minted,
                 bridge_canonical_ids=bridge,
             )
             owned[notebook_id] = object_ids

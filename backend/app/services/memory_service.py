@@ -960,7 +960,10 @@ class MemoryService:
         have a hidden derived source; a Memory without one costs nothing more.
         The sources that exist are removed in ONE transaction by
         ``remove_memory_sources`` — the same teardown ``delete_source`` runs,
-        over the whole page — with the Memory-specific steps inside it:
+        over the whole page — with the Memory-specific steps inside it (wired
+        into ``SourceIngestionService`` at composition, so every Memory-source
+        removal runs them: deprecate, a transfer's move and the post-ingest
+        cleanup too):
 
         1. ``detach_memory_projection_on``, right after the sources are
            locked: strip their evidence from objects another source owns (a
@@ -986,16 +989,8 @@ class MemoryService:
         sources = self.store.derived_memory_sources(refs)
         if not sources:
             return
-        from app.services.kg_merge import purge_canonical_ids
-
         self.memory_kg.remove_memory_sources(
-            [source_id for _, source_id, _ in sources],
-            detach=lambda db, rows: self.store.detach_memory_projection_on(
-                db, rows, canonical_ids_of=purge_canonical_ids
-            ),
-            after_teardown=lambda db, owned: self.store.drop_memory_lexical_rows_on(
-                db, owned
-            ),
+            [source_id for _, source_id, _ in sources]
         )
 
     def _purge_page(self, user_id: str, refs: Sequence[tuple[str, str]]) -> int:

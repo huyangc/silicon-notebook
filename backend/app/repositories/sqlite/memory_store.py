@@ -1724,7 +1724,7 @@ class MemoryStore:
         db: sqlite3.Connection,
         sources: Sequence[Mapping[str, Any]],
         *,
-        canonical_ids_of: Callable[[list[dict]], tuple[list[str], list[str]]],
+        bridge_canonical_ids_of: Callable[[list[dict]], list[str]],
     ) -> dict[str, list[str]]:
         """Mirror of the PostgreSQL twin: inside the teardown's transaction,
         strip the sources' evidence from foreign objects and remove the whole
@@ -1747,7 +1747,7 @@ class MemoryStore:
                 (notebook_id, *source_ids),
             ).fetchall()
             object_ids = [row["id"] for row in objects]
-            minted, bridge = canonical_ids_of([
+            bridge = bridge_canonical_ids_of([
                 {"object_id": row["id"], "object_type": row["object_type"],
                  "name": str(row["name"] or "")}
                 for row in objects
@@ -1756,7 +1756,6 @@ class MemoryStore:
                 db,
                 notebook_id,
                 source_ids,
-                minted_canonical_ids=minted,
                 bridge_canonical_ids=bridge,
             )
             owned[notebook_id] = object_ids

@@ -38,6 +38,7 @@ from app.repositories.ports import (
 from app.repositories.source_files import SourceFileStore
 from app.repositories.analysis_artifacts import AnalysisArtifactStore
 from app.services.agent_profile_job import AgentProfileConsolidationService
+from app.services.kg_merge import purge_bridge_canonical_ids
 from app.services.retrieval_experience_job import (
     RetrievalExperienceDistillationService,
 )
@@ -1722,6 +1723,14 @@ class RepositoryRuntime:
             # The batch teardown the one-source form above delegates to (the
             # Memory purge removes a page of sources in one set of statements).
             clear_sources_extraction_state=self.knowledge.clear_sources_extraction_state,
+            # Every Memory-source removal strips foreign evidence and removes
+            # the Memory's whole clusters and review candidates (the member
+            # exit, deprecate, a transfer's move, the post-ingest cleanup and
+            # any sweep all go through ``remove_memory_sources``).
+            memory_detach=lambda db, rows: self.memory_store.detach_memory_projection_on(
+                db, rows, bridge_canonical_ids_of=purge_bridge_canonical_ids
+            ),
+            memory_after_teardown=self.memory_store.drop_memory_lexical_rows_on,
             begin_extraction_run=begin_extraction_run,
             finish_extraction_run=finish_extraction_run,
             notebook_tier=notebook_tier,
