@@ -123,7 +123,6 @@ PRIVATE_REASON_BY_PATH = {
     "backend/app/api/kg_routes.py": "API readiness checks the process-owned model provider",
     "backend/app/api/knowhow_routes.py": "API readiness checks the process-owned model provider",
     "backend/app/api/mcp_tools/maintenance.py": "API readiness checks the process-owned model provider",
-    "backend/app/api/mcp_tools/memory_context.py": "MCP ask binds the runtime's one production default-ceiling readers",
     "backend/app/api/report_routes.py": "API readiness checks the process-owned model provider",
     "backend/app/api/source_routes.py": "API readiness checks the process-owned model provider",
     "backend/app/services/knowhow/api.py": "knowhow orchestration constructs narrow services from runtime ports",

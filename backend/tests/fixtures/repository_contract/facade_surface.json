@@ -1682,12 +1682,6 @@
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/mcp_tools/memory_context.py",
-        "scope": "<module>._run_ask_notebook",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>._report_llm_ready",
         "target": "_runtime"

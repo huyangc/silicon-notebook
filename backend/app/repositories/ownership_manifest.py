@@ -658,7 +658,6 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.optimize_knowhow_cell_stream', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/mcp_tools/_shared.py', scope='<module>.refuse_if_mirrored', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/mcp_tools/maintenance.py', scope='<module>.register_maintenance_tools.build_kg.run', kind='attribute', target='_runtime'),
-            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._run_ask_notebook', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._report_llm_ready', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.export_reports_endpoint', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.generate_report', kind='attribute', target='_runtime'),
