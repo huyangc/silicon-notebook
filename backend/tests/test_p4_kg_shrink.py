@@ -333,13 +333,37 @@ def test_strict_allowed_when_base_has_kg(repo):
     _configure_ask(repo)
     base = repo.create_notebook(NotebookCreate(name="base"))
     repo.mark_notebook_base(base.id)
+    # The base's graph stands on a visible source of its own: every ask runs
+    # under the default ceiling, where a mounted library contributes through
+    # its visible sources only, so a base with none could satisfy nothing.
+    _make_source(repo, base.id, "src-base")
     repo.store_kg(base.id, None, [
         {"local_id": "B1", "object_type": "concept",
-         "payload": {"name": "Engram"}, "evidence": []}], [])
+         "payload": {"name": "Engram"}, "evidence": [{
+             "source_id": "src-base", "source_title": "Doc",
+             "element_id": "el-src-base", "element_type": "paragraph",
+             "location_label": "p1", "quoted_span": "body", "confidence": 1.0,
+         }]}], [])
     empty = repo.create_notebook(NotebookCreate(name="empty"))   # own KG empty
     repo.replace_notebook_bases(empty.id, [base.id], "user-local")
     resp = repo.ask_reasoning(empty.id, AskRequest(question="Engram", mode="reasoning"))
     assert resp.kg_required is False           # mounted base satisfies the gate
+
+
+def test_strict_required_when_the_only_graph_bearing_base_contributes_nothing(repo):
+    """A mounted base whose graph stands on no visible source is frozen to
+    nothing under the default ceiling (visible sources only): it cannot
+    supply a KG hit, so it must not make a graph look available either."""
+    _configure_ask(repo)
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base.id)
+    repo.store_kg(base.id, None, [
+        {"local_id": "B1", "object_type": "concept",
+         "payload": {"name": "Engram"}, "evidence": []}], [])
+    empty = repo.create_notebook(NotebookCreate(name="empty"))
+    repo.replace_notebook_bases(empty.id, [base.id], "user-local")
+    resp = repo.ask_reasoning(empty.id, AskRequest(question="Engram", mode="reasoning"))
+    assert resp.kg_required is True
 
 
 def test_reasoning_search_federates_base(repo):

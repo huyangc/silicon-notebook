@@ -327,11 +327,11 @@ def test_multi_query_direct_collision_replaces_question_only_canonical():
     assert selected == [before, lexical]
 
 
-def _collision_chunks():
+def _collision_chunks(source_id="s"):
     def chunk(chunk_id, relevance, origin, *, text=None):
         return RetrievedChunk(
             chunk_id=chunk_id,
-            source_id="s",
+            source_id=source_id,
             source_title="s",
             section_path="",
             text=text or chunk_id,
@@ -371,11 +371,13 @@ def test_single_direct_collision_uses_historical_score_before_mmr(repo):
 def test_mix_direct_collision_restores_feature_off_rerank_tie_order(
     repo, monkeypatch
 ):
-    nb, _ = _seed_chunks(repo, ["routing baseline " * 20])
+    nb, sid = _seed_chunks(repo, ["routing baseline " * 20])
     _enable_overlay(repo, nb.id)
     _stub_expand(monkeypatch, 1)
     bind_chat_client(repo, "ask_answer", _FakeLLM(markers=()))
-    question_only, lexical, historical = _collision_chunks()
+    # Stubbed rows name the notebook's real source: every ask runs under the
+    # default ceiling, which admits only the notebook's own sources.
+    question_only, lexical, historical = _collision_chunks(sid)
 
     monkeypatch.setattr(
         repo.retrieval.candidates,
@@ -1428,15 +1430,16 @@ def test_ask_chunk_default_chunk_recall_wiring(repo, monkeypatch):
 def test_ask_chunk_mix_token_budget_actually_trims(repo, monkeypatch):
     """overlay_on=True,构造 candidates 总 token 超预算(长文本 + 极小 max_total_tokens),
     断言 selected 被 truncate_by_tokens 真实截短(len(selected) < len(candidates))。"""
-    nb, _ = _seed_chunks(repo, ["moe routing expert body " * 40])
+    nb, sid = _seed_chunks(repo, ["moe routing expert body " * 40])
     _enable_overlay(repo, nb.id)                      # rerank 配齐 + 有 KG → overlay_on=True
     bind_chat_client(repo, "ask_answer", _FakeLLM(markers=()))
 
     from app.services.retrieval import RetrievedChunk
 
+    # 桩行指向本库真实来源:每次提问都在默认天花板内运行,只放行本库自己的来源。
     def _long_chunk(i):
         return RetrievedChunk(
-            chunk_id=f"ck-long-{i}", source_id="src-x", source_title="Doc",
+            chunk_id=f"ck-long-{i}", source_id=sid, source_title="Doc",
             section_path="1", text=("moe routing expert detail " * 200),  # 每条约数千 token
             element_ids=["el-x-0001"], score=1.0 - i * 0.01, relevance=1.0 - i * 0.01)
 
@@ -1481,17 +1484,17 @@ def test_ask_chunk_citation_binding_parity_mix_vs_nonmix(repo, monkeypatch):
     """
     from app.services.retrieval import RetrievedChunk
 
-    def _chunk(i):
+    # 桩行指向各自库的真实来源:每次提问都在默认天花板内运行,只放行本库来源。
+    def _chunk(i, source_id):
         return RetrievedChunk(
-            chunk_id=f"ck-cite-{i}", source_id="src-x", source_title="Doc",
+            chunk_id=f"ck-cite-{i}", source_id=source_id, source_title="Doc",
             section_path=str(i), text=f"passage {i} moe routing detail body",
             element_ids=[f"el-x-{i:04d}"], score=1.0 - i * 0.1, relevance=1.0 - i * 0.1)
 
-    selected = [_chunk(i) for i in range(3)]           # ck-cite-0/1/2
-
     # ── mix 分支:_mix_retrieve 给 3 条候选,rerank identity 保序,预算够(不截);
     #    _chunk_answer_context 给它们 k1/k2/k3;_FakeLLM 只引用 [k2] → 只有 ck-cite-1 有 anchor。
-    nb1, _ = _seed_chunks(repo, ["moe routing expert " * 20])
+    nb1, sid1 = _seed_chunks(repo, ["moe routing expert " * 20])
+    selected = [_chunk(i, sid1) for i in range(3)]     # ck-cite-0/1/2
     _enable_overlay(repo, nb1.id)
     monkeypatch.setattr(repo.retrieval.candidates, "_mix_retrieve",
                         lambda nb_id, q, hl, subs: (list(selected), "", {}, [], 0))
@@ -1505,7 +1508,7 @@ def test_ask_chunk_citation_binding_parity_mix_vs_nonmix(repo, monkeypatch):
     # mix:只绑被 anchor 引用的 chunk(1 条),而非全部 3 条 selected
     assert len(resp_mix.citations) == 1, (
         f"mix 分支只绑被引用的 chunk,期望 1 条 Citation,实得 {len(resp_mix.citations)}")
-    assert resp_mix.citations[0].source_id == "src-x"
+    assert resp_mix.citations[0].source_id == sid1
     # nb1 是 personal 库、chunk 无 notebook_id(同库路径)→ tier 应回退 nb1 自己的 tier。
     assert resp_mix.citations[0].tier == "personal", (
         f"personal 库同库 chunk 引用 tier 应为 personal,实为 {resp_mix.citations[0].tier}")
@@ -1513,7 +1516,8 @@ def test_ask_chunk_citation_binding_parity_mix_vs_nonmix(repo, monkeypatch):
     # ── 非 mix 分支:同一批 selected,overlay_on=False → 每 selected 一条 Citation(3 条),
     #    与答案引用无关。用真实单查询 MMR 路径不好精确控 selected 集,故直接 stub
     #    _retrieve_chunks + _mmr_select_chunks 令 selected 恰为这 3 条。
-    nb2, _ = _seed_chunks(repo, ["moe routing expert " * 20])
+    nb2, sid2 = _seed_chunks(repo, ["moe routing expert " * 20])
+    selected = [_chunk(i, sid2) for i in range(3)]
     bind_rerank_client(repo, _UnconfiguredRerank())  # overlay_on=False
     _stub_expand(monkeypatch, 1)                       # 单查询 → MMR 分支
     monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks",
@@ -1527,7 +1531,7 @@ def test_ask_chunk_citation_binding_parity_mix_vs_nonmix(repo, monkeypatch):
     # 非 mix:每个 selected chunk 一条 Citation(3 条),与 anchor 无关
     assert len(resp_non.citations) == 3, (
         f"非 mix 分支每 selected 一条 Citation,期望 3 条,实得 {len(resp_non.citations)}")
-    assert {c.source_id for c in resp_non.citations} == {"src-x"}
+    assert {c.source_id for c in resp_non.citations} == {sid2}
     assert {c.location_label for c in resp_non.citations} == {"0", "1", "2"}
     assert {c.tier for c in resp_non.citations} == {"personal"}, (
         f"nb2 是 personal 库,非 mix 分支全部 3 条 citation tier 应为 personal,"
@@ -1551,12 +1555,16 @@ def test_ask_chunk_citation_tier_reflects_cross_tier_ppr_chunk(repo, monkeypatch
     与 anchor.tier 都必须解析为 'base',同池的本库 chunk 仍是 'personal'。"""
     from app.services.retrieval import RetrievedChunk
 
-    active_nb, _ = _seed_chunks(repo, ["moe routing expert " * 20])
-    base_nb, _ = _seed_chunks(repo, ["base layer reference " * 20])
+    active_nb, own_sid = _seed_chunks(repo, ["moe routing expert " * 20])
+    base_nb, base_sid = _seed_chunks(repo, ["base layer reference " * 20])
     repo.mark_notebook_base(base_nb.id)
+    # The base library is MOUNTED, and the stubbed rows name real sources:
+    # every ask runs under the default ceiling, where a library takes part
+    # only as a mounted participant, through its own visible sources.
+    repo.replace_notebook_bases(active_nb.id, [base_nb.id], "user-local")
 
     own_chunk = RetrievedChunk(
-        chunk_id="ck-own-0", source_id="src-x", source_title="Doc",
+        chunk_id="ck-own-0", source_id=own_sid, source_title="Doc",
         section_path="0", text="own passage moe routing detail",
         element_ids=["el-x-0000"], score=1.0, relevance=1.0,
         # codex r4 fix: 显式打上 active_nb.id,镜像真实 _ppr_retrieve 的产出——
@@ -1567,7 +1575,7 @@ def test_ask_chunk_citation_tier_reflects_cross_tier_ppr_chunk(repo, monkeypatch
         # 也需要同 citations_from 一样的自库归一化)。
         notebook_id=active_nb.id)
     ppr_chunk = RetrievedChunk(
-        chunk_id="ck-ppr-0", source_id="src-base", source_title="BaseDoc",
+        chunk_id="ck-ppr-0", source_id=base_sid, source_title="BaseDoc",
         section_path="0", text="base layer passage moe routing detail",
         element_ids=["el-base-0000"], score=0.9, relevance=0.9,
         notebook_id=base_nb.id)                        # PPR 标了来源 notebook
@@ -1581,10 +1589,10 @@ def test_ask_chunk_citation_tier_reflects_cross_tier_ppr_chunk(repo, monkeypatch
     resp = repo.ask_chunk(active_nb.id, AskRequest(question="moe routing"))
 
     tier_by_chunk = {c.source_id: c.tier for c in resp.citations}
-    assert tier_by_chunk.get("src-x") == "personal", (
-        f"active 库自己的 chunk tier 应为 personal,实为 {tier_by_chunk.get('src-x')}")
-    assert tier_by_chunk.get("src-base") == "base", (
-        f"PPR 带来的 base 库 chunk citation.tier 应为 base,实为 {tier_by_chunk.get('src-base')}")
+    assert tier_by_chunk.get(own_sid) == "personal", (
+        f"active 库自己的 chunk tier 应为 personal,实为 {tier_by_chunk.get(own_sid)}")
+    assert tier_by_chunk.get(base_sid) == "base", (
+        f"PPR 带来的 base 库 chunk citation.tier 应为 base,实为 {tier_by_chunk.get(base_sid)}")
 
     # anchor.tier(「来源分布」徽章的真实数据源)必须与 citation.tier 一致,
     # 而非硬编码 personal——两个 anchor 分别对应 own_chunk(k1)/ppr_chunk(k2)。
@@ -1601,11 +1609,11 @@ def test_ask_chunk_citation_tier_reflects_cross_tier_ppr_chunk(repo, monkeypatch
     # 查得到「模拟IC教材」这样的库名,同时不会对本库自己的证据显示一个多余的
     # 「来自「当前笔记本」」徽章。
     nb_by_chunk = {c.source_id: c.notebook_id for c in resp.citations}
-    assert nb_by_chunk.get("src-x") == "", (
-        f"active 库自己的 chunk citation.notebook_id 应留空,实为 {nb_by_chunk.get('src-x')!r}")
-    assert nb_by_chunk.get("src-base") == base_nb.id, (
+    assert nb_by_chunk.get(own_sid) == "", (
+        f"active 库自己的 chunk citation.notebook_id 应留空,实为 {nb_by_chunk.get(own_sid)!r}")
+    assert nb_by_chunk.get(base_sid) == base_nb.id, (
         f"PPR 带来的 base 库 chunk citation.notebook_id 应为 {base_nb.id!r},"
-        f"实为 {nb_by_chunk.get('src-base')!r}")
+        f"实为 {nb_by_chunk.get(base_sid)!r}")
     nb_by_anchor = {a.object_id: a.notebook_id for a in resp.anchors}
     assert nb_by_anchor.get("ck-own-0") == "", (
         f"active 库自己的 chunk anchor.notebook_id 应留空,实为 {nb_by_anchor.get('ck-own-0')!r}")
