@@ -206,6 +206,65 @@ def test_the_retrieval_record_reads_every_shape_retrieval_returns():
     assert "src-call" in log.source_ids()
 
 
+def _hits_with_evidence(hits: int, evidence_each: int) -> list:
+    from app.domain.retrieval import RetrievedKnowledge
+    from app.models.common import Evidence
+
+    return [
+        RetrievedKnowledge(
+            object_id=f"o{hit}", object_type="concept",
+            payload={"name": f"n{hit}", "source_id": f"src-{hit}-0"},
+            evidence=[
+                Evidence(
+                    source_id=f"src-{hit}-{row}", source_title="t", element_id="",
+                    element_type="paragraph", location_label="", quoted_span="q",
+                    confidence=1.0,
+                )
+                for row in range(evidence_each)
+            ],
+        )
+        for hit in range(hits)
+    ]
+
+
+@pytest.mark.parametrize("hits, evidence_each", [(10_000, 10), (60, 3_000)])
+def test_the_retrieval_record_reads_large_results_completely(hits, evidence_each):
+    """The reviewer's payloads: many hits with some evidence each, and hub
+    concepts with thousands of evidence rows.  Every source is recorded —
+    the head of the list as well as the tail."""
+    from app.services.report_memory_use import RetrievalSourceLog
+
+    log = RetrievalSourceLog()
+    log.note(_hits_with_evidence(hits, evidence_each))
+    recorded = log.source_ids()
+    assert len(recorded) == hits * evidence_each
+    assert "src-0-0" in recorded and f"src-{hits - 1}-{evidence_each - 1}" in recorded
+
+
+def test_the_retrieval_record_fails_rather_than_stopping_short(monkeypatch):
+    """Past the bound nothing is dropped silently: taking the record raises."""
+    import app.services.report_memory_use as memory_use
+
+    monkeypatch.setattr(memory_use, "_MAX_CONTAINERS", 100)
+    log = memory_use.RetrievalSourceLog()
+    log.note(_hits_with_evidence(50, 5))
+    with pytest.raises(memory_use.RetrievalRecordOverflow):
+        log.source_ids()
+
+
+def test_every_retrieval_seat_of_the_report_engine_is_watched(world):
+    """The runtime wires all five seats that hand evidence to report prompts
+    through the engine's retrieval record."""
+    engine = world.repo._runtime.report_execution.engine_factory(
+        user_id=world.alice.id, cancel_event=None
+    )
+    deps = engine.dependencies
+    log = deps.retrieval_sources
+    for seat in ("retrieval", "evidence_context", "communities",
+                 "retrieval_contributor_hydrate", "selected_graph_hydrate"):
+        assert log.watches(getattr(deps, seat)), seat
+
+
 def test_the_retrieval_record_proxy_writes_through_and_restores(monkeypatch):
     """A method replaced through the proxy replaces it on the port (as before
     the port was watched), and undoing that leaves the port as it was."""
