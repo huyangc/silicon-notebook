@@ -24,6 +24,11 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.repositories.sqlite.chunk_store import ChunkStore
 from app.services.embedding import FakeEmbedder
+from app.services.graph_retrieval import (
+    _PPR_CEILING_OVERFETCH,
+    _PPR_CEILING_WALK_WINDOWS,
+    PprRanking,
+)
 from app.services.source_scope import (
     ceiling_binds,
     current_source_scope,
@@ -101,16 +106,50 @@ def _mounted_scope(active_id, base_id):
 
 class _Ranking:
     """Stands in for ``scale_ppr``: a fixed descending ranking, cut at
-    ``max_results`` like the real bounded heap."""
+    ``max_results`` like the real bounded heap, returned as a ``PprRanking``
+    whose ``rank_further`` re-cuts the same ranking (no second ``scale_ppr``
+    call, like the real continuation over the same score vector).
 
-    def __init__(self, chunk_ids):
+    ``mapped`` models the scale index's chunk-id set per library
+    (``_ppr_chunk_ids``, read here from the ``chunks`` table): with it a
+    library the run refuses wholly can be dropped in memory; without it the
+    walk has to refuse that library's candidates through the store."""
+
+    def __init__(self, repo, chunk_ids, *, mapped=True):
         n = len(chunk_ids)
+        self.repo = repo
+        self.mapped = mapped
         self.ranking = [(cid, (n - i) / n) for i, cid in enumerate(chunk_ids)]
         self.calls: list = []
+        self.further: list = []
+
+    def _library_chunk_ids(self):
+        with self.repo._connect() as db:
+            rows = db.execute("SELECT notebook_id, id FROM chunks").fetchall()
+        out: dict = {}
+        for row in rows:
+            out.setdefault(row[0], set()).add(row[1])
+        return {
+            nb: frozenset(ids) if self.mapped else None
+            for nb, ids in out.items()
+        }
 
     def __call__(self, notebook_id, question, max_results=None):
         self.calls.append(max_results)
-        return list(self.ranking if max_results is None else self.ranking[:max_results])
+        if max_results is None:
+            return list(self.ranking)
+
+        def rank_further(limit, skip=None):
+            self.further.append((limit, skip is not None))
+            return [
+                item for item in self.ranking if skip is None or not skip(item[0])
+            ][:limit]
+
+        return PprRanking(
+            self.ranking[:max_results],
+            rank_further=rank_further if len(self.ranking) > max_results else None,
+            library_chunk_ids=self._library_chunk_ids(),
+        )
 
 
 class _HydrationSpy:
@@ -123,9 +162,9 @@ class _HydrationSpy:
         return self.store.graph_hydrate_rows(db, chunk_ids, **kwargs)
 
 
-def _install(repo, monkeypatch, ranking):
+def _install(repo, monkeypatch, ranking, *, mapped=True):
     graph = repo.retrieval.graph
-    fake = _Ranking(ranking)
+    fake = _Ranking(repo, ranking, mapped=mapped)
     monkeypatch.setattr(graph, "scale_ppr", fake)
     spy = _HydrationSpy(ChunkStore)
     monkeypatch.setattr(graph.chunks, "graph_hydrate_rows", spy)
@@ -165,16 +204,33 @@ def test_the_mounted_ceiling_is_pushed_into_hydration(repo, monkeypatch):
         assert set(kwargs["allowed_source_ids"][base]) == {"b1", "b2"}
 
 
-def test_window_exhaustion_re_ranks_everything_and_still_fills(repo, monkeypatch):
-    """More refused candidates than the over-ranked prefix holds: the scale
-    ranking is fetched in full once and the slots are still filled."""
+def test_window_exhaustion_ranks_further_and_still_fills(repo, monkeypatch):
+    """More refused candidates than the over-ranked prefix holds: the same
+    ranking is extended once (``rank_further``, no second ``scale_ppr``) as
+    far as the walk's budget can reach, and the slots are still filled."""
     active, base = _seed(repo, knowhow_chunks=60)
     ranking = [f"c-kh-{i:03d}" for i in range(60)] + ["c-b1", "c-a1", "c-b2", "c-a2"]
     fake, _ = _install(repo, monkeypatch, ranking)
     with _mounted_scope(active, base):
         out = repo._ppr_retrieve(active, "q")
     assert [c.chunk_id for c in out] == ["c-b1", "c-a1", "c-b2"]
-    assert fake.calls == [TOP * 16, None]
+    assert fake.calls == [TOP * _PPR_CEILING_OVERFETCH]
+    assert fake.further == [
+        (TOP * _PPR_CEILING_OVERFETCH + _PPR_CEILING_WALK_WINDOWS * 900, False)]
+
+
+def test_a_passage_kept_in_the_prefix_takes_one_slot_after_ranking_further(
+    repo, monkeypatch,
+):
+    """The prefix keeps c-a1 and runs out; ``rank_further`` ranks c-a1 again
+    at the top.  It must not be hydrated and kept a second time."""
+    active, base = _seed(repo, knowhow_chunks=60)
+    ranking = ["c-a1"] + [f"c-kh-{i:03d}" for i in range(60)] + ["c-b1", "c-b2"]
+    fake, _ = _install(repo, monkeypatch, ranking)
+    with _mounted_scope(active, base):
+        out = repo.retrieval.graph._ppr_retrieve(active, "q")
+    assert [c.chunk_id for c in out] == ["c-a1", "c-b1", "c-b2"]
+    assert len(fake.further) == 1
 
 
 def test_an_excluded_library_takes_no_slot(repo, monkeypatch):
@@ -184,6 +240,192 @@ def test_an_excluded_library_takes_no_slot(repo, monkeypatch):
     with source_scope_context(active, None, {"mode": "include", "notebook_ids": []}):
         out = repo._ppr_retrieve(active, "q")
     assert [c.chunk_id for c in out] == ["c-a1", "c-a2"]
+
+
+EXCLUDED = {"mode": "include", "notebook_ids": []}
+
+
+def test_rows_of_a_library_listed_mid_window_are_judged_row_by_row(repo, monkeypatch):
+    """B is excluded and the ranking carries no chunk map, so B is refused
+    through the walk: c-b1 lists B, and c-b2 -- in the SAME window, whose
+    statement was built before B was listed -- must be refused too.  Read on
+    the unfiltered ``graph._ppr_retrieve``: the facade's backstop filter
+    would hide a leaked row (and leave a slot empty instead)."""
+    active, base = _seed(repo)
+    with repo._write() as db:
+        _source(db, active, "a3")
+        _chunk(db, active, "a3", "c-a3")
+    _install(repo, monkeypatch, ["c-b1", "c-b2", "c-a1", "c-a2", "c-a3"], mapped=False)
+    with source_scope_context(active, None, EXCLUDED):
+        out = repo.retrieval.graph._ppr_retrieve(active, "q")
+    assert [c.chunk_id for c in out] == ["c-a1", "c-a2", "c-a3"]
+
+
+def test_two_late_uploads_in_one_window_are_both_refused(repo, monkeypatch):
+    """The active-library twin: the first late upload lists the active
+    ceiling, the second one in the same window is judged against it."""
+    notebook = repo.create_notebook(NotebookCreate(name="solo"))
+    with repo._write() as db:
+        for sid in ("s1", "s2", "s3", "late", "late2"):
+            _source(db, notebook.id, sid)
+            _chunk(db, notebook.id, sid, f"c-{sid}")
+    _install(repo, monkeypatch, ["c-late", "c-late2", "c-s1", "c-s2", "c-s3"])
+    with source_scope_context(
+        notebook.id,
+        {"mode": "include", "source_ids": ["s1", "s2", "s3"],
+         "narrowed": False, "owner_id": "user-local"},
+    ):
+        out = repo.retrieval.graph._ppr_retrieve(notebook.id, "q")
+    assert [c.chunk_id for c in out] == ["c-s1", "c-s2", "c-s3"]
+
+
+def _bulk_rows(repo, notebook_id, count):
+    """``count`` chunks of one source of ``notebook_id``, returned in id order."""
+    ids = [f"c-bx-{i:05d}" for i in range(count)]
+    with repo._write() as db:
+        _source(db, notebook_id, "bx")
+        db.executemany(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,"
+            "element_ids,created_at) VALUES (?,?,?,?,?,?,?)",
+            [(cid, notebook_id, "bx", "t", "S", "[]", NOW) for cid in ids],
+        )
+    return ids
+
+
+def _trace_hydrations(repo):
+    """Every hydration statement the walk sends from now on (the SQLite
+    connection is per thread and reused, so one trace callback sees them)."""
+    statements: list = []
+    with repo.retrieval.graph._connect() as db:
+        db.set_trace_callback(statements.append)
+    return statements
+
+
+def _hydrations(statements):
+    return [s for s in statements if "chunk_notebook_id" in s]
+
+
+def _events(repo, monkeypatch):
+    events: list = []
+    original = repo.event_log.emit
+
+    def emit(event, **kwargs):
+        events.append(event)
+        return original(event, **kwargs)
+
+    monkeypatch.setattr(repo.event_log, "emit", emit)
+    return events
+
+
+def test_a_wholly_refused_library_is_dropped_in_memory_before_the_walk(
+    repo, monkeypatch,
+):
+    """20,000 chunks of an unticked library outrank the active library's two.
+    The ranking maps that library to its chunks, so they leave the ranking
+    before any hydration: one statement, both in-ceiling passages."""
+    active, base = _seed(repo)
+    ahead = _bulk_rows(repo, base, 20_000)
+    fake, _ = _install(repo, monkeypatch, ahead + ["c-a1", "c-a2"])
+    statements = _trace_hydrations(repo)
+    with source_scope_context(active, None, EXCLUDED):
+        out = repo.retrieval.graph._ppr_retrieve(active, "q")
+    assert [c.chunk_id for c in out] == ["c-a1", "c-a2"]
+    assert len(_hydrations(statements)) == 1
+    assert fake.further == [
+        (TOP * _PPR_CEILING_OVERFETCH + _PPR_CEILING_WALK_WINDOWS * 900, True)]
+
+
+def test_without_a_chunk_map_the_walk_stops_at_its_budget(repo, monkeypatch):
+    """The same 20,000 refused candidates with no chunk map: the walk spends
+    its prefix windows (3, 6, 12, 24 and 48 ids at TOP=3: five statements)
+    and then exactly ``_PPR_CEILING_WALK_WINDOWS`` windows of 900, gives up
+    on the slots it could not fill, and says so."""
+    active, base = _seed(repo)
+    ahead = _bulk_rows(repo, base, 20_000)
+    fake, _ = _install(repo, monkeypatch, ahead + ["c-a1", "c-a2"], mapped=False)
+    events = _events(repo, monkeypatch)
+    statements = _trace_hydrations(repo)
+    with source_scope_context(active, None, EXCLUDED):
+        out = repo.retrieval.graph._ppr_retrieve(active, "q")
+    assert out == []
+    assert len(_hydrations(statements)) == 5 + _PPR_CEILING_WALK_WINDOWS
+    assert fake.calls == [TOP * _PPR_CEILING_OVERFETCH]
+    exhausted = [
+        {k: v for k, v in e.items() if k not in ("ts", "channel")}
+        for e in events if e.get("kind") == "ppr_ceiling_walk_exhausted"
+    ]
+    assert exhausted == [{
+        "kind": "ppr_ceiling_walk_exhausted",
+        "notebook_id": active,
+        "top_chunks": TOP,
+        "kept": 0,
+        "windows": _PPR_CEILING_WALK_WINDOWS,
+        "candidates_walked": TOP * _PPR_CEILING_OVERFETCH
+        + _PPR_CEILING_WALK_WINDOWS * 900,
+        "libraries_dropped": 0,
+        "libraries_unmapped": 1,
+    }]
+
+
+def test_ranking_further_reuses_the_score_vector(repo, monkeypatch):
+    """The real scale path: the only admitted passage is ranked LAST, so the
+    one-candidate prefix runs out and the walk ranks further.  That must
+    reuse the PPR already computed -- one power iteration, one
+    ``scale_ppr_done`` event -- and keep the score the passage has in the
+    complete ranking."""
+    import app.services.graph_retrieval as graph_module
+    import app.services.kg.scale_index as scale_index
+    from tests.test_ppr_retrieve import _seed_two_doc_moe
+
+    base = _seed_two_doc_moe(repo)
+    repo.rebuild_unified_kg(base.id)
+    repo.build_scale_index(base.id)
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (base.id,))
+    active = _seed_two_doc_moe(repo, suffix="-act")
+    repo.rebuild_unified_kg(active.id)
+    repo.replace_notebook_bases(active.id, [base.id], "user-local")
+    graph = repo.retrieval.graph
+    question = "Mixture of Experts"
+    # Fixed chunk seeds: the real ones are retrieved under the run's scope,
+    # and the ranking must be the same with and without it here.
+    from types import SimpleNamespace
+
+    seeds = [
+        SimpleNamespace(chunk_id=cid, relevance=weight)
+        for cid, weight in (("cA", 0.9), ("cB-act", 0.7), ("cA-act", 0.5), ("cB", 0.3))
+    ]
+    monkeypatch.setattr(graph, "_retrieve_chunks", lambda *a, **k: (seeds, [], None))
+    complete = graph.scale_ppr(active.id, question)
+    assert len(complete) >= 3
+    last = complete[-1][0]
+    with repo._connect() as db:
+        owner, source = db.execute(
+            "SELECT notebook_id, source_id FROM chunks WHERE id=?", (last,)
+        ).fetchone()
+    monkeypatch.setattr(graph.settings, "ppr_top_chunks", 1)
+    monkeypatch.setattr(graph_module, "_PPR_CEILING_OVERFETCH", 1)
+    iterations = {"n": 0}
+    real_ppr = scale_index.personalized_ppr
+
+    def counting_ppr(*args, **kwargs):
+        iterations["n"] += 1
+        return real_ppr(*args, **kwargs)
+
+    monkeypatch.setattr(scale_index, "personalized_ppr", counting_ppr)
+    events = _events(repo, monkeypatch)
+    with source_scope_context(
+        active.id,
+        {"mode": "include", "source_ids": [source] if owner == active.id else [],
+         "narrowed": False, "owner_id": "user-local"},
+        None,
+        {base.id: [source] if owner == base.id else []},
+    ):
+        out = graph._ppr_retrieve(active.id, question)
+    assert [(c.chunk_id, c.relevance) for c in out] == [(last, complete[-1][1])]
+    assert iterations["n"] == 1
+    assert [e["kind"] for e in events if e.get("kind") == "scale_ppr_done"] == [
+        "scale_ppr_done"]
 
 
 def test_all_selected_unchanged_run_issues_the_historical_hydration(repo, monkeypatch):
@@ -303,17 +545,29 @@ def test_store_binds_a_49k_ceiling_as_one_parameter(seeded):
     assert _hydrate(repo, ALL, allowed_source_ids={base: big}) == {"c-a1", "c-a2", "c-b2"}
 
 
-def test_store_plan_is_driven_by_candidate_keys_without_statistics(seeded):
+@pytest.mark.parametrize("statistics", ["none", "notebook_index_looks_unique"])
+def test_store_plan_is_driven_by_candidate_keys(seeded, statistics):
     """Production SQLite has no ``sqlite_stat1``: the candidate primary keys
-    must drive, never the notebook or source index."""
+    must drive, never the notebook or source index.  The second case forges
+    statistics that make ``idx_chunks_nb`` / ``idx_chunks_nb_created`` look
+    unique per value: the plan must not move either, which is why the
+    per-library notebook equality carries no unary ``+`` (it sits in an OR no
+    index can answer, see ``_library_source_ceiling_clause``)."""
     repo, _active, base = seeded
     captured: list = []
+    with repo._write() as db:
+        db.execute("ANALYZE")
+        db.execute("DELETE FROM sqlite_stat1")
+        if statistics != "none":
+            db.executemany(
+                "INSERT INTO sqlite_stat1(tbl,idx,stat) VALUES ('chunks',?,?)",
+                [("idx_chunks_nb", "1000000 1"),
+                 ("idx_chunks_nb_created", "1000000 1 1"),
+                 ("sqlite_autoindex_chunks_1", "1000000 1")],
+            )
     with repo._connect() as db:
-        has_stats = db.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE name='sqlite_stat1'"
-        ).fetchone()[0]
-        if has_stats:
-            db.execute("DELETE FROM sqlite_stat1")
+        # Re-read (or forget) the statistics on this very connection.
+        db.execute("ANALYZE sqlite_master")
         original = db.execute
 
         class _Capture:
