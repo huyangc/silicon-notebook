@@ -5,14 +5,15 @@
 借语义腿的联邦调度(``chunk_federation._run_supplement_arm``),按库以**整节**轮转
 交错、去重、以 ``GLOBAL_ASK_CANDIDATE_LIMIT`` 封顶且不切断一节。本文件钉住:
 
-* 每个库各查一次;探测命中按该库冻结天花板过滤后才分组、分节名额(天花板外的
-  隐藏投影/新增来源不占名额);
+* 每个库各查一次;该库冻结天花板**下推**给探针(天花板外的隐藏投影/新增来源
+  既不占探针窗口、也不占节名额——50 个界外同名命中挡不住界内那一个);
 * 无标识符零开销:不读参与集座位、不派任务、不发事件;
 * 合并以整节为单位轮转、去重、封顶不切节(放不下的节整节跳过、后面更小的节仍可
   进);命中保留 ``exact_lookup`` 与所属库;
 * 失败/超时 fail-open:不抛、不进回执、不上横幅;取消照常上抛;
 * 检索时刻证据登记(含读失败 fail closed、无计划不登记);
-* 开关;单库路径调用序列守卫;reasoning 外层不持槽;
+* 开关;单库路径:收窄不再关通道、天花板按判词下推或校验读(判词为假时逐字是
+  历史调用,读到界外来源即记漂移并按天花板重跑);reasoning 外层不持槽;
 * 两个按库席位纯函数(``exact_section_reserve_rules`` 与
   ``promote_bounded_prefix_by_library``)的单库等价与 k=2/3/5、余数分配。
 
@@ -86,6 +87,8 @@ class ExactProbe:
     _peer_exact_leg = _borrow("_peer_exact_leg")
     _exact_lookup_deps = _borrow("_exact_lookup_deps")
     _exact_lookup_limits = _borrow("_exact_lookup_limits")
+    _exact_lookup_ceiling = _borrow("_exact_lookup_ceiling")
+    _ceiling_binds_for = _borrow("_ceiling_binds_for")
 
     def __init__(self, participants=("nb-a",), *, sections=None, visible=None,
                  failures=None, limit=_CANDIDATE_LIMIT, enabled=True,
@@ -113,6 +116,9 @@ class ExactProbe:
         self.events: list = []
         self.event_log = SimpleNamespace(emit=self.events.append)
         self.steps: list = []
+        # ``(notebook_id, term, allowed_source_ids)`` per probe: the ceiling the
+        # service pushed down (``None`` = the historical call without one).
+        self.ceilings: list = []
         self.model_errors: list = []
         self.seat_reads = 0
         self.visible_reads: list = []
@@ -167,15 +173,21 @@ class ExactProbe:
             "element_ids": json.dumps([f"el-{chunk_id}"]),
         }
 
-    def _exact_search(self, db, notebook_id, term, k):
+    def _exact_search(self, db, notebook_id, term, k, **kwargs):
+        # The store contract (E2-4): ``allowed_source_ids`` is applied BEFORE
+        # the ``k`` window, and only when the caller passes it.
         self._record(("exact_search", notebook_id, term, k))
+        allowed = kwargs.pop("allowed_source_ids", None)
+        assert not kwargs, kwargs
+        with self._lock:
+            self.ceilings.append((notebook_id, term, allowed))
         failure = self._failures.get(notebook_id)
         if failure is not None:
             raise failure
         return [
             {"chunk_id": chunk_id, "source_id": source, "section_path": path}
             for path, chunk_id, source in self._chunk(notebook_id)
-            if term in path
+            if term in path and (allowed is None or source in allowed)
         ][:k]
 
     def _section_rows(self, db, notebook_id, source_id, section_path, limit):
@@ -466,6 +478,34 @@ def test_out_of_ceiling_hits_take_no_section_slot(outside):
     # 证据只登记天花板内、真正交给调用方的块。
     assert probe.snapshot_reads == [["a1", "b1"]]
     assert probe.searched() == ["nb-a", "nb-b"]
+    # 天花板是**下推**给探针的,每库各自那一份。
+    assert {(nid, allowed) for nid, _term, allowed in probe.ceilings} == {
+        ("nb-a", ("src-nb-a",)), ("nb-b", ("src-nb-b",)),
+    }
+
+
+def _crowded_sections(notebook_id: str, outside: str) -> list:
+    """50 个同名命中全在天花板外的来源里、排在前面,天花板内只有 1 个。"""
+    return [
+        *[(f"Hidden {i} > set_db", [f"h{i}"], outside) for i in range(50)],
+        ("Ref > set_db", ["in-1"], None),
+    ]
+
+
+def test_out_of_ceiling_hits_never_occupy_the_probe_window_in_peer_mode():
+    """B-9:探针窗口 ``EXACT_LOOKUP_FTS_K``=50 恰好被天花板外的 50 个同名命中占满。
+    先取后滤时窗口里一个界内命中都没有,这个库一节都拿不到;下推之后界内那一节
+    照常返回。"""
+    probe = ExactProbe(
+        ("nb-b",), sections={"nb-b": _crowded_sections("nb-b", "src-out")},
+    )
+
+    with _peer_run(("nb-b",)):
+        merged = probe._exact_lookup_chunks("nb-b", _QUERY)
+
+    assert _ids(merged) == [("nb-b", "in-1")]
+    assert not [s for s in probe.steps
+                if s[0] == "section_rows" and s[2].startswith("Hidden")]
 
 
 def test_a_library_with_no_visible_source_issues_no_query():
@@ -544,9 +584,9 @@ def test_an_exact_leg_runs_inside_one_arm_budget(monkeypatch):
     budgets: list = []
 
     class _Probe(ExactProbe):
-        def _exact_search(self, db, notebook_id, term, k):
+        def _exact_search(self, db, notebook_id, term, k, **kwargs):
             budgets.append(current_read_budget().deadline)
-            return super()._exact_search(db, notebook_id, term, k)
+            return super()._exact_search(db, notebook_id, term, k, **kwargs)
 
     probe = _Probe(("nb-b",))
     with _global_run(("nb-b",), Receipts()):
@@ -602,24 +642,23 @@ def test_no_plan_registers_no_exact_evidence():
 # 6. 单库路径守卫
 # ---------------------------------------------------------------------------
 
-def _single_path_steps(narrowed: bool) -> list:
-    """改动前那条函数体发出的逐步调用,一字不差。"""
-    if narrowed:
-        return [("restricted_probe", "nb-a", True)]
-    return [
-        ("restricted_probe", "nb-a", False),
-        ("exact_search", "nb-a", "set_db", 50),
-        ("exact_search", "nb-a", "report_timing", 50),
-        ("section_rows", "nb-a", "Cmds > set_db", 12),
-        ("section_rows", "nb-a", "Cmds > report_timing", 12),
-    ]
+_SINGLE_PATH_STEPS = [
+    ("exact_search", "nb-a", "set_db", 50),
+    ("exact_search", "nb-a", "report_timing", 50),
+    ("section_rows", "nb-a", "Cmds > set_db", 12),
+    ("section_rows", "nb-a", "Cmds > report_timing", 12),
+]
 
 
 @pytest.mark.parametrize("enabled", [True, False])
 @pytest.mark.parametrize("scope", ["none", "frozen_all", "narrowed"])
-def test_single_notebook_path_is_unchanged(scope, enabled):
-    """非对等(含挂载参考库、含冻结/收窄勾选):探针顺序与存储调用同改动前,
-    参与集座位与联邦开关都不读,不发事件,命中不打库标。"""
+def test_single_notebook_path_keeps_the_channel_under_every_scope(scope, enabled):
+    """非对等(含挂载参考库、含冻结/收窄勾选):收窄不再关掉精确通道(B-9)。
+    同一串存储调用;天花板在绑时下推给探针,不绑(无范围)时逐字是历史调用;
+    参与集座位与联邦开关都不读,不发事件,命中不打库标,也不再现探来源漂移。
+
+    替身没有接判词端口,所以按保守的历史答案「天花板存在即绑」——全选冻结也
+    下推(生产上全选且未漂移的 run 走校验读,见下面的判词用例)。"""
     probe = ExactProbe(
         ("nb-a", "nb-ref-1"),
         sections={"nb-a": _SECTIONS["nb-a"], "nb-ref-1": _SECTIONS["nb-b"]},
@@ -639,14 +678,92 @@ def test_single_notebook_path_is_unchanged(scope, enabled):
         with source_scope_context("nb-a", local):
             merged = probe._exact_lookup_chunks("nb-a", _QUERY)
 
-    assert probe.steps == _single_path_steps(scope == "narrowed")
+    assert probe.steps == _SINGLE_PATH_STEPS
+    pushed = None if scope == "none" else ("src-nb-a",)
+    assert probe.ceilings == [
+        ("nb-a", "set_db", pushed), ("nb-a", "report_timing", pushed),
+    ]
     assert probe.seat_reads == 0
     assert probe.visible_reads == []
     assert probe.events == []
-    expected = [] if scope == "narrowed" else [
-        ("", "a1"), ("", "a2"), ("", "a3"), ("", "a4"),
+    assert _ids(merged) == [("", "a1"), ("", "a2"), ("", "a3"), ("", "a4")]
+
+
+def test_a_narrowed_run_finds_the_in_ceiling_section_behind_a_full_window():
+    """B-9 单库:收窄 run 里天花板外来源有 50 个同名命中、恰好占满探针窗口,
+    天花板内只有 1 个——界内那一节照常返回(先取后滤时窗口里没有它)。"""
+    probe = ExactProbe(
+        ("nb-a",), sections={"nb-a": _crowded_sections("nb-a", "src-out")},
+    )
+    narrowed = SourceScope(mode="include", source_ids=["src-nb-a"], narrowed=True)
+
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
+        with source_scope_context("nb-a", narrowed):
+            merged = probe._exact_lookup_chunks("nb-a", _QUERY)
+
+    assert _ids(merged) == [("", "in-1")]
+    assert {allowed for _nid, _term, allowed in probe.ceilings} == {("src-nb-a",)}
+
+
+class _Verdict:
+    """``RetrievalService._ceiling_binds`` 的替身:判词固定,记下被问了哪些库。"""
+
+    def __init__(self, binds: bool):
+        self.binds = binds
+        self.asked: list = []
+
+    def __call__(self, notebook_id):
+        self.asked.append(notebook_id)
+        return self.binds
+
+
+def _with_verdict(probe, binds: bool) -> _Verdict:
+    verdict = _Verdict(binds)
+    probe._retrieval = SimpleNamespace(_ceiling_binds=verdict)
+    return verdict
+
+
+def test_an_unbinding_verdict_keeps_the_historical_call_when_nothing_is_outside():
+    """全选、未漂移、无外人隐藏来源(判词为假):不下推清单,逐字是历史调用,
+    结果全部在天花板内所以校验读通过、不重跑。"""
+    probe = ExactProbe(("nb-a",))
+    verdict = _with_verdict(probe, binds=False)
+    frozen = SourceScope(mode="include", source_ids=["src-nb-a"], narrowed=False)
+
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
+        with source_scope_context("nb-a", frozen):
+            merged = probe._exact_lookup_chunks("nb-a", _QUERY)
+
+    assert probe.steps == _SINGLE_PATH_STEPS
+    assert [allowed for _nid, _term, allowed in probe.ceilings] == [None, None]
+    assert verdict.asked == ["nb-a"]
+    assert _ids(merged) == [("", "a1"), ("", "a2"), ("", "a3"), ("", "a4")]
+
+
+def test_an_unbinding_verdict_is_verified_on_read_and_rerun_bound():
+    """判词为假之后库变了(冻结后新增的来源命中):校验读发现界外来源 → 记漂移、
+    按天花板重跑一次;界外那一节既不返回也不再被整节取回。"""
+    from app.services.source_scope import current_source_scope
+
+    probe = ExactProbe(
+        ("nb-a",),
+        sections={"nb-a": [("New > set_db", ["n1", "n2"], "src-new"),
+                           ("Cmds > set_db", ["a1"], None)]},
+    )
+    _with_verdict(probe, binds=False)
+    frozen = SourceScope(mode="include", source_ids=["src-nb-a"], narrowed=False)
+
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
+        with source_scope_context("nb-a", frozen):
+            merged = probe._exact_lookup_chunks("nb-a", _QUERY)
+            drift_recorded = current_source_scope()._ceiling_binds_memo.get("nb-a")
+
+    assert _ids(merged) == [("", "a1")]
+    # 两个名称各探一次:先是历史调用,再是按天花板的重跑。
+    assert [allowed for _nid, _term, allowed in probe.ceilings] == [
+        None, None, ("src-nb-a",), ("src-nb-a",),
     ]
-    assert _ids(merged) == expected
+    assert drift_recorded is True
 
 
 def test_single_notebook_failure_keeps_its_historical_handling():
