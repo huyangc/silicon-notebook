@@ -392,14 +392,15 @@ export function useReportWorkspace({
 
   // 旧数据:以前就已公开、但引用了其他成员个人记忆的报告,公开页现在打不开(与撤销的链接一样)。
   // 作者这里不能还显示成「已公开、可复制链接」——打开这样一份已公开的报告时读一次披露,引用了
-  // 别人的记忆就改成就地说明链接已失效,只留「取消分享」。
+  // 别人的记忆就改成就地说明链接已失效,只留「取消分享」。也跟着本地的分享状态走:取消分享即收起
+  // 说明;取消后再次公开成功(服务端准许了,比如那条他人记忆的投影已被移除),重读一次。
   useEffect(() => {
     setSharedRefusal(null);
     const owner = currentOwner();
     const report = activeReport;
     if (
       !owner || !policyRef.current.canManageReports || !report
-      || !report.shared || report.status !== "done"
+      || !report.shared || !shared || report.status !== "done"
     ) return undefined;
     let cancelled = false;
     getReportShareDisclosure(owner.notebookId, report.id).then((disclosure) => {
@@ -409,7 +410,7 @@ export function useReportWorkspace({
     }).catch((error) => logDiagnostic("report", error));
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeReport?.id, activeReport?.shared, activeReport?.status]);
+  }, [activeReport?.id, activeReport?.shared, activeReport?.status, shared]);
 
   useEffect(() => {
     if (!confirmDelete) return;
@@ -598,6 +599,8 @@ export function useReportWorkspace({
       if (!owns(owner) || activeReportRef.current?.id !== report.id) return null;
       setShared(true);
       setShareConfirm(null);
+      // 服务端刚刚准许公开:这条链接是好的,以前那句「公开链接已无法打开」不再成立。
+      setSharedRefusal(null);
       return await effectsRef.current.announceShareLink(token);
     } catch (error) {
       if (!owns(owner) || activeReportRef.current?.id !== report.id) return null;
@@ -624,6 +627,7 @@ export function useReportWorkspace({
             if (token) {
               setShared(true);
               setShareConfirm(null);
+              setSharedRefusal(null);
               return await effectsRef.current.announceShareLink(token);
             }
           } catch (readError) {
