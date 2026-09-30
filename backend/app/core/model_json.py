@@ -5,8 +5,10 @@ request without enforcing it. Keep valid JSON byte-for-byte unchanged and use
 the repair parser only for complete object-shaped replies. Repaired string
 values are accepted only when they remain verbatim in the raw response, so
 syntax recovery cannot silently rewrite an answer, query, or action argument.
-A backslash that starts no JSON escape (LaTeX ``\\mathrm``, ``50\\%``) is read
-as the literal characters written, which keeps them verbatim.
+Two deviations with a single reading are not repairs and are absorbed for
+every workload: a backslash that starts no JSON escape (LaTeX ``\\mathrm``,
+``50\\%``) is read as the literal characters written, and stray closing
+punctuation after a complete object is dropped.
 """
 from __future__ import annotations
 
@@ -25,8 +27,12 @@ class ModelJsonObject:
     repaired: bool = False
     #: A complete leading object was delivered and stray closing punctuation
     #: after it was dropped (see ``_leading_object``); ``content`` is then
-    #: the object's own text, byte-for-byte.
+    #: the object's own text, byte-for-byte apart from ``stray_backslashes``.
     trailing_data: bool = False
+    #: A backslash that starts no JSON escape was read literally (see
+    #: ``_escape_stray_backslashes``); ``content`` is the reply with each such
+    #: backslash doubled, so it decodes to exactly the characters written.
+    stray_backslashes: bool = False
 
 
 class ModelJsonRepairError(ValueError):
@@ -699,11 +705,23 @@ def parse_model_json_object(
     try:
         _strict_object(content)
     except ModelJsonRepairError as strict_error:
-        # Not a repair: the object is delivered exactly as the model wrote
-        # it, so this applies to every workload regardless of repair mode.
-        leading = _leading_object(content)
+        # Not repairs: what the model wrote is delivered with its one reading
+        # (stray backslashes literal, stray closers after the object dropped),
+        # so this applies to every workload regardless of repair mode.
+        unescaped = _escape_stray_backslashes(content)
+        stray = unescaped != content
+        if stray:
+            try:
+                _strict_object(unescaped)
+            except ModelJsonRepairError:
+                pass
+            else:
+                return ModelJsonObject(content=unescaped, stray_backslashes=True)
+        leading = _leading_object(unescaped)
         if leading is not None:
-            return ModelJsonObject(content=leading, trailing_data=True)
+            return ModelJsonObject(
+                content=leading, trailing_data=True, stray_backslashes=stray,
+            )
         if not allow_repair or strict_error.reason == "non_object":
             raise
     else:
@@ -716,16 +734,14 @@ def parse_model_json_object(
         raise ModelJsonRepairError("incomplete_object")
     _validate_complete_structure(stripped)
     # Stray backslashes get their one reading here rather than whatever the
-    # repair library does with them; when that was the only fault, the text
-    # is strict JSON now and the library is not needed at all.
-    unescaped = _escape_stray_backslashes(stripped)
+    # repair library does with them (a reply whose only fault they were never
+    # reaches this point; see above).
     try:
-        repaired = json.loads(unescaped)
-    except (ValueError, RecursionError):
-        try:
-            repaired = json_repair.loads(unescaped, skip_json_loads=True)
-        except Exception as exc:  # json-repair exposes several ValueError variants
-            raise ModelJsonRepairError("repair_failed") from exc
+        repaired = json_repair.loads(
+            _escape_stray_backslashes(stripped), skip_json_loads=True,
+        )
+    except Exception as exc:  # json-repair exposes several ValueError variants
+        raise ModelJsonRepairError("repair_failed") from exc
     if not isinstance(repaired, dict):
         raise ModelJsonRepairError("non_object")
     _validate_repaired_shape(stripped, repaired, schema_hint)

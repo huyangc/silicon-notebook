@@ -416,6 +416,7 @@ def test_nested_planning_string_must_remain_verbatim(monkeypatch):
 BS = "\\"
 
 
+@pytest.mark.parametrize("allow_repair", [True, False])
 @pytest.mark.parametrize(
     "raw",
     [
@@ -428,34 +429,65 @@ BS = "\\"
         + '% of it","grounded":true}',
     ],
 )
-def test_latex_backslashes_decode_to_the_characters_written(raw):
-    result = parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=True)
+def test_latex_backslashes_decode_to_the_characters_written(raw, allow_repair):
+    # Not a repair: every workload reads them the one way they can be read.
+    result = parse_model_json_object(
+        raw, ANSWER_SCHEMA, allow_repair=allow_repair,
+    )
 
     answer = json.loads(result.content)["answer"]
-    assert result.repaired
+    assert result.stray_backslashes
+    assert not result.repaired
+    assert result.content == raw.replace(BS + "m", BS + BS + "m").replace(
+        BS + "%", BS + BS + "%"
+    )
     assert BS + "mathrm{V}" in answer
     assert "50" + BS + "% of it" in answer
     assert answer.count(BS) == 2
 
 
-def test_valid_escapes_next_to_latex_keep_their_json_meaning():
+@pytest.mark.parametrize("allow_repair", [True, False])
+def test_valid_escapes_next_to_latex_keep_their_json_meaning(allow_repair):
     raw = (
         '{"answer":"a' + BS + 'nb ' + BS + '"q' + BS + '" c' + BS + BS
-        + 'd caf' + BS + 'u00e9 ' + BS + 'underline{x} 5' + BS + '%",'
-        '"grounded":true}'
+        + 'd caf' + BS + 'u00e9 ' + BS + 'underline{x} ' + BS + 'u12 5' + BS
+        + '%","grounded":true}'
     )
 
-    result = parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=True)
+    result = parse_model_json_object(
+        raw, ANSWER_SCHEMA, allow_repair=allow_repair,
+    )
 
     assert json.loads(result.content)["answer"] == (
-        'a\nb "q" c' + BS + "d caf" + chr(0xE9) + " " + BS + "underline{x} 5"
-        + BS + "%"
+        'a\nb "q" c' + BS + "d caf" + chr(0xE9) + " " + BS + "underline{x} "
+        + BS + "u12 5" + BS + "%"
     )
+
+
+def test_strict_json_is_not_flagged_as_stray_backslashes():
+    raw = '{"answer":"a' + BS + BS + 'b","grounded":true}'
+
+    result = parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=False)
+
+    assert result.content == raw
+    assert not result.stray_backslashes
+
+
+def test_stray_backslashes_and_stray_closers_are_both_absorbed():
+    obj = '{"answer":"50' + BS + '%","grounded":true}'
+
+    result = parse_model_json_object(
+        obj + '"}', ANSWER_SCHEMA, allow_repair=False,
+    )
+
+    assert result.trailing_data and result.stray_backslashes
+    assert result.content == obj.replace(BS, BS + BS)
+    assert json.loads(result.content)["answer"] == "50" + BS + "%"
 
 
 def test_latex_reading_does_not_depend_on_the_repair_library(monkeypatch):
     # Stray backslashes get their reading before the library runs; when they
-    # were the only fault, the library's own escape handling never matters.
+    # were the only fault, the library is never called.
     def fail(*_args, **_kwargs):
         raise AssertionError("json_repair must not be needed")
 
@@ -473,6 +505,27 @@ def test_latex_reading_does_not_depend_on_the_repair_library(monkeypatch):
     )
 
 
+def test_latex_next_to_a_syntax_fault_is_read_literally_by_the_repair():
+    raw = '{answer: "50' + BS + '% ' + BS + 'n' + BS + 'mathrm{V}", grounded: true}'
+
+    result = parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=True)
+
+    assert result.repaired
+    assert json.loads(result.content)["answer"] == (
+        "50" + BS + "% \n" + BS + "mathrm{V}"
+    )
+
+
+def test_latex_next_to_a_syntax_fault_stays_strict_when_repair_is_off():
+    # The unquoted key is a repair; the backslash reading does not excuse it.
+    with pytest.raises(ModelJsonRepairError, match="invalid_json"):
+        parse_model_json_object(
+            '{answer: "50' + BS + '%", grounded: true}',
+            ANSWER_SCHEMA,
+            allow_repair=False,
+        )
+
+
 def test_latex_reading_does_not_excuse_a_changed_string(monkeypatch):
     # Dropping the backslash is a change to what the model wrote.
     monkeypatch.setattr(
@@ -485,15 +538,6 @@ def test_latex_reading_does_not_excuse_a_changed_string(monkeypatch):
             '{answer: "50' + BS + '% of it", grounded: true}',
             ANSWER_SCHEMA,
             allow_repair=True,
-        )
-
-
-def test_latex_backslashes_stay_strict_when_repair_is_off():
-    with pytest.raises(ModelJsonRepairError, match="invalid_json"):
-        parse_model_json_object(
-            '{"answer":"50' + BS + '%","grounded":true}',
-            ANSWER_SCHEMA,
-            allow_repair=False,
         )
 
 
