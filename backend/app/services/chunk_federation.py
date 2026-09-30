@@ -1910,6 +1910,19 @@ def attest_selected_passages(candidates, hits) -> None:
     fingerprinted and grouped as siblings -- under the run's per-library read
     budget. The run's seen-set applies, so a passage the fan-out already
     attested costs nothing. A no-op outside a global run.
+
+    What it registers is the overlay leg's CONTRIBUTION TO THE POOL, not the
+    final selection: the mix branch's rerank and token-budget cut happen after
+    this, in ``AskService.ask_chunk`` behind the retrieval port, and moving the
+    registration there would add a second publisher at the orchestration layer
+    (and a port method) for a cost-only gain. Bound: the passages holding the
+    evidence elements of the objects the overlay admitted into its KG block
+    (at most ``chunk_kg_node_seed_top_n`` node seeds plus
+    ``chunk_kg_relation_seed_top_n`` relation seeds, expanded to depth
+    ``chunk_kg_max_depth``), minus those the run already settled -- every one
+    of them a rerank candidate the answer can cite. One
+    ``passage_evidence_snapshot`` call: one statement per 900 passages, one
+    statement in practice.
     """
     plan = current_federated_run_plan() if federated_ask_active() else None
     if plan is None:
@@ -1934,7 +1947,10 @@ def _report_evidence(candidates, plan, collected: dict, deadline: float) -> None
     not one per library, and not over every candidate that was ever considered.
     The consumer (the job's citation re-check) only ever asks about evidence
     that reached the answer, so widening this to the candidate pool would
-    multiply the read by the recall budget for rows nobody can cite.
+    multiply the read by the recall budget for rows nobody can cite. (For the
+    mix branch's overlay registration, ``attest_selected_passages``, the
+    "selection" is the overlay leg's contribution to the pool, before the
+    rerank and budget cut -- bounded as stated there.)
 
     BY PASSAGE, and that is a correctness property rather than a batching
     convenience.  Element ids are reused DETERMINISTICALLY across a re-ingest
