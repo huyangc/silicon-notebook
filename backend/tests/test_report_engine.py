@@ -2384,6 +2384,20 @@ def test_draft_section_accepts_a_complete_object_with_a_stray_trailer(
     assert notes == []
 
 
+def test_draft_section_reads_latex_backslashes_as_written(repo, monkeypatch):
+    # ``50\%`` / ``\mathrm{V}`` in a section body are invalid JSON escapes
+    # whose one reading is the characters written; the section drafts them.
+    bs = "\\"
+    body = "增益 50" + bs + "% 与 " + bs + "mathrm{V}"
+    reply = '{"markdown": "' + body + '", "grounded": true}'
+    out, attempts, notes, calls = _draft_with(repo, monkeypatch, [reply])
+
+    assert calls == 1
+    assert out["markdown"] == body
+    assert attempts == [("success", "")]
+    assert notes == []
+
+
 def test_draft_section_unparseable_reply_fails_as_malformed_not_empty(
     repo, monkeypatch
 ):

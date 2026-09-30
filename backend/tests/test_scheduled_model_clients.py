@@ -644,6 +644,37 @@ def test_every_workload_drops_stray_closers_after_a_complete_object():
         provider.close()
 
 
+def test_every_workload_reads_stray_backslashes_literally():
+    # query_rewrite is not a repair workload, and reading ``50\%`` as the
+    # characters written is not a repair: the reply is delivered instead of
+    # failing ``invalid_json`` (report sections and every other strict
+    # workload take the same path).
+    bs = "\\"
+    events = _EventLog()
+    provider = _provider(
+        chat=_Chat('{"query":"增益 50' + bs + '% ' + bs + 'mathrm{dB}"}'),
+        events=events,
+    )
+    try:
+        raw = provider.chat("query_rewrite").chat_json(
+            [{"role": "user", "content": "q"}], '{"query":""}'
+        )
+
+        assert json.loads(raw) == {
+            "query": "增益 50" + bs + "% " + bs + "mathrm{dB}"
+        }
+        [escaped] = [
+            event for event in events.events
+            if event.get("kind") == "model_json_repair"
+        ]
+        assert escaped["status"] == "escaped"
+        assert escaped["reason"] == "stray_backslash"
+        assert escaped["workload_id"] == "query_rewrite"
+        assert "增益" not in json.dumps(escaped, ensure_ascii=False)
+    finally:
+        provider.close()
+
+
 def test_unapproved_workload_remains_strict_when_repair_is_on():
     provider = _provider(chat=_Chat('{query: "q"}'))
     try:
