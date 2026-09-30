@@ -14,6 +14,7 @@ and frontend/app/dev/logs/activity/types.ts for the frozen field contract.
 """
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import json
 import threading
 
@@ -246,6 +247,17 @@ def test_activity_allowed_for_admin_any_user(client):
     assert resp.status_code == 200
 
 
+def _recent_occurrence() -> str:
+    """An issue timestamp that is always inside the archive's retention window.
+
+    The admin listing sweeps expired issues against the wall clock (the route
+    has no injectable clock), so a hard-coded date is a time bomb: these tests
+    used ``2026-08-31T01:00``/``02:00`` and, with the default 30-day retention,
+    turned red from 2026-09-30T01:00Z. One hour ago never expires.
+    """
+    return (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+
 def test_analysis_issue_log_is_admin_only_read_only_and_content_minimal(
     client, tmp_path
 ):
@@ -277,7 +289,7 @@ def test_analysis_issue_log_is_admin_only_read_only_and_content_minimal(
         category="spreadsheet_analysis",
         code="SPREADSHEET_INVALID_OOXML",
         summary="无法读取工作簿。",
-        occurred_at="2026-08-31T01:00:00+00:00",
+        occurred_at=_recent_occurrence(),
         source_path=str(source_file),
     )
 
@@ -329,7 +341,7 @@ def test_model_output_artifact_is_admin_only_and_loaded_separately(client, tmp_p
             schema_hint='{"markdown":""}',
             response='{"markdown":[]}',
             reason="invalid_type",
-            occurred_at="2026-08-31T02:00:00+00:00",
+            occurred_at=_recent_occurrence(),
         )
     )
 

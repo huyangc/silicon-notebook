@@ -857,6 +857,16 @@ def test_planner_cancellation_is_not_downgraded_to_local_profile(tmp_path):
         )
 
 
+# The three archive tests below inject ``now=lambda: "2026-08-31T01:00:00+00:00"``
+# into the service, so the issue they file is dated then and expires
+# ``retention_days`` (30) later. ``list_issues`` sweeps expired rows against its
+# own clock, which defaults to the wall clock: listing without ``now`` turned
+# these tests red from 2026-09-30T01:00Z onwards (a date bomb, not a
+# regression). Listing on the same injected clock keeps them independent of the
+# day they run.
+_ANALYSIS_NOW = datetime(2026, 8, 31, 1, 0, tzinfo=timezone.utc)
+
+
 def test_challenging_workbook_is_archived_instead_of_silently_misanalysed(tmp_path):
     path = tmp_path / "sales.xlsx"
     workbook = Workbook()
@@ -881,7 +891,7 @@ def test_challenging_workbook_is_archived_instead_of_silently_misanalysed(tmp_pa
         _source(path), notebook_name="Notebook", owner_id="user-1",
         row_element_ids={},
     ) is False
-    [issue] = artifacts.list_issues(status="open")
+    [issue] = artifacts.list_issues(status="open", now=_ANALYSIS_NOW)
     assert issue["code"] == "SPREADSHEET_MULTIPLE_REGIONS"
     assert issue["artifact_available"] is True
     assert artifacts.load_spreadsheet_manifest("nb-1", "src-1") is None
@@ -914,7 +924,7 @@ def test_oversized_cell_is_rejected_without_truncation(tmp_path):
         _source(path), notebook_name="Notebook", owner_id="user-1",
         row_element_ids={},
     ) is False
-    [issue] = artifacts.list_issues(status="open")
+    [issue] = artifacts.list_issues(status="open", now=_ANALYSIS_NOW)
     assert issue["code"] == "SPREADSHEET_CELL_TOO_LONG"
 
 
@@ -939,7 +949,7 @@ def test_missing_header_is_rejected_instead_of_synthesized(tmp_path):
         _source(path), notebook_name="Notebook", owner_id="user-1",
         row_element_ids={},
     ) is False
-    [issue] = artifacts.list_issues(status="open")
+    [issue] = artifacts.list_issues(status="open", now=_ANALYSIS_NOW)
     assert issue["code"] == "SPREADSHEET_HEADER_MISSING"
 
 
