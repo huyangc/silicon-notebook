@@ -2053,7 +2053,9 @@ class ChunkStorePort(Protocol):
     @staticmethod
     def hydrate_rows(db: object, chunk_ids: Sequence[str]) -> list[Any]: ...
     @staticmethod
-    def graph_hydrate_rows(db: object, chunk_ids: Sequence[str]) -> list[Any]: ...
+    # ``allowed_source_ids`` (PR-E2, E2-3 implements): ``None`` = unrestricted,
+    # byte-identical; a collection = only chunks of those sources (empty = []).
+    def graph_hydrate_rows(db: object, chunk_ids: Sequence[str], *, allowed_source_ids: Sequence[str] | None = None) -> list[Any]: ...
     @staticmethod
     def retrieval_contribution_rows(
         db: object,
@@ -2416,8 +2418,11 @@ class KnowledgeStorePort(Protocol):
     ) -> None: ...
     def finish_extraction(self, run_id: str, status: str, message: str) -> None: ...
     def add_relations_current(self, notebook_id: str, source_id: str, relations: list[dict]) -> int: ...
-    def _element_texts(self, db: object, element_ids: object, *, with_ordinal: bool = False) -> object: ...
-    def _enrich_evidence(self, db: object, evidence: object) -> object: ...
+    # ``owner_notebook_id`` (PR-E2 E2-4, ledger B-11): only elements of sources
+    # owned by that (live) notebook are read; entries pointing elsewhere keep
+    # their stored ``quoted_span`` / ``source_title``.  ``None`` = unchanged.
+    def _element_texts(self, db: object, element_ids: object, *, with_ordinal: bool = False, owner_notebook_id: str | None = None) -> object: ...
+    def _enrich_evidence(self, db: object, evidence: object, *, owner_notebook_id: str | None = None) -> object: ...
     # ``allowed_source_ids``: None → values unchanged (plus the additive
     # ``definition_basis`` / ``definition_source_id`` / ``definition_element_id``);
     # a sequence (empty = deny all) → no text from a source outside it reaches
@@ -2519,8 +2524,14 @@ class EvidenceKnowledgeContextPort(Protocol):
         self, notebook_id: str, object_ids: Sequence[str]
     ) -> dict[str, str]: ...
     def node_context(self, notebook_id: str, object_id: str, *, allowed_source_ids: Sequence[str] | None = None, name_only: bool = False) -> dict[str, Any]: ...
+    # ``source_ceilings`` (PR-E2 E2-4, ledger B-6): per participant notebook,
+    # the source ceiling that BINDS it on this run.  A notebook listed there
+    # reads only relation rows of in-ceiling sources and each returned row
+    # carries ``source_count`` (distinct in-ceiling sources); an empty ceiling
+    # reads nothing.  Notebooks not listed, and ``None``, read as before.
     def in_network_relations(
-        self, participant_ids: Sequence[str], object_ids: Sequence[str]
+        self, participant_ids: Sequence[str], object_ids: Sequence[str], *,
+        source_ceilings: Mapping[str, Iterable[str]] | None = None,
     ) -> list[dict[str, Any]]: ...
     # 保留:唯一生产调用方已改用下面的批量 relation_support_counts(有界化
     # B1 热点整改批 1)。逐条调用每次都要整表冷缓存 edge_support_map(8.35M
@@ -2543,7 +2554,10 @@ class RetrievalKnowledgeStorePort(KnowledgeStorePort, Protocol):
     lexical_knn_capable: bool
     def fts_search(self, db: object, notebook_id: str, q: str, k: int = 30, *, allowed_source_ids: Sequence[str] | None = None, corpus_langs: Sequence[str] | None = None, allow_knn: bool = False, authoritative_source_filter: bool = False, knn_max_term_chars: int | None = None, routing_stats: dict[str, int | float] | None = None) -> list[dict[str, Any]]: ...
     def chunk_fts_search(self, db: object, notebook_id: str, q: str, k: int = 30, *, allowed_source_ids: Sequence[str] | None = None, corpus_langs: Sequence[str] | None = None) -> list[dict[str, Any]]: ...
-    def chunk_exact_search(self, db: object, notebook_id: str, needle: str, k: int = 50) -> list[dict[str, Any]]: ...
+    # ``allowed_source_ids`` (PR-E2 E2-4, ledger B-9): ``None`` = unrestricted,
+    # byte-identical; empty = []; otherwise only chunks of those sources,
+    # filtered below the probe's LIMIT.
+    def chunk_exact_search(self, db: object, notebook_id: str, needle: str, k: int = 50, *, allowed_source_ids: Sequence[str] | None = None) -> list[dict[str, Any]]: ...
     def retrieval_objects(self, db: object, notebook_id: str,
                           object_type: str, statuses: Iterable[str] | None,
                           id_filter: Iterable[str] | None, *,
@@ -2581,9 +2595,15 @@ class RetrievalKnowledgeStorePort(KnowledgeStorePort, Protocol):
         ...
     def follow_start_row(self, db: object, object_id: str, active_notebook_id: str, statuses: Sequence[str], participant_ids: Sequence[str] | None = None) -> Any: ...
     def follow_endpoint_rows(self, db: object, notebook_id: str, object_id: str, endpoint: str, limit: int) -> list[Any]: ...
-    def follow_relation_evidence_rows(self, db: object, relation_ids: Sequence[str]) -> list[Any]: ...
+    # ``notebook_id`` (PR-E2 E2-4, ledger N-4): only relation rows of that
+    # notebook.  The source title is always read from the relation's own
+    # notebook only.
+    def follow_relation_evidence_rows(self, db: object, relation_ids: Sequence[str], *, notebook_id: str | None = None) -> list[Any]: ...
     def follow_object_rows(self, db: object, notebook_id: str, object_ids: Sequence[str], statuses: Sequence[str]) -> list[Any]: ...
-    def in_network_relation_rows(self, db: object, notebook_id: str, object_ids: Sequence[str]) -> list[Any]: ...
+    # ``allowed_source_ids`` (PR-E2 E2-4, ledger B-6): ``None`` = unchanged;
+    # empty = []; otherwise GROUP BY the edge over in-ceiling rows only, with
+    # ``source_count`` = distinct in-ceiling sources.
+    def in_network_relation_rows(self, db: object, notebook_id: str, object_ids: Sequence[str], *, allowed_source_ids: Sequence[str] | None = None) -> list[Any]: ...
 
 
 @runtime_checkable
@@ -2652,7 +2672,9 @@ class UnifiedKgStorePort(Protocol):
     @staticmethod
     def mention_seed_rows(db: object, notebook_id: str) -> object: ...
     @staticmethod
-    def relation_endpoint_name_rows(db: object, notebook_id: str, relation_ids: list[str]) -> list[Any]: ...
+    # ``allowed_source_ids`` (PR-E2, E2-1 implements): ``None`` = unchanged; a
+    # collection = only endpoints supported by those sources (empty = []).
+    def relation_endpoint_name_rows(db: object, notebook_id: str, relation_ids: list[str], *, allowed_source_ids: Sequence[str] | None = None) -> list[Any]: ...
     @staticmethod
     def relation_support_rows(
         db: object, notebook_id: str, triples: list[tuple[str, str, str]]
@@ -2782,12 +2804,16 @@ class UnifiedKgStorePort(Protocol):
         after: "tuple | None" = None,
     ) -> "tuple[int, tuple | None]": ...
     @staticmethod
+    # ``allowed_source_ids`` (PR-E2, E2-1 implements): ``None`` = unchanged; a
+    # collection = only relations supported by those sources (empty = []).
     def weak_support_relation_rows(
         db: object,
         notebook_id: str,
         canonical_ids: list[str],
         source_max: int,
         limit: int,
+        *,
+        allowed_source_ids: Sequence[str] | None = None,
     ) -> list[Any]: ...
     def mention_alias_candidate_batches(
         self, claims: Sequence[tuple[str, str]], aliases: Sequence[str]
@@ -3048,8 +3074,14 @@ class EvidenceContextPort(Protocol):
     def citation_titles(
         self, source_ids: Iterable[str]
     ) -> dict[str, str]: ...
+    # ``owner_notebook_ids`` (PR-E2 E2-4, ledger B-11): source id -> the
+    # notebook whose entry cites it.  A source owned by any other notebook is
+    # left out, so the caller keeps its stored title instead of the other
+    # library's current name.  ``None`` = unchanged.
     def citation_source_info(
-        self, source_ids: Iterable[str]
+        self, source_ids: Iterable[str], *,
+        metadata: Mapping[str, Mapping[str, Any]] | None = None,
+        owner_notebook_ids: Mapping[str, str] | None = None,
     ) -> dict[str, dict[str, str]]: ...
     def collection_item_citations(
         self,

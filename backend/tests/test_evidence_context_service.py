@@ -54,7 +54,7 @@ class _Knowledge:
             "steps": None,
         }
 
-    def in_network_relations(self, participant_ids, object_ids):
+    def in_network_relations(self, participant_ids, object_ids, *, source_ceilings=None):
         return []
 
     def relation_support_count(self, notebook_id, source_id, edge_type, target_id):
@@ -674,7 +674,7 @@ def test_evidence_context_relation_support_groups_by_relation_source_notebook():
     的归属)换成外层调用方的 ``notebook_id``(active),这条测试必须报红
     ——挂载库关系在 active 库查不到,×N源 后缀会消失。"""
     class _MultiNotebookKnowledge(_Knowledge):
-        def in_network_relations(self, participant_ids, object_ids):
+        def in_network_relations(self, participant_ids, object_ids, *, source_ceilings=None):
             return [{
                 "source_object_id": "o1", "edge_type": "supports",
                 "target_object_id": "o2", "notebook_id": "base",

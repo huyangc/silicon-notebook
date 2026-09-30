@@ -737,8 +737,22 @@ def knowledge_candidate_documents(connection, ids):
     ).fetchall()
 
 
-def chunk_exact_candidate_rows(connection, notebook_id: str, needle: str, limit: int):
+def chunk_exact_candidate_rows(
+    connection, notebook_id: str, needle: str, limit: int, *,
+    allowed_source_ids: Sequence[str] | None = None,
+):
     """EXACT substring chunk candidates for the identifier fast path.
+
+    `allowed_source_ids` (PR-E2 E2-4, ledger B-9): `None` sends the statement
+    and parameters byte-identical to the unrestricted probe.  A collection
+    (blank ids dropped, order and duplicates irrelevant) restricts the
+    candidates to chunks of those sources BELOW the `LIMIT`, so a ceiling's
+    out-of-scope hits can no longer fill the probe window; empty returns `[]`
+    without a query.  The list binds as one parameter through `id_binding`
+    (`member_of`: the trigram text match drives, the list filters its hits --
+    the same form `chunk_candidate_rows_for_terms` measured) and executes as a
+    custom plan (`execute_bound`).  Plans: `tests/postgres/
+    test_store_evidence_ceiling_explain_pins.py`.
 
     Only `ILIKE '%needle%'` — no `OPERATOR(public.%)` similarity branch, since
     "exact" here means exact; the trigram GIN index (`idx_chunks_text_trgm`)
@@ -756,12 +770,26 @@ def chunk_exact_candidate_rows(connection, notebook_id: str, needle: str, limit:
     if limit <= 0 or not (needle or "").strip():
         return []
     text_expression = expression("chunk_text")
-    return connection.execute(
+    ceiling = None
+    scope_sql = ""
+    scope_params: list[object] = []
+    if allowed_source_ids is not None:
+        source_ids = [str(value) for value in dict.fromkeys(allowed_source_ids) if value]
+        if not source_ids:
+            return []
+        ceiling = bind_ids(source_ids)
+        scope_sql = f" AND {member_of('source_id', ceiling)}"
+        scope_params.append(ceiling.param)
+    return execute_bound(
+        connection,
         "SELECT id AS candidate_id,source_id,section_path,"
         f"public.similarity({text_expression},%s) AS candidate_similarity "
-        f"FROM chunks WHERE notebook_id=%s AND {text_expression} ILIKE %s "
+        f"FROM chunks WHERE notebook_id=%s AND {text_expression} ILIKE %s"
+        f"{scope_sql} "
         "ORDER BY candidate_similarity DESC,id COLLATE \"C\" LIMIT %s",
-        (needle, notebook_id, f"%{escape_like_pattern(needle)}%", int(limit)),
+        (needle, notebook_id, f"%{escape_like_pattern(needle)}%",
+         *scope_params, int(limit)),
+        ceiling,
     ).fetchall()
 
 

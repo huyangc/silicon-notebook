@@ -194,7 +194,7 @@ class Knowledge:
             "definition": None, "steps": None,
         }
 
-    def in_network_relations(self, participant_ids, object_ids):
+    def in_network_relations(self, participant_ids, object_ids, *, source_ceilings=None):
         return []
 
     def relation_support_counts(self, notebook_id, triples):
