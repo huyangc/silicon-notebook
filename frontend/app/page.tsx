@@ -1439,7 +1439,7 @@ export default function Home() {
       fetchCheckup(nb).then((c) => {
         if (cancelled) return;
         setCheckup(c);
-        // 只读项(H9/H10)不会因修复而消失:只看还有没有用户能修的项。
+        // 只读项(fix="none")不会因修复而消失:只看还有没有用户能修的项。
         if (!checkupHasRepairableIssue(c)) setCheckupRepairPollUntil(0);
       }).catch(() => {});
     }, 8000);

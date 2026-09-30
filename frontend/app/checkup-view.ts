@@ -165,7 +165,7 @@ export function checkupCount(checkup: CheckupResponse | null, code: string): num
 
 /**
  * 是否还有**用户能修**的体检项。只读项(fix="none")不算:它们不会因为用户的修复而消失
- * (H10 甚至长期存在),拿 `healthy` 判「修完了」会让修复轮询一直跑到窗口结束。
+ * (有的会长期存在),拿 `healthy` 判「修完了」会让修复轮询一直跑到窗口结束。
  */
 export function checkupHasRepairableIssue(checkup: CheckupResponse | null): boolean {
   if (!checkup) return false;
@@ -175,8 +175,8 @@ export function checkupHasRepairableIssue(checkup: CheckupResponse | null): bool
 /**
  * 铃铛聚合提醒的签名:notebook + 当前命中的**可修复**体检代号集合。内容变化(新问题出现/
  * 旧问题修好)时签名变,铃铛据此重新提示;健康、或只剩只读项时返回 null(不提示)。
- * 只读项(fix="none",如 H9 隔离重建待完成、H10 已批准的记忆派生晋升)由系统或部署
- * 负责人处理,用户没有可点的修复,铃铛说「发现可修复的问题」就是假话。
+ * 只读项(fix="none")由系统或部署负责人处理,用户没有可点的修复,铃铛说「发现可修复的
+ * 问题」就是假话。
  */
 export function checkupAlertSignature(checkup: CheckupResponse | null): string | null {
   if (!checkup || !checkupHasRepairableIssue(checkup)) return null;

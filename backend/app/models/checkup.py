@@ -21,7 +21,8 @@ class CheckupItem(BaseModel):
 
 
 class CheckupResponse(BaseModel):
-    """一个 notebook 的体检结果聚合。``healthy`` = 所有 check.count 均为 0。"""
+    """一个 notebook 的体检结果聚合。``healthy`` = 所有可修复项(``fix`` 不是 ``none``)的 count 均为 0;
+    只读项照常列出,不影响 ``healthy``。"""
 
     notebook_id: str
     checked_at: str
