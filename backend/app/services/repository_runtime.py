@@ -2426,8 +2426,15 @@ class RepositoryRuntime:
                 )
             # M4: every retrieval/evidence port this engine reads is watched, so
             # the report can record which of the author's Memory reached its
-            # prompts (``app.services.report_memory_use``).
-            source_log = RetrievalSourceLog()
+            # prompts (``app.services.report_memory_use``).  Each newly handed
+            # source is resolved to the author's Memory at once and retained, so
+            # a Memory deprecated before the run completes is still recorded.
+            memory_store = self.memory_store
+            source_log = RetrievalSourceLog(
+                resolve_memory=lambda source_ids: memory_store.memory_sources_for_source_ids(
+                    source_ids, user_id
+                )
+            )
             dependencies = ReportEngineDependencies(
                 reports=self.report_store,
                 retrieval=source_log.watch(retrieval_port),
