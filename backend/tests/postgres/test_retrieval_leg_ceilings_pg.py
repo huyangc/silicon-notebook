@@ -1,22 +1,23 @@
 """PR-E2·E2-1 on real PostgreSQL: the weak-support store statements
 (``weak_support_relation_rows`` / ``relation_endpoint_name_rows`` with
-``allowed_source_ids``) -- same answers as the SQLite twin
+``allowed_source_ids`` or ``viewer_id``) and the overlay's
+``object_support_source_rows`` -- same answers as the SQLite twin
 (``tests/test_retrieval_leg_ceilings.py``) and EXPLAIN pins.
 
 Pinned plans, on a corpus where OTHER notebooks hold Memory sources and
 Memory-derived KG rows (so a plan that loses the notebook predicate reads
-them), for the custom plan psycopg gets (``execute_ids``, unprepared) and, as
-the control, the generic plan the same statement would get from the plan
-cache:
+them), asserted positively:
 
-* the canonical probe seeks ``canonical_relations``' primary key by
-  (notebook_id, canonical_src) -- never a Seq Scan;
-* target support reaches ``concept_clusters`` through a (notebook_id,
-  canonical_id) index and ``knowledge_object_sources`` through the object id
-  (``idx_kos_object`` or the (object_id, source_id) key) -- never by ceiling id
-  (``idx_kos_source``), never a Seq Scan;
-* the ceiling is ONE folded constant array in the custom plan (hashed, real
-  length), and an opaque ``string_to_array($n)`` only in the generic control;
+* the canonical probe seeks ``pk_canonical_relations`` by (notebook_id,
+  canonical_src) and the target's cluster members through a (notebook_id,
+  canonical_id) index -- ``kc``'s Index Cond names both columns;
+* the target's objects are probed by primary key (``ko.id = ANY(...)``) and,
+  in the list form, the reverse index by object id
+  (``Index Cond: (object_id = ko.id)``) -- never ``idx_kos_source`` (a seek
+  per ceiling id) nor ``idx_kos_notebook`` (a walk of the notebook);
+* the list form carries the ceiling as ONE folded constant array in the
+  custom plan, and an opaque ``string_to_array($n)`` only in the generic
+  control; the viewer form binds no list at all;
 * the name read is driven by the sample relations' primary keys.
 """
 from __future__ import annotations
@@ -40,11 +41,18 @@ NB = "nb-e21"
 NOW = "2026-09-01T00:00:00+00:00"
 NOISE = 20
 CEILING = ["src-vis"] + [f"src-pad-{i:05d}" for i in range(4999)]
+USER_A, USER_B = "u-e21-a", "u-e21-b"
 
 
 def _seed(database) -> None:
     with database.write() as db:
         db.execute("SET LOCAL statement_timeout = '0'")
+        for user in (USER_A, USER_B):
+            db.execute(
+                "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
+                "username,password_hash,password_salt,password_iterations) "
+                "VALUES (%s,%s,%s,'user','active',%s,%s,%s,'','',0)",
+                (user, f"{user}@example.test", user, NOW, NOW, user))
         for nb in [NB] + [f"nb-noise-{i}" for i in range(NOISE)]:
             db.execute(
                 "INSERT INTO notebooks(id,name,created_at,updated_at) VALUES (%s,%s,%s,%s)",
@@ -52,12 +60,18 @@ def _seed(database) -> None:
             db.execute(
                 "INSERT INTO unified_kg_state(notebook_id,source_index_backfilled,"
                 "updated_at) VALUES (%s,1,%s)", (nb, NOW))
+        db.execute(
+            "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
+            "content_md,created_at,updated_at) VALUES "
+            "('mem-b',%s,%s,'ask_answer','confirmed','t','x',%s,%s)", (NB, USER_B, NOW, NOW))
+        for nb in [NB] + [f"nb-noise-{i}" for i in range(NOISE)]:
             db.execute(
-                "INSERT INTO sources(id,notebook_id,title,source_type,created_at,"
-                "updated_at) VALUES (%s,%s,'v','markdown',%s,%s),"
-                "(%s,%s,'m','memory',%s,%s)",
+                "INSERT INTO sources(id,notebook_id,title,source_type,memory_id,created_at,"
+                "updated_at) VALUES (%s,%s,'v','markdown',NULL,%s,%s),"
+                "(%s,%s,'m','memory',%s,%s,%s)",
                 (f"{nb}-vis" if nb != NB else "src-vis", nb, NOW, NOW,
-                 f"{nb}-mem" if nb != NB else "src-mb", nb, NOW, NOW))
+                 f"{nb}-mem" if nb != NB else "src-mb", nb,
+                 "mem-b" if nb == NB else None, NOW, NOW))
         # The notebook under test: the same hand-built canonical layer as the
         # SQLite twin (``_raw_kg``).
         objects = [("ko-s", "src-vis", ["src-vis"]), ("ko-t1", "src-vis", ["src-vis"]),
@@ -130,7 +144,8 @@ def _seed(database) -> None:
     with psycopg.connect(database.settings.database_url, autocommit=True) as raw:
         raw.execute(
             "VACUUM (ANALYZE) knowledge_objects, knowledge_object_sources, "
-            "concept_clusters, knowledge_relations, canonical_relations, sources")
+            "concept_clusters, knowledge_relations, canonical_relations, sources, "
+            "memory_items")
 
 
 @pytest.fixture
@@ -147,46 +162,92 @@ def _set_backfilled(database, flag: int) -> None:
             (flag, NB))
 
 
+def _targets(db, **kwargs):
+    return sorted(r["canonical_tgt"] for r in UnifiedKgStore.weak_support_relation_rows(
+        db, NB, ["ko-s"], 2, 24, **kwargs))
+
+
 @pytest.mark.parametrize("backfilled", [1, 0])
 def test_pg_weak_support_matches_the_sqlite_twin(seeded, backfilled):
     _set_backfilled(seeded, backfilled)
     with seeded.connect() as db:
-        unbounded = UnifiedKgStore.weak_support_relation_rows(db, NB, ["ko-s"], 2, 24)
-        bound = UnifiedKgStore.weak_support_relation_rows(
-            db, NB, ["ko-s"], 2, 24, allowed_source_ids=["src-vis"])
-        denied = UnifiedKgStore.weak_support_relation_rows(
-            db, NB, ["ko-s"], 2, 24, allowed_source_ids=[])
-        limited = UnifiedKgStore.weak_support_relation_rows(
-            db, NB, ["ko-s"], 2, 1, allowed_source_ids=["src-vis"])
-    assert sorted(r["canonical_tgt"] for r in unbounded) == [
-        "K-good", "K-mem", "ko-t1", "ko-t2", "ko-t5"]
-    assert sorted(r["canonical_tgt"] for r in bound) == ["K-good", "ko-t1", "ko-t5"]
+        unbounded = _targets(db)
+        listed = _targets(db, allowed_source_ids=["src-vis"])
+        as_a = _targets(db, viewer_id=USER_A)
+        as_b = _targets(db, viewer_id=USER_B)
+        as_nobody = _targets(db, viewer_id="")
+        denied = _targets(db, allowed_source_ids=[])
+        row = UnifiedKgStore.weak_support_relation_rows(
+            db, NB, ["ko-s"], 2, 24, viewer_id=USER_A)[0]
+    assert unbounded == ["K-good", "K-mem", "ko-t1", "ko-t2", "ko-t5"]
+    assert listed == as_a == ["K-good", "ko-t1", "ko-t5"]
+    assert as_b == unbounded
+    assert as_nobody == as_a
     assert denied == []
-    # The gate is below the LIMIT: the first in-ceiling row, not an empty page.
-    assert [r["canonical_tgt"] for r in limited] == ["K-good"]
-    assert isinstance(bound[0]["sample_relation_ids"], str)
+    assert isinstance(row["sample_relation_ids"], str)
+    assert set(row.keys()) == {"canonical_src", "edge_type", "canonical_tgt",
+                               "source_count", "sample_relation_ids"}
+
+
+@pytest.mark.parametrize("form", ["list", "viewer"])
+def test_pg_weak_support_gate_sits_before_the_limit(seeded, form):
+    """``K-good`` removed, as in the SQLite twin: the first row in sort order
+    is ``K-mem``, outside the ceiling, so a gate applied after ``LIMIT 1``
+    would return nothing."""
+    with seeded.write() as db:
+        db.execute(
+            "DELETE FROM canonical_relations WHERE notebook_id=%s AND canonical_tgt='K-good'",
+            (NB,))
+    kwargs = {"allowed_source_ids": ["src-vis"]} if form == "list" else {"viewer_id": USER_A}
+    with seeded.connect() as db:
+        rows = UnifiedKgStore.weak_support_relation_rows(db, NB, ["ko-s"], 2, 1, **kwargs)
+    assert [r["canonical_tgt"] for r in rows] == ["ko-t1"]
 
 
 def test_pg_endpoint_names_carry_the_sample_source_and_honour_the_ceiling(seeded):
     with seeded.connect() as db:
-        unbounded = UnifiedKgStore.relation_endpoint_name_rows(db, NB, ["kr-1", "kr-5"])
-        bound = UnifiedKgStore.relation_endpoint_name_rows(
+        plain = UnifiedKgStore.relation_endpoint_name_rows(db, NB, ["kr-1", "kr-5"])
+        sourced = UnifiedKgStore.relation_endpoint_name_rows(
+            db, NB, ["kr-1", "kr-5"], with_source_id=True)
+        listed = UnifiedKgStore.relation_endpoint_name_rows(
             db, NB, ["kr-1", "kr-5"], allowed_source_ids=["src-vis"])
+        as_a = UnifiedKgStore.relation_endpoint_name_rows(
+            db, NB, ["kr-1", "kr-5"], viewer_id=USER_A)
+        as_b = UnifiedKgStore.relation_endpoint_name_rows(
+            db, NB, ["kr-1", "kr-5"], viewer_id=USER_B)
         denied = UnifiedKgStore.relation_endpoint_name_rows(
             db, NB, ["kr-1"], allowed_source_ids=[])
-    assert {(r["rid"], r["source_id"]) for r in unbounded} == {
+    assert set(plain[0].keys()) == {"rid", "src_name", "tgt_name"}
+    assert {(r["rid"], r["source_id"]) for r in sourced} == {
         ("kr-1", "src-vis"), ("kr-5", "src-mb")}
-    assert [r["rid"] for r in bound] == ["kr-1"]
+    assert [r["rid"] for r in listed] == ["kr-1"]
+    assert [r["rid"] for r in as_a] == ["kr-1"]
+    assert sorted(r["rid"] for r in as_b) == ["kr-1", "kr-5"]
     assert denied == []
 
 
-def _recorded(database, call) -> tuple[str, object]:
+@pytest.mark.parametrize("backfilled", [1, 0])
+def test_pg_object_support_sources(seeded, backfilled):
+    _set_backfilled(seeded, backfilled)
+    with seeded.connect() as db:
+        rows = UnifiedKgStore.object_support_source_rows(db, NB, ["ko-t1", "ko-t2", "ko-x"])
+    assert sorted((r["object_id"], r["source_id"]) for r in rows) == [
+        ("ko-t1", "src-vis"), ("ko-t2", "src-mb")]
+
+
+def _recorded(database, call, *, unprepared: bool) -> tuple[str, object]:
+    """The one statement of interest ``call`` sent (unprepared through
+    ``execute_ids`` for a list binding, a plain execute otherwise)."""
     captured: list[tuple[str, object]] = []
     original = psycopg.Connection.execute
 
     def recording(self, query, params=None, **options):
-        if options.get("prepare") is False and isinstance(query, str):
-            captured.append((query, params))
+        text = str(query)
+        if (options.get("prepare") is False) == unprepared and (
+            "canonical_relations" in text or "kr.id AS rid" in text
+            or "AS object_id" in text or "kos.object_id, kos.source_id" in text
+        ):
+            captured.append((text, params))
         return original(self, query, params, **options)
 
     psycopg.Connection.execute = recording
@@ -224,51 +285,94 @@ def _generic_plan(database, sql, params) -> str:
     return "\n".join(str(row["QUERY PLAN"]) for row in rows)
 
 
-def _assert_no_scan(plan: str) -> None:
+def _assert_key_driven(plan: str) -> None:
     for table in ("canonical_relations", "concept_clusters", "knowledge_object_sources",
                   "knowledge_objects", "knowledge_relations"):
         assert f"Seq Scan on {table}" not in plan, plan
-    # Neither ``idx_kos_source`` nor ``idx_kos_source_object``: both seek once
-    # per CEILING id instead of probing the few rows of one object.
     assert "idx_kos_source" not in plan, plan
+    assert "idx_kos_notebook" not in plan, plan
+
+
+def _assert_probe_shape(plan: str) -> None:
+    _assert_key_driven(plan)
+    assert "pk_canonical_relations" in plan, plan
+    # Cluster members: both columns of the (notebook_id, canonical_id) key.
+    # (The OFFSET 0 subquery's columns print under the table's own name.)
+    kc = [line for line in plan.split("\n") if "Index Cond" in line and "kc." in line]
+    assert any("kc.notebook_id = " in line
+               and "kc.canonical_id = canonical_relations.canonical_tgt" in line
+               for line in kc), plan
+    # The target's objects: primary key only.
+    assert "Index Cond: (ko.id = ANY (" in plan, plan
+    assert "Index Cond: (ko.notebook_id" not in plan, plan
 
 
 @pytest.mark.parametrize("backfilled", [1, 0])
-def test_pg_weak_support_probe_plan(seeded, backfilled):
+def test_pg_weak_support_list_probe_plan(seeded, backfilled):
     _set_backfilled(seeded, backfilled)
     sql, params = _recorded(seeded, lambda db: UnifiedKgStore.weak_support_relation_rows(
-        db, NB, ["ko-s"], 2, 24, allowed_source_ids=CEILING))
+        db, NB, ["ko-s"], 2, 24, allowed_source_ids=CEILING), unprepared=True)
     plan = _custom_plan(seeded, sql, params)
     generic = _generic_plan(seeded, sql, params)
-    _assert_no_scan(plan)
-    assert "pk_canonical_relations" in plan, plan
-    # Custom plan: the ceiling is one folded constant array.  Generic control:
-    # an opaque parameter, and -- the cliff ``execute_ids`` exists to avoid --
-    # the plan then drives the support probe by ceiling id (``idx_kos_source``)
-    # over a Seq Scan of every notebook's clusters.
-    assert "= ANY ('{src-vis," in plan and "string_to_array" not in plan, plan
-    assert "string_to_array($" in generic, generic
+    _assert_probe_shape(plan)
     if backfilled:
-        assert "knowledge_object_sources" in plan, plan
+        assert "Index Cond: (kos.object_id = ko.id)" in plan, plan
     else:
         assert "jsonb_array_elements" in plan, plan
+    # Custom plan: the ceiling is one folded constant array.  Generic control:
+    # an opaque parameter.
+    assert "= ANY ('{src-pad-00000," in plan and "string_to_array" not in plan, plan
+    assert plan.count("= ANY ('{src-pad-00000,") == 1, plan
+    assert "string_to_array($" in generic, generic
 
 
-def test_pg_endpoint_name_plan(seeded):
-    sql, params = _recorded(seeded, lambda db: UnifiedKgStore.relation_endpoint_name_rows(
-        db, NB, ["kr-1", "kr-5"], allowed_source_ids=CEILING))
+def test_pg_weak_support_viewer_probe_plan(seeded):
+    sql, params = _recorded(seeded, lambda db: UnifiedKgStore.weak_support_relation_rows(
+        db, NB, ["ko-s"], 2, 24, viewer_id=USER_A), unprepared=False)
+    assert "string_to_array" not in sql
     plan = _custom_plan(seeded, sql, params)
-    generic = _generic_plan(seeded, sql, params)
-    _assert_no_scan(plan)
-    # The sample relations' primary keys drive; the ceiling only filters them.
+    _assert_probe_shape(plan)
+    # ``sources`` / ``memory_items`` are a few rows here, so they are scanned;
+    # what must exist is an index path to them (the memory_sql pins' method).
+    with seeded.connect() as db:
+        db.execute("SET LOCAL enable_seqscan = off")
+        rows = db.execute(f"EXPLAIN (COSTS OFF) {sql}", params).fetchall()
+    forced = "\n".join(str(row["QUERY PLAN"]) for row in rows)
+    assert "Seq Scan" not in forced, forced
+    assert "pk_sources" in forced and "pk_memory_items" in forced, forced
+
+
+@pytest.mark.parametrize("form", ["list", "viewer"])
+def test_pg_endpoint_name_plan(seeded, form):
+    kwargs = {"allowed_source_ids": CEILING} if form == "list" else {"viewer_id": USER_A}
+    sql, params = _recorded(seeded, lambda db: UnifiedKgStore.relation_endpoint_name_rows(
+        db, NB, ["kr-1", "kr-5"], **kwargs), unprepared=form == "list")
+    plan = _custom_plan(seeded, sql, params)
+    _assert_key_driven(plan)
+    # The sample relations' primary keys drive; the gate only filters.
     assert "(kr.id = ANY ('{kr-1,kr-5}'::text[]))" in plan, plan
     assert "Index Cond: (kr.source_id" not in plan, plan
-    assert "= ANY ('{src-vis," in plan and "string_to_array" not in plan, plan
-    assert "string_to_array($" in generic, generic
+    if form == "list":
+        assert "= ANY ('{src-pad-00000," in plan and "string_to_array" not in plan, plan
+        assert "string_to_array($" in _generic_plan(seeded, sql, params)
+
+
+@pytest.mark.parametrize("backfilled", [1, 0])
+def test_pg_object_support_sources_plan(seeded, backfilled):
+    _set_backfilled(seeded, backfilled)
+    sql, params = _recorded(seeded, lambda db: UnifiedKgStore.object_support_source_rows(
+        db, NB, ["ko-t1", "ko-t2"]), unprepared=True)
+    plan = _custom_plan(seeded, sql, params)
+    _assert_key_driven(plan)
+    if backfilled:
+        assert "Index Cond: (kos.object_id = ANY (" in plan, plan
+    else:
+        assert "Index Cond: (ko.id = ANY (" in plan, plan
 
 
 def test_pg_unbound_statements_bind_no_list(seeded):
-    """Without the keyword neither statement goes through ``execute_ids``."""
+    """Without the keywords neither statement goes through ``execute_ids``,
+    and the viewer form binds no list either."""
     captured: list[str] = []
     original = psycopg.Connection.execute
 
@@ -282,6 +386,8 @@ def test_pg_unbound_statements_bind_no_list(seeded):
         with seeded.connect() as db:
             UnifiedKgStore.weak_support_relation_rows(db, NB, ["ko-s"], 2, 24)
             UnifiedKgStore.relation_endpoint_name_rows(db, NB, ["kr-1"])
+            UnifiedKgStore.weak_support_relation_rows(db, NB, ["ko-s"], 2, 24, viewer_id=USER_A)
+            UnifiedKgStore.relation_endpoint_name_rows(db, NB, ["kr-1"], viewer_id=USER_A)
     finally:
         psycopg.Connection.execute = original
     assert captured == []
