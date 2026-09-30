@@ -658,6 +658,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.optimize_knowhow_cell_stream', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/mcp_tools/_shared.py', scope='<module>.refuse_if_mirrored', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/mcp_tools/maintenance.py', scope='<module>.register_maintenance_tools.build_kg.run', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._run_ask_notebook', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._report_llm_ready', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.export_reports_endpoint', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.generate_report', kind='attribute', target='_runtime'),
@@ -1153,6 +1154,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.maintenance', kind='attribute', target='_runtime'),
             ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>._rss_child', kind='attribute', target='_runtime'),
             ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>.cmd_evidence', kind='attribute', target='_runtime'),
+            ConsumerSite(path='scripts/reflect_shadow_rig.py', scope='<module>._generate_report', kind='attribute', target='_runtime'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.verify_snapshot', kind='attribute', target='_runtime'),
         ),
         patches=(
@@ -3097,10 +3099,9 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/mcp_tools/_shared.py', scope='<module>._selected_notebook', kind='attribute', target='require_agent_access'),
-            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>.register_memory_context_tools.ask_notebook.check_memory_scope', kind='attribute', target='require_agent_access'),
+            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._memory_read_allowed', kind='attribute', target='require_agent_access'),
             ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>.register_memory_context_tools.get_memory.load', kind='attribute', target='require_agent_access'),
             ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>.register_memory_context_tools.search_agent_memory.load', kind='attribute', target='require_agent_access'),
-            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>.register_memory_context_tools.search_notebook_context.load', kind='attribute', target='require_agent_access'),
         ),
         patches=(
         ),
