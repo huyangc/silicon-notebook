@@ -1,13 +1,14 @@
 """Public retrieval port composed from candidate and graph owners."""
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from typing import Any
 
 from app.services.evidence_attestation import DEAD, attest_pointers
 from app.services.retrieval import NeighborExpansion
 from app.services.source_scope import (
-    current_source_scope, filter_retrieval_items,
+    current_source_scope, filter_evidence, filter_retrieval_items,
     node_context_row_within_ceiling, record_ceiling_drift,
     scoped_node_context_row, scoped_source_ceiling, source_ceiling_exists,
     subjectless_run_active,
@@ -116,42 +117,30 @@ class RetrievalService:
         )
 
     def follow_chain(self, *args, **kwargs):
-        """沿受控可传递关系做查询期两跳组合 → FollowChainResult。"""
-        from app.services.source_scope import (
-            base_scope_ceiling_active,
-            current_source_scope,
-            filter_evidence,
-            peer_scope_ceiling_active,
-            source_scope_ceiling_active,
-        )
+        """沿受控可传递关系做查询期两跳组合 → FollowChainResult。
 
+        EVERY hop's evidence goes through ``filter_evidence``, judged against
+        the hop's OWN library, on every run -- there is no "no ceiling, hand it
+        back as is" exit.  A hop's ``primary_evidence`` is what
+        ``render_follow_chain_context`` writes into the prompt as a citable
+        relation anchor, so an unfiltered hop is another member's Memory quote
+        with a live ``[k]`` behind it.  Whether a ceiling binds is
+        ``filter_evidence``'s own question (``ActiveSourceScope.allows``: the
+        library dimension, the library's per-notebook ceiling, the local
+        ceiling for the scope's own notebook); asking it a second time up here,
+        from a list of "which ceilings exist" flags, is how a new kind of
+        ceiling ends up skipped.  With no scope, or with no ceiling binding a
+        hop's library, ``filter_evidence`` keeps every entry, so such a run's
+        chains come back value-identical.
+
+        A hop left with no evidence drops its whole chain (a chain is two
+        hops); so does a hop from an excluded library and a chain whose
+        endpoint node did not survive the node filter.  The filter is Python
+        over evidence the walk already read: no statement binds a source list.
+        """
         notebook_id = _notebook_id(args, kwargs)
         result = self.graph.follow_chain(*args, **kwargs)
         scope = current_source_scope()
-        # THREE ORTHOGONAL ceilings gate this result: the local checkbox one,
-        # the mounted-library one, and each participant's own frozen source
-        # list. Testing the local one alone hands an unchecked reference
-        # library's chains back untouched, because narrowing only the library
-        # dimension deliberately leaves the local answers alone (R1); testing
-        # only those two hands back a federated run's chains untouched, because
-        # such a run submits NEITHER of them -- its only ceiling is the
-        # per-notebook one, and skipping the filter on it is fail-open on the
-        # very path that is supposed to be the backstop.
-        #
-        # CEILING, not narrowing: skipping the whole filter is a FILTERING
-        # decision, and the frozen snapshots bind on every submitted scope --
-        # including the browser's default full selection, where both narrowing
-        # answers are False.  ``ceilings_total`` needs no arm of its own: every
-        # scope that carries it also carries one of the three -- a default
-        # ceiling always freezes an include local dimension
-        # (``ceiling_active``), a global run always per-library ceilings
-        # (``peer_scope_ceiling_active``).
-        if not (
-            source_scope_ceiling_active()
-            or base_scope_ceiling_active()
-            or peer_scope_ceiling_active()
-        ):
-            return result
         result.nodes = filter_retrieval_items(notebook_id, "knowledge", result.nodes)
         allowed_nodes = {
             str(node.get("object_id") or node.get("id") or "")
@@ -164,29 +153,13 @@ class RetrievalService:
                 continue
             scoped_hops = []
             for hop in chain.hops:
-                # Library dimension first, exactly as filter_retrieval_items'
-                # knowledge/relation branch does: a hop carried by an unchecked
-                # reference library is dropped outright. The cross-notebook arm
-                # below keeps such a hop's evidence verbatim, which is right for
-                # a library that is still checked and a leak for one that is not.
-                if not scope.covers_notebook(hop.notebook_id):
+                # Library dimension first, as filter_retrieval_items' knowledge
+                # branch does: a hop carried by an unchecked reference library
+                # goes outright (its evidence is not the question).
+                if scope is not None and not scope.covers_notebook(hop.notebook_id):
                     scoped_hops = []
                     break
-                # Source dimension second, judged against the hop's OWN
-                # library. A peer hop used to be handed back verbatim on the
-                # argument that a still-checked library is not governed by the
-                # active notebook's checkboxes -- true, but it is governed by
-                # its own per-notebook ceiling, and returning its evidence
-                # unfiltered is fail-open the moment one binds. The library
-                # with no ceiling of its own still answers ``None`` here and
-                # keeps every row, exactly as before.
-                evidence = (
-                    list(hop.evidence)
-                    if hop.notebook_id != notebook_id
-                    and scope.source_ceiling_for(hop.notebook_id) is None
-                    else filter_evidence(hop.notebook_id or notebook_id,
-                                         hop.evidence)
-                )
+                evidence = filter_evidence(hop.notebook_id or notebook_id, hop.evidence)
                 if not evidence:
                     scoped_hops = []
                     break
@@ -443,6 +416,7 @@ class RetrievalService:
         chunks, kg_block, kg_id_map, kg_hits, ppr_count = self.candidates._mix_retrieve(
             notebook_id, query, high_level, queries
         )
+        kg_block, kg_id_map = self._scoped_overlay(notebook_id, kg_block, kg_id_map)
         return (
             filter_retrieval_items(notebook_id, "chunk", chunks),
             kg_block,
@@ -450,6 +424,69 @@ class RetrievalService:
             filter_retrieval_items(notebook_id, "knowledge", kg_hits),
             ppr_count,
         )
+
+    def _scoped_overlay(self, notebook_id, kg_block, kg_id_map):
+        """``mixed_chunk_candidates``' KG overlay (``kg_block`` / ``kg_id_map``)
+        with only the nodes that survive this run's scope.
+
+        The overlay is prompt text plus live ``k{n}`` anchors, and until now it
+        was the one output of the mix path that crossed this boundary
+        unfiltered.  A node survives when its library is covered and, where a
+        source ceiling binds that library, one of its OWN evidence entries is
+        inside it (``filter_evidence`` over the object's stored evidence -- the
+        rule ``filter_retrieval_items`` applies to a KG hit).  The node's library
+        is its id_map ``notebook_id`` ("" = this run's notebook).  One batched
+        evidence read by object id (never a source list), only when a ceiling
+        binds a rendered node's library; every node is checked, so no run-level
+        verdict is trusted here.
+
+        Dropped: the node's line and anchor, every ``chain:`` line naming it,
+        and the evidence quote of any surviving node such a line also names
+        (that quote may be the dropped edge's).  Nothing dropped → both values
+        are returned as they came (a run without a scope never reads).
+        """
+        scope = current_source_scope()
+        if scope is None or not kg_id_map:
+            return kg_block, kg_id_map
+        owners = {
+            key: str(entry.get("notebook_id") or notebook_id)
+            for key, entry in kg_id_map.items()
+        }
+        dropped = {key for key, owner in owners.items() if not scope.covers_notebook(owner)}
+        governed = {
+            key: owner for key, owner in owners.items()
+            if key not in dropped and scope.source_ceiling_binds(owner)
+        }
+        if governed:
+            evidence = self._object_evidence(
+                str(kg_id_map[key].get("object_id") or "") for key in governed
+            )
+            dropped.update(
+                key for key, owner in governed.items()
+                if not filter_evidence(
+                    owner, evidence.get(str(kg_id_map[key].get("object_id") or ""), ()),
+                )
+            )
+        if not dropped:
+            return kg_block, kg_id_map
+        return _overlay_without(kg_block, kg_id_map, dropped)
+
+    def _object_evidence(self, object_ids) -> dict:
+        """``{object_id: [evidence entries]}`` for the given objects, batched."""
+        import json
+
+        wanted = [oid for oid in dict.fromkeys(object_ids) if oid]
+        found: dict = {}
+        with self.candidates._connect() as db:
+            for batch in self.candidates._in_batches(wanted):
+                for row in self.candidates.knowledge.object_evidence_rows(db, batch):
+                    raw = row["evidence"]
+                    try:
+                        value = json.loads(raw) if isinstance(raw, str) else raw
+                    except ValueError:
+                        value = []
+                    found[str(row["id"])] = value if isinstance(value, list) else []
+        return found
 
     def merge_chunk_candidates(self, base, extra):
         return self.candidates._union_chunk_candidates(base, extra)
@@ -623,12 +660,74 @@ class RetrievalService:
         return self.cluster_map(notebook_id).get(object_id, object_id)
 
     def weak_support_relations(self, notebook_id, object_ids):
-        """canonical 层上支撑薄弱的相关边 → List[GapRelationRow](设计文档 §3.3)。"""
-        from app.services.source_scope import source_scope_restricted
+        """canonical 层上支撑薄弱的相关边 → List[GapRelationRow](设计文档 §3.3)。
+
+        The rows become reflect-prompt text (both endpoint names), so the source
+        ceiling is applied BEFORE the names are read -- a result-side filter
+        cannot help, the rows carry no evidence.  A narrowed run gets nothing
+        (the channel is off, as before).  Otherwise, when a source ceiling binds
+        the library:
+
+        * the run's verdict says it binds (``ceiling_binds``: another member's
+          Memory in the library, drift, a per-library freeze, a subjectless run)
+          → the frozen ceiling goes to both store reads
+          (``weak_support_relation_rows`` / ``relation_endpoint_name_rows``
+          ``allowed_source_ids``): an edge is kept only when its TARGET is still
+          supported by an in-ceiling source (``community_member_peers``' test)
+          and its sample relation itself comes from one;
+        * the verdict says it does not → the unbounded reads (no list bound,
+          the statements of a run without a scope), verified on read: every
+          sample relation's ``source_id`` must be inside the frozen ceiling.
+          The first that is not records the drift for the rest of the run
+          (``record_ceiling_drift``, the verdict ``node_context`` shares) and
+          the probe is re-read bound.
+
+        No scope, or no ceiling binding the library: the historical call.
+        """
+        from app.services.source_scope import (
+            library_source_ceiling,
+            scoped_allowed_source_ids,
+            source_scope_restricted,
+        )
 
         if source_scope_restricted():
             return []
-        return self.candidates.weak_support_relations(notebook_id, object_ids)
+        scope = current_source_scope()
+        if scope is None or not scope.source_ceiling_binds(notebook_id):
+            if scope is not None and not scope.covers_notebook(notebook_id):
+                return []
+            return self.candidates.weak_support_relations(notebook_id, object_ids)
+        object_ids = list(object_ids)
+        # The local ``exclude`` shape (direct service callers only) has no
+        # allow-list to bind: the unbounded read, judged row by row, is all
+        # there is for it.
+        bindable = library_source_ceiling(scope, notebook_id) is not None
+        if not bindable or not self._ceiling_binds(notebook_id):
+            ceiling = library_source_ceiling(scope, notebook_id)
+            drifted = []
+
+            def inside(source_id: str) -> bool:
+                if not source_id:
+                    # Outside, as under ``allows`` and the bound statement's
+                    # ``member_of`` -- but a relation with no source is not a
+                    # change after the freeze, so it drops only its own row.
+                    return False
+                ok = (source_id in ceiling if ceiling is not None
+                      else scope.allows(notebook_id, source_id))
+                if not ok:
+                    drifted.append(source_id)
+                return ok
+
+            rows = self.candidates.weak_support_relations(
+                notebook_id, object_ids, sample_source_inside=inside,
+            )
+            if not drifted or not bindable:
+                return rows
+            record_ceiling_drift(scope, notebook_id)
+        return self.candidates.weak_support_relations(
+            notebook_id, object_ids,
+            allowed_source_ids=scoped_allowed_source_ids(notebook_id),
+        )
 
     def runtime_dim(self):
         from app.services.vector_index import resolve_runtime_dim
@@ -667,6 +766,70 @@ class RetrievalService:
             _notebook_id(args, kwargs, keyword="active_notebook_id"), "relation",
             self.candidates.federated_retrieve_relations(*args, **kwargs),
         )
+
+
+# ``kg.graph_reason.render_subgraph_context``'s entry shapes: a node line
+# ``k{n}: [type][tier] name  — ev: "quote"``, the ``chain:`` header, and one
+# ``  [k{a}] name --edge--> [k{b}] name  (tier=...)`` line per edge.  Any other
+# line continues the entry above it (a quote may hold a newline).
+_OVERLAY_NODE = re.compile(r"^(k\d+): ")
+_OVERLAY_CHAIN = re.compile(r"^  \[(?:k\d+|\?)\] ")
+_OVERLAY_KEY = re.compile(r"\[(k\d+)\]")
+
+
+def _overlay_without(kg_block: str, kg_id_map: dict, dropped: set) -> tuple[str, dict]:
+    """``(kg_block, kg_id_map)`` without the ``dropped`` keys (see
+    ``RetrievalService._scoped_overlay``).  Fail-closed on the text: a chain
+    line is dropped when ANY ``[k{n}]`` it contains is dropped, and a
+    surviving node named by a dropped chain line loses its quote -- or the
+    node itself, when its line is not in the renderer's shape."""
+    entries: list[list] = []   # [kind, key, text]
+    for line in kg_block.split("\n"):
+        node = _OVERLAY_NODE.match(line)
+        if node:
+            entries.append(["node", node.group(1), line])
+        elif line == "chain:":
+            entries.append(["header", "", line])
+        elif _OVERLAY_CHAIN.match(line):
+            entries.append(["chain", "", line])
+        elif entries:
+            entries[-1][2] += "\n" + line
+        else:
+            entries.append(["other", "", line])
+    dropped = set(dropped)
+    unquote: set = set()
+    for kind, _key, text in entries:
+        if kind == "chain":
+            keys = set(_OVERLAY_KEY.findall(text))
+            if keys & dropped:
+                unquote |= keys - dropped
+    id_map = {key: value for key, value in kg_id_map.items() if key not in dropped}
+    for key in sorted(unquote):
+        entry = id_map.get(key)
+        if entry is None:
+            continue
+        prefix = (f"{key}: [{entry.get('object_type', '')}]"
+                  f"[{entry.get('tier', '')}] {entry.get('name', '')}")
+        for item in entries:
+            if item[0] == "node" and item[1] == key:
+                if item[2].startswith(prefix):
+                    item[2] = prefix
+                    id_map[key] = {**entry, "snippet": ""}
+                else:
+                    dropped.add(key)
+                    id_map.pop(key, None)
+    kept = []
+    for kind, key, text in entries:
+        if kind == "node" and key in dropped:
+            continue
+        if kind == "chain" and set(_OVERLAY_KEY.findall(text)) & dropped:
+            continue
+        kept.append((kind, text))
+    if kept and kept[-1][0] == "header":
+        kept.pop()
+    if not id_map:
+        return "", {}
+    return "\n".join(text for _kind, text in kept), id_map
 
 
 FOLLOW_CHAIN_PRODUCER = "follow_chain"
