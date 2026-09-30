@@ -120,6 +120,27 @@ run 直接抛出取消，两个事件都不发。改动之前被旧复核整份�
 全局 run 使用引擎自己的 retrieval-run 类别（`ask_chunk` / `ask_reasoning`），不再有独立类别；
 大参与库那一腿不冷加载共享整库索引。
 
+## 无主 Memory 来源
+
+服务就绪之后，每次服务启动都会跑一次后台清扫（作业名 `memory-orphan-sweep`），删除 Memory 已不存在的
+Memory 派生来源：`memory_id` 为 NULL 或空的来源（在拷贝不再携带 Memory 之前做的 notebook 拷贝留下的），
+或 `memory_id` 指向的行不存在或不是 `confirmed` 的来源（硬删除的残留）。每个来源都走普通的来源删除，
+因此它的元素、元素/对象/关系向量、知识对象与关系、证据、簇成员、抽取记录以及任何 chunk 行随之一起删除；
+清扫从不调用模型。启动时没有可清的就不起作业、也不写事件。
+
+事件只带标识符与计数：`memory_orphan_sweep_started`；某个来源删除失败时的 `memory_orphan_sweep_failed`
+（带 `source_id` 与 `error_class`）；`memory_orphan_sweep_completed`，带 `deleted`、`gone`（在读取与
+删除之间被别的写者删掉）和 `failed`。失败的来源被跳过、下次启动重试；连续三次失败会结束这一轮，其余的
+留到下次启动。没有进度标记：无主来源本身就是队列，按 id 顺序每次读 200 个（页大小只界定单条语句的
+结果，从不改变最终结果）。
+
+确认完成：干净启动之后，`SELECT count(*) FROM sources s WHERE s.source_type = 'memory' AND
+(s.memory_id IS NULL OR s.memory_id = '' OR NOT EXISTS (SELECT 1 FROM memory_items m WHERE m.id =
+s.memory_id AND m.status = 'confirmed'))` 应返回 0；体检项 `H12`（只读，修复动作 `none`）给出单个
+notebook 的同一数字。探测每页对 `sources` 扫一遍；PostgreSQL 上对 30 万个 Memory 来源做零无主的一轮实测
+1.2 秒。在 SQLite 上，两张 FTS5 影子表（`kg_objects_fts`、`chunks_fts`）会保留已删除对象与 chunk 的行，
+与任何其它来源删除之后的情形完全一样。
+
 ## 可观测性 / 日志
 
 后端通过统一的 `EventLogger`（`app/core/event_logging.py`）输出结构化日志：每条事件一行 JSONL 写入 `.local/logs/`，并附控制台简要行。写日志是 best-effort，绝不影响它所观测的请求或管线；未配置模型时 LLM 通道为 no-op。

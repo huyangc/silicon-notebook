@@ -70,6 +70,19 @@ test("H6 → 待分析来源 / extract_kg / 篇", () => {
   });
 });
 
+test("H12 → 残留的记忆来源 / none(只读) / 篇,排在其余源级项之后", () => {
+  const c = checkup([
+    item("H12", 3, [], "none"),
+    item("H6", 1, [], "extract_kg"),
+  ]);
+  const groups = sourceHealthGroups(c);
+  assert.deepEqual(groups.map((g) => g.key), ["H6", "H12"]);
+  assert.deepEqual(groups[1], {
+    key: "H12", label: "残留的记忆来源（重启后自动清理）", count: 3, unit: "篇", fix: "none", sample: [],
+  });
+  assert.deepEqual(sourceHealthGroups(checkup([item("H12", 0, [], "none")])), []);
+});
+
 test("H7/H8 是索引级,不进源级分组", () => {
   const c = checkup([
     item("H7", 1, [], "fold_index"),
