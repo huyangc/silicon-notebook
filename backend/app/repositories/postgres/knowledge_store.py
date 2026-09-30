@@ -48,7 +48,12 @@ from app.repositories.postgres._store_utils import (
     normalize_timestamp,
 )
 from app.repositories.postgres.database import PostgresDatabase
-from app.repositories.postgres.id_binding import bind_ids, execute_ids, member_of
+from app.repositories.postgres.id_binding import (
+    bind_ids,
+    execute_ids,
+    member_of,
+    not_member_of,
+)
 from app.repositories.postgres.mount_sql import (
     MOUNT_JOIN,
     MOUNT_VALID,
@@ -2504,15 +2509,15 @@ class KnowledgeStore:
         gate, gate_params = "", []
         if excluded:
             bound = source_ceiling.ceiling_param(excluded)
-            gate += f" AND source_id <> ALL({bound.sql})"
-            gate_params.append(bound.value)
+            gate += " AND " + not_member_of("source_id", bound)
+            gate_params.append(bound.param)
         if ceiling is not None:
             bound = source_ceiling.ceiling_param(ceiling)
             gate += " AND " + source_ceiling.evidence_support_sql(
                 "knowledge_objects", bound,
                 authoritative=not KnowledgeStore.source_index_backfilled(db, notebook_id),
             )
-            gate_params.append(bound.value)
+            gate_params.append(bound.param)
         sql = (
             f"SELECT COUNT(*) AS count FROM knowledge_objects "
             f"WHERE notebook_id = %s AND object_type = %s AND status IN ({placeholders})"
@@ -2583,7 +2588,7 @@ class KnowledgeStore:
                 "knowledge_objects", bound,
                 authoritative=not KnowledgeStore.source_index_backfilled(db, notebook_id),
             ) + " "
-            params.append(bound.value)
+            params.append(bound.param)
         params.append(max(1, int(limit)))
         sql = (
             "SELECT id,object_type,source_id,payload,evidence,status,created_at "

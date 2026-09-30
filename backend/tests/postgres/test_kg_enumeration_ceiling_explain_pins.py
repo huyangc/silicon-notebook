@@ -15,8 +15,9 @@ settings the store runs it under:
   ``idx_kos_object`` (object_id) — a few rows per object — never a Seq Scan
   of the evidence table and never ``idx_kos_source_object``, which would seek
   once per CEILING id for every candidate row;
-* the ceiling is one ``\x1f``-joined text parameter folded into a hashed
-  constant array (``= ANY ('{...}'::text[])``);
+* the ceiling is one ``\x1f``-joined text parameter (``id_binding.bind_ids``,
+  ``string_to_array(%s,E'\x1f')``) folded into a hashed constant array
+  (``= ANY ('{...}'::text[])``);
 * no Gather / Gather Merge: without the statement-local
   ``max_parallel_workers_per_gather = 0`` the 49k page plans Gather Merge and
   ships the whole constant to every worker (the control test shows it).
@@ -29,6 +30,7 @@ import psycopg
 import pytest
 
 from app.repositories.postgres import source_ceiling
+from app.repositories.postgres.id_binding import ID_SEPARATOR
 from app.repositories.postgres.knowledge_store import KnowledgeStore
 from app.repositories.postgres.migrator import PostgresMigrator
 from app.services.knowledge_contracts import USABLE_STATUSES
@@ -118,7 +120,7 @@ def _statement(connection, call) -> tuple[str, tuple]:
     # Text parameters only: the ceiling travels as one joined string, never
     # as a Python list adapted element by element.
     longest = max((p for p in params if isinstance(p, str)), key=len)
-    assert longest.count(source_ceiling.SEPARATOR) >= 3_999, len(longest)
+    assert longest.count(ID_SEPARATOR) >= 3_999, len(longest)
     assert not any(isinstance(p, (list, tuple, frozenset)) for p in params), params
     return sql, params
 
@@ -166,7 +168,7 @@ def _assert_common(plan: str) -> None:
 
 
 def test_page_with_reverse_index_keeps_keyset_scan_and_object_probe(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 65
+    assert PostgresMigrator(postgres_database).migrate() == 66
     _seed(postgres_database, backfilled=True)
     store = KnowledgeStore(postgres_database, _seams())
     after = ("2026-09-01T01:00:00+00:00", f"{NOTEBOOK}-ko-3600")
@@ -182,7 +184,7 @@ def test_page_with_reverse_index_keeps_keyset_scan_and_object_probe(postgres_dat
 
 
 def test_count_with_reverse_index_never_seeks_per_ceiling_id(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 65
+    assert PostgresMigrator(postgres_database).migrate() == 66
     _seed(postgres_database, backfilled=True)
     store = KnowledgeStore(postgres_database, _seams())
     for name, ceiling in CEILINGS.items():
@@ -193,7 +195,7 @@ def test_count_with_reverse_index_never_seeks_per_ceiling_id(postgres_database):
 
 
 def test_uncertified_index_reads_evidence_json_not_the_reverse_index(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 65
+    assert PostgresMigrator(postgres_database).migrate() == 66
     _seed(postgres_database, backfilled=False)
     store = KnowledgeStore(postgres_database, _seams())
     for name, ceiling in CEILINGS.items():
@@ -212,7 +214,7 @@ def test_control_without_statement_settings_the_49k_page_goes_parallel(postgres_
     """Control for the "no Gather" pins: the same custom plan WITHOUT
     ``execute_with_ceiling``'s settings is parallel here, so their absence
     above is the settings' doing, not the fixture's size."""
-    assert PostgresMigrator(postgres_database).migrate() == 65
+    assert PostgresMigrator(postgres_database).migrate() == 66
     _seed(postgres_database, backfilled=True)
     store = KnowledgeStore(postgres_database, _seams())
     with postgres_database.connect() as connection:
@@ -229,7 +231,7 @@ def test_ceiling_statements_never_become_server_side_prepared(postgres_database)
     ``source_ceiling`` module docstring).  Pin that the store's ceiling
     statements are sent unprepared however often they run, and that the check
     itself can see a prepared statement (control)."""
-    assert PostgresMigrator(postgres_database).migrate() == 65
+    assert PostgresMigrator(postgres_database).migrate() == 66
     _seed(postgres_database, backfilled=True)
     store = KnowledgeStore(postgres_database, _seams())
     prepared_sql = (

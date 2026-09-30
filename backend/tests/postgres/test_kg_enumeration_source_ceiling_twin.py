@@ -69,7 +69,7 @@ def _count(store, connection, supported, excluding):
 def test_postgres_and_sqlite_agree_on_pages_and_counts(
     postgres_database, tmp_path, monkeypatch, backfilled,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 65
+    assert PostgresMigrator(postgres_database).migrate() == 66
     with postgres_database.write() as connection:
         fx.seed(lambda sql, params: connection.execute(sql, params), "%s",
                 backfilled=backfilled,
@@ -104,7 +104,7 @@ def test_postgres_and_sqlite_agree_on_pages_and_counts(
 
 
 def test_postgres_no_ceiling_statements_are_byte_identical(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 65
+    assert PostgresMigrator(postgres_database).migrate() == 66
     with postgres_database.write() as connection:
         fx.seed(lambda sql, params: connection.execute(sql, params), "%s",
                 backfilled=True,
@@ -153,7 +153,7 @@ def test_postgres_no_ceiling_statements_are_byte_identical(postgres_database):
 
 
 def _seeded_store(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 65
+    assert PostgresMigrator(postgres_database).migrate() == 66
     with postgres_database.write() as connection:
         fx.seed(lambda sql, params: connection.execute(sql, params), "%s",
                 backfilled=True,
@@ -175,9 +175,10 @@ def _main_statement(recorder):
     )
 
 
-def test_postgres_separator_collision_binds_a_binary_array(postgres_database):
+def test_postgres_separator_collision_binds_a_text_array(postgres_database):
     """The joined-text form must never split an id: a ceiling holding an id
-    with the separator binds a binary array instead, and matches exactly."""
+    with the separator binds a ``text[]`` array parameter instead
+    (``id_binding.bind_ids``), and matches exactly."""
     store = _seeded_store(postgres_database)
     with postgres_database.connect() as connection:
         plain = fx.RecordingConnection(connection)
@@ -186,7 +187,7 @@ def test_postgres_separator_collision_binds_a_binary_array(postgres_database):
             allowed_source_ids=fx.INCLUDE_CEILING,
         )
         sql, params = _main_statement(plain)
-        assert "string_to_array(%s, E'\\x1f')" in sql and "%b" not in sql
+        assert "string_to_array(%s,E'\\x1f')" in sql and "::text[]" not in sql
         assert any(isinstance(p, str) and "\x1f" in p for p in params)
         for name in ("separator_exact", "separator_joined"):
             odd = fx.RecordingConnection(connection)
@@ -195,7 +196,7 @@ def test_postgres_separator_collision_binds_a_binary_array(postgres_database):
                 allowed_source_ids=fx.CEILINGS[name],
             )
             sql, params = _main_statement(odd)
-            assert "ANY(%b)" in sql and "string_to_array" not in sql, name
+            assert "ANY(%s::text[])" in sql and "string_to_array" not in sql, name
             assert sorted(next(p for p in params if isinstance(p, list))) == sorted(
                 fx.CEILINGS[name])
             assert [row["id"] for row in rows] == fx.reference_page_ids(fx.CEILINGS[name])
