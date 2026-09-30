@@ -1573,6 +1573,59 @@ def case_a_failed_purge_counts_what_remains_on_the_server(
     assert member_memory_count(world, world.shared, world.alice) == 2
 
 
+def case_a_cleanup_failure_after_the_delete_counts_the_deleted_rows(
+    world: World, monkeypatch
+) -> None:
+    """codex r1 #1: the Memory row's delete committed, then the second
+    derived-row removal failed. The exit reports what really happened — 503
+    with 1 deleted and 0 remaining, not 0 and 0 — the audit says 1, the
+    leaver is still a member, and the retry (from the disclosure) finishes.
+    A bulk delete failing the same way audits its committed rows and raises
+    the real cause."""
+    svc = service(world)
+    original = svc._remove_derived_rows
+    calls: list[int] = []
+
+    def fail_after_the_delete(refs):
+        calls.append(len(refs))
+        if len(calls) in (2, 4):  # the exit's and the bulk delete's second call
+            raise RuntimeError("injected cleanup failure after the row delete")
+        return original(refs)
+
+    events: list[dict] = []
+    monkeypatch.setattr(
+        svc.event_log, "emit", lambda event, **_kwargs: events.append(dict(event))
+    )
+    monkeypatch.setattr(svc, "_remove_derived_rows", fail_after_the_delete)
+    try:
+        self_exit(world, world.alice, world.shared, 1)
+    except MemberExitFailed as exc:
+        assert (exc.deleted_memory_count, exc.memory_count) == (1, 0)
+    else:  # pragma: no cover - the assertion below explains the failure
+        raise AssertionError("a failed cleanup was reported as finished")
+    assert world.repo.is_member(world.shared, world.alice.id)
+    assert member_memory_count(world, world.shared, world.alice) == 0
+    assert disclosure(world, world.alice, world.shared) == 0
+    assert self_exit(world, world.alice, world.shared, 0) == 0
+    assert not world.repo.is_member(world.shared, world.alice.id)
+
+    home = world.projections["alice_home"].memory_id
+    try:
+        svc.bulk_delete(world.alice.id, [home])
+    except RuntimeError as exc:
+        assert "injected cleanup failure" in str(exc)
+    else:  # pragma: no cover - the assertion below explains the failure
+        raise AssertionError("a failed cleanup was reported as finished")
+    assert member_memory_count(world, world.alice_home, world.alice) == 0
+    purges = [event for event in events if event.get("kind") == "memory_purge"]
+    assert purges == [
+        {"kind": "memory_purge", "action": "member_exit_partial",
+         "notebook_id": world.shared, "user_id": world.alice.id, "count": 1},
+        {"kind": "memory_purge", "action": "bulk_delete",
+         "notebook_id": world.alice_home, "user_id": world.alice.id, "count": 1},
+    ]
+
+
 def case_claimed_memories_gone_meanwhile_finish_with_zero_deleted(
     world: World, monkeypatch
 ) -> None:
@@ -1773,6 +1826,7 @@ MONKEYPATCH_CASES: dict[str, Callable[..., None]] = {
     "contract_503_counts": case_a_purge_failing_part_way_reports_both_numbers,
     "post_ingest_cleanup_clean": case_post_ingest_cleanup_leaves_nothing_memory_named,
     "failed_purge_counts_remaining": case_a_failed_purge_counts_what_remains_on_the_server,
+    "cleanup_failure_counts_deleted": case_a_cleanup_failure_after_the_delete_counts_the_deleted_rows,
     "claimed_gone_zero_deleted": case_claimed_memories_gone_meanwhile_finish_with_zero_deleted,
     "save_during_exit_kept": case_memory_saved_during_exit_is_never_deleted_unacknowledged,
     "rejoin_keeps_new_memory": case_rejoin_after_the_membership_ends_keeps_new_memory,

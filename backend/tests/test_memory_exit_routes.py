@@ -173,6 +173,44 @@ def test_a_failed_purge_reports_what_it_deleted_and_keeps_the_membership(
     ).json() == {"memory_count": 1}
 
 
+def test_a_cleanup_failure_after_the_delete_still_reports_what_was_deleted(
+    tmp_path, monkeypatch
+):
+    """codex r1 #1: the rows' delete committed, then removing their derived
+    rows once more failed. The 503 carries the real deleted count (not 0 with
+    0 remaining), and the retry, starting from the disclosure, finishes."""
+    w = _world(tmp_path, monkeypatch)
+    service = w["repo"]._runtime.memory_service
+    original = service._remove_derived_rows
+    calls: list[int] = []
+
+    def fail_after_the_delete(refs):
+        calls.append(len(refs))
+        if len(calls) == 2:
+            raise RuntimeError("injected cleanup failure")
+        return original(refs)
+
+    monkeypatch.setattr(service, "_remove_derived_rows", fail_after_the_delete)
+    response = w["client"].delete(
+        f"/api/notebooks/{w['notebook']}/membership?acknowledged_memory_count=2",
+        headers=w["reader"],
+    )
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": {"code": "exit_incomplete", "deleted_memory_count": 2, "memory_count": 0}
+    }
+    assert w["repo"].is_member(w["notebook"], w["reader_id"])
+    # Only the second call failed; the retry runs the real cleanup.
+    assert w["client"].get(
+        f"/api/notebooks/{w['notebook']}/membership/exit-disclosure", headers=w["reader"]
+    ).json() == {"memory_count": 0}
+    retry = w["client"].delete(
+        f"/api/notebooks/{w['notebook']}/membership", headers=w["reader"]
+    )
+    assert retry.status_code == 204
+    assert not w["repo"].is_member(w["notebook"], w["reader_id"])
+
+
 def test_a_failed_purge_before_any_delete_says_nothing_was_deleted(
     tmp_path, monkeypatch
 ):
