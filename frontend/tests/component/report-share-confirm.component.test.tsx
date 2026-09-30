@@ -639,6 +639,46 @@ test("A 的披露回得晚、那时已切到 B:A 的结果不会落到 B 上", a
   expect(screen.queryByRole("group", { name: "公开链接已失效" })).toBeNull();
 });
 
+test("失效的旧链接取消分享后,他人记忆已被移除、再次公开成功:显示「复制链接」,不留旧的失效说明", async () => {
+  const user = userEvent.setup();
+  reportBody = { ...REPORT, shared: true };
+  handlers.disclosure = () => json(200, { memory_count: 0, foreign_memory_count: 1 });
+  render(<Harness />);
+  await screen.findByRole("group", { name: "公开链接已失效" });
+
+  await user.click(screen.getByRole("button", { name: "取消分享" }));
+  await screen.findByRole("button", { name: "分享" });
+  handlers.disclosure = () => json(200, { memory_count: 0, foreign_memory_count: 0 });
+  await user.click(screen.getByRole("button", { name: "分享" }));
+
+  await screen.findByRole("button", { name: "已公开，链接已复制" });
+  expect(screen.getByRole("button", { name: "复制链接" })).toBeInTheDocument();
+  expect(screen.queryByRole("group", { name: "公开链接已失效" })).toBeNull();
+  // Still no stale notice once every late read has landed.
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+  expect(screen.queryByRole("group", { name: "公开链接已失效" })).toBeNull();
+});
+
+test("失效的旧链接取消分享后再次公开、POST 中途断网但服务端已公开:同样不留旧的失效说明", async () => {
+  const user = userEvent.setup();
+  reportBody = { ...REPORT, shared: true };
+  handlers.disclosure = () => json(200, { memory_count: 0, foreign_memory_count: 1 });
+  render(<Harness />);
+  await screen.findByRole("group", { name: "公开链接已失效" });
+
+  await user.click(screen.getByRole("button", { name: "取消分享" }));
+  await screen.findByRole("button", { name: "分享" });
+  handlers.disclosure = () => json(200, { memory_count: 0, foreign_memory_count: 0 });
+  handlers.share = () => { throw new TypeError("Failed to fetch"); };
+  handlers.shareRead = () => json(200, { share_token: "tok-9" });
+  await user.click(screen.getByRole("button", { name: "分享" }));
+
+  await screen.findByRole("button", { name: "已公开，链接已复制" });
+  expect(screen.getByRole("button", { name: "复制链接" })).toBeInTheDocument();
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+  expect(screen.queryByRole("group", { name: "公开链接已失效" })).toBeNull();
+});
+
 test("以前就已公开、只含作者本人记忆的报告:照常显示「复制链接」,没有失效说明", async () => {
   reportBody = { ...REPORT, shared: true };
   handlers.disclosure = () => json(200, { memory_count: 2, foreign_memory_count: 0 });
