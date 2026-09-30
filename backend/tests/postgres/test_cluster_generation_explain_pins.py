@@ -331,3 +331,16 @@ def test_viewer_scope_owned_and_citing_read_seeks_the_source_indexes(postgres_da
     assert "idx_kos_source" in plan, plan
     assert "idx_knowledge_objects_source" in plan, plan
     assert "idx_kos_notebook" not in plan, plan
+    # The same statement under the real planner on the analysed tables (no
+    # capability settings): each id array still drives its source index,
+    # never a scan of the notebook's objects or reverse-index rows.
+    sql, params = issued[0]
+    with postgres_database.connect() as connection:
+        real = "\n".join(
+            str(row["QUERY PLAN"]) for row in connection.execute(
+                f"EXPLAIN (COSTS OFF) {sql}", params).fetchall())
+    for table in ("knowledge_objects", "knowledge_object_sources"):
+        assert f"Seq Scan on {table}" not in real, real
+    assert "idx_kos_source" in real, real
+    assert "idx_knowledge_objects_source" in real, real
+    assert "idx_kos_notebook" not in real, real
