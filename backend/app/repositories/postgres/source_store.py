@@ -80,6 +80,23 @@ _HIDDEN_SOURCE_IDS_SQL = (
 #: Schema-induction sample: no Memory element (``notebook_element_sample``).
 _SAMPLE_NOT_MEMORY = f"NOT ({memory_sql.memory_source_type_predicate('s.source_type')})"
 
+# The drift probe's one-row fingerprint (``all_visible_source_ids(...,
+# digest_for_owner=)``): md5 over each half's ids in ``id`` order (``sources.id``
+# is COLLATE "C", byte order == Python's code-point ``sorted`` for UTF-8)
+# joined by U+001E, the visible half and the owner's hidden half in ONE
+# statement.  The same two predicates as ``all_visible_source_ids`` /
+# ``_HIDDEN_SOURCE_IDS_SQL``; an empty half is NULL.  Parameters:
+# (notebook_id, notebook_id, owner_id).  SQLite twin: ``_UNIVERSE_DIGEST_SQL``.
+_UNIVERSE_DIGEST_SQL = (
+    "SELECT (SELECT md5(string_agg(v.id, E'\\x1e' ORDER BY v.id)) "
+    "FROM sources v WHERE v.notebook_id=%s "
+    "AND v.source_type NOT IN ('memory','knowhow')) AS visible_digest, "
+    "(SELECT md5(string_agg(s.id, E'\\x1e' ORDER BY s.id)) "
+    "FROM sources s WHERE s.notebook_id=%s "
+    "AND s.source_type IN ('memory','knowhow') "
+    f"AND {memory_source_readable('s')}) AS hidden_digest"
+)
+
 
 # 论文元数据补抽候选谓词(接在 ``FROM sources s`` 且已按 ``s.notebook_id`` 过滤之后)。
 # 与 SQLite 侧 ``sqlite.source_store.PAPER_META_ELIGIBLE_SQL`` 同义;三个消费方
@@ -156,6 +173,14 @@ class SourceStore:
 
     IN_CHUNK = 5_000
 
+    # How many mounted libraries' visible sets a default retrieval ceiling
+    # reads at once from this store (``CeilingReaders.read_workers``): each
+    # read holds its own pooled connection, and four in parallel took six
+    # 49k-source libraries from +17.5 ms to -62..-111 ms against the route
+    # freeze.  Equal to ``source_scope.POSTGRES_MOUNTED_READ_WORKERS`` (this
+    # layer may not import the service; a test pins the two together).
+    ceiling_read_workers = 4
+
     # A ``table`` element whose ``location_label`` ends in " part N" (N >= 2)
     # is a continuation of an overlong table that parsing split into several
     # retrieval units (``parsers.py::_split_table_into_elements`` — the label
@@ -192,8 +217,29 @@ class SourceStore:
         self.now = normalized_clock(now)
         self.current_user_id = current_user_id
 
-    def all_visible_source_ids(self, notebook_id: str) -> list[str]:
-        """Return the current visible-source universe for graph drift checks."""
+    def all_visible_source_ids(
+        self, notebook_id: str, *, digest_for_owner: str | None = None,
+    ) -> list[str]:
+        """Return the current visible-source universe for graph drift checks.
+
+        ``digest_for_owner`` given -> NOT the ids but the drift probe's
+        fingerprint: ``[visible digest, hidden digest]``, two md5 hex strings
+        (``""`` for an empty half) over this universe and over
+        ``hidden_source_ids(notebook_id, digest_for_owner)``, each in ``id``
+        order joined by U+001E, read in ONE statement that returns one row.
+        ``source_scope.universe_digest`` computes the same value from a frozen
+        set, so equal digests are equal sets without shipping 49k ids per
+        probe (``retrieval_candidates._unsafe_source_scope_restricted``).
+        """
+        if digest_for_owner is not None:
+            with self.database.connect() as connection:
+                row = connection.execute(
+                    _UNIVERSE_DIGEST_SQL,
+                    (notebook_id, notebook_id, str(digest_for_owner)),
+                ).fetchone()
+            return [
+                str(row["visible_digest"] or ""), str(row["hidden_digest"] or ""),
+            ]
         with self.database.connect() as connection:
             rows = connection.execute(
                 "SELECT id FROM sources WHERE notebook_id=%s "

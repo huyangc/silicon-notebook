@@ -3773,11 +3773,15 @@ class RepositoryFacade:
 
     def preview_reasoning_intent(
         self, notebook_id: str, question: str, history: str = "",
-        cancel_event: CancelEvent = None
+        cancel_event: CancelEvent = None, *,
+        source_scope: Any = None, base_scope: Any = None,
+        user_id: str | None = None,
     ) -> QueryIntentContract:
-        """Corpus-blind preflight used before a reasoning Ask creates a job."""
+        """Corpus-blind preflight used before a reasoning Ask creates a job,
+        under the same default ceiling the ask will install."""
         return self._runtime.ask_component.preview_reasoning_intent(
-            notebook_id, question, history, cancel_event
+            notebook_id, question, history, cancel_event,
+            source_scope=source_scope, base_scope=base_scope, user_id=user_id,
         )
 
     def validate_reasoning_submission(

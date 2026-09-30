@@ -170,6 +170,11 @@ def global_ask_run(
             None,
             None,
             notebook_source_ceilings=frozen,
+            # Total: a library with no entry here -- a participant the plan
+            # did not select, or one mounted mid-run -- participates in
+            # nothing, on every gate (``covers_notebook`` / ``allows`` /
+            # ``scoped_allowed_source_ids`` / ``filter_retrieval_items``).
+            ceilings_total=True,
             subjectless=True,
         ))
         stack.enter_context(detached_ask_turn(turn))

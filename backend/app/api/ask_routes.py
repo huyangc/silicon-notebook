@@ -122,6 +122,13 @@ def _validate_source_scope(repo, notebook: NotebookSummary,
                            scope: SourceScope | None) -> SourceScope | None:
     """Validate and freeze a checkbox scope as an explicit active-source ceiling.
 
+    ``None`` in, ``None`` out -- and that no longer means "no ceiling": the
+    Ask service installs every run's ceiling in one place
+    (``AskService._retrieval_ceiling``), using what this returns as the local
+    dimension when a scope was submitted and freezing the default one (the
+    notebook's visible sources plus the asker's own hidden half, each mounted
+    library to its visible sources) when it was not.
+
     The browser uses exclusions while "all" is selected because that keeps
     toggles compact.  Workers must not carry that moving definition: normalize
     it once to an include-list so concurrent uploads cannot widen the run and
@@ -532,8 +539,6 @@ async def preview_ask_intent(
     )
 
     def run_preview() -> QueryIntentContract:
-        from app.services.source_scope import source_scope_context
-
         # No ValueError handler here on purpose.  The one that used to live at
         # this seam existed to surface the model-inferred source-scope errors
         # ("找不到指定来源：…"), and those are gone with that feature.  What
@@ -541,15 +546,15 @@ async def preview_ask_intent(
         # subclass carrying English internals — so re-adding a
         # ``user_error(422, str(exc))`` here would trust an error by its shape
         # rather than its provenance and leak that text as a user message.
-        # 预检必须用与执行**同一个**库上限:预检期若还看得见被取消勾选的库,
+        # 预检必须用与执行**同一个**上限:预检期若还看得见被取消勾选的库,
         # 它侦察出的证据面与提交时按同一份 base_scope 重新解析的结果会不一致,
-        # 用户会拿到一份走不通的确认。
-        with source_scope_context(
-            notebook_id, resolved_source_scope, resolved_base_scope
-        ):
-            return repo.preview_reasoning_intent(
-                notebook_id, question, history, cancel_event=cancel_event
-            )
+        # 用户会拿到一份走不通的确认。上限由 Ask 服务唯一的安装点装
+        # (``AskService._retrieval_ceiling``),路由只交出冻结好的两维。
+        return repo.preview_reasoning_intent(
+            notebook_id, question, history, cancel_event=cancel_event,
+            source_scope=resolved_source_scope,
+            base_scope=resolved_base_scope, user_id=user.id,
+        )
 
     task = asyncio.create_task(asyncio.to_thread(run_preview))
     try:
@@ -615,14 +620,13 @@ async def preview_ask_intent_stream(
     cancel_event = threading.Event()
 
     def run_preview() -> QueryIntentContract:
-        from app.services.source_scope import source_scope_context
-
-        with source_scope_context(
-            notebook_id, resolved_source_scope, resolved_base_scope
-        ):
-            return repo.preview_reasoning_intent(
-                notebook_id, question, history, cancel_event=cancel_event
-            )
+        # Same ceiling as the JSON endpoint: installed by the Ask service's one
+        # installation point, from the two dimensions frozen above.
+        return repo.preview_reasoning_intent(
+            notebook_id, question, history, cancel_event=cancel_event,
+            source_scope=resolved_source_scope,
+            base_scope=resolved_base_scope, user_id=user.id,
+        )
 
     return task_stream_response(
         request,

@@ -29,6 +29,7 @@ import logging
 import re
 import threading
 import time
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import (
     Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence,
@@ -37,6 +38,7 @@ from typing import (
 
 if TYPE_CHECKING:
     from app.application.ask_reasoning import ResponseDraftStage
+    from app.services.source_scope import CeilingReaders
     from app.repositories.ports import (
         AskCandidatePort,
         AskModelClientProvider,
@@ -162,8 +164,10 @@ from app.services.source_graph_activation import (
 # merely froze its own visible source list, and such a run still has a current
 # library whose Memory, index badge and citation origin stay correct.
 from app.services.source_scope import (
+    cancellable_ceiling_readers,
     citation_active_id,
-    source_scope_context,
+    default_ceiling_context,
+    partition_memory_sources,
     source_scope_restricted,
     subjectless_run_active,
 )
@@ -860,6 +864,7 @@ class AskService:
         overview_sources=None,
         overview_source_generation=None,
         note_ask_completed: "Callable[[str, str, str], None] | None" = None,
+        ceiling_readers: "CeilingReaders | None" = None,
     ) -> None:
         self.ask_state = ask_state
         self.overview_sources = overview_sources
@@ -938,6 +943,11 @@ class AskService:
         # ``None`` ⇒ 与这个座位出现之前逐字相同——窄测试替身与离线组合根照旧
         # 可构造。落点与「恰好通知一次」的论证见 ``_note_ask_completed``。
         self.note_ask_completed = note_ask_completed
+        # The store reads behind every Ask entry's default retrieval ceiling
+        # (``RepositoryRuntime.ceiling_readers()``; see ``_retrieval_ceiling``).
+        # ``None`` = unwired, and an unwired service refuses to ask rather
+        # than run without a ceiling.
+        self.ceiling_readers = ceiling_readers
 
     def _ask_modes(self):
         host = getattr(self, "ask_engine_host", None)
@@ -1086,10 +1096,12 @@ class AskService:
             actor_id=user_id,
             notebook_id=notebook_id,
             question=payload.question,
-        ), source_scope_context(
+        ), self._retrieval_ceiling(
             notebook_id,
-            getattr(payload, "source_scope", None),
-            getattr(payload, "base_scope", None),
+            user_id,
+            local_scope=getattr(payload, "source_scope", None),
+            base_scope=getattr(payload, "base_scope", None),
+            cancel_event=cancel_event,
         ):
             # Plugin engines construct their own stable-kind retrieval run in
             # ``ask_plugin_engine`` so plugin mode ids never enter the allowed
@@ -1118,6 +1130,60 @@ class AskService:
                     notebook_id, payload, user_id=user_id, job_id=job_id,
                     cancel_event=cancel_event,
                 )
+
+    @contextmanager
+    def _retrieval_ceiling(
+        self,
+        notebook_id: str,
+        user_id: str,
+        *,
+        local_scope: Any = None,
+        base_scope: Any = None,
+        cancel_event: CancelEvent = None,
+    ):
+        """THE retrieval ceiling of every Ask entry -- the one installation.
+
+        HTTP ``/ask`` (with or without ``source_scope``), ``/ask/stream`` and
+        detached jobs, MCP ``ask_notebook``, extension engines and the two
+        intent prechecks (``preview_reasoning_intent``) all come through here,
+        so none of them can run without a ceiling:
+        ``source_scope.default_ceiling_context`` for ``user_id`` over the
+        runtime's readers (``RepositoryRuntime.ceiling_readers()``).  A
+        dimension the route froze is used as-is; an omitted one is frozen
+        here (the notebook's visible sources plus the asker's own hidden
+        half, each mounted library to its visible sources, ``ceilings_total``
+        set).  An outer scope -- a global run, which installs its own through
+        ``global_run`` -- passes through untouched.
+
+        Fail closed: an unwired service (no readers) refuses, and a reader
+        failure fails the ask; neither ever falls back to an unscoped run.
+        Every read carries ``cancel_event`` (``cancellable_ceiling_readers``),
+        and a read the Stop interrupted surfaces as the Stop
+        (``AskCancelled``), not as a failure.
+        """
+        readers = getattr(self, "ceiling_readers", None)
+        if readers is None:
+            raise RuntimeError(
+                "AskService has no ceiling readers; an ask never runs "
+                "without a retrieval ceiling"
+            )
+        stack = ExitStack()
+        try:
+            stack.enter_context(default_ceiling_context(
+                notebook_id,
+                str(user_id or ""),
+                cancellable_ceiling_readers(readers, cancel_event),
+                local_scope=local_scope,
+                base_scope=base_scope,
+                cancel_event=cancel_event,
+            ))
+        except AskCancelled:
+            raise
+        except Exception:
+            raise_if_cancelled(cancel_event)
+            raise
+        with stack:
+            yield
 
     def ask_current(
         self, notebook_id: str, payload: AskRequest, *, submitted_via: StoredSubmittedVia = ""
@@ -1668,20 +1734,35 @@ class AskService:
         question: str,
         history: str = "",
         cancel_event: CancelEvent = None,
+        *,
+        source_scope: Any = None,
+        base_scope: Any = None,
+        user_id: str | None = None,
     ) -> QueryIntentContract:
-        """Understand a reasoning request before any corpus retrieval starts."""
+        """Understand a reasoning request before any corpus retrieval starts.
+
+        Runs under the same ceiling the ask will (``_retrieval_ceiling``, with
+        the scopes the route froze), so the precheck can never see more than
+        the run it prepares.  ``user_id`` defaults to the request's user."""
         from app.services.query_intent import plan_query_intent
 
         status: dict[str, bool] = {}
-        contract = plan_query_intent(
-            self.model_clients.chat("reasoning_agent"),
-            question,
-            history,
-            max_topics=self.settings.reasoning_max_subqueries,
-            purpose="step-by-step evidence-grounded answer",
+        with self._retrieval_ceiling(
+            notebook_id,
+            self.current_user_id() if user_id is None else user_id,
+            local_scope=source_scope,
+            base_scope=base_scope,
             cancel_event=cancel_event,
-            status=status,
-        )
+        ):
+            contract = plan_query_intent(
+                self.model_clients.chat("reasoning_agent"),
+                question,
+                history,
+                max_topics=self.settings.reasoning_max_subqueries,
+                purpose="step-by-step evidence-grounded answer",
+                cancel_event=cancel_event,
+                status=status,
+            )
         result = QueryIntentContract(**contract)
         result._understanding_succeeded = status.get(
             "understanding_succeeded", False
@@ -1697,9 +1778,10 @@ class AskService:
         ``ask_current`` before ``begin_job_current`` and the streaming
         coordinator before ``begin_durable_job`` — so an invalid submission
         fails before a durable job or stream header exists.  It no longer
-        depends on the request's source scope: the checkbox ceiling is applied
-        by ``source_scope_context`` at retrieval boundaries, and the
-        model-inferred scope this used to cross-check is gone.
+        depends on the request's source scope: the checkbox ceiling is
+        installed by ``_retrieval_ceiling`` and applied at retrieval
+        boundaries, and the model-inferred scope this used to cross-check is
+        gone.
         """
         if self._resolve_ask_mode(getattr(payload, "mode", None)).id != "reasoning":
             return
@@ -2175,13 +2257,8 @@ class AskService:
             plugin_engine_trace_steps,
             release_plugin_engine_ports,
         )
-        from contextlib import ExitStack
-
         from app.services.retrieval_run import current_retrieval_run, retrieval_run
-        from app.services.source_scope import (
-            current_source_scope,
-            source_scope_context,
-        )
+        from app.services.source_scope import current_source_scope
 
         host = self.ask_engine_host
         mode_id = str(payload.mode or "")
@@ -2219,8 +2296,14 @@ class AskService:
                 or run.cancel_event is not cancel_event
             ):
                 raise StageBoundaryError("invalid plugin Ask retrieval authority")
+            # The ceiling is ``AskService.ask``'s (``_retrieval_ceiling``): the
+            # same default ceiling every other engine runs under, per-library
+            # ceilings and ``ceilings_total`` included.  This method builds no
+            # scope of its own; reaching it without one is refused.
             scope = current_source_scope()
-            if scope is not None and scope.notebook_id != prepared.notebook_id:
+            if scope is None:
+                raise StageBoundaryError("plugin Ask has no retrieval ceiling")
+            if scope.notebook_id != prepared.notebook_id:
                 raise StageBoundaryError("plugin Ask source scope changed")
             owned_ports: list[object] = []
             hidden_cache: dict[tuple[str, str], tuple[str, ...]] = {}
@@ -2233,9 +2316,11 @@ class AskService:
                 # is what the MCP memory:read filter recognizes, and the port
                 # has no channel to mint it), so the caller's own Memory
                 # projection sources never enter the plugin retrieval face at
-                # all — filtering the frozen universe here beats trying to
-                # re-identify Memory-backed rows after the fact. Knowhow
-                # projections stay: the grid is notebook-shared content.
+                # all -- unconditionally, whatever the Memory channel says.
+                # "Which of these are Memory" is the ceiling's own spelling
+                # (``partition_memory_sources`` over the notebook's Memory
+                # source ids), not a second classifier.  Knowhow projections
+                # stay: the grid is notebook-shared content.
                 cached = hidden_cache.get((notebook_id, actor_id))
                 if cached is not None:
                     return cached
@@ -2243,95 +2328,13 @@ class AskService:
                     self.ask_engine_hidden_sources(notebook_id, actor_id)
                 )
                 if ids:
-                    metadata = self.evidence_context.source_metadata(ids)
-                    ids = tuple(
-                        source_id for source_id in ids
-                        if (metadata.get(source_id) or {}).get("source_type")
-                        != "memory"
-                    )
+                    ids = partition_memory_sources(
+                        ids, self.ceiling_readers.memory_sources(notebook_id)
+                    )[0]
                 hidden_cache[(notebook_id, actor_id)] = ids
                 return ids
 
-            scope_stack = ExitStack()
             try:
-                # The two scope dimensions are independently optional, so
-                # every OMITTED dimension is synthesized on its own while a
-                # supplied one passes through field-faithfully (codex #604
-                # R2 P2: a base-only or local-only submission left the other
-                # dimension unfrozen for the un-narrowed KG lane). The result
-                # is the frozen all-selected snapshot shape the browser
-                # freezes for every request, so the KG candidate seam behaves
-                # identically on every face: ANN arm on, snapshot applied at
-                # evidence hydrate. narrowed=False keeps every channel open,
-                # and the display receipt is a separate ContextVar only the
-                # API route sets on real narrowing — nothing user-visible is
-                # produced (this is per-run internal freezing, deliberately
-                # unlike persisted report scopes where an omitted dimension
-                # must stay omitted). The local hidden half MUST be the RAW
-                # set (the caller's Memory projections included, exactly what
-                # the browser snapshot carries): the seam's universe-drift
-                # probe compares it against the live `hidden_source_ids`
-                # read, and a Memory-stripped copy would never match —
-                # silently re-closing the ANN arm for every user who has one
-                # confirmed Memory (ANN-arm review P2-1). Memory exclusion is
-                # NOT this ceiling's job; its authorities are the port
-                # universe (`plugin_hidden_sources`) and the out-of-universe
-                # drop rule in `_issue_kg_evidence`. The library half freezes
-                # as include of the mounted-at-synthesis set (codex #604 R1
-                # P2): a None base scope leaves `base_ceiling_active` false
-                # and a library mounted mid-run would join the seam path.
-                # The supplied-half pass-through rebuilds raw dicts from the
-                # live scope object rather than the persistence payload
-                # helpers — those deliberately drop hidden ids, which would
-                # re-break the drift-probe equality.
-                needs_local = scope is None or not scope.source_provided
-                needs_base = scope is None or not scope.base_provided
-                if needs_local or needs_base:
-                    local_raw = (
-                        {
-                            "mode": "include",
-                            "source_ids": list(self.ask_engine_visible_sources(
-                                prepared.notebook_id
-                            )),
-                            "hidden_source_ids": list(
-                                self.ask_engine_hidden_sources(
-                                    prepared.notebook_id, prepared.user_id
-                                )
-                            ),
-                            "narrowed": False,
-                            "owner_id": prepared.user_id,
-                        }
-                        if needs_local else
-                        {
-                            "mode": scope.mode,
-                            "source_ids": list(scope.source_ids),
-                            "narrowed": scope.narrowed,
-                            "hidden_source_ids": list(scope.hidden_source_ids),
-                            "owner_id": scope.owner_id,
-                        }
-                    )
-                    base_raw = (
-                        {
-                            "mode": "include",
-                            "notebook_ids": [
-                                participant for participant in
-                                self.ask_engine_participant_notebooks(
-                                    prepared.notebook_id
-                                )
-                                if participant != prepared.notebook_id
-                            ],
-                            "narrowed": False,
-                        }
-                        if needs_base else
-                        {
-                            "mode": scope.base_mode,
-                            "notebook_ids": list(scope.base_notebook_ids),
-                            "narrowed": scope.base_narrowed,
-                        }
-                    )
-                    scope_stack.enter_context(source_scope_context(
-                        prepared.notebook_id, local_raw, base_raw
-                    ))
                 retrieval = PluginRetrievalAccess(
                     active_notebook_id=prepared.notebook_id,
                     actor_id=prepared.user_id,
@@ -2471,7 +2474,6 @@ class AskService:
                 raise AskPluginEngineError(code) from None
             finally:
                 release_plugin_engine_ports(*owned_ports)
-                scope_stack.close()
 
             tier_map = self._tier_map_for(
                 {record.notebook_id for record in records}

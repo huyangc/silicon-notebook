@@ -76,6 +76,11 @@ def test_ask_service_dispatches_by_the_same_registry(monkeypatch):
     from app.services.ask_service import AskService
 
     service = AskService.__new__(AskService)   # dispatch 不触任何端口
+    # Every ask installs its default ceiling first (``_retrieval_ceiling``);
+    # an empty notebook's readers keep this dispatch test store-free.
+    from tests.test_ask_service_boundary import static_ceiling_readers
+
+    service.ceiling_readers = static_ceiling_readers()
     calls = {}
     events = []
     service.event_log = type(
@@ -87,7 +92,9 @@ def test_ask_service_dispatches_by_the_same_registry(monkeypatch):
                     on_trace=None, cancel_event=None, seed_ids=None,
                     job_id=None):
             from app.services.retrieval_run import current_retrieval_run
+            from app.services.source_scope import current_source_scope
 
+            calls["scope"] = current_source_scope()
             calls["hit"] = (mid, user_id)
             calls["run_cancel"] = current_retrieval_run().cancel_event
             return AskResponse(conclusion=mid)
@@ -102,6 +109,9 @@ def test_ask_service_dispatches_by_the_same_registry(monkeypatch):
         cancel_event=cancel_event,
     ).conclusion == "ask_chunk"
     assert calls["hit"] == ("ask_chunk", "u1")
+    # The handler runs under the default ceiling, never unscoped.
+    assert calls["scope"] is not None and calls["scope"].ceilings_total
+    assert calls["scope"].owner_id == "u1"
     assert calls["run_cancel"] is cancel_event
     assert events[0]["kind"] == "retrieval_run_stats"
     assert events[0]["correlation_id"] == "job-safe-id"

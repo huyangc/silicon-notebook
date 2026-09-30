@@ -146,6 +146,9 @@ class RetrievalService:
             source_scope_ceiling_active()
             or base_scope_ceiling_active()
             or peer_scope_ceiling_active()
+            # A total set of per-library ceilings denies every library it
+            # does not name, even with no other ceiling active.
+            or (scope is not None and scope.ceilings_total)
         ):
             return result
         result.nodes = filter_retrieval_items(notebook_id, "knowledge", result.nodes)
@@ -563,11 +566,19 @@ class RetrievalService:
         """
         from app.services.source_scope import (
             base_scope_ceiling_active,
+            current_source_scope,
             scoped_participants,
         )
 
-        if not base_scope_ceiling_active():
+        scope = current_source_scope()
+        total = scope is not None and scope.ceilings_total
+        if not base_scope_ceiling_active() and not total:
             return self.candidates._any_base_notebook_has_kg(notebook_id)
+        # ``ceilings_total`` (every default ceiling, every global run) is a
+        # frozen library set too: a library mounted after the freeze has no
+        # entry and is not in, and one frozen to ``frozenset()`` (skipped
+        # because its sources could not be read) contributes nothing, so
+        # neither may make a graph look available.
         return any(
             self.has_kg(base_id)
             for base_id in scoped_participants(
@@ -579,6 +590,7 @@ class RetrievalService:
             # always keeps it -- this gate is about the base dimension only
             # (R1).
             if base_id != notebook_id
+            and not (total and scope.source_ceiling_for(base_id) == frozenset())
         )
 
     def unsafe_source_scope_restricted(self, notebook_id: str) -> bool:

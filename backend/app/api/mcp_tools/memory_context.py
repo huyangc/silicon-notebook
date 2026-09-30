@@ -38,7 +38,7 @@ from app.services.query_intent import (
     validate_confirmed_intent,
 )
 from app.services.search_concurrency import run_under_search_gate
-from app.services.source_scope import default_ceiling_context, memory_access_context
+from app.services.source_scope import memory_access_context
 
 from ._shared import (
     RESULT_LIMIT,
@@ -469,15 +469,16 @@ def _run_ask_notebook(
     private-Memory channel for everything run here.  It is entered HERE, in
     the worker thread that executes retrieval, on purpose: anyio's
     ``to_thread.run_sync`` does copy the event loop's context into the
-    worker, but entering the channel (and the ceiling below) inside the
-    function that runs the retrieval keeps it correct whatever hop brings the
-    work here, and scopes it exactly to this call.  The ask
-    itself runs under the default retrieval ceiling built for the token's
-    owner -- never under a submitted ``local_scope``: this surface has no
-    source picker, and its hidden half follows the channel (no Memory when
-    closed), so neither another member's nor, without ``memory:read``, the
-    owner's own Memory projections are retrievable.  A reader failure fails
-    the call; it never falls back to an unscoped run.
+    worker, but entering the channel inside the function that runs the
+    retrieval keeps it correct whatever hop brings the work here, and scopes
+    it exactly to this call.  The ceiling is not installed here: the ask (and
+    the understanding step) run under the Ask service's one installation
+    (``AskService._retrieval_ceiling``), built for the token's owner with no
+    submitted ``local_scope`` -- this surface has no source picker -- and its
+    hidden half follows the channel (no Memory when closed), so neither
+    another member's nor, without ``memory:read``, the owner's own Memory
+    projections are retrievable.  A reader failure fails the call; it never
+    falls back to an unscoped run.
     """
     with _owner_request_context(principal), memory_access_context(allow_memory):
         confirmation: AskIntentConfirmation | None = None
@@ -527,21 +528,19 @@ def _run_ask_notebook(
                 answers=[],
                 understanding_ms=understanding_ms,
             )
-        # ``_runtime``, not a facade seat (precedent: ``_shared.refuse_if_mirrored``):
-        # the readers are the runtime's one production wiring.
-        with default_ceiling_context(
-            notebook_id, principal.owner_id, repo._runtime.ceiling_readers()
-        ):
-            return _ask_actionable(
-                repo,
-                notebook_id,
-                AskRequest(
-                    question=question,
-                    mode=mode,
-                    conversation_id=conversation_id or None,
-                    intent=confirmation,
-                ),
-            )
+        # No ``local_scope``/``base_scope``: this surface has no source picker,
+        # so the Ask service's one installation (``AskService._retrieval_ceiling``)
+        # freezes the token owner's default ceiling.
+        return _ask_actionable(
+            repo,
+            notebook_id,
+            AskRequest(
+                question=question,
+                mode=mode,
+                conversation_id=conversation_id or None,
+                intent=confirmation,
+            ),
+        )
 
 
 _CLARIFICATION_NEXT_STEP = (

@@ -437,8 +437,11 @@ def test_ask_and_report_entrypoints_install_their_actor_identity():
     from app.services.report_engine import ReportEngine
 
     observed = []
+    from tests.test_ask_service_boundary import static_ceiling_readers
+
     ask = object.__new__(AskService)
     ask.event_log = None
+    ask.ceiling_readers = static_ceiling_readers()
     ask.ask_chunk = lambda *_args, **_kwargs: observed.append(
         ("ask", current_retrieval_run().actor_id)
     )
