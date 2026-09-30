@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, GitMerge, LayoutDashboard, LayoutGrid, Link2, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, Users, X } from "lucide-react";
 import "katex/dist/katex.min.css";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
@@ -133,7 +133,8 @@ import { useReportWorkspace } from "./use-report-workspace.ts";
 import { useKgWorkspace } from "./use-kg-workspace.ts";
 import { useNotebookCollection, type NotebookEditorPatch } from "./use-notebook-collection.ts";
 import { useNotebookTitleDraft } from "./use-notebook-title-draft.ts";
-import { useNotebookExit, type ExitAnchor } from "./use-notebook-exit.ts";
+import { anchorAt, anchorOf, useNotebookExit, type ExitAnchor } from "./use-notebook-exit.ts";
+import { ToastRegion, TOAST_DEFAULT_MS, TOAST_EXIT_MS } from "./toast-region";
 import { NotebookExitPanel } from "./notebook-exit-panel";
 import {
   useRootModalCoordinator,
@@ -906,6 +907,16 @@ export default function Home() {
     setCatalogReviewSeq(0);
   }, [sourceDetail?.id, currentNotebookId]);
   const [toast, setToast] = useState("");
+  // 「退出共享」的结果提示(永久删除记忆的唯一确认)停留更久:提示文字与 `toast` 相同时按
+  // TOAST_EXIT_MS 计时,其余提示仍是 TOAST_DEFAULT_MS。
+  const [exitToast, setExitToast] = useState("");
+  // 打开卡片菜单的那颗「⋮」:「退出共享」面板以它为落点,关闭后焦点也还给它。
+  const menuTriggerRef = useRef<HTMLElement | null>(null);
+  const showExitToast = useCallback((message: string) => {
+    setExitToast(message);
+    setToast(message);
+  }, []);
+  const expireToast = useCallback(() => setToast(""), []);
   // 铃铛里「进行中的提问」的全局条目要打开的那个全局会话(见 GlobalAskLauncher)。
   const [globalAskRequest, setGlobalAskRequest] = useState<GlobalConversationRequest | null>(null);
   const [modelStatusState, setModelStatusState] = useState({
@@ -963,7 +974,7 @@ export default function Home() {
   const [copyBusy, setCopyBusy] = useState(false);
   // 只读共享(Phase 2):「退出共享」是唯一一份流程(读条数→确认→DELETE),两个入口共用,
   // 见 use-notebook-exit.ts;已分享总览 modal 的数据与开关
-  const notebookExit = useNotebookExit({ onToast: setToast, onError: reportError });
+  const notebookExit = useNotebookExit({ onToast: showExitToast, onError: reportError });
   const [sharedByMeList, setSharedByMeList] = useState<SharedByMeItem[] | null>(null);
   // 总览里正在被撤销的那一本(codex #631 R2 P2)。`shareBusy` 是全局的忙碌闸,拿它当**文案**
   // 判据会让每一行的按钮都写「取消中…」——分享得多的用户读到的是「全都在取消」。闸(disabled)
@@ -1819,17 +1830,11 @@ export default function Home() {
       });
   }, [authChecked, currentUser?.id]);
 
-  useEffect(() => {
-    if (!toast) return;
-    const timer = window.setTimeout(() => setToast(""), 2200);
-    return () => window.clearTimeout(timer);
-  }, [toast]);
-
-  // 换库/回主页:上一个入口留下的退出确认面板不该悬在别的页面上。取消只收起面板,
+  // 换库/回主页:上一个入口留下的退出确认面板不该悬在别的页面上。只收起面板(不动焦点),
   // 已在飞的 DELETE 不受影响(它落地后照样刷新列表并出提示)。
   useEffect(() => {
-    notebookExit.cancel();
-  }, [currentNotebook?.id, notebookExit.cancel]);
+    notebookExit.dismiss();
+  }, [currentNotebook?.id, notebookExit.dismiss]);
 
   // Example prompts / placeholders adapt to the open notebook's imported sources,
   // so a new notebook never shows demo examples.
@@ -3075,8 +3080,14 @@ export default function Home() {
     return () => { void presentNotebookDelete(notebookId); notebookCollection.closeMenu(); };
   }
 
-  function leaveMenuNotebook(notebookId: string, anchor: ExitAnchor) {
+  function leaveMenuNotebook(notebookId: string, position: { left: number; top: number }) {
     return () => {
+      // 菜单一点就关,菜单项随之消失;面板以打开菜单的那颗「⋮」为落点(它还在),
+      // 找不到它时才退到菜单原来的位置。
+      const trigger = menuTriggerRef.current;
+      const anchor: ExitAnchor = trigger?.isConnected
+        ? anchorOf(trigger)
+        : anchorAt(position.left, position.top - 8);
       notebookCollection.closeMenu();
       notebookExit.start(notebookId, anchor, () => loadNotebookCollection());
     };
@@ -4838,6 +4849,7 @@ export default function Home() {
 
   function openNotebookMenu(notebookId: string, event: MouseEvent<HTMLButtonElement>) {
     event.stopPropagation();
+    menuTriggerRef.current = event.currentTarget;
     notebookCollection.openMenu(notebookId, event.currentTarget.getBoundingClientRect());
   }
 
@@ -5270,7 +5282,7 @@ export default function Home() {
                 {isReader ? (
                   <ReaderNotebookBadge
                     notebook={currentNotebook}
-                    leaveBusy={notebookExit.busyId === currentNotebook.id}
+                    leaveBusy={notebookExit.isBusy(currentNotebook.id)}
                     onLeave={handleLeaveShared}
                     // 组管理员(can_manage_content)可在顶栏改名(PATCH-only,notebook:manage)。
                     // 徽章按 can_manage_content 才渲染成可编辑;纯只读成员传了也只显示 h1。
@@ -7792,7 +7804,11 @@ export default function Home() {
       )}
 
       <GlobalAskLauncher key={currentUser.id} presentation={rootModals} uiMode={uiMode} openRequest={globalAskRequest} />
-      {toast && <div className="toast">{toast}</div>}
+      <ToastRegion
+        message={toast}
+        lingerMs={toast && toast === exitToast ? TOAST_EXIT_MS : TOAST_DEFAULT_MS}
+        onExpire={expireToast}
+      />
       <PendingToast toast={pending.toast} onClose={() => pending.setToast(null)}
         onClick={() => { if (pending.toast) openDoneItem(pending.toast); }} />
 

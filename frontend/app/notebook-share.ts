@@ -94,9 +94,9 @@ export const copyShared = (token: string): Promise<NotebookSummaryLike> =>
 export const joinShared = (token: string): Promise<NotebookSummaryLike> =>
   requestJson(`/shared/${token}/join`, { method: "POST", tag: "share" });
 
-// 退出只读共享(移除自己的成员身份,期望 204)。
-export const leaveNotebook = (notebookId: string): Promise<void> =>
-  requestVoid(`/notebooks/${notebookId}/membership`, { method: "DELETE", tag: "share" });
+// 退出只读共享**没有**无条件的 DELETE 入口:退出会永久删除成员自己的记忆,唯一的流程
+// (先告知、确认后才发 DELETE)在 notebook-exit-api.ts / use-notebook-exit.ts,守卫
+// (group-sharing-guard)禁止这里再导出 leaveNotebook。
 
 // owner 的「已分享总览」:所有我 owner 且 is_shared 的库(readonly 带成员名单)。
 export const sharedByMe = (): Promise<SharedByMeItem[]> =>

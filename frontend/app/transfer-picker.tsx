@@ -19,6 +19,7 @@ export function DestinationPicker({
   showExtractKg = false,
   extractKg = true,
   onExtractKgChange,
+  cancelWhileBusy = false,
   onCancel,
   onSubmit,
 }: {
@@ -36,6 +37,11 @@ export function DestinationPicker({
   showExtractKg?: boolean;
   extractKg?: boolean;
   onExtractKgChange?: (value: boolean) => void;
+  // 提交进行中「取消」是否仍可点。默认 false(既有的记忆页/知识表调用方行为不变:提交期间
+  // 整个选择器只读)。退出共享面板传 true:这个全屏浮层(z 80)盖住了面板自己永不禁用的
+  // 「取消」(z 70),不给它一个出口,转移途中「取消永远可用」就落空了;调用方负责在关掉
+  // 之后仍把那次已发出的请求的结果告诉用户。
+  cancelWhileBusy?: boolean;
   onCancel: () => void;
   // round 10 P2：第三个参数是目标笔记本的 name——本组件自己刚从 /notebooks
   // 拉到的完整候选列表（下面的 notebooks state）里现成就有，调用方（尤其是
@@ -165,7 +171,7 @@ export function DestinationPicker({
             .memory-dialog-actions 那几条(第 20/103/486-491/712 行附近的分组选择器)
             提到 globals.css,别在这里另造一套。 */}
         <div className="memory-dialog-actions">
-          <button type="button" disabled={busy} onClick={onCancel}>
+          <button type="button" disabled={busy && !cancelWhileBusy} onClick={onCancel}>
             取消
           </button>
           <button type="button" className="primary" disabled={busy || !target} onClick={submit}>

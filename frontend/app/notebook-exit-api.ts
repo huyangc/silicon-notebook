@@ -6,17 +6,21 @@
 //   1. GET  .../membership/exit-disclosure → { memory_count: N }  先问会删多少条;
 //   2. N = 0 → DELETE .../membership,不带任何查询参数(与改动前逐字节相同);
 //      N > 0 → 用户看过并确认之后 DELETE .../membership?acknowledged_memory_count=N。
-//   3. 服务端在「N > 0 而参数缺失或不等」时回 409 `exit_disclosure_required`(附它自己数
-//      到的最新条数),什么都不删;调用方据此就地更新确认框。
+//   3. 服务端在「确认数缺失或与它此刻数到的不等」时回 409 `exit_disclosure_required`(附它
+//      自己数到的最新条数),什么都不删;调用方据此就地更新确认框;
+//   4. 成功是 204(没有删)或 200 `{deleted_memory_count}`;删了一部分却没退成是 409 / 503
+//      `exit_incomplete`(带 deleted_memory_count 与 memory_count)。客户端展示的每个数字
+//      都取自这些响应,不自己算。
 //
 // 请求全部经共享 transport(api-client)。DELETE 用 `performApiRequest` 而不是
-// `requestVoid`:409 的正文要读出最新条数,而 `throwHumanizedHttpError` 会把它压平成一句
+// `requestVoid`:409/503 的正文要读出数字,而 `throwHumanizedHttpError` 会把它压平成一句
 // 泛化文案。其余失败仍走 `throwHumanizedHttpError`。
 
 import { performApiRequest, requestJson } from "./api-client.ts";
 import { throwHumanizedHttpError } from "./errors.ts";
+import { isGroupGranted } from "./group-api.ts";
 import { memoryListPath } from "./memory-model.ts";
-import type { PaginatedMemories } from "./workspace-model.ts";
+import type { NotebookSummary, PaginatedMemories } from "./workspace-model.ts";
 
 const TAG = "notebook-exit";
 const EXIT_DISCLOSURE_REQUIRED = "exit_disclosure_required";
@@ -44,46 +48,90 @@ export async function getExitDisclosure(
   return { memory_count: disclosure.memory_count };
 }
 
-export type LeaveResult =
-  | { left: true }
-  /** 服务端拒绝了:确认过的条数与它此刻数到的不一致(或还没确认)。`memoryCount` 是最新值。 */
-  | { left: false; memoryCount: number };
+/** 一次 DELETE 的结果。每个数字都来自服务端的响应,客户端不自己算。 */
+export type LeaveOutcome =
+  /** 204 或 200:成员关系已结束。`deleted` 是服务端数到的、这次请求删掉的条数(204 没删,为 0)。 */
+  | { kind: "left"; deleted: number }
+  /** 409 exit_disclosure_required:确认过的条数与服务端此刻数到的不一致。什么都没删,仍是成员。 */
+  | { kind: "disclosure"; memoryCount: number }
+  /** 409 / 503 exit_incomplete:已删 `deleted` 条,没有退出成功(仍是成员),还剩 `remaining` 条。 */
+  | { kind: "incomplete"; deleted: number; remaining: number; status: 409 | 503 }
+  /** 网络失败、超时、读不懂的 5xx:不知道服务端做到了哪一步,不能说「失败」。 */
+  | { kind: "unknown" };
 
-/** 409 正文里的最新条数;不是这个形状返回 null(那就是一个普通的 409)。 */
-async function disclosureRequiredCount(response: Response): Promise<number | null> {
-  let body: unknown;
+const EXIT_INCOMPLETE = "exit_incomplete";
+
+async function structuredDetail(response: Response): Promise<Record<string, unknown> | null> {
   try {
-    body = await response.json();
+    const detail = ((await response.json()) as { detail?: unknown } | null)?.detail;
+    return typeof detail === "object" && detail !== null ? (detail as Record<string, unknown>) : null;
   } catch {
     return null;
   }
-  const detail = (body as { detail?: unknown } | null)?.detail;
-  if (typeof detail !== "object" || detail === null) return null;
-  const { code, memory_count: memoryCount } = detail as Record<string, unknown>;
-  return code === EXIT_DISCLOSURE_REQUIRED && isCount(memoryCount) ? memoryCount : null;
 }
 
 /**
  * 退出共享。`acknowledgedMemoryCount` 为 0(或不传)时**不带**查询参数——N = 0 的请求
  * 必须与「退出要删记忆」出现之前的那条 DELETE 完全一样。
+ *
+ * 契约里有明确含义的响应(204 / 200 / 409 / 503 exit_incomplete)返回 `LeaveOutcome`;
+ * 传输失败和读不懂的 5xx 返回 `unknown`(调用方去核对实际状态);其余(401/403/404…)
+ * 抛出已翻成人话的错误。
  */
 export async function leaveNotebook(
   notebookId: string,
   acknowledgedMemoryCount = 0,
-): Promise<LeaveResult> {
+): Promise<LeaveOutcome> {
   const query = acknowledgedMemoryCount > 0
     ? `?acknowledged_memory_count=${acknowledgedMemoryCount}`
     : "";
-  const response = await performApiRequest(`${membershipPath(notebookId)}${query}`, {
-    method: "DELETE",
-    tag: TAG,
-  });
-  if (response.ok) return { left: true };
-  if (response.status === 409) {
-    const memoryCount = await disclosureRequiredCount(response.clone());
-    if (memoryCount !== null) return { left: false, memoryCount };
+  let response: Response;
+  try {
+    response = await performApiRequest(`${membershipPath(notebookId)}${query}`, {
+      method: "DELETE",
+      tag: TAG,
+    });
+  } catch {
+    return { kind: "unknown" };
   }
+  if (response.status === 204) return { kind: "left", deleted: 0 };
+  if (response.ok) {
+    const body = (await response.json().catch(() => null)) as { deleted_memory_count?: unknown } | null;
+    return { kind: "left", deleted: isCount(body?.deleted_memory_count) ? body.deleted_memory_count : 0 };
+  }
+  if (response.status === 409 || response.status === 503) {
+    const detail = await structuredDetail(response.clone());
+    if (detail?.code === EXIT_DISCLOSURE_REQUIRED && response.status === 409 && isCount(detail.memory_count)) {
+      return { kind: "disclosure", memoryCount: detail.memory_count };
+    }
+    if (detail?.code === EXIT_INCOMPLETE && isCount(detail.deleted_memory_count) && isCount(detail.memory_count)) {
+      return {
+        kind: "incomplete",
+        deleted: detail.deleted_memory_count,
+        remaining: detail.memory_count,
+        status: response.status,
+      };
+    }
+  }
+  if (response.status >= 500) return { kind: "unknown" };
   return throwHumanizedHttpError(response, TAG);
+}
+
+/** 退出之后服务端实际处于哪种状态(用于结果不明时核对)。 */
+export type ExitState =
+  | { left: true }
+  | { left: false; remaining: number };
+
+/**
+ * 重读笔记本列表与告知条数,判断此刻是「已退出」还是「仍是成员、还剩几条记忆」。
+ * 列表里没有这本库,或者它只剩群组授权(退出之后靠授权继续读)都算已退出。
+ * 任何一步读不到就抛出——调用方据此说「无法确认」,不猜。
+ */
+export async function readExitState(notebookId: string): Promise<ExitState> {
+  const notebooks = await requestJson<NotebookSummary[]>("/notebooks", { tag: TAG });
+  const entry = notebooks.find((notebook) => notebook.id === notebookId);
+  if (!entry || isGroupGranted(entry)) return { left: true };
+  return { left: false, remaining: (await getExitDisclosure(notebookId)).memory_count };
 }
 
 /** `Content-Disposition` 里的文件名(`filename*=UTF-8''…` 优先);取不到返回 null。

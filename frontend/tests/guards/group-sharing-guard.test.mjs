@@ -9,11 +9,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  appSourceModules,
   callsIn,
   controlFlowIn,
+  declarations,
   findFunction,
   ifConditionsIn,
   importsFrom,
+  importsIn,
   jsxElements,
   parseModule,
   variableInitializersIn,
@@ -287,12 +290,46 @@ test("退出共享的两个入口共用 use-notebook-exit 的同一份流程与�
   assert.equal(jsxElements(page, "NotebookExitPanel")[0].bindings.exit, "notebookExit");
   const badge = jsxElements(page, "ReaderNotebookBadge")[0];
   assert.equal(badge.bindings.onLeave, "handleLeaveShared");
-  assert.equal(badge.bindings.leaveBusy, "notebookExit.busyId === currentNotebook.id");
+  assert.equal(badge.bindings.leaveBusy, "notebookExit.isBusy(currentNotebook.id)");
   const bar = findFunction(page, "handleLeaveShared");
   assert.ok(bar, "缺 handleLeaveShared");
   assert.match(bar.getText(page), /notebookExit\.start\(/);
   assert.match(bar.getText(page), /refreshAfterAccessChange\(navEpoch\)/);
   assert.equal((pageText.match(/\bleaveNotebook\(/g) ?? []).length, 0);
+});
+
+// 退出共享**没有**无条件的 DELETE 入口:任何绕开「先告知、确认后才删」流程的导出都会让
+// 成员在不知情时永久丢掉记忆。notebook-share.ts 曾留着一个无人调用的 leaveNotebook(注释还
+// 写着「移除自己的成员身份」),它一旦被谁重新接上就是那个绕道——这里禁止它回来。
+test("notebook-share.ts 不导出 leaveNotebook,任何模块也不从那里导入它", async () => {
+  const share = await parseModule("notebook-share.ts");
+  assert.deepEqual(
+    declarations(share).filter((item) => item.name === "leaveNotebook"),
+    [],
+    "notebook-share.ts 又声明了 leaveNotebook —— 它是绕开记忆删除告知的无条件 DELETE",
+  );
+  const importers = [];
+  for (const { path, module } of await appSourceModules()) {
+    for (const item of importsIn(module)) {
+      if (/(^|\/)notebook-share(\.ts)?$/.test(item.module) && item.imported === "leaveNotebook") {
+        importers.push(path);
+      }
+    }
+  }
+  assert.deepEqual(importers, []);
+});
+
+// 结果提示是永久删除记忆的唯一确认:page 只渲染一份 ToastRegion(role=status 的常驻区域),
+// 「退出共享」的提示走 showExitToast(停留更久),不再有条件渲染整个 `.toast` 节点的旧写法。
+test("页面的提示由 ToastRegion 渲染,退出共享的提示走加长停留的那条通道", () => {
+  assert.equal(jsxElements(page, "ToastRegion").length, 1);
+  assert.equal(jsxElements(page, "ToastRegion")[0].bindings.message, "toast");
+  assert.match(pageText, /useNotebookExit\(\{ onToast: showExitToast,/);
+  assert.equal(
+    jsxElements(page, "div").filter((element) => element.attributes?.className === "toast").length,
+    0,
+    "page.tsx 又自己渲染了 <div className=\"toast\"> —— 没有 role=status,也没有停留时长",
+  );
 });
 
 test("笔记本列表有独立的「群组」分区,且那一区的角色列不写「所有者」", async () => {
