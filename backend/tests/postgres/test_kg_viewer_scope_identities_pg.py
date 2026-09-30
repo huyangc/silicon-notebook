@@ -262,3 +262,73 @@ def test_pg_owned_and_citing_sets_come_from_one_statement(repo):
     with repo._runtime.database.connect() as db:
         assert knowledge.relink_object_rows_for_source(
             db, s.nb, source_ids=[], with_citing=True) == []
+
+
+# ---------------------------------- neighbour member windows (codex #806 r3)
+# Twin of the SQLite block: one suspect hub no longer sizes every cluster's
+# member window; only a cluster with nothing visible in its window is paged
+# further, on its own; a cluster with no visible member at all stays hidden.
+from tests.test_kg_viewer_scope_identities import (  # noqa: E402
+    DARK,
+    DEEP,
+    HUB,
+    MEMBER_SPECS,
+    ORDINARY,
+    count_hydrated_member_rows,
+    neighbour_nodes,
+    seed_member_clusters,
+)
+
+
+def _seed(repo, nb):
+    return seed_member_clusters(repo, nb, MEMBER_SPECS, ph="%s", cast="::jsonb")
+
+
+def test_pg_a_suspect_hub_no_longer_sizes_every_clusters_member_window(repo, monkeypatch):
+    from app.services.kg_viewer_scope import _NEIGHBOUR_MEMBER_WINDOW as window
+
+    s = build_scenario(repo, b_memory=False)
+    _seed(repo, s.nb)
+    _certify(repo, s.nb, True)
+    reader = _reader(repo)
+    scope = as_user(s.b, reader.for_notebook, s.nb)
+    assert scope.hidden_member_bound(HUB) == 60
+    hydrated = count_hydrated_member_rows(reader.knowledge, monkeypatch)
+    clusters = [HUB, *ORDINARY, DEEP]
+    nodes, edges = neighbour_nodes(s.ids.engram_canonical, clusters)
+    kept, _edges = as_user(s.b, scope.filter_neighbourhood, nodes, edges,
+                           (s.ids.engram_canonical,))
+    assert [n["id"] for n in kept] == clusters
+    assert hydrated == [len(clusters) * window + 2, len(MEMBER_SPECS[DEEP]) - window]
+    assert sum(hydrated) <= (len(clusters) + 1) * window + len(MEMBER_SPECS[DEEP])
+
+
+@pytest.mark.parametrize("certified", [True, False])
+def test_pg_a_cluster_is_labelled_by_a_visible_member_beyond_the_first_window(
+    repo, certified,
+):
+    s = build_scenario(repo, b_memory=False)
+    _seed(repo, s.nb)
+    _certify(repo, s.nb, certified)
+    scope = as_user(s.b, _reader(repo).for_notebook, s.nb)
+    nodes, edges = neighbour_nodes(s.ids.engram_canonical, [HUB, DEEP])
+    kept, kept_edges = as_user(s.b, scope.filter_neighbourhood, nodes, edges,
+                               (s.ids.engram_canonical,))
+    labels = {n["id"]: n["payload"]["name"] for n in kept}
+    assert labels == {HUB: f"{HUB} s0", DEEP: f"{DEEP} v12"}
+    assert len(kept_edges) == 2 and "A-PRIVATE" not in repr(kept)
+
+
+@pytest.mark.parametrize("certified", [True, False])
+def test_pg_a_cluster_with_no_visible_member_anywhere_is_hidden(repo, certified):
+    s = build_scenario(repo, b_memory=False)
+    _seed(repo, s.nb)
+    _certify(repo, s.nb, certified)
+    scope = as_user(s.b, _reader(repo).for_notebook, s.nb)
+    nodes, edges = neighbour_nodes(s.ids.engram_canonical, [DARK, ORDINARY[0]])
+    kept, kept_edges = as_user(s.b, scope.filter_neighbourhood, nodes, edges,
+                               (s.ids.engram_canonical,))
+    assert [n["id"] for n in kept] == [ORDINARY[0]]
+    assert [e["target_object_id"] for e in kept_edges] == [ORDINARY[0]]
+    assert "A-PRIVATE" not in repr(kept)
+    assert as_user(s.b, scope.filter_neighbourhood, *neighbour_nodes(DARK, []), (DARK,)) is None
