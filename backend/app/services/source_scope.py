@@ -151,11 +151,28 @@ def _frozen_source_ids(source_ids: Any) -> "CeilingSet":
     passes every mounted library's set through here twice per install, and a
     per-element Python generator cost ~8 ms per 49k-id library each time.
     ``type(sid) is str`` is stricter than ``isinstance`` -- a ``str`` subclass
-    is simply coerced, as any non-canonical input is.
+    is simply coerced, as any non-canonical input is.  What this function (or
+    ``_ordered_source_ids``) builds is a ``_CheckedSourceIds`` -- a
+    ``CeilingSet``, so it carries the enumeration's bound-form memo -- which is
+    returned without re-checking: the second normalisation of every ceiling
+    on each install then costs nothing (the check alone is ~0.6 ms per 49k
+    ids).
     """
+    if type(source_ids) is _CheckedSourceIds:
+        return source_ids
     if isinstance(source_ids, CeilingSet) and set(map(type, source_ids)) <= _STR_TYPE:
         return source_ids
-    return CeilingSet(map(str, source_ids))
+    return _CheckedSourceIds(map(str, source_ids))
+
+
+class _CheckedSourceIds(CeilingSet):
+    """A ``CeilingSet`` whose elements were coerced to ``str`` when it was
+    built (only ``_frozen_source_ids`` / ``_ordered_source_ids`` build one).
+    Equal to, and hashing like, the plain ``frozenset`` of the same ids; it
+    keeps ``CeilingSet.bound_forms`` so an installed ceiling binds once per
+    run on the enumeration paths."""
+
+    __slots__ = ()
 
 
 _STR_TYPE = frozenset({str})
@@ -1942,7 +1959,7 @@ def _ordered_source_ids(values: Iterable[str]) -> tuple[tuple[str, ...], frozens
     frozenset)``, each built once and in C.  Duplicates -- which the production
     read of primary keys cannot return -- keep their first position."""
     order = tuple(map(str, values))
-    frozen = frozenset(order)
+    frozen = _CheckedSourceIds(order)
     if len(frozen) != len(order):
         order = tuple(dict.fromkeys(order))
     return order, frozen
