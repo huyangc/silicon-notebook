@@ -170,7 +170,7 @@ import {
 } from "./bundle-intake.ts";
 import { BundleChoicePanel, BundleReceiptsPanel, type BundleReceiptEntry } from "./bundle-upload-panels.tsx";
 import type { BundleFile, InlineReceipt } from "./md-bundle.ts";
-import { sourceHealthGroups, checkupCount, checkupAlertSignature, hasRepairAction, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
+import { sourceHealthGroups, checkupCount, checkupAlertSignature, checkupNotices, hasRepairAction, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { askQuestionLimitHint, fetchAnswerMemoryLinks } from "./ask-api";
 import { buildPublicReportLink } from "./public-report";
 import { cancelScaleIndex, fetchIndexStatus, fetchScaleIndexStatus, rebuildScaleIndex, type IndexStatus } from "../features/kg-maintenance/kg-api";
@@ -7328,6 +7328,28 @@ export default function Home() {
                         </div>
                       );
                     })}
+                  </div>
+                );
+              })()}
+              {/* 只读体检项(H12 残留的记忆来源):没有修复按钮,只说明现状与由谁处理。紧跟源级
+                  问题,同一种卡片、中性色。*/}
+              {(() => {
+                const notices = checkupNotices(checkup);
+                if (notices.length === 0) return null;
+                return (
+                  <div className="stack" style={{ marginTop: 8 }}>
+                    {notices.map((n) => (
+                      <div className="index-card index-tone-muted" key={n.key}>
+                        <span className="index-ic" aria-hidden="true"><Network size={19} /></span>
+                        <div className="index-main">
+                          <div className="tag-row" style={{ alignItems: "center" }}>
+                            <span className="index-state">{n.label}</span>
+                            {n.unit && <span className="tag">{n.count} {n.unit}</span>}
+                          </div>
+                          <div className="index-sub">{n.detail}</div>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 );
               })()}

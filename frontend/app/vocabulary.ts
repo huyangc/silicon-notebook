@@ -227,8 +227,16 @@ export const CHECKUP_ISSUE: Record<string, string> = {
   H6: "待分析来源",
   H7: "检索索引过期",
   H8: "检索索引损坏",
-  // 只读项(fix=none):系统在每次启动后自行清理,没有用户可点的修复。
-  H12: "残留的记忆来源（重启后自动清理）",
+};
+
+// 只读体检项(fix="none")→ 提示卡文案。它们没有用户能点的修复:系统自己处理。label 是
+// 卡片标题,detail 是说明,unit 非空时标题旁显示计数。
+export const CHECKUP_NOTICE: Record<string, { label: string; detail: string; unit: string }> = {
+  H12: {
+    label: "残留的记忆来源",
+    detail: "系统会在后台自动清理，无需处理。",
+    unit: "篇",
+  },
 };
 
 // 体检修复动作枚举(fix)→ 修复按钮文案。extract_kg 复用既有「分析新增」,
