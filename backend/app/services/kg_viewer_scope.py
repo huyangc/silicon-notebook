@@ -49,7 +49,7 @@ index's completeness certificate, folded to clusters in batches of 900
 object ids.  Neighbours then read the first members of every cluster of the
 response that needs a check in one batched statement
 (``concept_cluster_detail_rows(canonical_ids=...)``), at most
-``_NEIGHBOUR_MEMBER_WINDOW`` per cluster; only a cluster none of whose first
+``_FIRST_MEMBER_WINDOW`` per cluster; only a cluster none of whose first
 members is visible is paged further, on its own.  Everything else is
 decided on the rows the response already carries.
 
@@ -75,12 +75,12 @@ from app.services.source_scope import (
 
 _ID_BATCH = 900
 
-# Neighbour hydration's first member window per checked cluster (codex #806
-# r3): every checked cluster of a response reads at most this many member rows
-# in the one batched statement, whatever any cluster's suspect count; only a
-# cluster whose window is full and holds nothing visible is widened, on its
-# own (``_scan_members``).
-_NEIGHBOUR_MEMBER_WINDOW = 8
+# The first window of a "first visible member" scan (codex #806 r3/r4):
+# neighbour hydration reads at most this many member rows per checked cluster
+# in its one batched statement, and ``visible_member`` starts with at most
+# this many, whatever the cluster's suspect count; only a window that is full
+# and holds nothing visible is widened (``_scan_members``).
+_FIRST_MEMBER_WINDOW = 8
 
 
 class KgViewerScope:
@@ -220,10 +220,11 @@ class KgViewerScope:
         return suspects is None or bool(suspects.get(canonical_id))
 
     def hidden_member_bound(self, canonical_id: str) -> int:
-        """Rows a member window over-fetches by: the cluster's suspect count
-        (an upper bound on its hidden members) when the reverse index is
-        certified, else its owned count (callers widen while a full window
-        holds nothing visible)."""
+        """The cluster's suspect count (an upper bound on its hidden members)
+        when the reverse index is certified, else its owned count.  It only
+        ever LOWERS a first window below ``_FIRST_MEMBER_WINDOW`` (a cluster
+        with fewer suspects needs fewer rows to meet a visible member); it
+        never sizes a read (codex #806 r3/r4: a hub's count did)."""
         owned, per_owned, suspects = self._owned_state()
         if suspects is None:
             return int(per_owned.get(canonical_id, 0))
@@ -273,13 +274,12 @@ class KgViewerScope:
         """The first visible member (member-id order) of a cluster, or
         ``None`` when no live member is visible.
 
-        A bounded read of ``hidden_member_bound + 1`` member rows (no COUNT),
-        widened by doubling only while a full window holds nothing visible
-        (possible only without a certified reverse index)."""
+        A first read of at most ``_FIRST_MEMBER_WINDOW`` member rows (no
+        COUNT), widened by doubling only while a full window holds nothing
+        visible (``_scan_members``)."""
+        window = min(_FIRST_MEMBER_WINDOW, self.hidden_member_bound(canonical_id) + 1)
         with self._reader.connect() as db:
-            return self._scan_members(
-                db, canonical_id, after="",
-                window=self.hidden_member_bound(canonical_id) + 1)
+            return self._scan_members(db, canonical_id, after="", window=window)
 
     def _scan_members(
         self, db: Any, canonical_id: str, *, after: str, window: int,
@@ -308,9 +308,9 @@ class KgViewerScope:
     ) -> Dict[str, Optional[Dict[str, Any]]]:
         """``visible_member`` for many clusters: ONE batched read of the first
         ``window`` members of every listed cluster, where ``window`` is
-        ``_NEIGHBOUR_MEMBER_WINDOW`` (lower when no listed cluster's
+        ``_FIRST_MEMBER_WINDOW`` (lower when no listed cluster's
         ``hidden_member_bound + 1`` reaches it) -- at most
-        ``len(canonical_ids) × _NEIGHBOUR_MEMBER_WINDOW`` rows, however large
+        ``len(canonical_ids) × _FIRST_MEMBER_WINDOW`` rows, however large
         one cluster's suspect count is (codex #806 r3: a shared
         ``max(bound) + 1`` let one suspect hub size every cluster's window).
 
@@ -324,7 +324,7 @@ class KgViewerScope:
         if not canonical_ids:
             return {}
         window = min(
-            _NEIGHBOUR_MEMBER_WINDOW,
+            _FIRST_MEMBER_WINDOW,
             max(self.hidden_member_bound(cid) for cid in canonical_ids) + 1,
         )
         found: Dict[str, Optional[Dict[str, Any]]] = {}
@@ -345,17 +345,20 @@ class KgViewerScope:
                 found[cid] = visible
         return found
 
-    def cluster_display_name(self, canonical_id: str, name: str) -> str:
+    def cluster_display_name(self, canonical_id: str, name: str) -> Optional[str]:
         """A cluster that may hold a hidden member (``cluster_needs_check``)
         is labelled with its first visible member's name (the stored
         ``canonical_name`` and the label the viz artifact bakes from one
         member's payload may be a hidden member's); other clusters keep
-        ``name``."""
+        ``name``.  ``None`` when such a cluster has no visible live member:
+        it does not exist for this viewer, and the stored name -- which can
+        only have come from a hidden member -- is never the answer (codex
+        #806 r4)."""
         if not self.cluster_needs_check(canonical_id):
             return name
         row = self.visible_member(canonical_id)
         if row is None:
-            return name
+            return None
         # Same text-JSON row shape concept_detail decodes.
         return str(json.loads(row["payload"] or "{}").get("name", "") or "")
 

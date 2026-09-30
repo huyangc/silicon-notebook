@@ -380,7 +380,7 @@ def test_legacy_step_text_comes_from_the_elements_actual_source(repo, section):
 # One suspect hub used to size EVERY checked cluster's member window
 # (``max(hidden_member_bound) + 1``), so a response holding a hub hydrated its
 # whole member list for every other cluster too.  Now each cluster reads at
-# most ``_NEIGHBOUR_MEMBER_WINDOW`` rows in the batched statement, and only a
+# most ``_FIRST_MEMBER_WINDOW`` rows in the batched statement, and only a
 # cluster whose window holds nothing visible is paged further, on its own.
 # Member kinds, in member-id order: ``v`` visible, ``s`` suspect but visible
 # (owned by the visible source, cites A's Memory and the visible source), ``h``
@@ -463,7 +463,7 @@ def count_hydrated_member_rows(knowledge, monkeypatch):
 
 
 def test_a_suspect_hub_no_longer_sizes_every_clusters_member_window(repo, monkeypatch):
-    from app.services.kg_viewer_scope import _NEIGHBOUR_MEMBER_WINDOW as window
+    from app.services.kg_viewer_scope import _FIRST_MEMBER_WINDOW as window
 
     s = build_scenario(repo, b_memory=False)
     seed_member_clusters(repo, s.nb, MEMBER_SPECS)
@@ -515,3 +515,64 @@ def test_a_cluster_with_no_visible_member_anywhere_is_hidden(repo, certified):
     assert [e["target_object_id"] for e in kept_edges] == [ORDINARY[0]]
     assert "A-PRIVATE" not in repr(kept)
     assert as_user(s.b, scope.filter_neighbourhood, *neighbour_nodes(DARK, []), (DARK,)) is None
+
+
+# ------------------------------------- concept detail pages (codex #806 r4)
+# P2: a page read is the page size, never the cluster's suspect count (a hub
+# whose members all cite A's Memory used to add its whole count to every
+# page); the scan widens only while hidden members leave the page short.
+# P1: a cluster with no visible member is absent on EVERY page -- a later page
+# used to answer with the stored (hidden member's) canonical name.
+def _member_ids(names, canonical):
+    return sorted(oid for oid, name in names.items() if f"{canonical} " in name)
+
+
+def test_a_concept_page_reads_the_page_size_not_the_hubs_suspect_count(repo, monkeypatch):
+    from app.services.kg_viewer_scope import _FIRST_MEMBER_WINDOW as window
+
+    s = build_scenario(repo, b_memory=False)
+    seed_member_clusters(repo, s.nb, MEMBER_SPECS)
+    certify(repo, s.nb, True)
+    knowledge = reader_of(repo).knowledge
+    assert knowledge is repo._runtime.knowledge_query.knowledge
+    hydrated = count_hydrated_member_rows(knowledge, monkeypatch)
+    first = as_user(s.b, repo.concept_detail, s.nb, HUB, limit=5)
+    assert [m["payload"]["name"] for m in first["members"]] == [f"{HUB} s{i}" for i in range(5)]
+    assert first["canonical_name"] == f"{HUB} s0"
+    # Before r4: 5 + 1 + 60 suspects = a 66-row window, i.e. the whole hub.
+    assert hydrated == [6]
+    second = as_user(s.b, repo.concept_detail, s.nb, HUB, limit=5,
+                     after=first["next_cursor"])
+    assert [m["payload"]["name"] for m in second["members"]] == [
+        f"{HUB} s{i}" for i in range(5, 10)]
+    assert second["canonical_name"] == f"{HUB} s0"
+    # The page, then the label's first-visible-member scan (was 61 rows).
+    assert hydrated == [6, 6, window]
+
+
+@pytest.mark.parametrize("certified", [True, False])
+def test_a_concept_page_widens_past_hidden_members(repo, certified):
+    s = build_scenario(repo, b_memory=False)
+    seed_member_clusters(repo, s.nb, MEMBER_SPECS)
+    certify(repo, s.nb, certified)
+    page = as_user(s.b, repo.concept_detail, s.nb, DEEP, limit=3)
+    assert [m["payload"]["name"] for m in page["members"]] == [
+        f"{DEEP} v12", f"{DEEP} v13", f"{DEEP} v14"]
+    assert page["canonical_name"] == f"{DEEP} v12"
+    assert "A-PRIVATE" not in repr(page)
+    rest = as_user(s.b, repo.concept_detail, s.nb, DEEP, limit=3, after=page["next_cursor"])
+    assert [m["payload"]["name"] for m in rest["members"]] == [f"{DEEP} v15", f"{DEEP} v16"]
+    assert rest["canonical_name"] == f"{DEEP} v12" and rest["next_cursor"] is None
+
+
+@pytest.mark.parametrize("certified", [True, False])
+def test_a_cluster_with_no_visible_member_is_absent_on_every_page(repo, certified):
+    s = build_scenario(repo, b_memory=False)
+    names = seed_member_clusters(repo, s.nb, MEMBER_SPECS)
+    certify(repo, s.nb, certified)
+    members = _member_ids(names, DARK)
+    for after in ("", members[0], members[7], members[-1]):
+        with pytest.raises(KeyError):
+            as_user(s.b, repo.concept_detail, s.nb, DARK, limit=3, after=after)
+    owner = as_user(s.a, repo.concept_detail, s.nb, DARK, limit=3, after=members[0])
+    assert owner["canonical_name"] == f"A-PRIVATE {DARK}"
