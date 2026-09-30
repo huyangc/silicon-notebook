@@ -230,6 +230,71 @@ def test_listed_plan_is_driven_by_candidate_keys(pin_database, monkeypatch):
     assert "pk_chunks" in generic, generic
 
 
+@pytest.fixture
+def postgres_repository(postgres_settings):
+    from app.repositories.postgres.repository import PostgresRepository
+
+    repository = PostgresRepository(postgres_settings)
+    try:
+        yield repository
+    finally:
+        repository.close()
+
+
+def test_pg_mounted_knowhow_and_late_uploads_never_take_a_slot(
+    postgres_repository, monkeypatch,
+):
+    """The acceptance case end to end on PostgreSQL (twin of
+    ``test_ppr_source_ceiling.test_mounted_knowhow_and_late_uploads_never_
+    take_a_slot``): the best-ranked candidates are the mounted library's
+    Knowhow rows and its post-freeze upload; all three slots still go to
+    in-ceiling passages."""
+    from app.models.schemas import NotebookCreate
+    from app.services.source_scope import source_scope_context
+
+    repository = postgres_repository
+    base = repository.create_notebook(NotebookCreate(name="base")).id
+    repository.mark_notebook_base(base)
+    active = repository.create_notebook(NotebookCreate(name="active")).id
+    repository.replace_notebook_bases(active, [base], "user-local")
+    rows = (
+        (active, "a1", "file", "c-a1"), (active, "a2", "file", "c-a2"),
+        (base, "b1", "file", "c-b1"), (base, "b2", "file", "c-b2"),
+        (base, "kh", "knowhow", "c-kh-0"), (base, "late", "file", "c-late"),
+    )
+    with repository._runtime.database.write() as db:
+        for notebook_id, source_id, source_type, chunk_id in rows:
+            db.execute(
+                "INSERT INTO sources(id,notebook_id,title,source_type,status,"
+                "parse_status,created_at,updated_at) "
+                "VALUES (%s,%s,%s,%s,'ready','ready',%s,%s) ON CONFLICT DO NOTHING",
+                (source_id, notebook_id, source_id, source_type, NOW, NOW))
+            db.execute(
+                "INSERT INTO chunks(id,notebook_id,source_id,text,element_ids,created_at) "
+                "VALUES (%s,%s,%s,'t','[]',%s)", (chunk_id, notebook_id, source_id, NOW))
+        db.execute(
+            "INSERT INTO chunks(id,notebook_id,source_id,text,element_ids,created_at) "
+            "VALUES ('c-kh-1',%s,'kh','t','[]',%s)", (base, NOW))
+    graph = repository.retrieval.graph
+    monkeypatch.setattr(graph.settings, "ppr_top_chunks", 3)
+    ranking = ["c-kh-0", "c-kh-1", "c-late", "c-b1", "c-a1", "c-b2", "c-a2"]
+    monkeypatch.setattr(
+        graph, "scale_ppr",
+        lambda nb, q, max_results=None: [
+            (cid, 1.0 - i / 10) for i, cid in enumerate(ranking)
+        ][:max_results],
+    )
+    with source_scope_context(
+        active,
+        {"mode": "include", "source_ids": ["a1", "a2"], "narrowed": False,
+         "owner_id": "user-local"},
+        None,
+        {base: ["b1", "b2"]},
+    ):
+        out = repository._ppr_retrieve(active, "q")
+    assert [c.chunk_id for c in out] == ["c-b1", "c-a1", "c-b2"]
+
+
 def test_listed_statement_never_reaches_the_plan_cache(pin_database, monkeypatch):
     sql, params = _listed_statement(pin_database, monkeypatch)
     for _ in range(EXECUTIONS):
