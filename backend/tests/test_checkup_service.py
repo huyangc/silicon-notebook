@@ -166,7 +166,7 @@ def test_healthy_fresh_notebook(repo):
     result = repo.checkup.run(nb.id)
     assert result.notebook_id == nb.id
     assert result.checked_at
-    assert {c.code for c in result.checks} == {"H2", "H3", "H4", "H5", "H6", "H7", "H8"}
+    assert {c.code for c in result.checks} == {"H2", "H3", "H4", "H5", "H6", "H7", "H8", "H12"}
     assert all(c.count == 0 for c in result.checks)
     assert result.healthy is True
     # fix 枚举逐项钉死(内部契约,前端映射依赖它稳定)。
@@ -179,6 +179,7 @@ def test_healthy_fresh_notebook(repo):
         "H6": "extract_kg",
         "H7": "fold_index",
         "H8": "rebuild_index",
+        "H12": "none",
     }
 
 

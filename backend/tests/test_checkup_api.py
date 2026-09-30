@@ -73,7 +73,9 @@ def test_checkup_healthy_empty_notebook(tmp_path, monkeypatch):
     body = response.json()
     assert body["notebook_id"] == nb
     assert body["healthy"] is True
-    assert {c["code"] for c in body["checks"]} == {"H2", "H3", "H4", "H5", "H6", "H7", "H8"}
+    assert {c["code"] for c in body["checks"]} == {
+        "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H12",
+    }
     assert all(c["count"] == 0 for c in body["checks"])
 
 
