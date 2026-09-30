@@ -1003,7 +1003,11 @@ class _ScopedRunRetrieval:
         raise AssertionError("restricted PPR must have zero I/O")
 
     def exact_lookup_chunks(self, *args, **kwargs):
-        raise AssertionError("restricted exact lookup must have zero I/O")
+        # A narrowed run no longer switches the exact channel off at the
+        # producer (the ceiling is pushed into the probe, E2-2 / audit B-9).
+        # These runs ask "plain question", which names no probe-worthy
+        # identifier, so the channel must still never be reached.
+        raise AssertionError("a question naming no identifier never probes")
 
     # `RetrievalPort` 上的 KG 可用性对(`reasoning_retrieval.kg_in_scope_for`)。
     # 这批用例演的是**有图**库,和本文件关心的来源范围维度正交:无图会额外触发

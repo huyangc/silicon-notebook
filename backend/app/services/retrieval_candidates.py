@@ -183,23 +183,26 @@ def _first_relation_sample(raw: object) -> str:
 def _ceiling_bound_exact_deps(deps, allowed_source_ids):
     """``deps`` whose exact probe only returns hits inside a source ceiling.
 
-    ``None`` (no ceiling binds) returns ``deps`` unchanged.  Otherwise the
-    probe's rows are filtered by ``source_id`` before
-    ``exact_lookup_sections`` groups them, so an out-of-ceiling hit never
-    takes a section slot.  Used by the peer-mode exact leg only.
+    ``None`` (no ceiling binds) returns ``deps`` unchanged: the probe is called
+    with exactly its historical arguments.  Otherwise the ceiling is PUSHED
+    DOWN into the probe (``chunk_exact_search(..., allowed_source_ids=)``), so
+    the store applies it before its ``EXACT_LOOKUP_FTS_K`` window: an
+    out-of-ceiling source can neither take a section slot nor occupy the
+    probe window (audit B-9 -- the previous form filtered the rows the probe
+    returned, so 50 same-name hits in an excluded source emptied the window
+    before the one in-ceiling hit was ever read).  Used by the single-library
+    lookup and the peer-mode leg alike; an empty ceiling is handled by the
+    callers before any probe.
     """
     if allowed_source_ids is None:
         return deps
     from dataclasses import replace
 
-    ceiling = frozenset(str(value) for value in allowed_source_ids)
+    ceiling = tuple(allowed_source_ids)
     search = deps.exact_search
 
     def _exact_search(db, notebook_id, needle, k):
-        return [
-            hit for hit in search(db, notebook_id, needle, k)
-            if str(hit["source_id"] or "") in ceiling
-        ]
+        return search(db, notebook_id, needle, k, allowed_source_ids=ceiling)
 
     return replace(deps, exact_search=_exact_search)
 
@@ -1393,10 +1396,92 @@ class CandidateRetrievalService(_RetrievalState):
 
         def _load():
             rows = self.embeddings.vector_rows(db, notebook_id, table, id_col)
+            if table == "relation_embeddings":
+                # The per-notebook relation matrix is shared by every asker, so
+                # it holds only relations no Memory source derives (audit C-5);
+                # ``_memory_relation_matrix`` scores the Memory ones each
+                # caller's ceiling admits, live.  A notebook without Memory
+                # excludes nothing: the matrix it loaded before, unchanged.
+                excluded = self._memory_relation_ids(db, notebook_id)
+                if excluded:
+                    rows = [r for r in rows if r["vid"] not in excluded]
             return build_matrix(((r["vid"], r["vector"]) for r in rows),
                                 runtime_dim=runtime_dim)
 
         return self._vector_cache.get(f"{notebook_id}:matrix:{table}", version, _load)
+    def _memory_relation_ids(self, db: object, notebook_id: str) -> frozenset:
+        """Ids of the relations a Memory source derives (D4: the relation's own
+        ``source_id`` is a Memory source), any member's.  One Memory-source
+        read; a notebook without Memory stops there.  Otherwise one
+        ``relation_delta_rows`` read per ``_in_batches`` window of Memory
+        source ids -- bounded by the notebook's Memory graph, never by its
+        whole relation table."""
+        memory = [
+            str(value) for value in self.sources.memory_source_ids(db, notebook_id)
+            if value
+        ]
+        if not memory:
+            return frozenset()
+        ids: set = set()
+        for batch in self._in_batches(memory):
+            ids.update(
+                str(row["vid"])
+                for row in self.embeddings.relation_delta_rows(db, notebook_id, batch)
+            )
+        return frozenset(ids)
+
+    def _memory_relation_matrix(self, db: object, notebook_id: str):
+        """``(ids, matrix)`` of the Memory-derived relations THIS run may read,
+        scored live next to the shared relation matrix (which never holds them,
+        see ``_vector_matrix``).
+
+        "May read" is ``source_allowed(notebook_id, memory source)``: with no
+        scope every Memory relation, which keeps the unscoped union exactly
+        the relation set it always scored; under a ceiling only the asker's own
+        Memory the freeze admitted (another member's Memory is in no ceiling,
+        a withheld one in neither half of it).  ``([], None)`` when there is
+        nothing to add -- in particular for every notebook without Memory,
+        after one Memory-source read.
+        """
+        from app.services.source_scope import source_allowed
+        from app.services.vector_index import build_matrix, resolve_runtime_dim
+
+        memory = [
+            str(value) for value in self.sources.memory_source_ids(db, notebook_id)
+            if value and source_allowed(notebook_id, str(value))
+        ]
+        if not memory:
+            return [], None
+        rows: list = []
+        for batch in self._in_batches(memory):
+            rows.extend(self.embeddings.relation_delta_rows(db, notebook_id, batch))
+        if not rows:
+            return [], None
+        return build_matrix(
+            ((row["vid"], row["vector"]) for row in rows),
+            runtime_dim=resolve_runtime_dim(self.settings),
+        )
+
+    def _relation_scoring_matrix(self, db: object, notebook_id: str):
+        """The shared (Memory-free) relation matrix plus this run's readable
+        Memory relations, as one ``(ids, matrix)`` for ``top_k_sims``.  A fresh
+        array when anything is appended -- the cached matrix is never written.
+        Identical to the cached matrix (same objects) when nothing is."""
+        import numpy as np
+
+        ids, mat = self._vector_matrix(
+            db, notebook_id, "relation_embeddings", "relation_id")
+        own_ids, own_mat = self._memory_relation_matrix(db, notebook_id)
+        if not own_ids:
+            return ids, mat
+        if not ids:
+            return own_ids, own_mat
+        if mat.shape[1] != own_mat.shape[1]:
+            # A dimension mismatch cannot be scored against one query vector;
+            # keep the shared matrix alone rather than fail the channel.
+            return ids, mat
+        return [*ids, *own_ids], np.vstack((mat, own_mat))
+
     @staticmethod
     def _mask_vector_matrix(ids: List[str], mat, keep_ids):
         """``(ids, mat)`` 的**打分前**子集:只保留 ``keep_ids`` 里的行,行序不变。
@@ -1426,7 +1511,8 @@ class CandidateRetrievalService(_RetrievalState):
         version = self._vector_matrix_version(db, notebook_id, table)
         return self._vector_cache.peek(f"{notebook_id}:matrix:{table}", version)
     def _keyword_token_sets(self, db, notebook_id: str, objects: list,
-                            bounded: bool = False) -> dict:
+                            bounded: bool = False, *,
+                            read_evidence: Optional[Dict[str, list]] = None) -> dict:
         """Cached {object_id: frozenset(haystack_tokens)} for keyword scoring.
 
         Version-keyed on (COUNT, MAX(updated_at)) of knowledge_objects so any
@@ -1435,24 +1521,63 @@ class CandidateRetrievalService(_RetrievalState):
 
         bounded=True(ANN 门控的有界候选路径):跳过版本 COUNT 与进程缓存,直接对
         本批 objects 现场构建(与 _load 同构建逻辑,逐字节等价——为 ≤recall 个候选
-        付一次百万行 COUNT 是倒挂;该缓存对每查询候选集不同的 ANN 路径也从未命中过)。"""
+        付一次百万行 COUNT 是倒挂;该缓存对每查询候选集不同的 ANN 路径也从未命中过)。
+
+        WHAT THE PROCESS CACHE MAY HOLD (E2-2, audit C-5).  The cache is keyed
+        per notebook and shared by every asker, so it is built only from
+        content every asker's ceiling admits the same way:
+
+        * only objects none of whose evidence AS READ (``read_evidence``, the
+          lists before the caller's ceiling trimmed them) comes from a Memory
+          source.  A Memory-derived object -- and a shared object that carries
+          a Memory quote -- is absent, so ``score_knowledge`` tokenises it live
+          from the evidence THIS caller may see.  Before, the first caller
+          decided: an unscoped first call cached another member's Memory quote
+          inside a shared object's token set, and every later scoped caller was
+          ranked by it;
+        * each entry is tokenised from the evidence as read, never from the
+          caller's filtered view, so a scoped first caller no longer leaves a
+          trimmed token set behind for everyone else.
+
+        A notebook with no Memory source caches exactly what it cached before.
+        The Memory source list is read only when the cache is (re)built.
+        """
         from app.services.retrieval import _tokens, _payload_text
 
+        def _token_set(obj, evidence):
+            ev_text = " ".join(e.quoted_span for e in evidence)
+            return frozenset(_tokens(f"{_payload_text(obj['payload'])} {ev_text}"))
+
         def _build(objs):
-            out = {}
-            for o in objs:
-                ev_text = " ".join(
-                    e.quoted_span for e in o.get("evidence", [])
-                )
-                out[o["id"]] = frozenset(_tokens(f"{_payload_text(o['payload'])} {ev_text}"))
-            return out
+            return {o["id"]: _token_set(o, o.get("evidence", [])) for o in objs}
 
         if bounded:
             return _build(objects)
 
+        read = read_evidence if read_evidence is not None else {
+            o["id"]: o.get("evidence", []) for o in objects
+        }
+
+        def _build_shared():
+            memory = frozenset(
+                str(value)
+                for value in self.sources.memory_source_ids(db, notebook_id)
+                if value
+            )
+            out = {}
+            for obj in objects:
+                evidence = read.get(obj["id"], [])
+                if any(
+                    str(getattr(item, "source_id", "") or "") in memory
+                    for item in evidence
+                ):
+                    continue
+                out[obj["id"]] = _token_set(obj, evidence)
+            return out
+
         ver = self.knowledge.object_version_row(db, notebook_id)
         version = ("kwtok", ver["c"], ver["ts"])
-        return self._vector_cache.get(f"{notebook_id}:kwtok", version, lambda: _build(objects))
+        return self._vector_cache.get(f"{notebook_id}:kwtok", version, _build_shared)
     def _relations_with_names(self, db: object, notebook_id: str,
                               relation_ids: Optional[List[str]] = None) -> List[dict]:
         """关系 + 两端实体名 + evidence,预构建 keyword/embed 文本。JOIN 丢弃悬空边
@@ -1820,8 +1945,7 @@ class CandidateRetrievalService(_RetrievalState):
                 )
                 return []
             query_vector = self._embed_query(query)
-            rel_ids, rel_mat = self._vector_matrix(
-                db, notebook_id, "relation_embeddings", "relation_id")
+            rel_ids, rel_mat = self._relation_scoring_matrix(db, notebook_id)
             if not rel_ids:
                 # 无向量覆盖(未配 embedder/未回填)→ 界定不了候选,回退全量。
                 relations = live_relations(
@@ -2266,6 +2390,11 @@ class CandidateRetrievalService(_RetrievalState):
             kg_objs = {t: self._knowledge_objects(db, notebook_id, t, id_filter=id_filter)
                        for t in type_list}
             all_kg_objs = [o for objs in kg_objs.values() for o in objs]
+            # Each object's evidence as READ, before the ceiling trims it below
+            # (the trim rebinds ``obj["evidence"]``, so these lists survive):
+            # the keyword-token cache is built from this, never from one
+            # caller's filtered view (``_keyword_token_sets``).
+            read_evidence = {o["id"]: o.get("evidence", []) for o in all_kg_objs}
             if source_filter is not None:
                 allowed_sources = set(source_filter)
                 for obj in all_kg_objs:
@@ -2285,7 +2414,8 @@ class CandidateRetrievalService(_RetrievalState):
             # and the process-wide cache (which the candidate-set-varies-per-query
             # path never hit anyway) and build the token sets directly for this batch.
             token_sets = self._keyword_token_sets(
-                db, notebook_id, all_kg_objs, bounded=candidate_filter is not None)
+                db, notebook_id, all_kg_objs, bounded=candidate_filter is not None,
+                read_evidence=read_evidence)
             # candidate object ids for this retrieval call
             candidate_ids = {o["id"] for o in all_kg_objs}
             # 孤立节点降权: 有边节点集合。降权仅作用于 score(排序),不进 relevance([0,1]/tau 守恒)。
@@ -4040,6 +4170,12 @@ class CandidateRetrievalService(_RetrievalState):
             }
             lexical_ids.intersection_update(kept_ids)
             semantic_ids.intersection_update(kept_ids)
+            # The returned matrix is what the caller's MMR compares candidates
+            # against (audit B-10): a dropped row must not stay in it as a
+            # diversity reference, exactly as the brute-force path masks its
+            # whole-notebook matrix before scoring.
+            if mat is not None:
+                ids, mat = self._mask_vector_matrix(ids, mat, kept_ids)
         scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
         add_chunk_supports(scored, {
             chunk.chunk_id: [
@@ -4649,15 +4785,11 @@ class CandidateRetrievalService(_RetrievalState):
           query at all (``scoped_allowed_source_ids`` over the visible list
           ``_federated_tasks`` enumerated, as the keyword leg derives it).
         * The lookup honours that same ceiling (``_ceiling_bound_exact_deps``):
-          probe hits whose source is outside it -- a hidden Memory/Knowhow
-          projection, a source added since the freeze -- are dropped BEFORE
-          hits are grouped and section slots handed out, so they can neither
-          take a slot nor reach the subtree fetch (which stays inside the hit's
-          own source).  No extra read: the filter is applied to rows the probe
-          returns anyway, which is also why the single path's live drift gate
-          is not needed here.  Residual: the probe's own ``EXACT_LOOKUP_FTS_K``
-          window is taken before the filter, so out-of-ceiling rows can still
-          use part of it.
+          it is pushed down into the probe, so a source outside it -- a hidden
+          Memory/Knowhow projection, a source added since the freeze -- can
+          neither occupy the probe's ``EXACT_LOOKUP_FTS_K`` window nor take a
+          section slot, nor reach the subtree fetch (which stays inside the
+          hit's own source).
         * Any failure propagates to ``_run_one``: no ``_note_model_error``, so
           a missing supplementary leg is never a banner; its skip event
           (``arm="exact"``) carries the exception class.
@@ -4677,27 +4809,86 @@ class CandidateRetrievalService(_RetrievalState):
         return _leg
 
     def _exact_lookup_chunks_one(self, notebook_id: str, query: str):
-        """The single-library lookup -- the pre-federation body, unchanged."""
-        # The exact-section helper currently allocates slots before hydration
-        # and has no source predicate.  Skip it only for a truly narrowed run;
-        # an all-selected frozen snapshot keeps the historical channel and its
-        # output is checked again at the retrieval boundary.
-        if self._unsafe_source_scope_restricted(notebook_id):
-            return []
+        """The single-library lookup, under this run's source ceiling.
+
+        No narrowing gate any more (audit B-9): the probe takes the ceiling
+        below its window (``_ceiling_bound_exact_deps``), so a narrowed or
+        drifted run keeps the channel -- every hit, every section slot and
+        every subtree fetch stays inside the frozen ceiling.
+
+        Which list is pushed follows the run's ``ceiling_binds`` verdict
+        (``_ceiling_binds_for``, memoised on the scope), the rule every other
+        re-read under an all-selected freeze follows:
+
+        * no scope, or no source ceiling binds this library -- no list, the
+          historical call;
+        * the verdict binds (narrowed, drifted, a foreign hidden source, a
+          per-notebook freeze) -- ``_exact_lookup_ceiling``;
+        * the verdict does not bind -- no list, the historical call and bytes,
+          verified on read: a returned chunk whose source the ceiling does not
+          allow records the drift and the lookup is re-run bound.
+
+        Zero I/O -- no verdict probe either -- when the query names nothing
+        probe-worthy (``exact_lookup_terms``).
+        """
         if not self.settings.exact_lookup_enabled:
             return []
-        from app.services.exact_lookup import exact_lookup_chunks
+        from app.services.exact_lookup import exact_lookup_chunks, exact_lookup_terms
+        from app.services.source_scope import (
+            current_source_scope, record_ceiling_drift, source_allowed,
+        )
 
+        limits = self._exact_lookup_limits()
+        if not exact_lookup_terms(query, limits):
+            return []
         try:
-            return exact_lookup_chunks(
-                self._exact_lookup_deps(),
-                notebook_id,
-                query,
-                self._exact_lookup_limits(),
+            scope = current_source_scope()
+            binding = scope is not None and scope.source_ceiling_binds(notebook_id)
+            allowed = (
+                self._exact_lookup_ceiling(notebook_id)
+                if binding and self._ceiling_binds_for(notebook_id) else None
             )
+            if allowed is not None and not allowed:
+                return []
+            chunks = exact_lookup_chunks(
+                _ceiling_bound_exact_deps(self._exact_lookup_deps(), allowed),
+                notebook_id, query, limits,
+            )
+            if binding and allowed is None and not all(
+                source_allowed(notebook_id, chunk.source_id) for chunk in chunks
+            ):
+                record_ceiling_drift(scope, notebook_id)
+                allowed = self._exact_lookup_ceiling(notebook_id)
+                if not allowed:
+                    return []
+                chunks = exact_lookup_chunks(
+                    _ceiling_bound_exact_deps(self._exact_lookup_deps(), allowed),
+                    notebook_id, query, limits,
+                )
+            return chunks
         except Exception as exc:  # noqa: BLE001 — 精确通道失败绝不拖垮检索
             self._note_model_error("chunk_exact_lookup", "", exc)
             return []
+
+    def _exact_lookup_ceiling(self, notebook_id: str) -> tuple:
+        """The source list a binding ceiling pushes into the exact probe.
+
+        The frozen ceiling itself (``scoped_allowed_source_ids``: visible ∪ the
+        asker's hidden half, memoised sorted per run), not the live visible
+        list the peer leg intersects: the scope's own notebook legitimately
+        holds the asker's Knowhow/Memory projections, which are not visible
+        sources.  The legacy local ``exclude`` shape materialises no list; it
+        is expressed over the live visible universe instead (a direct service
+        caller's shape -- production freezes every local scope to ``include``).
+        """
+        from app.services.source_scope import scoped_allowed_source_ids
+
+        allowed = scoped_allowed_source_ids(notebook_id)
+        if allowed is None:
+            allowed = scoped_allowed_source_ids(
+                notebook_id, self.sources.all_visible_source_ids(notebook_id),
+            )
+        return tuple(allowed)
 
     @staticmethod
     def _union_chunk_candidates(base: list, extra: list) -> list:
@@ -4925,44 +5116,93 @@ class CandidateRetrievalService(_RetrievalState):
         -- a whole arm failing, not degrading.
 
         SHORT CIRCUIT.  Two layers, both ``is not None`` and never truthiness:
-        the caller does not enter this function at all unless SOME per-notebook
-        ceiling binds the run, and a node whose owning library has none
-        (``source_ceiling_for(owner) is None``) is passed through untouched and
-        contributes no id to the read.  ``frozenset()`` is a different answer --
-        "this library is frozen to zero sources", an explicit deny -- and must
-        drop every one of that library's nodes.  A node with no ``notebook_id``
-        keeps ``scoped_subgraph_nodes``' stated fail-open premise: it matches no
-        ceiling key, so it is ungoverned here too.
+        the caller does not enter this function at all unless SOME source
+        ceiling binds the run (the local one or a per-notebook one), and a node
+        whose owning library no source ceiling binds
+        (``ActiveSourceScope.source_ceiling_binds(owner)`` False) is passed
+        through untouched and contributes no id to the read.  ``frozenset()`` is
+        a different answer -- "this library is frozen to zero sources", an
+        explicit deny -- and must drop every one of that library's nodes.  A
+        node with no ``notebook_id`` is the scope's own notebook (the blank-id
+        convention ``allows`` and ``source_ceiling_binds`` share), so the local
+        ceiling governs it; under a peer-only run nothing binds a blank id and
+        it keeps ``scoped_subgraph_nodes``' stated fail-open premise.
+
+        THE CURRENT NOTEBOOK IS JUDGED TOO (E2-2, audit B-5).  The active
+        notebook never carries a per-notebook entry, so an earlier version that
+        governed only ``source_ceiling_for(owner) is not None`` walked straight
+        past it: another member's Memory-derived node -- and, with the Memory
+        channel closed, the asker's OWN Memory-derived node -- was rendered into
+        the answer prompt behind a live anchor.  ``allows`` (through
+        ``filter_evidence``) never admits either: another member's Memory is in
+        no member's ceiling, and a withheld source is in neither half of the
+        freeze.
+
+        VERDICT AND VERIFY-ON-READ.  Per library, ``_ceiling_binds_for`` (the
+        run's memoised ``source_scope.ceiling_binds``) decides the rule:
+
+        * binds -- a node survives only with at least one in-ceiling evidence
+          item, and an edge's evidence is narrowed to that ceiling (an edge
+          whose evidence the ceiling EMPTIED is dropped, its node kept as a
+          plain arrival: the relation's existence and type came from a source
+          the ceiling excludes);
+        * does not bind (all selected, nothing drifted, no foreign hidden
+          source) -- the walk is used as read, byte for byte, but only after
+          every governed node's and incoming edge's evidence is verified inside
+          the ceiling.  The first item outside records the drift
+          (``record_ceiling_drift``) and the whole library is re-judged as
+          binding -- the same contract as ``RetrievalService.node_context``.
+          An object with no evidence passes the check vacuously there, exactly
+          as ``node_context_row_within_ceiling`` treats it.
         """
-        from app.services.source_scope import filter_evidence
+        from app.services.source_scope import filter_evidence, record_ceiling_drift
 
         # Governed nodes only: {object_id: owning notebook id}.
         owners: Dict[str, str] = {}
         for triple in subgraph:
             node = triple[0] or {}
             owner = str(node.get("notebook_id") or "")
-            if scope.source_ceiling_for(owner) is not None:
+            if scope.source_ceiling_binds(owner):
                 owners[str(node.get("object_id") or "")] = owner
         if not owners:
             return subgraph
-        supported: set = set()
+        evidence_by_object: Dict[str, list] = {}
         with self._connect() as db:
             for batch in self._in_batches(owners):
                 for row in self.knowledge.object_evidence_rows(db, batch):
-                    object_id = str(row["id"])
-                    if filter_evidence(
-                        owners.get(object_id, ""),
-                        json.loads(row["evidence"] or "[]"),
-                    ):
-                        supported.add(object_id)
+                    evidence_by_object[str(row["id"])] = json.loads(
+                        row["evidence"] or "[]"
+                    )
+        binds = {
+            library: self._ceiling_binds_for(library)
+            for library in set(owners.values())
+        }
+
+        def _inside(library: str, items) -> bool:
+            items = list(items or ())
+            return len(filter_evidence(library, items)) == len(items)
+
+        for node, edge, _src_oid in subgraph:
+            object_id = str((node or {}).get("object_id") or "")
+            owner = owners.get(object_id)
+            if owner is None or binds[owner]:
+                continue
+            if not (
+                _inside(owner, evidence_by_object.get(object_id))
+                and _inside(owner, (edge or {}).get("evidence"))
+            ):
+                record_ceiling_drift(scope, owner)
+                binds[owner] = True
+        if not any(binds.values()):
+            return subgraph
         out: list = []
         for node, edge, src_oid in subgraph:
             object_id = str((node or {}).get("object_id") or "")
             owner = owners.get(object_id)
-            if owner is None:
+            if owner is None or not binds[owner]:
                 out.append((node, edge, src_oid))
                 continue
-            if object_id not in supported:
+            if not filter_evidence(owner, evidence_by_object.get(object_id) or []):
                 # The whole triple goes, exactly as an unchecked library's node
                 # does in ``scoped_subgraph_nodes``: emptying the evidence alone
                 # would leave the name in the prompt behind a live anchor, just
@@ -4977,11 +5217,36 @@ class CandidateRetrievalService(_RetrievalState):
                 # the TARGET node's owner because that is the library this
                 # quote is rendered and cited under (``id_map[k]["notebook_id"]``
                 # is the node's), so evidence from anywhere else fails closed.
-                edge = {**edge, "evidence": filter_evidence(
-                    owner, edge.get("evidence") or [],
-                )}
+                raw_evidence = edge.get("evidence") or []
+                kept = filter_evidence(owner, raw_evidence)
+                if raw_evidence and not kept:
+                    # Every item came from outside the ceiling: the chain line
+                    # would still state the relation (``--edge_type-->``) and
+                    # its id would still become a relation support.  Keep the
+                    # in-ceiling node as a plain arrival instead.
+                    out.append((node, None, None))
+                    continue
+                edge = {**edge, "evidence": kept}
             out.append((node, edge, src_oid))
         return out
+
+    def _ceiling_binds_for(self, notebook_id: str) -> bool:
+        """This run's ``source_scope.ceiling_binds`` verdict for ``notebook_id``.
+
+        Production wires one ``kg_viewer_scope.NodeContextCeilingVerdict`` into
+        ``RetrievalService`` and it is memoised on the run's scope, so the
+        overlay and exact lookup share it with both ``node_context`` re-read
+        sites (a drift recorded by any of them binds all of them).  A service
+        constructed without that port (test doubles) gets the conservative
+        historical answer: every existing ceiling binds
+        (``source_ceiling_exists``).
+        """
+        verdict = getattr(getattr(self, "_retrieval", None), "_ceiling_binds", None)
+        if not callable(verdict):
+            from app.services.source_scope import source_ceiling_exists
+
+            verdict = source_ceiling_exists
+        return bool(verdict(notebook_id))
     def _chunk_kg_overlay(self, notebook_id: str, query: str, hl: str, id_offset: int):
         """种子(节点∪关系端点)→1-hop 子图→渲染。
 
@@ -5087,11 +5352,14 @@ class CandidateRetrievalService(_RetrievalState):
         # library ceiling is applied to the walk's RESULT (see the helper).
         subgraph = scoped_subgraph_nodes(subgraph)
         # ...and the SOURCE ceiling right after it, for the half
-        # ``scoped_subgraph_nodes`` structurally cannot answer.  Guarded here
-        # rather than inside the helper so a run without per-notebook ceilings
-        # -- every single-notebook ask -- does not even enter it.
+        # ``scoped_subgraph_nodes`` structurally cannot answer: the local
+        # ceiling (the current notebook, which never has a per-notebook entry)
+        # as well as the per-notebook ones.  Guarded here rather than inside
+        # the helper so a run without any source ceiling does not even enter it.
         scope = current_source_scope()
-        if scope is not None and scope.peer_ceiling_active:
+        if scope is not None and (
+            scope.ceiling_active or scope.peer_ceiling_active
+        ):
             subgraph = self._ceiling_scoped_subgraph(subgraph, scope)
         if not subgraph:
             return "", {}, [], {}
