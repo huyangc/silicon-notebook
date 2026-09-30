@@ -1060,7 +1060,9 @@ owner）得到与不存在的 id 相同的 404；Memory 记录已不存在的 Me
 笔记本的每个读者照常可读。命令目录不接受任何隐藏来源：它的七个
 `.../sources/{sid}/command-catalog` 端点对 Memory 或 Knowhow 投影来源返回 404，与不存在的来源相同。通用的来源写入也不接受：
 `DELETE /api/sources/{id}` 与 `POST /api/sources/{id}/parse` 对 Memory 或 Knowhow 投影来源向所有
-调用方（包括该 Memory 的创建者）返回同样的 404；Memory 经 Memory 端点删除。
+调用方（包括该 Memory 的创建者）返回同样的 404；Memory 经 Memory 端点删除。引用的「查看原文」
+能为这类来源打开来源详情窗，因此详情窗对 Memory 或 Knowhow 投影来源不显示重新解析、删除操作、
+降级解析提示，也不显示命令目录一节。
 
 生命周期为 `candidate | confirmed | rejected | deprecated`。Agent 只能创建 `candidate`；
 token 具备 `memory:read_candidates` 时，同一用户、当前所选 notebook 下获授权的所有 Agent
