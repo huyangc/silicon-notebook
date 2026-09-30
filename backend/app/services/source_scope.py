@@ -2204,15 +2204,17 @@ def default_ceiling_context(
 
     COST.  Reader calls: a synthesised local dimension makes 3 + M (the
     participants, the notebook's visible set, its hidden half, and one visible
-    read per mounted library M), plus 1 ``memory_sources`` read when the Memory
-    channel is closed; a submitted one makes 1 + M.  None of that depends on the
-    number of SOURCES, and M is bounded by the mount set.  Bytes and time do
-    not share that property: both grow linearly with the total number of
-    visible sources across the notebook and its mounted libraries, because each
-    library's ceiling is materialised once as a ``frozenset`` plus the
-    reader-order tuple ``_peer_visible_sources`` hands out (no sort; together
-    ~1.4-2 ms per 49k ids).  Worst case before the run starts: the active
-    notebook's reads plus ``mounted_total_seconds``.
+    read per mounted library the library dimension admits, M), plus 1
+    ``memory_sources`` read when the Memory channel is closed; a submitted one
+    makes 1 + M.  None of that depends on the number of SOURCES, and M is
+    bounded by the mount set.  Bytes and time do not share that property: both
+    grow linearly with the total number of visible sources across the notebook
+    and its mounted libraries, because each library's ceiling is materialised
+    once as a ``frozenset`` plus the reader-order tuple
+    ``_peer_visible_sources`` hands out (no sort; together ~1.4-2 ms per 49k
+    ids).  The M mounted reads run ``readers.read_workers`` at a time (4 on
+    PostgreSQL, 1 on SQLite -- see ``CeilingReaders``).  Worst case before the
+    run starts: the active notebook's reads plus ``mounted_total_seconds``.
 
     Measured against TODAY's route-level freeze in the same process
     (``ask_routes._validate_source_scope`` on the all-selected scope plus its
@@ -2222,30 +2224,34 @@ def default_ceiling_context(
     per-pair difference is reported.  Conditions: Apple M5 Max, 18 cores,
     64 GB; local PostgreSQL 16.15; Python 3.14.6; 49k visible sources per
     library (ids of 43 ASCII characters) plus 300 Knowhow and 50 Memory
-    sources in the notebook; machine load 15-35 from other work (2026-09-30,
-    third fix round).  ``all_visible_source_ids`` and ``hidden_source_ids``
-    carry ``ORDER BY id``; ``memory_source_ids`` and the participant read do
-    not.  Constructor minus route, SQLite / PostgreSQL:
+    sources in the notebook; machine load 15-45 from other work (2026-09-30).
+    ``all_visible_source_ids`` and ``hidden_source_ids`` carry ``ORDER BY
+    id``; ``memory_source_ids`` and the participant read do not.  Constructor
+    minus route, SQLite / PostgreSQL:
 
     * no mount: -9.5 ms (38 vs 28) / -42 ms (106 vs 52); 2 vs 3 reads;
     * one mount: -8.4 ms (68 vs 60) / -25 ms (102 vs 82); 3 vs 4 reads;
-    * six mounts: +15 to +22 ms (166-200 vs 181-221) / +15 ms (248-287 vs
-      258-317); 8 vs 9 reads.  The previous form (sorted hand-out, SQLite
-      progress handler every 1 000 VM steps) measured +210 to +290 ms /
-      +91 ms in the same pairing.
+    * six mounts, SQLite serial: +16.2 / +16.8 ms at load ~20 (route 171,
+      constructor 184-186), +33.7 ms at load ~44; PostgreSQL with 4 workers:
+      -111 / -62 / -109 ms (faster in 30, 29, 28 of 31 pairs), where serially
+      it measured +17.5 / -5.8 ms.  8 vs 9 reads.  Before the third fix round
+      (sorted hand-out, SQLite progress handler every 1 000 VM steps) the same
+      pairing measured +210 to +290 ms / +91 ms.
     * peak allocation (second fix round, not re-measured): 10.6 / 16.7 /
       38.2 MB vs 9.7 / 15.8 / 45.9 MB (SQLite), 13.7 / 20.6 / 42.2 MB vs
       13.7 / 19.8 / 49.9 MB (PostgreSQL).
 
-    So with six mounted libraries this still costs ~15-20 ms more than
-    today's route freeze on both backends, and that remainder is the ceiling
-    itself: six 49k-id frozensets and hand-out tuples (~10-12 ms measured
-    alone) plus the participant read (~1 ms) -- the route freeze never
-    materialises a mounted library's set.  With fewer mounts it is cheaper.
-    On SQLite the per-library ``read_budget`` now adds little GC work: with
-    the progress handler every 100 000 VM steps (``_READ_BUDGET_VM_STEPS``)
-    six budgeted 49k-row reads run ~16 young collections (unbudgeted: ~5;
-    every 1 000 steps: ~208) and take about as long as unbudgeted ones.
+    So with six mounted libraries PostgreSQL is now cheaper than today's route
+    freeze, and SQLite still costs ~16 ms more (more under load): the ceiling
+    itself -- six 49k-id frozensets and hand-out tuples, ~10-12 ms measured
+    alone -- plus the participant read (~1 ms); the route freeze never
+    materialises a mounted library's set, and SQLite cannot win it back by
+    reading in parallel (see ``CeilingReaders.read_workers``).  With fewer
+    mounts both are cheaper.  On SQLite the per-library ``read_budget`` adds
+    little GC work: with the progress handler every 100 000 VM steps
+    (``_READ_BUDGET_VM_STEPS``) six budgeted 49k-row reads run ~16 young
+    collections (unbudgeted: ~5; every 1 000 steps: ~208) and take about as
+    long as unbudgeted ones.
 
     Once installed, runs that had no scope before (MCP ``ask_notebook``,
     unscoped API asks, the report worker) start running the drift probe
@@ -2258,7 +2264,9 @@ def default_ceiling_context(
     those channels -- which are not partitioned by source -- are switched off
     for that question instead of admitting a source outside the freeze, which
     is what the browser path already does.  The probe must stay per call, not
-    per run (codex #634 R1).
+    per run (codex #634 R1).  Until E2-2, a run whose Memory channel is closed
+    while the asker holds a confirmed Memory in the notebook runs with those
+    four channels off outright (see ``withheld_hidden_source_ids``).
     """
     if current_source_scope() is not None:
         yield
