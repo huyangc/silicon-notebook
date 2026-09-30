@@ -181,7 +181,7 @@ def memory_member_cluster_keys() -> str:
     """
     return (
         "SELECT DISTINCT mc.canonical_id, mc.generation FROM sources ms "
-        "JOIN knowledge_objects mo ON mo.source_id = ms.id "
+        "JOIN knowledge_objects mo ON mo.source_id = ms.id AND mo.notebook_id = ms.notebook_id "
         "JOIN concept_clusters mc ON mc.member_object_id = mo.id "
         "AND mc.notebook_id = ms.notebook_id "
         f"WHERE ms.notebook_id = %s AND {memory_source_type_predicate('ms.source_type')}"

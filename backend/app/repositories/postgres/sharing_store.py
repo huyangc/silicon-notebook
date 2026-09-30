@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 import json
 from datetime import timedelta
 from typing import Callable, Sequence
@@ -104,7 +106,9 @@ _VISIBLE_SOURCE_NOTEBOOK_SQL = (
 #   knowledge_relations              Memory relations, and relations -> own source + BOTH endpoints,
 #                                    with a Memory endpoint            one anti-join each
 #   relation_embeddings              via the relation               -> one NOT EXISTS per arm
-#   concept_clusters                 a cluster of a Memory          -> `_visible_cluster`
+#   concept_clusters                 a cluster of a Memory, and     -> `_visible_cluster` per row +
+#                                    every cluster of a dirty          the Memory-member set diffed
+#                                    source (stale by definition)      once; dirty -> none at all
 #   evidence inside kept rows        a manual merge appends the     -> stripped from the fetched rows
 #   (objects, relations, facts)      merged object's entries whole     (`strip_memory_evidence`)
 # The remaining entries (notebooks, notebook_bases, notebook_object_schemas, the
@@ -214,26 +218,23 @@ def _source_clustering_current(alias: str) -> str:
 
 
 def _visible_cluster(alias: str) -> str:
-    """Not a cluster of a Memory (`memory_sql.no_memory_cluster`: no Memory-derived
-    member, canonical id not minted from a Memory-derived object — the canonical
-    name and description are copied onto every row of a cluster and may come from
-    that object), and not a cluster whose canonical id was minted from an object
-    that no longer exists.
+    """The per-row half of "not a cluster of a Memory": the canonical id was not
+    minted from a Memory-derived object (`memory_sql.memory_seed_cluster`), nor from
+    an object that no longer exists. The other half — the cluster has a Memory-derived
+    member — is NOT evaluated per row: `_drop_memory_member_clusters` diffs the rows
+    against `memory_sql.memory_member_cluster_keys`, a set built once per notebook
+    from its Memory side (the per-row form probed the whole cluster for every member,
+    O(sum of cluster size squared): 13-15 s per statement for one 2,000-member cluster).
 
-    The second arm is the stale case a later Memory delete leaves behind: the
-    Memory member row goes with the Memory, the shared members keep the name and
-    description it seeded. Once the object is gone nothing can prove it was not a
-    Memory, so the copy leaves the cluster out. An object delete marks its notebook
-    dirty and only a rebuild clears that (a rebuild re-mints every canonical id
-    from live objects), so such a cluster only exists in a dirty notebook — whose
-    copy takes this statement set and starts dirty too. A cluster seeded by a
-    Memory under a real name (`K-<name>`) cannot be recognised at all once the
-    Memory is gone; it travels, and the copy's dirty flag is what tells its owner
-    to rebuild. `seed IS NULL` is the OR's first arm, so the existence probe runs
-    only for the rare `<prefix>~<object id>` rows."""
+    The minted-from-a-missing-object arm is the stale case a later Memory delete can
+    leave behind; an object delete marks the notebook dirty, and a dirty source's
+    copy carries no cluster at all (`_source_clustering_current`), which also covers
+    the real-name seed (`K-<name>`) that nothing can recognise once its Memory is
+    gone. `seed IS NULL` is the OR's first arm, so the existence probe runs only for
+    the rare `<prefix>~<object id>` rows."""
     seed = memory_sql.cluster_seed_object_id(alias)
     return (
-        f"{memory_sql.no_memory_cluster(alias)} AND ({seed} IS NULL OR EXISTS ("
+        f"NOT {memory_sql.memory_seed_cluster(alias)} AND ({seed} IS NULL OR EXISTS ("
         f"SELECT 1 FROM knowledge_objects so WHERE so.id = {seed}))"
     )
 
@@ -248,6 +249,13 @@ def _visible_cluster(alias: str) -> str:
 # Memory gets no state row, exactly as before. `validate_copy` reads the same
 # decision back from the copy (a state row exists iff the tag was set).
 _COPY_DIRTY_MARK = "_copy_starts_dirty"
+#: Values of the root tag: why the copy starts dirty. `insert_copy_rows` records
+#: whether the copy's clusters were dropped (`_CLUSTERS_DROPPED`) so `validate_copy`
+#: judges by the snapshot's decision, not by the source's live `dirty` (a content-only
+#: edit landing mid-copy turns the source dirty without changing a single row count).
+_HOLDS_MEMORY = "memory"
+_CLUSTERS_DROPPED = "clusters_dropped"
+_SOURCE_DIRTY_SQL = "SELECT 1 FROM unified_kg_state WHERE notebook_id = %s AND dirty = 1"
 _COPY_DIRTY_SQL = (
     "SELECT 1 WHERE EXISTS (SELECT 1 FROM sources WHERE notebook_id = %s "
     f"AND {memory_sql.memory_source_type_predicate()}) "
@@ -484,6 +492,51 @@ _COPY_VALIDATED_TABLES = (
 
 # The Memory-aware twin of every entry above that can hold Memory-derived rows
 # (see the M2 comment at the top); the rest are shared verbatim.
+# The published-generation cluster rows that pass the per-row half of the Memory
+# rule, before the dirty term (validate_copy counts from here: the decision about
+# dirtiness is the snapshot's, carried to it).
+_MEMORY_CLUSTERS_BASE_SQL = (
+    f"SELECT c.* FROM concept_clusters c WHERE c.notebook_id = %s "
+    "AND c.generation = COALESCE((SELECT cluster_generation "
+    "FROM unified_kg_state u WHERE u.notebook_id = c.notebook_id), 0) "
+    f"AND {_visible_cluster('c')}"
+)
+_MEMORY_MEMBER_KEYS_SQL = memory_sql.memory_member_cluster_keys()
+
+
+def _memory_member_keys(connection, notebook_id: str) -> set[tuple[str, int]]:
+    """This notebook's clusters with a Memory-derived member, as `(canonical_id,
+    generation)`, read once (the set grows with the notebook's Memory)."""
+    return {
+        (str(row["canonical_id"]), int(row["generation"]))
+        for row in connection.execute(_MEMORY_MEMBER_KEYS_SQL, (notebook_id,)).fetchall()
+    }
+
+
+def _drop_memory_member_clusters(rows: list, keys: set) -> list:
+    if not keys:
+        return rows
+    return [
+        row for row in rows if (str(row["canonical_id"]), int(row["generation"])) not in keys
+    ]
+
+
+def _memory_aware_cluster_count(connection, notebook_id: str, query: str) -> int:
+    """How many rows of the cluster statement `query` a copy keeps: per cluster, less
+    the clusters with a Memory-derived member (one row per cluster comes back, then
+    the set is subtracted in Python — never a per-row probe of the whole cluster)."""
+    keys = _memory_member_keys(connection, notebook_id)
+    total = 0
+    for row in connection.execute(
+        "SELECT c.canonical_id, c.generation, COUNT(*) AS n "
+        f"FROM ({query}) c GROUP BY c.canonical_id, c.generation",
+        (notebook_id,),
+    ).fetchall():
+        if (str(row["canonical_id"]), int(row["generation"])) not in keys:
+            total += int(row["n"])
+    return total
+
+
 _MEMORY_SNAPSHOT_TEXT: dict[str, str] = {
     "sources": f"SELECT * FROM sources WHERE notebook_id = %s AND {_visible_source('sources')}",
     "source_paper_meta": (
@@ -554,12 +607,10 @@ _MEMORY_SNAPSHOT_TEXT: dict[str, str] = {
         "ON er.id = e.relation_id AND er.notebook_id = e.notebook_id "
         f"WHERE e.notebook_id = %s AND {_visible_relation('er')}"
     ),
-    "concept_clusters": (
-        f"SELECT c.* FROM concept_clusters c WHERE c.notebook_id = %s "
-        "AND c.generation = COALESCE((SELECT cluster_generation "
-        "FROM unified_kg_state u WHERE u.notebook_id = c.notebook_id), 0) "
-        f"AND {_visible_cluster('c')} AND {_source_clustering_current('c')}"
-    ),
+    # The per-row half; `snapshot_copy_rows` drops the Memory-member clusters from
+    # the fetched rows (`_drop_memory_member_clusters`) and the size bound counts
+    # them out the same way (`_memory_aware_cluster_count`).
+    "concept_clusters": f"{_MEMORY_CLUSTERS_BASE_SQL} AND {_source_clustering_current('c')}",
 }
 _MEMORY_COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = tuple(
     (table, _MEMORY_SNAPSHOT_TEXT.get(table, query)) for table, query in _COPY_SNAPSHOT_QUERIES
@@ -602,26 +653,13 @@ _MEMORY_VALIDATED_EXTRAS: dict[str, str] = {
         f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS})) "
         f"AND {_visible_relation('knowledge_relations')}"
     ),
-    "concept_clusters": (
-        # Copy side: its state row (the dirty mark) has cluster_generation 0 and its
-        # rows are normalised to 0, so the generation term counts every copied row.
-        "AND generation = COALESCE((SELECT cluster_generation "
-        "FROM unified_kg_state u WHERE u.notebook_id = concept_clusters.notebook_id), 0) "
-        f"AND {_visible_cluster('concept_clusters')}"
-    ),
+    # concept_clusters: not overridden. The copy side keeps only the generation
+    # condition (the copy holds no Memory by construction); the source side is counted
+    # by `_validated_memory_cluster_count` from the snapshot's decision.
 }
 _MEMORY_COPY_VALIDATED_TABLES: tuple[tuple[str, str], ...] = tuple(
     (table, _MEMORY_VALIDATED_EXTRAS.get(table, extra)) for table, extra in _COPY_VALIDATED_TABLES
 )
-# The one predicate `validate_copy` applies to the SOURCE side only: a dirty source's
-# clusters are not copied (`_source_clustering_current`), and the copy itself always
-# starts dirty on this path, so the same term on the copy side would count none of the
-# rows a clean source with Memory did copy. Consequence: if the source turns dirty, or
-# is rebuilt, between the snapshot and this check, the counts differ and the copy fails
-# and is compensated — the same outcome as any concurrent write to the source today.
-_MEMORY_VALIDATED_SOURCE_ONLY: dict[str, str] = {
-    "concept_clusters": f"AND {_source_clustering_current('concept_clusters')}",
-}
 _COPY_VALIDATED_JOIN_TABLES = (
     (
         "knowhow_columns",
@@ -691,6 +729,9 @@ class SharingStore:
         self.settings = settings
         self.now = normalized_clock(now)
         self.insert_row = insert_row
+        # new copy id -> whether its snapshot dropped the clusters (see _CLUSTERS_DROPPED)
+        self._clusters_dropped: dict[str, bool] = {}
+        self._copy_decisions_lock = threading.Lock()
 
     def bind_insert_row(self, insert_row: Callable) -> None:
         self.insert_row = insert_row
@@ -1054,7 +1095,10 @@ class SharingStore:
                 raise KeyError(notebook_id)
             queries = self._copy_queries(connection, notebook_id)
             if queries is _MEMORY_COPY_SNAPSHOT_QUERIES:
-                snapshot[root_table][0][_COPY_DIRTY_MARK] = True
+                source_dirty = connection.execute(_SOURCE_DIRTY_SQL, (notebook_id,)).fetchone()
+                snapshot[root_table][0][_COPY_DIRTY_MARK] = (
+                    _CLUSTERS_DROPPED if source_dirty else _HOLDS_MEMORY
+                )
             violation = self._copy_limit_violation(connection, notebook_id, queries)
             if violation is not None:
                 raise NotebookTooLargeToCopyError(violation)
@@ -1063,21 +1107,29 @@ class SharingStore:
                     _snapshot_compat_row(table, row)
                     for row in connection.execute(query, (notebook_id,)).fetchall()
                 ]
-            memory_source_ids = (
-                [
+            memory_source_ids = []
+            if queries is _MEMORY_COPY_SNAPSHOT_QUERIES:
+                memory_source_ids = [
                     row["id"]
                     for row in connection.execute(_MEMORY_SOURCE_IDS_SQL, (notebook_id,)).fetchall()
                 ]
-                if queries is _MEMORY_COPY_SNAPSHOT_QUERIES
-                else []
-            )
+                snapshot["concept_clusters"] = _drop_memory_member_clusters(
+                    snapshot["concept_clusters"], _memory_member_keys(connection, notebook_id)
+                )
         strip_memory_evidence(snapshot, memory_source_ids)
         return snapshot
 
     @staticmethod
     def _copy_queries(connection, notebook_id: str) -> tuple[tuple[str, str], ...]:
         """The statement set for this copy (see the M2 comment at the top): the
-        pre-M2 statements unless the source holds a Memory source or is dirty."""
+        pre-M2 statements unless the source holds a Memory source or is dirty.
+
+        Cross-branch contract (the E4-1b chunk-write guard reads these shapes, keep
+        them exactly): this if/else on `_COPY_DIRTY_SQL` returning
+        `_MEMORY_COPY_SNAPSHOT_QUERIES` inside the `if` and `_COPY_SNAPSHOT_QUERIES`
+        after it; `_COPY_DIRTY_SQL` containing the rendered
+        `memory_sql.memory_source_type_predicate()`; the Memory-aware `chunks` entry
+        written `FROM chunks c` with `NOT memory_sql.memory_derived_in_notebook('c')`."""
         if connection.execute(_COPY_DIRTY_SQL, (notebook_id, notebook_id)).fetchone():
             return _MEMORY_COPY_SNAPSHOT_QUERIES
         return _COPY_SNAPSHOT_QUERIES
@@ -1103,7 +1155,11 @@ class SharingStore:
                 f"share read-only instead"
             )
         materialised = 0
-        for _table, query in queries or self._copy_queries(connection, notebook_id):
+        queries = queries or self._copy_queries(connection, notebook_id)
+        for table, query in queries:
+            if queries is _MEMORY_COPY_SNAPSHOT_QUERIES and table == "concept_clusters":
+                materialised += _memory_aware_cluster_count(connection, notebook_id, query)
+                continue
             crow = connection.execute(
                 f"SELECT COUNT(*) AS n FROM ({query}) AS _c", (notebook_id,)
             ).fetchone()
@@ -1227,6 +1283,9 @@ class SharingStore:
                         normalize_timestamp_row(table, data),
                     )
                     if starts_dirty and table == "notebooks":
+                        self._record_clusters_dropped(
+                            data["id"], starts_dirty == _CLUSTERS_DROPPED
+                        )
                         # See _COPY_DIRTY_MARK: Memory rows were left out, or the
                         # source's clustering was already out of date. Registered
                         # in kg_mutation's FULL CENSUS (deep copy entry): a brand-new
@@ -1296,6 +1355,28 @@ class SharingStore:
         # no copied FTS mirror table. Keep the neutral copy-service hook a no-op.
         del sql_text, rows, chunk_size
 
+    def _record_clusters_dropped(self, new_id: str, dropped: bool) -> None:
+        with self._copy_decisions_lock:
+            self._clusters_dropped[new_id] = dropped
+
+    def _take_clusters_dropped(self, new_id: str) -> "bool | None":
+        """The snapshot's decision for this copy (None when `validate_copy` runs
+        outside a copy made by this store instance, e.g. a direct call)."""
+        with self._copy_decisions_lock:
+            return self._clusters_dropped.pop(new_id, None)
+
+    @staticmethod
+    def _validated_memory_cluster_count(connection, notebook_id: str, dropped: "bool | None") -> int:
+        """Source-side cluster count on the Memory-aware path, judged by the
+        snapshot's decision: the rows it copied (the dirty term left out) or none if it
+        dropped them because the source was dirty. Without a recorded decision (a
+        direct call) the source's live `dirty` stands in."""
+        if dropped is None:
+            dropped = bool(connection.execute(_SOURCE_DIRTY_SQL, (notebook_id,)).fetchone())
+        if dropped:
+            return 0
+        return _memory_aware_cluster_count(connection, notebook_id, _MEMORY_CLUSTERS_BASE_SQL)
+
     def validate_copy(self, source_notebook_id: str, new_id: str) -> None:
         with self.database.connect() as connection:
             # The snapshot's statement-set decision, read back from the copy: the
@@ -1303,18 +1384,21 @@ class SharingStore:
             # else writes one while the copy is still behind its 'copying' sentinel).
             filtered = connection.execute(_COPY_FILTERED_SQL, (new_id,)).fetchone()
             validated = _MEMORY_COPY_VALIDATED_TABLES if filtered else _COPY_VALIDATED_TABLES
+            clusters_dropped = self._take_clusters_dropped(new_id)
             for table, extra in validated:
                 copied = connection.execute(
                     f"SELECT COUNT(*) AS c FROM {table} WHERE notebook_id=%s {extra}",
                     (new_id,),
                 ).fetchone()["c"]
-                source_extra = (
-                    f"{extra} {_MEMORY_VALIDATED_SOURCE_ONLY.get(table, '')}" if filtered else extra
-                )
-                source = connection.execute(
-                    f"SELECT COUNT(*) AS c FROM {table} WHERE notebook_id=%s {source_extra}",
-                    (source_notebook_id,),
-                ).fetchone()["c"]
+                if filtered and table == "concept_clusters":
+                    source = self._validated_memory_cluster_count(
+                        connection, source_notebook_id, clusters_dropped
+                    )
+                else:
+                    source = connection.execute(
+                        f"SELECT COUNT(*) AS c FROM {table} WHERE notebook_id=%s {extra}",
+                        (source_notebook_id,),
+                    ).fetchone()["c"]
                 if copied != source:
                     raise RuntimeError(f"copy_notebook: {table} 行数不一致 {copied}!={source}")
             for table, query in _COPY_VALIDATED_JOIN_TABLES:
@@ -1339,6 +1423,7 @@ class SharingStore:
             )
 
     def compensate_copy(self, notebook_id: str) -> None:
+        self._take_clusters_dropped(notebook_id)
         with self.database.write() as connection:
             connection.execute(
                 "DELETE FROM knowledge_embeddings WHERE notebook_id=%s", (notebook_id,)

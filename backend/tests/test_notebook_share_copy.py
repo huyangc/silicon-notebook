@@ -1902,7 +1902,7 @@ def test_memory_notebook_snapshot_is_the_legacy_snapshot_minus_the_memory_rows(
     assert {r["id"] for r in now_rows["knowledge_relations"]} == {"kr-shared"}
     assert {r["id"] for r in now_rows["knowledge_objects"]} == memory_cases.SHARED_OBJECTS
     assert {r["canonical_id"] for r in now_rows["concept_clusters"]} == {"K-shared"}
-    assert now_rows["notebooks"][0][store_module._COPY_DIRTY_MARK] is True
+    assert now_rows["notebooks"][0][store_module._COPY_DIRTY_MARK] == store_module._HOLDS_MEMORY
     # 留下的行与原文逐列相同,唯一的差别是夹带的 Memory 证据条目被剥掉了。
     memory_cases.assert_snapshot_is_legacy_minus_memory(now_rows, legacy)
 
@@ -1986,9 +1986,9 @@ def test_a_memory_object_merged_into_a_shared_one_leaves_no_memory_text_in_the_c
 @pytest.mark.parametrize("canonical", sorted(memory_cases.STALE_CLUSTER_CASES))
 def test_a_cluster_seeded_by_a_since_deleted_memory(repo, canonical):
     """spec review B2,走真实的删除路径:Memory 做种子的簇,Memory 被删(delete_source)后只剩
-    共享成员那一行,簇名与描述仍是 Memory 的。源库因此是脏的,副本也以脏状态开始(提示重建);
-    按对象 id 铸的种子(``K-~<对象 id>``)能认出种子对象已不在,副本不带这一簇。真名种子认不
-    出来,这一簇随副本走,重建时被重算。"""
+    共享成员那一行,簇名与描述仍是 Memory 的。删除让源库变脏;脏源库的成簇已过时,副本一个
+    簇行都不带、以「待重建」开始——真名种子(``K-<名字>``)与按对象 id 铸的种子
+    (``K-~<对象 id>``)一样,副本里没有这一簇,也没有任何 Memory 文本。"""
     nb = memory_cases.PROBE_NOTEBOOK
     _insert_rows(repo, memory_cases.probe_world(nb, cluster_canonical=canonical))
     repo.delete_source("src-mem-p")
@@ -2045,3 +2045,102 @@ def test_child_rows_are_judged_by_their_memory_parent_too(repo):
     new = repo.copy_notebook(memory_cases.NOTEBOOK, new_owner_id="user-adv-copy")
     view = memory_cases.read_copy(_fetch(repo), "?", new.id)
     memory_cases.assert_copy_has_no_memory(view)
+
+
+def test_shared_by_me_overview_sizes_exclude_memory(repo, client):
+    """主人的「我分享的」概览(GET /notebooks/shared-by-me)与预览读同一份扣减后的尺寸。"""
+    _seed_memory_world(repo)
+    token = client.post(f"/api/notebooks/{memory_cases.NOTEBOOK}/share").json()["share_token"]
+    preview = client.get(f"/api/shared/{token}").json()
+    overview = client.get("/api/notebooks/shared-by-me")
+    assert overview.status_code == 200, overview.text
+    row = next(item for item in overview.json() if item["id"] == memory_cases.NOTEBOOK)
+    assert row["size"] == preview["size"]
+    memory_cases.assert_share_sizes_exclude_memory({"size": row["size"]}, preview)
+
+
+def _race_validate(monkeypatch, repo, before_validate):
+    """Run ``before_validate`` between the copy's snapshot and its validate_copy — the
+    window a concurrent edit or rebuild of the source can land in."""
+    original = SharingStore.validate_copy
+
+    def racing(store_self, source_id, new_id):
+        before_validate()
+        return original(store_self, source_id, new_id)
+
+    monkeypatch.setattr(SharingStore, "validate_copy", racing)
+
+
+def _set_source_dirty(repo, nb, dirty):
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, dirty, kg_mutation_seq, updated_at) "
+            "VALUES (?, ?, 7, ?) ON CONFLICT(notebook_id) DO UPDATE SET dirty = excluded.dirty",
+            (nb, dirty, memory_cases.NOW),
+        )
+
+
+def test_copy_survives_the_source_turning_dirty_mid_copy(repo, client, monkeypatch):
+    """一次只改内容、不改行数的编辑在快照之后、校验之前把源库标脏:校验按快照时的决定计数,
+    拷贝 200(不进补偿),副本带着快照时的簇。"""
+    _seed_memory_world(repo)
+    token = client.post(f"/api/notebooks/{memory_cases.NOTEBOOK}/share").json()["share_token"]
+    _race_validate(monkeypatch, repo, lambda: _set_source_dirty(repo, memory_cases.NOTEBOOK, 1))
+    copied = client.post(f"/api/shared/{token}/copy")
+    assert copied.status_code == 200, copied.text
+    view = memory_cases.read_copy(_fetch(repo), "?", copied.json()["id"])
+    assert view.counts["concept_clusters"] == memory_cases.expected_copy_counts()["concept_clusters"]
+
+
+def test_copy_survives_the_source_being_rebuilt_mid_copy(repo, client, monkeypatch):
+    """源库快照时是脏的(簇全部不带),拷贝途中被重建清了脏:校验按快照时的决定(簇已丢)
+    计数,拷贝 200,副本 0 个簇行——以前这条路径会在补偿里以 500 结束。"""
+    _seed_memory_world(repo)
+    _set_source_dirty(repo, memory_cases.NOTEBOOK, 1)
+    token = client.post(f"/api/notebooks/{memory_cases.NOTEBOOK}/share").json()["share_token"]
+    _race_validate(monkeypatch, repo, lambda: _set_source_dirty(repo, memory_cases.NOTEBOOK, 0))
+    copied = client.post(f"/api/shared/{token}/copy")
+    assert copied.status_code == 200, copied.text
+    view = memory_cases.read_copy(_fetch(repo), "?", copied.json()["id"])
+    assert view.counts["concept_clusters"] == 0
+    memory_cases.assert_copy_has_no_memory(
+        view, expected={**memory_cases.expected_copy_counts(), "concept_clusters": 0}
+    )
+
+
+def test_a_large_cluster_with_a_memory_member_is_dropped_without_a_per_row_probe(repo):
+    """一个 600 成员的簇里有一个 Memory 成员:整簇不带;计数与快照都从「含 Memory 成员的簇」
+    集合做差,SQLite 上不出现按簇行对整簇的相关探测(拷贝在秒级以内完成)。"""
+    import time
+
+    _seed_memory_world(repo)
+    rows = [
+        memory_cases.Row("knowledge_objects", {
+            "id": f"ko-hub-{i}", "notebook_id": memory_cases.NOTEBOOK, "object_type": "concept",
+            "status": "approved", "source_id": "src-doc", "payload": {"name": f"hub {i}"},
+            "evidence": [], "created_at": memory_cases.NOW, "updated_at": memory_cases.NOW,
+        })
+        for i in range(600)
+    ] + [
+        memory_cases.Row("knowledge_objects", {
+            "id": "ko-alice-hub", "notebook_id": memory_cases.NOTEBOOK, "object_type": "concept",
+            "status": "approved", "source_id": "src-mem-alice",
+            "payload": {"name": f"{memory_cases.MARK} hub"}, "evidence": [],
+            "created_at": memory_cases.NOW, "updated_at": memory_cases.NOW,
+        }, True),
+    ] + [
+        memory_cases.Row("concept_clusters", {
+            "id": f"cc-hub-{member}", "notebook_id": memory_cases.NOTEBOOK,
+            "canonical_id": "K-hub", "member_object_id": member, "canonical_name": "hub",
+            "object_type": "concept", "created_at": memory_cases.NOW, "generation": 0,
+        })
+        for member in [f"ko-hub-{i}" for i in range(600)] + ["ko-alice-hub"]
+    ]
+    _insert_rows(repo, rows)
+    store = repo._runtime.sharing_store
+    started = time.monotonic()
+    assert store.snapshot_copy_within_limits(memory_cases.NOTEBOOK)
+    snapshot = store.snapshot_copy_rows(memory_cases.NOTEBOOK)
+    elapsed = time.monotonic() - started
+    assert {r["canonical_id"] for r in snapshot["concept_clusters"]} == {"K-shared"}
+    assert elapsed < 5, elapsed

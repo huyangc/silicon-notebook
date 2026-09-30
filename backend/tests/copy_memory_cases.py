@@ -507,10 +507,10 @@ def read_copy(fetch: Callable[[str, tuple], list[dict]], placeholder: str, nb_id
     return view
 
 
-def assert_copy_has_no_memory(view: CopyView) -> None:
-    """副本的行数等于共享内容,且任何表的任何列(JSON 列先解析、逐个字符串叶子比对)都没有
-    Memory 的文本或 id。"""
-    assert view.counts == expected_copy_counts(), view.counts
+def assert_copy_has_no_memory(view: CopyView, expected: dict | None = None) -> None:
+    """副本的行数等于共享内容(或给定的 ``expected``),且任何表的任何列(JSON 列先解析、
+    逐个字符串叶子比对)都没有 Memory 的文本或 id。"""
+    assert view.counts == (expected or expected_copy_counts()), view.counts
     leaked = [leaf for leaf in view.leaves if MARK in leaf]
     assert not leaked, f"a Memory text leaked into the copy: {leaked}"
     for table, ids in memory_ids().items():

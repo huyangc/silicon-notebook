@@ -389,7 +389,14 @@ def test_memory_cluster_docstring_holds_seed_arm_only_minted_real_names_left_to_
     """`memory_cluster` docstring 的两句话:canonical 臂只认按对象 id 铸的种子(``K-~ko-…``、
     ``Kx-~ko-…``);真名种子(哪怕长得像对象 id)在这里认不出来——Memory 被删后由拷贝的「脏源库
     不带簇」规则覆盖(见 test_notebook_share_copy / test_copy_memory_exclusion_pg 的
-    test_a_cluster_seeded_by_a_since_deleted_memory)。"""
+    test_a_cluster_seeded_by_a_since_deleted_memory)。
+
+    已知缺口(登记给 E4-2,本分支不改):成簇**干净**(dirty=0)、真名种子、Memory 已不是成员的
+    簇——例如 ``K-alice-private-plan``,唯一成员是共享对象,簇名与描述取自已删的 Memory——两条
+    规则都认不出,拷贝会带出它的名字。删除路径今天到不了这个形态:``delete_source`` 在拆除
+    事务里必标脏,``remove_memory_source`` 走 ``delete_source``;只有「重建进行中删了 Memory、
+    重建收尾 ``finish_rebuild_state`` 无条件写 dirty=0」才会留下它(重建的新一代若读到删除前
+    的成员,名字随之发布,删除的脏标又被清掉)。"""
     doc = memory_sql.memory_cluster.__doc__
     assert "K-~ko-" in doc and "Kx-~ko-" in doc and "_source_clustering_current" in doc
     assert "minted_canonical_ids" in doc

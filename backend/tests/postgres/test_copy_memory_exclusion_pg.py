@@ -242,7 +242,7 @@ def test_memory_notebook_snapshot_is_the_legacy_snapshot_minus_the_memory_rows(
     assert {r["id"] for r in now_rows["knowledge_relations"]} == {"kr-shared"}
     assert {r["id"] for r in now_rows["knowledge_objects"]} == cases.SHARED_OBJECTS
     assert {r["canonical_id"] for r in now_rows["concept_clusters"]} == {"K-shared"}
-    assert now_rows["notebooks"][0][store_module._COPY_DIRTY_MARK] is True
+    assert now_rows["notebooks"][0][store_module._COPY_DIRTY_MARK] == store_module._HOLDS_MEMORY
     cases.assert_snapshot_is_legacy_minus_memory(now_rows, legacy)
 
 
@@ -371,6 +371,65 @@ def test_snapshot_table_set_is_pinned_and_memory_carriers_are_not_in_it():
         assert not cases.MEMORY_CARRIERS_NOT_COPIED & tables
 
 
+def test_shared_by_me_overview_sizes_exclude_memory(pg_app):
+    repo, client = pg_app
+    _seed(repo)
+    token = client.post(f"/api/notebooks/{cases.NOTEBOOK}/share").json()["share_token"]
+    preview = client.get(f"/api/shared/{token}").json()
+    overview = client.get("/api/notebooks/shared-by-me")
+    assert overview.status_code == 200, overview.text
+    row = next(item for item in overview.json() if item["id"] == cases.NOTEBOOK)
+    assert row["size"] == preview["size"]
+    cases.assert_share_sizes_exclude_memory({"size": row["size"]}, preview)
+
+
+def _race_validate(monkeypatch, before_validate):
+    from app.repositories.postgres.sharing_store import SharingStore
+
+    original = SharingStore.validate_copy
+
+    def racing(store_self, source_id, new_id):
+        before_validate()
+        return original(store_self, source_id, new_id)
+
+    monkeypatch.setattr(SharingStore, "validate_copy", racing)
+
+
+def _set_source_dirty(repo, nb, dirty):
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, dirty, kg_mutation_seq, updated_at) "
+            "VALUES (%s, %s, 7, %s) ON CONFLICT (notebook_id) DO UPDATE SET dirty = excluded.dirty",
+            (nb, dirty, cases.NOW),
+        )
+
+
+def test_copy_survives_the_source_turning_dirty_mid_copy(pg_app, monkeypatch):
+    repo, client = pg_app
+    _seed(repo)
+    token = client.post(f"/api/notebooks/{cases.NOTEBOOK}/share").json()["share_token"]
+    _race_validate(monkeypatch, lambda: _set_source_dirty(repo, cases.NOTEBOOK, 1))
+    copied = client.post(f"/api/shared/{token}/copy")
+    assert copied.status_code == 200, copied.text
+    view = cases.read_copy(_fetch(repo), "%s", copied.json()["id"])
+    assert view.counts["concept_clusters"] == cases.expected_copy_counts()["concept_clusters"]
+
+
+def test_copy_survives_the_source_being_rebuilt_mid_copy(pg_app, monkeypatch):
+    repo, client = pg_app
+    _seed(repo)
+    _set_source_dirty(repo, cases.NOTEBOOK, 1)
+    token = client.post(f"/api/notebooks/{cases.NOTEBOOK}/share").json()["share_token"]
+    _race_validate(monkeypatch, lambda: _set_source_dirty(repo, cases.NOTEBOOK, 0))
+    copied = client.post(f"/api/shared/{token}/copy")
+    assert copied.status_code == 200, copied.text
+    view = cases.read_copy(_fetch(repo), "%s", copied.json()["id"])
+    assert view.counts["concept_clusters"] == 0
+    cases.assert_copy_has_no_memory(
+        view, expected={**cases.expected_copy_counts(), "concept_clusters": 0}
+    )
+
+
 # ------------------------------------------------------------------ EXPLAIN pins
 # The distribution the pins run on: the target notebook (nb-big) is a thin slice of
 # every big table and holds 40 Memory sources; ONE other notebook (nb-memheavy)
@@ -460,7 +519,10 @@ def _seed_scale(database) -> None:
         db.execute(
             "INSERT INTO concept_clusters(id,notebook_id,canonical_id,member_object_id,"
             f"canonical_name,object_type,created_at,generation) SELECT 'cc-'||n||'-'||g,{nb},"
-            "CASE WHEN g%%50=0 THEN 'K-~ko-'||n||'-'||g ELSE 'K-'||n||'-'||(g/3) END,"
+            # nb-big also holds one 600-member cluster ('K-hub') with Memory members:
+            # the shape whose per-row member probe was O(cluster size squared).
+            "CASE WHEN n=0 AND g<600 THEN 'K-hub' WHEN g%%50=0 THEN 'K-~ko-'||n||'-'||g "
+            "ELSE 'K-'||n||'-'||(g/3) END,"
             f"'ko-'||n||'-'||g,'n','concept',%s,0 FROM {each}", (NOW,))
         db.execute(
             "INSERT INTO knowledge_source_facts(id,notebook_id,source_id,source_generation,"
@@ -485,20 +547,28 @@ _EXPECTED_ANTI_JOINS = {
     "knowledge_source_fact_elements": 2, "knowledge_source_fact_backfills": 1,
     "knowledge_relations": 3, "chunk_embeddings": 1, "chunk_questions": 2,
     "element_embeddings": 0, "knowledge_embeddings": 1, "relation_embeddings": 3,
-    # member arm + minted-seed arm + "the source's clustering is current"
-    "concept_clusters": 3,
+    # minted-seed arm + "the source's clustering is current"; the member arm is a set
+    # read once (`_MEMORY_MEMBER_KEYS_SQL`), never a per-row probe
+    "concept_clusters": 2,
 }
 #: The validate_copy extras judge per-source tables by their own source_id (an
 #: anti-join) where the snapshot joins `sources` (a filter).
 _EXPECTED_VALIDATE_ANTI_JOINS = {
     **_EXPECTED_ANTI_JOINS, "source_paper_meta": 1, "source_authors": 1,
-    "concept_clusters": 2,  # the copy side; the source side adds the dirty term (+1)
 }
 #: Per-row probes a Memory-aware statement may add over its pre-M2 text: the element
 #: probe (element_embeddings, fact elements) and the minted-seed probe (clusters).
 _EXTRA_ROW_PROBES = {
     "knowledge_source_fact_elements": 1, "element_embeddings": 1, "concept_clusters": 1,
 }
+
+
+#: How production counts the Memory-aware cluster statements (the size bound and the
+#: validate source side): one row per cluster, the Memory-member set subtracted in Python.
+_CLUSTER_GROUP_COUNT = (
+    "SELECT c.canonical_id, c.generation, COUNT(*) AS n "
+    "FROM ({q}) c GROUP BY c.canonical_id, c.generation"
+)
 
 
 def _seq_scanned(plan: str) -> set[str]:
@@ -594,7 +664,11 @@ def test_memory_aware_snapshot_statements_and_their_counts_build_every_set_per_n
         if table not in store_module._MEMORY_SNAPSHOT_TEXT:
             assert query == legacy[table]
             continue
-        for wrap in ("{q}", "SELECT COUNT(*) AS n FROM ({q}) AS _c"):
+        count_wrap = (
+            _CLUSTER_GROUP_COUNT if table == "concept_clusters"
+            else "SELECT COUNT(*) AS n FROM ({q}) AS _c"
+        )
+        for wrap in ("{q}", count_wrap):
             new = _plans(scale_database, wrap.format(q=query), ("nb-big",))
             old = _plans(scale_database, wrap.format(q=legacy[table]), ("nb-big",))
             for mode in ("custom", "generic"):
@@ -621,15 +695,6 @@ def test_memory_aware_validate_extras_build_every_set_per_notebook(scale_databas
                 anti_joins=_EXPECTED_VALIDATE_ANTI_JOINS[table],
                 extra_probes=_EXTRA_ROW_PROBES.get(table, 0),
             )
-        source_only = store_module._MEMORY_VALIDATED_SOURCE_ONLY.get(table)
-        if source_only:
-            source_side = _plans(scale_database, f"{statement}{extra} {source_only}", ("nb-big",))
-            for mode in ("custom", "generic"):
-                _assert_notebook_scoped(
-                    f"validate {table} source side {mode}", source_side[mode], old[mode],
-                    anti_joins=_EXPECTED_VALIDATE_ANTI_JOINS[table] + 1,
-                    extra_probes=_EXTRA_ROW_PROBES.get(table, 0),
-                )
 
 
 def test_share_size_counts_and_probes_build_every_set_per_notebook(scale_database):
@@ -696,3 +761,71 @@ def test_child_rows_are_judged_by_their_memory_parent_too(pg_app):
     _mk_user(repo, "user-adv-copy")
     new = repo.copy_notebook(cases.NOTEBOOK, new_owner_id="user-adv-copy")
     cases.assert_copy_has_no_memory(cases.read_copy(_fetch(repo), "%s", new.id))
+
+
+_LOOPS_ON = re.compile(r"(?:Scan|Scan Backward) (?:using \S+ )?on (\w+).*?loops=(\d+)")
+
+
+def _max_loops_on(plan: str, table: str) -> int:
+    return max((int(n) for t, n in _LOOPS_ON.findall(plan) if t == table), default=0)
+
+
+def test_cluster_statements_never_probe_a_whole_cluster_per_row(scale_database):
+    """P1-1:nb-big 有一个 600 成员、含 Memory 成员的簇。拷贝的簇语句(快照、尺寸计数、validate
+    源侧)各只扫一遍 concept_clusters(loops=1);「含 Memory 成员的簇」集合从 Memory 一侧驱动,
+    对 concept_clusters 的探测次数至多是本库 Memory 对象数(400),与簇行数(4000)无关。按簇行
+    对整簇做相关探测的写法在这里是 loops=簇行数。"""
+    from app.repositories.postgres import sharing_store as store_module
+
+    snapshot = dict(store_module._MEMORY_COPY_SNAPSHOT_QUERIES)["concept_clusters"]
+    statements = {
+        "snapshot": snapshot,
+        "size count": _CLUSTER_GROUP_COUNT.format(q=snapshot),
+        "validate source": _CLUSTER_GROUP_COUNT.format(q=store_module._MEMORY_CLUSTERS_BASE_SQL),
+    }
+    with scale_database.connect() as db:
+        memory_objects = db.execute(
+            "SELECT COUNT(*) AS n FROM knowledge_objects o JOIN sources s ON s.id = o.source_id "
+            "WHERE o.notebook_id = 'nb-big' AND s.source_type = 'memory'"
+        ).fetchone()["n"]
+        hub = db.execute(
+            "SELECT COUNT(*) AS n FROM concept_clusters WHERE canonical_id = 'K-hub'"
+        ).fetchone()["n"]
+        assert hub >= 500
+        for label, query in statements.items():
+            rows = db.execute(
+                f"EXPLAIN (ANALYZE, TIMING OFF, COSTS OFF) {query}", ("nb-big",)
+            ).fetchall()
+            plan = "\n".join(str(r["QUERY PLAN"]) for r in rows)
+            assert _max_loops_on(plan, "concept_clusters") == 1, (label, plan)
+        rows = db.execute(
+            f"EXPLAIN (ANALYZE, TIMING OFF, COSTS OFF) {store_module._MEMORY_MEMBER_KEYS_SQL}",
+            ("nb-big",),
+        ).fetchall()
+        plan = "\n".join(str(r["QUERY PLAN"]) for r in rows)
+        assert _max_loops_on(plan, "concept_clusters") <= memory_objects, plan
+        keys = store_module._memory_member_keys(db, "nb-big")
+    assert ("K-hub", 0) in keys
+
+
+def test_memory_member_keys_and_cluster_counts_build_every_set_per_notebook(scale_database):
+    from app.repositories.postgres import sharing_store as store_module
+
+    legacy_clusters = _CLUSTER_GROUP_COUNT.format(
+        q=dict(store_module._COPY_SNAPSHOT_QUERIES)["concept_clusters"]
+    )
+    for label, query, legacy in (
+        ("member keys", store_module._MEMORY_MEMBER_KEYS_SQL, ""),
+        (
+            "validate source",
+            _CLUSTER_GROUP_COUNT.format(q=store_module._MEMORY_CLUSTERS_BASE_SQL),
+            legacy_clusters,
+        ),
+    ):
+        plans = _plans(scale_database, query, ("nb-big",))
+        old = _plans(scale_database, legacy, ("nb-big",)) if legacy else {}
+        for mode, plan in plans.items():
+            _assert_notebook_scoped(
+                f"{label} {mode}", plan, old.get(mode, ""),
+                extra_probes=_EXTRA_ROW_PROBES["concept_clusters"] if legacy else 0,
+            )
