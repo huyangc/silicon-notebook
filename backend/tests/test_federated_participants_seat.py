@@ -43,6 +43,12 @@ _GATES = (
     # "does any reference library have a KG" -- override arm only.
     "_any_base_notebook_has_kg",
 )
+# PR-D B1: a hit read from one library OUTSIDE the three legs (``expand_graph``
+# neighbours, ``_retrieve_neighbors``) is stamped in peer mode with the tier the
+# legs give that library, read from the same seat -- neither a leg nor a gate.
+_STAMPS = (
+    "_peer_owner",
+)
 
 
 def _seat_file_index() -> PythonSourceIndex:
@@ -82,7 +88,7 @@ def test_three_federated_legs_read_one_seat():
         finding.key.scope.rsplit(".", 1)[-1]: finding.count
         for finding in index.calls(target="self._retrieval_participants")
     }
-    assert seated == {name: 1 for name in (*_LEGS, *_GATES)}, seated
+    assert seated == {name: 1 for name in (*_LEGS, *_GATES, *_STAMPS)}, seated
 
 
 def test_the_seat_lives_on_the_shared_base_class():
