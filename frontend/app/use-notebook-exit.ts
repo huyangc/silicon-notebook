@@ -205,7 +205,7 @@ export function useNotebookExit(handlers: {
   const settle = useCallback(async (
     id: string,
     acknowledged: number,
-    outcome: LeaveOutcome | { kind: "failed"; error: unknown },
+    outcome: LeaveOutcome | { kind: "failed"; cause: unknown },
     state: ExitState | null,
   ) => {
     const attached = flowRef.current?.notebookId === id;
@@ -238,10 +238,10 @@ export function useNotebookExit(handlers: {
         return;
       case "failed":
         if (!attached) {
-          handlersRef.current.onError(outcome.error);
+          handlersRef.current.onError(outcome.cause);
           return;
         }
-        reopen({ failure: toUserMessage(outcome.error, EXIT_FAILED_TEXT), notice: "", changed: false });
+        reopen({ failure: toUserMessage(outcome.cause, EXIT_FAILED_TEXT), notice: "", changed: false });
         return;
       default:
         break;
@@ -271,11 +271,11 @@ export function useNotebookExit(handlers: {
         phase: current.phase === "checking" ? "leaving" : current.phase,
       });
     }
-    let outcome: LeaveOutcome | { kind: "failed"; error: unknown };
+    let outcome: LeaveOutcome | { kind: "failed"; cause: unknown };
     try {
       outcome = await leaveNotebook(id, acknowledged);
     } catch (error) {
-      outcome = { kind: "failed", error };
+      outcome = { kind: "failed", cause: error };
     }
     let state: ExitState | null = null;
     if (outcome.kind === "unknown") {
@@ -403,13 +403,13 @@ export function useNotebookExit(handlers: {
       const batches = await transferMemoriesInBatches(
         current.transferIds, targetNotebookId, mode, transferExtractKg,
       );
-      if (batches.results.length === 0 && batches.error !== null) {
+      if (batches.results.length === 0 && batches.firstFailure !== null) {
         if (flowRef.current?.notebookId === id && flowRef.current.transfer === "working" && epochRef.current === epoch) {
           // 选择器已被关掉,没人接这个错误:落在面板上。
-          update({ transfer: "idle", transferIds: [], failure: toUserMessage(batches.error, "转移没有成功，请稍后重试。") });
+          update({ transfer: "idle", transferIds: [], failure: toUserMessage(batches.firstFailure, "转移没有成功，请稍后重试。") });
           return;
         }
-        throw batches.error; // 选择器还开着:它就地显示错误,用户可以换个目标重试
+        throw batches.firstFailure; // 选择器还开着:它就地显示错误,用户可以换个目标重试
       }
       const summary = summarizeTransferResults(batches.results);
       // 移动时「副本已建但源没清掉」不算失败:退出会删掉这条源,副本已经在目标里了。
