@@ -81,9 +81,14 @@ export const deleteReport = (nb: string, id: string) =>
     method: "DELETE",
   });
 
-/** 分享前的披露:公开页会带上作者本人多少条个人记忆摘录(服务端按即将公开的确切范围数)。 */
+/** 分享前的披露(服务端按即将公开的确切范围数):`memory_count` = 公开页可能带上内容的作者本人
+ *  个人记忆条数(被引用的,以及生成时用到的);`foreign_memory_count` = 报告引用的其他成员的个人
+ *  记忆条数,大于 0 时这份报告不能公开。 */
 export const getReportShareDisclosure = (nb: string, id: string) =>
-  requestJson<{ memory_count: number }>(`/notebooks/${nb}/reports/${id}/share/disclosure`, options);
+  requestJson<{ memory_count: number; foreign_memory_count?: number }>(
+    `/notebooks/${nb}/reports/${id}/share/disclosure`,
+    options,
+  );
 
 // 409 `share_disclosure_required`:作者确认的条数与服务端此刻数出来的不相等(或根本没带确认
 // 而库里有 Memory 引用)。数字由服务端给,前端只负责把确认条就地更新成它——所以这里不走通用

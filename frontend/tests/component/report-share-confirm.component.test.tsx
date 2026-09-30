@@ -105,7 +105,11 @@ async function openReport() {
   return screen.findByRole("button", { name: "分享" });
 }
 
-const disclosureSentence = (n: number) => `公开页会包含 ${n} 条你引用到的个人记忆摘录。`;
+const disclosureSentence = (n: number) => `公开页可能包含来自 ${n} 条个人记忆的内容。`;
+const changedSentence = (n: number, added: number) =>
+  added > 0
+    ? `条数有变化（新增 ${added} 条）：${disclosureSentence(n)}`
+    : `条数有变化：${disclosureSentence(n)}`;
 const strip = () => screen.queryByRole("group", { name: "公开前确认" });
 
 beforeEach(() => {
@@ -248,8 +252,8 @@ test("409:确认条就地换成服务端确数,再确认发的是新数字", asy
 
   await user.click(await screen.findByRole("button", { name: "确认公开" }));
 
-  // 条还在、数字变了、没有横幅式的新元素;按钮回到可点。
-  expect(await screen.findByText(disclosureSentence(5))).toBeInTheDocument();
+  // 条还在、数字变了且说明「条数有变化」、没有横幅式的新元素;按钮回到可点。
+  expect(await screen.findByText(changedSentence(5, 2))).toBeInTheDocument();
   expect(screen.queryByText(disclosureSentence(3))).toBeNull();
   expect(strip()).not.toBeNull();
   expect(announceShareLink).not.toHaveBeenCalled();
@@ -272,7 +276,7 @@ test("409 的确数也认根层同形状(不依赖 detail 包裹)", async () => 
 
   await user.click(await screen.findByRole("button", { name: "确认公开" }));
 
-  expect(await screen.findByText(disclosureSentence(4))).toBeInTheDocument();
+  expect(await screen.findByText(changedSentence(4, 0))).toBeInTheDocument();
 });
 
 test("别的 409(不是披露要求)走通用错误:toast 报错,确认条不被改写", async () => {
@@ -351,6 +355,92 @@ test("取披露失败 + 403:确认条只显示那句原因(没有可确认的数
   const group = screen.getByRole("group", { name: "公开前确认" });
   expect(within(group).queryByRole("button", { name: "确认公开" })).toBeNull();
   expect(screen.getByRole("button", { name: "分享" })).toBeEnabled();
+});
+
+test("引用了其他成员的个人记忆:取披露就知道,不发 POST,确认条就地说明不能公开、只留「取消」", async () => {
+  const user = userEvent.setup();
+  const sentence = "报告引用了其他成员的个人记忆，不能公开";
+  handlers.disclosure = () => json(200, { memory_count: 2, foreign_memory_count: 1 });
+  await user.click(await openReport());
+
+  const group = await screen.findByRole("group", { name: "公开前确认" });
+  expect(within(group).getByText(sentence)).toBeInTheDocument();
+  expect(within(group).queryByText(disclosureSentence(2))).toBeNull();
+  expect(within(group).queryByRole("button", { name: "确认公开" })).toBeNull();
+  expect(shareCalls()).toHaveLength(0);
+  expect(screen.getByRole("button", { name: "分享" })).toBeEnabled();
+  expect(within(group).getByRole("button", { name: "取消" })).toHaveFocus();
+});
+
+test("服务端 403(引用了其他成员的个人记忆)时那句原因同样就地显示,焦点落到「取消」", async () => {
+  const user = userEvent.setup();
+  const sentence = "报告引用了其他成员的个人记忆，不能公开";
+  handlers.disclosure = () => json(200, { memory_count: 1 });
+  handlers.share = () => json(403, { detail: sentence }, { "X-User-Message": "1" });
+  await user.click(await openReport());
+
+  await user.click(await screen.findByRole("button", { name: "确认公开" }));
+
+  const group = screen.getByRole("group", { name: "公开前确认" });
+  await waitFor(() => expect(within(group).getByText(sentence)).toBeInTheDocument());
+  await waitFor(() => expect(within(group).getByRole("button", { name: "取消" })).toHaveFocus());
+});
+
+test("键盘:确认条出现时焦点进入条里(落在「取消」),Esc 收起且焦点回到「分享」,不发请求", async () => {
+  const user = userEvent.setup();
+  handlers.disclosure = () => json(200, { memory_count: 2 });
+  const button = await openReport();
+  await user.click(button);
+
+  const group = await screen.findByRole("group", { name: "公开前确认" });
+  await waitFor(() => expect(within(group).getByRole("button", { name: "取消" })).toHaveFocus());
+
+  await user.keyboard("{Escape}");
+
+  await waitFor(() => expect(strip()).toBeNull());
+  expect(screen.getByRole("button", { name: "分享" })).toHaveFocus();
+  expect(shareCalls()).toHaveLength(0);
+});
+
+test("键盘:点「取消」收起后焦点回到「分享」;公开成功后焦点也回到带结果的「分享」按钮上", async () => {
+  const user = userEvent.setup();
+  handlers.disclosure = () => json(200, { memory_count: 1 });
+  await user.click(await openReport());
+  await user.click(await screen.findByRole("button", { name: "取消" }));
+  await waitFor(() => expect(strip()).toBeNull());
+  expect(screen.getByRole("button", { name: "分享" })).toHaveFocus();
+
+  await user.click(screen.getByRole("button", { name: "分享" }));
+  await user.click(await screen.findByRole("button", { name: "确认公开" }));
+  const landed = await screen.findByRole("button", { name: "已公开，链接已复制" });
+  expect(strip()).toBeNull();
+  expect(landed).toHaveFocus();
+});
+
+test("在飞时 Esc 不收起确认条(结果马上落地)", async () => {
+  const user = userEvent.setup();
+  let releaseShare!: () => void;
+  const shareGate = new Promise<void>((resolve) => { releaseShare = resolve; });
+  const routed = vi.fn(fakeFetch);
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if ((init?.method || "GET").toUpperCase() === "POST" && String(input).endsWith("/share")) {
+      await shareGate;
+    }
+    return routed(input, init);
+  }));
+  handlers.disclosure = () => json(200, { memory_count: 2 });
+  await user.click(await openReport());
+  const group = await screen.findByRole("group", { name: "公开前确认" });
+  await user.click(within(group).getByRole("button", { name: "确认公开" }));
+  await screen.findByRole("button", { name: "生成链接中…" });
+
+  // 焦点在条里的禁用按钮上时按 Esc。
+  within(group).getByRole("button", { name: "取消" }).focus();
+  await user.keyboard("{Escape}");
+  expect(strip()).not.toBeNull();
+
+  await act(async () => { releaseShare(); });
+  await screen.findByRole("button", { name: "已公开，链接已复制" });
 });
 
 test("在飞:取披露与公开期间「分享」读「生成链接中…」且禁用,确认条两个按钮同样禁用", async () => {

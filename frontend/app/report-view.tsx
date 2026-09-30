@@ -1427,6 +1427,21 @@ export function ReportsPanel({
   // 为 true;用户取消分享的那一下在点击处清掉(见「分享」按钮的 onClick),旧链接的结果
   // 不会挂到下一条链接上。
   const shareResult = useCopyResult();
+  // 确认条收起时焦点回到这颗「分享」按钮(结果也落在它身上)。公开成功那一刻按钮还在忙
+  // (禁用的按钮拿不到焦点),就记下来,等它回到可点再给。
+  const shareButtonRef = useRef<HTMLButtonElement | null>(null);
+  const shareFocusPending = useRef(false);
+  const returnShareFocus = useCallback(() => {
+    const button = shareButtonRef.current;
+    if (button && !button.disabled) button.focus();
+    else shareFocusPending.current = true;
+  }, []);
+  useEffect(() => {
+    if (shareBusy || !shareFocusPending.current) return;
+    shareFocusPending.current = false;
+    const current = document.activeElement;
+    if (!current || current === document.body) shareButtonRef.current?.focus();
+  }, [shareBusy]);
   const reportsPage = useClientPagination(reports ?? NO_REPORTS, REPORT_LIST_PAGE_SIZE, notebookId);
   // 打开的报告要落在列表当前页上:返回列表时停在它所在的页。只跟随 active id 变化与
   // 清单(重新)加载完成,不跟随原地刷新——见 groups-page.tsx「选中的群组要落在侧栏
@@ -1481,6 +1496,7 @@ export function ReportsPanel({
             )}
             {!readOnly && active.status === "done" && (
               <button
+                ref={shareButtonRef}
                 className={shared && shareResult.resultFor(`share:${active.id}`) === "copied" ? "report-action copy-result-copied" : shared && shareResult.resultFor(`share:${active.id}`) === "failed" ? "report-action copy-result-failed" : "report-action"}
                 type="button"
                 disabled={shareBusy}
@@ -1534,8 +1550,11 @@ export function ReportsPanel({
         {!readOnly && !shared && active.status === "done" && shareConfirm && (
           <ReportShareConfirm
             count={shareConfirm.count}
+            added={shareConfirm.added}
             refusal={shareConfirm.refusal}
             busy={shareBusy}
+            returnFocusRef={shareButtonRef}
+            onReturnFocus={returnShareFocus}
             onConfirm={() => {
               void confirmShare().then((copied) => {
                 if (copied !== null) shareResult.report(`share:${active.id}`, copied);
