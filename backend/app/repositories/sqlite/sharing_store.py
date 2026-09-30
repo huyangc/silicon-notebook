@@ -731,21 +731,23 @@ class SharingStore:
         `memory:read`), and an orphaned Memory source reads for nobody.
         ``visible_only`` is the gate of the generic source write endpoints
         (delete, reparse): Memory and Knowhow projection rows answer ``None``
-        for every caller, the creator included. The two keywords are never
-        combined (write callers pass only ``visible_only``, read callers only
-        ``viewer_id``). Neither keyword keeps the historical statement byte for
-        byte.
+        for every caller, the creator included.
+
+        Exactly one gate is REQUIRED: a caller passes ``viewer_id`` (reads) or
+        ``visible_only=True`` (writes), never both and never neither — a
+        ``TypeError`` otherwise. There is no ungated mode: a new caller that
+        forgets to choose must fail loudly, not silently resolve another
+        member's Memory the way this lookup did before E3-1.
         """
-        if visible_only and viewer_id is not None:
-            raise ValueError("viewer_id and visible_only are separate gates")
+        if visible_only == (viewer_id is not None):
+            raise TypeError(
+                "source_notebook_id needs exactly one gate: "
+                "viewer_id=... (reads) or visible_only=True (writes)"
+            )
         with self.database.connect() as db:
             if visible_only:
                 row = db.execute(
                     _VISIBLE_SOURCE_NOTEBOOK_SQL, (source_id,)
-                ).fetchone()
-            elif viewer_id is None:
-                row = db.execute(
-                    "SELECT notebook_id FROM sources WHERE id = ?", (source_id,)
                 ).fetchone()
             else:
                 row = db.execute(

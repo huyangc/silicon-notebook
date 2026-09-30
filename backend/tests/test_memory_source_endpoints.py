@@ -232,9 +232,119 @@ def test_refusal_runs_the_same_reads_as_a_missing_id(seeded):
         )
 
 
+def test_participant_predicate_requires_the_gated_notebook_id():
+    """The shared predicate itself refuses without the owner gate's answer:
+    ``readable_notebook_id=None`` (the gate refused / was skipped) and an id that
+    is not the source's own notebook both answer False, even for a source that
+    is otherwise in scope. A future caller that feeds it something other than
+    the gate's result cannot open a source by accident."""
+    detail = source_routes.SourceDetail.model_construct(
+        notebook_id="nb-a", type="document"
+    )
+
+    def participants(_notebook_id):
+        return ["nb-a", "nb-b"]
+
+    predicate = source_routes.source_readable_in_participant_scope
+    assert predicate("nb-a", detail, participants, readable_notebook_id="nb-a")
+    assert not predicate("nb-a", detail, participants, readable_notebook_id=None)
+    assert not predicate("nb-a", detail, participants, readable_notebook_id="nb-b")
+    # The wrong-id refusal is not the participant check in disguise: nb-b is
+    # a participant too.
+    assert "nb-b" in participants("nb-a")
+
+
 # --------------------------------------------------------------------------- #
 # MCP get_cited_element
 # --------------------------------------------------------------------------- #
+
+
+class _CaptureServer:
+    def __init__(self):
+        self.handlers = {}
+
+    def tool(self, *, description):
+        def register(handler):
+            self.handlers[handler.__name__] = handler
+            return handler
+        return register
+
+
+def _mcp_reads(monkeypatch, principal, notebook_id, source_id, element_id):
+    """Run the real ``get_cited_element`` body with its synchronous ``load``
+    executed on THIS thread, and return (outcome, normalized statements).
+
+    ``_selected_notebook`` (the shared authentication choke point, identical
+    for every call) is replaced by its result; ``_run_with_progress`` runs the
+    work inline so the thread-local SQLite connection traced here is the one
+    ``load`` reads through."""
+    import anyio
+
+    from app.api.mcp_tools import citations
+
+    monkeypatch.setattr(
+        citations, "_selected_notebook",
+        lambda ctx, repo, scope: (principal, notebook_id),
+    )
+
+    async def inline(ctx, work, *, label):
+        return work()
+
+    monkeypatch.setattr(citations, "_run_with_progress", inline)
+    server = _CaptureServer()
+    citations.register_citation_tools(server, repository)
+    handler = server.handlers["get_cited_element"]
+    outcome: list = []
+
+    def run():
+        try:
+            outcome.append(anyio.run(handler, source_id, element_id, None))
+        except KeyError as exc:
+            outcome.append(("KeyError", exc.args))
+
+    statements = _normalized_statements(
+        run, (source_id, element_id, principal.owner_id)
+    )
+    return outcome[0], statements
+
+
+@pytest.mark.parametrize(
+    ("user", "scopes", "refused"),
+    [
+        ("alice", ["knowledge:read", "memory:read"], "src-e31-mem-bob"),
+        ("alice", ["knowledge:read", "memory:read"], "src-e31-mem-orphan"),
+        # Without memory:read even the token owner's own Memory is refused.
+        ("alice", ["knowledge:read"], "src-e31-mem-alice"),
+    ],
+)
+def test_get_cited_element_refusal_runs_the_same_reads_as_a_missing_id(
+    seeded, monkeypatch, user, scopes, refused
+):
+    from app.api.deps import mcp_memory_repository
+
+    principal = mcp_memory_repository().resolve_agent_token(
+        _token(seeded, user, scopes)
+    )
+    notebook_id = seeded["notebook_id"]
+    refused_outcome, refused_reads = _mcp_reads(
+        monkeypatch, principal, notebook_id, refused, _element_id(refused)
+    )
+    missing_outcome, missing_reads = _mcp_reads(
+        monkeypatch, principal, notebook_id, MISSING, _element_id(MISSING)
+    )
+    assert refused_outcome == ("KeyError", (refused,))
+    assert missing_outcome == ("KeyError", (MISSING,))
+    assert refused_reads and refused_reads == missing_reads
+    assert len(refused_reads) == 1 and "FROM memory_items rm" in refused_reads[0], (
+        "the refusal stops at the owner gate, before the source is read"
+    )
+    # Control: the same harness on a readable source reads past the gate.
+    readable_outcome, readable_reads = _mcp_reads(
+        monkeypatch, principal, notebook_id, "src-e31-doc",
+        _element_id("src-e31-doc"),
+    )
+    assert readable_outcome["text"] == _TEXT["src-e31-doc"]
+    assert len(readable_reads) > 1
 
 
 def _error_text(result) -> str:
@@ -383,9 +493,15 @@ def test_generic_write_endpoints_never_address_a_hidden_source(seeded):
             assert response.status_code == 404
             assert f"{source_id} 标题" not in response.text
     access = notebook_access_repository()
+
+    def still_there(source_id: str) -> bool:
+        with repository()._connect() as db:
+            return db.execute(
+                "SELECT 1 FROM sources WHERE id = ?", (source_id,)
+            ).fetchone() is not None
+
     for source_id in hidden:
-        # Still there, untouched: the ungated lookup still resolves it.
-        assert access.source_notebook_id(source_id) == seeded["notebook_id"]
+        assert still_there(source_id), source_id  # untouched
         assert access.source_notebook_id(source_id, visible_only=True) is None
     assert access.source_notebook_id(MISSING, visible_only=True) is None
     # Control: an ordinary document is still addressable and deletable.
@@ -394,18 +510,20 @@ def test_generic_write_endpoints_never_address_a_hidden_source(seeded):
     ) == seeded["notebook_id"]
     deleted = client.delete("/api/sources/src-e31-doc", headers=owner)
     assert deleted.status_code == 204, deleted.text
-    assert access.source_notebook_id("src-e31-doc") is None
+    assert not still_there("src-e31-doc")
 
 
-def test_ungated_notebook_lookup_is_unchanged_without_a_gate(seeded):
-    """Neither keyword keeps the historical lookup (any source's notebook);
+def test_notebook_lookup_requires_exactly_one_gate(seeded):
+    """There is no ungated mode: a caller must choose ``viewer_id`` (reads) or
+    ``visible_only=True`` (writes); neither or both is a ``TypeError``.
     ``viewer_id`` gates Memory by creator."""
     access = notebook_access_repository()
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         access.source_notebook_id(
             "src-e31-doc", viewer_id=seeded["alice"].id, visible_only=True
         )
-    assert access.source_notebook_id("src-e31-mem-bob") == seeded["notebook_id"]
+    with pytest.raises(TypeError):
+        access.source_notebook_id("src-e31-doc")
     assert access.source_notebook_id(
         "src-e31-mem-bob", viewer_id=seeded["alice"].id
     ) is None

@@ -619,17 +619,18 @@ class SharingStore:
     ) -> str | None:
         """The notebook ``source_id`` belongs to; see the SQLite adapter for the
         ``viewer_id`` (Memory owner gate of the reads) and ``visible_only``
-        (hidden-type gate of the writes) contracts — same statement, same miss."""
-        if visible_only and viewer_id is not None:
-            raise ValueError("viewer_id and visible_only are separate gates")
+        (hidden-type gate of the writes) contracts — same statement, same miss.
+        Exactly one gate is required (``TypeError`` otherwise); there is no
+        ungated mode."""
+        if visible_only == (viewer_id is not None):
+            raise TypeError(
+                "source_notebook_id needs exactly one gate: "
+                "viewer_id=... (reads) or visible_only=True (writes)"
+            )
         with self.database.connect() as connection:
             if visible_only:
                 row = connection.execute(
                     _VISIBLE_SOURCE_NOTEBOOK_SQL, (source_id,)
-                ).fetchone()
-            elif viewer_id is None:
-                row = connection.execute(
-                    "SELECT notebook_id FROM sources WHERE id=%s", (source_id,)
                 ).fetchone()
             else:
                 row = connection.execute(

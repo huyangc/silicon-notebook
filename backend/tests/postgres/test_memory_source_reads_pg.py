@@ -8,7 +8,7 @@ Two statements changed in this task, both built from
   viewer_id=...)`, the first read of `/sources/{id}`, its element endpoints, the
   participant-scope proxy and MCP `get_cited_element`. Another member's Memory,
   an orphaned Memory row and a missing id all answer None from this one
-  statement; `viewer_id=None` keeps the historical ungated statement.
+  statement; calling without a gate is a TypeError (no ungated mode).
 * `source_store._HIDDEN_SOURCE_IDS_SQL` -- `hidden_source_ids`, now consuming
   the same fragment instead of a hand-written twin.
 
@@ -120,10 +120,9 @@ def test_viewer_gated_notebook_lookup_matches_the_endpoint_matrix(stores):
     # Knowhow and ordinary sources are not gated.
     assert lookup("src-200", viewer_id="u-b") == "nb"
     assert lookup("src-500", viewer_id="") == "nb"
-    # viewer_id omitted: the historical ungated lookup (write-side callers).
-    assert lookup("src-1") == "nb"
-    assert lookup("src-orphan") == "nb"
-    assert lookup("src-does-not-exist") is None
+    # No gate chosen: there is no ungated mode.
+    with pytest.raises(TypeError):
+        lookup("src-1")
 
 
 def test_write_gate_never_resolves_a_hidden_source(stores):
@@ -136,7 +135,7 @@ def test_write_gate_never_resolves_a_hidden_source(stores):
     for source_id in ("src-0", "src-1", "src-orphan", "src-200", "src-missing"):
         assert lookup(source_id, visible_only=True) is None, source_id
     assert lookup("src-500", visible_only=True) == "nb"
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         lookup("src-500", viewer_id="u-a", visible_only=True)
 
 

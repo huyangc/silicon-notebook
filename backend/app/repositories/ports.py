@@ -600,7 +600,9 @@ class NotebookAccessRepository(Protocol):
     # endpoints — a Memory source not created by the viewer answers None, the
     # same as a missing id. `visible_only` (E3-1): the gate of the generic
     # source write endpoints — Memory/Knowhow projection rows answer None.
-    # Neither keyword keeps the ungated read.
+    # Exactly one of the two is required (TypeError otherwise): there is no
+    # ungated mode, so a caller that forgets to choose fails loudly. No
+    # in-tree plugin or extension SDK surface calls this method.
     def source_notebook_id(
         self,
         source_id: str,

@@ -9277,12 +9277,6 @@
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/mcp_tools/citations.py",
-        "scope": "<module>.register_citation_tools.get_cited_element.load",
-        "target": "require_agent_access"
-      },
-      {
-        "kind": "attribute",
         "path": "backend/app/api/mcp_tools/memory_context.py",
         "scope": "<module>.register_memory_context_tools.ask_notebook.check_memory_scope",
         "target": "require_agent_access"
