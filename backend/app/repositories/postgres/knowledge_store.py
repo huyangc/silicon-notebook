@@ -281,25 +281,17 @@ def _object_insert_row(row: Sequence[Any]) -> tuple:
 # PR-A·A1:``node_context`` 的来源天花板 SQL(规范定义在这一侧,SQLite 孪生同名
 # 函数方言不同、语义逐字等价)。
 #
-# 天花板在生产上是整库可见来源(可达 ~49k 个 id、~1.7 MB):每绑一次就是一次固定
-# 的序列化 + ``array_in`` + 规划成本(实测 ~50 ms/次,与 SQL 写法无关),同一连接上
-# 执行到第 ~10 次还会切到更慢的 generic plan。所以 ``node_context`` 的任何语句都
-# **不绑天花板**:SQL 只读回候选(簇成员的来源、兄弟过程的证据),在 Python 里对
-# 天花板 frozenset 判成员关系。
+# 绑还是不绑,按 ``source_ceiling`` 模块 docstring 的那条规则:必须在 LIMIT 之下过滤
+# 的语句(枚举的页与计数)经 ``source_ceiling`` / ``id_binding`` 绑一个参数;
+# ``node_context`` 手里是小而有界的候选集(簇成员的来源、兄弟过程的证据),所以它的
+# 任何语句都**不绑天花板**:SQL 只读回候选,在 Python 里对 ``normalise_ceiling`` 的
+# frozenset 判成员关系——没有要绑的,也没有要规划的。
 #
 # 反向索引 ``knowledge_object_sources`` 未认证(``source_index_backfilled`` 为假 =
 # 历史/未知,不是「没有行」)时簇谓词走权威支,直接扫 ``evidence`` JSON。两支读的
 # 都是 ``evidence[].source_id``(反向索引就是它打平出来的,见
-# ``source_ids_from_evidence``,只收非空 id);空/缺的 source_id 两支都不算来源。
-_ATTRIBUTABLE_SOURCE = "COALESCE(ev->>'source_id','')<>''"
-
-
-def _evidence_items(ref: str) -> str:
-    """``ref`` 那一行的 evidence 数组展开成 ``ev``(非数组按空数组)。"""
-    return (
-        "jsonb_array_elements(CASE WHEN jsonb_typeof("
-        f"{ref}.evidence)='array' THEN {ref}.evidence ELSE '[]'::jsonb END) ev"
-    )
+# ``source_ids_from_evidence``,只收非空 id);空/缺的 source_id 两支都不算来源
+# (``source_ceiling.ATTRIBUTABLE_SOURCE``)。
 
 
 def _node_context_cluster_sql(*, authoritative: bool) -> str:
@@ -319,10 +311,10 @@ def _node_context_cluster_sql(*, authoritative: bool) -> str:
     tests/postgres/test_cluster_generation_explain_pins.py。"""
     if authoritative:
         sources = (
-            "ARRAY(SELECT DISTINCT ev->>'source_id' FROM knowledge_objects ko "
-            f"CROSS JOIN LATERAL {_evidence_items('ko')} "
+            f"ARRAY(SELECT DISTINCT {source_ceiling.EVIDENCE_ITEM_SOURCE} FROM knowledge_objects ko "
+            f"CROSS JOIN LATERAL {source_ceiling.evidence_items('ko')} "
             "WHERE ko.id=m.member_object_id AND ko.notebook_id=c.notebook_id "
-            f"AND {_ATTRIBUTABLE_SOURCE})"
+            f"AND {source_ceiling.ATTRIBUTABLE_SOURCE})"
         )
     else:
         sources = (
@@ -351,21 +343,6 @@ def _node_context_cluster_sql(*, authoritative: bool) -> str:
         "AND m.generation=c.generation "
         'ORDER BY m.member_object_id COLLATE "C" LIMIT %s) m'
     )
-
-
-def _normalise_ceiling(allowed_source_ids: Optional[Iterable[str]]) -> Optional[frozenset]:
-    """天花板只归一化一次:``frozenset``(``source_ceiling_for`` 的形态)不含空 id
-    时原样用,不复制;其余可迭代形态(set / tuple / list)去空后转 frozenset。
-    ``None`` = 不限;空集 = 全部拒绝。"""
-    if allowed_source_ids is None:
-        return None
-    if (
-        isinstance(allowed_source_ids, frozenset)
-        and "" not in allowed_source_ids
-        and None not in allowed_source_ids
-    ):
-        return allowed_source_ids
-    return frozenset(str(s) for s in allowed_source_ids if s)
 
 
 def _evidence_dicts(raw: Any) -> list:
@@ -2380,7 +2357,7 @@ class KnowledgeStore:
         """
         if check_access:
             self.get_notebook(notebook_id)
-        allowed = _normalise_ceiling(allowed_source_ids)
+        allowed = source_ceiling.normalise_ceiling(allowed_source_ids)
         with self._connect() as db:
             row = db.execute("SELECT id, object_type, payload, evidence, source_id FROM knowledge_objects WHERE id=%s AND notebook_id=%s", (object_id, notebook_id)).fetchone()
             if row is None:

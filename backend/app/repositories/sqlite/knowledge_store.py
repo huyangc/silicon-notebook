@@ -47,23 +47,11 @@ _PUBLISHED_CLUSTER_GEN = (
 _DELETE_OBJECT_BATCH_SIZE = 500
 
 # PR-A·A1:``node_context`` 的来源天花板 SQL(PG 孪生同名函数是规范定义与完整
-# 说明,这里方言不同、语义逐字等价)。任何语句都不绑天花板(49k 个 id 的 JSON
-# 每条语句都要重新 ``json_each`` 一遍):SQL 只读回候选,成员关系在 Python 里对
-# frozenset 判。反向索引未认证时簇谓词走权威支,直接扫 ``evidence`` JSON。
-_EVIDENCE_ITEM_SOURCE = (
-    "json_extract(CASE WHEN ev.type='object' THEN ev.value ELSE '{}' END,"
-    "'$.source_id')"
-)
-_ATTRIBUTABLE_SOURCE = f"COALESCE({_EVIDENCE_ITEM_SOURCE},'')<>''"
-
-
-def _evidence_items(ref: str) -> str:
-    """``ref`` 那一行的 evidence 数组展开成 ``ev``(非法 JSON / 非数组按空数组)。"""
-    return (
-        f"json_each(CASE WHEN json_valid({ref}.evidence) "
-        f"THEN CASE WHEN json_type({ref}.evidence)='array' "
-        f"THEN {ref}.evidence ELSE '[]' END ELSE '[]' END) ev"
-    )
+# 说明,这里方言不同、语义逐字等价)。按 ``source_ceiling`` 的「绑还是不绑」规则,
+# 候选集小而有界,任何语句都不绑天花板:SQL 只读回候选,成员关系在 Python 里对
+# ``normalise_ceiling`` 的 frozenset 判。反向索引未认证时簇谓词走权威支,直接扫
+# ``evidence`` JSON;证据片段(``EVIDENCE_ITEM_SOURCE`` / ``ATTRIBUTABLE_SOURCE`` /
+# ``evidence_items``)与枚举共用 ``source_ceiling`` 的唯一文本。
 
 
 def _node_context_cluster_sql(*, authoritative: bool) -> str:
@@ -74,10 +62,10 @@ def _node_context_cluster_sql(*, authoritative: bool) -> str:
     if authoritative:
         sources = (
             "(SELECT json_group_array(s) FROM (SELECT DISTINCT "
-            f"CAST({_EVIDENCE_ITEM_SOURCE} AS TEXT) AS s FROM knowledge_objects ko "
-            f"JOIN {_evidence_items('ko')} "
+            f"CAST({source_ceiling.EVIDENCE_ITEM_SOURCE} AS TEXT) AS s FROM knowledge_objects ko "
+            f"JOIN {source_ceiling.evidence_items('ko')} "
             "WHERE ko.id=m.member_object_id AND ko.notebook_id=c.notebook_id "
-            f"AND ev.type='object' AND {_ATTRIBUTABLE_SOURCE}))"
+            f"AND ev.type='object' AND {source_ceiling.ATTRIBUTABLE_SOURCE}))"
         )
     else:
         sources = (
@@ -107,19 +95,6 @@ def _node_context_cluster_sql(*, authoritative: bool) -> str:
         "AND m.generation=(SELECT generation FROM c) "
         "ORDER BY m.member_object_id LIMIT ?"
     )
-
-
-def _normalise_ceiling(allowed_source_ids: Optional[Iterable[str]]) -> Optional[frozenset]:
-    """PG 孪生:天花板只归一化一次(不含空 id 的 frozenset 原样用)。"""
-    if allowed_source_ids is None:
-        return None
-    if (
-        isinstance(allowed_source_ids, frozenset)
-        and "" not in allowed_source_ids
-        and None not in allowed_source_ids
-    ):
-        return allowed_source_ids
-    return frozenset(str(s) for s in allowed_source_ids if s)
 
 
 def _evidence_dicts(raw: object) -> list:
@@ -2080,7 +2055,7 @@ class KnowledgeStore:
         名字与 occurrences)。"""
         if check_access:
             self.get_notebook(notebook_id)
-        allowed = _normalise_ceiling(allowed_source_ids)
+        allowed = source_ceiling.normalise_ceiling(allowed_source_ids)
         with self._connect() as db:
             row = db.execute("SELECT id, object_type, payload, evidence, source_id FROM knowledge_objects WHERE id=? AND notebook_id=?", (object_id, notebook_id)).fetchone()
             if row is None:

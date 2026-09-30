@@ -91,7 +91,10 @@ contributor constraints, not a second implementation history.
   `collection_map`, `collection_map_text`) passes `ceiling_binds` explicitly, with
   the run's verdict from `reasoning_retrieval.ceiling_binds_for_run`; the default
   binds and over-filters. `test_every_collection_entry_call_passes_the_ceiling_verdict`
-  pins the Ask, reasoning and catalog-overview callers.
+  pins the Ask, reasoning and catalog-overview callers. Its knowledge re-read twin,
+  `source_scope.ceiling_binds`, has one more arm (another member's Memory in the
+  library); listings do not need it because they exclude private Memory
+  unconditionally. Keep the other arms of the two verdicts in step.
 - `RepositoryRuntime` owns mutable operational state; `REPORT_CANCELLATIONS` is the
   explicit process-global exception shared by identity with the coordinator and
   compatibility functions. Domain builders take earlier frozen bundles, never the

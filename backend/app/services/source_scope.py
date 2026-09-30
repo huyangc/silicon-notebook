@@ -1084,9 +1084,20 @@ def ceiling_binds(
     step elements' sources) and clears the second; on a row that passed the
     check they are used as read.
 
-    The enumeration side names the same concept ``ceiling_binds``; its verdict
-    has no ``foreign_hidden`` arm because listings exclude private Memory
-    unconditionally by another rule.
+    The collection-enumeration twin is ``reasoning_retrieval
+    .ceiling_binds_for_run`` (passed as ``ceiling_binds`` to every enumeration
+    and catalog entry point and applied by ``collection_catalog
+    .CollectionCatalogService.source_ceiling``).  They agree on every arm but
+    one, and deliberately: the enumeration verdict has NO ``foreign_hidden``
+    arm, because listings, counts and evidence references exclude private
+    Memory unconditionally by another rule (the owner-column exclusion and the
+    Memory-ref drop), so another member's Memory never needs a ceiling there.
+    The other arms line up: deny-all and a per-library freeze bind in
+    ``source_ceiling`` whatever the verdict says; a subjectless run always
+    binds; narrowed or drifted is the verdict itself.  The enumeration verdict
+    is memoised per run and is not flipped on read -- a listing's continuation
+    is protected instead by its cursor's ceiling digest.  Two functions, not
+    one, because the arms are not identical.
     """
     if not scope.source_ceiling_binds(notebook_id):
         return False
