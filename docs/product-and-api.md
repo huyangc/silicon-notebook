@@ -1862,35 +1862,55 @@ warns about that lifecycle consequence without exposing member identities or cou
 Hard-deleting a Memory — `DELETE /memories/{id}`, or `POST /memories/bulk-delete` with at most
 200 ids (only the caller's own records count) — first removes everything derived from it: the
 hidden synthetic source with its elements and element vectors, and the KG objects, relations,
-source-local facts, cluster memberships, reverse-index rows and review candidates extracted from
-it; the notebook's graph is marked for rebuild. If a curator manually merged a Memory-derived
-object into another object, the surviving object only loses the evidence that Memory
-contributed; it is never deleted with the Memory. Bulk deletes write a content-free audit event
-(notebook, user, count).
+source-local facts, reverse-index rows extracted from it. Every concept cluster one of those
+objects belongs to is removed whole — all its member rows, in every generation — because its
+canonical id, name and description can carry the Memory's text on the shared members' rows; the
+surviving members are unclustered until the rebuild re-clusters them, and the notebook's graph is
+marked for rebuild. The merge candidates naming those clusters and the conflict candidates
+referencing the Memory's objects or relations are deleted in any status, resolved ones included,
+because their stored rationale can quote the Memory; a curator decision between shared objects
+only is never touched. If a curator manually merged a Memory-derived object into another object,
+the surviving object only loses the evidence that Memory contributed; it is never deleted with
+the Memory. Bulk deletes write a content-free audit event (notebook, user, count).
 
-Leaving a shared notebook deletes the leaver's own Memory there, and only their own exit does.
-Before leaving, `GET /notebooks/{id}/membership/exit-disclosure` returns `{"memory_count": N}`,
-the number of the caller's Memory items in that notebook — every status — that leaving would
-permanently delete (0 when they are not a member, or would keep reading the notebook as its
-owner or through a direct, group or everyone grant). `DELETE /notebooks/{id}/membership` then
-needs `?acknowledged_memory_count=N` equal to the server's count when N > 0; otherwise it answers
-409 `{"detail": {"code": "exit_disclosure_required", "memory_count": N}}`, deletes nothing and
-keeps the membership. With N = 0 no acknowledgement is needed and the request behaves as before.
-The count is taken under the membership row lock, and the membership ends in one transaction with
-a final count, so a Memory saved in the meantime is never deleted unacknowledged: the exit answers
-409 with the new count instead. A purge failure answers 503 with a Chinese message and leaves the
-user a member. Before confirming, the user can keep their Memory in two ways:
+Leaving a shared notebook deletes the leaver's own Memory there. Of the actions that end one
+person's access, only that person's own exit deletes anything. Before leaving,
+`GET /notebooks/{id}/membership/exit-disclosure` returns `{"memory_count": N}`, the number of the
+caller's Memory items in that notebook — every status — that leaving would permanently delete now
+(0 when they are not a member, or would keep reading the notebook as its owner or through a
+direct, group or everyone grant). `DELETE /notebooks/{id}/membership[?acknowledged_memory_count=A]`
+then claims, under the membership row lock, exactly the C items the exit deletes now, and every
+outcome says what the server did, counted by the server:
+
+- C = 0 and A absent or 0: 204; the membership ends (or was already gone); nothing is deleted.
+- A ≠ C, including A > 0 when C is 0 (the caller meanwhile lost the membership, gained a grant
+  or moved the items away): 409 `{"detail": {"code": "exit_disclosure_required", "memory_count": C}}`;
+  nothing is deleted and the membership is unchanged.
+- A = C > 0 and the exit finishes: 200 `{"deleted_memory_count": d}`, d being what this request
+  deleted.
+- A = C > 0, d items were deleted, but r items the caller did not acknowledge exist (saved while
+  the exit ran): 409 `{"detail": {"code": "exit_incomplete", "deleted_memory_count": d,
+  "memory_count": r}}`; the caller is still a member, the d are gone for good, the r remain.
+- A = C > 0 and the purge failed part-way: 503 with the same `exit_incomplete` body (d may be 0);
+  still a member; some Memory may already be deleted, and a retry — which starts from the
+  disclosure again — continues from there.
+
+The membership ends in one transaction with a final count, and only the membership the claim
+locked (a member removed and added back meanwhile keeps the new membership). Every step commits
+on its own, so an exit whose client went away still leaves a state the next disclosure reports
+truthfully. Before confirming, the user can keep their Memory in two ways:
 `GET /notebooks/{id}/memories/export` downloads exactly the counted items as a Markdown file
 (`<notebook>-记忆-<YYYYMMDD>.md`, each with its title, kind, status — candidates marked — times,
-tags, content and provenance line; streamed 200 at a time), and `POST /memories/transfer` copies
-or moves confirmed items into a notebook the user owns (other statuses are not transferred). The
-exit writes a content-free audit event (notebook, user, count).
+tags, content and provenance line; an entry's unclosed code fence or comment is closed so it
+cannot swallow the next; streamed 200 at a time), and `POST /memories/transfer` copies or moves
+confirmed items into a notebook the user owns (at most 200 ids per request; other statuses are
+not transferred). The exit writes a content-free audit event (notebook, user, count).
 
-Nobody else's action deletes a member's Memory: an owner removing a member, removing everyone,
-unsharing the notebook (which also clears its member list), revoking a grant, or removing someone
-from a granted group only withdraws access. Access is often temporary, so the Memory stays; while
-access is gone nobody can read it, its owner included, and it is visible to its owner again as
-soon as access returns.
+Actions that take access away never delete Memory: unsharing the notebook (which also clears its
+member list), revoking a grant, or removing someone from a granted group only withdraws access.
+Access is often temporary, so the Memory stays; while access is gone nobody can read it, its
+owner included, and it is visible to its owner again as soon as access returns. Deleting the
+whole notebook is different: it deletes everything in it, members' Memory included (above).
 
 The committed deterministic Memory evaluation reports Recall@5, MRR, nDCG, and three
 zero-tolerance counters: candidate-to-formal-plane leakage, cross-user leakage, and
