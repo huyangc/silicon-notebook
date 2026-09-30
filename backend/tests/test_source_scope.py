@@ -1529,7 +1529,20 @@ def test_both_adapters_filter_memory_ownership_inside_the_single_query():
         SourceStore as SqliteSourceStore,
     )
 
+    import sys
+
+    def _sql_text(node, module):
+        # A literal, or a module-level constant (the statement is rendered
+        # once from ``memory_sql.memory_source_readable`` since PR-A #806 r1).
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Name):
+            value = getattr(module, node.id, None)
+            return value if isinstance(value, str) else None
+        return None
+
     for store in (SqliteSourceStore, PostgresSourceStore):
+        module = sys.modules[store.__module__]
         source = inspect.getsource(store.hidden_source_ids)
         # textwrap.dedent, not inspect.cleandoc: cleandoc lstrips the first
         # line and dedents the rest independently, which drops a single-line
@@ -1542,14 +1555,13 @@ def test_both_adapters_filter_memory_ownership_inside_the_single_query():
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "execute"
             and node.args
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
+            and _sql_text(node.args[0], module) is not None
         ]
         assert len(calls) == 1, (
             f"{store.__module__}: 隐藏那一半必须只发一条查询"
         )
         call = calls[0]
-        sql = call.args[0].value
+        sql = _sql_text(call.args[0], module)
         assert "FROM sources" in sql
         assert "memory_items" in sql and "created_by" in sql, (
             f"{store.__module__}: Memory 归属过滤必须在这条 SQL 里,"

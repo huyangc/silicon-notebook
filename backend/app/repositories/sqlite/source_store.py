@@ -30,6 +30,10 @@ from app.repositories.ports import (
     SourceElementWrite,
 )
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.memory_sql import (
+    memory_source_readable,
+    memory_source_type_predicate,
+)
 
 
 # Sentinel distinguishing "paper_meta not passed" (source_from_row should
@@ -59,7 +63,19 @@ VISIBLE_SOURCE_TYPES_PREDICATE = "source_type NOT IN ('memory', 'knowhow')"
 # ⚠ 用在子查询里时保持不加限定词(`SELECT 1 FROM sources WHERE sources.id = o.
 # source_id AND source_type = 'memory'`):`knowledge_objects` / `concept_clusters`
 # 都没有 `source_type` 列,所以最内层的 `sources` 是它唯一能解析到的表。
-MEMORY_SOURCE_TYPE_PREDICATE = "source_type = 'memory'"
+#
+# 文本由 `memory_sql.memory_source_type_predicate()` 渲染(两条判据的共享定义点),
+# 本模块不再手写 `'memory'` 字面量的这条判据。
+MEMORY_SOURCE_TYPE_PREDICATE = memory_source_type_predicate()
+
+# ``SourceStore.hidden_source_ids``(参数:notebook_id、查看者):该用户的隐藏投影来源,
+# 「对该用户可读」是 `memory_sql.memory_source_readable('s')`,不是它的手写副本。
+_HIDDEN_SOURCE_IDS_SQL = (
+    "SELECT s.id FROM sources s WHERE s.notebook_id=? "
+    "AND s.source_type IN ('memory','knowhow') "
+    f"AND {memory_source_readable('s')} "
+    "ORDER BY s.id"
+)
 
 
 # 论文元数据补抽候选的 SQL 谓词(接在 ``FROM sources s`` 且已按 ``s.notebook_id``
@@ -227,16 +243,14 @@ class SourceStore:
         read: the compact ``include`` freeze reads only the requested ids plus
         a count, and merging the two would put every source row back on that
         hot path to answer a question bounded by the projection count.
+
+        "Readable by this user" is ``memory_sql.memory_source_readable`` (the
+        shared definition point; one parameter, the viewer), not a copy of it:
+        the KG viewer rule derives "another member's Memory" from this read.
         """
         with self.database.connect() as db:
             return [row["id"] for row in db.execute(
-                "SELECT s.id FROM sources s WHERE s.notebook_id=? "
-                "AND s.source_type IN ('memory','knowhow') "
-                "AND (s.source_type <> 'memory' OR EXISTS ("
-                "SELECT 1 FROM memory_items m "
-                "WHERE m.id = s.memory_id AND m.created_by = ?)) "
-                "ORDER BY s.id",
-                (notebook_id, owner_id),
+                _HIDDEN_SOURCE_IDS_SQL, (notebook_id, owner_id),
             ).fetchall()]
 
     def visible_source_scope_snapshot(
