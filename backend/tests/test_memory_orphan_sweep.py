@@ -841,8 +841,10 @@ def test_a_non_memory_source_in_a_page_is_a_recorded_failure_never_swallowed(wor
 def test_an_orphan_merged_into_a_shared_object_leaves_it_whole_and_no_memory_name(world):
     """B2 for orphans: the sweep goes through the Memory removal, so an orphan's
     object manually merged into a shared object loses only its evidence (the
-    shared object stays), and a cluster the orphan's object seeded -- whose
-    name sits on a shared member's row -- goes whole."""
+    shared object stays), and a cluster the orphan's object belongs to -- a
+    real-name canonical id whose name also sits on a shared member's row --
+    goes whole (the member arm; the minted-id seed arm is covered by
+    ``memory_purge_cases``' B2 fixture on both backends)."""
     repo = world.repo
     orphan, orphan_object, shared = "src-dep", "ko-src-dep-1", "ko-src-doc-1"
     with repo._runtime.database.write() as db:

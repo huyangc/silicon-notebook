@@ -282,9 +282,11 @@ def memory_cluster(cluster_alias: str) -> str:
     `cluster_seed_object_id`);canonical id 一律带类型前缀,从不等于裸对象 id。**真名种子**
     (`K-<规范化名字>`)在这里认不出来:Memory 对象还在簇里时由成员臂认出;Memory 被删之后
     只剩共享成员带着它起的名字——删除必然标脏,拷贝对脏源库一个簇都不带(sharing_store 的
-    `_source_clustering_current`),这一形态由那条规则覆盖。删除清理(E5-2)按对象算出该对象
-    能铸出的 canonical id(`kg_merge.minted_canonical_ids`,另加桥接 id),能认出真名种子——
-    它比这里宽,两处刻意不同:清理时 Memory 对象还在,拷贝时可能已经不在。
+    `_source_clustering_current`),这一形态由那条规则覆盖。删除清理(E5-2,
+    `purge_memory_review_rows_on`)与这里共用同一条铸造规则(`cluster_seed_object_id`),此外
+    按成员认出整簇——清理时 Memory 对象还在,真名种子的簇因此也能认出;合并候选另认没有簇行
+    带着的桥接 id(`kg_merge.purge_bridge_canonical_ids`)。拷贝时 Memory 对象可能已经不在,
+    所以这里只有成员臂与铸造臂。
     """
     c = _alias(cluster_alias, _CLUSTER_INNER | _CANONICAL_INNER)
     return f"({_memory_member_arm(c)} OR {_memory_canonical_arm(c)})"
