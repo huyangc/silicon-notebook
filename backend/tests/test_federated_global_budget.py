@@ -1155,6 +1155,41 @@ def test_unreadable_fingerprints_are_published_as_none_and_retried(pool):
             }]
 
 
+@pytest.mark.parametrize("path", ["federated", "overlay"])
+def test_a_stop_during_the_passage_snapshot_read_propagates(pool, path):
+    """PR-D P3-4: the read budget polls the run's cancel token and surfaces as
+    its own timeout. A Stop during the passage snapshot -- on the fan-out and
+    on the mix branch's overlay registration, which shares the read -- is the
+    run stopping, not an unreadable batch: it raises, and neither a read
+    failure event nor a ``None`` table is published."""
+    ids = ("nb-a",)
+    cancel = threading.Event()
+
+    def stopped(read_index, element_ids):
+        cancel.set()
+        raise ReadBudgetExceeded("read budget exhausted")
+
+    candidates = FakeCandidates(
+        _participants(ids),
+        retrieve=lambda nid, q: ([make_chunk(f"c-{nid}", elements=["e-1"])], [], None),
+        fingerprints=stopped,
+    )
+    receipts = Receipts()
+
+    with _global_run(ids, _plan(pool, receipts, cancel=cancel)):
+        with pytest.raises(AskCancelled):
+            if path == "federated":
+                cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+            else:
+                cf.attest_selected_passages(
+                    candidates, [make_chunk("c-overlay", elements=["e-1"])],
+                )
+
+    assert receipts.evidence == []
+    assert not [event for event in candidates.events
+                if event["kind"] == "chunk_federation_evidence_unavailable"]
+
+
 def test_a_passage_rewritten_after_retrieval_attests_nothing(pool):
     """检索读到原文之后、快照读之前来源被重新解析 → 这一段的 element 全部 ``None``。
 

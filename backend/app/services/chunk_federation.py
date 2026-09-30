@@ -2032,6 +2032,11 @@ def _report_evidence(candidates, plan, collected: dict, deadline: float) -> None
         except (AskCancelled, RetrievalControlError):
             raise
         except Exception as exc:  # noqa: BLE001 - see docstring
+            # A Stop surfaces here as the read budget's own timeout (the budget
+            # polls ``plan.cancel``): that is the run stopping, not a read that
+            # failed, so it propagates as the cancellation it is -- as in
+            # ``evidence_attestation._read_pointers``.
+            raise_if_cancelled(plan.cancel)
             _emit(candidates, {
                 "kind": "chunk_federation_evidence_unavailable",
                 "reason": "read_failed",
