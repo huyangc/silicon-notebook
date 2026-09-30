@@ -1209,6 +1209,10 @@ also the one copied table whose source and destination row counts may
 legitimately differ, so they are deliberately excluded from the deep copy's
 row-parity self-check.
 
+### A deep copy never carries Memory
+
+A deep copy — a user's own copy of a notebook and the copy delivered through a share link alike — never carries any Memory or anything derived from one, whoever owns the copy: copying your own notebook leaves your own Memory behind too. Memory sources, their elements and vectors, the knowledge objects, relations, facts and vectors derived from them, relations with a Memory-derived object at either end, and every cluster of a Memory (one with a Memory-derived member, or whose canonical id was minted from a Memory-derived object) are left out; evidence entries a Memory lent to a kept object, relation or fact (a manual merge appends them) are removed from the copied row, which is kept even when its evidence becomes empty. A copy of a notebook whose clustering is out of date carries no clusters at all: it starts unclustered and marked 「待重建」. A copy of a notebook that holds Memory starts marked 「待重建」 too. Nothing rebuilds automatically — the copy's owner starts the rebuild, and until then the members of a cluster that was not copied stand alone. Object schemas are induced from samples that read no Memory element; schemas induced before this change cannot be told apart and travel with the copy. Data from before Memory was isolated in the knowledge graph can still name a Memory object by its id (a fact's link to its knowledge object); such an id resolves to nothing in the copy and carries no text. A conflict resolution that chose 'modify' may have written model-restated Memory content into a shared object's payload before this change; the copy cannot recognise such a payload and carries it as it is. The share preview and the owner's share dialog count sources, nodes and edges without any member's Memory. A notebook without Memory whose clustering is up to date is copied exactly as before.
+
 ### Group libraries in the notebook list
 
 A library readable through a live group edge, where the viewer is neither owner
