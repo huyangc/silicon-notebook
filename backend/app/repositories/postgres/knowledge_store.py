@@ -1969,7 +1969,7 @@ class KnowledgeStore:
             return []
         ph = ",".join("%s" for _ in ids)
         return _compat_rows(db.execute(
-            f"SELECT id, evidence FROM knowledge_objects WHERE id IN ({ph})", ids,
+            f"SELECT id, evidence, source_id FROM knowledge_objects WHERE id IN ({ph})", ids,
         ).fetchall(), evidence=True)
 
     @staticmethod

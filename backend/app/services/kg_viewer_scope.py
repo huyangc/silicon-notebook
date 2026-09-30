@@ -238,7 +238,13 @@ class KgViewerScope:
     def _raw_objects(self, object_ids: Sequence[str]) -> tuple:
         """``(hidden, known)``: which ids are hidden raw objects, and which are
         raw objects at all (any status) — ids outside ``known`` are folded
-        cluster ids (or unknown), judged by the cluster check instead."""
+        cluster ids (or unknown), judged by the cluster check instead.
+
+        Each row is judged by the whole object rule on its OWN ``source_id``
+        (``row_hidden``), not only through ``owned_hidden``: that set holds
+        live objects, and the DB neighbour path can return a deprecated one
+        (merges keep the merged-away object's relations) whose owner is an
+        unreadable source while its merged-in evidence cites a readable one."""
         owned = self.owned_hidden
         hidden = {oid for oid in object_ids if oid in owned}
         known = set(hidden)
@@ -250,7 +256,7 @@ class KgViewerScope:
                         db, rest[start:start + _ID_BATCH]
                     ):
                         known.add(str(row["id"]))
-                        if self.evidence_hidden(row["evidence"]):
+                        if self.row_hidden(row["source_id"], row["evidence"]):
                             hidden.add(str(row["id"]))
         return frozenset(hidden), frozenset(known)
 
