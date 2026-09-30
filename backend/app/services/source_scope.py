@@ -1061,13 +1061,28 @@ def ceiling_binds(
 
     The two probes are callables so this module stays store-free; each is
     called at most once per run and library, and the whole verdict is
-    memoised on the scope (``_ceiling_binds_memo``).  Memoising is sound here
-    although ``_unsafe_source_scope_restricted`` must re-probe per call: that
-    probe gates candidate GENERATION (an out-of-scope candidate would consume
-    Top-K or seed hidden premises), whereas this verdict is taken when the
-    first KG hit of the run is re-read -- after recall, whose candidates the
-    frozen ceiling already bounded -- and decides only whether that
-    already-admitted object's text is re-read under the ceiling.
+    memoised on the scope (``_ceiling_binds_memo``).  Memoising is sound ONLY
+    together with verify-on-read (``node_context_row_within_ceiling``).  The
+    verdict is taken when the first KG hit of the run is re-read, but the
+    library can change after it: a concurrent upload or Memory write can merge
+    evidence of a source outside the frozen ceiling into an object recall
+    already admitted, and candidate filtering cannot see a change made after
+    recall.  So a False verdict never admits a row on its own: each row read
+    without a ceiling is accepted only when every occurrence's ``source_id``
+    and a ``defines_evidence`` definition's ``definition_source_id`` are inside
+    the frozen ceiling.  The first row that is not flips the memo to True
+    (``record_ceiling_drift``) -- every later hit of the run takes the bound
+    path without probing again -- and that same hit is re-read and judged as
+    if the verdict had been True from the start.  (Unlike
+    ``_unsafe_source_scope_restricted``, which gates candidate GENERATION and
+    must re-probe per call, a drift here costs nothing irreversible: the check
+    runs before the row's text is used.)
+
+    What the check cannot see: a ``cluster_description`` or ``defines_name``
+    definition and ``steps`` carry no source id in the row.  The bound path
+    judges the first and the last in the store (the Q1 member predicate, the
+    step elements' sources) and clears the second; on a row that passed the
+    check they are used as read.
 
     The enumeration side names the same concept ``ceiling_binds``; its verdict
     has no ``foreign_hidden`` arm because listings exclude private Memory
@@ -1098,6 +1113,60 @@ def _ceiling_binds_uncached(
     if notebook_id != scope.notebook_id or scope.restricted:
         return True
     return bool(drifted()) or bool(foreign_hidden())
+
+
+def node_context_row_within_ceiling(
+    scope: ActiveSourceScope | None, notebook_id: str, row: Any,
+) -> bool:
+    """Verify-on-read for a row re-read WITHOUT a ceiling because
+    ``ceiling_binds`` said False: is every source the row attributes its text
+    to inside the frozen ceiling of ``notebook_id``?
+
+    Checked, O(row) and without normalising anything: each occurrence's
+    ``source_id``, and ``definition_source_id`` when the definition is
+    ``defines_evidence`` -- exactly the ids ``scoped_node_context_row`` judges
+    per item.  Membership is tested in ``library_source_ceiling``'s memoised
+    frozenset (``ActiveSourceScope.allows`` for the local ``exclude`` shape,
+    which materialises none); a blank id is outside, as under ``allows``.
+    True → the bound path would keep all of it, so the row is used as read
+    (bytes of a run without a scope).  False → the ceiling drifted after the
+    verdict (a concurrent upload or Memory write merged new-source evidence into
+    an already-recalled object): the caller records it (``record_ceiling_drift``)
+    and re-processes the hit through the bound path.
+
+    Vacuously True with no scope, when no source ceiling binds the library
+    (``ceiling_binds`` never consulted a memo there), and for a non-dict row.
+    Not visible here, because the row names no source for them: a
+    ``cluster_description`` definition, a ``defines_name`` definition, and
+    ``steps`` -- see ``ceiling_binds``' docstring for what that leaves.
+    """
+    if scope is None or not isinstance(row, dict):
+        return True
+    if not scope.source_ceiling_binds(notebook_id):
+        return True
+    ceiling = library_source_ceiling(scope, notebook_id)
+
+    def inside(source_id: str) -> bool:
+        if ceiling is not None:
+            return source_id in ceiling
+        return scope.allows(notebook_id, source_id)
+
+    for occurrence in row.get("occurrences") or ():
+        if not inside(_evidence_source_id(occurrence)):
+            return False
+    if row.get("definition") and row.get("definition_basis") == "defines_evidence":
+        return inside(str(row.get("definition_source_id") or ""))
+    return True
+
+
+def record_ceiling_drift(scope: ActiveSourceScope, notebook_id: str) -> None:
+    """Turn ``ceiling_binds``' memoised verdict for ``notebook_id`` to True for
+    the rest of the run: a re-read failed ``node_context_row_within_ceiling``.
+    Same key as ``ceiling_binds``; the single dict store is the benign race
+    described on ``_library_ceiling_memo`` (a racing thread can only write the
+    same True or a stale False that the next failed check re-corrects -- each
+    row is verified either way)."""
+    scope._ceiling_binds_memo[notebook_id or scope.notebook_id] = True
 
 
 def _evidence_source_id(value: Any) -> str:
