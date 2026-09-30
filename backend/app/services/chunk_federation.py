@@ -1270,28 +1270,32 @@ def _peer_visible_sources(candidates, notebook_id: str) -> tuple:
     because its read failed therefore contributes nothing here either.
 
     Handed out in the order the constructor's own visible read returned
-    (``ActiveSourceScope.ceiling_hand_out``): the production read is
+    (``source_scope._sorted_library_ceiling``, pre-filled from that read by
+    ``source_scope_context``): the production read is
     ``ORDER BY id`` and already materialised, so this is the live read's order
     at no cost -- never frozenset (hash) order, which would make the same
     question bind differently per process (``PYTHONHASHSEED``), because
     ``scoped_allowed_source_ids`` preserves the order of the list it is given
     and that list becomes the producers' ``allowed_source_ids`` (bound into
     SQL, carried in traces).  A ceiling some other installer froze is sorted
-    once per scope instead.  The hand-out lives on the scope, so a scope
-    re-installed with a different ceiling for the same library (a refresh)
-    hands out its own.
+    once per scope instead.  The hand-out lives on the scope
+    (``_library_ceiling_memo``), so a scope re-installed with a different
+    ceiling for the same library (a refresh) hands out its own; and it is the
+    library's EFFECTIVE ceiling, so a library the library dimension excludes
+    hands out ``()``.
 
     A SUBJECTLESS (global) run keeps the live read: there the per-library
     enumeration is also the federation's coverage probe -- it runs under the
     plan's per-library budget and feeds the library's skip receipt and the
     "no visible source, no query" rule -- which this reuse must not bypass.
     """
-    from app.services.source_scope import current_source_scope
+    from app.services.source_scope import _sorted_library_ceiling, current_source_scope
 
     scope = current_source_scope()
     frozen = (
         None if scope is None or scope.subjectless
-        else scope.ceiling_hand_out(notebook_id)
+        or scope.source_ceiling_for(notebook_id) is None
+        else _sorted_library_ceiling(scope, notebook_id)
     )
     if frozen is not None:
         return frozen
