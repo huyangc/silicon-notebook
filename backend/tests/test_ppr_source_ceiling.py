@@ -497,6 +497,39 @@ def test_an_index_loaded_without_preload_still_drops_a_refused_library(
     assert graph._scale_index(base.id, allow_stale=True)._ppr_chunk_ids == {"cA", "cB"}
 
 
+def test_a_ranking_left_empty_by_a_refused_library_is_not_a_scale_failure(
+    repo, monkeypatch,
+):
+    """The active library has no passages of its own; the only other
+    participant is unticked.  The scale ranking succeeds and leaves nothing
+    admissible: PPR returns nothing, reports no scale bailout, and never
+    falls back to building the rustworkx graph."""
+    from types import SimpleNamespace
+    from tests.test_ppr_retrieve import _seed_two_doc_moe
+
+    base = _seed_two_doc_moe(repo)
+    repo.rebuild_unified_kg(base.id)
+    repo.build_scale_index(base.id)
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (base.id,))
+    active = repo.create_notebook(NotebookCreate(name="empty"))
+    repo.replace_notebook_bases(active.id, [base.id], "user-local")
+    graph = repo.retrieval.graph
+    seeds = [SimpleNamespace(chunk_id="cA", relevance=0.9)]
+    monkeypatch.setattr(graph, "_retrieve_chunks", lambda *a, **k: (seeds, [], None))
+    monkeypatch.setattr(
+        graph, "_ppr_graph",
+        lambda *a, **k: pytest.fail("the rustworkx fallback must not run"))
+    assert graph.scale_ppr(active.id, "Mixture of Experts"), "the base must rank"
+    events = _events(repo, monkeypatch)
+    with source_scope_context(active.id, None, EXCLUDED):
+        out = graph._ppr_retrieve(active.id, "Mixture of Experts")
+    assert out == []
+    kinds = [e.get("kind") for e in events]
+    assert "scale_ppr_bailout" not in kinds
+    assert kinds.count("scale_ppr_done") == 1
+
+
 def test_a_skipped_chunk_still_sets_the_score_range():
     """``rank_further`` with a dropped library must give every kept chunk the
     score it has in the prefix already walked: a skipped chunk leaves the
