@@ -27,7 +27,6 @@ import time
 
 import pytest
 
-from app.models.knowledge import MergeRequest
 from app.repositories.postgres import governance_store as governance_module
 from app.repositories.postgres import memory_store as memory_store_module
 from app.services.memory_service import (
@@ -40,6 +39,7 @@ from tests.memory_purge_cases import (
     _fused_doc_object,
     build_world,
     disclosure,
+    legacy_merge,
     make_memory,
     member_memory_count,
     plain_memory,
@@ -339,9 +339,7 @@ def test_two_leavers_merged_into_the_same_shared_objects_do_not_deadlock(
     targets = {"carol": (shared_y, shared_x), "dave": (shared_x, shared_y)}
     for name, (first, second) in targets.items():
         for projection, target in zip(projections[name], (first, second)):
-            world.repo.merge_knowledge(
-                world.shared, projection.object_ids[0], MergeRequest(into_id=target)
-            )
+            legacy_merge(world, world.shared, projection.object_ids[0], target)
     counts = {
         name: disclosure(world, user, world.shared) for name, user in users.items()
     }
