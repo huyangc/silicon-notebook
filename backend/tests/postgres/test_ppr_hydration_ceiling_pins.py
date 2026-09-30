@@ -249,18 +249,56 @@ def test_pg_mounted_knowhow_and_late_uploads_never_take_a_slot(
     take_a_slot``): the best-ranked candidates are the mounted library's
     Knowhow rows and its post-freeze upload; all three slots still go to
     in-ceiling passages."""
-    from app.models.schemas import NotebookCreate
     from app.services.source_scope import source_scope_context
 
     repository = postgres_repository
+    active, base = _seed_mounted(repository)
+    _rank(repository, monkeypatch,
+          ["c-kh-0", "c-kh-1", "c-late", "c-b1", "c-a1", "c-b2", "c-a2"])
+    with source_scope_context(
+        active,
+        {"mode": "include", "source_ids": ["a1", "a2"], "narrowed": False,
+         "owner_id": "user-local"},
+        None,
+        {base: ["b1", "b2"]},
+    ):
+        out = repository._ppr_retrieve(active, "q")
+    assert [c.chunk_id for c in out] == ["c-b1", "c-a1", "c-b2"]
+
+
+def test_pg_rows_of_a_library_listed_mid_window_are_judged_row_by_row(
+    postgres_repository, monkeypatch,
+):
+    """Twin of ``test_ppr_source_ceiling.test_rows_of_a_library_listed_mid_
+    window_are_judged_row_by_row`` on PostgreSQL, read on the UNFILTERED
+    ``graph._ppr_retrieve``: the mounted library is excluded and the ranking
+    carries no chunk map, so c-b1 lists it and c-b2, in the same window,
+    must be refused too."""
+    from app.services.source_scope import source_scope_context
+
+    repository = postgres_repository
+    active, _base = _seed_mounted(repository)
+    _rank(repository, monkeypatch, ["c-b1", "c-b2", "c-a1", "c-a2", "c-a3"])
+    with source_scope_context(active, None, {"mode": "include", "notebook_ids": []}):
+        out = repository.retrieval.graph._ppr_retrieve(active, "q")
+    assert [c.chunk_id for c in out] == ["c-a1", "c-a2", "c-a3"]
+
+
+def _seed_mounted(repository) -> tuple[str, str]:
+    """Active library (a1-a3) with a mounted library: b1, b2, a Knowhow
+    projection of two chunks and a post-freeze upload."""
+    from app.models.schemas import NotebookCreate
+
     base = repository.create_notebook(NotebookCreate(name="base")).id
     repository.mark_notebook_base(base)
     active = repository.create_notebook(NotebookCreate(name="active")).id
     repository.replace_notebook_bases(active, [base], "user-local")
     rows = (
         (active, "a1", "file", "c-a1"), (active, "a2", "file", "c-a2"),
+        (active, "a3", "file", "c-a3"),
         (base, "b1", "file", "c-b1"), (base, "b2", "file", "c-b2"),
-        (base, "kh", "knowhow", "c-kh-0"), (base, "late", "file", "c-late"),
+        (base, "kh", "knowhow", "c-kh-0"), (base, "kh", "knowhow", "c-kh-1"),
+        (base, "late", "file", "c-late"),
     )
     with repository._runtime.database.write() as db:
         for notebook_id, source_id, source_type, chunk_id in rows:
@@ -272,27 +310,20 @@ def test_pg_mounted_knowhow_and_late_uploads_never_take_a_slot(
             db.execute(
                 "INSERT INTO chunks(id,notebook_id,source_id,text,element_ids,created_at) "
                 "VALUES (%s,%s,%s,'t','[]',%s)", (chunk_id, notebook_id, source_id, NOW))
-        db.execute(
-            "INSERT INTO chunks(id,notebook_id,source_id,text,element_ids,created_at) "
-            "VALUES ('c-kh-1',%s,'kh','t','[]',%s)", (base, NOW))
+    return active, base
+
+
+def _rank(repository, monkeypatch, ranking) -> None:
+    """``scale_ppr`` replaced by a fixed ranking (a plain list: complete, no
+    chunk map), ``ppr_top_chunks`` = 3."""
     graph = repository.retrieval.graph
     monkeypatch.setattr(graph.settings, "ppr_top_chunks", 3)
-    ranking = ["c-kh-0", "c-kh-1", "c-late", "c-b1", "c-a1", "c-b2", "c-a2"]
     monkeypatch.setattr(
         graph, "scale_ppr",
         lambda nb, q, max_results=None: [
             (cid, 1.0 - i / 10) for i, cid in enumerate(ranking)
         ][:max_results],
     )
-    with source_scope_context(
-        active,
-        {"mode": "include", "source_ids": ["a1", "a2"], "narrowed": False,
-         "owner_id": "user-local"},
-        None,
-        {base: ["b1", "b2"]},
-    ):
-        out = repository._ppr_retrieve(active, "q")
-    assert [c.chunk_id for c in out] == ["c-b1", "c-a1", "c-b2"]
 
 
 def test_listed_statement_never_reaches_the_plan_cache(pin_database, monkeypatch):

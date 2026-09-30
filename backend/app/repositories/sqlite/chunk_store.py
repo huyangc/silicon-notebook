@@ -619,10 +619,15 @@ def _library_source_ceiling_clause(
     ceilings: Mapping[str, Iterable[str] | None],
 ) -> tuple[str | None, list]:
     """The SQLite twin of ``postgres/chunk_store._library_source_ceiling_clause``
-    (the rule is stated there).  Every column test carries the unary ``+``
-    (``id_binding.member_of`` / ``not_member_of`` for the lists, spelled out
-    for the notebook equality) so no notebook or source index can outbid the
-    candidate primary keys when ``sqlite_stat1`` is empty."""
+    (the rule is stated there).  The list tests carry the unary ``+``
+    (``id_binding.member_of`` / ``not_member_of``) so neither the notebook nor
+    the source index can outbid the candidate primary keys when
+    ``sqlite_stat1`` is empty.  The per-library notebook equality needs none:
+    it sits inside an OR whose first arm (``+c.notebook_id NOT IN ...``) no
+    index can serve, so SQLite can never answer the OR from an index and the
+    equality is only ever evaluated on rows the primary keys fetched (pinned
+    by ``test_store_plan_is_driven_by_candidate_keys`` with and without
+    ``ANALYZE``)."""
     listed = {
         str(notebook_id): ids for notebook_id, ids in ceilings.items()
         if ids is not None
@@ -637,6 +642,6 @@ def _library_source_ceiling_clause(
         if not ceiling:
             continue
         bound = ceiling_param(ceiling)
-        arms.append(f"(+c.notebook_id = ? AND {member_of('c.source_id', bound)})")
+        arms.append(f"(c.notebook_id = ? AND {member_of('c.source_id', bound)})")
         params.extend((notebook_id, bound.param))
     return f"({' OR '.join(arms)})", params

@@ -1,11 +1,29 @@
-"""Graph/PPR/follow-chain retrieval owner, composed without a facade."""
+"""Graph/PPR/follow-chain retrieval owner, composed without a facade.
+
+PPR UNDER A SOURCE CEILING (audit B-2).  The PPR graph is cached per
+participant set, so its ranking spans passages the run may not use; the run's
+per-library source ceilings are applied before the ``ppr_top_chunks`` cut
+(``_PprCeiling``), so an excluded or out-of-ceiling chunk never takes one of
+those slots.  Reaching past refused candidates has a price -- one hydration
+statement per window -- and it is bounded, deliberately:
+
+* a library the run admits nothing of is dropped from the ranking in memory
+  when its scale index carries its chunk-id set (``PprRanking``), which is the
+  expensive case (a small notebook with an unticked 1M-chunk library);
+* otherwise the walk spends at most ``_PPR_CEILING_WALK_WINDOWS`` windows of
+  900 candidates past its over-ranked prefix, ranked further from the SAME
+  score vector (no second PPR, one ``scale_ppr_done`` event); in-ceiling
+  passages ranked below that reach are not found by PPR on this run, the call
+  returns fewer than ``ppr_top_chunks`` passages and emits
+  ``ppr_ceiling_walk_exhausted``.  The other retrieval legs are unaffected.
+"""
 from __future__ import annotations
 
 import heapq
 import json
 import math
 import time
-from typing import Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from app.domain.citation_origin import owned_by_another_library
 from app.models.common import Evidence
@@ -117,8 +135,52 @@ def _peer_chunk_allowed(row, chunk_owner: Dict[str, str], ceilings) -> bool:
 #: over without re-running PPR.  The bounded heap costs the same at 20 and at
 #: 320 entries (it visits every chunk score either way: 0.42 s at 1M chunks);
 #: only a run whose first ``16 x ppr_top_chunks`` candidates hold fewer
-#: in-ceiling passages than slots re-ranks everything (``max_results=None``).
+#: in-ceiling passages than slots ranks further (``PprRanking.rank_further``,
+#: the same score vector, no second PPR).
 _PPR_CEILING_OVERFETCH = 16
+
+#: Hydration windows (``_IN_CHUNK`` = 900 candidates each) the ceiling walk may
+#: spend past the over-ranked prefix before it gives up on the remaining slots
+#: (``ppr_ceiling_walk_exhausted``).  Measured per window on PostgreSQL 16
+#: (900 ids, host load ~30): a wholly denied library 4.1 ms, a listed 49k-id
+#: ceiling 21.4 ms, nothing listed 7.3 ms -- so the walk costs at most
+#: 8 x 21.4 ms ~= 0.17 s per PPR call beyond its <= 5 prefix windows, below the
+#: ranking's own cost at the sizes where the walk can get long (1M chunks:
+#: power iteration 0.16 s + ranking 0.2-0.4 s), and reaches 7,200 candidates
+#: past the prefix (360 x the default 20 slots).  Before the bound a small
+#: notebook with an unticked 1M-chunk library walked ~1,111 windows (4.5-24 s)
+#: per call.
+_PPR_CEILING_WALK_WINDOWS = 8
+
+
+class PprRanking(list):
+    """``scale_ppr``'s ranking ``[(chunk_id, score)]`` -- a list, as it always
+    was -- plus what the PPR ceiling walk needs to rank further without a
+    second PPR (``_PprCeiling``).
+
+    ``rank_further(limit, skip)`` re-ranks the SAME score vector (no ANN, no
+    chunk seeds, no power iteration, no second ``scale_ppr_done`` event) into
+    its first ``limit`` entries, leaving out every chunk id ``skip`` answers
+    True for; scores stay the unskipped ones (``_normalized_score_ranking``).
+    It is ``None`` when this ranking is already complete.
+    ``library_chunk_ids`` maps each participant library with a scale index to
+    that index's chunk-id set when the index carries one
+    (``ScaleArtifactRuntime._prepare_ppr_core``'s ``_ppr_chunk_ids``, prepared
+    for every published index at startup preload), else to ``None``.
+
+    A plain list -- the rustworkx ranking, a test's stand-in -- reads as a
+    complete ranking with no library map."""
+
+    def __init__(
+        self,
+        items: Iterable[Tuple[str, float]],
+        *,
+        rank_further: Optional[Callable[..., List[Tuple[str, float]]]] = None,
+        library_chunk_ids: Optional[Mapping[str, Optional[frozenset]]] = None,
+    ) -> None:
+        super().__init__(items)
+        self.rank_further = rank_further
+        self.library_chunk_ids = dict(library_chunk_ids or {})
 
 
 class _PprCeiling:
@@ -147,9 +209,17 @@ class _PprCeiling:
     (``ActiveSourceScope.allows``, the backstop's own test): a chunk row names
     its one source, so the check is complete.  A refused row means the
     library changed after the probe: the drift is recorded on the run's
-    verdict (``record_ceiling_drift``) and the library is listed from the next
-    window on.  An all-selected run whose sources did not change therefore
+    verdict (``record_ceiling_drift``) and the library is listed -- its later
+    rows in the SAME window are judged against that list, row by row, since
+    the window's statement was built before it; the next windows push it into
+    the SQL.  An all-selected run whose sources did not change therefore
     issues exactly the statements it issued before this class existed.
+
+    A library the run admits nothing of (``refuses_library``: excluded in the
+    library dimension, or frozen to zero sources) is dropped from the ranking
+    in memory before the walk when the ranking knows its chunks
+    (``PprRanking.library_chunk_ids``); without that map its candidates are
+    refused by the store window by window, within the walk's budget.
     """
 
     def __init__(self, scope, active_notebook_id: str) -> None:
@@ -177,18 +247,31 @@ class _PprCeiling:
             return None
         return cls(scope, active_notebook_id)
 
-    def admits(self, row) -> bool:
-        """Verify-on-read for one hydrated row.  A listed library's rows were
-        filtered by the store and are taken as read."""
+    def refuses_library(self, notebook_id: str) -> bool:
+        """Whether the run admits no chunk of ``notebook_id`` at all."""
+        from app.services.source_scope import library_source_ceiling
+
+        return library_source_ceiling(self.scope, notebook_id) == frozenset()
+
+    def admits(self, row, sql_listed: Mapping[str, frozenset]) -> bool:
+        """Verify-on-read for one hydrated row.  ``sql_listed`` is the listing
+        the row's window was hydrated with: a library in it was filtered by
+        the store and its rows are taken as read.  A library listed after
+        that statement was built -- by an earlier row of the same window -- is
+        judged against its list here, row by row."""
         from app.services.source_scope import (
             library_source_ceiling,
             record_ceiling_drift,
         )
 
         origin = str(row["chunk_notebook_id"] or "") or self.active_notebook_id
-        if origin in self.listed:
+        source_id = str(row["source_id"] or "")
+        if origin in sql_listed:
             return True
-        if self.scope.allows(origin, str(row["source_id"] or "")):
+        listed = self.listed.get(origin)
+        if listed is not None:
+            return source_id in listed
+        if self.scope.allows(origin, source_id):
             return True
         if self.scope.covers_notebook(origin):
             record_ceiling_drift(self.scope, origin)
@@ -204,7 +287,10 @@ def _binary_text_key(value: str) -> bytes:
 
 
 def _normalized_score_ranking(
-    scores: Iterable[Tuple[str, float]], *, limit: int | None = None
+    scores: Iterable[Tuple[str, float]],
+    *,
+    limit: int | None = None,
+    skip: Optional[Callable[[str], bool]] = None,
 ) -> Tuple[List[Tuple[str, float]], int]:
     """Return the legacy stable descending min-max ranking with bounded memory.
 
@@ -212,6 +298,11 @@ def _normalized_score_ranking(
     surface.  Production hydration only needs ``ppr_top_chunks``; for that path a
     min-heap retains the exact same first K rows, including input-order tie breaks,
     while still visiting every score to preserve the legacy global min/max.
+
+    ``skip`` leaves a chunk out of the SELECTION only: its score still takes
+    part in the global min/max, so every kept chunk carries the score it has
+    in the unskipped ranking (``PprRanking.extend``'s continuation relies on
+    that to stay consistent with the prefix already walked).
     """
     if limit is not None and limit <= 0:
         return [], 0
@@ -227,6 +318,8 @@ def _normalized_score_ranking(
         count += 1
         lo = min(lo, score)
         hi = max(hi, score)
+        if skip is not None and skip(chunk_id):
+            continue
         if limit is None:
             raw.append((chunk_id, score))
             continue
@@ -1147,14 +1240,16 @@ class GraphRetrievalService(_RetrievalState):
         # 5. Chunk rankings: collect chunk node scores, min-max normalize into
         #    [0,1] (mirror run_ppr exactly), sort desc. chunk node key is the raw
         #    chunk_id, so it IS the downstream chunk-fetch id (no prefix to strip).
+        def chunk_scores():
+            return (
+                (cid, float(x[ci]))
+                for cid in combined_chunk_ids
+                if (ci := combined_index.get(cid)) is not None
+            )
+
         try:
             norm, chunks_considered = _normalized_score_ranking(
-                (
-                    (cid, float(x[ci]))
-                    for cid in combined_chunk_ids
-                    if (ci := combined_index.get(cid)) is not None
-                ),
-                limit=max_results,
+                chunk_scores(), limit=max_results,
             )
         except ValueError as exc:
             if str(exc) != "non_finite_ppr_score":
@@ -1180,7 +1275,22 @@ class GraphRetrievalService(_RetrievalState):
             "chunks_considered": chunks_considered,
             "chunks_ranked": len(norm),
         })
-        return norm
+        if max_results is None:
+            return norm
+
+        def rank_further(limit: int, skip=None) -> List[Tuple[str, float]]:
+            # Every score already passed the finiteness check above.
+            return _normalized_score_ranking(
+                chunk_scores(), limit=limit, skip=skip)[0]
+
+        return PprRanking(
+            norm,
+            rank_further=rank_further if chunks_considered > len(norm) else None,
+            library_chunk_ids={
+                bid: getattr(idx, "_ppr_chunk_ids", None)
+                for bid, idx in base_indexes
+            },
+        )
     def _ppr_retrieve(self, notebook_id: str, question: str) -> List["RetrievedChunk"]:
         """HippoRAG 式 PPR 检索:KG 种子 + chunk 种子 → reset 向量 → PPR →
         取 chunk 节点分数。返回前 ppr_top_chunks 的 RetrievedChunk(relevance=
@@ -1219,12 +1329,6 @@ class GraphRetrievalService(_RetrievalState):
             # a scale failure and constructing the fallback graph.
             max_results=window if top_chunks > 0 else None,
         )
-        # The scale ranking may stop at ``window``; the rustworkx one below
-        # is always complete.
-        rank_all = (
-            (lambda: self.scale_ppr(notebook_id, question, max_results=None))
-            if ceiling is not None and len(ranked) >= window else None
-        )
         if not ranked:
             if self._federated_graph_is_large(notebook_id):
                 self.event_log.emit({
@@ -1242,7 +1346,7 @@ class GraphRetrievalService(_RetrievalState):
             ranked = run_ppr(G, chunk_idx_to_id, reset, damping=self.settings.ppr_damping)
         if ceiling is not None:
             score_map, rows = self._ppr_rows_within_ceiling(
-                ranked, top_chunks, ceiling, rank_all)
+                notebook_id, ranked, top_chunks, ceiling)
             if not rows:
                 return []
         else:
@@ -1271,17 +1375,30 @@ class GraphRetrievalService(_RetrievalState):
 
     def _ppr_rows_within_ceiling(
         self,
+        notebook_id: str,
         ranked: List[Tuple[str, float]],
         top_chunks: int,
         ceiling: _PprCeiling,
-        rank_all,
     ) -> Tuple[Dict[str, float], list]:
         """The ``ranked[:top_chunks]`` cut with the ceiling applied BEFORE it:
-        walk the ranking in windows (``top_chunks``, then doubling up to
-        ``_IN_CHUNK``) and hydrate each through the ceiling until
-        ``top_chunks`` in-ceiling passages are kept or the ranking ends
-        (``rank_all``: the complete scale ranking, fetched once when the
-        over-ranked prefix ran out).
+        walk the ranking in windows and hydrate each through the ceiling until
+        ``top_chunks`` in-ceiling passages are kept, the ranking ends, or the
+        walk's budget is spent.
+
+        * Libraries the run admits nothing of are dropped in memory first,
+          when the ranking maps them to their chunks (``PprRanking
+          .library_chunk_ids``).
+        * The over-ranked prefix (``_PPR_CEILING_OVERFETCH x top_chunks``) is
+          walked in windows of ``top_chunks``, doubling.  Past it -- after
+          ``rank_further`` on the same score vector, or further down a
+          complete ranking -- at most ``_PPR_CEILING_WALK_WINDOWS`` windows of
+          ``_IN_CHUNK`` candidates follow; then the call keeps what it has
+          and emits ``ppr_ceiling_walk_exhausted``.  The trade-off: in-ceiling
+          passages ranked below the budget's reach are not found by PPR on
+          this run (the other retrieval legs are unaffected), in exchange for
+          a bounded number of statements per PPR call.
+        * A candidate kept in the prefix and ranked again by
+          ``rank_further`` takes its slot once.
 
         Slots are spent in rank order.  A candidate the ceiling refuses spends
         none; a candidate the store no longer holds spends its slot exactly as
@@ -1291,26 +1408,51 @@ class GraphRetrievalService(_RetrievalState):
         whose sources did not change hydrates one window of the first
         ``top_chunks`` ids with the historical statement and returns its rows
         unchanged."""
+        chunk_sets = getattr(ranked, "library_chunk_ids", None) or {}
+        refused = [nb for nb in chunk_sets if ceiling.refuses_library(nb)]
+        dropped = [chunk_sets[nb] for nb in refused if chunk_sets[nb] is not None]
+        skip = (
+            (lambda chunk_id: any(chunk_id in ids for ids in dropped))
+            if dropped else None
+        )
+        rank_further = getattr(ranked, "rank_further", None)
+        prefix = top_chunks * _PPR_CEILING_OVERFETCH
+        items = [item for item in ranked if skip is None or not skip(item[0])]
         kept: list = []
         score_map: Dict[str, float] = {}
         slots = top_chunks
         seen: set = set()
-        position, size = 0, top_chunks
+        position, size, budget_from, windows = 0, top_chunks, prefix, 0
+        cut = False  # the extended ranking stops at the budget's reach
         while slots > 0:
-            if position >= len(ranked):
-                if rank_all is None:
-                    break
-                ranked, rank_all, position = rank_all(), None, 0
+            if position >= len(items) and rank_further is not None:
+                reach = prefix + _PPR_CEILING_WALK_WINDOWS * self._IN_CHUNK
+                further = rank_further(reach, skip)
+                cut = len(further) >= reach
+                items = [item for item in further if item[0] not in seen]
+                rank_further, position, budget_from = None, 0, 0
                 continue
-            window = [
-                (chunk_id, score)
-                for chunk_id, score in ranked[position:position + size]
-                if chunk_id not in seen
-            ]
+            if position >= budget_from and windows == _PPR_CEILING_WALK_WINDOWS:
+                if position < len(items) or cut:
+                    self.event_log.emit({
+                        "kind": "ppr_ceiling_walk_exhausted",
+                        "notebook_id": notebook_id,
+                        "top_chunks": top_chunks,
+                        "kept": top_chunks - slots,
+                        "windows": windows,
+                        "candidates_walked": len(seen),
+                        "libraries_dropped": len(dropped),
+                        "libraries_unmapped": len(refused) - len(dropped),
+                    })
+                break
+            if position >= len(items):
+                break
+            if position >= budget_from:
+                windows += 1
+                size = self._IN_CHUNK
+            window = items[position:position + size]
             position += size
             size = min(size * 2, self._IN_CHUNK)
-            if not window:
-                continue
             scores = dict(window)
             seen.update(scores)
             listed = dict(ceiling.listed)
@@ -1329,7 +1471,7 @@ class GraphRetrievalService(_RetrievalState):
                 if row is None:
                     if not listed:
                         slots -= 1
-                elif ceiling.admits(row):
+                elif ceiling.admits(row, listed):
                     admitted.add(chunk_id)
                     slots -= 1
             for row in rows:
