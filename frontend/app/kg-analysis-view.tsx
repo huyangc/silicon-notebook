@@ -643,9 +643,13 @@ function ReportState({ report }: { report: KgAnalysisReport }) {
         </div>
       </div>
       <p className="kg-analysis-note">
-        {state.present
-          ? `上次整理时的规模：${countText(rebuild.object_count, rebuild.units, "object_count")} · ${countText(rebuild.relation_count, rebuild.units, "relation_count")} · ${countText(rebuild.cluster_count, rebuild.units, "cluster_count")}。`
-          : "这个知识库还没有任何整理记录，下面每一格都在说「没有」，而不是「是 0」。"}
+        {/* 有过改动却从没整理过(例如刚复制来、等待重建的副本):没有「上次整理」,
+            就不报一个整理时的规模——报出来只会是一串假的 0。 */}
+        {!state.present
+          ? "这个知识库还没有任何整理记录，下面每一格都在说「没有」，而不是「是 0」。"
+          : rebuild.at
+            ? `上次整理时的规模：${countText(rebuild.object_count, rebuild.units, "object_count")} · ${countText(rebuild.relation_count, rebuild.units, "relation_count")} · ${countText(rebuild.cluster_count, rebuild.units, "cluster_count")}。`
+            : "这个知识库有过改动，但还没有整理过，所以没有「上次整理时的规模」可以显示。"}
       </p>
     </div>
   );

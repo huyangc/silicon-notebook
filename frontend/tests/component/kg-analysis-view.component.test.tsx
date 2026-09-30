@@ -545,6 +545,25 @@ test("上次整理的三个规模数各带各的单位，不并成一个可相�
   expect(note.textContent).toContain("2,000,000 合并后的知识对象");
 });
 
+test("有过改动却从没整理过：不报一串假的 0 规模", async () => {
+  const base = report();
+  vi.mocked(fetchKgAnalysis).mockResolvedValue(
+    report({
+      state: {
+        ...base.state,
+        kg_mutation_seq: 1,
+        dirty: true,
+        last_rebuild: { ...base.state.last_rebuild, at: "", object_count: 0, relation_count: 0, cluster_count: 0 },
+      },
+    }),
+  );
+  renderView();
+  await screen.findByRole("heading", { name: "报告口径与新鲜度", level: 3 });
+  const state = blockByTitle("报告口径与新鲜度");
+  expect(within(state).queryByText(/^上次整理时的规模：/)).not.toBeInTheDocument();
+  expect(within(state).getByText(/有过改动，但还没有整理过/)).toBeInTheDocument();
+});
+
 // ------------------------------------------------------- 收敛率按类型分列
 
 test("收敛率按类型分列并另给合计，concept 的 31% 不被稀释成 10%", async () => {

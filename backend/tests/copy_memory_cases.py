@@ -290,8 +290,9 @@ def world(nb: str = NOTEBOOK, *, with_memory: bool = True) -> list[Row]:
             *_cluster(nb, "K-mixed", f"{MARK} topic", ("ko-shared-3", "ko-alice-1"), memory=True),
             # 纯 Memory 簇。
             *_cluster(nb, "K-bob", f"{MARK} bob topic", ("ko-bob-1", "ko-bob-2"), memory=True),
-            # canonical_id 本身是某个 Memory 对象 id,成员却都是共享对象。
-            *_cluster(nb, "ko-alice-2", f"{MARK} canon", ("ko-shared-4",), memory=True),
+            # 真名种子的簇,alice 的 Memory 对象还在簇里(成员臂),共享成员一起整簇不带。
+            *_cluster(nb, "K-alice-topic", f"{MARK} topic of alice",
+                      ("ko-shared-4", "ko-alice-2"), memory=True),
             # canonical_id 铸自 Memory 对象 id(``K-~<对象 id>``,名字退化的种子),成员是
             # 共享对象:簇名/描述可能取自那个 Memory 对象。
             *_cluster(nb, "K-~ko-bob-2", f"{MARK} minted", ("ko-shared-5",), memory=True),
@@ -669,3 +670,123 @@ def assert_snapshots_equal(new: dict, old: dict, ordered: Iterable[str] | None =
             assert a == b, f"{table}: rows or their order changed"
         else:
             assert sorted(a) == sorted(b), f"{table}: rows changed"
+
+
+# --------------------------------------------------------------------------
+# 评审复现的两个存量形态(spec review B1 / B2),走真实的合并与删除路径造出来。
+# --------------------------------------------------------------------------
+PROBE_NOTEBOOK = "nb-copy-probe"
+PROBE_MEMORY_TEXT = f"{MARK}: my salary is 123"
+
+
+def probe_world(nb: str = PROBE_NOTEBOOK, *, cluster_canonical: str | None = None) -> list[Row]:
+    """alice 的一条 Memory 派生出来源 ``src-mem-p``(元素原文带 ``MARK``)与对象 ``ko-mem-p``;
+    共享文档来源 ``src-doc-p`` 与对象 ``ko-shared-p``。两个对象的证据都是完整条目(原文、
+    标题、定位)。``cluster_canonical`` 给出时,再造一个由 Memory 做种子的簇:成员是两个对象,
+    簇名与描述取自 Memory。"""
+    rows = [
+        Row("notebooks", {
+            "id": nb, "name": "Shared", "purpose": "", "primary_domain": "Semiconductor",
+            "status": "draft", "created_by": OWNER, "created_at": NOW, "updated_at": NOW,
+        }),
+        Row("users", {"id": "u-alice", "email": "u-alice@example.test", "display_name": "a",
+                      "role": "user", "created_at": NOW, "updated_at": NOW}),
+        Row("memory_items", {
+            "id": "mem-p", "notebook_id": nb, "created_by": "u-alice", "origin": "ask_answer",
+            "status": "confirmed", "title": f"{MARK} title", "content_md": PROBE_MEMORY_TEXT,
+            "created_at": NOW, "updated_at": NOW,
+        }, True),
+        _source(nb, "src-doc-p", "document"),
+        _source(nb, "src-mem-p", "memory", memory_id="mem-p", memory=True),
+        Row("source_elements", {
+            "id": "el-doc-p", "source_id": "src-doc-p", "element_type": "paragraph",
+            "location_label": "p1", "text": "shared text", "created_at": NOW,
+        }),
+        Row("source_elements", {
+            "id": "el-mem-p", "source_id": "src-mem-p", "element_type": "paragraph",
+            "location_label": "p1", "text": PROBE_MEMORY_TEXT, "created_at": NOW,
+        }, True),
+    ]
+    for oid, sid, eid, memory in (
+        ("ko-shared-p", "src-doc-p", "el-doc-p", False),
+        ("ko-mem-p", "src-mem-p", "el-mem-p", True),
+    ):
+        entry = evidence(sid, eid, memory=memory)
+        if memory:
+            entry["quoted_span"] = PROBE_MEMORY_TEXT
+        rows.append(Row("knowledge_objects", {
+            "id": oid, "notebook_id": nb, "object_type": "concept", "status": "approved",
+            "source_id": sid, "payload": {"name": "salary", "definition": "d"},
+            "evidence": [entry], "created_at": NOW, "updated_at": NOW,
+        }, memory))
+        rows.append(Row("knowledge_object_sources", {
+            "object_id": oid, "notebook_id": nb, "source_id": sid,
+        }, memory))
+    if cluster_canonical is not None:
+        for member in ("ko-shared-p", "ko-mem-p"):
+            rows.append(Row("concept_clusters", {
+                "id": f"cc-p-{member}", "notebook_id": nb, "canonical_id": cluster_canonical,
+                "member_object_id": member, "canonical_name": f"{MARK} plan",
+                "object_type": "concept", "canonical_description": f"{MARK} description",
+                "created_at": NOW, "generation": 0,
+            }, True))
+    return rows
+
+
+def seed_probe(insert: Callable[[str, dict], None], nb: str = PROBE_NOTEBOOK, **kw) -> None:
+    for row in probe_world(nb, **kw):
+        insert(row.table, row.values)
+
+
+#: 被删 Memory 做种子的簇:名字种子判不出来源(拷贝照带,靠标脏让副本主人重建);按对象 id
+#: 铸的种子(``K-~<对象 id>``)能认出种子对象已不存在,拷贝不带。
+STALE_CLUSTER_CASES = {
+    "K-alice-private-plan": True,   # canonical -> cluster rows still arrive in the copy
+    "K-~ko-mem-p": False,
+}
+
+
+def assert_copy_objects_carry_no_memory_text(view: "CopyView") -> None:
+    leaked = [leaf for leaf in view.leaves if MARK in leaf or "src-mem-p" in leaf
+              or "el-mem-p" in leaf]
+    assert not leaked, leaked
+
+
+def poisoned(entries: tuple) -> tuple:
+    """The same (table, text) shape with every text replaced by a statement that fails
+    when executed: patched in for the Memory-aware set, it proves a path never ran it."""
+    return tuple((table, "SELECT memory_aware_statement_must_not_run(") for table, _ in entries)
+
+
+_KH_PG_V = "SELECT id FROM sources WHERE source_type='knowhow'"
+_KH_SQLITE_V = "SELECT id FROM sources WHERE source_type = 'knowhow'"
+_CLUSTER_GEN_EXTRA = (
+    "AND generation = COALESCE((SELECT cluster_generation "
+    "FROM unified_kg_state u WHERE u.notebook_id = concept_clusters.notebook_id), 0)"
+)
+
+
+def _legacy_validated(kh: str) -> dict[str, str]:
+    """`_COPY_VALIDATED_TABLES` as it was before M2 (master @ e02c8fa8), per backend."""
+    return {
+        "sources": "",
+        "source_paper_meta": f"AND source_id NOT IN ({kh})",
+        "source_authors": f"AND source_id NOT IN ({kh})",
+        "chunks": "",
+        "chunk_questions": "",
+        "knowledge_objects": f"AND source_id NOT IN ({kh})",
+        "knowledge_source_facts": f"AND source_id NOT IN ({kh})",
+        "knowledge_source_fact_elements": f"AND source_id NOT IN ({kh})",
+        "knowledge_source_fact_backfills": (
+            f"AND status IN ('complete','incomplete') AND source_id NOT IN ({kh})"
+        ),
+        "knowledge_relations": f"AND (source_id IS NULL OR source_id NOT IN ({kh}))",
+        "concept_clusters": _CLUSTER_GEN_EXTRA,
+        "notebook_object_schemas": "",
+        "knowhow_tables": "",
+        "notebook_assets": "",
+    }
+
+
+LEGACY_VALIDATED_PG = _legacy_validated(_KH_PG_V)
+LEGACY_VALIDATED_SQLITE = _legacy_validated(_KH_SQLITE_V)

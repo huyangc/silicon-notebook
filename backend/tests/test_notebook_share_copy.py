@@ -1389,12 +1389,12 @@ def test_snapshot_pin_is_the_liveness_root_read(tmp_path, monkeypatch):
     independent = SqliteDatabase(primary.settings, primary.root_dir)
     original = store._copy_limit_violation
 
-    def tombstone_then_count(db, notebook_id):
+    def tombstone_then_count(db, notebook_id, *args):
         with independent.write() as w:
             w.execute(
                 "UPDATE notebooks SET status='deleting' WHERE id=?", (notebook_id,)
             )
-        return original(db, notebook_id)
+        return original(db, notebook_id, *args)
 
     monkeypatch.setattr(store, "_copy_limit_violation", tombstone_then_count)
     snapshot = store.snapshot_copy_rows(nb)
@@ -1779,7 +1779,7 @@ def test_deep_copy_of_a_notebook_with_memories_carries_none_of_them(repo):
     # 源库一行没动
     memory_cases.assert_kept_rows_lost_only_the_lent_evidence(view)
     source = memory_cases.read_copy(fetch, "?", memory_cases.NOTEBOOK)
-    assert source.counts["sources"] == 4 and source.counts["concept_clusters"] == 9
+    assert source.counts["sources"] == 4 and source.counts["concept_clusters"] == 10
     assert _kg_state(repo, memory_cases.NOTEBOOK) is None
 
 
@@ -1817,29 +1817,37 @@ def test_share_link_copy_route_of_a_notebook_with_memories_carries_none_of_them(
     assert memory_cases.MARK not in listing.text
 
 
-def test_copy_of_a_notebook_without_memory_is_unchanged_and_not_marked_dirty(
+def test_copy_of_a_clean_notebook_without_memory_runs_the_pre_m2_statements_verbatim(
     repo, monkeypatch
 ):
-    """没有 Memory 的笔记本:快照的每一行、每一个顺序都与 M2 之前的语句原文给出的一致;
-    副本仍然没有 unified_kg_state 行(不被标脏)——这条路径字节不变。"""
+    """没有 Memory、也不脏的笔记本:快照、上限计数与 validate_copy 用的是 M2 之前的语句原文
+    (逐字相同,成本相同——一条 Memory 谓词都不执行);副本没有 unified_kg_state 行。把
+    Memory 那套语句换成执行即报错的文本,拷贝照样成功,证明这条路径根本没碰它们。"""
     from app.repositories.sqlite import sharing_store as store_module
 
+    current = dict(store_module._COPY_SNAPSHOT_QUERIES)
+    for table, legacy in memory_cases.LEGACY_SNAPSHOT_SQLITE.items():
+        assert current[table] == legacy, table
+    assert dict(store_module._COPY_VALIDATED_TABLES) == memory_cases.LEGACY_VALIDATED_SQLITE
+
     _seed_memory_world(repo, memory_cases.NOTEBOOK_PLAIN, with_memory=False)
-    store = repo._runtime.sharing_store
-    now_rows = store.snapshot_copy_rows(memory_cases.NOTEBOOK_PLAIN)
-    assert all(now_rows[t] for t in memory_cases.LEGACY_SNAPSHOT_SQLITE), "fixture covers each table"
-    assert store_module._COPY_DIRTY_MARK not in now_rows["notebooks"][0]
+    with repo._write() as db:  # a clean state row (rebuilt, not dirty) keeps the plain path
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, dirty, kg_mutation_seq, updated_at) "
+            "VALUES (?, 0, 3, ?)", (memory_cases.NOTEBOOK_PLAIN, memory_cases.NOW),
+        )
     monkeypatch.setattr(
-        store_module,
-        "_COPY_SNAPSHOT_QUERIES",
-        memory_cases.legacy_snapshot_queries(
-            store_module._COPY_SNAPSHOT_QUERIES, memory_cases.LEGACY_SNAPSHOT_SQLITE
-        ),
+        store_module, "_MEMORY_COPY_SNAPSHOT_QUERIES",
+        memory_cases.poisoned(store_module._MEMORY_COPY_SNAPSHOT_QUERIES),
     )
-    memory_cases.assert_snapshots_equal(
-        now_rows, store.snapshot_copy_rows(memory_cases.NOTEBOOK_PLAIN)
+    monkeypatch.setattr(
+        store_module, "_MEMORY_COPY_VALIDATED_TABLES",
+        memory_cases.poisoned(store_module._MEMORY_COPY_VALIDATED_TABLES),
     )
-    monkeypatch.undo()
+    store = repo._runtime.sharing_store
+    assert store.snapshot_copy_within_limits(memory_cases.NOTEBOOK_PLAIN)
+    snapshot = store.snapshot_copy_rows(memory_cases.NOTEBOOK_PLAIN)
+    assert store_module._COPY_DIRTY_MARK not in snapshot["notebooks"][0]
 
     _mk_user(repo, "user-plain-copy")
     new = repo.copy_notebook(memory_cases.NOTEBOOK_PLAIN, new_owner_id="user-plain-copy")
@@ -1850,23 +1858,39 @@ def test_copy_of_a_notebook_without_memory_is_unchanged_and_not_marked_dirty(
     )
 
 
+def test_copy_of_a_dirty_notebook_without_memory_starts_dirty(repo, monkeypatch):
+    """源库没有 Memory 但已标脏(例如某条 Memory 删掉之后还没重建):副本走 Memory 那套语句,
+    并以脏状态开始,提示副本主人重建;不会把过时的成簇当成最新的交出去。"""
+    _seed_memory_world(repo, memory_cases.NOTEBOOK_PLAIN, with_memory=False)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, dirty, kg_mutation_seq, updated_at) "
+            "VALUES (?, 1, 5, ?)", (memory_cases.NOTEBOOK_PLAIN, memory_cases.NOW),
+        )
+    _mk_user(repo, "user-dirty-copy")
+    new = repo.copy_notebook(memory_cases.NOTEBOOK_PLAIN, new_owner_id="user-dirty-copy")
+    state = _kg_state(repo, new.id)
+    assert state is not None and state["dirty"] == 1 and state["kg_mutation_seq"] == 1
+    fetch = _fetch(repo)
+    assert memory_cases.read_copy(fetch, "?", new.id).counts == (
+        memory_cases.read_copy(fetch, "?", memory_cases.NOTEBOOK_PLAIN).counts
+    )
+
+
 def test_memory_notebook_snapshot_is_the_legacy_snapshot_minus_the_memory_rows(
     repo, monkeypatch
 ):
-    """有 Memory 的笔记本:现行快照 = M2 之前的原文快照去掉旗标为 Memory 的行(其余逐行不变)。"""
+    """有 Memory 的笔记本:快照 = M2 之前的原文快照去掉 Memory 行、再剥掉共享行里夹带的 Memory
+    证据条目;其余逐列不变。"""
     from app.repositories.sqlite import sharing_store as store_module
 
     _seed_memory_world(repo)
     store = repo._runtime.sharing_store
     now_rows = store.snapshot_copy_rows(memory_cases.NOTEBOOK)
-    monkeypatch.setattr(
-        store_module,
-        "_COPY_SNAPSHOT_QUERIES",
-        memory_cases.legacy_snapshot_queries(
-            store_module._COPY_SNAPSHOT_QUERIES, memory_cases.LEGACY_SNAPSHOT_SQLITE
-        ),
-    )
     # 原文快照:M2 之前的语句,也没有证据剥离。
+    monkeypatch.setattr(
+        store_module, "_MEMORY_COPY_SNAPSHOT_QUERIES", store_module._COPY_SNAPSHOT_QUERIES
+    )
     monkeypatch.setattr(store_module, "strip_memory_evidence", lambda *_args: 0)
     legacy = store.snapshot_copy_rows(memory_cases.NOTEBOOK)
     assert len(legacy["sources"]) == 4 and len(legacy["knowledge_relations"]) == 5, (
