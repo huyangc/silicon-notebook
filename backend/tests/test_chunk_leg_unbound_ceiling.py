@@ -195,6 +195,22 @@ def test_another_members_memory_makes_the_verdict_bind_the_list(library):
     assert _binds_a_list(trace)
 
 
+def test_a_report_run_keeps_binding_the_list(library):
+    """Reports keep the frozen list: there it also answers which sources a
+    stale ANN generation does not hold (they are recalled by FTS), so an
+    unbound report would silently lose them."""
+    from app.services.retrieval_run import retrieval_run
+
+    repo, nb, sid, bob, _alice, statements = library
+    _run_legs(repo, nb)
+
+    with retrieval_run(run_kind="report_generation", actor_id=bob):
+        with source_scope_context(nb, _scope([sid], bob)):
+            _result, trace = _trace(statements, lambda: _run_legs(repo, nb))
+
+    assert _binds_a_list(trace)
+
+
 @pytest.mark.parametrize("leg", ["chunks", "keyword"])
 def test_a_source_outside_the_freeze_is_caught_on_read_and_the_leg_reruns_bound(
     library, leg,
