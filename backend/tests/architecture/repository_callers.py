@@ -123,6 +123,7 @@ PRIVATE_REASON_BY_PATH = {
     "backend/app/api/kg_routes.py": "API readiness checks the process-owned model provider",
     "backend/app/api/knowhow_routes.py": "API readiness checks the process-owned model provider",
     "backend/app/api/mcp_tools/maintenance.py": "API readiness checks the process-owned model provider",
+    "backend/app/api/mcp_tools/memory_context.py": "MCP ask binds the runtime's one production default-ceiling readers",
     "backend/app/api/report_routes.py": "API readiness checks the process-owned model provider",
     "backend/app/api/source_routes.py": "API readiness checks the process-owned model provider",
     "backend/app/services/knowhow/api.py": "knowhow orchestration constructs narrow services from runtime ports",
@@ -130,6 +131,7 @@ PRIVATE_REASON_BY_PATH = {
     "backend/app/services/startup_warmup.py": "server lifespan is the sole owner of crash recovery; deliberately not a public repository port",
     "scripts/bench_sqlite_writes.py": "synthetic temporary write benchmark",
     "scripts/generate_repository_contract_fixtures.py": "disposable contract fixture databases",
+    "scripts/reflect_shadow_rig.py": "offline rig mirrors the report worker's default-ceiling readers",
     "scripts/verify_repository_snapshot.py": "models a server start on a disposable backup, including the startup recovery sweep",
 }
 

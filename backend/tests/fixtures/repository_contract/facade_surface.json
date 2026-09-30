@@ -1682,6 +1682,12 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/memory_context.py",
+        "scope": "<module>._run_ask_notebook",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>._report_llm_ready",
         "target": "_runtime"
@@ -4648,6 +4654,12 @@
         "kind": "attribute",
         "path": "scripts/bench_scale_build_paging.py",
         "scope": "<module>.cmd_evidence",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/reflect_shadow_rig.py",
+        "scope": "<module>._generate_report",
         "target": "_runtime"
       },
       {
@@ -9278,7 +9290,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/memory_context.py",
-        "scope": "<module>.register_memory_context_tools.ask_notebook.check_memory_scope",
+        "scope": "<module>._memory_read_allowed",
         "target": "require_agent_access"
       },
       {
@@ -9291,12 +9303,6 @@
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/memory_context.py",
         "scope": "<module>.register_memory_context_tools.search_agent_memory.load",
-        "target": "require_agent_access"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/mcp_tools/memory_context.py",
-        "scope": "<module>.register_memory_context_tools.search_notebook_context.load",
         "target": "require_agent_access"
       }
     ],

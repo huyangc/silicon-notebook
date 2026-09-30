@@ -301,6 +301,14 @@
     {
       "count": 1,
       "kind": "independent_private",
+      "path": "backend/app/api/mcp_tools/memory_context.py",
+      "reason": "MCP ask binds the runtime's one production default-ceiling readers",
+      "scope": "<module>._run_ask_notebook",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
       "path": "backend/app/api/report_routes.py",
       "reason": "API readiness checks the process-owned model provider",
       "scope": "<module>._report_llm_ready",
@@ -473,6 +481,14 @@
       "reason": "disposable contract fixture databases",
       "scope": "<module>.normalized_repository_snapshot",
       "target": "_connect"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "scripts/reflect_shadow_rig.py",
+      "reason": "offline rig mirrors the report worker's default-ceiling readers",
+      "scope": "<module>._generate_report",
+      "target": "_runtime"
     },
     {
       "count": 1,
