@@ -10,8 +10,11 @@ PostgreSQL 镜像(占位符 `%s`),两份必须同修,与 `access_sql.py` / `moun
 现状要说清:两个 `source_store` 已迁入本模块——`hidden_source_ids` 的「对该用户可读」
 就是 `memory_source_readable('s')`(KG 查看者规则据此判定「另一位成员的 Memory」),
 `MEMORY_SOURCE_TYPE_PREDICATE` 由 `memory_source_type_predicate()` 渲染;
-`postgres/chunk_store.py` 里两处 Memory 属主判断仍各自带着一份手写谓词,随改动该读者的
-变更迁入本模块。`MEMORY_SOURCE_TYPE`/`memory_source_type_predicate` 与
+`sharing_store.source_notebook_id(viewer_id=...)`(来源/元素读取端点与 MCP
+`get_cited_element` 的属主闸)同样消费 `memory_source_readable`,于是「谁的 Memory 进
+天花板」与「谁能打开这条来源」是同一个定义。`postgres/chunk_store.py` 里两处 Memory
+属主判断仍各自带着一份手写谓词,随改动该读者的变更迁入本模块。
+`MEMORY_SOURCE_TYPE`/`memory_source_type_predicate` 与
 `source_store.MEMORY_SOURCE_TYPE_PREDICATE` 的一致性仍由 `test_memory_sql_contract.py`
 的漂移守卫钉住。
 

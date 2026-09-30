@@ -1567,6 +1567,16 @@ def test_both_adapters_filter_memory_ownership_inside_the_single_query():
             f"{store.__module__}: Memory 归属过滤必须在这条 SQL 里,"
             "不能取回全部再在结果侧丢弃"
         )
+        # D2: the Memory-readable half IS the shared fragment — the same
+        # definition the source/element read gate
+        # (`sharing_store.source_notebook_id(viewer_id=)`) consumes.
+        memory_sql = sys.modules[
+            store.__module__.rsplit(".", 1)[0] + ".memory_sql"
+        ]
+        assert memory_sql.memory_source_readable("s") in sql, (
+            f"{store.__module__}: 隐藏半边的 Memory 可读判定必须消费 "
+            "memory_sql.memory_source_readable,不许手写第二份"
+        )
         # 归属必须是**参数绑定的谓词**,不是取回来的一列:把 created_by 选进结果、
         # 再在 Python 里丢掉别人的行,行为上与正确实现无法区分,却把别人的私有
         # Memory 源 id 读进了本进程 —— 那正是这条守卫要拦的「挪到结果侧」。

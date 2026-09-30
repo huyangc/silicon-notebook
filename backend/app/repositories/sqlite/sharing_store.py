@@ -23,7 +23,17 @@ from app.repositories.sqlite.access_sql import (
 )
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.knowhow_history_store import record_change
+from app.repositories.sqlite.memory_sql import memory_source_readable
 from app.repositories.sqlite.mount_sql import MOUNT_VALID_EXPR
+
+# `source_notebook_id(viewer_id=...)`: the Memory owner gate of the source and
+# element read endpoints (see that method). Parameters `(source_id, viewer_id)`;
+# primary-key probe on `sources`, primary-key probe on `memory_items` only for
+# a Memory row. The PostgreSQL adapter's constant of the same name mirrors it.
+_VIEWER_SOURCE_NOTEBOOK_SQL = (
+    "SELECT s.notebook_id FROM sources s WHERE s.id = ? "
+    f"AND {memory_source_readable('s')}"
+)
 
 # knowhow-table content, PR-2+3 Task 13: knowledge_objects/knowledge_relations
 # derived FROM a knowhow hidden source stay EXCLUDED from a deep copy — they
@@ -690,11 +700,31 @@ class SharingStore:
             ).fetchone()
         return row["owner"] if row else None
 
-    def source_notebook_id(self, source_id: str) -> "str | None":
+    def source_notebook_id(
+        self, source_id: str, *, viewer_id: "str | None" = None
+    ) -> "str | None":
+        """The notebook ``source_id`` belongs to, or ``None``.
+
+        ``viewer_id`` is the Memory owner gate of every source/element read
+        (`/sources/{id}`, the participant-scope proxy, MCP `get_cited_element`):
+        with it, a Memory source whose `memory_items.created_by` is not the
+        viewer answers ``None`` — exactly what a missing id answers, from the
+        same single statement, so a refusal is indistinguishable from "does not
+        exist". The predicate is `memory_sql.memory_source_readable`, never a
+        hand-written copy; `''` reads no Memory at all (a token without
+        `memory:read`), and an orphaned Memory source reads for nobody.
+        ``None`` (write-side callers that gate on a capability instead) keeps
+        the historical statement byte for byte.
+        """
         with self.database.connect() as db:
-            row = db.execute(
-                "SELECT notebook_id FROM sources WHERE id = ?", (source_id,)
-            ).fetchone()
+            if viewer_id is None:
+                row = db.execute(
+                    "SELECT notebook_id FROM sources WHERE id = ?", (source_id,)
+                ).fetchone()
+            else:
+                row = db.execute(
+                    _VIEWER_SOURCE_NOTEBOOK_SQL, (source_id, viewer_id)
+                ).fetchone()
         return row["notebook_id"] if row else None
 
     def answer_notebook_id(self, answer_id: str) -> "str | None":

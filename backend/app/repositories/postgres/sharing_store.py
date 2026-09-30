@@ -36,10 +36,20 @@ from app.repositories.postgres.access_sql import (
 )
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.knowhow_history_store import record_change
+from app.repositories.postgres.memory_sql import memory_source_readable
 from app.repositories.postgres.mount_sql import MOUNT_VALID_EXPR
 
 
 _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type='knowhow'"
+
+# `source_notebook_id(viewer_id=...)`: the Memory owner gate of the source and
+# element read endpoints, mirrored by the SQLite adapter's constant of the same
+# name. Parameters `(source_id, viewer_id)`; primary-key probe on `sources`,
+# primary-key probe on `memory_items` only for a Memory row.
+_VIEWER_SOURCE_NOTEBOOK_SQL = (
+    "SELECT s.notebook_id FROM sources s WHERE s.id=%s "
+    f"AND {memory_source_readable('s')}"
+)
 
 # Deliberately absent: `notebook_grants` (group knowledge sharing P1, schema
 # v27), for the same reason `notebook_members` (share-token readers) already
@@ -591,11 +601,20 @@ class SharingStore:
             ).fetchone()
         return row["owner"] if row else None
 
-    def source_notebook_id(self, source_id: str) -> str | None:
+    def source_notebook_id(
+        self, source_id: str, *, viewer_id: str | None = None
+    ) -> str | None:
+        """The notebook ``source_id`` belongs to; see the SQLite adapter for the
+        ``viewer_id`` contract (Memory owner gate, same statement, same miss)."""
         with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT notebook_id FROM sources WHERE id=%s", (source_id,)
-            ).fetchone()
+            if viewer_id is None:
+                row = connection.execute(
+                    "SELECT notebook_id FROM sources WHERE id=%s", (source_id,)
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    _VIEWER_SOURCE_NOTEBOOK_SQL, (source_id, viewer_id)
+                ).fetchone()
         return row["notebook_id"] if row else None
 
     def answer_notebook_id(self, answer_id: str) -> str | None:

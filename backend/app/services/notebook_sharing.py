@@ -1145,7 +1145,16 @@ class NotebookSharingService:
         return self._store.notebook_sync_origin(notebook_id)
 
     def user_can_read_source(self, source_id: str, user_id: str) -> bool:
-        notebook_id = self._store.source_notebook_id(source_id)
+        """Notebook read access AND, for a Memory source, being its creator.
+
+        A Memory projection belongs to `memory_items.created_by`, not to the
+        notebook: another member (the notebook owner included) must not read it
+        through `/sources/{id}` or its elements. The owner gate is the SAME
+        statement that resolves the notebook (`source_notebook_id(viewer_id=)`),
+        so another member's Memory and a missing id both stop at that one read
+        with ``None`` — nothing downstream can tell them apart.
+        """
+        notebook_id = self._store.source_notebook_id(source_id, viewer_id=user_id)
         return bool(notebook_id) and self.user_can_read_notebook(notebook_id, user_id)
 
     def user_can_read_answer(self, answer_id: str, user_id: str) -> bool:
@@ -1337,8 +1346,10 @@ class NotebookSharingService:
     def source_owner(self, source_id: str) -> "str | None":
         return self._store.source_owner(source_id)
 
-    def source_notebook_id(self, source_id: str) -> "str | None":
-        return self._store.source_notebook_id(source_id)
+    def source_notebook_id(
+        self, source_id: str, *, viewer_id: "str | None" = None
+    ) -> "str | None":
+        return self._store.source_notebook_id(source_id, viewer_id=viewer_id)
 
     def conversation_owner(self, conversation_id: str) -> "str | None":
         return self._store.conversation_owner(conversation_id)
