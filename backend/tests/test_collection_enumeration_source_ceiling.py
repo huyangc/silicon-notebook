@@ -1459,6 +1459,20 @@ def test_an_evidence_less_row_is_judged_by_its_owner(repo):
     assert sorted(item.object_id for item in flipped.items) == ["oA", "oB", "oMix"]
 
 
+def test_a_row_is_judged_by_its_evidence_not_its_owner(repo):
+    """有证据的对象按绑定路径的判据核验:属主在冻结集合里、证据却全来自冻结之后
+    的来源(例如上传后并进来的证据)——绑定路径不会列它,所以快路径看见它就是漂移。"""
+    nb = _library(repo)
+    with retrieval_run(run_kind="ask_reasoning", actor_id=_ACTOR):
+        with _all_ticked(repo, nb):
+            _kg(repo, nb, "oMergedLate", [("sGone", "el-sGone-001")],
+                owner_source_id="sA")
+            kg = repo.collection_enumeration.enumerate_kg_objects(
+                nb, "concept", budget=_budget(), ceiling_binds=False)
+            assert _drifted(nb)
+    assert "oMergedLate" not in {item.object_id for item in kg.items}
+
+
 def test_a_49k_ceiling_binds_once_across_pages_and_counts(repo, monkeypatch):
     """codex #817 r1 P2:执行器与目录把 run 的那一个 frozenset(``members``)交给
     store,store 按对象身份缓存绑定形态——4.9 万 id 的天花板在整条清单的每一页和
