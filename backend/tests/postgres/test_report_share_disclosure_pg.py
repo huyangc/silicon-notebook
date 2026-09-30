@@ -295,7 +295,13 @@ def test_share_and_purge_of_the_same_author_never_deadlock_pg(world):
     nothing, so both finish — no deadlock abort.  A share that took the HIGH
     row first (citation order: the high source is cited first; or source-id
     order: its source id sorts first) would hold high while waiting on low,
-    and the purge would wait on high: a cycle."""
+    and the purge would wait on high: a cycle.
+
+    The purge here is the lock statement of ``MemoryStore._hard_delete_on``
+    (PR-E5) copied verbatim, followed by its delete.  Assembly step when
+    PR-E5 and this PR are both on master: call ``_hard_delete_on`` itself in
+    ``purge()`` instead of the copy, so a later change to the purge's
+    statement is exercised here."""
     import threading
     import time
 
@@ -344,17 +350,22 @@ def test_share_and_purge_of_the_same_author_never_deadlock_pg(world):
     ])
     database = world.repo._runtime.database
 
-    def waiting_on_locks() -> int:
+    def waiting(statement: str) -> bool:
+        """Whether a session running ``statement`` is waiting on a lock — the
+        purge and the share are told apart by their own statement text, so an
+        unrelated waiter cannot stand in for either."""
         with database.connect() as db:
-            return int(db.execute(
+            return db.execute(
                 "SELECT count(*) AS n FROM pg_stat_activity "
-                "WHERE datname = current_database() AND wait_event_type = 'Lock'"
-            ).fetchone()["n"])
+                "WHERE datname = current_database() AND wait_event_type = 'Lock' "
+                "AND pid <> pg_backend_pid() AND query LIKE %s",
+                (f"%{statement}%",),
+            ).fetchone()["n"] > 0
 
-    def wait_for_waiters(count: int) -> None:
+    def wait_until_waiting(statement: str) -> None:
         deadline = time.monotonic() + 30
-        while waiting_on_locks() < count:
-            assert time.monotonic() < deadline, f"never saw {count} lock waiters"
+        while not waiting(statement):
+            assert time.monotonic() < deadline, f"no session waits in {statement!r}"
             time.sleep(0.05)
 
     held, release = threading.Event(), threading.Event()
@@ -367,8 +378,8 @@ def test_share_and_purge_of_the_same_author_never_deadlock_pg(world):
             assert release.wait(30)
 
     def purge():
-        # The member-exit purge's lock statement (``_hard_delete_on`` on
-        # ``claude/memory-copy-delete``), verbatim, then its delete.
+        # ``_hard_delete_on``'s lock statement (PR-E5), verbatim, then its
+        # delete — see the docstring for the assembly step.
         try:
             with database.write() as db:
                 rows = db.execute(
@@ -395,10 +406,10 @@ def test_share_and_purge_of_the_same_author_never_deadlock_pg(world):
     assert held.wait(30)
     purger = threading.Thread(target=purge)
     purger.start()
-    wait_for_waiters(1)        # the purge queues on the low row first
+    wait_until_waiting("ORDER BY id FOR UPDATE")   # the purge queues on low first
     publisher = threading.Thread(target=publish)
     publisher.start()
-    wait_for_waiters(2)        # then the share queues behind it
+    wait_until_waiting("FOR SHARE OF")             # then the share queues
     release.set()              # the purge takes low, then high; the share follows
     blocker.join(30)
     purger.join(30)

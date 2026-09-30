@@ -66,7 +66,10 @@ function fakeFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Re
   if (method === "GET" && path === `/notebooks/${NB2}/reports`) return Promise.resolve(json(200, []));
   if (method === "GET" && path === `${BASE}/${RID}`) return Promise.resolve(json(200, reportBody));
   if (method === "GET" && path === `${BASE}/${RID2}`) {
-    return Promise.resolve(json(200, { ...REPORT, id: RID2, question: "另一份报告" }));
+    return Promise.resolve(json(200, { ...REPORT, id: RID2, question: "另一份报告", ...report2Extra }));
+  }
+  if (method === "GET" && path === `${BASE}/${RID2}/share/disclosure`) {
+    return Promise.resolve(json(200, { memory_count: 0, foreign_memory_count: 0 }));
   }
   if (method === "GET" && path === `${BASE}/${RID}/share`) {
     return Promise.resolve(handlers.shareRead(init));
@@ -132,10 +135,12 @@ const changedSentence = (n: number, added: number) =>
 const strip = () => screen.queryByRole("group", { name: "公开前确认" });
 
 let reportBody: ReportDetailT = REPORT;
+let report2Extra: Partial<ReportDetailT> = {};
 
 beforeEach(() => {
   calls = [];
   reportBody = REPORT;
+  report2Extra = {};
   announceShareLink.mockReset();
   announceShareLink.mockResolvedValue(true);
   notify.mockReset();
@@ -593,6 +598,45 @@ test("以前就已公开、引用了其他成员个人记忆的报告:打开时�
   await screen.findByRole("button", { name: "分享" });
   expect(screen.queryByRole("group", { name: "公开链接已失效" })).toBeNull();
   expect(calls.some((c) => c.method === "DELETE" && c.path === `${BASE}/${RID}/share`)).toBe(true);
+});
+
+test("从失效的已公开报告 A 切到正常的已公开报告 B:失效说明收起,B 上照常有「复制链接」", async () => {
+  const user = userEvent.setup();
+  reportBody = { ...REPORT, shared: true };
+  report2Extra = { shared: true };
+  handlers.disclosure = () => json(200, { memory_count: 0, foreign_memory_count: 1 });
+  render(<Harness />);
+  await screen.findByRole("group", { name: "公开链接已失效" });
+
+  await user.click(screen.getByRole("button", { name: "打开另一份报告" }));
+  await screen.findByRole("heading", { name: "另一份报告" });
+  await screen.findByRole("button", { name: "复制链接" });
+  await waitFor(() => expect(
+    calls.filter((c) => c.path === `${BASE}/${RID2}/share/disclosure`),
+  ).toHaveLength(1));
+  expect(screen.queryByRole("group", { name: "公开链接已失效" })).toBeNull();
+});
+
+test("A 的披露回得晚、那时已切到 B:A 的结果不会落到 B 上", async () => {
+  const user = userEvent.setup();
+  reportBody = { ...REPORT, shared: true };
+  report2Extra = { shared: true };
+  let answerA!: () => void;
+  const lateA = new Promise<void>((resolve) => { answerA = resolve; });
+  handlers.disclosure = async () => {
+    await lateA;
+    return json(200, { memory_count: 0, foreign_memory_count: 1 });
+  };
+  render(<Harness />);
+  await screen.findByRole("heading", { name: "比较两类封装工艺" });
+  await waitFor(() => expect(disclosureCalls()).toHaveLength(1));
+
+  await user.click(screen.getByRole("button", { name: "打开另一份报告" }));
+  await screen.findByRole("heading", { name: "另一份报告" });
+  await act(async () => { answerA(); });
+
+  await screen.findByRole("button", { name: "复制链接" });
+  expect(screen.queryByRole("group", { name: "公开链接已失效" })).toBeNull();
 });
 
 test("以前就已公开、只含作者本人记忆的报告:照常显示「复制链接」,没有失效说明", async () => {
