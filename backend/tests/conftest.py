@@ -6,6 +6,7 @@ from itertools import count
 from pathlib import Path
 import shutil
 import time
+from types import ModuleType
 
 os.environ.setdefault("SILICON_NOTEBOOK_AUTH_OPTIONAL", "true")
 
@@ -477,6 +478,59 @@ def _drain_knowhow_projection_schedulers():
         if remaining:
             time.sleep(0.01)
     assert not remaining, "knowhow projection scheduler did not quiesce during teardown"
+
+
+def _split_app_module_namespace() -> list[tuple[ModuleType, str, ModuleType, object]]:
+    """Every ``app`` package attribute that binds a submodule object which is
+    NOT the one ``sys.modules`` holds under that name (or holds nothing)."""
+    split = []
+    for package_name, package in list(sys.modules.items()):
+        if package is None or not hasattr(package, "__path__"):
+            continue
+        if package_name != "app" and not package_name.startswith("app."):
+            continue
+        prefix = package_name + "."
+        for attribute, value in list(vars(package).items()):
+            if not isinstance(value, ModuleType) or value.__name__ != prefix + attribute:
+                continue
+            registered = sys.modules.get(value.__name__)
+            if registered is not value:
+                split.append((package, attribute, value, registered))
+    return split
+
+
+@pytest.fixture(autouse=True)
+def _keep_app_module_namespace_whole():
+    """`sys.modules` 与父包属性是同一个模块的两份登记,测试摘掉一份就会分叉。
+
+    症状:某个测试 `sys.modules.pop("app.x.y")` 却没还原,父包 `app.x` 仍把旧的
+    `y` 模块对象挂在属性上;下一次 `import app.x.y` 会建一个新对象登记进
+    `sys.modules`,而 `from app.x import y` 走属性查找拿到的还是旧对象。此后
+    对着其中一个 monkeypatch,另一条路径根本看不见——
+    `test_scale_build_cli.py::test_the_composition_root_disowns_the_schema_at_the_call_site`
+    就是这样在 2026-09-29 于四条互不相关的分支上各红一次:它 patch 的是属性那一份,
+    被测 CLI 的 `from app.repositories.postgres.repository import PostgresRepository`
+    读的是 `sys.modules` 那一份,于是真的 `PostgresRepository` 被构造出来。污染源是
+    `test_repository_factory.py` 里的裸 `sys.modules.pop`;谁与受害者同 worker、中间
+    有没有别的测试恰好重新 import 把属性重绑回来,全看 xdist 分配,所以是间歇失败。
+
+    这里每个测试结束后核对一遍所有 `app` 包的模块属性与 `sys.modules` 是否指向同
+    一个对象(约 20 个包,不到 0.1 ms),不一致就把 `sys.modules` 复位到父包属性那
+    一份(即污染前的登记)并让**污染者**报错——不这样做,红的永远是后跑的无辜用例。
+    """
+    yield
+    split = _split_app_module_namespace()
+    for _package, _attribute, value, _registered in split:
+        sys.modules[value.__name__] = value
+    assert not split, (
+        "this test left an `app` package attribute and `sys.modules` pointing at "
+        "different module objects (a bare `sys.modules.pop` without restore?): "
+        + ", ".join(
+            f"{package.__name__}.{attribute} is {value!r} but sys.modules holds "
+            f"{registered!r}"
+            for package, attribute, value, registered in split
+        )
+    )
 
 
 @pytest.fixture(autouse=True)
