@@ -15,10 +15,18 @@ Pinned here, on real stores (``assert_*`` are backend neutral;
   None;
 * the auto-confirm refresh adopts the refreshed local dimension, inherits the
   outer per-library ceilings and ``ceilings_total``, and keeps the outer
-  library dimension it was not handed;
+  library dimension it was not handed; handed a refreshed library dimension
+  it adopts that one;
+* a persisted narrowed selection (handed in by the route, or read from the
+  persisted ``understanding``) is exactly what planning and generation run
+  under -- never the whole default ceiling;
 * a reader failure fails the phase (report marked failed, the engine never
   runs) -- in the coordinator AND in the refresh -- instead of running
-  unscoped.
+  unscoped;
+* a Stop pressed while the ceiling is being read (the endpoint only sets the
+  cancel event) ends the phase or cancels the report, never fails it and
+  never runs it: every ceiling read runs under a budget carrying the cancel
+  event, and the constructor checks the event before each mounted library.
 """
 from __future__ import annotations
 
@@ -162,6 +170,7 @@ class _Recorder:
             source_allowed(self.lib, "rep-lib-memory")
             or source_allowed(self.lib, "rep-lib-knowhow")
         )
+        snapshot["lib_covered"] = scope.covers_notebook(self.lib)
         return snapshot
 
 
@@ -276,6 +285,111 @@ def assert_auto_confirm_refresh_reinstalls_inside_the_ceiling(
         assert row["base_notebook_ids"] == {lib}, row
 
 
+def assert_auto_confirm_refresh_adopts_a_refreshed_library_dimension(
+    repo, ids, monkeypatch
+) -> None:
+    """The re-validation refreshed ONLY the library dimension (the library
+    was deselected while intent understanding ran): planning and generation
+    must run under the refreshed one, not the worker's stale ``[lib]``."""
+    coordinator = repo.report_execution
+    _synchronous(monkeypatch, coordinator)
+    recorder = _Recorder(monkeypatch, repo, ids)
+    nb, lib, alice = ids["nb"], ids["lib"], ids["alice"].id
+    rid = _create_report(repo, ids)
+    submitted_base = {"mode": "include", "notebook_ids": [lib], "narrowed": False}
+    refreshed_base = {"mode": "include", "notebook_ids": [], "narrowed": True}
+
+    def reconfirm(understanding):
+        return {
+            "understanding": understanding,
+            "source_scope": None,
+            "base_scope": refreshed_base,
+        }
+
+    assert coordinator.start_plan(
+        nb, rid, "q?", auto_generate=True, user_id=alice,
+        base_scope=submitted_base, scope_reconfirm=reconfirm,
+    )
+    phases = [row["phase"] for row in recorder.seen]
+    assert phases == ["intent", "plan", "generate"], phases
+    intent_row, plan_row, generate_row = recorder.seen
+    assert intent_row["base_notebook_ids"] == {lib}
+    assert intent_row["lib_covered"] is True
+    for row in (plan_row, generate_row):
+        assert row["base_provided"] is True, row
+        assert row["base_notebook_ids"] == set(), "刷新后的库维必须被采用"
+        assert row["lib_covered"] is False, "被取消勾选的参考库不得再参与"
+        # The local dimension was not refreshed: the worker's default freeze
+        # (not a user choice) stands.
+        assert row["source_ids"] == {"rep-visible"}, row
+        assert row["hidden"] == {"rep-knowhow", "rep-memory-alice"}, row
+        assert row["source_provided"] is False, row
+        assert row["ceilings_total"] is True, row
+
+
+def _persisted_scopes(ids) -> tuple[dict, dict]:
+    """A user's narrowed selection as the routes persist it (re-frozen
+    include, no hidden half), plus a library dimension."""
+    return (
+        {
+            "mode": "include", "source_ids": ["rep-visible"],
+            "hidden_source_ids": [], "narrowed": True,
+            "owner_id": ids["alice"].id,
+        },
+        {"mode": "include", "notebook_ids": [ids["lib"]], "narrowed": False},
+    )
+
+
+def _assert_runs_under_the_persisted_selection(row: dict, ids) -> None:
+    # The notebook has TWO visible sources; the default ceiling would admit
+    # both plus Alice's hidden half.  Only the persisted selection may stand.
+    assert row["source_ids"] == {"rep-visible"}, row
+    assert row["hidden"] == set(), row
+    assert row["source_provided"] is True, row
+    assert row["restricted"] is True, row
+    assert row["payload"] is not None, row
+    assert set(row["payload"]["source_ids"]) == {"rep-visible"}, row
+    assert row["base_provided"] is True, row
+    assert row["base_notebook_ids"] == {ids["lib"]}, row
+    assert row["ceilings_total"] is True, row
+    assert row["lib_ceiling"] == frozenset({"rep-lib-visible"}), row
+
+
+def assert_phases_run_under_the_persisted_selection(
+    repo, ids, monkeypatch, *, handed_by_route: bool
+) -> None:
+    """``start_generate`` with a persisted include scope and ``start_plan``
+    with a confirmed contract carrying one run INSIDE that selection, never
+    under the whole default ceiling.  ``handed_by_route``: the route passes
+    the re-frozen scope in (as ``/confirm`` and ``/generate`` do); otherwise
+    the coordinator must take it from the persisted ``understanding``."""
+    coordinator = repo.report_execution
+    _synchronous(monkeypatch, coordinator)
+    recorder = _Recorder(monkeypatch, repo, ids)
+    nb, alice = ids["nb"], ids["alice"].id
+    repo._runtime.source_store.insert_source(
+        source_id="rep-visible-2", notebook_id=nb, title="rep-visible-2",
+        source_type="pdf", status="active", parse_status="parsed",
+        file_name="", file_path="", file_size=0, file_hash="",
+        summary="", doc_type="", memory_id="",
+    )
+    rid = _create_report(repo, ids)
+    scope, base = _persisted_scopes(ids)
+    contract = {
+        "resolved_question": "q?", "source_scope": scope, "base_scope": base,
+    }
+    repo._runtime.report_store.update_report(nb, rid, understanding=contract)
+    kwargs = {"source_scope": scope, "base_scope": base} if handed_by_route else {}
+
+    assert coordinator.start_plan(
+        nb, rid, "q?", user_id=alice, intent_contract=contract, **kwargs
+    )
+    assert coordinator.start_generate(nb, rid, "q?", user_id=alice, **kwargs)
+    assert [row["phase"] for row in recorder.seen] == ["plan", "generate"]
+    for row in recorder.seen:
+        _assert_runs_under_the_persisted_selection(row, ids)
+
+
 class _FailingReaders:
     """``CeilingReaders`` whose participant read fails."""
 
@@ -362,6 +476,207 @@ def test_a_stop_during_the_ceiling_reads_ends_the_worker_quietly():
     assert not any(kw.get("status") == "failed" for _a, kw in reports.updates)
 
 
+# ---------------------------------------------------------------------------
+# Stop pressed WHILE the ceiling is being read.  The Stop endpoint only sets
+# the phase's cancel event (``ReportCancellationRegistry.cancel``); nothing
+# raises for it.  The readers below behave like the real stores under a read
+# budget: a read checks the budget it runs under, so a set cancel event on
+# that budget interrupts it (SQLite's progress handler, PostgreSQL's
+# per-statement check).
+# ---------------------------------------------------------------------------
+
+
+class _SpyRegistry(ReportCancellationRegistry):
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[threading.Event] = []
+
+    def register(self, key, event, *, replace=False):
+        self.events.append(event)
+        return super().register(key, event, replace=replace)
+
+
+def _store_read(values):
+    """A reader that honours the read budget it runs under, like a store."""
+    def read(*_args):
+        from app.repositories.read_budget import current_read_budget
+
+        budget = current_read_budget()
+        if budget is not None:
+            budget.check()
+        return list(values)
+    return read
+
+
+_SELECTION = {
+    "mode": "include", "source_ids": ["s1"], "hidden_source_ids": [],
+    "narrowed": True, "owner_id": "u",
+}
+
+
+def _coordinator_with(readers, reports, engine, registry):
+    return ReportExecutionCoordinator(
+        reports=reports,
+        engine_factory=lambda **_kwargs: engine,
+        cancellations=registry,
+        job_submitter=lambda fn, *args, name=None, notify_pending=False, **kw: fn(),
+        ceiling_readers=readers,
+    )
+
+
+def _start(coordinator, phase, **kwargs):
+    if phase == "plan":
+        return coordinator.start_plan("nb", "rid", "q", user_id="u", **kwargs)
+    return coordinator.start_generate("nb", "rid", "q", user_id="u", **kwargs)
+
+
+@pytest.mark.parametrize("phase", ["plan", "generate"])
+def test_a_stop_before_a_mounted_library_is_read_ends_the_phase_quietly(phase):
+    """Stop lands during the participant read; the next step is reading a
+    mounted library.  The constructor must see the phase's cancel event and
+    end the phase -- not read (or skip) the library and run the report."""
+    reports, engine, registry = _Reports(), _NeverRunEngine(), _SpyRegistry()
+    lib_reads: list[str] = []
+
+    def participants(notebook_id):
+        registry.cancel("rid")
+        return [notebook_id, "lib"]
+
+    def visible(notebook_id):
+        lib_reads.append(notebook_id)
+        return _store_read(["lib-s"])(notebook_id)
+
+    coordinator = _coordinator_with(CeilingReaders(
+        participants=participants, visible=visible,
+        hidden=lambda notebook_id, owner_id: [],
+        memory_sources=lambda notebook_id: [],
+    ), reports, engine, registry)
+    _start(coordinator, phase, source_scope=_SELECTION)
+    assert engine.calls == [], "停止后报告不得继续跑"
+    assert lib_reads == [], "停止后不得再读挂载库"
+    assert not any(kw.get("status") == "failed" for _a, kw in reports.updates)
+
+
+@pytest.mark.parametrize("phase", ["plan", "generate"])
+def test_a_stop_interrupting_an_active_notebook_read_ends_the_phase_quietly(phase):
+    """Stop lands while the ACTIVE notebook's visible set is being read (an
+    unscoped phase): the read is interrupted through its budget, and that
+    is the user's Stop -- the phase ends quietly, the report is not marked
+    failed and never runs."""
+    reports, engine, registry = _Reports(), _NeverRunEngine(), _SpyRegistry()
+
+    def visible(notebook_id):
+        registry.cancel("rid")
+        return _store_read(["s1"])(notebook_id)
+
+    coordinator = _coordinator_with(CeilingReaders(
+        participants=lambda notebook_id: [notebook_id], visible=visible,
+        hidden=lambda notebook_id, owner_id: [],
+        memory_sources=lambda notebook_id: [],
+    ), reports, engine, registry)
+    _start(coordinator, phase)
+    assert engine.calls == []
+    assert not any(kw.get("status") == "failed" for _a, kw in reports.updates)
+
+
+@pytest.mark.parametrize("phase", ["plan", "generate"])
+def test_every_ceiling_read_runs_under_a_budget_carrying_the_phase_cancel_event(
+    phase,
+):
+    """All four reads -- including the ACTIVE notebook's, which the
+    constructor gives no budget of its own -- run under a read budget whose
+    cancel event is the phase's, so a Stop never waits for a read."""
+    from app.repositories.read_budget import current_read_budget
+    from app.services.source_scope import memory_access_context
+
+    reports, engine, registry = _Reports(), _NeverRunEngine(), _SpyRegistry()
+    seen: dict[str, Any] = {}
+
+    def recording(name, values):
+        def read(*_args):
+            seen.setdefault(name, []).append(current_read_budget())
+            return list(values)
+        return read
+
+    coordinator = _coordinator_with(CeilingReaders(
+        participants=recording("participants", ["nb", "lib"]),
+        visible=recording("visible", ["s1"]),
+        hidden=recording("hidden", ["h1"]),
+        memory_sources=recording("memory_sources", []),
+    ), reports, engine, registry)
+    with memory_access_context(False):
+        _start(coordinator, phase)
+    assert engine.calls, "天花板装上后阶段应照常运行"
+    assert set(seen) == {"participants", "visible", "hidden", "memory_sources"}
+    (cancel,) = registry.events
+    for name, budgets in seen.items():
+        for budget in budgets:
+            assert budget is not None, f"{name} 读取没有预算"
+            assert budget.cancel_event is cancel, name
+
+
+@pytest.mark.parametrize("stop_at", ["mounted", "active"])
+def test_a_stop_during_the_refresh_reads_cancels_the_report(
+    sqlite_repo, monkeypatch, stop_at,
+):
+    """The auto-confirm refresh reads under the engine's cancel event too.
+    ``mounted``: Stop lands during the participant read and a library was
+    mounted since the freeze -- the refresh must stop instead of reading or
+    skipping it and planning on.  ``active``: Stop interrupts the participant
+    read itself.  Either way the report is cancelled, never planned, never
+    failed."""
+    repo, ids = sqlite_repo
+    nb, alice = ids["nb"], ids["alice"].id
+    rid = _create_report(repo, ids)
+    planned: list[str] = []
+    monkeypatch.setattr(
+        ReportEngine, "plan_outline",
+        lambda *args, **kwargs: planned.append("plan"),
+    )
+    stop = threading.Event()
+    engine = repo.report_execution.engine_factory(user_id=alice, cancel_event=stop)
+    late_reads: list[str] = []
+
+    def participants(notebook_id):
+        stop.set()
+        if stop_at == "active":
+            return _store_read([notebook_id])(notebook_id)
+        return [notebook_id, ids["lib"], "late-lib"]
+
+    def visible(notebook_id):
+        late_reads.append(notebook_id)
+        return _store_read(["late-s"])(notebook_id)
+
+    engine.dependencies = type(engine.dependencies)(**{
+        **engine.dependencies.__dict__,
+        "ceiling_readers": CeilingReaders(
+            participants=participants, visible=visible,
+            hidden=lambda notebook_id, owner_id: [],
+            memory_sources=lambda notebook_id: [],
+        ),
+    })
+    monkeypatch.setattr(
+        ReportEngine, "prepare_intent", lambda *args, **kwargs: {"x": 1}
+    )
+    monkeypatch.setattr(
+        ReportEngine, "_auto_confirm_intent",
+        lambda *args, **kwargs: (
+            {"resolved_question": "q?"},
+            {"mode": "include", "source_ids": ["rep-visible"], "narrowed": True},
+            None,
+        ),
+    )
+    with default_ceiling_context(nb, alice, repo._runtime.ceiling_readers()):
+        result = engine.run(
+            nb, rid, "q?", require_intent_review=True, auto_generate=True,
+        )
+    assert result is None
+    assert planned == [], "停止后不得规划"
+    assert late_reads == [], "停止后不得再读新挂载的库"
+    stored = repo._runtime.report_store.get_report(nb, rid)
+    assert stored["status"] == "cancelled", stored.get("error")
+
+
 @pytest.fixture
 def sqlite_repo(tmp_path, monkeypatch):
     from app.core.config import Settings
@@ -383,6 +698,25 @@ def test_unscoped_report_phases_run_under_the_default_ceiling(sqlite_repo, monke
 def test_auto_confirm_refresh_reinstalls_inside_the_ceiling(sqlite_repo, monkeypatch):
     repo, ids = sqlite_repo
     assert_auto_confirm_refresh_reinstalls_inside_the_ceiling(repo, ids, monkeypatch)
+
+
+def test_auto_confirm_refresh_adopts_a_refreshed_library_dimension(
+    sqlite_repo, monkeypatch,
+):
+    repo, ids = sqlite_repo
+    assert_auto_confirm_refresh_adopts_a_refreshed_library_dimension(
+        repo, ids, monkeypatch
+    )
+
+
+@pytest.mark.parametrize("handed_by_route", [True, False])
+def test_phases_run_under_the_persisted_selection(
+    sqlite_repo, monkeypatch, handed_by_route,
+):
+    repo, ids = sqlite_repo
+    assert_phases_run_under_the_persisted_selection(
+        repo, ids, monkeypatch, handed_by_route=handed_by_route
+    )
 
 
 @pytest.mark.parametrize("readers", ["failing", "missing"])
