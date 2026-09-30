@@ -47,6 +47,7 @@ from app.repositories.postgres._store_utils import (
     normalize_timestamp,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.id_binding import bind_ids, execute_ids, member_of
 from app.repositories.postgres.mount_sql import (
     MOUNT_JOIN,
     MOUNT_VALID,
@@ -1265,45 +1266,47 @@ class KnowledgeStore:
 
         ``source_ids`` (PR-A·A5, the KG viewer scope): the live objects OWNED by
         any of those sources, ``id`` only, in ONE statement; ``source_id`` is then
-        ignored and an empty list issues no query. The list is one array
-        parameter and the statement runs unprepared (``prepare=False``): psycopg
-        prepares a query text at its fifth execution and PostgreSQL may then pick
-        a generic plan that mis-estimates the array (the ceiling-binding ledger
-        of this round measured it). The id list is the only bound collection, so
-        the statement switches to the shared ``id_binding`` helpers mechanically.
+        ignored and an empty list issues no query. The list is the notebook's
+        unreadable hidden sources -- sized by the data (Memory sources grow per
+        member) -- so it is bound through ``id_binding``: one ``bind_ids``
+        parameter per leg, ``member_of('source_id', ...)``, executed by
+        ``execute_ids`` (a custom plan every time: a generic plan would
+        mis-estimate the list).
         """
         if source_ids is not None:
             values = sorted({str(value) for value in source_ids if value})
             if not values:
                 return []
+            bound = bind_ids(values)
             if with_citing:
                 # SQLite twin's docstring is canonical for ``with_citing``:
                 # owned rows, reverse-index citing rows (only when the index is
                 # certified) and one certificate marker row, in ONE statement,
-                # unordered, one array parameter per leg (each call planned
-                # with the listed ids' statistics; EXPLAIN pin in
+                # unordered, one bound parameter per leg (each call planned
+                # with the listed ids' values; EXPLAIN pin in
                 # tests/postgres/test_cluster_generation_explain_pins.py).
-                return db.execute(
+                return execute_ids(
+                    db,
                     "SELECT id, 'owned' AS kind FROM knowledge_objects "
-                    "WHERE notebook_id = %s AND source_id = ANY(%s) "
+                    f"WHERE notebook_id = %s AND {member_of('source_id', bound)} "
                     "AND status != 'deprecated' "
                     "UNION ALL "
                     "SELECT object_id, 'citing' FROM knowledge_object_sources "
-                    "WHERE source_id = ANY(%s) AND notebook_id = %s "
+                    f"WHERE {member_of('source_id', bound)} AND notebook_id = %s "
                     "AND EXISTS (SELECT 1 FROM unified_kg_state "
                     "WHERE notebook_id = %s AND source_index_backfilled = 1) "
                     "UNION ALL "
                     "SELECT NULL::text, 'certified' FROM unified_kg_state "
                     "WHERE notebook_id = %s AND source_index_backfilled = 1",
-                    (notebook_id, values, values, notebook_id, notebook_id, notebook_id),
-                    prepare=False,
+                    (notebook_id, bound.param, bound.param, notebook_id,
+                     notebook_id, notebook_id),
                 ).fetchall()
-            return db.execute(
+            return execute_ids(
+                db,
                 "SELECT id FROM knowledge_objects "
-                "WHERE notebook_id = %s AND source_id = ANY(%s) "
+                f"WHERE notebook_id = %s AND {member_of('source_id', bound)} "
                 "AND status != 'deprecated' ORDER BY ordinal",
-                (notebook_id, values),
-                prepare=False,
+                (notebook_id, bound.param),
             ).fetchall()
         return _compat_rows(
             db.execute(

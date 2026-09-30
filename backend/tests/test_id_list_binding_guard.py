@@ -262,6 +262,11 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(ANY, BATCHED, "attached candidates, batch_size per statement"),
         s(PG_EXP, BATCHED, "attached candidates, batch_size per statement"),
     ),
+    ("postgres/knowledge_store.py", "KnowledgeStore.concept_cluster_detail_rows"): (
+        s("unnest(%s)", BOUNDED, "the checked node ids of one viewer response"),),
+    ("postgres/knowledge_store.py", "_element_rows"): (
+        s(PG_EXP, BATCHED,
+          "element ids: one _ELEMENT_BATCH (900) window or one procedure's steps"),),
     ("postgres/maintenance.py", "PostgresMaintenanceAdapter.count_missing_chunk_vectors"): (
         s(PG_EXP, BOUNDED, "sources in flight in this process (ingest leases)"),),
     ("postgres/maintenance.py", "PostgresMaintenanceAdapter.count_missing_element_vectors"): (
@@ -558,6 +563,11 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(SQ_EXP, BATCHED, "object ids, capped at the delete batch size"),),
     ("sqlite/knowledge_store.py", "KnowledgeStore.object_meta_rows"): (
         s(SQ_EXP, BOUNDED, "the ranked search-hit window"),),
+    ("sqlite/knowledge_store.py", "KnowledgeStore.concept_cluster_detail_rows"): (
+        s(JSON, BOUNDED, "the checked node ids of one viewer response"),),
+    ("sqlite/knowledge_store.py", "_element_rows"): (
+        s(SQ_EXP, BATCHED,
+          "element ids: one _ELEMENT_BATCH (900) window or one procedure's steps"),),
     ("sqlite/knowledge_store.py", "KnowledgeStore.edge_centrality_source_rows"): (
         s(JSON, BOUNDED, "the top max_nodes ids"),
         s(JSON, BOUNDED, "the top max_nodes ids"),

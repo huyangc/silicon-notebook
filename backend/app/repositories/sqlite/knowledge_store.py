@@ -1049,9 +1049,9 @@ class KnowledgeStore:
         ``idx_knowledge_objects_nb_updated`` — a scan of the whole notebook for
         a handful of ids — so the index is named (``INDEXED BY``, which fails
         loudly if it ever disappears; EXPLAIN pin in
-        tests/test_kg_viewer_scope_rules.py). The JSON list is the only bound
-        collection, so the statement switches to the shared ``id_binding``
-        helpers mechanically.
+        tests/test_kg_viewer_scope_rules.py). The list is the notebook's
+        unreadable hidden sources, sized by the data, so it is bound through
+        ``id_binding`` (``drive_by('source_id', bind_ids(values))``).
 
         ``with_citing`` (with ``source_ids``; codex #806 r1, the KG viewer
         rule's suspect set): the SAME statement also returns, from the P0-4
@@ -1073,32 +1073,31 @@ class KnowledgeStore:
             values = sorted({str(value) for value in source_ids if value})
             if not values:
                 return []
+            bound = bind_ids(values)
             if with_citing:
-                ids = json.dumps(values)
                 return db.execute(
                     "SELECT id, 'owned' AS kind FROM knowledge_objects "
                     "INDEXED BY idx_knowledge_objects_source "
-                    "WHERE notebook_id = ? AND source_id IN "
-                    "(SELECT CAST(value AS TEXT) FROM json_each(?)) "
+                    f"WHERE notebook_id = ? AND {drive_by('source_id', bound)} "
                     "AND status != 'deprecated' "
                     "UNION ALL "
                     "SELECT object_id, 'citing' FROM knowledge_object_sources "
                     "INDEXED BY idx_kos_source_object "
-                    "WHERE source_id IN (SELECT CAST(value AS TEXT) FROM json_each(?)) "
+                    f"WHERE {drive_by('source_id', bound)} "
                     "AND notebook_id = ? AND EXISTS (SELECT 1 FROM unified_kg_state "
                     "WHERE notebook_id = ? AND source_index_backfilled = 1) "
                     "UNION ALL "
                     "SELECT NULL, 'certified' FROM unified_kg_state "
                     "WHERE notebook_id = ? AND source_index_backfilled = 1",
-                    (notebook_id, ids, ids, notebook_id, notebook_id, notebook_id),
+                    (notebook_id, bound.param, bound.param, notebook_id,
+                     notebook_id, notebook_id),
                 ).fetchall()
             return db.execute(
                 "SELECT id FROM knowledge_objects "
                 "INDEXED BY idx_knowledge_objects_source "
-                "WHERE notebook_id = ? AND source_id IN "
-                "(SELECT CAST(value AS TEXT) FROM json_each(?)) "
+                f"WHERE notebook_id = ? AND {drive_by('source_id', bound)} "
                 "AND status != 'deprecated' ORDER BY rowid",
-                (notebook_id, json.dumps(values)),
+                (notebook_id, bound.param),
             ).fetchall()
         return db.execute(
             "SELECT id, object_type, payload, evidence FROM knowledge_objects "
