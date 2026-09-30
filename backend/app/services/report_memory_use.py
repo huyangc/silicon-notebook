@@ -5,10 +5,16 @@ planner's corpus map and coverage probes, the section deep-dive agent's
 planning and reflection turns, the report-wide synthesis payload, the section
 drafting context — is assembled from what the engine's retrieval and evidence
 ports return.  ``RetrievalSourceLog.watch`` wraps those ports for one engine
-and records the ``source_id`` of every value they return; the engine maps the
-recorded sources to the author's Memory (``memory_sources_for_source_ids``)
-and stores the result on the report, so share disclosure counts Memory whose
-content may have reached ANY prompt, cited or not.
+and records the ``source_id`` of every value they return.  The sources a call
+hands over for the first time are resolved to the author's Memory right away
+(``memory_sources_for_source_ids``, one batch per call over the new ids only)
+and the association is retained: a Memory deprecated, deleted or moved before
+the run completes loses its projection source, and ``memory_items`` keeps no
+pointer back to it, so a lookup at completion could not recognise it any
+more.  At completion the engine adds a lookup of the sources that were not a
+Memory source when first seen (a Memory confirmed since) and stores the result
+on the report, so share disclosure counts Memory whose content may have
+reached ANY prompt, cited or not.
 
 What is recorded is what retrieval handed the run, a superset of what the
 prompts finally carried (a candidate can be dropped before rendering).  That
@@ -148,10 +154,23 @@ class RetrievalSourceLog:
     """The sources one report engine was handed by retrieval.  Thread-safe:
     sections retrieve in parallel."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        resolve_memory: Callable[[list[str]], Mapping[str, str]] | None = None,
+    ) -> None:
+        """``resolve_memory(source_ids) -> {source_id: memory_id}``: the
+        author's Memory behind the given sources, asked once per retrieval call
+        for the sources this log has not seen before (the runtime binds
+        ``memory_store.memory_sources_for_source_ids`` to the report's author).
+        The answer is RETAINED: a Memory deprecated, deleted or moved after its
+        projection reached the run has lost its source row by the time the run
+        completes, and could no longer be recognised then."""
         self._lock = threading.Lock()
         self._source_ids: set[str] = set()
+        self._memory_of: dict[str, str] = {}
+        self._resolve = resolve_memory
         self._overflowed = False
+        self._unresolved = False
 
     def watch(self, port: Any) -> Any:
         """``port`` with every call's result recorded."""
@@ -175,21 +194,47 @@ class RetrievalSourceLog:
 
     def note(self, value: Any) -> None:
         # Never raises: the watched call's result must reach its caller (which
-        # may swallow retrieval errors).  An overflow is kept and reported
-        # when the record is taken.
+        # may swallow retrieval errors).  An overflow or a failed Memory lookup
+        # is kept and reported when the record is taken.
         found: set[str] = set()
         complete = collect_source_ids(value, found)
         with self._lock:
+            new = sorted(found - self._source_ids)
             self._source_ids.update(found)
             if not complete:
                 self._overflowed = True
+        if not new or self._resolve is None:
+            return
+        try:
+            resolved = dict(self._resolve(new))
+        except Exception:  # noqa: BLE001 — reported when the record is taken
+            with self._lock:
+                self._unresolved = True
+            return
+        with self._lock:
+            self._memory_of.update(resolved)
+
+    def _raise_if_incomplete(self) -> None:
+        if self._overflowed:
+            raise RetrievalRecordOverflow(
+                "a retrieval result was too large to record completely"
+            )
+        if self._unresolved:
+            raise RetrievalRecordOverflow(
+                "the Memory behind a retrieval result could not be looked up"
+            )
 
     def source_ids(self) -> list[str]:
         """Every recorded source id.  Raises ``RetrievalRecordOverflow`` when
-        a result could not be read completely."""
+        a result could not be read completely or its Memory lookup failed."""
         with self._lock:
-            if self._overflowed:
-                raise RetrievalRecordOverflow(
-                    "a retrieval result was too large to record completely"
-                )
+            self._raise_if_incomplete()
             return sorted(self._source_ids)
+
+    def memory_sources(self) -> dict[str, str]:
+        """``{source_id: memory_id}`` of the author's Memory sources as they
+        were when retrieval handed them to the run (see ``__init__``).  Raises
+        like ``source_ids``."""
+        with self._lock:
+            self._raise_if_incomplete()
+            return dict(self._memory_of)

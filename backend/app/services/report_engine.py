@@ -3182,13 +3182,19 @@ class ReportEngine:
 
     def _author_memory_seen(self) -> set[str]:
         """The author's Memory behind every source retrieval has handed this
-        engine so far (``RetrievalSourceLog``)."""
-        source_ids = self.dependencies.retrieval_sources.source_ids()
-        if not source_ids:
-            return set()
-        return set(self.dependencies.memory_sources.memory_sources_for_source_ids(
-            source_ids, self.user_id
-        ).values())
+        engine so far (``RetrievalSourceLog``): the associations retained when
+        each source was first handed over (a Memory deprecated since has lost
+        its source row, but not its place here), plus a lookup now for the
+        sources that were not a Memory source then (a Memory confirmed since)."""
+        log = self.dependencies.retrieval_sources
+        retained = log.memory_sources()
+        late = [source_id for source_id in log.source_ids() if source_id not in retained]
+        found = set(retained.values())
+        if late:
+            found.update(self.dependencies.memory_sources.memory_sources_for_source_ids(
+                late, self.user_id
+            ).values())
+        return found
 
     def _record_memory_use(
         self, references, sections
@@ -3229,14 +3235,19 @@ class ReportEngine:
         ]
         cited = [str(row.get("source_id") or "") for row in rows]
         drafted = [str(ctx.get("source_id") or "") for group in contexts for ctx in group]
-        retrieved = self.dependencies.retrieval_sources.source_ids()
+        log = self.dependencies.retrieval_sources
+        retained = log.memory_sources()
+        retrieved = log.source_ids()
         memory_sources = self.dependencies.memory_sources
-        own: Mapping[str, str] = {}
+        # Associations retained when retrieval handed a source over win: the
+        # Memory may have been deprecated since, taking its source row along.
+        # The rest are looked up now (a Memory confirmed after first sight).
+        own: dict[str, str] = dict(retained)
         foreign: Mapping[str, tuple[str, str]] = {}
-        if any(cited + drafted + retrieved):
-            own = memory_sources.memory_sources_for_source_ids(
-                cited + drafted + retrieved, self.user_id
-            )
+        late = [s for s in cited + drafted + retrieved if s and s not in retained]
+        if late:
+            own.update(memory_sources.memory_sources_for_source_ids(late, self.user_id))
+        if any(cited):
             foreign = memory_sources.foreign_memory_sources_for_source_ids(
                 cited, self.user_id
             )
