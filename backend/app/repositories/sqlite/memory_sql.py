@@ -43,6 +43,11 @@ PostgreSQL 镜像(占位符 `%s`),两份必须同修,与 `access_sql.py` / `moun
   对象,只过滤成员行洗不掉名字,所以取名字的查询按整簇排除)。零参数。簇 id 是
   `K-<规范化种子名>`,不同笔记本可以撞同一个 canonical_id,所以相关条件同时钉
   notebook 与 generation。
+* `memory_cluster(cluster_alias)` / `no_memory_cluster(cluster_alias)` —— 「一条 Memory 的簇」
+  的唯一定义(拷贝整簇不带、删除清理整簇删除共用):有 Memory 派生成员,**或** canonical id
+  就是 / 按 `cluster_seed_object_id` 铸自一个 Memory 派生对象的 id。零参数。
+* `cluster_seed_object_id(cluster_alias)` —— canonical id 若按 `kg_merge.seed_or_unique` 的
+  `<类型前缀>~<对象 id>` 形式铸成,取出那个对象 id,否则 NULL。零参数。
 
 ## 为什么是排除形式、而不绑「可读全集」数组
 
@@ -59,16 +64,19 @@ Memory」的常见情形没有任何额外成本(调用方在无外人 Memory �
 
 * 每个片段都是**语句内**的相关子查询(codex #520 R2 P1:排除必须与被排除的行由同一次
   求值决定,跨查询相减/排除清单会被并发的 Memory 增删漏掉)。
-* 外层别名由调用方传入;内层别名(`rm` / `fs` / `fm` / `ds` / `mc` / `mo` / `ms`)固定。
+* 外层别名由调用方传入;内层别名(`rm` / `fs` / `fm` / `ds` / `mc` / `mo` / `ms` / `mk` /
+  `mks`)固定。
   SQL 标识符不区分大小写,所以 `_alias` 按小写比较,并要求整串是裸标识符(`fullmatch`,
   不接受尾部换行、带引号或带 schema 的写法);传入与内层同名的外层别名会把相关引用绑到
   内层表上、静默改变语义(例如 `MC` 会让簇片段退化成恒真的 `mc.x = mc.x`),所以直接拒绝。
 * **参数契约**:每个片段在语句文本里**它所在的位置**恰好消费固定个数的位置参数——
-  readable / foreign 各 1 个(`?`,查看者),derived / cluster 各 0 个。调用方按片段在
+  readable / foreign 各 1 个(`?`,查看者),derived / cluster / seed 各 0 个。调用方按片段在
   语句文本中的先后位置排列参数;个数由 `test_memory_sql_contract.py` 断言,嵌进更大
   语句时参数夹在别的参数中间的行为也由它断言。
 * `'memory'` 字面量只在 `MEMORY_SOURCE_TYPE` 出现一次;所有片段经它或
   `memory_source_type_predicate` 渲染,守卫再断言它与 `source_store` 的常量一致。
+  簇片段另有 `cluster_seed_object_id` 的铸造形状字面量(`'K-~ko-'` / `'K'` / `'-~ko-'`),
+  守卫逐个登记。
 * Knowhow 不在本模块的判据内:Knowhow 投影是笔记本级共享的,M1 只针对 Memory。
 """
 
@@ -86,6 +94,7 @@ _READABLE_INNER = frozenset({"rm"})
 _FOREIGN_INNER = frozenset({"fs", "fm"})
 _DERIVED_INNER = frozenset({"ds"})
 _CLUSTER_INNER = frozenset({"mc", "mo", "ms"})
+_CANONICAL_INNER = frozenset({"mk", "mks"})
 
 
 def _alias(name: str, reserved: frozenset[str]) -> str:
@@ -162,9 +171,12 @@ def no_memory_member_cluster(cluster_alias: str) -> str:
     「按整簇排除 memory」只在同一笔记本的同一代内判定:别的笔记本里撞同名的
     canonical_id、双代窗口里 building 代的成员,都不得跨界误判。
     """
-    c = _alias(cluster_alias, _CLUSTER_INNER)
+    return "NOT " + _memory_member_arm(_alias(cluster_alias, _CLUSTER_INNER))
+
+
+def _memory_member_arm(c: str) -> str:
     return (
-        "NOT EXISTS (SELECT 1 FROM concept_clusters mc "
+        "EXISTS (SELECT 1 FROM concept_clusters mc "
         "JOIN knowledge_objects mo ON mo.id = mc.member_object_id "
         "JOIN sources ms ON ms.id = mo.source_id "
         f"WHERE mc.notebook_id = {c}.notebook_id "
@@ -172,3 +184,52 @@ def no_memory_member_cluster(cluster_alias: str) -> str:
         f"AND mc.generation = {c}.generation "
         f"AND {memory_source_type_predicate()})"
     )
+
+
+def cluster_seed_object_id(cluster_alias: str) -> str:
+    """簇 `cluster_alias` 的 canonical id 若是**按对象 id 铸的**,取出那个对象 id;否则 NULL。
+    零参数。
+
+    `kg_merge.seed_or_unique`:名字退化(只剩符号)的对象不共簇,种子回退成 `~<对象 id>`,
+    canonical id 即 `<类型前缀>~<对象 id>`;类型前缀是 `K-`(概念)或 `K` 加一个字母再加
+    `-`(`KL-` / `KF-` / `KP-`),对象 id 一律以 `ko-` 开头。只认这两种长度的前缀后紧跟
+    `~ko-` 的写法:`_norm` 族归一化器会洗掉 `~`,真名种子不可能长成这样;`_norm_formula`
+    理论上能留下 `~`,但要恰好是 `~ko-...` 开头的公式才会被误读,实际不可达。只用
+    `substr` 与等值比较,两个后端文本逐字相同(不用 LIKE:PostgreSQL 的 `%` 在带参语句里
+    要转义成 `%%`,会让两份文本分叉)。
+    """
+    col = f"{_alias(cluster_alias, frozenset())}.canonical_id"
+    return (
+        f"(CASE WHEN substr({col}, 1, 6) = 'K-~ko-' THEN substr({col}, 4) "
+        f"WHEN substr({col}, 1, 1) = 'K' AND substr({col}, 3, 5) = '-~ko-' "
+        f"THEN substr({col}, 5) END)"
+    )
+
+
+def _memory_canonical_arm(c: str) -> str:
+    return (
+        "EXISTS (SELECT 1 FROM knowledge_objects mk JOIN sources mks ON mks.id = mk.source_id "
+        f"WHERE mk.id IN ({c}.canonical_id, {cluster_seed_object_id(c)}) "
+        f"AND {memory_source_type_predicate('mks.source_type')})"
+    )
+
+
+def memory_cluster(cluster_alias: str) -> str:
+    """概念簇 `cluster_alias`(取其 `notebook_id`/`canonical_id`/`generation`)是**某条
+    Memory 的簇**:同一笔记本同一代里有 Memory 派生成员,**或**它的 canonical id 就是、或
+    是按(见 `cluster_seed_object_id`)一个 Memory 派生对象的 id 铸的。零参数。
+
+    「一条 Memory 的簇」只有这一个定义:拷贝(E5-1)用它的否定 `no_memory_cluster` 整簇
+    不带,删除清理(E5-2)用它整簇删除——簇名与描述整簇复制到每个成员行,可能取自那个
+    Memory 对象,只删 Memory 成员行洗不掉它们。成员臂与 `no_memory_member_cluster` 同一段
+    文本;canonical 臂在对象还在时才判得出(对象已删的簇无从证明是不是 Memory 的,由调用方
+    自行决定怎么处理,这里不猜)。
+    """
+    c = _alias(cluster_alias, _CLUSTER_INNER | _CANONICAL_INNER)
+    return f"({_memory_member_arm(c)} OR {_memory_canonical_arm(c)})"
+
+
+def no_memory_cluster(cluster_alias: str) -> str:
+    """`memory_cluster` 的否定(同一对臂,两个 NOT EXISTS 以便规划成反连接)。零参数。"""
+    c = _alias(cluster_alias, _CLUSTER_INNER | _CANONICAL_INNER)
+    return f"(NOT {_memory_member_arm(c)} AND NOT {_memory_canonical_arm(c)})"

@@ -89,7 +89,34 @@ CLUSTERS = (
     (NOTEBOOK, "can-gen", "gen-topic", 0, ("ko-gen-plain",)),
     (NOTEBOOK, "can-gen", "gen-topic", 1, ("ko-mem-bob",)),
     (NOTEBOOK2, "can-mixed", "mixed-topic-nb2", 0, ("ko-nb2-plain",)),
+    # 「一条 Memory 的簇」的 canonical 臂(generation 2..8:不是 published 代,不碰
+    # query_store 的黄金聚合;每簇一代,因为同一成员在同一代只能属于一个簇)。成员都是普通对象,是不是 Memory 的簇只看 canonical id。
+    (NOTEBOOK, "K-~ko-mem-alice", "seeded-by-alice", 2, ("ko-upload",)),
+    (NOTEBOOK, "KL-~ko-mem-bob", "seeded-by-bob", 3, ("ko-mixed-plain",)),
+    (NOTEBOOK, "ko-mem-null", "canonical-is-memory", 4, ("ko-gen-plain",)),
+    (NOTEBOOK, "K-~ko-upload", "seeded-by-upload", 5, ("ko-knowhow",)),
+    (NOTEBOOK, "K-~ko-gone", "seeded-by-deleted", 6, ("ko-upload",)),
+    (NOTEBOOK, "K-ko-mem-alice", "real-name-seed", 7, ("ko-upload",)),
+    (NOTEBOOK, "K-~xko-mem-alice", "not-minted", 8, ("ko-upload",)),
 )
+
+#: ``cluster_seed_object_id`` 对每个 canonical id 取出的对象 id(没铸自对象 id 的为 None)。
+CLUSTER_SEED_OBJECT_IDS = {
+    "K-~ko-mem-alice": "ko-mem-alice",
+    "KL-~ko-mem-bob": "ko-mem-bob",
+    "KF-~ko-x": "ko-x",
+    "KP-~ko-x": "ko-x",
+    "K-~ko-gone": "ko-gone",
+    "K-ko-mem-alice": None,
+    "K-~xko-mem-alice": None,
+    "ko-mem-null": None,
+    "can-clean": None,
+    "K-~": None,
+    "K-~ko": None,
+    "KLM-~ko-x": None,
+    "k-~ko-x": None,
+    "": None,
+}
 
 ALL_SOURCE_IDS = frozenset(s[0] for s in SOURCES + SOURCES_NB2)
 ALL_OBJECT_IDS = frozenset(o[0] for o in OBJECTS + OBJECTS_NB2)
@@ -153,8 +180,30 @@ NO_MEMORY_MEMBER_CLUSTERS = frozenset(
         f"{NOTEBOOK}/can-unowned/0",
         f"{NOTEBOOK}/can-gen/0",
         f"{NOTEBOOK2}/can-mixed/0",
+        f"{NOTEBOOK}/K-~ko-mem-alice/2",
+        f"{NOTEBOOK}/KL-~ko-mem-bob/3",
+        f"{NOTEBOOK}/ko-mem-null/4",
+        f"{NOTEBOOK}/K-~ko-upload/5",
+        f"{NOTEBOOK}/K-~ko-gone/6",
+        f"{NOTEBOOK}/K-ko-mem-alice/7",
+        f"{NOTEBOOK}/K-~xko-mem-alice/8",
     }
 )
+
+#: 「一条 Memory 的簇」(``memory_cluster``):有 Memory 派生成员的簇(成员臂,按笔记本、代),
+#: 加上 canonical id 就是 / 铸自一个 Memory 派生对象的簇(canonical 臂)。铸自普通对象、
+#: 铸自已不存在的对象、真名种子恰好长得像对象 id、以及不是 ``~ko-`` 紧跟前缀的写法都不算。
+MEMORY_CLUSTERS = frozenset(
+    {
+        f"{NOTEBOOK}/can-mixed/0",
+        f"{NOTEBOOK}/can-orphan/0",
+        f"{NOTEBOOK}/can-gen/1",
+        f"{NOTEBOOK}/K-~ko-mem-alice/2",
+        f"{NOTEBOOK}/KL-~ko-mem-bob/3",
+        f"{NOTEBOOK}/ko-mem-null/4",
+    }
+)
+ALL_CLUSTERS = frozenset(f"{nb}/{cid}/{gen}" for nb, cid, _name, gen, _m in CLUSTERS)
 
 #: 旧 ``_NOT_MEMORY_OWNED_SQL``(E0 之前的手写文本,外层别名 ``o``),用作差分参照:
 #: 新片段的否定必须与它在同一份数据上逐行同义。
@@ -179,4 +228,8 @@ BAD_ALIASES = {
     "foreign": ("fs", "FS", "fm", "Fm", "o\n", '"o"', "public.o", "1x", ""),
     "derived": ("ds", "DS", "Ds", "o\n", '"o"', "public.o", "1x", ""),
     "cluster": ("mc", "MC", "Mc", "mo", "MO", "ms", "Ms", "c\n", '"c"', "public.c", ""),
+    "memory_cluster": (
+        "mc", "MO", "ms", "mk", "MK", "mks", "Mks", "c\n", '"c"', "public.c", "",
+    ),
+    "seed": ("c\n", '"c"', "public.c", "1x", ""),
 }

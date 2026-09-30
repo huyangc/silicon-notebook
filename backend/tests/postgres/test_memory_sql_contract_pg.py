@@ -4,7 +4,7 @@
 (`tests/memory_sql_cases.py`):本人 Memory 来源可读、别人的不可读、孤儿与无 memory_id 的
 Memory 来源对所有人失败即关、空查看者与 NULL 查看者读不到任何 Memory 来源、Knowhow 与普通
 来源人人可读;每个片段在语句文本里它所在的位置消费固定个数的 `%s`(readable / foreign
-各 1,derived / cluster 各 0);簇片段的两条相关条件(同笔记本、同代)各有用例;外层别名
+各 1,derived / cluster / seed 各 0);「一条 Memory 的簇」(`memory_cluster` 与其补集)同一张表;簇片段的两条相关条件(同笔记本、同代)各有用例;外层别名
 校验不分大小写、只收裸标识符;嵌进更大查询结果一致;`query_store` 旧常量改为引用片段后,
 真聚合给出硬编码的黄金结果。
 """
@@ -132,6 +132,9 @@ def test_every_fragment_consumes_a_fixed_number_of_positional_parameters():
         assert memory_sql.memory_derived_relation(alias).count("%s") == 0
     for alias in ("c", "cc", "x1"):
         assert memory_sql.no_memory_member_cluster(alias).count("%s") == 0
+        assert memory_sql.memory_cluster(alias).count("%") == 0
+        assert memory_sql.no_memory_cluster(alias).count("%") == 0
+        assert memory_sql.cluster_seed_object_id(alias).count("%") == 0
     for fragment in (
         memory_sql.memory_source_readable("s"),
         memory_sql.foreign_memory_object_excluded("o"),
@@ -154,6 +157,8 @@ def _alias_calls():
             memory_sql.memory_derived_relation,
         ),
         "cluster": (memory_sql.no_memory_member_cluster,),
+        "memory_cluster": (memory_sql.memory_cluster, memory_sql.no_memory_cluster),
+        "seed": (memory_sql.cluster_seed_object_id,),
     }
 
 
@@ -251,6 +256,33 @@ def test_no_memory_member_cluster_is_scoped_to_its_own_generation(world):
     assert f"{cases.NOTEBOOK}/can-gen/0" in kept, (
         "a Memory member in the building generation hid the published cluster"
     )
+
+
+def _cluster_keys(database, predicate: str) -> set[str]:
+    return _ids(
+        database,
+        "SELECT DISTINCT c.notebook_id || '/' || c.canonical_id || '/' || "
+        f"CAST(c.generation AS TEXT) AS id FROM concept_clusters c WHERE {predicate}",
+    )
+
+
+def test_memory_cluster_is_the_one_definition_of_a_cluster_of_a_memory(world):
+    memory = _cluster_keys(world, memory_sql.memory_cluster("c"))
+    clean = _cluster_keys(world, memory_sql.no_memory_cluster("c"))
+    assert memory == cases.MEMORY_CLUSTERS
+    assert clean == cases.ALL_CLUSTERS - cases.MEMORY_CLUSTERS
+    assert cases.ALL_CLUSTERS - cases.NO_MEMORY_MEMBER_CLUSTERS <= memory
+
+
+def test_cluster_seed_object_id_reads_the_object_id_a_canonical_id_was_minted_from(world):
+    for canonical, expected in cases.CLUSTER_SEED_OBJECT_IDS.items():
+        with world.connect() as db:
+            got = db.execute(
+                f"SELECT {memory_sql.cluster_seed_object_id('c')} AS seed "
+                "FROM (SELECT %s::text AS canonical_id) c",
+                (canonical,),
+            ).fetchone()["seed"]
+        assert got == expected, canonical
 
 
 # --------------------------------------------------------------- 嵌进更大的查询
