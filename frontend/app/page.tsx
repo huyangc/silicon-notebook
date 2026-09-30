@@ -170,7 +170,7 @@ import {
 } from "./bundle-intake.ts";
 import { BundleChoicePanel, BundleReceiptsPanel, type BundleReceiptEntry } from "./bundle-upload-panels.tsx";
 import type { BundleFile, InlineReceipt } from "./md-bundle.ts";
-import { sourceHealthGroups, checkupCount, checkupAlertSignature, checkupNotices, hasRepairAction, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
+import { sourceHealthGroups, checkupCount, checkupAlertSignature, checkupNotices, checkupHasRepairableIssue, hasRepairAction, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { askQuestionLimitHint, fetchAnswerMemoryLinks } from "./ask-api";
 import { buildPublicReportLink } from "./public-report";
 import { cancelScaleIndex, fetchIndexStatus, fetchScaleIndexStatus, rebuildScaleIndex, type IndexStatus } from "../features/kg-maintenance/kg-api";
@@ -1439,7 +1439,8 @@ export default function Home() {
       fetchCheckup(nb).then((c) => {
         if (cancelled) return;
         setCheckup(c);
-        if (c.healthy) setCheckupRepairPollUntil(0);
+        // 只读项(H9/H10)不会因修复而消失:只看还有没有用户能修的项。
+        if (!checkupHasRepairableIssue(c)) setCheckupRepairPollUntil(0);
       }).catch(() => {});
     }, 8000);
     return () => { cancelled = true; window.clearInterval(poll); };
