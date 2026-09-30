@@ -183,6 +183,21 @@ def test_healthy_fresh_notebook(repo):
     }
 
 
+def test_read_only_items_are_reported_but_do_not_make_the_notebook_unhealthy(
+    repo, monkeypatch
+):
+    """H12 (fix="none") has no user repair: it is listed with its count, and
+    ``healthy`` stays true when nothing fixable is hit."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    checkup = repo.checkup
+    monkeypatch.setattr(checkup, "_h12_orphan_memory_sources", lambda notebook_id: 3)
+    result = checkup.run(nb.id)
+    counts = {c.code: c.count for c in result.checks}
+    assert counts["H12"] == 3
+    assert all(count == 0 for code, count in counts.items() if code != "H12")
+    assert result.healthy is True
+
+
 # --------------------------------------------------------------------- H2
 def test_h2_hit_empty_source(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))

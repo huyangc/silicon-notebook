@@ -5,6 +5,7 @@ import {
   sourceHealthGroups,
   checkupCount,
   checkupAlertSignature,
+  checkupHasRepairableIssue,
   checkupNotices,
   hasRepairAction,
   repairRelease,
@@ -126,6 +127,24 @@ test("签名随命中集合变化(新问题/修好)", () => {
   const after = checkup([item("H2", 0), item("H4", 1, [], "backfill_vectors")]);
   assert.notEqual(checkupAlertSignature(before), checkupAlertSignature(after));
   assert.equal(checkupAlertSignature(after), "nb-1:H4");
+});
+
+test("只读项(fix=none)不触发铃铛:没有用户可点的修复", () => {
+  // H12(残留的记忆来源,系统自动清理)命中时 healthy=false,但只有它时不能说
+  // 「发现可修复的问题」。
+  const onlyReadOnly = checkup([item("H2", 0), item("H12", 2, [], "none")]);
+  assert.equal(onlyReadOnly.healthy, false);
+  assert.equal(checkupAlertSignature(onlyReadOnly), null);
+  const mixed = checkup([item("H4", 1, [], "backfill_vectors"), item("H12", 2, [], "none")]);
+  assert.equal(checkupAlertSignature(mixed), "nb-1:H4");
+});
+
+test("只读项不让修复轮询继续:只剩只读项时不再有可修复问题", () => {
+  const onlyReadOnly = checkup([item("H2", 0), item("H12", 3, [], "none")]);
+  assert.equal(onlyReadOnly.healthy, false);
+  assert.equal(checkupHasRepairableIssue(onlyReadOnly), false);
+  assert.equal(checkupHasRepairableIssue(checkup([item("H3", 1, ["s"], "reparse")])), true);
+  assert.equal(checkupHasRepairableIssue(null), false);
 });
 
 // ---- 修复忙碌位的解除条件(repairRelease / isRepairing)----------------------
