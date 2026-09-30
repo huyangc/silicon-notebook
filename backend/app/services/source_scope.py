@@ -1837,6 +1837,20 @@ class CeilingReaders:
 
     ``emit`` receives the content-free ``default_ceiling_library_skipped``
     event (``notebook_id`` and ``reason`` only); optional, and fail-open.
+
+    ``read_workers`` is how many mounted libraries these readers can read at
+    once to advantage -- a property of the STORE behind them, so the wiring
+    that binds the store states it (``_mounted_library_ceilings``).  Measured
+    at six mounted libraries x 49k visible sources, paired against today's
+    route freeze (2026-09-30):
+
+    * PostgreSQL: 4 workers turn the constructor from +17.5 / -5.8 ms into
+      -111 / -62 ms against today (faster in 30 and 29 of 31 pairs); pass
+      ``POSTGRES_MOUNTED_READ_WORKERS``.
+    * SQLite: keep 1.  ``sqlite3`` releases and re-acquires the GIL around
+      every row, so concurrent reads in one process convoy on it: 6 raw
+      49k-row reads took 170 ms serial, 320 ms on 4 threads and 469 ms on 6,
+      and the constructor went from +16 ms to +245..+629 ms.
     """
 
     participants: Callable[[str], Iterable[str]]
@@ -1844,6 +1858,7 @@ class CeilingReaders:
     hidden: Callable[[str, str], Iterable[str]]
     memory_sources: Callable[[str], Iterable[str]]
     emit: Callable[[dict], Any] | None = None
+    read_workers: int = 1
 
 
 # Per-library budget for a mounted library's visible read.  The same default as
@@ -1859,12 +1874,13 @@ DEFAULT_MOUNTED_READ_SECONDS = 5.0
 # load (see the COST section of ``default_ceiling_context``), so the stage
 # bound only ever bites a database that is already failing.
 DEFAULT_MOUNTED_TOTAL_SECONDS = 2 * DEFAULT_MOUNTED_READ_SECONDS
-# How many mounted libraries are read at once (``_mounted_library_ceilings``).
-# Each concurrent read holds one database connection for its duration, so this
-# stays well under the PostgreSQL pool (``POSTGRES_POOL_MAX_SIZE``, default 10)
-# and under federation's own fan-out bound (``DEFAULT_CHUNK_FANOUT_MAX_WORKERS``
-# = 8), which runs after this freeze, never at the same time.
-DEFAULT_MOUNTED_READ_WORKERS = 4
+# ``CeilingReaders.read_workers`` for a PostgreSQL store (see its docstring for
+# the measurements).  Each concurrent read holds one pooled connection for its
+# duration, so this stays well under the pool (``POSTGRES_POOL_MAX_SIZE``,
+# default 10) and under federation's own fan-out bound
+# (``DEFAULT_CHUNK_FANOUT_MAX_WORKERS`` = 8), which runs after this freeze,
+# never at the same time.
+POSTGRES_MOUNTED_READ_WORKERS = 4
 
 
 def partition_memory_sources(
@@ -2077,6 +2093,12 @@ def _mounted_library_ceilings(
     return result
 
 
+def _read_workers(readers: CeilingReaders, override: int | None) -> int:
+    """The concurrency for this freeze's mounted reads: the caller's explicit
+    ``mounted_read_workers`` if given, else what the readers' store states."""
+    return max(1, int(readers.read_workers if override is None else override))
+
+
 def _run_bounded(
     fn: Callable[[str], Any], items: Sequence[str], workers: int,
 ) -> list[Any]:
@@ -2127,7 +2149,7 @@ def default_ceiling_context(
     cancel_event: Any = None,
     mounted_read_seconds: float = DEFAULT_MOUNTED_READ_SECONDS,
     mounted_total_seconds: float = DEFAULT_MOUNTED_TOTAL_SECONDS,
-    mounted_read_workers: int = DEFAULT_MOUNTED_READ_WORKERS,
+    mounted_read_workers: int | None = None,
 ) -> Iterator[None]:
     """Install the retrieval ceiling EVERY entry point runs under.
 
@@ -2162,7 +2184,8 @@ def default_ceiling_context(
        belong to its own members -- and ``ceilings_total`` is set, so a library
        mounted after this freeze, or one the library dimension excludes (it
        is never read), participates in nothing.  Up to
-       ``mounted_read_workers`` mounted libraries are read at once, each under
+       ``mounted_read_workers`` (default: ``readers.read_workers``) mounted
+       libraries are read at once, each under
        its own budget -- ``min(stage deadline, now + mounted_read_seconds)``,
        the stage deadline being ``mounted_total_seconds`` after the mounted
        reads start -- and
@@ -2261,7 +2284,7 @@ def _fresh_default_ceiling(
     cancel_event: Any,
     mounted_read_seconds: float,
     mounted_total_seconds: float,
-    mounted_read_workers: int = DEFAULT_MOUNTED_READ_WORKERS,
+    mounted_read_workers: int | None = None,
 ) -> Iterator[None]:
     """Steps 2-4 of ``default_ceiling_context``, whatever is installed outside.
 
@@ -2287,7 +2310,7 @@ def _fresh_default_ceiling(
     local, withheld = _without_memory(local, readers, notebook_id)
     mounted = _mounted_library_ceilings(
         peers, readers, cancel_event, mounted_read_seconds,
-        mounted_total_seconds, mounted_read_workers,
+        mounted_total_seconds, _read_workers(readers, mounted_read_workers),
     )
     with source_scope_context(
         notebook_id,
@@ -2355,7 +2378,7 @@ def refreshed_ceiling_context(
     cancel_event: Any = None,
     mounted_read_seconds: float = DEFAULT_MOUNTED_READ_SECONDS,
     mounted_total_seconds: float = DEFAULT_MOUNTED_TOTAL_SECONDS,
-    mounted_read_workers: int = DEFAULT_MOUNTED_READ_WORKERS,
+    mounted_read_workers: int | None = None,
 ) -> Iterator[None]:
     """Re-install a REFRESHED freeze inside a run that already has a ceiling.
 
@@ -2471,7 +2494,7 @@ def refreshed_ceiling_context(
     ))
     mounted = _mounted_library_ceilings(
         added, readers, cancel_event, mounted_read_seconds,
-        mounted_total_seconds, mounted_read_workers,
+        mounted_total_seconds, _read_workers(readers, mounted_read_workers),
     )
     inherited.update(mounted.ceilings)
     read_order.update(mounted.read_order)

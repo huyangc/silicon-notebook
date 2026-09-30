@@ -1553,13 +1553,17 @@ def test_a_stop_during_a_mounted_read_in_flight_propagates(tmp_path, monkeypatch
     from app.services.cancellation import AskCancelled
 
     repo, ids = _real_sqlite_fixture(tmp_path, monkeypatch)
-    for explicit in (True, False):
+    # Serial, and in parallel (the mounted reads on worker threads, each in a
+    # copy of the caller's context): the stop reaches the read in flight
+    # either way.
+    for explicit, workers in ((True, 1), (False, 1), (True, 2), (False, 2)):
         cancel, started = threading.Event(), threading.Event()
         events: list[dict] = []
         failures: list[BaseException] = []
         readers = _replace(
             _real_readers(repo, emit=events.append),
             visible=_slow_sqlite_visible(repo, {ids["lib"]}, started, failures),
+            read_workers=workers,
         )
         thread, fired = _cancel_when_started(started, cancel)
         with pytest.raises(AskCancelled):
@@ -1578,7 +1582,7 @@ def test_a_stop_during_a_mounted_read_in_flight_propagates(tmp_path, monkeypatch
                     pytest.fail("a stopped run must not start")
         stopped_after = _time.monotonic() - fired["at"]
         thread.join(5)
-        assert stopped_after < 2.0, (explicit, stopped_after)
+        assert stopped_after < 2.0, (explicit, workers, stopped_after)
         assert events == [], "a stop is not a skipped library"
         assert len(failures) == 1 and isinstance(failures[0], sqlite3.OperationalError)
         assert "interrupted" in str(failures[0]).lower()
@@ -1996,8 +2000,10 @@ def build_real_fixture(repo, placeholder: str) -> dict[str, Any]:
     }
 
 
-def real_readers(repo, emit=None) -> CeilingReaders:
-    """The production wiring: bound store methods, nothing else."""
+def real_readers(repo, emit=None, read_workers: int = 1) -> CeilingReaders:
+    """The production wiring: bound store methods, nothing else (plus the
+    store's ``read_workers``: 1 for SQLite, ``POSTGRES_MOUNTED_READ_WORKERS``
+    for PostgreSQL)."""
     sources = repo._runtime.source_store
 
     def memory_sources(notebook_id: str) -> list[str]:
@@ -2010,6 +2016,7 @@ def real_readers(repo, emit=None) -> CeilingReaders:
         hidden=sources.hidden_source_ids,
         memory_sources=memory_sources,
         emit=emit,
+        read_workers=read_workers,
     )
 
 
@@ -2029,7 +2036,7 @@ def _real_readers(repo, emit=None) -> CeilingReaders:
     return real_readers(repo, emit=emit)
 
 
-def assert_default_ceiling_over_real_stores(repo, ids) -> None:
+def assert_default_ceiling_over_real_stores(repo, ids, read_workers: int = 1) -> None:
     """Bob's default ceiling admits his own Memory and the shared Knowhow,
     never Alice's Memory, and only a mounted library's visible source; a
     library mounted mid-run is refused; with the Memory channel closed his own
@@ -2046,7 +2053,7 @@ def assert_default_ceiling_over_real_stores(repo, ids) -> None:
             file_name="", file_path="", file_size=0, file_hash="",
             summary="", doc_type="", memory_id="",
         )
-    readers = real_readers(repo)
+    readers = real_readers(repo, read_workers=read_workers)
     with default_ceiling_context(nb, bob, readers):
         scope = current_source_scope()
         assert scope is not None
