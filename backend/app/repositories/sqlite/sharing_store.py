@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Callable, Sequence
 
 from app.core.config import Settings
+from app.repositories.copy_memory_evidence import strip_memory_evidence
 from app.repositories.group_rows import (
     GROUP_GRANT_COUNT_SQL,
     GROUP_GRANT_EXISTS_SQL,
@@ -66,10 +67,11 @@ _VISIBLE_SOURCE_NOTEBOOK_SQL = (
 # deliberate KO/relation omission is never mistaken for a copy error.
 _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type = 'knowhow'"
 
-# M2 (permission remediation E5-1): a notebook copy — the share-link deep copy —
-# never carries any Memory or any row derived from one. A Memory is its
-# creator's private record; the copy's new owner is somebody else. Every
-# predicate below is a `memory_sql` fragment (the single definition of "derived
+# M2 (permission remediation E5-1): a notebook copy — the user's own deep copy
+# and the copy delivered through a share link alike — never carries any Memory
+# or anything derived from one, whoever the copy's owner is (the Memory's author
+# copying their own notebook leaves their own memories behind too: a Memory
+# belongs to the notebook it was made in). Every predicate below is a `memory_sql` fragment (the single definition of "derived
 # from Memory"), never a hand-written twin, and it is applied INSIDE the
 # snapshot statements so `NotebookCopyService.copy_notebook` needs no change.
 # The same builders render the `_COPY_VALIDATED_TABLES` extras, so the parity
@@ -79,7 +81,10 @@ _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type = 'knowhow'"
 # removes it) lives in the PostgreSQL twin's comment at the same spot; this file
 # mirrors it entry for entry. Non-snapshot Memory-derived tables (memory_items,
 # promotion candidates, analysis/viz artifacts, communities, conversations, ...)
-# are absent from the copy by construction; a test pins that set.
+# are absent from the copy by construction; a test pins that set. Memory
+# evidence carried INSIDE a kept row (a manual merge appends the merged object's
+# evidence, Memory text included) is stripped from the materialised rows by
+# `copy_memory_evidence.strip_memory_evidence` in `snapshot_copy_rows`.
 
 
 def _visible_source(alias: str) -> str:
@@ -120,25 +125,57 @@ def _visible_relation(alias: str) -> str:
 
 
 def _visible_cluster(alias: str) -> str:
-    """No Memory-derived member anywhere in the cluster (its canonical name and
-    description are shared by every row and may come from a Memory member), and
-    the canonical id is not itself a Memory object."""
+    """Not a cluster of a Memory (`memory_sql.no_memory_cluster`: no Memory-derived
+    member, canonical id neither is nor was minted from a Memory-derived object —
+    the canonical name and description are copied onto every row of a cluster and
+    may come from that object), and not a cluster whose canonical id was minted
+    from an object that no longer exists.
+
+    The second arm is the stale case a later Memory delete leaves behind: the
+    Memory member row goes with the Memory, the shared members keep the name and
+    description it seeded. Once the object is gone nothing can prove it was not a
+    Memory, so the copy leaves the cluster out. It never costs clustering the copy
+    would otherwise keep: an object delete marks its notebook dirty and only a
+    rebuild clears that, and a rebuild re-mints every canonical id from live
+    objects — so such a cluster only exists in a dirty notebook, whose copy is
+    marked dirty too (`_COPY_DIRTY_SQL`) and re-clusters its members on rebuild.
+    `seed IS NULL` is evaluated first, so the existence probe runs only for the
+    rare `<prefix>~<object id>` rows."""
+    seed = memory_sql.cluster_seed_object_id(alias)
     return (
-        f"{memory_sql.no_memory_member_cluster(alias)} AND NOT EXISTS ("
-        f"SELECT 1 FROM knowledge_objects co WHERE co.id = {alias}.canonical_id "
-        f"AND {memory_sql.memory_derived_object('co')})"
+        f"{memory_sql.no_memory_cluster(alias)} AND ({seed} IS NULL OR EXISTS ("
+        f"SELECT 1 FROM knowledge_objects so WHERE so.id = {seed}))"
     )
 
 
 # Private snapshot -> insert side channel: the root `notebooks` row is tagged when
-# the source holds Memory sources, so `insert_copy_rows` marks the copy's KG state
-# dirty and clustering is rebuilt over what was actually copied.
-_MEMORY_EXCLUDED_MARK = "_memory_excluded"
-_MEMORY_PRESENT_SQL = (
-    "SELECT 1 FROM sources WHERE notebook_id = ? "
-    f"AND {memory_sql.memory_source_type_predicate()} LIMIT 1"
+# the copy's KG state must start dirty, so `insert_copy_rows` marks it and the
+# copy's owner is offered a rebuild. Two reasons, one probe: the source holds a
+# Memory source (Memory rows and the clusters they touched were left out, so the
+# copied clustering is not the source's), or the source itself is dirty (its
+# clustering is already out of date — e.g. a Memory deleted since the last
+# rebuild left its seeded cluster name on shared members; the copy must not
+# present that clustering as up to date). A copy of a clean notebook without
+# Memory gets no state row, exactly as before.
+_COPY_DIRTY_MARK = "_copy_starts_dirty"
+_COPY_DIRTY_SQL = (
+    "SELECT 1 WHERE EXISTS (SELECT 1 FROM sources WHERE notebook_id = ? "
+    f"AND {memory_sql.memory_source_type_predicate()}) "
+    "OR EXISTS (SELECT 1 FROM unified_kg_state WHERE notebook_id = ? AND dirty = 1)"
 )
-# What the copy leaves out, counted (share preview: node/edge numbers exclude Memory).
+# The notebook's Memory sources (any member's), whose evidence entries are
+# stripped from the rows the copy keeps. A handful per member; read into Python,
+# never bound back into a statement.
+_MEMORY_SOURCE_IDS_SQL = (
+    "SELECT id FROM sources WHERE notebook_id = ? "
+    f"AND {memory_sql.memory_source_type_predicate()}"
+)
+_MEMORY_PRESENT_SQL = _MEMORY_SOURCE_IDS_SQL + " LIMIT 1"
+_MEMORY_SOURCES_SQL = (
+    "SELECT COUNT(*) AS n FROM sources WHERE notebook_id = ? "
+    f"AND {memory_sql.memory_source_type_predicate()}"
+)
+# What the copy leaves out, counted (share preview: source/node/edge numbers exclude Memory).
 _MEMORY_NODES_SQL = (
     "SELECT COUNT(*) AS n FROM knowledge_objects o WHERE o.notebook_id = ? "
     f"AND {memory_sql.memory_derived_object('o')}"
@@ -369,7 +406,8 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     (
         "concept_clusters",
         # 批 3·W2 §1.6:只拷 published 代(PG 孪生同注释;副本行随后在服务层
-        # 归一 generation=0——副本刻意无 unified_kg_state 行)。
+        # 归一 generation=0——副本要么没有 unified_kg_state 行,要么只有
+        # insert_copy_rows 写的标脏行,其 cluster_generation 取列默认值 0)。
         "SELECT c.* FROM concept_clusters c WHERE c.notebook_id = ? "
         "AND c.generation = COALESCE((SELECT cluster_generation "
         "FROM unified_kg_state u WHERE u.notebook_id = c.notebook_id), 0) "
@@ -459,7 +497,7 @@ _COPY_VALIDATED_TABLES: tuple[tuple[str, str], ...] = (
     ),
     (
         "concept_clusters",
-        # §1.6:两侧同谓词校验口径(PG 孪生同注释)。
+        # §1.6:两侧同谓词校验口径(PG 孪生同注释;副本的标脏行 cluster_generation=0)。
         "AND generation = COALESCE((SELECT cluster_generation "
         "FROM unified_kg_state u WHERE u.notebook_id = concept_clusters.notebook_id), 0) "
         f"AND {_visible_cluster('concept_clusters')}",
@@ -957,8 +995,8 @@ class SharingStore:
             ]
             if not snapshot[root_table]:
                 raise KeyError(notebook_id)
-            if db.execute(_MEMORY_PRESENT_SQL, (notebook_id,)).fetchone():
-                snapshot[root_table][0][_MEMORY_EXCLUDED_MARK] = True
+            if db.execute(_COPY_DIRTY_SQL, (notebook_id, notebook_id)).fetchone():
+                snapshot[root_table][0][_COPY_DIRTY_MARK] = True
             violation = self._copy_limit_violation(db, notebook_id)
             if violation is not None:
                 raise NotebookTooLargeToCopyError(violation)
@@ -966,6 +1004,10 @@ class SharingStore:
                 snapshot[table] = [
                     dict(row) for row in db.execute(sql, (notebook_id,)).fetchall()
                 ]
+            memory_source_ids = [
+                row["id"] for row in db.execute(_MEMORY_SOURCE_IDS_SQL, (notebook_id,))
+            ]
+        strip_memory_evidence(snapshot, memory_source_ids)
         return snapshot
 
     def _copy_limit_violation(self, db, notebook_id: str) -> "str | None":
@@ -1010,18 +1052,22 @@ class SharingStore:
             db.execute("BEGIN")
             return self._copy_limit_violation(db, notebook_id) is None
 
-    def memory_derived_kg_counts(self, notebook_id: str) -> tuple[int, int]:
-        """(objects, relations) of this notebook that derive from a Memory — the rows a
-        copy leaves out, so the share preview's node/edge numbers can exclude them (a
-        Memory is its creator's private record; its size is not the link holder's to
-        learn). ``(0, 0)`` after one indexed probe when the notebook holds no Memory
-        source, so a notebook without Memory pays nothing."""
+    def memory_derived_kg_counts(self, notebook_id: str) -> tuple[int, int, int]:
+        """(sources, objects, relations) of this notebook that are, or derive from, a
+        Memory — the rows a copy leaves out, so every size the share surfaces show
+        (the public preview above all) can exclude them: a Memory is its creator's
+        private record, and its count is not the link holder's to learn by
+        subtracting one field from another. ``(0, 0, 0)`` after one indexed probe
+        when the notebook holds no Memory source, so a notebook without Memory pays
+        nothing. One read transaction, so the three counts agree."""
         with self.database.connect() as db:
+            db.execute("BEGIN")
             if db.execute(_MEMORY_PRESENT_SQL, (notebook_id,)).fetchone() is None:
-                return 0, 0
+                return 0, 0, 0
+            sources = db.execute(_MEMORY_SOURCES_SQL, (notebook_id,)).fetchone()["n"]
             nodes = db.execute(_MEMORY_NODES_SQL, (notebook_id,)).fetchone()["n"]
             edges = db.execute(_MEMORY_EDGES_SQL, (notebook_id,) * 3).fetchone()["n"]
-        return int(nodes), int(edges)
+        return int(sources), int(nodes), int(edges)
 
     def valid_copied_mount_base_ids(
         self, notebook_id: str, base_notebook_ids: Sequence[str]
@@ -1118,15 +1164,15 @@ class SharingStore:
         for index in range(0, len(rows), chunk_size):
             with self.database.write() as db:
                 for data in rows[index:index + chunk_size]:
-                    excluded = data.get(_MEMORY_EXCLUDED_MARK)
-                    if excluded is not None:
-                        data = {k: v for k, v in data.items() if k != _MEMORY_EXCLUDED_MARK}
+                    starts_dirty = data.get(_COPY_DIRTY_MARK)
+                    if starts_dirty is not None:
+                        data = {k: v for k, v in data.items() if k != _COPY_DIRTY_MARK}
                     self.insert_row(db, table, data)
-                    if excluded and table == "notebooks":
-                        # Memory rows were left out of this copy: mark its KG
-                        # state dirty so clustering is rebuilt over what was
-                        # actually copied (a cluster that lost a Memory member
-                        # is not the cluster the source had).
+                    if starts_dirty and table == "notebooks":
+                        # See _COPY_DIRTY_MARK: Memory rows were left out, or the
+                        # source's clustering was already out of date. Registered
+                        # in kg_mutation's FULL CENSUS (deep copy entry): a brand-new
+                        # notebook id, same transaction as its own birth row.
                         UnifiedKgStore.mark_dirty(db, data["id"], self.now())
 
     def seed_copied_knowhow_genesis(

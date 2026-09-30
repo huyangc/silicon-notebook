@@ -127,13 +127,30 @@ def _element_vec(nb: str, sid: str, eid: str, *, memory=False) -> Row:
     }, memory)
 
 
-def _object(nb: str, oid: str, sid: str, eid: str, *, memory=False) -> list[Row]:
+def evidence(sid: str, eid: str, *, memory: bool) -> dict:
+    """A full Evidence entry (``app.models.common.Evidence``): the quoted text, the source
+    title and the locator travel with it — a Memory's entry carries the Memory's text."""
+    label = MARK if memory else "shared"
+    return {
+        "source_id": sid, "source_title": f"{label} title {sid}", "element_id": eid,
+        "element_type": "paragraph", "location_label": f"{label} p1",
+        "quoted_span": f"{label} quoted {eid}", "confidence": 0.9,
+    }
+
+
+def _object(
+    nb: str, oid: str, sid: str, eid: str, *, memory=False, lent: tuple = (), own=True,
+) -> list[Row]:
+    """``lent``: Memory evidence entries a manual merge appended to this (shared) object.
+    ``own=False``: the object's own evidence is empty (a manually created object), so
+    after the strip its evidence is ``[]``."""
     name = f"{MARK} {oid}" if memory else f"shared {oid}"
+    own_entries = [evidence(sid, eid, memory=memory)] if own else []
     return [
         Row("knowledge_objects", {
             "id": oid, "notebook_id": nb, "object_type": "concept", "status": "approved",
             "source_id": sid, "payload": {"name": name},
-            "evidence": [{"source_id": sid, "element_id": eid}],
+            "evidence": own_entries + [evidence(s, e, memory=True) for s, e in lent],
             "created_at": NOW, "updated_at": NOW,
         }, memory),
         Row("knowledge_embeddings", {
@@ -142,11 +159,13 @@ def _object(nb: str, oid: str, sid: str, eid: str, *, memory=False) -> list[Row]
     ]
 
 
-def _relation(nb: str, rid: str, sid, src: str, dst: str, *, memory: bool) -> list[Row]:
+def _relation(
+    nb: str, rid: str, sid, src: str, dst: str, *, memory: bool, ev: list | None = None,
+) -> list[Row]:
     return [
         Row("knowledge_relations", {
             "id": rid, "notebook_id": nb, "source_id": sid, "source_object_id": src,
-            "target_object_id": dst, "edge_type": "related_to", "evidence": [],
+            "target_object_id": dst, "edge_type": "related_to", "evidence": ev or [],
             "created_at": NOW,
         }, memory),
         Row("relation_embeddings", {
@@ -155,7 +174,9 @@ def _relation(nb: str, rid: str, sid, src: str, dst: str, *, memory: bool) -> li
     ]
 
 
-def _facts(nb: str, sid: str, tag: str, obj: str, eid: str, *, memory: bool) -> list[Row]:
+def _facts(
+    nb: str, sid: str, tag: str, obj: str, eid: str, *, memory: bool, ev: list | None = None,
+) -> list[Row]:
     generation = f"gen-{tag}"
     fact_id = f"fact-{tag}"
     return [
@@ -163,7 +184,7 @@ def _facts(nb: str, sid: str, tag: str, obj: str, eid: str, *, memory: bool) -> 
             "id": fact_id, "notebook_id": nb, "source_id": sid, "source_generation": generation,
             "local_object_id": f"local-{tag}", "global_object_id": obj, "object_type": "concept",
             "payload": {"name": f"{MARK} {tag}" if memory else f"shared {tag}"},
-            "evidence": [], "created_at": NOW, "updated_at": NOW,
+            "evidence": ev or [], "created_at": NOW, "updated_at": NOW,
         }, memory),
         Row("knowledge_source_fact_elements", {
             "fact_id": fact_id, "notebook_id": nb, "source_id": sid,
@@ -188,7 +209,11 @@ def _cluster(nb: str, cid: str, name: str, members: Iterable[str], *, memory: bo
 
 
 def world(nb: str = NOTEBOOK, *, with_memory: bool = True) -> list[Row]:
-    """世界的全部行,按外键安全的顺序;``with_memory=False`` 只留共享内容。"""
+    """世界的全部行,按外键安全的顺序;``with_memory=False`` 只留共享内容。
+
+    共享行里夹带的 Memory 证据(手工合并留下的,带 Memory 原文、标题与定位)只在
+    ``with_memory`` 时出现;``LENT_EVIDENCE`` 登记它们,副本里必须一条不剩。"""
+    lent = LENT_EVIDENCE if with_memory else {}
     rows: list[Row] = [
         Row("notebooks", {
             "id": nb, "name": "Shared", "purpose": "", "primary_domain": "Semiconductor",
@@ -215,10 +240,19 @@ def world(nb: str = NOTEBOOK, *, with_memory: bool = True) -> list[Row]:
         }),
         *_object(nb, "ko-shared-1", "src-doc", "el-doc-1"),
         *_object(nb, "ko-shared-2", "src-doc", "el-doc-1"),
-        *_object(nb, "ko-shared-3", "src-doc", "el-doc-2"),
+        # 手工合并过 alice 的 Memory 对象:自己的证据 + alice 的一条(带原文)。
+        *_object(nb, "ko-shared-3", "src-doc", "el-doc-2", lent=lent.get("ko-shared-3", ())),
         *_object(nb, "ko-shared-4", "src-doc", "el-doc-2"),
-        *_relation(nb, "kr-shared", "src-doc", "ko-shared-1", "ko-shared-2", memory=False),
-        *_facts(nb, "src-doc", "doc", "ko-shared-1", "el-doc-1", memory=False),
+        # 自己没有证据(手工建的对象),合并进了 bob 的 Memory 对象:剥离后证据为 []。
+        *_object(nb, "ko-shared-5", "src-doc", "el-doc-2", own=False,
+                 lent=lent.get("ko-shared-5", ())),
+        *_object(nb, "ko-shared-6", "src-doc", "el-doc-2"),
+        *_relation(nb, "kr-shared", "src-doc", "ko-shared-1", "ko-shared-2", memory=False,
+                   ev=[evidence("src-doc", "el-doc-1", memory=False)]
+                   + [evidence(s, e, memory=True) for s, e in lent.get("kr-shared", ())]),
+        *_facts(nb, "src-doc", "doc", "ko-shared-1", "el-doc-1", memory=False,
+                ev=[evidence("src-doc", "el-doc-1", memory=False)]
+                + [evidence(s, e, memory=True) for s, e in lent.get("fact-doc", ())]),
         *_cluster(nb, "K-shared", "shared topic", ("ko-shared-1", "ko-shared-2"), memory=False),
     ]
     if with_memory:
@@ -258,6 +292,12 @@ def world(nb: str = NOTEBOOK, *, with_memory: bool = True) -> list[Row]:
             *_cluster(nb, "K-bob", f"{MARK} bob topic", ("ko-bob-1", "ko-bob-2"), memory=True),
             # canonical_id 本身是某个 Memory 对象 id,成员却都是共享对象。
             *_cluster(nb, "ko-alice-2", f"{MARK} canon", ("ko-shared-4",), memory=True),
+            # canonical_id 铸自 Memory 对象 id(``K-~<对象 id>``,名字退化的种子),成员是
+            # 共享对象:簇名/描述可能取自那个 Memory 对象。
+            *_cluster(nb, "K-~ko-bob-2", f"{MARK} minted", ("ko-shared-5",), memory=True),
+            # canonical_id 铸自一个已经不存在的对象(种它的 Memory 已被删除):无从证明
+            # 不是 Memory 的,拷贝不带。
+            *_cluster(nb, "KL-~ko-deleted-1", f"{MARK} stale", ("ko-shared-6",), memory=True),
             # 一条不该存在的 Memory 分块(+向量+问题)。
             Row("chunks", {
                 "id": "ck-mem-stray", "notebook_id": nb, "source_id": "src-mem-alice",
@@ -276,6 +316,16 @@ def world(nb: str = NOTEBOOK, *, with_memory: bool = True) -> list[Row]:
     return rows
 
 
+#: 共享行里夹带的 Memory 证据:行 -> ``(Memory 来源, Memory 元素)``。对象的是手工合并留下的
+#: (``merge_objects_in_transaction`` 整条追加);关系与事实按构造不会有,造出来钉住剥离的防御面。
+LENT_EVIDENCE: dict[str, tuple] = {
+    "ko-shared-3": (("src-mem-alice", "el-alice-1"),),
+    "ko-shared-5": (("src-mem-bob", "el-bob-1"), ("src-mem-orphan", "el-orphan-1")),
+    "kr-shared": (("src-mem-alice", "el-alice-1"),),
+    "fact-doc": (("src-mem-bob", "el-bob-1"),),
+}
+
+
 def seed(insert: Callable[[str, dict], None], nb: str = NOTEBOOK, *, with_memory: bool = True) -> None:
     for row in world(nb, with_memory=with_memory):
         insert(row.table, row.values)
@@ -290,16 +340,116 @@ def expected_copy_counts(nb: str = NOTEBOOK) -> dict[str, int]:
     return counts
 
 
+def _key(values: dict) -> Any:
+    return values.get("id") or values.get("object_id") or values.get("relation_id") \
+        or values.get("element_id") or values.get("chunk_id") or values.get("fact_id") \
+        or values.get("source_id")
+
+
 def memory_ids() -> dict[str, set[str]]:
     """世界里每张表的 Memory 行 id(取各表的主键列),用来断言副本没有引用它们。"""
     out: dict[str, set[str]] = {}
     for row in world():
         if row.memory:
-            key = row.values.get("id") or row.values.get("object_id") or row.values.get("relation_id") \
-                or row.values.get("element_id") or row.values.get("chunk_id") or row.values.get("fact_id") \
-                or row.values.get("source_id")
-            out.setdefault(row.table, set()).add(key)
+            out.setdefault(row.table, set()).add(_key(row.values))
     return out
+
+
+#: 世界里的 Memory 来源(任一成员的,含孤儿)。
+MEMORY_SOURCES = frozenset(
+    row.values["id"] for row in world() if row.table == "sources" and row.memory
+)
+#: 拷贝保留的知识对象,及每个对象自己(非夹带)的证据条数。
+SHARED_OBJECT_OWN_EVIDENCE = {
+    "ko-shared-1": 1, "ko-shared-2": 1, "ko-shared-3": 1, "ko-shared-4": 1,
+    "ko-shared-5": 0, "ko-shared-6": 1,
+}
+SHARED_OBJECTS = frozenset(SHARED_OBJECT_OWN_EVIDENCE)
+
+
+def _evidence_list(value: Any) -> list:
+    value = _decoded(value)
+    return value if isinstance(value, list) else []
+
+
+def assert_kept_rows_lost_only_the_lent_evidence(view: "CopyView") -> None:
+    """副本里保留下来的对象 / 关系 / 事实:夹带的 Memory 证据条目一条不剩,自己的证据原样在
+    (条数与文本);自己没有证据的对象以空数组留下,不被丢弃。"""
+    copy_sources = {row["id"] for row in view.rows["sources"]}
+    by_name = {
+        _decoded(row["payload"])["name"]: row for row in view.rows["knowledge_objects"]
+    }
+    assert set(by_name) == {f"shared {oid}" for oid in SHARED_OBJECTS}, set(by_name)
+    for oid, own in SHARED_OBJECT_OWN_EVIDENCE.items():
+        entries = _evidence_list(by_name[f"shared {oid}"]["evidence"])
+        assert len(entries) == own, (oid, entries)
+        for entry in entries:
+            assert entry["source_id"] in copy_sources, (oid, entry)
+            assert entry["quoted_span"].startswith("shared quoted"), (oid, entry)
+    for table in ("knowledge_relations", "knowledge_source_facts"):
+        for row in view.rows[table]:
+            entries = _evidence_list(row["evidence"])
+            assert len(entries) == 1 and entries[0]["source_id"] in copy_sources, (table, row)
+
+
+def assert_snapshot_is_legacy_minus_memory(now: dict, legacy: dict) -> None:
+    """现行快照 = M2 之前的原文快照去掉 Memory 行、再去掉共享行里夹带的 Memory 证据条目;
+    其余每一列逐字相同(没有被剥的行,证据 JSON 文本也逐字不变)。"""
+    memory = memory_ids()
+    stripped = 0
+    expected: dict[str, list] = {}
+    for table, rows in legacy.items():
+        kept = []
+        for row in rows:
+            if _key(row) in memory.get(table, ()):
+                continue
+            row = dict(row)
+            entries = _evidence_list(row.get("evidence")) if "evidence" in row else []
+            clean = [e for e in entries if e.get("source_id") not in MEMORY_SOURCES]
+            if len(clean) != len(entries):
+                stripped += len(entries) - len(clean)
+                row["evidence"] = clean
+            kept.append(row)
+        expected[table] = kept
+    assert stripped == sum(len(v) for v in LENT_EVIDENCE.values()), stripped
+
+    def canon(row):
+        return json.dumps(
+            {k: (_decoded(v) if k == "evidence" else v) for k, v in row.items()},
+            default=str, sort_keys=True,
+        )
+
+    assert set(now) == set(expected)
+    for table in now:
+        if table == "notebooks":
+            continue  # the root row carries the dirty tag
+        assert sorted(map(canon, now[table])) == sorted(map(canon, expected[table])), table
+    # 没被剥的行:证据 JSON 文本逐字不变(不是重新序列化出来的)。
+    legacy_text = {
+        r["id"]: r["evidence"] for r in legacy["knowledge_objects"]
+    }
+    for row in now["knowledge_objects"]:
+        if row["id"] not in LENT_EVIDENCE:
+            assert row["evidence"] == legacy_text[row["id"]], row["id"]
+
+
+def assert_share_sizes_exclude_memory(share: dict, preview: dict) -> None:
+    """分享响应、公开预览与主人的分享弹窗读同一份 size:来源数 / 节点数 / 边数都不含任何成员
+    的 Memory 及其派生行;``size.sources`` 与 ``source_count`` 相等,链接持有人无法从两者之差
+    算出 Memory 条数。"""
+    shared_sources = sum(
+        1 for row in world() if row.table == "sources" and not row.memory
+    )
+    shared_nodes = len(SHARED_OBJECTS)
+    shared_edges = sum(
+        1 for row in world() if row.table == "knowledge_relations" and not row.memory
+    )
+    for size in (share["size"], preview["size"]):
+        assert (size["sources"], size["nodes"], size["edges"]) == (
+            shared_sources, shared_nodes, shared_edges,
+        ), size
+    assert preview["source_count"] == preview["size"]["sources"] == shared_sources
+    assert (preview["node_count"], preview["edge_count"]) == (shared_nodes, shared_edges)
 
 
 @dataclass
@@ -308,28 +458,66 @@ class CopyView:
 
     counts: dict[str, int] = field(default_factory=dict)
     dump: str = ""
+    rows: dict[str, list[dict]] = field(default_factory=dict)
+    leaves: list[str] = field(default_factory=list)
+
+
+def _decoded(value: Any) -> Any:
+    """A JSON text column (SQLite stores JSON as text; PostgreSQL returns jsonb already
+    parsed) decoded to its structure, so the scan below sees the same leaves on both
+    backends — scanning the dumped text would miss an id inside SQLite's escaped quotes."""
+    if isinstance(value, str) and value[:1] in "[{":
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+def _leaves(value: Any) -> Iterable[str]:
+    """Every string in a (decoded) value, recursively. Vector bytes are not text and are
+    guarded by the row counts."""
+    value = _decoded(value)
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield str(key)
+            yield from _leaves(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _leaves(item)
 
 
 def read_copy(fetch: Callable[[str, tuple], list[dict]], placeholder: str, nb_id: str) -> CopyView:
     view = CopyView()
     parts: list[str] = []
+    leaves: list[str] = []
     for table, query in COPY_TABLE_QUERIES.items():
         rows = fetch(query.format(p=placeholder), (nb_id,))
         view.counts[table] = len(rows)
-        parts.append(json.dumps(rows, default=str, sort_keys=True))
+        decoded = [{k: _decoded(v) for k, v in row.items()} for row in rows]
+        view.rows[table] = decoded
+        parts.append(json.dumps(decoded, default=str, sort_keys=True, ensure_ascii=False))
+        for row in decoded:
+            leaves.extend(_leaves(list(row.values())))
     view.dump = "\n".join(parts)
+    view.leaves = leaves
     return view
 
 
 def assert_copy_has_no_memory(view: CopyView) -> None:
-    """副本的行数等于共享内容,且任何列都没有 Memory 的文本或 id。"""
+    """副本的行数等于共享内容,且任何表的任何列(JSON 列先解析、逐个字符串叶子比对)都没有
+    Memory 的文本或 id。"""
     assert view.counts == expected_copy_counts(), view.counts
-    assert MARK not in view.dump, "a Memory text leaked into the copy"
+    leaked = [leaf for leaf in view.leaves if MARK in leaf]
+    assert not leaked, f"a Memory text leaked into the copy: {leaked}"
     for table, ids in memory_ids().items():
+        if table == "memory_items":
+            continue
         for value in ids:
-            if table == "memory_items":
-                continue
-            assert f'"{value}"' not in view.dump, f"Memory row {table}:{value} referenced by the copy"
+            hits = [leaf for leaf in view.leaves if value in leaf]
+            assert not hits, f"Memory row {table}:{value} referenced by the copy: {hits}"
 
 
 # --------------------------------------------------------------------------

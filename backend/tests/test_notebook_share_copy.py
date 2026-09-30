@@ -638,7 +638,10 @@ def test_copy_route_maps_a_tombstone_after_token_resolution_to_404_not_500(
     assert client.post(f"/api/shared/{token}/copy").status_code == 404
 
 
-def test_share_preview_count_is_visible_while_copy_size_stays_physical(repo):
+def test_share_preview_count_is_visible_while_copy_size_counts_what_the_copy_carries(repo):
+    """``source_count`` is the visible count (no Memory, no knowhow link); ``size.sources``
+    counts what a copy carries: the knowhow hidden source travels with the copy, a Memory
+    source never does (M2, E5-1) — so the Memory count cannot be read off the difference."""
     nb = _mk_nb(repo, "Mixed")
     now = _now()
     with repo._write() as db:
@@ -664,7 +667,7 @@ def test_share_preview_count_is_visible_while_copy_size_stays_physical(repo):
 
     preview = repo.shared_preview(nb)
     assert preview["source_count"] == 1
-    assert preview["size"]["sources"] == 3
+    assert preview["size"]["sources"] == 2
 
 
 def test_copy_refuses_too_large(repo, tmp_path, monkeypatch):
@@ -1774,8 +1777,9 @@ def test_deep_copy_of_a_notebook_with_memories_carries_none_of_them(repo):
     state = _kg_state(repo, new.id)
     assert state is not None and state["dirty"] == 1
     # 源库一行没动
+    memory_cases.assert_kept_rows_lost_only_the_lent_evidence(view)
     source = memory_cases.read_copy(fetch, "?", memory_cases.NOTEBOOK)
-    assert source.counts["sources"] == 4 and source.counts["concept_clusters"] == 7
+    assert source.counts["sources"] == 4 and source.counts["concept_clusters"] == 9
     assert _kg_state(repo, memory_cases.NOTEBOOK) is None
 
 
@@ -1788,20 +1792,29 @@ def test_share_link_copy_route_of_a_notebook_with_memories_carries_none_of_them(
     token = shared.json()["share_token"]
     preview = client.get(f"/api/shared/{token}")
     assert preview.status_code == 200
-    # 预览的节点/边数与拷贝同口径:不含成员 Memory 派生的 8-4 个对象、5-4 条关系
-    assert (preview.json()["node_count"], preview.json()["edge_count"]) == (4, 1)
-    assert preview.json()["size"]["nodes"] == 4 and preview.json()["size"]["edges"] == 1
-    assert (shared.json()["size"]["nodes"], shared.json()["size"]["edges"]) == (4, 1)
-    assert repo._runtime.sharing_store.memory_derived_kg_counts(memory_cases.NOTEBOOK) == (4, 4)
+    memory_cases.assert_share_sizes_exclude_memory(shared.json(), preview.json())
+    assert repo._runtime.sharing_store.memory_derived_kg_counts(memory_cases.NOTEBOOK) == (
+        3, 4, 4
+    )
+    # 主人的分享弹窗读的是同一份 size(GET /notebooks/{id}/share)。
+    state_view = client.get(f"/api/notebooks/{memory_cases.NOTEBOOK}/share")
+    assert state_view.status_code == 200
+    assert state_view.json()["size"] == preview.json()["size"]
 
     copied = client.post(f"/api/shared/{token}/copy")
     assert copied.status_code == 200, copied.text
     new_id = copied.json()["id"]
 
     fetch = _fetch(repo)
-    memory_cases.assert_copy_has_no_memory(memory_cases.read_copy(fetch, "?", new_id))
+    view = memory_cases.read_copy(fetch, "?", new_id)
+    memory_cases.assert_copy_has_no_memory(view)
+    memory_cases.assert_kept_rows_lost_only_the_lent_evidence(view)
     state = _kg_state(repo, new_id)
     assert state is not None and state["dirty"] == 1
+    # 接收者读副本的知识列表:合并进共享对象的那段 Memory 原文不在里面。
+    listing = client.get(f"/api/notebooks/{new_id}/knowledge?type=concept")
+    assert listing.status_code == 200 and listing.json()["items"], listing.text
+    assert memory_cases.MARK not in listing.text
 
 
 def test_copy_of_a_notebook_without_memory_is_unchanged_and_not_marked_dirty(
@@ -1815,7 +1828,7 @@ def test_copy_of_a_notebook_without_memory_is_unchanged_and_not_marked_dirty(
     store = repo._runtime.sharing_store
     now_rows = store.snapshot_copy_rows(memory_cases.NOTEBOOK_PLAIN)
     assert all(now_rows[t] for t in memory_cases.LEGACY_SNAPSHOT_SQLITE), "fixture covers each table"
-    assert store_module._MEMORY_EXCLUDED_MARK not in now_rows["notebooks"][0]
+    assert store_module._COPY_DIRTY_MARK not in now_rows["notebooks"][0]
     monkeypatch.setattr(
         store_module,
         "_COPY_SNAPSHOT_QUERIES",
@@ -1853,17 +1866,19 @@ def test_memory_notebook_snapshot_is_the_legacy_snapshot_minus_the_memory_rows(
             store_module._COPY_SNAPSHOT_QUERIES, memory_cases.LEGACY_SNAPSHOT_SQLITE
         ),
     )
+    # 原文快照:M2 之前的语句,也没有证据剥离。
+    monkeypatch.setattr(store_module, "strip_memory_evidence", lambda *_args: 0)
     legacy = store.snapshot_copy_rows(memory_cases.NOTEBOOK)
     assert len(legacy["sources"]) == 4 and len(legacy["knowledge_relations"]) == 5, (
         "the pre-M2 text does carry the Memory rows (fixture sanity)"
     )
     assert {r["id"] for r in now_rows["sources"]} == {"src-doc"}
     assert {r["id"] for r in now_rows["knowledge_relations"]} == {"kr-shared"}
-    assert {r["id"] for r in now_rows["knowledge_objects"]} == {
-        "ko-shared-1", "ko-shared-2", "ko-shared-3", "ko-shared-4"
-    }
+    assert {r["id"] for r in now_rows["knowledge_objects"]} == memory_cases.SHARED_OBJECTS
     assert {r["canonical_id"] for r in now_rows["concept_clusters"]} == {"K-shared"}
-    assert now_rows["notebooks"][0][store_module._MEMORY_EXCLUDED_MARK] is True
+    assert now_rows["notebooks"][0][store_module._COPY_DIRTY_MARK] is True
+    # 留下的行与原文逐列相同,唯一的差别是夹带的 Memory 证据条目被剥掉了。
+    memory_cases.assert_snapshot_is_legacy_minus_memory(now_rows, legacy)
 
 
 def test_snapshot_table_set_is_pinned_and_memory_carriers_are_not_in_it():
@@ -1888,7 +1903,8 @@ def test_share_preview_of_a_notebook_without_memory_counts_every_row(repo, clien
     shared = client.post(f"/api/notebooks/{memory_cases.NOTEBOOK_PLAIN}/share")
     assert shared.status_code == 200
     preview = client.get(f"/api/shared/{shared.json()['share_token']}").json()
-    assert (preview["node_count"], preview["edge_count"]) == (4, 1)
+    assert (preview["node_count"], preview["edge_count"]) == (6, 1)
+    assert preview["size"]["sources"] == preview["source_count"] == 1
     assert repo._runtime.sharing_store.memory_derived_kg_counts(
         memory_cases.NOTEBOOK_PLAIN
-    ) == (0, 0)
+    ) == (0, 0, 0)

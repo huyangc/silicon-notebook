@@ -62,7 +62,8 @@ def _reset_copied_notebook_row(
     """Rewrite the copied notebooks row's identity/lifecycle/authority columns.
 
     索引管线四列一律复位成内建：published identity 住在 unified_kg_state 里而它
-    刻意不进深拷贝，照抄 desired 选择会让副本天生 desired≠published、每一次写入
+    刻意不进深拷贝（副本至多得到 insert_copy_rows 写的一条标脏行，各列取默认值，
+    published identity 即内建），照抄 desired 选择会让副本天生 desired≠published、每一次写入
     409 直到手动全库重建；照抄 generation/job_id 更会让副本的状态投影 join 到
     *源库*正在跑的 job 行。与「授权边/share_token/agent_profile_id 不随副本走」
     同一条论证——副本由新 owner 重新选择并显式重建（既有 chunk 是核心 schema，
@@ -71,12 +72,13 @@ def _reset_copied_notebook_row(
     已登记接受（codex #602 R7 P2 驳回）：插件管线库的副本里，拷来的插件 chunk 与
     此后按内建增量分块的新 chunk 会共存。这不触犯全库原子发布不变量——那条不变量
     保护的是**切换操作**的身份消费方（scale manifest identity、published KG identity、
-    fold/full 判定），而副本这些面全部从零开始（unified_kg_state 缺席、scale 工件
+    fold/full 判定），而副本这些面全部从零开始（unified_kg_state 缺席或只有标脏行、scale 工件
     不拷、首次重建必然 full），没有任何消费方会据错误身份做决策；extraction_runs
     随行拷贝、逐 run 保留真实的 (pipeline_id, version) 出处。剩下的只是 chunk
     粒度异质——与「部署中途调 chunk_target_chars 后新旧来源粒度不同」这一既有
     合法情形同类，从来不要求全库重建。另两个选项都更糟：种 published identity
-    需要给副本造 unified_kg_state 行（与 chunk_elements 标记语义的既有红线冲突）；
+    需要给副本造一条带真实身份的 unified_kg_state 行（与 chunk_elements 标记语义的
+    既有红线冲突；标脏行不带身份、chunk_elements_indexed 取默认 0，不在此列）；
     强制先重建再可写等于让每一次插件库拷贝都先付一轮全库模型钱。
     """
     if manual_name:
@@ -609,9 +611,9 @@ class NotebookCopyService:
                 )
                 chunks_out.append(data)
             # chunk_elements（element→chunk 反查表，v46）刻意**不**随深拷贝复制：
-            # unified_kg_state 不在 _COPY_SNAPSHOT_QUERIES 的表集合内，所以副本
-            # 的 chunk_elements_indexed 恒缺失（读作 0），读路径走 legacy 全量
-            # 扫描——反查行缺席是正确且自洽的。
+            # unified_kg_state 不在拷贝表集合内（至多有 insert_copy_rows 写的标脏行,
+            # 该列取默认 0），所以副本的 chunk_elements_indexed 恒缺失或为 0，读路径
+            # 走 legacy 全量扫描——反查行缺席是正确且自洽的。
             # ⚠ 若将来把 unified_kg_state 加进深拷贝表集合，**必须**同时复制
             # chunk_elements（或显式把副本的 chunk_elements_indexed 归零）：
             # 否则副本继承一个为真的标记而反查表是空的，点查路径会静默返回空
@@ -1022,17 +1024,23 @@ class NotebookSharingService:
         stats = self._copy_stats(notebook_id)
         if stats.get("copyable") and not self._store.snapshot_copy_within_limits(notebook_id):
             stats = {**stats, "copyable": False}
-        # M2: the node/edge numbers shown on every share surface (the public preview
-        # above all) exclude what a copy never carries — a member's Memory-derived KG
-        # rows. The verdict above stays on the physical counts (conservative, and
-        # retrieval's large-library logic reads the unadjusted memo directly).
-        memory_nodes, memory_edges = self._store.memory_derived_kg_counts(notebook_id)
+        # M2: the source/node/edge numbers shown on every share surface (the public
+        # preview above all, and the owner's share dialog) exclude what a copy never
+        # carries — every member's Memory sources and the KG rows derived from them —
+        # so no field of the preview lets a link holder compute the Memory count by
+        # subtracting another (`source_count` already excludes them). The verdict above
+        # stays on the physical counts (conservative, and retrieval's large-library
+        # logic reads the unadjusted memo directly).
+        memory_sources, memory_nodes, memory_edges = self._store.memory_derived_kg_counts(
+            notebook_id
+        )
         size = stats.get("size")
-        if (memory_nodes or memory_edges) and size:
+        if (memory_sources or memory_nodes or memory_edges) and size:
             stats = {
                 **stats,
                 "size": {
                     **size,
+                    "sources": max(0, size["sources"] - memory_sources),
                     "nodes": max(0, size["nodes"] - memory_nodes),
                     "edges": max(0, size["edges"] - memory_edges),
                 },

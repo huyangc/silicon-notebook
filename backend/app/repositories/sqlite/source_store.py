@@ -30,6 +30,7 @@ from app.repositories.ports import (
     DocumentCapacityExceeded,
     SourceElementWrite,
 )
+from app.repositories.sqlite import memory_sql
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.memory_sql import (
     memory_source_readable,
@@ -77,6 +78,8 @@ _HIDDEN_SOURCE_IDS_SQL = (
     f"AND {memory_source_readable('s')} "
     "ORDER BY s.id"
 )
+#: Schema-induction sample: no Memory element (``notebook_element_sample``).
+_SAMPLE_NOT_MEMORY = f"NOT ({memory_sql.memory_source_type_predicate('s.source_type')})"
 
 
 # 论文元数据补抽候选的 SQL 谓词(接在 ``FROM sources s`` 且已按 ``s.notebook_id``
@@ -1236,6 +1239,12 @@ class SourceStore:
         SQLite and Python work bounded for large notebooks and avoids loading
         the unrelated embedding BLOBs that the old ``_gather_elements`` join
         selected before truncating in the service.
+
+        Memory elements are left out (M2, E5-1): the model paraphrases this sample
+        into ``notebook_object_schemas`` (description, rationale, labels), a
+        notebook-level row every member sees and every copy carries, so a Memory
+        read here would reach both. A schema induced before this rule cannot be
+        told apart from one induced after it.
         """
         budget = max(0, int(max_chars))
         if budget == 0:
@@ -1248,12 +1257,13 @@ class SourceStore:
         with self.database.connect() as db:
             while rendered_chars < budget:
                 rows = db.execute(
-                    """
+                    f"""
                     SELECT e.rowid AS _rowid, e.location_label,
                            substr(e.text, 1, ?) AS text
                     FROM source_elements e
                     JOIN sources s ON s.id = e.source_id
                     WHERE s.notebook_id = ? AND e.rowid > ?
+                    AND {_SAMPLE_NOT_MEMORY}
                     ORDER BY e.rowid ASC
                     LIMIT ?
                     """,
