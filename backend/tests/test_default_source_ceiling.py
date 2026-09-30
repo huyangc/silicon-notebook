@@ -1790,6 +1790,42 @@ def test_refresh_never_inherits_an_excluded_librarys_empty_hand_out():
             ) == ("lib-1",)
 
 
+def test_a_refresh_that_excludes_a_library_never_prefills_its_old_order():
+    """The mirror case: the outer admitted and read ``nb-lib`` (its memo holds
+    the set and the order), and the refresh EXCLUDES it.  The new scope still
+    stores the same frozenset object as its entry, but the library's
+    effective ceiling is now ``frozenset()``; the pre-fill is keyed on that
+    effective ceiling, so no order and no set of the excluded library reach
+    the producers."""
+    from types import SimpleNamespace
+
+    from app.services import chunk_federation
+    from app.services.source_scope import library_source_ceiling
+
+    store = _two_mount_store()
+    candidates = SimpleNamespace(sources=SimpleNamespace(
+        all_visible_source_ids=lambda nb: ["live"],
+    ))
+    with default_ceiling_context(NB, "bob", store.readers()):
+        outer = current_source_scope()
+        assert _sorted_library_ceiling(outer, "nb-lib") == ("lib-1",)
+        with refreshed_ceiling_context(
+            NB, "bob", store.readers(),
+            base_scope={"mode": "exclude", "notebook_ids": ["nb-lib"],
+                        "narrowed": True},
+        ):
+            scope = current_source_scope()
+            assert scope.source_ceiling_for("nb-lib") is outer.source_ceiling_for(
+                "nb-lib"
+            )
+            assert library_source_ceiling(scope, "nb-lib") == frozenset()
+            assert _sorted_library_ceiling(scope, "nb-lib") == ()
+            assert scoped_allowed_source_ids("nb-lib") == ()
+            assert chunk_federation._peer_visible_sources(
+                candidates, "nb-lib"
+            ) == ()
+
+
 def test_peer_visible_sources_returns_the_frozen_ceiling_without_reading():
     from types import SimpleNamespace
 
