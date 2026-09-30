@@ -39,6 +39,7 @@ from app.services.collection_enumeration import (
     SourceItem,
 )
 from app.services.embedding import FakeEmbedder
+from app.services.global_citation_check import judge_reference
 from app.services.retrieval_participants import (
     ParticipantOverride,
     participant_override,
@@ -784,11 +785,17 @@ def test_global_ask_knowhow_object_citation_no_longer_voids_the_answer(repo):
     with _peer_run([anchor, peer], ceilings):
         citations = evidence_context.collection_item_citations(
             items, active_notebook_id=anchor)
-        void = repo._runtime.global_ask_service()._validate_citations(
-            list(citations.values()), {},
-            {notebook_id: set(ids) for notebook_id, ids in ceilings.items()},
-        )
-    assert void == ""
+    # The terminal check (``global_citation_check.judge_reference``, the
+    # per-reference verdict that replaced whole-answer voiding) passes every
+    # card: each one names an in-ceiling source, so none is ``out_of_ceiling``.
+    for citation in citations.values():
+        ceiling = set(ceilings[citation.notebook_id])
+        snapshot = (citation.source_id, "fingerprint")
+        assert judge_reference(
+            citation, evidence={citation.element_id: snapshot},
+            current={citation.element_id: snapshot}, siblings=(),
+            ceiling=ceiling, live_sources=ceiling,
+        ) is None, citation
     assert set(citations) == {"a-mixed", "p-mixed"}
     assert citations["a-mixed"].element_id == "el-a-doc-001"
     assert citations["p-mixed"].element_id == "el-p-doc-001"
@@ -1276,6 +1283,41 @@ def test_a_global_run_binds_whatever_ceiling_binds_says(repo):
     assert [item.object_id for item in kg.items] == ["oy"]
     assert {item.source_id for item in elements.items} == {"x1", "y1"}
     assert collection_map.element_count("formula") == 4
+
+
+def test_a_per_library_freeze_binds_whatever_ceiling_binds_says(repo):
+    """单库(非全局)运行里某库带着自己的逐库冻结时,``ceiling_binds=False`` 同样
+    关不掉它:判词只描述当前库的勾选与漂移,证明不了那份冻结仍等于该库的来源
+    (与知识重读判词 ``source_scope.ceiling_binds`` 的同一条分支)。"""
+    first, _second = _two_libraries(repo)
+    with source_scope_context(
+        first, None, None, notebook_source_ceilings={first: ["x1"]},
+    ):
+        elements = repo.collection_enumeration.enumerate_elements(
+            first, "formula", budget=_budget(), ceiling_binds=False)
+        roster = repo.collection_enumeration.enumerate_sources(
+            first, budget=_budget(), ceiling_binds=False)
+        collection_map = repo.collection_catalog.collection_map(
+            first, ceiling_binds=False)
+    assert {item.source_id for item in elements.items} == {"x1"}
+    assert [item.source_id for item in roster.items] == ["x1"]
+    assert collection_map.element_count("formula") == 1
+
+
+def test_an_excluded_library_is_denied_whatever_ceiling_binds_says(repo):
+    """库维度排除的库:判词为假时天花板也是「全部拒绝」,不是「没有天花板」。"""
+    first, second = _two_libraries(repo)
+    with source_scope_context(
+        first,
+        {"mode": "include", "source_ids": ["x1", "x2"], "narrowed": False},
+        {"mode": "include", "notebook_ids": [], "narrowed": True},
+    ):
+        ceiling = repo.collection_catalog.source_ceiling(
+            None, second, ceiling_binds=False)
+        own = repo.collection_catalog.source_ceiling(
+            None, first, ceiling_binds=False)
+    assert ceiling is not None and not ceiling.members
+    assert own is None
 
 
 # ------------------------------------------------- 成本:L4 与 scope 无关、零语句
