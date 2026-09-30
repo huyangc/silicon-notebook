@@ -205,7 +205,7 @@ def _memory_member_arm(c: str) -> str:
     )
 
 
-def cluster_seed_object_id(cluster_alias: str) -> str:
+def cluster_seed_object_id(cluster_alias: str, column: str = "canonical_id") -> str:
     """簇 `cluster_alias` 的 canonical id 若是**按对象 id 铸的**,取出那个对象 id;否则 NULL。
     零参数。
 
@@ -216,8 +216,11 @@ def cluster_seed_object_id(cluster_alias: str) -> str:
     理论上能留下 `~`,但要恰好是 `~ko-...` 开头的公式才会被误读,实际不可达。只用
     `substr` 与等值比较,两个后端文本逐字相同(不用 LIKE:PostgreSQL 的 `%` 在带参语句里
     要转义成 `%%`,会让两份文本分叉)。
+
+    `column` 默认读簇行的 `canonical_id`;Memory 清除用同一条规则判合并候选的
+    `canonical_a` / `canonical_b`(候选点名的簇 id 是否铸自被清除的对象),不另写一份。
     """
-    col = f"{_alias(cluster_alias, frozenset())}.canonical_id"
+    col = f"{_alias(cluster_alias, frozenset())}.{_alias(column, frozenset())}"
     return (
         f"(CASE WHEN substr({col}, 1, 6) = 'K-~ko-' THEN substr({col}, 4) "
         f"WHEN substr({col}, 1, 1) = 'K' AND substr({col}, 3, 5) = '-~ko-' "

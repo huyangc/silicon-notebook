@@ -1139,6 +1139,23 @@ def _seed_memory_named_cluster(world: World) -> str:
             "VALUES (?,?,'K-alice-private plan','K-bob loop',0.9,?,?,?)",
             (mid, world.shared, status, _GRANT_CREATED_AT, _GRANT_CREATED_AT),
         )
+    # The seed arm (``memory_sql.cluster_seed_object_id``): a cluster whose
+    # canonical id was MINTED from the Memory object (``K-~<object id>``) but
+    # which no longer has it as a member — only a shared one — plus a
+    # candidate naming that minted id.
+    seed_id = f"K-~{memory_object}"
+    world.sql.write(
+        "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,"
+        "canonical_name,object_type,canonical_description,created_at,generation) "
+        "VALUES ('cc-b2-seed',?,?,?,'ALICE-PRIVATE seed','concept','',?,1)",
+        (world.shared, seed_id, world.shared_doc_object, _GRANT_CREATED_AT),
+    )
+    world.sql.write(
+        "INSERT INTO concept_merge_candidates "
+        "(id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
+        "VALUES ('mc-b2-seed',?,'K-bob loop',?,0.9,'pending',?,?)",
+        (world.shared, seed_id, _GRANT_CREATED_AT, _GRANT_CREATED_AT),
+    )
     return other_shared
 
 
@@ -1161,7 +1178,8 @@ def _memory_named_leftovers(world: World, other_shared: str) -> dict[str, int]:
         ),
         "memory_named_candidates": world.sql.count(
             "SELECT COUNT(*) AS c FROM concept_merge_candidates "
-            "WHERE canonical_a='K-alice-private plan' OR canonical_b='K-alice-private plan'"
+            "WHERE canonical_a='K-alice-private plan' OR canonical_b='K-alice-private plan' "
+            "OR id='mc-b2-seed'"
         ),
         "memory_evidence_on_shared": int(
             world.projections["alice"].source_id

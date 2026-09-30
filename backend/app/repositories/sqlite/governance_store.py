@@ -19,6 +19,7 @@ from app.core.text_whitespace import PY_STRIP_WHITESPACE
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.memory_sql import (
+    cluster_seed_object_id,
     memory_derived_object,
     memory_derived_relation,
 )
@@ -28,19 +29,10 @@ from app.repositories.sqlite.id_binding import (
     member_of as id_member_of,
 )
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER
-from app.domain.kg_merge_seed import CANONICAL_ID_PREFIXES
 from app.domain.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
     USABLE_STATUSES,
     PromotionApproval,
-)
-
-# One row per canonical-id prefix, as a SQL constant (see the PostgreSQL
-# twin): the purge derives minted ids in SQL instead of binding a list.
-if not all(prefix.replace("-", "").isalpha() for prefix in CANONICAL_ID_PREFIXES):
-    raise ValueError("canonical-id prefixes must be plain letters and '-'")
-_PREFIX_ROWS = "({}) AS p".format(
-    " UNION ALL ".join(f"SELECT '{prefix}' AS prefix" for prefix in CANONICAL_ID_PREFIXES)
 )
 
 _REVIEW_STATUSES = frozenset({"pending", "verified", "rejected"})
@@ -1578,10 +1570,11 @@ class GovernanceStore:
         bridge_canonical_ids: List[str],
     ) -> int:
         """Mirror of the PostgreSQL twin (its docstring carries the rules):
-        the merge candidates naming the Memory's clusters, its minted ids or a
-        bridge id no cluster carries; the whole clusters; the conflict
-        candidates referencing its objects or relations. Minted ids are
-        derived in SQL from the owned objects; the source ids are one purge
+        the merge candidates naming the Memory's clusters, an id minted from
+        one of its objects (``memory_sql.cluster_seed_object_id``) or a bridge
+        id no cluster carries; the whole clusters; the conflict candidates
+        referencing its objects or relations. Nothing growing with the KG is
+        bound; the source ids are one purge
         page (at most 200); the bridge ids go through ``id_binding``.
         Returns the number of cluster rows removed."""
         ids = sorted(set(source_ids))
@@ -1591,21 +1584,23 @@ class GovernanceStore:
         owned = (
             "owned AS (SELECT ko.id FROM knowledge_objects ko "
             f"WHERE ko.notebook_id = ? AND ko.source_id IN ({marks}) "
-            f"AND {memory_derived_object('ko')}), "
-            "minted AS (SELECT o.id AS cid FROM owned o UNION ALL "
-            f"SELECT p.prefix || '~' || o.id FROM owned o CROSS JOIN {_PREFIX_ROWS})"
+            f"AND {memory_derived_object('ko')})"
         )
         doomed = (
             "SELECT mc.canonical_id FROM concept_clusters mc WHERE mc.notebook_id = ? "
             "AND (mc.member_object_id IN (SELECT id FROM owned) "
-            "OR mc.canonical_id IN (SELECT cid FROM minted))"
+            f"OR {cluster_seed_object_id('mc')} IN (SELECT id FROM owned))"
         )
         bridge = id_bind_ids(sorted(set(bridge_canonical_ids)), sort=True)
         connection.execute(
-            f"WITH {owned}, named AS (SELECT cid FROM minted UNION {doomed}) "
+            f"WITH {owned}, doomed AS ({doomed}) "
             "DELETE FROM concept_merge_candidates WHERE notebook_id = ? AND ("
-            "canonical_a IN (SELECT cid FROM named) "
-            "OR canonical_b IN (SELECT cid FROM named) "
+            "canonical_a IN (SELECT canonical_id FROM doomed) "
+            "OR canonical_b IN (SELECT canonical_id FROM doomed) "
+            f"OR {cluster_seed_object_id('concept_merge_candidates', 'canonical_a')} "
+            "IN (SELECT id FROM owned) "
+            f"OR {cluster_seed_object_id('concept_merge_candidates', 'canonical_b')} "
+            "IN (SELECT id FROM owned) "
             f"OR ({id_member_of('canonical_a', bridge)} AND NOT EXISTS ("
             "SELECT 1 FROM concept_clusters xa "
             "WHERE xa.notebook_id = concept_merge_candidates.notebook_id "

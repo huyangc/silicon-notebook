@@ -26,6 +26,7 @@ from app.repositories.postgres.cluster_lock import lock_cluster_artifact_type
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.knowledge_store import KnowledgeStore
 from app.repositories.postgres.memory_sql import (
+    cluster_seed_object_id,
     memory_derived_object,
     memory_derived_relation,
 )
@@ -35,21 +36,11 @@ from app.repositories.postgres.id_binding import (
     member_of as id_member_of,
 )
 from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER
-from app.domain.kg_merge_seed import CANONICAL_ID_PREFIXES
 from app.domain.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
     USABLE_STATUSES,
     PromotionApproval,
 )
-
-# One row per canonical-id prefix, as a SQL constant: the purge derives the
-# ids minted from an object (``<prefix>~<object id>``) in SQL instead of
-# binding a list that grows with the KG.
-_PREFIX_ROWS = "(VALUES {}) AS p(prefix)".format(
-    ",".join(f"('{prefix}')" for prefix in CANONICAL_ID_PREFIXES)
-)
-if not all(prefix.replace("-", "").isalpha() for prefix in CANONICAL_ID_PREFIXES):
-    raise ValueError("canonical-id prefixes must be plain letters and '-'")
 
 _REVIEW_STATUSES = frozenset({"pending", "verified", "rejected"})
 
@@ -1769,9 +1760,9 @@ class GovernanceStore:
         down, in the caller's transaction (before the objects go):
 
         1. the merge candidates (any status) naming a cluster that contains
-           one of those objects, or naming a canonical id that can only have
-           been minted from one of them (``<prefix>~<object id>`` and the
-           object id itself, derived here from ``CANONICAL_ID_PREFIXES``), or
+           one of those objects, or naming a canonical id minted from one of
+           them (``memory_sql.cluster_seed_object_id`` — the one minted-id
+           rule the copy uses too), or
            naming a bridge canonical id of one of them
            (``bridge_canonical_ids``) that no cluster row carries — a name
            only the Memory gave; a live cluster carrying the same bridge id
@@ -1788,8 +1779,9 @@ class GovernanceStore:
 
         "Object of a Memory source" is ``memory_sql``'s
         ``memory_derived_object`` over the given sources; "a cluster of a
-        Memory" is a cluster with such a member — the same member test as
-        ``no_memory_member_cluster``. Every list that grows with the KG is
+        Memory" is a cluster with such a member or seeded by such an object —
+        the member and seed arms of ``memory_sql.memory_cluster``, restricted
+        to the purged objects. Every list that grows with the KG is
         derived in SQL from the owned-objects subquery; the source ids are one
         purge page (at most 200) and the bridge ids go through ``id_binding``.
         Returns the number of cluster rows removed."""
@@ -1799,22 +1791,22 @@ class GovernanceStore:
         owned = (
             "owned AS (SELECT ko.id FROM knowledge_objects ko "
             "WHERE ko.notebook_id = %s AND ko.source_id = ANY(%s) "
-            f"AND {memory_derived_object('ko')}), "
-            f"minted AS (SELECT o.id AS cid FROM owned o UNION ALL "
-            f"SELECT p.prefix || '~' || o.id FROM owned o CROSS JOIN {_PREFIX_ROWS})"
+            f"AND {memory_derived_object('ko')})"
         )
         doomed = (
             "SELECT mc.canonical_id FROM concept_clusters mc WHERE mc.notebook_id = %s "
             "AND (mc.member_object_id IN (SELECT id FROM owned) "
-            "OR mc.canonical_id IN (SELECT cid FROM minted))"
+            f"OR {cluster_seed_object_id('mc')} IN (SELECT id FROM owned))"
         )
         bridge = id_bind_ids(sorted(set(bridge_canonical_ids)))
         id_execute_ids(
             connection,
-            f"WITH {owned}, named AS (SELECT cid FROM minted UNION {doomed}) "
+            f"WITH {owned}, doomed AS ({doomed}) "
             "DELETE FROM concept_merge_candidates m WHERE m.notebook_id = %s AND ("
-            "m.canonical_a IN (SELECT cid FROM named) "
-            "OR m.canonical_b IN (SELECT cid FROM named) "
+            "m.canonical_a IN (SELECT canonical_id FROM doomed) "
+            "OR m.canonical_b IN (SELECT canonical_id FROM doomed) "
+            f"OR {cluster_seed_object_id('m', 'canonical_a')} IN (SELECT id FROM owned) "
+            f"OR {cluster_seed_object_id('m', 'canonical_b')} IN (SELECT id FROM owned) "
             f"OR ({id_member_of('m.canonical_a', bridge)} AND NOT EXISTS ("
             "SELECT 1 FROM concept_clusters xa WHERE xa.notebook_id = m.notebook_id "
             "AND xa.canonical_id = m.canonical_a)) "
