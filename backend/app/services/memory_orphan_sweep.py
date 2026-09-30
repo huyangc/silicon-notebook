@@ -43,7 +43,10 @@ Contract (pinned by ``tests/test_memory_orphan_sweep.py``):
   so the rest also waits for the next start instead of failing one by one.
 * **Content-free events.** ``memory_orphan_sweep_started`` / ``_completed`` /
   ``_failed`` carry source ids, counts and an exception CLASS name -- never a
-  title, text, path or message.
+  title, text, path or message. A read that fails (statement timeout, lost
+  connection) emits ``_failed`` with the class name only and ends the pass, so
+  ``_started`` is always followed by ``_completed`` and a failed read is never
+  silent; the rest is left for the next start.
 """
 from __future__ import annotations
 
@@ -53,11 +56,13 @@ from typing import Any, Callable, Dict
 #: maintenance pools: one bounded pass per process start).
 JOB_NAME = "memory-orphan-sweep"
 
-#: Orphans read (and deleted) per page. A protocol constant: it bounds one
+#: Orphans read (and deleted) per page. Each page costs one anti-join pass over
+#: ``sources`` (about 0.5-1.5 s on 1M sources), so a page is sized to make a few
+#: thousand orphans a handful of passes. A protocol constant: it bounds one
 #: statement's result, never the outcome -- ``test_memory_orphan_sweep`` runs
 #: the same fixture with a page of 1 and with this value and requires the same
 #: end state.
-ORPHAN_SWEEP_PAGE_SIZE = 200
+ORPHAN_SWEEP_PAGE_SIZE = 1000
 
 #: Consecutive failed deletes that end a pass (see the module docstring).
 MAX_CONSECUTIVE_FAILURES = 3
@@ -97,7 +102,7 @@ class MemoryOrphanSweep:
 
     # ------------------------------------------------------------- driving
     def has_orphans(self) -> bool:
-        return bool(self._store.orphan_memory_source_ids(1))
+        return bool(self._store.has_orphan_memory_sources())
 
     def schedule(self) -> Any:
         """Submit one background pass when any orphan exists. Returns the job
@@ -124,7 +129,12 @@ class MemoryOrphanSweep:
         consecutive = 0
         started = False
         while consecutive < MAX_CONSECUTIVE_FAILURES:
-            page = self._store.orphan_memory_source_ids(self._page_size, after)
+            try:
+                page = self._store.orphan_memory_source_ids(self._page_size, after)
+            except Exception as exc:  # noqa: BLE001 - a failed read ends the pass, visibly
+                self._emit({"kind": "memory_orphan_sweep_failed",
+                            "error_class": type(exc).__name__})
+                break
             if not page:
                 break
             if not started:

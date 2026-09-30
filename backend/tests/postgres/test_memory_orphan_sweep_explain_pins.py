@@ -1,27 +1,28 @@
-"""EXPLAIN pins (real PG) of the two statements behind the E5-3 orphan sweep.
+"""EXPLAIN pins (real PG, the REAL planner) of the statements behind the E5-3 orphan sweep.
 
+* ``MemoryStore.has_orphan_memory_sources`` (startup probe, ``EXISTS``),
 * ``MemoryStore.orphan_memory_source_ids`` (the sweep's global keyset read) and
 * ``MemoryStore.orphan_memory_source_count_on`` (checkup H12, one notebook).
 
-Style follows ``test_memory_sql_explain_pins.py``: a non-trivial dataset (4,000
-sources, 200 of them Memory sources, 8 of those orphans), real ``VACUUM (ANALYZE)``
-statistics, and the plan the planner actually picks -- no ``enable_*`` switches for
-the sweep read, because the point of that pin is the plan an untuned production
-database chooses:
+No ``enable_*`` switches anywhere: the point of these pins is the plan an untuned
+production database chooses. The bed is big enough for the planner to have a real
+opinion (100,000 sources with random ids like production's ``src-<uuid>``, 30,000 of
+them Memory sources, 30,000 confirmed Memory items, 12 orphans of every shape) and
+carries ``VACUUM (ANALYZE)`` statistics.
 
-* neither statement may need a heap scan of either table: with ``enable_seqscan``
-  off (the idiom of the neighbouring pins -- a few thousand test rows would let the
-  planner legitimately prefer a Seq Scan on cost alone) an index path must exist;
-* the sweep read has no ``source_type``-only index to seek (``sources`` is indexed by
-  ``(notebook_id, source_type)``, not by type alone), so one pass over ``sources`` is
-  inherent: exactly one scan node, bounded by ``LIMIT``, no join back into
-  ``sources``. Its ``memory_items`` side is reached through an index only. Which
-  index depends on table size, and both shapes are bounded: on this small table the
-  planner hashes the confirmed ids once (``hashed SubPlan``); measured at 300k Memory
-  items / 350k sources it uses one ``memory_items_pkey`` probe per Memory source
-  (1.2 s for a full zero-orphan pass, 7 ms for the per-notebook count at 151 Memory
-  sources);
-* the count is seeked on ``idx_sources_nb_hidden_type (notebook_id, source_type)``.
+What is pinned, and why (measured on 1M sources / 300k Memory sources / random ids,
+PostgreSQL 16, load average ~45 -- see docs/operations.md):
+
+* the orphan predicate is ONE decorrelatable ``NOT EXISTS`` (no ``OR``): every plan
+  contains an ``Anti Join`` and no per-row ``SubPlan``. The earlier ``OR`` spelling
+  made the planner walk the whole of ``sources`` by primary key (id order for
+  ``ORDER BY id LIMIT``) with a probe per Memory source: 59 s for the ``LIMIT 1``
+  probe on the measurement machine, 8.4 s for a page;
+* the paged read sorts the (small) anti-join result, never the primary key: the
+  materialized CTE fences it, so ``pk_sources`` is not used as an ordered walk;
+* the startup probe is an ``EXISTS`` (first hit stops it), no ``ORDER BY``;
+* the per-notebook count is seeked on ``idx_sources_nb_hidden_type``
+  ``(notebook_id, source_type)``.
 """
 from __future__ import annotations
 
@@ -51,35 +52,42 @@ def _seed(postgres_database) -> None:
         db.execute(
             "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
             "created_at,updated_at,tier) "
-            "VALUES ('nb','N','','','ready','u-a',%s,%s,'personal')",
+            "SELECT 'nb'||g,'N','','','ready','u-a',%s,%s,'personal' "
+            "FROM generate_series(0,49) g",
             (_NOW, _NOW),
         )
-        db.execute(
-            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
-            "created_at,updated_at,tier) "
-            "VALUES ('nb2','N2','','','ready','u-a',%s,%s,'personal')",
-            (_NOW, _NOW),
-        )
-        # 192 confirmed Memory items; sources 0..191 are their (healthy) sources
+        # 30,000 confirmed Memory items (ids are md5s: random order, like production)
         db.execute(
             "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
             "content_md,created_at,updated_at) "
-            "SELECT 'mem-'||g,'nb','u-a','ask_answer','confirmed','t','x',%s,%s "
-            "FROM generate_series(0,191) g",
+            "SELECT 'mem-'||md5(g::text),'nb'||(g%%50),'u-a','ask_answer',"
+            "CASE WHEN g<30000 THEN 'confirmed' ELSE 'deprecated' END,'t','x',%s,%s "
+            "FROM generate_series(0,31999) g",
+            (_NOW, _NOW),
+        )
+        # 30,000 healthy Memory sources, 70,000 uploads
+        db.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,memory_id,created_at,"
+            "updated_at) SELECT 'src-'||md5('m'||g),'nb'||(g%%50),'t','memory',"
+            "'mem-'||md5(g::text),%s,%s FROM generate_series(0,29999) g",
             (_NOW, _NOW),
         )
         db.execute(
             "INSERT INTO sources(id,notebook_id,title,source_type,memory_id,created_at,"
-            "updated_at) SELECT 'src-'||lpad(g::text,5,'0'),"
-            "CASE WHEN g%%2=0 THEN 'nb' ELSE 'nb2' END,'t',"
-            "CASE WHEN g<200 THEN 'memory' WHEN g<400 THEN 'knowhow' ELSE 'upload' END,"
-            "CASE WHEN g<192 THEN 'mem-'||g WHEN g<196 THEN 'mem-gone-'||g "
-            "WHEN g<198 THEN NULL WHEN g<200 THEN '' END,%s,%s "
-            "FROM generate_series(0,3999) g",
+            "updated_at) SELECT 'src-'||md5('u'||g),'nb'||(g%%50),'t','upload',NULL,%s,%s "
+            "FROM generate_series(0,69999) g",
             (_NOW, _NOW),
         )
-        for table in _TABLES:
-            db.execute(f"ANALYZE {table}")
+        # 12 orphans in notebook nb7: cleared link (''), NULL link, deprecated Memory,
+        # a Memory that never existed
+        db.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,memory_id,created_at,"
+            "updated_at) SELECT 'orph-'||g,'nb7','t','memory',"
+            "CASE g%%4 WHEN 0 THEN '' WHEN 1 THEN NULL "
+            "WHEN 2 THEN 'mem-'||md5((30000+g)::text) ELSE 'mem-gone-'||g END,%s,%s "
+            "FROM generate_series(0,11) g",
+            (_NOW, _NOW),
+        )
     import psycopg
 
     with psycopg.connect(postgres_database.settings.database_url, autocommit=True) as raw:
@@ -87,63 +95,64 @@ def _seed(postgres_database) -> None:
             raw.execute(f"VACUUM (ANALYZE) {table}")
 
 
-def _plan(connection, sql: str, params: tuple, *, index_only: bool = False) -> str:
-    if index_only:
-        connection.execute("SET LOCAL enable_seqscan=off")
-        connection.execute("SET LOCAL enable_bitmapscan=off")
+def _plan(connection, sql: str, params: tuple = ()) -> str:
     rows = connection.execute(f"EXPLAIN (COSTS OFF) {sql}", params).fetchall()
     return "\n".join(str(row["QUERY PLAN"]) for row in rows)
 
 
-def _plans(postgres_database) -> dict[str, str]:
-    assert PostgresMigrator(postgres_database).migrate()
-    _seed(postgres_database)
+def _statements() -> dict[str, tuple[str, tuple]]:
     where = postgres_memory_store._ORPHAN_MEMORY_SOURCE_WHERE
-    with postgres_database.connect() as connection:
-        # the statements really do what the pin is about
-        ids = [
-            row["id"]
-            for row in connection.execute(
-                "SELECT s.id FROM sources s WHERE " + where + " AND s.id > %s "
-                "ORDER BY s.id LIMIT %s", ("", 100),
-            ).fetchall()
-        ]
-        assert len(ids) == 8, ids
-        plans = {
-            "ids": _plan(
-                connection,
-                "SELECT s.id FROM sources s WHERE " + where + " AND s.id > %s "
-                "ORDER BY s.id LIMIT %s",
-                ("", 200),
-                index_only=True,
-            ),
-        }
-    with postgres_database.connect() as connection:
-        plans["count"] = _plan(
-            connection,
-            "SELECT count(*) AS n FROM sources s WHERE s.notebook_id = %s AND " + where,
-            ("nb",),
-            index_only=True,
-        )
-    return plans
+    return {
+        "exists": (f"SELECT EXISTS (SELECT 1 FROM sources s WHERE {where}) AS found", ()),
+        "ids": (
+            "WITH o AS MATERIALIZED (SELECT s.id FROM sources s "
+            f"WHERE {where} AND s.id > %s) SELECT id FROM o ORDER BY id LIMIT %s",
+            ("", 200),
+        ),
+        "count": (
+            f"SELECT count(*) AS n FROM sources s WHERE s.notebook_id = %s AND {where}",
+            ("nb7",),
+        ),
+    }
 
 
 def test_orphan_statements_keep_their_plan_shapes(postgres_database):
-    plans = _plans(postgres_database)
+    assert PostgresMigrator(postgres_database).migrate()
+    _seed(postgres_database)
+    store = postgres_memory_store.MemoryStore(
+        postgres_database, new_id=lambda prefix: prefix, now=lambda: _NOW
+    )
+    statements = _statements()
+
+    # the pinned statements are the ones the store runs, and they find the 12 orphans
+    assert store.has_orphan_memory_sources() is True
+    found = store.orphan_memory_source_ids(1000)
+    assert len(found) == 12 and found == sorted(found)
+    with postgres_database.connect() as connection:
+        assert postgres_memory_store.MemoryStore.orphan_memory_source_count_on(
+            connection, "nb7"
+        ) == 12
+        plans = {
+            name: _plan(connection, sql, params)
+            for name, (sql, params) in statements.items()
+        }
 
     for name, plan in plans.items():
-        assert "Seq Scan" not in plan, (name, plan)
-        # memory_items is only ever reached through an index (the primary key probe on
-        # a large table, the owner index when the planner hashes the confirmed ids of
-        # a small one) -- never scanned as a heap
-        memory_lines = [ln for ln in plan.splitlines() if "on memory_items" in ln]
-        assert memory_lines and all("Index" in ln for ln in memory_lines), (name, plan)
+        # decorrelated: an anti join, never a per-row correlated SubPlan
+        assert "Anti Join" in plan, (name, plan)
+        assert "SubPlan" not in plan, (name, plan)
         assert plan.count("on sources") == 1, (name, plan)  # one pass, no join back
+    for name in ("exists", "ids"):
+        # the global statements never walk sources in primary-key order
+        assert "pk_sources" not in plans[name], (name, plans[name])
+    assert "ORDER BY" not in statements["exists"][0]
 
     ids = plans["ids"]
-    assert ids.startswith("Limit"), ids  # bounded
+    assert "CTE o" in ids and "Sort" in ids and ids.startswith("Limit"), ids
 
-    # the per-notebook count is seeked on the notebook prefix of the type index
+    # sources side: the (notebook_id, source_type) seek. The memory_items side is size
+    # dependent and both shapes are bounded: a Hash (Right) Anti Join over the confirmed
+    # items here, one pk_memory_items probe per Memory source on a large table (measured
+    # 28 ms for 1,525 Memory sources against 300k items).
     count = plans["count"]
-    assert "Index Scan using idx_sources_nb_hidden_type" in count, count
-    assert "notebook_id = 'nb'" in count and "source_type = 'memory'" in count, count
+    assert "idx_sources_nb_hidden_type" in count, count

@@ -69,12 +69,11 @@ def _json_list(raw: Any) -> list[str]:
 
 
 # 「无主的 Memory 来源」——语义与 postgres/memory_store.py 的同名常量逐字对应(见那里的
-# 说明)。SQLite 只作镜像,谓词文本相同。
-# 显式的 `IS NULL` / `= ''` 与 `NOT EXISTS` 的关系同那里:前者是「链接被清空」的直写。
+# 说明,包括为什么是没有 `OR` 的单个 NOT EXISTS)。SQLite 只作镜像,谓词文本相同。
 _ORPHAN_MEMORY_SOURCE_WHERE = (
     memory_sql.memory_source_type_predicate("s.source_type")
-    + " AND (s.memory_id IS NULL OR s.memory_id = '' OR NOT EXISTS ("
-    "SELECT 1 FROM memory_items m WHERE m.id = s.memory_id AND m.status = 'confirmed'))"
+    + " AND NOT EXISTS (SELECT 1 FROM memory_items m WHERE m.id = s.memory_id "
+    "AND m.status = 'confirmed' AND m.id <> '')"
 )
 
 
@@ -2157,6 +2156,14 @@ class MemoryStore:
             "SELECT embedding_status FROM memory_items WHERE id=?",
             (source_memory_id,),
         ).fetchone()
+
+    def has_orphan_memory_sources(self) -> bool:
+        """是否存在至少一个无主 Memory 来源(启动探测);PostgreSQL 版的镜像。"""
+        with self.database.connect() as db:
+            row = db.execute(
+                f"SELECT EXISTS (SELECT 1 FROM sources s WHERE {_ORPHAN_MEMORY_SOURCE_WHERE}) AS found"
+            ).fetchone()
+        return bool(row["found"])
 
     def orphan_memory_source_ids(self, limit: int, after_id: str = "") -> list[str]:
         """至多 `limit` 个无主 Memory 来源的 id,按 id 升序,只取 `after_id` 之后的(键集分页)。
