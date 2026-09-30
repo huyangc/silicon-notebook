@@ -91,15 +91,17 @@ def test_derived_memory_sources_uses_the_partial_index_on_analysed_data(
     repo, monkeypatch
 ):
     import psycopg
+    import psycopg.sql
 
     database = repo._runtime.database
+    owner = repo.create_user("p00100001", "pw123456")
     with database.write() as db:
         db.execute("SET LOCAL statement_timeout = '0'")
         db.execute(
             "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
             "created_at,updated_at,tier) "
-            "VALUES ('nb-pin','N','','','ready','u-pin',%s,%s,'personal')",
-            (_NOW, _NOW),
+            "VALUES ('nb-pin','N','','','ready',%s,%s,%s,'personal')",
+            (owner.id, _NOW, _NOW),
         )
         db.execute(
             "INSERT INTO sources(id,notebook_id,title,source_type,memory_id,created_at,"
@@ -124,8 +126,12 @@ def test_derived_memory_sources_uses_the_partial_index_on_analysed_data(
         )
         generic = "\n".join(
             str(row["QUERY PLAN"])
+            # A utility statement takes no bind parameters: the array goes in
+            # as a literal (the prepared statement's own parameter stays $1).
             for row in connection.execute(
-                "EXPLAIN (COSTS OFF) EXECUTE pin_derived(%s)", params
+                psycopg.sql.SQL("EXPLAIN (COSTS OFF) EXECUTE pin_derived({})").format(
+                    psycopg.sql.Literal(list(params[0]))
+                )
             ).fetchall()
         )
         connection.execute("DEALLOCATE pin_derived")
