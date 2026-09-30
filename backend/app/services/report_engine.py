@@ -70,7 +70,10 @@ from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancel
 # degrading an identity-attestation failure into an empty result set.
 from app.domain.retrieval_control import RetrievalControlError
 from app.services.citation_markers import MARKER_RE, marker_keys
-from app.services.report_execution import REPORT_CANCELLATIONS
+from app.services.report_execution import (
+    REPORT_CANCELLATIONS,
+    cancellable_ceiling_readers,
+)
 from app.services.report_corpus_profile import (
     PROFILE_FAILED,
     PROFILE_SCOPE_RESTRICTED,
@@ -3523,7 +3526,9 @@ class ReportEngine:
         ``None`` one was never persisted, so the worker's freeze of it stands.
         The outer per-library ceilings and ``ceilings_total`` are inherited.
         A reader failure (or no readers wired) fails the report; a stop
-        cancels it.  Neither falls back to planning without a ceiling.
+        cancels it -- every read runs under a budget carrying the engine's
+        cancel event (``cancellable_ceiling_readers``), so a Stop does not
+        wait for it.  Neither falls back to planning without a ceiling.
         """
         from app.services.source_scope import refreshed_ceiling_context
 
@@ -3534,16 +3539,20 @@ class ReportEngine:
             if readers is None:
                 raise RuntimeError("report scope refresh has no ceiling readers")
             stack.enter_context(refreshed_ceiling_context(
-                notebook_id, self.user_id, readers,
+                notebook_id, self.user_id,
+                cancellable_ceiling_readers(readers, self.cancel_event),
                 local_scope=refreshed_scope, base_scope=refreshed_base_scope,
                 cancel_event=self.cancel_event,
             ))
-        except AskCancelled:
-            reports.update_report(
-                notebook_id, rid, status="cancelled", progress="已取消"
-            )
-            return None
         except Exception as exc:
+            if isinstance(exc, AskCancelled) or (
+                # A read the Stop interrupted is the Stop, not a failure.
+                self.cancel_event is not None and self.cancel_event.is_set()
+            ):
+                reports.update_report(
+                    notebook_id, rid, status="cancelled", progress="已取消"
+                )
+                return None
             reports.update_report(notebook_id, rid, status="failed",
                                   error=str(exc)[:500], progress="规划失败")
             return None
