@@ -3058,11 +3058,17 @@ class RepositoryFacade:
             after=after,
         )
 
-    def _element_texts(self, db, element_ids, *, with_ordinal: bool = False):
-        return self._runtime.knowledge._element_texts(db, element_ids, with_ordinal=with_ordinal)
+    def _element_texts(self, db, element_ids, *, with_ordinal: bool = False,
+                       owner_notebook_id: Optional[str] = None):
+        return self._runtime.knowledge._element_texts(
+            db, element_ids, with_ordinal=with_ordinal,
+            owner_notebook_id=owner_notebook_id,
+        )
 
-    def _enrich_evidence(self, db, evidence):
-        return self._runtime.knowledge._enrich_evidence(db, evidence)
+    def _enrich_evidence(self, db, evidence, *, owner_notebook_id: Optional[str] = None):
+        return self._runtime.knowledge._enrich_evidence(
+            db, evidence, owner_notebook_id=owner_notebook_id,
+        )
 
     def node_context(
         self,

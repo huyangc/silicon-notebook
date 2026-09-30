@@ -532,6 +532,7 @@ class KnowledgeQueryService:
 
     def _viewer_resolved_evidence(
         self, scope: Any, evidence: list, members: list, attached: list,
+        notebook_id: str,
     ) -> list:
         """Every evidence item concept detail returns — the page's enriched
         ``evidence`` AND the raw items inside ``members[].evidence`` and
@@ -542,10 +543,17 @@ class KnowledgeQueryService:
         items together (the unfiltered path already made one for members);
         the lists are filtered in place and the members' enriched survivors
         are returned. Items reaching here already passed ``filter_evidence``
-        on the source they name."""
+        on the source they name.
+
+        Elements are re-read only from ``notebook_id`` -- the cluster's own
+        library (ledger B-11, PR-E2 E2-4): an item of a member promoted from a
+        private library keeps its stored quote and names its stored source,
+        which the viewer scope then judges like any other."""
         attached_items = [item for entry in attached for item in entry["evidence"]]
         with self.database.connect() as db:
-            enriched = self.knowledge._enrich_evidence(db, evidence + attached_items)
+            enriched = self.knowledge._enrich_evidence(
+                db, evidence + attached_items, owner_notebook_id=notebook_id,
+            )
         # _enrich_evidence keeps only dict items, and filter_evidence already
         # dropped everything else, so the two lists align index by index.
         unreadable = {
@@ -699,9 +707,15 @@ class KnowledgeQueryService:
         ]
         if scope is None:
             with self.database.connect() as db:
-                evidence = self.knowledge._enrich_evidence(db, evidence)
+                # 台账 B-11:元素只从本簇所在的库现读(晋升成员的外库证据保留
+                # 存储时的摘录)。
+                evidence = self.knowledge._enrich_evidence(
+                    db, evidence, owner_notebook_id=notebook_id,
+                )
         else:
-            evidence = self._viewer_resolved_evidence(scope, evidence, members, attached)
+            evidence = self._viewer_resolved_evidence(
+                scope, evidence, members, attached, notebook_id,
+            )
         return {
             "canonical_id": canonical_id,
             "canonical_name": name,

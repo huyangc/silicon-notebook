@@ -168,14 +168,12 @@ def _definition_from_defines(
     return {} if hit is None else _defines_evidence_fields(hit)
 
 
-# PG 孪生常量(台账 B-11):元素 → 来源 → 笔记本三次主键探测,谓词写成
-# ``+os.notebook_id=?``,让无统计信息(生产不跑 ANALYZE)时也由元素 id 驱动,
-# 而不是按 ``sources.notebook_id`` 扫一整库的来源。计划钉在
+# PG 孪生常量(台账 B-11):元素 → 来源两次主键探测(库的存在由
+# ``sources.notebook_id`` 外键 CASCADE 保证),谓词写成 ``+os.notebook_id=?``,
+# 让无统计信息(生产不跑 ANALYZE)时也由元素 id 驱动,而不是按
+# ``sources.notebook_id`` 扫一整库的来源。计划钉在
 # ``tests/test_store_evidence_ceiling_plans.py``。
-_OWN_ELEMENT_JOIN = (
-    " JOIN sources os ON os.id=se.source_id"
-    " JOIN notebooks onb ON onb.id=os.notebook_id"
-)
+_OWN_ELEMENT_JOIN = " JOIN sources os ON os.id=se.source_id"
 
 
 def _element_rows(db: sqlite3.Connection, element_ids: Iterable[object]) -> dict:
@@ -1873,8 +1871,7 @@ class KnowledgeStore:
 
     @staticmethod
     def in_network_relation_rows(db: sqlite3.Connection, notebook_id: str,
-                                 object_ids, *,
-                                 allowed_source_ids: Optional[Iterable[str]] = None):
+                                 object_ids, *, with_source_ids: bool = False):
         """T2(批 1 热点整改):``DISTINCT`` 下推同一 (src,et,tgt) 跨多个来源的
         重复原始行——此前它们全部原样回传,靠 Python 侧 identity 去重循环兜底
         (仍保留,防御性)。``ORDER BY`` 是把此前 planner 相关、无定义的行序钉成
@@ -1882,53 +1879,31 @@ class KnowledgeStore:
         记入 seen_relations"的 tie 由存储顺序决定,双后端/同库两次运行都不必
         一致;补上确定序让这类并列在跨后端/跨执行下稳定,不是语义变更。
 
-        ``allowed_source_ids``(PR-E2·E2-4,台账 B-6):``None`` → 语句与参数与
-        加这个参数之前逐字节相同(调用方只在该库的来源天花板**起约束作用**时
-        才传,见 ``EvidenceContextService.knowledge_context``)。空 → ``[]``,
-        不发语句。非空 → 只读 ``r.source_id`` 在天花板内的关系行,``DISTINCT``
-        换成 ``GROUP BY`` 并多投影一列 ``source_count`` = 天花板内**不同来源**
-        的条数(「×N源」的界内口径);没有一条界内行的边根本不返回。天花板经
-        ``source_ceiling.ceiling_param``(一个 JSON 参数、排序、备忘在 run 的
-        ``CeilingSet`` 上)绑定,谓词是 ``id_binding.member_of`` 的 ``+r.source_id
-        IN``:一元 ``+`` 让清单只做成员测试,关系行照旧由两端 id 走
-        ``idx_knowledge_relations_nb_source_target_edge`` 驱动——生产库不跑
-        ANALYZE,两种统计状态下的计划由 ``test_store_evidence_ceiling_plans.py``
-        钉住。"""
+        ``with_source_ids``(PR-E2·E2-4,台账 B-6):``False`` → 语句与参数与加
+        这个参数之前逐字节相同。``True`` → 多投影 ``r.source_id``(``DISTINCT``
+        因而是「每条边 × 每个来源」一行,排序末尾追加 ``r.source_id``),**不绑
+        任何来源清单**:候选只是 ≤ 几十个已接纳对象两两之间的关系行,是
+        ``source_ceiling`` 模块所说「小而有界的候选集」,天花板由调用方
+        (``EvidenceContextService._bounded_relation_rows``)读回后在 Python 里对
+        run 的 frozenset 判成员、计数并做读后核验。于是这条语句没有 49k 常量要
+        规划,也不进计划缓存的悬崖;两种统计状态下由两端 id 驱动,见
+        ``tests/test_store_evidence_ceiling_plans.py``。"""
         ids = list(object_ids)
         if len(ids) < 2:
             return []
         ph = ",".join("?" for _ in ids)
-        ceiling = source_ceiling.normalise_ceiling(allowed_source_ids)
-        if ceiling is not None:
-            if not ceiling:
-                return []
-            bound = source_ceiling.ceiling_param(ceiling)
-            return db.execute(
-                f"SELECT r.source_object_id, r.target_object_id, r.edge_type, "
-                f"src.object_type AS source_type, tgt.object_type AS target_type, "
-                f"COUNT(DISTINCT r.source_id) AS source_count "
-                f"FROM knowledge_relations AS r "
-                f"JOIN knowledge_objects AS src ON src.id=r.source_object_id "
-                f"JOIN knowledge_objects AS tgt ON tgt.id=r.target_object_id "
-                f"WHERE r.notebook_id=? AND r.review_status!='rejected' "
-                f"AND r.source_object_id IN ({ph}) "
-                f"AND r.target_object_id IN ({ph}) "
-                f"AND {member_of('r.source_id', bound)} "
-                f"GROUP BY r.source_object_id, r.target_object_id, r.edge_type, "
-                f"src.object_type, tgt.object_type "
-                f"ORDER BY r.source_object_id, r.edge_type, r.target_object_id",
-                [notebook_id, *ids, *ids, bound.param],
-            ).fetchall()
         return db.execute(
             f"SELECT DISTINCT r.source_object_id, r.target_object_id, r.edge_type, "
-            f"src.object_type AS source_type, tgt.object_type AS target_type "
+            f"src.object_type AS source_type, tgt.object_type AS target_type"
+            f"{', r.source_id' if with_source_ids else ''} "
             f"FROM knowledge_relations AS r "
             f"JOIN knowledge_objects AS src ON src.id=r.source_object_id "
             f"JOIN knowledge_objects AS tgt ON tgt.id=r.target_object_id "
             f"WHERE r.notebook_id=? AND r.review_status!='rejected' "
             f"AND r.source_object_id IN ({ph}) "
             f"AND r.target_object_id IN ({ph}) "
-            f"ORDER BY r.source_object_id, r.edge_type, r.target_object_id",
+            f"ORDER BY r.source_object_id, r.edge_type, r.target_object_id"
+            f"{', r.source_id' if with_source_ids else ''}",
             [notebook_id, *ids, *ids],
         ).fetchall()
 
@@ -2056,8 +2031,7 @@ class KnowledgeStore:
                        owner_notebook_id: Optional[str] = None):
         """步骤元素的正文(与 ``with_ordinal`` 时的文档序)。
 
-        ``owner_notebook_id``(台账 B-11):给了就只读属于该库(且该库存活)
-        的来源的元素,序号也只在该库内排——晋升进公共库的过程对象,其步骤
+        ``owner_notebook_id``(台账 B-11):给了就只读属于该库的来源的元素,序号也只在该库内排——晋升进公共库的过程对象,其步骤
         元素指向推广者的私有库,不再按全局 id 现读那边的正文(调用方回落到
         步骤自己存的 ``quote``)。``None`` = 与加参数之前逐字节相同。"""
         ids = [e for e in element_ids if e]
@@ -2096,13 +2070,14 @@ class KnowledgeStore:
         ``element_type`` / ``location_label`` 并给出 ``element_text``;读不到的
         条目用存储时的 ``quoted_span`` 当正文,``source_title`` 永远是存储值。
 
-        ``owner_notebook_id``(台账 B-11,PR-E2·E2-4):给了就只用**属于该库、
-        且该库存活**的来源的元素覆盖——``node_context`` 传对象自己所在的库。
+        ``owner_notebook_id``(台账 B-11,PR-E2·E2-4):给了就只用**属于该库**
+        的来源的元素覆盖——``node_context`` 与 ``knowledge_query`` 传对象自己所在
+        的库;库删除经外键级联带走来源与元素,所以读得到的元素必属存活的库。
         晋升进公共库的对象,证据仍指向推广者私有库的元素;那些条目读不到,
         于是保留存储时的 ``quoted_span`` / ``source_title``,不按全局 id 现读
         推广者私有库元素的现文与来源。对普通对象(证据都在本库)结果逐值不变。
-        ``None`` = 与加参数之前逐字节相同(``knowledge_query`` 的两个调用方
-        仍走这条,见 E2-4 报告)。"""
+        ``None`` = 与加参数之前逐字节相同。仍是一条语句;元素很多(>~500)
+        时计划见 PG 侧 ``_OWN_ELEMENT_JOIN`` 的注释。"""
         # PG 孪生:非对象项(脏数据)跳过,不抛。
         evidence = [e for e in evidence if isinstance(e, dict)]
         element_ids = list(

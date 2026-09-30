@@ -527,16 +527,19 @@ def test_assemble_builds_report_body_only(repo):
     assert gaps == ["「B」库内证据不足,内容偏推断/通识"]
 
 
-def test_assemble_keeps_the_stored_title_of_a_foreign_library_source(repo):
-    """PR-E2·E2-4(台账 B-11):``knowledge_context`` 把出处属于别库的条目标成
-    ``source_foreign``;报告参考文献列表不得再按全局 id 用那一库来源的现名覆盖
-    条目存储的标题(也不按它的归属判「来自参考库」)。同一份报告里本库条目的
-    标题照旧现读。
+def test_assemble_never_resolves_a_foreign_library_source(repo):
+    """PR-E2·E2-4(台账 B-11):一个晋升进公共库的对象,证据仍指向推广者私有库的
+    图片元素与来源。它经 ``knowledge_context`` 进入一节的 id map 后,报告参考
+    文献只能有存储时的标题与片段:不按全局 id 现读私有来源的现名,也不给私有
+    图片作附图候选。同一份报告里本库条目的标题照旧现读。
 
-    变异锚点:``_assemble`` 不传 ``owner_notebook_ids`` → 第一条参考文献变成
-    私有现名,红。"""
+    变异锚点:``knowledge_context`` 不把外库条目做成快照 → 第一条参考文献变成
+    私有现名并附上私有图,红。"""
+    from app.models.schemas import Evidence, NotebookCreate
+    from app.services.retrieval import RetrievedKnowledge
+
     nb = _mk_nb(repo)
-    private = _mk_nb(repo)
+    private = repo.create_notebook(NotebookCreate(name="private"))
     with repo._write() as db:
         for sid, owner, title in (("s-priv", private.id, "Private Current Name"),
                                   ("s-own", nb.id, "Own Live Title")):
@@ -544,27 +547,47 @@ def test_assemble_keeps_the_stored_title_of_a_foreign_library_source(repo):
                 "INSERT INTO sources(id,notebook_id,title,source_type,created_at,updated_at) "
                 "VALUES (?,?,?,'markdown','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
                 (sid, owner, title))
+        db.execute(
+            "INSERT INTO source_elements(id,source_id,element_type,location_label,text,"
+            "metadata,created_at) VALUES ('el-priv','s-priv','image','p1','PRIVATE TEXT',?,"
+            "'2026-01-01T00:00:00Z')",
+            (json.dumps({"asset_id": "asset-priv", "caption": "PRIVATE CAPTION"}),))
+        for object_id, source, element, title in (
+            ("ko-prom", "s-priv", "el-priv", "Stored Title"),
+            ("ko-own", "s-own", "", "Old Title"),
+        ):
+            db.execute(
+                "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,payload,"
+                "evidence,source_id,created_at,updated_at) VALUES (?,?,'concept','approved',"
+                "?,?,?,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+                (object_id, nb.id, json.dumps({"name": object_id}), json.dumps([{
+                    "source_id": source, "element_id": element,
+                    "quoted_span": "stored snapshot", "source_title": title,
+                }]), "" if object_id == "ko-prom" else source))
+    hits = [
+        RetrievedKnowledge(object_id=object_id, object_type="concept",
+                           payload={"name": object_id}, evidence=[])
+        for object_id in ("ko-prom", "ko-own")
+    ]
+    _block, id_map = repo._answer_context(nb.id, hits)
     eng = _mk_engine(repo, _OutlineLLM())
     outline = [{"title": "A", "scope": "sa", "sub_queries": ["qa"]}]
+    keys = list(id_map)
     sections = [{
-        "title": "A", "scope": "sa", "markdown": "## A\nx [k1] y [k2]", "grounded": True,
-        "id_map": {
-            "k1": {"object_id": "ko-prom", "object_type": "concept", "name": "P",
-                   "source_id": "s-priv", "source_title": "Stored Title",
-                   "location_label": "p1", "tier": "base", "source_foreign": True},
-            "k2": {"object_id": "ko-own", "object_type": "concept", "name": "O",
-                   "source_id": "s-own", "source_title": "Old Title",
-                   "location_label": "p1", "tier": "personal"},
-        },
-        "attempted": [],
+        "title": "A", "scope": "sa",
+        "markdown": f"## A\nx [{keys[0]}] y [{keys[1]}]", "grounded": True,
+        "id_map": id_map, "attempted": [],
     }]
     rid = repo.create_report(nb.id, "q")
     md, _gaps, references = eng._assemble(nb.id, rid, "q", outline, sections)
     by_object = {ref["object_id"]: ref for ref in references}
     assert by_object["ko-prom"]["source_title"] == "Stored Title"
+    assert not by_object["ko-prom"].get("images")
     assert by_object["ko-own"]["source_title"] == "Own Live Title"
-    assert "Private Current Name" not in md
-    assert "Private Current Name" not in json.dumps(references, ensure_ascii=False)
+    rendered = md + json.dumps(references, ensure_ascii=False)
+    for private in ("Private Current Name", "PRIVATE TEXT", "PRIVATE CAPTION",
+                    "asset-priv", "el-priv", "s-priv"):
+        assert private not in rendered, private
 
 
 def test_assemble_multikey_citation_renumbered(repo):

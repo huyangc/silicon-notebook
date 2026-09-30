@@ -1864,26 +1864,25 @@ class GraphRetrievalService(_RetrievalState):
     def scale_ppr(self, *args, **kwargs):
         return self._scale_ppr_impl(*args, **kwargs)
 
-    def in_network_relations(self, participant_ids, object_ids, *, source_ceilings=None):
+    def in_network_relations(self, participant_ids, object_ids, *, with_source_ids=None):
         """Relation rows among ``object_ids``, per participant notebook.
 
-        ``source_ceilings`` (PR-E2 E2-4, ledger B-6): ``{notebook_id: ceiling}``
-        for the notebooks whose source ceiling BINDS on this run; each such
-        notebook reads in-ceiling rows only and every row carries
-        ``source_count``.  Other notebooks read exactly as before."""
+        ``with_source_ids`` (PR-E2 E2-4, ledger B-6): the notebooks whose rows
+        must carry ``source_id`` (one row per edge and source) because a source
+        ceiling covers them on this run; the caller judges those rows against
+        the ceiling.  Other notebooks read exactly as before."""
         from app.services.kg.edge_schema import is_queryable_edge_pair
 
         ids = list(object_ids)
         if len(ids) < 2:
             return []
-        ceilings = source_ceilings or {}
+        sourced = frozenset(with_source_ids or ())
         out = []
         with self._connect() as database:
             for notebook_id in participant_ids:
-                if notebook_id in ceilings:
+                if notebook_id in sourced:
                     rows = self.knowledge.in_network_relation_rows(
-                        database, notebook_id, ids,
-                        allowed_source_ids=ceilings[notebook_id],
+                        database, notebook_id, ids, with_source_ids=True,
                     )
                 else:
                     rows = self.knowledge.in_network_relation_rows(

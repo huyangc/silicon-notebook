@@ -5,12 +5,14 @@
 through ``seed`` (placeholders rewritten per dialect) and assert the same
 ``check_*`` contract, so the two stores cannot drift apart:
 
-* B-6  ``in_network_relation_rows(allowed_source_ids=)`` -- in-ceiling rows
-  only, one row per edge with ``source_count`` = distinct in-ceiling sources;
+* B-6  ``in_network_relation_rows(with_source_ids=)`` -- one row per edge and
+  source (no id list bound), rejected rows never, today's rows without it;
 * B-9  ``chunk_exact_search(allowed_source_ids=)`` -- the ceiling filters
   below the probe window;
 * B-11 ``node_context`` -- elements are re-read only from the object's own
-  library; a promoted object's foreign evidence keeps its stored span/title;
+  library (occurrences, a definer's evidence, payload steps, legacy sibling
+  steps, ``_element_texts`` ordinals); a promoted object's foreign evidence
+  keeps its stored span/title;
 * N-4  ``follow_relation_evidence_rows`` -- titles only from the relation's
   own library, and ``notebook_id=`` restricts the rows.
 """
@@ -62,6 +64,7 @@ RELATIONS = [
     ("kr-6", NB, "s-05", "ko-b", "ko-c", "related_to", "pending"),
     ("kr-7", NB, "s-priv", "ko-a", "ko-c", "related_to", "pending"),  # foreign pointer
     ("kr-8", PRIV, "s-priv", "ko-x", "ko-y", "related_to", "pending"),
+    ("kr-def", NB, "s-01", "ko-definer", "ko-deft", "defines", "pending"),
 ]
 
 
@@ -100,6 +103,12 @@ def seed(execute: Callable[[str, tuple], Any], mark: str) -> None:
             "steps": [{"name": "step one", "element_id": "el-priv",
                        "quote": STORED_QUOTE}],
         }, _foreign_evidence(), ""),
+        # ko-deft is defined by ko-definer, a promoted object (foreign evidence).
+        ("ko-deft", NB, "concept", {"name": "defined"}, _own_evidence(), "s-01"),
+        ("ko-definer", NB, "concept", {"name": "definer"}, _foreign_evidence(), ""),
+        # A legacy promoted procedure: no payload steps, a section of its own.
+        ("ko-leg", NB, "procedure", {"name": "legacy step", "section_path": "LS"},
+         _foreign_evidence(), ""),
         ("ko-x", PRIV, "concept", {"name": "x"}, "[]", "s-priv"),
         ("ko-y", PRIV, "concept", {"name": "y"}, "[]", "s-priv"),
     ]
@@ -143,36 +152,27 @@ def edges(rows) -> dict[tuple[str, str, str], Any]:
 def check_in_network_relations(read: Callable[..., list]) -> None:
     """``read(object_ids, **kwargs)`` -> ``in_network_relation_rows`` rows."""
     ids = ["ko-a", "ko-b", "ko-c"]
-    unbound = read(ids)
-    assert edges(unbound) == {
+    assert edges(read(ids)) == {
         ("ko-a", "supports", "ko-b"): None,
         ("ko-a", "related_to", "ko-c"): None,
         ("ko-b", "related_to", "ko-c"): None,
     }
-    # Only in-ceiling rows, counted by DISTINCT source; an edge with no
-    # in-ceiling row is gone; s-99 names no row.
-    assert edges(read(ids, allowed_source_ids=frozenset({"s-01", "s-02", "s-99"}))) == {
-        ("ko-a", "supports", "ko-b"): 2,
-    }
-    # The rejected s-04 row never counts, not even inside the ceiling.
-    wide = frozenset({"s-01", "s-02", "s-03", "s-04", "s-05", "s-priv"})
-    assert edges(read(ids, allowed_source_ids=wide)) == {
-        ("ko-a", "supports", "ko-b"): 3,
-        ("ko-a", "related_to", "ko-c"): 1,
-        ("ko-b", "related_to", "ko-c"): 1,
-    }
-    # A list works as well as a set; blanks are dropped, not "unrestricted".
-    assert edges(read(ids, allowed_source_ids=["s-05", "", "s-05"])) == {
-        ("ko-b", "related_to", "ko-c"): 1,
-    }
-    assert read(ids, allowed_source_ids=frozenset()) == []
-    assert read(ids, allowed_source_ids=[""]) == []
-    # Row order is the documented ORDER BY on both paths.
-    ordered = [
-        (dict(row)["source_object_id"], dict(row)["edge_type"], dict(row)["target_object_id"])
-        for row in read(ids, allowed_source_ids=wide)
+    assert all("source_id" not in dict(row) for row in read(ids))
+    sourced = [
+        (dict(row)["source_object_id"], dict(row)["edge_type"],
+         dict(row)["target_object_id"], dict(row)["source_id"])
+        for row in read(ids, with_source_ids=True)
     ]
-    assert ordered == sorted(ordered, key=lambda edge: (edge[0], edge[1], edge[2]))
+    # One row per edge and source: s-02's two rows collapse, the rejected s-04
+    # row never appears; ordered by the edge, then the source.
+    assert sourced == [
+        ("ko-a", "related_to", "ko-c", "s-priv"),
+        ("ko-a", "supports", "ko-b", "s-01"),
+        ("ko-a", "supports", "ko-b", "s-02"),
+        ("ko-a", "supports", "ko-b", "s-03"),
+        ("ko-b", "related_to", "ko-c", "s-05"),
+    ]
+    assert read(["ko-a"], with_source_ids=True) == []
 
 
 def check_chunk_exact(search: Callable[..., list]) -> None:
@@ -208,6 +208,32 @@ def check_node_context_owner(node_context: Callable[[str], dict]) -> None:
     # The object's own library is still enriched from the live element.
     own = node_context("ko-a")
     assert own["occurrences"][0]["element_text"] == OWN_TEXT
+    # A definer promoted from the private library: its evidence is enriched
+    # only from ko-deft's library, so the definition is the stored span.
+    defined = node_context("ko-deft")
+    assert PRIVATE_TEXT not in json.dumps(defined, ensure_ascii=False, default=str)
+    assert defined["definition"] == STORED_SPAN
+    assert defined["definition_basis"] == "defines_evidence"
+    # A legacy promoted procedure (no payload steps): the sibling step's text
+    # is read only from the object's own library.
+    legacy = node_context("ko-leg")
+    assert PRIVATE_TEXT not in json.dumps(legacy, ensure_ascii=False, default=str)
+    assert [(step["name"], step["element_text"]) for step in legacy["steps"]] == [
+        ("legacy step", ""),
+    ]
+
+
+def check_element_texts_owner(element_texts: Callable[..., tuple]) -> None:
+    """``element_texts(ids, **kwargs)`` -> ``_element_texts``: with an owner
+    library, texts AND document ordinals come from that library only (the
+    first id naming a foreign element must not move the ordinal read there)."""
+    texts, ordinal = element_texts(
+        ["el-priv", "el-own"], with_ordinal=True, owner_notebook_id=NB,
+    )
+    assert texts == {"el-own": OWN_TEXT}
+    assert "el-own" in ordinal and "el-priv" not in ordinal
+    unowned, _ = element_texts(["el-priv", "el-own"])
+    assert unowned == {"el-priv": PRIVATE_TEXT, "el-own": OWN_TEXT}
 
 
 def check_follow_relation_evidence(read: Callable[..., list]) -> None:

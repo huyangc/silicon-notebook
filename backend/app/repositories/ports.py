@@ -2526,14 +2526,13 @@ class EvidenceKnowledgeContextPort(Protocol):
         self, notebook_id: str, object_ids: Sequence[str]
     ) -> dict[str, str]: ...
     def node_context(self, notebook_id: str, object_id: str, *, allowed_source_ids: Sequence[str] | None = None, name_only: bool = False) -> dict[str, Any]: ...
-    # ``source_ceilings`` (PR-E2 E2-4, ledger B-6): per participant notebook,
-    # the source ceiling that BINDS it on this run.  A notebook listed there
-    # reads only relation rows of in-ceiling sources and each returned row
-    # carries ``source_count`` (distinct in-ceiling sources); an empty ceiling
-    # reads nothing.  Notebooks not listed, and ``None``, read as before.
+    # ``with_source_ids`` (PR-E2 E2-4, ledger B-6): the notebooks whose rows
+    # carry ``source_id`` (one row per edge and source, no id list bound)
+    # because a source ceiling covers them; the caller judges those rows.
+    # Other notebooks, and ``None``, read as before.
     def in_network_relations(
         self, participant_ids: Sequence[str], object_ids: Sequence[str], *,
-        source_ceilings: Mapping[str, Iterable[str]] | None = None,
+        with_source_ids: Iterable[str] | None = None,
     ) -> list[dict[str, Any]]: ...
     # 保留:唯一生产调用方已改用下面的批量 relation_support_counts(有界化
     # B1 热点整改批 1)。逐条调用每次都要整表冷缓存 edge_support_map(8.35M
@@ -2602,10 +2601,10 @@ class RetrievalKnowledgeStorePort(KnowledgeStorePort, Protocol):
     # notebook only.
     def follow_relation_evidence_rows(self, db: object, relation_ids: Sequence[str], *, notebook_id: str | None = None) -> list[Any]: ...
     def follow_object_rows(self, db: object, notebook_id: str, object_ids: Sequence[str], statuses: Sequence[str]) -> list[Any]: ...
-    # ``allowed_source_ids`` (PR-E2 E2-4, ledger B-6): ``None`` = unchanged;
-    # empty = []; otherwise GROUP BY the edge over in-ceiling rows only, with
-    # ``source_count`` = distinct in-ceiling sources.
-    def in_network_relation_rows(self, db: object, notebook_id: str, object_ids: Sequence[str], *, allowed_source_ids: Sequence[str] | None = None) -> list[Any]: ...
+    # ``with_source_ids`` (PR-E2 E2-4, ledger B-6): ``False`` = unchanged;
+    # ``True`` = also project ``r.source_id`` (one row per edge and source,
+    # ordered by it last); no source list is bound.
+    def in_network_relation_rows(self, db: object, notebook_id: str, object_ids: Sequence[str], *, with_source_ids: bool = False) -> list[Any]: ...
 
 
 @runtime_checkable
@@ -3076,14 +3075,8 @@ class EvidenceContextPort(Protocol):
     def citation_titles(
         self, source_ids: Iterable[str]
     ) -> dict[str, str]: ...
-    # ``owner_notebook_ids`` (PR-E2 E2-4, ledger B-11): source id -> the
-    # notebook whose entry cites it.  A source owned by any other notebook is
-    # left out, so the caller keeps its stored title instead of the other
-    # library's current name.  ``None`` = unchanged.
     def citation_source_info(
-        self, source_ids: Iterable[str], *,
-        metadata: Mapping[str, Mapping[str, Any]] | None = None,
-        owner_notebook_ids: Mapping[str, str] | None = None,
+        self, source_ids: Iterable[str]
     ) -> dict[str, dict[str, str]]: ...
     def collection_item_citations(
         self,

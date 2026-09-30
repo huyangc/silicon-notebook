@@ -70,7 +70,6 @@ from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancel
 # degrading an identity-attestation failure into an empty result set.
 from app.domain.retrieval_control import RetrievalControlError
 from app.services.citation_markers import MARKER_RE, marker_keys
-from app.services.evidence_context import foreign_source_kwargs
 from app.services.report_execution import (
     REPORT_CANCELLATIONS,
     cancellable_ceiling_readers,
@@ -3766,7 +3765,7 @@ class ReportEngine:
             family_resolution.get("uncertain_source_ids") or []
         ) | set(family_resolution.get("unresolved_source_ids") or [])
         citation_source_info = self.dependencies.evidence_context.citation_source_info(
-            citation_source_ids, **foreign_source_kwargs(sections),
+            citation_source_ids
         )
 
         def _source_title(ctx):

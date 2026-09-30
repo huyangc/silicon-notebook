@@ -100,6 +100,32 @@ def test_concept_detail_includes_element_text(repo):
     assert any("conditional memory module" in (e.get("element_text") or "") for e in d["evidence"])
 
 
+def test_concept_detail_never_reads_a_promoted_members_private_element(repo):
+    """PR-E2·E2-4(台账 B-11,KG 概念详情面板):簇成员的证据里有一条指向另一库
+    (推广者私有库)元素的条目时,面板只显示存储的摘录,绝不按全局 id 现读那个
+    元素的现文;本库证据照旧现读。
+
+    变异锚点:``knowledge_query`` 两处 ``_enrich_evidence`` 不传
+    ``owner_notebook_id`` → 私有现文出现,红。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    private = repo.create_notebook(NotebookCreate(name="private"))
+    sid, eids = _src_with_elements(repo, nb.id, ["As shown, Engram is a conditional memory module."])
+    _psid, peids = _src_with_elements(repo, private.id, ["PRIVATE CURRENT TEXT"])
+    ev = {"source_id": sid, "source_title": "Doc", "element_id": eids[0], "element_type": "paragraph", "location_label": "p", "quoted_span": "Engram", "confidence": 1.0}
+    repo.store_kg(nb.id, sid, [{"local_id":"c","object_type":"concept","payload":{"name":"Engram","section_path":"1"},"evidence":[ev]}], [])
+    repo.rebuild_unified_kg(nb.id)
+    foreign = {"source_id": _psid, "source_title": "Stored Title", "element_id": peids[0], "element_type": "paragraph", "location_label": "p", "quoted_span": "stored snapshot", "confidence": 1.0}
+    with repo._write() as db:
+        db.execute("UPDATE knowledge_objects SET evidence=? WHERE notebook_id=?",
+                   (json.dumps([ev, foreign]), nb.id))
+    cid = list(repo.cluster_map(nb.id).values())[0]
+    detail = repo.concept_detail(nb.id, cid)
+    texts = [e.get("element_text") or "" for e in detail["evidence"]]
+    assert any("conditional memory module" in text for text in texts)
+    assert "stored snapshot" in texts
+    assert "PRIVATE CURRENT TEXT" not in json.dumps(detail, ensure_ascii=False, default=str)
+
+
 def test_formula_evidence_metadata_survives_context_enrichment(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     formula = r"C _ {l} = 2 \sigma (\tilde {C} _ {l}).\tag{7}"
