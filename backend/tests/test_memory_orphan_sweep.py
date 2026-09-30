@@ -517,6 +517,32 @@ def test_a_poison_row_at_the_end_of_a_page_does_not_stop_the_rest(world, events)
     assert [s for s in world.orphan_ids if s != victim and s in _source_ids(repo)] == []
 
 
+def test_a_first_page_read_that_fails_is_reported_and_starts_nothing(world, events):
+    """The startup probe succeeded, then the FIRST page read times out (the coldest, most
+    timeout-prone scan): exactly one content-free ``_failed`` -- no ``_started`` and no
+    ``_completed`` -- and nothing is deleted."""
+    repo = world.repo
+
+    class Store:
+        @staticmethod
+        def has_orphan_memory_sources():
+            return True
+
+        @staticmethod
+        def orphan_memory_source_ids(limit, after_id=""):
+            raise TimeoutError("canceling statement due to statement timeout: secret")
+
+    tally = MemoryOrphanSweep(
+        store=Store, delete_source=repo.delete_source, event_log=repo._runtime.event_log,
+    ).run_pass()
+
+    assert tally == {"deleted": 0, "gone": 0, "failed": 0}
+    assert _sweep_events(events) == [
+        {"kind": "memory_orphan_sweep_failed", "error_class": "TimeoutError"},
+    ]
+    assert set(world.orphan_ids) <= set(_source_ids(repo))
+
+
 def test_a_failed_read_is_reported_content_free_and_ends_the_pass(world, events):
     repo = world.repo
     real = repo._runtime.memory_store
@@ -651,7 +677,11 @@ def _block_of(tree, callee):
 
 
 def test_startup_reaches_the_sweep_on_the_success_path_after_mark_ready():
-    """The sweep is a statement of the SAME block as the other post-readiness catch-up
+    """NOTE for whoever refactors ``run_startup``: this guard reads its AST. Moving the
+    post-readiness catch-ups into a helper or another block makes it fail closed
+    ("not a plain statement of run_startup"); update the guard in the same change.
+
+    The sweep is a statement of the SAME block as the other post-readiness catch-up
     (``_reproject_legacy_knowhow_tables``), after it and before ``return repo`` -- not
     merely textually after ``mark_ready`` (a call moved into the not-ready branch would
     pass a text-order check and never run)."""

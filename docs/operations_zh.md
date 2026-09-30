@@ -136,8 +136,8 @@ Memory 派生来源：`memory_id` 为 NULL 或空的来源（在拷贝不再携�
 结果，从不改变最终结果）。
 
 确认完成：干净启动之后，`SELECT count(*) FROM sources s WHERE s.source_type = 'memory' AND
-(s.memory_id IS NULL OR s.memory_id = '' OR NOT EXISTS (SELECT 1 FROM memory_items m WHERE m.id =
-s.memory_id AND m.status = 'confirmed'))` 应返回 0；体检项 `H12`（只读，修复动作 `none`）给出单个
+NOT EXISTS (SELECT 1 FROM memory_items m WHERE m.id = s.memory_id AND m.status = 'confirmed' AND
+m.id <> '')` 应返回 0；体检项 `H12`（只读，修复动作 `none`）给出单个
 notebook 的同一数字。探测每页对 `sources` 扫一遍。PostgreSQL 16 上的实测（100 万个 sources，其中 30 万个是 Memory 来源，
 id 随机，32 万条 Memory，机器负载均值约 45）：启动探测（`EXISTS`，零无主）1.7 秒；读取一页在零无主时
 0.5 秒（200 行）到 0.7 秒（1000 行），存在 5000 个无主时 1.5 秒；体检单库计数 28 毫秒；而此前带 `OR` 的写法

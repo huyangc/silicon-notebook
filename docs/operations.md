@@ -178,8 +178,8 @@ are the queue, read in id order 1,000 at a time (the page size only bounds one s
 outcome).
 
 To confirm completion, `SELECT count(*) FROM sources s WHERE s.source_type = 'memory' AND
-(s.memory_id IS NULL OR s.memory_id = '' OR NOT EXISTS (SELECT 1 FROM memory_items m WHERE m.id =
-s.memory_id AND m.status = 'confirmed'))` should return 0 after a clean start; checkup item `H12`
+NOT EXISTS (SELECT 1 FROM memory_items m WHERE m.id = s.memory_id AND m.status = 'confirmed' AND
+m.id <> '')` should return 0 after a clean start; checkup item `H12`
 (read-only, repair action `none`) reports the same count for one notebook. The probe is one pass over
 `sources` per page. Measured on PostgreSQL 16 with 1,000,000 sources (300,000 of them Memory sources, random ids, 320,000 Memory items, machine load average about 45): the startup probe (`EXISTS`, zero orphans) 1.7 s, one page of the read 0.5 s (200 rows) to 0.7 s (1,000 rows) with no orphans and 1.5 s when 5,000 orphans exist, checkup's per-notebook count 28 ms; the earlier spelling with `OR` walked `sources` by primary key and needed 59 s for the probe. The predicate is deliberately one decorrelatable `NOT EXISTS` (no `OR`) so the planner uses an anti join. Every deletion also redacts the notebook's retained model-output diagnostics, once per orphan source, exactly as any source deletion does, so a sweep quietly clears those diagnostics for the affected notebooks. `H12` is a count only: it names no source, owner or content. On SQLite
 the two FTS5 shadow tables (`kg_objects_fts`, `chunks_fts`) keep their rows for the deleted objects and
