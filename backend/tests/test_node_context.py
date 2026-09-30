@@ -126,6 +126,23 @@ def test_concept_detail_never_reads_a_promoted_members_private_element(repo):
     assert "PRIVATE CURRENT TEXT" not in json.dumps(detail, ensure_ascii=False, default=str)
 
 
+def test_facade_forwards_the_owner_library(repo):
+    """``RepositoryFacade._enrich_evidence`` / ``_element_texts`` forward
+    ``owner_notebook_id`` to the store (the facade's signature matches the
+    port's)."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    private = repo.create_notebook(NotebookCreate(name="private"))
+    psid, peids = _src_with_elements(repo, private.id, ["PRIVATE CURRENT TEXT"])
+    item = {"source_id": psid, "element_id": peids[0], "quoted_span": "stored snapshot"}
+    with repo._connect() as db:
+        (enriched,) = repo._enrich_evidence(db, [item], owner_notebook_id=nb.id)
+        texts, ordinal = repo._element_texts(
+            db, peids, with_ordinal=True, owner_notebook_id=nb.id,
+        )
+    assert enriched["element_text"] == "stored snapshot"
+    assert (texts, ordinal) == ({}, {})
+
+
 def test_formula_evidence_metadata_survives_context_enrichment(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     formula = r"C _ {l} = 2 \sigma (\tilde {C} _ {l}).\tag{7}"
