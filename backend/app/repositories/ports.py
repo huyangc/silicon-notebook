@@ -2674,7 +2674,9 @@ class UnifiedKgStorePort(Protocol):
     def mention_seed_rows(db: object, notebook_id: str) -> object: ...
     @staticmethod
     # ``allowed_source_ids`` (PR-E2, E2-1 implements): ``None`` = unchanged; a
-    # collection = only endpoints supported by those sources (empty = []).
+    # collection = only rows whose sample relation itself comes from those
+    # sources (empty = []), and each returned row carries an extra
+    # ``source_id`` column.
     def relation_endpoint_name_rows(db: object, notebook_id: str, relation_ids: list[str], *, allowed_source_ids: Sequence[str] | None = None) -> list[Any]: ...
     @staticmethod
     def relation_support_rows(
@@ -2806,7 +2808,8 @@ class UnifiedKgStorePort(Protocol):
     ) -> "tuple[int, tuple | None]": ...
     @staticmethod
     # ``allowed_source_ids`` (PR-E2, E2-1 implements): ``None`` = unchanged; a
-    # collection = only relations supported by those sources (empty = []).
+    # collection = only edges whose TARGET end is still supported by those
+    # sources (empty = []).
     def weak_support_relation_rows(
         db: object,
         notebook_id: str,
