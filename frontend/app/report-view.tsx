@@ -22,7 +22,7 @@ import {
 } from "./answer-formatting";
 import { API_BASE } from "./api-config";
 import { AuthedImage } from "./authed-image";
-import { useCopyResult } from "./copy-result";
+import { useCopyResult, type CopyResult } from "./copy-result";
 import { EffortPicker, type EffortOption } from "./effort-picker";
 import {
   buildImageGallery,
@@ -1358,6 +1358,34 @@ export interface ReportsPanelProps {
   onPreviewImage?: (request: AnswerImagePreviewRequest) => void;
 }
 
+// 「分享」按钮的外观。公开成功后的结果格(链接进没进剪贴板)只在 `shared` 时画:取消分享的那
+// 一下结果已在点击处清掉,旧链接的结果不会挂到下一条链接上;请求在飞时文案让位给进行态。
+// class 写成字面量,与其它复制按钮同款。
+function shareButtonFace(
+  outcome: CopyResult,
+  shared: boolean,
+  busy: boolean,
+): { className: string; icon: React.ReactNode; label: string } {
+  const result = shared ? outcome : "idle";
+  if (result === "copied") {
+    return {
+      className: "report-action copy-result-copied",
+      icon: <Check size={14} />,
+      label: busy ? "撤销中…" : "已公开，链接已复制",
+    };
+  }
+  if (result === "failed") {
+    return {
+      className: "report-action copy-result-failed",
+      icon: <X size={14} />,
+      label: busy ? "撤销中…" : "已公开，复制失败",
+    };
+  }
+  const idle = shared ? "取消分享" : "分享";
+  const pending = shared ? "撤销中…" : "生成链接中…";
+  return { className: "report-action", icon: <Share2 size={14} />, label: busy ? pending : idle };
+}
+
 export function ReportsPanel({
   notebookId,
   workspace,
@@ -1454,6 +1482,7 @@ export function ReportsPanel({
   }, [active?.id, reportsLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
   // ---- 详情视图 ----
   if (active) {
+    const shareFace = shareButtonFace(shareResult.resultFor(`share:${active.id}`), shared, shareBusy);
     const displayQuestion = active.understanding?.confirmed
       ? active.understanding.resolved_question || active.question
       : active.question;
@@ -1497,7 +1526,7 @@ export function ReportsPanel({
             {!readOnly && active.status === "done" && (
               <button
                 ref={shareButtonRef}
-                className={shared && shareResult.resultFor(`share:${active.id}`) === "copied" ? "report-action copy-result-copied" : shared && shareResult.resultFor(`share:${active.id}`) === "failed" ? "report-action copy-result-failed" : "report-action"}
+                className={shareFace.className}
                 type="button"
                 disabled={shareBusy}
                 onClick={() => {
@@ -1508,13 +1537,9 @@ export function ReportsPanel({
                   });
                 }}
               >
-                {shared && shareResult.resultFor(`share:${active.id}`) === "copied" ? <Check size={14} /> : shared && shareResult.resultFor(`share:${active.id}`) === "failed" ? <X size={14} /> : <Share2 size={14} />}
+                {shareFace.icon}
                 {" "}
-                {shareBusy
-                  ? (shared ? "撤销中…" : "生成链接中…")
-                  : shared && shareResult.resultFor(`share:${active.id}`) === "copied" ? "已公开，链接已复制"
-                    : shared && shareResult.resultFor(`share:${active.id}`) === "failed" ? "已公开，复制失败"
-                      : (shared ? "取消分享" : "分享")}
+                {shareFace.label}
               </button>
             )}
             {!readOnly && shared && (

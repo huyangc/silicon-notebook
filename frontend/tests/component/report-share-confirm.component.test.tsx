@@ -9,16 +9,20 @@
 // 走无确认值的 POST、在飞时的禁用态、成功文案落在按钮上并到点还原。
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { COPY_RESULT_HOLD_MS } from "../../app/copy-result";
 import type { ReportDetailT } from "../../app/report-model";
+import { ReportShareConfirm } from "../../app/report-share-confirm";
 import { ReportsPanel } from "../../app/report-view";
 import { useReportWorkspace } from "../../app/use-report-workspace";
 
 const NB = "nb-1";
+const NB2 = "nb-2";
 const RID = "rep-1";
+const RID2 = "rep-2";
 const BASE = `/notebooks/${NB}/reports`;
 
 const REPORT: ReportDetailT = {
@@ -43,7 +47,7 @@ type Handler = (init: RequestInit) => Response | Promise<Response>;
 type Call = { method: string; path: string; body: string | null };
 
 let calls: Call[] = [];
-let handlers: { disclosure: Handler; share: Handler };
+let handlers: { disclosure: Handler; share: Handler; shareRead: Handler };
 const announceShareLink = vi.fn<(token: string) => Promise<boolean>>();
 const notify = vi.fn();
 
@@ -59,7 +63,14 @@ function fakeFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Re
   const method = (init.method || "GET").toUpperCase();
   calls.push({ method, path, body: typeof init.body === "string" ? init.body : null });
   if (method === "GET" && path === BASE) return Promise.resolve(json(200, []));
+  if (method === "GET" && path === `/notebooks/${NB2}/reports`) return Promise.resolve(json(200, []));
   if (method === "GET" && path === `${BASE}/${RID}`) return Promise.resolve(json(200, REPORT));
+  if (method === "GET" && path === `${BASE}/${RID2}`) {
+    return Promise.resolve(json(200, { ...REPORT, id: RID2, question: "另一份报告" }));
+  }
+  if (method === "GET" && path === `${BASE}/${RID}/share`) {
+    return Promise.resolve(handlers.shareRead(init));
+  }
   if (method === "GET" && path === `${BASE}/${RID}/share/disclosure`) {
     return Promise.resolve(handlers.disclosure(init));
   }
@@ -76,9 +87,10 @@ const shareCalls = () => calls.filter((c) => c.method === "POST" && c.path.endsW
 const disclosureCalls = () => calls.filter((c) => c.path.endsWith("/share/disclosure"));
 
 function Harness() {
+  const [notebookId, setNotebookId] = useState(NB);
   const workspace = useReportWorkspace({
     actorId: "user-a",
-    notebookId: NB,
+    notebookId,
     active: true,
     policy: {
       advanced: true,
@@ -96,7 +108,14 @@ function Harness() {
   });
   const { focusReport } = workspace;
   useEffect(() => { focusReport(RID); }, []); // eslint-disable-line react-hooks/exhaustive-deps
-  return <ReportsPanel notebookId={NB} workspace={workspace} setToast={vi.fn()} />;
+  return (
+    <>
+      <button type="button" onClick={() => focusReport(RID2)}>打开另一份报告</button>
+      <button type="button" onClick={() => focusReport(RID)}>打开原报告</button>
+      <button type="button" onClick={() => setNotebookId((id) => (id === NB ? NB2 : NB))}>换笔记本</button>
+      <ReportsPanel notebookId={notebookId} workspace={workspace} setToast={vi.fn()} />
+    </>
+  );
 }
 
 async function openReport() {
@@ -120,6 +139,7 @@ beforeEach(() => {
   handlers = {
     disclosure: () => json(200, { memory_count: 0 }),
     share: () => json(200, { share_token: "tok-1" }),
+    shareRead: () => json(404, { detail: "not shared" }),
   };
   vi.stubGlobal("fetch", vi.fn(fakeFetch));
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -364,7 +384,7 @@ test("引用了其他成员的个人记忆:取披露就知道,不发 POST,确认
   await user.click(await openReport());
 
   const group = await screen.findByRole("group", { name: "公开前确认" });
-  expect(within(group).getByText(sentence)).toBeInTheDocument();
+  expect(await within(group).findByText(sentence)).toBeInTheDocument();
   expect(within(group).queryByText(disclosureSentence(2))).toBeNull();
   expect(within(group).queryByRole("button", { name: "确认公开" })).toBeNull();
   expect(shareCalls()).toHaveLength(0);
@@ -475,4 +495,80 @@ test("在飞:取披露与公开期间「分享」读「生成链接中…」且�
   await act(async () => { releaseShare(); });
   await screen.findByRole("button", { name: "已公开，链接已复制" });
   expect(strip()).toBeNull();
+});
+
+test("换一份报告:上一份的确认条收起,不挂到这一份上;回到原报告也不再出现", async () => {
+  const user = userEvent.setup();
+  handlers.disclosure = () => json(200, { memory_count: 2 });
+  await user.click(await openReport());
+  await screen.findByRole("group", { name: "公开前确认" });
+
+  await user.click(screen.getByRole("button", { name: "打开另一份报告" }));
+  await screen.findByRole("heading", { name: "另一份报告" });
+  expect(strip()).toBeNull();
+
+  await user.click(screen.getByRole("button", { name: "打开原报告" }));
+  await screen.findByRole("heading", { name: "比较两类封装工艺" });
+  expect(strip()).toBeNull();
+  expect(shareCalls()).toHaveLength(0);
+});
+
+test("换笔记本:确认条随报告一起收起,换回来重新打开也不再出现", async () => {
+  const user = userEvent.setup();
+  handlers.disclosure = () => json(200, { memory_count: 2 });
+  await user.click(await openReport());
+  await screen.findByRole("group", { name: "公开前确认" });
+
+  await user.click(screen.getByRole("button", { name: "换笔记本" }));
+  await waitFor(() => expect(strip()).toBeNull());
+  await user.click(screen.getByRole("button", { name: "换笔记本" }));
+  await user.click(screen.getByRole("button", { name: "打开原报告" }));
+  await screen.findByRole("heading", { name: "比较两类封装工艺" });
+  expect(strip()).toBeNull();
+  expect(shareCalls()).toHaveLength(0);
+});
+
+test("POST 中途断网但服务端已公开:重读分享状态,按公开成功报告在按钮上", async () => {
+  const user = userEvent.setup();
+  handlers.share = () => { throw new TypeError("Failed to fetch"); };
+  handlers.shareRead = () => json(200, { share_token: "tok-9" });
+  await user.click(await openReport());
+
+  await screen.findByRole("button", { name: "已公开，链接已复制" });
+  expect(announceShareLink).toHaveBeenCalledWith("tok-9");
+  expect(notify).not.toHaveBeenCalled();
+});
+
+test("POST 中途断网且没有公开:如实报失败,按钮回到「分享」", async () => {
+  const user = userEvent.setup();
+  handlers.share = () => { throw new TypeError("Failed to fetch"); };
+  await user.click(await openReport());
+
+  await waitFor(() => expect(notify).toHaveBeenCalled());
+  expect(screen.getByRole("button", { name: "分享" })).toBeEnabled();
+  expect(announceShareLink).not.toHaveBeenCalled();
+  expect(calls.some((c) => c.method === "GET" && c.path === `${BASE}/${RID}/share`)).toBe(true);
+});
+
+test("状态区先空着挂上,句子在挂载之后才填入(读屏会播报)", () => {
+  function Probe() {
+    const ref = useRef<HTMLButtonElement | null>(null);
+    return (
+      <ReportShareConfirm
+        count={3}
+        added={null}
+        refusal={null}
+        busy={false}
+        returnFocusRef={ref}
+        onReturnFocus={() => {}}
+        onConfirm={() => {}}
+        onCancel={() => {}}
+      />
+    );
+  }
+  const firstPaint = renderToStaticMarkup(<Probe />);
+  expect(firstPaint).toContain('role="status"></span>');
+  expect(firstPaint).not.toContain(disclosureSentence(3));
+  render(<Probe />);
+  expect(screen.getByRole("status")).toHaveTextContent(disclosureSentence(3));
 });

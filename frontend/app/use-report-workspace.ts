@@ -590,6 +590,22 @@ export function useReportWorkspace({
         const refusal = toUserMessage(error, "只有作者可以公开分享这份报告");
         setShareConfirm((prev) => ({ count: prev?.count ?? null, added: null, refusal }));
       } else {
+        // 请求没有拿到回答(断网、超时):服务端可能已经公开了。重读一次分享状态,如实报告——
+        // 已公开就按公开成功处理(结果落在按钮上),否则才报「分享操作失败」。
+        if (httpErrorStatus(error) === undefined) {
+          try {
+            const { share_token: token } = await getReportShare(owner.notebookId, report.id);
+            if (!owns(owner) || activeReportRef.current?.id !== report.id) return null;
+            if (token) {
+              setShared(true);
+              setShareConfirm(null);
+              return await effectsRef.current.announceShareLink(token);
+            }
+          } catch (readError) {
+            logDiagnostic("report", readError);
+            if (!owns(owner) || activeReportRef.current?.id !== report.id) return null;
+          }
+        }
         surfaceError(error, "分享操作失败");
       }
       return null;
