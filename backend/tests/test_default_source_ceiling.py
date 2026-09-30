@@ -1752,6 +1752,44 @@ def test_generator_readers_are_frozen_where_they_enter():
         assert current_source_scope().source_ids == frozenset({"src-a", "src-b"})
 
 
+def test_refresh_never_inherits_an_excluded_librarys_empty_hand_out():
+    """#806 rebase recipe, third-review P2-1.  The outer scope carries a
+    ceiling for ``nb-lib`` but its library dimension excludes it, so the
+    outer memo's ordered entry for it is ``()``.  A refresh that re-admits
+    ``nb-lib`` inherits the same frozenset object; the order it inherits must
+    be paired with the set it was taken from (the outer's ``frozenset()``),
+    so it never matches and the new scope hands out the real sources --
+    not ``()``, which would silently drop a library the user selected."""
+    from types import SimpleNamespace
+
+    from app.services import chunk_federation
+
+    store = _two_mount_store()
+    candidates = SimpleNamespace(sources=SimpleNamespace(
+        all_visible_source_ids=lambda nb: ["live"],
+    ))
+    with source_scope_context(
+        NB, None, {"mode": "exclude", "notebook_ids": ["nb-lib"],
+                   "narrowed": True},
+        {"nb-lib": ["lib-1"]}, ceilings_total=True,
+    ):
+        outer = current_source_scope()
+        assert _sorted_library_ceiling(outer, "nb-lib") == ()
+        with refreshed_ceiling_context(
+            NB, "bob", store.readers(),
+            base_scope={"mode": "include", "notebook_ids": ["nb-lib"],
+                        "narrowed": True},
+        ):
+            scope = current_source_scope()
+            assert scope.source_ceiling_for("nb-lib") is outer.source_ceiling_for(
+                "nb-lib"
+            )
+            assert _sorted_library_ceiling(scope, "nb-lib") == ("lib-1",)
+            assert chunk_federation._peer_visible_sources(
+                candidates, "nb-lib"
+            ) == ("lib-1",)
+
+
 def test_peer_visible_sources_returns_the_frozen_ceiling_without_reading():
     from types import SimpleNamespace
 
