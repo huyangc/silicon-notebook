@@ -1,7 +1,8 @@
 """Post-readiness sweep of ownerless Memory sources (plan 2026-09-29 E5-3, audit N-5), SQLite.
 
-Real repository, real ``delete_source`` path, real notebook copy -- nothing in the
-delete cascade is replaced. The N-5 orphan is produced by the real deep copy
+Real repository, real ``remove_memory_sources`` path (the Memory-source removal
+every other path uses, with its composition-wired hooks), real notebook copy --
+nothing in the delete cascade is replaced. The N-5 orphan is produced by the real deep copy
 (which clears ``sources.memory_id`` and keeps ``source_type = 'memory'``); the
 hard-delete residue by the real ``MemoryStore.delete_memory`` (which never tears
 the derived source down); a non-confirmed Memory and a Memory row that never
@@ -34,6 +35,7 @@ from app.services import memory_orphan_sweep as sweep_module
 from app.services.memory_orphan_sweep import (
     MAX_CONSECUTIVE_FAILURES,
     ORPHAN_SWEEP_PAGE_SIZE,
+    REMOVE_BATCH,
     MemoryOrphanSweep,
 )
 from app.services.sqlite_repository import SQLiteRepository
@@ -353,6 +355,35 @@ def _assert_swept(world):
         assert any(alive.values())
 
 
+def _remover(repo, fails=lambda source_id: None):
+    """A stand-in for ``remove_memory_sources`` that raises ``fails(id)`` for the
+    ids it names -- for a whole call when one of them is in it, as a failed
+    transaction does -- and otherwise removes through the real path."""
+    real = repo._runtime.source_ingestion.remove_memory_sources
+    calls: list[list[str]] = []
+
+    def remove(source_ids):
+        ids = list(source_ids)
+        calls.append(ids)
+        for source_id in ids:
+            error = fails(source_id)
+            if error is not None:
+                raise error
+        return real(ids)
+
+    remove.calls = calls
+    return remove
+
+
+def _sweep(repo, remove, **kwargs):
+    return MemoryOrphanSweep(
+        store=kwargs.pop("store", repo._runtime.memory_store),
+        remove_memory_sources=remove,
+        event_log=repo._runtime.event_log,
+        **kwargs,
+    )
+
+
 # --------------------------------------------------------------------- tests
 def test_the_fixture_really_holds_every_orphan_shape(world):
     """Guards the guard: each shape is an orphan by the store's own predicate, the
@@ -442,15 +473,10 @@ def test_a_source_that_fails_is_isolated_and_the_next_start_finishes_it(world, e
     repo = world.repo
     victim = world.orphan_ids[2]
 
-    def flaky(source_id):
-        if source_id == victim:
-            raise RuntimeError("disk on fire: secret title")
-        return repo.delete_source(source_id)
+    flaky = _remover(repo, lambda sid: RuntimeError("disk on fire: secret title")
+                     if sid == victim else None)
 
-    tally = MemoryOrphanSweep(
-        store=repo._runtime.memory_store, delete_source=flaky,
-        event_log=repo._runtime.event_log,
-    ).run_pass()
+    tally = _sweep(repo, flaky).run_pass()
 
     assert tally == {"deleted": len(world.orphan_ids) - 1, "gone": 0, "failed": 1}
     assert _source_ids(repo).count(victim) == 1
@@ -474,18 +500,14 @@ def test_a_systemic_failure_ends_the_pass_and_leaves_the_rest_for_the_next_start
     world, events
 ):
     repo = world.repo
-    calls = []
+    broken = _remover(repo, lambda sid: ConnectionError("database away"))
 
-    def broken(source_id):
-        calls.append(source_id)
-        raise ConnectionError("database away")
+    tally = _sweep(repo, broken).run_pass()
 
-    tally = MemoryOrphanSweep(
-        store=repo._runtime.memory_store, delete_source=broken,
-        event_log=repo._runtime.event_log,
-    ).run_pass()
-
-    assert len(calls) == MAX_CONSECUTIVE_FAILURES  # stopped, did not fail one by one
+    # one call for the batch, then one id at a time until the cap: stopped, did
+    # not fail one by one
+    singles = [ids for ids in broken.calls if len(ids) == 1]
+    assert len(singles) == MAX_CONSECUTIVE_FAILURES
     assert tally == {"deleted": 0, "gone": 0, "failed": MAX_CONSECUTIVE_FAILURES}
     assert len(world.orphan_ids) > MAX_CONSECUTIVE_FAILURES
     assert set(world.orphan_ids) <= set(_source_ids(repo))  # everything left in place
@@ -502,15 +524,9 @@ def test_a_poison_row_at_the_end_of_a_page_does_not_stop_the_rest(world, events)
     repo = world.repo
     victim = world.orphan_ids[0]
 
-    def flaky(source_id):
-        if source_id == victim:
-            raise RuntimeError("poison")
-        return repo.delete_source(source_id)
+    flaky = _remover(repo, lambda sid: RuntimeError("poison") if sid == victim else None)
 
-    tally = MemoryOrphanSweep(
-        store=repo._runtime.memory_store, delete_source=flaky,
-        event_log=repo._runtime.event_log, page_size=1,
-    ).run_pass()
+    tally = _sweep(repo, flaky, page_size=1).run_pass()
 
     assert tally == {"deleted": len(world.orphan_ids) - 1, "gone": 0, "failed": 1}
     assert _source_ids(repo).count(victim) == 1
@@ -532,9 +548,7 @@ def test_a_first_page_read_that_fails_is_reported_and_starts_nothing(world, even
         def orphan_memory_source_ids(limit, after_id=""):
             raise TimeoutError("canceling statement due to statement timeout: secret")
 
-    tally = MemoryOrphanSweep(
-        store=Store, delete_source=repo.delete_source, event_log=repo._runtime.event_log,
-    ).run_pass()
+    tally = _sweep(repo, _remover(repo), store=Store).run_pass()
 
     assert tally == {"deleted": 0, "gone": 0, "failed": 0}
     assert _sweep_events(events) == [
@@ -560,10 +574,7 @@ def test_a_failed_read_is_reported_content_free_and_ends_the_pass(world, events)
                 raise TimeoutError("canceling statement due to statement timeout: secret")
             return real.orphan_memory_source_ids(limit, after_id)
 
-    tally = MemoryOrphanSweep(
-        store=Store, delete_source=repo.delete_source,
-        event_log=repo._runtime.event_log, page_size=2,
-    ).run_pass()
+    tally = _sweep(repo, _remover(repo), store=Store, page_size=2).run_pass()
 
     assert tally["deleted"] == 2 and tally["failed"] == 0
     kinds = [e["kind"] for e in _sweep_events(events)]
@@ -585,17 +596,18 @@ def test_a_success_resets_the_consecutive_failure_count(world):
     the pass."""
     repo = world.repo
     order = []
+    real = repo._runtime.source_ingestion.remove_memory_sources
 
-    def alternating(source_id):
-        order.append(source_id)
+    def alternating(source_ids):
+        ids = list(source_ids)
+        if len(ids) > 1:
+            raise RuntimeError("the batch fails")  # every id is then retried alone
+        order.append(ids[0])
         if len(order) % 2:
             raise RuntimeError("one bad source")
-        return repo.delete_source(source_id)
+        return real(ids)
 
-    tally = MemoryOrphanSweep(
-        store=repo._runtime.memory_store, delete_source=alternating,
-        event_log=repo._runtime.event_log,
-    ).run_pass()
+    tally = _sweep(repo, alternating).run_pass()
 
     assert len(order) == len(world.orphan_ids)  # every orphan was attempted once
     assert tally["failed"] == (len(order) + 1) // 2
@@ -620,11 +632,9 @@ def test_a_source_removed_by_another_writer_counts_as_gone(world):
                 repo.delete_source(first)
             return page
 
-    tally = MemoryOrphanSweep(
-        store=StaleOnce, delete_source=repo.delete_source,
-        event_log=repo._runtime.event_log,
-    ).run_pass()
+    tally = _sweep(repo, _remover(repo), store=StaleOnce).run_pass()
 
+    # the call removed the rows it still found; the missing one is ``gone``
     assert tally["gone"] == 1 and tally["failed"] == 0
     assert tally["deleted"] == len(world.orphan_ids) - 1
     _assert_swept(world)
@@ -724,13 +734,7 @@ def test_checkup_h12_counts_the_notebooks_remaining_orphans(world):
 def test_checkup_h12_follows_a_failed_pass_until_the_next_start(world):
     repo = world.repo
 
-    def broken(_source_id):
-        raise ConnectionError("away")
-
-    MemoryOrphanSweep(
-        store=repo._runtime.memory_store, delete_source=broken,
-        event_log=repo._runtime.event_log,
-    ).run_pass()
+    _sweep(repo, _remover(repo, lambda sid: ConnectionError("away"))).run_pass()
     total = sum(
         next(c for c in repo.checkup.run(nb).checks if c.code == "H12").count
         for nb in ("nb-a", world.copy_id)
@@ -772,9 +776,9 @@ def test_a_cleared_link_is_an_orphan_even_if_a_memory_row_has_an_empty_id(repo):
 
 
 def test_a_deep_copy_today_carries_no_memory_source(repo):
-    """The sweep is for LEGACY data only: once copies stop carrying Memory (E5-1) a fresh
-    ``copy_notebook`` produces no Memory source at all, so no new N-5 orphan appears.
-    (Skipped, loudly, on a tree that still has the old copy behaviour.)"""
+    """The sweep is for LEGACY data only: copies no longer carry Memory (E5-1), so a
+    fresh ``copy_notebook`` produces no Memory source at all and no new N-5 orphan
+    appears."""
     _user(repo, OWNER)
     _user(repo, RECIPIENT)
     _notebook(repo, "nb-src")
@@ -787,35 +791,108 @@ def test_a_deep_copy_today_carries_no_memory_source(repo):
             "SELECT COUNT(*) FROM sources WHERE notebook_id=? AND source_type='memory'",
             (copy.id,),
         ).fetchone()[0]
-    if carried:
-        pytest.skip("this tree still copies Memory sources (E5-1 not merged yet)")
     assert carried == 0
     assert repo._runtime.memory_store.orphan_memory_source_ids(10) == []
 
 
-def test_only_the_lookup_miss_of_delete_source_counts_as_gone(world, events):
+def test_an_exception_is_a_failure_and_only_an_absent_row_is_gone(world, events):
+    """``gone`` is a row the removal no longer found (another writer removed it:
+    the call's ids minus what it removed); any exception -- a KeyError included
+    -- is a recorded failure of that id, content-free."""
     repo = world.repo
     victim = world.orphan_ids[0]
-    other = world.orphan_ids[1]
+    raising = _remover(repo, lambda sid: KeyError("some-other-key") if sid == victim else None)
 
-    def raising(source_id):
-        if source_id == victim:
-            raise KeyError(source_id)  # delete_source's own get_source miss
-        if source_id == other:
-            raise KeyError("some-other-key")  # anything else is a real failure
-        return repo.delete_source(source_id)
+    tally = _sweep(repo, raising).run_pass()
 
-    tally = MemoryOrphanSweep(
-        store=repo._runtime.memory_store, delete_source=raising,
-        event_log=repo._runtime.event_log,
-    ).run_pass()
-
-    assert tally == {"deleted": len(world.orphan_ids) - 2, "gone": 1, "failed": 1}
+    assert tally == {"deleted": len(world.orphan_ids) - 1, "gone": 0, "failed": 1}
     failed = [e for e in _sweep_events(events) if e["kind"] == "memory_orphan_sweep_failed"]
     assert failed == [{
-        "kind": "memory_orphan_sweep_failed", "source_id": other, "error_class": "KeyError",
+        "kind": "memory_orphan_sweep_failed", "source_id": victim, "error_class": "KeyError",
     }]
     assert "some-other-key" not in json.dumps(_sweep_events(events))
+
+
+def test_a_non_memory_source_in_a_page_is_a_recorded_failure_never_swallowed(world, events):
+    """The removal accepts Memory sources only and refuses a whole call holding
+    anything else (``ValueError``). The orphan predicate never yields such an id;
+    if a page ever carried one, that id is a recorded failure, the Memory orphans
+    around it are still removed, and the document source keeps everything."""
+    repo = world.repo
+    real = repo._runtime.memory_store
+
+    class WithADocument:
+        @staticmethod
+        def orphan_memory_source_ids(limit, after_id=""):
+            page = real.orphan_memory_source_ids(limit, after_id)
+            return sorted([*page, "src-doc"]) if page and not after_id else page
+
+    tally = _sweep(repo, repo._runtime.source_ingestion.remove_memory_sources,
+                   store=WithADocument).run_pass()
+
+    assert tally == {"deleted": len(world.orphan_ids), "gone": 0, "failed": 1}
+    failed = [e for e in _sweep_events(events) if e["kind"] == "memory_orphan_sweep_failed"]
+    assert failed == [{
+        "kind": "memory_orphan_sweep_failed", "source_id": "src-doc", "error_class": "ValueError",
+    }]
+    _assert_swept(world)
+
+
+def test_an_orphan_merged_into_a_shared_object_leaves_it_whole_and_no_memory_name(world):
+    """B2 for orphans: the sweep goes through the Memory removal, so an orphan's
+    object manually merged into a shared object loses only its evidence (the
+    shared object stays), and a cluster the orphan's object seeded -- whose
+    name sits on a shared member's row -- goes whole."""
+    repo = world.repo
+    orphan, orphan_object, shared = "src-dep", "ko-src-dep-1", "ko-src-doc-1"
+    with repo._runtime.database.write() as db:
+        evidence = json.loads(db.execute(
+            "SELECT evidence FROM knowledge_objects WHERE id=?", (shared,)
+        ).fetchone()[0])
+        evidence.append({"source_id": orphan, "element_id": f"el-{orphan}-1"})
+        db.execute("UPDATE knowledge_objects SET evidence=? WHERE id=?",
+                   (json.dumps(evidence), shared))
+        db.execute("INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id) "
+                   "VALUES (?,?,?)", (shared, orphan, "nb-a"))
+        for member in (orphan_object, shared):
+            db.execute(
+                "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,"
+                "canonical_name,created_at,generation) VALUES (?,?,?,?,?,?,1)",
+                (f"cc-b2-{member}", "nb-a", "K-orphan private", member,
+                 "ORPHAN-PRIVATE name", NOW),
+            )
+
+    MemoryOrphanSweep.for_repository(repo).run_pass()
+
+    with repo._runtime.database.connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM knowledge_objects WHERE id=?",
+                          (shared,)).fetchone()[0] == 1
+        kept = json.loads(db.execute("SELECT evidence FROM knowledge_objects WHERE id=?",
+                                     (shared,)).fetchone()[0])
+        assert orphan not in {item.get("source_id") for item in kept}
+        assert db.execute(
+            "SELECT COUNT(*) FROM concept_clusters WHERE canonical_name LIKE 'ORPHAN-PRIVATE%' "
+            "OR canonical_id='K-orphan private'"
+        ).fetchone()[0] == 0
+
+
+def test_a_page_is_removed_in_calls_of_at_most_the_purge_page(world):
+    """The removal's statements are registered as one purge page (at most 200
+    ids); a read page larger than that goes in several calls."""
+    assert REMOVE_BATCH <= 200 < ORPHAN_SWEEP_PAGE_SIZE
+    repo = world.repo
+    counting = _remover(repo)
+    import app.services.memory_orphan_sweep as module
+
+    original = module.REMOVE_BATCH
+    module.REMOVE_BATCH = 2
+    try:
+        tally = _sweep(repo, counting).run_pass()
+    finally:
+        module.REMOVE_BATCH = original
+    assert tally["deleted"] == len(world.orphan_ids)
+    assert max(len(ids) for ids in counting.calls) == 2
+    assert len(counting.calls) == -(-len(world.orphan_ids) // 2)
 
 
 def test_orphan_predicate_uses_the_shared_memory_source_type_fragment():
