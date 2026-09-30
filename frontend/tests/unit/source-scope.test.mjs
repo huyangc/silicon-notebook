@@ -12,11 +12,36 @@ import {
   selectedBaseCount,
   selectedBaseIds,
   selectedSourceCount,
+  skippedLibrariesNotice,
   sourceIsSelected,
   sourceScopePayload,
   toggleBaseSelection,
   toggleSourceSelection,
 } from "../../app/source-scope.ts";
+
+// --- 没有参与本次回答的挂载参考库 -------------------------------------------
+
+test("未参与的参考库按名称说出,多个时用「它们」", () => {
+  assert.equal(
+    skippedLibrariesNotice([{ notebook_id: "a", name: "器件手册" }]),
+    "参考库《器件手册》这次没能及时读取，本次回答没有用到它的资料；再问一次通常就会包含。",
+  );
+  assert.equal(
+    skippedLibrariesNotice([
+      { notebook_id: "a", name: "甲" }, { notebook_id: "b", name: "乙" },
+    ]),
+    "参考库《甲》、《乙》这次没能及时读取，本次回答没有用到它们的资料；再问一次通常就会包含。",
+  );
+});
+
+test("读不到名称时不显示裸 id", () => {
+  const text = skippedLibrariesNotice([{ notebook_id: "lib-secret-id", name: "" }]);
+  assert.equal(
+    text,
+    "一个参考库这次没能及时读取，本次回答没有用到它的资料；再问一次通常就会包含。",
+  );
+  assert.ok(!text.includes("lib-secret-id"));
+});
 
 test("同库来源不算跨库(空串 = 照常给写入按钮)", () => {
   assert.equal(crossLibrarySourceNotebookId("nb-1", "nb-1"), "");

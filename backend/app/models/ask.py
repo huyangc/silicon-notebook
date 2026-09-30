@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_valid
 
 from app.models.source_scope import (
     BaseNotebookScope,
+    RetrievalScopeBaseReceipt,
     RetrievalScopeReceipt,
     SourceScope,
 )
@@ -920,6 +921,17 @@ class AskResponse(BaseModel):
     # SourceScope/BaseNotebookScope on the request.
     retrieval_scope: Optional[RetrievalScopeReceipt] = Field(
         default=None, exclude_if=lambda value: value is None
+    )
+    # Mounted reference libraries this single-notebook answer could NOT use:
+    # their source lists could not be read in time when the question started,
+    # so they took no part (``source_scope.current_skipped_mounted_libraries``;
+    # never searched without their limits).  A failure that changes the
+    # answer, so the answer says so -- the single-notebook counterpart of a
+    # global run's skipped-notebook receipt.  Names are snapshots, like
+    # ``retrieval_scope``'s.  Empty -- and absent from the payload -- on every
+    # healthy run.
+    skipped_libraries: List[RetrievalScopeBaseReceipt] = Field(
+        default_factory=list, exclude_if=lambda value: not value
     )
     # 严格推理(reasoning/graph)无可用 KG(本 notebook 无图且无可用 base)时 True。
     kg_required: bool = False

@@ -684,6 +684,22 @@ def _clarification_payload(pending: _PendingIntent) -> dict[str, Any]:
     )
 
 
+def _answer_entries(answer: Any) -> dict[str, Any]:
+    """The optional keys of an answered payload: ``intent`` (``_intent_entry``)
+    and ``skipped_libraries`` -- each mounted reference library the answer
+    could not use because its source list could not be read in time when the
+    question started (``AskResponse.skipped_libraries``; id and name only).
+    Both absent when empty, so a healthy answer's payload is unchanged."""
+    entries = _intent_entry(answer)
+    skipped = getattr(answer, "skipped_libraries", None) or ()
+    if skipped:
+        entries["skipped_libraries"] = [
+            {"notebook_id": item.notebook_id, "name": item.name}
+            for item in skipped
+        ]
+    return entries
+
+
 def _intent_entry(answer: Any) -> dict[str, Any]:
     """The ``intent`` key of an answered payload, or nothing at all.
 
@@ -1051,7 +1067,7 @@ def register_memory_context_tools(
             "conversation_id": answer.conversation_id,
             "anchors": anchor_rows,
             "citations": citation_rows,
-            **_intent_entry(answer),
+            **_answer_entries(answer),
         }, initial_omitted_items=(
                 # The FILTERED lists (``_strip_memory_items``): counting the
                 # unfiltered ones is how the hidden Memory count leaks out.

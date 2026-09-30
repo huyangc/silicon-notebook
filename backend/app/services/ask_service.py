@@ -87,6 +87,7 @@ from app.models.knowledge import (
     KnowledgeFieldValue,
     KnowledgeRecord,
 )
+from app.models.source_scope import RetrievalScopeBaseReceipt
 from app.services import background_jobs
 from app.services.ask_followup import (
     FollowupResolution,
@@ -2171,6 +2172,34 @@ class AskService:
             raise AskCancelled()
         return turn
 
+    def _skipped_libraries(self, notebook_id: str) -> list[RetrievalScopeBaseReceipt]:
+        """The answer's notice of mounted libraries this run left out.
+
+        Read from the installed ceiling (``current_skipped_mounted_libraries``:
+        library ids whose visible-source list could not be read in time, a
+        library the user unchecked never included).  Names come from the
+        notebook's mount list, read only when something was skipped; a name
+        that cannot be read stays empty (the notice still appears)."""
+        from app.services.source_scope import current_skipped_mounted_libraries
+
+        skipped = current_skipped_mounted_libraries()
+        if not skipped:
+            return []
+        try:
+            names = {
+                str(ref.id): str(ref.name or "")
+                for ref in self.notebooks.get_notebook(notebook_id).base_notebooks
+            }
+        except Exception:  # noqa: BLE001 - the notice must not cost the answer
+            names = {}
+        return [
+            RetrievalScopeBaseReceipt(
+                notebook_id=library, name=names.get(library, "")[:500],
+                included=False,
+            )
+            for library in skipped
+        ]
+
     def _save_answer(
         self,
         notebook_id: str,
@@ -2194,6 +2223,8 @@ class AskService:
         receipt = current_retrieval_scope_receipt()
         if receipt is not None:
             response.retrieval_scope = receipt
+        # Same sink: a mounted library the ceiling had to leave out.
+        response.skipped_libraries = self._skipped_libraries(notebook_id)
         response.asked_at = asked_at or response.asked_at
         AskService._drop_dangling_references(self, response)
         # A DETACHED turn owns its own persistence. The three assignments above

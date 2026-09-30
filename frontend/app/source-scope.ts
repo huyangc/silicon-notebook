@@ -199,6 +199,24 @@ export function retrievalScopeSummary(
   return `${localText} · 参考库 ${bases.selected}/${bases.total}`;
 }
 
+/**
+ * 回答下方那句「哪些参考库没有参与」的文案（``AskResponse.skipped_libraries``）。
+ * 只说现象：提问开始时没能及时读出这个库，本次回答没有用到它；再问一次通常就会包含。
+ * 名称缺失（读不到挂载列表）时说「一个参考库」，不显示裸 id。
+ */
+export function skippedLibrariesNotice(
+  libraries: readonly { notebook_id: string; name: string }[],
+): string {
+  const named = libraries.map((library) => library.name.trim()).filter(Boolean);
+  const unnamed = libraries.length - named.length;
+  const parts = named.map((name) => `《${name}》`);
+  if (unnamed > 0) parts.push(unnamed === 1 ? "另一个参考库" : `另外 ${unnamed} 个参考库`);
+  const subject = named.length > 0
+    ? `参考库${parts.join("、")}`
+    : (unnamed === 1 ? "一个参考库" : `${unnamed} 个参考库`);
+  return `${subject}这次没能及时读取，本次回答没有用到${libraries.length > 1 ? "它们" : "它"}的资料；再问一次通常就会包含。`;
+}
+
 export function removeSourceFromSelection(
   selection: SourceScopeSelection,
   sourceId: string,
