@@ -2597,6 +2597,13 @@
                 }
               ]
             },
+            "skipped_libraries": {
+              "items": {
+                "$ref": "#/components/schemas/RetrievalScopeBaseReceipt"
+              },
+              "title": "Skipped Libraries",
+              "type": "array"
+            },
             "top_relevance": {
               "default": 0.0,
               "title": "Top Relevance",
