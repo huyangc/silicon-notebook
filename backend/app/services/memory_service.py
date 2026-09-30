@@ -287,6 +287,16 @@ class MemberExitFailed(_MemberExitNotFinished):
     there. HTTP 503 ``exit_incomplete``."""
 
 
+class _PurgeCleanupFailed(Exception):
+    """A purge page's Memory rows were deleted (committed, ``deleted`` of
+    them), then removing their derived rows once more failed. The cause is
+    chained; callers count ``deleted`` as deleted before they fail."""
+
+    def __init__(self, deleted: int) -> None:
+        super().__init__(f"{deleted} Memory rows deleted; derived-row cleanup failed")
+        self.deleted = deleted
+
+
 class MembershipExitPort(Protocol):
     """What the self-exit needs from the sharing service."""
 
@@ -1035,12 +1045,21 @@ class MemoryService:
         Memories can publish its source between the first removal and the row
         delete, and its own post-ingest recheck may have run before the row
         was gone — the same window ``transfer``'s move closes the same way
-        (P1-C, round 6). The second lookup finds nothing in the normal case."""
+        (P1-C, round 6). The second lookup finds nothing in the normal case.
+
+        The row delete commits on its own, so a failure of that second
+        removal cannot take the deletion back: it raises
+        ``_PurgeCleanupFailed`` carrying the committed count, and every
+        caller reports those rows as deleted (a source left behind is an
+        orphan the orphan sweep removes)."""
         self._remove_derived_rows(refs)
         deleted = self.store.bulk_delete_memories(
             user_id, [memory_id for memory_id, _ in refs]
         )
-        self._remove_derived_rows(refs)
+        try:
+            self._remove_derived_rows(refs)
+        except Exception as exc:
+            raise _PurgeCleanupFailed(deleted) from exc
         return deleted
 
     def _audit_purge(
@@ -1072,12 +1091,19 @@ class MemoryService:
         # (creator only, not read access), so no derived row survives a
         # deleted Memory and no other user's projection is ever touched.
         refs = self.store.owned_memory_refs(user_id, memory_ids)
-        deleted = self._purge_page(user_id, refs) if refs else 0
+        failure: BaseException | None = None
+        try:
+            deleted = self._purge_page(user_id, refs) if refs else 0
+        except _PurgeCleanupFailed as exc:
+            # The rows are gone: audit them, then fail with the real cause.
+            deleted, failure = exc.deleted, exc.__cause__
         per_notebook: dict[str, int] = {}
         for _memory_id, notebook_id in refs:
             per_notebook[notebook_id] = per_notebook.get(notebook_id, 0) + 1
         for notebook_id, count in sorted(per_notebook.items()):
             self._audit_purge("bulk_delete", notebook_id, user_id, count)
+        if failure is not None:
+            raise failure
         return deleted
 
     # ------------------------------------------------------------ self-exit
@@ -1141,6 +1167,8 @@ class MemoryService:
             for offset in range(0, len(refs), _PURGE_PAGE):
                 deleted += self._purge_page(user_id, refs[offset:offset + _PURGE_PAGE])
         except Exception as exc:
+            if isinstance(exc, _PurgeCleanupFailed):
+                deleted += exc.deleted  # committed before the cleanup failed
             self._audit_exit(notebook_id, user_id, deleted, finished=False)
             raise MemberExitFailed(
                 deleted, self._remaining_after_failure(notebook_id, user_id, claimed - deleted)
