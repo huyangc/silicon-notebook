@@ -1409,6 +1409,21 @@ class CandidateRetrievalService(_RetrievalState):
                                 runtime_dim=runtime_dim)
 
         return self._vector_cache.get(f"{notebook_id}:matrix:{table}", version, _load)
+    def _memory_source_ids(self, db: object, notebook_id: str) -> list:
+        """The notebook's Memory source ids (``SourceStore.memory_source_ids``:
+        one narrow indexed read, bounded by its Memory count).  Production
+        always wires the ``sources`` port; a partial service built without one
+        (store-conformance harnesses) has no Memory to tell apart, and gets
+        ``[]`` -- the relation and token paths then read exactly what they
+        read before Memory was separated."""
+        sources = getattr(self, "sources", None)
+        if sources is None:
+            return []
+        return [
+            str(value) for value in sources.memory_source_ids(db, notebook_id)
+            if value
+        ]
+
     def _memory_relation_ids(self, db: object, notebook_id: str) -> frozenset:
         """Ids of the relations a Memory source derives (D4: the relation's own
         ``source_id`` is a Memory source), any member's.  One Memory-source
@@ -1416,10 +1431,7 @@ class CandidateRetrievalService(_RetrievalState):
         ``relation_delta_rows`` read per ``_in_batches`` window of Memory
         source ids -- bounded by the notebook's Memory graph, never by its
         whole relation table."""
-        memory = [
-            str(value) for value in self.sources.memory_source_ids(db, notebook_id)
-            if value
-        ]
+        memory = self._memory_source_ids(db, notebook_id)
         if not memory:
             return frozenset()
         ids: set = set()
@@ -1447,8 +1459,8 @@ class CandidateRetrievalService(_RetrievalState):
         from app.services.vector_index import build_matrix, resolve_runtime_dim
 
         memory = [
-            str(value) for value in self.sources.memory_source_ids(db, notebook_id)
-            if value and source_allowed(notebook_id, str(value))
+            value for value in self._memory_source_ids(db, notebook_id)
+            if source_allowed(notebook_id, value)
         ]
         if not memory:
             return [], None
@@ -1559,11 +1571,7 @@ class CandidateRetrievalService(_RetrievalState):
         }
 
         def _build_shared():
-            memory = frozenset(
-                str(value)
-                for value in self.sources.memory_source_ids(db, notebook_id)
-                if value
-            )
+            memory = frozenset(self._memory_source_ids(db, notebook_id))
             out = {}
             for obj in objects:
                 evidence = read.get(obj["id"], [])

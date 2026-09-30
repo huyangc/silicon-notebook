@@ -446,7 +446,8 @@ def test_exact_lookup_arm_switch_off_closes_it_in_peer_mode():
     ``test_peer_mode_exact_arm.py``);这里只钉回退开关
     ``GLOBAL_ASK_EXACT_ARM_ENABLED=false``——对等模式回到零查询、零座位读(问题里
     明明有标识符 ``set_db``)。它一关,``exact_section_reserve`` 的保底规则随命中
-    为空自动 inert。对照臂:单库路径照旧先探来源闸、再看 ``exact_lookup_enabled``。"""
+    为空自动 inert。对照臂:单库路径不再探来源闸(E2-2:收窄不关精确通道,天花板
+    下推进探针),``exact_lookup_enabled`` 关时同样零调用。"""
     probe = _LexicalProbe()
     probe.settings.global_ask_exact_arm_enabled = False
 
@@ -460,7 +461,7 @@ def test_exact_lookup_arm_switch_off_closes_it_in_peer_mode():
     assert CandidateRetrievalService._exact_lookup_chunks(
         probe, "nb-a", "set_db",
     ) == []
-    assert probe.calls == ["restricted_probe"]
+    assert probe.calls == []
 
 
 # ---------------------------------------------------------------------------
