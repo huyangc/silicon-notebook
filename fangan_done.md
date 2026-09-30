@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-09-29（新增 §47 当前库保底席位与原文段下限；§48 全局问答引用核对：部分失败照常交付；§49 KG 对象定义的来源归因与 KG 详情按查看者过滤；§50 全局问答集合枚举引用按冻结参与集；§51 集合枚举与按篇读取原文认本次勾选的来源）
+更新日期：2026-09-30（新增 §52 笔记本拷贝不带 Memory；§53 成员退出与 Memory 的彻底删除；此前 2026-09-29 新增 §47 当前库保底席位与原文段下限；§48 全局问答引用核对：部分失败照常交付；§49 KG 对象定义的来源归因与 KG 详情按查看者过滤；§50 全局问答集合枚举引用按冻结参与集；§51 集合枚举与按篇读取原文认本次勾选的来源）
 
 对照依据：[产品方案](silicon_notebook_fangan.md)。章节号指向原方案；“扩展”表示交付时延伸能力，不冒称原方案已有独立条款。
 
@@ -437,6 +437,18 @@ Agent profile、opaque token、scope/allowlist/过期与撤销、公开 onboardi
 **已交付，2026-09-29；方案 §11 扩展。** 提问时只勾选部分来源、或冻结范围之后来源发生变化时，集合枚举与 `read_document` 不再整体关闭：集合地图、来源 / 元素 / 知识对象清单、计数、续跑游标与引用卡只看勾选的来源，清单在轨迹、回喂账目、合成分区标题、reflect 提示词与结果卡上如实标注「（仅勾选的来源）」；按篇读取在读原文前再按来源天花板与参与集核对一次，范围外的文档与「清单里没有这个标题」无法区分。全选且未漂移的默认提问与不带范围时完全相同：天花板是否约束由每个检索 run 判定一次，并显式传给每个枚举与目录入口。全局问答不再提供「仅当前笔记本」范围、不注入锚点库的理解块；Knowhow 完整枚举在全局、收窄或漂移时让路。原待办「集合枚举的引用不过来源天花板」「`read_document` 延后项：收窄时整套枚举不提供」「全局模式下『参考库』措辞没有对应物」随之关闭。
 
 当前合同见[检索模式][retrieval]中的集合枚举工具一节；回归入口：[推理侧](backend/tests/test_reasoning_enumeration_source_ceiling.py)、[执行器与目录](backend/tests/test_collection_enumeration_source_ceiling.py)。
+
+## 52. 笔记本拷贝不带 Memory（2026-09-30）
+
+**已交付，2026-09-30；方案 §19 私有 Memory 的延伸（来源范围与权限整改计划 PR-E5，用户裁决 M2）。** 深拷贝——给自己拷一份与经分享链接投递的一份——一律不带任何成员的 Memory 及其派生内容：Memory 来源、元素与向量、派生的知识对象、关系、事实与向量、任一端是 Memory 对象的关系、「Memory 的簇」（含 Memory 成员或 canonical id 铸自 Memory 对象），以及 Memory 借给保留行的证据条目。成簇过时或含 Memory 的笔记本，副本以「待重建」开始；分享预览与分享弹窗的数量不含 Memory。没有 Memory 且成簇最新的笔记本，拷贝与此前完全相同。此前拷贝留下的无主 Memory 来源由启动后的后台清扫删除，体检项 H12 只读显示剩余数量。
+
+当前合同见[产品/API][product]的深拷贝一节与[运维][ops]的无主 Memory 来源一节；回归入口：[拷贝排除](backend/tests/test_notebook_share_copy.py)、[判据契约](backend/tests/test_memory_sql_contract.py)、[孤儿清扫](backend/tests/test_memory_orphan_sweep.py)。
+
+## 53. 成员退出与 Memory 的彻底删除（2026-09-30）
+
+**已交付，2026-09-30；方案 §19 私有 Memory 的延伸（来源范围与权限整改计划 PR-E5，用户裁决 M5）。** 成员退出共享笔记本时，只有本人的退出、并且在告知条数并得到确认之后，才永久删除本人在该库的记忆；确认前可以导出为文件或转移到自己的笔记本。每种结果都由服务端如实计数（退出合同 v2：204、带删除条数的 200、需重新确认的 409、带已删与剩余条数的 409 / 503 未完成）。收回访问权的操作一律不删记忆；删除整本笔记本则删除其中的一切。硬删除、批量删除、弃用、转移移动、退出与无主来源清扫共用同一条移除：剥离合并进共享对象的证据（共享对象保留），整簇删除 Memory 的簇及点名它们的审阅候选，并标记待重建。
+
+当前合同见[Memory 与 Agent MCP][memory]；回归入口：[清除场景](backend/tests/memory_purge_cases.py)、[退出路由](backend/tests/test_memory_exit_routes.py)、[PostgreSQL 交错](backend/tests/postgres/test_memory_exit_interleavings_pg.py)。
 
 [product]: docs/product-and-api_zh.md
 [flow]: docs/product-and-api_zh.md#产品流程
