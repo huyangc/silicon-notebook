@@ -122,6 +122,37 @@ test("Excel 分析结果显示计算回执、公式告警并可定位原来源",
 });
 
 
+test("a workbook receipt from a mounted library carries its library and renders the same", () => {
+  // The wire's optional `notebook_id` / `tier` on the result (absent for the
+  // current library at the default tier) are part of the typed mirror.
+  const receipt: SpreadsheetAnalysisResult = {
+    kind: "spreadsheet",
+    source_id: "src-sheet",
+    source_title: "销售数据",
+    sheet: "Sales",
+    range: "A1:B3",
+    operation: "filter",
+    columns: [{ id: "Region", name: "Region" }],
+    rows: [],
+    coverage: {
+      total_rows: 0, scanned_rows: 2, returned_rows: 0, complete: true,
+      truncated_reason: null, overflow_semantics: "",
+    },
+    formula_cells: 0,
+    unresolved_formula_cells: 0,
+    notebook_id: "nb-mounted",
+    tier: "base",
+  };
+  const answer = answerWithRows(1);
+  answer.result_sets = [receipt];
+  answer.result_coverage = undefined;
+  renderAnswer(answer);
+  expect(screen.getByText(/Excel 分析 · 销售数据/)).toBeInTheDocument();
+  expect(receipt.notebook_id).toBe("nb-mounted");
+  expect(receipt.tier).toBe("base");
+});
+
+
 test("complete Knowhow result shows coverage, initially caps at 20 rows, then expands loaded rows", async () => {
   const user = userEvent.setup();
   const openRow = renderAnswer(answerWithRows(25));

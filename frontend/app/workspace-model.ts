@@ -511,6 +511,9 @@ export type SpreadsheetAnalysisResult = {
   formula_cells: number;
   unresolved_formula_cells: number;
   warnings?: string[];
+  /** 回执的归属库与层级（同 `Citation.notebook_id` / `tier`）：本库为空、层级为默认值时整体缺席。 */
+  notebook_id?: string;
+  tier?: string;
 };
 
 export type KnowhowBatchCoverage = {
