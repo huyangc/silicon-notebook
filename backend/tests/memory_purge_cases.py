@@ -27,7 +27,6 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from app.models.knowledge import MergeRequest
 from app.models.schemas import NotebookCreate, SourceImportFile, SourceImportRequest
 from app.services.embedding import FakeEmbedder
 from app.services.memory_service import (
@@ -229,6 +228,63 @@ def make_memory(
     return projection
 
 
+def _json_list(value: Any) -> list:
+    if isinstance(value, str):
+        value = json.loads(value or "[]")
+    return list(value or [])
+
+
+def legacy_merge(world: World, notebook_id: str, object_id: str, into_id: str) -> None:
+    """The state a manual ``merge_knowledge`` of ``object_id`` into
+    ``into_id`` left before merges of Memory-derived objects were refused
+    (E4-3), written directly in SQL on either backend — exactly what
+    ``merge_objects_in_transaction`` did: the target's evidence gains the
+    source's items (deduplicated by element and quoted span), the target's
+    reverse-index rows are replaced from its evidence, the source object is
+    deprecated in place, and the notebook's graph is marked dirty."""
+    sql = world.sql
+    [source] = sql.rows(
+        "SELECT evidence FROM knowledge_objects WHERE id=? AND notebook_id=?",
+        (object_id, notebook_id),
+    )
+    [target] = sql.rows(
+        "SELECT evidence FROM knowledge_objects WHERE id=? AND notebook_id=?",
+        (into_id, notebook_id),
+    )
+    merged = _json_list(target["evidence"])
+    seen = {(item.get("element_id"), item.get("quoted_span")) for item in merged}
+    for item in _json_list(source["evidence"]):
+        key = (item.get("element_id"), item.get("quoted_span"))
+        if key not in seen:
+            merged.append(item)
+            seen.add(key)
+    evidence_value = "CAST(? AS jsonb)" if sql.postgres else "?"
+    sql.write(
+        f"UPDATE knowledge_objects SET evidence={evidence_value}, updated_at=? WHERE id=?",
+        (json.dumps(merged, ensure_ascii=False), _GRANT_CREATED_AT, into_id),
+    )
+    sql.write("DELETE FROM knowledge_object_sources WHERE object_id=?", (into_id,))
+    for source_id in dict.fromkeys(
+        item["source_id"] for item in merged
+        if isinstance(item, dict) and item.get("source_id")
+    ):
+        sql.write(
+            "INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id) "
+            "VALUES (?,?,?)",
+            (into_id, source_id, notebook_id),
+        )
+    sql.write(
+        "UPDATE knowledge_objects SET status='deprecated', last_reviewed=?, updated_at=? "
+        "WHERE id=?",
+        (_GRANT_CREATED_AT, _GRANT_CREATED_AT, object_id),
+    )
+    sql.write(
+        "UPDATE unified_kg_state SET dirty=1, kg_mutation_seq=kg_mutation_seq+1 "
+        "WHERE notebook_id=?",
+        (notebook_id,),
+    )
+
+
 def build_world(repo: Any, *, postgres: bool) -> World:
     sql = Sql(repo, postgres=postgres)
     bind_all_embedding_clients(repo, FakeEmbedder(dim=EMBED_DIM))
@@ -261,14 +317,11 @@ def build_world(repo: Any, *, postgres: bool) -> World:
     make_memory(world, "bob", shared, bob)
     make_memory(world, "alice_home", alice_home, alice)
     make_memory(world, "alice_elsewhere", elsewhere, alice)
-    # N-1: a curator manually merges Alice's Memory-derived object into the
-    # shared document object; the shared object now also cites her Memory.
+    # N-1: a curator manually merged Alice's Memory-derived object into the
+    # shared document object before merges of Memory objects were refused;
+    # the shared object now also cites her Memory (legacy state, in SQL).
     alice_projection = world.projections["alice"]
-    repo.merge_knowledge(
-        shared,
-        alice_projection.object_ids[0],
-        MergeRequest(into_id=doc_object),
-    )
+    legacy_merge(world, shared, alice_projection.object_ids[0], doc_object)
     assert alice_projection.source_id in _evidence_sources(world, doc_object)
     # New notebooks are born with a trusted reverse index; the unbackfilled
     # case flips this explicitly.
