@@ -411,6 +411,72 @@ def test_nested_planning_string_must_remain_verbatim(monkeypatch):
         )
 
 
+# ── LaTeX backslashes inside JSON strings (deepseek-flash, 2026-09-29) ──
+# Built from BS so no literal backslash escape sits in this file's source.
+BS = "\\"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # Stray backslashes only.
+        '{"answer":"U = 5 ' + BS + 'mathrm{V}, 50' + BS + '% of it",'
+        '"grounded":true}',
+        # The observed failure: paragraph breaks written as JSON escapes in
+        # the same string as the LaTeX.
+        '{"answer":"U = 5 ' + BS + 'mathrm{V}' + BS + 'n' + BS + 'n50' + BS
+        + '% of it","grounded":true}',
+    ],
+)
+def test_latex_backslashes_decode_to_the_characters_written(raw):
+    result = parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=True)
+
+    answer = json.loads(result.content)["answer"]
+    assert result.repaired
+    assert BS + "mathrm{V}" in answer
+    assert "50" + BS + "% of it" in answer
+    assert answer.count(BS) == 2
+
+
+def test_valid_escapes_next_to_latex_keep_their_json_meaning():
+    raw = (
+        '{"answer":"a' + BS + 'nb ' + BS + '"q' + BS + '" c' + BS + BS
+        + 'd caf' + BS + 'u00e9 ' + BS + 'underline{x} 5' + BS + '%",'
+        '"grounded":true}'
+    )
+
+    result = parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=True)
+
+    assert json.loads(result.content)["answer"] == (
+        'a\nb "q" c' + BS + "d caf" + chr(0xE9) + " " + BS + "underline{x} 5"
+        + BS + "%"
+    )
+
+
+def test_latex_reading_does_not_excuse_a_changed_string(monkeypatch):
+    # Dropping the backslash is a change to what the model wrote.
+    monkeypatch.setattr(
+        "app.core.model_json.json_repair.loads",
+        lambda *_args, **_kwargs: {"answer": "50% of it", "grounded": True},
+    )
+
+    with pytest.raises(ModelJsonRepairError, match="string_changed"):
+        parse_model_json_object(
+            '{answer: "50' + BS + '% of it", grounded: true}',
+            ANSWER_SCHEMA,
+            allow_repair=True,
+        )
+
+
+def test_latex_backslashes_stay_strict_when_repair_is_off():
+    with pytest.raises(ModelJsonRepairError, match="invalid_json"):
+        parse_model_json_object(
+            '{"answer":"50' + BS + '%","grounded":true}',
+            ANSWER_SCHEMA,
+            allow_repair=False,
+        )
+
+
 # ── codex #720 R1 ──────────────────────────────────────────────────────────
 
 
