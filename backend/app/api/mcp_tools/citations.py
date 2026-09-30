@@ -38,7 +38,10 @@ def register_citation_tools(
             "display title. Use it to verify a claim's evidence before acting "
             "on it. Discloses nothing beyond what an answer in the selected "
             "notebook already may cite -- the notebook's own sources plus the "
-            "reference libraries it currently mounts."
+            "reference libraries it currently mounts. A memory-derived source "
+            "is readable only by the person who saved that memory, and only "
+            "when this token has memory:read (shown as 读取已确认记忆 on the "
+            "Agent access page); otherwise it fails like an unknown id."
         )
     )
     async def get_cited_element(
