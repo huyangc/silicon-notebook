@@ -5802,10 +5802,12 @@ class ReasoningRetriever:
         # 保持原样——本通道只往 chunks 里追加,不改既有那一步的任何数字。
         # 问题不含可探测名称 → exact_probe_terms 为空 → 一次调用都不发、也不记轨迹步,
         # 现有轨迹逐字节不变(这是中性回归的验收点,由 stub 测试直接断言)。
+        # 收窄或漂移的 run 不再跳过(E2-2):通道把本次来源天花板下推进探针,
+        # 只会返回天花板内的小节(``CandidateRetrievalService._exact_lookup_chunks_one``),
+        # 结果再经 ``exact_lookup`` 的 `_filter_candidates` 边界。
         seed_terms = (self._exact_lookup_terms(question)
                       if self.settings.exact_lookup_enabled
-                      and self.allow_exact_lookup
-                      and not self._unsafe_scope_restricted() else [])
+                      and self.allow_exact_lookup else [])
         if seed_terms:
             raise_if_cancelled(self.cancel_event)
             # 检索串用抽出的名称本身,不用整句问题——与 reflect 动作同构
@@ -8380,17 +8382,7 @@ class ReasoningRetriever:
                 probed = (self._exact_lookup_terms(term, honor_quotes=False)
                           if term else [])
                 fresh = [t for t in probed if _norm_query(t) not in exact_terms_done]
-                if self._unsafe_scope_restricted():
-                    feed_exact_lookup_skip(
-                        "source_scope_unsafe_channel", [],
-                        "指定来源范围下按名称精确查找不可用"
-                    )
-                    record(TraceStep(
-                        step_type="skip",
-                        summary="跳过按名称精确查找（指定来源范围下不可用）",
-                        detail={"reason": "source_scope_unsafe_channel"},
-                    ))
-                elif not self.settings.exact_lookup_enabled or not self.allow_exact_lookup:
+                if not self.settings.exact_lookup_enabled or not self.allow_exact_lookup:
                     # 复用既有 exact_lookup_disabled 分支语义(镜像 allow_ppr):策略位
                     # 关闭与部署 flag 关闭在动作侧是同一条路径,不再区分理由。
                     feed_exact_lookup_skip(
