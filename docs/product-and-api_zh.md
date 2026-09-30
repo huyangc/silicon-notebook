@@ -1069,6 +1069,14 @@ owner）得到与不存在的 id 相同的 404；Memory 记录已不存在的 Me
 能为这类来源打开来源详情窗，因此详情窗对 Memory 或 Knowhow 投影来源不显示重新解析、删除操作、
 降级解析提示，也不显示命令目录一节。
 
+Memory 的隐藏合成源通常随 Memory 一起消失。有两种情况曾经会留下无主的合成源：一是在拷贝不再
+携带 Memory 之前做的 notebook 拷贝（副本保留了隐藏合成源，却清空了它指向 Memory 的链接）；二是
+Memory 被硬删除或已不是 `confirmed`、而合成源没有被一并拆掉。此后每次服务启动、就绪之后，会有一次
+后台清扫，经由普通的来源删除逐个移除这类无主 Memory 来源，因此它的元素、向量、知识图谱对象与关系、
+证据和簇成员随之一起消失。清扫不调用任何模型，可安全重复（第二次什么也找不到），删不掉的留到下次
+启动。notebook 看板“来源状态”块把该 notebook 里仍剩下的数量显示为「残留的记忆来源（重启后自动清理）」
+——这是一个只读的流水线体检项（`H12`，修复动作 `none`），只有数量、没有按钮。
+
 生命周期为 `candidate | confirmed | rejected | deprecated`。Agent 只能创建 `candidate`；
 token 具备 `memory:read_candidates` 时，同一用户、当前所选 notebook 下获授权的所有 Agent
 profile 都可检索它。Candidate 永远不会进入正式 notebook Ask、notebook 搜索、Deep Report

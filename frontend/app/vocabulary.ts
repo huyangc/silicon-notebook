@@ -227,6 +227,8 @@ export const CHECKUP_ISSUE: Record<string, string> = {
   H6: "待分析来源",
   H7: "检索索引过期",
   H8: "检索索引损坏",
+  // 只读项(fix=none):系统在每次启动后自行清理,没有用户可点的修复。
+  H12: "残留的记忆来源（重启后自动清理）",
 };
 
 // 体检修复动作枚举(fix)→ 修复按钮文案。extract_kg 复用既有「分析新增」,

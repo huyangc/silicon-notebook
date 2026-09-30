@@ -10,7 +10,8 @@ import { CHECKUP_ISSUE } from "./vocabulary.ts";
 import type { CheckupItem, CheckupResponse } from "./workspace-model.ts";
 
 // 「来源状态」块要展示的源级体检项,及其展示顺序。H7/H8 刻意排除(索引级)。
-const SOURCE_LEVEL_CODES = ["H2", "H3", "H4", "H5", "H6"] as const;
+// H12(无主的记忆来源)是只读项(fix=none):只显示数量,没有修复按钮——系统自己清理。
+const SOURCE_LEVEL_CODES = ["H2", "H3", "H4", "H5", "H6", "H12"] as const;
 
 // 每个源级项的计数单位:H2/H3/H6 数的是来源(篇),H4/H5 数的是缺向量的条目(项)。
 const SOURCE_CHECK_UNIT: Record<string, string> = {
@@ -19,6 +20,7 @@ const SOURCE_CHECK_UNIT: Record<string, string> = {
   H4: "项",
   H5: "项",
   H6: "篇",
+  H12: "篇",
 };
 
 export type SourceHealthGroup = {

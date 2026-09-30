@@ -1414,6 +1414,18 @@ a citation's 「查看原文」 can open for such a source, accordingly shows no
 action, no degraded-parse hint, and no command catalog section for a Memory or Knowhow
 projection source.
 
+A Memory's hidden synthetic source normally disappears with its Memory. Two cases used to
+leave an ownerless one behind: a notebook copy made before copies stopped carrying Memory
+(the copy kept the hidden source but cleared its link to the Memory), and a Memory that was
+hard-deleted or is no longer `confirmed` while its source was not torn down. After every
+server start, once the service reports ready, one background pass removes every such
+ownerless Memory source through the ordinary source deletion, so its elements, vectors,
+knowledge-graph objects and relations, evidence and cluster memberships go with it. The pass
+makes no model call, is safe to repeat (a second run finds nothing) and leaves anything it
+could not delete for the next start. The notebook dashboard's source-status block shows the
+number still remaining in that notebook as 「残留的记忆来源（重启后自动清理）」 — a read-only pipeline
+checkup item (`H12`, repair action `none`) with a count and no button.
+
 The lifecycle is `candidate | confirmed | rejected | deprecated`. An Agent can create only
 `candidate`; all authorized Agent profiles belonging to the same user and selected notebook
 may retrieve it when the token includes `memory:read_candidates`. A candidate is never

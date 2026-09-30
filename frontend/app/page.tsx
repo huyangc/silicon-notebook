@@ -7309,7 +7309,7 @@ export default function Home() {
                               <div className="index-sub">{titles.join("、")}{g.count > titles.length ? " 等" : ""}</div>
                             )}
                           </div>
-                          {!readOnlyWorkspace && (
+                          {!readOnlyWorkspace && g.fix !== "none" && (
                             <div className="index-ctas">
                               {/* extract_kg 走 startKgBuild,删除知识图谱期间它会早退——按钮同口径
                                   禁用(文案仍由 repairing 决定:删除不是这一组的修复在跑)。 */}
