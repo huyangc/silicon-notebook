@@ -215,9 +215,11 @@ def test_copy_of_a_dirty_notebook_without_memory_starts_dirty(pg_app):
     state = _kg_state(repo, new.id)
     assert state is not None and int(state["dirty"]) == 1 and int(state["kg_mutation_seq"]) == 1
     fetch = _fetch(repo)
-    assert cases.read_copy(fetch, "%s", new.id).counts == (
-        cases.read_copy(fetch, "%s", cases.NOTEBOOK_PLAIN).counts
-    )
+    copied = cases.read_copy(fetch, "%s", new.id).counts
+    source = cases.read_copy(fetch, "%s", cases.NOTEBOOK_PLAIN).counts
+    # 脏源库的成簇已过时:副本不带簇行,其余逐表相同。
+    assert source["concept_clusters"] > 0 and copied["concept_clusters"] == 0
+    assert {**copied, "concept_clusters": 0} == {**source, "concept_clusters": 0}
 
 
 def test_memory_notebook_snapshot_is_the_legacy_snapshot_minus_the_memory_rows(
@@ -315,8 +317,9 @@ def test_a_cluster_seeded_by_a_since_deleted_memory(pg_app, canonical):
     state = _kg_state(repo, new.id)
     assert state is not None and int(state["dirty"]) == 1
     view = cases.read_copy(_fetch(repo), "%s", new.id)
-    carried = cases.STALE_CLUSTER_CASES[canonical]
-    assert view.counts["concept_clusters"] == (1 if carried else 0)
+    assert view.counts["concept_clusters"] == cases.STALE_CLUSTER_CASES[canonical] == 0
+    # 副本里任何一张表、任何一列都没有 Memory 的文本(簇名与描述随簇一起没带)。
+    assert not [leaf for leaf in view.leaves if cases.MARK in leaf], view.dump
 
 
 def test_schema_induction_sample_reads_no_memory_element(pg_app):
@@ -482,12 +485,14 @@ _EXPECTED_ANTI_JOINS = {
     "knowledge_source_fact_elements": 2, "knowledge_source_fact_backfills": 1,
     "knowledge_relations": 3, "chunk_embeddings": 1, "chunk_questions": 2,
     "element_embeddings": 0, "knowledge_embeddings": 1, "relation_embeddings": 3,
-    "concept_clusters": 2,
+    # member arm + minted-seed arm + "the source's clustering is current"
+    "concept_clusters": 3,
 }
 #: The validate_copy extras judge per-source tables by their own source_id (an
 #: anti-join) where the snapshot joins `sources` (a filter).
 _EXPECTED_VALIDATE_ANTI_JOINS = {
     **_EXPECTED_ANTI_JOINS, "source_paper_meta": 1, "source_authors": 1,
+    "concept_clusters": 2,  # the copy side; the source side adds the dirty term (+1)
 }
 #: Per-row probes a Memory-aware statement may add over its pre-M2 text: the element
 #: probe (element_embeddings, fact elements) and the minted-seed probe (clusters).
@@ -616,6 +621,15 @@ def test_memory_aware_validate_extras_build_every_set_per_notebook(scale_databas
                 anti_joins=_EXPECTED_VALIDATE_ANTI_JOINS[table],
                 extra_probes=_EXTRA_ROW_PROBES.get(table, 0),
             )
+        source_only = store_module._MEMORY_VALIDATED_SOURCE_ONLY.get(table)
+        if source_only:
+            source_side = _plans(scale_database, f"{statement}{extra} {source_only}", ("nb-big",))
+            for mode in ("custom", "generic"):
+                _assert_notebook_scoped(
+                    f"validate {table} source side {mode}", source_side[mode], old[mode],
+                    anti_joins=_EXPECTED_VALIDATE_ANTI_JOINS[table] + 1,
+                    extra_probes=_EXTRA_ROW_PROBES.get(table, 0),
+                )
 
 
 def test_share_size_counts_and_probes_build_every_set_per_notebook(scale_database):

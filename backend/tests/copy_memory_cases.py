@@ -738,11 +738,11 @@ def seed_probe(insert: Callable[[str, dict], None], nb: str = PROBE_NOTEBOOK, **
         insert(row.table, row.values)
 
 
-#: 被删 Memory 做种子的簇:名字种子判不出来源(拷贝照带,靠标脏让副本主人重建);按对象 id
-#: 铸的种子(``K-~<对象 id>``)能认出种子对象已不存在,拷贝不带。
+#: 被删 Memory 做种子的簇(真名种子 / 按对象 id 铸的种子)。删除让源库变脏,脏源库的成簇已过时,
+#: 副本一行簇都不带(以「待重建」开始),两种形态都一样;值 = 副本里的簇行数。
 STALE_CLUSTER_CASES = {
-    "K-alice-private-plan": True,   # canonical -> cluster rows still arrive in the copy
-    "K-~ko-mem-p": False,
+    "K-alice-private-plan": 0,
+    "K-~ko-mem-p": 0,
 }
 
 
