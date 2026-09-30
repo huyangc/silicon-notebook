@@ -2144,3 +2144,28 @@ def test_a_large_cluster_with_a_memory_member_is_dropped_without_a_per_row_probe
     elapsed = time.monotonic() - started
     assert {r["canonical_id"] for r in snapshot["concept_clusters"]} == {"K-shared"}
     assert elapsed < 5, elapsed
+
+
+def test_cluster_statements_read_concept_clusters_once_on_sqlite(repo):
+    """P1-1 在 SQLite 上的形状钉:拷贝的簇语句(快照、尺寸计数、validate 源侧)只在外层读一次
+    concept_clusters;没有按簇行对整簇做相关探测的子查询(那种写法对一个 2000 成员的簇是
+    O(簇大小²))。「含 Memory 成员的簇」由集合语句单独读、在 Python 里做差。"""
+    import re
+
+    from app.repositories.sqlite import sharing_store as store_module
+
+    snapshot = dict(store_module._MEMORY_COPY_SNAPSHOT_QUERIES)["concept_clusters"]
+    group = (
+        "SELECT c.canonical_id, c.generation, COUNT(*) AS n "
+        "FROM ({q}) c GROUP BY c.canonical_id, c.generation"
+    )
+    cluster_index = re.compile(r"INDEX (idx_clusters\w*|sqlite_autoindex_concept_clusters\w*)")
+    with repo._connect() as db:
+        for label, query in (
+            ("snapshot", snapshot),
+            ("size count", group.format(q=snapshot)),
+            ("validate source", group.format(q=store_module._MEMORY_CLUSTERS_BASE_SQL)),
+        ):
+            plan = [row[3] for row in db.execute(f"EXPLAIN QUERY PLAN {query}", ("nb",))]
+            reads = [line for line in plan if cluster_index.search(line) or "SCAN c" in line]
+            assert len(reads) == 1, (label, plan)
