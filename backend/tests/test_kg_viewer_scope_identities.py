@@ -217,6 +217,72 @@ def test_owned_and_citing_sets_come_from_one_indexed_statement(repo):
     assert set(kinds) == {"owned"}, kinds
 
 
+# ------------------------------------------ same gap, found by the sweep
+def test_fused_description_counts_a_member_owned_by_foreign_memory(repo):
+    """Q1 on the member's OWN source: a member owned by A's Memory whose
+    evidence is all visible (merged) still makes the fused description
+    unattributable to B."""
+    s = build_scenario(repo, b_memory=False)
+    repo.store_kg(s.nb, "src-s", [
+        {"local_id": "z", "object_type": "concept",
+         "payload": {"name": "Gizmo", "section_path": "Z"},
+         "evidence": [_ev("src-s", "el-s-def")]}], [])
+    repo.store_kg(s.nb, "src-ma", [
+        {"local_id": "z", "object_type": "concept",
+         "payload": {"name": "Gizmo", "section_path": "Z"},
+         "evidence": [_ev("src-s", "el-s-occ")]}], [])
+    repo.rebuild_unified_kg(s.nb)
+    with repo._write() as db:
+        visible = _object_id(db, s.nb, "Gizmo", "src-s")
+        owned = _object_id(db, s.nb, "Gizmo", "src-ma")
+    canonical = repo.cluster_map(s.nb)[visible]
+    assert repo.cluster_map(s.nb)[owned] == canonical
+    with repo._write() as db:
+        db.execute(
+            "UPDATE concept_clusters SET canonical_description='A-PRIVATE fused Gizmo' "
+            "WHERE notebook_id=? AND canonical_id=?", (s.nb, canonical))
+    ctx = as_user(s.b, repo.node_context, s.nb, visible)
+    assert ctx["definition_basis"] != "cluster_description"
+    assert "A-PRIVATE" not in repr(ctx)
+    assert as_user(s.a, repo.node_context, s.nb, visible)["definition"] == (
+        "A-PRIVATE fused Gizmo")
+
+
+def test_evidence_items_are_judged_on_named_and_actual_source(repo):
+    """Occurrences (object context) and every evidence list of concept detail
+    — the page's, each member's and each attached object's — drop an item
+    whose element lives in an unreadable source although it names a readable
+    one, and an item naming an unreadable source although its element is
+    readable (its ``source_title`` is that source's)."""
+    s = build_scenario(repo, b_memory=False)
+    repo.store_kg(s.nb, "src-s", [
+        {"local_id": "g", "object_type": "concept",
+         "payload": {"name": "Gadget", "section_path": "G"},
+         "evidence": [_ev("src-s", "el-s-def"), _ev("src-s", "el-ma-occ"),
+                      _ev("src-ma", "el-s-step")]},
+        {"local_id": "t", "object_type": "claim",
+         "payload": {"name": "Attachment", "section_path": "G"},
+         "evidence": [_ev("src-s", "el-s-occ"), _ev("src-s", "el-ma-def")]},
+    ], [{"source_local_id": "t", "target_local_id": "g", "edge_type": "about",
+         "evidence": []}])
+    repo.rebuild_unified_kg(s.nb)
+    with repo._write() as db:
+        gadget = _object_id(db, s.nb, "Gadget", "src-s")
+    canonical = repo.cluster_map(s.nb)[gadget]
+    ctx = as_user(s.b, repo.node_context, s.nb, gadget)
+    assert [(o["source_id"], o["element_id"]) for o in ctx["occurrences"]] == [
+        ("src-s", "el-s-def")]
+    detail = as_user(s.b, repo.concept_detail, s.nb, canonical)
+    assert [e["element_id"] for e in detail["evidence"]] == ["el-s-def"]
+    assert [e["element_id"] for e in detail["members"][0]["evidence"]] == ["el-s-def"]
+    assert [e["element_id"] for a in detail["attached"] for e in a["evidence"]] == [
+        "el-s-occ"]
+    for secret in ("el-ma", "src-ma", "A-PRIVATE"):
+        assert secret not in repr(ctx) + repr(detail), secret
+    owner = as_user(s.a, repo.concept_detail, s.nb, canonical)
+    assert len(owner["members"][0]["evidence"]) == 3
+
+
 # ------------------------------------------------- 2./3. legacy siblings
 def _legacy(repo, nb, name, section, source_id, evidence):
     """A legacy procedure (no payload ``steps``) with exactly ``evidence``,
