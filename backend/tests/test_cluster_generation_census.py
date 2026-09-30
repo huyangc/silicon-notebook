@@ -69,9 +69,8 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "分页删,跨代豁免:死成员行在每一代都要清);C:purge_memory_review_rows_on"
         "(Memory 清理删整簇 + 按簇 id 删合并候选,跨代豁免:计划 §3 第 3 步按"
         "canonical_id 在任一代删整簇,名字与描述在每一代都要清)"),
-    "backend/app/repositories/sqlite/governance_store.py": (8, 0, 0, 2, 0,
-        "PG 孪生同注记(SQLite 侧两条 NOT EXISTS 的表名与 FROM 分处两个字面量,"
-        "不计入出现数)"),
+    "backend/app/repositories/sqlite/governance_store.py": (10, 0, 0, 2, 0,
+        "PG 孪生同注记"),
     "backend/app/repositories/postgres/index_projection_store.py": (2, 0, 0, 2, 0,
         "A×2:version_facts 簇分量(版本身份红线)+scale-graph 读,均已配谓词。"
         "后者(graph_rows 的 clusters 腿)自批 3·W4 T-W4-3.1 起改 keyset 分页,"
