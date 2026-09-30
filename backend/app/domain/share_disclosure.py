@@ -8,7 +8,7 @@ repositories may not import services, so they live here.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping, Protocol, Sequence, runtime_checkable
 
 SHARE_DISCLOSURE_REQUIRED = "share_disclosure_required"
 
@@ -35,6 +35,22 @@ SECTION_MEMORY_KEY = "memory_used"
 REPORT_MEMORY_USED_FIELD = "memory_used"
 
 
+# The per-citation record the report engine writes (``_record_memory_use``):
+# internal handles, never shown on any surface — the public projection is an
+# allowlist, and the admin audit detail strips them (``without_memory_record``).
+CITATION_MEMORY_RECORD_FIELDS = ("memory_id", "memory_owner_id")
+
+
+def without_memory_record(reference: object) -> object:
+    """A stored citation without the engine's Memory record fields."""
+    if not isinstance(reference, Mapping):
+        return reference
+    return {
+        key: value for key, value in reference.items()
+        if key not in CITATION_MEMORY_RECORD_FIELDS
+    }
+
+
 def _memory_ids(value: object) -> list[str]:
     if not isinstance(value, (list, tuple)):
         return []
@@ -56,8 +72,24 @@ def split_report_memory_use(
     return understanding, visible, sorted(used)
 
 
+@runtime_checkable
+class MemorySourceReader(Protocol):
+    """The report engine's own seat for recording which Memory a report
+    carries (M4).  Wired from the repository runtime's Memory store; checked
+    at wiring time (``isinstance``), so a store or test double without these
+    reads fails when the engine is built, never in the middle of a report."""
+
+    def memory_sources_for_source_ids(
+        self, source_ids: Sequence[str], owner_id: str
+    ) -> Mapping[str, str]: ...
+
+    def foreign_memory_sources_for_source_ids(
+        self, source_ids: Sequence[str], member_id: str
+    ) -> Mapping[str, tuple[str, str]]: ...
+
+
 class ShareDisclosureRequired(Exception):
-    """The acknowledgement is missing or no longer matches the current count."""
+    """The page may carry more of the author's Memory than was acknowledged."""
 
     def __init__(self, memory_count: int, new_memory_count: int) -> None:
         super().__init__(SHARE_DISCLOSURE_REQUIRED)
@@ -73,13 +105,21 @@ class ShareDisclosureRequired(Exception):
 
 
 def require_acknowledged(count: int, acknowledged: int | None) -> None:
-    """Raise unless nothing is disclosed or ``acknowledged`` equals ``count``.
+    """Raise when ``count`` is above what was acknowledged (nothing counts as 0).
 
-    ``new_memory_count`` is how many more entries the page now carries than
-    were acknowledged (all of them when nothing was); never negative.
+    A count at or below the acknowledgement is accepted: the author agreed to
+    at least that much.  It falls when a cited Memory can no longer be
+    recognised (in a report generated before recording existed, its Memory
+    source was removed), while the page still carries the stored excerpt the
+    author saw counted — so refusing would only ask the author to acknowledge
+    a smaller number for the same page.  Only a HIGHER count asks again; that
+    is the direction the count taken inside the share transaction protects.
+
+    ``new_memory_count`` is how many more entries the page may carry than were
+    acknowledged (all of them when nothing was); always at least 1.
     """
-    if count and acknowledged != count:
-        raise ShareDisclosureRequired(count, max(0, count - (acknowledged or 0)))
+    if count > (acknowledged or 0):
+        raise ShareDisclosureRequired(count, count - (acknowledged or 0))
 
 
 @dataclass(frozen=True)

@@ -408,11 +408,15 @@ class ReportStore:
         candidate = new_capability_token("rshr")
         with self.database.write() as db:
             row = db.execute(
-                "SELECT id FROM reports WHERE id=? AND notebook_id=?",
+                "SELECT id, share_token FROM reports WHERE id=? AND notebook_id=?",
                 (report_id, notebook_id),
             ).fetchone()
             if row is None:
                 raise KeyError(report_id)
+            if row["share_token"]:
+                # Already public: nothing new is published, so nothing is asked
+                # (the page of a finished report cannot grow).
+                return str(row["share_token"])
             if memory_guard is not None:
                 memory_guard.check(MemoryStore.memory_sources_on(
                     db, memory_guard.live_source_ids, memory_guard.author_id,
@@ -428,6 +432,8 @@ class ReportStore:
                 "WHERE id=? AND notebook_id=? RETURNING share_token",
                 (candidate, self.now(), report_id, notebook_id),
             ).fetchone()
+        if issued is None:
+            raise KeyError(report_id)
         return str(issued["share_token"])
 
     def unshare_report(self, notebook_id: str, report_id: str) -> None:

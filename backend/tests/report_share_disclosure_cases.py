@@ -226,8 +226,8 @@ def case_own_memory_needs_the_current_count_acknowledged(world: World) -> None:
     missing = share(world, world.alice, rid)
     assert missing.status_code == 409
     assert missing.json() == _required(1, 1)
-    wrong = share(world, world.alice, rid, 2)
-    assert wrong.status_code == 409 and wrong.json() == _required(1, 0)
+    too_few = share(world, world.alice, rid, 0)
+    assert too_few.status_code == 409 and too_few.json() == _required(1, 1)
     empty_body = share(world, world.alice, rid, body={})
     assert empty_body.status_code == 409 and empty_body.json() == _required(1, 1)
     assert not is_shared(world, rid)
@@ -255,7 +255,7 @@ def case_count_is_distinct_memories_of_the_author_only(world: World) -> None:
         source_ref(world.doc_source, "k7"),
     ])
     assert disclosure(world, world.alice, rid).json() == counts(2)
-    assert share(world, world.alice, rid, 3).json() == _required(2, 0)
+    assert share(world, world.alice, rid, 1).json() == _required(2, 1)
     assert share(world, world.alice, rid, 2).status_code == 200
 
 
@@ -298,6 +298,8 @@ def case_another_members_memory_is_never_published(world: World) -> None:
     earlier = make_report(world, world.owner, [source_ref(world.memories["a2"][1], "k1")])
     token = world.repo.share_report(world.notebook, earlier)
     assert disclosure(world, world.owner, earlier).json() == counts(0, 1)
+    # Re-sharing it is refused too (it does not hand the link out again).
+    _refused_as_foreign(share(world, world.owner, earlier))
     revoked = world.client.delete(_url(world, earlier), headers=world.owner.headers)
     assert revoked.status_code == 204
     assert world.client.get(f"/api/public/reports/{token}").status_code == 404
@@ -340,18 +342,25 @@ def case_only_the_author_publishes_even_past_the_row_gate(world: World) -> None:
 
 
 def case_memory_removed_between_disclosure_and_acknowledgement(world: World) -> None:
+    """Downward: a report generated before recording loses one recognisable
+    Memory between disclosure and click.  The author acknowledged 2, the
+    recount says 1, the page still carries both stored excerpts — the
+    acknowledgement covers it, so it publishes (P2-2)."""
     make_memory(world, world.alice, "a1")
     a2 = make_memory(world, world.alice, "a2")
     rid = make_report(world, world.alice, [
-        source_ref(world.memories["a1"][1], "k1"),
-        source_ref(world.memories["a2"][1], "k2"),
+        source_ref(world.memories["a1"][1], "k1", "第一条记忆的摘录"),
+        source_ref(world.memories["a2"][1], "k2", "第二条记忆的摘录"),
     ])
     assert disclosure(world, world.alice, rid).json() == counts(2)
     world.repo._runtime.memory_service.deprecate(a2, world.alice.id)
-    stale = share(world, world.alice, rid, 2)
-    assert stale.status_code == 409 and stale.json() == _required(1, 0)
-    assert not is_shared(world, rid)
-    assert share(world, world.alice, rid, 1).status_code == 200
+    assert disclosure(world, world.alice, rid).json() == counts(1)
+    published = share(world, world.alice, rid, 2)
+    assert published.status_code == 200, published.text
+    public = world.client.get(f"/api/public/reports/{published.json()['share_token']}")
+    assert [ref["snippet"] for ref in public.json()["references"]] == [
+        "第一条记忆的摘录", "第二条记忆的摘录",
+    ]
 
 
 def case_memory_confirmed_between_disclosure_and_acknowledgement(world: World) -> None:
@@ -440,6 +449,117 @@ def case_memory_confirmed_between_the_count_and_the_flip(world: World) -> None:
     assert world.repo.report_share_token(world.notebook, rid) == ""
     published = share(world, world.alice, rid, 2)
     assert published.status_code == 200
+
+
+def case_memory_removed_between_the_count_and_the_flip(world: World) -> None:
+    """Downward inside the share transaction: a cited Memory stops being
+    recognisable after the route's count; the store's recount is lower than
+    the acknowledgement and the report publishes."""
+    make_memory(world, world.alice, "a1")
+    a2 = make_memory(world, world.alice, "a2")
+    rid = make_report(world, world.alice, [
+        source_ref(world.memories["a1"][1], "k1"),
+        source_ref(world.memories["a2"][1], "k2"),
+    ])
+    original = world.repo.share_report
+    removed: list[str] = []
+
+    def share_after_a_concurrent_removal(notebook_id, report_id, **kwargs):
+        if not removed:
+            world.repo._runtime.memory_service.deprecate(a2, world.alice.id)
+            removed.append(a2)
+        return original(notebook_id, report_id, **kwargs)
+
+    world.monkeypatch.setattr(world.repo, "share_report", share_after_a_concurrent_removal)
+    published = share(world, world.alice, rid, 2)
+    assert removed and published.status_code == 200, published.text
+    assert is_shared(world, rid)
+
+
+def case_resharing_a_public_report_returns_its_link(world: World) -> None:
+    """P3-5: an already public report publishes nothing new; any POST returns
+    the existing link without asking."""
+    mid = make_memory(world, world.alice, "a1")
+    rid = make_report(world, world.alice, [memory_ref(mid, "k1")])
+    token = share(world, world.alice, rid, 1).json()["share_token"]
+    for acknowledged in (None, 0, 5):
+        again = share(world, world.alice, rid, acknowledged)
+        assert again.status_code == 200 and again.json() == {"share_token": token}
+
+
+def case_a_report_deleted_while_the_share_waits_is_not_found(world: World) -> None:
+    """P3-2: the report row disappears inside the share transaction (deleted
+    with its notebook while the share waited for a cited row): 404, not 500,
+    and nothing is issued."""
+    import app.repositories.postgres.report_store as pg_store
+    import app.repositories.sqlite.report_store as sqlite_store
+
+    make_memory(world, world.alice, "a1")
+    rid = make_report(world, world.alice, [source_ref(world.memories["a1"][1], "k1")])
+    postgres = "postgres" in type(world.repo._runtime.database).__module__
+    placeholder = "%s" if postgres else "?"
+    store_module = pg_store if postgres else sqlite_store
+    real = store_module.MemoryStore.memory_sources_on
+
+    def delete_then_read(db, source_ids, owner_id, *, lock=False):
+        db.execute(f"DELETE FROM reports WHERE id={placeholder}", (rid,))
+        return real(db, source_ids, owner_id, lock=lock)
+
+    world.monkeypatch.setattr(
+        store_module.MemoryStore, "memory_sources_on", staticmethod(delete_then_read)
+    )
+    gone = share(world, world.alice, rid, 1)
+    assert gone.status_code == 404, gone.text
+    assert gone.json() == {"detail": "Report not found"}
+
+
+def case_generation_fails_closed_when_the_record_lookup_fails(world: World) -> None:
+    """P3-3: a report whose Memory record cannot be taken is not stored as
+    done (it would later under-count what its page carries); it fails, keeps
+    its outline for a retry, and cannot be shared."""
+    make_memory(world, world.alice, "a1")
+    models = _Models(section_markdown="## 结论\n正文")
+    engine = _engine(world, world.alice, models)
+    rid = _new_report(world, world.alice)
+    _outline_ready(world, rid)
+    _serve_memory(world, [])
+    world.monkeypatch.setattr(
+        engine, "_assemble",
+        lambda *a, **k: ("# 报告\n\n正文", [], [source_ref(world.doc_source, "k1")]),
+    )
+
+    def lookup_down(*args, **kwargs):
+        raise RuntimeError("lookup down")
+
+    world.monkeypatch.setattr(
+        world.repo._runtime.memory_store, "memory_sources_for_source_ids", lookup_down
+    )
+    assert world.repo.claim_report_generation(world.notebook, rid)
+    engine.generate(world.notebook, rid, "环路为什么稳定？", depth=2)
+    stored = world.repo.get_report(world.notebook, rid)
+    assert stored["status"] == "failed"
+    assert stored["outline"]
+    refused = share(world, world.alice, rid)
+    assert refused.status_code == 409
+    assert refused.json() == {"detail": "只能分享已完成的报告。"}
+
+
+def case_admin_audit_detail_does_not_carry_the_memory_record(world: World) -> None:
+    """P3-8: the admin activity detail shows the citation and its excerpt,
+    not the engine's internal record handles."""
+    mid = make_memory(world, world.alice, "a1")
+    rid = make_report(world, world.alice, [
+        recorded(source_ref(world.memories["a1"][1], "k1", "私有记忆里的原话"),
+                 mid, world.alice),
+    ])
+    detail = world.client.get(
+        f"/api/admin/users/{world.alice.id}/reports/{rid}", headers=world.admin.headers
+    )
+    assert detail.status_code == 200, detail.text
+    references = detail.json()["references"]
+    assert [ref["snippet"] for ref in references] == ["私有记忆里的原话"]
+    assert all("memory_id" not in ref and "memory_owner_id" not in ref
+               for ref in references)
 
 
 def case_recorded_memory_citation_counts_after_the_memory_is_deleted(world: World) -> None:

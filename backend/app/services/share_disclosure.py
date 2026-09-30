@@ -52,13 +52,20 @@ The publish rule
 * another member's Memory cited: refused (403 at the route), whatever the count.
 * count 0: nothing to disclose; publishing is exactly what it was before M4.
 * count > 0 and the requester is not the author: refused (403 at the route).
-* count > 0 and the acknowledgement is absent or differs: ``ShareDisclosureRequired``
-  carrying the current count (409 at the route).
+* count above the acknowledgement (an absent one counts as 0):
+  ``ShareDisclosureRequired`` carrying the current count (409 at the route).
+  A count at or below it is accepted: the author agreed to at least that much,
+  and the count of a report generated before recording can only FALL (a cited
+  Memory source removed), while its page still carries the excerpt the author
+  saw counted.
+* already public: re-sharing publishes nothing new; the existing link is
+  returned without asking (another member's Memory is still refused).
 
 The route checks this on the publishing request and then hands
 ``share_memory_guard`` to ``share_report``, which re-counts the live part in
 the same transaction that sets the share token and refuses with the same
-typed error if it changed in between.  The foreign check is not repeated there:
+typed error if it ROSE in between — that upward direction is what the lock
+and the in-transaction count protect.  The foreign check is not repeated there:
 a cited source cannot become another member's Memory source (Memory source ids
 are minted fresh and a Memory's creator never changes), it can only stop being
 one, which makes publishing less restricted, never more.
@@ -181,16 +188,28 @@ def report_share_disclosure(
 
 
 def require_publishable(
-    disclosure: ShareDisclosure, *, requester_id: str, acknowledged: int | None
+    disclosure: ShareDisclosure,
+    *,
+    requester_id: str,
+    acknowledged: int | None,
+    already_shared: bool = False,
 ) -> None:
-    """Raise unless ``requester_id`` may publish now with ``acknowledged``."""
+    """Raise unless ``requester_id`` may publish now with ``acknowledged``.
+
+    ``already_shared``: the report is public already, so re-sharing publishes
+    nothing new and the acknowledgement is not checked here; the store hands
+    back the existing link, and if the link was revoked in the meantime it
+    checks the acknowledgement itself (``share_memory_guard``).  Another
+    member's Memory is refused either way.
+    """
     if disclosure.foreign_memory_ids:
         raise ForeignMemoryShareRefused()
     if disclosure.memory_count == 0:
         return
     if not requester_id or requester_id != disclosure.author_id:
         raise NonAuthorShareRefused()
-    require_acknowledged(disclosure.memory_count, acknowledged)
+    if not already_shared:
+        require_acknowledged(disclosure.memory_count, acknowledged)
 
 
 def share_memory_guard(
