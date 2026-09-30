@@ -1,4 +1,5 @@
-import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
+import { useState } from "react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
@@ -8,7 +9,11 @@ import {
   NotebookMenuActions,
   ReaderNotebookBadge,
 } from "../../app/notebook-reader-actions.tsx";
-import { anchorAt, useNotebookExit } from "../../app/use-notebook-exit.ts";
+import { anchorAt, anchorOf, useNotebookExit } from "../../app/use-notebook-exit.ts";
+import { DestinationPicker } from "../../app/transfer-picker.tsx";
+import { placePanel } from "../../app/notebook-exit-placement.ts";
+import { TRANSFER_BATCH_MAX } from "../../app/memory-transfer.ts";
+import { ToastRegion, TOAST_DEFAULT_MS, TOAST_EXIT_MS } from "../../app/toast-region.tsx";
 import type { NotebookSummary } from "../../app/workspace-model.ts";
 
 // 「退出共享」会永久删掉成员自己在这本笔记本里的记忆,所以先告知、允许先导出/先转移、
@@ -37,8 +42,9 @@ const json = (body: unknown, status = 200) =>
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 type Handler = (call: Call) => Response | Promise<Response> | undefined;
@@ -546,4 +552,745 @@ test("filenameFromDisposition:优先 filename*,退到 filename,不带路径", ()
   expect(filenameFromDisposition("attachment; filename=\"../../etc/x.md\"")).toBe("x.md");
   expect(filenameFromDisposition(null)).toBeNull();
   expect(filenameFromDisposition("attachment")).toBeNull();
+});
+
+// ---------------------------------------------------------------------------------------
+// 结果如实(契约 v2):每个数字取自服务端响应;网络中断是「不知道」;晚到的结果照样告知。
+// ---------------------------------------------------------------------------------------
+
+const notebooksList = (present: boolean, grantedVia = false): Handler => (call) => (
+  call.method === "GET" && call.path === "/api/notebooks"
+    ? json(present
+      ? [{
+        id: "nb1", name: "封装工艺库", access: "reader",
+        granted_via: grantedVia ? [{ id: "g1", name: "组" }] : undefined,
+      }]
+      : [])
+    : undefined
+);
+
+const incomplete = (status: 409 | 503, deleted: number, remaining: number) =>
+  json({ detail: { code: "exit_incomplete", deleted_memory_count: deleted, memory_count: remaining } }, status);
+
+test("成功提示里的条数是服务端删掉的条数,不是用户确认时看到的那个", async () => {
+  const user = userEvent.setup();
+  installServer([disclosure(3), leave(() => json({ deleted_memory_count: 2 }))]);
+  const { onToast } = mount("bar");
+
+  await pressLeave(user);
+  await user.click(within(await panel()).getByRole("button", { name: "确认退出并删除" }));
+
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("已退出共享，已删除 2 条记忆"));
+});
+
+test("409 告知条数变成 0:面板说没有要删的记忆,确认键是「退出共享」,再按发无参数 DELETE", async () => {
+  const user = userEvent.setup();
+  let attempt = 0;
+  const calls = installServer([
+    disclosure(3),
+    leave(() => {
+      attempt += 1;
+      return attempt === 1
+        ? json({ detail: { code: "exit_disclosure_required", memory_count: 0 } }, 409)
+        : new Response(null, { status: 204 });
+    }),
+  ]);
+  const { onToast } = mount("bar");
+
+  await pressLeave(user);
+  await user.click(within(await panel()).getByRole("button", { name: "确认退出并删除" }));
+
+  const dialog = await panel();
+  await within(dialog).findByText("你在这个笔记本里已经没有记忆了。");
+  expect(within(dialog).getByText("现在没有需要删除的记忆了，可以直接退出。")).toBeInTheDocument();
+  await user.click(within(dialog).getByRole("button", { name: "退出共享" }));
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("已退出共享"));
+  expect(deletes(calls).map((call) => call.search)).toEqual(["?acknowledged_memory_count=3", ""]);
+});
+
+test("409 exit_incomplete:面板留着,说已删 d 条、新增 r 条,条数换成 r,并按契约重读一次告知", async () => {
+  const user = userEvent.setup();
+  let attempt = 0;
+  const calls = installServer([
+    disclosure(3, 2),
+    leave(() => {
+      attempt += 1;
+      return attempt === 1 ? incomplete(409, 3, 2) : json({ deleted_memory_count: 2 });
+    }),
+  ]);
+  const { onToast } = mount("bar");
+
+  await pressLeave(user);
+  await user.click(within(await panel()).getByRole("button", { name: "确认退出并删除" }));
+
+  const dialog = await panel();
+  await within(dialog).findByText("已删除 3 条记忆。退出期间又新增了 2 条，确认后会删除它们并退出。");
+  expect(within(dialog).getByText("退出后，你在这个笔记本里的 2 条记忆会被永久删除，无法恢复。")).toBeInTheDocument();
+  await waitFor(() => expect(disclosures(calls)).toHaveLength(2)); // 未完成之后从告知重新开始
+  expect(onToast).not.toHaveBeenCalled();
+
+  await user.click(within(dialog).getByRole("button", { name: "确认退出并删除" }));
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("已退出共享，已删除 2 条记忆"));
+  expect(deletes(calls).map((call) => call.search)).toEqual([
+    "?acknowledged_memory_count=3",
+    "?acknowledged_memory_count=2",
+  ]);
+});
+
+test("503 exit_incomplete:面板留着,说已删几条、还剩几条、仍是成员;一条没删时明说没删", async () => {
+  const user = userEvent.setup();
+  let attempt = 0;
+  installServer([
+    disclosure(4, 4),
+    leave(() => {
+      attempt += 1;
+      return attempt === 1 ? incomplete(503, 2, 2) : incomplete(503, 0, 4);
+    }),
+  ]);
+  const { onToast, onError } = mount("bar");
+
+  await pressLeave(user);
+  await user.click(within(await panel()).getByRole("button", { name: "确认退出并删除" }));
+  const dialog = await panel();
+  await within(dialog).findByText("退出没有完成：已删除 2 条记忆，还剩 2 条，你仍是成员。可以重试。");
+  expect(within(dialog).getByRole("alert")).toHaveTextContent("已删除 2 条记忆");
+
+  // 重读告知(4)之后再试一次,这回一条也没删掉。
+  await waitFor(() => expect(within(dialog).getByRole("button", { name: "确认退出并删除" })).toBeEnabled());
+  await user.click(within(dialog).getByRole("button", { name: "确认退出并删除" }));
+  await within(dialog).findByText("退出没有完成：没有删除任何记忆，还剩 4 条，你仍是成员。可以重试。");
+  expect(onToast).not.toHaveBeenCalled();
+  expect(onError).not.toHaveBeenCalled();
+});
+
+test("网络中断:重读列表与告知——已经退出了就说已退出,不说失败", async () => {
+  const user = userEvent.setup();
+  installServer([
+    disclosure(3),
+    leave(() => Promise.reject(new TypeError("Failed to fetch"))),
+    notebooksList(false),
+  ]);
+  const { afterLeave, onToast, onError } = mount("bar");
+
+  await pressLeave(user);
+  await user.click(within(await panel()).getByRole("button", { name: "确认退出并删除" }));
+
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("已退出共享"));
+  expect(afterLeave).toHaveBeenCalledOnce();
+  expect(onError).not.toHaveBeenCalled();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+test("代理超时(500)同样是「不知道」;重读到仍是成员且条数没变:说都还在、没有被删除", async () => {
+  const user = userEvent.setup();
+  installServer([
+    disclosure(3, 3),
+    leave(() => json({ detail: "timeout" }, 500)),
+    notebooksList(true),
+  ]);
+  const { onToast, onError } = mount("bar");
+
+  await pressLeave(user);
+  await user.click(within(await panel()).getByRole("button", { name: "确认退出并删除" }));
+
+  const dialog = await panel();
+  await within(dialog).findByText("退出的结果没有收到，重新核对后：你仍是成员，还有 3 条记忆，都还在，没有被删除。可以重试。");
+  expect(within(dialog).getByRole("button", { name: "确认退出并删除" })).toBeEnabled();
+  expect(onToast).not.toHaveBeenCalled();
+  expect(onError).not.toHaveBeenCalled();
+});
+
+test("网络中断后重读到条数变少:只说还剩几条、另有一部分已被删除,不自己算差值", async () => {
+  const user = userEvent.setup();
+  installServer([
+    disclosure(5, 2),
+    leave(() => Promise.reject(new TypeError("Failed to fetch"))),
+    notebooksList(true),
+  ]);
+  mount("menu");
+
+  await pressLeave(user);
+  await user.click(within(await panel()).getByRole("button", { name: "确认退出并删除" }));
+
+  const dialog = await panel();
+  await within(dialog).findByText("退出的结果没有收到，重新核对后：你仍是成员，还有 2 条记忆，另有一部分已经被删除。可以重试。");
+  expect(within(dialog).getByText("退出后，你在这个笔记本里的 2 条记忆会被永久删除，无法恢复。")).toBeInTheDocument();
+});
+
+test("网络中断后连核对也读不到:说无法确认,给「重试」和「取消」,不说失败", async () => {
+  const user = userEvent.setup();
+  installServer([
+    disclosure(3),
+    leave(() => Promise.reject(new TypeError("Failed to fetch"))),
+    (call) => (call.method === "GET" && call.path === "/api/notebooks" ? json({}, 500) : undefined),
+  ]);
+  const { onToast } = mount("bar");
+
+  await pressLeave(user);
+  await user.click(within(await panel()).getByRole("button", { name: "确认退出并删除" }));
+
+  const dialog = await panel();
+  await within(dialog).findByText("暂时无法确认是否已经退出，请刷新页面查看笔记本列表。");
+  expect(within(dialog).getByRole("button", { name: "重试" })).toBeEnabled();
+  expect(within(dialog).getByRole("button", { name: "取消" })).toBeEnabled();
+  expect(onToast).not.toHaveBeenCalled();
+});
+
+test("条数为 0 的直接退出失败:结果落在面板(按钮旁),不只走页面横幅;可以就地再试", async () => {
+  const user = userEvent.setup();
+  let attempt = 0;
+  const calls = installServer([
+    disclosure(0),
+    leave(() => {
+      attempt += 1;
+      return attempt === 1 ? json({ detail: "x" }, 403) : new Response(null, { status: 204 });
+    }),
+  ]);
+  const { onToast, onError } = mount("bar");
+
+  await pressLeave(user);
+
+  const dialog = await panel();
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent("没有权限进行这个操作");
+  expect(onError).not.toHaveBeenCalled();
+  await user.click(within(dialog).getByRole("button", { name: "退出共享" }));
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("已退出共享"));
+  expect(deletes(calls)).toHaveLength(2);
+});
+
+test("面板已被取消之后才到的结果照样告知:409 未完成、503、网络中断核对", async () => {
+  const cases: Array<[string, () => Promise<Response> | Response, string, Handler[]]> = [
+    ["409 exit_incomplete", () => incomplete(409, 3, 2),
+      "已删除 3 条记忆，但退出没有完成：期间又新增了 2 条，你仍是成员。", []],
+    ["503 exit_incomplete", () => incomplete(503, 1, 2),
+      "退出没有完成：已删除 1 条记忆，还剩 2 条，你仍是成员。可以重试。", []],
+    ["网络中断,核对出已退出", () => Promise.reject(new TypeError("Failed to fetch")),
+      "已退出共享", [notebooksList(false)]],
+    ["网络中断,核对不出", () => Promise.reject(new TypeError("Failed to fetch")),
+      "暂时无法确认是否已经退出，请刷新页面查看笔记本列表。",
+      [(call) => (call.path === "/api/notebooks" ? json({}, 500) : undefined)]],
+  ];
+  for (const [label, respond, expected, extra] of cases) {
+    const user = userEvent.setup();
+    const gate = deferred<void>();
+    installServer([disclosure(3), leave(async () => { await gate.promise; return respond(); }), ...extra]);
+    const { onToast } = mount("bar");
+
+    await pressLeave(user);
+    await user.click(within(await panel()).getByRole("button", { name: "确认退出并删除" }));
+    await user.click(within(await panel()).getByRole("button", { name: "取消" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    gate.resolve();
+
+    await waitFor(() => expect(onToast, label).toHaveBeenCalledWith(expected));
+    expect(screen.queryByRole("dialog"), label).not.toBeInTheDocument();
+    cleanup();
+    vi.unstubAllGlobals();
+  }
+});
+
+test("刷新列表失败也要告诉用户退出已经发生:先报错,再给成功提示", async () => {
+  const user = userEvent.setup();
+  installServer([disclosure(3), leave(() => json({ deleted_memory_count: 3 }))]);
+  const afterLeave = vi.fn(async () => { throw new Error("list down"); });
+  const onToast = vi.fn();
+  const onError = vi.fn();
+  render(<Host entry="bar" afterLeave={afterLeave} onToast={onToast} onError={onError} />);
+
+  await pressLeave(user);
+  await user.click(within(await panel()).getByRole("button", { name: "确认退出并删除" }));
+
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("已退出共享，已删除 3 条记忆"));
+  expect(onError).toHaveBeenCalledOnce();
+});
+
+// F6:条数请求已 resolve 为 0、续行还没跑时用户取消——之后不许再发 DELETE。
+test("条数读到 0 之后、续行执行之前取消:不发 DELETE", async () => {
+  const body = deferred<unknown>();
+  const seen: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input));
+    seen.push(`${(init?.method ?? "GET").toUpperCase()} ${url.pathname}`);
+    if (url.pathname.endsWith("/exit-disclosure")) {
+      return { ok: true, status: 200, headers: new Headers(), json: () => body.promise } as unknown as Response;
+    }
+    throw new Error(`unexpected ${url.pathname}`);
+  }));
+  const { result } = renderHook(() => useNotebookExit({ onToast: vi.fn(), onError: vi.fn() }));
+
+  act(() => { result.current.start("nb1", anchorAt(0, 0), async () => undefined); });
+  await waitFor(() => expect(seen).toHaveLength(1));
+  await act(async () => {
+    body.resolve({ memory_count: 0 });
+    result.current.cancel(); // 同一个同步段里:续行(await 之后)还没跑
+  });
+  await new Promise((done) => setTimeout(done, 30));
+
+  expect(seen.filter((entry) => entry.startsWith("DELETE"))).toEqual([]);
+});
+
+// F7 及其后继:取消不再让一次在途 DELETE 把「另一本」笔记本的按钮吞掉;同一本再按则接回在途请求。
+test("第一本的 DELETE 在途且已取消:第二本照常发起,两边的结果各自告知、各调各的刷新", async () => {
+  const gate = deferred<Response>();
+  const calls = installServer([
+    (call) => (call.path === "/api/notebooks/nb1/membership/exit-disclosure" ? json({ memory_count: 2 }) : undefined),
+    (call) => (call.path === "/api/notebooks/nb2/membership/exit-disclosure" ? json({ memory_count: 0 }) : undefined),
+    (call) => (call.method === "DELETE" && call.path === "/api/notebooks/nb1/membership" ? gate.promise : undefined),
+    (call) => (call.method === "DELETE" && call.path === "/api/notebooks/nb2/membership" ? new Response(null, { status: 204 }) : undefined),
+  ]);
+  const onToast = vi.fn();
+  const after1 = vi.fn(async () => undefined);
+  const after2 = vi.fn(async () => undefined);
+  const { result } = renderHook(() => useNotebookExit({ onToast, onError: vi.fn() }));
+
+  act(() => { result.current.start("nb1", anchorAt(0, 0), after1); });
+  await waitFor(() => expect(result.current.flow?.phase).toBe("confirm"));
+  act(() => { result.current.confirm(); });
+  await waitFor(() => expect(result.current.isBusy("nb1")).toBe(true));
+  act(() => { result.current.cancel(); });
+  expect(result.current.isBusy("nb1")).toBe(true);
+  expect(result.current.isBusy("nb2")).toBe(false);
+
+  act(() => { result.current.start("nb2", anchorAt(0, 0), after2); });
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("已退出共享"));
+  expect(after2).toHaveBeenCalledOnce();
+  expect(after1).not.toHaveBeenCalled();
+
+  gate.resolve(json({ deleted_memory_count: 2 }));
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("已退出共享，已删除 2 条记忆"));
+  expect(after1).toHaveBeenCalledOnce();
+  expect(deletes(calls).map((call) => call.path)).toEqual([
+    "/api/notebooks/nb1/membership",
+    "/api/notebooks/nb2/membership",
+  ]);
+});
+
+test("同一本笔记本的 DELETE 还没落地时再按:接回在途请求(正在退出…),不发第二个 DELETE 也不重读条数", async () => {
+  const gate = deferred<Response>();
+  const calls = installServer([disclosure(2), leave(() => gate.promise)]);
+  const onToast = vi.fn();
+  const after = vi.fn(async () => undefined);
+  const { result } = renderHook(() => useNotebookExit({ onToast, onError: vi.fn() }));
+
+  act(() => { result.current.start("nb1", anchorAt(0, 0), after); });
+  await waitFor(() => expect(result.current.flow?.phase).toBe("confirm"));
+  act(() => { result.current.confirm(); });
+  await waitFor(() => expect(result.current.flow?.leaving).toBe(true));
+  act(() => { result.current.cancel(); });
+  expect(result.current.flow).toBeNull();
+
+  act(() => { result.current.start("nb1", anchorAt(0, 0), after); });
+  expect(result.current.flow).toMatchObject({ phase: "leaving", leaving: true });
+  expect(result.current.isBusy("nb1")).toBe(true);
+  expect(deletes(calls)).toHaveLength(1);
+  expect(disclosures(calls)).toHaveLength(1);
+
+  gate.resolve(json({ deleted_memory_count: 2 }));
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("已退出共享，已删除 2 条记忆"));
+  expect(result.current.flow).toBeNull();
+  expect(after).toHaveBeenCalledOnce();
+});
+
+// ---------------------------------------------------------------------------------------
+// 键盘与读屏
+// ---------------------------------------------------------------------------------------
+
+test("打开时焦点进「取消」(不是破坏性按钮);面板是模态对话框,带名称与含条数的描述", async () => {
+  const user = userEvent.setup();
+  installServer([disclosure(3)]);
+  mount("bar");
+
+  await pressLeave(user);
+  const dialog = await panel();
+
+  expect(within(dialog).getByRole("button", { name: "取消" })).toHaveFocus();
+  expect(within(dialog).getByRole("button", { name: "确认退出并删除" })).not.toHaveFocus();
+  expect(dialog).toHaveAttribute("aria-modal", "true");
+  expect(dialog).toHaveAccessibleName("退出共享");
+  expect(dialog).toHaveAccessibleDescription(/退出后，你在这个笔记本里的 3 条记忆会被永久删除，无法恢复。/);
+});
+
+test("Tab / Shift+Tab 只在面板内循环,焦点在面板外时 Tab 把它拉进来", async () => {
+  const user = userEvent.setup();
+  installServer([disclosure(3)]);
+  mount("bar");
+  const opener = screen.getByRole("button", { name: "退出共享" });
+
+  await pressLeave(user);
+  const dialog = await panel();
+  const first = within(dialog).getByRole("button", { name: "导出为文件" });
+  const last = within(dialog).getByRole("button", { name: "确认退出并删除" });
+
+  last.focus();
+  fireEvent.keyDown(last, { key: "Tab" });
+  expect(first).toHaveFocus();
+  fireEvent.keyDown(first, { key: "Tab", shiftKey: true });
+  expect(last).toHaveFocus();
+
+  opener.focus();
+  fireEvent.keyDown(opener, { key: "Tab" });
+  expect(first).toHaveFocus();
+  opener.focus();
+  fireEvent.keyDown(opener, { key: "Tab", shiftKey: true });
+  expect(last).toHaveFocus();
+});
+
+test("Escape 关闭面板、什么都不发,焦点回到打开它的按钮", async () => {
+  const user = userEvent.setup();
+  const calls = installServer([disclosure(3)]);
+  mount("bar");
+  const opener = screen.getByRole("button", { name: "退出共享" });
+
+  await pressLeave(user);
+  await panel();
+  await user.keyboard("{Escape}");
+
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  await waitFor(() => expect(opener).toHaveFocus());
+  expect(deletes(calls)).toHaveLength(0);
+});
+
+test("点「取消」同样把焦点还给打开它的按钮", async () => {
+  const user = userEvent.setup();
+  installServer([disclosure(3)]);
+  mount("bar");
+  const opener = screen.getByRole("button", { name: "退出共享" });
+
+  await pressLeave(user);
+  await user.click(within(await panel()).getByRole("button", { name: "取消" }));
+
+  await waitFor(() => expect(opener).toHaveFocus());
+});
+
+test("退出请求在途时 Escape 不关面板(结果必须给用户看);「取消」仍可用", async () => {
+  const user = userEvent.setup();
+  const gate = deferred<Response>();
+  installServer([disclosure(2), leave(() => gate.promise)]);
+  const { onToast } = mount("bar");
+
+  await pressLeave(user);
+  await user.click(within(await panel()).getByRole("button", { name: "确认退出并删除" }));
+  await within(await panel()).findByRole("button", { name: "正在退出…" });
+  await user.keyboard("{Escape}");
+
+  expect(screen.getByRole("dialog", { name: "退出共享" })).toBeInTheDocument();
+  expect(within(screen.getByRole("dialog")).getByRole("button", { name: "取消" })).toBeEnabled();
+  gate.resolve(json({ deleted_memory_count: 2 }));
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("已退出共享，已删除 2 条记忆"));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+});
+
+test("退出成功后打开它的控件已经消失:焦点落到页面主体,不丢在 body 上", async () => {
+  const user = userEvent.setup();
+  installServer([disclosure(2), leaveOk()]);
+  function GoneHost() {
+    const [shown, setShown] = useState(true);
+    const exit = useNotebookExit({ onToast: vi.fn(), onError: vi.fn() });
+    return (
+      <>
+        <main aria-label="页面主体"><h1>笔记本</h1></main>
+        {shown && (
+          <button
+            type="button"
+            onClick={(event) => exit.start("nb1", anchorOf(event.currentTarget), async () => setShown(false))}
+          >
+            退出共享
+          </button>
+        )}
+        <NotebookExitPanel exit={exit} />
+      </>
+    );
+  }
+  render(<GoneHost />);
+
+  await pressLeave(user);
+  await user.click(within(await panel()).getByRole("button", { name: "确认退出并删除" }));
+
+  await waitFor(() => expect(screen.queryByRole("button", { name: "退出共享" })).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.getByRole("main")).toHaveFocus());
+});
+
+// ---------------------------------------------------------------------------------------
+// 结果提示:role=status、停留时长
+// ---------------------------------------------------------------------------------------
+
+test("提示区域始终是 role=status 的 live region;默认 2.2 秒消失,退出共享的提示停留更久", () => {
+  vi.useFakeTimers();
+  try {
+    const onExpire = vi.fn();
+    const view = render(<ToastRegion message="" onExpire={onExpire} />);
+    expect(screen.getByRole("status")).toBeInTheDocument(); // 没有内容时区域也在
+    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+
+    view.rerender(<ToastRegion message="已保存" onExpire={onExpire} />);
+    expect(within(screen.getByRole("status")).getByText("已保存")).toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(TOAST_DEFAULT_MS - 1); });
+    expect(onExpire).not.toHaveBeenCalled();
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(onExpire).toHaveBeenCalledOnce();
+
+    const exitExpire = vi.fn();
+    view.rerender(
+      <ToastRegion message="已退出共享，已删除 3 条记忆" lingerMs={TOAST_EXIT_MS} onExpire={exitExpire} />,
+    );
+    act(() => { vi.advanceTimersByTime(TOAST_DEFAULT_MS + 1000); });
+    expect(exitExpire).not.toHaveBeenCalled();
+    expect(TOAST_EXIT_MS).toBeGreaterThanOrEqual(6000); // 不短于待确认中心的完工提示
+    act(() => { vi.advanceTimersByTime(TOAST_EXIT_MS); });
+    expect(exitExpire).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+// ---------------------------------------------------------------------------------------
+// 转移:分批、取消可用
+// ---------------------------------------------------------------------------------------
+
+const memoriesPage = (total: number): Handler => (call) => {
+  if (call.path !== "/api/notebooks/nb1/memories") return undefined;
+  const query = new URLSearchParams(call.search);
+  const offset = Number(query.get("offset") ?? 0);
+  const limit = Number(query.get("limit") ?? 100);
+  const size = Math.max(0, Math.min(limit, total - offset));
+  return json({
+    items: Array.from({ length: size }, (_, index) => ({ id: `m${offset + index}`, status: "confirmed" })),
+    total_count: total, offset, limit,
+  });
+};
+
+const targetNotebooks: Handler = (call) => (
+  call.method === "GET" && call.path === "/api/notebooks"
+    ? json([
+      { id: "nb1", name: "封装工艺库", access: "reader" },
+      { id: "nb2", name: "我的库", access: "owner" },
+    ])
+    : undefined
+);
+
+const transferAll = (batches: string[][], respond?: (index: number) => Response | undefined): Handler => (call) => {
+  if (call.path !== "/api/memories/transfer") return undefined;
+  const ids = (JSON.parse(call.body) as { memory_ids: string[] }).memory_ids;
+  batches.push(ids);
+  const custom = respond?.(batches.length);
+  if (custom) return custom;
+  return json({
+    results: ids.map((id) => ({ source_id: id, new_id: `n-${id}`, ok: true, error: null, error_code: null, status: "copied" })),
+  });
+};
+
+async function openPicker(user: ReturnType<typeof userEvent.setup>, title: string) {
+  await user.click(within(await panel()).getByRole("button", { name: "转移到其他笔记本" }));
+  const picker = await screen.findByRole("dialog", { name: title });
+  await waitFor(() => expect(within(picker).getByRole("option", { name: "我的库" })).toBeInTheDocument());
+  await user.selectOptions(within(picker).getByLabelText("目标笔记本"), "nb2");
+  return picker;
+}
+
+test("250 条已确认记忆的转移分成 200 + 50 两批提交,汇总成一句话,并重读告知", async () => {
+  const user = userEvent.setup();
+  const batches: string[][] = [];
+  const calls = installServer([disclosure(250, 0), memoriesPage(250), targetNotebooks, transferAll(batches)]);
+  mount("bar");
+
+  await pressLeave(user);
+  const picker = await openPicker(user, "复制/移动 250 条记忆");
+  await user.click(within(picker).getByRole("button", { name: "确认" }));
+
+  const dialog = await panel();
+  await within(dialog).findByText("已复制 250 条记忆到「我的库」");
+  expect(batches.map((batch) => batch.length)).toEqual([TRANSFER_BATCH_MAX, 50]);
+  expect(new Set(batches.flat()).size).toBe(250);
+  await within(dialog).findByText("你在这个笔记本里已经没有记忆了。");
+  expect(disclosures(calls)).toHaveLength(2);
+});
+
+test("某一批整体失败不中断后面的批次:汇总里如实写成功与失败条数", async () => {
+  const user = userEvent.setup();
+  const batches: string[][] = [];
+  const calls = installServer([
+    disclosure(250, 200),
+    memoriesPage(250),
+    targetNotebooks,
+    transferAll(batches, (index) => (index === 1 ? json({ detail: "x" }, 500) : undefined)),
+  ]);
+  mount("bar");
+
+  await pressLeave(user);
+  const picker = await openPicker(user, "复制/移动 250 条记忆");
+  await user.click(within(picker).getByRole("button", { name: "确认" }));
+
+  const dialog = await panel();
+  await within(dialog).findByText("已复制 50 条记忆到「我的库」，另有 200 条没有成功。");
+  expect(batches.map((batch) => batch.length)).toEqual([TRANSFER_BATCH_MAX, 50]);
+  await within(dialog).findByText("退出后，你在这个笔记本里的 200 条记忆会被永久删除，无法恢复。");
+  expect(disclosures(calls)).toHaveLength(2);
+});
+
+test("所有批次都失败:选择器留着并就地写出原因(可以换个目标重试),不重读条数", async () => {
+  const user = userEvent.setup();
+  const batches: string[][] = [];
+  const calls = installServer([
+    disclosure(250),
+    memoriesPage(250),
+    targetNotebooks,
+    transferAll(batches, () => json({ detail: "x" }, 403)),
+  ]);
+  mount("bar");
+
+  await pressLeave(user);
+  const picker = await openPicker(user, "复制/移动 250 条记忆");
+  await user.click(within(picker).getByRole("button", { name: "确认" }));
+
+  expect(await within(picker).findByRole("alert")).toHaveTextContent("没有权限进行这个操作");
+  expect(screen.getByRole("dialog", { name: "复制/移动 250 条记忆" })).toBeInTheDocument();
+  expect(batches).toHaveLength(2);
+  expect(disclosures(calls)).toHaveLength(1);
+});
+
+test("选择器焦点:打开时进选择器;Escape 只关选择器、面板还在,焦点回到面板", async () => {
+  const user = userEvent.setup();
+  installServer([disclosure(2), memoriesPage(2), targetNotebooks]);
+  mount("bar");
+
+  await pressLeave(user);
+  const picker = await openPicker(user, "复制/移动 2 条记忆");
+  expect(picker.contains(document.activeElement)).toBe(true);
+
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "复制/移动 2 条记忆" })).not.toBeInTheDocument());
+  const dialog = screen.getByRole("dialog", { name: "退出共享" });
+  await waitFor(() => expect(within(dialog).getByRole("button", { name: "取消" })).toHaveFocus());
+});
+
+test("转移提交中选择器的「取消」可用:关掉后面板显示「正在转移…」,结果落地照常汇报并重读条数", async () => {
+  const user = userEvent.setup();
+  const gate = deferred<Response>();
+  const calls = installServer([
+    disclosure(2, 0),
+    memoriesPage(2),
+    targetNotebooks,
+    (call) => (call.path === "/api/memories/transfer" ? gate.promise : undefined),
+  ]);
+  mount("bar");
+
+  await pressLeave(user);
+  const picker = await openPicker(user, "复制/移动 2 条记忆");
+  await user.click(within(picker).getByRole("button", { name: "确认" }));
+  await within(picker).findByRole("button", { name: "处理中…" });
+  const pickerCancel = within(picker).getByRole("button", { name: "取消" });
+  expect(pickerCancel).toBeEnabled();
+  await user.click(pickerCancel);
+
+  const dialog = await panel();
+  expect(screen.queryByRole("dialog", { name: "复制/移动 2 条记忆" })).not.toBeInTheDocument();
+  expect(within(dialog).getByRole("button", { name: "正在转移…" })).toBeDisabled();
+  expect(within(dialog).getByRole("button", { name: "确认退出并删除" })).toBeDisabled();
+  expect(within(dialog).getByRole("button", { name: "取消" })).toBeEnabled();
+
+  gate.resolve(json({
+    results: ["m0", "m1"].map((id) => ({ source_id: id, new_id: `n-${id}`, ok: true, error: null, error_code: null, status: "copied" })),
+  }));
+  await within(dialog).findByText("你在这个笔记本里已经没有记忆了。");
+  expect(within(dialog).getByText("已复制 2 条记忆到「我的库」")).toBeInTheDocument();
+  expect(disclosures(calls)).toHaveLength(2);
+});
+
+test("面板被取消之后转移才落地:结果用提示告知", async () => {
+  const user = userEvent.setup();
+  const gate = deferred<Response>();
+  installServer([
+    disclosure(2), memoriesPage(2), targetNotebooks,
+    (call) => (call.path === "/api/memories/transfer" ? gate.promise : undefined),
+  ]);
+  const { onToast } = mount("bar");
+
+  await pressLeave(user);
+  const picker = await openPicker(user, "复制/移动 2 条记忆");
+  await user.click(within(picker).getByRole("button", { name: "确认" }));
+  await user.click(within(picker).getByRole("button", { name: "取消" }));
+  await user.click(within(await panel()).getByRole("button", { name: "取消" }));
+  gate.resolve(json({
+    results: ["m0", "m1"].map((id) => ({ source_id: id, new_id: `n-${id}`, ok: true, error: null, error_code: null, status: "copied" })),
+  }));
+
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("已复制 2 条记忆到「我的库」"));
+});
+
+test("目标笔记本选择器的默认行为不变:提交中「取消」仍是禁用的(记忆页/知识表沿用)", async () => {
+  const user = userEvent.setup();
+  installServer([targetNotebooks]);
+  render(
+    <DestinationPicker
+      sourceNotebookId="nb1"
+      allowMove
+      title="复制/移动 1 条记忆"
+      onCancel={() => undefined}
+      onSubmit={() => new Promise<void>(() => undefined)}
+    />,
+  );
+  const picker = await screen.findByRole("dialog", { name: "复制/移动 1 条记忆" });
+  await waitFor(() => expect(within(picker).getByRole("option", { name: "我的库" })).toBeInTheDocument());
+  await user.selectOptions(within(picker).getByLabelText("目标笔记本"), "nb2");
+  await user.click(within(picker).getByRole("button", { name: "确认" }));
+
+  expect(await within(picker).findByRole("button", { name: "处理中…" })).toBeDisabled();
+  expect(within(picker).getByRole("button", { name: "取消" })).toBeDisabled();
+});
+
+// ---------------------------------------------------------------------------------------
+// 落点
+// ---------------------------------------------------------------------------------------
+
+test("placePanel:优先在入口正下方;下方放不下翻到上方;两边都放不下贴视口底边;四边夹住", () => {
+  const viewport = { width: 1000, height: 700 };
+  const panelSize = { width: 360, height: 200 };
+  const box = (left: number, top: number, width = 90, height = 30) => ({
+    left, top, right: left + width, bottom: top + height,
+  });
+  // 正下方:顶边 = 入口底边 + 8
+  expect(placePanel(box(100, 100), panelSize, viewport)).toEqual({ left: 100, top: 138 });
+  // 靠右:右边夹在视口内(留 8)
+  expect(placePanel(box(900, 100), panelSize, viewport)).toEqual({ left: 632, top: 138 });
+  // 靠左越界:左边夹到 8
+  expect(placePanel(box(-40, 100), panelSize, viewport).left).toBe(8);
+  // 最后一行:下方放不下,翻到入口上方且不盖住入口
+  expect(placePanel(box(100, 640), panelSize, viewport)).toEqual({ left: 100, top: 432 });
+  // 上下都放不下:贴视口底边(不出屏)
+  expect(placePanel(box(100, 150), { width: 360, height: 640 }, viewport).top).toBe(52);
+  // 面板比视口还高:顶边夹在 8(面板自己 max-height + 滚动)
+  expect(placePanel(box(100, 150), { width: 360, height: 900 }, viewport).top).toBe(8);
+  // 入口已滚出视口(在上方):面板仍留在视口内
+  expect(placePanel(box(100, -300), panelSize, viewport).top).toBeGreaterThanOrEqual(8);
+  expect(placePanel(box(100, 2000), panelSize, viewport).top).toBeLessThanOrEqual(700 - 200 - 8);
+});
+
+test("面板跟着入口走:页面滚动、窗口缩放后重新量入口再摆", async () => {
+  const user = userEvent.setup();
+  vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(360);
+  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(200);
+  installServer([disclosure(3)]);
+  mount("bar");
+  const opener = screen.getByRole("button", { name: "退出共享" });
+  const rect = (top: number) => ({
+    left: 100, right: 190, top, bottom: top + 30, width: 90, height: 30, x: 100, y: top, toJSON: () => ({}),
+  }) as DOMRect;
+  const measure = vi.spyOn(opener, "getBoundingClientRect").mockReturnValue(rect(300));
+
+  await pressLeave(user);
+  const dialog = await panel();
+  expect(dialog.style.top).toBe("338px");
+  expect(dialog.style.left).toBe("100px");
+
+  measure.mockReturnValue(rect(120)); // 页面滚动了
+  act(() => { window.dispatchEvent(new Event("scroll")); });
+  expect(dialog.style.top).toBe("158px");
+
+  measure.mockReturnValue(rect(650)); // 滚到视口底部(jsdom 视口高 768):放不下,翻到上方
+  act(() => { window.dispatchEvent(new Event("scroll")); });
+  expect(dialog.style.top).toBe("442px");
+
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 300 });
+  act(() => { window.dispatchEvent(new Event("resize")); }); // 窗口缩窄:左边夹住
+  expect(dialog.style.left).toBe("8px");
 });

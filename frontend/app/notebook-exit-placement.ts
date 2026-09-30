@@ -28,8 +28,8 @@ export function placePanel(
   );
   const lowest = Math.max(PLACEMENT_MARGIN, viewport.height - panel.height - PLACEMENT_MARGIN);
   const below = anchor.bottom + PLACEMENT_GAP;
-  if (below <= lowest) return { left, top: below };
+  if (below <= lowest) return { left, top: Math.max(below, PLACEMENT_MARGIN) };
   const above = anchor.top - PLACEMENT_GAP - panel.height;
-  if (above >= PLACEMENT_MARGIN) return { left, top: above };
+  if (above >= PLACEMENT_MARGIN && above <= lowest) return { left, top: above };
   return { left, top: clamp(below, PLACEMENT_MARGIN, lowest) };
 }
