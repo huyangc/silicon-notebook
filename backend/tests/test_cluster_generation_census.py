@@ -108,9 +108,10 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "谓词由调用方持有)"),
     "backend/app/repositories/sqlite/memory_sql.py": (1, 0, 0, 0, 0,
         "PG 孪生同注记"),
-    "backend/app/repositories/postgres/sharing_store.py": (1, 0, 0, 2, 0,
-        "C→§1.6:拷贝快照只取 published 代 + 校验两侧同谓词口径"),
-    "backend/app/repositories/sqlite/sharing_store.py": (1, 0, 0, 2, 0,
+    "backend/app/repositories/postgres/sharing_store.py": (2, 0, 0, 4, 0,
+        "C→§1.6:拷贝快照只取 published 代 + 校验两侧同谓词口径;E5-1(M2)给这两处"
+        "各加一份 Memory 感知的孪生文本(源库含 Memory 或已标脏时才用),代次谓词逐字相同"),
+    "backend/app/repositories/sqlite/sharing_store.py": (2, 0, 0, 4, 0,
         "PG 孪生同注记"),
     "backend/app/repositories/postgres/unified_kg_store.py": (27, 10, 7, 24, 13,
         "A 大头(30 站点已配谓词,含 codex #671 R1 补的 mention_seed_rows;LEFT JOIN 入 ON);B 已参数化:写新代三原语"
