@@ -1556,8 +1556,9 @@ validation ranges live in the [Product and API reference](./product-and-api.md#p
 repairable but still rejects it, and `on` accepts conservative repairs (the default).
 It does not complete truncated output or relax schema/type/prose safety checks.
 Independent of this setting, every chat workload accepts a complete object followed
-only by stray closing punctuation (recorded as `model_json_repair` `status: "trimmed"`);
-that delivers the object unchanged and is not a repair. Repair
+only by stray closing punctuation (recorded as `model_json_repair` `status: "trimmed"`)
+and reads a backslash that starts no JSON escape, such as LaTeX `50\%`, as the
+characters written (`status: "escaped"`); neither is a repair. Repair
 events are content-free and correlate through the model call's safe `support_id`.
 
 The same-origin `/api/*` rewrite has a finite proxy idle timeout. Ask therefore sends a
