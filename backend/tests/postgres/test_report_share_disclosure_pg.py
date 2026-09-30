@@ -303,14 +303,25 @@ def test_share_and_purge_of_the_same_author_never_deadlock_pg(world):
 
     service = world.repo._runtime.memory_service
     ingestion = world.repo._runtime.source_ingestion
-    memories = []
-    for key in ("d1", "d2"):
+    def confirmed(key: str):
         candidate = service.create_candidate(
             world.notebook, world.alice.id, None, f"req-{key}-{next(_KEYS)}",
             f"记忆 {key}", f"记忆 {key}：环路补偿保持稳定。", [], "reason", {}, [],
         )
-        memories.append(service.confirm(candidate.id, world.alice.id))
-    low, high = sorted(memories, key=lambda memory: memory.id)
+        return service.confirm(candidate.id, world.alice.id)
+
+    # The HIGH Memory row is written first (heap order puts it first), and
+    # below its source is cited first and sorts first by source id: every
+    # natural row order the lock statement could fall back on without its
+    # ``ORDER BY lm.id`` reaches the high row first.
+    earlier = confirmed("d0")
+    for attempt in range(1, 64):
+        later = confirmed(f"d{attempt}")
+        if earlier.id > later.id:
+            break
+        earlier = later
+    high, low = earlier, later
+    assert high.id > low.id
     minted = ingestion.new_id
     projections = {}
     for memory, source_id in ((low, f"src-z-{next(_KEYS)}"), (high, f"src-a-{next(_KEYS)}")):
