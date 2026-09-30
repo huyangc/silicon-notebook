@@ -528,8 +528,8 @@ def _plans(database, query: str, params: tuple) -> dict[str, str]:
 
 def _assert_notebook_scoped(label, new_plan, legacy_plan="", *, anti_joins=None, extra_probes=0):
     """No new Seq Scan on a big table, no hashed SubPlan beyond the pre-M2 text's (the
-    knowhow NOT IN), no per-row SubPlan beyond the registered probes, and — when given —
-    exactly the expected number of Memory anti-joins."""
+    knowhow NOT IN), no per-row SubPlan beyond the registered probes, no join compared
+    by a filter, and — when given — exactly the expected number of Memory anti-joins."""
     assert (_seq_scanned(new_plan) & set(_BIG_TABLES)) <= _seq_scanned(legacy_plan), (
         f"{label}: a new sequential scan\n--- new\n{new_plan}\n--- legacy\n{legacy_plan}"
     )
@@ -538,6 +538,12 @@ def _assert_notebook_scoped(label, new_plan, legacy_plan="", *, anti_joins=None,
     )
     assert _correlated_subplans(new_plan) <= _correlated_subplans(legacy_plan) + extra_probes, (
         f"{label}: an unregistered per-row SubPlan\n{new_plan}"
+    )
+    # A nested loop that compares with a Join Filter instead of an index or hash key
+    # is quadratic in the notebook (the per-arm NOT EXISTS around relation vectors
+    # did 1.44M comparisons at 3,600 x 400).
+    assert new_plan.count("Join Filter") <= legacy_plan.count("Join Filter"), (
+        f"{label}: a join compared by filter, not by key\n{new_plan}"
     )
     if anti_joins is not None:
         assert new_plan.count("Anti Join") == anti_joins, (

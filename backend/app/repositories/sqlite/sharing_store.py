@@ -191,10 +191,16 @@ def _visible_chunk_question(alias: str) -> str:
 
 
 def _visible_fact_element(alias: str) -> str:
+    """Own source, parent fact and bound element all not Memory. The parent is
+    written as "a non-Memory parent exists" (a semi-join probed by the fact's key),
+    not "no Memory parent exists": the anti-join form planned a nested loop whose
+    join filter compared every fact element with every Memory fact (measured
+    1.44M comparisons at 3,600 x 400). A fact element without its fact is dropped:
+    the service remaps `fact_id` strictly, so it could only ever fail the copy."""
     return (
-        f"{_not_memory_here(alias)} AND NOT EXISTS (SELECT 1 FROM knowledge_source_facts pf "
+        f"{_not_memory_here(alias)} AND EXISTS (SELECT 1 FROM knowledge_source_facts pf "
         f"WHERE pf.id = {alias}.fact_id AND pf.notebook_id = {alias}.notebook_id "
-        f"AND {memory_sql.memory_derived_in_notebook('pf')}) "
+        f"AND NOT {memory_sql.memory_derived_in_notebook('pf')}) "
         f"AND NOT {_memory_element(alias + '.element_id')}"
     )
 
@@ -586,12 +592,16 @@ _MEMORY_SNAPSHOT_TEXT: dict[str, str] = {
         f"SELECT e.* FROM knowledge_embeddings e WHERE e.notebook_id = ? "
         f"AND NOT {_memory_object_here('eo', 'e.object_id', 'e.notebook_id')}"
     ),
-    # One NOT EXISTS per arm (not one over their OR): each is its own anti-join.
-    "relation_embeddings": f"SELECT e.* FROM relation_embeddings e WHERE e.notebook_id = ? "
-    + " ".join(
-        "AND NOT EXISTS (SELECT 1 FROM knowledge_relations er "
-        f"WHERE er.id = e.relation_id AND er.notebook_id = e.notebook_id AND {arm})"
-        for arm in _relation_memory_arms("er")
+    # Joined to its relation and judged by the relation's own three anti-joins (the
+    # same predicate as `knowledge_relations`). One NOT EXISTS per arm around the vector
+    # instead planned a nested-loop anti-join whose join filter compared every vector
+    # with every Memory relation (1.44M comparisons at 3,600 x 400, measured). A vector
+    # whose relation is missing is dropped rather than copied: the service remaps
+    # `relation_id` strictly, so such a row could only ever fail the copy.
+    "relation_embeddings": (
+        "SELECT e.* FROM relation_embeddings e JOIN knowledge_relations er "
+        "ON er.id = e.relation_id AND er.notebook_id = e.notebook_id "
+        f"WHERE e.notebook_id = ? AND {_visible_relation('er')}"
     ),
     "concept_clusters": (
         f"SELECT c.* FROM concept_clusters c WHERE c.notebook_id = ? "
