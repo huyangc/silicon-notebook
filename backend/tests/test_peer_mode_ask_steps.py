@@ -656,18 +656,29 @@ def test_workbook_lane_drops_libraries_outside_the_run():
 # ---------------------------------------------------------------------------
 
 def test_inner_scope_context_is_a_passthrough():
-    """``AskService.ask`` 内层的 ``source_scope_context(nb, None, None)`` 三者全 None
-    时 **yield 而不设 scope**,外层的全局 scope 原样存活。
+    """``AskService.ask`` 内层的默认天花板(``_retrieval_ceiling`` →
+    ``default_ceiling_context``)在外层已有 scope 时 **零读取、原样透传**,外层的
+    全局 scope 原样存活。
 
     这是整个 D1 方案成立的关键事实:全局入口在 ``ask()`` **之外**装好逐库天花板,
-    而 ``ask()`` 内部照旧为请求自己的 scope 开一层——如果那一层无条件覆盖,外层
+    而 ``ask()`` 内部照旧为请求自己装一层默认天花板——如果那一层无条件覆盖,外层
     天花板会在检索开始前当场消失,本文件每一条闸都会在生产里失效。
     """
+    from app.services.ask_service import AskService
+    from tests.test_ask_service_boundary import static_ceiling_readers
+
+    def never(*_args):
+        raise AssertionError("an outer scope must pass through with zero reads")
+
+    service = AskService.__new__(AskService)
+    service.ceiling_readers = static_ceiling_readers(
+        participants=never, visible=never, hidden=never, memory_sources=never,
+    )
     with _peer_scope(("nb-a", "nb-b")) as ids:
         outer = current_source_scope()
         assert outer is not None and outer.peer_ceiling_active is True
 
-        with source_scope_context(ids[0], None, None):
+        with service._retrieval_ceiling(ids[0], "u"):
             assert current_source_scope() is outer
             assert peer_scope_ceiling_active() is True
             assert subjectless_run_active() is True
@@ -678,9 +689,12 @@ def test_inner_scope_context_is_a_passthrough():
 
     assert current_source_scope() is None
 
-    # 负对照:没有外层时它同样什么都不装(而不是装一个空 scope)。
-    with source_scope_context("nb-a", None, None):
-        assert current_source_scope() is None
+    # 对照:没有外层时它装的是**默认天花板**(不是「什么都不装」)。
+    service.ceiling_readers = static_ceiling_readers(visible=lambda _nb: ("s1",))
+    with service._retrieval_ceiling("nb-a", "u"):
+        scope = current_source_scope()
+        assert scope is not None and scope.ceilings_total
+        assert scope.source_ids == {"s1"} and scope.owner_id == "u"
         assert peer_scope_ceiling_active() is False
         assert subjectless_run_active() is False
 

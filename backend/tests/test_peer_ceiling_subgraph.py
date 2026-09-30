@@ -301,6 +301,10 @@ def test_seed_nodes_survive(overlay, federation):
 def test_absent_ceiling_is_byte_identical(
     repo, overlay, federation, monkeypatch,
 ):
+    # Pins the PRIMITIVE with no scope installed.  Unreachable in production:
+    # every Ask entry installs the default ceiling (``AskService._retrieval_
+    # ceiling``), which freezes each mounted library -- guaranteed by
+    # ``test_default_ceiling_guard.py``.
     active, peer = federation
     candidates = repo.retrieval.candidates
     prune_calls: list = []

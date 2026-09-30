@@ -316,7 +316,11 @@ def test_an_object_with_no_occurrences_at_all_renders_only_without_a_ceiling():
 # 5. 缺席时逐值不变
 # --------------------------------------------------------------------------- #
 def test_absent_ceiling_is_value_identical():
-    """无 scope / 有 scope 但无任何天花板 → 与今天逐值相同(含隐藏那条)。"""
+    """无 scope / 有 scope 但无任何天花板 → 与今天逐值相同(含隐藏那条)。
+
+    钉的是**原语**在无 scope 时不动。生产不可达:每个问答入口都经
+    ``AskService._retrieval_ceiling`` 装默认天花板,由
+    ``test_default_ceiling_guard.py`` 保证。"""
     bare = _service(_both_sources_knowledge()).knowledge_context(
         ACTIVE, [_hit(ACTIVE)])
     with source_scope_context(ACTIVE, None, None):
