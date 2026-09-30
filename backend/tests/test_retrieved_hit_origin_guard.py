@@ -23,13 +23,19 @@ enclosing function + class. A construction that passes a non-literal-empty
 ``global-unreachable``  the gate that keeps it out of a global run;
 ``not-in-engine``       no module of the global engine calls it.
 
-``test_global_citation_producers_e2e`` is the behavioural half: every citation
-and anchor of every healthy global run, over every producer and reasoning
-action, names one of the run's participants.
+Every module is parsed (no text pre-filter), constructions are recognised
+under any import alias or rebinding, and a stamp or call on a dead path (under
+``if False:``, after an unconditional ``return``) does not count as a proof.
+
+Like D9, this is a REGISTRY in which every construction site is accounted for;
+it does not prove behaviour. ``test_global_citation_producers_e2e`` is the
+behavioural half: every citation and anchor of every healthy global run, over
+every producer and reasoning action, names one of the run's participants.
 """
 from __future__ import annotations
 
 import ast
+import functools
 from collections import Counter
 
 import pytest
@@ -103,8 +109,10 @@ ORIGIN_REGISTRY = {
 
 
 def scan_source(relative: str, source: str) -> list:
-    """``(file, qualname, class, passes_library)`` for every hit construction."""
-    tree = ast.parse(source)
+    """``(file, qualname, class, passes_library)`` for every hit construction,
+    under any import alias or ``X = RetrievedChunk`` rebinding."""
+    tree = d9.parse(source)
+    aliases = d9._aliases(tree, tuple(sorted(HIT_CLASSES)))
     sites: list = []
 
     def visit(node, stack):
@@ -113,30 +121,35 @@ def scan_source(relative: str, source: str) -> list:
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 scope = stack + [child.name]
             if isinstance(child, ast.Call):
-                func = child.func
-                name = func.id if isinstance(func, ast.Name) else (
-                    func.attr if isinstance(func, ast.Attribute) else "")
-                if name in HIT_CLASSES:
+                name = d9._call_name(child)
+                if name in aliases:
                     library = next(
                         (k.value for k in child.keywords if k.arg == "notebook_id"), None,
                     )
                     passes = library is not None and not (
                         isinstance(library, ast.Constant) and not library.value
                     )
-                    sites.append((relative, ".".join(stack), name, passes))
+                    sites.append((relative, ".".join(stack), aliases[name], passes))
             visit(child, scope)
 
     visit(tree, [])
     return sites
 
 
+@functools.lru_cache(maxsize=None)
+def _scan_source_cached(relative: str, source: str) -> tuple:
+    return tuple(scan_source(relative, source))
+
+
 def scan() -> Counter:
+    """Every unstamped construction under ``d9.APP``. No text pre-filter (the
+    D9 lesson): every module is parsed, so an alias cannot hide a site."""
     found: Counter = Counter()
     for path in sorted(d9.APP.rglob("*.py")):
-        source = path.read_text(encoding="utf-8")
-        if not any(f"{name}(" in source for name in HIT_CLASSES):
-            continue
-        for relative, qualname, name, passes in scan_source(str(path.relative_to(d9.APP)), source):
+        relative = str(path.relative_to(d9.APP))
+        for _rel, qualname, name, passes in _scan_source_cached(
+            relative, path.read_text(encoding="utf-8"),
+        ):
             if not passes:
                 found[(relative, qualname, name)] += 1
     return found
@@ -160,7 +173,7 @@ def _proof_problems(proof) -> list:
         return [
             f"{module} calls {proof[1]}"
             for module in d9.GLOBAL_ENGINE_MODULES
-            if proof[1] in d9._called_names(ast.parse((d9.APP / module).read_text(encoding="utf-8")))
+            if proof[1] in d9._called_names(d9.parse_file(d9.APP / module))
         ]
     if kind in ("passes-kw", "assigns-attr"):
         _kind, relative, qualname, name = proof
@@ -169,13 +182,13 @@ def _proof_problems(proof) -> list:
             return [f"{relative}::{qualname} no longer exists"]
         if kind == "passes-kw":
             ok = any(isinstance(call, ast.Call) and any(k.arg == name for k in call.keywords)
-                     for call in ast.walk(node))
+                     for call in d9.live_walk(node))
         else:
             ok = any(
                 isinstance(assign, ast.Assign) and any(
                     isinstance(target, ast.Attribute) and target.attr == name
                     for target in assign.targets)
-                for assign in ast.walk(node)
+                for assign in d9.live_walk(node)
             )
         return [] if ok else [f"{relative}::{qualname} no longer writes {name}"]
     return d9.proof_problems(proof)
@@ -195,33 +208,54 @@ def test_every_origin_proof_still_holds(site):
 
 # --- the guard's own teeth ------------------------------------------------
 
-def test_an_unstamped_hit_construction_fails():
-    source = (
-        "from app.domain.retrieval import RetrievedKnowledge\n"
-        "def neighbours(rows):\n"
-        "    return [RetrievedKnowledge(object_id=r.id, object_type='claim', payload={})\n"
-        "            for r in rows]\n"
-    )
-    found = scan()
-    found.update(
-        (relative, qualname, name)
-        for relative, qualname, name, passes in scan_source("services/new_leg.py", source)
-        if not passes
-    )
-    assert any("new_leg" in problem for problem in origin_problems(found))
+def _scanned_problems(tmp_path, monkeypatch, source: str) -> list:
+    """Run the real ``scan()`` over a fake app directory holding one module."""
+    import sys
+
+    fake = tmp_path / "app"
+    target = fake / "services" / "new_leg.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(source, encoding="utf-8")
+    monkeypatch.setattr(sys.modules[d9.__name__], "APP", fake)
+    return [problem for problem in origin_problems(scan()) if "new_leg" in problem]
 
 
-def test_a_literal_empty_library_counts_as_no_library():
-    source = "def make(r):\n    return RetrievedChunk(chunk_id=r.c, notebook_id='')\n"
-    [(_relative, _qualname, _name, passes)] = scan_source("services/new_leg.py", source)
-    assert passes is False
+@pytest.mark.parametrize("source", [
+    "from app.domain.retrieval import RetrievedKnowledge\n"
+    "def neighbours(rows):\n"
+    "    return [RetrievedKnowledge(object_id=r.id, object_type='claim', payload={})\n"
+    "            for r in rows]\n",
+    # an import alias: no "RetrievedKnowledge(" text anywhere in the module
+    "from app.domain.retrieval import RetrievedKnowledge as K\n"
+    "def neighbours(rows):\n"
+    "    return [K(object_id=r.id, object_type='claim', payload={}) for r in rows]\n",
+    # a rebinding alias through the module
+    "from app.domain import retrieval\n"
+    "Hit = retrieval.RetrievedChunk\n"
+    "def make(r):\n"
+    "    return Hit(chunk_id=r.c)\n",
+    # a literal empty library is no library
+    "def make(r):\n    return RetrievedChunk(chunk_id=r.c, notebook_id='')\n",
+], ids=["plain", "import-alias", "rebinding-alias", "literal-empty"])
+def test_an_unstamped_hit_construction_fails(tmp_path, monkeypatch, source):
+    assert _scanned_problems(tmp_path, monkeypatch, source)
 
 
-def test_removing_a_downstream_stamp_fails(tmp_path, monkeypatch):
+def test_a_stamped_hit_construction_passes(tmp_path, monkeypatch):
+    source = "def make(r, nb):\n    return RetrievedChunk(chunk_id=r.c, notebook_id=nb)\n"
+    assert _scanned_problems(tmp_path, monkeypatch, source) == []
+
+
+@pytest.mark.parametrize("replacement", [
+    "",
+    "                if False:\n                    h.notebook_id = nid\n",
+], ids=["removed", "under-if-false"])
+def test_removing_a_downstream_stamp_fails(tmp_path, monkeypatch, replacement):
     import sys
 
     source = (d9.APP / RC).read_text(encoding="utf-8")
-    unstamped = source.replace("                h.notebook_id = nid\n", "", 1)
+    assert "                h.notebook_id = nid\n" in source  # first: _federated_retrieve_impl
+    unstamped = source.replace("                h.notebook_id = nid\n", replacement, 1)
     assert unstamped != source
     fake = tmp_path / "app"
     target = fake / RC
