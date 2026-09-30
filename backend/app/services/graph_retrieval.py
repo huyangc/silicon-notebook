@@ -112,6 +112,92 @@ def _peer_chunk_allowed(row, chunk_owner: Dict[str, str], ceilings) -> bool:
     return str(row["source_id"] or "") in ceilings.get(owner, frozenset())
 
 
+#: Candidates the scale PPR path ranks per ``ppr_top_chunks`` slot when a
+#: source ceiling is in force, so passages outside the ceiling can be passed
+#: over without re-running PPR.  The bounded heap costs the same at 20 and at
+#: 320 entries (it visits every chunk score either way: 0.42 s at 1M chunks);
+#: only a run whose first ``16 x ppr_top_chunks`` candidates hold fewer
+#: in-ceiling passages than slots re-ranks everything (``max_results=None``).
+_PPR_CEILING_OVERFETCH = 16
+
+
+class _PprCeiling:
+    """The run's source ceilings as PPR's slot filter (audit B-2).
+
+    The PPR graph is built -- and process-cached -- per PARTICIPANT SET, never
+    per ceiling (``_participant_graph_cache_key``: a per-checkbox key would
+    rebuild a multi-million-node graph per selection).  So the ranking spans
+    every participant's chunks, a mounted library's Knowhow rows and the
+    sources uploaded after the freeze included, and the ceiling must be
+    applied between the ranking and the ``ppr_top_chunks`` cut: a passage the
+    run may not use must not take a slot.
+
+    Which libraries are LISTED (their ceiling pushed into the hydration SQL,
+    ``graph_hydrate_rows(allowed_source_ids=...)``) is ``source_scope
+    .ceiling_binds``' verdict taken from the scope alone: a per-library
+    freeze binds (a mounted library opens only the sources visible when the
+    run was frozen, so its Knowhow rows and later uploads stay out), and so
+    does an excluded library once seen.  The active library's own ceiling is
+    NOT listed up front: PPR runs only when ``_unsafe_source_scope_restricted``
+    -- a fresh probe on every call -- found it neither narrowed nor drifted,
+    which are that verdict's remaining arms for chunks (its ``foreign_hidden``
+    arm is about KG rows; §12 of the remediation plan), so binding it would
+    change nothing but the statement.  Instead every row of an unlisted
+    library is verified on read against the frozen ceiling
+    (``ActiveSourceScope.allows``, the backstop's own test): a chunk row names
+    its one source, so the check is complete.  A refused row means the
+    library changed after the probe: the drift is recorded on the run's
+    verdict (``record_ceiling_drift``) and the library is listed from the next
+    window on.  An all-selected run whose sources did not change therefore
+    issues exactly the statements it issued before this class existed.
+    """
+
+    def __init__(self, scope, active_notebook_id: str) -> None:
+        from app.services.source_scope import library_source_ceiling
+
+        self.scope = scope
+        self.active_notebook_id = active_notebook_id
+        self.listed: Dict[str, frozenset] = {
+            notebook_id: library_source_ceiling(scope, notebook_id)
+            for notebook_id, _ceiling in scope.notebook_source_ceilings
+        }
+
+    @classmethod
+    def for_run(cls, active_notebook_id: str) -> Optional["_PprCeiling"]:
+        """``None`` exactly when ``filter_retrieval_items`` short-circuits: no
+        scope, or no ceiling in either dimension nor per library."""
+        from app.services.source_scope import current_source_scope
+
+        scope = current_source_scope()
+        if scope is None or not (
+            scope.ceiling_active
+            or scope.base_ceiling_active
+            or scope.peer_ceiling_active
+        ):
+            return None
+        return cls(scope, active_notebook_id)
+
+    def admits(self, row) -> bool:
+        """Verify-on-read for one hydrated row.  A listed library's rows were
+        filtered by the store and are taken as read."""
+        from app.services.source_scope import (
+            library_source_ceiling,
+            record_ceiling_drift,
+        )
+
+        origin = str(row["chunk_notebook_id"] or "") or self.active_notebook_id
+        if origin in self.listed:
+            return True
+        if self.scope.allows(origin, str(row["source_id"] or "")):
+            return True
+        if self.scope.covers_notebook(origin):
+            record_ceiling_drift(self.scope, origin)
+        ceiling = library_source_ceiling(self.scope, origin)
+        if ceiling is not None:
+            self.listed[origin] = ceiling
+        return False
+
+
 def _binary_text_key(value: str) -> bytes:
     """Locale-free identifier order shared with persisted graph artifacts."""
     return value.encode("utf-8", "surrogatepass")
@@ -1120,6 +1206,10 @@ class GraphRetrievalService(_RetrievalState):
             return []
         from app.services.kg.ppr import run_ppr
         top_chunks = self.settings.ppr_top_chunks
+        # A ceiling in force → the cut below keeps its slots for passages
+        # inside it (``_PprCeiling``); the scale path over-ranks for that.
+        ceiling = _PprCeiling.for_run(notebook_id) if top_chunks > 0 else None
+        window = top_chunks * (1 if ceiling is None else _PPR_CEILING_OVERFETCH)
         ranked = self.scale_ppr(
             notebook_id,
             question,
@@ -1127,7 +1217,13 @@ class GraphRetrievalService(_RetrievalState):
             # scale PPR still succeeds and the legacy slice below decides the
             # empty/negative-prefix result, rather than treating the setting as
             # a scale failure and constructing the fallback graph.
-            max_results=top_chunks if top_chunks > 0 else None,
+            max_results=window if top_chunks > 0 else None,
+        )
+        # The scale ranking may stop at ``window``; the rustworkx one below
+        # is always complete.
+        rank_all = (
+            (lambda: self.scale_ppr(notebook_id, question, max_results=None))
+            if ceiling is not None and len(ranked) >= window else None
         )
         if not ranked:
             if self._federated_graph_is_large(notebook_id):
@@ -1144,13 +1240,18 @@ class GraphRetrievalService(_RetrievalState):
             if not reset:
                 return []
             ranked = run_ppr(G, chunk_idx_to_id, reset, damping=self.settings.ppr_damping)
-        ranked = ranked[:top_chunks]
-        if not ranked:
-            return []
-
-        score_map = dict(ranked)
-        with self._connect() as db:
-            rows = self.chunks.graph_hydrate_rows(db, score_map)
+        if ceiling is not None:
+            score_map, rows = self._ppr_rows_within_ceiling(
+                ranked, top_chunks, ceiling, rank_all)
+            if not rows:
+                return []
+        else:
+            ranked = ranked[:top_chunks]
+            if not ranked:
+                return []
+            score_map = dict(ranked)
+            with self._connect() as db:
+                rows = self.chunks.graph_hydrate_rows(db, score_map)
         from app.services.retrieval import RetrievedChunk, RetrievalSupport
         # combined_chunk_ids (scale_ppr) spans base ⊕ active — a chunk here can
         # belong to a base notebook even though this call is scoped to
@@ -1167,6 +1268,76 @@ class GraphRetrievalService(_RetrievalState):
             ),)) for r in rows]
         out.sort(key=lambda c: c.relevance, reverse=True)
         return out
+
+    def _ppr_rows_within_ceiling(
+        self,
+        ranked: List[Tuple[str, float]],
+        top_chunks: int,
+        ceiling: _PprCeiling,
+        rank_all,
+    ) -> Tuple[Dict[str, float], list]:
+        """The ``ranked[:top_chunks]`` cut with the ceiling applied BEFORE it:
+        walk the ranking in windows (``top_chunks``, then doubling up to
+        ``_IN_CHUNK``) and hydrate each through the ceiling until
+        ``top_chunks`` in-ceiling passages are kept or the ranking ends
+        (``rank_all``: the complete scale ranking, fetched once when the
+        over-ranked prefix ran out).
+
+        Slots are spent in rank order.  A candidate the ceiling refuses spends
+        none; a candidate the store no longer holds spends its slot exactly as
+        the historical cut did -- unless the window was filtered in SQL, where
+        "not returned" cannot tell a deleted chunk from a refused one.  Kept
+        rows are returned in hydration order, as before: an all-selected run
+        whose sources did not change hydrates one window of the first
+        ``top_chunks`` ids with the historical statement and returns its rows
+        unchanged."""
+        kept: list = []
+        score_map: Dict[str, float] = {}
+        slots = top_chunks
+        seen: set = set()
+        position, size = 0, top_chunks
+        while slots > 0:
+            if position >= len(ranked):
+                if rank_all is None:
+                    break
+                ranked, rank_all, position = rank_all(), None, 0
+                continue
+            window = [
+                (chunk_id, score)
+                for chunk_id, score in ranked[position:position + size]
+                if chunk_id not in seen
+            ]
+            position += size
+            size = min(size * 2, self._IN_CHUNK)
+            if not window:
+                continue
+            scores = dict(window)
+            seen.update(scores)
+            listed = dict(ceiling.listed)
+            with self._connect() as db:
+                rows = (
+                    self.chunks.graph_hydrate_rows(
+                        db, scores, allowed_source_ids=listed)
+                    if listed else self.chunks.graph_hydrate_rows(db, scores)
+                )
+            by_id = {row["id"]: row for row in rows}
+            admitted: set = set()
+            for chunk_id, _score in window:
+                if slots == 0:
+                    break
+                row = by_id.get(chunk_id)
+                if row is None:
+                    if not listed:
+                        slots -= 1
+                elif ceiling.admits(row):
+                    admitted.add(chunk_id)
+                    slots -= 1
+            for row in rows:
+                if row["id"] in admitted:
+                    kept.append(row)
+                    score_map[row["id"]] = scores[row["id"]]
+        return score_map, kept
+
     def _ppr_reset_vector(self, notebook_id: str, question: str,
                           key_to_idx: Dict[str, int]) -> Dict[int, float]:
         """构造 PPR 的 reset/personalization 向量:KG 实体种子(federated_retrieve)

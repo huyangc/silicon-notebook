@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Sequence
+from typing import Iterable, Mapping, Sequence
 
 from app.repositories.chunk_elements import reverse_rows_for_writes
 from app.repositories.like_pattern import escape_like_pattern
 from app.repositories.ports import ChunkWrite
+from app.repositories.sqlite.source_ceiling import ceiling_param, normalise_ceiling
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.id_binding import (
     bind_ids, drive_by, member_of, not_member_of,
@@ -426,17 +427,34 @@ class ChunkStore:
         ).fetchall()
 
     @staticmethod
-    def graph_hydrate_rows(db: sqlite3.Connection, chunk_ids: Sequence[str]):
+    def graph_hydrate_rows(
+        db: sqlite3.Connection,
+        chunk_ids: Sequence[str],
+        *,
+        allowed_source_ids: Mapping[str, Iterable[str] | None] | None = None,
+    ):
+        """Hydrate one window of PPR-ranked chunk ids; ``allowed_source_ids``
+        is the per-library ceiling map of the PostgreSQL twin, with the same
+        semantics (a listed library keeps only its listed sources, an empty
+        list denies it, nothing listed = the historical statement, byte for
+        byte).  The candidate primary keys drive the read with and without
+        planner statistics; each list is ONE ``json_each`` parameter
+        (``id_binding.member_of``, the non-driving ``+col IN`` form), so a
+        49k-source ceiling never approaches the variable limit."""
         ids = list(chunk_ids)
         if not ids:
             return []
         ph = ",".join("?" for _ in ids)
-        return db.execute(
+        sql = (
             f"SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, "
             f"c.notebook_id AS chunk_notebook_id, s.title AS source_title "
             f"FROM chunks c JOIN sources s ON s.id=c.source_id "
-            f"WHERE c.id IN ({ph})", ids,
-        ).fetchall()
+            f"WHERE c.id IN ({ph})"
+        )
+        clause, params = _library_source_ceiling_clause(allowed_source_ids or {})
+        if clause is None:
+            return db.execute(sql, ids).fetchall()
+        return db.execute(f"{sql} AND {clause}", [*ids, *params]).fetchall()
 
     @staticmethod
     def retrieval_contribution_rows(
@@ -595,3 +613,30 @@ class ChunkStore:
                 "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
                 [(r["id"], notebook_id, r["text"] or "") for r in rows])
         return len(rows)
+
+
+def _library_source_ceiling_clause(
+    ceilings: Mapping[str, Iterable[str] | None],
+) -> tuple[str | None, list]:
+    """The SQLite twin of ``postgres/chunk_store._library_source_ceiling_clause``
+    (the rule is stated there).  Every column test carries the unary ``+``
+    (``id_binding.member_of`` / ``not_member_of`` for the lists, spelled out
+    for the notebook equality) so no notebook or source index can outbid the
+    candidate primary keys when ``sqlite_stat1`` is empty."""
+    listed = {
+        str(notebook_id): ids for notebook_id, ids in ceilings.items()
+        if ids is not None
+    }
+    if not listed:
+        return None, []
+    notebooks = bind_ids(sorted(listed))
+    arms = [not_member_of("c.notebook_id", notebooks)]
+    params: list = [notebooks.param]
+    for notebook_id in sorted(listed):
+        ceiling = normalise_ceiling(listed[notebook_id])
+        if not ceiling:
+            continue
+        bound = ceiling_param(ceiling)
+        arms.append(f"(+c.notebook_id = ? AND {member_of('c.source_id', bound)})")
+        params.extend((notebook_id, bound.param))
+    return f"({' OR '.join(arms)})", params
