@@ -203,6 +203,13 @@ REGISTRY = {
         (("if-calls", AS, "AskService._drop_dangling_references", "current_federated_run_plan",
           "drop_dangling_references"),),
         "J2 single-notebook pass; skipped whenever a run plan is installed", 1),
+    ("services/reference_liveness.py", "prune_dead_report_elements", "splat:element_id"): (
+        "single-notebook-only",
+        (("if-calls", "services/report_engine.py",
+          "ReportEngine._sections_without_dead_elements", "current_federated_run_plan"),
+         ("calls", "services/report_engine.py", "ReportEngine.run_final_audit_stage",
+          "_sections_without_dead_elements")),
+        "J2 for deep reports: clears a dead locator; skipped whenever a run plan is installed", 1),
     # --- never inside a global Ask (import gates) --------------------------
     ("services/report_engine.py", "ReportEngine._assemble._sub", 'dict:"element_id"'): (
         "global-unreachable", _import_gate("services/report_engine.py"),
