@@ -266,6 +266,8 @@ class SQLiteRepository(RepositoryFacade):
                 active_source_ids=rt._active_source_ids_snapshot,
                 now=rt.seams.now,
                 event_log=rt.event_log,
+                # H12(只读,E5-3):本库里仍在的无主 Memory 来源数。
+                orphan_memory_sources=rt.memory_store.orphan_memory_source_count_on,
             )
             # 事件失效插槽已在 facade 构造期指向 __dict__ 晚解析的转发器(见
             # RepositoryFacade.__init__)——这里**不要**再绑具体实例:并发首访的

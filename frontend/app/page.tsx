@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, GitMerge, LayoutDashboard, LayoutGrid, Link2, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, Users, X } from "lucide-react";
 import "katex/dist/katex.min.css";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
@@ -88,7 +88,6 @@ import {
   previewShared,
   copyShared,
   joinShared,
-  leaveNotebook,
   sharedByMe,
   shareModeLabel,
   shareLinkCopyToast,
@@ -134,6 +133,9 @@ import { useReportWorkspace } from "./use-report-workspace.ts";
 import { useKgWorkspace } from "./use-kg-workspace.ts";
 import { useNotebookCollection, type NotebookEditorPatch } from "./use-notebook-collection.ts";
 import { useNotebookTitleDraft } from "./use-notebook-title-draft.ts";
+import { anchorAt, anchorOf, useNotebookExit, type ExitAnchor } from "./use-notebook-exit.ts";
+import { ToastRegion, TOAST_DEFAULT_MS, TOAST_EXIT_MS } from "./toast-region";
+import { NotebookExitPanel } from "./notebook-exit-panel";
 import {
   useRootModalCoordinator,
   type RootModalCloseReason,
@@ -168,7 +170,7 @@ import {
 } from "./bundle-intake.ts";
 import { BundleChoicePanel, BundleReceiptsPanel, type BundleReceiptEntry } from "./bundle-upload-panels.tsx";
 import type { BundleFile, InlineReceipt } from "./md-bundle.ts";
-import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
+import { sourceHealthGroups, checkupCount, checkupAlertSignature, checkupNotices, checkupHasRepairableIssue, hasRepairAction, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { askQuestionLimitHint, fetchAnswerMemoryLinks } from "./ask-api";
 import { buildPublicReportLink } from "./public-report";
 import { cancelScaleIndex, fetchIndexStatus, fetchScaleIndexStatus, rebuildScaleIndex, type IndexStatus } from "../features/kg-maintenance/kg-api";
@@ -905,6 +907,16 @@ export default function Home() {
     setCatalogReviewSeq(0);
   }, [sourceDetail?.id, currentNotebookId]);
   const [toast, setToast] = useState("");
+  // 「退出共享」的结果提示(永久删除记忆的唯一确认)停留更久:提示文字与 `toast` 相同时按
+  // TOAST_EXIT_MS 计时,其余提示仍是 TOAST_DEFAULT_MS。
+  const [exitToast, setExitToast] = useState("");
+  // 打开卡片菜单的那颗「⋮」:「退出共享」面板以它为落点,关闭后焦点也还给它。
+  const menuTriggerRef = useRef<HTMLElement | null>(null);
+  const showExitToast = useCallback((message: string) => {
+    setExitToast(message);
+    setToast(message);
+  }, []);
+  const expireToast = useCallback(() => setToast(""), []);
   // 铃铛里「进行中的提问」的全局条目要打开的那个全局会话(见 GlobalAskLauncher)。
   const [globalAskRequest, setGlobalAskRequest] = useState<GlobalConversationRequest | null>(null);
   const [modelStatusState, setModelStatusState] = useState({
@@ -960,8 +972,9 @@ export default function Home() {
   // 接收分享(拷贝侧):sharedPreview 存预览并驱动预览弹窗;copyBusy 覆盖拷贝/加入请求
   const [sharedPreview, setSharedPreview] = useState<SharedPreview | null>(null);
   const [copyBusy, setCopyBusy] = useState(false);
-  // 只读共享(Phase 2):退出共享请求覆盖;已分享总览 modal 的数据与开关
-  const [leaveBusy, setLeaveBusy] = useState(false);
+  // 只读共享(Phase 2):「退出共享」是唯一一份流程(读条数→确认→DELETE),两个入口共用,
+  // 见 use-notebook-exit.ts;已分享总览 modal 的数据与开关
+  const notebookExit = useNotebookExit({ onToast: showExitToast, onError: reportError });
   const [sharedByMeList, setSharedByMeList] = useState<SharedByMeItem[] | null>(null);
   // 总览里正在被撤销的那一本(codex #631 R2 P2)。`shareBusy` 是全局的忙碌闸,拿它当**文案**
   // 判据会让每一行的按钮都写「取消中…」——分享得多的用户读到的是「全都在取消」。闸(disabled)
@@ -1426,7 +1439,8 @@ export default function Home() {
       fetchCheckup(nb).then((c) => {
         if (cancelled) return;
         setCheckup(c);
-        if (c.healthy) setCheckupRepairPollUntil(0);
+        // 只读项(fix="none")不会因修复而消失:只看还有没有用户能修的项。
+        if (!checkupHasRepairableIssue(c)) setCheckupRepairPollUntil(0);
       }).catch(() => {});
     }, 8000);
     return () => { cancelled = true; window.clearInterval(poll); };
@@ -1817,11 +1831,11 @@ export default function Home() {
       });
   }, [authChecked, currentUser?.id]);
 
+  // 换库/回主页:上一个入口留下的退出确认面板不该悬在别的页面上。只收起面板(不动焦点),
+  // 已在飞的 DELETE 不受影响(它落地后照样刷新列表并出提示)。
   useEffect(() => {
-    if (!toast) return;
-    const timer = window.setTimeout(() => setToast(""), 2200);
-    return () => window.clearTimeout(timer);
-  }, [toast]);
+    notebookExit.dismiss();
+  }, [currentNotebook?.id, notebookExit.dismiss]);
 
   // Example prompts / placeholders adapt to the open notebook's imported sources,
   // so a new notebook never shows demo examples.
@@ -3067,13 +3081,16 @@ export default function Home() {
     return () => { void presentNotebookDelete(notebookId); notebookCollection.closeMenu(); };
   }
 
-  function leaveMenuNotebook(notebookId: string) {
+  function leaveMenuNotebook(notebookId: string, position: { left: number; top: number }) {
     return () => {
+      // 菜单一点就关,菜单项随之消失;面板以打开菜单的那颗「⋮」为落点(它还在),
+      // 找不到它时才退到菜单原来的位置。
+      const trigger = menuTriggerRef.current;
+      const anchor: ExitAnchor = trigger?.isConnected
+        ? anchorOf(trigger)
+        : anchorAt(position.left, position.top - 8);
       notebookCollection.closeMenu();
-      leaveNotebook(notebookId)
-        .then(() => loadNotebookCollection())
-        .then(() => setToast("已退出只读共享"))
-        .catch(reportError);
+      notebookExit.start(notebookId, anchor, () => loadNotebookCollection());
     };
   }
 
@@ -4470,20 +4487,16 @@ export default function Home() {
     }
   }
 
-  async function handleLeaveShared() {
+  function handleLeaveShared(anchor: ExitAnchor) {
     if (!currentNotebook) return;
-    const leftId = currentNotebook.id;
     const navEpoch = workspaceEpochRef.current;
-    setLeaveBusy(true);
-    try {
-      await leaveNotebook(leftId);
-      // 走同一条收口:重取、请求世代闸、对账都别再抄一份(抄一份就会漏掉其中一道闸——
-      // 这次漏的正是请求世代)。
-      await notebookCollection.refreshAfterAccessChange(navEpoch);
-      setToast("已退出只读共享");
-    } finally {
-      setLeaveBusy(false);
-    }
+    // 退出成功之后走同一条收口:重取、请求世代闸、对账都别再抄一份(抄一份就会漏掉其中
+    // 一道闸——这次漏的正是请求世代)。
+    notebookExit.start(
+      currentNotebook.id,
+      anchor,
+      () => notebookCollection.refreshAfterAccessChange(navEpoch),
+    );
   }
 
   // E. owner「已分享总览」:拉取所有我 owner 且已分享的库 → 打开 modal
@@ -4837,6 +4850,7 @@ export default function Home() {
 
   function openNotebookMenu(notebookId: string, event: MouseEvent<HTMLButtonElement>) {
     event.stopPropagation();
+    menuTriggerRef.current = event.currentTarget;
     notebookCollection.openMenu(notebookId, event.currentTarget.getBoundingClientRect());
   }
 
@@ -5269,8 +5283,8 @@ export default function Home() {
                 {isReader ? (
                   <ReaderNotebookBadge
                     notebook={currentNotebook}
-                    leaveBusy={leaveBusy}
-                    onLeave={() => { handleLeaveShared().catch(reportError); }}
+                    leaveBusy={notebookExit.isBusy(currentNotebook.id)}
+                    onLeave={handleLeaveShared}
                     // 组管理员(can_manage_content)可在顶栏改名(PATCH-only,notebook:manage)。
                     // 徽章按 can_manage_content 才渲染成可编辑;纯只读成员传了也只显示 h1。
                     // 镜像上 canManageNotebook 为假 → 连承接方都不下发,徽章退回只读标题,
@@ -6133,12 +6147,16 @@ export default function Home() {
             // 它们按下去,写死在组件里的「镜像…」就成了一句说谎的话。
             manageDisabledNote={menuNotebookCapabilities.mirrored ? MIRROR_NOTEBOOK_MANAGE_NOTE : ""}
             deleteDisabledNote={menuNotebookCapabilities.mirrored ? MIRROR_NOTEBOOK_DELETE_NOTE : ""}
-            onLeave={leaveMenuNotebook(notebookCollection.menu.notebook.id)}
+            onLeave={leaveMenuNotebook(notebookCollection.menu.notebook.id, notebookCollection.menu.position)}
             onEdit={editMenuNotebook(notebookCollection.menu.notebook.id)}
             onDelete={deleteMenuNotebook(notebookCollection.menu.notebook.id)}
           />
         </div>
       )}
+
+      {/* 「退出共享」的确认面板:顶栏按钮与卡片菜单两个入口共用这一个实例。菜单一点就关,
+          所以面板不能长在菜单里,自己按落点浮在按下的位置旁。 */}
+      <NotebookExitPanel exit={notebookExit} />
 
       {rootModals.view("notebook-share").open && shareModal && currentNotebook && (
         <section className="utility-modal" role="dialog" aria-modal={rootModals.view("notebook-share").topmost} aria-hidden={!rootModals.view("notebook-share").topmost} inert={rootModals.view("notebook-share").topmost ? undefined : true} style={{ zIndex: rootModals.view("notebook-share").zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("notebook-share", "backdrop"); }}>
@@ -7292,7 +7310,7 @@ export default function Home() {
                               <div className="index-sub">{titles.join("、")}{g.count > titles.length ? " 等" : ""}</div>
                             )}
                           </div>
-                          {!readOnlyWorkspace && (
+                          {!readOnlyWorkspace && hasRepairAction(g.fix) && (
                             <div className="index-ctas">
                               {/* extract_kg 走 startKgBuild,删除知识图谱期间它会早退——按钮同口径
                                   禁用(文案仍由 repairing 决定:删除不是这一组的修复在跑)。 */}
@@ -7311,6 +7329,28 @@ export default function Home() {
                         </div>
                       );
                     })}
+                  </div>
+                );
+              })()}
+              {/* 只读体检项(H12 残留的记忆来源):没有修复按钮,只说明现状与由谁处理。紧跟源级
+                  问题,同一种卡片、中性色。*/}
+              {(() => {
+                const notices = checkupNotices(checkup);
+                if (notices.length === 0) return null;
+                return (
+                  <div className="stack" style={{ marginTop: 8 }}>
+                    {notices.map((n) => (
+                      <div className="index-card index-tone-muted" key={n.key}>
+                        <span className="index-ic" aria-hidden="true"><Network size={19} /></span>
+                        <div className="index-main">
+                          <div className="tag-row" style={{ alignItems: "center" }}>
+                            <span className="index-state">{n.label}</span>
+                            {n.unit && <span className="tag">{n.count} {n.unit}</span>}
+                          </div>
+                          <div className="index-sub">{n.detail}</div>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 );
               })()}
@@ -7787,7 +7827,11 @@ export default function Home() {
       )}
 
       <GlobalAskLauncher key={currentUser.id} presentation={rootModals} uiMode={uiMode} openRequest={globalAskRequest} />
-      {toast && <div className="toast">{toast}</div>}
+      <ToastRegion
+        message={toast}
+        lingerMs={toast && toast === exitToast ? TOAST_EXIT_MS : TOAST_DEFAULT_MS}
+        onExpire={expireToast}
+      />
       <PendingToast toast={pending.toast} onClose={() => pending.setToast(null)}
         onClick={() => { if (pending.toast) openDoneItem(pending.toast); }} />
 

@@ -1,9 +1,11 @@
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse, Response
 
 from app.api.deps import (
     get_current_user,
+    memory_membership_service,
     notebook_catalog_repository,
     notebook_question_suggestions_service,
     notebook_access_repository,
@@ -24,6 +26,7 @@ from app.domain.indexing_pipeline import (
     IndexingPipelineUnavailableError,
 )
 from app.models.identity import UserProfile
+from app.models.memory import MemberExitResult, MemoryExitDisclosure
 from app.models.question_suggestions import QuestionSuggestionsResponse
 from app.models.notebooks import (
     MountableNotebook,
@@ -42,6 +45,11 @@ from app.models.notebooks import (
     ShareState,
     SharedByMeItem,
     SharedPreview,
+)
+from app.services.memory_service import (
+    ExitDisclosureRequired,
+    MemberExitFailed,
+    MemberExitIncomplete,
 )
 from app.repositories.ports import (
     KgBuildAlreadyRunning,
@@ -436,7 +444,94 @@ def join_shared_route(token: str, user: UserProfile = Depends(get_current_user))
         raise HTTPException(status_code=404, detail="Shared notebook not found")
 
 
-@router.delete("/notebooks/{notebook_id}/membership", status_code=204)
-def leave_notebook_route(notebook_id: str, user: UserProfile = Depends(get_current_user)) -> None:
-    """退出只读共享:只删自己的成员记录(幂等,不影响他人)。"""
-    notebook_sharing_repository().leave_notebook(notebook_id, user.id)
+@router.get(
+    "/notebooks/{notebook_id}/membership/exit-disclosure",
+    response_model=MemoryExitDisclosure,
+    dependencies=[Depends(require_notebook_read)],
+)
+def membership_exit_disclosure_route(
+    notebook_id: str, user: UserProfile = Depends(get_current_user)
+) -> MemoryExitDisclosure:
+    """退出前告知:退出会永久删除调用者本人在这本库里的多少条记忆(各种状态都算)。
+    不是成员、或退出后仍能凭所有者身份/授权读这本库时为 0。"""
+    return MemoryExitDisclosure(
+        memory_count=memory_membership_service().exit_disclosure(notebook_id, user.id)
+    )
+
+
+_EXIT_RESPONSES: dict = {
+    200: {
+        "model": MemberExitResult,
+        "description": "The exit finished; this request deleted `deleted_memory_count` "
+        "Memories (counted by the server).",
+    },
+    204: {"description": "Nothing to delete: the membership ended (or was already absent)."},
+    409: {
+        "description": "`exit_disclosure_required` `{code, memory_count}`: the "
+        "acknowledgement differs from the count; nothing deleted, membership unchanged. "
+        "`exit_incomplete` `{code, deleted_memory_count, memory_count}`: that many were "
+        "deleted, Memories saved during the exit remain; still a member.",
+    },
+    503: {
+        "description": "`exit_incomplete` `{code, deleted_memory_count, memory_count}`: the "
+        "purge failed part-way; still a member; what was deleted stays deleted; retry is safe.",
+    },
+}
+
+
+def _exit_incomplete(status_code: int, exc: MemberExitIncomplete | MemberExitFailed) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "code": "exit_incomplete",
+            "deleted_memory_count": exc.deleted_memory_count,
+            "memory_count": exc.memory_count,
+        },
+    )
+
+
+@router.delete(
+    "/notebooks/{notebook_id}/membership",
+    status_code=204,
+    response_class=Response,
+    responses=_EXIT_RESPONSES,
+)
+def leave_notebook_route(
+    notebook_id: str,
+    acknowledged_memory_count: Optional[int] = Query(default=None, ge=0),
+    user: UserProfile = Depends(get_current_user),
+) -> Response:
+    """本人退出共享:结束自己的成员关系(幂等,不影响他人)。成员记录是本人读这本库的最后
+    途径时,同时永久删除本人在这本库里的全部记忆及其派生数据。
+
+    服务端在成员行锁下领取此刻要删的记忆,条数 C;`acknowledged_memory_count`(缺省按 0)
+    必须等于 C:
+    - 不等(含 C=0 而确认数大于 0:期间已不是成员、有了授权或把记忆移走了)→ 409
+      `exit_disclosure_required`(带 C),什么都不删、成员关系不变;
+    - C=0 → 204,成员关系结束(或本来就不在),什么都不删;
+    - C>0 且全部删完、收尾成功 → 200 `{"deleted_memory_count": d}`,d 是本次请求实际删除
+      的条数;
+    - 删了 d 条(d>0),但期间又保存了未确认的 r 条 → 409 `exit_incomplete`(带 d、r),
+      仍是成员;
+    - 中途失败 → 503 `exit_incomplete`(带 d、r,d 可以为 0),仍是成员,已删的不会恢复,
+      可以重试(重试从重新告知条数开始)。
+    客户端断开不影响结果:每一步各自提交,下一次告知如实报告剩下的条数。"""
+    try:
+        deleted = memory_membership_service().leave_notebook(
+            notebook_id, user.id, acknowledged_memory_count
+        )
+    except ExitDisclosureRequired as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "exit_disclosure_required", "memory_count": exc.memory_count},
+        )
+    except MemberExitIncomplete as exc:
+        raise _exit_incomplete(409, exc)
+    except MemberExitFailed as exc:
+        raise _exit_incomplete(503, exc)
+    if acknowledged_memory_count:
+        return JSONResponse(
+            status_code=200,
+            content=MemberExitResult(deleted_memory_count=deleted).model_dump(),
+        )
+    return Response(status_code=204)

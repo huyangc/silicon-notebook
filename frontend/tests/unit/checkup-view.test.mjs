@@ -5,6 +5,9 @@ import {
   sourceHealthGroups,
   checkupCount,
   checkupAlertSignature,
+  checkupHasRepairableIssue,
+  checkupNotices,
+  hasRepairAction,
   repairRelease,
   isRepairing,
 } from "../../app/checkup-view.ts";
@@ -70,6 +73,25 @@ test("H6 → 待分析来源 / extract_kg / 篇", () => {
   });
 });
 
+test("H12 不进源级分组,而是只读提示卡(无按钮、中性)", () => {
+  const c = checkup([item("H12", 3, [], "none"), item("H6", 1, [], "extract_kg")]);
+  assert.deepEqual(sourceHealthGroups(c).map((g) => g.key), ["H6"]);
+  assert.deepEqual(checkupNotices(c), [{
+    key: "H12", label: "残留的记忆来源", detail: "系统会在后台自动清理，无需处理。", count: 3, unit: "篇",
+  }]);
+  assert.deepEqual(checkupNotices(checkup([item("H12", 0, [], "none")])), []);
+  assert.deepEqual(checkupNotices(null), []);
+  // 只有 fix="none" 的才当提示卡:同代号带修复动作(不应出现)不展示
+  assert.deepEqual(checkupNotices(checkup([item("H12", 2, [], "reparse")])), []);
+});
+
+test("只读项(fix=none)没有修复按钮,其余都有", () => {
+  assert.equal(hasRepairAction("none"), false);
+  for (const fix of ["reparse", "backfill_vectors", "extract_kg", "fold_index", "rebuild_index"]) {
+    assert.equal(hasRepairAction(fix), true, fix);
+  }
+});
+
 test("H7/H8 是索引级,不进源级分组", () => {
   const c = checkup([
     item("H7", 1, [], "fold_index"),
@@ -105,6 +127,24 @@ test("签名随命中集合变化(新问题/修好)", () => {
   const after = checkup([item("H2", 0), item("H4", 1, [], "backfill_vectors")]);
   assert.notEqual(checkupAlertSignature(before), checkupAlertSignature(after));
   assert.equal(checkupAlertSignature(after), "nb-1:H4");
+});
+
+test("只读项(fix=none)不触发铃铛:没有用户可点的修复", () => {
+  // H12(残留的记忆来源,系统自动清理)命中时 healthy=false,但只有它时不能说
+  // 「发现可修复的问题」。
+  const onlyReadOnly = checkup([item("H2", 0), item("H12", 2, [], "none")]);
+  assert.equal(onlyReadOnly.healthy, false);
+  assert.equal(checkupAlertSignature(onlyReadOnly), null);
+  const mixed = checkup([item("H4", 1, [], "backfill_vectors"), item("H12", 2, [], "none")]);
+  assert.equal(checkupAlertSignature(mixed), "nb-1:H4");
+});
+
+test("只读项不让修复轮询继续:只剩只读项时不再有可修复问题", () => {
+  const onlyReadOnly = checkup([item("H2", 0), item("H12", 3, [], "none")]);
+  assert.equal(onlyReadOnly.healthy, false);
+  assert.equal(checkupHasRepairableIssue(onlyReadOnly), false);
+  assert.equal(checkupHasRepairableIssue(checkup([item("H3", 1, ["s"], "reparse")])), true);
+  assert.equal(checkupHasRepairableIssue(null), false);
 });
 
 // ---- 修复忙碌位的解除条件(repairRelease / isRepairing)----------------------

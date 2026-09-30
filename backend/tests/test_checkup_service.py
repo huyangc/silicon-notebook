@@ -166,7 +166,7 @@ def test_healthy_fresh_notebook(repo):
     result = repo.checkup.run(nb.id)
     assert result.notebook_id == nb.id
     assert result.checked_at
-    assert {c.code for c in result.checks} == {"H2", "H3", "H4", "H5", "H6", "H7", "H8"}
+    assert {c.code for c in result.checks} == {"H2", "H3", "H4", "H5", "H6", "H7", "H8", "H12"}
     assert all(c.count == 0 for c in result.checks)
     assert result.healthy is True
     # fix 枚举逐项钉死(内部契约,前端映射依赖它稳定)。
@@ -179,7 +179,23 @@ def test_healthy_fresh_notebook(repo):
         "H6": "extract_kg",
         "H7": "fold_index",
         "H8": "rebuild_index",
+        "H12": "none",
     }
+
+
+def test_read_only_items_are_reported_but_do_not_make_the_notebook_unhealthy(
+    repo, monkeypatch
+):
+    """H12 (fix="none") has no user repair: it is listed with its count, and
+    ``healthy`` stays true when nothing fixable is hit."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    checkup = repo.checkup
+    monkeypatch.setattr(checkup, "_h12_orphan_memory_sources", lambda notebook_id: 3)
+    result = checkup.run(nb.id)
+    counts = {c.code: c.count for c in result.checks}
+    assert counts["H12"] == 3
+    assert all(count == 0 for code, count in counts.items() if code != "H12")
+    assert result.healthy is True
 
 
 # --------------------------------------------------------------------- H2

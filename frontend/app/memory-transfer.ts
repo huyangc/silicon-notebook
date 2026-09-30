@@ -14,6 +14,34 @@ export type { TransferResult } from "./transfer-model.ts";
 // "failed";move 复制成功但源清理失败 → 该条 status="copied_source_not_removed",
 // ok=false 但 new_id 非空)。调用方用 transfer-model.ts 的
 // summarizeTransferResults() 汇总展示,不要在这里再堆一遍判断逻辑。
+/** 服务端一次最多收 200 个 id(MemoryTransferRequest.memory_ids 的 max_length)。 */
+export const TRANSFER_BATCH_MAX = 200;
+
+/**
+ * 超过 200 条时分批提交,汇总所有批次的逐条结果。某一批整体失败(抛错)不中断后面的批次:
+ * 该批的条数计入 `failed`,第一个抛出的异常留在 `firstFailure`。全部批次都失败时 `results` 为空。
+ */
+export async function transferMemoriesInBatches(
+  memoryIds: readonly string[],
+  targetNotebookId: string,
+  mode: TransferMode,
+  extractKg: boolean,
+): Promise<{ results: TransferResult[]; failed: number; firstFailure: unknown }> {
+  const results: TransferResult[] = [];
+  let failed = 0;
+  let firstFailure: unknown = null;
+  for (let offset = 0; offset < memoryIds.length; offset += TRANSFER_BATCH_MAX) {
+    const batch = memoryIds.slice(offset, offset + TRANSFER_BATCH_MAX);
+    try {
+      results.push(...(await transferMemories(batch, targetNotebookId, mode, extractKg)).results);
+    } catch (thrown) {
+      failed += batch.length;
+      firstFailure ??= thrown;
+    }
+  }
+  return { results, failed, firstFailure };
+}
+
 export const transferMemories = (
   memoryIds: readonly string[],
   targetNotebookId: string,

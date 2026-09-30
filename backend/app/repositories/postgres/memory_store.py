@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from psycopg.errors import DeadlockDetected, SerializationFailure
 
 from app.models.memory import MemoryRevision, MemoryWrite
 from app.models.identity import AgentProfile, AgentTokenAccess, AgentTokenSummary
 from app.models.memory import (
+    MemberExitSnapshot,
     MemoryNotebookOption,
     MemoryRecord,
     PaginatedMemories,
@@ -29,12 +30,19 @@ from app.repositories.postgres._store_utils import (
 from app.repositories.postgres.access_sql import (
     GRANT_PROBE_FOR_SHARE_SQL,
     MEMBER_PROBE_FOR_SHARE_SQL,
+    grant_access_expr,
     grant_probe_params,
     read_access_clause,
     read_access_exists_clause,
     read_access_params,
 )
+from app.repositories.postgres import memory_sql
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.governance_store import GovernanceStore
+from app.repositories.postgres.memory_sql import (
+    memory_derived_object,
+    memory_source_type_predicate,
+)
 from app.repositories.postgres.search import (
     MemoryCandidateScope,
     memory_candidate_ids,
@@ -64,9 +72,41 @@ def _json_list(raw: Any) -> list[str]:
     return [str(item) for item in value] if isinstance(value, list) else []
 
 
+# ``promotion_candidates.reason`` for a proposal withdrawn because its Memory
+# was hard-deleted (single delete, bulk delete, or a member's exit purge).
+MEMORY_DELETED_PROMOTION_REASON = "withdrawn_memory_deleted"
+
+
+def _bulk_memory_ids(memory_ids: Sequence[str]) -> list[str]:
+    """De-duplicated, bounded id list shared by bulk delete and its pre-read."""
+    unique = list(dict.fromkeys(str(m) for m in memory_ids if m))
+    if len(unique) > 200:
+        raise ValueError("memory_ids may contain at most 200 unique values")
+    return unique
+
+
 def _strict_json_value(value: Any, *, field: str) -> Any:
     """Validate application-owned JSON and return a Jsonb-ready value."""
     return json.loads(strict_json_dumps(value, field=field))
+
+
+# 「无主的 Memory 来源」:`source_type` 是 memory,而它指回的 Memory 不再是一条已确认的
+# Memory —— `memory_id` 为 NULL/空(既有的笔记本拷贝清空了它,N-5)、指向的行已不存在
+# (硬删残留)、或指向的行不是 `confirmed`。`orphan_memory_source_ids`、
+# `has_orphan_memory_sources` 与 `orphan_memory_source_count_on` 共用这一段文本,清扫与
+# 体检不可能各说各话。
+#
+# 形状是**可去相关**的单个 `NOT EXISTS`,没有 `OR`:NULL 的 `memory_id` 让 `m.id = s.memory_id`
+# 恒不真,所以 NOT EXISTS 自然成立;空串由子查询里的 `m.id <> ''` 保证(即便存在 id 为空串的
+# Memory 行,空串链接也仍是孤儿)。带 `OR memory_id IS NULL OR memory_id = ''` 的旧写法会
+# 让规划器放弃反连接,在 id 随机的百万级 `sources` 上沿主键整表走一遍并逐个 Memory 来源
+# 做探针(冷缓存 8–26 秒);现在的形状走 Hash Anti Join,见
+# `test_memory_orphan_sweep_explain_pins`。
+_ORPHAN_MEMORY_SOURCE_WHERE = (
+    memory_sql.memory_source_type_predicate("s.source_type")
+    + " AND NOT EXISTS (SELECT 1 FROM memory_items m WHERE m.id = s.memory_id "
+    "AND m.status = 'confirmed' AND m.id <> '')"
+)
 
 
 class MemoryStore:
@@ -1573,11 +1613,8 @@ class MemoryStore:
 
     def delete_memory(self, memory_id: str, user_id: str) -> None:
         with self.database.write() as db:
-            cursor = db.execute(
-                "DELETE FROM memory_items WHERE id=%s AND created_by=%s",
-                (memory_id, user_id),
-            )
-        if cursor.rowcount != 1:
+            deleted = self._hard_delete_on(db, user_id, [memory_id])
+        if len(deleted) != 1:
             raise KeyError(memory_id)
 
     def delete_memory_if_unchanged(
@@ -1665,24 +1702,315 @@ class MemoryStore:
         return cursor.rowcount == 1
 
     def bulk_delete_memories(self, user_id: str, memory_ids: Sequence[str]) -> int:
-        unique = list(dict.fromkeys(str(m) for m in memory_ids if m))
+        unique = _bulk_memory_ids(memory_ids)
         if not unique:
             return 0
-        if len(unique) > 200:
-            raise ValueError("memory_ids may contain at most 200 unique values")
-        placeholders = ",".join("%s" for _ in unique)
         with self.database.write() as db:
-            rows = db.execute(
-                f"SELECT id FROM memory_items WHERE created_by=%s AND id IN ({placeholders})",
-                (user_id, *unique),
-            ).fetchall()
-            ids = [r["id"] for r in rows]
-            execute_many(
-                db,
-                "DELETE FROM memory_items WHERE id=%s AND created_by=%s",
-                [(i, user_id) for i in ids],
+            return len(self._hard_delete_on(db, user_id, unique))
+
+    def _hard_delete_on(
+        self, db: object, user_id: str, memory_ids: Sequence[str]
+    ) -> list[str]:
+        """Delete the caller's own Memory rows and withdraw their live proposals.
+
+        One transaction: lock the rows in id order, reject every still-active
+        promotion proposal pointing at them, then delete them (revisions,
+        provenance and embeddings go with the row through their cascading
+        foreign keys). Locking the Memory rows first gives the same
+        Memory-then-candidate order ``approve_promotion`` uses, and it makes a
+        proposal racing this delete either visible to the withdrawal or fail
+        on the vanished row. Every statement is scoped by owner, notebook and
+        id — the creator condition is enforced here too, not only by the
+        callers that pre-filter. The derived source and KG rows are NOT
+        touched here — ``MemoryService`` removes them first, before this row
+        disappears."""
+        rows = db.execute(
+            "SELECT id,notebook_id FROM memory_items "
+            "WHERE created_by=%s AND id=ANY(%s) ORDER BY id FOR UPDATE",
+            (user_id, list(memory_ids)),
+        ).fetchall()
+        by_notebook: dict[str, list[str]] = {}
+        for row in rows:
+            by_notebook.setdefault(row["notebook_id"], []).append(row["id"])
+        now = self.now()
+        for notebook_id, ids in by_notebook.items():
+            GovernanceStore.withdraw_memory_promotions_on(
+                db, notebook_id, ids, MEMORY_DELETED_PROMOTION_REASON, now
             )
-        return len(ids)
+            db.execute(
+                "DELETE FROM memory_items "
+                "WHERE notebook_id=%s AND created_by=%s AND id=ANY(%s)",
+                (notebook_id, user_id, ids),
+            )
+        return [row["id"] for row in rows]
+
+    def owned_memory_refs(
+        self, user_id: str, memory_ids: Sequence[str]
+    ) -> list[tuple[str, str]]:
+        """``(memory_id, notebook_id)`` of the subset of ``memory_ids`` this
+        user created, whatever their current read access — exactly the rows
+        ``bulk_delete_memories`` would delete, so the service can remove
+        their derived rows first. Same de-duplication and 200-id bound."""
+        unique = _bulk_memory_ids(memory_ids)
+        if not unique:
+            return []
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT id,notebook_id FROM memory_items "
+                "WHERE created_by=%s AND id=ANY(%s) ORDER BY id",
+                (user_id, unique),
+            ).fetchall()
+        return [(row["id"], row["notebook_id"]) for row in rows]
+
+    @staticmethod
+    def _member_exit_state_on(
+        db: object, notebook_id: str, user_id: str, *, lock: bool
+    ) -> tuple[Any, bool]:
+        """``(is_member, keeps_access)`` for one user and notebook.
+
+        ``lock`` takes the membership row ``FOR UPDATE``: every Memory write
+        by a member holds that row ``FOR SHARE`` for its whole transaction
+        (the locked member probe of ``access_sql``), so while it is held no Memory of
+        this member can be created or changed here. ``keeps_access`` is the
+        user's read path WITHOUT the membership row: ownership or any grant
+        (the same ``grant_access_expr`` the read predicate uses)."""
+        member = db.execute(
+            "SELECT added_at FROM notebook_members WHERE notebook_id=%s AND user_id=%s"
+            + (" FOR UPDATE" if lock else ""),
+            (notebook_id, user_id),
+        ).fetchone()
+        grant = grant_access_expr("nb.id", "%s", "xg", "xgm", "xga")
+        access = db.execute(
+            "SELECT COALESCE(nb.created_by=%s, false) OR "
+            f"{grant} AS keeps_access FROM notebooks nb WHERE nb.id=%s",
+            (user_id, *(user_id,) * grant.count("%s"), notebook_id),
+        ).fetchone()
+        return (
+            member["added_at"] if member is not None else None,
+            bool(access and access["keeps_access"]),
+        )
+
+    def member_exit_snapshot(
+        self, notebook_id: str, user_id: str, *, claim: bool
+    ) -> MemberExitSnapshot:
+        """What leaving ``notebook_id`` would delete of ``user_id``'s Memory.
+
+        ``claim=False`` is the disclosure read: counts only. ``claim=True`` is
+        the exit's first step: under the membership row lock (see
+        ``_member_exit_state_on``) it returns the ids to delete, so the count
+        the leaver acknowledged is checked against exactly the rows that will
+        be deleted — a Memory saved after the disclosure changes the count.
+        Every status counts: the exit deletes candidates, rejected and
+        deprecated rows too."""
+        if claim:
+            with self.database.write() as db:
+                token, keeps = self._member_exit_state_on(
+                    db, notebook_id, user_id, lock=True
+                )
+                ids: tuple[str, ...] = ()
+                if token is not None and not keeps:
+                    ids = tuple(
+                        row["id"]
+                        for row in db.execute(
+                            "SELECT id FROM memory_items "
+                            "WHERE notebook_id=%s AND created_by=%s "
+                            "ORDER BY created_at,id",
+                            (notebook_id, user_id),
+                        ).fetchall()
+                    )
+            return MemberExitSnapshot(
+                token is not None, keeps, len(ids), ids, membership_token=token
+            )
+        with self.database.connect() as db:
+            token, keeps = self._member_exit_state_on(
+                db, notebook_id, user_id, lock=False
+            )
+            count = 0
+            if token is not None and not keeps:
+                count = int(db.execute(
+                    "SELECT COUNT(*) AS c FROM memory_items "
+                    "WHERE notebook_id=%s AND created_by=%s",
+                    (notebook_id, user_id),
+                ).fetchone()["c"])
+        return MemberExitSnapshot(token is not None, keeps, count)
+
+    def finish_member_exit(
+        self, notebook_id: str, user_id: str, membership_token: Any
+    ) -> tuple[int, bool]:
+        """End the membership this exit claimed — atomically with the check
+        that none of the leaver's Memory is left.
+
+        One transaction under the membership row lock. Returns
+        ``(remaining, ended)``:
+
+        * the row is gone, or is not the claimed one (its ``added_at`` differs
+          from ``membership_token``: someone removed the member and added
+          them back while the purge ran) → ``(0, False)``: the claimed
+          membership has already ended, and a membership created after it
+          is never touched — nor counted;
+        * the claimed row, and Memory of the leaver exists here (saved while
+          the purge ran) → ``(count, False)``: the membership stays, nothing
+          unacknowledged is ever deleted;
+        * otherwise the row is deleted → ``(0, True)``.
+
+        The row delete lives here, not in the sharing store, because it must
+        commit together with that count."""
+        with self.database.write() as db:
+            member = db.execute(
+                "SELECT added_at FROM notebook_members "
+                "WHERE notebook_id=%s AND user_id=%s FOR UPDATE",
+                (notebook_id, user_id),
+            ).fetchone()
+            if member is None or member["added_at"] != membership_token:
+                return 0, False
+            remaining = int(db.execute(
+                "SELECT COUNT(*) AS c FROM memory_items "
+                "WHERE notebook_id=%s AND created_by=%s",
+                (notebook_id, user_id),
+            ).fetchone()["c"])
+            if remaining:
+                return remaining, False
+            db.execute(
+                "DELETE FROM notebook_members WHERE notebook_id=%s AND user_id=%s",
+                (notebook_id, user_id),
+            )
+        return 0, True
+
+    def derived_memory_sources(
+        self, refs: Sequence[tuple[str, str]]
+    ) -> list[tuple[str, str, str]]:
+        """``(memory_id, source_id, notebook_id)`` of the hidden sources
+        projected from these ``(memory_id, notebook_id)`` refs — one read for
+        a whole page (at most ``_PURGE_PAGE`` ids). Keyed on the ref pairs
+        rather than a join with ``memory_items``, so it also finds a source
+        whose Memory row is already gone (the post-delete sweep for an ingest
+        that finished in between). A Memory without a derived source simply
+        has no row.
+
+        The predicate repeats ``idx_sources_memory_id``'s partial-index
+        condition (``memory_id IS NOT NULL AND memory_id <> ''``): PostgreSQL
+        cannot infer ``memory_id <> ''`` from ``memory_id = ANY($1)``, so
+        without it both the custom and the generic plan scan the whole
+        ``sources`` table (measured 36 ms vs 0.46 ms at 300k rows)."""
+        if not refs:
+            return []
+        wanted = {(memory_id, notebook_id) for memory_id, notebook_id in refs}
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT id,notebook_id,memory_id FROM sources "
+                "WHERE memory_id = ANY(%s) AND memory_id IS NOT NULL "
+                f"AND memory_id <> '' AND {memory_source_type_predicate()} "
+                "ORDER BY id",
+                (sorted({memory_id for memory_id, _ in refs}),),
+            ).fetchall()
+        return [
+            (row["memory_id"], row["id"], row["notebook_id"])
+            for row in rows
+            if (row["memory_id"], row["notebook_id"]) in wanted
+        ]
+
+    def detach_memory_projection_on(
+        self,
+        db: object,
+        sources: Sequence[Mapping[str, Any]],
+        *,
+        bridge_canonical_ids_of: Callable[[list[dict]], list[str]],
+    ) -> dict[str, list[str]]:
+        """The Memory-specific half of a purge page, inside the teardown's
+        transaction (``SourceIngestionService.remove_memory_sources`` calls it
+        after locking ``sources`` — rows of ``{id, notebook_id}`` — and before
+        the generic teardown). Per notebook, in batched statements:
+
+        * strip the sources' evidence from objects ANOTHER source owns
+          (``strip_sources_evidence_on``: one id-ordered lock statement), so
+          the teardown deletes only what the Memory itself minted;
+        * read the sources' own objects (``memory_derived_object``);
+        * remove the whole clusters of those objects and the merge and
+          conflict candidates naming them
+          (``purge_memory_review_rows_on``).
+
+        Returns the own object ids per notebook, for the lexical-index
+        cleanup after the teardown. ``bridge_canonical_ids_of`` maps the
+        objects ``[{object_id, object_type, name}]`` to their bridge canonical
+        ids (``kg_merge.purge_bridge_canonical_ids``); the ids minted from
+        them are derived in SQL."""
+        owned: dict[str, list[str]] = {}
+        by_notebook: dict[str, list[str]] = {}
+        for row in sources:
+            by_notebook.setdefault(row["notebook_id"], []).append(row["id"])
+        now = self.now()
+        for notebook_id in sorted(by_notebook):
+            source_ids = sorted(by_notebook[notebook_id])
+            GovernanceStore.strip_sources_evidence_on(db, notebook_id, source_ids, now)
+            objects = db.execute(
+                "SELECT ko.id,ko.object_type,ko.payload->>'name' AS name "
+                "FROM knowledge_objects ko "
+                "WHERE ko.notebook_id=%s AND ko.source_id = ANY(%s) "
+                f"AND {memory_derived_object('ko')} ORDER BY ko.id",
+                (notebook_id, source_ids),
+            ).fetchall()
+            object_ids = [row["id"] for row in objects]
+            bridge = bridge_canonical_ids_of([
+                {"object_id": row["id"], "object_type": row["object_type"],
+                 "name": row["name"] or ""}
+                for row in objects
+            ])
+            GovernanceStore.purge_memory_review_rows_on(
+                db,
+                notebook_id,
+                source_ids,
+                bridge_canonical_ids=bridge,
+            )
+            owned[notebook_id] = object_ids
+        return owned
+
+    @staticmethod
+    def drop_memory_lexical_rows_on(
+        db: object, owned_objects: Mapping[str, Sequence[str]] | None
+    ) -> int:
+        """PostgreSQL searches ``knowledge_objects`` itself; there is no
+        separate lexical-index table to clean (see the SQLite twin)."""
+        return 0
+
+    def memory_export_page(
+        self,
+        notebook_id: str,
+        user_id: str,
+        *,
+        after: tuple[Any, str] | None,
+        limit: int,
+    ) -> tuple[list[MemoryRecord], tuple[Any, str] | None]:
+        """One keyset page of this user's own Memory in one notebook, oldest
+        first (``created_at``, then id), every status — the export's reader.
+
+        Read-gated like every Memory read, owner-scoped like every Memory
+        row. Returns the records and the cursor for the next page (``None``
+        when this page was the last); the cursor carries the raw column
+        value, so no timestamp formatting can skip or repeat a row."""
+        page = max(1, min(int(limit), 500))
+        clauses = [
+            "m.notebook_id=%s",
+            "m.created_by=%s",
+            self._read_access_clause(),
+        ]
+        params: list[Any] = [notebook_id, user_id, *read_access_params(user_id)]
+        if after is not None:
+            clauses.append("(m.created_at,m.id)>(%s,%s)")
+            params.extend(after)
+        with self.database.connect() as db:
+            rows = db.execute(
+                f"SELECT {self._select_columns()},m.created_at AS cursor_created_at "
+                "FROM memory_items m LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+                f"WHERE {' AND '.join(clauses)} "
+                "ORDER BY m.created_at,m.id LIMIT %s",
+                (*params, page + 1),
+            ).fetchall()
+        more = len(rows) > page
+        rows = rows[:page]
+        cursor = (
+            (rows[-1]["cursor_created_at"], rows[-1]["id"]) if more and rows else None
+        )
+        return [self._record(row) for row in rows], cursor
 
     def list_memories(
         self,
@@ -2049,3 +2377,51 @@ class MemoryStore:
             "SELECT embedding_status FROM memory_items WHERE id=%s FOR SHARE",
             (source_memory_id,),
         ).fetchone()
+
+    def has_orphan_memory_sources(self) -> bool:
+        """是否存在至少一个无主 Memory 来源(启动探测;`EXISTS`,不排序,首个命中即停)。"""
+        with self.database.connect() as db:
+            row = db.execute(
+                f"SELECT EXISTS (SELECT 1 FROM sources s WHERE {_ORPHAN_MEMORY_SOURCE_WHERE}) AS found"
+            ).fetchone()
+        return bool(row["found"])
+
+    def orphan_memory_source_ids(self, limit: int, after_id: str = "") -> list[str]:
+        """`orphan_memory_source_refs` 的 id 一列(同一条语句)。"""
+        return [source_id for source_id, _ in self.orphan_memory_source_refs(limit, after_id)]
+
+    def orphan_memory_source_refs(
+        self, limit: int, after_id: str = ""
+    ) -> list[tuple[str, str]]:
+        """至多 `limit` 个无主 Memory 来源的 `(id, notebook_id)`,按 id 升序,只取 `after_id`
+        之后的(键集分页)。清扫按 `notebook_id` 把一页切成同库的批,一次移除只涉及一个笔记本。
+
+        全库读(清扫在启动后一次跑完,不属于任何笔记本)。反连接放进 MATERIALIZED CTE、
+        再对结果(只有孤儿行,数量以 Memory 来源数为界)排序取前 `limit` 个:CTE 阻止
+        规划器为了 `ORDER BY s.id LIMIT` 去沿主键整表走一遍。`sources` 上没有单独的
+        `source_type` 索引,所以反连接对 `sources` 是整表一趟;清扫每页至多再来一趟,页数
+        由 `limit` 决定但不改变结果。实测数字与计划见 `test_memory_orphan_sweep_explain_pins`
+        和 docs/operations.md。
+        """
+        with self.database.connect() as db:
+            rows = db.execute(
+                "WITH o AS MATERIALIZED (SELECT s.id, s.notebook_id FROM sources s "
+                f"WHERE {_ORPHAN_MEMORY_SOURCE_WHERE} AND s.id > %s) "
+                "SELECT id, notebook_id FROM o ORDER BY id LIMIT %s",
+                (after_id, max(1, int(limit))),
+            ).fetchall()
+        return [(str(row["id"]), str(row["notebook_id"])) for row in rows]
+
+    @staticmethod
+    def orphan_memory_source_count_on(db: object, notebook_id: str) -> int:
+        """本笔记本里仍在的无主 Memory 来源数(体检只读项;搭调用方的读快照)。
+
+        先按 `(notebook_id, source_type)` 索引限到本库的 Memory 来源(数量以本库
+        已确认 Memory 为界),再逐行判无主。
+        """
+        row = db.execute(
+            "SELECT count(*) AS n FROM sources s "
+            f"WHERE s.notebook_id = %s AND {_ORPHAN_MEMORY_SOURCE_WHERE}",
+            (notebook_id,),
+        ).fetchone()
+        return int(row["n"])

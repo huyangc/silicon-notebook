@@ -164,6 +164,40 @@ federates several times at once); a widened scope therefore costs connections, n
 A global run uses the engine's own retrieval-run kinds (`ask_chunk` / `ask_reasoning`) rather than a
 category of its own, and a large participant's leg never cold-loads a shared whole-library index.
 
+## Ownerless Memory sources
+
+After the service reports ready, every server start runs one background pass (job name
+`memory-orphan-sweep`) that deletes Memory-derived sources whose Memory is gone: a source whose
+`memory_id` is NULL or empty (left by notebook copies made before copies stopped carrying Memory), or
+whose `memory_id` points at a row that is missing or not `confirmed` (residue of a hard delete). They go
+through the same Memory-source removal as a member's exit or a hard delete, in calls of at most 200
+sources of one notebook (a page is split by notebook, so one call's transaction touches one notebook): the orphan's evidence is stripped from any shared object it was merged into (the shared object
+stays), every concept cluster one of its objects belongs to or was minted from goes whole together with
+the review candidates naming it, and its elements, element/object/relation vectors, knowledge objects and
+relations, facts, cluster members, extraction runs and any chunk rows go with it; the notebook is marked
+for a knowledge-graph rebuild. The pass never calls a model. A start with nothing to sweep runs no job and
+writes no event.
+
+The events carry identifiers and counts only: `memory_orphan_sweep_started`;
+`memory_orphan_sweep_failed` with `source_id` and `error_class` for one source that could not be deleted;
+`memory_orphan_sweep_completed` with `deleted`, `gone` (removed by another writer between the read and the
+removal: a call's sources minus what it removed) and `failed`. A call that fails is retried one source at a
+time, so one failing source never holds back the others; any error of that source counts as `failed`,
+including a refusal because it is not a Memory source (the orphan query never returns one). A failed
+source is skipped and retried at the next start; three failed sources in a row end the pass and leave the
+rest for the next start. A read of the orphan list that fails (for example a statement timeout) emits `memory_orphan_sweep_failed` with `error_class` only and ends the pass the same way. There is no progress marker: the orphans themselves
+are the queue, read in id order 1,000 at a time (the page size only bounds one statement, never the
+outcome).
+
+To confirm completion, `SELECT count(*) FROM sources s WHERE s.source_type = 'memory' AND
+NOT EXISTS (SELECT 1 FROM memory_items m WHERE m.id = s.memory_id AND m.status = 'confirmed' AND
+m.id <> '')` should return 0 after a clean start; checkup item `H12`
+(read-only, repair action `none`) reports the same count for one notebook. The probe is one pass over
+`sources` per page. Measured on PostgreSQL 16 with 1,000,000 sources (300,000 of them Memory sources, random ids, 320,000 Memory items, machine load average about 45): the startup probe (`EXISTS`, zero orphans) 1.7 s, one page of the read 0.5 s (200 rows) to 0.7 s (1,000 rows) with no orphans and 1.5 s when 5,000 orphans exist, checkup's per-notebook count 28 ms; the earlier spelling with `OR` walked `sources` by primary key and needed 59 s for the probe. The predicate is deliberately one decorrelatable `NOT EXISTS` (no `OR`) so the planner uses an anti join. Every deletion also redacts the notebook's retained model-output diagnostics, once per orphan source, exactly as any source deletion does, so a sweep quietly clears those diagnostics for the affected notebooks. `H12` is a count only: it names no source, owner or content. On SQLite
+the removal also drops the `kg_objects_fts` rows of the deleted objects (the Memory removal does, unlike an
+ordinary source deletion); `chunks_fts` keeps its rows for deleted chunks, exactly as after any other
+source deletion (a Memory source normally has no chunks).
+
 ## Observability
 
 The backend emits structured logs through a single `EventLogger` (`app/core/event_logging.py`): one JSONL line per event under `.local/logs/` plus a brief console line. Logging is best-effort — it never breaks the request or pipeline it observes — and is a no-op for the LLM channel when no model is configured.

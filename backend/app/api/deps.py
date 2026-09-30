@@ -963,3 +963,15 @@ def model_service_binding_summary() -> dict[str, bool]:
         "reasoning_llm_configured": models.configured("reasoning_agent"),
         "embedding_configured": models.configured("retrieval_query_embedding"),
     }
+
+
+from app.services.memory_service import MemoryService  # noqa: E402
+
+
+def memory_membership_service() -> MemoryService:
+    """The member's own exit and its Memory export (exit disclosure, the
+    acknowledged exit that deletes the leaver's Memory, the Markdown export).
+    These are ``MemoryService`` use cases the frozen facade surface does not
+    carry, so the route reaches the runtime seat directly — the same way
+    ``notebook_delete_repository`` does."""
+    return repository()._runtime.memory_service  # type: ignore[attr-defined]

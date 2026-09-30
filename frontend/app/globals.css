@@ -8020,6 +8020,55 @@ button.tag:hover {
   color: #ba2d2d;
 }
 
+/* 「退出共享」确认面板(notebook-exit-panel.tsx)。fixed 浮层,落点跟着入口控件走
+   (顶栏按钮/卡片的「⋮」的正下方,放不下翻到上方,四边夹在视口内),不推动任何内容。z-index 高于卡片菜单
+   (30)、低于目标笔记本选择器(80)与 toast(90),所以「转移到其他笔记本」打开的选择器
+   永远盖在它上面。 */
+.notebook-exit-panel {
+  position: fixed;
+  /* 真实落点由 notebook-exit-panel.tsx 量入口后直接写 left/top;这两个只是首帧兜底。 */
+  left: 8px;
+  top: 8px;
+  z-index: 70;
+  box-sizing: border-box;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  width: min(360px, calc(100vw - 16px));
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid #d8dee8;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 18px 50px rgba(24, 39, 75, 0.18);
+}
+
+.notebook-exit-panel p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #22272e;
+}
+
+.notebook-exit-panel .notebook-exit-lead {
+  font-weight: 600;
+}
+
+.notebook-exit-panel .notebook-exit-hint {
+  color: var(--muted);
+}
+
+.notebook-exit-panel .notebook-exit-error {
+  color: var(--danger);
+}
+
+.notebook-exit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .source-modal {
   position: fixed;
   inset: 0;

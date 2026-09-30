@@ -2607,10 +2607,10 @@ class KnowledgeLifecycleService:
         ``place_new_concepts`` 的既有差异,本 PR 不改)。这些 id 是排除集查询的
         有界键——凡是会被判 ``frozenset((a, b)) in exclude`` 的对,``a``/``b``
         必有一个出自这里。"""
-        from app.services.kg_merge import _norm, seed_or_unique
+        from app.services.kg_merge import bridge_canonical_id
 
         return list(dict.fromkeys(
-            "K-" + seed_or_unique(_norm(o.get("name", "")), o["object_id"])
+            bridge_canonical_id(o.get("name", ""), o["object_id"])
             for o in new_objs
         ))
 
@@ -2820,11 +2820,11 @@ class KnowledgeLifecycleService:
                         canonical_of[i] = folded.get(i, "")
 
         for oid, qvec in new_vecs.items():
-            from app.services.kg_merge import _norm, seed_or_unique
+            from app.services.kg_merge import bridge_canonical_id
             # 与 kg_merge.detect_bridge_candidates 一致的空 seed 守卫:符号-only 名
             # (_norm→"")绝不塌缩成裸 "K-"——否则该退化 canonical 会被写进
             # concept_merge_candidates,与真实簇(K-~oid)错位且互相污染。
-            my_cid = "K-" + seed_or_unique(_norm(name_by_obj.get(oid, "")), oid)
+            my_cid = bridge_canonical_id(name_by_obj.get(oid, ""), oid)
             q = np.asarray(qvec, dtype=np.float32)
             k = min(max(topk * pad_factor, topk + 1), n_labels)
             eligible: list = []  # [(node_id, canonical_id, sim)] — alive concepts, not self

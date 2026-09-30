@@ -25,6 +25,16 @@ from app.repositories.postgres._store_utils import (
 from app.repositories.postgres.cluster_lock import lock_cluster_artifact_type
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.knowledge_store import KnowledgeStore
+from app.repositories.postgres.memory_sql import (
+    cluster_seed_object_id,
+    memory_derived_object,
+    memory_derived_relation,
+)
+from app.repositories.postgres.id_binding import (
+    bind_ids as id_bind_ids,
+    execute_ids as id_execute_ids,
+    member_of as id_member_of,
+)
 from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER
 from app.domain.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
@@ -1695,6 +1705,226 @@ class GovernanceStore:
             "WHERE id=%s",
             (reason, reviewer_id, normalize_timestamp(now), candidate_id),
         )
+
+    @staticmethod
+    def withdraw_memory_promotions_on(
+        connection: Any,
+        notebook_id: str,
+        memory_ids: List[str],
+        reason: str,
+        now: str,
+    ) -> int:
+        """Reject the still-active proposals of Memory rows the caller is
+        about to hard-delete, inside the caller's delete transaction.
+
+        ``promotion_candidates.object_id`` has no foreign key to
+        ``memory_items``: a proposal outliving its Memory stays in the curator
+        queue forever and can never be approved (the pinned snapshot is gone).
+        Withdrawal is ``status='rejected'`` because the queue has no other
+        terminal state for "never reviewed"; an already approved proposal is
+        left alone — its base object is independent of the Memory row. A
+        withdrawal is not a review: ``reviewed_by`` is left empty (no
+        reviewer acted) and ``reason`` carries the machine code. The curator
+        queue lists only active proposals, and no UI renders ``reason``.
+
+        Scoped by notebook AND the Memory ids; the caller already holds the
+        Memory rows ``FOR UPDATE`` (same Memory-then-candidate lock order as
+        ``approve_promotion`` / ``reject_promotion``), so a concurrent
+        proposal either committed before this statement or fails on the
+        missing row afterwards."""
+        if not memory_ids:
+            return 0
+        cursor = connection.execute(
+            "UPDATE promotion_candidates "
+            "SET status='rejected', reason=%s, reviewed_by='', updated_at=%s "
+            "WHERE notebook_id=%s AND object_type='memory' AND object_id=ANY(%s) "
+            "AND status IN ('proposed','under_review')",
+            (
+                reason,
+                normalize_timestamp(now),
+                notebook_id,
+                list(memory_ids),
+            ),
+        )
+        return int(cursor.rowcount or 0)
+
+    @staticmethod
+    def purge_memory_review_rows_on(
+        connection: Any,
+        notebook_id: str,
+        source_ids: List[str],
+        *,
+        bridge_canonical_ids: List[str],
+    ) -> int:
+        """Remove what names the objects of Memory sources about to be torn
+        down, in the caller's transaction (before the objects go):
+
+        1. the merge candidates (any status) naming a cluster that contains
+           one of those objects, or naming a canonical id minted from one of
+           them (``memory_sql.cluster_seed_object_id`` — the one minted-id
+           rule the copy uses too), or
+           naming a bridge canonical id of one of them
+           (``bridge_canonical_ids``) that no cluster row carries — a name
+           only the Memory gave; a live cluster carrying the same bridge id
+           keeps its candidates;
+        2. every such cluster WHOLE — every generation, all member rows: its
+           canonical id, name and description may carry the Memory's text on
+           every shared member's row (plan §3 step 3; the teardown marks the
+           notebook dirty, so the rebuild re-clusters the surviving members);
+        3. the conflict candidates (any status: ``rationale`` and
+           ``resolved_payload`` may quote the Memory) whose left, right or
+           winner reference is one of the objects or relations. A candidate
+           between shared objects only is never touched: its references are
+           shared object or relation ids.
+
+        "Object of a Memory source" is ``memory_sql``'s
+        ``memory_derived_object`` over the given sources; "a cluster of a
+        Memory" is a cluster with such a member or seeded by such an object —
+        the member and seed arms of ``memory_sql.memory_cluster``, restricted
+        to the purged objects. Every list that grows with the KG is
+        derived in SQL from the owned-objects subquery; the source ids are one
+        purge page (at most 200) and the bridge ids go through ``id_binding``.
+        Returns the number of cluster rows removed."""
+        ids = sorted(set(source_ids))
+        if not ids:
+            return 0
+        owned = (
+            "owned AS (SELECT ko.id FROM knowledge_objects ko "
+            "WHERE ko.notebook_id = %s AND ko.source_id = ANY(%s) "
+            f"AND {memory_derived_object('ko')})"
+        )
+        doomed = (
+            "SELECT mc.canonical_id FROM concept_clusters mc WHERE mc.notebook_id = %s "
+            "AND (mc.member_object_id IN (SELECT id FROM owned) "
+            f"OR {cluster_seed_object_id('mc')} IN (SELECT id FROM owned))"
+        )
+        bridge = id_bind_ids(sorted(set(bridge_canonical_ids)))
+        id_execute_ids(
+            connection,
+            f"WITH {owned}, doomed AS ({doomed}) "
+            "DELETE FROM concept_merge_candidates m WHERE m.notebook_id = %s AND ("
+            "m.canonical_a IN (SELECT canonical_id FROM doomed) "
+            "OR m.canonical_b IN (SELECT canonical_id FROM doomed) "
+            f"OR {cluster_seed_object_id('m', 'canonical_a')} IN (SELECT id FROM owned) "
+            f"OR {cluster_seed_object_id('m', 'canonical_b')} IN (SELECT id FROM owned) "
+            f"OR ({id_member_of('m.canonical_a', bridge)} AND NOT EXISTS ("
+            "SELECT 1 FROM concept_clusters xa WHERE xa.notebook_id = m.notebook_id "
+            "AND xa.canonical_id = m.canonical_a)) "
+            f"OR ({id_member_of('m.canonical_b', bridge)} AND NOT EXISTS ("
+            "SELECT 1 FROM concept_clusters xb WHERE xb.notebook_id = m.notebook_id "
+            "AND xb.canonical_id = m.canonical_b)))",
+            (notebook_id, ids, notebook_id, notebook_id, bridge.param, bridge.param),
+        )
+        removed = connection.execute(
+            f"WITH {owned} DELETE FROM concept_clusters c WHERE c.notebook_id = %s "
+            f"AND c.canonical_id IN ({doomed})",
+            (notebook_id, ids, notebook_id, notebook_id),
+        ).rowcount
+        connection.execute(
+            "WITH refs AS (SELECT ko.id FROM knowledge_objects ko "
+            "WHERE ko.notebook_id = %s AND ko.source_id = ANY(%s) "
+            f"AND {memory_derived_object('ko')} UNION ALL "
+            "SELECT kr.id FROM knowledge_relations kr "
+            "WHERE kr.notebook_id = %s AND kr.source_id = ANY(%s) "
+            f"AND {memory_derived_relation('kr')}) "
+            "DELETE FROM kg_conflict_candidates c WHERE c.notebook_id = %s "
+            "AND (c.left_ref IN (SELECT id FROM refs) "
+            "OR c.right_ref IN (SELECT id FROM refs) "
+            "OR c.winner_ref IN (SELECT id FROM refs))",
+            (notebook_id, ids, notebook_id, ids, notebook_id),
+        )
+        return int(removed or 0)
+
+    @staticmethod
+    def strip_sources_evidence_on(
+        connection: Any, notebook_id: str, source_ids: List[str], now: str
+    ) -> List[str]:
+        """Detach several sources' evidence from the objects ANOTHER source
+        owns, in the caller's transaction.
+
+        Deleting a source removes every object whose evidence references it
+        (``clear_sources_graph_state``). For an object minted by that source
+        this is right; for an object minted by a different source that merely
+        gained this source's evidence (a manual ``merge_knowledge`` of a
+        Memory-derived object into a shared one), it deletes the shared
+        object with everything its own source contributed. Run this first
+        and the teardown that follows only reaches the rows these sources
+        minted: the foreign object keeps its payload and its other evidence,
+        and loses exactly the items citing one of ``source_ids``.
+
+        "Owned" is the object's primary ``source_id`` column. The candidate
+        lookup mirrors the teardown's (reverse index when backfilled,
+        evidence containment per source otherwise). Every foreign object is
+        then locked in ONE statement, in id order: two members leaving at
+        once whose objects were merged into the same shared objects take
+        those row locks in the same global order, so they queue instead of
+        deadlocking. Writes are scoped by ``notebook_id``. Returns the
+        stripped object ids."""
+        ids = sorted(set(source_ids))
+        if not ids:
+            return []
+        if KnowledgeStore.source_index_backfilled(connection, notebook_id):
+            rows = connection.execute(
+                "SELECT ko.id, ko.evidence FROM knowledge_objects ko "
+                "WHERE ko.notebook_id = %s "
+                "AND (ko.source_id IS NULL OR ko.source_id <> ALL(%s)) "
+                "AND ko.id IN (SELECT kos.object_id FROM knowledge_object_sources kos "
+                "WHERE kos.source_id = ANY(%s) AND kos.notebook_id = %s) "
+                "ORDER BY ko.id COLLATE \"C\" FOR UPDATE OF ko",
+                (notebook_id, ids, ids, notebook_id),
+            ).fetchall()
+        else:
+            candidates: set[str] = set()
+            for source_id in ids:
+                candidates.update(
+                    row["id"]
+                    for row in connection.execute(
+                        "SELECT id FROM knowledge_objects "
+                        "WHERE notebook_id = %s AND source_id IS DISTINCT FROM %s "
+                        "AND evidence @> jsonb_build_array("
+                        "jsonb_build_object('source_id', %s::text))",
+                        (notebook_id, source_id, source_id),
+                    ).fetchall()
+                )
+            found = id_bind_ids(sorted(candidates))
+            rows = id_execute_ids(
+                connection,
+                "SELECT id, evidence FROM knowledge_objects "
+                f"WHERE notebook_id = %s AND {id_member_of('id', found)} "
+                "AND (source_id IS NULL OR source_id <> ALL(%s)) "
+                "ORDER BY id COLLATE \"C\" FOR UPDATE",
+                (notebook_id, found.param, ids),
+            ).fetchall() if candidates else []
+        wanted = set(ids)
+        stripped: List[str] = []
+        for row in rows:
+            kept = [
+                item
+                for item in json_value(row["evidence"], [])
+                if not (isinstance(item, dict) and item.get("source_id") in wanted)
+            ]
+            connection.execute(
+                "UPDATE knowledge_objects SET evidence = %s, updated_at = %s "
+                "WHERE id = %s AND notebook_id = %s",
+                (
+                    jsonb(_json_document(
+                        kept, expected=list, field="knowledge evidence"
+                    )),
+                    normalize_timestamp(now),
+                    row["id"],
+                    notebook_id,
+                ),
+            )
+            stripped.append(row["id"])
+        if stripped:
+            objects = id_bind_ids(stripped)
+            id_execute_ids(
+                connection,
+                "DELETE FROM knowledge_object_sources WHERE notebook_id = %s "
+                f"AND {id_member_of('object_id', objects)} AND source_id = ANY(%s)",
+                (notebook_id, objects.param, ids),
+            )
+        return stripped
 
     # -------------------------------------------------- knowledge mutation
     @staticmethod

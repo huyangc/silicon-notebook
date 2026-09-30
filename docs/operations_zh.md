@@ -123,6 +123,38 @@ run 直接抛出取消，两个事件都不发。改动之前被旧复核整份�
 全局 run 使用引擎自己的 retrieval-run 类别（`ask_chunk` / `ask_reasoning`），不再有独立类别；
 大参与库那一腿不冷加载共享整库索引。
 
+## 无主 Memory 来源
+
+服务就绪之后，每次服务启动都会跑一次后台清扫（作业名 `memory-orphan-sweep`），删除 Memory 已不存在的
+Memory 派生来源：`memory_id` 为 NULL 或空的来源（在拷贝不再携带 Memory 之前做的 notebook 拷贝留下的），
+或 `memory_id` 指向的行不存在或不是 `confirmed` 的来源（硬删除的残留）。它们与成员退出、硬删除走同一条
+Memory 来源移除，每次至多 200 个同一 notebook 的来源（一页按 notebook 切分，一次调用的事务只涉及一个
+notebook）：无主来源合并进共享对象的证据被剥掉（共享对象保留），它的对象所在的、
+或 canonical id 铸自它的对象的每个概念簇整簇删除，点名这些簇的审阅候选一并删除；它的元素、元素/对象/关系
+向量、知识对象与关系、事实、簇成员、抽取记录以及任何 chunk 行随之一起删除，该 notebook 标记为待重建知识图谱。
+清扫从不调用模型。启动时没有可清的就不起作业、也不写事件。
+
+事件只带标识符与计数：`memory_orphan_sweep_started`；某个来源删除失败时的 `memory_orphan_sweep_failed`
+（带 `source_id` 与 `error_class`）；`memory_orphan_sweep_completed`，带 `deleted`、`gone`（在读取与
+移除之间被别的写者删掉：一次调用的来源数减去它实际移除的数）和 `failed`。一次调用失败时逐个来源重试，
+一个失败的来源不会拖住其余来源；该来源的任何错误都记为 `failed`，包括因为它不是 Memory 来源而被拒绝
+（无主查询从不返回这种来源）。失败的来源被跳过、下次启动重试；连续三个来源失败会结束这一轮，其余的
+留到下次启动。读取无主清单本身失败（例如语句超时）时，同样发一条只带 `error_class` 的
+`memory_orphan_sweep_failed` 并结束这一轮。没有进度标记：无主来源本身就是队列，按 id 顺序每次读 1000 个（页大小只界定单条语句的
+结果，从不改变最终结果）。
+
+确认完成：干净启动之后，`SELECT count(*) FROM sources s WHERE s.source_type = 'memory' AND
+NOT EXISTS (SELECT 1 FROM memory_items m WHERE m.id = s.memory_id AND m.status = 'confirmed' AND
+m.id <> '')` 应返回 0；体检项 `H12`（只读，修复动作 `none`）给出单个
+notebook 的同一数字。探测每页对 `sources` 扫一遍。PostgreSQL 16 上的实测（100 万个 sources，其中 30 万个是 Memory 来源，
+id 随机，32 万条 Memory，机器负载均值约 45）：启动探测（`EXISTS`，零无主）1.7 秒；读取一页在零无主时
+0.5 秒（200 行）到 0.7 秒（1000 行），存在 5000 个无主时 1.5 秒；体检单库计数 28 毫秒；而此前带 `OR` 的写法
+会沿主键整表走一遍，探测就要 59 秒。谓词特意写成一个可去相关的 `NOT EXISTS`（不带 `OR`），让规划器走反连接。
+每次删除还会脱敏该 notebook 保留的模型输出诊断件（每个无主来源一次），与任何来源删除完全一样，所以清扫会
+悄悄清掉受影响 notebook 的这些诊断件。`H12` 只有数量：不指出任何来源、属主或内容。在 SQLite 上，移除还会删掉已删对象在 `kg_objects_fts` 里的行
+（Memory 来源移除会删，普通来源删除不删）；`chunks_fts` 会保留已删 chunk 的行，与任何其它来源删除之后的情形
+完全一样（Memory 来源通常没有 chunk）。
+
 ## 可观测性 / 日志
 
 后端通过统一的 `EventLogger`（`app/core/event_logging.py`）输出结构化日志：每条事件一行 JSONL 写入 `.local/logs/`，并附控制台简要行。写日志是 best-effort，绝不影响它所观测的请求或管线；未配置模型时 LLM 通道为 no-op。

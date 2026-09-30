@@ -469,7 +469,12 @@ def test_deprecate_transition_and_approval_race_is_atomic(repo, promotion_setup)
         assert approval_result[0] == "approved"
 
 
-def test_admin_approval_fails_closed_after_member_loses_notebook_access(repo):
+def _shared_member_proposal(repo, *, via_grant: bool):
+    """A member-owned confirmed Memory, proposed into a mounted base.
+
+    ``via_grant`` gives the member read access through a direct user grant
+    instead of a membership row, so the access can be REVOKED without the
+    member leaving (a revocation keeps the Memory; an exit deletes it)."""
     notebook_owner = repo.create_user("s00108004", "pw")
     memory_owner = repo.create_user("t00108005", "pw")
     token = set_request_user(notebook_owner)
@@ -480,7 +485,16 @@ def test_admin_approval_fails_closed_after_member_loses_notebook_access(repo):
     base = repo.create_notebook(NotebookCreate(name="Shared promotion base"))
     repo.mark_notebook_base(base.id)
     repo.replace_notebook_bases(notebook.id, [base.id], notebook_owner.id)
-    repo.add_member(notebook.id, memory_owner.id)
+    if via_grant:
+        with repo._write() as db:
+            db.execute(
+                "INSERT INTO notebook_grants "
+                "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+                "VALUES ('gnt-member',?,'user',?,'reader',?,'t')",
+                (notebook.id, memory_owner.id, notebook_owner.id),
+            )
+    else:
+        repo.add_member(notebook.id, memory_owner.id)
     memory = repo.create_memory_candidate(
         notebook.id,
         memory_owner.id,
@@ -495,6 +509,19 @@ def test_admin_approval_fails_closed_after_member_loses_notebook_access(repo):
     )
     memory = repo.confirm_memory(memory.id, memory_owner.id)
     proposal = repo.propose_memory_promotion(memory.id, memory_owner.id)
+    return notebook, base, memory_owner, memory, proposal
+
+
+@pytest.mark.parametrize("access_loss", ["owner_removes_member", "grant_revoked"])
+def test_admin_approval_fails_closed_after_member_loses_notebook_access(
+    repo, access_loss
+):
+    """The OWNER removing the member, or a revoked grant: both take access
+    away without deleting anything, so the Memory and its proposal stay, and
+    approval fails closed while the creator cannot read the notebook."""
+    notebook, base, memory_owner, memory, proposal = _shared_member_proposal(
+        repo, via_grant=access_loss == "grant_revoked"
+    )
     with repo._connect() as db:
         before_revision_count = db.execute(
             "SELECT COUNT(*) AS c FROM memory_revisions WHERE memory_id=?",
@@ -505,7 +532,11 @@ def test_admin_approval_fails_closed_after_member_loses_notebook_access(repo):
             (memory.id,),
         ).fetchone()["payload_json"]
 
-    repo.remove_member(notebook.id, memory_owner.id)
+    if access_loss == "owner_removes_member":
+        repo.remove_member(notebook.id, memory_owner.id)
+    else:
+        with repo._write() as db:
+            db.execute("DELETE FROM notebook_grants WHERE id='gnt-member'")
     with pytest.raises(PermissionError):
         repo.approve_promotion(proposal["id"])
 
@@ -539,6 +570,54 @@ def test_admin_approval_fails_closed_after_member_loses_notebook_access(repo):
     assert revision_count == before_revision_count
     assert provenance == before_provenance
     assert base_count == 0
+
+
+def test_member_exit_withdraws_the_proposal_and_the_memory_never_returns(repo):
+    """The member's own acknowledged exit deletes their Memory: its proposal
+    is withdrawn (not orphaned in the curator queue, no reviewer recorded)
+    and rejoining does not bring it back."""
+    notebook, base, memory_owner, memory, proposal = _shared_member_proposal(
+        repo, via_grant=False
+    )
+
+    repo._runtime.memory_service.leave_notebook(notebook.id, memory_owner.id, 1)
+    with pytest.raises(KeyError):  # the Memory it pinned no longer exists
+        repo.approve_promotion(proposal["id"])
+
+    with repo._connect() as db:
+        promotion = dict(db.execute(
+            "SELECT status,reason,reviewed_by FROM promotion_candidates WHERE id=?",
+            (proposal["id"],),
+        ).fetchone())
+        remaining = {
+            table: db.execute(
+                f"SELECT COUNT(*) AS c FROM {table} WHERE {column}=?", (memory.id,)
+            ).fetchone()["c"]
+            for table, column in (
+                ("memory_items", "id"),
+                ("memory_revisions", "memory_id"),
+                ("memory_provenance", "memory_id"),
+            )
+        }
+        base_count = db.execute(
+            "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=?",
+            (base.id,),
+        ).fetchone()["c"]
+    assert promotion == {
+        "status": "rejected",
+        "reason": "withdrawn_memory_deleted",
+        "reviewed_by": "",
+    }
+    assert remaining == {
+        "memory_items": 0, "memory_revisions": 0, "memory_provenance": 0,
+    }
+    assert base_count == 0
+    assert not any(
+        item["id"] == proposal["id"] for item in repo.list_promotion_queue()
+    )
+
+    repo.add_member(notebook.id, memory_owner.id)
+    assert repo.list_memories(memory_owner.id, notebook_id=notebook.id).items == []
 
 
 def test_admin_approval_fails_closed_on_candidate_memory_notebook_mismatch(
@@ -831,8 +910,16 @@ def test_promotion_routes_record_the_authenticated_admin_reviewer(tmp_path, monk
     }
 
 
-def test_memory_promotion_routes_hide_revoked_member_candidates(tmp_path, monkeypatch):
-    """Approve and reject use the same 404 boundary after creator access loss."""
+@pytest.mark.parametrize("access_loss", ["owner_removes_member", "grant_revoked"])
+def test_memory_promotion_routes_hide_revoked_member_candidates(
+    tmp_path, monkeypatch, access_loss
+):
+    """Approve and reject use the same 404 boundary after creator access loss.
+
+    Access is lost by the owner removing the member or by revoking the
+    creator's grant — both keep the Memory and its proposals (only the
+    member's own EXIT deletes them; see
+    ``test_member_exit_withdraws_the_proposal_and_the_memory_never_returns``)."""
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'revoked-routes.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
@@ -862,7 +949,16 @@ def test_memory_promotion_routes_hide_revoked_member_candidates(tmp_path, monkey
     base = repo_api.create_notebook(NotebookCreate(name="Revoked member base"))
     repo_api.mark_notebook_base(base.id)
     repo_api.replace_notebook_bases(notebook_id, [base.id], owner_id)
-    repo_api.add_member(notebook_id, member_id)
+    if access_loss == "owner_removes_member":
+        repo_api.add_member(notebook_id, member_id)
+    else:
+        with repo_api._write() as db:
+            db.execute(
+                "INSERT INTO notebook_grants "
+                "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+                "VALUES ('gnt-revoked',?,'user',?,'reader',?,'t')",
+                (notebook_id, member_id, owner_id),
+            )
     with repo_api._write() as db:
         db.execute(
             "UPDATE users SET role='admin' WHERE id=?",
@@ -877,7 +973,11 @@ def test_memory_promotion_routes_hide_revoked_member_candidates(tmp_path, monkey
         )
         memory = repo_api.confirm_memory(memory.id, member_id)
         proposals.append(repo_api.propose_memory_promotion(memory.id, member_id))
-    repo_api.remove_member(notebook_id, member_id)
+    if access_loss == "owner_removes_member":
+        repo_api.remove_member(notebook_id, member_id)
+    else:
+        with repo_api._write() as db:
+            db.execute("DELETE FROM notebook_grants WHERE id='gnt-revoked'")
 
     approve = client.post(
         f"/api/promotion-queue/{proposals[0]['id']}/approve",

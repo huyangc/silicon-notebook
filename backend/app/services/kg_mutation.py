@@ -106,7 +106,9 @@ mutation_phases.json, replayed by test_kg_mutation_phase_matrix) is unchanged:
                            cluster_mutation_seq WITH the pointer; NO
                            kg_mutation_seq bump ever (batch-3-W2 two-tier
                            rule — see FULL CENSUS)
-    deep copy / migration / fixture writes   never call this coordinator
+    deep copy / migration / fixture writes   never call this coordinator (the
+                           deep copy's one dirty mark is store-level; see its
+                           FULL CENSUS entry below)
 
 FULL CENSUS — "every bump is atomic with the data it announces"
 ---------------------------------------------------------------
@@ -346,6 +348,34 @@ Deliberately NOT moved into a transaction, with the reason for each:
                                 notebook_kg's own docstring for the full
                                 writeup of what replaced the three explicit
                                 invalidation calls this entry used to license.
+    deep copy's dirty mark (sharing_store.insert_copy_rows, both backends;
+      permission remediation E5-1, M2)
+                                A copy whose source holds a Memory source
+                                (Memory rows and the clusters they touched are
+                                left out) or whose source is itself dirty
+                                (its clustering is already out of date) must
+                                start dirty so its owner is offered a rebuild.
+                                The store calls UnifiedKgStore.mark_dirty
+                                directly, in the SAME transaction as the copy's
+                                own ``notebooks`` birth row, and nowhere else.
+                                It is outside this coordinator on purpose, and
+                                it is not a second online entry: the id is
+                                brand new and still behind the 'copying'
+                                sentinel, so no reader, memo, cache or
+                                once-set can hold state for it and there is
+                                nothing to invalidate; the row it writes is
+                                the column defaults plus dirty=1 and
+                                kg_mutation_seq=1 (cluster_generation 0, the
+                                community/canonical-relation/mention seqs -1,
+                                source_index_backfilled and
+                                chunk_elements_indexed 0 — matching the two
+                                reverse indexes a copy does not carry — and the
+                                built-in indexing identity) — the same row the
+                                copy's first real KG write would create. The
+                                graph rows the copy inserts afterwards need no
+                                bump of their own for the same reason. The
+                                frozen phase matrix (copy_notebook never calls
+                                the coordinator) is unchanged.
     RepositoryFacade.add_relations   Fixture/test-only bare insert; never
                                 bumps at all, invalidates explicitly
                                 (review_queue_memo, gap 1).

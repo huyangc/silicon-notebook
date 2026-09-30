@@ -63,6 +63,29 @@ def seed_or_unique(seed: str, object_id: str) -> str:
     return seed if seed else f"~{object_id}"
 
 
+def bridge_canonical_id(name: str, object_id: str) -> str:
+    """The canonical id a concept object is bridged under (Tier-2 bridge
+    candidates, the ANN twin, and the Memory purge that removes candidates
+    naming it): ``"K-" + seed_or_unique(_norm(name), object_id)``. Never
+    goes through the acronym alias redirect (``place_new_concepts`` does),
+    so it can name a cluster no row carries. One definition for every site."""
+    return "K-" + seed_or_unique(_norm(name or ""), object_id)
+
+
+def purge_bridge_canonical_ids(objects: Iterable[dict]) -> List[str]:
+    """For objects ``[{object_id, object_type, name}]`` about to be purged:
+    the bridge ids of the concept objects (``bridge_canonical_id``). They may
+    also be carried by a live shared cluster, so the purge acts on a merge
+    candidate naming one only when no cluster row carries it. (The ids that
+    can only have been minted from a purged object are recognised in SQL by
+    ``memory_sql.cluster_seed_object_id``.)"""
+    return sorted({
+        bridge_canonical_id(item.get("name") or "", item["object_id"])
+        for item in objects
+        if item.get("object_type") == "concept"
+    })
+
+
 def build_acronym_alias_map(names: Iterable[str]) -> Dict[str, str]:
     """For every "Full (ACR)" name where ACR is the initialism of Full, map the
     acronym's seed to the expansion's seed: ``{_norm(ACR): _norm(Full)}``. Lets
@@ -485,7 +508,7 @@ def detect_bridge_candidates(new_items, new_vectors, existing_items, existing_ve
         q = np.asarray(v, dtype="float32"); q /= (np.linalg.norm(q) + 1e-9)
         sims = EX @ q
         idx = np.argsort(-sims)[:top_k]
-        my_cid = "K-" + seed_or_unique(_norm(it.get("name", "")), it["object_id"])
+        my_cid = bridge_canonical_id(it.get("name", ""), it["object_id"])
         for j in idx:
             s = float(sims[j])
             if s < lo:

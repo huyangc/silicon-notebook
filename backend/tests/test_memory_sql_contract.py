@@ -150,19 +150,26 @@ def test_every_fragment_consumes_a_fixed_number_of_positional_parameters():
     for alias in ("o", "ko", "x1"):
         assert memory_sql.foreign_memory_object_excluded(alias).count("?") == 1
         assert memory_sql.memory_derived_object(alias).count("?") == 0
+        assert memory_sql.memory_derived_in_notebook(alias).count("?") == 0
     for alias in ("r", "kr", "x1"):
         assert memory_sql.foreign_memory_relation_excluded(alias).count("?") == 1
         assert memory_sql.memory_derived_relation(alias).count("?") == 0
     for alias in ("c", "cc", "x1"):
         assert memory_sql.no_memory_member_cluster(alias).count("?") == 0
+        assert memory_sql.memory_cluster(alias).count("?") == 0
+        assert memory_sql.no_memory_cluster(alias).count("?") == 0
+        assert memory_sql.cluster_seed_object_id(alias).count("?") == 0
     # 没有别的占位符方言混进来。
     for fragment in (
         memory_sql.memory_source_readable("s"),
         memory_sql.foreign_memory_object_excluded("o"),
         memory_sql.memory_derived_object("o"),
         memory_sql.no_memory_member_cluster("c"),
+        memory_sql.memory_cluster("c"),
+        memory_sql.no_memory_cluster("c"),
+        memory_sql.cluster_seed_object_id("c"),
     ):
-        assert "%s" not in fragment
+        assert "%s" not in fragment and "%" not in fragment
 
 
 # ------------------------------------------------------------------ 外层别名校验
@@ -176,8 +183,14 @@ def _alias_calls():
         "derived": (
             memory_sql.memory_derived_object,
             memory_sql.memory_derived_relation,
+            memory_sql.memory_derived_in_notebook,
         ),
         "cluster": (memory_sql.no_memory_member_cluster,),
+        "memory_cluster": (
+            memory_sql.memory_cluster, memory_sql.no_memory_cluster,
+            memory_sql.memory_seed_cluster,
+        ),
+        "seed": (memory_sql.cluster_seed_object_id,),
     }
 
 
@@ -284,6 +297,118 @@ def test_no_memory_member_cluster_is_scoped_to_its_own_generation(world):
     )
 
 
+def _cluster_keys(database, predicate: str) -> set[str]:
+    return _ids(
+        database,
+        "SELECT DISTINCT c.notebook_id || '/' || c.canonical_id || '/' || "
+        f"CAST(c.generation AS TEXT) FROM concept_clusters c WHERE {predicate}",
+    )
+
+
+def test_memory_cluster_is_the_one_definition_of_a_cluster_of_a_memory(world):
+    """「一条 Memory 的簇」:有 Memory 派生成员(按笔记本、代),或 canonical id 就是 / 铸自
+    一个 Memory 派生对象。铸自普通对象、铸自已删对象(判不出)、真名种子恰好长得像对象 id
+    都不算。`no_memory_cluster` 恰是它的补集。"""
+    memory = _cluster_keys(world, memory_sql.memory_cluster("c"))
+    clean = _cluster_keys(world, memory_sql.no_memory_cluster("c"))
+    assert memory == cases.MEMORY_CLUSTERS
+    assert clean == cases.ALL_CLUSTERS - cases.MEMORY_CLUSTERS
+    # 成员臂与 no_memory_member_cluster 同义:凡被它排除的簇都是 Memory 的簇。
+    assert cases.ALL_CLUSTERS - cases.NO_MEMORY_MEMBER_CLUSTERS <= memory
+
+
+def test_cluster_seed_object_id_reads_the_object_id_a_canonical_id_was_minted_from(world):
+    for canonical, expected in cases.CLUSTER_SEED_OBJECT_IDS.items():
+        with world.connect() as db:
+            got = db.execute(
+                f"SELECT {memory_sql.cluster_seed_object_id('c')} AS seed "
+                "FROM (SELECT ? AS canonical_id) c",
+                (canonical,),
+            ).fetchone()["seed"]
+        assert got == expected, canonical
+
+
+def test_cluster_seed_object_id_matches_how_kg_merge_mints_canonical_ids(world):
+    """与 `kg_merge.seed_or_unique` 的铸造规则对齐:每个类型前缀(概念 `K-`,claim/formula/
+    procedure 的 `KL-`/`KF-`/`KP-`)加上退化名的哨兵种子,取回的就是那个对象 id;真名种子
+    取回 NULL。前缀清单改了、哨兵改了,这里当场红。"""
+    from app.services.kg_merge import seed_or_unique
+    from app.services import knowledge_lifecycle
+
+    source = open(knowledge_lifecycle.__file__, encoding="utf-8").read()
+    prefixes = set(re.findall(r'id_prefix="(K[A-Z]?-)"', source)) | set(
+        re.findall(r'\(seed_\w+, "(K[A-Z]?-)"\)', source)
+    )
+    assert prefixes == {"K-", "KL-", "KF-", "KP-"}, prefixes
+    for prefix in sorted(prefixes):
+        for object_id, name in (("ko-3f2a9c", ""), ("ko-3f2a9c", "real name")):
+            canonical = f"{prefix}{seed_or_unique(name, object_id)}"
+            with world.connect() as db:
+                got = db.execute(
+                    f"SELECT {memory_sql.cluster_seed_object_id('c')} AS seed "
+                    "FROM (SELECT ? AS canonical_id) c",
+                    (canonical,),
+                ).fetchone()["seed"]
+            assert got == (object_id if not name else None), canonical
+
+
+def test_memory_derived_in_notebook_agrees_on_same_notebook_rows_and_stops_at_the_notebook(world):
+    """合法数据(行与来源同笔记本)上与 `memory_derived_object` 逐行同义;来源在别的笔记本
+    时不算(那条只用来把外层的笔记本条件传进内层)。"""
+    got = _ids(
+        world,
+        "SELECT o.id FROM knowledge_objects o "
+        f"WHERE {memory_sql.memory_derived_in_notebook('o')}",
+    )
+    assert got == cases.MEMORY_DERIVED_OBJECTS
+    with world.connect() as db:
+        row = db.execute(
+            f"SELECT {memory_sql.memory_derived_in_notebook('x')} AS here, "
+            f"{memory_sql.memory_derived_object('x')} AS anywhere "
+            "FROM (SELECT ? AS source_id, ? AS notebook_id) x",
+            ("src-mem-alice", cases.NOTEBOOK2),
+        ).fetchone()
+    assert (bool(row["here"]), bool(row["anywhere"])) == (False, True)
+
+
+def test_memory_member_cluster_keys_is_the_member_arm_as_a_set(world):
+    """同一判据的集合形态:每个笔记本读出的 (canonical_id, generation) 恰是成员臂排除的那些簇,
+    一个参数(笔记本 id)。"""
+    member_clusters = cases.ALL_CLUSTERS - cases.NO_MEMORY_MEMBER_CLUSTERS
+    for notebook in (cases.NOTEBOOK, cases.NOTEBOOK2):
+        with world.connect() as db:
+            rows = db.execute(memory_sql.memory_member_cluster_keys(), (notebook,)).fetchall()
+        got = {f"{notebook}/{row[0]}/{row[1]}" for row in rows}
+        assert got == {key for key in member_clusters if key.startswith(notebook + "/")}
+    assert memory_sql.memory_member_cluster_keys().count("?") == 1
+
+
+def test_memory_cluster_docstring_holds_seed_arm_only_minted_real_names_left_to_the_dirty_rule(
+    world,
+):
+    """`memory_cluster` docstring 的两句话:canonical 臂只认按对象 id 铸的种子(``K-~ko-…``、
+    ``Kx-~ko-…``);真名种子(哪怕长得像对象 id)在这里认不出来——Memory 被删后由拷贝的「脏源库
+    不带簇」规则覆盖(见 test_notebook_share_copy / test_copy_memory_exclusion_pg 的
+    test_a_cluster_seeded_by_a_since_deleted_memory)。
+
+    已知缺口(登记给 E4-2,本分支不改):成簇**干净**(dirty=0)、真名种子、Memory 已不是成员的
+    簇——例如 ``K-alice-private-plan``,唯一成员是共享对象,簇名与描述取自已删的 Memory——两条
+    规则都认不出,拷贝会带出它的名字。删除路径今天到不了这个形态:``delete_source`` 在拆除
+    事务里必标脏,``remove_memory_sources`` 与它共用拆除事务、同样标脏;只有「重建进行中删了 Memory、
+    重建收尾 ``finish_rebuild_state`` 无条件写 dirty=0」才会留下它(重建的新一代若读到删除前
+    的成员,名字随之发布,删除的脏标又被清掉)。"""
+    doc = memory_sql.memory_cluster.__doc__
+    assert "K-~ko-" in doc and "Kx-~ko-" in doc and "_source_clustering_current" in doc
+    # 清除与这里共用同一条铸造规则,另认桥接 id;不再指向已删除的第二份规则。
+    assert "purge_memory_review_rows_on" in doc and "purge_bridge_canonical_ids" in doc
+    assert "minted_canonical_ids" not in doc
+    seeded = _cluster_keys(world, memory_sql.memory_seed_cluster("c"))
+    assert seeded == cases.MEMORY_SEED_CLUSTERS
+    assert f"{cases.NOTEBOOK}/K-ko-mem-alice/7" not in _cluster_keys(
+        world, memory_sql.memory_cluster("c")
+    )
+
+
 # --------------------------------------------------------------- 嵌进更大的查询
 def test_fragment_embedded_in_a_larger_query_agrees_with_the_standalone_result(world):
     """参数夹在别的参数中间、与别的表 join,结果仍与独立执行一致。"""
@@ -323,7 +448,15 @@ _PUBLIC_FRAGMENTS = (
     "memory_derived_object",
     "memory_derived_relation",
     "no_memory_member_cluster",
+    "memory_derived_in_notebook",
+    "memory_cluster",
+    "no_memory_cluster",
+    "memory_seed_cluster",
+    "cluster_seed_object_id",
 )
+
+#: 簇片段里 `cluster_seed_object_id` 的铸造形状字面量(`kg_merge.seed_or_unique`)。
+_SEED_SHAPE_LITERALS = {"K-~ko-", "K", "-~ko-"}
 
 
 def _public_names(module) -> set[str]:
@@ -347,6 +480,14 @@ def test_both_backends_declare_the_same_fragments_with_identical_text():
             pg_text = getattr(pg_memory_sql, name)(alias)
             assert "?" not in pg_text
             assert pg_text.replace("%s", "?") == getattr(memory_sql, name)(alias), name
+    # One documented difference: SQLite's unary ``+`` index hint (no sqlite_stat1 there,
+    # see the fragment's docstring); everything else is byte-identical.
+    sqlite_keys = memory_sql.memory_member_cluster_keys()
+    assert sqlite_keys.count("+mc.notebook_id") == 1
+    assert (
+        pg_memory_sql.memory_member_cluster_keys().replace("%s", "?")
+        == sqlite_keys.replace("+mc.notebook_id", "mc.notebook_id")
+    )
     assert pg_memory_sql.memory_source_type_predicate() == memory_sql.memory_source_type_predicate()
     assert pg_memory_sql.memory_source_type_predicate("t.k") == memory_sql.memory_source_type_predicate("t.k")
 
@@ -359,7 +500,13 @@ def test_memory_type_literal_is_single_sourced_and_matches_source_store():
     for module in (memory_sql, pg_memory_sql):
         for name in _PUBLIC_FRAGMENTS:
             text = getattr(module, name)("x1")
-            assert set(quoted.findall(text)) == {module.MEMORY_SOURCE_TYPE}, (module, name)
+            literals = set(quoted.findall(text))
+            if name == "cluster_seed_object_id":
+                assert literals == _SEED_SHAPE_LITERALS, (module, name)
+            elif name in {"memory_cluster", "no_memory_cluster", "memory_seed_cluster"}:
+                assert literals == {module.MEMORY_SOURCE_TYPE} | _SEED_SHAPE_LITERALS
+            else:
+                assert literals == {module.MEMORY_SOURCE_TYPE}, (module, name)
     assert sqlite_source_store.MEMORY_SOURCE_TYPE_PREDICATE == memory_sql.memory_source_type_predicate()
     assert pg_source_store.MEMORY_SOURCE_TYPE_PREDICATE == pg_memory_sql.memory_source_type_predicate()
 

@@ -6,7 +6,7 @@
 // page.tsx 直接读 checkup 判定。
 
 // 值导入须带 .ts 后缀:本模块被 node --test 直接加载(见 scale-index.ts 同款)。
-import { CHECKUP_ISSUE } from "./vocabulary.ts";
+import { CHECKUP_ISSUE, CHECKUP_NOTICE } from "./vocabulary.ts";
 import type { CheckupItem, CheckupResponse } from "./workspace-model.ts";
 
 // 「来源状态」块要展示的源级体检项,及其展示顺序。H7/H8 刻意排除(索引级)。
@@ -120,6 +120,42 @@ export function isRepairing(entry: RepairRelease | undefined, currentCount: numb
   return entry.count === currentCount;
 }
 
+/**
+ * 这一项有没有用户可点的修复动作。只读项(fix="none")只显示提示卡,看板不给它画修复
+ * 按钮——防御:即使某个只读代号混进了源级分组,也不会出现按钮。
+ */
+export function hasRepairAction(fix: string): boolean {
+  return fix !== "none";
+}
+
+/** 只读体检项(fix="none")的展示顺序。 */
+const READ_ONLY_CODES = ["H12"] as const;
+
+export type CheckupNotice = {
+  key: string;
+  label: string;
+  detail: string;
+  // 计数(unit 为空时不显示)。
+  count: number;
+  unit: string;
+};
+
+/**
+ * 只读体检项(fix="none",count>0)→ 提示卡。没有修复按钮:H12(无主的记忆来源)由
+ * 系统在后台自动清理。未登记文案的只读代号不展示(不猜文案)。
+ */
+export function checkupNotices(checkup: CheckupResponse | null): CheckupNotice[] {
+  if (!checkup) return [];
+  const out: CheckupNotice[] = [];
+  for (const code of READ_ONLY_CODES) {
+    const item = checkup.checks.find((c) => c.code === code);
+    const copy = CHECKUP_NOTICE[code];
+    if (!item || item.count <= 0 || item.fix !== "none" || !copy) continue;
+    out.push({ key: code, label: copy.label, detail: copy.detail, count: item.count, unit: copy.unit });
+  }
+  return out;
+}
+
 /** 某个体检项的命中计数(未命中/无该项时 0)。H7/H8 由 page.tsx 用它判定索引可信度。 */
 export function checkupCount(checkup: CheckupResponse | null, code: string): number {
   if (!checkup) return 0;
@@ -128,13 +164,24 @@ export function checkupCount(checkup: CheckupResponse | null, code: string): num
 }
 
 /**
- * 铃铛聚合提醒的签名:notebook + 当前命中的体检代号集合。内容变化(新问题出现/
- * 旧问题修好)时签名变,铃铛据此重新提示;健康时返回 null(不提示)。
+ * 是否还有**用户能修**的体检项。只读项(fix="none")不算:它们不会因为用户的修复而消失
+ * (有的会长期存在),拿 `healthy` 判「修完了」会让修复轮询一直跑到窗口结束。
+ */
+export function checkupHasRepairableIssue(checkup: CheckupResponse | null): boolean {
+  if (!checkup) return false;
+  return checkup.checks.some((c) => c.count > 0 && c.fix !== "none");
+}
+
+/**
+ * 铃铛聚合提醒的签名:notebook + 当前命中的**可修复**体检代号集合。内容变化(新问题出现/
+ * 旧问题修好)时签名变,铃铛据此重新提示;健康、或只剩只读项时返回 null(不提示)。
+ * 只读项(fix="none")由系统或部署负责人处理,用户没有可点的修复,铃铛说「发现可修复的
+ * 问题」就是假话。
  */
 export function checkupAlertSignature(checkup: CheckupResponse | null): string | null {
-  if (!checkup || checkup.healthy) return null;
+  if (!checkup || !checkupHasRepairableIssue(checkup)) return null;
   const hit = checkup.checks
-    .filter((c) => c.count > 0)
+    .filter((c) => c.count > 0 && c.fix !== "none")
     .map((c) => c.code)
     .sort();
   if (hit.length === 0) return null;

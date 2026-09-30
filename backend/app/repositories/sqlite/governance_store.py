@@ -18,6 +18,16 @@ from typing import Dict, List, Optional
 from app.core.text_whitespace import PY_STRIP_WHITESPACE
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
+from app.repositories.sqlite.memory_sql import (
+    cluster_seed_object_id,
+    memory_derived_object,
+    memory_derived_relation,
+)
+from app.repositories.sqlite.id_binding import (
+    bind_ids as id_bind_ids,
+    drive_by as id_drive_by,
+    member_of as id_member_of,
+)
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER
 from app.domain.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
@@ -1522,6 +1532,169 @@ class GovernanceStore:
             "WHERE id=?",
             (reason, reviewer_id, now, candidate_id),
         )
+
+    @staticmethod
+    def withdraw_memory_promotions_on(
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        memory_ids: List[str],
+        reason: str,
+        now: str,
+    ) -> int:
+        """Reject the still-active proposals of Memory rows the caller is
+        about to hard-delete, inside the caller's delete transaction.
+
+        Mirror of the PostgreSQL twin (see its docstring for why a proposal
+        must not outlive its Memory, why ``rejected`` is the withdrawal state
+        and why ``reviewed_by`` stays empty). Here the process-wide write lock
+        the caller holds already serializes this against proposal and
+        approval writers."""
+        if not memory_ids:
+            return 0
+        placeholders = ",".join("?" for _ in memory_ids)
+        cursor = connection.execute(
+            "UPDATE promotion_candidates "
+            "SET status='rejected', reason=?, reviewed_by='', updated_at=? "
+            f"WHERE notebook_id=? AND object_type='memory' AND object_id IN ({placeholders}) "
+            "AND status IN ('proposed','under_review')",
+            (reason, now, notebook_id, *memory_ids),
+        )
+        return int(cursor.rowcount or 0)
+
+    @staticmethod
+    def purge_memory_review_rows_on(
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        source_ids: List[str],
+        *,
+        bridge_canonical_ids: List[str],
+    ) -> int:
+        """Mirror of the PostgreSQL twin (its docstring carries the rules):
+        the merge candidates naming the Memory's clusters, an id minted from
+        one of its objects (``memory_sql.cluster_seed_object_id``) or a bridge
+        id no cluster carries; the whole clusters; the conflict candidates
+        referencing its objects or relations. Nothing growing with the KG is
+        bound; the source ids are one purge
+        page (at most 200); the bridge ids go through ``id_binding``.
+        Returns the number of cluster rows removed."""
+        ids = sorted(set(source_ids))
+        if not ids:
+            return 0
+        marks = ",".join("?" for _ in ids)
+        owned = (
+            "owned AS (SELECT ko.id FROM knowledge_objects ko "
+            f"WHERE ko.notebook_id = ? AND ko.source_id IN ({marks}) "
+            f"AND {memory_derived_object('ko')})"
+        )
+        doomed = (
+            "SELECT mc.canonical_id FROM concept_clusters mc WHERE mc.notebook_id = ? "
+            "AND (mc.member_object_id IN (SELECT id FROM owned) "
+            f"OR {cluster_seed_object_id('mc')} IN (SELECT id FROM owned))"
+        )
+        bridge = id_bind_ids(sorted(set(bridge_canonical_ids)), sort=True)
+        connection.execute(
+            f"WITH {owned}, doomed AS ({doomed}) "
+            "DELETE FROM concept_merge_candidates WHERE notebook_id = ? AND ("
+            "canonical_a IN (SELECT canonical_id FROM doomed) "
+            "OR canonical_b IN (SELECT canonical_id FROM doomed) "
+            f"OR {cluster_seed_object_id('concept_merge_candidates', 'canonical_a')} "
+            "IN (SELECT id FROM owned) "
+            f"OR {cluster_seed_object_id('concept_merge_candidates', 'canonical_b')} "
+            "IN (SELECT id FROM owned) "
+            f"OR ({id_member_of('canonical_a', bridge)} AND NOT EXISTS ("
+            "SELECT 1 FROM concept_clusters xa "
+            "WHERE xa.notebook_id = concept_merge_candidates.notebook_id "
+            "AND xa.canonical_id = concept_merge_candidates.canonical_a)) "
+            f"OR ({id_member_of('canonical_b', bridge)} AND NOT EXISTS ("
+            "SELECT 1 FROM concept_clusters xb "
+            "WHERE xb.notebook_id = concept_merge_candidates.notebook_id "
+            "AND xb.canonical_id = concept_merge_candidates.canonical_b)))",
+            (notebook_id, *ids, notebook_id, notebook_id, bridge.param, bridge.param),
+        )
+        removed = connection.execute(
+            f"WITH {owned} DELETE FROM concept_clusters WHERE notebook_id = ? "
+            f"AND canonical_id IN ({doomed})",
+            (notebook_id, *ids, notebook_id, notebook_id),
+        ).rowcount
+        connection.execute(
+            "WITH refs AS (SELECT ko.id FROM knowledge_objects ko "
+            f"WHERE ko.notebook_id = ? AND ko.source_id IN ({marks}) "
+            f"AND {memory_derived_object('ko')} UNION ALL "
+            "SELECT kr.id FROM knowledge_relations kr "
+            f"WHERE kr.notebook_id = ? AND kr.source_id IN ({marks}) "
+            f"AND {memory_derived_relation('kr')}) "
+            "DELETE FROM kg_conflict_candidates WHERE notebook_id = ? "
+            "AND (left_ref IN (SELECT id FROM refs) "
+            "OR right_ref IN (SELECT id FROM refs) "
+            "OR winner_ref IN (SELECT id FROM refs))",
+            (notebook_id, *ids, notebook_id, *ids, notebook_id),
+        )
+        return int(removed or 0)
+
+    @staticmethod
+    def strip_sources_evidence_on(
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        source_ids: List[str],
+        now: str,
+    ) -> List[str]:
+        """Mirror of the PostgreSQL twin: detach several sources' evidence
+        from the objects another source owns (the caller's ``BEGIN
+        IMMEDIATE`` serialises writers, so there is no row-lock order to
+        keep here). Candidate lookup mirrors the teardown branch for branch."""
+        ids = sorted(set(source_ids))
+        if not ids:
+            return []
+        marks = ",".join("?" for _ in ids)
+        if KnowledgeStore.source_index_backfilled(connection, notebook_id):
+            rows = connection.execute(
+                "SELECT ko.id, ko.evidence FROM knowledge_objects ko "
+                f"WHERE ko.notebook_id = ? AND (ko.source_id IS NULL OR ko.source_id NOT IN ({marks})) "
+                "AND ko.id IN (SELECT kos.object_id FROM knowledge_object_sources kos "
+                f"WHERE kos.source_id IN ({marks}) AND kos.notebook_id = ?) "
+                "ORDER BY ko.id",
+                (notebook_id, *ids, *ids, notebook_id),
+            ).fetchall()
+        else:
+            by_id: Dict[str, sqlite3.Row] = {}
+            for source_id in ids:
+                for row in connection.execute(
+                    "SELECT DISTINCT ko.id, ko.evidence "
+                    "FROM knowledge_objects AS ko "
+                    "JOIN json_each(CASE WHEN json_valid(ko.evidence) THEN "
+                    "CASE WHEN json_type(ko.evidence) = 'array' "
+                    "THEN ko.evidence ELSE '[]' END ELSE '[]' END) AS item "
+                    f"WHERE ko.notebook_id = ? "
+                    f"AND (ko.source_id IS NULL OR ko.source_id NOT IN ({marks})) "
+                    "AND item.type = 'object' "
+                    "AND json_extract(CASE WHEN item.type = 'object' "
+                    "THEN item.value ELSE '{}' END, '$.source_id') = ?",
+                    (notebook_id, *ids, source_id),
+                ).fetchall():
+                    by_id[row["id"]] = row
+            rows = [by_id[key] for key in sorted(by_id)]
+        wanted = set(ids)
+        stripped: List[str] = []
+        for row in rows:
+            kept = [
+                item
+                for item in json.loads(row["evidence"] or "[]")
+                if not (isinstance(item, dict) and item.get("source_id") in wanted)
+            ]
+            connection.execute(
+                "UPDATE knowledge_objects SET evidence = ?, updated_at = ? "
+                "WHERE id = ? AND notebook_id = ?",
+                (json.dumps(kept, ensure_ascii=False), now, row["id"], notebook_id),
+            )
+            stripped.append(row["id"])
+        if stripped:
+            objects = id_bind_ids(stripped, sort=True)
+            connection.execute(
+                "DELETE FROM knowledge_object_sources WHERE notebook_id = ? "
+                f"AND {id_drive_by('object_id', objects)} AND source_id IN ({marks})",
+                (notebook_id, objects.param, *ids),
+            )
+        return stripped
 
     # -------------------------------------------------- knowledge mutation
     @staticmethod

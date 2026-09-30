@@ -26,6 +26,7 @@ _READABLE_INNER = frozenset({"rm"})
 _FOREIGN_INNER = frozenset({"fs", "fm"})
 _DERIVED_INNER = frozenset({"ds"})
 _CLUSTER_INNER = frozenset({"mc", "mo", "ms"})
+_CANONICAL_INNER = frozenset({"mk", "mks"})
 
 
 def _alias(name: str, reserved: frozenset[str]) -> str:
@@ -93,6 +94,23 @@ def memory_derived_relation(relation_alias: str) -> str:
     return _memory_derived(_alias(relation_alias, _DERIVED_INNER))
 
 
+def memory_derived_in_notebook(row_alias: str) -> str:
+    """行 `row_alias`(取其 `source_id` 与 `notebook_id`)的主来源是**本笔记本的** Memory
+    来源。零参数。
+
+    与 `memory_derived_object` 同一判据,多钉一条 `ds.notebook_id = {a}.notebook_id`:行与
+    它的来源同属一个笔记本是写入不变量,所以在合法数据上两者逐行同义;多出来的这条让
+    规划器把外层的 `notebook_id = $1` 传进内层,「Memory 来源集合」只按本笔记本构建,
+    成本随本库、不随全站 Memory 的用量增长(拷贝快照与分享预览的计数,见 sharing_store)。
+    """
+    a = _alias(row_alias, _DERIVED_INNER)
+    return (
+        "EXISTS (SELECT 1 FROM sources ds "
+        f"WHERE ds.id = {a}.source_id AND ds.notebook_id = {a}.notebook_id "
+        f"AND {memory_source_type_predicate('ds.source_type')})"
+    )
+
+
 def no_memory_member_cluster(cluster_alias: str) -> str:
     """概念簇 `cluster_alias`(取其 `notebook_id`/`canonical_id`/`generation`)整簇没有
     Memory 派生成员。零参数。
@@ -102,9 +120,12 @@ def no_memory_member_cluster(cluster_alias: str) -> str:
     「按整簇排除 memory」只在同一笔记本的同一代内判定:别的笔记本里撞同名的
     canonical_id、双代窗口里 building 代的成员,都不得跨界误判。
     """
-    c = _alias(cluster_alias, _CLUSTER_INNER)
+    return "NOT " + _memory_member_arm(_alias(cluster_alias, _CLUSTER_INNER))
+
+
+def _memory_member_arm(c: str) -> str:
     return (
-        "NOT EXISTS (SELECT 1 FROM concept_clusters mc "
+        "EXISTS (SELECT 1 FROM concept_clusters mc "
         "JOIN knowledge_objects mo ON mo.id = mc.member_object_id "
         "JOIN sources ms ON ms.id = mo.source_id "
         f"WHERE mc.notebook_id = {c}.notebook_id "
@@ -112,3 +133,92 @@ def no_memory_member_cluster(cluster_alias: str) -> str:
         f"AND mc.generation = {c}.generation "
         f"AND {memory_source_type_predicate()})"
     )
+
+
+def cluster_seed_object_id(cluster_alias: str, column: str = "canonical_id") -> str:
+    """簇 `cluster_alias` 的 canonical id 若是**按对象 id 铸的**,取出那个对象 id;否则 NULL。
+    零参数。
+
+    `kg_merge.seed_or_unique`:名字退化(只剩符号)的对象不共簇,种子回退成 `~<对象 id>`,
+    canonical id 即 `<类型前缀>~<对象 id>`;类型前缀是 `K-`(概念)或 `K` 加一个字母再加
+    `-`(`KL-` / `KF-` / `KP-`),对象 id 一律以 `ko-` 开头。只认这两种长度的前缀后紧跟
+    `~ko-` 的写法:`_norm` 族归一化器会洗掉 `~`,真名种子不可能长成这样;`_norm_formula`
+    理论上能留下 `~`,但要恰好是 `~ko-...` 开头的公式才会被误读,实际不可达。只用
+    `substr` 与等值比较,两个后端文本逐字相同(不用 LIKE:PostgreSQL 的 `%` 在带参语句里
+    要转义成 `%%`,会让两份文本分叉)。
+
+    `column` 默认读簇行的 `canonical_id`;Memory 清除用同一条规则判合并候选的
+    `canonical_a` / `canonical_b`(候选点名的簇 id 是否铸自被清除的对象),不另写一份。
+    """
+    col = f"{_alias(cluster_alias, frozenset())}.{_alias(column, frozenset())}"
+    return (
+        f"(CASE WHEN substr({col}, 1, 6) = 'K-~ko-' THEN substr({col}, 4) "
+        f"WHEN substr({col}, 1, 1) = 'K' AND substr({col}, 3, 5) = '-~ko-' "
+        f"THEN substr({col}, 5) END)"
+    )
+
+
+def _memory_canonical_arm(c: str) -> str:
+    return (
+        "EXISTS (SELECT 1 FROM knowledge_objects mk JOIN sources mks ON mks.id = mk.source_id "
+        f"WHERE mk.id = {cluster_seed_object_id(c)} "
+        f"AND {memory_source_type_predicate('mks.source_type')})"
+    )
+
+
+def memory_seed_cluster(cluster_alias: str) -> str:
+    """概念簇 `cluster_alias` 的 canonical id 是按一个 Memory 派生对象的 id 铸的(见
+    `cluster_seed_object_id`):一行一次主键探测,只对 `~ko-` 形态的行真正命中。零参数。"""
+    return _memory_canonical_arm(_alias(cluster_alias, _CLUSTER_INNER | _CANONICAL_INNER))
+
+
+def memory_member_cluster_keys() -> str:
+    """本笔记本里**含 Memory 派生成员**的每个簇的 `(canonical_id, generation)`。一个参数:
+    笔记本 id。
+
+    与 `memory_cluster` 的成员臂同一判据(同一笔记本、同一代)。那条臂写成按簇行相关的
+    EXISTS,放进逐簇行求值的语句里代价是 O(Σ簇大小²)(实测一个 2000 成员的簇每条语句
+    13–15 s);按簇行过滤的读者改读这份集合、在集合上做差。集合每次拷贝读一次,大小不超过
+    本库 Memory 对象数 × 代数。
+
+    实际计划(不是「从 Memory 一侧驱动」这么理想):PostgreSQL 把本库的对象与本库的簇行做
+    Hash Join(concept_clusters 扫一遍),再按主键逐对象探测 sources——代价随本库规模线性
+    增长;SQLite(没有统计信息)按笔记本索引走本库的对象,逐个按主键探测来源,对 Memory
+    对象按 ``idx_clusters_member (member_object_id=?)`` 探测簇行——同样随本库规模线性增长,
+    从不按簇行把整簇走一遍。
+    SQLite 孪生在 ``mc.notebook_id`` 前多一个一元 ``+``(那边没有统计信息时的索引提示,理由见
+    它的 docstring);除此之外两端逐字相同。
+    """
+    return (
+        "SELECT DISTINCT mc.canonical_id, mc.generation FROM sources ms "
+        "JOIN knowledge_objects mo ON mo.source_id = ms.id AND mo.notebook_id = ms.notebook_id "
+        "JOIN concept_clusters mc ON mc.member_object_id = mo.id "
+        "AND mc.notebook_id = ms.notebook_id "
+        f"WHERE ms.notebook_id = %s AND {memory_source_type_predicate('ms.source_type')}"
+    )
+
+
+def memory_cluster(cluster_alias: str) -> str:
+    """概念簇 `cluster_alias`(取其 `notebook_id`/`canonical_id`/`generation`)是**某条
+    Memory 的簇**:同一笔记本同一代里有 Memory 派生成员(成员臂;按簇行过滤的读者改读
+    `memory_member_cluster_keys`,同一判据),**或**它的 canonical id 是按一个 Memory 派生对象
+    的 id 铸的(`memory_seed_cluster`)。零参数。
+
+    canonical 臂只认**按对象 id 铸的**种子(`K-~ko-…` 与 `Kx-~ko-…`,见
+    `cluster_seed_object_id`);canonical id 一律带类型前缀,从不等于裸对象 id。**真名种子**
+    (`K-<规范化名字>`)在这里认不出来:Memory 对象还在簇里时由成员臂认出;Memory 被删之后
+    只剩共享成员带着它起的名字——删除必然标脏,拷贝对脏源库一个簇都不带(sharing_store 的
+    `_source_clustering_current`),这一形态由那条规则覆盖。删除清理(E5-2,
+    `purge_memory_review_rows_on`)与这里共用同一条铸造规则(`cluster_seed_object_id`),此外
+    按成员认出整簇——清理时 Memory 对象还在,真名种子的簇因此也能认出;合并候选另认没有簇行
+    带着的桥接 id(`kg_merge.purge_bridge_canonical_ids`)。拷贝时 Memory 对象可能已经不在,
+    所以这里只有成员臂与铸造臂。
+    """
+    c = _alias(cluster_alias, _CLUSTER_INNER | _CANONICAL_INNER)
+    return f"({_memory_member_arm(c)} OR {_memory_canonical_arm(c)})"
+
+
+def no_memory_cluster(cluster_alias: str) -> str:
+    """`memory_cluster` 的否定(同一对臂,两个 NOT EXISTS 以便规划成反连接)。零参数。"""
+    c = _alias(cluster_alias, _CLUSTER_INNER | _CANONICAL_INNER)
+    return f"(NOT {_memory_member_arm(c)} AND NOT {_memory_canonical_arm(c)})"

@@ -62,7 +62,8 @@ def _reset_copied_notebook_row(
     """Rewrite the copied notebooks row's identity/lifecycle/authority columns.
 
     索引管线四列一律复位成内建：published identity 住在 unified_kg_state 里而它
-    刻意不进深拷贝，照抄 desired 选择会让副本天生 desired≠published、每一次写入
+    刻意不进深拷贝（副本至多得到 insert_copy_rows 写的一条标脏行，各列取默认值，
+    published identity 即内建），照抄 desired 选择会让副本天生 desired≠published、每一次写入
     409 直到手动全库重建；照抄 generation/job_id 更会让副本的状态投影 join 到
     *源库*正在跑的 job 行。与「授权边/share_token/agent_profile_id 不随副本走」
     同一条论证——副本由新 owner 重新选择并显式重建（既有 chunk 是核心 schema，
@@ -71,12 +72,13 @@ def _reset_copied_notebook_row(
     已登记接受（codex #602 R7 P2 驳回）：插件管线库的副本里，拷来的插件 chunk 与
     此后按内建增量分块的新 chunk 会共存。这不触犯全库原子发布不变量——那条不变量
     保护的是**切换操作**的身份消费方（scale manifest identity、published KG identity、
-    fold/full 判定），而副本这些面全部从零开始（unified_kg_state 缺席、scale 工件
+    fold/full 判定），而副本这些面全部从零开始（unified_kg_state 缺席或只有标脏行、scale 工件
     不拷、首次重建必然 full），没有任何消费方会据错误身份做决策；extraction_runs
     随行拷贝、逐 run 保留真实的 (pipeline_id, version) 出处。剩下的只是 chunk
     粒度异质——与「部署中途调 chunk_target_chars 后新旧来源粒度不同」这一既有
     合法情形同类，从来不要求全库重建。另两个选项都更糟：种 published identity
-    需要给副本造 unified_kg_state 行（与 chunk_elements 标记语义的既有红线冲突）；
+    需要给副本造一条带真实身份的 unified_kg_state 行（与 chunk_elements 标记语义的
+    既有红线冲突；标脏行不带身份、chunk_elements_indexed 取默认 0，不在此列）；
     强制先重建再可写等于让每一次插件库拷贝都先付一轮全库模型钱。
     """
     if manual_name:
@@ -609,9 +611,9 @@ class NotebookCopyService:
                 )
                 chunks_out.append(data)
             # chunk_elements（element→chunk 反查表，v46）刻意**不**随深拷贝复制：
-            # unified_kg_state 不在 _COPY_SNAPSHOT_QUERIES 的表集合内，所以副本
-            # 的 chunk_elements_indexed 恒缺失（读作 0），读路径走 legacy 全量
-            # 扫描——反查行缺席是正确且自洽的。
+            # unified_kg_state 不在拷贝表集合内（至多有 insert_copy_rows 写的标脏行,
+            # 该列取默认 0），所以副本的 chunk_elements_indexed 恒缺失或为 0，读路径
+            # 走 legacy 全量扫描——反查行缺席是正确且自洽的。
             # ⚠ 若将来把 unified_kg_state 加进深拷贝表集合，**必须**同时复制
             # chunk_elements（或显式把副本的 chunk_elements_indexed 归零）：
             # 否则副本继承一个为真的标记而反查表是空的，点查路径会静默返回空
@@ -964,7 +966,7 @@ class NotebookSharingService:
         token = self._store.set_share_token(
             notebook_id, f"shr-{secrets.token_urlsafe(16)}"
         )
-        stats = self.notebook_copy_stats(notebook_id)
+        stats = self._shown_copy_stats(notebook_id)
         return {
             "share_token": token,
             "copyable": stats["copyable"],
@@ -986,7 +988,7 @@ class NotebookSharingService:
         if not token:
             # 没有链接就没有「可不可拷贝 / 多大」这回事 —— 也不为它跑一次规模统计。
             return {"share_token": "", "copyable": False, "size": {}}
-        stats = self.notebook_copy_stats(notebook_id)
+        stats = self._shown_copy_stats(notebook_id)
         return {
             "share_token": token,
             "copyable": stats["copyable"],
@@ -995,6 +997,12 @@ class NotebookSharingService:
 
     def unshare_notebook(self, notebook_id: str) -> None:
         self._catalog.get_notebook(notebook_id)  # raises KeyError if missing
+        # Unsharing drops every membership row too, but it withdraws an
+        # authorisation; it is not the members leaving. Their Memory stays —
+        # its owner can only read it with notebook read access, which they no
+        # longer hold, and it comes back if they are let in again. Only a
+        # member's own acknowledged exit (``MemoryService.leave_notebook``)
+        # deletes Memory.
         self._store.clear_share(notebook_id)
 
     def find_notebook_by_share_token(self, token: str) -> "str | None":
@@ -1018,9 +1026,36 @@ class NotebookSharingService:
             stats = {**stats, "copyable": False}
         return stats
 
+    def _shown_copy_stats(self, notebook_id: str) -> dict:
+        """`notebook_copy_stats` for the surfaces that SHOW its size (the public
+        preview, the share response, the owner's share dialog and overview).
+
+        M2: those numbers exclude what a copy never carries — every member's Memory
+        sources and the KG rows derived from them — so no field of the preview lets a
+        link holder compute the Memory count by subtracting another (`source_count`
+        already excludes them). Only these callers pay for it; the verdict-only
+        callers (copy, join) and retrieval read the physical counts. A notebook
+        without Memory pays one indexed probe."""
+        stats = self.notebook_copy_stats(notebook_id)
+        memory_sources, memory_nodes, memory_edges = self._store.memory_derived_kg_counts(
+            notebook_id
+        )
+        size = stats.get("size")
+        if (memory_sources or memory_nodes or memory_edges) and size:
+            stats = {
+                **stats,
+                "size": {
+                    **size,
+                    "sources": max(0, size["sources"] - memory_sources),
+                    "nodes": max(0, size["nodes"] - memory_nodes),
+                    "edges": max(0, size["edges"] - memory_edges),
+                },
+            }
+        return stats
+
     def shared_preview(self, notebook_id: str) -> dict:
         notebook = self._catalog.get_notebook(notebook_id)
-        stats = self.notebook_copy_stats(notebook_id)
+        stats = self._shown_copy_stats(notebook_id)
         owner_display, titles = self._store.shared_preview_rows(notebook_id)
         return {
             "name": notebook.name,
@@ -1046,7 +1081,7 @@ class NotebookSharingService:
         for row in self._store.list_shared_by_owner(user_id):
             token = row["share_token"] or ""
             if token:
-                stats = self.notebook_copy_stats(row["id"])
+                stats = self._shown_copy_stats(row["id"])
                 readonly = not stats["copyable"]
                 mode = "readonly" if readonly else "copy"
                 size = stats["size"]
@@ -1199,8 +1234,23 @@ class NotebookSharingService:
         them read access, this call still resets their overlay — that is a
         blank slate, not a leak, and is the same "start over" outcome as any
         other rejoin.
+
+        Never deletes Memory. Ending someone's membership is an access change
+        like revoking a grant: their Memory stays, readable by nobody while
+        they cannot read the notebook, and returns if they are let back in.
+        The one path that deletes a member's Memory is their own acknowledged
+        exit, ``MemoryService.leave_notebook`` (``DELETE .../membership``).
         """
         self._store.remove_member(notebook_id, user_id)
+        self._clear_member_profile(notebook_id, user_id)
+
+    def forget_member_state(self, notebook_id: str, user_id: str) -> None:
+        """The per-member cleanup ``remove_member`` runs after its row delete,
+        for a caller that has already deleted the membership row itself in a
+        transaction of its own (the self-exit does, atomically with its final
+        Memory count). Deliberately does not touch ``notebook_members``: by
+        the time this runs the user may have rejoined, and deleting that new
+        row would silently undo their rejoin."""
         self._clear_member_profile(notebook_id, user_id)
 
     def _clear_member_profile(self, notebook_id: str, user_id: str) -> None:
@@ -1275,6 +1325,9 @@ class NotebookSharingService:
         and rejoining the notebook is what makes them visible again — which is
         the same person's own notes, so that is correct rather than a leak.
         The single-member path is the one users actually take, and it cleans up.
+
+        Never deletes Memory either: nobody else's action may destroy a
+        member's Memory (see ``remove_member``).
         """
         return self._store.kick_all_members(notebook_id)
 
@@ -1340,6 +1393,10 @@ class NotebookSharingService:
         return notebook
 
     def leave_notebook(self, notebook_id: str, user_id: str) -> None:
+        """Membership-only removal, kept for the frozen facade surface. The
+        user-facing exit (``DELETE /notebooks/{id}/membership``) is
+        ``MemoryService.leave_notebook``, which deletes the leaver's Memory
+        after they acknowledge its count and ends the membership itself."""
         self.remove_member(notebook_id, user_id)
 
     # -------------------------------------------------------------- ownership

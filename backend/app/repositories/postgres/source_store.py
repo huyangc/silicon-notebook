@@ -22,6 +22,7 @@ from app.models.sources import (
 )
 from app.domain.source_display import summary_display_title
 from app.models.question_suggestions import QUESTION_SUGGESTION_REVISION_PAGE_SIZE
+from app.repositories.postgres.memory_sql import memory_source_type_predicate
 from app.repositories.ports import (
     SOURCE_PAPER_META_UNSET,
     DocumentCapacityExceeded,
@@ -38,6 +39,7 @@ from app.repositories.postgres._store_utils import (
     normalize_timestamp,
     placeholders,
 )
+from app.repositories.postgres import memory_sql
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.memory_sql import (
     memory_source_readable,
@@ -75,6 +77,8 @@ _HIDDEN_SOURCE_IDS_SQL = (
     f"AND {memory_source_readable('s')} "
     "ORDER BY s.id"
 )
+#: Schema-induction sample: no Memory element (``notebook_element_sample``).
+_SAMPLE_NOT_MEMORY = f"NOT ({memory_sql.memory_source_type_predicate('s.source_type')})"
 
 
 # 论文元数据补抽候选谓词(接在 ``FROM sources s`` 且已按 ``s.notebook_id`` 过滤之后)。
@@ -1211,6 +1215,11 @@ class SourceStore:
     def notebook_element_sample(
         self, notebook_id: str, *, max_chars: int = 8000
     ) -> list[dict]:
+        """Deterministic, character-bounded schema-induction sample (SQLite twin's
+        docstring). Memory elements are left out (M2, E5-1): the model paraphrases
+        the sample into ``notebook_object_schemas`` (description, rationale, labels),
+        a notebook-level row every member sees and every copy carries, so a Memory
+        read here would reach both."""
         budget = max(0, int(max_chars))
         if budget == 0:
             return []
@@ -1224,6 +1233,7 @@ class SourceStore:
                     "substring(e.text FROM 1 FOR %s) AS text "
                     "FROM source_elements e JOIN sources s ON s.id=e.source_id "
                     "WHERE s.notebook_id=%s AND e.ordinal>%s "
+                    f"AND {_SAMPLE_NOT_MEMORY} "
                     "ORDER BY e.ordinal LIMIT %s",
                     (budget, notebook_id, after_ordinal, 32),
                 ).fetchall()
@@ -1583,7 +1593,40 @@ class SourceStore:
         )
 
     def delete_source_row(self, connection, source_id: str) -> None:
-        connection.execute("DELETE FROM sources WHERE id=%s", (source_id,))
+        self.delete_source_rows(connection, [source_id])
+
+    @staticmethod
+    def delete_source_rows(connection, source_ids: Sequence[str]) -> None:
+        """Delete source rows (elements and the other child rows go through
+        their cascading foreign keys) — the batch form ``delete_source_row``
+        uses, so a single delete and a Memory purge page share one statement."""
+        ids = sorted({str(source_id) for source_id in source_ids if source_id})
+        if ids:
+            connection.execute("DELETE FROM sources WHERE id = ANY(%s)", (ids,))
+
+    @staticmethod
+    def lock_sources_for_teardown_tx(
+        connection, source_ids: Sequence[str]
+    ) -> list[dict]:
+        """``FOR UPDATE`` the existing rows among ``source_ids``, in id order,
+        and return ``{id, notebook_id, source_type, file_path, is_memory}``
+        for each (``is_memory`` is ``memory_sql``'s Memory-source predicate).
+
+        The batch form of ``source_exists_for_update_tx`` (without its
+        capacity lock): the teardown takes the aggregate lock before any
+        derived row, and taking every lock of a batch in one id-ordered
+        statement gives two concurrent teardowns one global order. A missing
+        id is simply absent (already removed)."""
+        ids = sorted({str(source_id) for source_id in source_ids if source_id})
+        if not ids:
+            return []
+        rows = connection.execute(
+            "SELECT id,notebook_id,source_type,file_path,"
+            f"({memory_source_type_predicate()}) AS is_memory FROM sources "
+            "WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
+            (ids,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def insert_elements(
         self,

@@ -1209,6 +1209,10 @@ also the one copied table whose source and destination row counts may
 legitimately differ, so they are deliberately excluded from the deep copy's
 row-parity self-check.
 
+### A deep copy never carries Memory
+
+A deep copy — a user's own copy of a notebook and the copy delivered through a share link alike — never carries any Memory or anything derived from one, whoever owns the copy: copying your own notebook leaves your own Memory behind too. Memory sources, their elements and vectors, the knowledge objects, relations, facts and vectors derived from them, relations with a Memory-derived object at either end, and every cluster of a Memory (one with a Memory-derived member, or whose canonical id was minted from a Memory-derived object) are left out; evidence entries a Memory lent to a kept object, relation or fact (a manual merge appends them) are removed from the copied row, which is kept even when its evidence becomes empty. A copy of a notebook whose clustering is out of date carries no clusters at all: it starts unclustered and marked 「待重建」. A copy of a notebook that holds Memory starts marked 「待重建」 too. Nothing rebuilds automatically — the copy's owner starts the rebuild, and until then the members of a cluster that was not copied stand alone. Object schemas are induced from samples that read no Memory element; schemas induced before this change cannot be told apart and travel with the copy. Data from before Memory was isolated in the knowledge graph can still name a Memory object by its id (a fact's link to its knowledge object); such an id resolves to nothing in the copy and carries no text. A conflict resolution that chose 'modify' may have written model-restated Memory content into a shared object's payload before this change; the copy cannot recognise such a payload and carries it as it is. The share preview and the owner's share dialog count sources, nodes and edges without any member's Memory. A notebook without Memory whose clustering is up to date is copied exactly as before.
+
 ### Group libraries in the notebook list
 
 A library readable through a live group edge, where the viewer is neither owner
@@ -1225,11 +1229,13 @@ nor a `notebook_members` row, forms the notebook list's **群组** partition.
   list **and the detail** path fill it in; the de-duplication rule is identical on
   both: **the membership row wins** — somebody who both joined by share link and
   sits in a granted group gets an empty `granted_via` and keeps a working "退出
-  共享" button, because that button deletes precisely that membership row.
+  共享" button, because that button ends precisely that membership row (and,
+  after telling them how many, deletes the leaver's own Memory there — see
+  "Memory and Agent MCP").
 - Conversely, a card whose `granted_via` is non-empty **must not** show "退出
-  共享": that button only deletes a `notebook_members` row and does nothing to an
-  authorization edge, so pressing it while the library stays in the list is a
-  guaranteed false failure. It is replaced by a static explanation that the group
+  共享": that button only ends a `notebook_members` membership and does nothing
+  to an authorization edge, so pressing it while the library stays in the list is
+  a guaranteed false failure. It is replaced by a static explanation that the group
   admin governs this access.
 - `GET /notebooks/{id}/mountable` now returns `MountableNotebook`, which adds
   `origin ∈ {base, mine, shared}`, projected from columns `MOUNT_VALID_EXPR`
@@ -1411,6 +1417,23 @@ included; a Memory is deleted through the Memory endpoints. The source detail wi
 a citation's 「查看原文」 can open for such a source, accordingly shows no reparse or delete
 action, no degraded-parse hint, and no command catalog section for a Memory or Knowhow
 projection source.
+
+A Memory's hidden synthetic source normally disappears with its Memory. Two cases used to
+leave an ownerless one behind: a notebook copy made before copies stopped carrying Memory
+(the copy kept the hidden source but cleared its link to the Memory), and a Memory that was
+hard-deleted or is no longer `confirmed` while its source was not torn down. After every
+server start, once the service reports ready, one background pass removes every such
+ownerless Memory source through the same Memory-source removal as a member's exit or a hard
+delete, in calls of at most 200 sources of one notebook: the orphan's evidence is stripped
+from any shared object it was merged into (the shared object stays), every concept cluster one
+of its objects belongs to or was minted from goes whole together with the review candidates
+naming it, and its elements, vectors, knowledge-graph objects and relations and cluster
+memberships go with it. The pass
+makes no model call, is safe to repeat (a second run finds nothing) and leaves anything it
+could not delete for the next start. The notebook dashboard shows the number still remaining in
+that notebook as a neutral notice, 「残留的记忆来源」 with 「系统会在后台自动清理，无需处理。」 — a read-only
+pipeline checkup item (`H12`, repair action `none`) with a count and no button; it is normally 0
+after a start.
 
 The lifecycle is `candidate | confirmed | rejected | deprecated`. An Agent can create only
 `candidate`; all authorized Agent profiles belonging to the same user and selected notebook
@@ -1856,9 +1879,72 @@ only in snapshot and queue history. Approval revalidates the Memory's current co
 plus the pinned revision and notebook binding, in the write transaction before reusing KG dedupe/merge to create or merge one
 or more Base KG objects. Approval/rejection records the authenticated admin reviewer; the API
 and promotion audit record the complete `base_object_ids` result. This does not change or
-expose the private Memory row.
+expose the private Memory row. A proposal whose Memory is hard-deleted is withdrawn in the
+same transaction: it becomes `rejected` with reason `withdrawn_memory_deleted` and no
+reviewer (a withdrawal is not a review); an already approved promotion is independent of the
+Memory and stays.
 Deleting a notebook cascades all members' private Memory bound to it, so the delete dialog
 warns about that lifecycle consequence without exposing member identities or counts.
+
+Hard-deleting a Memory — `DELETE /memories/{id}`, or `POST /memories/bulk-delete` with at most
+200 ids (only the caller's own records count) — first removes everything derived from it: the
+hidden synthetic source with its elements and element vectors, and the KG objects, relations,
+source-local facts, reverse-index rows extracted from it. Every concept cluster one of those
+objects belongs to is removed whole — all its member rows, in every generation — because its
+canonical id, name and description can carry the Memory's text on the shared members' rows; the
+surviving members are unclustered until the rebuild re-clusters them, and the notebook's graph is
+marked for rebuild. The merge candidates naming those clusters and the conflict candidates
+referencing the Memory's objects or relations are deleted in any status, resolved ones included,
+because their stored rationale can quote the Memory. A conflict decision between shared objects
+only is never touched. A merge decision is keyed by cluster, so a decided merge candidate naming
+a removed cluster goes too: a merge the curator rejected (or confirmed) between that cluster and a
+shared one may be proposed again after the rebuild. A merge candidate that names the Memory
+object's bridge id is removed only when no cluster carries that id; a live shared cluster with the
+same id keeps its candidates. If a curator manually merged a Memory-derived object into another
+object, the surviving object only loses the evidence that Memory contributed; it is never deleted
+with the Memory. Every other removal of a Memory's derived source does the same cleanup:
+deprecating a confirmed Memory, moving it to another notebook with `POST /memories/transfer`, and
+the cleanup after an extraction that finished once the Memory was no longer confirmed. Bulk
+deletes write a content-free audit event (notebook, user, count).
+
+Leaving a shared notebook deletes the leaver's own Memory there. Of the actions that end one
+person's access, only that person's own exit deletes anything. Before leaving,
+`GET /notebooks/{id}/membership/exit-disclosure` returns `{"memory_count": N}`, the number of the
+caller's Memory items in that notebook — every status — that leaving would permanently delete now
+(0 when they are not a member, or would keep reading the notebook as its owner or through a
+direct, group or everyone grant). `DELETE /notebooks/{id}/membership[?acknowledged_memory_count=A]`
+then claims, under the membership row lock, exactly the C items the exit deletes now, and every
+outcome says what the server did, counted by the server:
+
+- C = 0 and A absent or 0: 204; the membership ends (or was already gone); nothing is deleted.
+- A ≠ C, including A > 0 when C is 0 (the caller meanwhile lost the membership, gained a grant
+  or moved the items away): 409 `{"detail": {"code": "exit_disclosure_required", "memory_count": C}}`;
+  nothing is deleted and the membership is unchanged.
+- A = C > 0 and the exit finishes: 200 `{"deleted_memory_count": d}`, d being what this request
+  deleted.
+- A = C > 0, d items were deleted, but r items the caller did not acknowledge exist (saved while
+  the exit ran): 409 `{"detail": {"code": "exit_incomplete", "deleted_memory_count": d,
+  "memory_count": r}}`; the caller is still a member, the d are gone for good, the r remain.
+- A = C > 0 and the purge failed part-way: 503 with the same `exit_incomplete` body (d may be 0);
+  still a member; some Memory may already be deleted, and a retry — which starts from the
+  disclosure again — continues from there.
+
+The membership ends in one transaction with a final count, and only the membership the claim
+locked (a member removed and added back meanwhile keeps the new membership). Every step commits
+on its own, so an exit whose client went away still leaves a state the next disclosure reports
+truthfully. Before confirming, the user can keep their Memory in two ways:
+`GET /notebooks/{id}/memories/export` downloads exactly the counted items as a Markdown file
+(`<notebook>-记忆-<YYYYMMDD>.md`, each with its title, kind, status — candidates marked — times,
+tags, content and provenance line; an entry's unclosed code fence or comment is closed so it
+cannot swallow the next; streamed 200 at a time), and `POST /memories/transfer` copies or moves
+confirmed items into a notebook the user owns (at most 200 ids per request; other statuses are
+not transferred). The exit writes a content-free audit event (notebook, user, count).
+
+Actions that take access away never delete Memory: unsharing the notebook (which also clears its
+member list), revoking a grant, or removing someone from a granted group only withdraws access.
+Access is often temporary, so the Memory stays; while access is gone nobody can read it, its
+owner included, and it is visible to its owner again as soon as access returns. Deleting the
+whole notebook is different: it deletes everything in it, members' Memory included (above).
 
 The committed deterministic Memory evaluation reports Recall@5, MRR, nDCG, and three
 zero-tolerance counters: candidate-to-formal-plane leakage, cross-user leakage, and
@@ -3459,7 +3545,7 @@ Key local beta APIs:
 - `GET /api/notebooks`, `POST /api/notebooks`, `PATCH /api/notebooks/{id}`, `DELETE /api/notebooks/{id}` — the delete endpoint returns **202** with `{"status":"deleting"}`, not 204: it commits a single-row status change (`notebooks.status='deleting'`) and returns immediately; the notebook is excluded from every list/read/search/mount surface from that instant on (`GET /api/notebooks/{id}` 404s immediately), but its **owner** gets **409** from a repeat `DELETE` on the same notebook (codex #659 R6 P2: the delete endpoint's guard is owner-scoped and deliberately does not apply the same live-only visibility filter every other write endpoint does, precisely so a retried/duplicate delete request reaches this 409 instead of a misleading 404) — a **non-owner** still gets 404 either way (existence is never leaked to a caller without access). The actual database and disk cleanup runs afterward as a background job (materializing source file paths, waiting out any knowledge-graph rebuild already running against that notebook, then one atomic finalize step that archives the deleted content into the user's retained-activity history and removes the row). The browser already treated a successful delete as fire-and-forget (it tombstones the card client-side and refreshes the list), so this is a behavior change only for direct API callers that previously relied on 204 meaning "fully deleted" — poll `GET /api/notebooks/{id}` (404) to confirm invisibility, or (administrators only) `GET /api/admin/users/{user_id}/activity` for confirmation the retained-activity archive has landed. The archived `deleted_at` timestamp is the finalize step's moment, which can trail the delete request by anywhere from under a second to tens of minutes on a large notebook. A full KG **rebuild**'s own delete phase (a different path from notebook deletion) likewise drains the old graph in bounded pages before its single atomic reset; the page/threshold row budget is `KG_GRAPH_DRAIN_PAGE_ROWS` (default 2000, allowed 50–20000 — the ceiling stays under SQLite's default SQLITE_MAX_VARIABLE_NUMBER because drain pages bind selected ids as SQL parameters).
 - `GET /api/notebooks/{id}/analytics`
 - `GET /api/notebooks/{id}/analytics/content-overview` — viewer-aware content assets: `memory` (`total`, `confirmed`, `candidate`, up to three recent `id`/`title`/`status`/`updated_at`) and `knowhow` (`table_count`, `row_count`, `projection_pending`, `projection_failed`, `stale_code_count`, up to three recent table summaries)
-- `GET /api/notebooks/{id}/checkup` — read-only pipeline health check (dashboard hot path): aggregates source/index damage-and-pending signals — empty source, missing retrieval segments, missing retrieval vectors, sources pending analysis, stale/corrupt retrieval index — each with a count, a bounded sample, and a suggested repair action; all zero when healthy. Consumed by the dashboard's source-status and index blocks plus the bell; a healthy notebook stays neutral and undisturbed. The two missing-retrieval-vector counts are served from an event-driven per-notebook memo: the app's own vector writes (ingest embedding, "backfill vectors", re-parse) invalidate it on completion, so the next poll reflects the new counts; **cross-process** writes (an operator running the offline CLI backfill/import on the server) and a few rare background-failure paths are invisible to these events and fall back to the backstop cache — counts may be **up to 300 seconds stale** in those scenarios.
+- `GET /api/notebooks/{id}/checkup` — read-only pipeline health check (dashboard hot path): aggregates source/index damage-and-pending signals — empty source, missing retrieval segments, missing retrieval vectors, sources pending analysis, stale/corrupt retrieval index — each with a count, a bounded sample, and a repair action (read-only items carry the action `none`: they are shown as a notice without a button because the system handles them). `healthy` is true when every repairable item (action other than `none`) counts zero; read-only items are still listed with their counts but do not count toward `healthy`, and they neither ring the bell nor keep the repair polling alive. Consumed by the dashboard's source-status and index blocks plus the bell; a healthy notebook stays neutral and undisturbed. The two missing-retrieval-vector counts are served from an event-driven per-notebook memo: the app's own vector writes (ingest embedding, "backfill vectors", re-parse) invalidate it on completion, so the next poll reflects the new counts; **cross-process** writes (an operator running the offline CLI backfill/import on the server) and a few rare background-failure paths are invisible to these events and fall back to the backstop cache — counts may be **up to 300 seconds stale** in those scenarios.
 - `POST /api/notebooks/{id}/sources/reparse` — checkup repair: batch re-parse the given sources (empty/missing-segment damage), scheduled through the existing pipeline in the background, filtered to the notebook scope.
 - `POST /api/notebooks/{id}/backfill-vectors` — checkup repair: backfill the notebook's missing retrieval vectors in the background (missing-only, idempotent, embedding-only — never re-parses).
 - `POST /api/notebooks/{id}/paper-meta/backfill` — owner-triggered paper-metadata backfill (background, idempotent/resumable), returns `{queued}`; 409 when the LLM is not configured. The source panel's 「补全论文信息」 button is **shown only when there is work to do**: it hides when `NotebookSummary.paper_meta_missing` (filled precisely only by the single-notebook `GET /api/notebooks/{id}`, an EXISTS probe over the same predicate the backfill queue uses; `null` = not computed on list projections and older backends) is `false` **and** the visible source page has no `paper_meta_status="missing"` row. `null`/absent keeps the legacy always-visible behavior — hiding is triggered only by an explicit `false` — and the button stays visible while a backfill is running to host its 「补全中…」 state.

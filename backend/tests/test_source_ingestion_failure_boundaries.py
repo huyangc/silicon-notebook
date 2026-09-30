@@ -224,19 +224,21 @@ def test_delete_locks_source_before_projection_cleanup(repo, monkeypatch):
     events: list[str] = []
     store = repo._runtime.source_store
     ingestion = repo._runtime.source_ingestion
-    original_lock = store.source_exists_for_update_tx
-    original_clear = ingestion.clear_source_extraction_state
+    original_lock = store.lock_sources_for_teardown_tx
+    original_clear = ingestion.clear_sources_extraction_state
 
-    def observe_lock(db, source_id, notebook_id=None):
+    def observe_lock(db, source_ids):
         events.append("lock")
-        return original_lock(db, source_id, notebook_id)
+        return original_lock(db, source_ids)
 
     def observe_clear(*args, **kwargs):
         events.append("clear")
         return original_clear(*args, **kwargs)
 
-    monkeypatch.setattr(store, "source_exists_for_update_tx", observe_lock)
-    monkeypatch.setattr(ingestion, "clear_source_extraction_state", observe_clear)
+    # The single delete runs the one teardown body the Memory purge batches
+    # (``_teardown_sources_tx``): the aggregate lock, then the derived rows.
+    monkeypatch.setattr(store, "lock_sources_for_teardown_tx", observe_lock)
+    monkeypatch.setattr(ingestion, "clear_sources_extraction_state", observe_clear)
 
     repo.delete_source(sid)
 
@@ -244,17 +246,17 @@ def test_delete_locks_source_before_projection_cleanup(repo, monkeypatch):
 
 
 def test_delete_source_does_not_pass_notebook_id_to_the_lock_probe(repo, monkeypatch):
-    """W4-2 (WR-7): delete_source's teardown transaction must call
-    ``source_exists_for_update_tx`` with ``notebook_id=None`` — passing the
-    notebook id back in would make PostgreSQL also take the notebooks-row
-    ``FOR NO KEY UPDATE`` capacity lock, putting the whole per-source teardown
-    back on top of it (the exact regression this task removes). This is a
-    call-shape pin (SQLite discards the argument either way, so it cannot
-    observe the behavioral difference itself — see the PostgreSQL lane's
-    ``test_delete_source_does_not_wait_on_notebook_capacity_lock`` for the
-    real cross-connection lock behavior).
+    """W4-2 (WR-7): delete_source's teardown transaction must not take the
+    notebooks-row ``FOR NO KEY UPDATE`` capacity lock — that would put the
+    whole per-source teardown back on top of it (the exact regression W4-2
+    removed). The teardown's lock is ``lock_sources_for_teardown_tx``, which
+    takes source ids only and never the capacity lock; the capacity-locking
+    probe ``source_exists_for_update_tx`` is not called by the delete at all.
+    This is a call-shape pin (SQLite cannot observe the lock itself — see the
+    PostgreSQL lane's ``test_delete_source_does_not_wait_on_notebook_capacity_lock``
+    for the real cross-connection lock behavior).
 
-    The other two call sites of the same primitive
+    The other two call sites of ``source_exists_for_update_tx``
     (``_clear_state_of_present_source_tx`` and ``ingest_memory_source``'s
     reparse branch) are deliberately UNCHANGED and keep passing
     ``notebook_id`` — this test only pins the ``delete_source`` call site.
@@ -269,18 +271,24 @@ def test_delete_source_does_not_pass_notebook_id_to_the_lock_probe(repo, monkeyp
     )
     sid = out[0].id
     store = repo._runtime.source_store
-    original_lock = store.source_exists_for_update_tx
+    original_lock = store.lock_sources_for_teardown_tx
     calls: list[tuple] = []
+    probes: list[tuple] = []
 
-    def observe_lock(db, source_id, notebook_id=None):
-        calls.append((source_id, notebook_id))
-        return original_lock(db, source_id, notebook_id)
+    def observe_lock(db, source_ids):
+        calls.append(tuple(source_ids))
+        return original_lock(db, source_ids)
 
-    monkeypatch.setattr(store, "source_exists_for_update_tx", observe_lock)
+    monkeypatch.setattr(store, "lock_sources_for_teardown_tx", observe_lock)
+    monkeypatch.setattr(
+        store, "source_exists_for_update_tx",
+        lambda db, source_id, notebook_id=None: probes.append((source_id, notebook_id)),
+    )
 
     repo.delete_source(sid)
 
-    assert calls == [(sid, None)]
+    assert calls == [(sid,)]
+    assert probes == []
 
 
 def test_metadata_augmentation_model_failure_falls_back_deterministically(repo):

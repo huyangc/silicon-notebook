@@ -51,6 +51,40 @@ MemoryStatus = Literal["candidate", "confirmed", "rejected", "deprecated"]
 MemoryPromotionState = Literal["none", "proposed", "approved", "rejected"]
 
 
+@dataclass(frozen=True)
+class MemberExitSnapshot:
+    """What leaving a notebook would do to the leaver's own Memory.
+
+    ``memory_count`` is the number of Memory rows (every status) the exit
+    would delete: zero when the user is not a member, or would keep reading
+    the notebook through its ownership or a grant (``keeps_access``). The
+    ids and the membership token are filled only for a claiming read taken
+    under the membership lock.
+    """
+
+    is_member: bool
+    keeps_access: bool
+    memory_count: int
+    memory_ids: tuple[str, ...] = ()
+    # What identifies the claimed membership row (its ``added_at``): the
+    # finish ends only THAT membership, never one re-created meanwhile.
+    membership_token: Any = None
+
+
+class MemoryExitDisclosure(BaseModel):
+    """``GET /notebooks/{id}/membership/exit-disclosure``."""
+
+    memory_count: int
+
+
+class MemberExitResult(BaseModel):
+    """``DELETE /notebooks/{id}/membership`` 200: the exit finished; this
+    request deleted ``deleted_memory_count`` Memories (counted by the
+    server)."""
+
+    deleted_memory_count: int
+
+
 class MemoryRecord(BaseModel):
     id: str
     notebook_id: str

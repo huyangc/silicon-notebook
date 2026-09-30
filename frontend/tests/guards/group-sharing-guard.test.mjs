@@ -9,11 +9,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  appSourceModules,
   callsIn,
   controlFlowIn,
+  declarations,
   findFunction,
   ifConditionsIn,
   importsFrom,
+  importsIn,
   jsxElements,
   parseModule,
   variableInitializersIn,
@@ -244,7 +247,7 @@ test("两个只读入口都由 notebook-reader-actions 提供,page 不自己再�
   assert.equal(menuActions.length, 1);
   assert.equal(
     menuActions[0].bindings.onLeave,
-    "leaveMenuNotebook(notebookCollection.menu.notebook.id)",
+    "leaveMenuNotebook(notebookCollection.menu.notebook.id, notebookCollection.menu.position)",
     "菜单的退出共享回调没有绑到 leaveMenuNotebook 工厂",
   );
   // leaveMenuNotebook 是把「读 notebookCollection.menu.notebook.id」挪到 JSX 渲染层
@@ -253,7 +256,14 @@ test("两个只读入口都由 notebook-reader-actions 提供,page 不自己再�
   const leaveFactory = findFunction(page, "leaveMenuNotebook");
   assert.ok(leaveFactory, "缺 leaveMenuNotebook 工厂函数");
   const leaveFactoryText = leaveFactory.getText(page);
-  assert.match(leaveFactoryText, /leaveNotebook\(notebookId\)/);
+  // 退出不再直接打 DELETE:它进「读条数→确认→DELETE」那唯一一份流程(退出会永久删掉
+  // 成员自己的记忆,必须先告知)。page 自己不许再持有 leaveNotebook。
+  assert.match(leaveFactoryText, /notebookExit\.start\(notebookId,/);
+  assert.equal(
+    importsFrom(page, "./notebook-share").some((item) => item.imported === "leaveNotebook"),
+    false,
+    "page.tsx 又导入了 leaveNotebook —— 它会绕开退出共享的记忆删除告知流程",
+  );
   assert.match(
     leaveFactoryText,
     /loadNotebookCollection\(\)/,
@@ -268,6 +278,67 @@ test("两个只读入口都由 notebook-reader-actions 提供,page 不自己再�
     strays.map((element) => element.bindings.onClick),
     [],
     "page.tsx 又自己渲染了退出共享按钮 —— 它绕开了组件测试守着的那条分流",
+  );
+});
+
+// 「退出共享」的两个入口(顶栏按钮、卡片菜单)必须进同一份流程、共用同一个确认面板。
+// 组件测试(notebook-exit.component.test.tsx)证明流程本身正确;这里只钉 page 的接线:
+// 两个入口都调 `notebookExit.start`,面板只渲染一份,顶栏按钮的忙碌态来自流程而不是
+// 另一个本地 state。
+test("退出共享的两个入口共用 use-notebook-exit 的同一份流程与同一个确认面板", () => {
+  assert.equal(jsxElements(page, "NotebookExitPanel").length, 1, "确认面板必须恰好渲染一份");
+  assert.equal(jsxElements(page, "NotebookExitPanel")[0].bindings.exit, "notebookExit");
+  const badge = jsxElements(page, "ReaderNotebookBadge")[0];
+  assert.equal(badge.bindings.onLeave, "handleLeaveShared");
+  assert.equal(badge.bindings.leaveBusy, "notebookExit.isBusy(currentNotebook.id)");
+  const bar = findFunction(page, "handleLeaveShared");
+  assert.ok(bar, "缺 handleLeaveShared");
+  assert.match(bar.getText(page), /notebookExit\.start\(/);
+  assert.match(bar.getText(page), /refreshAfterAccessChange\(navEpoch\)/);
+  assert.equal((pageText.match(/\bleaveNotebook\(/g) ?? []).length, 0);
+});
+
+// 退出共享**没有**无条件的 DELETE 入口:任何绕开「先告知、确认后才删」流程的导出都会让
+// 成员在不知情时永久丢掉记忆。notebook-share.ts 曾留着一个无人调用的 leaveNotebook(注释还
+// 写着「移除自己的成员身份」),它一旦被谁重新接上就是那个绕道——这里禁止它回来。
+test("notebook-share.ts 不导出 leaveNotebook,任何模块也不从那里导入它", async () => {
+  const share = await parseModule("notebook-share.ts");
+  assert.deepEqual(
+    declarations(share).filter((item) => item.name === "leaveNotebook"),
+    [],
+    "notebook-share.ts 又声明了 leaveNotebook —— 它是绕开记忆删除告知的无条件 DELETE",
+  );
+  const importers = [];
+  for (const { path, module } of await appSourceModules()) {
+    for (const item of importsIn(module)) {
+      if (/(^|\/)notebook-share(\.ts)?$/.test(item.module) && item.imported === "leaveNotebook") {
+        importers.push(path);
+      }
+    }
+  }
+  assert.deepEqual(importers, []);
+});
+
+// 结果提示是永久删除记忆的唯一确认:page 只渲染一份 ToastRegion(role=status 的常驻区域),
+// 「退出共享」的提示走 showExitToast(停留更久),不再有条件渲染整个 `.toast` 节点的旧写法。
+test("页面的提示由 ToastRegion 渲染,退出共享的提示走加长停留的那条通道", () => {
+  assert.equal(jsxElements(page, "ToastRegion").length, 1);
+  assert.equal(jsxElements(page, "ToastRegion")[0].bindings.message, "toast");
+  assert.match(pageText, /useNotebookExit\(\{ onToast: showExitToast,/);
+  // 只有「退出共享」自己的提示按加长时长计时,其余提示仍是默认时长。
+  assert.equal(
+    jsxElements(page, "ToastRegion")[0].bindings.lingerMs,
+    "toast && toast === exitToast ? TOAST_EXIT_MS : TOAST_DEFAULT_MS",
+  );
+  assert.match(
+    pageText,
+    /const showExitToast = useCallback\(\(message: string\) => \{\s*setExitToast\(message\);\s*setToast\(message\);\s*\}, \[\]\);/,
+    "showExitToast 必须同时记下这条提示(setExitToast)并显示它(setToast)",
+  );
+  assert.equal(
+    jsxElements(page, "div").filter((element) => element.attributes?.className === "toast").length,
+    0,
+    "page.tsx 又自己渲染了 <div className=\"toast\"> —— 没有 role=status,也没有停留时长",
   );
 });
 

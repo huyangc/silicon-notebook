@@ -802,6 +802,7 @@ def run_startup(lease: object | None) -> object | None:
             preload_summary["ppr_cores"],
         )
         _reproject_legacy_knowhow_tables(repo)
+        _sweep_orphan_memory_sources(repo)
         return repo
     except Exception as exc:  # noqa: BLE001 — surface via readiness, never crash
         _fail_lifecycle(lease, exc)
@@ -893,3 +894,29 @@ def _reproject_legacy_knowhow_tables(repo) -> None:
             )
     except Exception:  # noqa: BLE001 — best-effort, must never affect readiness
         logger.exception("startup: legacy knowhow reprojection scan failed (non-fatal)")
+
+
+def _sweep_orphan_memory_sources(repo) -> None:
+    """Post-readiness step for audit N-5 (plan 2026-09-29 E5-3): hand every
+    ownerless Memory source (``memory_id`` cleared by an earlier notebook copy,
+    or its Memory hard-deleted / no longer confirmed) to ONE background sweep
+    (``app.services.memory_orphan_sweep``, which owns the whole contract:
+    ordinary ``delete_source`` path, keyset-paged, resumable because the
+    orphans themselves are the queue, content-free events).
+
+    Same placement and failure discipline as ``_reproject_legacy_knowhow_tables``
+    above: strictly AFTER ``mark_ready()`` and every exception is swallowed here,
+    so a bug in the catch-up can never turn a successful startup into "error".
+    With nothing to sweep it is one ``EXISTS`` probe and no job.
+
+    ORDER: when the ruling-M1 isolated rebuild (``_rebuild_memory_isolated_notebooks``,
+    E4-5) is also present, THIS step runs first. Every orphan deleted while a
+    notebook is being rebuilt bumps that notebook's graph sequence and makes the
+    rebuild's result stale, so sweeping first saves a second rebuild. (Correct
+    either way -- a rebuild already tolerates concurrent deletes -- just cheaper.)"""
+    try:
+        from app.services.memory_orphan_sweep import MemoryOrphanSweep
+
+        MemoryOrphanSweep.for_repository(repo).schedule()
+    except Exception:  # noqa: BLE001 — best-effort, must never affect readiness
+        logger.exception("startup: memory orphan sweep scheduling failed (non-fatal)")

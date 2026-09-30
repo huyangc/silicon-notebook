@@ -24,11 +24,13 @@ from app.models.sources import (
 from app.domain.evidence_fingerprint import element_text_sha
 from app.domain.source_display import summary_display_title
 from app.models.question_suggestions import QUESTION_SUGGESTION_REVISION_PAGE_SIZE
+from app.repositories.sqlite.memory_sql import memory_source_type_predicate
 from app.repositories.ports import (
     SOURCE_PAPER_META_UNSET,
     DocumentCapacityExceeded,
     SourceElementWrite,
 )
+from app.repositories.sqlite import memory_sql
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.memory_sql import (
     memory_source_readable,
@@ -76,6 +78,8 @@ _HIDDEN_SOURCE_IDS_SQL = (
     f"AND {memory_source_readable('s')} "
     "ORDER BY s.id"
 )
+#: Schema-induction sample: no Memory element (``notebook_element_sample``).
+_SAMPLE_NOT_MEMORY = f"NOT ({memory_sql.memory_source_type_predicate('s.source_type')})"
 
 
 # 论文元数据补抽候选的 SQL 谓词(接在 ``FROM sources s`` 且已按 ``s.notebook_id``
@@ -1235,6 +1239,12 @@ class SourceStore:
         SQLite and Python work bounded for large notebooks and avoids loading
         the unrelated embedding BLOBs that the old ``_gather_elements`` join
         selected before truncating in the service.
+
+        Memory elements are left out (M2, E5-1): the model paraphrases this sample
+        into ``notebook_object_schemas`` (description, rationale, labels), a
+        notebook-level row every member sees and every copy carries, so a Memory
+        read here would reach both. A schema induced before this rule cannot be
+        told apart from one induced after it.
         """
         budget = max(0, int(max_chars))
         if budget == 0:
@@ -1247,12 +1257,13 @@ class SourceStore:
         with self.database.connect() as db:
             while rendered_chars < budget:
                 rows = db.execute(
-                    """
+                    f"""
                     SELECT e.rowid AS _rowid, e.location_label,
                            substr(e.text, 1, ?) AS text
                     FROM source_elements e
                     JOIN sources s ON s.id = e.source_id
                     WHERE s.notebook_id = ? AND e.rowid > ?
+                    AND {_SAMPLE_NOT_MEMORY}
                     ORDER BY e.rowid ASC
                     LIMIT ?
                     """,
@@ -1784,7 +1795,38 @@ class SourceStore:
     def delete_source_row(
         self, connection: sqlite3.Connection, source_id: str
     ) -> None:
-        connection.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+        self.delete_source_rows(connection, [source_id])
+
+    @staticmethod
+    def delete_source_rows(
+        connection: sqlite3.Connection, source_ids: Sequence[str]
+    ) -> None:
+        """Mirror of the PostgreSQL twin: the batch form ``delete_source_row``
+        uses (page-bounded id list)."""
+        ids = sorted({str(source_id) for source_id in source_ids if source_id})
+        if ids:
+            marks = ",".join("?" for _ in ids)
+            connection.execute(f"DELETE FROM sources WHERE id IN ({marks})", ids)
+
+    @staticmethod
+    def lock_sources_for_teardown_tx(
+        connection: sqlite3.Connection, source_ids: Sequence[str]
+    ) -> list[dict]:
+        """Mirror of the PostgreSQL twin. The caller's ``BEGIN IMMEDIATE`` is
+        the lock here; this reads the existing rows in id order."""
+        ids = sorted({str(source_id) for source_id in source_ids if source_id})
+        if not ids:
+            return []
+        marks = ",".join("?" for _ in ids)
+        rows = connection.execute(
+            "SELECT id,notebook_id,source_type,file_path,"
+            f"({memory_source_type_predicate()}) AS is_memory FROM sources "
+            f"WHERE id IN ({marks}) ORDER BY id",
+            ids,
+        ).fetchall()
+        return [
+            {**dict(row), "is_memory": bool(row["is_memory"])} for row in rows
+        ]
 
     # ------------------------------------------------- knowhow projection
     # (Task 5, knowhow-tables PR-1): the deterministic projector writes one

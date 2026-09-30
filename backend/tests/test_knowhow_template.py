@@ -197,6 +197,27 @@ def test_template_slash_in_title_is_percent_escaped_in_filename_star(tmp_path, m
     assert _decoded_filename_star(disposition) == "输入/输出对照表-template.xlsx"
 
 
+def test_template_ascii_fallback_is_used_only_when_the_ascii_form_is_empty():
+    """Spec review P3: extracting the shared download-header helper must not
+    change this endpoint's ASCII ``filename=`` rule. Here only an EMPTY ASCII
+    form falls back to ``template.xlsx``; an ASCII form without Latin letters
+    is kept as it always was (the Memory export's letter rule is its own)."""
+    from app.api.knowhow_routes import _template_content_disposition
+
+    assert _template_content_disposition("电路.xlsx").startswith(
+        'attachment; filename=".xlsx";'
+    )
+    assert _template_content_disposition("电路-2026").startswith(
+        'attachment; filename="-2026";'
+    )
+    assert _template_content_disposition("电路").startswith(
+        'attachment; filename="template.xlsx";'
+    )
+    assert _template_content_disposition("输入/输出对照表-template.xlsx").startswith(
+        'attachment; filename="_-template.xlsx";'
+    )
+
+
 # ===========================================================================
 # POST /notebooks/{nb}/knowhow/{t}/append (mode=preview)
 # ===========================================================================

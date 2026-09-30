@@ -3197,7 +3197,7 @@
           "type": "object"
         },
         "CheckupResponse": {
-          "description": "一个 notebook 的体检结果聚合。``healthy`` = 所有 check.count 均为 0。",
+          "description": "一个 notebook 的体检结果聚合。``healthy`` = 所有可修复项(``fix`` 不是 ``none``)的 count 均为 0;\n只读项照常列出,不影响 ``healthy``。",
           "properties": {
             "checked_at": {
               "title": "Checked At",
@@ -7596,6 +7596,20 @@
           "title": "LastRebuild",
           "type": "object"
         },
+        "MemberExitResult": {
+          "description": "``DELETE /notebooks/{id}/membership`` 200: the exit finished; this\nrequest deleted ``deleted_memory_count`` Memories (counted by the\nserver).",
+          "properties": {
+            "deleted_memory_count": {
+              "title": "Deleted Memory Count",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "deleted_memory_count"
+          ],
+          "title": "MemberExitResult",
+          "type": "object"
+        },
         "MemoryBulkDeleteRequest": {
           "properties": {
             "memory_ids": {
@@ -7644,6 +7658,20 @@
             "content_md"
           ],
           "title": "MemoryCreateFromAnswer",
+          "type": "object"
+        },
+        "MemoryExitDisclosure": {
+          "description": "``GET /notebooks/{id}/membership/exit-disclosure``.",
+          "properties": {
+            "memory_count": {
+              "title": "Memory Count",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "memory_count"
+          ],
+          "title": "MemoryExitDisclosure",
           "type": "object"
         },
         "MemoryNotebookOption": {
@@ -24019,8 +24047,74 @@
       },
       "/api/notebooks/{notebook_id}/membership": {
         "delete": {
-          "description": "退出只读共享:只删自己的成员记录(幂等,不影响他人)。",
+          "description": "本人退出共享:结束自己的成员关系(幂等,不影响他人)。成员记录是本人读这本库的最后\n途径时,同时永久删除本人在这本库里的全部记忆及其派生数据。\n\n服务端在成员行锁下领取此刻要删的记忆,条数 C;`acknowledged_memory_count`(缺省按 0)\n必须等于 C:\n- 不等(含 C=0 而确认数大于 0:期间已不是成员、有了授权或把记忆移走了)→ 409\n  `exit_disclosure_required`(带 C),什么都不删、成员关系不变;\n- C=0 → 204,成员关系结束(或本来就不在),什么都不删;\n- C>0 且全部删完、收尾成功 → 200 `{\"deleted_memory_count\": d}`,d 是本次请求实际删除\n  的条数;\n- 删了 d 条(d>0),但期间又保存了未确认的 r 条 → 409 `exit_incomplete`(带 d、r),\n  仍是成员;\n- 中途失败 → 503 `exit_incomplete`(带 d、r,d 可以为 0),仍是成员,已删的不会恢复,\n  可以重试(重试从重新告知条数开始)。\n客户端断开不影响结果:每一步各自提交,下一次告知如实报告剩下的条数。",
           "operationId": "leave_notebook_route_api_notebooks__notebook_id__membership_delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "acknowledged_memory_count",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Acknowledged Memory Count"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemberExitResult"
+                  }
+                }
+              },
+              "description": "The exit finished; this request deleted `deleted_memory_count` Memories (counted by the server)."
+            },
+            "204": {
+              "description": "Nothing to delete: the membership ended (or was already absent)."
+            },
+            "409": {
+              "description": "`exit_disclosure_required` `{code, memory_count}`: the acknowledgement differs from the count; nothing deleted, membership unchanged. `exit_incomplete` `{code, deleted_memory_count, memory_count}`: that many were deleted, Memories saved during the exit remain; still a member."
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            },
+            "503": {
+              "description": "`exit_incomplete` `{code, deleted_memory_count, memory_count}`: the purge failed part-way; still a member; what was deleted stays deleted; retry is safe."
+            }
+          },
+          "summary": "Leave Notebook Route"
+        }
+      },
+      "/api/notebooks/{notebook_id}/membership/exit-disclosure": {
+        "get": {
+          "description": "退出前告知:退出会永久删除调用者本人在这本库里的多少条记忆(各种状态都算)。\n不是成员、或退出后仍能凭所有者身份/授权读这本库时为 0。",
+          "operationId": "membership_exit_disclosure_route_api_notebooks__notebook_id__membership_exit_disclosure_get",
           "parameters": [
             {
               "in": "path",
@@ -24033,7 +24127,14 @@
             }
           ],
           "responses": {
-            "204": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemoryExitDisclosure"
+                  }
+                }
+              },
               "description": "Successful Response"
             },
             "422": {
@@ -24047,7 +24148,7 @@
               "description": "Validation Error"
             }
           },
-          "summary": "Leave Notebook Route"
+          "summary": "Membership Exit Disclosure Route"
         }
       },
       "/api/notebooks/{notebook_id}/memories": {
@@ -24162,6 +24263,44 @@
             }
           },
           "summary": "List Notebook Memories"
+        }
+      },
+      "/api/notebooks/{notebook_id}/memories/export": {
+        "get": {
+          "description": "The caller's OWN Memory in this notebook as a Markdown download — the\nway out before leaving a shared notebook deletes it. Every status (the\nexit deletes candidates too; they are marked), oldest first, nothing of\nother users. Streamed in pages of ``_EXPORT_PAGE`` (200) Memories, so a\nlarge export never builds one string in memory. Read-gated: works only\nwhile the caller can read the notebook.",
+          "operationId": "export_notebook_memories_api_notebooks__notebook_id__memories_export_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Export Notebook Memories"
         }
       },
       "/api/notebooks/{notebook_id}/memories/from-answer": {

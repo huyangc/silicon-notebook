@@ -3529,33 +3529,84 @@ class KnowledgeStore:
         source_id: str,
         notebook_id: str,
     ) -> None:
-        """Delete one source's graph rows without touching its extraction history."""
+        """Delete one source's graph rows without touching its extraction history.
+
+        The one-source form of ``clear_sources_graph_state``: there is a
+        single teardown implementation, so the per-source delete and the
+        batched Memory purge cannot drift apart."""
+        self.clear_sources_graph_state(db, [source_id], notebook_id)
+
+    def clear_sources_graph_state(
+        self,
+        db: Any,
+        source_ids: Sequence[str],
+        notebook_id: str,
+    ) -> None:
+        """Delete the graph rows of several sources of ONE notebook, in the
+        caller's transaction: relation-completion state, source facts and
+        their backfill markers, every object whose evidence references one of
+        the sources (reverse index when backfilled, evidence containment per
+        source otherwise), the sources' relations, then any object still
+        owned by one of them. Each statement takes the whole id list, so the
+        statement count does not grow with the number of sources (only the
+        object-delete pages grow, by one per ``_DELETE_OBJECT_BATCH_SIZE``
+        objects). The id list is bounded by the caller's page (a Memory purge
+        page, or one source)."""
+        ids = sorted({str(source_id) for source_id in source_ids if source_id})
+        if not ids:
+            return
         db.execute(
-            "DELETE FROM kg_relation_completion_state WHERE source_id = %s",
-            (source_id,),
+            "DELETE FROM kg_relation_completion_state WHERE source_id = ANY(%s)",
+            (ids,),
         )
         db.execute(
             "DELETE FROM knowledge_source_facts "
-            "WHERE source_id=%s AND notebook_id=%s",
-            (source_id, notebook_id),
+            "WHERE notebook_id=%s AND source_id = ANY(%s)",
+            (notebook_id, ids),
         )
         db.execute(
             "DELETE FROM knowledge_source_fact_backfills "
-            "WHERE source_id=%s AND notebook_id=%s",
-            (source_id, notebook_id),
+            "WHERE notebook_id=%s AND source_id = ANY(%s)",
+            (notebook_id, ids),
         )
-        stale_after_id = ""
+        if self.source_index_backfilled(db, notebook_id):
+            stale_after_id = ""
+            while True:
+                rows = db.execute(
+                    "SELECT DISTINCT object_id COLLATE \"C\" AS object_id "
+                    "FROM knowledge_object_sources "
+                    "WHERE source_id = ANY(%s) AND notebook_id = %s "
+                    "AND object_id COLLATE \"C\" > %s "
+                    "ORDER BY object_id COLLATE \"C\" LIMIT %s",
+                    (ids, notebook_id, stale_after_id, _DELETE_OBJECT_BATCH_SIZE),
+                ).fetchall()
+                stale_batch = [row["object_id"] for row in rows]
+                if not stale_batch:
+                    break
+                stale_after_id = stale_batch[-1]
+                self._delete_object_id_batch(db, notebook_id, stale_batch)
+        else:
+            for source_id in ids:
+                stale_after_id = ""
+                while True:
+                    stale_batch = self._stale_object_ids_for_source_batch(
+                        db, source_id, notebook_id, after_id=stale_after_id
+                    )
+                    if not stale_batch:
+                        break
+                    stale_after_id = stale_batch[-1]
+                    self._delete_object_id_batch(db, notebook_id, stale_batch)
+        db.execute(
+            "DELETE FROM knowledge_relations WHERE source_id = ANY(%s)", (ids,)
+        )
         while True:
-            stale_batch = self._stale_object_ids_for_source_batch(
-                db, source_id, notebook_id, after_id=stale_after_id
-            )
-            if not stale_batch:
-                break
-            stale_after_id = stale_batch[-1]
-            self._delete_object_id_batch(db, notebook_id, stale_batch)
-        self.delete_relations_for_source(db, source_id)
-        while True:
-            direct_batch = self._direct_object_ids_for_source_batch(db, source_id)
+            direct_batch = [
+                row["id"]
+                for row in db.execute(
+                    "SELECT id FROM knowledge_objects WHERE source_id = ANY(%s) LIMIT %s",
+                    (ids, _DELETE_OBJECT_BATCH_SIZE),
+                ).fetchall()
+            ]
             if not direct_batch:
                 break
             self._delete_object_id_batch(db, notebook_id, direct_batch)
@@ -3568,10 +3619,30 @@ class KnowledgeStore:
         *,
         clear_embeddings: bool,
     ) -> None:
-        self.clear_source_graph_state(db, source_id, notebook_id)
-        db.execute("DELETE FROM extraction_runs WHERE source_id = %s", (source_id,))
+        """One-source form of ``clear_sources_extraction_state``."""
+        self.clear_sources_extraction_state(
+            db, [source_id], notebook_id, clear_embeddings=clear_embeddings
+        )
+
+    def clear_sources_extraction_state(
+        self,
+        db: Any,
+        source_ids: Sequence[str],
+        notebook_id: str,
+        *,
+        clear_embeddings: bool,
+    ) -> None:
+        """Graph rows (``clear_sources_graph_state``), extraction runs and,
+        when asked, element vectors of several sources of one notebook."""
+        ids = sorted({str(source_id) for source_id in source_ids if source_id})
+        if not ids:
+            return
+        self.clear_sources_graph_state(db, ids, notebook_id)
+        db.execute("DELETE FROM extraction_runs WHERE source_id = ANY(%s)", (ids,))
         if clear_embeddings:
-            db.execute("DELETE FROM element_embeddings WHERE source_id = %s", (source_id,))
+            db.execute(
+                "DELETE FROM element_embeddings WHERE source_id = ANY(%s)", (ids,)
+            )
 
     @staticmethod
     def delete_relations_for_source(db: Any, source_id: str) -> None:

@@ -637,6 +637,31 @@ def test_owner_can_hard_delete_single_and_bulk_memories(tmp_path, monkeypatch):
     notebook_id = client.post(
         "/api/notebooks", headers=owner_headers, json={"name": "Delete me"}
     ).json()["id"]
+    # Every saved Memory gets its hidden derived source (KG gate open, ingest
+    # synchronous), so the deletes below must take those projections too.
+    _seed_kg_object(repo, notebook_id)
+    repo._runtime.memory_service.kg_ingest_scheduler = lambda fn, item: fn(item)
+
+    def derived(memory_id):
+        with repo._connect() as db:
+            source = db.execute(
+                "SELECT id FROM sources WHERE memory_id=?", (memory_id,)
+            ).fetchone()
+            if source is None:
+                return {"sources": 0, "source_elements": 0, "extraction_runs": 0}
+            return {
+                "sources": 1,
+                "source_elements": db.execute(
+                    "SELECT COUNT(*) AS c FROM source_elements WHERE source_id=?",
+                    (source["id"],),
+                ).fetchone()["c"],
+                "extraction_runs": db.execute(
+                    "SELECT COUNT(*) AS c FROM extraction_runs WHERE source_id=?",
+                    (source["id"],),
+                ).fetchone()["c"],
+            }
+
+    gone = {"sources": 0, "source_elements": 0, "extraction_runs": 0}
 
     def make(headers, notebook, question, title):
         answer_id = _answer(repo, notebook, question)
@@ -655,11 +680,13 @@ def test_owner_can_hard_delete_single_and_bulk_memories(tmp_path, monkeypatch):
 
     # Single hard delete removes the row entirely (204 then 404 on re-read).
     solo = make(owner_headers, notebook_id, "Solo?", "Solo")
+    assert derived(solo)["sources"] == 1
     deleted = client.delete(f"/api/memories/{solo}", headers=owner_headers)
     assert deleted.status_code == 204, deleted.text
     assert client.get(
         f"/api/memories/{solo}", headers=owner_headers
     ).status_code == 404
+    assert derived(solo) == gone
 
     # A non-owner delete is a 404 and must leave the row intact.
     guarded = make(owner_headers, notebook_id, "Guarded?", "Guarded")
@@ -669,11 +696,13 @@ def test_owner_can_hard_delete_single_and_bulk_memories(tmp_path, monkeypatch):
     assert client.get(
         f"/api/memories/{guarded}", headers=owner_headers
     ).status_code == 200
+    assert derived(guarded)["sources"] == 1
 
     # Bulk delete counts only the caller's own live rows; foreign/missing/dupes
     # never inflate the count and foreign rows survive.
     first = make(owner_headers, notebook_id, "First?", "First")
     second = make(owner_headers, notebook_id, "Second?", "Second")
+    assert derived(first)["sources"] == derived(second)["sources"] == 1
     foreign_nb = client.post(
         "/api/notebooks", headers=foreign_headers, json={"name": "Foreign"}
     ).json()["id"]
@@ -686,10 +715,11 @@ def test_owner_can_hard_delete_single_and_bulk_memories(tmp_path, monkeypatch):
     )
     assert result.status_code == 200, result.text
     assert result.json() == {"deleted": 3}
-    for gone in (first, second, guarded):
+    for deleted_id in (first, second, guarded):
         assert client.get(
-            f"/api/memories/{gone}", headers=owner_headers
+            f"/api/memories/{deleted_id}", headers=owner_headers
         ).status_code == 404
+        assert derived(deleted_id) == gone
     assert client.get(
         f"/api/memories/{foreign_memory}", headers=foreign_headers
     ).status_code == 200

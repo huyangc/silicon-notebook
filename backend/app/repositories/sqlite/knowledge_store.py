@@ -3297,33 +3297,73 @@ class KnowledgeStore:
         source_id: str,
         notebook_id: str,
     ) -> None:
-        """Delete one source's graph rows without touching its extraction history."""
+        """Delete one source's graph rows without touching its extraction history.
+
+        The one-source form of ``clear_sources_graph_state`` (see the
+        PostgreSQL twin): one teardown implementation for the per-source
+        delete and the batched Memory purge."""
+        self.clear_sources_graph_state(db, [source_id], notebook_id)
+
+    def clear_sources_graph_state(
+        self,
+        db: sqlite3.Connection,
+        source_ids: Sequence[str],
+        notebook_id: str,
+    ) -> None:
+        """Mirror of the PostgreSQL twin: the graph rows of several sources of
+        one notebook, each statement over the whole (page-bounded) id list."""
+        ids = sorted({str(source_id) for source_id in source_ids if source_id})
+        if not ids:
+            return
+        marks = ",".join("?" for _ in ids)
         db.execute(
-            "DELETE FROM kg_relation_completion_state WHERE source_id = ?",
-            (source_id,),
+            f"DELETE FROM kg_relation_completion_state WHERE source_id IN ({marks})",
+            ids,
         )
         db.execute(
             "DELETE FROM knowledge_source_facts "
-            "WHERE source_id=? AND notebook_id=?",
-            (source_id, notebook_id),
+            f"WHERE notebook_id=? AND source_id IN ({marks})",
+            (notebook_id, *ids),
         )
         db.execute(
             "DELETE FROM knowledge_source_fact_backfills "
-            "WHERE source_id=? AND notebook_id=?",
-            (source_id, notebook_id),
+            f"WHERE notebook_id=? AND source_id IN ({marks})",
+            (notebook_id, *ids),
         )
-        stale_after_id = ""
+        if self.source_index_backfilled(db, notebook_id):
+            stale_after_id = ""
+            while True:
+                rows = db.execute(
+                    "SELECT DISTINCT object_id FROM knowledge_object_sources "
+                    f"WHERE source_id IN ({marks}) AND notebook_id = ? "
+                    "AND object_id > ? ORDER BY object_id LIMIT ?",
+                    (*ids, notebook_id, stale_after_id, _DELETE_OBJECT_BATCH_SIZE),
+                ).fetchall()
+                stale_batch = [row["object_id"] for row in rows]
+                if not stale_batch:
+                    break
+                stale_after_id = stale_batch[-1]
+                self._delete_object_id_batch(db, notebook_id, stale_batch)
+        else:
+            for source_id in ids:
+                stale_after_id = ""
+                while True:
+                    stale_batch = self._stale_object_ids_for_source_batch(
+                        db, source_id, notebook_id, after_id=stale_after_id
+                    )
+                    if not stale_batch:
+                        break
+                    stale_after_id = stale_batch[-1]
+                    self._delete_object_id_batch(db, notebook_id, stale_batch)
+        db.execute(f"DELETE FROM knowledge_relations WHERE source_id IN ({marks})", ids)
         while True:
-            stale_batch = self._stale_object_ids_for_source_batch(
-                db, source_id, notebook_id, after_id=stale_after_id
-            )
-            if not stale_batch:
-                break
-            stale_after_id = stale_batch[-1]
-            self._delete_object_id_batch(db, notebook_id, stale_batch)
-        self.delete_relations_for_source(db, source_id)
-        while True:
-            direct_batch = self._direct_object_ids_for_source_batch(db, source_id)
+            direct_batch = [
+                row["id"]
+                for row in db.execute(
+                    f"SELECT id FROM knowledge_objects WHERE source_id IN ({marks}) LIMIT ?",
+                    (*ids, _DELETE_OBJECT_BATCH_SIZE),
+                ).fetchall()
+            ]
             if not direct_batch:
                 break
             self._delete_object_id_batch(db, notebook_id, direct_batch)
@@ -3336,10 +3376,30 @@ class KnowledgeStore:
         *,
         clear_embeddings: bool,
     ) -> None:
-        self.clear_source_graph_state(db, source_id, notebook_id)
-        db.execute("DELETE FROM extraction_runs WHERE source_id = ?", (source_id,))
+        """One-source form of ``clear_sources_extraction_state``."""
+        self.clear_sources_extraction_state(
+            db, [source_id], notebook_id, clear_embeddings=clear_embeddings
+        )
+
+    def clear_sources_extraction_state(
+        self,
+        db: sqlite3.Connection,
+        source_ids: Sequence[str],
+        notebook_id: str,
+        *,
+        clear_embeddings: bool,
+    ) -> None:
+        """Mirror of the PostgreSQL twin."""
+        ids = sorted({str(source_id) for source_id in source_ids if source_id})
+        if not ids:
+            return
+        self.clear_sources_graph_state(db, ids, notebook_id)
+        marks = ",".join("?" for _ in ids)
+        db.execute(f"DELETE FROM extraction_runs WHERE source_id IN ({marks})", ids)
         if clear_embeddings:
-            db.execute("DELETE FROM element_embeddings WHERE source_id = ?", (source_id,))
+            db.execute(
+                f"DELETE FROM element_embeddings WHERE source_id IN ({marks})", ids
+            )
 
     @staticmethod
     def delete_relations_for_source(db: sqlite3.Connection, source_id: str) -> None:

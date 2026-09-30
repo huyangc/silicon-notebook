@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from app.api.download_headers import attachment_content_disposition
 from app.api.deps import (
     content_overview_service,
     get_current_user,
@@ -746,27 +747,15 @@ def patch_knowhow_cells_batch(
 
 def _template_content_disposition(filename: str) -> str:
     """RFC 5987/6266 Content-Disposition value for a (possibly non-ASCII)
-    download filename: an ASCII-sanitized `filename=` fallback for clients
-    that don't understand the extended form, plus the real UTF-8 name via
-    `filename*=` (what every modern browser actually uses). Needed because
-    Starlette encodes header VALUES as latin-1 (Response.init_headers) — a
-    raw Chinese table title in a bare `filename="..."` alone would 500
-    (UnicodeEncodeError) the instant a real (non-ASCII) table title reached
-    this response. export_reports_endpoint's sibling zip download above
-    never needed this: "reports.zip" is a fixed ASCII literal, never a
-    user-supplied title."""
-    import re
-    from urllib.parse import quote
-
-    ascii_fallback = re.sub(
-        r'[\\"/\r\n\x00-\x1f]', "_", filename.encode("ascii", "ignore").decode("ascii")
-    ).strip() or "template.xlsx"
-    # safe="" so a literal "/" in a table title is %2F-escaped too — quote's
-    # default (safe="/") would leave it raw, which violates RFC 5987's
-    # attr-char grammar and is inconsistent with the fallback branch above,
-    # which DOES strip "/".
-    encoded = quote(filename, safe="")
-    return f'attachment; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded}'
+    download filename — see ``download_headers.attachment_content_disposition``
+    for the two-form encoding and why a bare Chinese ``filename=`` would 500.
+    export_reports_endpoint's sibling zip download above never needed this:
+    "reports.zip" is a fixed ASCII literal, never a user-supplied title."""
+    # Only an EMPTY ASCII form falls back here (the rule this endpoint has
+    # always had); the letter rule of the Memory export does not apply.
+    return attachment_content_disposition(
+        filename, fallback="template.xlsx", require_letter=False
+    )
 
 
 @router.get(

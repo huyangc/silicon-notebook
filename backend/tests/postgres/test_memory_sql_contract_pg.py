@@ -4,7 +4,7 @@
 (`tests/memory_sql_cases.py`):本人 Memory 来源可读、别人的不可读、孤儿与无 memory_id 的
 Memory 来源对所有人失败即关、空查看者与 NULL 查看者读不到任何 Memory 来源、Knowhow 与普通
 来源人人可读;每个片段在语句文本里它所在的位置消费固定个数的 `%s`(readable / foreign
-各 1,derived / cluster 各 0);簇片段的两条相关条件(同笔记本、同代)各有用例;外层别名
+各 1,derived / cluster / seed 各 0);「一条 Memory 的簇」(`memory_cluster` 与其补集)同一张表;簇片段的两条相关条件(同笔记本、同代)各有用例;外层别名
 校验不分大小写、只收裸标识符;嵌进更大查询结果一致;`query_store` 旧常量改为引用片段后,
 真聚合给出硬编码的黄金结果。
 """
@@ -127,11 +127,15 @@ def test_every_fragment_consumes_a_fixed_number_of_positional_parameters():
     for alias in ("o", "ko", "x1"):
         assert memory_sql.foreign_memory_object_excluded(alias).count("%s") == 1
         assert memory_sql.memory_derived_object(alias).count("%s") == 0
+        assert memory_sql.memory_derived_in_notebook(alias).count("%s") == 0
     for alias in ("r", "kr", "x1"):
         assert memory_sql.foreign_memory_relation_excluded(alias).count("%s") == 1
         assert memory_sql.memory_derived_relation(alias).count("%s") == 0
     for alias in ("c", "cc", "x1"):
         assert memory_sql.no_memory_member_cluster(alias).count("%s") == 0
+        assert memory_sql.memory_cluster(alias).count("%") == 0
+        assert memory_sql.no_memory_cluster(alias).count("%") == 0
+        assert memory_sql.cluster_seed_object_id(alias).count("%") == 0
     for fragment in (
         memory_sql.memory_source_readable("s"),
         memory_sql.foreign_memory_object_excluded("o"),
@@ -152,8 +156,14 @@ def _alias_calls():
         "derived": (
             memory_sql.memory_derived_object,
             memory_sql.memory_derived_relation,
+            memory_sql.memory_derived_in_notebook,
         ),
         "cluster": (memory_sql.no_memory_member_cluster,),
+        "memory_cluster": (
+            memory_sql.memory_cluster, memory_sql.no_memory_cluster,
+            memory_sql.memory_seed_cluster,
+        ),
+        "seed": (memory_sql.cluster_seed_object_id,),
     }
 
 
@@ -250,6 +260,90 @@ def test_no_memory_member_cluster_is_scoped_to_its_own_generation(world):
     assert f"{cases.NOTEBOOK}/can-gen/1" not in kept
     assert f"{cases.NOTEBOOK}/can-gen/0" in kept, (
         "a Memory member in the building generation hid the published cluster"
+    )
+
+
+def _cluster_keys(database, predicate: str) -> set[str]:
+    return _ids(
+        database,
+        "SELECT DISTINCT c.notebook_id || '/' || c.canonical_id || '/' || "
+        f"CAST(c.generation AS TEXT) AS id FROM concept_clusters c WHERE {predicate}",
+    )
+
+
+def test_memory_cluster_is_the_one_definition_of_a_cluster_of_a_memory(world):
+    memory = _cluster_keys(world, memory_sql.memory_cluster("c"))
+    clean = _cluster_keys(world, memory_sql.no_memory_cluster("c"))
+    assert memory == cases.MEMORY_CLUSTERS
+    assert clean == cases.ALL_CLUSTERS - cases.MEMORY_CLUSTERS
+    assert cases.ALL_CLUSTERS - cases.NO_MEMORY_MEMBER_CLUSTERS <= memory
+
+
+def test_cluster_seed_object_id_reads_the_object_id_a_canonical_id_was_minted_from(world):
+    for canonical, expected in cases.CLUSTER_SEED_OBJECT_IDS.items():
+        with world.connect() as db:
+            got = db.execute(
+                f"SELECT {memory_sql.cluster_seed_object_id('c')} AS seed "
+                "FROM (SELECT %s::text AS canonical_id) c",
+                (canonical,),
+            ).fetchone()["seed"]
+        assert got == expected, canonical
+
+
+def test_memory_derived_in_notebook_agrees_on_same_notebook_rows_and_stops_at_the_notebook(world):
+    """合法数据(行与来源同笔记本)上与 `memory_derived_object` 逐行同义;来源在别的笔记本
+    时不算(那条只用来把外层的笔记本条件传进内层)。"""
+    got = _ids(
+        world,
+        "SELECT o.id AS id FROM knowledge_objects o "
+        f"WHERE {memory_sql.memory_derived_in_notebook('o')}",
+    )
+    assert got == cases.MEMORY_DERIVED_OBJECTS
+    with world.connect() as db:
+        row = db.execute(
+            f"SELECT {memory_sql.memory_derived_in_notebook('x')} AS here, "
+            f"{memory_sql.memory_derived_object('x')} AS anywhere "
+            "FROM (SELECT %s::text AS source_id, %s::text AS notebook_id) x",
+            ("src-mem-alice", cases.NOTEBOOK2),
+        ).fetchone()
+    assert (bool(row["here"]), bool(row["anywhere"])) == (False, True)
+
+
+def test_memory_member_cluster_keys_is_the_member_arm_as_a_set(world):
+    """同一判据的集合形态:每个笔记本读出的 (canonical_id, generation) 恰是成员臂排除的那些簇,
+    一个参数(笔记本 id)。"""
+    member_clusters = cases.ALL_CLUSTERS - cases.NO_MEMORY_MEMBER_CLUSTERS
+    for notebook in (cases.NOTEBOOK, cases.NOTEBOOK2):
+        with world.connect() as db:
+            rows = db.execute(memory_sql.memory_member_cluster_keys(), (notebook,)).fetchall()
+        got = {f"{notebook}/{row['canonical_id']}/{row['generation']}" for row in rows}
+        assert got == {key for key in member_clusters if key.startswith(notebook + "/")}
+    assert memory_sql.memory_member_cluster_keys().count("%s") == 1
+
+
+def test_memory_cluster_docstring_holds_seed_arm_only_minted_real_names_left_to_the_dirty_rule(
+    world,
+):
+    """`memory_cluster` docstring 的两句话:canonical 臂只认按对象 id 铸的种子(``K-~ko-…``、
+    ``Kx-~ko-…``);真名种子(哪怕长得像对象 id)在这里认不出来——Memory 被删后由拷贝的「脏源库
+    不带簇」规则覆盖(见 test_notebook_share_copy / test_copy_memory_exclusion_pg 的
+    test_a_cluster_seeded_by_a_since_deleted_memory)。
+
+    已知缺口(登记给 E4-2,本分支不改):成簇**干净**(dirty=0)、真名种子、Memory 已不是成员的
+    簇——例如 ``K-alice-private-plan``,唯一成员是共享对象,簇名与描述取自已删的 Memory——两条
+    规则都认不出,拷贝会带出它的名字。删除路径今天到不了这个形态:``delete_source`` 在拆除
+    事务里必标脏,``remove_memory_sources`` 与它共用拆除事务、同样标脏;只有「重建进行中删了 Memory、
+    重建收尾 ``finish_rebuild_state`` 无条件写 dirty=0」才会留下它(重建的新一代若读到删除前
+    的成员,名字随之发布,删除的脏标又被清掉)。"""
+    doc = memory_sql.memory_cluster.__doc__
+    assert "K-~ko-" in doc and "Kx-~ko-" in doc and "_source_clustering_current" in doc
+    # 清除与这里共用同一条铸造规则,另认桥接 id;不再指向已删除的第二份规则。
+    assert "purge_memory_review_rows_on" in doc and "purge_bridge_canonical_ids" in doc
+    assert "minted_canonical_ids" not in doc
+    seeded = _cluster_keys(world, memory_sql.memory_seed_cluster("c"))
+    assert seeded == cases.MEMORY_SEED_CLUSTERS
+    assert f"{cases.NOTEBOOK}/K-ko-mem-alice/7" not in _cluster_keys(
+        world, memory_sql.memory_cluster("c")
     )
 
 
