@@ -26,7 +26,12 @@ from app.models.common import Evidence
 from app.repositories.lexical_query import sqlite_fts_match_expression
 from app.repositories.sqlite import source_ceiling
 from app.repositories.sqlite.database import SqliteDatabase
-from app.repositories.sqlite.id_binding import bind_ids, drive_by, member_of
+from app.repositories.sqlite.id_binding import (
+    bind_ids,
+    drive_by,
+    member_of,
+    not_member_of,
+)
 from app.repositories.sqlite.mount_sql import (
     MOUNT_JOIN, MOUNT_VALID, MOUNTED_BASE_IDS_SUBQUERY,
 )
@@ -2187,15 +2192,15 @@ class KnowledgeStore:
         gate, gate_params = "", []
         if excluded:
             bound = source_ceiling.ceiling_param(excluded)
-            gate += f" AND source_id NOT IN {bound.sql}"
-            gate_params.append(bound.value)
+            gate += " AND " + not_member_of("source_id", bound)
+            gate_params.append(bound.param)
         if ceiling is not None:
             bound = source_ceiling.ceiling_param(ceiling)
             gate += " AND " + source_ceiling.evidence_support_sql(
                 "knowledge_objects", bound,
                 authoritative=not KnowledgeStore.source_index_backfilled(db, notebook_id),
             )
-            gate_params.append(bound.value)
+            gate_params.append(bound.param)
         sql = (
             f"SELECT COUNT(*) AS count FROM knowledge_objects "
             f"WHERE notebook_id = ? AND object_type = ? AND status IN ({placeholders})"
@@ -2291,7 +2296,7 @@ class KnowledgeStore:
                 "knowledge_objects", bound,
                 authoritative=not KnowledgeStore.source_index_backfilled(db, notebook_id),
             ) + " "
-            params.append(bound.value)
+            params.append(bound.param)
         params.append(max(1, int(limit)))
         sql = (
             "SELECT id, object_type, source_id, payload, evidence, status, created_at "

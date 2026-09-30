@@ -9,7 +9,9 @@ import json
 
 import pytest
 
+from app.repositories.postgres import id_binding as pg_binding
 from app.repositories.postgres import source_ceiling as pg
+from app.repositories.sqlite import id_binding as lite_binding
 from app.repositories.sqlite import source_ceiling as lite
 
 BACKENDS = pytest.mark.parametrize("module", [pg, lite], ids=["postgres", "sqlite"])
@@ -39,10 +41,10 @@ def test_normalise_ceiling_rejects_one_string(module, value):
 
 def _ids(module, bound):
     if module is lite:
-        return set(json.loads(bound.value))
-    if bound.sql == "%b":
-        return set(bound.value)
-    return set(bound.value.split(pg.SEPARATOR))
+        return set(json.loads(bound.param))
+    if bound.sql == "%s::text[]":
+        return set(bound.param)
+    return set(bound.param.split(pg_binding.ID_SEPARATOR))
 
 
 @BACKENDS
@@ -66,19 +68,46 @@ def test_ceiling_param_identity_is_checked_not_trusted():
     """A cache entry whose key object is not THIS ceiling (an id reused
     after the original died) must not be served."""
     ceiling = frozenset({"x", "y"})
-    impostor = pg.BoundCeiling("string_to_array(%s, E'\\x1f')", "other")
+    impostor = pg_binding.BoundIds("string_to_array(%s,E'\\x1f')", "other")
     with pg._cache_lock:
         pg._cache[id(ceiling)] = (frozenset({"other"}), impostor)
-    assert pg.ceiling_param(ceiling).value != "other"
+    assert pg.ceiling_param(ceiling).param != "other"
     assert _ids(pg, pg.ceiling_param(ceiling)) == {"x", "y"}
 
 
 def test_postgres_bound_form_joins_text_and_falls_back_on_separator():
-    plain = pg.ceiling_param(frozenset({"a", "b"}))
-    assert plain.sql == "string_to_array(%s, E'\\x1f')"
-    assert isinstance(plain.value, str) and set(plain.value.split("\x1f")) == {"a", "b"}
-    odd = pg.ceiling_param(frozenset({"a\x1fb", "c"}))
-    assert odd.sql == "%b" and sorted(odd.value) == ["a\x1fb", "c"]
+    plain = pg.ceiling_param(frozenset({"b", "a"}))
+    assert plain.sql == "string_to_array(%s,E'\\x1f')"
+    assert plain.param == "a\x1fb"
+    odd = pg.ceiling_param(frozenset({"c", "a\x1fb"}))
+    assert odd.sql == "%s::text[]" and odd.param == ["a\x1fb", "c"]
+
+
+@pytest.mark.parametrize(
+    "ceiling",
+    [frozenset({"b", "a", "c"}), frozenset({"a\x1fb", "c"}), frozenset({"甲", 'q"t', "z,y"})],
+)
+def test_the_bound_form_is_the_id_binding_module_s(ceiling):
+    """The binding half is ``id_binding``'s, not a second copy: a ceiling
+    binds exactly as ``bind_ids`` over its sorted ids (PostgreSQL) or with
+    ``sort=True`` (SQLite), and the predicate is the NON-driving
+    ``member_of`` on both backends and both branches."""
+    assert pg.ceiling_param(ceiling) == pg_binding.bind_ids(sorted(ceiling))
+    assert lite.ceiling_param(ceiling) == lite_binding.bind_ids(ceiling, sort=True)
+    for module, binding in ((pg, pg_binding), (lite, lite_binding)):
+        bound = module.ceiling_param(ceiling)
+        certified = module.evidence_support_sql("ko", bound, authoritative=False)
+        authoritative = module.evidence_support_sql("ko", bound, authoritative=True)
+        assert binding.member_of("kos.source_id", bound) in certified
+        assert binding.member_of(module.EVIDENCE_ITEM_SOURCE, bound) in authoritative
+    # SQLite's driving form (``drive_by``: no unary plus) would seek once per
+    # ceiling id per candidate row; every ``IN`` list here is ``+``-guarded.
+    lite_bound = lite.ceiling_param(ceiling)
+    certified = lite.evidence_support_sql("ko", lite_bound, authoritative=False)
+    authoritative = lite.evidence_support_sql("ko", lite_bound, authoritative=True)
+    assert certified.count(" IN ") == 1 and "AND +kos.source_id IN " in certified
+    assert authoritative.count(" IN ") == 1
+    assert "+" + lite.EVIDENCE_ITEM_SOURCE + " IN " in authoritative
 
 
 @BACKENDS

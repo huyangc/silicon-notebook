@@ -18,29 +18,46 @@ Bind or not — the rule
   ceiling and tests membership in Python against the ``normalise_ceiling``
   frozenset: nothing to bind, nothing to plan.
 
-What binding costs, and why it is written the way it is
-=======================================================
+Two layers
+==========
+
+* CEILING layer — this module: ``normalise_ceiling`` (the one domain
+  normalisation: blanks dropped, empty = deny all), the identity cache inside
+  ``ceiling_param`` (keyed by the run's ceiling object), the evidence
+  fragments and ``evidence_support_sql``, and the enumeration page's own
+  statement-local settings (``_STATEMENT_SETTINGS``).
+* BINDING layer — the repository-wide ``postgres/id_binding.py``:
+  ``ceiling_param`` returns its ``BoundIds`` (``bind_ids``), the predicate is
+  its ``member_of``, and ``execute_with_ceiling`` executes through its
+  ``execute_ids``.  That module's docstring holds the binding measurements
+  (joined text, custom plans); the binder never changes membership, so the
+  two layers compose.
+
+What binding costs here, and why it is written the way it is
+============================================================
 
 Measured on PostgreSQL 16, 30k objects per notebook, certified reverse index,
 one 25-row page, 49k-id ceiling (``tests/postgres/
 test_kg_enumeration_ceiling_explain_pins.py`` pins the resulting plans):
 
 * A Python ``list`` parameter costs ~21 ms of pure client CPU (text array
-  adaptation, GIL held; binary ``%b`` still ~9 ms).  ``ceiling_param`` binds
-  ONE text value instead — the ids joined by ``\\x1f`` — and the statement
-  unfolds it with ``string_to_array(%s, E'\\x1f')``.  With a custom plan the
-  immutable call is constant-folded into a hashed ``= ANY('{...}'::text[])``,
-  exactly what the list produced, for ~2 ms of transfer.  An id containing
-  the separator falls back to a binary array (``%b``), never to a split.
+  adaptation, GIL held; binary still ~9 ms).  ``bind_ids`` binds ONE text
+  value instead — the ids joined by ``\\x1f`` — unfolded by
+  ``string_to_array(%s,E'\\x1f')``.  With a custom plan the immutable call is
+  constant-folded into a hashed ``= ANY('{...}'::text[])``, exactly what the
+  list produced, for ~2 ms of transfer.  An id containing the separator makes
+  ``bind_ids`` bind a ``text[]`` array parameter instead, never a split.
 * The planner charges the hashed array's build once per inner rescan and
   answers with Gather Merge + 2 workers, each receiving and hashing the whole
   constant (~20 ms, a parallel-worker slot per page).  ``execute_with_ceiling``
-  turns parallelism off for that one statement.
+  turns parallelism off for that one statement.  ``id_binding`` deliberately
+  offers no such settings (another statement measured slower without its
+  workers), so they are this page's own opt-in.
 * psycopg prepares a statement on its fifth execution per connection, after
   which PostgreSQL may choose a GENERIC plan: the ceiling becomes an opaque
   ``$n`` (assumed ~10 elements, unhashed) and, e.g., the uncertified count went
-  from ~40 ms to ~3.6 s at its sixth execution.  ``execute_with_ceiling``
-  always sends the unnamed (unprepared) statement.
+  from ~40 ms to ~3.6 s at its sixth execution.  ``execute_ids`` always sends
+  the unnamed (unprepared) statement.
 
 Together (same fixture, one connection, median of 15, machine under load):
 dense 49k page 65 → 9 ms with the scope's frozenset (14 ms when a fresh list
@@ -51,38 +68,21 @@ ceiling) no longer gets parallel workers — none-4k page 27 → 28 ms, sparse-4
 89 → 36 ms, i.e. it never lost what the workers' copies of the constant cost.
 The ceiling is still one bind per statement; normalise it once per run (hand
 the scope's own frozenset down) so ``ceiling_param``'s cache serves every page.
-
-Two layers, and where they will live
-====================================
-
-This module is written as two layers so the binding half can move to the
-repository-wide id-binding home (``postgres/id_binding.py``, branch
-``claude/ceiling-sql-binding``, merging first) by mechanical replacement:
-
-* CEILING layer — stays here: ``normalise_ceiling``, ``EVIDENCE_ITEM_SOURCE``,
-  ``ATTRIBUTABLE_SOURCE``, ``evidence_items``, ``evidence_source_exists``,
-  ``evidence_support_sql`` and the identity cache inside ``ceiling_param``
-  (it is keyed by the run's ceiling object, a ceiling concern).
-* BINDING layer — delegates after that merge: the body of ``ceiling_param``
-  below the cache (joined text / ``%b`` fallback, i.e. the ``BoundCeiling``
-  it builds) becomes that module's id-list parameter builder, and
-  ``_run`` becomes its ``execute_ids`` (always ``prepare=False``).  The
-  statement-local ``_STATEMENT_SETTINGS`` stay here unless that module owns
-  an equivalent, in which case ``_apply_settings`` / ``_restore_settings``
-  are deleted and ``execute_with_ceiling`` becomes a thin alias.
-  ``BoundCeiling`` is only the pair (SQL expression, value); any builder that
-  returns such a pair drops in without touching ``evidence_support_sql`` or
-  the stores.
 """
 from __future__ import annotations
 
 import threading
 from collections import OrderedDict
-from typing import Any, Iterable, NamedTuple, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 from psycopg.pq import TransactionStatus
 
-SEPARATOR = "\x1f"
+from app.repositories.postgres.id_binding import (
+    BoundIds,
+    bind_ids,
+    execute_ids,
+    member_of,
+)
 
 # The source id of one evidence item ``ev`` (a jsonb element from
 # ``evidence_items``); non-object items yield NULL.
@@ -100,16 +100,7 @@ _STATEMENT_SETTINGS = (("max_parallel_workers_per_gather", "0"), ("jit", "off"))
 
 _CACHE_LIMIT = 8
 _cache_lock = threading.Lock()
-_cache: "OrderedDict[int, tuple[frozenset, BoundCeiling]]" = OrderedDict()
-
-
-class BoundCeiling(NamedTuple):
-    """A ceiling in bindable form: ``sql`` is the text array expression to put
-    inside ``= ANY(...)`` / ``<> ALL(...)`` (it holds exactly ONE placeholder),
-    ``value`` the one parameter it binds."""
-
-    sql: str
-    value: Any
+_cache: "OrderedDict[int, tuple[frozenset, BoundIds]]" = OrderedDict()
 
 
 def normalise_ceiling(source_ids: Optional[Iterable[str]]) -> Optional[frozenset]:
@@ -136,9 +127,13 @@ def normalise_ceiling(source_ids: Optional[Iterable[str]]) -> Optional[frozenset
     return frozenset(str(value) for value in source_ids if value)
 
 
-def ceiling_param(ceiling: frozenset) -> BoundCeiling:
-    """The bound form of a NON-EMPTY normalised ceiling, computed once per
-    ceiling object.
+def ceiling_param(ceiling: frozenset) -> BoundIds:
+    """The bound form (``id_binding.bind_ids``) of a NON-EMPTY normalised
+    ceiling, computed once per ceiling object.
+
+    The ids are bound sorted: a frozenset iterates in the per-process string
+    hash order, and a sorted binding keeps the statement text and parameter
+    identical for equal ceilings.  Membership ignores order.
 
     Keyed by the frozenset's identity with a small LRU bound.  Identity is safe
     here because a frozenset cannot change after it is built, and each entry
@@ -147,7 +142,8 @@ def ceiling_param(ceiling: frozenset) -> BoundCeiling:
     a stale id harmless anyway.  A run hands every page the scope's one
     memoised frozenset, so one join serves the whole enumeration; a caller that
     passes a fresh collection per call simply misses (the result is the same,
-    only recomputed).
+    only recomputed).  ``id_binding`` deliberately keeps no such cache (its
+    callers build a fresh list per call); this ceiling object is long-lived.
     """
     key = id(ceiling)
     with _cache_lock:
@@ -155,10 +151,7 @@ def ceiling_param(ceiling: frozenset) -> BoundCeiling:
         if hit is not None and hit[0] is ceiling:
             _cache.move_to_end(key)
             return hit[1]
-    if any(SEPARATOR in value for value in ceiling):
-        bound = BoundCeiling("%b", list(ceiling))
-    else:
-        bound = BoundCeiling("string_to_array(%s, E'\\x1f')", SEPARATOR.join(ceiling))
+    bound = bind_ids(sorted(ceiling))
     with _cache_lock:
         _cache[key] = (ceiling, bound)
         _cache.move_to_end(key)
@@ -182,10 +175,11 @@ def evidence_source_exists(ref: str, condition: str) -> str:
     return f"EXISTS (SELECT 1 FROM {evidence_items(ref)} WHERE {condition})"
 
 
-def evidence_support_sql(ref: str, bound: BoundCeiling, *, authoritative: bool) -> str:
+def evidence_support_sql(ref: str, bound: BoundIds, *, authoritative: bool) -> str:
     """The ONLY text of the support predicate: the ``knowledge_objects`` row
     ``ref`` (an alias or the unaliased table name) has at least one evidence
-    item whose source is in ``bound``.  Binds ``bound.value`` once.
+    item whose source is in ``bound`` (``id_binding.member_of``).  Binds
+    ``bound.param`` once.
 
     Support is EVIDENCE (``evidence[].source_id``), never the row's own
     ``source_id`` column (its owner): a merged object's evidence spans several
@@ -195,18 +189,19 @@ def evidence_support_sql(ref: str, bound: BoundCeiling, *, authoritative: bool) 
     answers with one ``idx_kos_object`` probe per candidate row.
     """
     if authoritative:
-        return evidence_source_exists(ref, f"{EVIDENCE_ITEM_SOURCE}=ANY({bound.sql})")
+        return evidence_source_exists(ref, member_of(EVIDENCE_ITEM_SOURCE, bound))
     return (
         "EXISTS (SELECT 1 FROM knowledge_object_sources kos "
         f"WHERE kos.object_id={ref}.id "
         f"AND kos.notebook_id={ref}.notebook_id "
-        f"AND kos.source_id=ANY({bound.sql}))"
+        f"AND {member_of('kos.source_id', bound)})"
     )
 
 
 def execute_with_ceiling(db: Any, sql: str, params: Sequence[Any]) -> Any:
-    """Execute a statement that binds a ceiling: unprepared, with parallel
-    query (and JIT) off for exactly this statement.
+    """Execute a statement that binds a ceiling: unprepared
+    (``id_binding.execute_ids``), with parallel query (and JIT) off for
+    exactly this statement.
 
     The settings are transaction-local (``set_config(..., true)``) and are put
     back to their previous values right after the statement, so nothing
@@ -222,18 +217,14 @@ def execute_with_ceiling(db: Any, sql: str, params: Sequence[Any]) -> Any:
     if getattr(db, "autocommit", False):
         with db.transaction():
             _apply_settings(db)
-            return _run(db, sql, params)
+            return execute_ids(db, sql, tuple(params))
     previous = _apply_settings(db)
     try:
-        return _run(db, sql, params)
+        return execute_ids(db, sql, tuple(params))
     finally:
         info = getattr(db, "info", None)
         if info is None or info.transaction_status == TransactionStatus.INTRANS:
             _restore_settings(db, previous)
-
-
-def _run(db: Any, sql: str, params: Sequence[Any]) -> Any:
-    return db.execute(sql, tuple(params), prepare=False)
 
 
 def _apply_settings(db: Any) -> tuple:
