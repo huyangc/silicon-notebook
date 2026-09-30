@@ -56,6 +56,7 @@ from app.core.model_safety import (
     safe_model_finish_reason,
 )
 from app.domain.extensions import RetrievalContributorHostPort
+from app.domain.share_disclosure import REPORT_PLANNING_MEMORY_KEY, SECTION_MEMORY_KEY
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 # Only the NAME, from the dependency-free domain layer: these modules are
 # not on the participant override's frozen reader whitelist, but their
@@ -641,6 +642,23 @@ def cancel_report(report_id: str) -> bool:
 
 def unregister_cancel(report_id: str, event: threading.Event) -> None:
     REPORT_CANCELLATIONS.unregister(report_id, event)
+
+
+def _memory_ids_within(
+    lines: Sequence[tuple[str, str]], *, start: int, limit: int
+) -> list[str]:
+    """Memory ids whose line, laid out one per line from offset ``start``,
+    begins before a prompt cut at ``limit`` characters (M4: a Memory counts
+    as used once any of its text reached the model)."""
+    shown: list[str] = []
+    offset = start
+    for memory_id, line in lines:
+        if offset >= limit:
+            break
+        if memory_id and memory_id not in shown:
+            shown.append(memory_id)
+        offset += len(line) + 1
+    return shown
 
 
 @dataclass(frozen=True)
@@ -1483,13 +1501,23 @@ class ReportEngine:
                 if deps.memory_retriever is not None and not source_scope_restricted()
                 else []
             )
-            if memories:
+            memory_lines = [
+                (item.memory_id, f"- {item.title}: {item.text[:240]}")
+                for item in memories
+            ]
+            if memory_lines:
                 parts.append("用户已确认 Memory:\n" + "\n".join(
-                    f"- {item.title}: {item.text[:240]}" for item in memories
+                    line for _, line in memory_lines
                 ))
         except Exception:
-            pass
-        return ("\n\n".join(parts))[:6000] if parts else "(语料侦察无结果)"
+            memory_lines = []
+        text = "\n\n".join(parts)
+        self._planning_memory_ids = _memory_ids_within(
+            memory_lines, start=len(text) - sum(
+                len(line) + 1 for _, line in memory_lines
+            ) + 1, limit=6000,
+        )
+        return text[:6000] if parts else "(语料侦察无结果)"
 
     def _probe_sufficiency(self, notebook_id: str, sections: List[dict], *,
                            max_queries: int = 4) -> List[dict]:
@@ -1685,11 +1713,22 @@ class ReportEngine:
                 report_id=rid,
                 stage="planning_corpus_map",
             ):
+                self._planning_memory_ids = []
                 corpus_map = self._build_corpus_map(
                     notebook_id, research_question
                 )
             raise_if_cancelled(self.cancel_event)
-            reports.update_report(notebook_id, rid, progress="多视角规划大纲中")
+            # M4: the author's Memory shown to the outline planner is recorded
+            # on the report (a store-owned key of ``understanding_json``; a copy
+            # of the contract, which itself still goes into the planner prompt).
+            planning_memory = list(self._planning_memory_ids)
+            reports.update_report(
+                notebook_id, rid, progress="多视角规划大纲中",
+                understanding=(
+                    {**intent_contract, REPORT_PLANNING_MEMORY_KEY: planning_memory}
+                    if planning_memory else None
+                ),
+            )
             with observe_stage(
                 self.dependencies.event_log,
                 report_id=rid,
@@ -3091,47 +3130,77 @@ class ReportEngine:
         self._assert_report_stage_runtime(
             generation, runtime, run_kind="report_generation"
         )
+        references, section_memory = self._record_memory_use(references, sections)
         persisted_sections: list[Mapping[str, object]] = []
-        for section in sections:
+        for section, memory_used in zip(sections, section_memory):
             clean = dict(section)
             clean.pop("id_map", None)
             clean.pop("_synthesis_blueprint", None)
             clean.pop("_synthesis_status", None)
+            if memory_used:
+                clean[SECTION_MEMORY_KEY] = memory_used
             persisted_sections.append(MappingProxyType(clean))
         return FinalizedReportArtifact(
             generation=generation,
             sections=tuple(persisted_sections),
             content_md=content_md,
             gaps=tuple(gaps),
-            references=tuple(
-                MappingProxyType(row) for row in self._record_memory_citations(references)
-            ),
+            references=tuple(MappingProxyType(row) for row in references),
         )
 
-    def _record_memory_citations(self, references) -> list[dict]:
-        """Mark, on each stored citation, that its source is the author's Memory.
+    def _record_memory_use(
+        self, references, sections
+    ) -> tuple[list[dict], list[list[str]]]:
+        """Record, on the stored report, which Memory it carries (M4).
 
-        A citation whose ``source_id`` is one of the author's Memory projection
-        sources gets ``memory_id`` (the Memory behind it) and
-        ``memory_owner_id`` (the author).  Share disclosure (M4) counts these
-        from the stored report, so deleting the Memory or its projection later
-        cannot hide that the report carries a private excerpt.  Additive only:
-        other citations are stored exactly as before, and the public report
-        projection is an allowlist that never names these fields.
+        * Each citation whose ``source_id`` is a Memory projection source gets
+          ``memory_id`` and ``memory_owner_id`` — the author's own, or another
+          member's (whose publication the share route refuses).  Share
+          disclosure counts these from the stored report, so deleting the
+          Memory or its projection later cannot hide the stored excerpt.
+        * Each section gets the author's Memory whose content entered its
+          drafting prompt: the confirmed-Memory block (``object_type ==
+          'memory'`` in its id map) and every id-map entry whose source is one
+          of the author's Memory projection sources, cited or not — the
+          model may restate evidence without a marker.
+
+        Additive only: other citations and sections are stored exactly as
+        before, and neither the report detail API nor the public projection
+        names these fields.
         """
         rows = [dict(row) for row in references]
+        contexts = [
+            [ctx for ctx in dict(section.get("id_map") or {}).values()
+             if isinstance(ctx, Mapping)]
+            for section in sections
+        ]
+        cited = [str(row.get("source_id") or "") for row in rows]
+        drafted = [str(ctx.get("source_id") or "") for group in contexts for ctx in group]
         retriever = self.dependencies.memory_retriever
-        source_ids = [str(row.get("source_id") or "") for row in rows]
-        if retriever is None or not any(source_ids):
-            return rows
-        memory_of = retriever.store.memory_sources_for_source_ids(
-            source_ids, self.user_id
-        )
-        for row, source_id in zip(rows, source_ids):
-            if source_id in memory_of:
-                row["memory_id"] = memory_of[source_id]
-                row["memory_owner_id"] = self.user_id
-        return rows
+        own: Mapping[str, str] = {}
+        foreign: Mapping[str, tuple[str, str]] = {}
+        if retriever is not None and any(cited + drafted):
+            own = retriever.store.memory_sources_for_source_ids(
+                cited + drafted, self.user_id
+            )
+            foreign = retriever.store.foreign_memory_sources_for_source_ids(
+                cited, self.user_id
+            )
+        for row, source_id in zip(rows, cited):
+            if source_id in own:
+                row["memory_id"], row["memory_owner_id"] = own[source_id], self.user_id
+            elif source_id in foreign:
+                row["memory_id"], row["memory_owner_id"] = foreign[source_id]
+        section_memory = []
+        for group in contexts:
+            used = {
+                str(ctx.get("object_id")) for ctx in group
+                if ctx.get("object_type") == "memory" and ctx.get("object_id")
+            }
+            used.update(own[str(ctx.get("source_id") or "")] for ctx in group
+                        if str(ctx.get("source_id") or "") in own)
+            section_memory.append(sorted(used))
+        return rows, section_memory
 
     def _generate_run(
         self,
@@ -3641,11 +3710,11 @@ class ReportEngine:
             def _sub(m, _id_map=id_map):
                 # 支持单 key [k1] 与逗号复合 [k1, k3](LLM 常不按 [k1][k3] 而吐逗号):
                 # 逐 key 重映射到全局、bracket 内去重;全未知则整段剥除(幻觉/未知 marker)。
-                # 复合 marker 是一个证据组：先完整验证，再产生任何全局编号副作用。
+                # 复合 marker 只剥掉未知 key、保留已知 key:整段剥除时句子仍留在正文,
+                # 真实出处(比如作者的个人记忆)却从参考文献里消失,分享前的披露
+                # 也就数不到它(M4)。
                 local_keys = marker_keys(m.group(0))
-                contexts = [_id_map.get(key) for key in local_keys]
-                if any(not ctx for ctx in contexts):
-                    return ""
+                contexts = [_id_map[key] for key in local_keys if _id_map.get(key)]
 
                 out_keys: List[str] = []
                 for ctx in contexts:

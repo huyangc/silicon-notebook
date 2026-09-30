@@ -210,3 +210,62 @@ def test_memory_ids_for_source_ids_explain_pin_pg(world):
     assert "Index Scan using pk_sources on sources s" in locked, locked
     assert "pk_memory_items on memory_items lm" in locked, locked
     assert "Seq Scan" not in locked, locked
+
+
+def test_foreign_memory_sources_map_only_other_members_memory_sources_pg(world):
+    store = world.repo._runtime.memory_store
+    a1 = make_memory(world, world.alice, "a1")
+    o1 = make_memory(world, world.owner, "o1")
+    alice_source = world.memories["a1"][1]
+    owner_source = world.memories["o1"][1]
+    wanted = [alice_source, owner_source, world.doc_source, "src-unknown", owner_source]
+    assert store.foreign_memory_sources_for_source_ids(wanted, world.alice.id) == {
+        owner_source: (o1, world.owner.id)
+    }
+    assert store.foreign_memory_sources_for_source_ids(wanted, world.owner.id) == {
+        alice_source: (a1, world.alice.id)
+    }
+    assert store.foreign_memory_sources_for_source_ids(wanted, "") == {}
+    assert store.foreign_memory_sources_for_source_ids([], world.alice.id) == {}
+    with world.repo._runtime.database.write() as db:
+        db.execute("DELETE FROM memory_items WHERE id=%s", (o1,))
+    assert store.foreign_memory_sources_for_source_ids(wanted, world.alice.id) == {}
+    assert store.foreign_memory_sources_for_source_ids_sql().count("%s") == 2
+    # Past psycopg's prepare threshold and the generic-plan switch.
+    for length in (1, 3, 300, 40_000, 2, 1, 5, 7, 9, 11, 13, 15):
+        long = [f"src-missing-{index}" for index in range(length - 1)] + [alice_source]
+        assert store.foreign_memory_sources_for_source_ids(long, world.owner.id) == {
+            alice_source: (a1, world.alice.id)
+        }
+
+
+def _foreign_plan(world, wanted: list[str]) -> str:
+    store = world.repo._runtime.memory_store
+    with world.repo._runtime.database.connect() as db:
+        db.execute("SET LOCAL enable_seqscan=off")
+        db.execute("SET LOCAL enable_bitmapscan=off")
+        return "\n".join(
+            str(row["QUERY PLAN"])
+            for row in db.execute(
+                "EXPLAIN (COSTS OFF) " + store.foreign_memory_sources_for_source_ids_sql(),
+                (json.dumps(wanted), world.alice.id),
+            ).fetchall()
+        )
+
+
+def test_foreign_memory_sources_explain_pin_pg(world):
+    """Same judging as the author's read: an index path exists for every
+    table, the cited id list drives the probe once Memory sources are many."""
+    wanted = [f"src-bulk-{index}" for index in range(1, 300)]
+    _seed_sources(world, uploads=5_000, foreign_memories=0)
+    few = _foreign_plan(world, wanted)
+    assert "Function Scan on jsonb_array_elements_text wanted" in few, few
+    assert "on memory_items fo" in few, few
+    assert "Seq Scan" not in few, few
+
+    _seed_sources(world, uploads=0, foreign_memories=30_000)
+    many = _foreign_plan(world, wanted)
+    assert "Function Scan on jsonb_array_elements_text wanted" in many, many
+    assert "Index Scan using pk_sources on sources s" in many, many
+    assert "pk_memory_items on memory_items fo" in many, many
+    assert "Seq Scan" not in many, many

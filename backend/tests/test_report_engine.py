@@ -662,8 +662,9 @@ def test_assemble_credibility_counts_partial_ledgers_as_available_and_tracks_the
     assert credibility["claim_ledgers_total"] == 3
 
 
-def test_assemble_multikey_fails_closed_if_any_key_is_unknown(repo):
-    """任一本节未知 key 使整个复合 marker fail closed，且不产生部分 reference。"""
+def test_assemble_multikey_drops_only_the_unknown_key(repo):
+    """复合 marker 里的未知 key 只剥掉它自己:已知 key 照常登记为引用。整段剥除会
+    让句子留在正文、真实出处却从参考文献消失(M4:作者的个人记忆因此逃过披露)。"""
     nb = _mk_nb(repo)
     eng = _mk_engine(repo, _OutlineLLM())
     outline = [{"title": "A", "scope": "sa", "sub_queries": ["qa"]}]
@@ -681,9 +682,12 @@ def test_assemble_multikey_fails_closed_if_any_key_is_unknown(repo):
     md, gaps, references = eng._assemble(nb.id, rid, "q", outline, sections)
     body = md.split("## 参考文献")[0]
     assert "k2001" not in body and "k9999" not in body
-    assert "不完整前提 。" in body or "不完整前提  。" in body
-    assert references == []
-    assert "## 参考文献" not in md
+    assert "不完整前提 [k1]。" in body
+    assert [(ref["key"], ref["object_id"]) for ref in references] == [("k1", "rel-ab")]
+    # All keys unknown: the marker still disappears entirely.
+    sections[0]["markdown"] = "## A\n全是编的 [k8888, k9999]。"
+    md, gaps, references = eng._assemble(nb.id, rid, "q", outline, sections)
+    assert "全是编的 。" in md and references == []
 
 
 def test_assemble_all_grounded_has_no_limitation_note(repo):
