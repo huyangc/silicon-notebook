@@ -165,6 +165,65 @@ def test_understanding_bytes_of_a_report_without_memory_are_unchanged(world):
     assert raw == json.dumps(understanding, ensure_ascii=False)
 
 
+# --- the retrieval record ----------------------------------------------------------
+
+
+def test_the_retrieval_record_reads_every_shape_retrieval_returns():
+    from app.domain.retrieval import RetrievedElement, RetrievedKnowledge
+    from app.models.common import Evidence
+    from app.services.report_memory_use import RetrievalSourceLog
+
+    class _Port:
+        def hits(self):
+            return [
+                RetrievedKnowledge(
+                    object_id="o1", object_type="concept",
+                    payload={"source_id": "src-payload", "nested": [{"source_id": "src-deep"}]},
+                    evidence=[Evidence(
+                        source_id="src-evidence", source_title="t", element_id="",
+                        element_type="paragraph", location_label="", quoted_span="",
+                        confidence=1.0,
+                    )],
+                ),
+                RetrievedElement("e1", "src-element", "t", "", "paragraph", "x"),
+            ]
+
+        def context(self):
+            return "block", {"k1": {"source_id": "src-context"}}
+
+        flag = True
+
+    log = RetrievalSourceLog()
+    port = log.watch(_Port())
+    assert port.flag is True
+    port.hits()
+    port.context()
+    assert log.source_ids() == [
+        "src-context", "src-deep", "src-element", "src-evidence", "src-payload",
+    ]
+    call = log.watch_call(lambda: ({"source_id": "src-call"},))
+    call()
+    assert "src-call" in log.source_ids()
+
+
+def test_the_retrieval_record_proxy_writes_through_and_restores(monkeypatch):
+    """A method replaced through the proxy replaces it on the port (as before
+    the port was watched), and undoing that leaves the port as it was."""
+    from app.services.report_memory_use import RetrievalSourceLog
+
+    class _Port:
+        def hits(self):
+            return [{"source_id": "src-real"}]
+
+    inner = _Port()
+    port = RetrievalSourceLog().watch(inner)
+    with monkeypatch.context() as patch:
+        patch.setattr(port, "hits", lambda: [{"source_id": "src-fake"}])
+        assert inner.hits() == [{"source_id": "src-fake"}]
+    assert "hits" not in vars(inner)
+    assert inner.hits() == [{"source_id": "src-real"}]
+
+
 # --- the service rule ------------------------------------------------------------
 
 
