@@ -115,6 +115,8 @@ const optimisticGenerating = (
 // 「确认公开」。
 /** 披露端点说报告引用了其他成员的个人记忆时,不发请求、就地显示的原因(与服务端 403 同句)。 */
 export const FOREIGN_MEMORY_REFUSAL = "报告引用了其他成员的个人记忆，不能公开";
+/** 以前就已公开、但引用了其他成员个人记忆的报告:公开链接已打不开时,作者这里看到的说明。 */
+export const SHARED_LINK_REFUSED = "报告引用了其他成员的个人记忆，公开链接已无法打开，可以取消分享";
 
 export type ReportShareConfirmState = {
   count: number | null;
@@ -185,6 +187,7 @@ export function useReportWorkspace({
   const [shareBusy, setShareBusy] = useState(false);
   const [shared, setShared] = useState(false);
   const [shareConfirm, setShareConfirm] = useState<ReportShareConfirmState | null>(null);
+  const [sharedRefusal, setSharedRefusal] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmDeleteId, setConfirmDeleteIdState] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -242,6 +245,7 @@ export function useReportWorkspace({
     setShareBusy(false);
     setShared(false);
     setShareConfirm(null);
+    setSharedRefusal(null);
     setConfirmDelete(false);
     setConfirmDeleteIdState(null);
     setDeletingId(null);
@@ -385,6 +389,27 @@ export function useReportWorkspace({
   useEffect(() => {
     setShareConfirm(null);
   }, [activeReport?.id]);
+
+  // 旧数据:以前就已公开、但引用了其他成员个人记忆的报告,公开页现在打不开(与撤销的链接一样)。
+  // 作者这里不能还显示成「已公开、可复制链接」——打开这样一份已公开的报告时读一次披露,引用了
+  // 别人的记忆就改成就地说明链接已失效,只留「取消分享」。
+  useEffect(() => {
+    setSharedRefusal(null);
+    const owner = currentOwner();
+    const report = activeReport;
+    if (
+      !owner || !policyRef.current.canManageReports || !report
+      || !report.shared || report.status !== "done"
+    ) return undefined;
+    let cancelled = false;
+    getReportShareDisclosure(owner.notebookId, report.id).then((disclosure) => {
+      if (cancelled || !owns(owner) || activeReportRef.current?.id !== report.id) return;
+      const others = disclosure?.foreign_memory_count;
+      if (typeof others === "number" && others > 0) setSharedRefusal(SHARED_LINK_REFUSED);
+    }).catch((error) => logDiagnostic("report", error));
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeReport?.id, activeReport?.shared, activeReport?.status]);
 
   useEffect(() => {
     if (!confirmDelete) return;
@@ -838,6 +863,7 @@ export function useReportWorkspace({
     shareBusy: visible && shareBusy,
     shared: visible && shared,
     shareConfirm: visible ? shareConfirm : null,
+    sharedRefusal: visible && shared ? sharedRefusal : null,
     confirmDelete: visible && confirmDelete,
     confirmDeleteId: visible ? confirmDeleteId : null,
     deletingId: visible ? deletingId : null,

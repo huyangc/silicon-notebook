@@ -2,7 +2,7 @@ import io
 import zipfile
 from typing import List
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, StrictInt
 
@@ -747,7 +747,7 @@ def unshare_report_route(notebook_id: str, report_id: str) -> None:
 
 
 @public_router.get("/public/reports/{token}", response_model=PublicReport)
-def public_report_route(token: str) -> PublicReport:
+def public_report_route(token: str, response: Response) -> PublicReport:
     """The one report read that needs no session — the token is the whole grant.
 
     Deliberately has NO `Depends(get_current_user)`: this is the anonymous
@@ -793,4 +793,7 @@ def public_report_route(token: str) -> PublicReport:
     # like the creator's read access above, with the same 404.
     if report_foreign_memory_ids(repo._runtime.memory_store, row):  # type: ignore[attr-defined]
         raise HTTPException(status_code=404, detail="shared report not found")
+    # Every open is re-authorized above; no browser or proxy may keep a copy
+    # that outlives a revocation (as the public conversation routes do).
+    response.headers["Cache-Control"] = "no-store"
     return PublicReport(**public_report_payload(row, row.get("references") or []))
