@@ -656,6 +656,35 @@ def test_closed_channel_strips_memory_from_a_submitted_scope_too():
         assert source_allowed(NB, "src-memory-bob") is True
 
 
+def test_closed_channel_fails_closed_without_the_narrowed_bit():
+    """The fail-closed check comes BEFORE the probe's ``narrowed`` short-cuts:
+    a submitted include freeze that carries no narrowed bit (``narrowed`` is
+    None, which otherwise means "legacy scope, keep the channels") still
+    switches the non-partitioned channels off once Memory is withheld."""
+    store = _shared_store()
+    submitted = {
+        "mode": "include",
+        "source_ids": ["src-a", "src-b"],
+        "hidden_source_ids": ["src-knowhow", "src-memory-bob"],
+        "owner_id": "bob",
+    }
+    with memory_access_context(False), default_ceiling_context(
+        NB, "bob", store.readers(), local_scope=submitted,
+    ):
+        scope = current_source_scope()
+        assert scope.narrowed is None
+        assert scope.withheld_hidden_source_ids == frozenset({"src-memory-bob"})
+        assert source_scope_visible_universe_matches(
+            NB, ["src-a", "src-b"], ["src-knowhow", "src-memory-bob"],
+        ) is False
+    with default_ceiling_context(
+        NB, "bob", store.readers(), local_scope=submitted,
+    ):
+        assert source_scope_visible_universe_matches(
+            NB, ["src-a", "src-b"], ["src-knowhow", "src-memory-bob"],
+        ) is True, "channel open: the legacy short-cut stands"
+
+
 def test_closed_channel_refuses_an_exclude_form_submission():
     store = _shared_store()
     submitted = {"mode": "exclude", "source_ids": []}
@@ -1232,7 +1261,9 @@ def test_mounted_libraries_are_read_in_parallel_up_to_the_worker_bound():
             with lock:
                 in_flight["now"] -= 1
 
-    caller_deadline = _time.monotonic() + 30.0
+    # Shorter than the per-library budget (5 s), so a worker that did not
+    # inherit the caller's context would read under a later deadline.
+    caller_deadline = _time.monotonic() + 3.0
     started = _time.monotonic()
     with read_budget(caller_deadline), default_ceiling_context(
         NB, "bob", _replace(store.readers(), visible=slow),
