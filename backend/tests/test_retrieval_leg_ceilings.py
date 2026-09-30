@@ -37,7 +37,9 @@ from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
 from app.services.embedding import FakeEmbedder
 from app.services.kg.graph_reason import render_subgraph_context
 from app.services.retrieval_service import RetrievalService
-from app.services.source_scope import current_source_scope, source_scope_context
+from app.services.source_scope import (
+    CeilingSet, current_source_scope, source_scope_context,
+)
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients
 
@@ -270,55 +272,83 @@ def _raw_kg(db, nb, *, backfilled):
         (nb, 1 if backfilled else 0, _now()))
 
 
+def _users(repo):
+    with repo._connect() as db:
+        return {row["username"]: row["id"] for row in db.execute(
+            "SELECT id, username FROM users")}
+
+
 @pytest.mark.parametrize("backfilled", [True, False])
 def test_weak_support_store_keeps_only_targets_supported_inside_the_ceiling(
     repo, backfilled,
 ):
-    nb, _a = _shared(repo)
+    nb, a = _shared(repo)
+    b = _users(repo)["b00000002"]
     with repo._write() as db:
         _raw_kg(db, nb, backfilled=backfilled)
     with repo._connect() as db:
-        unbounded = UnifiedKgStore.weak_support_relation_rows(db, nb, ["ko-s"], 2, 24)
-        bound = UnifiedKgStore.weak_support_relation_rows(
-            db, nb, ["ko-s"], 2, 24, allowed_source_ids=["src-vis"])
-        denied = UnifiedKgStore.weak_support_relation_rows(
-            db, nb, ["ko-s"], 2, 24, allowed_source_ids=[])
+        def probe(**kwargs):
+            return sorted(r["canonical_tgt"] for r in UnifiedKgStore
+                          .weak_support_relation_rows(db, nb, ["ko-s"], 2, 24, **kwargs))
 
-    assert sorted(r["canonical_tgt"] for r in unbounded) == [
-        "K-good", "K-mem", "ko-t1", "ko-t2", "ko-t5"]
-    assert sorted(r["canonical_tgt"] for r in bound) == ["K-good", "ko-t1", "ko-t5"]
+        unbounded = probe()
+        listed = probe(allowed_source_ids=["src-vis"])
+        as_a = probe(viewer_id=a)
+        as_b = probe(viewer_id=b)
+        as_nobody = probe(viewer_id="")
+        denied = probe(allowed_source_ids=[])
+        shape = dict(UnifiedKgStore.weak_support_relation_rows(
+            db, nb, ["ko-s"], 2, 24, viewer_id=a)[0]).keys()
+        with pytest.raises(ValueError):
+            UnifiedKgStore.weak_support_relation_rows(
+                db, nb, ["ko-s"], 2, 24, allowed_source_ids=["src-vis"], viewer_id=a)
+
+    assert unbounded == ["K-good", "K-mem", "ko-t1", "ko-t2", "ko-t5"]
+    # The list form and the viewer form agree for A (B's Memory is the only
+    # thing A's all-selected ceiling excludes).
+    assert listed == as_a == ["K-good", "ko-t1", "ko-t5"]
+    # B reads B's own Memory; nobody reads anyone's.
+    assert as_b == unbounded
+    assert as_nobody == as_a
     assert denied == []
-    # Same row shape as the unbounded read.
-    assert set(dict(bound[0]).keys()) == set(dict(unbounded[0]).keys())
+    assert set(shape) == {"canonical_src", "edge_type", "canonical_tgt",
+                          "source_count", "sample_relation_ids"}
 
 
-def test_weak_support_gate_sits_before_the_limit(repo):
+@pytest.mark.parametrize("form", ["list", "viewer"])
+def test_weak_support_gate_sits_before_the_limit(repo, form):
     """With LIMIT 1 the unsupported targets sort first (``canonical_tgt``
     ``K-mem`` < ``ko-*``); a post-LIMIT filter would return nothing."""
-    nb, _a = _shared(repo)
+    nb, a = _shared(repo)
     with repo._write() as db:
         _raw_kg(db, nb, backfilled=True)
         db.execute("DELETE FROM canonical_relations WHERE canonical_tgt='K-good'")
+    kwargs = {"allowed_source_ids": ["src-vis"]} if form == "list" else {"viewer_id": a}
     with repo._connect() as db:
-        rows = UnifiedKgStore.weak_support_relation_rows(
-            db, nb, ["ko-s"], 2, 1, allowed_source_ids=["src-vis"])
+        rows = UnifiedKgStore.weak_support_relation_rows(db, nb, ["ko-s"], 2, 1, **kwargs)
     assert [r["canonical_tgt"] for r in rows] == ["ko-t1"]
 
 
 def test_endpoint_names_carry_the_sample_source_and_honour_the_ceiling(repo):
-    nb, _a = _shared(repo)
+    nb, a = _shared(repo)
     with repo._write() as db:
         _raw_kg(db, nb, backfilled=True)
     with repo._connect() as db:
-        unbounded = UnifiedKgStore.relation_endpoint_name_rows(
-            db, nb, ["kr-1", "kr-5"])
-        bound = UnifiedKgStore.relation_endpoint_name_rows(
+        plain = UnifiedKgStore.relation_endpoint_name_rows(db, nb, ["kr-1", "kr-5"])
+        sourced = UnifiedKgStore.relation_endpoint_name_rows(
+            db, nb, ["kr-1", "kr-5"], with_source_id=True)
+        listed = UnifiedKgStore.relation_endpoint_name_rows(
             db, nb, ["kr-1", "kr-5"], allowed_source_ids=["src-vis"])
+        as_a = UnifiedKgStore.relation_endpoint_name_rows(
+            db, nb, ["kr-1", "kr-5"], viewer_id=a)
         denied = UnifiedKgStore.relation_endpoint_name_rows(
             db, nb, ["kr-1"], allowed_source_ids=[])
-    assert {(r["rid"], r["source_id"]) for r in unbounded} == {
+    # Without a keyword the statement (and so the row) is the historical one.
+    assert set(dict(plain[0]).keys()) == {"rid", "src_name", "tgt_name"}
+    assert {(r["rid"], r["source_id"]) for r in sourced} == {
         ("kr-1", "src-vis"), ("kr-5", "src-mb")}
-    assert [r["rid"] for r in bound] == ["kr-1"]
+    assert [r["rid"] for r in listed] == ["kr-1"]
+    assert [r["rid"] for r in as_a] == ["kr-1"]
     assert denied == []
 
 
@@ -403,22 +433,34 @@ def test_weak_support_without_foreign_memory_is_identical_and_binds_no_list(
         memo = dict(current_source_scope()._ceiling_binds_memo)
 
     assert scoped == unscoped and scoped
-    assert spy.calls and all(kwargs == {} for _name, kwargs in spy.calls)
+    # No bound statement: the fast path's only extra is the sample source column.
+    assert spy.calls == [("weak_support_relation_rows", {}),
+                         ("relation_endpoint_name_rows", {"with_source_id": True})]
     assert memo == {nb: False}
+
+
+def _service(repo, verdict):
+    return RetrievalService(
+        candidates=repo.retrieval.candidates, graph=repo.retrieval.graph,
+        community_queries=repo.retrieval._community_queries,
+        ceiling_verdict=verdict,
+    )
+
+
+def _bound_kwargs(spy):
+    return [kwargs for _name, kwargs in spy.calls
+            if "allowed_source_ids" in kwargs or "viewer_id" in kwargs]
 
 
 def test_weak_support_fast_path_verifies_on_read_and_flips_the_run(repo, monkeypatch):
     """The verdict said "does not bind" (no foreign Memory at the time), but a
     sample relation read afterwards comes from a source outside the freeze --
     here B's Memory, confirmed after the verdict.  The row is not shown, the
-    drift is recorded for the rest of the run, and the probe is re-read bound."""
+    drift is recorded for the rest of the run, and the probe is re-read bound
+    -- in the viewer form, since the library still matches the freeze."""
     nb, a = _shared(repo)
     seeds = _seed_weak(repo, nb)
-    service = RetrievalService(
-        candidates=repo.retrieval.candidates, graph=repo.retrieval.graph,
-        community_queries=repo.retrieval._community_queries,
-        ceiling_verdict=lambda _nb: False,
-    )
+    service = _service(repo, lambda _nb: False)
     spy = _Spy(repo.retrieval.candidates.unified_kg)
     monkeypatch.setattr(repo.retrieval.candidates, "unified_kg", spy)
 
@@ -429,9 +471,87 @@ def test_weak_support_fast_path_verifies_on_read_and_flips_the_run(repo, monkeyp
     assert "SECRETPROJECT" not in {row.tgt_name for row in rows}
     assert _names(rows) == [("版图设计", "寄生电容")]
     assert memo == {nb: True}
-    bound = [kwargs for _name, kwargs in spy.calls if kwargs]
+    assert _bound_kwargs(spy) == [{"viewer_id": a}, {"viewer_id": a}]
+
+
+def test_weak_support_binds_the_viewer_not_the_list_for_foreign_memory(
+    repo, monkeypatch,
+):
+    """Another member's Memory is the only reason the all-selected freeze
+    binds: one scalar (the asker), no source list on either statement."""
+    nb, a = _shared(repo)
+    seeds = _seed_weak(repo, nb)
+    spy = _Spy(repo.retrieval.candidates.unified_kg)
+    monkeypatch.setattr(repo.retrieval.candidates, "unified_kg", spy)
+    with _all_selected(nb, a):
+        rows = repo.retrieval.weak_support_relations(nb, seeds)
+    assert _names(rows) == [("版图设计", "寄生电容")]
+    assert _bound_kwargs(spy) == [{"viewer_id": a}, {"viewer_id": a}]
+
+
+def test_weak_support_binds_the_list_when_the_library_drifted(repo, monkeypatch):
+    """A visible source added after the freeze: "not another member's Memory"
+    would admit it, so the frozen list is bound (as a CeilingSet)."""
+    nb, a = _shared(repo)
+    seeds = _seed_weak(repo, nb)
+    with repo._write() as db:
+        _source(db, nb, "src-late")
+    repo.store_kg(nb, "src-late", [
+        _concept("A", "版图设计", "src-late"), _concept("L", "LATEUPLOAD", "src-late"),
+    ], [_edge("A", "L", "src-late")])
+    repo.rebuild_unified_kg(nb)
+    repo.rebuild_canonical_relations(nb, force=True)
+    spy = _Spy(repo.retrieval.candidates.unified_kg)
+    monkeypatch.setattr(repo.retrieval.candidates, "unified_kg", spy)
+    with _all_selected(nb, a):
+        rows = repo.retrieval.weak_support_relations(nb, seeds)
+    names = {row.tgt_name for row in rows}
+    assert "LATEUPLOAD" not in names and "SECRETPROJECT" not in names
+    bound = _bound_kwargs(spy)
     assert bound and all(
-        list(kwargs["allowed_source_ids"]) == ["src-vis"] for kwargs in bound)
+        isinstance(kwargs["allowed_source_ids"], CeilingSet)
+        and set(kwargs["allowed_source_ids"]) == {"src-vis"} for kwargs in bound)
+
+
+def test_weak_support_binds_the_list_for_a_per_library_ceiling(repo, monkeypatch):
+    """A global run's per-notebook freeze is never stated as "viewer"."""
+    nb, a = _shared(repo)
+    seeds = _seed_weak(repo, nb)
+    spy = _Spy(repo.retrieval.candidates.unified_kg)
+    monkeypatch.setattr(repo.retrieval.candidates, "unified_kg", spy)
+    with source_scope_context(nb, None, None, {nb: ["src-vis"]}, subjectless=True):
+        rows = repo.retrieval.weak_support_relations(nb, seeds)
+    assert "SECRETPROJECT" not in {row.tgt_name for row in rows}
+    bound = _bound_kwargs(spy)
+    assert bound and all(set(kwargs["allowed_source_ids"]) == {"src-vis"}
+                         and "viewer_id" not in kwargs for kwargs in bound)
+
+
+def test_weak_support_for_an_excluded_library_is_empty(repo):
+    """The library dimension: a library this run does not cover gives no
+    hints at all, even with no source ceiling of its own."""
+    nb, a = _shared(repo)
+    seeds = _seed_weak(repo, nb)
+    other = repo.create_notebook(NotebookCreate(name="anchor")).id
+    assert repo.retrieval.weak_support_relations(nb, seeds)  # control
+    with source_scope_context(other, None, {"mode": "include", "notebook_ids": []}):
+        assert repo.retrieval.weak_support_relations(nb, seeds) == []
+
+
+def test_a_sample_relation_without_a_source_drops_only_its_row(repo, monkeypatch):
+    """Blank source: outside the ceiling (as under ``allows`` and the bound
+    statement), but not a change after the freeze -- no drift recorded."""
+    nb, a = _shared(repo, b_memory=False)
+    seeds = _seed_weak(repo, nb, b_memory=False)
+    with repo._write() as db:
+        db.execute("UPDATE knowledge_relations SET source_id=NULL WHERE notebook_id=?", (nb,))
+    unscoped = repo.retrieval.weak_support_relations(nb, seeds)
+    assert unscoped  # control: the unscoped hint still shows
+    with _all_selected(nb, a):
+        rows = repo.retrieval.weak_support_relations(nb, seeds)
+        memo = dict(current_source_scope()._ceiling_binds_memo)
+    assert rows == []
+    assert memo == {nb: False}
 
 
 def test_weak_support_is_off_for_a_narrowed_run(repo):
@@ -459,43 +579,71 @@ def _plan(db, sql, params) -> str:
     return "\n".join(str(row["detail"]) for row in rows)
 
 
+def _plans(db, calls):
+    recorder = _Recorder(db)
+    for call in calls:
+        call(recorder)
+    return [_plan(db, sql, params) for sql, params in recorder.statements
+            if "unified_kg_state" not in sql.split("FROM", 1)[1][:30]]
+
+
 @pytest.mark.parametrize("backfilled", [True, False])
+@pytest.mark.parametrize("form", ["list", "viewer"])
 def test_sqlite_bound_weak_support_plans_probe_by_key_without_analyze(
-    repo, backfilled,
+    repo, backfilled, form,
 ):
-    nb, _a = _shared(repo)
+    nb, a = _shared(repo)
     with repo._write() as db:
         _raw_kg(db, nb, backfilled=backfilled)
+    kwargs = {"allowed_source_ids": ["src-vis"]} if form == "list" else {"viewer_id": a}
     with repo._connect() as db:
         assert db.execute(
             "SELECT count(*) AS c FROM sqlite_master WHERE name='sqlite_stat1'"
         ).fetchone()["c"] == 0 or db.execute(
             "SELECT count(*) AS c FROM sqlite_stat1").fetchone()["c"] == 0
-        recorder = _Recorder(db)
-        UnifiedKgStore.weak_support_relation_rows(
-            recorder, nb, ["ko-s"], 2, 24, allowed_source_ids=["src-vis"])
-        UnifiedKgStore.relation_endpoint_name_rows(
-            recorder, nb, ["kr-1"], allowed_source_ids=["src-vis"])
-        probe, names = [s for s in recorder.statements if "json_each" in s[0]]
-        probe_plan = _plan(db, *probe)
-        names_plan = _plan(db, *names)
+        probe_plan, names_plan = _plans(db, [
+            lambda r: UnifiedKgStore.weak_support_relation_rows(
+                r, nb, ["ko-s"], 2, 24, **kwargs),
+            lambda r: UnifiedKgStore.relation_endpoint_name_rows(
+                r, nb, ["kr-1"], **kwargs),
+        ])
 
-    # The canonical probe seeks the primary key by (notebook_id, canonical_src).
-    assert "canonical_relations" in probe_plan
-    assert "SCAN cr" not in probe_plan, probe_plan
-    # Cluster support: the (notebook_id, canonical_id) index, never a scan.
-    assert "SCAN kc" not in probe_plan, probe_plan
-    if backfilled:
-        # Reverse index probed per object (``object_id=?``), never per
-        # ceiling id (``idx_kos_source``) and never scanned.
-        assert "SEARCH kos" in probe_plan and "(object_id=?)" in probe_plan, probe_plan
-        assert "idx_kos_source" not in probe_plan, probe_plan
-        assert "SCAN kos" not in probe_plan, probe_plan
-    else:
-        assert "SCAN ko " not in probe_plan + " ", probe_plan
-    # Names: relation primary keys drive; the ceiling only filters.
-    assert "SCAN kr" not in names_plan, names_plan
-    assert "idx_knowledge_relations_source" not in names_plan, names_plan
+    for plan in (probe_plan, names_plan):
+        assert "SCAN kos" not in plan and "SCAN ko " not in plan + " ", plan
+        assert "idx_kos_source" not in plan and "idx_knowledge_objects_nb" not in plan, plan
+    # The canonical probe seeks the primary key by (notebook_id, canonical_src);
+    # the target's objects are probed by primary key, its cluster members by
+    # the (notebook_id, canonical_id) index.
+    assert ("SEARCH cr USING INDEX sqlite_autoindex_canonical_relations_1 "
+            "(notebook_id=? AND canonical_src=?)") in probe_plan, probe_plan
+    assert "SEARCH ko EXISTS USING INDEX sqlite_autoindex_knowledge_objects_1 (id=?)" \
+        in probe_plan, probe_plan
+    assert "(notebook_id=? AND canonical_id=?)" in probe_plan, probe_plan
+    if form == "viewer":
+        assert "SEARCH fs USING INDEX sqlite_autoindex_sources_1 (id=?)" in probe_plan
+        assert "SEARCH fm USING INDEX sqlite_autoindex_memory_items_1 (id=?)" in probe_plan
+    elif backfilled:
+        # Reverse index probed per object, never per ceiling id.
+        assert "SEARCH kos USING INDEX" in probe_plan and "(object_id=?)" in probe_plan
+    # Names: the sample relations' primary keys drive; the gate only filters.
+    assert "SEARCH kr USING INDEX sqlite_autoindex_knowledge_relations_1 (id=?)" \
+        in names_plan, names_plan
+
+
+@pytest.mark.parametrize("backfilled", [True, False])
+def test_sqlite_object_support_sources_are_driven_by_object_ids(repo, backfilled):
+    nb, _a = _shared(repo)
+    with repo._write() as db:
+        _raw_kg(db, nb, backfilled=backfilled)
+    with repo._connect() as db:
+        rows = UnifiedKgStore.object_support_source_rows(db, nb, ["ko-t1", "ko-t2", "ko-x"])
+        [plan] = _plans(db, [lambda r: UnifiedKgStore.object_support_source_rows(
+            r, nb, ["ko-t1", "ko-t2"])])
+    assert sorted((r["object_id"], r["source_id"]) for r in rows) == [
+        ("ko-t1", "src-vis"), ("ko-t2", "src-mb")]
+    expected = ("SEARCH kos USING INDEX" if backfilled
+                else "SEARCH ko USING INDEX sqlite_autoindex_knowledge_objects_1 (id=?)")
+    assert expected in plan and "idx_knowledge_objects_nb" not in plan, plan
 
 
 # ------------------------------------------------------ B-5 overlay (mix)
@@ -589,4 +737,144 @@ def test_mix_overlay_drops_everything_when_nothing_survives(repo, monkeypatch):
     with _all_selected(nb, a):
         result = _mix(repo, monkeypatch, nb, block, id_map)
     assert result[1:3] == ("", {})
+
+
+def _node(ids, nb, name, notebook=None):
+    return {"object_id": ids[name], "object_type": "concept", "name": name,
+            "tier": "personal", "notebook_id": notebook or nb}
+
+
+def _edge_to(quote):
+    return {"edge_type": "related_to", "tier": "personal", "evidence": [{"quote": quote}]}
+
+
+@pytest.mark.parametrize("quote", [
+    'intro\nk1001: SECRET TAIL',                       # both reviews' probe
+    'intro\n  [k1001] SECRET TAIL2',                    # chain-shaped line
+    'intro"\nchain:\n  [k1001] Public root --x--> [k1003] SECRET  (tier=personal)',
+])
+def test_mix_overlay_multiline_quote_of_a_dropped_node_never_survives(
+    repo, monkeypatch, quote,
+):
+    nb, a = _shared(repo)
+    ids = _overlay_seed(repo, nb)
+    block, id_map = render_subgraph_context([
+        (_node(ids, nb, "Public root"), None, None),
+        (_node(ids, nb, "SECRETNODE"), _edge_to(quote), ids["Public root"]),
+        (_node(ids, nb, "Public other"), _edge_to("PUBLIC QUOTE"), ids["Public root"]),
+    ], id_offset=1000, active_notebook_id=nb)
+    assert "SECRET" in block  # control
+    with _all_selected(nb, a):
+        _c, kg_block, kg_id_map, _h, _p = _mix(repo, monkeypatch, nb, block, id_map)
+    assert "SECRET" not in kg_block and "intro" not in kg_block
+    assert set(kg_id_map) == {"k1001", "k1003"}
+    assert "PUBLIC QUOTE" in kg_block
+
+
+def test_mix_overlay_keeps_a_quote_that_did_not_come_from_a_dropped_edge(
+    repo, monkeypatch,
+):
+    """U→T carries T's (visible) quote; T→D is dropped with D.  T's quote is
+    not D's edge's, so it stays; only the dropped edge line goes."""
+    nb, a = _shared(repo)
+    ids = _overlay_seed(repo, nb)
+    block, id_map = render_subgraph_context([
+        (_node(ids, nb, "Public root"), None, None),
+        (_node(ids, nb, "Public other"), _edge_to("VISIBLE QUOTE U->T"), ids["Public root"]),
+        (_node(ids, nb, "SECRETNODE"), _edge_to("SECRET T->D"), ids["Public other"]),
+    ], id_offset=1000, active_notebook_id=nb)
+    with _all_selected(nb, a):
+        _c, kg_block, kg_id_map, _h, _p = _mix(repo, monkeypatch, nb, block, id_map)
+    assert "SECRET" not in kg_block
+    assert kg_id_map["k1002"]["snippet"] == "VISIBLE QUOTE U->T"
+    assert 'k1002: [concept][personal] Public other  — ev: "VISIBLE QUOTE U->T"' in kg_block
+    assert kg_block.endswith("chain:\n  [k1001] Public root --related_to--> "
+                             "[k1002] Public other  (tier=personal)")
+
+
+def test_mix_overlay_not_in_the_renderer_shape_is_dropped_whole(repo, monkeypatch):
+    nb, a = _shared(repo)
+    ids = _overlay_seed(repo, nb)
+    block, id_map = _overlay(nb, ids)
+    with _all_selected(nb, a):
+        result = _mix(repo, monkeypatch, nb, block + "\nstray text", id_map)
+    assert result[1:3] == ("", {})
+
+
+def _library(repo, a_id):
+    """A second notebook (A's), sources src-p (in its frozen ceiling) and
+    src-p2 (not), one object each."""
+    user = repo.get_user(a_id) if hasattr(repo, "get_user") else None
+    token = set_request_user(user) if user is not None else None
+    try:
+        lib = repo.create_notebook(NotebookCreate(name="library")).id
+    finally:
+        if token is not None:
+            reset_request_user(token)
+    with repo._write() as db:
+        _source(db, lib, "src-p")
+        _source(db, lib, "src-p2")
+    repo.store_kg(lib, "src-p", [_concept("O", "LIBINSIDE", "src-p")], [])
+    repo.store_kg(lib, "src-p2", [_concept("X", "LIBOUTSIDE", "src-p2")], [])
+    return lib, _ids_by_name(repo, lib)
+
+
+def _library_overlay(nb, ids, lib, lib_ids):
+    return render_subgraph_context([
+        (_node(ids, nb, "Public root"), None, None),
+        (_node(lib_ids, nb, "LIBINSIDE", lib), _edge_to("LIB IN QUOTE"), ids["Public root"]),
+        (_node(lib_ids, nb, "LIBOUTSIDE", lib), _edge_to("LIB OUT QUOTE"), ids["Public root"]),
+    ], id_offset=1000, active_notebook_id=nb)
+
+
+def test_mix_overlay_judges_a_library_node_by_its_own_library(repo, monkeypatch):
+    nb, a = _shared(repo)
+    ids = _overlay_seed(repo, nb)
+    lib, lib_ids = _library(repo, a)
+    block, id_map = _library_overlay(nb, ids, lib, lib_ids)
+    scope = {"mode": "include", "source_ids": ["src-vis"], "hidden_source_ids": [],
+             "narrowed": False, "owner_id": a}
+    with source_scope_context(nb, scope, None, {lib: ["src-p"]}):
+        _c, kg_block, kg_id_map, _h, _p = _mix(repo, monkeypatch, nb, block, id_map)
+    assert "LIBINSIDE" in kg_block and "LIB IN QUOTE" in kg_block
+    assert "LIBOUTSIDE" not in kg_block
+    assert {v["name"] for v in kg_id_map.values()} == {"Public root", "LIBINSIDE"}
+
+
+def test_mix_overlay_drops_nodes_of_an_excluded_library(repo, monkeypatch):
+    nb, a = _shared(repo)
+    ids = _overlay_seed(repo, nb)
+    lib, lib_ids = _library(repo, a)
+    block, id_map = _library_overlay(nb, ids, lib, lib_ids)
+    scope = {"mode": "include", "source_ids": ["src-vis"], "hidden_source_ids": [],
+             "narrowed": False, "owner_id": a}
+    with source_scope_context(nb, scope, {"mode": "include", "notebook_ids": []}):
+        _c, kg_block, kg_id_map, _h, _p = _mix(repo, monkeypatch, nb, block, id_map)
+    assert "LIB" not in kg_block
+    assert {v["name"] for v in kg_id_map.values()} == {"Public root"}
+
+
+def test_merge_does_not_repoint_relation_endpoints(repo):
+    """The overlay's node quote is its incoming edge's evidence, not checked
+    against the ceiling (``RetrievalService._scoped_overlay``): sound only
+    while no writer re-points a relation's endpoints across sources.  A manual
+    merge of an object into one from another source moves evidence and
+    deprecates the merged object; its relations keep their endpoints."""
+    from app.models.schemas import MergeRequest
+
+    nb, _a = _shared(repo)
+    with repo._write() as db:
+        _source(db, nb, "src-vis2")
+    repo.store_kg(nb, "src-vis2", [_concept("A", "OtherA", "src-vis2")], [])
+    repo.store_kg(nb, "src-vis", [
+        _concept("M", "MergedM", "src-vis"), _concept("N", "NeighbourN", "src-vis"),
+    ], [_edge("N", "M", "src-vis")])
+    ids = _ids_by_name(repo, nb)
+    repo.merge_knowledge(nb, ids["MergedM"], MergeRequest(into_id=ids["OtherA"]))
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT source_object_id, target_object_id, source_id FROM knowledge_relations "
+            "WHERE notebook_id=?", (nb,)).fetchall()
+    assert [(r["source_object_id"], r["target_object_id"], r["source_id"]) for r in rows] \
+        == [(ids["NeighbourN"], ids["MergedM"], "src-vis")]
 

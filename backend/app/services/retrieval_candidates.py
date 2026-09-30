@@ -933,6 +933,7 @@ class CandidateRetrievalService(_RetrievalState):
     def weak_support_relations(
         self, notebook_id: str, object_ids: Iterable[str], *,
         allowed_source_ids: Optional[Iterable[str]] = None,
+        viewer_id: Optional[str] = None,
         sample_source_inside: Any = None,
     ) -> List[GapRelationRow]:
         """给定一批 KG 对象 id,取它们在 canonical 层上**支撑薄弱**的出边。
@@ -961,13 +962,19 @@ class CandidateRetrievalService(_RetrievalState):
         与这里的 `(src, tgt)` 展示序在真并列上给出不同结果。
 
         来源天花板由 ``RetrievalService.weak_support_relations`` 决定、这里只转交:
-        ``allowed_source_ids`` 原样交给两条 store 读(缺省 → 两条语句逐字不变);
-        ``sample_source_inside(source_id) -> bool`` 是快路径的读时核验,样本关系
-        出自它不认的来源时这条边不解析名字(丢弃)。
+        ``allowed_source_ids`` / ``viewer_id`` 原样交给两条 store 读(都缺省 → 两条
+        语句逐字不变);``sample_source_inside(source_id) -> bool`` 是快路径的读时
+        核验(名称读取因此多投影样本关系的 ``source_id``),样本关系出自它不认的
+        来源时这条边不解析名字(丢弃)。
         """
-        ceiling = (
-            {} if allowed_source_ids is None
-            else {"allowed_source_ids": allowed_source_ids}
+        ceiling = {
+            key: value for key, value in (
+                ("allowed_source_ids", allowed_source_ids), ("viewer_id", viewer_id),
+            ) if value is not None
+        }
+        names_kwargs = (
+            {**ceiling, "with_source_id": True}
+            if sample_source_inside is not None else ceiling
         )
         seeds = [
             text for text in dict.fromkeys(str(oid) for oid in object_ids) if text
@@ -1005,7 +1012,7 @@ class CandidateRetrievalService(_RetrievalState):
                     )] = sample
             name_rows = self.unified_kg.relation_endpoint_name_rows(
                 database, notebook_id,
-                list(dict.fromkeys(sample_by_edge.values())), **ceiling,
+                list(dict.fromkeys(sample_by_edge.values())), **names_kwargs,
             )
         names_by_relation = {
             row["rid"]: ((row["src_name"] or "").strip(),

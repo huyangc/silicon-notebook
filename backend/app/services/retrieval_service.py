@@ -8,11 +8,30 @@ from typing import Any
 from app.services.evidence_attestation import DEAD, attest_pointers
 from app.services.retrieval import NeighborExpansion
 from app.services.source_scope import (
-    current_source_scope, filter_evidence, filter_retrieval_items,
+    CeilingSet, current_source_scope, filter_evidence, filter_retrieval_items,
+    library_source_ceiling, source_allowed,
     node_context_row_within_ceiling, record_ceiling_drift,
     scoped_node_context_row, scoped_source_ceiling, source_ceiling_exists,
     subjectless_run_active,
 )
+
+
+def _bindable_ceiling(scope, notebook_id: str):
+    """``notebook_id``'s frozen ceiling as a ``CeilingSet``, so the store's
+    ``source_ceiling.ceiling_param`` builds its bound SQL form once per run.
+
+    A per-library ceiling already is one; the local include ceiling is the
+    union ``source_ids | hidden_source_ids`` (a plain frozenset), wrapped once
+    per retrieval run."""
+    from app.services.retrieval_run import memoized_retrieval_value
+
+    ceiling = library_source_ceiling(scope, notebook_id)
+    if ceiling is None or isinstance(ceiling, CeilingSet):
+        return ceiling
+    return memoized_retrieval_value(
+        ("weak_support_ceiling", id(scope), notebook_id or scope.notebook_id),
+        lambda: CeilingSet(ceiling),
+    )
 
 
 def _notebook_id(args, kwargs, *, keyword: str = "notebook_id") -> str:
@@ -428,18 +447,33 @@ class RetrievalService:
         The overlay is prompt text plus live ``k{n}`` anchors, and until now it
         was the one output of the mix path that crossed this boundary
         unfiltered.  A node survives when its library is covered and, where a
-        source ceiling binds that library, one of its OWN evidence entries is
-        inside it (``filter_evidence`` over the object's stored evidence -- the
-        rule ``filter_retrieval_items`` applies to a KG hit).  The node's library
-        is its id_map ``notebook_id`` ("" = this run's notebook).  One batched
-        evidence read by object id (never a source list), only when a ceiling
-        binds a rendered node's library; every node is checked, so no run-level
-        verdict is trusted here.
+        source ceiling binds that library, one of its OWN evidence sources is
+        inside it (``source_allowed`` -- the rule ``filter_retrieval_items``
+        applies to a KG hit).  The node's library is its id_map ``notebook_id``
+        ("" = this run's notebook).  The sources come from one batched read per
+        library by object id (``object_support_source_rows``: the reverse index
+        when certified, otherwise the evidence JSON projected to source ids in
+        SQL), only when a ceiling binds a rendered node's library; every node is
+        checked, so no run-level verdict is trusted here.
 
-        Dropped: the node's line and anchor, every ``chain:`` line naming it,
-        and the evidence quote of any surviving node such a line also names
-        (that quote may be the dropped edge's).  Nothing dropped → both values
-        are returned as they came (a run without a scope never reads).
+        Filtering re-renders from structure (``_OverlayStructure``), never by
+        editing text: dropped nodes lose their line and anchor, an edge goes
+        with either endpoint, and a surviving node whose incoming edge came
+        from a dropped node loses its quote -- the renderer takes a node's quote
+        from its own incoming edge, i.e. from that edge.  A block that is not
+        exactly the renderer's output for this id_map cannot be re-rendered
+        safely, so when anything must be dropped from it the whole overlay goes.
+
+        The node quote comes from the incoming edge's evidence, which is not
+        checked here.  It is from the node's own source: every relation writer
+        is intra-source (``store_kg``, relation completion, ``relink_notebook_kg``,
+        Knowhow projection) and no writer re-points a relation's endpoints
+        (a manual merge moves evidence and deprecates the merged object, it does
+        not touch relations) -- pinned by
+        ``test_merge_does_not_repoint_relation_endpoints``.
+
+        Nothing dropped → both values are returned as they came (a run without
+        a scope never reads).
         """
         scope = current_source_scope()
         if scope is None or not kg_id_map:
@@ -449,39 +483,35 @@ class RetrievalService:
             for key, entry in kg_id_map.items()
         }
         dropped = {key for key, owner in owners.items() if not scope.covers_notebook(owner)}
-        governed = {
-            key: owner for key, owner in owners.items()
-            if key not in dropped and scope.source_ceiling_binds(owner)
-        }
-        if governed:
-            evidence = self._object_evidence(
-                str(kg_id_map[key].get("object_id") or "") for key in governed
-            )
+        governed: dict[str, dict[str, str]] = {}
+        for key, owner in owners.items():
+            if key not in dropped and scope.source_ceiling_binds(owner):
+                governed.setdefault(owner, {})[key] = str(
+                    kg_id_map[key].get("object_id") or "")
+        for owner, keys in governed.items():
+            sources = self._object_support_sources(owner, keys.values())
             dropped.update(
-                key for key, owner in governed.items()
-                if not filter_evidence(
-                    owner, evidence.get(str(kg_id_map[key].get("object_id") or ""), ()),
-                )
+                key for key, object_id in keys.items()
+                if not any(source_allowed(owner, sid)
+                           for sid in sources.get(object_id, ()))
             )
         if not dropped:
             return kg_block, kg_id_map
-        return _overlay_without(kg_block, kg_id_map, dropped)
+        structure = _OverlayStructure.parse(kg_block, kg_id_map)
+        if structure is None:
+            return "", {}
+        return structure.without(dropped)
 
-    def _object_evidence(self, object_ids) -> dict:
-        """``{object_id: [evidence entries]}`` for the given objects, batched."""
-        import json
-
+    def _object_support_sources(self, notebook_id, object_ids) -> dict:
+        """``{object_id: [source ids]}`` for objects of one library, batched."""
         wanted = [oid for oid in dict.fromkeys(object_ids) if oid]
         found: dict = {}
+        store = self.candidates.unified_kg
         with self.candidates._connect() as db:
             for batch in self.candidates._in_batches(wanted):
-                for row in self.candidates.knowledge.object_evidence_rows(db, batch):
-                    raw = row["evidence"]
-                    try:
-                        value = json.loads(raw) if isinstance(raw, str) else raw
-                    except ValueError:
-                        value = []
-                    found[str(row["id"])] = value if isinstance(value, list) else []
+                for row in store.object_support_source_rows(db, notebook_id, batch):
+                    found.setdefault(str(row["object_id"]), []).append(
+                        str(row["source_id"] or ""))
         return found
 
     def merge_chunk_candidates(self, base, extra):
@@ -666,11 +696,16 @@ class RetrievalService:
 
         * the run's verdict says it binds (``ceiling_binds``: another member's
           Memory in the library, drift, a per-library freeze, a subjectless run)
-          → the frozen ceiling goes to both store reads
-          (``weak_support_relation_rows`` / ``relation_endpoint_name_rows``
-          ``allowed_source_ids``): an edge is kept only when its TARGET is still
-          supported by an in-ceiling source (``community_member_peers``' test)
-          and its sample relation itself comes from one;
+          → both store reads (``weak_support_relation_rows`` /
+          ``relation_endpoint_name_rows``) are bounded: an edge is kept only
+          when its TARGET still has an in-ceiling object and its sample relation
+          itself is in-ceiling.  When the ceiling is this notebook's own
+          all-selected freeze and still matches the library
+          (``_weak_support_viewer_form``), "in-ceiling" is stated as "not
+          derived from another member's Memory" (``viewer_id``, one scalar);
+          otherwise the frozen list is bound once per statement
+          (``allowed_source_ids``, a ``CeilingSet`` so its bound form is built
+          once per run);
         * the verdict says it does not → the unbounded reads (no list bound,
           the statements of a run without a scope), verified on read: every
           sample relation's ``source_id`` must be inside the frozen ceiling.
@@ -685,11 +720,7 @@ class RetrievalService:
 
         No scope, or no ceiling binding the library: the historical call.
         """
-        from app.services.source_scope import (
-            library_source_ceiling,
-            scoped_allowed_source_ids,
-            source_scope_restricted,
-        )
+        from app.services.source_scope import source_scope_restricted
 
         if source_scope_restricted():
             return []
@@ -725,10 +756,43 @@ class RetrievalService:
             if not drifted or not bindable:
                 return rows
             record_ceiling_drift(scope, notebook_id)
+        if self._weak_support_viewer_form(scope, notebook_id):
+            return self.candidates.weak_support_relations(
+                notebook_id, object_ids, viewer_id=scope.owner_id,
+            )
+        ceiling = _bindable_ceiling(scope, notebook_id)
+        if ceiling is None:  # unreachable (``bindable``); fail closed, never unbound
+            return []
         return self.candidates.weak_support_relations(
-            notebook_id, object_ids,
-            allowed_source_ids=scoped_allowed_source_ids(notebook_id),
+            notebook_id, object_ids, allowed_source_ids=ceiling,
         )
+
+    def _weak_support_viewer_form(self, scope, notebook_id) -> bool:
+        """May the bound weak-support probe say "not derived from another
+        member's Memory" (``viewer_id``, one scalar) instead of binding the
+        frozen list?
+
+        Only when the two say the same thing: the ceiling is this notebook's
+        own all-selected local freeze (include, not narrowed -- a narrowed run
+        never gets here), no per-library freeze, not a subjectless run, and the
+        library's visible universe and the asker's hidden half still equal the
+        frozen lists, re-probed now (``unsafe_source_scope_restricted``, the
+        per-call drift probe -- never memoised).  Then the ceiling is exactly
+        "everything this asker may read", and what it excludes is another
+        member's Memory, which ``memory_sql.foreign_memory_*`` states in SQL.
+        Anything else -- drift, a per-library or deny-all freeze, a global run
+        -- binds the list.
+        """
+        if (
+            scope.subjectless
+            or scope.source_ceiling_for(notebook_id) is not None
+            or (notebook_id and notebook_id != scope.notebook_id)
+            or scope.mode != "include"
+            or scope.narrowed is not False
+            or not library_source_ceiling(scope, notebook_id)
+        ):
+            return False
+        return not self.unsafe_source_scope_restricted(notebook_id)
 
     def runtime_dim(self):
         from app.services.vector_index import resolve_runtime_dim
@@ -769,68 +833,113 @@ class RetrievalService:
         )
 
 
-# ``kg.graph_reason.render_subgraph_context``'s entry shapes: a node line
-# ``k{n}: [type][tier] name  — ev: "quote"``, the ``chain:`` header, and one
-# ``  [k{a}] name --edge--> [k{b}] name  (tier=...)`` line per edge.  Any other
-# line continues the entry above it (a quote may hold a newline).
-_OVERLAY_NODE = re.compile(r"^(k\d+): ")
-_OVERLAY_CHAIN = re.compile(r"^  \[(?:k\d+|\?)\] ")
-_OVERLAY_KEY = re.compile(r"\[(k\d+)\]")
+_CHAIN_KEY = re.compile(r"  \[(k\d+|\?)\] ")
+_CHAIN_TARGET = re.compile(r"--> \[(k\d+)\] ")
+_CHAIN_TIER = re.compile(r"  \(tier=([^\n]*)\)(?=\n|$)")
 
 
-def _overlay_without(kg_block: str, kg_id_map: dict, dropped: set) -> tuple[str, dict]:
-    """``(kg_block, kg_id_map)`` without the ``dropped`` keys (see
-    ``RetrievalService._scoped_overlay``).  Fail-closed on the text: a chain
-    line is dropped when ANY ``[k{n}]`` it contains is dropped, and a
-    surviving node named by a dropped chain line loses its quote -- or the
-    node itself, when its line is not in the renderer's shape."""
-    entries: list[list] = []   # [kind, key, text]
-    for line in kg_block.split("\n"):
-        node = _OVERLAY_NODE.match(line)
-        if node:
-            entries.append(["node", node.group(1), line])
-        elif line == "chain:":
-            entries.append(["header", "", line])
-        elif _OVERLAY_CHAIN.match(line):
-            entries.append(["chain", "", line])
-        elif entries:
-            entries[-1][2] += "\n" + line
-        else:
-            entries.append(["other", "", line])
-    dropped = set(dropped)
-    unquote: set = set()
-    for kind, _key, text in entries:
-        if kind == "chain":
-            keys = set(_OVERLAY_KEY.findall(text))
-            if keys & dropped:
-                unquote |= keys - dropped
-    id_map = {key: value for key, value in kg_id_map.items() if key not in dropped}
-    for key in sorted(unquote):
-        entry = id_map.get(key)
-        if entry is None:
-            continue
-        prefix = (f"{key}: [{entry.get('object_type', '')}]"
-                  f"[{entry.get('tier', '')}] {entry.get('name', '')}")
-        for item in entries:
-            if item[0] == "node" and item[1] == key:
-                if item[2].startswith(prefix):
-                    item[2] = prefix
-                    id_map[key] = {**entry, "snippet": ""}
-                else:
-                    dropped.add(key)
-                    id_map.pop(key, None)
-    kept = []
-    for kind, key, text in entries:
-        if kind == "node" and key in dropped:
-            continue
-        if kind == "chain" and set(_OVERLAY_KEY.findall(text)) & dropped:
-            continue
-        kept.append((kind, text))
-    if kept and kept[-1][0] == "header":
-        kept.pop()
-    if not id_map:
-        return "", {}
-    return "\n".join(text for _kind, text in kept), id_map
+class _OverlayStructure:
+    """The chunk-mix KG overlay as data: ``kg_id_map`` (the nodes, in render
+    order) plus the edges ``(src_key, edge_type, tgt_key, tier)`` of its
+    ``chain:`` section, with the block's text a pure function of the two
+    (``kg.graph_reason.render_subgraph_context``'s format).
+
+    ``parse`` never splits a node line on its text: every node line is known
+    exactly from the id_map (a quote with a newline, or a line that looks
+    like another entry, stays inside the node line it belongs to).  Only the
+    chain section is read, with each name taken from the id_map, and the
+    result is accepted only if rendering it gives back the block byte for
+    byte -- anything else answers ``None`` (the caller then drops the whole
+    overlay rather than guess)."""
+
+    def __init__(self, id_map: dict, edges: list) -> None:
+        self.id_map = id_map
+        self.edges = edges
+
+    @staticmethod
+    def _node_line(key: str, entry: dict) -> str:
+        quote = entry.get("snippet") or ""
+        suffix = f'  — ev: "{quote}"' if quote else ""
+        return (f"{key}: [{entry.get('object_type', '')}]"
+                f"[{entry.get('tier', '')}] {entry.get('name', '')}{suffix}")
+
+    def render(self) -> str:
+        lines = [self._node_line(key, entry) for key, entry in self.id_map.items()]
+        chain = []
+        for src, edge_type, tgt, tier in self.edges:
+            src_name = self.id_map[src].get("name", "") if src in self.id_map else ""
+            tgt_name = self.id_map[tgt].get("name", "")
+            chain.append(
+                f"  [{src}] {src_name} --{edge_type}--> [{tgt}] {tgt_name}  "
+                f"(tier={tier})".rstrip())
+        if chain:
+            lines.append("chain:")
+            lines.extend(chain)
+        return "\n".join(lines) if lines else "(none)"
+
+    @classmethod
+    def parse(cls, kg_block: str, kg_id_map: dict) -> "_OverlayStructure | None":
+        id_map = dict(kg_id_map)
+        head = "\n".join(cls._node_line(key, entry) for key, entry in id_map.items())
+        if not kg_block.startswith(head):
+            return None
+        rest = kg_block[len(head):]
+        edges: list = []
+        if rest:
+            if not rest.startswith("\nchain:\n"):
+                return None
+            rest = rest[len("\nchain:\n"):]
+            pos = 0
+            while pos < len(rest):
+                if edges:
+                    if rest[pos] != "\n":
+                        return None
+                    pos += 1
+                match = _CHAIN_KEY.match(rest, pos)
+                if match is None:
+                    return None
+                src = match.group(1)
+                pos = match.end()
+                src_name = id_map[src].get("name", "") if src in id_map else ""
+                if not rest.startswith(f"{src_name} --", pos):
+                    return None
+                pos += len(src_name) + 3
+                arrow = rest.find("--> [", pos)
+                target = _CHAIN_TARGET.match(rest, arrow) if arrow >= 0 else None
+                if target is None or target.group(1) not in id_map:
+                    return None
+                edge_type, tgt = rest[pos:arrow], target.group(1)
+                pos = target.end()
+                tgt_name = id_map[tgt].get("name", "")
+                if not rest.startswith(tgt_name, pos):
+                    return None
+                tier = _CHAIN_TIER.match(rest, pos + len(tgt_name))
+                if tier is None:
+                    return None
+                edges.append((src, edge_type, tgt, tier.group(1)))
+                pos = tier.end()
+        structure = cls(id_map, edges)
+        return structure if structure.render() == kg_block else None
+
+    def without(self, dropped: set) -> tuple[str, dict]:
+        """``(kg_block, kg_id_map)`` without the ``dropped`` node keys.  An edge
+        goes with either endpoint; a surviving node whose incoming edge came
+        from a dropped node loses its quote (its line's quote is that edge's)."""
+        unquote = {
+            tgt for src, _type, tgt, _tier in self.edges
+            if src in dropped and tgt not in dropped
+        }
+        id_map = {
+            key: ({**entry, "snippet": ""} if key in unquote else entry)
+            for key, entry in self.id_map.items() if key not in dropped
+        }
+        if not id_map:
+            return "", {}
+        edges = [
+            edge for edge in self.edges
+            if edge[0] not in dropped and edge[2] not in dropped
+        ]
+        return _OverlayStructure(id_map, edges).render(), id_map
 
 
 FOLLOW_CHAIN_PRODUCER = "follow_chain"
