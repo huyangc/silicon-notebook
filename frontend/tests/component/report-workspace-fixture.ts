@@ -17,6 +17,7 @@ export function reportWorkspaceFixture(
     shareBusy: false,
     shared: false,
     shareConfirm: null,
+    sharedRefusal: null,
     confirmDelete: false,
     confirmDeleteId: null,
     deletingId: null,

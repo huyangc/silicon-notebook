@@ -1410,6 +1410,7 @@ export function ReportsPanel({
     shareBusy,
     shared,
     shareConfirm,
+    sharedRefusal,
     confirmDelete,
     confirmDeleteId,
     deletingId,
@@ -1542,7 +1543,7 @@ export function ReportsPanel({
                 {shareFace.label}
               </button>
             )}
-            {!readOnly && shared && (
+            {!readOnly && shared && !sharedRefusal && (
               <button
                 className={copyResult.resultFor(`share-link:${active.id}`) === "copied" ? "report-action copy-result-copied" : copyResult.resultFor(`share-link:${active.id}`) === "failed" ? "report-action copy-result-failed" : "report-action"}
                 type="button"
@@ -1572,6 +1573,13 @@ export function ReportsPanel({
             )}
           </div>
         </div>
+        {!readOnly && shared && sharedRefusal && (
+          // 以前就已公开、但引用了其他成员个人记忆的报告:公开链接已经打不开。就地说明,
+          // 不再给「复制链接」;「取消分享」照常可用。被动说明,不抢焦点。
+          <div className="report-share-confirm" role="group" aria-label="公开链接已失效">
+            <span className="report-share-confirm-text" role="status">{sharedRefusal}</span>
+          </div>
+        )}
         {!readOnly && !shared && active.status === "done" && shareConfirm && (
           <ReportShareConfirm
             count={shareConfirm.count}

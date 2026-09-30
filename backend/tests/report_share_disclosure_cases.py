@@ -315,6 +315,7 @@ def case_another_members_memory_is_never_published(world: World) -> None:
     own_token = world.repo.share_report(world.notebook, own)
     served = world.client.get(f"/api/public/reports/{own_token}")
     assert served.status_code == 200
+    assert served.headers.get("Cache-Control") == "no-store"
     assert [ref["snippet"] for ref in served.json()["references"]] == ["主人自己的记忆"]
     assert disclosure(world, world.owner, earlier).json() == counts(0, 1)
     # Re-sharing it is refused too (it does not hand the link out again).
