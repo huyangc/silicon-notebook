@@ -159,7 +159,10 @@ def _alias_calls():
             memory_sql.memory_derived_in_notebook,
         ),
         "cluster": (memory_sql.no_memory_member_cluster,),
-        "memory_cluster": (memory_sql.memory_cluster, memory_sql.no_memory_cluster),
+        "memory_cluster": (
+            memory_sql.memory_cluster, memory_sql.no_memory_cluster,
+            memory_sql.memory_seed_cluster,
+        ),
         "seed": (memory_sql.cluster_seed_object_id,),
     }
 
@@ -304,6 +307,35 @@ def test_memory_derived_in_notebook_agrees_on_same_notebook_rows_and_stops_at_th
             ("src-mem-alice", cases.NOTEBOOK2),
         ).fetchone()
     assert (bool(row["here"]), bool(row["anywhere"])) == (False, True)
+
+
+def test_memory_member_cluster_keys_is_the_member_arm_as_a_set(world):
+    """同一判据的集合形态:每个笔记本读出的 (canonical_id, generation) 恰是成员臂排除的那些簇,
+    一个参数(笔记本 id)。"""
+    member_clusters = cases.ALL_CLUSTERS - cases.NO_MEMORY_MEMBER_CLUSTERS
+    for notebook in (cases.NOTEBOOK, cases.NOTEBOOK2):
+        with world.connect() as db:
+            rows = db.execute(memory_sql.memory_member_cluster_keys(), (notebook,)).fetchall()
+        got = {f"{notebook}/{row['canonical_id']}/{row['generation']}" for row in rows}
+        assert got == {key for key in member_clusters if key.startswith(notebook + "/")}
+    assert memory_sql.memory_member_cluster_keys().count("%s") == 1
+
+
+def test_memory_cluster_docstring_holds_seed_arm_only_minted_real_names_left_to_the_dirty_rule(
+    world,
+):
+    """`memory_cluster` docstring 的两句话:canonical 臂只认按对象 id 铸的种子(``K-~ko-…``、
+    ``Kx-~ko-…``);真名种子(哪怕长得像对象 id)在这里认不出来——Memory 被删后由拷贝的「脏源库
+    不带簇」规则覆盖(见 test_notebook_share_copy / test_copy_memory_exclusion_pg 的
+    test_a_cluster_seeded_by_a_since_deleted_memory)。"""
+    doc = memory_sql.memory_cluster.__doc__
+    assert "K-~ko-" in doc and "Kx-~ko-" in doc and "_source_clustering_current" in doc
+    assert "minted_canonical_ids" in doc
+    seeded = _cluster_keys(world, memory_sql.memory_seed_cluster("c"))
+    assert seeded == cases.MEMORY_SEED_CLUSTERS
+    assert f"{cases.NOTEBOOK}/K-ko-mem-alice/7" not in _cluster_keys(
+        world, memory_sql.memory_cluster("c")
+    )
 
 
 # --------------------------------------------------------------- 嵌进更大的查询

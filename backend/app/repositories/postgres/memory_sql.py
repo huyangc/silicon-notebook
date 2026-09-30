@@ -163,17 +163,44 @@ def _memory_canonical_arm(c: str) -> str:
     )
 
 
+def memory_seed_cluster(cluster_alias: str) -> str:
+    """概念簇 `cluster_alias` 的 canonical id 是按一个 Memory 派生对象的 id 铸的(见
+    `cluster_seed_object_id`):一行一次主键探测,只对 `~ko-` 形态的行真正命中。零参数。"""
+    return _memory_canonical_arm(_alias(cluster_alias, _CLUSTER_INNER | _CANONICAL_INNER))
+
+
+def memory_member_cluster_keys() -> str:
+    """本笔记本里**含 Memory 派生成员**的每个簇的 `(canonical_id, generation)`。一个参数:
+    笔记本 id。
+
+    从 Memory 一侧驱动:本库的 Memory 来源 → 它们的对象(`source_id` 索引)→ 这些对象的簇
+    成员行(`member_object_id` 索引),集合随本库 Memory 的规模、每个笔记本只建一次。与
+    `memory_cluster` 的成员臂同一判据(同一笔记本、同一代);那条臂写成按簇行相关的
+    EXISTS,放进逐簇行求值的语句里代价是 O(Σ簇大小²)(实测一个 2000 成员的簇每条语句
+    13–15 s),所以按簇行过滤的读者读这份集合、在集合上做差,而不是逐行探测。
+    """
+    return (
+        "SELECT DISTINCT mc.canonical_id, mc.generation FROM sources ms "
+        "JOIN knowledge_objects mo ON mo.source_id = ms.id "
+        "JOIN concept_clusters mc ON mc.member_object_id = mo.id "
+        "AND mc.notebook_id = ms.notebook_id "
+        f"WHERE ms.notebook_id = %s AND {memory_source_type_predicate('ms.source_type')}"
+    )
+
+
 def memory_cluster(cluster_alias: str) -> str:
     """概念簇 `cluster_alias`(取其 `notebook_id`/`canonical_id`/`generation`)是**某条
-    Memory 的簇**:同一笔记本同一代里有 Memory 派生成员,**或**它的 canonical id 是按
-    (见 `cluster_seed_object_id`)一个 Memory 派生对象的 id 铸的。零参数。canonical id
-    一律带类型前缀(`kg_merge`),从不等于裸对象 id,所以不比较 `canonical_id = 对象 id`。
+    Memory 的簇**:同一笔记本同一代里有 Memory 派生成员(成员臂;按簇行过滤的读者改读
+    `memory_member_cluster_keys`,同一判据),**或**它的 canonical id 是按一个 Memory 派生对象
+    的 id 铸的(`memory_seed_cluster`)。零参数。
 
-    「一条 Memory 的簇」只有这一个定义:拷贝(E5-1)用它的否定 `no_memory_cluster` 整簇
-    不带,删除清理(E5-2)用它整簇删除——簇名与描述整簇复制到每个成员行,可能取自那个
-    Memory 对象,只删 Memory 成员行洗不掉它们。成员臂与 `no_memory_member_cluster` 同一段
-    文本;canonical 臂在对象还在时才判得出(对象已删的簇无从证明是不是 Memory 的,由调用方
-    自行决定怎么处理,这里不猜)。
+    canonical 臂只认**按对象 id 铸的**种子(`K-~ko-…` 与 `Kx-~ko-…`,见
+    `cluster_seed_object_id`);canonical id 一律带类型前缀,从不等于裸对象 id。**真名种子**
+    (`K-<规范化名字>`)在这里认不出来:Memory 对象还在簇里时由成员臂认出;Memory 被删之后
+    只剩共享成员带着它起的名字——删除必然标脏,拷贝对脏源库一个簇都不带(sharing_store 的
+    `_source_clustering_current`),这一形态由那条规则覆盖。删除清理(E5-2)按对象算出该对象
+    能铸出的 canonical id(`kg_merge.minted_canonical_ids`,另加桥接 id),能认出真名种子——
+    它比这里宽,两处刻意不同:清理时 Memory 对象还在,拷贝时可能已经不在。
     """
     c = _alias(cluster_alias, _CLUSTER_INNER | _CANONICAL_INNER)
     return f"({_memory_member_arm(c)} OR {_memory_canonical_arm(c)})"
