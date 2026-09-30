@@ -1724,6 +1724,18 @@ def test_ceiling_is_built_once_and_nothing_is_sorted(monkeypatch):
         return order, frozen
 
     monkeypatch.setattr(source_scope_module, "_ordered_source_ids", counting_ordered)
+    set_sizes: list[int] = []
+    real_set = set
+
+    def recording_set(iterable=()):
+        values = list(iterable)
+        set_sizes.append(len(values))
+        return real_set(values)
+
+    # The element-type check (``set(map(type, ids))``) never runs on a ceiling
+    # this constructor built: it is a ``_CheckedSourceIds``, so neither
+    # normalisation on install re-checks it.
+    monkeypatch.setattr(source_scope_module, "set", recording_set, raising=False)
     with default_ceiling_context(NB, "bob", store.readers()):
         scope = current_source_scope()
         assert isinstance(scope.source_ceiling_for("nb-lib"), frozenset)
@@ -1731,6 +1743,7 @@ def test_ceiling_is_built_once_and_nothing_is_sorted(monkeypatch):
         # The hand-out is the reader's own order, not a sort of the set.
         assert scope.ceiling_hand_out("nb-lib") == tuple(big)
     assert max(sorted_sizes, default=0) <= 2, sorted_sizes
+    assert max(set_sizes, default=0) < 49_000, set_sizes
     # One build per id list -- the active notebook's visible (49k) and hidden
     # (1) halves and the two mounted libraries (49k, 1) -- and none twice:
     # ``source_scope_context`` and ``__post_init__`` reuse the frozenset the
