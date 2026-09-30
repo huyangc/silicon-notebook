@@ -332,12 +332,14 @@ def test_memory_cluster_docstring_holds_seed_arm_only_minted_real_names_left_to_
     已知缺口(登记给 E4-2,本分支不改):成簇**干净**(dirty=0)、真名种子、Memory 已不是成员的
     簇——例如 ``K-alice-private-plan``,唯一成员是共享对象,簇名与描述取自已删的 Memory——两条
     规则都认不出,拷贝会带出它的名字。删除路径今天到不了这个形态:``delete_source`` 在拆除
-    事务里必标脏,``remove_memory_source`` 走 ``delete_source``;只有「重建进行中删了 Memory、
+    事务里必标脏,``remove_memory_sources`` 与它共用拆除事务、同样标脏;只有「重建进行中删了 Memory、
     重建收尾 ``finish_rebuild_state`` 无条件写 dirty=0」才会留下它(重建的新一代若读到删除前
     的成员,名字随之发布,删除的脏标又被清掉)。"""
     doc = memory_sql.memory_cluster.__doc__
     assert "K-~ko-" in doc and "Kx-~ko-" in doc and "_source_clustering_current" in doc
-    assert "minted_canonical_ids" in doc
+    # 清除与这里共用同一条铸造规则,另认桥接 id;不再指向已删除的第二份规则。
+    assert "purge_memory_review_rows_on" in doc and "purge_bridge_canonical_ids" in doc
+    assert "minted_canonical_ids" not in doc
     seeded = _cluster_keys(world, memory_sql.memory_seed_cluster("c"))
     assert seeded == cases.MEMORY_SEED_CLUSTERS
     assert f"{cases.NOTEBOOK}/K-ko-mem-alice/7" not in _cluster_keys(

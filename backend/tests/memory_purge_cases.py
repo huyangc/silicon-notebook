@@ -1156,6 +1156,22 @@ def _seed_memory_named_cluster(world: World) -> str:
         "VALUES ('mc-b2-seed',?,'K-bob loop',?,0.9,'pending',?,?)",
         (world.shared, seed_id, _GRANT_CREATED_AT, _GRANT_CREATED_AT),
     )
+    # The candidate arms of the same rule (assembly review P3-2): a canonical
+    # id minted from the Memory object (``KL-~<object id>``: not a bridge id,
+    # which is always ``K-``) that NO cluster row carries, named on side a by
+    # one candidate and on side b by another. Only the minted-id arm of each
+    # side can recognise them.
+    minted_only = f"KL-~{memory_object}"
+    for mid, side_a, side_b in (
+        ("mc-b2-mint-a", minted_only, "K-bob loop"),
+        ("mc-b2-mint-b", "K-bob loop", minted_only),
+    ):
+        world.sql.write(
+            "INSERT INTO concept_merge_candidates "
+            "(id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,0.9,'pending',?,?)",
+            (mid, world.shared, side_a, side_b, _GRANT_CREATED_AT, _GRANT_CREATED_AT),
+        )
     return other_shared
 
 
@@ -1179,7 +1195,7 @@ def _memory_named_leftovers(world: World, other_shared: str) -> dict[str, int]:
         "memory_named_candidates": world.sql.count(
             "SELECT COUNT(*) AS c FROM concept_merge_candidates "
             "WHERE canonical_a='K-alice-private plan' OR canonical_b='K-alice-private plan' "
-            "OR id='mc-b2-seed'"
+            "OR id IN ('mc-b2-seed','mc-b2-mint-a','mc-b2-mint-b')"
         ),
         "memory_evidence_on_shared": int(
             world.projections["alice"].source_id
