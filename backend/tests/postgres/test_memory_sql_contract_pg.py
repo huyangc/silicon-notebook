@@ -127,6 +127,7 @@ def test_every_fragment_consumes_a_fixed_number_of_positional_parameters():
     for alias in ("o", "ko", "x1"):
         assert memory_sql.foreign_memory_object_excluded(alias).count("%s") == 1
         assert memory_sql.memory_derived_object(alias).count("%s") == 0
+        assert memory_sql.memory_derived_in_notebook(alias).count("%s") == 0
     for alias in ("r", "kr", "x1"):
         assert memory_sql.foreign_memory_relation_excluded(alias).count("%s") == 1
         assert memory_sql.memory_derived_relation(alias).count("%s") == 0
@@ -155,6 +156,7 @@ def _alias_calls():
         "derived": (
             memory_sql.memory_derived_object,
             memory_sql.memory_derived_relation,
+            memory_sql.memory_derived_in_notebook,
         ),
         "cluster": (memory_sql.no_memory_member_cluster,),
         "memory_cluster": (memory_sql.memory_cluster, memory_sql.no_memory_cluster),
@@ -283,6 +285,25 @@ def test_cluster_seed_object_id_reads_the_object_id_a_canonical_id_was_minted_fr
                 (canonical,),
             ).fetchone()["seed"]
         assert got == expected, canonical
+
+
+def test_memory_derived_in_notebook_agrees_on_same_notebook_rows_and_stops_at_the_notebook(world):
+    """合法数据(行与来源同笔记本)上与 `memory_derived_object` 逐行同义;来源在别的笔记本
+    时不算(那条只用来把外层的笔记本条件传进内层)。"""
+    got = _ids(
+        world,
+        "SELECT o.id AS id FROM knowledge_objects o "
+        f"WHERE {memory_sql.memory_derived_in_notebook('o')}",
+    )
+    assert got == cases.MEMORY_DERIVED_OBJECTS
+    with world.connect() as db:
+        row = db.execute(
+            f"SELECT {memory_sql.memory_derived_in_notebook('x')} AS here, "
+            f"{memory_sql.memory_derived_object('x')} AS anywhere "
+            "FROM (SELECT %s::text AS source_id, %s::text AS notebook_id) x",
+            ("src-mem-alice", cases.NOTEBOOK2),
+        ).fetchone()
+    assert (bool(row["here"]), bool(row["anywhere"])) == (False, True)
 
 
 # --------------------------------------------------------------- 嵌进更大的查询
