@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -325,6 +326,10 @@ class ActiveSourceScope:
     # installer, every direct construction) keeps the conservative answer:
     # the ceiling binds wherever one exists.  Not a gate and not compared.
     _verdict_probes: Any = field(default=None, compare=False)
+    # ``(visible ids, hidden ids)`` in the order the synthesising read
+    # returned them (the store's ``ORDER BY id``), for the freeze's digest;
+    # ``None`` for any other shape.  Not compared.
+    _universe_read_order: Any = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -456,12 +461,21 @@ class ActiveSourceScope:
         withheld from it.  A pure function of frozen fields, computed at most
         once per scope -- a value, not a cached verdict: every probe still
         re-reads the live side."""
+        visible_order, hidden_order = self._universe_read_order or (None, None)
         return (
-            universe_digest(self.source_ids),
-            universe_digest(
-                self.hidden_source_ids | self.withheld_hidden_source_ids
+            _ordered_digest(visible_order, self.source_ids),
+            _ordered_digest(
+                hidden_order,
+                self.hidden_source_ids | self.withheld_hidden_source_ids,
             ),
         )
+
+    @cached_property
+    def _ceiling_bound_libraries(self) -> set[str]:
+        """Libraries ``ceiling_binds`` answered or was flipped to "binds" on
+        this run -- only ever added to (``set.add`` is atomic), so the verdict
+        is monotone: a stale "does not bind" can never overwrite it."""
+        return set()
 
     @cached_property
     def _ceiling_binds_memo(self) -> dict[str, bool]:
@@ -616,6 +630,43 @@ _CURRENT_SOURCE_SCOPE: ContextVar[ActiveSourceScope | None] = ContextVar(
 )
 
 
+class _PendingCeiling:
+    """A default ceiling installed LAZILY (``default_ceiling_context(...,
+    lazy=True)``): nothing is read until the first reader of the scope --
+    ``current_source_scope()`` -- asks for it, then it is built once, by the
+    same constructor an eager install runs, and every later reader (worker
+    threads included: they copy this holder through ``copy_context()``) gets
+    that same object.  A failure is remembered and raised to every reader:
+    a retrieval that consumes the scope fails rather than running without it.
+    """
+
+    def __init__(self, build: Callable[[], "ActiveSourceScope | None"]) -> None:
+        self._build = build
+        self._lock = threading.Lock()
+        self._done = False
+        self._scope: ActiveSourceScope | None = None
+        self._error: BaseException | None = None
+
+    def resolve(self) -> "ActiveSourceScope | None":
+        with self._lock:
+            if not self._done:
+                try:
+                    self._scope = self._build()
+                except BaseException as exc:
+                    self._error = exc
+                    raise
+                finally:
+                    self._done = True
+        if self._error is not None:
+            raise self._error
+        return self._scope
+
+
+_PENDING_CEILING: ContextVar[_PendingCeiling | None] = ContextVar(
+    "pending_default_ceiling", default=None
+)
+
+
 def _scope_dict(scope: Any) -> dict[str, Any] | None:
     if scope is None:
         return None
@@ -663,6 +714,7 @@ def source_scope_context(
     _ceiling_read_order: Mapping[str, tuple[frozenset[str], tuple[str, ...]]]
     | None = None,
     _verdict_probes: Any = None,
+    _universe_read_order: Any = None,
 ) -> Iterator[None]:
     """Install this run's retrieval scope, if it has one at all.
 
@@ -748,6 +800,7 @@ def source_scope_context(
         ),
         _skipped_libraries=tuple((_skipped_libraries or {}).items()),
         _verdict_probes=_verdict_probes,
+        _universe_read_order=_universe_read_order,
     )
     for library, (frozen, order) in (_ceiling_read_order or {}).items():
         # Only where the library's effective ceiling IS that set: an excluded
@@ -763,7 +816,13 @@ def source_scope_context(
 
 
 def current_source_scope() -> ActiveSourceScope | None:
-    return _CURRENT_SOURCE_SCOPE.get()
+    scope = _CURRENT_SOURCE_SCOPE.get()
+    if scope is None:
+        pending = _PENDING_CEILING.get()
+        if pending is not None:
+            # A lazily installed default ceiling: built on this first read.
+            return pending.resolve()
+    return scope
 
 
 def current_skipped_mounted_libraries() -> dict[str, str]:
@@ -1378,11 +1437,21 @@ def ceiling_binds(
     if not scope.source_ceiling_binds(notebook_id):
         return False
     key = notebook_id or scope.notebook_id
+    # Only-increasing, like ``_collection_drift_memo``: a library once found
+    # (or flipped) to bind stays bound for the run, whatever a racing thread
+    # that computed "does not bind" earlier writes afterwards.
+    bound = scope._ceiling_bound_libraries
+    if key in bound:
+        return True
     memo = scope._ceiling_binds_memo
     if key not in memo:
-        memo[key] = _ceiling_binds_uncached(
-            scope, key, drifted=drifted, foreign_hidden=foreign_hidden)
-    return memo[key]
+        if _ceiling_binds_uncached(
+            scope, key, drifted=drifted, foreign_hidden=foreign_hidden,
+        ):
+            bound.add(key)
+            return True
+        memo[key] = False
+    return key in bound
 
 
 def _ceiling_binds_uncached(
@@ -1457,11 +1526,10 @@ def node_context_row_within_ceiling(
 def record_ceiling_drift(scope: ActiveSourceScope, notebook_id: str) -> None:
     """Turn ``ceiling_binds``' memoised verdict for ``notebook_id`` to True for
     the rest of the run: a re-read failed ``node_context_row_within_ceiling``.
-    Same key as ``ceiling_binds``; the single dict store is the benign race
-    described on ``_library_ceiling_memo`` (a racing thread can only write the
-    same True or a stale False that the next failed check re-corrects -- each
-    row is verified either way)."""
-    scope._ceiling_binds_memo[notebook_id or scope.notebook_id] = True
+    Same key as ``ceiling_binds``, written to the only-increasing set
+    (``_ceiling_bound_libraries``): once bound, no racing thread's earlier
+    "does not bind" can undo it."""
+    scope._ceiling_bound_libraries.add(notebook_id or scope.notebook_id)
 
 
 def record_collection_ceiling_drift(scope: ActiveSourceScope, notebook_id: str) -> None:
@@ -1788,6 +1856,16 @@ def evidence_json_allowed(notebook_id: str, raw: Any) -> bool:
     return bool(filter_evidence(notebook_id, raw or []))
 
 
+def _ordered_digest(order: Sequence[str] | None, ids: frozenset[str]) -> str:
+    """``universe_digest(ids)`` without the sort when ``order`` is the store's
+    own ``ORDER BY id`` read of exactly that set (the synthesising read; the
+    length check rejects a set that lost or gained ids since -- a stripped
+    hidden half, say).  ~3.7 ms instead of ~18.7 ms at 49k ids."""
+    if order is None or len(order) != len(ids):
+        return universe_digest(ids)
+    return hashlib.md5("\x1e".join(order).encode("utf-8")).hexdigest() if order else ""
+
+
 def universe_digest(source_ids: Iterable[str]) -> str:
     """THE drift-probe fingerprint of a source-id set: md5 hex of the ids in
     code-point order joined by U+001E, ``""`` for the empty set.
@@ -1893,13 +1971,24 @@ def live_universe_digests(
     visible_reader: Callable[..., Any], notebook_id: str, owner_id: str,
 ) -> Sequence[str] | None:
     """The store's one-row drift fingerprint through ``visible_reader``
-    (``SourceStore.all_visible_source_ids``), or ``None`` for a reader that
-    predates the ``digest_for_owner`` keyword (bounded test doubles), whose
-    callers then fall back to comparing the two full sets."""
+    (``SourceStore.all_visible_source_ids``), or ``None`` for a reader whose
+    signature does not take ``digest_for_owner`` (bounded test doubles that
+    predate it), whose callers then fall back to comparing the two full sets.
+    Decided from the signature, never by catching ``TypeError``: an error
+    raised inside a store that does take the keyword must surface, not
+    silently turn every probe back into two full reads."""
+    import inspect
+
     try:
-        digests = visible_reader(notebook_id, digest_for_owner=str(owner_id or ""))
-    except TypeError:
+        parameters = inspect.signature(visible_reader).parameters
+    except (TypeError, ValueError):
         return None
+    if "digest_for_owner" not in parameters and not any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        return None
+    digests = visible_reader(notebook_id, digest_for_owner=str(owner_id or ""))
     return tuple(str(value) for value in digests)
 
 
@@ -1918,6 +2007,38 @@ class CeilingVerdictProbes:
     foreign_hidden: Callable[[str, str], bool]
 
 
+_REPORT_RUN_KINDS = frozenset({"report_planning", "report_generation"})
+
+
+def _report_run_active() -> bool:
+    """Is the current retrieval run a Deep Report phase?  A report's chunk
+    lane uses the frozen list for more than filtering: it is also the ANN
+    sidecar's COVERAGE question -- which allowed sources the scale index does
+    not hold yet (uploaded after the last fold) and must be recalled through
+    the bounded ``report_delta_fallback`` FTS.  Without the list the lane
+    trusts the index alone and those sources vanish from the report."""
+    from app.services.retrieval_run import current_retrieval_run
+
+    run = current_retrieval_run()
+    return run is not None and run.run_kind in _REPORT_RUN_KINDS
+
+
+def _probe_or_bind(probe: Callable[[], Any]) -> bool:
+    """A verdict probe's answer, or ``True`` ("the ceiling binds") when the
+    probe itself fails -- a saturated pool must not fail a result filter that
+    otherwise does no I/O, and binding is the conservative answer.  A Stop and
+    the participant override's control error still propagate."""
+    from app.domain.retrieval_control import RetrievalControlError
+    from app.services.cancellation import AskCancelled
+
+    try:
+        return bool(probe())
+    except (AskCancelled, RetrievalControlError):
+        raise
+    except Exception:  # noqa: BLE001 - fail closed: bind
+        return True
+
+
 def run_ceiling_binds(scope: ActiveSourceScope, notebook_id: str) -> bool:
     """``ceiling_binds`` for this run with the probes the scope carries.
 
@@ -1926,38 +2047,44 @@ def run_ceiling_binds(scope: ActiveSourceScope, notebook_id: str) -> bool:
     False -- nothing a producer could read is outside the ceiling -- when the
     run is not narrowed, no Memory was withheld, the live universe still
     digests to the freeze (``_universe_matches``) and no other member's
-    Memory sits in the notebook.  Memoised per run and library
-    (``_ceiling_binds_memo``, shared with ``NodeContextCeilingVerdict``) and
-    therefore sound only with verify-on-read: every producer that reads
-    without the list checks what it read (``verify_unbound_read``,
-    ``filter_retrieval_items``) and flips the verdict on the first row from
-    outside the freeze.  No probes -> ``source_ceiling_binds``: the ceiling
-    binds wherever one exists, today's conservative answer.
+    Memory sits in the notebook.  Memoised per run and library, monotone
+    (``_ceiling_bound_libraries``; shared with ``NodeContextCeilingVerdict``)
+    and therefore sound only with verify-on-read: every producer that reads
+    without the list checks what it read against the ceiling it captured
+    BEFORE the read (``verify_unbound_read``, ``filter_retrieval_items``) and
+    flips the verdict on the first row from outside the freeze.
+
+    Always "binds" -- today's conservative answer, ``source_ceiling_binds`` --
+    when the scope carries no probes (every installer but the store-wired
+    default ceiling), and for a Deep Report phase (``_report_run_active``).
+    A probe that fails answers "binds" (``_probe_or_bind``).
     """
     probes = scope._verdict_probes
-    if probes is None:
+    if probes is None or _report_run_active():
         return scope.source_ceiling_binds(notebook_id)
     library = notebook_id or scope.notebook_id
     return ceiling_binds(
         scope,
         notebook_id,
-        drifted=lambda: not _universe_matches(
+        drifted=lambda: _probe_or_bind(lambda: not _universe_matches(
             scope, None, None, probes.universe_digests(library, scope.owner_id),
-        ),
-        foreign_hidden=lambda: bool(
-            probes.foreign_hidden(library, scope.owner_id)
+        )),
+        foreign_hidden=lambda: _probe_or_bind(
+            lambda: probes.foreign_hidden(library, scope.owner_id)
         ),
     )
 
 
 def unbound_ceiling(notebook_id: str) -> frozenset[str] | None:
-    """The frozen ceiling this run did NOT hand ``notebook_id``'s producers.
+    """The frozen ceiling this run does NOT hand ``notebook_id``'s producers.
 
     ``scoped_allowed_source_ids(notebook_id)`` returns ``None`` -- no source
     list in the SQL -- when ``run_ceiling_binds`` says the ceiling binds
-    nothing there; this returns that ceiling so a producer can verify what it
-    read (``verify_unbound_read``).  ``None`` when the list WAS handed out (or
-    no ceiling exists): nothing to verify."""
+    nothing there; this returns that ceiling.  A producer takes it BEFORE its
+    read and hands it to ``verify_unbound_read`` afterwards.  ``None`` when
+    the list is handed out (or no ceiling exists): nothing to verify.  The
+    verdict is monotone, so a producer that got ``None`` here cannot read
+    unbound afterwards."""
     scope = current_source_scope()
     if scope is None:
         return None
@@ -1967,19 +2094,27 @@ def unbound_ceiling(notebook_id: str) -> frozenset[str] | None:
     return ceiling
 
 
-def verify_unbound_read(notebook_id: str, source_ids: Iterable[Any]) -> bool:
-    """Verify-on-read for a producer that read ``notebook_id`` without its
-    source list: True when every source it returned is inside the frozen
-    ceiling (or the list was bound anyway).  The first source outside it
-    means the library changed after the run's verdict: the verdict flips
-    (``record_ceiling_drift``), every later call binds, and the caller
-    re-runs this call bound so no outsider occupies its top-K."""
-    ceiling = unbound_ceiling(notebook_id)
+def verify_unbound_read(
+    notebook_id: str,
+    ceiling: frozenset[str] | None,
+    source_ids: Iterable[Any],
+) -> bool:
+    """Verify-on-read for a producer that may have read ``notebook_id``
+    without its source list.  ``ceiling`` is what ``unbound_ceiling`` gave
+    the producer BEFORE the read (``None``: the read was bound, nothing to
+    check); judged by membership in it, never by the verdict as it stands now
+    -- a concurrent flip between the read and the check must not wave an
+    outsider through.  True when every returned source is inside; the first
+    one outside flips the verdict (``record_ceiling_drift``), every later
+    call binds, and the caller re-runs this call bound (or drops the
+    outsiders) so none takes a top-K slot."""
     if ceiling is None:
         return True
     if all(str(value or "") in ceiling for value in source_ids):
         return True
-    record_ceiling_drift(current_source_scope(), notebook_id)
+    scope = current_source_scope()
+    if scope is not None:
+        record_ceiling_drift(scope, notebook_id)
     return False
 
 
@@ -2145,12 +2280,19 @@ def cancellable_ceiling_readers(
                 return read(*args)
         return call
 
+    probes = readers.verdict_probes
     return replace(
         readers,
         participants=bounded(readers.participants),
         visible=bounded(readers.visible),
         hidden=bounded(readers.hidden),
         memory_sources=bounded(readers.memory_sources),
+        # The run verdict's two reads happen later, during retrieval; a Stop
+        # must reach them too.
+        verdict_probes=None if probes is None else CeilingVerdictProbes(
+            universe_digests=bounded(probes.universe_digests),
+            foreign_hidden=bounded(probes.foreign_hidden),
+        ),
     )
 
 
@@ -2421,8 +2563,15 @@ def default_ceiling_context(
     mounted_read_seconds: float = DEFAULT_MOUNTED_READ_SECONDS,
     mounted_total_seconds: float = DEFAULT_MOUNTED_TOTAL_SECONDS,
     mounted_read_workers: int | None = None,
+    lazy: bool = False,
 ) -> Iterator[None]:
     """Install the retrieval ceiling EVERY entry point runs under.
+
+    ``lazy=True`` installs it without reading anything: the first
+    ``current_source_scope()`` inside builds it (``_PendingCeiling``), exactly
+    as an eager install would have, and a block that never consumes the scope
+    -- the intent precheck, one model call with no retrieval dependency --
+    pays no read at all.
 
     There is no "no scope = no ceiling": an unscoped run used to install
     nothing, and every producer without an owner predicate of its own (the
@@ -2542,14 +2691,40 @@ def default_ceiling_context(
     if current_source_scope() is not None:
         yield
         return
-    with _fresh_default_ceiling(
-        notebook_id, owner_id, readers,
+    fresh = dict(
         local_scope=local_scope, base_scope=base_scope,
         cancel_event=cancel_event, mounted_read_seconds=mounted_read_seconds,
         mounted_total_seconds=mounted_total_seconds,
         mounted_read_workers=mounted_read_workers,
-    ):
+    )
+    if not lazy:
+        with _fresh_default_ceiling(notebook_id, owner_id, readers, **fresh):
+            yield
+        return
+
+    def build() -> ActiveSourceScope | None:
+        # Built where it is first read, by the eager constructor; the
+        # holder is cleared while building so nothing it calls can re-enter.
+        from app.services.cancellation import AskCancelled, raise_if_cancelled
+
+        token = _PENDING_CEILING.set(None)
+        try:
+            with _fresh_default_ceiling(notebook_id, owner_id, readers, **fresh):
+                return _CURRENT_SOURCE_SCOPE.get()
+        except AskCancelled:
+            raise
+        except Exception:
+            # A read the Stop interrupted is the Stop, as for an eager install.
+            raise_if_cancelled(cancel_event)
+            raise
+        finally:
+            _PENDING_CEILING.reset(token)
+
+    token = _PENDING_CEILING.set(_PendingCeiling(build))
+    try:
         yield
+    finally:
+        _PENDING_CEILING.reset(token)
 
 
 @contextmanager
@@ -2602,6 +2777,7 @@ def _fresh_default_ceiling(
         _skipped_libraries=mounted.skipped,
         _ceiling_read_order=mounted.read_order,
         _verdict_probes=readers.verdict_probes,
+        _universe_read_order=(local or {}).get("_read_order") if synthesize_local else None,
     ):
         yield
 
@@ -2636,14 +2812,18 @@ def _synthesised_local(
     the frozenset the scope keeps (``_frozen_source_ids`` reuses it downstream,
     so it is still built exactly once).
     """
+    visible = tuple(map(str, readers.visible(notebook_id)))
+    hidden = tuple(str(value) for value in readers.hidden(notebook_id, owner_id))
     return {
         "mode": "include",
-        "source_ids": _frozen_source_ids(readers.visible(notebook_id)),
-        "hidden_source_ids": tuple(
-            str(value) for value in readers.hidden(notebook_id, owner_id)
-        ),
+        "source_ids": _frozen_source_ids(visible),
+        "hidden_source_ids": hidden,
         "narrowed": False,
         "owner_id": owner_id,
+        # The readers' own ``ORDER BY id`` order -- exactly the order the
+        # store's drift fingerprint concatenates in -- so the freeze's digest
+        # needs no sort (``ActiveSourceScope._frozen_universe_digests``).
+        "_read_order": (visible, hidden),
     }
 
 

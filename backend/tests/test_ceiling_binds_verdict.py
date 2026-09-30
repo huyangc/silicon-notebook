@@ -373,7 +373,7 @@ def test_an_occurrence_outside_the_ceiling_flips_the_verdict_and_rereads_bound()
     with _all_ticked():
         block, id_map = _service(knowledge, _real_verdict(probes)).knowledge_context(
             ACTIVE, [_cluster_hit("ko-merged"), _cluster_hit("ko-next")])
-        assert current_source_scope()._ceiling_binds_memo == {ACTIVE: True}
+        assert ACTIVE in current_source_scope()._ceiling_bound_libraries
     assert NEW_TEXT not in block and NEW_SOURCE not in str(id_map)
     assert [entry["object_id"] for entry in id_map.values()] == ["ko-merged", "ko-next"]
     assert id_map["k1"]["snippet"] == OPEN_TEXT
@@ -406,7 +406,7 @@ def test_a_definition_outside_the_ceiling_is_dropped_as_under_the_bound_path():
     with _all_ticked():
         block, id_map = _service(knowledge, _real_verdict(_Probes())).knowledge_context(
             ACTIVE, [_cluster_hit("ko-defined")])
-        assert current_source_scope()._ceiling_binds_memo == {ACTIVE: True}
+        assert ACTIVE in current_source_scope()._ceiling_bound_libraries
     assert DEF_TEXT not in block
     # Falls back to the first in-ceiling occurrence, as the bound path does.
     assert id_map["k1"]["definition"] == OPEN_TEXT
@@ -456,7 +456,7 @@ def test_retrieval_service_flips_on_a_drifted_row_and_rereads_it_bound():
         service, seen = _retrieval_service(rows, probes)
         with _all_ticked():
             row = service.node_context(ACTIVE, object_id)
-            assert current_source_scope()._ceiling_binds_memo == {ACTIVE: True}
+            assert ACTIVE in current_source_scope()._ceiling_bound_libraries
             following = service.node_context(ACTIVE, "ko-next")
         assert NEW_TEXT not in str(row) and DEF_TEXT not in str(row)
         assert seen == [{}, bound, bound], object_id
@@ -509,7 +509,7 @@ def test_a_merge_after_the_verdict_is_caught_on_a_real_store(repo, monkeypatch):
                        (json.dumps([_nc_ev(new_el, new_src), _nc_ev(f"el-{nb}", src)]), hub))
             db.execute("INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id) VALUES (?,?,?)", (hub, new_src, nb))
         after = service.knowledge_context(nb, [hit], budget_chars=10_000)
-        assert current_source_scope()._ceiling_binds_memo == {nb: True}
+        assert nb in current_source_scope()._ceiling_bound_libraries
     assert "HUB fused description" in before[0] and pushed[0] == "<absent>"
     assert NEW_TEXT not in after[0] and new_src not in json.dumps(after[1])
     assert pushed[1:] == ["<absent>", frozenset(visible)]

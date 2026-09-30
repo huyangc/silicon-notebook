@@ -2897,15 +2897,18 @@ class CandidateRetrievalService(_RetrievalState):
         When that ceiling was pushed down (no list: the run's verdict says it
         binds nothing, ``source_scope.scoped_allowed_source_ids``), the rows
         are verified on read and a row from outside the freeze flips the
-        verdict and re-runs this call bound (``verify_unbound_read``)."""
-        from app.services.source_scope import verify_unbound_read
+        verdict and re-runs this call bound (``verify_unbound_read``).  The
+        ceiling is taken BEFORE the read, so a concurrent flip between the read
+        and the check cannot wave an outsider through."""
+        from app.services.source_scope import unbound_ceiling, verify_unbound_read
 
+        unbound = None if allowed_source_ids is not None else unbound_ceiling(notebook_id)
         result = self._retrieve_chunks_once(
             notebook_id, query, recall, allowed_source_ids=allowed_source_ids,
             producer_explicit=producer_explicit, drifted=drifted,
         )
-        if allowed_source_ids is None and not verify_unbound_read(
-            notebook_id, (chunk.source_id for chunk in result[0]),
+        if not verify_unbound_read(
+            notebook_id, unbound, (chunk.source_id for chunk in result[0]),
         ):
             result = self._retrieve_chunks_once(
                 notebook_id, query, recall,
@@ -3594,8 +3597,23 @@ class CandidateRetrievalService(_RetrievalState):
         )
         if effective_allowed is _REPORT_CHUNK_AUTHORITY_FAILED:
             return [], [], None
+        # A pushed-down ceiling (the run's verdict binds nothing here) still
+        # decides everything this lane decides IN PYTHON -- the sidecar plan,
+        # the KNN filter, the lexical-failure banner role -- from the frozen
+        # ceiling; only the SQL legs below go without the list, and what they
+        # return is left to ``_retrieve_chunks``' verify-on-read (which
+        # records the drift and re-runs bound) rather than silently dropped.
+        sql_unbound = False
+        if effective_allowed is None and allowed_source_ids is None:
+            from app.services.source_scope import unbound_ceiling
+
+            pushed_down = unbound_ceiling(notebook_id)
+            if pushed_down is not None:
+                sql_unbound = True
+                effective_allowed = pushed_down
         allowed = (
-            frozenset(str(value) for value in effective_allowed)
+            effective_allowed if sql_unbound
+            else frozenset(str(value) for value in effective_allowed)
             if effective_allowed is not None else None
         )
         if allowed == frozenset():
@@ -3613,19 +3631,25 @@ class CandidateRetrievalService(_RetrievalState):
         source_counts = getattr(idx, "chunk_ann_source_counts", None)
         scope_ann_complete = True
         unindexed_allowed_sources = frozenset()
-        if allowed is not None and (
+        sidecar_missing = (
             source_codes is None
             or source_names is None
             or source_counts is None
             or len(source_codes) != len(labels)
-        ):
-            # Older indexes have no row→source sidecar.  Do not run global ANN
-            # and filter its Top-K afterward: out-of-scope rows could starve
-            # valid evidence.  Returning None selects the bounded scoped-FTS
-            # fallback until the index is rebuilt/folded.
-            return None
-        if allowed is not None and len(source_counts) != len(source_names):
-            return None
+            or len(source_counts) != len(source_names)
+        )
+        if allowed is not None and sidecar_missing:
+            if sql_unbound:
+                # Pushed down and no row→source sidecar to plan with: run the
+                # unscoped lane as is -- global ANN, exactly what a run
+                # without a scope does -- and let verify-on-read judge it.
+                allowed = None
+            else:
+                # Older indexes have no row→source sidecar.  Do not run global
+                # ANN and filter its Top-K afterward: out-of-scope rows could
+                # starve valid evidence.  Returning None selects the bounded
+                # scoped-FTS fallback until the index is rebuilt/folded.
+                return None
         qarr = np.asarray(query_vector, dtype=np.float32)
         dim = int(idx.manifest.get("dim", qarr.shape[0]))
         if dim != qarr.shape[0]:
@@ -3848,7 +3872,9 @@ class CandidateRetrievalService(_RetrievalState):
                             k=recall,
                             allowed_source_ids=(
                                 tuple(sorted(lexical_allowed))
-                                if lexical_allowed is not None else None
+                                if lexical_allowed is not None
+                                and not (sql_unbound and lexical_allowed is allowed)
+                                else None
                             ),
                             corpus_langs=corpus_langs,
                         )
@@ -3921,7 +3947,10 @@ class CandidateRetrievalService(_RetrievalState):
                     if chunk["chunk_id"] in delta_semantic_ids
                 ),
             )
-        if allowed is not None:
+        if allowed is not None and not sql_unbound:
+            # (Pushed down: an out-of-ceiling row is left for
+            # ``_retrieve_chunks``' verify-on-read, which records the drift and
+            # re-runs the call bound.)
             chunks = [chunk for chunk in chunks if chunk["source_id"] in allowed]
             kept_ids = {chunk["chunk_id"] for chunk in chunks}
             chunk_sims = {
@@ -4127,8 +4156,8 @@ class CandidateRetrievalService(_RetrievalState):
             element_ids=list(json.loads(row["element_ids"] or "[]")),
             notebook_id=str(row["chunk_notebook_id"]),
         ) for row in rows]
-        if unbound is not None and not verify_unbound_read(
-            notebook_id, (chunk.source_id for chunk in chunks),
+        if not verify_unbound_read(
+            notebook_id, unbound, (chunk.source_id for chunk in chunks),
         ):
             # A by-id hydrate has no top-K to protect: dropping the rows from
             # outside the freeze is the bound read's answer.
@@ -4295,6 +4324,7 @@ class CandidateRetrievalService(_RetrievalState):
         recall = recall or self.settings.chunk_recall
         from app.services.source_scope import (
             scoped_allowed_source_ids,
+            unbound_ceiling,
             verify_unbound_read,
         )
 
@@ -4304,11 +4334,13 @@ class CandidateRetrievalService(_RetrievalState):
                 allowed_source_ids=scoped_allowed_source_ids(notebook_id),
             )
 
+        # A pushed-down ceiling (no list) is verified on read against the
+        # ceiling taken before it; an outsider flips the run's verdict and
+        # this call re-runs bound.
+        unbound = unbound_ceiling(notebook_id)
         hits = keyword_arm()
-        # A pushed-down ceiling (no list) is verified on read; an outsider
-        # flips the run's verdict and this call re-runs bound.
         if not verify_unbound_read(
-            notebook_id, (getattr(hit, "source_id", "") for hit in hits),
+            notebook_id, unbound, (getattr(hit, "source_id", "") for hit in hits),
         ):
             hits = keyword_arm()
         return hits

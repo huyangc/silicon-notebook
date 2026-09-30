@@ -141,14 +141,15 @@ class RetrievalService:
         # CEILING, not narrowing: skipping the whole filter is a FILTERING
         # decision, and the frozen snapshots bind on every submitted scope --
         # including the browser's default full selection, where both narrowing
-        # answers are False.
+        # answers are False.  ``ceilings_total`` needs no arm of its own: every
+        # scope that carries it also carries one of the three -- a default
+        # ceiling always freezes an include local dimension
+        # (``ceiling_active``), a global run always per-library ceilings
+        # (``peer_scope_ceiling_active``).
         if not (
             source_scope_ceiling_active()
             or base_scope_ceiling_active()
             or peer_scope_ceiling_active()
-            # A total set of per-library ceilings denies every library it
-            # does not name, even with no other ceiling active.
-            or (scope is not None and scope.ceilings_total)
         ):
             return result
         result.nodes = filter_retrieval_items(notebook_id, "knowledge", result.nodes)
