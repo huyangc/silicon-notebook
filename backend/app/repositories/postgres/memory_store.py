@@ -2376,10 +2376,12 @@ class MemoryStore:
     def orphan_memory_source_ids(self, limit: int, after_id: str = "") -> list[str]:
         """至多 `limit` 个无主 Memory 来源的 id,按 id 升序,只取 `after_id` 之后的(键集分页)。
 
-        全库读(清扫在启动后一次跑完,不属于任何笔记本)。语句只有一个来源表扫描 +
-        对 Memory 来源逐行的 `memory_items` 主键探针(`OR` 让它无法去相关成反连接);
-        `sources` 上没有单独的 `source_type` 索引,这次扫描是整表一趟,清扫每页最多再扫
-        一趟,页数由 `limit` 决定但不改变结果。见 `test_memory_orphan_sweep_explain_pins`。
+        全库读(清扫在启动后一次跑完,不属于任何笔记本)。语句对 `sources` 只有一趟扫描;
+        `memory_items` 一侧只经索引访问(`OR` 让它无法去相关成反连接:表小时规划器把已确认
+        的 id 哈希一次,表大时逐个 Memory 来源做主键探针,实测 30 万 Memory 来源零无主
+        的一轮约 1.2 秒)。`sources` 上没有单独的 `source_type` 索引,所以这一趟是整表
+        的;清扫每页最多再扫一趟,页数由 `limit` 决定但不改变结果。见
+        `test_memory_orphan_sweep_explain_pins`。
         """
         with self.database.connect() as db:
             rows = db.execute(
