@@ -132,6 +132,25 @@ def test_one_manager_installs_all_four():
             assert scope.source_provided is False and scope.base_provided is False
             assert scope.restricted is False and scope.ceiling_active is False
             assert scope.narrowed is None
+            # E-1: the ceilings are TOTAL.  A library the plan did not select
+            # -- a public library the anchor mounts, one mounted mid-run --
+            # participates in nothing, on every gate, even though no library
+            # dimension was submitted.
+            assert scope.ceilings_total is True
+            assert not scope.covers_notebook("nb-unselected-public")
+            assert not scope.allows("nb-unselected-public", "src-any")
+            from app.services.source_scope import (
+                filter_retrieval_items,
+                scoped_allowed_source_ids,
+            )
+
+            assert scoped_allowed_source_ids(
+                "nb-unselected-public", ["src-any"],
+            ) == ()
+            assert filter_retrieval_items("nb-a", "knowledge", [
+                {"object_id": "ko", "notebook_id": "nb-unselected-public",
+                 "evidence": [{"source_id": "src-any"}]},
+            ]) == []
 
             assert seats[2].conversation_id == "conv-1"
             assert seats[3].window() == 4

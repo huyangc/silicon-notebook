@@ -1385,19 +1385,35 @@ class AskService:
     def ask_chunk_current(
         self, notebook_id: str, payload: AskRequest, cancel_event: CancelEvent = None
     ) -> AskResponse:
-        return self.ask_chunk(
-            notebook_id, payload, user_id=self.current_user_id(),
+        """One engine for the request's user -- under the same ceiling
+        ``ask`` installs (``_retrieval_ceiling``), never without one."""
+        user_id = self.current_user_id()
+        with self._retrieval_ceiling(
+            notebook_id, user_id,
+            local_scope=getattr(payload, "source_scope", None),
+            base_scope=getattr(payload, "base_scope", None),
             cancel_event=cancel_event,
-        )
+        ):
+            return self.ask_chunk(
+                notebook_id, payload, user_id=user_id, cancel_event=cancel_event,
+            )
 
     def ask_reasoning_current(
         self, notebook_id: str, payload: AskRequest, on_trace=None,
         cancel_event: CancelEvent = None,
     ) -> AskResponse:
-        return self.ask_reasoning(
-            notebook_id, payload, user_id=self.current_user_id(),
-            on_trace=on_trace, cancel_event=cancel_event,
-        )
+        """``ask_chunk_current``'s reasoning twin, same ceiling."""
+        user_id = self.current_user_id()
+        with self._retrieval_ceiling(
+            notebook_id, user_id,
+            local_scope=getattr(payload, "source_scope", None),
+            base_scope=getattr(payload, "base_scope", None),
+            cancel_event=cancel_event,
+        ):
+            return self.ask_reasoning(
+                notebook_id, payload, user_id=user_id,
+                on_trace=on_trace, cancel_event=cancel_event,
+            )
 
     def unconfigured_model_response_current(
         self, notebook_id: str, question: str, conversation_id: str, mode: str,
