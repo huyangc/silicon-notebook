@@ -215,6 +215,98 @@ def test_run_ingest_creates_sources_chunks_embeddings_no_kg(repo, tmp_path):
     assert nko == 0
 
 
+@pytest.mark.parametrize("phase", ["ingest", "all", "reparse"])
+def test_batch_source_processing_skips_notebook_metadata(repo, tmp_path, monkeypatch, phase):
+    """Offline parsing must finish without calling the whole-notebook model."""
+    calls = []
+
+    class NotebookMetadata:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            calls.append(messages)
+            return json.dumps({"name": "资料综合", "description": "两份来源的描述。"})
+
+    _bind_chat(repo, "notebook_metadata", NotebookMetadata())
+    _bind_chat(repo, "kg_extract", _StubLLM())
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda *_a, **_kw: None)
+    monkeypatch.setattr(repo, "rebuild_unified_kg", lambda *_a, **_kw: 0)
+    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda *_a, **_kw: 0)
+    directory = _make_md_dir(tmp_path, n=1)
+    files = bi.iter_files(directory)
+    nb_id = bi.ensure_notebook(repo, None, "未命名笔记本")
+    if phase == "reparse":
+        repo.upload_sources(
+            nb_id,
+            [bi.UploadedSourceFile(file_name=p.name, content_type="", content=p.read_bytes())
+             for p in files],
+            scheduler=lambda _sid: None,
+        )
+        result = bi.run_reparse(repo, nb_id, report_interval=0, no_rebuild=True)
+        assert result["reparsed"] == len(files)
+    elif phase == "all":
+        result = bi.run_all(repo, nb_id, files, report_interval=0)
+        assert result["extracted"] == len(files)
+    else:
+        result = bi.run_ingest(repo, nb_id, files, workers=2)
+        assert result["uploaded"] == len(files)
+    assert result["failed"] == 0
+    assert calls == []
+    assert repo.get_notebook(nb_id).name == "未命名笔记本"
+    assert repo.get_notebook(nb_id).purpose == ""
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT name_auto, purpose_auto, metadata_generation FROM notebooks WHERE id=?",
+            (nb_id,),
+        ).fetchone()
+        assert tuple(row) == (1, 1, 0)
+        assert db.execute("SELECT COUNT(*) FROM source_elements").fetchone()[0] > 0
+        assert db.execute("SELECT COUNT(*) FROM chunk_embeddings").fetchone()[0] > 0
+    # Skipping a batch must not permanently disable the notebook's automation.
+    repo._augment_notebook_meta(nb_id)
+    assert len(calls) == 1
+    assert repo.get_notebook(nb_id).purpose == "两份来源的描述。"
+
+
+def test_batch_failed_source_also_skips_notebook_metadata(repo, tmp_path, monkeypatch):
+    directory = _make_md_dir(tmp_path, n=1)
+    nb_id = bi.ensure_notebook(repo, None, "未命名笔记本")
+    ingestion = repo._runtime.source_ingestion
+
+    def fail_summary(*_args):
+        raise RuntimeError("test source failure")
+
+    monkeypatch.setattr(ingestion, "summarize_source", fail_summary)
+    monkeypatch.setattr(
+        ingestion, "notebook_meta_row",
+        lambda *_args: pytest.fail("failed batch source must not even reserve metadata generation"),
+    )
+    bi.run_ingest(repo, nb_id, bi.iter_files(directory), workers=2)
+    with repo._connect() as db:
+        statuses = db.execute("SELECT parse_status FROM sources").fetchall()
+    assert statuses and all(row[0] == "failed" for row in statuses)
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_batch_metadata_suppression_does_not_leak_to_reused_worker(fails):
+    from app.services.notebook_metadata import notebook_metadata_refresh_suppressed
+
+    def batch_work():
+        assert notebook_metadata_refresh_suppressed()
+        if fails:
+            raise RuntimeError("test batch interruption")
+
+    with bi.ThreadPoolExecutor(max_workers=1) as pool:
+        accepted = set()
+        future = bi._submit_tracked_future(pool.submit, accepted, batch_work)
+        if fails:
+            with pytest.raises(RuntimeError, match="test batch interruption"):
+                future.result()
+        else:
+            future.result()
+        assert pool.submit(notebook_metadata_refresh_suppressed).result() is False
+
+
 def test_backfill_chunk_embeddings_missing_only(repo, tmp_path):
     """missing_only=True 只补缺向量的 chunk:返回值==被删数、补全后全有向量、
     未删的行 created_at 不变(证明没重嵌已有的)。"""

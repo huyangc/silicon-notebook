@@ -42,6 +42,7 @@ from app.services.image_backfill_phase import (
     run_backfill_images,
 )
 from app.services.knowledge_lifecycle import ModelSkipPolicy
+from app.services.notebook_metadata import suppress_notebook_metadata_refresh
 from app.services.repository import UploadedSourceFile
 from app.services.maintenance_cli import (
     MaintenanceCliError,
@@ -139,7 +140,11 @@ def _resolve_tracked_future(
     if not completion.set_running_or_notify_cancel():
         return
     try:
-        result = function(*args, **kwargs)
+        # Per-source title/description synthesis serializes a whole notebook's
+        # ingestion pool. Offline work skips it, including failed-source paths;
+        # the context resets before a shared executor can accept online work.
+        with suppress_notebook_metadata_refresh():
+            result = function(*args, **kwargs)
     except BaseException as exc:
         completion.set_exception(exc)
     else:
@@ -1873,6 +1878,8 @@ def _dispatch_main(
     repo: BatchIngestRepository,
     effective: EffectiveConcurrency,
 ) -> int:
+    if args.phase in {"ingest", "all", "reparse"}:
+        print("[batch] 本次跳过笔记本名称和描述的自动刷新，结束时也不补刷。", flush=True)
     if args.phase == "vectors-to-blob":
         # 纯格式转换(已算好的向量 JSON→BLOB),不产出新向量,不需要 EMBED 就绪,
         # 也不走 ensure_notebook(不新建库;--notebook-id 必须是已存在的库)。

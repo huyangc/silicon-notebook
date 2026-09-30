@@ -11,6 +11,11 @@ operator commands. The [command index](../scripts/README.md#统一-cli-入口) o
 the group catalog and minimal examples; this section owns the operating boundaries.
 `batch` accepts every existing `batch_ingest.py` phase and option;
 `batch-ingest` is an alias.
+The `ingest`, `all`, and `reparse` phases automatically skip notebook
+name/description refresh throughout source processing, including failures, and
+do not refresh at the end. No extra flag is required. Source summaries and paper
+metadata still run; notebook field values and automatic/manual ownership are
+preserved, so subsequent online operations can refresh automatic fields normally.
 Existing scripts remain supported; their trailing arguments, exit codes, locking,
 confirmation flags and signal handling are retained. The shell/Python entry keeps
 the caller's working directory, so relative input/output arguments keep their meaning

@@ -71,6 +71,7 @@ from app.services.parser_chain_execution import (
 )
 from app.services.notebook_metadata import (
     MetadataRefreshCoordinator, fallback_metadata, synthesize_metadata,
+    notebook_metadata_refresh_suppressed,
 )
 from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
@@ -1990,6 +1991,8 @@ class SourceIngestionService:
         invalidate older model responses. Manual writes remain authoritative
         through the store's field-specific flags at publication time.
         """
+        if notebook_metadata_refresh_suppressed():
+            return
         meta = self.notebook_meta_row(notebook_id)
         if meta is None or not (meta["name_auto"] or meta["purpose_auto"]):
             return

@@ -273,6 +273,10 @@ PostgreSQL 必须先停 API 与全部后台 writer，再给命令追加
 preflight + database-wide advisory lock，锁竞争会以状态码 2 退出。`--dry-run` 不连接
 数据库。`vectors-to-blob` 只用于 SQLite 旧文本向量；PostgreSQL 已存 `bytea`，会在连接前拒绝。
 
+`ingest`、`all`、`reparse` 默认跳过笔记本名称和描述的自动刷新，结束时也不补刷，
+无需追加开关。来源摘要、论文信息和后续分析仍照常执行；名称／描述的自动状态保留，
+后续网页端操作仍可触发刷新。
+
 ```bash
 PYTHONPATH=backend python scripts/batch_ingest.py index \
   --notebook-id nb-xxxx --confirm-service-stopped
