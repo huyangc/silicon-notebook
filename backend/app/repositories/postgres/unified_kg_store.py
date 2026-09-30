@@ -171,11 +171,21 @@ _WEAK_TARGET_OBJECTS = (
 
 
 def _weak_target_supported(condition: str) -> str:
-    """``cr`` 行的目标端有一个对象满足 ``condition``(写在 ``ko`` 上)。"""
+    """``cr`` 行的目标端有一个对象满足 ``condition``(写在 ``ko`` 上):一个
+    ``LATERAL … LIMIT 1`` 探针,与 ``cr`` 做 ``JOIN … ON true``。
+
+    写成 LATERAL 而不是 ``WHERE EXISTS``:规划器能在它前面放 ``Memoize``
+    (键是 ``cr.canonical_tgt``),同一个目标被多条候选边指到时只判一次。同一个
+    偏斜语料上(96 种子、5000 成员的纯 Memory 枢纽簇被 96 条边指到)执行
+    1732 ms → 92 ms(EXISTS 是 SubPlan,逐行重判)。"""
     return (
-        "EXISTS (SELECT 1 FROM knowledge_objects ko "
-        f"WHERE {_WEAK_TARGET_OBJECTS} AND ko.notebook_id = cr.notebook_id "
-        f"AND {condition})"
+        "JOIN LATERAL (SELECT 1 FROM knowledge_objects ko "
+        f"WHERE {_WEAK_TARGET_OBJECTS} "
+        # IS NOT DISTINCT FROM (the column is NOT NULL, so it is equality) is
+        # not an index qual: the objects are reached by primary key only,
+        # never BitmapAnd'ed with a walk of the notebook's objects.
+        f"AND ko.notebook_id IS NOT DISTINCT FROM cr.notebook_id "
+        f"AND {condition} LIMIT 1) supported ON true"
     )
 
 
@@ -1191,7 +1201,8 @@ class UnifiedKgStore:
         闸在 ``LIMIT`` 之前,而且**按排序惰性求值**:候选先在一个带 ``OFFSET 0``
         的子查询里排好序(优化栅栏,闸不会被下推进去),外层只对排在前面的行
         逐行判支撑、拿够 ``limit`` 行即停——而不是对整批候选(96 种子 × 数百条边)
-        都先判一遍再排序。子查询的排序键透传到外层,不会再排一次。
+        都先判一遍再排序。子查询的排序键透传到外层,不会再排一次。支撑探针是
+        ``LATERAL``(见 ``_weak_target_supported``),同一目标只判一次。
         """
         if not canonical_ids:
             return []
@@ -1232,7 +1243,7 @@ class UnifiedKgStore:
             f"        AND source_count<=%s "
             f"      ORDER BY source_count ASC, canonical_tgt ASC, canonical_src ASC, "
             f"               edge_type ASC OFFSET 0) cr "
-            f"WHERE {_weak_target_supported(condition)} "
+            f"{_weak_target_supported(condition)} "
             f"ORDER BY cr.source_count ASC, cr.canonical_tgt ASC, cr.canonical_src ASC, "
             f"         cr.edge_type ASC "
             f"LIMIT %s"
@@ -1326,7 +1337,9 @@ class UnifiedKgStore:
             sql = (
                 f"SELECT ko.id AS object_id, {EVIDENCE_ITEM_SOURCE} AS source_id "
                 f"FROM knowledge_objects ko CROSS JOIN LATERAL {evidence_items('ko')} "
-                f"WHERE {member_of('ko.id', bound)} AND ko.notebook_id=%s"
+                f"WHERE {member_of('ko.id', bound)} "
+                # Not an index qual (NOT NULL column): primary key only.
+                f"AND ko.notebook_id IS NOT DISTINCT FROM %s"
             )
         return execute_ids(db, sql, [bound.param, notebook_id]).fetchall()
 
