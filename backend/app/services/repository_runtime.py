@@ -2350,6 +2350,8 @@ class RepositoryRuntime:
             profiles=self.agent_profile,
             # P3(codex #535 R6):观察行同批清空,同一条空白起点契约。
             observations=self.agent_observations,
+            # E7-4:回答 id 接口的属主判定(库读权 ∧ 会话创建者)读这一座。
+            ask_state=self.ask_state,
         )
         return self.sharing
 
@@ -2409,6 +2411,7 @@ class RepositoryRuntime:
         at its last persisted status."""
         from app.services.report_engine import ReportEngine, ReportEngineDependencies
         from app.services.report_execution import ReportGenerationGate
+        from app.services.report_memory_use import RetrievalSourceLog
         from app.services.report_corpus_profile import ReportCorpusProfileService
 
         generation_gate = ReportGenerationGate(
@@ -2424,16 +2427,31 @@ class RepositoryRuntime:
                 raise RuntimeError(
                     "wire_report_execution engine factory requires wired retrieval"
                 )
+            # M4: every retrieval/evidence port this engine reads is watched, so
+            # the report can record which of the author's Memory reached its
+            # prompts (``app.services.report_memory_use``).  Each newly handed
+            # source is resolved to the author's Memory at once and retained, so
+            # a Memory deprecated before the run completes is still recorded.
+            memory_store = self.memory_store
+            source_log = RetrievalSourceLog(
+                resolve_memory=lambda source_ids: memory_store.memory_sources_for_source_ids(
+                    source_ids, user_id
+                )
+            )
             dependencies = ReportEngineDependencies(
                 reports=self.report_store,
-                retrieval=retrieval_port,
-                evidence_context=self.evidence_context,
+                retrieval=source_log.watch(retrieval_port),
+                evidence_context=source_log.watch(self.evidence_context),
                 model_clients=self.models,
                 model_errors=self.models,
                 source_query=self.source_store,
-                communities=retrieval_port.community_queries(engine_settings),
+                communities=source_log.watch(
+                    retrieval_port.community_queries(engine_settings)
+                ),
                 settings=engine_settings,
                 event_log=self.event_log,
+                memory_sources=self.memory_store,
+                retrieval_sources=source_log,
                 memory_retriever=self.memory_retriever,
                 corpus_profile=ReportCorpusProfileService(self.source_store),
                 generation_gate=generation_gate,
@@ -2445,15 +2463,15 @@ class RepositoryRuntime:
                 selected_source_graph=self.selected_source_graph,
                 retrieval_contributors=self.retrieval_contributors,
                 retrieval_connection_probe=self.database,
-                retrieval_contributor_hydrate=(
+                retrieval_contributor_hydrate=source_log.watch_call(
                     retrieval_port.hydrate_retrieval_contribution_chunks
                 ),
                 scale_version=lambda nb: tuple(self.scale_artifacts.version(nb)),
-                selected_graph_hydrate=lambda ids: (
+                selected_graph_hydrate=source_log.watch_call(lambda ids: (
                     hydrate_selected_graph_chunk_rows(
                         retrieval_port.hydrate_chunk_candidates(ids)[0]
                     )
-                ),
+                )),
             )
             return ReportEngine(
                 dependencies, user_id=user_id, cancel_event=cancel_event

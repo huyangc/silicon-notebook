@@ -2471,6 +2471,23 @@ button.chat-session-card {
   gap: 8px;
 }
 
+/* 公开前确认条:长在报告头下面一行、靠右对齐(紧贴上方的按钮组),只向下展开,
+   不给报告正文加单侧边距,也不把它挤向侧边。 */
+.report-share-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  font-size: 13px;
+  color: #22272e;
+}
+
+.report-share-confirm-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .report-action {
   display: inline-flex;
   align-items: center;

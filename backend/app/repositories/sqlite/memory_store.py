@@ -659,10 +659,15 @@ class MemoryStore:
             row = db.execute(
                 "SELECT a.question,a.payload,a.conversation_id FROM answers a "
                 "JOIN notebooks nb ON nb.id=a.notebook_id "
-                "WHERE a.id=? AND a.notebook_id=? AND " + read_access_clause(),
+                # the author, re-checked under the write lock like read access:
+                # the answer's conversation must still be the writer's own
+                "JOIN conversations c ON c.id=a.conversation_id "
+                "WHERE a.id=? AND a.notebook_id=? AND c.created_by=? AND "
+                + read_access_clause(),
                 (
                     write.source_answer_id,
                     write.notebook_id,
+                    write.created_by,
                     *read_access_params(write.created_by),
                 ),
             ).fetchone()
@@ -1876,3 +1881,96 @@ class MemoryStore:
             "SELECT embedding_status FROM memory_items WHERE id=?",
             (source_memory_id,),
         ).fetchone()
+
+    @staticmethod
+    def memory_sources_for_source_ids_sql(*, lock: bool = False) -> str:
+        """SQLite mirror of the PostgreSQL statement; see its docstring there.
+
+        Two scalar parameters: the id list as ONE JSON array text, and the owner.
+        ``json_each`` feeds a primary-key probe of ``sources`` per id, so a
+        citation list of hundreds stays one bound variable (never near the
+        32,766-variable limit) and one index probe per id.  ``lock`` adds
+        nothing here: a caller inside ``write()`` already holds the database
+        write lock (``BEGIN IMMEDIATE``), which every Memory write waits for.
+        """
+        del lock
+        from app.repositories.sqlite import memory_sql
+
+        return (
+            "SELECT s.id AS source_id, s.memory_id AS memory_id "
+            "FROM json_each(?) AS wanted "
+            "JOIN sources s ON s.id = wanted.value "
+            f"WHERE {memory_sql.memory_source_type_predicate('s.source_type')} "
+            f"AND {memory_sql.memory_source_readable('s')}"
+        )
+
+    @staticmethod
+    def memory_sources_on(
+        db: sqlite3.Connection,
+        source_ids: Sequence[str],
+        owner_id: str,
+        *,
+        lock: bool = False,
+    ) -> dict[str, str]:
+        """``{source_id: memory_id}`` for the given ids that are ``owner_id``'s
+        Memory sources, read on the caller's connection."""
+        wanted = list(dict.fromkeys(str(item) for item in source_ids if item))
+        owner = str(owner_id or "")
+        if not wanted or not owner:
+            return {}
+        rows = db.execute(
+            MemoryStore.memory_sources_for_source_ids_sql(lock=lock),
+            (json.dumps(wanted), owner),
+        ).fetchall()
+        return {str(row["source_id"]): str(row["memory_id"]) for row in rows}
+
+    def memory_sources_for_source_ids(
+        self, source_ids: Sequence[str], owner_id: str
+    ) -> dict[str, str]:
+        """Mirrors the PostgreSQL store: only Memory sources readable by the
+        owner under ``memory_sql`` map; another member's Memory source, an
+        orphan, Knowhow, ordinary sources and unknown ids map to nothing."""
+        with self.database.connect() as db:
+            return self.memory_sources_on(db, source_ids, owner_id)
+
+    def memory_ids_for_source_ids(
+        self, source_ids: Sequence[str], owner_id: str
+    ) -> list[str]:
+        """Sorted distinct Memory ids behind ``memory_sources_for_source_ids``."""
+        return sorted(set(self.memory_sources_for_source_ids(source_ids, owner_id).values()))
+
+    @staticmethod
+    def foreign_memory_sources_for_source_ids_sql() -> str:
+        """SQLite mirror of the PostgreSQL statement; see its docstring there.
+        Two scalar parameters: the id list as ONE JSON array text, and the member."""
+        from app.repositories.sqlite import memory_sql
+
+        return (
+            "SELECT s.id AS source_id, s.memory_id AS memory_id, "
+            "fo.created_by AS owner_id "
+            "FROM json_each(?) AS wanted "
+            "JOIN sources s ON s.id = wanted.value "
+            "JOIN memory_items fo ON fo.id = s.memory_id "
+            f"WHERE {memory_sql.memory_source_type_predicate('s.source_type')} "
+            f"AND NOT {memory_sql.memory_source_readable('s')}"
+        )
+
+    def foreign_memory_sources_for_source_ids(
+        self, source_ids: Sequence[str], member_id: str
+    ) -> dict[str, tuple[str, str]]:
+        """Mirrors the PostgreSQL store: ``{source_id: (memory_id, owner_id)}``
+        for the ids that are Memory sources of someone other than ``member_id``
+        (orphaned Memory sources map to nothing)."""
+        wanted = list(dict.fromkeys(str(item) for item in source_ids if item))
+        member = str(member_id or "")
+        if not wanted or not member:
+            return {}
+        with self.database.connect() as db:
+            rows = db.execute(
+                self.foreign_memory_sources_for_source_ids_sql(),
+                (json.dumps(wanted), member),
+            ).fetchall()
+        return {
+            str(row["source_id"]): (str(row["memory_id"]), str(row["owner_id"]))
+            for row in rows
+        }

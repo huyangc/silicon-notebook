@@ -56,6 +56,12 @@ from app.core.model_safety import (
     safe_model_finish_reason,
 )
 from app.domain.extensions import RetrievalContributorHostPort
+from app.domain.share_disclosure import (
+    REPORT_PLANNING_MEMORY_KEY,
+    SECTION_MEMORY_KEY,
+    MemorySourceReader,
+)
+from app.services.report_memory_use import RetrievalSourceLog
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 # Only the NAME, from the dependency-free domain layer: these modules are
 # not on the participant override's frozen reader whitelist, but their
@@ -643,6 +649,23 @@ def unregister_cancel(report_id: str, event: threading.Event) -> None:
     REPORT_CANCELLATIONS.unregister(report_id, event)
 
 
+def _memory_ids_within(
+    lines: Sequence[tuple[str, str]], *, start: int, limit: int
+) -> list[str]:
+    """Memory ids whose line, laid out one per line from offset ``start``,
+    begins before a prompt cut at ``limit`` characters (M4: a Memory counts
+    as used once any of its text reached the model)."""
+    shown: list[str] = []
+    offset = start
+    for memory_id, line in lines:
+        if offset >= limit:
+            break
+        if memory_id and memory_id not in shown:
+            shown.append(memory_id)
+        offset += len(line) + 1
+    return shown
+
+
 @dataclass(frozen=True)
 class ReportEngineDependencies:
     """引擎的全部协作面(窄端口,消费者所有的契约见 app.repositories.ports)。"""
@@ -655,6 +678,15 @@ class ReportEngineDependencies:
     communities: "CommunityQueryPort"
     settings: "Settings"
     event_log: Any
+    # M4:把报告带出的个人记忆记在报告上(``_record_memory_use``)。必填、接线时就按
+    # ``MemorySourceReader`` 核对——缺了这两个读法的 store 或测试替身在构造引擎时失败,
+    # 而不是在一份报告写到一半时失败;与 ``memory_retriever`` 是否接线无关。
+    memory_sources: MemorySourceReader
+    # M4:本引擎的检索/证据端口交出过哪些来源(``RetrievalSourceLog.watch`` 包在
+    # ``retrieval``/``evidence_context`` 等端口外面)。规划与生成收尾时据它记下
+    # 可能进过任何提示词的作者个人记忆——深挖 Agent 的中间观察、全篇综合载荷
+    # 都由这些端口供给。
+    retrieval_sources: RetrievalSourceLog
     memory_retriever: Any = None
     corpus_profile: Any = None
     generation_gate: Any = None
@@ -676,6 +708,17 @@ class ReportEngineDependencies:
     # ⚠ 与 P1 那个座位不同,这里没有对应的 owner 字段:打法库没有任何租户维度,
     # 一条打法不属于任何人,所以「报告创建者是谁」对它不是一个有意义的问题。
     retrieval_experiences: Any = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.memory_sources, MemorySourceReader):
+            raise TypeError(
+                "ReportEngineDependencies.memory_sources must provide "
+                "memory_sources_for_source_ids and foreign_memory_sources_for_source_ids"
+            )
+        if not isinstance(self.retrieval_sources, RetrievalSourceLog):
+            raise TypeError(
+                "ReportEngineDependencies.retrieval_sources must be a RetrievalSourceLog"
+            )
 
 
 class _NeverHeldConnectionProbe:
@@ -1483,13 +1526,23 @@ class ReportEngine:
                 if deps.memory_retriever is not None and not source_scope_restricted()
                 else []
             )
-            if memories:
+            memory_lines = [
+                (item.memory_id, f"- {item.title}: {item.text[:240]}")
+                for item in memories
+            ]
+            if memory_lines:
                 parts.append("用户已确认 Memory:\n" + "\n".join(
-                    f"- {item.title}: {item.text[:240]}" for item in memories
+                    line for _, line in memory_lines
                 ))
         except Exception:
-            pass
-        return ("\n\n".join(parts))[:6000] if parts else "(语料侦察无结果)"
+            memory_lines = []
+        text = "\n\n".join(parts)
+        self._planning_memory_ids = _memory_ids_within(
+            memory_lines, start=len(text) - sum(
+                len(line) + 1 for _, line in memory_lines
+            ) + 1, limit=6000,
+        )
+        return text[:6000] if parts else "(语料侦察无结果)"
 
     def _probe_sufficiency(self, notebook_id: str, sections: List[dict], *,
                            max_queries: int = 4) -> List[dict]:
@@ -1685,6 +1738,7 @@ class ReportEngine:
                 report_id=rid,
                 stage="planning_corpus_map",
             ):
+                self._planning_memory_ids = []
                 corpus_map = self._build_corpus_map(
                     notebook_id, research_question
                 )
@@ -1739,9 +1793,23 @@ class ReportEngine:
                 sections = self._judge_sufficiency(
                     research_question, sections, probe, use_llm=sufficiency_llm
                 )
+            # M4: the author's Memory that planning prompts may have carried —
+            # the corpus map's Memory lines, and every Memory source retrieval
+            # handed the planner (corpus map, coverage and sufficiency probes)
+            # — is recorded on the report, in a store-owned key of
+            # ``understanding_json`` (a copy of the contract: the contract
+            # itself goes into prompts).  A failed lookup fails the planning.
+            planning_memory = sorted(
+                set(self._planning_memory_ids) | self._author_memory_seen()
+            )
             reports.update_report(notebook_id, rid, outline=sections,
                                   status="outline_ready",
-                                  progress=f"大纲就绪({len(sections)} 节),待确认")
+                                  progress=f"大纲就绪({len(sections)} 节),待确认",
+                                  understanding=(
+                                      {**intent_contract,
+                                       REPORT_PLANNING_MEMORY_KEY: planning_memory}
+                                      if planning_memory else None
+                                  ))
             return sections
         except AskCancelled:
             reports.update_report(notebook_id, rid, status="cancelled", progress="已取消")
@@ -3091,20 +3159,114 @@ class ReportEngine:
         self._assert_report_stage_runtime(
             generation, runtime, run_kind="report_generation"
         )
+        references, section_memory, run_memory = self._record_memory_use(
+            references, sections
+        )
         persisted_sections: list[Mapping[str, object]] = []
-        for section in sections:
+        for section, memory_used in zip(sections, section_memory):
             clean = dict(section)
             clean.pop("id_map", None)
             clean.pop("_synthesis_blueprint", None)
             clean.pop("_synthesis_status", None)
+            if memory_used:
+                clean[SECTION_MEMORY_KEY] = memory_used
             persisted_sections.append(MappingProxyType(clean))
         return FinalizedReportArtifact(
             generation=generation,
             sections=tuple(persisted_sections),
             content_md=content_md,
             gaps=tuple(gaps),
-            references=tuple(MappingProxyType(dict(row)) for row in references),
+            references=tuple(MappingProxyType(row) for row in references),
+            memory_used=tuple(run_memory),
         )
+
+    def _author_memory_seen(self) -> set[str]:
+        """The author's Memory behind every source retrieval has handed this
+        engine so far (``RetrievalSourceLog``): the associations retained when
+        each source was first handed over (a Memory deprecated since has lost
+        its source row, but not its place here), plus a lookup now for the
+        sources that were not a Memory source then (a Memory confirmed since)."""
+        log = self.dependencies.retrieval_sources
+        retained = log.memory_sources()
+        late = [source_id for source_id in log.source_ids() if source_id not in retained]
+        found = set(retained.values())
+        if late:
+            found.update(self.dependencies.memory_sources.memory_sources_for_source_ids(
+                late, self.user_id
+            ).values())
+        return found
+
+    def _record_memory_use(
+        self, references, sections
+    ) -> tuple[list[dict], list[list[str]], list[str]]:
+        """Record, on the stored report, which Memory it carries (M4).
+
+        * Each citation whose ``source_id`` is a Memory projection source gets
+          ``memory_id`` and ``memory_owner_id`` — the author's own, or another
+          member's (whose publication the share route refuses).  Share
+          disclosure counts these from the stored report, so deleting the
+          Memory or its projection later cannot hide the stored excerpt.
+        * Each section gets the author's Memory whose content entered its
+          drafting prompt: the confirmed-Memory block (``object_type ==
+          'memory'`` in its id map) and every id-map entry whose source is one
+          of the author's Memory projection sources, cited or not — the
+          model may restate evidence without a marker.
+        * The run gets the author's Memory behind every source retrieval
+          handed this generation (``RetrievalSourceLog``): what the section
+          deep-dive agent observed while planning and reflecting (including
+          evidence it later dropped) and what the report-wide synthesis
+          payload was built from.  Stored by ``_generate_run`` in the
+          report's store-owned understanding key.
+
+        Additive only: other citations and sections are stored exactly as
+        before, and neither the report detail API nor the public projection
+        names these fields.
+
+        Fails closed: if the lookup fails, the exception fails the report.  A
+        report stored without its record would later under-count what its page
+        carries once a cited Memory is deleted, so it is not stored at all
+        (the outline is kept and generation can be retried).
+        """
+        rows = [dict(row) for row in references]
+        contexts = [
+            [ctx for ctx in dict(section.get("id_map") or {}).values()
+             if isinstance(ctx, Mapping)]
+            for section in sections
+        ]
+        cited = [str(row.get("source_id") or "") for row in rows]
+        drafted = [str(ctx.get("source_id") or "") for group in contexts for ctx in group]
+        log = self.dependencies.retrieval_sources
+        retained = log.memory_sources()
+        retrieved = log.source_ids()
+        memory_sources = self.dependencies.memory_sources
+        # Associations retained when retrieval handed a source over win: the
+        # Memory may have been deprecated since, taking its source row along.
+        # The rest are looked up now (a Memory confirmed after first sight).
+        own: dict[str, str] = dict(retained)
+        foreign: Mapping[str, tuple[str, str]] = {}
+        late = [s for s in cited + drafted + retrieved if s and s not in retained]
+        if late:
+            own.update(memory_sources.memory_sources_for_source_ids(late, self.user_id))
+        if any(cited):
+            foreign = memory_sources.foreign_memory_sources_for_source_ids(
+                cited, self.user_id
+            )
+        for row, source_id in zip(rows, cited):
+            if source_id in own:
+                row["memory_id"], row["memory_owner_id"] = own[source_id], self.user_id
+            elif source_id in foreign:
+                row["memory_id"], row["memory_owner_id"] = foreign[source_id]
+        section_memory = []
+        for group in contexts:
+            used = {
+                str(ctx.get("object_id")) for ctx in group
+                if ctx.get("object_type") == "memory" and ctx.get("object_id")
+            }
+            used.update(own[str(ctx.get("source_id") or "")] for ctx in group
+                        if str(ctx.get("source_id") or "") in own)
+            section_memory.append(sorted(used))
+        run_memory = sorted({own[source_id] for source_id in retrieved if source_id in own})
+        return rows, section_memory, run_memory
 
     def _generate_run(
         self,
@@ -3178,6 +3340,18 @@ class ReportEngine:
                     )
                     return
                 raise_if_cancelled(self.cancel_event)
+                if artifact.memory_used:
+                    # M4: the run-level record joins the planner's in the
+                    # store-owned understanding key before the report is
+                    # published as done; a failed write fails the report.
+                    current = reports.get_report(notebook_id, rid)
+                    reports.update_report(notebook_id, rid, understanding={
+                        **dict(current.get("understanding") or {}),
+                        REPORT_PLANNING_MEMORY_KEY: sorted(
+                            set(current.get("memory_used") or ())
+                            | set(artifact.memory_used)
+                        ),
+                    })
                 if not reports.complete_report_generation(
                     notebook_id,
                     rid,
@@ -3614,11 +3788,11 @@ class ReportEngine:
             def _sub(m, _id_map=id_map):
                 # 支持单 key [k1] 与逗号复合 [k1, k3](LLM 常不按 [k1][k3] 而吐逗号):
                 # 逐 key 重映射到全局、bracket 内去重;全未知则整段剥除(幻觉/未知 marker)。
-                # 复合 marker 是一个证据组：先完整验证，再产生任何全局编号副作用。
+                # 复合 marker 只剥掉未知 key、保留已知 key:整段剥除时句子仍留在正文,
+                # 真实出处(比如作者的个人记忆)却从参考文献里消失,分享前的披露
+                # 也就数不到它(M4)。
                 local_keys = marker_keys(m.group(0))
-                contexts = [_id_map.get(key) for key in local_keys]
-                if any(not ctx for ctx in contexts):
-                    return ""
+                contexts = [_id_map[key] for key in local_keys if _id_map.get(key)]
 
                 out_keys: List[str] = []
                 for ctx in contexts:

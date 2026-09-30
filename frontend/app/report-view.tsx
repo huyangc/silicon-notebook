@@ -22,7 +22,7 @@ import {
 } from "./answer-formatting";
 import { API_BASE } from "./api-config";
 import { AuthedImage } from "./authed-image";
-import { useCopyResult } from "./copy-result";
+import { useCopyResult, type CopyResult } from "./copy-result";
 import { EffortPicker, type EffortOption } from "./effort-picker";
 import {
   buildImageGallery,
@@ -37,6 +37,7 @@ import {
 } from "./inline-citation-images";
 import { Pagination } from "./Pagination";
 import { quotedPhraseHint } from "./query-syntax";
+import { ReportShareConfirm } from "./report-share-confirm";
 import { useClientPagination } from "./use-client-pagination.ts";
 import {
   CITATION_IMAGE_SLOT_ATTRIBUTE,
@@ -1357,6 +1358,34 @@ export interface ReportsPanelProps {
   onPreviewImage?: (request: AnswerImagePreviewRequest) => void;
 }
 
+// 「分享」按钮的外观。公开成功后的结果格(链接进没进剪贴板)只在 `shared` 时画:取消分享的那
+// 一下结果已在点击处清掉,旧链接的结果不会挂到下一条链接上;请求在飞时文案让位给进行态。
+// class 写成字面量,与其它复制按钮同款。
+function shareButtonFace(
+  outcome: CopyResult,
+  shared: boolean,
+  busy: boolean,
+): { className: string; icon: React.ReactNode; label: string } {
+  const result = shared ? outcome : "idle";
+  if (result === "copied") {
+    return {
+      className: "report-action copy-result-copied",
+      icon: <Check size={14} />,
+      label: busy ? "撤销中…" : "已公开，链接已复制",
+    };
+  }
+  if (result === "failed") {
+    return {
+      className: "report-action copy-result-failed",
+      icon: <X size={14} />,
+      label: busy ? "撤销中…" : "已公开，复制失败",
+    };
+  }
+  const idle = shared ? "取消分享" : "分享";
+  const pending = shared ? "撤销中…" : "生成链接中…";
+  return { className: "report-action", icon: <Share2 size={14} />, label: busy ? pending : idle };
+}
+
 export function ReportsPanel({
   notebookId,
   workspace,
@@ -1380,6 +1409,8 @@ export function ReportsPanel({
     outlineBusy,
     shareBusy,
     shared,
+    shareConfirm,
+    sharedRefusal,
     confirmDelete,
     confirmDeleteId,
     deletingId,
@@ -1397,6 +1428,8 @@ export function ReportsPanel({
     confirmIntent,
     confirmOutline,
     toggleShare,
+    confirmShare,
+    cancelShareConfirm,
     copyShareLink,
     requestDelete,
     deleteById: deleteFromList,
@@ -1417,6 +1450,27 @@ export function ReportsPanel({
   // 自动复制还失败了,按钮就在说反话(codex #612 R5 P2)。`shared` 翻面是「链接身份换了」
   // 唯一的信号(换 token 必经 shared:false),在它上面清掉结果。
   useEffect(() => { copyResult.reset(); }, [shared, copyResult.reset]);
+  // 「分享」按钮自己的结果格(「已公开，链接已复制」)。与上面那两颗复制按钮**分开一格**,也
+  // 不挂在 `shared` 翻面的重置 effect 上:公开成功的那一刻 `shared` 正好翻成 true,而结果是
+  // 在稍后(复制完成后)才报——共用那条重置会把刚报的结果抹掉。取而代之:显示时要求 `shared`
+  // 为 true;用户取消分享的那一下在点击处清掉(见「分享」按钮的 onClick),旧链接的结果
+  // 不会挂到下一条链接上。
+  const shareResult = useCopyResult();
+  // 确认条收起时焦点回到这颗「分享」按钮(结果也落在它身上)。公开成功那一刻按钮还在忙
+  // (禁用的按钮拿不到焦点),就记下来,等它回到可点再给。
+  const shareButtonRef = useRef<HTMLButtonElement | null>(null);
+  const shareFocusPending = useRef(false);
+  const returnShareFocus = useCallback(() => {
+    const button = shareButtonRef.current;
+    if (button && !button.disabled) button.focus();
+    else shareFocusPending.current = true;
+  }, []);
+  useEffect(() => {
+    if (shareBusy || !shareFocusPending.current) return;
+    shareFocusPending.current = false;
+    const current = document.activeElement;
+    if (!current || current === document.body) shareButtonRef.current?.focus();
+  }, [shareBusy]);
   const reportsPage = useClientPagination(reports ?? NO_REPORTS, REPORT_LIST_PAGE_SIZE, notebookId);
   // 打开的报告要落在列表当前页上:返回列表时停在它所在的页。只跟随 active id 变化与
   // 清单(重新)加载完成,不跟随原地刷新——见 groups-page.tsx「选中的群组要落在侧栏
@@ -1429,6 +1483,7 @@ export function ReportsPanel({
   }, [active?.id, reportsLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
   // ---- 详情视图 ----
   if (active) {
+    const shareFace = shareButtonFace(shareResult.resultFor(`share:${active.id}`), shared, shareBusy);
     const displayQuestion = active.understanding?.confirmed
       ? active.understanding.resolved_question || active.question
       : active.question;
@@ -1471,18 +1526,24 @@ export function ReportsPanel({
             )}
             {!readOnly && active.status === "done" && (
               <button
-                className="report-action"
+                ref={shareButtonRef}
+                className={shareFace.className}
                 type="button"
                 disabled={shareBusy}
-                onClick={() => void toggleShare()}
+                onClick={() => {
+                  // 结果落在这颗按钮自己身上;null = 这一次没有公开成功(取消分享、需要确认、被拒),不画结果。
+                  if (shared) shareResult.reset();
+                  void toggleShare().then((copied) => {
+                    if (copied !== null) shareResult.report(`share:${active.id}`, copied);
+                  });
+                }}
               >
-                <Share2 size={14} />
-                {shareBusy
-                  ? (shared ? "撤销中…" : "生成链接中…")
-                  : (shared ? "取消分享" : "分享")}
+                {shareFace.icon}
+                {" "}
+                {shareFace.label}
               </button>
             )}
-            {!readOnly && shared && (
+            {!readOnly && shared && !sharedRefusal && (
               <button
                 className={copyResult.resultFor(`share-link:${active.id}`) === "copied" ? "report-action copy-result-copied" : copyResult.resultFor(`share-link:${active.id}`) === "failed" ? "report-action copy-result-failed" : "report-action"}
                 type="button"
@@ -1512,6 +1573,29 @@ export function ReportsPanel({
             )}
           </div>
         </div>
+        {!readOnly && shared && sharedRefusal && (
+          // 以前就已公开、但引用了其他成员个人记忆的报告:公开链接已经打不开。就地说明,
+          // 不再给「复制链接」;「取消分享」照常可用。被动说明,不抢焦点。
+          <div className="report-share-confirm" role="group" aria-label="公开链接已失效">
+            <span className="report-share-confirm-text" role="status">{sharedRefusal}</span>
+          </div>
+        )}
+        {!readOnly && !shared && active.status === "done" && shareConfirm && (
+          <ReportShareConfirm
+            count={shareConfirm.count}
+            added={shareConfirm.added}
+            refusal={shareConfirm.refusal}
+            busy={shareBusy}
+            returnFocusRef={shareButtonRef}
+            onReturnFocus={returnShareFocus}
+            onConfirm={() => {
+              void confirmShare().then((copied) => {
+                if (copied !== null) shareResult.report(`share:${active.id}`, copied);
+              });
+            }}
+            onCancel={cancelShareConfirm}
+          />
+        )}
         <div className="report-detail-title">
           <h2 title={displayQuestion}>{displayQuestion}</h2>
           <div className="report-detail-meta">

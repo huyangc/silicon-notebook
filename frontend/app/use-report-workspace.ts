@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { logDiagnostic, toUserMessage } from "./errors";
+import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors";
 import {
   cancelReport,
   confirmReportIntent,
@@ -11,7 +11,9 @@ import {
   generateReport,
   getReport,
   getReportShare,
+  getReportShareDisclosure,
   listReports,
+  ShareDisclosureRequired,
   shareReport,
   unshareReport,
   updateReportOutline,
@@ -106,6 +108,22 @@ const optimisticGenerating = (
   understanding: { ...report.understanding, credibility: undefined },
 });
 
+// 公开前的确认条状态。`count` 是服务端数出来的「公开页可能包含来自几条作者本人个人记忆的
+// 内容」(取数失败、靠 409 才拿到确数之前为 null);`added` 非 null 表示这是 409 带回的新数字
+// (值为比确认时多出的条数),条上先说「条数有变化」;`refusal` 非 null 表示这份报告不能公开
+// (引用了其他成员的个人记忆,或服务端拒绝了这次公开)——那句中文原因就地显示,不再给
+// 「确认公开」。
+/** 披露端点说报告引用了其他成员的个人记忆时,不发请求、就地显示的原因(与服务端 403 同句)。 */
+export const FOREIGN_MEMORY_REFUSAL = "报告引用了其他成员的个人记忆，不能公开";
+/** 以前就已公开、但引用了其他成员个人记忆的报告:公开链接已打不开时,作者这里看到的说明。 */
+export const SHARED_LINK_REFUSED = "报告引用了其他成员的个人记忆，公开链接已无法打开，可以取消分享";
+
+export type ReportShareConfirmState = {
+  count: number | null;
+  added: number | null;
+  refusal: string | null;
+};
+
 export type ReportWorkspace = ReturnType<typeof useReportWorkspace>;
 
 export function useReportWorkspace({
@@ -168,6 +186,8 @@ export function useReportWorkspace({
   const [outlineBusy, setOutlineBusy] = useState(false);
   const [shareBusy, setShareBusy] = useState(false);
   const [shared, setShared] = useState(false);
+  const [shareConfirm, setShareConfirm] = useState<ReportShareConfirmState | null>(null);
+  const [sharedRefusal, setSharedRefusal] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmDeleteId, setConfirmDeleteIdState] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -224,6 +244,8 @@ export function useReportWorkspace({
     setOutlineBusy(false);
     setShareBusy(false);
     setShared(false);
+    setShareConfirm(null);
+    setSharedRefusal(null);
     setConfirmDelete(false);
     setConfirmDeleteIdState(null);
     setDeletingId(null);
@@ -362,6 +384,33 @@ export function useReportWorkspace({
   useEffect(() => {
     setShared(Boolean(activeReport?.shared));
   }, [activeReport?.id, activeReport?.shared]);
+
+  // 确认条属于「打开的那一份报告」:换报告、回列表都得收起,别让上一份的条数挂在下一份上。
+  useEffect(() => {
+    setShareConfirm(null);
+  }, [activeReport?.id]);
+
+  // 旧数据:以前就已公开、但引用了其他成员个人记忆的报告,公开页现在打不开(与撤销的链接一样)。
+  // 作者这里不能还显示成「已公开、可复制链接」——打开这样一份已公开的报告时读一次披露,引用了
+  // 别人的记忆就改成就地说明链接已失效,只留「取消分享」。也跟着本地的分享状态走:取消分享即收起
+  // 说明;取消后再次公开成功(服务端准许了,比如那条他人记忆的投影已被移除),重读一次。
+  useEffect(() => {
+    setSharedRefusal(null);
+    const owner = currentOwner();
+    const report = activeReport;
+    if (
+      !owner || !policyRef.current.canManageReports || !report
+      || !report.shared || !shared || report.status !== "done"
+    ) return undefined;
+    let cancelled = false;
+    getReportShareDisclosure(owner.notebookId, report.id).then((disclosure) => {
+      if (cancelled || !owns(owner) || activeReportRef.current?.id !== report.id) return;
+      const others = disclosure?.foreign_memory_count;
+      if (typeof others === "number" && others > 0) setSharedRefusal(SHARED_LINK_REFUSED);
+    }).catch((error) => logDiagnostic("report", error));
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeReport?.id, activeReport?.shared, activeReport?.status, shared]);
 
   useEffect(() => {
     if (!confirmDelete) return;
@@ -538,32 +587,133 @@ export function useReportWorkspace({
     }
   };
 
-  const toggleShare = async () => {
+  // 发一次公开请求并处理它的四种结局。调用方已占好 "share" 操作令牌与 shareBusy。
+  // 返回「链接有没有进剪贴板」;null = 没有走到复制(被拒、需要确认、切库/换报告失效)。
+  const publishReport = async (
+    owner: ReportOwner,
+    report: ReportDetailT,
+    acknowledged: number | undefined,
+  ): Promise<boolean | null> => {
+    try {
+      const { share_token: token } = await shareReport(owner.notebookId, report.id, acknowledged);
+      if (!owns(owner) || activeReportRef.current?.id !== report.id) return null;
+      setShared(true);
+      setShareConfirm(null);
+      // 服务端刚刚准许公开:这条链接是好的,以前那句「公开链接已无法打开」不再成立。
+      setSharedRefusal(null);
+      return await effectsRef.current.announceShareLink(token);
+    } catch (error) {
+      if (!owns(owner) || activeReportRef.current?.id !== report.id) return null;
+      if (error instanceof ShareDisclosureRequired) {
+        // 服务端此刻的确数与作者确认的不等:确认条就地换成确数,由作者重新决定。作者已经
+        // 看过一个数字时,条上先说「条数有变化」;取披露失败、这是第一次拿到数字时不说。
+        const { memoryCount, newMemoryCount } = error;
+        setShareConfirm((prev) => ({
+          count: memoryCount,
+          added: prev?.count != null ? newMemoryCount : null,
+          refusal: null,
+        }));
+      } else if (httpErrorStatus(error) === 403) {
+        // 服务端拒绝公开(非作者、或引用了其他成员的个人记忆):那句原因就地显示在确认条里。
+        const refusal = toUserMessage(error, "只有作者可以公开分享这份报告");
+        setShareConfirm((prev) => ({ count: prev?.count ?? null, added: null, refusal }));
+      } else {
+        // 请求没有拿到回答(断网、超时):服务端可能已经公开了。重读一次分享状态,如实报告——
+        // 已公开就按公开成功处理(结果落在按钮上),否则才报「分享操作失败」。
+        if (httpErrorStatus(error) === undefined) {
+          try {
+            const { share_token: token } = await getReportShare(owner.notebookId, report.id);
+            if (!owns(owner) || activeReportRef.current?.id !== report.id) return null;
+            if (token) {
+              setShared(true);
+              setShareConfirm(null);
+              setSharedRefusal(null);
+              return await effectsRef.current.announceShareLink(token);
+            }
+          } catch (readError) {
+            logDiagnostic("report", readError);
+            if (!owns(owner) || activeReportRef.current?.id !== report.id) return null;
+          }
+        }
+        surfaceError(error, "分享操作失败");
+      }
+      return null;
+    }
+  };
+
+  // 分享 / 取消分享。返回值只在「这一次公开成功」时有意义(链接有没有进剪贴板),其余 null。
+  const toggleShare = async (): Promise<boolean | null> => {
     const owner = currentOwner();
     const report = activeReportRef.current;
-    if (!owner || !policyRef.current.canManageReports || !report || shareBusy) return;
+    if (!owner || !policyRef.current.canManageReports || !report || shareBusy) return null;
     const operation = beginOperation("share");
     const wasShared = shared;
     setShareBusy(true);
     try {
       if (wasShared) {
         await unshareReport(owner.notebookId, report.id);
-        if (!owns(owner) || activeReportRef.current?.id !== report.id) return;
+        if (!owns(owner) || activeReportRef.current?.id !== report.id) return null;
         setShared(false);
         effectsRef.current.notify("已取消分享，原链接立即失效");
-      } else {
-        const { share_token: token } = await shareReport(owner.notebookId, report.id);
-        if (!owns(owner) || activeReportRef.current?.id !== report.id) return;
-        setShared(true);
-        await effectsRef.current.announceShareLink(token);
+        return null;
       }
+      // 先取披露:公开页可能包含来自几条作者本人个人记忆的内容,以及有没有引用其他成员的
+      // 个人记忆。引用了别人的 → 不发 POST,确认条就地说明不能公开;0 条 → 直接公开(与从前
+      // 逐字节相同的那一发 POST);>0 → 展开确认条等作者决定。取数失败不拦公开:POST 不带
+      // 确认值,服务端 409 / 403 会把确数或原因带回来。
+      let count: number | undefined;
+      let foreign = 0;
+      try {
+        const disclosure = await getReportShareDisclosure(owner.notebookId, report.id);
+        const value = disclosure?.memory_count;
+        count = Number.isInteger(value) && value >= 0 ? value : undefined;
+        const others = disclosure?.foreign_memory_count;
+        foreign = typeof others === "number" && Number.isInteger(others) && others > 0 ? others : 0;
+      } catch (error) {
+        logDiagnostic("report", error);
+      }
+      if (!owns(owner) || activeReportRef.current?.id !== report.id) return null;
+      if (foreign > 0) {
+        setShareConfirm({ count: null, added: null, refusal: FOREIGN_MEMORY_REFUSAL });
+        return null;
+      }
+      if (count !== undefined && count > 0) {
+        setShareConfirm({ count, added: null, refusal: null });
+        return null;
+      }
+      return await publishReport(owner, report, undefined);
     } catch (error) {
       if (owns(owner) && activeReportRef.current?.id === report.id) {
         surfaceError(error, "分享操作失败");
       }
+      return null;
     } finally {
       if (owns(owner) && ownsOperation("share", operation)) setShareBusy(false);
     }
+  };
+
+  // 确认条上的「确认公开」:把作者看到的那个数字原样交给服务端核对。
+  const confirmShare = async (): Promise<boolean | null> => {
+    const owner = currentOwner();
+    const report = activeReportRef.current;
+    const pending = shareConfirm;
+    if (
+      !owner || !policyRef.current.canManageReports || !report || shareBusy
+      || !pending || pending.count === null || pending.refusal !== null
+    ) return null;
+    const operation = beginOperation("share");
+    setShareBusy(true);
+    try {
+      return await publishReport(owner, report, pending.count);
+    } finally {
+      if (owns(owner) && ownsOperation("share", operation)) setShareBusy(false);
+    }
+  };
+
+  // 「取消」:收起确认条,什么请求都不发。请求在飞时不可取消(结果马上落地)。
+  const cancelShareConfirm = () => {
+    if (shareBusy) return;
+    setShareConfirm(null);
   };
 
   // 返回「链接有没有进剪贴板」;null = 这一次压根没走到复制(前置守卫不通过、切库/换
@@ -716,6 +866,8 @@ export function useReportWorkspace({
     outlineBusy: visible && outlineBusy,
     shareBusy: visible && shareBusy,
     shared: visible && shared,
+    shareConfirm: visible ? shareConfirm : null,
+    sharedRefusal: visible && shared ? sharedRefusal : null,
     confirmDelete: visible && confirmDelete,
     confirmDeleteId: visible ? confirmDeleteId : null,
     deletingId: visible ? deletingId : null,
@@ -738,6 +890,8 @@ export function useReportWorkspace({
     confirmIntent,
     confirmOutline,
     toggleShare,
+    confirmShare,
+    cancelShareConfirm,
     copyShareLink,
     requestDelete,
     deleteById,

@@ -152,6 +152,8 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     # 公开分享链接的发布/撤销。第三段之后是固定字面量，token 只出现在
     # `/api/public/reports/{token}`（另一张模板表），不进这条路径。
     ("reports", None, "share"),
+    # 分享前的个人记忆披露条数(M4),同样全是字面量。
+    ("reports", None, "share", "disclosure"),
     ("unified-kg",),
     ("unified-kg", "rebuild"),
     ("unified-kg", "rebuild", "status"),

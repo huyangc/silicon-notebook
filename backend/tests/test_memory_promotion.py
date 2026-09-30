@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.models.schemas import AskResponse, Citation, NotebookCreate
+from tests.answer_owner_testkit import save_owned_answer
 from app.services.sqlite_repository import (
     SQLiteRepository,
     reset_request_user,
@@ -630,9 +631,10 @@ def test_approval_binds_only_server_validated_source_element_evidence(
             "VALUES ('element-safe','source-safe','paragraph','p1',"
             "'Verified source statement.','{}','t')"
         )
-    answer_id = repo._runtime.ask_state.save_answer(
+    answer_id = save_owned_answer(
+        repo,
         notebook.id,
-        None,
+        owner.id,
         "What is verified?",
         AskResponse(
             conclusion="Verified source statement.",
@@ -647,7 +649,6 @@ def test_approval_binds_only_server_validated_source_element_evidence(
                 )
             ],
         ),
-        owner.id,
     )
     memory = repo.create_memory_from_answer(
         notebook.id,

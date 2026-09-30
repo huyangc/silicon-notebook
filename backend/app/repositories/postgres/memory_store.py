@@ -764,10 +764,14 @@ class MemoryStore:
                     raise KeyError(write.source_answer_id)
                 row = db.execute(
                     "SELECT a.question,a.payload,a.conversation_id FROM answers a "
-                    "WHERE a.id=%s AND a.notebook_id=%s FOR SHARE OF a",
+                    # the author, re-checked in this transaction like read access
+                    "JOIN conversations c ON c.id=a.conversation_id "
+                    "WHERE a.id=%s AND a.notebook_id=%s AND c.created_by=%s "
+                    "FOR SHARE OF a",
                     (
                         write.source_answer_id,
                         write.notebook_id,
+                        write.created_by,
                     ),
                 ).fetchone()
                 if row is None:
@@ -808,11 +812,13 @@ class MemoryStore:
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT 1 FROM answers a JOIN notebooks n ON n.id=a.notebook_id "
-                "WHERE a.id=%s AND a.notebook_id=%s AND "
+                "JOIN conversations c ON c.id=a.conversation_id "
+                "WHERE a.id=%s AND a.notebook_id=%s AND c.created_by=%s AND "
                 + read_access_clause("n", "nm"),
                 (
                     write.source_answer_id,
                     write.notebook_id,
+                    write.created_by,
                     *read_access_params(write.created_by),
                 ),
             ).fetchone()
@@ -2049,3 +2055,164 @@ class MemoryStore:
             "SELECT embedding_status FROM memory_items WHERE id=%s FOR SHARE",
             (source_memory_id,),
         ).fetchone()
+
+    @staticmethod
+    def memory_sources_for_source_ids_sql(*, lock: bool = False) -> str:
+        """The statement behind the Memory-source lookups (also EXPLAIN-pinned).
+
+        Two scalar parameters, in order: the id list as ONE JSON array text, and
+        the owner.  The id list is a citation list (a report's references), so it
+        can run to hundreds; it is unpacked in SQL instead of being bound as one
+        placeholder per id or as ``= ANY(%s)`` with a Python list.  The row
+        estimate of ``jsonb_array_elements_text`` does not depend on the bound
+        value, so the custom and generic plans are the same and a prepared
+        statement cannot flip to a worse plan.
+
+        ``lock=True`` (the report share transaction) adds ``FOR SHARE OF s`` on
+        the matching source rows, taken in ``s.id`` order; the share takes the
+        matching Memory rows first, in Memory-id order, with
+        ``memory_rows_lock_sql`` (see there and ``memory_sources_on``).
+        Readability is decided by ``memory_source_readable`` alone.
+        """
+        from app.repositories.postgres import memory_sql
+
+        return (
+            "SELECT s.id AS source_id, s.memory_id AS memory_id "
+            "FROM jsonb_array_elements_text(%s::jsonb) AS wanted(id) "
+            "JOIN sources s ON s.id = wanted.id "
+            f"WHERE {memory_sql.memory_source_type_predicate('s.source_type')} "
+            f"AND {memory_sql.memory_source_readable('s')}"
+            + (" ORDER BY s.id FOR SHARE OF s" if lock else "")
+        )
+
+    @staticmethod
+    def memory_rows_lock_sql() -> str:
+        """The share transaction's first lock: ``FOR SHARE`` on the Memory rows
+        behind the cited sources that are the owner's Memory sources, in
+        Memory-id order (also EXPLAIN-pinned).  Same two scalar parameters as
+        ``memory_sources_for_source_ids_sql``.
+
+        The count and the token are one snapshot: each lock guards one input of
+        the count — this one the Memory row (its hard delete or a change of its
+        owner), the source lock the source row (its removal, or a change of its
+        type / ``memory_id``); ``sources.memory_id`` carries no foreign key, so
+        neither implies the other.  A concurrent write to exactly those rows
+        waits for the share transaction, or — when it committed first — is
+        seen (READ COMMITTED re-checks a row it waited for).
+
+        Order.  Memory rows are locked in Memory-id order, the order the Memory
+        purge locks them in (``_hard_delete_on``, PR-E5: ``SELECT … ORDER BY id
+        FOR UPDATE``); that shared order is what keeps a share and a purge of
+        the same author out of a cycle.  Taking the Memory rows
+        before the source rows is not what prevents it — the purge removes the
+        derived source rows and the Memory rows in separate transactions, so
+        no purge transaction holds both.  The synchronous notebook-delete path
+        (sources ``FOR UPDATE``, then ``memory_items`` through its cascade) is
+        used only by evaluation and tests; production deletes a notebook as a
+        job after its tombstone, and a tombstoned notebook no longer admits a
+        share.  Only rows of cited sources without a stored record are locked;
+        other users' Memory and the author's uncited Memory are untouched.
+        """
+        from app.repositories.postgres import memory_sql
+
+        return (
+            "SELECT lm.id FROM memory_items lm WHERE lm.id IN ("
+            "SELECT s.memory_id "
+            "FROM jsonb_array_elements_text(%s::jsonb) AS wanted(id) "
+            "JOIN sources s ON s.id = wanted.id "
+            f"WHERE {memory_sql.memory_source_type_predicate('s.source_type')} "
+            f"AND {memory_sql.memory_source_readable('s')}"
+            ") ORDER BY lm.id FOR SHARE OF lm"
+        )
+
+    @staticmethod
+    def memory_sources_on(
+        db: object, source_ids: Sequence[str], owner_id: str, *, lock: bool = False
+    ) -> dict[str, str]:
+        """``{source_id: memory_id}`` for the given ids that are ``owner_id``'s
+        Memory sources, read on the caller's connection (see the SQL builder).
+        ``lock=True``: the Memory rows first (Memory-id order), then the source
+        rows (source-id order); see ``memory_rows_lock_sql``."""
+        wanted = list(dict.fromkeys(str(item) for item in source_ids if item))
+        owner = str(owner_id or "")
+        if not wanted or not owner:
+            return {}
+        if lock:
+            db.execute(
+                MemoryStore.memory_rows_lock_sql(), (json.dumps(wanted), owner)
+            ).fetchall()
+        rows = db.execute(
+            MemoryStore.memory_sources_for_source_ids_sql(lock=lock),
+            (json.dumps(wanted), owner),
+        ).fetchall()
+        return {str(row["source_id"]): str(row["memory_id"]) for row in rows}
+
+    def memory_sources_for_source_ids(
+        self, source_ids: Sequence[str], owner_id: str
+    ) -> dict[str, str]:
+        """``{source_id: memory_id}`` for the ids that are ``owner_id``'s Memory
+        sources.
+
+        A source maps only when it is a Memory source (``source_type =
+        'memory'``) readable by ``owner_id`` under ``memory_sql``'s single
+        definition — its ``memory_items`` row was created by that owner.
+        Another member's Memory source, an orphaned Memory source, Knowhow, an
+        ordinary source and an unknown id map to nothing, so a caller can never
+        learn about anyone else's Memory.  Empty ids or owner: ``{}``.
+        """
+        with self.database.connect() as db:
+            return self.memory_sources_on(db, source_ids, owner_id)
+
+    def memory_ids_for_source_ids(
+        self, source_ids: Sequence[str], owner_id: str
+    ) -> list[str]:
+        """Sorted distinct Memory ids behind ``memory_sources_for_source_ids``."""
+        return sorted(set(self.memory_sources_for_source_ids(source_ids, owner_id).values()))
+
+    @staticmethod
+    def foreign_memory_sources_for_source_ids_sql() -> str:
+        """The statement behind ``foreign_memory_sources_for_source_ids`` (also
+        EXPLAIN-pinned).  Same two scalar parameters and the same id-list
+        unpacking as ``memory_sources_for_source_ids_sql``.
+
+        A cited source is another member's Memory source when it is a Memory
+        source that ``memory_source_readable`` refuses to the given member AND
+        its ``memory_items`` row exists (so its owner is known).  An orphaned
+        Memory source (its Memory row gone) has no known owner and maps to
+        nothing here, exactly as it maps to nothing in the author's read.
+        """
+        from app.repositories.postgres import memory_sql
+
+        return (
+            "SELECT s.id AS source_id, s.memory_id AS memory_id, "
+            "fo.created_by AS owner_id "
+            "FROM jsonb_array_elements_text(%s::jsonb) AS wanted(id) "
+            "JOIN sources s ON s.id = wanted.id "
+            "JOIN memory_items fo ON fo.id = s.memory_id "
+            f"WHERE {memory_sql.memory_source_type_predicate('s.source_type')} "
+            f"AND NOT {memory_sql.memory_source_readable('s')}"
+        )
+
+    def foreign_memory_sources_for_source_ids(
+        self, source_ids: Sequence[str], member_id: str
+    ) -> dict[str, tuple[str, str]]:
+        """``{source_id: (memory_id, owner_id)}`` for the given ids that are
+        Memory sources of someone other than ``member_id``.
+
+        Used where a stored artifact of ``member_id`` (a report) is about to
+        leave the notebook: citing another member's Memory must be refused, and
+        the refusal must be able to say so.  Empty ids or member: ``{}``.
+        """
+        wanted = list(dict.fromkeys(str(item) for item in source_ids if item))
+        member = str(member_id or "")
+        if not wanted or not member:
+            return {}
+        with self.database.connect() as db:
+            rows = db.execute(
+                self.foreign_memory_sources_for_source_ids_sql(),
+                (json.dumps(wanted), member),
+            ).fetchall()
+        return {
+            str(row["source_id"]): (str(row["memory_id"]), str(row["owner_id"]))
+            for row in rows
+        }

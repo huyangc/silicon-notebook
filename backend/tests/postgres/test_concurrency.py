@@ -1716,9 +1716,16 @@ def _seed_memory_race(postgres_database, *, member: bool = False) -> None:
                 "VALUES ('nb-memory-race','member-race','reader',%s)",
                 (now,),
             )
+        # The answer belongs to member-race (E7-4: the Memory write re-checks
+        # the author under its lock, and the author is the conversation's creator).
+        connection.execute(
+            "INSERT INTO conversations(id,notebook_id,title,created_by,created_at,updated_at) "
+            "VALUES ('conv-memory-race','nb-memory-race','Q','member-race',%s,%s)",
+            (now, now),
+        )
         connection.execute(
             "INSERT INTO answers(id,notebook_id,question,payload,created_at,conversation_id) "
-            "VALUES ('answer-memory-race','nb-memory-race','Q',%s,%s,NULL)",
+            "VALUES ('answer-memory-race','nb-memory-race','Q',%s,%s,'conv-memory-race')",
             (Jsonb({"answer": "A", "citations": []}), now),
         )
 

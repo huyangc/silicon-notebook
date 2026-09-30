@@ -2571,7 +2571,13 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 ### 报告公开分享护栏
 
-有写权限的成员通过 `POST /notebooks/{nb}/reports/{rid}/share` 发布已完成报告，`DELETE` 撤销，`GET /public/reports/{token}` 匿名读取。未完成报告返回 409；重复发布返回同一 token，撤销后与不存在的 token 不可区分。
+报告创建者通过 `POST /notebooks/{nb}/reports/{rid}/share` 发布已完成报告，`DELETE` 撤销，`GET /public/reports/{token}` 匿名读取。未完成报告返回 409；重复发布返回同一 token，撤销后与不存在的 token 不可区分。
+
+报告创建者以外的任何人（包括笔记本主人和部署管理员）得到与报告不存在时相同的 404，报告是否存在不会被透露；下面的「只有作者能公开」规则，另外对已越过这道检查、但不是作者的调用方返回 403。发布前，`GET /notebooks/{nb}/reports/{rid}/share/disclosure` 返回 `{memory_count, foreign_memory_count}`。`memory_count` 是公开页可能带出内容的作者本人不同个人记忆的条数：报告引用的（引用本身是个人记忆的，以及生成时记录为来自作者个人记忆的引用），加上生成报告时可能进入过任何提示词的——大纲规划看到的记忆条目、各章节的已确认记忆块，以及检索在规划与生成过程中交出的每个来源背后的作者个人记忆（语料侦察与覆盖探针、章节深挖 Agent 的中间观察（含其后丢弃的证据）、全篇综合载荷、章节上下文），无论是否被引用——因为正文可以不带引用标记地转述这些内容。检索结果大到无法完整记录时，规划或生成直接失败，而不是少计。`foreign_memory_count` 是报告引用的其他成员个人记忆的条数；大于 0 时报告不能公开：无论确认值是多少，`POST .../share` 都返回 403「报告引用了其他成员的个人记忆，不能公开」；点「分享」时直接在按钮下方说明不能公开，不会生成链接；此前已发出的链接也随之失效——公开页每次打开都重新核对，返回与撤销的链接相同的 404，作者的页面则说明链接已无法打开，只提供取消分享。
+
+`memory_count` 大于 0 时，`POST .../share` 必须带 `{"acknowledged_memory_count": N}`；服务端在这一次请求里、以及在发放 token 的同一事务内各重新计数一次，只有条数**高于**确认值时才返回 409 `{"detail": {"code": "share_disclosure_required", "memory_count": N, "new_memory_count": M}}` 且不发 token（`M` 为多出的条数）。条数不高于确认值时照常公开：条数只会因为被引用的记忆不再能识别而下降，而公开页展示的仍是作者当时看到并确认过的摘录；确认值高于条数同样接受（客户端发出的从不多于它展示过的）。PostgreSQL 上，该事务对没有存下记录的被引用来源背后的记忆行与来源行加共享锁，直到提交；其中记忆行按记忆 id 顺序加锁，与个人记忆清除加锁的顺序相同。SQLite 上它与所有写操作一样持有进程级数据库写锁。已公开的报告再次分享时直接返回原链接，不再询问。不含个人记忆的报告与从前完全相同，不需要请求体；撤销分享从不询问。公开页响应带 `Cache-Control: no-store`。
+
+本版本之前产生的报告，只能按它们留下的记录识别。在本版本之前规划、之后生成的报告带有生成阶段的记录，条数只缺大纲规划看到的个人记忆。规划与生成都在本版本之前的报告，没有「生成时用到了哪些个人记忆」的记录，只能识别它们的引用：引用本身是个人记忆的，以及被引用来源此刻仍是作者（或其他成员）记忆来源的。因此，这类报告正文里不带引用转述的个人记忆，以及记忆来源已被删除的引用，既不计入条数，也不会被拒绝公开。没有来源的文字——社区摘要与知识图谱里的融合概念定义——无法归属到某条个人记忆。被引用的个人记忆删除后，已完成的报告仍保留当时引用的摘录、标题以及正文中对它们的表述：报告创建者、部署管理员（审计）以及已分享时持有链接的任何人仍能看到；管理员审计详情展示引用时不带内部的记忆记录字段。
 
 匿名投影仅允许正文、研究问题、时间及引用标题、原始文件名、位置和摘录；不返回 `source_id`、`element_id`、`object_id`、`notebook_id` 或 `understanding`（含意图与来源范围）。资料基础披露已冻结在 `content_md`。匿名处理不绑定当前用户，也不调用依赖用户身份的仓库方法。
 
@@ -2693,6 +2699,8 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - `GET /api/notebooks/{id}/conversations`、`GET|PATCH|DELETE /api/conversations/{id}`
 - `POST /api/answers/{answer_id}/feedback`
 - Memory：`GET /api/memories`、`GET /api/notebooks/{id}/memories`、`GET|PATCH /api/memories/{memory_id}`、`POST /api/memories/{memory_id}/confirm|reject|deprecate|promote`、`POST /api/answers/{answer_id}/memory-preview/stream`（网页端；`/memory-preview` 保持 JSON 兼容）、`POST /api/notebooks/{id}/memories/from-answer`
+  - 接受回答 id 的接口（`POST /api/answers/{answer_id}/memory-preview`、`.../memory-preview/stream`、`POST /api/answers/{answer_id}/feedback`、`POST /api/notebooks/{notebook_id}/memories/from-answer`）只作用于调用者自己的回答：调用者必须能读该笔记本，并且必须是该回答所属会话的创建者。他人的回答（含笔记本所有者）、没有会话的回答、不存在的回答 id 一律返回同一个 404 `Answer not found`。共享存储里的 `answer_owner` 返回的是笔记本所有者，不用于授权。
+  - 部署管理员通过「用户活动日志」查看用户回答全文属于审计权限，是独立的、仅管理员可用的读取通道，不受回答属主规则约束。
 - Agent 接入：匿名机器可读说明 `GET /api/agent-mcp/onboarding`；认证管理面 `GET|POST /api/agent-profiles`、`PATCH /api/agent-profiles/{profile_id}`、`POST /api/agent-profiles/{profile_id}/tokens`、`GET /api/agent-tokens`、`PUT /api/agent-tokens/{token_id}/access`、`DELETE /api/agent-tokens/{token_id}`；Streamable HTTP MCP 挂载在 `/mcp`
 - Knowhow agent 接入面：`GET /api/agent/knowhow/tables?notebook_id=`、`GET /api/agent/knowhow/tables/{table_id}/discrimination`、`GET /api/agent/knowhow/rows/{row_id}`、`GET|PUT|DELETE /api/agent/knowhow/rows/{row_id}/cells/{column_id}/code`——session 或 Agent Bearer token 均可访问；读需要 `knowledge:read`，代码写入需要 `knowhow:code`（见 [Memory 与 Agent MCP](#memory-与-agent-mcp)）
 - 统一 KG：`POST .../unified-kg/rebuild`、`GET .../unified-kg`、`GET .../unified-kg/pending-merges`、`POST .../unified-kg/merges/{id}/confirm|reject`
@@ -3048,6 +3056,8 @@ workload 做有界规划，不引入 Anthropic SDK 一类通用 Agent。模型�
 ## 管理员用户活动日志（`/dev/logs`）
 
 `/dev/logs` 共享同一条顶部范围条（被查看用户、日期范围），分两个视图 tab：**活动**（默认）与**模型调用**（原有的按天 LLM 调用流水查看器，逐位保留——`kind`/`status`/`model` 过滤、全文搜索、按天下拉、自动刷新均未改动，其 API 仍是 `/api/debug/logs/...`，仍受 `DEBUG_LOGS_ENABLED` 门控）。
+
+部署管理员在这里查看用户的回答全文与报告属于审计权限：这是独立的、仅管理员可用的读取通道，不受笔记本界面按用户的规则（回答属主规则、报告创建者限制）约束。
 
 「活动」视图三栏：
 

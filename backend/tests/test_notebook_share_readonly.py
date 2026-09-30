@@ -225,14 +225,20 @@ def test_ensure_conversation_scoped_to_caller_no_cross_inject(repo):
         assert db.execute("SELECT title FROM conversations WHERE id='conv-owner'").fetchone()[0] == "owner chat"
 
 
-def test_user_can_read_answer_follows_membership(repo):
-    """I1:feedback 权限 = 父 notebook 读权(owner ∪ 成员)。"""
+def test_user_can_read_answer_follows_membership_and_is_not_authorisation(repo):
+    """`user_can_read_answer` = notebook READ access only (owner ∪ 成员). It is
+    NOT the right to act on the answer: `user_owns_answer` (E7-4) also needs
+    the conversation's author, and this answer has no conversation."""
     nb = _mk_nb(repo, owner="user-local")
     _mk_user(repo, "user-mbr")
     with repo._write() as db:
         db.execute("INSERT INTO answers (id,notebook_id,question,payload,created_at) VALUES (?,?,?,?,?)",
                    ("ans-1", nb, "q", "{}", _now()))
+    sharing = repo._runtime.sharing
     assert repo.user_can_read_answer("ans-1", "user-mbr") is False   # 非成员
     assert repo.user_can_read_answer("ans-1", "user-local") is True  # owner
     repo.add_member(nb, "user-mbr")
     assert repo.user_can_read_answer("ans-1", "user-mbr") is True    # 成员可
+    # reading the notebook never makes anyone the answer's owner
+    for user in ("user-mbr", "user-local"):
+        assert sharing.user_owns_answer("ans-1", user) is False

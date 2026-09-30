@@ -10841,6 +10841,44 @@
           "title": "ReportOutlineUpdate",
           "type": "object"
         },
+        "ReportShareDisclosure": {
+          "description": "``memory_count``: distinct Memory entries of the author whose content\nthe public page may carry (cited or used).  ``foreign_memory_count``:\ndistinct Memory entries of OTHER members the report cites; above zero the\nreport cannot be published at all.",
+          "properties": {
+            "foreign_memory_count": {
+              "default": 0,
+              "title": "Foreign Memory Count",
+              "type": "integer"
+            },
+            "memory_count": {
+              "title": "Memory Count",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "memory_count"
+          ],
+          "title": "ReportShareDisclosure",
+          "type": "object"
+        },
+        "ReportShareRequest": {
+          "description": "Optional body of ``POST .../share`` (M4).\n\n``acknowledged_memory_count`` is the number of the author's own Memory\nexcerpts the author saw and confirmed.  A client that has nothing to\nconfirm sends no body at all, exactly as before M4, and must not get a 422.",
+          "properties": {
+            "acknowledged_memory_count": {
+              "anyOf": [
+                {
+                  "minimum": 0.0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Acknowledged Memory Count"
+            }
+          },
+          "title": "ReportShareRequest",
+          "type": "object"
+        },
         "ReportShareResponse": {
           "properties": {
             "share_token": {
@@ -25315,8 +25353,74 @@
           "summary": "Get Report Share Route"
         },
         "post": {
-          "description": "Publish one finished report behind an unguessable link.\n\nOnly `done` reports can be shared: a link to a running or failed report\nwould show an empty or half-written body to whoever it was sent to.",
+          "description": "Publish one finished report behind an unguessable link.\n\nOnly `done` reports can be shared: a link to a running or failed report\nwould show an empty or half-written body to whoever it was sent to.\n\nM4: a report citing another member's Memory is never published (403).\nA report carrying the author's own Memory is published only by the\nauthor and only with ``acknowledged_memory_count`` equal to the count —\nnever a number from an earlier request.  The count is taken here (which\ndecides the 403 and refuses early without a write) and taken again by\n``share_report`` inside the transaction that sets the token\n(``memory_guard``), so a Memory change committed in between is refused\ntoo.  A mismatch is a 409 whose ``detail`` carries\n``share_disclosure_required`` and the current count; no token is issued.\nA report citing none publishes exactly as before (no body needed).  A\n``done`` report is frozen (it cannot be regenerated), so what the author\nconfirms is the content the link serves.",
           "operationId": "share_report_route_api_notebooks__notebook_id__reports__report_id__share_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "report_id",
+              "required": true,
+              "schema": {
+                "title": "Report Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ReportShareRequest"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Payload"
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ReportShareResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Share Report Route"
+        }
+      },
+      "/api/notebooks/{notebook_id}/reports/{report_id}/share/disclosure": {
+        "get": {
+          "description": "How many of the author's own Memory entries the public page may carry,\nand how many of other members' Memory entries the report cites.\n\nRead before sharing so the author can be asked first (M4), or told before\ntrying that the report cannot be published.  Row-level gated like every\noperation on an existing report.  The numbers are advisory: the share POST\ncounts again and refuses an acknowledgement that no longer matches.",
+          "operationId": "report_share_disclosure_route_api_notebooks__notebook_id__reports__report_id__share_disclosure_get",
           "parameters": [
             {
               "in": "path",
@@ -25342,7 +25446,7 @@
               "content": {
                 "application/json": {
                   "schema": {
-                    "$ref": "#/components/schemas/ReportShareResponse"
+                    "$ref": "#/components/schemas/ReportShareDisclosure"
                   }
                 }
               },
@@ -25359,7 +25463,7 @@
               "description": "Validation Error"
             }
           },
-          "summary": "Share Report Route"
+          "summary": "Report Share Disclosure Route"
         }
       },
       "/api/notebooks/{notebook_id}/scale-index/cancel": {

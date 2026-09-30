@@ -20,6 +20,7 @@ from app.api.deps import (
 from app.core.cache import CacheAdmin, make_cache_backend
 from app.core.config import get_settings
 from app.domain.auth_policy import AuthStoreError
+from app.domain.share_disclosure import without_memory_record
 from app.models.admin import (
     ActivityAsk,
     ActivityReport,
@@ -769,7 +770,12 @@ def get_admin_user_report_detail(
                 generation_started_at=snapshot.get("generation_started_at") or "",
                 error=_activity_failure_text(user, snapshot.get("error")),
                 content_md=snapshot.get("content_md") or "",
-                references=snapshot.get("references") or [],
+                # The engine's per-citation Memory record (M4) is an internal
+                # handle; audit access sees the author and the excerpt already.
+                references=[
+                    without_memory_record(reference)
+                    for reference in snapshot.get("references") or []
+                ],
                 notebook_name=snapshot.get("notebook_name") or "",
                 notebook_deleted_at=snapshot.get("notebook_deleted_at") or "",
                 retained_until=snapshot.get("retained_until") or "",

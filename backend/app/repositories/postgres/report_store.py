@@ -12,10 +12,28 @@ from app.repositories.postgres._store_utils import (
 )
 from app.core.capability_tokens import new_capability_token
 from app.domain.report_export import ReportExportSource
+from app.domain.share_disclosure import (
+    REPORT_MEMORY_USED_FIELD,
+    REPORT_PLANNING_MEMORY_KEY,
+    ShareMemoryGuard,
+    split_report_memory_use,
+)
+from app.repositories.postgres.memory_store import MemoryStore
 from app.models.ask import StoredSubmittedVia
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.read_authority_lock import lock_reader_access_on
 from app.core.internal_observability import public_report_sections
+
+
+def _keep_planning_memory(column: str) -> str:
+    """`` || <column's stored planner Memory record, or {}>`` — appended to a
+    jsonb expression so the record survives a write that does not carry it."""
+    key = f"'{REPORT_PLANNING_MEMORY_KEY}'"
+    return (
+        f" || (CASE WHEN {column} ? {key}"
+        f" THEN jsonb_build_object({key}, {column} -> {key})"
+        f" ELSE '{{}}'::jsonb END)"
+    )
 
 
 class ReportStore:
@@ -75,6 +93,10 @@ class ReportStore:
                     f" THEN jsonb_build_object('_generation_started_at',"
                     f" {col} -> '_generation_started_at')"
                     f" ELSE '{{}}'::jsonb END)"
+                    # The planner's Memory record (M4) is the store's too: a
+                    # write that does not carry it keeps the stored one.
+                    + ("" if REPORT_PLANNING_MEMORY_KEY in val
+                       else _keep_planning_memory(col))
                 )
             else:
                 sets.append(f"{col} = %s")
@@ -121,9 +143,13 @@ class ReportStore:
         Prior generated artifacts are cleared in the same CAS transaction.
         """
         now = normalize_timestamp(self.now())
+        # A replacement ``understanding`` keeps the planner's stored Memory
+        # record (M4, ``REPORT_PLANNING_MEMORY_KEY``): the outline it planned is
+        # kept.
         understanding_sql = (
             "jsonb_set(%s::jsonb - 'credibility',"
             "'{_generation_started_at}',%s,true)"
+            + _keep_planning_memory("understanding_json")
             if understanding is not None
             else "jsonb_set(understanding_json - 'credibility',"
             "'{_generation_started_at}',%s,true)"
@@ -211,10 +237,13 @@ class ReportStore:
              "updated_at": iso_timestamp(row["updated_at"]), "depth": row["depth"],
              "section_count": len(json_value(row["outline_json"], []))}
         if full:
+            understanding, sections, memory_used = split_report_memory_use(
+                understanding, list(json_value(row["sections_json"], []))
+            )
+            if memory_used:
+                d[REPORT_MEMORY_USED_FIELD] = memory_used
             d.update(outline=json_value(row["outline_json"], []),
-                     sections=public_report_sections(
-                         json_value(row["sections_json"], [])
-                     ),
+                     sections=public_report_sections(sections),
                      gaps=json_value(row["gaps_json"], []),
                      references=json_value(row["references_json"], []),
                      section_status=json_value(row["section_status_json"], []),
@@ -358,20 +387,44 @@ class ReportStore:
     # are a separate tuple from PUBLIC_FIELDS and never reach the payload.
     GATE_FIELDS = ("notebook_id", "created_by")
 
-    def share_report(self, notebook_id: str, report_id: str) -> str:
+    def share_report(
+        self,
+        notebook_id: str,
+        report_id: str,
+        *,
+        memory_guard: ShareMemoryGuard | None = None,
+    ) -> str:
         """Issue (or return) the public token for one report.
 
         Idempotent: re-sharing keeps the existing link so a URL already handed
         out never silently starts 404ing.
+
+        ``memory_guard`` (M4): the author's Memory the page carries is counted
+        again HERE, in the transaction that sets the token, and a count that no
+        longer matches the acknowledgement raises ``ShareDisclosureRequired``
+        with nothing written.  The live part is read with ``FOR SHARE`` on the
+        cited Memory ``sources`` rows and their ``memory_items`` rows
+        (``MemoryStore.memory_sources_for_source_ids_sql``): a concurrent
+        change to exactly those rows either committed before the read and is
+        seen, or waits until this transaction ends (one read and one UPDATE).
         """
         candidate = new_capability_token("rshr")
         with self.database.write() as db:
             row = db.execute(
-                "SELECT id FROM reports WHERE id=%s AND notebook_id=%s",
+                "SELECT id, share_token FROM reports WHERE id=%s AND notebook_id=%s",
                 (report_id, notebook_id),
             ).fetchone()
             if row is None:
                 raise KeyError(report_id)
+            if row["share_token"]:
+                # Already public: nothing new is published, so nothing is asked
+                # (the page of a finished report cannot grow).
+                return str(row["share_token"])
+            if memory_guard is not None:
+                memory_guard.check(MemoryStore.memory_sources_on(
+                    db, memory_guard.live_source_ids, memory_guard.author_id,
+                    lock=True,
+                ).values())
             # One conditional write instead of read-then-write.  Under
             # READ COMMITTED two concurrent shares both observe NULL and would
             # each overwrite unconditionally, so the later token wins and the
@@ -384,6 +437,10 @@ class ReportStore:
                 "WHERE id=%s AND notebook_id=%s RETURNING share_token",
                 (candidate, normalize_timestamp(self.now()), report_id, notebook_id),
             ).fetchone()
+        if issued is None:
+            # Deleted (with its notebook) while this transaction waited for a
+            # cited row: the same answer as a report that never existed.
+            raise KeyError(report_id)
         return str(issued["share_token"])
 
     def unshare_report(self, notebook_id: str, report_id: str) -> None:

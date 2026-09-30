@@ -2,8 +2,9 @@ import io
 import zipfile
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field, StrictInt
 
 from app.api.deps import (
     repository,
@@ -24,6 +25,15 @@ from app.models.reports import (
     ReportSummary,
 )
 from app.services.report_public_view import public_report_payload
+from app.services.share_disclosure import (
+    ForeignMemoryShareRefused,
+    NonAuthorShareRefused,
+    ShareDisclosureRequired,
+    report_foreign_memory_ids,
+    report_share_disclosure,
+    require_publishable,
+    share_memory_guard,
+)
 from app.services.report_export import export_completed_reports
 from app.services.reports.intent_confirmation import (
     ReportIntentConfirmationError,
@@ -592,20 +602,114 @@ def delete_report(notebook_id: str, report_id: str) -> dict:
     return {"status": "deleted"}
 
 
+class ReportShareRequest(BaseModel):
+    """Optional body of ``POST .../share`` (M4).
+
+    ``acknowledged_memory_count`` is the number of the author's own Memory
+    excerpts the author saw and confirmed.  A client that has nothing to
+    confirm sends no body at all, exactly as before M4, and must not get a 422.
+    """
+
+    acknowledged_memory_count: StrictInt | None = Field(default=None, ge=0)
+
+
+class ReportShareDisclosure(BaseModel):
+    """``memory_count``: distinct Memory entries of the author whose content
+    the public page may carry (cited or used).  ``foreign_memory_count``:
+    distinct Memory entries of OTHER members the report cites; above zero the
+    report cannot be published at all."""
+
+    memory_count: int
+    foreign_memory_count: int = 0
+
+
+def _share_disclosure(repo, report: dict):
+    # The Memory store answers "which of these sources are the author's Memory"
+    # through memory_sql's single readability predicate.
+    return report_share_disclosure(
+        repo._runtime.memory_store,  # type: ignore[attr-defined]
+        report,
+    )
+
+
+@router.get("/notebooks/{notebook_id}/reports/{report_id}/share/disclosure",
+            response_model=ReportShareDisclosure,
+            dependencies=[Depends(require_notebook_read)])
+def report_share_disclosure_route(
+    notebook_id: str, report_id: str
+) -> ReportShareDisclosure:
+    """How many of the author's own Memory entries the public page may carry,
+    and how many of other members' Memory entries the report cites.
+
+    Read before sharing so the author can be asked first (M4), or told before
+    trying that the report cannot be published.  Row-level gated like every
+    operation on an existing report.  The numbers are advisory: the share POST
+    counts again and refuses an acknowledgement that no longer matches.
+    """
+    repo = repository()
+    report = _own_report_or_404(repo, notebook_id, report_id)
+    disclosure = _share_disclosure(repo, report)
+    return ReportShareDisclosure(
+        memory_count=disclosure.memory_count,
+        foreign_memory_count=disclosure.foreign_memory_count,
+    )
+
+
 @router.post("/notebooks/{notebook_id}/reports/{report_id}/share",
              response_model=ReportShareResponse,
              dependencies=[Depends(require_notebook_read)])
-def share_report_route(notebook_id: str, report_id: str) -> ReportShareResponse:
+def share_report_route(
+    notebook_id: str,
+    report_id: str,
+    payload: ReportShareRequest | None = Body(default=None),
+) -> ReportShareResponse:
     """Publish one finished report behind an unguessable link.
 
     Only `done` reports can be shared: a link to a running or failed report
     would show an empty or half-written body to whoever it was sent to.
+
+    M4: a report citing another member's Memory is never published (403).
+    A report carrying the author's own Memory is published only by the
+    author and only with ``acknowledged_memory_count`` equal to the count —
+    never a number from an earlier request.  The count is taken here (which
+    decides the 403 and refuses early without a write) and taken again by
+    ``share_report`` inside the transaction that sets the token
+    (``memory_guard``), so a Memory change committed in between is refused
+    too.  A mismatch is a 409 whose ``detail`` carries
+    ``share_disclosure_required`` and the current count; no token is issued.
+    A report citing none publishes exactly as before (no body needed).  A
+    ``done`` report is frozen (it cannot be regenerated), so what the author
+    confirms is the content the link serves.
     """
     repo = repository()
     report = _own_report_or_404(repo, notebook_id, report_id)
     if str(report.get("status") or "") != "done":
         raise user_error(409, "只能分享已完成的报告。")
-    return ReportShareResponse(share_token=repo.share_report(notebook_id, report_id))
+    acknowledged = payload.acknowledged_memory_count if payload else None
+    disclosure = _share_disclosure(repo, report)
+    try:
+        require_publishable(
+            disclosure,
+            requester_id=repo.current_user().id,
+            acknowledged=acknowledged,
+            already_shared=bool(report.get("shared")),
+        )
+        token = repo.share_report(
+            notebook_id, report_id,
+            memory_guard=share_memory_guard(disclosure, acknowledged),
+        )
+    except KeyError:
+        # Deleted (with its notebook) while the share waited for a cited row.
+        raise HTTPException(status_code=404, detail="Report not found") from None
+    except ForeignMemoryShareRefused:
+        raise user_error(403, "报告引用了其他成员的个人记忆，不能公开") from None
+    except NonAuthorShareRefused:
+        raise user_error(
+            403, "报告引用了作者本人的个人记忆，只有作者可以公开分享。"
+        ) from None
+    except ShareDisclosureRequired as required:
+        raise HTTPException(status_code=409, detail=required.detail()) from None
+    return ReportShareResponse(share_token=token)
 
 
 @router.get("/notebooks/{notebook_id}/reports/{report_id}/share",
@@ -643,7 +747,7 @@ def unshare_report_route(notebook_id: str, report_id: str) -> None:
 
 
 @public_router.get("/public/reports/{token}", response_model=PublicReport)
-def public_report_route(token: str) -> PublicReport:
+def public_report_route(token: str, response: Response) -> PublicReport:
     """The one report read that needs no session — the token is the whole grant.
 
     Deliberately has NO `Depends(get_current_user)`: this is the anonymous
@@ -684,4 +788,12 @@ def public_report_route(token: str) -> PublicReport:
         str(row.get("notebook_id") or ""), str(row.get("created_by") or "")
     ):
         raise HTTPException(status_code=404, detail="shared report not found")
+    # M4: a report that cites another member's Memory is never public — also
+    # when its link was issued before that rule.  Re-checked on every open,
+    # like the creator's read access above, with the same 404.
+    if report_foreign_memory_ids(repo._runtime.memory_store, row):  # type: ignore[attr-defined]
+        raise HTTPException(status_code=404, detail="shared report not found")
+    # Every open is re-authorized above; no browser or proxy may keep a copy
+    # that outlives a revocation (as the public conversation routes do).
+    response.headers["Cache-Control"] = "no-store"
     return PublicReport(**public_report_payload(row, row.get("references") or []))
