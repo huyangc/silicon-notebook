@@ -314,36 +314,45 @@ def test_s9_a_transfer_move_during_the_purge(world, monkeypatch):
 def test_two_leavers_merged_into_the_same_shared_objects_do_not_deadlock(
     world, monkeypatch
 ):
-    """Item 6: Alice's two Memory sources were merged into shared objects Y
-    and X, Bob's into X and Y — opposite orders by source. Each exit takes
-    the shared rows' locks in ONE id-ordered statement, so the two queue;
-    a barrier right after the strip makes them overlap on every run."""
+    """Item 6: Carol's two Memory sources were merged into shared objects Y
+    and X, Dave's into X and Y — opposite orders by source. Each exit takes
+    the shared rows' locks in ONE id-ordered statement, so the two queue
+    instead of deadlocking; a barrier right after the strip makes the two
+    transactions overlap on every run. (Locking source by source, in source
+    order, deadlocks here: Carol holds Y and waits for X, Dave the reverse.)"""
     shared_x = _fused_doc_object(world, "Shared x notes")
     shared_y = _fused_doc_object(world, "Shared y notes")
     shared_x, shared_y = sorted([shared_x, shared_y])
+    users = {
+        "carol": world.repo.create_user("c00100005", "pw123456"),
+        "dave": world.repo.create_user("d00100006", "pw123456"),
+    }
+    for user in users.values():
+        world.repo.add_member(world.shared, user.id)
     projections = {
-        user: sorted(
-            (make_memory(world, f"dl-{user}-{n}", world.shared, getattr(world, user))
-             for n in range(2)),
+        name: sorted(
+            (make_memory(world, f"dl-{name}-{n}", world.shared, user) for n in range(2)),
             key=lambda projection: projection.source_id,
         )
-        for user in ("alice", "bob")
+        for name, user in users.items()
     }
-    targets = {"alice": (shared_y, shared_x), "bob": (shared_x, shared_y)}
-    for user, (first, second) in targets.items():
-        for projection, target in zip(projections[user], (first, second)):
+    targets = {"carol": (shared_y, shared_x), "dave": (shared_x, shared_y)}
+    for name, (first, second) in targets.items():
+        for projection, target in zip(projections[name], (first, second)):
             world.repo.merge_knowledge(
                 world.shared, projection.object_ids[0], MergeRequest(into_id=target)
             )
     counts = {
-        user: disclosure(world, getattr(world, user), world.shared)
-        for user in ("alice", "bob")
+        name: disclosure(world, user, world.shared) for name, user in users.items()
     }
+    assert counts == {"carol": 2, "dave": 2}
     barrier = threading.Barrier(2)
     original = governance_module.GovernanceStore.strip_sources_evidence_on
+    stripped_by: dict[str, set[str]] = {}
 
     def strip_then_meet(connection, notebook_id, source_ids, now):
         stripped = original(connection, notebook_id, source_ids, now)
+        stripped_by.setdefault(threading.current_thread().name, set()).update(stripped)
         try:
             barrier.wait(timeout=3)
         except threading.BrokenBarrierError:
@@ -356,19 +365,21 @@ def test_two_leavers_merged_into_the_same_shared_objects_do_not_deadlock(
     )
     results: dict[str, str] = {}
     threads = [
-        threading.Thread(target=lambda user=user: results.__setitem__(
-            user,
-            _outcome(lambda: self_exit(world, getattr(world, user), world.shared, counts[user])),
+        threading.Thread(target=lambda name=name: results.__setitem__(
+            name,
+            _outcome(lambda: self_exit(world, users[name], world.shared, counts[name])),
         ))
-        for user in ("alice", "bob")
+        for name in users
     ]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join(60)
-    assert results == {
-        "alice": f"200 {counts['alice']}", "bob": f"200 {counts['bob']}",
-    }
+    assert results == {"carol": "200 2", "dave": "200 2"}
+    # Both exits really took the shared rows' locks (each stripped X and Y).
+    assert [sorted(ids) for ids in stripped_by.values()] == [
+        sorted([shared_x, shared_y]), sorted([shared_x, shared_y]),
+    ], stripped_by
     for target in (shared_x, shared_y):
         assert world.sql.count(
             "SELECT COUNT(*) AS c FROM knowledge_objects WHERE id=?", (target,)
