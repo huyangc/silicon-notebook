@@ -1932,3 +1932,102 @@ def test_share_preview_of_a_notebook_without_memory_counts_every_row(repo, clien
     assert repo._runtime.sharing_store.memory_derived_kg_counts(
         memory_cases.NOTEBOOK_PLAIN
     ) == (0, 0, 0)
+
+
+def _insert_rows(repo, rows):
+    with repo._write() as db:
+        for row in rows:
+            columns = list(row.values)
+            db.execute(
+                f"INSERT INTO {row.table} ({','.join(columns)}) "
+                f"VALUES ({','.join('?' for _ in columns)})",
+                [
+                    json.dumps(row.values[c]) if c in memory_cases.JSON_COLUMNS else row.values[c]
+                    for c in columns
+                ],
+            )
+
+
+def test_a_memory_object_merged_into_a_shared_one_leaves_no_memory_text_in_the_copy(
+    repo, client
+):
+    """spec review B1,走真实的手工合并路径:alice 的 Memory 对象并进共享对象后,共享对象的
+    证据里夹着 Memory 原文、标题与定位。整本拷贝与分享链接拷贝的副本里都没有它们;接收者
+    读副本的知识列表也看不到。"""
+    from app.models.knowledge import MergeRequest
+
+    nb = memory_cases.PROBE_NOTEBOOK
+    _insert_rows(repo, memory_cases.probe_world(nb))
+    repo.merge_knowledge(nb, "ko-mem-p", MergeRequest(into_id="ko-shared-p"))
+    with repo._connect() as db:
+        merged = db.execute(
+            "SELECT evidence FROM knowledge_objects WHERE id='ko-shared-p'"
+        ).fetchone()["evidence"]
+    assert memory_cases.PROBE_MEMORY_TEXT in merged, "fixture: the merge carried the text"
+
+    _mk_user(repo, "user-probe-copy")
+    new = repo.copy_notebook(nb, new_owner_id="user-probe-copy")
+    view = memory_cases.read_copy(_fetch(repo), "?", new.id)
+    memory_cases.assert_copy_objects_carry_no_memory_text(view)
+    assert view.counts["knowledge_objects"] == 1
+
+    token = client.post(f"/api/notebooks/{nb}/share").json()["share_token"]
+    preview = client.get(f"/api/shared/{token}").json()
+    assert preview["size"]["sources"] == preview["source_count"] == 1
+    copied = client.post(f"/api/shared/{token}/copy")
+    assert copied.status_code == 200, copied.text
+    listing = client.get(f"/api/notebooks/{copied.json()['id']}/knowledge?type=concept")
+    assert listing.status_code == 200 and listing.json()["items"], listing.text
+    assert memory_cases.MARK not in listing.text and "src-mem-p" not in listing.text
+
+
+@pytest.mark.parametrize("canonical", sorted(memory_cases.STALE_CLUSTER_CASES))
+def test_a_cluster_seeded_by_a_since_deleted_memory(repo, canonical):
+    """spec review B2,走真实的删除路径:Memory 做种子的簇,Memory 被删(delete_source)后只剩
+    共享成员那一行,簇名与描述仍是 Memory 的。源库因此是脏的,副本也以脏状态开始(提示重建);
+    按对象 id 铸的种子(``K-~<对象 id>``)能认出种子对象已不在,副本不带这一簇。真名种子认不
+    出来,这一簇随副本走,重建时被重算。"""
+    nb = memory_cases.PROBE_NOTEBOOK
+    _insert_rows(repo, memory_cases.probe_world(nb, cluster_canonical=canonical))
+    repo.delete_source("src-mem-p")
+    source_state = _kg_state(repo, nb)
+    assert source_state is not None and source_state["dirty"] == 1
+    with repo._connect() as db:
+        left = db.execute(
+            "SELECT member_object_id FROM concept_clusters WHERE notebook_id=?", (nb,)
+        ).fetchall()
+    assert [r["member_object_id"] for r in left] == ["ko-shared-p"]
+
+    _mk_user(repo, "user-stale-copy")
+    new = repo.copy_notebook(nb, new_owner_id="user-stale-copy")
+    state = _kg_state(repo, new.id)
+    assert state is not None and state["dirty"] == 1
+    view = memory_cases.read_copy(_fetch(repo), "?", new.id)
+    carried = memory_cases.STALE_CLUSTER_CASES[canonical]
+    assert view.counts["concept_clusters"] == (1 if carried else 0)
+    assert view.counts["knowledge_objects"] == 1
+
+
+def test_schema_induction_sample_reads_no_memory_element(repo):
+    """模式归纳的样本不读任何成员的 Memory 元素:它会被模型转述进笔记本级的对象模式,
+    人人可见、随拷贝走。"""
+    _seed_memory_world(repo)
+    sample = repo._runtime.source_store.notebook_element_sample(memory_cases.NOTEBOOK)
+    texts = [item["text"] for item in sample]
+    assert texts and all(memory_cases.MARK not in text for text in texts), texts
+    assert {"shared element el-doc-1", "shared element el-doc-2"} <= set(texts)
+
+
+def test_share_size_of_a_notebook_without_memory_costs_one_statement(repo):
+    """没有 Memory 的笔记本,分享尺寸的 Memory 扣减只跑一条带索引的探测就返回 (0, 0, 0)。"""
+    _seed_memory_world(repo, memory_cases.NOTEBOOK_PLAIN, with_memory=False)
+    store = repo._runtime.sharing_store
+    statements = []
+    conn = store.database.connect()
+    conn.set_trace_callback(statements.append)
+    try:
+        assert store.memory_derived_kg_counts(memory_cases.NOTEBOOK_PLAIN) == (0, 0, 0)
+    finally:
+        conn.set_trace_callback(None)
+    work = [s for s in statements if s.lstrip().upper().startswith("SELECT")]
+    assert len(work) == 1, statements
