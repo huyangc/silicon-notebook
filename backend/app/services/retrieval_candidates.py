@@ -4881,11 +4881,14 @@ class CandidateRetrievalService(_RetrievalState):
     def _exact_lookup_ceiling(self, notebook_id: str) -> tuple:
         """The source list a binding ceiling pushes into the exact probe.
 
-        The frozen ceiling itself (``scoped_allowed_source_ids``: visible ∪ the
-        asker's hidden half, memoised sorted per run), not the live visible
-        list the peer leg intersects: the scope's own notebook legitimately
-        holds the asker's Knowhow/Memory projections, which are not visible
-        sources.  The legacy local ``exclude`` shape materialises no list; it
+        The frozen ceiling itself (``scoped_allowed_source_ids(nb)``: visible
+        ∪ the asker's hidden half, memoised sorted per run), deliberately NOT
+        ``scoped_allowed_source_ids(nb, visible)``: the scope's own notebook
+        legitimately holds the asker's Knowhow and own Memory projections,
+        which are not visible sources, so intersecting with the live visible
+        list would drop Knowhow sections from the lookup -- narrower than any
+        run gets today.  The peer leg (``_peer_exact_leg``) keeps
+        ``(nb, visible)``: a peer's per-notebook ceiling is its visible list.  The legacy local ``exclude`` shape materialises no list; it
         is expressed over the live visible universe instead (a direct service
         caller's shape -- production freezes every local scope to ``include``).
         """

@@ -688,9 +688,12 @@ def test_retrieve_chunks_all_selected_frozen_scope_restores_the_language_gate(
       是唯一候选来源,而且来源谓词把扫描收窄了」)对真收窄成立、对全选不成立:
       全选的谓词覆盖整库,正是这道闸要挡的病态全库探针(实测 64 词项 29.7s vs
       3 词项 0.26s)。
-    * **过滤**不放松——`_retrieve_chunks_fts_degraded` 仍然收到物化的冻结清单
-      (元素臂与 KG 臂没有自己的 actor 谓词,清单是别人的私有 Memory 与并发上传
-      唯一的 LIMIT 前防线;codex #640 R1 两条 P1)。
+    * **过滤**按本 run 的 ``ceiling_binds`` 判词(E2-2,更正第 4b 条):这个库全选、
+      未漂移、没有别人的私有 Memory,天花板排除不了任何东西,所以
+      `_retrieve_chunks_fts_degraded` 收到 None——语句与无 scope 逐字相同,不再绑
+      整库 id 清单。codex #640 R1 两条 P1 的防线换成了判词的 ``foreign_hidden`` 臂
+      (库里有别人的 Memory 就绑)加读时校验(返回的候选有界外来源就记漂移、按清单
+      重跑);这两条由 ``test_candidate_leg_ceilings.py`` 的 chunk 臂用例钉住。
 
     等价 oracle:未漂移全选与无 scope 的候选集(chunk_id/score/relevance)必须逐
     字相同——冻结清单此时恰好覆盖整库,下推它一条候选都不改。
@@ -760,9 +763,9 @@ def test_retrieve_chunks_all_selected_frozen_scope_restores_the_language_gate(
     assert unscoped_fts_degraded_calls == [None], (
         f"无 scope 本来就没有 allow-list,实际 {unscoped_fts_degraded_calls}"
     )
-    assert fts_degraded_calls == [(sid,)], (
-        "全选冻结仍然必须把物化的冻结清单下推到 LIMIT 之前(别人的私有 Memory "
-        f"与并发上传唯一的防线),实际 {fts_degraded_calls}"
+    assert fts_degraded_calls == [None] == unscoped_fts_degraded_calls, (
+        "全选、未漂移、无外人 Memory:判词不绑,语句与无 scope 相同、不下推清单,"
+        f"实际 {fts_degraded_calls}"
     )
     assert len(scored) >= 1
     assert all(c.chunk_id.startswith("ck-") for c in scored)

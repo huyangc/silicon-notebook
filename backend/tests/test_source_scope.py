@@ -1265,6 +1265,66 @@ def test_checkbox_scope_enumeration_reaches_the_executor_and_is_disclosed():
     assert step.detail["source_scoped"] is True
 
 
+def test_a_narrowed_reasoning_run_still_finds_the_in_ceiling_section():
+    """E2-2:收窄的 reasoning run 不再跳过按名称精确查找——种子轮与 reflect 动作
+    都照常调用通道(通道把天花板下推进探针,只会返回界内小节),界内小节进入
+    证据,轨迹里没有「指定来源范围下不可用」的跳过。
+
+    变异锚点:恢复种子轮的 ``_unsafe_scope_restricted()`` 闸,或恢复动作侧的
+    逐动作跳过分支,本条报红。"""
+    def _section(chunk_id, term):
+        return RetrievedChunk(
+            chunk_id=chunk_id, source_id="A", source_title="Manual A",
+            section_path=f"Cmds > {term}", text=f"{term} arguments",
+            element_ids=[f"el-{chunk_id}"], score=1.0, relevance=1.0,
+            exact_lookup=True,
+        )
+
+    class _ExactRetrieval(_ScopedRunRetrieval):
+        def __init__(self):
+            super().__init__()
+            self.exact_queries = []
+
+        def exact_lookup_chunks(self, notebook_id, query):
+            self.exact_queries.append(query)
+            term = "report_timing" if "report_timing" in query else "set_db"
+            return [_section(f"c-{term}", term)]
+
+    retrieval = _ExactRetrieval()
+    retriever = ReasoningRetriever(
+        retrieval=retrieval,
+        model_clients=_ScopedRunModels(),
+        communities=_ScopedRunCommunities(),
+        settings=_ScopedRunSettings(),
+    )
+    retriever.plan = lambda *a, **k: [SubQuery(query="set_db 命令是怎样的")]
+    decisions = iter([
+        ReflectDecision(next_action="exact_lookup", exact_term="report_timing"),
+        ReflectDecision(next_action="answer", sufficient=True),
+    ])
+    retriever.reflect = lambda *a, **k: next(
+        decisions, ReflectDecision(next_action="answer", sufficient=True)
+    )
+
+    with source_scope_context(
+        "nb", SourceScope(mode="include", source_ids=["A"], narrowed=True)
+    ):
+        assert retriever._unsafe_scope_restricted() is True
+        result = retriever.run("nb", "set_db 命令是怎样的")
+
+    assert len(retrieval.exact_queries) == 2
+    assert "set_db" in retrieval.exact_queries[0]
+    assert "report_timing" in retrieval.exact_queries[1]
+    assert {"c-set_db", "c-report_timing"} <= {
+        chunk.chunk_id for chunk in result.chunks
+    }
+    assert not any(
+        step.detail.get("reason") == "source_scope_unsafe_channel"
+        and "精确查找" in step.summary
+        for step in result.trace
+    )
+
+
 def test_checkbox_scope_rejected_community_expansion_does_not_end_loop():
     """受限 run 下模型选中 expand_community:记一条 skip 后循环继续——下一轮的
     search_elements(来源可寻址,受限下允许)照常执行,再由模型收尾。
