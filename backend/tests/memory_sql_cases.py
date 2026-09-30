@@ -233,3 +233,10 @@ BAD_ALIASES = {
     ),
     "seed": ("c\n", '"c"', "public.c", "1x", ""),
 }
+
+#: ``memory_seed_cluster``:canonical id 铸自一个 Memory 派生对象的簇——只认按对象 id 铸的
+#: ``K-~ko-…`` / ``Kx-~ko-…``;真名种子(``K-ko-mem-alice`` 这种恰好长得像对象 id 的名字也算)
+#: 与裸对象 id 都不算。
+MEMORY_SEED_CLUSTERS = frozenset(
+    {f"{NOTEBOOK}/K-~ko-mem-alice/2", f"{NOTEBOOK}/KL-~ko-mem-bob/3"}
+)

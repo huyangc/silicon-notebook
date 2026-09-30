@@ -186,7 +186,10 @@ def _alias_calls():
             memory_sql.memory_derived_in_notebook,
         ),
         "cluster": (memory_sql.no_memory_member_cluster,),
-        "memory_cluster": (memory_sql.memory_cluster, memory_sql.no_memory_cluster),
+        "memory_cluster": (
+            memory_sql.memory_cluster, memory_sql.no_memory_cluster,
+            memory_sql.memory_seed_cluster,
+        ),
         "seed": (memory_sql.cluster_seed_object_id,),
     }
 
@@ -368,6 +371,35 @@ def test_memory_derived_in_notebook_agrees_on_same_notebook_rows_and_stops_at_th
     assert (bool(row["here"]), bool(row["anywhere"])) == (False, True)
 
 
+def test_memory_member_cluster_keys_is_the_member_arm_as_a_set(world):
+    """同一判据的集合形态:每个笔记本读出的 (canonical_id, generation) 恰是成员臂排除的那些簇,
+    一个参数(笔记本 id)。"""
+    member_clusters = cases.ALL_CLUSTERS - cases.NO_MEMORY_MEMBER_CLUSTERS
+    for notebook in (cases.NOTEBOOK, cases.NOTEBOOK2):
+        with world.connect() as db:
+            rows = db.execute(memory_sql.memory_member_cluster_keys(), (notebook,)).fetchall()
+        got = {f"{notebook}/{row[0]}/{row[1]}" for row in rows}
+        assert got == {key for key in member_clusters if key.startswith(notebook + "/")}
+    assert memory_sql.memory_member_cluster_keys().count("?") == 1
+
+
+def test_memory_cluster_docstring_holds_seed_arm_only_minted_real_names_left_to_the_dirty_rule(
+    world,
+):
+    """`memory_cluster` docstring 的两句话:canonical 臂只认按对象 id 铸的种子(``K-~ko-…``、
+    ``Kx-~ko-…``);真名种子(哪怕长得像对象 id)在这里认不出来——Memory 被删后由拷贝的「脏源库
+    不带簇」规则覆盖(见 test_notebook_share_copy / test_copy_memory_exclusion_pg 的
+    test_a_cluster_seeded_by_a_since_deleted_memory)。"""
+    doc = memory_sql.memory_cluster.__doc__
+    assert "K-~ko-" in doc and "Kx-~ko-" in doc and "_source_clustering_current" in doc
+    assert "minted_canonical_ids" in doc
+    seeded = _cluster_keys(world, memory_sql.memory_seed_cluster("c"))
+    assert seeded == cases.MEMORY_SEED_CLUSTERS
+    assert f"{cases.NOTEBOOK}/K-ko-mem-alice/7" not in _cluster_keys(
+        world, memory_sql.memory_cluster("c")
+    )
+
+
 # --------------------------------------------------------------- 嵌进更大的查询
 def test_fragment_embedded_in_a_larger_query_agrees_with_the_standalone_result(world):
     """参数夹在别的参数中间、与别的表 join,结果仍与独立执行一致。"""
@@ -410,6 +442,7 @@ _PUBLIC_FRAGMENTS = (
     "memory_derived_in_notebook",
     "memory_cluster",
     "no_memory_cluster",
+    "memory_seed_cluster",
     "cluster_seed_object_id",
 )
 
@@ -438,6 +471,10 @@ def test_both_backends_declare_the_same_fragments_with_identical_text():
             pg_text = getattr(pg_memory_sql, name)(alias)
             assert "?" not in pg_text
             assert pg_text.replace("%s", "?") == getattr(memory_sql, name)(alias), name
+    assert (
+        pg_memory_sql.memory_member_cluster_keys().replace("%s", "?")
+        == memory_sql.memory_member_cluster_keys()
+    )
     assert pg_memory_sql.memory_source_type_predicate() == memory_sql.memory_source_type_predicate()
     assert pg_memory_sql.memory_source_type_predicate("t.k") == memory_sql.memory_source_type_predicate("t.k")
 
@@ -453,7 +490,7 @@ def test_memory_type_literal_is_single_sourced_and_matches_source_store():
             literals = set(quoted.findall(text))
             if name == "cluster_seed_object_id":
                 assert literals == _SEED_SHAPE_LITERALS, (module, name)
-            elif name in {"memory_cluster", "no_memory_cluster"}:
+            elif name in {"memory_cluster", "no_memory_cluster", "memory_seed_cluster"}:
                 assert literals == {module.MEMORY_SOURCE_TYPE} | _SEED_SHAPE_LITERALS
             else:
                 assert literals == {module.MEMORY_SOURCE_TYPE}, (module, name)
