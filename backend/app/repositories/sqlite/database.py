@@ -15,8 +15,20 @@ from app.repositories.sqlite.write_lock_stats import WriteLockStats
 
 
 _FETCHMANY_OMITTED = object()
-# Polling granularity affects interruption latency only, never selected rows.
-_READ_BUDGET_VM_STEPS = 1000
+# How often (in SQLite VM steps) a budgeted read's progress handler checks the
+# deadline and the cancel token.  Polling granularity affects interruption
+# latency only, never selected rows.  Measured on an Apple M5 Max
+# (2026-09-30), 100 000 steps is ~0.5 ms of pure VM work (a recursive CTE,
+# ~216k steps/ms) and ~5 ms of a 49k-row indexed read whose rows Python
+# materialises as they come (~4 steps per row): a Stop or an expired deadline
+# is noticed within about 0.5-5 ms of statement work, longer only on
+# statements whose single opcodes are expensive.
+# ``test_sqlite_read_budget_granularity`` pins "within 250 ms" end to end.
+# Not finer: every handler call is a point where the interpreter runs pending
+# young-generation collections, and at 1 000 steps six 49k-row reads ran ~208
+# young collections instead of ~16 (+100-200 ms on a default-ceiling
+# constructor with six mounted libraries of 49k sources).
+_READ_BUDGET_VM_STEPS = 100_000
 
 
 class _DiagnosticCursor(sqlite3.Cursor):
