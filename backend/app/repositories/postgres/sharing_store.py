@@ -38,6 +38,7 @@ from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.knowhow_history_store import record_change
 from app.repositories.postgres.memory_sql import memory_source_readable
 from app.repositories.postgres.mount_sql import MOUNT_VALID_EXPR
+from app.repositories.postgres.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 
 
 _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type='knowhow'"
@@ -49,6 +50,14 @@ _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type='knowhow'"
 _VIEWER_SOURCE_NOTEBOOK_SQL = (
     "SELECT s.notebook_id FROM sources s WHERE s.id=%s "
     f"AND {memory_source_readable('s')}"
+)
+
+# `source_notebook_id(visible_only=True)`: the gate of the generic source write
+# endpoints (delete, reparse) — Memory and Knowhow projection rows answer None
+# like a missing id. Mirrors the SQLite constant of the same name.
+_VISIBLE_SOURCE_NOTEBOOK_SQL = (
+    "SELECT notebook_id FROM sources WHERE id=%s "
+    f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
 )
 
 # Deliberately absent: `notebook_grants` (group knowledge sharing P1, schema
@@ -602,12 +611,23 @@ class SharingStore:
         return row["owner"] if row else None
 
     def source_notebook_id(
-        self, source_id: str, *, viewer_id: str | None = None
+        self,
+        source_id: str,
+        *,
+        viewer_id: str | None = None,
+        visible_only: bool = False,
     ) -> str | None:
         """The notebook ``source_id`` belongs to; see the SQLite adapter for the
-        ``viewer_id`` contract (Memory owner gate, same statement, same miss)."""
+        ``viewer_id`` (Memory owner gate of the reads) and ``visible_only``
+        (hidden-type gate of the writes) contracts — same statement, same miss."""
+        if visible_only and viewer_id is not None:
+            raise ValueError("viewer_id and visible_only are separate gates")
         with self.database.connect() as connection:
-            if viewer_id is None:
+            if visible_only:
+                row = connection.execute(
+                    _VISIBLE_SOURCE_NOTEBOOK_SQL, (source_id,)
+                ).fetchone()
+            elif viewer_id is None:
                 row = connection.execute(
                     "SELECT notebook_id FROM sources WHERE id=%s", (source_id,)
                 ).fetchone()

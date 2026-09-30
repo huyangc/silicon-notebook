@@ -10437,7 +10437,7 @@
     "owner": "NotebookSharingService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, source_id: 'str', *, viewer_id: \"'str | None'\" = None) -> \"'str | None'\""
+    "signature": "(self, source_id: 'str', *, viewer_id: \"'str | None'\" = None, visible_only: 'bool' = False) -> \"'str | None'\""
   },
   "source_parse_busy": {
     "consumers": [

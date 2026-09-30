@@ -12,6 +12,11 @@ Two statements changed in this task, both built from
 * `source_store._HIDDEN_SOURCE_IDS_SQL` -- `hidden_source_ids`, now consuming
   the same fragment instead of a hand-written twin.
 
+A third statement, `sharing_store._VISIBLE_SOURCE_NOTEBOOK_SQL`
+(`source_notebook_id(visible_only=True)`), is the gate of the generic source
+write endpoints (delete, reparse): Memory and Knowhow projection rows are never
+addressable there, for any caller.
+
 The SQLite side of the same behaviour is pinned through the real routes by
 `tests/test_memory_source_endpoints.py`.
 
@@ -121,6 +126,20 @@ def test_viewer_gated_notebook_lookup_matches_the_endpoint_matrix(stores):
     assert lookup("src-does-not-exist") is None
 
 
+def test_write_gate_never_resolves_a_hidden_source(stores):
+    """`visible_only=True` -- the gate of `DELETE /sources/{id}` and
+    `POST /sources/{id}/parse`: Memory (own, another member's, orphaned) and
+    Knowhow projection rows answer None exactly like a missing id; ordinary
+    sources resolve."""
+    _database, sharing, _sources = stores
+    lookup = sharing.source_notebook_id
+    for source_id in ("src-0", "src-1", "src-orphan", "src-200", "src-missing"):
+        assert lookup(source_id, visible_only=True) is None, source_id
+    assert lookup("src-500", visible_only=True) == "nb"
+    with pytest.raises(ValueError):
+        lookup("src-500", viewer_id="u-a", visible_only=True)
+
+
 def test_hidden_source_ids_consume_the_shared_fragment(stores):
     _database, _sharing, sources = stores
     assert memory_sql.memory_source_readable("s") in (
@@ -155,8 +174,15 @@ def test_changed_statements_keep_their_index_paths(stores):
         hidden = _plan(
             connection, source_store_module._HIDDEN_SOURCE_IDS_SQL, ("nb", "u-a")
         )
-    for name, plan in (("gate", gate), ("hidden", hidden)):
+        write_gate = _plan(
+            connection, sharing_store_module._VISIBLE_SOURCE_NOTEBOOK_SQL, ("src-1",)
+        )
+    for name, plan in (("gate", gate), ("hidden", hidden), ("write", write_gate)):
         assert "Seq Scan" not in plan, (name, plan)
+    # The write gate: a single primary-key probe; the type check is a filter
+    # on that one row.
+    assert "Index Scan using pk_sources on sources" in write_gate, write_gate
+    assert "SubPlan" not in write_gate, write_gate
     # The gate: one primary-key probe on sources; the Memory check a correlated
     # primary-key probe on memory_items for that single row (evaluated only
     # when the row IS a Memory source) -- nothing scales with the notebook.

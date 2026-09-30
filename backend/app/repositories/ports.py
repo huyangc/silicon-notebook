@@ -598,9 +598,15 @@ class NotebookAccessRepository(Protocol):
     # `source_owner(source_id) == user.id`.
     # `viewer_id` (E3-1): the Memory owner gate of the source/element read
     # endpoints — a Memory source not created by the viewer answers None, the
-    # same as a missing id. None keeps the ungated read (write-side callers).
+    # same as a missing id. `visible_only` (E3-1): the gate of the generic
+    # source write endpoints — Memory/Knowhow projection rows answer None.
+    # Neither keyword keeps the ungated read.
     def source_notebook_id(
-        self, source_id: str, *, viewer_id: str | None = None
+        self,
+        source_id: str,
+        *,
+        viewer_id: str | None = None,
+        visible_only: bool = False,
     ) -> str | None: ...
     def conversation_owner(self, conversation_id: str) -> str | None: ...
     def answer_owner(self, answer_id: str) -> str | None: ...

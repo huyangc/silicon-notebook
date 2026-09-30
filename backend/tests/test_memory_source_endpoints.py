@@ -360,10 +360,51 @@ def test_hidden_source_ids_admit_only_the_viewers_own_memory(seeded):
     assert store.hidden_source_ids(notebook_id, "") == ["src-e31-knowhow"]
 
 
-def test_ungated_notebook_lookup_is_unchanged_for_write_callers(seeded):
-    """``viewer_id`` omitted keeps the historical lookup: the write-side
-    capability guards (parse/delete) resolve any source's notebook."""
+def test_generic_write_endpoints_never_address_a_hidden_source(seeded):
+    """``DELETE /sources/{id}`` and ``POST /sources/{id}/parse`` answer the
+    missing-id 404 for a Memory or Knowhow projection source -- for every
+    caller, the Memory's own creator included (alice owns the notebook, so
+    she holds sources:write; bob's case adds nothing a capability would not
+    already refuse). Memory is deleted through the Memory endpoints and
+    re-ingested by the Memory service; a Knowhow row is maintained by table
+    sync. Nothing is deleted or reparsed, and no title leaks."""
+    client = TestClient(seeded["app"])
+    owner = seeded["headers"]["alice"]
+    hidden = ("src-e31-mem-alice", "src-e31-mem-bob", "src-e31-mem-orphan",
+              "src-e31-knowhow")
+    for source_id in hidden:
+        for method, suffix in (("POST", "/parse"), ("DELETE", "")):
+            response = client.request(
+                method, f"/api/sources/{source_id}{suffix}", headers=owner
+            )
+            assert _shape(response) == _shape(client.request(
+                method, f"/api/sources/{MISSING}{suffix}", headers=owner
+            )), (source_id, method)
+            assert response.status_code == 404
+            assert f"{source_id} 标题" not in response.text
     access = notebook_access_repository()
+    for source_id in hidden:
+        # Still there, untouched: the ungated lookup still resolves it.
+        assert access.source_notebook_id(source_id) == seeded["notebook_id"]
+        assert access.source_notebook_id(source_id, visible_only=True) is None
+    assert access.source_notebook_id(MISSING, visible_only=True) is None
+    # Control: an ordinary document is still addressable and deletable.
+    assert access.source_notebook_id(
+        "src-e31-doc", visible_only=True
+    ) == seeded["notebook_id"]
+    deleted = client.delete("/api/sources/src-e31-doc", headers=owner)
+    assert deleted.status_code == 204, deleted.text
+    assert access.source_notebook_id("src-e31-doc") is None
+
+
+def test_ungated_notebook_lookup_is_unchanged_without_a_gate(seeded):
+    """Neither keyword keeps the historical lookup (any source's notebook);
+    ``viewer_id`` gates Memory by creator."""
+    access = notebook_access_repository()
+    with pytest.raises(ValueError):
+        access.source_notebook_id(
+            "src-e31-doc", viewer_id=seeded["alice"].id, visible_only=True
+        )
     assert access.source_notebook_id("src-e31-mem-bob") == seeded["notebook_id"]
     assert access.source_notebook_id(
         "src-e31-mem-bob", viewer_id=seeded["alice"].id
