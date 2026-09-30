@@ -96,3 +96,34 @@ def test_the_export_streams_in_bounded_pages(world, monkeypatch):
     assert text.index("Memory alice") < text.index("Plain page-0") < text.index(
         "Plain page-3"
     )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Starts a block:\n\n```python\nprint('never closed')",
+        "Tilde block:\n\n~~~~\ncode\n~~~",  # a shorter fence does not close it
+        "Fence with info:\n\n````md\n```\ninner\n```",
+        "An open comment <!-- never closed",
+    ],
+)
+def test_an_entry_cannot_swallow_the_next_one(world, body):
+    """Quality review P3 / item 7: an unclosed code fence (or HTML comment)
+    in one Memory's content must not turn every following entry into code.
+    Rendered with CommonMark, the entry after it is still a heading."""
+    from markdown_it import MarkdownIt
+
+    world.repo._runtime.memory_service.create_candidate(
+        world.alice_home, world.alice.id, None, "req-fence-a", "Fence a",
+        body, [], "reason", {}, [],
+    )
+    plain_memory(world, world.alice_home, world.alice, "fence-b", "candidate")
+    text = export_text(world, world.alice, world.alice_home)
+    tokens = MarkdownIt("commonmark").parse(text)
+    headings = [
+        tokens[index + 1].content
+        for index, token in enumerate(tokens)
+        if token.type == "heading_open" and token.tag == "h2"
+    ]
+    assert any(heading.endswith("Plain fence-b") for heading in headings), headings
+    assert text.rstrip().endswith("条记忆。")

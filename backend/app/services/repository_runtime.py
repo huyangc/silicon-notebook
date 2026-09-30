@@ -1719,6 +1719,9 @@ class RepositoryRuntime:
             normalize_doc_type=normalize_doc_type,
             default_notebook_names=default_notebook_names,
             clear_source_extraction_state=clear_source_extraction_state,
+            # The batch teardown the one-source form above delegates to (the
+            # Memory purge removes a page of sources in one set of statements).
+            clear_sources_extraction_state=self.knowledge.clear_sources_extraction_state,
             begin_extraction_run=begin_extraction_run,
             finish_extraction_run=finish_extraction_run,
             notebook_tier=notebook_tier,

@@ -9,7 +9,7 @@ with its acknowledged Memory count) — against a world
 whose Memory projections are REAL: the hidden source, its element and
 extraction run come from the offline ingest pipeline, and its KG rows come
 from ``store_kg`` with the source's running generation (objects, relations,
-source-local facts, reverse index, embeddings), plus one cluster member row.
+source-local facts, reverse index, embeddings), plus the cluster rows incremental fusion places them in.
 
 The world deliberately contains everything a mis-scoped delete would hit:
 
@@ -210,15 +210,9 @@ def make_memory(world: World, key: str, notebook_id: str, user: Any) -> Projecti
             "SELECT id FROM knowledge_relations WHERE source_id=?", (source_id,)
         )
     ]
-    sql.write(
-        "INSERT INTO concept_clusters "
-        "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
-        "VALUES (?,?,?,?,?,'concept',?)",
-        (
-            f"cc-{key}", notebook_id, f"canon-{key}", object_ids[0], f"{key} loop",
-            _GRANT_CREATED_AT,
-        ),
-    )
+    # Cluster rows through the real writer: incremental fusion (Tier-1 name
+    # seeds, Tier-2 bridge candidates), exactly as extraction runs it.
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook_id, source_id)
     projection = Projection(
         memory.id, notebook_id, source_id, element_ids, object_ids, relation_ids
     )
@@ -835,48 +829,175 @@ def case_approved_promotion_survives_deletion(world: World) -> None:
     assert_purged(world, "alice_home")
 
 
-def _seed_review_candidates(world: World) -> None:
+def _seed_conflict_candidates(world: World) -> None:
+    """Conflict candidates in the shape the conflict detector writes: object
+    or relation ids on both sides. The detector itself needs a model; the
+    shape (``left_ref``/``right_ref``/``winner_ref`` = ids) is what matters."""
     alice = world.projections["alice"]
     bob = world.projections["bob"]
     rows = [
-        ("kc-alice-obj", "object", alice.object_ids[1], world.shared_doc_object, "pending"),
-        ("kc-alice-rel", "relation", world.shared_doc_object, alice.relation_ids[0], "resolved"),
-        ("kc-bob-obj", "object", bob.object_ids[1], world.shared_doc_object, "pending"),
+        ("kc-alice-obj", "node", alice.object_ids[1], world.shared_doc_object, None, "pending"),
+        ("kc-alice-rel", "edge", world.shared_doc_object, alice.relation_ids[0], None, "resolved"),
+        ("kc-alice-winner", "node", world.shared_doc_object, bob.object_ids[0],
+         alice.object_ids[1], "resolved"),
+        ("kc-bob-obj", "node", bob.object_ids[1], world.shared_doc_object, None, "pending"),
+        # A curator's decision between shared objects only: never touched.
+        ("kc-shared-only", "node", world.shared_doc_object, world.shared_doc_object,
+         world.shared_doc_object, "resolved"),
     ]
-    for cid, kind, left, right, status in rows:
+    for cid, kind, left, right, winner, status in rows:
         world.sql.write(
             "INSERT INTO kg_conflict_candidates "
-            "(id,notebook_id,kind,left_ref,right_ref,rationale,status,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,'quotes the Memory text',?,?,?)",
-            (cid, world.shared, kind, left, right, status,
+            "(id,notebook_id,kind,left_ref,right_ref,winner_ref,rationale,status,"
+            "created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,'quotes the Memory text',?,?,?)",
+            (cid, world.shared, kind, left, right, winner, status,
              _GRANT_CREATED_AT, _GRANT_CREATED_AT),
-        )
-    merges = [
-        ("mc-alice-pending", alice.object_ids[1], world.shared_doc_object, "pending"),
-        ("mc-alice-decided", alice.object_ids[1], world.shared_doc_object, "rejected"),
-        ("mc-bob-pending", bob.object_ids[1], world.shared_doc_object, "pending"),
-    ]
-    for mid, left, right, status in merges:
-        world.sql.write(
-            "INSERT INTO concept_merge_candidates "
-            "(id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
-            "VALUES (?,?,?,?,0.9,?,?,?)",
-            (mid, world.shared, left, right, status, _GRANT_CREATED_AT, _GRANT_CREATED_AT),
         )
 
 
 def case_review_candidates_of_deleted_objects_are_deleted(world: World) -> None:
-    _seed_review_candidates(world)
+    """Conflict candidates referencing the Memory's objects or relations go
+    (any status: the rationale can quote the Memory); a decision between
+    shared objects only and another member's candidates stay."""
+    _seed_conflict_candidates(world)
     world.repo.delete_memory(world.projections["alice"].memory_id, world.alice.id)
     conflicts = {
         row["id"] for row in world.sql.rows("SELECT id FROM kg_conflict_candidates")
     }
-    merges = {
-        row["id"] for row in world.sql.rows("SELECT id FROM concept_merge_candidates")
-    }
-    assert conflicts == {"kc-bob-obj"}
-    assert merges == {"mc-alice-decided", "mc-bob-pending"}
+    assert conflicts == {"kc-bob-obj", "kc-shared-only"}
     assert_purged(world, "alice")
+    assert_intact(world, "bob")
+
+
+class _TwinEmbedder(FakeEmbedder):
+    """Texts naming "twin" share one direction (cosine 1 with each other,
+    about 0 with the hash vectors of everything else), so incremental fusion's
+    Tier-2 bridge detector really proposes merges between them."""
+
+    def _vec(self, text: str) -> list[float]:
+        if "twin" in text.lower():
+            return [1.0 if index % 2 == 0 else -1.0 for index in range(self.dim)]
+        return super()._vec(text)
+
+
+def _fused_doc_object(world: World, name: str) -> str:
+    """A document source with one concept object, fused like extraction does."""
+    repo = world.repo
+    imported = _as_user(
+        world.owner,
+        lambda: repo.import_sources(
+            world.shared,
+            SourceImportRequest(files=[SourceImportFile(
+                file_name=f"{name}.md", file_size=10, mime_type="text/markdown",
+            )]),
+        ),
+    )
+    source_id = imported[0].id
+    repo.store_kg(
+        world.shared,
+        source_id,
+        [{
+            "local_id": "d", "object_type": "concept",
+            "payload": {"name": name, "section_path": ""},
+            "evidence": [_evidence(source_id, "", name)],
+        }],
+        [],
+    )
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(world.shared, source_id)
+    [row] = world.sql.rows(
+        "SELECT id FROM knowledge_objects WHERE source_id=?", (source_id,)
+    )
+    return row["id"]
+
+
+def _merge_candidates(world: World) -> set[tuple[str, str]]:
+    return {
+        (row["canonical_a"], row["canonical_b"])
+        for row in world.sql.rows(
+            "SELECT canonical_a,canonical_b FROM concept_merge_candidates "
+            "WHERE notebook_id=?",
+            (world.shared,),
+        )
+    }
+
+
+def case_merge_candidates_written_by_fusion_are_deleted(world: World) -> None:
+    """Item 3: merge candidates hold CLUSTER canonical ids (``K-<seed>``),
+    written here by the real fusion writer. After the purge none names the
+    Memory's clusters or bridge ids; the candidate between two shared
+    clusters stays."""
+    bind_all_embedding_clients(world.repo, _TwinEmbedder(dim=EMBED_DIM))
+    _fused_doc_object(world, "Twin shared notes")
+    _fused_doc_object(world, "Twin other notes")
+    make_memory(world, "twin", world.shared, world.alice)
+    before = _merge_candidates(world)
+    shared_pair = ("K-twin other notes", "K-twin shared notes")
+    assert shared_pair in before
+    memory_names = {"K-twin loop", "K-twin compensation"}
+    assert any(set(pair) & memory_names for pair in before), before
+    world.repo.delete_memory(world.projections["twin"].memory_id, world.alice.id)
+    after = _merge_candidates(world)
+    assert not any(set(pair) & memory_names for pair in after), after
+    assert shared_pair in after
+    assert_purged(world, "twin")
+
+
+def case_whole_clusters_of_the_memory_are_removed(world: World) -> None:
+    """B2 (E5-1 spec review): a cluster seeded by a Memory object keeps the
+    Memory's canonical id, name and description on its SHARED members' rows.
+    The purge removes every cluster the Memory's object belongs to — all
+    member rows — and the merge candidates naming it; the shared object
+    survives and the notebook is marked for a rebuild."""
+    alice = world.projections["alice"]
+    memory_object = next(
+        object_id for object_id in alice.object_ids
+        if world.sql.count(
+            "SELECT COUNT(*) AS c FROM knowledge_objects WHERE id=? AND status<>'deprecated'",
+            (object_id,),
+        )
+    )
+    world.sql.write(
+        "DELETE FROM concept_clusters WHERE member_object_id IN (?,?)",
+        (memory_object, world.shared_doc_object),
+    )
+    for member in (world.shared_doc_object, memory_object):
+        world.sql.write(
+            "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,"
+            "canonical_name,object_type,canonical_description,created_at,generation) "
+            "VALUES (?,?,'K-alice-private plan',?,'ALICE-PRIVATE plan','concept',"
+            "'ALICE-PRIVATE description',?,0)",
+            (f"cc-b2-{member}", world.shared, member, _GRANT_CREATED_AT),
+        )
+    for mid, status in (("mc-b2-pending", "pending"), ("mc-b2-rejected", "rejected")):
+        world.sql.write(
+            "INSERT INTO concept_merge_candidates "
+            "(id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
+            "VALUES (?,?,'K-alice-private plan','K-bob loop',0.9,?,?,?)",
+            (mid, world.shared, status, _GRANT_CREATED_AT, _GRANT_CREATED_AT),
+        )
+    mark_clean(world, world.shared)
+    self_exit(world, world.alice, world.shared, 1)
+    leftovers = world.sql.rows(
+        "SELECT canonical_id,canonical_name,canonical_description FROM concept_clusters "
+        "WHERE notebook_id=?",
+        (world.shared,),
+    )
+    assert not [
+        row for row in leftovers
+        if "ALICE-PRIVATE" in str(row["canonical_name"])
+        or "ALICE-PRIVATE" in str(row["canonical_description"] or "")
+        or row["canonical_id"] == "K-alice-private plan"
+    ], leftovers
+    assert world.sql.count(
+        "SELECT COUNT(*) AS c FROM concept_merge_candidates WHERE canonical_a=?",
+        ("K-alice-private plan",),
+    ) == 0
+    assert world.sql.count(
+        "SELECT COUNT(*) AS c FROM knowledge_objects WHERE id=?",
+        (world.shared_doc_object,),
+    ) == 1
+    assert graph_state(world, world.shared)[0] == 1
     assert_intact(world, "bob")
 
 
@@ -943,6 +1064,8 @@ CASES: dict[str, Callable[..., None]] = {
     "exit_withdraws_promotion": case_exit_withdraws_active_promotion,
     "approved_promotion_survives": case_approved_promotion_survives_deletion,
     "review_candidates_deleted": case_review_candidates_of_deleted_objects_are_deleted,
+    "merge_candidates_real_writer": case_merge_candidates_written_by_fusion_are_deleted,
+    "whole_memory_clusters_removed": case_whole_clusters_of_the_memory_are_removed,
     "mixed_statuses": case_mixed_statuses_are_counted_exported_and_deleted_together,
     "export_scope": case_export_needs_read_access_and_is_lazy,
     "contract_200_counts": case_contract_a_finished_exit_reports_what_it_deleted,
@@ -1034,6 +1157,30 @@ def case_memory_saved_during_exit_is_never_deleted_unacknowledged(
     assert self_exit(world, world.alice, world.shared, 1) == 1
     assert not world.repo.is_member(world.shared, world.alice.id)
     assert_purged(world, "late")
+
+
+def case_remove_and_readd_during_the_purge_keeps_the_new_membership(
+    world: World, monkeypatch
+) -> None:
+    """S4 (quality review): while the purge runs, the owner removes the
+    member and adds them back. The finish ends only the membership this exit
+    claimed (same ``added_at``): the new membership, created after the
+    claim, survives, with what is saved under it."""
+    store = service(world).store
+    original = store.bulk_delete_memories
+
+    def delete_then_readd(user_id, memory_ids):
+        deleted = original(user_id, memory_ids)
+        world.repo.remove_member(world.shared, world.alice.id)
+        world.repo.add_member(world.shared, world.alice.id)
+        plain_memory(world, world.shared, world.alice, "readded", "candidate")
+        return deleted
+
+    monkeypatch.setattr(store, "bulk_delete_memories", delete_then_readd)
+    assert self_exit(world, world.alice, world.shared, 1) == 1
+    assert world.repo.is_member(world.shared, world.alice.id)
+    assert_purged(world, "alice")
+    assert member_memory_count(world, world.shared, world.alice) == 1
 
 
 def case_rejoin_after_the_membership_ends_keeps_new_memory(
@@ -1157,6 +1304,7 @@ MONKEYPATCH_CASES: dict[str, Callable[..., None]] = {
     "contract_503_counts": case_a_purge_failing_part_way_reports_both_numbers,
     "save_during_exit_kept": case_memory_saved_during_exit_is_never_deleted_unacknowledged,
     "rejoin_keeps_new_memory": case_rejoin_after_the_membership_ends_keeps_new_memory,
+    "remove_readd_keeps_membership": case_remove_and_readd_during_the_purge_keeps_the_new_membership,
     "audit_trail": case_purges_leave_a_content_free_audit_trail,
     "statements_bounded": case_statements_per_page_do_not_grow_with_sourceless_memories,
 }

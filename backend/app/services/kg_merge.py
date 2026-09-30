@@ -63,6 +63,44 @@ def seed_or_unique(seed: str, object_id: str) -> str:
     return seed if seed else f"~{object_id}"
 
 
+def bridge_canonical_id(name: str, object_id: str) -> str:
+    """The canonical id a concept object is bridged under (Tier-2 bridge
+    candidates, the ANN twin, and the Memory purge that removes candidates
+    naming it): ``"K-" + seed_or_unique(_norm(name), object_id)``. Never
+    goes through the acronym alias redirect (``place_new_concepts`` does),
+    so it can name a cluster no row carries. One definition for every site."""
+    return "K-" + seed_or_unique(_norm(name or ""), object_id)
+
+
+#: Canonical-id prefixes by object type (concept / claim / formula /
+#: procedure), as the placement and rebuild paths mint them
+#: (``knowledge_lifecycle``'s ``_TYPES`` / ``_SEEDS`` maps use these literals).
+CANONICAL_ID_PREFIXES = ("K-", "KL-", "KF-", "KP-")
+
+
+def minted_canonical_ids(object_id: str) -> List[str]:
+    """Every canonical id that can only have been minted from ``object_id``:
+    the unique-seed sentinel ``<prefix>~<object_id>`` for each prefix
+    (``seed_or_unique``) and the object id itself (a singleton's canonical
+    is its own id). No other object's cluster can carry one of these."""
+    return [object_id, *(f"{prefix}~{object_id}" for prefix in CANONICAL_ID_PREFIXES)]
+
+
+def purge_canonical_ids(objects: Iterable[dict]) -> tuple[List[str], List[str]]:
+    """For objects ``[{object_id, object_type, name}]`` about to be purged:
+    ``(minted, bridge)`` — the canonical ids minted from them
+    (``minted_canonical_ids``) and the bridge ids of the concept objects
+    (``bridge_canonical_id``), which may also be carried by a live shared
+    cluster and are therefore only acted on when no cluster carries them."""
+    minted: List[str] = []
+    bridge: List[str] = []
+    for item in objects:
+        minted.extend(minted_canonical_ids(item["object_id"]))
+        if item.get("object_type") == "concept":
+            bridge.append(bridge_canonical_id(item.get("name") or "", item["object_id"]))
+    return sorted(set(minted)), sorted(set(bridge))
+
+
 def build_acronym_alias_map(names: Iterable[str]) -> Dict[str, str]:
     """For every "Full (ACR)" name where ACR is the initialism of Full, map the
     acronym's seed to the expansion's seed: ``{_norm(ACR): _norm(Full)}``. Lets
@@ -485,7 +523,7 @@ def detect_bridge_candidates(new_items, new_vectors, existing_items, existing_ve
         q = np.asarray(v, dtype="float32"); q /= (np.linalg.norm(q) + 1e-9)
         sims = EX @ q
         idx = np.argsort(-sims)[:top_k]
-        my_cid = "K-" + seed_or_unique(_norm(it.get("name", "")), it["object_id"])
+        my_cid = bridge_canonical_id(it.get("name", ""), it["object_id"])
         for j in idx:
             s = float(sims[j])
             if s < lo:
