@@ -2383,7 +2383,7 @@ def test_report_generate_recovers_when_auto_confirm_intent_returns_none(
 
     from app.services.model_work import ModelPriority, model_work_scope
     from app.services.report_engine import ReportEngine
-    from app.services.source_scope import source_scope_context
+    from app.services.source_scope import default_ceiling_context
     from tests.test_report_engine import _AutoRunLLM, _bind_report_llm, _mk_nb
 
     nb = _mk_nb(rrepo)
@@ -2402,7 +2402,7 @@ def test_report_generate_recovers_when_auto_confirm_intent_returns_none(
     captured, gate_reason = rig._generate_report(
         rrepo, ReportEngine, profile, nb.id, report_id, item,
         model_work_scope=model_work_scope, model_priority=ModelPriority.REPORT,
-        source_scope_context=source_scope_context,
+        default_ceiling_context=default_ceiling_context,
     )
 
     assert gate_reason is None, "清晰契约确认重试成功，不该再判门控失败"
@@ -2423,7 +2423,7 @@ def test_report_generate_recovers_when_auto_confirm_intent_returns_none(
 def test_report_generate_keeps_required_clarification_blocked(rrepo, monkeypatch):
     from app.services.model_work import ModelPriority, model_work_scope
     from app.services.report_engine import ReportEngine
-    from app.services.source_scope import source_scope_context
+    from app.services.source_scope import default_ceiling_context
     from tests.test_report_engine import _AutoRunLLM, _bind_report_llm, _mk_nb
 
     nb = _mk_nb(rrepo)
@@ -2441,7 +2441,7 @@ def test_report_generate_keeps_required_clarification_blocked(rrepo, monkeypatch
         rrepo, ReportEngine, types.SimpleNamespace(id="rig-owner"),
         nb.id, report_id, item,
         model_work_scope=model_work_scope, model_priority=ModelPriority.REPORT,
-        source_scope_context=source_scope_context,
+        default_ceiling_context=default_ceiling_context,
     )
 
     assert gate_reason == "clarification_gate"
@@ -2465,7 +2465,7 @@ def test_report_generate_marks_clarification_gate_failed_when_the_claim_is_lost(
 
     from app.services.model_work import ModelPriority, model_work_scope
     from app.services.report_engine import ReportEngine
-    from app.services.source_scope import source_scope_context
+    from app.services.source_scope import default_ceiling_context
     from tests.test_report_engine import _AutoRunLLM, _bind_report_llm, _mk_nb
 
     nb = _mk_nb(rrepo)
@@ -2485,7 +2485,7 @@ def test_report_generate_marks_clarification_gate_failed_when_the_claim_is_lost(
     captured, gate_reason = rig._generate_report(
         rrepo, ReportEngine, profile, nb.id, report_id, item,
         model_work_scope=model_work_scope, model_priority=ModelPriority.REPORT,
-        source_scope_context=source_scope_context,
+        default_ceiling_context=default_ceiling_context,
     )
 
     assert gate_reason == "clarification_gate"
@@ -2518,7 +2518,7 @@ def test_report_generate_marks_planning_failure_failed_on_the_straight_path(
 
     from app.services.model_work import ModelPriority, model_work_scope
     from app.services.report_engine import ReportEngine
-    from app.services.source_scope import source_scope_context
+    from app.services.source_scope import default_ceiling_context
     from tests.test_report_engine import _AutoRunLLM, _bind_report_llm, _mk_nb
 
     nb = _mk_nb(rrepo)
@@ -2539,7 +2539,7 @@ def test_report_generate_marks_planning_failure_failed_on_the_straight_path(
     captured, gate_reason = rig._generate_report(
         rrepo, ReportEngine, profile, nb.id, report_id, item,
         model_work_scope=model_work_scope, model_priority=ModelPriority.REPORT,
-        source_scope_context=source_scope_context,
+        default_ceiling_context=default_ceiling_context,
     )
 
     detail = rrepo.get_report(nb.id, report_id)
@@ -2552,6 +2552,50 @@ def test_report_generate_marks_planning_failure_failed_on_the_straight_path(
     assert len(rows) == 1
     assert rows[0]["status"] == "failed"
     assert "merge_key" not in rows[0]
+
+
+def test_report_generate_runs_under_the_default_ceiling_like_the_worker(
+    rrepo, monkeypatch,
+):
+    """rig 的报告半程与报告 worker 同形:引擎在默认检索天花板里跑(本库可见
+    来源、`ceilings_total`、未提交本地范围),而不是在什么都不装的
+    `source_scope_context(nb, None, None)` 里——否则 A/B 计时漏掉天花板开启的
+    漂移探针开销。"""
+    from types import SimpleNamespace
+
+    from app.services.model_work import ModelPriority, model_work_scope
+    from app.services.report_engine import ReportEngine
+    from app.services.source_scope import (
+        current_source_scope,
+        current_source_scope_payload,
+        default_ceiling_context,
+    )
+    from tests.test_report_engine import _mk_nb
+
+    nb = _mk_nb(rrepo)
+    seen: list[Any] = []
+
+    def run(self, *args, **kwargs):
+        scope = current_source_scope()
+        seen.append((scope, current_source_scope_payload()))
+
+    monkeypatch.setattr(ReportEngine, "run", run)
+    question = "分析 PLL 稳定性"
+    report_id = rrepo.create_report(nb.id, question, depth=1)
+    rig._generate_report(
+        rrepo, ReportEngine, SimpleNamespace(id="rig-owner"), nb.id,
+        report_id, _report_item(question),
+        model_work_scope=model_work_scope, model_priority=ModelPriority.REPORT,
+        default_ceiling_context=default_ceiling_context,
+    )
+    assert len(seen) == 1
+    scope, payload = seen[0]
+    assert scope is not None, "rig 的报告必须在默认天花板里跑"
+    assert scope.notebook_id == nb.id
+    assert scope.ceilings_total is True
+    assert scope.source_provided is False
+    assert payload is None
+    assert current_source_scope() is None
 
 
 # ---------------------------------------------------------------------------
