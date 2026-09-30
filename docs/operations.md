@@ -1387,8 +1387,8 @@ opens a per-notebook circuit for the rest of the current retrieval run; later ge
 skip the database statement. Calls already in flight are not forcibly cancelled. Exact
 phrase/identifier lookup is a separate channel and is never covered by this circuit.
 A source-scoped probe binds its source list unprepared, so it is planned with the real
-list on every execution; before 2026-09-29 the same probe drifted into a generic plan
-from about its 11th execution on a pooled connection and could cross this budget
+list on every execution; earlier releases let the same probe drift into a generic plan
+from about its 11th execution on a pooled connection, where it crossed this budget
 periodically on large notebooks. Timeouts that still recur therefore come from the query
 itself (its terms, the trigram index, or load), not from the plan cache.
 
