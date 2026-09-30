@@ -58,6 +58,7 @@ MEMORY_BODY = f"{TERM} bandwidth private note MEMITEMSECRET"
 MEMORY_ELEMENT = f"{TERM} bandwidth memory element MEMELEMSECRET"
 MEMORY_KG = f"{TERM} bandwidth memory concept MEMKGSECRET"
 MEMORY_SECRETS = ("MEMITEMSECRET", "MEMELEMSECRET", "MEMKGSECRET")
+MIXED_MEMORY_QUOTE = f"{TERM} bandwidth mixed occurrence MIXMEMQUOTE"
 FULL_SCOPES = [
     "knowledge:read", "memory:read", "memory:read_candidates",
     "memory:propose", "ask:execute",
@@ -131,12 +132,14 @@ def seed_shared_notebook(env: dict, placeholder: str) -> dict:
             summary="", doc_type="", memory_id=memory_id,
         )
 
-    def insert_object(object_id: str, source_id: str, element_id: str, name: str):
+    def insert_object(object_id: str, source_id: str, element_id: str, name: str,
+                      also: tuple[tuple[str, str, str], ...] = ()):
+        occurrences = [(source_id, element_id, name), *also]
         evidence = json.dumps([{
-            "source_id": source_id, "source_title": source_id,
-            "element_id": element_id, "element_type": "paragraph",
-            "location_label": "p1", "quoted_span": name, "confidence": 1.0,
-        }])
+            "source_id": occurrence_source, "source_title": occurrence_source,
+            "element_id": occurrence_element, "element_type": "paragraph",
+            "location_label": "p1", "quoted_span": quote, "confidence": 1.0,
+        } for occurrence_source, occurrence_element, quote in occurrences])
         with repo._write() as db:
             db.execute(
                 "INSERT INTO knowledge_objects "
@@ -151,11 +154,12 @@ def seed_shared_notebook(env: dict, placeholder: str) -> dict:
             # payload itself).  A closed Memory channel runs on the
             # source-restricted lexical lane until E2-2, which reads exactly
             # these, so without them the visible object is unreachable there.
-            db.execute(
-                "INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id) "
-                f"VALUES ({ph},{ph},{ph})",
-                (object_id, source_id, notebook_id),
-            )
+            for occurrence_source in dict.fromkeys(o[0] for o in occurrences):
+                db.execute(
+                    "INSERT INTO knowledge_object_sources "
+                    f"(object_id,source_id,notebook_id) VALUES ({ph},{ph},{ph})",
+                    (object_id, occurrence_source, notebook_id),
+                )
             if ph == "?":
                 db.execute(
                     "INSERT INTO kg_objects_fts(object_id,notebook_id,name) "
@@ -192,7 +196,13 @@ def seed_shared_notebook(env: dict, placeholder: str) -> dict:
             [ChunkWrite("chunk-visible", VISIBLE_TEXT, "1", ("el-visible",))],
             created_at=NOW,
         )
-    insert_object("ko-visible", "src-visible", "el-visible", VISIBLE_KG)
+    # ``node_context`` scenario: the visible object ALSO cites Alice's Memory
+    # element (mixed evidence).  Whoever may not read that Memory must get the
+    # object with the visible occurrence only -- the re-read binds the ceiling
+    # (``ceiling_binds``: withheld Memory, or another member's Memory present).
+    insert_object("ko-visible", "src-visible", "el-visible", VISIBLE_KG, also=(
+        ("src-memory-alice", "el-memory", MIXED_MEMORY_QUOTE),
+    ))
     insert_object("ko-memory", "src-memory-alice", "el-memory", MEMORY_KG)
     # Raw rows skip the extraction pipeline's embed step; without vectors the
     # KG arms cannot see either object and the test would prove nothing.
@@ -300,6 +310,8 @@ async def assert_memory_channel_through_mcp(env: dict, monkeypatch) -> None:
         # The element and KG arms did run -- over the visible source only.
         assert "VISELEMMARK" in prompt and "VISKGMARK" in prompt
         assert _source_ids(closed) == {"src-visible"}
+        # node_context: the mixed object arrives without its Memory occurrence.
+        assert "MIXMEMQUOTE" not in prompt and "MIXMEMQUOTE" not in _wire_text(closed)
 
         # --- Alice WITH memory:read: her Memory is retrieved as before --------
         opened, prompt = await ask_as("alice", FULL_SCOPES)
@@ -310,6 +322,9 @@ async def assert_memory_channel_through_mcp(env: dict, monkeypatch) -> None:
             c.get("memory_id") == ids["memory_id"] for c in opened["citations"]
         ), opened["citations"]
         assert "src-memory-alice" in _source_ids(opened)
+        # ... and with it the mixed object keeps its Memory occurrence (the
+        # control that shows the node_context assertions are not vacuous).
+        assert "MIXMEMQUOTE" in _wire_text(opened)
 
         # --- Bob, full scopes: never Alice's Memory ---------------------------
         calls_before = store_calls.calls
@@ -321,6 +336,7 @@ async def assert_memory_channel_through_mcp(env: dict, monkeypatch) -> None:
             assert secret not in _wire_text(foreign)
         assert "VISELEMMARK" in prompt and "VISKGMARK" in prompt
         assert _source_ids(foreign) == {"src-visible"}
+        assert "MIXMEMQUOTE" not in prompt and "MIXMEMQUOTE" not in _wire_text(foreign)
 
 
 def _source_ids(answer: dict) -> set[str]:
