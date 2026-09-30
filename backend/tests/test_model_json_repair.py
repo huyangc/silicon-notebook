@@ -453,6 +453,26 @@ def test_valid_escapes_next_to_latex_keep_their_json_meaning():
     )
 
 
+def test_latex_reading_does_not_depend_on_the_repair_library(monkeypatch):
+    # Stray backslashes get their reading before the library runs; when they
+    # were the only fault, the library's own escape handling never matters.
+    def fail(*_args, **_kwargs):
+        raise AssertionError("json_repair must not be needed")
+
+    monkeypatch.setattr("app.core.model_json.json_repair.loads", fail)
+
+    result = parse_model_json_object(
+        '{"answer":"50' + BS + '%' + BS + 'n' + BS + 'mathrm{V}",'
+        '"grounded":true}',
+        ANSWER_SCHEMA,
+        allow_repair=True,
+    )
+
+    assert json.loads(result.content)["answer"] == (
+        "50" + BS + "%\n" + BS + "mathrm{V}"
+    )
+
+
 def test_latex_reading_does_not_excuse_a_changed_string(monkeypatch):
     # Dropping the backslash is a change to what the model wrote.
     monkeypatch.setattr(

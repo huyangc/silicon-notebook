@@ -373,7 +373,7 @@ notebook 内页采用来源栏 + 主区域的两列 workspace，主区域提供 
 
 模型服务状态是只读投影：`GET /api/model-services/status` 返回脱敏后的服务身份、workload 绑定、容量、运行/排队数、熔断与最近健康状态，不触发上游探测。只有 admin 能显式调用单服务或全服务 test endpoint。所有模型失败都携带安全 `support_id`，用户把它提交给维护人员，维护人员再以服务端日志关联具体坏掉的服务；状态与 UI 永不返回端点、凭据、provider body、prompt/response 或 raw exception。schema v24 已不可逆清空 `user_profiles.model_settings`、删除旧的逐用户健康行，并按部署服务 ID 持久化健康状态；个人配置路由与页面已下线。
 
-全部 27 个 chat workload 的模型 JSON 都在 scheduler 统一出口严格解析，并按 schema example 校验已声明顶层/嵌套形状；只有 `reasoning_agent` / `ask_answer` 可按 `MODEL_JSON_REPAIR_MODE` 进入 `app.core.model_json` 的保守恢复层。该层只处理首尾完整对象的可恢复语法错误（如缺引号/逗号），限制顶层 shape 与明确类型，并要求每个非空字符串值仍逐字存在；截断和语义重写不修。统一出口把每次被拒响应交给 `AnalysisArtifactStore` 私有保存，并由 model registry 的穷尽映射归入 `ask`/`report`/`source`/`knowledge`/`memory`/`knowhow`/`retrieval`；普通观测仍只记录稳定状态/reason、workload 与安全 `support_id`，不写 prompt/response。Ask 的 NDJSON transport 在队列空闲时发送 5 秒空白心跳并关闭常见代理缓冲，前端丢弃空行；它只保持传输活跃，不制造 trace step，也不改变 detached worker 的生命周期。
+全部 27 个 chat workload 的模型 JSON 都在 scheduler 统一出口严格解析，并按 schema example 校验已声明顶层/嵌套形状；只有 `reasoning_agent` / `ask_answer` 可按 `MODEL_JSON_REPAIR_MODE` 进入 `app.core.model_json` 的保守恢复层。该层只处理首尾完整对象的可恢复语法错误（如缺引号/逗号），限制顶层 shape 与明确类型，并要求每个非空字符串值仍逐字存在（不构成 JSON 转义的反斜杠，如 LaTeX 的 `\%`，按字面读）；截断和语义重写不修。统一出口把每次被拒响应交给 `AnalysisArtifactStore` 私有保存，并由 model registry 的穷尽映射归入 `ask`/`report`/`source`/`knowledge`/`memory`/`knowhow`/`retrieval`；普通观测仍只记录稳定状态/reason、workload 与安全 `support_id`，不写 prompt/response。Ask 的 NDJSON transport 在队列空闲时发送 5 秒空白心跳并关闭常见代理缓冲，前端丢弃空行；它只保持传输活跃，不制造 trace step，也不改变 detached worker 的生命周期。
 
 新增可由环境覆盖的 pydantic v2 setting 必须使用 `validation_alias`；列表类值按现有 `NoDecode` 约定解析。
 
