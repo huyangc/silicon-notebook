@@ -925,6 +925,11 @@ def _sync_ask_service(content_harness) -> AskService:
     service.current_user_id = lambda: "user-content"
     service.cancellations = AskCancellationRegistry()
     service.notebooks = SimpleNamespace(get_notebook=lambda notebook_id: notebook_id)
+    # Every ask installs its default ceiling first; an empty notebook's
+    # readers keep this lifecycle double store-free.
+    from tests.test_ask_service_boundary import static_ceiling_readers
+
+    service.ceiling_readers = static_ceiling_readers()
     return service
 
 
