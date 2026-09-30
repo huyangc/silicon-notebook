@@ -502,7 +502,8 @@ def case_a_report_deleted_while_the_share_waits_is_not_found(world: World) -> No
     real = store_module.MemoryStore.memory_sources_on
 
     def delete_then_read(db, source_ids, owner_id, *, lock=False):
-        db.execute(f"DELETE FROM reports WHERE id={placeholder}", (rid,))
+        if lock:     # the share transaction's own read, after it found the row
+            db.execute(f"DELETE FROM reports WHERE id={placeholder}", (rid,))
         return real(db, source_ids, owner_id, lock=lock)
 
     world.monkeypatch.setattr(
