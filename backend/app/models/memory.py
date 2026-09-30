@@ -73,6 +73,14 @@ class MemoryExitDisclosure(BaseModel):
     memory_count: int
 
 
+class MemberExitResult(BaseModel):
+    """``DELETE /notebooks/{id}/membership`` 200: the exit finished; this
+    request deleted ``deleted_memory_count`` Memories (counted by the
+    server)."""
+
+    deleted_memory_count: int
+
+
 class MemoryRecord(BaseModel):
     id: str
     notebook_id: str

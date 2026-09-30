@@ -1,9 +1,12 @@
 """HTTP contract of the member's own exit and the Memory export (E5-2, M5).
 
 * ``GET  /api/notebooks/{id}/membership/exit-disclosure`` -> ``{"memory_count": N}``
-* ``DELETE /api/notebooks/{id}/membership[?acknowledged_memory_count=N]``:
-  409 ``{"detail": {"code": "exit_disclosure_required", "memory_count": N}}``
-  unless N matches; 204 otherwise; no query needed when N is 0.
+* ``DELETE /api/notebooks/{id}/membership[?acknowledged_memory_count=A]``,
+  contract v2 (C = what the exit deletes now, claimed under the lock):
+  C = 0 and A absent or 0 -> 204; A != C (also C = 0 with A > 0) -> 409
+  ``exit_disclosure_required`` with C; A = C > 0 -> 200
+  ``{"deleted_memory_count": d}``; memories saved during the exit -> 409
+  ``exit_incomplete`` with d and r; a failed purge -> 503 ``exit_incomplete``.
 * ``GET  /api/notebooks/{id}/memories/export`` -> Markdown attachment.
 * ``POST /api/memories/transfer`` stays the other way out (confirmed only).
 """
@@ -72,7 +75,7 @@ def _world(tmp_path, monkeypatch):
     )
     return {
         "client": client, "repo": repo, "notebook": notebook_id,
-        "own_notebook": own_notebook, "owner": owner_headers,
+        "own_notebook": own_notebook, "owner": owner_headers, "owner_id": owner_id,
         "reader": reader_headers, "reader_id": reader_id,
         "stranger": stranger_headers, "confirmed": confirmed.id,
         "candidate": candidate.id,
@@ -107,8 +110,8 @@ def test_exit_needs_the_exact_acknowledgement_then_deletes_and_leaves(
         assert refused.json() == expected
     assert client.get(f"/api/notebooks/{notebook}", headers=w["reader"]).status_code == 200
     left = client.delete(url + "?acknowledged_memory_count=2", headers=w["reader"])
-    assert left.status_code == 204
-    assert left.content == b""
+    assert left.status_code == 200
+    assert left.json() == {"deleted_memory_count": 2}
     assert client.get(f"/api/notebooks/{notebook}", headers=w["reader"]).status_code == 404
     with w["repo"]._connect() as db:
         remaining = db.execute(
@@ -135,7 +138,42 @@ def test_exit_without_memory_needs_no_acknowledgement(tmp_path, monkeypatch):
     assert again.status_code == 204
 
 
-def test_a_failed_purge_is_a_chinese_actionable_error_and_keeps_the_membership(
+def test_a_failed_purge_reports_what_it_deleted_and_keeps_the_membership(
+    tmp_path, monkeypatch
+):
+    """503 ``exit_incomplete``: the server says how many it deleted before
+    failing and how many remain; the caller is still a member."""
+    w = _world(tmp_path, monkeypatch)
+    store = w["repo"]._runtime.memory_service.store
+    original = store.bulk_delete_memories
+    calls: list[int] = []
+
+    def fail_on_second_page(user_id, memory_ids):
+        calls.append(len(memory_ids))
+        if len(calls) > 1:
+            raise RuntimeError("injected")
+        return original(user_id, memory_ids)
+
+    from app.services import memory_service as memory_service_module
+
+    monkeypatch.setattr(memory_service_module, "_PURGE_PAGE", 1)
+    monkeypatch.setattr(store, "bulk_delete_memories", fail_on_second_page)
+    response = w["client"].delete(
+        f"/api/notebooks/{w['notebook']}/membership?acknowledged_memory_count=2",
+        headers=w["reader"],
+    )
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": {"code": "exit_incomplete", "deleted_memory_count": 1, "memory_count": 1}
+    }
+    assert w["repo"].is_member(w["notebook"], w["reader_id"])
+    # The retry starts from the disclosure again, which tells the truth.
+    assert w["client"].get(
+        f"/api/notebooks/{w['notebook']}/membership/exit-disclosure", headers=w["reader"]
+    ).json() == {"memory_count": 1}
+
+
+def test_a_failed_purge_before_any_delete_says_nothing_was_deleted(
     tmp_path, monkeypatch
 ):
     w = _world(tmp_path, monkeypatch)
@@ -150,9 +188,76 @@ def test_a_failed_purge_is_a_chinese_actionable_error_and_keeps_the_membership(
         headers=w["reader"],
     )
     assert response.status_code == 503
-    assert response.headers["X-User-Message"] == "1"
-    assert "你仍是成员" in response.json()["detail"]
+    assert response.json() == {
+        "detail": {"code": "exit_incomplete", "deleted_memory_count": 0, "memory_count": 2}
+    }
     assert w["repo"].is_member(w["notebook"], w["reader_id"])
+
+
+def test_memory_saved_during_the_exit_is_an_incomplete_exit_with_both_numbers(
+    tmp_path, monkeypatch
+):
+    """409 ``exit_incomplete``: the acknowledged two are gone, one saved
+    meanwhile remains, the caller is still a member and is told both."""
+    w = _world(tmp_path, monkeypatch)
+    service = w["repo"]._runtime.memory_service
+    original = service.store.bulk_delete_memories
+
+    def delete_then_save(user_id, memory_ids):
+        deleted = original(user_id, memory_ids)
+        service.create_candidate(
+            w["notebook"], w["reader_id"], None, "exit-late", "Late",
+            "Saved while the exit ran.", [], "reason", {}, [],
+        )
+        return deleted
+
+    monkeypatch.setattr(service.store, "bulk_delete_memories", delete_then_save)
+    response = w["client"].delete(
+        f"/api/notebooks/{w['notebook']}/membership?acknowledged_memory_count=2",
+        headers=w["reader"],
+    )
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": {"code": "exit_incomplete", "deleted_memory_count": 2, "memory_count": 1}
+    }
+    assert w["repo"].is_member(w["notebook"], w["reader_id"])
+
+
+def test_an_acknowledgement_is_refused_when_nothing_would_be_deleted(
+    tmp_path, monkeypatch
+):
+    """Spec P2-1: the caller acknowledged 2, then meanwhile gained a grant
+    (or lost the membership): the exit would delete 0, so the
+    acknowledgement is refused with 0 and nothing changes."""
+    w = _world(tmp_path, monkeypatch)
+    client, notebook = w["client"], w["notebook"]
+    url = f"/api/notebooks/{notebook}/membership"
+    with w["repo"]._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO notebook_grants "
+            "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+            "VALUES ('gnt-exit-route',?,'user',?,'reader',?,'2026-09-29T00:00:00+00:00')",
+            (notebook, w["reader_id"], w["owner_id"]),
+        )
+    refused = client.delete(url + "?acknowledged_memory_count=2", headers=w["reader"])
+    assert refused.status_code == 409
+    assert refused.json() == {
+        "detail": {"code": "exit_disclosure_required", "memory_count": 0}
+    }
+    assert w["repo"].is_member(notebook, w["reader_id"])
+    # With 0 acknowledged (or none) the exit ends the membership and keeps
+    # every Memory: the grant still reads them.
+    assert client.delete(url, headers=w["reader"]).status_code == 204
+    assert not w["repo"].is_member(notebook, w["reader_id"])
+    assert client.get(
+        f"/api/notebooks/{notebook}/memories", headers=w["reader"]
+    ).json()["total_count"] == 2
+    # No longer a member at all: a stale acknowledgement is refused the same way.
+    stale = client.delete(url + "?acknowledged_memory_count=2", headers=w["reader"])
+    assert stale.status_code == 409
+    assert stale.json() == {
+        "detail": {"code": "exit_disclosure_required", "memory_count": 0}
+    }
 
 
 def test_export_is_a_markdown_attachment_of_only_the_callers_memory(

@@ -183,19 +183,42 @@ def _export_section(index: int, item: MemoryRecord) -> str:
 
 
 class ExitDisclosureRequired(Exception):
-    """Leaving would delete Memory the leaver has not acknowledged.
+    """The acknowledged count differs from what the exit would delete now.
 
-    ``memory_count`` is the server-side count at the moment of the check:
-    the client must show it and retry with exactly that number."""
+    Nothing was deleted and the membership is unchanged. ``memory_count`` is
+    the server-side count at the moment of the check (0 when the caller is
+    no longer a member or keeps reading through a grant): the client shows
+    it and asks again. HTTP 409 ``exit_disclosure_required``."""
 
     def __init__(self, memory_count: int) -> None:
         super().__init__(f"exit would delete {memory_count} Memory items")
         self.memory_count = memory_count
 
 
-class MemberExitFailed(Exception):
-    """The exit's Memory purge failed part-way. The leaver is still a member;
-    already deleted Memory stays deleted and a retry continues from there."""
+class _MemberExitNotFinished(Exception):
+    """The purge ran, the exit did not finish: the leaver is still a member,
+    ``deleted_memory_count`` Memories are gone for good (counted by the
+    server, this request only) and ``memory_count`` remain."""
+
+    def __init__(self, deleted_memory_count: int, memory_count: int) -> None:
+        super().__init__(
+            f"exit incomplete: {deleted_memory_count} deleted, {memory_count} remain"
+        )
+        self.deleted_memory_count = deleted_memory_count
+        self.memory_count = memory_count
+
+
+class MemberExitIncomplete(_MemberExitNotFinished):
+    """The acknowledged Memories were deleted (at least one), but Memories
+    the leaver did not acknowledge exist now (saved while the purge ran), so
+    the membership stays. HTTP 409 ``exit_incomplete``."""
+
+
+class MemberExitFailed(_MemberExitNotFinished):
+    """The purge (or the finish) failed part-way; ``deleted_memory_count``
+    may be 0. The leaver is still a member; what was deleted stays deleted
+    and a retry, which starts again from the disclosure, continues from
+    there. HTTP 503 ``exit_incomplete``."""
 
 
 class MembershipExitPort(Protocol):
@@ -997,47 +1020,97 @@ class MemoryService:
         notebook_id: str,
         user_id: str,
         acknowledged_memory_count: int | None,
-    ) -> None:
+    ) -> int:
         """The member's own exit: delete their Memory here, then end the
-        membership. The one path that deletes a member's Memory.
+        membership. The one path that deletes a member's Memory. Returns how
+        many Memories THIS call deleted (counted here, never the client's
+        number); every other outcome is a typed exception carrying the
+        server's numbers.
 
         1. Claim, under the membership row lock: the exact Memory ids the exit
-           will delete. More than zero and not acknowledged with exactly that
-           count → ``ExitDisclosureRequired``, nothing touched. Zero needs no
-           acknowledgement: the exit behaves exactly as before.
-        2. Purge those ids page by page (``_purge_page``) — the rows and every
-           row derived from them.
-        3. Finish, under the membership row lock again: end the membership
+           deletes now, count C (0 when the caller is not a member or keeps
+           reading through ownership or a grant). An acknowledgement that
+           differs from C — absent while C > 0, or ANY number but 0 while C
+           is 0 — raises ``ExitDisclosureRequired(C)``: nothing touched.
+        2. C = 0: end the membership (or find it already gone); nobody's
+           Memory is deleted — a caller who keeps reading through a grant
+           keeps every Memory. Returns 0.
+        3. C > 0: purge those ids page by page (``_purge_page``) — the rows
+           and every row derived from them — counting what was deleted (d).
+           A failure part-way raises ``MemberExitFailed(d, r)``: still a
+           member, d gone for good, r counted now; a retry is safe.
+        4. Finish, under the membership row lock again: end the membership
            only if none of the leaver's Memory is left there. A Memory saved
-           while the purge ran is never deleted unacknowledged: the membership
-           stays and ``ExitDisclosureRequired`` carries the new count.
+           while the purge ran is never deleted unacknowledged: the
+           membership stays, and the caller learns both numbers —
+           ``MemberExitIncomplete(d, r)``, or ``ExitDisclosureRequired(r)``
+           when d is 0 (nothing happened). A failure here is
+           ``MemberExitFailed(d, r)``.
 
-        Someone who keeps reading the notebook as its owner or through a
-        grant has not left: the membership row goes and every Memory stays.
-        A purge failure raises ``MemberExitFailed`` with the membership intact
-        (already deleted Memory stays deleted; a retry continues). The
-        per-member overlay/observation cleanup follows the membership end."""
+        Correctness does not depend on the caller still listening: every
+        step commits on its own and the next disclosure reports what is
+        left. The per-member overlay/observation cleanup follows the
+        membership end; its failure no longer changes the outcome (the
+        membership has ended and the Memories are deleted — that is what is
+        reported) and is logged instead."""
         snapshot = self.store.member_exit_snapshot(notebook_id, user_id, claim=True)
+        claimed = snapshot.memory_count
+        if (acknowledged_memory_count or 0) != claimed:
+            raise ExitDisclosureRequired(claimed)
         if not snapshot.is_member or snapshot.keeps_access:
             self.membership.remove_member(notebook_id, user_id)
-            return
-        if snapshot.memory_count and acknowledged_memory_count != snapshot.memory_count:
-            raise ExitDisclosureRequired(snapshot.memory_count)
+            return 0
         deleted = 0
         refs = [(memory_id, notebook_id) for memory_id in snapshot.memory_ids]
         try:
             for offset in range(0, len(refs), _PURGE_PAGE):
                 deleted += self._purge_page(user_id, refs[offset:offset + _PURGE_PAGE])
         except Exception as exc:
-            if deleted:
-                self._audit_purge("member_exit_partial", notebook_id, user_id, deleted)
-            raise MemberExitFailed(notebook_id) from exc
-        if deleted:
-            self._audit_purge("member_exit", notebook_id, user_id, deleted)
-        remaining = self.store.finish_member_exit(notebook_id, user_id)
+            self._audit_exit(notebook_id, user_id, deleted, finished=False)
+            raise MemberExitFailed(
+                deleted, self._remaining_after_failure(notebook_id, user_id, claimed - deleted)
+            ) from exc
+        try:
+            remaining = self.store.finish_member_exit(notebook_id, user_id)
+        except Exception as exc:
+            self._audit_exit(notebook_id, user_id, deleted, finished=False)
+            raise MemberExitFailed(
+                deleted, self._remaining_after_failure(notebook_id, user_id, claimed - deleted)
+            ) from exc
+        self._audit_exit(notebook_id, user_id, deleted, finished=not remaining)
         if remaining:
+            if deleted:
+                raise MemberExitIncomplete(deleted, remaining)
             raise ExitDisclosureRequired(remaining)
-        self.membership.forget_member_state(notebook_id, user_id)
+        try:
+            self.membership.forget_member_state(notebook_id, user_id)
+        except Exception as exc:  # noqa: BLE001 - the exit itself has finished
+            self.event_log.logger.warning(
+                "member exit overlay cleanup failed (%s)", type(exc).__name__
+            )
+        return deleted
+
+    def _audit_exit(
+        self, notebook_id: str, user_id: str, deleted: int, *, finished: bool
+    ) -> None:
+        if deleted:
+            action = "member_exit" if finished else "member_exit_partial"
+            self._audit_purge(action, notebook_id, user_id, deleted)
+
+    def _remaining_after_failure(
+        self, notebook_id: str, user_id: str, fallback: int
+    ) -> int:
+        """The leaver's Memory count after a failed purge or finish, read the
+        way the disclosure reads it. When even that read fails (the database
+        is what failed), the claim's own arithmetic — claimed minus deleted —
+        is the best the server knows."""
+        try:
+            return self.exit_disclosure(notebook_id, user_id)
+        except Exception as exc:  # noqa: BLE001 - reporting path of a failure
+            self.event_log.logger.warning(
+                "member exit remaining count failed (%s)", type(exc).__name__
+            )
+            return max(fallback, 0)
 
     # ---------------------------------------------------------------- export
     def export_markdown(

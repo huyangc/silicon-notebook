@@ -30,7 +30,11 @@ from typing import Any, Callable
 from app.models.knowledge import MergeRequest
 from app.models.schemas import NotebookCreate, SourceImportFile, SourceImportRequest
 from app.services.embedding import FakeEmbedder
-from app.services.memory_service import ExitDisclosureRequired, MemberExitFailed
+from app.services.memory_service import (
+    ExitDisclosureRequired,
+    MemberExitFailed,
+    MemberExitIncomplete,
+)
 from app.core.request_context import reset_request_user, set_request_user
 from tests.model_testkit import bind_all_embedding_clients
 
@@ -474,9 +478,10 @@ def service(world: World) -> Any:
     return world.repo._runtime.memory_service
 
 
-def self_exit(world: World, user: Any, notebook_id: str, ack: int | None = None) -> None:
-    """``DELETE /notebooks/{id}/membership`` below the route."""
-    service(world).leave_notebook(notebook_id, user.id, ack)
+def self_exit(world: World, user: Any, notebook_id: str, ack: int | None = None) -> int:
+    """``DELETE /notebooks/{id}/membership`` below the route; returns what
+    this exit deleted (the 200 body's ``deleted_memory_count``)."""
+    return service(world).leave_notebook(notebook_id, user.id, ack)
 
 
 def disclosure(world: World, user: Any, notebook_id: str) -> int:
@@ -750,6 +755,36 @@ def case_revoking_authorisation_keeps_memory(world: World) -> None:
     assert repo.get_memory(alice.memory_id, world.alice.id).id == alice.memory_id
 
 
+def case_contract_a_finished_exit_reports_what_it_deleted(world: World) -> None:
+    """Contract v2, 200: the number returned is what this exit deleted."""
+    plain_memory(world, world.shared, world.alice, "contract-200", "candidate")
+    assert disclosure(world, world.alice, world.shared) == 2
+    assert self_exit(world, world.alice, world.shared, 2) == 2
+    assert not world.repo.is_member(world.shared, world.alice.id)
+    assert member_memory_count(world, world.shared, world.alice) == 0
+
+
+def case_contract_zero_claim_refuses_a_positive_acknowledgement(world: World) -> None:
+    """Contract v2, spec P2-1: the member acknowledged 1, then gained a grant
+    (or lost the membership) while the panel was open. The exit would delete
+    0, so the acknowledgement is refused with 0 and nothing changes; only an
+    acknowledgement of 0 (or none) ends the membership, deleting nothing."""
+    grant_user(world, world.shared, world.alice)
+    assert expect_disclosure_required(
+        lambda: self_exit(world, world.alice, world.shared, 1)
+    ) == 0
+    assert world.repo.is_member(world.shared, world.alice.id)
+    assert_intact(world, "alice")
+    assert self_exit(world, world.alice, world.shared, 0) == 0
+    assert not world.repo.is_member(world.shared, world.alice.id)
+    assert_intact(world, "alice")
+    # No longer a member at all: a stale acknowledgement is refused too.
+    assert expect_disclosure_required(
+        lambda: self_exit(world, world.bob, world.alice_home, 3)
+    ) == 0
+    assert_intact(world, "bob")
+
+
 def _promotion_row(world: World, candidate_id: str) -> dict:
     [row] = world.sql.rows(
         "SELECT status,reason,reviewed_by,target_base_id FROM promotion_candidates "
@@ -910,6 +945,8 @@ CASES: dict[str, Callable[..., None]] = {
     "review_candidates_deleted": case_review_candidates_of_deleted_objects_are_deleted,
     "mixed_statuses": case_mixed_statuses_are_counted_exported_and_deleted_together,
     "export_scope": case_export_needs_read_access_and_is_lazy,
+    "contract_200_counts": case_contract_a_finished_exit_reports_what_it_deleted,
+    "contract_zero_claim_refuses_ack": case_contract_zero_claim_refuses_a_positive_acknowledgement,
 }
 
 
@@ -924,12 +961,47 @@ def case_failed_purge_keeps_the_membership(world: World, monkeypatch) -> None:
     monkeypatch.setattr(source_ingestion, "remove_memory_sources", failing_remove)
     try:
         self_exit(world, world.alice, world.shared, 1)
-    except MemberExitFailed:
-        pass
+    except MemberExitFailed as exc:
+        assert (exc.deleted_memory_count, exc.memory_count) == (0, 1)
     else:  # pragma: no cover - the assertion below explains the failure
         raise AssertionError("the exit swallowed a failed Memory purge")
     assert world.repo.is_member(world.shared, world.alice.id)
     assert_intact(world, "alice")
+
+
+def case_a_purge_failing_part_way_reports_both_numbers(
+    world: World, monkeypatch
+) -> None:
+    """Contract v2, 503: one page deleted, the next failed. The caller is told
+    1 deleted and 1 left, is still a member, and the retry — which starts
+    from the disclosure — finishes."""
+    from app.services import memory_service as memory_service_module
+
+    plain_memory(world, world.shared, world.alice, "contract-503", "confirmed")
+    store = service(world).store
+    original = store.bulk_delete_memories
+    pages: list[int] = []
+
+    def fail_second_page(user_id, memory_ids):
+        pages.append(len(memory_ids))
+        if len(pages) > 1:
+            raise RuntimeError("injected failure on the second page")
+        return original(user_id, memory_ids)
+
+    monkeypatch.setattr(memory_service_module, "_PURGE_PAGE", 1)
+    monkeypatch.setattr(store, "bulk_delete_memories", fail_second_page)
+    try:
+        self_exit(world, world.alice, world.shared, 2)
+    except MemberExitFailed as exc:
+        assert (exc.deleted_memory_count, exc.memory_count) == (1, 1)
+    else:  # pragma: no cover - the assertion below explains the failure
+        raise AssertionError("a failed purge was reported as finished")
+    assert world.repo.is_member(world.shared, world.alice.id)
+    monkeypatch.undo()
+    assert disclosure(world, world.alice, world.shared) == 1
+    assert self_exit(world, world.alice, world.shared, 1) == 1
+    assert not world.repo.is_member(world.shared, world.alice.id)
+    assert member_memory_count(world, world.shared, world.alice) == 0
 
 
 def case_memory_saved_during_exit_is_never_deleted_unacknowledged(
@@ -946,14 +1018,20 @@ def case_memory_saved_during_exit_is_never_deleted_unacknowledged(
         return deleted
 
     monkeypatch.setattr(store, "bulk_delete_memories", delete_then_save)
-    assert expect_disclosure_required(
-        lambda: self_exit(world, world.alice, world.shared, 1)
-    ) == 1
+    try:
+        self_exit(world, world.alice, world.shared, 1)
+    except MemberExitIncomplete as exc:
+        # The acknowledged one is gone and the caller is told so, next to
+        # the one saved meanwhile that stays.
+        assert (exc.deleted_memory_count, exc.memory_count) == (1, 1)
+    else:  # pragma: no cover - the assertion below explains the failure
+        raise AssertionError("an incomplete exit was reported as finished")
     assert world.repo.is_member(world.shared, world.alice.id)
     assert_purged(world, "alice")
     assert_intact(world, "late")
     monkeypatch.undo()
-    self_exit(world, world.alice, world.shared, 1)
+    assert disclosure(world, world.alice, world.shared) == 1
+    assert self_exit(world, world.alice, world.shared, 1) == 1
     assert not world.repo.is_member(world.shared, world.alice.id)
     assert_purged(world, "late")
 
@@ -1076,6 +1154,7 @@ MONKEYPATCH_CASES: dict[str, Callable[..., None]] = {
     "late_source_removed": case_a_source_published_just_before_the_row_delete_is_removed_after,
     "gone_source_is_removed": case_a_source_removed_concurrently_counts_as_removed,
     "failed_purge_keeps_membership": case_failed_purge_keeps_the_membership,
+    "contract_503_counts": case_a_purge_failing_part_way_reports_both_numbers,
     "save_during_exit_kept": case_memory_saved_during_exit_is_never_deleted_unacknowledged,
     "rejoin_keeps_new_memory": case_rejoin_after_the_membership_ends_keeps_new_memory,
     "audit_trail": case_purges_leave_a_content_free_audit_trail,
