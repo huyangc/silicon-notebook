@@ -1226,6 +1226,52 @@ def _new_offline_repo(
     )
 
 
+@contextlib.contextmanager
+def _offline_repository(
+    database: Path,
+    storage: Path,
+    *,
+    configured: bool = False,
+    missing_ask_answer: bool = False,
+) -> Iterator[object]:
+    """``_new_offline_repo`` whose background work is finished before it leaves.
+
+    Every repository built here lives in a ``TemporaryDirectory``, and a
+    delivered Ask does not end on the caller's thread: it hands an
+    ``ask-completed-*`` job to the process-wide light maintenance pool, which
+    opens the repository's database and upserts ``agent_profile_jobs`` (and may
+    chain further light jobs). Nothing orders that job before the directory's
+    cleanup. When the cleanup wins, ``rmtree`` unlinks ``fixture.db``, the job
+    then reconnects and SQLite recreates an EMPTY database file in the half
+    deleted directory (the job logs ``no such table: agent_profile_jobs``), and
+    the final ``rmdir`` fails with ``Directory not empty``.
+
+    So on exit this waits (bounded, and loudly failing on timeout) for every
+    maintenance pool to go idle, then closes the repository, which also joins
+    its per-instance model-config watcher and model schedulers. That is the
+    same pool drain the backend test suite runs after every test; it has to
+    happen here too because the directory is deleted inside the test body,
+    before any fixture teardown gets a chance. The background jobs are left
+    running (not mocked away) on purpose: the goldens freeze what the CURRENT
+    runtime does, and the jobs never touch the captured response.
+    """
+    from app.services import background_jobs
+
+    repo = _new_offline_repo(
+        database,
+        storage,
+        configured=configured,
+        missing_ask_answer=missing_ask_answer,
+    )
+    try:
+        yield repo
+    finally:
+        try:
+            background_jobs._drain_maintenance_executors_for_tests(timeout=30.0)
+        finally:
+            repo.close()
+
+
 def _evidence() -> dict[str, object]:
     return {
         "source_id": "src-fixture",
@@ -2121,8 +2167,9 @@ def generate_v9_fixture(output_dir: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="repository-v9-fixture-") as temporary:
         staging = Path(temporary)
         staging_storage = staging / "storage"
-        with _deterministic_runtime():
-            repo = _new_offline_repo(staging / "source.db", staging_storage)
+        with _deterministic_runtime(), _offline_repository(
+            staging / "source.db", staging_storage
+        ) as repo:
             notebook_id = _seed_v9_rows(repo, final_storage)
             _create_index_artifacts(repo, notebook_id)
             snapshot = normalized_repository_snapshot(repo, notebook_id)
@@ -2229,18 +2276,18 @@ def collect_ask_goldens() -> dict[str, object]:
                 # graph counts — the goldens would then freeze one case's
                 # numbers into another's.
                 knowledge_counts_cache.invalidate()
-                repo = _new_offline_repo(
+                with _offline_repository(
                     case_root / "fixture.db",
                     case_root / "storage",
                     configured=True,
                     missing_ask_answer=case_name == "unconfigured_model",
-                )
-                notebook_id = _seed_ask_repository(
-                    repo, include_kg=include_kg, include_source=include_source
-                )
-                cases[case_name] = _capture_ask_case(
-                    repo, notebook_id, mode, question
-                )
+                ) as repo:
+                    notebook_id = _seed_ask_repository(
+                        repo, include_kg=include_kg, include_source=include_source
+                    )
+                    cases[case_name] = _capture_ask_case(
+                        repo, notebook_id, mode, question
+                    )
 
     return {"source_commit": SOURCE_COMMIT, "cases": cases}
 
@@ -2322,9 +2369,16 @@ def _serialization_contract() -> dict[str, object]:
     from app.models.schemas import AskRequest
     from app.services.repository import UploadedSourceFile
 
-    with tempfile.TemporaryDirectory(prefix="repository-api-contract-") as temporary:
+    with (
+        tempfile.TemporaryDirectory(prefix="repository-api-contract-") as temporary,
+        contextlib.ExitStack() as repository_scope,
+    ):
         root = Path(temporary)
-        repo = _new_offline_repo(root / "api.db", root / "storage")
+        # Entered inside the directory's scope so it exits first: the route Ask
+        # below hands the same ``ask-completed-*`` job to the background pool.
+        repo = repository_scope.enter_context(
+            _offline_repository(root / "api.db", root / "storage")
+        )
         repo.settings.viz_sync_build_max_objects = 1
 
         def fixture_repository():
@@ -2829,8 +2883,7 @@ def refresh_v9_snapshot(output_dir: Path) -> None:
         storage = staging / "storage"
         shutil.copyfile(final_database, database)
         shutil.copytree(final_storage, storage)
-        with _deterministic_runtime():
-            repo = _new_offline_repo(database, storage)
+        with _deterministic_runtime(), _offline_repository(database, storage) as repo:
             snapshot = normalized_repository_snapshot(repo, "nb-fixture")
     snapshot_path = output_dir / "expected_snapshot.json"
     _write_json(snapshot_path, snapshot)
