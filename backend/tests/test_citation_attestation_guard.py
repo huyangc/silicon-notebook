@@ -150,6 +150,9 @@ REGISTRY = {
         "pointer-registered", _KG_POINTER_PROOF, "KG object anchor locator (occurrences[0])", 1),
     (EC, "_attest_kg_anchor_evidence", 'store:["element_id"]'): (
         "pointer-registered", _KG_POINTER_PROOF, "J2 clear of a dead KG anchor locator", 1),
+    (EC, "_snapshot_foreign_entry", 'store:["element_id"]'): (
+        "no-element", (),
+        "B-11: a KG anchor whose source belongs to another library keeps no locator", 1),
     (EC, "EvidenceContextService.collection_item_citations", "Citation"): (
         "read-registered", _COLLECTION_PROOF,
         "enumerated element/KG rows (hydrated full text); document rows pass element_id='' (J3)", 2),
@@ -660,6 +663,17 @@ def no_element_problems(site) -> list:
                         literal_empty = True
                     else:
                         return [f"{relative}::{qualname} writes a non-literal element_id"]
+        if isinstance(child, ast.Assign) and callee.startswith("store"):
+            for target in child.targets:
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.slice, ast.Constant)
+                    and target.slice.value == "element_id"
+                ):
+                    if isinstance(child.value, ast.Constant) and child.value.value == "":
+                        literal_empty = True
+                    else:
+                        return [f"{relative}::{qualname} stores a non-literal element_id"]
     return [] if literal_empty else [f"{relative}::{qualname} never writes element_id=''"]
 
 
