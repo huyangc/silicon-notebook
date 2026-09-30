@@ -12,7 +12,9 @@ What this scans (every ``.py`` under ``app/repositories/postgres`` and
 ``app/repositories/sqlite`` except the two ``id_binding`` modules), by reading
 the AST -- string constants for SQL, calls for placeholder expansion:
 
-* PostgreSQL: ``ANY(%s``, ``ALL(%s``, ``unnest(%s`` inside a SQL string, and
+* PostgreSQL: ``ANY(%s``, ``ALL(%s``, ``unnest(%s`` inside a SQL string, a
+  list passed as one scalar and unpacked by the server
+  (``json[b]_array_elements[_text](%s``, ``string_to_array(%s``), and
   ``%s`` placeholder expansion (``",".join("%s" for ...)``, ``["%s"] * n``,
   the ``placeholders(values)`` helper);
 * SQLite: ``?`` placeholder expansion (``",".join("?" for ...)``,
@@ -39,6 +41,11 @@ REPOSITORIES = Path(__file__).resolve().parents[1] / "app" / "repositories"
 BINDING_MODULES = {"postgres/id_binding.py", "sqlite/id_binding.py"}
 
 _PG_ARRAY = re.compile(r"\b(ANY|ALL)\s*\(\s*%s|\b(unnest)\s*\(\s*%s", re.IGNORECASE)
+# A list smuggled in as one scalar and unpacked by the server: a JSON array or
+# a joined string.  ``bind_ids`` owns the joined-string form.
+_PG_UNPACK = re.compile(
+    r"\b(jsonb?_array_elements(?:_text)?|string_to_array)\s*\(\s*%s", re.IGNORECASE
+)
 _SQLITE_JSON = re.compile(r"json_each\s*\(\s*\?\s*\)", re.IGNORECASE)
 _MARK = {"postgres": "%s", "sqlite": "?"}
 
@@ -54,6 +61,10 @@ ANY = "ANY(%s)"
 PG_EXP = "%s-expansion"
 SQ_EXP = "?-expansion"
 JSON = "json_each(?)"
+JSONB = "jsonb_array_elements_text(%s)"
+PG_KINDS = {ANY, "ALL(%s)", "unnest(%s)", PG_EXP, JSONB,
+            "jsonb_array_elements(%s)", "json_array_elements(%s)",
+            "json_array_elements_text(%s)", "string_to_array(%s)"}
 
 
 def s(kind: str, klass: str, why: str) -> tuple[str, str, str]:
@@ -344,6 +355,8 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(PG_EXP, BATCHED, "base notebook ids, 400 per statement"),),
     ("postgres/source_store.py", "SourceStore.visible_source_ids_by_notebook"): (
         s(ANY, BOUNDED, "a global run's participant notebooks (<= 8)"),),
+    ("postgres/source_store.py", "SourceStore.visible_source_scope_snapshot"): (
+        s(JSONB, DRIVEN, "the requested source ids with their ordinals, primary-key probes"),),
     ("postgres/source_store.py", "SourceStore.element_type_count_rows"): (
         s(ANY, BATCHED, "source ids, COUNT_IN_CHUNK (1024) per statement"),
         s(ANY, NOT_IDS, "the requested element types"),
@@ -737,6 +750,8 @@ class _Scanner(ast.NodeVisitor):
                 word = match.group(1) or match.group(2)
                 kind = "unnest(%s)" if word.lower() == "unnest" else f"{word.upper()}(%s)"
                 self._add(kind, node)
+            for match in _PG_UNPACK.finditer(node.value):
+                self._add(f"{match.group(1).lower()}(%s)", node)
         else:
             for _match in _SQLITE_JSON.finditer(node.value):
                 self._add(JSON, node)
@@ -824,7 +839,7 @@ def test_every_exemption_names_a_class_and_a_reason():
     for key, entries in EXEMPT.items():
         assert entries, key
         for kind, klass, why in entries:
-            assert kind in {ANY, "ALL(%s)", "unnest(%s)", PG_EXP, SQ_EXP, JSON}, key
+            assert kind in PG_KINDS | {SQ_EXP, JSON}, key
             assert klass in CLASSES, key
             assert why.strip() and len(why) <= 100, key
             backend = key[0].split("/", 1)[0]
@@ -871,6 +886,10 @@ def test_postgres_statements_that_bind_through_the_module_run_unprepared():
          ["ALL(%s)"]),
         ("postgres", 'def f(db, ids):\n    db.execute("SELECT * FROM unnest(%s::text[])", (ids,))\n',
          ["unnest(%s)"]),
+        ("postgres", 'def f(db, p):\n    db.execute("SELECT value FROM jsonb_array_elements_text(%s::jsonb)", (p,))\n',
+         [JSONB]),
+        ("postgres", "def f(db, p):\n    db.execute(\"SELECT 1 WHERE x=ANY(string_to_array(%s,E'\\\\x1f'))\", (p,))\n",
+         ["string_to_array(%s)"]),
         ("postgres", 'def f(db, ids):\n    ph = ",".join("%s" for _ in ids)\n', [PG_EXP]),
         ("postgres", 'def f(db, ids):\n    ph = ",".join(["%s"] * len(ids))\n', [PG_EXP]),
         ("postgres", 'def f(db, ids):\n    ph = placeholders(ids)\n', [PG_EXP]),
