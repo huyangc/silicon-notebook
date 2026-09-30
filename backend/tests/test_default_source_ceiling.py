@@ -606,23 +606,26 @@ def test_closed_memory_channel_keeps_memory_out_of_the_hidden_half():
         assert "src-memory-bob" not in scoped_allowed_source_ids(NB)
         assert source_scope_restricted() is False
         assert current_source_scope_payload() is None
-        # The drift probe re-reads the RAW owner-scoped hidden half; the
-        # withheld Memory must not read as drift ...
+        # Fail-closed until E2-2: with Memory withheld the probe reports
+        # drift even when the live universe matches, so the whole-graph, PPR,
+        # relation and exact-lookup channels are off for this run.
+        assert source_scope_visible_universe_matches(
+            NB, ["src-a", "src-b"], ["src-knowhow", "src-memory-bob"],
+        ) is False
+    # Open channel, same store: nothing withheld, and the matching live
+    # universe reads as no drift.
+    with default_ceiling_context(NB, "bob", store.readers()):
+        assert current_source_scope().withheld_hidden_source_ids == frozenset()
         assert source_scope_visible_universe_matches(
             NB, ["src-a", "src-b"], ["src-knowhow", "src-memory-bob"],
         ) is True
-        # ... while a Memory confirmed mid-run still does.
-        assert source_scope_visible_universe_matches(
-            NB, ["src-a", "src-b"],
-            ["src-knowhow", "src-memory-bob", "src-memory-bob-2"],
-        ) is False
 
 
 def test_closed_channel_strips_memory_from_a_submitted_scope_too():
     """The constructor does not rely on "nobody submits a scope while closing
     the channel": a submitted all-selected freeze carrying the asker's own
     Memory in its hidden half (and, defensively, a Memory id in its visible
-    half) loses both, and the probe still reports no drift."""
+    half) loses both, and the probe reports drift (fail-closed until E2-2)."""
     store = _shared_store()
     submitted = {
         "mode": "include",
@@ -642,7 +645,7 @@ def test_closed_channel_strips_memory_from_a_submitted_scope_too():
         assert source_allowed(NB, "src-memory-bob") is False
         assert source_scope_visible_universe_matches(
             NB, ["src-a", "src-b"], ["src-knowhow", "src-memory-bob"],
-        ) is True
+        ) is False
         assert current_source_scope_payload() == {
             "mode": "include", "source_ids": ["src-a", "src-b"], "narrowed": False,
         }
@@ -1080,9 +1083,10 @@ def test_refresh_inside_a_closed_channel_keeps_the_withheld_memory():
             assert scope.hidden_source_ids == frozenset({"src-knowhow"})
             assert scope.withheld_hidden_source_ids == frozenset({"src-memory-bob"})
             assert source_allowed(NB, "src-memory-bob") is False
+            # Inherited, so the refreshed scope stays fail-closed too.
             assert source_scope_visible_universe_matches(
                 NB, live_visible, live_hidden,
-            ) is True, "withheld Memory is not drift"
+            ) is False
 
 
 def test_refresh_without_a_library_dimension_admits_a_library_mounted_since_the_freeze():
@@ -1926,10 +1930,12 @@ def assert_default_ceiling_over_real_stores(repo, ids) -> None:
         scope = current_source_scope()
         assert scope.hidden_source_ids == frozenset({"src-knowhow"})
         assert scope.withheld_hidden_source_ids == frozenset({"src-memory-bob"})
+        # Fail-closed until E2-2: withheld Memory switches the
+        # non-partitioned channels off.
         assert source_scope_visible_universe_matches(
             nb, sources.all_visible_source_ids(nb),
             sources.hidden_source_ids(nb, bob),
-        ) is True
+        ) is False
 
 
 def test_default_ceiling_over_real_sqlite_stores(tmp_path, monkeypatch):
