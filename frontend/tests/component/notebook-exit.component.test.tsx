@@ -1324,6 +1324,53 @@ test("旧流程的转移还在途时重开退出、打开选择器又取消:新�
   expect(transfers).toBe(1);
 });
 
+test("旧流程的转移落地不会清掉新流程自己在途的转移:新流程关掉选择器后仍显示「正在转移…」,自己的结果照常落在面板", async () => {
+  const user = userEvent.setup();
+  const gates = [deferred<Response>(), deferred<Response>()];
+  let transfers = 0;
+  installServer([
+    disclosure(2), memoriesPage(2), targetNotebooks,
+    (call) => {
+      if (call.path !== "/api/memories/transfer") return undefined;
+      transfers += 1;
+      return gates[transfers - 1].promise;
+    },
+  ]);
+  const { onToast } = mount("bar");
+  const copied = () => json({
+    results: ["m0", "m1"].map((id) => ({ source_id: id, new_id: `n-${id}`, ok: true, error: null, error_code: null, status: "copied" })),
+  });
+
+  // 旧流程发起转移后连同面板一起取消
+  await pressLeave(user);
+  const oldPicker = await openPicker(user, "复制/移动 2 条记忆");
+  await user.click(within(oldPicker).getByRole("button", { name: "确认" }));
+  await within(oldPicker).findByRole("button", { name: "处理中…" });
+  await user.click(within(oldPicker).getByRole("button", { name: "取消" }));
+  await user.click(within(await panel()).getByRole("button", { name: "取消" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "退出共享" })).not.toBeInTheDocument());
+
+  // 新流程也发起转移;旧转移先落地
+  await pressLeave(user);
+  const newPicker = await openPicker(user, "复制/移动 2 条记忆");
+  await user.click(within(newPicker).getByRole("button", { name: "确认" }));
+  await within(newPicker).findByRole("button", { name: "处理中…" });
+  gates[0].resolve(copied());
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("已复制 2 条记忆到「我的库」"));
+
+  // 新流程关掉自己的选择器:它的转移还在途
+  await user.click(within(newPicker).getByRole("button", { name: "取消" }));
+  const dialog = await panel();
+  expect(within(dialog).getByRole("button", { name: "正在转移…" })).toBeDisabled();
+  expect(within(dialog).getByRole("button", { name: "确认退出并删除" })).toBeDisabled();
+  expect(within(dialog).getByRole("button", { name: "取消" })).toBeEnabled();
+
+  gates[1].resolve(copied());
+  await within(dialog).findByText("已复制 2 条记忆到「我的库」");
+  expect(within(dialog).getByRole("button", { name: "转移到其他笔记本" })).toBeEnabled();
+  expect(transfers).toBe(2);
+});
+
 test("另一本笔记本的导出还在下载时打开这本的退出面板:这本的导出键不显示「正在导出…」、可以点", async () => {
   const OTHER = { ...NOTEBOOK, id: "nb9", name: "另一本" } as NotebookSummary;
   vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
