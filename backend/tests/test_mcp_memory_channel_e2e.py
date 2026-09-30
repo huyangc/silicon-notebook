@@ -146,6 +146,22 @@ def seed_shared_notebook(env: dict, placeholder: str) -> dict:
                 (object_id, notebook_id, json.dumps({"name": name, "definition": name}),
                  evidence, source_id, NOW, NOW),
             )
+            # The KG extraction pipeline writes the object's reverse source
+            # index and, on SQLite, its lexical shadow (PostgreSQL searches the
+            # payload itself).  A closed Memory channel runs on the
+            # source-restricted lexical lane until E2-2, which reads exactly
+            # these, so without them the visible object is unreachable there.
+            db.execute(
+                "INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id) "
+                f"VALUES ({ph},{ph},{ph})",
+                (object_id, source_id, notebook_id),
+            )
+            if ph == "?":
+                db.execute(
+                    "INSERT INTO kg_objects_fts(object_id,notebook_id,name) "
+                    "VALUES (?,?,?)",
+                    (object_id, notebook_id, name),
+                )
 
     # Alice's Memory: created and confirmed through the real service (its
     # recall index is the service's), with the KG ingest job disabled so the
