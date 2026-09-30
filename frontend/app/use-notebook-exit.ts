@@ -105,15 +105,18 @@ export function useNotebookExit(handlers: {
 }) {
   const [flow, setFlow] = useState<ExitFlow | null>(null);
   const [slow, setSlow] = useState(false);
-  const [exporting, setExporting] = useState(false);
   const [transferExtractKg, setTransferExtractKg] = useState(true);
   const [, bump] = useReducer((n: number) => n + 1, 0);
   const exportResult = useCopyResult();
 
   const flowRef = useRef<ExitFlow | null>(null);
   const leavingRef = useRef<Set<string>>(new Set());
-  const exportingRef = useRef(false);
-  const transferBusyRef = useRef(false);
+  // 正在导出的笔记本(按笔记本记,和导出结果 `export:<id>` 同一口径):另一本笔记本的退出
+  // 面板不会因为这本的下载还没完而显示「正在导出…」、按钮被禁用。
+  const exportingRef = useRef<Set<string>>(new Set());
+  // 在途转移所属流程的 epoch(没有则为 null)。按流程认领:取消后重开的新流程(epoch 已变)
+  // 不会被旧流程的转移置成「正在转移…」,旧转移落定也不会清掉新流程自己的在途标记。
+  const transferEpochRef = useRef<number | null>(null);
   const epochRef = useRef(0);
   const controllerRef = useRef<AbortController | null>(null);
   const afterLeaveRef = useRef<Map<string, () => Promise<void>>>(new Map());
@@ -341,19 +344,20 @@ export function useNotebookExit(handlers: {
 
   const exportMemories = useCallback(async () => {
     const current = flowRef.current;
-    if (!current || exportingRef.current || current.leaving) return;
-    const key = `export:${current.notebookId}`;
-    exportingRef.current = true;
-    setExporting(true);
+    if (!current || exportingRef.current.has(current.notebookId) || current.leaving) return;
+    const id = current.notebookId;
+    const key = `export:${id}`;
+    exportingRef.current.add(id);
+    bump();
     try {
-      const { blob, filename } = await exportOwnMemories(current.notebookId);
+      const { blob, filename } = await exportOwnMemories(id);
       saveBlobAsFile(blob, filename);
       exportResult.report(key, true);
     } catch {
       exportResult.report(key, false);
     } finally {
-      exportingRef.current = false;
-      setExporting(false);
+      exportingRef.current.delete(id);
+      bump();
     }
   }, [exportResult]);
 
@@ -380,10 +384,14 @@ export function useNotebookExit(handlers: {
     update({ transfer: "picking", transferIds: ids });
   }, [update]);
 
-  /** 关掉选择器。转移请求还在途时保留「转移中」状态:结果落地后照常汇报并重读条数。 */
+  /** 关掉选择器。**这个流程**的转移请求还在途时保留「转移中」状态:结果落地后照常汇报并
+   *  重读条数。别的(已取消的)流程的转移不算——它落地时只发提示,不会来解开这个面板。 */
   const closeTransfer = useCallback(() => {
-    if (transferBusyRef.current) update({ transfer: "working" });
-    else update({ transfer: "idle", transferIds: [] });
+    if (transferEpochRef.current !== null && transferEpochRef.current === epochRef.current) {
+      update({ transfer: "working" });
+    } else {
+      update({ transfer: "idle", transferIds: [] });
+    }
   }, [update]);
 
   /** 交给既有的目标笔记本选择器(DestinationPicker)。resolve = 已完成,选择器由此卸载。 */
@@ -396,7 +404,7 @@ export function useNotebookExit(handlers: {
     if (!current) return;
     const epoch = epochRef.current;
     const id = current.notebookId;
-    transferBusyRef.current = true;
+    transferEpochRef.current = epoch;
     try {
       // 服务端一次最多 200 个 id:分批提交,某一批失败不影响后面的批次。
       const batches = await transferMemoriesInBatches(
@@ -430,7 +438,7 @@ export function useNotebookExit(handlers: {
       update({ transfer: "idle", transferIds: [], notice, failure: "", recounting: true });
       void runCheck(id, epoch, "recount");
     } finally {
-      transferBusyRef.current = false;
+      if (transferEpochRef.current === epoch) transferEpochRef.current = null;
     }
   }, [runCheck, transferExtractKg, update]);
 
@@ -442,7 +450,7 @@ export function useNotebookExit(handlers: {
       || (flow?.notebookId === notebookId && flow.phase === "checking"),
     /** 在途请求已经拖过了 REVEAL_AFTER_MS:此时才把面板露出来。 */
     slow,
-    exporting,
+    exporting: flow !== null && exportingRef.current.has(flow.notebookId),
     exportResult: (flow ? exportResult.resultFor(`export:${flow.notebookId}`) : "idle") as CopyResult,
     transferExtractKg,
     setTransferExtractKg,
