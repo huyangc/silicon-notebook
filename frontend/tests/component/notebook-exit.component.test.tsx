@@ -781,6 +781,8 @@ test("面板已被取消之后才到的结果照样告知:409 未完成、503、
       "退出没有完成：已删除 1 条记忆，还剩 2 条，你仍是成员。可以重试。", []],
     ["网络中断,核对出已退出", () => Promise.reject(new TypeError("Failed to fetch")),
       "已退出共享", [notebooksList(false)]],
+    ["网络中断,核对出仍是成员", () => Promise.reject(new TypeError("Failed to fetch")),
+      "退出的结果没有收到，重新核对后：你仍是成员，还有 3 条记忆，都还在，没有被删除。可以重试。", [notebooksList(true)]],
     ["网络中断,核对不出", () => Promise.reject(new TypeError("Failed to fetch")),
       "暂时无法确认是否已经退出，请刷新页面查看笔记本列表。",
       [(call) => (call.path === "/api/notebooks" ? json({}, 500) : undefined)]],
