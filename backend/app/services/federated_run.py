@@ -265,9 +265,11 @@ class FederatedRunPlan:
     # call it, which is what keeps a plan assembled before this field existed
     # (and every test double shaped like one) working unchanged.
     on_evidence_groups: Any = None
-    # ``Callable[[str], bool] | None`` -- "has THIS run already registered this
-    # element?" (a real snapshot or a declared ``None``), read by
-    # ``evidence_attestation.attest_pointers``. J2 drops a card only for an id
+    # ``Callable[[str], object] | None`` -- "has THIS run already registered
+    # this element?" (a real snapshot or a declared ``None``), read by
+    # ``evidence_attestation.attest_pointers``; truthy iff registered, and the
+    # value ``"unreadable"`` marks a declared ``None`` (``_RunState.
+    # is_registered``) so telemetry need not count it as attested. J2 drops a card only for an id
     # that was dangling BEFORE the question; an element some producer already
     # registered in this run and that then vanished must keep its card so the
     # terminal check can say ``source_gone``. ``None`` means nobody answers,

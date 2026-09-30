@@ -143,6 +143,7 @@ def test_table_analysis_drops_a_row_locator_dangling_before_the_question(world):
     assert run.events == [{
         "kind": "producer_evidence_attested", "producer": "table_analysis",
         "method": "pointers", "elements": 1, "read": 1, "attested": 0, "live": 0, "dead": 1, "unknown": 0,
+        "already_unknown": 0,
     }]
 
 
@@ -184,7 +185,7 @@ def test_producer_events_are_content_free_counts(world, producer):
         assert event["producer"] == producer
         assert event["method"] == ("pointers" if producer == "table_analysis" else "read")
         assert set(event) <= {"kind", "producer", "method", "elements", "read",
-                              "attested", "live", "dead", "unknown"}
+                              "attested", "live", "dead", "unknown", "already_unknown"}
         rendered = repr(event)
         assert not any(token in rendered for token in (CITED, SIBLING, SOURCE))
         assert not any(text[:4] in rendered for text in TEXTS.values())
