@@ -98,6 +98,8 @@ run 下它在笔记本、失败异常类名与耗时毫秒之外多带一个 `re
 `chunk_federation_evidence_unavailable` 表示某次调用的证据指纹读不出来，
 受影响的引用因此按名字被标为「无法核对」。终态引用复核从不作废答案：它逐条判定每一条引用与锚点，
 给未通过的打标记（线上只有 `changed` / `source_gone` / `unverifiable` 三种），答案照常整份交付。
+按 id 读到的指针快照也算一次 run 的首个真实快照：同一次 run 里，知识图谱指针在元素被修改之前读过、列举又在修改之后
+读到新原文时，这条引用会被报为 `changed`，尽管答案依据的是后读到的原文；这是有意保留的保守方向——宁可报出变化，也不藏起变化。
 `global_ask_citations_partial` 报告这样一份答案，只含计数（`checked`、`failed`、三类计数，以及内部
 原因码 `changed` / `source_gone` / `unattested` / `unreadable` / `unattributed` / `out_of_ceiling`
 的 `reasons` 计数）；`unattested` 表示没有任何生产者为该元素登记过检索时刻快照。只有出现

@@ -50,7 +50,12 @@ travel as ``federated_run.PointerSnapshot`` and never replace ANY existing
 entry, not even a declared ``None``: when the federated channel found a
 passage's text changed under the run (a re-ingest reuses element ids), a blind
 by-id read here would see the NEW text and launder that declaration into a
-pass. Only a reading producer's snapshot may replace a ``None``.
+pass. Only a reading producer's snapshot may replace a ``None``. A pointer
+snapshot IS a real snapshot for the first-wins rule: an element whose KG
+pointer was read before an edit and whose text an enumeration then read after
+it, in the same run, is reported ``changed`` although the model saw the later
+text -- the conservative direction (report a change, never hide one), kept on
+purpose.
 
 Content-free telemetry: ``producer_evidence_attested`` and
 ``producer_evidence_unavailable`` carry the producer code and counts, never an

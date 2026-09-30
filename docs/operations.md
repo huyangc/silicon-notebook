@@ -132,6 +132,9 @@ question or path text). `chunk_federation_evidence_unavailable` reports that
 a call's evidence fingerprints could not be read, which makes the affected citations reportable by name as
 unverifiable. The terminal citation recheck never withdraws an answer: it judges every citation and anchor,
 marks the failed ones (`changed`, `source_gone`, `unverifiable` on the wire) and delivers the answer whole.
+A by-id pointer snapshot counts as a run's first real snapshot, so an element whose knowledge-graph pointer was
+read before an edit and whose text an enumeration read after it, within the same run, is reported `changed`
+although the answer was written from the later text; this errs toward reporting a change and is kept on purpose.
 `global_ask_citations_partial` reports such an answer with counts only (`checked`, `failed`, the three
 per-kind counts and a `reasons` map over the internal codes `changed`, `source_gone`, `unattested`,
 `unreadable`, `unattributed`, `out_of_ceiling`); `unattested` means no producer registered a retrieval-time
