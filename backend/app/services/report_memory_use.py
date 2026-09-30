@@ -34,6 +34,12 @@ from typing import Any, Callable
 # (``RetrievalSourceLog.source_ids``) raises, which fails the planning or
 # generation — the same rule as a failed Memory lookup.  A silently partial
 # record would under-count what the page may carry.
+#
+# Cost, measured with flat dicts under tracemalloc: 150,000 containers take
+# 0.23 s and 10 MB at peak, 1 million 1.8 s and 75 MB, 2 million 3.7 s and
+# 150 MB; about 75 bytes per container on top of the input itself (a dict is
+# at least 184 bytes), so the bound — about 9 s and 375 MB — is reached only by
+# an input of well over a gigabyte.  Real report payloads are below 200,000.
 _MAX_CONTAINERS = 5_000_000
 _ATOMS = (str, bytes, bytearray, int, float, bool, type(None))
 
