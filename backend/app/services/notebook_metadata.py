@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Callable, Iterable
-from contextvars import copy_context
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, field
 
 from app.services.prompts import NOTEBOOK_META_SCHEMA_HINT, notebook_meta_prompt
@@ -16,6 +17,23 @@ from app.services.prompts import NOTEBOOK_META_SCHEMA_HINT, notebook_meta_prompt
 
 NOTEBOOK_AUTO_NAME_MAX_CHARS = 120
 NOTEBOOK_AUTO_DESCRIPTION_MAX_CHARS = 1000
+
+
+_refresh_suppressed = ContextVar("notebook_metadata_refresh_suppressed", default=False)
+
+
+def notebook_metadata_refresh_suppressed() -> bool:
+    return _refresh_suppressed.get()
+
+
+@contextmanager
+def suppress_notebook_metadata_refresh() -> Iterator[None]:
+    """Skip automatic notebook metadata only within an offline worker's scope."""
+    token = _refresh_suppressed.set(True)
+    try:
+        yield
+    finally:
+        _refresh_suppressed.reset(token)
 
 
 @dataclass

@@ -302,6 +302,10 @@ Retrieval 的 point-specific proposal source 与通用 admission reader 是两�
 - PostgreSQL 离线 mutation phase 通过共享 maintenance opener，在独立非池化 session
   持有数据库级 advisory lock；`--confirm-service-stopped` 是操作者断言，不会停服务。
   `vectors-to-blob` 是 SQLite 物理格式修复，在线 scale 构建使用自己的组合根与每库锁。
+- 离线 batch worker 在可排空任务边界设置 `notebook_metadata` 模块持有的上下文开关，
+  `SourceIngestionService` 在读取笔记本元信息、预留代次或调用模型之前检查并跳过刷新。
+  开关在 worker 的 `finally` 中恢复，不改运行时全局状态或持久字段归属；共享线程池的
+  后续在线作业不继承禁用状态。批量来源处理及失败收尾均跳过名称／描述刷新，结束不补刷。
 
 完整执行步骤、兼容转换、校验/回滚条件见[运维参考](./docs/operations_zh.md#sqlite--postgresql-正向影子同步)
 与[停服迁移 runbook](./docs/postgres-migration-runbook.md)；迁移编写与验证规则见

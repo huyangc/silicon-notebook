@@ -14,7 +14,13 @@ manual, including clearing a description or setting a placeholder name; automati
 refresh never overwrites it. The settings form omits untouched fields, and the
 workspace title follows automatic updates without replacing an in-progress edit.
 
-Source type corrections refresh automatic fields as well. Source parsing/reparsing refreshes automatic fields after the source summary is
+Offline `batch ingest`, `batch all`, and `batch reparse` skip automatic notebook
+name/description refresh by default, including failed sources, with no final
+refresh. Existing field values and automatic/manual ownership remain unchanged;
+later online source operations can refresh automatic fields as usual. Source
+summaries, paper metadata, embedding, and KG processing retain their behavior.
+
+Source type corrections refresh automatic fields as well. Online source parsing/reparsing refreshes automatic fields after the source summary is
 stored; a failed parse also refreshes, using that source's title without its error
 text. Failure handling clears any previously stored summary without changing
 the current processing state, refreshes metadata, then publishes terminal failure
