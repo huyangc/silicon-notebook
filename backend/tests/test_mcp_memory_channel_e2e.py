@@ -16,7 +16,11 @@ What must hold (each assertion names the mutation it catches in the report):
 * Bob, full scopes: none of Alice's Memory-derived content, ever -- the ask
   runs under the default ceiling, whose hidden half is the asker's own.
 * ``search_notebook_context`` without ``memory:read``: no Memory item and no
-  Memory store query; with it, the Memory item is returned.
+  Memory store query; with it, the Memory item is returned.  Deliberately
+  NOT asserted: that search's knowledge-graph leg omits Memory-derived
+  objects.  It does not today -- it returns ``MEMKGSECRET`` to every token,
+  Alice's and Bob's, with or without ``memory:read`` -- and nothing on this
+  branch changes that leg.
 
 ``build_mcp_app`` / ``seed_shared_notebook`` / ``assert_*`` are backend
 neutral; ``tests/postgres/test_mcp_memory_channel_pg.py`` runs the same
