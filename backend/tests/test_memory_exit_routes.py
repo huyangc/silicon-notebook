@@ -347,3 +347,27 @@ def test_the_exit_runs_to_completion_whether_or_not_the_client_listens():
     from app.api.notebook_routes import leave_notebook_route
 
     assert not inspect.iscoroutinefunction(leave_notebook_route)
+
+
+def test_a_finished_exit_that_deleted_nothing_still_answers_200_with_zero(
+    tmp_path, monkeypatch
+):
+    """BM6 (fix2 re-review): A = C > 0, but every claimed Memory was removed
+    by another path before the purge reached it. The exit finished and this
+    request deleted 0: 200 ``{"deleted_memory_count": 0}``, not 204."""
+    w = _world(tmp_path, monkeypatch)
+    service = w["repo"]._runtime.memory_service
+    original = service._purge_page
+
+    def removed_elsewhere_first(user_id, refs):
+        service.store.bulk_delete_memories(user_id, [memory_id for memory_id, _ in refs])
+        return original(user_id, refs)
+
+    monkeypatch.setattr(service, "_purge_page", removed_elsewhere_first)
+    response = w["client"].delete(
+        f"/api/notebooks/{w['notebook']}/membership?acknowledged_memory_count=2",
+        headers=w["reader"],
+    )
+    assert response.status_code == 200
+    assert response.json() == {"deleted_memory_count": 0}
+    assert not w["repo"].is_member(w["notebook"], w["reader_id"])

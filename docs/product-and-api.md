@@ -1868,10 +1868,17 @@ canonical id, name and description can carry the Memory's text on the shared mem
 surviving members are unclustered until the rebuild re-clusters them, and the notebook's graph is
 marked for rebuild. The merge candidates naming those clusters and the conflict candidates
 referencing the Memory's objects or relations are deleted in any status, resolved ones included,
-because their stored rationale can quote the Memory; a curator decision between shared objects
-only is never touched. If a curator manually merged a Memory-derived object into another object,
-the surviving object only loses the evidence that Memory contributed; it is never deleted with
-the Memory. Bulk deletes write a content-free audit event (notebook, user, count).
+because their stored rationale can quote the Memory. A conflict decision between shared objects
+only is never touched. A merge decision is keyed by cluster, so a decided merge candidate naming
+a removed cluster goes too: a merge the curator rejected (or confirmed) between that cluster and a
+shared one may be proposed again after the rebuild. A merge candidate that names the Memory
+object's bridge id is removed only when no cluster carries that id; a live shared cluster with the
+same id keeps its candidates. If a curator manually merged a Memory-derived object into another
+object, the surviving object only loses the evidence that Memory contributed; it is never deleted
+with the Memory. Every other removal of a Memory's derived source does the same cleanup:
+deprecating a confirmed Memory, moving it to another notebook with `POST /memories/transfer`, and
+the cleanup after an extraction that finished once the Memory was no longer confirmed. Bulk
+deletes write a content-free audit event (notebook, user, count).
 
 Leaving a shared notebook deletes the leaver's own Memory there. Of the actions that end one
 person's access, only that person's own exit deletes anything. Before leaving,
