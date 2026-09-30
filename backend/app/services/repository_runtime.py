@@ -2448,8 +2448,12 @@ class RepositoryRuntime:
             memory_sources=memory_sources,
             emit=self.event_log.emit,
             # The store states its own concurrency: PostgreSQL
-            # ``POSTGRES_MOUNTED_READ_WORKERS``, SQLite 1.
-            read_workers=int(getattr(sources, "ceiling_read_workers", 1)),
+            # ``POSTGRES_MOUNTED_READ_WORKERS``, SQLite 1 -- never more than
+            # the pool can lease at once (each read holds a connection).
+            read_workers=max(1, min(
+                int(getattr(sources, "ceiling_read_workers", 1)),
+                int(getattr(self.settings, "postgres_pool_max_size", 1) or 1),
+            )),
             # The run verdict's two probes (``run_ceiling_binds``): with them
             # an un-narrowed, undrifted run over a notebook holding no other
             # member's Memory binds no source list in its SQL.

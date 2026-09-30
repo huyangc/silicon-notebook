@@ -1141,6 +1141,7 @@ class AskService:
         local_scope: Any = None,
         base_scope: Any = None,
         cancel_event: CancelEvent = None,
+        lazy: bool = False,
     ):
         """THE retrieval ceiling of every Ask entry -- the one installation.
 
@@ -1161,6 +1162,11 @@ class AskService:
         Every read carries ``cancel_event`` (``cancellable_ceiling_readers``),
         and a read the Stop interrupted surfaces as the Stop
         (``AskCancelled``), not as a failure.
+
+        ``lazy`` (the intent precheck): installed without reading; the first
+        consumer of the scope builds the same default ceiling
+        (``default_ceiling_context(lazy=True)``), and a block that consumes
+        none -- one model call -- pays no read.
         """
         readers = getattr(self, "ceiling_readers", None)
         if readers is None:
@@ -1177,6 +1183,7 @@ class AskService:
                 local_scope=local_scope,
                 base_scope=base_scope,
                 cancel_event=cancel_event,
+                lazy=lazy,
             ))
         except AskCancelled:
             raise
@@ -1760,7 +1767,10 @@ class AskService:
 
         Runs under the same ceiling the ask will (``_retrieval_ceiling``, with
         the scopes the route froze), so the precheck can never see more than
-        the run it prepares.  ``user_id`` defaults to the request's user."""
+        the run it prepares -- installed lazily: the understanding step reads
+        no corpus today, so it pays no ceiling read, and anything that ever
+        does read the scope in here gets the full default ceiling.
+        ``user_id`` defaults to the request's user."""
         from app.services.query_intent import plan_query_intent
 
         status: dict[str, bool] = {}
@@ -1770,6 +1780,10 @@ class AskService:
             local_scope=source_scope,
             base_scope=base_scope,
             cancel_event=cancel_event,
+            # One model call with no retrieval dependency: the ceiling is
+            # installed (so nothing in here can run without one) but only
+            # built if something actually reads it.
+            lazy=True,
         ):
             contract = plan_query_intent(
                 self.model_clients.chat("reasoning_agent"),
