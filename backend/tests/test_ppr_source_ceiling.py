@@ -428,6 +428,21 @@ def test_ranking_further_reuses_the_score_vector(repo, monkeypatch):
         "scale_ppr_done"]
 
 
+def test_a_skipped_chunk_still_sets_the_score_range():
+    """``rank_further`` with a dropped library must give every kept chunk the
+    score it has in the prefix already walked: a skipped chunk leaves the
+    selection, never the min/max the scores are normalised by."""
+    from app.services.graph_retrieval import _normalized_score_ranking
+
+    scores = [("low", 1.0), ("top", 5.0), ("mid", 3.0), ("dropped", 9.0)]
+    unskipped, _ = _normalized_score_ranking(scores, limit=4)
+    skipped, considered = _normalized_score_ranking(
+        scores, limit=2, skip=lambda chunk_id: chunk_id == "dropped")
+    assert skipped == [("top", 0.5), ("mid", 0.25)]
+    assert skipped == [item for item in unskipped if item[0] != "dropped"][:2]
+    assert considered == 4
+
+
 def test_all_selected_unchanged_run_issues_the_historical_hydration(repo, monkeypatch):
     """No mounted library, every source selected and nothing uploaded since:
     one hydration of the first ``top_chunks`` ids without a ceiling, and the
