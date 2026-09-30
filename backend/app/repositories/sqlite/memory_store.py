@@ -29,6 +29,7 @@ from app.repositories.sqlite.access_sql import (
     read_access_exists_clause,
     read_access_params,
 )
+from app.repositories.sqlite import memory_sql
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.governance_store import GovernanceStore
 from app.repositories.sqlite.id_binding import bind_ids, drive_by
@@ -65,6 +66,16 @@ def _json_list(raw: Any) -> list[str]:
     except (TypeError, ValueError):
         return []
     return [str(item) for item in value] if isinstance(value, list) else []
+
+
+# 「无主的 Memory 来源」——语义与 postgres/memory_store.py 的同名常量逐字对应(见那里的
+# 说明)。SQLite 只作镜像,谓词文本相同。
+# 显式的 `IS NULL` / `= ''` 与 `NOT EXISTS` 的关系同那里:前者是「链接被清空」的直写。
+_ORPHAN_MEMORY_SOURCE_WHERE = (
+    memory_sql.memory_source_type_predicate("s.source_type")
+    + " AND (s.memory_id IS NULL OR s.memory_id = '' OR NOT EXISTS ("
+    "SELECT 1 FROM memory_items m WHERE m.id = s.memory_id AND m.status = 'confirmed'))"
+)
 
 
 class MemoryStore:
@@ -2146,3 +2157,25 @@ class MemoryStore:
             "SELECT embedding_status FROM memory_items WHERE id=?",
             (source_memory_id,),
         ).fetchone()
+
+    def orphan_memory_source_ids(self, limit: int, after_id: str = "") -> list[str]:
+        """至多 `limit` 个无主 Memory 来源的 id,按 id 升序,只取 `after_id` 之后的(键集分页)。
+        PostgreSQL 版的镜像;计划形态见 `test_memory_orphan_sweep`。"""
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT s.id FROM sources s "
+                f"WHERE {_ORPHAN_MEMORY_SOURCE_WHERE} AND s.id > ? "
+                "ORDER BY s.id LIMIT ?",
+                (after_id, max(1, int(limit))),
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
+
+    @staticmethod
+    def orphan_memory_source_count_on(db: sqlite3.Connection, notebook_id: str) -> int:
+        """本笔记本里仍在的无主 Memory 来源数(体检只读项);PostgreSQL 版的镜像。"""
+        row = db.execute(
+            "SELECT count(*) AS n FROM sources s "
+            f"WHERE s.notebook_id = ? AND {_ORPHAN_MEMORY_SOURCE_WHERE}",
+            (notebook_id,),
+        ).fetchone()
+        return int(row["n"])

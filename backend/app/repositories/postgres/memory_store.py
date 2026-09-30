@@ -36,6 +36,7 @@ from app.repositories.postgres.access_sql import (
     read_access_exists_clause,
     read_access_params,
 )
+from app.repositories.postgres import memory_sql
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.governance_store import GovernanceStore
 from app.repositories.postgres.memory_sql import (
@@ -87,6 +88,20 @@ def _bulk_memory_ids(memory_ids: Sequence[str]) -> list[str]:
 def _strict_json_value(value: Any, *, field: str) -> Any:
     """Validate application-owned JSON and return a Jsonb-ready value."""
     return json.loads(strict_json_dumps(value, field=field))
+
+
+# 「无主的 Memory 来源」:`source_type` 是 memory,而它指回的 Memory 不再是一条已确认的
+# Memory —— `memory_id` 为 NULL/空(既有的笔记本拷贝清空了它,N-5)、指向的行已不存在
+# (硬删残留)、或指向的行不是 `confirmed`。`orphan_memory_source_ids` 与
+# `orphan_memory_source_count_on` 共用这一段文本,清扫与体检不可能各说各话。
+# 显式的 `IS NULL` / `= ''` 是「链接被清空」的直写:`NOT EXISTS` 对 NULL 本就成立
+# (`m.id = NULL` 恒不真),它们留着是让谓词在反连接被改写成 `NOT IN`(对 NULL 不安全)
+# 时仍然正确;`= ''` 还挡住「存在 id 为空串的 Memory 行」这种反常数据。
+_ORPHAN_MEMORY_SOURCE_WHERE = (
+    memory_sql.memory_source_type_predicate("s.source_type")
+    + " AND (s.memory_id IS NULL OR s.memory_id = '' OR NOT EXISTS ("
+    "SELECT 1 FROM memory_items m WHERE m.id = s.memory_id AND m.status = 'confirmed'))"
+)
 
 
 class MemoryStore:
@@ -2357,3 +2372,34 @@ class MemoryStore:
             "SELECT embedding_status FROM memory_items WHERE id=%s FOR SHARE",
             (source_memory_id,),
         ).fetchone()
+
+    def orphan_memory_source_ids(self, limit: int, after_id: str = "") -> list[str]:
+        """至多 `limit` 个无主 Memory 来源的 id,按 id 升序,只取 `after_id` 之后的(键集分页)。
+
+        全库读(清扫在启动后一次跑完,不属于任何笔记本)。语句只有一个来源表扫描 +
+        对 Memory 来源逐行的 `memory_items` 主键探针(`OR` 让它无法去相关成反连接);
+        `sources` 上没有单独的 `source_type` 索引,这次扫描是整表一趟,清扫每页最多再扫
+        一趟,页数由 `limit` 决定但不改变结果。见 `test_memory_orphan_sweep_explain_pins`。
+        """
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT s.id FROM sources s "
+                f"WHERE {_ORPHAN_MEMORY_SOURCE_WHERE} AND s.id > %s "
+                "ORDER BY s.id LIMIT %s",
+                (after_id, max(1, int(limit))),
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
+
+    @staticmethod
+    def orphan_memory_source_count_on(db: object, notebook_id: str) -> int:
+        """本笔记本里仍在的无主 Memory 来源数(体检只读项;搭调用方的读快照)。
+
+        先按 `(notebook_id, source_type)` 索引限到本库的 Memory 来源(数量以本库
+        已确认 Memory 为界),再逐行判无主。
+        """
+        row = db.execute(
+            "SELECT count(*) AS n FROM sources s "
+            f"WHERE s.notebook_id = %s AND {_ORPHAN_MEMORY_SOURCE_WHERE}",
+            (notebook_id,),
+        ).fetchone()
+        return int(row["n"])

@@ -37,6 +37,11 @@
   「健康」结论——rebuild/fold(`.tmp`+swap 原子)换新 manifest.version 即失效。**不用 version_signal**:
   它只由 unified_kg_state 的 seq 组成、rebuild/fold 不 bump 它,与磁盘产物解耦(评审 B1:用它当键会
   漏报「fold 后损坏」、且损坏被缓存后重建清不掉)。损坏结论从不入缓存、每次现探(修好即自愈)。
+- H12(只读,E5-3 / 审计 N-5):本库里仍在的无主 Memory 来源数(``memory_id`` 被既有拷贝清空,
+  或其 Memory 已被硬删/不再确认)。启动后的孤儿清扫(``memory_orphan_sweep``)会清掉它们;
+  ``fix="none"``:没有用户修复动作,只计数。``(notebook_id, source_type)`` 索引限到本库,不缓存。
+  ``fix="none"`` 的项不算「可修复的问题」,前端铃铛不为它们提醒(该规则随 E4-5 的
+  ``checkupAlertSignature`` 改动落地,本项依赖它)。
 """
 from __future__ import annotations
 
@@ -222,6 +227,9 @@ class CheckupService:
     - ``probe_index_integrity``:H8 的磁盘探针(never-raise,见模块级 probe_scale_index_integrity)。
     - ``active_source_ids``:内存活跃租约快照(H2/H3 的 Python 后置减法)。
     - ``now``:时钟 seam;``event_log``:仅用于 fail-soft 探针的 warning。
+    - ``orphan_memory_sources``:H12(E5-3),``(db, notebook_id) -> int``,解析到后端
+      ``MemoryStore.orphan_memory_source_count_on``;见 ``_h12_orphan_memory_sources``。
+      未注入时恒为 0。
     """
 
     def __init__(
@@ -239,6 +247,7 @@ class CheckupService:
         active_source_ids: Callable[[], "set[str]"],
         now: Callable[[], str],
         event_log: Any = None,
+        orphan_memory_sources: "Callable[[Any, str], int] | None" = None,
     ) -> None:
         self._database = database
         self._queries = queries
@@ -252,6 +261,7 @@ class CheckupService:
         self._active_source_ids = active_source_ids
         self._now = now
         self._event_log = event_log
+        self._orphan_memory_sources = orphan_memory_sources
         # 进程内 H8 缓存:nb -> (manifest_version, 0)。**只缓存「健康」结论**(见 _h8 说明:
         # 损坏结论从不进缓存,每次现探,以免修复后仍粘住误报)。键是磁盘 manifest 身份,
         # rebuild/fold 换新 version 即失效。重启即空。move_to_end + popitem(last=False) LRU 有界化。
@@ -320,6 +330,7 @@ class CheckupService:
             CheckupItem("H6", h6_count, [], "extract_kg"),
             CheckupItem("H7", self._h7_index_stale(notebook_id), [], "fold_index"),
             CheckupItem("H8", self._h8_index_integrity(notebook_id), [], "rebuild_index"),
+            CheckupItem("H12", self._h12_orphan_memory_sources(notebook_id), [], "none"),
         ]
         healthy = all(item.count == 0 for item in checks)
         return CheckupResult(
@@ -556,6 +567,24 @@ class CheckupService:
                 # 损坏结论不缓存,反而清掉本 nb 任何旧的健康缓存——下次仍现探,修好即自愈。
                 self._h8_cache.pop(notebook_id, None)
         return result
+
+    # ---------------------------------------------------------------- H12
+    def _h12_orphan_memory_sources(self, notebook_id: str) -> int:
+        """H12(只读,E5-3 / 审计 N-5):本库里仍在的无主 Memory 来源数——``memory_id`` 被
+        既有的笔记本拷贝清空、或其 Memory 已被硬删/不再确认,而来源本身还在。
+
+        这些来源用户看不到(Memory 来源在来源列表里隐藏),系统在**每次启动后**自动清掉
+        (``memory_orphan_sweep``),所以非零只有两种可能:清扫还没轮到(刚有新的残留、
+        或本次启动的清扫仍在跑),或清扫在此库上失败了、留待下次启动。没有用户修复
+        动作,``fix="none"``,只计数。
+
+        一条按 ``(notebook_id, source_type)`` 索引限到本库 Memory 来源(以已确认 Memory
+        数为界)的 COUNT,自开一个读连接;不缓存(值随清扫单调归零,缓存只会让
+        「已清完」晚显示)。未注入时为 0。"""
+        if self._orphan_memory_sources is None:
+            return 0
+        with self._database.connect() as db:
+            return int(self._orphan_memory_sources(db, notebook_id))
 
     # --------------------------------------------------------------- utils
     def _warn(self, msg: str, *args: Any) -> None:
