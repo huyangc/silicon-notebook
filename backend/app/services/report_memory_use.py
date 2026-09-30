@@ -26,48 +26,70 @@ import threading
 from collections.abc import Mapping
 from typing import Any, Callable
 
-# Upper bound on values inspected per port call.  Retrieval results are lists
-# of at most a few thousand hits with small payloads; the bound only stops a
-# pathological structure from turning the record into real work.
-_MAX_NODES = 1_000_000
+# Upper bound on containers (mappings, sequences, records) inspected per port
+# call; atoms are never pushed or counted.  Measured shapes stay far below it:
+# 10,000 knowledge hits with 10 evidence rows each is about 150,000 containers,
+# 60 hub concepts with 3,000 evidence rows each about 180,000.  Reaching it does
+# NOT truncate the record: the call is marked overflowed and taking the record
+# (``RetrievalSourceLog.source_ids``) raises, which fails the planning or
+# generation — the same rule as a failed Memory lookup.  A silently partial
+# record would under-count what the page may carry.
+_MAX_CONTAINERS = 5_000_000
 _ATOMS = (str, bytes, bytearray, int, float, bool, type(None))
 
 
-def collect_source_ids(value: Any, out: set[str]) -> None:
-    """Add every non-empty ``source_id`` found in ``value`` to ``out``.
+class RetrievalRecordOverflow(RuntimeError):
+    """A retrieval result was too large to read completely; the Memory record
+    of this run cannot be trusted, so the run fails instead of under-counting."""
+
+
+def _containers(values: Any) -> list[Any]:
+    return [value for value in values if not isinstance(value, _ATOMS)]
+
+
+def collect_source_ids(value: Any, out: set[str]) -> bool:
+    """Add every non-empty ``source_id`` found in ``value`` to ``out``; return
+    False when the value was too large to read completely.
 
     Reads mappings (key ``source_id``), dataclass instances and pydantic models
     (field or attribute ``source_id``), and walks lists, tuples, sets and the
     fields / values of the above.  Anything else is not entered."""
+    if isinstance(value, _ATOMS):
+        return True
     stack = [value]
     seen: set[int] = set()
     visited = 0
-    while stack and visited < _MAX_NODES:
+    while stack:
+        if visited >= _MAX_CONTAINERS:
+            return False
         item = stack.pop()
-        visited += 1
-        if isinstance(item, _ATOMS):
-            continue
         marker = id(item)
         if marker in seen:
             continue
         seen.add(marker)
+        visited += 1
         if isinstance(item, Mapping):
             source_id = item.get("source_id")
             if isinstance(source_id, str) and source_id:
                 out.add(source_id)
-            stack.extend(item.values())
+            stack.extend(_containers(item.values()))
         elif isinstance(item, (list, tuple, set, frozenset)):
-            stack.extend(item)
+            stack.extend(_containers(item))
         elif dataclasses.is_dataclass(item) and not isinstance(item, type):
             source_id = getattr(item, "source_id", None)
             if isinstance(source_id, str) and source_id:
                 out.add(source_id)
-            stack.extend(getattr(item, f.name, None) for f in dataclasses.fields(item))
+            stack.extend(_containers(
+                getattr(item, f.name, None) for f in dataclasses.fields(item)
+            ))
         elif hasattr(type(item), "model_fields"):
             source_id = getattr(item, "source_id", None)
             if isinstance(source_id, str) and source_id:
                 out.add(source_id)
-            stack.extend(getattr(item, name, None) for name in type(item).model_fields)
+            stack.extend(_containers(
+                getattr(item, name, None) for name in type(item).model_fields
+            ))
+    return True
 
 
 class _Watched:
@@ -123,6 +145,7 @@ class RetrievalSourceLog:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._source_ids: set[str] = set()
+        self._overflowed = False
 
     def watch(self, port: Any) -> Any:
         """``port`` with every call's result recorded."""
@@ -135,15 +158,32 @@ class RetrievalSourceLog:
             self.note(result)
             return result
 
+        recorded.__watched_log__ = self  # type: ignore[attr-defined]
         return recorded
 
+    def watches(self, value: Any) -> bool:
+        """Whether ``value`` (a port or a callable) records into this log."""
+        if isinstance(value, _Watched):
+            return object.__getattribute__(value, "_log") is self
+        return getattr(value, "__watched_log__", None) is self
+
     def note(self, value: Any) -> None:
+        # Never raises: the watched call's result must reach its caller (which
+        # may swallow retrieval errors).  An overflow is kept and reported
+        # when the record is taken.
         found: set[str] = set()
-        collect_source_ids(value, found)
-        if found:
-            with self._lock:
-                self._source_ids.update(found)
+        complete = collect_source_ids(value, found)
+        with self._lock:
+            self._source_ids.update(found)
+            if not complete:
+                self._overflowed = True
 
     def source_ids(self) -> list[str]:
+        """Every recorded source id.  Raises ``RetrievalRecordOverflow`` when
+        a result could not be read completely."""
         with self._lock:
+            if self._overflowed:
+                raise RetrievalRecordOverflow(
+                    "a retrieval result was too large to record completely"
+                )
             return sorted(self._source_ids)

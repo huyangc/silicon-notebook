@@ -285,16 +285,18 @@ def test_memory_ids_for_source_ids_explain_pin_pg(world):
 
 
 def test_share_and_purge_of_the_same_author_never_deadlock_pg(world):
-    """A share and a Memory purge of the same author, interleaved so that the
-    purge holds its first Memory row while the share starts locking: both lock
-    Memory rows in Memory-id order, so the share waits for the purge and both
-    finish — no deadlock abort.  The two cited projections are given source
-    ids in the OPPOSITE order of their Memory ids, so locking Memory rows in
-    source-id order would form a cycle here."""
+    """A share and a Memory purge of the same author on the same two Memory
+    rows.  A third transaction holds the LOW row; the purge (the member exit's
+    ``ORDER BY id FOR UPDATE``) queues on it, then the share queues too.  When
+    the low row is released the purge takes low, then high, and commits; the
+    share, which locks in Memory-id order, has been waiting on low holding
+    nothing, so both finish — no deadlock abort.  A share that took the HIGH
+    row first (citation order: the high source is cited first; or source-id
+    order: its source id sorts first) would hold high while waiting on low,
+    and the purge would wait on high: a cycle."""
     import threading
     import time
 
-    import app.repositories.postgres.memory_store as pg_memory_store
     from tests.report_share_disclosure_cases import (
         _KEYS, make_report, share, source_ref,
     )
@@ -321,30 +323,51 @@ def test_share_and_purge_of_the_same_author_never_deadlock_pg(world):
         )
     world.monkeypatch.setattr(ingestion, "new_id", minted)
     assert projections[low.id] > projections[high.id]
+    # The HIGH Memory's source is cited first: with the Memory rows locked in
+    # citation order (no ORDER BY) or in source-id order, the share would
+    # hold the higher row first.
     rid = make_report(world, world.alice, [
-        source_ref(projections[low.id], "k1"), source_ref(projections[high.id], "k2"),
+        source_ref(projections[high.id], "k1"), source_ref(projections[low.id], "k2"),
     ])
+    database = world.repo._runtime.database
 
-    holds_first, go_on = threading.Event(), threading.Event()
-    real_execute_many = pg_memory_store.execute_many
+    def waiting_on_locks() -> int:
+        with database.connect() as db:
+            return int(db.execute(
+                "SELECT count(*) AS n FROM pg_stat_activity "
+                "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+            ).fetchone()["n"])
 
-    def pausing_execute_many(db, sql, rows):
-        rows = list(rows)
-        if not sql.startswith("DELETE FROM memory_items") or len(rows) < 2:
-            return real_execute_many(db, sql, rows)
-        real_execute_many(db, sql, rows[:1])     # the purge holds the lower row
-        holds_first.set()
-        assert go_on.wait(30)
-        return real_execute_many(db, sql, rows[1:])
+    def wait_for_waiters(count: int) -> None:
+        deadline = time.monotonic() + 30
+        while waiting_on_locks() < count:
+            assert time.monotonic() < deadline, f"never saw {count} lock waiters"
+            time.sleep(0.05)
 
-    world.monkeypatch.setattr(pg_memory_store, "execute_many", pausing_execute_many)
+    held, release = threading.Event(), threading.Event()
     results: dict[str, object] = {}
 
+    def hold_the_low_row():
+        with database.write() as db:
+            db.execute("SELECT id FROM memory_items WHERE id=%s FOR UPDATE", (low.id,))
+            held.set()
+            assert release.wait(30)
+
     def purge():
+        # The member-exit purge's lock statement (``_hard_delete_on`` on
+        # ``claude/memory-copy-delete``), verbatim, then its delete.
         try:
-            results["purged"] = world.repo._runtime.memory_store.bulk_delete_memories(
-                world.alice.id, [high.id, low.id]
-            )
+            with database.write() as db:
+                rows = db.execute(
+                    "SELECT id,notebook_id FROM memory_items "
+                    "WHERE created_by=%s AND id=ANY(%s) ORDER BY id FOR UPDATE",
+                    (world.alice.id, [high.id, low.id]),
+                ).fetchall()
+                db.execute(
+                    "DELETE FROM memory_items WHERE created_by=%s AND id=ANY(%s)",
+                    (world.alice.id, [row["id"] for row in rows]),
+                )
+            results["purged"] = len(rows)
         except Exception as exc:  # noqa: BLE001 — the assertion reports it
             results["purge_error"] = repr(exc)
 
@@ -354,13 +377,17 @@ def test_share_and_purge_of_the_same_author_never_deadlock_pg(world):
         except Exception as exc:  # noqa: BLE001 — the assertion reports it
             results["share_error"] = repr(exc)
 
+    blocker = threading.Thread(target=hold_the_low_row)
+    blocker.start()
+    assert held.wait(30)
     purger = threading.Thread(target=purge)
     purger.start()
-    assert holds_first.wait(30), "the purge never took its first Memory row"
+    wait_for_waiters(1)        # the purge queues on the low row first
     publisher = threading.Thread(target=publish)
     publisher.start()
-    time.sleep(1.5)            # the share is now waiting inside its locking read
-    go_on.set()
+    wait_for_waiters(2)        # then the share queues behind it
+    release.set()              # the purge takes low, then high; the share follows
+    blocker.join(30)
     purger.join(30)
     publisher.join(30)
     assert "purge_error" not in results and "share_error" not in results, results
