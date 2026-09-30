@@ -1,6 +1,6 @@
 """``refreshed_ceiling_context`` over every outer shape it can meet.
 
-A property grid (adopted from the third E1-1 review): 10 outer scopes x 4
+A property grid (adopted from the third E1-1 review): 12 outer scopes x 4
 refreshed dimensions x 3 Memory-channel states (open; closed at the outer
 freeze; closed only at the refresh).  Between the outer freeze and the refresh
 a library is mounted (``nb-late``) and a source uploaded (``src-new``), then
@@ -103,6 +103,16 @@ def _outer(kind: str, store: _Store):
         "ceilings_total_own_entry": lambda: source_scope_context(
             NB, None, None, {NB: ["src-a"]}, ceilings_total=True,
         ),
+        # Total per-library ceilings but an UNBOUND local dimension.
+        "ceilings_total_unbound_local": lambda: source_scope_context(
+            NB, None, None, {"nb-lib": ["lib-1"]}, ceilings_total=True,
+        ),
+        # A default ceiling over a submitted exclusion list (refused by the
+        # constructor itself while the Memory channel is closed).
+        "default_submitted_exclusion": lambda: default_ceiling_context(
+            NB, "bob", readers,
+            local_scope={"mode": "exclude", "source_ids": ["src-b"]},
+        ),
     }[kind]()
 
 
@@ -162,6 +172,7 @@ KINDS = [
     "none", "default", "legacy_narrowed", "legacy_exclude",
     "legacy_binds_nothing", "legacy_own_entry", "legacy_own_entry_with_memory",
     "subjectless", "another_notebook", "ceilings_total_own_entry",
+    "ceilings_total_unbound_local", "default_submitted_exclusion",
 ]
 CHANNELS = ["open", "closed", "closed_at_refresh"]
 CELLS = list(itertools.product(KINDS, ["local", "library", "both", "neither"], CHANNELS))
@@ -178,6 +189,11 @@ def test_a_refresh_never_widens_the_selection(kind, dims, channel):
         memory_access_context(False) if channel == "closed_at_refresh"
         else contextlib.nullcontext()
     )
+    if kind == "default_submitted_exclusion" and channel == "closed":
+        with at_freeze, pytest.raises(ValueError):
+            with _outer(kind, store):
+                pass
+        return
     with at_freeze, _outer(kind, store):
         outer = current_source_scope()
         store.mounts.append("nb-late")          # mounted after the outer freeze
