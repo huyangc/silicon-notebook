@@ -22,6 +22,12 @@ from app.services.spreadsheet_analysis import (
 )
 
 
+#: When the tests list issues recorded under the fixed service clock
+#: (``2026-08-31T01:00``); listing against the real clock expired them once
+#: the 30-day retention passed (2026-09-30).
+_LISTED_AT = datetime(2026, 8, 31, 2, tzinfo=timezone.utc)
+
+
 class _EventLog:
     def __init__(self) -> None:
         self.events = []
@@ -881,7 +887,7 @@ def test_challenging_workbook_is_archived_instead_of_silently_misanalysed(tmp_pa
         _source(path), notebook_name="Notebook", owner_id="user-1",
         row_element_ids={},
     ) is False
-    [issue] = artifacts.list_issues(status="open")
+    [issue] = artifacts.list_issues(status="open", now=_LISTED_AT)
     assert issue["code"] == "SPREADSHEET_MULTIPLE_REGIONS"
     assert issue["artifact_available"] is True
     assert artifacts.load_spreadsheet_manifest("nb-1", "src-1") is None
@@ -914,7 +920,7 @@ def test_oversized_cell_is_rejected_without_truncation(tmp_path):
         _source(path), notebook_name="Notebook", owner_id="user-1",
         row_element_ids={},
     ) is False
-    [issue] = artifacts.list_issues(status="open")
+    [issue] = artifacts.list_issues(status="open", now=_LISTED_AT)
     assert issue["code"] == "SPREADSHEET_CELL_TOO_LONG"
 
 
@@ -939,7 +945,7 @@ def test_missing_header_is_rejected_instead_of_synthesized(tmp_path):
         _source(path), notebook_name="Notebook", owner_id="user-1",
         row_element_ids={},
     ) is False
-    [issue] = artifacts.list_issues(status="open")
+    [issue] = artifacts.list_issues(status="open", now=_LISTED_AT)
     assert issue["code"] == "SPREADSHEET_HEADER_MISSING"
 
 
