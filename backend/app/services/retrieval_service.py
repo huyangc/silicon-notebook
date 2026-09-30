@@ -113,7 +113,13 @@ class RetrievalService:
         every mounted library, and it applies every library's source ceiling
         and the library dimension before its ``ppr_top_chunks`` cut
         (``_PprCeiling``), so an excluded or out-of-ceiling chunk never takes
-        that budget; this filter remains the fail-closed backstop.
+        one of those slots. Reaching past refused candidates is bounded (a
+        library the run admits nothing of is dropped in memory when its scale
+        index maps its chunks; otherwise at most ``_PPR_CEILING_WALK_WINDOWS``
+        hydration windows past the over-ranked prefix), so when in-ceiling
+        passages rank below that reach the call returns fewer than
+        ``ppr_top_chunks`` and emits ``ppr_ceiling_walk_exhausted``; this
+        filter remains the fail-closed backstop.
 
         Known, deliberately unfixed limitation: ``_federated_graph_is_large``
         (the size guard this and ``_chunk_kg_overlay`` sit behind) walks EVERY
