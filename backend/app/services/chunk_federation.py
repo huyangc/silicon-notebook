@@ -1269,14 +1269,17 @@ def _peer_visible_sources(candidates, notebook_id: str) -> tuple:
     frozen set minus later deletions.  A library frozen to ``frozenset()``
     because its read failed therefore contributes nothing here either.
 
-    Handed out SORTED, the order the live read's ``ORDER BY id`` gives, never
-    in frozenset (hash) order: ``scoped_allowed_source_ids`` preserves the
-    order of the list it is given, and that list becomes the producers'
-    ``allowed_source_ids`` -- bound into SQL, carried in traces -- so hash
-    order would make the same question bind differently per process
-    (``PYTHONHASHSEED``).  Sorted once per run and library (about 6 ms at 49k
-    ids), memoized under the frozenset itself so a scope re-installed with a
-    different ceiling for the same library gets its own entry.
+    Handed out in the order the constructor's own visible read returned
+    (``ActiveSourceScope.ceiling_hand_out``): the production read is
+    ``ORDER BY id`` and already materialised, so this is the live read's order
+    at no cost -- never frozenset (hash) order, which would make the same
+    question bind differently per process (``PYTHONHASHSEED``), because
+    ``scoped_allowed_source_ids`` preserves the order of the list it is given
+    and that list becomes the producers' ``allowed_source_ids`` (bound into
+    SQL, carried in traces).  A ceiling some other installer froze is sorted
+    once per scope instead.  The hand-out lives on the scope, so a scope
+    re-installed with a different ceiling for the same library (a refresh)
+    hands out its own.
 
     A SUBJECTLESS (global) run keeps the live read: there the per-library
     enumeration is also the federation's coverage probe -- it runs under the
@@ -1288,13 +1291,10 @@ def _peer_visible_sources(candidates, notebook_id: str) -> tuple:
     scope = current_source_scope()
     frozen = (
         None if scope is None or scope.subjectless
-        else scope.source_ceiling_for(notebook_id)
+        else scope.ceiling_hand_out(notebook_id)
     )
     if frozen is not None:
-        return memoized_retrieval_value(
-            ("federated_chunk_visible_frozen", notebook_id, frozen),
-            lambda: tuple(sorted(frozen)),
-        )
+        return frozen
     return memoized_retrieval_value(
         ("federated_chunk_visible", notebook_id),
         lambda: tuple(candidates.sources.all_visible_source_ids(notebook_id)),
