@@ -52,8 +52,9 @@
   `scripts/generate_repository_contract_fixtures.py --rebaseline-surface`。
 - 两种 adapter 的 `access_sql.py`、`mount_sql.py` 与 `memory_sql.py` 判据同步维护；
   `memory_sql.py` 是「谁能读 Memory 派生来源」与「哪些 KG 行算派生自 Memory」的共享
-  定义点，新读者一律 import；早于它的读者（`source_store.hidden_source_ids`、
-  `postgres/chunk_store.py` 里的 Memory 属主判断）仍自带手写谓词，在改动它们的变更里
+  定义点，新读者一律 import（`source_store.hidden_source_ids` 与来源读取闸
+  `sharing_store.source_notebook_id(viewer_id=...)` 已经如此）；早于它的读者
+  （`postgres/chunk_store.py` 里的 Memory 属主判断）仍自带手写谓词，在改动它们的变更里
   迁入。新的 notebook 写
   端点走 `require_notebook_capability(...)`；在 body 中才解析身份的路径也使用同一
   capability 表及独立 mirror-write fence。先授权再返回镜像写错误，保留已登记的

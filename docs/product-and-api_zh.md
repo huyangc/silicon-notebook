@@ -1052,6 +1052,14 @@ notebook 卡片数量和 notebook Memory 标签是同一份数据的 notebook �
 始终按 owner 全量统计，不随状态、搜索或 notebook 筛选变化；notebook 筛选项来自有界的 owner
 聚合查询，不做逐 notebook 查询。
 
+这条隐藏合成源及其元素与 Memory 本身一样私有。`GET /api/sources/{id}` 及其 `/elements`、
+`/elements-page`，`/api/notebooks/{id}/sources/{source_id}` 下的三个活跃笔记本读取，以及 MCP
+`get_cited_element`，只对创建该 Memory 的成员打开 Memory 来源；笔记本的其他读者（包括笔记本
+owner）得到与不存在的 id 相同的 404；Memory 记录已不存在的 Memory 来源对所有人都是如此。Agent
+令牌还须有 `memory:read` 才能打开其主人自己的 Memory 来源。Knowhow 投影来源是笔记本共享内容，
+笔记本的每个读者照常可读。命令目录不接受任何隐藏来源：它的七个
+`.../sources/{sid}/command-catalog` 端点对 Memory 或 Knowhow 投影来源返回 404，与不存在的来源相同。
+
 生命周期为 `candidate | confirmed | rejected | deprecated`。Agent 只能创建 `candidate`；
 token 具备 `memory:read_candidates` 时，同一用户、当前所选 notebook 下获授权的所有 Agent
 profile 都可检索它。Candidate 永远不会进入正式 notebook Ask、notebook 搜索、Deep Report
@@ -1273,6 +1281,8 @@ scope 时整行在结果截断**之前**被过滤，且不计入截断计数，�
 `get_cited_element` 把一条引用还原回原文：按 `ask_notebook` 或 `search_notebook_context` 返回的
 `source_id` 与 `element_id` 原样传入，取回该元素自身的文本、它在文档中的位置和文档显示标题。
 它披露的范围不超过当前所选笔记本的答案本来就可以引用的内容——本库来源加上它当前挂载的参考库。
+由 Memory 派生的来源只返回给该 Memory 的创建者，且令牌须有 `memory:read`；否则与未知 id 的失败
+完全相同。
 
 **来源管理。** 这一组里凡是接受 `source_id` 的工具，都只在**当前所选笔记本内**解析它——不含
 挂载的参与库，也不含隐藏的 `memory`/`knowhow` 投影行。这比 `get_cited_element` 更窄：后者刻意
@@ -1802,7 +1812,8 @@ worker。每段起步一次模型调用；一段里的 flag 形状参数超过 `
 （重新抽取知识图谱、写摘要）都会推进而元素纹丝不动，按它判会在一次普通的重新抽取之后
 谎报「来源已重新解析」，并逼用户重跑一整轮付费识别。
 
-端点（都作用在路径里那个笔记本自己的来源上；读取需要笔记本读权限，写入需要 owner）：
+端点（都作用在路径里那个笔记本自己的、用户可见的来源上——Memory 或 Knowhow 投影来源得到
+与不存在的来源相同的 404；读取需要笔记本读权限，写入需要 owner）：
 
 - `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/preview` —— 成本预告：`estimated_windows`（前缀覆盖全文时是真跑分段的精确值，`sampled=true` 时是显式下界）、`estimated_calls`（**只覆盖已读前缀**，其余段落不报价）、`windows_in_prefix`（这次计价覆盖了多少段）、`skipped_windows_in_prefix`，有界读取触顶时带 `sampled`（按元素总数是否超过读回行数判，不是「行数是否达上限」）；来源尚未解析完或解析失败时返回带用户可读文案的 `409`，两条读取跨了一次重解析（重读一次仍漂移）时是另一条 `409`
 - `POST /api/notebooks/{id}/sources/{sid}/command-catalog` —— 发起抽取；该来源已有活跃任务（既有任务从 `.../job` 取）、抽取模型未配置、来源尚未解析完或解析失败、或上一轮还有候选没审阅完（需先确认或跳过）时返回带用户可读文案的 `409`。上一轮的候选若已因来源被重新解析而过期，则不拦，改为整批清掉再放行
@@ -2648,9 +2659,9 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - `/api/extensions/{plugin_id}/…` —— 部署插件自有 HTTP 路由的唯一挂载面，经 router 级会话认证；见[部署插件](#部署插件)。
 - 工作区 UI contribution 使用构建期 `SILICON_NOTEBOOK_UI_PLUGINS` 流程与[插件 SOP](./deployment-extensions-sop_zh.md)的部署对账契约。注入的 `actions.api` 将请求限定到 `/api/extensions/{plugin_id}/`，剥离自带 authorization／cookie 头并固定 auth／tag／unauthorized 策略。`requestTask()` 消费共享 NDJSON 任务流，仅暴露耗时、固定阶段及安全兜底错误；空响应用 `requestVoid`。未授权处理会清除浏览器 bearer 并刷新，所以插件路由仅在真实会话失效时返回 401，上游凭据失败须转为 502／424。管理员拓扑页通过 `GET /api/admin/extensions` 读取运行中后端，与前端构建输入无关。
 - `POST /api/notebooks/{id}/sources` —— multipart 文件上传（异步解析/抽取）。每个文件在 multipart 流写入临时 spool 时即受限，超过 `SOURCE_UPLOAD_MAX_MB`（默认 50 MiB）返回 413；每次请求超过 20 个文件也返回 413。浏览器读取上面的两个护栏，取得前禁用文件输入，选择时即时拒绝超限文件，并在发送前复查暂存文件。每个被接受的文件以 `{source_id}_{净化后的客户端文件名}` 落盘；该组件整体压进文件系统 255 字节的单组件上限（按 UTF-8 字节截断主干、保留扩展名——浏览器允许客户端提交最长 255 字节的文件名，加上 37 字节的 id 前缀会在 ext4/XFS/NTFS 上超限导致上传失败）；被压缩的只有派生的磁盘名，存储的文件名与标题保持客户端原值
-- `GET /api/sources/{id}`、`DELETE /api/sources/{id}`、`POST /api/sources/{id}/parse`、`GET /api/sources/{id}/elements`、`GET /api/sources/{id}/elements-page?offset=&limit=&anchor_element_id=` —— owner∪成员口径，按来源自己所属的笔记本判权限。分页读取返回 `{items,total_count,offset,limit}`，`limit` 最大 100；anchor 有效时会把 `offset` 调整为包含目标元素的页。
+- `GET /api/sources/{id}`、`DELETE /api/sources/{id}`、`POST /api/sources/{id}/parse`、`GET /api/sources/{id}/elements`、`GET /api/sources/{id}/elements-page?offset=&limit=&anchor_element_id=` —— owner∪成员口径，按来源自己所属的笔记本判权限；Memory 投影来源及其元素（三个 `GET`）只有该 Memory 的创建者能读，其他人得到与不存在相同的 404。分页读取返回 `{items,total_count,offset,limit}`，`limit` 最大 100；anchor 有效时会把 `offset` 调整为包含目标元素的页。
 - `GET /api/notebooks/{id}/sources/{source_id}/elements-page?offset=&limit=&anchor_element_id=` —— 采用当前活跃 notebook 参与集授权的有界来源详情读取。浏览器使用该端点；代理全量 element 端点继续保留向后兼容。
-- `GET /api/notebooks/{id}/sources/{source_id}`、`GET /api/notebooks/{id}/sources/{source_id}/elements` —— 同样两个读取，但权限按路径里的**当前活跃**笔记本判，目标在它的有效参与集（自身 + 已生效挂载的参考库）内解析。挂载参考库不等于获得该库的直接成员权限，因此浏览器始终只用活跃笔记本过权限、由后端内部代理读取；参与集每次请求实时判定，被挂库降级/易主/深拷贝中或挂载被取消时当场 404。本库来源走的是同一条路径（参与集首项恒为活跃笔记本自身），响应如实返回来源真正所属的笔记本，供前端据此按只读渲染。写入刻意不代理——重新解析与删除仍是 `/api/sources/{id}` 上受 `sources:write` 能力守卫（P2 起 owner∪组管理员）的直接操作。详情响应比 `/api/sources/{id}` 更窄：去掉 `file_path` 与原始 `error_message`（两者都可能带服务端绝对路径），改回一个如实的 `parse_failed` 布尔；跨库的隐藏合成源（memory/knowhow 投影行，集合地图刻意把它们算进作用域）直接拒绝
+- `GET /api/notebooks/{id}/sources/{source_id}`、`GET /api/notebooks/{id}/sources/{source_id}/elements` —— 同样两个读取，但权限按路径里的**当前活跃**笔记本判，目标在它的有效参与集（自身 + 已生效挂载的参考库）内解析。挂载参考库不等于获得该库的直接成员权限，因此浏览器始终只用活跃笔记本过权限、由后端内部代理读取；参与集每次请求实时判定，被挂库降级/易主/深拷贝中或挂载被取消时当场 404。本库来源走的是同一条路径（参与集首项恒为活跃笔记本自身），响应如实返回来源真正所属的笔记本，供前端据此按只读渲染。写入刻意不代理——重新解析与删除仍是 `/api/sources/{id}` 上受 `sources:write` 能力守卫（P2 起 owner∪组管理员）的直接操作。详情响应比 `/api/sources/{id}` 更窄：去掉 `file_path` 与原始 `error_message`（两者都可能带服务端绝对路径），改回一个如实的 `parse_failed` 布尔；跨库的隐藏合成源（memory/knowhow 投影行，集合地图刻意把它们算进作用域）直接拒绝；活跃笔记本自己的 Memory 投影来源也只对该 Memory 的创建者打开（Knowhow 投影行照常可读）
 - `GET /api/notebooks/{id}/assets/{asset_id}` —— 图片资产（knowhow 单元格图片、来源插图）适用同一条参与集规则：路径里的笔记本是查看者的活跃笔记本，资产自己声明所属笔记本，不在活跃笔记本有效参与集内的资产一律 404。经挂载库代理来的资产用 `Cache-Control: no-store`，取消挂载即刻生效；活跃笔记本自己的资产保持原有长缓存
 - 命令目录路由及响应／错误契约见[命令目录（工具手册）](#命令目录工具手册)。
 - `GET /api/notebooks/{id}/understanding` —— 「AI 对这个库的理解」；任意有读权的成员；返回 `enabled`、`base`、`mine`、`job`、`can_edit_base`——见[AI 对这个库的理解](#ai-对这个库的理解)
