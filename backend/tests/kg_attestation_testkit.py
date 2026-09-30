@@ -556,6 +556,27 @@ def collection_race(sources, database, marker, notebook_id, mutation):
     return response
 
 
+def collection_registers_only_what_it_minted(sources, database, marker, notebook_id):
+    """Rebase guard (PR-D quality review item 9): ``_attest_collection_citations``
+    is the LAST statement before ``collection_item_citations`` returns, so it
+    registers exactly the citations the function minted. The second row is
+    hydrated (its element exists) but refused -- its source is not in the
+    row's library -- so its element must not be registered; the first row's
+    must. Registering earlier (nothing minted yet) or over the hydration
+    (everything read) both fail here."""
+    seed(database, marker, notebook_id)
+    refused = SimpleNamespace(
+        element_id=OTHER, source_id="src-kg-attest-elsewhere", source_title="Elsewhere",
+        location_label="p1", text=SNIPPET, notebook_id=notebook_id, tier="personal",
+    )
+    items = [element_row(notebook_id, CITED), refused]
+    with global_run(sources, notebook_id) as run:
+        citations, _anchors = collection_references(sources, notebook_id, items)
+    assert {key: c.element_id for key, c in citations.items()} == {CITED: CITED}
+    assert set(run.state.evidence_snapshot()) == {CITED}
+    _assert_full_text_snapshot(run, CITED)
+
+
 def collection_dangling_element_row(sources, database, marker, notebook_id):
     """J2, never registered: element rows whose elements were already gone
     before the question -- no producer registered them in this run -- are asked

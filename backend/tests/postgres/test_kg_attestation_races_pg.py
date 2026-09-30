@@ -68,6 +68,10 @@ def test_knowledge_context_issues_one_read_over_admitted_objects_pg(store):
     kit.kg_one_read_per_call(*store[:2], "%s", store[2])
 
 
+def test_collection_registers_only_the_citations_it_minted_pg(store):
+    kit.collection_registers_only_what_it_minted(*store[:2], "%s", store[2])
+
+
 @pytest.mark.parametrize("mutation", MUTATIONS)
 def test_follow_chain_hop_anchors_race_the_terminal_read_pg(store, mutation):
     sources, database, notebook_id = store
