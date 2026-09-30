@@ -7,7 +7,8 @@ the owner-scoped ``hidden_source_ids``, ``memory_source_ids``), so the same
 assertions run here against PostgreSQL: another member's Memory never enters
 the ceiling, a mounted library contributes its visible sources only, a library
 mounted mid-run is refused, and a closed Memory channel withholds the asker's
-own Memory without the drift probe reporting drift.
+own Memory and switches the non-partitioned channels off (fail-closed until
+E2-2).
 """
 from __future__ import annotations
 
@@ -37,5 +38,11 @@ def postgres_repository(postgres_settings):
 
 
 def test_default_ceiling_over_real_postgres_stores(postgres_repository):
+    """With the PostgreSQL wiring's ``read_workers``: the mounted libraries
+    are read in parallel, each on its own pooled connection."""
+    from app.services.source_scope import POSTGRES_MOUNTED_READ_WORKERS
+
     ids = build_real_fixture(postgres_repository, "%s")
-    assert_default_ceiling_over_real_stores(postgres_repository, ids)
+    assert_default_ceiling_over_real_stores(
+        postgres_repository, ids, read_workers=POSTGRES_MOUNTED_READ_WORKERS,
+    )
