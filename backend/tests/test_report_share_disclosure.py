@@ -252,6 +252,39 @@ def test_the_retrieval_record_fails_rather_than_stopping_short(monkeypatch):
         log.source_ids()
 
 
+def test_the_retrieval_record_resolves_each_new_source_once_and_keeps_it():
+    """Each call resolves only the sources the log has not seen, and the
+    association is kept even after the resolver would no longer answer; a
+    failed lookup fails the record instead of dropping the batch."""
+    from app.services.report_memory_use import (
+        RetrievalRecordOverflow, RetrievalSourceLog,
+    )
+
+    live = {"src-mem": "mem-1"}
+    asked: list[list[str]] = []
+
+    def resolve(source_ids):
+        asked.append(list(source_ids))
+        return {s: live[s] for s in source_ids if s in live}
+
+    log = RetrievalSourceLog(resolve_memory=resolve)
+    log.note([{"source_id": "src-mem"}, {"source_id": "src-doc"}])
+    log.note([{"source_id": "src-mem"}, {"source_id": "src-new"}])
+    assert asked == [["src-doc", "src-mem"], ["src-new"]]
+    live.clear()                      # the Memory was deprecated since
+    assert log.memory_sources() == {"src-mem": "mem-1"}
+
+    def broken(source_ids):
+        raise RuntimeError("database down")
+
+    failing = RetrievalSourceLog(resolve_memory=broken)
+    failing.note([{"source_id": "src-x"}])
+    with pytest.raises(RetrievalRecordOverflow):
+        failing.memory_sources()
+    with pytest.raises(RetrievalRecordOverflow):
+        failing.source_ids()
+
+
 def test_every_retrieval_seat_of_the_report_engine_is_watched(world):
     """The runtime wires all five seats that hand evidence to report prompts
     through the engine's retrieval record."""
