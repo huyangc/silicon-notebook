@@ -167,36 +167,57 @@ def _provenance_line(item: MemoryRecord) -> str:
 
 
 _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+# CommonMark HTML block type 1: starts with one of these tags and runs until
+# a line containing ANY of their end tags — raw text, not Markdown.
+_RAW_HTML_START = re.compile(r"^ {0,3}<(script|pre|style|textarea)(?=[\s>]|$)", re.IGNORECASE)
+_RAW_HTML_ENDS = ("</script>", "</pre>", "</style>", "</textarea>")
 
 
 def _self_contained_markdown(markdown: str) -> str:
     """``markdown`` closed so that it cannot change how the NEXT export entry
     renders: a code fence left open (```` ``` ```` or ``~~~``, CommonMark: the
     closing fence uses the same character, at least as long, with nothing
-    after it) is closed with the matching fence, and an unterminated HTML
-    comment is terminated. Nothing else is changed."""
+    after it) is closed with the matching fence; a raw HTML block left open
+    (``<script>``, ``<pre>``, ``<style>``, ``<textarea>`` — CommonMark type 1,
+    which runs until a line with one of their end tags) gets its end tag; an
+    unterminated HTML comment is terminated. Nothing else is changed."""
     text = str(markdown or "").rstrip()
     open_fence: str | None = None
+    raw_end: str | None = None
     outside: list[str] = []
     for line in text.split("\n"):
-        match = _FENCE_RE.match(line)
-        if match is None:
-            if open_fence is None:
-                outside.append(line)
+        if raw_end is not None:
+            if any(tag in line.lower() for tag in _RAW_HTML_ENDS):
+                raw_end = None
             continue
-        marker, rest = match.group(1), match.group(2)
-        if open_fence is None:
-            if marker[0] == "`" and "`" in rest:
-                continue  # a backtick info string cannot contain backticks
-            open_fence = marker
-        elif marker[0] == open_fence[0] and len(marker) >= len(open_fence) and not rest.strip():
-            open_fence = None
+        match = _FENCE_RE.match(line)
+        if open_fence is not None:
+            if (
+                match is not None
+                and match.group(1)[0] == open_fence[0]
+                and len(match.group(1)) >= len(open_fence)
+                and not match.group(2).strip()
+            ):
+                open_fence = None
+            continue
+        if match is not None:
+            marker, rest = match.group(1), match.group(2)
+            if not (marker[0] == "`" and "`" in rest):  # backtick info strings
+                open_fence = marker                      # cannot hold backticks
+                continue
+        raw = _RAW_HTML_START.match(line)
+        if raw is not None:
+            if not any(tag in line.lower() for tag in _RAW_HTML_ENDS):
+                raw_end = f"</{raw.group(1).lower()}>"
+            continue
+        outside.append(line)
+    if raw_end is not None:
+        return text + "\n" + raw_end
     if open_fence is not None:
-        text += "\n" + open_fence
-    else:
-        prose = "\n".join(outside)
-        if prose.rfind("<!--") > prose.rfind("-->"):
-            text += "\n-->"
+        return text + "\n" + open_fence
+    prose = "\n".join(outside)
+    if prose.rfind("<!--") > prose.rfind("-->"):
+        text += "\n-->"
     return text
 
 

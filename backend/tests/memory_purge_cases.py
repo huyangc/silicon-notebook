@@ -1100,12 +1100,13 @@ def case_merge_candidates_written_by_fusion_are_deleted(world: World) -> None:
     assert_purged(world, "twin")
 
 
-def case_whole_clusters_of_the_memory_are_removed(world: World) -> None:
-    """B2 (E5-1 spec review): a cluster seeded by a Memory object keeps the
-    Memory's canonical id, name and description on its SHARED members' rows.
-    The purge removes every cluster the Memory's object belongs to — all
-    member rows — and the merge candidates naming it; the shared object
-    survives and the notebook is marked for a rebuild."""
+def _seed_memory_named_cluster(world: World) -> str:
+    """The B2 legacy state (E5-1 spec review and the fix2 re-review's probe):
+    Alice's live Memory object seeded the cluster ``K-alice-private plan`` —
+    name and description are her text — whose other members are two SHARED
+    document objects, one of them in the building generation; a pending and
+    a rejected merge candidate name that cluster. Returns the second shared
+    object's id."""
     alice = world.projections["alice"]
     memory_object = next(
         object_id for object_id in alice.object_ids
@@ -1114,17 +1115,22 @@ def case_whole_clusters_of_the_memory_are_removed(world: World) -> None:
             (object_id,),
         )
     )
-    world.sql.write(
-        "DELETE FROM concept_clusters WHERE member_object_id IN (?,?)",
-        (memory_object, world.shared_doc_object),
+    _other_source, other_shared = _doc_object(
+        world.repo, world.sql, world.owner, world.shared
     )
-    for member in (world.shared_doc_object, memory_object):
+    world.sql.write(
+        "DELETE FROM concept_clusters WHERE member_object_id IN (?,?,?)",
+        (memory_object, world.shared_doc_object, other_shared),
+    )
+    for member, generation in (
+        (world.shared_doc_object, 0), (memory_object, 0), (other_shared, 1),
+    ):
         world.sql.write(
             "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,"
             "canonical_name,object_type,canonical_description,created_at,generation) "
             "VALUES (?,?,'K-alice-private plan',?,'ALICE-PRIVATE plan','concept',"
-            "'ALICE-PRIVATE description',?,0)",
-            (f"cc-b2-{member}", world.shared, member, _GRANT_CREATED_AT),
+            "'ALICE-PRIVATE description',?,?)",
+            (f"cc-b2-{member}", world.shared, member, _GRANT_CREATED_AT, generation),
         )
     for mid, status in (("mc-b2-pending", "pending"), ("mc-b2-rejected", "rejected")):
         world.sql.write(
@@ -1133,29 +1139,166 @@ def case_whole_clusters_of_the_memory_are_removed(world: World) -> None:
             "VALUES (?,?,'K-alice-private plan','K-bob loop',0.9,?,?,?)",
             (mid, world.shared, status, _GRANT_CREATED_AT, _GRANT_CREATED_AT),
         )
+    return other_shared
+
+
+def _memory_named_leftovers(world: World, other_shared: str) -> dict[str, int]:
+    """Everything the B2 state must not leave behind, as counts; the purge of
+    any path must turn it into ``_CLEAN``."""
+    return {
+        "shared_doc_object": world.sql.count(
+            "SELECT COUNT(*) AS c FROM knowledge_objects WHERE id=?",
+            (world.shared_doc_object,),
+        ),
+        "other_shared_object": world.sql.count(
+            "SELECT COUNT(*) AS c FROM knowledge_objects WHERE id=?", (other_shared,)
+        ),
+        "memory_named_cluster_rows": world.sql.count(
+            "SELECT COUNT(*) AS c FROM concept_clusters WHERE notebook_id=? AND ("
+            "canonical_id='K-alice-private plan' OR canonical_name LIKE ? "
+            "OR canonical_description LIKE ?)",
+            (world.shared, "ALICE-PRIVATE%", "ALICE-PRIVATE%"),
+        ),
+        "memory_named_candidates": world.sql.count(
+            "SELECT COUNT(*) AS c FROM concept_merge_candidates "
+            "WHERE canonical_a='K-alice-private plan' OR canonical_b='K-alice-private plan'"
+        ),
+        "memory_evidence_on_shared": int(
+            world.projections["alice"].source_id
+            in _evidence_sources(world, world.shared_doc_object)
+        ),
+    }
+
+
+_CLEAN = {
+    "shared_doc_object": 1, "other_shared_object": 1,
+    "memory_named_cluster_rows": 0, "memory_named_candidates": 0,
+    "memory_evidence_on_shared": 0,
+}
+
+
+def case_whole_clusters_of_the_memory_are_removed(world: World) -> None:
+    """B2 (E5-1 spec review): a cluster seeded by a Memory object keeps the
+    Memory's canonical id, name and description on its SHARED members' rows.
+    The exit removes every cluster the Memory's object belongs to — all
+    member rows, in EVERY generation — and the merge candidates naming it;
+    the shared objects survive and the notebook is marked for a rebuild."""
+    other_shared = _seed_memory_named_cluster(world)
     mark_clean(world, world.shared)
     self_exit(world, world.alice, world.shared, 1)
-    leftovers = world.sql.rows(
-        "SELECT canonical_id,canonical_name,canonical_description FROM concept_clusters "
-        "WHERE notebook_id=?",
-        (world.shared,),
-    )
-    assert not [
-        row for row in leftovers
-        if "ALICE-PRIVATE" in str(row["canonical_name"])
-        or "ALICE-PRIVATE" in str(row["canonical_description"] or "")
-        or row["canonical_id"] == "K-alice-private plan"
-    ], leftovers
-    assert world.sql.count(
-        "SELECT COUNT(*) AS c FROM concept_merge_candidates WHERE canonical_a=?",
-        ("K-alice-private plan",),
-    ) == 0
-    assert world.sql.count(
-        "SELECT COUNT(*) AS c FROM knowledge_objects WHERE id=?",
-        (world.shared_doc_object,),
-    ) == 1
+    assert _memory_named_leftovers(world, other_shared) == _CLEAN
     assert graph_state(world, world.shared)[0] == 1
     assert_intact(world, "bob")
+
+
+def case_deprecate_then_exit_leaves_nothing_memory_named(world: World) -> None:
+    """P1-1 (fix2 re-review): deprecating a confirmed Memory removes its
+    derived source through ``remove_memory_source``; it must strip the
+    shared object's Memory evidence (the shared object survives, N-1) and
+    purge the Memory-named cluster and candidates — the later exit no longer
+    finds a source to clean."""
+    other_shared = _seed_memory_named_cluster(world)
+    service(world).deprecate(world.projections["alice"].memory_id, world.alice.id)
+    assert _memory_named_leftovers(world, other_shared) == _CLEAN
+    self_exit(world, world.alice, world.shared, disclosure(world, world.alice, world.shared))
+    assert _memory_named_leftovers(world, other_shared) == _CLEAN
+    assert_purged(world, "alice")
+
+
+def case_transfer_move_leaves_nothing_memory_named(world: World) -> None:
+    """P1-1: the exit panel's "transfer" (move) removes the Memory's source
+    through ``remove_memory_source`` inside ``transfer``: same cleanup."""
+    other_shared = _seed_memory_named_cluster(world)
+    result = service(world).transfer(
+        world.alice.id, [world.projections["alice"].memory_id], world.alice_home,
+        "move", extract_kg=False,
+    )
+    assert [item["status"] for item in result] == ["moved"]
+    assert _memory_named_leftovers(world, other_shared) == _CLEAN
+    assert disclosure(world, world.alice, world.shared) == 0
+
+
+def case_post_ingest_cleanup_leaves_nothing_memory_named(
+    world: World, monkeypatch
+) -> None:
+    """P1-1: a KG ingest that finishes after the Memory stopped being
+    confirmed removes the source it just rebuilt (``_kg_ingest_job``'s
+    recheck) through ``remove_memory_source``: same cleanup."""
+    other_shared = _seed_memory_named_cluster(world)
+    svc = service(world)
+    alice = world.projections["alice"]
+
+    def deprecated_meanwhile(*_args, **_kwargs):
+        # A concurrent deprecate committed while the ingest ran (its own
+        # removal found nothing yet); the ingest leaves the source in place.
+        world.sql.write(
+            "UPDATE memory_items SET status='deprecated' WHERE id=?", (alice.memory_id,)
+        )
+        return alice.source_id
+
+    monkeypatch.setattr(svc.memory_kg, "ingest_memory_source", deprecated_meanwhile)
+    svc._kg_ingest_job((alice.memory_id, world.alice.id))
+    assert svc.memory_kg.memory_source_id(alice.memory_id) is None
+    assert _memory_named_leftovers(world, other_shared) == _CLEAN
+
+
+def case_one_page_strips_every_merged_source(world: World) -> None:
+    """P2-2 (fix2 re-review): one purge page holding two Memory sources, each
+    merged into a DIFFERENT shared object: both shared objects survive and
+    both lose exactly that Memory's evidence."""
+    _src_x, shared_x = _doc_object(world.repo, world.sql, world.owner, world.shared)
+    _src_y, shared_y = _doc_object(world.repo, world.sql, world.owner, world.shared)
+    first = make_memory(world, "merged-x", world.shared, world.alice)
+    second = make_memory(world, "merged-y", world.shared, world.alice)
+    legacy_merge(world, world.shared, first.object_ids[0], shared_x)
+    legacy_merge(world, world.shared, second.object_ids[0], shared_y)
+    count = disclosure(world, world.alice, world.shared)
+    assert self_exit(world, world.alice, world.shared, count) == count
+    for shared, projection in ((shared_x, first), (shared_y, second)):
+        assert world.sql.count(
+            "SELECT COUNT(*) AS c FROM knowledge_objects WHERE id=?", (shared,)
+        ) == 1
+        assert projection.source_id not in _evidence_sources(world, shared)
+    assert_purged(world, "merged-x")
+    assert_purged(world, "merged-y")
+
+
+def case_a_live_cluster_with_the_bridge_id_keeps_its_candidates(world: World) -> None:
+    """P2-3 (fix2 re-review): a Memory concept named like a shared concept
+    ("Phase margin") has the bridge id ``K-phase margin`` — which is also a
+    LIVE shared cluster. A curator's decision between that shared cluster and
+    another one is not the Memory's and stays; only a bridge id no cluster
+    carries is purged. (The Memory object here is unclustered, as the
+    isolation work leaves every Memory object.)"""
+    world.repo._runtime.knowledge_lifecycle.incremental_fuse_source(
+        world.shared, world.shared_doc_source
+    )
+    assert world.sql.count(
+        "SELECT COUNT(*) AS c FROM concept_clusters WHERE canonical_id='K-phase margin'"
+    ) >= 1
+    twin = make_memory(
+        world, "phase", world.shared, world.alice, names=("Phase margin", "phase private")
+    )
+    world.sql.write(
+        f"DELETE FROM concept_clusters WHERE member_object_id IN ({_in(twin.object_ids)})",
+        tuple(twin.object_ids),
+    )
+    for mid, other in (("mc-live-shared", "K-shared other"), ("mc-bridge-only", "K-phase private")):
+        world.sql.write(
+            "INSERT INTO concept_merge_candidates "
+            "(id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
+            "VALUES (?,?,'K-phase margin',?,0.9,'rejected',?,?)",
+            (mid, world.shared, other, _GRANT_CREATED_AT, _GRANT_CREATED_AT),
+        )
+    world.repo.delete_memory(twin.memory_id, world.alice.id)
+    remaining = {
+        row["id"] for row in world.sql.rows(
+            "SELECT id FROM concept_merge_candidates WHERE id IN ('mc-live-shared','mc-bridge-only')"
+        )
+    }
+    # K-phase private is the Memory's own bridge id with no cluster: its
+    # candidate goes; the shared pair stays.
+    assert remaining == {"mc-live-shared"}, remaining
 
 
 def case_mixed_statuses_are_counted_exported_and_deleted_together(world: World) -> None:
@@ -1202,6 +1345,31 @@ def case_export_needs_read_access_and_is_lazy(world: World) -> None:
     text = export_text(world, world.bob, world.shared)
     assert "Memory bob" in text and "Memory alice" not in text
     assert text.rstrip().endswith("共导出 1 条记忆。")
+
+
+def _member_job_row(world: World, notebook_id: str, user: Any) -> None:
+    """A per-member overlay job row — part of the state ``forget_member_state``
+    clears when a membership ends."""
+    world.sql.write(
+        "INSERT INTO agent_profile_jobs "
+        "(notebook_id,owner_id,status,pending_signal,created_at,updated_at) "
+        "VALUES (?,?,'idle',3,?,?)",
+        (notebook_id, user.id, _GRANT_CREATED_AT, _GRANT_CREATED_AT),
+    )
+
+
+def _member_job_rows(world: World, notebook_id: str, user: Any) -> int:
+    return world.sql.count(
+        "SELECT COUNT(*) AS c FROM agent_profile_jobs WHERE notebook_id=? AND owner_id=?",
+        (notebook_id, user.id),
+    )
+
+
+def case_a_finished_exit_clears_the_members_overlay(world: World) -> None:
+    """The membership this exit ended loses its per-member overlay state."""
+    _member_job_row(world, world.shared, world.alice)
+    self_exit(world, world.alice, world.shared, 1)
+    assert _member_job_rows(world, world.shared, world.alice) == 0
 
 
 _TEARDOWN_TABLES = (
@@ -1287,12 +1455,17 @@ CASES: dict[str, Callable[..., None]] = {
     "review_candidates_deleted": case_review_candidates_of_deleted_objects_are_deleted,
     "merge_candidates_real_writer": case_merge_candidates_written_by_fusion_are_deleted,
     "whole_memory_clusters_removed": case_whole_clusters_of_the_memory_are_removed,
+    "deprecate_then_exit_clean": case_deprecate_then_exit_leaves_nothing_memory_named,
+    "transfer_move_clean": case_transfer_move_leaves_nothing_memory_named,
+    "one_page_strips_every_source": case_one_page_strips_every_merged_source,
+    "live_bridge_cluster_keeps_candidates": case_a_live_cluster_with_the_bridge_id_keeps_its_candidates,
     "one_teardown_same_outcome": case_single_and_batched_teardown_have_the_same_outcome,
     "purge_refuses_document_source": case_the_memory_purge_refuses_a_document_source,
     "mixed_statuses": case_mixed_statuses_are_counted_exported_and_deleted_together,
     "export_scope": case_export_needs_read_access_and_is_lazy,
     "contract_200_counts": case_contract_a_finished_exit_reports_what_it_deleted,
     "contract_zero_claim_refuses_ack": case_contract_zero_claim_refuses_a_positive_acknowledgement,
+    "exit_clears_member_overlay": case_a_finished_exit_clears_the_members_overlay,
 }
 
 
@@ -1350,6 +1523,57 @@ def case_a_purge_failing_part_way_reports_both_numbers(
     assert member_memory_count(world, world.shared, world.alice) == 0
 
 
+def case_a_failed_purge_counts_what_remains_on_the_server(
+    world: World, monkeypatch
+) -> None:
+    """BM4 (fix2 re-review): the 503's remaining count is counted by the
+    server, not claimed minus deleted: one page deleted, a Memory saved
+    meanwhile, the next page failed — 1 deleted, 2 remain (1 claimed + 1
+    new), still a member."""
+    from app.services import memory_service as memory_service_module
+
+    plain_memory(world, world.shared, world.alice, "bm4", "confirmed")
+    store = service(world).store
+    original = store.bulk_delete_memories
+    pages: list[int] = []
+
+    def save_then_fail(user_id, memory_ids):
+        pages.append(len(memory_ids))
+        if len(pages) > 1:
+            plain_memory(world, world.shared, world.alice, "bm4-new", "candidate")
+            raise RuntimeError("injected failure on the second page")
+        return original(user_id, memory_ids)
+
+    monkeypatch.setattr(memory_service_module, "_PURGE_PAGE", 1)
+    monkeypatch.setattr(store, "bulk_delete_memories", save_then_fail)
+    try:
+        self_exit(world, world.alice, world.shared, 2)
+    except MemberExitFailed as exc:
+        assert (exc.deleted_memory_count, exc.memory_count) == (1, 2)
+    else:  # pragma: no cover - the assertion below explains the failure
+        raise AssertionError("a failed purge was reported as finished")
+    assert member_memory_count(world, world.shared, world.alice) == 2
+
+
+def case_claimed_memories_gone_meanwhile_finish_with_zero_deleted(
+    world: World, monkeypatch
+) -> None:
+    """BM6 (fix2 re-review): every claimed Memory left by another path before
+    the purge reached it (d = 0 while A = C > 0): the exit still finishes and
+    reports 0 deleted by THIS request."""
+    svc = service(world)
+    alice = world.projections["alice"]
+    original = svc._purge_page
+
+    def moved_away_first(user_id, refs):
+        svc.transfer(user_id, [alice.memory_id], world.alice_home, "move", extract_kg=False)
+        return original(user_id, refs)
+
+    monkeypatch.setattr(svc, "_purge_page", moved_away_first)
+    assert self_exit(world, world.alice, world.shared, 1) == 0
+    assert not world.repo.is_member(world.shared, world.alice.id)
+
+
 def case_memory_saved_during_exit_is_never_deleted_unacknowledged(
     world: World, monkeypatch
 ) -> None:
@@ -1397,6 +1621,7 @@ def case_remove_and_readd_during_the_purge_keeps_the_new_membership(
         world.repo.remove_member(world.shared, world.alice.id)
         world.repo.add_member(world.shared, world.alice.id)
         plain_memory(world, world.shared, world.alice, "readded", "candidate")
+        _member_job_row(world, world.shared, world.alice)  # the new membership's
         return deleted
 
     monkeypatch.setattr(store, "bulk_delete_memories", delete_then_readd)
@@ -1404,6 +1629,9 @@ def case_remove_and_readd_during_the_purge_keeps_the_new_membership(
     assert world.repo.is_member(world.shared, world.alice.id)
     assert_purged(world, "alice")
     assert member_memory_count(world, world.shared, world.alice) == 1
+    # BM3: the exit did not end the new membership, so it must not clear the
+    # new membership's per-member state either.
+    assert _member_job_rows(world, world.shared, world.alice) == 1
 
 
 def case_rejoin_after_the_membership_ends_keeps_new_memory(
@@ -1525,6 +1753,9 @@ MONKEYPATCH_CASES: dict[str, Callable[..., None]] = {
     "gone_source_is_removed": case_a_source_removed_concurrently_counts_as_removed,
     "failed_purge_keeps_membership": case_failed_purge_keeps_the_membership,
     "contract_503_counts": case_a_purge_failing_part_way_reports_both_numbers,
+    "post_ingest_cleanup_clean": case_post_ingest_cleanup_leaves_nothing_memory_named,
+    "failed_purge_counts_remaining": case_a_failed_purge_counts_what_remains_on_the_server,
+    "claimed_gone_zero_deleted": case_claimed_memories_gone_meanwhile_finish_with_zero_deleted,
     "save_during_exit_kept": case_memory_saved_during_exit_is_never_deleted_unacknowledged,
     "rejoin_keeps_new_memory": case_rejoin_after_the_membership_ends_keeps_new_memory,
     "remove_readd_keeps_membership": case_remove_and_readd_during_the_purge_keeps_the_new_membership,

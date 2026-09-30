@@ -105,10 +105,15 @@ def test_the_export_streams_in_bounded_pages(world, monkeypatch):
         "Tilde block:\n\n~~~~\ncode\n~~~",  # a shorter fence does not close it
         "Fence with info:\n\n````md\n```\ninner\n```",
         "An open comment <!-- never closed",
+        "A raw block:\n\n<script>\nlet never = 'closed';",
+        "A raw block:\n\n<pre>\nnever closed",
+        "A raw block:\n\n<style>\np { color: red }",
+        "Fenced raw tag stays code:\n\n```\n<pre>\n```",
     ],
 )
 def test_an_entry_cannot_swallow_the_next_one(world, body):
-    """Quality review P3 / item 7: an unclosed code fence (or HTML comment)
+    """Quality review P3 / item 7: an unclosed code fence, raw HTML block
+    (``<script>`` / ``<pre>`` / ``<style>``, CommonMark type 1) or HTML comment
     in one Memory's content must not turn every following entry into code.
     Rendered with CommonMark, the entry after it is still a heading."""
     from markdown_it import MarkdownIt
