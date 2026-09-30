@@ -1672,11 +1672,8 @@ class MemoryStore:
             raise ValueError("memory_ids may contain at most 200 unique values")
         placeholders = ",".join("%s" for _ in unique)
         with self.database.write() as db:
-            # Deleted in Memory-id order: the order a report share locks the
-            # same author's Memory rows in, so the two never wait in a cycle.
             rows = db.execute(
-                f"SELECT id FROM memory_items WHERE created_by=%s AND id IN ({placeholders}) "
-                "ORDER BY id",
+                f"SELECT id FROM memory_items WHERE created_by=%s AND id IN ({placeholders})",
                 (user_id, *unique),
             ).fetchall()
             ids = [r["id"] for r in rows]
@@ -2095,12 +2092,20 @@ class MemoryStore:
         type / ``memory_id``); ``sources.memory_id`` carries no foreign key, so
         neither implies the other.  A concurrent write to exactly those rows
         waits for the share transaction, or — when it committed first — is
-        seen (READ COMMITTED re-checks a row it waited for).  Memory rows are
-        locked in Memory-id order, the order the Memory purge deletes in
-        (``bulk_delete_memories``), and before any source row, so a share and
-        a purge of the same author cannot wait on each other in a cycle.
-        Nothing else is locked: other users' Memory and the author's uncited
-        Memory are untouched.
+        seen (READ COMMITTED re-checks a row it waited for).
+
+        Order.  Memory rows are locked in Memory-id order, the order the Memory
+        purge locks them in (``SELECT … ORDER BY id FOR UPDATE`` of the member
+        exit's ``_hard_delete_on``); that shared order is what keeps a share
+        and a purge of the same author out of a cycle.  Taking the Memory rows
+        before the source rows is not what prevents it — the purge removes the
+        derived source rows and the Memory rows in separate transactions, so
+        no purge transaction holds both.  The synchronous notebook-delete path
+        (sources ``FOR UPDATE``, then ``memory_items`` through its cascade) is
+        used only by evaluation and tests; production deletes a notebook as a
+        job after its tombstone, and a tombstoned notebook no longer admits a
+        share.  Only rows of cited sources without a stored record are locked;
+        other users' Memory and the author's uncited Memory are untouched.
         """
         from app.repositories.postgres import memory_sql
 
