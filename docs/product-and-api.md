@@ -1401,7 +1401,10 @@ accepts no hidden source: its seven `.../sources/{sid}/command-catalog` endpoint
 404 for a Memory or Knowhow projection source, as for a missing one. Nor do the generic
 source writes: `DELETE /api/sources/{id}` and `POST /api/sources/{id}/parse` answer that
 404 for a Memory or Knowhow projection source to every caller, the Memory's creator
-included; a Memory is deleted through the Memory endpoints.
+included; a Memory is deleted through the Memory endpoints. The source detail window, which
+a citation's 「查看原文」 can open for such a source, accordingly shows no reparse or delete
+action, no degraded-parse hint, and no command catalog section for a Memory or Knowhow
+projection source.
 
 The lifecycle is `candidate | confirmed | rejected | deprecated`. An Agent can create only
 `candidate`; all authorized Agent profiles belonging to the same user and selected notebook

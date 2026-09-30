@@ -189,6 +189,7 @@ import {
   type CatalogConfirmRequest,
   type CatalogReviewRequest,
 } from "./command-catalog-panel";
+import { sourceDetailManageable } from "./source-management";
 import { ModelServicePanel, ModelServiceSummaryButton } from "./model-service-panel";
 import {
   ModelTestCoordinator,
@@ -6946,7 +6947,7 @@ export default function Home() {
                   >
                     {sourceDetailBaseLabel}
                   </span>
-                ) : !readOnlyWorkspace ? (
+                ) : !readOnlyWorkspace && sourceDetailManageable(sourceDetail.type) ? (
                 <div className="source-detail-actions">
                   <button
                     className="icon-button subtle-icon"
@@ -7029,7 +7030,9 @@ export default function Home() {
                   ))}
                 </div>
               )}
-              {sourceDetail.parse_quality_warning && (
+              {/* 记忆 / Knowhow 同步行不经文档解析，也不能在这里重新解析或删除：
+                  这段提示连同它的两个按钮对它们都不出现（见 source-management.ts）。 */}
+              {sourceDetail.parse_quality_warning && sourceDetailManageable(sourceDetail.type) && (
                 <section className="source-pdf-fallback-warning" aria-label="降级解析提示">
                   <div>
                     <strong>当前内容由本地解析器生成</strong>
@@ -7062,8 +7065,9 @@ export default function Home() {
               {/* 命令目录（方案 C）：只对本笔记本自己的来源渲染。参考库来源是只读的，
                   发起/取消/确认在后端都是 owner-only 且按 notebook 收窄，对一个只是被
                   挂载进来的库发起会花这个库的钱、写那个库的知识——授权语义是错的，
-                  入口连出现都不该出现（与上方重新解析/删除同一条判据）。 */}
-              {!sourceDetailBaseId && currentNotebookId && (
+                  入口连出现都不该出现（与上方重新解析/删除同一条判据）。记忆 / Knowhow
+                  同步行同样不出现：命令目录只接受用户导入的文档，后端对它们回 404。 */}
+              {!sourceDetailBaseId && currentNotebookId && sourceDetailManageable(sourceDetail.type) && (
                 <CommandCatalogSection
                   notebookId={currentNotebookId}
                   sourceId={sourceDetail.id}
