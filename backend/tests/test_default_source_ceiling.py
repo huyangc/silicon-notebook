@@ -1042,10 +1042,28 @@ def test_refresh_re_expresses_an_inherited_exclusion_list_narrower():
             assert scope.withheld_hidden_source_ids == frozenset({"src-memory-bob"})
 
 
+def test_refresh_re_expression_keeps_an_excluded_hidden_source_out():
+    """Fourth review R4: the exclusion list may name a HIDDEN source (here the
+    notebook-wide Knowhow projection).  Re-expressed as the synthesised freeze,
+    the exclusion must be subtracted from the hidden half too, or the refresh
+    readmits a source the outer refused."""
+    store = _shared_store()
+    with source_scope_context(
+        NB, {"mode": "exclude", "source_ids": ["src-knowhow"]},
+    ):
+        assert source_allowed(NB, "src-knowhow") is False
+        with refreshed_ceiling_context(NB, "bob", store.readers()):
+            scope = current_source_scope()
+            assert "src-knowhow" not in scope.hidden_source_ids
+            assert source_allowed(NB, "src-knowhow") is False
+            assert source_allowed(NB, "src-memory-bob") is True
+            assert source_allowed(NB, "src-a") is True
+
+
 def test_refresh_of_the_local_dimension_keeps_a_submitted_library_exclusion():
     """Mutant M8: the outer default ceiling SUBMITTED a library exclusion and
-    the refresh passes only ``local_scope`` -- the excluded library, whose
-    ceiling the refresh inherits, must stay excluded."""
+    the refresh passes only ``local_scope`` -- the excluded library (never
+    read, so it has no ceiling to inherit) must stay excluded."""
     store = _two_mount_store()
     base = {"mode": "exclude", "notebook_ids": ["nb-lib2"], "narrowed": True}
     with default_ceiling_context(NB, "bob", store.readers(), base_scope=base):
@@ -1177,6 +1195,122 @@ def test_a_failing_mounted_library_is_denied_not_fatal(error, reason):
     }], "content-free: notebook id and reason code only"
 
 
+def test_mounted_libraries_are_read_in_parallel_up_to_the_worker_bound():
+    """Fourth review P2-4(a): mounted libraries are read at most
+    ``mounted_read_workers`` at a time -- each in a copy of the caller's
+    context, so a budget the caller holds still caps every read -- and the
+    result is assembled in library order.  Four libraries that each take
+    0.25 s finish in about one wave per two libraries with two workers, never
+    with more than two reads in flight."""
+    import threading
+    import time as _time
+    from dataclasses import replace as _replace
+
+    from app.repositories.read_budget import current_read_budget, read_budget
+
+    libraries = [f"nb-lib{i}" for i in range(4)]
+    store = _Store(
+        visible={NB: ["src-a"], **{lib: [f"{lib}-1"] for lib in libraries}},
+        mounts=libraries,
+    )
+    original = store.visible
+    lock = threading.Lock()
+    in_flight = {"now": 0, "max": 0}
+    deadlines: list[float] = []
+
+    def slow(notebook_id):
+        if notebook_id == NB:
+            return original(notebook_id)
+        with lock:
+            in_flight["now"] += 1
+            in_flight["max"] = max(in_flight["max"], in_flight["now"])
+            deadlines.append(current_read_budget().deadline)
+        try:
+            _time.sleep(0.25)
+            return original(notebook_id)
+        finally:
+            with lock:
+                in_flight["now"] -= 1
+
+    caller_deadline = _time.monotonic() + 30.0
+    started = _time.monotonic()
+    with read_budget(caller_deadline), default_ceiling_context(
+        NB, "bob", _replace(store.readers(), visible=slow),
+        mounted_read_workers=2,
+    ):
+        scope = current_source_scope()
+        for lib in libraries:
+            assert scope.source_ceiling_for(lib) == frozenset({f"{lib}-1"})
+        assert list(scope._ceiling_hand_out_memo) == libraries
+    elapsed = _time.monotonic() - started
+    assert in_flight["max"] == 2, in_flight
+    assert elapsed < 0.9, elapsed  # serial would be >= 1.0 s
+    assert all(deadline <= caller_deadline for deadline in deadlines)
+    assert store.events == []
+
+
+def test_an_excluded_library_is_never_read():
+    """Fourth review P3-1: the fresh constructor filters mounted participants
+    by the library dimension, as the refresh does.  An excluded library is
+    not read, gets no ceiling, and is refused; so two excluded libraries that
+    would never finish cannot spend the stage budget a selected one needs."""
+    import time as _time
+    from dataclasses import replace as _replace
+
+    from app.repositories.read_budget import current_read_budget
+
+    store = _Store(
+        visible={NB: ["src-a"], "nb-ok": ["ok-1"]},
+        mounts=["nb-slow1", "nb-slow2", "nb-ok"],
+    )
+    original = store.visible
+
+    def never_finishes(notebook_id):
+        if notebook_id not in ("nb-slow1", "nb-slow2"):
+            return original(notebook_id)
+        store.visible_calls.append(notebook_id)
+        while True:
+            current_read_budget().check()
+            _time.sleep(0.005)
+
+    with default_ceiling_context(
+        NB, "bob", _replace(store.readers(), visible=never_finishes),
+        base_scope={"mode": "exclude", "notebook_ids": ["nb-slow1", "nb-slow2"],
+                    "narrowed": True},
+        mounted_total_seconds=0.3, mounted_read_workers=1,
+    ):
+        scope = current_source_scope()
+        assert scope.source_ceiling_for("nb-ok") == frozenset({"ok-1"})
+        assert scope.source_ceiling_for("nb-slow1") is None
+        assert scope.covers_notebook("nb-slow1") is False
+        assert source_allowed("nb-slow2", "anything") is False
+    assert store.visible_calls == [NB, "nb-ok"]
+    assert store.events == []
+
+
+def test_a_reader_returning_non_string_ids_is_coerced():
+    """Fourth review R3: ``_ordered_source_ids`` coerces every id to ``str``
+    (in C), so a reader that hands back other types yields a ``str`` ceiling
+    and a ``str`` hand-out in the reader's order."""
+    from dataclasses import replace as _replace
+
+    store = _two_mount_store()
+    original = store.visible
+
+    def numeric(notebook_id):
+        if notebook_id == "nb-lib":
+            return [3, 1, 2]
+        return original(notebook_id)
+
+    with default_ceiling_context(
+        NB, "bob", _replace(store.readers(), visible=numeric),
+    ):
+        scope = current_source_scope()
+        assert scope.source_ceiling_for("nb-lib") == frozenset({"1", "2", "3"})
+        assert scope.ceiling_hand_out("nb-lib") == ("3", "1", "2")
+        assert source_allowed("nb-lib", "1") is True
+
+
 def test_a_skipped_mounted_library_is_recorded_for_the_answer():
     """Third review P2-1: a mounted library left out because its visible list
     could not be read in time changes the answer, so the scope records it --
@@ -1230,6 +1364,18 @@ def test_a_skipped_mounted_library_is_recorded_for_the_answer():
                         "narrowed": True},
         ):
             assert current_skipped_mounted_libraries() == {}
+
+    # Fourth review R6: a library that never got a turn before the stage
+    # deadline is a skip too, and must be recorded as one -- healthy readers,
+    # a stage budget already spent when the reads start.
+    queued = _two_mount_store()
+    with default_ceiling_context(
+        NB, "bob", queued.readers(), mounted_total_seconds=0.0,
+    ):
+        assert current_skipped_mounted_libraries() == {
+            "nb-lib": "queue_deadline", "nb-lib2": "queue_deadline",
+        }
+    assert "nb-lib" not in queued.visible_calls
 
 
 def test_an_unclassified_failure_after_the_deadline_counts_as_timeout():
@@ -1471,14 +1617,17 @@ def test_a_real_budget_overrun_on_sqlite_is_classified_as_timeout(tmp_path, monk
     }]
 
 
-def test_mounted_reads_share_one_stage_deadline():
+@pytest.mark.parametrize("workers", [1, 2])
+def test_mounted_reads_share_one_stage_deadline(workers):
     """Quality re-review P3-6: every mounted read is bounded by ``min(stage
-    deadline, now + per-library budget)``, like ``_prepared_peer``.  Two
-    libraries that never finish cost one stage (not two per-library budgets):
-    the first is interrupted at the stage deadline (``timeout``), the second
-    gets no turn at all (``queue_deadline``, never read), and a healthy
-    library after them is refused the same way rather than stretching the
-    stage."""
+    deadline, now + per-library budget)``, like ``_prepared_peer``.  Libraries
+    that never finish cost one stage (not one per-library budget each).  With
+    one worker the first is interrupted at the stage deadline (``timeout``),
+    the second gets no turn at all (``queue_deadline``, never read); with two
+    workers both slow ones run at once and both hit the stage deadline.  Either
+    way the healthy library queued behind them gets its turn only after the
+    stage deadline and is refused (``queue_deadline``) rather than stretching
+    the stage."""
     import time as _time
 
     from app.repositories.read_budget import current_read_budget
@@ -1503,16 +1652,20 @@ def test_mounted_reads_share_one_stage_deadline():
     with default_ceiling_context(
         NB, "bob", _replace(store.readers(), visible=never_finishes),
         mounted_read_seconds=5.0, mounted_total_seconds=0.3,
+        mounted_read_workers=workers,
     ):
         scope = current_source_scope()
         assert scope.source_ceiling_for("nb-slow1") == frozenset()
         assert scope.source_ceiling_for("nb-slow2") == frozenset()
         assert scope.source_ceiling_for("nb-ok") == frozenset()
     assert _time.monotonic() - started < 1.5
-    assert store.visible_calls == [NB, "nb-slow1"], "no turn after the stage"
+    read = ["nb-slow1"] if workers == 1 else ["nb-slow1", "nb-slow2"]
+    assert store.visible_calls[0] == NB
+    assert sorted(store.visible_calls[1:]) == read, "no turn after the stage"
+    # Events come in library order, whatever order the reads finished in.
     assert [(e["notebook_id"], e["reason"]) for e in store.events] == [
         ("nb-slow1", "timeout"),
-        ("nb-slow2", "queue_deadline"),
+        ("nb-slow2", "timeout" if workers == 2 else "queue_deadline"),
         ("nb-ok", "queue_deadline"),
     ]
 
@@ -1958,6 +2111,16 @@ def test_each_mounted_library_visible_set_is_read_once_per_run(tmp_path, monkeyp
     sources = repo._runtime.source_store
     statements: list[str] = []
     sources.database.connect().set_trace_callback(statements.append)
+    # Mounted libraries are read on worker threads, each with its own
+    # connection: trace those too.
+    new_connection = sources.database._new_connection
+
+    def traced_connection(*args, **kwargs):
+        conn = new_connection(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(sources.database, "_new_connection", traced_connection)
     candidates = SimpleNamespace(
         sources=sources, notebook_copy_stats=lambda _nb: {"copyable": True},
     )
