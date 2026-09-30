@@ -38,7 +38,19 @@ from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.id_binding import (
     BoundIds, bind_ids, drive_by, member_of,
 )
+from app.repositories.sqlite.memory_sql import (
+    foreign_memory_object_excluded,
+    foreign_memory_relation_excluded,
+)
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
+from app.repositories.sqlite.source_ceiling import (
+    EVIDENCE_ITEM_SOURCE,
+    ceiling_param,
+    evidence_items,
+    evidence_support_sql,
+    execute_with_ceiling,
+    normalise_ceiling,
+)
 from app.domain.kg_analysis_contracts import (
     BOARD_DEPENDENT_ARTIFACT_KINDS,
     batched,
@@ -93,20 +105,17 @@ _PUBLISHED_COMMUNITY_GEN = (
 
 def _object_support_exists(
     cluster_ref: str, *, authoritative: bool, bound: BoundIds,
-    object_expr: str | None = None,
 ) -> str:
     """该簇某个成员对象是否被清单内来源支撑(相关子查询,关联到 cluster_ref)。
 
     清单以**一个** JSON 数组参数绑定(``bound = bind_ids(source_ids)``,调用方
     在对应位置追加 ``bound.param``);谓词是 ``member_of``——天花板只过滤,
-    不驱动计划。``object_expr`` 同 PG 孪生:缺省是簇成员,弱支撑探测拿它问
-    未成簇的端点对象本身。
+    不驱动计划。
     """
-    object_ref = object_expr or f"{cluster_ref}.member_object_id"
     if authoritative:
         return (
             "EXISTS (SELECT 1 FROM knowledge_objects ko "
-            f"WHERE ko.id={object_ref} "
+            f"WHERE ko.id={cluster_ref}.member_object_id "
             f"AND ko.notebook_id={cluster_ref}.notebook_id "
             "AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(ko.evidence) "
             "THEN CASE WHEN json_type(ko.evidence)='array' "
@@ -122,7 +131,7 @@ def _object_support_exists(
     return (
         "EXISTS (SELECT 1 FROM knowledge_object_sources kos "
         f"WHERE kos.notebook_id={cluster_ref}.notebook_id "
-        f"AND kos.object_id={object_ref} "
+        f"AND kos.object_id={cluster_ref}.member_object_id "
         f"AND {member_of('kos.source_id', bound)})"
     )
 
@@ -146,24 +155,27 @@ def _canonical_support_exists(
     )
 
 
-def _endpoint_support_exists(
-    row_ref: str, endpoint_expr: str, *, authoritative: bool, bound: BoundIds,
-) -> str:
-    """``canonical_relations`` 一端是否有天花板内来源支撑(PG 孪生同名函数,语义
-    等价):成簇端点按 ``community_member_peers`` 的判据问簇,未成簇端点问对象本身;
-    两支互斥,OR 拼。参数顺序:簇支 (notebook_id, 清单),对象支 (清单)。"""
+# 弱支撑探测的目标端(PG 孪生 ``_WEAK_TARGET_OBJECTS`` 同义):本世代的簇成员 ∪
+# 端点 id 本身,收成一组对象,支撑判据只出现一处。相关引用 ``cr``;参数:簇代次
+# (notebook_id),再是判据自己的一个参数。
+_WEAK_TARGET_OBJECTS = (
+    "ko.id IN (SELECT kc.member_object_id FROM concept_clusters kc "
+    "WHERE kc.notebook_id = cr.notebook_id AND kc.canonical_id = cr.canonical_tgt "
+    f"AND kc.generation = {_PUBLISHED_CLUSTER_GEN} "
+    "UNION ALL SELECT cr.canonical_tgt)"
+)
+
+
+def _weak_target_supported(condition: str) -> str:
+    """``cr`` 行的目标端有一个对象满足 ``condition``(写在 ``ko`` 上)。
+
+    ``+ko.notebook_id``:一元加号让这一列不能当索引键,对象由 ``ko.id IN (...)``
+    按主键探查;不加时(无 ANALYZE)规划器改走 ``(notebook_id, …)`` 索引,等于逐行
+    扫该库全部对象。"""
     return (
-        "("
-        + _canonical_support_exists(
-            row_ref, authoritative=authoritative, bound=bound,
-            canonical_expr=endpoint_expr,
-        )
-        + " OR "
-        + _object_support_exists(
-            row_ref, authoritative=authoritative, bound=bound,
-            object_expr=endpoint_expr,
-        )
-        + ")"
+        "EXISTS (SELECT 1 FROM knowledge_objects ko "
+        f"WHERE {_WEAK_TARGET_OBJECTS} AND +ko.notebook_id = cr.notebook_id "
+        f"AND {condition})"
     )
 
 
@@ -1065,15 +1077,19 @@ class UnifiedKgStore:
         source_max: int,
         limit: int,
         *,
-        allowed_source_ids: Sequence[str] | None = None,
+        allowed_source_ids: Iterable[str] | None = None,
+        viewer_id: str | None = None,
     ) -> List[sqlite3.Row]:
         """BOUNDED weak-support probe (设计文档 §3.3):给定 canonical 源端集合,
         取**来源数** ≤ ``source_max`` 的出边,最多 ``limit`` 行。
 
-        ``allowed_source_ids`` 同 PG 孪生:缺省 → 语句逐字不变;传进来时只留
-        **目标端**还有天花板内来源支撑的边(``_endpoint_support_exists``,判据同
-        ``community_member_peers``),闸压在 ``LIMIT`` 之前;空清单 = deny all。
-        清单经 ``id_binding`` 绑成一个 JSON 参数(``member_of``,只过滤不驱动)。
+        ``allowed_source_ids`` / ``viewer_id`` 同 PG 孪生(两个都缺省 → 语句逐字
+        不变,至多传一个):目标端(``_WEAK_TARGET_OBJECTS``)要有一个对象的证据
+        落在冻结天花板内(``source_ceiling.evidence_support_sql``,清单是一个 JSON
+        参数),或不派生自别人的 Memory(``memory_sql.foreign_memory_object_excluded``)。
+        闸在 ``LIMIT`` 之前。PG 侧把候选先排好序再惰性判支撑(那里的执行时间由它
+        决定);这里保持直接写法,SQLite 的规划不按清单长度计价,49k 天花板上的
+        实测见 E2-1 修复报告。
 
         判据是 `source_count`(支撑这条边的**不同文档**数)而不是 `support_count`
         (聚合掉的原始关系行数)。两者在 canonical 层经常差得很远:别名归一与 claim
@@ -1098,8 +1114,10 @@ class UnifiedKgStore:
         """
         if not canonical_ids:
             return []
+        if allowed_source_ids is not None and viewer_id is not None:
+            raise ValueError("pass allowed_source_ids or viewer_id, not both")
         placeholders = ",".join("?" for _ in canonical_ids)
-        if allowed_source_ids is None:
+        if allowed_source_ids is None and viewer_id is None:
             return db.execute(
                 f"SELECT canonical_src, edge_type, canonical_tgt, source_count, "
                 f"       sample_relation_ids "
@@ -1111,32 +1129,36 @@ class UnifiedKgStore:
                 f"LIMIT ?",
                 [notebook_id, *canonical_ids, source_max, limit],
             ).fetchall()
-        source_ids = list(dict.fromkeys(allowed_source_ids))
-        if not source_ids:
-            return []
-        ceiling = bind_ids(source_ids, sort=True)
-        gate = _endpoint_support_exists(
-            "cr", "cr.canonical_tgt",
-            authoritative=not UnifiedKgStore._source_index_backfilled(db, notebook_id),
-            bound=ceiling,
-        )
-        return db.execute(
+        if viewer_id is not None:
+            condition, param = foreign_memory_object_excluded("ko"), viewer_id
+        else:
+            ceiling = normalise_ceiling(allowed_source_ids)
+            if not ceiling:
+                return []
+            bound = ceiling_param(ceiling)
+            condition = evidence_support_sql(
+                "ko", bound,
+                authoritative=not UnifiedKgStore._source_index_backfilled(db, notebook_id),
+            )
+            param = bound.param
+        return execute_with_ceiling(
+            db,
             f"SELECT cr.canonical_src, cr.edge_type, cr.canonical_tgt, cr.source_count, "
             f"       cr.sample_relation_ids "
             f"FROM canonical_relations cr "
             f"WHERE cr.notebook_id=? AND cr.canonical_src IN ({placeholders}) "
-            f"  AND cr.source_count<=? AND {gate} "
+            f"  AND cr.source_count<=? AND {_weak_target_supported(condition)} "
             f"ORDER BY cr.source_count ASC, cr.canonical_tgt ASC, cr.canonical_src ASC, "
             f"         cr.edge_type ASC "
             f"LIMIT ?",
-            [notebook_id, *canonical_ids, source_max,
-             notebook_id, ceiling.param, ceiling.param, limit],
+            [notebook_id, *canonical_ids, source_max, notebook_id, param, limit],
         ).fetchall()
 
     @staticmethod
     def relation_endpoint_name_rows(
         db: sqlite3.Connection, notebook_id: str, relation_ids: List[str],
-        *, allowed_source_ids: Sequence[str] | None = None,
+        *, allowed_source_ids: Iterable[str] | None = None,
+        viewer_id: str | None = None, with_source_id: bool = False,
     ) -> List[sqlite3.Row]:
         """按**关系 id** 批量解析两端显示名(`canonical_name` 优先,payload name 回退)。
 
@@ -1162,25 +1184,30 @@ class UnifiedKgStore:
         快照(support/source 计数同样是那一刻的),提示行说的是「上次建图时这条边
         只有一两篇文献撑着」。在这里补状态过滤只会让名字与计数分属两代事实,而代价
         是两条 join 各多一个无索引的残余谓词。真正过期的整份快照由 rebuild 换掉。
-
-        每行带样本关系自己的 ``source_id``(快路径的读时核验用,见 PG 孪生)。
-        ``allowed_source_ids`` 缺省 → 不加谓词;传进来时样本关系本身必须出自
-        天花板内来源(空清单 = deny all)。
         """
         if not relation_ids:
             return []
+        # 关键字同 PG 孪生:三个都缺省 → 语句逐字不变;``with_source_id`` 多投影样本
+        # 关系的 ``source_id``(快路径读时核验);``allowed_source_ids``(空 = deny
+        # all)/ ``viewer_id`` 至多一个,样本关系本身须出自天花板内 / 非他人 Memory。
+        if allowed_source_ids is not None and viewer_id is not None:
+            raise ValueError("pass allowed_source_ids or viewer_id, not both")
         placeholders = ",".join("?" for _ in relation_ids)
         gate = ""
         params = [notebook_id, notebook_id, notebook_id, *relation_ids]
         if allowed_source_ids is not None:
-            source_ids = list(dict.fromkeys(allowed_source_ids))
-            if not source_ids:
+            ceiling = normalise_ceiling(allowed_source_ids)
+            if not ceiling:
                 return []
-            ceiling = bind_ids(source_ids, sort=True)
-            gate = f" AND {member_of('kr.source_id', ceiling)}"
-            params.append(ceiling.param)
+            bound = ceiling_param(ceiling)
+            gate = f" AND {member_of('kr.source_id', bound)}"
+            params.append(bound.param)
+        elif viewer_id is not None:
+            gate = f" AND {foreign_memory_relation_excluded('kr')}"
+            params.append(viewer_id)
+        source_column = "kr.source_id AS source_id, " if with_source_id else ""
         return db.execute(
-            f"SELECT kr.id AS rid, kr.source_id AS source_id, "
+            f"SELECT kr.id AS rid, {source_column}"
             f"       COALESCE(NULLIF(cs.canonical_name,''), "
             f"                json_extract(so.payload,'$.name'), '') AS src_name, "
             f"       COALESCE(NULLIF(ct.canonical_name,''), "
@@ -1195,6 +1222,33 @@ class UnifiedKgStore:
             f"WHERE kr.notebook_id=? AND kr.id IN ({placeholders}){gate}",
             params,
         ).fetchall()
+
+    @staticmethod
+    def object_support_source_rows(
+        db: sqlite3.Connection, notebook_id: str, object_ids: Sequence[str],
+    ) -> List[sqlite3.Row]:
+        """PG 孪生同名方法:给定对象的每个证据来源 ``(object_id, source_id)``。
+        反向索引已认证时读 ``knowledge_object_sources``,否则在 SQL 里把证据 JSON
+        投影成来源 id(引文不出库)。对象 id 驱动读取(``drive_by``,一个 JSON
+        参数;调用方分批)。"""
+        ids = list(object_ids)
+        if not ids:
+            return []
+        bound = bind_ids(ids)
+        if UnifiedKgStore._source_index_backfilled(db, notebook_id):
+            sql = (
+                "SELECT kos.object_id, kos.source_id FROM knowledge_object_sources kos "
+                f"WHERE {drive_by('kos.object_id', bound)} AND +kos.notebook_id=?"
+            )
+        else:
+            # ``+``: the notebook column must not become the index key (without
+            # ANALYZE the planner would walk the notebook's objects instead).
+            sql = (
+                f"SELECT ko.id AS object_id, CAST({EVIDENCE_ITEM_SOURCE} AS TEXT) AS source_id "
+                f"FROM knowledge_objects ko JOIN {evidence_items('ko')} "
+                f"WHERE {drive_by('ko.id', bound)} AND +ko.notebook_id=? AND ev.type='object'"
+            )
+        return db.execute(sql, (bound.param, notebook_id)).fetchall()
 
     @staticmethod
     def replace_canonical_relations(
