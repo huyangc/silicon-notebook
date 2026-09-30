@@ -1766,7 +1766,7 @@ class KnowledgeStore:
             return []
         ph = ",".join("?" for _ in ids)
         return db.execute(
-            f"SELECT id, evidence FROM knowledge_objects WHERE id IN ({ph})", ids,
+            f"SELECT id, evidence, source_id FROM knowledge_objects WHERE id IN ({ph})", ids,
         ).fetchall()
 
     @staticmethod

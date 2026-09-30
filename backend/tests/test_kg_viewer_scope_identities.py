@@ -283,6 +283,48 @@ def test_evidence_items_are_judged_on_named_and_actual_source(repo):
     assert len(owner["members"][0]["evidence"]) == 3
 
 
+def deprecate_with_visible_evidence(repo, s, object_id):
+    """A's Memory object that absorbed a visible evidence item (a merge into
+    it) and was later merged away itself: deprecated, owned by A's Memory,
+    citing a readable source. Its Memory relation to Engram stays (merges do
+    not re-point relations), so after the rebuild it is a RAW neighbour of
+    the Engram cluster on the DB path."""
+    raw = json.dumps([_ev("src-ma", "el-ma-secret"), _ev("src-s", "el-s-occ")])
+    with repo._write() as db:
+        db.execute(
+            "UPDATE knowledge_objects SET evidence=?, status='deprecated' WHERE id=?",
+            (raw, object_id))
+        repo._runtime.knowledge.replace_object_sources(db, object_id, s.nb, raw)
+    repo.rebuild_unified_kg(s.nb, force=True)
+    assert object_id not in repo.cluster_map(s.nb)
+
+
+def test_a_raw_object_is_judged_on_its_own_source_whatever_its_status(repo, monkeypatch):
+    """The owner half is judged on the row's own ``source_id``, not only
+    through the live owned set: a deprecated object of A's Memory that
+    cites a readable source never reaches B as a neighbour."""
+    s = build_scenario(repo, b_memory=False)
+    deprecate_with_visible_evidence(repo, s, s.ids.secret)
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "viz_index", lambda *_a, **_k: None)
+    owner = as_user(s.a, repo.kg_neighbors, s.nb, s.ids.engram_s)
+    assert s.ids.secret in {n["id"] for n in owner["nodes"]}, owner
+    view = as_user(s.b, repo.kg_neighbors, s.nb, s.ids.engram_s)
+    assert s.ids.secret not in {n["id"] for n in view["nodes"]}
+    assert "SecretProject" not in repr(view)
+    hidden = as_user(s.b, repo.kg_neighbors, s.nb, s.ids.secret)
+    assert hidden["nodes"] == [] and hidden["edges"] == []
+    scope = as_user(s.b, reader_of(repo).for_notebook, s.nb)
+    kept, edges = scope.filter_neighbourhood(
+        [{"id": s.ids.secret, "object_type": "concept",
+          "payload": {"name": "SecretProject"}},
+         {"id": s.ids.engram_canonical, "object_type": "concept",
+          "payload": {"name": "Engram"}}],
+        [{"source_object_id": s.ids.secret, "target_object_id": s.ids.engram_canonical,
+          "edge_type": "related_to"}],
+        (s.ids.engram_canonical,))
+    assert [n["id"] for n in kept] == [s.ids.engram_canonical] and edges == []
+
+
 # ------------------------------------------------- 2./3. legacy siblings
 def _legacy(repo, nb, name, section, source_id, evidence):
     """A legacy procedure (no payload ``steps``) with exactly ``evidence``,

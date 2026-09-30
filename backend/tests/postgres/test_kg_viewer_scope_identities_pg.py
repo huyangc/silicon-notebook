@@ -110,6 +110,29 @@ def test_pg_cluster_labels_never_come_from_an_evidence_hidden_member(repo, certi
         "A-PRIVATE Gadget")
 
 
+def test_pg_a_raw_object_is_judged_on_its_own_source_whatever_its_status(repo, monkeypatch):
+    """Twin of the SQLite test: a deprecated object of A's Memory that
+    absorbed a visible evidence item keeps its Memory relation to Engram, so
+    the DB neighbour path returns it as a raw node; B never gets it."""
+    s = build_scenario(repo, b_memory=False)
+    raw = json.dumps([_ev("src-ma", "el-ma-secret"), _ev("src-s", "el-s-occ")])
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "UPDATE knowledge_objects SET evidence=%s::jsonb, status='deprecated' WHERE id=%s",
+            (raw, s.ids.secret))
+        repo._runtime.knowledge.replace_object_sources(db, s.ids.secret, s.nb, raw)
+    repo.rebuild_unified_kg(s.nb, force=True)
+    assert s.ids.secret not in repo.cluster_map(s.nb)
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "viz_index", lambda *_a, **_k: None)
+    owner = as_user(s.a, repo.kg_neighbors, s.nb, s.ids.engram_s)
+    assert s.ids.secret in {n["id"] for n in owner["nodes"]}, owner
+    view = as_user(s.b, repo.kg_neighbors, s.nb, s.ids.engram_s)
+    assert s.ids.secret not in {n["id"] for n in view["nodes"]}
+    assert "SecretProject" not in repr(view)
+    hidden = as_user(s.b, repo.kg_neighbors, s.nb, s.ids.secret)
+    assert hidden["nodes"] == [] and hidden["edges"] == []
+
+
 def _legacy(repo, nb, name, section, source_id, evidence):
     oid = repo._test_insert_object(
         nb, "procedure", {"name": name, "section_path": section}, source_id=source_id)
