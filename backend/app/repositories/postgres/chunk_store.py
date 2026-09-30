@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Sequence
+from typing import Iterable, Mapping, Sequence
 
 from app.repositories.chunk_elements import reverse_rows_for_writes
 from app.repositories.ports import ChunkWrite
@@ -17,6 +17,7 @@ from app.repositories.postgres._store_utils import (
     placeholders,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.source_ceiling import ceiling_param, normalise_ceiling
 from app.repositories.postgres.id_binding import (
     bind_ids,
     execute_bound,
@@ -428,17 +429,43 @@ class ChunkStore:
         return [_compat_element_ids(row) for row in rows]
 
     @staticmethod
-    def graph_hydrate_rows(connection, chunk_ids: Sequence[str]):
+    def graph_hydrate_rows(
+        connection,
+        chunk_ids: Sequence[str],
+        *,
+        allowed_source_ids: Mapping[str, Iterable[str] | None] | None = None,
+    ):
+        """Hydrate one window of PPR-ranked chunk ids (across every library
+        the PPR graph spans).
+
+        ``allowed_source_ids`` holds the per-library source ceilings of the
+        run: ``{notebook_id: frozen source ids}``.  A chunk of a listed library
+        comes back only when its source is in that library's list (an empty
+        list denies the library, a ``None`` value lists nothing); a chunk of an
+        unlisted library, and every chunk when nothing is listed, comes back
+        as read -- then the statement is byte for byte the one issued before
+        the keyword existed.  The ceilings only filter: the <= ``_IN_CHUNK``
+        candidate primary keys drive the read (pinned by
+        ``tests/postgres/test_ppr_hydration_ceiling_pins.py``), and every list
+        is bound through ``id_binding`` (one parameter, custom plan).
+        """
         ids = list(chunk_ids)
         if not ids:
             return []
-        rows = connection.execute(
+        sql = (
             "SELECT c.id,c.source_id,c.text,c.section_path,c.element_ids,"
             "c.notebook_id AS chunk_notebook_id,s.title AS source_title "
             "FROM chunks c JOIN sources s ON s.id=c.source_id "
-            f"WHERE c.id IN ({placeholders(ids)}) ORDER BY c.ordinal",
-            ids,
-        ).fetchall()
+            f"WHERE c.id IN ({placeholders(ids)})"
+        )
+        clause, params = _library_source_ceiling_clause(allowed_source_ids or {})
+        if clause is None:
+            rows = connection.execute(f"{sql} ORDER BY c.ordinal", ids).fetchall()
+        else:
+            rows = execute_ids(
+                connection, f"{sql} AND {clause} ORDER BY c.ordinal",
+                [*ids, *params],
+            ).fetchall()
         return [_compat_element_ids(row) for row in rows]
 
     @staticmethod
@@ -605,3 +632,37 @@ class ChunkStore:
                 "SELECT COUNT(*) AS c FROM chunks WHERE notebook_id=%s", (notebook_id,)
             ).fetchone()["c"]
         )
+
+
+def _library_source_ceiling_clause(
+    ceilings: Mapping[str, Iterable[str] | None],
+) -> tuple[str | None, list]:
+    """``graph_hydrate_rows``' per-library ceiling predicate on ``c`` and its
+    parameters (``(None, [])`` when no library is listed).  Same text on the
+    SQLite twin, dialect aside.
+
+    A chunk passes when its library is not listed, or when its source is in
+    its OWN library's list: each list is paired with its notebook id, so a
+    ceiling can never admit another library's source.  An empty (or blank-only)
+    list pairs with nothing, which denies that library; a ``None`` value is not
+    a ceiling and leaves the library unlisted.  Libraries are ordered by id so
+    equal arguments give one statement text; the lists go through
+    ``source_ceiling.ceiling_param`` (the run's ``CeilingSet`` memoises its
+    bound form)."""
+    listed = {
+        str(notebook_id): ids for notebook_id, ids in ceilings.items()
+        if ids is not None
+    }
+    if not listed:
+        return None, []
+    notebooks = bind_ids(sorted(listed))
+    arms = [not_member_of("c.notebook_id", notebooks)]
+    params: list = [notebooks.param]
+    for notebook_id in sorted(listed):
+        ceiling = normalise_ceiling(listed[notebook_id])
+        if not ceiling:
+            continue
+        bound = ceiling_param(ceiling)
+        arms.append(f"(c.notebook_id=%s AND {member_of('c.source_id', bound)})")
+        params.extend((notebook_id, bound.param))
+    return f"({' OR '.join(arms)})", params
