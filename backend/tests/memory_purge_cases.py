@@ -147,8 +147,17 @@ def _doc_object(repo: Any, sql: Sql, user: Any, notebook_id: str) -> tuple[str, 
     return source_id, row["id"]
 
 
-def make_memory(world: World, key: str, notebook_id: str, user: Any) -> Projection:
-    """A confirmed Memory with a real derived source and a full KG projection."""
+def make_memory(
+    world: World,
+    key: str,
+    notebook_id: str,
+    user: Any,
+    names: tuple[str, str] | None = None,
+) -> Projection:
+    """A confirmed Memory with a real derived source and a full KG projection
+    (two concept objects, named ``names`` or ``<key> loop`` / ``<key>
+    compensation``)."""
+    first_name, second_name = names or (f"{key} loop", f"{key} compensation")
     repo, sql = world.repo, world.sql
     service = repo._runtime.memory_service
     candidate = service.create_candidate(
@@ -180,12 +189,12 @@ def make_memory(world: World, key: str, notebook_id: str, user: Any) -> Projecti
         [
             {
                 "local_id": "a", "object_type": "concept",
-                "payload": {"name": f"{key} loop", "section_path": ""},
+                "payload": {"name": first_name, "section_path": ""},
                 "evidence": evidence,
             },
             {
                 "local_id": "b", "object_type": "concept",
-                "payload": {"name": f"{key} compensation", "section_path": ""},
+                "payload": {"name": second_name, "section_path": ""},
                 "evidence": evidence,
             },
         ],
@@ -924,18 +933,27 @@ def _merge_candidates(world: World) -> set[tuple[str, str]]:
 
 def case_merge_candidates_written_by_fusion_are_deleted(world: World) -> None:
     """Item 3: merge candidates hold CLUSTER canonical ids (``K-<seed>``),
-    written here by the real fusion writer. After the purge none names the
-    Memory's clusters or bridge ids; the candidate between two shared
-    clusters stays."""
+    written here by the real fusion writer. The Memory's "TLL" is placed
+    (acronym redirect) into the shared "Twin locked loop (TLL)" cluster, while
+    the bridge detector names it ``K-tll`` — an id no cluster row carries.
+    After the purge no candidate names the Memory's clusters (the shared
+    cluster it joined goes whole) or its bridge id; the candidate between two
+    untouched shared clusters stays."""
     bind_all_embedding_clients(world.repo, _TwinEmbedder(dim=EMBED_DIM))
+    _fused_doc_object(world, "Twin locked loop (TLL)")
     _fused_doc_object(world, "Twin shared notes")
     _fused_doc_object(world, "Twin other notes")
-    make_memory(world, "twin", world.shared, world.alice)
+    make_memory(
+        world, "twin", world.shared, world.alice, names=("TLL", "twin private idea")
+    )
     before = _merge_candidates(world)
     shared_pair = ("K-twin other notes", "K-twin shared notes")
-    assert shared_pair in before
-    memory_names = {"K-twin loop", "K-twin compensation"}
-    assert any(set(pair) & memory_names for pair in before), before
+    assert shared_pair in before, before
+    assert any("K-tll" in pair for pair in before), before
+    assert world.sql.count(
+        "SELECT COUNT(*) AS c FROM concept_clusters WHERE canonical_id='K-tll'"
+    ) == 0
+    memory_names = {"K-tll", "K-twin private idea", "K-twin locked loop"}
     world.repo.delete_memory(world.projections["twin"].memory_id, world.alice.id)
     after = _merge_candidates(world)
     assert not any(set(pair) & memory_names for pair in after), after
