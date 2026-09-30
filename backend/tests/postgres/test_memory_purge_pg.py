@@ -10,7 +10,10 @@ import threading
 
 import pytest
 
-from app.services.memory_service import ExitDisclosureRequired
+from app.services.memory_service import (
+    ExitDisclosureRequired,
+    MemberExitIncomplete,
+)
 from tests.memory_purge_cases import (
     CASES,
     EMBED_DIM,
@@ -70,6 +73,10 @@ def _race(calls):
             outcomes[index] = "ok"
         except ExitDisclosureRequired as exc:
             outcomes[index] = f"disclosure:{exc.memory_count}"
+        except MemberExitIncomplete as exc:
+            outcomes[index] = (
+                f"incomplete:{exc.deleted_memory_count}:{exc.memory_count}"
+            )
         except BaseException as exc:  # noqa: BLE001 - reported below
             outcomes[index] = f"{type(exc).__name__}: {exc}"
 
@@ -135,7 +142,9 @@ def test_an_exit_racing_a_save_never_deletes_the_unacknowledged_memory(
 
     outcomes = _race([lambda: self_exit(world, world.alice, world.shared, 1), save])
     assert outcomes[1] == "ok", outcomes
-    assert outcomes[0] == "ok" or outcomes[0].startswith("disclosure:"), outcomes
+    assert outcomes[0] == "ok" or outcomes[0].startswith(
+        ("disclosure:", "incomplete:1:")
+    ), outcomes
     surviving = {
         row["id"]
         for row in world.sql.rows(

@@ -7596,6 +7596,20 @@
           "title": "LastRebuild",
           "type": "object"
         },
+        "MemberExitResult": {
+          "description": "``DELETE /notebooks/{id}/membership`` 200: the exit finished; this\nrequest deleted ``deleted_memory_count`` Memories (counted by the\nserver).",
+          "properties": {
+            "deleted_memory_count": {
+              "title": "Deleted Memory Count",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "deleted_memory_count"
+          ],
+          "title": "MemberExitResult",
+          "type": "object"
+        },
         "MemoryBulkDeleteRequest": {
           "properties": {
             "memory_ids": {
@@ -24033,7 +24047,7 @@
       },
       "/api/notebooks/{notebook_id}/membership": {
         "delete": {
-          "description": "退出只读共享:删自己的成员记录(幂等,不影响他人),并永久删除自己在这本库里的\n全部记忆及其派生数据——前提是成员记录是本人读这本库的最后途径。\n\n要删的记忆多于 0 条时,必须带上 `acknowledged_memory_count` 且与服务端此刻的条数\n完全一致,否则 409 `exit_disclosure_required`(带服务端条数),什么都不删、仍是成员。\n0 条时不需要确认,行为与从前一致。",
+          "description": "本人退出共享:结束自己的成员关系(幂等,不影响他人)。成员记录是本人读这本库的最后\n途径时,同时永久删除本人在这本库里的全部记忆及其派生数据。\n\n服务端在成员行锁下领取此刻要删的记忆,条数 C;`acknowledged_memory_count`(缺省按 0)\n必须等于 C:\n- 不等(含 C=0 而确认数大于 0:期间已不是成员、有了授权或把记忆移走了)→ 409\n  `exit_disclosure_required`(带 C),什么都不删、成员关系不变;\n- C=0 → 204,成员关系结束(或本来就不在),什么都不删;\n- C>0 且全部删完、收尾成功 → 200 `{\"deleted_memory_count\": d}`,d 是本次请求实际删除\n  的条数;\n- 删了 d 条(d>0),但期间又保存了未确认的 r 条 → 409 `exit_incomplete`(带 d、r),\n  仍是成员;\n- 中途失败 → 503 `exit_incomplete`(带 d、r,d 可以为 0),仍是成员,已删的不会恢复,\n  可以重试(重试从重新告知条数开始)。\n客户端断开不影响结果:每一步各自提交,下一次告知如实报告剩下的条数。",
           "operationId": "leave_notebook_route_api_notebooks__notebook_id__membership_delete",
           "parameters": [
             {
@@ -24064,8 +24078,21 @@
             }
           ],
           "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemberExitResult"
+                  }
+                }
+              },
+              "description": "The exit finished; this request deleted `deleted_memory_count` Memories (counted by the server)."
+            },
             "204": {
-              "description": "Successful Response"
+              "description": "Nothing to delete: the membership ended (or was already absent)."
+            },
+            "409": {
+              "description": "`exit_disclosure_required` `{code, memory_count}`: the acknowledgement differs from the count; nothing deleted, membership unchanged. `exit_incomplete` `{code, deleted_memory_count, memory_count}`: that many were deleted, Memories saved during the exit remain; still a member."
             },
             "422": {
               "content": {
@@ -24076,6 +24103,9 @@
                 }
               },
               "description": "Validation Error"
+            },
+            "503": {
+              "description": "`exit_incomplete` `{code, deleted_memory_count, memory_count}`: the purge failed part-way; still a member; what was deleted stays deleted; retry is safe."
             }
           },
           "summary": "Leave Notebook Route"
