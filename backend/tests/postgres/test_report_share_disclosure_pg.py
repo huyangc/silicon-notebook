@@ -281,6 +281,8 @@ def test_memory_ids_for_source_ids_explain_pin_pg(world):
         )
     assert "LockRows" in memory_rows, memory_rows
     assert "pk_memory_items on memory_items lm" in memory_rows, memory_rows
+    # The rows are locked in Memory-id order: LockRows sits on a sort by lm.id.
+    assert "Sort Key: lm.id" in memory_rows, memory_rows
     assert "Seq Scan" not in memory_rows, memory_rows
 
 
