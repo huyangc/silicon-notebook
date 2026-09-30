@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import builtins
 import sys
+import importlib
 import importlib.util
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -583,9 +584,59 @@ def _seams() -> RepositoryCompatibilitySeams:
     )
 
 
+def _forget_module(monkeypatch: pytest.MonkeyPatch, module_name: str) -> None:
+    """Drop ``module_name`` from ``sys.modules`` for THIS test only.
+
+    A bare ``sys.modules.pop`` leaves the process with two views of the same
+    module: the parent package still binds the OLD module object as an
+    attribute, while the next ``import`` builds a NEW one. From then on
+    ``from app.repositories.postgres import repository`` (attribute lookup)
+    and ``from app.repositories.postgres.repository import PostgresRepository``
+    (``sys.modules`` lookup) resolve to different objects, and a monkeypatch
+    applied through one path is invisible to the other. That is exactly how
+    ``test_scale_build_cli.py::test_the_composition_root_disowns_the_schema_at_the_call_site``
+    flaked for every worker that ran one of these tests earlier (2026-09-29).
+
+    Both halves go through ``monkeypatch`` so its LIFO undo restores them
+    together: the package attribute is pinned to the current module (a real
+    re-import inside the test rebinds it, and the undo puts the old one back)
+    and the ``sys.modules`` entry comes back at teardown. Pop a package AFTER
+    its submodules, so the submodule's parent is still the live package.
+    """
+    parent_name, _, child = module_name.rpartition(".")
+    parent = sys.modules.get(parent_name)
+    if parent is not None and hasattr(parent, child):
+        monkeypatch.setattr(parent, child, getattr(parent, child))
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
+
+
+def test_forgetting_a_module_restores_the_package_attribute_and_sys_modules():
+    """Regression pin for the helper above — the leak is only visible AFTER the
+    forgetting test's teardown, from a later test, so the helper has to prove
+    its own restore rather than rely on the victim to notice."""
+    import app.repositories.postgres.repository as real_module
+    package = sys.modules["app.repositories.postgres"]
+    module_name = real_module.__name__
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _forget_module(monkeypatch, module_name)
+        assert module_name not in sys.modules
+        reimported = importlib.import_module(module_name)
+        assert reimported is not real_module
+        assert package.repository is reimported
+
+    assert sys.modules[module_name] is real_module
+    assert package.repository is real_module
+    from app.repositories.postgres import repository as via_attribute
+    from app.repositories.postgres.repository import PostgresRepository
+
+    assert via_attribute is real_module
+    assert PostgresRepository is real_module.PostgresRepository
+
+
 def test_postgresql_repository_import_is_lazy(monkeypatch, tmp_path):
     module_name = "app.repositories.postgres.repository"
-    sys.modules.pop(module_name, None)
+    _forget_module(monkeypatch, module_name)
     factory = _repository_factory_module()
 
     assert module_name not in sys.modules
@@ -605,7 +656,7 @@ def test_create_repository_omits_migrate_and_seed_kwargs_by_default(monkeypatch,
     接受它们的最小替身(比如上面那条测试的单参数 lambda)不受影响
     (codex #700 R1 P1)。"""
     module_name = "app.repositories.postgres.repository"
-    sys.modules.pop(module_name, None)
+    _forget_module(monkeypatch, module_name)
     factory = _repository_factory_module()
 
     postgres_module = ModuleType(module_name)
@@ -626,7 +677,7 @@ def test_create_repository_forwards_migrate_and_seed_when_overridden(monkeypatch
     (codex #700 R1 P1)——`search` 这类只读工具靠这两个关键字关掉
     `bundle._initialize` 的迁移与 admin 密码重写。"""
     module_name = "app.repositories.postgres.repository"
-    sys.modules.pop(module_name, None)
+    _forget_module(monkeypatch, module_name)
     factory = _repository_factory_module()
 
     calls: list[dict] = []
@@ -744,8 +795,8 @@ def test_real_postgresql_selection_uses_adapter_and_redacts_startup_failure(tmp_
 
 def test_postgresql_selection_does_not_mask_nested_import_failures(monkeypatch, tmp_path):
     factory = _repository_factory_module()
-    sys.modules.pop("app.repositories.postgres.repository", None)
-    sys.modules.pop("app.repositories.postgres", None)
+    _forget_module(monkeypatch, "app.repositories.postgres.repository")
+    _forget_module(monkeypatch, "app.repositories.postgres")
     real_import = builtins.__import__
 
     def import_with_missing_driver(name, globals=None, locals=None, fromlist=(), level=0):
