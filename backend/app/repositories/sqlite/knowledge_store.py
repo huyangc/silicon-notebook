@@ -168,6 +168,16 @@ def _definition_from_defines(
     return {} if hit is None else _defines_evidence_fields(hit)
 
 
+# PG 孪生常量(台账 B-11):元素 → 来源 → 笔记本三次主键探测,谓词写成
+# ``+os.notebook_id=?``,让无统计信息(生产不跑 ANALYZE)时也由元素 id 驱动,
+# 而不是按 ``sources.notebook_id`` 扫一整库的来源。计划钉在
+# ``tests/test_store_evidence_ceiling_plans.py``。
+_OWN_ELEMENT_JOIN = (
+    " JOIN sources os ON os.id=se.source_id"
+    " JOIN notebooks onb ON onb.id=os.notebook_id"
+)
+
+
 def _element_rows(db: sqlite3.Connection, element_ids: Iterable[object]) -> dict:
     """{element_id: (source_id, text)},只含存在的元素。"""
     ids = [e for e in dict.fromkeys(element_ids) if e]
@@ -1822,15 +1832,29 @@ class KnowledgeStore:
         ).fetchall()
 
     @staticmethod
-    def follow_relation_evidence_rows(db: sqlite3.Connection, relation_ids):
+    def follow_relation_evidence_rows(db: sqlite3.Connection, relation_ids, *,
+                                      notebook_id: Optional[str] = None):
+        """推导链一跳的证据与来源标题(台账 N-4)。
+
+        来源标题只取**关系自己那一库**的来源(``s.notebook_id=r.notebook_id``
+        在 JOIN 条件里,无条件):关系的 ``source_id`` 指向别的库时(晋升、合并
+        带进来的外库指针)标题留空,不按全局 id 现读外库来源的名字。对一致的
+        数据(关系与其来源同库)结果与加谓词之前逐值相同。
+
+        ``notebook_id``:给了就只返回该库的关系行——调用方(推导链)只从起点
+        所在的库读边,于是一个指向别库关系的 id 不会被水合。``None`` = 不按库
+        限定关系行(JOIN 上的同库谓词照样生效)。"""
         ids = list(relation_ids)
         if not ids:
             return []
         ph = ",".join("?" for _ in ids)
+        own = "" if notebook_id is None else " AND r.notebook_id=?"
         return db.execute(
             f"SELECT r.id, r.evidence, s.title AS source_title "
-            f"FROM knowledge_relations r LEFT JOIN sources s ON s.id=r.source_id "
-            f"WHERE r.id IN ({ph})", tuple(ids),
+            f"FROM knowledge_relations r LEFT JOIN sources s "
+            f"ON s.id=r.source_id AND s.notebook_id=r.notebook_id "
+            f"WHERE r.id IN ({ph}){own}",
+            (*ids, *(() if notebook_id is None else (notebook_id,))),
         ).fetchall()
 
     @staticmethod
@@ -1849,17 +1873,52 @@ class KnowledgeStore:
 
     @staticmethod
     def in_network_relation_rows(db: sqlite3.Connection, notebook_id: str,
-                                 object_ids):
+                                 object_ids, *,
+                                 allowed_source_ids: Optional[Iterable[str]] = None):
         """T2(批 1 热点整改):``DISTINCT`` 下推同一 (src,et,tgt) 跨多个来源的
         重复原始行——此前它们全部原样回传,靠 Python 侧 identity 去重循环兜底
         (仍保留,防御性)。``ORDER BY`` 是把此前 planner 相关、无定义的行序钉成
         确定行为:旧 SQL 没有 ORDER BY,支持数并列时 identity 去重"谁先到谁被
         记入 seen_relations"的 tie 由存储顺序决定,双后端/同库两次运行都不必
-        一致;补上确定序让这类并列在跨后端/跨执行下稳定,不是语义变更。"""
+        一致;补上确定序让这类并列在跨后端/跨执行下稳定,不是语义变更。
+
+        ``allowed_source_ids``(PR-E2·E2-4,台账 B-6):``None`` → 语句与参数与
+        加这个参数之前逐字节相同(调用方只在该库的来源天花板**起约束作用**时
+        才传,见 ``EvidenceContextService.knowledge_context``)。空 → ``[]``,
+        不发语句。非空 → 只读 ``r.source_id`` 在天花板内的关系行,``DISTINCT``
+        换成 ``GROUP BY`` 并多投影一列 ``source_count`` = 天花板内**不同来源**
+        的条数(「×N源」的界内口径);没有一条界内行的边根本不返回。天花板经
+        ``source_ceiling.ceiling_param``(一个 JSON 参数、排序、备忘在 run 的
+        ``CeilingSet`` 上)绑定,谓词是 ``id_binding.member_of`` 的 ``+r.source_id
+        IN``:一元 ``+`` 让清单只做成员测试,关系行照旧由两端 id 走
+        ``idx_knowledge_relations_nb_source_target_edge`` 驱动——生产库不跑
+        ANALYZE,两种统计状态下的计划由 ``test_store_evidence_ceiling_plans.py``
+        钉住。"""
         ids = list(object_ids)
         if len(ids) < 2:
             return []
         ph = ",".join("?" for _ in ids)
+        ceiling = source_ceiling.normalise_ceiling(allowed_source_ids)
+        if ceiling is not None:
+            if not ceiling:
+                return []
+            bound = source_ceiling.ceiling_param(ceiling)
+            return db.execute(
+                f"SELECT r.source_object_id, r.target_object_id, r.edge_type, "
+                f"src.object_type AS source_type, tgt.object_type AS target_type, "
+                f"COUNT(DISTINCT r.source_id) AS source_count "
+                f"FROM knowledge_relations AS r "
+                f"JOIN knowledge_objects AS src ON src.id=r.source_object_id "
+                f"JOIN knowledge_objects AS tgt ON tgt.id=r.target_object_id "
+                f"WHERE r.notebook_id=? AND r.review_status!='rejected' "
+                f"AND r.source_object_id IN ({ph}) "
+                f"AND r.target_object_id IN ({ph}) "
+                f"AND {member_of('r.source_id', bound)} "
+                f"GROUP BY r.source_object_id, r.target_object_id, r.edge_type, "
+                f"src.object_type, tgt.object_type "
+                f"ORDER BY r.source_object_id, r.edge_type, r.target_object_id",
+                [notebook_id, *ids, *ids, bound.param],
+            ).fetchall()
         return db.execute(
             f"SELECT DISTINCT r.source_object_id, r.target_object_id, r.edge_type, "
             f"src.object_type AS source_type, tgt.object_type AS target_type "
@@ -1993,25 +2052,57 @@ class KnowledgeStore:
             "payload": json.loads(row["payload"] or "{}"),
         } for row in rows]
 
-    def _element_texts(self, db, element_ids, *, with_ordinal: bool = False):
+    def _element_texts(self, db, element_ids, *, with_ordinal: bool = False,
+                       owner_notebook_id: Optional[str] = None):
+        """步骤元素的正文(与 ``with_ordinal`` 时的文档序)。
+
+        ``owner_notebook_id``(台账 B-11):给了就只读属于该库(且该库存活)
+        的来源的元素,序号也只在该库内排——晋升进公共库的过程对象,其步骤
+        元素指向推广者的私有库,不再按全局 id 现读那边的正文(调用方回落到
+        步骤自己存的 ``quote``)。``None`` = 与加参数之前逐字节相同。"""
         ids = [e for e in element_ids if e]
         if not ids:
             return {}, {}
         ph = ",".join("?" for _ in ids)
-        rows = db.execute(f"SELECT id, text FROM source_elements WHERE id IN ({ph})", ids).fetchall()
+        if owner_notebook_id is None:
+            rows = db.execute(f"SELECT id, text FROM source_elements WHERE id IN ({ph})", ids).fetchall()
+        else:
+            rows = db.execute(
+                f"SELECT se.id, se.text FROM source_elements se{_OWN_ELEMENT_JOIN} "
+                f"WHERE se.id IN ({ph}) AND +os.notebook_id=?",
+                (*ids, owner_notebook_id),
+            ).fetchall()
         texts = {r["id"]: r["text"] for r in rows}
         if not with_ordinal:
             return texts, {}
-        order_rows = db.execute(
-            "SELECT se.id FROM source_elements se JOIN sources s ON se.source_id=s.id "
-            "WHERE s.notebook_id=(SELECT notebook_id FROM sources WHERE id=("
-            "SELECT source_id FROM source_elements WHERE id=? LIMIT 1)) "
-            "ORDER BY se.created_at ASC, se.id ASC",
-            (ids[0],),
-        ).fetchall()
+        if owner_notebook_id is None:
+            order_rows = db.execute(
+                "SELECT se.id FROM source_elements se JOIN sources s ON se.source_id=s.id "
+                "WHERE s.notebook_id=(SELECT notebook_id FROM sources WHERE id=("
+                "SELECT source_id FROM source_elements WHERE id=? LIMIT 1)) "
+                "ORDER BY se.created_at ASC, se.id ASC",
+                (ids[0],),
+            ).fetchall()
+        else:
+            order_rows = db.execute(
+                "SELECT se.id FROM source_elements se JOIN sources s ON se.source_id=s.id "
+                "WHERE s.notebook_id=? ORDER BY se.created_at ASC, se.id ASC",
+                (owner_notebook_id,),
+            ).fetchall()
         ordinal = {r["id"]: i for i, r in enumerate(order_rows)}
         return texts, ordinal
-    def _enrich_evidence(self, db, evidence):
+    def _enrich_evidence(self, db, evidence, *, owner_notebook_id: Optional[str] = None):
+        """证据条目补全:按 ``element_id`` 读元素,覆盖 ``source_id`` /
+        ``element_type`` / ``location_label`` 并给出 ``element_text``;读不到的
+        条目用存储时的 ``quoted_span`` 当正文,``source_title`` 永远是存储值。
+
+        ``owner_notebook_id``(台账 B-11,PR-E2·E2-4):给了就只用**属于该库、
+        且该库存活**的来源的元素覆盖——``node_context`` 传对象自己所在的库。
+        晋升进公共库的对象,证据仍指向推广者私有库的元素;那些条目读不到,
+        于是保留存储时的 ``quoted_span`` / ``source_title``,不按全局 id 现读
+        推广者私有库元素的现文与来源。对普通对象(证据都在本库)结果逐值不变。
+        ``None`` = 与加参数之前逐字节相同(``knowledge_query`` 的两个调用方
+        仍走这条,见 E2-4 报告)。"""
         # PG 孪生:非对象项(脏数据)跳过,不抛。
         evidence = [e for e in evidence if isinstance(e, dict)]
         element_ids = list(
@@ -2020,11 +2111,19 @@ class KnowledgeStore:
         details = {}
         if element_ids:
             ph = ",".join("?" for _ in element_ids)
-            rows = db.execute(
-                f"SELECT id, source_id, element_type, location_label, text "
-                f"FROM source_elements WHERE id IN ({ph})",
-                element_ids,
-            ).fetchall()
+            if owner_notebook_id is None:
+                rows = db.execute(
+                    f"SELECT id, source_id, element_type, location_label, text "
+                    f"FROM source_elements WHERE id IN ({ph})",
+                    element_ids,
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    f"SELECT se.id, se.source_id, se.element_type, se.location_label, se.text "
+                    f"FROM source_elements se{_OWN_ELEMENT_JOIN} "
+                    f"WHERE se.id IN ({ph}) AND +os.notebook_id=?",
+                    (*element_ids, owner_notebook_id),
+                ).fetchall()
             details = {row["id"]: row for row in rows}
         out = []
         for e in evidence:
@@ -2065,7 +2164,8 @@ class KnowledgeStore:
             section = payload.get("section_path", "")
             shown_section = section if allowed is None or row["source_id"] in allowed else ""
             raw_evidence = json.loads(row["evidence"] or "[]")
-            occurrences = self._enrich_evidence(db, raw_evidence)
+            occurrences = self._enrich_evidence(
+                db, raw_evidence, owner_notebook_id=notebook_id)
             if allowed is not None:
                 occurrences = _scoped_occurrences(raw_evidence, occurrences, allowed)
             result = {"id": object_id, "object_type": obj_type, "name": payload.get("name", ""),
@@ -2113,7 +2213,8 @@ class KnowledgeStore:
                         # 一次批量 enrich 覆盖全部定义者的证据(顺序 = 关系 id 序、
                         # 定义者内证据序)。
                         enriched = self._enrich_evidence(
-                            db, [item for ev in per_definer for item in ev])
+                            db, [item for ev in per_definer for item in ev],
+                            owner_notebook_id=notebook_id)
                         result.update(_definition_from_defines(
                             json.loads(drows[0]["payload"] or "{}").get("name", ""),
                             len(per_definer[0]), enriched, allowed))
@@ -2123,7 +2224,9 @@ class KnowledgeStore:
                     # New self-contained shape: ordered steps live in the object's payload.
                     if allowed is None:
                         eids = [s.get("element_id") for s in steps_payload if s.get("element_id")]
-                        texts, _ord = self._element_texts(db, eids) if eids else ({}, {})
+                        texts, _ord = self._element_texts(
+                            db, eids, owner_notebook_id=notebook_id,
+                        ) if eids else ({}, {})
                         result["steps"] = [
                             {"name": s.get("name", ""),
                              "element_text": texts.get(s.get("element_id") or "", s.get("quote", "")),
@@ -2138,7 +2241,9 @@ class KnowledgeStore:
                 else:
                     result["steps"] = _legacy_sibling_steps(
                         db, notebook_id, section, shown_section, allowed,
-                        self._element_texts, own_row=row)
+                        lambda db_, ids_, **kw: self._element_texts(
+                            db_, ids_, owner_notebook_id=notebook_id, **kw),
+                        own_row=row)
             return result
 
     # ------------------------------------------------------------- counts
@@ -3550,7 +3655,10 @@ class KnowledgeStore:
                  "match": "lexical"} for r in rows]
 
     @staticmethod
-    def chunk_exact_search(db, notebook_id: str, needle: str, k: int = 50) -> List[Dict]:
+    def chunk_exact_search(
+        db, notebook_id: str, needle: str, k: int = 50, *,
+        allowed_source_ids: Optional[Sequence[str]] = None,
+    ) -> List[Dict]:
         """EXACT substring chunk hits — deliberately NOT lexical_recall_terms.
 
         `chunk_fts_search` above decomposes its query into an OR-union of
@@ -3567,6 +3675,16 @@ class KnowledgeStore:
         would cost one query per identifier for nothing. `score` is native bm25
         ranking; it orders this backend's own hits and is never compared across
         backends.
+
+        `allowed_source_ids` (PR-E2 E2-4, ledger B-9): `None` sends the
+        statement and parameters byte-identical to the unrestricted probe.  A
+        collection (blank ids dropped) restricts the hits to chunks of those
+        sources BELOW the `LIMIT` -- out-of-ceiling hits no longer take the
+        probe window -- and empty returns `[]` without a query.  The list binds
+        as ONE JSON parameter (`id_binding.bind_ids(sort=True)`), tested with
+        `member_of` (`+c.source_id IN`): the FTS5 MATCH drives, the list only
+        filters, in both statistics states (production never runs ANALYZE;
+        `tests/test_store_evidence_ceiling_plans.py`).
         """
         term = (needle or "").strip()
         if len(term) < 3 or k <= 0:
@@ -3574,13 +3692,27 @@ class KnowledgeStore:
             # already guarantees >= 4, so this is a defensive floor.
             return []
         match_query = '"' + term.replace('"', '""') + '"'
-        rows = db.execute(
-            "SELECT chunks_fts.chunk_id AS chunk_id, c.source_id AS source_id, "
-            "c.section_path AS section_path, bm25(chunks_fts) AS rank "
-            "FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.chunk_id "
-            "WHERE chunks_fts.notebook_id=? AND chunks_fts MATCH ? "
-            "ORDER BY rank LIMIT ?",
-            (notebook_id, match_query, k)).fetchall()
+        if allowed_source_ids is None:
+            rows = db.execute(
+                "SELECT chunks_fts.chunk_id AS chunk_id, c.source_id AS source_id, "
+                "c.section_path AS section_path, bm25(chunks_fts) AS rank "
+                "FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.chunk_id "
+                "WHERE chunks_fts.notebook_id=? AND chunks_fts MATCH ? "
+                "ORDER BY rank LIMIT ?",
+                (notebook_id, match_query, k)).fetchall()
+        else:
+            source_ids = [str(value) for value in dict.fromkeys(allowed_source_ids) if value]
+            if not source_ids:
+                return []
+            ceiling = bind_ids(source_ids, sort=True)
+            rows = db.execute(
+                "SELECT chunks_fts.chunk_id AS chunk_id, c.source_id AS source_id, "
+                "c.section_path AS section_path, bm25(chunks_fts) AS rank "
+                "FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.chunk_id "
+                "WHERE chunks_fts.notebook_id=? AND chunks_fts MATCH ? "
+                f"AND {member_of('c.source_id', ceiling)} "
+                "ORDER BY rank LIMIT ?",
+                (notebook_id, match_query, ceiling.param, k)).fetchall()
         return [{"chunk_id": r["chunk_id"], "source_id": r["source_id"],
                  "section_path": r["section_path"] or "",
                  "score": -float(r["rank"]), "match": "lexical"} for r in rows]

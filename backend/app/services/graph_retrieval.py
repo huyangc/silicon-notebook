@@ -1326,7 +1326,9 @@ class GraphRetrievalService(_RetrievalState):
                 missing = [row["id"] for row in rows
                            if row["id"] not in hydrated_relation_cache]
                 for batch in self._in_batches(missing):
-                    for row in self.knowledge.follow_relation_evidence_rows(db, batch):
+                    for row in self.knowledge.follow_relation_evidence_rows(
+                        db, batch, notebook_id=owner_notebook_id,
+                    ):
                         try:
                             evidence = json.loads(row["evidence"] or "[]")
                         except Exception:
@@ -1862,18 +1864,31 @@ class GraphRetrievalService(_RetrievalState):
     def scale_ppr(self, *args, **kwargs):
         return self._scale_ppr_impl(*args, **kwargs)
 
-    def in_network_relations(self, participant_ids, object_ids):
+    def in_network_relations(self, participant_ids, object_ids, *, source_ceilings=None):
+        """Relation rows among ``object_ids``, per participant notebook.
+
+        ``source_ceilings`` (PR-E2 E2-4, ledger B-6): ``{notebook_id: ceiling}``
+        for the notebooks whose source ceiling BINDS on this run; each such
+        notebook reads in-ceiling rows only and every row carries
+        ``source_count``.  Other notebooks read exactly as before."""
         from app.services.kg.edge_schema import is_queryable_edge_pair
 
         ids = list(object_ids)
         if len(ids) < 2:
             return []
+        ceilings = source_ceilings or {}
         out = []
         with self._connect() as database:
             for notebook_id in participant_ids:
-                rows = self.knowledge.in_network_relation_rows(
-                    database, notebook_id, ids,
-                )
+                if notebook_id in ceilings:
+                    rows = self.knowledge.in_network_relation_rows(
+                        database, notebook_id, ids,
+                        allowed_source_ids=ceilings[notebook_id],
+                    )
+                else:
+                    rows = self.knowledge.in_network_relation_rows(
+                        database, notebook_id, ids,
+                    )
                 out.extend(
                     {**dict(row), "notebook_id": notebook_id}
                     for row in rows

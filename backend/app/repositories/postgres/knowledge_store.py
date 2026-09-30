@@ -418,6 +418,17 @@ def _definition_from_defines(
     return {} if hit is None else _defines_evidence_fields(hit)
 
 
+# 「元素属于对象所在的那一库,且该库存活」(台账 B-11,PR-E2·E2-4):
+# ``_enrich_evidence`` / ``_element_texts`` 的 ``owner_notebook_id`` 形态接在
+# ``source_elements se`` 后面,谓词 ``os.notebook_id=%s``。三次主键探测
+# (元素 → 来源 → 笔记本),与元素 id 清单的长度成正比、与库大小无关;
+# EXPLAIN pin 在 tests/postgres/test_store_evidence_ceiling_explain_pins.py。
+_OWN_ELEMENT_JOIN = (
+    " JOIN sources os ON os.id=se.source_id"
+    " JOIN notebooks onb ON onb.id=os.notebook_id"
+)
+
+
 def _element_rows(db: Any, element_ids: Iterable[Any]) -> dict:
     """{element_id: (source_id, text)},只含存在的元素。"""
     ids = [e for e in dict.fromkeys(element_ids) if e]
@@ -2104,15 +2115,20 @@ class KnowledgeStore:
         ).fetchall()
 
     @staticmethod
-    def follow_relation_evidence_rows(db: Any, relation_ids):
+    def follow_relation_evidence_rows(db: Any, relation_ids, *,
+                                      notebook_id: Optional[str] = None):
+        """SQLite 侧同名方法的 parity 实现(台账 N-4 的理由见那侧)。"""
         ids = list(relation_ids)
         if not ids:
             return []
         ph = ",".join("%s" for _ in ids)
+        own = "" if notebook_id is None else " AND r.notebook_id=%s"
         rows = db.execute(
             f"SELECT r.id, r.evidence, s.title AS source_title "
-            f"FROM knowledge_relations r LEFT JOIN sources s ON s.id=r.source_id "
-            f"WHERE r.id IN ({ph})", tuple(ids),
+            f"FROM knowledge_relations r LEFT JOIN sources s "
+            f"ON s.id=r.source_id AND s.notebook_id=r.notebook_id "
+            f"WHERE r.id IN ({ph}){own}",
+            (*ids, *(() if notebook_id is None else (notebook_id,))),
         ).fetchall()
         return _compat_rows(rows, evidence=True)
 
@@ -2133,13 +2149,44 @@ class KnowledgeStore:
 
     @staticmethod
     def in_network_relation_rows(db: Any, notebook_id: str,
-                                 object_ids):
+                                 object_ids, *,
+                                 allowed_source_ids: Optional[Iterable[str]] = None):
         """SQLite 侧同名方法的 parity 实现;T2(批 1 热点整改)的 ``DISTINCT``/
-        ``ORDER BY`` 理由见那侧 docstring——两侧逐字同一套语义。"""
+        ``ORDER BY`` 理由与 ``allowed_source_ids`` 的语义见那侧 docstring——两侧
+        逐字同一套语义。
+
+        天花板形态在这里的写法:``source_ceiling.ceiling_param``(一个参数,
+        备忘在 run 的 ``CeilingSet`` 上)+ ``id_binding.member_of``(``= ANY``,
+        关系行由 ``idx_knowledge_relations_nb_source_target_edge`` 驱动、清单
+        只过滤)+
+        ``execute_ids``(每次都是 custom plan,绕开第 5 次 prepare / 约第 11 次
+        generic plan 的悬崖)。"""
         ids = list(object_ids)
         if len(ids) < 2:
             return []
         ph = ",".join("%s" for _ in ids)
+        ceiling = source_ceiling.normalise_ceiling(allowed_source_ids)
+        if ceiling is not None:
+            if not ceiling:
+                return []
+            bound = source_ceiling.ceiling_param(ceiling)
+            return execute_ids(
+                db,
+                f"SELECT r.source_object_id, r.target_object_id, r.edge_type, "
+                f"src.object_type AS source_type, tgt.object_type AS target_type, "
+                f"COUNT(DISTINCT r.source_id) AS source_count "
+                f"FROM knowledge_relations AS r "
+                f"JOIN knowledge_objects AS src ON src.id=r.source_object_id "
+                f"JOIN knowledge_objects AS tgt ON tgt.id=r.target_object_id "
+                f"WHERE r.notebook_id=%s AND r.review_status!='rejected' "
+                f"AND r.source_object_id IN ({ph}) "
+                f"AND r.target_object_id IN ({ph}) "
+                f"AND {member_of('r.source_id', bound)} "
+                f"GROUP BY r.source_object_id, r.target_object_id, r.edge_type, "
+                f"src.object_type, tgt.object_type "
+                f"ORDER BY r.source_object_id, r.edge_type, r.target_object_id",
+                [notebook_id, *ids, *ids, bound.param],
+            ).fetchall()
         return db.execute(
             f"SELECT DISTINCT r.source_object_id, r.target_object_id, r.edge_type, "
             f"src.object_type AS source_type, tgt.object_type AS target_type "
@@ -2261,25 +2308,43 @@ class KnowledgeStore:
             "payload": json_value(row["payload"], {}),
         } for row in rows]
 
-    def _element_texts(self, db, element_ids, *, with_ordinal: bool = False):
+    def _element_texts(self, db, element_ids, *, with_ordinal: bool = False,
+                       owner_notebook_id: Optional[str] = None):
+        """SQLite 侧同名方法的 parity 实现(``owner_notebook_id`` 见那侧)。"""
         ids = [e for e in element_ids if e]
         if not ids:
             return {}, {}
         ph = ",".join("%s" for _ in ids)
-        rows = db.execute(f"SELECT id, text FROM source_elements WHERE id IN ({ph})", ids).fetchall()
+        if owner_notebook_id is None:
+            rows = db.execute(f"SELECT id, text FROM source_elements WHERE id IN ({ph})", ids).fetchall()
+        else:
+            rows = db.execute(
+                f"SELECT se.id, se.text FROM source_elements se{_OWN_ELEMENT_JOIN} "
+                f"WHERE se.id IN ({ph}) AND os.notebook_id=%s",
+                (*ids, owner_notebook_id),
+            ).fetchall()
         texts = {r["id"]: r["text"] for r in rows}
         if not with_ordinal:
             return texts, {}
-        order_rows = db.execute(
-            "SELECT se.id FROM source_elements se JOIN sources s ON se.source_id=s.id "
-            "WHERE s.notebook_id=(SELECT notebook_id FROM sources WHERE id=("
-            "SELECT source_id FROM source_elements WHERE id=%s LIMIT 1)) "
-            "ORDER BY se.created_at ASC, se.id ASC",
-            (ids[0],),
-        ).fetchall()
+        if owner_notebook_id is None:
+            order_rows = db.execute(
+                "SELECT se.id FROM source_elements se JOIN sources s ON se.source_id=s.id "
+                "WHERE s.notebook_id=(SELECT notebook_id FROM sources WHERE id=("
+                "SELECT source_id FROM source_elements WHERE id=%s LIMIT 1)) "
+                "ORDER BY se.created_at ASC, se.id ASC",
+                (ids[0],),
+            ).fetchall()
+        else:
+            order_rows = db.execute(
+                "SELECT se.id FROM source_elements se JOIN sources s ON se.source_id=s.id "
+                "WHERE s.notebook_id=%s ORDER BY se.created_at ASC, se.id ASC",
+                (owner_notebook_id,),
+            ).fetchall()
         ordinal = {r["id"]: i for i, r in enumerate(order_rows)}
         return texts, ordinal
-    def _enrich_evidence(self, db, evidence):
+    def _enrich_evidence(self, db, evidence, *, owner_notebook_id: Optional[str] = None):
+        """SQLite 侧同名方法的 parity 实现(``owner_notebook_id`` 与台账 B-11
+        的理由见那侧 docstring)。"""
         # 非对象项(脏数据)跳过,不抛:定义者最多扫 NODE_CONTEXT_DEFINES_SCAN 个,
         # 一条坏证据不该让整次 node_context 失败。
         evidence = [e for e in evidence if isinstance(e, dict)]
@@ -2289,11 +2354,19 @@ class KnowledgeStore:
         details = {}
         if element_ids:
             ph = ",".join("%s" for _ in element_ids)
-            rows = db.execute(
-                f"SELECT id, source_id, element_type, location_label, text "
-                f"FROM source_elements WHERE id IN ({ph})",
-                element_ids,
-            ).fetchall()
+            if owner_notebook_id is None:
+                rows = db.execute(
+                    f"SELECT id, source_id, element_type, location_label, text "
+                    f"FROM source_elements WHERE id IN ({ph})",
+                    element_ids,
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    f"SELECT se.id, se.source_id, se.element_type, se.location_label, se.text "
+                    f"FROM source_elements se{_OWN_ELEMENT_JOIN} "
+                    f"WHERE se.id IN ({ph}) AND os.notebook_id=%s",
+                    (*element_ids, owner_notebook_id),
+                ).fetchall()
             details = {row["id"]: row for row in rows}
         out = []
         for e in evidence:
@@ -2367,7 +2440,8 @@ class KnowledgeStore:
             section = payload.get("section_path", "")
             shown_section = section if allowed is None or row["source_id"] in allowed else ""
             raw_evidence = json_value(row["evidence"], [])
-            occurrences = self._enrich_evidence(db, raw_evidence)
+            occurrences = self._enrich_evidence(
+                db, raw_evidence, owner_notebook_id=notebook_id)
             if allowed is not None:
                 occurrences = _scoped_occurrences(raw_evidence, occurrences, allowed)
             result = {"id": object_id, "object_type": obj_type, "name": payload.get("name", ""),
@@ -2416,7 +2490,8 @@ class KnowledgeStore:
                         # 一次批量 enrich 覆盖全部定义者的证据(顺序 = 关系 id 序、
                         # 定义者内证据序)。
                         enriched = self._enrich_evidence(
-                            db, [item for ev in per_definer for item in ev])
+                            db, [item for ev in per_definer for item in ev],
+                            owner_notebook_id=notebook_id)
                         result.update(_definition_from_defines(
                             json_value(drows[0]["payload"], {}).get("name", ""),
                             len(per_definer[0]), enriched, allowed))
@@ -2426,7 +2501,9 @@ class KnowledgeStore:
                     # New self-contained shape: ordered steps live in the object's payload.
                     if allowed is None:
                         eids = [s.get("element_id") for s in steps_payload if s.get("element_id")]
-                        texts, _ord = self._element_texts(db, eids) if eids else ({}, {})
+                        texts, _ord = self._element_texts(
+                            db, eids, owner_notebook_id=notebook_id,
+                        ) if eids else ({}, {})
                         result["steps"] = [
                             {"name": s.get("name", ""),
                              "element_text": texts.get(s.get("element_id") or "", s.get("quote", "")),
@@ -2441,7 +2518,9 @@ class KnowledgeStore:
                 else:
                     result["steps"] = _legacy_sibling_steps(
                         db, notebook_id, section, shown_section, allowed,
-                        self._element_texts, own_row=row)
+                        lambda db_, ids_, **kw: self._element_texts(
+                            db_, ids_, owner_notebook_id=notebook_id, **kw),
+                        own_row=row)
             return result
 
     # ------------------------------------------------------------- counts
@@ -3791,18 +3870,30 @@ class KnowledgeStore:
         return result
 
     @staticmethod
-    def chunk_exact_search(db, notebook_id: str, needle: str, k: int = 50) -> List[Dict]:
+    def chunk_exact_search(
+        db, notebook_id: str, needle: str, k: int = 50, *,
+        allowed_source_ids: Optional[Sequence[str]] = None,
+    ) -> List[Dict]:
         """EXACT substring chunk hits — the identifier fast path's probe.
 
         Semantically equal to the SQLite adapter: no `lexical_recall_terms`
         decomposition, so `set_db` means `set_db` and never `set` OR `db`.
         `score` is this backend's own trigram similarity; the caller groups by
         section and never compares scores across backends.
+
+        `allowed_source_ids`: see `search.chunk_exact_candidate_rows` (`None`
+        = unrestricted and byte-identical; empty = `[]`; otherwise only chunks
+        of those sources, filtered below the `LIMIT`).
         """
         term = (needle or "").strip()
         if len(term) < 3 or k <= 0:
             return []
-        rows = chunk_exact_candidate_rows(db, notebook_id, term, k)
+        if allowed_source_ids is None:
+            rows = chunk_exact_candidate_rows(db, notebook_id, term, k)
+        else:
+            rows = chunk_exact_candidate_rows(
+                db, notebook_id, term, k, allowed_source_ids=allowed_source_ids,
+            )
         return [
             {
                 "chunk_id": row["candidate_id"],

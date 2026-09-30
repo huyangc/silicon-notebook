@@ -70,6 +70,7 @@ from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancel
 # degrading an identity-attestation failure into an empty result set.
 from app.domain.retrieval_control import RetrievalControlError
 from app.services.citation_markers import MARKER_RE, marker_keys
+from app.services.evidence_context import foreign_source_owners
 from app.services.report_execution import (
     REPORT_CANCELLATIONS,
     cancellable_ceiling_readers,
@@ -3764,8 +3765,21 @@ class ReportEngine:
         uncertain_source_ids = set(
             family_resolution.get("uncertain_source_ids") or []
         ) | set(family_resolution.get("unresolved_source_ids") or [])
-        citation_source_info = self.dependencies.evidence_context.citation_source_info(
-            citation_source_ids
+        # 台账 B-11(PR-E2·E2-4):知识对象条目的出处若属于别的库,保留条目存储
+        # 的标题,不按全局 id 现读那一库来源的现名。没有这样的条目时调用不变。
+        foreign_sources = foreign_source_owners(
+            ctx
+            for section in sections
+            for ctx in (section.get("id_map") or {}).values()
+        )
+        citation_source_info = (
+            self.dependencies.evidence_context.citation_source_info(
+                citation_source_ids, owner_notebook_ids=foreign_sources,
+            )
+            if foreign_sources else
+            self.dependencies.evidence_context.citation_source_info(
+                citation_source_ids
+            )
         )
 
         def _source_title(ctx):
