@@ -171,6 +171,10 @@ _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 # a line containing ANY of their end tags — raw text, not Markdown.
 _RAW_HTML_START = re.compile(r"^ {0,3}<(script|pre|style|textarea)(?=[\s>]|$)", re.IGNORECASE)
 _RAW_HTML_ENDS = ("</script>", "</pre>", "</style>", "</textarea>")
+# CommonMark HTML block type 2: a line starting with ``<!--`` opens a comment
+# block that runs until a line containing ``-->``; fences and raw tags inside
+# it are comment text.
+_COMMENT_BLOCK_START = re.compile(r"^ {0,3}<!--")
 
 
 def _self_contained_markdown(markdown: str) -> str:
@@ -180,14 +184,17 @@ def _self_contained_markdown(markdown: str) -> str:
     after it) is closed with the matching fence; a raw HTML block left open
     (``<script>``, ``<pre>``, ``<style>``, ``<textarea>`` — CommonMark type 1,
     which runs until a line with one of their end tags) gets its end tag; an
-    unterminated HTML comment is terminated. Nothing else is changed."""
+    unterminated HTML comment is terminated — a comment block (a line
+    starting with ``<!--``, CommonMark type 2) is scanned for ``-->`` only,
+    so a fence or raw tag inside it opens nothing. Nothing else is changed."""
     text = str(markdown or "").rstrip()
     open_fence: str | None = None
     raw_end: str | None = None
+    raw_ends: tuple[str, ...] = _RAW_HTML_ENDS
     outside: list[str] = []
     for line in text.split("\n"):
         if raw_end is not None:
-            if any(tag in line.lower() for tag in _RAW_HTML_ENDS):
+            if any(tag in line.lower() for tag in raw_ends):
                 raw_end = None
             continue
         match = _FENCE_RE.match(line)
@@ -205,10 +212,14 @@ def _self_contained_markdown(markdown: str) -> str:
             if not (marker[0] == "`" and "`" in rest):  # backtick info strings
                 open_fence = marker                      # cannot hold backticks
                 continue
+        if _COMMENT_BLOCK_START.match(line) is not None:
+            if "-->" not in line:
+                raw_end, raw_ends = "-->", ("-->",)
+            continue
         raw = _RAW_HTML_START.match(line)
         if raw is not None:
             if not any(tag in line.lower() for tag in _RAW_HTML_ENDS):
-                raw_end = f"</{raw.group(1).lower()}>"
+                raw_end, raw_ends = f"</{raw.group(1).lower()}>", _RAW_HTML_ENDS
             continue
         outside.append(line)
     if raw_end is not None:

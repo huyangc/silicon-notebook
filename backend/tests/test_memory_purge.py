@@ -109,6 +109,11 @@ def test_the_export_streams_in_bounded_pages(world, monkeypatch):
         "A raw block:\n\n<pre>\nnever closed",
         "A raw block:\n\n<style>\np { color: red }",
         "Fenced raw tag stays code:\n\n```\n<pre>\n```",
+        # codex r1 #3: a fence or raw tag inside a comment block is comment
+        # text; the comment is what must be closed.
+        "<!--\n```\nhidden",
+        "Intro\n\n<!-- note\n<pre>\nstill a comment",
+        "<!--\n```\n-->\n\n```python\nopen after the comment",
     ],
 )
 def test_an_entry_cannot_swallow_the_next_one(world, body):
