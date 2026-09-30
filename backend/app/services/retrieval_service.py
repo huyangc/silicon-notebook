@@ -90,15 +90,11 @@ class RetrievalService:
     def ppr_retrieve(self, *args, **kwargs):
         """HippoRAG 式 PPR 跨文档传播检索 → List[RetrievedChunk]。
 
-        Same accepted second-order cost as ``scoped_subgraph_nodes`` (see its
-        docstring): the library-scope filter here is a pure OUTPUT filter.
         ``graph_retrieval._ppr_retrieve`` builds/queries the PPR graph across
-        every mounted library -- checked or not -- and its own
-        ``ranked[: settings.ppr_top_chunks]`` truncation happens BEFORE this
-        filter runs, so an excluded library's chunks can still occupy some of
-        that fixed budget. No excluded content is ever returned --
-        ``filter_retrieval_items`` still drops it here -- only recall/budget
-        share is at stake, same as the graph-walk case.
+        every mounted library, and it applies every library's source ceiling
+        and the library dimension before its ``ppr_top_chunks`` cut
+        (``_PprCeiling``), so an excluded or out-of-ceiling chunk never takes
+        that budget; this filter remains the fail-closed backstop.
 
         Known, deliberately unfixed limitation: ``_federated_graph_is_large``
         (the size guard this and ``_chunk_kg_overlay`` sit behind) walks EVERY
@@ -680,7 +676,12 @@ class RetrievalService:
           sample relation's ``source_id`` must be inside the frozen ceiling.
           The first that is not records the drift for the rest of the run
           (``record_ceiling_drift``, the verdict ``node_context`` shares) and
-          the probe is re-read bound.
+          the probe is re-read bound.  A sample relation with no source is
+          outside too (as under ``allows`` and the bound statement) but is not
+          a change after the freeze: it drops its own row only.  What the check
+          cannot see is the target's support; an in-ceiling relation's
+          endpoints come from that same source (store_kg mints objects per
+          source), which is what makes the sample the row's evidence.
 
         No scope, or no ceiling binding the library: the historical call.
         """
