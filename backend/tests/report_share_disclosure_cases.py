@@ -1108,6 +1108,43 @@ def case_a_retrieval_record_overflow_fails_the_planning(world: World) -> None:
     assert "too large to record" in stored["error"]
 
 
+def case_a_retrieval_record_overflow_fails_the_generation(world: World) -> None:
+    """The generation twin: a retrieval result the deep dive was handed is too
+    large to record completely, so the report fails (its outline kept for a
+    retry, nothing to share) instead of being stored with a short record."""
+    import app.services.report_memory_use as memory_use
+    from app.domain.retrieval import RetrievedKnowledge
+    from app.services.reasoning_retrieval import ReasoningResult
+
+    hits = [
+        RetrievedKnowledge(object_id=f"o{index}", object_type="concept",
+                           payload={"name": f"n{index}", "source_id": f"src-{index}"})
+        for index in range(5)
+    ]
+
+    def observe(*args, **kwargs):
+        generator.dependencies.retrieval.federated_retrieve(world.notebook, "环路")
+        return ReasoningResult()
+
+    generator = _engine(world, world.alice, _Models(), deep_dive=observe)
+    world.monkeypatch.setattr(
+        generator.dependencies.retrieval, "federated_retrieve", lambda *a, **k: list(hits)
+    )
+    rid = _new_report(world, world.alice)
+    _outline_ready(world, rid)
+    _serve_memory(world, [])
+    world.monkeypatch.setattr(memory_use, "_MAX_CONTAINERS", 3)
+    assert world.repo.claim_report_generation(world.notebook, rid)
+    generator.generate(world.notebook, rid, "环路为什么稳定？", depth=2)
+    stored = world.repo.get_report(world.notebook, rid)
+    assert stored["status"] == "failed", (stored["status"], stored["error"])
+    assert "too large to record" in stored["error"]
+    assert stored["outline"]
+    refused = share(world, world.alice, rid)
+    assert refused.status_code == 409
+    assert refused.json() == {"detail": "只能分享已完成的报告。"}
+
+
 def case_planner_record_is_kept_by_the_store(world: World) -> None:
     """The planner's Memory record lives in ``understanding_json`` but belongs
     to the store: every later understanding write that does not carry it keeps
