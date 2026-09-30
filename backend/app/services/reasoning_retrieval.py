@@ -1379,6 +1379,14 @@ def ceiling_binds_for_run(retrieval) -> bool:
     ``unsafe_scope_restricted``(陈旧的 False 会在 I/O 之前重新放开它们)。这里记住的
     是集合读取的判词——同一个 run 里执行器前后两页用两种口径读,续跑的游标会被它按
     天花板摘要拒掉,清单也会前后不一。
+
+    孪生判词是知识重读(``node_context``)的 ``source_scope.ceiling_binds``(按库
+    memo,读后核验不过时翻成真)。两者刻意只差一条分支:这里**没有**
+    ``foreign_hidden``(库里有别人的私有 Memory)——清单、计数与证据引用对私有
+    Memory 是无条件剔除的(属主列排除、Memory 引用丢弃),别人的 Memory 在枚举里
+    不需要靠天花板挡。其余分支对得上:全部拒绝与逐库冻结在
+    ``CollectionCatalogService.source_ceiling`` 里不看本判词恒生效,无主体 run 恒生效,
+    收窄或漂移就是本判词本身。分支不完全相同,所以是两个函数而不是一个。
     """
     from app.services.source_scope import current_source_scope
 
