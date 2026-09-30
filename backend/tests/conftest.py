@@ -499,8 +499,8 @@ def _split_app_module_namespace() -> list[tuple[ModuleType, str, ModuleType, obj
     return split
 
 
-@pytest.fixture(autouse=True)
-def _keep_app_module_namespace_whole():
+@pytest.hookimpl(wrapper=True, trylast=True)
+def pytest_runtest_teardown(item, nextitem):
     """`sys.modules` 与父包属性是同一个模块的两份登记,测试摘掉一份就会分叉。
 
     症状:某个测试 `sys.modules.pop("app.x.y")` 却没还原,父包 `app.x` 仍把旧的
@@ -517,8 +517,14 @@ def _keep_app_module_namespace_whole():
     这里每个测试结束后核对一遍所有 `app` 包的模块属性与 `sys.modules` 是否指向同
     一个对象(约 20 个包,不到 0.1 ms),不一致就把 `sys.modules` 复位到父包属性那
     一份(即污染前的登记)并让**污染者**报错——不这样做,红的永远是后跑的无辜用例。
+
+    做成 teardown 钩子的 wrapper 而不是 autouse fixture:本文件里更早注册的 autouse
+    fixture 自己请求了 `monkeypatch`,于是 `monkeypatch` 比任何后注册的 fixture 都
+    先建立、后拆除;fixture 形式的核对会跑在 `monkeypatch.undo()` 之前,把用
+    `monkeypatch.delitem(sys.modules, ...)` 正确摘模块的测试也判成污染者。钩子在
+    所有 fixture finalizer 之后才 yield 回来,看到的才是测试真正留下的状态。
     """
-    yield
+    result = yield
     split = _split_app_module_namespace()
     for _package, _attribute, value, _registered in split:
         sys.modules[value.__name__] = value
@@ -531,6 +537,7 @@ def _keep_app_module_namespace_whole():
             for package, attribute, value, registered in split
         )
     )
+    return result
 
 
 @pytest.fixture(autouse=True)
