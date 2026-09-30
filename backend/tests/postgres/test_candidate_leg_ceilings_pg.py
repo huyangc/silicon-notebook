@@ -265,4 +265,7 @@ def test_pg_unscoped_first_call_does_not_rank_a_later_scoped_one(repo, people):
     cold = ranking(alice_scope)
     candidates._vector_cache.invalidate(f"{seed.nb}:kwtok")
     ranking(None)
-    assert ranking(alice_scope) == cold
+    warm = ranking(alice_scope)
+    assert warm == cold
+    # X's only match is Bob's Memory quote: it never ranks for Alice.
+    assert [object_id for object_id, _ in warm] == ["Y"]

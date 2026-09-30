@@ -362,7 +362,9 @@ def test_an_unscoped_first_call_does_not_rank_a_later_scoped_one(mixed_object):
     warm = _ranking(repo, nb, alice_scope)
 
     assert warm == cold
-    assert [object_id for object_id, _ in warm][:1] == ["Y"]
+    # X's only match is Bob's Memory quote, which Alice may not read: it does
+    # not rank for her at all, whichever call built the cache.
+    assert [object_id for object_id, _ in warm] == ["Y"]
 
 
 def test_a_scoped_first_call_does_not_rank_a_later_unscoped_one(mixed_object):
