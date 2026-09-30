@@ -1,7 +1,7 @@
 """PostgreSQL twin of ``tests/test_memory_orphan_sweep.py`` (plan 2026-09-29 E5-3, N-5).
 
 Same fixture shapes, same acceptance sentences, on the primary backend: the store
-read and its keyset paging, the cascade through the real ``delete_source`` path
+read and its keyset paging, the cascade through the real ``remove_memory_sources`` path
 (every derived table, including the ones a foreign key does not reach), idempotency,
 page-of-one equivalence, failure isolation and the per-notebook count behind
 checkup's read-only H12. PostgreSQL has no FTS5 shadow tables, so nothing is exempt
@@ -339,10 +339,12 @@ def test_a_failing_source_is_isolated_and_left_for_the_next_start(
     repo = postgres_repository
     victim = world.orphan_ids[2]
 
-    def flaky(source_id):
-        if source_id == victim:
-            raise RuntimeError("secret title")
-        return repo.delete_source(source_id)
+    real = repo._runtime.source_ingestion.remove_memory_sources
+
+    def flaky(source_ids):
+        if victim in source_ids:
+            raise RuntimeError("secret title")  # the whole call fails, as a transaction does
+        return real(source_ids)
 
     log = repo._runtime.event_log
     seen = []
@@ -350,7 +352,7 @@ def test_a_failing_source_is_isolated_and_left_for_the_next_start(
     log.emit = lambda event, *a, **k: (seen.append(dict(event)), original_emit(event, *a, **k))[1]
     try:
         tally = MemoryOrphanSweep(
-            store=repo._runtime.memory_store, delete_source=flaky, event_log=log
+            store=repo._runtime.memory_store, remove_memory_sources=flaky, event_log=log
         ).run_pass()
     finally:
         del log.emit
@@ -363,15 +365,15 @@ def test_a_failing_source_is_isolated_and_left_for_the_next_start(
 
     calls = []
 
-    def broken(source_id):
-        calls.append(source_id)
+    def broken(source_ids):
+        calls.append(list(source_ids))
         raise ConnectionError("away")
 
     stopped = MemoryOrphanSweep(
-        store=repo._runtime.memory_store, delete_source=broken, event_log=log
+        store=repo._runtime.memory_store, remove_memory_sources=broken, event_log=log
     ).run_pass()
     assert stopped == {"deleted": 0, "gone": 0, "failed": 1}  # only the victim was left
-    assert calls == [victim]
+    assert calls == [[victim], [victim]]  # the call, then the id on its own
     assert MAX_CONSECUTIVE_FAILURES >= 2
 
     assert MemoryOrphanSweep.for_repository(repo).run_pass()["deleted"] == 1  # next start
@@ -394,8 +396,7 @@ def test_checkup_h12_counts_the_notebooks_remaining_orphans(postgres_repository)
 
 
 def test_a_deep_copy_today_carries_no_memory_source(postgres_repository):
-    """The sweep is for LEGACY data only (E5-1: copies carry no Memory). Skipped, loudly,
-    on a tree that still copies Memory sources."""
+    """The sweep is for LEGACY data only (E5-1: copies carry no Memory)."""
     repo = postgres_repository
     _user(repo, OWNER)
     _user(repo, RECIPIENT)
@@ -409,29 +410,44 @@ def test_a_deep_copy_today_carries_no_memory_source(postgres_repository):
             "SELECT COUNT(*) FROM sources WHERE notebook_id=%s AND source_type='memory'",
             (copy.id,),
         ).fetchone())
-    if carried:
-        pytest.skip("this tree still copies Memory sources (E5-1 not merged yet)")
     assert carried == 0
     assert repo._runtime.memory_store.orphan_memory_source_ids(10) == []
 
 
-def test_only_the_lookup_miss_of_delete_source_counts_as_gone(postgres_repository):
+def test_an_exception_is_a_failure_and_a_non_memory_id_is_refused(postgres_repository):
+    """Any exception of the removal is a recorded failure of that id (a KeyError
+    included); a page carrying a non-Memory source makes the removal refuse it
+    (ValueError), recorded, while the Memory orphans around it are removed."""
     world = World(postgres_repository)
     repo = postgres_repository
-    victim, other = world.orphan_ids[0], world.orphan_ids[1]
+    real_store = repo._runtime.memory_store
+    victim = world.orphan_ids[0]
+    real = repo._runtime.source_ingestion.remove_memory_sources
 
-    def raising(source_id):
-        if source_id == victim:
-            raise KeyError(source_id)
-        if source_id == other:
+    def raising(source_ids):
+        if victim in source_ids:
             raise KeyError("some-other-key")
-        return repo.delete_source(source_id)
+        return real(source_ids)
 
     tally = MemoryOrphanSweep(
-        store=repo._runtime.memory_store, delete_source=raising,
+        store=real_store, remove_memory_sources=raising,
         event_log=repo._runtime.event_log,
     ).run_pass()
-    assert tally == {"deleted": len(world.orphan_ids) - 2, "gone": 1, "failed": 1}
+    assert tally == {"deleted": len(world.orphan_ids) - 1, "gone": 0, "failed": 1}
+
+    class WithADocument:
+        @staticmethod
+        def orphan_memory_source_ids(limit, after_id=""):
+            page = real_store.orphan_memory_source_ids(limit, after_id)
+            return sorted([*page, "src-doc"]) if page and not after_id else page
+
+    second = MemoryOrphanSweep(
+        store=WithADocument, remove_memory_sources=real,
+        event_log=repo._runtime.event_log,
+    ).run_pass()
+    assert second == {"deleted": 1, "gone": 0, "failed": 1}  # the victim; src-doc refused
+    assert "src-doc" in _source_ids(repo)
+    _assert_swept(world)
 
 
 def test_a_cleared_link_is_an_orphan_even_if_a_memory_row_has_an_empty_id(postgres_repository):

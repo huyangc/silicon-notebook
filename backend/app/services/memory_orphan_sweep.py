@@ -14,33 +14,42 @@ behind that no lifecycle path can find any more:
 
 Because retrieval keeps Memory sources fail-closed for everyone when they have
 no readable owner, such a source is unreachable *and* unowned; this sweep
-deletes it, through the ordinary ``delete_source`` path so every derived row
-goes with it.
+deletes it through ``SourceIngestionService.remove_memory_sources`` — the one
+Memory-source removal every other path uses (the member-exit purge, a hard
+delete, deprecate, a transfer's move): the same teardown as ``delete_source``
+plus the composition-wired Memory hooks, so the orphan's evidence is stripped
+from any shared object it was merged into (the shared object stays) and the
+whole clusters and review candidates naming its objects go with it.
 
 Contract (pinned by ``tests/test_memory_orphan_sweep.py``):
 
 * **After readiness, never before.** ``startup_warmup`` calls
   :meth:`MemoryOrphanSweep.schedule` strictly after ``mark_ready()``;
   :meth:`run_pass` itself refuses to run while the process is not ready.
-* **One worker, the ordinary delete path.** One background thread walks the
+* **One worker, the Memory removal path.** One background thread walks the
   orphans in id order, ``ORPHAN_SWEEP_PAGE_SIZE`` at a time, and removes each
-  with ``delete_source`` (the same call the API and ``remove_memory_source``
-  use: extraction state, embeddings, KG rows, source row, files, images, cache
-  invalidation, dirty mark). It never calls a model: ``delete_source`` skips
-  the corpus-summary refresh for hidden synthetic source types.
+  page in calls of at most ``REMOVE_BATCH`` ids through
+  ``remove_memory_sources`` (one transaction per call: evidence strip,
+  whole-cluster and candidate purge, extraction state, embeddings, KG rows,
+  source rows, dirty mark; then artifact redaction and cache invalidation).
+  It never calls a model.
 * **Paging never changes the result.** The read is keyset-paged on the source
   id; the page size only sets how many rows one statement returns. A source
-  that vanishes between the read and the delete (another writer) counts as
-  already gone: exactly the ``KeyError(source_id)`` of ``delete_source``'s own
-  lookup; any other ``KeyError`` is a failure.
+  that vanishes between the read and the removal (another writer) counts as
+  ``gone``: ``remove_memory_sources`` locks the rows that still exist and
+  returns how many it removed, so ``gone`` is a call's ids minus that count.
 * **Idempotent, resumable.** There is no progress marker: the orphans
   themselves are the queue. A second run finds none, runs no job and emits no
   event; an interrupted or failed pass leaves exactly what it did not delete
   for the next start.
-* **Failures are isolated, and bounded.** One source that fails to delete is
-  logged, skipped and left for the next start; ``MAX_CONSECUTIVE_FAILURES``
-  failures in a row (a systemic fault: database away, lock held) end the pass,
-  so the rest also waits for the next start instead of failing one by one.
+* **Failures are isolated, and bounded.** A call that fails is retried one id
+  at a time, so one poison source never blocks the others: that source is
+  recorded (``_failed`` with its id and the exception class), skipped and left
+  for the next start. A ``ValueError`` — the call was handed a source that is
+  not a Memory source, which the orphan predicate never yields — is such a
+  failure too, never swallowed. ``MAX_CONSECUTIVE_FAILURES`` failed ids in a
+  row (a systemic fault: database away, lock held) end the pass, so the rest
+  also waits for the next start instead of failing one by one.
 * **Content-free events.** ``memory_orphan_sweep_started`` / ``_completed`` /
   ``_failed`` carry source ids, counts and an exception CLASS name -- never a
   title, text, path or message. A read that fails (statement timeout, lost
@@ -50,7 +59,7 @@ Contract (pinned by ``tests/test_memory_orphan_sweep.py``):
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Sequence
 
 #: Diagnostic name of the one background thread (not one of the gated
 #: maintenance pools: one bounded pass per process start).
@@ -67,6 +76,11 @@ ORPHAN_SWEEP_PAGE_SIZE = 1000
 #: Consecutive failed deletes that end a pass (see the module docstring).
 MAX_CONSECUTIVE_FAILURES = 3
 
+#: Ids per ``remove_memory_sources`` call: one Memory purge page, the bound the
+#: id-list guard registers for every statement of that removal (at most 200
+#: source ids). A page of the read is removed in calls of this size.
+REMOVE_BATCH = 200
+
 
 class MemoryOrphanSweep:
     """Delete every ownerless Memory source once, after readiness."""
@@ -75,7 +89,7 @@ class MemoryOrphanSweep:
         self,
         *,
         store: Any,
-        delete_source: Callable[[str], None],
+        remove_memory_sources: Callable[[Sequence[str]], int],
         event_log: Any,
         is_ready: Callable[[], bool] | None = None,
         page_size: int = ORPHAN_SWEEP_PAGE_SIZE,
@@ -85,7 +99,7 @@ class MemoryOrphanSweep:
 
             is_ready = readiness.is_ready
         self._store = store
-        self._delete_source = delete_source
+        self._remove_memory_sources = remove_memory_sources
         self._event_log = event_log
         self._is_ready = is_ready
         self._page_size = max(1, int(page_size))
@@ -95,7 +109,7 @@ class MemoryOrphanSweep:
         runtime = repo._runtime
         return cls(
             store=runtime.memory_store,
-            delete_source=repo.delete_source,
+            remove_memory_sources=runtime.source_ingestion.remove_memory_sources,
             event_log=runtime.event_log,
             **kwargs,
         )
@@ -140,11 +154,24 @@ class MemoryOrphanSweep:
             if not started:
                 started = True
                 self._emit({"kind": "memory_orphan_sweep_started"})
-            for source_id in page:
-                after = source_id
-                outcome = self._delete_one(source_id)
-                tally[outcome] += 1
-                consecutive = consecutive + 1 if outcome == "failed" else 0
+            for offset in range(0, len(page), REMOVE_BATCH):
+                batch = page[offset:offset + REMOVE_BATCH]
+                after = batch[-1]
+                try:
+                    removed = int(self._remove_memory_sources(list(batch)))
+                except Exception:  # noqa: BLE001 - isolate the failing id(s) below
+                    # Retry one id at a time so one poison source never takes
+                    # the others with it; the consecutive-failure cap counts ids.
+                    for source_id in batch:
+                        outcome = self._remove_one(source_id)
+                        tally[outcome] += 1
+                        consecutive = consecutive + 1 if outcome == "failed" else 0
+                        if consecutive >= MAX_CONSECUTIVE_FAILURES:
+                            break
+                else:
+                    tally["deleted"] += removed
+                    tally["gone"] += len(batch) - removed
+                    consecutive = 0
                 if consecutive >= MAX_CONSECUTIVE_FAILURES:
                     break
         if started:
@@ -155,24 +182,15 @@ class MemoryOrphanSweep:
             )
         return tally
 
-    def _delete_one(self, source_id: str) -> str:
+    def _remove_one(self, source_id: str) -> str:
         try:
-            self._delete_source(source_id)
-        except KeyError as exc:
-            # Only ``delete_source``'s own ``get_source(source_id)`` miss means "another
-            # writer removed it since the read"; any other KeyError is a real failure.
-            if exc.args == (source_id,):
-                return "gone"
-            self._emit({"kind": "memory_orphan_sweep_failed",
-                        "source_id": source_id,
-                        "error_class": type(exc).__name__})
-            return "failed"
+            removed = int(self._remove_memory_sources([source_id]))
         except Exception as exc:  # noqa: BLE001 - one source never stops the pass
             self._emit({"kind": "memory_orphan_sweep_failed",
                         "source_id": source_id,
                         "error_class": type(exc).__name__})
             return "failed"
-        return "deleted"
+        return "deleted" if removed else "gone"
 
     # ------------------------------------------------------------- events
     def _emit(self, event: dict) -> None:
