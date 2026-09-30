@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import ast
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import pytest
@@ -731,7 +731,11 @@ class _Scanner(ast.NodeVisitor):
         self.mark = _MARK[backend]
         self.docstrings = docstrings
         self.stack: list[str] = []
-        self.sites: list[tuple[str, str, int]] = []
+        self.sites: list[tuple[str, str]] = []
+        # Line numbers are diagnostic metadata for the failure message only;
+        # the site identity is (scope, kind), so an edit above a site never
+        # invalidates its reviewed entry.
+        self.diagnostic_lines_by_key: dict[tuple[str, str], list[int]] = defaultdict(list)
 
     def _scope(self) -> str:
         return ".".join(self.stack) or "<module>"
@@ -744,7 +748,9 @@ class _Scanner(ast.NodeVisitor):
     visit_FunctionDef = visit_AsyncFunctionDef = visit_ClassDef = _enter
 
     def _add(self, kind: str, node: ast.AST) -> None:
-        self.sites.append((self._scope(), kind, node.lineno))
+        key = (self._scope(), kind)
+        self.sites.append(key)
+        self.diagnostic_lines_by_key[key].append(node.lineno)
 
     def visit_Constant(self, node: ast.Constant) -> None:
         if not isinstance(node.value, str) or id(node) in self.docstrings:
@@ -783,23 +789,34 @@ class _Scanner(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def _scan(source: str, backend: str) -> list[tuple[str, str, int]]:
+def _scan(source: str, backend: str) -> _Scanner:
     tree = ast.parse(source)
     scanner = _Scanner(backend, _docstrings(tree))
     scanner.visit(tree)
-    return scanner.sites
+    return scanner
 
 
-def _repository_sites() -> dict[tuple[str, str], list[tuple[str, int]]]:
-    found: dict[tuple[str, str], list[tuple[str, int]]] = {}
+def _repository_sites() -> tuple[
+    dict[tuple[str, str], list[str]], dict[tuple[str, str], list[str]]
+]:
+    """``(found, diagnostic_lines_by_key)``: the kinds bound per
+    ``(module, scope)`` (the identity the registry is keyed by) and, for the
+    failure message only, ``"<kind> at line <n>"`` per site."""
+    found: dict[tuple[str, str], list[str]] = {}
+    diagnostic_lines_by_key: dict[tuple[str, str], list[str]] = defaultdict(list)
     for backend in ("postgres", "sqlite"):
         for path in sorted((REPOSITORIES / backend).rglob("*.py")):
             relative = f"{backend}/{path.relative_to(REPOSITORIES / backend).as_posix()}"
             if relative in BINDING_MODULES:
                 continue
-            for scope, kind, line in _scan(path.read_text(encoding="utf-8"), backend):
-                found.setdefault((relative, scope), []).append((kind, line))
-    return found
+            scanner = _scan(path.read_text(encoding="utf-8"), backend)
+            for scope, kind in scanner.sites:
+                found.setdefault((relative, scope), []).append(kind)
+            for (scope, kind), lines in scanner.diagnostic_lines_by_key.items():
+                diagnostic_lines_by_key[(relative, scope)].extend(
+                    f"{kind} at line {line}" for line in lines
+                )
+    return found, diagnostic_lines_by_key
 
 
 _HOW_TO_FIX = (
@@ -818,12 +835,11 @@ _HOW_TO_FIX = (
 
 # ------------------------------------------------------------------- tests
 def test_every_id_list_binding_site_is_converted_or_reviewed():
-    found = _repository_sites()
+    found, diagnostic_lines_by_key = _repository_sites()
     problems: list[str] = []
-    for key, sites in sorted(found.items()):
+    for key, kinds in sorted(found.items()):
         expected = EXEMPT.get(key)
-        kinds = [kind for kind, _line in sites]
-        where = ", ".join(f"{kind} at line {line}" for kind, line in sites)
+        where = ", ".join(diagnostic_lines_by_key[key])
         if expected is None:
             problems.append(f"{key[0]} :: {key[1]} binds an id list directly ({where}).")
         elif Counter(kind for kind, _klass, _why in expected) != Counter(kinds):
@@ -908,4 +924,4 @@ def test_postgres_statements_that_bind_through_the_module_run_unprepared():
     ],
 )
 def test_the_scanner_recognises_each_form(backend, source, kinds):
-    assert [kind for _scope, kind, _line in _scan(source, backend)] == kinds
+    assert [kind for _scope, kind in _scan(source, backend).sites] == kinds
