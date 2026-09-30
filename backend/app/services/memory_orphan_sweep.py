@@ -31,7 +31,8 @@ Contract (pinned by ``tests/test_memory_orphan_sweep.py``):
 * **Paging never changes the result.** The read is keyset-paged on the source
   id; the page size only sets how many rows one statement returns. A source
   that vanishes between the read and the delete (another writer) counts as
-  already gone.
+  already gone: exactly the ``KeyError(source_id)`` of ``delete_source``'s own
+  lookup; any other ``KeyError`` is a failure.
 * **Idempotent, resumable.** There is no progress marker: the orphans
   themselves are the queue. A second run finds none, runs no job and emits no
   event; an interrupted or failed pass leaves exactly what it did not delete
@@ -147,8 +148,15 @@ class MemoryOrphanSweep:
     def _delete_one(self, source_id: str) -> str:
         try:
             self._delete_source(source_id)
-        except KeyError:
-            return "gone"  # removed by another writer since the read
+        except KeyError as exc:
+            # Only ``delete_source``'s own ``get_source(source_id)`` miss means "another
+            # writer removed it since the read"; any other KeyError is a real failure.
+            if exc.args == (source_id,):
+                return "gone"
+            self._emit({"kind": "memory_orphan_sweep_failed",
+                        "source_id": source_id,
+                        "error_class": type(exc).__name__})
+            return "failed"
         except Exception as exc:  # noqa: BLE001 - one source never stops the pass
             self._emit({"kind": "memory_orphan_sweep_failed",
                         "source_id": source_id,

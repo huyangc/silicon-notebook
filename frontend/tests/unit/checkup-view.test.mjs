@@ -5,6 +5,7 @@ import {
   sourceHealthGroups,
   checkupCount,
   checkupAlertSignature,
+  checkupNotices,
   hasRepairAction,
   repairRelease,
   isRepairing,
@@ -71,17 +72,16 @@ test("H6 → 待分析来源 / extract_kg / 篇", () => {
   });
 });
 
-test("H12 → 残留的记忆来源 / none(只读) / 篇,排在其余源级项之后", () => {
-  const c = checkup([
-    item("H12", 3, [], "none"),
-    item("H6", 1, [], "extract_kg"),
-  ]);
-  const groups = sourceHealthGroups(c);
-  assert.deepEqual(groups.map((g) => g.key), ["H6", "H12"]);
-  assert.deepEqual(groups[1], {
-    key: "H12", label: "残留的记忆来源（重启后自动清理）", count: 3, unit: "篇", fix: "none", sample: [],
-  });
-  assert.deepEqual(sourceHealthGroups(checkup([item("H12", 0, [], "none")])), []);
+test("H12 不进源级分组,而是只读提示卡(无按钮、中性)", () => {
+  const c = checkup([item("H12", 3, [], "none"), item("H6", 1, [], "extract_kg")]);
+  assert.deepEqual(sourceHealthGroups(c).map((g) => g.key), ["H6"]);
+  assert.deepEqual(checkupNotices(c), [{
+    key: "H12", label: "残留的记忆来源", detail: "系统会在后台自动清理，无需处理。", count: 3, unit: "篇",
+  }]);
+  assert.deepEqual(checkupNotices(checkup([item("H12", 0, [], "none")])), []);
+  assert.deepEqual(checkupNotices(null), []);
+  // 只有 fix="none" 的才当提示卡:同代号带修复动作(不应出现)不展示
+  assert.deepEqual(checkupNotices(checkup([item("H12", 2, [], "reparse")])), []);
 });
 
 test("只读项(fix=none)没有修复按钮,其余都有", () => {

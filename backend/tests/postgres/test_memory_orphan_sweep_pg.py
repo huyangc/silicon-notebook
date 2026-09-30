@@ -65,12 +65,12 @@ def _user(repo, user_id):
     )
 
 
-def _notebook(repo, notebook_id):
+def _notebook(repo, notebook_id, owner=OWNER):
     _write(
         repo,
         "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at)"
         " VALUES (%s,%s,%s,%s,%s,%s)",
-        (notebook_id, notebook_id, OWNER, "ready", NOW, NOW),
+        (notebook_id, notebook_id, owner, "ready", NOW, NOW),
     )
 
 
@@ -229,15 +229,17 @@ class World:
         _source(repo, "nb-a", "src-dangling", "memory", "mem-never")
         for source_id in ("src-keep", "src-doc", "src-hard", "src-dep", "src-dangling"):
             _derive(repo, "nb-a", source_id)
-        copy = repo.copy_notebook("nb-a", new_owner_id=RECIPIENT)  # N-5, for real
-        self.copy_id = copy.id
-        with repo._runtime.database.connect() as db:
-            rows = db.execute(
-                "SELECT id, memory_id FROM sources WHERE notebook_id=%s "
-                "AND source_type='memory' ORDER BY id", (self.copy_id,),
-            ).fetchall()
-        self.n5_ids = [r["id"] for r in rows]
-        assert self.n5_ids and all(not r["memory_id"] for r in rows), rows
+        # N-5: what an EARLIER deep copy left behind. Since E5-1 a copy carries no Memory,
+        # so the legacy transform is written field by field (``notebook_sharing.py``:
+        # ``data["memory_id"] = ""``; ``source_type`` stays 'memory'; ids remapped into
+        # the new notebook; derived rows copied along).
+        self.copy_id = "nb-legacy-copy"
+        _notebook(repo, self.copy_id, owner=RECIPIENT)
+        self.n5_ids = ["src-n5-a", "src-n5-b"]
+        for legacy_id in self.n5_ids:
+            _source(repo, self.copy_id, legacy_id, "memory", "")
+            _derive(repo, self.copy_id, legacy_id)
+        _source(repo, self.copy_id, "src-n5-doc", "markdown", "")
         _source(repo, "nb-a", "src-null", "memory", None)
         _derive(repo, "nb-a", "src-null")
         _derive(repo, "nb-a", "src-knowhow")
@@ -247,8 +249,7 @@ class World:
         self.control_ids = ["src-keep", "src-doc", "src-knowhow"]
         self.captured = {s: _capture(repo, s) for s in self.orphan_ids + self.control_ids}
         for sid in self.n5_ids:
-            assert self.captured[sid]["source_elements"], sid
-            assert self.captured[sid]["knowledge_objects"], sid
+            assert all(self.captured[sid][t] for t, _k, _f in _DERIVED), sid
 
 
 def _assert_swept(world):
@@ -389,3 +390,44 @@ def test_checkup_h12_counts_the_notebooks_remaining_orphans(postgres_repository)
     assert h12(world.copy_id).count == len(world.n5_ids)
     MemoryOrphanSweep.for_repository(repo).run_pass()
     assert h12("nb-a").count == 0 and h12(world.copy_id).count == 0
+
+
+def test_a_deep_copy_today_carries_no_memory_source(postgres_repository):
+    """The sweep is for LEGACY data only (E5-1: copies carry no Memory). Skipped, loudly,
+    on a tree that still copies Memory sources."""
+    repo = postgres_repository
+    _user(repo, OWNER)
+    _user(repo, RECIPIENT)
+    _notebook(repo, "nb-src")
+    _memory_item(repo, "mem-c", "nb-src")
+    _source(repo, "nb-src", "src-c", "memory", "mem-c")
+    _derive(repo, "nb-src", "src-c")
+    copy = repo.copy_notebook("nb-src", new_owner_id=RECIPIENT)
+    with repo._runtime.database.connect() as db:
+        carried = _first(db.execute(
+            "SELECT COUNT(*) FROM sources WHERE notebook_id=%s AND source_type='memory'",
+            (copy.id,),
+        ).fetchone())
+    if carried:
+        pytest.skip("this tree still copies Memory sources (E5-1 not merged yet)")
+    assert carried == 0
+    assert repo._runtime.memory_store.orphan_memory_source_ids(10) == []
+
+
+def test_only_the_lookup_miss_of_delete_source_counts_as_gone(postgres_repository):
+    world = World(postgres_repository)
+    repo = postgres_repository
+    victim, other = world.orphan_ids[0], world.orphan_ids[1]
+
+    def raising(source_id):
+        if source_id == victim:
+            raise KeyError(source_id)
+        if source_id == other:
+            raise KeyError("some-other-key")
+        return repo.delete_source(source_id)
+
+    tally = MemoryOrphanSweep(
+        store=repo._runtime.memory_store, delete_source=raising,
+        event_log=repo._runtime.event_log,
+    ).run_pass()
+    assert tally == {"deleted": len(world.orphan_ids) - 2, "gone": 1, "failed": 1}
