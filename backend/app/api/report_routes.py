@@ -691,11 +691,15 @@ def share_report_route(
             disclosure,
             requester_id=repo.current_user().id,
             acknowledged=acknowledged,
+            already_shared=bool(report.get("shared")),
         )
         token = repo.share_report(
             notebook_id, report_id,
             memory_guard=share_memory_guard(disclosure, acknowledged),
         )
+    except KeyError:
+        # Deleted (with its notebook) while the share waited for a cited row.
+        raise HTTPException(status_code=404, detail="Report not found") from None
     except ForeignMemoryShareRefused:
         raise user_error(403, "报告引用了其他成员的个人记忆，不能公开") from None
     except NonAuthorShareRefused:

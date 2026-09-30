@@ -2478,13 +2478,21 @@ class MemoryStore:
         statement cannot flip to a worse plan.
 
         ``lock=True`` (the report share transaction) adds ``FOR SHARE`` on the
-        matching ``sources`` rows and their ``memory_items`` rows: removing the
-        projection, deleting / moving / changing the status of exactly those
-        Memory entries waits for the share transaction to commit, or — when it
+        matching rows, so the count and the token are one snapshot.  Each half
+        guards one input of the count: ``s`` the source row (its removal or a
+        change of its type / ``memory_id``), ``lm`` the Memory row (its hard
+        delete or a change of its owner) — ``sources.memory_id`` carries no
+        foreign key, so neither lock implies the other.  A concurrent write to
+        exactly those rows waits for the share transaction, or — when it
         committed first — is seen by this statement (READ COMMITTED re-checks a
-        row it waited for).  Nothing else is locked: other users' Memory and the
-        author's uncited Memory are untouched.  The ``memory_items`` join only
-        takes the lock; readability is decided by ``memory_source_readable``.
+        row it waited for).  Rows are locked in one fixed order (``s.id``), not
+        in citation order, so a writer that locks the same sources in id order
+        cannot form a cycle with a share; a writer locking them in another
+        order still can, and PostgreSQL resolves that by aborting one side
+        (a share aborted that way publishes nothing).  Nothing
+        else is locked: other users' Memory and the author's uncited Memory are
+        untouched.  The ``memory_items`` join only takes the lock; readability
+        is decided by ``memory_source_readable``.
         """
         from app.repositories.postgres import memory_sql
 
@@ -2495,7 +2503,7 @@ class MemoryStore:
             + ("JOIN memory_items lm ON lm.id = s.memory_id " if lock else "")
             + f"WHERE {memory_sql.memory_source_type_predicate('s.source_type')} "
             f"AND {memory_sql.memory_source_readable('s')}"
-            + (" FOR SHARE OF s, lm" if lock else "")
+            + (" ORDER BY s.id FOR SHARE OF s, lm" if lock else "")
         )
 
     @staticmethod

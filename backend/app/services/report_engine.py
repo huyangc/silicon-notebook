@@ -56,7 +56,11 @@ from app.core.model_safety import (
     safe_model_finish_reason,
 )
 from app.domain.extensions import RetrievalContributorHostPort
-from app.domain.share_disclosure import REPORT_PLANNING_MEMORY_KEY, SECTION_MEMORY_KEY
+from app.domain.share_disclosure import (
+    REPORT_PLANNING_MEMORY_KEY,
+    SECTION_MEMORY_KEY,
+    MemorySourceReader,
+)
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 # Only the NAME, from the dependency-free domain layer: these modules are
 # not on the participant override's frozen reader whitelist, but their
@@ -673,6 +677,10 @@ class ReportEngineDependencies:
     communities: "CommunityQueryPort"
     settings: "Settings"
     event_log: Any
+    # M4:把报告带出的个人记忆记在报告上(``_record_memory_use``)。必填、接线时就按
+    # ``MemorySourceReader`` 核对——缺了这两个读法的 store 或测试替身在构造引擎时失败,
+    # 而不是在一份报告写到一半时失败;与 ``memory_retriever`` 是否接线无关。
+    memory_sources: MemorySourceReader
     memory_retriever: Any = None
     corpus_profile: Any = None
     generation_gate: Any = None
@@ -694,6 +702,13 @@ class ReportEngineDependencies:
     # ⚠ 与 P1 那个座位不同,这里没有对应的 owner 字段:打法库没有任何租户维度,
     # 一条打法不属于任何人,所以「报告创建者是谁」对它不是一个有意义的问题。
     retrieval_experiences: Any = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.memory_sources, MemorySourceReader):
+            raise TypeError(
+                "ReportEngineDependencies.memory_sources must provide "
+                "memory_sources_for_source_ids and foreign_memory_sources_for_source_ids"
+            )
 
 
 class _NeverHeldConnectionProbe:
@@ -3167,6 +3182,11 @@ class ReportEngine:
         Additive only: other citations and sections are stored exactly as
         before, and neither the report detail API nor the public projection
         names these fields.
+
+        Fails closed: if the lookup fails, the exception fails the report.  A
+        report stored without its record would later under-count what its page
+        carries once a cited Memory is deleted, so it is not stored at all
+        (the outline is kept and generation can be retried).
         """
         rows = [dict(row) for row in references]
         contexts = [
@@ -3176,14 +3196,14 @@ class ReportEngine:
         ]
         cited = [str(row.get("source_id") or "") for row in rows]
         drafted = [str(ctx.get("source_id") or "") for group in contexts for ctx in group]
-        retriever = self.dependencies.memory_retriever
+        memory_sources = self.dependencies.memory_sources
         own: Mapping[str, str] = {}
         foreign: Mapping[str, tuple[str, str]] = {}
-        if retriever is not None and any(cited + drafted):
-            own = retriever.store.memory_sources_for_source_ids(
+        if any(cited + drafted):
+            own = memory_sources.memory_sources_for_source_ids(
                 cited + drafted, self.user_id
             )
-            foreign = retriever.store.foreign_memory_sources_for_source_ids(
+            foreign = memory_sources.foreign_memory_sources_for_source_ids(
                 cited, self.user_id
             )
         for row, source_id in zip(rows, cited):

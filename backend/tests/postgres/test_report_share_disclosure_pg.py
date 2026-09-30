@@ -102,6 +102,64 @@ def test_share_transaction_locks_only_the_cited_memory_pg(world):
     assert results["deprecated_at"] >= released_at
 
 
+@pytest.mark.parametrize(
+    "statement, target",
+    [
+        # The source half (``FOR SHARE OF s``): removing only the projection row.
+        ("DELETE FROM sources WHERE id=%s", "source"),
+        # The Memory half (``FOR SHARE OF lm``): hard-deleting only the Memory
+        # row (``sources.memory_id`` has no foreign key, so the source row is
+        # not touched and the ``s`` lock alone would not hold it).
+        ("DELETE FROM memory_items WHERE id=%s", "memory"),
+    ],
+)
+def test_each_half_of_the_share_lock_holds_its_row_pg(world, statement, target):
+    """Each input of the in-transaction count is held separately: a write to
+    only the cited source row, or only the cited Memory row, waits for the
+    share transaction to end."""
+    import threading
+    import time
+
+    from tests.report_share_disclosure_cases import make_report, share, source_ref
+
+    make_memory(world, world.alice, "a1")
+    cited_memory, cited_source = world.memories["a1"]
+    rid = make_report(world, world.alice, [source_ref(cited_source, "k1")])
+    store = world.repo._runtime.report_store
+    real_now = store.now
+    inside, release = threading.Event(), threading.Event()
+
+    def held_now():
+        inside.set()
+        assert release.wait(30)
+        return real_now()
+
+    world.monkeypatch.setattr(store, "now", held_now)
+    results: dict[str, object] = {}
+
+    def publish():
+        results["share"] = share(world, world.alice, rid, 1).status_code
+
+    def write_one_row():
+        with world.repo._runtime.database.write() as db:
+            db.execute(statement, (cited_source if target == "source" else cited_memory,))
+        results["written_at"] = time.monotonic()
+
+    publisher = threading.Thread(target=publish)
+    publisher.start()
+    assert inside.wait(30), "the share transaction never reached its UPDATE"
+    writer = threading.Thread(target=write_one_row)
+    writer.start()
+    writer.join(1.0)
+    assert writer.is_alive(), f"the cited {target} row changed under the share transaction"
+    released_at = time.monotonic()
+    release.set()
+    publisher.join(30)
+    writer.join(30)
+    assert results["share"] == 200
+    assert results["written_at"] >= released_at
+
+
 def test_memory_ids_for_source_ids_maps_only_the_owners_memory_sources_pg(world):
     store = world.repo._runtime.memory_store
     a1 = make_memory(world, world.alice, "a1")
