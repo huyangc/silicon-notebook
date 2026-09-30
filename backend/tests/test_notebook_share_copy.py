@@ -2169,3 +2169,106 @@ def test_cluster_statements_read_concept_clusters_once_on_sqlite(repo):
             plan = [row[3] for row in db.execute(f"EXPLAIN QUERY PLAN {query}", ("nb",))]
             reads = [line for line in plan if cluster_index.search(line) or "SCAN c" in line]
             assert len(reads) == 1, (label, plan)
+
+
+def test_member_keys_probe_clusters_by_member_on_a_database_without_statistics(repo):
+    """P1-A:本仓库的 SQLite 不跑 ANALYZE。在没有 sqlite_stat1 的库上,「含 Memory 成员的簇」
+    集合语句必须按 ``idx_clusters_member (member_object_id=?)`` 探测簇行;按
+    ``(notebook_id=?)`` 读簇行会让每个 Memory 对象把本库全部簇行走一遍。"""
+    from app.repositories.sqlite import sharing_store as store_module
+
+    with repo._connect() as db:
+        assert not db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'sqlite_stat1'"
+        ).fetchone(), "the pin is about a database the planner has no statistics for"
+        plan = [row[3] for row in db.execute(
+            f"EXPLAIN QUERY PLAN {store_module._MEMORY_MEMBER_KEYS_SQL}", ("nb",)
+        )]
+    cluster_reads = [line for line in plan if " mc " in f"{line} "]
+    assert cluster_reads == [
+        "SEARCH mc USING INDEX idx_clusters_member (member_object_id=?)"
+    ], plan
+
+
+def test_many_memory_objects_in_small_clusters_copy_quickly(repo):
+    """P1-A 的实际形态:2000 个 Memory 对象,每个和一个共享对象组成两人簇(共 4000 对象,
+    在拷贝上限以内)。尺寸复核与快照都在秒级以内,两人簇整簇不带。"""
+    import time
+
+    nb = memory_cases.NOTEBOOK
+    _seed_memory_world(repo)
+    rows = []
+    for i in range(2000):
+        rows += [
+            memory_cases.Row("knowledge_objects", {
+                "id": f"ko-many-mem-{i}", "notebook_id": nb, "object_type": "concept",
+                "status": "approved", "source_id": "src-mem-alice",
+                "payload": {"name": f"{memory_cases.MARK} {i}"}, "evidence": [],
+                "created_at": memory_cases.NOW, "updated_at": memory_cases.NOW,
+            }, True),
+            memory_cases.Row("knowledge_objects", {
+                "id": f"ko-many-doc-{i}", "notebook_id": nb, "object_type": "concept",
+                "status": "approved", "source_id": "src-doc", "payload": {"name": f"doc {i}"},
+                "evidence": [], "created_at": memory_cases.NOW, "updated_at": memory_cases.NOW,
+            }),
+        ]
+        rows += [
+            memory_cases.Row("concept_clusters", {
+                "id": f"cc-many-{member}", "notebook_id": nb, "canonical_id": f"K-pair-{i}",
+                "member_object_id": member, "canonical_name": f"pair {i}",
+                "object_type": "concept", "created_at": memory_cases.NOW, "generation": 0,
+            })
+            for member in (f"ko-many-mem-{i}", f"ko-many-doc-{i}")
+        ]
+    _insert_rows(repo, rows)
+    store = repo._runtime.sharing_store
+    started = time.monotonic()
+    assert store.snapshot_copy_within_limits(nb)
+    snapshot = store.snapshot_copy_rows(nb)
+    elapsed = time.monotonic() - started
+    assert {r["canonical_id"] for r in snapshot["concept_clusters"]} == {"K-shared"}
+    assert elapsed < 3, elapsed
+
+
+def test_validate_and_compensate_both_consume_the_copys_cluster_decision(repo, monkeypatch):
+    """快照的「簇是否因源库脏而丢掉」记录按副本 id 存在 store 里:成功的拷贝由 validate_copy
+    取走,中途失败的拷贝由 compensate_copy 取走——两条路径都不留下记录。"""
+    _seed_memory_world(repo)
+    _mk_user(repo, "user-decision")
+    store = repo._runtime.sharing_store
+    repo.copy_notebook(memory_cases.NOTEBOOK, new_owner_id="user-decision")
+    assert store._clusters_dropped == {}
+
+    original = SharingStore.insert_copy_rows
+
+    def fail_after_the_root_row(store_self, table, rows, *, chunk_size):
+        if table == "knowledge_objects":
+            assert store_self._clusters_dropped, "the root row recorded the decision"
+            raise RuntimeError("injected failure after the decision was recorded")
+        return original(store_self, table, rows, chunk_size=chunk_size)
+
+    monkeypatch.setattr(SharingStore, "insert_copy_rows", fail_after_the_root_row)
+    with pytest.raises(RuntimeError, match="injected failure"):
+        repo.copy_notebook(memory_cases.NOTEBOOK, new_owner_id="user-decision")
+    assert store._clusters_dropped == {}
+
+
+def test_member_clusters_are_diffed_per_generation(repo, client):
+    """「含 Memory 成员的簇」按 (canonical_id, generation) 成对做差:重建进行中,building 代
+    (generation 1)里的 K-shared 含一个 Memory 成员,published 代(generation 0)里没有——
+    拷贝照带 published 代的 K-shared,校验两侧一致,拷贝 200。"""
+    _seed_memory_world(repo)
+    _insert_rows(repo, [
+        memory_cases.Row("concept_clusters", {
+            "id": "cc-building-K-shared", "notebook_id": memory_cases.NOTEBOOK,
+            "canonical_id": "K-shared", "member_object_id": "ko-alice-1",
+            "canonical_name": "shared topic", "object_type": "concept",
+            "created_at": memory_cases.NOW, "generation": 1,
+        }, True),
+    ])
+    token = client.post(f"/api/notebooks/{memory_cases.NOTEBOOK}/share").json()["share_token"]
+    copied = client.post(f"/api/shared/{token}/copy")
+    assert copied.status_code == 200, copied.text
+    view = memory_cases.read_copy(_fetch(repo), "?", copied.json()["id"])
+    assert view.counts["concept_clusters"] == memory_cases.expected_copy_counts()["concept_clusters"]
+    assert {r["canonical_id"] for r in view.rows["concept_clusters"]} == {"K-shared"}

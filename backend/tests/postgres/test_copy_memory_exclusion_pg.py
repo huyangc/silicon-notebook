@@ -430,6 +430,49 @@ def test_copy_survives_the_source_being_rebuilt_mid_copy(pg_app, monkeypatch):
     )
 
 
+def test_validate_and_compensate_both_consume_the_copys_cluster_decision(pg_app, monkeypatch):
+    from app.repositories.postgres.sharing_store import SharingStore
+
+    repo, _client = pg_app
+    _seed(repo)
+    _mk_user(repo, "user-decision")
+    store = repo._runtime.sharing_store
+    repo.copy_notebook(cases.NOTEBOOK, new_owner_id="user-decision")
+    assert store._clusters_dropped == {}
+
+    original = SharingStore.insert_copy_rows
+
+    def fail_after_the_root_row(store_self, table, rows, *, chunk_size):
+        if table == "knowledge_objects":
+            assert store_self._clusters_dropped, "the root row recorded the decision"
+            raise RuntimeError("injected failure after the decision was recorded")
+        return original(store_self, table, rows, chunk_size=chunk_size)
+
+    monkeypatch.setattr(SharingStore, "insert_copy_rows", fail_after_the_root_row)
+    with pytest.raises(RuntimeError, match="injected failure"):
+        repo.copy_notebook(cases.NOTEBOOK, new_owner_id="user-decision")
+    assert store._clusters_dropped == {}
+
+
+def test_member_clusters_are_diffed_per_generation(pg_app):
+    repo, client = pg_app
+    _seed(repo)
+    _insert_rows(repo, [
+        cases.Row("concept_clusters", {
+            "id": "cc-building-K-shared", "notebook_id": cases.NOTEBOOK,
+            "canonical_id": "K-shared", "member_object_id": "ko-alice-1",
+            "canonical_name": "shared topic", "object_type": "concept",
+            "created_at": cases.NOW, "generation": 1,
+        }, True),
+    ])
+    token = client.post(f"/api/notebooks/{cases.NOTEBOOK}/share").json()["share_token"]
+    copied = client.post(f"/api/shared/{token}/copy")
+    assert copied.status_code == 200, copied.text
+    view = cases.read_copy(_fetch(repo), "%s", copied.json()["id"])
+    assert view.counts["concept_clusters"] == cases.expected_copy_counts()["concept_clusters"]
+    assert {r["canonical_id"] for r in view.rows["concept_clusters"]} == {"K-shared"}
+
+
 # ------------------------------------------------------------------ EXPLAIN pins
 # The distribution the pins run on: the target notebook (nb-big) is a thin slice of
 # every big table and holds 40 Memory sources; ONE other notebook (nb-memheavy)
