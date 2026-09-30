@@ -18,9 +18,9 @@ from app.api.deps import (
     repository,
     require_notebook_capability,
     require_notebook_read,
-    source_repository,
     user_error,
 )
+from app.api.source_routes import _HIDDEN_SOURCE_TYPES
 from app.core.audit_actor import session_audit_principal
 from app.models.command_catalog import (
     CommandCatalogApplyRequest,
@@ -136,19 +136,25 @@ def _require_settled_job(job: dict, message: str) -> None:
         raise user_error(409, message)
 
 
-def _owned_source(notebook_id: str, source_id: str):
-    """本 notebook 自己的来源,否则 404。
+def _owned_source(notebook_id: str, source_id: str) -> None:
+    """本 notebook 自己的、用户可见的来源,否则 404。
 
     刻意**不**接受参与集(挂载参考库)的来源:抽取会花模型钱并写这个库的知识,
     对一个只是被挂载进来的库这么做,授权语义是错的。
+
+    同样不接受隐藏合成源(Memory / knowhow 投影,与 `source_routes._HIDDEN_SOURCE_TYPES`
+    同一份集合):命令目录抽取的对象是用户导入的文档,而预告会回显来源标题——
+    知道一个 Memory 来源的 id 就能读到别人私有记忆的标题。三种拒绝(不存在、别的库、
+    隐藏类型)都由同一条一行读(来源卡片投影)判定、给同一个 404,拒绝与不存在走
+    完全相同的读。
     """
-    try:
-        detail = source_repository().get_source(source_id)
-    except KeyError:
+    meta = repository().source_metadata([source_id]).get(source_id)
+    if (
+        meta is None
+        or meta["notebook_id"] != notebook_id
+        or meta["source_type"] in _HIDDEN_SOURCE_TYPES
+    ):
         raise HTTPException(status_code=404, detail="Source not found")
-    if detail.notebook_id != notebook_id:
-        raise HTTPException(status_code=404, detail="Source not found")
-    return detail
 
 
 @router.get(

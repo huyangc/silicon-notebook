@@ -3255,8 +3255,8 @@ async def test_get_cited_element_follows_the_participant_set_not_the_allowlist(
         selected. Reading the allowlist instead of the mount would deny this.
     Plus: a hidden synthetic (memory/knowhow) source stays unreachable ACROSS
     libraries — Memory is owner-private and a projection row is not a user
-    document — while the same-notebook case keeps its existing behaviour
-    (tightening that belongs to its own change).
+    document. In the same notebook a Memory projection reads only for its
+    creator (``own-memory`` here has no creator row, so it reads for nobody).
     """
     repo = repository()
     service = mcp_env["service"]
@@ -3318,10 +3318,15 @@ async def test_get_cited_element_follows_the_participant_set_not_the_allowlist(
             "source_id": base_memory["source_id"],
             "element_id": base_memory["element_id"],
         })).isError, "跨库的隐藏合成源一律不代理"
-        assert not (await client.call("get_cited_element", {
+        # Same notebook, but a Memory projection with no creator row reads for
+        # nobody (and this token has no memory:read either): the owner gate
+        # answers exactly what a missing id answers. The full matrix (own vs
+        # another member's Memory, with and without memory:read) lives in
+        # test_memory_source_endpoints.py.
+        assert (await client.call("get_cited_element", {
             "source_id": own_memory["source_id"],
             "element_id": own_memory["element_id"],
-        })).isError, "同库合成源保持既有行为不变"
+        })).isError, "无创建者的 Memory 来源对任何人都与不存在同义"
 
 
 # --------------------------------------------------------------------------- #

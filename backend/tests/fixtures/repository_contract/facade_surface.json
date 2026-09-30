@@ -9277,6 +9277,12 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/citations.py",
+        "scope": "<module>.register_citation_tools.get_cited_element.load",
+        "target": "require_agent_access"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/mcp_tools/memory_context.py",
         "scope": "<module>.register_memory_context_tools.ask_notebook.check_memory_scope",
         "target": "require_agent_access"
@@ -10401,6 +10407,12 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/api/catalog_routes.py",
+        "scope": "<module>._owned_source",
+        "target": "source_metadata"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/mcp_tools/citations.py",
         "scope": "<module>.register_citation_tools.get_cited_element.load",
         "target": "source_metadata"
@@ -10411,6 +10423,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, source_ids: 'Sequence[str]') -> 'Dict[str, Dict[str, Any]]'"
+  },
+  "source_notebook_id": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/citations.py",
+        "scope": "<module>.register_citation_tools.get_cited_element.load",
+        "target": "source_notebook_id"
+      }
+    ],
+    "kind": "method",
+    "owner": "NotebookSharingService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, source_id: 'str', *, viewer_id: \"'str | None'\" = None) -> \"'str | None'\""
   },
   "source_parse_busy": {
     "consumers": [

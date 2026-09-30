@@ -51,14 +51,33 @@ def register_citation_tools(
 
         def load() -> dict[str, Any]:
             with _owner_request_context(principal):
-                # TWO narrow reads, both primary-key/indexed, because Agents
-                # call this in a loop: `source_metadata` is the source-card
-                # projection (owning notebook, source type, display-title
-                # columns) and `evidence_elements` is the element row by id.
-                # NOT `get_source` + `source_elements_page`, which cost ~11-13
-                # statements between them (paper authors, an element COUNT(*),
-                # a KG EXISTS, the private error_message, two more COUNTs) and
-                # discard every one of those results here.
+                # Memory owner gate FIRST, before anything about the source is
+                # read. A Memory projection belongs to its creator: another
+                # member's is unreadable, and without `memory:read` so is the
+                # token owner's own (viewer `''` reads no Memory at all — the
+                # same capability ask_notebook/search_notebook_context apply).
+                # The capability check runs on EVERY call and the gate is one
+                # statement that answers None for a missing id and a refused
+                # Memory source alike, so both raise the identical KeyError
+                # after the identical reads.
+                try:
+                    repo.require_agent_access(principal, "memory:read", notebook_id)
+                    viewer_id = principal.owner_id
+                except PermissionError:
+                    viewer_id = ""
+                readable_notebook_id = repo.source_notebook_id(
+                    source_id, viewer_id=viewer_id
+                )
+                if readable_notebook_id is None:
+                    raise KeyError(source_id)
+                # Then TWO narrow reads, both primary-key/indexed, because
+                # Agents call this in a loop: `source_metadata` is the
+                # source-card projection (owning notebook, source type,
+                # display-title columns) and `evidence_elements` is the element
+                # row by id. NOT `get_source` + `source_elements_page`, which
+                # cost ~11-13 statements between them (paper authors, an
+                # element COUNT(*), a KG EXISTS, the private error_message, two
+                # more COUNTs) and discard every one of those results here.
                 meta = repo.source_metadata([source_id]).get(source_id)
                 if meta is None:
                     raise KeyError(source_id)
@@ -76,6 +95,7 @@ def register_citation_tools(
                         type=str(meta["source_type"]),
                     ),
                     repo.participant_notebook_ids,
+                    readable_notebook_id=readable_notebook_id,
                 ):
                     raise KeyError(source_id)
                 element = repo.evidence_elements([element_id]).get(element_id)

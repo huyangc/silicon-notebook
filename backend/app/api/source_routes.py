@@ -490,7 +490,8 @@ async def upload_sources(
 
 @router.get("/sources/{source_id}", response_model=SourceDetail)
 def get_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> SourceDetail:
-    if not notebook_access_repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员 ∪ 有效授权边
+    # 读:owner ∪ 只读成员 ∪ 有效授权边;Memory 来源另须是其创建者(与不存在同为 404)。
+    if not notebook_access_repository().user_can_read_source(source_id, user.id):
         raise HTTPException(status_code=404, detail="Source not found")
     try:
         return source_repository().get_source(source_id)
@@ -790,7 +791,8 @@ def backfill_vectors(notebook_id: str) -> RepairScheduledResult:
 
 @router.get("/sources/{source_id}/elements", response_model=List[SourceElement])
 def source_elements(source_id: str, user: UserProfile = Depends(get_current_user)) -> List[SourceElement]:
-    if not notebook_access_repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员 ∪ 有效授权边
+    # 同 get_source:Memory 来源的元素只给创建者本人。
+    if not notebook_access_repository().user_can_read_source(source_id, user.id):
         raise HTTPException(status_code=404, detail="Source not found")
     try:
         return source_repository().source_elements(source_id)
@@ -863,11 +865,22 @@ def source_readable_in_participant_scope(
     notebook_id: str,
     detail: SourceDetail,
     participant_notebook_ids: Callable[[str], Sequence[str]],
+    *,
+    readable_notebook_id: str | None,
 ) -> bool:
     """``detail`` 这份来源可否作为 ``notebook_id`` 的参与集资源被代理读取。
 
-    两道判据,顺序固定:先参与集,再跨库隐藏合成源。
+    三道判据,顺序固定:Memory 属主、参与集、跨库隐藏合成源。
+
+    ``readable_notebook_id`` 是调用方**第一条读**的结果:
+    `source_notebook_id(source_id, viewer_id=查看者)`——别人的 Memory 来源与不存在的
+    id 在那条语句里同样得到 ``None``,调用方据此在读任何别的东西之前就按「不存在」
+    拒绝,所以两者走完全相同的读、给出完全相同的 404。这里再要求它非空且与 ``detail``
+    同库,是让判据本身离不开那道闸:新的调用方漏掉属主闸就拿不到这个参数。Agent 令牌
+    没有 `memory:read` 时查看者传 `''`,连本人的 Memory 也读不到(MCP `get_cited_element`)。
     """
+    if readable_notebook_id is None or readable_notebook_id != detail.notebook_id:
+        return False
     if not in_participant_scope(
         notebook_id, detail.notebook_id, participant_notebook_ids
     ):
@@ -875,12 +888,12 @@ def source_readable_in_participant_scope(
     # ⚠ 跨库时再挡一道隐藏合成源。集合地图/枚举**刻意**把 memory/knowhow 的物理 source
     # 行算进作用域(`source_change_signal_rows` 的原话:数的是检索能够到的东西,不是来源
     # 面板显示的东西),所以一个清单条目原则上可以带着这类 source_id 出现在跨库结果里,
-    # 用户一点「查看来源」,`/elements` 就会把整条合成源摊开——包括没被枚举到的部分,而
-    # Memory 是**按创建者私有**的。当前这条路径实际走不通(knowhow 只写 `knowhow_cell`
-    # 元素、不在可枚举白名单里,Memory 投影根本不写 source_elements),但那是别处的事实,
-    # 不该被这里的授权判断依赖 —— deny by default 更便宜也更稳。
-    # 同库刻意不挡:那是既有 `/sources/{id}` owner∪member 路径逐字不变的行为,收紧它属于
-    # 另一件事。图片资产端点同样不挡:knowhow 单元格图片是普通内容资产,本就随挂载库的
+    # 用户一点「查看来源」,`/elements` 就会把整条合成源摊开——包括没被枚举到的部分。
+    # 两类合成源都**写**元素:Memory 投影经 `source_ingestion.ingest_memory_source`
+    # 写 source_elements 与元素向量(元素 id 形如 `el-<source_id>-0001`,可预测),
+    # knowhow 写 `knowhow_cell` 元素。跨库一律拒绝:文档视图对挂载库的合成源没有意义。
+    # 同库:knowhow 表是笔记本级共享内容,照常可读;Memory 由上面的属主闸决定(只有
+    # 创建者本人)。图片资产端点不挡:knowhow 单元格图片是普通内容资产,本就随挂载库的
     # 内容参与检索,与「文档视图对合成源没有意义」不是一回事。
     return not (
         detail.notebook_id != notebook_id and detail.type in _HIDDEN_SOURCE_TYPES
@@ -896,18 +909,29 @@ def _in_participant_scope(notebook_id: str, owner_notebook_id: str) -> bool:
     return in_participant_scope(notebook_id, owner_notebook_id, _participant_ids)
 
 
-def _participant_scoped_source(notebook_id: str, source_id: str) -> SourceDetail:
-    """返回 ``source_id`` 的详情,前提是它属于 ``notebook_id`` 的有效参与集;否则 404。
+def _participant_scoped_source(
+    notebook_id: str, source_id: str, viewer_id: str
+) -> SourceDetail:
+    """返回 ``source_id`` 的详情,前提是它属于 ``notebook_id`` 的有效参与集、且不是
+    别人的 Memory 来源;否则 404。
 
     participant 集首项恒为 active notebook 自身,所以同库来源走的是同一条路径——
-    调用方不需要先判断「跨不跨库」再选端点。
+    调用方不需要先判断「跨不跨库」再选端点。第一条读就是 Memory 属主闸(见
+    `source_readable_in_participant_scope`):别人的 Memory 与不存在的 id 停在同一条
+    语句、同一个 404 上,`get_source` 那十来条读两者都不付。
     """
+    readable_notebook_id = notebook_access_repository().source_notebook_id(
+        source_id, viewer_id=viewer_id
+    )
+    if readable_notebook_id is None:
+        raise HTTPException(status_code=404, detail="Source not found")
     try:
         detail = source_repository().get_source(source_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
     if not source_readable_in_participant_scope(
-        notebook_id, detail, _participant_ids
+        notebook_id, detail, _participant_ids,
+        readable_notebook_id=readable_notebook_id,
     ):
         raise HTTPException(status_code=404, detail="Source not found")
     return detail
@@ -918,11 +942,15 @@ def _participant_scoped_source(notebook_id: str, source_id: str) -> SourceDetail
     response_model=ScopedSourceDetail,
     dependencies=[Depends(require_notebook_read)],
 )
-def get_source_in_scope(notebook_id: str, source_id: str) -> ScopedSourceDetail:
+def get_source_in_scope(
+    notebook_id: str, source_id: str, user: UserProfile = Depends(get_current_user)
+) -> ScopedSourceDetail:
     # ⚠ 响应模型不是 SourceDetail:代理读取会把参考库的来源交给一个对该库既非 owner
     # 也非成员的用户,`file_path`(后端绝对路径)和 `error_message`(原始异常串,同样
     # 可能带绝对路径)不能跟着出去。理由与取舍见 ScopedSourceDetail 的 docstring。
-    return ScopedSourceDetail.of(_participant_scoped_source(notebook_id, source_id))
+    return ScopedSourceDetail.of(
+        _participant_scoped_source(notebook_id, source_id, user.id)
+    )
 
 
 @router.get(
@@ -930,9 +958,11 @@ def get_source_in_scope(notebook_id: str, source_id: str) -> ScopedSourceDetail:
     response_model=List[SourceElement],
     dependencies=[Depends(require_notebook_read)],
 )
-def source_elements_in_scope(notebook_id: str, source_id: str) -> List[SourceElement]:
+def source_elements_in_scope(
+    notebook_id: str, source_id: str, user: UserProfile = Depends(get_current_user)
+) -> List[SourceElement]:
     # 先做范围校验再读元素:元素是整源的行集合,越权请求不应该先把它捞出来。
-    _participant_scoped_source(notebook_id, source_id)
+    _participant_scoped_source(notebook_id, source_id, user.id)
     try:
         return source_repository().source_elements(source_id)
     except KeyError:
@@ -950,8 +980,9 @@ def source_elements_page_in_scope(
     offset: int = Query(0, ge=0),
     limit: int = Query(40, ge=1, le=100),
     anchor_element_id: str = Query("", max_length=200),
+    user: UserProfile = Depends(get_current_user),
 ) -> PaginatedSourceElements:
-    _participant_scoped_source(notebook_id, source_id)
+    _participant_scoped_source(notebook_id, source_id, user.id)
     try:
         return source_repository().source_elements_page(
             source_id, offset, limit, anchor_element_id
