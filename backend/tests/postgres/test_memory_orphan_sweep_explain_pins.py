@@ -100,38 +100,50 @@ def _plan(connection, sql: str, params: tuple = ()) -> str:
     return "\n".join(str(row["QUERY PLAN"]) for row in rows)
 
 
-def _statements() -> dict[str, tuple[str, tuple]]:
-    where = postgres_memory_store._ORPHAN_MEMORY_SOURCE_WHERE
-    return {
-        "exists": (f"SELECT EXISTS (SELECT 1 FROM sources s WHERE {where}) AS found", ()),
-        "ids": (
-            "WITH o AS MATERIALIZED (SELECT s.id FROM sources s "
-            f"WHERE {where} AND s.id > %s) SELECT id FROM o ORDER BY id LIMIT %s",
-            ("", 200),
-        ),
-        "count": (
-            f"SELECT count(*) AS n FROM sources s WHERE s.notebook_id = %s AND {where}",
-            ("nb7",),
-        ),
-    }
+class _Recorder:
+    """Wraps a connection so the exact statements a store method runs are captured."""
+
+    def __init__(self, connection, seen):
+        self._connection, self._seen = connection, seen
+
+    def execute(self, sql, params=()):
+        self._seen.append((sql, tuple(params)))
+        return self._connection.execute(sql, params)
+
+
+class _RecordingDatabase:
+    def __init__(self, database, seen):
+        self._database, self._seen = database, seen
+
+    def connect(self):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def wrapped():
+            with self._database.connect() as connection:
+                yield _Recorder(connection, self._seen)
+
+        return wrapped()
 
 
 def test_orphan_statements_keep_their_plan_shapes(postgres_database):
     assert PostgresMigrator(postgres_database).migrate()
     _seed(postgres_database)
+    # the pinned statements are the ones the store methods really run
+    seen: list[tuple[str, tuple]] = []
     store = postgres_memory_store.MemoryStore(
-        postgres_database, new_id=lambda prefix: prefix, now=lambda: _NOW
+        _RecordingDatabase(postgres_database, seen), new_id=lambda prefix: prefix, now=lambda: _NOW
     )
-    statements = _statements()
-
-    # the pinned statements are the ones the store runs, and they find the 12 orphans
     assert store.has_orphan_memory_sources() is True
-    found = store.orphan_memory_source_ids(1000)
+    found = store.orphan_memory_source_ids(200)
     assert len(found) == 12 and found == sorted(found)
-    with postgres_database.connect() as connection:
+    with store.database.connect() as connection:
         assert postgres_memory_store.MemoryStore.orphan_memory_source_count_on(
             connection, "nb7"
         ) == 12
+    assert len(seen) == 3, seen
+    statements = dict(zip(("exists", "ids", "count"), seen))
+    with postgres_database.connect() as connection:
         plans = {
             name: _plan(connection, sql, params)
             for name, (sql, params) in statements.items()
@@ -145,7 +157,7 @@ def test_orphan_statements_keep_their_plan_shapes(postgres_database):
     for name in ("exists", "ids"):
         # the global statements never walk sources in primary-key order
         assert "pk_sources" not in plans[name], (name, plans[name])
-    assert "ORDER BY" not in statements["exists"][0]
+    assert "ORDER BY" not in statements["exists"][0]  # the probe is an EXISTS, unordered
 
     ids = plans["ids"]
     assert "CTE o" in ids and "Sort" in ids and ids.startswith("Limit"), ids
