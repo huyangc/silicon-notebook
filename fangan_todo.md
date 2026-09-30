@@ -110,12 +110,10 @@
       上千），大量极短段的库理论上可能逼近 1000。
 - [ ] **问答纠偏规则 12（限定词保真）人工 A/B**：仓库无问答质量评测台，放量前用「点名子部件 /
       周期性 / 方向」三句式各问一次验证；ledger 喂摘要未做。
-- [ ] **`read_document`（PR-A）已登记的延后项**：(a) `source_scope` 真正收窄了检索范围时，
-      整套枚举工具连同 `read_document` 一并不提供（与枚举同一道闸）——需要把来源清单本身做成
-      按选中来源可寻址（source-addressable）才能在收窄范围下继续工作；(b) 清单里**同名**的第二篇
+- [ ] **`read_document`（PR-A）已登记的延后项**：(a) 清单里**同名**的第二篇
       文档无法按标题精确匹配（动作的参数就是标题），只能被跳过并提示模型改读别的文档，尚无第二个
       消歧维度（如序号）；无标题文档已可按花名册占位串「未命名来源」读取，不再属于这一条。
-      (c) **取样通道的 I/O 放大**：`prepare_source_overview` 对每个元素调一次
+      (b) **取样通道的 I/O 放大**：`prepare_source_overview` 对每个元素调一次
       `source_elements_page(offset, limit=1)`，而每次调用含「来源存在性检查 + `COUNT(*)` +
       单行窗口」三条语句——standard 档一篇取 5 个元素即 15 条语句、加两次 generation 读约 17 条
       往返，一个 run 读 4 篇约 70 条；exhaustive 档一篇 16 个元素约 50 条，一 run 约 200 条。
@@ -193,13 +191,6 @@
       Hypothesis 对象。
 - [ ] schema 归纳只提议新类型，不对既有类型提议新字段。
 - [ ] KG refine 自我修正只有总开关 `KG_REFINE_ENABLED`，无抽样 / 比率控制。
-- [ ] **集合枚举的引用不过来源天花板**（同一族，另一条通道）。`collection_enumeration`
-      的 KG 行按 `knowledge_objects.evidence` 原样取 `evidence_element_ids`，
-      `evidence_context.collection_item_citations` 再从中选第一条活的元素建引用卡——两步
-      都只认**库维度**（参与集），不认来源天花板。今天这是自洽的：整个枚举面（花名册）
-      本来就不按来源收窄，只修引用那一半会变成半套语义。要不要让「我的库里有哪些文档 /
-      对象」也认来源勾选，是一次产品裁决（收窄范围时枚举总闸已经会关闭，见
-      `docs/product-and-api_zh.md` 的 `read_document` 一段），拍板后再一并改两步。
 
 ### 检索
 
@@ -266,14 +257,6 @@
       看到 A 库的。修法要新开一条不经鉴权座位的参与集入口（与 `chunk_federation
       ._bounded_participants` 同源），并决定跨库工作簿的成本上界（分析臂是模型规划 +
       逐表读取，× 库数不是免费的）。
-- [ ] **全局（对等）模式下「参考库」这套措辞没有对应物**。`document_overview
-      .overview_intent` 从问句里解析「不包括参考库 / 只介绍…」并产出 `local_only=True`，
-      `collection_enumeration` 据此把枚举范围收成 `notebook_ids == active_notebook_id`
-      一本。对等 run 里没有「当前库 vs 参考库」这组关系，`local_only` 于是把一次跨 8 库
-      的「我的库里有哪些文档」压成只看命名锚点。方向是**少给**（不是泄漏），所以 D0-5
-      没有动它；拍板时要一起决定全局模式下这组措辞映射到什么（整体忽略？还是换一套
-      「只看某一个库」的显式范围表达），以及 `docs/product-and-api*.md` 里 `read_document`
-      那段的对应文案。
 - [ ] **`AskService` 的 synthesis-only 入口（全局引用复核重合成的前置件）**。今天全局回答的
       引用核对发现失败时，回答照常整份交付：未通过的引用逐条带标记，答案下方一句说明
       （`fangan_done.md` 第 48 条）；不作废任何内容，也不要求用户重新提问。所以这个入口不再是
