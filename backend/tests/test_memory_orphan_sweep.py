@@ -579,12 +579,13 @@ def test_startup_hook_runs_the_sweep_in_the_background(world, monkeypatch):
 
 def test_startup_reaches_the_sweep_only_after_mark_ready():
     tree = ast.parse(textwrap.dedent(inspect.getsource(startup_warmup.run_startup)))
-    calls = {}
+    lines: dict[str, list[int]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            calls.setdefault(node.func.id, node.lineno)
-    assert "_sweep_orphan_memory_sources" in calls
-    assert calls["_mark_lifecycle_ready"] < calls["_sweep_orphan_memory_sources"]
+            lines.setdefault(node.func.id, []).append(node.lineno)
+    assert "_sweep_orphan_memory_sources" in lines
+    # EVERY call of the sweep sits after the readiness flip
+    assert max(lines["_mark_lifecycle_ready"]) < min(lines["_sweep_orphan_memory_sources"])
 
 
 def test_startup_hook_never_raises(repo, monkeypatch):
