@@ -152,7 +152,10 @@ def walk(store):
     memory = _evidence("src-mem-bob", "elM", "SECRETMEMO ZEBRAQUARTZ")
     _object(repo, nb, "e1", "src-doc", "Mixture-of-Experts (MoE)", doc)
     _object(repo, nb, "e3", "src-mem-bob", "ZEBRAQUARTZ plan", memory)
-    _object(repo, nb, "e4", "src-doc", "Router balance", doc)
+    # Nothing in e4 matches the query, so the KG search never seeds it: under
+    # a ceiling it is reached only by walking rX.
+    _object(repo, nb, "e4", "src-doc", "Router balance",
+            _evidence("src-doc", "elC", "load balance loss"))
     _relation(repo, nb, "rM", "src-mem-bob", "e1", "e3", memory)
     _relation(repo, nb, "rX", "src-mem-bob", "e1", "e4", memory)
     return repo, nb, bob, alice
@@ -221,6 +224,42 @@ def test_another_members_memory_never_reaches_the_prompt(walk):
     assert not {"rM", "rX"} & {
         support.support_id for values in supports.values() for support in values
     }
+
+
+def test_the_walk_reaches_router_balance_only_through_rx(walk):
+    """Fixture check for the case above: under Bob's own open ceiling e4 is a
+    walk arrival with rX's chain line, so dropping that line for Alice is the
+    edge rule at work, not a seed that never had an edge."""
+    repo, nb, bob, _alice = walk
+
+    block, _id_map, _supports = _overlay(
+        repo, nb, _scope(["src-doc"], ["src-mem-bob"], bob),
+    )
+
+    assert any(
+        "--kind_of-->" in line and "Router balance" in line
+        for line in block.splitlines()
+    )
+
+
+def test_a_node_outside_the_ceiling_after_the_verdict_is_verified_on_read(walk):
+    """The run's verdict said the ceiling does not bind (all selected, nothing
+    drifted when it was taken), and then the library changed: the walk now
+    holds a node whose only source the freeze never admitted.  Verify-on-read
+    catches it, records the drift for the rest of the run, and prunes it."""
+    from app.services.source_scope import current_source_scope
+
+    repo, nb, _bob, alice = walk
+    with source_scope_context(nb, _scope(["src-doc"], [], alice)):
+        scope = current_source_scope()
+        scope._ceiling_binds_memo[nb] = False    # the verdict, taken earlier
+        block, id_map, _hits, _supports = (
+            repo.retrieval.candidates._chunk_kg_overlay(nb, QUERY, QUERY, 1000)
+        )
+        drift_recorded = scope._ceiling_binds_memo[nb]
+
+    assert "ZEBRAQUARTZ" not in block and "e3" not in _objects(id_map)
+    assert drift_recorded is True
 
 
 def test_closed_channel_through_the_mixed_candidate_seam(walk):
