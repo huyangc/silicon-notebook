@@ -28,7 +28,7 @@ Contract (pinned by ``tests/test_memory_orphan_sweep.py``):
   :meth:`run_pass` itself refuses to run while the process is not ready.
 * **One worker, the Memory removal path.** One background thread walks the
   orphans in id order, ``ORPHAN_SWEEP_PAGE_SIZE`` at a time, and removes each
-  page in calls of at most ``REMOVE_BATCH`` ids through
+  page in calls of at most ``REMOVE_BATCH`` ids of ONE notebook through
   ``remove_memory_sources`` (one transaction per call: evidence strip,
   whole-cluster and candidate purge, extraction state, embeddings, KG rows,
   source rows, dirty mark; then artifact redaction and cache invalidation).
@@ -80,6 +80,22 @@ MAX_CONSECUTIVE_FAILURES = 3
 #: id-list guard registers for every statement of that removal (at most 200
 #: source ids). A page of the read is removed in calls of this size.
 REMOVE_BATCH = 200
+
+
+def _batches_by_notebook(page: Sequence[tuple[str, str]]) -> list[list[str]]:
+    """A read page's ``(source id, notebook id)`` rows as removal batches: the
+    ids of ONE notebook each (in the page's id order), at most
+    ``REMOVE_BATCH`` per batch. A removal locks and marks dirty per notebook,
+    so a batch spanning many notebooks would hold all their locks in one long
+    transaction and grow its statements with their number."""
+    by_notebook: dict[str, list[str]] = {}
+    for source_id, notebook_id in page:
+        by_notebook.setdefault(notebook_id, []).append(source_id)
+    return [
+        ids[offset:offset + REMOVE_BATCH]
+        for ids in by_notebook.values()
+        for offset in range(0, len(ids), REMOVE_BATCH)
+    ]
 
 
 class MemoryOrphanSweep:
@@ -144,7 +160,7 @@ class MemoryOrphanSweep:
         started = False
         while consecutive < MAX_CONSECUTIVE_FAILURES:
             try:
-                page = self._store.orphan_memory_source_ids(self._page_size, after)
+                page = self._store.orphan_memory_source_refs(self._page_size, after)
             except Exception as exc:  # noqa: BLE001 - a failed read ends the pass, visibly
                 self._emit({"kind": "memory_orphan_sweep_failed",
                             "error_class": type(exc).__name__})
@@ -154,9 +170,8 @@ class MemoryOrphanSweep:
             if not started:
                 started = True
                 self._emit({"kind": "memory_orphan_sweep_started"})
-            for offset in range(0, len(page), REMOVE_BATCH):
-                batch = page[offset:offset + REMOVE_BATCH]
-                after = batch[-1]
+            after = page[-1][0]  # the cursor moves before any removal is tried
+            for batch in _batches_by_notebook(page):
                 try:
                     removed = int(self._remove_memory_sources(list(batch)))
                 except Exception:  # noqa: BLE001 - isolate the failing id(s) below

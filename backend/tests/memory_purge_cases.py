@@ -1642,6 +1642,27 @@ def case_a_cleanup_failure_after_the_delete_counts_the_deleted_rows(
     ]
 
 
+def case_a_post_commit_failure_keeps_the_removed_count(
+    world: World, monkeypatch
+) -> None:
+    """Assembly review P3-7 (the codex r1 #1 principle): a step after the
+    removal's commit (the unified-cache invalidation) fails. The removal still
+    returns what it committed — the orphan sweep would otherwise record a
+    whole batch as ``gone`` — and a hard delete through it completes."""
+    ingestion = world.repo._runtime.source_ingestion
+
+    def broken(_notebook_id):
+        raise RuntimeError("injected cache invalidation failure")
+
+    monkeypatch.setattr(ingestion.kg_mutations, "invalidate_unified_cache", broken)
+    elsewhere = world.projections["alice_elsewhere"]
+    assert ingestion.remove_memory_sources([elsewhere.source_id]) == 1
+    assert ingestion.remove_memory_sources([elsewhere.source_id]) == 0
+    home = world.projections["alice_home"]
+    service(world).delete(home.memory_id, world.alice.id)
+    assert_purged(world, "alice_home")
+
+
 def case_claimed_memories_gone_meanwhile_finish_with_zero_deleted(
     world: World, monkeypatch
 ) -> None:
@@ -1843,6 +1864,7 @@ MONKEYPATCH_CASES: dict[str, Callable[..., None]] = {
     "post_ingest_cleanup_clean": case_post_ingest_cleanup_leaves_nothing_memory_named,
     "failed_purge_counts_remaining": case_a_failed_purge_counts_what_remains_on_the_server,
     "cleanup_failure_counts_deleted": case_a_cleanup_failure_after_the_delete_counts_the_deleted_rows,
+    "post_commit_failure_keeps_count": case_a_post_commit_failure_keeps_the_removed_count,
     "claimed_gone_zero_deleted": case_claimed_memories_gone_meanwhile_finish_with_zero_deleted,
     "save_during_exit_kept": case_memory_saved_during_exit_is_never_deleted_unacknowledged,
     "rejoin_keeps_new_memory": case_rejoin_after_the_membership_ends_keeps_new_memory,

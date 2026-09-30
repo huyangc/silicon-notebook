@@ -2359,7 +2359,9 @@ class SourceIngestionService:
         transaction. Every caller gets both — ``remove_memory_source`` (one
         Memory: deprecate, a transfer's move, the post-ingest cleanup) and a
         page of the member-exit purge alike. The post-commit steps are
-        ``delete_source``'s (``_after_sources_removed``).
+        ``delete_source``'s (``_after_sources_removed``); a failure there is
+        logged by class and never raised, so the returned count is always
+        what committed.
 
         Idempotent: a source that is already gone (a concurrent exit or
         delete removed it between the lookup and here) counts as deleted.
@@ -2384,7 +2386,16 @@ class SourceIngestionService:
                 self.kg_mutations.mark_unified_kg_dirty_in_tx(db, notebook_id)
             if self.memory_after_teardown is not None:
                 self.memory_after_teardown(db, detached)
-        self._after_sources_removed(rows)
+        try:
+            self._after_sources_removed(rows)
+        except Exception as exc:  # noqa: BLE001 - the removal has committed
+            # The rows are gone and the in-transaction dirty mark already
+            # invalidated every reader keyed on the mutation seq; failing here
+            # would make callers count committed removals as not done (the
+            # orphan sweep would record them as gone, an exit as failed).
+            self.event_log.logger.warning(
+                "memory source post-commit cleanup failed (%s)", type(exc).__name__
+            )
         return len(rows)
 
     def _teardown_sources_tx(

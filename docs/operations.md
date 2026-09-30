@@ -171,7 +171,7 @@ After the service reports ready, every server start runs one background pass (jo
 `memory_id` is NULL or empty (left by notebook copies made before copies stopped carrying Memory), or
 whose `memory_id` points at a row that is missing or not `confirmed` (residue of a hard delete). They go
 through the same Memory-source removal as a member's exit or a hard delete, in calls of at most 200
-sources: the orphan's evidence is stripped from any shared object it was merged into (the shared object
+sources of one notebook (a page is split by notebook, so one call's transaction touches one notebook): the orphan's evidence is stripped from any shared object it was merged into (the shared object
 stays), every concept cluster one of its objects belongs to or was minted from goes whole together with
 the review candidates naming it, and its elements, element/object/relation vectors, knowledge objects and
 relations, facts, cluster members, extraction runs and any chunk rows go with it; the notebook is marked
