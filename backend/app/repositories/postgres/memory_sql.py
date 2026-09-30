@@ -173,11 +173,18 @@ def memory_member_cluster_keys() -> str:
     """本笔记本里**含 Memory 派生成员**的每个簇的 `(canonical_id, generation)`。一个参数:
     笔记本 id。
 
-    从 Memory 一侧驱动:本库的 Memory 来源 → 它们的对象(`source_id` 索引)→ 这些对象的簇
-    成员行(`member_object_id` 索引),集合随本库 Memory 的规模、每个笔记本只建一次。与
-    `memory_cluster` 的成员臂同一判据(同一笔记本、同一代);那条臂写成按簇行相关的
+    与 `memory_cluster` 的成员臂同一判据(同一笔记本、同一代)。那条臂写成按簇行相关的
     EXISTS,放进逐簇行求值的语句里代价是 O(Σ簇大小²)(实测一个 2000 成员的簇每条语句
-    13–15 s),所以按簇行过滤的读者读这份集合、在集合上做差,而不是逐行探测。
+    13–15 s);按簇行过滤的读者改读这份集合、在集合上做差。集合每次拷贝读一次,大小不超过
+    本库 Memory 对象数 × 代数。
+
+    实际计划(不是「从 Memory 一侧驱动」这么理想):PostgreSQL 把本库的对象与本库的簇行做
+    Hash Join(concept_clusters 扫一遍),再按主键逐对象探测 sources——代价随本库规模线性
+    增长;SQLite(没有统计信息)按笔记本索引走本库的对象,逐个按主键探测来源,对 Memory
+    对象按 ``idx_clusters_member (member_object_id=?)`` 探测簇行——同样随本库规模线性增长,
+    从不按簇行把整簇走一遍。
+    SQLite 孪生在 ``mc.notebook_id`` 前多一个一元 ``+``(那边没有统计信息时的索引提示,理由见
+    它的 docstring);除此之外两端逐字相同。
     """
     return (
         "SELECT DISTINCT mc.canonical_id, mc.generation FROM sources ms "

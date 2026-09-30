@@ -478,9 +478,13 @@ def test_both_backends_declare_the_same_fragments_with_identical_text():
             pg_text = getattr(pg_memory_sql, name)(alias)
             assert "?" not in pg_text
             assert pg_text.replace("%s", "?") == getattr(memory_sql, name)(alias), name
+    # One documented difference: SQLite's unary ``+`` index hint (no sqlite_stat1 there,
+    # see the fragment's docstring); everything else is byte-identical.
+    sqlite_keys = memory_sql.memory_member_cluster_keys()
+    assert sqlite_keys.count("+mc.notebook_id") == 1
     assert (
         pg_memory_sql.memory_member_cluster_keys().replace("%s", "?")
-        == memory_sql.memory_member_cluster_keys()
+        == sqlite_keys.replace("+mc.notebook_id", "mc.notebook_id")
     )
     assert pg_memory_sql.memory_source_type_predicate() == memory_sql.memory_source_type_predicate()
     assert pg_memory_sql.memory_source_type_predicate("t.k") == memory_sql.memory_source_type_predicate("t.k")

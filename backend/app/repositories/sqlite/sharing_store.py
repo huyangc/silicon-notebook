@@ -584,20 +584,36 @@ def _drop_memory_member_clusters(rows: list, keys: set) -> list:
     ]
 
 
-def _memory_aware_cluster_count(connection, notebook_id: str, query: str) -> int:
+def _member_keys_once(connection, notebook_id: str, box: "dict | None") -> set:
+    """`_memory_member_keys`, read at most once per `box` (one copy's transaction shares
+    one box between the size bound and the snapshot diff)."""
+    if box is None:
+        return _memory_member_keys(connection, notebook_id)
+    if "keys" not in box:
+        box["keys"] = _memory_member_keys(connection, notebook_id)
+    return box["keys"]
+
+
+def _memory_aware_cluster_count(
+    connection, notebook_id: str, query: str, box: "dict | None" = None
+) -> int:
     """How many rows of the cluster statement `query` a copy keeps: per cluster, less
     the clusters with a Memory-derived member (one row per cluster comes back, then
-    the set is subtracted in Python — never a per-row probe of the whole cluster)."""
-    keys = _memory_member_keys(connection, notebook_id)
-    total = 0
-    for row in connection.execute(
+    the set is subtracted in Python — never a per-row probe of the whole cluster).
+    No cluster row (e.g. a dirty source) reads no set at all."""
+    rows = connection.execute(
         "SELECT c.canonical_id, c.generation, COUNT(*) AS n "
         f"FROM ({query}) c GROUP BY c.canonical_id, c.generation",
         (notebook_id,),
-    ).fetchall():
-        if (str(row["canonical_id"]), int(row["generation"])) not in keys:
-            total += int(row["n"])
-    return total
+    ).fetchall()
+    if not rows:
+        return 0
+    keys = _member_keys_once(connection, notebook_id, box)
+    return sum(
+        int(row["n"])
+        for row in rows
+        if (str(row["canonical_id"]), int(row["generation"])) not in keys
+    )
 
 
 _MEMORY_SNAPSHOT_TEXT: dict[str, str] = {
@@ -1219,7 +1235,8 @@ class SharingStore:
                 snapshot[root_table][0][_COPY_DIRTY_MARK] = (
                     _CLUSTERS_DROPPED if source_dirty else _HOLDS_MEMORY
                 )
-            violation = self._copy_limit_violation(db, notebook_id, queries)
+            keys_box: dict = {}
+            violation = self._copy_limit_violation(db, notebook_id, queries, keys_box)
             if violation is not None:
                 raise NotebookTooLargeToCopyError(violation)
             for table, sql in queries[1:]:
@@ -1231,9 +1248,11 @@ class SharingStore:
                 memory_source_ids = [
                     row["id"] for row in db.execute(_MEMORY_SOURCE_IDS_SQL, (notebook_id,))
                 ]
-                snapshot["concept_clusters"] = _drop_memory_member_clusters(
-                    snapshot["concept_clusters"], _memory_member_keys(db, notebook_id)
-                )
+                if snapshot["concept_clusters"]:
+                    snapshot["concept_clusters"] = _drop_memory_member_clusters(
+                        snapshot["concept_clusters"],
+                        _member_keys_once(db, notebook_id, keys_box),
+                    )
         strip_memory_evidence(snapshot, memory_source_ids)
         return snapshot
 
@@ -1242,18 +1261,31 @@ class SharingStore:
         """The statement set for this copy (see the M2 comment at the top): the
         pre-M2 statements unless the source holds a Memory source or is dirty.
 
-        Cross-branch contract (the E4-1b chunk-write guard reads these shapes, keep
-        them exactly): this if/else on `_COPY_DIRTY_SQL` returning
-        `_MEMORY_COPY_SNAPSHOT_QUERIES` inside the `if` and `_COPY_SNAPSHOT_QUERIES`
-        after it; `_COPY_DIRTY_SQL` containing the rendered
-        `memory_sql.memory_source_type_predicate()`; the Memory-aware `chunks` entry
-        written `FROM chunks c` with `NOT memory_sql.memory_derived_in_notebook('c')`."""
+        跨分支契约(E4-1b 的守卫 `backend/tests/test_memory_chunk_write_guard.py` 按下面
+        四条检查本文件,每一条都必须保持为真):
+        1. 普通集合(`_COPY_SNAPSHOT_QUERIES`,其 `chunks` 语句没有顶层 AND 合取项
+           `NOT memory_sql.memory_derived_*(<别名>)`)只能在 Memory 探测没有命中的分支上被
+           `return`。探测必须恰好写成 `if <conn>.execute(_COPY_DIRTY_SQL, …).fetchone():`(或把
+           同一个调用作为三元表达式的条件)——不许 `is None`、不许 `not`、不许布尔组合;
+           `_COPY_DIRTY_SQL` 是模块级字符串,含 `memory_sql.memory_source_type_predicate(...)`
+           的渲染文本。探测命中(真值)时返回 Memory 集合 `_MEMORY_COPY_SNAPSHOT_QUERIES`,
+           只有落空时才返回普通集合。
+        2. 在任何函数内部,普通集合此外只能以常量下标读取非 chunks 的条目(根行 `[0]`)。
+        3. 在模块级,普通集合只能被投影成表名集合(`frozenset(t for t, _q in S)`),或出现在
+           构造另一个语句集合(`_MEMORY_COPY_SNAPSHOT_QUERIES`)的赋值里;`dict(S)` 及任何其他
+           用法都会撤销豁免。
+        4. `_MEMORY_COPY_SNAPSHOT_QUERIES` 的 `chunks` 语句必须以顶层 AND 合取项的形式包含
+           `NOT ` + `memory_sql.memory_derived_in_notebook('c')`(绝不 OR 连接)。"""
         if db.execute(_COPY_DIRTY_SQL, (notebook_id, notebook_id)).fetchone():
             return _MEMORY_COPY_SNAPSHOT_QUERIES
         return _COPY_SNAPSHOT_QUERIES
 
     def _copy_limit_violation(
-        self, db, notebook_id: str, queries: "tuple[tuple[str, str], ...] | None" = None
+        self,
+        db,
+        notebook_id: str,
+        queries: "tuple[tuple[str, str], ...] | None" = None,
+        keys_box: "dict | None" = None,
     ) -> "str | None":
         """Both copy bounds, counted (not fetched) on the caller's connection:
         the message to raise if either is crossed, else None. Single source of
@@ -1274,7 +1306,7 @@ class SharingStore:
             )
         queries = queries or self._copy_queries(db, notebook_id)
         materialised = sum(
-            _memory_aware_cluster_count(db, notebook_id, sql)
+            _memory_aware_cluster_count(db, notebook_id, sql, keys_box)
             if queries is _MEMORY_COPY_SNAPSHOT_QUERIES and table == "concept_clusters"
             else int(db.execute(f"SELECT COUNT(*) FROM ({sql}) AS _c", (notebook_id,)).fetchone()[0])
             for table, sql in queries
