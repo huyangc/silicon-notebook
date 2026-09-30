@@ -29,12 +29,10 @@ The SQLite specifics:
 
 The binding layer is ``sqlite/id_binding.py`` (as in the PostgreSQL twin);
 the ceiling layer — ``normalise_ceiling``, the evidence predicate text and
-the identity cache in ``ceiling_param`` — is this module's.
+the per-object memo in ``ceiling_param`` — is this module's.
 """
 from __future__ import annotations
 
-import threading
-from collections import OrderedDict
 from typing import Any, Iterable, Optional, Sequence
 
 from app.repositories.sqlite.id_binding import BoundIds, bind_ids, member_of
@@ -48,9 +46,6 @@ EVIDENCE_ITEM_SOURCE = (
 # ``ev`` names a source at all (empty / missing ``source_id`` names none).
 ATTRIBUTABLE_SOURCE = f"COALESCE({EVIDENCE_ITEM_SOURCE},'')<>''"
 
-_CACHE_LIMIT = 8
-_cache_lock = threading.Lock()
-_cache: "OrderedDict[int, tuple[frozenset, BoundIds]]" = OrderedDict()
 
 
 def normalise_ceiling(source_ids: Optional[Iterable[str]]) -> Optional[frozenset]:
@@ -72,10 +67,10 @@ def normalise_ceiling(source_ids: Optional[Iterable[str]]) -> Optional[frozenset
 
 def ceiling_param(ceiling: frozenset) -> BoundIds:
     """The bound form (``id_binding.bind_ids``: one JSON array) of a
-    NON-EMPTY normalised ceiling, computed once per ceiling object;
-    identity-keyed small LRU for the reason the PostgreSQL twin gives
-    (immutable key, strong reference held, ``is`` check).  JSON has no
-    separator to collide with, so there is no fallback form.
+    NON-EMPTY normalised ceiling, memoised on the ceiling object exactly as the
+    PostgreSQL twin does (``source_scope.CeilingSet.bound_forms``; no
+    process-level cache).  JSON has no separator to collide with, so there is
+    no fallback form.
 
     The ids are written SORTED (``sort=True``): SQLite builds the ``IN``
     list's ephemeral index from ``json_each`` in array order, and sequential
@@ -83,18 +78,12 @@ def ceiling_param(ceiling: frozenset) -> BoundIds:
     Measured with a cached 49k-id ceiling on 30k objects: dense page 19 → 5 ms,
     sparse page 30 → 16 ms, dense count 37 → 21 ms; the sort itself (~9 ms) is
     paid once per ceiling object."""
-    key = id(ceiling)
-    with _cache_lock:
-        hit = _cache.get(key)
-        if hit is not None and hit[0] is ceiling:
-            _cache.move_to_end(key)
-            return hit[1]
-    bound = bind_ids(ceiling, sort=True)
-    with _cache_lock:
-        _cache[key] = (ceiling, bound)
-        _cache.move_to_end(key)
-        while len(_cache) > _CACHE_LIMIT:
-            _cache.popitem(last=False)
+    forms = getattr(ceiling, "bound_forms", None)
+    if forms is None:
+        return bind_ids(ceiling, sort=True)
+    bound = forms.get("sqlite")
+    if bound is None:
+        bound = forms["sqlite"] = bind_ids(ceiling, sort=True)
     return bound
 
 
@@ -123,7 +112,12 @@ def evidence_support_sql(ref: str, bound: BoundIds, *, authoritative: bool) -> s
     ``bound``.  Binds ``bound.param`` once.  Both branches use the
     non-driving ``member_of`` (see the module docstring)."""
     if authoritative:
-        return evidence_source_exists(ref, member_of(EVIDENCE_ITEM_SOURCE, bound))
+        # CAST on the evidence side: ``json_extract`` returns an INTEGER for a
+        # numeric ``source_id`` (``{"source_id": 123}``), which never equals
+        # the TEXT ``'123'`` bound in the list.  PostgreSQL's ``->>`` and the
+        # executor's Python re-check (``str()``) both read it as text.
+        return evidence_source_exists(
+            ref, member_of(f"CAST({EVIDENCE_ITEM_SOURCE} AS TEXT)", bound))
     return (
         "EXISTS (SELECT 1 FROM knowledge_object_sources kos "
         f"WHERE kos.object_id={ref}.id "

@@ -82,6 +82,31 @@ from typing import Any, Callable, Iterable, Iterator
 NotebookSourceCeilings = tuple[tuple[str, frozenset[str]], ...]
 
 
+class CeilingSet(frozenset):
+    """A frozen source-id set that carries its own bound SQL forms.
+
+    The enumeration page and its count bind a source ceiling as ONE statement
+    parameter (``repositories/*/source_ceiling.ceiling_param``); building that
+    parameter for ~49k ids costs ~10 ms, and a run issues it for every page
+    and count.  The bound form therefore lives ON the set, in
+    ``bound_forms`` (one entry per backend), for exactly as long as the set
+    lives -- the run's scope -- instead of in a process-level cache that would
+    keep megabyte-sized ceilings of finished runs alive.  The store reads it
+    by duck typing (``getattr(ceiling, "bound_forms", None)``): a plain
+    frozenset still binds, just without the memo.  A frozenset cannot change,
+    so a form stored on it can never describe another set; two threads that
+    build the same form race benignly (one dict assignment of an immutable
+    value).  Equality and hashing are ``frozenset``'s.
+    """
+
+    __slots__ = ("bound_forms",)
+
+    def __new__(cls, iterable: Any = ()) -> "CeilingSet":
+        instance = super().__new__(cls, iterable)
+        instance.bound_forms = {}
+        return instance
+
+
 def _ceiling_pairs(value: Any) -> NotebookSourceCeilings:
     """Normalize a per-notebook ceiling argument into the canonical stored shape.
 
@@ -100,7 +125,7 @@ def _ceiling_pairs(value: Any) -> NotebookSourceCeilings:
     items = value.items() if hasattr(value, "items") else value
     return tuple(sorted(
         (
-            (str(notebook_id), frozenset(str(sid) for sid in source_ids))
+            (str(notebook_id), CeilingSet(str(sid) for sid in source_ids))
             for notebook_id, source_ids in items
         ),
         key=lambda pair: pair[0],
@@ -514,11 +539,11 @@ def source_scope_context(
     current = ActiveSourceScope(
         notebook_id=notebook_id,
         mode=str((raw or {}).get("mode") or "exclude"),
-        source_ids=frozenset(
+        source_ids=CeilingSet(
             str(value) for value in (raw or {}).get("source_ids") or []
         ),
         narrowed=_narrowed_flag(raw),
-        hidden_source_ids=frozenset(
+        hidden_source_ids=CeilingSet(
             str(value) for value in (raw or {}).get("hidden_source_ids") or []
         ),
         # (raw or {}):库维度加入后 raw 可以为 None（只提交了 base_scope）。
@@ -1103,10 +1128,16 @@ def ceiling_binds(
     Memory-ref drop), so another member's Memory never needs a ceiling there.
     The other arms line up: deny-all and a per-library freeze bind in
     ``source_ceiling`` whatever the verdict says; a subjectless run always
-    binds; narrowed or drifted is the verdict itself.  The enumeration verdict
-    is memoised per run and is not flipped on read -- a listing's continuation
-    is protected instead by its cursor's ceiling digest.  Two functions, not
-    one, because the arms are not identical.
+    binds; narrowed or drifted is the verdict itself.  Both are memoised only
+    together with verify-on-read, each on what its reads hold: this one on a
+    row's occurrences and definition source (``node_context_row_within_
+    ceiling`` → ``record_ceiling_drift``); the enumeration one on the signal
+    rows every plan, roster, map and fingerprint reads, on every KG row a
+    fast-path page returns (the bound path's own criterion), and on the
+    Knowhow complete enumeration's catalogued projection sources
+    (``record_collection_ceiling_drift``).  Its drift record is separate
+    because it must not inherit ``foreign_hidden``.  Two functions, not one,
+    because the arms are not identical.
     """
     if not scope.source_ceiling_binds(notebook_id):
         return False

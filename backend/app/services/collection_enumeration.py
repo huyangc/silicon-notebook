@@ -672,18 +672,34 @@ class _FastPathDrift(Exception):
     outside the frozen ceiling; the drift is already recorded on the run."""
 
 
-def _verify_fast_path_owner(
+def _verify_fast_path_row(
     row: Any, frozen: Optional[frozenset], notebook_id: str,
 ) -> None:
     """Verify-on-read for one KG row listed WITHOUT a ceiling (``frozen`` is
     the library's frozen ceiling, ``None`` when the read is bound or there is
-    nothing to verify against).  The owner column is the source the object
-    was extracted from; one outside the freeze is a source added after the
-    run's verdict.  Plain frozenset membership, nothing normalised."""
+    nothing to verify against), by the BOUND path's own criterion, so the
+    fast path lists exactly what the bound path would: at least one evidence
+    item from a frozen source.  An object with no attributable evidence (the
+    bound path would drop it, the fast path lists it) is judged by its owner
+    column instead -- the source it was extracted from.  A row that fails
+    either test came from a source added after the run's verdict: the drift is
+    recorded on the run BEFORE any cursor of this read is handed out, and the
+    read is run again bound.  Plain frozenset membership, nothing normalised.
+    """
     if frozen is None:
         return
-    owner = str(_row_get(row, "source_id") or "")
-    if owner and owner not in frozen:
+    sources = [
+        source for source in (
+            str(entry.get("source_id") or "")
+            for entry in _evidence_entries(_row_get(row, "evidence"))
+        ) if source
+    ]
+    if sources:
+        holds = any(source in frozen for source in sources)
+    else:
+        owner = str(_row_get(row, "source_id") or "")
+        holds = not owner or owner in frozen
+    if not holds:
         scope = current_source_scope()
         if scope is not None:
             record_collection_ceiling_drift(scope, notebook_id)
@@ -1449,13 +1465,15 @@ class CollectionEnumerationService:
         """List usable knowledge objects of one type across the scope.
 
         On the un-bound fast path (``ceiling_binds`` False) every returned
-        row's owner is checked against the frozen ceiling
-        (``CollectionCatalogService.fast_path_members``).  A row owned by a
-        source outside it means the source set drifted after the run's verdict
-        was taken: the drift is recorded on the run and THIS read is run again,
-        now bound (``_walk_kg_objects`` sees the recorded drift through
+        row is checked against the frozen ceiling by the bound path's own
+        criterion (``_verify_fast_path_row``; the frozen set comes from
+        ``CollectionCatalogService.fast_path_members``).  A row that fails it
+        means the source set drifted after the run's verdict was taken: the
+        drift is recorded on the run and THIS read is run again, now bound
+        (``_walk_kg_objects`` sees the recorded drift through
         ``source_ceiling``).  A cursor cut on the fast path then no longer
-        matches the bound ceiling digest and reports ``concurrent_change``.
+        matches the bound ceiling digest and is refused as ``concurrent_change``
+        rather than silently skipping rows.
         """
         call = dict(
             budget=budget, cursor=cursor, cancel_event=cancel_event,
@@ -1593,7 +1611,7 @@ class CollectionEnumerationService:
                         lookahead = len(usable) > allowance
                         page = usable[:allowance]
                         for row in page:
-                            _verify_fast_path_owner(row, frozen, notebook_id)
+                            _verify_fast_path_row(row, frozen, notebook_id)
                             payload = _json_object(_row_get(row, "payload"))
                             item = KgObjectItem(
                                 object_id=str(_row_get(row, "id")),

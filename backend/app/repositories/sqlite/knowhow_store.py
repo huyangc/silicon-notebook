@@ -790,7 +790,7 @@ class KnowhowStore:
         query_key = str(query or "").casefold()
         with self.database.connect() as db:
             rows = db.execute(
-                "SELECT t.id,t.title,t.mutation_seq,"
+                "SELECT t.id,t.title,t.mutation_seq,t.hidden_source_id,"
                 "(SELECT COUNT(*) FROM knowhow_rows r WHERE r.table_id=t.id) AS row_count,"
                 "(SELECT COALESCE(MAX(ch.seq),0) FROM knowhow_changes ch "
                 "WHERE ch.table_id=t.id) AS enumeration_seq "

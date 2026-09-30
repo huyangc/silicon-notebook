@@ -1388,11 +1388,19 @@ def ceiling_binds_for_run(retrieval) -> bool:
     ``CollectionCatalogService.source_ceiling`` 里不看本判词恒生效,无主体 run 恒生效,
     收窄或漂移就是本判词本身。分支不完全相同,所以是两个函数而不是一个。
 
-    **读后核验**(codex #817 r1,与 #806 的 ``node_context`` 同一条规则):判词为假的
-    run 里,集合读取走不绑天花板的快路径,每次读取都拿手里的来源行(signal 行、
-    KG 行的属主)对冻结天花板判成员关系;判词算出之后新增的来源一旦被看见,就记在
-    run 上(``source_scope.record_collection_ceiling_drift``),这次读取与之后的每次
-    读取都改为绑定天花板,本函数也从此返回真(清单如实带上「仅勾选的来源」)。
+    **读后核验**(codex #817 r1,与 #806 的 ``node_context`` 同一条规则:判词只有配合
+    读后核验才可以按 run 记住):判词为假的 run 里,集合读取走不绑天花板的快路径,
+    每次读取都拿手里的东西对冻结天花板判成员关系——计划、花名册、地图与三个指纹
+    读到的 signal 行(``CollectionCatalogService._fast_path_holds``,零额外查询);
+    KG 页返回的每一行,按绑定路径自己的判据(至少一条证据在冻结集合内,无证据的
+    对象看属主列);KG 读取入口先确认一次(``confirm_fast_path``,一条 signal 读,
+    它手里没有来源行);Knowhow 完整枚举的目录里每张表的投影源
+    (``AskService._knowhow_catalog_in_ceiling``)。判词算出之后新增的来源一旦被看见,
+    就记在 run 上(``source_scope.record_collection_ceiling_drift``,与
+    ``node_context`` 的记录分开,因为它不能继承 ``foreign_hidden``),这次读取与之后
+    的每次读取都改为绑定天花板,本函数也从此返回真(清单如实带上「仅勾选的来源」)。
+    翻转记在这次读取交出任何游标之前,所以快路径上切出的游标(天花板摘要为空)在
+    绑定之后被「资料有变动」拒掉,而不是悄悄跳过行。
     """
     from app.services.source_scope import (
         collection_ceiling_drifted,

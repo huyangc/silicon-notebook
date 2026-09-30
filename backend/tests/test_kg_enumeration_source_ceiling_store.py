@@ -12,6 +12,8 @@ spec on both backends and asserts they agree.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from app.core.config import Settings
@@ -188,9 +190,17 @@ def test_reverse_index_probe_is_by_object_not_per_ceiling_id(seeded):
     assert "idx_knowledge_objects_nb_type_created" in plans[0], plans[0]
     assert "TEMP B-TREE FOR ORDER BY" not in plans[0], plans[0]
     for plan in plans:
-        assert "(object_id=?)" in plan and "SEARCH kos EXISTS USING" in plan, plan
+        # The property, not one SQLite build's rendering: newer builds print
+        # the probe as ``SEARCH kos EXISTS USING ...``, older ones (the CI
+        # image) as ``CORRELATED SCALAR SUBQUERY n | SEARCH kos USING ...``.
+        # Either way kos is sought by ``object_id`` alone, never per ceiling
+        # id, never scanned, and the ceiling list never drives the outer loop.
+        assert re.search(
+            r"SEARCH kos (?:EXISTS )?USING (?:COVERING )?INDEX \w+ \(object_id=\?\)",
+            plan), plan
         assert "source_id=?" not in plan, plan
         assert "SCAN kos" not in plan, plan
+        assert plan.startswith("SEARCH knowledge_objects "), plan
 
 
 def test_one_string_is_refused_not_split_into_characters(seeded):

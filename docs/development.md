@@ -94,7 +94,13 @@ contributor constraints, not a second implementation history.
   pins the Ask, reasoning and catalog-overview callers. Its knowledge re-read twin,
   `source_scope.ceiling_binds`, has one more arm (another member's Memory in the
   library); listings do not need it because they exclude private Memory
-  unconditionally. Keep the other arms of the two verdicts in step.
+  unconditionally. Keep the other arms of the two verdicts in step. Both are
+  memoised per run only together with verify-on-read: a collection read on the
+  un-bound fast path checks the source rows it holds (signal rows, each KG row by
+  the bound path's criterion, the Knowhow catalog's projection sources) against the
+  frozen ceiling, and one outside it records the drift
+  (`source_scope.record_collection_ceiling_drift`) so that read and every later one
+  binds.
 - `RepositoryRuntime` owns mutable operational state; `REPORT_CANCELLATIONS` is the
   explicit process-global exception shared by identity with the coordinator and
   compatibility functions. Domain builders take earlier frozen bundles, never the

@@ -408,6 +408,7 @@ def test_knowhow_complete_enumeration_matches_persisted_contract(content_harness
         "id": table_id,
         "title": "Enumeration",
         "mutation_seq": 0,
+        "hidden_source_id": None,
         "row_count": 100,
         "enumeration_seq": 101,
     }]

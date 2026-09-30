@@ -750,14 +750,15 @@ def test_peer_mode_has_no_current_notebook(repo):
         f"sources: 4 (current notebook: {peer_map.active_sources})")
 
 
-def test_global_ask_knowhow_object_citation_no_longer_voids_the_answer(repo):
+def test_global_ask_knowhow_object_citation_is_never_out_of_ceiling(repo):
     """线上 bug 回归:全局问答的冻结天花板 = 每个参与库的可见来源,Knowhow 投影
     源是隐藏来源,不在天花板里。投影出来的 KG 对象以前被引到投影元素上,终态
-    复核判 ``out_of_ceiling``,整份答案作废。
+    复核把这张引用卡判为 ``out_of_ceiling``。
 
     现在:同时有可见证据的对象引到可见元素;只有投影证据的对象不出引用卡——
-    两种情况下终态复核都不作废。挂载进名义 active 的参考库(对等模式里的另一个
-    参与库)同样覆盖。
+    终态复核(``global_citation_check.judge_reference``)对每张卡都不给
+    ``out_of_ceiling``。挂载进名义 active 的参考库(对等模式里的另一个参与库)
+    同样覆盖。
     """
     anchor = repo.create_notebook(NotebookCreate(name="甲")).id
     peer = repo.create_notebook(NotebookCreate(name="乙")).id
@@ -1094,6 +1095,40 @@ def test_map_knowhow_count_follows_the_executor_gate_under_drift(rrepo, drifted)
     assert f"knowhow tables: {expected} |" in result.collection_map_text
 
 
+def test_knowhow_complete_enumeration_verifies_its_catalog_on_read(rrepo):
+    """Knowhow 完整枚举的闸是按 run 记住的判词(#817 r1):判词之后新建的表,其投影
+    源不在冻结天花板里——目录读取发现它就记下漂移、交回空目录(这条路径让路给
+    逐行过滤的推理路径);冻结时已有的表照常。"""
+    notebook = rrepo.create_notebook(NotebookCreate(name="nb")).id
+    _src(rrepo, notebook, "s1", formulas=1)
+    ask_service = rrepo._runtime.ask_service()
+    store = ask_service.knowhow_store
+
+    def projected_table(title, projection):
+        table_id = rrepo.create_knowhow_table(
+            notebook, title, "", [{"name": "Topic", "role": "anchor"}])
+        _src(rrepo, notebook, projection, source_type="knowhow")
+        store.set_knowhow_hidden_source(table_id, projection)
+
+    projected_table("T1", "kh-T1")
+    with retrieval_run(run_kind="ask_reasoning", actor_id=_ACTOR):
+        with _frozen_all_selected(rrepo, notebook, ["s1"]):
+            assert ask_service._knowhow_completeness_in_scope(notebook) is True
+            intact = ask_service._knowhow_catalog_in_ceiling(
+                notebook, store.knowhow_enumeration_catalog(notebook))
+            assert [t["title"] for t in intact["tables"]] == ["T1"]
+            assert intact["tables"][0]["hidden_source_id"] == "kh-T1"
+            assert not _drifted(notebook)
+            projected_table("T2", "kh-T2")
+            drifted = ask_service._knowhow_catalog_in_ceiling(
+                notebook, store.knowhow_enumeration_catalog(notebook))
+            assert drifted["tables"] == []
+            assert _drifted(notebook)
+            collection_map = rrepo.collection_catalog.collection_map(
+                notebook, ceiling_binds=False, knowhow_reachable=True)
+    assert collection_map.knowhow_tables == 0
+
+
 # --------------------------------------- 对等模式:引用只看本 run 冻结的参与集
 
 def _global_libraries(repo):
@@ -1406,6 +1441,24 @@ def test_a_kg_row_owned_outside_the_freeze_flips_the_read_to_bound(repo):
     assert sorted(item.object_id for item in kg.items) == ["oA", "oB", "oMix"]
 
 
+def test_an_evidence_less_row_is_judged_by_its_owner(repo):
+    """无证据的对象绑定路径会丢、快路径会列,所以快路径按属主列核验:属主在冻结
+    集合里(或为空)照常列出且不算漂移;属主在冻结集合外即漂移,这次读取改为绑定。"""
+    nb = _library(repo)
+    _kg(repo, nb, "oOwnedIn", [], owner_source_id="sA")
+    with retrieval_run(run_kind="ask_reasoning", actor_id=_ACTOR):
+        with _all_ticked(repo, nb):
+            intact = repo.collection_enumeration.enumerate_kg_objects(
+                nb, "concept", budget=_budget(), ceiling_binds=False)
+            assert not _drifted(nb)
+            _kg(repo, nb, "oOwnedOut", [], owner_source_id="sGone")
+            flipped = repo.collection_enumeration.enumerate_kg_objects(
+                nb, "concept", budget=_budget(), ceiling_binds=False)
+            assert _drifted(nb)
+    assert {"oNone", "oOwnedIn"} <= {item.object_id for item in intact.items}
+    assert sorted(item.object_id for item in flipped.items) == ["oA", "oB", "oMix"]
+
+
 def test_a_49k_ceiling_binds_once_across_pages_and_counts(repo, monkeypatch):
     """codex #817 r1 P2:执行器与目录把 run 的那一个 frozenset(``members``)交给
     store,store 按对象身份缓存绑定形态——4.9 万 id 的天花板在整条清单的每一页和
@@ -1423,7 +1476,6 @@ def test_a_49k_ceiling_binds_once_across_pages_and_counts(repo, monkeypatch):
         return original(values, **kwargs)
 
     monkeypatch.setattr(store_ceiling, "bind_ids", counting)
-    monkeypatch.setattr(store_ceiling, "_cache", type(store_ceiling._cache)())
     ticks = ["sA", "sC"] + [f"absent-{index:05d}" for index in range(49_000)]
     with retrieval_run(run_kind="ask_reasoning", actor_id=_ACTOR):
         with _ticked(nb, ticks):
