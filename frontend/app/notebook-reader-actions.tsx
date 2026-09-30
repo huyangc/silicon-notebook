@@ -4,7 +4,7 @@ import { useRef } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent } from "react";
 
 import { grantedViaLabel, isGroupGranted } from "./group-api.ts";
-import { anchorBelow, type ExitAnchor } from "./use-notebook-exit.ts";
+import { anchorOf, type ExitAnchor } from "./use-notebook-exit.ts";
 import type { NotebookSummary } from "./workspace-model.ts";
 
 /**
@@ -55,7 +55,7 @@ type BadgeRenameProps = {
 type ReaderNotebookBadgeProps = {
   notebook: NotebookSummary;
   leaveBusy: boolean;
-  /** 按下「退出共享」。参数是确认面板的落点(按钮正下方);流程本身见 `use-notebook-exit.ts`。 */
+  /** 按下「退出共享」。参数是确认面板的落点(这颗按钮:面板出现在它正下方并跟着它走);流程本身见 `use-notebook-exit.ts`。 */
   onLeave: (anchor: ExitAnchor) => void;
   /** 组管理员改名(可选);仅当 `notebook.can_manage_content` 时真正渲染成可编辑。 */
   rename?: BadgeRenameProps;
@@ -171,7 +171,7 @@ export function ReaderNotebookBadge({
           className="sort-button reader-badge-action"
           disabled={leaveBusy}
           title="退出该共享笔记本"
-          onClick={(event) => onLeave(anchorBelow(event.currentTarget))}
+          onClick={(event) => onLeave(anchorOf(event.currentTarget))}
         >
           {leaveBusy ? "退出中…" : "退出共享"}
         </button>

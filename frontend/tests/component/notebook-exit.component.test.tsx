@@ -8,7 +8,7 @@ import {
   NotebookMenuActions,
   ReaderNotebookBadge,
 } from "../../app/notebook-reader-actions.tsx";
-import { useNotebookExit } from "../../app/use-notebook-exit.ts";
+import { anchorAt, useNotebookExit } from "../../app/use-notebook-exit.ts";
 import type { NotebookSummary } from "../../app/workspace-model.ts";
 
 // 「退出共享」会永久删掉成员自己在这本笔记本里的记忆,所以先告知、允许先导出/先转移、
@@ -75,6 +75,14 @@ const disclosure = (...counts: number[]): Handler => {
 const leave = (respond: (call: Call) => Response | Promise<Response>): Handler =>
   (call) => (call.method === "DELETE" && call.path.endsWith("/membership") ? respond(call) : undefined);
 
+/** 服务端的成功响应:带了确认数就回 200 + 它自己数到的删除条数,没带回 204。 */
+const leaveOk = (): Handler => leave((call) => {
+  const acknowledged = Number(new URLSearchParams(call.search).get("acknowledged_memory_count") ?? 0);
+  return acknowledged > 0
+    ? json({ deleted_memory_count: acknowledged })
+    : new Response(null, { status: 204 });
+});
+
 const deletes = (calls: Call[]) => calls.filter((call) => call.method === "DELETE");
 const disclosures = (calls: Call[]) => calls.filter((call) => call.path.endsWith("/exit-disclosure"));
 
@@ -95,7 +103,7 @@ function Host({
       {entry === "bar" ? (
         <ReaderNotebookBadge
           notebook={NOTEBOOK}
-          leaveBusy={exit.busyId === NOTEBOOK.id}
+          leaveBusy={exit.isBusy(NOTEBOOK.id)}
           onLeave={(anchor) => exit.start(NOTEBOOK.id, anchor, afterLeave)}
         />
       ) : (
@@ -103,7 +111,7 @@ function Host({
           notebook={NOTEBOOK}
           canManageNotebook={false}
           canDeleteNotebook={false}
-          onLeave={() => exit.start(NOTEBOOK.id, { left: 40, top: 60 }, afterLeave)}
+          onLeave={() => exit.start(NOTEBOOK.id, anchorAt(40, 60), afterLeave)}
           onEdit={() => undefined}
           onDelete={() => undefined}
         />
@@ -138,7 +146,7 @@ afterEach(() => {
 for (const entry of ["bar", "menu"] as const) {
   test(`${entry}:没有记忆要删时直接退出——同一条无参数 DELETE,不出现确认面板`, async () => {
     const user = userEvent.setup();
-    const calls = installServer([disclosure(0), leave(() => new Response(null, { status: 204 }))]);
+    const calls = installServer([disclosure(0), leaveOk()]);
     const { afterLeave, onToast } = mount(entry);
 
     await pressLeave(user);
@@ -153,7 +161,7 @@ for (const entry of ["bar", "menu"] as const) {
 
   test(`${entry}:有记忆要删时就地告知条数,确认前不发 DELETE;确认带着条数发出`, async () => {
     const user = userEvent.setup();
-    const calls = installServer([disclosure(3), leave(() => new Response(null, { status: 204 }))]);
+    const calls = installServer([disclosure(3), leaveOk()]);
     const { afterLeave, onToast } = mount(entry);
 
     await pressLeave(user);
@@ -207,7 +215,7 @@ test("取消不发任何请求;确认在途时取消仍可点,已发出的 DELET
   await user.click(cancel);
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
-  gate.resolve(new Response(null, { status: 204 }));
+  gate.resolve(json({ deleted_memory_count: 2 }));
   await waitFor(() => expect(onToast).toHaveBeenCalledWith("已退出共享，已删除 2 条记忆"));
   expect(afterLeave).toHaveBeenCalledOnce();
   expect(deletes(calls)).toHaveLength(1);
@@ -222,7 +230,7 @@ test("409:就地更新为服务端的最新条数并要求重新确认,第二次
       attempt += 1;
       return attempt === 1
         ? json({ detail: { code: "exit_disclosure_required", memory_count: 5 } }, 409)
-        : new Response(null, { status: 204 });
+        : json({ deleted_memory_count: 5 });
     }),
   ]);
   const { onToast, onError } = mount("bar");
@@ -272,7 +280,7 @@ test("读条数失败不盲退:给出说明与重试/取消,重试成功后才�
       attempt += 1;
       return attempt === 1 ? json({ detail: "boom" }, 500) : json({ memory_count: 0 });
     },
-    leave(() => new Response(null, { status: 204 })),
+    leaveOk(),
   ]);
   const { onToast } = mount("bar");
 
@@ -309,7 +317,7 @@ for (const entry of ["bar", "menu"] as const) {
     const gate = deferred<Response>();
     const calls = installServer([
       (call) => (call.path.endsWith("/exit-disclosure") ? gate.promise : undefined),
-      leave(() => new Response(null, { status: 204 })),
+      leaveOk(),
     ]);
     const { onToast } = mount(entry);
     const button = screen.getByRole("button", { name: "退出共享" });
@@ -337,7 +345,7 @@ test("双击「确认退出并删除」:DELETE 只发一次", async () => {
   fireEvent.click(confirm);
   fireEvent.click(confirm);
   await within(await panel()).findByRole("button", { name: "正在退出…" });
-  gate.resolve(new Response(null, { status: 204 }));
+  gate.resolve(json({ deleted_memory_count: 2 }));
 
   await waitFor(() => expect(onToast).toHaveBeenCalled());
   expect(deletes(calls)).toHaveLength(1);
@@ -351,13 +359,13 @@ test("同一个事件循环里连调两次确认:DELETE 只发一次", async () 
   const onToast = vi.fn();
   const { result } = renderHook(() => useNotebookExit({ onToast, onError: vi.fn() }));
 
-  act(() => { result.current.start("nb1", { left: 0, top: 0 }, async () => undefined); });
+  act(() => { result.current.start("nb1", anchorAt(0, 0), async () => undefined); });
   await waitFor(() => expect(result.current.flow?.phase).toBe("confirm"));
   act(() => {
     result.current.confirm();
     result.current.confirm();
   });
-  gate.resolve(new Response(null, { status: 204 }));
+  gate.resolve(json({ deleted_memory_count: 2 }));
 
   await waitFor(() => expect(onToast).toHaveBeenCalledWith("已退出共享，已删除 2 条记忆"));
   expect(deletes(calls)).toHaveLength(1);
@@ -370,7 +378,7 @@ test("退出请求失败:确认面板就地写出原因并保持打开,可以重
     disclosure(2),
     leave(() => {
       attempt += 1;
-      return attempt === 1 ? json({ detail: "x" }, 500) : new Response(null, { status: 204 });
+      return attempt === 1 ? json({ detail: "x" }, 403) : json({ deleted_memory_count: 2 });
     }),
   ]);
   const { onToast, onError } = mount("bar");
@@ -450,7 +458,7 @@ test("转移:复用既有的目标笔记本选择器;转移后就地重读条数
         ],
       })
       : undefined),
-    leave(() => new Response(null, { status: 204 })),
+    leaveOk(),
   ]);
   const { onToast } = mount("bar");
 
