@@ -473,20 +473,21 @@ class KnowledgeQueryService:
         """One concept-detail page under the viewer rule (PR-A·A5).
 
         Returns ``(visible_rows, name, dropped_unowned, exhausted,
-        owned_members)``. The first read over-fetches by the cluster's
-        owned-hidden member count, so the common page is one statement and
-        still carries ``want`` visible rows; members hidden by the evidence
-        half alone (not in the owned set) can still shorten a window, so the
-        scan keeps reading — doubling the window — until it holds ``want``
-        visible rows or the cluster ends. The cursor handed back later is the
-        last KEPT member, so keyset paging stays exact however many rows a
-        window drops. A first page whose whole cluster holds no visible member
-        is a 404, decided by this scan (no COUNT). With a certified reverse
-        index the over-fetch is the cluster's suspect count (members owned by
-        or citing an unreadable source), an upper bound on its hidden members,
-        so the first window is always enough."""
+        owned_members)``. The first read is ``want`` rows -- the page size,
+        never sized by the cluster's hidden or suspect count (codex #806 r4:
+        a hub whose members all cite an unreadable source used to add its
+        whole suspect count to every page's read).  Only while hidden members
+        leave fewer than ``want`` visible rows does the scan keep reading from
+        the last row read, doubling the window, until it holds ``want``
+        visible rows or the cluster ends -- so a page reads about twice the
+        rows it needs at most, plus the hidden ones it skips. The cursor
+        handed back later is the last KEPT member, so keyset paging stays
+        exact however many rows a window drops. A cluster that may hold a
+        hidden member and has no visible live member is a 404 on EVERY page,
+        exactly as on the first (codex #806 r4: a later page used to fall
+        back to the stored canonical name)."""
         owned_members = scope.owned_member_count(canonical_id)
-        window = None if want is None else want + scope.hidden_member_bound(canonical_id)
+        window = want
         cursor = after
         kept: list = []
         dropped = 0
@@ -523,6 +524,10 @@ class KnowledgeQueryService:
                 if not after and kept
                 else scope.cluster_display_name(canonical_id, name)
             )
+            if name is None:
+                # No visible live member anywhere in the cluster: absent for
+                # this viewer on every page, same 404 as the first page.
+                raise KeyError(canonical_id)
         return kept, name, dropped, exhausted, owned_members
 
     def _viewer_resolved_evidence(

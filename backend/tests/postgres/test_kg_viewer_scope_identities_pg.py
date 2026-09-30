@@ -274,6 +274,7 @@ from tests.test_kg_viewer_scope_identities import (  # noqa: E402
     HUB,
     MEMBER_SPECS,
     ORDINARY,
+    _member_ids,
     count_hydrated_member_rows,
     neighbour_nodes,
     seed_member_clusters,
@@ -285,7 +286,7 @@ def _seed(repo, nb):
 
 
 def test_pg_a_suspect_hub_no_longer_sizes_every_clusters_member_window(repo, monkeypatch):
-    from app.services.kg_viewer_scope import _NEIGHBOUR_MEMBER_WINDOW as window
+    from app.services.kg_viewer_scope import _FIRST_MEMBER_WINDOW as window
 
     s = build_scenario(repo, b_memory=False)
     _seed(repo, s.nb)
@@ -332,3 +333,53 @@ def test_pg_a_cluster_with_no_visible_member_anywhere_is_hidden(repo, certified)
     assert [e["target_object_id"] for e in kept_edges] == [ORDINARY[0]]
     assert "A-PRIVATE" not in repr(kept)
     assert as_user(s.b, scope.filter_neighbourhood, *neighbour_nodes(DARK, []), (DARK,)) is None
+
+
+# ------------------------------------- concept detail pages (codex #806 r4)
+def test_pg_a_concept_page_reads_the_page_size_not_the_hubs_suspect_count(repo, monkeypatch):
+    from app.services.kg_viewer_scope import _FIRST_MEMBER_WINDOW as window
+
+    s = build_scenario(repo, b_memory=False)
+    _seed(repo, s.nb)
+    _certify(repo, s.nb, True)
+    knowledge = _reader(repo).knowledge
+    assert knowledge is repo._runtime.knowledge_query.knowledge
+    hydrated = count_hydrated_member_rows(knowledge, monkeypatch)
+    first = as_user(s.b, repo.concept_detail, s.nb, HUB, limit=5)
+    assert [m["payload"]["name"] for m in first["members"]] == [f"{HUB} s{i}" for i in range(5)]
+    assert first["canonical_name"] == f"{HUB} s0"
+    assert hydrated == [6]
+    second = as_user(s.b, repo.concept_detail, s.nb, HUB, limit=5,
+                     after=first["next_cursor"])
+    assert [m["payload"]["name"] for m in second["members"]] == [
+        f"{HUB} s{i}" for i in range(5, 10)]
+    assert second["canonical_name"] == f"{HUB} s0"
+    assert hydrated == [6, 6, window]
+
+
+@pytest.mark.parametrize("certified", [True, False])
+def test_pg_a_concept_page_widens_past_hidden_members(repo, certified):
+    s = build_scenario(repo, b_memory=False)
+    _seed(repo, s.nb)
+    _certify(repo, s.nb, certified)
+    page = as_user(s.b, repo.concept_detail, s.nb, DEEP, limit=3)
+    assert [m["payload"]["name"] for m in page["members"]] == [
+        f"{DEEP} v12", f"{DEEP} v13", f"{DEEP} v14"]
+    assert page["canonical_name"] == f"{DEEP} v12"
+    assert "A-PRIVATE" not in repr(page)
+    rest = as_user(s.b, repo.concept_detail, s.nb, DEEP, limit=3, after=page["next_cursor"])
+    assert [m["payload"]["name"] for m in rest["members"]] == [f"{DEEP} v15", f"{DEEP} v16"]
+    assert rest["canonical_name"] == f"{DEEP} v12" and rest["next_cursor"] is None
+
+
+@pytest.mark.parametrize("certified", [True, False])
+def test_pg_a_cluster_with_no_visible_member_is_absent_on_every_page(repo, certified):
+    s = build_scenario(repo, b_memory=False)
+    names = _seed(repo, s.nb)
+    _certify(repo, s.nb, certified)
+    members = _member_ids(names, DARK)
+    for after in ("", members[0], members[7], members[-1]):
+        with pytest.raises(KeyError):
+            as_user(s.b, repo.concept_detail, s.nb, DARK, limit=3, after=after)
+    owner = as_user(s.a, repo.concept_detail, s.nb, DARK, limit=3, after=members[0])
+    assert owner["canonical_name"] == f"A-PRIVATE {DARK}"
