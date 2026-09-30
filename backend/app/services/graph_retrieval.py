@@ -1565,7 +1565,7 @@ class GraphRetrievalService(_RetrievalState):
         (``_kg_object_owners``)已经把 owner 集与 chunk 腿的参与集求过交,而联邦
         向量腿在同一次 ``_mix_retrieve`` 里**先跑**,且经同一个入口为每个 peer
         参与库取过一次可见来源——所以这里不会再读库:默认天花板下的单库运行直接
-        拿 scope 里冻结的天花板(排序结果按 run 缓存),其余运行是 memo 命中。没有
+        拿 scope 里冻结的天花板(按构造器那次读取的顺序交出,不排序、不读库),其余运行是 memo 命中。没有
         ambient run 时(memo 直通)无 scope 的运行会真读,但那种场景本来就没有任何
         东西被冻结。
         """

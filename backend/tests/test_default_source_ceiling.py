@@ -953,6 +953,92 @@ def test_refresh_inside_a_legacy_scope_that_binds_nothing_only_narrows():
             }
 
 
+def test_refresh_in_a_closed_channel_keeps_the_own_memory_out_of_every_inherited_shape():
+    """Third review P3-4 (mutant X1) and P3-3.  With the Memory channel closed
+    at the refresh, a local dimension the refresh re-derives from an
+    older-style outer must lose the asker's own Memory in BOTH halves -- the
+    synthesised ``visible ∪ hidden(owner)`` for an outer that binds nothing,
+    and the per-notebook entry an outer binds its own notebook by."""
+    store = _shared_store()
+    with source_scope_context(
+        NB, None, {"mode": "include", "notebook_ids": ["nb-lib"], "narrowed": False},
+    ), memory_access_context(False), refreshed_ceiling_context(
+        NB, "bob", store.readers(),
+    ):
+        scope = current_source_scope()
+        assert "src-memory-bob" not in scope.hidden_source_ids
+        assert scope.hidden_source_ids == frozenset({"src-knowhow"})
+        assert source_allowed(NB, "src-memory-bob") is False
+        assert source_allowed(NB, "src-knowhow") is True
+    with source_scope_context(
+        NB, None, None, {NB: ["src-a", "src-memory-bob"]},
+    ):
+        assert source_allowed(NB, "src-memory-bob") is True, "the outer admits it"
+        with memory_access_context(False), refreshed_ceiling_context(
+            NB, "bob", store.readers(),
+        ):
+            scope = current_source_scope()
+            assert scope.source_ceiling_for(NB) == frozenset({"src-a"})
+            assert source_allowed(NB, "src-memory-bob") is False
+            assert source_allowed(NB, "src-a") is True
+        with refreshed_ceiling_context(NB, "bob", store.readers()):
+            assert source_allowed(NB, "src-memory-bob") is True, (
+                "channel open: the entry is inherited as it is"
+            )
+
+
+def test_refresh_keeps_an_own_entry_even_when_the_outer_ceilings_are_total():
+    """Third review P3-2: an outer that binds its own notebook by a
+    per-notebook entry AND carries ``ceilings_total`` has an unbound
+    ``exclude []`` local dimension.  A refresh that does not pass the local
+    dimension must keep the entry, not inherit the unbound local dimension
+    (which would admit every source, another member's Memory included)."""
+    store = _shared_store()
+    with source_scope_context(NB, None, None, {NB: ["src-a"]}, ceilings_total=True):
+        for base in (None, {"mode": "include", "notebook_ids": ["nb-lib"],
+                            "narrowed": False}):
+            with refreshed_ceiling_context(
+                NB, "bob", store.readers(), base_scope=base,
+            ):
+                scope = current_source_scope()
+                assert scope.source_ceiling_for(NB) == frozenset({"src-a"})
+                assert source_allowed(NB, "src-a") is True
+                assert source_allowed(NB, "src-b") is False
+                assert source_allowed(NB, "src-memory-alice") is False
+                assert source_allowed(NB, "src-memory-bob") is False
+
+
+def test_refresh_re_expresses_an_inherited_exclusion_list_narrower():
+    """An older-style outer whose local dimension is an EXCLUSION list admits
+    everything it does not name -- another member's Memory included -- and
+    cannot be bounded when the Memory channel closes.  A refresh that does not
+    pass the local dimension re-expresses it as the synthesised
+    ``visible ∪ hidden(owner)`` minus the excluded ids: never wider than the
+    outer, still excluding what it excluded, still narrowed."""
+    store = _shared_store()
+    with source_scope_context(NB, {"mode": "exclude", "source_ids": ["src-b"]}):
+        assert source_allowed(NB, "src-memory-alice") is True, "the outer admits it"
+        with refreshed_ceiling_context(NB, "bob", store.readers()):
+            scope = current_source_scope()
+            assert scope.mode == "include"
+            assert source_allowed(NB, "src-b") is False
+            assert source_allowed(NB, "src-a") is True
+            assert source_allowed(NB, "src-memory-bob") is True
+            assert source_allowed(NB, "src-memory-alice") is False
+            assert source_scope_restricted() is True
+            assert current_source_scope_payload() == {
+                "mode": "include", "source_ids": ["src-a"], "narrowed": True,
+            }
+        with memory_access_context(False), refreshed_ceiling_context(
+            NB, "bob", store.readers(),
+        ):
+            scope = current_source_scope()
+            assert source_allowed(NB, "src-memory-bob") is False
+            assert source_allowed(NB, "src-b") is False
+            assert source_allowed(NB, "src-knowhow") is True
+            assert scope.withheld_hidden_source_ids == frozenset({"src-memory-bob"})
+
+
 def test_refresh_of_the_local_dimension_keeps_a_submitted_library_exclusion():
     """Mutant M8: the outer default ceiling SUBMITTED a library exclusion and
     the refresh passes only ``local_scope`` -- the excluded library, whose
@@ -1085,6 +1171,90 @@ def test_a_failing_mounted_library_is_denied_not_fatal(error, reason):
         "notebook_id": "nb-lib",
         "reason": reason,
     }], "content-free: notebook id and reason code only"
+
+
+def test_a_skipped_mounted_library_is_recorded_for_the_answer():
+    """Third review P2-1: a mounted library left out because its visible list
+    could not be read in time changes the answer, so the scope records it --
+    library id and reason code only -- for the entry point's result notice.
+    A healthy run records nothing; a library the user's library dimension
+    excludes is not reported (its absence is the user's choice); a refresh
+    carries an inherited skip and records its own."""
+    from app.repositories.read_budget import ReadBudgetExceeded
+    from app.services.source_scope import current_skipped_mounted_libraries
+
+    healthy = _two_mount_store()
+    with default_ceiling_context(NB, "bob", healthy.readers()):
+        assert current_skipped_mounted_libraries() == {}
+        assert current_source_scope().skipped_mounted_libraries() == {}
+    assert current_skipped_mounted_libraries() == {}, "no scope, nothing skipped"
+
+    store = _two_mount_store(fail={
+        "nb-lib": ReadBudgetExceeded("read budget exhausted"),
+        "nb-lib2": RuntimeError("boom"),
+    })
+    with default_ceiling_context(NB, "bob", store.readers()):
+        assert current_skipped_mounted_libraries() == {
+            "nb-lib": "timeout", "nb-lib2": "unavailable",
+        }
+        # Not a gate and not part of what the scope admits.
+        scope = current_source_scope()
+        assert scope == ActiveSourceScope(**{
+            name: getattr(scope, name)
+            for name in scope.__dataclass_fields__ if name != "_skipped_libraries"
+        })
+    with default_ceiling_context(
+        NB, "bob", store.readers(),
+        base_scope={"mode": "exclude", "notebook_ids": ["nb-lib2"],
+                    "narrowed": True},
+    ):
+        assert current_skipped_mounted_libraries() == {"nb-lib": "timeout"}
+
+    late = _two_mount_store(fail={"nb-late": RuntimeError("boom")})
+    late.visible_by_nb["nb-late"] = ["late-1"]
+    lib_fails = _two_mount_store(fail={"nb-lib": RuntimeError("boom")})
+    with default_ceiling_context(NB, "bob", lib_fails.readers()):
+        late.mounts.append("nb-late")
+        with refreshed_ceiling_context(NB, "bob", late.readers()):
+            assert current_skipped_mounted_libraries() == {
+                "nb-lib": "unavailable",   # inherited with its empty ceiling
+                "nb-late": "unavailable",  # newly admitted, read now, failed
+            }
+        with refreshed_ceiling_context(
+            NB, "bob", late.readers(),
+            base_scope={"mode": "include", "notebook_ids": ["nb-lib2"],
+                        "narrowed": True},
+        ):
+            assert current_skipped_mounted_libraries() == {}
+
+
+def test_an_unclassified_failure_after_the_deadline_counts_as_timeout():
+    """Third review P3-6 (mutant X4): a driver may surface its own interrupt as
+    a generic error that ``classify_read_failure`` cannot name.  Raised once
+    the library's deadline has passed it is a ``timeout``; raised before it,
+    ``unavailable``."""
+    import time as _time
+
+    from dataclasses import replace as _replace
+
+    store = _two_mount_store()
+    original = store.visible
+
+    def generic_error_after_the_deadline(notebook_id):
+        if notebook_id != "nb-lib":
+            return original(notebook_id)
+        _time.sleep(0.25)
+        raise RuntimeError("driver said something unhelpful")
+
+    with default_ceiling_context(
+        NB, "bob",
+        _replace(store.readers(), visible=generic_error_after_the_deadline),
+        mounted_read_seconds=0.1,
+    ):
+        assert current_source_scope().source_ceiling_for("nb-lib") == frozenset()
+    assert [(e["notebook_id"], e["reason"]) for e in store.events] == [
+        ("nb-lib", "timeout"),
+    ]
 
 
 def test_a_zero_budget_denies_each_mounted_library_at_the_entry_check(
@@ -1404,19 +1574,36 @@ def test_peer_visible_sources_returns_the_frozen_ceiling_without_reading():
     ))
     from app.services.retrieval_run import retrieval_run
 
+    # A reader order that is NOT sorted order: the hand-out must be the
+    # reader's (the production read's ``ORDER BY id``), not a sort of the set
+    # and never hash order (which varies with PYTHONHASHSEED).
+    read_order = [f"lib-{i:03d}" for i in range(200)][::-1]
     many = _Store(
-        visible={NB: ["src-a"], "nb-lib": [f"lib-{i:03d}" for i in range(200)]},
+        visible={NB: ["src-a"], "nb-lib": read_order},
         mounts=["nb-lib"],
     )
     with default_ceiling_context(NB, "bob", many.readers()), \
             retrieval_run(run_kind="ask_chunk"):
-        frozen = current_source_scope().source_ceiling_for("nb-lib")
+        outer = current_source_scope()
+        frozen = outer.source_ceiling_for("nb-lib")
         handed = chunk_federation._peer_visible_sources(candidates, "nb-lib")
-        # The frozen set, handed out in the live read's ``ORDER BY id`` order,
-        # never in hash order (which varies with PYTHONHASHSEED) ...
-        assert handed == tuple(sorted(frozen))
-        assert handed == tuple(many.visible_by_nb["nb-lib"])
-        # ... sorted once per run.
+        assert handed == tuple(read_order)
+        assert frozenset(handed) == frozen
+        assert chunk_federation._peer_visible_sources(candidates, "nb-lib") is handed
+        # A refresh inherits the ceiling and its hand-out with it ...
+        with refreshed_ceiling_context(NB, "bob", many.readers()):
+            assert chunk_federation._peer_visible_sources(
+                candidates, "nb-lib"
+            ) is handed
+        # ... while a scope installed with a DIFFERENT ceiling for the same
+        # library inside the same run hands out its own, never the outer's
+        # (the hand-out lives on the scope, not in the run memo).
+        with source_scope_context(
+            NB, None, None, {"nb-lib": ["lib-001", "lib-000"]},
+        ):
+            assert chunk_federation._peer_visible_sources(
+                candidates, "nb-lib"
+            ) == ("lib-000", "lib-001"), "no reader order -> sorted once"
         assert chunk_federation._peer_visible_sources(candidates, "nb-lib") is handed
     with default_ceiling_context(NB, "bob", store.readers()):
         assert chunk_federation._peer_visible_sources(candidates, "nb-lib") == (
@@ -1519,10 +1706,20 @@ def test_ceiling_is_built_once_and_nothing_is_sorted(monkeypatch):
         return result
 
     monkeypatch.setattr(source_scope_module, "_frozen_source_ids", counting_frozen)
+    real_ordered = source_scope_module._ordered_source_ids
+
+    def counting_ordered(values):
+        order, frozen = real_ordered(values)
+        built.append(len(frozen))
+        return order, frozen
+
+    monkeypatch.setattr(source_scope_module, "_ordered_source_ids", counting_ordered)
     with default_ceiling_context(NB, "bob", store.readers()):
         scope = current_source_scope()
         assert isinstance(scope.source_ceiling_for("nb-lib"), frozenset)
         assert len(scope.source_ceiling_for("nb-lib")) == 49_000
+        # The hand-out is the reader's own order, not a sort of the set.
+        assert scope.ceiling_hand_out("nb-lib") == tuple(big)
     assert max(sorted_sizes, default=0) <= 2, sorted_sizes
     # One build per id list -- the active notebook's visible (49k) and hidden
     # (1) halves and the two mounted libraries (49k, 1) -- and none twice:
