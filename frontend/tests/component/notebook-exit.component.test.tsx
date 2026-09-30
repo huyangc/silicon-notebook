@@ -1277,6 +1277,103 @@ test("面板被取消之后转移才落地:结果用提示告知", async () => {
   await waitFor(() => expect(onToast).toHaveBeenCalledWith("已复制 2 条记忆到「我的库」"));
 });
 
+test("旧流程的转移还在途时重开退出、打开选择器又取消:新面板不被卡在「正在转移…」,旧转移落地只发提示", async () => {
+  // codex #820 r2:在途转移曾是全局标记,新流程关掉选择器时被它置成「正在转移…」;旧转移落地
+  // 时 epoch 不匹配、不更新新流程,面板就永远卡住,转移与确认退出都点不了。
+  const user = userEvent.setup();
+  const gate = deferred<Response>();
+  let transfers = 0;
+  installServer([
+    disclosure(2), memoriesPage(2), targetNotebooks,
+    (call) => {
+      if (call.path !== "/api/memories/transfer") return undefined;
+      transfers += 1;
+      return gate.promise;
+    },
+  ]);
+  const { onToast } = mount("bar");
+
+  // 旧流程:发起转移 → 关掉选择器 → 取消退出面板(请求仍在途)
+  await pressLeave(user);
+  const oldPicker = await openPicker(user, "复制/移动 2 条记忆");
+  await user.click(within(oldPicker).getByRole("button", { name: "确认" }));
+  await within(oldPicker).findByRole("button", { name: "处理中…" });
+  await user.click(within(oldPicker).getByRole("button", { name: "取消" }));
+  await user.click(within(await panel()).getByRole("button", { name: "取消" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "退出共享" })).not.toBeInTheDocument());
+
+  // 新流程:打开选择器,不提交就取消
+  await pressLeave(user);
+  const newPicker = await openPicker(user, "复制/移动 2 条记忆");
+  await user.click(within(newPicker).getByRole("button", { name: "取消" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "复制/移动 2 条记忆" })).not.toBeInTheDocument());
+
+  const dialog = await panel();
+  expect(within(dialog).queryByRole("button", { name: "正在转移…" })).not.toBeInTheDocument();
+  expect(within(dialog).getByRole("button", { name: "转移到其他笔记本" })).toBeEnabled();
+  expect(within(dialog).getByRole("button", { name: "确认退出并删除" })).toBeEnabled();
+
+  // 旧转移落地:只以提示告知,新面板仍可操作
+  gate.resolve(json({
+    results: ["m0", "m1"].map((id) => ({ source_id: id, new_id: `n-${id}`, ok: true, error: null, error_code: null, status: "copied" })),
+  }));
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("已复制 2 条记忆到「我的库」"));
+  expect(within(dialog).queryByRole("button", { name: "正在转移…" })).not.toBeInTheDocument();
+  expect(within(dialog).getByRole("button", { name: "转移到其他笔记本" })).toBeEnabled();
+  expect(within(dialog).getByRole("button", { name: "确认退出并删除" })).toBeEnabled();
+  expect(transfers).toBe(1);
+});
+
+test("另一本笔记本的导出还在下载时打开这本的退出面板:这本的导出键不显示「正在导出…」、可以点", async () => {
+  const OTHER = { ...NOTEBOOK, id: "nb9", name: "另一本" } as NotebookSummary;
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+  const gate = deferred<Response>();
+  const calls = installServer([
+    disclosure(2),
+    (call) => {
+      if (!call.path.endsWith("/memories/export")) return undefined;
+      if (call.path === "/api/notebooks/nb1/memories/export") return gate.promise;
+      return new Response("# mine", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown", "Content-Disposition": 'attachment; filename="m.md"' },
+      });
+    },
+  ]);
+  function TwoNotebooks() {
+    const exit = useNotebookExit({ onToast: () => undefined, onError: () => undefined });
+    return (
+      <>
+        {[NOTEBOOK, OTHER].map((notebook) => (
+          <ReaderNotebookBadge
+            key={notebook.id}
+            notebook={notebook}
+            leaveBusy={exit.isBusy(notebook.id)}
+            onLeave={(anchor) => exit.start(notebook.id, anchor, async () => undefined)}
+          />
+        ))}
+        <NotebookExitPanel exit={exit} />
+      </>
+    );
+  }
+  const user = userEvent.setup();
+  render(<TwoNotebooks />);
+
+  await user.click(screen.getAllByRole("button", { name: "退出共享" })[0]);
+  await user.click(within(await panel()).getByRole("button", { name: "导出为文件" }));
+  await within(await panel()).findByRole("button", { name: "正在导出…" });
+  await user.click(within(await panel()).getByRole("button", { name: "取消" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "退出共享" })).not.toBeInTheDocument());
+
+  await user.click(screen.getAllByRole("button", { name: "退出共享" })[1]);
+  const dialog = await panel();
+  const exportButton = await within(dialog).findByRole("button", { name: "导出为文件" });
+  expect(exportButton).toBeEnabled();
+  await user.click(exportButton);
+  await within(dialog).findByRole("button", { name: "已导出" });
+  expect(calls.some((call) => call.path === "/api/notebooks/nb9/memories/export")).toBe(true);
+  gate.resolve(new Response("# first", { status: 200, headers: { "Content-Type": "text/markdown" } }));
+});
+
 test("目标笔记本选择器的默认行为不变:提交中「取消」仍是禁用的(记忆页/知识表沿用)", async () => {
   const user = userEvent.setup();
   installServer([targetNotebooks]);
