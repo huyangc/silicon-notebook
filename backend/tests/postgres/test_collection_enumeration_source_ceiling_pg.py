@@ -17,7 +17,12 @@ import pytest
 from app.models.notebooks import NotebookCreate
 from app.repositories.postgres._store_utils import jsonb, normalize_timestamp
 from app.services.collection_enumeration import EnumerationBudget
-from app.services.source_scope import source_scope_context
+from app.services.retrieval_run import retrieval_run
+from app.services.source_scope import (
+    collection_ceiling_drifted,
+    current_source_scope,
+    source_scope_context,
+)
 
 
 pytestmark = [
@@ -341,3 +346,114 @@ def test_pg_peer_citations_follow_the_frozen_participant_set(postgres_repository
     assert [item.source_id for item in roster.items] == ["sA", "sB", "sC"]
     assert set(peer) == {"sA", "sB", "sC"}
     assert set(single) == {"sA", "sB", "sD"}
+
+
+# ----------------- 读后核验:判词算出之后新增的来源永远在冻结天花板之外(#817 r1)
+
+def _insert_late_source_with_content(repository, notebook_id, source_id):
+    """冻结之后上传的来源:4 个公式 + 一个属主是它、证据也只在它身上的对象。"""
+    _insert_late_source(repository, notebook_id, source_id)
+    runtime = repository._runtime
+    now = normalize_timestamp(runtime.seams.now())
+    evidence = [{"source_id": source_id, "element_id": f"el-{source_id}-001",
+                 "element_type": "formula", "location_label": "p1",
+                 "quoted_span": "q", "confidence": 1.0}]
+    with runtime.database.write() as db:
+        for index in range(1, 5):
+            db.execute(
+                "INSERT INTO source_elements "
+                "(id,source_id,element_type,location_label,text,metadata,"
+                "created_at) VALUES (%s,%s,'formula',%s,%s,%s,%s)",
+                (f"el-{source_id}-{index:03d}", source_id, f"p{index}",
+                 f"late {index}", jsonb({}), now),
+            )
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,payload,evidence,source_id,"
+            "created_at,updated_at) VALUES (%s,%s,'concept','approved',%s,%s,"
+            "%s,%s,%s)",
+            ("oLate", notebook_id, jsonb({"name": "oLate"}), jsonb(evidence),
+             source_id, now, now),
+        )
+        runtime.knowledge.replace_object_sources(db, "oLate", notebook_id, evidence)
+        runtime.unified_kg.mark_dirty(db, notebook_id, now)
+
+
+def test_pg_an_upload_after_the_verdict_is_never_counted_listed_or_complete(
+    postgres_repository,
+):
+    """codex #817 r1 的复现(PG):全选 run 的首次集合读取之后上传来源,之后的
+    地图、元素、来源与 KG 读取都不含它,``complete`` 与分母按冻结集合。"""
+    repository = postgres_repository
+    notebook_id = _seed(repository)
+    enumeration = repository.collection_enumeration
+    with retrieval_run(run_kind="ask_reasoning", actor_id="user-local"):
+        with source_scope_context(notebook_id, {
+            "mode": "include", "source_ids": ["sA", "sB", "sC"],
+            "narrowed": False,
+        }):
+            before = repository.collection_catalog.collection_map(
+                notebook_id, ceiling_binds=False)
+            _insert_late_source_with_content(repository, notebook_id, "sLate")
+            kg_first = enumeration.enumerate_kg_objects(
+                notebook_id, "concept", budget=_budget(page_size=1, max_rows=1),
+                ceiling_binds=False)
+            assert collection_ceiling_drifted(current_source_scope(), notebook_id)
+            elements = enumeration.enumerate_elements(
+                notebook_id, "formula", budget=_budget(), ceiling_binds=False)
+            roster = enumeration.enumerate_sources(
+                notebook_id, budget=_budget(), ceiling_binds=False)
+            kg = enumeration.enumerate_kg_objects(
+                notebook_id, "concept", budget=_budget(), ceiling_binds=False)
+            after = repository.collection_catalog.collection_map(
+                notebook_id, ceiling_binds=False)
+    assert before.element_count("formula") == 6
+    assert kg_first.coverage.total == 3          # oA、oB、oMix:冻结集合
+    assert "sLate" not in {item.source_id for item in elements.items}
+    assert elements.coverage.complete is True and elements.coverage.total == 6
+    assert [item.source_id for item in roster.items] == ["sA", "sB", "sC"]
+    assert roster.coverage.complete is True
+    assert sorted(item.object_id for item in kg.items) == ["oA", "oB", "oMix"]
+    assert kg.coverage.complete is True
+    assert after.element_count("formula") == 6 and after.sources == 3
+
+
+def test_pg_a_49k_ceiling_binds_once_across_pages_and_counts(
+    postgres_repository, monkeypatch,
+):
+    """codex #817 r1 P2(PG):store 收到的是 run 的那一个 frozenset,4.9 万 id 的
+    天花板在每一页与每个计数里只绑定一次。"""
+    from app.repositories.postgres import source_ceiling as store_ceiling
+
+    repository = postgres_repository
+    notebook_id = _seed(repository)
+    bound = []
+    original = store_ceiling.bind_ids
+
+    def counting(ids):
+        values = list(ids)
+        if len(values) > 40_000:
+            bound.append(len(values))
+        return original(values)
+
+    monkeypatch.setattr(store_ceiling, "bind_ids", counting)
+    monkeypatch.setattr(store_ceiling, "_cache", type(store_ceiling._cache)())
+    ticks = ["sA", "sC"] + [f"absent-{index:05d}" for index in range(49_000)]
+    items, cursor, calls = [], None, 0
+    with retrieval_run(run_kind="ask_reasoning", actor_id="user-local"):
+        with _ticked(notebook_id, ticks):
+            counts = dict(repository.collection_catalog.collection_map(
+                notebook_id).kg_objects)
+            while True:
+                result = repository.collection_enumeration.enumerate_kg_objects(
+                    notebook_id, "concept",
+                    budget=_budget(page_size=1, max_rows=1), cursor=cursor)
+                calls += 1
+                items.extend(result.items)
+                cursor = result.cursor
+                if cursor is None:
+                    break
+    assert counts["concept"] == 2
+    assert calls == 2 and result.coverage.complete is True
+    assert sorted(item.object_id for item in items) == ["oA", "oMix"]
+    assert bound == [49_002]
