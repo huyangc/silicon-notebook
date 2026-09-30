@@ -67,24 +67,62 @@ _VISIBLE_SOURCE_NOTEBOOK_SQL = (
 # deliberate KO/relation omission is never mistaken for a copy error.
 _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type = 'knowhow'"
 
-# M2 (permission remediation E5-1): a notebook copy — the user's own deep copy
-# and the copy delivered through a share link alike — never carries any Memory
-# or anything derived from one, whoever the copy's owner is (the Memory's author
+# M2 (permission remediation E5-1): a notebook copy — the user's own deep copy and
+# the copy delivered through a share link alike — never carries any Memory or
+# anything derived from one, whoever the copy's owner is (the Memory's author
 # copying their own notebook leaves their own memories behind too: a Memory
-# belongs to the notebook it was made in). Every predicate below is a `memory_sql` fragment (the single definition of "derived
-# from Memory"), never a hand-written twin, and it is applied INSIDE the
-# snapshot statements so `NotebookCopyService.copy_notebook` needs no change.
-# The same builders render the `_COPY_VALIDATED_TABLES` extras, so the parity
-# check compares like with like (source side and copy side under one predicate).
+# belongs to the notebook it was made in).
 #
-# The per-table census (what each snapshot entry can carry and which predicate
-# removes it) lives in the PostgreSQL twin's comment at the same spot; this file
-# mirrors it entry for entry. Non-snapshot Memory-derived tables (memory_items,
-# promotion candidates, analysis/viz artifacts, communities, conversations, ...)
-# are absent from the copy by construction; a test pins that set. Memory
-# evidence carried INSIDE a kept row (a manual merge appends the merged object's
-# evidence, Memory text included) is stripped from the materialised rows by
-# `copy_memory_evidence.strip_memory_evidence` in `snapshot_copy_rows`.
+# Two statement sets, chosen per copy by ONE probe (`_COPY_DIRTY_SQL`) that runs
+# inside the snapshot's own transaction:
+#
+# * `_COPY_SNAPSHOT_QUERIES` / `_COPY_VALIDATED_TABLES` — the statements as they
+#   were before M2, verbatim. Used when the source holds no Memory source and is
+#   not dirty: nothing Memory-derived can be in it (a dirty flag is the only
+#   trace a since-deleted Memory can leave, see `_visible_cluster`), so the copy
+#   pays exactly what it paid before, statement for statement.
+# * `_MEMORY_COPY_SNAPSHOT_QUERIES` / `_MEMORY_COPY_VALIDATED_TABLES` — the same
+#   table list with the Memory predicates below. Used otherwise; the copy then
+#   starts dirty (`_COPY_DIRTY_MARK`) and its owner is offered a rebuild. Nothing
+#   rebuilds on its own: `dirty` drives the 「待重建」 badge, the rebuild is the
+#   owner's click (it costs model calls), and until then the shared members of a
+#   cluster the copy left out stay singletons.
+#
+# Every Memory predicate is scoped to THIS notebook: `memory_sql.memory_derived_in_notebook`
+# (the `memory_derived_object` rule plus "the source is in the row's notebook", a
+# write-side invariant) lets the planner carry the outer `notebook_id` into every
+# inner set, so the sets grow with this notebook, never with the deployment's
+# Memory. Parent-keyed child rows are judged by their parent AND their own source
+# (the service remaps both strictly; either one left pointing at a Memory row would
+# KeyError the copy). The census:
+#   sources / source_paper_meta / source_authors / source_elements
+#                                    Memory sources and their rows  -> source_type on the source
+#   chunks                           none by construction           -> memory_derived_in_notebook
+#   chunk_embeddings                 via the chunk                  -> the chunk's source
+#   chunk_questions                  via the chunk and own source   -> both
+#   element_embeddings               via the element and own source -> both
+#   knowledge_objects                Memory objects                 -> memory_derived_in_notebook
+#   knowledge_embeddings             via the object                 -> the object's source
+#   knowledge_source_facts/_backfills   Memory-source facts         -> memory_derived_in_notebook
+#   knowledge_source_fact_elements   via the fact, the element, own -> all three
+#   knowledge_relations              Memory relations, and relations -> own source + BOTH endpoints,
+#                                    with a Memory endpoint            one anti-join each
+#   relation_embeddings              via the relation               -> one NOT EXISTS per arm
+#   concept_clusters                 a cluster of a Memory          -> `_visible_cluster`
+#   evidence inside kept rows        a manual merge appends the     -> stripped from the fetched rows
+#   (objects, relations, facts)      merged object's entries whole     (`strip_memory_evidence`)
+# The remaining entries (notebooks, notebook_bases, notebook_object_schemas, the
+# knowhow_* family, notebook_assets) hold configuration or user-authored table
+# content. notebook_object_schemas is induced by a model from
+# `source_store.notebook_element_sample`, which reads no Memory element since
+# E5-1; a schema induced before that cannot be told apart and travels as it is.
+# `knowledge_source_facts.global_object_id` may still name a Memory object id
+# from before M1 (an opaque id that resolves to nothing in the copy: the service
+# passes unmapped ids through); it carries no text. Everything Memory-derived
+# that is not a snapshot table (memory_items, memory_*, promotion_candidates,
+# knowledge_object_sources, mention_edges, communities, kg_analysis_artifacts,
+# canonical_relations, conversations, answers, reports, ...) is absent from the
+# copy by construction; a test pins that set.
 
 
 def _visible_source(alias: str) -> str:
@@ -92,11 +130,30 @@ def _visible_source(alias: str) -> str:
     return f"NOT ({memory_sql.memory_source_type_predicate(alias + '.source_type')})"
 
 
-def _visible_by_source(alias: str) -> str:
-    """A per-source row (chunk, fact, ...) whose `{alias}.source_id` is not a
-    Memory source. `memory_derived_object` only reads `{alias}.source_id`, so it
-    is the right classifier for any row keyed by its source."""
-    return f"NOT {memory_sql.memory_derived_object(alias)}"
+def _not_memory_here(alias: str) -> str:
+    """A row keyed by its own `source_id` and `notebook_id` whose source is not a
+    Memory source of that notebook."""
+    return f"NOT {memory_sql.memory_derived_in_notebook(alias)}"
+
+
+def _memory_object_here(alias: str, id_column: str, notebook_column: str) -> str:
+    """The knowledge object `id_column` names is a Memory-derived object of the
+    notebook `notebook_column` names."""
+    return (
+        f"EXISTS (SELECT 1 FROM knowledge_objects {alias} WHERE {alias}.id = {id_column} "
+        f"AND {alias}.notebook_id = {notebook_column} "
+        f"AND {memory_sql.memory_derived_in_notebook(alias)})"
+    )
+
+
+def _memory_element_here(element_column: str, notebook_column: str) -> str:
+    """The source element `element_column` names belongs to a Memory source of the
+    notebook `notebook_column` names."""
+    return (
+        "EXISTS (SELECT 1 FROM source_elements pe JOIN sources ps ON ps.id = pe.source_id "
+        f"WHERE pe.id = {element_column} AND ps.notebook_id = {notebook_column} "
+        f"AND {memory_sql.memory_source_type_predicate('ps.source_type')})"
+    )
 
 
 def _relation_memory_arms(alias: str) -> tuple[str, ...]:
@@ -107,40 +164,54 @@ def _relation_memory_arms(alias: str) -> tuple[str, ...]:
     to point at (the service would raise KeyError on the object map) and the edge
     itself is Memory-derived content."""
     return (
-        memory_sql.memory_derived_relation(alias),
-        *(
-            f"EXISTS (SELECT 1 FROM knowledge_objects {end} "
-            f"WHERE {end}.id = {alias}.{column} AND {memory_sql.memory_derived_object(end)})"
-            for end, column in (("eo1", "source_object_id"), ("eo2", "target_object_id"))
-        ),
+        memory_sql.memory_derived_in_notebook(alias),
+        _memory_object_here("eo1", f"{alias}.source_object_id", f"{alias}.notebook_id"),
+        _memory_object_here("eo2", f"{alias}.target_object_id", f"{alias}.notebook_id"),
     )
 
 
-def _relation_carries_memory(alias: str) -> str:
-    return "(" + " OR ".join(_relation_memory_arms(alias)) + ")"
-
-
 def _visible_relation(alias: str) -> str:
-    return f"NOT {_relation_carries_memory(alias)}"
+    """Three top-level NOT EXISTS, never one NOT over their OR: each is planned as
+    its own anti-join (the OR form becomes hashed subplans over every Memory object
+    of the deployment, measured 30x on a notebook with none)."""
+    return " AND ".join(f"NOT {arm}" for arm in _relation_memory_arms(alias))
+
+
+def _visible_chunk_question(alias: str) -> str:
+    return (
+        f"{_not_memory_here(alias)} AND NOT EXISTS (SELECT 1 FROM chunks qc "
+        f"WHERE qc.id = {alias}.chunk_id AND qc.notebook_id = {alias}.notebook_id "
+        f"AND {memory_sql.memory_derived_in_notebook('qc')})"
+    )
+
+
+def _visible_fact_element(alias: str) -> str:
+    return (
+        f"{_not_memory_here(alias)} AND NOT EXISTS (SELECT 1 FROM knowledge_source_facts pf "
+        f"WHERE pf.id = {alias}.fact_id AND pf.notebook_id = {alias}.notebook_id "
+        f"AND {memory_sql.memory_derived_in_notebook('pf')}) "
+        f"AND NOT {_memory_element_here(alias + '.element_id', alias + '.notebook_id')}"
+    )
 
 
 def _visible_cluster(alias: str) -> str:
     """Not a cluster of a Memory (`memory_sql.no_memory_cluster`: no Memory-derived
-    member, canonical id neither is nor was minted from a Memory-derived object —
-    the canonical name and description are copied onto every row of a cluster and
-    may come from that object), and not a cluster whose canonical id was minted
-    from an object that no longer exists.
+    member, canonical id not minted from a Memory-derived object — the canonical
+    name and description are copied onto every row of a cluster and may come from
+    that object), and not a cluster whose canonical id was minted from an object
+    that no longer exists.
 
     The second arm is the stale case a later Memory delete leaves behind: the
     Memory member row goes with the Memory, the shared members keep the name and
     description it seeded. Once the object is gone nothing can prove it was not a
-    Memory, so the copy leaves the cluster out. It never costs clustering the copy
-    would otherwise keep: an object delete marks its notebook dirty and only a
-    rebuild clears that, and a rebuild re-mints every canonical id from live
-    objects — so such a cluster only exists in a dirty notebook, whose copy is
-    marked dirty too (`_COPY_DIRTY_SQL`) and re-clusters its members on rebuild.
-    `seed IS NULL` is evaluated first, so the existence probe runs only for the
-    rare `<prefix>~<object id>` rows."""
+    Memory, so the copy leaves the cluster out. An object delete marks its notebook
+    dirty and only a rebuild clears that (a rebuild re-mints every canonical id
+    from live objects), so such a cluster only exists in a dirty notebook — whose
+    copy takes this statement set and starts dirty too. A cluster seeded by a
+    Memory under a real name (`K-<name>`) cannot be recognised at all once the
+    Memory is gone; it travels, and the copy's dirty flag is what tells its owner
+    to rebuild. `seed IS NULL` is the OR's first arm, so the existence probe runs
+    only for the rare `<prefix>~<object id>` rows."""
     seed = memory_sql.cluster_seed_object_id(alias)
     return (
         f"{memory_sql.no_memory_cluster(alias)} AND ({seed} IS NULL OR EXISTS ("
@@ -149,41 +220,43 @@ def _visible_cluster(alias: str) -> str:
 
 
 # Private snapshot -> insert side channel: the root `notebooks` row is tagged when
-# the copy's KG state must start dirty, so `insert_copy_rows` marks it and the
-# copy's owner is offered a rebuild. Two reasons, one probe: the source holds a
-# Memory source (Memory rows and the clusters they touched were left out, so the
-# copied clustering is not the source's), or the source itself is dirty (its
-# clustering is already out of date — e.g. a Memory deleted since the last
-# rebuild left its seeded cluster name on shared members; the copy must not
-# present that clustering as up to date). A copy of a clean notebook without
-# Memory gets no state row, exactly as before.
+# the Memory-aware set was used, so `insert_copy_rows` writes the copy's KG state
+# row with dirty=1. One probe decides both: the source holds a Memory source
+# (Memory rows and the clusters they touched are left out, so the copied
+# clustering is not the source's), or the source is itself dirty (its clustering
+# is already out of date — e.g. a Memory deleted since the last rebuild left its
+# seeded cluster name on shared members). A copy of a clean notebook without
+# Memory gets no state row, exactly as before. `validate_copy` reads the same
+# decision back from the copy (a state row exists iff the tag was set).
 _COPY_DIRTY_MARK = "_copy_starts_dirty"
 _COPY_DIRTY_SQL = (
     "SELECT 1 WHERE EXISTS (SELECT 1 FROM sources WHERE notebook_id = ? "
     f"AND {memory_sql.memory_source_type_predicate()}) "
     "OR EXISTS (SELECT 1 FROM unified_kg_state WHERE notebook_id = ? AND dirty = 1)"
 )
+_COPY_FILTERED_SQL = "SELECT 1 FROM unified_kg_state WHERE notebook_id = ?"
 # The notebook's Memory sources (any member's), whose evidence entries are
-# stripped from the rows the copy keeps. A handful per member; read into Python,
-# never bound back into a statement.
+# stripped from the rows the copy keeps. Read into Python, never bound back.
 _MEMORY_SOURCE_IDS_SQL = (
     "SELECT id FROM sources WHERE notebook_id = ? "
     f"AND {memory_sql.memory_source_type_predicate()}"
 )
 _MEMORY_PRESENT_SQL = _MEMORY_SOURCE_IDS_SQL + " LIMIT 1"
+# What the copy leaves out, counted, for the share sizes (sources, nodes, edges).
 _MEMORY_SOURCES_SQL = (
     "SELECT COUNT(*) AS n FROM sources WHERE notebook_id = ? "
     f"AND {memory_sql.memory_source_type_predicate()}"
 )
-# What the copy leaves out, counted (share preview: source/node/edge numbers exclude Memory).
 _MEMORY_NODES_SQL = (
     "SELECT COUNT(*) AS n FROM knowledge_objects o WHERE o.notebook_id = ? "
-    f"AND {memory_sql.memory_derived_object('o')}"
+    f"AND {memory_sql.memory_derived_in_notebook('o')}"
 )
+# The UNION of the three arms (each planned from this notebook's side), not one OR.
 _MEMORY_EDGES_SQL = "SELECT COUNT(*) AS n FROM (" + " UNION ".join(
     f"SELECT r.id FROM knowledge_relations r WHERE r.notebook_id = ? AND {arm}"
     for arm in _relation_memory_arms("r")
-) + ")"
+) + ") u"
+
 
 # Deep-copy row snapshot: table -> the exact SELECT the former mixin issued.
 # "notebooks" carries the single source row that the copy service rewrites
@@ -308,10 +381,7 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     ("notebooks", f"SELECT * FROM notebooks WHERE id = ? AND {NOTEBOOK_LIVE_SQL}"),
     # 参考库挂载边——原样取出，有效性由服务层按新 owner 重判（见上面的登记段）。
     ("notebook_bases", "SELECT * FROM notebook_bases WHERE notebook_id = ?"),
-    (
-        "sources",
-        f"SELECT * FROM sources WHERE notebook_id = ? AND {_visible_source('sources')}",
-    ),
+    ("sources", "SELECT * FROM sources WHERE notebook_id = ?"),
     (
         # 1:1 with sources (PK = source_id) — joined the same way as the
         # sibling per-source tables below rather than filtered on its own
@@ -320,59 +390,47 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
         # meta in practice, but this keeps the filter style uniform).
         "source_paper_meta",
         "SELECT spm.* FROM source_paper_meta spm JOIN sources s ON s.id = spm.source_id "
-        f"WHERE s.notebook_id = ? AND s.source_type != 'knowhow' AND {_visible_source('s')}",
+        "WHERE s.notebook_id = ? AND s.source_type != 'knowhow'",
     ),
     (
         "source_authors",
         "SELECT sa.* FROM source_authors sa JOIN sources s ON s.id = sa.source_id "
-        f"WHERE s.notebook_id = ? AND s.source_type != 'knowhow' AND {_visible_source('s')}",
+        "WHERE s.notebook_id = ? AND s.source_type != 'knowhow'",
     ),
     (
         "source_elements",
         "SELECT se.* FROM source_elements se JOIN sources s ON s.id = se.source_id "
-        f"WHERE s.notebook_id = ? AND {_visible_source('s')}",
+        "WHERE s.notebook_id = ?",
     ),
-    (
-        "chunks",
-        f"SELECT c.* FROM chunks c WHERE c.notebook_id = ? AND {_visible_by_source('c')}",
-    ),
+    ("chunks", "SELECT * FROM chunks WHERE notebook_id = ?"),
     (
         "knowledge_objects",
-        f"SELECT o.* FROM knowledge_objects o WHERE o.notebook_id = ? "
-        f"AND o.source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) AND {_visible_by_source('o')}",
+        f"SELECT * FROM knowledge_objects WHERE notebook_id = ? "
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
     ),
     (
         "knowledge_source_facts",
-        f"SELECT f.* FROM knowledge_source_facts f WHERE f.notebook_id = ? "
-        f"AND f.source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) AND {_visible_by_source('f')}",
+        f"SELECT * FROM knowledge_source_facts WHERE notebook_id = ? "
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
     ),
     (
         "knowledge_source_fact_elements",
-        f"SELECT f.* FROM knowledge_source_fact_elements f WHERE f.notebook_id = ? "
-        f"AND f.source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) AND {_visible_by_source('f')}",
+        f"SELECT * FROM knowledge_source_fact_elements WHERE notebook_id = ? "
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
     ),
     (
         "knowledge_source_fact_backfills",
-        f"SELECT f.* FROM knowledge_source_fact_backfills f WHERE f.notebook_id = ? "
-        f"AND f.status IN ('complete','incomplete') "
-        f"AND f.source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) AND {_visible_by_source('f')}",
+        f"SELECT * FROM knowledge_source_fact_backfills WHERE notebook_id = ? "
+        f"AND status IN ('complete','incomplete') "
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
     ),
     (
         "knowledge_relations",
-        f"SELECT r.* FROM knowledge_relations r WHERE r.notebook_id = ? "
-        f"AND (r.source_id IS NULL OR r.source_id NOT IN ({_KNOWHOW_SOURCE_IDS})) "
-        f"AND {_visible_relation('r')}",
+        f"SELECT * FROM knowledge_relations WHERE notebook_id = ? "
+        f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))",
     ),
-    (
-        "chunk_embeddings",
-        "SELECT e.* FROM chunk_embeddings e WHERE e.notebook_id = ? AND NOT EXISTS ("
-        "SELECT 1 FROM chunks ec WHERE ec.id = e.chunk_id AND ec.notebook_id = e.notebook_id "
-        f"AND {memory_sql.memory_derived_object('ec')})",
-    ),
-    (
-        "chunk_questions",
-        f"SELECT q.* FROM chunk_questions q WHERE q.notebook_id = ? AND {_visible_by_source('q')}",
-    ),
+    ("chunk_embeddings", "SELECT * FROM chunk_embeddings WHERE notebook_id = ?"),
+    ("chunk_questions", "SELECT * FROM chunk_questions WHERE notebook_id = ?"),
     (
         # element_embeddings still excludes knowhow: the projector's
         # _write_elements never embeds an element (only chunks get vectors),
@@ -382,36 +440,20 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
         # otherwise appear.
         "element_embeddings",
         "SELECT ee.* FROM element_embeddings ee JOIN sources s ON s.id = ee.source_id "
-        f"WHERE s.notebook_id = ? AND s.source_type != 'knowhow' AND {_visible_source('s')}",
+        "WHERE s.notebook_id = ? AND s.source_type != 'knowhow'",
     ),
     # knowledge_embeddings / relation_embeddings / concept_clusters never hold
     # knowhow rows (the projector writes none), so they need no knowhow filter.
-    (
-        "knowledge_embeddings",
-        "SELECT e.* FROM knowledge_embeddings e WHERE e.notebook_id = ? AND NOT EXISTS ("
-        "SELECT 1 FROM knowledge_objects eo WHERE eo.id = e.object_id "
-        f"AND {memory_sql.memory_derived_object('eo')})",
-    ),
-    (
-        "relation_embeddings",
-        # One NOT EXISTS per arm, notebook-bounded (PostgreSQL twin's comment has the
-        # measurement behind this shape).
-        "SELECT e.* FROM relation_embeddings e WHERE e.notebook_id = ? "
-        + " ".join(
-            "AND NOT EXISTS (SELECT 1 FROM knowledge_relations er "
-            f"WHERE er.id = e.relation_id AND er.notebook_id = e.notebook_id AND {arm})"
-            for arm in _relation_memory_arms("er")
-        ),
-    ),
+    ("knowledge_embeddings", "SELECT * FROM knowledge_embeddings WHERE notebook_id = ?"),
+    ("relation_embeddings", "SELECT * FROM relation_embeddings WHERE notebook_id = ?"),
     (
         "concept_clusters",
         # 批 3·W2 §1.6:只拷 published 代(PG 孪生同注释;副本行随后在服务层
-        # 归一 generation=0——副本要么没有 unified_kg_state 行,要么只有
-        # insert_copy_rows 写的标脏行,其 cluster_generation 取列默认值 0)。
-        "SELECT c.* FROM concept_clusters c WHERE c.notebook_id = ? "
-        "AND c.generation = COALESCE((SELECT cluster_generation "
-        "FROM unified_kg_state u WHERE u.notebook_id = c.notebook_id), 0) "
-        f"AND {_visible_cluster('c')}",
+        # 归一 generation=0——走这套语句的副本没有 unified_kg_state 行,走 Memory
+        # 那套的副本只有 cluster_generation=0 的标脏行)。
+        "SELECT * FROM concept_clusters WHERE notebook_id = ? "
+        "AND generation = COALESCE((SELECT cluster_generation "
+        "FROM unified_kg_state u WHERE u.notebook_id = concept_clusters.notebook_id), 0)",
     ),
     (
         "notebook_object_schemas",
@@ -455,56 +497,155 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
 _COPY_VALIDATED_TABLES: tuple[tuple[str, str], ...] = (
     # PR-2+3 Task 13 makes the knowhow hidden source + its chunks travel WITH
     # the copy (snapshot `sources`/`chunks` above carry no knowhow exclusion),
-    # so their parity predicate carries no knowhow term. paper_meta/authors
-    # still exclude knowhow, matching their `source_type != 'knowhow'` snapshot
-    # filter (a knowhow hidden source never has paper metadata in practice).
-    # Every entry that can hold Memory-derived rows carries the SAME Memory
-    # predicate as its snapshot query (E5-1), on both the source and copy side.
-    ("sources", f"AND {_visible_source('sources')}"),
-    (
-        "source_paper_meta",
-        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) AND {_visible_by_source('source_paper_meta')}",
-    ),
-    (
-        "source_authors",
-        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) AND {_visible_by_source('source_authors')}",
-    ),
-    ("chunks", f"AND {_visible_by_source('chunks')}"),
-    ("chunk_questions", f"AND {_visible_by_source('chunk_questions')}"),
-    (
-        "knowledge_objects",
-        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) AND {_visible_by_source('knowledge_objects')}",
-    ),
-    (
-        "knowledge_source_facts",
-        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) AND {_visible_by_source('knowledge_source_facts')}",
-    ),
-    (
-        "knowledge_source_fact_elements",
-        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) "
-        f"AND {_visible_by_source('knowledge_source_fact_elements')}",
-    ),
-    (
-        "knowledge_source_fact_backfills",
-        f"AND status IN ('complete','incomplete') "
-        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) "
-        f"AND {_visible_by_source('knowledge_source_fact_backfills')}",
-    ),
-    (
-        "knowledge_relations",
-        f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS})) "
-        f"AND {_visible_relation('knowledge_relations')}",
-    ),
+    # so their parity predicate is empty. paper_meta/authors still exclude
+    # knowhow, matching their `source_type != 'knowhow'` snapshot filter (a
+    # knowhow hidden source never has paper metadata in practice).
+    ("sources", ""),
+    ("source_paper_meta", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
+    ("source_authors", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
+    ("chunks", ""),
+    ("chunk_questions", ""),
+    ("knowledge_objects", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
+    ("knowledge_source_facts", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
+    ("knowledge_source_fact_elements", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
+    ("knowledge_source_fact_backfills", f"AND status IN ('complete','incomplete') "
+     f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
+    ("knowledge_relations", f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))"),
     (
         "concept_clusters",
-        # §1.6:两侧同谓词校验口径(PG 孪生同注释;副本的标脏行 cluster_generation=0)。
+        # §1.6:两侧同谓词校验口径(PG 孪生同注释)。
         "AND generation = COALESCE((SELECT cluster_generation "
-        "FROM unified_kg_state u WHERE u.notebook_id = concept_clusters.notebook_id), 0) "
-        f"AND {_visible_cluster('concept_clusters')}",
+        "FROM unified_kg_state u WHERE u.notebook_id = concept_clusters.notebook_id), 0)",
     ),
     ("notebook_object_schemas", ""),
     ("knowhow_tables", ""),
     ("notebook_assets", ""),
+)
+
+# The Memory-aware twin of every entry above that can hold Memory-derived rows
+# (see the M2 comment at the top); the rest are shared verbatim.
+_MEMORY_SNAPSHOT_TEXT: dict[str, str] = {
+    "sources": f"SELECT * FROM sources WHERE notebook_id = ? AND {_visible_source('sources')}",
+    "source_paper_meta": (
+        "SELECT m.* FROM source_paper_meta m JOIN sources s ON s.id = m.source_id "
+        f"WHERE s.notebook_id = ? AND s.source_type <> 'knowhow' AND {_visible_source('s')}"
+    ),
+    "source_authors": (
+        "SELECT a.* FROM source_authors a JOIN sources s ON s.id = a.source_id "
+        f"WHERE s.notebook_id = ? AND s.source_type <> 'knowhow' AND {_visible_source('s')}"
+    ),
+    "source_elements": (
+        "SELECT e.* FROM source_elements e JOIN sources s ON s.id = e.source_id "
+        f"WHERE s.notebook_id = ? AND {_visible_source('s')}"
+    ),
+    "chunks": (
+        f"SELECT c.* FROM chunks c WHERE c.notebook_id = ? AND {_not_memory_here('c')}"
+    ),
+    "knowledge_objects": (
+        f"SELECT o.* FROM knowledge_objects o WHERE o.notebook_id = ? "
+        f"AND o.source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) AND {_not_memory_here('o')}"
+    ),
+    "knowledge_source_facts": (
+        f"SELECT f.* FROM knowledge_source_facts f WHERE f.notebook_id = ? "
+        f"AND f.source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) AND {_not_memory_here('f')}"
+    ),
+    "knowledge_source_fact_elements": (
+        f"SELECT f.* FROM knowledge_source_fact_elements f WHERE f.notebook_id = ? "
+        f"AND f.source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) AND {_visible_fact_element('f')}"
+    ),
+    "knowledge_source_fact_backfills": (
+        f"SELECT f.* FROM knowledge_source_fact_backfills f WHERE f.notebook_id = ? "
+        "AND f.status IN ('complete','incomplete') "
+        f"AND f.source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) AND {_not_memory_here('f')}"
+    ),
+    "knowledge_relations": (
+        f"SELECT r.* FROM knowledge_relations r WHERE r.notebook_id = ? "
+        f"AND (r.source_id IS NULL OR r.source_id NOT IN ({_KNOWHOW_SOURCE_IDS})) "
+        f"AND {_visible_relation('r')}"
+    ),
+    "chunk_embeddings": (
+        f"SELECT e.* FROM chunk_embeddings e WHERE e.notebook_id = ? AND NOT EXISTS ("
+        "SELECT 1 FROM chunks ec WHERE ec.id = e.chunk_id AND ec.notebook_id = e.notebook_id "
+        f"AND {memory_sql.memory_derived_in_notebook('ec')})"
+    ),
+    "chunk_questions": (
+        f"SELECT q.* FROM chunk_questions q WHERE q.notebook_id = ? "
+        f"AND {_visible_chunk_question('q')}"
+    ),
+    "element_embeddings": (
+        "SELECT e.* FROM element_embeddings e JOIN sources s ON s.id = e.source_id "
+        f"WHERE s.notebook_id = ? AND s.source_type <> 'knowhow' AND {_visible_source('s')} "
+        f"AND NOT {_memory_element_here('e.element_id', 's.notebook_id')}"
+    ),
+    "knowledge_embeddings": (
+        f"SELECT e.* FROM knowledge_embeddings e WHERE e.notebook_id = ? "
+        f"AND NOT {_memory_object_here('eo', 'e.object_id', 'e.notebook_id')}"
+    ),
+    # One NOT EXISTS per arm (not one over their OR): each is its own anti-join.
+    "relation_embeddings": f"SELECT e.* FROM relation_embeddings e WHERE e.notebook_id = ? "
+    + " ".join(
+        "AND NOT EXISTS (SELECT 1 FROM knowledge_relations er "
+        f"WHERE er.id = e.relation_id AND er.notebook_id = e.notebook_id AND {arm})"
+        for arm in _relation_memory_arms("er")
+    ),
+    "concept_clusters": (
+        f"SELECT c.* FROM concept_clusters c WHERE c.notebook_id = ? "
+        "AND c.generation = COALESCE((SELECT cluster_generation "
+        "FROM unified_kg_state u WHERE u.notebook_id = c.notebook_id), 0) "
+        f"AND {_visible_cluster('c')}"
+    ),
+}
+_MEMORY_COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = tuple(
+    (table, _MEMORY_SNAPSHOT_TEXT.get(table, query)) for table, query in _COPY_SNAPSHOT_QUERIES
+)
+# `validate_copy` extras under the same predicates, source side and copy side alike.
+# Because both sides share the predicate, a predicate that wrongly leaves out a
+# non-Memory row is INVISIBLE here (the snapshot skips it and the source-side count
+# skips it too): this check proves the copy is complete relative to the predicate,
+# not that the predicate is right. The tests keep an independent expectation
+# (`copy_memory_cases.expected_copy_counts`, from the world's own Memory flags).
+_MEMORY_VALIDATED_EXTRAS: dict[str, str] = {
+    "sources": f"AND {_visible_source('sources')}",
+    "source_paper_meta": (
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) "
+        f"AND {_not_memory_here('source_paper_meta')}"
+    ),
+    "source_authors": (
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) AND {_not_memory_here('source_authors')}"
+    ),
+    "chunks": f"AND {_not_memory_here('chunks')}",
+    "chunk_questions": f"AND {_visible_chunk_question('chunk_questions')}",
+    "knowledge_objects": (
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) "
+        f"AND {_not_memory_here('knowledge_objects')}"
+    ),
+    "knowledge_source_facts": (
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) "
+        f"AND {_not_memory_here('knowledge_source_facts')}"
+    ),
+    "knowledge_source_fact_elements": (
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) "
+        f"AND {_visible_fact_element('knowledge_source_fact_elements')}"
+    ),
+    "knowledge_source_fact_backfills": (
+        "AND status IN ('complete','incomplete') "
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) "
+        f"AND {_not_memory_here('knowledge_source_fact_backfills')}"
+    ),
+    "knowledge_relations": (
+        f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS})) "
+        f"AND {_visible_relation('knowledge_relations')}"
+    ),
+    "concept_clusters": (
+        # Copy side: its state row (the dirty mark) has cluster_generation 0 and its
+        # rows are normalised to 0, so the generation term counts every copied row.
+        "AND generation = COALESCE((SELECT cluster_generation "
+        "FROM unified_kg_state u WHERE u.notebook_id = concept_clusters.notebook_id), 0) "
+        f"AND {_visible_cluster('concept_clusters')}"
+    ),
+}
+_MEMORY_COPY_VALIDATED_TABLES: tuple[tuple[str, str], ...] = tuple(
+    (table, _MEMORY_VALIDATED_EXTRAS.get(table, extra)) for table, extra in _COPY_VALIDATED_TABLES
 )
 
 # knowhow_columns/rows/cells/cell_code carry no notebook_id column of their
@@ -995,22 +1136,35 @@ class SharingStore:
             ]
             if not snapshot[root_table]:
                 raise KeyError(notebook_id)
-            if db.execute(_COPY_DIRTY_SQL, (notebook_id, notebook_id)).fetchone():
+            queries = self._copy_queries(db, notebook_id)
+            if queries is _MEMORY_COPY_SNAPSHOT_QUERIES:
                 snapshot[root_table][0][_COPY_DIRTY_MARK] = True
-            violation = self._copy_limit_violation(db, notebook_id)
+            violation = self._copy_limit_violation(db, notebook_id, queries)
             if violation is not None:
                 raise NotebookTooLargeToCopyError(violation)
-            for table, sql in _COPY_SNAPSHOT_QUERIES[1:]:
+            for table, sql in queries[1:]:
                 snapshot[table] = [
                     dict(row) for row in db.execute(sql, (notebook_id,)).fetchall()
                 ]
-            memory_source_ids = [
-                row["id"] for row in db.execute(_MEMORY_SOURCE_IDS_SQL, (notebook_id,))
-            ]
+            memory_source_ids = (
+                [row["id"] for row in db.execute(_MEMORY_SOURCE_IDS_SQL, (notebook_id,))]
+                if queries is _MEMORY_COPY_SNAPSHOT_QUERIES
+                else []
+            )
         strip_memory_evidence(snapshot, memory_source_ids)
         return snapshot
 
-    def _copy_limit_violation(self, db, notebook_id: str) -> "str | None":
+    @staticmethod
+    def _copy_queries(db, notebook_id: str) -> tuple[tuple[str, str], ...]:
+        """The statement set for this copy (see the M2 comment at the top): the
+        pre-M2 statements unless the source holds a Memory source or is dirty."""
+        if db.execute(_COPY_DIRTY_SQL, (notebook_id, notebook_id)).fetchone():
+            return _MEMORY_COPY_SNAPSHOT_QUERIES
+        return _COPY_SNAPSHOT_QUERIES
+
+    def _copy_limit_violation(
+        self, db, notebook_id: str, queries: "tuple[tuple[str, str], ...] | None" = None
+    ) -> "str | None":
         """Both copy bounds, counted (not fetched) on the caller's connection:
         the message to raise if either is crossed, else None. Single source of
         truth shared by snapshot_copy_rows (atomic, in its BEGIN read snapshot)
@@ -1030,7 +1184,7 @@ class SharingStore:
             )
         materialised = sum(
             int(db.execute(f"SELECT COUNT(*) FROM ({sql}) AS _c", (notebook_id,)).fetchone()[0])
-            for _table, sql in _COPY_SNAPSHOT_QUERIES
+            for _table, sql in queries or self._copy_queries(db, notebook_id)
         )
         if materialised > self.settings.notebook_copy_max_snapshot_rows:
             return (
@@ -1250,7 +1404,12 @@ class SharingStore:
         """Post-copy integrity self-check: row parity per table + no dangling
         relation endpoints.  Raises RuntimeError (copy is then compensated)."""
         with self.database.connect() as db:
-            for table, extra in _COPY_VALIDATED_TABLES:
+            # The snapshot's statement-set decision, read back from the copy: the
+            # Memory-aware set was used iff the copy got its dirty state row (nothing
+            # else writes one while the copy is still behind its 'copying' sentinel).
+            filtered = db.execute(_COPY_FILTERED_SQL, (new_id,)).fetchone()
+            validated = _MEMORY_COPY_VALIDATED_TABLES if filtered else _COPY_VALIDATED_TABLES
+            for table, extra in validated:
                 copied_count = db.execute(
                     f"SELECT COUNT(*) FROM {table} WHERE notebook_id = ? {extra}",
                     (new_id,),

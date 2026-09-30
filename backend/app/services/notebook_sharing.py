@@ -966,7 +966,7 @@ class NotebookSharingService:
         token = self._store.set_share_token(
             notebook_id, f"shr-{secrets.token_urlsafe(16)}"
         )
-        stats = self.notebook_copy_stats(notebook_id)
+        stats = self._shown_copy_stats(notebook_id)
         return {
             "share_token": token,
             "copyable": stats["copyable"],
@@ -988,7 +988,7 @@ class NotebookSharingService:
         if not token:
             # 没有链接就没有「可不可拷贝 / 多大」这回事 —— 也不为它跑一次规模统计。
             return {"share_token": "", "copyable": False, "size": {}}
-        stats = self.notebook_copy_stats(notebook_id)
+        stats = self._shown_copy_stats(notebook_id)
         return {
             "share_token": token,
             "copyable": stats["copyable"],
@@ -1024,13 +1024,19 @@ class NotebookSharingService:
         stats = self._copy_stats(notebook_id)
         if stats.get("copyable") and not self._store.snapshot_copy_within_limits(notebook_id):
             stats = {**stats, "copyable": False}
-        # M2: the source/node/edge numbers shown on every share surface (the public
-        # preview above all, and the owner's share dialog) exclude what a copy never
-        # carries — every member's Memory sources and the KG rows derived from them —
-        # so no field of the preview lets a link holder compute the Memory count by
-        # subtracting another (`source_count` already excludes them). The verdict above
-        # stays on the physical counts (conservative, and retrieval's large-library
-        # logic reads the unadjusted memo directly).
+        return stats
+
+    def _shown_copy_stats(self, notebook_id: str) -> dict:
+        """`notebook_copy_stats` for the surfaces that SHOW its size (the public
+        preview, the share response, the owner's share dialog and overview).
+
+        M2: those numbers exclude what a copy never carries — every member's Memory
+        sources and the KG rows derived from them — so no field of the preview lets a
+        link holder compute the Memory count by subtracting another (`source_count`
+        already excludes them). Only these callers pay for it; the verdict-only
+        callers (copy, join) and retrieval read the physical counts. A notebook
+        without Memory pays one indexed probe."""
+        stats = self.notebook_copy_stats(notebook_id)
         memory_sources, memory_nodes, memory_edges = self._store.memory_derived_kg_counts(
             notebook_id
         )
@@ -1049,7 +1055,7 @@ class NotebookSharingService:
 
     def shared_preview(self, notebook_id: str) -> dict:
         notebook = self._catalog.get_notebook(notebook_id)
-        stats = self.notebook_copy_stats(notebook_id)
+        stats = self._shown_copy_stats(notebook_id)
         owner_display, titles = self._store.shared_preview_rows(notebook_id)
         return {
             "name": notebook.name,
@@ -1075,7 +1081,7 @@ class NotebookSharingService:
         for row in self._store.list_shared_by_owner(user_id):
             token = row["share_token"] or ""
             if token:
-                stats = self.notebook_copy_stats(row["id"])
+                stats = self._shown_copy_stats(row["id"])
                 readonly = not stats["copyable"]
                 mode = "readonly" if readonly else "copy"
                 size = stats["size"]
