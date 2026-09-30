@@ -14,6 +14,7 @@ and frontend/app/dev/logs/activity/types.ts for the frozen field contract.
 """
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import json
 import threading
 
@@ -222,6 +223,17 @@ def _insert_answer(db, answer_id, notebook_id, conversation_id, question, payloa
 # --- GET /admin/users/{user_id}/activity ------------------------------------
 
 
+def _recent_occurred_at(*, hours: int) -> str:
+    """An issue timestamp the admin listing still considers live.
+
+    ``/api/admin/analysis-issues`` filters ``expires_at`` (occurred_at +
+    ``analysis_failure_retention_days``, default 30) against the REAL clock,
+    so a literal date here is a time bomb: ``2026-08-31T01:00Z`` expired on
+    2026-09-30T01:00Z and turned CI red on every branch at once.
+    """
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+
 def test_activity_forbidden_for_other_regular_user(client):
     a = _auth(client, 1)
     b = _auth(client, 2)
@@ -277,7 +289,7 @@ def test_analysis_issue_log_is_admin_only_read_only_and_content_minimal(
         category="spreadsheet_analysis",
         code="SPREADSHEET_INVALID_OOXML",
         summary="无法读取工作簿。",
-        occurred_at="2026-08-31T01:00:00+00:00",
+        occurred_at=_recent_occurred_at(hours=2),
         source_path=str(source_file),
     )
 
@@ -329,7 +341,7 @@ def test_model_output_artifact_is_admin_only_and_loaded_separately(client, tmp_p
             schema_hint='{"markdown":""}',
             response='{"markdown":[]}',
             reason="invalid_type",
-            occurred_at="2026-08-31T02:00:00+00:00",
+            occurred_at=_recent_occurred_at(hours=1),
         )
     )
 
