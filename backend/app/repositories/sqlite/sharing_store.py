@@ -146,13 +146,18 @@ def _memory_object_here(alias: str, id_column: str, notebook_column: str) -> str
     )
 
 
-def _memory_element_here(element_column: str, notebook_column: str) -> str:
-    """The source element `element_column` names belongs to a Memory source of the
-    notebook `notebook_column` names."""
+def _memory_element(element_column: str) -> str:
+    """The source element `element_column` names belongs to a Memory source.
+
+    A per-row primary-key probe (element, then its source), deliberately a scalar
+    subquery rather than an EXISTS: `source_elements` has no notebook column, so an
+    EXISTS gives the planner nothing to scope the set by and it hashes the whole
+    element table (measured: a Seq Scan of every element in the deployment). The
+    probe costs two index lookups per row of THIS notebook."""
     return (
-        "EXISTS (SELECT 1 FROM source_elements pe JOIN sources ps ON ps.id = pe.source_id "
-        f"WHERE pe.id = {element_column} AND ps.notebook_id = {notebook_column} "
-        f"AND {memory_sql.memory_source_type_predicate('ps.source_type')})"
+        f"COALESCE((SELECT {memory_sql.memory_source_type_predicate('ps.source_type')} "
+        "FROM source_elements pe JOIN sources ps ON ps.id = pe.source_id "
+        f"WHERE pe.id = {element_column}), FALSE)"
     )
 
 
@@ -190,7 +195,7 @@ def _visible_fact_element(alias: str) -> str:
         f"{_not_memory_here(alias)} AND NOT EXISTS (SELECT 1 FROM knowledge_source_facts pf "
         f"WHERE pf.id = {alias}.fact_id AND pf.notebook_id = {alias}.notebook_id "
         f"AND {memory_sql.memory_derived_in_notebook('pf')}) "
-        f"AND NOT {_memory_element_here(alias + '.element_id', alias + '.notebook_id')}"
+        f"AND NOT {_memory_element(alias + '.element_id')}"
     )
 
 
@@ -575,7 +580,7 @@ _MEMORY_SNAPSHOT_TEXT: dict[str, str] = {
     "element_embeddings": (
         "SELECT e.* FROM element_embeddings e JOIN sources s ON s.id = e.source_id "
         f"WHERE s.notebook_id = ? AND s.source_type <> 'knowhow' AND {_visible_source('s')} "
-        f"AND NOT {_memory_element_here('e.element_id', 's.notebook_id')}"
+        f"AND NOT {_memory_element('e.element_id')}"
     ),
     "knowledge_embeddings": (
         f"SELECT e.* FROM knowledge_embeddings e WHERE e.notebook_id = ? "

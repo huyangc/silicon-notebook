@@ -790,3 +790,27 @@ def _legacy_validated(kh: str) -> dict[str, str]:
 
 LEGACY_VALIDATED_PG = _legacy_validated(_KH_PG_V)
 LEGACY_VALIDATED_SQLITE = _legacy_validated(_KH_SQLITE_V)
+
+
+#: The quality review's adversarial rows: a child row whose OWN source is shared but whose
+#: parent is Memory-derived (the write paths never produce them; each would KeyError the
+#: copy on a strictly remapped parent id if the child were judged by its own source only).
+ADVERSARIAL_ROWS = (
+    Row("source_elements", {
+        "id": "el-alice-9", "source_id": "src-mem-alice", "element_type": "para",
+        "location_label": "p9", "text": f"{MARK} element el-alice-9", "created_at": NOW,
+    }, True),
+    Row("element_embeddings", {  # vector filed under the shared source, element is Memory
+        "element_id": "el-alice-9", "source_id": "src-doc", "notebook_id": NOTEBOOK,
+        "vector": b"vec-adv", "created_at": NOW,
+    }, True),
+    Row("knowledge_source_fact_elements", {  # shared fact bound to a Memory element
+        "fact_id": "fact-doc", "notebook_id": NOTEBOOK, "source_id": "src-doc",
+        "source_generation": "gen-doc", "element_id": "el-alice-1", "created_at": NOW,
+    }, True),
+    Row("chunk_questions", {  # question filed under the shared source, chunk is Memory
+        "id": "cq-adv", "chunk_id": "ck-mem-stray", "notebook_id": NOTEBOOK,
+        "source_id": "src-doc", "question": f"{MARK} adv?", "vector": b"vec-cq-adv",
+        "created_at": NOW,
+    }, True),
+)

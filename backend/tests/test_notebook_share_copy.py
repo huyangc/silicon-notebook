@@ -2031,3 +2031,14 @@ def test_share_size_of_a_notebook_without_memory_costs_one_statement(repo):
         conn.set_trace_callback(None)
     work = [s for s in statements if s.lstrip().upper().startswith("SELECT")]
     assert len(work) == 1, statements
+
+
+def test_child_rows_are_judged_by_their_memory_parent_too(repo):
+    """评审的对抗夹具:子行自己的来源是共享来源,父行(元素、分块)却是 Memory 的。按父行
+    一并判定,拷贝成功(不在严格重映射的父 id 上 KeyError),这些子行一行都不带。"""
+    _seed_memory_world(repo)
+    _insert_rows(repo, memory_cases.ADVERSARIAL_ROWS)
+    _mk_user(repo, "user-adv-copy")
+    new = repo.copy_notebook(memory_cases.NOTEBOOK, new_owner_id="user-adv-copy")
+    view = memory_cases.read_copy(_fetch(repo), "?", new.id)
+    memory_cases.assert_copy_has_no_memory(view)
