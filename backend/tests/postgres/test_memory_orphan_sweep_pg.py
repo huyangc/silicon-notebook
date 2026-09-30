@@ -270,6 +270,7 @@ def _assert_swept(world):
 def test_the_store_read_finds_exactly_the_orphan_shapes(postgres_repository):
     world = World(postgres_repository)
     store = postgres_repository._runtime.memory_store
+    assert store.has_orphan_memory_sources() is True
     assert store.orphan_memory_source_ids(1000) == world.orphan_ids
     assert "src-keep" not in world.orphan_ids
     for sid in ("src-hard", "src-dep", "src-dangling", "src-null"):
@@ -431,3 +432,18 @@ def test_only_the_lookup_miss_of_delete_source_counts_as_gone(postgres_repositor
         event_log=repo._runtime.event_log,
     ).run_pass()
     assert tally == {"deleted": len(world.orphan_ids) - 2, "gone": 1, "failed": 1}
+
+
+def test_a_cleared_link_is_an_orphan_even_if_a_memory_row_has_an_empty_id(postgres_repository):
+    """NULL falls out of the NOT EXISTS by itself (``m.id = NULL`` is never true); the
+    empty string is guarded by ``m.id <> ''`` in the subquery, so a confirmed Memory row
+    with an empty id cannot rescue a source whose link was cleared."""
+    repo = postgres_repository
+    _user(repo, OWNER)
+    _notebook(repo, "nb-a")
+    _memory_item(repo, "", "nb-a")
+    _source(repo, "nb-a", "src-cleared", "memory", "")
+    _source(repo, "nb-a", "src-null", "memory", None)
+    store = repo._runtime.memory_store
+    assert store.orphan_memory_source_ids(10) == ["src-cleared", "src-null"]
+    assert store.has_orphan_memory_sources() is True

@@ -92,15 +92,20 @@ def _strict_json_value(value: Any, *, field: str) -> Any:
 
 # 「无主的 Memory 来源」:`source_type` 是 memory,而它指回的 Memory 不再是一条已确认的
 # Memory —— `memory_id` 为 NULL/空(既有的笔记本拷贝清空了它,N-5)、指向的行已不存在
-# (硬删残留)、或指向的行不是 `confirmed`。`orphan_memory_source_ids` 与
-# `orphan_memory_source_count_on` 共用这一段文本,清扫与体检不可能各说各话。
-# 显式的 `IS NULL` / `= ''` 是「链接被清空」的直写:`NOT EXISTS` 对 NULL 本就成立
-# (`m.id = NULL` 恒不真),它们留着是让谓词在反连接被改写成 `NOT IN`(对 NULL 不安全)
-# 时仍然正确;`= ''` 还挡住「存在 id 为空串的 Memory 行」这种反常数据。
+# (硬删残留)、或指向的行不是 `confirmed`。`orphan_memory_source_ids`、
+# `has_orphan_memory_sources` 与 `orphan_memory_source_count_on` 共用这一段文本,清扫与
+# 体检不可能各说各话。
+#
+# 形状是**可去相关**的单个 `NOT EXISTS`,没有 `OR`:NULL 的 `memory_id` 让 `m.id = s.memory_id`
+# 恒不真,所以 NOT EXISTS 自然成立;空串由子查询里的 `m.id <> ''` 保证(即便存在 id 为空串的
+# Memory 行,空串链接也仍是孤儿)。带 `OR memory_id IS NULL OR memory_id = ''` 的旧写法会
+# 让规划器放弃反连接,在 id 随机的百万级 `sources` 上沿主键整表走一遍并逐个 Memory 来源
+# 做探针(冷缓存 8–26 秒);现在的形状走 Hash Anti Join,见
+# `test_memory_orphan_sweep_explain_pins`。
 _ORPHAN_MEMORY_SOURCE_WHERE = (
     memory_sql.memory_source_type_predicate("s.source_type")
-    + " AND (s.memory_id IS NULL OR s.memory_id = '' OR NOT EXISTS ("
-    "SELECT 1 FROM memory_items m WHERE m.id = s.memory_id AND m.status = 'confirmed'))"
+    + " AND NOT EXISTS (SELECT 1 FROM memory_items m WHERE m.id = s.memory_id "
+    "AND m.status = 'confirmed' AND m.id <> '')"
 )
 
 
@@ -2373,21 +2378,29 @@ class MemoryStore:
             (source_memory_id,),
         ).fetchone()
 
+    def has_orphan_memory_sources(self) -> bool:
+        """是否存在至少一个无主 Memory 来源(启动探测;`EXISTS`,不排序,首个命中即停)。"""
+        with self.database.connect() as db:
+            row = db.execute(
+                f"SELECT EXISTS (SELECT 1 FROM sources s WHERE {_ORPHAN_MEMORY_SOURCE_WHERE}) AS found"
+            ).fetchone()
+        return bool(row["found"])
+
     def orphan_memory_source_ids(self, limit: int, after_id: str = "") -> list[str]:
         """至多 `limit` 个无主 Memory 来源的 id,按 id 升序,只取 `after_id` 之后的(键集分页)。
 
-        全库读(清扫在启动后一次跑完,不属于任何笔记本)。语句对 `sources` 只有一趟扫描;
-        `memory_items` 一侧只经索引访问(`OR` 让它无法去相关成反连接:表小时规划器把已确认
-        的 id 哈希一次,表大时逐个 Memory 来源做主键探针,实测 30 万 Memory 来源零无主
-        的一轮约 1.2 秒)。`sources` 上没有单独的 `source_type` 索引,所以这一趟是整表
-        的;清扫每页最多再扫一趟,页数由 `limit` 决定但不改变结果。见
-        `test_memory_orphan_sweep_explain_pins`。
+        全库读(清扫在启动后一次跑完,不属于任何笔记本)。反连接放进 MATERIALIZED CTE、
+        再对结果(只有孤儿 id,数量以 Memory 来源数为界)排序取前 `limit` 个:CTE 阻止
+        规划器为了 `ORDER BY s.id LIMIT` 去沿主键整表走一遍。`sources` 上没有单独的
+        `source_type` 索引,所以反连接对 `sources` 是整表一趟;清扫每页至多再来一趟,页数
+        由 `limit` 决定但不改变结果。实测数字与计划见 `test_memory_orphan_sweep_explain_pins`
+        和 docs/operations.md。
         """
         with self.database.connect() as db:
             rows = db.execute(
-                "SELECT s.id FROM sources s "
-                f"WHERE {_ORPHAN_MEMORY_SOURCE_WHERE} AND s.id > %s "
-                "ORDER BY s.id LIMIT %s",
+                "WITH o AS MATERIALIZED (SELECT s.id FROM sources s "
+                f"WHERE {_ORPHAN_MEMORY_SOURCE_WHERE} AND s.id > %s) "
+                "SELECT id FROM o ORDER BY id LIMIT %s",
                 (after_id, max(1, int(limit))),
             ).fetchall()
         return [str(row["id"]) for row in rows]

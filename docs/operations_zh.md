@@ -134,14 +134,19 @@ Memory 派生来源：`memory_id` 为 NULL 或空的来源（在拷贝不再携�
 事件只带标识符与计数：`memory_orphan_sweep_started`；某个来源删除失败时的 `memory_orphan_sweep_failed`
 （带 `source_id` 与 `error_class`）；`memory_orphan_sweep_completed`，带 `deleted`、`gone`（在读取与
 删除之间被别的写者删掉）和 `failed`。失败的来源被跳过、下次启动重试；连续三次失败会结束这一轮，其余的
-留到下次启动。没有进度标记：无主来源本身就是队列，按 id 顺序每次读 200 个（页大小只界定单条语句的
+留到下次启动。读取无主清单本身失败（例如语句超时）时，同样发一条只带 `error_class` 的
+`memory_orphan_sweep_failed` 并结束这一轮。没有进度标记：无主来源本身就是队列，按 id 顺序每次读 1000 个（页大小只界定单条语句的
 结果，从不改变最终结果）。
 
 确认完成：干净启动之后，`SELECT count(*) FROM sources s WHERE s.source_type = 'memory' AND
 (s.memory_id IS NULL OR s.memory_id = '' OR NOT EXISTS (SELECT 1 FROM memory_items m WHERE m.id =
 s.memory_id AND m.status = 'confirmed'))` 应返回 0；体检项 `H12`（只读，修复动作 `none`）给出单个
-notebook 的同一数字。探测每页对 `sources` 扫一遍；PostgreSQL 上对 30 万个 Memory 来源做零无主的一轮实测
-1.2 秒。在 SQLite 上，两张 FTS5 影子表（`kg_objects_fts`、`chunks_fts`）会保留已删除对象与 chunk 的行，
+notebook 的同一数字。探测每页对 `sources` 扫一遍。PostgreSQL 16 上的实测（100 万个 sources，其中 30 万个是 Memory 来源，
+id 随机，32 万条 Memory，机器负载均值约 45）：启动探测（`EXISTS`，零无主）1.7 秒；读取一页在零无主时
+0.5 秒（200 行）到 0.7 秒（1000 行），存在 5000 个无主时 1.5 秒；体检单库计数 28 毫秒；而此前带 `OR` 的写法
+会沿主键整表走一遍，探测就要 59 秒。谓词特意写成一个可去相关的 `NOT EXISTS`（不带 `OR`），让规划器走反连接。
+每次删除还会脱敏该 notebook 保留的模型输出诊断件（每个无主来源一次），与任何来源删除完全一样，所以清扫会
+悄悄清掉受影响 notebook 的这些诊断件。`H12` 只有数量：不指出任何来源、属主或内容。在 SQLite 上，两张 FTS5 影子表（`kg_objects_fts`、`chunks_fts`）会保留已删除对象与 chunk 的行，
 与任何其它来源删除之后的情形完全一样。
 
 ## 可观测性 / 日志

@@ -907,7 +907,13 @@ def _sweep_orphan_memory_sources(repo) -> None:
     Same placement and failure discipline as ``_reproject_legacy_knowhow_tables``
     above: strictly AFTER ``mark_ready()`` and every exception is swallowed here,
     so a bug in the catch-up can never turn a successful startup into "error".
-    With nothing to sweep it is one bounded probe query and no job."""
+    With nothing to sweep it is one ``EXISTS`` probe and no job.
+
+    ORDER: when the ruling-M1 isolated rebuild (``_rebuild_memory_isolated_notebooks``,
+    E4-5) is also present, THIS step runs first. Every orphan deleted while a
+    notebook is being rebuilt bumps that notebook's graph sequence and makes the
+    rebuild's result stale, so sweeping first saves a second rebuild. (Correct
+    either way -- a rebuild already tolerates concurrent deletes -- just cheaper.)"""
     try:
         from app.services.memory_orphan_sweep import MemoryOrphanSweep
 

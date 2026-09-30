@@ -495,6 +495,65 @@ def test_a_systemic_failure_ends_the_pass_and_leaves_the_rest_for_the_next_start
     _assert_swept(world)
 
 
+def test_a_poison_row_at_the_end_of_a_page_does_not_stop_the_rest(world, events):
+    """With a page of one every row is the last of its page: the failed row must still
+    advance the cursor, otherwise the next read returns it again, the consecutive-failure
+    counter is used up by that one row and the orphans after it are never reached."""
+    repo = world.repo
+    victim = world.orphan_ids[0]
+
+    def flaky(source_id):
+        if source_id == victim:
+            raise RuntimeError("poison")
+        return repo.delete_source(source_id)
+
+    tally = MemoryOrphanSweep(
+        store=repo._runtime.memory_store, delete_source=flaky,
+        event_log=repo._runtime.event_log, page_size=1,
+    ).run_pass()
+
+    assert tally == {"deleted": len(world.orphan_ids) - 1, "gone": 0, "failed": 1}
+    assert _source_ids(repo).count(victim) == 1
+    assert [s for s in world.orphan_ids if s != victim and s in _source_ids(repo)] == []
+
+
+def test_a_failed_read_is_reported_content_free_and_ends_the_pass(world, events):
+    repo = world.repo
+    real = repo._runtime.memory_store
+    reads = []
+
+    class Store:
+        @staticmethod
+        def has_orphan_memory_sources():
+            return real.has_orphan_memory_sources()
+
+        @staticmethod
+        def orphan_memory_source_ids(limit, after_id=""):
+            reads.append(after_id)
+            if len(reads) == 2:  # the second page: statement timeout
+                raise TimeoutError("canceling statement due to statement timeout: secret")
+            return real.orphan_memory_source_ids(limit, after_id)
+
+    tally = MemoryOrphanSweep(
+        store=Store, delete_source=repo.delete_source,
+        event_log=repo._runtime.event_log, page_size=2,
+    ).run_pass()
+
+    assert tally["deleted"] == 2 and tally["failed"] == 0
+    kinds = [e["kind"] for e in _sweep_events(events)]
+    assert kinds == [
+        "memory_orphan_sweep_started", "memory_orphan_sweep_failed",
+        "memory_orphan_sweep_completed",
+    ]
+    assert _sweep_events(events)[1] == {
+        "kind": "memory_orphan_sweep_failed", "error_class": "TimeoutError",
+    }
+    assert "secret" not in json.dumps(_sweep_events(events))
+    # the rest waits for the next start, which finishes it
+    assert MemoryOrphanSweep.for_repository(repo).run_pass()["deleted"] == len(world.orphan_ids) - 2
+    _assert_swept(world)
+
+
 def test_a_success_resets_the_consecutive_failure_count(world):
     """Only a run of failures is systemic: failures separated by successes never end
     the pass."""
@@ -576,12 +635,34 @@ def test_startup_hook_runs_the_sweep_in_the_background(world, monkeypatch):
     _assert_swept(world)
 
 
-def test_startup_reaches_the_sweep_only_after_mark_ready():
-    # ``ast.unparse`` drops comments and docstring-free noise, so the textual order of
-    # the remaining calls is the statement order of the function body.
+def _block_of(tree, callee):
+    """The statement list (a ``body``) that directly holds ``callee(...)`` as a statement."""
+    for node in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if not isinstance(block, list):
+                continue
+            for index, stmt in enumerate(block):
+                call = stmt.value if isinstance(stmt, ast.Expr) else None
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) \
+                        and call.func.id == callee:
+                    return block, index
+    raise AssertionError(f"{callee}(...) is not a plain statement of run_startup")
+
+
+def test_startup_reaches_the_sweep_on_the_success_path_after_mark_ready():
+    """The sweep is a statement of the SAME block as the other post-readiness catch-up
+    (``_reproject_legacy_knowhow_tables``), after it and before ``return repo`` -- not
+    merely textually after ``mark_ready`` (a call moved into the not-ready branch would
+    pass a text-order check and never run)."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(startup_warmup.run_startup)))
+    block, at = _block_of(tree, "_sweep_orphan_memory_sources")
+    other, other_at = _block_of(tree, "_reproject_legacy_knowhow_tables")
+    assert block is other and other_at < at
+    assert any(isinstance(stmt, ast.Return) for stmt in block[at + 1:])
+    # ... and the readiness flip is an earlier ``if`` of the enclosing try, whose
+    # branch returns (a not-ready start never reaches the sweep)
     body = ast.unparse(ast.parse(textwrap.dedent(inspect.getsource(startup_warmup.run_startup))))
-    assert "_sweep_orphan_memory_sources(repo)" in body
-    # EVERY call of the sweep sits after the LAST readiness flip
     assert body.index("_sweep_orphan_memory_sources(") > body.rindex("_mark_lifecycle_ready(")
 
 
