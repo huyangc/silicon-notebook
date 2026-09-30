@@ -1049,6 +1049,64 @@ def case_memory_in_the_synthesis_payload_counts(world: World) -> None:
     _published_only_after_acknowledging(world, rid, [mid])
 
 
+def case_planning_and_generation_records_are_joined(world: World) -> None:
+    """The planner records one Memory (its Memory lines), the generation run
+    another (the deep dive retrieved its projection): the report carries
+    both — the run record joins the planning record, it does not replace it."""
+    from app.services.reasoning_retrieval import ReasoningResult
+
+    planned = make_memory(world, world.alice, "a1")
+    retrieved = make_memory(world, world.alice, "a2")
+    elements = _projection_elements(world, "a2")
+    models = _Models(outline_title=MEMORY_TEXT, section_markdown=f"## {MEMORY_TEXT}\n正文")
+    planner = _engine(world, world.alice, models)
+    for method in ("federated_retrieve", "retrieve_elements", "ppr_retrieve"):
+        world.monkeypatch.setattr(planner.dependencies.retrieval, method, lambda *a, **k: [])
+    rid = _new_report(world, world.alice)
+    _serve_memory(world, ["a1"])
+    planner.plan_outline(world.notebook, rid, "环路为什么稳定？")
+    assert world.repo.get_report(world.notebook, rid)["memory_used"] == [planned]
+
+    def observe_then_drop(*args, **kwargs):
+        generator.dependencies.retrieval.retrieve_elements(world.notebook, "环路补偿", limit=5)
+        return ReasoningResult()
+
+    generator = _engine(world, world.alice, models, deep_dive=observe_then_drop)
+    world.monkeypatch.setattr(
+        generator.dependencies.retrieval, "retrieve_elements", lambda *a, **k: list(elements)
+    )
+    _serve_memory(world, [])
+    _generate(world, generator, rid)
+    _published_only_after_acknowledging(world, rid, [planned, retrieved])
+
+
+def case_a_retrieval_record_overflow_fails_the_planning(world: World) -> None:
+    """A retrieval result too large to record completely fails the planning
+    (no outline to generate, nothing to share) instead of under-counting."""
+    import app.services.report_memory_use as memory_use
+
+    make_memory(world, world.alice, "a1")
+    models = _Models()
+    planner = _engine(world, world.alice, models)
+    world.monkeypatch.setattr(memory_use, "_MAX_CONTAINERS", 3)
+    from app.domain.retrieval import RetrievedKnowledge
+
+    hits = [
+        RetrievedKnowledge(object_id=f"o{index}", object_type="concept",
+                           payload={"name": f"n{index}", "source_id": f"src-{index}"})
+        for index in range(5)
+    ]
+    world.monkeypatch.setattr(
+        planner.dependencies.retrieval, "federated_retrieve", lambda *a, **k: list(hits)
+    )
+    rid = _new_report(world, world.alice)
+    _serve_memory(world, [])
+    planner.plan_outline(world.notebook, rid, "环路为什么稳定？")
+    stored = world.repo.get_report(world.notebook, rid)
+    assert stored["status"] == "failed", (stored["status"], stored["error"])
+    assert "too large to record" in stored["error"]
+
+
 def case_planner_record_is_kept_by_the_store(world: World) -> None:
     """The planner's Memory record lives in ``understanding_json`` but belongs
     to the store: every later understanding write that does not carry it keeps
