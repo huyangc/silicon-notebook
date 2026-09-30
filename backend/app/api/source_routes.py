@@ -507,7 +507,13 @@ def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) 
     # notebook_capability_allowed 的 docstring)。语义与旧的
     # `source_owner(source_id) != user.id` 逐字等价:source 不存在 → 404;
     # 非 owner → 404。
-    notebook_id = notebook_access_repository().source_notebook_id(source_id)
+    # 隐藏合成源(Memory/knowhow 投影)在这个通用端点上不可寻址,对任何人(含 Memory
+    # 创建者)都与不存在同为 404:Memory 由 Memory 端点删除、由 Memory 服务重新摄取,
+    # knowhow 行由表格同步维护,喂给文档解析只会标失败、清派生态。判定就在这第一条读里
+    # (`visible_only`),拒绝与不存在走同一条语句、同一个 404,不泄露标题。
+    notebook_id = notebook_access_repository().source_notebook_id(
+        source_id, visible_only=True
+    )
     if notebook_id is None or not notebook_capability_allowed(
         "sources:write", notebook_id, user.id
     ):
@@ -994,8 +1000,10 @@ def source_elements_page_in_scope(
 @router.delete("/sources/{source_id}", status_code=204)
 def delete_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> None:
     # 同 parse_source 上面的注释:notebook_id 不在 URL 上,守卫在函数体内先反查
-    # 再按同一张能力表判 "sources:write"。
-    notebook_id = notebook_access_repository().source_notebook_id(source_id)
+    # 再按同一张能力表判 "sources:write"。隐藏合成源同 parse_source:不可寻址,404。
+    notebook_id = notebook_access_repository().source_notebook_id(
+        source_id, visible_only=True
+    )
     if notebook_id is None or not notebook_capability_allowed(
         "sources:write", notebook_id, user.id
     ):

@@ -1612,10 +1612,14 @@ class RepositoryFacade:
         return self._runtime.sharing.source_owner(source_id)
 
     def source_notebook_id(
-        self, source_id: str, *, viewer_id: "str | None" = None
+        self,
+        source_id: str,
+        *,
+        viewer_id: "str | None" = None,
+        visible_only: bool = False,
     ) -> "str | None":
         return self._runtime.sharing.source_notebook_id(
-            source_id, viewer_id=viewer_id
+            source_id, viewer_id=viewer_id, visible_only=visible_only
         )
 
     def conversation_owner(self, conversation_id: str) -> "str | None":

@@ -25,6 +25,7 @@ from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.knowhow_history_store import record_change
 from app.repositories.sqlite.memory_sql import memory_source_readable
 from app.repositories.sqlite.mount_sql import MOUNT_VALID_EXPR
+from app.repositories.sqlite.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 
 # `source_notebook_id(viewer_id=...)`: the Memory owner gate of the source and
 # element read endpoints (see that method). Parameters `(source_id, viewer_id)`;
@@ -33,6 +34,17 @@ from app.repositories.sqlite.mount_sql import MOUNT_VALID_EXPR
 _VIEWER_SOURCE_NOTEBOOK_SQL = (
     "SELECT s.notebook_id FROM sources s WHERE s.id = ? "
     f"AND {memory_source_readable('s')}"
+)
+
+# `source_notebook_id(visible_only=True)`: the gate of the generic source WRITE
+# endpoints (`DELETE /sources/{id}`, `POST /sources/{id}/parse`). A Memory or
+# Knowhow projection row is never addressable there — Memory is deleted through
+# the Memory endpoints and re-ingested by the Memory service, a Knowhow row is
+# maintained by table projection — so both answer None, like a missing id.
+# The predicate is the Sources panel's own visibility rule. One parameter.
+_VISIBLE_SOURCE_NOTEBOOK_SQL = (
+    "SELECT notebook_id FROM sources WHERE id = ? "
+    f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
 )
 
 # knowhow-table content, PR-2+3 Task 13: knowledge_objects/knowledge_relations
@@ -701,7 +713,11 @@ class SharingStore:
         return row["owner"] if row else None
 
     def source_notebook_id(
-        self, source_id: str, *, viewer_id: "str | None" = None
+        self,
+        source_id: str,
+        *,
+        viewer_id: "str | None" = None,
+        visible_only: bool = False,
     ) -> "str | None":
         """The notebook ``source_id`` belongs to, or ``None``.
 
@@ -713,11 +729,21 @@ class SharingStore:
         exist". The predicate is `memory_sql.memory_source_readable`, never a
         hand-written copy; `''` reads no Memory at all (a token without
         `memory:read`), and an orphaned Memory source reads for nobody.
-        ``None`` (write-side callers that gate on a capability instead) keeps
-        the historical statement byte for byte.
+        ``visible_only`` is the gate of the generic source write endpoints
+        (delete, reparse): Memory and Knowhow projection rows answer ``None``
+        for every caller, the creator included. The two keywords are never
+        combined (write callers pass only ``visible_only``, read callers only
+        ``viewer_id``). Neither keyword keeps the historical statement byte for
+        byte.
         """
+        if visible_only and viewer_id is not None:
+            raise ValueError("viewer_id and visible_only are separate gates")
         with self.database.connect() as db:
-            if viewer_id is None:
+            if visible_only:
+                row = db.execute(
+                    _VISIBLE_SOURCE_NOTEBOOK_SQL, (source_id,)
+                ).fetchone()
+            elif viewer_id is None:
                 row = db.execute(
                     "SELECT notebook_id FROM sources WHERE id = ?", (source_id,)
                 ).fetchone()
