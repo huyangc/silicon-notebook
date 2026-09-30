@@ -283,15 +283,26 @@ class ActiveSourceScope:
     ceilings_total: bool = False
     # The asker's OWN Memory projection sources that ``default_ceiling_context``
     # deliberately left OUT of ``hidden_source_ids`` because the Memory channel
-    # was closed (``memory_access_context(False)``).  Read in exactly two
-    # places, neither of them a gate: the drift probe
-    # (``source_scope_visible_universe_matches``), whose live hidden read is the
-    # raw owner-scoped set, so without this it would report drift on every run
-    # of a user holding one confirmed Memory and silently switch the
-    # whole-graph channels off for them; and ``refreshed_ceiling_context``
-    # (via ``_refreshed_local``), which carries the set over when it inherits
-    # the local dimension so the refreshed scope's probe keeps matching.  No
-    # gate admits a withheld id.
+    # was closed (``memory_access_context(False)``).  Read in two places: the
+    # drift probe (``source_scope_visible_universe_matches``) and
+    # ``refreshed_ceiling_context`` (via ``_refreshed_local``), which carries
+    # the set over when it inherits the local dimension.  No gate admits a
+    # withheld id.
+    #
+    # FAIL-CLOSED UNTIL E2-2.  The probe answers "drifted" whenever this set is
+    # non-empty, which switches the whole-graph walk, PPR, relation and
+    # exact-lookup channels off for that run.  Those channels are not
+    # partitioned by source: with the channel closed, the 1-hop walk still
+    # rendered the asker's own Memory-derived node names and relation chain
+    # into the answer prompt behind a live anchor (measured on a real store,
+    # third E1-1 review), because the walk checks only libraries that carry a
+    # per-notebook entry and the active notebook never does.  The original
+    # rationale -- keep these channels on for a user holding one confirmed
+    # Memory -- is superseded until E2-2 lands its per-node ceiling check on
+    # the walk (``retrieval_candidates._ceiling_scoped_subgraph``); E2-2 then
+    # removes that line and restores the channels.  Cost meanwhile: a caller
+    # without ``memory:read`` whose owner holds a confirmed Memory in the
+    # notebook runs without those four channels.
     withheld_hidden_source_ids: frozenset[str] = frozenset()
     # Mounted libraries the default-ceiling constructors froze to
     # ``frozenset()`` because their visible-source list could not be read in
@@ -1741,13 +1752,16 @@ def source_scope_visible_universe_matches(
     True for the whole run and reroute the lexical arm off its normal lane.
     """
     scope = current_source_scope()
-    if (
-        scope is None
-        or notebook_id != scope.notebook_id
-        or scope.narrowed is None
-        or scope.narrowed
-        or scope.mode != "include"
-    ):
+    if scope is None or notebook_id != scope.notebook_id:
+        return True
+    if scope.withheld_hidden_source_ids:
+        # Fail-closed until E2-2 (see ``withheld_hidden_source_ids``): the
+        # asker's own Memory was withheld because the Memory channel is
+        # closed, and the non-partitioned channels this probe guards would
+        # still surface it.  Checked BEFORE the ``narrowed`` short-circuits,
+        # so a submitted scope without the narrowed bit cannot skip it.
+        return False
+    if scope.narrowed is None or scope.narrowed or scope.mode != "include":
         return True
     visible_matches = set(
         str(value) for value in current_visible_source_ids
