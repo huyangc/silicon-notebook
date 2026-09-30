@@ -146,16 +146,102 @@ def _doc_object(repo: Any, sql: Sql, user: Any, notebook_id: str) -> tuple[str, 
     return source_id, row["id"]
 
 
+def legacy_fuse(
+    world: World, notebook_id: str, source_id: str, *, bridge_embedder: Any = None
+) -> None:
+    """The cluster rows (and, with ``bridge_embedder``, the Tier-2 bridge
+    merge candidates) incremental fusion wrote for a Memory source BEFORE the
+    isolation work stopped clustering Memory objects — the legacy state the
+    purge must clean up. Computed with fusion's own functions
+    (``kg_merge.place_new_concepts`` with name seeds and the acronym redirect,
+    ``kg_merge.detect_bridge_candidates``) and written with fusion's cluster
+    shape and its candidate writer (``insert_merge_candidate``), so the rows
+    have exactly the production shape whether or not fusion still clusters
+    Memory objects today."""
+    from app.services.kg_merge import (
+        _norm,
+        detect_bridge_candidates,
+        place_new_concepts,
+    )
+
+    sql = world.sql
+    objects = [
+        {"object_id": row["id"], "name": str(row["name"] or "")}
+        for row in sql.rows(
+            ("SELECT id, payload->>'name' AS name FROM knowledge_objects "
+             if sql.postgres else
+             "SELECT id, json_extract(payload,'$.name') AS name FROM knowledge_objects ")
+            + "WHERE source_id=? AND object_type='concept' AND status<>'deprecated' "
+            "ORDER BY id",
+            (source_id,),
+        )
+    ]
+    clusters = sql.rows(
+        "SELECT canonical_id, canonical_name, member_object_id FROM concept_clusters "
+        "WHERE notebook_id=? AND object_type='concept'",
+        (notebook_id,),
+    )
+    canon_names = {row["canonical_id"]: row["canonical_name"] for row in clusters}
+    placed = place_new_concepts(
+        objects, canon_names, seed_fn=lambda item: _norm(item["name"])
+    )
+    for row in placed:
+        sql.write(
+            "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,"
+            "canonical_name,object_type,created_at) VALUES (?,?,?,?,?,'concept',?)",
+            (f"cc-{row['member_object_id']}", notebook_id, row["canonical_id"],
+             row["member_object_id"], row["canonical_name"], _GRANT_CREATED_AT),
+        )
+    if bridge_embedder is None or not objects:
+        return
+    own = {item["object_id"] for item in objects}
+    existing = [
+        {"object_id": row["member_object_id"], "name": row["canonical_name"]}
+        for row in clusters if row["member_object_id"] not in own
+    ]
+    names = {
+        row["id"]: str(row["name"] or "")
+        for row in sql.rows(
+            ("SELECT id, payload->>'name' AS name FROM knowledge_objects "
+             if sql.postgres else
+             "SELECT id, json_extract(payload,'$.name') AS name FROM knowledge_objects ")
+            + "WHERE notebook_id=? AND object_type='concept'",
+            (notebook_id,),
+        )
+    }
+    for item in existing:
+        item["name"] = names.get(item["object_id"], item["name"])
+    vector = lambda text: bridge_embedder.embed_texts([text])[0]  # noqa: E731
+    candidates = detect_bridge_candidates(
+        objects,
+        {item["object_id"]: vector(item["name"]) for item in objects},
+        existing,
+        {item["object_id"]: vector(item["name"]) for item in existing},
+        {row["member_object_id"]: row["canonical_id"] for row in clusters},
+        set(),
+    )
+    governance = world.repo._runtime.governance
+    with world.repo._runtime.database.write() as db:
+        for candidate in candidates:
+            governance.insert_merge_candidate(
+                db, notebook_id, candidate["canonical_a"], candidate["canonical_b"],
+                candidate["score"], _GRANT_CREATED_AT, id_prefix="cm",
+            )
+
+
 def make_memory(
     world: World,
     key: str,
     notebook_id: str,
     user: Any,
     names: tuple[str, str] | None = None,
+    bridge_embedder: Any = None,
 ) -> Projection:
     """A confirmed Memory with a real derived source and a full KG projection
     (two concept objects, named ``names`` or ``<key> loop`` / ``<key>
-    compensation``)."""
+    compensation``), clustered the way fusion clustered Memory objects before
+    the isolation work (``legacy_fuse``; with ``bridge_embedder`` also the
+    bridge merge candidates it wrote)."""
     first_name, second_name = names or (f"{key} loop", f"{key} compensation")
     repo, sql = world.repo, world.sql
     service = repo._runtime.memory_service
@@ -218,9 +304,7 @@ def make_memory(
             "SELECT id FROM knowledge_relations WHERE source_id=?", (source_id,)
         )
     ]
-    # Cluster rows through the real writer: incremental fusion (Tier-1 name
-    # seeds, Tier-2 bridge candidates), exactly as extraction runs it.
-    repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook_id, source_id)
+    legacy_fuse(world, notebook_id, source_id, bridge_embedder=bridge_embedder)
     projection = Projection(
         memory.id, notebook_id, source_id, element_ids, object_ids, relation_ids
     )
@@ -986,7 +1070,8 @@ def _merge_candidates(world: World) -> set[tuple[str, str]]:
 
 def case_merge_candidates_written_by_fusion_are_deleted(world: World) -> None:
     """Item 3: merge candidates hold CLUSTER canonical ids (``K-<seed>``),
-    written here by the real fusion writer. The Memory's "TLL" is placed
+    written here by fusion's own functions and writer (``legacy_fuse``: the
+    shape fusion wrote for Memory objects before the isolation work). The Memory's "TLL" is placed
     (acronym redirect) into the shared "Twin locked loop (TLL)" cluster, while
     the bridge detector names it ``K-tll`` — an id no cluster row carries.
     After the purge no candidate names the Memory's clusters (the shared
@@ -997,7 +1082,8 @@ def case_merge_candidates_written_by_fusion_are_deleted(world: World) -> None:
     _fused_doc_object(world, "Twin shared notes")
     _fused_doc_object(world, "Twin other notes")
     make_memory(
-        world, "twin", world.shared, world.alice, names=("TLL", "twin private idea")
+        world, "twin", world.shared, world.alice, names=("TLL", "twin private idea"),
+        bridge_embedder=_TwinEmbedder(dim=EMBED_DIM),
     )
     before = _merge_candidates(world)
     shared_pair = ("K-twin other notes", "K-twin shared notes")
