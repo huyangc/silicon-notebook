@@ -77,8 +77,8 @@ def purge_bridge_canonical_ids(objects: Iterable[dict]) -> List[str]:
     the bridge ids of the concept objects (``bridge_canonical_id``). They may
     also be carried by a live shared cluster, so the purge acts on a merge
     candidate naming one only when no cluster row carries it. (The ids that
-    can only have been minted from a purged object — ``<prefix>~<id>`` and
-    the id itself — are derived in SQL from ``CANONICAL_ID_PREFIXES``.)"""
+    can only have been minted from a purged object are recognised in SQL by
+    ``memory_sql.cluster_seed_object_id``.)"""
     return sorted({
         bridge_canonical_id(item.get("name") or "", item["object_id"])
         for item in objects
