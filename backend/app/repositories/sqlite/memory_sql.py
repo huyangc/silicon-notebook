@@ -43,9 +43,11 @@ PostgreSQL 镜像(占位符 `%s`),两份必须同修,与 `access_sql.py` / `moun
   对象,只过滤成员行洗不掉名字,所以取名字的查询按整簇排除)。零参数。簇 id 是
   `K-<规范化种子名>`,不同笔记本可以撞同一个 canonical_id,所以相关条件同时钉
   notebook 与 generation。
+* `memory_derived_in_notebook(row_alias)` —— 同 `memory_derived_object`,另钉「来源属于行
+  所在的笔记本」(写入不变量,合法数据上同义),让集合按本笔记本构建。零参数。
 * `memory_cluster(cluster_alias)` / `no_memory_cluster(cluster_alias)` —— 「一条 Memory 的簇」
   的唯一定义(拷贝整簇不带、删除清理整簇删除共用):有 Memory 派生成员,**或** canonical id
-  就是 / 按 `cluster_seed_object_id` 铸自一个 Memory 派生对象的 id。零参数。
+  按 `cluster_seed_object_id` 铸自一个 Memory 派生对象的 id。零参数。
 * `cluster_seed_object_id(cluster_alias)` —— canonical id 若按 `kg_merge.seed_or_unique` 的
   `<类型前缀>~<对象 id>` 形式铸成,取出那个对象 id,否则 NULL。零参数。
 
@@ -162,6 +164,23 @@ def memory_derived_relation(relation_alias: str) -> str:
     return _memory_derived(_alias(relation_alias, _DERIVED_INNER))
 
 
+def memory_derived_in_notebook(row_alias: str) -> str:
+    """行 `row_alias`(取其 `source_id` 与 `notebook_id`)的主来源是**本笔记本的** Memory
+    来源。零参数。
+
+    与 `memory_derived_object` 同一判据,多钉一条 `ds.notebook_id = {a}.notebook_id`:行与
+    它的来源同属一个笔记本是写入不变量,所以在合法数据上两者逐行同义;多出来的这条让
+    规划器把外层的 `notebook_id = $1` 传进内层,「Memory 来源集合」只按本笔记本构建,
+    成本随本库、不随全站 Memory 的用量增长(拷贝快照与分享预览的计数,见 sharing_store)。
+    """
+    a = _alias(row_alias, _DERIVED_INNER)
+    return (
+        "EXISTS (SELECT 1 FROM sources ds "
+        f"WHERE ds.id = {a}.source_id AND ds.notebook_id = {a}.notebook_id "
+        f"AND {memory_source_type_predicate('ds.source_type')})"
+    )
+
+
 def no_memory_member_cluster(cluster_alias: str) -> str:
     """概念簇 `cluster_alias`(取其 `notebook_id`/`canonical_id`/`generation`)整簇没有
     Memory 派生成员。零参数。
@@ -209,15 +228,16 @@ def cluster_seed_object_id(cluster_alias: str) -> str:
 def _memory_canonical_arm(c: str) -> str:
     return (
         "EXISTS (SELECT 1 FROM knowledge_objects mk JOIN sources mks ON mks.id = mk.source_id "
-        f"WHERE mk.id IN ({c}.canonical_id, {cluster_seed_object_id(c)}) "
+        f"WHERE mk.id = {cluster_seed_object_id(c)} "
         f"AND {memory_source_type_predicate('mks.source_type')})"
     )
 
 
 def memory_cluster(cluster_alias: str) -> str:
     """概念簇 `cluster_alias`(取其 `notebook_id`/`canonical_id`/`generation`)是**某条
-    Memory 的簇**:同一笔记本同一代里有 Memory 派生成员,**或**它的 canonical id 就是、或
-    是按(见 `cluster_seed_object_id`)一个 Memory 派生对象的 id 铸的。零参数。
+    Memory 的簇**:同一笔记本同一代里有 Memory 派生成员,**或**它的 canonical id 是按
+    (见 `cluster_seed_object_id`)一个 Memory 派生对象的 id 铸的。零参数。canonical id
+    一律带类型前缀(`kg_merge`),从不等于裸对象 id,所以不比较 `canonical_id = 对象 id`。
 
     「一条 Memory 的簇」只有这一个定义:拷贝(E5-1)用它的否定 `no_memory_cluster` 整簇
     不带,删除清理(E5-2)用它整簇删除——簇名与描述整簇复制到每个成员行,可能取自那个

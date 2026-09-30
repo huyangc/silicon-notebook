@@ -150,6 +150,7 @@ def test_every_fragment_consumes_a_fixed_number_of_positional_parameters():
     for alias in ("o", "ko", "x1"):
         assert memory_sql.foreign_memory_object_excluded(alias).count("?") == 1
         assert memory_sql.memory_derived_object(alias).count("?") == 0
+        assert memory_sql.memory_derived_in_notebook(alias).count("?") == 0
     for alias in ("r", "kr", "x1"):
         assert memory_sql.foreign_memory_relation_excluded(alias).count("?") == 1
         assert memory_sql.memory_derived_relation(alias).count("?") == 0
@@ -182,6 +183,7 @@ def _alias_calls():
         "derived": (
             memory_sql.memory_derived_object,
             memory_sql.memory_derived_relation,
+            memory_sql.memory_derived_in_notebook,
         ),
         "cluster": (memory_sql.no_memory_member_cluster,),
         "memory_cluster": (memory_sql.memory_cluster, memory_sql.no_memory_cluster),
@@ -347,6 +349,25 @@ def test_cluster_seed_object_id_matches_how_kg_merge_mints_canonical_ids(world):
             assert got == (object_id if not name else None), canonical
 
 
+def test_memory_derived_in_notebook_agrees_on_same_notebook_rows_and_stops_at_the_notebook(world):
+    """合法数据(行与来源同笔记本)上与 `memory_derived_object` 逐行同义;来源在别的笔记本
+    时不算(那条只用来把外层的笔记本条件传进内层)。"""
+    got = _ids(
+        world,
+        "SELECT o.id FROM knowledge_objects o "
+        f"WHERE {memory_sql.memory_derived_in_notebook('o')}",
+    )
+    assert got == cases.MEMORY_DERIVED_OBJECTS
+    with world.connect() as db:
+        row = db.execute(
+            f"SELECT {memory_sql.memory_derived_in_notebook('x')} AS here, "
+            f"{memory_sql.memory_derived_object('x')} AS anywhere "
+            "FROM (SELECT ? AS source_id, ? AS notebook_id) x",
+            ("src-mem-alice", cases.NOTEBOOK2),
+        ).fetchone()
+    assert (bool(row["here"]), bool(row["anywhere"])) == (False, True)
+
+
 # --------------------------------------------------------------- 嵌进更大的查询
 def test_fragment_embedded_in_a_larger_query_agrees_with_the_standalone_result(world):
     """参数夹在别的参数中间、与别的表 join,结果仍与独立执行一致。"""
@@ -386,6 +407,7 @@ _PUBLIC_FRAGMENTS = (
     "memory_derived_object",
     "memory_derived_relation",
     "no_memory_member_cluster",
+    "memory_derived_in_notebook",
     "memory_cluster",
     "no_memory_cluster",
     "cluster_seed_object_id",

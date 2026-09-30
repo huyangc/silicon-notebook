@@ -93,7 +93,8 @@ CLUSTERS = (
     # query_store 的黄金聚合;每簇一代,因为同一成员在同一代只能属于一个簇)。成员都是普通对象,是不是 Memory 的簇只看 canonical id。
     (NOTEBOOK, "K-~ko-mem-alice", "seeded-by-alice", 2, ("ko-upload",)),
     (NOTEBOOK, "KL-~ko-mem-bob", "seeded-by-bob", 3, ("ko-mixed-plain",)),
-    (NOTEBOOK, "ko-mem-null", "canonical-is-memory", 4, ("ko-gen-plain",)),
+    # 裸对象 id 当 canonical:生产不会出现(canonical 一律带类型前缀),不按 Memory 簇认。
+    (NOTEBOOK, "ko-mem-null", "bare-object-id", 4, ("ko-gen-plain",)),
     (NOTEBOOK, "K-~ko-upload", "seeded-by-upload", 5, ("ko-knowhow",)),
     (NOTEBOOK, "K-~ko-gone", "seeded-by-deleted", 6, ("ko-upload",)),
     (NOTEBOOK, "K-ko-mem-alice", "real-name-seed", 7, ("ko-upload",)),
@@ -200,7 +201,6 @@ MEMORY_CLUSTERS = frozenset(
         f"{NOTEBOOK}/can-gen/1",
         f"{NOTEBOOK}/K-~ko-mem-alice/2",
         f"{NOTEBOOK}/KL-~ko-mem-bob/3",
-        f"{NOTEBOOK}/ko-mem-null/4",
     }
 )
 ALL_CLUSTERS = frozenset(f"{nb}/{cid}/{gen}" for nb, cid, _name, gen, _m in CLUSTERS)
