@@ -59,15 +59,19 @@ def register_citation_tools(
                 # member's is unreadable, and without `memory:read` so is the
                 # token owner's own (viewer `''` reads no Memory at all — the
                 # same capability ask_notebook/search_notebook_context apply).
-                # The capability check runs on EVERY call and the gate is one
-                # statement that answers None for a missing id and a refused
-                # Memory source alike, so both raise the identical KeyError
-                # after the identical reads.
-                try:
-                    repo.require_agent_access(principal, "memory:read", notebook_id)
-                    viewer_id = principal.owner_id
-                except PermissionError:
-                    viewer_id = ""
+                # `memory:read` is read off the principal `_selected_notebook`
+                # just refreshed from the live token row for THIS call (its
+                # `knowledge:read` check re-validated that same token, the
+                # allowlist and notebook read access a moment ago), so it is
+                # the same live answer `require_agent_access(principal,
+                # "memory:read", notebook_id)` would give -- without paying
+                # its three repeated reads on every call of a tool Agents run
+                # in a loop. The gate is one statement that answers None for a
+                # missing id and a refused Memory source alike, so both raise
+                # the identical KeyError after the identical reads.
+                viewer_id = (
+                    principal.owner_id if "memory:read" in principal.scopes else ""
+                )
                 readable_notebook_id = repo.source_notebook_id(
                     source_id, viewer_id=viewer_id
                 )

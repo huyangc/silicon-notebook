@@ -3097,7 +3097,6 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/mcp_tools/_shared.py', scope='<module>._selected_notebook', kind='attribute', target='require_agent_access'),
-            ConsumerSite(path='backend/app/api/mcp_tools/citations.py', scope='<module>.register_citation_tools.get_cited_element.load', kind='attribute', target='require_agent_access'),
             ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>.register_memory_context_tools.ask_notebook.check_memory_scope', kind='attribute', target='require_agent_access'),
             ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>.register_memory_context_tools.get_memory.load', kind='attribute', target='require_agent_access'),
             ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>.register_memory_context_tools.search_agent_memory.load', kind='attribute', target='require_agent_access'),

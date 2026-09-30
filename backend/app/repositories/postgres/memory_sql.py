@@ -41,7 +41,14 @@ def memory_source_type_predicate(column: str = "source_type") -> str:
 
 
 def memory_source_readable(source_alias: str) -> str:
-    """来源 `source_alias` 对查看者可读。恰好一个参数:查看者 id。"""
+    """来源 `source_alias` 对查看者可读。恰好一个参数:查看者 id。
+
+    前提:`memory_items.created_by` 永不为空串——它是 NOT NULL 且外键指向
+    `users(id)`,用户 id 由系统生成,不存在 id 为 `''` 的用户,所有写入 Memory 的
+    路径都按真实用户建行。所以查看者传 `''`(无 actor 的后台路径、没有 `memory:read`
+    的 Agent 令牌)时本片段对任何 Memory 来源都为假;`foreign_memory_*` 两个片段依赖
+    同一前提(查看者 `''` 时所有 Memory 派生行都算「别人的」)。
+    """
     a = _alias(source_alias, _READABLE_INNER)
     return (
         f"({a}.source_type <> '{MEMORY_SOURCE_TYPE}' OR EXISTS ("
