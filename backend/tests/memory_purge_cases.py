@@ -1092,6 +1092,25 @@ def case_single_and_batched_teardown_have_the_same_outcome(world: World) -> None
             assert counts[table] == 0, (projection.memory_id, table, counts)
 
 
+def case_the_memory_purge_refuses_a_document_source(world: World) -> None:
+    """``remove_memory_sources`` is not a general source delete: a batch
+    holding a document source is refused as a whole (the Memory test is
+    ``memory_sql``'s predicate) and nothing is removed."""
+    ingestion = world.repo._runtime.source_ingestion
+    alice = world.projections["alice"]
+    try:
+        ingestion.remove_memory_sources([alice.source_id, world.shared_doc_source])
+    except ValueError:
+        pass
+    else:  # pragma: no cover - the assertion below explains the failure
+        raise AssertionError("a document source went through the Memory purge")
+    assert world.sql.count(
+        "SELECT COUNT(*) AS c FROM sources WHERE id IN (?,?)",
+        (alice.source_id, world.shared_doc_source),
+    ) == 2
+    assert_intact(world, "alice")
+
+
 CASES: dict[str, Callable[..., None]] = {
     "hard_delete": case_hard_delete_removes_every_derived_row,
     "hard_delete_unbackfilled": case_hard_delete_on_an_unbackfilled_notebook,
@@ -1112,6 +1131,7 @@ CASES: dict[str, Callable[..., None]] = {
     "merge_candidates_real_writer": case_merge_candidates_written_by_fusion_are_deleted,
     "whole_memory_clusters_removed": case_whole_clusters_of_the_memory_are_removed,
     "one_teardown_same_outcome": case_single_and_batched_teardown_have_the_same_outcome,
+    "purge_refuses_document_source": case_the_memory_purge_refuses_a_document_source,
     "mixed_statuses": case_mixed_statuses_are_counted_exported_and_deleted_together,
     "export_scope": case_export_needs_read_access_and_is_lazy,
     "contract_200_counts": case_contract_a_finished_exit_reports_what_it_deleted,
