@@ -865,7 +865,15 @@ class CollectionCatalogService:
         admits every live source anyway, so skipping it loses nothing.  The
         default is the SAFE value (bind), so a caller that does not pass the
         verdict over-filters rather than leaks.  The private-Memory exclusion
-        does not depend on any of this; it is unconditional.
+        does not depend on any of this; it is unconditional.  Two ceilings bind
+        whatever the verdict says, the same two arms as the knowledge re-read
+        verdict (``source_scope.ceiling_binds``): a library the scope excludes
+        (deny all), and a library that carries its own per-notebook freeze —
+        the verdict speaks only for the active notebook's ticks and drift, and
+        nothing proves such a freeze still equals that library's sources.
+        Neither occurs on a browser run's all-ticked path (unticked libraries
+        are not participants; per-notebook freezes come with global runs), so
+        its bytes are unchanged.
 
         THE one definition every collection reader shares (``SourceCeiling``'s
         docstring lists them).  Same branch order as
@@ -899,10 +907,14 @@ class CollectionCatalogService:
         scope = current_source_scope()
         if scope is None:
             return None
-        if not ceiling_binds and not scope.subjectless:
-            return None
         if not scope.covers_notebook(notebook_id):
             return SourceCeiling(members=frozenset())
+        if (
+            not ceiling_binds
+            and not scope.subjectless
+            and scope.source_ceiling_for(notebook_id) is None
+        ):
+            return None
         if (
             scope.source_ceiling_for(notebook_id) is not None
             or (
