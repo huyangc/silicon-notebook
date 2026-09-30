@@ -313,23 +313,51 @@ def test_a_page_of_one_gives_the_same_end_state_as_the_default_page(
     world = World(postgres_repository)
     store = postgres_repository._runtime.memory_store
     reads = []
-    original = store.orphan_memory_source_ids
+    original = store.orphan_memory_source_refs
 
     def counting(limit, after_id=""):
         page = original(limit, after_id)
         reads.append((limit, len(page)))
         return page
 
-    store.orphan_memory_source_ids = counting
+    store.orphan_memory_source_refs = counting
     try:
         tally = MemoryOrphanSweep.for_repository(postgres_repository, page_size=1).run_pass()
     finally:
-        del store.orphan_memory_source_ids
+        del store.orphan_memory_source_refs
     assert tally == {"deleted": len(world.orphan_ids), "gone": 0, "failed": 0}
     assert all(limit == 1 for limit, _n in reads)
     assert len(reads) == len(world.orphan_ids) + 1
     _assert_swept(world)
     assert ORPHAN_SWEEP_PAGE_SIZE > 1
+
+
+def test_a_removal_call_holds_the_sources_of_one_notebook(postgres_repository):
+    """Assembly review P3-6: the read carries each orphan's notebook, and the
+    page (which interleaves two notebooks in id order) is removed in calls of
+    one notebook each."""
+    world = World(postgres_repository)
+    repo = postgres_repository
+    store = repo._runtime.memory_store
+    notebook_of = dict(store.orphan_memory_source_refs(1000))
+    assert notebook_of == {
+        sid: (world.copy_id if sid in world.n5_ids else "nb-a") for sid in world.orphan_ids
+    }
+    real = repo._runtime.source_ingestion.remove_memory_sources
+    calls = []
+
+    def counting(source_ids):
+        calls.append(list(source_ids))
+        return real(source_ids)
+
+    tally = MemoryOrphanSweep(
+        store=store, remove_memory_sources=counting, event_log=repo._runtime.event_log
+    ).run_pass()
+    assert tally == {"deleted": len(world.orphan_ids), "gone": 0, "failed": 0}
+    assert [sorted({notebook_of[sid] for sid in call}) for call in calls] == [
+        ["nb-a"], [world.copy_id],
+    ]
+    _assert_swept(world)
 
 
 def test_a_failing_source_is_isolated_and_left_for_the_next_start(
@@ -437,9 +465,9 @@ def test_an_exception_is_a_failure_and_a_non_memory_id_is_refused(postgres_repos
 
     class WithADocument:
         @staticmethod
-        def orphan_memory_source_ids(limit, after_id=""):
-            page = real_store.orphan_memory_source_ids(limit, after_id)
-            return sorted([*page, "src-doc"]) if page and not after_id else page
+        def orphan_memory_source_refs(limit, after_id=""):
+            page = real_store.orphan_memory_source_refs(limit, after_id)
+            return sorted([*page, ("src-doc", "nb-a")]) if page and not after_id else page
 
     second = MemoryOrphanSweep(
         store=WithADocument, remove_memory_sources=real,

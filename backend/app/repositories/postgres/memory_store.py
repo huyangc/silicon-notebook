@@ -2387,10 +2387,17 @@ class MemoryStore:
         return bool(row["found"])
 
     def orphan_memory_source_ids(self, limit: int, after_id: str = "") -> list[str]:
-        """至多 `limit` 个无主 Memory 来源的 id,按 id 升序,只取 `after_id` 之后的(键集分页)。
+        """`orphan_memory_source_refs` 的 id 一列(同一条语句)。"""
+        return [source_id for source_id, _ in self.orphan_memory_source_refs(limit, after_id)]
+
+    def orphan_memory_source_refs(
+        self, limit: int, after_id: str = ""
+    ) -> list[tuple[str, str]]:
+        """至多 `limit` 个无主 Memory 来源的 `(id, notebook_id)`,按 id 升序,只取 `after_id`
+        之后的(键集分页)。清扫按 `notebook_id` 把一页切成同库的批,一次移除只涉及一个笔记本。
 
         全库读(清扫在启动后一次跑完,不属于任何笔记本)。反连接放进 MATERIALIZED CTE、
-        再对结果(只有孤儿 id,数量以 Memory 来源数为界)排序取前 `limit` 个:CTE 阻止
+        再对结果(只有孤儿行,数量以 Memory 来源数为界)排序取前 `limit` 个:CTE 阻止
         规划器为了 `ORDER BY s.id LIMIT` 去沿主键整表走一遍。`sources` 上没有单独的
         `source_type` 索引,所以反连接对 `sources` 是整表一趟;清扫每页至多再来一趟,页数
         由 `limit` 决定但不改变结果。实测数字与计划见 `test_memory_orphan_sweep_explain_pins`
@@ -2398,12 +2405,12 @@ class MemoryStore:
         """
         with self.database.connect() as db:
             rows = db.execute(
-                "WITH o AS MATERIALIZED (SELECT s.id FROM sources s "
+                "WITH o AS MATERIALIZED (SELECT s.id, s.notebook_id FROM sources s "
                 f"WHERE {_ORPHAN_MEMORY_SOURCE_WHERE} AND s.id > %s) "
-                "SELECT id FROM o ORDER BY id LIMIT %s",
+                "SELECT id, notebook_id FROM o ORDER BY id LIMIT %s",
                 (after_id, max(1, int(limit))),
             ).fetchall()
-        return [str(row["id"]) for row in rows]
+        return [(str(row["id"]), str(row["notebook_id"])) for row in rows]
 
     @staticmethod
     def orphan_memory_source_count_on(db: object, notebook_id: str) -> int:

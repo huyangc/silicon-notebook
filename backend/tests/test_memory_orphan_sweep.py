@@ -437,14 +437,14 @@ def test_a_page_of_one_gives_the_same_end_state_as_the_default_page(
         world = World(repo)
         reads = []
         store = repo._runtime.memory_store
-        original = store.orphan_memory_source_ids
+        original = store.orphan_memory_source_refs
 
         def counting(limit, after_id=""):
             page = original(limit, after_id)
             reads.append((limit, len(page)))
             return page
 
-        monkeypatch.setattr(store, "orphan_memory_source_ids", counting)
+        monkeypatch.setattr(store, "orphan_memory_source_refs", counting)
         kwargs = {} if page_size is None else {"page_size": page_size}
         tally = MemoryOrphanSweep.for_repository(repo, **kwargs).run_pass()
         _assert_swept(world)
@@ -545,7 +545,7 @@ def test_a_first_page_read_that_fails_is_reported_and_starts_nothing(world, even
             return True
 
         @staticmethod
-        def orphan_memory_source_ids(limit, after_id=""):
+        def orphan_memory_source_refs(limit, after_id=""):
             raise TimeoutError("canceling statement due to statement timeout: secret")
 
     tally = _sweep(repo, _remover(repo), store=Store).run_pass()
@@ -568,11 +568,11 @@ def test_a_failed_read_is_reported_content_free_and_ends_the_pass(world, events)
             return real.has_orphan_memory_sources()
 
         @staticmethod
-        def orphan_memory_source_ids(limit, after_id=""):
+        def orphan_memory_source_refs(limit, after_id=""):
             reads.append(after_id)
             if len(reads) == 2:  # the second page: statement timeout
                 raise TimeoutError("canceling statement due to statement timeout: secret")
-            return real.orphan_memory_source_ids(limit, after_id)
+            return real.orphan_memory_source_refs(limit, after_id)
 
     tally = _sweep(repo, _remover(repo), store=Store, page_size=2).run_pass()
 
@@ -625,8 +625,8 @@ def test_a_source_removed_by_another_writer_counts_as_gone(world):
         the sweep gets there."""
 
         @staticmethod
-        def orphan_memory_source_ids(limit, after_id=""):
-            page = real.orphan_memory_source_ids(limit, after_id)
+        def orphan_memory_source_refs(limit, after_id=""):
+            page = real.orphan_memory_source_refs(limit, after_id)
             if not served:
                 served.append(True)
                 repo.delete_source(first)
@@ -823,9 +823,9 @@ def test_a_non_memory_source_in_a_page_is_a_recorded_failure_never_swallowed(wor
 
     class WithADocument:
         @staticmethod
-        def orphan_memory_source_ids(limit, after_id=""):
-            page = real.orphan_memory_source_ids(limit, after_id)
-            return sorted([*page, "src-doc"]) if page and not after_id else page
+        def orphan_memory_source_refs(limit, after_id=""):
+            page = real.orphan_memory_source_refs(limit, after_id)
+            return sorted([*page, ("src-doc", "nb-a")]) if page and not after_id else page
 
     tally = _sweep(repo, repo._runtime.source_ingestion.remove_memory_sources,
                    store=WithADocument).run_pass()
@@ -897,6 +897,91 @@ def test_a_page_is_removed_in_calls_of_at_most_the_purge_page(world):
     assert len(counting.calls) == -(-len(world.orphan_ids) // 2)
 
 
+def _orphan_notebooks(world):
+    return {
+        sid: (world.copy_id if sid in world.n5_ids else "nb-a") for sid in world.orphan_ids
+    }
+
+
+def test_a_removal_call_holds_the_sources_of_one_notebook(world):
+    """Assembly review P3-6: the read page interleaves two notebooks' orphans
+    (id order puts ``src-null`` after the copy's ``src-n5-*``); every removal
+    call holds ONE notebook's sources, so one transaction locks and marks
+    dirty one notebook, not every notebook of the page."""
+    repo = world.repo
+    notebook_of = _orphan_notebooks(world)
+    page_notebooks = [notebook_of[sid] for sid in world.orphan_ids]
+    assert page_notebooks != sorted(page_notebooks)  # the page really interleaves them
+    counting = _remover(repo)
+
+    tally = _sweep(repo, counting).run_pass()
+
+    assert tally == {"deleted": len(world.orphan_ids), "gone": 0, "failed": 0}
+    assert [sorted({notebook_of[sid] for sid in call}) for call in counting.calls] == [
+        ["nb-a"], [world.copy_id],
+    ]
+    _assert_swept(world)
+
+
+def test_a_row_gone_during_the_one_by_one_retry_counts_as_gone(world):
+    """Assembly review P3-3 (S1): a batch fails on a poison row; while it
+    failed, another writer removed a second row of that batch. Retried alone,
+    that row is found no more: ``gone``, not ``deleted``."""
+    repo = world.repo
+    poison, vanished = "src-dep", "src-hard"
+    real = repo._runtime.source_ingestion.remove_memory_sources
+
+    def remove(source_ids):
+        ids = list(source_ids)
+        if poison in ids and len(ids) > 1:
+            repo.delete_source(vanished)  # another writer, while the batch fails
+            raise RuntimeError("the batch fails")
+        if ids == [poison]:
+            raise RuntimeError("poison")
+        return real(ids)
+
+    tally = _sweep(repo, remove).run_pass()
+
+    assert tally == {"deleted": len(world.orphan_ids) - 2, "gone": 1, "failed": 1}
+    assert vanished not in _source_ids(repo)
+    assert poison in _source_ids(repo)
+
+
+def test_a_successful_batch_resets_the_consecutive_failures(world, monkeypatch):
+    """Assembly review P3-3 (S2), batches of two: batch 1 ends with two
+    failures in a row, batch 2 succeeds whole, batch 3's first id fails. Only
+    one failure is consecutive at that point, so batch 3's second id is still
+    removed; without the reset the pass would stop at three."""
+    monkeypatch.setattr(sweep_module, "REMOVE_BATCH", 2)
+    repo = world.repo
+    failing = {"src-dangling", "src-dep", "src-n5-a"}
+    flaky = _remover(repo, lambda sid: RuntimeError("bad") if sid in failing else None)
+
+    tally = _sweep(repo, flaky).run_pass()
+
+    assert [len(call) for call in flaky.calls] == [2, 1, 1, 2, 2, 1, 1]
+    assert tally == {"deleted": 3, "gone": 0, "failed": 3}
+    assert "src-n5-b" not in _source_ids(repo)
+
+
+def test_the_failure_cap_ends_the_pass_between_batches(world, monkeypatch):
+    """Assembly review P3-3 (S3), batches of two, everything failing: the cap
+    is reached inside batch 2's one-by-one retry, and the pass ends there --
+    batch 3 is never tried, neither as a whole nor one by one."""
+    monkeypatch.setattr(sweep_module, "REMOVE_BATCH", 2)
+    repo = world.repo
+    broken = _remover(repo, lambda sid: ConnectionError("database away"))
+
+    tally = _sweep(repo, broken).run_pass()
+
+    assert tally == {"deleted": 0, "gone": 0, "failed": MAX_CONSECUTIVE_FAILURES}
+    assert broken.calls == [
+        ["src-dangling", "src-dep"], ["src-dangling"], ["src-dep"],
+        ["src-hard", "src-null"], ["src-hard"],
+    ]
+    assert set(world.orphan_ids) <= set(_source_ids(repo))
+
+
 def test_orphan_predicate_uses_the_shared_memory_source_type_fragment():
     from app.repositories.sqlite import memory_store
 
@@ -922,7 +1007,8 @@ def test_sqlite_plans_of_the_two_statements(world):
             )
 
         ids = plan(
-            "SELECT s.id FROM sources s WHERE " + where + " AND s.id > ? ORDER BY s.id LIMIT ?",
+            "SELECT s.id, s.notebook_id FROM sources s WHERE " + where
+            + " AND s.id > ? ORDER BY s.id LIMIT ?",
             ("", 50),
         )
         count = plan(

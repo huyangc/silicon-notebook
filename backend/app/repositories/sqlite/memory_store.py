@@ -2166,16 +2166,22 @@ class MemoryStore:
         return bool(row["found"])
 
     def orphan_memory_source_ids(self, limit: int, after_id: str = "") -> list[str]:
-        """至多 `limit` 个无主 Memory 来源的 id,按 id 升序,只取 `after_id` 之后的(键集分页)。
-        PostgreSQL 版的镜像;计划形态见 `test_memory_orphan_sweep`。"""
+        """`orphan_memory_source_refs` 的 id 一列(同一条语句)。"""
+        return [source_id for source_id, _ in self.orphan_memory_source_refs(limit, after_id)]
+
+    def orphan_memory_source_refs(
+        self, limit: int, after_id: str = ""
+    ) -> list[tuple[str, str]]:
+        """至多 `limit` 个无主 Memory 来源的 `(id, notebook_id)`,按 id 升序,只取 `after_id`
+        之后的(键集分页)。PostgreSQL 版的镜像;计划形态见 `test_memory_orphan_sweep`。"""
         with self.database.connect() as db:
             rows = db.execute(
-                "SELECT s.id FROM sources s "
+                "SELECT s.id, s.notebook_id FROM sources s "
                 f"WHERE {_ORPHAN_MEMORY_SOURCE_WHERE} AND s.id > ? "
                 "ORDER BY s.id LIMIT ?",
                 (after_id, max(1, int(limit))),
             ).fetchall()
-        return [str(row["id"]) for row in rows]
+        return [(str(row["id"]), str(row["notebook_id"])) for row in rows]
 
     @staticmethod
     def orphan_memory_source_count_on(db: sqlite3.Connection, notebook_id: str) -> int:
