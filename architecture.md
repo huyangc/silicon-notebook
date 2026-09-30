@@ -465,7 +465,15 @@ SQLite/PostgreSQL bundle 中分别绑定参数占位符，持有用户所有的�
 （引用/提示词侧经 `subjectless_run_active()` 读，过滤点经 `peer_scope_ceiling_active()` 读，天花板必须
 是参与集上的**全映射**）、detached 对话轮次（因此不写任何笔记本的 answers 表）、联邦运行计划（共享
 执行器、公平窗口、阶段预算、取消令牌以及回执与证据指纹的唯一返回接缝）。装一半不是降级而是错误：
-检索层与 ask 层读的是两个不同谓词，分开安装会让它们互相矛盾。
+检索层与 ask 层读的是两个不同谓词，分开安装会让它们互相矛盾。逐库天花板是**完整**的
+（`ceilings_total`）：计划没选中的库、运行中途新挂载的库在每道闸上都不参与。
+单库问答的范围安装点同样只有一个：`AskService.ask`（HTTP 同步/流式/后台作业、MCP `ask_notebook`、
+扩展回答引擎）与意图预检 `preview_reasoning_intent` 都经 `AskService._retrieval_ceiling` 调
+`source_scope.default_ceiling_context`（读取器由 `RepositoryRuntime.ceiling_readers()` 唯一接线）：
+路由冻结过的维度原样使用，没提交的维度冻结为提问人的默认上限（可见来源 ∪ 本人隐藏来源，挂载库只取
+可见来源、置 `ceilings_total`），外层已有 scope（全局运行）则透传；报告 worker 走
+`ReportExecutionCoordinator._default_ceiling`、自动确认刷新走 `refreshed_ceiling_context`。
+`backend/tests/test_default_ceiling_guard.py` 以相等断言钉住这组安装点。
 这次 run **没有主体库位**：交给引擎的 `notebook_id` 是 `resolved_notebook_ids[0]`，只作命名锚点，
 按同一条 `_peer_leg` 判据与其余参与库同等对待（打标归属、下推逐库天花板、大库只 peek、关补召回）。
 跨库检索走 `chunk_federation` 的联邦通道：参与库 × 子查询的任务表提交到 `GlobalAskService` 持有的

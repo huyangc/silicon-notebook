@@ -55,7 +55,16 @@
   定义点，新读者一律 import（`source_store.hidden_source_ids` 与来源读取闸
   `sharing_store.source_notebook_id(viewer_id=...)` 已经如此）；早于它的读者
   （`postgres/chunk_store.py` 里的 Memory 属主判断）仍自带手写谓词，在改动它们的变更里
-  迁入。新的 notebook 写
+  迁入。
+- 检索范围每类入口只有一个安装点：所有问答入口经 `AskService._retrieval_ceiling`
+  （`source_scope.default_ceiling_context`，读取器来自 `RepositoryRuntime.ceiling_readers()`），
+  报告各阶段经 `ReportExecutionCoordinator._default_ceiling` / `ReportEngine._refreshed_ceiling`，
+  全局问答经 `global_run.global_ask_run`；`backend/tests/test_default_ceiling_guard.py` 以相等断言
+  钉住，路由、MCP 工具或回答引擎自己进入 `source_scope_context` 即红。两个构造器与全局运行都置
+  `ceilings_total`：没有逐库条目的库不参与任何通道。读取 scope 自身笔记本的新 producer 必须从
+  `scoped_allowed_source_ids` 取来源清单（本次运行的 `ceiling_binds` 判定证明排除不了任何东西时它返回
+  `None`），并用 `verify_unbound_read` 核验不带清单的读取。
+- 新的 notebook 写
   端点走 `require_notebook_capability(...)`；在 body 中才解析身份的路径也使用同一
   capability 表及独立 mirror-write fence。先授权再返回镜像写错误，保留已登记的
   报告创建者私有权限例外。不得根据空/null principal id 猜 grant 种类或绕过实时读权；

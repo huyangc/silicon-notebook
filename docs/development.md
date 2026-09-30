@@ -68,7 +68,19 @@ contributor constraints, not a second implementation history.
   it (`source_store.hidden_source_ids` and the source-read gate
   `sharing_store.source_notebook_id(viewer_id=...)` already do). Readers that predate it
   (the Memory-owner predicates in `postgres/chunk_store.py`) still carry their own
-  predicate and move onto it in the change that touches them. New notebook
+  predicate and move onto it in the change that touches them.
+- Retrieval scopes have one installation per entry kind: every Ask entry goes through
+  `AskService._retrieval_ceiling` (`source_scope.default_ceiling_context` over
+  `RepositoryRuntime.ceiling_readers()`), report phases through
+  `ReportExecutionCoordinator._default_ceiling` / `ReportEngine._refreshed_ceiling`, and
+  global runs through `global_run.global_ask_run`; `backend/tests/test_default_ceiling_guard.py`
+  pins that with equality assertions, so a route, MCP tool or engine that enters
+  `source_scope_context` itself fails it. Both constructors and the global run set
+  `ceilings_total`: a library without a per-library entry participates in nothing. A new
+  producer that reads a scope's own notebook must take its source list from
+  `scoped_allowed_source_ids` (which returns `None` when the run's `ceiling_binds` verdict
+  proves nothing can be excluded) and verify an unbound read with `verify_unbound_read`.
+- New notebook
   write endpoints use `require_notebook_capability(...)`; body-resolved identities use
   the same capability table, including its independent mirror-write fence. Preserve
   authorization-before-mirror-error ordering and the registered creator-owned report
