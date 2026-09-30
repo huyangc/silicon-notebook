@@ -115,7 +115,7 @@ import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.repositories.ports import (
     KnowledgeStorePort,
@@ -134,7 +134,9 @@ from app.services.retrieval_participants import (
 )
 from app.services.retrieval_run import memoized_retrieval_value
 from app.services.source_scope import (
+    collection_ceiling_drifted,
     current_source_scope,
+    record_collection_ceiling_drift,
     scoped_participants,
     source_scope_restricted,
     subjectless_run_active,
@@ -206,8 +208,11 @@ class SourceCeiling:
     ``members`` is the scope's OWN frozenset whenever the scope holds one (a
     per-library freeze, or ticks with no hidden half) — accepted as-is, never
     copied.  The two derived shapes are lazy and computed at most once per
-    object: ``source_ids`` (sorted, for the store's single ceiling parameter)
-    and ``digest`` (for the L3 memo key and cursor identity).  Membership
+    object: ``source_ids`` (sorted) and ``digest`` (for the L3 memo key and
+    cursor identity).  The store is handed ``members`` itself, never
+    ``source_ids``: its bound form (``repositories/*/source_ceiling
+    .ceiling_param``) is cached by that frozenset's identity, so one binding
+    serves every page and count of the run.  Membership
     alone never sorts anything.  ``eq=False``: identity, not a comparison of
     two 49k-element sets.
     """
@@ -250,6 +255,23 @@ def _scope_ceiling(scope, notebook_id: str) -> SourceCeiling:
     if not scope.hidden_source_ids:
         return SourceCeiling(members=scope.source_ids)
     return SourceCeiling(members=scope.source_ids | scope.hidden_source_ids)
+
+
+def _local_freeze(scope: Any, notebook_id: str) -> bool:
+    """The active library carries the browser's frozen include list."""
+    return bool(
+        scope.ceiling_active
+        and notebook_id == scope.notebook_id
+        and scope.mode == "include"
+    )
+
+
+def _frozen_ceiling(scope: Any, notebook_id: str) -> SourceCeiling:
+    """The frozen ceiling of ``notebook_id``, built once per run."""
+    return memoized_retrieval_value(
+        ("collection_source_ceiling", scope, notebook_id),
+        lambda: _scope_ceiling(scope, notebook_id),
+    )
 
 
 def knowhow_enumeration_reachable(scope_unsafe: Optional[bool] = None) -> bool:
@@ -576,10 +598,15 @@ class CollectionCatalogService:
             kg_objects = self._scope_kg_counts(
                 db, notebook_ids, ceiling_binds=ceiling_binds,
             )
+            scope = current_source_scope()
             knowhow_tables = self._reachable_knowhow_tables(
                 db, notebook_ids, active_notebook_id,
-                knowhow_enumeration_reachable() if knowhow_reachable is None
-                else knowhow_reachable,
+                (knowhow_enumeration_reachable() if knowhow_reachable is None
+                 else knowhow_reachable)
+                # Drift found by THIS build's signal read (see
+                # ``_fast_path_holds``): the sources changed after the freeze.
+                and not (scope is not None and collection_ceiling_drifted(
+                    scope, active_notebook_id)),
             )
         return CollectionMap(
             notebook_ids=notebook_ids,
@@ -913,20 +940,14 @@ class CollectionCatalogService:
             not ceiling_binds
             and not scope.subjectless
             and scope.source_ceiling_for(notebook_id) is None
+            and self._fast_path_holds(scope, notebook_id, signals)
         ):
             return None
         if (
             scope.source_ceiling_for(notebook_id) is not None
-            or (
-                scope.ceiling_active
-                and notebook_id == scope.notebook_id
-                and scope.mode == "include"
-            )
+            or _local_freeze(scope, notebook_id)
         ):
-            return memoized_retrieval_value(
-                ("collection_source_ceiling", scope, notebook_id),
-                lambda: _scope_ceiling(scope, notebook_id),
-            )
+            return _frozen_ceiling(scope, notebook_id)
         if not (scope.ceiling_active and notebook_id == scope.notebook_id):
             return None
         if signals is None:
@@ -934,6 +955,76 @@ class CollectionCatalogService:
         return _make_ceiling(
             row[0] for row in signals if scope.allows(notebook_id, row[0])
         )
+
+    def _fast_path_holds(
+        self,
+        scope: Any,
+        notebook_id: str,
+        signals: Optional[Sequence[Tuple[str, ...]]],
+    ) -> bool:
+        """Verify-on-read for the un-bound fast path (codex #817 r1, the rule
+        #806 adopted for ``node_context``): the run's verdict "not narrowed, not
+        drifted" is memoised, so a source uploaded after it was taken would
+        otherwise be counted, listed and cited by every later collection read.
+
+        A read that has the library's signal rows in hand checks them against
+        the frozen ceiling (frozenset membership, nothing normalised).  One row
+        outside it means the source set drifted after the verdict: the drift is
+        recorded on the run (``record_collection_ceiling_drift``) and THIS read
+        and every later one of the library binds the ceiling.  A read without
+        rows in hand (a KG count, a cursor digest) trusts the fast path only
+        until some read has recorded drift; the executor's KG entry confirms it
+        first (``confirm_fast_path``) and re-checks every row it returns
+        (``fast_path_members``).  Libraries without a local include freeze have
+        nothing to verify against and keep the historical behaviour.
+        """
+        if collection_ceiling_drifted(scope, notebook_id):
+            return False
+        if signals is None or not _local_freeze(scope, notebook_id):
+            return True
+        members = _frozen_ceiling(scope, notebook_id).members
+        if all(row[0] in members for row in signals):
+            return True
+        record_collection_ceiling_drift(scope, notebook_id)
+        return False
+
+    def confirm_fast_path(
+        self, db: object, notebook_ids: Sequence[str], *, ceiling_binds: bool,
+    ) -> None:
+        """Before a read that holds no signal rows (the KG walk and its count),
+        verify the un-bound fast path once: one signal read of the library
+        carrying the local freeze, judged by ``_fast_path_holds``.  A no-op
+        when the ceiling binds anyway, when drift is already recorded, and when
+        no participant carries a local include freeze."""
+        scope = current_source_scope()
+        if ceiling_binds or scope is None or scope.subjectless:
+            return
+        for notebook_id in notebook_ids:
+            if (
+                _local_freeze(scope, notebook_id)
+                and not collection_ceiling_drifted(scope, notebook_id)
+            ):
+                self._fast_path_holds(
+                    scope, notebook_id,
+                    list(self._sources.source_change_signal_rows(db, notebook_id)),
+                )
+
+    def fast_path_members(
+        self, notebook_id: str, *, ceiling_binds: bool,
+    ) -> Optional[frozenset]:
+        """The frozen ceiling a fast-path read must still honour row by row:
+        the library's local include freeze when its reads are NOT binding it
+        (``source_ceiling`` returned ``None`` for it), else ``None`` — a bound
+        read is filtered in SQL, and a library without a freeze has nothing to
+        verify against."""
+        scope = current_source_scope()
+        if (
+            ceiling_binds or scope is None or scope.subjectless
+            or not _local_freeze(scope, notebook_id)
+            or collection_ceiling_drifted(scope, notebook_id)
+        ):
+            return None
+        return _frozen_ceiling(scope, notebook_id).members
 
     def scope_ceiling_digest(
         self,
@@ -1329,13 +1420,16 @@ class CollectionCatalogService:
         (four index-assisted counts on a miss, memoized on the seq and the
         ceiling digest).  A deny-all ceiling costs no query at all.
         """
-        if not ceiling.source_ids:
+        if not ceiling.members:
             return {object_type: 0 for object_type in ENUMERABLE_KG_OBJECT_TYPES}
         memory_ids = tuple(self._sources.memory_source_ids(db, notebook_id))
+        # ``members`` — the run's ONE frozenset — not the sorted tuple: the
+        # store's bound form is cached by that object's identity, so every
+        # count and page of the run shares one binding (codex #817 r1).
         return {
             object_type: int(self._knowledge.count_knowledge(
                 db, notebook_id, object_type, USABLE_STATUSES,
-                supported_by_source_ids=ceiling.source_ids,
+                supported_by_source_ids=ceiling.members,
                 excluding_owner_source_ids=memory_ids,
             ))
             for object_type in ENUMERABLE_KG_OBJECT_TYPES

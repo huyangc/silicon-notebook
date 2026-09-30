@@ -1387,12 +1387,25 @@ def ceiling_binds_for_run(retrieval) -> bool:
     不需要靠天花板挡。其余分支对得上:全部拒绝与逐库冻结在
     ``CollectionCatalogService.source_ceiling`` 里不看本判词恒生效,无主体 run 恒生效,
     收窄或漂移就是本判词本身。分支不完全相同,所以是两个函数而不是一个。
-    """
-    from app.services.source_scope import current_source_scope
 
-    return memoized_retrieval_value(
-        ("source_ceiling_binds", current_source_scope()),
+    **读后核验**(codex #817 r1,与 #806 的 ``node_context`` 同一条规则):判词为假的
+    run 里,集合读取走不绑天花板的快路径,每次读取都拿手里的来源行(signal 行、
+    KG 行的属主)对冻结天花板判成员关系;判词算出之后新增的来源一旦被看见,就记在
+    run 上(``source_scope.record_collection_ceiling_drift``),这次读取与之后的每次
+    读取都改为绑定天花板,本函数也从此返回真(清单如实带上「仅勾选的来源」)。
+    """
+    from app.services.source_scope import (
+        collection_ceiling_drifted,
+        current_source_scope,
+    )
+
+    scope = current_source_scope()
+    verdict = memoized_retrieval_value(
+        ("source_ceiling_binds", scope),
         lambda: unsafe_scope_restricted(retrieval),
+    )
+    return verdict or (
+        scope is not None and collection_ceiling_drifted(scope, scope.notebook_id)
     )
 
 
@@ -3888,6 +3901,20 @@ class ReasoningRetriever:
         """本 run 的集合读取判词(见 ``ceiling_binds_for_run``)。方法形态只为给替身
         一个可替换的座位;生产读的就是那一份按 run 记住的值。"""
         return ceiling_binds_for_run(self.retrieval)
+
+    @staticmethod
+    def _read_drifted() -> bool:
+        """刚结束的这次集合读取有没有在快路径上看见冻结之后新增的来源(读后核验,
+        ``source_scope.record_collection_ceiling_drift``)。看见了,那次读取已经改为
+        绑定天花板,清单要如实带上「仅勾选的来源」。"""
+        from app.services.source_scope import (
+            collection_ceiling_drifted,
+            current_source_scope,
+        )
+
+        scope = current_source_scope()
+        return scope is not None and collection_ceiling_drifted(
+            scope, scope.notebook_id)
 
     # --- KG 工具箱(薄封装 repo 原语) ---
     def _filter_candidates(self, kind: str, items):
@@ -7407,7 +7434,7 @@ class ReasoningRetriever:
                     # 换成最新那份(它的 returned_total 是整条链的累计)。
                     chain_state.outcome.items.extend(listed.items)
                     chain_state.outcome.coverage = coverage
-                chain_state.outcome.source_scoped |= source_scoped
+                chain_state.outcome.source_scoped |= source_scoped or self._read_drifted()
                 chain_state.cursor = listed.cursor
                 # T3 合同:complete=False ⟹ 游标非空,唯一例外是
                 # concurrent_change。所以「没列全又没给游标」= 冲突。

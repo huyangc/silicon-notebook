@@ -308,6 +308,15 @@ class ActiveSourceScope:
         Same mechanics and thread-safety argument as ``_library_ceiling_memo``."""
         return {}
 
+    @cached_property
+    def _collection_drift_memo(self) -> set[str]:
+        """Libraries whose collection reads found a source outside the frozen
+        ceiling on this run (``record_collection_ceiling_drift``).  Only ever
+        grows; ``set.add`` of a str is atomic, so the ``_library_ceiling_memo``
+        argument holds (a racing reader sees the drift now or on its next
+        read, never a torn value)."""
+        return set()
+
     @property
     def peer_ceiling_active(self) -> bool:
         """Whether ANY per-notebook ceiling binds on this run.
@@ -1178,6 +1187,23 @@ def record_ceiling_drift(scope: ActiveSourceScope, notebook_id: str) -> None:
     same True or a stale False that the next failed check re-corrects -- each
     row is verified either way)."""
     scope._ceiling_binds_memo[notebook_id or scope.notebook_id] = True
+
+
+def record_collection_ceiling_drift(scope: ActiveSourceScope, notebook_id: str) -> None:
+    """The collection-read twin of ``record_ceiling_drift``: a collection read
+    on the un-bound fast path (``reasoning_retrieval.ceiling_binds_for_run``
+    False) saw a source outside ``notebook_id``'s frozen ceiling.  From here on
+    every collection read of that library on this run binds the ceiling
+    (``collection_ceiling_drifted``), and the run's verdict reads True, so the
+    listing is disclosed as source-scoped.  Separate from ``_ceiling_binds_memo``
+    on purpose: that verdict has a ``foreign_hidden`` arm the enumeration
+    verdict must not inherit."""
+    scope._collection_drift_memo.add(notebook_id or scope.notebook_id)
+
+
+def collection_ceiling_drifted(scope: ActiveSourceScope, notebook_id: str) -> bool:
+    """Whether ``record_collection_ceiling_drift`` fired for ``notebook_id``."""
+    return (notebook_id or scope.notebook_id) in scope._collection_drift_memo
 
 
 def _evidence_source_id(value: Any) -> str:
