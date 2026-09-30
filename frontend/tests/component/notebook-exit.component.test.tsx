@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { filenameFromDisposition } from "../../app/notebook-exit-api.ts";
 import { NotebookExitPanel } from "../../app/notebook-exit-panel.tsx";
+import { useDialogFocus } from "../../app/use-dialog-focus.ts";
 import {
   NotebookMenuActions,
   ReaderNotebookBadge,
@@ -694,6 +695,48 @@ test("网络中断后列表里这本库只剩群组授权:算已退出(靠授权
   await user.click(within(await panel()).getByRole("button", { name: "确认退出并删除" }));
 
   await waitFor(() => expect(onToast).toHaveBeenCalledWith("已退出共享"));
+});
+
+test("网络中断后,经个人或「所有人」授权仍可读的库不在列表里:算已退出,不说「仍是成员」", async () => {
+  // 列表只列自有库、成员行与群组授权;个人授权与「所有人」授权从不进列表。
+  const user = userEvent.setup();
+  installServer([
+    disclosure(3),
+    leave(() => Promise.reject(new TypeError("Failed to fetch"))),
+    notebooksList(false),
+  ]);
+  const { onToast } = mount("bar");
+
+  await pressLeave(user);
+  await user.click(within(await panel()).getByRole("button", { name: "确认退出并删除" }));
+
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("已退出共享"));
+  expect(onToast).not.toHaveBeenCalledWith(expect.stringContaining("仍是成员"));
+});
+
+test("面板开着时焦点掉到 body(按下的按钮被禁用或卸载)就收回到落点", () => {
+  function Layer({ disabled }: { disabled: boolean }) {
+    const containerRef = useRef<HTMLDivElement | null>(null);
+    const cancelRef = useRef<HTMLButtonElement | null>(null);
+    useDialogFocus({ containerRef, active: true, initialFocusRef: cancelRef });
+    return (
+      <div ref={containerRef} role="dialog">
+        <button type="button" disabled={disabled}>导出为文件</button>
+        <button ref={cancelRef} type="button">取消</button>
+      </div>
+    );
+  }
+  const { rerender } = render(<Layer disabled={false} />);
+  const cancel = screen.getByRole("button", { name: "取消" });
+  const exportButton = screen.getByRole("button", { name: "导出为文件" });
+  expect(cancel).toHaveFocus();
+  exportButton.focus();
+  expect(exportButton).toHaveFocus();
+  // 浏览器里被禁用的按钮把焦点丢到 body;jsdom 不会,这里显式丢一次再渲染。
+  exportButton.blur();
+  expect(document.activeElement).toBe(document.body);
+  rerender(<Layer disabled />);
+  expect(cancel).toHaveFocus();
 });
 
 test("代理超时(500)同样是「不知道」;重读到仍是成员且条数没变:说都还在、没有被删除", async () => {
