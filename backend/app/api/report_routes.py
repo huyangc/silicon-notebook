@@ -24,7 +24,13 @@ from app.models.reports import (
     ReportShareResponse,
     ReportSummary,
 )
-from app.services.public_share_recheck import mounts_still_effective
+from app.services.public_share_recheck import (
+    mounts_still_effective,
+    report_library_ids,
+    report_references_needing_owner,
+    report_source_ids,
+    report_unresolved_object_ids,
+)
 from app.services.report_public_view import (
     public_report_payload,
     report_memory_lookup_source_ids,
@@ -819,17 +825,30 @@ def public_report_route(token: str, response: Response) -> PublicReport:
 
 
 def _report_mounts_still_effective(repo, row: dict, references: list) -> bool:
-    source_ids = list(dict.fromkeys(
-        str(reference.get("source_id") or "") for reference in references
-        if isinstance(reference, dict) and reference.get("source_id")
-    ))
-    owners = (
+    """D-3 for a report (``public_share_recheck``): ownership is read only for
+    citations marked as coming from a mounted library (or older than the
+    mark) -- sources first, then the knowledge objects whose source did not
+    resolve, one batch each -- and a marked citation whose library cannot be
+    named any more fails closed."""
+    wanted = report_references_needing_owner(references)
+    if not wanted:
+        return True
+    source_ids = report_source_ids(wanted)
+    sources = (
         repo._runtime.source_store.visible_source_owners(source_ids)  # type: ignore[attr-defined]
         if source_ids else {}
     )
+    object_ids = report_unresolved_object_ids(wanted, sources)
+    objects = (
+        repo._runtime.knowledge.object_owners(object_ids)  # type: ignore[attr-defined]
+        if object_ids else {}
+    )
+    libraries = report_library_ids(wanted, sources, objects)
+    if libraries is None:
+        return False
     return mounts_still_effective(
         str(row.get("notebook_id") or ""),
         str(row.get("created_by") or ""),
-        owners.values(),
+        libraries,
         repo.participant_notebook_ids,
     )

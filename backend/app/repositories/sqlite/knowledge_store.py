@@ -1714,6 +1714,26 @@ class KnowledgeStore:
             f"{bound_clause}", params,
         ).fetchall()
 
+    def object_owners(self, object_ids: Sequence[str]) -> dict[str, str]:
+        """``{object_id: notebook_id}`` for those of ``object_ids`` that exist,
+        whatever their status; an unknown id is absent.
+
+        The PostgreSQL twin's contract (the public report page's ownership
+        read, D-3): ONE statement, the id list as ONE JSON parameter
+        (``json_each``) so the variable limit never applies, each id a
+        primary-key probe. Ownership only -- no content leaves this read.
+        """
+        ids = list(dict.fromkeys(str(value) for value in object_ids if value))
+        if not ids:
+            return {}
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT o.id,o.notebook_id FROM knowledge_objects o WHERE o.id IN ("
+                "SELECT value FROM json_each(?))",
+                (json.dumps(ids),),
+            ).fetchall()
+        return {row["id"]: row["notebook_id"] for row in rows}
+
     def usable_object_rows(self, notebook_id: str, object_ids: Sequence[str]):
         with self.database.connect() as db:
             rows = self.usable_object_rows_on(
