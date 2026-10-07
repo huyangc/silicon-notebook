@@ -7,6 +7,7 @@ import math
 import time
 from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
+from app.domain.citation_origin import owned_by_another_library
 from app.models.common import Evidence
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.retrieval import RetrievedKnowledge
@@ -1337,6 +1338,11 @@ class GraphRetrievalService(_RetrievalState):
                             "evidence": evidence,
                             "source_title": row["source_title"] or "",
                         }
+                self._snapshot_foreign_relation_evidence(
+                    db, owner_notebook_id,
+                    [hydrated_relation_cache[i] for i in missing
+                     if i in hydrated_relation_cache],
+                )
                 hydrated = []
                 for row in rows:
                     detail = hydrated_relation_cache.get(row["id"])
@@ -1863,6 +1869,41 @@ class GraphRetrievalService(_RetrievalState):
 
     def scale_ppr(self, *args, **kwargs):
         return self._scale_ppr_impl(*args, **kwargs)
+
+    def _snapshot_foreign_relation_evidence(self, db, owner_notebook_id, details):
+        """Ledger B-11 for derived-chain hops (PR-E2 E2-4): an evidence item
+        of a relation in ``owner_notebook_id`` whose source belongs to ANOTHER
+        library (a promoted relation still points at the promoter's private
+        source) keeps its stored quote and title but loses its ``source_id``
+        and ``element_id`` -- the same pointer-free snapshot
+        ``evidence_context`` makes of a KG entry.  The hop's anchor therefore
+        never re-reads that library's current source name or images by a
+        global id.  Under a source ceiling such an item has no in-ceiling
+        source and the hop is dropped downstream, as before.
+
+        One bounded primary-key read of the cited sources' rows, on the
+        caller's connection, per hydration batch; items are rewritten in
+        place in the hydration cache."""
+        source_ids = list(dict.fromkeys(
+            str(item.get("source_id") or "")
+            for detail in details for item in detail["evidence"]
+            if isinstance(item, dict) and item.get("source_id")
+        ))
+        if not source_ids:
+            return
+        rows = {
+            str(row["id"]): dict(row)
+            for row in self.sources.source_listing_rows(db, source_ids)
+        }
+        for detail in details:
+            detail["evidence"] = [
+                {**item, "source_id": "", "element_id": ""}
+                if isinstance(item, dict) and owned_by_another_library(
+                    rows.get(str(item.get("source_id") or "")) or {}, owner_notebook_id,
+                )
+                else item
+                for item in detail["evidence"]
+            ]
 
     def in_network_relations(self, participant_ids, object_ids, *, with_source_ids=None):
         """Relation rows among ``object_ids``, per participant notebook.

@@ -153,6 +153,10 @@ REGISTRY = {
     (EC, "_snapshot_foreign_entry", 'store:["element_id"]'): (
         "no-element", (),
         "B-11: a KG anchor whose source belongs to another library keeps no locator", 1),
+    ("services/graph_retrieval.py", "GraphRetrievalService._snapshot_foreign_relation_evidence",
+     "splat:element_id"): (
+        "no-element", (),
+        "B-11: a chain hop's evidence item from another library keeps no locator", 1),
     (EC, "EvidenceContextService.collection_item_citations", "Citation"): (
         "read-registered", _COLLECTION_PROOF,
         "enumerated element/KG rows (hydrated full text); document rows pass element_id='' (J3)", 2),
@@ -656,7 +660,7 @@ def no_element_problems(site) -> list:
                         literal_empty = True
                     else:
                         return [f"{relative}::{qualname} passes a non-literal element_id"]
-        if isinstance(child, ast.Dict) and callee.startswith("dict"):
+        if isinstance(child, ast.Dict) and callee.startswith(("dict", "splat")):
             for key, value in zip(child.keys, child.values):
                 if isinstance(key, ast.Constant) and key.value == "element_id":
                     if isinstance(value, ast.Constant) and value.value == "":
