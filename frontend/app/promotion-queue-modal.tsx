@@ -17,6 +17,7 @@ import { FloatingModalCard } from "./floating-modal-card";
 import { Pagination } from "./Pagination";
 import { PromotionCandidateActions } from "./promotion-candidate-actions";
 import type { PromotionCandidate } from "./promotion-queue";
+import type { PromotionNotice } from "./use-promotion-queue";
 import { promotionReviewSections } from "./promotion-review";
 import { useClientPagination } from "./use-client-pagination.ts";
 import { label, PROMOTION_STATUS } from "./vocabulary";
@@ -28,6 +29,7 @@ const PROMOTION_QUEUE_PAGE_SIZE = 20;
 
 export function PromotionQueueModal({
   candidates,
+  notices = {},
   busy,
   lookupNotebookName,
   interactive = true,
@@ -37,6 +39,11 @@ export function PromotionQueueModal({
   onReject,
 }: {
   candidates: readonly PromotionCandidate[];
+  /**
+   * 按候选 id 的决策结果(失败原因)。`closed` 时顶替那一条的按钮;否则(暂时性失败)
+   * 显示在按钮旁边,按钮保留可重试。
+   */
+  notices?: Readonly<Record<string, PromotionNotice>>;
   busy: boolean;
   /**
    * 目标公共知识库名字的**第二级**回退。优先用后端 join 出来的 `target_base_name`
@@ -134,13 +141,20 @@ export function PromotionQueueModal({
                   {cand.base_match_id && (
                     <p className="conflict-note">公共知识库中已有相似内容 — 批准后将合并。</p>
                   )}
-                  {(cand.status === "proposed" || cand.status === "under_review") && (
-                    <PromotionCandidateActions
-                      hasTargetBase={Boolean(cand.target_base_id)}
-                      busy={busy}
-                      onApprove={() => onApprove(cand.id)}
-                      onReject={() => onReject(cand.id)}
-                    />
+                  {notices[cand.id]?.closed ? (
+                    <p className="conflict-note" role="status">{notices[cand.id].reason}</p>
+                  ) : (cand.status === "proposed" || cand.status === "under_review") && (
+                    <>
+                      {notices[cand.id] && (
+                        <p className="conflict-note" role="status">{notices[cand.id].reason}</p>
+                      )}
+                      <PromotionCandidateActions
+                        hasTargetBase={Boolean(cand.target_base_id)}
+                        busy={busy}
+                        onApprove={() => onApprove(cand.id)}
+                        onReject={() => onReject(cand.id)}
+                      />
+                    </>
                   )}
                 </article>
                 );

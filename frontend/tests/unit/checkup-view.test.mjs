@@ -130,21 +130,60 @@ test("签名随命中集合变化(新问题/修好)", () => {
 });
 
 test("只读项(fix=none)不触发铃铛:没有用户可点的修复", () => {
-  // H12(残留的记忆来源,系统自动清理)命中时 healthy=false,但只有它时不能说
-  // 「发现可修复的问题」。
-  const onlyReadOnly = checkup([item("H2", 0), item("H12", 2, [], "none")]);
+  // H9(隔离重建待完成)/H10(已批准的记忆派生晋升)/H12(残留的记忆来源,系统自动清理)
+  // 命中时 healthy=false,但只有它们时不能说「发现可修复的问题」。
+  const onlyReadOnly = checkup([
+    item("H2", 0), item("H9", 1, [], "none"), item("H10", 2, [], "none"), item("H12", 2, [], "none"),
+  ]);
   assert.equal(onlyReadOnly.healthy, false);
   assert.equal(checkupAlertSignature(onlyReadOnly), null);
-  const mixed = checkup([item("H4", 1, [], "backfill_vectors"), item("H12", 2, [], "none")]);
+  const mixed = checkup([item("H4", 1, [], "backfill_vectors"), item("H10", 2, [], "none"), item("H12", 2, [], "none")]);
   assert.equal(checkupAlertSignature(mixed), "nb-1:H4");
 });
 
 test("只读项不让修复轮询继续:只剩只读项时不再有可修复问题", () => {
-  const onlyReadOnly = checkup([item("H2", 0), item("H12", 3, [], "none")]);
+  const onlyReadOnly = checkup([item("H2", 0), item("H10", 3, [], "none"), item("H12", 3, [], "none")]);
   assert.equal(onlyReadOnly.healthy, false);
   assert.equal(checkupHasRepairableIssue(onlyReadOnly), false);
   assert.equal(checkupHasRepairableIssue(checkup([item("H3", 1, ["s"], "reparse")])), true);
   assert.equal(checkupHasRepairableIssue(null), false);
+});
+
+test("只读项装配成提示卡:有文案、按 H9、H10 顺序、H9 不显示计数", () => {
+  const c = checkup([
+    item("H10", 2, [], "none"),
+    item("H9", 1, [], "none"),
+    item("H2", 1, ["s1"], "reparse"),
+  ]);
+  const notices = checkupNotices(c);
+  assert.deepEqual(notices.map((n) => n.key), ["H9", "H10"]);
+  assert.equal(notices[0].unit, "");
+  assert.equal(notices[1].count, 2);
+  assert.equal(notices[1].unit, "条");
+  assert.ok(notices.every((n) => n.label && n.detail));
+  // 源级分组不收只读项
+  assert.deepEqual(sourceHealthGroups(c).map((g) => g.key), ["H2"]);
+  // 计数为 0 或不是只读项时不出卡
+  assert.deepEqual(checkupNotices(checkup([item("H9", 0, [], "none")])), []);
+  assert.deepEqual(checkupNotices(null), []);
+});
+
+test("H11(公共知识库里还有成员的个人记忆)是只读提示卡:排在 H10 之后、显示条数、不响铃", () => {
+  const c = checkup([
+    item("H11", 3, [], "none"),
+    item("H10", 2, [], "none"),
+    item("H2", 0),
+  ]);
+  const notices = checkupNotices(c);
+  assert.deepEqual(notices.map((n) => n.key), ["H10", "H11"]);
+  const h11 = notices[1];
+  assert.equal(h11.count, 3);
+  assert.equal(h11.unit, "条");
+  assert.match(h11.label, /公共知识库/);
+  assert.match(h11.detail, /转移|删除/);
+  assert.equal(checkupAlertSignature(checkup([item("H11", 3, [], "none")])), null);
+  assert.equal(checkupHasRepairableIssue(checkup([item("H11", 3, [], "none")])), false);
+  assert.deepEqual(checkupNotices(checkup([item("H11", 0, [], "none")])), []);
 });
 
 // ---- 修复忙碌位的解除条件(repairRelease / isRepairing)----------------------

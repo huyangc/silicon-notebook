@@ -1377,7 +1377,8 @@ class SourceStore:
         agent_profile_id: str = "",
         connection: "sqlite3.Connection | None" = None,
         capacity_limit: "int | None" = None,
-    ) -> None:
+        unless_public_library: bool = False,
+    ) -> bool:
         """Insert one sources row (created_at/updated_at minted via the ``now``
         seam). Pass ``connection`` to join a caller-owned write transaction —
         batch imports keep their all-or-nothing semantics; without it the row
@@ -1404,7 +1405,15 @@ class SourceStore:
         inserts nothing. Only the own-transaction shape is supported: a joined
         ``connection`` gives this method no say over when the transaction took
         its write lock, so the count could predate it — refuse loudly rather
-        than enforce a limit that does not actually hold."""
+        than enforce a limit that does not actually hold.
+
+        ``unless_public_library`` (M1, E4-3; the Memory-derived source insert):
+        the row is inserted only while the notebook is not a public library —
+        the statement becomes ``INSERT … SELECT … FROM notebooks WHERE id=?
+        AND tier <> 'base'``, so the check and the write are one statement in
+        the write transaction (SQLite's single writer serializes it against
+        the publish UPDATE, which in turn refuses while a Memory source
+        exists). Returns whether the row was inserted."""
         if capacity_limit is not None and connection is not None:
             raise ValueError(
                 "capacity_limit requires an owned write transaction; "
@@ -1417,8 +1426,13 @@ class SourceStore:
             (id, notebook_id, title, source_type, status, parse_status, file_name,
              file_path, source_url, file_size, file_hash, summary, doc_type,
              memory_id, agent_profile_id, created_at, updated_at, uploaded_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
+            + (
+                "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
+                "FROM notebooks WHERE id = ? AND tier <> 'base'"
+                if unless_public_library else
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            )
         )
         values = (
             source_id, notebook_id, title, source_type, status, parse_status,
@@ -1432,9 +1446,10 @@ class SourceStore:
             if source_type not in {"memory", "knowhow"}
             else None,
         )
+        if unless_public_library:
+            values = (*values, notebook_id)
         if connection is not None:
-            connection.execute(statement, values)
-            return
+            return connection.execute(statement, values).rowcount > 0
         with self.database.write() as db:
             if capacity_limit is not None:
                 # BEGIN IMMEDIATE before the COUNT: the RESERVED lock (plus the
@@ -1445,7 +1460,7 @@ class SourceStore:
                 current = self._visible_document_count_on(db, notebook_id)
                 if current >= capacity_limit:
                     raise DocumentCapacityExceeded(current, capacity_limit)
-            db.execute(statement, values)
+            return db.execute(statement, values).rowcount > 0
 
     def source_id_by_hash(self, notebook_id: str, digest: str) -> Optional[str]:
         """Existing source in this notebook whose content hash matches

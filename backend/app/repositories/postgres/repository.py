@@ -131,6 +131,10 @@ class PostgresRepository(RepositoryFacade):
                 active_source_ids=rt._active_source_ids_snapshot,
                 now=rt.seams.now,
                 event_log=rt.event_log,
+                # H11(只读,M1/E4-3):本库已是公共知识库却仍持有的 Memory 来源数。
+                public_library_memory_sources=(
+                    rt.notebook_store.public_library_memory_source_count
+                ),
                 # H12(只读,E5-3):本库里仍在的无主 Memory 来源数。
                 orphan_memory_sources=rt.memory_store.orphan_memory_source_count_on,
             )

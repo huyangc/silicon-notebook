@@ -2208,6 +2208,7 @@ class RepositoryRuntime:
             embed_objects_batch=embed_objects_batch,
             embed_relations_batch=embed_relations_batch,
             source_ids_from_evidence=source_ids_from_evidence,
+            memory_source_ids=self.source_store.memory_source_ids,
             set_source_status=set_source_status,
             run_extraction=run_extraction,
             model_clients=self.models,

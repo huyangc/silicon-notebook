@@ -2209,9 +2209,14 @@ class SourceIngestionService:
                 if self.sources.get_source(existing_id).file_hash == fingerprint:
                     return existing_id  # content unchanged (e.g. only tags edited)
             else:
-                source_id = self.new_id("src")
-                self.sources.insert_source(
-                    source_id=source_id,
+                new_source_id = self.new_id("src")
+                # M1 (E4-3): the insert itself is conditional on the notebook
+                # not being a public library (one statement; PostgreSQL holds
+                # the notebook row FOR SHARE against the publish UPDATE). A
+                # job queued before the notebook was published ends here,
+                # cleanly: no source, so nothing is extracted.
+                if not self.sources.insert_source(
+                    source_id=new_source_id,
                     notebook_id=notebook_id,
                     title=title,
                     source_type="memory",
@@ -2224,7 +2229,17 @@ class SourceIngestionService:
                     summary="",
                     doc_type="",
                     memory_id=memory_id,
-                )
+                    unless_public_library=True,
+                ):
+                    self.event_log.emit({
+                        "kind": "memory_kg",
+                        "notebook_id": notebook_id,
+                        "memory_id": memory_id,
+                        "status": "skipped",
+                        "reason": "public_library",
+                    })
+                    return None
+                source_id = new_source_id
 
             from app.services.parsers import parse_markdown_text
 

@@ -742,3 +742,296 @@ def test_incremental_merge_pair_reads_delegate_on_caller_connections(repo, monke
     # PR-C:两次读都以本源新概念的桥接 canonical id 为界,不是整本库的候选对。
     want_ids = ["K-" + _norm("MoE Gating")]
     assert [ids for _nb, _statuses, _db, ids in calls] == [want_ids, want_ids]
+
+
+# ── E4-3 / M1: the Tier-2 pool never contains Memory-derived concepts ────────
+#
+# Each case runs twice on identical data; only the ``source_type`` of the
+# existing concepts' source differs. ``markdown`` is the control that proves
+# the fixture really produces the candidate; ``memory`` must not. The legacy
+# cluster row on the existing concept stands in for pre-migration data (after
+# E4-3 incremental fusion never gives a Memory object a cluster row), so the
+# exclusion is exercised on its own rather than through "no canonical, skip".
+
+def _existing_source(repo, nb_id, source_id, source_type, now):
+    with repo._write() as db:
+        memory_id = None
+        if source_type == "memory":
+            memory_id = f"mem-{source_id}"
+            db.execute(
+                "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at) "
+                "VALUES ('u-mem','u-mem@example.test','u-mem','user','active',?,?)",
+                (now, now),
+            )
+            db.execute(
+                "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
+                "content_md,created_at,updated_at) VALUES (?,?,'u-mem','ask_answer',"
+                "'confirmed','t','x',?,?)",
+                (memory_id, nb_id, now, now),
+            )
+        db.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,memory_id,created_at,"
+            "updated_at) VALUES (?,?,?,?,?,?,?)",
+            (source_id, nb_id, source_id, source_type, memory_id, now, now),
+        )
+
+
+def _candidate_pairs(repo, nb_id):
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT canonical_a, canonical_b FROM concept_merge_candidates WHERE notebook_id=?",
+            (nb_id,)).fetchall()
+    return {tuple(sorted((r["canonical_a"], r["canonical_b"]))) for r in rows}
+
+
+@pytest.mark.parametrize("branch", ["bruteforce", "ann"])
+@pytest.mark.parametrize("source_type", ["markdown", "memory"])
+def test_tier2_never_bridges_to_a_memory_derived_concept(repo, monkeypatch, branch, source_type):
+    from app.services.kg_merge import _norm
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    now = "2026-09-29T00:00:00"
+    dim = 16
+    _existing_source(repo, nb.id, "src-E", source_type, now)
+    existing = [("ko-e1", "Expert Routing", _mk_vec(dim, 0, 1.0, 1, 0.05))]
+    for oid, name, vec in existing:
+        _seed_concept(repo, nb.id, oid, name, "src-E", vec, now)
+    _build_small_base(repo, nb.id, existing, now)
+    if branch == "ann":
+        repo.build_scale_index(nb.id)
+        monkeypatch.setattr(repo.settings, "kg_incremental_tier2_max_entities", 0)
+    else:
+        assert repo._scale_index(nb.id, allow_stale=True) is None
+    _seed_concept(repo, nb.id, "ko-new", "MoE Gating", "src-B",
+                  _mk_vec(dim, 0, 0.99, 1, 0.04), now)
+
+    repo.incremental_fuse_source(nb.id, "src-B")
+
+    pair =tuple(sorted(("K-" + _norm("MoE Gating"), "K-" + _norm("Expert Routing"))))
+    if source_type == "markdown":
+        assert _candidate_pairs(repo, nb.id) == {pair}      # control
+    else:
+        assert _candidate_pairs(repo, nb.id) == set()
+
+
+def test_tier2_memory_concepts_do_not_take_top_k_slots(repo):
+    """Brute-force branch ranks top_k=5 BEFORE filtering. Five Memory-derived
+    concepts nearer than a shared one (no cluster rows — the post-E4 shape)
+    used to fill every slot and silently drop the shared bridge."""
+    from app.services.kg_merge import _norm
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    now = "2026-09-29T00:00:00"
+    dim = 16
+    _existing_source(repo, nb.id, "src-M", "memory", now)
+    for i in range(5):
+        _seed_concept(repo, nb.id, f"ko-m{i}", f"Private {i}", "src-M",
+                      _mk_vec(dim, 0, 1.0, 1 + i, 0.01), now)
+    shared = [("ko-s", "Expert Routing", _mk_vec(dim, 0, 1.0, 9, 0.3))]
+    for oid, name, vec in shared:
+        _seed_concept(repo, nb.id, oid, name, "src-A", vec, now)
+    _build_small_base(repo, nb.id, shared, now)
+    _seed_concept(repo, nb.id, "ko-new", "MoE Gating", "src-B", _unit(dim, 0), now)
+
+    repo.incremental_fuse_source(nb.id, "src-B")
+
+    assert _candidate_pairs(repo, nb.id) == {
+        tuple(sorted(("K-" + _norm("MoE Gating"), "K-" + _norm("Expert Routing"))))
+    }
+
+
+def test_notebook_without_memory_reads_no_memory_objects(repo, monkeypatch):
+    """Cost pin: with no Memory source the Tier-2 exclusion issues no read —
+    the only extra statement is the ``memory_source_ids`` probe at entry."""
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    now = "2026-09-29T00:00:00"
+    dim = 16
+    existing = [("ko-e1", "Expert Routing", _mk_vec(dim, 0, 1.0, 1, 0.05))]
+    for oid, name, vec in existing:
+        _seed_concept(repo, nb.id, oid, name, "src-A", vec, now)
+    _build_small_base(repo, nb.id, existing, now)
+    _seed_concept(repo, nb.id, "ko-new", "MoE Gating", "src-B", _mk_vec(dim, 0, 0.99, 1, 0.04), now)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    probes = []
+    original = lifecycle._memory_source_ids
+    monkeypatch.setattr(
+        lifecycle, "_memory_source_ids",
+        lambda db, notebook_id: probes.append(notebook_id) or original(db, notebook_id),
+    )
+    reads = []
+    real_rows = lifecycle.knowledge.incremental_object_rows
+
+    def rows_spy(db, notebook_id, source_id, object_type, *, exclude_source=False,
+                 exclude_memory_derived=False):
+        reads.append((source_id, object_type, exclude_source, exclude_memory_derived))
+        return real_rows(db, notebook_id, source_id, object_type,
+                         exclude_source=exclude_source,
+                         exclude_memory_derived=exclude_memory_derived)
+
+    monkeypatch.setattr(lifecycle.knowledge, "incremental_object_rows", rows_spy)
+    repo.incremental_fuse_source(nb.id, "src-B")
+    assert probes == [nb.id]
+    # Exactly the reads this method made before E4-3: the new-object read per
+    # type and the brute-force pool read (now carrying the Memory exclusion in
+    # the same statement) — no per-Memory-source reads.
+    assert reads == [
+        ("src-B", "concept", False, False),
+        ("src-B", "concept", True, True),
+        ("src-B", "claim", False, False),
+        ("src-B", "formula", False, False),
+        ("src-B", "procedure", False, False),
+    ]
+
+
+def _seed_memory_sources(repo, nb_id, n, now, *, deprecated_ordinary=False):
+    """``n`` confirmed Memories of 5 members, each with its synthetic source and
+    one concept close to the new concept (so, without the exclusion, they
+    would be ANN hits / brute-force top-k contenders). ``deprecated_ordinary``
+    seeds the same rows as ordinary sources with deprecated concepts instead:
+    the pre-existing "not alive" shape the Memory exclusion must cost exactly
+    as much as."""
+    rows_u = [(f"u-m{i}", f"u-m{i}@example.test", f"u-m{i}", "user", "active", now, now)
+              for i in range(5)]
+    rows_m, rows_s, rows_o, rows_e = [], [], [], []
+    for i in range(n):
+        rows_m.append((f"mem{i}", nb_id, f"u-m{i % 5}", "ask_answer", "confirmed", "t", "x", now, now))
+        rows_s.append((f"srcm{i}", nb_id, "t", "file" if deprecated_ordinary else "memory",
+                       None if deprecated_ordinary else f"mem{i}", now, now))
+        rows_o.append((f"kom{i}", nb_id, "concept",
+                       "deprecated" if deprecated_ordinary else "approved", "",
+                       json.dumps({"name": f"Private notion {i}"}), "[]", f"srcm{i}", now, now))
+        rows_e.append((f"kom{i}", nb_id,
+                       json.dumps(_mk_vec(16, 0, 1.0, 1 + i % 14, 0.2 + (i % 50) * 0.002)),
+                       now))
+    with repo._write() as db:
+        db.executemany("INSERT INTO users(id,email,display_name,role,status,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?,?,?)", rows_u)
+        db.executemany("INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
+                       "content_md,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)", rows_m)
+        db.executemany("INSERT INTO sources(id,notebook_id,title,source_type,memory_id,"
+                       "created_at,updated_at) VALUES (?,?,?,?,?,?,?)", rows_s)
+        db.executemany("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,"
+                       "payload,evidence,source_id,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?)", rows_o)
+        db.executemany("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
+                       "VALUES (?,?,?,?)", rows_e)
+
+
+def _count_statements(monkeypatch):
+    from app.repositories.sqlite import database as sdb
+    counter = {"n": 0}
+    original = sdb._DiagnosticCursor.execute
+
+    def counted(self, *args, **kwargs):
+        counter["n"] += 1
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(sdb._DiagnosticCursor, "execute", counted)
+    return counter
+
+
+@pytest.mark.parametrize("branch", ["bruteforce", "ann"])
+def test_fusion_statements_do_not_grow_with_memory_sources(tmp_path, monkeypatch, branch):
+    """Cost pin (quality review P1-1 / F2): the Memory exclusion rides reads
+    ``incremental_fuse_source`` already makes, so there is no per-Memory-source
+    read any more (the old code made 1 + N).
+
+    * brute force: the same number of statements for 0, 5 and 1,000 Memory
+      sources (the exclusion is a predicate in the pool read);
+    * ANN: 0 and 5 are equal, and 1,000 costs exactly what 1,000 *deprecated*
+      ordinary concepts in the same places cost — Memory hits are "not alive"
+      like deprecated ones, and when they crowd the window the existing
+      doubling loop (k from 20 up to at most 4,096, one ``valid_object_ids``
+      per round) spends its bounded extra rounds the same way.
+
+    Each run also yields the one shared bridge and never a Memory one."""
+    from app.services.kg_merge import _norm
+    counts = {}
+    for n in (0, 5, 1000, "deprecated"):
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / f'n{n}.db'}")
+        monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / f"s{n}"))
+        monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+        monkeypatch.setenv("EMBED_DIM", "16")
+        r = SQLiteRepository(Settings(_env_file=None))
+        bind_all_embedding_clients(r, FakeEmbedder(dim=16))
+        nb = r.create_notebook(NotebookCreate(name="kb"))
+        now = "2026-09-29T00:00:00"
+        if n == "deprecated":
+            _seed_memory_sources(r, nb.id, 1000, now, deprecated_ordinary=True)
+        else:
+            _seed_memory_sources(r, nb.id, n, now)
+        # The shared concept is the nearest hit, the Memory ones right behind
+        # it: they fill the ANN window / the brute-force ranking, so their
+        # exclusion is exercised, while recall of the shared bridge (the ANN
+        # window cap) stays out of this pin.
+        shared = [("ko-s", "Expert Routing", _mk_vec(16, 0, 1.0, 15, 0.01))]
+        for oid, name, vec in shared:
+            _seed_concept(r, nb.id, oid, name, "src-A", vec, now)
+        _build_small_base(r, nb.id, shared, now)
+        if branch == "ann":
+            r.build_scale_index(nb.id)
+            monkeypatch.setattr(r.settings, "kg_incremental_tier2_max_entities", 0)
+        _seed_concept(r, nb.id, "ko-new", "MoE Gating", "src-B", _unit(16, 0), now)
+        r.incremental_fuse_source(nb.id, "src-B")  # warm-up (orphan sweep, append)
+        with r._write() as db:
+            db.execute("DELETE FROM concept_merge_candidates WHERE notebook_id=?", (nb.id,))
+        counter = _count_statements(monkeypatch)
+        r.incremental_fuse_source(nb.id, "src-B")
+        counts[n] = counter["n"]
+        monkeypatch.undo()
+        assert _candidate_pairs(r, nb.id) == {
+            tuple(sorted(("K-" + _norm("MoE Gating"), "K-" + _norm("Expert Routing"))))
+        }, n
+    assert counts[0] == counts[5], counts
+    if branch == "bruteforce":
+        assert counts[5] == counts[1000], counts
+    assert counts[1000] == counts["deprecated"], counts
+
+
+def test_ann_widening_failure_keeps_the_pairs_found_in_earlier_rounds(repo, monkeypatch):
+    """Quality re-review P1-1: a crowd of not-alive hits (deprecated here;
+    Memory-derived objects behave the same) makes the ANN loop widen; when a
+    widened knn query fails, the shared concept already found in the first
+    round must still be bridged. The old ``continue`` threw it away."""
+    from app.services.kg_merge import _norm
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    now = "2026-09-29T00:00:00"
+    _seed_memory_sources(repo, nb.id, 60, now, deprecated_ordinary=True)
+    shared = [("ko-s", "Expert Routing", _mk_vec(16, 0, 1.0, 15, 0.01))]
+    for oid, name, vec in shared:
+        _seed_concept(repo, nb.id, oid, name, "src-A", vec, now)
+    _build_small_base(repo, nb.id, shared, now)
+    repo.build_scale_index(nb.id)
+    monkeypatch.setattr(repo.settings, "kg_incremental_tier2_max_entities", 0)
+    _seed_concept(repo, nb.id, "ko-new", "MoE Gating", "src-B", _unit(16, 0), now)
+
+    lifecycle = repo._runtime.knowledge_lifecycle
+    real_open = lifecycle.scale_artifacts.open_ann
+    calls: list[int] = []
+
+    class _FailsWhenWidened:
+        def __init__(self, ann):
+            self._ann = ann
+
+        def __getattr__(self, name):
+            return getattr(self._ann, name)
+
+        def knn_query(self, q, k):
+            calls.append(k)
+            if len(calls) > 1:
+                raise RuntimeError("Cannot return the results in a contiguous 2D array")
+            return self._ann.knn_query(q, k=k)
+
+    monkeypatch.setattr(
+        lifecycle.scale_artifacts, "open_ann",
+        lambda idx, kind: _FailsWhenWidened(real_open(idx, kind)),
+    )
+    errors: list = []
+    monkeypatch.setattr(lifecycle, "_note_model_error", lambda *a, **k: errors.append(a[0]))
+
+    repo.incremental_fuse_source(nb.id, "src-B")
+
+    assert len(calls) == 2 and calls[1] > calls[0]  # it did widen, and that round failed
+    assert errors == ["tier2_bridge_ann_query"]
+    assert _candidate_pairs(repo, nb.id) == {
+        tuple(sorted(("K-" + _norm("MoE Gating"), "K-" + _norm("Expert Routing"))))
+    }
+

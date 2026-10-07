@@ -25,6 +25,7 @@ from app.domain.indexing_pipeline import (
     IndexingPipelineRebuildFailedError,
     IndexingPipelineUnavailableError,
 )
+from app.domain.memory_kg_isolation import NotebookHoldsMemory
 from app.models.identity import UserProfile
 from app.models.memory import MemberExitResult, MemoryExitDisclosure
 from app.models.question_suggestions import QuestionSuggestionsResponse
@@ -232,6 +233,9 @@ def set_notebook_tier(notebook_id: str, payload: SetTierRequest, user: UserProfi
         return catalog.get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+    except NotebookHoldsMemory as exc:
+        # M1: members' personal memories never go public with the library.
+        raise user_error(409, exc.user_message)
 
 
 @router.get("/notebooks/{notebook_id}/bases", response_model=List[MountedBase],

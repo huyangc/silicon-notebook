@@ -416,6 +416,12 @@ class KnowledgeLifecycleService:
         notebook_copy_stats: Callable[[str], dict],
         note_model_error: Callable[..., None],
         participant_notebook_ids: Callable[[str], List[str]],
+        # M1 (E4-3): ``SourceStorePort.memory_source_ids`` — the notebook's
+        # Memory synthetic source ids, the single definition of "which sources
+        # are Memory". Required (no fail-open default): incremental fusion
+        # refuses Memory sources and keeps Memory-derived concepts out of the
+        # Tier-2 pool with it.
+        memory_source_ids: Callable[[object, str], List[str]],
         invalidate_knowledge_counts: Callable[[str], None] = lambda _notebook_id: None,
         # 批 3·W1 PR-3 §4.2 的三处在途重建检查点(选项 A)共用这一个callable:
         # 读 notebooks.status 是否为 'deleting'。默认 `lambda _nid: False`
@@ -478,6 +484,7 @@ class KnowledgeLifecycleService:
         self._embed_objects_batch = embed_objects_batch
         self._embed_relations_batch = embed_relations_batch
         self._source_ids_from_evidence = source_ids_from_evidence
+        self._memory_source_ids = memory_source_ids
         self._set_source_status = set_source_status
         self._run_extraction = run_extraction
         self.model_clients = model_clients
@@ -2354,8 +2361,27 @@ class KnowledgeLifecycleService:
         return total
 
     def incremental_fuse_source(self, notebook_id: str, source_id: str) -> None:
-        """上传后增量融合该源 concept 进 concept_clusters。Tier1 名种子 append(无 LLM)。"""
+        """上传后增量融合该源 concept 进 concept_clusters。Tier1 名种子 append(无 LLM)。
+
+        M1(E4-3):个人记忆派生的对象只属于它的主人,不进任何共享簇。
+        ① 来源本身是 Memory 来源 → 入口直接返回:不 append 簇行、不产桥接候选、
+        claim/formula/procedure 也不聚类。两个调用方(`run_extraction` 的抽取收尾、
+        `scale_index_builder` 的增量 fold)都经过这里,一处覆盖;Memory 对象于是
+        保持「无簇行」,读者按既有 COALESCE 路径把它当单例。
+        ② 共享来源融合时,Tier2 候选池剔除 Memory 派生 concept,使它们既不成为桥接
+        对端,也不挤占 top-k 槽位。两个分支都把 D4 判据(`memory_sql.memory_derived_object`)
+        折进**已有**的那条读:暴力分支是 `incremental_object_rows(..., exclude_source=True,
+        exclude_memory_derived=True)`,ANN 分支是命中存活位的
+        `valid_object_ids(..., exclude_memory_derived=True)`(Memory 命中与 deprecated
+        命中一样按「不存活」跳过)。所以语句数与库里 Memory 来源的条数无关
+        (`test_incremental_fusion.py` 的成本钉:N = 0 / 5 / 1000 语句数相同)。
+        入口判「本源是不是 Memory」只问 `SourceStorePort.memory_source_ids`(单一定义);
+        库里没有 Memory 时它是一条按 (notebook_id, source_type) 索引探空的语句。"""
         if not self.settings.kg_incremental_fusion_enabled:
+            return
+        with self._connect() as db:
+            memory_sources = frozenset(self._memory_source_ids(db, notebook_id))
+        if source_id in memory_sources:
             return
         # 清理 re-extraction 留下的 orphan 簇行(member 指向已删 knowledge_objects):重抽取删旧
         # ko- 以新 id 重建,旧簇成员行悬空。消费方(build_ppr_graph/unified_graph)虽已过滤,
@@ -2499,8 +2525,11 @@ class KnowledgeLifecycleService:
                 # This only moves I/O; the brute-force/skipped branches below still
                 # receive the exact same ordered rows and make the same decision.
                 with self._connect() as db:
+                    # M1: Memory-derived concepts never enter the shared pool
+                    # (same statement; see the docstring above).
                     ex = self.knowledge.incremental_object_rows(
-                        db, notebook_id, source_id, "concept", exclude_source=True
+                        db, notebook_id, source_id, "concept", exclude_source=True,
+                        exclude_memory_derived=True,
                     )
             if ann is None and len(ex) <= self.settings.kg_incremental_tier2_max_entities:
                 # PR-C:桥接候选对恒含本次新对象的某个 canonical id(见
@@ -2783,6 +2812,12 @@ class KnowledgeLifecycleService:
         # double k and re-query (hnsw knn_query is cheap; a fresh query is
         # simpler and safer than incremental cursors).
         pad_factor = max(1, int(self.settings.kg_tier2_ann_pad_factor))
+        first_k = min(max(topk * pad_factor, topk + 1), n_labels)
+        # Not clamped below n_labels: when the query's own vector is not in
+        # the (possibly stale) index, the n_labels-th neighbour is a real one
+        # (test_tier2_ann_claim_dense_overfetch_matches_concept_only_oracle).
+        # A failing widened query is handled below by keeping the earlier
+        # rounds' hits instead.
         hard_cap = min(n_labels, 4096)
         # Deprecated alignment: the legacy path's existing_items query filters
         # status!='deprecated'; ann_labels carries no status, so raw hits are
@@ -2790,6 +2825,9 @@ class KnowledgeLifecycleService:
         # objects) and deprecated/vanished objects are skipped BEFORE they can
         # consume an eligible slot — matching the legacy pool, where deprecated
         # rows never entered the ranking at all.
+        # M1: Memory-derived hits come back not-alive from ``valid_object_ids``
+        # below (``exclude_memory_derived``) — the same skip as a deprecated
+        # hit, so they never take an eligible slot and are never folded.
         status_alive: Dict[str, bool] = {}
         # PR-C:替代整表 cluster_map 的按命中折叠。负结果也 memo("" 表示这个 id
         # 没有簇行),因为 `if not other_cid` 对 None 和 "" 判定相同 —— 与旧的
@@ -2818,7 +2856,9 @@ class KnowledgeLifecycleService:
                 return
             with self._connect() as db:
                 if unknown_alive:
-                    alive = self.governance_store.valid_object_ids(db, unknown_alive)
+                    alive = self.governance_store.valid_object_ids(
+                        db, unknown_alive, exclude_memory_derived=True
+                    )
                     for i in unknown_alive:
                         status_alive[i] = i in alive
                 need = _pending_fold()
@@ -2834,16 +2874,24 @@ class KnowledgeLifecycleService:
             # concept_merge_candidates,与真实簇(K-~oid)错位且互相污染。
             my_cid = bridge_canonical_id(name_by_obj.get(oid, ""), oid)
             q = np.asarray(qvec, dtype=np.float32)
-            k = min(max(topk * pad_factor, topk + 1), n_labels)
+            k = first_k
             eligible: list = []  # [(node_id, canonical_id, sim)] — alive concepts, not self
-            query_failed = False
             while True:
                 try:
                     ann.set_ef(max(k + 1, 50))
                     labels, distances = ann.knn_query(q, k=k)
                 except Exception as exc:  # noqa: BLE001 — fail-open, mirrors other ANN call sites
                     self._note_model_error("tier2_bridge_ann_query", "", exc)
-                    query_failed = True
+                    # Keep what the earlier (narrower) rounds already found:
+                    # a widened window only adds FARTHER neighbours, so the
+                    # previous round's eligible hits stay the nearest alive
+                    # ones. Dropping them (the old ``continue``) silently lost
+                    # this object's bridge whenever a widened query failed —
+                    # e.g. hnswlib's "Cannot return the results in a
+                    # contiguous 2D array" near k == n_labels, which a crowd
+                    # of not-alive hits (deprecated, or Memory-derived since
+                    # M1) makes this loop reach. A first-round failure leaves
+                    # ``eligible`` empty: nothing to bridge, as before.
                     break
                 hits = sorted(zip(labels[0], distances[0]), key=lambda ld: ld[1])
                 raw_ids = [idx.ann_labels[int(lab)] for lab, _ in hits]
@@ -2877,8 +2925,6 @@ class KnowledgeLifecycleService:
                 if tail_sim < lo:
                     break  # everything beyond the tail is below threshold anyway
                 k = min(k * 2, hard_cap)
-            if query_failed:
-                continue
             for node_id, other_cid, sim in eligible:
                 if sim < lo:
                     break  # eligible is distance-sorted ascending -> sim descending

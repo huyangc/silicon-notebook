@@ -27,6 +27,8 @@ from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.knowledge_store import KnowledgeStore
 from app.repositories.postgres.memory_sql import (
     cluster_seed_object_id,
+    foreign_memory_object_excluded,
+    foreign_memory_relation_excluded,
     memory_derived_object,
     memory_derived_relation,
 )
@@ -40,6 +42,13 @@ from app.domain.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
     USABLE_STATUSES,
     PromotionApproval,
+)
+from app.domain.memory_kg_isolation import (
+    PROMOTION_APPROVE_MESSAGE,
+    MemoryKnowledgeMergeRefused,
+    MemoryPromotionRefused,
+    PromotionObjectMissing,
+    memory_merge_refusal,
 )
 
 _REVIEW_STATUSES = frozenset({"pending", "verified", "rejected"})
@@ -435,8 +444,12 @@ class GovernanceStore:
         ).fetchall()
 
     @staticmethod
-    def valid_object_ids(db: Any, object_ids):
-        return KnowledgeStore.valid_object_ids(db, object_ids)
+    def valid_object_ids(
+        db: Any, object_ids, *, exclude_memory_derived: bool = False
+    ):
+        return KnowledgeStore.valid_object_ids(
+            db, object_ids, exclude_memory_derived=exclude_memory_derived
+        )
 
     # ------------------------------------------------------------- review
     @staticmethod
@@ -498,7 +511,12 @@ class GovernanceStore:
             "FROM knowledge_relations kr "
             "LEFT JOIN knowledge_objects ko_s ON ko_s.id = kr.source_object_id "
             "LEFT JOIN knowledge_objects ko_t ON ko_t.id = kr.target_object_id "
-            "WHERE kr.notebook_id = %s AND kr.review_status != 'rejected'",
+            "WHERE kr.notebook_id = %s AND kr.review_status != 'rejected' "
+            # M1: Memory-derived relations are left out WHOLE (not per viewer:
+            # the queue memo is per notebook). Only their owner may review
+            # them, so for everyone else they would be items that can never
+            # be acted on; nor do they corroborate shared edges.
+            f"AND NOT {memory_derived_relation('kr')}",
             (PY_STRIP_WHITESPACE, notebook_id),
         ).fetchall()
 
@@ -521,7 +539,8 @@ class GovernanceStore:
 
     @staticmethod
     def update_edge_review(
-        connection: Any, notebook_id: str, relation_id: str, status: str
+        connection: Any, notebook_id: str, relation_id: str, status: str,
+        *, actor_id: str | None = None,
     ) -> str:
         """Set ``review_status`` and return the PREVIOUS value (R3 T-A3 P1-2) —
         callers (``KnowledgeGovernanceService.set_edge_review``) need it to
@@ -537,16 +556,24 @@ class GovernanceStore:
         rows (bad id/notebook) makes the join produce zero rows, so
         ``fetchone()`` returns ``None`` — same "not found" signal the old
         ``cur.rowcount == 0`` check used, now via RETURNING's row count
-        instead of the UPDATE's own rowcount."""
+        instead of the UPDATE's own rowcount.
+
+        M1 (E4-3): a relation derived from someone else's Memory (not
+        ``actor_id``'s; an orphan Memory source is nobody's) is filtered out
+        in the same locking subquery (``foreign_memory_relation_excluded``),
+        so it takes the identical "not found" path as an id that does not
+        exist — no existence probe. ``actor_id=None`` (internal callers)
+        owns no Memory: every Memory-derived relation is out of reach."""
         if status not in _REVIEW_STATUSES:
             raise ValueError(f"invalid edge review status: {status!r}")
         row = connection.execute(
             "UPDATE knowledge_relations SET review_status=%s "
-            "FROM (SELECT id, review_status AS prev FROM knowledge_relations "
-            "WHERE id=%s AND notebook_id=%s FOR UPDATE) old "
+            "FROM (SELECT kr.id, kr.review_status AS prev FROM knowledge_relations kr "
+            "WHERE kr.id=%s AND kr.notebook_id=%s "
+            f"AND {foreign_memory_relation_excluded('kr')} FOR UPDATE) old "
             "WHERE knowledge_relations.id=old.id "
             "RETURNING old.prev",
-            (status, relation_id, notebook_id),
+            (status, relation_id, notebook_id, actor_id),
         ).fetchone()
         if row is None:
             raise KeyError(f"relation {relation_id!r} not found in notebook {notebook_id!r}")
@@ -1017,12 +1044,25 @@ class GovernanceStore:
     # ------------------------------------------------------------ promotion
     @staticmethod
     def promotion_object_type_row(
-        connection: Any, notebook_id: str, object_id: str
+        connection: Any, notebook_id: str, object_id: str,
+        *, actor_id: str | None = None,
     ) -> "dict | None":
+        """``object_type`` plus ``memory_derived`` (the ``memory_sql`` D4
+        classifier) of the object a generic promotion proposal names, so the
+        service can refuse a Memory-derived object without another read.
+
+        The owner is read in this same locking read: an object derived from
+        someone else's Memory (not ``actor_id``'s, or an orphan Memory source)
+        is filtered out by ``foreign_memory_object_excluded`` and comes back
+        as ``None`` — the caller's "not found", identical to a missing id. So
+        ``memory_derived`` is true only for the proposer's own Memory."""
         return connection.execute(
-            "SELECT object_type FROM knowledge_objects "
-            "WHERE id=%s AND notebook_id=%s FOR UPDATE",
-            (object_id, notebook_id),
+            "SELECT ko.object_type, "
+            f"{memory_derived_object('ko')} AS memory_derived "
+            "FROM knowledge_objects ko "
+            "WHERE ko.id=%s AND ko.notebook_id=%s "
+            f"AND {foreign_memory_object_excluded('ko')} FOR UPDATE",
+            (object_id, notebook_id, actor_id),
         ).fetchone()
 
     @staticmethod
@@ -1140,13 +1180,16 @@ class GovernanceStore:
         """Detection-shaped read: no evidence bodies, vectors filtered in SQL.
 
         Mirrors the SQLite statement exactly (see its docstring for why evidence
-        moved to a bounded by-id read and why the embedding join case-folds
-        ``object_type``).
+        moved to a bounded by-id read, why the embedding join case-folds
+        ``object_type``, why Memory-derived objects never reach detection, and
+        what that exclusion costs here: a hash anti join over every Memory
+        source in the deployment, measured there).
         """
         objects = connection.execute(
-            "SELECT id, object_type, payload, status "
-            "FROM knowledge_objects "
-            "WHERE notebook_id=%s AND status != 'deprecated'",
+            "SELECT o.id, o.object_type, o.payload, o.status "
+            "FROM knowledge_objects o "
+            "WHERE o.notebook_id=%s AND o.status != 'deprecated' "
+            f"AND NOT {memory_derived_object('o')}",
             (notebook_id,),
         ).fetchall()
         vectors = connection.execute(
@@ -1154,7 +1197,8 @@ class GovernanceStore:
             "FROM knowledge_embeddings e "
             "JOIN knowledge_objects o ON o.id = e.object_id "
             "WHERE e.notebook_id=%s AND o.status != 'deprecated' "
-            "AND lower(o.object_type) IN ('concept','claim')",
+            "AND lower(o.object_type) IN ('concept','claim') "
+            f"AND NOT {memory_derived_object('o')}",
             (notebook_id,),
         ).fetchall()
         notebook = connection.execute(
@@ -1205,10 +1249,13 @@ class GovernanceStore:
         Only the columns detection reads: no evidence bodies (fetched by id
         for surviving candidates) and no ``review_status`` — detection has
         never filtered rejected relations and must keep not filtering them.
+        Memory-derived relations are excluded in SQL, before the ``LIMIT``
+        rail (see the SQLite docstring).
         """
         sql = (
-            "SELECT id, source_object_id, target_object_id, edge_type "
-            "FROM knowledge_relations WHERE notebook_id=%s"
+            "SELECT r.id, r.source_object_id, r.target_object_id, r.edge_type "
+            "FROM knowledge_relations r WHERE r.notebook_id=%s "
+            f"AND NOT {memory_derived_relation('r')}"
         )
         params: tuple = (notebook_id,)
         if max_rows is not None:
@@ -1604,12 +1651,27 @@ class GovernanceStore:
             raise ValueError("晋升候选缺少目标公共知识库(target_base_id)")
         require_live_promotion_target(connection, base_nb_id)
 
-        # Fetch the personal object being promoted.
+        # Fetch the personal object being promoted, classified by the D4
+        # Memory classifier in the same read. The candidate row is already
+        # locked; nothing has been written yet.
         src = connection.execute(
-            "SELECT * FROM knowledge_objects WHERE id=%s", (cand["object_id"],)
+            "SELECT ko.*, "
+            f"{memory_derived_object('ko')} AS memory_derived "
+            "FROM knowledge_objects ko WHERE ko.id=%s",
+            (cand["object_id"],),
         ).fetchone()
         if src is None:
-            raise KeyError(cand["object_id"])
+            # Q5: the candidate exists (it is locked above) but the object it
+            # names is gone — e.g. its source was re-analysed and minted new
+            # ids. Distinct from "candidate missing" (KeyError → 404): the
+            # service closes this proposal as rejected in this transaction.
+            raise PromotionObjectMissing()
+        if src["memory_derived"]:
+            # M1: a proposal queued before the propose-side refusal (or racing
+            # it) must never copy a Memory object's payload or raw evidence
+            # into the public library. The service rejects the candidate in
+            # this same transaction and surfaces the refusal.
+            raise MemoryPromotionRefused(PROMOTION_APPROVE_MESSAGE)
         src_payload = json_value(src["payload"], {})
         src_evidence = json_value(src["evidence"], [])
 
@@ -1934,14 +1996,23 @@ class GovernanceStore:
         object_id: str,
         payload,
         now: str,
+        *,
+        actor_id: str | None = None,
     ) -> dict:
         """The in-transaction body of update_knowledge: validate, apply the
         partial update and return the refetched row. ``payload`` is the
-        KnowledgeUpdate model (status/payload/owner partial edit)."""
+        KnowledgeUpdate model (status/payload/owner partial edit).
+
+        M1 (E4-3): an object derived from someone else's Memory (not
+        ``actor_id``'s; an orphan Memory source is nobody's) is filtered out
+        in the locking read, so it raises the same ``KeyError`` as a missing
+        id — no existence probe, no write. ``actor_id=None`` (internal
+        callers) owns no Memory."""
         row = connection.execute(
-            "SELECT * FROM knowledge_objects WHERE id = %s AND notebook_id = %s "
+            "SELECT ko.* FROM knowledge_objects ko WHERE ko.id = %s "
+            f"AND ko.notebook_id = %s AND {foreign_memory_object_excluded('ko')} "
             "FOR UPDATE",
-            (object_id, notebook_id),
+            (object_id, notebook_id, actor_id),
         ).fetchone()
         if row is None:
             raise KeyError(object_id)
@@ -1995,14 +2066,34 @@ class GovernanceStore:
         source_id: str,
         into_id: str,
         now: str,
+        *,
+        actor_id: str | None = None,
     ) -> dict:
         """The in-transaction body of merge_knowledge: fold source evidence
         into the target, maintain the reverse index, deprecate the source in
-        place, and return the refetched target row."""
+        place, and return the refetched target row.
+
+        M1: a Memory-derived object is never folded into, or folded with,
+        another object (``app.domain.memory_kg_isolation`` has the rule and
+        why same-owner pairs are refused too). Both halves ride the same
+        statement that takes the row locks — no extra round trip, and no
+        window between the check and the write:
+
+        * an object derived from someone else's Memory (not ``actor_id``'s,
+          or an orphan Memory source) is filtered out by
+          ``foreign_memory_object_excluded`` and raises the same ``KeyError``
+          as a missing id (no existence probe);
+        * what survives and is Memory-derived is the caller's own, and raises
+          ``MemoryKnowledgeMergeRefused`` (409 with the reason) before
+          anything is written."""
         locked = connection.execute(
-            "SELECT * FROM knowledge_objects WHERE notebook_id = %s "
-            "AND id IN (%s, %s) ORDER BY id COLLATE \"C\" FOR UPDATE",
-            (notebook_id, source_id, into_id),
+            "SELECT ko.*, "
+            f"{memory_derived_object('ko')} AS memory_derived "
+            "FROM knowledge_objects ko WHERE ko.notebook_id = %s "
+            "AND ko.id IN (%s, %s) "
+            f"AND {foreign_memory_object_excluded('ko')} "
+            "ORDER BY ko.id COLLATE \"C\" FOR UPDATE",
+            (notebook_id, source_id, into_id, actor_id),
         ).fetchall()
         by_id = {row["id"]: row for row in locked}
         src = by_id.get(source_id)
@@ -2011,6 +2102,11 @@ class GovernanceStore:
             raise KeyError(source_id if src is None else into_id)
         if src["object_type"] != tgt["object_type"]:
             raise ValueError("can only merge knowledge objects of the same type")
+        refusal = memory_merge_refusal(
+            bool(src["memory_derived"]), bool(tgt["memory_derived"])
+        )
+        if refusal is not None:
+            raise MemoryKnowledgeMergeRefused(refusal)
         merged: List[dict] = json_value(tgt["evidence"], [])
         seen = {(e.get("element_id"), e.get("quoted_span")) for e in merged}
         for item in json_value(src["evidence"], []):

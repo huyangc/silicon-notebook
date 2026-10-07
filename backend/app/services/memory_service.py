@@ -371,6 +371,21 @@ class MemoryService:
             item = self.store.memory_for_user(memory_id, user_id)
             if item.status != "confirmed":
                 return  # deprecated/rejected before we ran: nothing created
+            # The eligibility gate is re-checked when the job RUNS, not only
+            # when it was queued: the notebook may have been published as a
+            # public library (or had extraction switched off) while the job
+            # waited. M1: a public library never gains a Memory source. Ends
+            # cleanly with a content-free event; ingest_memory_source's
+            # conditional insert closes the remaining statement-level race.
+            if not self.memory_kg.memory_kg_eligible(item.notebook_id):
+                self.event_log.emit({
+                    "kind": "memory_kg",
+                    "notebook_id": item.notebook_id,
+                    "memory_id": memory_id,
+                    "status": "skipped",
+                    "reason": "not_eligible",
+                })
+                return
             self.memory_kg.ingest_memory_source(
                 item.notebook_id, item.id, item.title, item.content_md
             )

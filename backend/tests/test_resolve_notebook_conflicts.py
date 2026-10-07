@@ -1005,3 +1005,147 @@ def test_semantic_ann_failure_event_shape_is_counts_only(repo, monkeypatch):
     assert set(failures[0]) == {"kind", "notebook_id", "group_size"}
     assert failures[0]["notebook_id"] == nb_id
     assert isinstance(failures[0]["group_size"], int)
+
+
+# ---------------------------------------------------------------------------
+# E4-3 / M1: conflict detection never sees Memory-derived objects or relations
+# ---------------------------------------------------------------------------
+
+_MEMORY_NOW = "2026-09-29T00:00:00+00:00"
+
+
+def _seed_memory_conflicts(repo: SQLiteRepository, source_type: str = "memory"):
+    """Shared discriminative node pair (the control) + the SAME conflict shapes
+    — a discriminative node pair and a supports/contradicts edge pair — on
+    objects whose primary source is a member's Memory. ``source_type`` lets a
+    control run put the second group on an ordinary source instead."""
+    nb_id, oid_pos, oid_neg = _seed_notebook_with_node_claims(repo)
+    memory_id = None
+    with repo._write() as db:
+        if source_type == "memory":
+            memory_id = "mem-conflict"
+            db.execute(
+                "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at) "
+                "VALUES ('u-mem','u-mem@example.test','u-mem','user','active',?,?)",
+                (_MEMORY_NOW, _MEMORY_NOW),
+            )
+            db.execute(
+                "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
+                "content_md,created_at,updated_at) VALUES (?,?,'u-mem','ask_answer',"
+                "'confirmed','t','x',?,?)",
+                (memory_id, nb_id, _MEMORY_NOW, _MEMORY_NOW),
+            )
+        db.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,memory_id,created_at,"
+            "updated_at) VALUES ('src-private',?,'private',?,?,?,?)",
+            (nb_id, source_type, memory_id, _MEMORY_NOW, _MEMORY_NOW),
+        )
+    evidence = [{**_make_evidence("Private bias text."), "source_id": "src-private"}]
+    repo.store_kg(nb_id, "src-private", [
+        {"local_id": "MP", "object_type": "claim",
+         "payload": {"name": "positive private bias holds"}, "evidence": evidence},
+        {"local_id": "MN", "object_type": "claim",
+         "payload": {"name": "negative private bias holds"}, "evidence": evidence},
+    ], [
+        {"source_local_id": "MP", "target_local_id": "MN", "edge_type": "supports",
+         "evidence": [{"quoted_span": "Private bias supports.", "element_id": ""}]},
+        {"source_local_id": "MP", "target_local_id": "MN", "edge_type": "contradicts",
+         "evidence": [{"quoted_span": "Private bias contradicts.", "element_id": ""}]},
+    ])
+    with repo._connect() as db:
+        private_objects = {r["id"] for r in db.execute(
+            "SELECT id FROM knowledge_objects WHERE source_id='src-private'"
+        ).fetchall()}
+        private_relations = {r["id"] for r in db.execute(
+            "SELECT id FROM knowledge_relations WHERE source_id='src-private'"
+        ).fetchall()}
+    assert len(private_objects) == 2 and len(private_relations) == 2
+    return nb_id, {oid_pos, oid_neg}, private_objects, private_relations
+
+
+@pytest.mark.parametrize("source_type", ["markdown", "memory"])
+def test_conflict_candidates_never_include_memory_objects_or_relations(repo, source_type):
+    nb_id, shared, private_objects, private_relations = _seed_memory_conflicts(
+        repo, source_type
+    )
+    llm = FakeLLM([])
+    bind_chat_client(repo, "kg_conflict_review", llm)
+
+    repo.resolve_notebook_conflicts(nb_id)
+
+    refs = {ref for c in repo.pending_conflicts(nb_id) for ref in (c["left_ref"], c["right_ref"])}
+    prompts = json.dumps(llm.calls, ensure_ascii=False)
+    assert shared <= refs  # the shared discriminative pair is detected (control)
+    private = private_objects | private_relations
+    if source_type == "markdown":
+        # Control: the very same shapes on an ordinary source ARE detected,
+        # so the memory run below is not passing for lack of a candidate.
+        assert refs & private
+        assert "private bias" in prompts
+    else:
+        assert refs.isdisjoint(private)
+        assert "private bias" not in prompts.lower()
+
+
+def test_conflict_row_readers_exclude_memory_rows(repo):
+    nb_id, shared, private_objects, private_relations = _seed_memory_conflicts(repo)
+    # Two more Memory relations whose ordering keys sort first ("!" precedes
+    # digits and letters) and two shared ones whose keys sort last ("~"), on
+    # objects with the same ids, so whichever index the planner walks
+    # (today: notebook_id, source_object_id, ...) the LIMIT-bounded scan meets
+    # Memory rows before shared ones.
+    with repo._write() as db:
+        # The fixture's shared claims carry no real source (store_kg(..., None)):
+        # the "~" object copies theirs, its relations carry NULL (no FK target).
+        (shared_object_source,) = {r["source_id"] for r in db.execute(
+            "SELECT source_id FROM knowledge_objects WHERE id IN (?,?)", tuple(shared)
+        ).fetchall()}
+        shared_source = None
+        for oid, source_id in (("!", "src-private"), ("~", shared_object_source)):
+            db.execute(
+                "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,"
+                "payload,evidence,source_id,created_at,updated_at) "
+                "VALUES (?,?,'claim','approved','','{}','[]',?,?,?)",
+                (oid, nb_id, source_id, _MEMORY_NOW, _MEMORY_NOW),
+            )
+        for rid, end, source_id in (
+            ("!mem-rel-a", "!", "src-private"), ("!mem-rel-b", "!", "src-private"),
+            ("~shared-rel-a", "~", shared_source), ("~shared-rel-b", "~", shared_source),
+        ):
+            db.execute(
+                "INSERT INTO knowledge_relations (id,notebook_id,source_object_id,"
+                "target_object_id,edge_type,evidence,source_id,created_at) "
+                "VALUES (?,?,?,?,'contradicts','[]',?,?)",
+                (rid, nb_id, end, end, source_id, _MEMORY_NOW),
+            )
+    private_relations = private_relations | {"!mem-rel-a", "!mem-rel-b"}
+    store = repo._runtime.governance
+    with repo._connect() as db:
+        every = [r["id"] for r in db.execute(
+            "SELECT r.id FROM knowledge_relations r WHERE r.notebook_id=?", (nb_id,)
+        ).fetchall()]
+        shared_relations = set(every) - private_relations
+        k = len(shared_relations)
+        # Precondition, same statement shape without the exclusion: a LIMIT k
+        # scan does reach Memory relations first — otherwise this test could
+        # not tell "exclude, then limit" from "limit, then exclude".
+        unfiltered = [r["id"] for r in db.execute(
+            "SELECT r.id, r.source_object_id, r.target_object_id, r.edge_type "
+            "FROM knowledge_relations r WHERE r.notebook_id=? LIMIT ?", (nb_id, k)
+        ).fetchall()]
+        assert set(unfiltered) & private_relations, unfiltered
+        objects, vectors, _notebook = store.conflict_resolution_rows(db, nb_id)
+        relations = store.conflict_relation_rows(db, nb_id)
+        bounded = store.conflict_relation_rows(db, nb_id, max_rows=k)
+    assert k >= 1
+    object_ids = {r["id"] for r in objects}
+    assert shared <= object_ids
+    assert object_ids.isdisjoint(private_objects)
+    vector_ids = {r["object_id"] for r in vectors}
+    assert shared <= vector_ids  # store_kg embedded them: the check below is not vacuous
+    assert vector_ids.isdisjoint(private_objects)
+    assert {r["id"] for r in relations}.isdisjoint(private_relations)
+    # The exclusion sits before the LIMIT rail: a bound the size of the shared
+    # set returns exactly the shared relations (filtering after the LIMIT would
+    # have spent part of it on the Memory relations).
+    assert {r["id"] for r in bounded} == shared_relations

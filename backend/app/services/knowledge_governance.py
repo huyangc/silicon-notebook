@@ -37,6 +37,11 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
+from app.domain.memory_kg_isolation import (
+    PROMOTION_PROPOSE_MESSAGE,
+    MemoryPromotionRefused,
+    PromotionRefused,
+)
 from app.models.common import Evidence
 from app.models.ask import RuleCard
 from app.models.knowledge import (
@@ -473,12 +478,17 @@ class KnowledgeGovernanceService:
     # queue membership. R3 T-A3 P1-2 / T-A2 carry contract.
     _NON_REJECTED_REVIEW_STATUSES = frozenset({"pending", "verified"})
 
-    def set_edge_review(self, notebook_id: str, rel_id: str, status: str) -> None:
+    def set_edge_review(
+        self, notebook_id: str, rel_id: str, status: str,
+        *, actor_id: Optional[str] = None,
+    ) -> None:
         """Persist review_status on a knowledge_relation.
 
         Allowed statuses: 'pending', 'verified', 'rejected'.
         Raises ValueError for unknown statuses.
-        Raises KeyError if the relation does not exist in this notebook.
+        Raises KeyError if the relation does not exist in this notebook — or
+        is derived from a Memory that is not ``actor_id``'s (M1: identical
+        answer, no existence probe; ``None`` = internal caller, owns none).
         Invalidates the federated reasoning graph cache so the next
         graph-reasoning call sees the updated set of active edges.
 
@@ -518,7 +528,7 @@ class KnowledgeGovernanceService:
                 f"review_status must be one of {sorted(self._REVIEW_STATUSES)}, got {status!r}")
         with self._write() as db:
             prev_status = self.governance_store.update_edge_review(
-                db, notebook_id, rel_id, status
+                db, notebook_id, rel_id, status, actor_id=actor_id
             )
             # review_status flips in place (relation COUNT unchanged) — bump
             # the monotonic seq, in THIS SAME transaction, so seq-keyed fast
@@ -1574,7 +1584,8 @@ class KnowledgeGovernanceService:
         )
 
     def propose_promotion(
-        self, notebook_id: str, object_id: str, *, target_base_id: str = ""
+        self, notebook_id: str, object_id: str, *, target_base_id: str = "",
+        actor_id: Optional[str] = None,
     ) -> dict:
         """Propose a personal-KG object for promotion into the base corpus.
 
@@ -1585,15 +1596,26 @@ class KnowledgeGovernanceService:
         mounted public reference libraries (0 mounted → reject; 1 → default;
         >1 → the caller must pass target_base_id explicitly — see
         _resolve_promotion_target).
+
+        M1: an object derived from someone else's Memory (not ``actor_id``'s,
+        or an orphan Memory source) is "missing" (KeyError → the same 404 as
+        an unknown id, read in the store's locking read); one derived from
+        the proposer's own Memory raises ``MemoryPromotionRefused`` (409).
         """
         self.get_notebook(notebook_id)  # KeyError if notebook missing
         now = self._now()
         with self._write() as db:
             obj = self.governance_store.promotion_object_type_row(
-                db, notebook_id, object_id
+                db, notebook_id, object_id, actor_id=actor_id
             )
             if obj is None:
                 raise KeyError(object_id)
+            if obj["memory_derived"]:
+                # M1: a Memory reaches the public library only through its
+                # creator's propose_memory_promotion (safe evidence cards).
+                # Refused before the idempotency lookup, so a proposal queued
+                # before this fix is not handed back either.
+                raise MemoryPromotionRefused(PROMOTION_PROPOSE_MESSAGE)
             nb_row = self.governance_store.notebook_tier_row(db, notebook_id)
             if nb_row and nb_row["tier"] == "base":
                 raise ValueError("cannot propose from a base notebook — use the review gate")
@@ -1697,7 +1719,9 @@ class KnowledgeGovernanceService:
         """Approve a promotion: copy the personal object into the base corpus,
         deduplicating against existing base objects of the same type via the
         kg_merge seed clustering. Idempotent. Raises KeyError if the candidate
-        is missing; ValueError if it is rejected or there is no base notebook.
+        is missing; ValueError if it is rejected or there is no base notebook;
+        ``PromotionRefused`` (after committing the proposal as rejected) if
+        the object it names is derived from a Memory (M1) or no longer exists.
         """
         now = self._now()
         with self._write() as db:
@@ -1722,6 +1746,7 @@ class KnowledgeGovernanceService:
                 raise ValueError("promotion candidate routing changed")
             if cand["status"] == "rejected":
                 raise ValueError("cannot approve a rejected promotion candidate")
+            refused: Optional[PromotionRefused] = None
             if cand["object_type"] == "memory":
                 memory, _legacy_candidates, existing_ids = (
                     self.memory_store.promotion_data_on(db, cand["object_id"])
@@ -1784,14 +1809,29 @@ class KnowledgeGovernanceService:
                     if not was_approved
                     else {}
                 )
-                if reviewer_id:
-                    approval = self.governance_store.approve_promotion_in_transaction(
-                        db, candidate_id, now, reviewer_id
+                try:
+                    if reviewer_id:
+                        approval = self.governance_store.approve_promotion_in_transaction(
+                            db, candidate_id, now, reviewer_id
+                        )
+                    else:
+                        approval = self.governance_store.approve_promotion_in_transaction(
+                            db, candidate_id, now
+                        )
+                except PromotionRefused as exc:
+                    # The store refused before any write, with the candidate
+                    # row locked and known active: the object is derived from
+                    # a Memory (M1) or no longer exists (Q5). Such a proposal
+                    # can never be approved, so it is closed here, in this
+                    # transaction, with the exception's machine reason — a dead
+                    # queue item would otherwise sit in front of every curator
+                    # forever. ``reviewed_by`` is the approving admin: an
+                    # admin did act.
+                    self.governance_store.set_promotion_rejected(
+                        db, candidate_id, exc.reason, now,
+                        reviewer_id or "curator",
                     )
-                else:
-                    approval = self.governance_store.approve_promotion_in_transaction(
-                        db, candidate_id, now
-                    )
+                    refused = exc
             # Idempotency: an already-approved candidate returns the existing
             # base object with NO post-commit hooks — exactly the old
             # early-return-inside-the-transaction behavior.
@@ -1813,12 +1853,17 @@ class KnowledgeGovernanceService:
             # counts, cluster-input version — kept answering from before the
             # promotion). Both branches dirty the notebook the rows landed in,
             # which is the base notebook, not the personal one in the URL.
-            self._mark_unified_kg_dirty_in_tx(
-                db,
-                memory_approval[0]["base_notebook_id"]
-                if memory_approval is not None
-                else approval.base_notebook_id,
-            )
+            # A refused approval wrote no knowledge row: nothing to announce.
+            if refused is None:
+                self._mark_unified_kg_dirty_in_tx(
+                    db,
+                    memory_approval[0]["base_notebook_id"]
+                    if memory_approval is not None
+                    else approval.base_notebook_id,
+                )
+        if refused is not None:
+            # Raised only after the rejection above has committed.
+            raise refused
 
         if memory_approval is not None:
             memory_result, base_ids = memory_approval
@@ -1916,12 +1961,17 @@ class KnowledgeGovernanceService:
     # ------------------------------------------------------------------
 
     def update_knowledge(
-        self, notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate
+        self, notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate,
+        *, actor_id: Optional[str] = None,
     ) -> RuleCard:
+        """Partial edit of one knowledge object. M1: an object derived from a
+        Memory that is not ``actor_id``'s raises the same ``KeyError`` as a
+        missing id (read in the store's locking read); ``None`` (internal
+        callers such as conflict resolution) owns no Memory."""
         now = self._now()
         with self._write() as db:
             row = self.governance_store.update_object_in_transaction(
-                db, notebook_id, knowledge_id, payload, now
+                db, notebook_id, knowledge_id, payload, now, actor_id=actor_id
             )
             # A node edit is a clustering input: a payload/name change moves its
             # normalized-name seed (→ cross-doc cluster membership), a re-embed
@@ -2174,14 +2224,29 @@ class KnowledgeGovernanceService:
         groups.sort(key=lambda g: (-len(g.members), -g.similarity))
         return groups
 
-    def merge_knowledge(self, notebook_id: str, source_id: str, payload: MergeRequest) -> RuleCard:
+    def merge_knowledge(
+        self, notebook_id: str, source_id: str, payload: MergeRequest,
+        *, actor_id: Optional[str] = None,
+    ) -> RuleCard:
+        """Fold ``source_id`` into ``payload.into_id``.
+
+        M1 refusal: a side derived from someone else's Memory (not
+        ``actor_id``'s, or an orphan Memory source) raises ``KeyError`` — the
+        same 404 as an unknown id; a merge that involves the caller's own
+        Memory-derived object raises ``MemoryKnowledgeMergeRefused`` (the
+        route answers 409 with its curated copy). The check has exactly one
+        home — the store's ``merge_objects_in_transaction``, evaluated in the
+        statement that locks both rows — so there is no service-side pre-read
+        that a concurrent write could invalidate, and nothing is written or
+        marked dirty on a refusal (the exception unwinds this write
+        transaction)."""
         into_id = payload.into_id
         if into_id == source_id:
             raise ValueError("cannot merge a knowledge object into itself")
         now = self._now()
         with self._write() as db:
             row = self.governance_store.merge_objects_in_transaction(
-                db, notebook_id, source_id, into_id, now
+                db, notebook_id, source_id, into_id, now, actor_id=actor_id
             )
             # merge deprecates one object in place (COUNT unchanged) — bump the
             # monotonic seq so _scale_index_version / _cluster_input_version fast

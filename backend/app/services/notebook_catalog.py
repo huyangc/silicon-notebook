@@ -770,6 +770,9 @@ class NotebookCatalogService:
             _delete_notebook_asset_dir(self._storage_dir(), notebook_id)
 
     def mark_notebook_base(self, notebook_id: str) -> None:
+        """Publish as a public library. M1: raises ``NotebookHoldsMemory``
+        (``app.domain.memory_kg_isolation``) while the notebook holds any
+        Memory source — the store decides it inside the tier UPDATE."""
         self.get_notebook(notebook_id)  # raises KeyError if missing
         self._store.set_tier(notebook_id, "base")
 

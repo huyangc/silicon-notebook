@@ -184,9 +184,9 @@ def test_t4deleg_promotion_object_type_row_delegate(repo, monkeypatch):
     original = store.promotion_object_type_row  # staticmethod -> plain function
     calls = []
 
-    def spy(db, notebook_id, obj_id):
+    def spy(db, notebook_id, obj_id, **kwargs):
         calls.append((notebook_id, obj_id))
-        return original(db, notebook_id, obj_id)
+        return original(db, notebook_id, obj_id, **kwargs)
 
     monkeypatch.setattr(store, "promotion_object_type_row", spy)
     repo.propose_promotion(notebook.id, object_id)

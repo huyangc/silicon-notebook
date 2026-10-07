@@ -1346,7 +1346,15 @@ class SourceStore:
         agent_profile_id: str = "",
         connection=None,
         capacity_limit: "int | None" = None,
-    ) -> None:
+        unless_public_library: bool = False,
+    ) -> bool:
+        # ``unless_public_library`` (M1, E4-3): see the SQLite twin. Here the
+        # INSERT … SELECT reads the notebook row FOR SHARE, which conflicts
+        # with the publish UPDATE's row lock: a publish that committed first
+        # is seen (the locking read re-checks the new row version and finds
+        # tier='base' → nothing inserted); a publish that comes second waits
+        # for this transaction. Returns whether the row was inserted.
+        #
         # ``capacity_limit`` (None = exempt): enforce the notebook's
         # visible-document ceiling atomically with this insert — notebook-row
         # lock, then COUNT, then INSERT, all in one owned transaction (see
@@ -1363,7 +1371,12 @@ class SourceStore:
             "(id,notebook_id,title,source_type,status,parse_status,file_name,file_path,"
             "source_url,file_size,file_hash,summary,doc_type,memory_id,"
             "agent_profile_id,created_at,updated_at,uploaded_by) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+            + (
+                "SELECT %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s "
+                "FROM notebooks WHERE id=%s AND tier <> 'base' FOR SHARE"
+                if unless_public_library else
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+            )
         )
         now = self.now()
         values = (
@@ -1394,12 +1407,13 @@ class SourceStore:
             if source_type not in {"memory", "knowhow"}
             else None,
         )
+        if unless_public_library:
+            values = (*values, notebook_id)
         visible = source_type not in {"memory", "knowhow"}
         if connection is not None:
             if visible:
                 self._lock_notebook_row_for_capacity(connection, notebook_id)
-            connection.execute(statement, values)
-            return
+            return connection.execute(statement, values).rowcount > 0
         with self.database.write() as owned:
             if visible:
                 self._lock_notebook_row_for_capacity(owned, notebook_id)
@@ -1407,7 +1421,7 @@ class SourceStore:
                 current = self._visible_document_count_on(owned, notebook_id)
                 if current >= capacity_limit:
                     raise DocumentCapacityExceeded(current, capacity_limit)
-            owned.execute(statement, values)
+            return owned.execute(statement, values).rowcount > 0
 
     def source_id_for_memory(self, memory_id: str) -> str | None:
         if not memory_id:
