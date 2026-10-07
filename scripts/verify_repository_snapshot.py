@@ -5205,5 +5205,23 @@ MIGRATION_MANIFEST[(86, 87)] = {
     "views": {},
 }
 
+
+# v88 (PR-E8, ledger B-12, parity with PostgreSQL 0068_promotion_provenance.sql):
+# data only -- a public library's evidence entries that name another
+# notebook's source are rewritten to the library's own 'promotion' sources and
+# elements. No schema object changes, and the frozen v9 fixture holds no such
+# entry, so no row changes either.
+MIGRATION_MANIFEST = {
+    (key[0], 88, *key[2:]): manifest
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(87, 88)] = {
+    "tables": {},
+    "columns": {},
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

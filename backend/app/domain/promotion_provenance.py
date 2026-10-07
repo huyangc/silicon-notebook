@@ -27,8 +27,10 @@ The rule, defined once here and applied by both backends' approval paths
   title>``; approval publishes it, by design).
 * Each foreign entry becomes one element of that source.  Its text is the
   original element's CURRENT text when the same transaction can still read it
-  (the element exists and belongs to the source the entry names), otherwise the
-  entry's stored ``quoted_span``; an entry with neither is dropped (an object
+  (the element exists, belongs to the source the entry names, and that source
+  is not a member's Memory -- the stores never read a Memory element here),
+  otherwise the entry's stored ``quoted_span``; an entry with neither is
+  dropped (an object
   left without evidence is then dropped by every ceiling: fail closed).
 * The entry is rewritten to point at the new source and element; the original
   ``source_id`` and its notebook stay on the entry only as display keys
@@ -147,6 +149,9 @@ class PromotionPlan:
     evidence: list
     sources: Tuple[PromotionSourceRow, ...]
     elements: Tuple[PromotionElementRow, ...]
+    #: foreign entries rewritten / dropped (neither live text nor a quote)
+    rewritten: int = 0
+    dropped: int = 0
 
 
 def evidence_source_ids(evidence: Sequence[Any]) -> list[str]:
@@ -197,13 +202,16 @@ def plan_promotion_evidence(
     rewritten: list = []
     sources: dict[str, PromotionSourceRow] = {}
     elements: dict[str, PromotionElementRow] = {}
+    kept = dropped = 0
     for item in evidence or ():
         if not isinstance(item, dict):
             rewritten.append(item)
+            kept += 1
             continue
         origin_source_id = str(item.get("source_id") or "")
         if origin_source_id in own_source_ids:
             rewritten.append(item)
+            kept += 1
             continue
         origin_element_id = str(item.get("element_id") or "")
         live = origin_elements.get(origin_element_id) if origin_element_id else None
@@ -215,6 +223,7 @@ def plan_promotion_evidence(
         stored_span = stored_span if isinstance(stored_span, str) else ""
         text = live_text or stored_span
         if not text:
+            dropped += 1
             continue
         if memory is not None:
             source_id = promotion_source_id(base_notebook_id, memory_origin_key(memory[0]))
@@ -261,4 +270,6 @@ def plan_promotion_evidence(
         evidence=rewritten,
         sources=tuple(sources.values()),
         elements=tuple(elements.values()),
+        rewritten=len(rewritten) - kept,
+        dropped=dropped,
     )

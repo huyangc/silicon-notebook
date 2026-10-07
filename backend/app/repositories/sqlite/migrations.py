@@ -268,7 +268,11 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # awaiting the post-readiness isolation rebuild, 2 = awaiting the
 # post-readiness dangling-seed check) and cleans the pre-isolation derived
 # rows of notebooks holding Memory sources. See ``_migration_87``.
-SCHEMA_VERSION = 87
+# v88 (PR-E8, ledger B-12, paired with PostgreSQL 0068_promotion_provenance.sql)
+# rewrites every public library's evidence entries that name another
+# notebook's source to the library's own 'promotion' sources and elements
+# (app.domain.promotion_provenance). No schema change. See ``_migration_88``.
+SCHEMA_VERSION = 88
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
 # when v87 was written (a migration must not change meaning when the live
@@ -5161,6 +5165,112 @@ class SqliteMigrator:
             counts["mki_scan"], counts["mki_g"],
         )
 
+    def _migration_88(self) -> None:
+        """PR-E8 (ledger B-12) promotion provenance, parity with PostgreSQL
+        ``0068_promotion_provenance.sql`` -- read that file's header first:
+        the scope (public libraries), the candidate rule (attested reverse
+        index, else every object's evidence), the rewrite and the idempotency
+        argument are written there once and hold here unchanged.
+
+        SQLite specifics:
+
+        * One ``BEGIN IMMEDIATE`` transaction including the ``user_version``
+          stamp (same shape as v87).
+        * The rewrite of each candidate object is the approval paths' own
+          planner and writer (``promotion_provenance_store.plan_for_library``
+          / ``write_plan``, rule in ``app.domain.promotion_provenance``), run
+          library by library and object by object in id order -- so "the
+          first entry names the source / element" is the same order 0068's
+          ``DISTINCT ON`` takes, and the rows are the runtime's rows;
+          ``tests/test_promotion_provenance_migration.py`` pins both against
+          the PostgreSQL file on one shared world.
+        * The candidate notebook of an approved promotion
+          (``source_candidate_id``) is the fallback origin notebook, as on
+          PostgreSQL.
+        """
+        from app.repositories.sqlite.knowledge_store import KnowledgeStore
+        from app.repositories.sqlite.promotion_provenance_store import (
+            plan_for_library,
+            write_plan,
+        )
+
+        counts = {"libraries": set(), "objects_rewritten": 0,
+                  "entries_rewritten": 0, "entries_dropped": 0,
+                  "objects_without_evidence": 0}
+        with self.database.write(operation="sqlite.migration.88") as db:
+            self.database.begin_immediate(db)
+            now = _now()
+            libraries = db.execute(
+                "SELECT n.id AS id, (EXISTS (SELECT 1 FROM unified_kg_state u "
+                "WHERE u.notebook_id = n.id AND u.source_index_backfilled = 1) "
+                "AND NOT EXISTS (SELECT 1 FROM source_index_backfills b "
+                "WHERE b.notebook_id = n.id AND b.status <> 'complete')) AS attested "
+                "FROM notebooks n WHERE n.tier = 'base' ORDER BY n.id"
+            ).fetchall()
+            for library in libraries:
+                library_id = str(library["id"])
+                if library["attested"]:
+                    candidates = db.execute(
+                        "SELECT DISTINCT kos.object_id AS id "
+                        "FROM knowledge_object_sources kos "
+                        "WHERE kos.notebook_id = ? AND NOT EXISTS (SELECT 1 FROM "
+                        "sources s WHERE s.id = kos.source_id AND s.notebook_id = ?) "
+                        "ORDER BY kos.object_id",
+                        (library_id, library_id),
+                    ).fetchall()
+                else:
+                    candidates = db.execute(
+                        "SELECT id FROM knowledge_objects WHERE notebook_id = ? "
+                        "ORDER BY id",
+                        (library_id,),
+                    ).fetchall()
+                for candidate in candidates:
+                    row = db.execute(
+                        "SELECT ko.id, ko.evidence, pc.notebook_id AS candidate_notebook "
+                        "FROM knowledge_objects ko LEFT JOIN promotion_candidates pc "
+                        "ON pc.id = NULLIF(ko.source_candidate_id, '') "
+                        "WHERE ko.id = ? AND ko.notebook_id = ?",
+                        (candidate["id"], library_id),
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    try:
+                        evidence = json.loads(row["evidence"] or "[]")
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(evidence, list):
+                        continue
+                    plan = plan_for_library(
+                        db, library_id, evidence,
+                        fallback_origin_notebook_id=str(row["candidate_notebook"] or ""),
+                    )
+                    if not (plan.rewritten or plan.dropped):
+                        continue
+                    counts["libraries"].add(library_id)
+                    counts["objects_rewritten"] += 1
+                    counts["entries_rewritten"] += plan.rewritten
+                    counts["entries_dropped"] += plan.dropped
+                    if not plan.evidence:
+                        counts["objects_without_evidence"] += 1
+                    write_plan(db, library_id, plan, now)
+                    rewritten = json.dumps(plan.evidence, ensure_ascii=False)
+                    db.execute(
+                        "UPDATE knowledge_objects SET evidence = ? WHERE id = ?",
+                        (rewritten, row["id"]),
+                    )
+                    KnowledgeStore.replace_object_sources(
+                        db, str(row["id"]), library_id, rewritten
+                    )
+            db.execute("PRAGMA user_version = 88")
+        # Content-free: counts only (docs/operations.md).
+        logger.info(
+            "promotion-provenance migration: libraries=%d objects_rewritten=%d "
+            "entries_rewritten=%d entries_dropped=%d objects_without_evidence=%d",
+            len(counts["libraries"]), counts["objects_rewritten"],
+            counts["entries_rewritten"], counts["entries_dropped"],
+            counts["objects_without_evidence"],
+        )
+
     def _seed(self) -> None:
         now = _now()
         with self._connect() as db:
@@ -5268,11 +5378,11 @@ class SqliteMigrator:
         applied: list[int] = []
         for version in range(current + 1, SCHEMA_VERSION + 1):
             getattr(self, f"_migration_{version}")()
-            # v25, v78 and v87 stamp themselves inside the same BEGIN
+            # v25, v78, v87 and v88 stamp themselves inside the same BEGIN
             # IMMEDIATE transaction as their irreversible data/schema changes.
             # Preserve the existing migration/stamp behavior byte-for-byte for
             # all other versions.
-            if version not in {25, 78, 87}:
+            if version not in {25, 78, 87, 88}:
                 with self._connect() as db:
                     db.execute(f"PRAGMA user_version = {version}")
             applied.append(version)

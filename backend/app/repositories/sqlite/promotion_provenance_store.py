@@ -21,6 +21,7 @@ from app.domain.promotion_provenance import (
     plan_promotion_evidence,
 )
 from app.repositories.sqlite.id_binding import bind_ids, drive_by
+from app.repositories.sqlite.memory_sql import memory_source_type_predicate
 
 
 def plan_for_library(
@@ -51,11 +52,14 @@ def plan_for_library(
     element_ids = foreign_element_ids(evidence, own)
     if element_ids:
         bound = bind_ids(element_ids)
+        # A Memory source's element is never read (PostgreSQL twin).
         origin_elements = {
             str(row["id"]): OriginElement(str(row["source_id"]), str(row["text"] or ""))
             for row in connection.execute(
-                "SELECT id,source_id,text FROM source_elements "
-                f"WHERE {drive_by('id', bound)}",
+                "SELECT e.id,e.source_id,e.text FROM source_elements e "
+                "JOIN sources s ON s.id=e.source_id "
+                f"WHERE {drive_by('e.id', bound)} "
+                f"AND NOT ({memory_source_type_predicate('s.source_type')})",
                 (bound.param,),
             ).fetchall()
         }

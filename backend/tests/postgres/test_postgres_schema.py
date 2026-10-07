@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 67
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 68
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -69,10 +69,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 67
-    assert migrator.migrate() == 67
-    assert migrator.current_version() == 67
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 67
+    assert migrator.migrate() == 68
+    assert migrator.migrate() == 68
+    assert migrator.current_version() == 68
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 68
 
 
 @pytest.mark.postgres_integration
@@ -80,7 +80,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 67
+    assert migrator.migrate() == 68
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -163,7 +163,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 67
+        assert PostgresMigrator(databases[1]).migrate() == 68
     finally:
         for database in databases:
             database.close()
@@ -255,6 +255,7 @@ def test_packaged_index_migration_phases_are_exact():
         (65, "sync_export_snapshot"),
         (66, "user_seen_release_ordinal"),
         (67, "memory_kg_isolation"),
+        (68, "promotion_provenance"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -740,6 +741,8 @@ def test_packaged_index_migration_phases_are_exact():
     # sets are unindexed TEMP tables dropped at commit, so neither this parser
     # nor postgres_catalog's CREATE INDEX expectation sees a phantom entry.
     assert index_declarations(67) == []
+    # Migration 68 (PR-E8 promotion provenance) is data only: no index either.
+    assert index_declarations(68) == []
     # Spelled without ``IF NOT EXISTS`` on purpose, and that is asserted
     # rather than merely commented: app/migration/shadow/postgres_catalog.py
     # parses CREATE INDEX straight out of these files to build the catalog

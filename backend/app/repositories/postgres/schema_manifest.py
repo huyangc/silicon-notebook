@@ -425,7 +425,13 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # clusters with a Memory member, the derived layers naming them, mixed
 # evidence, chunks under Memory sources). No table, index, FK or
 # unique-surface change.
+# SQLite v88 / PostgreSQL 0068 (PR-E8, ledger B-12, promotion provenance)
+# rewrite every public library's evidence entries that name another notebook's
+# source to the library's own source_type='promotion' sources and elements
+# (app/domain/promotion_provenance.py) and replace the rewritten objects'
+# reverse-index rows. Data only: no table, column, index, FK or unique-surface
+# change.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=87,
-    postgres_version=67,
+    sqlite_version=88,
+    postgres_version=68,
 )

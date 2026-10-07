@@ -76,8 +76,10 @@ def upgraded(repo):
         cases.seed(db, postgres=False)
     before = _snapshot(database)
     _roll_back_to_v86(database)
-    applied = SqliteMigrator(database, repo.settings).migrate()
-    assert applied == [87]
+    # v87 alone: v88 (PR-E8) then rewrites the public library's promotion
+    # copy that this world keeps (``ko-pub``), which is v88's own acceptance
+    # (tests/test_promotion_provenance_migration.py), not v87's.
+    SqliteMigrator(database, repo.settings)._migration_87()
     return repo, before, _snapshot(database)
 
 
@@ -158,7 +160,7 @@ def test_rerun_changes_nothing_and_never_requeues_a_finished_notebook(upgraded):
 def test_fresh_database_has_the_marker_defaulting_to_isolated(repo):
     database = repo._runtime.database
     with database.connect() as db:
-        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == 87
+        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == 88
         column = {
             row[1]: (row[2], row[3], row[4])
             for row in db.execute("PRAGMA table_info(unified_kg_state)")

@@ -28,6 +28,7 @@ from app.repositories.postgres._store_utils import (
     normalize_timestamp,
 )
 from app.repositories.postgres.id_binding import bind_ids, execute_ids, member_of
+from app.repositories.postgres.memory_sql import memory_source_type_predicate
 
 
 def plan_for_library(
@@ -59,12 +60,18 @@ def plan_for_library(
     element_ids = foreign_element_ids(evidence, own)
     if element_ids:
         bound = bind_ids(element_ids)
+        # A Memory source's element is never read: such an entry keeps only
+        # the excerpt already stored with it (it cannot reach a public library
+        # through the approval paths, M1; this keeps a stray one from carrying
+        # more of a Memory than it already did).
         origin_elements = {
             str(row["id"]): OriginElement(str(row["source_id"]), str(row["text"] or ""))
             for row in execute_ids(
                 connection,
-                "SELECT id,source_id,text FROM source_elements "
-                f"WHERE {member_of('id', bound)}",
+                "SELECT e.id,e.source_id,e.text FROM source_elements e "
+                "JOIN sources s ON s.id=e.source_id "
+                f"WHERE {member_of('e.id', bound)} "
+                f"AND NOT ({memory_source_type_predicate('s.source_type')})",
                 (bound.param,),
             ).fetchall()
         }

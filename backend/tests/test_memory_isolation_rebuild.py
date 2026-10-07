@@ -42,7 +42,7 @@ def repo(tmp_path, monkeypatch):
     with database.write() as db:
         db.execute("ALTER TABLE unified_kg_state DROP COLUMN memory_isolation_version")
         db.execute("PRAGMA user_version = 86")
-    assert SqliteMigrator(database, repository.settings).migrate() == [87]
+    assert SqliteMigrator(database, repository.settings).migrate() == [87, 88]
     return repository
 
 
@@ -575,7 +575,7 @@ def _make_repo(tmp_path, monkeypatch):
     with database.write() as db:
         db.execute("ALTER TABLE unified_kg_state DROP COLUMN memory_isolation_version")
         db.execute("PRAGMA user_version = 86")
-    assert SqliteMigrator(database, repository.settings).migrate() == [87]
+    assert SqliteMigrator(database, repository.settings).migrate() == [87, 88]
     return repository
 
 
