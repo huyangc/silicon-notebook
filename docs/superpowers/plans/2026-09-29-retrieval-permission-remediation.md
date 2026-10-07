@@ -693,6 +693,12 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
   来源一律 404，摘要里看不到它的名字与 KG 标志（N-6）；主人一切照旧；成员另获 b 的读权后生效；两人参与集相同时共用图缓存（缓存命中计数）。
 - 变异：wiring 退回无查看者，成员用例必须红；缓存键不含有效集合指纹，「成员不共用主人含私有库的图」必须红。
 - 红线：后台无 actor 路径失败即关（只剩 base / everyone）；`list_mount_edges` / `mountable_notebooks` 不变。
+- **E7-5 交接（公开页 D-3 复核，按创建者）**：`$R/backend/app/services/public_share_recheck.py::mounts_still_effective` 今天经
+  `repo.participant_notebook_ids(notebook_id)` 取不随查看者变化的参与集，已经带着 `creator_id` 参数。E6 合入后改为按查看者取参与集、
+  `viewer_id=creator`，调用点共三处：`$R/backend/app/api/ask_routes.py` 的 `_public_conversation_or_404`（公开页与图片端点）与
+  `_conversation_share_count`（分享 POST 与披露 GET 的预检），以及 `$R/backend/app/api/report_routes.py` 的 `_report_mounts_still_effective`。
+  匿名路由不绑定请求用户，所以查看者必须显式传入，不能取 `current_viewer_id()`。`public_page_mount_recheck_cases.py` 的场景（成员 Alice +
+  主人把自己的库挂到共享库）在 M3 生效后会按新语义变化，E6-3 同步改写期望并补「挂载人自己能读、创建者读不了」的用例。
 
 **E6-Z**：`docs/product-and-api*.md`「读权 ⇒ 可挂载」一节加 M3 与 N-6；`docs/development*.md` 的 `mount_sql` 条目改为「随查看者」；
 `architecture.md` 参与集解析。
