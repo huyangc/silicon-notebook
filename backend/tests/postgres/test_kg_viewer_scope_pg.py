@@ -25,6 +25,9 @@ pytestmark = [
 T0 = datetime(2026, 9, 1, tzinfo=timezone.utc)
 
 
+from tests.pre_isolation_graph import build_pre_isolation  # noqa: E402
+
+
 @pytest.fixture
 def repo(postgres_settings):
     from app.repositories.postgres.repository import PostgresRepository
@@ -141,7 +144,7 @@ def build_scenario(repo, *, b_memory: bool):
                 "VALUES (%s,%s,%s,%s,%s,'defines','[]'::jsonb,%s)",
                 (rel_id, nb, "src-s", definer, ids.engram_s, T0),
             )
-    repo.rebuild_unified_kg(nb)
+    build_pre_isolation(repo, nb)
     cmap = repo.cluster_map(nb)
     ids.engram_canonical = cmap[ids.engram_s]
     assert cmap[ids.engram_ma] == ids.engram_canonical
@@ -234,7 +237,7 @@ def test_pg_owner_column_hides_objects_whatever_their_evidence(repo):
          "evidence": []},
     ], [{"source_local_id": "n", "target_local_id": "m", "edge_type": "about",
          "evidence": []}])
-    repo.rebuild_unified_kg(s.nb)
+    build_pre_isolation(repo, s.nb)
     with repo._runtime.database.connect() as db:
         merged = db.execute(
             "SELECT id FROM knowledge_objects WHERE notebook_id=%s AND source_id='src-ma' "

@@ -2652,7 +2652,11 @@ class UnifiedKgStorePort(Protocol):
     @staticmethod
     def distinct_cluster_count(db: object, notebook_id: str) -> int: ...
     @staticmethod
-    def finish_rebuild_state(db: object, notebook_id: str, cluster_input_version: str, cluster_count: int, now: str, published_generation: int) -> None: ...
+    def finish_rebuild_state(db: object, notebook_id: str, cluster_input_version: str, cluster_count: int, now: str, published_generation: int, *, input_seq: int | None = None) -> None:
+        """Rebuild end-write. ``input_seq`` is the ``kg_mutation_seq`` the rebuild
+        claimed with (``claim_derived_generation``); dirty is cleared only while
+        the current seq still equals it, so a change that arrived mid-rebuild
+        keeps the notebook dirty (E4-2). ``None`` (unknown start) never clears it."""
     @staticmethod
     def insert_scratch_rows(db: object, rows: object) -> None: ...
     @staticmethod

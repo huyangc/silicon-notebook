@@ -407,3 +407,13 @@ def _community_queries(repo):
         event_log=runtime.event_log,
         sibling_min_bridge=settings.sibling_min_bridge,
     )
+
+
+# ---------------------------------------------- E4-2: Memory in the bridge
+def test_memory_claims_and_memory_members_build_no_mention_bridge(repo):
+    """Ruling M1 (E4-2): no mention edge or co-mention from a Memory claim, and a
+    legacy Memory cluster member never makes a shared concept a cross-source
+    bridge target. Body shared with the PostgreSQL twin."""
+    from tests import memory_kg_seed_world as world
+
+    world.assert_memory_builds_no_mention_bridge(repo)

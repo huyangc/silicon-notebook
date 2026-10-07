@@ -5939,17 +5939,17 @@ class KnowledgeLifecycleService:
                             db, notebook_id, "concept")})
             with self._write() as db:
                 # CRITICAL: the store's finish_rebuild_state UPSERT stores
-                # cluster_input_version=_ver (captured at ENTRY, reflecting the seq
-                # this rebuild consumed) and clears dirty=0, but MUST NOT touch
-                # kg_mutation_seq — the column is omitted from both the column list
-                # and the SET so an existing row's counter is PRESERVED. Bumping it
-                # here would advance the version past what was just stored (gate
-                # never skips); resetting it would lose mutations that arrived
-                # mid-rebuild.
+                # cluster_input_version=_ver (captured at ENTRY) and clears dirty
+                # only while kg_mutation_seq still equals the claim's (input_seq:
+                # a change that arrived mid-rebuild keeps dirty=1), but MUST NOT
+                # touch kg_mutation_seq — omitted from both the column list and
+                # the SET so the counter is PRESERVED. Bumping it would advance the
+                # version past what was just stored (gate never skips); resetting
+                # it would lose mutations that arrived mid-rebuild.
                 self.unified_kg.finish_rebuild_state(
                     db, notebook_id, _ver, cluster_count, now,
                     published_generation=generation,
-                )
+                    input_seq=_claim["kg_mutation_seq"])
         finally:
             # Final cleanup: drop only THIS run's scratch rows (run_id-scoped
             # so a concurrent rebuild with a different run_id is unaffected).

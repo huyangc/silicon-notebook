@@ -2645,3 +2645,18 @@ def test_deleting_the_notebook_takes_the_artifacts_with_it(repo):
     assert _artifacts(repo, notebook_id) == {}
     assert _edges(repo, notebook_id) == []
     assert _profiles(repo, notebook_id) == {}
+
+
+# ------------------------------------ E4-2: the analysis readers skip Memory
+# Ruling M1. A rebuild never clusters a Memory-derived object (the seed readers
+# leave it out; tests/test_rebuild_streaming.py pins that end to end). These
+# pin the three heavy analysis readers on their own, the way the source-profile
+# test above pins the hidden-source rule: a published cluster row with a Memory
+# member (the shape a pre-isolation notebook, or a legacy fusion, left behind)
+# and the Memory source's own relations must not be counted, named or ranked.
+
+def test_analysis_readers_do_not_count_rank_or_name_memory_derived_rows(repo):
+    """Body shared with the PostgreSQL twin (tests/memory_kg_seed_world.py)."""
+    from tests import memory_kg_seed_world as world
+
+    world.assert_analysis_readers_skip_legacy_memory_rows(repo)

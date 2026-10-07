@@ -35,6 +35,9 @@ from tests.test_kg_viewer_scope import (  # noqa: F401  (``repo`` is a fixture)
 )
 
 
+from tests.pre_isolation_graph import build_pre_isolation
+
+
 @pytest.fixture(params=["viz", "db"])
 def neighbour_path(request, repo, monkeypatch):
     if request.param == "db":
@@ -57,7 +60,7 @@ def add_phantom(repo, s):
          "evidence": [_ev("src-ma", "el-ma-secret")]},
     ], [{"source_local_id": "ph", "target_local_id": "hub", "edge_type": "related_to",
          "evidence": []}])
-    repo.rebuild_unified_kg(s.nb)
+    build_pre_isolation(repo, s.nb)
     with repo._write() as db:
         phantom = _object_id(db, s.nb, "A-PRIVATE Phantom", "src-s")
     return phantom, repo.cluster_map(s.nb)[phantom]
@@ -75,7 +78,7 @@ def add_gadget(repo, s):
          "payload": {"name": "Gadget", "section_path": "A-PRIVATE G"},
          "evidence": [_ev("src-ma", "el-ma-def")]},
     ], [])
-    repo.rebuild_unified_kg(s.nb)
+    build_pre_isolation(repo, s.nb)
     with repo._write() as db:
         visible, hidden = (
             db.execute(
@@ -159,7 +162,7 @@ def test_unrelated_clusters_keep_their_stored_label(repo):
         {"local_id": "w", "object_type": "concept",
          "payload": {"name": "Widget", "section_path": "W"},
          "evidence": [_ev("src-s", "el-s-def")]}], [])
-    repo.rebuild_unified_kg(s.nb)
+    build_pre_isolation(repo, s.nb)
     with repo._write() as db:
         widget = _object_id(db, s.nb, "Widget", "src-s")
     widget_c = repo.cluster_map(s.nb)[widget]
@@ -231,7 +234,7 @@ def test_fused_description_counts_a_member_owned_by_foreign_memory(repo):
         {"local_id": "z", "object_type": "concept",
          "payload": {"name": "Gizmo", "section_path": "Z"},
          "evidence": [_ev("src-s", "el-s-occ")]}], [])
-    repo.rebuild_unified_kg(s.nb)
+    build_pre_isolation(repo, s.nb)
     with repo._write() as db:
         visible = _object_id(db, s.nb, "Gizmo", "src-s")
         owned = _object_id(db, s.nb, "Gizmo", "src-ma")
@@ -265,7 +268,7 @@ def test_evidence_items_are_judged_on_named_and_actual_source(repo):
          "evidence": [_ev("src-s", "el-s-occ"), _ev("src-s", "el-ma-def")]},
     ], [{"source_local_id": "t", "target_local_id": "g", "edge_type": "about",
          "evidence": []}])
-    repo.rebuild_unified_kg(s.nb)
+    build_pre_isolation(repo, s.nb)
     with repo._write() as db:
         gadget = _object_id(db, s.nb, "Gadget", "src-s")
     canonical = repo.cluster_map(s.nb)[gadget]
@@ -295,7 +298,7 @@ def deprecate_with_visible_evidence(repo, s, object_id):
             "UPDATE knowledge_objects SET evidence=?, status='deprecated' WHERE id=?",
             (raw, object_id))
         repo._runtime.knowledge.replace_object_sources(db, object_id, s.nb, raw)
-    repo.rebuild_unified_kg(s.nb, force=True)
+    build_pre_isolation(repo, s.nb, force=True)
     assert object_id not in repo.cluster_map(s.nb)
 
 

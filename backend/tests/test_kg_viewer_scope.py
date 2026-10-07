@@ -24,6 +24,9 @@ from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository
 
 
+from tests.pre_isolation_graph import build_pre_isolation
+
+
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
@@ -145,7 +148,7 @@ def build_scenario(repo, *, b_memory: bool):
                 "VALUES (?,?,?,?,?,'defines','[]',?)",
                 (rel_id, nb, "src-s", definer, ids.engram_s, _now()),
             )
-    repo.rebuild_unified_kg(nb)
+    build_pre_isolation(repo, nb)
     cmap = repo.cluster_map(nb)
     ids.engram_canonical = cmap[ids.engram_s]
     assert cmap[ids.engram_ma] == ids.engram_canonical
@@ -283,7 +286,7 @@ def test_concept_detail_keyset_pages_stay_full_around_hidden_members(repo):
             "local_id": "c", "object_type": "concept",
             "payload": {"name": "Engram", "section_path": "1"},
             "evidence": [_ev(f"src-v{index}", f"el-v{index}")]}], [])
-    repo.rebuild_unified_kg(s.nb)
+    build_pre_isolation(repo, s.nb)
     canonical = repo.cluster_map(s.nb)[s.ids.engram_s]
     seen, after, total = [], "", None
     while True:

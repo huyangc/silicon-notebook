@@ -1,3 +1,4 @@
+import json
 import time
 import pytest
 from unittest.mock import patch
@@ -302,3 +303,202 @@ def test_scratch_seed_and_cluster_swap_keep_store_seams(repo, monkeypatch):
         elif name not in {"write.begin", "write.commit"}:
             assert db_id in opened_reads
     assert progress
+
+
+# ------------------------------------------------ E4-2: Memory never seeds
+# Ruling M1: objects derived from a member's Memory never enter a shared
+# cluster or any layer derived from the clusters. The world is shared with the
+# other E4-2 tests and the PostgreSQL twin (tests/memory_kg_seed_world.py).
+
+def _state(repo, notebook_id):
+    with repo._connect() as db:
+        return dict(db.execute(
+            "SELECT dirty, kg_mutation_seq, cluster_input_version "
+            "FROM unified_kg_state WHERE notebook_id=?", (notebook_id,)).fetchone())
+
+
+def test_a_rebuild_puts_no_memory_derived_object_in_any_cluster(repo):
+    """After a rebuild of a notebook holding another member's Memory: no Memory
+    object is a cluster member, no canonical id / name / description is minted
+    from one, and canonical relations, mention bridge, communities and the
+    analysis artifacts name none -- while the shared graph is still built
+    (positive controls: the cross-source GQA cluster, a canonical relation, a
+    mention edge and a community exist)."""
+    from tests import memory_kg_seed_world as world
+
+    nb_id = world.seed(repo)
+    repo.rebuild_unified_kg(nb_id, force=True)
+    layers = world.assert_no_memory_in_derived_layers(repo, nb_id)
+    gqa = [r for r in layers["clusters"] if r["canonical_id"] == "K-grouped query attention"]
+    assert len(gqa) == 2
+    assert layers["canonical_relations"] and layers["mention_edges"]
+    assert layers["community_members"]
+    # A Memory object is its own canonical: it has no cluster row at all.
+    assert {r["member_object_id"] for r in layers["clusters"]} == set(
+        world.object_ids_by_name(repo, nb_id, "s1").values()
+    ) | set(world.object_ids_by_name(repo, nb_id, "s2").values()) | set(
+        world.object_ids_by_name(repo, nb_id, "s3").values()
+    )
+    assert _state(repo, nb_id)["dirty"] == 0
+
+
+def test_seed_streams_leave_memory_derived_objects_out(repo):
+    """The two seed readers of the clustering pass (names for the alias map,
+    then id+payload into the scratch table) skip Memory objects, in order."""
+    from tests import memory_kg_seed_world as world
+
+    nb_id = world.seed(repo)
+    store = repo._runtime.unified_kg
+    shared = {
+        name for source in world.SHARED_SOURCES
+        for name in world.object_ids_by_name(repo, nb_id, source)
+    }
+    with repo._connect() as db:
+        names = [json.loads(r["payload"])["name"]
+                 for r in store.seed_payload_rows(db, nb_id, "concept")]
+        streamed = [r["id"] for r in store.stream_seed_rows(db, nb_id, "concept")]
+        claims = [json.loads(r["payload"])["name"]
+                  for r in store.seed_payload_rows(db, nb_id, "claim")]
+    assert names == ["Grouped-query attention (GQA)", "Multi-Query Attention (MQA)",
+                     "Grouped-query attention (GQA)", "KV cache"]
+    assert not set(streamed) & world.memory_object_ids(repo, nb_id)
+    assert len(streamed) == 4
+    assert claims == ["GQA uses fewer KV heads than MQA while keeping quality."]
+    assert set(names) | set(claims) <= shared
+
+
+def test_a_memory_source_deleted_mid_rebuild_leaves_the_notebook_dirty(repo, monkeypatch):
+    """E5-1 review P3-b: the rebuild end-write used to clear dirty even when a
+    change arrived while the rebuild ran, so "dirty is the only trace a deleted
+    Memory leaves" failed under a concurrent delete. The rebuild now clears it
+    only while kg_mutation_seq still equals the value it claimed with."""
+    from tests import memory_kg_seed_world as world
+
+    nb_id = world.seed(repo)
+    repo.rebuild_unified_kg(nb_id, force=True)
+    assert _state(repo, nb_id)["dirty"] == 0  # control: a quiet rebuild is clean
+    store = repo._runtime.unified_kg
+    real = store.stream_seed_rows
+    fired = []
+
+    def stream_seed_rows(db, notebook_id, object_type):
+        if not fired:
+            fired.append(object_type)
+            repo.delete_source(world.MEMORY_SOURCE)  # the Memory removal path
+        return real(db, notebook_id, object_type)
+
+    monkeypatch.setattr(store, "stream_seed_rows", stream_seed_rows)
+    before = _state(repo, nb_id)["kg_mutation_seq"]
+    repo.rebuild_unified_kg(nb_id, force=True)
+    after = _state(repo, nb_id)
+    assert fired and after["kg_mutation_seq"] > before
+    assert after["dirty"] == 1, after
+    # the next rebuild picks it up and, nothing changing any more, clears it
+    monkeypatch.setattr(store, "stream_seed_rows", real)
+    repo.rebuild_unified_kg(nb_id)
+    assert _state(repo, nb_id)["dirty"] == 0
+
+
+def test_finish_rebuild_state_clears_dirty_only_at_the_claimed_seq(repo):
+    """Store level: dirty goes to 0 only when the current kg_mutation_seq equals
+    input_seq; a later seq or an unknown start keeps it 1. The pointer guard
+    still wins (a moved pointer is a no-op)."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, None, [{"local_id": "a", "object_type": "concept",
+                                 "payload": {"name": "MOSFET", "section_path": ""},
+                                 "evidence": []}], [])
+    repo.rebuild_unified_kg(nb.id, force=True)
+    store = repo._runtime.unified_kg
+    with repo._connect() as db:
+        gen, seq = db.execute(
+            "SELECT cluster_generation, kg_mutation_seq FROM unified_kg_state "
+            "WHERE notebook_id=?", (nb.id,)).fetchone()
+
+    def finish(**kw):
+        with repo._write() as db:
+            db.execute("UPDATE unified_kg_state SET dirty=1 WHERE notebook_id=?", (nb.id,))
+            store.finish_rebuild_state(db, nb.id, "v", 1, "2026-09-30T00:00:00",
+                                       published_generation=kw.pop("gen", gen), **kw)
+        return _state(repo, nb.id)["dirty"]
+
+    assert finish(input_seq=seq) == 0
+    assert finish(input_seq=seq - 1) == 1
+    assert finish() == 1
+    assert finish(input_seq=seq, gen=gen + 5) == 1  # pointer moved: no-op
+
+
+def test_finish_rebuild_state_insert_branch_follows_the_same_rule(repo):
+    """The INSERT branch (the state row vanished mid-rebuild -- an offline
+    merge) writes a birth row whose kg_mutation_seq is the column default 0:
+    dirty is 0 only for a rebuild that claimed at seq 0, else 1; an unknown
+    start never reads clean."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    store = repo._runtime.unified_kg
+
+    def finish_on_a_missing_row(input_seq):
+        with repo._write() as db:
+            db.execute("DELETE FROM unified_kg_state WHERE notebook_id=?", (nb.id,))
+            store.finish_rebuild_state(db, nb.id, "v", 1, "2026-09-30T00:00:00",
+                                       published_generation=0, input_seq=input_seq)
+        state = _state(repo, nb.id)
+        assert state["kg_mutation_seq"] == 0 and state["cluster_input_version"] == "v"
+        return state["dirty"]
+
+    assert finish_on_a_missing_row(0) == 0
+    assert finish_on_a_missing_row(3) == 1
+    assert finish_on_a_missing_row(None) == 1
+
+
+def _marker_column_present(repo) -> bool:
+    with repo._connect() as db:
+        return any(r["name"] == "memory_isolation_version"
+                   for r in db.execute("PRAGMA table_info(unified_kg_state)"))
+
+
+def test_a_manual_rebuild_sets_the_memory_isolation_marker(repo):
+    """E4-5 hand-over: the rebuild end-write sets memory_isolation_version=1 in
+    the same guarded upsert (any rebuild after the isolation is isolated)."""
+    if not _marker_column_present(repo):
+        pytest.skip("unified_kg_state.memory_isolation_version arrives with "
+                    "SQLite v87 (E4-5); flips on at PR-E4 assembly")
+    from tests import memory_kg_seed_world as world
+
+    nb_id = world.seed(repo)
+    repo.rebuild_unified_kg(nb_id, force=True)
+    with repo._write() as db:
+        db.execute("UPDATE unified_kg_state SET memory_isolation_version=0 "
+                   "WHERE notebook_id=?", (nb_id,))
+    repo.rebuild_unified_kg(nb_id, force=True)
+    with repo._connect() as db:
+        assert db.execute("SELECT memory_isolation_version FROM unified_kg_state "
+                          "WHERE notebook_id=?", (nb_id,)).fetchone()[0] == 1
+
+
+def test_catchup_window_never_republishes_a_memory_member(repo):
+    """Second line of defence (E4-2): the catch-up after a generation flip moves
+    the fusion rows of the retired generation into the published one. A
+    Memory-derived member row in that window (legacy data, a future writer) is
+    not moved; the shared row next to it is."""
+    from tests import memory_kg_seed_world as world
+
+    nb_id = world.seed(repo)
+    repo.rebuild_unified_kg(nb_id, force=True)
+    memory = world.object_ids_by_name(repo, nb_id, world.MEMORY_SOURCE)
+    shared = world.object_ids_by_name(repo, nb_id, "s2")
+    with repo._write() as db:
+        gen = db.execute("SELECT cluster_generation FROM unified_kg_state "
+                         "WHERE notebook_id=?", (nb_id,)).fetchone()[0]
+        for row_id, member in (("cc-win-mem", memory["SECRET-ALPHA plan"]),
+                               ("cc-win-shared", shared["KV cache"])):
+            db.execute(
+                "INSERT INTO concept_clusters (id, notebook_id, canonical_id, "
+                "member_object_id, canonical_name, object_type, created_at, generation) "
+                "VALUES (?, ?, 'K-window', ?, 'window', 'concept', ?, ?)",
+                (row_id, nb_id, member, world.NOW, gen + 7),
+            )
+    with repo._connect() as db:
+        rows = repo._runtime.unified_kg.catchup_window_members(
+            db, nb_id, gen, "2026-01-01T00:00:00", 5, 100)
+    members = {r["member_object_id"] for r in rows}
+    assert shared["KV cache"] in members
+    assert not members & world.memory_object_ids(repo, nb_id)

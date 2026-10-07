@@ -25,6 +25,9 @@ from tests.test_kg_viewer_scope import (  # noqa: F401  (``repo`` is a fixture)
 )
 
 
+from tests.pre_isolation_graph import build_pre_isolation
+
+
 def _cluster_of(repo, nb, object_id):
     return repo.cluster_map(nb)[object_id]
 
@@ -43,7 +46,7 @@ def _add_owned_objects(repo, s):
          "evidence": []},
     ], [{"source_local_id": "n", "target_local_id": "m", "edge_type": "about",
          "evidence": []}])
-    repo.rebuild_unified_kg(s.nb)
+    build_pre_isolation(repo, s.nb)
     with repo._write() as db:
         merged = db.execute(
             "SELECT id FROM knowledge_objects WHERE notebook_id=? AND source_id='src-ma' "
@@ -88,7 +91,7 @@ def test_visible_member_never_returns_its_foreign_evidence_items(repo):
             # tell, so the post-enrich filter is what drops it.
             {**_ev("src-s", "el-ma-def"), "quoted_span": "mislabelled"},
         ]}], [])
-    repo.rebuild_unified_kg(s.nb)
+    build_pre_isolation(repo, s.nb)
     canonical = _cluster_of(repo, s.nb, s.ids.engram_s)
     detail = as_user(s.b, repo.concept_detail, s.nb, canonical)
     member_blob = repr(detail["members"])
@@ -131,7 +134,7 @@ def _add_dangling(repo, s):
          "evidence": [_ev("src-ma", "el-ma-def"), _ev("src-gone", "el-gone")]},
     ], [{"source_local_id": "k", "target_local_id": "d", "edge_type": "about",
          "evidence": []}])
-    repo.rebuild_unified_kg(s.nb)
+    build_pre_isolation(repo, s.nb)
     with repo._write() as db:
         dangling = db.execute(
             "SELECT id FROM knowledge_objects WHERE notebook_id=? AND source_id='src-s' "
@@ -187,7 +190,7 @@ def _fixed_hub(repo, s, pattern):
         ))
     with repo._write() as db:
         repo._runtime.knowledge.insert_object_chunk(db, rows)
-    repo.rebuild_unified_kg(s.nb)
+    build_pre_isolation(repo, s.nb)
     return _cluster_of(repo, s.nb, "ko-hub-00")
 
 
@@ -252,7 +255,7 @@ def test_neighbour_cap_counts_visible_neighbours(repo, monkeypatch, path):
          "evidence": [_ev("src-s", "el-s-def")]} for i in range(3)],
         [{"source_local_id": f"v{i}", "target_local_id": "hub", "edge_type": "about",
           "evidence": []} for i in range(3)])
-    repo.rebuild_unified_kg(s.nb)
+    build_pre_isolation(repo, s.nb)
     if path == "db":
         monkeypatch.setattr(repo._runtime.scale_artifacts, "viz_index",
                             lambda *_a, **_k: None)
@@ -304,7 +307,7 @@ def _foreign_memories(repo, s, count, *, offset=0):
             "local_id": "c", "object_type": "concept",
             "payload": {"name": f"Private topic {j}", "section_path": "1"},
             "evidence": [_ev(f"src-x{j}", f"el-x{j}")]}], [])
-    repo.rebuild_unified_kg(s.nb)
+    build_pre_isolation(repo, s.nb)
 
 
 def _endpoint_counts(repo, monkeypatch, s):
@@ -411,7 +414,7 @@ def _mixed_neighbour_clusters(repo, s, names):
         {"local_id": n, "object_type": "concept",
          "payload": {"name": n, "section_path": "A-PRIVATE"},
          "evidence": [_ev("src-ma", "el-ma-occ")]} for n in names], [])
-    repo.rebuild_unified_kg(s.nb)
+    build_pre_isolation(repo, s.nb)
 
 
 def test_partly_hidden_clusters_are_read_in_one_batch(repo, monkeypatch):

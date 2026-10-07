@@ -22,6 +22,9 @@ pytestmark = [
 ]
 
 
+from tests.pre_isolation_graph import build_pre_isolation  # noqa: E402
+
+
 def _reader(repo):
     return repo._runtime.knowledge_query.viewer_scope.__self__
 
@@ -55,7 +58,7 @@ def test_pg_neighbours_omit_a_cluster_hidden_by_the_evidence_half(
          "evidence": [_ev("src-ma", "el-ma-secret")]},
     ], [{"source_local_id": "ph", "target_local_id": "hub", "edge_type": "related_to",
          "evidence": []}])
-    repo.rebuild_unified_kg(s.nb)
+    build_pre_isolation(repo, s.nb)
     with repo._runtime.database.connect() as db:
         phantom = _object_id(db, s.nb, "A-PRIVATE Phantom", "src-s")
     phantom_c = repo.cluster_map(s.nb)[phantom]
@@ -83,7 +86,7 @@ def test_pg_cluster_labels_never_come_from_an_evidence_hidden_member(repo, certi
          "payload": {"name": "Gadget", "section_path": "A-PRIVATE G"},
          "evidence": [_ev("src-ma", "el-ma-def")]},
     ], [])
-    repo.rebuild_unified_kg(s.nb)
+    build_pre_isolation(repo, s.nb)
     database = repo._runtime.database
     with database.connect() as db:
         visible = db.execute(
@@ -121,7 +124,7 @@ def test_pg_a_raw_object_is_judged_on_its_own_source_whatever_its_status(repo, m
             "UPDATE knowledge_objects SET evidence=%s::jsonb, status='deprecated' WHERE id=%s",
             (raw, s.ids.secret))
         repo._runtime.knowledge.replace_object_sources(db, s.ids.secret, s.nb, raw)
-    repo.rebuild_unified_kg(s.nb, force=True)
+    build_pre_isolation(repo, s.nb, force=True)
     assert s.ids.secret not in repo.cluster_map(s.nb)
     monkeypatch.setattr(repo._runtime.scale_artifacts, "viz_index", lambda *_a, **_k: None)
     owner = as_user(s.a, repo.kg_neighbors, s.nb, s.ids.engram_s)
@@ -187,7 +190,7 @@ def test_pg_fused_description_counts_a_member_owned_by_foreign_memory(repo):
         {"local_id": "z", "object_type": "concept",
          "payload": {"name": "Gizmo", "section_path": "Z"},
          "evidence": [_ev("src-s", "el-s-occ")]}], [])
-    repo.rebuild_unified_kg(s.nb)
+    build_pre_isolation(repo, s.nb)
     database = repo._runtime.database
     with database.connect() as db:
         visible = _object_id(db, s.nb, "Gizmo", "src-s")
@@ -217,7 +220,7 @@ def test_pg_evidence_items_are_judged_on_named_and_actual_source(repo):
          "evidence": [_ev("src-s", "el-s-occ"), _ev("src-s", "el-ma-def")]},
     ], [{"source_local_id": "t", "target_local_id": "g", "edge_type": "about",
          "evidence": []}])
-    repo.rebuild_unified_kg(s.nb)
+    build_pre_isolation(repo, s.nb)
     with repo._runtime.database.connect() as db:
         gadget = _object_id(db, s.nb, "Gadget", "src-s")
     canonical = repo.cluster_map(s.nb)[gadget]
