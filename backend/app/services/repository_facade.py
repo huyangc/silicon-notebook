@@ -2571,13 +2571,17 @@ class RepositoryFacade:
             notebook_id, limit
         )
 
-    def set_edge_review(self, notebook_id: str, rel_id: str, status: str) -> None:
+    def set_edge_review(
+        self, notebook_id: str, rel_id: str, status: str,
+        *, actor_id: Optional[str] = None,
+    ) -> None:
         """Persist review_status on a knowledge_relation —
         KnowledgeGovernanceService owns the orchestration (Task 16; the frozen
         commit→dirty→invalidate phase order is unchanged). Frozen-signature
-        delegate."""
+        delegate; ``actor_id`` (M1) is additive: a relation derived from
+        someone else's Memory answers like a missing id."""
         return self._runtime.knowledge_governance.set_edge_review(
-            notebook_id, rel_id, status
+            notebook_id, rel_id, status, actor_id=actor_id
         )
 
     def _delete_relations_for_source(self, db, source_id: str) -> None:
@@ -3104,7 +3108,8 @@ class RepositoryFacade:
         )
 
     def propose_promotion(
-        self, notebook_id: str, object_id: str, *, target_base_id: str = ""
+        self, notebook_id: str, object_id: str, *, target_base_id: str = "",
+        actor_id: Optional[str] = None,
     ) -> dict:
         """Propose a personal-KG object for promotion into the base corpus —
         KnowledgeGovernanceService owns the orchestration (Task 16; idempotent
@@ -3112,9 +3117,11 @@ class RepositoryFacade:
         Task 7 (multi-domain base libraries) adds target_base_id: which
         mounted public reference library to promote into (required only when
         more than one is mounted). Frozen for the original two positional
-        params; target_base_id is additive and backward compatible."""
+        params; target_base_id is additive and backward compatible, and so
+        is ``actor_id`` (M1: the proposer, for the Memory ownership check)."""
         return self._runtime.knowledge_governance.propose_promotion(
-            notebook_id, object_id, target_base_id=target_base_id
+            notebook_id, object_id, target_base_id=target_base_id,
+            actor_id=actor_id,
         )
 
     def list_promotion_queue(self, status_filter: Optional[str] = None) -> List[dict]:
@@ -3172,13 +3179,15 @@ class RepositoryFacade:
         )
 
     def update_knowledge(
-        self, notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate
+        self, notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate,
+        *, actor_id: Optional[str] = None,
     ) -> RuleCard:
         """Update a knowledge object — KnowledgeGovernanceService owns the
         orchestration (Task 16; the frozen commit→best-effort-embed→invalidate
-        →dirty order is unchanged). Frozen-signature delegate."""
+        →dirty order is unchanged). Frozen-signature delegate; ``actor_id``
+        (M1) is additive."""
         return self._runtime.knowledge_governance.update_knowledge(
-            notebook_id, knowledge_id, payload
+            notebook_id, knowledge_id, payload, actor_id=actor_id
         )
 
     @staticmethod
@@ -3215,13 +3224,16 @@ class RepositoryFacade:
             notebook_id, object_type
         )
 
-    def merge_knowledge(self, notebook_id: str, source_id: str, payload: MergeRequest) -> RuleCard:
+    def merge_knowledge(
+        self, notebook_id: str, source_id: str, payload: MergeRequest,
+        *, actor_id: Optional[str] = None,
+    ) -> RuleCard:
         """Merge one knowledge object into another —
         KnowledgeGovernanceService owns the orchestration (Task 16; the frozen
         commit→dirty→invalidate mirror-image order is unchanged).
-        Frozen-signature delegate."""
+        Frozen-signature delegate; ``actor_id`` (M1) is additive."""
         return self._runtime.knowledge_governance.merge_knowledge(
-            notebook_id, source_id, payload
+            notebook_id, source_id, payload, actor_id=actor_id
         )
 
     def search_notebook(self, notebook_id: str, query: str) -> NotebookSearchResponse:

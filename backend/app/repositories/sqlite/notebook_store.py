@@ -22,6 +22,14 @@ from app.repositories.sqlite.mount_sql import (
 # pointing at the SAME tuple.
 from app.domain.knowledge_contracts import USABLE_STATUSES  # noqa: F401
 from app.repositories.sqlite.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
+from app.repositories.sqlite.memory_sql import memory_source_type_predicate
+from app.domain.memory_kg_isolation import NotebookHoldsMemory
+
+# 「这本笔记本里有 Memory 来源」:发布为公共库的拒绝条件(M1,E4-3)。一个参数:笔记本 id。
+_HOLDS_MEMORY_SQL = (
+    "SELECT 1 FROM sources hm WHERE hm.notebook_id = ? "
+    f"AND {memory_source_type_predicate('hm.source_type')} LIMIT 1"
+)
 
 
 class NotebookStore:
@@ -327,6 +335,21 @@ class NotebookStore:
                     values,
                 )
 
+    @staticmethod
+    def public_library_memory_source_count(db: object, notebook_id: str) -> int:
+        """Checkup H11 (M1, E4-3, read-only): the Memory sources this notebook
+        still holds while it is a public library; 0 when it is not one. One
+        primary-key probe on ``notebooks`` plus the
+        ``sources(notebook_id, source_type)`` index."""
+        row = db.execute(
+            "SELECT COUNT(*) AS c FROM sources hm "
+            "JOIN notebooks hn ON hn.id = hm.notebook_id "
+            "WHERE hm.notebook_id = ? AND hn.tier = 'base' "
+            f"AND {memory_source_type_predicate('hm.source_type')}",
+            (notebook_id,),
+        ).fetchone()
+        return int(row["c"] if row is not None else 0)
+
     def set_tier(
         self, notebook_id: str, tier: Literal["base", "personal"]
     ) -> None:
@@ -335,13 +358,31 @@ class NotebookStore:
         tier='personal': 撤回发布。两者幂等。
 
         降级为 personal 时不清理指向它的挂载边:边保留但解析时跳过(见
-        resolve_participants),重新发布即自动恢复。"""
+        resolve_participants),重新发布即自动恢复。
+
+        M1(E4-3):笔记本里还有任何 Memory 来源时拒绝发布(``NotebookHoldsMemory``,
+        路由回 409 与界面文案)——公共库可被任何笔记本挂载,成员个人记忆生成的知识
+        对象不能随之公开。判定就写在这条 UPDATE 里(``NOT EXISTS`` 走
+        ``sources(notebook_id, source_type)`` 索引),不是先查后写;只有被拒
+        (影响 0 行)时才多读一次,把「笔记本不存在」(照旧静默)与「含 Memory」分开。
+        撤回发布(personal)不受影响。"""
         now = self.now()
         with self.database.write() as db:
-            db.execute(
-                "UPDATE notebooks SET tier=?, updated_at=? WHERE id=?",
-                (tier, now, notebook_id),
+            if tier != "base":
+                db.execute(
+                    "UPDATE notebooks SET tier=?, updated_at=? WHERE id=?",
+                    (tier, now, notebook_id),
+                )
+                return
+            cur = db.execute(
+                "UPDATE notebooks SET tier=?, updated_at=? WHERE id=? "
+                f"AND NOT EXISTS ({_HOLDS_MEMORY_SQL})",
+                (tier, now, notebook_id, notebook_id),
             )
+            if cur.rowcount == 0 and db.execute(
+                _HOLDS_MEMORY_SQL, (notebook_id,)
+            ).fetchone() is not None:
+                raise NotebookHoldsMemory()
 
     def indexing_pipeline_state(self, notebook_id: str) -> dict[str, str]:
         with self.database.connect() as db:

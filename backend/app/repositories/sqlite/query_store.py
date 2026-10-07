@@ -41,6 +41,7 @@ from app.repositories.sqlite.identity_store import (
 )
 from app.repositories.sqlite.memory_sql import (
     memory_derived_object,
+    memory_derived_relation,
     no_memory_member_cluster,
 )
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
@@ -2043,7 +2044,17 @@ class QueryStore:
                 placeholders = ",".join("?" for _ in notebook_ids)
                 governance = [
                     ("merge", "concept_merge_candidates", "status = 'pending'"),
-                    ("edge", "knowledge_relations", "review_status = 'pending'"),
+                    # M1: the same exclusion as the edge review queue
+                    # (``GovernanceStore.review_queue_rows``) — Memory-derived
+                    # relations are left out of that queue for everyone, so the
+                    # bell must not count them either (they could never be
+                    # reviewed away).
+                    (
+                        "edge",
+                        "knowledge_relations",
+                        "review_status = 'pending' AND NOT "
+                        + memory_derived_relation("knowledge_relations"),
+                    ),
                 ]
                 if is_admin:
                     governance.append(

@@ -20,6 +20,8 @@ from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.memory_sql import (
     cluster_seed_object_id,
+    foreign_memory_object_excluded,
+    foreign_memory_relation_excluded,
     memory_derived_object,
     memory_derived_relation,
 )
@@ -33,6 +35,13 @@ from app.domain.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
     USABLE_STATUSES,
     PromotionApproval,
+)
+from app.domain.memory_kg_isolation import (
+    PROMOTION_APPROVE_MESSAGE,
+    MemoryKnowledgeMergeRefused,
+    MemoryPromotionRefused,
+    PromotionObjectMissing,
+    memory_merge_refusal,
 )
 
 _REVIEW_STATUSES = frozenset({"pending", "verified", "rejected"})
@@ -315,8 +324,12 @@ class GovernanceStore:
         ).fetchall()
 
     @staticmethod
-    def valid_object_ids(db: sqlite3.Connection, object_ids):
-        return KnowledgeStore.valid_object_ids(db, object_ids)
+    def valid_object_ids(
+        db: sqlite3.Connection, object_ids, *, exclude_memory_derived: bool = False
+    ):
+        return KnowledgeStore.valid_object_ids(
+            db, object_ids, exclude_memory_derived=exclude_memory_derived
+        )
 
     # ------------------------------------------------------------- review
     @staticmethod
@@ -427,7 +440,12 @@ class GovernanceStore:
             "FROM knowledge_relations kr "
             "LEFT JOIN knowledge_objects ko_s ON ko_s.id = kr.source_object_id "
             "LEFT JOIN knowledge_objects ko_t ON ko_t.id = kr.target_object_id "
-            "WHERE kr.notebook_id = ? AND kr.review_status != 'rejected'",
+            "WHERE kr.notebook_id = ? AND kr.review_status != 'rejected' "
+            # M1: Memory-derived relations are left out WHOLE (not per viewer:
+            # the queue memo is per notebook). Only their owner may review
+            # them, so for everyone else they would be items that can never
+            # be acted on; nor do they corroborate shared edges.
+            f"AND NOT {memory_derived_relation('kr')}",
             (PY_STRIP_WHITESPACE, notebook_id),
         ).fetchall()
 
@@ -449,7 +467,8 @@ class GovernanceStore:
 
     @staticmethod
     def update_edge_review(
-        connection: sqlite3.Connection, notebook_id: str, relation_id: str, status: str
+        connection: sqlite3.Connection, notebook_id: str, relation_id: str, status: str,
+        *, actor_id: str | None = None,
     ) -> str:
         """Set ``review_status`` and return the PREVIOUS value (R3 T-A3 P1-2,
         mirrors the PostgreSQL sibling above) — same-transaction SELECT then
@@ -463,10 +482,18 @@ class GovernanceStore:
         Deliberately does NOT validate ``status`` against ``_REVIEW_STATUSES``
         (unlike the PostgreSQL sibling) — that asymmetry predates this change
         and stays: the allowed-status set and error behavior are unchanged by
-        this fix, only the return value is new."""
+        this fix, only the return value is new.
+
+        M1 (E4-3): a relation derived from someone else's Memory (not
+        ``actor_id``'s; an orphan Memory source is nobody's) is filtered out
+        in the read (``foreign_memory_relation_excluded``), so it takes the
+        identical "not found" path as an id that does not exist — no
+        existence probe, no write. ``actor_id=None`` owns no Memory."""
         row = connection.execute(
-            "SELECT review_status FROM knowledge_relations WHERE id=? AND notebook_id=?",
-            (relation_id, notebook_id),
+            "SELECT kr.review_status FROM knowledge_relations kr "
+            "WHERE kr.id=? AND kr.notebook_id=? "
+            f"AND {foreign_memory_relation_excluded('kr')}",
+            (relation_id, notebook_id, actor_id),
         ).fetchone()
         if row is None:
             raise KeyError(f"relation {relation_id!r} not found in notebook {notebook_id!r}")
@@ -902,11 +929,20 @@ class GovernanceStore:
     # ------------------------------------------------------------ promotion
     @staticmethod
     def promotion_object_type_row(
-        connection: sqlite3.Connection, notebook_id: str, object_id: str
+        connection: sqlite3.Connection, notebook_id: str, object_id: str,
+        *, actor_id: str | None = None,
     ) -> "sqlite3.Row | None":
+        """``object_type`` plus ``memory_derived`` (the ``memory_sql`` D4
+        classifier) of the object a generic promotion proposal names, so the
+        service can refuse a Memory-derived object without another read.
+        An object derived from someone else's Memory comes back as ``None``
+        (the caller's "not found"); see the PostgreSQL twin."""
         return connection.execute(
-            "SELECT object_type FROM knowledge_objects WHERE id=? AND notebook_id=?",
-            (object_id, notebook_id),
+            "SELECT ko.object_type, "
+            f"{memory_derived_object('ko')} AS memory_derived "
+            "FROM knowledge_objects ko WHERE ko.id=? AND ko.notebook_id=? "
+            f"AND {foreign_memory_object_excluded('ko')}",
+            (object_id, notebook_id, actor_id),
         ).fetchone()
 
     @staticmethod
@@ -1022,11 +1058,32 @@ class GovernanceStore:
         strategy's own filter (Concept/Claim, non-deprecated) so the vectors that
         strategy can never look at are not decoded either — ``lower()`` because
         legacy rows may carry capitalised types.
+
+        M1: objects derived from a member's Memory (``memory_sql``'s D4
+        classifier — primary ``source_id`` is a Memory source) never enter
+        detection, neither as a candidate side nor as a vector. A candidate
+        pairing one with a shared object would put Memory text in front of
+        the adjudicator, into the queue's ``rationale`` and, through a
+        "modify" verdict, into the shared object's payload (N-2). Excluding
+        them here, in the one statement that defines the detection universe,
+        closes all three; the relation reader does the same for edges.
+
+        Cost: the D4 classifier is not notebook-scoped. On PostgreSQL the
+        planner turns it into a hash anti join whose hash side is EVERY Memory
+        source in the deployment (``source_type = 'memory'`` on
+        ``idx_sources_nb_hidden_type``), also for a notebook that holds no
+        Memory. Measured (PG, 49,000 live concepts in the notebook, 1,005
+        Memory sources across the deployment, warm cache, median of 7): the
+        object read 90 -> 101 ms and the vector read 77 -> 123 ms for a
+        notebook without Memory; 88 -> 93 ms / 76 -> 137 ms for one holding
+        1,000 of them. SQLite evaluates it as a correlated primary-key probe on
+        ``sources`` per scanned row.
         """
         objects = connection.execute(
-            "SELECT id, object_type, payload, status "
-            "FROM knowledge_objects "
-            "WHERE notebook_id=? AND status != 'deprecated'",
+            "SELECT o.id, o.object_type, o.payload, o.status "
+            "FROM knowledge_objects o "
+            "WHERE o.notebook_id=? AND o.status != 'deprecated' "
+            f"AND NOT {memory_derived_object('o')}",
             (notebook_id,),
         ).fetchall()
         vectors = connection.execute(
@@ -1034,7 +1091,8 @@ class GovernanceStore:
             "FROM knowledge_embeddings e "
             "JOIN knowledge_objects o ON o.id = e.object_id "
             "WHERE e.notebook_id=? AND o.status != 'deprecated' "
-            "AND lower(o.object_type) IN ('concept','claim')",
+            "AND lower(o.object_type) IN ('concept','claim') "
+            f"AND NOT {memory_derived_object('o')}",
             (notebook_id,),
         ).fetchall()
         notebook = connection.execute(
@@ -1075,10 +1133,16 @@ class GovernanceStore:
         Only the columns detection reads: no evidence bodies (fetched by id
         for surviving candidates) and no ``review_status`` — detection has
         never filtered rejected relations and must keep not filtering them.
+
+        Memory-derived relations (D4: primary ``source_id`` is a Memory
+        source) are excluded in SQL, before the ``LIMIT`` rail, for the same
+        reason as the object side of ``conflict_resolution_rows``; the rail
+        therefore counts only the relations detection may actually look at.
         """
         sql = (
-            "SELECT id, source_object_id, target_object_id, edge_type "
-            "FROM knowledge_relations WHERE notebook_id=?"
+            "SELECT r.id, r.source_object_id, r.target_object_id, r.edge_type "
+            "FROM knowledge_relations r WHERE r.notebook_id=? "
+            f"AND NOT {memory_derived_relation('r')}"
         )
         params: tuple = (notebook_id,)
         if max_rows is not None:
@@ -1442,12 +1506,23 @@ class GovernanceStore:
             raise ValueError("晋升候选缺少目标公共知识库(target_base_id)")
         require_live_promotion_target(connection, base_nb_id)
 
-        # Fetch the personal object being promoted.
+        # Fetch the personal object being promoted, classified by the D4
+        # Memory classifier in the same read (inside the caller's write
+        # transaction; nothing has been written yet).
         src = connection.execute(
-            "SELECT * FROM knowledge_objects WHERE id=?", (cand["object_id"],)
+            "SELECT ko.*, "
+            f"{memory_derived_object('ko')} AS memory_derived "
+            "FROM knowledge_objects ko WHERE ko.id=?",
+            (cand["object_id"],),
         ).fetchone()
         if src is None:
-            raise KeyError(cand["object_id"])
+            # Q5: the candidate exists but its object is gone — see the
+            # PostgreSQL twin; the service closes the proposal as rejected.
+            raise PromotionObjectMissing()
+        if src["memory_derived"]:
+            # M1: see the PostgreSQL twin — refused before any write; the
+            # service rejects the candidate in this same transaction.
+            raise MemoryPromotionRefused(PROMOTION_APPROVE_MESSAGE)
         src_payload = json.loads(src["payload"] or "{}")
         src_evidence = json.loads(src["evidence"] or "[]")
 
@@ -1704,13 +1779,19 @@ class GovernanceStore:
         object_id: str,
         payload,
         now: str,
+        *,
+        actor_id: str | None = None,
     ) -> sqlite3.Row:
         """The in-transaction body of update_knowledge: validate, apply the
         partial update and return the refetched row. ``payload`` is the
-        KnowledgeUpdate model (status/payload/owner partial edit)."""
+        KnowledgeUpdate model (status/payload/owner partial edit).
+
+        M1 (E4-3): an object derived from someone else's Memory raises the
+        same ``KeyError`` as a missing id; see the PostgreSQL twin."""
         row = connection.execute(
-            "SELECT * FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
-            (object_id, notebook_id),
+            "SELECT ko.* FROM knowledge_objects ko WHERE ko.id = ? "
+            f"AND ko.notebook_id = ? AND {foreign_memory_object_excluded('ko')}",
+            (object_id, notebook_id, actor_id),
         ).fetchone()
         if row is None:
             raise KeyError(object_id)
@@ -1744,22 +1825,39 @@ class GovernanceStore:
         source_id: str,
         into_id: str,
         now: str,
+        *,
+        actor_id: str | None = None,
     ) -> sqlite3.Row:
         """The in-transaction body of merge_knowledge: fold source evidence
         into the target, maintain the reverse index, deprecate the source in
-        place, and return the refetched target row."""
-        src = connection.execute(
-            "SELECT * FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
-            (source_id, notebook_id),
-        ).fetchone()
-        tgt = connection.execute(
-            "SELECT * FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
-            (into_id, notebook_id),
-        ).fetchone()
+        place, and return the refetched target row.
+
+        M1: a Memory-derived object is never folded into, or folded with,
+        another object (``app.domain.memory_kg_isolation`` has the rule and
+        why same-owner pairs are refused too). The classification rides the
+        two reads this body already makes, inside the caller's write
+        transaction (SQLite's single writer: nothing can change either row
+        between these reads and the UPDATEs): an object derived from someone
+        else's Memory is filtered out (``foreign_memory_object_excluded``) and
+        raises the same ``KeyError`` as a missing id; one of the caller's own
+        raises ``MemoryKnowledgeMergeRefused`` before anything is written."""
+        read = (
+            "SELECT ko.*, "
+            f"{memory_derived_object('ko')} AS memory_derived "
+            "FROM knowledge_objects ko WHERE ko.id = ? AND ko.notebook_id = ? "
+            f"AND {foreign_memory_object_excluded('ko')}"
+        )
+        src = connection.execute(read, (source_id, notebook_id, actor_id)).fetchone()
+        tgt = connection.execute(read, (into_id, notebook_id, actor_id)).fetchone()
         if src is None or tgt is None:
             raise KeyError(source_id if src is None else into_id)
         if src["object_type"] != tgt["object_type"]:
             raise ValueError("can only merge knowledge objects of the same type")
+        refusal = memory_merge_refusal(
+            bool(src["memory_derived"]), bool(tgt["memory_derived"])
+        )
+        if refusal is not None:
+            raise MemoryKnowledgeMergeRefused(refusal)
         merged: List[dict] = json.loads(tgt["evidence"] or "[]")
         seen = {(e.get("element_id"), e.get("quoted_span")) for e in merged}
         for item in json.loads(src["evidence"] or "[]"):

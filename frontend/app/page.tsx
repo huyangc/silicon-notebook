@@ -63,6 +63,7 @@ import { type AskRetrievalEffortId } from "./ask-retrieval-effort";
 import { AskModePicker } from "./ask-mode-picker";
 import { proposePromotion } from "./promotion-queue";
 import { PromotionQueueModal } from "./promotion-queue-modal";
+import { InfoModalActions, type InfoModalAction } from "./info-modal-actions";
 import { usePromotionQueue } from "./use-promotion-queue";
 import { useReleaseNotes } from "./use-release-notes";
 import { PromotionTargetModal } from "./promotion-target-modal";
@@ -349,15 +350,8 @@ type InfoModal = {
   title: string;
   message: string;
   sections?: Array<[string, string[]]>;
-  actions: Array<{
-    label: string;
-    desc?: string;
-    // 按钮旁的上下文注记(如「当前基准库:名字」),渲染为描述下方的小徽标
-    note?: string;
-    primary?: boolean;
-    danger?: boolean;
-    action: () => void;
-  }>;
+  // `action` 先关弹窗再执行;`run` 会被拒绝的写动作,原因落在按钮旁(见 info-modal-actions.tsx)。
+  actions: InfoModalAction[];
 };
 
 // Domain-agnostic fallback prompts. Used when a notebook has no expected
@@ -5352,7 +5346,7 @@ export default function Home() {
                     sections: baseNames.length ? [["本笔记本的参考库", baseNames] as [string, string[]]] : undefined,
                     actions: [
                       ...(currentUser?.role === "admin" ? [{ label: "内容审核", desc: "审核待收录进公共知识库的内容（管理员）", action: () => promotionQueue.openPromoQueue().catch(reportError) }] : []),
-                      ...(currentUser?.role === "admin" ? [{ label: tier.label, desc: "把当前笔记本设为公共知识库，供其他笔记本挂为参考库（管理员）", action: () => handleTierAction().catch(reportError) }] : []),
+                      ...(currentUser?.role === "admin" ? [{ label: tier.label, desc: "把当前笔记本设为公共知识库，供其他笔记本挂为参考库（管理员）", run: () => handleTierAction() }] : []),
                       // 检索索引的立即/空闲时重建已收敛进「看板 → 索引与构建」面板(检索索引行,
                       // 与 tier 解耦、大库亦可建)，此处不再重复列出，避免同一动作多处入口各自确认。
                       { label: "关系审核队列", desc: "审核知识图谱中待人工确认的实体关联", action: () => edgeReview.openEdgeReviewQueue(currentNotebookId).catch(reportError) }
@@ -6898,35 +6892,11 @@ export default function Home() {
                   ))}
                 </div>
               )}
-              {infoModal.actions.some((action) => action.desc || action.note) ? (
-                // 带描述的动作(分析弹窗):网格布局 —— 按钮列共享最宽标签宽度做到等宽对齐,描述/注记跟随右列
-                <div className="info-action-grid">
-                  {infoModal.actions.map((action) => (
-                    <Fragment key={action.label}>
-                      <button
-                        className={action.danger ? "new-pill danger-pill" : action.primary ? "new-pill" : "sort-button"}
-                        onClick={() => { if (rootModals.requestClose("info", "button")) action.action(); }}
-                      >
-                        {action.label}
-                      </button>
-                      <div className="info-action-desc-cell">
-                        {action.desc && <span className="info-action-desc">{action.desc}</span>}
-                        {action.note && <span className="info-action-note">{action.note}</span>}
-                      </div>
-                    </Fragment>
-                  ))}
-                </div>
-              ) : (
-                infoModal.actions.map((action) => (
-                  <button
-                    key={action.label}
-                    className={action.danger ? "new-pill danger-pill" : action.primary ? "new-pill" : "sort-button"}
-                    onClick={() => { if (rootModals.requestClose("info", "button")) action.action(); }}
-                  >
-                    {action.label}
-                  </button>
-                ))
-              )}
+              <InfoModalActions
+                actions={infoModal.actions}
+                requestClose={() => rootModals.requestClose("info", "button")}
+                reportDetachedError={reportError}
+              />
             </div>
             </>)}
           </FloatingModalCard>
@@ -7332,7 +7302,8 @@ export default function Home() {
                   </div>
                 );
               })()}
-              {/* 只读体检项(H12 残留的记忆来源):没有修复按钮,只说明现状与由谁处理。紧跟源级
+              {/* 只读体检项(H9 知识图谱待整理、H10 记忆内容已收录到公共知识库、H11 公共知识库里
+                  还有成员的个人记忆、H12 残留的记忆来源):没有修复按钮,只说明现状与由谁处理。紧跟源级
                   问题,同一种卡片、中性色。*/}
               {(() => {
                 const notices = checkupNotices(checkup);
@@ -7778,6 +7749,7 @@ export default function Home() {
       {rootModals.view("promotion-queue").open && (
         <PromotionQueueModal
           candidates={promotionQueue.view.candidates}
+          notices={promotionQueue.view.notices}
           busy={promotionQueue.view.busy}
           lookupNotebookName={(notebookId) => notebookCollection.rows.find((n) => n.id === notebookId)?.name}
           interactive={rootModals.view("promotion-queue").topmost}

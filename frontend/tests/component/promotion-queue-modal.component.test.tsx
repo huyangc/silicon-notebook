@@ -304,3 +304,46 @@ test("被别的弹窗盖住时整体退出交互树（aria-hidden + inert）", (
   expect(dialog.getAttribute("aria-hidden")).toBe("true");
   expect(dialog.hasAttribute("inert")).toBe(true);
 });
+
+test("被拒绝的那一条在自己的按钮位置上显示原因，不再给批准/拒绝按钮", () => {
+  const reason = "这条贡献申请指向由个人记忆生成的知识对象，已自动关闭";
+  render(
+    <PromotionQueueModal
+      candidates={[candidate(), candidate({ id: "cand-2", payload: { name: "反向传播" } })]}
+      notices={{ "cand-1": { reason: reason, closed: true } }}
+      busy={false}
+      lookupNotebookName={noName}
+      onRequestClose={noop}
+      onApprove={noop}
+      onReject={noop}
+    />,
+  );
+
+  const refused = screen.getByRole("heading", { name: "梯度下降" }).closest("article")!;
+  expect(within(refused as HTMLElement).getByRole("status")).toHaveTextContent(reason);
+  expect(within(refused as HTMLElement).queryByRole("button", { name: "批准收录" })).toBeNull();
+  const other = screen.getByRole("heading", { name: "反向传播" }).closest("article")!;
+  expect(within(other as HTMLElement).queryByRole("status")).toBeNull();
+  expect(within(other as HTMLElement).getByRole("button", { name: "批准收录" })).toBeInTheDocument();
+});
+
+test("暂时性失败的原因显示在按钮旁边，批准/拒绝按钮仍在，可以直接重试", async () => {
+  const user = userEvent.setup();
+  const onApprove = vi.fn();
+  render(
+    <PromotionQueueModal
+      candidates={[candidate()]}
+      notices={{ "cand-1": { reason: "服务暂时不可用，请稍后再试", closed: false } }}
+      busy={false}
+      lookupNotebookName={noName}
+      onRequestClose={noop}
+      onApprove={onApprove}
+      onReject={noop}
+    />,
+  );
+
+  const item = screen.getByRole("heading", { name: "梯度下降" }).closest("article") as HTMLElement;
+  expect(within(item).getByRole("status")).toHaveTextContent("服务暂时不可用，请稍后再试");
+  await user.click(within(item).getByRole("button", { name: "批准收录" }));
+  expect(onApprove).toHaveBeenCalledWith("cand-1");
+});

@@ -32,6 +32,7 @@ from app.repositories.sqlite.id_binding import (
     member_of,
     not_member_of,
 )
+from app.repositories.sqlite.memory_sql import memory_derived_object
 from app.repositories.sqlite.mount_sql import (
     MOUNT_JOIN, MOUNT_VALID, MOUNTED_BASE_IDS_SUBQUERY,
 )
@@ -1183,23 +1184,42 @@ class KnowledgeStore:
     @staticmethod
     def incremental_object_rows(
         db: sqlite3.Connection, notebook_id: str, source_id: str, object_type: str,
-        *, exclude_source: bool = False,
+        *, exclude_source: bool = False, exclude_memory_derived: bool = False,
     ):
+        """This source's live objects of ``object_type`` — or, with
+        ``exclude_source=True`` (concept only), every OTHER source's live
+        concepts in the notebook (the Tier-2 brute-force pool).
+
+        ``exclude_memory_derived`` (M1, E4-3) folds ``NOT memory_derived_object``
+        into the same statement: objects derived from a member's Memory never
+        enter a shared pool. One statement whatever the number of Memory
+        sources; off, the statement text is unchanged. SQLite evaluates the
+        classifier as a correlated primary-key probe on ``sources`` per
+        scanned row; PostgreSQL as a deployment-wide hash anti join over every
+        Memory source (see the PostgreSQL twin and
+        ``GovernanceStore.conflict_resolution_rows`` for the measured cost)."""
+        memory = (
+            f" AND NOT {memory_derived_object('knowledge_objects')}"
+            if exclude_memory_derived else ""
+        )
         if object_type == "concept" and exclude_source:
             return db.execute(
                 "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? "
-                "AND object_type='concept' AND status!='deprecated' AND source_id!=?",
+                "AND object_type='concept' AND status!='deprecated' AND source_id!=?"
+                + memory,
                 (notebook_id, source_id),
             ).fetchall()
         if object_type == "concept":
             return db.execute(
                 "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? AND source_id=? "
-                "AND object_type='concept' AND status!='deprecated'",
+                "AND object_type='concept' AND status!='deprecated'"
+                + memory,
                 (notebook_id, source_id),
             ).fetchall()
         return db.execute(
             "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? AND source_id=? "
-            "AND object_type=? AND status!='deprecated'",
+            "AND object_type=? AND status!='deprecated'"
+            + memory,
             (notebook_id, source_id, object_type),
         ).fetchall()
 
@@ -1237,14 +1257,28 @@ class KnowledgeStore:
         ).fetchall()
 
     @staticmethod
-    def valid_object_ids(db: sqlite3.Connection, object_ids):
+    def valid_object_ids(
+        db: sqlite3.Connection, object_ids, *, exclude_memory_derived: bool = False
+    ):
+        """The live (non-deprecated) ids among ``object_ids``.
+
+        ``exclude_memory_derived`` (M1, E4-3): Memory-derived objects count as
+        not live — same statement, so the Tier-2 ANN branch skips them like a
+        deprecated hit at no extra round trip. Off, the text is unchanged.
+        SQLite: a primary-key probe on ``sources`` per hit; PostgreSQL: a
+        deployment-wide hash anti join (see the twin)."""
         ids = list(object_ids)
         if not ids:
             return set()
         ph = ",".join("?" for _ in ids)
+        memory = (
+            f" AND NOT {memory_derived_object('knowledge_objects')}"
+            if exclude_memory_derived else ""
+        )
         return {
             row["id"] for row in db.execute(
-                f"SELECT id FROM knowledge_objects WHERE id IN ({ph}) AND status!='deprecated'",
+                f"SELECT id FROM knowledge_objects WHERE id IN ({ph}) AND status!='deprecated'"
+                f"{memory}",
                 ids,
             ).fetchall()
         }
@@ -2018,6 +2052,7 @@ class KnowledgeStore:
             rows = db.execute(
                 "SELECT id, status, payload FROM knowledge_objects "
                 "WHERE notebook_id=? AND object_type=? AND status != 'deprecated' "
+                f"AND NOT {memory_derived_object('knowledge_objects')} "
                 "ORDER BY created_at ASC, id ASC",
                 (notebook_id, object_type),
             ).fetchall()
@@ -2030,6 +2065,7 @@ class KnowledgeStore:
             "SELECT id, status, json_extract(payload, '$.name') AS name "
             "FROM knowledge_objects "
             "WHERE notebook_id=? AND object_type=? AND status != 'deprecated' "
+            f"AND NOT {memory_derived_object('knowledge_objects')} "
             "ORDER BY created_at ASC, id ASC",
             (notebook_id, object_type),
         ).fetchall()

@@ -145,3 +145,102 @@ test("clearQueue 只清可见载荷，不释放在飞的单飞闸", async () => 
 
   await act(async () => { release(); await inFlight; });
 });
+
+test("批准被服务端拒绝：重取队列，原因落在被点的那一条上（它已关闭也按原位置保留），不抛给顶部", async () => {
+  const { humanizedError } = await import("../../app/errors");
+  const reason = "这条贡献申请指向由个人记忆生成的知识对象，已自动关闭";
+  const first = { id: "cand-0", status: "proposed" } as unknown as PromotionCandidate;
+  const last = { id: "cand-2", status: "proposed" } as unknown as PromotionCandidate;
+  promotionApi.fetchPromotionQueue.mockResolvedValueOnce([first, candidate, last]);
+  const { result, notify, refreshCollection } = harness();
+  await act(async () => { await result.current.openPromoQueue(); });
+
+  promotionApi.approvePromotion.mockRejectedValueOnce(humanizedError(reason, 409));
+  // The server closed cand-1: the refreshed queue no longer lists it.
+  promotionApi.fetchPromotionQueue.mockResolvedValueOnce([first, last]);
+  await act(async () => {
+    await expect(result.current.decidePromotion("cand-1", "approve")).resolves.toBeUndefined();
+  });
+
+  expect(promotionApi.fetchPromotionQueue).toHaveBeenCalledTimes(2);
+  expect(result.current.view.candidates.map((c) => c.id)).toEqual(["cand-0", "cand-1", "cand-2"]);
+  expect(result.current.view.notices).toEqual({ "cand-1": { reason: reason, closed: true } });
+  expect(notify).not.toHaveBeenCalled();
+  expect(refreshCollection).not.toHaveBeenCalled();
+  expect(result.current.view.busy).toBe(false);
+
+  // Closing the modal drops the per-item result with the payload.
+  act(() => { result.current.clearQueue(); });
+  expect(result.current.view.notices).toEqual({});
+});
+
+test("批准被拒绝且重取也失败：保留当前列表，原因照样落在那一条上", async () => {
+  const { humanizedError } = await import("../../app/errors");
+  promotionApi.fetchPromotionQueue.mockResolvedValueOnce([candidate]);
+  const { result } = harness();
+  await act(async () => { await result.current.openPromoQueue(); });
+
+  promotionApi.approvePromotion.mockRejectedValueOnce(humanizedError("操作有冲突，请刷新后重试", 409));
+  promotionApi.fetchPromotionQueue.mockRejectedValueOnce(new Error("offline"));
+  await act(async () => { await result.current.decidePromotion("cand-1", "approve"); });
+
+  expect(result.current.view.candidates).toEqual([candidate]);
+  // Unknown whether it closed: the buttons stay, the reason sits next to them.
+  expect(result.current.view.notices).toEqual({
+    "cand-1": { reason: "操作有冲突，请刷新后重试", closed: false },
+  });
+});
+
+test("暂时性失败（服务出错、那一条仍待审核）：原因放在按钮旁、按钮保留；重试成功后原因消失", async () => {
+  const { humanizedError } = await import("../../app/errors");
+  promotionApi.fetchPromotionQueue.mockResolvedValueOnce([candidate]);
+  const { result, notify } = harness();
+  await act(async () => { await result.current.openPromoQueue(); });
+
+  promotionApi.approvePromotion.mockRejectedValueOnce(humanizedError("服务暂时不可用，请稍后再试", 503));
+  promotionApi.fetchPromotionQueue.mockResolvedValueOnce([candidate]);  // still proposed
+  await act(async () => { await result.current.decidePromotion("cand-1", "approve"); });
+
+  expect(result.current.view.candidates).toEqual([candidate]);
+  expect(result.current.view.notices).toEqual({
+    "cand-1": { reason: "服务暂时不可用，请稍后再试", closed: false },
+  });
+
+  // Retry from the same buttons: it goes through and the stale reason is gone.
+  promotionApi.approvePromotion.mockResolvedValueOnce({ merged_into: "" });
+  promotionApi.fetchPromotionQueue.mockResolvedValueOnce([]);
+  await act(async () => { await result.current.decidePromotion("cand-1", "approve"); });
+  expect(result.current.view.notices).toEqual({});
+  expect(notify).toHaveBeenCalledWith("已批准收录，内容已加入公共知识库");
+});
+
+test("批准成功后重取队列失败：这一条不出现失败原因（与顶部「已批准」不矛盾），刷新失败照旧交给调用方", async () => {
+  promotionApi.fetchPromotionQueue.mockResolvedValueOnce([candidate]);
+  const { result, notify } = harness();
+  await act(async () => { await result.current.openPromoQueue(); });
+
+  promotionApi.approvePromotion.mockResolvedValueOnce({ merged_into: "" });
+  promotionApi.fetchPromotionQueue.mockRejectedValueOnce(new Error("offline"));
+  await act(async () => {
+    await expect(result.current.decidePromotion("cand-1", "approve")).rejects.toThrow("offline");
+  });
+
+  expect(notify).toHaveBeenCalledWith("已批准收录，内容已加入公共知识库");
+  expect(result.current.view.notices).toEqual({});
+  expect(result.current.view.busy).toBe(false);
+});
+
+test("重新打开内容审核：上一轮留在条目上的原因清空", async () => {
+  const { humanizedError } = await import("../../app/errors");
+  promotionApi.fetchPromotionQueue.mockResolvedValueOnce([candidate]);
+  const { result } = harness();
+  await act(async () => { await result.current.openPromoQueue(); });
+  promotionApi.approvePromotion.mockRejectedValueOnce(humanizedError("服务暂时不可用，请稍后再试", 503));
+  promotionApi.fetchPromotionQueue.mockResolvedValueOnce([candidate]);
+  await act(async () => { await result.current.decidePromotion("cand-1", "approve"); });
+  expect(Object.keys(result.current.view.notices)).toEqual(["cand-1"]);
+
+  promotionApi.fetchPromotionQueue.mockResolvedValueOnce([candidate]);
+  await act(async () => { await result.current.openPromoQueue(); });
+  expect(result.current.view.notices).toEqual({});
+});

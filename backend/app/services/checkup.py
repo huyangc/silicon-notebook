@@ -227,6 +227,9 @@ class CheckupService:
     - ``probe_index_integrity``:H8 的磁盘探针(never-raise,见模块级 probe_scale_index_integrity)。
     - ``active_source_ids``:内存活跃租约快照(H2/H3 的 Python 后置减法)。
     - ``now``:时钟 seam;``event_log``:仅用于 fail-soft 探针的 warning。
+    - ``public_library_memory_sources``:H11(裁决 M1,E4-3),``(db, notebook_id) -> int``,
+      解析到后端 ``NotebookStore.public_library_memory_source_count``;见
+      ``_h11_public_library_memory``。未注入时恒为 0。
     - ``orphan_memory_sources``:H12(E5-3),``(db, notebook_id) -> int``,解析到后端
       ``MemoryStore.orphan_memory_source_count_on``;见 ``_h12_orphan_memory_sources``。
       未注入时恒为 0。
@@ -247,6 +250,7 @@ class CheckupService:
         active_source_ids: Callable[[], "set[str]"],
         now: Callable[[], str],
         event_log: Any = None,
+        public_library_memory_sources: "Callable[[Any, str], int] | None" = None,
         orphan_memory_sources: "Callable[[Any, str], int] | None" = None,
     ) -> None:
         self._database = database
@@ -261,6 +265,7 @@ class CheckupService:
         self._active_source_ids = active_source_ids
         self._now = now
         self._event_log = event_log
+        self._public_library_memory_sources = public_library_memory_sources
         self._orphan_memory_sources = orphan_memory_sources
         # 进程内 H8 缓存:nb -> (manifest_version, 0)。**只缓存「健康」结论**(见 _h8 说明:
         # 损坏结论从不进缓存,每次现探,以免修复后仍粘住误报)。键是磁盘 manifest 身份,
@@ -305,6 +310,7 @@ class CheckupService:
             # 对齐(评审:全集口径会把有 elements、却不走文档 KG 抽取的 knowhow 合成源算进
             # H6→与 KG 行「0 待分析」自相矛盾、healthy 恒 false 且点「分析新增」修不掉)。
             h6_count = int(self._queries.visible_pending_kg_source_count(db, notebook_id))
+            h11_count = self._h11_public_library_memory(db, notebook_id)
             # 活跃租约快照是**进程全局**的(source_ingestion._active_sources 跨所有 notebook
             # 共用一个 dict)。H4/H5 的 memo 键只能用**本库**的那一小撮,否则别的库上传一个
             # 文件就把每个库的缓存都冲掉——见 _h45_missing_vector_counts 的键论证。收窄本身
@@ -330,6 +336,7 @@ class CheckupService:
             CheckupItem("H6", h6_count, [], "extract_kg"),
             CheckupItem("H7", self._h7_index_stale(notebook_id), [], "fold_index"),
             CheckupItem("H8", self._h8_index_integrity(notebook_id), [], "rebuild_index"),
+            CheckupItem("H11", h11_count, [], "none"),
             CheckupItem("H12", self._h12_orphan_memory_sources(notebook_id), [], "none"),
         ]
         # 只读项(fix="none")单列报告、不计入 healthy——它们没有用户修复动作,
@@ -569,6 +576,27 @@ class CheckupService:
                 # 损坏结论不缓存,反而清掉本 nb 任何旧的健康缓存——下次仍现探,修好即自愈。
                 self._h8_cache.pop(notebook_id, None)
         return result
+
+    # ---------------------------------------------------------------- H11
+    def _h11_public_library_memory(self, db: Any, notebook_id: str) -> int:
+        """H11(只读,裁决 M1,E4-3):本库已是**公共知识库**、却仍持有的 Memory 来源数;
+        不是公共库或没有 Memory 时为 0。
+
+        写侧两头互相挡住:发布(``set_tier('base')``)在同一条 UPDATE 里判定库里没有
+        Memory 来源才生效;Memory 来源的插入(``insert_source(...,
+        unless_public_library=True)``)只在库不是公共库时才写入,排队中的抽取作业
+        运行时还会复查一次(发布发生在「确认记忆」与「作业运行」之间也挡得住)。
+        PostgreSQL 上两者锁同一行笔记本(发布 FOR NO KEY UPDATE、插入 FOR SHARE)而
+        串行;SQLite 单写者天然串行。所以非零只来自两种来源:这批守卫上线之前就已
+        发布、且含 Memory 来源的库;或经同步导入(按表复制 ``notebooks`` 行,不经过
+        ``set_tier``)得到的含 Memory 来源的公共库。这一项只计数、``fix="none"``:成员的记忆归成员处理(转移或删除),
+        系统不替人动;运维把 H11>0 的库逐个看完,就是「已含个人记忆的公共库」清单。
+
+        与迁移任务(E4-5)的 H9/H10 刻意分开写在这个独立方法里:同一读快照、按
+        ``notebooks`` 主键加 ``sources(notebook_id, source_type)`` 索引的有界计数。"""
+        if self._public_library_memory_sources is None:
+            return 0
+        return int(self._public_library_memory_sources(db, notebook_id))
 
     # ---------------------------------------------------------------- H12
     def _h12_orphan_memory_sources(self, notebook_id: str) -> int:

@@ -1,9 +1,10 @@
 // 流水线体检(P2)结果 → 看板展示模型的纯装配逻辑。单测于 checkup-view.test.mjs。
 //
-// 后端 /checkup 返回内部代号(H2..H8)+ 修复动作枚举(fix);这里把「源级」体检项
+// 后端 /checkup 返回内部代号(H2..H11)+ 修复动作枚举(fix);这里把「源级」体检项
 // (H2–H6)装配成看板「来源状态」块要渲染的行,界面词经 vocabulary.ts 映射。
 // H7/H8 是索引级(检索索引过期/损坏),不在这里——它们接进「索引与构建」块,由
-// page.tsx 直接读 checkup 判定。
+// page.tsx 直接读 checkup 判定。H9/H10/H11 是只读项(fix="none",无修复按钮),
+// 由 checkupNotices 装配成紧跟源级问题之后的提示卡。
 
 // 值导入须带 .ts 后缀:本模块被 node --test 直接加载(见 scale-index.ts 同款)。
 import { CHECKUP_ISSUE, CHECKUP_NOTICE } from "./vocabulary.ts";
@@ -129,20 +130,21 @@ export function hasRepairAction(fix: string): boolean {
 }
 
 /** 只读体检项(fix="none")的展示顺序。 */
-const READ_ONLY_CODES = ["H12"] as const;
+const READ_ONLY_CODES = ["H9", "H10", "H11", "H12"] as const;
 
 export type CheckupNotice = {
   key: string;
   label: string;
   detail: string;
-  // 计数(unit 为空时不显示)。
+  // 计数(unit 为空时不显示,如 H9 只表示「本库待整理」)。
   count: number;
   unit: string;
 };
 
 /**
- * 只读体检项(fix="none",count>0)→ 提示卡。没有修复按钮:H12(无主的记忆来源)由
- * 系统在后台自动清理。未登记文案的只读代号不展示(不猜文案)。
+ * 只读体检项(fix="none",count>0)→ 提示卡。没有修复按钮:H9 由系统在后台整理,
+ * H10 由管理员决定,H11 由成员自己转移或删除记忆,H12(无主的记忆来源)由系统在后台
+ * 自动清理。未登记文案的只读代号不展示(不猜文案)。
  */
 export function checkupNotices(checkup: CheckupResponse | null): CheckupNotice[] {
   if (!checkup) return [];
@@ -165,7 +167,7 @@ export function checkupCount(checkup: CheckupResponse | null, code: string): num
 
 /**
  * 是否还有**用户能修**的体检项。只读项(fix="none")不算:它们不会因为用户的修复而消失
- * (有的会长期存在),拿 `healthy` 判「修完了」会让修复轮询一直跑到窗口结束。
+ * (H10 甚至长期存在),拿 `healthy` 判「修完了」会让修复轮询一直跑到窗口结束。
  */
 export function checkupHasRepairableIssue(checkup: CheckupResponse | null): boolean {
   if (!checkup) return false;
@@ -175,8 +177,9 @@ export function checkupHasRepairableIssue(checkup: CheckupResponse | null): bool
 /**
  * 铃铛聚合提醒的签名:notebook + 当前命中的**可修复**体检代号集合。内容变化(新问题出现/
  * 旧问题修好)时签名变,铃铛据此重新提示;健康、或只剩只读项时返回 null(不提示)。
- * 只读项(fix="none")由系统或部署负责人处理,用户没有可点的修复,铃铛说「发现可修复的
- * 问题」就是假话。
+ * 只读项(fix="none",如 H9 隔离重建待完成、H10 已批准的记忆派生晋升、H11 公共知识库里
+ * 仍有成员的个人记忆、H12 无主的记忆来源)由系统、部署负责人或成员自己处理,用户没有
+ * 可点的修复,铃铛说「发现可修复的问题」就是假话。
  */
 export function checkupAlertSignature(checkup: CheckupResponse | null): string | null {
   if (!checkup || !checkupHasRepairableIssue(checkup)) return null;

@@ -215,7 +215,7 @@ export const MODEL_FINISH_REASON: Record<string, string> = {
   function_call: "",
 };
 
-// 流水线体检(P2)的内部代号 → 界面词。/checkup 响应体是内部契约(code=H2..H8、
+// 流水线体检(P2)的内部代号 → 界面词。/checkup 响应体是内部契约(code=H2..H11、
 // fix=reparse 等枚举),面向用户的标签只在这里映射,绝不能含黑话(见 docs/ui-vocabulary.md
 // 「界面词汇表」+ scripts/check_ui_vocabulary.py)。H4/H5 同为「检索向量缺失」是有意的
 // (对用户是同一件事、同一个修复动作),渲染时按 label 合并成一行。
@@ -229,9 +229,25 @@ export const CHECKUP_ISSUE: Record<string, string> = {
   H8: "检索索引损坏",
 };
 
-// 只读体检项(fix="none")→ 提示卡文案。它们没有用户能点的修复:系统自己处理。label 是
-// 卡片标题,detail 是说明,unit 非空时标题旁显示计数。
+// 只读体检项(fix="none")→ 提示卡文案。它们没有用户能点的修复:系统自己处理(H9、H12),
+// 由管理员决定(H10),或由成员自己转移或删除记忆(H11)。label 是卡片标题,detail 是
+// 说明,unit 非空时标题旁显示计数。
 export const CHECKUP_NOTICE: Record<string, { label: string; detail: string; unit: string }> = {
+  H9: {
+    label: "知识图谱将重新整理一次",
+    detail: "升级后系统会在后台自动整理：记忆里的内容会从合并后的知识对象和主题板块中分离出来。整理完成前，部分合并结果可能暂时缺失。",
+    unit: "",
+  },
+  H10: {
+    label: "有记忆内容已收录到公共知识库",
+    detail: "这些条目来自成员的记忆，是否处理由管理员决定。",
+    unit: "条",
+  },
+  H11: {
+    label: "这个公共知识库里还有成员的个人记忆",
+    detail: "这个库在「含个人记忆时不能发布」生效之前就已发布。请让这些成员把自己的记忆转移到别的笔记本或删除。",
+    unit: "条",
+  },
   H12: {
     label: "残留的记忆来源",
     detail: "系统会在后台自动清理，无需处理。",

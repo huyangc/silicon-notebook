@@ -20,6 +20,7 @@ from app.api.deps import (
 from app.core.cache import CacheAdmin, make_cache_backend
 from app.core.config import get_settings
 from app.domain.auth_policy import AuthStoreError
+from app.domain.memory_kg_isolation import PromotionRefused
 from app.domain.share_disclosure import without_memory_record
 from app.models.admin import (
     ActivityAsk,
@@ -124,14 +125,22 @@ def test_all_system_model_services(
     dependencies=[Depends(require_notebook_capability("knowledge:write"))],
 )
 def propose_promotion(
-    notebook_id: str, knowledge_id: str, payload: PromoteRequest = PromoteRequest()
+    notebook_id: str, knowledge_id: str, payload: PromoteRequest = PromoteRequest(),
+    user: UserProfile = Depends(get_current_user),
 ) -> PromotionCandidate:
     try:
         return PromotionCandidate(**repository().propose_promotion(
-            notebook_id, knowledge_id, target_base_id=payload.target_base_id
+            notebook_id, knowledge_id, target_base_id=payload.target_base_id,
+            actor_id=user.id,
         ))
     except KeyError:
+        # Also an object derived from someone else's Memory (M1): the same
+        # body as an unknown id, so the route is no existence probe.
         raise HTTPException(status_code=404, detail="Notebook or knowledge object not found")
+    except PromotionRefused as exc:
+        # Must precede ``ValueError`` (its base): curated copy, 409 — only
+        # the proposer's own Memory-derived object reaches here.
+        raise user_error(409, exc.user_message)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -159,6 +168,10 @@ def approve_promotion(candidate_id: str, user: UserProfile = Depends(get_current
         )
     except (KeyError, PermissionError):
         raise HTTPException(status_code=404, detail="Promotion candidate not found")
+    except PromotionRefused as exc:
+        # The object is derived from a Memory (M1) or no longer exists (Q5);
+        # the proposal has already been rejected (committed) by the service.
+        raise user_error(409, exc.user_message)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

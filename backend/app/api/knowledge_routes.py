@@ -27,6 +27,7 @@ from app.models.knowledge import (
     ObjectSchemaUpdate,
     PaginatedKnowledge,
 )
+from app.domain.memory_kg_isolation import MemoryKnowledgeMergeRefused
 from app.services.knowledge_contracts import KnowledgeGraphTooLargeError
 from app.services.schema_registry import SchemaConflictError
 
@@ -198,9 +199,14 @@ def propose_schemas(notebook_id: str) -> List[ObjectSchemaModel]:
 
 
 @router.patch("/notebooks/{notebook_id}/knowledge/{knowledge_id}", dependencies=[Depends(require_notebook_capability("knowledge:write"))])
-def update_knowledge(notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate):
+def update_knowledge(notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate,
+                     user: UserProfile = Depends(get_current_user)):
+    # M1: an object derived from someone else's Memory is "not found" (same
+    # 404 body as an unknown id) — decided in the store's locking read.
     try:
-        return repository().update_knowledge(notebook_id, knowledge_id, payload)
+        return repository().update_knowledge(
+            notebook_id, knowledge_id, payload, actor_id=user.id
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="Knowledge object not found")
     except ValueError as exc:
@@ -238,11 +244,19 @@ def knowledge_graph(notebook_id: str) -> KnowledgeGraph:
 
 
 @router.post("/notebooks/{notebook_id}/knowledge/{knowledge_id}/merge", dependencies=[Depends(require_notebook_capability("knowledge:write"))])
-def merge_knowledge(notebook_id: str, knowledge_id: str, payload: MergeRequest):
+def merge_knowledge(notebook_id: str, knowledge_id: str, payload: MergeRequest,
+                    user: UserProfile = Depends(get_current_user)):
+    # M1: a side derived from someone else's Memory is "not found" (same 404
+    # body as an unknown id); the caller's own Memory answers 409 with why.
     try:
-        return repository().merge_knowledge(notebook_id, knowledge_id, payload)
+        return repository().merge_knowledge(
+            notebook_id, knowledge_id, payload, actor_id=user.id
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="Knowledge object not found")
+    except MemoryKnowledgeMergeRefused as exc:
+        # Must precede ``ValueError`` (its base): curated copy, 409.
+        raise user_error(409, exc.user_message)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -269,12 +283,17 @@ def edge_review_queue(notebook_id: str, limit: int = 100) -> EdgeReviewQueueResp
 
 @router.post("/notebooks/{notebook_id}/relations/{rel_id}/review", status_code=200, dependencies=[Depends(require_notebook_capability("knowledge:write"))])
 def review_relation(notebook_id: str, rel_id: str,
-                    payload: EdgeReviewRequest) -> dict:
+                    payload: EdgeReviewRequest,
+                    user: UserProfile = Depends(get_current_user)) -> dict:
     """Mark an edge as 'verified', 'rejected', or 'pending'.
     Rejected edges are excluded from all future graph-reasoning traversals.
     """
+    # M1: a relation derived from someone else's Memory answers exactly like
+    # a relation id that does not exist (404, same body).
     try:
-        repository().set_edge_review(notebook_id, rel_id, payload.status)
+        repository().set_edge_review(
+            notebook_id, rel_id, payload.status, actor_id=user.id
+        )
         return {"rel_id": rel_id, "review_status": payload.status}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))

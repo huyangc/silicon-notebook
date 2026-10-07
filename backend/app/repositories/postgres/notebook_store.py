@@ -26,6 +26,14 @@ from app.repositories.postgres.mount_sql import (
 )
 from app.domain.knowledge_contracts import USABLE_STATUSES  # noqa: F401
 from app.repositories.postgres.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
+from app.repositories.postgres.memory_sql import memory_source_type_predicate
+from app.domain.memory_kg_isolation import NotebookHoldsMemory
+
+# 「这本笔记本里有 Memory 来源」:发布为公共库的拒绝条件(M1,E4-3)。一个参数:笔记本 id。
+_HOLDS_MEMORY_SQL = (
+    "SELECT 1 FROM sources hm WHERE hm.notebook_id = %s "
+    f"AND {memory_source_type_predicate('hm.source_type')} LIMIT 1"
+)
 
 
 class NotebookStore:
@@ -309,12 +317,56 @@ class NotebookStore:
                 f"UPDATE notebooks SET {','.join(updates)} WHERE id=%s", values
             )
 
+    @staticmethod
+    def public_library_memory_source_count(db: object, notebook_id: str) -> int:
+        """Checkup H11 (M1, E4-3, read-only): the Memory sources this notebook
+        still holds while it is a public library; 0 when it is not one. One
+        primary-key probe on ``notebooks`` plus the
+        ``sources(notebook_id, source_type)`` index."""
+        row = db.execute(
+            "SELECT COUNT(*) AS c FROM sources hm "
+            "JOIN notebooks hn ON hn.id = hm.notebook_id "
+            "WHERE hm.notebook_id = %s AND hn.tier = 'base' "
+            f"AND {memory_source_type_predicate('hm.source_type')}",
+            (notebook_id,),
+        ).fetchone()
+        return int(row["c"] if row is not None else 0)
+
     def set_tier(self, notebook_id: str, tier: Literal["base", "personal"]) -> None:
+        """See the SQLite adapter: publishing (``tier='base'``) is refused with
+        ``NotebookHoldsMemory`` while the notebook holds a Memory source —
+        decided in the UPDATE itself (no separate check before the write).
+
+        The notebook row is locked FOR NO KEY UPDATE in a statement of its own
+        first (not FOR UPDATE: that would also wait for every uncommitted child
+        row insert, whose foreign-key check holds FOR KEY SHARE on this row).
+        The Memory-source insert (``SourceStore.insert_source(...,
+        unless_public_library=True)``) holds the same row FOR SHARE, so the two
+        serialize: if the insert committed first, this UPDATE's fresh
+        statement snapshot (taken after the lock was granted) sees the source
+        and refuses; if the publish commits first, the insert's locking read
+        re-checks the row, finds ``tier='base'`` and inserts nothing. Without
+        the separate lock, an UPDATE whose snapshot predates the insert's
+        commit would wait for the row and then publish anyway."""
         with self.database.write() as connection:
+            if tier != "base":
+                connection.execute(
+                    "UPDATE notebooks SET tier=%s,updated_at=%s WHERE id=%s",
+                    (tier, self.now(), notebook_id),
+                )
+                return
             connection.execute(
-                "UPDATE notebooks SET tier=%s,updated_at=%s WHERE id=%s",
-                (tier, self.now(), notebook_id),
+                "SELECT 1 FROM notebooks WHERE id=%s FOR NO KEY UPDATE", (notebook_id,)
+            ).fetchall()
+            cur = connection.execute(
+                "UPDATE notebooks SET tier=%s,updated_at=%s WHERE id=%s "
+                f"AND NOT EXISTS ({_HOLDS_MEMORY_SQL})",
+                (tier, self.now(), notebook_id, notebook_id),
             )
+            if cur.rowcount == 0 and connection.execute(
+                _HOLDS_MEMORY_SQL, (notebook_id,)
+            ).fetchone() is not None:
+                raise NotebookHoldsMemory()
 
     def indexing_pipeline_state(self, notebook_id: str) -> dict[str, str]:
         with self.database.connect() as connection:

@@ -312,12 +312,22 @@ test("modal mutations suppress errors after their frozen lease becomes stale", (
     assert.match(text, /catch \(error\)[\s\S]*rootModals\.owns\(modalLease\)[\s\S]*throw error/, name);
   }
   // 同一条判据，随两个治理队列搬到各自的 owner hook；协调器在那里叫 `modals`。
-  for (const [module, parent, name] of [
-    [promotionQueueHook, "usePromotionQueue", "decidePromotion"],
-    [edgeReviewHook, "useEdgeReviewQueue", "decideEdge"],
-  ]) {
-    const text = findFunctionIn(module, parent, name).getText(module);
-    assert.match(text, /catch \(error\)[\s\S]*modals\.owns\(modalLease\)[\s\S]*throw error/, name);
+  {
+    const text = findFunctionIn(edgeReviewHook, "useEdgeReviewQueue", "decideEdge").getText(edgeReviewHook);
+    assert.match(text, /catch \(error\)[\s\S]*modals\.owns\(modalLease\)[\s\S]*throw error/, "decideEdge");
+  }
+  // 内容审核的决策失败不再抛给顶部状态栏，而是把原因落在被点的那一条上(按钮
+  // 结果落在按钮旁的仓库规则)。判据不变：票据作废后什么都不写——catch 里先
+  // `if (!modals.owns(modalLease)) return;`，重取队列之后再核一次，才写队列与原因。
+  {
+    const text = findFunctionIn(promotionQueueHook, "usePromotionQueue", "decidePromotion").getText(promotionQueueHook);
+    const handler = text.slice(text.indexOf("catch (error)"));
+    assert.match(handler, /^catch \(error\) \{\s*if \(!modals\.owns\(modalLease\)\) return;/, "decidePromotion");
+    assert.match(
+      handler,
+      /await fetchPromotionQueue\(\)[\s\S]*if \(!modals\.owns\(modalLease\)\) return;[\s\S]*setPromoQueue[\s\S]*setPromoNotices/,
+      "decidePromotion",
+    );
   }
   const promotion = findFunctionIn(page, "Home", "submitPromotion").getText(page);
   assert.match(promotion, /const actorId = currentUser\?\.id/);

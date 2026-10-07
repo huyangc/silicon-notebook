@@ -177,6 +177,38 @@ def test_no_bare_chinese_4xx_http_exception():
 # 写清楚为什么它仍然满足「中文用户文案」这个契约、以及谁在覆盖它。
 # 键用「文件::函数名」而不是行号——行号会被无关改动推移。
 ALLOWED_DYNAMIC_USER_ERROR = {
+    "app/api/knowledge_routes.py::merge_knowledge": (
+        "唯一的动态实参是 MemoryKnowledgeMergeRefused.user_message:它只可能是 "
+        "app/domain/memory_kg_isolation.py 的两个中文模块常量之一(CROSS_CLASS_MESSAGE / "
+        "SAME_OWNER_MESSAGE),由 memory_merge_refusal 选出,两个后端的 "
+        "merge_objects_in_transaction 只用这个结果构造异常;不拼异常原文或对象内容。"
+        "tests/test_memory_kg_isolation_vocabulary.py 对该模块每个文案常量跑词汇守卫;"
+        "tests/test_memory_kg_isolation_write.py 的路由用例覆盖真实 409 响应。"
+    ),
+    "app/api/admin_routes.py::propose_promotion": (
+        "唯一的动态实参是 PromotionRefused.user_message:提交路径上它恒为 "
+        "app/domain/memory_kg_isolation.py 的中文模块常量 PROMOTION_PROPOSE_MESSAGE"
+        "(KnowledgeGovernanceService.propose_promotion 只用它构造 MemoryPromotionRefused),"
+        "不拼对象内容或异常原文。tests/test_memory_kg_isolation_vocabulary.py 对该模块"
+        "每个文案常量跑词汇守卫;tests/test_memory_kg_isolation_write.py 覆盖真实 409。"
+    ),
+    "app/api/admin_routes.py::approve_promotion": (
+        "唯一的动态实参是 PromotionRefused.user_message:审批路径上它恒为 "
+        "app/domain/memory_kg_isolation.py 的两个中文模块常量之一"
+        "(PROMOTION_APPROVE_MESSAGE 经 MemoryPromotionRefused / "
+        "PROMOTION_OBJECT_MISSING_MESSAGE 经 PromotionObjectMissing,两个后端的 "
+        "approve_promotion_in_transaction 只抛这两种)。"
+        "tests/test_memory_kg_isolation_vocabulary.py 对该模块每个文案常量跑词汇守卫;"
+        "tests/test_memory_kg_isolation_write.py 与 PG 孪生覆盖真实 409。"
+    ),
+    "app/api/notebook_routes.py::set_notebook_tier": (
+        "唯一的动态实参是 NotebookHoldsMemory.user_message:它恒为 "
+        "app/domain/memory_kg_isolation.py 的中文模块常量 PUBLISH_HOLDS_MEMORY_MESSAGE"
+        "(两个后端 notebook_store.set_tier(..., refuse_memory=True) 只用它构造异常),"
+        "同函数另一条 403 是中文字面量。tests/test_memory_kg_isolation_vocabulary.py 对该"
+        "模块每个文案常量跑词汇守卫;tests/test_memory_kg_isolation_write.py 与 PG 孪生"
+        "覆盖真实 409。"
+    ),
     "app/api/sso_routes.py::_error": (
         "仅把固定认证错误码映射为函数内中文常量；未知码使用固定兜底，"
         "外部认证响应和异常原文不会展示。test_sso_routes 覆盖错误响应与脱敏。"
