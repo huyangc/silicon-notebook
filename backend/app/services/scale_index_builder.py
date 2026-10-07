@@ -924,6 +924,23 @@ class ScaleIndexBuilder:
             return rebuilt > built
         return last_rebuild > built_at
 
+    def _same_build_settings(
+        self, notebook_id: str, manifest: dict, version: Sequence[Any],
+    ) -> bool:
+        """Whether ``version`` (the current one) carries the same build
+        settings as the index described by ``manifest``: the settings tail of
+        the version list -- the graph-build settings (synonym edges, mention
+        weights, runtime dim...), the isolation pair, the mention seq, the
+        pipeline identity, the edge schema and the KG reset epoch -- which
+        the shared-content digest does not cover. A re-stamp copies the old
+        graph as is, so it is only right when they are all equal (the list
+        is compared from its end, so the version facts in front of it --
+        which a Memory change moves -- are not compared)."""
+        _seq, _cseq, tail, epoch = self.projections.version_signal(notebook_id)
+        width = len(tail) + 2 + (2 if epoch else 0)
+        stored = list(manifest.get("version") or [])
+        return len(stored) >= width and list(version)[-width:] == stored[-width:]
+
     def fold(
         self,
         notebook_id: str,
@@ -1016,9 +1033,19 @@ class ScaleIndexBuilder:
             # index was built over (the online re-extraction path, which
             # rebuilds nothing).
             if self.projections.memory_sources_changed(idx.manifest, memory_sources):
+                # The identity a re-stamp publishes is captured HERE, before
+                # the checks below verify the shared rows: the Memory set and
+                # the watermark read above, then the version. A shared write
+                # committing after this point therefore leaves the re-stamped
+                # index stale (an older version, its source absent from the
+                # watermark), so the next fold or build takes it in -- never
+                # a newer version or watermark over the old content.
+                version = self.version(notebook_id)
                 reason = (
                     "kg_rebuilt_since_build"
                     if self.predates_last_kg_rebuild(notebook_id, idx.manifest)
+                    else "build_settings_changed"
+                    if not self._same_build_settings(notebook_id, idx.manifest, version)
                     else "shared_content_changed"
                     if self.projections.shared_content_digest(notebook_id)
                     != idx.manifest.get(SHARED_CONTENT_DIGEST_FIELD)
@@ -1035,7 +1062,8 @@ class ScaleIndexBuilder:
                     return self.build(notebook_id)
                 return self._restamp(
                     notebook_id, idx, assume_locked=assume_locked,
-                    on_completed=on_completed,
+                    on_completed=on_completed, version=version,
+                    watermark=current_sources, memory_sources=memory_sources,
                 )
             return idx.manifest
         if not assume_locked:
@@ -1337,9 +1365,15 @@ class ScaleIndexBuilder:
         *,
         assume_locked: bool,
         on_completed: Callable[[], None] | None,
+        version: list,
+        watermark: Sequence[str],
+        memory_sources: Sequence[str],
     ) -> dict:
-        """Republish ``idx`` unchanged under the current version and Memory
-        digest -- manifest only (M1: see ``fold``).
+        """Republish ``idx`` unchanged under the version, watermark and Memory
+        set that ``fold`` captured before verifying the shared rows --
+        manifest only (M1: see ``fold``).  Never re-read here: a shared write
+        committed after the verification must leave the result stale, not be
+        recorded as indexed without its content.
 
         Every other file of the live root is hard-linked into this claim's
         staging directory (copied where the filesystem cannot link), so the
@@ -1374,20 +1408,16 @@ class ScaleIndexBuilder:
                 notebook_id, claim_token
             )
             _link_or_copy_files(str(live_dir), str(temporary), skip={"manifest.json"})
-            # The Memory digest before the version (see ``build``).
-            isolation_stamp = self.projections.memory_isolation_stamp(
-                self.projections.memory_source_ids(notebook_id)
-            )
+            # The Memory digest was read before the version (see ``build``).
+            isolation_stamp = self.projections.memory_isolation_stamp(memory_sources)
             manifest = dict(idx.manifest)
             manifest.update(
                 {
                     **isolation_stamp,
-                    "version": self.version(notebook_id),
+                    "version": list(version),
                     "notebook_id": notebook_id,
                     "build_id": new_build_id(),
-                    "watermark_sources": sorted(
-                        self.projections.source_ids(notebook_id)
-                    ),
+                    "watermark_sources": sorted(watermark),
                 }
             )
             scale_index_module.save_fold_manifest(str(temporary), manifest)
