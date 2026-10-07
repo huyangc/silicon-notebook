@@ -1131,21 +1131,40 @@ def test_memory_derived_kg_objects_are_never_enumerable(repo):
     assert claims.items == () and claims.coverage.complete is True
 
 
-def test_memory_exclusion_does_not_touch_the_board_count(repo):
-    """刻意的口径分叉:看板计数(notebook_catalog 那条口径)不受影响。
+def test_the_board_count_shows_a_viewer_no_other_members_memory(repo):
+    """看板计数(notebook_catalog 那条口径)按查看者算(E4-4,裁决 M1)。
 
-    枚举问的是「清单能列出多少」,看板问的是「这个库里有多少知识」。给两者
-    同一个数,必然有一个是错的。
+    枚举问的是「清单能列出多少」——Memory 对谁都不列;看板问的是「这个库里
+    **你**能看到多少知识」:共享对象加上你自己的 Memory 派生对象,别人的一个
+    都不算(``""`` 是共享口径)。不带 ``viewer_id`` 是内部调用方的口径,仍是
+    全库数——枚举地图读它,再自己减去 Memory。
     """
     notebook = _shared_notebook_with_private_memory(repo)
-    with repo._connect() as db:
-        board = {
-            row["object_type"]: int(row["c"])
-            for row in repo._runtime.queries.knowledge_type_count_rows(
-                db, notebook.id, USABLE_STATUSES
-            )
-        }
-    assert board["concept"] == 4 and board["claim"] == 1
+    owner = repo.create_user("a00000011", "pw123456").id
+    member = repo.create_user("b00000012", "pw123456").id
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO memory_items (id,notebook_id,created_by,origin,status,title,"
+            "content_md,created_at,updated_at) VALUES (?,?,?,'ask_answer','confirmed',"
+            "'t','c',?,?)",
+            ("mem-owner", notebook.id, owner, NOW, NOW),
+        )
+        db.execute("UPDATE sources SET memory_id='mem-owner' WHERE id='s-mem'")
+    repo._runtime.queries.invalidate_knowledge_counts(notebook.id)
+
+    def board(viewer_id):
+        with repo._connect() as db:
+            return {
+                row["object_type"]: int(row["c"])
+                for row in repo._runtime.queries.knowledge_type_count_rows(
+                    db, notebook.id, USABLE_STATUSES, viewer_id=viewer_id
+                )
+            }
+
+    assert board(member) == {"concept": 2}
+    assert board(owner) == {"concept": 4, "claim": 1}
+    assert board("") == {"concept": 2}
+    assert board(None) == {"concept": 4, "claim": 1}
 
 
 def test_memory_source_cannot_be_reached_by_name_or_by_id(repo):

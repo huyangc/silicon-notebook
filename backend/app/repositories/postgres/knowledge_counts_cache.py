@@ -26,6 +26,15 @@ per-notebook epoch 守卫——原因是 PG 面对的大库冷查询窗口(几�
 全局 epoch 在这个窗口内被无关库的高频 ingestion 持续作废的概率显著更高,窄窗口下可以
 不设防的假设在这里不成立,所以选择更精细的隔离而不是复用 sqlite 的从简版本。
 
+Memory 隔离(E4-4,裁决 M1):类型/状态计数的 memo 按 ``(epoch, seq)`` 存**两半**——
+共享半(不含任何 Memory 派生对象)与全体成员 Memory 半——由一条语句在同一快照里算出
+(``_TYPE_STATUS_HALVES_SQL``)。缓存里没有任何查看者的视图:``viewer_id=None``(内部
+调用方)= 两半之和,结果与隔离前逐值相同、零现读;空串(``memory:read`` 关闭)= 共享半;
+查看者 id = 共享半 + 现读一条本人 Memory 半(``memory_type_status_counts``,由本人的
+Memory 来源驱动,有界)。不做跨两次读的「全量减去外人」:没有共享快照时,并发删除一条
+外人 Memory 会让差值带出它的计数(codex #520 R2 P1 的同一教训);语句内的减法与「共享
++ 本人」都没有这个窗口,后者最坏只让本人自己的计数短暂滞后。
+
 (R3 T-A3 曾在这里加过第 5 个 memo ``review_queue_total`` 及其 ``carry_review_
 queue_total`` retag——codex #638 R1 指出 module-global 键跨 runtime 混串、且
 端点两次独立读会产生 items/total 跨版本不一致的响应;v4 把队列总量挪进
@@ -43,6 +52,10 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from psycopg import Error
 
 from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
+from app.repositories.postgres.memory_sql import (
+    memory_source_type_predicate,
+    own_memory_source,
+)
 
 # non-deprecated 是大多数调用点想要的「活跃」集合;更窄的 USABLE_STATUSES 由
 # knowledge_contracts 定义,调用方按需自己过滤——与 sqlite 版同一分工。
@@ -137,30 +150,105 @@ def _seq_gated(
     return value
 
 
-def type_status_counts(db: Any, notebook_id: str) -> "Dict[Tuple[str, str], int]":
-    """``{(object_type, status): count}`` for the notebook, memoized on
-    ``kg_mutation_seq``. Returns a shared read-only dict — callers must not
-    mutate it。"""
+#: 冷计数(E4-4,裁决 M1):**一条**语句、同一快照同时算出两半——共享半(不含任何
+#: Memory 派生对象)与全体成员 Memory 半(与查看者无关的合计)。总数走与改动前同一条
+#: 覆盖扫描 GROUP BY,Memory 半由本库 Memory 来源驱动(InitPlan 取来源 id,再走
+#: ``idx_knowledge_objects_source``),共享半 = 总数 − Memory 半。两半一起按
+#: ``(kg_reset_epoch, kg_mutation_seq)`` 缓存:对象属于哪一半不会变(来源类型与对象的
+#: ``source_id`` 都不会被改写,Memory 的增删都经 ``mark_dirty`` 推进 seq),缓存新鲜度
+#: 与改动前的旧缓存相同。缓存里没有任何「某个查看者的视图」:共享半对所有人相同,
+#: Memory 半是全体成员的合计,只供 ``viewer_id=None``(内部调用方,今天本来就看得到
+#: 这个数)使用。
+_TYPE_STATUS_HALVES_SQL = (
+    "WITH total AS (SELECT object_type, status, COUNT(*) AS c FROM knowledge_objects "
+    "WHERE notebook_id=%s GROUP BY object_type, status), "
+    "memory AS (SELECT mo.object_type, mo.status, COUNT(*) AS c FROM knowledge_objects mo "
+    "WHERE mo.source_id = ANY(ARRAY(SELECT s.id FROM sources s "
+    f"WHERE s.notebook_id=%s AND {memory_source_type_predicate('s.source_type')})) "
+    "AND mo.notebook_id=%s GROUP BY mo.object_type, mo.status) "
+    "SELECT t.object_type, t.status, t.c - COALESCE(m.c, 0) AS c, "
+    "COALESCE(m.c, 0) AS m FROM total t LEFT JOIN memory m "
+    "ON m.object_type = t.object_type AND m.status = t.status"
+)
 
-    def compute() -> Dict[Tuple[str, str], int]:
+_Counts = Dict[Tuple[str, str], int]
+
+
+def _type_status_halves(db: Any, notebook_id: str) -> "Tuple[_Counts, _Counts, _Counts]":
+    """``(shared, every member's Memory, total)``, memoized together on
+    ``(kg_reset_epoch, kg_mutation_seq)``; shared read-only dicts."""
+
+    def compute() -> "Tuple[_Counts, _Counts, _Counts]":
         rows = db.execute(
-            "SELECT object_type, status, COUNT(*) AS c FROM knowledge_objects "
-            "WHERE notebook_id=%s GROUP BY object_type, status",
-            (notebook_id,),
+            _TYPE_STATUS_HALVES_SQL, (notebook_id, notebook_id, notebook_id)
         ).fetchall()
-        return {(r["object_type"], r["status"]): int(r["c"]) for r in rows}
+        shared = {(r["object_type"], r["status"]): int(r["c"]) for r in rows if int(r["c"])}
+        memory = {(r["object_type"], r["status"]): int(r["m"]) for r in rows if int(r["m"])}
+        total = {
+            (r["object_type"], r["status"]): int(r["c"]) + int(r["m"]) for r in rows
+        }
+        return shared, memory, total
 
     return _seq_gated(_MEMO, db, notebook_id, compute)
+
+
+def shared_type_status_counts(db: Any, notebook_id: str) -> "_Counts":
+    """``{(object_type, status): count}`` of the notebook's objects NOT derived
+    from any Memory (the cached shared half). Read-only。"""
+    return _type_status_halves(db, notebook_id)[0]
+
+
+def memory_type_status_counts(db: Any, notebook_id: str, viewer_id: str) -> "_Counts":
+    """The viewer's OWN Memory half, read live (never memoized):
+    ``{(object_type, status): count}`` of the objects derived from
+    ``viewer_id``'s Memory sources in the notebook (``""`` owns none). One
+    statement driven by those sources (``= ANY(ARRAY(subquery))``: an InitPlan
+    on ``idx_sources_nb_hidden_type``, then ``idx_knowledge_objects_source``;
+    the join form hash-joined the notebook's whole object table — 500k
+    objects: 35-75 ms vs 1-2 ms), so it grows with the viewer's own Memory
+    objects, never with the shared ones."""
+    if not viewer_id:
+        return {}
+    rows = db.execute(
+        "SELECT o.object_type, o.status, COUNT(*) AS c FROM knowledge_objects o "
+        "WHERE o.source_id = ANY(ARRAY(SELECT s.id FROM sources s "
+        f"WHERE s.notebook_id=%s AND {own_memory_source('s')})) AND o.notebook_id=%s "
+        "GROUP BY o.object_type, o.status",
+        (notebook_id, viewer_id, notebook_id),
+    ).fetchall()
+    return {(r["object_type"], r["status"]): int(r["c"]) for r in rows}
+
+
+def type_status_counts(
+    db: Any, notebook_id: str, *, viewer_id: "Optional[str]" = None,
+) -> "_Counts":
+    """``{(object_type, status): count}`` for the notebook as ``viewer_id`` may
+    see it. ``None``: every object (both cached halves — today's result, zero
+    live reads); ``""``: the cached shared half; a user id: the shared half plus
+    that user's own Memory objects (one live read). Read-only result。"""
+    shared, _memory, total = _type_status_halves(db, notebook_id)
+    if viewer_id is None:
+        return total
+    own = memory_type_status_counts(db, notebook_id, viewer_id)
+    if not own:
+        return shared
+    merged = dict(shared)
+    for key, count in own.items():
+        merged[key] = merged.get(key, 0) + count
+    return merged
 
 
 def type_counts(
     db: Any,
     notebook_id: str,
     statuses: "Optional[Tuple[str, ...]]" = None,
+    *,
+    viewer_id: "Optional[str]" = None,
 ) -> "Dict[str, int]":
     """``{object_type: count}`` filtered to ``statuses`` (a whitelist), or to
-    all-but-``deprecated`` when ``statuses is None``。"""
-    raw = type_status_counts(db, notebook_id)
+    all-but-``deprecated`` when ``statuses is None``; ``viewer_id`` as in
+    ``type_status_counts``。"""
+    raw = type_status_counts(db, notebook_id, viewer_id=viewer_id)
     allow = set(statuses) if statuses is not None else None
     out: Dict[str, int] = {}
     for (object_type, status), c in raw.items():
@@ -173,9 +261,12 @@ def type_counts(
     return out
 
 
-def active_object_count(db: Any, notebook_id: str) -> int:
-    """Total non-deprecated object count。"""
-    raw = type_status_counts(db, notebook_id)
+def active_object_count(
+    db: Any, notebook_id: str, *, viewer_id: "Optional[str]" = None,
+) -> int:
+    """Total non-deprecated object count (``viewer_id`` as in
+    ``type_status_counts``)。"""
+    raw = type_status_counts(db, notebook_id, viewer_id=viewer_id)
     return sum(c for (_ot, status), c in raw.items() if status != _DEPRECATED)
 
 
@@ -184,13 +275,17 @@ def object_type_total(
     notebook_id: str,
     object_type: str,
     status: "Optional[str]" = None,
+    *,
+    viewer_id: "Optional[str]" = None,
 ) -> int:
     """The ``/knowledge`` list-pagination total for one ``object_type`` — served
     as a slice of the seq-gated ``type_status_counts`` memo instead of a fresh
     per-request ``COUNT(*)``. A falsy ``status`` counts ALL statuses (including
     deprecated), identical to the bare ``WHERE notebook_id=%s AND object_type=%s``
-    count it replaces; a truthy status is one dict lookup。"""
-    raw = type_status_counts(db, notebook_id)
+    count it replaces; a truthy status is one dict lookup. ``viewer_id`` as in
+    ``type_status_counts`` — the total counts exactly the rows the viewer's
+    page statement can return。"""
+    raw = type_status_counts(db, notebook_id, viewer_id=viewer_id)
     if status:
         return raw.get((object_type, status), 0)
     return sum(c for (ot, _st), c in raw.items() if ot == object_type)
@@ -242,7 +337,7 @@ def warm_all(db: Any, progress=None) -> int:
     total = len(ids)
     for i, notebook_id in enumerate(ids, start=1):
         try:
-            type_status_counts(db, notebook_id)
+            shared_type_status_counts(db, notebook_id)
             pending_source_count(db, notebook_id)
             visible_pending_source_count(db, notebook_id)
             chunk_count(db, notebook_id)
@@ -384,6 +479,8 @@ def invalidate(notebook_id: Optional[str] = None) -> None:
 
 
 __all__ = [
+    "shared_type_status_counts",
+    "memory_type_status_counts",
     "type_status_counts",
     "type_counts",
     "active_object_count",

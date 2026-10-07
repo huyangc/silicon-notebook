@@ -56,9 +56,15 @@ class _FakeDB:
     def execute(self, sql, params=()):
         if "kg_mutation_seq" in sql:
             return _Cursor(row={"kg_mutation_seq": self.seq, "kg_reset_epoch": self.epoch})
+        if "GROUP BY o.object_type, o.status" in sql:
+            # E4-4: the live Memory half (never memoized) — no Memory here.
+            self.memory_calls = getattr(self, "memory_calls", 0) + 1
+            return _Cursor(rows=[])
         if "GROUP BY object_type, status" in sql:
+            # E4-4: one statement returns both halves (c = shared, m = every
+            # member's Memory); these fakes hold no Memory.
             self.type_status_calls += 1
-            return _Cursor(rows=list(self._type_rows))
+            return _Cursor(rows=[{"m": 0, **row} for row in self._type_rows])
         if "FROM chunks" in sql:
             self.chunk_calls += 1
             return _Cursor(row={"c": self._chunk_count})

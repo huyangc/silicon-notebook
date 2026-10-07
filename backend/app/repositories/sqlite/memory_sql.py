@@ -155,6 +155,70 @@ def foreign_memory_relation_excluded(relation_alias: str) -> str:
     return _foreign_memory_excluded(_alias(relation_alias, _FOREIGN_INNER))
 
 
+def foreign_memory_in_notebook_excluded(row_alias: str) -> str:
+    """行 `row_alias`(知识对象或关系,取其 `source_id` 与 `notebook_id`)的主来源不是
+    **本笔记本里**别人的 Memory 来源。一个参数:查看者 id。
+
+    与 `foreign_memory_object_excluded` 同一判据,多钉一条 `fs.notebook_id = {a}.notebook_id`
+    (理由同 `memory_derived_in_notebook`):行与它的来源同属一个笔记本是写入不变量,所以
+    在合法数据上两者逐行同义;多出来的这条让规划器把外层的 `notebook_id = $1` 传进内层,
+    反连接的小侧只按本笔记本的 Memory 来源构建(`idx_sources_nb_hidden_type`),成本随
+    本库、不随全站 Memory 的用量增长。KG 读者(列表、计数、图、搜索、邻居)用这一形。
+    """
+    a = _alias(row_alias, _FOREIGN_INNER)
+    return (
+        "NOT EXISTS (SELECT 1 FROM sources fs "
+        f"WHERE fs.id = {a}.source_id AND fs.notebook_id = {a}.notebook_id "
+        f"AND {memory_source_type_predicate('fs.source_type')} "
+        "AND NOT EXISTS (SELECT 1 FROM memory_items fm "
+        "WHERE fm.id = fs.memory_id AND fm.created_by = ?))"
+    )
+
+
+def memory_viewer_filter(row_alias: str, viewer_id: "str | None") -> "tuple[str, tuple]":
+    """KG 读者的 ``viewer_id`` 关键字的唯一解释(E4-4):返回 ``(" AND <谓词>", 参数)``,
+    调用方把它接在自己的 WHERE 之后、按文本位置放参数。
+
+    * ``None`` → ``("", ())``:不拼任何东西,语句文本与隔离之前逐字相同(内部调用方、
+      库里没有外人 Memory 时服务层根本不传)。
+    * ``""`` → 排除**全部** Memory 派生行,查看者本人的也不例外(``memory:read`` 通道
+      关闭、或没有身份的读取)。用零参数的 `memory_derived_in_notebook`,不把空串当成
+      一个查看者去比 `created_by`。
+    * 其余 → 只排除本笔记本里**别人的** Memory 派生行(`foreign_memory_in_notebook_excluded`,
+      一个参数)。
+    """
+    if viewer_id is None:
+        return "", ()
+    if not viewer_id:
+        return f" AND NOT {memory_derived_in_notebook(row_alias)}", ()
+    return f" AND {foreign_memory_in_notebook_excluded(row_alias)}", (viewer_id,)
+
+
+def own_memory_source(source_alias: str) -> str:
+    """来源 `source_alias` 是查看者**本人**的 Memory 来源。一个参数:查看者 id。
+
+    即 `source_type = 'memory'` 且 `memory_source_readable`——读者用它从本库的 Memory
+    来源(`idx_sources_nb_hidden_type`)驱动,读出查看者自己的 Memory 派生行(共享工件
+    之上的本人叠加、本人 Memory 计数)。空查看者读不到任何行。
+    """
+    a = _alias(source_alias, _READABLE_INNER)
+    return (
+        f"{memory_source_type_predicate(f'{a}.source_type')} "
+        f"AND {memory_source_readable(a)}"
+    )
+
+
+def hidden_type_index_term(source_alias: str) -> str:
+    """规划器提示,语义上冗余(每条 Memory 来源都满足):`idx_sources_nb_hidden_type` 是
+    **部分**索引(`WHERE source_type IN ('memory','knowhow')`),SQLite 只有在查询里原样
+    重复这条谓词时才会用它——单写 `source_type = 'memory'` 规划器推不出蕴含,会把本库
+    全部来源走一遍。由本库 Memory 来源**驱动**的读(本人叠加、本人 Memory 计数、KG 搜索
+    的外人 id 集合)与它并列写。零参数。PostgreSQL 能自己证明蕴含,镜像只为双后端同名。
+    """
+    a = _alias(source_alias, _READABLE_INNER)
+    return f"{a}.source_type IN ('{MEMORY_SOURCE_TYPE}','knowhow')"
+
+
 def _memory_derived(alias: str) -> str:
     return (
         "EXISTS (SELECT 1 FROM sources ds "

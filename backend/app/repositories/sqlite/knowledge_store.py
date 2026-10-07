@@ -32,7 +32,15 @@ from app.repositories.sqlite.id_binding import (
     member_of,
     not_member_of,
 )
-from app.repositories.sqlite.memory_sql import memory_derived_object
+from app.repositories.sqlite.memory_sql import (
+    hidden_type_index_term,
+    memory_derived_in_notebook,
+    memory_derived_object,
+    memory_source_readable,
+    memory_source_type_predicate,
+    memory_viewer_filter,
+    own_memory_source,
+)
 from app.repositories.sqlite.mount_sql import (
     MOUNT_JOIN, MOUNT_VALID, MOUNTED_BASE_IDS_SUBQUERY,
 )
@@ -53,6 +61,36 @@ _DELETE_OBJECT_BATCH_SIZE = 500
 # ``normalise_ceiling`` 的 frozenset 判。反向索引未认证时簇谓词走权威支,直接扫
 # ``evidence`` JSON;证据片段(``EVIDENCE_ITEM_SOURCE`` / ``ATTRIBUTABLE_SOURCE`` /
 # ``evidence_items``)与枚举共用 ``source_ceiling`` 的唯一文本。
+
+
+def _fts_viewer_filter(
+    object_ref: str, notebook_id: str, viewer_id: Optional[str],
+) -> tuple:
+    """The ``viewer_id`` rule for the KG FTS statements (E4-4, M1), same
+    meaning as ``memory_viewer_filter``: ``None`` → ``("", ())``; ``""`` →
+    no object of any Memory source of the notebook; a user id → no object of
+    another member's (or an orphan) Memory source.
+
+    ``kg_objects_fts`` rows carry no source, so the rule is an
+    ``object_ref NOT IN (<ids of the excluded objects>)``: an uncorrelated
+    list SQLite materialises once per statement, driven by the notebook's
+    Memory sources (``idx_sources_nb_hidden_type`` → ``idx_knowledge_objects_source``).
+    Its cost follows the excluded objects, not the FTS hits (a per-hit
+    primary-key probe cost +75% on a common term).  An FTS row whose object no
+    longer exists is kept exactly as without a viewer (hydration drops it)."""
+    if viewer_id is None:
+        return "", ()
+    if viewer_id:
+        foreign, params = f"NOT {memory_source_readable('s')}", (notebook_id, viewer_id)
+    else:
+        foreign, params = memory_source_type_predicate("s.source_type"), (notebook_id,)
+    return (
+        f" AND {object_ref} NOT IN (SELECT xo.id FROM sources s "
+        "CROSS JOIN knowledge_objects xo "
+        f"WHERE s.notebook_id=? AND {hidden_type_index_term('s')} AND {foreign} "
+        "AND xo.source_id = s.id AND xo.notebook_id = s.notebook_id)",
+        params,
+    )
 
 
 def _node_context_cluster_sql(*, authoritative: bool) -> str:
@@ -1391,17 +1429,45 @@ class KnowledgeStore:
         ).fetchone()["c"])
 
     @staticmethod
-    def unified_graph_rows(db: sqlite3.Connection, notebook_id: str):
+    def unified_graph_rows(
+        db: sqlite3.Connection, notebook_id: str, *,
+        viewer_id: Optional[str] = None, own_memory_only: bool = False,
+    ):
+        """See the PostgreSQL twin (``viewer_id`` / ``own_memory_only``)."""
+        if own_memory_only:
+            if viewer_id is None:
+                raise ValueError("own_memory_only needs a viewer_id")
+            if not viewer_id:
+                return []
+            # ``CROSS JOIN`` pins the join order: driven by the notebook's
+            # Memory sources (``idx_sources_nb_hidden_type``), then objects by
+            # ``idx_knowledge_objects_source`` — never a walk of the notebook.
+            return db.execute(
+                "SELECT o.id, o.object_type, o.payload, o.status FROM sources s "
+                "CROSS JOIN knowledge_objects o "
+                f"WHERE s.notebook_id=? AND {hidden_type_index_term('s')} "
+                f"AND {own_memory_source('s')} "
+                "AND o.source_id=s.id AND o.notebook_id=s.notebook_id "
+                "AND o.status!='deprecated' ORDER BY o.rowid",
+                (notebook_id, viewer_id),
+            ).fetchall()
+        memory_filter, memory_params = memory_viewer_filter("knowledge_objects", viewer_id)
         return db.execute(
             "SELECT id, object_type, payload, status FROM knowledge_objects "
-            "WHERE notebook_id=? AND status!='deprecated'", (notebook_id,),
+            f"WHERE notebook_id=? AND status!='deprecated'{memory_filter}",
+            (notebook_id, *memory_params),
         ).fetchall()
 
     @staticmethod
-    def neighbor_relation_rows(db: sqlite3.Connection, notebook_id: str, object_ids):
+    def neighbor_relation_rows(
+        db: sqlite3.Connection, notebook_id: str, object_ids, *,
+        viewer_id: Optional[str] = None,
+    ):
+        """``viewer_id`` as in the PostgreSQL twin."""
         ids = list(object_ids)
         if not ids:
             return []
+        memory_filter, memory_params = memory_viewer_filter("knowledge_relations", viewer_id)
         # One cluster's member objects: a hub concept's cluster grows with the
         # notebook, so the list is one JSON parameter; each id is an endpoint
         # seek, which is the intent (``drive_by``).
@@ -1409,25 +1475,35 @@ class KnowledgeStore:
         return db.execute(
             f"SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
             f"WHERE notebook_id=? AND ({drive_by('source_object_id', members)} "
-            f"OR {drive_by('target_object_id', members)})",
-            (notebook_id, members.param, members.param),
+            f"OR {drive_by('target_object_id', members)}){memory_filter}",
+            (notebook_id, members.param, members.param, *memory_params),
         ).fetchall()
 
     @staticmethod
     def object_meta_rows_for_notebook(
-        db: sqlite3.Connection, notebook_id: str, object_ids,
+        db: sqlite3.Connection, notebook_id: str, object_ids, *,
+        viewer_id: Optional[str] = None,
     ):
+        """``viewer_id`` as in the PostgreSQL twin."""
         ids = list(object_ids)
         if not ids:
             return []
         ph = ",".join("?" for _ in ids)
+        memory_filter, memory_params = memory_viewer_filter("knowledge_objects", viewer_id)
         return db.execute(
             f"SELECT id, object_type, payload FROM knowledge_objects "
-            f"WHERE notebook_id=? AND id IN ({ph})", (notebook_id, *ids),
+            f"WHERE notebook_id=? AND id IN ({ph}){memory_filter}",
+            (notebook_id, *ids, *memory_params),
         ).fetchall()
 
     @staticmethod
     def community_context_rows(db: sqlite3.Connection, notebook_id: str, members):
+        """Shared tooling (E4-4, M1): Memory-derived objects and relations are
+        left out of every community summary's input, unconditionally — see
+        the PostgreSQL twin.  The object read stays driven by primary key (no
+        outer ``notebook_id`` predicate: the SQLite planner would scan the
+        notebook instead); the classifier's ``ds.notebook_id`` correlation is
+        a per-row primary-key probe on ``sources``."""
         ids = list(members)
         if not ids:
             return [], []
@@ -1438,7 +1514,8 @@ class KnowledgeStore:
         targets = bind_ids(ids, sort=True)
         objects = db.execute(
             "SELECT id, object_type, payload FROM knowledge_objects "
-            f"WHERE {drive_by('id', bound)}",
+            f"WHERE {drive_by('id', bound)} "
+            f"AND NOT {memory_derived_in_notebook('knowledge_objects')}",
             (bound.param,),
         ).fetchall()
         relations = db.execute(
@@ -1446,6 +1523,7 @@ class KnowledgeStore:
             f"WHERE notebook_id=? AND review_status!='rejected' "
             f"AND {drive_by('source_object_id', bound)} "
             f"AND {member_of('target_object_id', targets)} "
+            f"AND NOT {memory_derived_in_notebook('knowledge_relations')} "
             f"ORDER BY id",
             [notebook_id, bound.param, targets.param],
         ).fetchall()
@@ -1831,11 +1909,19 @@ class KnowledgeStore:
         ).fetchall()
 
     @staticmethod
-    def object_evidence_rows(db: sqlite3.Connection, object_ids):
+    def object_evidence_rows(
+        db: sqlite3.Connection, object_ids, *, with_evidence: bool = True,
+    ):
+        """See the PostgreSQL twin: ``with_evidence=False`` reads
+        ``(id, source_id)`` only; the default statement is unchanged."""
         ids = list(object_ids)
         if not ids:
             return []
         ph = ",".join("?" for _ in ids)
+        if not with_evidence:
+            return db.execute(
+                f"SELECT id, source_id FROM knowledge_objects WHERE id IN ({ph})", ids,
+            ).fetchall()
         return db.execute(
             f"SELECT id, evidence, source_id FROM knowledge_objects WHERE id IN ({ph})", ids,
         ).fetchall()
@@ -2093,7 +2179,11 @@ class KnowledgeStore:
         repository: 0.138s -> 14.155s on a 200k-row database for the same
         recipe). ``notebook_id`` is projected instead and checked in
         Python -- there is no "read a lot then filter" risk because the
-        result set is already capped by the id list."""
+        result set is already capped by the id list.
+
+        Shared tooling (E4-4, M1): a Memory-derived id is never hydrated here
+        (see the PostgreSQL twin) — a correlated primary-key probe on
+        ``sources`` per seeked row, not an outer ``notebook_id`` predicate."""
         ids = list(dict.fromkeys(object_ids))
         rows: List[sqlite3.Row] = []
         for offset in range(0, len(ids), batch_size):
@@ -2102,7 +2192,8 @@ class KnowledgeStore:
             rows.extend(
                 row for row in db.execute(
                     "SELECT id, payload, notebook_id FROM knowledge_objects "
-                    f"WHERE id IN ({placeholders})",
+                    f"WHERE id IN ({placeholders}) "
+                    f"AND NOT {memory_derived_in_notebook('knowledge_objects')}",
                     tuple(batch),
                 ).fetchall()
                 if row["notebook_id"] == notebook_id
@@ -2150,7 +2241,10 @@ class KnowledgeStore:
             ).fetchall()
         ordinal = {r["id"]: i for i, r in enumerate(order_rows)}
         return texts, ordinal
-    def _enrich_evidence(self, db, evidence, *, owner_notebook_id: Optional[str] = None):
+    def _enrich_evidence(
+        self, db, evidence, *, owner_notebook_id: Optional[str] = None,
+        sources_only: bool = False,
+    ):
         """证据条目补全:按 ``element_id`` 读元素,覆盖 ``source_id`` /
         ``element_type`` / ``location_label`` 并给出 ``element_text``;读不到的
         条目用存储时的 ``quoted_span`` 当正文,``source_title`` 永远是存储值。
@@ -2162,7 +2256,14 @@ class KnowledgeStore:
         于是保留存储时的 ``quoted_span`` / ``source_title``,不按全局 id 现读
         推广者私有库元素的现文与来源。对普通对象(证据都在本库)结果逐值不变。
         ``None`` = 与加参数之前逐字节相同。仍是一条语句;元素很多(>~500)
-        时计划见 PG 侧 ``_OWN_ELEMENT_JOIN`` 的注释。"""
+        时计划见 PG 侧 ``_OWN_ELEMENT_JOIN`` 的注释。
+
+        ``sources_only``(E4-4):只按 element id 解析 ``source_id``/``element_id``,
+        不读正文列;``element_text`` 置空,也**不补** ``element_type``/
+        ``location_label``(默认路径会从元素补上,这里只保留证据项自身带的值)——
+        唯一消费者(查看者规则)只读 ``source_id``。与 ``owner_notebook_id`` 同给
+        时仍是那条 CASE 语句,只投影 id、元素所在库与经 CASE 的 ``source_id``;
+        外库元素照样清空 ``element_id``。默认路径语句逐字不变。"""
         # PG 孪生:非对象项(脏数据)跳过,不抛。
         evidence = [e for e in evidence if isinstance(e, dict)]
         element_ids = list(
@@ -2173,8 +2274,12 @@ class KnowledgeStore:
         if element_ids:
             ph = ",".join("?" for _ in element_ids)
             if owner_notebook_id is None:
+                columns = (
+                    "id, source_id" if sources_only
+                    else "id, source_id, element_type, location_label, text"
+                )
                 rows = db.execute(
-                    f"SELECT id, source_id, element_type, location_label, text "
+                    f"SELECT {columns} "
                     f"FROM source_elements WHERE id IN ({ph})",
                     element_ids,
                 ).fetchall()
@@ -2183,12 +2288,17 @@ class KnowledgeStore:
                 # and only an element of ``owner_notebook_id`` returns its
                 # columns -- another library's element answers "exists, not
                 # yours" and nothing else (its text never crosses the wire).
+                # ``sources_only`` (E4-4) narrows this form too: the id, the
+                # element's library and its (CASE-gated) source only.
+                text_columns = "" if sources_only else (
+                    f", CASE WHEN os.notebook_id=o.nb THEN se.element_type END AS element_type, "
+                    f"CASE WHEN os.notebook_id=o.nb THEN se.location_label END AS location_label, "
+                    f"CASE WHEN os.notebook_id=o.nb THEN se.text END AS text"
+                )
                 rows = db.execute(
                     f"SELECT se.id, os.notebook_id AS element_notebook_id, "
-                    f"CASE WHEN os.notebook_id=o.nb THEN se.source_id END AS source_id, "
-                    f"CASE WHEN os.notebook_id=o.nb THEN se.element_type END AS element_type, "
-                    f"CASE WHEN os.notebook_id=o.nb THEN se.location_label END AS location_label, "
-                    f"CASE WHEN os.notebook_id=o.nb THEN se.text END AS text "
+                    f"CASE WHEN os.notebook_id=o.nb THEN se.source_id END AS source_id"
+                    f"{text_columns} "
                     f"FROM source_elements se{_OWN_ELEMENT_JOIN} "
                     f"CROSS JOIN (SELECT ? AS nb) o "
                     f"WHERE se.id IN ({ph})",
@@ -2204,7 +2314,17 @@ class KnowledgeStore:
         for e in evidence:
             enriched = dict(e)
             detail = details.get(e.get("element_id", ""))
-            if detail is not None:
+            if sources_only:
+                if detail is not None:
+                    enriched.update({
+                        "source_id": detail["source_id"],
+                        "element_id": detail["id"],
+                    })
+                elif e.get("element_id", "") in foreign_elements:
+                    # B-11: another library's element -- drop the locator
+                    enriched["element_id"] = ""
+                enriched["element_text"] = ""
+            elif detail is not None:
                 enriched.update({
                     "source_id": detail["source_id"],
                     "element_id": detail["id"],
@@ -2373,16 +2493,22 @@ class KnowledgeStore:
         return int(row["count"])
 
     @staticmethod
-    def count_active_objects(db: sqlite3.Connection, notebook_id: str) -> int:
+    def count_active_objects(
+        db: sqlite3.Connection, notebook_id: str, *, viewer_id: Optional[str] = None,
+    ) -> int:
+        """``viewer_id`` as in ``knowledge_counts_cache.type_status_counts``."""
         from app.repositories.sqlite import knowledge_counts_cache
-        return knowledge_counts_cache.active_object_count(db, notebook_id)
+        return knowledge_counts_cache.active_object_count(
+            db, notebook_id, viewer_id=viewer_id)
 
     @staticmethod
     def type_counts(
-        db: sqlite3.Connection, notebook_id: str
+        db: sqlite3.Connection, notebook_id: str, *, viewer_id: Optional[str] = None,
     ) -> "tuple[Dict[str, int], Dict[str, str]]":
+        """``viewer_id`` as in the PostgreSQL twin."""
         from app.repositories.sqlite import knowledge_counts_cache
-        counts = knowledge_counts_cache.type_counts(db, notebook_id)  # non-deprecated
+        counts = knowledge_counts_cache.type_counts(
+            db, notebook_id, viewer_id=viewer_id)  # non-deprecated
         # Labels are resolved by SchemaRegistryService so global + notebook
         # overlay semantics have one implementation rather than dialect SQL
         # duplicated in both knowledge stores.
@@ -2475,7 +2601,11 @@ class KnowledgeStore:
         status: Optional[str],
         offset: int,
         limit: int,
+        *,
+        viewer_id: Optional[str] = None,
     ) -> "tuple[int, List[dict]]":
+        """``viewer_id`` as in the PostgreSQL twin: rows and total are the
+        same view."""
         base_query = (
             "FROM knowledge_objects "
             "WHERE notebook_id = ? AND object_type = ?"
@@ -2484,12 +2614,15 @@ class KnowledgeStore:
         if status:
             base_query += " AND status = ?"
             params.append(status)
+        memory_filter, memory_params = memory_viewer_filter("knowledge_objects", viewer_id)
+        base_query += memory_filter
+        params.extend(memory_params)
 
         # Pagination total = a slice of the seq-gated type/status count memo
         # (from_row already warmed it this request), not a fresh per-page COUNT.
         from app.repositories.sqlite import knowledge_counts_cache
         total = knowledge_counts_cache.object_type_total(
-            db, notebook_id, object_type, status
+            db, notebook_id, object_type, status, viewer_id=viewer_id
         )
         rows = db.execute(
             f"SELECT * {base_query} ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?",
@@ -2516,18 +2649,44 @@ class KnowledgeStore:
 
     # -------------------------------------------------------------- graph
     @staticmethod
-    def graph_node_rows(db: sqlite3.Connection, notebook_id: str) -> List[sqlite3.Row]:
+    def graph_node_rows(
+        db: sqlite3.Connection, notebook_id: str, *, viewer_id: Optional[str] = None,
+    ) -> List[sqlite3.Row]:
+        """``viewer_id`` as in the PostgreSQL twin."""
+        memory_filter, memory_params = memory_viewer_filter("knowledge_objects", viewer_id)
         return db.execute(
             "SELECT id, object_type, status, payload FROM knowledge_objects "
-            "WHERE notebook_id = ? AND status != 'deprecated'", (notebook_id,)
+            f"WHERE notebook_id = ? AND status != 'deprecated'{memory_filter}",
+            (notebook_id, *memory_params),
         ).fetchall()
 
     @staticmethod
-    def relations_for_notebook(db: sqlite3.Connection, notebook_id: str) -> List[dict]:
-        rows = db.execute(
-            "SELECT * FROM knowledge_relations WHERE notebook_id = ?",
-            (notebook_id,),
-        ).fetchall()
+    def relations_for_notebook(
+        db: sqlite3.Connection, notebook_id: str, *,
+        viewer_id: Optional[str] = None, own_memory_only: bool = False,
+    ) -> List[dict]:
+        """``viewer_id`` / ``own_memory_only`` as in the PostgreSQL twin."""
+        if own_memory_only:
+            if viewer_id is None:
+                raise ValueError("own_memory_only needs a viewer_id")
+            if not viewer_id:
+                return []
+            rows = db.execute(
+                "SELECT r.* FROM sources s "
+                "CROSS JOIN knowledge_relations r "
+                f"WHERE s.notebook_id=? AND {hidden_type_index_term('s')} "
+                f"AND {own_memory_source('s')} "
+                "AND r.source_id=s.id AND r.notebook_id=s.notebook_id "
+                "ORDER BY r.id",
+                (notebook_id, viewer_id),
+            ).fetchall()
+        else:
+            memory_filter, memory_params = memory_viewer_filter(
+                "knowledge_relations", viewer_id)
+            rows = db.execute(
+                f"SELECT * FROM knowledge_relations WHERE notebook_id = ?{memory_filter}",
+                (notebook_id, *memory_params),
+            ).fetchall()
         return [
             {
                 "id": r["id"], "source_id": r["source_id"],
@@ -3640,9 +3799,14 @@ class KnowledgeStore:
         authoritative_source_filter: bool = False,
         knn_max_term_chars: int | None = None,
         routing_stats: dict[str, int | float] | None = None,
+        viewer_id: str | None = None,
     ) -> List[Dict]:
         """FTS5 MATCH(kg_objects_fts, trigram)。notebook 维度过滤。返回
         [{object_id, name, score, match:'lexical'}]。q 空 → []。
+
+        `viewer_id`(E4-4,裁决 M1)同 PostgreSQL 孪生:None 不拼任何东西、语句逐字
+        不变;"" 不返回任何 Memory 派生对象;用户 id 不返回别人的 Memory 派生对象。
+        判定在 LIMIT 之前(`_fts_viewer_filter`),被排除的对象不占名额。
 
         `corpus_langs` 是调用方已探得的语料语言(`_notebook_langs`);缺省 None
         = 未探测 = 不过滤,行为逐位不变。见 `corpus_gated_recall_terms`。
@@ -3666,6 +3830,9 @@ class KnowledgeStore:
                     "json_extract(CASE WHEN ev.type='object' THEN ev.value "
                     "ELSE '{}' END,'$.source_id')"
                 )
+                # the ceiling branch already joins ``ko``: filter on its id
+                viewer_sql, viewer_params = _fts_viewer_filter(
+                    "ko.id", notebook_id, viewer_id)
                 rows = db.execute(
                     "SELECT f.object_id,f.name,bm25(kg_objects_fts) AS rank "
                     "FROM kg_objects_fts f JOIN knowledge_objects ko ON ko.id=f.object_id "
@@ -3673,27 +3840,34 @@ class KnowledgeStore:
                     "SELECT 1 FROM json_each(CASE WHEN json_valid(ko.evidence) "
                     "THEN CASE WHEN json_type(ko.evidence)='array' "
                     "THEN ko.evidence ELSE '[]' END ELSE '[]' END) ev "
-                    f"WHERE ev.type='object' AND {member_of(ev_source, ceiling)}) "
+                    f"WHERE ev.type='object' AND {member_of(ev_source, ceiling)})"
+                    f"{viewer_sql} "
                     "ORDER BY rank LIMIT ?",
-                    (notebook_id, match_query, ceiling.param, k),
+                    (notebook_id, match_query, ceiling.param, *viewer_params, k),
                 ).fetchall()
             else:
+                viewer_sql, viewer_params = _fts_viewer_filter(
+                    "kg_objects_fts.object_id", notebook_id, viewer_id)
                 rows = db.execute(
                     "SELECT object_id,name,bm25(kg_objects_fts) AS rank "
                     "FROM kg_objects_fts WHERE notebook_id=? "
                     "AND kg_objects_fts MATCH ? AND EXISTS ("
                     "SELECT 1 FROM knowledge_object_sources kos "
                     "WHERE kos.notebook_id=? AND kos.object_id=kg_objects_fts.object_id "
-                    f"AND {member_of('kos.source_id', ceiling)}) "
+                    f"AND {member_of('kos.source_id', ceiling)})"
+                    f"{viewer_sql} "
                     "ORDER BY rank LIMIT ?",
-                    (notebook_id, match_query, notebook_id, ceiling.param, k),
+                    (notebook_id, match_query, notebook_id, ceiling.param,
+                     *viewer_params, k),
                 ).fetchall()
         else:
+            viewer_sql, viewer_params = _fts_viewer_filter(
+                "kg_objects_fts.object_id", notebook_id, viewer_id)
             rows = db.execute(
             "SELECT object_id, name, bm25(kg_objects_fts) AS rank "
-            "FROM kg_objects_fts WHERE notebook_id=? AND kg_objects_fts MATCH ? "
+            f"FROM kg_objects_fts WHERE notebook_id=? AND kg_objects_fts MATCH ?{viewer_sql} "
             "ORDER BY rank LIMIT ?",
-            (notebook_id, match_query, k)).fetchall()
+            (notebook_id, match_query, *viewer_params, k)).fetchall()
         return [{"object_id": r["object_id"], "name": r["name"],
                  "score": -float(r["rank"]), "match": "lexical"} for r in rows]
 
@@ -3825,12 +3999,29 @@ class KnowledgeStore:
         return len(fts_rows) if fts_rows else 0
 
     @staticmethod
-    def object_meta_rows(db: sqlite3.Connection, ids: List[str]) -> List[sqlite3.Row]:
+    def object_meta_rows(
+        db: sqlite3.Connection, ids: List[str], *,
+        notebook_id: Optional[str] = None, viewer_id: Optional[str] = None,
+    ) -> List[sqlite3.Row]:
+        """KG search hit hydration; ``notebook_id`` / ``viewer_id`` as in the
+        PostgreSQL twin.  The viewer form keeps the primary-key seek: the
+        notebook check is a residual on the seeked rows."""
         placeholders = ",".join("?" for _ in ids)
+        if viewer_id is None:
+            return db.execute(
+                f"SELECT id, object_type, status, payload FROM knowledge_objects "
+                f"WHERE id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        if not notebook_id:
+            raise ValueError("a viewer-scoped hydration needs its notebook_id")
+        if not ids:
+            return []
+        memory_filter, memory_params = memory_viewer_filter("knowledge_objects", viewer_id)
         return db.execute(
             f"SELECT id, object_type, status, payload FROM knowledge_objects "
-            f"WHERE id IN ({placeholders})",
-            ids,
+            f"WHERE id IN ({placeholders}) AND +notebook_id=?{memory_filter}",
+            (*ids, notebook_id, *memory_params),
         ).fetchall()
 
     # ------------------------------------------------------------- schemas
@@ -4085,17 +4276,25 @@ class KnowledgeStore:
            thousand-placeholder IN and no temp-table write).
         3. Under-K graphs load every live relation plus the full object id
            set — identical result to the unbounded path.
+
+        Shared tooling (E4-4, M1): the centrality map is one process-wide
+        cache ranking the edge-review queue for every member, so relations
+        and objects derived from any member's Memory never enter it
+        (``memory_derived_in_notebook``, a primary-key probe per row).
         """
+        rel_memory = f"AND NOT {memory_derived_in_notebook('knowledge_relations')} "
         degree: Dict[str, int] = {}
         for row in db.execute(
             "SELECT source_object_id AS n, COUNT(*) AS c FROM knowledge_relations "
             "WHERE notebook_id = ? AND review_status != 'rejected' "
+            f"{rel_memory}"
             "GROUP BY source_object_id", (notebook_id,),
         ).fetchall():
             degree[row["n"]] = degree.get(row["n"], 0) + row["c"]
         for row in db.execute(
             "SELECT target_object_id AS n, COUNT(*) AS c FROM knowledge_relations "
             "WHERE notebook_id = ? AND review_status != 'rejected' "
+            f"{rel_memory}"
             "GROUP BY target_object_id", (notebook_id,),
         ).fetchall():
             degree[row["n"]] = degree.get(row["n"], 0) + row["c"]
@@ -4112,7 +4311,8 @@ class KnowledgeStore:
                 "r.edge_type, r.evidence FROM knowledge_relations r "
                 "JOIN json_each(?) s ON s.value = r.source_object_id "
                 "JOIN json_each(?) t ON t.value = r.target_object_id "
-                "WHERE r.notebook_id = ? AND r.review_status != 'rejected'",
+                "WHERE r.notebook_id = ? AND r.review_status != 'rejected' "
+                f"AND NOT {memory_derived_in_notebook('r')}",
                 (top_ids_json, top_ids_json, notebook_id),
             ).fetchall()
             node_ids = top_ids
@@ -4120,11 +4320,13 @@ class KnowledgeStore:
             rel_rows = db.execute(
                 "SELECT id, source_object_id, target_object_id, edge_type, "
                 "evidence FROM knowledge_relations "
-                "WHERE notebook_id = ? AND review_status != 'rejected'",
+                "WHERE notebook_id = ? AND review_status != 'rejected' "
+                f"{rel_memory.rstrip()}",
                 (notebook_id,),
             ).fetchall()
             obj_rows = db.execute(
-                "SELECT id, object_type FROM knowledge_objects WHERE notebook_id = ?",
+                "SELECT id, object_type FROM knowledge_objects WHERE notebook_id = ? "
+                f"AND NOT {memory_derived_in_notebook('knowledge_objects')}",
                 (notebook_id,),
             ).fetchall()
             node_ids = [dict(row) for row in obj_rows]

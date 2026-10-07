@@ -54,7 +54,12 @@ from app.repositories.postgres.id_binding import (
     member_of,
     not_member_of,
 )
-from app.repositories.postgres.memory_sql import memory_derived_object
+from app.repositories.postgres.memory_sql import (
+    memory_derived_in_notebook,
+    memory_derived_object,
+    memory_viewer_filter,
+    own_memory_source,
+)
 from app.repositories.postgres.mount_sql import (
     MOUNT_JOIN,
     MOUNT_VALID,
@@ -144,8 +149,13 @@ def _lexical_candidate_union(
     authoritative_source_filter: bool = False,
     knn_max_term_chars: int | None = None,
     routing_stats: dict[str, int | float] | None = None,
+    viewer_id: str | None = None,
 ) -> list[dict]:
     """Build the PostgreSQL equivalent of SQLite's bounded FTS OR query.
+
+    ``viewer_id`` (knowledge producer only, E4-4) is forwarded to the
+    candidate producer only when set, so the chunk producer and every
+    unscoped call keep their exact signature and statement text.
 
     Every surviving term costs one real LATERAL probe here, which is why the
     corpus gate matters far more on this backend than on SQLite: see
@@ -169,6 +179,8 @@ def _lexical_candidate_union(
         producer_options["knn_max_term_chars"] = knn_max_term_chars
     if routing_stats is not None:
         producer_options["routing_stats"] = routing_stats
+    if viewer_id is not None:
+        producer_options["viewer_id"] = viewer_id
     if allowed_source_ids is None:
         candidates = candidate_rows_for_terms(
             db, notebook_id, terms, per_term_limit, **producer_options
@@ -1573,42 +1585,85 @@ class KnowledgeStore:
         ).fetchone()["c"])
 
     @staticmethod
-    def unified_graph_rows(db: Any, notebook_id: str):
+    def unified_graph_rows(
+        db: Any, notebook_id: str, *,
+        viewer_id: Optional[str] = None, own_memory_only: bool = False,
+    ):
+        """Live objects of the unified graph's full path.
+
+        ``viewer_id`` (E4-4, M1): ``None`` = every object (text unchanged),
+        ``""`` = no Memory-derived object, a user id = no other member's.
+        ``own_memory_only=True`` (needs a ``viewer_id``) returns ONLY the
+        viewer's own Memory-derived objects, driven by the notebook's Memory
+        sources — the overlay the service lays over the viewer-independent
+        viz artifact (whose nodes carry no Memory at all); the empty viewer
+        owns none."""
+        if own_memory_only:
+            if viewer_id is None:
+                raise ValueError("own_memory_only needs a viewer_id")
+            if not viewer_id:
+                return []
+            # ``= ANY(ARRAY(subquery))`` drives by the viewer's Memory sources
+            # (an InitPlan on ``idx_sources_nb_hidden_type``) and then
+            # ``idx_knowledge_objects_source``; the join form hash-joined the
+            # whole notebook (see ``knowledge_counts_cache.memory_type_status_counts``).
+            return _compat_rows(db.execute(
+                "SELECT o.id, o.object_type, o.payload, o.status FROM knowledge_objects o "
+                "WHERE o.source_id = ANY(ARRAY(SELECT s.id FROM sources s "
+                f"WHERE s.notebook_id=%s AND {own_memory_source('s')})) "
+                "AND o.notebook_id=%s AND o.status!='deprecated' ORDER BY o.ordinal",
+                (notebook_id, viewer_id, notebook_id),
+            ).fetchall(), payload=True)
+        memory_filter, memory_params = memory_viewer_filter("knowledge_objects", viewer_id)
         return _compat_rows(db.execute(
             "SELECT id, object_type, payload, status FROM knowledge_objects "
-            "WHERE notebook_id=%s AND status!='deprecated' ORDER BY ordinal",
-            (notebook_id,),
+            f"WHERE notebook_id=%s AND status!='deprecated'{memory_filter} ORDER BY ordinal",
+            (notebook_id, *memory_params),
         ).fetchall(), payload=True)
 
     @staticmethod
-    def neighbor_relation_rows(db: Any, notebook_id: str, object_ids):
+    def neighbor_relation_rows(
+        db: Any, notebook_id: str, object_ids, *, viewer_id: Optional[str] = None,
+    ):
+        """``viewer_id`` as in ``unified_graph_rows``: an edge only another
+        member's Memory relation supports is not read for this viewer."""
         ids = list(object_ids)
         if not ids:
             return []
+        memory_filter, memory_params = memory_viewer_filter("knowledge_relations", viewer_id)
         # One cluster's member objects (grows with the notebook): one array
         # parameter, each id an endpoint key probe (id_binding class 3).
         return db.execute(
             "SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
             "WHERE notebook_id=%s "
-            "AND (source_object_id=ANY(%s) OR target_object_id=ANY(%s))",
-            (notebook_id, ids, ids),
+            f"AND (source_object_id=ANY(%s) OR target_object_id=ANY(%s)){memory_filter}",
+            (notebook_id, ids, ids, *memory_params),
         ).fetchall()
 
     @staticmethod
     def object_meta_rows_for_notebook(
-        db: Any, notebook_id: str, object_ids,
+        db: Any, notebook_id: str, object_ids, *, viewer_id: Optional[str] = None,
     ):
+        """``viewer_id`` as in ``unified_graph_rows``."""
         ids = list(object_ids)
         if not ids:
             return []
         ph = ",".join("%s" for _ in ids)
+        memory_filter, memory_params = memory_viewer_filter("knowledge_objects", viewer_id)
         return _compat_rows(db.execute(
             f"SELECT id, object_type, payload FROM knowledge_objects "
-            f"WHERE notebook_id=%s AND id IN ({ph})", (notebook_id, *ids),
+            f"WHERE notebook_id=%s AND id IN ({ph}){memory_filter}",
+            (notebook_id, *ids, *memory_params),
         ).fetchall(), payload=True)
 
     @staticmethod
     def community_context_rows(db: Any, notebook_id: str, members):
+        """Members and internal relations fed to the community-summary model.
+
+        Shared tooling (E4-4, M1): a summary is one text every member reads,
+        so Memory-derived objects and relations are left out for everyone,
+        unconditionally (``memory_derived_in_notebook``; bound to the
+        notebook, so the Memory side is the notebook's own Memory sources)."""
         ids = list(members)
         if not ids:
             return [], []
@@ -1616,13 +1671,16 @@ class KnowledgeStore:
         # parameter, the keys the statements exist to read (id_binding
         # class 3).
         objects = db.execute(
-            "SELECT id, object_type, payload FROM knowledge_objects WHERE id=ANY(%s)",
-            (ids,),
+            "SELECT id, object_type, payload FROM knowledge_objects "
+            "WHERE notebook_id=%s AND id=ANY(%s) "
+            f"AND NOT {memory_derived_in_notebook('knowledge_objects')}",
+            (notebook_id, ids),
         ).fetchall()
         relations = db.execute(
             "SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
             "WHERE notebook_id=%s AND review_status!='rejected' "
             "AND source_object_id=ANY(%s) AND target_object_id=ANY(%s) "
+            f"AND NOT {memory_derived_in_notebook('knowledge_relations')} "
             "ORDER BY id COLLATE \"C\"",
             (notebook_id, ids, ids),
         ).fetchall()
@@ -2022,11 +2080,19 @@ class KnowledgeStore:
         ).fetchall(), evidence=include_id_evidence)
 
     @staticmethod
-    def object_evidence_rows(db: Any, object_ids):
+    def object_evidence_rows(db: Any, object_ids, *, with_evidence: bool = True):
+        """``(id, evidence, source_id)`` of the given objects by primary key.
+        ``with_evidence=False`` (E4-4, for the viewer rule, which judges an
+        object by its own ``source_id`` only) reads ``(id, source_id)`` and
+        never the evidence JSON; the default statement is unchanged."""
         ids = list(object_ids)
         if not ids:
             return []
         ph = ",".join("%s" for _ in ids)
+        if not with_evidence:
+            return _compat_rows(db.execute(
+                f"SELECT id, source_id FROM knowledge_objects WHERE id IN ({ph})", ids,
+            ).fetchall())
         return _compat_rows(db.execute(
             f"SELECT id, evidence, source_id FROM knowledge_objects WHERE id IN ({ph})", ids,
         ).fetchall(), evidence=True)
@@ -2329,14 +2395,20 @@ class KnowledgeStore:
         unlike the SQLite twin below, PostgreSQL plans this as a primary-key
         scan with ``notebook_id`` evaluated as a filter, not a per-batch
         notebook-wide scan (same conclusion as ``GovernanceStore.
-        review_queue_rows``'s endpoint lookup)."""
+        review_queue_rows``'s endpoint lookup).
+
+        Shared tooling (E4-4, M1): duplicate groups are one list every member
+        reviews, so a Memory-derived id is never hydrated here, whoever
+        passes it (pass 1 already leaves Memory rows out — this is the
+        second line, in the same statement)."""
         ids = list(dict.fromkeys(object_ids))
         rows: List[Any] = []
         for offset in range(0, len(ids), batch_size):
             batch = ids[offset:offset + batch_size]
             rows.extend(db.execute(
                 "SELECT id, payload FROM knowledge_objects "
-                "WHERE notebook_id=%s AND id = ANY(%s)",
+                "WHERE notebook_id=%s AND id = ANY(%s) "
+                f"AND NOT {memory_derived_in_notebook('knowledge_objects')}",
                 (notebook_id, batch),
             ).fetchall())
         return [{
@@ -2378,11 +2450,20 @@ class KnowledgeStore:
             ).fetchall()
         ordinal = {r["id"]: i for i, r in enumerate(order_rows)}
         return texts, ordinal
-    def _enrich_evidence(self, db, evidence, *, owner_notebook_id: Optional[str] = None):
+    def _enrich_evidence(
+        self, db, evidence, *, owner_notebook_id: Optional[str] = None,
+        sources_only: bool = False,
+    ):
         """SQLite 侧同名方法的 parity 实现(``owner_notebook_id`` 与台账 B-11
         的理由见那侧 docstring)。"""
         # 非对象项(脏数据)跳过,不抛:定义者最多扫 NODE_CONTEXT_DEFINES_SCAN 个,
         # 一条坏证据不该让整次 node_context 失败。
+        # ``sources_only``(E4-4):只按 element id 解析 ``source_id``/``element_id``,
+        # 不读正文列;``element_text`` 置空,也**不补** ``element_type``/
+        # ``location_label``(默认路径会从元素补上,这里只保留证据项自身带的值)——
+        # 唯一消费者(查看者规则)只读 ``source_id``。与 ``owner_notebook_id`` 同给时
+        # 仍是那条 CASE 语句,只投影 id、元素所在库与经 CASE 的 ``source_id``;外库
+        # 元素照样清空 ``element_id``。默认路径语句逐字不变。
         evidence = [e for e in evidence if isinstance(e, dict)]
         element_ids = list(
             dict.fromkeys(e.get("element_id") for e in evidence if e.get("element_id"))
@@ -2392,8 +2473,12 @@ class KnowledgeStore:
         if element_ids:
             ph = ",".join("%s" for _ in element_ids)
             if owner_notebook_id is None:
+                columns = (
+                    "id, source_id" if sources_only
+                    else "id, source_id, element_type, location_label, text"
+                )
                 rows = db.execute(
-                    f"SELECT id, source_id, element_type, location_label, text "
+                    f"SELECT {columns} "
                     f"FROM source_elements WHERE id IN ({ph})",
                     element_ids,
                 ).fetchall()
@@ -2402,12 +2487,17 @@ class KnowledgeStore:
                 # and only an element of ``owner_notebook_id`` returns its
                 # columns -- another library's element answers "exists, not
                 # yours" and nothing else (its text never crosses the wire).
+                # ``sources_only`` (E4-4) narrows this form too: the id, the
+                # element's library and its (CASE-gated) source only.
+                text_columns = "" if sources_only else (
+                    f", CASE WHEN os.notebook_id=o.nb THEN se.element_type END AS element_type, "
+                    f"CASE WHEN os.notebook_id=o.nb THEN se.location_label END AS location_label, "
+                    f"CASE WHEN os.notebook_id=o.nb THEN se.text END AS text"
+                )
                 rows = db.execute(
                     f"SELECT se.id, os.notebook_id AS element_notebook_id, "
-                    f"CASE WHEN os.notebook_id=o.nb THEN se.source_id END AS source_id, "
-                    f"CASE WHEN os.notebook_id=o.nb THEN se.element_type END AS element_type, "
-                    f"CASE WHEN os.notebook_id=o.nb THEN se.location_label END AS location_label, "
-                    f"CASE WHEN os.notebook_id=o.nb THEN se.text END AS text "
+                    f"CASE WHEN os.notebook_id=o.nb THEN se.source_id END AS source_id"
+                    f"{text_columns} "
                     f"FROM source_elements se{_OWN_ELEMENT_JOIN} "
                     f"CROSS JOIN (SELECT %s::text AS nb) o "
                     f"WHERE se.id IN ({ph})",
@@ -2423,7 +2513,17 @@ class KnowledgeStore:
         for e in evidence:
             enriched = dict(e)
             detail = details.get(e.get("element_id", ""))
-            if detail is not None:
+            if sources_only:
+                if detail is not None:
+                    enriched.update({
+                        "source_id": detail["source_id"],
+                        "element_id": detail["id"],
+                    })
+                elif e.get("element_id", "") in foreign_elements:
+                    # B-11: another library's element -- drop the locator
+                    enriched["element_id"] = ""
+                enriched["element_text"] = ""
+            elif detail is not None:
                 enriched.update({
                     "source_id": detail["source_id"],
                     "element_id": detail["id"],
@@ -2642,16 +2742,24 @@ class KnowledgeStore:
         return int(row["count"])
 
     @staticmethod
-    def count_active_objects(db: Any, notebook_id: str) -> int:
+    def count_active_objects(
+        db: Any, notebook_id: str, *, viewer_id: Optional[str] = None,
+    ) -> int:
+        """``viewer_id`` as in ``knowledge_counts_cache.type_status_counts``."""
         from app.repositories.postgres import knowledge_counts_cache
-        return knowledge_counts_cache.active_object_count(db, notebook_id)
+        return knowledge_counts_cache.active_object_count(
+            db, notebook_id, viewer_id=viewer_id)
 
     @staticmethod
     def type_counts(
-        db: Any, notebook_id: str
+        db: Any, notebook_id: str, *, viewer_id: Optional[str] = None,
     ) -> "tuple[Dict[str, int], Dict[str, str]]":
+        """``viewer_id`` (E4-4, M1): ``None`` = every object; ``""`` = no
+        Memory-derived object; a user id = shared objects plus that user's own
+        Memory objects (``knowledge_counts_cache.type_status_counts``)."""
         from app.repositories.postgres import knowledge_counts_cache
-        counts = knowledge_counts_cache.type_counts(db, notebook_id)  # non-deprecated
+        counts = knowledge_counts_cache.type_counts(
+            db, notebook_id, viewer_id=viewer_id)  # non-deprecated
         # Labels are resolved by SchemaRegistryService so global + notebook
         # overlay semantics have one implementation rather than dialect SQL
         # duplicated in both knowledge stores.
@@ -2719,7 +2827,16 @@ class KnowledgeStore:
         status: Optional[str],
         offset: int,
         limit: int,
+        *,
+        viewer_id: Optional[str] = None,
     ) -> "tuple[int, List[dict]]":
+        """One OFFSET page of ``/knowledge`` and its total.
+
+        ``viewer_id`` (E4-4, M1): ``None`` = every object (statement text
+        unchanged); ``""`` = no Memory-derived object; a user id = no other
+        member's Memory-derived object.  The total is the same view
+        (``object_type_total(viewer_id=...)``), so rows and total never
+        disagree about what exists."""
         base_query = (
             "FROM knowledge_objects "
             "WHERE notebook_id = %s AND object_type = %s"
@@ -2728,12 +2845,15 @@ class KnowledgeStore:
         if status:
             base_query += " AND status = %s"
             params.append(status)
+        memory_filter, memory_params = memory_viewer_filter("knowledge_objects", viewer_id)
+        base_query += memory_filter
+        params.extend(memory_params)
 
         # Pagination total = a slice of the seq-gated type/status count memo
         # (from_row already warmed it this request), not a fresh per-page COUNT.
         from app.repositories.postgres import knowledge_counts_cache
         total = knowledge_counts_cache.object_type_total(
-            db, notebook_id, object_type, status
+            db, notebook_id, object_type, status, viewer_id=viewer_id
         )
         rows = db.execute(
             f"SELECT * {base_query} ORDER BY created_at ASC, id ASC LIMIT %s OFFSET %s",
@@ -2761,19 +2881,46 @@ class KnowledgeStore:
 
     # -------------------------------------------------------------- graph
     @staticmethod
-    def graph_node_rows(db: Any, notebook_id: str) -> List[dict]:
+    def graph_node_rows(
+        db: Any, notebook_id: str, *, viewer_id: Optional[str] = None,
+    ) -> List[dict]:
+        """Nodes of the legacy ``/graph``; ``viewer_id`` as in
+        ``list_knowledge_page``."""
+        memory_filter, memory_params = memory_viewer_filter("knowledge_objects", viewer_id)
         rows = db.execute(
             "SELECT id, object_type, status, payload FROM knowledge_objects "
-            "WHERE notebook_id = %s AND status != 'deprecated'", (notebook_id,)
+            f"WHERE notebook_id = %s AND status != 'deprecated'{memory_filter}",
+            (notebook_id, *memory_params),
         ).fetchall()
         return _compat_rows(rows, payload=True)
 
     @staticmethod
-    def relations_for_notebook(db: Any, notebook_id: str) -> List[dict]:
-        rows = db.execute(
-            "SELECT * FROM knowledge_relations WHERE notebook_id = %s",
-            (notebook_id,),
-        ).fetchall()
+    def relations_for_notebook(
+        db: Any, notebook_id: str, *,
+        viewer_id: Optional[str] = None, own_memory_only: bool = False,
+    ) -> List[dict]:
+        """Every relation of the notebook; ``viewer_id`` / ``own_memory_only``
+        as in ``unified_graph_rows`` (the own-Memory form reads the relations
+        extracted from the viewer's own Memory sources, ordered by id)."""
+        if own_memory_only:
+            if viewer_id is None:
+                raise ValueError("own_memory_only needs a viewer_id")
+            if not viewer_id:
+                return []
+            rows = db.execute(
+                "SELECT r.* FROM knowledge_relations r "
+                "WHERE r.source_id = ANY(ARRAY(SELECT s.id FROM sources s "
+                f"WHERE s.notebook_id=%s AND {own_memory_source('s')})) "
+                "AND r.notebook_id=%s ORDER BY r.id COLLATE \"C\"",
+                (notebook_id, viewer_id, notebook_id),
+            ).fetchall()
+        else:
+            memory_filter, memory_params = memory_viewer_filter(
+                "knowledge_relations", viewer_id)
+            rows = db.execute(
+                f"SELECT * FROM knowledge_relations WHERE notebook_id = %s{memory_filter}",
+                (notebook_id, *memory_params),
+            ).fetchall()
         return [
             {
                 "id": r["id"], "source_id": r["source_id"],
@@ -3842,8 +3989,15 @@ class KnowledgeStore:
         authoritative_source_filter: bool = False,
         knn_max_term_chars: int | None = None,
         routing_stats: dict[str, int | float] | None = None,
+        viewer_id: str | None = None,
     ) -> List[Dict]:
-        """Return deterministic lexical knowledge hits from trigram candidates."""
+        """Return deterministic lexical knowledge hits from trigram candidates.
+
+        ``viewer_id`` (E4-4, ruling M1): ``None`` = every object (statement
+        text unchanged); ``""`` = no Memory-derived object at all (the
+        ``memory:read`` channel is closed); a user id = no other member's
+        Memory-derived object.  The filter sits in the candidate probes, so
+        excluded objects take no candidate slot (``memory_viewer_filter``)."""
         needle = (q or "").strip()
         return _lexical_candidate_union(
             db,
@@ -3860,6 +4014,7 @@ class KnowledgeStore:
             authoritative_source_filter=authoritative_source_filter,
             knn_max_term_chars=knn_max_term_chars,
             routing_stats=routing_stats,
+            viewer_id=viewer_id,
         )
 
     def chunk_fts_search(
@@ -3983,14 +4138,31 @@ class KnowledgeStore:
         return count
 
     @staticmethod
-    def object_meta_rows(db: Any, ids: List[str]) -> List[dict]:
+    def object_meta_rows(
+        db: Any, ids: List[str], *,
+        notebook_id: Optional[str] = None, viewer_id: Optional[str] = None,
+    ) -> List[dict]:
+        """Hydration of KG search hits (lexical and ANN — an ANN label may come
+        from an index built before the Memory isolation, so this read is where
+        such an id is judged).  ``viewer_id`` as in ``list_knowledge_page``;
+        it binds the probe to ``notebook_id`` (required with it), so the
+        Memory side is that notebook's Memory sources."""
         if not ids:
             return []
         placeholders = ",".join("%s" for _ in ids)
+        if viewer_id is None:
+            return _compat_rows(db.execute(
+                f"SELECT id, object_type, status, payload FROM knowledge_objects "
+                f"WHERE id IN ({placeholders})",
+                ids,
+            ).fetchall(), payload=True)
+        if not notebook_id:
+            raise ValueError("a viewer-scoped hydration needs its notebook_id")
+        memory_filter, memory_params = memory_viewer_filter("knowledge_objects", viewer_id)
         return _compat_rows(db.execute(
             f"SELECT id, object_type, status, payload FROM knowledge_objects "
-            f"WHERE id IN ({placeholders})",
-            ids,
+            f"WHERE id IN ({placeholders}) AND notebook_id=%s{memory_filter}",
+            (*ids, notebook_id, *memory_params),
         ).fetchall(), payload=True)
 
     # ------------------------------------------------------------- schemas
@@ -4330,17 +4502,26 @@ class KnowledgeStore:
            thousand-placeholder IN and no temp-table write).
         3. Under-K graphs load every live relation plus the full object id
            set — identical result to the unbounded path.
+
+        Shared tooling (E4-4, M1): the centrality map is one process-wide
+        cache ranking the edge-review queue for every member, so relations
+        and objects derived from any member's Memory never enter it
+        (``memory_derived_in_notebook``: a hash anti join whose small side is
+        this notebook's Memory sources).
         """
+        rel_memory = f"AND NOT {memory_derived_in_notebook('knowledge_relations')} "
         degree: Dict[str, int] = {}
         for row in db.execute(
             "SELECT source_object_id AS n, COUNT(*) AS c FROM knowledge_relations "
             "WHERE notebook_id = %s AND review_status != 'rejected' "
+            f"{rel_memory}"
             "GROUP BY source_object_id", (notebook_id,),
         ).fetchall():
             degree[row["n"]] = degree.get(row["n"], 0) + row["c"]
         for row in db.execute(
             "SELECT target_object_id AS n, COUNT(*) AS c FROM knowledge_relations "
             "WHERE notebook_id = %s AND review_status != 'rejected' "
+            f"{rel_memory}"
             "GROUP BY target_object_id", (notebook_id,),
         ).fetchall():
             degree[row["n"]] = degree.get(row["n"], 0) + row["c"]
@@ -4355,7 +4536,8 @@ class KnowledgeStore:
                 "SELECT r.id, r.source_object_id, r.target_object_id, "
                 "r.edge_type, r.evidence FROM knowledge_relations r "
                 "WHERE r.source_object_id=ANY(%s) AND r.target_object_id=ANY(%s) "
-                "AND r.notebook_id = %s AND r.review_status != 'rejected'",
+                "AND r.notebook_id = %s AND r.review_status != 'rejected' "
+                f"AND NOT {memory_derived_in_notebook('r')}",
                 (top_ids, top_ids, notebook_id),
             ).fetchall()
             node_ids = top_ids
@@ -4363,11 +4545,13 @@ class KnowledgeStore:
             rel_rows = db.execute(
                 "SELECT id, source_object_id, target_object_id, edge_type, "
                 "evidence FROM knowledge_relations "
-                "WHERE notebook_id = %s AND review_status != 'rejected'",
+                "WHERE notebook_id = %s AND review_status != 'rejected' "
+                f"{rel_memory.rstrip()}",
                 (notebook_id,),
             ).fetchall()
             obj_rows = db.execute(
-                "SELECT id, object_type FROM knowledge_objects WHERE notebook_id = %s",
+                "SELECT id, object_type FROM knowledge_objects WHERE notebook_id = %s "
+                f"AND NOT {memory_derived_in_notebook('knowledge_objects')}",
                 (notebook_id,),
             ).fetchall()
             node_ids = [dict(row) for row in obj_rows]

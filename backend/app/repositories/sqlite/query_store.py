@@ -40,8 +40,11 @@ from app.repositories.sqlite.identity_store import (
     _resolve_global_default,
 )
 from app.repositories.sqlite.memory_sql import (
+    hidden_type_index_term,
     memory_derived_object,
     memory_derived_relation,
+    memory_viewer_filter,
+    own_memory_source,
     no_memory_member_cluster,
 )
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
@@ -158,13 +161,21 @@ class QueryStore:
 
     @staticmethod
     def knowledge_type_count_rows(
-        db: sqlite3.Connection, notebook_id: str, statuses: tuple[str, ...]
+        db: sqlite3.Connection, notebook_id: str, statuses: tuple[str, ...],
+        *, viewer_id: "str | None" = None,
     ) -> "list[dict]":
         # Served from the seq-gated count cache (one GROUP BY per kg_mutation_seq
         # instead of per open/list/poll). Returns row-like dicts with the same
         # ["object_type"] / ["c"] keys the callers read.
+        #
+        # ``viewer_id`` (E4-4, M1; ``knowledge_counts_cache.type_status_counts``):
+        # None = every object (today's numbers; internal callers and the
+        # enumeration map, which subtracts Memory itself); "" = the shared
+        # view (no member's Memory-derived object); a user id = the shared
+        # view plus that user's own Memory-derived objects.
         from app.repositories.sqlite import knowledge_counts_cache
-        counts = knowledge_counts_cache.type_counts(db, notebook_id, statuses)
+        counts = knowledge_counts_cache.type_counts(
+            db, notebook_id, statuses, viewer_id=viewer_id)
         return [{"object_type": ot, "c": c} for ot, c in counts.items()]
 
     # Bound parameters per batch, leaving room for the notebook id and the
@@ -336,12 +347,38 @@ class QueryStore:
         ).fetchall()
 
     @staticmethod
-    def notebook_has_kg(db: sqlite3.Connection, notebook_id: str) -> bool:
-        row = db.execute(
-            "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = ?)",
-            (notebook_id,),
+    def notebook_has_kg(
+        db: sqlite3.Connection, notebook_id: str, *, viewer_id: "str | None" = None,
+    ) -> bool:
+        """``kg_ready`` (E4-4, M1), ``viewer_id`` as in ``count_active_objects``:
+        None = any object at all (today's statement, byte-identical); "" = an
+        object of the shared view (none derived from any member's Memory); a
+        user id = the shared view, or else one derived from that user's own
+        Memory (read only when the shared half is empty; driven by the
+        notebook's Memory sources).  The shared half is the cached count
+        (every status, as the None probe), so a viewer read never scans the
+        notebook for it."""
+        if viewer_id is None:
+            row = db.execute(
+                "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = ?)",
+                (notebook_id,),
+            ).fetchone()
+            return bool(row[0])
+        from app.repositories.sqlite import knowledge_counts_cache
+        shared = knowledge_counts_cache.shared_type_status_counts(db, notebook_id)
+        if shared or not viewer_id:
+            return bool(shared)
+        # The own half as an EXISTS driven by the viewer's Memory sources: it
+        # stops at the first object (a count here cost 35-90 ms on a notebook
+        # holding 20k of other members' Memory objects).
+        own = db.execute(
+            "SELECT EXISTS(SELECT 1 FROM sources s CROSS JOIN knowledge_objects o "
+            f"WHERE s.notebook_id = ? AND {hidden_type_index_term('s')} "
+            f"AND {own_memory_source('s')} "
+            "AND o.source_id = s.id AND o.notebook_id = s.notebook_id)",
+            (notebook_id, viewer_id),
         ).fetchone()
-        return bool(row[0])
+        return bool(own[0])
 
     @staticmethod
     def notebook_has_usable_kg(db: sqlite3.Connection, notebook_id: str) -> bool:
@@ -1745,7 +1782,12 @@ class QueryStore:
             }
         return {"items": page, "has_more": has_more, "next_cursor": next_cursor}
 
-    def notebook_analytics(self, notebook_id: str) -> NotebookAnalytics:
+    def notebook_analytics(
+        self, notebook_id: str, *, viewer_id: "str | None" = None,
+    ) -> NotebookAnalytics:
+        """``viewer_id`` scopes ``knowledge_counts`` only, with the meaning of
+        ``knowledge_type_count_rows`` (E4-4, M1): None = every object, "" =
+        the shared view, a user id = shared plus that user's own Memory."""
         with self.database.connect() as db:
             exists = db.execute(
                 f"SELECT 1 FROM notebooks WHERE id = ? AND {access_sql.NOTEBOOK_LIVE_SQL}",
@@ -1783,7 +1825,8 @@ class QueryStore:
             ]
             # seq-gated count cache (non-deprecated) — same GROUP BY, memoized.
             from app.repositories.sqlite import knowledge_counts_cache
-            knowledge_counts = knowledge_counts_cache.type_counts(db, notebook_id)
+            knowledge_counts = knowledge_counts_cache.type_counts(
+                db, notebook_id, viewer_id=viewer_id)
             # Memory-derived AND knowhow-projection hidden synthetic sources
             # (source_type IN ('memory', 'knowhow')) are excluded — this feeds
             # the /analytics 看板 parse_status distribution, a user-facing
@@ -2123,8 +2166,13 @@ class QueryStore:
         return " ".join(parts)
 
     def search_notebook(
-        self, notebook_id: str, query: str
+        self, notebook_id: str, query: str, *, viewer_id: "str | None" = None,
     ) -> NotebookSearchResponse:
+        """``viewer_id`` scopes the KG leg (E4-4, M1): None = every object
+        (today's statement, byte-identical); "" = the shared view (no member's
+        Memory-derived object — ``memory:read`` closed); a user id = no other
+        member's.  The source and element legs already hide Memory for
+        everyone."""
         needle = query.strip().lower()
         with self.database.connect() as db:
             notebook = db.execute(
@@ -2205,10 +2253,13 @@ class QueryStore:
                         element_id=row["id"],
                     )
                 )
+            memory_filter, memory_params = memory_viewer_filter(
+                "knowledge_objects", viewer_id)
             knowledge_rows = db.execute(
                 "SELECT id, object_type, payload FROM knowledge_objects "
-                "WHERE notebook_id = ? AND status != 'deprecated' AND LOWER(payload) LIKE ? LIMIT ?",
-                (notebook_id, like, cap),
+                "WHERE notebook_id = ? AND status != 'deprecated' AND LOWER(payload) LIKE ?"
+                f"{memory_filter} LIMIT ?",
+                (notebook_id, like, *memory_params, cap),
             ).fetchall() if len(hits) < cap else ()
             for row in knowledge_rows:
                 payload = json.loads(row["payload"] or "{}")

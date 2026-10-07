@@ -3063,9 +3063,13 @@ class RepositoryFacade:
             owner_notebook_id=owner_notebook_id,
         )
 
-    def _enrich_evidence(self, db, evidence, *, owner_notebook_id: Optional[str] = None):
+    def _enrich_evidence(
+        self, db, evidence, *, owner_notebook_id: Optional[str] = None,
+        sources_only: bool = False,
+    ):
         return self._runtime.knowledge._enrich_evidence(
             db, evidence, owner_notebook_id=owner_notebook_id,
+            sources_only=sources_only,
         )
 
     def node_context(

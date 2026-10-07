@@ -20,6 +20,7 @@ from tests.postgres.test_kg_viewer_scope_pg import (  # noqa: F401  (``repo`` is
 )
 from tests.test_kg_service_readers import (
     _MISSING,
+    _seed_named_cluster,
     _spy_viewer_keyword,
     build_pre_isolation,
 )
@@ -249,6 +250,27 @@ def test_pg_the_store_seam_matches_what_the_stores_take(repo):
 
 def test_pg_the_isolation_marker_reader_is_wired(repo):
     assert_isolation_marker_is_wired(repo, "postgres")
+
+
+@pytest.mark.parametrize("pending", [True, False])
+def test_pg_a_pending_notebook_never_answers_a_search_hit_by_a_seeded_cluster_id(
+    repo, monkeypatch, pending,
+):
+    s = build_scenario(repo, b_memory=False)
+    seed = "K-a private seedname"
+    _seed_named_cluster(repo, s, seed, ph="%s")
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "_isolation_pending",
+                        lambda _db, _nb: pending)
+    hits = as_user(s.b, repo.kg_search, s.nb, "Engram")
+    engram = [h for h in hits if h["name"] == "Engram"]
+    assert len(engram) == 1, hits
+    if pending:
+        assert engram[0]["object_id"] == s.ids.engram_s, hits
+        assert "private seedname" not in repr(hits)
+        assert as_user(s.b, repo.node_context, s.nb,
+                       engram[0]["object_id"])["id"] == s.ids.engram_s
+    else:
+        assert engram[0]["object_id"] == seed, hits
 
 
 def test_pg_list_judges_an_item_without_an_element_by_the_source_it_names(repo):

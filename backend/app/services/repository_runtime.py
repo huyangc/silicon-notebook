@@ -2243,6 +2243,13 @@ class RepositoryRuntime:
             ),
         )
         self.scale_artifacts.lifecycle = self.knowledge_lifecycle
+        # E4-7: KG search reads the M1 transition marker through the
+        # lifecycle (late-bound, so the E4-5 reader wired onto it counts).
+        if self.knowledge_query is not None:
+            self.knowledge_query.memory_isolation_pending = (
+                lambda notebook_id: self.knowledge_lifecycle._memory_isolation_pending(
+                    notebook_id)
+            )
         # 批 3·W1 PR-3 Phase A: the delete-job runner needs BOTH legs of the
         # quiesce gate (§T-3.3) -- durable (self.kg_build_jobs, seat-eager)
         # and in-process (self.knowledge_lifecycle.kg_maintenance /

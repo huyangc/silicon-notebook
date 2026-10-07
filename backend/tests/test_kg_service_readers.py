@@ -266,6 +266,40 @@ def test_folded_search_hits_are_labelled_in_one_member_read(repo, monkeypatch):
     assert len(connects) <= 4, connects
 
 
+def _seed_named_cluster(repo, s, seed_id, ph="?"):
+    """A legacy mixed cluster whose canonical id was minted from A's private
+    Memory concept (``K-<seed>``) and that holds the shared Engram too."""
+    with repo._runtime.database.write() as db:
+        db.execute(f"UPDATE concept_clusters SET canonical_id={ph} "
+                   f"WHERE notebook_id={ph} AND canonical_id={ph}",
+                   (seed_id, s.nb, s.ids.engram_canonical))
+
+
+@pytest.mark.parametrize("pending", [True, False])
+def test_a_pending_notebook_never_answers_a_search_hit_by_a_seeded_cluster_id(
+    repo, monkeypatch, pending,
+):
+    """E4-4 §7.1: before the isolated rebuild a mixed cluster's canonical id
+    can carry a hidden member's text.  While the marker says pending, B's
+    folded hit is answered by its first visible member's object id -- same
+    name, no seeded id, openable; once isolated, the canonical id again."""
+    s = build_scenario(repo, b_memory=False)
+    seed = "K-a private seedname"
+    _seed_named_cluster(repo, s, seed)
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "_isolation_pending",
+                        lambda _db, _nb: pending)
+    hits = as_user(s.b, repo.kg_search, s.nb, "Engram")
+    engram = [h for h in hits if h["name"] == "Engram"]
+    assert len(engram) == 1, hits
+    if pending:
+        assert engram[0]["object_id"] == s.ids.engram_s, hits
+        assert "private seedname" not in repr(hits)
+        ctx = as_user(s.b, repo.node_context, s.nb, engram[0]["object_id"])
+        assert ctx["id"] == s.ids.engram_s
+    else:
+        assert engram[0]["object_id"] == seed, hits
+
+
 def test_a_cluster_hit_with_no_visible_member_is_dropped(repo, monkeypatch):
     """P2-2: a hit that reaches the folded stage as a CANONICAL id (an ANN
     leg answering with a cluster) whose every member is hidden is dropped,
@@ -432,6 +466,33 @@ def test_own_memory_neighbours_are_own_memory_objects_only(repo):
     assert view["focus_id"] == s.ids.definer_ma
     assert _node_ids(view) == {s.ids.definer_ma}, view
     assert view["edges"] == []
+
+
+@pytest.mark.parametrize("assembled", [False, True])
+def test_the_neighbour_filter_reads_owners_without_evidence(repo, monkeypatch, assembled):
+    """E4-4 review P2-2: the neighbour filter's owner read uses only ``id``
+    and ``source_id``; with the E4-4 stores assembled it asks for no
+    evidence (``with_evidence=False``; the doubles stand in for E4-4's
+    keywords)."""
+    s = build_scenario(repo, b_memory=False)
+    monkeypatch.setattr(kg_viewer_scope, "STORE_READERS_TAKE_VIEWER_ID", assembled)
+    knowledge = repo._runtime.knowledge
+    original = knowledge.object_evidence_rows
+    calls: list = []
+
+    def double(db, ids, **kwargs):
+        calls.append(kwargs)
+        return original(db, ids)
+
+    monkeypatch.setattr(knowledge, "object_evidence_rows", double)
+    _spy_viewer_keyword(monkeypatch, knowledge, "neighbor_relation_rows", [])
+    for name in ("knowledge_type_count_rows", "notebook_has_kg"):
+        _spy_viewer_keyword(monkeypatch, repo._runtime.queries, name, [])
+    view = as_user(s.b, repo.kg_neighbors, s.nb, s.ids.engram_s)
+    assert "visible definer" in repr(view) and "private definer" not in repr(view)
+    assert calls, "the owner read ran"
+    expected = {"with_evidence": False} if assembled else {}
+    assert all(kwargs == expected for kwargs in calls), calls
 
 
 def test_the_neighbour_route_reads_the_focus_row_not_every_own_object(repo, monkeypatch):

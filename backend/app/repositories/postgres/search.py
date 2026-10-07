@@ -14,7 +14,10 @@ from app.repositories.postgres.access_sql import (
     read_access_params,
 )
 from app.repositories.postgres.id_binding import bind_ids, execute_bound, member_of
-from app.repositories.postgres.memory_sql import memory_derived_in_notebook
+from app.repositories.postgres.memory_sql import (
+    memory_derived_in_notebook,
+    memory_viewer_filter,
+)
 
 
 PAYLOAD_NAME_EXPRESSION = '(payload ->> \'name\') COLLATE "C"'
@@ -475,8 +478,15 @@ def _candidate_rows_for_terms(
     live_only: bool = False,
     allowed_source_ids: list[str] | None = None,
     authoritative_source_filter: bool = False,
+    viewer_id: str | None = None,
 ):
-    """Run bounded indexed candidate probes per term in one PostgreSQL query."""
+    """Run bounded indexed candidate probes per term in one PostgreSQL query.
+
+    ``viewer_id`` (knowledge objects only; E4-4, M1): the Memory filter of
+    ``memory_viewer_filter`` joins the per-arm scope predicates — evaluated
+    per candidate row inside each arm's LIMIT, so another member's Memory
+    objects neither surface nor take a candidate slot.  ``None`` leaves the
+    statement text unchanged."""
     if ranked_terms is None:
         ranked_terms = list(enumerate(terms or []))
     elif terms is not None:
@@ -535,6 +545,12 @@ def _candidate_rows_for_terms(
         else:
             raise ValueError("source-scoped lexical search target is unsupported")
         source_params.append(ceiling.param)
+    if viewer_id is not None:
+        if target.table != "knowledge_objects":
+            raise ValueError("a viewer-scoped lexical search reads knowledge objects only")
+        memory_filter, memory_params = memory_viewer_filter(target.table, viewer_id)
+        scope_predicates.append(memory_filter.removeprefix(" AND "))
+        source_params.extend(memory_params)
     term_values = ",".join("(%s,%s,%s)" for _ in ranked_terms)
     term_params = [
         value
@@ -620,11 +636,15 @@ def knowledge_candidate_rows_for_terms(
     authoritative_source_filter: bool = False,
     knn_max_term_chars: int | None = None,
     routing_stats: dict[str, int | float] | None = None,
+    viewer_id: str | None = None,
 ):
     # `allow_knn` is a hint, not a command: it engages only when the run is
     # unscoped (the source-scoped statement carries an EXISTS predicate the KNN
     # shape has no bench for) and a conforming GiST index actually exists.
     # Every other combination uses the result-equivalent split legacy arms.
+    # `viewer_id` (E4-4, M1) is a scope of the same kind: the Memory filter
+    # (`memory_viewer_filter`) rides the legacy arms' scope predicates, so a
+    # viewer read never takes the KNN shape either.
     ranked_terms = list(enumerate(terms))
     knn_terms = [
         (rank, term) for rank, term in ranked_terms
@@ -644,6 +664,7 @@ def knowledge_candidate_rows_for_terms(
     if (
         allow_knn
         and allowed_source_ids is None
+        and viewer_id is None
         and knn_terms
         and per_term_limit > 0
         and knn_name_index_available(connection)
@@ -699,6 +720,7 @@ def knowledge_candidate_rows_for_terms(
             live_only=True,
             allowed_source_ids=allowed_source_ids,
             authoritative_source_filter=authoritative_source_filter,
+            viewer_id=viewer_id,
         )
     finally:
         if routing_stats is not None:
@@ -1049,15 +1071,26 @@ def notebook_element_rows(connection, notebook_id: str, needle: str, limit: int)
     ).fetchall()
 
 
-def notebook_knowledge_rows(connection, notebook_id: str, needle: str, limit: int):
+def notebook_knowledge_rows(
+    connection, notebook_id: str, needle: str, limit: int,
+    *, viewer_id: str | None = None,
+):
+    """The KG leg of the notebook search box (HTTP ``/search`` and MCP
+    ``search_notebook_context``).  ``viewer_id`` (E4-4, M1) appends
+    ``memory_viewer_filter`` after the ILIKE group: ``None`` keeps the text
+    byte-identical (and ``idx_knowledge_objects_nb_payload_trgm``'s literal
+    ``status!='deprecated'`` partial predicate implied, see hotpath_indexes);
+    ``""`` drops every Memory-derived object; a user id drops other members'."""
     pattern = f"%{needle}%"
+    memory_filter, memory_params = memory_viewer_filter("knowledge_objects", viewer_id)
     return connection.execute(
         "SELECT id,object_type,payload FROM knowledge_objects "
         "WHERE notebook_id=%s AND status!='deprecated' AND "
         f"({PAYLOAD_NAME_EXPRESSION} ILIKE %s OR "
-        "(payload::text) COLLATE \"C\" ILIKE %s) "
+        "(payload::text) COLLATE \"C\" ILIKE %s)"
+        f"{memory_filter} "
         "ORDER BY ordinal LIMIT %s",
-        (notebook_id, pattern, pattern, limit),
+        (notebook_id, pattern, pattern, *memory_params, limit),
     ).fetchall()
 
 
