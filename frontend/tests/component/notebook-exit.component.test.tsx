@@ -1421,6 +1421,76 @@ test("另一本笔记本的导出还在下载时打开这本的退出面板:这�
   gate.resolve(new Response("# first", { status: 200, headers: { "Content-Type": "text/markdown" } }));
 });
 
+const WAIT_FOR_EXPORT = "正在导出，导出完成后才能退出或转移，以免文件缺少内容。";
+
+test("导出进行中:确认退出与转移都不可用、旁边说明原因,取消可用;关掉再开仍要等;导出完成后恢复", async () => {
+  // codex #820 r3(P1):导出按页读取,导出没完就清除,后面的页读到空,下载「成功」却只有前一截。
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+  const user = userEvent.setup();
+  const gate = deferred<Response>();
+  const calls = installServer([
+    disclosure(2),
+    (call) => (call.path === "/api/notebooks/nb1/memories/export" ? gate.promise : undefined),
+  ]);
+  mount("bar");
+
+  await pressLeave(user);
+  let dialog = await panel();
+  await user.click(within(dialog).getByRole("button", { name: "导出为文件" }));
+  await within(dialog).findByRole("button", { name: "正在导出…" });
+  expect(within(dialog).getByRole("button", { name: "确认退出并删除" })).toBeDisabled();
+  expect(within(dialog).getByRole("button", { name: "转移到其他笔记本" })).toBeDisabled();
+  expect(within(dialog).getByText(WAIT_FOR_EXPORT)).toBeInTheDocument();
+  expect(within(dialog).getByRole("button", { name: "取消" })).toBeEnabled();
+
+  // 关掉再打开:同一本笔记本的导出仍在途,照样要等
+  await user.click(within(dialog).getByRole("button", { name: "取消" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "退出共享" })).not.toBeInTheDocument());
+  await pressLeave(user);
+  dialog = await panel();
+  expect(await within(dialog).findByRole("button", { name: "确认退出并删除" })).toBeDisabled();
+  expect(within(dialog).getByText(WAIT_FOR_EXPORT)).toBeInTheDocument();
+
+  gate.resolve(new Response("# 记忆", {
+    status: 200,
+    headers: { "Content-Disposition": "attachment; filename=\"memories-nb1.md\"" },
+  }));
+  await within(dialog).findByRole("button", { name: "已导出" });
+  expect(within(dialog).getByRole("button", { name: "确认退出并删除" })).toBeEnabled();
+  expect(within(dialog).getByRole("button", { name: "转移到其他笔记本" })).toBeEnabled();
+  expect(within(dialog).queryByText(WAIT_FOR_EXPORT)).not.toBeInTheDocument();
+  expect(deletes(calls)).toHaveLength(0);
+});
+
+test("导出进行中,绕过界面直接调用 confirm / openTransfer / submitTransfer 也都被拒绝", async () => {
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+  const gate = deferred<Response>();
+  const calls = installServer([
+    disclosure(2), memoriesPage(2),
+    (call) => (call.path === "/api/notebooks/nb1/memories/export" ? gate.promise : undefined),
+    (call) => (call.path === "/api/memories/transfer" ? json({ results: [] }) : undefined),
+  ]);
+  const { result } = renderHook(() => useNotebookExit({ onToast: () => undefined, onError: () => undefined }));
+
+  act(() => { result.current.start("nb1", anchorAt(40, 60), async () => undefined); });
+  await waitFor(() => expect(result.current.flow?.phase).toBe("confirm"));
+  let exported!: Promise<void>;
+  act(() => { exported = result.current.exportMemories(); });
+  await waitFor(() => expect(result.current.exporting).toBe(true));
+
+  act(() => { result.current.confirm(); });
+  await act(async () => { await result.current.openTransfer(); });
+  await expect(result.current.submitTransfer("nb2", "move", "我的库")).rejects.toThrow(WAIT_FOR_EXPORT);
+  expect(deletes(calls)).toHaveLength(0);
+  expect(calls.some((call) => call.path === "/api/notebooks/nb1/memories")).toBe(false);
+  expect(calls.some((call) => call.path === "/api/memories/transfer")).toBe(false);
+  expect(result.current.flow?.transfer).toBe("idle");
+
+  gate.resolve(new Response("# 记忆", { status: 200 }));
+  await act(async () => { await exported; });
+  expect(result.current.exporting).toBe(false);
+});
+
 test("目标笔记本选择器的默认行为不变:提交中「取消」仍是禁用的(记忆页/知识表沿用)", async () => {
   const user = userEvent.setup();
   installServer([targetNotebooks]);

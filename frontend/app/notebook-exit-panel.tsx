@@ -22,6 +22,7 @@ import {
   EXIT_CHANGED_TEXT,
   EXIT_CHANGED_TO_EMPTY_TEXT,
   EXIT_UNAVAILABLE_TEXT,
+  EXIT_WAIT_FOR_EXPORT_TEXT,
 } from "./notebook-exit-copy.ts";
 import { placePanel } from "./notebook-exit-placement.ts";
 import { DestinationPicker } from "./transfer-picker.tsx";
@@ -88,7 +89,10 @@ function ExitDialog({ exit }: { exit: NotebookExit }) {
   });
 
   const empty = flow.count === 0;
-  const locked = flow.leaving || flow.recounting || flow.transfer !== "idle";
+  // 本笔记本的导出还在进行:退出和转移都要等它完成(导出按页读取,先删/先移走会让文件
+  // 缺掉后面的记忆)。取消不受影响。
+  const waitingForExport = exit.exporting && !flow.leaving;
+  const locked = flow.leaving || flow.recounting || flow.transfer !== "idle" || exit.exporting;
   const exportClass = exit.exportResult === "copied"
     ? "sort-button copy-result-copied"
     : exit.exportResult === "failed"
@@ -168,6 +172,9 @@ function ExitDialog({ exit }: { exit: NotebookExit }) {
               </div>
             )}
           </>
+        )}
+        {flow.phase === "confirm" && waitingForExport && (
+          <p className="notebook-exit-hint" role="status">{EXIT_WAIT_FOR_EXPORT_TEXT}</p>
         )}
         <div className="notebook-exit-actions">
           {flow.phase === "unavailable" && (

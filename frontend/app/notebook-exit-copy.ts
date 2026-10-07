@@ -9,6 +9,8 @@ export const EXIT_FAILED_TEXT = "退出没有成功，请重试";
 export const EXIT_UNVERIFIED_TEXT = "暂时无法确认是否已经退出，请刷新页面查看笔记本列表。";
 export const EXIT_CHANGED_TEXT = "记忆数量有变化，请重新确认。";
 export const EXIT_CHANGED_TO_EMPTY_TEXT = "现在没有需要删除的记忆了，可以直接退出。";
+/** 导出还没完成时,退出和转移都要等:先删或先移走会让下载的文件缺掉后面的记忆。 */
+export const EXIT_WAIT_FOR_EXPORT_TEXT = "正在导出，导出完成后才能退出或转移，以免文件缺少内容。";
 
 /** 成功之后的提示:200 带服务端数到的条数,204(没有删)只说退出了。 */
 export const leftText = (deleted: number): string =>
