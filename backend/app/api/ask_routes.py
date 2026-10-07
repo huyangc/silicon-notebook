@@ -1056,8 +1056,9 @@ def _own_conversation_or_404(
     ``''`` never equals a real user id, so an equality-first gate would 404
     creatorless rows and the fail-closed branch would be dead code.
 
-    Returns the (equal) creator id; callers currently discard it, exactly like
-    the report ``cancel``/``delete``/``unshare`` handlers discard their row.
+    Returns the (equal) creator id. The read-back and revoke handlers discard
+    it; the share POST and its disclosure GET use it as the author whose own
+    Memory is counted (M4) and as the creator the mount pre-check runs for.
     """
     owner = repo.conversation_creator(notebook_id, conversation_id)
     if owner is None:
@@ -1114,15 +1115,31 @@ def _conversation_share_count(
     snapshot the share would publish. ``new_memory_count`` is measured
     against the page the link serves now, read through the same
     ``public_conversation_by_token`` the anonymous page uses. Reads only.
+
+    Everything the share would refuse is refused here too, so the disclosure
+    read and the POST answer the same way: a boundary sorting before the
+    published watermark (``ConversationShareWatermarkStale``), and — like the
+    global share's authority sweep — a range quoting a mounted library that
+    is no longer an effective participant for the creator (D-3): such a link
+    would 404 on its first open, so it is not issued (404 with the global
+    branch's sentence).
     """
     detail = repo.get_conversation(conversation_id)
+    state = repo.conversation_share_state(notebook_id, conversation_id)
     boundary, window = conversation_share_window(
         [(turn.answer_id, turn.response.model_dump(mode="json")) for turn in detail.turns],
         conversation_id,
         through_id,
+        published_through_id=str(state.get("shared_through_id") or ""),
     )
+    if not mounts_still_effective(
+        notebook_id, author_id,
+        conversation_library_ids([{"payload": payload} for payload in window]),
+        repo.participant_notebook_ids,
+    ):
+        raise user_error(404, "部分笔记本已无法访问，请重新选择范围。")
     published: list = []
-    token = repo.conversation_share_state(notebook_id, conversation_id).get("share_token")
+    token = state.get("share_token")
     snapshot = repo.public_conversation_by_token(token) if token else None
     if snapshot is not None:
         published = [turn.get("payload") for turn in snapshot.get("turns") or []]
@@ -1421,13 +1438,14 @@ def public_conversation_asset_route(token: str, alias: str) -> FileResponse:
 
     ⚠ Cross-notebook boundary (design §六): a referenced image may live in a
     MOUNTED reference library, so ``asset["notebook_id"]`` can differ from the
-    conversation's notebook. The authorization here is deliberately "referenced
-    inside the frozen snapshot + creator's live read access to the conversation
-    notebook", NOT a fresh participant-scope re-check of the asset's own
-    notebook. The frozen snapshot IS the grant — when the answer was generated,
-    that library was in the creator's participant set and the evidence (hence the
-    image) was legitimately assembled. We do not widen this to re-authorize the
-    asset's notebook (there is no request user to authorize) nor narrow it to
+    conversation's notebook. The authorization is "referenced inside the frozen
+    snapshot + creator's live read access to the conversation notebook + every
+    mounted library the snapshot quotes is still an effective participant of
+    that notebook for the creator" — the last one is D-3, run by the shared
+    ``_public_conversation_or_404`` on every image request exactly as on every
+    page open. The snapshot is no longer the grant on its own: unmounting the
+    library (or the mount ceasing to be effective) kills its images with the
+    page, and restoring the mount revives both. We still do not narrow this to
     same-notebook assets (that would silently drop legitimate federated images).
 
     ``Cache-Control: no-store``: revocation must not be architected away by an

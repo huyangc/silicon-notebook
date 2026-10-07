@@ -2166,9 +2166,12 @@ class GlobalAskService:
         """The author's Memory a share pinned at ``through_id`` (a job id;
         empty = the newest completed turn) would publish: ``memory_count`` and
         ``new_memory_count`` (relative to the current watermark). Owner only,
-        refused exactly like the share, and nothing is written."""
+        refused exactly like the share -- the same window refusals and the same
+        authority sweep over the libraries the range draws on -- and nothing is
+        written."""
         self._owned_conversation(conversation_id, user_id)
-        _boundary, count = self._share_count(conversation_id, user_id, through_id)
+        boundary, count = self._share_count(conversation_id, user_id, through_id)
+        self._share_authority_sweep(conversation_id, user_id, boundary)
         return {"memory_count": count.memory_count,
                 "new_memory_count": count.new_memory_count}
 
@@ -2226,11 +2229,12 @@ class GlobalAskService:
         the user id as an argument and touch no ContextVar.
 
         The re-check is LIVE on every open (product decision 2026-09-20): the
-        snapshot is frozen, the authorization is not. The set re-checked is the
-        union of the snapshot turns' ``cited_notebook_ids``, falling back to
-        their ``resolved_notebook_ids`` when nothing was cited, so a snapshot
-        that cited nothing is not a snapshot that checks nothing (see
-        ``_snapshot_notebook_ids``). Losing read access to ANY of them kills the
+        snapshot is frozen, the authorization is not. The set re-checked is,
+        for every snapshot turn, the libraries it searched
+        (``resolved_notebook_ids``) together with the libraries its evidence
+        names -- always both (D-2): a turn can restate a library it searched
+        without citing it, and a snapshot that cited nothing is not a snapshot
+        that checks nothing (see ``_snapshot_notebook_ids``). Losing read access to ANY of them kills the
         whole link -- one unreadable library cannot be quietly dropped from an
         answer that already quoted it -- and restoring access revives the SAME
         token.
