@@ -227,12 +227,24 @@ def test_retrieval_authority_filters_private_memory_in_postgres(
             doc_type="",
             memory_id=memory_id,
         )
-        chunks.replace_source_chunks(
-            source_id,
-            notebook_id,
-            [ChunkWrite(f"chunk-{source_id}", source_id, "", ())],
-            created_at=now,
-        )
+        if source_type == "memory":
+            # The store refuses to chunk a Memory source (E4-1), and this test
+            # exists to prove the READ filter still hides such rows should they
+            # ever exist -- so they are planted directly.
+            with postgres_database.write() as connection:
+                connection.execute(
+                    "INSERT INTO chunks"
+                    "(id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                    "VALUES (%s,%s,%s,%s,'','[]',%s)",
+                    (f"chunk-{source_id}", notebook_id, source_id, source_id, now),
+                )
+        else:
+            chunks.replace_source_chunks(
+                source_id,
+                notebook_id,
+                [ChunkWrite(f"chunk-{source_id}", source_id, "", ())],
+                created_at=now,
+            )
         chunks.replace_chunk_questions(
             f"chunk-{source_id}",
             notebook_id,

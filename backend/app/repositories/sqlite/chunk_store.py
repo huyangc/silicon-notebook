@@ -12,6 +12,10 @@ from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.id_binding import (
     bind_ids, drive_by, member_of, not_member_of,
 )
+from app.repositories.sqlite.memory_sql import (
+    MEMORY_SOURCE_NOT_CHUNKED,
+    memory_source_type_predicate,
+)
 from app.repositories.sqlite.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 from app.domain.vector_index import encode_vector
 from app.domain.indexing_pipeline import IndexingPipelineStalePlanError
@@ -21,6 +25,39 @@ from app.domain.indexing_pipeline import IndexingPipelineStalePlanError
 # default SQLITE_MAX_VARIABLE_NUMBER is far higher, but a fixed batch keeps the
 # statement shape stable no matter how many evidence elements one query hit.
 CHUNK_ELEMENT_LOOKUP_BATCH = 500
+
+# ``ChunkStore.replace_source_chunks`` and ``ChunkStore.insert_rows`` raise
+# ``ValueError(MEMORY_SOURCE_NOT_CHUNKED)`` when the target source is a private
+# Memory projection. Passages are a SHARED index (every notebook member
+# retrieves from them) while Memory is private per user, so a Memory source
+# must never own a chunk row. The message and the type predicate come from
+# ``memory_sql`` (the one definition of "Memory source").
+#
+# Which chunk write paths refuse, and which do not (the static guard
+# ``tests/test_memory_chunk_write_guard.py`` enumerates every write of the
+# ``chunks`` table and fails on an unlisted one):
+#   * refuse with ``_refuse_memory_source``: this file's two methods, the KG
+#     build publish (``kg_build_job_store``), the Knowhow transfer insert
+#     (``knowhow_transfer_store``) and the sync import (``migration/sync``);
+#   * changes existing rows only / moves existing rows only: ``maintenance``
+#     and the ``migration`` mirrors, listed with that reason in the guard;
+#   * the notebook copy path (``NotebookCopyService.copy_notebook`` ->
+#     ``sharing_store.insert_copy_rows("chunks")``) does not call the refusal.
+#     Which chunk rows it copies is decided by the ``chunks`` query of the copy
+#     statement set ``sharing_store`` uses for a notebook that holds a Memory
+#     source: its only set ``_COPY_SNAPSHOT_QUERIES`` when there is one set, or,
+#     where ``SharingStore._copy_queries`` chooses per copy (task E5-1), the set
+#     it returns when its probe ``_COPY_DIRTY_SQL`` finds a Memory source,
+#     ``_MEMORY_COPY_SNAPSHOT_QUERIES``. When that query carries
+#     ``NOT memory_sql.memory_derived_*(<alias>)`` (``memory_derived_object``,
+#     ``memory_derived_in_notebook``) a Memory source's rows are not copied.
+#     The guard checks on every run, on both backends, whether it does and lists
+#     the path as guarded or unguarded accordingly (``copy_path_reason``).
+
+
+#: 两个写方法的 Memory 探针:对来源做一次主键点查(计划钉在
+#: ``tests/test_memory_chunk_write_sqlite_plans.py``)。
+MEMORY_PROBE_SQL = "SELECT 1 FROM sources WHERE id = ? AND " + memory_source_type_predicate()
 
 
 class ChunkStore:
@@ -222,6 +259,12 @@ class ChunkStore:
                  c.section_path, json.dumps(list(c.element_ids)), created_at)
                 for c in chunks]
         with self.database.write() as db:
+            # 探测与写入同一个写事务:write() 的连接是 sqlite3 旧式事务控制,
+            # SELECT 不开事务、要到 DELETE 才开——先 BEGIN IMMEDIATE,否则另一进程
+            # 可在「探测通过」与「首条写入」之间改掉来源。在任何 DELETE 之前拒绝,
+            # 被拒的写入不动该来源已有的行。write() 每次递出全新连接,此处无已开事务。
+            self.database.begin_immediate(db)
+            self._refuse_memory_source(db, source_id)
             # chunks_fts 是词法派生索引(无 source_id 列,不随 chunks 的 FK 级联),须同事务
             # 手动同步:先删本 source 旧 chunk 的 FTS 行(chunks DELETE 前 join 取 id),再重插。
             db.execute(
@@ -242,6 +285,28 @@ class ChunkStore:
                 db.execute(
                     "UPDATE sources SET chunked_at = ? WHERE id = ?",
                     (mark_chunked_at, source_id))
+
+    @staticmethod
+    def _refuse_memory_source(connection: sqlite3.Connection, source_id: str) -> None:
+        """``replace_source_chunks`` / ``insert_rows`` 两个写方法的守卫:每次写调用、
+        每个来源只探一次主键(绝不逐 chunk 行);Memory 来源是用户私有的,不许在
+        共享段落索引里拥有行。在**调用方连接**上执行,事务归调用方
+        (``replace_source_chunks`` 自己先 BEGIN IMMEDIATE)。未知 source_id 这里不拒,
+        chunks 外键照旧在插入时拒。
+
+        它**不**做的事:探针只保证「写入那一刻来源已经是 Memory」时被拒,防不住类型
+        **事后**被改成 Memory。PostgreSQL(READ COMMITTED)上实测:探针是普通 SELECT,
+        并发的 ``UPDATE sources SET source_type='memory'`` 照样提交,探针加 ``FOR KEY
+        SHARE`` / ``FOR SHARE`` 也一样。所以「Memory 来源名下没有 chunk」这条不变量
+        依赖 ``sources.source_type`` 插入后永不改变:静态守卫
+        (``test_memory_chunk_write_guard.py``)断言除 INSERT 外没有语句写这一列,表可能是
+        ``sources`` 的通用写者都登记在那里;同步导入的 ``ON CONFLICT (id) DO UPDATE`` 在运行时
+        把关:包里某来源 id 的类型与目标端不同、且其中一方是 Memory 时,整轮导入在应用任何
+        表之前被拒绝。(SQLite 的 BEGIN IMMEDIATE 关掉了 ``replace_source_chunks``
+        里探针与写入之间的窗口,但提交之后类型再被改,仍只有不可变性防得住。)"""
+        row = connection.execute(MEMORY_PROBE_SQL, (source_id,)).fetchone()
+        if row is not None:
+            raise ValueError(MEMORY_SOURCE_NOT_CHUNKED)
 
     def _insert_fts_rows(self, connection: sqlite3.Connection, rows: list) -> None:
         connection.executemany(
@@ -367,6 +432,9 @@ class ChunkStore:
         ]
         if not values:
             return
+        # 事务归调用方:探测跑在调用方这条连接上(Knowhow 投影器在同一个写事务里已先写过
+        # 元素行),与下面的 INSERT 同一事务。
+        self._refuse_memory_source(connection, source_id)
         connection.executemany(
             "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
             "VALUES (?,?,?,?,?,?,?)", values)

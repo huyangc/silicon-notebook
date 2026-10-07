@@ -6,6 +6,11 @@ from typing import Callable
 
 from psycopg import sql
 
+from app.domain.knowhow_transfer import (
+    CHUNK_SOURCE_MISMATCH,
+    MEMORY_SOURCE,
+    KnowhowTransferRefused,
+)
 from app.repositories.chunk_elements import reverse_rows as chunk_element_reverse_rows
 from app.repositories.postgres._store_utils import (
     execute_many,
@@ -16,6 +21,11 @@ from app.repositories.postgres._store_utils import (
 )
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.knowhow_history_store import record_change
+from app.repositories.postgres.memory_sql import (
+    MEMORY_SOURCE_NOT_CHUNKED,
+    TRANSFER_CHUNK_SOURCE_MISMATCH,
+    memory_source_type_predicate,
+)
 
 # 插入 FK 顺序：表→列/行→资产→格/代码→隐藏源→元素→chunk→向量
 _BUSINESS_ORDER = ("columns", "rows", "assets", "cells", "cell_code")
@@ -57,6 +67,32 @@ def _insert_rows(db: object, table: str, rows: list) -> None:
             ),
             [prepared[c] for c in cols],
         )
+
+
+#: The transfer's Memory probe: ONE primary-key lookup of the transferred source.
+MEMORY_PROBE_SQL = (
+    "SELECT 1 FROM sources WHERE id=%s AND " + memory_source_type_predicate()
+)
+
+
+def _refuse_memory_source(db: object, payload: dict) -> None:
+    """Refuse a transfer whose chunk rows would belong to a Memory source, on the
+    insert transaction's own connection, after the ``sources`` row is in and before
+    the first chunk row. Every chunk row must name the payload's own source (else
+    the transfer is refused: a chunk under some other source id is not something a
+    table transfer produces), and that one id is probed by primary key. A Memory
+    source is private per user and must not own rows in the shared passage index.
+    Protects against a source that IS Memory now, not against a later type change
+    (see ``ChunkStore._refuse_memory_source``)."""
+    chunk_rows = payload.get("chunks") or []
+    if not chunk_rows:
+        return
+    source = payload.get("source") or {}
+    source_id = str(source.get("id", ""))
+    if not source_id or any(str(row["source_id"]) != source_id for row in chunk_rows):
+        raise KnowhowTransferRefused(TRANSFER_CHUNK_SOURCE_MISMATCH, reason=CHUNK_SOURCE_MISMATCH)
+    if db.execute(MEMORY_PROBE_SQL, (source_id,)).fetchone() is not None:
+        raise KnowhowTransferRefused(MEMORY_SOURCE_NOT_CHUNKED, reason=MEMORY_SOURCE)
 
 
 def _snapshot_row(table: str, row: dict) -> dict:
@@ -218,6 +254,7 @@ class KnowhowTransferStore:
                 _insert_rows(db, _TABLE_NAMES[key], payload.get(key) or [])
             if payload.get("source"):
                 _insert_rows(db, "sources", [payload["source"]])
+            _refuse_memory_source(db, payload)
             for key in _DERIVED_ORDER:
                 _insert_rows(db, _TABLE_NAMES[key], payload.get(key) or [])
 

@@ -89,6 +89,14 @@ import re
 #: Memory 派生来源的 `sources.source_type` 取值 —— 本模块里唯一的 `'memory'` 字面量。
 MEMORY_SOURCE_TYPE = "memory"
 
+#: 拒绝信息:`ChunkStore` 的两个写方法、KG 发布、Knowhow 表传输在目标是 Memory 来源时抛出所用的
+#: 固定文案,不带任何内容。同步导入不用它:整轮拒绝时用自己的句子(带来源数量与 id、说明怎么处理),
+#: 见 `migration/sync/import_.py`。
+MEMORY_SOURCE_NOT_CHUNKED = "memory sources are not chunked"
+
+#: 拒绝信息:Knowhow 表传输的 payload 里有 chunk 行不指向 payload 自己的来源。
+TRANSFER_CHUNK_SOURCE_MISMATCH = "transfer chunk rows must belong to the transferred source"
+
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # 各片段内层子查询占用的别名(小写);外层别名与之相同(不分大小写)即绑错表。

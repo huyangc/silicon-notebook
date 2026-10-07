@@ -355,6 +355,99 @@ def test_move_out_of_a_mirrored_source_is_refused(client, repo):
     assert repo.get_knowhow_table(tid)["notebook_id"] == mirrored
 
 
+def _projected_table(repo, nb, *, hidden_type: str) -> str:
+    """A table with a hidden source that owns one element and one passage, written
+    directly (the state a projection leaves), then typed ``hidden_type``. The
+    transfer's own ``_remap`` never produces a Memory hidden source; this plants it."""
+    import json as _json
+
+    tid = _table(repo, nb)
+    table = repo.get_knowhow_table(tid)
+    column_id = table["columns"][0]["id"]
+    row_id = table["rows"][0]["id"]
+    hidden = f"src-kh-{tid[-8:]}"
+    repo._runtime.source_store.insert_source(
+        source_id=hidden, notebook_id=nb, title="T", source_type="knowhow",
+        status="extracted", parse_status="extracted", file_name="t.md",
+        file_path="/tmp/t.md", file_size=0, file_hash="h", summary="", doc_type="",
+    )
+    element = f"el-{row_id}-{column_id}"
+    now = "2026-01-01T00:00:00+00:00"
+    with repo._runtime.chunk_store.database.write() as db:
+        db.execute("UPDATE knowhow_tables SET hidden_source_id=? WHERE id=?", (hidden, tid))
+        db.execute(
+            "INSERT INTO source_elements (id,source_id,element_type,location_label,text,metadata,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (element, hidden, "paragraph", "", "过冲", _json.dumps(
+                {"knowhow": {"table_id": tid, "row_id": row_id, "column_id": column_id}}
+            ), now),
+        )
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (f"khchunk-{row_id}-0", nb, hidden, "过冲", "", _json.dumps([element]), now),
+        )
+        db.execute("UPDATE sources SET source_type=? WHERE id=?", (hidden_type, hidden))
+    return tid
+
+
+def _tables_in(repo, nb) -> int:
+    with repo._runtime.chunk_store.database.connect() as db:
+        return db.execute("SELECT COUNT(*) FROM knowhow_tables WHERE notebook_id=?", (nb,)).fetchone()[0]
+
+
+@pytest.mark.parametrize("mode", ["copy", "move"])
+def test_transfer_of_a_memory_hidden_source_is_a_classified_409(client, repo, mode):
+    """E4-1b: the transfer insert refuses passages of a Memory source and rolls
+    back; the route answers with a classified user error (plain Chinese, marked
+    for display), not an internal 500. Nothing changes on either side."""
+    h = _login(client, f"m0000000{'1' if mode == 'copy' else '2'}")
+    src = client.post("/api/notebooks", json={"name": "src"}, headers=h).json()["id"]
+    dst = client.post("/api/notebooks", json={"name": "dst"}, headers=h).json()["id"]
+    tid = _projected_table(repo, src, hidden_type="memory")
+    resp = client.post(
+        f"/api/notebooks/{src}/knowhow/{tid}/transfer",
+        json={"target_notebook_id": dst, "mode": mode},
+        headers=h,
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.headers.get("X-User-Message") == "1"
+    assert "个人记忆" in resp.json()["detail"]
+    assert "没有做任何改动" in resp.json()["detail"]
+    assert _tables_in(repo, dst) == 0
+    assert repo.get_knowhow_table(tid)["notebook_id"] == src
+
+
+def test_transfer_whose_passages_name_another_source_is_a_classified_422(client, repo, monkeypatch):
+    """The other refusal of the transfer insert: a passage row that names a source
+    other than the table's own hidden source (``_remap`` never builds one; the
+    payload is altered here to reach the refusal through the route)."""
+    from app.services.knowhow import transfer as kh_transfer
+
+    h = _login(client, "m00000003")
+    src = client.post("/api/notebooks", json={"name": "src"}, headers=h).json()["id"]
+    dst = client.post("/api/notebooks", json={"name": "dst"}, headers=h).json()["id"]
+    tid = _projected_table(repo, src, hidden_type="knowhow")
+    remap = kh_transfer._remap
+
+    def stray_passage(*args, **kwargs):
+        payload, asset_files, seams = remap(*args, **kwargs)
+        payload["chunks"][0]["source_id"] = "src-somewhere-else"
+        return payload, asset_files, seams
+
+    monkeypatch.setattr(kh_transfer, "_remap", stray_passage)
+    resp = client.post(
+        f"/api/notebooks/{src}/knowhow/{tid}/transfer",
+        json={"target_notebook_id": dst, "mode": "copy"},
+        headers=h,
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.headers.get("X-User-Message") == "1"
+    assert "没有做任何改动" in resp.json()["detail"]
+    assert _tables_in(repo, dst) == 0
+    assert repo.get_knowhow_table(tid)["notebook_id"] == src
+
+
 def test_transfer_between_two_local_notebooks_is_unaffected(client, repo):
     """两本本地库之间照常——围栏是条件分支,不是对这条路由的全局收紧。"""
     h = _login(client, "z00000003")

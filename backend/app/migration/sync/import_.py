@@ -282,6 +282,7 @@ from app.migration.sync.package import (
     json_document,
     rows_path,
 )
+from app.repositories.postgres.memory_sql import MEMORY_SOURCE_TYPE
 from app.repositories.postgres.schema_manifest import (
     POSTGRES_EMPTY_TIME_SENTINELS,
     POSTGRES_ROWID_ORDINAL_TABLES,
@@ -2498,6 +2499,7 @@ def _preflight(backend: _Backend, conn: Any, context: _Context) -> bool:
             "A local notebook, or a mirror of a different environment, is "
             "never overwritten by an import."
         )
+    _preflight_memory_sources(backend, conn, context)
     return False
 
 
@@ -4729,6 +4731,162 @@ def _package_columns(
     return columns
 
 
+# The import's two Memory refusals. Both end the WHOLE run with a fixed sentence
+# that says what is wrong and what to do, plus the number of offending sources and
+# their ids (opaque identifiers, not content: no title, text or user id). Neither
+# skips a row: a skipped source row would leave that source's child rows (elements,
+# KG rows, passages) applied to a target row of the other type.
+_MEMORY_ID_LIMIT = 20
+
+
+def _id_list(ids: Sequence[str]) -> str:
+    shown = ", ".join(ids[:_MEMORY_ID_LIMIT])
+    extra = len(ids) - _MEMORY_ID_LIMIT
+    return shown + (f" (and {extra} more)" if extra > 0 else "")
+
+
+def _memory_chunks_message(ids: Sequence[str]) -> str:
+    return (
+        f"the package carries passages of {len(ids)} Memory source(s), and a Memory "
+        "source never owns passages. Upgrade the source environment to this version "
+        "(its schema migration removes those passages), export a FULL package again "
+        "and import that one; this package cannot be resumed. "
+        f"Source ids: {_id_list(ids)}"
+    )
+
+
+def _memory_type_message(conflicts: Sequence[tuple[str, str, str]]) -> str:
+    """``conflicts``: ``(source id, package type, target type)``."""
+    detail = ", ".join(
+        f"{sid} (package: {package}, target: {target})"
+        for sid, package, target in conflicts[:_MEMORY_ID_LIMIT]
+    )
+    extra = len(conflicts) - _MEMORY_ID_LIMIT
+    return (
+        f"{len(conflicts)} source id(s) have a different type in the package than in "
+        f"the target, and one of the two types is {MEMORY_SOURCE_TYPE!r}: the same "
+        "source id has different types in the two environments, and a source's type "
+        "never changes after it is created. Nothing was imported from this package. "
+        f"{_RECONCILE_TYPES} "
+        f"Source ids: {detail}" + (f" (and {extra} more)" if extra > 0 else "")
+    )
+
+
+# What the operator does about a type conflict, in plain words.
+_RECONCILE_TYPES = (
+    "同一个来源在两个环境里的类型不一致，本次没有导入任何内容。"
+    "请先核对两边的这些来源、让它们的类型一致，再重新同步。"
+)
+
+
+def _memory_type_conflicts(
+    package_types: Mapping[str, str], target_types: Mapping[str, str]
+) -> list[tuple[str, str, str]]:
+    return sorted(
+        (sid, package_types[sid], target_type)
+        for sid, target_type in target_types.items()
+        if sid in package_types
+        and package_types[sid] != target_type
+        and MEMORY_SOURCE_TYPE in (package_types[sid], target_type)
+    )
+
+
+def _source_rows_statement(count: int) -> str:
+    """``SELECT id, source_type FROM sources WHERE id IN (?,...)`` for ``count`` ids:
+    the ONE statement both Memory refusals of the import run (primary-key lookups;
+    its EXPLAIN pins run this same builder). Which rows are Memory is decided in
+    Python against ``MEMORY_SOURCE_TYPE``, so the statement has no type predicate
+    the planner could lead with."""
+    marks = ",".join("?" for _ in range(count))
+    return f"SELECT id, source_type FROM sources WHERE id IN ({marks})"
+
+
+def _source_rows_by_id(
+    backend: _Backend, conn: Any, ids: Sequence[str]
+) -> dict[str, str]:
+    """``{source id: source_type}`` for the given ids; one statement per
+    ``_ROW_BATCH`` ids (the per-batch ``IN`` list ``_TargetKeys`` uses)."""
+    found: dict[str, str] = {}
+    for chunk in _batched(list(ids), _ROW_BATCH):
+        for row in backend.fetch(conn, _source_rows_statement(len(chunk)), chunk):
+            found[str(row["id"])] = str(row["source_type"])
+    return found
+
+
+def _memory_ids(types_by_id: Mapping[str, str]) -> set[str]:
+    return {sid for sid, kind in types_by_id.items() if kind == MEMORY_SOURCE_TYPE}
+
+
+def _preflight_memory_sources(backend: _Backend, conn: Any, context: _Context) -> None:
+    """Refuse, before ANY table of the run is applied (so nothing is half-applied
+    and a dry run refuses too), a package that would put a Memory source's
+    passages into the shared index or change a source's type to or from Memory.
+
+    * type conflict: one ``SELECT id, source_type`` per ``_ROW_BATCH`` of the
+      package's source ids, compared with the package's own types;
+    * passages: one streaming pass over the package's chunk rows collecting the
+      distinct source ids they name; the Memory ones are those the package types
+      as Memory plus, for ids the package carries no source row for (a window),
+      those the target types as Memory (one more statement per ``_ROW_BATCH``).
+      After the conflict check the two typings agree wherever both exist.
+
+    ``_apply_table`` repeats the same two refusals per batch inside its own write
+    transaction (``_refuse_memory_source``) for whatever changed after this read."""
+    package_types = {
+        str(decode_value(row.get("id"))): str(decode_value(row.get("source_type")) or "")
+        for row in _iter_lines(context.package_dir / rows_path("sources"))
+    }
+    target_types = _source_rows_by_id(backend, conn, sorted(package_types))
+    conflicts = _memory_type_conflicts(package_types, target_types)
+    if conflicts:
+        raise SyncImportError(_memory_type_message(conflicts))
+    chunk_sources = {
+        str(decode_value(row.get("source_id")))
+        for row in _iter_lines(context.package_dir / rows_path("chunks"))
+    }
+    memory_ids = _memory_ids(package_types)
+    memory_ids |= _memory_ids(
+        _source_rows_by_id(backend, conn, sorted(chunk_sources - package_types.keys()))
+    )
+    offending = sorted(chunk_sources & memory_ids)
+    if offending:
+        raise SyncImportError(_memory_chunks_message(offending))
+
+
+def _refuse_memory_source(
+    backend: _Backend,
+    conn: Any,
+    table: str,
+    rows: list[dict[str, Any]],
+) -> None:
+    """The per-batch backstop of ``_preflight_memory_sources``, on this table's own
+    write transaction before the upsert (a raise rolls the batch back).
+
+    * ``chunks``: a Memory source is private per user and must not own rows in
+      the shared passage index. ONE probe per statement batch over the batch's
+      distinct source ids (the per-batch ``IN`` list ``_TargetKeys`` uses for every
+      table); the sources table is applied in an earlier transaction, so a Memory
+      source this same run created is visible to it.
+    * ``sources``: the generic ``ON CONFLICT (id) DO UPDATE SET <all columns>``
+      would rewrite ``source_type`` of an existing row, and the invariant "no chunk
+      under a Memory source" rests on that column never changing after insert (a
+      probe cannot protect against a later change). ONE ``SELECT id, source_type``
+      per batch of incoming ids.
+
+    Every other table returns at once without issuing a statement."""
+    if table == "chunks":
+        ids = sorted({str(row.get("source_id")) for row in rows})
+        found = _memory_ids(_source_rows_by_id(backend, conn, ids))
+        if found:
+            raise SyncImportError(_memory_chunks_message(sorted(found)))
+    elif table == "sources":
+        ids = sorted({str(row.get("id")) for row in rows})
+        package = {str(row.get("id")): str(row.get("source_type")) for row in rows}
+        conflicts = _memory_type_conflicts(package, _source_rows_by_id(backend, conn, ids))
+        if conflicts:
+            raise SyncImportError(_memory_type_message(conflicts))
+
+
 def _apply_table(
     backend: _Backend, conn: Any, table: str, context: _Context
 ) -> TableOutcome:
@@ -4839,6 +4997,7 @@ def _apply_table(
             kept = allowed
         if not kept:
             continue
+        _refuse_memory_source(backend, conn, table, kept)
         if unique_keys and resolve_collisions:
             # A window, on a table §5 says the source owns: clear the
             # target's own colliding rows instead of refusing. The assert

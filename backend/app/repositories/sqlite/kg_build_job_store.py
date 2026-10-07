@@ -6,13 +6,30 @@ import sqlite3
 from typing import Callable, Sequence
 
 from app.domain.vector_index import encode_vector
-from app.domain.indexing_pipeline import IndexingPipelineStalePlanError
+from app.domain.indexing_pipeline import (
+    IndexingPipelineMemorySourceError,
+    IndexingPipelineStalePlanError,
+)
 from app.models.sources import INDEXING_CHUNK_FALLBACK_WARNING_PREFIX
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.memory_sql import (
+    MEMORY_SOURCE_NOT_CHUNKED,
+    memory_source_type_predicate,
+)
 from app.repositories.sqlite.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 from app.repositories.ports import (
     INDEXING_PIPELINE_PUBLISH_DELETE_BATCH,
     KgBuildAlreadyRunning,
+)
+
+#: 发布的 Memory 拒绝探针:一条限定笔记本的语句,由部分索引 ``idx_sources_nb_hidden_type``
+#: (``notebook_id, source_type`` WHERE ``source_type IN ('memory','knowhow')``)应答。SQLite
+#: 不会从 ``source_type = 'memory'`` 推出索引的 ``IN`` 条件(它只认与索引 WHERE 相同的项),
+#: 所以语句里原样带上这一项;少了它,规划器改走 ``idx_sources_notebook_file_hash``、逐行
+#: 读完本笔记本的全部来源(计划钉在 ``tests/test_memory_chunk_write_sqlite_plans.py``)。
+NOTEBOOK_MEMORY_SOURCES_SQL = (
+    "SELECT id FROM sources WHERE notebook_id = ? "
+    "AND source_type IN ('memory','knowhow') AND " + memory_source_type_predicate()
 )
 
 # 协议边界:staged 回退警告码的最大长度(具名常量,不是可调预算)。
@@ -218,6 +235,23 @@ class KgBuildJobStore:
                 (self.now(), notebook_id),
             )
         return int(cursor.rowcount)
+
+    @staticmethod
+    def _refuse_memory_source(
+        db: sqlite3.Connection, notebook_id: str, snapshot: Sequence[str]
+    ) -> None:
+        """发布事务里拒绝「快照(= 暂存来源)含 Memory 来源」:**一条**限定笔记本的有界
+        语句(``sources`` 按 ``notebook_id`` 加 Memory 类型谓词,走
+        ``idx_sources_nb_hidden_type``),结果(至多本笔记本自己的 Memory 来源)在
+        Python 里与发布事务已加载的快照求交,在发布事务自己的连接上、第一次改动线上
+        数据之前执行。Memory 来源是用户私有的,不许在共享段落索引里拥有行。今天上面
+        的快照比对已经把这样的来源挡在外面(它不是可见类型);这是该谓词一旦漂移时的
+        最后一道。和所有 chunk 写探针一样,它防的是「此刻就是 Memory」,不防类型事后被改
+        (见 ``ChunkStore._refuse_memory_source``)。抛
+        ``IndexingPipelineMemorySourceError``,让跑这次发布的 job 以自己的分类原因结束。"""
+        rows = db.execute(NOTEBOOK_MEMORY_SOURCES_SQL, (notebook_id,)).fetchall()
+        if {str(row["id"]) for row in rows} & set(snapshot):
+            raise IndexingPipelineMemorySourceError(MEMORY_SOURCE_NOT_CHUNKED)
 
     def begin_indexing_pipeline_stage(
         self,
@@ -800,6 +834,7 @@ class KgBuildJobStore:
                 return False
 
             self._validate_stage_payloads(db, payloads)
+            self._refuse_memory_source(db, notebook_id, snapshot)
 
             # All validation precedes the first live mutation.
             for source_id in snapshot:
