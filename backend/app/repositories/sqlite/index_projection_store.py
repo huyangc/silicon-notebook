@@ -112,9 +112,22 @@ _SHARED_CONTENT_FACTS = (
     ("SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts FROM knowledge_embeddings "
      "WHERE notebook_id=? AND object_id" + _NOT_A_MEMORY_OBJECT, 3),
 )
+# The reviewed shared relations (see the PostgreSQL twin): a review rewrites
+# ``review_status`` alone, which no aggregate above sees.
+_SHARED_REVIEWED_RELATIONS_SQL = (
+    "SELECT id, review_status FROM knowledge_relations "
+    "WHERE notebook_id=? AND review_status <> 'pending'" + _EXCLUDE_MEMORY_ROWS
+    + " ORDER BY id"
+)
 _MEMORY_RELATION_IDS_SQL = (
     "SELECT id FROM knowledge_relations WHERE notebook_id=? AND source_id IN "
     + _NOTEBOOK_MEMORY_SOURCES
+)
+_NOT_A_MEMORY_RELATION = " NOT IN (" + _MEMORY_RELATION_IDS_SQL + ")"
+# The shared relation vectors behind the relation ANN (see the PostgreSQL twin).
+_SHARED_RELATION_EMBEDDING_FACTS = (
+    "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts FROM relation_embeddings "
+    "WHERE notebook_id=? AND relation_id" + _NOT_A_MEMORY_RELATION
 )
 
 
@@ -372,7 +385,8 @@ class IndexProjectionStore:
 
     def shared_content_digest(self, notebook_id: str) -> str:
         """``version_facts``' aggregates over the rows NOT derived from Memory,
-        as a digest -- see the PostgreSQL twin."""
+        as a digest, plus the shared relation vectors and the reviewed shared
+        relations -- see the PostgreSQL twin."""
         with self.connect() as db:
             facts = [
                 [int(row["c"]), str(row["ts"])]
@@ -381,6 +395,16 @@ class IndexProjectionStore:
                     for statement, binds in _SHARED_CONTENT_FACTS
                 )
             ]
+            relation_vectors = db.execute(
+                _SHARED_RELATION_EMBEDDING_FACTS, (notebook_id,) * 3
+            ).fetchone()
+            facts.append([int(relation_vectors["c"]), str(relation_vectors["ts"])])
+            facts.append([
+                [str(row["id"]), str(row["review_status"])]
+                for row in db.execute(
+                    _SHARED_REVIEWED_RELATIONS_SQL, (notebook_id, notebook_id)
+                ).fetchall()
+            ])
         return hashlib.sha256(repr(facts).encode("utf-8")).hexdigest()[:32]
 
     @staticmethod

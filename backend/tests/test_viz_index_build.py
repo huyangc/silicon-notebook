@@ -77,6 +77,7 @@ from tests.memory_artifact_fixture import (  # noqa: E402
     assert_a_re_stamp_republishes_the_source_partition_companion,
     assert_a_re_stamp_publishes_the_identity_it_verified,
     assert_a_re_stamp_never_copies_a_graph_built_under_other_settings,
+    assert_a_re_stamp_never_keeps_a_rejected_relation,
     assert_a_pre_isolation_index_is_rebuilt_by_the_next_fold,
     assert_no_artifact_built_before_the_isolation_is_served,
     confirm_a_memory,
@@ -764,6 +765,10 @@ def test_a_re_stamp_never_copies_a_graph_built_under_other_settings(repo):
     assert_a_re_stamp_never_copies_a_graph_built_under_other_settings(repo)
 
 
+def test_a_re_stamp_never_keeps_a_rejected_relation(repo):
+    assert_a_re_stamp_never_keeps_a_rejected_relation(repo)
+
+
 @pytest.mark.parametrize(
     ("last_rebuild", "expected"),
     [
@@ -789,7 +794,7 @@ def test_a_re_stamp_never_hides_an_online_re_extraction(repo):
     assert_a_re_stamp_never_hides_an_online_re_extraction(repo)
 
 
-@pytest.mark.parametrize("change", ["vectors", "clusters"])
+@pytest.mark.parametrize("change", ["vectors", "clusters", "relation_vectors"])
 def test_a_re_stamp_never_hides_a_shared_change_of(repo, change):
     assert_a_re_stamp_never_hides_a_shared_change_of(repo, change)
 

@@ -28,6 +28,7 @@ from tests.memory_artifact_fixture import (
     assert_a_re_stamp_republishes_the_source_partition_companion,
     assert_a_re_stamp_publishes_the_identity_it_verified,
     assert_a_re_stamp_never_copies_a_graph_built_under_other_settings,
+    assert_a_re_stamp_never_keeps_a_rejected_relation,
     assert_an_index_built_before_the_first_memory_recovers_by_fold,
     assert_a_memory_vector_takes_no_synonym_slot,
     assert_a_memory_confirmed_mid_viz_build_never_publishes,
@@ -410,7 +411,7 @@ def test_a_re_stamp_never_hides_an_online_re_extraction(repo16):
     assert_a_re_stamp_never_hides_an_online_re_extraction(repo16)
 
 
-@pytest.mark.parametrize("change", ["vectors", "clusters"])
+@pytest.mark.parametrize("change", ["vectors", "clusters", "relation_vectors"])
 def test_a_re_stamp_never_hides_a_shared_change_of(repo16, change):
     assert_a_re_stamp_never_hides_a_shared_change_of(repo16, change)
 
@@ -425,6 +426,10 @@ def test_a_re_stamp_publishes_the_identity_it_verified(repo16):
 
 def test_a_re_stamp_never_copies_a_graph_built_under_other_settings(repo16):
     assert_a_re_stamp_never_copies_a_graph_built_under_other_settings(repo16)
+
+
+def test_a_re_stamp_never_keeps_a_rejected_relation(repo16):
+    assert_a_re_stamp_never_keeps_a_rejected_relation(repo16)
 
 
 @pytest.mark.parametrize("tier", ["personal", "base"])

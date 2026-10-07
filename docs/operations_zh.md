@@ -297,7 +297,8 @@ manifest 字段。
   超过该阈值的可视化时，无论是否开启自动，都必须手动构建。
 
 在升级前建成的索引上做 fold 会被拒绝并改为完整构建（事件 `scale_fold_refused`，原因 `memory_isolation`）。如果
-只有记忆发生变化（索引所依据的共享数据行没有变，且索引建成后知识图谱没有重建过），下一次 fold 只重写 manifest
+只有记忆发生变化（索引所依据的共享数据行没有变——对象、关系及其审核状态、段落、簇、对象与关系向量——且索引建成后
+知识图谱没有重建过），下一次 fold 只重写 manifest
 （1M 对象规模下不到 1 秒；来源分区伴随工件与每次 fold 一样重新发布）；否则改为完整构建（事件
 `scale_fold_refused`，原因 `kg_rebuilt_since_build`、`build_settings_changed`（同义边、提及边等建图设置与索引
 建成时不同）或 `shared_content_changed`）。重写 manifest 时写入的是核对共享数据行之前读到的版本与来源水位，所以
