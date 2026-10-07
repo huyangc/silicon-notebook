@@ -2,7 +2,7 @@
 
 承 `docs/superpowers/specs/2026-07-22-pipeline-damage-recovery-design.md`「二·体检层」。
 把已经存在的判据(store 查询 / maintenance 计数 / 索引状态)**只读地聚合**成 per-notebook
-的 H2–H8 体检结果,供 T3 的 `GET /notebooks/{id}/checkup` 端点消费。
+的 H2–H10 体检结果,供 T3 的 `GET /notebooks/{id}/checkup` 端点消费。
 
 设计红线:
 - **只读**:本 service 不写库、不调 LLM / embedding / rerank。体检就是聚合已有判据。
@@ -37,11 +37,21 @@
   「健康」结论——rebuild/fold(`.tmp`+swap 原子)换新 manifest.version 即失效。**不用 version_signal**:
   它只由 unified_kg_state 的 seq 组成、rebuild/fold 不 bump 它,与磁盘产物解耦(评审 B1:用它当键会
   漏报「fold 后损坏」、且损坏被缓存后重建清不掉)。损坏结论从不入缓存、每次现探(修好即自愈)。
+- H9(只读,裁决 M1 存量迁移):``unified_kg_state.memory_isolation_version`` 不是 1——0 = 本库的
+  共享派生图建于 Memory 隔离之前,正等启动后的隔离重建;2 = 正等启动后的「悬空种子」检查
+  (``memory_isolation_rebuild``,查出任一信号即转 0 入重建队列,否则转 1;凡有簇的
+  非 0 库都经过这一步,个人库、公共库、副本都在内)。主键单行读,
+  搭 H2/H3/H6 的读快照,不缓存;``fix="none"``:没有用户修复动作,系统自己会重建。未注入
+  ``memory_isolation_pending`` 时恒为 0。
+- H10(只读,同一裁决):本库经**通用**晋升路径、在写侧守卫出现之前**已批准**的 Memory 派生
+  对象数(谓词同迁移 0067 / v87 第 3 步,状态换成 approved)。它们的 payload 与原始证据已拷进
+  公共库;是否改写那些公共对象由部署负责人决定,系统不动,所以同样 ``fix="none"``、只计数。
+  未注入 ``approved_memory_promotions`` 时恒为 0。
 - H12(只读,E5-3 / 审计 N-5):本库里仍在的无主 Memory 来源数(``memory_id`` 被既有拷贝清空,
   或其 Memory 已被硬删/不再确认)。启动后的孤儿清扫(``memory_orphan_sweep``)会清掉它们;
   ``fix="none"``:没有用户修复动作,只计数。``(notebook_id, source_type)`` 索引限到本库,不缓存。
-  ``fix="none"`` 的项不算「可修复的问题」,前端铃铛不为它们提醒(该规则随 E4-5 的
-  ``checkupAlertSignature`` 改动落地,本项依赖它)。
+- ``fix="none"`` 的项只供运维与看板读取,不算「可修复的问题」:前端铃铛不为它们提醒
+  (``frontend/app/checkup-view.ts`` 的 ``checkupAlertSignature``)。
 """
 from __future__ import annotations
 
@@ -85,8 +95,8 @@ _H45_CACHE_TTL = 300.0
 
 @dataclass(frozen=True)
 class CheckupItem:
-    """单个体检项的结果。``code`` 是内部代号(H2..H8),``fix`` 是修复动作枚举
-    (reparse|backfill_vectors|extract_kg|fold_index|rebuild_index)——都是内部契约,
+    """单个体检项的结果。``code`` 是内部代号(H2..H10),``fix`` 是修复动作枚举
+    (reparse|backfill_vectors|extract_kg|fold_index|rebuild_index|none;none = 只读项,系统自行处理)——都是内部契约,
     面向用户的文案由前端映射。``sample`` 是有界的 source_id 样本(H4–H8 是计数型,sample
     留空;H2/H3 给前端展示命中的源)。"""
 
@@ -194,7 +204,7 @@ def h45_version_key(unified_kg: Any):
 
 
 class CheckupService:
-    """per-notebook 的只读体检聚合器(H2–H8)。
+    """per-notebook 的只读体检聚合器(H2–H10)。
 
     collaborators 全部由 RepositoryRuntime 注入为窄 callable seam,便于单测直接构造
     (无需给 facade 打桩):
@@ -227,6 +237,10 @@ class CheckupService:
     - ``probe_index_integrity``:H8 的磁盘探针(never-raise,见模块级 probe_scale_index_integrity)。
     - ``active_source_ids``:内存活跃租约快照(H2/H3 的 Python 后置减法)。
     - ``now``:时钟 seam;``event_log``:仅用于 fail-soft 探针的 warning。
+    - ``memory_isolation_pending``:H9,``(db, notebook_id) -> bool``,解析到
+      ``MemoryIsolationStore.not_isolated``(后端相关实例由构造方注入,本 service 不 import 后端)。
+    - ``approved_memory_promotions``:H10,``(db, notebook_id) -> int``,解析到
+      ``MemoryIsolationStore.approved_memory_promotion_count``(同上注入)。
     - ``public_library_memory_sources``:H11(裁决 M1,E4-3),``(db, notebook_id) -> int``,
       解析到后端 ``NotebookStore.public_library_memory_source_count``;见
       ``_h11_public_library_memory``。未注入时恒为 0。
@@ -250,6 +264,8 @@ class CheckupService:
         active_source_ids: Callable[[], "set[str]"],
         now: Callable[[], str],
         event_log: Any = None,
+        memory_isolation_pending: "Callable[[Any, str], bool] | None" = None,
+        approved_memory_promotions: "Callable[[Any, str], int] | None" = None,
         public_library_memory_sources: "Callable[[Any, str], int] | None" = None,
         orphan_memory_sources: "Callable[[Any, str], int] | None" = None,
     ) -> None:
@@ -265,6 +281,8 @@ class CheckupService:
         self._active_source_ids = active_source_ids
         self._now = now
         self._event_log = event_log
+        self._memory_isolation_pending = memory_isolation_pending
+        self._approved_memory_promotions = approved_memory_promotions
         self._public_library_memory_sources = public_library_memory_sources
         self._orphan_memory_sources = orphan_memory_sources
         # 进程内 H8 缓存:nb -> (manifest_version, 0)。**只缓存「健康」结论**(见 _h8 说明:
@@ -296,7 +314,8 @@ class CheckupService:
 
     # ------------------------------------------------------------------ run
     def run(self, notebook_id: str) -> CheckupResult:
-        """聚合 H2–H8,返回结构化结果。任一 check.count>0 即 ``healthy=False``。"""
+        """聚合 H2–H10,返回结构化结果。任一可修复项(fix 不是 "none")count>0 即
+        ``healthy=False``;只读项(H9/H10)照常列在 checks 里,不影响 healthy。"""
         # 活跃租约快照取一次,H2/H3 共用(active 集通常个位数,一次集合减法)。租约的读法
         # 由注入方在锁下取快照,这里拿到的已是不可变副本。
         active = set(self._active_source_ids() or ())
@@ -323,6 +342,21 @@ class CheckupService:
             # **之前**采样——version 若在计数期间前进,存下的条目挂着旧 version,下次必
             # 失配重算,方向保守(同 knowledge_counts_cache 的先读 version 后计值)。
             h45_version = self._kg_version(db, notebook_id)
+            # H9(裁决 M1 存量迁移,只读项):unified_kg_state.memory_isolation_version
+            # 不是 1——0 = 正等启动后的隔离重建,2 = 正等启动后的检查(查出信号转 0,
+            # 否则转 1)。系统自己会处理,没有用户修复动作(fix="none");主键单行读,
+            # 搭同一读快照。
+            h9_count = (
+                1 if self._memory_isolation_pending is not None
+                and self._memory_isolation_pending(db, notebook_id) else 0
+            )
+            # H10(同上,只读项):隔离之前经通用路径晋升、已批准的 Memory 派生对象
+            # 数——它们的内容已拷进公共库,如何处理由部署负责人决定,系统不改写;
+            # fix="none"。按 (notebook_id, status) 索引取已批准行,搭同一读快照。
+            h10_count = (
+                int(self._approved_memory_promotions(db, notebook_id))
+                if self._approved_memory_promotions is not None else 0
+            )
         # H4/H5 也减活跃租约(codex):正在嵌入的源 chunk/element 已在、向量还没落,是
         # 正常在途而非损坏——不排除会每次嵌入都误报缺向量、甚至触发并发 backfill 重复模型调用。
         h4_count, h5_count = self._h45_missing_vector_counts(
@@ -336,6 +370,8 @@ class CheckupService:
             CheckupItem("H6", h6_count, [], "extract_kg"),
             CheckupItem("H7", self._h7_index_stale(notebook_id), [], "fold_index"),
             CheckupItem("H8", self._h8_index_integrity(notebook_id), [], "rebuild_index"),
+            CheckupItem("H9", h9_count, [], "none"),
+            CheckupItem("H10", h10_count, [], "none"),
             CheckupItem("H11", h11_count, [], "none"),
             CheckupItem("H12", self._h12_orphan_memory_sources(notebook_id), [], "none"),
         ]

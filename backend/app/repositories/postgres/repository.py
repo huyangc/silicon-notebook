@@ -86,7 +86,7 @@ class PostgresRepository(RepositoryFacade):
 
     @property
     def checkup(self):
-        """P2 体检聚合(H2–H8)——与 SQLiteRepository.checkup 同构(镜像 ``maintenance`` 的每后端各
+        """P2 体检聚合(H2–H10)——与 SQLiteRepository.checkup 同构(镜像 ``maintenance`` 的每后端各
         一份模式),只是 database/queries/maintenance 落到 postgres。checkup 本身后端中性(注入
         queries + count seam,不 import 任何后端),故两后端共用同一 service;H7/H8 走 scale artifacts
         (文件系统层、后端无关)。facade 是 lru_cache 单例 → checkup 单例,H7/H8 进程内缓存跨请求存活。"""
@@ -99,6 +99,11 @@ class PostgresRepository(RepositoryFacade):
             )
 
             rt = self._runtime
+            from app.repositories.postgres.memory_isolation_store import (
+                MemoryIsolationStore,
+            )
+
+            _memory_isolation_pending = MemoryIsolationStore.not_isolated
             c = CheckupService(
                 database=rt.database,
                 queries=rt.queries,
@@ -131,6 +136,12 @@ class PostgresRepository(RepositoryFacade):
                 active_source_ids=rt._active_source_ids_snapshot,
                 now=rt.seams.now,
                 event_log=rt.event_log,
+                # H9(只读):裁决 M1 存量迁移后本库是否仍等隔离重建。
+                memory_isolation_pending=_memory_isolation_pending,
+                # H10(只读):隔离前经通用路径已批准的 Memory 派生对象晋升数。
+                approved_memory_promotions=(
+                    MemoryIsolationStore.approved_memory_promotion_count
+                ),
                 # H11(只读,M1/E4-3):本库已是公共知识库却仍持有的 Memory 来源数。
                 public_library_memory_sources=(
                     rt.notebook_store.public_library_memory_source_count

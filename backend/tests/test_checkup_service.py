@@ -167,7 +167,7 @@ def test_healthy_fresh_notebook(repo):
     assert result.notebook_id == nb.id
     assert result.checked_at
     assert {c.code for c in result.checks} == {
-        "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H11", "H12",
+        "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9", "H10", "H11", "H12",
     }
     assert all(c.count == 0 for c in result.checks)
     assert result.healthy is True
@@ -181,6 +181,8 @@ def test_healthy_fresh_notebook(repo):
         "H6": "extract_kg",
         "H7": "fold_index",
         "H8": "rebuild_index",
+        "H9": "none",
+        "H10": "none",
         "H11": "none",
         "H12": "none",
     }
@@ -189,15 +191,19 @@ def test_healthy_fresh_notebook(repo):
 def test_read_only_items_are_reported_but_do_not_make_the_notebook_unhealthy(
     repo, monkeypatch
 ):
-    """H12 (fix="none") has no user repair: it is listed with its count, and
-    ``healthy`` stays true when nothing fixable is hit."""
+    """H9/H10/H12 (fix="none") have no user repair: they are listed with their
+    counts, and ``healthy`` stays true when nothing fixable is hit."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     checkup = repo.checkup
+    monkeypatch.setattr(checkup, "_memory_isolation_pending", lambda db, notebook_id: True)
+    monkeypatch.setattr(checkup, "_approved_memory_promotions", lambda db, notebook_id: 3)
     monkeypatch.setattr(checkup, "_h12_orphan_memory_sources", lambda notebook_id: 3)
     result = checkup.run(nb.id)
     counts = {c.code: c.count for c in result.checks}
-    assert counts["H12"] == 3
-    assert all(count == 0 for code, count in counts.items() if code != "H12")
+    assert (counts["H9"], counts["H10"], counts["H12"]) == (1, 3, 3)
+    assert all(
+        count == 0 for code, count in counts.items() if code not in {"H9", "H10", "H12"}
+    )
     assert result.healthy is True
 
 

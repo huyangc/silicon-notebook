@@ -138,13 +138,34 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "community_overview_on 分岔)"),
     "backend/app/repositories/source_subgraph_projection.py": (4, 0, 0, 2, 0,
         "A×4(两函数各 PG/SQLite 分支),共享 published_gen 局部模板"),
-    "backend/app/repositories/sqlite/migrations.py": (3, 0, 2, 1, 0,
+    "backend/app/repositories/postgres/memory_isolation_store.py": (6, 0, 2, 0, 0,
+        "C 类跨代(裁决 M1 隔离重建前的桥接 id 合并候选清理):「没有任何簇行"
+        "携带该 canonical id」按任一代判——published 或 building 代里还有簇"
+        "携带它,候选就指向活簇,不得删(与 e5 purge_memory_review_rows_on 同一"
+        "判据)。xa/xb 两处。另 2 处是悬空种子检查的分页读(A 类 published 读者:"
+        "代次取自本库 state 行的 cluster_generation 后作为参数 generation = %s 绑定,"
+        "不是本守卫计数的谓词写法)。另 2 处 concept_clusters:"
+        "陈旧社区成员探针里的「无簇携带」判定(同样按任一代,宽松一侧只会少报)、"
+        "升级前普查的「有簇」存在性探测(G 集合,不读簇内容)。2 处 "
+        "community_members:陈旧成员探针的分页读(A 类 published 读者:代次取自 "
+        "state 行的 community_generation,作参数 generation = %s 绑定)。"),
+    "backend/app/repositories/sqlite/memory_isolation_store.py": (6, 0, 2, 0, 0,
+        "同 PG 孪生:桥接 id 候选清理的跨代「无簇携带」判定 xa/xb 两处,悬空种子"
+        "检查的 published 分页读 2 处(代次作参数绑定);另 2 处 concept_clusters 与"
+        "2 处 community_members 同 PG 孪生的补充说明。"),
+    "backend/app/repositories/sqlite/migrations.py": (6, 1, 4, 1, 0,
         "非站点:DDL(_migration_71 的索引重建);谓词计数来自启动恢复"
         "_reap_stale_derived_generations 的 state 行现读(逐本取 keep)。"
         "community_members 的两处来自 _migration_84 的一次性去重 DDL "
         "(DELETE ... WHERE rowid NOT IN (SELECT MIN(rowid) ... )):C 类跨代"
         "豁免——它按 (community_id, canonical_id) 折叠历史重复行,好让那张表"
-        "第一次拿到唯一面,与 published 代次无关(重复行在哪一代都是重复行)"),
+        "第一次拿到唯一面,与 published 代次无关(重复行在哪一代都是重复行)。"
+        "_migration_87(裁决 M1 存量清理)各 +2/+1/+2:concept_clusters 的 A 集读"
+        "与整簇删除、communities 与 community_members 的受影响社区整删——C 类跨代"
+        "豁免:含 Memory 成员的 canonical id 在任一代(published 与 building)都要"
+        "整簇删掉,只删 published 代会把 building 代里同名的 K-<Memory 种子名> 留下。"
+        "再 +1 concept_clusters:同一迁移的 G 集读(F 外、种子对象已不存在的簇"
+        "只入队不删),同为 C 类跨代——任一代里的悬空种子都要让本库重建"),
     "backend/app/services/kg_analysis_precompute.py": (0, 0, 1, 0, 0,
         "非站点:注释里的表名"),
     "scripts/diag_open_latency.py": (3, 0, 0, 0, 0,

@@ -234,8 +234,8 @@ export const CHECKUP_ISSUE: Record<string, string> = {
 // 说明,unit 非空时标题旁显示计数。
 export const CHECKUP_NOTICE: Record<string, { label: string; detail: string; unit: string }> = {
   H9: {
-    label: "知识图谱将重新整理一次",
-    detail: "升级后系统会在后台自动整理：记忆里的内容会从合并后的知识对象和主题板块中分离出来。整理完成前，部分合并结果可能暂时缺失。",
+    label: "知识图谱待后台检查整理",
+    detail: "升级后系统会在后台检查这个笔记本，并按需重新整理一次：记忆里的内容会从合并后的知识对象和主题板块中分离出来。完成前，部分合并结果可能暂时缺失。",
     unit: "",
   },
   H10: {

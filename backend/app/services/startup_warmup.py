@@ -21,9 +21,11 @@ Robustness: migration or scale preload failure keeps the service not-ready;
 per-notebook count warm failures remain best-effort inside
 ``warm_open_path_caches``. Set ``STARTUP_PRELOAD_SCALE_INDEXES=false`` only as
 an explicit recovery escape hatch. The one-shot knowhow
-legacy-model reprojection sweep below runs strictly AFTER ``mark_ready()`` (it
-is a background catch-up, not a readiness precondition) and is itself
-exception-safe, so it can never flip a successful startup back to "error".
+legacy-model reprojection sweep and the ruling-M1 isolated rebuild of notebooks
+the 0067 / v87 migration marked (``_rebuild_memory_isolated_notebooks``) run
+strictly AFTER ``mark_ready()`` (they are background catch-ups, not readiness
+preconditions) and are themselves exception-safe, so they can never flip a
+successful startup back to "error".
 """
 from __future__ import annotations
 
@@ -803,6 +805,7 @@ def run_startup(lease: object | None) -> object | None:
         )
         _reproject_legacy_knowhow_tables(repo)
         _sweep_orphan_memory_sources(repo)
+        _rebuild_memory_isolated_notebooks(repo)
         return repo
     except Exception as exc:  # noqa: BLE001 — surface via readiness, never crash
         _fail_lifecycle(lease, exc)
@@ -920,3 +923,25 @@ def _sweep_orphan_memory_sources(repo) -> None:
         MemoryOrphanSweep.for_repository(repo).schedule()
     except Exception:  # noqa: BLE001 — best-effort, must never affect readiness
         logger.exception("startup: memory orphan sweep scheduling failed (non-fatal)")
+
+
+def _rebuild_memory_isolated_notebooks(repo) -> None:
+    """Post-readiness step for ruling M1 (plan 2026-09-29 §3.2): hand every
+    notebook the 0067 / v87 migration left at ``memory_isolation_version = 0``
+    to ONE background rebuild pass (``app.services.memory_isolation_rebuild``,
+    which owns the whole contract: ordinary rebuild path, marker on success
+    only, retry at the next start, content-free events).
+
+    Same placement and failure discipline as ``_reproject_legacy_knowhow_tables``
+    right above it: strictly AFTER ``mark_ready()`` -- the rebuild is never a
+    readiness precondition and must never run before it -- and every exception
+    is swallowed here, so a bug in the catch-up can never turn a successful
+    startup into "error". With nothing pending it is one COUNT and no job."""
+    try:
+        from app.services.memory_isolation_rebuild import MemoryIsolationRebuild
+
+        MemoryIsolationRebuild.for_repository(repo).schedule()
+    except Exception:  # noqa: BLE001 — best-effort, must never affect readiness
+        logger.exception(
+            "startup: memory-isolation rebuild scheduling failed (non-fatal)"
+        )
