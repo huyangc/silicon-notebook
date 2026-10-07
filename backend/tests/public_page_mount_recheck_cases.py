@@ -76,6 +76,122 @@ def case_conversation_page_dies_with_its_mount_and_revives(world: World) -> None
     assert world.client.get(page).status_code == 200
 
 
+def case_conversation_image_dies_with_its_mount_and_revives(world: World) -> None:
+    """The image endpoint runs the same per-open re-check as the page: an image
+    from the mounted library stops being served when the mount goes and
+    comes back with it (images are on in this world's deployment)."""
+    from app.services.knowhow.assets import AssetService
+
+    library, source = mounted_library(world)
+    asset = AssetService(world.repo).save(
+        library, "figure.png", "image/png", b"\x89PNG\r\n\x1a\nmounted-figure",
+        world.owner.id,
+    )["id"]
+    anchor = source_anchor(source, "k1", notebook_id=library, title="参考资料")
+    anchor["images"] = [{"element_id": anchor["element_id"], "asset_id": asset,
+                         "caption": "参考图"}]
+    cid, (first,) = seed_conversation(world, world.alice, [answer([anchor])])
+    token = publish(world, world.alice, cid, first).json()["share_token"]
+    (image,) = world.client.get(f"/api/public/conversations/{token}").json()["turns"][0]["images"]
+    url = f"/api/public/conversations/{token}/assets/{image['alias']}"
+    assert world.client.get(url).status_code == 200
+    mount(world, [])
+    assert world.client.get(url).status_code == 404
+    mount(world, [library])
+    assert world.client.get(url).status_code == 200
+
+
+def case_conversation_share_is_refused_while_its_mount_is_gone(world: World) -> None:
+    """Like the global share's authority sweep: a link that would 404 on its
+    first open is not issued, and the disclosure read refuses the same way."""
+    library, source = mounted_library(world)
+    cid, (first,) = seed_conversation(world, world.alice, [
+        answer([source_anchor(source, "k1", notebook_id=library, title="参考资料")]),
+    ])
+    mount(world, [])
+    lost = {"detail": "部分笔记本已无法访问，请重新选择范围。"}
+    read = world.client.get(
+        f"/api/notebooks/{world.notebook}/conversations/{cid}/share/disclosure",
+        params={"through_id": first}, headers=world.alice.headers,
+    )
+    assert read.status_code == 404 and read.json() == lost
+    refused = publish(world, world.alice, cid, first)
+    assert refused.status_code == 404 and refused.json() == lost
+    assert world.repo.conversation_share_state(world.notebook, cid)["share_token"] == ""
+    mount(world, [library])
+    assert publish(world, world.alice, cid, first).status_code == 200
+
+
+def _knowledge_object(world: World, notebook_id: str) -> str:
+    object_id = f"ko-mounted-{next(_KEYS)}"
+    sql = world.repo._runtime.global_ask_store._sql
+    with world.repo._runtime.database.write() as db:
+        db.execute(sql(
+            "INSERT INTO knowledge_objects (id, notebook_id, object_type, status, payload, "
+            "evidence, source_id, created_at, updated_at) "
+            "VALUES (?, ?, 'concept', 'approved', '{}', '[]', '', ?, ?)"
+        ), (object_id, notebook_id, "2026-01-01T00:00:00+00:00",
+            "2026-01-01T00:00:00+00:00"))
+    return object_id
+
+
+def _object_ref(object_id: str, key: str, *, mounted: bool) -> dict:
+    """A knowledge-object citation without any source, as the report engine
+    stores one whose object had no occurrence."""
+    return {
+        "key": key, "object_id": object_id, "object_type": "concept",
+        "label": "概念", "name": "概念", "source_title": "", "source_id": "",
+        "element_id": "", "snippet": "概念定义", "location_label": "",
+        "tier": "personal", "from_reference_library": mounted,
+    }
+
+
+def case_report_quoting_a_mounted_object_without_a_source_dies_with_its_mount(
+    world: World,
+) -> None:
+    library, _source = mounted_library(world)
+    object_id = _knowledge_object(world, library)
+    rid = make_report(world, world.alice, [_object_ref(object_id, "k1", mounted=True)])
+    token = share(world, world.alice, rid).json()["share_token"]
+    page = f"/api/public/reports/{token}"
+    assert world.client.get(page).status_code == 200
+    mount(world, [])
+    assert world.client.get(page).status_code == 404
+    mount(world, [library])
+    assert world.client.get(page).status_code == 200
+
+
+def case_report_quoting_a_mounted_library_it_can_no_longer_name_fails_closed(
+    world: World,
+) -> None:
+    """Marked as coming from a mounted library, but its object is gone: nothing
+    can show the library is still mounted, so the page is not served."""
+    mounted_library(world)
+    rid = make_report(world, world.alice, [
+        _object_ref("ko-gone", "k1", mounted=True), source_ref(world.doc_source, "k2"),
+    ])
+    token = share(world, world.alice, rid).json()["share_token"]
+    assert world.client.get(f"/api/public/reports/{token}").status_code == 404
+
+
+def case_report_of_local_citations_reads_no_ownership(world: World) -> None:
+    """Every citation marked local: the per-open re-check reads nothing."""
+    rid = make_report(world, world.alice, [
+        {**source_ref(world.doc_source, "k1"), "from_reference_library": False},
+        _object_ref("ko-local", "k2", mounted=False),
+    ])
+    token = share(world, world.alice, rid).json()["share_token"]
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("a report of local citations reads no ownership")
+
+    runtime = world.repo._runtime
+    world.monkeypatch.setattr(runtime.source_store, "visible_source_owners", refuse)
+    world.monkeypatch.setattr(runtime.knowledge, "object_owners", refuse)
+    world.monkeypatch.setattr(world.repo, "participant_notebook_ids", refuse)
+    assert world.client.get(f"/api/public/reports/{token}").status_code == 200
+
+
 def case_report_page_dies_with_its_mount_and_revives(world: World) -> None:
     library, source = mounted_library(world)
     rid = make_report(world, world.alice, [

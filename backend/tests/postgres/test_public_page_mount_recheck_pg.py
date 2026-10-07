@@ -27,6 +27,8 @@ def client(postgres_scope, tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    # The image case needs the deployment to serve answer images.
+    monkeypatch.setenv("MINERU_RETURN_IMAGES", "true")
     from app.api import deps
     from app.core.config import get_settings
     from app.main import create_app

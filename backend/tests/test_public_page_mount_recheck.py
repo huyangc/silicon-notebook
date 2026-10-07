@@ -25,6 +25,8 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    # The image case needs the deployment to serve answer images.
+    monkeypatch.setenv("MINERU_RETURN_IMAGES", "true")
     from app.api import deps
     from app.core.config import get_settings
     from app.main import create_app
@@ -47,6 +49,25 @@ def test_a_conversation_names_the_libraries_on_its_anchors_and_citations():
         "not a turn",
     ]
     assert conversation_library_ids(turns) == {"nb-b", "nb-c"}
+
+
+def test_report_ownership_is_read_only_for_mounted_or_unmarked_citations():
+    from app.services.public_share_recheck import (
+        report_library_ids,
+        report_references_needing_owner,
+        report_unresolved_object_ids,
+    )
+
+    local = {"source_id": "s-local", "from_reference_library": False}
+    legacy = {"source_id": "s-legacy"}
+    mounted = {"source_id": "s-gone", "object_id": "ko-1", "from_reference_library": True}
+    wanted = report_references_needing_owner([local, legacy, mounted, "junk"])
+    assert wanted == [legacy, mounted]
+    assert report_unresolved_object_ids(wanted, {"s-legacy": "nb-a"}) == ["ko-1"]
+    assert report_library_ids(wanted, {"s-legacy": "nb-a"}, {"ko-1": "nb-b"}) == {"nb-a", "nb-b"}
+    # A marked citation naming no library fails closed; a legacy one is not counted.
+    assert report_library_ids(wanted, {"s-legacy": "nb-a"}, {}) is None
+    assert report_library_ids([legacy], {}, {}) == set()
 
 
 def test_the_check_reads_nothing_without_another_library_and_fails_closed():
