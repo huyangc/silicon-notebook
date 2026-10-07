@@ -315,6 +315,7 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "IndexProjectionStore.active_relation_graph_rows": BUILD_READER,
         "IndexProjectionStore.graph_rows": BUILD_READER,
         "_SHARED_CONTENT_FACTS": BUILD_READER,
+        "_SHARED_REVIEWED_RELATIONS_SQL": BUILD_READER,
         "IndexProjectionStore.relation_ids_for_source_batch": CALLER_FILTERED,
         "IndexProjectionStore.version_facts": STATE_PROBE,
         "_MEMORY_CLUSTER_CANONICALS_SQL": MEMORY_SIDE,

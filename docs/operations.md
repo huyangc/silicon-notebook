@@ -385,7 +385,8 @@ rows and calls no model (about 100 s at 1M objects).
 
 A fold onto an index built before the upgrade is refused and replaced by a full build (event
 `scale_fold_refused`, reason `memory_isolation`). When only the notebook's memories changed — the
-shared rows the index was built over are the same and the knowledge graph was not rebuilt since —
+shared rows the index was built over are the same (objects, relations and their reviews, chunks,
+clusters, object and relation vectors) and the knowledge graph was not rebuilt since —
 the next fold republishes only the manifest (under a second at 1M objects; the source-partition
 companion is republished as after any fold); otherwise it runs a full build (event
 `scale_fold_refused`, reason `kg_rebuilt_since_build`, `build_settings_changed` — a graph-build

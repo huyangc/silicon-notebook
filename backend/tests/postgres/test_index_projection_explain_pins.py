@@ -243,6 +243,10 @@ def _captured_plans(postgres_database, capabilities_off: bool = True) -> dict[st
         and "FROM concept_clusters" in s and "NOT IN" in s,
         "shared_embeddings": lambda s: s.startswith("SELECT COUNT(*)")
         and "FROM knowledge_embeddings" in s and "NOT IN" in s,
+        "shared_relation_vectors": lambda s: s.startswith("SELECT COUNT(*)")
+        and "FROM relation_embeddings" in s and "NOT IN" in s,
+        "shared_reviews": lambda s: s.startswith(
+            "SELECT id, review_status FROM knowledge_relations"),
     }
     plans: dict[str, list[str]] = {name: [] for name in roles}
     with postgres_database.connect() as connection:
@@ -318,7 +322,7 @@ def test_memory_exclusion_statements_keep_their_index_paths(postgres_database):
     # ONE hashed SubPlan over THIS notebook's Memory, no join, no every-
     # notebook Memory scan
     for name in ("shared_objects", "shared_relations", "shared_clusters",
-                 "shared_embeddings"):
+                 "shared_embeddings", "shared_relation_vectors", "shared_reviews"):
         plan = plans[name][0]
         assert "hashed SubPlan" in plan and "Join" not in plan, (name, plan)
         assert _sources_bounded_by_notebook(plan), (name, plan)

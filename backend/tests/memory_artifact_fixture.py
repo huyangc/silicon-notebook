@@ -820,6 +820,25 @@ def _change_only_shared_clusters(repo, notebook_id: str) -> None:
     repo._vector_cache.invalidate(f"{notebook_id}:clustermap")
 
 
+def _change_only_shared_relation_vectors(repo, notebook_id: str) -> None:
+    """The shared relation's vector rewritten (a relation re-embedding);
+    objects, relations, chunks, clusters and object vectors untouched."""
+    with repo._connect() as db:
+        relation_id = db.execute(
+            sql(repo, "SELECT id FROM knowledge_relations WHERE notebook_id=?"),
+            (notebook_id,),
+        ).fetchone()["id"]
+    vector = struct.pack("<16f", *([0.25] * 16))
+    with repo._write() as db:
+        db.execute(sql(repo, "DELETE FROM relation_embeddings WHERE relation_id=?"),
+                   (relation_id,))
+        db.execute(
+            sql(repo, "INSERT INTO relation_embeddings (relation_id,notebook_id,"
+                      "vector,created_at) VALUES (?,?,?,?)"),
+            (relation_id, notebook_id, vector, "2026-12-31T00:00:00"),
+        )
+
+
 def assert_a_re_stamp_never_hides_a_shared_change_of(repo, change: str) -> None:
     """Only the shared vectors (``vectors``) or only the published cluster rows
     (``clusters``) changed, no source and no KG rebuild -- then a Memory is
@@ -829,7 +848,8 @@ def assert_a_re_stamp_never_hides_a_shared_change_of(repo, change: str) -> None:
     notebook_id = seed_notebook_without_memory(repo)
     first = repo.build_scale_index(notebook_id)
     {"vectors": _change_only_shared_vectors,
-     "clusters": _change_only_shared_clusters}[change](repo, notebook_id)
+     "clusters": _change_only_shared_clusters,
+     "relation_vectors": _change_only_shared_relation_vectors}[change](repo, notebook_id)
     events = _capture_events(repo)
     confirm_a_memory(repo, notebook_id, next(_LATE_COUNTER))
     folded = repo.fold_scale_index_delta(notebook_id)
@@ -904,6 +924,47 @@ def assert_a_re_stamp_never_copies_a_graph_built_under_other_settings(repo) -> N
     assert folded["built_at"] > first["built_at"], "a full build, not a re-stamp"
     assert _file_identities(root) != files_before
     assert runtime.status(notebook_id)["state"] == "indexed"
+
+
+def assert_a_re_stamp_never_keeps_a_rejected_relation(repo) -> None:
+    """codex #824 r3: a shared relation rejected after the index was built
+    (``set_edge_review`` rewrites ``review_status`` only -- no count, no
+    timestamp moves), then only the notebook's Memory changes: the fold must
+    build in full, so the persisted graph drops the rejected edge as a fresh
+    build does, instead of re-stamping the old graph that still holds it."""
+    notebook_id = seed_notebook_without_memory(repo)
+    first = repo.build_scale_index(notebook_id)
+    runtime = repo._runtime.scale_artifacts
+    # the persisted reasoning graph (the PPR transition the graph build feeds,
+    # ``graph_rows``: rejected relations left out) holds the shared edge
+    with_edge = runtime.load(notebook_id).transition.nnz
+    with repo._connect() as db:
+        relation_id = db.execute(
+            sql(repo, "SELECT id FROM knowledge_relations WHERE notebook_id=?"),
+            (notebook_id,),
+        ).fetchone()["id"]
+    repo.set_edge_review(notebook_id, relation_id, "rejected")
+    events = _capture_events(repo)
+    confirm_a_memory(repo, notebook_id, next(_LATE_COUNTER))
+    root = runtime.artifacts.scale_dir(notebook_id)
+    files_before = _file_identities(root)
+    folded = repo.fold_scale_index_delta(notebook_id)
+    assert [e["reason"] for e in events if e.get("kind") == "scale_fold_refused"] == [
+        "shared_content_changed"
+    ]
+    assert folded["build_id"] != first["build_id"]
+    assert _file_identities(root) != files_before, "a full build, not a re-stamp"
+    idx = runtime.load(notebook_id)
+    assert idx is not None and idx.transition.nnz < with_edge, "the rejected edge is gone"
+    # undoing the review is a shared change the same way
+    repo.set_edge_review(notebook_id, relation_id, "pending")
+    events.clear()
+    confirm_a_memory(repo, notebook_id, next(_LATE_COUNTER))
+    repo.fold_scale_index_delta(notebook_id)
+    assert [e["reason"] for e in events if e.get("kind") == "scale_fold_refused"] == [
+        "shared_content_changed"
+    ]
+    assert runtime.load(notebook_id).transition.nnz == with_edge
 
 
 def assert_a_re_stamp_republishes_the_source_partition_companion(repo) -> None:

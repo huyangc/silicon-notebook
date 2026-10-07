@@ -157,9 +157,26 @@ _SHARED_CONTENT_FACTS = (
     ("SELECT COUNT(*) AS c, MAX(created_at) AS ts FROM knowledge_embeddings "
      "WHERE notebook_id=%s AND object_id" + _NOT_A_MEMORY_OBJECT, 3),
 )
+# The one in-place change to the shared graph the aggregates above cannot see:
+# a relation's review (reject / approve / undo) rewrites ``review_status`` and
+# nothing else -- no count, no timestamp -- while the graph build leaves a
+# rejected relation out. Every shared relation that is not in the default
+# state, by id (curated rows only: bounded by reviews, not by the notebook).
+_SHARED_REVIEWED_RELATIONS_SQL = (
+    "SELECT id, review_status FROM knowledge_relations "
+    "WHERE notebook_id=%s AND review_status <> 'pending'" + _EXCLUDE_MEMORY_ROWS
+    + " ORDER BY id"
+)
 _MEMORY_RELATION_IDS_SQL = (
     "SELECT id FROM knowledge_relations WHERE notebook_id=%s AND source_id = "
     + _NOTEBOOK_MEMORY_SOURCES
+)
+_NOT_A_MEMORY_RELATION = " NOT IN (" + _MEMORY_RELATION_IDS_SQL + ")"
+# The relation vectors behind the relation ANN, without Memory relations: a
+# re-embedding of existing shared relations moves no relation aggregate.
+_SHARED_RELATION_EMBEDDING_FACTS = (
+    "SELECT COUNT(*) AS c, MAX(created_at) AS ts FROM relation_embeddings "
+    "WHERE notebook_id=%s AND relation_id" + _NOT_A_MEMORY_RELATION
 )
 
 
@@ -368,7 +385,14 @@ class IndexProjectionStore:
         moves for Memory and shared content alike (both bump the same
         counters), and a shared source re-parsed under its old id is no delta
         source, so only this tells the two apart. Chunks need no exclusion
-        (Memory sources stay chunkless). Not on any hot path: read once per
+        (Memory sources stay chunkless). Plus the reviewed shared relations
+        (``_SHARED_REVIEWED_RELATIONS_SQL``): a review changes no aggregate,
+        yet a rejected relation leaves the graph (codex #824 r3), and the
+        shared relation vectors behind the relation ANN
+        (``_SHARED_RELATION_EMBEDDING_FACTS``). Every other in-place write to
+        these tables moves an aggregate: object updates set ``updated_at``,
+        embeddings are re-inserted with a new ``created_at``, clusters are
+        rewritten as a new generation. Not on any hot path: read once per
         build, fold and re-stamp."""
         with self.connect() as db:
             facts = [
@@ -378,6 +402,16 @@ class IndexProjectionStore:
                     for statement, binds in _SHARED_CONTENT_FACTS
                 )
             ]
+            relation_vectors = db.execute(
+                _SHARED_RELATION_EMBEDDING_FACTS, (notebook_id,) * 3
+            ).fetchone()
+            facts.append([int(relation_vectors["c"]), iso_timestamp(relation_vectors["ts"])])
+            facts.append([
+                [str(row["id"]), str(row["review_status"])]
+                for row in db.execute(
+                    _SHARED_REVIEWED_RELATIONS_SQL, (notebook_id, notebook_id)
+                ).fetchall()
+            ])
         return hashlib.sha256(repr(facts).encode("utf-8")).hexdigest()[:32]
 
     @staticmethod
