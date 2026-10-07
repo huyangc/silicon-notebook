@@ -297,11 +297,13 @@ def test_share_and_purge_of_the_same_author_never_deadlock_pg(world):
     order: its source id sorts first) would hold high while waiting on low,
     and the purge would wait on high: a cycle.
 
-    The purge here is the lock statement of ``MemoryStore._hard_delete_on``
-    (PR-E5) copied verbatim, followed by its delete.  Assembly step when
-    PR-E5 and this PR are both on master: call ``_hard_delete_on`` itself in
-    ``purge()`` instead of the copy, so a later change to the purge's
-    statement is exercised here."""
+    The purge is the production purge transaction itself:
+    ``MemoryStore.bulk_delete_memories`` (what the member exit's and the bulk
+    delete's ``_purge_page`` call) runs ``_hard_delete_on`` — Memory rows
+    ``ORDER BY id FOR UPDATE``, the promotion withdrawal, the delete — in one
+    transaction, so a later change to the purge's statements is exercised
+    here.  It never touches ``sources``: the derived source rows go in
+    ``remove_memory_sources``' own transactions, before and after."""
     import threading
     import time
 
@@ -377,21 +379,14 @@ def test_share_and_purge_of_the_same_author_never_deadlock_pg(world):
             held.set()
             assert release.wait(30)
 
+    store = world.repo._runtime.memory_store
+
     def purge():
-        # ``_hard_delete_on``'s lock statement (PR-E5), verbatim, then its
-        # delete — see the docstring for the assembly step.
+        # The production purge transaction (``_hard_delete_on``); see the docstring.
         try:
-            with database.write() as db:
-                rows = db.execute(
-                    "SELECT id,notebook_id FROM memory_items "
-                    "WHERE created_by=%s AND id=ANY(%s) ORDER BY id FOR UPDATE",
-                    (world.alice.id, [high.id, low.id]),
-                ).fetchall()
-                db.execute(
-                    "DELETE FROM memory_items WHERE created_by=%s AND id=ANY(%s)",
-                    (world.alice.id, [row["id"] for row in rows]),
-                )
-            results["purged"] = len(rows)
+            results["purged"] = store.bulk_delete_memories(
+                world.alice.id, [high.id, low.id]
+            )
         except Exception as exc:  # noqa: BLE001 — the assertion reports it
             results["purge_error"] = repr(exc)
 
