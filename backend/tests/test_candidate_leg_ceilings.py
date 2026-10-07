@@ -515,7 +515,7 @@ def test_a_scoped_first_call_does_not_rank_a_later_unscoped_one(mixed_object):
 
 
 def test_the_shared_token_cache_holds_no_memory_evidenced_object(mixed_object):
-    repo, nb, _bob, _alice = mixed_object
+    repo, nb, _bob, alice = mixed_object
 
     _ranking(repo, nb, None)
     with repo._connect() as db:
@@ -525,6 +525,16 @@ def test_the_shared_token_cache_holds_no_memory_evidenced_object(mixed_object):
     )
 
     assert cached is not None
+    tokens = repo.retrieval.candidates._vector_cache.get(
+        f"{nb}:kwtok", ("kwtok", version_row["c"], version_row["ts"]),
+        lambda: pytest.fail("the cache was just warmed"),
+    )
+    assert "Y" in tokens and "X" not in tokens
+
+    # Warmed by a scoped caller whose view of X no longer shows the Memory
+    # quote: the decision is still taken on the evidence as READ.
+    _cold(repo, nb)
+    _ranking(repo, nb, _scope(["src-doc"], [], alice))
     tokens = repo.retrieval.candidates._vector_cache.get(
         f"{nb}:kwtok", ("kwtok", version_row["c"], version_row["ts"]),
         lambda: pytest.fail("the cache was just warmed"),
