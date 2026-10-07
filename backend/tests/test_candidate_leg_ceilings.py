@@ -663,30 +663,59 @@ def test_memory_relations_are_cached_not_read_per_request(
 ):
     """The Memory half is cached with the shared one (quality review P2-2):
     after the first call, no request reads Memory relations again, whoever
-    asks; the per-request mask still keeps Bob's rF out of Alice's seats."""
+    asks; the per-request mask still keeps Bob's rF out of Alice's seats.
+    The cold build maps both Memory sources in ONE batched read that returns
+    each relation's source (``with_source_id=True``), not one read per
+    source."""
     repo, nb, bob, alice = relation_matrix
-    embeddings = repo.retrieval.candidates.embeddings
-    real = embeddings.relation_delta_rows
-    reads: list = []
-    monkeypatch.setattr(
-        embeddings, "relation_delta_rows",
-        lambda db, notebook_id, source_ids: (
-            reads.append(tuple(source_ids)), real(db, notebook_id, source_ids))[1],
-    )
+    reads = _record_relation_delta_reads(repo, monkeypatch)
     alice_scope = _scope(["src-doc"], ["src-mem-alice"], alice)
 
     first = _relations(repo, nb, alice_scope)
-    built = len(reads)
+    built = list(reads)
     later = [
         _relations(repo, nb, alice_scope),
         _relations(repo, nb, None),
         _relations(repo, nb, _scope(["src-doc"], ["src-mem-bob"], bob)),
     ]
 
-    assert built > 0 and len(reads) == built
+    assert built == [(("src-mem-alice", "src-mem-bob"), {"with_source_id": True})]
+    assert reads == built
     assert sorted(first) == sorted(later[0]) == ["rD", "rO"]
     assert sorted(later[1]) == ["rF", "rO"]
     assert sorted(later[2]) == ["rD", "rF"]
+
+
+def test_the_memory_relation_map_reads_in_batches_of_the_in_chunk(
+    relation_matrix, monkeypatch,
+):
+    """The cold build batches Memory sources at ``_IN_CHUNK`` (900 in
+    production; 1 here, so two Memory sources take two reads), and every
+    batch still maps its relations to their own source: Bob's rF stays out of
+    Alice's seats and her own rO stays in."""
+    repo, nb, _bob, alice = relation_matrix
+    candidates = repo.retrieval.candidates
+    monkeypatch.setattr(candidates, "_IN_CHUNK", 1)
+    reads = _record_relation_delta_reads(repo, monkeypatch)
+
+    got = _relations(repo, nb, _scope(["src-doc"], ["src-mem-alice"], alice))
+
+    assert sorted(len(source_ids) for source_ids, _kwargs in reads) == [1, 1]
+    assert all(kwargs == {"with_source_id": True} for _ids, kwargs in reads)
+    assert sorted(got) == ["rD", "rO"]
+
+
+def _record_relation_delta_reads(repo, monkeypatch) -> list:
+    embeddings = repo.retrieval.candidates.embeddings
+    real = embeddings.relation_delta_rows
+    reads: list = []
+
+    def recording(db, notebook_id, source_ids, **kwargs):
+        reads.append((tuple(sorted(source_ids)), kwargs))
+        return real(db, notebook_id, source_ids, **kwargs)
+
+    monkeypatch.setattr(embeddings, "relation_delta_rows", recording)
+    return reads
 
 
 def test_tied_relations_keep_the_whole_matrix_order(store):

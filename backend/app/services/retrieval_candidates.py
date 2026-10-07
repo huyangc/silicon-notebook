@@ -1429,9 +1429,9 @@ class CandidateRetrievalService(_RetrievalState):
 
         A notebook without Memory has an empty Memory half and a shared half
         equal to the whole matrix, row for row.  Building it costs, once per
-        version, one Memory-source read plus one ``relation_delta_rows`` read
-        per Memory source (the relation -> source map; the store returns no
-        source column).
+        version, one Memory-source read plus one batched
+        ``relation_delta_rows(with_source_id=True)`` read per 900 Memory
+        sources (the relation -> source map, ``_memory_relation_sources``).
         """
         import numpy as np
 
@@ -1491,15 +1491,17 @@ class CandidateRetrievalService(_RetrievalState):
         """``{relation id: Memory source id}`` for every relation a Memory
         source derives (D4: the relation's own ``source_id``), any member's.
         One Memory-source read; a notebook without Memory stops there.
-        Otherwise one ``relation_delta_rows`` read per Memory source -- bounded
-        by the notebook's Memory graph, and paid only when
-        ``_relation_matrices`` rebuilds for a new version."""
+        Otherwise one ``relation_delta_rows(with_source_id=True)`` read per
+        batch of at most ``_IN_CHUNK`` (900) Memory sources -- the batching
+        contract its id-list guard registration states -- each row carrying
+        its relation's own source.  Paid only when ``_relation_matrices``
+        rebuilds for a new version."""
         mapping: Dict[str, str] = {}
-        for source_id in self._memory_source_ids(db, notebook_id):
+        for batch in self._in_batches(self._memory_source_ids(db, notebook_id)):
             for row in self.embeddings.relation_delta_rows(
-                db, notebook_id, [source_id],
+                db, notebook_id, batch, with_source_id=True,
             ):
-                mapping[str(row["vid"])] = source_id
+                mapping[str(row["vid"])] = str(row["source_id"])
         return mapping
 
     def _relation_top_k(self, db: object, notebook_id: str, query_vector, k: int):
