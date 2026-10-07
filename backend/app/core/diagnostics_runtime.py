@@ -91,6 +91,8 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     # 第三段 share 是固定字面量;token 只出现在匿名 /api/public/conversations/{token}
     # (T3,另一张模板表),不进这条路径。少了它整条会落到兜底 {redacted},丢观测。
     ("conversations", None, "share"),
+    # M4 分享前的个人记忆披露读取(E7-5);through_id 只在查询串里,不进路径。
+    ("conversations", None, "share", "disclosure"),
     ("edge-review-queue",),
     ("relations", None, "review"),
     ("object-schemas",),
