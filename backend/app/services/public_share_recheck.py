@@ -25,10 +25,18 @@ Which libraries the references come from:
 * a conversation turn names a library on every anchor and citation retrieved
   from a mounted one (``notebook_id``, empty for local evidence), so the
   stored turns answer it without a read;
-* a report citation stores only its ``source_id``; the route resolves the
-  cited sources' owning notebooks in ONE batched read
-  (``visible_source_owners``).  A source that is gone resolves to nothing and
-  is not counted: its library cannot be named any more.
+* a report citation stores its ``source_id`` / ``object_id`` and, since the
+  engine recorded it, ``from_reference_library`` (whether its evidence came
+  from a mounted library, decided by the owning notebook at generation).  The
+  route reads ownership only for citations that say so or predate the field
+  (a report of local citations reads nothing): the cited sources in ONE
+  batched read (``visible_source_owners``), then the cited knowledge objects
+  whose source did not resolve -- a knowledge object can be cited with no
+  source -- in ONE batched read (``knowledge.object_owners``).  A citation
+  marked as coming from a mounted library whose library can no longer be
+  named (its source and object are gone) fails closed: the page is not
+  served, since nothing can show the library is still mounted.  A legacy
+  citation without the field that cannot be resolved is not counted.
 """
 from __future__ import annotations
 
@@ -51,6 +59,58 @@ def conversation_library_ids(turns: Sequence[Any]) -> set[str]:
             for item in items:
                 if isinstance(item, Mapping) and item.get("notebook_id"):
                     found.add(str(item["notebook_id"]))
+    return found
+
+
+REFERENCE_LIBRARY_FLAG = "from_reference_library"
+
+
+def report_references_needing_owner(references: Sequence[Any]) -> list[Mapping[str, Any]]:
+    """The report citations whose library has to be read: those marked as
+    coming from a mounted library, and legacy ones written before the mark."""
+    return [
+        reference for reference in references
+        if isinstance(reference, Mapping)
+        and (REFERENCE_LIBRARY_FLAG not in reference
+             or reference.get(REFERENCE_LIBRARY_FLAG) is True)
+    ]
+
+
+def report_source_ids(references: Sequence[Mapping[str, Any]]) -> list[str]:
+    return list(dict.fromkeys(
+        str(reference.get("source_id")) for reference in references
+        if reference.get("source_id")
+    ))
+
+
+def report_unresolved_object_ids(
+    references: Sequence[Mapping[str, Any]], source_owners: Mapping[str, str]
+) -> list[str]:
+    """Object ids of the citations whose source did not name a library."""
+    return list(dict.fromkeys(
+        str(reference.get("object_id")) for reference in references
+        if reference.get("object_id")
+        and not source_owners.get(str(reference.get("source_id") or ""))
+    ))
+
+
+def report_library_ids(
+    references: Sequence[Mapping[str, Any]],
+    source_owners: Mapping[str, str],
+    object_owners: Mapping[str, str],
+) -> set[str] | None:
+    """The libraries the citations come from, or ``None`` (fail closed) when a
+    citation marked as coming from a mounted library names none any more."""
+    found: set[str] = set()
+    for reference in references:
+        library = (
+            source_owners.get(str(reference.get("source_id") or ""))
+            or object_owners.get(str(reference.get("object_id") or ""))
+        )
+        if library:
+            found.add(str(library))
+        elif reference.get(REFERENCE_LIBRARY_FLAG) is True:
+            return None
     return found
 
 

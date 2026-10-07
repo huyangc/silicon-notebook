@@ -1887,6 +1887,30 @@ class KnowledgeStore:
             params.append(int(limit))
         return db.execute(statement, params).fetchall()
 
+    def object_owners(self, object_ids: Sequence[str]) -> dict[str, str]:
+        """``{object_id: notebook_id}`` for those of ``object_ids`` that exist,
+        whatever their status; an unknown id is absent.
+
+        The public report page's ownership read (D-3): which library a cited
+        knowledge object belongs to, so a citation of a mounted library's
+        object can be re-checked even when it carries no source. Ownership
+        only -- no content leaves this read. Same shape as
+        ``SourceStore.visible_source_owners``: the id list (bounded by the
+        report's citations) is ONE jsonb parameter unnested once and probed
+        through the primary key, never one placeholder per id
+        (``test_public_page_owner_explain_pins``).
+        """
+        ids = list(dict.fromkeys(str(value) for value in object_ids if value))
+        if not ids:
+            return {}
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT o.id,o.notebook_id FROM knowledge_objects o WHERE o.id = ANY(ARRAY("
+                "SELECT jsonb_array_elements_text(%s::jsonb)))",
+                (json.dumps(ids),),
+            ).fetchall()
+        return {row["id"]: row["notebook_id"] for row in rows}
+
     def usable_object_rows(self, notebook_id: str, object_ids: Sequence[str]):
         with self.database.connect() as db:
             rows = self.usable_object_rows_on(
