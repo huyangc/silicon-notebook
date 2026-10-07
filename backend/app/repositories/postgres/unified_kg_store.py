@@ -152,6 +152,19 @@ def _not_memory_object_ref(
     )
 
 
+# 重建收尾写进 `unified_kg_state` 的规模(`object_count` / `relation_count`,
+# `unified_kg_status` 与分析卡片「上次整理规模」直接读它)只计共享部分:与共享口径
+# 的计数相减推不出任何成员的记忆条数(裁决 M1)。排除片段在同一条 COUNT 里。
+_END_STATE_OBJECT_COUNT_SQL = (
+    "SELECT COUNT(*) AS c FROM knowledge_objects o "
+    f"WHERE o.notebook_id=%s AND o.status!='deprecated' AND {_not_memory('o')}"
+)
+_END_STATE_RELATION_COUNT_SQL = (
+    "SELECT COUNT(*) AS c FROM knowledge_relations kr "
+    f"WHERE kr.notebook_id=%s AND {_not_memory('kr')}"
+)
+
+
 # E4-5 交接(裁决 M1):`unified_kg_state.memory_isolation_version` 由 PG 0067 /
 # SQLite v87 加列;任何一次成功重建都天然隔离,所以重建收尾(`finish_rebuild_state`)
 # 在同一条 upsert 里把它置 1。列只在 0067 落地后存在,所以按本代码认识的 schema
@@ -1198,12 +1211,10 @@ class UnifiedKgStore:
         受同一个 ``cluster_generation`` 守卫约束。输入未变的跳过路径不经过这里,由
         隔离重建工作线程自己置标记。"""
         object_count = db.execute(
-            "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=%s AND status!='deprecated'",
-            (notebook_id,),
+            _END_STATE_OBJECT_COUNT_SQL, (notebook_id,),
         ).fetchone()["c"]
         relation_count = db.execute(
-            "SELECT COUNT(*) AS c FROM knowledge_relations WHERE notebook_id=%s",
-            (notebook_id,),
+            _END_STATE_RELATION_COUNT_SQL, (notebook_id,),
         ).fetchone()["c"]
         marker_column, marker_value, marker_set = (
             (", memory_isolation_version", ", 1", "memory_isolation_version=1,\n              ")

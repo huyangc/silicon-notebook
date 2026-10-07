@@ -61,6 +61,11 @@ def _captured(repo, nb_id: str, monkeypatch) -> dict[str, str]:
         list(store.community_graph_rows(db, nb_id)[1])
         store.community_rows_for_summary(db, nb_id, 0)
         store.catchup_window_members(db, nb_id, 0, "2026-01-01T00:00:00", 5, 100)
+        # finish_rebuild_state's two end-state totals (run before its upsert)
+        from app.repositories.sqlite import unified_kg_store as kg_module
+
+        db.execute(kg_module._END_STATE_OBJECT_COUNT_SQL, (nb_id,))
+        db.execute(kg_module._END_STATE_RELATION_COUNT_SQL, (nb_id,))
     monkeypatch.setattr(database, "connect", traced)
     store.cluster_size_histogram(nb_id)
     store.largest_clusters(nb_id)
@@ -78,6 +83,9 @@ def _captured(repo, nb_id: str, monkeypatch) -> dict[str, str]:
         "largest": lambda s: "AS members" in s,
         "provenance": lambda s: "endpoint_unusable" in s,
         "catchup": lambda s: "datetime(c.created_at)" in s,
+        "end_objects": lambda s: s.startswith("SELECT COUNT(*) AS c FROM knowledge_objects o "),
+        "end_relations": lambda s: s.startswith(
+            "SELECT COUNT(*) AS c FROM knowledge_relations kr "),
     }
     found = {}
     for name, matches in roles.items():

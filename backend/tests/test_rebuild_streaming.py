@@ -342,6 +342,12 @@ def test_a_rebuild_puts_no_memory_derived_object_in_any_cluster(repo):
     assert _state(repo, nb_id)["dirty"] == 0
 
 
+def test_rebuild_totals_count_the_shared_graph_only(repo):
+    from tests import memory_kg_seed_world as world
+
+    world.assert_rebuild_totals_count_the_shared_graph_only(repo)
+
+
 def test_seed_streams_leave_memory_derived_objects_out(repo):
     """The two seed readers of the clustering pass (names for the alias map,
     then id+payload into the scratch table) skip Memory objects, in order."""

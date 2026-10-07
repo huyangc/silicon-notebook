@@ -936,11 +936,12 @@ def test_fusion_statements_do_not_grow_with_memory_sources(tmp_path, monkeypatch
 
     * brute force: the same number of statements for 0, 5 and 1,000 Memory
       sources (the exclusion is a predicate in the pool read);
-    * ANN: 0 and 5 are equal, and 1,000 costs exactly what 1,000 *deprecated*
-      ordinary concepts in the same places cost — Memory hits are "not alive"
-      like deprecated ones, and when they crowd the window the existing
-      doubling loop (k from 20 up to at most 4,096, one ``valid_object_ids``
-      per round) spends its bounded extra rounds the same way.
+    * ANN: the same number for 0, 5 and 1,000 as well -- the scale index
+      leaves Memory-derived objects out of its ANN labels (E4-6), so Memory
+      concepts never crowd the window. 1,000 *deprecated* ordinary concepts
+      in the same places do crowd it (the existing doubling loop: k from 20
+      up to at most 4,096, one ``valid_object_ids`` per round), so they may
+      cost more, never less.
 
     Each run also yields the one shared bridge and never a Memory one."""
     from app.services.kg_merge import _norm
@@ -980,10 +981,11 @@ def test_fusion_statements_do_not_grow_with_memory_sources(tmp_path, monkeypatch
         assert _candidate_pairs(r, nb.id) == {
             tuple(sorted(("K-" + _norm("MoE Gating"), "K-" + _norm("Expert Routing"))))
         }, n
-    assert counts[0] == counts[5], counts
+    assert counts[0] == counts[5] == counts[1000], counts
     if branch == "bruteforce":
-        assert counts[5] == counts[1000], counts
-    assert counts[1000] == counts["deprecated"], counts
+        assert counts[1000] == counts["deprecated"], counts
+    else:
+        assert counts[1000] <= counts["deprecated"], counts
 
 
 def test_ann_widening_failure_keeps_the_pairs_found_in_earlier_rounds(repo, monkeypatch):

@@ -57,7 +57,9 @@ def assert_isolation_marker_is_wired(repo, backend: str) -> None:
     """Once E4-5's ``MemoryIsolationStore`` exists for ``backend``, the
     runtime's lifecycle reads its marker through ``not_isolated`` (a None
     reader serves pre-isolation artifacts as isolated); before E4-5 the
-    reader is None -- every notebook is isolated, today's behaviour."""
+    reader is None -- every notebook is isolated, today's behaviour.  The
+    backend's repository constructor assigns it (the neutral runtime that
+    builds the lifecycle cannot import a backend store)."""
     try:
         module = importlib.import_module(
             f"app.repositories.{backend}.memory_isolation_store")
@@ -66,8 +68,8 @@ def assert_isolation_marker_is_wired(repo, backend: str) -> None:
         return
     pending = repo._runtime.knowledge_lifecycle._isolation_pending
     assert pending is not None, (
-        "assembly: pass memory_isolation_pending=MemoryIsolationStore.not_isolated "
-        "to KnowledgeLifecycleService")
+        "assembly: the backend repository constructor must set "
+        "knowledge_lifecycle._isolation_pending = MemoryIsolationStore.not_isolated")
     assert pending is module.MemoryIsolationStore.not_isolated
 
 

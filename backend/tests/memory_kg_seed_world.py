@@ -128,6 +128,31 @@ def memory_object_ids(repo, notebook_id: str) -> set[str]:
     return {row["id"] for row in rows}
 
 
+def assert_rebuild_totals_count_the_shared_graph_only(repo) -> None:
+    """The rebuild's end-state totals (``unified_kg_status`` objects /
+    relations, which the analysis card's last-rebuild size also reads) count
+    the shared graph only: subtracting a shared-view count from them never
+    yields another member's Memory count (ruling M1)."""
+    notebook_id = seed(repo)
+    repo.rebuild_unified_kg(notebook_id, force=True)
+    shared_objects = rows(
+        repo,
+        "SELECT COUNT(*) AS c FROM knowledge_objects ko JOIN sources s ON s.id = ko.source_id "
+        "WHERE ko.notebook_id=? AND ko.status!='deprecated' AND s.source_type<>'memory'",
+        (notebook_id,),
+    )[0]["c"]
+    shared_relations = rows(
+        repo,
+        "SELECT COUNT(*) AS c FROM knowledge_relations kr JOIN sources s ON s.id = kr.source_id "
+        "WHERE kr.notebook_id=? AND s.source_type<>'memory'",
+        (notebook_id,),
+    )[0]["c"]
+    memory_objects = memory_object_ids(repo, notebook_id)
+    assert memory_objects and shared_objects == 5 and shared_relations == 2
+    status = repo.unified_kg_status(notebook_id)
+    assert (status["objects"], status["relations"]) == (shared_objects, shared_relations)
+
+
 def object_ids_by_name(repo, notebook_id: str, source_id: str) -> dict[str, str]:
     name = ("payload ->> 'name'" if is_postgres(repo)
             else "json_extract(payload,'$.name')")

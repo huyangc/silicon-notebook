@@ -2027,10 +2027,10 @@ previews hold — plus the viewer's own Memory objects read live; `limit` bounds
 layers, so a graph response holds at most twice `limit` nodes. A token without `memory:read` sees
 no Memory-derived row, its own included, and the notebook's Memory count is 0 for it. Notebook
 counts, `kg_ready` and the analytics card's knowledge counts are the shared view plus the viewer's
-own Memory-derived objects. Index node/ANN counts and the share-preview size count the shared
-graph only. Rebuild-time totals (`unified_kg_status`, the analysis card's last-rebuild size) are
-counted once, when a rebuild ends, over every non-deprecated object and every relation of the
-notebook, Memory-derived ones included; they are numbers only and name no object.
+own Memory-derived objects. Index node/ANN counts, the share-preview size and the rebuild-time
+totals (`unified_kg_status`, the analysis card's last-rebuild size; counted once when a rebuild
+ends, over non-deprecated objects and relations) count the shared graph only, so no member's
+Memory count can be derived from them.
 
 Knowledge-graph store reads take the viewer: another member's Memory-derived objects and
 relations are left out of the knowledge list and its total, type and board counts, `kg_ready`,
