@@ -639,8 +639,11 @@ class KgViewerScope:
         (one statement for a typical page; a page is at most 200 objects).
         With the E4-4 stores assembled the read asks for the element's
         ``source_id`` only (``sources_only=True``: no element text);
-        before them it reads the store's full enrichment.  Items come as
-        ``Evidence`` models or dicts."""
+        before them it reads the store's full enrichment.  Elements are read
+        only from this notebook (ledger B-11, PR-E2 E2-4, the same
+        ``owner_notebook_id`` concept detail passes): an element of another
+        library resolves to no source here, so its item is judged on the
+        source it names alone.  Items come as ``Evidence`` models or dicts."""
         named = [self._as_evidence_dict(item) for item in items]
         hidden = {i for i, item in enumerate(named) if item is None
                   or self.evidence_hidden(item)}
@@ -655,7 +658,8 @@ class KgViewerScope:
                     batch = elements[start:start + _ID_BATCH]
                     resolved = self._reader.knowledge._enrich_evidence(
                         db, [{"element_id": element, "source_id": ""}
-                             for element in batch], **narrow)
+                             for element in batch],
+                        owner_notebook_id=self.notebook_id, **narrow)
                     actual.update(
                         (element, str(row.get("source_id") or ""))
                         for element, row in zip(batch, resolved))

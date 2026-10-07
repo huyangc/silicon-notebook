@@ -67,6 +67,10 @@ def test_enrich_evidence_can_resolve_sources_only(world):
     cases.check_enrich_evidence_sources_only(world)
 
 
+def test_enrich_evidence_sources_only_narrows_the_owner_form(world):
+    cases.check_enrich_evidence_sources_only_with_owner(world)
+
+
 def test_enrich_evidence_sources_only_is_primary_key_driven(world):
     with cases.connect(world) as db:
         plan = [

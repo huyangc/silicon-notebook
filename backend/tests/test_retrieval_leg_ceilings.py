@@ -404,12 +404,37 @@ def _seed_weak(repo, nb, *, b_memory=True):
         ], [_edge("A", "X", "src-mb")])
     repo.rebuild_unified_kg(nb)
     repo.rebuild_canonical_relations(nb, force=True)
+    if b_memory:
+        _pre_isolation_memory_canonical_row(repo, nb)
     with repo._connect() as db:
         return [
             row["id"] for row in db.execute(
                 "SELECT id FROM knowledge_objects WHERE notebook_id=? AND source_id=?",
                 (nb, "src-vis"))
         ]
+
+
+def _pre_isolation_memory_canonical_row(repo, nb):
+    """The canonical row a pre-isolation build derived from B's Memory edge
+    (shared 版图设计 cluster -> the Memory-only SECRETPROJECT object, its one
+    sample relation from ``src-mb``).  The isolated build never writes it
+    (PR-E4 E4-2 leaves Memory out of canonical relations), so it is written in
+    SQL: a notebook still awaiting its isolated rebuild holds exactly this
+    row, and the weak-support ceiling (PR-E2 E2-1) is what keeps it out."""
+    with repo._write() as db:
+        shared = db.execute(
+            "SELECT canonical_src FROM canonical_relations WHERE notebook_id=?",
+            (nb,)).fetchone()
+        rel = db.execute(
+            "SELECT id, edge_type, target_object_id FROM knowledge_relations "
+            "WHERE notebook_id=? AND source_id='src-mb'", (nb,)).fetchone()
+        assert shared is not None and rel is not None
+        db.execute(
+            "INSERT INTO canonical_relations (notebook_id, canonical_src, edge_type, "
+            "canonical_tgt, support_count, source_count, sample_relation_ids, "
+            "updated_at) VALUES (?,?,?,?,1,1,?,?)",
+            (nb, shared["canonical_src"], rel["edge_type"], rel["target_object_id"],
+             json.dumps([rel["id"]]), _now()))
 
 
 def _names(rows):

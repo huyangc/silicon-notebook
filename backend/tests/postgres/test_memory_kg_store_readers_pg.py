@@ -71,6 +71,10 @@ def test_enrich_evidence_can_resolve_sources_only_pg(world):
     cases.check_enrich_evidence_sources_only(world)
 
 
+def test_enrich_evidence_sources_only_narrows_the_owner_form_pg(world):
+    cases.check_enrich_evidence_sources_only_with_owner(world)
+
+
 def test_a_viewer_read_never_takes_the_knn_shape_pg(world):
     """``allow_knn`` is a hint: with a conforming GiST name index the unscoped
     probe takes the KNN statement (control), a viewer read never does — its
