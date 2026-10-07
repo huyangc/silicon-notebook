@@ -570,6 +570,19 @@ def test_promoted_object_never_shows_the_promoters_private_text_or_title(
     assert anchors[0].knowhow is None and not anchors[0].images
     assert cards[0].label.startswith("Stored Title")
     assert cards[0].knowhow is None and not cards[0].images
+    # A source-level reference (no element) to the same private source: the
+    # card is still a snapshot -- the decision is the source row's library,
+    # never whether the source has a display name.
+    import dataclasses
+
+    source_level = dataclasses.replace(hit, evidence=[
+        hit.evidence[0].model_copy(update={"element_id": ""}),
+    ])
+    (source_card,) = evidence_context.citations_from(
+        [source_level], set(), "fallback", notebook_id=public.id,
+    )
+    assert (source_card.source_id, source_card.element_id) == ("", "")
+    assert source_card.label.startswith("Stored Title")
 
 
 def test_mixed_pointer_card_and_anchor_carry_no_foreign_element(repo):
