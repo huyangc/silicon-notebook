@@ -511,7 +511,7 @@ def test_the_stop_reaches_the_verdict_probes():
 
     cancel = threading.Event()
     readers = CeilingReaders(
-        participants=lambda nb: (nb,), visible=lambda nb: (),
+        participants=lambda nb, _viewer: (nb,), visible=lambda nb: (),
         hidden=lambda nb, owner: (), memory_sources=lambda nb: (),
         verdict_probes=CeilingVerdictProbes(
             universe_digests=probe, foreign_hidden=lambda *_a: probe() and False,

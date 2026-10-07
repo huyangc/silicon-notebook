@@ -509,6 +509,9 @@ _AUTHORIZATION_SITES = {
     "app/services/plugin_ask_engine.py": "predicate_call",
     # facade 公开面,消费者含鉴权路径。
     "app/services/repository_facade.py": "predicate_call",
+    # 公开页(会话页/图片/分享预检/公开报告)的挂载复核:以分享创建者为查看者
+    # 取参与集(E6-3,M3)。匿名路由,查看者显式传入,不经 current_viewer_id()。
+    "app/services/public_share_recheck.py": "predicate_call",
     # 谓词本身(双后端)。
     "app/repositories/sqlite/notebook_store.py": "predicate_call",
     "app/repositories/postgres/notebook_store.py": "predicate_call",

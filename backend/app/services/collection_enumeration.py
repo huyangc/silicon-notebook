@@ -151,6 +151,7 @@ from app.services.retrieval_participants import (
     resolve_retrieval_participants,
 )
 from app.services.source_display import source_display_title
+from app.services.retrieval_run import current_viewer_id
 from app.services.source_scope import (
     current_source_scope,
     record_collection_ceiling_drift,
@@ -1901,7 +1902,7 @@ class CollectionEnumerationService:
         here loses nothing.
         """
         notebook_ids, tiers = self._notebooks.participant_tiers(
-            db, active_notebook_id, viewer_id="",  # E6-3
+            db, active_notebook_id, viewer_id=current_viewer_id(),
         )
         return tuple(
             (str(notebook_id), str(tiers.get(notebook_id, "personal")))
@@ -1947,7 +1948,7 @@ class CollectionEnumerationService:
             resolve_retrieval_participant_ids(
                 active_notebook_id,
                 lambda: self._notebooks.participant_ids(
-                    db, active_notebook_id, viewer_id="",  # E6-3
+                    db, active_notebook_id, viewer_id=current_viewer_id(),
                 ),
             )
         )

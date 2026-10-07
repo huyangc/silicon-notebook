@@ -36,6 +36,7 @@ from app.services.retrieval import (
 # ``backend/tests/test_participant_override_guard.py::
 # test_evidence_context_authorization_site_keeps_mount_predicate`` 反向钉住。
 from app.services.retrieval_participants import resolve_retrieval_participant_ids
+from app.services.retrieval_run import current_viewer_id
 from app.services.citation_markers import MARKER_RE, marker_keys
 from app.services.source_display import source_display_title
 from app.services.source_element_selection import deduplicate_source_chunks_in_order
@@ -611,7 +612,7 @@ class EvidenceContextService:
         else:
             participants = set(
                 self.notebooks.participant_notebook_ids(
-                    active_notebook_id, viewer_id="",  # E6-3
+                    active_notebook_id, viewer_id=current_viewer_id(),
                 )
             )
         rows = [
@@ -1161,7 +1162,7 @@ class EvidenceContextService:
         participants = resolve_retrieval_participant_ids(
             notebook_id,
             lambda: self.notebooks.participant_notebook_ids(
-                notebook_id, viewer_id="",  # E6-3
+                notebook_id, viewer_id=current_viewer_id(),
             ),
         )
         # T3(B2 有界化):需要折叠的 id 集合 = hit ids(本函数内 ``_canonical()``

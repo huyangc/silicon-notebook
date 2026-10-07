@@ -107,7 +107,10 @@ upsert,它照搬源环境那一行(同样不可转让)的 owner 映射结果,而
 `QueryStore.notebook_has_usable_base_kg`、`QueryStore.mounted_bases_row`、
 `UnifiedKgStore.mounted_base_ids`、`KnowledgeStore.any_mounted_has_kg_on`、
 `KnowledgeStore.follow_start_row`。`viewer_id` 为 `None` / 空串即无查看者,只剩公共库与
-`everyone`。服务层的查看者来源(检索运行的 `actor_id`)与缓存键由任务 E6-3 接上。
+`everyone`。服务层的查看者来源是 `retrieval_run.current_viewer_id()`(检索运行的
+`actor_id`,否则请求用户,否则无查看者);公开页与 MCP 显式传创建者 / 令牌属主。
+`tests/test_mount_viewer_guard.py` 钉住每个服务层调用点都带查看者,图缓存键按查看者
+有效集合分开(`graph_retrieval._participant_graph_cache_key`)。
 
 不随查看者变化、切换后也继续用旧片段的调用点:`list_mount_edges` /
 `mountable_notebooks`(路由 owner 专属,查看者恒为挂载人)、深拷贝重判

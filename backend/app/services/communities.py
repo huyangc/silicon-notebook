@@ -17,6 +17,7 @@ from typing import List, Optional, Tuple
 # PEER mode: the participant-set predicate. This module is reader #5 on the
 # participant override's frozen whitelist (see ``mounted_base_ids``).
 from app.services.retrieval_participants import federated_ask_active
+from app.services.retrieval_run import current_viewer_id
 
 
 class CommunityQueryService:
@@ -77,7 +78,7 @@ class CommunityQueryService:
             lambda: (
                 active_notebook_id,
                 *self.unified_kg.mounted_base_ids(
-                    active_notebook_id, viewer_id="",  # E6-3
+                    active_notebook_id, viewer_id=current_viewer_id(),
                 ),
             ),
         )
@@ -314,10 +315,6 @@ def _resolve_focal(store, notebook_id: str, focal_name: str) -> Optional[str]:
     if not notebook_id or not key:
         return None
     return store.resolve_focal(notebook_id, key)
-
-
-def mounted_base_ids(queries, active_nb: str) -> List[str]:
-    return queries.mounted_base_ids(active_nb)
 
 
 def community_peers(queries, base_nb: str, focal_name: str, query: str, *,

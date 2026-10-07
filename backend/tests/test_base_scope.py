@@ -135,7 +135,7 @@ def test_r2_omitted_base_scope_freezes_each_mounted_library_to_its_visible_sourc
     from tests.test_ask_service_boundary import static_ceiling_readers
 
     readers = static_ceiling_readers(
-        participants=lambda _nb: ("nb", "base"),
+        participants=lambda _nb, _viewer: ("nb", "base"),
         visible=lambda nb: ("base-source",) if nb == "base" else ("s1",),
         hidden=lambda nb, _owner: ("base-hidden",) if nb == "base" else (),
     )
@@ -642,7 +642,7 @@ def test_follow_chain_drops_hops_carried_by_an_unchecked_library():
     from tests.test_ask_service_boundary import static_ceiling_readers
 
     readers = static_ceiling_readers(
-        participants=lambda _nb: ("nb", "kept-base", "dropped-base"),
+        participants=lambda _nb, _viewer: ("nb", "kept-base", "dropped-base"),
         visible=lambda nb: (f"s-{nb}", "s1"),
     )
     with default_ceiling_context(
@@ -1163,7 +1163,7 @@ def test_receipt_never_reaches_the_retrieval_gates():
     from tests.test_ask_service_boundary import static_ceiling_readers
 
     readers = static_ceiling_readers(
-        participants=lambda _nb: ("nb", "b1"),
+        participants=lambda _nb, _viewer: ("nb", "b1"),
         visible=lambda nb: ("s9",) if nb == "b1" else ("s1", "s2"),
     )
     chunks = [

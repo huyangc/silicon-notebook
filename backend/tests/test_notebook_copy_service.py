@@ -236,9 +236,9 @@ def test_t4deleg_notebook_row_on_delegate(repo, monkeypatch):
         store_dbs.append(db)
         return original_store(db, nb_id)
 
-    def spy_summary(db, row):
+    def spy_summary(db, row, **kwargs):
         summary_dbs.append(db)
-        return original_summary(db, row)
+        return original_summary(db, row, **kwargs)
 
     monkeypatch.setattr(store, "notebook_row_on", spy_store)
     monkeypatch.setattr(summaries, "from_row", spy_summary)

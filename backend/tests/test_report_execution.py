@@ -29,7 +29,7 @@ from app.services.source_scope import CeilingReaders
 # ceiling to install without a repository (the ceiling itself is pinned in
 # test_report_api.py and test_report_default_ceiling.py).
 _READERS = CeilingReaders(
-    participants=lambda notebook_id: [notebook_id],
+    participants=lambda notebook_id, _viewer_id: [notebook_id],
     visible=lambda notebook_id: [],
     hidden=lambda notebook_id, owner_id: [],
     memory_sources=lambda notebook_id: [],

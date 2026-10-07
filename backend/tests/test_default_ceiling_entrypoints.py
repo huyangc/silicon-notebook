@@ -266,10 +266,6 @@ def seed(env: dict, placeholder: str) -> dict:
     kg_object(lib, "ko-lib-memory", "src-lib-memory", "el-lib-memory",
               f"{TERM} latency carol concept LIBMEMSECRET")
     with repo._write() as db:
-        # E6-3: the participant reader is not yet bound to the asker (M3), so only
-        # a library open to everybody -- a public base -- is mounted for the run;
-        # E6-3 restores Alice's private library with her actor.
-        db.execute(f"UPDATE notebooks SET tier='base' WHERE id={ph}", (lib,))
         db.execute(
             "INSERT INTO notebook_bases(notebook_id,base_notebook_id,created_at,created_by) "
             f"VALUES ({ph},{ph},{ph},{ph})",

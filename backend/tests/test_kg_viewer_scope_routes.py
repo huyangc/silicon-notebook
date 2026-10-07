@@ -138,19 +138,15 @@ def test_the_memory_owner_sees_everything(two_users_client):
     assert "SecretProject" in r.text
 
 
-def test_mounted_library_exposes_visible_sources_only_to_a_non_member(two_users_client):
-    """Ruling: a mounted library's hidden half (its Knowhow projections, and
-    any Memory) is scoped to that library's members.  The owner mounts a
-    library of their own into the shared notebook; the member of the shared
-    notebook is not a member of the library."""
-    env = two_users_client
+def _mounted_library(env, *, public: bool):
+    """The owner's library ``lib`` -- one visible source and one Knowhow
+    projection, each with a KG object -- mounted into the shared notebook.
+    ``public`` marks it a public base before mounting.  Returns
+    ``(lib, visible object id, knowhow object id, context url)``."""
     c, repo = env.client, env.repo
     lib = c.post("/api/notebooks", headers=env.owner, json={"name": "lib"}).json()["id"]
-    # M3: a private library mounted on a shared notebook is effective only for those
-    # who can read it themselves, so the "reader who is not a member" of this
-    # contract is a reader of a library open to everybody -- a public base.  (E6-3
-    # pins the private case end to end once the route binds the asker.)
-    repo.mark_notebook_base(lib)
+    if public:
+        repo.mark_notebook_base(lib)
     with repo._write() as db:
         _source(db, lib, "src-lib", elements=[("el-lib", "LIB visible")])
         db.execute(
@@ -180,6 +176,17 @@ def test_mounted_library_exposes_visible_sources_only_to_a_non_member(two_users_
         visible = _object_id(db, lib, "LibVisible", "src-lib")
         knowhow = _object_id(db, lib, "KNOWHOW concept", "src-kh")
     url = f"/api/notebooks/{env.nb}/objects/{{}}/context?source_notebook_id={lib}"
+    return lib, visible, knowhow, url
+
+
+def test_mounted_library_exposes_visible_sources_only_to_a_non_member(two_users_client):
+    """Ruling: a mounted library's hidden half (its Knowhow projections, and
+    any Memory) is scoped to that library's members.  The owner mounts a
+    PUBLIC library of their own into the shared notebook; the member of the
+    shared notebook may read it (it is public) but is not its member."""
+    env = two_users_client
+    c = env.client
+    _lib, visible, knowhow, url = _mounted_library(env, public=True)
     # Not a member of the library: visible sources only.
     assert c.get(url.format(knowhow), headers=env.member).status_code == 404
     r = c.get(url.format(visible), headers=env.member)
@@ -187,6 +194,26 @@ def test_mounted_library_exposes_visible_sources_only_to_a_non_member(two_users_
     # The library's owner is its member: its Knowhow is readable.
     r = c.get(url.format(knowhow), headers=env.owner)
     assert r.status_code == 200 and "KNOWHOW row text" in r.text
+
+
+def test_a_private_mounted_library_counts_only_for_its_readers(two_users_client):
+    """M3 over the KG object route: the owner mounts a PRIVATE library of
+    their own into the shared notebook.  For the member, who may not read
+    that library, the mount does not exist -- both objects 404; for the owner
+    it is unchanged.  Once the member is given read access to the library,
+    the mount counts for them too."""
+    env = two_users_client
+    c, repo = env.client, env.repo
+    lib, visible, knowhow, url = _mounted_library(env, public=False)
+    for object_id in (visible, knowhow):
+        assert c.get(url.format(object_id), headers=env.member).status_code == 404
+    r = c.get(url.format(visible), headers=env.owner)
+    assert r.status_code == 200 and "LIB visible" in r.text
+    r = c.get(url.format(knowhow), headers=env.owner)
+    assert r.status_code == 200 and "KNOWHOW row text" in r.text
+    repo.add_member(lib, env.member_id)
+    r = c.get(url.format(visible), headers=env.member)
+    assert r.status_code == 200 and "LIB visible" in r.text
 
 
 def test_routes_apply_the_rule_to_clusters_and_legacy_siblings(two_users_client):

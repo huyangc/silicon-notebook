@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Hashable, Iterator, Optional, TypeVar
 from uuid import uuid4
 
+from app.core.request_context import request_user_id
 from app.services.cancellation import CancelEvent, raise_if_cancelled
 
 
@@ -288,6 +289,33 @@ def retrieval_run(*, run_kind: str, event_log: Any = None,
             _RETRIEVAL_RUN.reset(token)
 
 
+def current_viewer_id() -> str:
+    """Who the participant set is resolved for (M3: a mount is effective only
+    for a viewer who may read the mounted library, or for its mounter).
+
+    1. The retrieval run's ``actor_id`` -- reports, Global Ask and reattached
+       runs execute on worker threads, so the run's own authority identity
+       wins over whatever request context happens to be copied in;
+    2. otherwise the requesting user (``request_context.get_request_user``),
+       which ``deps.get_current_user`` sets for every authenticated request
+       -- under ``AUTH_OPTIONAL`` to the seeded local account, so a tokenless
+       request loses nothing;
+    3. otherwise ``''``: no viewer, so only public libraries and ``everyone``
+       grants take part.  Deliberately NOT ``identity.current_user()``: its
+       no-request fallback is the seeded local account, and judging a mount
+       for HIM on a worker thread, a CLI or the startup warm-up would judge it
+       for the wrong person.  A background path without an actor fails
+       closed.
+
+    Resolved at CALL time, never cached: a value captured when a service was
+    built would pin one user's participant set onto every later request.
+    """
+    state = _RETRIEVAL_RUN.get()
+    if state is not None and state.actor_id:
+        return state.actor_id
+    return str(request_user_id() or "")
+
+
 def memoized_query_embedding(key: Hashable, compute: Callable[[], T]) -> T:
     state = current_retrieval_run()
     return state.memoized_embedding(key, compute) if state is not None else compute()
@@ -311,6 +339,7 @@ def retrieval_fanout_slot() -> Iterator[None]:
 __all__ = [
     "RetrievalRunState",
     "current_retrieval_run",
+    "current_viewer_id",
     "memoized_query_embedding",
     "memoized_retrieval_value",
     "retrieval_fanout_slot",

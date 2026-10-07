@@ -17,12 +17,22 @@ NOW = "2026-07-20T00:00:00"
 
 
 @pytest.fixture
-def repo(tmp_path, monkeypatch) -> SQLiteRepository:
+def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'ask_available.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    return SQLiteRepository(Settings(_env_file=None))
+    from app.core.request_context import reset_request_user, set_request_user
+
+    instance = SQLiteRepository(Settings(_env_file=None))
+    # The summary is the requesting user's (Memory counts, mounts): the
+    # seeded local account asks, explicitly -- a summary read with no request
+    # user has no viewer.
+    marker = set_request_user(instance.current_user())
+    try:
+        yield instance
+    finally:
+        reset_request_user(marker)
 
 
 def _add_source(db, notebook_id, source_id, source_type):

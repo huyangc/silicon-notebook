@@ -43,6 +43,7 @@ from app.services.retrieval_experience_job import (
     RetrievalExperienceDistillationService,
 )
 from app.services.search_profile_job import SearchProfileInferenceService
+from app.services.retrieval_run import current_viewer_id
 from app.services.catalog_job import CommandCatalogService
 from app.services.kg_analysis import KgAnalysisService
 from app.services.kg_mutation import KgMutationCoordinator
@@ -1192,17 +1193,28 @@ class RepositoryRuntime:
         return self.identity.current_user().id
 
     def _participant_notebook_ids(self, notebook_id: str) -> list[str]:
-        """The one-argument participant reader the four wirings below hand out.
+        """The one-argument participant reader three wirings below hand out.
 
         ``NotebookStore.participant_notebook_ids`` takes a REQUIRED ``viewer_id``
         (M3: a mount is effective for the mounter, or for whoever can read the
-        mounted library themselves).  The services these wirings feed hold
-        ``Callable[[str], ...]`` seams, so the viewer is bound here, once.
-        E6-3 replaces the empty viewer with ``current_viewer_id()`` (the run's
-        actor, never the HTTP request); until then ``""`` means "no viewer":
-        only public libraries and ``everyone`` grants survive."""
+        mounted library themselves).  The services these wirings feed
+        (``knowledge_query``, ``knowledge_lifecycle``, the plugin engine) hold
+        ``Callable[[str], ...]`` seams, so the viewer is bound here, at CALL
+        time: ``current_viewer_id()`` -- the retrieval run's actor, else the
+        requesting user, else nobody (only public libraries and ``everyone``
+        grants survive)."""
         return self.notebook_store.participant_notebook_ids(
-            notebook_id, viewer_id="",  # E6-3
+            notebook_id, viewer_id=current_viewer_id(),
+        )
+
+    def _viewer_participant_notebook_ids(
+        self, notebook_id: str, viewer_id: str
+    ) -> list[str]:
+        """The ceiling's participant reader (``CeilingReaders.participants``):
+        the viewer is the ceiling's own ``owner_id``, passed explicitly, so a
+        ceiling a worker thread builds is the asker's, not the thread's."""
+        return self.notebook_store.participant_notebook_ids(
+            notebook_id, viewer_id=viewer_id,
         )
 
     # 触发面(2026-09-22 PR-3·T7 起扩到全部三个提问面,推翻 codex #535 R4 P2 当时
@@ -2466,7 +2478,7 @@ class RepositoryRuntime:
                 notebook_id, digest_for_owner=owner_id)
 
         return CeilingReaders(
-            participants=self._participant_notebook_ids,
+            participants=self._viewer_participant_notebook_ids,
             visible=sources.all_visible_source_ids,
             hidden=sources.hidden_source_ids,
             memory_sources=memory_sources,

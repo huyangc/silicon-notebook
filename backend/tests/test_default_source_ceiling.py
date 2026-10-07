@@ -93,7 +93,7 @@ class _Store:
         self.budgets: list[Any] = []
         self.events: list[dict] = []
 
-    def participants(self, notebook_id: str) -> list[str]:
+    def participants(self, notebook_id: str, viewer_id: str = "") -> list[str]:
         self.calls.append("participants")
         return [notebook_id, *self.mounts]
 
@@ -1739,7 +1739,7 @@ def test_generator_readers_are_frozen_where_they_enter():
     store = _shared_store()
     readers = _replace(
         store.readers(),
-        participants=lambda nb: (value for value in store.participants(nb)),
+        participants=lambda nb, viewer: (value for value in store.participants(nb, viewer)),
         visible=lambda nb: (value for value in store.visible(nb)),
         hidden=lambda nb, owner: (value for value in store.hidden(nb, owner)),
         memory_sources=lambda nb: (value for value in store.memory_sources(nb)),
@@ -2074,6 +2074,11 @@ def build_real_fixture(repo, placeholder: str) -> dict[str, Any]:
     finally:
         reset_request_user(token)
     repo._runtime.sharing.add_member(nb, bob.id)
+    # M3: Alice's mounts count for Bob only because he may read the mounted
+    # libraries himself; these worlds test the ceiling over a mount, not the
+    # mount's audience (``test_mount_viewer_e2e.py`` does that).
+    for library in (lib, lib2, late):
+        repo._runtime.sharing.add_member(library, bob.id)
     sources = repo._runtime.source_store
 
     def insert(notebook_id, source_id, source_type, memory_id=""):
@@ -2134,15 +2139,11 @@ def real_readers(repo, emit=None, read_workers: int = 1) -> CeilingReaders:
 
     notebooks = repo._runtime.notebook_store
 
-    def participants(notebook_id: str):
-        # E6-2: the participant reader takes a viewer.  These worlds predate M3
-        # (a library the notebook's owner mounted counts for whoever asks), so
-        # the reader is bound to the mounter -- the notebook's creator -- and
-        # keeps testing the ceiling, not the mount's audience.  E6-3 binds the
-        # run's actor in production and rewrites the worlds that need it.
-        return notebooks.participant_notebook_ids(
-            notebook_id, viewer_id=notebooks.get_row(notebook_id)["created_by"],
-        )
+    def participants(notebook_id: str, viewer_id: str):
+        # The production reader (``RepositoryRuntime
+        # ._viewer_participant_notebook_ids``): the ceiling's owner is the
+        # viewer the mount table is resolved for (M3).
+        return notebooks.participant_notebook_ids(notebook_id, viewer_id=viewer_id)
 
     return CeilingReaders(
         participants=participants,

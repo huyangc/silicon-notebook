@@ -76,6 +76,7 @@ from app.services.retrieval import (
 )
 from app.services.retrieval_run import (
     current_retrieval_run,
+    current_viewer_id,
     memoized_query_embedding,
     memoized_retrieval_value,
     retrieval_fanout_slot,
@@ -455,11 +456,16 @@ class _RetrievalState:
                 lambda: self._mount_participants(active_notebook_id),
             )
 
+        # The viewer is part of the memo key (M3): the mount read below is
+        # resolved for ``current_viewer_id()``, and a run whose actor changed
+        # under it must not be served another viewer's participant set.
         pairs = (
             resolve()
             if current_participant_override() is not None
             else memoized_retrieval_value(
-                ("retrieval_participants", active_notebook_id), resolve
+                ("retrieval_participants", active_notebook_id,
+                 current_viewer_id()),
+                resolve,
             )
         )
         return tuple(
@@ -478,7 +484,7 @@ class _RetrievalState:
         """
         with self._connect() as db:
             notebook_ids, tier_map = self.notebooks.participant_tiers(
-                db, active_notebook_id, viewer_id="",  # E6-3
+                db, active_notebook_id, viewer_id=current_viewer_id(),
             )
         return tuple(
             (nid, tier_map.get(nid, "personal")) for nid in notebook_ids
@@ -526,7 +532,7 @@ class _RetrievalState:
                 not self.notebook_copy_stats(notebook_id)["copyable"]
                 for notebook_id
                 in self.notebooks.participant_notebook_ids(
-                    active_notebook_id, viewer_id="",  # E6-3
+                    active_notebook_id, viewer_id=current_viewer_id(),
                 )
             )
         return any(
@@ -833,9 +839,11 @@ class _RetrievalState:
             )
         if database is not None:
             return self.knowledge.any_mounted_has_kg_on(
-                database, notebook_id, viewer_id="",  # E6-3
+                database, notebook_id, viewer_id=current_viewer_id(),
             )
-        return self.knowledge.any_mounted_has_kg(notebook_id, viewer_id="")  # E6-3
+        return self.knowledge.any_mounted_has_kg(
+            notebook_id, viewer_id=current_viewer_id(),
+        )
 
     def _federated_rx_graph(self, *args, **kwargs):
         return self._peer._federated_rx_graph(*args, **kwargs)

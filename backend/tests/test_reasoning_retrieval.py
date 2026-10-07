@@ -294,6 +294,22 @@ def rrepo(tmp_path, monkeypatch):
     return r
 
 
+@pytest.fixture
+def owner_asks(rrepo):
+    """The notebooks' owner (the seeded local account) is the requesting user.
+
+    A mounted private library counts only for a viewer who may read it (M3),
+    and a retriever called outside any retrieval run takes its viewer from the
+    request -- there is no implicit fallback to the local account."""
+    from app.core.request_context import reset_request_user, set_request_user
+
+    marker = set_request_user(rrepo.current_user())
+    try:
+        yield
+    finally:
+        reset_request_user(marker)
+
+
 def _seed_two_nodes(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo.store_kg(nb.id, None, [
@@ -2660,7 +2676,6 @@ def test_run_expand_community_no_base_noop(rrepo, monkeypatch):
         called["peers"] += 1
         return []
     monkeypatch.setattr(C, "community_peers", _peers)
-    monkeypatch.setattr(C, "mounted_base_ids", lambda *a, **k: [])
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "X"}]},
         reflects=[
@@ -4185,15 +4200,11 @@ def test_first_round_seed_recall_concurrency_peaks_at_two_over_four_libraries(
     assert state["peak"] == 2
 
 
-def test_chunk_participant_count_counts_the_checked_reference_library(rrepo):
+def test_chunk_participant_count_counts_the_checked_reference_library(rrepo, owner_asks):
     """真实 `RetrievalService`:本库 + 一个挂载的参考库 ⇒ 2(与联邦扇出同一个座位)。"""
     nb = _seed_notebook_without_kg(rrepo)
     assert rrepo.retrieval.chunk_participant_count(nb.id) == 1
     base = _seed_two_nodes(rrepo)
-    # E6-3: the participant reader is not yet bound to the run's viewer, so only a
-    # library open to everybody (a public base) mounts here; E6-3 restores the
-    # owner's private library with its actor.
-    rrepo.mark_notebook_base(base.id)
     rrepo.replace_notebook_bases(nb.id, [base.id], "user-local")
     assert rrepo.retrieval.chunk_participant_count(nb.id) == 2
 
@@ -4885,7 +4896,7 @@ def test_allow_search_chunks_policy_flag_disables_seed_and_action(rrepo):
     assert "chunks_query" not in reflect_schema
 
 
-def test_kg_in_scope_counts_a_checked_reference_library(rrepo):
+def test_kg_in_scope_counts_a_checked_reference_library(rrepo, owner_asks):
     """P2-3:本库无图,但挂了一个**有图**参考库并且勾选了它 ⇒ 范围内有图。
 
     这是 `kg_in_scope` 的第二个维度(`any_base_has_kg`),此前只有「本库有图」
@@ -4901,7 +4912,6 @@ def test_kg_in_scope_counts_a_checked_reference_library(rrepo):
     from app.services.source_scope import source_scope_context
 
     base = _seed_two_nodes(rrepo)                  # 有图的参考库
-    rrepo.mark_notebook_base(base.id)              # E6-3:见 chunk_participant_count 那条
     nb = _seed_notebook_without_kg(rrepo)          # 本库无图
     rrepo.replace_notebook_bases(nb.id, [base.id], "user-local")
     rrepo.settings.graph_ppr_enabled = False
@@ -4926,7 +4936,7 @@ def test_kg_in_scope_counts_a_checked_reference_library(rrepo):
 
 
 def test_first_round_seed_brings_own_passages_when_only_a_reference_library_has_kg(
-        rrepo):
+        rrepo, owner_asks):
     """本库无图谱、勾选的参考库有图谱:首轮播种照跑,**本库**原文进证据池。
 
     走真实的 `search_chunks`(不打桩),断言的是端到端结果:本库那段原文经
@@ -4940,7 +4950,6 @@ def test_first_round_seed_brings_own_passages_when_only_a_reference_library_has_
 
     own_text = "布局布线阶段先全局布局再详细布线。"
     base = _seed_two_nodes(rrepo)                         # 有图的参考库
-    rrepo.mark_notebook_base(base.id)                     # E6-3:见 chunk_participant_count 那条
     nb = _seed_notebook_without_kg(rrepo, (own_text,))    # 本库无图
     rrepo.replace_notebook_bases(nb.id, [base.id], "user-local")
     rrepo.settings.graph_ppr_enabled = False

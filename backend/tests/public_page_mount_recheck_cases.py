@@ -159,6 +159,34 @@ def case_a_mount_its_creator_cannot_read_is_not_served(world: World) -> None:
     assert world.client.get(page).status_code == 200
 
 
+def case_a_report_quoting_a_mount_its_author_cannot_read_is_not_served(
+    world: World,
+) -> None:
+    """M3, the report side of the case above: the owner's private library is
+    mounted, Alice cannot read it, and her report quotes it.  Sharing is
+    refused (the link would 404 on its first open); once Alice may read the
+    library the link is issued and served, it dies the moment she stops
+    reading it, and revives when she reads it again."""
+    library, source = mounted_library(world, readable_by_alice=False)
+    rid = make_report(world, world.alice, [{
+        **source_ref(source, "k1"), "from_reference_library": True, "notebook_id": library,
+    }])
+    refused = share(world, world.alice, rid)
+    assert refused.status_code == 404
+    assert refused.json() == {"detail": "部分笔记本已无法访问，请重新选择范围。"}
+    assert world.repo.report_share_token(world.notebook, rid) == ""
+    world.repo.add_member(library, world.alice.id)
+    token = share(world, world.alice, rid).json()["share_token"]
+    page = f"/api/public/reports/{token}"
+    assert world.client.get(page).status_code == 200
+    world.repo.remove_member(library, world.alice.id)
+    gone = world.client.get(page)
+    assert gone.status_code == 404
+    assert gone.json() == {"detail": "shared report not found"}
+    world.repo.add_member(library, world.alice.id)
+    assert world.client.get(page).status_code == 200
+
+
 def _knowledge_object(world: World, notebook_id: str) -> str:
     object_id = f"ko-mounted-{next(_KEYS)}"
     sql = world.repo._runtime.global_ask_store._sql

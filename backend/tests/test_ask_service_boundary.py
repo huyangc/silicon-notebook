@@ -277,7 +277,7 @@ class _MinimalEvidence:
 
 def static_ceiling_readers(
     *,
-    participants=lambda notebook_id: (notebook_id,),
+    participants=lambda notebook_id, _viewer_id: (notebook_id,),
     visible=lambda _notebook_id: (),
     hidden=lambda _notebook_id, _owner_id: (),
     memory_sources=lambda _notebook_id: (),
@@ -301,17 +301,23 @@ def _minimal_ask_service(**overrides):
     Unless ``ceiling_readers`` is given, the ceiling readers mirror the
     extension-engine universe overrides (the production wiring binds both to
     the same store reads), with no Memory sources."""
-    overrides.setdefault("ceiling_readers", static_ceiling_readers(
-        **{
-            name: overrides[key]
-            for name, key in (
-                ("participants", "ask_engine_participant_notebooks"),
-                ("visible", "ask_engine_visible_sources"),
-                ("hidden", "ask_engine_hidden_sources"),
-            )
-            if key in overrides
-        }
-    ))
+    universe = {
+        name: overrides[key]
+        for name, key in (
+            ("participants", "ask_engine_participant_notebooks"),
+            ("visible", "ask_engine_visible_sources"),
+            ("hidden", "ask_engine_hidden_sources"),
+        )
+        if key in overrides
+    }
+    if "participants" in universe:
+        # The ceiling's reader also names its viewer (the ceiling's owner);
+        # the engine seam resolves it at call time.
+        engine_participants = universe["participants"]
+        universe["participants"] = (
+            lambda notebook_id, _viewer_id: engine_participants(notebook_id)
+        )
+    overrides.setdefault("ceiling_readers", static_ceiling_readers(**universe))
     return AskService(
         ask_state=_MinimalAskState(), retrieval=_MinimalRetrieval(),
         candidates=_MinimalCandidates(),
