@@ -23,6 +23,7 @@ import type { AskResponse, ConversationShareResponse, NotebookSummary } from "..
 const net = vi.hoisted(() => ({
   requestJson: vi.fn(),
   requestVoid: vi.fn(),
+  perform: vi.fn(),
   me: vi.fn(),
   notebooks: vi.fn(),
 }));
@@ -31,6 +32,9 @@ vi.mock("../../app/api-client.ts", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../app/api-client.ts")>(),
   requestJson: net.requestJson,
   requestVoid: net.requestVoid,
+  // 「分享」POST 要读响应状态与正文（409 `share_disclosure_required` 带确数），所以走
+  // `performApiRequest`，与 `requestJson` 分开挡。
+  performApiRequest: net.perform,
 }));
 vi.mock("../../app/auth.ts", () => ({ fetchMe: net.me }));
 vi.mock("../../app/notebook-api.ts", () => ({ listNotebooks: net.notebooks }));
@@ -73,9 +77,13 @@ const JOB_1 = doneJob("job-1", "2026-09-19T01:00:00Z");
 const JOB_2 = doneJob("job-2", "2026-09-19T01:00:01Z", "m1");
 const UNFINISHED: GlobalJob = { ...doneJob("job-3", "2026-09-19T01:00:02Z"), status: "failed", answer: null };
 
-const shareApi = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), del: vi.fn() }));
+const shareApi = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), del: vi.fn(), disclosure: vi.fn() }));
+/** 每次 POST 实际送出的请求体原文 —— 「不带确认值时逐字节不变」要看原文，不看解析后的对象。 */
+let shareBodies: string[] = [];
 /** 每次命中分享端点时记下的请求路径 —— 端点走的是全局那一组，不是 /notebooks/… */
 let sharePaths: string[] = [];
+/** 披露端点（`…/share/disclosure?through_id=`）的请求路径，与分享端点分开记。 */
+let disclosurePaths: string[] = [];
 let turnsByConversation: Record<string, GlobalJob[]> = {};
 
 const SHARED = (throughId: string, at: string): ConversationShareResponse => ({
@@ -101,6 +109,14 @@ let detailImpl: (id: string, offset: number) => Promise<GlobalConversationDetail
 
 beforeEach(() => {
   sharePaths = [];
+  disclosurePaths = [];
+  shareBodies = [];
+  // 服务端按「即将公开的确切范围」数个人记忆：job-2 那一轮引用了一条，所以截到 job-1 是 0 条，
+  // 截到 job-2 / 当前最新是 1 条。前端不再自己数，数字全从这里来。
+  shareApi.disclosure.mockImplementation(async (throughId: string) => ({
+    memory_count: throughId === "job-1" ? 0 : 1,
+    new_memory_count: 0,
+  }));
   turnsByConversation = { "conv-a": [JOB_1, JOB_2, UNFINISHED] };
   Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: vi.fn() });
   detailImpl = async (id, offset) => detailFor(id, offset);
@@ -112,12 +128,12 @@ beforeEach(() => {
 
   net.requestJson.mockImplementation(async (path: string, options: { method?: string; body?: string } = { }) => {
     const method = (options.method || "GET").toUpperCase();
+    if (path.includes("/share/disclosure?")) {
+      disclosurePaths.push(path);
+      return shareApi.disclosure(new URLSearchParams(path.split("?")[1]).get("through_id") ?? "");
+    }
     if (path.endsWith("/share")) {
       sharePaths.push(path);
-      if (method === "POST") {
-        const body = JSON.parse(String(options.body || "{}"));
-        return shareApi.post(body.expected_through_id);
-      }
       return shareApi.get();
     }
     if (path.startsWith("/global-ask/conversations?")) return [conversation()];
@@ -126,6 +142,19 @@ beforeEach(() => {
       return detailImpl(decodeURIComponent(detail[1]), Number(new URLSearchParams(detail[2]).get("offset") || 0));
     }
     throw new Error(`unexpected request: ${method} ${path}`);
+  });
+  net.perform.mockImplementation(async (path: string, options: { method?: string; body?: string } = {}) => {
+    if (path.endsWith("/share") && (options.method || "").toUpperCase() === "POST") {
+      sharePaths.push(path);
+      shareBodies.push(String(options.body ?? ""));
+      const body = JSON.parse(String(options.body || "{}"));
+      // 用例可以直接返回一个 Response（例如带结构化正文的 409），否则按 200 回执包装。
+      const result = await shareApi.post(body.expected_through_id, body.acknowledged_memory_count);
+      return result instanceof Response
+        ? result
+        : new Response(JSON.stringify(result), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    throw new Error(`unexpected perform: ${options.method} ${path}`);
   });
   net.requestVoid.mockImplementation(async (path: string, options: { method?: string } = {}) => {
     if (path.endsWith("/share") && (options.method || "").toUpperCase() === "DELETE") {
@@ -151,6 +180,8 @@ async function openShareOn(index: number) {
   const buttons = await screen.findAllByRole("button", { name: "分享到这条回答" });
   fireEvent.click(buttons[index]);
   await screen.findByText("分享会话");
+  // 弹窗先取分享状态、会话轮次与服务端披露，三者都落定才画正文与按钮。
+  await waitFor(() => expect(screen.queryByText("正在加载…")).toBeNull());
   return view;
 }
 
@@ -184,7 +215,8 @@ test("只含旧形状回答的会话同样能分享：历史轮次的页脚也�
   fireEvent.click(await screen.findByRole("button", { name: "分享到这条回答" }));
   expect(await screen.findByText(/分享至第 1 轮回答（本会话共 1 轮）/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
-  await waitFor(() => expect(shareApi.post).toHaveBeenCalledWith("job-legacy"));
+  // 带着服务端数出来的那 1 条个人记忆的确认值。
+  await waitFor(() => expect(shareApi.post).toHaveBeenCalledWith("job-legacy", 1));
 });
 
 test("边界钉在这条**作业**上：POST 走全局端点，expected_through_id 是 job_id", async () => {
@@ -193,10 +225,12 @@ test("边界钉在这条**作业**上：POST 走全局端点，expected_through_
   // 抬头按适配后的轮次说事：运行中那条不算轮次，所以是「第 2 轮 / 共 2 轮」。
   expect(screen.getByText(/分享至第 2 轮回答（本会话共 2 轮）/)).toBeInTheDocument();
   // 披露按截断批次算得出——第二轮引用的那条个人记忆被数出来（适配器确实把引用带过来了）。
-  expect(screen.getByText(/公开页会包含 1 条你引用到的个人记忆摘录/)).toBeInTheDocument();
+  expect(await screen.findByText(/公开页会包含 1 条你引用到的个人记忆摘录/)).toBeInTheDocument();
+  // 披露端点同样是全局那一组，查的范围就是即将公开的确切范围：这条作业。
+  expect(disclosurePaths).toEqual(["/global-ask/conversations/conv-a/share/disclosure?through_id=job-2"]);
 
   fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
-  await waitFor(() => expect(shareApi.post).toHaveBeenCalledWith("job-2"));
+  await waitFor(() => expect(shareApi.post).toHaveBeenCalledWith("job-2", 1));
   // 端点是全局那一组，不是 /notebooks/{id}/conversations/{id}/share。
   expect(new Set(sharePaths)).toEqual(new Set(["/global-ask/conversations/conv-a/share"]));
   expect(await screen.findByText("已生成分享链接（到这一条为止）")).toBeInTheDocument();
@@ -232,7 +266,7 @@ test("五态之 behind：水位停在更早那条作业，说清这条回答**�
   expect(screen.getByText(/还不包含这条回答/)).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: /更新到这一条/ }));
-  await waitFor(() => expect(shareApi.post).toHaveBeenCalledWith("job-2"));
+  await waitFor(() => expect(shareApi.post).toHaveBeenCalledWith("job-2", 1));
   expect(await screen.findByText("已更新到这一条")).toBeInTheDocument();
 });
 
@@ -275,7 +309,7 @@ test("切到别的会话后，上一条会话迟到的分享回执不写进新�
   await openShareOn(1);
 
   fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
-  await waitFor(() => expect(shareApi.post).toHaveBeenCalledWith("job-2"));
+  await waitFor(() => expect(shareApi.post).toHaveBeenCalledWith("job-2", 1));
 
   // 在途时切会话：弹窗按 conversationId 重挂（这里直接被收掉），aliveRef 因此为假。
   fireEvent.click((await screen.findAllByRole("button", { name: "新建对话" }))[0]);
@@ -324,11 +358,13 @@ test("70 轮的会话：翻页取全，抬头与附图/记忆计数按 70 轮算
   expect(buttons).toHaveLength(GLOBAL_ASK_PAGE_SIZE);
   fireEvent.click(buttons[buttons.length - 1]); // 最新那条：边界就在第一页里
   await screen.findByText("分享会话");
+  // 个人记忆条数只来自服务端（前端不数）：这里给一个与任何前端计数都对不上的数。
+  shareApi.disclosure.mockResolvedValue({ memory_count: 5, new_memory_count: 0 });
 
   expect(await screen.findByText(/分享至第 70 轮回答（本会话共 70 轮）/)).toBeInTheDocument();
-  // 最早那轮的附图与记忆都在第二页上：只读第一页时这两条会各少一个。
-  expect(screen.getByText(/公开页会包含 1 张附图/)).toBeInTheDocument();
-  expect(screen.getByText(/公开页会包含 2 条你引用到的个人记忆摘录/)).toBeInTheDocument();
+  // 最早那轮的附图在第二页上：只读第一页时它会少一张。
+  expect(await screen.findByText(/公开页会包含 1 张附图/)).toBeInTheDocument();
+  expect(await screen.findByText(/公开页会包含 5 条你引用到的个人记忆摘录/)).toBeInTheDocument();
 });
 
 test("取更早那页失败：一个数字都不给，只给两面都提的兜底文案", async () => {
@@ -344,9 +380,11 @@ test("取更早那页失败：一个数字都不给，只给两面都提的兜�
   await screen.findByText("分享会话");
 
   await waitFor(() => expectNoDisclosureNumbers());
-  // 披露算不出不等于不能发布：expected 仍是用户点的那条作业。
-  fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
-  await waitFor(() => expect(shareApi.post).toHaveBeenCalledWith("job-70"));
+  // 轮次取不全时一个数都算不出，也就不为它去问披露端点。
+  expect(disclosurePaths).toEqual([]);
+  // 披露算不出不等于不能发布：expected 仍是用户点的那条作业，不带确认值。
+  fireEvent.click(await screen.findByRole("button", { name: /分享到这一条/ }));
+  await waitFor(() => expect(shareApi.post).toHaveBeenCalledWith("job-70", undefined));
 });
 
 test("翻到上界仍有更早的轮次：同样一个数字都不给", async () => {
@@ -460,4 +498,107 @@ test("收起浮窗会一并收掉分享弹窗，并把宿主页面的 Esc 还回
   } finally {
     window.removeEventListener("keydown", pageEscape);
   }
+});
+
+
+// --- M4：服务端披露、确认值与 409 / 403（全局问答这一侧的接线）-----------------------------
+//
+// 弹窗正文与按钮反馈由 conversation-share-modal.component.test.tsx 钉住；这里钉的是全局
+// 这一组端点的接线：披露端点路径、POST 的请求体**原文**（零条时逐字节不变）、真实的
+// 409 / 403 响应经 `throwShareFailure` 走到弹窗上。
+
+const jsonResponse = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...headers } });
+
+function stubClipboard(rejects = false) {
+  const writeText = vi.fn();
+  if (rejects) writeText.mockRejectedValue(new Error("denied"));
+  else writeText.mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true, writable: true });
+  return writeText;
+}
+
+test("服务端说 0 条：POST 请求体原文就是 {expected_through_id}，没有任何确认字段", async () => {
+  shareApi.disclosure.mockResolvedValue({ memory_count: 0, new_memory_count: 0 });
+  await openShareOn(1);
+  expect(screen.queryByText(/条你引用到的个人记忆摘录/)).toBeNull();
+
+  fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
+  await waitFor(() => expect(shareBodies).toHaveLength(1));
+  expect(shareBodies[0]).toBe('{"expected_through_id":"job-2"}');
+});
+
+test("服务端说 N 条：POST 请求体多一个 acknowledged_memory_count，值就是作者看到的 N", async () => {
+  shareApi.disclosure.mockResolvedValue({ memory_count: 4, new_memory_count: 0 });
+  await openShareOn(1);
+  expect(await screen.findByText("公开页会包含 4 条你引用到的个人记忆摘录。")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
+  await waitFor(() => expect(shareBodies).toHaveLength(1));
+  expect(shareBodies[0]).toBe('{"expected_through_id":"job-2","acknowledged_memory_count":4}');
+});
+
+test("披露端点取数失败：兜底文案、POST 不带确认值；真实 409（detail 形态）带回确数，按钮改成「确认公开」", async () => {
+  shareApi.disclosure.mockRejectedValue(new Error("网络中断"));
+  shareApi.post.mockResolvedValueOnce(jsonResponse(409, {
+    detail: { code: "share_disclosure_required", memory_count: 3, new_memory_count: 2 },
+  }));
+  await openShareOn(1);
+  expect(screen.getByText(/公开页可能包含引用到的附图与个人记忆摘录（本次未能统计数量）/)).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
+  await waitFor(() => expect(shareBodies).toHaveLength(1));
+  expect(shareBodies[0]).toBe('{"expected_through_id":"job-2"}');
+  expect(await screen.findByText("公开页会包含 3 条你引用到的个人记忆摘录。")).toBeInTheDocument();
+  expect(screen.queryByText(/本次未能统计数量/)).toBeNull();
+  expect(screen.queryByRole("button", { name: /分享到这一条/ })).toBeNull();
+
+  fireEvent.click(screen.getByRole("button", { name: "确认公开" }));
+  await waitFor(() => expect(shareBodies).toHaveLength(2));
+  expect(shareBodies[1]).toBe('{"expected_through_id":"job-2","acknowledged_memory_count":3}');
+  expect(await screen.findByLabelText("分享链接")).toBeInTheDocument();
+});
+
+test("409 也接受根级形态（code 与数字不在 detail 下）", async () => {
+  shareApi.disclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 0 });
+  shareApi.post.mockResolvedValueOnce(jsonResponse(409, {
+    code: "share_disclosure_required", memory_count: 6, new_memory_count: 6,
+  }));
+  await openShareOn(1);
+
+  fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
+  expect(await screen.findByText("公开页会包含 6 条你引用到的个人记忆摘录。")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "确认公开" })).toBeInTheDocument();
+});
+
+test("别的 409（水位过期）不是披露确认：照旧原样上屏，按钮不变成「确认公开」", async () => {
+  shareApi.post.mockResolvedValueOnce(jsonResponse(
+    409, { detail: "这条会话已有变化，请刷新后重新分享。" }, { "X-User-Message": "1" },
+  ));
+  await openShareOn(1);
+
+  fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
+  expect(await screen.findByText("这条会话已有变化，请刷新后重新分享。")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "确认公开" })).toBeNull();
+});
+
+test("真实 403（带 X-User-Message）：那句中文原因就地显示在按钮上方", async () => {
+  const sentence = "这条会话引用了其他成员的个人记忆，不能公开分享。";
+  shareApi.post.mockResolvedValueOnce(jsonResponse(403, { detail: sentence }, { "X-User-Message": "1" }));
+  await openShareOn(1);
+
+  fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent(sentence);
+  expect(screen.getByRole("button", { name: /分享到这一条/ })).not.toBeDisabled();
+});
+
+test("公开成功：结果落在复制按钮上；复制失败时说「已公开，复制失败」", async () => {
+  stubClipboard(true);
+  await openShareOn(1);
+
+  fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
+  const failed = await screen.findByRole("button", { name: /已公开，复制失败/ });
+  expect(failed).toHaveClass("copy-result-failed");
+  expect((screen.getByLabelText("分享链接") as HTMLInputElement).value).toContain("/c/gshr-token");
 });

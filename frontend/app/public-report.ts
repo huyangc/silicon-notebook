@@ -88,6 +88,21 @@ export function publicReferenceNumber(
   return matched ? Number(matched[1]) : index + 1;
 }
 
+/**
+ * 引用出处的「位置」标签的公开页呈现（报告页与会话页共用，只此一份）。
+ *
+ * 作者的个人记忆被引用时，后端投影里它的位置标签是内部记号 `Memory`（那条引用保留标题
+ * 与摘录、去掉 `memory_id`）。匿名读者看到「Memory」既读不懂，也看不出这不是文档原文，
+ * 所以统一换成「作者的个人记忆」（词表：Memory → 记忆，见 docs/ui-vocabulary.md）。
+ * 其余位置标签（页码、章节……）原样。
+ */
+export const MEMORY_LOCATION_MARK = "Memory";
+export const PUBLIC_MEMORY_LOCATION_LABEL = "作者的个人记忆";
+export function publicReferenceLocation(location: string | undefined): string {
+  const text = String(location || "");
+  return text === MEMORY_LOCATION_MARK ? PUBLIC_MEMORY_LOCATION_LABEL : text;
+}
+
 /** remarkCitations 需要的最小引用形状（结构上兼容 AnswerReference）。 */
 export type PublicCitationRefT = { id: string; displayLabel: string };
 

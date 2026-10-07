@@ -126,3 +126,23 @@ test("没被截断的引用不挂假提示", async () => {
   // REPORT 不带 `question_truncated`（旧后端也是这个形状），页头也不该挂提示。
   expect(screen.queryByText("（研究问题过长，已截断）")).toBeNull();
 });
+
+test("个人记忆引用保留标题与摘录，位置标签读作「作者的个人记忆」，不露内部记号", async () => {
+  mocks.fetchPublicReport.mockResolvedValue({
+    ...REPORT,
+    references: [
+      { key: "k1", title: "我的笔记", file_name: "", location: "Memory", snippet: "记忆摘录" },
+      { key: "k7", title: "乙文", file_name: "乙文", location: "p. 3", snippet: "乙摘录" },
+    ],
+  });
+  const { container } = render(<PublicReportPage />);
+
+  await screen.findByText("引用出处");
+  const memory = container.querySelector("#ref-k1")!;
+  expect(memory.querySelector("strong")!.textContent).toBe("我的笔记");
+  expect(memory.querySelector("blockquote")!.textContent).toBe("记忆摘录");
+  expect(memory.querySelector(".public-report-locus")!.textContent).toBe("作者的个人记忆");
+  expect(screen.queryByText("Memory")).toBeNull();
+  // 别的位置标签原样，不被误改。
+  expect(container.querySelector("#ref-k7 .public-report-locus")!.textContent).toBe("p. 3");
+});

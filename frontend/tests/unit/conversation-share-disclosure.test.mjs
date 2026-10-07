@@ -5,8 +5,11 @@ import {
   SHARE_DISCLOSURE_COUNTS_ERROR,
   SHARE_UPDATE_BOUNDED_COUNTS_ERROR,
   SHARE_UPDATE_COUNTS_ERROR,
+  readServerMemoryDisclosure,
   resolveShareBoundary,
+  shareMemorySentence,
   shareScopeState,
+  shareUpdateMemorySentence,
   summarizeShareDisclosure,
   summarizeShareUpdate,
   withinWatermark,
@@ -33,9 +36,14 @@ function citation(overrides = {}) {
   return { images: [], ...overrides };
 }
 
-// --- Memory disclosure red line (设计 §五 consent; codex T5 review P2-1) -------
+// --- Memory disclosure red line (设计 §五 consent; M4) ------------------------
+//
+// M4：个人记忆条数只有服务端一处定义（披露端点），前端不再自己数——Memory 投影命中的
+// 引用没有 memory_id，前端数不到。所以这些用例把「服务端的数字」当输入，钉两件事：
+//  1) 服务端的数字原样呈现（哪怕前端能看到的 memory_id 与它对不上）；
+//  2) 前端看得到的 memory_id 一概不参与计数（变异：把前端计数加回来，下面几条必红）。
 
-test("K counts DISTINCT memory ids, deduped across turns and repeat citations", () => {
+test("the memory count is the server number, even when the turns' own memory_ids disagree", () => {
   const turns = [
     turn("2026-01-01T00:00:00Z", {
       citations: [citation({ memory_id: "mem-a" }), citation({ memory_id: "mem-a" })],
@@ -44,38 +52,64 @@ test("K counts DISTINCT memory ids, deduped across turns and repeat citations", 
       citations: [citation({ memory_id: "mem-b" }), citation({ memory_id: "" })],
     }),
   ];
-  // mem-a appears twice (one turn, two citations) + mem-b once -> 2 distinct.
-  assert.equal(summarizeShareDisclosure(turns, "", "").memoryCount, 2);
+  // Two distinct memory_ids are visible in the turns, but the server (which also
+  // sees Memory-projection hits that carry no memory_id) says 5: 5 is what shows.
+  assert.equal(summarizeShareDisclosure(turns, "", "", 5).memoryCount, 5);
 });
 
-test("a memory-backed citation is counted (the disclosure can never be zero when one exists)", () => {
+test("the frontend never counts memory_id itself: server says 0 -> memoryCount 0", () => {
   const turns = [turn("2026-01-01T00:00:00Z", { citations: [citation({ memory_id: "mem-x" })] })];
-  assert.ok(summarizeShareDisclosure(turns, "", "").memoryCount > 0);
+  assert.equal(summarizeShareDisclosure(turns, "", "", 0).memoryCount, 0);
+  // ...and a turn without any memory_id still discloses what the server counted.
+  const plain = [turn("2026-01-01T00:00:00Z", { citations: [citation()] })];
+  assert.equal(summarizeShareDisclosure(plain, "", "", 2).memoryCount, 2);
+});
+
+test("readServerMemoryDisclosure accepts the endpoint shape and rejects anything malformed", () => {
+  assert.deepEqual(readServerMemoryDisclosure({ memory_count: 3, new_memory_count: 1 }), {
+    memoryCount: 3,
+    newMemoryCount: 1,
+  });
+  // new_memory_count is optional (report endpoint omits it): defaults to 0.
+  assert.deepEqual(readServerMemoryDisclosure({ memory_count: 0 }), { memoryCount: 0, newMemoryCount: 0 });
+  // Anything else is a failed fetch (null) -> the fallback copy, never a guessed number.
+  for (const bad of [null, undefined, "3", [], {}, { memory_count: -1 }, { memory_count: 1.5 },
+    { memory_count: "2" }, { memory_count: 2, new_memory_count: -1 }, { memory_count: 2, new_memory_count: "1" }]) {
+    assert.equal(readServerMemoryDisclosure(bad), null, JSON.stringify(bad));
+  }
+});
+
+test("the two disclosure sentences are the product-decided wording", () => {
+  assert.equal(shareMemorySentence(3), "公开页会包含 3 条你引用到的个人记忆摘录。");
+  assert.equal(shareUpdateMemorySentence(4, 0), "更新后公开页共 4 条你引用到的个人记忆摘录。");
+  assert.equal(shareUpdateMemorySentence(4, 2), "更新后公开页共 4 条你引用到的个人记忆摘录（新增 2 条）。");
 });
 
 // --- Watermark filter excludes turns AFTER the watermark id (freeze) ----------
 
 test("turns after the watermark id are counted as new, not included in shared counts", () => {
   const turns = [
-    turn("2026-01-01T00:00:00Z", { citations: [citation({ memory_id: "mem-in" })] }),
-    turn("2026-01-01T00:05:00Z", { citations: [citation({ memory_id: "mem-late" })] }),
+    turn("2026-01-01T00:00:00Z", { citations: [citation({ images: [{ asset_id: "in" }] })] }),
+    turn("2026-01-01T00:05:00Z", { citations: [citation({ images: [{ asset_id: "late" }] })] }),
   ];
-  // Watermark id at the first turn: the second (later) turn is "new", its memory
+  // Watermark id at the first turn: the second (later) turn is "new", its images
   // must NOT enter the disclosure — you only publish up to the watermark.
-  const d = summarizeShareDisclosure(turns, turns[0].answer_id, turns[0].created_at);
+  const d = summarizeShareDisclosure(turns, turns[0].answer_id, turns[0].created_at, 1);
   assert.equal(d.sharedCount, 1);
   assert.equal(d.newCount, 1);
-  assert.equal(d.memoryCount, 1); // only mem-in, not mem-late
+  assert.equal(d.imageCount, 1); // only "in", not "late"
+  assert.equal(d.memoryCount, 1); // passed through from the server number
 });
 
 test("empty id (unshared preview / afterUpdate) counts every turn", () => {
   const turns = [
-    turn("2026-01-01T00:00:00Z", { citations: [citation({ memory_id: "mem-1" })] }),
-    turn("2026-01-01T00:05:00Z", { citations: [citation({ memory_id: "mem-2" })] }),
+    turn("2026-01-01T00:00:00Z", { citations: [citation({ images: [{ asset_id: "a" }] })] }),
+    turn("2026-01-01T00:05:00Z", { citations: [citation({ images: [{ asset_id: "b" }] })] }),
   ];
-  const d = summarizeShareDisclosure(turns, "", "");
+  const d = summarizeShareDisclosure(turns, "", "", 2);
   assert.equal(d.sharedCount, 2);
   assert.equal(d.newCount, 0);
+  assert.equal(d.imageCount, 2);
   assert.equal(d.memoryCount, 2);
 });
 
@@ -88,16 +122,16 @@ test("empty id (unshared preview / afterUpdate) counts every turn", () => {
 test("a same-instant answer AFTER the watermark id is 'new', not 'shared'", () => {
   const at = "2026-01-01T00:00:00Z";
   const turns = [
-    turnId("ans-a", at, { citations: [citation({ memory_id: "mem-a" })] }),
-    turnId("ans-b", at, { citations: [citation({ memory_id: "mem-b" })] }),
+    turnId("ans-a", at, { citations: [citation({ images: [{ asset_id: "a" }] })] }),
+    turnId("ans-b", at, { citations: [citation({ images: [{ asset_id: "b" }] })] }),
   ];
   // Watermark pinned to ans-a (the earlier tie member); ans-b sorts AFTER it.
-  const d = summarizeShareDisclosure(turns, "ans-a", at);
+  const d = summarizeShareDisclosure(turns, "ans-a", at, 1);
   assert.equal(d.sharedCount, 1);
   assert.equal(d.newCount, 1); // ans-b is NEW despite the equal timestamp
-  assert.equal(d.memoryCount, 1); // only mem-a — mem-b is not yet published
+  assert.equal(d.imageCount, 1); // only ans-a's image — ans-b is not yet published
   // Forward-looking update must flag the newly-exposed memory BEFORE the click.
-  const preview = summarizeShareUpdate(turns, "ans-a", at);
+  const preview = summarizeShareUpdate(turns, "ans-a", at, { memoryCount: 2, newMemoryCount: 1 });
   assert.equal(preview.afterUpdate.memoryCount, 2);
   assert.equal(preview.newMemoryCount, 1);
 });
@@ -106,35 +140,44 @@ test("a same-instant answer AFTER the watermark id is 'new', not 'shared'", () =
 
 test("a shared_through_id absent from turns falls back to the timestamp interval", () => {
   const turns = [
-    turn("2026-01-01T00:00:00Z", { citations: [citation({ memory_id: "mem-in" })] }),
-    turn("2026-01-01T00:05:00Z", { citations: [citation({ memory_id: "mem-late" })] }),
+    turn("2026-01-01T00:00:00Z", { citations: [citation({ images: [{ asset_id: "in" }] })] }),
+    turn("2026-01-01T00:05:00Z", { citations: [citation({ images: [{ asset_id: "late" }] })] }),
   ];
   // Watermark answer was deleted: its id is not in `turns`. Fall back to the
   // created_at interval (mirrors the backend's deleted-watermark fallback).
-  const d = summarizeShareDisclosure(turns, "ans-deleted", "2026-01-01T00:00:00Z");
+  const d = summarizeShareDisclosure(turns, "ans-deleted", "2026-01-01T00:00:00Z", 0);
   assert.equal(d.sharedCount, 1);
   assert.equal(d.newCount, 1);
-  assert.equal(d.memoryCount, 1); // only mem-in (created_at <= watermark)
+  assert.equal(d.imageCount, 1); // only "in" (created_at <= watermark)
 });
 
 // --- Forward-looking "update to latest" disclosure (consent; codex #522 R1) ---
 // "更新到最新" pushes the watermark to ALL turns, so its consent judgement is
-// "what will this button publish". A memory referenced ONLY by a post-watermark
-// turn must be counted in the forward-looking disclosure BEFORE the click — the
-// bug was that its count only rose AFTER the update, i.e. after it was published.
+// "what will this button publish". The server number for the post-watermark range
+// (memoryCount) and its increment (newMemoryCount) must be shown BEFORE the click.
 
-test("summarizeShareUpdate counts post-watermark memory in the forward-looking disclosure", () => {
+test("summarizeShareUpdate takes both memory numbers from the server", () => {
   const turns = [
     turn("2026-01-01T00:00:00Z", { citations: [citation({ memory_id: "mem-in" })] }),
     turn("2026-01-01T00:05:00Z", { citations: [citation({ memory_id: "mem-late" })] }),
   ];
   const id = turns[0].answer_id;
-  // Current disclosure freezes at the watermark: only mem-in is public today.
-  assert.equal(summarizeShareDisclosure(turns, id, turns[0].created_at).memoryCount, 1);
-  // Forward-looking: "更新到最新" would publish BOTH mem-in and mem-late.
-  const preview = summarizeShareUpdate(turns, id, turns[0].created_at);
-  assert.equal(preview.afterUpdate.memoryCount, 2); // mem-late IS counted
-  assert.equal(preview.newMemoryCount, 1);          // and flagged as newly exposed
+  const preview = summarizeShareUpdate(turns, id, turns[0].created_at, { memoryCount: 7, newMemoryCount: 3 });
+  assert.equal(preview.afterUpdate.memoryCount, 7); // the server total, not 2 (frontend visible ids)
+  assert.equal(preview.newMemoryCount, 3);          // the server increment
+});
+
+test("summarizeShareUpdate reports no new memory when the server says 0 new", () => {
+  const turns = [
+    turn("2026-01-01T00:00:00Z", { citations: [citation({ memory_id: "mem-a" })] }),
+    turn("2026-01-01T00:05:00Z", { citations: [citation({ memory_id: "mem-b" })] }),
+  ];
+  const preview = summarizeShareUpdate(turns, turns[0].answer_id, turns[0].created_at, {
+    memoryCount: 1,
+    newMemoryCount: 0,
+  });
+  assert.equal(preview.afterUpdate.memoryCount, 1);
+  assert.equal(preview.newMemoryCount, 0); // not 1: the frontend's two visible ids don't count
 });
 
 test("summarizeShareUpdate flags newly exposed images from post-watermark turns", () => {
@@ -142,19 +185,12 @@ test("summarizeShareUpdate flags newly exposed images from post-watermark turns"
     turn("2026-01-01T00:00:00Z", { citations: [citation({ images: [{ asset_id: "a1" }] })] }),
     turn("2026-01-01T00:05:00Z", { citations: [citation({ images: [{ asset_id: "a2" }] })] }),
   ];
-  const preview = summarizeShareUpdate(turns, turns[0].answer_id, turns[0].created_at);
+  const preview = summarizeShareUpdate(turns, turns[0].answer_id, turns[0].created_at, {
+    memoryCount: 0,
+    newMemoryCount: 0,
+  });
   assert.equal(preview.afterUpdate.imageCount, 2);
   assert.equal(preview.newImageCount, 1);
-});
-
-test("summarizeShareUpdate reports no new memory when a post-watermark turn reuses an already-public id", () => {
-  const turns = [
-    turn("2026-01-01T00:00:00Z", { citations: [citation({ memory_id: "mem-a" })] }),
-    turn("2026-01-01T00:05:00Z", { citations: [citation({ memory_id: "mem-a" })] }),
-  ];
-  const preview = summarizeShareUpdate(turns, turns[0].answer_id, turns[0].created_at);
-  assert.equal(preview.afterUpdate.memoryCount, 1); // mem-a, deduped
-  assert.equal(preview.newMemoryCount, 0);          // already disclosed -> not "new"
 });
 
 // --- Images: dedup by asset_id per turn, summed; anchors ∪ citations ----------

@@ -361,3 +361,26 @@ test("库内引用不挂「外部」标记（空转保护）", async () => {
   await screen.findByText("甲文");
   expect(screen.queryByText("外部")).toBeNull();
 });
+
+test("个人记忆引用保留标题与摘录，位置标签读作「作者的个人记忆」，不露内部记号", async () => {
+  mocks.fetchPublicConversation.mockResolvedValue({
+    ...CONVERSATION,
+    turns: [{
+      ...CONVERSATION.turns[0],
+      references: [
+        { key: "k1", title: "我的笔记", file_name: "", location: "Memory", snippet: "记忆摘录" },
+        { key: "k7", title: "乙文", file_name: "乙文", location: "p. 3", snippet: "乙摘录" },
+      ],
+    }],
+  });
+  const { container } = render(<PublicConversationPage />);
+
+  await screen.findByText("引用出处");
+  const memory = container.querySelector("#ref-t0-k1");
+  expect(memory).not.toBeNull();
+  expect(memory!.querySelector("strong")!.textContent).toBe("我的笔记");
+  expect(memory!.querySelector("blockquote")!.textContent).toBe("记忆摘录");
+  expect(memory!.querySelector(".public-report-locus")!.textContent).toBe("作者的个人记忆");
+  expect(screen.queryByText("Memory")).toBeNull();
+  expect(container.querySelector("#ref-t0-k7 .public-report-locus")!.textContent).toBe("p. 3");
+});

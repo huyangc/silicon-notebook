@@ -25,6 +25,11 @@ import type {
   ConversationSummary,
 } from "./workspace-model.ts";
 import { requestTaskStream } from "./request-task-stream.ts";
+import {
+  conversationShareDisclosurePath,
+  postConversationShare,
+  type ConversationShareDisclosureResponse,
+} from "./conversation-share-request.ts";
 
 // Compatibility exports: collection search is no longer owned by the Ask API,
 // but existing external imports keep the same public surface during F5.
@@ -214,14 +219,28 @@ export const deleteConversation = (id: string) =>
 // 披露到的那条答案。`expectedThroughId` 是弹窗据以算披露的那批 turns 里**最新**一条
 // 的 answer_id：服务端把水位钉死在它上,发布的快照 == 披露的快照,关闭「披露到 X、实际
 // 公开到更新的 Y」的 TOCTOU(codex #522 R2 P1)。空串回退「当前最新」(旧行为)。
-export const shareConversation = (nb: string, cid: string, expectedThroughId = "") =>
-  requestJson<ConversationShareResponse>(
+//
+// `acknowledgedMemoryCount`（M4）：作者在披露里看到并确认的个人记忆条数。缺省时请求体与
+// 接入披露之前逐字节相同；服务端按即将公开的确切范围重算，不相等就 409
+// `share_disclosure_required`（这里转成带确数的 `ShareDisclosureRequired`）。
+export const shareConversation = (
+  nb: string,
+  cid: string,
+  expectedThroughId = "",
+  acknowledgedMemoryCount?: number,
+) =>
+  postConversationShare(
     `/notebooks/${nb}/conversations/${cid}/share`,
-    {
-      ...options,
-      method: "POST",
-      body: JSON.stringify({ expected_through_id: expectedThroughId }),
-    },
+    options,
+    expectedThroughId,
+    acknowledgedMemoryCount,
+  );
+
+/** 分享前的披露：服务端按 `through_id`（即将公开的确切范围）数出的个人记忆条数。 */
+export const getConversationShareDisclosure = (nb: string, cid: string, throughId: string) =>
+  requestJson<ConversationShareDisclosureResponse>(
+    conversationShareDisclosurePath(`/notebooks/${nb}/conversations/${cid}/share`, throughId),
+    options,
   );
 
 export const getConversationShare = (nb: string, cid: string) =>

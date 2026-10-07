@@ -127,6 +127,23 @@ export const parseShareDisclosureRequired = (
   };
 };
 
+/** 公开分享请求的失败出口(报告与会话共用,只此一份):409 `share_disclosure_required`
+ *  转成带确数的类型化异常;其余失败照常走人话层。 */
+export async function throwShareFailure(res: Response, tag: string): Promise<never> {
+  if (res.status === 409) {
+    // body 只能消费一次:探测读克隆,真正的报错仍交给原始 res 走人话层。
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await res.clone().text());
+    } catch {
+      parsed = undefined;
+    }
+    const required = parseShareDisclosureRequired(res.status, parsed);
+    if (required) throw new ShareDisclosureRequired(required.memoryCount, required.newMemoryCount);
+  }
+  return throwHumanizedHttpError(res, tag);
+}
+
 // `acknowledgedMemoryCount` 缺省时不带 body:零个 Memory 引用的报告分享,请求与今天逐字节相同。
 export const shareReport = async (
   nb: string,
@@ -140,20 +157,7 @@ export const shareReport = async (
       ? {}
       : { body: JSON.stringify({ acknowledged_memory_count: acknowledgedMemoryCount }) }),
   });
-  if (!res.ok) {
-    if (res.status === 409) {
-      // body 只能消费一次:探测读克隆,真正的报错仍交给原始 res 走人话层。
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(await res.clone().text());
-      } catch {
-        parsed = undefined;
-      }
-      const required = parseShareDisclosureRequired(res.status, parsed);
-      if (required) throw new ShareDisclosureRequired(required.memoryCount, required.newMemoryCount);
-    }
-    await throwHumanizedHttpError(res, options.tag);
-  }
+  if (!res.ok) await throwShareFailure(res, options.tag);
   return res.json() as Promise<{ share_token: string }>;
 };
 
