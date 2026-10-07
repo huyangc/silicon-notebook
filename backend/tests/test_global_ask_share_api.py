@@ -831,3 +831,35 @@ def test_images_off_deployment_wide_emits_no_alias_and_serves_no_bytes(client_no
         f"/api/public/conversations/{token}/assets/"
         f"{conversation_asset_alias(token, asset_id)}"
     ).status_code == 404
+
+
+# ------------------------------------------ M4 分享披露(E7-5,场景见 cases 模块)
+
+
+@pytest.fixture
+def disclosure_world(tmp_path, monkeypatch):
+    """真实用户 + 真实 Memory 的世界,与 PG 孪生同一份场景。"""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'd.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "ds"))
+    monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.api import deps
+    from app.core.config import get_settings
+    from app.main import create_app
+    from tests.report_share_disclosure_cases import build_world
+
+    get_settings.cache_clear()
+    deps.repository.cache_clear()
+    return build_world(TestClient(create_app()), monkeypatch)
+
+
+def _global_disclosure_cases():
+    from tests.conversation_share_disclosure_cases import GLOBAL_CASES
+
+    return GLOBAL_CASES
+
+
+@pytest.mark.parametrize("case", sorted(_global_disclosure_cases()))
+def test_global_share_disclosure_scenario(disclosure_world, case):
+    _global_disclosure_cases()[case](disclosure_world)
