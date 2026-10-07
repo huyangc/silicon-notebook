@@ -402,11 +402,14 @@ class ReportStore:
         ``memory_guard`` (M4): the author's Memory the page carries is counted
         again HERE, in the transaction that sets the token, and a count that no
         longer matches the acknowledgement raises ``ShareDisclosureRequired``
-        with nothing written.  The live part is read with ``FOR SHARE`` on the
-        cited Memory ``sources`` rows and their ``memory_items`` rows
-        (``MemoryStore.memory_sources_for_source_ids_sql``): a concurrent
-        change to exactly those rows either committed before the read and is
-        seen, or waits until this transaction ends (one read and one UPDATE).
+        with nothing written.  The live part is read under ``FOR SHARE`` in
+        two steps (``MemoryStore.memory_sources_on(lock=True)``): first the
+        cited Memory sources' ``memory_items`` rows, in Memory-id order
+        (``memory_rows_lock_sql``), then the ``sources`` rows themselves, in
+        source-id order (``memory_sources_for_source_ids_sql(lock=True)``).  A
+        concurrent change to exactly those rows either committed before the
+        read and is seen, or waits until this transaction ends (the reads and
+        one UPDATE).
         """
         candidate = new_capability_token("rshr")
         with self.database.write() as db:
