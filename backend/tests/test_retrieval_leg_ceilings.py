@@ -614,8 +614,12 @@ def test_sqlite_bound_weak_support_plans_probe_by_key_without_analyze(
     # The canonical probe seeks the primary key by (notebook_id, canonical_src);
     # the target's objects are probed by primary key, its cluster members by
     # the (notebook_id, canonical_id) index.
-    assert ("SEARCH cr USING INDEX sqlite_autoindex_canonical_relations_1 "
+    assert ("SEARCH canonical_relations USING INDEX sqlite_autoindex_canonical_relations_1 "
             "(notebook_id=? AND canonical_src=?)") in probe_plan, probe_plan
+    # Lazy: the sorted candidates are a co-routine the gate reads in order --
+    # one sort (inside), none after the gate.
+    assert "CO-ROUTINE cr" in probe_plan, probe_plan
+    assert probe_plan.count("USE TEMP B-TREE FOR ORDER BY") == 1, probe_plan
     assert "SEARCH ko EXISTS USING INDEX sqlite_autoindex_knowledge_objects_1 (id=?)" \
         in probe_plan, probe_plan
     assert "(notebook_id=? AND canonical_id=?)" in probe_plan, probe_plan
@@ -1008,6 +1012,46 @@ def test_mix_overlay_unbound_keeps_an_evidence_less_node(repo, monkeypatch):
     block, id_map = render_subgraph_context([
         (_node(ids, nb, "Public root"), None, None),
         (_node(ids, nb, "Bare node"), _edge_to("BARE QUOTE"), ids["Public root"]),
+    ], id_offset=1000, active_notebook_id=nb)
+    monkeypatch.setattr(repo.retrieval.candidates, "_mix_retrieve",
+                        lambda *_a: ([], block, dict(id_map), [], 0))
+    with source_scope_context(nb, _freeze(a)):
+        _c, kg_block, kg_id_map, _h, _p = repo.retrieval.mixed_chunk_candidates(
+            nb, "q", "", ["q"])
+        memo = dict(current_source_scope()._ceiling_binds_memo)
+    assert (kg_block, kg_id_map) == (block, id_map)
+    assert memo == {nb: False}
+
+
+@pytest.mark.parametrize("backfilled", [True, False])
+def test_mix_overlay_does_not_count_an_evidence_item_without_a_source(
+    repo, monkeypatch, backfilled,
+):
+    """An evidence item naming no source is neither support nor drift: on
+    an unbound run it does not flip the run, and the node it belongs to stays
+    (as an evidence-less node does).  Read from the reverse index (a blank
+    row) or from the evidence JSON."""
+    nb, a = _shared(repo, b_memory=False)
+    repo.store_kg(nb, "src-vis", [
+        _concept("P", "Public root", "src-vis"),
+        {"local_id": "E", "object_type": "concept",
+         "payload": {"name": "Blank sourced", "section_path": "1"},
+         "evidence": [{**_ev("src-vis", "no source"), "source_id": ""}]},
+    ], [])
+    ids = _ids_by_name(repo, nb)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id,source_index_backfilled,updated_at) "
+            "VALUES (?,?,?) ON CONFLICT(notebook_id) DO UPDATE SET "
+            "source_index_backfilled=excluded.source_index_backfilled",
+            (nb, 1 if backfilled else 0, _now()))
+        if backfilled:
+            db.execute(
+                "INSERT OR IGNORE INTO knowledge_object_sources (object_id,source_id,notebook_id) "
+                "VALUES (?,'',?)", (ids["Blank sourced"], nb))
+    block, id_map = render_subgraph_context([
+        (_node(ids, nb, "Public root"), None, None),
+        (_node(ids, nb, "Blank sourced"), _edge_to("BLANK QUOTE"), ids["Public root"]),
     ], id_offset=1000, active_notebook_id=nb)
     monkeypatch.setattr(repo.retrieval.candidates, "_mix_retrieve",
                         lambda *_a: ([], block, dict(id_map), [], 0))
