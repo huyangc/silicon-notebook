@@ -1984,7 +1984,50 @@ def case_an_export_whose_pages_disagree_with_its_count_is_refused(
         raise AssertionError("a short export was handed out")
 
 
+def case_an_export_over_the_byte_limit_is_refused_early(
+    world: World, monkeypatch
+) -> None:
+    """``MEMORY_EXPORT_MAX_BYTES``: once the snapshot's content passes the
+    limit the read stops (later pages are never read) and the export fails
+    with ``MemoryExportTooLarge`` carrying the snapshot's count and the limit,
+    before any piece of the file exists."""
+    from app.core.memory_inputs import MemoryExportTooLarge
+    from app.services import memory_service as memory_service_module
+
+    plain_memory(world, world.shared, world.alice, "big-2", "confirmed")
+    plain_memory(world, world.shared, world.alice, "big-3", "confirmed")
+    svc = service(world)
+    first = world.sql.rows(
+        "SELECT content_md FROM memory_items WHERE notebook_id=? AND created_by=? "
+        "ORDER BY created_at, id LIMIT 1",
+        (world.shared, world.alice.id),
+    )[0]["content_md"]
+    limit = len(first.encode("utf-8")) + 1  # the first fits, the second does not
+    monkeypatch.setattr(svc, "export_max_bytes", limit)
+    monkeypatch.setattr(memory_service_module, "_EXPORT_PAGE", 1)
+    store = svc.store
+    original = store._export_page_on
+    pages: list[int] = []
+
+    def counting(*args, **kwargs):
+        rows, cursor = original(*args, **kwargs)
+        pages.append(len(rows))
+        return rows, cursor
+
+    monkeypatch.setattr(store, "_export_page_on", counting)
+    try:
+        svc.export_markdown(world.shared, world.alice.id, "Shared")
+    except MemoryExportTooLarge as exc:
+        assert (exc.memory_count, exc.limit_bytes) == (3, limit)
+    else:  # pragma: no cover - the assertion below explains the failure
+        raise AssertionError("an export past the byte limit was handed out")
+    assert pages == [1, 1]  # the third page was never read
+    monkeypatch.setattr(svc, "export_max_bytes", 10 * limit + 10_000)
+    assert export_text(world, world.alice, world.shared).rstrip().endswith("共导出 3 条记忆。")
+
+
 EXPORT_SNAPSHOT_CASES: dict[str, Callable[..., None]] = {
+    "export_over_byte_limit": case_an_export_over_the_byte_limit_is_refused_early,
     "exit_during_export_file_whole": case_an_exit_purge_during_the_export_leaves_the_file_whole,
     "export_after_purge_refused": lambda world, monkeypatch: (
         case_an_export_after_the_purge_is_refused_not_empty(world)

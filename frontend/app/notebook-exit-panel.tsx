@@ -171,6 +171,9 @@ function ExitDialog({ exit }: { exit: NotebookExit }) {
                 </button>
               </div>
             )}
+            {!empty && exit.exportFailureReason && (
+              <p className="notebook-exit-error" role="alert">{exit.exportFailureReason}</p>
+            )}
           </>
         )}
         {flow.phase === "confirm" && waitingForExport && (

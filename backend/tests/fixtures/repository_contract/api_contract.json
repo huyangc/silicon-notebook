@@ -24267,7 +24267,7 @@
       },
       "/api/notebooks/{notebook_id}/memories/export": {
         "get": {
-          "description": "The caller's OWN Memory in this notebook as a Markdown download — the\nway out before leaving a shared notebook deletes it. Every status (the\nexit deletes candidates too; they are marked), oldest first, nothing of\nother users. Every item is read in one snapshot BEFORE the response\nstarts (a purge running meanwhile can never cut the file short), then\nsent piece by piece. Read-gated: works only while the caller can read\nthe notebook (404). No Memory of the caller here: 404\n``{\"code\": \"nothing_to_export\"}``, never an empty file.",
+          "description": "The caller's OWN Memory in this notebook as a Markdown download — the\nway out before leaving a shared notebook deletes it. Every status (the\nexit deletes candidates too; they are marked), oldest first, nothing of\nother users. Every item is read in one snapshot BEFORE the response\nstarts (a purge running meanwhile can never cut the file short), then\nsent piece by piece. Read-gated: works only while the caller can read\nthe notebook (404). No Memory of the caller here: 404\n``{\"code\": \"nothing_to_export\"}``, never an empty file. Content past\n``MEMORY_EXPORT_MAX_BYTES``: 413 ``{\"code\": \"export_too_large\",\n\"memory_count\", \"limit_bytes\"}`` before anything is sent.",
           "operationId": "export_notebook_memories_api_notebooks__notebook_id__memories_export_get",
           "parameters": [
             {

@@ -15,6 +15,7 @@ from app.models.memory import (
     PaginatedMemories,
 )
 from app.core.json_safety import strict_json_dumps
+from app.core.memory_inputs import MemoryExportTooLarge
 from app.repositories.identity_errors import (
     AgentTokenAccessConflictError,
     AgentTokenInactiveError,
@@ -1799,7 +1800,7 @@ class MemoryStore:
         return deleted
 
     def memory_export_snapshot(
-        self, notebook_id: str, user_id: str, *, page_size: int
+        self, notebook_id: str, user_id: str, *, page_size: int, max_bytes: int
     ) -> list[MemoryRecord]:
         """Mirror of the PostgreSQL twin: this user's own Memory in one
         notebook, every status, oldest first, read-gated — the count and every
@@ -1808,7 +1809,9 @@ class MemoryStore:
         it short. Python's sqlite3 opens no transaction for a SELECT, so
         without the BEGIN each page would take its own snapshot. Rolled back
         on exit (read only); never takes over a transaction the caller holds.
-        Raises ``RuntimeError`` when the pages disagree with the count."""
+        Content past ``max_bytes`` (UTF-8) stops the read with
+        ``MemoryExportTooLarge``. Raises ``RuntimeError`` when the pages
+        disagree with the count."""
         page = max(1, min(int(page_size), 500))
         db = self.database.connect()
         owned = not db.in_transaction
@@ -1820,10 +1823,16 @@ class MemoryStore:
                 f"SELECT count(*) AS n FROM memory_items m WHERE {where}", params
             ).fetchone()["n"])
             items: list[MemoryRecord] = []
+            size = 0
             after: tuple[Any, str] | None = None
             while True:
                 rows, after = self._export_page_on(db, notebook_id, user_id, after, page)
-                items.extend(self._record(row) for row in rows)
+                for row in rows:
+                    record = self._record(row)
+                    size += len(record.content_md.encode("utf-8"))
+                    if size > max_bytes:
+                        raise MemoryExportTooLarge(total, max_bytes)
+                    items.append(record)
                 if after is None:
                     break
         finally:

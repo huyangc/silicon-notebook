@@ -35,6 +35,20 @@ class MemoryInputError(ValueError):
     """A caller-controlled Memory payload violated the shared contract."""
 
 
+class MemoryExportTooLarge(Exception):
+    """The Memory export's snapshot read passed ``MEMORY_EXPORT_MAX_BYTES`` of
+    content: it stopped before anything was sent (HTTP 413
+    ``export_too_large``). ``memory_count`` is the snapshot's item count,
+    ``limit_bytes`` the configured limit."""
+
+    def __init__(self, memory_count: int, limit_bytes: int) -> None:
+        super().__init__(
+            f"memory export over {limit_bytes} bytes ({memory_count} items)"
+        )
+        self.memory_count = memory_count
+        self.limit_bytes = limit_bytes
+
+
 def normalize_text(
     value: Any, *, field: str, max_chars: int, required: bool = True
 ) -> str:

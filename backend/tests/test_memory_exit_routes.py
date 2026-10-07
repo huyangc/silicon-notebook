@@ -348,6 +348,21 @@ def test_an_export_with_nothing_left_is_a_404_never_an_empty_file(tmp_path, monk
     ).status_code == 404
 
 
+def test_an_export_past_the_byte_limit_is_a_413_and_no_file(tmp_path, monkeypatch):
+    """``MEMORY_EXPORT_MAX_BYTES`` (composed into the service from config)."""
+    monkeypatch.setenv("MEMORY_EXPORT_MAX_BYTES", "10")
+    w = _world(tmp_path, monkeypatch)
+    assert w["repo"]._runtime.memory_service.export_max_bytes == 10
+    response = w["client"].get(
+        f"/api/notebooks/{w['notebook']}/memories/export", headers=w["reader"]
+    )
+    assert response.status_code == 413
+    assert response.json() == {
+        "detail": {"code": "export_too_large", "memory_count": 2, "limit_bytes": 10}
+    }
+    assert "content-disposition" not in response.headers
+
+
 def test_download_file_names_are_readable_across_origins(tmp_path, monkeypatch):
     """A cross-origin frontend can only read ``Content-Disposition`` (the
     export's file name) if CORS exposes it."""

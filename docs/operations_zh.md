@@ -152,6 +152,14 @@ id 随机，32 万条 Memory，机器负载均值约 45）：启动探测（`EXI
 （Memory 来源移除会删，普通来源删除不删）；`chunks_fts` 会保留已删 chunk 的行，与任何其它来源删除之后的情形
 完全一样（Memory 来源通常没有 chunk）。
 
+## Memory 导出的大小上限
+
+`MEMORY_EXPORT_MAX_BYTES`（默认 `268435456`，即 256 MB；最小 1）限制一次成员记忆导出
+（`GET /notebooks/{id}/memories/export`）读进内存的正文总量。导出会在发送之前，在一个快照里读完该成员在
+这本笔记本里的全部记忆，所以下载期间这些内容一直留在服务器内存里；超过上限时读取随即停止，在发出任何内容
+之前返回 413 `export_too_large`，带条目数与上限。请按 worker 的内存来定：一次导出至多占用这么多正文（外加
+每条的少量元数据），同时进行的导出会叠加。单条正文至多 40,000 字符。
+
 ## 可观测性 / 日志
 
 后端通过统一的 `EventLogger`（`app/core/event_logging.py`）输出结构化日志：每条事件一行 JSONL 写入 `.local/logs/`，并附控制台简要行。写日志是 best-effort，绝不影响它所观测的请求或管线；未配置模型时 LLM 通道为 no-op。
