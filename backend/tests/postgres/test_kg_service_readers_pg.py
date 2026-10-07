@@ -139,6 +139,18 @@ def test_pg_overlay_edges_join_two_overlay_nodes(repo):
     assert len(view["nodes"]) <= 2
 
 
+def test_pg_graph_totals_do_not_depend_on_the_limit(repo):
+    """Twin of the SQLite case (codex #824 r2)."""
+    s = build_scenario(repo, b_memory=False)
+    _memory_relation(repo, s, "rel-mem-own", s.ids.engram_ma, s.ids.definer_ma,
+                     "ownedge")
+    narrow = as_user(s.a, repo.unified_graph, s.nb, level="object", limit=1)
+    wide = as_user(s.a, repo.unified_graph, s.nb, level="object", limit=80)
+    assert len(wide["edges"]) > len(narrow["edges"]), "fixture: the cut drops an edge"
+    assert (narrow["total_nodes"], narrow["total_edges"]) == (
+        wide["total_nodes"], wide["total_edges"]), (narrow, wide)
+
+
 def test_pg_own_memory_neighbours_are_own_memory_objects_only(repo):
     s = build_scenario(repo, b_memory=False)
     view = as_user(s.a, repo.kg_neighbors, s.nb, s.ids.definer_ma)

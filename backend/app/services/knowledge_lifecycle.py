@@ -4594,7 +4594,7 @@ class KnowledgeLifecycleService:
             total_nodes -= len(nodes) - len(kept)
             total_edges -= len(edges) - len(kept_edges)
             nodes, edges = kept, kept_edges
-        own_nodes, own_edges, own_total = scope.own_memory_graph(
+        own_nodes, own_edges, own_total, own_edge_total = scope.own_memory_graph(
             cap=limit, concept_only=concept_only, name_only=name_only)
         nodes = list(nodes) + own_nodes
         total_nodes += own_total
@@ -4603,7 +4603,7 @@ class KnowledgeLifecycleService:
             "nodes": nodes,
             "edges": list(edges) + own_edges,
             "total_nodes": total_nodes,
-            "total_edges": total_edges + len(own_edges),
+            "total_edges": total_edges + own_edge_total,
             "truncated": len(nodes) < total_nodes,
         }
 

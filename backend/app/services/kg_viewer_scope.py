@@ -372,22 +372,25 @@ class KgViewerScope:
 
     def own_memory_graph(
         self, *, cap: Optional[int], concept_only: bool, name_only: bool,
-    ) -> Tuple[List[dict], List[dict], int]:
-        """The owner overlay: ``(nodes, edges, total)`` of the viewer's own
-        Memory objects, read from the live tables (the persisted artifacts
-        hold nobody's Memory, E4-6).  ``total`` counts every such object of
-        the requested level; ``nodes`` are the first ``cap`` of them in
-        insertion order (``cap`` bounds this layer alone: the graph views
+    ) -> Tuple[List[dict], List[dict], int, int]:
+        """The owner overlay: ``(nodes, edges, total, edge_total)`` of the
+        viewer's own Memory objects, read from the live tables (the persisted
+        artifacts hold nobody's Memory, E4-6).  ``total`` counts every such
+        object of the requested level; ``nodes`` are the first ``cap`` of them
+        in insertion order (``cap`` bounds this layer alone: the graph views
         append it to a shared page that ``cap`` bounds separately, so a
         response holds at most ``2 × cap`` nodes); ``edges`` are the live
-        relations whose BOTH
-        endpoints are among ``nodes`` (a relation lives inside one source,
-        so a Memory relation joins Memory objects of the same Memory).
-        Reads: the owned-id statement, one metadata read and one relation
-        read per 900 kept ids -- bounded by ``cap``."""
+        relations whose BOTH endpoints are among ``nodes`` (a relation lives
+        inside one source, so a Memory relation joins Memory objects of the
+        same Memory); ``edge_total`` counts those relations among ALL the
+        objects ``total`` counts, so the graph's totals do not depend on
+        ``cap`` (codex #824 r2).  Reads: the owned-id statement, one metadata
+        read and one relation read per 900 kept ids -- and, only when ``cap``
+        leaves some of the viewer's own objects out, one relation read per
+        900 of them for the edge count (bounded by the viewer's own Memory)."""
         ids = list(self.own_memory_object_ids())
         if not ids:
-            return [], [], 0
+            return [], [], 0, 0
         knowledge = self._reader.knowledge
         rows: Dict[str, Any] = {}
         # Only the level filter needs every object's type; otherwise the
@@ -403,23 +406,19 @@ class KgViewerScope:
                 oid for oid in wanted if oid in rows
                 and (not concept_only or rows[oid]["object_type"] == "concept")
             ]
-            total = len(ordered) if concept_only or cap is None else len(ids)
+            # Every object ``total`` counts, in the same order.
+            counted = ordered if concept_only or cap is None else ids
+            total = len(counted)
             kept = ordered if cap is None else ordered[:max(0, int(cap))]
-            kept_set = set(kept)
-            edges: List[dict] = []
-            seen: set = set()
-            for start in range(0, len(kept), _ID_BATCH):
-                for rel in knowledge.neighbor_relation_rows(
-                    db, self.notebook_id, kept[start:start + _ID_BATCH]
-                ):
-                    key = (str(rel["source_object_id"]), str(rel["target_object_id"]),
-                           rel["edge_type"])
-                    if key in seen or key[0] not in kept_set or key[1] not in kept_set:
-                        continue
-                    seen.add(key)
-                    edges.append({"source_object_id": key[0],
-                                  "target_object_id": key[1],
-                                  "edge_type": key[2]})
+            edges = [
+                {"source_object_id": key[0], "target_object_id": key[1],
+                 "edge_type": key[2]}
+                for key in self._own_relations_among(db, knowledge, kept)
+            ]
+            edge_total = (
+                len(edges) if len(kept) == len(counted)
+                else len(self._own_relations_among(db, knowledge, counted))
+            )
         nodes = []
         for oid in kept:
             payload = _payload(rows[oid]["payload"])
@@ -428,7 +427,28 @@ class KgViewerScope:
                 "object_type": rows[oid]["object_type"],
                 "payload": {"name": payload.get("name", "")} if name_only else payload,
             })
-        return nodes, edges, total
+        return nodes, edges, total, edge_total
+
+    def _own_relations_among(
+        self, db: Any, knowledge: Any, object_ids: Sequence[str],
+    ) -> List[Tuple[str, str, Any]]:
+        """``(source, target, edge_type)`` of the live relations whose both
+        endpoints are in ``object_ids``, each once, in read order: one
+        ``neighbor_relation_rows`` read per 900 ids."""
+        members = set(object_ids)
+        seen: set = set()
+        out: List[Tuple[str, str, Any]] = []
+        for start in range(0, len(object_ids), _ID_BATCH):
+            for rel in knowledge.neighbor_relation_rows(
+                db, self.notebook_id, list(object_ids[start:start + _ID_BATCH])
+            ):
+                key = (str(rel["source_object_id"]), str(rel["target_object_id"]),
+                       rel["edge_type"])
+                if key in seen or key[0] not in members or key[1] not in members:
+                    continue
+                seen.add(key)
+                out.append(key)
+        return out
 
     def _raw_objects(self, object_ids: Sequence[str]) -> tuple:
         """``(hidden, known)``: which ids are hidden raw objects, and which are
