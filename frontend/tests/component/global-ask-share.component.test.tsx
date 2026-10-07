@@ -214,7 +214,8 @@ test("只含旧形状回答的会话同样能分享：历史轮次的页脚也�
 
   fireEvent.click(await screen.findByRole("button", { name: "分享到这条回答" }));
   expect(await screen.findByText(/分享至第 1 轮回答（本会话共 1 轮）/)).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
+  // 抬头先于披露出现；按钮要等服务端披露落定才画出来，所以这里等它。
+  fireEvent.click(await screen.findByRole("button", { name: /分享到这一条/ }));
   // 带着服务端数出来的那 1 条个人记忆的确认值。
   await waitFor(() => expect(shareApi.post).toHaveBeenCalledWith("job-legacy", 1));
 });
@@ -351,6 +352,9 @@ function expectNoDisclosureNumbers() {
 
 test("70 轮的会话：翻页取全，抬头与附图/记忆计数按 70 轮算", async () => {
   turnsByConversation = { "conv-a": longConversation(70) };
+  // 个人记忆条数只来自服务端（前端不数）：这里给一个与任何前端计数都对不上的数。
+  // 必须在打开弹窗之前就位——披露请求在弹窗加载完轮次后立刻发出。
+  shareApi.disclosure.mockResolvedValue({ memory_count: 5, new_memory_count: 0 });
   window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
   render(<GlobalAskPage />);
   const buttons = await screen.findAllByRole("button", { name: "分享到这条回答" });
@@ -358,8 +362,6 @@ test("70 轮的会话：翻页取全，抬头与附图/记忆计数按 70 轮算
   expect(buttons).toHaveLength(GLOBAL_ASK_PAGE_SIZE);
   fireEvent.click(buttons[buttons.length - 1]); // 最新那条：边界就在第一页里
   await screen.findByText("分享会话");
-  // 个人记忆条数只来自服务端（前端不数）：这里给一个与任何前端计数都对不上的数。
-  shareApi.disclosure.mockResolvedValue({ memory_count: 5, new_memory_count: 0 });
 
   expect(await screen.findByText(/分享至第 70 轮回答（本会话共 70 轮）/)).toBeInTheDocument();
   // 最早那轮的附图在第二页上：只读第一页时它会少一张。
