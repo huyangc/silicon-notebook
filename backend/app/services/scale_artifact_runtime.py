@@ -319,11 +319,6 @@ class ScaleArtifactRuntime:
         with self.building_lock:
             return self.idle_queue.pop(notebook_id, None) is not None
 
-    def build_viz_graph_arrays(self, notebook_id: str):
-        from app.services.kg.viz_index import arrays_from_graph
-
-        return arrays_from_graph(self.lifecycle._unified_graph_full(notebook_id, "object"))
-
     @staticmethod
     def viz_arrays_from_graph(full: dict):
         from app.services.kg.viz_index import arrays_from_graph
@@ -405,6 +400,20 @@ class ScaleArtifactRuntime:
         if lifecycle is None:
             raise RuntimeError("knowledge lifecycle is not wired")
         return lifecycle.unified_kg_status(notebook_id)
+
+    def _viz_head_predates_isolation(self, notebook_id: str, current_version) -> bool:
+        """Whether the standalone viz on disk was built before the M1
+        isolation, from its small manifest alone, so a refused artifact is
+        never materialised. Read on the cold path only (right before the full
+        ``load_viz`` it may save); an unreadable manifest is left to
+        ``load_viz`` to judge."""
+        try:
+            head = self.artifacts.read_manifest(self.artifacts.viz_dir(notebook_id))
+        except Exception:  # noqa: BLE001 - load_viz reports a corrupt root
+            return False
+        return head is not None and self.projections.predates_memory_isolation(
+            head, current_version
+        )
 
     def _cache_viz(self, notebook_id: str, index: Any) -> None:
         # Written right after ``build_viz`` published a NEW generation, so the
@@ -924,7 +933,13 @@ class ScaleArtifactRuntime:
                 superseded = _viz_signature_superseded(
                     cached_signature, disk_signature
                 )
-                if self._viz_manifest_fresh(cached.manifest, cur, cur_cseq):
+                if self.projections.predates_memory_isolation(
+                    cached.manifest, cur
+                ):
+                    # M1: built before the isolation -- may hold a member's
+                    # Memory; never served, not even as a stale folding.
+                    self.viz_cache.pop(notebook_id, None)
+                elif self._viz_manifest_fresh(cached.manifest, cur, cur_cseq):
                     if not superseded:
                         return cached
                     # A newer generation is on disk under the same version/
@@ -958,7 +973,21 @@ class ScaleArtifactRuntime:
                     # with no recorded identity has no invalidation basis, so
                     # it reloads rather than being served indefinitely.
                     return self._serve_stale_viz(notebook_id, cached)
-        index = self.artifacts.load_viz(notebook_id)
+        # M1: same refusal as the warm-entry branch above. The artifact is
+        # treated as absent, so a within-budget notebook builds a fresh one
+        # right here and a large one reports "no preview yet" until the scale
+        # index build publishes it. Judged from the small manifest FIRST, so a
+        # refused artifact is never materialised (the full ``load_viz`` would
+        # otherwise run on every read of such a notebook); re-checked on what
+        # was loaded, in case another writer swapped the root in between.
+        if self._viz_head_predates_isolation(notebook_id, cur):
+            index = None
+        else:
+            index = self.artifacts.load_viz(notebook_id)
+            if index is not None and self.projections.predates_memory_isolation(
+                index.manifest, cur
+            ):
+                index = None
         if index is not None:
             if self._viz_manifest_fresh(index.manifest, cur, cur_cseq):
                 self.viz_cache[notebook_id] = (
@@ -1060,6 +1089,15 @@ class ScaleArtifactRuntime:
         cur = self.version(notebook_id)
         cur_cseq = int(self.projections.version_signal(notebook_id)[1])
         manifest = index.manifest
+        if self.projections.predates_memory_isolation(manifest, cur):
+            # M1: an artifact built before the isolation is neither served nor
+            # counted (its node/edge counts include a member's Memory).
+            return {
+                "viz_indexed": False,
+                "viz_nodes": 0,
+                "viz_edges": 0,
+                "viz_stale": True,
+            }
         fresh = self._viz_manifest_fresh(manifest, cur, cur_cseq)
         return {
             "viz_indexed": fresh,
@@ -1636,7 +1674,14 @@ class ScaleArtifactRuntime:
                 result["state"] = "stale"
                 result.update({"stale": True, "stale_reason": "corrupt", "last_built_at": ""})
                 return result
-            version_stale = manifest.get("version") != self.version(notebook_id)
+            current_version = self.version(notebook_id)
+            version_stale = manifest.get("version") != current_version
+            # M1: the node / ANN counts of an index built before the isolation
+            # include a member's Memory; they are not reported (state stays
+            # "stale", so the rebuild that replaces it is offered as before).
+            counts_leak = self.projections.predates_memory_isolation(
+                manifest, current_version
+            )
             delta_over = (
                 delta["delta_chunks"] > self.settings.index_stale_delta_threshold
             )
@@ -1656,9 +1701,9 @@ class ScaleArtifactRuntime:
                     "last_build_ms": int(manifest.get("total_build_ms", 0)),
                     "manifest_dim": int(manifest.get("dim", 0)),
                     "runtime_dim": int(runtime_dim),
-                    "n_nodes": int(manifest.get("n_nodes", 0)),
+                    "n_nodes": 0 if counts_leak else int(manifest.get("n_nodes", 0)),
                     "n_chunks": int(manifest.get("n_chunks", 0)),
-                    "n_ann": int(manifest.get("n_ann", 0)),
+                    "n_ann": 0 if counts_leak else int(manifest.get("n_ann", 0)),
                     "n_chunk_ann": int(manifest.get("n_chunk_ann", 0)),
                     "has_chunk_ann": bool(manifest.get("has_chunk_ann", False)),
                 }
@@ -1718,11 +1763,8 @@ class ScaleArtifactRuntime:
             runtime_dim = resolve_runtime_dim(self.settings) or self.settings.embed_dim
             if int(index.manifest.get("dim", runtime_dim)) != int(runtime_dim):
                 return "full"
-            built_at = str(index.manifest.get("built_at", ""))
-            if built_at:
-                last_rebuild = self.projections.unified_last_rebuild_at(notebook_id)
-                if last_rebuild and last_rebuild > built_at:
-                    return "full"
+            if self.builder.predates_last_kg_rebuild(notebook_id, index.manifest):
+                return "full"
         try:
             if (
                 len(self.builder._index_delta(notebook_id)["delta_sources"])
@@ -2178,12 +2220,20 @@ class ScaleArtifactRuntime:
                 # its admitting thread took; the finally below is the single
                 # release site for both.
                 succeeded = False
+                published = True
                 try:
                     operation = self._resolve_mode(notebook_id, mode)
                     if operation == "fold":
-                        self.fold(notebook_id, assume_locked=True)
+                        outcome = self.fold(notebook_id, assume_locked=True)
                     else:
-                        self.build(notebook_id, assume_locked=True)
+                        outcome = self.build(notebook_id, assume_locked=True)
+                    # M1: a build discarded because Memory kept arriving --
+                    # directly, or as the full build a refused fold fell back
+                    # to -- published nothing: no "index done" for it.
+                    published = not (
+                        isinstance(outcome, dict)
+                        and outcome.get("status") == "discarded"
+                    )
                     succeeded = True
                 except Exception:  # noqa: BLE001 - daemon is fail-open
                     try:
@@ -2205,7 +2255,7 @@ class ScaleArtifactRuntime:
                     self._discard_scale_build_lock(notebook_id)
                     with self.building_lock:
                         self.building.discard(notebook_id)
-                    if succeeded:
+                    if succeeded and published:
                         self.notify_index_done(notebook_id)
                     # A corpus publication that landed while this build was
                     # running records a coalesced full follow-up. Claim it

@@ -46,6 +46,59 @@ def _warn_if_scale_index_uses_full_width(
     )
 
 
+def _link_or_copy_files(source_dir: str, target_dir: str, *, skip=()) -> None:
+    """Every regular file of ``source_dir`` into ``target_dir`` under the same
+    name: a hard link (published artifact files are never written in place --
+    a publish swaps whole directories -- so sharing the inode is safe), or a
+    copy where the filesystem refuses a link."""
+    import os
+    import shutil
+
+    for name in sorted(os.listdir(source_dir)):
+        if name in skip:
+            continue
+        source = os.path.join(source_dir, name)
+        if not os.path.isfile(source):
+            continue
+        target = os.path.join(target_dir, name)
+        try:
+            os.link(source, target)
+        except OSError:
+            shutil.copy2(source, target)
+
+
+#: Manifest field: ``shared_content_digest`` of the rows the index was built
+#: (or last folded) over. A re-stamp carries it unchanged and republishes only
+#: while it still matches (see ``fold``).
+SHARED_CONTENT_DIGEST_FIELD = "shared_content_digest"
+
+
+def _instant(text: str):
+    """An ISO timestamp WITH an offset as an aware datetime, else None."""
+    import datetime
+
+    try:
+        value = datetime.datetime.fromisoformat(str(text))
+    except ValueError:
+        return None
+    return value if value.tzinfo is not None else None
+
+
+def _without_clusters(rows: dict, canonicals) -> dict:
+    """One source partition's rows minus the cluster memberships of the given
+    canonical ids; the rows are returned untouched when there is nothing to
+    drop (every notebook without Memory)."""
+    if not canonicals or not rows.get("clusters"):
+        return rows
+    return {
+        **rows,
+        "clusters": [
+            row for row in rows["clusters"]
+            if row["canonical_id"] not in canonicals
+        ],
+    }
+
+
 class ScaleIndexBuilder:
     def __init__(
         self,
@@ -57,8 +110,6 @@ class ScaleIndexBuilder:
         get_notebook: Callable[[str], Any],
         version: Callable[[str], list],
         load_scale: Callable[[str], Any],
-        full_viz_graph: Callable[[str], dict],
-        relations_for_notebook: Callable[[str], list],
         cluster_map: Callable[[str], dict],
         incremental_fuse_source: Callable[[str, str], None],
         invalidate_scale_cache: Callable[[str], None],
@@ -77,17 +128,16 @@ class ScaleIndexBuilder:
         self.get_notebook = get_notebook
         self.version = version
         self.load_scale = load_scale
-        self.full_viz_graph = full_viz_graph
-        self.relations_for_notebook = relations_for_notebook
         self.cluster_map = cluster_map
         self.incremental_fuse_source = incremental_fuse_source
         self.invalidate_scale_cache = invalidate_scale_cache
         self.invalidate_source_partition_cache = invalidate_source_partition_cache
         self.cache_viz = cache_viz
-        # full_viz_graph('object') caches the whole 8M-object graph dict in the
-        # facade's unified_cache and never drops it during the build. Once
-        # viz_arrays has extracted the compact numpy arrays the dict is dead
-        # weight (~12-20GB at 8M objects), so build() invalidates it right after.
+        # The build derives its viz from projection rows and parks no graph
+        # dict of its own, but a viewer's browse during a long build can leave
+        # the whole-object graph dict (~12-20GB at 8M objects) in the facade's
+        # unified_cache; build() drops this notebook's entries right after
+        # viz_arrays so none rides resident through persist.
         # None = unwired (older callers / tests that don't exercise the cache).
         self.invalidate_unified_cache = invalidate_unified_cache
         self.building = building
@@ -150,15 +200,24 @@ class ScaleIndexBuilder:
             source_ids = self.projections.visible_source_ids(
                 notebook_id, all_sources
             )
+            # M1, same defence as the viz fold: a shared object's partition
+            # names the canonical id of each cluster it belongs to, minted from
+            # a member's name -- so a cluster holding a Memory member is left
+            # out of every partition. Read once per companion build (a probe
+            # only, for a notebook without Memory).
+            memory_clusters = self.projections.memory_cluster_canonicals(
+                notebook_id
+            )
             manifest = self.artifacts.save_source_partitions(
                 notebook_id,
                 parent_version=parent_version,
                 parent_build_id=parent_build_id,
                 source_ids=source_ids,
-                load_rows=lambda source_id: (
+                load_rows=lambda source_id: _without_clusters(
                     self.projections.source_graph_partition_rows(
                         notebook_id, source_id
-                    )
+                    ),
+                    memory_clusters,
                 ),
                 claim_token=claim_token,
                 verify_held=verify_held,
@@ -368,8 +427,90 @@ class ScaleIndexBuilder:
         notebook_id: str,
         on_stage: Callable[[str, int], None] | None = None,
     ) -> dict:
-        """Build the complete persisted scale index for one notebook."""
+        """Build the complete persisted scale index for one notebook.
+
+        M1. The object / relation reads (graph rows, viz derive) exclude the
+        notebook's Memory rows IN each statement, so they are exact whatever
+        Memory is confirmed or deleted meanwhile. The KG / relation ANN feeds
+        and the membership leg cannot be: they filter by a Memory id set read
+        up front, so a Memory row confirmed after that read can reach an ANN
+        label or a graph node id. The build therefore keeps a running union of
+        every Memory row it observes -- before the first read, after each ANN
+        leg, after the gather, and right before publishing -- and, if rows
+        appeared that the artifact actually holds (an ANN label, a node id, a
+        viz id), publishes nothing and runs once more; if that happens again,
+        the build is discarded with one content-free event and left to the
+        ordinary scheduling. Rows that appeared but reached nothing publish as
+        is. (A Memory row confirmed AND deleted again between two observations
+        is invisible to this and can leave its id and vector -- never a name --
+        in an ANN index; retrieval hydrates labels from the live tables, where
+        it no longer exists.)
+        """
         self.get_notebook(notebook_id)
+        for _attempt in range(2):
+            manifest = self._build_attempt(notebook_id, on_stage)
+            if manifest is not None:
+                return manifest
+        self.event_log.emit(
+            {
+                "kind": "scale_index_build_discarded",
+                "notebook_id": notebook_id,
+                "reason": "memory_appeared_during_build",
+            }
+        )
+        return {
+            "status": "discarded",
+            "reason": "memory_appeared_during_build",
+            "notebook_id": notebook_id,
+        }
+
+    def _memory_snapshot(self, notebook_id: str) -> tuple:
+        """The notebook's Memory rows an artifact must not contain: its Memory
+        source ids and the ids of the objects and relations derived from them.
+        One source read for a notebook without Memory."""
+        sources = frozenset(self.projections.memory_source_ids(notebook_id))
+        if not sources:
+            return sources, frozenset(), frozenset()
+        return (
+            sources,
+            self.projections.memory_derived_ids(notebook_id, "knowledge_embeddings"),
+            self.projections.memory_derived_ids(notebook_id, "relation_embeddings"),
+        )
+
+    def _observe_memory(self, notebook_id: str, seen: tuple) -> tuple:
+        """``seen`` plus the notebook's Memory rows now: a running union that
+        only grows, so a row observed once counts even if it is deleted
+        before the build ends."""
+        return tuple(
+            then | now for then, now in zip(seen, self._memory_snapshot(notebook_id))
+        )
+
+    @staticmethod
+    def _memory_reached(start: tuple, seen: tuple, *, objects=(), relations=()) -> bool:
+        """Whether a Memory object or relation that appeared after ``start``
+        (per the running union ``seen``) is among the given artifact ids --
+        object-side ids (ANN labels, node ids, viz ids) and relation ids. A
+        Memory source alone reaches nothing."""
+        new_objects = seen[1] - start[1]
+        new_relations = seen[2] - start[2]
+        if not new_objects and not new_relations:
+            return False
+        return any(
+            item in new_objects for group in objects for item in group
+        ) or any(item in new_relations for item in relations)
+
+    def _build_attempt(
+        self,
+        notebook_id: str,
+        on_stage: Callable[[str, int], None] | None,
+    ) -> dict | None:
+        """One full build; None -- nothing published -- when Memory that
+        appeared while it ran reached the artifact (see ``build``)."""
+        memory_start = self._memory_snapshot(notebook_id)
+        memory_seen = memory_start
+        # Before any content read, so it is never newer than the content: a
+        # re-stamp republishes this index only while it still matches.
+        shared_digest = self.projections.shared_content_digest(notebook_id)
         # OOM guard (audit P2-6): building every vector matrix / hnsw at full
         # native width costs ~4x the truncated path's memory — the difference
         # between fitting and OOM on a multi-million-vector base library. The
@@ -421,6 +562,7 @@ class ScaleIndexBuilder:
             on_load_ms=lambda ms: record("kg_matrix", ms),
         )
         record("ann_build", _kg_add_ms)
+        memory_seen = self._observe_memory(notebook_id, memory_seen)
         # The built dim now comes off the index itself (the matrix that used to
         # answer this is gone by construction, not merely freed early).
         from app.services.vector_index import resolve_runtime_dim as _resolve_dim
@@ -475,6 +617,7 @@ class ScaleIndexBuilder:
             ),
         )
         del synonyms
+        memory_seen = self._observe_memory(notebook_id, memory_seen)
 
         kg_id_set = set(kg_node_ids)
         id_to_idx = {node_id: i for i, node_id in enumerate(node_ids)}
@@ -537,23 +680,43 @@ class ScaleIndexBuilder:
         relation_ann_labels, relation_ann_index = timed(
             "relation_matrix", _load_build_relation_ann
         )
+        memory_seen = self._observe_memory(notebook_id, memory_seen)
         gc.collect()
 
+        # M1: derived from the Memory-free projection reads, NOT from the
+        # facade's ``_unified_graph_full`` (the graph a viewer browses, which
+        # is scoped to a viewer and cached without one). A persisted artifact
+        # is shared by every member of the notebook, so its input must be
+        # viewer-independent by construction. Equivalent to
+        # ``_unified_graph_full(nb, "object")`` for a notebook without Memory
+        # (``test_lite_graph_equals_full``).
         viz_artifacts = timed(
             "viz_arrays",
             lambda: viz_index_module.arrays_from_graph(
-                self.full_viz_graph(notebook_id)
+                self._derive_object_graph_lite(notebook_id)
             ),
         )
         viz_ids, viz_adj, viz_deg, viz_types, viz_names, viz_payload = (
             viz_artifacts
         )
-        # The compact viz arrays above are independent numpy structures; the
-        # source graph dict full_viz_graph() left in unified_cache is now dead
-        # weight and must not ride resident through persist.
+        # The compact viz arrays above are independent numpy structures; a
+        # whole-graph dict a viewer's browse parked in unified_cache meanwhile
+        # is dead weight here and must not ride resident through persist.
         if self.invalidate_unified_cache is not None:
             self.invalidate_unified_cache(notebook_id)
         gc.collect()
+
+        # M1 bracket (see ``build``): read BEFORE the version, so a Memory row
+        # confirmed after this point is counted by the version but not by the
+        # stamped digest -- the next fold then re-stamps, never the reverse.
+        memory_after = self._memory_snapshot(notebook_id)
+        memory_seen = tuple(then | now for then, now in zip(memory_seen, memory_after))
+        if self._memory_reached(
+            memory_start, memory_seen,
+            objects=(ann_labels, node_ids, viz_ids),
+            relations=relation_ann_labels,
+        ):
+            return None
 
         # built_dim was captured right after ann_build, before ann_vectors was
         # freed (see above).
@@ -588,6 +751,9 @@ class ScaleIndexBuilder:
             "watermark_sources": sorted(
                 self.projections.source_ids(notebook_id)
             ),
+            # M1: built by the isolating code, over this Memory set.
+            **self.projections.memory_isolation_stamp(memory_after[0]),
+            SHARED_CONTENT_DIGEST_FIELD: shared_digest,
             "built_at": self.now(),
             # W-CLI T-W3: the hnswlib/numpy/scipy versions this artifact was
             # built with. Optional by construction (older artifacts have no
@@ -700,8 +866,11 @@ class ScaleIndexBuilder:
         self.invalidate_scale_cache(notebook_id)
         return {**saved_manifest, "build_ms": dict(timings)}
 
-    def _index_delta(self, notebook_id: str) -> dict:
-        current_sources = self.projections.source_ids(notebook_id)
+    def _index_delta(
+        self, notebook_id: str, *, current_sources: "list[str] | None" = None
+    ) -> dict:
+        if current_sources is None:
+            current_sources = self.projections.source_ids(notebook_id)
         try:
             manifest = self.artifacts.read_manifest(
                 self.artifacts.scale_dir(notebook_id)
@@ -729,6 +898,31 @@ class ScaleIndexBuilder:
             ),
             "indexed": True,
         }
+
+    def predates_last_kg_rebuild(self, notebook_id: str, manifest: dict) -> bool:
+        """Whether the notebook's knowledge graph was rebuilt after the index
+        described by ``manifest`` was built -- content a fold's source delta
+        cannot see (a source re-parsed under its old id), so only a full build
+        brings it in. The worker picks a full build on it
+        (``ScaleArtifactRuntime._resolve_mode``) and a fold never re-stamps
+        past it; a re-stamp keeps ``built_at``, so it never erases it.
+
+        Compared as instants: ``built_at`` carries the process's local offset
+        while PostgreSQL returns ``last_rebuild_at`` in the session's (UTC),
+        so the two strings are only comparable as text on SQLite, where both
+        come from the same clock -- as text, a rebuild up to the local offset
+        (8 hours at +08:00) after the build compared as older. Text is the
+        fallback for a value without an offset."""
+        built_at = str(manifest.get("built_at", ""))
+        if not built_at:
+            return False
+        last_rebuild = self.projections.unified_last_rebuild_at(notebook_id)
+        if not last_rebuild:
+            return False
+        rebuilt, built = _instant(last_rebuild), _instant(built_at)
+        if rebuilt is not None and built is not None:
+            return rebuilt > built
+        return last_rebuild > built_at
 
     def fold(
         self,
@@ -782,8 +976,67 @@ class ScaleIndexBuilder:
             )
             return self.build(notebook_id)
 
-        delta = self._index_delta(notebook_id)
+        # M1: an index built before the isolation (no ``memory_isolation``
+        # field) can hold a member's Memory objects and names in its ANN /
+        # graph / viz. Folding onto it would keep them -- the viz is copied
+        # over as is -- and stamp the result as current AND isolated, which is
+        # exactly what makes a contaminated index look fresh for good. Whether
+        # it holds Memory cannot be told: a Memory deleted before the upgrade,
+        # followed by a fold, is gone from the watermark and from every table
+        # (Memory is hard-deleted, no tombstone) while the viz folded over it
+        # still holds its name. So every pre-isolation index -- a public
+        # library's too -- is rebuilt from scratch, once: a full build reads
+        # stored vectors and rows and calls no model. Only a full build ever
+        # turns a pre-isolation index into an isolated one.
+        if self.projections.built_before_memory_isolation(idx.manifest):
+            self.event_log.emit(
+                {
+                    "kind": "scale_fold_refused",
+                    "notebook_id": notebook_id,
+                    "reason": "memory_isolation",
+                }
+            )
+            return self.build(notebook_id)
+
+        memory_sources = self.projections.memory_source_ids(notebook_id)
+        current_sources = self.projections.source_ids(notebook_id)
+        delta = self._index_delta(notebook_id, current_sources=current_sources)
         if not delta["delta_sources"]:
+            # M1: Memory never enters the index, so a notebook that gained (or
+            # lost) Memory since the index was stamped needs no new content --
+            # but its version moved, and without a re-stamp the index would
+            # stay stale forever (the delta, which never lists a Memory source,
+            # is empty). Only the manifest is republished -- and only if
+            # nothing but Memory changed: the version also moves for shared
+            # content a fold cannot see (a source re-parsed under its old id is
+            # no delta source), which only a full build brings in. Two tests:
+            # the KG was rebuilt after the index was built (the worker's own
+            # full-build test, ``predates_last_kg_rebuild``), or the shared
+            # rows -- ``version_facts`` without Memory -- differ from those the
+            # index was built over (the online re-extraction path, which
+            # rebuilds nothing).
+            if self.projections.memory_sources_changed(idx.manifest, memory_sources):
+                reason = (
+                    "kg_rebuilt_since_build"
+                    if self.predates_last_kg_rebuild(notebook_id, idx.manifest)
+                    else "shared_content_changed"
+                    if self.projections.shared_content_digest(notebook_id)
+                    != idx.manifest.get(SHARED_CONTENT_DIGEST_FIELD)
+                    else None
+                )
+                if reason is not None:
+                    self.event_log.emit(
+                        {
+                            "kind": "scale_fold_refused",
+                            "notebook_id": notebook_id,
+                            "reason": reason,
+                        }
+                    )
+                    return self.build(notebook_id)
+                return self._restamp(
+                    notebook_id, idx, assume_locked=assume_locked,
+                    on_completed=on_completed,
+                )
             return idx.manifest
         if not assume_locked:
             with self.building_lock:
@@ -816,6 +1069,9 @@ class ScaleIndexBuilder:
                         "error": type(exc).__name__,
                     })
 
+            # read BEFORE the fold's own reads, so it is never newer than the
+            # content (a later re-stamp compares against it)
+            shared_digest = self.projections.shared_content_digest(notebook_id)
             (
                 delta_nodes,
                 delta_edges,
@@ -877,6 +1133,7 @@ class ScaleIndexBuilder:
 
             manifest = dict(idx.manifest)
             manifest["built_at"] = self.now()
+            manifest[SHARED_CONTENT_DIGEST_FIELD] = shared_digest
             if idx.chunk_ann_path and idx.chunk_ann_labels is not None:
                 chunk_vector_ids, chunk_matrix = delta_vectors(
                     "chunk_embeddings", "chunk_id", list(delta_chunks)
@@ -967,8 +1224,14 @@ class ScaleIndexBuilder:
                 manifest["n_relation_ann"] = len(relation_labels)
 
             scale_index_module.copy_fold_viz(str(live_dir), str(temporary))
+            # M1: the Memory digest is read BEFORE the version (see ``build``);
+            # a fold adds only delta-source rows, which are never Memory.
+            isolation_stamp = self.projections.memory_isolation_stamp(
+                self.projections.memory_source_ids(notebook_id)
+            )
             manifest.update(
                 {
+                    **isolation_stamp,
                     "version": self.version(notebook_id),
                     # Written, never inherited from ``idx`` — same reason as
                     # ``library_versions`` below, and the binding the offline
@@ -1067,6 +1330,99 @@ class ScaleIndexBuilder:
                 if completed:
                     self.notify_index_done(notebook_id)
 
+    def _restamp(
+        self,
+        notebook_id: str,
+        idx,
+        *,
+        assume_locked: bool,
+        on_completed: Callable[[], None] | None,
+    ) -> dict:
+        """Republish ``idx`` unchanged under the current version and Memory
+        digest -- manifest only (M1: see ``fold``).
+
+        Every other file of the live root is hard-linked into this claim's
+        staging directory (copied where the filesystem cannot link), so the
+        cost is a directory of links plus one small JSON, not the rewrite of
+        the graph, the arrays and three ANN indexes a fold does. Published by
+        the same swap, under the same claim re-verification, as a fold; the
+        companion is republished after it exactly as a fold does, because it
+        pairs on the main version and build id.
+
+        ``built_at`` is kept: the content is still that of the original build,
+        and ``predates_last_kg_rebuild`` must keep seeing it as such. The files
+        are linked from the live root, so the manifest can only be ``idx``'s if
+        the live root is still ``idx``'s: ``idx`` was loaded before the claim
+        (a direct call without ``assume_locked``), and if another publisher
+        swapped the root meanwhile, nothing is re-stamped and the live
+        manifest is returned as it stands (``idx``'s when there is none, as
+        a fold with nothing to do returns it).
+        """
+        if not assume_locked:
+            with self.building_lock:
+                if notebook_id in self.building:
+                    return {"status": "already_building"}
+                self.building.add(notebook_id)
+        completed = False
+        claim_token = self.scale_build_claim_token(notebook_id)
+        try:
+            live_dir = self.artifacts.scale_dir(notebook_id)
+            live = self.artifacts.read_manifest(live_dir)
+            if (live or {}).get("build_id") != idx.manifest.get("build_id"):
+                return live if live is not None else idx.manifest
+            temporary = self.artifacts.prepare_fold_directory(
+                notebook_id, claim_token
+            )
+            _link_or_copy_files(str(live_dir), str(temporary), skip={"manifest.json"})
+            # The Memory digest before the version (see ``build``).
+            isolation_stamp = self.projections.memory_isolation_stamp(
+                self.projections.memory_source_ids(notebook_id)
+            )
+            manifest = dict(idx.manifest)
+            manifest.update(
+                {
+                    **isolation_stamp,
+                    "version": self.version(notebook_id),
+                    "notebook_id": notebook_id,
+                    "build_id": new_build_id(),
+                    "watermark_sources": sorted(
+                        self.projections.source_ids(notebook_id)
+                    ),
+                }
+            )
+            scale_index_module.save_fold_manifest(str(temporary), manifest)
+            with self.building_lock:
+                self.artifacts.swap_fold_directory(
+                    notebook_id,
+                    temporary,
+                    verify_held=lambda: self.verify_scale_build_lock(notebook_id),
+                )
+                self.invalidate_scale_cache(notebook_id)
+            if bool(
+                getattr(
+                    self.settings,
+                    "source_partitioned_graph_artifacts_enabled",
+                    False,
+                )
+            ):
+                self._rebuild_source_partitions(
+                    notebook_id,
+                    manifest.get("version"),
+                    parent_build_id=manifest.get("build_id"),
+                    claim_token=claim_token,
+                    verify_held=lambda: self.verify_scale_build_lock(notebook_id),
+                )
+            completed = True
+            return manifest
+        finally:
+            if completed and on_completed is not None:
+                on_completed()
+            if not assume_locked:
+                with self.building_lock:
+                    self.building.discard(notebook_id)
+                if completed:
+                    self.notify_index_done(notebook_id)
+
     def _delta_relation_ids(
         self, notebook_id: str, source_ids: Sequence[str]
     ) -> list[str]:
@@ -1086,7 +1442,12 @@ class ScaleIndexBuilder:
 
         # Consumed INSIDE the connection scope: active_object_graph_rows
         # streams keyset pages (batch-3 W4 T-W4-3.1) rather than one
-        # whole-table fetchall.
+        # whole-table fetchall. Both reads leave out what is derived from a
+        # member's Memory (M1) IN THE STATEMENT, so the artifact carries no
+        # Memory object, no Memory-derived name, and no edge a Memory relation
+        # supports -- an edge backed by both a Memory and a shared relation
+        # stays, on the shared relation alone. An edge to an excluded object
+        # has no folded endpoint left and is dropped when the arrays are cut.
         with self.projections.connect() as db:
             nodes = [
                 {
@@ -1098,17 +1459,26 @@ class ScaleIndexBuilder:
                     db, notebook_id
                 )
             ]
-        edges = [
-            {
-                "source_object_id": relation["source_object_id"],
-                "target_object_id": relation["target_object_id"],
-                "edge_type": relation["edge_type"],
-            }
-            for relation in self.relations_for_notebook(notebook_id)
-        ]
-        return derive_unified_graph(
-            nodes, edges, self.cluster_map(notebook_id)
-        )
+            edges = [
+                {
+                    "source_object_id": relation["source_object_id"],
+                    "target_object_id": relation["target_object_id"],
+                    "edge_type": relation["edge_type"],
+                }
+                for relation in self.projections.active_relation_graph_rows(
+                    db, notebook_id
+                )
+            ]
+        # A cluster that holds a Memory-derived member is not folded into: its
+        # canonical id is minted from a member's name, so a SHARED object folded
+        # into it would carry the private name as its node id. The map is the
+        # cached one every reader shares, so a filtered COPY is made, and only
+        # when such a cluster exists (never for a notebook without Memory).
+        fold = self.cluster_map(notebook_id)
+        skipped = self.projections.memory_cluster_canonicals(notebook_id)
+        if skipped:
+            fold = {oid: cid for oid, cid in fold.items() if cid not in skipped}
+        return derive_unified_graph(nodes, edges, fold)
 
     def build_viz(self, notebook_id: str) -> Optional[dict]:
         self.get_notebook(notebook_id)
@@ -1120,6 +1490,12 @@ class ScaleIndexBuilder:
         # cluster_mutation_seq the rebuild bumps but version() (a version_facts memo
         # key) doesn't expose, so viz freshness would otherwise miss a same-second
         # cluster-only rewrite (codex PR#356 r1 P1).
+        #
+        # M1: the derive's object and relation reads exclude Memory rows in
+        # the statement itself, so the viz holds none whatever Memory is
+        # confirmed or deleted while it runs -- no retry is needed here. The
+        # Memory source ids are read first only for the stamp.
+        memory_sources = self.projections.memory_source_ids(notebook_id)
         ver = self.version(notebook_id)
         cseq = int(self.projections.version_signal(notebook_id)[1])
         full = self._derive_object_graph_lite(notebook_id)
@@ -1138,6 +1514,10 @@ class ScaleIndexBuilder:
             "cluster_seq": cseq,
             "n_viz_nodes": len(viz_ids),
             "n_viz_edges": len(viz_payload.get("edges", [])),
+            # M1: built by the isolating code, over this Memory set (the same
+            # two fields as the scale index; only the isolation field has a
+            # reader for a viz -- nothing folds onto one).
+            **self.projections.memory_isolation_stamp(memory_sources),
         }
         # P2, codex PR#643 R12: the viz root is published through staging +
         # swap like every other root, under this build's claim. The two hooks

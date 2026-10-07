@@ -196,6 +196,21 @@ SCRATCH_SUFFIXES = (".old", ".tmp")
 SCRATCH_INFIX = ".tmp-"
 
 
+def _published_children(root: Path) -> list[str]:
+    """Names of the direct children of ``root`` that carry ``manifest.json``
+    and are not build scratch, in stable order (see ``indexed_notebook_ids``)."""
+    if not root.is_dir():
+        return []
+    return sorted(
+        entry.name
+        for entry in root.iterdir()
+        if entry.is_dir()
+        and not entry.name.endswith(SCRATCH_SUFFIXES)
+        and SCRATCH_INFIX not in entry.name
+        and (entry / "manifest.json").is_file()
+    )
+
+
 class ScaleArtifactStore:
     def __init__(self, settings) -> None:
         self.settings = settings
@@ -227,16 +242,17 @@ class ScaleArtifactStore:
         a filesystem inventory only; the runtime separately drops orphan
         artifacts whose notebook row no longer exists.
         """
-        root = Path(os.path.join(self.settings.storage_dir, "kg_index"))
-        if not root.is_dir():
-            return []
-        return sorted(
-            entry.name
-            for entry in root.iterdir()
-            if entry.is_dir()
-            and not entry.name.endswith(SCRATCH_SUFFIXES)
-            and SCRATCH_INFIX not in entry.name
-            and (entry / "manifest.json").is_file()
+        return _published_children(
+            Path(os.path.join(self.settings.storage_dir, "kg_index"))
+        )
+
+    def viz_notebook_ids(self) -> list[str]:
+        """The same inventory for the standalone viz roots (``kg_viz``):
+        every published one, including a notebook with no scale index -- a
+        large notebook's pre-isolation viz is never served and is replaced
+        only by a scale build (``manifest`` via ``read_manifest(viz_dir(nb))``)."""
+        return _published_children(
+            Path(os.path.join(str(self.settings.storage_dir), "kg_viz"))
         )
 
     # ─────────────────────────────────────────────────── manifest reads ──

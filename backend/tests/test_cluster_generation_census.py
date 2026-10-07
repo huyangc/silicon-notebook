@@ -71,14 +71,22 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "canonical_id 在任一代删整簇,名字与描述在每一代都要清)"),
     "backend/app/repositories/sqlite/governance_store.py": (10, 0, 0, 2, 0,
         "PG 孪生同注记"),
-    "backend/app/repositories/postgres/index_projection_store.py": (2, 0, 0, 2, 0,
-        "A×2:version_facts 簇分量(版本身份红线)+scale-graph 读,均已配谓词。"
+    "backend/app/repositories/postgres/index_projection_store.py": (4, 0, 0, 4, 0,
+        "A×4:version_facts 簇分量(版本身份红线)+scale-graph 读,均已配谓词;"
+        "第四处是 M1 的 `_SHARED_CONTENT_FACTS` 簇分量(version_facts 簇分量去掉 "
+        "Memory 派生成员,重新盖戳前比对),与 version_facts 同一已发布代次谓词;"
+        "第三处是 M1 的 `_MEMORY_CLUSTER_CANONICALS_SQL`(含 Memory 派生成员的簇的 "
+        "canonical 集合,graph_rows 据此整簇跳过),代次同 clusters 腿——与它共用"
+        "循环前那一次指针求值、以绑定参数出现,所以 graph_rows 内谓词计数不变;"
+        "另有 `memory_cluster_canonicals`(viz 折叠用,同一 SQL)自己读一次已发布代次指针,"
+        "故本文件的代次谓词数由 2 变 3(与 sqlite 孪生现在一致)。"
         "后者(graph_rows 的 clusters 腿)自批 3·W4 T-W4-3.1 起改 keyset 分页,"
         "指针读因此从谓词内的标量子查询上提为循环前的一次求值 + 逐页绑定"
         "参数——谓词仍在每一页上,谓词计数不变,变的只是求值次数"
         "(逐页重求值会让翻代提交撕裂一次扫描)"),
-    "backend/app/repositories/sqlite/index_projection_store.py": (2, 0, 0, 2, 0,
-        "PG 孪生同注记"),
+    "backend/app/repositories/sqlite/index_projection_store.py": (4, 0, 0, 4, 0,
+        "PG 孪生同注记(SQLite 无绑定代次:M1 的 canonical 集合 SQL 内联了指针子查询,"
+        "graph_rows 与 viz 折叠共用这一条;另加 `_SHARED_CONTENT_FACTS` 簇分量,谓词计数 4)"),
     "backend/app/repositories/postgres/kg_build_job_store.py": (1, 0, 0, 0, 0,
         "C:_clear_notebook_derived_kg 整表按 notebook 清空(跨代豁免:"
         "staged 发布即整体作废全部派生 KG;communities 两表走动态表名清单)"),

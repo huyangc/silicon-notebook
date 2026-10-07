@@ -1686,6 +1686,14 @@ def run_build(
             f"{error} Investigate why the lock session died (an idle reaper, a "
             "failover, a terminated backend) before retrying."
         ) from None
+    if isinstance(result, dict) and result.get("status") == "discarded":
+        # M1: memories kept being confirmed while the build ran, so it
+        # published nothing (the live index is unchanged). Not a success.
+        raise ScaleBuildCliFailure(
+            f"{mode} of {notebook_id} published nothing: "
+            f"{result.get('reason', 'discarded')}. The live index is unchanged; "
+            "re-run the build."
+        )
     report(f"{mode} finished in {round(time.perf_counter() - started, 1)}s")
     return {"notebook_id": notebook_id, "mode": mode, "result": result}
 

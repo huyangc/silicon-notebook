@@ -73,10 +73,10 @@ class RetrievalSnapshotCache:
     def invalidate_unified(self, notebook_id: str) -> None:
         """Drop only this notebook's unified-graph dict entries (the
         ``(notebook_id, level)`` keys) — WITHOUT the vector-cache family sweep
-        invalidate_kg does. Used by the scale-index build to release the whole
-        full_viz_graph('object') dict (~12-20GB at 8M objects) once viz_arrays
-        has extracted the compact arrays, so it never rides resident through
-        persist."""
+        invalidate_kg does. Used by the scale-index build to release a whole
+        object-graph dict (~12-20GB at 8M objects) a viewer's browse parked
+        during the build, once viz_arrays has extracted the compact arrays, so
+        it never rides resident through persist."""
         for key in [k for k in self.unified_cache if k[0] == notebook_id]:
             self.unified_cache.pop(key, None)
 

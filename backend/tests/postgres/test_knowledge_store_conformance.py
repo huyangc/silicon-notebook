@@ -3457,6 +3457,17 @@ class _ProjectionCursor:
 class _ProjectionConnection:
     def execute(self, statement, _params):
         statement = str(statement)
+        if "source_type = 'memory'" in statement and statement.startswith(
+            ("SELECT EXISTS", "SELECT id FROM sources", "SELECT DISTINCT",
+             "SELECT id FROM knowledge_")
+        ):
+            # M1: this notebook holds no Memory source -- the store's probe says
+            # so, and its Memory-id / Memory-set reads find nothing. (The row
+            # reads carry the exclusion in their own statement and are
+            # answered below like any other row read.)
+            if statement.startswith("SELECT EXISTS"):
+                return _ProjectionCursor([{"present": False}])
+            return _ProjectionCursor([])
         if "FROM knowledge_objects" in statement:
             return _ProjectionCursor(
                 [

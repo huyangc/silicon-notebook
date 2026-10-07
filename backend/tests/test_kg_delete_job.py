@@ -581,19 +581,26 @@ def test_first_object_read_after_delete_does_not_repaint_deleted_nodes(
     assert scale.version(nb) != version_before
 
 
-def test_delete_republishes_the_preview_for_hidden_objects_that_remain(
+def test_delete_republishes_the_preview_without_the_memory_objects_that_remain(
     repo, monkeypatch
 ):
+    """The hidden Memory projection's object survives the delete (it is not a
+    source-derived shared graph), but M1 keeps a member's Memory out of every
+    shared artifact: the preview never held it, and once the delete has removed
+    the shared objects there is nothing left to publish -- the stale preview is
+    retired instead of being republished around a private object."""
     nb = repo.create_notebook(NotebookCreate(name="nb")).id
     _seed_graph(repo, nb)
     scale, warm, live, spawned = _published_preview(repo, nb, monkeypatch)
-    assert warm["total_nodes"] == 3
+    assert warm["total_nodes"] == 2          # the Memory object is not in it
 
     _run_delete(repo, nb)
 
-    first = repo.unified_graph(nb, level="object", limit=80)
-    assert [node["id"] for node in first["nodes"]] == ["ko-src-mem"]
-    assert (live / "manifest.json").exists()
+    # No artifact is republished for it, and no refresh is left to run. (What
+    # the graph view then answers from the live tables is the viewer-scoped
+    # read path's business, not the persisted artifact's.)
+    repo.unified_graph(nb, level="object", limit=80)
+    assert not live.exists()
     assert spawned == []
 
 

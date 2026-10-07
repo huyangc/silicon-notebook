@@ -213,7 +213,10 @@ def test_derived_only_delta_remains_actionable_physical_content(repo):
     scale_status = repo.scale_index_status(nb.id)
     assert scale_status["unindexed_sources"] == 0
     assert scale_status["has_unindexed_content"] is True
-    assert repo._index_delta(nb.id)["delta_sources"] == ["s-knowhow", "s-memory"]
+    # A member's Memory source is not part of the source set a shared artifact
+    # describes (M1: it can neither be watermarked nor become a fold delta), so
+    # only the Knowhow projection stays actionable physical content.
+    assert repo._index_delta(nb.id)["delta_sources"] == ["s-knowhow"]
 
 
 def test_status_delta_searchable_reflects_setting(repo, monkeypatch):
