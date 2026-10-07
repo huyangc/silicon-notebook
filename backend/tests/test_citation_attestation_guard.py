@@ -157,6 +157,11 @@ REGISTRY = {
      "splat:element_id"): (
         "no-element", (),
         "B-11: a chain hop's evidence item from another library keeps no locator", 1),
+    ("services/knowledge_query.py", "KnowledgeQueryService._viewer_resolved_evidence",
+     "splat:element_id"): (
+        "no-element", (),
+        "B-11: a concept-detail raw evidence item naming another library's element "
+        "keeps no locator", 1),
     ("repositories/sqlite/knowledge_store.py", "KnowledgeStore._enrich_evidence",
      'store:["element_id"]'): (
         "no-element", (),
