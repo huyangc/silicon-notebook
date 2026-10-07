@@ -404,6 +404,8 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(JSONB, DRIVEN, "the requested source ids with their ordinals, primary-key probes"),),
     ("postgres/source_store.py", "SourceStore.visible_source_owners"): (
         s(JSONB, DRIVEN, "one answer's cited source ids, primary-key probes"),),
+    ("postgres/source_store.py", "SourceStore.source_owners"): (
+        s(JSONB, DRIVEN, "one public report's cited source ids, primary-key probes"),),
     ("postgres/source_store.py", "SourceStore.element_type_count_rows"): (
         s(ANY, BATCHED, "source ids, COUNT_IN_CHUNK (1024) per statement"),
         s(ANY, NOT_IDS, "the requested element types"),
@@ -733,6 +735,8 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(JSON, DRIVEN, "the requested source ids with their ordinals, primary-key probes"),),
     ("sqlite/source_store.py", "SourceStore.visible_source_owners"): (
         s(JSON, DRIVEN, "one answer's cited source ids, primary-key probes"),),
+    ("sqlite/source_store.py", "SourceStore.source_owners"): (
+        s(JSON, DRIVEN, "one public report's cited source ids, primary-key probes"),),
     ("sqlite/source_store.py", "SourceStore.element_type_count_rows"): (
         s(SQ_EXP, NOT_IDS, "the requested element types"),
         s(SQ_EXP, BATCHED, "source ids, one batch per statement"),

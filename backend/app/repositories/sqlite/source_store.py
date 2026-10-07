@@ -257,6 +257,25 @@ class SourceStore:
             ).fetchall()
         return {row["id"]: row["notebook_id"] for row in rows}
 
+    def source_owners(self, source_ids: Sequence[str]) -> dict[str, str]:
+        """``{source_id: notebook_id}`` for those of ``source_ids`` that exist,
+        of ANY type (hidden projections included); a deleted id is absent.
+
+        The PostgreSQL twin's contract: ownership only, for the public report
+        page's mount re-check (D-3); ONE statement, the id list as ONE JSON
+        parameter (``json_each``), each id a primary-key probe.
+        """
+        ids = list(dict.fromkeys(str(value) for value in source_ids if value))
+        if not ids:
+            return {}
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT s.id,s.notebook_id FROM sources s WHERE s.id IN ("
+                "SELECT value FROM json_each(?))",
+                (json.dumps(ids),),
+            ).fetchall()
+        return {row["id"]: row["notebook_id"] for row in rows}
+
     def hidden_source_ids(self, notebook_id: str, owner_id: str) -> list[str]:
         """Hidden Memory/Knowhow projection participants **for one user**, in
         stable id order.

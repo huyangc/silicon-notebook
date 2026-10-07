@@ -691,11 +691,24 @@ def share_report_route(
     A report citing none publishes exactly as before (no body needed).  A
     ``done`` report is frozen (it cannot be regenerated), so what the author
     confirms is the content the link serves.
+
+    D-3: a report quoting a mounted library that is no longer an effective
+    participant for its creator is refused (404) before anything is asked —
+    the public page would refuse it on every open.
     """
     repo = repository()
     report = _own_report_or_404(repo, notebook_id, report_id)
     if str(report.get("status") or "") != "done":
         raise user_error(409, "只能分享已完成的报告。")
+    # D-3 up front, as the conversation share does: a report quoting a mounted
+    # library that is no longer effective for its creator would 404 on the
+    # link's first open, so no link is issued and nothing is asked.
+    if not _report_mounts_still_effective(
+        repo,
+        {"notebook_id": notebook_id, "created_by": report.get("created_by")},
+        report.get("references") or [],
+    ):
+        raise user_error(404, "部分笔记本已无法访问，请重新选择范围。")
     acknowledged = payload.acknowledged_memory_count if payload else None
     disclosure = _share_disclosure(repo, report)
     try:
@@ -825,17 +838,18 @@ def public_report_route(token: str, response: Response) -> PublicReport:
 
 
 def _report_mounts_still_effective(repo, row: dict, references: list) -> bool:
-    """D-3 for a report (``public_share_recheck``): ownership is read only for
-    citations marked as coming from a mounted library (or older than the
-    mark) -- sources first, then the knowledge objects whose source did not
-    resolve, one batch each -- and a marked citation whose library cannot be
-    named any more fails closed."""
+    """D-3 for a report (``public_share_recheck``): only citations marked as
+    coming from a mounted library (or older than the mark) matter; each names
+    its library by the stored ``notebook_id``, else by its source (of any
+    type, hidden projections included), else by its knowledge object -- one
+    batch each, only for what is still unnamed -- and a marked citation whose
+    library cannot be named any more fails closed."""
     wanted = report_references_needing_owner(references)
     if not wanted:
         return True
     source_ids = report_source_ids(wanted)
     sources = (
-        repo._runtime.source_store.visible_source_owners(source_ids)  # type: ignore[attr-defined]
+        repo._runtime.source_store.source_owners(source_ids)  # type: ignore[attr-defined]
         if source_ids else {}
     )
     object_ids = report_unresolved_object_ids(wanted, sources)

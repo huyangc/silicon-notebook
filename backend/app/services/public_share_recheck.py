@@ -25,18 +25,26 @@ Which libraries the references come from:
 * a conversation turn names a library on every anchor and citation retrieved
   from a mounted one (``notebook_id``, empty for local evidence), so the
   stored turns answer it without a read;
-* a report citation stores its ``source_id`` / ``object_id`` and, since the
-  engine recorded it, ``from_reference_library`` (whether its evidence came
-  from a mounted library, decided by the owning notebook at generation).  The
-  route reads ownership only for citations that say so or predate the field
-  (a report of local citations reads nothing): the cited sources in ONE
-  batched read (``visible_source_owners``), then the cited knowledge objects
-  whose source did not resolve -- a knowledge object can be cited with no
-  source -- in ONE batched read (``knowledge.object_owners``).  A citation
-  marked as coming from a mounted library whose library can no longer be
-  named (its source and object are gone) fails closed: the page is not
-  served, since nothing can show the library is still mounted.  A legacy
-  citation without the field that cannot be resolved is not counted.
+* a report citation stores ``from_reference_library`` (whether its evidence
+  came from a mounted library, decided by the owning notebook at generation)
+  and, for a mounted one, that library itself (``notebook_id``, written at
+  generation since E7-5, as a conversation turn does).  The route reads
+  ownership only for citations marked as mounted, or older than the mark, that
+  do not carry their library (a report of local citations, or of mounted ones
+  that name their library, reads nothing beyond the participant set): the
+  cited sources of any type -- the hidden Memory and Knowhow projections
+  included -- in ONE batched read (``source_store.source_owners``), then the
+  cited knowledge objects whose source did not resolve -- a knowledge object
+  can be cited with no source -- in ONE batched read
+  (``knowledge.object_owners``).  A citation marked as coming from a mounted
+  library whose library can no longer be named (written before the library
+  was stored, and its source and object are gone) fails closed: the page is
+  not served, since nothing can show the library is still mounted.  A legacy
+  citation without the mark that cannot be resolved is not counted.
+
+Ownership is not readability: whether another member's Memory may be
+published at all is decided before this check, by
+``share_disclosure.report_foreign_memory_ids``.
 """
 from __future__ import annotations
 
@@ -66,8 +74,8 @@ REFERENCE_LIBRARY_FLAG = "from_reference_library"
 
 
 def report_references_needing_owner(references: Sequence[Any]) -> list[Mapping[str, Any]]:
-    """The report citations whose library has to be read: those marked as
-    coming from a mounted library, and legacy ones written before the mark."""
+    """The report citations whose library matters: those marked as coming
+    from a mounted library, and legacy ones written before the mark."""
     return [
         reference for reference in references
         if isinstance(reference, Mapping)
@@ -77,19 +85,21 @@ def report_references_needing_owner(references: Sequence[Any]) -> list[Mapping[s
 
 
 def report_source_ids(references: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Source ids of the citations that do not carry their library."""
     return list(dict.fromkeys(
         str(reference.get("source_id")) for reference in references
-        if reference.get("source_id")
+        if reference.get("source_id") and not reference.get("notebook_id")
     ))
 
 
 def report_unresolved_object_ids(
     references: Sequence[Mapping[str, Any]], source_owners: Mapping[str, str]
 ) -> list[str]:
-    """Object ids of the citations whose source did not name a library."""
+    """Object ids of the citations that carry no library and whose source did
+    not name one."""
     return list(dict.fromkeys(
         str(reference.get("object_id")) for reference in references
-        if reference.get("object_id")
+        if reference.get("object_id") and not reference.get("notebook_id")
         and not source_owners.get(str(reference.get("source_id") or ""))
     ))
 
@@ -99,12 +109,15 @@ def report_library_ids(
     source_owners: Mapping[str, str],
     object_owners: Mapping[str, str],
 ) -> set[str] | None:
-    """The libraries the citations come from, or ``None`` (fail closed) when a
-    citation marked as coming from a mounted library names none any more."""
+    """The libraries the citations come from -- the stored ``notebook_id``
+    first, then the cited source, then the cited knowledge object -- or
+    ``None`` (fail closed) when a citation marked as coming from a mounted
+    library names none any more."""
     found: set[str] = set()
     for reference in references:
         library = (
-            source_owners.get(str(reference.get("source_id") or ""))
+            reference.get("notebook_id")
+            or source_owners.get(str(reference.get("source_id") or ""))
             or object_owners.get(str(reference.get("object_id") or ""))
         )
         if library:
