@@ -1911,6 +1911,26 @@ it: citation cards, answer anchors, derived-chain anchors, prompts, report refer
 the stored excerpt and title, never the current element text or source name from the promoter's private
 library, and such a citation carries no link, image or table jump into that library, and the same holds for
 evidence that names another library's element even under this library's source.
+Since PR-E8 an approval no longer leaves the promoted evidence pointing into the promoter's notebook: the public
+library gets its own provenance (`app/domain/promotion_provenance.py`). For every original — the promoter's source, or
+for a Memory promotion the Memory itself — the library holds one synthetic source of type `promotion`, titled
+「晋升自：<original title>」 (a Memory promotion 「晋升自个人记忆：<Memory title>」; approving publishes that title, by
+design), reused by every later promotion from the same original. Each evidence entry becomes one element of it, whose
+text is the original element's current text read in the approving transaction (never a member's Memory element),
+otherwise the entry's stored excerpt; an entry with neither is dropped, and an object left without evidence is then
+left out by every source ceiling. The entry points at the library's source and element; the original source id and
+notebook stay on it only as `origin_source_id` / `origin_notebook_id` display keys. Merging into an existing public
+object rewrites only the incoming entries, and the reverse index follows the new sources. Because a promotion source
+is an ordinary visible source of the library, a notebook that mounts the library (whose ceiling opens only the
+library's visible sources) and a global ask both recall and cite the promoted object, its citation card names the
+original title and opens the library's 「晋升自」 source, and deleting the promoter's private notebook changes
+nothing. The library's source list shows it with the type 「收录」 and the 「已收录」 badge; it can be deleted —
+which deletes the promoted objects its evidence supports, as for any source — but not re-parsed
+(`POST /api/sources/{source_id}/parse` answers 409 「这份来源是收录到公共知识库的内容，不能重新解析。」, the batch
+`…/sources/reparse` skips it, the MCP `reparse_source` refuses it), and no document pipeline processes it (it is never
+a KG analysis target, never counted as pending analysis, never asked for paper metadata, never reported by the
+missing-chunks checkup). Data approved before the upgrade is rewritten the same way by the PostgreSQL `0068` /
+SQLite v88 migration (see Operations).
 Deleting a notebook cascades all members' private Memory bound to it, so the delete dialog
 warns about that lifecycle consequence without exposing member identities or counts.
 

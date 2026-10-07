@@ -314,6 +314,48 @@ manifest 字段。
 并区分是图谱预览尚未生成，还是当前预览里还没有这个节点，下一次索引构建后可用。邻居焦点不在落盘预览里时，
 也按同样方式处理。
 
+## 公共知识库里晋升对象的出处
+
+晋升进公共知识库的知识对象现在由公共库自己承载出处：每个原件对应一个类型为 `promotion` 的可见来源
+（「晋升自：<原标题>」），每条证据对应它的一个元素（产品契约见
+[Memory 与 Agent MCP](./product-and-api_zh.md#memory-与-agent-mcp) 里关于晋升的段落）。本版本起批准晋升即按此写入；
+升级到 **PostgreSQL 0068 / SQLite v88** 时改写升级前已批准的数据。
+
+**迁移。** 一个事务，只改数据（不改表结构），不调用模型。按公共知识库（`notebooks.tier = 'base'`）找出证据里
+指向「不是本库来源」的对象——反向索引被确认完整时（`unified_kg_state.source_index_backfilled = 1` 且没有未完成的
+`source_index_backfills` 行）经反向索引查找，否则逐个读取对象证据——逐条改写：原元素还在时取它的现文（从不读取
+成员个人记忆的元素），否则取证据里保存的摘录，两者都没有则丢弃该条。摘要行在 PostgreSQL 写进服务器日志
+（`RAISE LOG`），在 SQLite 写进应用日志（`silicon_notebook.sqlite.maintenance`）：
+`promotion-provenance migration: libraries=… objects_rewritten=… entries_rewritten=…
+entries_dropped=… objects_without_evidence=…`（只有计数）。`objects_without_evidence` 是证据全部被丢弃的对象数；
+此后任何来源范围都不会让它们进入回答，管理员可以删除或重新晋升。
+
+- 成本：与已确认完整的公共库的反向索引行数成正比（`idx_kos_notebook` 索引扫描，按本库来源做反连接），再加候选
+  对象的证据；反向索引未确认完整的公共库要读取全部对象的证据，0067 在 PostgreSQL 上实测 200 万对象的库读完要
+  13.5 秒。连接池的 `POSTGRES_STATEMENT_TIMEOUT_SECONDS` / `POSTGRES_LOCK_TIMEOUT_SECONDS` 生效；超时则事务回滚、
+  启动报告「未就绪」，调大后重启即重试。
+- 升级前先备份：应用层无法撤销这次改写。之后若回退代码，数据仍可读（晋升来源就是普通可见来源）。
+
+**确认已完成。** `SELECT count(*) FROM sources WHERE source_type = 'promotion'` 显示建立的晋升来源数。公共库里
+不应再有指向别的笔记本来源的证据；PostgreSQL 上可这样核对（它会读取公共库的全部证据，请在低峰执行）：
+
+```sql
+SELECT ko.notebook_id, count(*) AS foreign_entries
+FROM notebooks n
+JOIN knowledge_objects ko ON ko.notebook_id = n.id
+CROSS JOIN LATERAL jsonb_array_elements(
+  CASE WHEN jsonb_typeof(ko.evidence) = 'array' THEN ko.evidence ELSE '[]'::jsonb END
+) AS ev(item)
+WHERE n.tier = 'base' AND jsonb_typeof(ev.item) = 'object'
+  AND NOT EXISTS (SELECT 1 FROM sources s
+                  WHERE s.id = COALESCE(ev.item ->> 'source_id', '')
+                    AND s.notebook_id = ko.notebook_id)
+GROUP BY ko.notebook_id;
+```
+
+升级后它不返回任何行。晋升来源在公共库的来源列表里显示类型「收录」；它不会被重新解析、不是知识图谱分析目标、
+也不会被缺分块体检项报告，无需维护。删除它即删去它支撑的晋升对象。
+
 ## 可观测性 / 日志
 
 后端通过统一的 `EventLogger`（`app/core/event_logging.py`）输出结构化日志：每条事件一行 JSONL 写入 `.local/logs/`，并附控制台简要行。写日志是 best-effort，绝不影响它所观测的请求或管线；未配置模型时 LLM 通道为 no-op。
