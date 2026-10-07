@@ -53,6 +53,7 @@ from app.repositories.postgres.search import (
     notebook_source_rows,
 )
 from app.repositories.postgres.source_store import (
+    NOT_PROMOTION_SOURCE_PREDICATE,
     PAPER_META_ELIGIBLE_SQL,
     PAPER_META_NO_META_SQL,
     VISIBLE_SOURCE_TYPES_PREDICATE,
@@ -419,6 +420,8 @@ class QueryStore:
                 "SELECT s.id AS id FROM sources s "
                 "WHERE s.notebook_id = %s "
                 "AND s.source_type NOT IN ('memory', 'knowhow') "
+                # 晋升出处来源(PR-E8)不分块:内容经它支撑的知识对象召回
+                f"AND s.{NOT_PROMOTION_SOURCE_PREDICATE} "
                 "AND s.chunked_at IS NULL "
                 "AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id)",
                 (notebook_id,),

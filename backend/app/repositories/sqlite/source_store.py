@@ -52,6 +52,12 @@ _UNSET = SOURCE_PAPER_META_UNSET
 # 的**单一真源**:两处口径逐字一致才不会出现「面板显示 19 篇但配额算到 18」。
 # 内部真集路径(get_source/pending_kg/copy/scale-index)刻意不用它,保留完整集合。
 VISIBLE_SOURCE_TYPES_PREDICATE = "source_type NOT IN ('memory', 'knowhow')"
+# 晋升出处来源(PR-E8,``app.domain.promotion_provenance``)按上面的谓词**可见**
+# (进列表、进挂载库与全局问答的天花板——B-12 的修法),但不是用户导入的文档:KG
+# 抽取目标、待分析计数、论文元数据补抽、体检 H2/H3 都在既有可见谓词之后再接这一句。
+# 写成独立的合取项而不是并进 ``NOT IN`` 列表:SQLite 只在 WHERE 里逐字出现索引谓词时
+# 才用部分索引,改动既有那一项会让那些语句丢掉索引。PostgreSQL 侧同名常量逐字同义。
+NOT_PROMOTION_SOURCE_PREDICATE = "source_type <> 'promotion'"
 
 
 # 「这一行是私有 Memory 的合成来源」的 SQL 谓词——`memory_source_ids` 取的正是这批
@@ -127,6 +133,7 @@ def _universe_digest(joined: str | None) -> str:
 # 一份保证不漂移。合规条件与 models.sources 的 PAPER_META_ELIGIBLE_* 常量同义。
 PAPER_META_ELIGIBLE_SQL = (
     " AND s.source_type NOT IN ('memory', 'knowhow')"
+    f" AND s.{NOT_PROMOTION_SOURCE_PREDICATE}"
     " AND s.doc_type IN ('', 'academic_paper')"
     " AND s.parse_status IN ('parsed', 'extracting', 'extracted')"
 )

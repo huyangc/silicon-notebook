@@ -192,7 +192,7 @@ import {
   type CatalogConfirmRequest,
   type CatalogReviewRequest,
 } from "./command-catalog-panel";
-import { sourceDetailManageable } from "./source-management";
+import { sourceDetailManageable, sourceDetailReparsable, sourceTypeTag } from "./source-management";
 import { ModelServicePanel, ModelServiceSummaryButton } from "./model-service-panel";
 import {
   ModelTestCoordinator,
@@ -584,7 +584,8 @@ function formatFileSize(size: number): string {
 }
 
 function sourceTypeLabel(source: SourceSummary): string {
-  return source.type || source.file_name.split(".").pop()?.toLowerCase() || "source";
+  return sourceTypeTag(source.type)
+    ?? (source.type || source.file_name.split(".").pop()?.toLowerCase() || "source");
 }
 
 
@@ -6937,6 +6938,7 @@ export default function Home() {
                   </span>
                 ) : !readOnlyWorkspace && sourceDetailManageable(sourceDetail.type) ? (
                 <div className="source-detail-actions">
+                  {sourceDetailReparsable(sourceDetail.type) && (
                   <button
                     className="icon-button subtle-icon"
                     disabled={reparsingSource || sourceDetailDeleting}
@@ -6948,6 +6950,7 @@ export default function Home() {
                       ? <Loader2 size={23} className="busy-spin" aria-hidden="true" />
                       : <ExternalLink size={23} />}
                   </button>
+                  )}
                   <button
                     className="icon-button subtle-icon danger-icon"
                     disabled={reparsingSource || sourceDetailDeleting}

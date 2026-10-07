@@ -31,6 +31,9 @@ from app.repositories.sqlite.id_binding import (
     member_of as id_member_of,
 )
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER
+from app.repositories.sqlite.promotion_provenance_store import (
+    materialize_promotion_evidence,
+)
 from app.domain.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
     USABLE_STATUSES,
@@ -1382,6 +1385,19 @@ class GovernanceStore:
         if not base_nb_id:
             raise ValueError("晋升候选缺少目标公共知识库(target_base_id)")
         require_live_promotion_target(connection, base_nb_id)
+        # B-12 (PR-E8): see the PostgreSQL twin -- the cards are rewritten to
+        # the public library's own "晋升自个人记忆：<title>" source.
+        memory_row = connection.execute(
+            "SELECT title FROM memory_items WHERE id=?", (cand["object_id"],)
+        ).fetchone()
+        evidence = materialize_promotion_evidence(
+            connection, base_nb_id, evidence, now,
+            fallback_origin_notebook_id=str(cand["notebook_id"] or ""),
+            memory=(
+                str(cand["object_id"]),
+                str(memory_row["title"] or "") if memory_row is not None else "",
+            ),
+        )
 
         base_object_ids: list[str] = []
         created_object_ids: list[str] = []
@@ -1524,7 +1540,12 @@ class GovernanceStore:
             # service rejects the candidate in this same transaction.
             raise MemoryPromotionRefused(PROMOTION_APPROVE_MESSAGE)
         src_payload = json.loads(src["payload"] or "{}")
-        src_evidence = json.loads(src["evidence"] or "[]")
+        # B-12 (PR-E8): see the PostgreSQL twin -- only these incoming entries
+        # are rewritten to the public library's own "晋升自：<title>" sources.
+        src_evidence = materialize_promotion_evidence(
+            connection, base_nb_id, json.loads(src["evidence"] or "[]"), now,
+            fallback_origin_notebook_id=str(cand["notebook_id"] or ""),
+        )
 
         # Cross-corpus dedup against existing base objects of the same type.
         base_objs = connection.execute(

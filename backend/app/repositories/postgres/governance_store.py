@@ -38,6 +38,9 @@ from app.repositories.postgres.id_binding import (
     member_of as id_member_of,
 )
 from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER
+from app.repositories.postgres.promotion_provenance_store import (
+    materialize_promotion_evidence,
+)
 from app.domain.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
     USABLE_STATUSES,
@@ -1516,6 +1519,21 @@ class GovernanceStore:
         if not base_nb_id:
             raise ValueError("晋升候选缺少目标公共知识库(target_base_id)")
         require_live_promotion_target(connection, base_nb_id)
+        # B-12 (PR-E8): the evidence cards point at the member's notebook; the
+        # public library gets its own "晋升自个人记忆：<title>" source and one
+        # element per card, and the cards are rewritten to point at them
+        # (app.domain.promotion_provenance).
+        memory_row = connection.execute(
+            "SELECT title FROM memory_items WHERE id=%s", (cand["object_id"],)
+        ).fetchone()
+        evidence = materialize_promotion_evidence(
+            connection, base_nb_id, evidence, now,
+            fallback_origin_notebook_id=str(cand["notebook_id"] or ""),
+            memory=(
+                str(cand["object_id"]),
+                str(memory_row["title"] or "") if memory_row is not None else "",
+            ),
+        )
 
         base_object_ids: list[str] = []
         created_object_ids: list[str] = []
@@ -1673,7 +1691,13 @@ class GovernanceStore:
             # this same transaction and surfaces the refusal.
             raise MemoryPromotionRefused(PROMOTION_APPROVE_MESSAGE)
         src_payload = json_value(src["payload"], {})
-        src_evidence = json_value(src["evidence"], [])
+        # B-12 (PR-E8): the promoted evidence points at the public library's
+        # own "晋升自：<title>" sources; on a merge only these incoming entries
+        # are rewritten (app.domain.promotion_provenance).
+        src_evidence = materialize_promotion_evidence(
+            connection, base_nb_id, json_value(src["evidence"], []), now,
+            fallback_origin_notebook_id=str(cand["notebook_id"] or ""),
+        )
 
         # Cross-corpus dedup against existing base objects of the same type.
         base_objs = _base_dedup_rows_for_update(

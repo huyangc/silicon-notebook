@@ -63,6 +63,7 @@ from collections import OrderedDict
 from typing import Dict, Optional, Tuple
 
 from app.repositories.sqlite.access_sql import NOTEBOOK_LIVE_SQL
+from app.repositories.sqlite.source_store import NOT_PROMOTION_SOURCE_PREDICATE
 from app.repositories.sqlite.memory_sql import (
     hidden_type_index_term,
     memory_source_type_predicate,
@@ -295,9 +296,13 @@ def _pending_source_count_query(
     visible_clause = (
         "AND s.source_type NOT IN ('memory','knowhow') " if visible_only else ""
     )
+    # A promotion source (PR-E8) is never an extraction target, so it is never
+    # pending either -- in both counts (the analyze-new count would otherwise
+    # never drain).
     row = db.execute(
         "SELECT COUNT(*) FROM sources s WHERE s.notebook_id = ? "
         + visible_clause
+        + f"AND s.{NOT_PROMOTION_SOURCE_PREDICATE} "
         + "AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id) "
         "AND NOT EXISTS (SELECT 1 FROM knowledge_objects k "
         "WHERE k.source_id = s.id AND k.source_id != '' "

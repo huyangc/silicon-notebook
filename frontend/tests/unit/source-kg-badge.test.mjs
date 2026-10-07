@@ -47,6 +47,16 @@ test("旧后端不发新字段时逐字回到原来的两态", () => {
   assert.equal(sourceKgBadge({ kg_extracted: true }).state, "analyzed");
 });
 
+test("收录来源显示「已收录」,不是永远降不下来的「待分析」", () => {
+  // PR-E8:公共知识库里由「贡献到公共知识库」生成的来源从不交给分析,两个字段都为假。
+  const badge = sourceKgBadge({ type: "promotion", kg_extracted: false, kg_analyzed_empty: false });
+  assert.equal(badge.state, "promoted");
+  assert.equal(badge.label, "已收录");
+  assert.notEqual(badge.label, "待分析");
+  // 其它类型不受影响
+  assert.equal(sourceKgBadge({ type: "markdown" }).state, "pending");
+});
+
 test("矛盾组合显示更强的那个事实", () => {
   // 两者本该互斥。真收到矛盾组合(旧行 + 新字段回填)时,「确实有知识对象」是更强
   // 的事实,不能因为另一个布尔为真就把它降级成「无知识」。

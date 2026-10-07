@@ -30,6 +30,7 @@ from app.repositories.knowhow_asset_refs import (  # 后端中性,与 sqlite mai
 )
 from app.repositories.ports import OfflineMaintenanceBusyError
 from app.repositories.source_fact_backfill import project_historical_source_fact
+from app.repositories.postgres.source_store import NOT_PROMOTION_SOURCE_PREDICATE
 from app.repositories.text_whitespace import PY_WHITESPACE  # 后端中性,与 sqlite maintenance 共用
 from app.domain.kg.source_partition import (
     SOURCE_PARTITION_FORMAT_VERSION,
@@ -376,6 +377,7 @@ class PostgresMaintenanceAdapter:
                 " ) latest ON TRUE WHERE s.notebook_id=%s "
                 " AND s.id COLLATE \"C\">%s "
                 " AND s.source_type NOT IN ('memory','knowhow') "
+                f" AND s.{NOT_PROMOTION_SOURCE_PREDICATE} "
                 " AND EXISTS (SELECT 1 FROM source_elements pe "
                 " WHERE pe.source_id=s.id) "
                 + ") SELECT id AS source_id,"
@@ -460,6 +462,7 @@ class PostgresMaintenanceAdapter:
             row = db.execute(
                 "SELECT COUNT(*) AS c FROM sources s WHERE s.notebook_id=%s "
                 "AND s.source_type NOT IN ('memory','knowhow') "
+                f"AND s.{NOT_PROMOTION_SOURCE_PREDICATE} "
                 "AND EXISTS (SELECT 1 FROM source_elements pe "
                 "WHERE pe.source_id=s.id) "
                 "AND NOT EXISTS (SELECT 1 FROM knowledge_objects k "
@@ -491,6 +494,7 @@ class PostgresMaintenanceAdapter:
                 "SELECT s.id FROM sources s WHERE s.notebook_id=%s "
                 "AND s.id COLLATE \"C\">%s "
                 "AND s.source_type NOT IN ('memory','knowhow') "
+                f"AND s.{NOT_PROMOTION_SOURCE_PREDICATE} "
                 "AND s.doc_type IN ('','academic_paper') "
                 "AND s.parse_status IN ('parsed','extracting','extracted')"
                 + existing

@@ -8,6 +8,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
+from app.domain.promotion_provenance import (
+    memory_origin_key,
+    promotion_element_id,
+    promotion_source_id,
+)
 from app.models.schemas import AskResponse, Citation, NotebookCreate
 from tests.answer_owner_testkit import save_owned_answer
 from app.services.sqlite_repository import (
@@ -750,18 +755,40 @@ def test_approval_binds_only_server_validated_source_element_evidence(
             (base.id, result["base_object_ids"][0]),
         ).fetchone()
     evidence = json.loads(row["evidence"])
+    # PR-E8 (B-12): the card is rewritten to the public library's own
+    # "晋升自个人记忆：<title>" source and element; the verified original stays
+    # only as display keys.
+    promotion_source = promotion_source_id(base.id, memory_origin_key(memory.id))
     assert evidence == [
         {
-            "source_id": "source-safe",
+            "source_id": promotion_source,
             "source_title": "Approved paper",
-            "element_id": "element-safe",
+            "element_id": promotion_element_id(
+                promotion_source, "element-safe", "Verified source statement."
+            ),
             "element_type": "paragraph",
             "location_label": "p1",
             "quoted_span": "Verified source statement.",
             "confidence": 1.0,
+            "origin_source_id": "source-safe",
+            "origin_notebook_id": notebook.id,
         }
     ]
     assert "forged client quote" not in json.dumps(evidence)
+    with repo._connect() as db:
+        source = dict(db.execute(
+            "SELECT notebook_id,title,source_type FROM sources WHERE id=?",
+            (promotion_source,),
+        ).fetchone())
+        element_text = db.execute(
+            "SELECT text FROM source_elements WHERE source_id=?", (promotion_source,)
+        ).fetchone()["text"]
+    assert source == {
+        "notebook_id": base.id,
+        "title": "晋升自个人记忆：Verified claim",
+        "source_type": "promotion",
+    }
+    assert element_text == "Verified source statement."
 
 
 def test_admin_rejection_records_state_but_leaves_confirmed_memory(repo, promotion_setup):
