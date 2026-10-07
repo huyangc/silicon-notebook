@@ -57,6 +57,18 @@ def _store_module(database_url: str):
     return module
 
 
+def _projection_store(database_url: str):
+    """The backend's ``IndexProjectionStore`` -- the owner of the
+    "built before the Memory isolation" predicate the worker uses."""
+    from app.core.database_url import database_identity
+
+    if database_identity(database_url).scheme == "postgresql":
+        from app.repositories.postgres.index_projection_store import IndexProjectionStore
+    else:
+        from app.repositories.sqlite.index_projection_store import IndexProjectionStore
+    return IndexProjectionStore
+
+
 def _setting(env: str, field: str) -> int:
     """A bound as the service reads it (environment, else the Settings
     default)."""
@@ -65,35 +77,33 @@ def _setting(env: str, field: str) -> int:
     return int(os.environ.get(env, Settings.model_fields[field].default))
 
 
-def _scale_rows(module, db, storage_dir: str, notebook_ids) -> list[dict]:
-    from app.services.memory_isolation_rebuild import manifest_predates_memory_isolation
+def _scale_rows(module, projections, db, storage_dir: str, notebook_ids) -> list[dict]:
+    from types import SimpleNamespace
+
+    from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
 
     max_bytes = _setting("NOTEBOOK_COPY_MAX_BYTES", "notebook_copy_max_bytes")
     max_rows = _setting("NOTEBOOK_COPY_MAX_ROWS", "notebook_copy_max_rows")
     viz_budget = _setting("VIZ_SYNC_BUILD_MAX_OBJECTS", "viz_sync_build_max_objects")
 
-    def roots(kind: str) -> dict:
-        root = Path(storage_dir) / kind
-        if not root.is_dir():
-            return {}
-        return {entry.name: entry / "manifest.json" for entry in sorted(root.iterdir())
-                if entry.is_dir() and "." not in entry.name
-                and (entry / "manifest.json").is_file()}
-
-    scale_roots, viz_roots = roots("kg_index"), roots("kg_viz")
-    candidates = [(nb, path, "index") for nb, path in scale_roots.items()]
+    # The artifact store's own inventories (published roots only; build
+    # scratch / rollback directories excluded by the same rule the worker uses).
+    artifacts = ScaleArtifactStore(SimpleNamespace(storage_dir=storage_dir))
+    scale_roots = artifacts.indexed_notebook_ids()
+    candidates = [(nb, artifacts.scale_dir(nb), "index") for nb in scale_roots]
     # a standalone viz without a scale root, over the synchronous viz budget
-    candidates += [(nb, path, "viz") for nb, path in viz_roots.items()
-                   if nb not in scale_roots]
+    known = set(scale_roots)
+    candidates += [(nb, artifacts.viz_dir(nb), "viz")
+                   for nb in artifacts.viz_notebook_ids() if nb not in known]
     rows = []
-    for notebook_id, manifest_path, kind in candidates:
+    for notebook_id, directory, kind in candidates:
         if notebook_ids is not None and notebook_id not in notebook_ids:
             continue
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = artifacts.read_manifest(directory)
         except (OSError, ValueError):
             manifest = None
-        if not manifest_predates_memory_isolation(manifest):
+        if not projections.built_before_memory_isolation(manifest):
             continue
         facts = module.MemoryIsolationStore.census_facts(db, notebook_id)
         if kind == "viz" and facts["objects"] <= viz_budget:
@@ -116,7 +126,7 @@ def census(database_url: str, notebook_ids=None, *, all_signals: bool = False,
             db, notebook_ids, all_signals=all_signals, **kwargs)
         if storage_dir:
             result["notebooks"] += _scale_rows(
-                module, db, storage_dir,
+                module, _projection_store(database_url), db, storage_dir,
                 None if notebook_ids is None else set(notebook_ids))
     return result
 

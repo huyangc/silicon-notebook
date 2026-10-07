@@ -114,10 +114,11 @@ _ID_BATCH = 900
 #
 #: E4-4 adds the keyword ``viewer_id=`` to the KG store readers
 #: (``list_knowledge_page``, ``type_counts``, ``fts_search``,
-#: ``knowledge_type_count_rows``, ``notebook_has_kg``).  Until both are
-#: assembled the stores do not take it and ``store_viewer_kwargs`` passes
-#: nothing.  Assembly: ``True``.
-STORE_READERS_TAKE_VIEWER_ID = False
+#: ``knowledge_type_count_rows``, ``notebook_has_kg``), ``sources_only=`` to
+#: ``_enrich_evidence`` and ``with_evidence=`` to ``object_evidence_rows``.
+#: Assembled in PR-E4: on (tests/test_kg_viewer_scope_assembly.py checks it
+#: against what the stores take).
+STORE_READERS_TAKE_VIEWER_ID = True
 
 
 def store_readers_take_viewer_id() -> bool:

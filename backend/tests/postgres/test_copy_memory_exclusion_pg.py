@@ -272,12 +272,16 @@ def test_share_preview_of_a_notebook_without_memory_counts_every_row(pg_app):
 
 
 def test_a_memory_object_merged_into_a_shared_one_leaves_no_memory_text_in_the_copy(pg_app):
-    from app.models.knowledge import MergeRequest
+    # A manual merge of a Memory object is refused since E4-3: build the state a
+    # pre-isolation manual merge left directly in SQL (memory_purge_cases.legacy_merge).
+    from types import SimpleNamespace
+
+    from tests.memory_purge_cases import Sql, legacy_merge
 
     repo, client = pg_app
     nb = cases.PROBE_NOTEBOOK
     _insert_rows(repo, cases.probe_world(nb))
-    repo.merge_knowledge(nb, "ko-mem-p", MergeRequest(into_id="ko-shared-p"))
+    legacy_merge(SimpleNamespace(sql=Sql(repo, postgres=True)), nb, "ko-mem-p", "ko-shared-p")
     merged = _fetch(repo)(
         "SELECT evidence::text AS e FROM knowledge_objects WHERE id='ko-shared-p'", ()
     )[0]["e"]

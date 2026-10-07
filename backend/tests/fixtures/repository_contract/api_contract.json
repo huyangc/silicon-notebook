@@ -20550,7 +20550,7 @@
       },
       "/api/notebooks/{notebook_id}/checkup": {
         "get": {
-          "description": "流水线体检(P2):只读聚合 H2–H10 的损坏/待办信号(H9/H10 为只读项,fix=none)。看板高频入口,`require_notebook_read`\n守卫(只读成员也能看)。与系统级 `/health`(API/LLM 状态)语义不同。响应用内部代号\n(H2/reparse 等),界面词由前端映射。",
+          "description": "流水线体检(P2):只读聚合 H2–H12 的损坏/待办信号(H9–H12 为只读项,fix=none)。看板高频入口,`require_notebook_read`\n守卫(只读成员也能看)。与系统级 `/health`(API/LLM 状态)语义不同。响应用内部代号\n(H2/reparse 等),界面词由前端映射。",
           "operationId": "notebook_checkup_api_notebooks__notebook_id__checkup_get",
           "parameters": [
             {

@@ -176,8 +176,10 @@ class _EmptySummaryQueries:
     def visible_source_count(connection, notebook_id):
         return 0
 
+    # ``viewer_id``: the E4-4 store keyword. With no Memory probe wired the
+    # summary always passes it (``NotebookSummaryQuery.viewer_count_kwargs``).
     @staticmethod
-    def knowledge_type_count_rows(connection, notebook_id, statuses):
+    def knowledge_type_count_rows(connection, notebook_id, statuses, *, viewer_id=None):
         return []
 
     @staticmethod
@@ -185,7 +187,7 @@ class _EmptySummaryQueries:
         return []
 
     @staticmethod
-    def notebook_has_kg(connection, notebook_id):
+    def notebook_has_kg(connection, notebook_id, *, viewer_id=None):
         return False
 
     @staticmethod

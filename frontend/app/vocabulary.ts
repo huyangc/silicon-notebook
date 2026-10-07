@@ -215,7 +215,7 @@ export const MODEL_FINISH_REASON: Record<string, string> = {
   function_call: "",
 };
 
-// 流水线体检(P2)的内部代号 → 界面词。/checkup 响应体是内部契约(code=H2..H11、
+// 流水线体检(P2)的内部代号 → 界面词。/checkup 响应体是内部契约(code=H2..H12、
 // fix=reparse 等枚举),面向用户的标签只在这里映射,绝不能含黑话(见 docs/ui-vocabulary.md
 // 「界面词汇表」+ scripts/check_ui_vocabulary.py)。H4/H5 同为「检索向量缺失」是有意的
 // (对用户是同一件事、同一个修复动作),渲染时按 label 合并成一行。

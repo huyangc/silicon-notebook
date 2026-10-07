@@ -370,48 +370,10 @@ def test_checkup_counts_approved_generic_promotions_of_memory_objects(repo):
     assert h10(cases.NB_F).count == 1
 
 
-# ------------------------------------------- acceptance that needs E4-2
-# The isolated rebuild is only isolated when the graph-build inputs leave out
+# ------------------------------------------------ end-to-end isolation
+# The isolated rebuild is isolated because the graph-build inputs leave out
 # Memory-derived objects (E4-2, unified_kg_store seed readers), and a manual
-# rebuild only clears the marker once E4-2's line is in finish_rebuild_state.
-# On a branch without E4-2 the pass re-mints the polluted clusters and still
-# sets the marker. The repository's test policy forbids xfail markers, so the
-# expected failure is asserted explicitly under an EXPLICIT switch -- never
-# inferred from the code, so reverting E4-2 cannot silently flip it back:
-#
-#   * _E42_LANDED is False on this branch; test_the_e42_switch_matches_the_tree
-#     turns red the moment E4-2 is in the tree while it still says False
-#     (the probe import succeeds), and red if it says True without E4-2 (the
-#     probe import fails loudly with ImportError);
-#   * PR-E4 ASSEMBLY STEP: delete this whole block (_E42_LANDED, the switch
-#     test and _expect) and call isolated() / marked() directly in the two
-#     acceptance tests below, so they assert unconditionally.
-_E42_LANDED = False
-
-
-def _probe_e42() -> None:
-    # E4-2's own names (the seed readers' exclusion fragment and the marker
-    # write of finish_rebuild_state); ImportError while E4-2 is absent.
-    from app.repositories.sqlite.unified_kg_store import (  # noqa: F401
-        _not_memory,
-        _writes_isolation_marker,
-    )
-
-
-def test_the_e42_switch_matches_the_tree():
-    if _E42_LANDED:
-        _probe_e42()
-    else:
-        with pytest.raises(ImportError):
-            _probe_e42()
-
-
-def _expect(check) -> None:
-    if _E42_LANDED:
-        check()
-    else:
-        with pytest.raises(AssertionError):
-            check()
+# rebuild clears the marker through E4-2's line in finish_rebuild_state.
 
 
 def _memory_object_ids(db):
@@ -426,8 +388,7 @@ def test_after_the_pass_no_derived_layer_holds_memory(repo):
     co-mention pair or a community member. (Canonical ids and names are not
     compared with the Memory objects' names: the shared documents' own
     "Bandgap" / "secret project" legitimately re-mint K-bandgap and
-    K-secret project, with only shared members.) Red by design until E4-2
-    (see the block comment above)."""
+    K-secret project, with only shared members.)"""
     MemoryIsolationRebuild.for_repository(repo).run_pass()
     with repo._runtime.database.connect() as db:
         memory = _memory_object_ids(db)
@@ -450,20 +411,16 @@ def test_after_the_pass_no_derived_layer_holds_memory(repo):
         assert not {x for r in pairs for x in r} & memory
         assert not {r[0] for r in members} & memory
 
-    _expect(isolated)
+    isolated()
 
 
 def test_a_manual_rebuild_sets_the_marker(repo):
     """The ordinary 刷新图谱 path (no isolation worker involved) clears the
-    marker through unified_kg_store.finish_rebuild_state (E4-2's line). Red by
-    design until E4-2 (see the block comment above)."""
+    marker through unified_kg_store.finish_rebuild_state (E4-2's line)."""
     job = repo.start_unified_kg_rebuild(cases.NB_F)
     repo.run_unified_kg_rebuild_job(cases.NB_F, job["job_id"])
 
-    def marked():
-        assert _marker(repo, cases.NB_F) == 1
-
-    _expect(marked)
+    assert _marker(repo, cases.NB_F) == 1
 
 
 def test_the_dangling_seed_check_pages_through_every_cluster(repo):
@@ -674,26 +631,6 @@ def test_pre_isolation_scale_indexes_are_queued_for_a_full_build(scale_repo, mon
     finally:
         for notebook_id in list(scale.idle_queue):
             scale.dequeue_idle(notebook_id)
-
-
-def test_the_scale_predicate_equals_e46s_once_both_are_in_the_tree():
-    """manifest_predates_memory_isolation is the worker's copy of E4-6's
-    IndexProjectionStore.built_before_memory_isolation (same field, same
-    version). Skipped ONLY while E4-6 is not in the tree; once it is, a
-    different answer on any sample is a failure (PR-E4 assembly: or call
-    E4-6's function directly and delete the copy)."""
-    from app.repositories.postgres import index_projection_store as pg
-    from app.repositories.sqlite import index_projection_store as sq
-    from app.services.memory_isolation_rebuild import manifest_predates_memory_isolation
-
-    if not hasattr(pg.IndexProjectionStore, "built_before_memory_isolation"):
-        pytest.skip("E4-6 (built_before_memory_isolation) is not in this tree yet")
-    samples = ({}, {"memory_isolation": 1}, {"memory_isolation": 0},
-               {"memory_isolation": 2}, None, [], {"memory_isolation": "1"})
-    for store in (pg.IndexProjectionStore, sq.IndexProjectionStore):
-        for manifest in samples:
-            assert manifest_predates_memory_isolation(manifest) == \
-                store.built_before_memory_isolation(manifest), (store, manifest)
 
 
 def _gk_state(repo):

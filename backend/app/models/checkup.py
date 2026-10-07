@@ -1,7 +1,7 @@
 """流水线体检(P2)的 API 响应模型。
 
 `CheckupService`(`app/services/checkup.py`)产出内部 dataclass;这里是它的 pydantic 传输层。
-字段是**内部契约**:``code``(H2..H10)与 ``fix``(修复动作枚举)都是内部代号——面向用户的界面词
+字段是**内部契约**:``code``(H2..H12)与 ``fix``(修复动作枚举)都是内部代号——面向用户的界面词
 由前端映射层(T5)负责,后端不出中文用户文案(界面词汇守卫红线)。
 """
 from __future__ import annotations

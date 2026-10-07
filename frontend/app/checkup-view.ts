@@ -1,9 +1,9 @@
 // 流水线体检(P2)结果 → 看板展示模型的纯装配逻辑。单测于 checkup-view.test.mjs。
 //
-// 后端 /checkup 返回内部代号(H2..H11)+ 修复动作枚举(fix);这里把「源级」体检项
+// 后端 /checkup 返回内部代号(H2..H12)+ 修复动作枚举(fix);这里把「源级」体检项
 // (H2–H6)装配成看板「来源状态」块要渲染的行,界面词经 vocabulary.ts 映射。
 // H7/H8 是索引级(检索索引过期/损坏),不在这里——它们接进「索引与构建」块,由
-// page.tsx 直接读 checkup 判定。H9/H10/H11 是只读项(fix="none",无修复按钮),
+// page.tsx 直接读 checkup 判定。H9–H12 是只读项(fix="none",无修复按钮),
 // 由 checkupNotices 装配成紧跟源级问题之后的提示卡。
 
 // 值导入须带 .ts 后缀:本模块被 node --test 直接加载(见 scale-index.ts 同款)。
