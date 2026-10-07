@@ -316,6 +316,66 @@ def case_report_share_is_refused_while_its_mount_is_gone(world: World) -> None:
     assert share(world, world.alice, rid).status_code == 200
 
 
+def case_generated_report_marks_a_sourceless_mounted_object_by_its_context(
+    world: World,
+) -> None:
+    """Through the real engine (fake models): the section cites a knowledge
+    object of a mounted personal library that has no occurrence, so no source
+    names its library; the evidence context does.  The stored citation is
+    marked as coming from the mounted library and names it, and the public
+    page follows the mount: 200, unmounted 404, remounted 200."""
+    import re
+
+    from app.domain.retrieval import RetrievedKnowledge
+    from app.services.reasoning_retrieval import ReasoningResult
+    from tests.report_share_disclosure_cases import (
+        _Models,
+        _engine,
+        _generate,
+        _new_report,
+        _outline_ready,
+        _serve_memory,
+    )
+
+    library, _source = mounted_library(world)
+    object_id = _knowledge_object(world, library)
+    hit = RetrievedKnowledge(
+        object_id=object_id, object_type="concept", payload={"name": "参考库概念"},
+        score=1.0, relevance=1.0, notebook_id=library, tier="personal",
+    )
+
+    class _CitingModels(_Models):
+        """Cites whichever key the section prompt gave the mounted object."""
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            content = messages[-1]["content"]
+            if "ONLY this section" in content:
+                found = re.search(r"(k\d+): \[concept\]\[[a-z]+\] 参考库概念", content)
+                assert found, "the mounted object reaches the section prompt"
+                self.section_markdown = f"## 结论\n参考库概念成立 [{found.group(1)}]。"
+            return super().chat_json(messages, schema_hint, **kwargs)
+
+    engine = _engine(world, world.alice, _CitingModels(),
+                     deep_dive=lambda *a, **k: ReasoningResult(top_hits=[hit]))
+    rid = _new_report(world, world.alice)
+    _outline_ready(world, rid)
+    _serve_memory(world, [])
+    stored = _generate(world, engine, rid)
+    (reference,) = [ref for ref in stored["references"] if ref["object_id"] == object_id]
+    assert reference["source_id"] == ""
+    assert reference["from_reference_library"] is True
+    assert reference["notebook_id"] == library
+
+    token = share(world, world.alice, rid).json()["share_token"]
+    page = f"/api/public/reports/{token}"
+    assert world.client.get(page).status_code == 200
+    assert library not in world.client.get(page).text
+    mount(world, [])
+    assert world.client.get(page).status_code == 404
+    mount(world, [library])
+    assert world.client.get(page).status_code == 200
+
+
 def case_report_page_dies_with_its_mount_and_revives(world: World) -> None:
     library, source = mounted_library(world)
     rid = make_report(world, world.alice, [
