@@ -16,6 +16,8 @@ per-row probe.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from tests.test_default_ceiling_probe import (
@@ -128,7 +130,7 @@ def test_digest_statement_keeps_its_index_paths(postgres_database):
     # Both halves start from a notebook_id index condition on ``sources``
     # (the visible half from whichever (notebook_id, ...) index the planner
     # prefers, the hidden half from the hidden-type partial index).
-    assert "on sources v" in plan and "on sources s" in plan, plan
+    assert re.search(r"on sources$", plan, re.M) and "on sources s" in plan, plan
     assert plan.count("Index Cond: (notebook_id = 'nb'::text)") >= 2, plan
     assert "idx_sources_nb_hidden_type" in plan, plan
     assert "idx_memory_owner_notebook_status" in plan and "hashed SubPlan" in plan, plan

@@ -88,9 +88,9 @@ _SAMPLE_NOT_MEMORY = f"NOT ({memory_sql.memory_source_type_predicate('s.source_t
 # ``_HIDDEN_SOURCE_IDS_SQL``; an empty half is NULL.  Parameters:
 # (notebook_id, notebook_id, owner_id).  SQLite twin: ``_UNIVERSE_DIGEST_SQL``.
 _UNIVERSE_DIGEST_SQL = (
-    "SELECT (SELECT md5(string_agg(v.id, E'\\x1e' ORDER BY v.id)) "
-    "FROM sources v WHERE v.notebook_id=%s "
-    "AND v.source_type NOT IN ('memory','knowhow')) AS visible_digest, "
+    "SELECT (SELECT md5(string_agg(id, E'\\x1e' ORDER BY id)) "
+    "FROM sources WHERE notebook_id=%s "
+    f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}) AS visible_digest, "
     "(SELECT md5(string_agg(s.id, E'\\x1e' ORDER BY s.id)) "
     "FROM sources s WHERE s.notebook_id=%s "
     "AND s.source_type IN ('memory','knowhow') "

@@ -91,8 +91,8 @@ _SAMPLE_NOT_MEMORY = f"NOT ({memory_sql.memory_source_type_predicate('s.source_t
 # owner_id).  An empty half is NULL.
 _UNIVERSE_DIGEST_SQL = (
     "SELECT (SELECT group_concat(id, char(30)) FROM ("
-    "SELECT v.id FROM sources v WHERE v.notebook_id=? "
-    "AND v.source_type NOT IN ('memory','knowhow') ORDER BY v.id)) AS visible_ids, "
+    "SELECT id FROM sources WHERE notebook_id=? "
+    f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} ORDER BY id)) AS visible_ids, "
     "(SELECT group_concat(id, char(30)) FROM ("
     "SELECT s.id FROM sources s WHERE s.notebook_id=? "
     "AND s.source_type IN ('memory','knowhow') "
