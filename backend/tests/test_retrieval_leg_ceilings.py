@@ -525,10 +525,13 @@ def test_weak_support_binds_the_viewer_not_the_list_for_foreign_memory(
     seeds = _seed_weak(repo, nb)
     spy = _Spy(repo.retrieval.candidates.unified_kg)
     monkeypatch.setattr(repo.retrieval.candidates, "unified_kg", spy)
-    with _all_selected(nb, a):
+    with _all_selected(nb, a, probes=_probes(repo)):
         rows = repo.retrieval.weak_support_relations(nb, seeds)
     assert _names(rows) == [("版图设计", "寄生电容")]
+    # The verdict binds, so the bound statements are the ONLY reads -- no
+    # unbounded fast-path read first.
     assert _bound_kwargs(spy) == [{"viewer_id": a}, {"viewer_id": a}]
+    assert len(spy.calls) == 2
 
 
 def test_weak_support_binds_the_list_when_the_library_drifted(repo, monkeypatch):
