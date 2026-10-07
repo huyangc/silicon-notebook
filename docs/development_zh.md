@@ -70,6 +70,57 @@
   报告创建者私有权限例外。不得根据空/null principal id 猜 grant 种类或绕过实时读权；
   读判据扩展时同步更新 Memory 授权锁位 allowlist。access-SQL 与
   notebook-capability 守卫负责验证。
+- 由成员记忆派生的知识图谱行只属于该成员（裁决 M1）；下列读者、构建与守卫要同步维护：
+  - 建图读者一律使用 `memory_derived_in_notebook`（绑定笔记本的判据），并把每个按 id 引用的
+    对象探针绑定到引用行所在的笔记本；不绑定的 `memory_derived_object` 会让 PostgreSQL 把
+    全站的 Memory 来源都拿去建哈希。
+  - KG 读者的 `viewer_id` 只有一种含义（`memory_sql.memory_viewer_filter`）：`None` 返回全部行；
+    `""` 不返回任何记忆派生行；用户 id 不返回其他成员记忆派生的行。对行读者，`None` 时语句
+    文本不变；对计数读者，`None` 时结果不变且零现读。探针一律绑定到行所在的笔记本
+    （`foreign_memory_in_notebook_excluded`、`memory_derived_in_notebook`）。类型计数缓存按
+    `(kg_reset_epoch, kg_mutation_seq)` 保存同一条语句算出的两半：共享半与全体成员的记忆半
+    （总数减去由记忆来源驱动的计数）。`None` 取两半之和，`""` 读共享半，用户 id 再现读一次
+    本人的那一半（`own_memory_source`）。由记忆来源驱动的读取，在 PostgreSQL 上用
+    `= ANY(ARRAY(子查询))` 的 InitPlan 绑定来源 id；在 SQLite 上用 `CROSS JOIN` 固定连接顺序
+    或用不相关的 `IN` / `NOT IN` 列表，并写出 `hidden_type_index_term`。
+  - `memory_sql` 的五个片段及其消费者（未注明的两个后端都有）：`memory_derived_in_notebook`
+    （无绑定参数）——共享工具 `community_context_rows`、`duplicate_member_rows`、
+    `edge_centrality_source_rows`，`memory_viewer_filter` 的 `""` 支，以及建图读者；
+    `foreign_memory_in_notebook_excluded`（一个参数）——只经 `memory_viewer_filter` 使用；
+    `memory_viewer_filter`（三值）——两个 `knowledge_store` 的行读者、PostgreSQL `search.py` 的
+    `_candidate_rows_for_terms` 与 `notebook_knowledge_rows`（PostgreSQL
+    `query_store.search_notebook` 经后者间接用到）、SQLite `query_store.search_notebook`；
+    `own_memory_source`（一个参数）——两个 `knowledge_counts_cache.memory_type_status_counts`、
+    两个 `knowledge_store` 的 `own_memory_only` 叠加读、两个 `query_store.notebook_has_kg` 的
+    本人 EXISTS；`hidden_type_index_term`（无绑定参数，SQLite 规划器提示，PostgreSQL 只为两个
+    后端同名）——SQLite 的两半计数语句与本人半、`knowledge_store` 的叠加读与
+    `_fts_viewer_filter`、`query_store.notebook_has_kg` 的本人 EXISTS。原有片段也新增了消费者：
+    SQLite `knowledge_store._fts_viewer_filter` 用 `memory_source_readable` 与
+    `memory_source_type_predicate`；两个 `knowledge_counts_cache` 用
+    `memory_source_type_predicate`（两半语句的记忆 CTE）。
+  - `kg_viewer_scope.KgViewerScope` 是 `memory_sql` 查看者片段的 Python 孪生（对象或关系只由
+    自身来源决定是否隐藏，每个证据条目也只按自身来源判断），由 `test_kg_viewer_scope_twins*`
+    在两个后端钉住；服务层只通过 `store_viewer_kwargs` 向 KG store 读取传 `viewer_id`，也就是
+    仅当笔记本里有查看者不能读的记忆时才传。`test_kg_viewer_scope_assembly.py` 的装配绊线核对
+    开关（`STORE_READERS_TAKE_VIEWER_ID`）与 store 接受的关键字一致，并核对隔离标记读取已接好。
+  - 没有记忆来源的笔记本，其 scale 与 viz 工件与隔离前逐字节相同，差别只在三份 manifest：主索引
+    和 viz 的 manifest 多出 `memory_isolation`、`memory_sources_digest`、`shared_content_digest`
+    三个字段；所有 version 列表（主索引、viz、来源分区伴随工件的 `parent_version`）都多一对
+    (`memory_isolation`, 1)，这一对现在每个笔记本的 version 都带。构建发出的语句也相同，只有
+    三点不同：每条对象和关系读取都在自身语句里排除记忆（hashed `NOT IN` 子查询；PostgreSQL 上
+    实测与不过滤等价，SQLite 上整表读取多 13–30%）；多出单行记忆探针和记忆来源读取；viz 派生
+    改读三列精简投影，不再读整行。version 信号不再探测记忆。ANN 喂数和成员关系腿用预读的记忆
+    id 集合过滤；构建持续累计观察到的记忆行，只有新出现的行确实进入了产物时才重跑，再次命中
+    则丢弃。
+  - `backend/tests/test_memory_chunk_write_guard.py` 扫描 `backend/app`、`scripts/` 与
+    `examples/`（也扫描其中 `migrations` 目录以外的 `.sql` 文件）：每处写 `chunks` 的地方都必须
+    在写入前拒绝 Memory 来源，或带经检查的理由登记；`sources.source_type` 只由 INSERT 写入。
+  - `backend/tests/test_memory_reader_guard.py` 让读者清单保持封闭：`backend/app/repositories`
+    下凡是按笔记本读取 `knowledge_objects`、`knowledge_relations` 或 `concept_clusters` 的函数或
+    SQL 常量，都要按名字登记到一个类别（带查看者的读者、本人记忆读、排除全部记忆的共享工具或
+    建图读者、计数缓存、按键 / 天花板 / 调用方限定的读、派生层、状态探针、记忆一侧、拷贝、维护）。
+    未登记的读者报出 `文件:行` 并失败，已登记却不再读取的名字同样失败；查看者、本人记忆、排除与
+    计数缓存四类按代码核对。
 - participant 集合替换只由 `retrieval_participants.py` 在检索消费边界提供，
   `global_run.py` 是唯一安装者。授权仍走真实 mount/read 判据，`source_scope.py`
   只能收窄已证明的集合。保留精确 reader/writer allowlist、actor/run 绑定、无内容

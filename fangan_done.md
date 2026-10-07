@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-10-08（新增 §56 会话公开分享先告知个人记忆，公开页每次打开复核用到的库；此前 2026-10-07 新增 §54 检索各腿按本次运行的来源天花板取数；此前 2026-09-30 新增 §52 笔记本拷贝不带 Memory；§53 成员退出与 Memory 的彻底删除；此前 2026-09-29 新增 §47 当前库保底席位与原文段下限；§48 全局问答引用核对：部分失败照常交付；§49 KG 对象定义的来源归因与 KG 详情按查看者过滤；§50 全局问答集合枚举引用按冻结参与集；§51 集合枚举与按篇读取原文认本次勾选的来源）
+更新日期：2026-10-08（新增 §55 知识图谱里的 Memory 只属于本人；§56 会话公开分享先告知个人记忆，公开页每次打开复核用到的库；此前 2026-10-07 新增 §54 检索各腿按本次运行的来源天花板取数；此前 2026-09-30 新增 §52 笔记本拷贝不带 Memory；§53 成员退出与 Memory 的彻底删除；此前 2026-09-29 新增 §47 当前库保底席位与原文段下限；§48 全局问答引用核对：部分失败照常交付；§49 KG 对象定义的来源归因与 KG 详情按查看者过滤；§50 全局问答集合枚举引用按冻结参与集；§51 集合枚举与按篇读取原文认本次勾选的来源）
 
 对照依据：[产品方案](silicon_notebook_fangan.md)。章节号指向原方案；“扩展”表示交付时延伸能力，不冒称原方案已有独立条款。
 
@@ -455,6 +455,12 @@ Agent profile、opaque token、scope/allowlist/过期与撤销、公开 onboardi
 **已交付，2026-10-07；方案 §11、§19 的延伸（来源范围与权限整改计划 PR-E2）。** 各检索腿在取数时就按本次运行冻结的来源天花板取舍，不再先取后滤：概念漫游（PPR）的名额只给天花板内的段落，越过被拒候选的遍历有上界；推导链每一跳都过证据边界，无界内证据即整条丢弃；弱支撑提示与 mix 叠加只保留界内支撑的节点与样本关系；回答上下文的关系行与「×N源」只计界内来源；所有提问人共用的关键词与关系向量缓存不再含 Memory 派生内容；插件引擎的越界命中直接丢弃；晋升到公共库的对象按证据快照呈现，不再现读推广者私有库。收窄范围时精确标识符查找恢复可用，天花板下推进探针，单库与全局逐库一致——待办账本里登记的逐库精确臂「探测窗口先取后滤」残余随之关闭。全选且未变化、没有他人 Memory 的运行与不带范围时逐字节相同。默认天花板（PR-E1）为个人记忆通道关闭的提问临时关掉的全图、PPR、关系与精确查找四个通道随之恢复，各自按天花板挡住提问人本人被扣下的个人记忆；各腿统一在读取前只取一次本次运行的判词。
 
 当前合同见[产品/API][product]的「按来源选择检索范围」与 Memory 晋升两节、[开发规范][dev]的 id 清单绑定一节；回归入口：[服务层腿](backend/tests/test_retrieval_leg_ceilings.py)、[候选层腿](backend/tests/test_candidate_leg_ceilings.py)、[PPR 名额](backend/tests/test_ppr_source_ceiling.py)、[store 与证据](backend/tests/test_store_evidence_ceiling_plans.py)、[真实存储上的精确查找](backend/tests/test_exact_lookup_ceiling_store.py)、[PostgreSQL 计划钉子](backend/tests/postgres/test_store_evidence_ceiling_explain_pins.py)。实施计划：[检索层权限整改计划](docs/superpowers/plans/2026-09-29-retrieval-permission-remediation.md)。
+
+## 55. 知识图谱里的 Memory 只属于本人（2026-10-08）
+
+**已交付，2026-10-08；方案 §19.1「成员的 Memory 互不可见」与 §19.4 Memory → KG 治理的延伸（来源范围与权限整改计划 PR-E4，用户裁决 M1）。** 由成员 Memory 派生的知识对象与关系在结构上只属于该成员：建图时不做共享概念簇的种子或成员，不进规范关系、提及桥、共提、社区及其摘要和簇分析；增量融合、冲突检测与手工合并不碰它们（合并 409，按 id 写入对他人等同不存在，通用贡献申请拒收、批准时复核）；含成员 Memory 的笔记本不能发布为公共知识库；落盘的图谱预览、检索索引与来源分区伴随工件不含任何 Memory；知识列表、计数、图谱与邻居视图、KG 搜索和搜索框知识部分按查看者读取，查看者只多看到本人的 Memory 对象，没有 `memory:read` 的令牌一条也看不到；Memory 来源永不分块，整本索引重建、Knowhow 转移与同步导入各自拒绝。存量由迁移 PostgreSQL 0067 / SQLite v87 清理，就绪后后台一轮检查并重建（体检 H9–H11 只读提示），升级前可用普查脚本估算重建范围。
+
+当前合同见[Memory 与 Agent MCP][memory]中的「知识图谱里的记忆」与[运维][ops]的记忆隔离一节；回归入口：[建图排除](backend/tests/test_rebuild_streaming.py)、[写侧拒绝](backend/tests/test_memory_kg_isolation_write.py)、[store 读者](backend/tests/test_memory_kg_store_readers.py)、[两用户端到端](backend/tests/test_kg_viewer_scope_routes.py)、[工件构建](backend/tests/test_viz_index_build.py)、[迁移](backend/tests/test_memory_isolation_migration.py)、[隔离重建](backend/tests/test_memory_isolation_rebuild.py)、[段落写入守卫](backend/tests/test_memory_chunk_write_guard.py)、[读者登记守卫](backend/tests/test_memory_reader_guard.py)。
 
 ## 56. 会话公开分享先告知个人记忆，公开页每次打开复核用到的库（2026-10-08）
 

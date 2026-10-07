@@ -208,6 +208,194 @@ answers 413 `export_too_large` with the item count and the limit, before anythin
 Size it to the worker's memory: one export holds at most this much content (plus per-item
 metadata), and concurrent exports add up. Each item's content is at most 40,000 characters.
 
+## Memory isolation in the knowledge graph
+
+Knowledge-graph rows derived from a member's Memory belong to that member only (product contract:
+[Memory in the knowledge graph](./product-and-api.md#memory-in-the-knowledge-graph)). Upgrading to
+PostgreSQL 0067 / SQLite v87 removes what earlier versions mixed into the shared derived layers,
+and one background pass after startup rebuilds what the migration cannot.
+
+**Before deploying: the census.** Run
+`PYTHONPATH=backend python3 scripts/memory_isolation_census.py --database-url <snapshot URL> --storage-dir <storage dir> --all-signals`
+on a production snapshot taken **before** the upgrade. It is read-only and calls no model. It
+prints:
+
+- every notebook the post-readiness pass will rebuild: set F (holds a Memory source, always
+  rebuilt) and the queued notebooks of set G, each with the signal that queues it (and, with
+  `--all-signals`, every signal on its own);
+- every notebook it will queue a full scale build for (set SCALE: a pre-isolation scale index, or
+  a pre-isolation standalone visualisation over `VIZ_SYNC_BUILD_MAX_OBJECTS` objects, on a
+  non-copyable notebook);
+- for each notebook its object count and `merge_review_pairs`, the ambiguous seed pairs its last
+  rebuild sent to the model; one more rebuild sends about as many.
+
+Three limits of the census: `merge_review_pairs` is read from `kg_rebuild_checkpoint`, which the
+migration deletes for F, so a census run after the upgrade shows 0 for F; the pairs do not include
+the concept-description calls, so read them as a lower bound; and the SCALE list is the set that
+will eventually be queued, not when (a scale build is queued only once the notebook's knowledge
+graph is isolated, see below). Concept descriptions are regenerated only where their evidence
+changed; communities need no model. A dirty notebook has already moved its `kg_mutation_seq`
+since its last rebuild, so its input version has changed anyway: for a notebook that will be
+refreshed sooner or later, this merge-review cost is paid earlier, not added; it is added only
+for a notebook nobody would ever refresh. Cost of the check itself, measured: 3.3 s and 610
+statements for a clean 1M-object notebook (3.2–11.1 s depending on cache).
+
+**The migration.** Upgrading to PostgreSQL 0067 / SQLite v87 runs one transaction. Its summary
+line goes to the **PostgreSQL server log** (`RAISE LOG`) on PostgreSQL and to the **application
+log** (`silicon_notebook.sqlite.maintenance`) on SQLite:
+`memory-kg-isolation migration: affected_notebooks=… memory_objects=… clusters_removed=…
+communities_removed=… memory_chunks_removed=… private_kept=… promotions_rejected=…
+conflicts_applied_on_shared_nodes=… conflicts_applied_on_shared_edges=… cross_owner_stripped=…
+evidence_scan_notebooks=… seed_check_notebooks=…` (counts only). `private_kept` counts
+Memory-derived objects that keep shared evidence a manual merge folded into them; only the
+Memory's owner sees them.
+
+- If the migration exceeds `POSTGRES_STATEMENT_TIMEOUT_SECONDS`, or cannot take its lock within
+  `POSTGRES_LOCK_TIMEOUT_SECONDS`, the transaction rolls back and startup reports "not ready".
+  Raise the value and restart; nothing is half-applied. Measured: slowest statement 1.9 s at 2M
+  objects.
+- Statements on narrow tables that have no index on the side being deleted read the whole table
+  once: mention edges by concept took 3.0 s at 15.6M rows. The evidence scan grows linearly with
+  the largest notebook in F that is not a public library, or is a public library whose reverse
+  index is not attested: 2.3 s at 1M objects × 8 evidence items, 13.5 s to read all evidence of a
+  2M-object library.
+- With sync change capture enabled, the migration's deletes are captured (161k log rows at the
+  measured scale, about 10% slower) and the next export carries them. Either disable capture
+  before upgrading and re-enable it afterwards, or let the export carry the deletes (the 0065
+  precedent).
+
+**Applied conflicts that changed shared rows.** The migration deletes every conflict candidate
+that references a Memory-derived object or relation, applied ones included. The summary line's
+`conflicts_applied_on_shared_nodes` / `_edges` count the applied conflicts that had changed a
+shared object or relation for a Memory one: a node `modify` merged a payload into the shared
+object, a node `discard` set the shared object to status `conflict`, and an edge `discard` that a
+Memory relation won set the shared relation's review status to `rejected`. The migration does not restore those rows. The only way to get
+their list is to run this read-only SQL **before** upgrading (same text on both backends), because
+the candidate rows no longer exist afterwards:
+
+```sql
+WITH m AS (SELECT ko.id FROM knowledge_objects ko JOIN sources ds ON ds.id = ko.source_id WHERE ds.source_type = 'memory'),
+     mr AS (SELECT kr.id FROM knowledge_relations kr JOIN sources ds ON ds.id = kr.source_id WHERE ds.source_type = 'memory')
+SELECT k.id, k.notebook_id, k.kind, k.resolution, k.winner_ref, k.left_ref, k.right_ref
+FROM kg_conflict_candidates k
+WHERE k.status = 'applied' AND (
+  (k.kind = 'node' AND (
+     (k.resolution = 'modify' AND (k.left_ref IN (SELECT id FROM m) OR k.right_ref IN (SELECT id FROM m))
+      AND (CASE WHEN k.winner_ref IN (k.left_ref, k.right_ref) THEN k.winner_ref ELSE k.left_ref END) NOT IN (SELECT id FROM m))
+     OR (k.resolution = 'discard' AND k.winner_ref IN (k.left_ref, k.right_ref) AND k.winner_ref IN (SELECT id FROM m)
+      AND (CASE WHEN k.winner_ref = k.left_ref THEN k.right_ref ELSE k.left_ref END) NOT IN (SELECT id FROM m))))
+  OR (k.kind = 'edge' AND k.resolution = 'discard' AND k.winner_ref IN (k.left_ref, k.right_ref)
+      AND k.winner_ref IN (SELECT id FROM mr)
+      AND (CASE WHEN k.winner_ref = k.left_ref THEN k.right_ref ELSE k.left_ref END) IN (SELECT id FROM knowledge_relations)
+      AND (CASE WHEN k.winner_ref = k.left_ref THEN k.right_ref ELSE k.left_ref END) NOT IN (SELECT id FROM mr)))
+ORDER BY k.notebook_id, k.id;
+```
+
+**Approved promotions of Memory content (checkup H10).** H10 > 0 means approved generic
+promotions copied Memory content into a public library. The migration and checkup leave approved
+promotions as they are; the deployment owner decides, after listing them with (same text on both
+backends):
+
+```sql
+SELECT pc.id AS candidate_id, pc.notebook_id AS source_notebook_id, pc.object_id AS memory_object_id,
+       b.notebook_id AS public_notebook_id, b.id AS public_object_id,
+       CASE WHEN b.source_candidate_id = pc.id THEN 'created_from_memory' ELSE 'absorbed_memory_evidence' END AS how
+FROM promotion_candidates pc
+JOIN knowledge_objects b ON b.source_candidate_id = pc.id OR (pc.base_match_id <> '' AND b.id = pc.base_match_id)
+WHERE pc.status = 'approved' AND pc.object_type <> 'memory'
+  AND EXISTS (SELECT 1 FROM knowledge_objects ko WHERE ko.id = pc.object_id AND ko.notebook_id = pc.notebook_id
+      AND EXISTS (SELECT 1 FROM sources ds WHERE ds.id = ko.source_id AND ds.source_type = 'memory'))
+ORDER BY pc.id, b.id;
+```
+
+**The marker.** `unified_kg_state.memory_isolation_version`:
+
+- 0 = awaiting the isolated rebuild (notebooks that held a Memory source — a public library that
+  holds one included; it is rebuilt by the same startup pass, no manual step, and checkup H11
+  tells you such libraries exist — and notebooks the check queued);
+- 2 = awaiting the post-readiness check (every other notebook with clusters, including public
+  libraries and notebook copies; a copy gets a state row of defaults);
+- 1 = isolated.
+
+**The pass after readiness.** One background pass runs after the service reports ready:
+
+- it checks every 2 (event `memory_isolation_seed_checked`, outcome `queued` or `clean`, with the
+  signal name `dirty` / `seed` / `stale_reference`); a queued notebook is reset like the migration
+  reset F and set to 0;
+- it rebuilds every 0 (`memory_isolation_rebuild_started` / `_completed`) through the ordinary
+  rebuild path; the marker goes to 1 only after the rebuild returned normally;
+- `_deferred` means the notebook's rebuild slot was busy (a user rebuild or relink, or the offline
+  CLI); a timer re-runs the pass up to 20 × 30 s per process start, then the next start continues;
+- `_failed` (stage and exception class) keeps the marker; the notebook is retried at the next
+  start.
+
+The pass never deletes a curator's merge decision: when a notebook is queued, only a merge
+candidate whose sentinel side was minted from an object that no longer exists is removed. Text of
+a deleted Memory can survive in a superseded generation of clusters or communities. No reader reads
+it, since every reader reads the published generation only; it is removed by the reclamation that
+runs before the next rebuild, or by startup recovery (`_reap_stale_community_generations` and its
+cluster twin). Startup recovery reclaims at most 40 pages per start
+(`_RECOVERY_REAP_PAGES_BUDGET`) and skips a notebook while it has a catch-up debt
+(`derived_catchup_from`), so a large notebook may need several starts to be clean.
+
+After this release a manual 刷新图谱 or `backend/app/scripts/recluster_kg.py` also completes a
+notebook. A rebuild clears the notebook's dirty flag only if no knowledge-graph change arrived
+while it ran; otherwise the notebook stays dirty and the next rebuild picks the change up. Any
+rebuild that actually reclusters also sets `memory_isolation_version = 1` (the skip path of an
+unchanged input does not reach that end-write; the isolation pass sets the marker there).
+
+**Done when** this returns 0 (same SQL on both backends), i.e. checkup H9 is 0 on every notebook:
+
+```sql
+SELECT count(*) FROM unified_kg_state u JOIN notebooks n ON n.id = u.notebook_id
+WHERE u.memory_isolation_version <> 1 AND n.status NOT IN ('copying','deleting','importing');
+```
+
+**and** the index status of every notebook reports no pre-isolation artifact (below). Authority
+split: the database rebuild queue is this marker; artifacts on disk are judged by their own
+manifest field.
+
+**Visualisations and scale indexes.** After the isolation upgrade no index or visualisation built
+before it is used any more, in any notebook (with or without Memory, public libraries included),
+until it has been rebuilt: an artifact whose manifest lacks the `memory_isolation` field is never
+served, the index status reports it stale with 0 nodes and 0 ANN entries, a notebook with at most
+`VIZ_SYNC_BUILD_MAX_OBJECTS` objects rebuilds its visualisation on the first read, and a larger one
+shows no preview until its scale index build publishes. Knowledge-graph semantic search reads the
+index exactly, so until a notebook's index is rebuilt its search returns lexical results only.
+Every index built before the upgrade therefore gets one full build; it reads stored vectors and
+rows and calls no model (about 100 s at 1M objects).
+
+- With `SCALE_INDEX_AUTO_ENABLED` true, the post-migration pass queues that full build (event
+  `memory_isolation_scale_queued`), any tier, with or without Memory, for every non-copyable
+  notebook whose knowledge graph is isolated (marker 1) and that has a pre-isolation scale index,
+  or has only a pre-isolation standalone visualisation and more than `VIZ_SYNC_BUILD_MAX_OBJECTS`
+  objects. A notebook whose rebuild was deferred or failed gets its build after that rebuild
+  succeeds; a start re-queues only what is still unstamped.
+- Otherwise run the scale index build yourself: when the switch is off, and always for a copyable
+  notebook (at most `NOTEBOOK_COPY_MAX_ROWS` rows) that has a hand-built scale index or a
+  visualisation over that threshold.
+
+A fold onto an index built before the upgrade is refused and replaced by a full build (event
+`scale_fold_refused`, reason `memory_isolation`). When only the notebook's memories changed — the
+shared rows the index was built over are the same and the knowledge graph was not rebuilt since —
+the next fold republishes only the manifest (under a second at 1M objects; the source-partition
+companion is republished as after any fold); otherwise it runs a full build (event
+`scale_fold_refused`, reason `kg_rebuilt_since_build` or `shared_content_changed`). A build during
+which memories keep reaching the index is discarded after one retry (event
+`scale_index_build_discarded`, reason `memory_appeared_during_build`); the live index stays as it
+was, and the next KG write re-arms automatic indexing, or you can run the build again by hand. Cost
+for a notebook without Memory: the statements it always ran, plus one-row Memory probes and an
+in-statement exclusion. On PostgreSQL that exclusion costs the same as an unfiltered read. On
+SQLite a whole-table read costs 13–30 % more (measured at 300k rows: objects 147 → 195 ms,
+relations 149 → 174 ms, viz objects 271 → 293 ms).
+
+**Graph views before a notebook is isolated.** Until a notebook's isolated rebuild has finished
+(`memory_isolation_version <> 1`), its graph and neighbour views never serve a stored preview: a
+small notebook answers from the live tables; a large one shows no preview in the graph view, and in
+a large notebook the neighbour view says the node cannot be located yet — that no preview has been
+built, or that the current preview does not hold this node — until the next index build. A
+neighbour focus the stored preview does not hold is answered the same way.
+
 ## Observability
 
 The backend emits structured logs through a single `EventLogger` (`app/core/event_logging.py`): one JSONL line per event under `.local/logs/` plus a brief console line. Logging is best-effort — it never breaks the request or pipeline it observes — and is a no-op for the LLM channel when no model is configured.
@@ -888,6 +1076,17 @@ running the target side — re-export it from the source environment instead (a 
 checkout produces v2 automatically; there is no converter for an existing v1 file). If a v1
 package is still in flight — exported but not yet imported — when you upgrade the target, discard
 it and re-export from source once the source side is upgraded too.
+
+The import refuses, for the whole run and before any table is applied, a package that would put
+passages of a private Memory projection into the target's shared passage index, or in which a
+source id has a different type than at the target with one of the two types Memory. Nothing is
+written (a `--dry-run` refuses the same way). The error names the number of affected sources and
+up to 20 of their ids (sorted; the rest counted as "(and N more)") and says what to do: for
+passages, upgrade the source environment to this version (its schema migration removes those
+passages), export a FULL package again and import that one — the refused package cannot be
+resumed; for a type conflict, the same source id has different types in the two environments,
+which no supported path produces; the error says so and asks, in Chinese, to reconcile the two
+sides before syncing again.
 
 Use `--full` to deliberately reset a target's baseline without touching the capture gate or the
 watermark table directly — for example after a long gap, or simply to hand over a package that
