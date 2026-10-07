@@ -1445,13 +1445,33 @@ def ceiling_binds(
         return True
     memo = scope._ceiling_binds_memo
     if key not in memo:
-        if _ceiling_binds_uncached(
-            scope, key, drifted=drifted, foreign_hidden=foreign_hidden,
-        ):
-            bound.add(key)
-            return True
-        memo[key] = False
+        # Single flight: a report's sections ask the same verdict at once;
+        # one computes it (two probe reads), the others wait and read it.
+        with _verdict_lock(scope):
+            if key not in memo and key not in bound:
+                if _ceiling_binds_uncached(
+                    scope, key, drifted=drifted, foreign_hidden=foreign_hidden,
+                ):
+                    bound.add(key)
+                    return True
+                memo[key] = False
     return key in bound
+
+
+_VERDICT_LOCK_GUARD = threading.Lock()
+
+
+def _verdict_lock(scope: ActiveSourceScope) -> "threading.Lock":
+    """The scope's own lock for computing a ``ceiling_binds`` verdict, made
+    once (under a module guard, so two first callers cannot each make one)
+    and kept in the instance ``__dict__`` like the scope's other per-run
+    memos -- the frozen dataclass's fields, equality and hash are untouched.
+    Held only while one library's verdict is computed."""
+    lock = scope.__dict__.get("_verdict_lock")
+    if lock is None:
+        with _VERDICT_LOCK_GUARD:
+            lock = scope.__dict__.setdefault("_verdict_lock", threading.Lock())
+    return lock
 
 
 def _ceiling_binds_uncached(
@@ -2007,22 +2027,6 @@ class CeilingVerdictProbes:
     foreign_hidden: Callable[[str, str], bool]
 
 
-_REPORT_RUN_KINDS = frozenset({"report_planning", "report_generation"})
-
-
-def _report_run_active() -> bool:
-    """Is the current retrieval run a Deep Report phase?  A report's chunk
-    lane uses the frozen list for more than filtering: it is also the ANN
-    sidecar's COVERAGE question -- which allowed sources the scale index does
-    not hold yet (uploaded after the last fold) and must be recalled through
-    the bounded ``report_delta_fallback`` FTS.  Without the list the lane
-    trusts the index alone and those sources vanish from the report."""
-    from app.services.retrieval_run import current_retrieval_run
-
-    run = current_retrieval_run()
-    return run is not None and run.run_kind in _REPORT_RUN_KINDS
-
-
 def _probe_or_bind(probe: Callable[[], Any]) -> bool:
     """A verdict probe's answer, or ``True`` ("the ceiling binds") when the
     probe itself fails -- a saturated pool must not fail a result filter that
@@ -2056,11 +2060,14 @@ def run_ceiling_binds(scope: ActiveSourceScope, notebook_id: str) -> bool:
 
     Always "binds" -- today's conservative answer, ``source_ceiling_binds`` --
     when the scope carries no probes (every installer but the store-wired
-    default ceiling), and for a Deep Report phase (``_report_run_active``).
+    default ceiling).  A Deep Report phase is judged like any other run: the
+    pushed-down ANN lane still plans its sidecar coverage from the frozen
+    ceiling in Python (``_retrieve_chunks_ann``), so a source the scale index
+    has not folded yet is still recalled through ``report_delta_fallback``.
     A probe that fails answers "binds" (``_probe_or_bind``).
     """
     probes = scope._verdict_probes
-    if probes is None or _report_run_active():
+    if probes is None:
         return scope.source_ceiling_binds(notebook_id)
     library = notebook_id or scope.notebook_id
     return ceiling_binds(

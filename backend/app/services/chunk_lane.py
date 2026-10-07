@@ -59,7 +59,12 @@ def _lexical_gate_drift_probe(retrieval_state, notebook_id: str) -> bool:
     already tolerates above) must not turn a swallowed probe failure into a
     new, unswallowed emit failure.
     """
-    probe = getattr(retrieval_state, "_unsafe_source_scope_restricted", None)
+    # ``_lexical_gate_drift`` skips the read when the run pushed the list
+    # down (no list: the gate's answer cannot depend on drift); a double
+    # without it falls back to the per-call channel probe.
+    probe = getattr(retrieval_state, "_lexical_gate_drift", None)
+    if not callable(probe):
+        probe = getattr(retrieval_state, "_unsafe_source_scope_restricted", None)
     if not callable(probe):
         return False
     try:
