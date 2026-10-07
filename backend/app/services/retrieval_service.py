@@ -476,7 +476,7 @@ class RetrievalService:
         Knowhow projection) and no writer re-points a relation's endpoints
         (a manual merge moves evidence and deprecates the merged object, it does
         not touch relations) -- pinned by
-        ``test_merge_does_not_repoint_relation_endpoints``.
+        ``test_merge_keeps_relation_endpoints``.
 
         Nothing dropped → both values are returned as they came (a run without
         a scope never reads).
