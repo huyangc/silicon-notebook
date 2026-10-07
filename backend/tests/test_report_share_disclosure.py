@@ -19,6 +19,7 @@ from app.services.share_disclosure import (
     report_share_disclosure,
     require_publishable,
 )
+from tests.conversation_share_disclosure_cases import REPORT_CASES
 from tests.report_share_disclosure_cases import CASES, build_world, make_memory
 
 
@@ -46,6 +47,12 @@ def world(client, monkeypatch):
 @pytest.mark.parametrize("case", sorted(CASES))
 def test_report_share_disclosure_scenario(world, case):
     CASES[case](world)
+
+
+@pytest.mark.parametrize("case", sorted(REPORT_CASES))
+def test_public_report_memory_marker_scenario(world, case):
+    """E7-5: the public report page marks the author's Memory (``is_memory``)."""
+    REPORT_CASES[case](world)
 
 
 # --- the store read ------------------------------------------------------------
