@@ -19,6 +19,8 @@ haystack that carries the entire phrase (see `keyword_basis`).
 from __future__ import annotations
 
 import math
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import (
     AbstractSet,
@@ -1908,6 +1910,30 @@ def select_with_graph_reserve(
     )
 
 
+# The candidate pool every ``score_chunks`` call in the block saw, before the
+# ``RELEVANCE_FLOOR`` and the limit drop anything (``observed_chunk_candidates``).
+_CANDIDATE_SOURCE_SINK: ContextVar[Optional[List[str]]] = ContextVar(
+    "chunk_candidate_source_sink", default=None,
+)
+
+
+@contextmanager
+def observed_chunk_candidates():
+    """Collect the ``source_id`` of every candidate ``score_chunks`` is handed
+    inside the block -- the raw ANN / FTS / gathered pool, not only the
+    survivors.  A producer that read without its source list verifies THIS
+    against the ceiling it took before the read: an outsider that took a
+    candidate slot and was then scored below the floor still crowded out an
+    in-ceiling candidate, so it must flip the verdict and re-run the call
+    bound.  Worker threads that copy the context share the one list."""
+    sink: List[str] = []
+    token = _CANDIDATE_SOURCE_SINK.set(sink)
+    try:
+        yield sink
+    finally:
+        _CANDIDATE_SOURCE_SINK.reset(token)
+
+
 def score_chunks(
     query: str,
     chunks: List[dict],
@@ -1917,6 +1943,9 @@ def score_chunks(
 ) -> List[RetrievedChunk]:
     """Keyword + 可选语义(预算好的 chunk_sims)融合打分 chunk;大召回(默认
     top-150)。与 score_elements 同构,但作用于合并后的检索 chunk。"""
+    sink = _CANDIDATE_SOURCE_SINK.get()
+    if sink is not None:
+        sink.extend(str(c.get("source_id") or "") for c in chunks)
     basis = keyword_basis(query)
     scored: List[RetrievedChunk] = []
     for c in chunks:

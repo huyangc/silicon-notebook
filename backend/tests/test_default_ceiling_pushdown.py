@@ -636,3 +636,87 @@ def test_concurrent_sections_compute_the_verdict_once(repo):
 
     assert answers == [False] * 6
     assert len(calls) == 1, calls
+
+
+def test_a_report_on_an_index_without_a_sidecar_still_recalls_an_unindexed_source(
+    repo, monkeypatch,
+):
+    """#822 codex r2 P2: an older scale index has no row->source sidecar, so a
+    pushed-down report cannot confirm the index covers its ceiling.  It takes
+    the bounded fallback a bound report takes -- never the ANN-only lane that
+    would miss a source the index does not hold yet."""
+    from dataclasses import replace as dc_replace
+
+    from app.services.retrieval_run import retrieval_run
+
+    instance, bob, _alice = repo
+    nb = instance.create_notebook(NotebookCreate(name="kb")).id
+    _add_source(instance, nb, ["indexed baseline text " * 20])
+    instance.rebuild_unified_kg(nb)
+    instance.build_scale_index(nb)
+    delta = _add_source(instance, nb, ["DELTA9000 fresh unfolded evidence " * 20])
+    candidates = instance.retrieval.candidates
+    real_index = candidates._scale_index
+
+    def without_sidecar(notebook_id, **kwargs):
+        idx = real_index(notebook_id, **kwargs)
+        if idx is None:
+            return idx
+        try:
+            return dc_replace(idx, chunk_ann_source_codes=None)
+        except TypeError:
+            monkeypatch.setattr(idx, "chunk_ann_source_codes", None, raising=False)
+            return idx
+
+    monkeypatch.setattr(candidates, "_scale_index", without_sidecar)
+    with retrieval_run(run_kind="report_generation", actor_id=bob):
+        with _ceiling(instance, nb, bob):
+            assert run_ceiling_binds(current_source_scope(), nb) is False
+            hits = candidates._retrieve_chunks(nb, "DELTA9000 unfolded evidence", 10)[0]
+
+    assert delta in {hit.source_id for hit in hits}
+
+
+@pytest.mark.parametrize("leg", ["chunks", "keyword"])
+def test_an_outsider_that_took_a_candidate_slot_and_scored_below_the_floor_flips(
+    library, monkeypatch, leg,
+):
+    """#822 codex r2 P2: a source finishing after the verdict takes the FTS
+    candidate slots and is then scored below ``RELEVANCE_FLOOR`` -- invisible
+    among the survivors, yet it crowded the in-ceiling candidate out.  The
+    raw candidate pool is verified, so the verdict flips and the call re-runs
+    bound: the in-ceiling chunk is back."""
+    repo, nb, sid, bob, _alice, _statements = library
+    candidates = repo.retrieval.candidates
+    late_chunks = []
+    real_hits = type(candidates)._chunk_fts_hits
+
+    def crowded(self, db, notebook_id, query, *, k, allowed_source_ids=None, **kwargs):
+        if allowed_source_ids is None:
+            return list(late_chunks)                           # the slots, taken
+        return real_hits(self, db, notebook_id, query, k=k,
+                         allowed_source_ids=allowed_source_ids, **kwargs)
+
+    monkeypatch.setattr(type(candidates), "_chunk_fts_hits", crowded)
+    monkeypatch.setattr(candidates, "_embed_query", lambda _query: None)
+    monkeypatch.setattr(candidates, "notebook_copy_stats",
+                        lambda _nb: {"copyable": False, "size": {}})
+    with _ceiling(repo, nb, bob):
+        scope = current_source_scope()
+        scope_unbound = run_ceiling_binds(scope, nb) is False   # verdict first
+        late = _add_source(repo, nb, ["zq zq zq unrelated filler words " * 3])
+        with candidates._connect() as db:
+            late_chunks.extend(
+                {"chunk_id": row["id"], "source_id": late} for row in db.execute(
+                    "SELECT id FROM chunks WHERE source_id=?", (late,),
+                ).fetchall()
+            )
+        if leg == "chunks":
+            hits = candidates._retrieve_chunks(nb, "bandgap reference", 5)[0]
+        else:
+            hits = candidates._keyword_chunk_candidates(nb, "bandgap reference")
+        flipped = nb in scope._ceiling_bound_libraries
+
+    assert scope_unbound, "the late source arrived after an unbound verdict"
+    assert flipped, "the outsider in the raw pool flipped the verdict"
+    assert hits and {hit.source_id for hit in hits} == {sid}
