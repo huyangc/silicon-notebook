@@ -83,16 +83,23 @@ _NOTEBOOK_MEMORY_SOURCES = (
     + memory_sql.memory_source_type_predicate()
     + ")"
 )
+# These reads run for every notebook (no probe picks them, codex #824 r6), so
+# each is DRIVEN by the Memory source set: the unary ``+`` keeps the planner
+# off the notebook-wide indexes (which would walk every object / relation /
+# cluster of the notebook to find none) and on the ``source_id`` and
+# ``member_object_id`` indexes; ``CROSS JOIN`` fixes the objects-first order.
+# A notebook without Memory reads its sources and nothing else
+# (``test_viz_index_build``'s plan pin).
 _MEMORY_CLUSTER_CANONICALS_SQL = (
     "SELECT DISTINCT c.canonical_id FROM knowledge_objects o "
-    "JOIN concept_clusters c ON c.member_object_id = o.id "
-    "WHERE o.notebook_id=? AND o.source_id IN " + _NOTEBOOK_MEMORY_SOURCES
-    + " AND c.notebook_id=? "
+    "CROSS JOIN concept_clusters c ON c.member_object_id = o.id "
+    "WHERE +o.notebook_id=? AND o.source_id IN " + _NOTEBOOK_MEMORY_SOURCES
+    + " AND +c.notebook_id=? "
     "AND c.generation = COALESCE((SELECT cluster_generation "
     "FROM unified_kg_state WHERE notebook_id = ?), 0)"
 )
 _MEMORY_OBJECT_IDS_SQL = (
-    "SELECT id FROM knowledge_objects WHERE notebook_id=? AND source_id IN "
+    "SELECT id FROM knowledge_objects WHERE +notebook_id=? AND source_id IN "
     + _NOTEBOOK_MEMORY_SOURCES
 )
 # ``shared_content_digest``'s statements (see the PostgreSQL twin), each with
@@ -120,7 +127,7 @@ _SHARED_REVIEWED_RELATIONS_SQL = (
     + " ORDER BY id"
 )
 _MEMORY_RELATION_IDS_SQL = (
-    "SELECT id FROM knowledge_relations WHERE notebook_id=? AND source_id IN "
+    "SELECT id FROM knowledge_relations WHERE +notebook_id=? AND source_id IN "
     + _NOTEBOOK_MEMORY_SOURCES
 )
 _NOT_A_MEMORY_RELATION = " NOT IN (" + _MEMORY_RELATION_IDS_SQL + ")"
@@ -129,13 +136,6 @@ _SHARED_RELATION_EMBEDDING_FACTS = (
     "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts FROM relation_embeddings "
     "WHERE notebook_id=? AND relation_id" + _NOT_A_MEMORY_RELATION
 )
-
-
-def _when(present: bool, fragment: str) -> str:
-    """The Memory fragment only for a notebook that holds a Memory source: for
-    every other notebook the statement text -- and so its plan and cost -- stays
-    exactly what it was."""
-    return fragment if present else ""
 
 
 def _without_rows(ids, matrix, excluded):
@@ -462,15 +462,6 @@ class IndexProjectionStore:
             for row in db.execute(_MEMORY_SOURCE_IDS_SQL, (notebook_id,)).fetchall()
         )
 
-    @staticmethod
-    def has_memory_source(db, notebook_id: str) -> bool:
-        """Whether the notebook holds any Memory-derived source at all."""
-        return bool(db.execute(
-            "SELECT EXISTS(SELECT 1 FROM sources WHERE notebook_id=? AND "
-            + memory_sql.memory_source_type_predicate() + ")",
-            (notebook_id,),
-        ).fetchone()[0])
-
     def memory_source_ids(self, notebook_id: str) -> List[str]:
         """The notebook's Memory source ids (small: one per confirmed memory)."""
         with self.connect() as db:
@@ -509,14 +500,13 @@ class IndexProjectionStore:
     def source_ids(self, notebook_id: str) -> List[str]:
         """The sources a scale artifact can describe: everything except the
         members' Memory sources (M1) -- the artifact's watermark and fold
-        delta. Behind the probe, so a notebook without Memory runs the very
-        statement it always ran. See the PostgreSQL twin."""
+        delta. The exclusion is in the statement for every notebook (codex
+        #824 r6): exact at the statement's own snapshot, never chosen by an
+        earlier probe that a Memory confirmed in between would outdate. See
+        the PostgreSQL twin."""
         with self.connect() as db:
-            exclude = _when(
-                self.has_memory_source(db, notebook_id), _NOT_MEMORY_SOURCE
-            )
             return [r["id"] for r in db.execute(
-                "SELECT id FROM sources WHERE notebook_id=?" + exclude,
+                "SELECT id FROM sources WHERE notebook_id=?" + _NOT_MEMORY_SOURCE,
                 (notebook_id,)).fetchall()]
 
     def chunk_sources_for_ids(
@@ -633,10 +623,8 @@ class IndexProjectionStore:
         if sql is None:
             return frozenset()
         with self.connect() as db:
-            if not self.has_memory_source(db, notebook_id):
-                # One index probe instead of the id read: a notebook without
-                # Memory pays no statement it did not pay before the isolation.
-                return frozenset()
+            # One statement for every notebook (codex #824 r6): driven by the
+            # notebook's Memory source ids, so it reads nothing without Memory.
             return frozenset(
                 row["id"]
                 for row in db.execute(sql, (notebook_id, notebook_id)).fetchall()
@@ -645,11 +633,10 @@ class IndexProjectionStore:
     def memory_cluster_canonicals(self, notebook_id: str) -> "frozenset[str]":
         """Canonical ids of the published clusters that hold a Memory-derived
         member -- what a shared artifact must not fold anything into (see the
-        PostgreSQL twin). Empty, with one index probe, for a notebook without
-        Memory."""
+        PostgreSQL twin). One statement driven by the Memory source ids (empty
+        for a notebook without Memory), with no probe before it (codex #824
+        r6)."""
         with self.connect() as db:
-            if not self.has_memory_source(db, notebook_id):
-                return frozenset()
             return self._memory_canonicals_on(db, notebook_id)
 
     @staticmethod
@@ -890,10 +877,7 @@ class IndexProjectionStore:
             # hub node id is `cluster:<canonical id>`, minted from a member's
             # name, so filtering the member row alone would leave the private
             # name in the persisted node ids.
-            memory_canonicals = (
-                self._memory_canonicals_on(db, notebook_id)
-                if self.has_memory_source(db, notebook_id) else frozenset()
-            )
+            memory_canonicals = self._memory_canonicals_on(db, notebook_id)
             for r in db.execute(
                     "SELECT canonical_id, member_object_id FROM concept_clusters "
                     "WHERE notebook_id=? "

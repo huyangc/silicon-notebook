@@ -69,6 +69,8 @@ from tests.memory_artifact_fixture import (  # noqa: E402
     NOW,
     SECRET_NAMES,
     _file_identities,
+    assert_a_first_memory_committed_before_the_source_list_never_reaches_a_fold,
+    assert_a_fold_that_reached_memory_publishes_nothing_and_rebuilds,
     assert_a_memory_confirmed_mid_build_never_publishes,
     assert_a_pre_isolation_index_is_rebuilt_once_its_memory_is_deleted,
     assert_a_re_stamp_never_hides_a_shared_re_extraction,
@@ -579,15 +581,18 @@ def test_extra_edges_never_touch_a_memory_object(repo):
     assert any(a == shared_id and b == other and w == 0.98 for a, b, w in edges)
 
 
-def test_a_notebook_without_memory_issues_only_the_probe_for_every_artifact_read(repo):
-    """Every whole-notebook read a build makes (graph rows, both vector feeds, the
-    cluster canonical read) touches the Memory tables with the one-row probe and
-    nothing more when the notebook holds no Memory source; one that does holds
-    them all."""
+def test_no_artifact_read_chooses_its_statement_by_a_memory_probe(repo):
+    """codex #824 r6: every whole-notebook read a build makes (graph rows, both
+    vector feeds, the Memory id and cluster reads, the source list) states its
+    Memory exclusion in its own statement for EVERY notebook -- no probe picks
+    the statement first, so a first Memory committed between a probe and the
+    read can never be left in.  The Memory id / cluster reads of a notebook
+    without Memory are driven by its (empty) Memory source set: they return
+    nothing and walk the sources index, never a table scan."""
     import re
     from contextlib import contextmanager
 
-    plain = _star(repo)
+    plain = _star(repo).id
     seeded = seed_shared_notebook_with_memory(repo)
     projections = repo._runtime.index_projections
     original = projections.connect
@@ -601,7 +606,7 @@ def test_a_notebook_without_memory_issues_only_the_probe_for_every_artifact_read
 
     projections.connect = traced
     try:
-        for notebook_id, holds_memory in ((plain.id, False), (seeded["notebook_id"], True)):
+        for notebook_id in (plain, seeded["notebook_id"]):
             seen.clear()
             projections.graph_rows(notebook_id, None, synonym_edges=[])
             for table, column in (("knowledge_embeddings", "object_id"),
@@ -610,15 +615,66 @@ def test_a_notebook_without_memory_issues_only_the_probe_for_every_artifact_read
                 list(projections.embedding_pages(notebook_id, table, column))
             projections.memory_cluster_canonicals(notebook_id)
             projections.source_ids(notebook_id)
-            # beyond the probes, the (empty) Memory source-id reads and the
-            # in-statement exclusion of the row reads, a notebook without
-            # Memory pays for no Memory id or cluster read
+            assert not [s for s in seen if s.startswith("SELECT EXISTS(")], seen
             memory_reads = [s for s in seen if "source_type = 'memory'" in s
                             and (s.startswith("SELECT id FROM knowledge_")
                                  or s.startswith("SELECT DISTINCT c.canonical_id"))]
-            assert bool(memory_reads) is holds_memory, (holds_memory, memory_reads)
+            assert memory_reads, (notebook_id, seen)
+            listed = [s for s in seen if s.startswith("SELECT id FROM sources WHERE "
+                                                      "notebook_id=") and "NOT (" in s]
+            assert listed, seen
     finally:
         projections.connect = original
+    assert projections.memory_derived_ids(plain, "knowledge_embeddings") == frozenset()
+    assert projections.memory_derived_ids(plain, "relation_embeddings") == frozenset()
+    assert projections.memory_cluster_canonicals(plain) == frozenset()
+
+
+def test_the_source_list_keeps_its_rows_and_index_path_without_memory(repo):
+    """codex #824 r6: on a notebook without Memory, the source list with its
+    in-statement exclusion returns exactly the rows of the unfiltered read and
+    searches the same index; the Memory id reads search the sources index."""
+    from app.repositories.sqlite.index_projection_store import (
+        _MEMORY_CLUSTER_CANONICALS_SQL, _MEMORY_OBJECT_IDS_SQL,
+        _MEMORY_RELATION_IDS_SQL, _NOT_MEMORY_SOURCE,
+    )
+
+    plain = seed_notebook_without_memory(repo)
+    with repo._write() as db:
+        for n in range(30):
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+                "created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                (f"src-plain-{n}", plain, "t", "md", "ready", NOW, NOW))
+    bare = "SELECT id FROM sources WHERE notebook_id=?"
+
+    def plan(db, statement, params):
+        return [row["detail"] for row in db.execute(
+            "EXPLAIN QUERY PLAN " + statement, params).fetchall()]
+
+    with repo._connect() as db:
+        filtered_plan = plan(db, bare + _NOT_MEMORY_SOURCE, (plain,))
+        bare_plan = plan(db, bare, (plain,))
+        object_plan, relation_plan = [
+            plan(db, sql, (plain, plain))
+            for sql in (_MEMORY_OBJECT_IDS_SQL, _MEMORY_RELATION_IDS_SQL)]
+        canonical_plan = plan(db, _MEMORY_CLUSTER_CANONICALS_SQL, (plain,) * 4)
+        unfiltered = [row["id"] for row in db.execute(bare, (plain,)).fetchall()]
+    assert len(unfiltered) == 31
+    assert repo._runtime.index_projections.source_ids(plain) == unfiltered
+    assert filtered_plan == bare_plan and len(bare_plan) == 1, (filtered_plan, bare_plan)
+    assert bare_plan[0].startswith("SEARCH sources USING INDEX"), bare_plan
+    # driven by the (empty) Memory source set through the source_id / member
+    # indexes: never a walk of the notebook's objects, relations or clusters
+    assert object_plan[0].startswith(
+        "SEARCH knowledge_objects USING INDEX idx_knowledge_objects_source"), object_plan
+    assert relation_plan[0].startswith(
+        "SEARCH knowledge_relations USING INDEX idx_knowledge_relations_source"), relation_plan
+    assert canonical_plan[0].startswith(
+        "SEARCH o USING INDEX idx_knowledge_objects_source"), canonical_plan
+    assert any("idx_clusters_member" in line for line in canonical_plan), canonical_plan
+    for detail in (object_plan, relation_plan, canonical_plan):
+        assert not any(line.startswith("SCAN") for line in detail), detail
 
 
 def test_status_of_a_scale_index_built_before_the_isolation_reports_no_leaking_counts(repo):
@@ -728,6 +784,19 @@ def test_an_existing_memory_re_extracted_during_a_build_never_reaches_the_ann_la
     assert_a_memory_confirmed_mid_build_never_publishes(
         repo, monkeypatch, notebook_id, window, existing_source="src-memory"
     )
+
+
+def test_a_first_memory_committed_before_the_fold_source_list_never_reaches_the_fold(
+    repo, monkeypatch
+):
+    """codex #824 r6 P1: see the fixture's scenario of the same name."""
+    assert_a_first_memory_committed_before_the_source_list_never_reaches_a_fold(
+        repo, monkeypatch)
+
+
+def test_a_fold_that_reached_memory_publishes_nothing_and_rebuilds(repo, monkeypatch):
+    """codex #824 r6 P1: the fold's pre-publish Memory check."""
+    assert_a_fold_that_reached_memory_publishes_nothing_and_rebuilds(repo, monkeypatch)
 
 
 @pytest.mark.parametrize("window", ["ann_feed", "relation_feed"])

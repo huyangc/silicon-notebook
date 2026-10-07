@@ -708,6 +708,144 @@ def assert_an_index_built_before_the_first_memory_recovers_by_fold(repo) -> None
     assert runtime.load(notebook_id).manifest["build_id"] == folded["build_id"]
 
 
+def _foldable_notebook_without_memory(repo) -> tuple:
+    """A notebook without Memory, indexed with a relation ANN (``store_kg``
+    embedded its shared relation), then given a new shared source -- so the
+    next fold has a delta. Returns ``(notebook_id, {name: object id})``."""
+    notebook_id = seed_notebook_without_memory(repo)
+    ids = _object_ids_by_name(repo, notebook_id)
+    shared_relation = _relation_id(repo, notebook_id, ids["MOSFET"], ids["gain"],
+                                   "depends_on", SHARED_SOURCE)
+    repo.build_scale_index(notebook_id)
+    idx = repo._runtime.scale_artifacts.load(notebook_id)
+    assert idx is not None and list(idx.relation_ann_labels or ()) == [shared_relation]
+    with repo._write() as db:
+        db.execute(
+            sql(repo, "INSERT INTO sources (id,notebook_id,title,source_type,"
+                      "status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)"),
+            ("src-fold", notebook_id, "fold", "md", "ready", NOW, NOW),
+        )
+    repo.store_kg(notebook_id, "src-fold", [_object("f", "FOLDED")], [])
+    return notebook_id, ids
+
+
+def _arm_fold(repo, monkeypatch, before_source_list) -> list:
+    """Run ``before_source_list()`` once, right before the first source-list
+    statement INSIDE the next fold (``source_ids``: the bare list or the list
+    with its Memory exclusion -- never the Memory source read). Returns the
+    events the builder emits from here on."""
+    projections = repo._runtime.index_projections
+    builder = repo._runtime.scale_builder
+    bare = sql(repo, "SELECT id FROM sources WHERE notebook_id=?")
+    state = {"armed": False}
+
+    def before(statement) -> None:
+        if not isinstance(statement, str):  # a psycopg ``Composed`` statement
+            return
+        if state["armed"] and statement.startswith(bare) and (
+                statement.strip() == bare or "NOT (" in statement):
+            state["armed"] = False
+            before_source_list()
+
+    outer = projections.connect
+
+    @contextmanager
+    def connect():
+        with outer() as db:
+            yield _StatementHook(db, before)
+
+    monkeypatch.setattr(projections, "connect", connect)
+    real_fold = builder.fold
+
+    def fold(notebook_id, *args, **kwargs):
+        state["armed"] = True
+        try:
+            return real_fold(notebook_id, *args, **kwargs)
+        finally:
+            state["armed"] = False
+
+    monkeypatch.setattr(builder, "fold", fold)
+    events: list = []
+    real_emit = builder.event_log.emit
+    monkeypatch.setattr(builder.event_log, "emit",
+                        lambda e: (events.append(dict(e)), real_emit(e))[1])
+    return events
+
+
+def assert_a_first_memory_committed_before_the_source_list_never_reaches_a_fold(
+    repo, monkeypatch,
+) -> None:
+    """codex #824 r6 P1: the notebook's FIRST Memory -- a source, an object, a
+    relation between two shared objects and both vectors -- commits right
+    before the fold's source-list statement. The list leaves it out in the
+    statement itself, so the fold folds the shared delta as usual (no refusal)
+    and its ANN, relation ANN, nodes and watermark hold none of it."""
+    notebook_id, ids = _foldable_notebook_without_memory(repo)
+    confirmed: list = []
+    events = _arm_fold(repo, monkeypatch, lambda: confirmed.append(confirm_a_memory(
+        repo, notebook_id, next(_LATE_COUNTER),
+        relation_between=(ids["MOSFET"], ids["gain"]),
+    )))
+    folded = repo.fold_scale_index_delta(notebook_id)
+    assert len(confirmed) == 1
+    late = confirmed[0]
+    assert not [e for e in events if e.get("kind") == "scale_fold_refused"], events
+    assert "src-fold" in folded["watermark_sources"]
+    assert late["source_id"] not in folded["watermark_sources"]
+    assert_no_label_name_or_node_of(
+        repo, notebook_id, [late["object_id"]], [late["name"]], [late["relation_id"]],
+    )
+
+
+def assert_a_fold_that_reached_memory_publishes_nothing_and_rebuilds(
+    repo, monkeypatch,
+) -> None:
+    """codex #824 r6 P1, the fold's last line: should a Memory source reach the
+    fold's delta anyway (here the source list is made to hand one back), the
+    fold publishes nothing of its own -- one content-free refusal event -- and
+    the full build, which keeps Memory out, takes over."""
+    notebook_id, ids = _foldable_notebook_without_memory(repo)
+    late = confirm_a_memory(repo, notebook_id, next(_LATE_COUNTER),
+                            relation_between=(ids["MOSFET"], ids["gain"]))
+    projections = repo._runtime.index_projections
+    builder = repo._runtime.scale_builder
+    real_list = projections.source_ids
+    real_fold = builder.fold
+    state = {"leak": False}
+
+    def leaky_source_ids(nb):
+        listed = real_list(nb)
+        if state["leak"]:  # the fold's first source list only
+            state["leak"] = False
+            return sorted(listed + [late["source_id"]])
+        return listed
+
+    def fold(nb, *args, **kwargs):
+        state["leak"] = True
+        try:
+            return real_fold(nb, *args, **kwargs)
+        finally:
+            state["leak"] = False
+
+    monkeypatch.setattr(projections, "source_ids", leaky_source_ids)
+    monkeypatch.setattr(builder, "fold", fold)
+    events: list = []
+    real_emit = builder.event_log.emit
+    monkeypatch.setattr(builder.event_log, "emit",
+                        lambda e: (events.append(dict(e)), real_emit(e))[1])
+    outcome = repo.fold_scale_index_delta(notebook_id)
+    assert_no_label_name_or_node_of(
+        repo, notebook_id, [late["object_id"]], [late["name"]], [late["relation_id"]],
+    )
+    assert [e for e in events if e.get("kind") == "scale_fold_refused"] == [
+        {"kind": "scale_fold_refused", "notebook_id": notebook_id,
+         "reason": "memory_reached_fold"}
+    ]
+    assert outcome.get("status") != "discarded"
+    assert late["source_id"] not in outcome["watermark_sources"]
+    assert "src-fold" in outcome["watermark_sources"]
+
+
 def _capture_events(repo) -> list:
     """Every event the scale builder emits from here on (the test's repository
     is discarded afterwards, so the hook is never taken off)."""
