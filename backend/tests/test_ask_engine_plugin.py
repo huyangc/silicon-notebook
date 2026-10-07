@@ -2047,6 +2047,21 @@ def test_plugin_ask_passes_an_outer_scope_through_untouched():
     assert captured[-1] is installed
 
 
+def test_the_plugin_engine_reached_without_a_ceiling_refuses():
+    """E1-2 (review V12): ``ask_plugin_engine`` builds no scope of its own.
+    Reached directly -- not through ``AskService.ask``'s ``_retrieval_ceiling``
+    -- it refuses before the provider runs instead of retrieving unscoped."""
+    from app.application.ask_reasoning import StageBoundaryError
+
+    captured: list[object] = []
+    service = _scope_capturing_plugin_service(captured)
+    with pytest.raises(StageBoundaryError, match="no retrieval ceiling"):
+        service.ask_plugin_engine(
+            "nb", AskRequest(question="问题", mode="alpha.kg"), user_id="user",
+        )
+    assert captured == [], "the provider never searched"
+
+
 def test_kg_budget_is_shared_and_early_exits_never_spend_it():
     access = _kg_access(
         search_knowledge=lambda *_args, **_kwargs: [_object(notebook_id="notebook-1")],
