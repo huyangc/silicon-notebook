@@ -183,23 +183,15 @@ def _first_relation_sample(raw: object) -> str:
 def _first_vector_dim(rows, runtime_dim: int):
     """The dimension ``build_matrix`` would give a matrix of ``rows``
     (``(vid, vector)`` rows in read order): that of the first row it would
-    keep, after the same decoding and runtime truncation; ``None`` when no
-    row is valid.  Reads rows only until that first one."""
-    from app.services.vector_index import decode_vector, truncate_vec
+    keep; ``None`` when no row is valid.  Asks ``build_matrix`` itself, one
+    row at a time up to that first one, so decoding, runtime truncation and
+    the validity rules stay its own (no second decode site)."""
+    from app.services.vector_index import build_matrix
 
     for row in rows:
-        raw = row["vector"]
-        if not raw:
-            continue
-        try:
-            arr = decode_vector(raw)
-        except Exception:  # noqa: BLE001 — skipped, as build_matrix skips it
-            continue
-        if arr is None or arr.ndim != 1 or arr.size == 0:
-            continue
-        if runtime_dim > 0:
-            arr = truncate_vec(arr, runtime_dim)
-        return int(arr.size)
+        ids, mat = build_matrix([(row["vid"], row["vector"])], runtime_dim=runtime_dim)
+        if ids:
+            return int(mat.shape[1])
     return None
 
 
