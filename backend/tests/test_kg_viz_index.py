@@ -755,3 +755,43 @@ def test_large_nb_guard_uses_cached_active_object_count(repo, monkeypatch):
     total_calls = len(cached_cold_calls) + len(uncached_raw_calls)
     assert total_calls == 1                  # 第二次:同 seq,命中 memo,合计仍是 1
     assert len(uncached_raw_calls) == 0      # 且不能是靠走②形态凑出来的「零查询」假象
+
+
+# ───────────────────────── M1: what the graph and neighbour views read ────────
+from tests.memory_artifact_fixture import (  # noqa: E402
+    SECRET_NAMES,
+    seed_shared_notebook_with_memory,
+)
+
+
+def test_neighbour_view_drops_an_edge_only_a_memory_relation_supports(repo):
+    """Two visible (shared) nodes joined ONLY by another member's Memory relation
+    are not neighbours in the served view; an edge a shared relation also
+    supports stays, once, and a Memory-only edge type on that pair is gone."""
+    seeded = seed_shared_notebook_with_memory(repo)
+    nb_id, canon = seeded["notebook_id"], seeded["canonical"]
+
+    left = repo.kg_neighbors(nb_id, canon["left"])
+    assert left["edges"] == []
+    assert [n["id"] for n in left["nodes"]] == [canon["left"]]
+
+    core = repo.kg_neighbors(nb_id, canon["MOSFET"])
+    triples = sorted(
+        (e["source_object_id"], e["target_object_id"], e["edge_type"])
+        for e in core["edges"]
+    )
+    assert triples == sorted([
+        (canon["MOSFET"], canon["gain"], "depends_on"),
+        (canon["MOSFET"], canon["bias"], "depends_on"),
+    ])
+    rendered = repr(core) + repr(repo.unified_graph(nb_id, "object", 10))
+    for secret in SECRET_NAMES:
+        assert secret not in rendered
+
+
+def test_graph_view_served_from_the_artifact_has_no_memory_node(repo):
+    seeded = seed_shared_notebook_with_memory(repo)
+    graph = repo.unified_graph(seeded["notebook_id"], "object", 10)
+    names = {node["payload"]["name"] for node in graph["nodes"]}
+    assert names == {"MOSFET", "gain", "bias", "left", "right"}
+    assert graph["total_nodes"] == 5 and graph["total_edges"] == 2

@@ -151,8 +151,6 @@ def test_scale_builder_callbacks_do_not_retain_repository_facade(repo):
             "get_notebook",
             "version",
             "load_scale",
-            "full_viz_graph",
-            "relations_for_notebook",
             "cluster_map",
             "incremental_fuse_source",
             "invalidate_scale_cache",

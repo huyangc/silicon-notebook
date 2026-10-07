@@ -18,6 +18,7 @@ caller-appended settings tail), so on-disk manifest.version keeps matching.
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, TYPE_CHECKING
 
@@ -27,6 +28,7 @@ from app.repositories.postgres._store_utils import (
     json_value,
     keyset_pages as _keyset_pages,
 )
+from app.repositories.postgres import memory_sql
 from app.repositories.postgres.embedding_store import (
     MATRIX_FETCH_BATCH,
     EmbeddingStore,
@@ -45,6 +47,153 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 def _binary_text_key(value: str) -> bytes:
     """Match PostgreSQL C collation for identifier ordering."""
     return value.encode("utf-8", "surrogatepass")
+
+
+#: M1 isolation of the shared scale / viz artifacts. Two separate things carry it:
+#:
+#: * every artifact built by the isolating code carries the manifest field
+#:   ``memory_isolation`` = this version (``memory_isolation_stamp``), so
+#:   ``predates_memory_isolation`` tells an artifact built BEFORE the isolation
+#:   by the field alone -- never by what the notebook's version looks like now
+#:   (a clean artifact built before the notebook's first Memory must stay
+#:   usable once that Memory arrives);
+#: * the version signal of EVERY notebook carries the pair
+#:   (``memory_isolation``, version) in its settings tail, so a
+#:   pre-isolation artifact is never version-exact (its embedded viz is never
+#:   served as fresh, the index status reports it stale). Every notebook, not
+#:   only one holding Memory now: a Memory deleted before the upgrade is
+#:   hard-deleted and leaves nothing to decide on, while its name can still sit
+#:   in the artifact's viz. The cost is one full rebuild of every index built
+#:   before the upgrade (stored vectors and rows only, no model call).
+#:
+#: Bump it when what a Memory-bearing artifact may contain changes again.
+#: Mirrored in ``sqlite/index_projection_store.py`` (parity test:
+#: ``test_index_projection_store_parity``).
+MEMORY_ISOLATION_ARTIFACT_VERSION = 1
+MEMORY_ISOLATION_ARTIFACT_MARKER = "memory_isolation"
+#: Manifest field holding a digest of the notebook's Memory source ids at the
+#: moment the artifact was stamped: ``fold`` re-stamps an index whose delta is
+#: empty but whose notebook gained (or lost) Memory since, because Memory never
+#: enters the index -- only the version has to move.
+MEMORY_SOURCES_DIGEST_FIELD = "memory_sources_digest"
+
+_NOT_MEMORY_SOURCE = (
+    " AND NOT (" + memory_sql.memory_source_type_predicate() + ")"
+)
+# Trailing predicate of every PAGED / whole-table object and relation read of an
+# artifact build (M1: an object / relation is derived from Memory when its
+# primary source is a Memory source -- the ``memory_sql.memory_derived_*``
+# definition, restricted to this notebook's Memory sources). Written as an
+# UNCORRELATED ``NOT IN (subquery)``: PostgreSQL plans it as a *hashed* SubPlan
+# -- the subquery (an index lookup on ``idx_sources_nb_hidden_type``) runs ONCE
+# per statement into a hash table, and each row costs one hash probe -- so every
+# page is exact at its own snapshot (a Memory confirmed, and even deleted again,
+# while a build runs can never be read by a later page). Measured at 1M rows
+# with 200 Memory sources: 1.6-2.8 ms per 10k-row page and 148 ms for the whole
+# relation read, the same as with no filter; the correlated ``NOT EXISTS`` anti
+# join cost 14-46 ms per page, and ``<> ALL(ARRAY(...))`` 20-48 ms per page and
+# 2.7 s for the whole read (a linear scan of the array per row). Appended for
+# every notebook, not behind a probe: a probe taken before the first page is
+# exactly the window the first Memory would slip through. For a notebook
+# without Memory the hash is empty. One scalar parameter: the notebook id.
+# ``NOT IN`` must not meet a NULL on either side, or it yields NULL and drops
+# the row: ``source_id IS NULL`` rows (a relation written without a source --
+# ``knowledge_relations.source_id`` is nullable here) are never Memory and are
+# kept by the first arm; the subquery keeps ``id IS NOT NULL`` although
+# ``sources.id`` is NOT NULL here, so the fragment reads the same as the SQLite
+# twin, where a ``TEXT PRIMARY KEY`` does admit a NULL id (the planner drops the
+# redundant test). (A Memory set too large for ``work_mem`` would fall back to
+# an unhashed SubPlan; one id per confirmed memory keeps it far below that.)
+_EXCLUDE_MEMORY_ROWS = (
+    " AND (source_id IS NULL OR source_id NOT IN (SELECT id FROM sources "
+    "WHERE notebook_id=%s AND id IS NOT NULL AND "
+    + memory_sql.memory_source_type_predicate() + "))"
+)
+# The notebook's own Memory source ids -- small (one per confirmed memory).
+_MEMORY_SOURCE_IDS_SQL = (
+    "SELECT id FROM sources WHERE notebook_id=%s AND "
+    + memory_sql.memory_source_type_predicate()
+)
+# The three id reads below are driven by THIS notebook's Memory source ids (one
+# scalar parameter, bound twice) -- the ``memory_derived_*`` fragment has no
+# notebook predicate on its ``sources`` side and planned as a scan of every
+# notebook's Memory (measured 280-330 ms against 6-18 ms at 1M objects with
+# 20k foreign Memory sources).
+_NOTEBOOK_MEMORY_SOURCES = (
+    "ANY(ARRAY(SELECT id FROM sources WHERE notebook_id=%s AND "
+    + memory_sql.memory_source_type_predicate()
+    + "))"
+)
+# Clusters are NOT filtered per page (a whole-cluster anti join per row measured
+# ~1.2 s per 10k-row page against 6 ms); the clusters holding a Memory-derived
+# member are read ONCE and their rows skipped.
+_MEMORY_CLUSTER_CANONICALS_SQL = (
+    "SELECT DISTINCT c.canonical_id FROM knowledge_objects o "
+    "JOIN concept_clusters c ON c.member_object_id = o.id "
+    "WHERE o.notebook_id=%s AND o.source_id = " + _NOTEBOOK_MEMORY_SOURCES
+    + " AND c.notebook_id=%s AND c.generation=%s"
+)
+_MEMORY_OBJECT_IDS_SQL = (
+    "SELECT id FROM knowledge_objects WHERE notebook_id=%s AND source_id = "
+    + _NOTEBOOK_MEMORY_SOURCES
+)
+# ``version_facts``' five aggregates restricted to rows not derived from
+# Memory (``shared_content_digest``), each with the number of times it binds
+# the notebook id. Objects and relations by the in-statement exclusion;
+# embeddings and cluster members by THIS notebook's Memory object ids (small,
+# hashed once per statement); chunks as they are.
+_NOT_A_MEMORY_OBJECT = " NOT IN (" + _MEMORY_OBJECT_IDS_SQL + ")"
+_SHARED_CONTENT_FACTS = (
+    ("SELECT COUNT(*) AS c, MAX(updated_at) AS ts FROM knowledge_objects "
+     "WHERE notebook_id=%s" + _EXCLUDE_MEMORY_ROWS, 2),
+    ("SELECT COUNT(*) AS c, MAX(created_at) AS ts FROM knowledge_relations "
+     "WHERE notebook_id=%s" + _EXCLUDE_MEMORY_ROWS, 2),
+    ("SELECT COUNT(*) AS c, MAX(created_at) AS ts FROM chunks "
+     "WHERE notebook_id=%s", 1),
+    ("SELECT COUNT(*) AS c, MAX(created_at) AS ts FROM concept_clusters "
+     "WHERE notebook_id=%s AND generation = COALESCE((SELECT cluster_generation "
+     "FROM unified_kg_state WHERE notebook_id = %s), 0) "
+     "AND member_object_id" + _NOT_A_MEMORY_OBJECT, 4),
+    ("SELECT COUNT(*) AS c, MAX(created_at) AS ts FROM knowledge_embeddings "
+     "WHERE notebook_id=%s AND object_id" + _NOT_A_MEMORY_OBJECT, 3),
+)
+_MEMORY_RELATION_IDS_SQL = (
+    "SELECT id FROM knowledge_relations WHERE notebook_id=%s AND source_id = "
+    + _NOTEBOOK_MEMORY_SOURCES
+)
+
+
+def _when(present: bool, fragment: str) -> str:
+    """The Memory fragment only for a notebook that holds a Memory source: for
+    every other notebook (all base libraries, most personal ones) the statement
+    text -- and so its plan and cost -- stays exactly what it was."""
+    return fragment if present else ""
+
+
+def _without_rows(ids, matrix, excluded):
+    """``(ids, matrix)`` minus the rows of the excluded ids (row-aligned)."""
+    if not excluded or ids is None or not len(ids):
+        return ids, matrix
+    keep = [i for i, vid in enumerate(ids) if vid not in excluded]
+    if len(keep) == len(ids):
+        return ids, matrix
+    import numpy as np
+    return [ids[i] for i in keep], np.asarray(matrix)[keep]
+
+
+def _without_edges(edges, excluded):
+    """Extra edges minus those touching an excluded id."""
+    if not excluded:
+        return edges
+    return [e for e in edges if e[0] not in excluded and e[1] not in excluded]
+
+
+def _without_ids(rows, excluded):
+    """``(id, raw)`` pairs minus the excluded ids -- applied BEFORE decoding, so
+    pages keep their full size and an unchanged stream is returned untouched."""
+    if not excluded:
+        return rows
+    return ((vid, raw) for vid, raw in rows if vid not in excluded)
 
 
 # The two frozen edge encodings the gathered graph produces: the default
@@ -109,7 +258,18 @@ class IndexProjectionStore:
         position). It MUST stay LAST: three call sites read
         ``version_signal(nb)[1]`` for cseq (scale_artifact_runtime.py,
         scale_index_builder.py) and appending anywhere but the end would
-        silently shift what they read."""
+        silently shift what they read.
+
+        M1: EVERY notebook's settings tail carries the pair
+        (``memory_isolation``, version) -- right before the mention seq and
+        the pipeline identity, which keep ending the tail as they always
+        did -- so the version of an artifact built
+        before the isolation -- or before the last bump of that version -- is
+        never the current one: exact loads refuse it, the index status reports
+        it stale and the automatic indexing rebuilds it. Whether the notebook
+        holds Memory does not matter: a Memory deleted before the upgrade
+        leaves no trace to decide on, while its name can still sit in such an
+        artifact's viz. No probe: the pair is a constant."""
         from app.domain.vector_index import resolve_runtime_dim
         settings_tail = (
             self.settings.ppr_variant_edge_weight,
@@ -136,7 +296,12 @@ class IndexProjectionStore:
                 if st else "builtin.chunk.v1"
             )
             epoch = int(st["kg_reset_epoch"]) if (st and st["kg_reset_epoch"] is not None) else 0
-        return seq, cseq, settings_tail + (mseq, pipeline_id, pipeline_version), epoch
+        isolation = (MEMORY_ISOLATION_ARTIFACT_MARKER, MEMORY_ISOLATION_ARTIFACT_VERSION)
+        return (
+            seq, cseq,
+            settings_tail + isolation + (mseq, pipeline_id, pipeline_version),
+            epoch,
+        )
 
     def pipeline_identity(self, notebook_id: str) -> tuple[str, str]:
         with self.connect() as connection:
@@ -196,6 +361,106 @@ class IndexProjectionStore:
             if state else "builtin.chunk.v1",
         ]
 
+    def shared_content_digest(self, notebook_id: str) -> str:
+        """A digest of ``version_facts``' five aggregates over the notebook's
+        rows that are NOT derived from Memory -- what a re-stamp needs to know
+        is unchanged before it republishes an index as current: the version
+        moves for Memory and shared content alike (both bump the same
+        counters), and a shared source re-parsed under its old id is no delta
+        source, so only this tells the two apart. Chunks need no exclusion
+        (Memory sources stay chunkless). Not on any hot path: read once per
+        build, fold and re-stamp."""
+        with self.connect() as db:
+            facts = [
+                [int(row["c"]), iso_timestamp(row["ts"])]
+                for row in (
+                    db.execute(statement, (notebook_id,) * binds).fetchone()
+                    for statement, binds in _SHARED_CONTENT_FACTS
+                )
+            ]
+        return hashlib.sha256(repr(facts).encode("utf-8")).hexdigest()[:32]
+
+    @staticmethod
+    def predates_memory_isolation(manifest, current_version) -> bool:
+        """Whether an artifact with this ``manifest`` was built before the
+        isolation: such an artifact can hold a member's Memory objects and
+        names -- even of a notebook holding no Memory now, since a Memory
+        deleted before the upgrade leaves no trace -- so no reader may serve
+        it, not even as "stale but usable", and its counts are not reported.
+
+        Decided by the artifact's own ``memory_isolation`` field alone, which
+        every isolating build / fold / viz build writes; never by comparing
+        version lists, so an artifact built cleanly before the notebook's
+        first Memory stays usable once that Memory arrives.
+        ``current_version`` is kept for the callers' shape and not consulted."""
+        return IndexProjectionStore.built_before_memory_isolation(manifest)
+
+    @staticmethod
+    def built_before_memory_isolation(manifest) -> bool:
+        """Whether ``manifest`` lacks the isolation field this code writes --
+        an artifact built before the isolation (or before its last bump)."""
+        field = (
+            manifest.get(MEMORY_ISOLATION_ARTIFACT_MARKER)
+            if isinstance(manifest, dict) else None
+        )
+        return field != MEMORY_ISOLATION_ARTIFACT_VERSION
+
+    @staticmethod
+    def memory_isolation_stamp(memory_source_ids) -> dict:
+        """The two manifest fields an isolating build / fold writes: the
+        isolation version, and a digest of the notebook's Memory source ids at
+        stamping time ("" for none) -- ids never enter a shared artifact, and a
+        digest is all ``fold`` needs to see the Memory set changed."""
+        ids = sorted(memory_source_ids or ())
+        digest = (
+            hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest()[:32]
+            if ids else ""
+        )
+        return {
+            MEMORY_ISOLATION_ARTIFACT_MARKER: MEMORY_ISOLATION_ARTIFACT_VERSION,
+            MEMORY_SOURCES_DIGEST_FIELD: digest,
+        }
+
+    @classmethod
+    def memory_sources_changed(cls, manifest, memory_source_ids) -> bool:
+        """Whether the notebook's Memory set differs from the one ``manifest``
+        was stamped over. A manifest without the digest (built before the
+        isolation, or by a notebook that never had Memory) counts as stamped
+        over no Memory -- so a notebook without Memory never reads as changed."""
+        recorded = (
+            manifest.get(MEMORY_SOURCES_DIGEST_FIELD, "")
+            if isinstance(manifest, dict) else ""
+        )
+        current = cls.memory_isolation_stamp(memory_source_ids)[
+            MEMORY_SOURCES_DIGEST_FIELD
+        ]
+        return (recorded or "") != current
+
+    @staticmethod
+    def memory_source_set(db, notebook_id: str) -> "frozenset[str]":
+        """The notebook's Memory source ids, read on ``db`` (one index lookup on
+        ``idx_sources_nb_hidden_type``; empty for a notebook without Memory)."""
+        return frozenset(
+            row["id"]
+            for row in db.execute(_MEMORY_SOURCE_IDS_SQL, (notebook_id,)).fetchall()
+        )
+
+    @staticmethod
+    def has_memory_source(db, notebook_id: str) -> bool:
+        """Whether the notebook holds any Memory-derived source at all -- one
+        index probe on ``idx_sources_nb_hidden_type (notebook_id, source_type)``."""
+        return bool(db.execute(
+            "SELECT EXISTS(SELECT 1 FROM sources WHERE notebook_id=%s AND "
+            + memory_sql.memory_source_type_predicate()
+            + ") AS present",
+            (notebook_id,),
+        ).fetchone()["present"])
+
+    def memory_source_ids(self, notebook_id: str) -> List[str]:
+        """The notebook's Memory source ids (small: one per confirmed memory)."""
+        with self.connect() as db:
+            return sorted(self.memory_source_set(db, notebook_id))
+
     def version_with_settings(self, notebook_id: str, settings_tail: tuple) -> list:
         return self.version_facts(notebook_id) + list(settings_tail)
 
@@ -228,9 +493,20 @@ class IndexProjectionStore:
             ).fetchone()["exists"])
 
     def source_ids(self, notebook_id: str) -> List[str]:
+        """The sources a scale artifact can describe: everything except the
+        members' Memory sources. This is the artifact's watermark and its fold
+        delta, and a shared artifact must not list -- or count -- a member's
+        private sources (M1); a Memory source therefore never becomes a fold
+        delta either, so its objects never reach an index. The exclusion is
+        appended behind the probe, so a notebook without Memory runs the very
+        statement it always ran."""
         with self.connect() as db:
+            exclude = _when(
+                self.has_memory_source(db, notebook_id), _NOT_MEMORY_SOURCE
+            )
             return [r["id"] for r in db.execute(
-                "SELECT id FROM sources WHERE notebook_id=%s", (notebook_id,)).fetchall()]
+                "SELECT id FROM sources WHERE notebook_id=%s" + exclude,
+                (notebook_id,)).fetchall()]
 
     def chunk_sources_for_ids(
         self, notebook_id: str, chunk_ids: Sequence[str]
@@ -319,6 +595,9 @@ class IndexProjectionStore:
     def relation_ids_for_source_batch(
         self, db, notebook_id: str, source_ids: Sequence[str]
     ) -> list[str]:
+        # No Memory exclusion here: the batch is a fold delta, taken from
+        # ``source_ids()``, which never lists a Memory source -- so no relation
+        # this reads has a Memory source as its ``source_id``.
         if not source_ids:
             return []
         placeholders = ",".join("%s" for _ in source_ids)
@@ -330,6 +609,61 @@ class IndexProjectionStore:
                 (notebook_id, *source_ids),
             ).fetchall()
         ]
+
+    def memory_derived_ids(
+        self, notebook_id: str, table: str
+    ) -> "frozenset[str]":
+        """Ids of the notebook's Memory-derived rows that ``table`` (an
+        embedding table) carries vectors for -- what a shared index must skip.
+
+        ``knowledge_embeddings`` -> objects, ``relation_embeddings`` ->
+        relations; any other table (chunks: the write guard keeps Memory
+        sources chunkless) has nothing to exclude. Driven by THIS notebook's
+        Memory source ids; empty for a notebook without Memory.
+        """
+        sql = {
+            "knowledge_embeddings": _MEMORY_OBJECT_IDS_SQL,
+            "relation_embeddings": _MEMORY_RELATION_IDS_SQL,
+        }.get(table)
+        if sql is None:
+            return frozenset()
+        with self.connect() as db:
+            if not self.has_memory_source(db, notebook_id):
+                # One index probe instead of the id read: a notebook without
+                # Memory pays no statement it did not pay before the isolation.
+                return frozenset()
+            return frozenset(
+                row["id"]
+                for row in db.execute(sql, (notebook_id, notebook_id)).fetchall()
+            )
+
+    def memory_cluster_canonicals(self, notebook_id: str) -> "frozenset[str]":
+        """Canonical ids of the published clusters that hold a Memory-derived
+        member -- the clusters a shared artifact must not fold anything into
+        (the id is minted from a member's name, so folding a SHARED object into
+        such a cluster would put the private name into the artifact's node id).
+        Empty, with one index probe, for a notebook without Memory."""
+        with self.connect() as db:
+            if not self.has_memory_source(db, notebook_id):
+                return frozenset()
+            published = db.execute(
+                "SELECT cluster_generation FROM unified_kg_state "
+                "WHERE notebook_id=%s", (notebook_id,),
+            ).fetchone()
+            generation = int(
+                0 if published is None or published["cluster_generation"] is None
+                else published["cluster_generation"]
+            )
+            return self._memory_canonicals_on(db, notebook_id, generation)
+
+    @staticmethod
+    def _memory_canonicals_on(db, notebook_id: str, generation: int) -> "frozenset[str]":
+        return frozenset(
+            row["canonical_id"] for row in db.execute(
+                _MEMORY_CLUSTER_CANONICALS_SQL,
+                (notebook_id, notebook_id, notebook_id, generation),
+            ).fetchall()
+        )
 
     def active_object_graph_rows(self, db, notebook_id: str):
         """Whole-notebook active object rows for the standalone viz derive,
@@ -363,6 +697,10 @@ class IndexProjectionStore:
         earlier version of this ledger did exactly that). Same trade-off, same
         acceptance, as ``EmbeddingStore.vector_pages``.
 
+        M1: every page carries ``_EXCLUDE_MEMORY_ROWS`` -- exact at the page's
+        own snapshot, whatever Memory is confirmed or deleted between pages --
+        so the standalone viz never holds a member's private object or its name.
+
         This is a GENERATOR: it must be consumed inside the caller's
         connection scope, exactly once, by iteration — no ``len()``, no
         indexing, no second pass. A caller that iterates after closing ``db``
@@ -375,13 +713,36 @@ class IndexProjectionStore:
                 f"SELECT id,object_type,{PAYLOAD_NAME_EXPRESSION} AS name,ordinal "
                 "FROM knowledge_objects "
                 "WHERE notebook_id=%s AND status!='deprecated'"
+                + _EXCLUDE_MEMORY_ROWS
                 + ("" if cursor is None else " AND ordinal>%s")
                 + " ORDER BY ordinal",
-                (notebook_id,) if cursor is None else (notebook_id, cursor),
+                (notebook_id, notebook_id) if cursor is None
+                else (notebook_id, notebook_id, cursor),
             ),
             lambda row: row["ordinal"],
         ):
             yield from page
+
+    def active_relation_graph_rows(self, db, notebook_id: str):
+        """The relation half of the standalone viz derive: every relation of
+        the notebook that is not derived from a Memory source (M1: a member's
+        Memory relations never support an edge of a shared artifact).
+
+        Only the three columns the derive reads -- ``relations_for_notebook``
+        also hauls every relation's evidence JSON, which the viz never looks
+        at. No ``review_status`` / endpoint-status filter and no ORDER BY, both
+        exactly as ``relations_for_notebook`` (the derive drops an edge whose
+        endpoint is not a folded node, so edges to an excluded Memory object
+        vanish there). Whole-result ``fetchall`` like its predecessor (a known
+        cost at multi-million relations, unchanged by the isolation). Memory
+        relations are left out by ``_EXCLUDE_MEMORY_ROWS``, as in
+        ``active_object_graph_rows``.
+        """
+        return db.execute(
+            "SELECT source_object_id, target_object_id, edge_type "
+            "FROM knowledge_relations WHERE notebook_id=%s" + _EXCLUDE_MEMORY_ROWS,
+            (notebook_id, notebook_id),
+        ).fetchall()
 
     def source_subgraph_signature(
         self, notebook_id: str, source_ids: Sequence[str]
@@ -555,6 +916,9 @@ class IndexProjectionStore:
         # which runs an hnsw build between pages — acquires and releases a
         # connection per page instead (`embedding_pages`).
         with self.connect() as db:
+            # M1: every object / relation page carries ``_EXCLUDE_MEMORY_ROWS``
+            # (exact per page, see there); the cluster leg skips the clusters
+            # that hold a Memory member.
             for src_clause, src_params in clauses:
                 # Key: `ordinal` alone. `uq_knowledge_objects_ordinal` is
                 # GLOBALLY unique, so the trailing `id COLLATE "C"` in the
@@ -567,10 +931,12 @@ class IndexProjectionStore:
                     lambda cursor, _c=src_clause, _p=src_params: (
                         f"SELECT id, object_type, payload, ordinal FROM knowledge_objects "
                         f"WHERE notebook_id=%s AND status IN ({ph}){_c}"
+                        + _EXCLUDE_MEMORY_ROWS
                         + ("" if cursor is None else " AND ordinal>%s")
                         + " ORDER BY ordinal, id COLLATE \"C\"",
-                        (notebook_id, *USABLE_STATUSES, *_p) if cursor is None
-                        else (notebook_id, *USABLE_STATUSES, *_p, cursor),
+                        (notebook_id, *USABLE_STATUSES, *_p, notebook_id)
+                        if cursor is None
+                        else (notebook_id, *USABLE_STATUSES, *_p, notebook_id, cursor),
                     ),
                     lambda row: row["ordinal"],
                 ):
@@ -594,10 +960,11 @@ class IndexProjectionStore:
                         "SELECT id, source_object_id, target_object_id, edge_type "
                         f"FROM knowledge_relations "
                         f"WHERE notebook_id=%s AND review_status!='rejected'{_c}"
+                        + _EXCLUDE_MEMORY_ROWS
                         + ("" if cursor is None else " AND id COLLATE \"C\">%s")
                         + " ORDER BY id COLLATE \"C\"",
-                        (notebook_id, *_p) if cursor is None
-                        else (notebook_id, *_p, cursor),
+                        (notebook_id, *_p, notebook_id) if cursor is None
+                        else (notebook_id, *_p, notebook_id, cursor),
                     ),
                     lambda row: row["id"],
                 ):
@@ -667,6 +1034,13 @@ class IndexProjectionStore:
                 or published_row["cluster_generation"] is None
                 else published_row["cluster_generation"]
             )
+            # A cluster with a Memory-derived member is dropped as a whole: its
+            # hub node id is `cluster:<canonical id>` and the canonical id is
+            # minted from a member's name, so filtering the member row alone
+            # would still leave the private name in the persisted node ids.
+            memory_canonicals = self._memory_canonicals_on(
+                db, notebook_id, published_generation
+            ) if self.has_memory_source(db, notebook_id) else frozenset()
             for page in _keyset_pages(
                 db, int(self.settings.graph_fetch_page_rows),
                 lambda cursor: (
@@ -683,6 +1057,8 @@ class IndexProjectionStore:
                 lambda row: (row["canonical_id"], row["member_object_id"]),
             ):
                 for r in page:
+                    if r["canonical_id"] in memory_canonicals:
+                        continue
                     cluster_groups.setdefault(
                         r["canonical_id"], []).append(r["member_object_id"])
 
@@ -695,11 +1071,18 @@ class IndexProjectionStore:
         # entry — only the statement differs.
         ent_chunk_map = self.ent_chunk_map(notebook_id, paged=True)
         _kg_keys = set(kg_nodes.keys())
+        # The scoped leg already admits only gathered (hence non-Memory)
+        # objects; the whole-notebook leg admits every id the evidence map
+        # holds, so a Memory object's memberships are dropped by id here.
+        _memory_oids = (
+            frozenset() if scoped
+            else self.memory_derived_ids(notebook_id, "knowledge_embeddings")
+        )
         membership_object_ids = sorted(
             (
                 oid
                 for oid in ent_chunk_map
-                if not scoped or oid in _kg_keys
+                if (oid in _kg_keys if scoped else oid not in _memory_oids)
             ),
             key=_binary_text_key,
         )
@@ -726,6 +1109,8 @@ class IndexProjectionStore:
                 with self.connect() as db:
                     ann_ids_raw, ann_matrix_raw = self.vector_matrix(
                         db, notebook_id, "knowledge_embeddings", "object_id")
+                ann_ids_raw, ann_matrix_raw = _without_rows(
+                    ann_ids_raw, ann_matrix_raw, _memory_oids)
                 ann_ids: list = list(ann_ids_raw) if ann_ids_raw else []
                 has_vecs = bool(ann_ids) and ann_matrix_raw is not None and len(ann_matrix_raw)
                 if has_vecs and self.settings.ppr_emb_synonym_enabled:
@@ -739,6 +1124,12 @@ class IndexProjectionStore:
             # P2 共提桥:scale CSR 节点空间含 cluster router(下方 hub 装配),故 claim↔cluster
             # 软边同样适用;仅 whole-notebook(not scoped)路径追加,与 variant/synonym 一致。
             extra_edges = extra_edges + self.mention_extra_edges(notebook_id)
+            # M1: whatever produced them (name variants, synonym KNN over a
+            # cache that still holds Memory vectors, mention bridges), no
+            # extra edge may touch a Memory object.
+            extra_edges = _without_edges(extra_edges, _memory_oids)
+
+        del _memory_oids
 
         # node_ids: kg nodes first, then chunk nodes, then cluster hubs.
         # Hubs are pre-appended HERE (before edge assembly) rather than
@@ -910,14 +1301,23 @@ class IndexProjectionStore:
         from app.domain.vector_index import build_matrix, resolve_runtime_dim
         runtime_dim = resolve_runtime_dim(self.settings)
         if object_ids is None:
+            # M1: a member's Memory objects / relations get no vector row in a
+            # whole-notebook matrix (filtered on the raw pairs, before decode).
+            excluded = self.memory_derived_ids(notebook_id, table)
             with self.connect() as db:
                 n_hint = EmbeddingStore.version_row(db, notebook_id, table)["c"]
                 return build_matrix(
-                    EmbeddingStore.vector_pages(db, notebook_id, table, id_column),
+                    _without_ids(
+                        EmbeddingStore.vector_pages(db, notebook_id, table, id_column),
+                        excluded,
+                    ),
                     n_hint=n_hint, runtime_dim=runtime_dim)
         if not object_ids:
             return [], []
 
+        # The fold's bounded lookup: its ids come from the Memory-free delta
+        # (``graph_rows`` scoped, ``relation_ids_for_source_batch``), so there
+        # is nothing to exclude here and no extra read to pay for.
         def _rows():
             with self.connect() as db:
                 for batch in self.in_batches(object_ids):
@@ -967,13 +1367,20 @@ class IndexProjectionStore:
         """
         from app.domain.vector_index import matrix_pages, resolve_runtime_dim
         runtime_dim = resolve_runtime_dim(self.settings)
+        # M1: a member's Memory objects / relations never get a label in a
+        # shared ANN. Filtered on the raw (id, vector) pairs BEFORE decoding,
+        # so pages keep their size and an unaffected stream is untouched.
+        excluded = self.memory_derived_ids(notebook_id, table)
         yield from matrix_pages(
-            EmbeddingStore.vector_pages(
-                # batch=page_rows (codex #676 R10 P2): the configured budget
-                # must bound the RAW db fetch too, not only the decoded
-                # output pages matrix_pages cuts afterwards.
-                None, notebook_id, table, id_column, batch=page_rows,
-                connect=self.connect,
+            _without_ids(
+                EmbeddingStore.vector_pages(
+                    # batch=page_rows (codex #676 R10 P2): the configured budget
+                    # must bound the RAW db fetch too, not only the decoded
+                    # output pages matrix_pages cuts afterwards.
+                    None, notebook_id, table, id_column, batch=page_rows,
+                    connect=self.connect,
+                ),
+                excluded,
             ),
             page_rows,
             runtime_dim=runtime_dim,

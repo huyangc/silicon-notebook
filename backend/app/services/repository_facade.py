@@ -577,12 +577,6 @@ class RepositoryFacade:
             load_scale=lambda notebook_id: _repository_from_weakref(
                 repository_ref
             )._scale_index(notebook_id, allow_stale=True),
-            full_viz_graph=lambda notebook_id: _repository_from_weakref(
-                repository_ref
-            )._unified_graph_full(notebook_id, "object"),
-            relations_for_notebook=lambda notebook_id: _repository_from_weakref(
-                repository_ref
-            ).relations_for_notebook(notebook_id),
             cluster_map=lambda notebook_id: _repository_from_weakref(
                 repository_ref
             ).cluster_map(notebook_id),
@@ -3313,8 +3307,10 @@ class RepositoryFacade:
     def _probe_scale_version_signal(self, notebook_id: str):
         """Cheap probe: (seq, cseq, settings_tail, kg_reset_epoch) for
         `notebook_id` (batch-3-W1 PR-2 appended kg_reset_epoch at the
-        trailing position). O(1) — a single unified_kg_state row read, no
-        table aggregates — always run, never single-flighted (it's the
+        trailing position). O(1) — a single unified_kg_state row read plus the
+        one-row Memory-source probe (E4-6: the isolation pair of a notebook
+        holding Memory rides the signal), no table aggregates — always run,
+        never single-flighted (it's the
         signal used to decide whether the expensive cold path is needed at
         all, so it must never itself block on another thread's cold
         compute).
@@ -3493,10 +3489,6 @@ class RepositoryFacade:
     def maybe_auto_index(self, notebook_id: str) -> None:
         """Compatibility delegate to runtime automatic indexing."""
         return self._runtime.scale_artifacts.maybe_auto_index(notebook_id)
-
-    def _build_viz_graph_arrays(self, notebook_id: str):
-        """Compatibility helper over the runtime builder's pure viz math."""
-        return self._runtime.scale_artifacts.build_viz_graph_arrays(notebook_id)
 
     def _viz_arrays_from_graph(self, full: dict):
         """Compatibility delegate for callers that already derived a graph."""

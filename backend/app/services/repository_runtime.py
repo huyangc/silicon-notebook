@@ -1894,8 +1894,6 @@ class RepositoryRuntime:
         get_notebook: Callable[[str], Any],
         version: Callable[[str], list],
         load_scale: Callable[[str], Any],
-        full_viz_graph: Callable[[str], dict],
-        relations_for_notebook: Callable[[str], list],
         cluster_map: Callable[[str], dict],
         incremental_fuse_source: Callable[[str, str], None],
         invalidate_scale_cache: Callable[[str], None],
@@ -1926,8 +1924,6 @@ class RepositoryRuntime:
             get_notebook=get_notebook,
             version=version,
             load_scale=load_scale,
-            full_viz_graph=full_viz_graph,
-            relations_for_notebook=relations_for_notebook,
             cluster_map=cluster_map,
             incremental_fuse_source=incremental_fuse_source,
             invalidate_scale_cache=invalidate_scale_cache,
@@ -1939,9 +1935,10 @@ class RepositoryRuntime:
             building_lock=building_lock,
             notify_index_done=notify_index_done,
             now=self.seams.now,
-            # Release full_viz_graph('object')'s cached whole-graph dict after
-            # viz_arrays so it doesn't ride resident through persist. Targeted
-            # (unified_cache only), not the invalidate_kg family sweep.
+            # Drop any whole-graph dict a viewer's browse parked in
+            # unified_cache during the build, after viz_arrays, so it doesn't
+            # ride resident through persist. Targeted (unified_cache only), not
+            # the invalidate_kg family sweep.
             invalidate_unified_cache=(
                 lambda nb: snapshots.invalidate_unified(nb)
             ),

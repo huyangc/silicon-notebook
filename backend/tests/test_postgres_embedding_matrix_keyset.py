@@ -68,6 +68,7 @@ class _FakeConnection:
     def __init__(self, dataset: list[tuple[str, bytes]], *, max_calls: int):
         self._dataset = list(dataset)
         self.calls: list[tuple[str, tuple]] = []
+        self.memory_reads: list[tuple[str, tuple]] = []
         self._max_calls = max_calls
 
     def __enter__(self):
@@ -81,6 +82,14 @@ class _FakeConnection:
             statement.as_string(None) if hasattr(statement, "as_string") else str(statement)
         )
         params = tuple(params)
+        if "source_type = 'memory'" in sql_text:
+            # M1: the whole-notebook load first probes for a Memory source (this
+            # dataset has none, so no id read follows). The shape under
+            # test is the VECTOR statements, so it is recorded on its own.
+            self.memory_reads.append((sql_text, params))
+            if sql_text.startswith("SELECT EXISTS"):
+                return _FakeCursor([{"present": False}])  # holds no Memory source
+            return _FakeCursor([])
         self.calls.append((sql_text, params))
         if len(self.calls) > self._max_calls:
             raise AssertionError(
@@ -204,6 +213,7 @@ def test_embedding_matrix_object_ids_none_paginates_and_uses_n_hint():
     ids, matrix = store.embedding_matrix("nb-1", "knowledge_embeddings", "object_id")
 
     assert len(conn.calls) == 2  # 1 COUNT(*) n_hint + 1 keyset page (25 < default batch)
+    assert len(conn.memory_reads) == 1  # M1: only the one-row Memory probe
     page_call = conn.calls[1]
     assert page_call[1] == ("nb-1", MATRIX_FETCH_BATCH)
     assert ids == [vid for vid, _ in dataset]

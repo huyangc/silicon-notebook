@@ -804,12 +804,13 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
                 )
                 scale_nodes = int(manifest.get("n_nodes", 0))
                 finalized["scale_index_nodes"] = scale_nodes
+                status = _scale_index_outcome(manifest)
                 log({
                     "phase": "kg",
-                    "status": "scale_index_built",
+                    "status": status,
                     "nodes": scale_nodes,
                 })
-                print(f"scale index built (nodes={scale_nodes})", flush=True)
+                print(f"{status.replace('_', ' ')} (nodes={scale_nodes})", flush=True)
             return finalized
 
         if rebuild_only:
@@ -984,8 +985,9 @@ def run_all(repo: BatchIngestRepository, notebook_id: str,
                 manifest = repo.build_scale_index(notebook_id, on_stage=_index_stage_progress)
                 scale_nodes = manifest.get("n_nodes", 0)
                 res["scale_index_nodes"] = scale_nodes
-                log({"phase": "all", "status": "scale_index_built", "nodes": scale_nodes})
-                print(f"scale index built (nodes={scale_nodes})", flush=True)
+                status = _scale_index_outcome(manifest)
+                log({"phase": "all", "status": status, "nodes": scale_nodes})
+                print(f"{status.replace('_', ' ')} (nodes={scale_nodes})", flush=True)
     finally:
         repo.settings.kg_auto_extract = orig_auto
         repo.settings.kg_incremental_fusion_enabled = orig_fusion
@@ -1107,7 +1109,18 @@ def run_index(repo: BatchIngestRepository, notebook_id: str) -> dict[str, int]:
     """Phase 3 (offline): build the scalable-retrieval index for a (base) notebook.
     Static base KGs should re-run this after a rebuild."""
     manifest = repo.build_scale_index(notebook_id, on_stage=_index_stage_progress)
+    if _scale_index_outcome(manifest) == "scale_index_discarded":
+        return {"indexed_nodes": 0, "scale_index_discarded": 1}
     return {"indexed_nodes": manifest.get("n_nodes", 0)}
+
+
+def _scale_index_outcome(manifest: dict) -> str:
+    """``scale_index_discarded`` for a build that published nothing because
+    memories kept being confirmed while it ran (the live index is unchanged),
+    ``scale_index_built`` otherwise."""
+    if isinstance(manifest, dict) and manifest.get("status") == "discarded":
+        return "scale_index_discarded"
+    return "scale_index_built"
 
 
 def backfill_node_embeddings(
