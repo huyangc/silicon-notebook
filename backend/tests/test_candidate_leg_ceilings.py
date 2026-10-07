@@ -816,6 +816,34 @@ def test_an_own_memory_relation_is_scored_with_its_own_vector(store):
     assert sims["rB"] == pytest.approx(expected, abs=1e-5)
 
 
+@pytest.mark.parametrize("asker", ["bob", "unscoped"])
+def test_mixed_dimensions_keep_one_vector_space_across_both_halves(store, asker):
+    """Legacy rows of another dimension (codex #823 r3 P2): a valid 3-dim
+    shared relation read first, then an old 2-dim Memory relation the asker
+    may read.  One vector space for the whole notebook -- the first valid row
+    in the notebook-wide read picks it, as the single matrix always did -- so
+    the shared hit keeps its similarity 1.0 and the 2-dim Memory row is the
+    one skipped, in both halves alike (built apart, each half picked its own
+    dimension and the shared hit was lost)."""
+    repo, bob, alice = store
+    nb = _vectors_notebook(repo, bob, alice, [
+        ("rS", "src-doc", [1.0, 0.0, 0.0]), ("rM", "src-mem-bob", [1.0, 0.0]),
+    ])
+    scope = (_scope(["src-doc"], ["src-mem-bob"], bob) if asker == "bob" else None)
+    with source_scope_context(nb, scope):
+        with repo._connect() as db:
+            vectors, pairs, _fallback = repo.retrieval.candidates._relation_top_k(
+                db, nb, [1.0, 0.0, 0.0], 5)
+            shared_ids, shared_mat = repo.retrieval.candidates._vector_matrix(
+                db, nb, "relation_embeddings", "relation_id")
+    sims = dict(pairs)
+
+    assert sims.get("rS") == pytest.approx(1.0, abs=1e-6), pairs
+    assert "rM" not in sims
+    assert vectors == 1
+    assert shared_ids == ["rS"] and shared_mat.shape == (1, 3)
+
+
 def test_the_relation_cache_keeps_the_key_the_cold_guard_peeks(relation_matrix):
     """The split relation entry lives under the key and version the large-
     notebook cold-matrix guard peeks (``_vector_matrix_warm``); moving it

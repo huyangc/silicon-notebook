@@ -1433,7 +1433,10 @@ class CandidateRetrievalService(_RetrievalState):
           merge can order ties exactly as one whole matrix did (spec review P2).
 
         A notebook without Memory has an empty Memory half and a shared half
-        equal to the whole matrix, row for row.  Building it costs, once per
+        equal to the whole matrix, row for row.  Both halves are cut from ONE
+        matrix over the notebook-wide read, so they share its vector space
+        (the dimension and the skipped legacy rows the single matrix always
+        had).  Building it costs, once per
         version, one Memory-source read plus one batched
         ``relation_delta_rows(with_source_id=True)`` read per 900 Memory
         sources (the relation -> source map, ``_memory_relation_sources``).
@@ -1452,16 +1455,26 @@ class CandidateRetrievalService(_RetrievalState):
             for index, row in enumerate(rows):
                 position.setdefault(row["vid"], index)
             source_of = self._memory_relation_sources(db, notebook_id)
-            shared_ids, shared_mat = build_matrix(
-                ((r["vid"], r["vector"]) for r in rows
-                 if str(r["vid"]) not in source_of),
-                runtime_dim=runtime_dim,
+            # ONE matrix over the notebook-wide read first, then split: the
+            # vector space (the first valid row's dimension; rows of another
+            # dimension skipped) is the whole notebook's, exactly as the single
+            # matrix always chose it, and both halves skip the same rows.
+            # Built apart, each half would pick its own dimension from legacy
+            # rows, and a query could lose valid shared hits (codex #823 r3).
+            ids, mat = build_matrix(
+                ((r["vid"], r["vector"]) for r in rows), runtime_dim=runtime_dim,
             )
-            memory_ids, memory_mat = build_matrix(
-                ((r["vid"], r["vector"]) for r in rows
-                 if str(r["vid"]) in source_of),
-                runtime_dim=runtime_dim,
-            )
+            in_memory = np.asarray(
+                [str(vid) in source_of for vid in ids], dtype=bool)
+            if not in_memory.any():
+                shared_ids, shared_mat = ids, mat
+                memory_ids, memory_mat = [], np.zeros((0, 0), dtype=np.float32)
+            else:
+                shared_ids = [vid for vid, m in zip(ids, in_memory) if not m]
+                memory_ids = [vid for vid, m in zip(ids, in_memory) if m]
+                shared_mat = (mat[~in_memory] if shared_ids
+                              else np.zeros((0, 0), dtype=np.float32))
+                memory_mat = mat[in_memory]
             memory_sources = tuple(sorted({
                 source_of[str(vid)] for vid in memory_ids}))
             slot = {source: index for index, source in enumerate(memory_sources)}
