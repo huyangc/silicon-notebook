@@ -530,6 +530,77 @@ def test_a_ranking_left_empty_by_a_refused_library_is_not_a_scale_failure(
     assert kinds.count("scale_ppr_done") == 1
 
 
+def test_ranking_further_keeps_an_unticked_library_out(repo, monkeypatch):
+    """The real scale path with two mounted libraries: B1 is partially
+    admitted (only src-A-b1) and its refused passage fills the one-candidate
+    prefix; B2 is unticked and its passages rank right behind it, ahead of
+    the active library's.  ``rank_further`` must leave B2 out exactly as the
+    first pass did: the slot fills with an active passage, the walk spends
+    the prefix window plus one, and no B2 passage is ever hydrated.
+
+    The score vector is fixed (``personalized_ppr`` replaced) so the order is
+    a fixture fact, not a property of the graph build."""
+    import numpy as np
+
+    import app.services.graph_retrieval as graph_module
+    import app.services.kg.scale_index as scale_index
+    from types import SimpleNamespace
+    from tests.test_ppr_retrieve import _seed_two_doc_moe
+
+    bases = []
+    for suffix in ("-b1", "-b2"):
+        library = _seed_two_doc_moe(repo, suffix=suffix)
+        repo.rebuild_unified_kg(library.id)
+        repo.build_scale_index(library.id)
+        with repo._write() as db:
+            db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (library.id,))
+        bases.append(library.id)
+    b1, b2 = bases
+    active = _seed_two_doc_moe(repo, suffix="-act")
+    repo.rebuild_unified_kg(active.id)
+    repo.replace_notebook_bases(active.id, [b1, b2], "user-local")
+    graph = repo.retrieval.graph
+    seeds = [SimpleNamespace(chunk_id="cA-act", relevance=0.9)]
+    monkeypatch.setattr(graph, "_retrieve_chunks", lambda *a, **k: (seeds, [], None))
+    built: dict = {}
+    real_combined = graph._scale_combined_graph
+
+    def capture_combined(*args, **kwargs):
+        built.update(real_combined(*args, **kwargs))
+        return built
+
+    monkeypatch.setattr(graph, "_scale_combined_graph", capture_combined)
+    order = {"cB-b1": 1.0, "cA-b2": 0.9, "cB-b2": 0.8,
+             "cA-act": 0.5, "cA-b1": 0.4, "cB-act": 0.3}
+
+    def fixed_ppr(transition, reset, *args, stats=None, **kwargs):
+        if stats is not None:
+            stats["iters"] = 1
+        x = np.full(len(built["combined_ids"]), 0.01, dtype=transition.dtype)
+        for chunk_id, score in order.items():
+            x[built["combined_index"][chunk_id]] = score
+        return x
+
+    monkeypatch.setattr(scale_index, "personalized_ppr", fixed_ppr)
+    monkeypatch.setattr(graph.settings, "ppr_top_chunks", 1)
+    monkeypatch.setattr(graph_module, "_PPR_CEILING_OVERFETCH", 1)
+    spy = _HydrationSpy(ChunkStore)
+    monkeypatch.setattr(graph.chunks, "graph_hydrate_rows", spy)
+    with source_scope_context(
+        active.id,
+        {"mode": "include", "source_ids": ["src-A-act", "src-B-act"],
+         "narrowed": False, "owner_id": "user-local"},
+        {"mode": "include", "notebook_ids": [b1]},
+        {b1: ["src-A-b1"]},
+    ):
+        out = graph._ppr_retrieve(active.id, "Mixture of Experts")
+    assert [c.chunk_id for c in out] == ["cA-act"]
+    assert len(spy.calls) <= 1 + 1
+    hydrated = {chunk_id for ids, _kwargs in spy.calls for chunk_id in ids}
+    assert "cB-b1" in hydrated, "the prefix must have been walked"
+    assert not hydrated & {"cA-b2", "cB-b2"}, hydrated
+
+
 def test_a_skipped_chunk_still_sets_the_score_range():
     """``rank_further`` with a dropped library must give every kept chunk the
     score it has in the prefix already walked: a skipped chunk leaves the
