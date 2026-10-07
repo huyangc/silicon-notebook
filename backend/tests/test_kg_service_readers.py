@@ -72,7 +72,7 @@ def keyword_log(repo, monkeypatch):
     # E4-4's ``sources_only`` on the list page's element read (P3-B).
     enrich = knowledge._enrich_evidence
     monkeypatch.setattr(knowledge, "_enrich_evidence",
-                        lambda db, items, sources_only=False: enrich(db, items))
+                        lambda db, items, sources_only=False, **kw: enrich(db, items, **kw))
     # The notebook summary the reads validate against takes the keyword too
     # (its own test below); record it apart so these tests see the KG reads.
     summary: list = []
@@ -226,7 +226,9 @@ def test_list_resolves_each_distinct_element_once_and_sources_only(repo, monkeyp
     assert "copy 0" not in repr(page) and "A-PRIVATE" not in repr(page)
     assert len(calls) == 1, calls
     elements, kwargs = calls[0]
-    assert kwargs == {"sources_only": True}
+    # B-11 (PR-E2 E2-4): elements are read from this notebook only, like
+    # concept detail's read.
+    assert kwargs == {"sources_only": True, "owner_notebook_id": s.nb}
     assert len(elements) == len(set(elements)), elements
     assert elements.count("el-ma-secret") == 1
 

@@ -194,6 +194,9 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "KnowledgeStore.follow_start_row": CEILING_BOUNDED,
         "KnowledgeStore.follow_endpoint_rows": CEILING_BOUNDED,
         "KnowledgeStore.follow_object_rows": CEILING_BOUNDED,
+        # PR-E2 E2-1: a chain hop's relation evidence, by the hop's relation ids;
+        # every item passes the run's evidence boundary before it is cited
+        "KnowledgeStore.follow_relation_evidence_rows": CEILING_BOUNDED,
         "KnowledgeStore.in_network_relation_rows": CEILING_BOUNDED,
         "KnowledgeStore.neighbor_ids": CEILING_BOUNDED,
         "KnowledgeStore.relation_connected_object_ids": CEILING_BOUNDED,
@@ -297,6 +300,13 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "UnifiedKgStore.comention_peers": CEILING_BOUNDED,
         "_canonical_support_exists": CEILING_BOUNDED,
         "_object_support_exists": CEILING_BOUNDED,
+        # PR-E2 E2-1: the weak-support hint's target probe (``SELECT 1``, judged
+        # by the ceiling's or the viewer's condition its caller passes) and the
+        # chunk-mix KG overlay's ceiling backstop (source ids of objects the
+        # caller holds, judged against the run's ceiling)
+        "_WEAK_TARGET_OBJECTS": CEILING_BOUNDED,
+        "_weak_target_supported": CEILING_BOUNDED,
+        "UnifiedKgStore.object_support_source_rows": CEILING_BOUNDED,
         # probes
         "UnifiedKgStore.cluster_input_facts": STATE_PROBE,
         "UnifiedKgStore.cluster_version_row": STATE_PROBE,

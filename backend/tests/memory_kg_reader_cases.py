@@ -585,6 +585,33 @@ def check_enrich_evidence_sources_only(world) -> None:
     assert full[0]["element_text"] == "text of src-s"
 
 
+def check_enrich_evidence_sources_only_with_owner(world) -> None:
+    """``sources_only`` narrows E2-4's owner form too (one CASE statement,
+    parameters ``(owner, *ids)``): no element text, type or label column is
+    projected; an element of the owner library resolves its source like the
+    full owner read; an element of another library clears its locator and
+    keeps the stored source."""
+    evidence = [_ev("src-s"), _ev("src-mb")]
+    knowledge = store(world)
+    with connect(world) as db:
+        full = knowledge._enrich_evidence(db, evidence, owner_notebook_id=world.nb)
+        recorder = Recorder(db)
+        own = knowledge._enrich_evidence(
+            recorder, evidence, owner_notebook_id=world.nb, sources_only=True)
+        foreign = knowledge._enrich_evidence(
+            recorder, evidence, owner_notebook_id=world.nb2, sources_only=True)
+    assert len(recorder.statements) == 2 and len(set(recorder.statements)) == 1
+    statement = recorder.statements[0]
+    assert "element_notebook_id" in statement and "source_id" in statement
+    for column in ("se.text", "se.element_type", "se.location_label"):
+        assert column not in statement, statement
+    assert [item["source_id"] for item in own] == [item["source_id"] for item in full]
+    assert [item["element_id"] for item in own] == ["el-src-s", "el-src-mb"]
+    assert all(item["element_text"] == "" for item in own + foreign)
+    assert [item["element_id"] for item in foreign] == ["", ""]
+    assert [item["source_id"] for item in foreign] == ["src-s", "src-mb"]
+
+
 # ------------------------------------------------ stale-index readers (corr. 8)
 def ceiling_for_a(world) -> dict:
     """A's frozen all-selected ceiling: visible sources + A's own Memory."""
