@@ -331,13 +331,13 @@ def _confirmed(contract: dict) -> dict:
     }
 
 
-async def ask_http(http, headers, notebook_id) -> dict:
+async def ask_http(http, headers, notebook_id, mode: str = "reasoning") -> dict:
     """① ``/ask`` without ``source_scope`` (intent confirmed as the browser
     does after ③)."""
     contract = await _intent(http, headers, notebook_id)
     reply = await http.post(
         f"/api/notebooks/{notebook_id}/ask",
-        json={"question": QUESTION, "mode": "reasoning", "intent": _confirmed(contract)},
+        json={"question": QUESTION, "mode": mode, "intent": _confirmed(contract)},
         headers=headers,
     )
     assert reply.status_code == 200, reply.text
@@ -514,8 +514,12 @@ def _stable(response: dict) -> dict:
 
 async def assert_a_plain_notebook_is_unchanged(env: dict, monkeypatch) -> None:
     """No mounted library, no other member's Memory: installing the ceiling
-    changes neither the prompts nor the answer (push-down: no source list is
-    bound, and nothing is filtered)."""
+    changes neither the prompts nor the answer, in chunk mode and in reasoning
+    mode (push-down: no source list is bound, and nothing is filtered).  The
+    baseline is the same build with ``_retrieval_ceiling`` replaced by an
+    empty context -- master's unscoped run; the SQLite golden oracle
+    (``test_ask_repository_golden``, frozen from master) pins the same on
+    SQLite, and this case is the PostgreSQL half."""
     from app.services.ask_service import AskService
 
     app = env["app"]
@@ -553,19 +557,25 @@ async def assert_a_plain_notebook_is_unchanged(env: dict, monkeypatch) -> None:
         transport=transport, base_url="http://test",
     ) as http:
         headers = await _login(http, alice.username)
-        model.prompts.clear()
-        with_ceiling = await ask_http(http, headers, plain.id)
-        prompts_with = list(model.prompts)
+        with_ceiling = {}
+        for mode in ("chunk", "reasoning"):
+            model.prompts.clear()
+            answer = await ask_http(http, headers, plain.id, mode)
+            with_ceiling[mode] = (list(model.prompts), _stable(answer))
 
         @contextlib.contextmanager
         def no_ceiling(self, *args, **kwargs):
             yield
 
         monkeypatch.setattr(AskService, "_retrieval_ceiling", no_ceiling)
-        model.prompts.clear()
-        without_ceiling = await ask_http(http, headers, plain.id)
-    assert prompts_with and prompts_with == model.prompts
-    assert _stable(with_ceiling) == _stable(without_ceiling)
+        without_ceiling = {}
+        for mode in ("chunk", "reasoning"):
+            model.prompts.clear()
+            answer = await ask_http(http, headers, plain.id, mode)
+            without_ceiling[mode] = (list(model.prompts), _stable(answer))
+    for mode in ("chunk", "reasoning"):
+        assert with_ceiling[mode][0], mode
+        assert with_ceiling[mode] == without_ceiling[mode], mode
 
 
 async def assert_a_reader_failure_fails_the_ask(env: dict, monkeypatch) -> None:
