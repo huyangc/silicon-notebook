@@ -2017,8 +2017,18 @@ def test_ceiling_is_built_once_and_nothing_is_sorted(monkeypatch):
 
 
 def test_frozen_source_ids_reuses_canonical_input_and_coerces_the_rest():
-    canonical = frozenset({"a", "b"})
+    canonical = source_scope_module.CeilingSet({"a", "b"})
     assert source_scope_module._frozen_source_ids(canonical) is canonical
+    built = source_scope_module._frozen_source_ids(["a", "b"])
+    assert source_scope_module._frozen_source_ids(built) is built
+    # A plain frozenset is copied once into a CeilingSet, so the enumeration's
+    # bound-form memo (``bound_forms``, from master's #820) lives on every
+    # installed ceiling.
+    plain = frozenset({"a", "b"})
+    copied = source_scope_module._frozen_source_ids(plain)
+    assert copied == plain and copied is not plain
+    assert isinstance(copied, source_scope_module.CeilingSet)
+    assert copied.bound_forms == {}
     assert source_scope_module._frozen_source_ids([1, "b"]) == frozenset(
         {"1", "b"}
     )
