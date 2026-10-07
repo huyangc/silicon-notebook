@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from app.domain.promotion_provenance import PROMOTION_SOURCE_TYPE
+from app.domain.promotion_source import PROMOTION_SOURCE_TYPE
 
 
 PDF_PYTHON_FALLBACK_WARNING_PREFIX = "[pdf-python-fallback]"

@@ -49,11 +49,16 @@ import hashlib
 from dataclasses import dataclass
 from typing import AbstractSet, Any, Mapping, Optional, Sequence, Tuple
 
-#: ``sources.source_type`` of a public library's synthetic promotion source.
-PROMOTION_SOURCE_TYPE = "promotion"
-
-PROMOTION_TITLE_PREFIX = "晋升自："
-MEMORY_PROMOTION_TITLE_PREFIX = "晋升自个人记忆："
+# The type value and the titles live in the readers' leaf module; re-exported.
+from app.domain.promotion_source import (  # noqa: F401 - re-exported
+    MEMORY_PROMOTION_TITLE_PREFIX,
+    PROMOTION_SOURCE_TYPE,
+    PROMOTION_TITLE_PREFIX,
+    is_promotion_source_type,
+    memory_promotion_source_title,
+    promotion_origin_title,
+    promotion_source_title,
+)
 
 #: Display keys a rewritten evidence entry keeps for its original.
 ORIGIN_SOURCE_KEY = "origin_source_id"
@@ -94,28 +99,6 @@ def promotion_source_id(base_notebook_id: str, origin_key: str) -> str:
 def promotion_element_id(source_id: str, origin_element_id: str, text: str) -> str:
     """``el-promo-`` + md5(``<promotion source>|<original element>|<text>``)."""
     return "el-promo-" + _digest(str(source_id), str(origin_element_id), str(text))
-
-
-def promotion_source_title(origin_title: str) -> str:
-    return PROMOTION_TITLE_PREFIX + str(origin_title or "")
-
-
-def memory_promotion_source_title(memory_title: str) -> str:
-    return MEMORY_PROMOTION_TITLE_PREFIX + str(memory_title or "")
-
-
-def promotion_origin_title(title: str) -> str:
-    """The original's title inside a promotion source title (what a citation
-    card shows); a title without either prefix (renamed) is returned as is."""
-    value = str(title or "")
-    for prefix in (MEMORY_PROMOTION_TITLE_PREFIX, PROMOTION_TITLE_PREFIX):
-        if value.startswith(prefix):
-            return value[len(prefix):]
-    return value
-
-
-def is_promotion_source_type(source_type: object) -> bool:
-    return str(source_type or "") == PROMOTION_SOURCE_TYPE
 
 
 @dataclass(frozen=True)

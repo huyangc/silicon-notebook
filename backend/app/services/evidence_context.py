@@ -12,7 +12,7 @@ from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
 
 from app.core.config import Settings
 from app.domain.citation_origin import foreign_notebook_id, owned_by_another_library
-from app.domain.promotion_provenance import (
+from app.domain.promotion_source import (
     is_promotion_source_type,
     promotion_origin_title,
 )

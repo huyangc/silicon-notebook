@@ -251,6 +251,11 @@ REGISTRY = {
      "splat:element_id"): (
         "global-unreachable", _import_gate("services/knowledge_lifecycle.py"),
         "relation completion at ingestion", 1),
+    # PR-E8: the promotion approval (and its migration) rewrites STORED
+    # evidence onto the public library's own element; no reader sees it here.
+    ("domain/promotion_provenance.py", "plan_promotion_evidence", "splat:element_id"): (
+        "global-unreachable", _import_gate("domain/promotion_provenance.py"),
+        "promotion approval rewrites stored evidence on write", 1),
     ("repositories/sqlite/memory_store.py", "MemoryStore._validate_evidence_ref_on", "splat:element_id"): (
         "global-unreachable", _import_gate("repositories/sqlite/memory_store.py"),
         "Memory evidence validation on write", 1),
