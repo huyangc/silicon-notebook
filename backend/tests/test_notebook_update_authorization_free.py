@@ -56,6 +56,10 @@ _PREDICATE_CONSTANTS = (
     ("app.repositories.sqlite.mount_sql", "MOUNT_VALID"),
     ("app.repositories.sqlite.mount_sql", "MOUNT_VALID_EXPR"),
     ("app.repositories.sqlite.mount_sql", "MOUNT_GATE_CLOSED_EXPR"),
+    # M3 带查看者的两条谓词(E6-2 起是参与集的真调用口)。`MOUNT_VIEWER_JOIN` 与
+    # `MOUNTED_BASE_IDS_FOR_VIEWER_SUBQUERY` 带 JOIN 骨架,与 `MOUNT_JOIN` 同理不点名。
+    ("app.repositories.sqlite.mount_sql", "MOUNT_EFFECTIVE_FOR_VIEWER"),
+    ("app.repositories.sqlite.mount_sql", "MOUNT_EFFECTIVE_FOR_VIEWER_EXPR"),
 )
 
 #: 空转保护:授权谓词里**确实**会出现的列。扫不到它们就说明上面那张表指错了地方,

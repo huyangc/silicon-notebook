@@ -18,7 +18,7 @@
 里的「挂载方 owner」一律取挂载方笔记本的 `a.created_by`,不取请求用户——四支回答的
 是「这条边本身还站不站得住」,与谁在提问无关。**「参与集与谁在提问无关」这条旧契约
 已被 M3 裁决作废**,见下面「挂载仅对挂载人生效」:边站得住之后,还要问「对这位查看者
-生效吗」。回答这一问的片段已经在本文件里,调用点何时切换见「两组片段并存」。
+生效吗」。回答这一问的片段就在本文件里,哪些调用点用哪一组见「两组片段并存」。
 
 ## 挂载仅对挂载人生效(M3,带查看者的片段)
 
@@ -100,12 +100,14 @@ upsert,它照搬源环境那一行(同样不可转让)的 owner 映射结果,而
 `MOUNT_GATE_CLOSED_EXPR`、`MOUNT_ORIGIN_COLUMN`、`MOUNT_ORDER`、
 `MOUNTED_BASE_IDS_SUBQUERY`)逐字未变;带查看者的四个公开片段(`MOUNT_VIEWER_JOIN`、
 `MOUNT_EFFECTIVE_FOR_VIEWER`、`MOUNT_EFFECTIVE_FOR_VIEWER_EXPR`、
-`MOUNTED_BASE_IDS_FOR_VIEWER_SUBQUERY`)与它们并列。**此刻(任务 E6-1 落地时)没有任何
-调用点 import 带查看者的片段**:`resolve_participants`、`participant_rows`、
-`notebook_has_usable_base_kg`、`mounted_bases_row`、`UnifiedKgStore.mounted_base_ids`、
-`any_mounted_has_kg_on`、`follow_start_row` 仍按旧片段求值,即参与集仍与查看者无关,
-M3 在调用点上尚未生效。同一轮整改里,任务 E6-2 把这些 store 调用点切到带查看者的
-片段,任务 E6-3 接上服务层的查看者来源与缓存键。
+`MOUNTED_BASE_IDS_FOR_VIEWER_SUBQUERY`)与它们并列。**参与集的七个 store 调用点用带
+查看者的一组**,每个都收一个必填关键字 `viewer_id`(漏传当场 TypeError):
+`NotebookStore.resolve_participants`(`participant_ids` / `participant_tiers` /
+`participant_notebook_ids` 委托给它)、`participant_rows`、
+`QueryStore.notebook_has_usable_base_kg`、`QueryStore.mounted_bases_row`、
+`UnifiedKgStore.mounted_base_ids`、`KnowledgeStore.any_mounted_has_kg_on`、
+`KnowledgeStore.follow_start_row`。`viewer_id` 为 `None` / 空串即无查看者,只剩公共库与
+`everyone`。服务层的查看者来源(检索运行的 `actor_id`)与缓存键由任务 E6-3 接上。
 
 不随查看者变化、切换后也继续用旧片段的调用点:`list_mount_edges` /
 `mountable_notebooks`(路由 owner 专属,查看者恒为挂载人)、深拷贝重判

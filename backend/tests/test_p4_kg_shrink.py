@@ -205,21 +205,21 @@ def test_any_base_notebook_has_kg(repo):
     base = repo.create_notebook(NotebookCreate(name="base"))
     repo.mark_notebook_base(base.id)
     repo.replace_notebook_bases(active.id, [base.id], "user-local")
-    assert repo._any_base_notebook_has_kg(active.id) is False
+    assert repo._any_base_notebook_has_kg(active.id, viewer_id="user-local") is False
     # personal notebook with KG must NOT count as base:
     pers = repo.create_notebook(NotebookCreate(name="p"))
     repo.store_kg(pers.id, None, [
         {"local_id": "P1", "object_type": "concept",
          "payload": {"name": "P"}, "evidence": []}], [])
-    assert repo._any_base_notebook_has_kg(active.id) is False
+    assert repo._any_base_notebook_has_kg(active.id, viewer_id="user-local") is False
     # now give the BASE notebook KG:
     repo.store_kg(base.id, None, [
         {"local_id": "B1", "object_type": "concept",
          "payload": {"name": "B"}, "evidence": []}], [])
-    assert repo._any_base_notebook_has_kg(active.id) is True
+    assert repo._any_base_notebook_has_kg(active.id, viewer_id="user-local") is True
     # unrelated notebook that never mounted base must NOT see the gate open:
     unmounted = repo.create_notebook(NotebookCreate(name="unmounted"))
-    assert repo._any_base_notebook_has_kg(unmounted.id) is False
+    assert repo._any_base_notebook_has_kg(unmounted.id, viewer_id="user-local") is False
 
 
 def test_base_kg_available_on_notebook_summary(repo):

@@ -1901,7 +1901,7 @@ class CollectionEnumerationService:
         here loses nothing.
         """
         notebook_ids, tiers = self._notebooks.participant_tiers(
-            db, active_notebook_id
+            db, active_notebook_id, viewer_id="",  # E6-3
         )
         return tuple(
             (str(notebook_id), str(tiers.get(notebook_id, "personal")))
@@ -1947,7 +1947,7 @@ class CollectionEnumerationService:
             resolve_retrieval_participant_ids(
                 active_notebook_id,
                 lambda: self._notebooks.participant_ids(
-                    db, active_notebook_id,
+                    db, active_notebook_id, viewer_id="",  # E6-3
                 ),
             )
         )

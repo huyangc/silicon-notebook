@@ -11,8 +11,8 @@ from app.repositories.sqlite.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.notebook_delete_job_store import NotebookDeleteJobStore
 from app.repositories.sqlite.mount_sql import (
-    MOUNT_GATE_CLOSED_EXPR, MOUNT_JOIN, MOUNT_ORDER, MOUNT_ORIGIN_COLUMN,
-    MOUNT_VALID, MOUNT_VALID_EXPR,
+    MOUNT_EFFECTIVE_FOR_VIEWER, MOUNT_GATE_CLOSED_EXPR, MOUNT_JOIN, MOUNT_ORDER,
+    MOUNT_ORIGIN_COLUMN, MOUNT_VALID_EXPR, MOUNT_VIEWER_JOIN,
 )
 
 # Knowledge-object statuses that count as "usable" for retrieval and the
@@ -74,9 +74,14 @@ class NotebookStore:
 
     @staticmethod
     def resolve_participants(
-        db: sqlite3.Connection, active_notebook_id: str
+        db: sqlite3.Connection, active_notebook_id: str, *, viewer_id: str | None
     ) -> list[tuple[str, str]]:
-        """[(notebook_id, tier)] —— 首项恒为 active 本身。唯一的参与集定义点。"""
+        """[(notebook_id, tier)] —— 首项恒为 active 本身。唯一的参与集定义点。
+
+        参与集随提问人变化(M3):挂载只对挂载人、或自己本来就能读被挂库的人生效,
+        公共库与 ``everyone`` 授权对所有人生效。``viewer_id`` 是**必填关键字**——
+        漏传当场 TypeError,不会静默回到「与谁在提问无关」的旧语义;``None`` / 空串
+        表示没有查看者,只剩公共库与 ``everyone``(失败即关)。"""
         active = db.execute(
             "SELECT tier FROM notebooks WHERE id=?", (active_notebook_id,)
         ).fetchone()
@@ -86,27 +91,37 @@ class NotebookStore:
         )]
         rows = db.execute(
             "SELECT b.id AS id, b.tier AS tier "
-            + MOUNT_JOIN + MOUNT_VALID + MOUNT_ORDER,
-            (active_notebook_id,),
+            + MOUNT_VIEWER_JOIN + MOUNT_EFFECTIVE_FOR_VIEWER + MOUNT_ORDER,
+            (viewer_id, active_notebook_id),
         ).fetchall()
         out.extend((row["id"], row["tier"] or "personal") for row in rows)
         return out
 
-    def participant_notebook_ids(self, active_notebook_id: str) -> list[str]:
+    def participant_notebook_ids(
+        self, active_notebook_id: str, *, viewer_id: str | None
+    ) -> list[str]:
         with self.database.connect() as db:
-            return self.participant_ids(db, active_notebook_id)
+            return self.participant_ids(db, active_notebook_id, viewer_id=viewer_id)
 
     @staticmethod
-    def participant_ids(db: sqlite3.Connection, active_notebook_id: str) -> list[str]:
-        return [nb_id for nb_id, _ in NotebookStore.resolve_participants(db, active_notebook_id)]
+    def participant_ids(
+        db: sqlite3.Connection, active_notebook_id: str, *, viewer_id: str | None
+    ) -> list[str]:
+        return [
+            nb_id for nb_id, _ in NotebookStore.resolve_participants(
+                db, active_notebook_id, viewer_id=viewer_id
+            )
+        ]
 
     @staticmethod
-    def participant_rows(db: sqlite3.Connection, active_notebook_id: str):
+    def participant_rows(
+        db: sqlite3.Connection, active_notebook_id: str, *, viewer_id: str | None
+    ):
         """(active_row, base_rows) —— 形状与全局唯一 base 时代一致,消费方无需改动。"""
         base_rows = db.execute(
             "SELECT b.id AS id, b.tier AS tier "
-            + MOUNT_JOIN + MOUNT_VALID + MOUNT_ORDER,
-            (active_notebook_id,),
+            + MOUNT_VIEWER_JOIN + MOUNT_EFFECTIVE_FOR_VIEWER + MOUNT_ORDER,
+            (viewer_id, active_notebook_id),
         ).fetchall()
         active_row = db.execute(
             "SELECT id, tier FROM notebooks WHERE id=?", (active_notebook_id,),
@@ -114,12 +129,16 @@ class NotebookStore:
         return active_row, base_rows
 
     @staticmethod
-    def participant_tiers(db: sqlite3.Connection, active_notebook_id: str):
+    def participant_tiers(
+        db: sqlite3.Connection, active_notebook_id: str, *, viewer_id: str | None
+    ):
         """``([notebook_id, ...], {notebook_id: tier})`` —— 两半由同一次
         ``resolve_participants`` 派生,所以 tier map 的键集合**恒等于**那份 id 列表。
         消费方(``collection_enumeration._mount_participant_pairs``)按这条不变量把
         两半 zip 回 ``(id, tier)`` 对;要改成「map 里还带别的库」就必须同时改它。"""
-        pairs = NotebookStore.resolve_participants(db, active_notebook_id)
+        pairs = NotebookStore.resolve_participants(
+            db, active_notebook_id, viewer_id=viewer_id
+        )
         return [nb_id for nb_id, _ in pairs], dict(pairs)
 
     @staticmethod

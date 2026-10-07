@@ -46,7 +46,11 @@ from app.repositories.postgres.memory_sql import (
     no_memory_member_cluster,
     own_memory_source,
 )
-from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
+from app.repositories.postgres.mount_sql import (
+    MOUNT_EFFECTIVE_FOR_VIEWER,
+    MOUNT_ORDER,
+    MOUNT_VIEWER_JOIN,
+)
 from app.repositories.postgres.search import (
     notebook_element_rows,
     notebook_knowledge_rows,
@@ -332,13 +336,18 @@ class QueryStore:
         return bool(row["exists"])
 
     @staticmethod
-    def notebook_has_usable_base_kg(db: Any, notebook_id: str) -> bool:
-        """本库挂载的参考库中是否有任一含**可用状态** KG。与 sqlite 同义(PR#334)。"""
+    def notebook_has_usable_base_kg(
+        db: Any, notebook_id: str, *, viewer_id: str | None
+    ) -> bool:
+        """本库挂载的参考库中是否有任一含**可用状态** KG。与 sqlite 同义(PR#334)。
+        
+        ``viewer_id`` 是必填关键字(M3:挂载只对挂载人或自己能读被挂库的人生效);
+        ``None``/空串 = 无查看者,只剩公共库与 ``everyone``。"""
         row = db.execute(
-            "SELECT EXISTS(SELECT 1 " + MOUNT_JOIN + MOUNT_VALID
+            "SELECT EXISTS(SELECT 1 " + MOUNT_VIEWER_JOIN + MOUNT_EFFECTIVE_FOR_VIEWER
             + " AND EXISTS(SELECT 1 FROM knowledge_objects ko "
             "WHERE ko.notebook_id = b.id AND ko.status=ANY(%s))) AS exists",
-            (notebook_id, list(USABLE_STATUSES)),
+            (viewer_id, notebook_id, list(USABLE_STATUSES)),
         ).fetchone()
         return bool(row["exists"])
 
@@ -463,14 +472,16 @@ class QueryStore:
         return int(row["count"])
 
     @staticmethod
-    def mounted_bases_row(db: Any, notebook_id: str):
+    def mounted_bases_row(db: Any, notebook_id: str, *, viewer_id: str | None):
         """本库挂载的有效参考库 + 各自是否有 KG —— 一次查询同时供 NotebookSummary 的
-        base_notebooks 与 base_kg_available。"""
+        base_notebooks 与 base_kg_available。
+        ``viewer_id`` 是必填关键字(M3:挂载只对挂载人或自己能读被挂库的人生效);
+        ``None``/空串 = 无查看者,只剩公共库与 ``everyone``。"""
         return db.execute(
             "SELECT b.id AS id, b.name AS name, b.tier AS tier, "
             "EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id) AS has_kg "
-            + MOUNT_JOIN + MOUNT_VALID + MOUNT_ORDER,
-            (notebook_id,),
+            + MOUNT_VIEWER_JOIN + MOUNT_EFFECTIVE_FOR_VIEWER + MOUNT_ORDER,
+            (viewer_id, notebook_id),
         ).fetchall()
 
     @staticmethod

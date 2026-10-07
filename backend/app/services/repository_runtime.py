@@ -1191,6 +1191,20 @@ class RepositoryRuntime:
         Mirrors what both persistence bundles already do with ``identity``."""
         return self.identity.current_user().id
 
+    def _participant_notebook_ids(self, notebook_id: str) -> list[str]:
+        """The one-argument participant reader the four wirings below hand out.
+
+        ``NotebookStore.participant_notebook_ids`` takes a REQUIRED ``viewer_id``
+        (M3: a mount is effective for the mounter, or for whoever can read the
+        mounted library themselves).  The services these wirings feed hold
+        ``Callable[[str], ...]`` seams, so the viewer is bound here, once.
+        E6-3 replaces the empty viewer with ``current_viewer_id()`` (the run's
+        actor, never the HTTP request); until then ``""`` means "no viewer":
+        only public libraries and ``everyone`` grants survive."""
+        return self.notebook_store.participant_notebook_ids(
+            notebook_id, viewer_id="",  # E6-3
+        )
+
     # 触发面(2026-09-22 PR-3·T7 起扩到全部三个提问面,推翻 codex #535 R4 P2 当时
     # 登记的「同步不计入」口径):流式 AskExecutionCoordinator 的 done 分支、同步
     # `POST /notebooks/{id}/ask`、MCP `ask_notebook`。后两者经 `RepositoryFacade.ask`
@@ -2045,7 +2059,7 @@ class RepositoryRuntime:
             schemas=self.schema_registry,
             snapshots=self.retrieval_snapshots,
             notebook_languages=lambda: self.notebook_languages,
-            participant_notebook_ids=self.notebook_store.participant_notebook_ids,
+            participant_notebook_ids=self._participant_notebook_ids,
             node_context_reader=lambda notebook_id, object_id, *, allowed_source_ids=None: (
                 self.knowledge.node_context(
                     notebook_id, object_id, check_access=False,
@@ -2222,7 +2236,7 @@ class RepositoryRuntime:
             relations_for_notebook=relations_for_notebook,
             notebook_copy_stats=notebook_copy_stats,
             note_model_error=note_model_error,
-            participant_notebook_ids=self.notebook_store.participant_notebook_ids,
+            participant_notebook_ids=self._participant_notebook_ids,
             invalidate_knowledge_counts=self.queries.invalidate_knowledge_counts,
             # codex #659 R7: a checkpoint must abort BOTH while the delete is
             # in flight ('deleting') AND after it finished (row gone,
@@ -2452,7 +2466,7 @@ class RepositoryRuntime:
                 notebook_id, digest_for_owner=owner_id)
 
         return CeilingReaders(
-            participants=self.notebook_store.participant_notebook_ids,
+            participants=self._participant_notebook_ids,
             visible=sources.all_visible_source_ids,
             hidden=sources.hidden_source_ids,
             memory_sources=memory_sources,
@@ -2714,9 +2728,7 @@ class RepositoryRuntime:
                 # ``ReasoningRetriever`` and deliberately do not.
                 reflect_action_host=self.reflect_actions,
                 ask_engine_host=self.ask_engines,
-                ask_engine_participant_notebooks=(
-                    self.notebook_store.participant_notebook_ids
-                ),
+                ask_engine_participant_notebooks=self._participant_notebook_ids,
                 ask_engine_visible_sources=self.source_store.all_visible_source_ids,
                 ask_engine_hidden_sources=self.source_store.hidden_source_ids,
                 # Agentic Memory PR-3(T7):同步 `POST /ask` 与 MCP

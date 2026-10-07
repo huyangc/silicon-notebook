@@ -56,7 +56,7 @@ class _Notebooks:
             for notebook_id in notebook_ids
         }
 
-    def participant_notebook_ids(self, active_notebook_id):
+    def participant_notebook_ids(self, active_notebook_id, *, viewer_id=None):
         return [active_notebook_id, PEER]
 
 

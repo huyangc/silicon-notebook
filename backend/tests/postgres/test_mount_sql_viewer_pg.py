@@ -383,3 +383,106 @@ def test_viewer_fragments_keep_the_index_path_at_realistic_scale(pg_realistic_mo
                             f"{label} 不再顺序扫描 notebooks,这条 pin 在这档规模上已经"
                             f"失去鉴别力,重新定规模:\n{plan}"
                         )
+
+
+# ------------------------------------------- E6-2:真实调用点发出的语句
+#
+# 上面钉的是片段拼出来的三种形状;这里钉**七个 store 调用点真正发出的语句**。语句
+# 是录下来的(包一层只记录的连接代理),不是在测试里重拼——调用点换回旧片段、或拼
+# 错参数顺序,录到的语句就不是发布的形状,或者计划里出现顺序扫描。
+
+
+class _Recorder:
+    """只记录 `execute(sql, params)` 再原样转发的连接代理。"""
+
+    def __init__(self, connection):
+        self._connection = connection
+        self.calls: list[tuple[str, tuple]] = []
+
+    def execute(self, query, params=None, *args, **kwargs):
+        self.calls.append((str(query), tuple(params or ())))
+        return self._connection.execute(query, params, *args, **kwargs)
+
+
+def _recorded_call_site_statements(database, viewer):
+    """调用七个调用点各一次,返回 `{站点: [(sql, params), ...]}`(只留挂载语句)。"""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from app.domain.knowledge_contracts import USABLE_STATUSES
+    from app.repositories.postgres.knowledge_store import KnowledgeStore
+    from app.repositories.postgres.notebook_store import NotebookStore
+    from app.repositories.postgres.query_store import QueryStore
+    from app.repositories.postgres.unified_kg_store import UnifiedKgStore
+
+    out: dict[str, list] = {}
+    with database.connect() as connection:
+
+        def record(site, call):
+            recorder = _Recorder(connection)
+            call(recorder)
+            out[site] = [
+                (sql, params) for sql, params in recorder.calls
+                if "FROM notebook_bases" in sql
+            ]
+
+        kw = {"viewer_id": viewer}
+        record("resolve_participants",
+               lambda db: NotebookStore.resolve_participants(db, _PROBE, **kw))
+        record("participant_rows",
+               lambda db: NotebookStore.participant_rows(db, _PROBE, **kw))
+        record("notebook_has_usable_base_kg",
+               lambda db: QueryStore.notebook_has_usable_base_kg(db, _PROBE, **kw))
+        record("mounted_bases_row",
+               lambda db: QueryStore.mounted_bases_row(db, _PROBE, **kw))
+        record("any_mounted_has_kg_on",
+               lambda db: KnowledgeStore.any_mounted_has_kg_on(db, _PROBE, **kw))
+        record("follow_start_row",
+               lambda db: KnowledgeStore.follow_start_row(
+                   db, "ko-none", _PROBE, USABLE_STATUSES, **kw))
+
+        def mounted_base_ids(recorder):
+            @contextmanager
+            def connect():
+                yield recorder
+
+            unified = UnifiedKgStore.__new__(UnifiedKgStore)
+            unified.database = SimpleNamespace(connect=connect)
+            unified.mounted_base_ids(_PROBE, **kw)
+
+        record("mounted_base_ids", mounted_base_ids)
+    return out
+
+
+@pytest.mark.parametrize("pg_realistic_mounts", [6000], indirect=True)
+def test_call_site_statements_are_the_published_viewer_fragments(pg_realistic_mounts):
+    """七个调用点各录到一条挂载语句:它含发布的带查看者片段、参数按
+    `(viewer, notebook)` 绑定,并且在真实形状夹具上(custom / generic 两种计划,
+    含 `enable_seqscan=off` 的能力判据)不顺序扫描任何访问控制表。"""
+    database, _notebooks = pg_realistic_mounts
+    with database.connect() as connection:
+        for label, viewer in _PIN_VIEWERS:
+            recorded = _recorded_call_site_statements(database, viewer)
+            assert sorted(recorded) == sorted([
+                "resolve_participants", "participant_rows",
+                "notebook_has_usable_base_kg", "mounted_bases_row",
+                "any_mounted_has_kg_on", "follow_start_row", "mounted_base_ids",
+            ])
+            for site, statements in recorded.items():
+                assert len(statements) == 1, (site, statements)
+                query, params = statements[0]
+                assert pg_mount_sql.MOUNT_VIEWER_JOIN in query, (site, query)
+                assert pg_mount_sql._MOUNT_EFFECTIVE_FOR_VIEWER_PRED in query, (site, query)
+                # 查看者紧挨在它所属笔记本之前(查看者行先于 WHERE 出现)。
+                at = [i for i, value in enumerate(params) if value == viewer]
+                assert len(at) == 1 and params[at[0] + 1] == _PROBE, (site, params)
+                modes = ("custom",) if any(isinstance(p, list) for p in params) else (
+                    "custom", "generic"
+                )
+                for mode in modes:
+                    plan = _plan(connection, query, params, mode=mode)
+                    assert not _SEQ_SCAN.search(plan), f"{site} / {label} / {mode}:\n{plan}"
+                capability = _plan(connection, query, params, seqscan=False)
+                assert not _SEQ_SCAN.search(capability), (
+                    f"{site} / {label}(enable_seqscan=off):\n{capability}"
+                )

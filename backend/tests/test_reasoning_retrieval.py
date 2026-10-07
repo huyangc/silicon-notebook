@@ -4190,6 +4190,10 @@ def test_chunk_participant_count_counts_the_checked_reference_library(rrepo):
     nb = _seed_notebook_without_kg(rrepo)
     assert rrepo.retrieval.chunk_participant_count(nb.id) == 1
     base = _seed_two_nodes(rrepo)
+    # E6-3: the participant reader is not yet bound to the run's viewer, so only a
+    # library open to everybody (a public base) mounts here; E6-3 restores the
+    # owner's private library with its actor.
+    rrepo.mark_notebook_base(base.id)
     rrepo.replace_notebook_bases(nb.id, [base.id], "user-local")
     assert rrepo.retrieval.chunk_participant_count(nb.id) == 2
 
@@ -4897,6 +4901,7 @@ def test_kg_in_scope_counts_a_checked_reference_library(rrepo):
     from app.services.source_scope import source_scope_context
 
     base = _seed_two_nodes(rrepo)                  # 有图的参考库
+    rrepo.mark_notebook_base(base.id)              # E6-3:见 chunk_participant_count 那条
     nb = _seed_notebook_without_kg(rrepo)          # 本库无图
     rrepo.replace_notebook_bases(nb.id, [base.id], "user-local")
     rrepo.settings.graph_ppr_enabled = False
@@ -4935,6 +4940,7 @@ def test_first_round_seed_brings_own_passages_when_only_a_reference_library_has_
 
     own_text = "布局布线阶段先全局布局再详细布线。"
     base = _seed_two_nodes(rrepo)                         # 有图的参考库
+    rrepo.mark_notebook_base(base.id)                     # E6-3:见 chunk_participant_count 那条
     nb = _seed_notebook_without_kg(rrepo, (own_text,))    # 本库无图
     rrepo.replace_notebook_bases(nb.id, [base.id], "user-local")
     rrepo.settings.graph_ppr_enabled = False

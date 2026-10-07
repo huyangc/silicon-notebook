@@ -763,7 +763,7 @@ def test_notebook_mount_and_sharing_semantics(core_stores: CoreStores):
     )
     core_stores.notebooks.set_tier(base_id, "base")
     core_stores.notebooks.replace_mounts(personal_id, [base_id, base_id], owner.id)
-    assert core_stores.notebooks.participant_notebook_ids(personal_id) == [
+    assert core_stores.notebooks.participant_notebook_ids(personal_id, viewer_id=owner.id) == [
         personal_id,
         base_id,
     ]
@@ -2616,13 +2616,13 @@ def test_cross_owner_base_visibility_fails_closed_after_downgrade(
     )
     core_stores.notebooks.set_tier(base_id, "base")
     core_stores.notebooks.replace_mounts(personal_id, [base_id], owner.id)
-    assert core_stores.notebooks.participant_notebook_ids(personal_id) == [
+    assert core_stores.notebooks.participant_notebook_ids(personal_id, viewer_id=owner.id) == [
         personal_id,
         base_id,
     ]
 
     core_stores.notebooks.set_tier(base_id, "personal")
-    assert core_stores.notebooks.participant_notebook_ids(personal_id) == [personal_id]
+    assert core_stores.notebooks.participant_notebook_ids(personal_id, viewer_id=owner.id) == [personal_id]
     edge = core_stores.notebooks.list_mount_edges_for_notebook(personal_id)[0]
     assert edge["active"] is False
     assert edge["name"] == "已不可用的知识库"

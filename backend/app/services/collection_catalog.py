@@ -590,7 +590,7 @@ class CollectionCatalogService:
                 resolve_retrieval_participant_ids(
                     active_notebook_id,
                     lambda: self._notebooks.participant_ids(
-                        db, active_notebook_id,
+                        db, active_notebook_id, viewer_id="",  # E6-3
                     ),
                 )
             )

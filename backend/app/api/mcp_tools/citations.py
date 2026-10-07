@@ -101,7 +101,13 @@ def register_citation_tools(
                         notebook_id=str(meta["notebook_id"]),
                         type=str(meta["source_type"]),
                     ),
-                    repo.participant_notebook_ids,
+                    # The participant set is read AS the token's owner (M3: a mount
+                    # is effective for its mounter, or for whoever can read the
+                    # mounted library) -- NOT the Memory gate's `viewer_id` above,
+                    # which is `''` when the token lacks `memory:read`.
+                    lambda nb: repo.participant_notebook_ids(
+                        nb, viewer_id=principal.owner_id
+                    ),
                     readable_notebook_id=readable_notebook_id,
                 ):
                     raise KeyError(source_id)

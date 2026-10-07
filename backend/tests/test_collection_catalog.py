@@ -470,7 +470,7 @@ def test_downgraded_cross_owner_base_falls_out_of_scope(repo):
     assert mounted.element_count("formula") == 4
     with repo._connect() as db:
         assert list(mounted.notebook_ids) == (
-            repo._runtime.notebook_store.participant_ids(db, notebook.id)
+            repo._runtime.notebook_store.participant_ids(db, notebook.id, viewer_id="user-local")
         )
 
     repo.set_notebook_personal(base.id)            # 降级 → 跨 owner 边即刻失效

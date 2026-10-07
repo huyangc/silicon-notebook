@@ -96,10 +96,20 @@ def test_a_stored_library_is_used_before_any_read():
 
 
 def test_the_check_reads_nothing_without_another_library_and_fails_closed():
-    def never(_notebook_id):
+    def never(_notebook_id, *, viewer_id):
         raise AssertionError("no other library: nothing to read")
 
+    viewers: list[str] = []
+
+    def effective(_notebook_id, *, viewer_id):
+        viewers.append(viewer_id)
+        return ["nb-a", "nb-b"]
+
     assert mounts_still_effective("nb-a", "u", {"nb-a", ""}, never)
-    assert not mounts_still_effective("nb-a", "", {"nb-b"}, lambda _nb: ["nb-a", "nb-b"])
-    assert mounts_still_effective("nb-a", "u", {"nb-b"}, lambda _nb: ["nb-a", "nb-b"])
-    assert not mounts_still_effective("nb-a", "u", {"nb-b", "nb-c"}, lambda _nb: ["nb-a", "nb-b"])
+    assert not mounts_still_effective("nb-a", "", {"nb-b"}, effective)
+    assert viewers == [], "an empty creator fails closed without reading"
+    assert mounts_still_effective("nb-a", "u", {"nb-b"}, effective)
+    assert not mounts_still_effective("nb-a", "u", {"nb-b", "nb-c"}, effective)
+    # M3: the participant set is read AS the share's creator (the anonymous page
+    # binds no request user), never as nobody.
+    assert viewers == ["u", "u"]

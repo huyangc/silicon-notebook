@@ -1228,17 +1228,21 @@ class RepositoryFacade:
         return self._runtime.notebook_summaries.count_pending_kg_sources(db, notebook_id)
 
     def _any_base_notebook_has_kg(
-        self, notebook_id: str, db: "object | None" = None
+        self, notebook_id: str, db: "object | None" = None, *, viewer_id: str | None
     ) -> bool:
-        """True iff 该 notebook 挂载的参考库里有任一已建 KG。"""
-        return self._runtime.knowledge.any_mounted_has_kg_compat(notebook_id, db)
+        """True iff 该 notebook 挂载的参考库里有任一已建 KG(对 ``viewer_id`` 生效的挂载)。"""
+        return self._runtime.knowledge.any_mounted_has_kg_compat(
+            notebook_id, db, viewer_id=viewer_id
+        )
 
     def _mounted_bases(
-        self, notebook_id: str, db: "object | None" = None
+        self, notebook_id: str, db: "object | None" = None, *, viewer_id: str | None
     ) -> "tuple[list, list]":
         """(参考库列表, 其中已建 KG 的库 id) —— 第二项过去是 `any(has_kg)` 布尔,现在是
         那批 id;`bool(...)` 与旧值逐字等价,故按布尔消费的调用方行为不变。"""
-        return self._runtime.notebook_summaries.mounted_bases(notebook_id, db)
+        return self._runtime.notebook_summaries.mounted_bases(
+            notebook_id, db, viewer_id=viewer_id
+        )
 
     def _source_ids_from_evidence(self, evidence_json: Optional[str | list]) -> set:
         """PURE parse of an evidence JSON TEXT value into its distinct
@@ -3891,15 +3895,22 @@ class RepositoryFacade:
     def _mix_retrieve(self, notebook_id: str, query: str, hl: str, sub_queries: list) -> tuple:
         return self.retrieval.candidates._mix_retrieve(notebook_id, query, hl, sub_queries)
 
-    def participant_notebook_ids(self, notebook_id: str) -> List[str]:
+    def participant_notebook_ids(
+        self, notebook_id: str, *, viewer_id: str | None
+    ) -> List[str]:
         """联邦参与库:active 在首位 + 全部 base tier(与 _ppr_graph/federated_retrieve
         的内联谓词一致;此 helper v1 只供新代码使用,存量调用点不迁移)。
 
         公开(v1 落地时叫 `_participant_notebook_ids`,零调用点)是因为它现在有了
         facade **外部**的消费方:MCP 的 `get_cited_element` 拿注入的 repository 去做
         「引用点查」的参与集校验——deps 里的 `notebook_store_port()` 是浏览器侧
-        (FastAPI 依赖)的取数口,MCP 不经过它。唯一定义点仍是 mount_sql.py。"""
-        return self._runtime.notebook_store.participant_notebook_ids(notebook_id)
+        (FastAPI 依赖)的取数口,MCP 不经过它。唯一定义点仍是 mount_sql.py。
+
+        ``viewer_id`` 是必填关键字(M3:挂载只对挂载人或自己能读被挂库的人生效):
+        调用方必须说出「替谁取」——MCP 传令牌所属用户,公开页传分享创建者。"""
+        return self._runtime.notebook_store.participant_notebook_ids(
+            notebook_id, viewer_id=viewer_id
+        )
 
     def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge],
                         id_offset: int = 0) -> tuple:

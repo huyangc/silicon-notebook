@@ -48,7 +48,11 @@ from app.repositories.sqlite.memory_sql import (
     memory_derived_in_notebook,
     memory_source_type_predicate,
 )
-from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
+from app.repositories.sqlite.mount_sql import (
+    MOUNT_EFFECTIVE_FOR_VIEWER,
+    MOUNT_ORDER,
+    MOUNT_VIEWER_JOIN,
+)
 from app.repositories.sqlite.source_ceiling import (
     EVIDENCE_ITEM_SOURCE,
     ceiling_param,
@@ -1585,13 +1589,16 @@ class UnifiedKgStore:
     # -------------------------------------------- community-peer primitives
     # communities.py(对比检索原语)的读接口 —— 自己开只读连接(原实现即用
     # 独立 repo._connect() 短查询;WAL 并发读)。
-    def mounted_base_ids(self, active_nb: str) -> list[str]:
+    def mounted_base_ids(self, active_nb: str, *, viewer_id: str | None) -> list[str]:
         """本库挂载的有效参考库 id —— 社区对比检索的扩展域。原
-        first_base_notebook_id 的全局 LIMIT 1 在多领域下无意义。"""
+        first_base_notebook_id 的全局 LIMIT 1 在多领域下无意义。
+        ``viewer_id`` 是必填关键字(M3:挂载只对挂载人或自己能读被挂库的人生效);
+        ``None``/空串 = 无查看者,只剩公共库与 ``everyone``。"""
         with self.database.connect() as db:
             rows = db.execute(
-                "SELECT b.id AS id " + MOUNT_JOIN + MOUNT_VALID + MOUNT_ORDER,
-                (active_nb,)).fetchall()
+                "SELECT b.id AS id " + MOUNT_VIEWER_JOIN
+                + MOUNT_EFFECTIVE_FOR_VIEWER + MOUNT_ORDER,
+                (viewer_id, active_nb)).fetchall()
         return [row["id"] for row in rows]
 
     def resolve_focal(self, notebook_id: str, focal_key: str) -> Optional[str]:

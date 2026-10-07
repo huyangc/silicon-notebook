@@ -67,7 +67,7 @@ class _Notebooks:
         tiers = {ACTIVE: "personal", PEER: "base"}
         return {nid: tiers.get(nid, "personal") for nid in notebook_ids}
 
-    def participant_notebook_ids(self, active_notebook_id):
+    def participant_notebook_ids(self, active_notebook_id, *, viewer_id=None):
         return [ACTIVE, PEER]
 
 

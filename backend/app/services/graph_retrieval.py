@@ -494,7 +494,7 @@ class GraphRetrievalService(_RetrievalState):
                 # Participating notebooks: active + all base notebooks (excl.
                 # active if active is itself base, to avoid duplication).
                 active_row, base_rows = self.notebooks.participant_rows(
-                    db, active_notebook_id,
+                    db, active_notebook_id, viewer_id="",  # E6-3
                 )
                 active_tier = active_row["tier"] if active_row else "personal"
 
@@ -615,7 +615,9 @@ class GraphRetrievalService(_RetrievalState):
         override = current_participant_override()
         with self._connect() as db:
             participants = (
-                self.notebooks.participant_ids(db, notebook_id)
+                self.notebooks.participant_ids(
+                    db, notebook_id, viewer_id="",  # E6-3
+                )
                 if override is None
                 else [
                     participant_id
@@ -1122,7 +1124,9 @@ class GraphRetrievalService(_RetrievalState):
         override = current_participant_override()
         if override is None:
             with self._connect() as db:
-                base_ids = self.notebooks.participant_ids(db, notebook_id)[1:]
+                base_ids = self.notebooks.participant_ids(
+                    db, notebook_id, viewer_id="",  # E6-3
+                )[1:]
         else:
             base_ids = [
                 participant_id
@@ -1637,6 +1641,7 @@ class GraphRetrievalService(_RetrievalState):
             override = current_participant_override()
             start = self.knowledge.follow_start_row(
                 db, start_object_id, active_notebook_id, USABLE_STATUSES,
+                viewer_id="",  # E6-3
                 **({} if override is None else {"participant_ids": [
                     participant_id
                     for participant_id, _tier

@@ -10,7 +10,7 @@ from app.services.retrieval_service import RetrievalService
 
 
 class _Unified:
-    def mounted_base_ids(self, active_notebook_id):
+    def mounted_base_ids(self, active_notebook_id, *, viewer_id=None):
         return [] if active_notebook_id == "base" else ["base"]
 
     def resolve_focal(self, notebook_id, key):
