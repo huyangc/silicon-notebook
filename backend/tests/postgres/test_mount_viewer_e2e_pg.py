@@ -17,6 +17,7 @@ from tests.test_mount_viewer_e2e import (
     assert_a_global_ask_reads_by_its_actor,
     assert_a_join_summary_is_the_joiners,
     assert_a_report_reads_the_mount_by_its_author,
+    assert_every_participant_reader_follows_the_run_actor,
     assert_graph_caches_follow_the_effective_set,
     assert_no_actor_no_request_reads_only_public_libraries,
     assert_the_mount_counts_only_for_its_readers,
@@ -71,3 +72,7 @@ def test_no_actor_and_no_request_reads_only_public_libraries_on_postgres(
 
 def test_a_join_summary_is_the_joiners_on_postgres(postgres_env):
     assert_a_join_summary_is_the_joiners(postgres_env)
+
+
+def test_every_participant_reader_follows_the_run_actor_on_postgres(postgres_env):
+    assert_every_participant_reader_follows_the_run_actor(postgres_env)
