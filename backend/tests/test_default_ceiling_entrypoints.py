@@ -53,6 +53,7 @@ from app.repositories.ports import ChunkWrite, SourceElementWrite
 from tests.model_testkit import bind_chat_client
 from tests.test_mcp_memory_channel_e2e import (
     FULL_SCOPES,
+    NO_MEMORY_SCOPES,
     build_mcp_app,
     token,
 )
@@ -70,18 +71,37 @@ LIBRARY_VISIBLE = "LIBVISKGMARK"
 SECRETS = ("BOBELEMSECRET", "BOBKGSECRET", "LIBKHSECRET", "LIBMEMSECRET")
 
 
+# The reflect turns every reasoning ask walks through before answering, so
+# the relation expansion, the element arm, community neighbours and
+# derivation chains each really run once (their trace steps are asserted).
+REFLECT_TURNS = (
+    {"next_action": "expand_graph", "sufficient": False,
+     "expand": {"object_id": "ko-visible", "direction": "both"}},
+    {"next_action": "search_elements", "sufficient": False,
+     "elements_query": f"{TERM} latency element"},
+    {"next_action": "expand_community", "sufficient": False,
+     "community_focal": f"{TERM} latency visible concept VISKGMARK"},
+    {"next_action": "follow_chain", "sufficient": False,
+     "follow_chain": {"start_object_id": "ko-visible", "direction": "both"}},
+)
+WALKED_STEPS = ("expand", "fallback", "expand_community", "follow_chain")  # search_elements records "fallback"
+
+
 class _Model:
-    """Reasoning understanding/planning answered at once; every other call
-    cites every ``k{n}`` key it was shown, and its prompt is recorded."""
+    """Reasoning understanding/planning answered at once; the reflect turns
+    walk ``REFLECT_TURNS`` before answering; every other call cites every
+    ``k{n}`` key it was shown, and its prompt is recorded."""
 
     configured = True
 
     def __init__(self) -> None:
         self.prompts: list[str] = []
+        self._turn = 0
 
     def chat_json(self, messages, schema_hint="", *args, **kwargs):
         schema_hint = schema_hint or ""
         if "normalized_question" in schema_hint:
+            self._turn = 0                        # every ask is understood first
             return json.dumps({
                 "normalized_question": QUESTION, "intent_type": "explain",
                 "result_scope": "ranked", "completeness_required": False,
@@ -89,8 +109,15 @@ class _Model:
                 "needs_clarification": False, "confidence": 0.9,
             })
         if "sub_queries" in schema_hint:
+            self._turn = 0                        # a new reasoning run
             return json.dumps({"sub_queries": [{"query": f"{TERM} latency"}]})
         if "next_action" in schema_hint:
+            text = "\n".join(str(message.get("content") or "") for message in messages)
+            self.prompts.append(text)             # reflect prompts carry evidence too
+            turn = self._turn
+            self._turn += 1
+            if turn < len(REFLECT_TURNS):
+                return json.dumps(REFLECT_TURNS[turn])
             return json.dumps({"next_action": "answer", "sufficient": True})
         text = "\n".join(str(message.get("content") or "") for message in messages)
         self.prompts.append(text)
@@ -252,6 +279,30 @@ def _bind_model() -> _Model:
     return model
 
 
+def _count_ceiling_reads(monkeypatch) -> list[str]:
+    """Every read the Ask service's ceiling readers make, by name."""
+    from dataclasses import replace
+
+    service = repository()._runtime.ask_service()
+    readers = service.ceiling_readers
+    reads: list[str] = []
+
+    def counted(name, read):
+        def call(*args, **kwargs):
+            reads.append(name)
+            return read(*args, **kwargs)
+        return call
+
+    monkeypatch.setattr(service, "ceiling_readers", replace(
+        readers,
+        participants=counted("participants", readers.participants),
+        visible=counted("visible", readers.visible),
+        hidden=counted("hidden", readers.hidden),
+        memory_sources=counted("memory_sources", readers.memory_sources),
+    ))
+    return reads
+
+
 async def _login(http: httpx.AsyncClient, username: str) -> dict[str, str]:
     reply = await http.post(
         "/api/auth/login", json={"username": username, "password": PASSWORD},
@@ -338,10 +389,18 @@ async def assert_every_entry_runs_under_the_default_ceiling(env: dict, monkeypat
     model = _bind_model()
     understood: list = []
     original_plan = query_intent.plan_query_intent
+    reads = _count_ceiling_reads(monkeypatch)
 
     def recording_plan(*args, **kwargs):
-        understood.append(current_source_scope())
-        return original_plan(*args, **kwargs)
+        # ③: the precheck's ceiling is installed but LAZY -- nothing was read
+        # to run this model call ...
+        understood.append(("reads", len(reads)))
+        result = original_plan(*args, **kwargs)
+        understood.append(("reads after the model call", len(reads)))
+        # ... and anything that does consume the scope in here gets the full
+        # default ceiling.
+        understood.append(("scope", current_source_scope()))
+        return result
 
     monkeypatch.setattr(query_intent, "plan_query_intent", recording_plan)
     transport = httpx.ASGITransport(app=app)
@@ -351,14 +410,22 @@ async def assert_every_entry_runs_under_the_default_ceiling(env: dict, monkeypat
         headers = await _login(http, env["alice"].username)
 
         model.prompts.clear()
+        reads.clear()
+        understood.clear()
         answer = await ask_http(http, headers, notebook_id)
         _assert_alice_sees_only_what_she_may(
             "\n".join(model.prompts), json.dumps(answer, ensure_ascii=False), "① /ask",
         )
         assert "skipped_libraries" not in answer, "a healthy run carries no notice"
+        walked = [step["step_type"] for step in answer["reasoning_trace"]]
+        for step_type in WALKED_STEPS:
+            assert step_type in walked, (step_type, walked)
 
-        # ③ the intent precheck ran under the same ceiling, for Alice.
-        scope = understood[-1]
+        # ③ the intent precheck: zero ceiling reads for its model call, and
+        # the default ceiling for Alice once the scope is consumed.
+        assert understood[0] == ("reads", 0)
+        assert understood[1] == ("reads after the model call", 0)
+        scope = understood[2][1]
         assert scope is not None and scope.ceilings_total
         assert scope.owner_id == env["alice"].id
         assert "src-memory-bob" not in scope.hidden_source_ids
@@ -378,6 +445,19 @@ async def assert_every_entry_runs_under_the_default_ceiling(env: dict, monkeypat
             "\n".join(model.prompts), json.dumps(mcp, ensure_ascii=False),
             "④ MCP ask_notebook",
         )
+
+        # ④ without memory:read, with Bob's Memory in the notebook and the
+        # mounted library's Knowhow/Memory projections: none of Bob's, none of
+        # the library's hidden, and not Alice's own Memory either (the channel
+        # is closed); the visible source still takes part.
+        model.prompts.clear()
+        closed = await ask_mcp(app, token(env, "alice", NO_MEMORY_SCOPES), notebook_id)
+        prompt = "\n".join(model.prompts)
+        wire = json.dumps(closed, ensure_ascii=False)
+        assert "VISKGMARK" in prompt, "the visible source still takes part"
+        for secret in (*SECRETS, OWN_MEMORY):
+            assert secret not in prompt, f"closed channel: {secret} reached the retrieval"
+            assert secret not in wire, f"closed channel: {secret} reached the answer"
 
 
 async def assert_a_skipped_library_is_named_in_the_answer(env: dict, monkeypatch) -> None:
@@ -485,6 +565,237 @@ async def assert_a_plain_notebook_is_unchanged(env: dict, monkeypatch) -> None:
     assert _stable(with_ceiling) == _stable(without_ceiling)
 
 
+async def assert_a_reader_failure_fails_the_ask(env: dict, monkeypatch) -> None:
+    """Spec F1: the active notebook's ceiling read fails -> the ask fails and
+    no model is called.  It never runs without a ceiling."""
+    app = env["app"]
+    notebook_id = env["notebook"].id
+    model = _bind_model()
+    store = repository()._runtime.source_store
+    original = store.all_visible_source_ids
+
+    def failing(notebook, *args, **kwargs):
+        if notebook == notebook_id and not kwargs:
+            raise RuntimeError("visible read failed")
+        return original(notebook, *args, **kwargs)
+
+    monkeypatch.setattr(store, "all_visible_source_ids", failing)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=transport, base_url="http://test",
+    ) as http:
+        headers = await _login(http, env["alice"].username)
+        model.prompts.clear()
+        reply = await http.post(
+            f"/api/notebooks/{notebook_id}/ask",
+            json={"question": QUESTION, "mode": "chunk"}, headers=headers,
+        )
+    assert reply.status_code >= 500, reply.text
+    assert model.prompts == [], "no model call without a ceiling"
+    for secret in SECRETS:
+        assert secret not in reply.text
+
+
+def assert_a_stop_during_the_freeze_cancels_the_ask(env: dict, monkeypatch) -> None:
+    """Spec R3 / quality V10: a Stop pressed while the ask's ceiling is being
+    read ends the ask as cancelled at once -- the read in flight is
+    interrupted (it runs under a budget carrying the cancel event), no further
+    ceiling read happens and no model is called."""
+    import threading
+    from dataclasses import replace
+
+    from app.models.ask import AskRequest
+    from app.repositories.read_budget import current_read_budget
+    from app.services.cancellation import AskCancelled
+
+    notebook_id = env["notebook"].id
+    model = _bind_model()
+    service = repository()._runtime.ask_service()
+    readers = service.ceiling_readers
+    cancel = threading.Event()
+    later_reads: list[str] = []
+
+    def visible(notebook, *args):
+        # The Stop arrives while this read runs; a store checks its budget.
+        cancel.set()
+        budget = current_read_budget()
+        if budget is not None:
+            budget.check()
+        return readers.visible(notebook, *args)
+
+    def hidden(*args):
+        later_reads.append("hidden")
+        return readers.hidden(*args)
+
+    monkeypatch.setattr(service, "ceiling_readers", replace(
+        readers, visible=visible, hidden=hidden,
+    ))
+    marker = set_request_user(env["alice"])
+    try:
+        with pytest.raises(AskCancelled):
+            service.ask(
+                notebook_id, AskRequest(question=QUESTION, mode="chunk"),
+                user_id=env["alice"].id, cancel_event=cancel,
+            )
+    finally:
+        reset_request_user(marker)
+    assert later_reads == [], "the interrupted freeze read nothing more"
+    assert model.prompts == []
+
+
+class _ReportModel:
+    """Every model call of a 6-section Deep Report, with each prompt recorded
+    (the drafting prompts carry the retrieved evidence)."""
+
+    configured = True
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def _record(self, messages) -> None:
+        self.prompts.append(
+            "\n".join(str(message.get("content") or "") for message in messages)
+        )
+
+    def chat_json(self, messages, schema_hint="", *args, **kwargs):
+        self._record(messages)
+        hint = schema_hint or ""
+        if "normalized_question" in hint:
+            return json.dumps({
+                "normalized_question": QUESTION, "intent_type": "explain",
+                "result_scope": "ranked", "completeness_required": False,
+                "entities": [], "mandatory_topics": [], "ambiguities": [],
+                "needs_clarification": False, "confidence": 0.9,
+            })
+        if '"sections":[{"title"' in hint:
+            return json.dumps({"sections": [
+                {"title": f"Section {i}", "scope": f"{TERM} aspect {i}",
+                 "sub_queries": [f"{TERM} latency aspect {i}"],
+                 "intent_ids": [], "perspectives": [], "tensions": []}
+                for i in range(2)]})
+        if "verdicts" in hint:
+            return json.dumps({"verdicts": [
+                {"title": f"Section {i}", "sufficiency": "充足", "gap_note": "",
+                 "action": "keep"} for i in range(2)]})
+        if '"markdown"' in hint:
+            return json.dumps({"markdown": f"{TERM} text [k1]", "grounded": True,
+                               "claims": []})
+        if "high_level_keywords" in hint:
+            return json.dumps({"query": QUESTION, "sub_queries": [{"query": QUESTION}]})
+        if '"summary"' in hint:
+            return json.dumps({"summary": "s", "coverage": [], "contradictions": []})
+        if "sub_queries" in hint:
+            return json.dumps({"sub_queries": [{"query": f"{TERM} latency"}]})
+        if "next_action" in hint:
+            return json.dumps({"next_action": "answer", "sufficient": True})
+        if '"answer"' in hint:
+            return json.dumps({"answer": f"{TERM} [k1]", "grounded": True})
+        return "{}"
+
+    def chat(self, messages, *args, **kwargs):
+        self._record(messages)
+        return f"{TERM} text"
+
+
+def _run_unscoped_report(notebook_id: str, user, monkeypatch) -> tuple[dict, list[str]]:
+    """Intent, plan and generate of a report created without any scope, each
+    through the production coordinator (its default ceiling) and the real
+    engine; only the models are stubbed.  Returns the report and prompts."""
+    from app.models.schemas import AskRequest  # noqa: F401 - keeps imports honest
+    from app.services.model_registry import WORKLOADS
+
+    repo = repository()
+    model = _ReportModel()
+    for workload, spec in WORKLOADS.items():
+        if spec.kind == "chat":
+            bind_chat_client(repo, workload, model)
+    coordinator = repo.report_execution
+    monkeypatch.setattr(
+        coordinator, "job_submitter",
+        lambda fn, *args, name=None, notify_pending=False, **kwargs: fn(),
+    )
+    # Post-completion observers (profile consolidation...) run model calls of
+    # their own in the background; they are not this report's retrieval.
+    monkeypatch.setattr(coordinator, "after_completed", None)
+    marker = set_request_user(user)
+    try:
+        report_id = repo.create_report(notebook_id, QUESTION, depth=2)
+        coordinator.start_plan(notebook_id, report_id, QUESTION, "", False, user_id=user.id)
+        row = repo.get_report(notebook_id, report_id)
+        assert row["status"] == "intent_ready", (row.get("status"), row.get("error"))
+        understanding = dict(row.get("understanding") or {})
+        understanding["resolved_question"] = QUESTION
+        assert repo.claim_report_intent(notebook_id, report_id, understanding)
+        coordinator.start_plan(notebook_id, report_id, QUESTION, "", False,
+                               user_id=user.id, intent_contract=understanding)
+        row = repo.get_report(notebook_id, report_id)
+        assert row["status"] == "outline_ready", (row.get("status"), row.get("error"))
+        assert repo.claim_report_generation(notebook_id, report_id, None)
+        coordinator.start_generate(notebook_id, report_id, QUESTION, 2, user_id=user.id)
+        row = repo.get_report(notebook_id, report_id)
+    finally:
+        reset_request_user(marker)
+    return row, model.prompts
+
+
+def assert_an_unscoped_report_retrieves_only_what_its_creator_may(env, monkeypatch) -> None:
+    """⑤ end to end: the report's retrieval -- every drafting prompt and the
+    finished report -- carries none of Bob's Memory-derived content nor the
+    mounted library's hidden projections; the visible source takes part."""
+    row, prompts = _run_unscoped_report(env["notebook"].id, env["alice"], monkeypatch)
+    assert row["status"] == "done", (row.get("status"), row.get("error"))
+    text = "\n".join(prompts)
+    assert any(marker in text for marker in VISIBLE), "the visible source takes part"
+    wire = json.dumps(row, ensure_ascii=False, default=str)
+    for secret in SECRETS:
+        assert secret not in text, f"⑤ report: {secret} reached the report's retrieval"
+        assert secret not in wire, f"⑤ report: {secret} reached the report"
+
+
+def assert_a_plain_notebook_report_is_unchanged(env, monkeypatch) -> None:
+    """No mounted library, no other member's Memory: a report's prompts are
+    the same with and without the default ceiling."""
+    from contextlib import ExitStack
+
+    from app.services.report_execution import ReportExecutionCoordinator
+
+    alice = env["alice"]
+    marker = set_request_user(alice)
+    try:
+        plain = notebook_catalog_repository().create_notebook(
+            NotebookCreate(name="Plain report notebook")
+        )
+    finally:
+        reset_request_user(marker)
+    runtime = repository()._runtime
+    runtime.source_store.insert_source(
+        source_id="src-plain-report", notebook_id=plain.id, title=f"{TERM} plain",
+        source_type="markdown", status="active", parse_status="parsed",
+        file_name="plain.md", file_path="", file_size=0, file_hash="",
+        summary="", doc_type="", memory_id="",
+    )
+    with repository()._write() as db:
+        runtime.source_store.replace_elements(
+            db, "src-plain-report",
+            [SourceElementWrite("el-plain-report", "paragraph", "p1",
+                                f"{TERM} latency plain element", {})],
+            created_at=NOW,
+        )
+        runtime.chunk_store.insert_rows(
+            db, plain.id, "src-plain-report",
+            [ChunkWrite("chunk-plain-report", f"{TERM} latency plain chunk", "1",
+                        ("el-plain-report",))],
+            created_at=NOW,
+        )
+    _row, with_ceiling = _run_unscoped_report(plain.id, alice, monkeypatch)
+    monkeypatch.setattr(
+        ReportExecutionCoordinator, "_default_ceiling",
+        lambda self, *args, **kwargs: ExitStack(),
+    )
+    _row, without_ceiling = _run_unscoped_report(plain.id, alice, monkeypatch)
+    assert with_ceiling and with_ceiling == without_ceiling
+
+
 @pytest.fixture
 def sqlite_env(tmp_path, monkeypatch):
     env = build_app(f"sqlite:///{tmp_path / 'e12.db'}", tmp_path, monkeypatch)
@@ -523,3 +834,22 @@ def test_an_unwired_ask_service_refuses_instead_of_running_unscoped():
     service.ask_chunk = lambda *args, **kwargs: pytest.fail("ran without a ceiling")
     with pytest.raises(RuntimeError, match="ceiling"):
         service.ask("nb", AskRequest(question="q"), user_id="u")
+
+
+@pytest.mark.anyio
+async def test_a_reader_failure_fails_the_ask_on_sqlite(sqlite_env, monkeypatch):
+    await assert_a_reader_failure_fails_the_ask(sqlite_env, monkeypatch)
+
+
+def test_a_stop_during_the_freeze_cancels_the_ask_on_sqlite(sqlite_env, monkeypatch):
+    assert_a_stop_during_the_freeze_cancels_the_ask(sqlite_env, monkeypatch)
+
+
+def test_an_unscoped_report_retrieves_only_what_its_creator_may_on_sqlite(
+    sqlite_env, monkeypatch,
+):
+    assert_an_unscoped_report_retrieves_only_what_its_creator_may(sqlite_env, monkeypatch)
+
+
+def test_a_plain_notebook_report_is_unchanged_on_sqlite(sqlite_env, monkeypatch):
+    assert_a_plain_notebook_report_is_unchanged(sqlite_env, monkeypatch)
