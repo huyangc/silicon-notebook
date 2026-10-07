@@ -556,11 +556,39 @@ def case_legacy_mixed_cluster_reads(world, monkeypatch):
     assert PRIVATE not in json.dumps(detail, ensure_ascii=False).lower(), detail
     assert [m["id"] for m in detail["members"]] == [world.ids.mqa]
     assert detail["member_total"] == 1
+    # clicking the node A is shown -- the member's own id -- opens the same
+    # detail (codex #824 r4), still without the seeded id or B's Memory
+    clicked = get(world, "A", f"/concepts/{world.ids.mqa}/detail")
+    assert_clean(world, clicked, "A legacy detail by the shown member id")
+    clicked = clicked.json()
+    assert clicked["canonical_id"] == world.ids.mqa
+    assert [m["id"] for m in clicked["members"]] == [world.ids.mqa]
+    assert clicked["member_total"] == 1
+    # B's hidden member id resolves to nothing for A (same as an unknown id)
+    hidden = get(world, "A", f"/concepts/{world.ids.mqa_b}/detail").json()
+    assert hidden["members"] == []
+    assert PRIVATE not in json.dumps(hidden, ensure_ascii=False).lower()
     # B's own Memory object is B's: its context opens for B, is missing for A
     get(world, "B", f"/objects/{world.ids.alpha}/context")
     get(world, "A", f"/objects/{world.ids.alpha}/context", status=404)
     b_detail = get(world, "B", f"/concepts/{SEED}/detail").json()
     assert {m["id"] for m in b_detail["members"]} == {world.ids.mqa, world.ids.mqa_b}
+
+
+def case_own_memory_concept_detail(world, monkeypatch):
+    """GET /concepts/{id}/detail on B's own Memory concept, which belongs to
+    no cluster (codex #824 r4): a detail of one member for B -- the concept,
+    its evidence from B's Memory -- and nothing of it for A."""
+    own = get(world, "B", f"/concepts/{world.ids.alpha}/detail").json()
+    assert [m["id"] for m in own["members"]] == [world.ids.alpha], own
+    assert own["canonical_id"] == world.ids.alpha
+    assert own["canonical_name"] == "ZQPRIV alpha plan"
+    assert own["member_total"] == 1
+    assert {e.get("source_id") for e in own["evidence"]} == {"src-mb"}
+    other = get(world, "A", f"/concepts/{world.ids.alpha}/detail")
+    assert other.json()["members"] == []
+    assert_clean(world, other, "A detail of B's Memory concept",
+                 tolerate=(world.ids.alpha,))
 
 
 def case_neighbours(world, monkeypatch):
@@ -750,6 +778,7 @@ ISOLATED_CASES = [
     case_search_semantic_leg,
     case_search_semantic_leg_over_a_real_index,
     case_neighbours,
+    case_own_memory_concept_detail,
     case_governance_lists,
     case_analysis_and_status_counts,
     case_http_search,

@@ -2043,7 +2043,10 @@ asks which of its notebooks hold Memory once per request, not once per notebook.
 awaits its isolated rebuild, a cluster that holds Memory the viewer may not read is answered by its
 first visible member's object id, never by the cluster's id: in KG search hits, in the graph view's
 nodes and edges, in the neighbour view (its focus included) and as concept detail's
-`canonical_id`.
+`canonical_id`. `GET .../concepts/{id}/detail` opens such a member id: it resolves to the member's
+cluster when the viewer may see that member (otherwise it answers like an unknown id). The viewer's
+own Memory concept belongs to no cluster; its detail is a cluster of one (the concept itself, its
+evidence and attached objects under the same viewer rule), and other members get nothing for it.
 
 **Writes, merges and publishing.** Knowledge objects and relations derived from a member's
 personal Memory belong to that member only: they never join a shared concept cluster, never appear
