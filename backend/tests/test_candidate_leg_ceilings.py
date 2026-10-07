@@ -21,10 +21,14 @@ The closed-channel shape.  Master has no ``withheld_hidden_source_ids`` yet
 non-empty).  The state that fail-closed line guards is "the freeze's hidden
 half lacks the asker's own Memory AND the drift probe agrees with the freeze".
 It is built here as a frozen include whose hidden half is empty and whose
-``owner_id`` is blank, so the probe re-reads the same (empty) hidden half and
-answers "no drift" -- exactly what E1-1's probe answers after subtracting the
-withheld sources.  So these tests prove the leak is closed by the per-node
-check alone, with no channel switched off.
+``owner_id`` is blank, so the drift probe re-reads the same (empty) hidden half
+and answers "no drift" -- exactly what E1-1's probe answers after subtracting
+the withheld sources -- and no channel is switched off.  The run's
+``ceiling_binds`` verdict, however, is "binds" there: with a blank owner every
+Memory source in the notebook counts as one the asker may not read (its
+``foreign_hidden`` arm).  So these cases exercise the per-node check's BOUND
+path; its unbound path with verify-on-read is pinned separately by the cases
+that take the verdict on a Memory-free notebook and only then change it.
 """
 from __future__ import annotations
 
@@ -104,6 +108,11 @@ def _doc_source(repo, nb: str, source_id: str) -> None:
 
 
 def _object(repo, nb, object_id, source_id, name, evidence_json) -> None:
+    """One KG object, written as the store writes it: the row plus its
+    reverse-index rows (``knowledge_object_sources``, one per evidence
+    source).  A new notebook's reverse index is marked complete, so a reader
+    that trusts it would see an object without those rows as sourceless."""
+    sources = {item["source_id"] for item in json.loads(evidence_json)}
     with repo._write() as db:
         db.execute(
             "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,"
@@ -111,6 +120,11 @@ def _object(repo, nb, object_id, source_id, name, evidence_json) -> None:
             "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (object_id, nb, "concept", "approved", "", json.dumps({"name": name}),
              evidence_json, source_id, NOW, NOW),
+        )
+        db.executemany(
+            "INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id) "
+            "VALUES (?,?,?)",
+            [(object_id, source, nb) for source in sorted(sources)],
         )
 
 
@@ -191,7 +205,9 @@ def test_closed_channel_never_renders_the_askers_own_memory(walk):
     """The asker's own Memory withheld from the freeze (channel closed) and the
     drift probe agreeing: the walk still runs (no channel off), and neither the
     Memory-derived node, nor its name, nor a chain through a Memory-derived
-    relation reaches the prompt or gets an anchor."""
+    relation reaches the prompt or gets an anchor.  (The verdict binds here --
+    a blank owner reads no Memory, so every Memory source counts as foreign --
+    so this is the bound path; see the module docstring.)"""
     repo, nb, _bob, _alice = walk
     candidates = repo.retrieval.candidates
 
@@ -242,36 +258,154 @@ def test_the_walk_reaches_router_balance_only_through_rx(walk):
     )
 
 
-def test_a_node_outside_the_ceiling_after_the_verdict_is_verified_on_read(walk):
-    """The run's verdict said the ceiling does not bind (all selected, nothing
-    drifted when it was taken), and then the library changed: the walk now
-    holds a node whose only source the freeze never admitted.  Verify-on-read
-    catches it, records the drift for the rest of the run, and prunes it."""
-    from app.services.source_scope import current_source_scope
+def _verdict_binds(nb) -> bool:
+    """The run's ``ceiling_binds`` verdict as the public function reports it.
+    The two probes answer "nothing to exclude", so a True here can only come
+    from a drift the run recorded (verify-on-read) -- what the cases below
+    observe, without reading the scope's private memo."""
+    from app.services.source_scope import ceiling_binds, current_source_scope
 
-    repo, nb, _bob, alice = walk
-    with source_scope_context(nb, _scope(["src-doc"], [], alice)):
-        scope = current_source_scope()
-        scope._ceiling_binds_memo[nb] = False    # the verdict, taken earlier
+    return ceiling_binds(
+        current_source_scope(), nb,
+        drifted=lambda: False, foreign_hidden=lambda: False,
+    )
+
+
+# The cases below write KG rows attributed to ``src-late``, a source with no
+# ``sources`` row the drift probe could see (one deleted while its graph rows
+# linger, or one whose row the probe read missed): the walk still runs, so
+# only verify-on-read stands between those rows and the prompt.
+
+
+def test_a_node_outside_the_ceiling_after_the_verdict_is_verified_on_read(
+    plain_walk,
+):
+    """The run's verdict was taken on a Memory-free, unchanged notebook -- it
+    does not bind -- and then a node from outside the freeze joined the walk.
+    The walk is otherwise used as read, but verify-on-read catches the node
+    whose only source the freeze never admitted: it is pruned and the run
+    binds from now on."""
+    repo, nb, bob = plain_walk
+    with source_scope_context(nb, _scope(["src-doc"], [], bob)):
+        assert repo.retrieval._ceiling_binds(nb) is False     # the verdict
+        _object(repo, nb, "e7", "src-late", "Late gate",
+                _evidence("src-late", "elL", "late quote"))
+        _relation(repo, nb, "rN", "src-doc", "e1", "e7",
+                  _evidence("src-doc", "elA", "paper link"))
         block, id_map, _hits, _supports = (
             repo.retrieval.candidates._chunk_kg_overlay(nb, QUERY, QUERY, 1000)
         )
-        drift_recorded = scope._ceiling_binds_memo[nb]
+        binds_after = _verdict_binds(nb)
 
+    assert "Mixture-of-Experts" in block
+    assert "Late gate" not in block and "e7" not in _objects(id_map)
+    assert binds_after is True
+
+
+def test_an_edge_outside_the_ceiling_after_the_verdict_is_verified_on_read(
+    plain_walk,
+):
+    """Same, for the incoming EDGE: after the verdict, a source outside the
+    freeze yields a relation between two nodes the freeze admits.  Both nodes pass on their
+    own evidence; the edge's evidence does not.  The chain step is not
+    rendered (the node stays, as a plain arrival) and the run binds from now
+    on (quality review P2-3)."""
+    repo, nb, bob = plain_walk
+    _object(repo, nb, "e8", "src-doc", "Gate network",
+            _evidence("src-doc", "elG", "gating"))
+    with source_scope_context(nb, _scope(["src-doc"], [], bob)):
+        assert repo.retrieval._ceiling_binds(nb) is False
+        # (``knowledge_relations.source_id`` references ``sources``; the
+        # row is attributed by its evidence alone, the way a relation whose
+        # source row is gone reads.)
+        _relation(repo, nb, "rL", None, "e1", "e8",
+                  _evidence("src-late", "elL", "late link"))
+        block, _id_map, _hits, _supports = (
+            repo.retrieval.candidates._chunk_kg_overlay(nb, QUERY, QUERY, 1000)
+        )
+        binds_after = _verdict_binds(nb)
+
+    assert "Gate network" in block, "the walk reached e8 (only via rL)"
+    assert not any(
+        "--kind_of-->" in line and "Gate network" in line
+        for line in block.splitlines()
+    )
+    assert "late link" not in block
+    assert binds_after is True
+
+
+def test_the_bound_path_drops_a_node_without_evidence(walk):
+    """When the verdict binds (Alice: Bob's Memory is in the notebook), a walk
+    node needs at least one in-ceiling evidence item, so an evidence-less node
+    is dropped; when it does not bind (Bob, his own Memory in his ceiling) the
+    same node is used as read (quality review P3-5)."""
+    repo, nb, bob, alice = walk
+    _object(repo, nb, "e6", "src-doc", "Capacity factor", "[]")
+    _relation(repo, nb, "rE", "src-doc", "e1", "e6",
+              _evidence("src-doc", "elA", "paper link"))
+
+    bound, _id_map, _supports = _overlay(repo, nb, _scope(["src-doc"], [], alice))
+    unbound, _id_map, _supports = _overlay(
+        repo, nb, _scope(["src-doc"], ["src-mem-bob"], bob))
+
+    assert "Capacity factor" not in bound
+    assert "Capacity factor" in unbound
+
+
+def test_a_failing_verdict_probe_binds_instead_of_failing_the_ask(
+    walk, monkeypatch,
+):
+    """A probe that cannot answer (a pool timeout, say) makes the overlay take
+    its bound path; cancellation still propagates (quality review P3-7)."""
+    from app.domain.cancellation import AskCancelled
+
+    repo, nb, _bob, alice = walk
+
+    def _broken(_nb):
+        raise RuntimeError("pool timeout")
+
+    monkeypatch.setattr(repo.retrieval, "_ceiling_binds", _broken)
+    block, id_map, _supports = _overlay(repo, nb, _scope(["src-doc"], [], alice))
+    assert "Mixture-of-Experts" in block
     assert "ZEBRAQUARTZ" not in block and "e3" not in _objects(id_map)
-    assert drift_recorded is True
+
+    def _cancelled(_nb):
+        raise AskCancelled()
+
+    monkeypatch.setattr(repo.retrieval, "_ceiling_binds", _cancelled)
+    with pytest.raises(AskCancelled):
+        _overlay(repo, nb, _scope(["src-doc"], [], alice))
+
+
+def _seam(repo, nb, scope):
+    with source_scope_context(nb, scope):
+        _chunks, block, id_map, hits, _ppr = repo.retrieval.mixed_chunk_candidates(
+            nb, QUERY, QUERY, [QUERY],
+        )
+    return block, id_map, hits
+
+
+def test_open_channel_through_the_mixed_candidate_seam(walk):
+    """Positive control for the seam case below (spec review): with the same
+    fixture -- reverse index written as the store writes it -- and the
+    channel open, Bob's own Memory node does reach the block, so the closed
+    case is not passing on an empty block."""
+    repo, nb, bob, _alice = walk
+
+    block, id_map, _hits = _seam(repo, nb, _scope(["src-doc"], ["src-mem-bob"], bob))
+
+    assert "ZEBRAQUARTZ" in block and "e3" in _objects(id_map)
 
 
 def test_closed_channel_through_the_mixed_candidate_seam(walk):
     """Same closed-channel shape through ``mixed_chunk_candidates`` (the seam
-    chunk mode reads): no Memory-derived node name or anchor."""
+    chunk mode reads): no Memory-derived node name or anchor, while the walk
+    itself still renders the paper's nodes."""
     repo, nb, _bob, _alice = walk
 
-    with source_scope_context(nb, _scope(["src-doc"], [], "")):
-        _chunks, block, id_map, hits, _ppr = repo.retrieval.mixed_chunk_candidates(
-            nb, QUERY, QUERY, [QUERY],
-        )
+    block, id_map, hits = _seam(repo, nb, _scope(["src-doc"], [], ""))
 
+    assert "Mixture-of-Experts" in block
     assert "ZEBRAQUARTZ" not in block
     assert "e3" not in _objects(id_map)
     assert "e3" not in {hit.object_id for hit in hits}
@@ -398,6 +532,28 @@ def test_the_shared_token_cache_holds_no_memory_evidenced_object(mixed_object):
     assert "Y" in tokens and "X" not in tokens
 
 
+def test_an_object_whose_evidence_this_call_trimmed_is_tokenised_live(mixed_object):
+    """Z carries a quote attributed to a source outside the freeze that is not
+    Memory (``src-gone``: its row is gone, the evidence lingers), so the shared
+    cache holds Z's tokens with that quote.  Bob's all-selected run trims the
+    quote; his ranking must not be lifted by it, whichever call built the cache
+    (quality review P3-11)."""
+    repo, nb, bob, _alice = mixed_object
+    _object(repo, nb, "Z", "src-doc", "Zeta widget", json.dumps([
+        json.loads(_evidence("src-doc", "elZ", "zeta design"))[0],
+        json.loads(_evidence("src-gone", "elG", "zebraquartz notes"))[0],
+    ]))
+    bob_scope = _scope(["src-doc"], ["src-mem-bob"], bob)
+
+    cold = _ranking(repo, nb, bob_scope)
+    _cold(repo, nb)
+    _ranking(repo, nb, None)          # caches Z's tokens, quote included
+    warm = _ranking(repo, nb, bob_scope)
+
+    assert warm == cold
+    assert "Z" not in [object_id for object_id, _ in warm]
+
+
 # ---------------------------------------------------------------------------
 # C-5: the shared relation vector matrix
 # ---------------------------------------------------------------------------
@@ -473,6 +629,74 @@ def test_the_shared_relation_matrix_holds_no_memory_relation(relation_matrix):
             db, nb, "relation_embeddings", "relation_id")
 
     assert ids == ["rD"]
+
+
+def test_memory_relations_are_cached_not_read_per_request(
+    relation_matrix, monkeypatch,
+):
+    """The Memory half is cached with the shared one (quality review P2-2):
+    after the first call, no request reads Memory relations again, whoever
+    asks; the per-request mask still keeps Bob's rF out of Alice's seats."""
+    repo, nb, bob, alice = relation_matrix
+    embeddings = repo.retrieval.candidates.embeddings
+    real = embeddings.relation_delta_rows
+    reads: list = []
+    monkeypatch.setattr(
+        embeddings, "relation_delta_rows",
+        lambda db, notebook_id, source_ids: (
+            reads.append(tuple(source_ids)), real(db, notebook_id, source_ids))[1],
+    )
+    alice_scope = _scope(["src-doc"], ["src-mem-alice"], alice)
+
+    first = _relations(repo, nb, alice_scope)
+    built = len(reads)
+    later = [
+        _relations(repo, nb, alice_scope),
+        _relations(repo, nb, None),
+        _relations(repo, nb, _scope(["src-doc"], ["src-mem-bob"], bob)),
+    ]
+
+    assert built > 0 and len(reads) == built
+    assert sorted(first) == sorted(later[0]) == ["rD", "rO"]
+    assert sorted(later[1]) == ["rF", "rO"]
+    assert sorted(later[2]) == ["rD", "rF"]
+
+
+def test_tied_relations_keep_the_whole_matrix_order(store):
+    """Four relations with the very same vector, two of them Memory-derived and
+    interleaved with the paper's (r1 paper, r2 Memory, r3 paper, r4 Memory).
+    With a recall of two, a run that reads every row must pick r1 and r2 --
+    what one whole matrix ordered first -- not the two shared rows first
+    (spec review P2)."""
+    repo, bob, _alice = store
+    nb = _notebook(repo, "ties")
+    _doc_source(repo, nb, "src-doc")
+    _memory_source(repo, nb, "src-mem", bob)
+    for oid, source in (("a", "src-doc"), ("b", "src-mem"), ("c", "src-doc"),
+                        ("d", "src-mem")):
+        _object(repo, nb, oid, source, f"node {oid}",
+                _evidence(source, f"el{oid}", "zebra"))
+    rows = (("r1", "src-doc", "a", "c"), ("r2", "src-mem", "a", "b"),
+            ("r3", "src-doc", "c", "d"), ("r4", "src-mem", "b", "d"))
+    for rid, source, src, tgt in rows:
+        _relation(repo, nb, rid, source, src, tgt,
+                  _evidence(source, "el" + src, "zebra link"))
+    vector = [float(v) for v in repo.retrieval.candidates._embed_query("zebra link")]
+    with repo._write() as db:
+        for rid, *_ in rows:
+            db.execute(
+                "INSERT INTO relation_embeddings (relation_id,notebook_id,vector,"
+                "created_at) VALUES (?,?,?,?)",
+                (rid, nb, json.dumps(vector), NOW),
+            )
+    repo.settings.relation_recall = 2
+    own = _scope(["src-doc"], ["src-mem"], bob)
+
+    for scope in (None, own, None, own):
+        with source_scope_context(nb, scope):
+            hits = repo.retrieval.candidates._retrieve_relations_scored(
+                nb, "zebra link")
+        assert sorted(hit.relation_id for hit in hits) == ["r1", "r2"]
 
 
 # ---------------------------------------------------------------------------

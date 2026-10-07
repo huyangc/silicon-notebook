@@ -96,6 +96,7 @@ class _Seed:
             )
 
     def obj(self, object_id, source_id, name, evidence):
+        """Row plus reverse-index rows, as the store writes them."""
         with self._write() as db:
             db.execute(
                 "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,"
@@ -104,6 +105,12 @@ class _Seed:
                 (object_id, self.nb, json.dumps({"name": name}),
                  json.dumps(evidence), source_id, T0, T0),
             )
+            for source in sorted({item["source_id"] for item in evidence}):
+                db.execute(
+                    "INSERT INTO knowledge_object_sources (object_id,source_id,"
+                    "notebook_id) VALUES (%s,%s,%s)",
+                    (object_id, source, self.nb),
+                )
 
     def rel(self, relation_id, source_id, src, tgt, evidence):
         with self._write() as db:
@@ -161,6 +168,9 @@ def test_pg_open_channel_control_renders_the_askers_own_memory_node(walk):
 
 
 def test_pg_closed_channel_never_renders_the_askers_own_memory(walk):
+    """The drift probe agrees with the freeze (no channel off); the verdict
+    binds (a blank owner reads no Memory, so every Memory source counts as
+    foreign), so this is the per-node check's bound path."""
     repo, nb, _bob, _alice = walk
 
     with source_scope_context(nb, _scope(["src-doc"], [], "")):
@@ -269,3 +279,75 @@ def test_pg_unscoped_first_call_does_not_rank_a_later_scoped_one(repo, people):
     assert warm == cold
     # X's only match is Bob's Memory quote: it never ranks for Alice.
     assert [object_id for object_id, _ in warm] == ["Y"]
+
+    # ...and the other order (spec review P3): a scoped first caller leaves
+    # no trimmed token set behind for a later unscoped one.
+    candidates._vector_cache.invalidate(f"{seed.nb}:kwtok")
+    unscoped_cold = ranking(None)
+    candidates._vector_cache.invalidate(f"{seed.nb}:kwtok")
+    ranking(alice_scope)
+    assert ranking(None) == unscoped_cold
+
+
+def test_pg_an_edge_outside_the_ceiling_after_the_verdict_is_verified_on_read(
+    repo, people,
+):
+    """Twin of the SQLite case: verdict taken on a Memory-free notebook (does
+    not bind), then a relation attributed only to a source outside the freeze
+    links two admitted nodes -- the chain step is not rendered and the run
+    binds from now on."""
+    from app.services.source_scope import ceiling_binds, current_source_scope
+
+    bob, _alice = people
+    seed = _Seed(repo, "late-edge")
+    seed.doc("src-doc")
+    doc = [_ev("src-doc", "elA", "MoE routing")]
+    seed.obj("e1", "src-doc", "Mixture-of-Experts (MoE)", doc)
+    seed.obj("e8", "src-doc", "Gate network", [_ev("src-doc", "elG", "gating")])
+    with source_scope_context(seed.nb, _scope(["src-doc"], [], bob)):
+        assert repo.retrieval._ceiling_binds(seed.nb) is False
+        seed.rel("rL", None, "e1", "e8", [_ev("src-late", "elL", "late link")])
+        block, _id_map, _hits, _supports = (
+            repo.retrieval.candidates._chunk_kg_overlay(
+                seed.nb, QUERY, QUERY, 1000)
+        )
+        binds_after = ceiling_binds(
+            current_source_scope(), seed.nb,
+            drifted=lambda: False, foreign_hidden=lambda: False,
+        )
+
+    assert "Gate network" in block
+    assert not any(
+        "--kind_of-->" in line and "Gate network" in line
+        for line in block.splitlines()
+    )
+    assert binds_after is True
+
+
+def test_pg_tied_relations_keep_the_whole_matrix_order(repo, people):
+    bob, _alice = people
+    seed = _Seed(repo, "ties")
+    seed.doc("src-doc")
+    seed.memory("src-mem", bob)
+    for oid, source in (("a", "src-doc"), ("b", "src-mem"), ("c", "src-doc"),
+                        ("d", "src-mem")):
+        seed.obj(oid, source, f"node {oid}", [_ev(source, f"el{oid}", "zebra")])
+    rows = (("r1", "src-doc", "a", "c"), ("r2", "src-mem", "a", "b"),
+            ("r3", "src-doc", "c", "d"), ("r4", "src-mem", "b", "d"))
+    for rid, source, src, tgt in rows:
+        seed.rel(rid, source, src, tgt, [_ev(source, "el" + src, "zebra link")])
+    candidates = repo.retrieval.candidates
+    vector = [float(v) for v in candidates._embed_query("zebra link")]
+    with seed._write() as db:
+        for rid, *_ in rows:
+            db.execute(
+                "INSERT INTO relation_embeddings (relation_id,notebook_id,vector,"
+                "created_at) VALUES (%s,%s,%s,%s)",
+                (rid, seed.nb, encode_vector(vector), T0),
+            )
+    repo.settings.relation_recall = 2
+
+    for scope in (None, _scope(["src-doc"], ["src-mem"], bob)):
+        with source_scope_context(seed.nb, scope):
+            hits = candidates._retrieve_relations_scored(seed.nb, "zebra link")
+        assert sorted(hit.relation_id for hit in hits) == ["r1", "r2"]
