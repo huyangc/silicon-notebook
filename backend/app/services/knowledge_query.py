@@ -545,9 +545,18 @@ class KnowledgeQueryService:
     ) -> dict:
         source_id = self._participant_source(notebook_id, source_notebook_id)
         scope = filtering(self.viewer_scope(source_id, notebook_id))
-        return self._concept_detail(
+        detail = self._concept_detail(
             source_id, canonical_id, limit=limit, after=after, scope=scope
         )
+        if (scope is not None and scope.cluster_needs_check(canonical_id)
+                and self.memory_isolation_pending(source_id)):
+            # Awaiting the isolated rebuild: answered by the first visible
+            # member, never by a canonical id that may be minted from a
+            # hidden member's name (``KgViewerScope.pending_answer_ids``).
+            answer = scope.pending_answer_ids([canonical_id]).get(canonical_id)
+            if answer is not None:
+                detail = {**detail, "canonical_id": answer}
+        return detail
 
     def _viewer_cluster_page(
         self, scope: Any, notebook_id: str, canonical_id: str,

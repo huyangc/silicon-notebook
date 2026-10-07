@@ -396,6 +396,16 @@ class MemoryIsolationStore:
         return row is not None and int(row["memory_isolation_version"]) == 0
 
     @staticmethod
+    def forget_cluster_input_version(db: Any, notebook_id: str) -> None:
+        """See the PostgreSQL twin (the isolated rebuild never takes the
+        skip path, so its end-state totals are the shared graph's)."""
+        db.execute(
+            "UPDATE unified_kg_state SET cluster_input_version = '' "
+            "WHERE notebook_id = ? AND memory_isolation_version = 0",
+            (notebook_id,),
+        )
+
+    @staticmethod
     def mark_isolated(db: Any, notebook_id: str) -> bool:
         """Set the marker to 1 after a successful isolated rebuild. True when
         this call changed it (idempotent)."""

@@ -487,6 +487,20 @@ class MemoryIsolationStore:
         return row is not None and int(row["memory_isolation_version"]) == 0
 
     @staticmethod
+    def forget_cluster_input_version(db: Any, notebook_id: str) -> None:
+        """Make the next rebuild of a notebook awaiting its isolated rebuild
+        (marker 0) a real one: an empty stored input version never matches,
+        so ``rebuild_unified_kg(force=False)`` cannot take its skip path --
+        which would set no end-state totals and leave the pre-isolation ones,
+        Memory-derived rows counted, in ``unified_kg_status``.  One
+        primary-key UPDATE; a no-op once the notebook is isolated."""
+        db.execute(
+            "UPDATE unified_kg_state SET cluster_input_version = '' "
+            "WHERE notebook_id = %s AND memory_isolation_version = 0",
+            (notebook_id,),
+        )
+
+    @staticmethod
     def mark_isolated(db: Any, notebook_id: str) -> bool:
         """Set the marker to 1 after a successful isolated rebuild. True when
         this call changed it (idempotent: an already-isolated notebook is a

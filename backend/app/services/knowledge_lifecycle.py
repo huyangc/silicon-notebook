@@ -85,7 +85,7 @@ from app.services.kg_analysis_precompute import (
     stamp_cluster_seq,
 )
 from app.services.model_work import notebook_model_artifact_scope
-from app.services.kg_viewer_scope import store_viewer_kwargs
+from app.services.kg_viewer_scope import answer_graph_by, store_viewer_kwargs
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.kg.run_control import (
     KgBuildAborted,
@@ -4534,7 +4534,8 @@ class KnowledgeLifecycleService:
             "total_nodes": total_nodes,
             "total_edges": total_edges,
             "truncated": len(sliced["nodes"]) < total_nodes,
-        }, limit, concept_only=level == "concept", name_only=False, shared=True)
+        }, limit, concept_only=level == "concept", name_only=False, shared=True,
+            pending=not artifacts)
 
     def _memory_isolation_pending(self, notebook_id: str) -> bool:
         """Whether the notebook is not isolated yet (E4-5 marker ``<> 1``, one
@@ -4547,6 +4548,7 @@ class KnowledgeLifecycleService:
     def _with_viewer_overlay(
         self, scope, graph: dict, limit: Optional[int], *,
         concept_only: bool = False, name_only: bool = True, shared: bool = False,
+        pending: bool = False,
     ) -> dict:
         """The viewer's graph = the shared graph + the viewer's own Memory
         (M1, E4-7).  ``graph`` is shared already when ``shared``; otherwise it
@@ -4564,10 +4566,17 @@ class KnowledgeLifecycleService:
         shared page holds at most ``limit`` nodes and the own overlay at most
         ``limit`` more, so a response holds at most ``2 × limit`` nodes (and
         exactly the shared page's when the viewer owns no Memory here).  No
-        scope: ``graph`` unchanged."""
+        scope: ``graph`` unchanged.  ``pending`` (the notebook awaits its
+        isolated rebuild): a cluster that may hold a hidden member is
+        answered by its first visible member's object id, never by a
+        canonical id that may be minted from a hidden member's name
+        (``KgViewerScope.pending_answer_ids``)."""
         if scope is None:
             return graph
         nodes, edges = graph["nodes"], graph["edges"]
+        if pending and scope.filters:
+            nodes, edges = answer_graph_by(
+                scope.pending_answer_ids(n["id"] for n in nodes), nodes, edges)
         total_nodes, total_edges = graph["total_nodes"], graph["total_edges"]
         if not shared:
             viewed_nodes, viewed_edges = (
@@ -4917,6 +4926,13 @@ class KnowledgeLifecycleService:
             e for e in edges
             if e["source_object_id"] in keep and e["target_object_id"] in keep
         ]
+        if not artifacts:
+            # Awaiting the isolated rebuild: a cluster that may hold a hidden
+            # member is answered by its first visible member (see
+            # ``KgViewerScope.pending_answer_ids``), the focus included.
+            renames = scope.pending_answer_ids([*keep])
+            nodes, edges = answer_graph_by(renames, nodes, edges)
+            result = {**result, "focus_id": renames.get(str(focus_id), focus_id)}
         return {**result, "nodes": nodes, "edges": edges}
 
     def _kg_neighbors_unchecked(

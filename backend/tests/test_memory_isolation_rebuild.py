@@ -248,6 +248,40 @@ def test_rearming_stops_after_the_configured_rounds(repo):
     repo.fail_unified_kg_rebuild_submission(cases.NB_F, held["job_id"])
 
 
+def test_the_pass_leaves_shared_only_totals_even_when_the_input_looks_unchanged(repo):
+    """A queued notebook is really reclustered, never skipped on an unchanged
+    input version: the skip path writes no end-state totals, so the
+    pre-isolation ones -- Memory-derived rows counted -- would stay in
+    ``unified_kg_status``.  Here the stored input version is made to match
+    the current input exactly (the skip path would be taken) and the stored
+    totals are the stale pre-isolation ones; after the pass they are the
+    shared graph's."""
+    lifecycle = repo._runtime.knowledge_lifecycle
+    service = MemoryIsolationRebuild.for_repository(repo)
+    # the pass's own pre-rebuild purge first, so it changes no input below
+    service._purge_bridge_candidates(cases.NB_F)
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET cluster_input_version=?, object_count=999, "
+            "relation_count=999, cluster_count=CASE WHEN cluster_count > 0 "
+            "THEN cluster_count ELSE 1 END WHERE notebook_id=?",
+            (lifecycle._cluster_input_version(cases.NB_F), cases.NB_F),
+        )
+    service.run_pass()
+    with repo._runtime.database.connect() as db:
+        shared_objects = db.execute(
+            "SELECT COUNT(*) FROM knowledge_objects ko JOIN sources s ON s.id = ko.source_id "
+            "WHERE ko.notebook_id=? AND ko.status!='deprecated' AND s.source_type<>'memory'",
+            (cases.NB_F,)).fetchone()[0]
+        shared_relations = db.execute(
+            "SELECT COUNT(*) FROM knowledge_relations kr JOIN sources s ON s.id = kr.source_id "
+            "WHERE kr.notebook_id=? AND s.source_type<>'memory'",
+            (cases.NB_F,)).fetchone()[0]
+    status = repo.unified_kg_status(cases.NB_F)
+    assert _marker(repo, cases.NB_F) == 1
+    assert (status["objects"], status["relations"]) == (shared_objects, shared_relations)
+
+
 def test_a_notebook_rebuilt_meanwhile_is_skipped(repo, events):
     """The marker is read again right before each notebook: one cleared since
     the pending list was taken (a manual rebuild, another pass) is skipped

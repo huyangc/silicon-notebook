@@ -2040,8 +2040,10 @@ at hydration) and the notebook search box's knowledge leg; the viewer's own are 
 `memory:read` no Memory-derived row is returned, the viewer's own included. Community summaries,
 duplicate groups and the edge-review ranking never include Memory-derived rows. The notebook list
 asks which of its notebooks hold Memory once per request, not once per notebook. While a notebook
-awaits its isolated rebuild, a KG search hit on a cluster that holds Memory the viewer may not read
-is answered by its first visible member, never by the cluster's id.
+awaits its isolated rebuild, a cluster that holds Memory the viewer may not read is answered by its
+first visible member's object id, never by the cluster's id: in KG search hits, in the graph view's
+nodes and edges, in the neighbour view (its focus included) and as concept detail's
+`canonical_id`.
 
 **Writes, merges and publishing.** Knowledge objects and relations derived from a member's
 personal Memory belong to that member only: they never join a shared concept cluster, never appear

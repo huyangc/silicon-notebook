@@ -348,7 +348,9 @@ After this release a manual 刷新图谱 or `backend/app/scripts/recluster_kg.py
 notebook. A rebuild clears the notebook's dirty flag only if no knowledge-graph change arrived
 while it ran; otherwise the notebook stays dirty and the next rebuild picks the change up. Any
 rebuild that actually reclusters also sets `memory_isolation_version = 1` (the skip path of an
-unchanged input does not reach that end-write; the isolation pass sets the marker there).
+unchanged input does not reach that end-write). The isolation pass never takes that skip path: it
+clears the queued notebook's stored input version first, so the rebuild reclusters and its
+end-state totals (`unified_kg_status`) are the shared graph's; it then sets the marker.
 
 **Done when** this returns 0 (same SQL on both backends), i.e. checkup H9 is 0 on every notebook:
 

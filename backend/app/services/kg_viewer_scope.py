@@ -574,6 +574,23 @@ class KgViewerScope:
             str(cid) for cid in canonical_ids if self.cluster_needs_check(str(cid))))
         return self._first_visible_members(checked)
 
+    def pending_answer_ids(self, ids: Iterable[Any]) -> Dict[str, str]:
+        """While the notebook awaits its isolated rebuild (the E4-5 marker
+        ``<> 1``) a cluster that may hold a hidden member can still carry a
+        canonical id minted from that member's name (``K-<seed>``).  The
+        viewer is then answered by the cluster's first VISIBLE member's object
+        id instead: ``{cluster id: member object id}`` for every such id among
+        ``ids`` that has a visible member (one with none is dropped by the
+        viewer rule anyway).  The same batched member read as
+        ``cluster_first_visible`` -- KG search's folded hits, the graph view,
+        the neighbour view and concept detail all answer by it."""
+        return {
+            cid: str(row["member_object_id"])
+            for cid, row in self.cluster_first_visible(
+                [str(i) for i in ids if i]).items()
+            if row is not None
+        }
+
     def object_is_own_memory(self, notebook_id: str, object_id: str) -> bool:
         """Whether ``object_id`` is an object of the viewer's OWN Memory
         (its owner column is one of ``own_memory``): ONE primary-key read of
@@ -695,6 +712,29 @@ class KgViewerScope:
             and str(e["target_object_id"]) not in exclude
         ]
         return kept_nodes, kept_edges
+
+
+def answer_graph_by(
+    renames: Dict[str, str], nodes: List[dict], edges: List[dict],
+) -> Tuple[List[dict], List[dict]]:
+    """``nodes`` / ``edges`` with every id in ``renames`` replaced by its
+    answer id (``KgViewerScope.pending_answer_ids``); unchanged when empty."""
+    if not renames:
+        return nodes, edges
+
+    def answer(value: Any) -> Any:
+        return renames.get(str(value), value)
+
+    return (
+        [{**n, "id": answer(n["id"])} if str(n["id"]) in renames else n for n in nodes],
+        [
+            {**e, "source_object_id": answer(e["source_object_id"]),
+             "target_object_id": answer(e["target_object_id"])}
+            if str(e["source_object_id"]) in renames or str(e["target_object_id"]) in renames
+            else e
+            for e in edges
+        ],
+    )
 
 
 def _payload(value: Any) -> dict:
