@@ -1798,40 +1798,72 @@ class MemoryStore:
                 deleted += int(cursor.rowcount or 0)
         return deleted
 
-    def memory_export_page(
+    def memory_export_snapshot(
+        self, notebook_id: str, user_id: str, *, page_size: int
+    ) -> list[MemoryRecord]:
+        """Mirror of the PostgreSQL twin: this user's own Memory in one
+        notebook, every status, oldest first, read-gated — the count and every
+        keyset page in ONE explicit read transaction (``BEGIN DEFERRED``: one
+        WAL snapshot from the first read on), so a concurrent purge cannot cut
+        it short. Python's sqlite3 opens no transaction for a SELECT, so
+        without the BEGIN each page would take its own snapshot. Rolled back
+        on exit (read only); never takes over a transaction the caller holds.
+        Raises ``RuntimeError`` when the pages disagree with the count."""
+        page = max(1, min(int(page_size), 500))
+        db = self.database.connect()
+        owned = not db.in_transaction
+        if owned:
+            db.execute("BEGIN DEFERRED")
+        try:
+            where, params = self._export_where(notebook_id, user_id)
+            total = int(db.execute(
+                f"SELECT count(*) AS n FROM memory_items m WHERE {where}", params
+            ).fetchone()["n"])
+            items: list[MemoryRecord] = []
+            after: tuple[Any, str] | None = None
+            while True:
+                rows, after = self._export_page_on(db, notebook_id, user_id, after, page)
+                items.extend(self._record(row) for row in rows)
+                if after is None:
+                    break
+        finally:
+            if owned and db.in_transaction:
+                db.rollback()
+        if len(items) != total:
+            raise RuntimeError(
+                f"memory export read {len(items)} of {total} items in one snapshot"
+            )
+        return items
+
+    def _export_where(self, notebook_id: str, user_id: str) -> tuple[str, list[Any]]:
+        clauses = ["m.notebook_id=?", "m.created_by=?", self._read_access_clause()]
+        return " AND ".join(clauses), [notebook_id, user_id, *read_access_params(user_id)]
+
+    def _export_page_on(
         self,
+        db: Any,
         notebook_id: str,
         user_id: str,
-        *,
         after: tuple[Any, str] | None,
-        limit: int,
-    ) -> tuple[list[MemoryRecord], tuple[Any, str] | None]:
-        """Mirror of the PostgreSQL twin: one keyset page of this user's own
-        Memory in one notebook, oldest first, every status, read-gated."""
-        page = max(1, min(int(limit), 500))
-        clauses = [
-            "m.notebook_id=?",
-            "m.created_by=?",
-            self._read_access_clause(),
-        ]
-        params: list[Any] = [notebook_id, user_id, *read_access_params(user_id)]
+        page: int,
+    ) -> tuple[list[Any], tuple[Any, str] | None]:
+        """One keyset page on the caller's connection (PostgreSQL twin)."""
+        where, params = self._export_where(notebook_id, user_id)
         if after is not None:
-            clauses.append("(m.created_at>? OR (m.created_at=? AND m.id>?))")
+            where += " AND (m.created_at>? OR (m.created_at=? AND m.id>?))"
             params.extend((after[0], after[0], after[1]))
-        with self.database.connect() as db:
-            rows = db.execute(
-                f"SELECT {self._select_columns()},m.created_at AS cursor_created_at "
-                "FROM memory_items m LEFT JOIN memory_provenance p ON p.memory_id=m.id "
-                f"WHERE {' AND '.join(clauses)} "
-                "ORDER BY m.created_at,m.id LIMIT ?",
-                (*params, page + 1),
-            ).fetchall()
+        rows = db.execute(
+            f"SELECT {self._select_columns()},m.created_at AS cursor_created_at "
+            "FROM memory_items m LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+            f"WHERE {where} ORDER BY m.created_at,m.id LIMIT ?",
+            (*params, page + 1),
+        ).fetchall()
         more = len(rows) > page
         rows = rows[:page]
         cursor = (
             (rows[-1]["cursor_created_at"], rows[-1]["id"]) if more and rows else None
         )
-        return [self._record(row) for row in rows], cursor
+        return rows, cursor
 
     def list_memories(
         self,

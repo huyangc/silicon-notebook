@@ -1936,7 +1936,15 @@ truthfully. Before confirming, the user can keep their Memory in two ways:
 `GET /notebooks/{id}/memories/export` downloads exactly the counted items as a Markdown file
 (`<notebook>-记忆-<YYYYMMDD>.md`, each with its title, kind, status — candidates marked — times,
 tags, content and provenance line; an entry's unclosed code fence or comment is closed so it
-cannot swallow the next; streamed 200 at a time), and `POST /memories/transfer` copies or moves
+cannot swallow the next). The export reads every item in one snapshot before the first byte
+is sent (PostgreSQL: one read-only REPEATABLE READ transaction; SQLite: one read transaction;
+statements read 200 rows at a time; the transaction lasts as long as the server's reads, never
+the download), so an exit, delete or move committing meanwhile — from another tab or device —
+can never cut the file short: it holds either all of those items or none of them, never a
+prefix. With nothing of the caller's left in the notebook the answer is 404
+`{"detail": {"code": "nothing_to_export", "memory_count": 0}}`, never an empty file; after a
+finished exit the notebook is unreadable (plain 404). The web panel also keeps 「确认退出并删除」
+and the transfer disabled while its own export is running. `POST /memories/transfer` copies or moves
 confirmed items into a notebook the user owns (at most 200 ids per request; other statuses are
 not transferred). The exit writes a content-free audit event (notebook, user, count).
 

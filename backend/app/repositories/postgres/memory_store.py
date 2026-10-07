@@ -5,6 +5,7 @@ import json
 from dataclasses import replace
 from typing import Any, Callable, Mapping, Sequence
 
+from psycopg import IsolationLevel
 from psycopg.errors import DeadlockDetected, SerializationFailure
 
 from app.models.memory import MemoryRevision, MemoryWrite
@@ -1972,45 +1973,75 @@ class MemoryStore:
         separate lexical-index table to clean (see the SQLite twin)."""
         return 0
 
-    def memory_export_page(
+    def memory_export_snapshot(
+        self, notebook_id: str, user_id: str, *, page_size: int
+    ) -> list[MemoryRecord]:
+        """This user's own Memory in one notebook, every status, oldest first
+        (``created_at``, then id), read in ONE read-only REPEATABLE READ
+        transaction: the count and every keyset page see the same snapshot,
+        so a concurrent purge (the member's exit, a hard or bulk delete, a
+        transfer's move) can never cut the result short. The transaction lasts
+        as long as the server's reads, never the client's download: the
+        caller renders and streams the returned list afterwards.
+
+        Read-gated like every Memory read, owner-scoped like every Memory row.
+        Statements stay bounded by ``page_size`` rows; the list holds every
+        item (at most ``MEMORY_CONTENT_MAX_CHARS`` of content each). Raises
+        ``RuntimeError`` when the pages disagree with the snapshot's count
+        (they cannot, inside one snapshot; the check refuses to hand out a
+        file that silently lacks items)."""
+        page = max(1, min(int(page_size), 500))
+        with self.database.connect() as db:
+            db.read_only = True
+            db.isolation_level = IsolationLevel.REPEATABLE_READ
+            where, params = self._export_where(notebook_id, user_id)
+            total = int(db.execute(
+                f"SELECT count(*) AS n FROM memory_items m WHERE {where}", params
+            ).fetchone()["n"])
+            items: list[MemoryRecord] = []
+            after: tuple[Any, str] | None = None
+            while True:
+                rows, after = self._export_page_on(db, notebook_id, user_id, after, page)
+                items.extend(self._record(row) for row in rows)
+                if after is None:
+                    break
+        if len(items) != total:
+            raise RuntimeError(
+                f"memory export read {len(items)} of {total} items in one snapshot"
+            )
+        return items
+
+    def _export_where(self, notebook_id: str, user_id: str) -> tuple[str, list[Any]]:
+        clauses = ["m.notebook_id=%s", "m.created_by=%s", self._read_access_clause()]
+        return " AND ".join(clauses), [notebook_id, user_id, *read_access_params(user_id)]
+
+    def _export_page_on(
         self,
+        db: Any,
         notebook_id: str,
         user_id: str,
-        *,
         after: tuple[Any, str] | None,
-        limit: int,
-    ) -> tuple[list[MemoryRecord], tuple[Any, str] | None]:
-        """One keyset page of this user's own Memory in one notebook, oldest
-        first (``created_at``, then id), every status — the export's reader.
-
-        Read-gated like every Memory read, owner-scoped like every Memory
-        row. Returns the records and the cursor for the next page (``None``
-        when this page was the last); the cursor carries the raw column
-        value, so no timestamp formatting can skip or repeat a row."""
-        page = max(1, min(int(limit), 500))
-        clauses = [
-            "m.notebook_id=%s",
-            "m.created_by=%s",
-            self._read_access_clause(),
-        ]
-        params: list[Any] = [notebook_id, user_id, *read_access_params(user_id)]
+        page: int,
+    ) -> tuple[list[Any], tuple[Any, str] | None]:
+        """One keyset page on the caller's connection; the cursor carries the
+        raw column value, so no timestamp formatting can skip or repeat a row.
+        Returns the rows and the next cursor (``None`` after the last page)."""
+        where, params = self._export_where(notebook_id, user_id)
         if after is not None:
-            clauses.append("(m.created_at,m.id)>(%s,%s)")
+            where += " AND (m.created_at,m.id)>(%s,%s)"
             params.extend(after)
-        with self.database.connect() as db:
-            rows = db.execute(
-                f"SELECT {self._select_columns()},m.created_at AS cursor_created_at "
-                "FROM memory_items m LEFT JOIN memory_provenance p ON p.memory_id=m.id "
-                f"WHERE {' AND '.join(clauses)} "
-                "ORDER BY m.created_at,m.id LIMIT %s",
-                (*params, page + 1),
-            ).fetchall()
+        rows = db.execute(
+            f"SELECT {self._select_columns()},m.created_at AS cursor_created_at "
+            "FROM memory_items m LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+            f"WHERE {where} ORDER BY m.created_at,m.id LIMIT %s",
+            (*params, page + 1),
+        ).fetchall()
         more = len(rows) > page
         rows = rows[:page]
         cursor = (
             (rows[-1]["cursor_created_at"], rows[-1]["id"]) if more and rows else None
         )
-        return [self._record(row) for row in rows], cursor
+        return rows, cursor
 
     def list_memories(
         self,

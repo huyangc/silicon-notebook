@@ -56,6 +56,7 @@ from app.models.admin import PromoteRequest, PromotionCandidate
 from app.repositories.ports import AskStateStorePort, MemoryRepository
 from app.services.prompts import MEMORY_PREVIEW_SCHEMA_HINT, memory_preview_prompt
 from app.services.knowledge_governance import PromotionTargetError
+from app.services.memory_service import NothingToExport
 from app.services.citation_markers import LOOSE_MARKER_RE
 from app.core.memory_inputs import MemoryInputError
 from app.api.task_stream import task_stream_response
@@ -304,15 +305,21 @@ def export_notebook_memories(
     """The caller's OWN Memory in this notebook as a Markdown download — the
     way out before leaving a shared notebook deletes it. Every status (the
     exit deletes candidates too; they are marked), oldest first, nothing of
-    other users. Streamed in pages of ``_EXPORT_PAGE`` (200) Memories, so a
-    large export never builds one string in memory. Read-gated: works only
-    while the caller can read the notebook."""
+    other users. Every item is read in one snapshot BEFORE the response
+    starts (a purge running meanwhile can never cut the file short), then
+    sent piece by piece. Read-gated: works only while the caller can read
+    the notebook (404). No Memory of the caller here: 404
+    ``{"code": "nothing_to_export"}``, never an empty file."""
     service = memory_membership_service()
     try:
         title = notebook_catalog_repository().get_notebook(notebook_id).name
         pieces = service.export_markdown(notebook_id, user.id, title)
     except (KeyError, PermissionError):
         raise _not_found()
+    except NothingToExport:
+        raise HTTPException(
+            status_code=404, detail={"code": "nothing_to_export", "memory_count": 0}
+        )
     day = str(service.now())[:10].replace("-", "")
     filename = f"{safe_download_name(title, fallback='笔记本')}-记忆-{day}.md"
     return StreamingResponse(

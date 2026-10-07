@@ -328,6 +328,26 @@ def test_export_is_a_markdown_attachment_of_only_the_callers_memory(
     ).status_code == 404
 
 
+def test_an_export_with_nothing_left_is_a_404_never_an_empty_file(tmp_path, monkeypatch):
+    """codex #820 r3: the member's Memory here is gone (deleted, or purged by
+    an exit that then could not finish): 404 ``nothing_to_export``, no file.
+    After a finished exit the notebook is unreadable: a plain 404."""
+    w = _world(tmp_path, monkeypatch)
+    client, notebook = w["client"], w["notebook"]
+    service = w["repo"]._runtime.memory_service
+    service.bulk_delete(w["reader_id"], [w["confirmed"], w["candidate"]])
+    response = client.get(f"/api/notebooks/{notebook}/memories/export", headers=w["reader"])
+    assert response.status_code == 404
+    assert response.json() == {"detail": {"code": "nothing_to_export", "memory_count": 0}}
+    assert "content-disposition" not in response.headers
+    assert client.delete(
+        f"/api/notebooks/{notebook}/membership", headers=w["reader"]
+    ).status_code == 204
+    assert client.get(
+        f"/api/notebooks/{notebook}/memories/export", headers=w["reader"]
+    ).status_code == 404
+
+
 def test_download_file_names_are_readable_across_origins(tmp_path, monkeypatch):
     """A cross-origin frontend can only read ``Content-Disposition`` (the
     export's file name) if CORS exposes it."""

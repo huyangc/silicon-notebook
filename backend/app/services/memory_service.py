@@ -55,9 +55,10 @@ _TOKEN_TOUCH_SECONDS = 300
 # resolves, detaches and deletes together. A page size, not a cap — the purge
 # walks every claimed id. Matches ``bulk_delete_memories``' own 200-id bound.
 _PURGE_PAGE = 200
-# Page width of the Markdown export's keyset read. The export streams one
-# page at a time, so its memory use is bounded by this, not by the number of
-# Memories.
+# Page width of the Markdown export's keyset read. The whole export is read
+# in ONE snapshot transaction (so a concurrent purge cannot truncate it) and
+# held in memory while it is sent; this bounds each statement's result, not
+# the export's size.
 _EXPORT_PAGE = 200
 _ORIGIN_LABELS = {"ask_answer": "问答保存", "external_agent": "Agent 提议"}
 _STATUS_LABELS = {
@@ -285,6 +286,12 @@ class MemberExitFailed(_MemberExitNotFinished):
     may be 0. The leaver is still a member; what was deleted stays deleted
     and a retry, which starts again from the disclosure, continues from
     there. HTTP 503 ``exit_incomplete``."""
+
+
+class NothingToExport(Exception):
+    """The caller has no Memory in this notebook to export (none were ever
+    saved, or a purge removed them all before the export's snapshot). HTTP
+    404 ``nothing_to_export`` — never an empty file."""
 
 
 class _PurgeCleanupFailed(Exception):
@@ -1228,15 +1235,30 @@ class MemoryService:
         self, notebook_id: str, user_id: str, notebook_title: str
     ) -> Iterator[str]:
         """The caller's own Memory in one notebook as a Markdown document,
-        yielded in pieces: at most ``_EXPORT_PAGE`` Memories are in memory at
-        a time, however many there are. Every status is included (candidates
-        are marked — leaving deletes them too); nothing of other users. The
-        read check runs now, before the first piece is produced."""
+        yielded in pieces. Every status is included (candidates are marked —
+        leaving deletes them too); nothing of other users.
+
+        Everything is read NOW, before the first piece exists: the read check,
+        then every item in one snapshot read (``memory_export_snapshot``: one
+        read-only transaction whose length is the server's reads, never the
+        client's download). A purge running at the same time — this member's
+        exit from another tab or device, a delete, a transfer's move — either
+        committed before the snapshot (those items are not in it) or after
+        (the file still has them all): the download can never silently stop
+        part-way. Nothing to export raises ``NothingToExport`` (HTTP 404)
+        instead of handing out an empty file. Memory use: the items are held
+        while the file is sent (at most ``MEMORY_CONTENT_MAX_CHARS`` of
+        content each)."""
         self._require_notebook(notebook_id, user_id)
-        return self._export_pieces(notebook_id, user_id, notebook_title)
+        items = self.store.memory_export_snapshot(
+            notebook_id, user_id, page_size=_EXPORT_PAGE
+        )
+        if not items:
+            raise NothingToExport()
+        return self._export_pieces(items, notebook_title)
 
     def _export_pieces(
-        self, notebook_id: str, user_id: str, notebook_title: str
+        self, items: Sequence[MemoryRecord], notebook_title: str
     ) -> Iterator[str]:
         yield (
             f"# {_one_line(notebook_title) or '笔记本'} · 我的记忆\n\n"
@@ -1244,18 +1266,9 @@ class MemoryService:
             "只包含你本人在这本笔记本里的记忆。标为「候选」的尚未确认；"
             "退出这本共享笔记本时，这里列出的全部记忆都会被永久删除。\n"
         )
-        written = 0
-        cursor = None
-        while True:
-            items, cursor = self.store.memory_export_page(
-                notebook_id, user_id, after=cursor, limit=_EXPORT_PAGE
-            )
-            for item in items:
-                written += 1
-                yield _export_section(written, item)
-            if cursor is None:
-                break
-        yield f"\n---\n\n共导出 {written} 条记忆。\n"
+        for index, item in enumerate(items, start=1):
+            yield _export_section(index, item)
+        yield f"\n---\n\n共导出 {len(items)} 条记忆。\n"
 
     def get(self, memory_id: str, user_id: str) -> MemoryRecord:
         return self.store.memory_for_user(memory_id, user_id)
