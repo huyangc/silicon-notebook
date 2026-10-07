@@ -452,15 +452,26 @@ class RetrievalService:
 
         The overlay is prompt text plus live ``k{n}`` anchors, and until now it
         was the one output of the mix path that crossed this boundary
-        unfiltered.  A node survives when its library is covered and, where a
-        source ceiling binds that library, one of its OWN evidence sources is
-        inside it (``source_allowed`` -- the rule ``filter_retrieval_items``
-        applies to a KG hit).  The node's library is its id_map ``notebook_id``
-        ("" = this run's notebook).  The sources come from one batched read per
-        library by object id (``object_support_source_rows``: the reverse index
-        when certified, otherwise the evidence JSON projected to source ids in
-        SQL), only when a ceiling binds a rendered node's library; every node is
-        checked, so no run-level verdict is trusted here.
+        unfiltered.  The node's library is its id_map ``notebook_id`` ("" = this
+        run's notebook).  A node from a library the run does not cover goes,
+        without a read.  Where a source ceiling exists for the node's library,
+        the node's own evidence sources are read (one batched read per library
+        by object id, ``object_support_source_rows``: the reverse index when
+        certified, otherwise the evidence JSON projected to source ids in SQL)
+        and judged by the run's verdict -- the same one ``node_context`` and the
+        candidate layer use (``ceiling_binds``):
+
+        * binds → a node survives only with an in-ceiling source
+          (``source_allowed``, the rule ``filter_retrieval_items`` applies to a
+          KG hit; a node with no source is dropped);
+        * does not bind → the overlay is used as is, verified on read: every
+          source a node names must be inside the frozen ceiling (a node naming
+          none passes, vacuously, as in ``node_context_row_within_ceiling``).
+          The first that is not records the drift for the rest of the run
+          (``record_ceiling_drift``) and the library's nodes are judged as if
+          the verdict had bound.  So a library without anyone else's Memory and
+          without drift renders byte for byte as it did, evidence-less objects
+          included.
 
         Filtering re-renders from structure (``_OverlayStructure``), never by
         editing text: dropped nodes lose their line and anchor, an edge goes
@@ -496,6 +507,12 @@ class RetrievalService:
                     kg_id_map[key].get("object_id") or "")
         for owner, keys in governed.items():
             sources = self._object_support_sources(owner, keys.values())
+            if not self._ceiling_binds(owner):
+                if all(source_allowed(owner, sid)
+                       for object_id in keys.values()
+                       for sid in sources.get(object_id, ())):
+                    continue
+                record_ceiling_drift(scope, owner)
             dropped.update(
                 key for key, object_id in keys.items()
                 if not any(source_allowed(owner, sid)
@@ -509,15 +526,18 @@ class RetrievalService:
         return structure.without(dropped)
 
     def _object_support_sources(self, notebook_id, object_ids) -> dict:
-        """``{object_id: [source ids]}`` for objects of one library, batched."""
+        """``{object_id: [source ids]}`` for objects of one library, batched.
+        An evidence item naming no source contributes nothing (it can neither
+        support a node under a binding ceiling nor show a drift)."""
         wanted = [oid for oid in dict.fromkeys(object_ids) if oid]
         found: dict = {}
         store = self.candidates.unified_kg
         with self.candidates._connect() as db:
             for batch in self.candidates._in_batches(wanted):
                 for row in store.object_support_source_rows(db, notebook_id, batch):
-                    found.setdefault(str(row["object_id"]), []).append(
-                        str(row["source_id"] or ""))
+                    source_id = str(row["source_id"] or "")
+                    if source_id:
+                        found.setdefault(str(row["object_id"]), []).append(source_id)
         return found
 
     def merge_chunk_candidates(self, base, extra):
