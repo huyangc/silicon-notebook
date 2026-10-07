@@ -2598,9 +2598,11 @@ def test_postgres_promotion_dedup_does_not_overwrite_concurrent_merge_evidence(
         def __getattr__(self, name):
             return getattr(self.connection, name)
 
-        def execute(self, query, params=None):
+        def execute(self, query, params=None, **kwargs):
+            # ``**kwargs``: the approval's id-list reads (PR-E8 provenance,
+            # ``id_binding.execute_ids``) pass ``prepare=False``.
             sql = " ".join(str(query).split())
-            cursor = self.connection.execute(query, params)
+            cursor = self.connection.execute(query, params, **kwargs)
             # Match the dedup CORPUS read by its WHERE shape, not by its
             # projection: the corpus read no longer selects `evidence` (P1 批 B
             # — the matched row's evidence is re-read by primary key afterwards,
@@ -2685,9 +2687,22 @@ def test_postgres_promotion_dedup_does_not_overwrite_concurrent_merge_evidence(
             "SELECT evidence FROM knowledge_objects WHERE id=%s",
             ("ko-promotion-race-target",),
         ).fetchone()["evidence"]
+    # PR-E8: the promoted entry arrives rewritten onto the public library's
+    # own promotion element (its quote, since the original element is not in
+    # this world); the union is what this test guards.
+    from app.domain.promotion_provenance import (
+        memory_origin_key, promotion_element_id, promotion_source_id,
+    )
+
+    origin_key = (
+        memory_origin_key(candidate_object_id) if promotion_kind == "memory"
+        else _evidence()[0]["source_id"]
+    )
+    promotion_source = promotion_source_id("nb-base", origin_key)
     assert {item["element_id"] for item in evidence} == {
         "base-existing",
-        promoted_element,
+        promotion_element_id(
+            promotion_source, promoted_element, f"evidence {promoted_element}"),
         "concurrent-merge",
     }
 
@@ -2982,8 +2997,9 @@ def test_postgres_reject_waiting_behind_approve_cannot_overwrite(postgres_databa
         def __getattr__(self, name):
             return getattr(self.connection, name)
 
-        def execute(self, query, params=None):
-            cursor = self.connection.execute(query, params)
+        def execute(self, query, params=None, **kwargs):
+            # ``**kwargs``: see GatePromotionBaseRead (``prepare=False``).
+            cursor = self.connection.execute(query, params, **kwargs)
             sql = " ".join(str(query).split())
             if (
                 sql.startswith("SELECT * FROM promotion_candidates WHERE id=%s FOR UPDATE")
