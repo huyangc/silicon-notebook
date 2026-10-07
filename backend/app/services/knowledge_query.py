@@ -15,6 +15,7 @@ from app.models.knowledge import (
 from app.services.retrieval import RetrievedKnowledge
 from app.services.extraction_profiles import OBJECT_SCHEMAS, OBJECT_TYPE_LABELS, ObjectSchema
 from app.services.knowledge_contracts import CONCEPT_DETAIL_PAGE_MAX, KnowledgeGraphTooLargeError
+from app.services.kg_viewer_scope import filtering, store_viewer_kwargs
 from app.services.model_work import ModelProviderError
 
 
@@ -186,22 +187,55 @@ class KnowledgeQueryService:
                 best[key] = folded
         return sorted(best.values(), key=lambda item: item["score"], reverse=True)[:limit]
 
+    def _viewer_search_hits(self, scope: Any, hits: list, *, folded: bool) -> list:
+        """KG search under the viewer rule (M1, E4-7).  Raw hits (``folded``
+        False): a hit whose object is hidden is dropped -- decided on the
+        scope's live owned-hidden set alone, no row read: a hit that is not
+        a live object never reaches the answer (``hydrate_search_hits`` drops
+        deprecated and unknown ids).
+        Folded hits: a cluster hit takes the label of its first visible
+        member, and a cluster with none is dropped -- every cluster of the
+        page judged in ONE batched member read (``cluster_labels``), never
+        one read per hit.  The FTS leg is filtered in the store once it takes
+        ``viewer_id`` (E4-4); this pass covers the ANN leg (a pre-isolation
+        index included) and keeps the answer right before that."""
+        ids = [hit["object_id"] for hit in hits]
+        hidden = frozenset() if folded else scope.owned_hidden.intersection(ids)
+        labels = scope.cluster_labels(ids) if folded else {}
+        kept = []
+        for hit in hits:
+            if hit["object_id"] in hidden:
+                continue
+            if hit["object_id"] in labels:
+                name = labels[hit["object_id"]]
+                if name is None:
+                    continue
+                hit = {**hit, "name": name}
+            kept.append(hit)
+        return kept
+
     def search(self, notebook_id: str, query: str, limit: int = 30) -> list:
         from app.services.kg.search import merge_search_hits
 
         self.catalog.get_notebook(notebook_id)
+        scope = filtering(self.viewer_scope(notebook_id))
         # Probed BEFORE the connection is taken: on a cold language cache the
         # probe opens its own connection, and nesting that inside this `with`
         # would contend for the pool. Same shape as every retrieval call site.
         corpus_langs = self.retrieval().lexical_corpus_languages(notebook_id)
         with self.database.connect() as db:
             lexical = self.knowledge.fts_search(
-                db, notebook_id, query, limit, corpus_langs=corpus_langs
+                db, notebook_id, query, limit, corpus_langs=corpus_langs,
+                **store_viewer_kwargs(scope),
             )
         semantic = self.semantic_search(notebook_id, query, limit)
         merged = merge_search_hits(lexical, semantic, limit)
+        if scope is not None:
+            merged = self._viewer_search_hits(scope, merged, folded=False)
         hydrated = self.hydrate_search_hits(notebook_id, merged)
         result = self.fold_hits_to_canonical(notebook_id, hydrated, limit)
+        if scope is not None:
+            result = self._viewer_search_hits(scope, result, folded=True)
         if self.memory_retriever is not None:
             memories = self.memory_retriever.notebook_memory_hits(
                 self.current_user_id(), notebook_id, query, limit
@@ -222,9 +256,14 @@ class KnowledgeQueryService:
         return result[:limit]
 
     def knowledge_types(self, notebook_id: str) -> List[KnowledgeTypeCount]:
+        """Counts per type as the viewer sees them: the shared objects plus
+        the viewer's own Memory objects (E4-4's ``viewer_id`` keyword, passed
+        only when the notebook holds Memory the viewer may not read)."""
         self.catalog.get_notebook(notebook_id)
+        scope = self.viewer_scope(notebook_id)
         with self.database.connect() as db:
-            counts, _ = self.knowledge.type_counts(db, notebook_id)
+            counts, _ = self.knowledge.type_counts(
+                db, notebook_id, **store_viewer_kwargs(scope))
         labels = self.schemas.schema_labels(notebook_id)
         ordered = [item for item in OBJECT_SCHEMAS if item in counts]
         ordered += [item for item in counts if item not in OBJECT_SCHEMAS]
@@ -249,14 +288,33 @@ class KnowledgeQueryService:
         self, notebook_id: str, object_type: str, status: Optional[str] = None,
         offset: int = 0, limit: int = 50,
     ) -> PaginatedKnowledge:
+        """One page of a type, as the viewer sees it (M1, E4-7): the rows and
+        the total leave out objects derived from Memory the viewer may not
+        read (E4-4's ``viewer_id`` keyword), and every returned object's
+        evidence leaves out the items attributed to such a source -- by the
+        source an item names or the source its element actually lives in,
+        the rule concept detail applies (``list_evidence_hidden``: one
+        element read for the whole page)."""
         self.catalog.get_notebook(notebook_id)
         offset = max(0, int(offset))
         limit = max(1, min(int(limit), 200))
         schema = self.schemas.effective_schemas(notebook_id).get(object_type)
+        scope = filtering(self.viewer_scope(notebook_id))
         with self.database.connect() as db:
             total, objects = self.knowledge.list_knowledge_page(
-                db, notebook_id, object_type, status, offset, limit
+                db, notebook_id, object_type, status, offset, limit,
+                **store_viewer_kwargs(scope),
             )
+        if scope is not None:
+            items = [(index, item) for index, obj in enumerate(objects)
+                     for item in (obj.get("evidence") or [])]
+            hidden = scope.list_evidence_hidden([item for _index, item in items])
+            kept: Dict[int, list] = {index: [] for index in range(len(objects))}
+            for position, (index, item) in enumerate(items):
+                if position not in hidden:
+                    kept[index].append(item)
+            objects = [{**obj, "evidence": kept[index]}
+                       for index, obj in enumerate(objects)]
         return PaginatedKnowledge(
             items=[self.knowledge_record(object_type, obj, schema) for obj in objects],
             total_count=total,
@@ -286,6 +344,15 @@ class KnowledgeQueryService:
             )
         with self.database.connect() as db:
             rows = self.knowledge.graph_node_rows(db, notebook_id)
+        relations = self.relations_for_notebook(notebook_id)
+        scope = filtering(self.viewer_scope(notebook_id))
+        if scope is not None:
+            # M1 (E4-7): the viewer's view of the live graph -- objects and
+            # relations owned by a source hidden from the viewer are left
+            # out (the rows are live and carry the relation's own source, so
+            # the owner rule is exact here without a store keyword).
+            rows, relations = scope.drop_hidden_graph(
+                list(rows), relations, shared=False)
         nodes = [
             KnowledgeNode(
                 id=row["id"],
@@ -303,7 +370,7 @@ class KnowledgeQueryService:
                 relation=relation["edge_type"],
                 label=relation["edge_type"],
             )
-            for relation in self.relations_for_notebook(notebook_id)
+            for relation in relations
             if relation["source_object_id"] in valid
             and relation["target_object_id"] in valid
         ]
@@ -461,7 +528,7 @@ class KnowledgeQueryService:
         after: str = "",
     ) -> dict:
         source_id = self._participant_source(notebook_id, source_notebook_id)
-        scope = self.viewer_scope(source_id, notebook_id)
+        scope = filtering(self.viewer_scope(source_id, notebook_id))
         return self._concept_detail(
             source_id, canonical_id, limit=limit, after=after, scope=scope
         )
@@ -472,8 +539,7 @@ class KnowledgeQueryService:
     ) -> tuple:
         """One concept-detail page under the viewer rule (PR-A·A5).
 
-        Returns ``(visible_rows, name, dropped_unowned, exhausted,
-        owned_members)``. The first read is ``want`` rows -- the page size,
+        Returns ``(visible_rows, name, exhausted, owned_members)``. The first read is ``want`` rows -- the page size,
         never sized by the cluster's hidden or suspect count (codex #806 r4:
         a hub whose members all cite an unreadable source used to add its
         whole suspect count to every page's read).  Only while hidden members
@@ -490,7 +556,6 @@ class KnowledgeQueryService:
         window = want
         cursor = after
         kept: list = []
-        dropped = 0
         seen_any = False
         name = ""
         with self.database.connect() as db:
@@ -499,12 +564,10 @@ class KnowledgeQueryService:
                     db, notebook_id, canonical_id, limit=window, after=cursor
                 )
                 seen_any = seen_any or bool(rows)
-                for row in rows:
-                    if scope.member_hidden(row):
-                        if str(row["member_object_id"]) not in scope.owned_hidden:
-                            dropped += 1
-                    else:
-                        kept.append(row)
+                # Owner rule (E4-7): a member is hidden exactly when it is
+                # owned by an unreadable source, so every dropped row is
+                # counted in ``owned_members`` already.
+                kept.extend(row for row in rows if not scope.member_hidden(row))
                 exhausted = window is None or len(rows) < window
                 if exhausted or len(kept) >= want:
                     break
@@ -528,7 +591,7 @@ class KnowledgeQueryService:
                 # No visible live member anywhere in the cluster: absent for
                 # this viewer on every page, same 404 as the first page.
                 raise KeyError(canonical_id)
-        return kept, name, dropped, exhausted, owned_members
+        return kept, name, exhausted, owned_members
 
     def _viewer_resolved_evidence(
         self, scope: Any, evidence: list, members: list, attached: list,
@@ -615,7 +678,6 @@ class KnowledgeQueryService:
         # re-derived per page.
         fetch_limit = None if limit is None else limit + 1
         owned_members = 0
-        dropped = 0
         exhausted = False
         if scope is None:
             with self.database.connect() as db:
@@ -623,7 +685,7 @@ class KnowledgeQueryService:
                     db, notebook_id, canonical_id, limit=fetch_limit, after=after
                 )
         else:
-            cluster_rows, name, dropped, exhausted, owned_members = (
+            cluster_rows, name, exhausted, owned_members = (
                 self._viewer_cluster_page(
                     scope, notebook_id, canonical_id, fetch_limit, after
                 )
@@ -665,9 +727,9 @@ class KnowledgeQueryService:
                     db, notebook_id, canonical_id
                 )
             if scope is not None:
-                # Owned-hidden members notebook-wide in this cluster, plus the
-                # evidence-hidden ones this scan met (see _viewer_cluster_page).
-                member_total = max(0, member_total - owned_members - dropped)
+                # The hidden members of this cluster are its owned-hidden
+                # live members (the owner rule), counted notebook-wide.
+                member_total = max(0, member_total - owned_members)
         if not member_ids:
             return {
                 "canonical_id": canonical_id,
@@ -712,7 +774,7 @@ class KnowledgeQueryService:
                 seen.add(other)
                 item = other_objects[other]
                 if scope is not None:
-                    if scope.object_hidden(item["id"], item.get("evidence")):
+                    if scope.object_hidden(item["id"]):
                         continue
                     item = {**item, "evidence": scope.filter_evidence(item.get("evidence") or [])}
                 attached.append({**item, "edge_type": edge["edge_type"]})
@@ -752,18 +814,19 @@ class KnowledgeQueryService:
         viewer, the store gets the viewer's readable set as its ceiling
         (description, ``defines`` evidence, occurrences and steps all pass
         the same strict predicate), and an object hidden by the object rule —
-        owned by an unreadable hidden source, or citing one and nothing
-        readable — is a 404: the store would still return its own name and
+        owned by an unreadable hidden source (E4-7: its evidence no longer
+        hides it; unreadable items are dropped by that same ceiling) — is a
+        404: the store would still return its own name and
         payload, which are that source's text. Otherwise (the common case)
         nothing is filtered and the payload is today's, byte for byte. An
         explicit ``allowed_source_ids`` is intersected with the viewer's set,
         never widened by it.
         """
         source_id = self._participant_source(notebook_id, source_notebook_id)
-        scope = self.viewer_scope(source_id, notebook_id)
+        scope = filtering(self.viewer_scope(source_id, notebook_id))
         if scope is not None:
             row = self.knowledge.get_object_row(source_id, object_id)
-            if row is not None and scope.row_hidden(row["source_id"], row["evidence"]):
+            if row is not None and scope.row_hidden(row["source_id"]):
                 raise KeyError(object_id)
             viewer_allowed = scope.allowed_source_ids()
             allowed_source_ids = (

@@ -1842,11 +1842,20 @@ class SourceStorePort(Protocol):
         the rows this one drops.
         """
         ...
-    def memory_source_ids(self, db: object, notebook_id: str) -> list[str]:
+    def memory_source_ids(
+        self, db: object, notebook_id: str, *,
+        holders_among: Sequence[str] | None = None,
+    ) -> list[str]:
         """The notebook's private Memory synthetic source ids — the exact
         complement of ``source_change_signal_rows``' exclusion, and the single
         definition of "which sources are Memory" that the services layer
         consumes.
+
+        ``holders_among`` (E4-7, the notebook list's counts): the batched
+        presence form -- ``notebook_id`` is then ignored and the answer is the
+        notebook ids among ``holders_among`` that hold at least one Memory
+        source (distinct, any order), in ONE statement whatever the number of
+        notebooks; the list is bound through ``id_binding``.
 
         Bounded by the notebook's Memory count (``idx_sources_memory_id``
         allows one derived source per Memory) and index-seeked on

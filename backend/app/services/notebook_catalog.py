@@ -6,7 +6,7 @@ import shutil
 import weakref
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping
+from typing import Any, Callable, Dict, List, Mapping, Sequence
 
 from app.domain.indexing_pipeline import (
     BUILTIN_INDEXING_PIPELINE_VERSION,
@@ -42,6 +42,17 @@ from app.repositories.ports import (
 # historical importers unchanged.
 from app.repositories.source_files import delete_source_file as _delete_source_file
 from app.services.knowledge_contracts import USABLE_STATUSES
+from app.services import kg_viewer_scope as _kg_viewer_scope
+from app.services.kg_viewer_scope import (
+    store_readers_take_viewer_id,
+    viewer_identity,
+)
+
+
+def memory_channel_allowed() -> bool:
+    """D5's switch through the one seam ``kg_viewer_scope`` holds (read at
+    call time)."""
+    return _kg_viewer_scope.memory_channel_allowed()
 
 
 # Search has one canonical total-hit contract in app.models.ask. Memory is an
@@ -160,11 +171,15 @@ class NotebookSummaryQuery:
         queries: QueryStorePort,
         kg_build_jobs: "KgBuildJobStorePort | None" = None,
         indexing_pipelines: "IndexingPipelineHostPort | None" = None,
+        memory_source_ids: "Callable[[object, str], Sequence[str]] | None" = None,
     ) -> None:
         self.database = database
         self.queries = queries
         self.kg_build_jobs = kg_build_jobs
         self.indexing_pipelines = indexing_pipelines
+        # ``SourceStorePort.memory_source_ids``: the no-Memory short-circuit
+        # of ``viewer_count_kwargs`` (E4-7).
+        self.memory_source_ids = memory_source_ids
 
     def _indexing_option_map(self) -> dict[str, IndexingPipelineOption]:
         """Resolve live availability once per summary/list projection."""
@@ -190,15 +205,57 @@ class NotebookSummaryQuery:
     ) -> int:
         return self.queries.count_rows(db, table, column, value)
 
+    def memory_holders(
+        self, db: object, notebook_ids: Sequence[str],
+    ) -> "set[str] | None":
+        """Which of ``notebook_ids`` hold Memory -- ONE statement for a whole
+        notebook list (``memory_source_ids(holders_among=...)``), so the list
+        page pays one probe, not one per notebook.  ``None`` (no read at all)
+        while the E4-4 seam is off or no probe is wired: ``viewer_count_kwargs``
+        then decides per notebook as before."""
+        if not store_readers_take_viewer_id() or self.memory_source_ids is None:
+            return None
+        return set(self.memory_source_ids(db, "", holders_among=list(notebook_ids)))
+
+    def viewer_count_kwargs(
+        self, db: object, notebook_id: str, user_id: "str | None",
+        *, holds_memory: "bool | None" = None,
+    ) -> Dict[str, str]:
+        """The ``viewer_id`` keyword of the summary counts and ``kg_ready``
+        (M1, E4-7 counts decision; D2's three values, E4-4): ``None`` -- the
+        keyword absent -- is every object, today's statement; ``""`` is the
+        shared view (no Memory-derived object at all); a user id is the
+        shared view plus that user's OWN Memory-derived objects.
+
+        With the E4-4 seam on, a notebook holding Memory is always counted
+        for the viewer: ``viewer_identity(user)`` -- the user while the
+        Memory channel is open, ``""`` when it is closed (D5: a token
+        without ``memory:read`` sees no Memory-derived row, its own
+        included) or when there is no user.  A notebook without Memory keeps
+        today's statement (no keyword), decided by one read of its Memory
+        sources (``memory_source_ids``, the probe ``KgViewerScopeReader``
+        short-circuits on) -- or by ``holds_memory`` when the caller already
+        knows (the list page's batched ``memory_holders``); with no such probe
+        wired the keyword is always passed, which is exact, only not
+        byte-identical."""
+        if not store_readers_take_viewer_id():
+            return {}
+        if holds_memory is None and self.memory_source_ids is not None:
+            holds_memory = bool(self.memory_source_ids(db, notebook_id))
+        if holds_memory is False:
+            return {}
+        return {"viewer_id": viewer_identity(user_id or "")}
+
     def knowledge_type_counts(
-        self, db: object, notebook_id: str
+        self, db: object, notebook_id: str, **viewer: str
     ) -> Dict[str, int]:
         """{counts-dict key: count} for the 6 knowledge object_types
         from_row surfaces, via ONE GROUP BY query instead of 6 separate
         per-type COUNT(*) calls. Same USABLE_STATUSES filter and same
-        zero-default for absent types as the old per-type COUNT(*) calls."""
+        zero-default for absent types as the old per-type COUNT(*) calls.
+        ``viewer``: ``viewer_count_kwargs``."""
         rows = self.queries.knowledge_type_count_rows(
-            db, notebook_id, USABLE_STATUSES
+            db, notebook_id, USABLE_STATUSES, **viewer
         )
         by_type = {r["object_type"]: int(r["c"]) for r in rows}
         return {
@@ -206,8 +263,11 @@ class NotebookSummaryQuery:
             for otype, key in self._NOTEBOOK_COUNT_TYPES.items()
         }
 
-    def has_kg(self, db: object, notebook_id: str) -> bool:
-        return self.queries.notebook_has_kg(db, notebook_id)
+    def has_kg(self, db: object, notebook_id: str, **viewer: str) -> bool:
+        """``kg_ready`` on the same keyword as the counts
+        (``viewer_count_kwargs``): with a viewer, the notebook has a shared KG
+        object or one derived from the viewer's own Memory."""
+        return self.queries.notebook_has_kg(db, notebook_id, **viewer)
 
     def visible_source_count(
         self, db: object, notebook_id: str
@@ -266,14 +326,28 @@ class NotebookSummaryQuery:
         *,
         memory_count: int = 0,
         indexing_options: Mapping[str, IndexingPipelineOption] | None = None,
+        user_id: "str | None" = None,
+        memory_holders: "set[str] | None" = None,
     ) -> NotebookSummary:
+        # ``memory_holders`` (E4-7): the list page's batched answer to "which of
+        # these notebooks hold Memory" (``memory_holders``); None = ask per row.
         # 注意:kg_building/paper_meta_backfilling 仅经 get(kg_building=...,
         # paper_meta_backfilling=...) 回填为真值;list_for_user 等走 from_row 的
         # 路径恒为 False（当前无消费方读列表里的该字段）。
+        # M1/D5 (E4-7): a viewer whose Memory channel is closed (a token without
+        # ``memory:read``) sees no Memory-derived signal, its own Memory count
+        # included -- and ``get``'s confirmed-Memory evidence probe, gated on
+        # this count, is skipped with it (that channel returns nothing).
+        if not memory_channel_allowed():
+            memory_count = 0
+        own_memory = self.viewer_count_kwargs(
+            connection, row["id"], user_id,
+            holds_memory=None if memory_holders is None else row["id"] in memory_holders,
+        )
         counts = {
             "sources": self.visible_source_count(connection, row["id"]),
             "memories": memory_count,
-            **self.knowledge_type_counts(connection, row["id"]),
+            **self.knowledge_type_counts(connection, row["id"], **own_memory),
         }
         keys = row.keys()
 
@@ -339,7 +413,7 @@ class NotebookSummaryQuery:
             # `SELECT notebooks.*`,所以列表与详情两条路径同时拿到它,零新增查询;
             # `in keys` 的兜底与相邻字段同款,喂的是快照/旧行投影那类不带全列的行。
             sync_origin=str(row["sync_origin"] or "") if "sync_origin" in keys else "",
-            kg_ready=self.has_kg(connection, row["id"]),
+            kg_ready=self.has_kg(connection, row["id"], **own_memory),
             base_kg_available=bool(base_kg_ids),
             base_kg_notebook_ids=base_kg_ids,
             base_notebooks=base_refs,
@@ -490,6 +564,7 @@ class NotebookSummaryQuery:
                 row,
                 memory_count=memory_counts.get((user_id, notebook_id), 0),
                 indexing_options=indexing_options,
+                user_id=user_id,
             )
             self._fill_viewer_relation(db, summary, row, user_id)
             # ask_available: 该库能否在任一模式下产出有据回答(见 NotebookSummary 字段注释)。
@@ -583,30 +658,37 @@ class NotebookSummaryQuery:
         with self.database.connect() as db:
             memory_counts = self.queries.memory_counts_by_owner_notebook(db, user_id)
             rows = self.queries.owned_notebook_rows(db, user_id)
+            joined = self.queries.joined_notebook_rows(db, user_id)
+            granted = self.queries.granted_notebook_rows(db, user_id)
+            # E4-7: one probe for the whole list (None while the seam is off).
+            holders = self.memory_holders(
+                db, [row["id"] for part in (rows, joined, granted) for row in part])
             for row in rows:
                 nb = self.from_row(
                     db,
                     row,
                     memory_count=memory_counts.get((user_id, row["id"]), 0),
                     indexing_options=indexing_options,
+                    user_id=user_id,
+                    memory_holders=holders,
                 )
                 nb.access = "owner"
                 nb.can_manage_content = True
                 seen.add(nb.id)
                 out.append(nb)
-            joined = self.queries.joined_notebook_rows(db, user_id)
             for row in joined:
                 nb = self.from_row(
                     db,
                     row,
                     memory_count=memory_counts.get((user_id, row["id"]), 0),
                     indexing_options=indexing_options,
+                    user_id=user_id,
+                    memory_holders=holders,
                 )
                 nb.access = "reader"
                 nb.shared_from = row["_owner_username"] or ""
                 seen.add(nb.id)
                 out.append(nb)
-            granted = self.queries.granted_notebook_rows(db, user_id)
             admin_ids = {
                 row["id"] for row in granted if notebook_grant_confers_admin(row)
             }
@@ -631,6 +713,8 @@ class NotebookSummaryQuery:
                     row,
                     memory_count=memory_counts.get((user_id, notebook_id), 0),
                     indexing_options=indexing_options,
+                    user_id=user_id,
+                    memory_holders=holders,
                 )
                 nb.access = "reader"
                 nb.shared_from = row["_owner_username"] or ""
@@ -780,8 +864,27 @@ class NotebookCatalogService:
         self.get_notebook(notebook_id)  # raises KeyError if missing
         self._store.set_tier(notebook_id, "personal")
 
+    def _viewer_read_kwargs(self, notebook_id: str) -> Dict[str, str]:
+        """The ``viewer_id`` keyword of this catalog's own KG-reading store
+        calls (``notebook_analytics``' knowledge counts, the search box's
+        knowledge leg), on the rule of the summary counts
+        (``NotebookSummaryQuery.viewer_count_kwargs``, M1/E4-7): with the
+        E4-4 seam on, the request user's identity -- ``""`` with the Memory
+        channel closed -- on a notebook holding Memory; nothing (today's
+        statement) on one without, and nothing at all while the seam is off
+        (no probe, no connection)."""
+        if not store_readers_take_viewer_id():
+            return {}
+        user = self._identity.current_user()
+        with self._summaries.database.connect() as db:
+            return self._summaries.viewer_count_kwargs(
+                db, notebook_id, getattr(user, "id", None))
+
     def notebook_analytics(self, notebook_id: str) -> NotebookAnalytics:
-        return self._queries.notebook_analytics(notebook_id)
+        """The analytics card; its knowledge counts are the viewer's view
+        (``_viewer_read_kwargs``: shared plus the viewer's own Memory)."""
+        return self._queries.notebook_analytics(
+            notebook_id, **self._viewer_read_kwargs(notebook_id))
 
     def search_notebook(
         self, notebook_id: str, query: str
@@ -793,7 +896,10 @@ class NotebookCatalogService:
         # syntax across the product instead of a box where it silently finds
         # nothing.
         needle = strip_accepted_quote_markers(query)
-        response = self._queries.search_notebook(notebook_id, needle)
+        # M1 (E4-7): the knowledge leg leaves out another member's
+        # Memory-derived objects (``_viewer_read_kwargs``).
+        response = self._queries.search_notebook(
+            notebook_id, needle, **self._viewer_read_kwargs(notebook_id))
         if self.memory_retriever is None:
             return response
         # Memory keeps the ORIGINAL query: its retriever is phrase-aware and

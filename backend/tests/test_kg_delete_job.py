@@ -581,6 +581,33 @@ def test_first_object_read_after_delete_does_not_repaint_deleted_nodes(
     assert scale.version(nb) != version_before
 
 
+def _own_the_memory_source(repo, notebook_id: str):
+    """Give ``src-mem`` a confirmed Memory of a new member (its owner) and
+    return ``(owner, other member)``."""
+    from app.core.request_context import reset_request_user, set_request_user
+
+    owner = repo.create_user("m00000001", "pw123456")
+    other = repo.create_user("m00000002", "pw123456")
+    repo.add_member(notebook_id, owner.id)
+    repo.add_member(notebook_id, other.id)
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO memory_items (id,notebook_id,created_by,origin,status,title,"
+            "content_md,created_at,updated_at) VALUES ('mem-own',?,?,'ask_answer',"
+            "'confirmed','t','c',?,?)", (notebook_id, owner.id, now, now))
+        db.execute("UPDATE sources SET memory_id='mem-own' WHERE id='src-mem'")
+
+    def as_user(user, fn, *args, **kwargs):
+        token = set_request_user(user)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            reset_request_user(token)
+
+    return owner, other, as_user
+
+
 def test_delete_republishes_the_preview_without_the_memory_objects_that_remain(
     repo, monkeypatch
 ):
@@ -588,18 +615,26 @@ def test_delete_republishes_the_preview_without_the_memory_objects_that_remain(
     source-derived shared graph), but M1 keeps a member's Memory out of every
     shared artifact: the preview never held it, and once the delete has removed
     the shared objects there is nothing left to publish -- the stale preview is
-    retired instead of being republished around a private object."""
+    retired instead of being republished around a private object.  The graph
+    view is the shared graph plus the viewer's OWN Memory objects from the live
+    tables (E4-7): only the owner sees the surviving object, before and after."""
     nb = repo.create_notebook(NotebookCreate(name="nb")).id
     _seed_graph(repo, nb)
+    owner, other, as_user = _own_the_memory_source(repo, nb)
     scale, warm, live, spawned = _published_preview(repo, nb, monkeypatch)
     assert warm["total_nodes"] == 2          # the Memory object is not in it
 
+    def graph(user):
+        return as_user(user, repo.unified_graph, nb, level="object", limit=80)
+
+    assert "ko-src-mem" not in {n["id"] for n in graph(other)["nodes"]}
+    assert "ko-src-mem" in {n["id"] for n in graph(owner)["nodes"]}
+
     _run_delete(repo, nb)
 
-    # No artifact is republished for it, and no refresh is left to run. (What
-    # the graph view then answers from the live tables is the viewer-scoped
-    # read path's business, not the persisted artifact's.)
-    repo.unified_graph(nb, level="object", limit=80)
+    assert [node["id"] for node in graph(other)["nodes"]] == []
+    assert [node["id"] for node in graph(owner)["nodes"]] == ["ko-src-mem"]
+    # No artifact is republished for it, and no refresh is left to run.
     assert not live.exists()
     assert spawned == []
 

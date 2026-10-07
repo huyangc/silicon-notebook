@@ -187,9 +187,10 @@ def test_mounted_library_exposes_visible_sources_only_to_a_non_member(two_users_
 def test_routes_apply_the_rule_to_clusters_and_legacy_siblings(two_users_client):
     """codex #806 r1, over HTTP as the notebook owner: a cluster whose only
     member is owned by the visible source but cites only the member's Memory
-    (finding 1), a legacy sibling procedure owned by that Memory (finding 2)
-    and a legacy evidence item naming the visible source while pointing at a
-    Memory element (finding 3)."""
+    (finding 1 -- since E4-7 the object is the visible source's and stays,
+    only its Memory evidence item goes), a legacy sibling procedure owned by
+    that Memory (finding 2) and a legacy evidence item naming the visible
+    source while pointing at a Memory element (finding 3)."""
     import json
 
     env = two_users_client
@@ -199,13 +200,13 @@ def test_routes_apply_the_rule_to_clusters_and_legacy_siblings(two_users_client)
          "payload": {"name": "Engram", "section_path": "1"},
          "evidence": [_ev("src-s", "el-s-occ")]},
         {"local_id": "ph", "object_type": "concept",
-         "payload": {"name": "M-PRIVATE Phantom", "section_path": "1"},
+         "payload": {"name": "Phantom", "section_path": "1"},
          "evidence": [_ev("src-mm", "el-mm-secret")]},
     ], [{"source_local_id": "ph", "target_local_id": "hub", "edge_type": "related_to",
          "evidence": []}])
     build_pre_isolation(repo, nb)
     with repo._write() as db:
-        phantom = _object_id(db, nb, "M-PRIVATE Phantom", "src-s")
+        phantom = _object_id(db, nb, "Phantom", "src-s")
     phantom_c = repo.cluster_map(nb)[phantom]
 
     def legacy(name, source_id, evidence):
@@ -225,9 +226,10 @@ def test_routes_apply_the_rule_to_clusters_and_legacy_siblings(two_users_client)
         r = c.get(f"/api/notebooks/{nb}/objects/{env.ids.engram_s}/neighbors",
                   headers=headers)
         assert r.status_code == 200
-        assert (phantom_c in r.text) is sees and ("M-PRIVATE" in r.text) is sees, r.text
+        assert phantom_c in r.text, r.text
         r = c.get(f"/api/notebooks/{nb}/concepts/{phantom_c}/detail", headers=headers)
-        assert r.status_code == (200 if sees else 404), r.text
+        assert r.status_code == 200, r.text
+        assert ("el-mm-secret" in r.text) is sees, r.text
         r = c.get(f"/api/notebooks/{nb}/objects/{target}/context", headers=headers)
         assert r.status_code == 200, r.text
         names = sorted(st["name"] for st in r.json()["steps"])

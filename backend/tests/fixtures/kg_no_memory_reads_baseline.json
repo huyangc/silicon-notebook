@@ -1,0 +1,172 @@
+{
+ "graph": {
+  "edges": [
+   {
+    "from_id": "<object claim:plain claim>",
+    "label": "about",
+    "relation": "about",
+    "to_id": "<object concept:Plainword>"
+   }
+  ],
+  "nodes": [
+   {
+    "headline": "Plainword",
+    "id": "<object concept:Plainword>",
+    "object_type": "concept",
+    "status": "approved"
+   },
+   {
+    "headline": "plain claim",
+    "id": "<object claim:plain claim>",
+    "object_type": "claim",
+    "status": "approved"
+   }
+  ]
+ },
+ "list": {
+  "items": [
+   {
+    "evidence": [
+     {
+      "confidence": 1.0,
+      "element_id": "el-p",
+      "element_type": "paragraph",
+      "location_label": "p",
+      "quoted_span": "quote el-p",
+      "source_id": "src-p",
+      "source_title": "src-p"
+     }
+    ],
+    "fields": [
+     {
+      "key": "name",
+      "value": "Plainword"
+     },
+     {
+      "key": "section_path",
+      "value": "1"
+     }
+    ],
+    "headline": "Plainword",
+    "id": "<object concept:Plainword>",
+    "last_reviewed": "",
+    "object_type": "concept",
+    "owner": "",
+    "status": "approved"
+   }
+  ],
+  "limit": 50,
+  "offset": 0,
+  "total_count": 1
+ },
+ "neighbours": {
+  "edges": [
+   {
+    "edge_type": "about",
+    "source_count": 1,
+    "source_object_id": "<object claim:plain claim>",
+    "support_count": 1,
+    "target_object_id": "K-plainword"
+   }
+  ],
+  "focus_id": "K-plainword",
+  "focus_object_id": "<object concept:Plainword>",
+  "nodes": [
+   {
+    "id": "K-plainword",
+    "object_type": "concept",
+    "payload": {
+     "name": "Plainword"
+    }
+   },
+   {
+    "id": "<object claim:plain claim>",
+    "object_type": "claim",
+    "payload": {
+     "name": "plain claim"
+    }
+   }
+  ],
+  "source_notebook_id": "<notebook>"
+ },
+ "search": [
+  {
+   "match": "lexical",
+   "name": "Plainword",
+   "object_id": "K-plainword",
+   "object_type": "concept",
+   "score": 1.0538922155688623e-06
+  }
+ ],
+ "summary": {
+  "counts": {
+   "cases": 0,
+   "checklist_items": 0,
+   "glossary": 0,
+   "memories": 0,
+   "methods": 0,
+   "risks": 0,
+   "rules": 0,
+   "sources": 1
+  },
+  "kg_ready": true
+ },
+ "types": [
+  {
+   "count": 1,
+   "label": "概念 Concept",
+   "object_type": "concept"
+  },
+  {
+   "count": 1,
+   "label": "论断 Claim",
+   "object_type": "claim"
+  }
+ ],
+ "unified_bounded": {
+  "edges": [
+   {
+    "edge_type": "about",
+    "source_count": 1,
+    "source_object_id": "<object claim:plain claim>",
+    "support_count": 1,
+    "target_object_id": "K-plainword"
+   }
+  ],
+  "nodes": [
+   {
+    "id": "K-plainword",
+    "object_type": "concept",
+    "payload": {
+     "name": "Plainword"
+    }
+   },
+   {
+    "id": "<object claim:plain claim>",
+    "object_type": "claim",
+    "payload": {
+     "name": "plain claim"
+    }
+   }
+  ],
+  "total_edges": 1,
+  "total_nodes": 2,
+  "truncated": false
+ },
+ "unified_full": {
+  "edges": [],
+  "nodes": [
+   {
+    "id": "K-plainword",
+    "object_type": "concept",
+    "payload": {
+     "name": "Plainword",
+     "section_path": "1"
+    }
+   }
+  ],
+  "total_edges": 0,
+  "total_nodes": 1,
+  "truncated": false
+ }
+}
