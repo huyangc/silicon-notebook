@@ -527,3 +527,33 @@ def test_a_probe_less_scope_answers_source_ceiling_binds_without_the_memo():
         assert scoped_allowed_source_ids("nb") == ("s1",)
         assert run_ceiling_binds(scope, "other-library") is scope.source_ceiling_binds(
             "other-library")
+
+
+def test_the_node_context_verdict_reads_the_one_row_fingerprint(repo, monkeypatch):
+    """The node-context re-read's verdict (``NodeContextCeilingVerdict``)
+    judges drift by the store's one-row fingerprint -- one visible read with
+    ``digest_for_owner`` -- not by the two full reads it used before."""
+    from app.services.kg_viewer_scope import NodeContextCeilingVerdict
+
+    instance, bob, _alice = repo
+    nb = instance.create_notebook(NotebookCreate(name="kb")).id
+    _add_source(instance, nb, [f"{TEXT} one " * 5])
+    store = instance._runtime.source_store
+    reads = []
+    real_visible, real_hidden = store.all_visible_source_ids, store.hidden_source_ids
+
+    def visible(notebook_id, *args, **kwargs):
+        reads.append(("visible", "digest" if kwargs.get("digest_for_owner") else "full"))
+        return real_visible(notebook_id, *args, **kwargs)
+
+    def hidden(*args, **kwargs):
+        reads.append(("hidden", "full"))
+        return real_hidden(*args, **kwargs)
+
+    verdict = NodeContextCeilingVerdict(database=instance._runtime.database, sources=store)
+    with _ceiling(instance, nb, bob):
+        monkeypatch.setattr(store, "all_visible_source_ids", visible)
+        monkeypatch.setattr(store, "hidden_source_ids", hidden)
+        assert verdict(nb) is False
+    assert ("visible", "digest") in reads
+    assert ("visible", "full") not in reads
