@@ -15,26 +15,41 @@
 //     activeIdRef 手法；两个调用点都按会话 + 边界作 key，切会话即重挂，aliveRef 足矣）。
 //
 // 两条披露（设计 §五 是用户 consent 红线）：包含 M 张附图、包含 K 条个人记忆摘录。
-// 计数不来自 share 回执（它只给链接口令 + 水位），而是打开弹窗时加载该会话、按**水位
-// 之前**的轮次统计。**附图与 Memory 披露都绝不可静默省略**：M>0 / K>0 各自必显示；加载
-// 失败时退化成不带数字、但**两者都提**的兜底文案（见 conversation-share-disclosure 里的
-// SHARE_*_COUNTS_ERROR 常量），而不是只提其一或不显示。
+// 附图数不来自 share 回执（它只给链接口令 + 水位），而是打开弹窗时加载该会话、按**水位
+// 之前**的轮次统计；**个人记忆条数只来自服务端披露端点**（M4：前端不再自己数，Memory
+// 投影命中的引用前端数不到）。**附图与 Memory 披露都绝不可静默省略**：M>0 / K>0 各自
+// 必显示；加载失败时退化成不带数字、但**两者都提**的兜底文案（见
+// conversation-share-disclosure 里的 SHARE_*_COUNTS_ERROR 常量），而不是只提其一或不显示。
+//
+// 确认值绑在 POST 上：作者看到的条数 K>0 时，「分享/更新」那一下就带着 K 交回服务端
+// （`acknowledged_memory_count`），服务端按即将公开的确切范围重算，不相等就 409
+// `share_disclosure_required`——这里把披露行就地换成服务端的确数、按钮改成「确认公开」，
+// 由作者重新决定。K=0 或取数失败时 POST 不带确认值（K=0 时请求与从前逐字节相同）；403
+// 的那句中文原因就地显示在按钮上方。结果落在按钮自己身上：在飞时「生成链接中…」且禁用，
+// 成功后链接复制按钮显示「已公开，链接已复制」/「已公开，复制失败」（`useCopyResult`）。
+// 关闭按钮在任何忙碌态下都不禁用——放弃的请求落定时由 `aliveRef` 丢弃。
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Copy, Link2, RefreshCw, X } from "lucide-react";
+import { Check, Copy, Link2, RefreshCw, X } from "lucide-react";
 
 import type { ConversationShareApi } from "./conversation-share-api.ts";
 import { buildPublicConversationLink } from "./public-conversation.ts";
 import { FloatingModalCard } from "./floating-modal-card.tsx";
 import { httpErrorStatus, toUserMessage } from "./errors.ts";
+import { useCopyResult } from "./copy-result.ts";
+import { ShareDisclosureRequired } from "./report-api.ts";
 import {
   SHARE_DISCLOSURE_COUNTS_ERROR,
   SHARE_UPDATE_BOUNDED_COUNTS_ERROR,
   SHARE_UPDATE_COUNTS_ERROR,
+  readServerMemoryDisclosure,
   resolveShareBoundary,
+  shareMemorySentence,
   shareScopeState,
+  shareUpdateMemorySentence,
   summarizeShareDisclosure,
   summarizeShareUpdate,
+  type ServerMemoryDisclosure,
   type ShareDisclosure,
   type ShareTurn,
   type ShareUpdatePreview,
@@ -140,11 +155,29 @@ export function ConversationShareModal({
   busyRef.current = busy;
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  // 服务端披露端点的回执，按「查的是哪个范围」记 key：范围一变（切会话、水位越界）旧回执
+  // 对新范围不作数。`counts: null` = 取数失败（或形状不对）。
+  const [memoryFetch, setMemoryFetch] = useState<{ key: string; counts: ServerMemoryDisclosure | null } | null>(null);
+  // 409 `share_disclosure_required`：服务端此刻的确数。披露行换成它、按钮改成「确认公开」，
+  // 重试的 POST 把它交回。`action` 记下是哪个按钮撞上的（分享 / 更新），只在对应按钮上生效。
+  const [conflict, setConflict] = useState<{
+    action: "share" | "update";
+    memoryCount: number;
+    newMemoryCount: number;
+  } | null>(null);
+  // 403：服务端给的那句中文原因，就地显示在按钮上方（不是页顶横幅）。
+  const [refusal, setRefusal] = useState("");
+  // 「已公开，链接已复制」那一格：与 `doCopy` 的 notice 分开，结果落在复制按钮自己身上，
+  // 停留 1.6 s。key 带会话身份，换会话即失配回 idle。
+  const shareResult = useCopyResult();
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError("");
+    setConflict(null);
+    setRefusal("");
+    setMemoryFetch(null);
     // 每次重跑（切会话/切库导致 api.key 变）都要清掉上一轮的
     // countsError / shareStateError，否则一次失败后即便重跑成功，兜底告警/禁用态
     // 会残留在一个已经算得出精确数字、已加载出分享状态的会话上（codex T5 评审 P2-4）。
@@ -216,16 +249,10 @@ export function ConversationShareModal({
   // 披露描述的是「链接里有什么」,不是「用户点了哪一条」。unknown 同走这一支(它至少是
   // 我们已知的上界),数字本身已由 countsUnavailable 压掉。
   const disclosureTurns = (boundary.watermarkAhead || boundary.watermarkUnknown) ? turns : scopedTurns;
-  const disclosure = useMemo(
-    () => summarizeShareDisclosure(disclosureTurns, shared ? watermarkId : "", watermark),
+  // 轮数与附图数（个人记忆条数不在这里数——见下面 `effectiveMemory`，只来自服务端）。
+  const turnDisclosure = useMemo(
+    () => summarizeShareDisclosure(disclosureTurns, shared ? watermarkId : "", watermark, 0),
     [disclosureTurns, watermarkId, watermark, shared],
-  );
-  // 前瞻披露:推进水位会公开新增轮次,consent 判据是**这个按钮将要公开什么**,所以它必须
-  // 在点击前就披露更新后的记忆/附图条数(codex #522 R1 P1)。边界模式下「更新后」的范围
-  // 就是截断批次(只消费于 `canAdvance`,而那要求 !watermarkAhead,故这里用 scopedTurns)。
-  const updatePreview = useMemo(
-    () => summarizeShareUpdate(scopedTurns, shared ? watermarkId : "", watermark),
-    [scopedTurns, watermarkId, watermark, shared],
   );
   // 「更新」块的渲染条件。既有模式沿用 newCount>0（含 countsError 时 turns 为空 → 不显示,
   // 逐字保留接入前行为）;边界模式另接住 countsUnavailable——算不出新增轮数,但确实还没
@@ -233,7 +260,64 @@ export function ConversationShareModal({
   // 支不给按钮（见 `ShareBoundary` 的注释:后端水位 advance-only）。
   const canAdvance = shared
     && !boundary.watermarkAhead
-    && (disclosure.newCount > 0 || (bounded && countsUnavailable));
+    && (turnDisclosure.newCount > 0 || (bounded && countsUnavailable));
+
+  // 即将公开的确切范围：水位将被钉到的那条回答（空串 = 当前最新）。披露端点与 POST 的
+  // `expected_through_id` 必须说同一个范围，所以这里与 `doShare` 里的 expected 同一个式子；
+  // 水位已越过边界时没有发布动作，披露的是链接**当前**的范围——水位那条。
+  const lastScopedId = scopedTurns.length ? scopedTurns[scopedTurns.length - 1].answer_id : "";
+  const expectedThroughId = throughAnswerId || lastScopedId;
+  const disclosureThroughId = boundary.watermarkAhead ? watermarkId : expectedThroughId;
+  const memoryFetchKey = `${api.key}|${disclosureThroughId}`;
+  // 取不到整批轮次时（countsUnavailable）已经退到兜底文案，不再为它去问服务端。
+  const memoryFetchWanted = !loading && !countsUnavailable;
+  useEffect(() => {
+    if (!memoryFetchWanted) return;
+    let cancelled = false;
+    // 经 `Promise.resolve().then` 调用：同步抛出的异常（接线错误）与网络失败走同一条
+    // 「取数失败」降级，不会把整个弹窗带崩。
+    Promise.resolve()
+      .then(() => apiRef.current.loadDisclosure(disclosureThroughId))
+      .then((raw) => {
+        if (!cancelled) setMemoryFetch({ key: memoryFetchKey, counts: readServerMemoryDisclosure(raw) });
+      })
+      .catch(() => {
+        if (!cancelled) setMemoryFetch({ key: memoryFetchKey, counts: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [memoryFetchWanted, memoryFetchKey, disclosureThroughId]);
+  const memoryEntry = memoryFetch && memoryFetch.key === memoryFetchKey ? memoryFetch : null;
+  // 回执还在路上：先不画披露、不给发布按钮——点了也只会换来一次不必要的 409。
+  const memoryPending = memoryFetchWanted && memoryEntry === null;
+  // 409 的确数只对撞上它的那个按钮生效（分享 / 更新随是否已分享而定）。
+  const conflictHere = conflict && conflict.action === (shared ? "update" : "share") ? conflict : null;
+  // 个人记忆条数的**唯一来源**：409 带回的确数优先，其次是披露端点；都没有 = 未知。
+  const effectiveMemory: ServerMemoryDisclosure | null = conflictHere
+    ? { memoryCount: conflictHere.memoryCount, newMemoryCount: conflictHere.newMemoryCount }
+    : (memoryEntry ? memoryEntry.counts : null);
+  // 数不出来（轮次取不全，或披露端点失败）：不带数字、但两个面都提的兜底文案。
+  const showCountsError = countsUnavailable || effectiveMemory === null;
+  // 已公开范围的记忆条数：有「更新」时，端点给的是更新后的总数，扣掉新增即当前已公开的。
+  const disclosure: ShareDisclosure = useMemo(() => ({
+    ...turnDisclosure,
+    memoryCount: effectiveMemory
+      ? (canAdvance ? Math.max(0, effectiveMemory.memoryCount - effectiveMemory.newMemoryCount) : effectiveMemory.memoryCount)
+      : 0,
+  }), [turnDisclosure, effectiveMemory, canAdvance]);
+  // 前瞻披露:推进水位会公开新增轮次,consent 判据是**这个按钮将要公开什么**,所以它必须
+  // 在点击前就披露更新后的记忆/附图条数(codex #522 R1 P1)。边界模式下「更新后」的范围
+  // 就是截断批次(只消费于 `canAdvance`,而那要求 !watermarkAhead,故这里用 scopedTurns)。
+  const updatePreview = useMemo(
+    () => summarizeShareUpdate(
+      scopedTurns,
+      shared ? watermarkId : "",
+      watermark,
+      effectiveMemory ?? { memoryCount: 0, newMemoryCount: 0 },
+    ),
+    [scopedTurns, watermarkId, watermark, shared, effectiveMemory],
+  );
 
   async function doShare(action: "share" | "update") {
     // 防御性复查:分享状态未知时绝不发布(CTA 已 disabled,这里兜底 codex #522 R6 P1)。
@@ -241,29 +325,56 @@ export function ConversationShareModal({
     setBusy(action);
     setError("");
     setNotice("");
+    setRefusal("");
     try {
-      // 水位钉死在弹窗据以算披露的那批轮次的**最新**一条(ASC 排序,末条即最新)。
-      // 发布的快照 == 披露的快照(codex #522 R2 P1)。详情没加载出来(countsError)时
+      // `expectedThroughId`(组件级,与披露端点查询的范围同一个式子):水位钉死在弹窗据以
+      // 算披露的那批轮次的**最新**一条(ASC 排序,末条即最新)。发布的快照 == 披露的快照(codex #522 R2 P1)。详情没加载出来(countsError)时
       // turns 为空,expected="" 回退「当前最新」——那种情形披露也已退化成不带数字的告警。
       //
       // ⚠ 边界模式下 `throughAnswerId` **本人**就是 expected,不经 turns 兜底:详情加载
       // 失败时回退成 "" 会让服务端按**当前最新**发布,而那恰恰是用户没点的那些轮次——
       // 界面上写着「分享到这一条」,发出去的却是整条会话。
-      const expectedThroughId = throughAnswerId
-        || (scopedTurns.length ? scopedTurns[scopedTurns.length - 1].answer_id : "");
-      const resp = await api.share(expectedThroughId);
+      //
+      // 确认值（M4）：作者此刻在披露里看到的个人记忆条数——409 带回的确数优先，否则是披露
+      // 端点给的数。条数为 0 或取数失败时**不带**确认值，请求与接入披露之前逐字节相同。
+      const shown = conflictHere ? conflictHere.memoryCount : effectiveMemory?.memoryCount;
+      const acknowledged = shown !== undefined && shown > 0 ? shown : undefined;
+      const resp = await api.share(expectedThroughId, acknowledged);
       if (!aliveRef.current) return;
       setToken(resp.share_token || "");
       setWatermark(resp.shared_through_at || "");
       setWatermarkId(resp.shared_through_id || "");
+      setConflict(null);
       setNotice(
         action === "update"
           ? (bounded ? "已更新到这一条" : "已更新到最新")
           : (bounded ? "已生成分享链接（到这一条为止）" : "已生成分享链接"),
       );
+      if (action === "share") {
+        // 首次公开：链接随即进剪贴板，结果落在（刚出现的）复制按钮上。
+        let copied = false;
+        try {
+          await copyToClipboard(buildPublicConversationLink(
+            resp.share_token || "", typeof window !== "undefined" ? window.location.origin : "",
+          ));
+          copied = true;
+        } catch {
+          // 复制失败不是公开失败：链接已发，按钮上说清「已公开，复制失败」，手动复制即可。
+        }
+        if (aliveRef.current) shareResult.report(`share:${api.key}`, copied);
+      }
     } catch (err) {
       if (!aliveRef.current) return;
-      setError(toUserMessage(err, action === "update" ? "更新失败" : "分享失败"));
+      if (err instanceof ShareDisclosureRequired) {
+        // 服务端此刻的确数与作者看到的不等（或取数失败时第一次拿到数字）：披露行就地换成
+        // 确数，按钮改成「确认公开」，由作者重新决定。不发 token、不推进水位。
+        setConflict({ action, memoryCount: err.memoryCount, newMemoryCount: err.newMemoryCount });
+      } else if (httpErrorStatus(err) === 403) {
+        // 服务端拒绝公开：那句中文原因（`X-User-Message`）就地显示在按钮上方。
+        setRefusal(toUserMessage(err, "暂时无法公开分享"));
+      } else {
+        setError(toUserMessage(err, action === "update" ? "更新失败" : "分享失败"));
+      }
     } finally {
       if (aliveRef.current) setBusy("");
     }
@@ -280,6 +391,8 @@ export function ConversationShareModal({
       setToken("");
       setWatermark("");
       setWatermarkId("");
+      setConflict(null);
+      shareResult.reset();
       setNotice("已取消分享，原链接立即失效");
     } catch (err) {
       if (!aliveRef.current) return;
@@ -386,7 +499,7 @@ export function ConversationShareModal({
             <button className="icon-button" onClick={onClose} title="关闭">×</button>
           </div>
           <div className="source-detail-body conversation-share-body">
-            {loading ? (
+            {loading || memoryPending ? (
               <p className="tool-hint" style={{ margin: 0 }}>正在加载…</p>
             ) : (<>
               {error && <p className="password-change-status error">{error}</p>}
@@ -403,13 +516,21 @@ export function ConversationShareModal({
                 <div className="conversation-share-link">
                   <Link2 size={14} />
                   <input readOnly value={link} onFocus={(event) => event.currentTarget.select()} aria-label="分享链接" />
+                  {/* 首次公开的结果落在这颗按钮自己身上（与「生成分享链接」同一位置换上来）：
+                      「已公开，链接已复制」/「已公开，复制失败」停留 1.6 s 后回到「复制」。
+                      class 以字面量留在各分支里（button-press-feedback-guard 采集字面量）。 */}
                   <button
                     type="button"
-                    className="sort-button"
+                    className={shareResult.resultFor(`share:${api.key}`) === "copied" ? "sort-button copy-result-copied" : shareResult.resultFor(`share:${api.key}`) === "failed" ? "sort-button copy-result-failed" : "sort-button"}
                     disabled={busy !== ""}
                     onClick={() => void doCopy()}
                   >
-                    <Copy size={13} /> {busy === "copy" ? "复制中…" : "复制"}
+                    {shareResult.resultFor(`share:${api.key}`) === "copied" ? <Check size={13} /> : shareResult.resultFor(`share:${api.key}`) === "failed" ? <X size={13} /> : <Copy size={13} />}
+                    {" "}{busy === "copy"
+                      ? "复制中…"
+                      : shareResult.resultFor(`share:${api.key}`) === "copied"
+                        ? "已公开，链接已复制"
+                        : shareResult.resultFor(`share:${api.key}`) === "failed" ? "已公开，复制失败" : "复制"}
                   </button>
                 </div>
 
@@ -433,7 +554,13 @@ export function ConversationShareModal({
                   <div className="conversation-share-update">
                     {/* consent 红线:披露必须在按钮**之前**呈现,点了才涨会先公开
                         水位之后新轮引用的私有 Memory(codex #522 R1 P1)。 */}
-                    <ShareUpdateDisclosureLines preview={updatePreview} countsError={countsUnavailable} bounded={bounded} />
+                    <ShareUpdateDisclosureLines
+                      preview={updatePreview}
+                      countsError={showCountsError}
+                      memoryKnown={effectiveMemory !== null}
+                      bounded={bounded}
+                    />
+                    {refusal && <p className="password-change-status error" role="alert">{refusal}</p>}
                     <button
                       type="button"
                       className="sort-button"
@@ -441,12 +568,14 @@ export function ConversationShareModal({
                       onClick={() => void doShare("update")}
                     >
                       <RefreshCw size={13} className={busy === "update" ? "busy-spin" : undefined} />
-                      {" "}{busy === "update" ? "更新中…" : (bounded ? "更新到这一条" : "更新到最新")}
+                      {" "}{busy === "update" ? "更新中…" : (conflictHere ? "确认公开" : (bounded ? "更新到这一条" : "更新到最新"))}
                     </button>
                   </div>
                 )}
 
-                <ShareDisclosureLines disclosure={disclosure} countsError={countsUnavailable} />
+                <ShareDisclosureLines disclosure={disclosure} countsError={showCountsError} memoryKnown={effectiveMemory !== null} />
+                {/* 没有「更新」块可挂时（例如撞上 403 的只有这一支），原因仍落在紧邻处。 */}
+                {refusal && !canAdvance && <p className="password-change-status error" role="alert">{refusal}</p>}
 
                 <button
                   type="button"
@@ -457,7 +586,8 @@ export function ConversationShareModal({
                   <X size={13} /> {busy === "revoke" ? "撤销中…" : "撤销分享"}
                 </button>
               </>) : (<>
-                <ShareDisclosureLines disclosure={disclosure} countsError={countsUnavailable} />
+                <ShareDisclosureLines disclosure={disclosure} countsError={showCountsError} memoryKnown={effectiveMemory !== null} />
+                {refusal && <p className="password-change-status error" role="alert">{refusal}</p>}
                 <button
                   type="button"
                   className="button conversation-share-cta"
@@ -465,7 +595,7 @@ export function ConversationShareModal({
                   onClick={() => void doShare("share")}
                 >
                   <Link2 size={14} className={busy === "share" ? "busy-spin" : undefined} />
-                  {" "}{busy === "share" ? "分享中…" : (bounded ? "分享到这一条" : "生成分享链接")}
+                  {" "}{busy === "share" ? "生成链接中…" : (conflictHere ? "确认公开" : (bounded ? "分享到这一条" : "生成分享链接"))}
                 </button>
               </>)}
             </>)}
@@ -480,9 +610,13 @@ export function ConversationShareModal({
 function ShareDisclosureLines({
   disclosure,
   countsError,
+  memoryKnown,
 }: {
   disclosure: ShareDisclosure;
   countsError: boolean;
+  /** 个人记忆条数是服务端给出的确数（披露端点，或 409 带回）。兜底文案下仍为真时，
+   *  记忆那一行照常画出——409 的确数必须上屏，哪怕附图数算不出来。 */
+  memoryKnown: boolean;
 }) {
   return (
     <div className="conversation-share-disclosure">
@@ -490,16 +624,14 @@ function ShareDisclosureLines({
         <p className="tool-hint" style={{ margin: 0 }}>
           {SHARE_DISCLOSURE_COUNTS_ERROR}
         </p>
-      ) : (<>
-        {disclosure.imageCount > 0 && (
+      ) : (
+        disclosure.imageCount > 0 && (
           <p className="tool-hint" style={{ margin: 0 }}>公开页会包含 {disclosure.imageCount} 张附图。</p>
-        )}
-        {disclosure.memoryCount > 0 && (
-          <p className="tool-hint" style={{ margin: 0 }}>
-            公开页会包含 {disclosure.memoryCount} 条你引用到的个人记忆摘录。
-          </p>
-        )}
-      </>)}
+        )
+      )}
+      {memoryKnown && disclosure.memoryCount > 0 && (
+        <p className="tool-hint" style={{ margin: 0 }}>{shareMemorySentence(disclosure.memoryCount)}</p>
+      )}
     </div>
   );
 }
@@ -510,22 +642,34 @@ function ShareDisclosureLines({
 function ShareUpdateDisclosureLines({
   preview,
   countsError,
+  memoryKnown,
   bounded,
 }: {
   preview: ShareUpdatePreview;
   countsError: boolean;
+  /** 个人记忆条数是服务端给出的确数（披露端点，或 409 带回）；兜底文案下仍为真时，
+   *  记忆那一行照常画出。 */
+  memoryKnown: boolean;
   /** 边界模式（分享到某条回答为止）。只影响措辞:兜底文案里的按钮名必须与旁边那个
    *  按钮上写的字一致,否则用户据以决定的那句话说的是另一个公开范围。 */
   bounded?: boolean;
 }) {
+  const { afterUpdate, newMemoryCount, newImageCount } = preview;
+  const memoryLine = memoryKnown && afterUpdate.memoryCount > 0 && (
+    <p className="tool-hint" style={{ margin: 0 }}>
+      {shareUpdateMemorySentence(afterUpdate.memoryCount, newMemoryCount)}
+    </p>
+  );
   if (countsError) {
     return (
-      <p className="tool-hint" style={{ margin: 0 }}>
-        {bounded ? SHARE_UPDATE_BOUNDED_COUNTS_ERROR : SHARE_UPDATE_COUNTS_ERROR}
-      </p>
+      <div className="conversation-share-disclosure">
+        <p className="tool-hint" style={{ margin: 0 }}>
+          {bounded ? SHARE_UPDATE_BOUNDED_COUNTS_ERROR : SHARE_UPDATE_COUNTS_ERROR}
+        </p>
+        {memoryLine}
+      </div>
     );
   }
-  const { afterUpdate, newMemoryCount, newImageCount } = preview;
   return (
     <div className="conversation-share-disclosure">
       {afterUpdate.imageCount > 0 && (
@@ -533,11 +677,7 @@ function ShareUpdateDisclosureLines({
           更新后公开页共 {afterUpdate.imageCount} 张附图{newImageCount > 0 ? `（新增 ${newImageCount} 张）` : ""}。
         </p>
       )}
-      {afterUpdate.memoryCount > 0 && (
-        <p className="tool-hint" style={{ margin: 0 }}>
-          更新后公开页共 {afterUpdate.memoryCount} 条你引用到的个人记忆摘录{newMemoryCount > 0 ? `（新增 ${newMemoryCount} 条）` : ""}。
-        </p>
-      )}
+      {memoryLine}
     </div>
   );
 }

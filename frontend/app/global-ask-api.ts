@@ -8,6 +8,11 @@ import type { AskIntentConfirmation, QueryIntentContract } from "./ask-intent-mo
 import type { AskRetrievalEffortId } from "./ask-retrieval-effort.ts";
 import type { ConversationShareApi, ShareTurnsResult } from "./conversation-share-api.ts";
 import { SHARE_SNAPSHOT_MAX_TURNS, type ShareTurn } from "./conversation-share-disclosure.ts";
+import {
+  conversationShareDisclosurePath,
+  postConversationShare,
+  type ConversationShareDisclosureResponse,
+} from "./conversation-share-request.ts";
 import type { AskResponse, ConversationShareResponse } from "./workspace-model.ts";
 
 export type GlobalScope = { mode: "all" } | { mode: "include"; notebook_ids: string[] };
@@ -359,9 +364,11 @@ export function globalConversationShareApi(conversationId: string): Conversation
     key: `global:${conversationId}`,
     load: () => requestJson<ConversationShareResponse>(path, options),
     loadTurns: () => loadGlobalShareTurns(conversationId),
-    share: (expectedThroughId) => requestJson<ConversationShareResponse>(path, {
-      ...options, method: "POST", body: JSON.stringify({ expected_through_id: expectedThroughId }),
-    }),
+    share: (expectedThroughId, acknowledgedMemoryCount) =>
+      postConversationShare(path, options, expectedThroughId, acknowledgedMemoryCount),
+    loadDisclosure: (throughId) => requestJson<ConversationShareDisclosureResponse>(
+      conversationShareDisclosurePath(path, throughId), options,
+    ),
     unshare: () => requestVoid(path, { ...options, method: "DELETE" }),
   };
 }

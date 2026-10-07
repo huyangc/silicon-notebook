@@ -6,6 +6,11 @@
 // 绝不省略**是用户 consent 红线,承重逻辑落在这里,由
 // `frontend/tests/unit/conversation-share-disclosure.test.mjs` 钉住(codex T5 评审 P2-1)。
 //
+// M4:个人记忆的条数**只有服务端一处定义**(`services/share_disclosure.py`,披露端点
+// 返回)。它比前端能看到的多——Memory 投影命中的元素/图谱引用没有 `memory_id`,前端数
+// 不到——所以这里**不再自己数** Memory:附图仍按轮次统计,记忆条数由调用方传入服务端
+// 的数字。前端数出来的数字一旦与服务端并存,就会出现「披露少于实际公开」的那一种错。
+//
 // 「已分享 vs 新增」的分类判据是 `shared_through_id` 在权威 turn 顺序里的位置,而不是
 // created_at 时间戳(codex #522 R3):后端公开快照的 keyset 用 `(created_at, rowid/
 // ordinal)` 排序,同刻并列的两条答案里排在水位之后(rowid 更大)的那条算「新增」;纯
@@ -33,9 +38,33 @@ export type ShareTurn = {
   created_at: string;
   response?: {
     anchors?: { images?: ShareTurnImage[] }[] | null;
-    citations?: { images?: ShareTurnImage[]; memory_id?: string }[] | null;
+    citations?: { images?: ShareTurnImage[] }[] | null;
   } | null;
 };
+
+/** 披露端点回来的个人记忆条数（服务端口径）。`memoryCount` = 公开页将包含的、你引用到的
+ *  不同个人记忆条数；`newMemoryCount` = 其中相对当前已公开范围**新增**的条数。 */
+export type ServerMemoryDisclosure = { memoryCount: number; newMemoryCount: number };
+
+const isCount = (value: unknown): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value >= 0;
+
+/** 读披露端点的回执；形状不对（缺字段、负数、非整数）一律当作取数失败（返回 null），
+ *  绝不猜一个数字——取不到就走兜底文案、POST 不带确认值，由服务端 409 带回确数。 */
+export function readServerMemoryDisclosure(raw: unknown): ServerMemoryDisclosure | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const body = raw as Record<string, unknown>;
+  if (!isCount(body.memory_count)) return null;
+  const added = body.new_memory_count;
+  if (added !== undefined && !isCount(added)) return null;
+  return { memoryCount: body.memory_count, newMemoryCount: added ?? 0 };
+}
+
+/** 两句披露文案（产品裁决 M4 的字面）。 */
+export const shareMemorySentence = (count: number): string =>
+  `公开页会包含 ${count} 条你引用到的个人记忆摘录。`;
+export const shareUpdateMemorySentence = (count: number, added: number): string =>
+  `更新后公开页共 ${count} 条你引用到的个人记忆摘录${added > 0 ? `（新增 ${added} 条）` : ""}。`;
 
 // countsError 兜底文案（设计 §五 consent 红线）。会话详情没加载出来时算不出精确数字,
 // 但披露的**两个面——附图与个人记忆——缺一不可**:公开页两者都会包含,只提其一等于对
@@ -102,10 +131,10 @@ function watermarkClassifier(
  * 水位答案被删、id 找不到时作兜底,并供组件显示"内容截至何时"。
  *
  * M（附图）：各轮 anchors ∪ citations 里图片按 asset_id 去重后逐轮求和（读者每轮
- * 看到几张就是几张）。K（记忆）：各轮 citations 里 memory_id 非空的按 memory_id
- * 去重（K 条不同的个人记忆,而不是被引用几次）。
+ * 看到几张就是几张）。K（记忆）：**不在这里数**，由调用方传入服务端披露端点给出的条数
+ * `memoryCount`（见文件头 M4）；本函数只把它原样放进结果。
  *
- * 计数方向刻意**保守**(宁多勿少):前端统计 anchors ∪ citations,而公开页只投影
+ * 附图计数方向刻意**保守**(宁多勿少):前端统计 anchors ∪ citations,而公开页只投影
  * 被选中的那一支(anchors 有 marker 命中时 else citations),是子集——所以披露数
  * ≥ 公开页实际,绝不出现「公开页有内容而披露没数」(codex T5 评审已核这条不变量)。
  */
@@ -113,12 +142,12 @@ export function summarizeShareDisclosure(
   turns: ShareTurn[],
   sharedThroughId: string,
   watermark: string,
+  memoryCount: number,
 ): ShareDisclosure {
   const isShared = watermarkClassifier(turns, sharedThroughId, watermark);
   let sharedCount = 0;
   let newCount = 0;
   let imageCount = 0;
-  const memoryIds = new Set<string>();
   for (let index = 0; index < turns.length; index += 1) {
     const turn = turns[index];
     if (!isShared(index, turn.created_at)) {
@@ -137,11 +166,10 @@ export function summarizeShareDisclosure(
       for (const image of citation.images || []) {
         if (image.asset_id) assetIds.add(image.asset_id);
       }
-      if (citation.memory_id) memoryIds.add(citation.memory_id);
     }
     imageCount += assetIds.size;
   }
-  return { sharedCount, newCount, imageCount, memoryCount: memoryIds.size };
+  return { sharedCount, newCount, imageCount, memoryCount };
 }
 
 export type ShareUpdatePreview = {
@@ -161,22 +189,24 @@ export type ShareUpdatePreview = {
  * 就必须显示更新后会公开多少条记忆摘录;否则水位之后新轮引用的私有 Memory 会先被
  * 公开、条数事后才涨——即在**未披露**的情况下公开了新的私有 Memory。
  *
- * `afterUpdate` 是全部轮次(id="")的披露即更新后公开的范围;`newMemoryCount`/
- * `newImageCount` 是相对当前已公开(在当前水位之内)的增量。当前披露恒为 `afterUpdate`
- * 的**子集**(afterUpdate 多算的只是水位之后的新轮),故两个增量恒 ≥ 0——记忆按 id
- * 全局去重,current 的去重集 ⊆ afterUpdate 的去重集,相减即「更新才会新暴露的记忆数」
- * (已在早前轮次公开过、新轮又引用一次的记忆不计入新增)。
+ * `afterUpdate` 是全部轮次(id="")的披露即更新后公开的范围;`newImageCount` 是相对当前
+ * 已公开(在当前水位之内)的附图增量,恒 ≥ 0。个人记忆两个数都取自服务端披露端点:
+ * `memoryCount` 是更新后的总条数,`newMemoryCount` 是相对已公开范围新增的条数(服务端
+ * 按 Memory id 去重后相减,早前轮次公开过、新轮又引用一次的不计入新增)。
  */
 export function summarizeShareUpdate(
   turns: ShareTurn[],
   sharedThroughId: string,
   watermark: string,
+  memory: ServerMemoryDisclosure,
 ): ShareUpdatePreview {
-  const current = summarizeShareDisclosure(turns, sharedThroughId, watermark);
-  const afterUpdate = summarizeShareDisclosure(turns, "", "");
+  const current = summarizeShareDisclosure(
+    turns, sharedThroughId, watermark, Math.max(0, memory.memoryCount - memory.newMemoryCount),
+  );
+  const afterUpdate = summarizeShareDisclosure(turns, "", "", memory.memoryCount);
   return {
     afterUpdate,
-    newMemoryCount: afterUpdate.memoryCount - current.memoryCount,
+    newMemoryCount: memory.newMemoryCount,
     newImageCount: afterUpdate.imageCount - current.imageCount,
   };
 }

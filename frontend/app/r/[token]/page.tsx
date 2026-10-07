@@ -29,6 +29,7 @@ import { normalizeMathMarkdown } from "../../math-markdown";
 import {
   fetchPublicReport,
   publicCitationRefs,
+  publicReferenceLocation,
   publicReferenceNumber,
   type PublicReportT,
 } from "../../public-report";
@@ -193,7 +194,7 @@ export default function PublicReportPage() {
                   {reference.title_truncated && (
                     <small className="public-report-truncated">（标题过长，已截断）</small>
                   )}
-                  {reference.location && <span className="public-report-locus">{reference.location}</span>}
+                  {reference.location && <span className="public-report-locus">{publicReferenceLocation(reference.location)}</span>}
                   {reference.file_name && reference.file_name !== reference.title && (
                     <small>原始文件：{reference.file_name}</small>
                   )}

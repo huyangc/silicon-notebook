@@ -13,9 +13,11 @@
 import {
   getConversation,
   getConversationShare,
+  getConversationShareDisclosure,
   shareConversation,
   unshareConversation,
 } from "./ask-api.ts";
+import type { ConversationShareDisclosureResponse } from "./conversation-share-request.ts";
 import type { ShareTurn } from "./conversation-share-disclosure.ts";
 import type { ConversationShareResponse } from "./workspace-model.ts";
 
@@ -43,7 +45,10 @@ export type ConversationShareApi = {
   loadTurns: () => Promise<ShareTurnsResult>;
   /** 「分享」与「更新到最新/这一条」是**同一个**调用：幂等复用链接口令，同时把水位
    *  钉在 `expectedThroughId` 上。空串回退「当前最新」（会话列表那个入口的旧语义）。 */
-  share: (expectedThroughId: string) => Promise<ConversationShareResponse>;
+  share: (expectedThroughId: string, acknowledgedMemoryCount?: number) => Promise<ConversationShareResponse>;
+  /** 服务端按「即将公开的确切范围」（`throughId`：水位将被钉到的那条回答，空串 = 当前
+   *  最新）数出的个人记忆条数。**Memory 的计数只在服务端**——前端不自己数。 */
+  loadDisclosure: (throughId: string) => Promise<ConversationShareDisclosureResponse>;
   unshare: () => Promise<void>;
 };
 
@@ -63,7 +68,11 @@ export function notebookConversationShareApi(
     load: () => getConversationShare(notebookId, conversationId),
     loadTurns: () => getConversation(conversationId)
       .then((detail) => ({ turns: detail.turns || [], complete: true })),
-    share: (expectedThroughId) => shareConversation(notebookId, conversationId, expectedThroughId),
+    // 没有确认值时按三个参数调用——与接入披露之前逐字相同；带确认值才多第四个参数。
+    share: (expectedThroughId, acknowledgedMemoryCount) => (acknowledgedMemoryCount === undefined
+      ? shareConversation(notebookId, conversationId, expectedThroughId)
+      : shareConversation(notebookId, conversationId, expectedThroughId, acknowledgedMemoryCount)),
+    loadDisclosure: (throughId) => getConversationShareDisclosure(notebookId, conversationId, throughId),
     unshare: () => unshareConversation(notebookId, conversationId),
   };
 }

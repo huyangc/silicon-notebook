@@ -21,6 +21,8 @@ import {
 } from "./public-report.ts";
 
 export type { PublicCitationRefT } from "./public-report.ts";
+// 位置标签的公开页呈现（个人记忆 → 「作者的个人记忆」）：两个公开页共用报告那一份。
+export { publicReferenceLocation } from "./public-report.ts";
 
 /** 一条引用出处，匿名读者看到的样子。与 `PublicReference`(后端)逐字段同形。 */
 export type PublicReferenceT = {
