@@ -241,7 +241,14 @@ def test_legacy_report_source_graph_receipt_is_scrubbed_on_repository_read(tmp_p
     assert detail["sections"] == [{"title": "section"}]
 
 
-def test_whole_scope_is_byte_identical_and_does_no_snapshot_io():
+def test_an_all_selected_default_ceiling_is_byte_identical_and_does_no_snapshot_io():
+    """E1-2: an all-selected run reaches this service under the default
+    ceiling every Ask entry installs (``default_ceiling_context``), never
+    without a scope.  That ceiling is not a narrowing: the baseline passes
+    through untouched and no selected-source snapshot is built."""
+    from app.services.source_scope import default_ceiling_context
+    from tests.test_ask_service_boundary import static_ceiling_readers
+
     baseline = [_chunk("b", "a")]
     snapshots = SimpleNamespace(snapshot=lambda *_args: (_ for _ in ()).throw(
         AssertionError("whole scope must not build a selected-source snapshot")
@@ -252,8 +259,8 @@ def test_whole_scope_is_byte_identical_and_does_no_snapshot_io():
     )
     service._snapshots = snapshots
 
-    with source_scope_context(
-        "nb", {"mode": "include", "source_ids": ["a"], "narrowed": False}
+    with default_ceiling_context(
+        "nb", "user", static_ceiling_readers(visible=lambda _nb: ("a",)),
     ):
         result = service.run("nb", baseline)
 
