@@ -284,6 +284,33 @@ def the_promotion_source_is_never_a_pipeline_target(world: World) -> None:
     assert summary.paper_meta_status is None
 
 
+def the_answer_context_reads_the_entry_as_the_librarys_own(world: World) -> None:
+    """The E2-4 snapshot path (an entry owned by another library) no longer
+    fires for a rewritten entry: it keeps its pointers into the public
+    library, is named after the original, and its source is one of the
+    library's visible sources (E7b ``visible_source_owners``)."""
+    from app.models.common import Evidence
+    from app.services.retrieval import RetrievedKnowledge
+
+    (base_object,) = world.approved["base_object_ids"]
+    (entry,) = world.evidence(base_object)
+    hit = RetrievedKnowledge(
+        object_id=base_object, object_type="claim", payload={"name": CLAIM},
+        evidence=[Evidence(**{key: entry[key] for key in (
+            "source_id", "source_title", "element_id", "element_type",
+            "location_label", "quoted_span", "confidence")})],
+    )
+    _block, id_map = world.repo._answer_context(world.base, [hit])
+    (value,) = id_map.values()
+    assert value["source_id"] == world.promotion_source
+    assert value["element_id"] == entry["element_id"]
+    assert value["source_title"] == ORIGIN_TITLE
+    assert not value.get("source_foreign")
+    owners = world.repo._runtime.source_store.visible_source_owners(
+        [world.promotion_source])
+    assert owners == {world.promotion_source: world.base}
+
+
 # ---------------------------------------------------------------------------
 # acceptance: recalled and cited under every ceiling
 # ---------------------------------------------------------------------------

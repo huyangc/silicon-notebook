@@ -74,6 +74,10 @@ def test_pg_the_promotion_source_is_never_a_pipeline_target(world):
     cases.the_promotion_source_is_never_a_pipeline_target(world)
 
 
+def test_pg_the_answer_context_reads_the_entry_as_the_librarys_own(world):
+    cases.the_answer_context_reads_the_entry_as_the_librarys_own(world)
+
+
 def test_pg_single_notebook_ask_through_a_mount_cites_the_promoted_object(world):
     cases.single_notebook_ask_through_a_mount_cites_the_promoted_object(world)
 

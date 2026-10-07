@@ -595,3 +595,38 @@ class TestBaseReviewGateEdgeCases:
         hits = repo.federated_retrieve(personal.id, "thermal noise")
         hit_ids = {h.object_id for h in hits}
         assert result["base_object_id"] in hit_ids
+
+    def test_approved_copy_is_reachable_under_the_default_ceiling(self, repo):
+        """PR-E8 (B-12): under the ceiling every ask installs, a mounted public
+        library opens only its VISIBLE sources. The approved copy's evidence
+        now names the library's own promotion source, so the copy is still
+        recalled; before, its evidence named the promoter's source and the
+        ceiling dropped it."""
+        base = _make_base_nb(repo)
+        personal = _make_personal_nb(repo)
+        repo.replace_notebook_bases(personal.id, [base.id], "user-local")
+        with repo._write() as db:
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,created_at,"
+                "updated_at) VALUES ('s-tn',?,'噪声笔记','markdown','t','t')",
+                (personal.id,))
+            db.execute(
+                "INSERT INTO source_elements (id,source_id,element_type,"
+                "location_label,text,metadata,created_at) VALUES ('el-tn','s-tn',"
+                "'paragraph','p1','thermal noise sets the noise floor','{}','t')")
+        repo.store_kg(personal.id, "s-tn", [{
+            "local_id": "C1", "object_type": "claim",
+            "payload": {"name": "thermal noise sets the noise floor",
+                        "section_path": "1"},
+            "evidence": [{"source_id": "s-tn", "source_title": "噪声笔记",
+                          "element_id": "el-tn", "element_type": "paragraph",
+                          "location_label": "p1", "quoted_span": "thermal noise",
+                          "confidence": 1.0}],
+        }], [])
+        p_oid = _objects_in(repo, personal.id, "claim")[0]["id"]
+        cand = repo.propose_promotion(personal.id, p_oid)
+        result = repo.approve_promotion(cand["id"])
+        service = repo._runtime.ask_service()
+        with service._retrieval_ceiling(personal.id, repo.current_user().id):
+            hits = repo.federated_retrieve(personal.id, "thermal noise")
+        assert result["base_object_id"] in {h.object_id for h in hits}

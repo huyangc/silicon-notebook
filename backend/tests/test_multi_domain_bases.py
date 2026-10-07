@@ -361,6 +361,54 @@ class TestPromotionTarget:
         assert b2_count == 1
         assert b1_count == 0
 
+    def test_promotion_provenance_lands_in_the_explicit_target(self, repo):
+        """PR-E8:「晋升自：」来源与它的元素写进被指定的那个公共库(b2),证据改指
+        它;最早创建的 b1 一行不多。"""
+        from app.domain.promotion_provenance import (
+            PROMOTION_SOURCE_TYPE, promotion_source_id,
+        )
+
+        a = repo.create_notebook(NotebookCreate(name="a"))
+        b1 = repo.create_notebook(NotebookCreate(name="早创建"))
+        b2 = repo.create_notebook(NotebookCreate(name="后创建"))
+        repo.mark_notebook_base(b1.id)
+        repo.mark_notebook_base(b2.id)
+        repo.replace_notebook_bases(a.id, [b1.id, b2.id], "user-local")
+        with repo._write() as db:
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,created_at,"
+                "updated_at) VALUES ('s-a',?,'原件','markdown','t','t')", (a.id,))
+            db.execute(
+                "INSERT INTO source_elements (id,source_id,element_type,"
+                "location_label,text,metadata,created_at) VALUES "
+                "('el-a','s-a','paragraph','p1','增益原文','{}','t')")
+        repo.store_kg(a.id, "s-a", [{
+            "local_id": "G", "object_type": "concept",
+            "payload": {"name": "Gain", "definition": "增益"},
+            "evidence": [{"source_id": "s-a", "source_title": "原件",
+                          "element_id": "el-a", "element_type": "paragraph",
+                          "location_label": "p1", "quoted_span": "增益",
+                          "confidence": 1.0}],
+        }], [])
+        with repo._connect() as db:
+            oid = db.execute(
+                "SELECT id FROM knowledge_objects WHERE notebook_id=?", (a.id,)
+            ).fetchone()["id"]
+        cand = repo.propose_promotion(a.id, oid, target_base_id=b2.id)
+        (base_object,) = repo.approve_promotion(cand["id"])["base_object_ids"]
+        with repo._connect() as db:
+            promoted = {
+                row["notebook_id"]: row["id"] for row in db.execute(
+                    "SELECT id,notebook_id FROM sources WHERE source_type=?",
+                    (PROMOTION_SOURCE_TYPE,))
+            }
+            evidence = db.execute(
+                "SELECT evidence FROM knowledge_objects WHERE id=?", (base_object,)
+            ).fetchone()["evidence"]
+        assert promoted == {b2.id: promotion_source_id(b2.id, "s-a")}
+        assert '"origin_source_id": "s-a"' in evidence
+        assert promotion_source_id(b2.id, "s-a") in evidence
+
     def test_approve_promotion_with_empty_legacy_target_raises_actionable_error(self, repo):
         """迁移 20 之前遗留的候选行 target_base_id 是迁移给的默认空串——按设计
         宁可报错也不去猜(不悄悄捞「最早创建的 base」)。错误信息本身要点名
