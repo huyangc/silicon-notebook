@@ -1503,15 +1503,31 @@ class CandidateRetrievalService(_RetrievalState):
         return mapping
 
     def _relation_top_k(self, db: object, notebook_id: str, query_vector, k: int):
-        """``(readable ids in whole-matrix order, top-k (id, sim) pairs)`` over
-        the relations THIS run may read.
+        """``(vectors, top-k (id, sim) pairs, fallback ids)`` over the
+        relations THIS run may read.
+
+        * ``vectors`` -- how many relation vectors the notebook has at all,
+          readable or not.  0 is the historical "no vector coverage" case the
+          caller answers with its keyword-only full JOIN; any other value
+          keeps the caller on the bounded path, even when nothing is readable
+          (quality review P3-e: a notebook whose only vectors are another
+          member's Memory relations used to fall through to the unbounded
+          JOIN).
+        * ``pairs`` -- the top ``k`` by similarity when a query vector can be
+          scored (a zero-norm one yields the first ``k`` readable rows at 0.0,
+          as ``top_k_sims`` does).
+        * ``fallback ids`` -- only when there are no pairs: the first ``k``
+          readable rows in whole-matrix order (no query vector, or a
+          dimension mismatch), for the caller's bounded keyword scoring.
 
         Readable = the shared half plus the Memory rows whose source
         ``source_allowed`` admits: with no scope every Memory relation (the
         set an unscoped run always scored), under a ceiling only the asker's
         own Memory the freeze admitted.  The mask is applied to the Memory
         half's similarity vector before any selection, so a masked row can
-        neither take a seat nor shift one; neither cached matrix is copied.
+        neither take a seat nor shift one; neither cached matrix is copied,
+        and only the winning rows are turned back into ids (quality review
+        P3-d: no per-request list over every row).
 
         A notebook without Memory is scored exactly as before
         (``top_k_sims`` over the one shared matrix).  Otherwise both halves
@@ -1524,53 +1540,66 @@ class CandidateRetrievalService(_RetrievalState):
         from app.services.source_scope import source_allowed
         from app.services.vector_index import top_k_sims
 
+        def _shared_only(ids, mat):
+            pairs = top_k_sims(query_vector, ids, mat, k) if query_vector else []
+            return len(ids), pairs, ([] if pairs else list(ids[:max(0, k)]))
+
         if not self._memory_source_ids(db, notebook_id):
             # No Memory source: the shared half IS the whole matrix (and a
             # double that stubs ``_vector_matrix`` keeps working).
-            shared_ids, shared_mat = self._vector_matrix(
-                db, notebook_id, "relation_embeddings", "relation_id")
-            pairs = (
-                top_k_sims(query_vector, shared_ids, shared_mat, k)
-                if query_vector else []
-            )
-            return list(shared_ids), pairs
+            return _shared_only(*self._vector_matrix(
+                db, notebook_id, "relation_embeddings", "relation_id"))
         (shared_ids, shared_mat, shared_pos, memory_ids, memory_mat,
          memory_pos, memory_sources, memory_slot) = self._relation_matrices(
             db, notebook_id)
         if not memory_ids:
-            pairs = (
-                top_k_sims(query_vector, shared_ids, shared_mat, k)
-                if query_vector else []
-            )
-            return list(shared_ids), pairs
+            return _shared_only(shared_ids, shared_mat)
+        vectors = len(shared_ids) + len(memory_ids)
         admitted = np.fromiter(
             (source_allowed(notebook_id, source) for source in memory_sources),
             dtype=bool, count=len(memory_sources),
         )
         keep = np.nonzero(admitted[memory_slot])[0]
-        ids = [*shared_ids, *(memory_ids[int(row)] for row in keep)]
+        n_shared = len(shared_ids)
         positions = np.concatenate((shared_pos, memory_pos[keep]))
-        order = np.argsort(positions, kind="stable")
-        readable = [ids[int(index)] for index in order]
-        if not query_vector or not ids or k <= 0:
-            return readable, []
+
+        def _id(index: int):
+            if index < n_shared:
+                return shared_ids[index]
+            return memory_ids[int(keep[index - n_shared])]
+
+        def _first_readable() -> list:
+            count = min(max(0, k), len(positions))
+            if count == 0:
+                return []
+            if count < len(positions):
+                head = np.argpartition(positions, count - 1)[:count]
+            else:
+                head = np.arange(len(positions))
+            head = head[np.argsort(positions[head], kind="stable")]
+            return [_id(int(index)) for index in head]
+
+        if not query_vector or k <= 0:
+            return vectors, [], _first_readable()
         q = np.asarray(query_vector, dtype=np.float32)
-        norm = float(np.linalg.norm(q))
         if q.ndim != 1:
-            return readable, []
+            return vectors, [], _first_readable()
+        norm = float(np.linalg.norm(q))
         if norm == 0:
-            return readable, [(rid, 0.0) for rid in readable[:k]]
+            return vectors, [(rid, 0.0) for rid in _first_readable()], []
         q = q / norm
         parts = []
-        if shared_ids and shared_mat.size and shared_mat.shape[1] == q.shape[0]:
+        if n_shared and shared_mat.size and shared_mat.shape[1] == q.shape[0]:
             parts.append(shared_mat @ q)
-        elif shared_ids:
-            return readable, []
+        elif n_shared:
+            return vectors, [], _first_readable()
         if len(keep) and memory_mat.size and memory_mat.shape[1] == q.shape[0]:
             parts.append((memory_mat @ q)[keep])
         elif len(keep):
-            return readable, []
-        sims = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
+            return vectors, [], _first_readable()
+        if not parts:
+            return vectors, [], []
+        sims = np.concatenate(parts)
         kk = min(k, len(sims))
         if kk < len(sims):
             threshold = np.partition(-sims, kk - 1)[kk - 1]
@@ -1578,7 +1607,7 @@ class CandidateRetrievalService(_RetrievalState):
         else:
             candidates = np.arange(len(sims))
         ranked = candidates[np.lexsort((positions[candidates], -sims[candidates]))]
-        return readable, [(ids[int(i)], float(sims[int(i)])) for i in ranked[:kk]]
+        return vectors, [(_id(int(i)), float(sims[int(i)])) for i in ranked[:kk]], []
 
     @staticmethod
     def _mask_vector_matrix(ids: List[str], mat, keep_ids):
@@ -2049,9 +2078,9 @@ class CandidateRetrievalService(_RetrievalState):
                 )
                 return []
             query_vector = self._embed_query(query)
-            rel_ids, top_pairs = self._relation_top_k(
+            vectors, top_pairs, fallback_ids = self._relation_top_k(
                 db, notebook_id, query_vector, self.settings.relation_recall)
-            if not rel_ids:
+            if not vectors:
                 # 无向量覆盖(未配 embedder/未回填)→ 界定不了候选,回退全量。
                 relations = live_relations(
                     self._relations_with_names(db, notebook_id)
@@ -2068,7 +2097,9 @@ class CandidateRetrievalService(_RetrievalState):
                     # 注:这是退化路径(model_error 兜底),不追求与"有 query_vector"
                     # 分支等价——矩阵内前 N 个 id 是任意切片,不是相关性排序;只保证
                     # 有界不炸内存,排序质量让位于可用性。
-                    top_ids = rel_ids[: self.settings.relation_recall]
+                    # 向量覆盖存在、但本次一条都读不到(库里只有别人的 Memory
+                    # 关系有向量)时 fallback_ids 为空:不退回全量 JOIN,返回空。
+                    top_ids = fallback_ids
                     relation_sims = {}
                 relations = live_relations(
                     self._relations_with_names(

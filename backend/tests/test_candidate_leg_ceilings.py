@@ -356,15 +356,32 @@ def test_a_failing_verdict_probe_binds_instead_of_failing_the_ask(
     walk, monkeypatch,
 ):
     """A probe that cannot answer (a pool timeout, say) makes the overlay take
-    its bound path; cancellation still propagates (quality review P3-7)."""
+    its bound path; cancellation still propagates (quality review P3-7).
+
+    The case that tells "binds" from "does not bind" (fix review P3-a): Bob,
+    his own Memory in his ceiling, nothing outside it -- the ordinary verdict
+    does not bind, so the evidence-less node e6 is used as read; with the probe
+    failing the run binds and e6 is dropped.  (After PR-E1 the verdict comes
+    from ``run_ceiling_binds``, which only probes a scope carrying
+    ``verdict_probes``: this case must then install the failing probe there,
+    or a probe-less scope binds regardless and the case proves nothing.)"""
     from app.domain.cancellation import AskCancelled
 
-    repo, nb, _bob, alice = walk
+    repo, nb, bob, alice = walk
+    _object(repo, nb, "e6", "src-doc", "Capacity factor", "[]")
+    _relation(repo, nb, "rE", "src-doc", "e1", "e6",
+              _evidence("src-doc", "elA", "paper link"))
+    bob_scope = _scope(["src-doc"], ["src-mem-bob"], bob)
+    healthy, _id_map, _supports = _overlay(repo, nb, bob_scope)
+    assert "Capacity factor" in healthy, "control: unbound keeps e6"
 
     def _broken(_nb):
         raise RuntimeError("pool timeout")
 
     monkeypatch.setattr(repo.retrieval, "_ceiling_binds", _broken)
+    failing, _id_map, _supports = _overlay(repo, nb, bob_scope)
+    assert "Mixture-of-Experts" in failing
+    assert "Capacity factor" not in failing, "a failed probe binds"
     block, id_map, _supports = _overlay(repo, nb, _scope(["src-doc"], [], alice))
     assert "Mixture-of-Experts" in block
     assert "ZEBRAQUARTZ" not in block and "e3" not in _objects(id_map)
@@ -707,6 +724,129 @@ def test_tied_relations_keep_the_whole_matrix_order(store):
             hits = repo.retrieval.candidates._retrieve_relations_scored(
                 nb, "zebra link")
         assert sorted(hit.relation_id for hit in hits) == ["r1", "r2"]
+
+
+def _vectors_notebook(repo, bob, alice, rows):
+    """A notebook whose relations carry the given vectors, inserted in order.
+    ``rows`` = ``[(relation_id, source_id, vector)]``; sources ``src-doc``,
+    ``src-mem-bob`` and ``src-mem-alice`` exist."""
+    nb = _notebook(repo, f"vectors-{len(rows)}-{rows[0][0]}")
+    _doc_source(repo, nb, "src-doc")
+    _memory_source(repo, nb, "src-mem-bob", bob)
+    _memory_source(repo, nb, "src-mem-alice", alice)
+    for oid, source in (("a", "src-doc"), ("b", "src-doc")):
+        _object(repo, nb, oid, source, f"node {oid}",
+                _evidence(source, f"el-{oid}", f"q {oid}"))
+    for rid, source, _vector in rows:
+        _relation(repo, nb, rid, source, "a", "b",
+                  _evidence(source, "el-a", f"link {rid}"))
+    with repo._write() as db:
+        for rid, _source, vector in rows:
+            if vector is None:
+                continue
+            db.execute(
+                "INSERT INTO relation_embeddings (relation_id,notebook_id,vector,"
+                "created_at) VALUES (?,?,?,?)",
+                (rid, nb, json.dumps([float(v) for v in vector]), NOW),
+            )
+    return nb
+
+
+def test_an_own_memory_relation_is_scored_with_its_own_vector(store):
+    """Bob's own Memory relation rB sits AFTER Alice's rF in the Memory half;
+    the sim Bob gets for rB must be rB's true cosine, not a neighbour row's
+    (fix review P3-b: a masked index taken by count would hand him rF's)."""
+    repo, bob, alice = store
+    rng = np.random.default_rng(3)
+    q = np.asarray(repo.retrieval.candidates._embed_query("orbital link"),
+                   dtype=np.float32)
+    v_foreign, v_own, v_doc = (rng.standard_normal(q.shape[0]) for _ in range(3))
+    nb = _vectors_notebook(repo, bob, alice, [
+        ("rD", "src-doc", v_doc), ("rF", "src-mem-alice", v_foreign),
+        ("rB", "src-mem-bob", v_own),
+    ])
+    with source_scope_context(nb, _scope(["src-doc"], ["src-mem-bob"], bob)):
+        with repo._connect() as db:
+            _vectors, pairs, _fallback = repo.retrieval.candidates._relation_top_k(
+                db, nb, q.tolist(), 5)
+    sims = dict(pairs)
+    expected = float(np.dot(q / np.linalg.norm(q), v_own / np.linalg.norm(v_own)))
+
+    assert "rF" not in sims
+    assert sims["rB"] == pytest.approx(expected, abs=1e-5)
+
+
+def test_the_relation_cache_keeps_the_key_the_cold_guard_peeks(relation_matrix):
+    """The split relation entry lives under the key and version the large-
+    notebook cold-matrix guard peeks (``_vector_matrix_warm``); moving it
+    would make every warm large notebook look cold and skip relation
+    scoring (fix review P3-c)."""
+    repo, nb, _bob, alice = relation_matrix
+    candidates = repo.retrieval.candidates
+    with repo._connect() as db:
+        assert candidates._vector_matrix_warm(db, nb, "relation_embeddings") is False
+
+    _relations(repo, nb, _scope(["src-doc"], ["src-mem-alice"], alice))
+
+    with repo._connect() as db:
+        assert candidates._vector_matrix_warm(db, nb, "relation_embeddings") is True
+
+
+def test_only_unreadable_memory_vectors_never_fall_back_to_the_full_join(
+    store, monkeypatch,
+):
+    """The only relations with vectors are Alice's Memory relations, and Bob
+    may not read them: there is vector coverage, so the leg stays bounded and
+    returns nothing -- it does not fall back to the keyword-only JOIN over
+    every relation (fix review P3-e)."""
+    repo, bob, alice = store
+    q = repo.retrieval.candidates._embed_query("orbital link")
+    nb = _vectors_notebook(repo, bob, alice, [
+        ("rD", "src-doc", None), ("rF", "src-mem-alice", q),
+    ])
+    candidates = repo.retrieval.candidates
+    real = candidates._relations_with_names
+    unbounded: list = []
+
+    def _spy(db, notebook_id, relation_ids=None):
+        if relation_ids is None:
+            unbounded.append(notebook_id)
+        return real(db, notebook_id, relation_ids=relation_ids)
+
+    monkeypatch.setattr(candidates, "_relations_with_names", _spy)
+    with source_scope_context(nb, _scope(["src-doc"], ["src-mem-bob"], bob)):
+        hits = candidates._retrieve_relations_scored(nb, "orbital link")
+
+    assert hits == [] and unbounded == []
+
+
+def test_without_a_query_vector_the_bounded_fallback_is_readable_and_in_order(
+    store, monkeypatch,
+):
+    """No query vector: the leg still hydrates only ``relation_recall`` rows,
+    the first READABLE ones in whole-matrix order -- Alice's own rO (stored
+    before the paper's rD) first, Bob's rF never."""
+    repo, bob, alice = store
+    q = repo.retrieval.candidates._embed_query("orbital link")
+    nb = _vectors_notebook(repo, bob, alice, [
+        ("rF", "src-mem-bob", q), ("rO", "src-mem-alice", q),
+        ("rD", "src-doc", q),
+    ])
+    candidates = repo.retrieval.candidates
+    monkeypatch.setattr(candidates, "_embed_query", lambda _query: None)
+    repo.settings.relation_recall = 1
+    hydrated: list = []
+    real = candidates._relations_with_names
+    monkeypatch.setattr(
+        candidates, "_relations_with_names",
+        lambda db, notebook_id, relation_ids=None: (
+            hydrated.append(relation_ids),
+            real(db, notebook_id, relation_ids=relation_ids))[1],
+    )
+    with source_scope_context(nb, _scope(["src-doc"], ["src-mem-alice"], alice)):
+        candidates._retrieve_relations_scored(nb, "link rO")
+
+    assert hydrated == [["rO"]]
 
 
 # ---------------------------------------------------------------------------
