@@ -127,11 +127,14 @@ test("没被截断的引用不挂假提示", async () => {
   expect(screen.queryByText("（研究问题过长，已截断）")).toBeNull();
 });
 
-test("个人记忆引用保留标题与摘录，位置标签读作「作者的个人记忆」，不露内部记号", async () => {
+test("个人记忆引用（后端的结构化布尔 memory）保留标题与摘录，位置标签读作「作者的个人记忆」", async () => {
   mocks.fetchPublicReport.mockResolvedValue({
     ...REPORT,
     references: [
-      { key: "k1", title: "我的笔记", file_name: "", location: "Memory", snippet: "记忆摘录" },
+      // 后端没有位置标签可给时，标签也照样出现（不能因为 location 为空就整行消失）。
+      { key: "k1", title: "我的笔记", file_name: "", location: "", snippet: "记忆摘录", memory: true },
+      // 有位置标签的个人记忆：标签被统一换掉。
+      { key: "k2", title: "另一条笔记", file_name: "", location: "第 2 页", snippet: "另一条摘录", memory: true },
       { key: "k7", title: "乙文", file_name: "乙文", location: "p. 3", snippet: "乙摘录" },
     ],
   });
@@ -142,7 +145,22 @@ test("个人记忆引用保留标题与摘录，位置标签读作「作者的�
   expect(memory.querySelector("strong")!.textContent).toBe("我的笔记");
   expect(memory.querySelector("blockquote")!.textContent).toBe("记忆摘录");
   expect(memory.querySelector(".public-report-locus")!.textContent).toBe("作者的个人记忆");
-  expect(screen.queryByText("Memory")).toBeNull();
-  // 别的位置标签原样，不被误改。
+  expect(container.querySelector("#ref-k2 .public-report-locus")!.textContent).toBe("作者的个人记忆");
+  // 不是个人记忆的引用：位置标签原样，也没有个人记忆标签。
   expect(container.querySelector("#ref-k7 .public-report-locus")!.textContent).toBe("p. 3");
+});
+
+test("只认结构化布尔：位置标签恰好叫 Memory 的普通文档引用不会被标成个人记忆", async () => {
+  mocks.fetchPublicReport.mockResolvedValue({
+    ...REPORT,
+    references: [
+      // 芯片手册的一级章节就叫 "Memory"——这是文档原文，不是作者的记忆。
+      { key: "k1", title: "芯片手册", file_name: "chip.pdf", location: "Memory", snippet: "章节摘录" },
+    ],
+  });
+  const { container } = render(<PublicReportPage />);
+
+  await screen.findByText("引用出处");
+  expect(container.querySelector("#ref-k1 .public-report-locus")!.textContent).toBe("Memory");
+  expect(screen.queryByText("作者的个人记忆")).toBeNull();
 });

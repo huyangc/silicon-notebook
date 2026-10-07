@@ -28,7 +28,7 @@ vi.mock("../../app/ask-api.ts", () => ({
 import { ConversationShareModal } from "../../app/conversation-share-modal.tsx";
 import { notebookConversationShareApi } from "../../app/conversation-share-api.ts";
 import { humanizedError } from "../../app/errors.ts";
-import { ShareDisclosureRequired } from "../../app/report-api.ts";
+import { ShareDisclosureRequired } from "../../app/share-failure.ts";
 import { SHARE_DISCLOSURE_COUNTS_ERROR } from "../../app/conversation-share-disclosure.ts";
 
 // 两轮问答,末轮引用一条个人记忆——分享披露算得出 memoryCount=1;末条 answer_id 是
@@ -171,7 +171,7 @@ test("边界模式：expected 钉在用户点的那条,而不是会话最新那�
 
   fireEvent.click(cta);
   await waitFor(() =>
-    expect(mocks.shareConversation).toHaveBeenCalledWith("nb-1", "conv-1", "a1"),
+    expect(mocks.shareConversation).toHaveBeenCalledWith("nb-1", "conv-1", "a1", undefined),
   );
 });
 
@@ -193,7 +193,7 @@ test("边界模式 + 详情加载失败：仍发用户点的那条 id,绝不回�
   fireEvent.click(cta);
   // 空 expected 会让服务端按当前最新发布 —— 界面写着「分享到这一条」,发出去却是整条会话。
   await waitFor(() =>
-    expect(mocks.shareConversation).toHaveBeenCalledWith("nb-1", "conv-1", "a1"),
+    expect(mocks.shareConversation).toHaveBeenCalledWith("nb-1", "conv-1", "a1", undefined),
   );
 });
 
@@ -584,8 +584,9 @@ test("服务端说 0 条：不画记忆那一行，POST 不带确认值（哪怕
   expect(screen.queryByText(/条你引用到的个人记忆摘录/)).toBeNull();
   fireEvent.click(cta);
   await waitFor(() => expect(mocks.shareConversation).toHaveBeenCalledTimes(1));
-  // 零条时与接入披露之前逐字相同：三个参数，没有第四个。
-  expect(mocks.shareConversation.mock.calls[0]).toEqual(["nb-1", "conv-1", "a2"]);
+  // 零条时没有确认值：第四个参数是 undefined，`JSON.stringify` 会丢掉它——网络上的请求体
+  // 字节与接入披露之前相同（请求体字节由 conversation-share-requests 那个文件钉住）。
+  expect(mocks.shareConversation.mock.calls[0]).toEqual(["nb-1", "conv-1", "a2", undefined]);
 });
 
 test("披露端点取数失败：兜底文案照旧、POST 不带确认值；409 带回确数后披露行换成确数、按钮改成「确认公开」", async () => {
@@ -602,7 +603,7 @@ test("披露端点取数失败：兜底文案照旧、POST 不带确认值；409
 
   // 第一发不带确认值。
   await waitFor(() => expect(mocks.shareConversation).toHaveBeenCalledTimes(1));
-  expect(mocks.shareConversation.mock.calls[0]).toEqual(["nb-1", "conv-1", "a2"]);
+  expect(mocks.shareConversation.mock.calls[0]).toEqual(["nb-1", "conv-1", "a2", undefined]);
   // 409：披露行就地换成服务端确数，按钮文字换成「确认公开」，没有页顶报错。
   expect(await screen.findByText("公开页会包含 2 条你引用到的个人记忆摘录。")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "确认公开" })).not.toBeDisabled();
@@ -676,8 +677,9 @@ test("403：服务端给的那句中文原因就地显示在按钮上方，按�
   // 原因紧邻按钮（同一个父容器里，在它前面），而不是弹窗页眉上方的通用错误位。
   const cta = screen.getByRole("button", { name: "生成分享链接" });
   expect(cta).not.toBeDisabled();
-  expect(alert.parentElement).toBe(cta.parentElement);
-  expect(alert.compareDocumentPosition(cta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  // 紧邻：原因就是按钮的**前一个兄弟节点**（页顶通用错误位也在同一个父节点里，只比较
+  // 父节点和先后顺序分不出这两处）。
+  expect(cta.previousElementSibling).toBe(alert);
   expect(screen.queryByLabelText("分享链接")).toBeNull();
 });
 
@@ -703,7 +705,7 @@ test("请求在飞：按钮「生成链接中…」且禁用；关闭按钮此�
   await waitFor(() => expect(screen.queryByRole("button", { name: /生成链接中…/ })).toBeNull());
 });
 
-test("公开成功：结果落在复制按钮自己身上——「已公开，链接已复制」，1.6 秒后回到「复制」", async () => {
+test("公开成功：结果落在公开按钮原来的位置上——「已公开」1.6 秒；不自动复制，「复制」保持手动", async () => {
   notShared();
   mocks.shareConversation.mockResolvedValue(SHARED_A2);
   const writeText = stubClipboard();
@@ -711,26 +713,134 @@ test("公开成功：结果落在复制按钮自己身上——「已公开，�
   renderModal();
 
   fireEvent.click(await screen.findByRole("button", { name: "生成分享链接" }));
-  const done = await screen.findByRole("button", { name: /已公开，链接已复制/ });
+  const done = await screen.findByRole("button", { name: "已公开" });
   expect(done).toHaveClass("copy-result-copied");
-  expect(writeText).toHaveBeenCalledTimes(1);
-  expect(String(writeText.mock.calls[0][0])).toContain("/c/tok-1");
-  await waitFor(
-    () => expect(screen.getByRole("button", { name: /^复制$/ })).not.toHaveClass("copy-result-copied"),
-    { timeout: 4000 },
-  );
+  expect(done).toBeDisabled();
+  // 不碰剪贴板：复制仍是用户自己点的「复制」。
+  expect(writeText).not.toHaveBeenCalled();
+  expect(screen.getByRole("button", { name: "复制" })).not.toBeDisabled();
+  await waitFor(() => expect(screen.queryByRole("button", { name: "已公开" })).toBeNull(), { timeout: 4000 });
+  // 链接和「复制」仍在。
+  expect((screen.getByLabelText("分享链接") as HTMLInputElement).value).toContain("/c/tok-1");
+  expect(screen.getByRole("button", { name: "复制" })).toBeInTheDocument();
 });
 
-test("公开成功但复制失败：按钮上说「已公开，复制失败」，链接仍在输入框里", async () => {
+// --- 公开成功后披露行要描述刚公开出去的范围（评审 F1）-------------------------------
+//
+// 冲突一清，披露行若退回 409 之前取到的旧数字，就会在复制按钮上方少报：作者读完就复制发出去。
+
+test("F1 未分享：端点说 1 条、409 带回 2 条、确认公开成功后，披露行是确认过的 2 条", async () => {
   notShared();
-  mocks.shareConversation.mockResolvedValue(SHARED_A2);
-  const writeText = stubClipboard();
-  writeText.mockRejectedValue(new Error("denied"));
+  mocks.getConversationShareDisclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 0 });
+  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(2, 2));
+  mocks.shareConversation.mockResolvedValueOnce(SHARED_A2);
 
   renderModal();
 
   fireEvent.click(await screen.findByRole("button", { name: "生成分享链接" }));
-  const failed = await screen.findByRole("button", { name: /已公开，复制失败/ });
-  expect(failed).toHaveClass("copy-result-failed");
-  expect((screen.getByLabelText("分享链接") as HTMLInputElement).value).toContain("/c/tok-1");
+  fireEvent.click(await screen.findByRole("button", { name: "确认公开" }));
+  await screen.findByLabelText("分享链接");
+  expect(screen.getByText("公开页会包含 2 条你引用到的个人记忆摘录。")).toBeInTheDocument();
+  expect(screen.queryByText("公开页会包含 1 条你引用到的个人记忆摘录。")).toBeNull();
+});
+
+test("F1 更新：已公开 1 条、更新会到 2 条，409 带回 3 条，确认后披露行是确认过的 3 条", async () => {
+  mocks.getConversationShare.mockResolvedValue({
+    share_token: "tok-1",
+    shared_through_at: "2026-01-01T00:00:00",
+    shared_through_id: "a1",
+  });
+  mocks.getConversation.mockResolvedValue(DETAIL);
+  mocks.getConversationShareDisclosure.mockResolvedValue({ memory_count: 2, new_memory_count: 1 });
+  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(3, 2));
+  mocks.shareConversation.mockResolvedValueOnce(SHARED_A2);
+
+  renderModal();
+
+  fireEvent.click(await screen.findByRole("button", { name: /更新到最新/ }));
+  fireEvent.click(await screen.findByRole("button", { name: "确认公开" }));
+  // 更新完成后没有「更新」块了，链接旁只剩当前范围的披露：必须是刚确认的 3 条。
+  await waitFor(() => expect(screen.queryByRole("button", { name: /更新到最新|确认公开/ })).toBeNull());
+  expect(screen.getByText("公开页会包含 3 条你引用到的个人记忆摘录。")).toBeInTheDocument();
+  expect(screen.queryByText(/公开页会包含 2 条/)).toBeNull();
+});
+
+test("F1 取数失败的路径：409 带回确数、确认成功后，兜底文案换成确认过的确数", async () => {
+  notShared();
+  mocks.getConversationShareDisclosure.mockRejectedValue(new Error("网络中断"));
+  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(2, 2));
+  mocks.shareConversation.mockResolvedValueOnce(SHARED_A2);
+
+  renderModal();
+
+  fireEvent.click(await screen.findByRole("button", { name: "生成分享链接" }));
+  fireEvent.click(await screen.findByRole("button", { name: "确认公开" }));
+  await screen.findByLabelText("分享链接");
+  expect(screen.getByText("公开页会包含 2 条你引用到的个人记忆摘录。")).toBeInTheDocument();
+  expect(screen.queryByText(SHARE_DISCLOSURE_COUNTS_ERROR)).toBeNull();
+});
+
+test("F1 零条：没带确认值就被接受，成功后不画记忆那一行", async () => {
+  notShared();
+  mocks.getConversationShareDisclosure.mockRejectedValue(new Error("网络中断"));
+  mocks.shareConversation.mockResolvedValue(SHARED_A2);
+
+  renderModal();
+
+  fireEvent.click(await screen.findByRole("button", { name: "生成分享链接" }));
+  await screen.findByLabelText("分享链接");
+  expect(screen.queryByText(/条你引用到的个人记忆摘录/)).toBeNull();
+});
+
+// --- 新增条数是「相对当前已公开水位」（评审 F2）；承重的减法要有用例钉住（F5 R4/R10）----
+
+test("F2/R4 已公开 2 条、更新后共 3 条（新增 1 条）：当前行是 2 条，不是总数 3 条", async () => {
+  mocks.getConversationShare.mockResolvedValue({
+    share_token: "tok-1",
+    shared_through_at: "2026-01-01T00:00:00",
+    shared_through_id: "a1",
+  });
+  mocks.getConversation.mockResolvedValue(DETAIL);
+  mocks.getConversationShareDisclosure.mockResolvedValue({ memory_count: 3, new_memory_count: 1 });
+
+  renderModal();
+
+  expect(await screen.findByText("更新后公开页共 3 条你引用到的个人记忆摘录（新增 1 条）。")).toBeInTheDocument();
+  // 当前链接里已有的 = 总数 - 新增。
+  expect(screen.getByText("公开页会包含 2 条你引用到的个人记忆摘录。")).toBeInTheDocument();
+  expect(screen.queryByText("公开页会包含 3 条你引用到的个人记忆摘录。")).toBeNull();
+});
+
+test("F2 取数失败时更新撞上 409 {3, 新增 1}：当前 2 条、新增 1 条（新增相对当前水位，不是相对确认值）", async () => {
+  mocks.getConversationShare.mockResolvedValue({
+    share_token: "tok-1",
+    shared_through_at: "2026-01-01T00:00:00",
+    shared_through_id: "a1",
+  });
+  mocks.getConversation.mockResolvedValue(DETAIL);
+  mocks.getConversationShareDisclosure.mockRejectedValue(new Error("网络中断"));
+  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(3, 1));
+
+  renderModal();
+
+  fireEvent.click(await screen.findByRole("button", { name: /更新到最新/ }));
+  expect(await screen.findByText("更新后公开页共 3 条你引用到的个人记忆摘录（新增 1 条）。")).toBeInTheDocument();
+  expect(screen.getByText("公开页会包含 2 条你引用到的个人记忆摘录。")).toBeInTheDocument();
+});
+
+test("R10 轮次取不全（兜底文案）时更新撞上 409：确数仍然上屏", async () => {
+  mocks.getConversationShare.mockResolvedValue({
+    share_token: "tok-1",
+    shared_through_at: "2026-01-01T00:00:00",
+    shared_through_id: "a1",
+  });
+  mocks.getConversation.mockRejectedValue(new Error("详情加载失败"));
+  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(2, 1));
+
+  renderModal("a2");
+
+  fireEvent.click(await screen.findByRole("button", { name: /更新到这一条/ }));
+  // 轮次算不出，附图数没有；个人记忆的确数来自服务端，必须画出来。
+  expect(await screen.findByText("更新后公开页共 2 条你引用到的个人记忆摘录（新增 1 条）。")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "确认公开" })).toBeInTheDocument();
 });

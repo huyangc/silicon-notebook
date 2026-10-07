@@ -26,7 +26,8 @@
 // `share_disclosure_required`——这里把披露行就地换成服务端的确数、按钮改成「确认公开」，
 // 由作者重新决定。K=0 或取数失败时 POST 不带确认值（K=0 时请求与从前逐字节相同）；403
 // 的那句中文原因就地显示在按钮上方。结果落在按钮自己身上：在飞时「生成链接中…」且禁用，
-// 成功后链接复制按钮显示「已公开，链接已复制」/「已公开，复制失败」（`useCopyResult`）。
+// 成功后原按钮的位置上显示「已公开」1.6 s（`useCopyResult`，key 是链接 token）；复制仍是
+// 手动的。公开成功时披露行改成作者刚确认的数字，不退回 409 之前取到的旧数。
 // 关闭按钮在任何忙碌态下都不禁用——放弃的请求落定时由 `aliveRef` 丢弃。
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -37,7 +38,7 @@ import { buildPublicConversationLink } from "./public-conversation.ts";
 import { FloatingModalCard } from "./floating-modal-card.tsx";
 import { httpErrorStatus, toUserMessage } from "./errors.ts";
 import { useCopyResult } from "./copy-result.ts";
-import { ShareDisclosureRequired } from "./report-api.ts";
+import { ShareDisclosureRequired } from "./share-failure.ts";
 import {
   SHARE_DISCLOSURE_COUNTS_ERROR,
   SHARE_UPDATE_BOUNDED_COUNTS_ERROR,
@@ -167,8 +168,8 @@ export function ConversationShareModal({
   } | null>(null);
   // 403：服务端给的那句中文原因，就地显示在按钮上方（不是页顶横幅）。
   const [refusal, setRefusal] = useState("");
-  // 「已公开，链接已复制」那一格：与 `doCopy` 的 notice 分开，结果落在复制按钮自己身上，
-  // 停留 1.6 s。key 带会话身份，换会话即失配回 idle。
+  // 「已公开」那一格：公开按钮自己的结果，停留 1.6 s。key 是被公开的那条链接的 token
+  // （不是会话身份）：链接一换就自动失配回 idle，新链接不会顶着旧链接的结果出现。
   const shareResult = useCopyResult();
 
   useEffect(() => {
@@ -350,19 +351,17 @@ export function ConversationShareModal({
           ? (bounded ? "已更新到这一条" : "已更新到最新")
           : (bounded ? "已生成分享链接（到这一条为止）" : "已生成分享链接"),
       );
-      if (action === "share") {
-        // 首次公开：链接随即进剪贴板，结果落在（刚出现的）复制按钮上。
-        let copied = false;
-        try {
-          await copyToClipboard(buildPublicConversationLink(
-            resp.share_token || "", typeof window !== "undefined" ? window.location.origin : "",
-          ));
-          copied = true;
-        } catch {
-          // 复制失败不是公开失败：链接已发，按钮上说清「已公开，复制失败」，手动复制即可。
-        }
-        if (aliveRef.current) shareResult.report(`share:${api.key}`, copied);
-      }
+      // 披露行从此要描述**刚公开出去的**范围：把作者刚确认的数字写回当前范围的披露缓存
+      // （新增置 0——已经公开了）。不写回的话，冲突一清，披露行会退回 409 之前取到的旧数字，
+      // 而它就在复制按钮上方——作者读完就复制发出去，正是「公开页有内容而披露少报」。
+      // 没带确认值就被服务端接受，说明这个范围里确实是 0 条。
+      setMemoryFetch({
+        key: memoryFetchKey,
+        counts: { memoryCount: acknowledged ?? 0, newMemoryCount: 0 },
+      });
+      // 结果落在公开按钮自己身上：「已公开」停留 1.6 s。key 取被公开的这条链接自己的
+      // token（copy-result.ts 的规矩：结果不能跟着槽位走，链接一换就自动失配回 idle）。
+      shareResult.report(`share:${resp.share_token || ""}`, true);
     } catch (err) {
       if (!aliveRef.current) return;
       if (err instanceof ShareDisclosureRequired) {
@@ -516,21 +515,13 @@ export function ConversationShareModal({
                 <div className="conversation-share-link">
                   <Link2 size={14} />
                   <input readOnly value={link} onFocus={(event) => event.currentTarget.select()} aria-label="分享链接" />
-                  {/* 首次公开的结果落在这颗按钮自己身上（与「生成分享链接」同一位置换上来）：
-                      「已公开，链接已复制」/「已公开，复制失败」停留 1.6 s 后回到「复制」。
-                      class 以字面量留在各分支里（button-press-feedback-guard 采集字面量）。 */}
                   <button
                     type="button"
-                    className={shareResult.resultFor(`share:${api.key}`) === "copied" ? "sort-button copy-result-copied" : shareResult.resultFor(`share:${api.key}`) === "failed" ? "sort-button copy-result-failed" : "sort-button"}
+                    className="sort-button"
                     disabled={busy !== ""}
                     onClick={() => void doCopy()}
                   >
-                    {shareResult.resultFor(`share:${api.key}`) === "copied" ? <Check size={13} /> : shareResult.resultFor(`share:${api.key}`) === "failed" ? <X size={13} /> : <Copy size={13} />}
-                    {" "}{busy === "copy"
-                      ? "复制中…"
-                      : shareResult.resultFor(`share:${api.key}`) === "copied"
-                        ? "已公开，链接已复制"
-                        : shareResult.resultFor(`share:${api.key}`) === "failed" ? "已公开，复制失败" : "复制"}
+                    <Copy size={13} /> {busy === "copy" ? "复制中…" : "复制"}
                   </button>
                 </div>
 
@@ -574,6 +565,14 @@ export function ConversationShareModal({
                 )}
 
                 <ShareDisclosureLines disclosure={disclosure} countsError={showCountsError} memoryKnown={effectiveMemory !== null} />
+                {/* 公开成功的结果：原来那颗「生成分享链接」/「更新」按钮随公开一起退场，所以结果
+                    就落在它原来的位置、同一款按钮上，停留 1.6 s（`useCopyResult`，key 是这条链接
+                    自己的 token）。复制仍是手动的「复制」。class 以字面量写在这里。 */}
+                {shareResult.resultFor(`share:${token}`) === "copied" && (
+                  <button type="button" className="button conversation-share-cta copy-result-copied" disabled>
+                    <Check size={14} /> 已公开
+                  </button>
+                )}
                 {/* 没有「更新」块可挂时（例如撞上 403 的只有这一支），原因仍落在紧邻处。 */}
                 {refusal && !canAdvance && <p className="password-change-status error" role="alert">{refusal}</p>}
 

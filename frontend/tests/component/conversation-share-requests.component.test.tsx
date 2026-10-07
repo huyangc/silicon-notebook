@@ -8,7 +8,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { getConversationShareDisclosure, shareConversation } from "../../app/ask-api.ts";
 import { globalConversationShareApi } from "../../app/global-ask-api.ts";
 import { httpErrorStatus, toUserMessage } from "../../app/errors.ts";
-import { ShareDisclosureRequired } from "../../app/report-api.ts";
+import { ShareDisclosureRequired } from "../../app/share-failure.ts";
 
 type Call = { method: string; url: string; body: string | null };
 let calls: Call[] = [];
@@ -40,7 +40,8 @@ afterEach(() => {
 const path = (call: Call) => new URL(call.url, "http://localhost").pathname.replace(/^\/api(?=\/)/, "");
 
 test("笔记本：不带确认值的 POST，请求体原文与接入披露之前逐字节相同", async () => {
-  await shareConversation("nb-1", "conv-1", "a2");
+  // 与笔记本侧工厂的调用形态一致：没有确认值时第四个参数显式是 undefined。
+  await shareConversation("nb-1", "conv-1", "a2", undefined);
   expect(calls).toHaveLength(1);
   expect(calls[0].method).toBe("POST");
   expect(path(calls[0])).toBe("/notebooks/nb-1/conversations/conv-1/share");
@@ -101,4 +102,11 @@ test("403：服务端的中文原因（X-User-Message）原样成为错误文案
   const error = await shareConversation("nb-1", "conv-1", "a2", 1).catch((reason) => reason);
   expect(httpErrorStatus(error)).toBe(403);
   expect(toUserMessage(error, "暂时无法公开分享")).toBe("这条会话引用了其他成员的个人记忆，不能公开分享。");
+});
+
+test("自相矛盾的 409（新增大于总数）不被当成披露确认，落回普通错误", async () => {
+  respond = () => json(409, { detail: { code: "share_disclosure_required", memory_count: 1, new_memory_count: 3 } });
+  const error = await shareConversation("nb-1", "conv-1", "a2").catch((reason) => reason);
+  expect(error).not.toBeInstanceOf(ShareDisclosureRequired);
+  expect(httpErrorStatus(error)).toBe(409);
 });
