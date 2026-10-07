@@ -1200,6 +1200,35 @@ mount predicate in `MOUNT_GATE_CLOSED_EXPR`, never re-spelled at the consumer,
 and it also keeps the library's real name visible, since the mounting owner still
 legitimately holds read access.
 
+### A mount counts only for those who may read the mounted library
+
+A valid mount edge is not the same for every reader of the mounting notebook.
+**A mounted library takes part only for a viewer who may read it themselves** —
+its mounter, a member of or grantee on the library, or anyone when it is a public
+`tier='base'` library or carries an `everyone` grant. Alice mounts her private
+library B on her notebook A and shares A with Bob: Alice searches B as before;
+for Bob, B does not exist. None of B's passages, elements, knowledge-graph
+objects, relations or communities reach his asks on any retrieval channel; the
+source and asset proxy reads (`/notebooks/A/sources/{id}`, `.../elements`,
+`.../elements-page`, `.../assets/{id}`) and MCP `get_cited_element` answer 404
+for B's content exactly as for an unknown id. Give Bob read access to B and the
+mount counts for him too, with nothing to reconfigure.
+
+The notebook summary follows the same viewer: `base_notebooks`,
+`base_kg_notebook_ids`, `base_kg_available` and the reference-library half of
+`ask_available` describe only the mounts effective for the person reading it, so
+a member never sees the name of, or a knowledge-graph flag for, a private library
+they cannot read. The mount list on the settings page (`GET .../bases`) is the
+mounter's configuration view and is unchanged.
+
+Who "the viewer" is: the asker for an Ask (HTTP, stream, MCP), the report's
+author for its planning and generation, the user who started a Global Ask job or
+a detached ask that a returning client reattaches to — taken from the run itself
+on its worker thread, never from whatever request happens to be ambient — the
+token's owner for MCP reads, and the share's creator when an anonymous public
+page re-checks its mounts. A background path with no run and no request user has
+no viewer and sees only public libraries and `everyone`-granted ones.
+
 ### A deep copy carries the mounts that still hold for the recipient
 
 A deep copy — a user's own copy, and the copy that delivers a shared small
