@@ -28,6 +28,12 @@ prompts it received ARE the retrieval result):
   key, built separately, without ``b``); Carol, another member who may not
   read ``b`` either, shares Bob's entry; once Bob may read ``b`` he shares
   Alice's (cache hits counted).
+* Below the ceiling, which would mask any single reader: every service-layer
+  participant reader (the retrieval seat, the reference-KG gate, the chain's
+  start row, the collection map, the typed enumeration, enumerated-row
+  citations, community peers, the runtime's injected reader, the scale PPR
+  graph) reaches ``b`` for Alice and not for Bob, whoever the ambient request
+  user is.
 * Background runs take the viewer from the run's actor, never from the
   thread's ambient request: a report, a Global Ask job and a detached
   (reattachable) ask run for Bob read nothing of ``b`` even when the ambient
@@ -70,7 +76,8 @@ OWN = {
 }
 LIB = {
     "source": "src-b", "element": "el-b", "chunk": "chunk-b",
-    "object": "ko-b1", "object2": "ko-b2", "relation": "rel-b",
+    "object": "ko-b1", "object2": "ko-b2", "object3": "ko-b3",
+    "relation": "rel-b", "relation2": "rel-b2",
 }
 
 
@@ -178,17 +185,24 @@ def _seed(env: dict, ph: str) -> None:
               f"{TERM} latency library concept {MARK}KG")
     kg_object(b, LIB["object2"], LIB["source"], LIB["element"],
               f"{TERM} latency library mechanism {MARK}KGTWO")
+    kg_object(b, LIB["object3"], LIB["source"], LIB["element"],
+              f"{TERM} latency library origin {MARK}KGTHREE")
     with repo._write() as db:
-        db.execute(
-            "INSERT INTO knowledge_relations (id,notebook_id,source_id,"
-            "source_object_id,target_object_id,edge_type,evidence,created_at) "
-            f"VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})",
-            (LIB["relation"], b, LIB["source"], LIB["object"], LIB["object2"],
-             "derived_from", json.dumps([{
-                 "source_id": LIB["source"], "element_id": LIB["element"],
-                 "quoted_span": f"{TERM} {MARK}RELQUOTE", "confidence": 1.0,
-             }]), NOW),
-        )
+        # A two-hop ``kind_of`` chain (concept -> concept): b1 -> b2 -> b3.
+        for relation, start, end in (
+            (LIB["relation"], LIB["object"], LIB["object2"]),
+            (LIB["relation2"], LIB["object2"], LIB["object3"]),
+        ):
+            db.execute(
+                "INSERT INTO knowledge_relations (id,notebook_id,source_id,"
+                "source_object_id,target_object_id,edge_type,evidence,created_at) "
+                f"VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})",
+                (relation, b, LIB["source"], start, end, "kind_of",
+                 json.dumps([{
+                     "source_id": LIB["source"], "element_id": LIB["element"],
+                     "quoted_span": f"{TERM} {MARK}RELQUOTE", "confidence": 1.0,
+                 }]), NOW),
+            )
     for notebook_id in (a, b):
         repo.backfill_chunk_fts(notebook_id)
         repo.rebuild_unified_kg(notebook_id)
@@ -534,6 +548,82 @@ def assert_graph_caches_follow_the_effective_set(env: dict, monkeypatch) -> None
         )
 
 
+def _participant_readers(env, user, bystander) -> dict:
+    """Every service-layer participant reader of ``a``, each answering in a
+    retrieval run whose actor is ``user`` while the ambient request user is
+    ``bystander``: which libraries / what of ``b`` it reaches."""
+    from types import SimpleNamespace
+
+    from app.services.retrieval_run import retrieval_run
+
+    repo = repository()
+    runtime = repo._runtime
+    candidates = repo.retrieval.candidates
+    graph = repo.retrieval.graph
+    a, b = env["notebook"].id, env["library"].id
+    element_row = SimpleNamespace(
+        notebook_id=b, element_id=LIB["element"], source_id=LIB["source"],
+        evidence_element_ids=(), source_title="b", element_type="paragraph",
+        location_label="p1", text="x",
+    )
+    marker = set_request_user(bystander)
+    try:
+        with retrieval_run(run_kind="ask_reasoning", actor_id=user.id):
+            with runtime.database.connect() as db:
+                pairs = runtime.collection_enumeration._mount_participant_pairs(db, a)
+                closing = runtime.collection_enumeration._closing_participants(db, a)
+            chain = graph.follow_chain(a, LIB["object"], direction="out")
+            return {
+                "seat": [nb for nb, _tier in candidates._retrieval_participants(a)],
+                "base_has_kg": candidates._any_base_notebook_has_kg(a),
+                "follow_chain": bool(chain.nodes or chain.inferences),
+                "collection_map_sources": runtime.collection_catalog.collection_map(a).sources,
+                "enumeration_pairs": [nb for nb, _tier in pairs],
+                "enumeration_closing": list(closing),
+                "citations": sorted(
+                    runtime.evidence_context_component.collection_item_citations(
+                        [element_row], active_notebook_id=a,
+                    )
+                ),
+                "communities": repo.retrieval.community_queries().mounted_base_ids(a),
+                "runtime_reader": runtime._participant_notebook_ids(a),
+                "scale_ppr": sorted(
+                    chunk for chunk, _score in graph._scale_ppr_impl(a, QUESTION)
+                    if chunk == LIB["chunk"]
+                ),
+            }
+    finally:
+        reset_request_user(marker)
+
+
+def assert_every_participant_reader_follows_the_run_actor(env) -> None:
+    """Channel by channel, below the ceiling (which would mask any one of
+    them): the seat, the reference-KG gate, the chain's start row, the
+    collection map, the typed enumeration (opening and closing), the
+    enumerated-row citations, community peers, the runtime's injected reader
+    and the scale PPR graph each reach ``b`` for Alice and not for Bob --
+    whoever the ambient request user is -- and for Bob once he may read it."""
+    repo = repository()
+    a, b = env["notebook"].id, env["library"].id
+    repo.build_scale_index(b)
+    hidden = {
+        "seat": [a], "base_has_kg": False, "follow_chain": False,
+        "collection_map_sources": 1, "enumeration_pairs": [a],
+        "enumeration_closing": [a], "citations": [], "communities": [],
+        "runtime_reader": [a], "scale_ppr": [],
+    }
+    shown = {
+        "seat": [a, b], "base_has_kg": True, "follow_chain": True,
+        "collection_map_sources": 2, "enumeration_pairs": [a, b],
+        "enumeration_closing": [a, b], "citations": [LIB["element"]],
+        "communities": [b], "runtime_reader": [a, b], "scale_ppr": [LIB["chunk"]],
+    }
+    assert _participant_readers(env, env["bob"], env["alice"]) == hidden
+    assert _participant_readers(env, env["alice"], env["bob"]) == shown
+    grant_bob_the_library(env)
+    assert _participant_readers(env, env["bob"], env["alice"]) == shown
+
+
 # ---------------------------------------------------------------------------
 # Background runs: the run's actor, not the ambient request
 # ---------------------------------------------------------------------------
@@ -754,3 +844,7 @@ def test_no_actor_and_no_request_reads_only_public_libraries_on_sqlite(
 
 def test_a_join_summary_is_the_joiners_on_sqlite(sqlite_env):
     assert_a_join_summary_is_the_joiners(sqlite_env)
+
+
+def test_every_participant_reader_follows_the_run_actor_on_sqlite(sqlite_env):
+    assert_every_participant_reader_follows_the_run_actor(sqlite_env)
