@@ -33,6 +33,7 @@ from app.services.memory_service import (
     ExitDisclosureRequired,
     MemberExitFailed,
     MemberExitIncomplete,
+    NothingToExport,
 )
 from app.core.request_context import reset_request_user, set_request_user
 from tests.model_testkit import bind_all_embedding_clients
@@ -1871,4 +1872,122 @@ MONKEYPATCH_CASES: dict[str, Callable[..., None]] = {
     "remove_readd_keeps_membership": case_remove_and_readd_during_the_purge_keeps_the_new_membership,
     "audit_trail": case_purges_leave_a_content_free_audit_trail,
     "statements_bounded": case_statements_per_page_do_not_grow_with_sourceless_memories,
+}
+
+
+# ----------------------------------------------------------------------------
+# Export snapshot (codex #820 r3): the export never stops part-way under a
+# concurrent purge. Run by tests/test_memory_purge.py (SQLite) and
+# tests/postgres/test_memory_exit_interleavings_pg.py (PostgreSQL).
+# ----------------------------------------------------------------------------
+def _export_pages_with(world: World, monkeypatch, after_first_page: Callable[[], None]) -> None:
+    """Pages of one Memory; ``after_first_page`` runs (on ANOTHER thread, as
+    another request would) once the export's first page has been read."""
+    import threading
+
+    from app.services import memory_service as memory_service_module
+
+    monkeypatch.setattr(memory_service_module, "_EXPORT_PAGE", 1)
+    store = service(world).store
+    original = store._export_page_on
+    pages: list[int] = []
+
+    def page_then_interleave(*args, **kwargs):
+        rows, cursor = original(*args, **kwargs)
+        pages.append(len(rows))
+        if len(pages) == 1:
+            errors: list[BaseException] = []
+
+            def run() -> None:
+                try:
+                    after_first_page()
+                except BaseException as exc:  # noqa: BLE001 - re-raised below
+                    errors.append(exc)
+
+            worker = threading.Thread(target=run)
+            worker.start()
+            worker.join(30)
+            assert not worker.is_alive(), "the concurrent purge did not finish"
+            if errors:
+                raise errors[0]
+        return rows, cursor
+
+    monkeypatch.setattr(store, "_export_page_on", page_then_interleave)
+
+
+def case_an_exit_purge_during_the_export_leaves_the_file_whole(
+    world: World, monkeypatch
+) -> None:
+    """The member's exit (another tab or device) purges every claimed Memory
+    while the export is between its pages. The export read one snapshot, so
+    the file still holds all three entries; the exit itself completed."""
+    plain_memory(world, world.shared, world.alice, "export-2", "confirmed")
+    plain_memory(world, world.shared, world.alice, "export-3", "candidate")
+    exited: list[int] = []
+    _export_pages_with(
+        world, monkeypatch,
+        lambda: exited.append(self_exit(world, world.alice, world.shared, 3)),
+    )
+    text = export_text(world, world.alice, world.shared)
+    assert exited == [3]
+    assert member_memory_count(world, world.shared, world.alice) == 0
+    assert text.count("\n## ") == 3
+    assert "Memory alice" in text and "Plain export-2" in text and "Plain export-3" in text
+    assert text.rstrip().endswith("共导出 3 条记忆。")
+
+
+def case_an_export_after_the_purge_is_refused_not_empty(world: World) -> None:
+    """The purge finished first. A finished exit leaves no membership: the
+    export is refused as unreadable. A member whose Memory here is all gone
+    (deleted) gets ``NothingToExport`` (HTTP 404 ``nothing_to_export``) —
+    never a file with zero entries."""
+    svc = service(world)
+    alice = world.projections["alice"]
+    svc.delete(alice.memory_id, world.alice.id)
+    assert member_memory_count(world, world.shared, world.alice) == 0
+    try:
+        export_text(world, world.alice, world.shared)
+    except NothingToExport:
+        pass
+    else:  # pragma: no cover - the assertion below explains the failure
+        raise AssertionError("an empty export file was produced")
+    bob_count = member_memory_count(world, world.shared, world.bob)
+    assert self_exit(world, world.bob, world.shared, bob_count) == bob_count
+    try:
+        export_text(world, world.bob, world.shared)
+    except (KeyError, PermissionError):
+        pass
+    else:  # pragma: no cover - the assertion below explains the failure
+        raise AssertionError("a former member was handed an export")
+
+
+def case_an_export_whose_pages_disagree_with_its_count_is_refused(
+    world: World, monkeypatch
+) -> None:
+    """The count check: pages that come back short of the snapshot's own
+    count (they cannot, inside one snapshot) make the export fail loudly
+    before the first byte, instead of a file that silently lacks items."""
+    plain_memory(world, world.shared, world.alice, "short-2", "confirmed")
+    store = service(world).store
+    original = store._export_page_on
+
+    def drop_the_first_row(db, notebook_id, user_id, after, page):
+        rows, cursor = original(db, notebook_id, user_id, after, page)
+        return (rows[1:] if after is None else rows), cursor
+
+    monkeypatch.setattr(store, "_export_page_on", drop_the_first_row)
+    try:
+        service(world).export_markdown(world.shared, world.alice.id, "Shared")
+    except RuntimeError as exc:
+        assert "1 of 2" in str(exc)
+    else:  # pragma: no cover - the assertion below explains the failure
+        raise AssertionError("a short export was handed out")
+
+
+EXPORT_SNAPSHOT_CASES: dict[str, Callable[..., None]] = {
+    "exit_during_export_file_whole": case_an_exit_purge_during_the_export_leaves_the_file_whole,
+    "export_after_purge_refused": lambda world, monkeypatch: (
+        case_an_export_after_the_purge_is_refused_not_empty(world)
+    ),
+    "export_count_check": case_an_export_whose_pages_disagree_with_its_count_is_refused,
 }

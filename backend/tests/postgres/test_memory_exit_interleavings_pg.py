@@ -36,6 +36,7 @@ from app.services.memory_service import (
 )
 from tests.memory_purge_cases import (
     EMBED_DIM,
+    EXPORT_SNAPSHOT_CASES,
     _fused_doc_object,
     build_world,
     disclosure,
@@ -71,6 +72,15 @@ def repo(postgres_settings, tmp_path):
 @pytest.fixture
 def world(repo):
     return build_world(repo, postgres=True)
+
+
+@pytest.mark.parametrize("case", sorted(EXPORT_SNAPSHOT_CASES))
+def test_export_snapshot_against_a_concurrent_exit(world, monkeypatch, case):
+    """codex #820 r3: the export reads one REPEATABLE READ snapshot; an exit
+    purge committing on another connection between its pages cannot cut the
+    file short, a finished purge is a refusal (never an empty file), and
+    pages short of the snapshot's count fail loudly."""
+    EXPORT_SNAPSHOT_CASES[case](world, monkeypatch)
 
 
 def _orphans(world) -> int:

@@ -17,6 +17,7 @@ from app.services.sqlite_repository import SQLiteRepository
 from tests.memory_purge_cases import (
     CASES,
     EMBED_DIM,
+    EXPORT_SNAPSHOT_CASES,
     MONKEYPATCH_CASES,
     build_world,
     export_text,
@@ -75,21 +76,27 @@ def test_removing_or_kicking_members_has_no_memory_path():
     assert not hasattr(notebook_sharing.NotebookSharingService, "bind_member_memory_purge")
 
 
-def test_the_export_streams_in_bounded_pages(world, monkeypatch):
-    """At most one page of Memories is held at a time, however many exist."""
+@pytest.mark.parametrize("case", sorted(EXPORT_SNAPSHOT_CASES))
+def test_memory_export_snapshot_scenario(world, monkeypatch, case):
+    EXPORT_SNAPSHOT_CASES[case](world, monkeypatch)
+
+
+def test_the_export_reads_its_snapshot_in_bounded_pages(world, monkeypatch):
+    """Each statement of the export's snapshot read returns at most one page,
+    however many Memories exist."""
     monkeypatch.setattr(memory_service_module, "_EXPORT_PAGE", 2)
     for number in range(4):
         plain_memory(world, world.shared, world.alice, f"page-{number}", "confirmed")
     store = world.repo._runtime.memory_service.store
-    original = store.memory_export_page
+    original = store._export_page_on
     sizes: list[int] = []
 
     def recording(*args, **kwargs):
-        items, cursor = original(*args, **kwargs)
-        sizes.append(len(items))
-        return items, cursor
+        rows, cursor = original(*args, **kwargs)
+        sizes.append(len(rows))
+        return rows, cursor
 
-    monkeypatch.setattr(store, "memory_export_page", recording)
+    monkeypatch.setattr(store, "_export_page_on", recording)
     text = export_text(world, world.alice, world.shared)
     assert sizes == [2, 2, 1]
     assert text.count("\n## ") == 5
