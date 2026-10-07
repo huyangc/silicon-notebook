@@ -737,6 +737,35 @@ def knowledge_candidate_documents(connection, ids):
     ).fetchall()
 
 
+_EXACT_PROBE_FORM = ("postgres", "member_of")
+
+
+def _exact_probe_ceiling(allowed_source_ids):
+    """The exact probe's bound ceiling (``id_binding.bind_ids``), or ``None``
+    for an empty one (deny all).
+
+    A run's ceiling (``source_scope.CeilingSet``) carries its bound forms in
+    ``bound_forms``: the memo is read BEFORE any normalisation, so a run pays
+    the ~49k-id build once, not once per probe.  Its key names the backend
+    AND the SQL form -- this ``member_of`` binding, sorted -- because the same
+    object also carries ``source_ceiling.ceiling_param``'s form under its own
+    key.  Any other collection is normalised (blanks dropped, duplicates
+    folded, the caller's order kept) and bound fresh."""
+    forms = getattr(allowed_source_ids, "bound_forms", None)
+    if forms is not None:
+        bound = forms.get(_EXACT_PROBE_FORM)
+        if bound is None:
+            source_ids = sorted(str(value) for value in allowed_source_ids if value)
+            if not source_ids:
+                return None
+            bound = forms[_EXACT_PROBE_FORM] = bind_ids(source_ids)
+        return bound
+    source_ids = [str(value) for value in dict.fromkeys(allowed_source_ids) if value]
+    if not source_ids:
+        return None
+    return bind_ids(source_ids)
+
+
 def chunk_exact_candidate_rows(
     connection, notebook_id: str, needle: str, limit: int, *,
     allowed_source_ids: Sequence[str] | None = None,
@@ -751,7 +780,8 @@ def chunk_exact_candidate_rows(
     without a query.  The list binds as one parameter through `id_binding`
     (`member_of`: the trigram text match drives, the list filters its hits --
     the same form `chunk_candidate_rows_for_terms` measured) and executes as a
-    custom plan (`execute_bound`).  Plans: `tests/postgres/
+    custom plan (`execute_bound`); a run's `CeilingSet` keeps that bound form
+    (`_exact_probe_ceiling`).  Plans: `tests/postgres/
     test_store_evidence_ceiling_explain_pins.py`.
 
     Only `ILIKE '%needle%'` — no `OPERATOR(public.%)` similarity branch, since
@@ -774,10 +804,9 @@ def chunk_exact_candidate_rows(
     scope_sql = ""
     scope_params: list[object] = []
     if allowed_source_ids is not None:
-        source_ids = [str(value) for value in dict.fromkeys(allowed_source_ids) if value]
-        if not source_ids:
+        ceiling = _exact_probe_ceiling(allowed_source_ids)
+        if ceiling is None:
             return []
-        ceiling = bind_ids(source_ids)
         scope_sql = f" AND {member_of('source_id', ceiling)}"
         scope_params.append(ceiling.param)
     return execute_bound(

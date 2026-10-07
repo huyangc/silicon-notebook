@@ -151,6 +151,53 @@ def check_closed_channel(backend):
     assert "SECRETMEMO" not in repr(chunks)
 
 
+def check_probe_reads_the_ceiling_memo(backend):
+    """The store reads a run ceiling's bound form (``CeilingSet.bound_forms``)
+    BEFORE normalising the ids, under a key naming the backend AND the SQL
+    form: a fresh ceiling leaves its ``member_of`` form there; a form already
+    there is what binds (it is the run's own, built once); and another form's
+    entry on the same object -- ``source_ceiling.ceiling_param``'s, keyed by
+    the backend alone -- is never mistaken for it."""
+    from app.services.source_scope import CeilingSet
+
+    repo, seed, _bob = backend
+    if isinstance(seed, PgSeed):
+        from app.repositories.postgres.id_binding import bind_ids
+        form, bind = ("postgres", "member_of"), (lambda ids: bind_ids(sorted(ids)))
+        other = "postgres"
+    else:
+        from app.repositories.sqlite.id_binding import bind_ids
+        form, bind = ("sqlite", "member_of"), (lambda ids: bind_ids(ids, sort=True))
+        other = "sqlite"
+    for source_id in ("src-in", "src-x"):
+        seed.source(source_id)
+        seed.chunk(f"c-{source_id}", source_id, "zebra_quartz_cmd body",
+                   f"{source_id} > zebra_quartz_cmd")
+    deps = repo.retrieval.candidates._exact_lookup_deps()
+
+    def probe(ceiling):
+        with deps.connect() as db:
+            return sorted(row["chunk_id"] for row in deps.exact_search(
+                db, seed.nb, "zebra_quartz_cmd", 50, allowed_source_ids=ceiling))
+
+    fresh = CeilingSet({"src-in"})
+    assert probe(fresh) == ["c-src-in"]
+    assert set(fresh.bound_forms) == {form}
+
+    memoised = CeilingSet({"src-in"})
+    memoised.bound_forms[form] = bind(["src-x"])
+    assert probe(memoised) == ["c-src-x"], "the memo is read before the ids"
+
+    foreign_form = CeilingSet({"src-in"})
+    foreign_form.bound_forms[other] = bind(["src-x"])
+    assert probe(foreign_form) == ["c-src-in"], "another form's key is not this one"
+    assert probe(CeilingSet()) == []
+
+
+def test_the_probe_reads_the_ceiling_memo(backend):
+    check_probe_reads_the_ceiling_memo(backend)
+
+
 def test_a_narrowed_run_finds_the_in_ceiling_section_behind_a_full_window(backend):
     check_narrowed_window(backend)
 
