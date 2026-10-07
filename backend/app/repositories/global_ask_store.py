@@ -613,23 +613,9 @@ class GlobalAskStore:
             )
             if through_id is None:
                 raise ConversationHasNoShareableAnswer(conversation_id)
-            current_id = conv["shared_through_id"]
-            if current_id and current_id != through_id:
-                # Advance-only: reject a request whose boundary sorts BEFORE the
-                # published one, evaluated in SQL over both job rows with the
-                # SAME (created_at, id) keyset the public snapshot uses. An equal
-                # boundary short-circuits above as an idempotent no-op; a current
-                # boundary whose job was deleted resolves nothing here and
-                # advances, matching the public read's deleted-watermark
-                # fallback.
-                regresses = db.execute(self._sql(
-                    "SELECT 1 FROM global_ask_jobs r, global_ask_jobs c "
-                    "WHERE r.id=? AND c.id=? AND r.conversation_id=? "
-                    "AND c.conversation_id=? AND (r.created_at < c.created_at "
-                    "OR (r.created_at = c.created_at AND r.id < c.id))"
-                ), (through_id, current_id, conversation_id, conversation_id)).fetchone()
-                if regresses is not None:
-                    raise ConversationShareWatermarkStale(expected or through_id)
+            self._refuse_regression(
+                db, conversation_id, through_id, conv["shared_through_id"], expected
+            )
             issued = db.execute(self._sql(
                 "UPDATE global_ask_conversations "
                 "SET share_token=COALESCE(share_token,?), shared_through_at=?, "
@@ -637,6 +623,25 @@ class GlobalAskStore:
                 "RETURNING share_token, shared_through_at, shared_through_id"
             ), (candidate, through_at, through_id, conversation_id, user_id)).fetchone()
         return self._share_state(issued)
+
+    def _refuse_regression(self, db, conversation_id, through_id, current_id, expected):
+        """Advance-only: raise ``ConversationShareWatermarkStale`` when the
+        boundary sorts BEFORE the published watermark ``current_id``, evaluated
+        in SQL over both job rows with the SAME (created_at, id) keyset the
+        public snapshot uses. An equal boundary is an idempotent no-op; a
+        current boundary whose job was deleted resolves nothing here and
+        advances, matching the public read's deleted-watermark fallback. One
+        check for the share and its read-only window, so both refuse alike."""
+        if not current_id or current_id == through_id:
+            return
+        regresses = db.execute(self._sql(
+            "SELECT 1 FROM global_ask_jobs r, global_ask_jobs c "
+            "WHERE r.id=? AND c.id=? AND r.conversation_id=? "
+            "AND c.conversation_id=? AND (r.created_at < c.created_at "
+            "OR (r.created_at = c.created_at AND r.id < c.id))"
+        ), (through_id, current_id, conversation_id, conversation_id)).fetchone()
+        if regresses is not None:
+            raise ConversationShareWatermarkStale(expected or through_id)
 
     def _share_boundary(self, db, conversation_id, user_id, expected):
         """Resolve ``(created_at, id)`` of the job the watermark pins to.
@@ -764,12 +769,15 @@ class GlobalAskStore:
         disclosure is counted over exactly it (M4).  Refuses as the share does:
         ``KeyError`` for a missing or foreign conversation,
         ``ConversationShareWatermarkStale`` for a boundary that does not
-        resolve, ``ConversationHasNoShareableAnswer`` without a done job.
+        resolve or that sorts before the published watermark
+        (``_refuse_regression``), ``ConversationHasNoShareableAnswer`` without
+        a done job.
         """
         expected = str(expected_through_id or "").strip()
         with self.database.connect() as db:
             conv = db.execute(self._sql(
-                "SELECT id FROM global_ask_conversations WHERE id=? AND user_id=?"
+                "SELECT id, shared_through_id FROM global_ask_conversations "
+                "WHERE id=? AND user_id=?"
             ), (conversation_id, user_id)).fetchone()
             if conv is None:
                 raise KeyError(conversation_id)
@@ -778,6 +786,9 @@ class GlobalAskStore:
             )
             if through_id is None:
                 raise ConversationHasNoShareableAnswer(conversation_id)
+            self._refuse_regression(
+                db, conversation_id, through_id, conv["shared_through_id"], expected
+            )
             rows = self._jobs_through(
                 db, conversation_id, {"id": through_id, "created_at": through_at}
             )

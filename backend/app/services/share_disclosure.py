@@ -451,7 +451,10 @@ def require_conversation_acknowledged(
 
 
 def conversation_share_window(
-    turns: Sequence[tuple[str, Any]], conversation_id: str, through_id: str = ""
+    turns: Sequence[tuple[str, Any]],
+    conversation_id: str,
+    through_id: str = "",
+    published_through_id: str = "",
 ) -> tuple[str, list[Any]]:
     """``(boundary turn id, payloads of the turns the share would publish)``.
 
@@ -459,20 +462,23 @@ def conversation_share_window(
     in the canonical order the public snapshot uses; the window is the prefix
     ending at ``through_id`` (empty = the newest), cut at ``MAX_TURNS`` like
     the public page.  It refuses exactly as the share write does, with the same
-    exceptions: a boundary that does not resolve is
-    ``ConversationShareWatermarkStale``, a conversation without a completed
-    turn ``ConversationHasNoShareableAnswer``."""
+    exceptions: a boundary that does not resolve, or that sorts before the
+    published watermark ``published_through_id`` (the watermark only
+    advances; a watermark turn that no longer resolves is not compared, as
+    the store does not compare it), is ``ConversationShareWatermarkStale``; a
+    conversation without a completed turn is
+    ``ConversationHasNoShareableAnswer``."""
     if not turns:
         raise ConversationHasNoShareableAnswer(conversation_id)
+    positions = {turn_id: position for position, (turn_id, _payload) in enumerate(turns)}
     if through_id:
-        index = next(
-            (position for position, (turn_id, _payload) in enumerate(turns)
-             if turn_id == through_id),
-            None,
-        )
+        index = positions.get(through_id)
         if index is None:
             raise ConversationShareWatermarkStale(through_id)
     else:
         index = len(turns) - 1
+    published = positions.get(published_through_id) if published_through_id else None
+    if published is not None and index < published:
+        raise ConversationShareWatermarkStale(through_id or turns[index][0])
     window = [payload for _turn_id, payload in turns[: index + 1]][:MAX_TURNS]
     return turns[index][0], window
