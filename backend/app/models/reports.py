@@ -116,6 +116,9 @@ class PublicReportReference(BaseModel):
     title_truncated: bool = False
     snippet_truncated: bool = False
     file_name_truncated: bool = False
+    # M4: the citation is the author's own personal memory. A marker, never an
+    # id; present only when true (same as `PublicReference.is_memory`).
+    is_memory: bool = Field(default=False, exclude_if=lambda value: not value)
 
 
 class PublicReport(BaseModel):

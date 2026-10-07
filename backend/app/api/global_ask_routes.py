@@ -13,6 +13,7 @@ from app.api.task_stream import (
 )
 from app.models.identity import UserProfile
 from app.models.ask import (
+    ConversationShareDisclosure,
     ConversationShareRequest,
     ConversationShareResponse,
     QueryIntentContract,
@@ -29,6 +30,7 @@ from app.models.global_ask import (
 from app.models.sources import SourceElement
 from app.services.cancellation import AskCancelled
 from app.services.global_ask import GlobalAskError
+from app.services.share_disclosure import ShareDisclosureRequired
 
 # Upper bound on how long a pushed frame waits for an idle connection to notice
 # it. Small against the sub-second goal, large enough that a parked watcher is
@@ -278,7 +280,9 @@ def _share_call(method, *args, **kwargs):
     ``_own_conversation_or_404`` answers; the two 409s carry the store's own
     refusals with the same Chinese sentences the notebook-scoped route uses --
     the same modal renders both, so a divergent sentence would read as a
-    different failure for what is the same one.
+    different failure for what is the same one. M4's
+    ``share_disclosure_required`` 409 carries its counts under ``detail``,
+    exactly as the notebook-scoped twin sends it.
     """
     try:
         return method(*args, **kwargs)
@@ -288,6 +292,8 @@ def _share_call(method, *args, **kwargs):
         raise user_error(409, "这条会话已有变化，请刷新后重新分享。")
     except ConversationHasNoShareableAnswer:
         raise user_error(409, "这条会话还没有已完成的回答，暂时无法分享。")
+    except ShareDisclosureRequired as required:
+        raise HTTPException(status_code=409, detail=required.detail()) from None
     except GlobalAskError as exc:
         raise user_error(exc.status_code, exc.message) from exc
 
@@ -305,12 +311,36 @@ def share_global_conversation_route(
     it disclosed. It pins the published snapshot to exactly that turn, closing
     the window where a turn finishing between the client's disclosure read and
     this POST would otherwise be published without the user ever reviewing it.
+
+    M4: with the author's own Memory in that range, ``acknowledged_memory_count``
+    must equal the server's count (409 ``share_disclosure_required`` with the
+    counts otherwise; no token, no watermark move). Without Memory the body and
+    the response are what they were before.
     """
     state = _share_call(
         global_ask_service().share_conversation, conversation_id, user_id=user.id,
         expected_through_id=payload.expected_through_id if payload else "",
+        acknowledged_memory_count=payload.acknowledged_memory_count if payload else None,
     )
     return ConversationShareResponse(**state)
+
+
+@router.get("/conversations/{conversation_id}/share/disclosure",
+            response_model=ConversationShareDisclosure)
+def global_conversation_share_disclosure_route(
+    conversation_id: str,
+    through_id: str = Query(default=""),
+    user: UserProfile = Depends(get_current_user),
+) -> ConversationShareDisclosure:
+    """How many of the author's own Memory entries a share pinned at
+    ``through_id`` (a JOB id; empty = the newest completed turn) would publish,
+    and how many of them the page the link serves now does not carry yet (M4).
+    Owner only and refused like the POST (``_share_call``); writes nothing."""
+    counts = _share_call(
+        global_ask_service().share_disclosure, conversation_id, user_id=user.id,
+        through_id=through_id,
+    )
+    return ConversationShareDisclosure(**counts)
 
 
 @router.get("/conversations/{conversation_id}/share", response_model=ConversationShareResponse)

@@ -415,7 +415,8 @@ def test_every_conversation_share_route_calls_the_row_level_gate():
     行级判定是**体内**的,像 `Depends(...)` 那样在声明处看不见 —— 后续加端点时漏挂
     不会报错,只会安静地让任何读权用户操作别人的会话。AST 扫描:按装饰器路径字面量
     选端点,按 Name 节点判是否调用了守卫。匿名面(T3)挂在 `public_router`、路径里
-    也没有 `{conversation_id}`(token 即授权),此文件的这三个都在主 `router` 上。"""
+    也没有 `{conversation_id}`(token 即授权),此文件的这四个(含 M4 披露读取)都在
+    主 `router` 上。"""
     import ast
     from pathlib import Path
 
@@ -449,7 +450,8 @@ def test_every_conversation_share_route_calls_the_row_level_gate():
                 offenders.append(node.name)
 
     # 空转保护:扫到 0 个端点却报绿,比没有守卫更糟。
-    assert len(checked) == 3, f"只扫到 {len(checked)} 个分享端点: {checked}"
+    # 发放/回读/撤销 + M4 的披露读取(E7-5)。
+    assert len(checked) == 4, f"只扫到 {len(checked)} 个分享端点: {checked}"
     assert offenders == [], (
         f"以下分享端点没有调用行级守卫 _own_conversation_or_404: {offenders}"
     )

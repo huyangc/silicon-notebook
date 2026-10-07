@@ -1,14 +1,16 @@
 import asyncio
 import threading
+from contextlib import contextmanager
 from time import monotonic
-from typing import Any, List
+from typing import Any, Iterator, List
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.core.config import get_settings
 from app.bootstrap import application_extension_runtime
 from app.domain.ask_engine import AskPluginEngineError
+from app.domain.conversation_public_view import MAX_TURNS
 
 from app.core.capability_tokens import is_global_conversation_share_token
 from app.api.deps import (
@@ -36,6 +38,7 @@ from app.models.ask import (
     ConversationBulkDeleteResult,
     ConversationDetail,
     ConversationRenameRequest,
+    ConversationShareDisclosure,
     ConversationShareRequest,
     ConversationShareResponse,
     ConversationSummary,
@@ -68,8 +71,21 @@ from app.services.query_intent import (
     validate_confirmed_intent,
 )
 from app.services.conversation_public_view import (
+    memory_lookup_source_ids,
     public_conversation_payload,
     resolve_conversation_asset_alias,
+)
+from app.services.public_share_recheck import (
+    conversation_library_ids,
+    mounts_still_effective,
+)
+from app.services.share_disclosure import (
+    ConversationShareDisclosure as ConversationShareCount,
+    ShareDisclosureRequired,
+    author_memory_sources,
+    conversation_share_disclosure,
+    conversation_share_window,
+    require_conversation_acknowledged,
 )
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS, AssetService
 from app.services.search_concurrency import run_under_search_gate
@@ -1053,6 +1069,68 @@ def _own_conversation_or_404(
     return owner
 
 
+@contextmanager
+def _conversation_share_errors() -> Iterator[None]:
+    """The refusals of the share POST and of its disclosure GET, mapped once:
+    both resolve the same range, so both must refuse it the same way.
+
+    ``KeyError`` (deleted between the gate read and this one) is the gate's own
+    404. A boundary answer that no longer resolves, or would move the published
+    watermark backwards, is the store's ``ConversationShareWatermarkStale`` —
+    the user reloads and re-reviews rather than publishing "latest" behind
+    their back (codex #522 R2/R3). A conversation without a completed answer
+    has nothing to bound a snapshot (design doc §七 item 5; refused atomically
+    by the store, codex #522 R5, so no token exists to roll back). M4: the
+    author's Memory in the range without the exact acknowledgement is a 409
+    whose ``detail`` carries ``share_disclosure_required`` and the counts.
+    """
+    try:
+        yield
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Conversation not found") from None
+    except ConversationShareWatermarkStale:
+        raise user_error(409, "这条会话已有变化，请刷新后重新分享。") from None
+    except ConversationHasNoShareableAnswer:
+        raise user_error(409, "这条会话还没有已完成的回答，暂时无法分享。") from None
+    except ShareDisclosureRequired as required:
+        raise HTTPException(status_code=409, detail=required.detail()) from None
+
+
+def _memory_store(repo):
+    # The Memory store answers "which of these sources are the author's Memory"
+    # through memory_sql's single readability predicate (as report_routes does).
+    return repo._runtime.memory_store  # type: ignore[attr-defined]
+
+
+def _conversation_share_count(
+    repo, notebook_id: str, conversation_id: str, author_id: str, through_id: str
+) -> tuple[str, ConversationShareCount]:
+    """``(boundary answer id, the author's Memory count)`` over EXACTLY the
+    range a share pinned at ``through_id`` (empty = the newest answer) would
+    publish (M4, ``share_disclosure.conversation_share_window``).
+
+    The window is a prefix of ``get_conversation``'s turns, which come in the
+    canonical order whose keyset the public snapshot applies, so it is the
+    snapshot the share would publish. ``new_memory_count`` is measured
+    against the page the link serves now, read through the same
+    ``public_conversation_by_token`` the anonymous page uses. Reads only.
+    """
+    detail = repo.get_conversation(conversation_id)
+    boundary, window = conversation_share_window(
+        [(turn.answer_id, turn.response.model_dump(mode="json")) for turn in detail.turns],
+        conversation_id,
+        through_id,
+    )
+    published: list = []
+    token = repo.conversation_share_state(notebook_id, conversation_id).get("share_token")
+    snapshot = repo.public_conversation_by_token(token) if token else None
+    if snapshot is not None:
+        published = [turn.get("payload") for turn in snapshot.get("turns") or []]
+    return boundary, conversation_share_disclosure(
+        _memory_store(repo), author_id, window, published[:MAX_TURNS]
+    )
+
+
 @router.post(
     "/notebooks/{notebook_id}/conversations/{conversation_id}/share",
     response_model=ConversationShareResponse,
@@ -1087,27 +1165,61 @@ def share_conversation_route(
     share-then-check path (mint a NULL-watermark token, then a second
     ``discard_unwatermarked_share`` rolls it back), which could leave a permanent
     token-without-watermark row if the process died between the two steps.
+
+    M4: the server counts the author's own Memory over the exact range it is
+    about to publish (``_conversation_share_count``) and, when there is any,
+    publishes only with ``acknowledged_memory_count`` equal to that count;
+    otherwise 409 ``share_disclosure_required`` with the counts, no token
+    issued and the watermark untouched. The share is then pinned to the
+    boundary that range ended at, so an answer finishing in between is never
+    published uncounted. Without Memory the flow and the response are what
+    they were before.
     """
     repo = repository()
-    _own_conversation_or_404(repo, notebook_id, conversation_id)
+    owner = _own_conversation_or_404(repo, notebook_id, conversation_id)
     expected = payload.expected_through_id if payload else ""
-    try:
-        state = repo.share_conversation(notebook_id, conversation_id, expected)
-    except KeyError:
-        # Deleted between the gate read and the share write.
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    except ConversationShareWatermarkStale:
-        # The disclosed boundary answer was deleted — no token was issued; make
-        # the user reload and re-review rather than publish an unconsented span.
-        raise user_error(409, "这条会话已有变化，请刷新后重新分享。")
-    except ConversationHasNoShareableAnswer:
-        # No committed answer to bound the snapshot — the store refused to mint a
-        # token atomically, so nothing to roll back (codex #522 R5).
-        raise user_error(409, "这条会话还没有已完成的回答，暂时无法分享。")
+    acknowledged = payload.acknowledged_memory_count if payload else None
+    with _conversation_share_errors():
+        boundary, count = _conversation_share_count(
+            repo, notebook_id, conversation_id, owner, expected
+        )
+        require_conversation_acknowledged(count, acknowledged)
+        state = repo.share_conversation(notebook_id, conversation_id, boundary)
     return ConversationShareResponse(
         share_token=state["share_token"],
         shared_through_at=state["shared_through_at"],
         shared_through_id=state["shared_through_id"],
+    )
+
+
+@router.get(
+    "/notebooks/{notebook_id}/conversations/{conversation_id}/share/disclosure",
+    response_model=ConversationShareDisclosure,
+    dependencies=[Depends(require_notebook_read)],
+)
+def conversation_share_disclosure_route(
+    notebook_id: str,
+    conversation_id: str,
+    through_id: str = Query(default=""),
+) -> ConversationShareDisclosure:
+    """How many of the author's own Memory entries a share pinned at
+    ``through_id`` (an answer id; empty = the newest answer, the same meaning
+    as the POST's ``expected_through_id``) would publish, and how many of them
+    the page the link serves now does not carry yet (M4).
+
+    Read before sharing so the author is asked with the server's number; the
+    browser never counts Memory itself. Same creator gate and the same
+    refusals as the POST, and nothing is written. The number is advisory: the
+    POST counts again over the range it publishes.
+    """
+    repo = repository()
+    owner = _own_conversation_or_404(repo, notebook_id, conversation_id)
+    with _conversation_share_errors():
+        _boundary, count = _conversation_share_count(
+            repo, notebook_id, conversation_id, owner, through_id
+        )
+    return ConversationShareDisclosure(
+        memory_count=count.memory_count, new_memory_count=count.new_memory_count
     )
 
 
@@ -1217,6 +1329,11 @@ def _public_conversation_or_404(repo, token: str) -> dict:
       same reason mount validity is a live predicate — there are several ways to
       lose read access and a cascade would have to be re-derived at each.
 
+    * a mounted library the published turns quote is no longer an effective
+      participant of the conversation's notebook for its creator (D-3,
+      ``public_share_recheck``) — handled like the global branch losing a
+      library: the whole page goes, and restoring the mount revives it.
+
     Returns the row with its GATE fields (``notebook_id``/``created_by``) still
     present; the page route pops them before projection, the image route only
     reads notebook scope from them and never projects the row.
@@ -1229,7 +1346,13 @@ def _public_conversation_or_404(repo, token: str) -> dict:
     creator = str(row.get("created_by") or "")
     if not creator:
         raise HTTPException(status_code=404, detail="shared conversation not found")
-    if not repo.user_can_read_notebook(str(row.get("notebook_id") or ""), creator):
+    notebook_id = str(row.get("notebook_id") or "")
+    if not repo.user_can_read_notebook(notebook_id, creator):
+        raise HTTPException(status_code=404, detail="shared conversation not found")
+    if not mounts_still_effective(
+        notebook_id, creator, conversation_library_ids(row.get("turns") or []),
+        repo.participant_notebook_ids,
+    ):
         raise HTTPException(status_code=404, detail="shared conversation not found")
     return row
 
@@ -1237,7 +1360,7 @@ def _public_conversation_or_404(repo, token: str) -> dict:
 @public_router.get(
     "/public/conversations/{token}", response_model=PublicConversation
 )
-def public_conversation_route(token: str) -> PublicConversation:
+def public_conversation_route(token: str, response: Response) -> PublicConversation:
     """The one conversation read that needs no session — the token is the whole
     grant (T3). Mirrors ``report_routes.public_report_route``.
 
@@ -1248,6 +1371,10 @@ def public_conversation_route(token: str) -> PublicConversation:
     administrator. ``public_conversation_by_token`` takes the token alone for
     exactly that reason, and the payload is an explicit allowlist rather than the
     stored row.
+
+    M4: a reference that is the creator's own personal memory carries
+    ``is_memory``; the creator's Memory sources among the shown references are
+    read in ONE batch per page, with the creator's id passed explicitly.
     """
     repo = repository()
     row = _public_conversation_or_404(repo, token)
@@ -1255,11 +1382,17 @@ def public_conversation_route(token: str) -> PublicConversation:
     # for the live re-check ONLY and must never cross to an anonymous reader
     # (store docstring). Defense-in-depth — the allowlist ignores them anyway.
     row.pop("notebook_id", None)
-    row.pop("created_by", None)
+    creator = str(row.pop("created_by", None) or "")
     # The global branch's gate field, popped on the same principle: the set of
     # libraries this open re-authorized is for the image endpoint's scope check,
     # never for a reader.
     row.pop("notebook_ids", None)
+    memory_sources = author_memory_sources(
+        _memory_store(repo), memory_lookup_source_ids(row), creator
+    )
+    # Every open is re-authorized above; no browser or proxy may keep a copy
+    # that outlives a revocation (as the report page and the image route do).
+    response.headers["Cache-Control"] = "no-store"
     # The raw share token derives each image's opaque alias (T4); the deployment
     # image switch is passed as a bool so the projection stays a pure function.
     return PublicConversation(
@@ -1267,6 +1400,7 @@ def public_conversation_route(token: str) -> PublicConversation:
             row,
             share_token=token,
             images_enabled=get_settings().mineru_return_images,
+            memory_sources=memory_sources,
         )
     )
 

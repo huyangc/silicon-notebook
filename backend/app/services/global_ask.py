@@ -44,6 +44,10 @@ from app.services.global_run import global_ask_run
 # 待确认中心「进行中的提问」的推送入口——与笔记本内问答的 worker 同一个叶子模块。
 from app.services.pending_bus import publish_snapshot
 from app.services.retrieval_participants import ParticipantOverride
+from app.services.share_disclosure import (
+    conversation_share_disclosure,
+    require_conversation_acknowledged,
+)
 
 
 _LOG = logging.getLogger("silicon_notebook.global_ask")
@@ -460,27 +464,39 @@ def _turn_evidence_notebook_ids(payload: Any) -> set[str]:
 def _snapshot_notebook_ids(payloads: list) -> set[str]:
     """The libraries ONE published snapshot has to re-authorize.
 
-    PER TURN, then unioned: each turn contributes the libraries its evidence
-    names, or -- when it names none -- every library it ran over
-    (``resolved_notebook_ids``). The fallback is decided turn by turn on
-    purpose. Deciding it once for the whole snapshot let a single cited turn
-    switch the fallback off for all the others, and a turn with no citations is
-    not a turn with no library content: an enumeration answer has its citations
-    cleared while its body is still that library's document list, and a turn
-    whose only citations are external or memory-backed names no library at all.
-    Such a turn would then keep being served after the sharer lost access to the
-    library it was written from.
+    PER TURN, then unioned: each turn contributes every library it ran over
+    (``resolved_notebook_ids``) together with every library its evidence names
+    -- always both (D-2). A turn's answer can restate a library it retrieved
+    from without citing it: the model paraphrases a passage it was handed and
+    marks none, an enumeration answer has its citations cleared while its body
+    is still that library's document list, and a turn whose only citations are
+    external or memory-backed names no library at all. Re-checking only the
+    cited libraries (with the run's libraries as a fallback for a turn that
+    cites none) kept serving such a turn after the sharer lost access to a
+    library it had been written from, as long as the turn cited another one.
+    The evidence half stays: a library named only on an anchor or citation is
+    re-checked even if a legacy row's run scope does not list it.
 
     Only a turn with no library on either axis contributes nothing, because
     there is then no library whose access could have been revoked.
     """
     scope: set[str] = set()
     for payload in payloads:
-        scope |= (
-            _turn_evidence_notebook_ids(payload)
-            or set(_payload_notebook_ids(payload, "resolved_notebook_ids"))
-        )
+        scope |= _turn_evidence_notebook_ids(payload)
+        scope |= set(_payload_notebook_ids(payload, "resolved_notebook_ids"))
     return scope
+
+
+class _NoMemorySources:
+    """The Memory-source seat of a service built without one (library and test
+    construction): no source is anyone's Memory source."""
+
+    @staticmethod
+    def memory_sources_for_source_ids(source_ids, owner_id) -> dict[str, str]:
+        return {}
+
+
+_NO_MEMORY_SOURCES = _NoMemorySources()
 
 
 def _public_turn_row(job: Any) -> dict[str, Any]:
@@ -509,8 +525,13 @@ def _public_turn_row(job: Any) -> dict[str, Any]:
 class GlobalAskService:
     def __init__(self, *, store, notebooks, can_read, sources, settings, ask=None,
                  can_read_many=None, event_log=None, note_ask_completed=None,
-                 evidence_reader=None):
+                 evidence_reader=None, memory_sources=None):
         self.store = store
+        # M4: the Memory store's ``memory_sources_for_source_ids`` (the author's
+        # Memory sources among cited ones, ``memory_sql.memory_source_readable``)
+        # for the share disclosure count. ``None`` (library/test construction)
+        # counts only what the stored answers record as Memory.
+        self.memory_sources = memory_sources
         self.notebooks = notebooks
         self.can_read = can_read
         self.can_read_many = can_read_many
@@ -2112,7 +2133,47 @@ class GlobalAskService:
             user_id,
         )
 
-    def share_conversation(self, conversation_id, *, user_id, expected_through_id=""):
+    def _share_count(self, conversation_id, user_id, through_id=""):
+        """``(boundary job id, the author's Memory count)`` over EXACTLY the
+        done jobs a share pinned at ``through_id`` would publish (M4).
+
+        The window is the store's read-only twin of the share
+        (``share_window``: same boundary, same keyset as the public snapshot),
+        cut at the ``MAX_TURNS`` the page projects; ``new_memory_count`` is
+        measured against the snapshot the link serves now, read the way the
+        anonymous page reads it. One batched Memory-source lookup for both.
+        Raises what the share raises for the same range.
+        """
+        window = self.store.share_window(
+            conversation_id, user_id, expected_through_id=through_id
+        )
+        published = []
+        token = self.store.conversation_share_state(conversation_id, user_id).get(
+            "share_token"
+        )
+        snapshot = self.store.public_conversation_by_token(token) if token else None
+        if snapshot is not None:
+            published = [_public_turn_row(job)["payload"]
+                         for job in snapshot.get("jobs") or []]
+        count = conversation_share_disclosure(
+            self.memory_sources or _NO_MEMORY_SOURCES, user_id,
+            [_public_turn_row(job)["payload"] for job in window["jobs"]][:MAX_TURNS],
+            published[:MAX_TURNS],
+        )
+        return window["through_id"], count
+
+    def share_disclosure(self, conversation_id, *, user_id, through_id=""):
+        """The author's Memory a share pinned at ``through_id`` (a job id;
+        empty = the newest completed turn) would publish: ``memory_count`` and
+        ``new_memory_count`` (relative to the current watermark). Owner only,
+        refused exactly like the share, and nothing is written."""
+        self._owned_conversation(conversation_id, user_id)
+        _boundary, count = self._share_count(conversation_id, user_id, through_id)
+        return {"memory_count": count.memory_count,
+                "new_memory_count": count.new_memory_count}
+
+    def share_conversation(self, conversation_id, *, user_id, expected_through_id="",
+                           acknowledged_memory_count=None):
         """Publish this conversation behind an unguessable link AND advance the
         read watermark -- one call, exactly like the notebook-scoped endpoint.
 
@@ -2120,11 +2181,22 @@ class GlobalAskService:
         client saw in what it disclosed). The store pins the watermark to it, or
         raises ``ConversationShareWatermarkStale`` when it no longer resolves,
         so the published snapshot can only ever equal the disclosed one.
+
+        M4: the author's own Memory in that range is published only with
+        ``acknowledged_memory_count`` equal to its count
+        (``ShareDisclosureRequired`` otherwise: no token, no watermark move),
+        and the share is pinned to the boundary the count was taken over.
         """
         self._owned_conversation(conversation_id, user_id)
-        self._share_authority_sweep(conversation_id, user_id, expected_through_id)
+        boundary, count = self._share_count(
+            conversation_id, user_id, expected_through_id
+        )
+        # A link that could not be opened is refused before the author is
+        # asked to confirm anything about it.
+        self._share_authority_sweep(conversation_id, user_id, boundary)
+        require_conversation_acknowledged(count, acknowledged_memory_count)
         return self.store.share_conversation(
-            conversation_id, user_id, expected_through_id=expected_through_id
+            conversation_id, user_id, expected_through_id=boundary
         )
 
     def conversation_share(self, conversation_id, *, user_id):
@@ -2169,10 +2241,12 @@ class GlobalAskService:
         what an anonymous caller must not learn.
 
         The returned row is the shape ``conversation_public_view`` projects,
-        plus ONE gate field: ``notebook_ids``, the set just re-authorized. It is
-        never projected (the allowlist ignores it and the page route pops it);
-        the anonymous image endpoint reads it to refuse an asset that lives
-        outside the libraries this open actually re-checked.
+        plus two gate fields, never projected (the allowlist ignores them and
+        the page route pops them): ``notebook_ids``, the set just
+        re-authorized, which the anonymous image endpoint reads to refuse an
+        asset that lives outside the libraries this open actually re-checked;
+        and ``created_by``, the sharer, whose own Memory the page marks (M4),
+        as the notebook-scoped row carries it.
         """
         row = self.store.public_conversation_by_token(token)
         if row is None:
@@ -2194,6 +2268,9 @@ class GlobalAskService:
             "shared_through_at": row.get("shared_through_at") or "",
             "turns": [_public_turn_row(job) for job in jobs],
             "notebook_ids": frozenset(scope),
+            # Gate field like ``notebook_ids``: the sharer, whose own Memory the
+            # page route marks (M4); popped before projection, never shown.
+            "created_by": creator,
         }
 
     def cited_element(self, job_id, element_id, *, user_id, allowed_notebook_ids=None):

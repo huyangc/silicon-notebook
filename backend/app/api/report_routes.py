@@ -24,11 +24,16 @@ from app.models.reports import (
     ReportShareResponse,
     ReportSummary,
 )
-from app.services.report_public_view import public_report_payload
+from app.services.public_share_recheck import mounts_still_effective
+from app.services.report_public_view import (
+    public_report_payload,
+    report_memory_lookup_source_ids,
+)
 from app.services.share_disclosure import (
     ForeignMemoryShareRefused,
     NonAuthorShareRefused,
     ShareDisclosureRequired,
+    author_memory_sources,
     report_foreign_memory_ids,
     report_share_disclosure,
     require_publishable,
@@ -793,7 +798,38 @@ def public_report_route(token: str, response: Response) -> PublicReport:
     # like the creator's read access above, with the same 404.
     if report_foreign_memory_ids(repo._runtime.memory_store, row):  # type: ignore[attr-defined]
         raise HTTPException(status_code=404, detail="shared report not found")
+    references = row.get("references") or []
+    # D-3: a mounted library the report quotes must still be an effective
+    # participant of its notebook for the creator; same 404 otherwise, and
+    # restoring the mount revives the link.  A citation stores only its source,
+    # so the cited sources' libraries are read in one batch.
+    if not _report_mounts_still_effective(repo, row, references):
+        raise HTTPException(status_code=404, detail="shared report not found")
+    # M4: citations of the author's own Memory carry ``is_memory``; the
+    # author's Memory sources among them are read in one batch per page.
+    memory_sources = author_memory_sources(
+        repo._runtime.memory_store,  # type: ignore[attr-defined]
+        report_memory_lookup_source_ids(references),
+        str(row.get("created_by") or ""),
+    )
     # Every open is re-authorized above; no browser or proxy may keep a copy
     # that outlives a revocation (as the public conversation routes do).
     response.headers["Cache-Control"] = "no-store"
-    return PublicReport(**public_report_payload(row, row.get("references") or []))
+    return PublicReport(**public_report_payload(row, references, memory_sources))
+
+
+def _report_mounts_still_effective(repo, row: dict, references: list) -> bool:
+    source_ids = list(dict.fromkeys(
+        str(reference.get("source_id") or "") for reference in references
+        if isinstance(reference, dict) and reference.get("source_id")
+    ))
+    owners = (
+        repo._runtime.source_store.visible_source_owners(source_ids)  # type: ignore[attr-defined]
+        if source_ids else {}
+    )
+    return mounts_still_effective(
+        str(row.get("notebook_id") or ""),
+        str(row.get("created_by") or ""),
+        owners.values(),
+        repo.participant_notebook_ids,
+    )

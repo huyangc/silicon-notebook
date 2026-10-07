@@ -413,26 +413,19 @@ def test_the_link_dies_when_a_cited_library_becomes_unreadable_and_revives(clien
     """用户裁决:每次打开都实时复核分享者对**被引各库**的读权。
 
     组成员用共享库的语料问出一条全局回答并分享;撤销授权 → 整条链接当场 404,
-    恢复 → **同一个** token 复活。未被引用的那个库读不了不影响。
+    恢复 → **同一个** token 复活。
     """
     owner, _owner_id = _new_user(client)
     cited_nb = _notebook(client, owner, "被引库")
-    other_nb = _notebook(client, owner, "未引库")
     reader, reader_id, group_id, grants = _group_granted_reader(
-        client, owner, [cited_nb, other_nb])
+        client, owner, [cited_nb])
     cid = _seed(reader_id, [
         _job_payload("job-a", "x", question="问题", cited=[cited_nb],
-                     resolved=[cited_nb, other_nb]),
+                     resolved=[cited_nb]),
     ])
     token = _share(client, reader, cid, "job-a")["share_token"]
     page = f"/api/public/conversations/{token}"
 
-    assert client.get(page).status_code == 200
-
-    # 未被引用的库失权:引用面没变,链接照常。
-    assert client.delete(
-        f"/api/notebooks/{other_nb}/grants/{grants[other_nb]}", headers=owner
-    ).status_code == 204
     assert client.get(page).status_code == 200
 
     # 被引用的库失权:整条链接 404,与未知 token 不可区分。
@@ -443,6 +436,42 @@ def test_the_link_dies_when_a_cited_library_becomes_unreadable_and_revives(clien
 
     # 权限恢复 → 同一个 token 复活。
     _grant_notebook_to_group(client, owner, cited_nb, group_id)
+    assert client.get(page).status_code == 200
+
+
+def test_a_library_the_round_searched_but_did_not_cite_is_re_checked(client):
+    """D-2:每轮的复核集合恒并入它检索过的库(``resolved_notebook_ids``),不只
+    看被引的库。
+
+    一轮回答引用了库 A,同时转述了检索到、却没有标引用的库 B 的内容。只复核被引
+    库时,分享者失去库 B 的读权后这条链接照样把转述端给匿名读者;现在整条链接
+    404,恢复读权后同一个 token 复活。分享前的复核同理:B 读不了就不发链接。
+    """
+    owner, _owner_id = _new_user(client)
+    nb_a = _notebook(client, owner, "被引库")
+    nb_b = _notebook(client, owner, "被转述库")
+    reader, reader_id, group_id, grants = _group_granted_reader(
+        client, owner, [nb_a, nb_b])
+    paraphrase = _answer()
+    paraphrase["answer"] = "详细答案 [k1]。另外,乙库里的设计说明也提到同一结论。"
+    cid = _seed(reader_id, [
+        _job_payload("job-a", "x", question="问题", cited=[nb_a],
+                     resolved=[nb_a, nb_b], answer=paraphrase),
+    ])
+    token = _share(client, reader, cid, "job-a")["share_token"]
+    page = f"/api/public/conversations/{token}"
+    assert client.get(page).status_code == 200
+
+    assert client.delete(
+        f"/api/notebooks/{nb_b}/grants/{grants[nb_b]}", headers=owner
+    ).status_code == 204
+    assert client.get(page).status_code == 404
+    # The share-time sweep reads the same set: no new link while B is lost.
+    refused = client.post(_share_path(cid), headers=reader,
+                          json={"expected_through_id": "job-a"})
+    assert refused.status_code == 404
+
+    _grant_notebook_to_group(client, owner, nb_b, group_id)
     assert client.get(page).status_code == 200
 
 
@@ -600,8 +629,12 @@ def test_the_two_share_token_namespaces_never_cross(client):
     ])
     gtoken = _share(client, owner, gcid, "job-a")["share_token"]
 
-    # 单库会话 + 一条答案,走单库端点铸它自己的 token。
+    # 单库会话 + 一条答案,走单库端点铸它自己的 token。锚点的证据来自本库:
+    # 单库公开页每次打开会复核引用到的**其它**库是否仍然挂着(D-3),占位库名
+    # 在那里是一个从未挂载的库。
     ncid = f"nconv-{next(_IDS)}"
+    local_answer = _answer()
+    local_answer["anchors"][0]["notebook_id"] = nb
     db = repository()._runtime.database
     with db.write() as conn:
         conn.execute(
@@ -613,7 +646,7 @@ def test_the_two_share_token_namespaces_never_cross(client):
             "INSERT INTO answers "
             "(id, notebook_id, conversation_id, question, payload, created_at) "
             "VALUES (?, ?, ?, '单库问题?', ?, '2026-01-01T00:00:01')",
-            (f"{ncid}-ans", nb, ncid, json.dumps(_answer(), ensure_ascii=False)))
+            (f"{ncid}-ans", nb, ncid, json.dumps(local_answer, ensure_ascii=False)))
     ntoken = client.post(
         f"/api/notebooks/{nb}/conversations/{ncid}/share", headers=owner
     ).json()["share_token"]

@@ -752,6 +752,47 @@ class GlobalAskStore:
             ],
         }
 
+    def share_window(self, conversation_id, user_id, *, expected_through_id=None):
+        """The done jobs a share pinned at ``expected_through_id`` would
+        publish, read only: ``{"through_id": <boundary job id>, "jobs": [...]}``
+        with the jobs in the shape ``public_conversation_by_token`` returns.
+
+        The boundary resolves exactly as ``share_conversation`` resolves it
+        (``_share_boundary``: that done job, or the newest done job when empty)
+        and the jobs are the same keyset prefix ``_public_jobs`` serves for a
+        watermark on that job -- the snapshot the share would publish, so the
+        disclosure is counted over exactly it (M4).  Refuses as the share does:
+        ``KeyError`` for a missing or foreign conversation,
+        ``ConversationShareWatermarkStale`` for a boundary that does not
+        resolve, ``ConversationHasNoShareableAnswer`` without a done job.
+        """
+        expected = str(expected_through_id or "").strip()
+        with self.database.connect() as db:
+            conv = db.execute(self._sql(
+                "SELECT id FROM global_ask_conversations WHERE id=? AND user_id=?"
+            ), (conversation_id, user_id)).fetchone()
+            if conv is None:
+                raise KeyError(conversation_id)
+            through_at, through_id = self._share_boundary(
+                db, conversation_id, user_id, expected
+            )
+            if through_id is None:
+                raise ConversationHasNoShareableAnswer(conversation_id)
+            rows = self._jobs_through(
+                db, conversation_id, {"id": through_id, "created_at": through_at}
+            )
+        return {
+            "through_id": through_id,
+            "jobs": [
+                {
+                    "job_id": row["id"],
+                    "payload": self._payload(row["payload_json"]),
+                    "created_at": row["created_at"],
+                }
+                for row in rows
+            ],
+        }
+
     def _public_jobs(self, db, conv):
         """The watermark-bounded prefix of this conversation's done jobs.
 
@@ -768,18 +809,25 @@ class GlobalAskStore:
                 "WHERE id=? AND conversation_id=? AND status='done'"
             ), (conv["shared_through_id"], conv["id"])).fetchone()
         if watermark is not None:
-            return db.execute(self._sql(
-                "SELECT id, payload_json, created_at FROM global_ask_jobs "
-                "WHERE conversation_id=? AND status='done' AND ("
-                "created_at < ? OR (created_at = ? AND id <= ?)) "
-                + GLOBAL_JOBS_ORDER_ASC + " LIMIT ?"
-            ), (conv["id"], watermark["created_at"], watermark["created_at"],
-                watermark["id"], MAX_TURNS + 1)).fetchall()
+            return self._jobs_through(db, conv["id"], watermark)
         return db.execute(self._sql(
             "SELECT id, payload_json, created_at FROM global_ask_jobs "
             "WHERE conversation_id=? AND status='done' AND created_at <= ? "
             + GLOBAL_JOBS_ORDER_ASC + " LIMIT ?"
         ), (conv["id"], conv["shared_through_at"], MAX_TURNS + 1)).fetchall()
+
+    def _jobs_through(self, db, conversation_id, boundary):
+        """The done jobs up to and including ``boundary`` (a job row's ``id``
+        and ``created_at``) in the canonical ``(created_at, id)`` order, as a
+        keyset, capped at ``MAX_TURNS + 1`` -- the one statement behind both the
+        published snapshot and the share window."""
+        return db.execute(self._sql(
+            "SELECT id, payload_json, created_at FROM global_ask_jobs "
+            "WHERE conversation_id=? AND status='done' AND ("
+            "created_at < ? OR (created_at = ? AND id <= ?)) "
+            + GLOBAL_JOBS_ORDER_ASC + " LIMIT ?"
+        ), (conversation_id, boundary["created_at"], boundary["created_at"],
+            boundary["id"], MAX_TURNS + 1)).fetchall()
 
     @staticmethod
     def _payload(raw):

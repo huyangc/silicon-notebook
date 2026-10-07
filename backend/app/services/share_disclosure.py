@@ -1,11 +1,13 @@
-"""Report share disclosure: how much of the author's own Memory a public report
-may carry, and whether it may be published at all (M4).
+"""Share disclosure: how much of the author's own Memory a public report or
+conversation may carry, and whether it may be published at all (M4).
 
-Ruling M4: publishing a report that cites the author's own Memory asks the
-author first, with the count.  This module is the single server-side
-definition of that count for reports and of the publish rule built on it; the
-report page shows the number it is given and never counts Memory itself.
-(Conversations are not covered here yet; their count is a later task.)
+Ruling M4: publishing a report or a conversation that cites the author's own
+Memory asks the author first, with the count.  This module is the single
+server-side definition of that count and of the publish rule built on it; the
+share dialogs show the number they are given and never count Memory
+themselves.  The report half comes first; the conversation half (the
+notebook-scoped and the global conversation alike) is at the end of the
+module, under "Conversations".
 
 The count
 ---------
@@ -86,19 +88,35 @@ from app.domain.share_disclosure import (
     ShareMemoryGuard,
     require_acknowledged,
 )
+from app.domain.conversation_public_view import MAX_TURNS
+from app.repositories.ports import (
+    ConversationHasNoShareableAnswer,
+    ConversationShareWatermarkStale,
+)
 
 __all__ = [
+    "MEMORY_TITLE_PREFIX",
     "SHARE_DISCLOSURE_REQUIRED",
+    "ConversationShareDisclosure",
     "ForeignMemoryShareRefused",
     "MemoryIdReader",
+    "MemorySourceMapReader",
     "NonAuthorShareRefused",
     "ShareDisclosure",
     "ShareDisclosureRequired",
     "ShareMemoryGuard",
+    "author_memory_sources",
+    "conversation_share_disclosure",
+    "conversation_share_window",
+    "public_memory_title",
+    "reference_memory_id",
     "report_foreign_memory_ids",
     "report_share_disclosure",
+    "require_conversation_acknowledged",
     "require_publishable",
     "share_memory_guard",
+    "turn_references",
+    "unresolved_source_ids",
 ]
 
 MEMORY_OBJECT_TYPE = "memory"
@@ -253,3 +271,208 @@ def share_memory_guard(
         live_source_ids=disclosure.live_source_ids,
         acknowledged=acknowledged,
     )
+
+
+# --- Conversations ----------------------------------------------------------
+#
+# A conversation share publishes a watermark-bounded prefix of the
+# conversation's completed turns (the notebook-scoped ``answers`` rows, or the
+# global conversation's ``done`` jobs), so its count is taken over exactly that
+# prefix: the turns up to and including the boundary the share would pin
+# (``expected_through_id``; empty = the newest completed turn) in the same
+# canonical order and with the same keyset the public snapshot uses, cut at the
+# ``MAX_TURNS`` the public page projects.
+#
+# The count is the number of DISTINCT Memory entries of the author the page may
+# carry, read off every anchor and citation of those turns (not only the
+# references the page selects: the answer body can restate an anchor the page
+# does not list), as the union of
+#
+# * citations that carry a ``memory_id`` (the author's confirmed Memory cited
+#   directly; a run only ever reads the asker's own Memory);
+# * anchors that ARE a Memory (``object_type == "memory"``, id in ``object_id``);
+# * anchors and citations whose ``source_id`` is, right now, one of the
+#   author's Memory sources (a Memory projection hit: an element or a knowledge
+#   graph object derived from the Memory), resolved in ONE batch by
+#   ``memory_store.memory_sources_for_source_ids(source_ids, author_id)`` (the
+#   statement behind ``memory_ids_for_source_ids``, on
+#   ``memory_sql.memory_source_readable``) for the window and the published
+#   snapshot together.
+#
+# ``new_memory_count`` is how many of them are not already on the page the link
+# serves now (the snapshot behind the current watermark): 0 when nothing new is
+# published -- in particular when the boundary IS the current watermark -- and
+# all of them when the conversation is not shared yet.  It is never derived from
+# the acknowledgement: that is the report's "above what was acknowledged"
+# reading (``require_acknowledged``), which a conversation does not use.
+#
+# The publish rule: a count above 0 needs ``acknowledged_memory_count`` equal
+# to it (``!=`` refuses, an absent acknowledgement included); a count of 0
+# publishes exactly as before.  Only the conversation's creator reaches either
+# endpoint (the share routes' row-level gate), so there is no non-author case.
+
+MEMORY_TITLE_PREFIX = "Memory · "
+"""The label prefix the Ask engine gives a direct Memory citation
+(``AskService._memory_citations``).  An authenticated reader sees it as the
+citation's label; the public projections drop it and carry ``is_memory``
+instead, so the page names the author's personal memory in its own words, for
+every stored answer, old ones included."""
+
+
+class MemorySourceMapReader(Protocol):
+    def memory_sources_for_source_ids(
+        self, source_ids: Sequence[str], owner_id: str
+    ) -> Mapping[str, str]: ...
+
+
+def reference_memory_id(
+    reference: Any, memory_by_source: Mapping[str, str]
+) -> str:
+    """The Memory id a stored reference (a ``Citation``, an ``AnswerAnchor`` or
+    a report reference) stands for, or ``""``.
+
+    The one definition the conversation count and both public projections
+    share: a recorded ``memory_id``, else a reference that IS a Memory
+    (``object_type == "memory"``), else a ``source_id`` that
+    ``memory_by_source`` (the author's Memory sources, ``{source_id:
+    memory_id}``) maps."""
+    if not isinstance(reference, Mapping):
+        return ""
+    recorded = str(reference.get("memory_id") or "")
+    if recorded:
+        return recorded
+    object_id = str(reference.get("object_id") or "")
+    if object_id and str(reference.get("object_type") or "") == MEMORY_OBJECT_TYPE:
+        return object_id
+    return str(memory_by_source.get(str(reference.get("source_id") or ""), "") or "")
+
+
+def unresolved_source_ids(references: Sequence[Any]) -> list[str]:
+    """Distinct ``source_id``s of the references whose Memory identity is not a
+    stored fact -- the only ones the batched source lookup has to answer."""
+    wanted: list[str] = []
+    for reference in references:
+        if not isinstance(reference, Mapping) or reference_memory_id(reference, {}):
+            continue
+        source_id = str(reference.get("source_id") or "")
+        if source_id:
+            wanted.append(source_id)
+    return list(dict.fromkeys(wanted))
+
+
+def author_memory_sources(
+    reader: MemorySourceMapReader, source_ids: Sequence[str], author_id: str
+) -> dict[str, str]:
+    """``{source_id: memory_id}`` for the given sources that are the author's
+    Memory sources: ONE batched read, and none when there is nothing to ask."""
+    wanted = list(dict.fromkeys(str(item) for item in source_ids if item))
+    if not wanted or not author_id:
+        return {}
+    return dict(reader.memory_sources_for_source_ids(wanted, author_id))
+
+
+def public_memory_title(title: str) -> str:
+    """A Memory reference's title as a public page shows it: without the
+    engine's ``Memory · `` label prefix (the page marks it with ``is_memory``)."""
+    if title.startswith(MEMORY_TITLE_PREFIX):
+        return title[len(MEMORY_TITLE_PREFIX):].strip()
+    return title
+
+
+def turn_references(payload: Any) -> list[Mapping[str, Any]]:
+    """Every anchor and citation of one stored answer (an ``AskResponse``
+    payload; a global turn's legacy ``response`` has the same two lists)."""
+    row = payload if isinstance(payload, Mapping) else {}
+    found: list[Mapping[str, Any]] = []
+    for key in ("anchors", "citations"):
+        items = row.get(key)
+        if isinstance(items, list):
+            found.extend(item for item in items if isinstance(item, Mapping))
+    return found
+
+
+@dataclass(frozen=True)
+class ConversationShareDisclosure:
+    """The author's distinct Memory ids in the snapshot about to be published,
+    and those the currently published snapshot already carries."""
+
+    memory_ids: frozenset[str]
+    published_memory_ids: frozenset[str] = frozenset()
+
+    @property
+    def memory_count(self) -> int:
+        return len(self.memory_ids)
+
+    @property
+    def new_memory_count(self) -> int:
+        """Relative to the current watermark: the entries this share adds to
+        the page the link serves now.  Never above ``memory_count``."""
+        return len(self.memory_ids - self.published_memory_ids)
+
+
+def conversation_share_disclosure(
+    reader: MemorySourceMapReader,
+    author_id: str,
+    payloads: Sequence[Any],
+    published_payloads: Sequence[Any] = (),
+) -> ConversationShareDisclosure:
+    """Count the author's Memory in the turns about to be published
+    (``payloads``) and in the turns the link serves now
+    (``published_payloads``), with one batched source lookup for both."""
+    window = [ref for payload in payloads for ref in turn_references(payload)]
+    published = [
+        ref for payload in published_payloads for ref in turn_references(payload)
+    ]
+    memory_by_source = author_memory_sources(
+        reader, unresolved_source_ids(window + published), author_id
+    )
+
+    def ids(references: list[Mapping[str, Any]]) -> frozenset[str]:
+        return frozenset(
+            memory_id for reference in references
+            if (memory_id := reference_memory_id(reference, memory_by_source))
+        )
+
+    return ConversationShareDisclosure(
+        memory_ids=ids(window), published_memory_ids=ids(published)
+    )
+
+
+def require_conversation_acknowledged(
+    disclosure: ConversationShareDisclosure, acknowledged: int | None
+) -> None:
+    """Raise ``ShareDisclosureRequired`` unless a conversation carrying the
+    author's Memory comes with exactly the count as its acknowledgement
+    (``!=`` refuses, an absent one included).  A count of 0 never asks."""
+    if disclosure.memory_count and acknowledged != disclosure.memory_count:
+        raise ShareDisclosureRequired(
+            disclosure.memory_count, disclosure.new_memory_count
+        )
+
+
+def conversation_share_window(
+    turns: Sequence[tuple[str, Any]], conversation_id: str, through_id: str = ""
+) -> tuple[str, list[Any]]:
+    """``(boundary turn id, payloads of the turns the share would publish)``.
+
+    ``turns`` are every completed turn of the conversation as ``(id, payload)``
+    in the canonical order the public snapshot uses; the window is the prefix
+    ending at ``through_id`` (empty = the newest), cut at ``MAX_TURNS`` like
+    the public page.  It refuses exactly as the share write does, with the same
+    exceptions: a boundary that does not resolve is
+    ``ConversationShareWatermarkStale``, a conversation without a completed
+    turn ``ConversationHasNoShareableAnswer``."""
+    if not turns:
+        raise ConversationHasNoShareableAnswer(conversation_id)
+    if through_id:
+        index = next(
+            (position for position, (turn_id, _payload) in enumerate(turns)
+             if turn_id == through_id),
+            None,
+        )
+        if index is None:
+            raise ConversationShareWatermarkStale(through_id)
+    else:
+        index = len(turns) - 1
+    window = [payload for _turn_id, payload in turns[: index + 1]][:MAX_TURNS]
+    return turns[index][0], window
