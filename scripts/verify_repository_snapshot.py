@@ -51,7 +51,7 @@ import sqlite3
 import sys
 import tempfile
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 from unittest import mock
@@ -928,6 +928,11 @@ class DatabaseSnapshot:
     schema_objects: Dict[str, Dict[str, str]]
     special_rows: Dict[str, Dict[Tuple[Any, ...], Dict[str, Any]]]
     cluster_v24_projection: "ClusterDedupeProjection | None"
+    # every column of every unified_kg_state row (one row per notebook), for
+    # the v87 queue normalization (_compare_memory_isolation_queue)
+    kg_state_rows: Dict[Tuple[Any, ...], Dict[str, Any]] = field(
+        default_factory=dict
+    )
 
 
 def _digest_update(h: "hashlib._Hash", value: Any) -> None:
@@ -1079,6 +1084,7 @@ def snapshot_database(
         tables: Dict[str, TableSnapshot] = {}
         special_rows: Dict[str, Dict[Tuple[Any, ...], Dict[str, Any]]] = {}
         cluster_v24_projection: "ClusterDedupeProjection | None" = None
+        kg_state_rows: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
         for kind, name, sql in master:
             if kind != "table":
                 continue
@@ -1122,12 +1128,17 @@ def snapshot_database(
                 special_rows[name] = _special_table_rows(
                     meta_conn, name, digest_columns, pk_columns
                 )
+            if name == "unified_kg_state":
+                kg_state_rows = _special_table_rows(
+                    meta_conn, name, all_column_names, pk_columns
+                )
         return DatabaseSnapshot(
             user_version=user_version,
             tables=tables,
             schema_objects=schema_objects,
             special_rows=special_rows,
             cluster_v24_projection=cluster_v24_projection,
+            kg_state_rows=kg_state_rows,
         )
     finally:
         meta_conn.close()
@@ -1173,7 +1184,73 @@ def _empty_normalized() -> Dict[str, int]:
         "concept_clusters": 0,
         "scrubbed_model_profiles": 0,
         "scrubbed_model_statuses": 0,
+        "memory_isolation_queued": 0,
     }
+
+
+# v87 (ruling M1) queues every notebook holding a Memory source for the
+# isolated rebuild, and marks every other non-public notebook with clusters 2
+# (awaiting the post-readiness dangling-seed check). A queued state row
+# gets exactly one reset -- marker 0, dirty 1, both mutation counters +1, the
+# three derived-layer sequences -1, updated_at restamped -- and every other
+# column is untouched; any other row is byte-identical apart from the new
+# column (1, or 2 for a seed-check candidate). A queued notebook without a state row gets one
+# (marker 0, dirty 1). Anything else is a discrepancy. The verifier does not
+# re-derive WHICH notebooks were queued (the migration's own tests pin that);
+# it pins that queueing can only take this one documented shape.
+_V87_RESET_COLUMNS = frozenset({
+    "memory_isolation_version", "dirty", "kg_mutation_seq",
+    "cluster_mutation_seq", "community_seq", "canonical_rel_seq",
+    "mention_seq", "updated_at",
+})
+
+
+def _compare_memory_isolation_queue(
+    pre_rows: Dict[Tuple[Any, ...], Dict[str, Any]],
+    post_rows: Dict[Tuple[Any, ...], Dict[str, Any]],
+    normalized: Dict[str, int],
+) -> List[str]:
+    problems: List[str] = []
+    queued = 0
+    for key, post in post_rows.items():
+        marker = post.get("memory_isolation_version")
+        pre = pre_rows.get(key)
+        if pre is None:
+            if marker != 0 or post.get("dirty") != 1:
+                problems.append("migration-v87-unexpected-state-row")
+            else:
+                queued += 1
+            continue
+        if marker in (1, 2):
+            # 1 = isolated; 2 = marked for the worker's dangling-seed check
+            # (outside F, clusters present) -- in both cases nothing else moves
+            if any(pre.get(c) != post.get(c) for c in pre):
+                problems.append("row-digest-changed")
+            continue
+        if marker != 0:
+            problems.append("migration-v87-marker-value")
+            continue
+        unchanged = all(
+            pre.get(c) == post.get(c) for c in pre if c not in _V87_RESET_COLUMNS
+        )
+        reset = (
+            post.get("dirty") == 1
+            and post.get("kg_mutation_seq") == (pre.get("kg_mutation_seq") or 0) + 1
+            and post.get("cluster_mutation_seq")
+            == (pre.get("cluster_mutation_seq") or 0) + 1
+            and post.get("community_seq") == -1
+            and post.get("canonical_rel_seq") == -1
+            and post.get("mention_seq") == -1
+        )
+        if not (unchanged and reset):
+            problems.append("migration-v87-queue-reset-mismatch")
+        else:
+            queued += 1
+    if set(pre_rows) - set(post_rows):
+        problems.append("row-count-changed")
+    if not problems:
+        normalized["memory_isolation_queued"] = queued
+    return sorted(set(problems))
 
 
 def _compare_special_rows(
@@ -1511,6 +1588,16 @@ def compare_snapshots(
                 note(name, "migration-v24-survivor-digest-mismatch")
             else:
                 normalized["concept_clusters"] = projection.removed_count
+            continue
+        if (
+            name == "unified_kg_state"
+            and pre.user_version < 87 <= post.user_version
+        ):
+            queue_problems = _compare_memory_isolation_queue(
+                pre.kg_state_rows, post.kg_state_rows, normalized
+            )
+            for problem in queue_problems:
+                note(name, problem)
             continue
         if name in SPECIAL_TABLES:
             problems: List[str] = []
@@ -4986,6 +5073,40 @@ MIGRATION_MANIFEST = {
 MIGRATION_MANIFEST[(85, 86)] = {
     "tables": {},
     "columns": USERS_SEEN_RELEASE_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
+
+# v87 (ruling M1, parity with PostgreSQL 0067_memory_kg_isolation.sql): the
+# ``unified_kg_state.memory_isolation_version`` marker, INTEGER NOT NULL
+# DEFAULT 1. Its data half only touches notebooks that hold a Memory source
+# (none in the frozen v9 fixture): every pre-existing state row reads the
+# default 1, and no other table's rows change. No new table, index, trigger or
+# view.
+MEMORY_ISOLATION_COLUMNS = {
+    "unified_kg_state": {
+        "memory_isolation_version": (
+            "memory_isolation_version", "INTEGER", 1, "1", 0),
+    },
+}
+MIGRATION_MANIFEST = {
+    (key[0], 87, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "unified_kg_state": {
+                **manifest["columns"].get("unified_kg_state", {}),
+                **MEMORY_ISOLATION_COLUMNS["unified_kg_state"],
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(86, 87)] = {
+    "tables": {},
+    "columns": MEMORY_ISOLATION_COLUMNS,
     "indexes": {},
     "triggers": {},
     "views": {},

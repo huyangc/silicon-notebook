@@ -414,7 +414,16 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # INTEGER, no backfill): the mainline ordinal of the newest release whose
 # update notes the user has been shown; NULL = never recorded. No table,
 # index, FK or unique-surface change.
+# SQLite v87 / PostgreSQL 0067 (ruling M1, Memory-derived knowledge-graph
+# content structurally isolated) add unified_kg_state.memory_isolation_version
+# (integer NOT NULL DEFAULT 1: 0 = this notebook's shared derived graph was
+# built before the isolation and awaits the post-readiness rebuild of
+# app/services/memory_isolation_rebuild.py; 1 = isolated) and clean the
+# pre-isolation derived rows of notebooks holding Memory sources (whole
+# clusters with a Memory member, the derived layers naming them, mixed
+# evidence, chunks under Memory sources). No table, index, FK or
+# unique-surface change.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=86,
-    postgres_version=66,
+    sqlite_version=87,
+    postgres_version=67,
 )

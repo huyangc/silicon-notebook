@@ -50,11 +50,102 @@ FIXTURE_SECRETS = (
 )
 
 
+def _rollback_v87(db: sqlite3.Connection) -> None:
+    """Undo _migration_87 (ruling M1: unified_kg_state.memory_isolation_version,
+    parity with PostgreSQL 0067_memory_kg_isolation.sql) before forging any
+    older deployed schema: a pure column addition on the schema side (the
+    fixture holds no Memory source, so the data half changed no row) -- same
+    shape as _rollback_v68."""
+    db.execute("ALTER TABLE unified_kg_state DROP COLUMN memory_isolation_version")
+
+
+def test_deployed_v86_database_verifies_memory_isolation_marker(tmp_path):
+    """A deployed v86 database is missing exactly _migration_87's schema
+    addition: ``unified_kg_state.memory_isolation_version`` NOT NULL DEFAULT 1.
+    The fixture has no Memory source, so the cleanup half deletes nothing and
+    marks nothing: every existing state row reads 1 and no table changes."""
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as upgraded_db:
+        columns = {
+            row[1]: (row[2], row[3], row[4])
+            for row in upgraded_db.execute("PRAGMA table_info(unified_kg_state)")
+        }
+        assert columns["memory_isolation_version"] == ("INTEGER", 1, "1")
+        assert upgraded_db.execute(
+            "SELECT COUNT(*) FROM unified_kg_state "
+            "WHERE memory_isolation_version <> 1"
+        ).fetchone()[0] == 0
+
+    with sqlite3.connect(database) as rollback:
+        _rollback_v87(rollback)
+        rollback.execute("PRAGMA user_version = 86")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 86
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+    assert result.normalized["memory_isolation_queued"] == 0
+
+
+def test_v87_queue_normalization_accepts_only_the_documented_reset():
+    """v87 may queue a notebook (Memory source, or a cluster whose seed object
+    is gone): its state row gets exactly one reset. Any other change to a
+    queued row, or any change to an unqueued row, is a discrepancy."""
+    module = _load_verifier()
+    pre = {("nb-a",): {"notebook_id": "nb-a", "dirty": 0, "kg_mutation_seq": 5,
+                       "cluster_mutation_seq": 3, "community_seq": 5,
+                       "canonical_rel_seq": 5, "mention_seq": 5,
+                       "cluster_input_version": "v", "updated_at": "t0"},
+           ("nb-b",): {"notebook_id": "nb-b", "dirty": 0, "kg_mutation_seq": 1,
+                       "cluster_mutation_seq": 1, "community_seq": 1,
+                       "canonical_rel_seq": 1, "mention_seq": 1,
+                       "cluster_input_version": "v", "updated_at": "t0"}}
+    queued = {**pre[("nb-a",)], "memory_isolation_version": 0, "dirty": 1,
+              "kg_mutation_seq": 6, "cluster_mutation_seq": 4, "community_seq": -1,
+              "canonical_rel_seq": -1, "mention_seq": -1, "updated_at": "t1"}
+    untouched = {**pre[("nb-b",)], "memory_isolation_version": 1}
+
+    def run(post):
+        normalized = {"memory_isolation_queued": 0}
+        return module._compare_memory_isolation_queue(pre, post, normalized), normalized
+
+    problems, normalized = run({("nb-a",): queued, ("nb-b",): untouched})
+    assert problems == [] and normalized["memory_isolation_queued"] == 1
+    # a queued row whose other columns moved
+    assert run({("nb-a",): {**queued, "cluster_input_version": "x"},
+                ("nb-b",): untouched})[0] == ["migration-v87-queue-reset-mismatch"]
+    # a queued row without the counter bump
+    assert run({("nb-a",): {**queued, "kg_mutation_seq": 5},
+                ("nb-b",): untouched})[0] == ["migration-v87-queue-reset-mismatch"]
+    # an unqueued row that changed
+    assert run({("nb-a",): queued, ("nb-b",): {**untouched, "dirty": 1}})[0] == [
+        "row-digest-changed"]
+    # a seed-check candidate (marker 2) is accepted only unchanged
+    assert run({("nb-a",): queued,
+                ("nb-b",): {**untouched, "memory_isolation_version": 2}})[0] == []
+    assert run({("nb-a",): queued,
+                ("nb-b",): {**untouched, "memory_isolation_version": 2,
+                            "dirty": 1}})[0] == ["row-digest-changed"]
+    assert run({("nb-a",): queued,
+                ("nb-b",): {**untouched, "memory_isolation_version": 3}})[0] == [
+        "migration-v87-marker-value"]
+    # a vanished row
+    assert run({("nb-a",): queued})[0] == ["row-count-changed"]
+
+
 def _rollback_v86(db: sqlite3.Connection) -> None:
     """Undo _migration_86 (users.seen_release_ordinal, parity with PostgreSQL
     0066_user_seen_release_ordinal.sql) before forging any older deployed
     schema: a pure column addition, no index to drop -- same shape as
     _rollback_v72."""
+    _rollback_v87(db)
     db.execute("ALTER TABLE users DROP COLUMN seen_release_ordinal")
 
 

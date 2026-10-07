@@ -147,6 +147,8 @@ _REAL_SQLITE_MIGRATION_MODULES = {
     "test_extension_toggle_store.py",
     "test_indexing_pipeline_identity.py",
     "test_merge_dbs_taxonomy.py",
+    "test_memory_isolation_migration.py",
+    "test_memory_isolation_rebuild.py",
     "test_readiness_gate.py",
     "test_repository_snapshot_verifier.py",
     "test_retrieval_experience_store.py",

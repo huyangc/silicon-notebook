@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from typing import Callable
+from typing import Any, Callable
 
 from app.core.config import Settings
 from app.repositories.sqlite.anchor_normalization import sqlite_js_trim_expression
@@ -263,7 +263,52 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # with PostgreSQL 0066_user_seen_release_ordinal.sql: the mainline ordinal of
 # the newest release the user has been shown the system-update notice for.
 # NULL means "never recorded". See ``_migration_86``'s own docstring.
-SCHEMA_VERSION = 86
+# v87 (ruling M1, paired with PostgreSQL 0067_memory_kg_isolation.sql) adds
+# unified_kg_state.memory_isolation_version (INTEGER NOT NULL DEFAULT 1; 0 =
+# awaiting the post-readiness isolation rebuild, 2 = awaiting the
+# post-readiness dangling-seed check) and cleans the pre-isolation derived
+# rows of notebooks holding Memory sources. See ``_migration_87``.
+SCHEMA_VERSION = 87
+
+# Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
+# when v87 was written (a migration must not change meaning when the live
+# definition later moves). tests/test_memory_isolation_migration.py asserts
+# each one still equals the live rendering for the same alias, so a drift is a
+# visible, reviewed decision instead of a silent one.
+_V87_MEMORY_SOURCE_S = "s.source_type = 'memory'"
+_V87_MEMORY_DERIVED_KO = (
+    "EXISTS (SELECT 1 FROM sources ds WHERE ds.id = ko.source_id "
+    "AND ds.source_type = 'memory')"
+)
+# ``promotion_candidates.object_type`` of the creator-only Memory promotion
+# path (propose_memory_promotion) -- a promotion kind, not a source type.
+_V87_PROMOTION_MEMORY_KIND = "'memory'"
+# The open promotion statuses (the schema's are proposed | under_review |
+# approved | rejected) and the reason the approval-time refusal writes
+# (``app.domain.memory_kg_isolation.MEMORY_PROMOTION_REJECTED_REASON``; pinned
+# equal by tests/test_memory_isolation_migration.py).
+_V87_PROMOTION_OPEN_STATUSES = "('proposed', 'under_review')"
+_V87_PROMOTION_REJECTED_REASON = "memory_derived_object"
+_V87_TEMP_TABLES = (
+    "mki_ms", "mki_f", "mki_g", "mki_m", "mki_a", "mki_am",
+    "mki_promo", "mki_conflict_shared", "mki_conflict_shared_edges",
+    "mki_comm", "mki_chunks", "mki_scan", "mki_mixed",
+)
+
+
+def _v87_sentinel_object_id(column: str) -> str:
+    """The object id a unique-seed sentinel canonical id ``<prefix>~<id>``
+    (prefixes K- / KL- / KF- / KP-) was minted from; NULL otherwise. The same
+    decoding as ``memory_sql.cluster_seed_object_id``, over any column."""
+    return (
+        f"(CASE WHEN substr({column}, 1, 6) = 'K-~ko-' THEN substr({column}, 4) "
+        f"WHEN substr({column}, 1, 1) = 'K' AND substr({column}, 3, 5) = '-~ko-' "
+        f"THEN substr({column}, 5) END)"
+    )
+_V87_MEMORY_DERIVED_KR = (
+    "EXISTS (SELECT 1 FROM sources ds WHERE ds.id = kr.source_id "
+    "AND ds.source_type = 'memory')"
+)
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -4726,6 +4771,396 @@ class SqliteMigrator:
                 db, "users", "seen_release_ordinal", "INTEGER"
             )
 
+    def _migration_87(self) -> None:
+        """Ruling M1 cleanup, parity with PostgreSQL
+        ``0067_memory_kg_isolation.sql`` -- read that file's header first:
+        the order, the scope (the notebooks holding a Memory source, F; the
+        other notebooks with clusters, G, that are only marked 2), the definition of
+        A / M, the idempotency argument and every per-step rationale are
+        written there once and hold here unchanged, statement for statement.
+
+        SQLite specifics:
+
+        * The whole migration, including the ``user_version`` stamp, is one
+          ``BEGIN IMMEDIATE`` transaction (same shape as v78), so a crash
+          leaves either nothing or everything.
+        * The "Memory-derived" fragments are frozen copies (``_V87_*``) of
+          what ``app/repositories/sqlite/memory_sql.py`` renders today;
+          ``tests/test_memory_isolation_migration.py`` pins the equality.
+        * The evidence rewrite of step 9 runs in Python (SQL only preselects
+          the candidates), keeping every item it does not strip as it was.
+          A JSON array item that is not an object (legacy string evidence)
+          is never handed to ``json_extract`` (``je.type`` guard) and is
+          always kept.
+        * ``chunks_fts`` has no foreign key to ``chunks`` and does not cascade:
+          its rows for Memory chunks are deleted explicitly, and only when
+          there are such chunks at all (a ``chunk_id IN (...)`` delete scans
+          the whole FTS table, so an empty set must not pay for it).
+        """
+        with self.database.write(operation="sqlite.migration.87") as db:
+            self.database.begin_immediate(db)
+            first_run = "memory_isolation_version" not in {
+                (r["name"] if isinstance(r, sqlite3.Row) else r[1])
+                for r in db.execute("PRAGMA table_info(unified_kg_state)")
+            }
+            for name in _V87_TEMP_TABLES:
+                db.execute(f"DROP TABLE IF EXISTS temp.{name}")
+            # 1. Memory sources with their owner, F, G (marked for the
+            # post-readiness dangling-seed check only).
+            db.execute(
+                "CREATE TEMP TABLE mki_ms AS "
+                "SELECT s.id, s.notebook_id, mi.created_by AS owner "
+                "FROM sources s LEFT JOIN memory_items mi ON mi.id = s.memory_id "
+                f"WHERE {_V87_MEMORY_SOURCE_S}"
+            )
+            db.execute("CREATE INDEX temp.idx_mki_ms ON mki_ms(id)")
+            db.execute(
+                "CREATE TEMP TABLE mki_f AS SELECT DISTINCT notebook_id FROM mki_ms"
+            )
+            db.execute(
+                "CREATE TEMP TABLE mki_g AS SELECT n.id AS notebook_id "
+                "FROM notebooks n WHERE n.id NOT IN (SELECT notebook_id FROM mki_f) "
+                "AND EXISTS (SELECT 1 FROM concept_clusters cc "
+                "WHERE cc.notebook_id = n.id)"
+            )
+            # 2. M from the Memory sources; A from M; A u M.
+            db.execute(
+                "CREATE TEMP TABLE mki_m AS SELECT ko.notebook_id, ko.id "
+                "FROM mki_ms JOIN knowledge_objects ko ON ko.source_id = mki_ms.id "
+                "WHERE ko.notebook_id IN (SELECT notebook_id FROM mki_f) "
+                f"AND {_V87_MEMORY_DERIVED_KO}"
+            )
+            db.execute("CREATE INDEX temp.idx_mki_m ON mki_m(id)")
+            db.execute("CREATE INDEX temp.idx_mki_m_nb ON mki_m(notebook_id, id)")
+            db.execute(
+                "CREATE TEMP TABLE mki_a AS "
+                "SELECT DISTINCT cc.notebook_id, cc.canonical_id "
+                "FROM mki_m JOIN concept_clusters cc "
+                "ON cc.member_object_id = mki_m.id AND cc.notebook_id = mki_m.notebook_id"
+            )
+            db.execute(
+                "CREATE TEMP TABLE mki_am AS "
+                "SELECT notebook_id, canonical_id AS ref FROM mki_a "
+                "UNION SELECT notebook_id, id AS ref FROM mki_m"
+            )
+            db.execute("CREATE INDEX temp.idx_mki_am ON mki_am(notebook_id, ref)")
+            in_am = (
+                "EXISTS (SELECT 1 FROM mki_am WHERE mki_am.notebook_id = "
+                "{t}.notebook_id AND mki_am.ref = {t}.{c})"
+            )
+            in_f = "{t}.notebook_id IN (SELECT notebook_id FROM mki_f)"
+            # 3. open generic-path promotion proposals of Memory-derived
+            # objects are rejected (not deleted: the audit trail stays); the
+            # creator-only Memory path ('memory') and approved proposals are
+            # left alone.
+            db.execute(
+                "CREATE TEMP TABLE mki_promo AS SELECT pc.id "
+                "FROM promotion_candidates pc "
+                f"WHERE pc.object_type <> {_V87_PROMOTION_MEMORY_KIND} "
+                f"AND pc.status IN {_V87_PROMOTION_OPEN_STATUSES} "
+                "AND EXISTS (SELECT 1 FROM knowledge_objects ko "
+                "WHERE ko.id = pc.object_id AND ko.notebook_id = pc.notebook_id "
+                f"AND {_V87_MEMORY_DERIVED_KO})"
+            )
+            db.execute(
+                "UPDATE promotion_candidates SET status = 'rejected', "
+                "reason = ?, reviewed_by = '', updated_at = ? "
+                "WHERE id IN (SELECT id FROM mki_promo)",
+                (_V87_PROMOTION_REJECTED_REASON, _now()),
+            )
+            # 4. applied conflicts that changed a shared object / relation for
+            # a Memory one are counted (summary line only); then merge and
+            # conflict candidates naming A u M (or a sentinel minted from M).
+            db.execute(
+                "CREATE TEMP TABLE mki_conflict_shared AS SELECT k.id "
+                "FROM kg_conflict_candidates k "
+                f"WHERE {in_f.format(t='k')} "
+                "AND k.kind = 'node' AND k.status = 'applied' AND ("
+                "(k.resolution = 'modify' "
+                "AND (k.left_ref IN (SELECT id FROM mki_m) "
+                "OR k.right_ref IN (SELECT id FROM mki_m)) "
+                "AND (CASE WHEN k.winner_ref IN (k.left_ref, k.right_ref) "
+                "THEN k.winner_ref ELSE k.left_ref END) "
+                "NOT IN (SELECT id FROM mki_m)) "
+                "OR (k.resolution = 'discard' "
+                "AND k.winner_ref IN (k.left_ref, k.right_ref) "
+                "AND k.winner_ref IN (SELECT id FROM mki_m) "
+                "AND (CASE WHEN k.winner_ref = k.left_ref THEN k.right_ref "
+                "ELSE k.left_ref END) NOT IN (SELECT id FROM mki_m)))"
+            )
+            db.execute(
+                "CREATE TEMP TABLE mki_conflict_shared_edges AS SELECT k.id "
+                "FROM kg_conflict_candidates k "
+                f"WHERE {in_f.format(t='k')} "
+                "AND k.kind = 'edge' AND k.status = 'applied' "
+                "AND k.resolution = 'discard' "
+                "AND k.winner_ref IN (k.left_ref, k.right_ref) "
+                "AND EXISTS (SELECT 1 FROM knowledge_relations kr "
+                f"WHERE kr.id = k.winner_ref AND {_V87_MEMORY_DERIVED_KR}) "
+                "AND EXISTS (SELECT 1 FROM knowledge_relations kr "
+                "WHERE kr.id = (CASE WHEN k.winner_ref = k.left_ref "
+                "THEN k.right_ref ELSE k.left_ref END) "
+                f"AND NOT {_V87_MEMORY_DERIVED_KR})"
+            )
+            db.execute(
+                "DELETE FROM concept_merge_candidates "
+                f"WHERE {in_f.format(t='concept_merge_candidates')} AND ("
+                f"{in_am.format(t='concept_merge_candidates', c='canonical_a')} OR "
+                f"{in_am.format(t='concept_merge_candidates', c='canonical_b')} OR "
+                f"{_v87_sentinel_object_id('concept_merge_candidates.canonical_a')} "
+                "IN (SELECT id FROM mki_m) OR "
+                f"{_v87_sentinel_object_id('concept_merge_candidates.canonical_b')} "
+                "IN (SELECT id FROM mki_m))"
+            )
+            db.execute(
+                "DELETE FROM kg_conflict_candidates "
+                f"WHERE {in_f.format(t='kg_conflict_candidates')} AND ("
+                "(kind = 'node' AND (left_ref IN (SELECT id FROM mki_m) "
+                "OR right_ref IN (SELECT id FROM mki_m))) "
+                "OR (kind = 'edge' AND EXISTS (SELECT 1 FROM knowledge_relations kr "
+                "WHERE kr.id IN (kg_conflict_candidates.left_ref, "
+                "kg_conflict_candidates.right_ref) "
+                f"AND {_V87_MEMORY_DERIVED_KR})))"
+            )
+            # 5. mention bridge: pairs bridged by a Memory claim first, then
+            # pairs and edges naming A u M.
+            db.execute(
+                "DELETE FROM concept_comentions WHERE EXISTS ("
+                "SELECT 1 FROM mki_m JOIN mention_edges e1 "
+                "ON e1.notebook_id = mki_m.notebook_id "
+                "AND e1.claim_object_id = mki_m.id "
+                "JOIN mention_edges e2 ON e2.notebook_id = e1.notebook_id "
+                "AND e2.claim_object_id = e1.claim_object_id "
+                "WHERE e1.notebook_id = concept_comentions.notebook_id "
+                "AND e1.concept_canonical_id = concept_comentions.canonical_a "
+                "AND e2.concept_canonical_id = concept_comentions.canonical_b)"
+            )
+            for column in ("canonical_a", "canonical_b"):
+                db.execute(
+                    "DELETE FROM concept_comentions WHERE "
+                    f"{in_am.format(t='concept_comentions', c=column)}"
+                )
+            db.execute(
+                "DELETE FROM mention_edges WHERE EXISTS (SELECT 1 FROM mki_m "
+                "WHERE mki_m.notebook_id = mention_edges.notebook_id "
+                "AND mki_m.id = mention_edges.claim_object_id)"
+            )
+            db.execute(
+                "DELETE FROM mention_edges WHERE "
+                f"{in_am.format(t='mention_edges', c='concept_canonical_id')}"
+            )
+            # 6. canonical relations.
+            for column in ("canonical_src", "canonical_tgt"):
+                db.execute(
+                    "DELETE FROM canonical_relations WHERE "
+                    f"{in_am.format(t='canonical_relations', c=column)}"
+                )
+            # 7. whole communities with an A u M member; on the first run
+            # only, precompute, checkpoints and clustering scratch of F.
+            db.execute(
+                "CREATE TEMP TABLE mki_comm AS SELECT DISTINCT cm.community_id "
+                "FROM mki_am JOIN community_members cm "
+                "ON cm.notebook_id = mki_am.notebook_id "
+                "AND cm.canonical_id = mki_am.ref"
+            )
+            db.execute(
+                "DELETE FROM community_members "
+                "WHERE community_id IN (SELECT community_id FROM mki_comm)"
+            )
+            db.execute(
+                "DELETE FROM communities "
+                "WHERE id IN (SELECT community_id FROM mki_comm)"
+            )
+            if first_run:
+                for table in ("kg_analysis_artifacts", "kg_community_edges",
+                              "kg_source_profiles", "kg_rebuild_checkpoint",
+                              "kg_cluster_scratch", "kg_canonical_scratch"):
+                    db.execute(
+                        f"DELETE FROM {table} "
+                        "WHERE notebook_id IN (SELECT notebook_id FROM mki_f)"
+                    )
+            # 8. the clusters themselves (whole clusters, every generation).
+            db.execute(
+                "DELETE FROM concept_clusters WHERE (notebook_id, canonical_id) "
+                "IN (SELECT notebook_id, canonical_id FROM mki_a)"
+            )
+            # 9. mixed evidence (Python rewrite): a shared object of F loses
+            # every Memory evidence item (candidates from the reverse index,
+            # and from the evidence itself outside public libraries);
+            # a Memory object loses the items of another member's Memory, or
+            # of a Memory whose owner is unknown. Objects outside F (a public
+            # library's approved promotion copy) are never touched.
+            owners = {
+                r[0]: r[1]
+                for r in db.execute("SELECT id, owner FROM mki_ms").fetchall()
+            }
+            item_source = (
+                "json_extract(CASE WHEN je.type = 'object' THEN je.value "
+                "ELSE '{}' END, '$.source_id')"
+            )
+            evidence_array = (
+                "json_valid(ko.evidence) AND json_type(ko.evidence) = 'array'"
+            )
+            # mki_scan: F's notebooks whose evidence itself is scanned -- not a
+            # public library, or a public library whose reverse index is not
+            # attested complete (source_index_backfilled = 1 and no backfill
+            # other than 'complete'); an attested public library keeps the
+            # reverse-index path only.
+            db.execute(
+                "CREATE TEMP TABLE mki_scan AS SELECT f.notebook_id FROM mki_f f "
+                "JOIN notebooks n ON n.id = f.notebook_id "
+                "WHERE COALESCE(n.tier, '') <> 'base' "
+                "OR NOT EXISTS (SELECT 1 FROM unified_kg_state u "
+                "WHERE u.notebook_id = f.notebook_id AND u.source_index_backfilled = 1) "
+                "OR EXISTS (SELECT 1 FROM source_index_backfills b "
+                "WHERE b.notebook_id = f.notebook_id AND b.status <> 'complete')"
+            )
+            db.execute(
+                "CREATE TEMP TABLE mki_mixed AS SELECT kos.object_id AS id "
+                "FROM mki_ms JOIN knowledge_object_sources kos "
+                "ON kos.source_id = mki_ms.id AND kos.notebook_id = mki_ms.notebook_id "
+                "WHERE NOT EXISTS (SELECT 1 FROM mki_m WHERE mki_m.id = kos.object_id) "
+                "UNION SELECT ko.id FROM mki_scan "
+                "JOIN knowledge_objects ko ON ko.notebook_id = mki_scan.notebook_id "
+                f"WHERE NOT {_V87_MEMORY_DERIVED_KO} "
+                f"AND CASE WHEN {evidence_array} THEN EXISTS ("
+                "SELECT 1 FROM json_each(ko.evidence) je "
+                f"WHERE {item_source} IN (SELECT id FROM mki_ms)) ELSE 0 END"
+            )
+            candidates = db.execute(
+                "SELECT ko.id, ko.evidence FROM mki_mixed "
+                "JOIN knowledge_objects ko ON ko.id = mki_mixed.id "
+                f"WHERE {evidence_array}"
+            ).fetchall()
+            cross = db.execute(
+                "SELECT ko.id, ko.source_id, ko.evidence FROM mki_m "
+                "JOIN knowledge_objects ko ON ko.id = mki_m.id "
+                "JOIN mki_ms own ON own.id = ko.source_id "
+                f"WHERE CASE WHEN {evidence_array} THEN EXISTS ("
+                "SELECT 1 FROM json_each(ko.evidence) je "
+                f"JOIN mki_ms oth ON oth.id = {item_source} "
+                "WHERE oth.id <> own.id AND (own.owner IS NULL "
+                "OR oth.owner IS NULL OR own.owner <> oth.owner)) ELSE 0 END"
+            ).fetchall()
+
+            def foreign(item: Any, own: "str | None") -> bool:
+                if not isinstance(item, dict) or item.get("source_id") not in owners:
+                    return False
+                sid = item["source_id"]
+                if own is None:
+                    return True
+                return sid != own and (
+                    owners[own] is None or owners[sid] is None
+                    or owners[own] != owners[sid]
+                )
+
+            rewrites = [(oid, text, None) for oid, text in candidates]
+            rewrites += [(oid, text, own) for oid, own, text in cross]
+            for object_id, evidence_text, own in rewrites:
+                kept = [item for item in json.loads(evidence_text)
+                        if not foreign(item, own)]
+                db.execute(
+                    "UPDATE knowledge_objects SET evidence = ? WHERE id = ?",
+                    (json.dumps(kept, ensure_ascii=False), object_id),
+                )
+            db.execute(
+                "DELETE FROM knowledge_object_sources WHERE EXISTS ("
+                "SELECT 1 FROM mki_ms WHERE mki_ms.id = knowledge_object_sources.source_id "
+                "AND mki_ms.notebook_id = knowledge_object_sources.notebook_id "
+                "AND (NOT EXISTS (SELECT 1 FROM mki_m "
+                "WHERE mki_m.id = knowledge_object_sources.object_id) "
+                "OR EXISTS (SELECT 1 FROM knowledge_objects ko "
+                "JOIN mki_ms own ON own.id = ko.source_id "
+                "WHERE ko.id = knowledge_object_sources.object_id "
+                "AND own.id <> mki_ms.id AND (own.owner IS NULL "
+                "OR mki_ms.owner IS NULL OR own.owner <> mki_ms.owner))))"
+            )
+            # 10. chunks under Memory sources and their derived rows.
+            db.execute(
+                "CREATE TEMP TABLE mki_chunks AS SELECT c.id FROM chunks c "
+                "WHERE c.source_id IN (SELECT id FROM mki_ms)"
+            )
+            if db.execute("SELECT 1 FROM mki_chunks LIMIT 1").fetchone():
+                for table in ("chunks_fts", "chunk_embeddings",
+                              "chunk_questions", "chunk_elements"):
+                    db.execute(
+                        f"DELETE FROM {table} "
+                        "WHERE chunk_id IN (SELECT id FROM mki_chunks)"
+                    )
+                db.execute(
+                    "DELETE FROM chunks WHERE id IN (SELECT id FROM mki_chunks)"
+                )
+            # 11. the summary counts (content-free; logged after COMMIT).
+            counts = {
+                name: db.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
+                for name in ("mki_f", "mki_m", "mki_a", "mki_comm", "mki_chunks",
+                             "mki_promo", "mki_conflict_shared",
+                             "mki_conflict_shared_edges", "mki_scan", "mki_g")
+            }
+            counts["cross_owner"] = len(cross)
+            # Memory-derived objects that keep shared evidence a manual merge
+            # folded into them (private to the Memory's owner; same figure as
+            # PostgreSQL's private_kept).
+            counts["private_kept"] = db.execute(
+                "SELECT COUNT(*) FROM mki_m JOIN knowledge_objects ko "
+                "ON ko.id = mki_m.id "
+                f"WHERE CASE WHEN {evidence_array} THEN EXISTS ("
+                "SELECT 1 FROM json_each(ko.evidence) je "
+                f"WHERE {item_source} IS NOT NULL "
+                f"AND {item_source} NOT IN (SELECT id FROM mki_ms)) ELSE 0 END"
+            ).fetchone()[0]
+            # 12. marker and derived-layer gates, first run only: F to 0 with
+            # the reset, G to 2 (awaiting the worker's dangling-seed check;
+            # a G notebook without a state row -- a copy -- gets one of table
+            # defaults, which every reader takes for a missing row).
+            self.add_column_if_missing(
+                db, "unified_kg_state", "memory_isolation_version",
+                "INTEGER NOT NULL DEFAULT 1",
+            )
+            if first_run:
+                now = _now()
+                db.execute(
+                    "UPDATE unified_kg_state SET memory_isolation_version = 0, "
+                    "community_seq = -1, canonical_rel_seq = -1, mention_seq = -1, "
+                    "dirty = 1, kg_mutation_seq = kg_mutation_seq + 1, "
+                    "cluster_mutation_seq = cluster_mutation_seq + 1, updated_at = ? "
+                    "WHERE notebook_id IN (SELECT notebook_id FROM mki_f)",
+                    (now,),
+                )
+                db.execute(
+                    "INSERT INTO unified_kg_state "
+                    "(notebook_id, updated_at, memory_isolation_version) "
+                    "SELECT g.notebook_id, ?, 2 FROM mki_g g WHERE true "
+                    "ON CONFLICT(notebook_id) DO UPDATE SET memory_isolation_version = 2",
+                    (now,),
+                )
+                db.execute(
+                    "INSERT INTO unified_kg_state "
+                    "(notebook_id, dirty, updated_at, memory_isolation_version) "
+                    "SELECT f.notebook_id, 1, ?, 0 FROM mki_f f "
+                    "JOIN notebooks n ON n.id = f.notebook_id "
+                    "WHERE NOT EXISTS (SELECT 1 FROM unified_kg_state u "
+                    "WHERE u.notebook_id = f.notebook_id)",
+                    (now,),
+                )
+            for name in _V87_TEMP_TABLES:
+                db.execute(f"DROP TABLE IF EXISTS temp.{name}")
+            db.execute("PRAGMA user_version = 87")
+        # Content-free: counts only, never ids or text (docs/operations.md).
+        logger.info(
+            "memory-kg-isolation migration: affected_notebooks=%d "
+            "memory_objects=%d clusters_removed=%d communities_removed=%d "
+            "memory_chunks_removed=%d private_kept=%d promotions_rejected=%d "
+            "conflicts_applied_on_shared_nodes=%d "
+            "conflicts_applied_on_shared_edges=%d cross_owner_stripped=%d "
+            "evidence_scan_notebooks=%d seed_check_notebooks=%d",
+            counts["mki_f"], counts["mki_m"], counts["mki_a"],
+            counts["mki_comm"], counts["mki_chunks"], counts["private_kept"],
+            counts["mki_promo"], counts["mki_conflict_shared"],
+            counts["mki_conflict_shared_edges"], counts["cross_owner"],
+            counts["mki_scan"], counts["mki_g"],
+        )
+
     def _seed(self) -> None:
         now = _now()
         with self._connect() as db:
@@ -4833,11 +5268,11 @@ class SqliteMigrator:
         applied: list[int] = []
         for version in range(current + 1, SCHEMA_VERSION + 1):
             getattr(self, f"_migration_{version}")()
-            # v25 and v78 stamp themselves inside the same BEGIN IMMEDIATE
-            # transaction as their irreversible data/schema changes. Preserve
-            # the existing migration/stamp behavior byte-for-byte for all
-            # other versions.
-            if version not in {25, 78}:
+            # v25, v78 and v87 stamp themselves inside the same BEGIN
+            # IMMEDIATE transaction as their irreversible data/schema changes.
+            # Preserve the existing migration/stamp behavior byte-for-byte for
+            # all other versions.
+            if version not in {25, 78, 87}:
                 with self._connect() as db:
                     db.execute(f"PRAGMA user_version = {version}")
             applied.append(version)

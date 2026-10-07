@@ -32,7 +32,7 @@ def notebook_content_overview(
     dependencies=[Depends(require_notebook_read)],
 )
 def notebook_checkup(notebook_id: str) -> CheckupResponse:
-    """流水线体检(P2):只读聚合 H2–H8 的损坏/待办信号。看板高频入口,`require_notebook_read`
+    """流水线体检(P2):只读聚合 H2–H10 的损坏/待办信号(H9/H10 为只读项,fix=none)。看板高频入口,`require_notebook_read`
     守卫(只读成员也能看)。与系统级 `/health`(API/LLM 状态)语义不同。响应用内部代号
     (H2/reparse 等),界面词由前端映射。"""
     result = checkup_service().run(notebook_id)

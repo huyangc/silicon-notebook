@@ -17,7 +17,8 @@ const item = (code, count, sample = [], fix = "reparse") => ({ code, count, samp
 const checkup = (checks, extra = {}) => ({
   notebook_id: "nb-1",
   checked_at: "2026-07-23T00:00:00Z",
-  healthy: checks.every((c) => c.count === 0),
+  // 与后端同口径:只读项(fix=none)不计入 healthy。
+  healthy: checks.every((c) => c.count === 0 || c.fix === "none"),
   checks,
   ...extra,
 });
@@ -131,20 +132,24 @@ test("签名随命中集合变化(新问题/修好)", () => {
 
 test("只读项(fix=none)不触发铃铛:没有用户可点的修复", () => {
   // H9(隔离重建待完成)/H10(已批准的记忆派生晋升)/H12(残留的记忆来源,系统自动清理)
-  // 命中时 healthy=false,但只有它们时不能说「发现可修复的问题」。
+  // 只有它们命中时后端报 healthy=true;视图本就不读 healthy——即便收到 healthy=false,
+  // 也不能说「发现可修复的问题」。
   const onlyReadOnly = checkup([
     item("H2", 0), item("H9", 1, [], "none"), item("H10", 2, [], "none"), item("H12", 2, [], "none"),
   ]);
-  assert.equal(onlyReadOnly.healthy, false);
+  assert.equal(onlyReadOnly.healthy, true);
   assert.equal(checkupAlertSignature(onlyReadOnly), null);
+  const inconsistent = checkup(onlyReadOnly.checks, { healthy: false });
+  assert.equal(checkupAlertSignature(inconsistent), null);
   const mixed = checkup([item("H4", 1, [], "backfill_vectors"), item("H10", 2, [], "none"), item("H12", 2, [], "none")]);
   assert.equal(checkupAlertSignature(mixed), "nb-1:H4");
 });
 
 test("只读项不让修复轮询继续:只剩只读项时不再有可修复问题", () => {
   const onlyReadOnly = checkup([item("H2", 0), item("H10", 3, [], "none"), item("H12", 3, [], "none")]);
-  assert.equal(onlyReadOnly.healthy, false);
+  assert.equal(onlyReadOnly.healthy, true);
   assert.equal(checkupHasRepairableIssue(onlyReadOnly), false);
+  assert.equal(checkupHasRepairableIssue(checkup(onlyReadOnly.checks, { healthy: false })), false);
   assert.equal(checkupHasRepairableIssue(checkup([item("H3", 1, ["s"], "reparse")])), true);
   assert.equal(checkupHasRepairableIssue(null), false);
 });

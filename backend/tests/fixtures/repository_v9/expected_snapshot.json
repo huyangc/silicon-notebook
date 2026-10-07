@@ -1057,6 +1057,7 @@
         "kg_mutation_seq": 3,
         "kg_reset_epoch": 0,
         "last_rebuild_at": "<timestamp>",
+        "memory_isolation_version": 1,
         "mention_seq": -1,
         "notebook_id": "<nb-id-1>",
         "object_count": 2,
@@ -2542,7 +2543,7 @@
       },
       {
         "name": "unified_kg_state",
-        "sql_sha256": "a73577dd5f81ae15082bcdad63b25004c6e39175808366a1b74681d6b11cdc9a",
+        "sql_sha256": "3a4d49c8e64479af7aa176df4f5b99b0af698770e84510280a4661c40d0d08e9",
         "type": "table"
       },
       {
@@ -3271,6 +3272,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 86
+    "user_version": 87
   }
 }

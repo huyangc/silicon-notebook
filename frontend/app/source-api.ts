@@ -97,7 +97,7 @@ export const deleteSource = (id: string) =>
 /** Returns a Blob only; the component owns object-URL creation and revocation. */
 export const fetchInternalAssetBlob = (url: string) => requestBlob(url, options);
 
-// 流水线体检(P2):只读聚合 H2–H8。看板弹窗打开时拉取(与 fetchIndexStatus 同处)。
+// 流水线体检(P2):只读聚合 H2–H10。看板弹窗打开时拉取(与 fetchIndexStatus 同处)。
 export const fetchCheckup = (notebookId: string) =>
   requestJson<CheckupResponse>(`/notebooks/${notebookId}/checkup`, options);
 

@@ -224,7 +224,7 @@ class SQLiteRepository(RepositoryFacade):
 
     @property
     def checkup(self) -> CheckupService:
-        """P2 体检聚合(H2–H8),**懒构造在后端相关的 facade 这一层**(而非中性 repository_runtime:
+        """P2 体检聚合(H2–H10),**懒构造在后端相关的 facade 这一层**(而非中性 repository_runtime:
         neutrality 守卫禁止它 import sqlite/postgres,而 checkup 依赖 maintenance 的 COUNT + sqlite
         QueryStore)。复用本 facade 的 ``maintenance`` adapter 做 H4/H5 计数;其余 seam 从 runtime
         取(database/scale/活跃租约快照/state_signature)。lru_cache 的 facade 单例 → 单个 checkup
@@ -232,6 +232,11 @@ class SQLiteRepository(RepositoryFacade):
         c = self.__dict__.get("_checkup")
         if c is None:
             rt = self._runtime
+            from app.repositories.sqlite.memory_isolation_store import (
+                MemoryIsolationStore,
+            )
+
+            _memory_isolation_pending = MemoryIsolationStore.not_isolated
             c = CheckupService(
                 database=rt.database,
                 queries=rt.queries,
@@ -266,6 +271,12 @@ class SQLiteRepository(RepositoryFacade):
                 active_source_ids=rt._active_source_ids_snapshot,
                 now=rt.seams.now,
                 event_log=rt.event_log,
+                # H9(只读):裁决 M1 存量迁移后本库是否仍等隔离重建。
+                memory_isolation_pending=_memory_isolation_pending,
+                # H10(只读):隔离前经通用路径已批准的 Memory 派生对象晋升数。
+                approved_memory_promotions=(
+                    MemoryIsolationStore.approved_memory_promotion_count
+                ),
                 # H11(只读,M1/E4-3):本库已是公共知识库却仍持有的 Memory 来源数。
                 public_library_memory_sources=(
                     rt.notebook_store.public_library_memory_source_count

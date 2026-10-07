@@ -74,7 +74,7 @@ def test_checkup_healthy_empty_notebook(tmp_path, monkeypatch):
     assert body["notebook_id"] == nb
     assert body["healthy"] is True
     assert {c["code"] for c in body["checks"]} == {
-        "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H11", "H12",
+        "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9", "H10", "H11", "H12",
     }
     assert all(c["count"] == 0 for c in body["checks"])
 
