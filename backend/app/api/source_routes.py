@@ -913,13 +913,26 @@ def source_readable_in_participant_scope(
     )
 
 
-def _participant_ids(active_notebook_id: str) -> list[str]:
-    """本模块(HTTP 侧)的参与集取数口 —— deps 的全局 port。"""
-    return notebook_store_port().participant_notebook_ids(active_notebook_id)
+def _participant_ids_for(viewer_id: str) -> Callable[[str], list[str]]:
+    """本模块(HTTP 侧)的参与集取数口 —— deps 的全局 port,按请求用户取。
+
+    挂载只对挂载人、或自己本来就能读被挂库的人生效(M3),所以参与集随查看者变化:
+    这里把查看者绑成 ``Callable[[str], ...]``,判据本体(``in_participant_scope`` 等)
+    的注入口形状不变。"""
+    def participant_ids(active_notebook_id: str) -> list[str]:
+        return notebook_store_port().participant_notebook_ids(
+            active_notebook_id, viewer_id=viewer_id
+        )
+
+    return participant_ids
 
 
-def _in_participant_scope(notebook_id: str, owner_notebook_id: str) -> bool:
-    return in_participant_scope(notebook_id, owner_notebook_id, _participant_ids)
+def _in_participant_scope(
+    notebook_id: str, owner_notebook_id: str, viewer_id: str
+) -> bool:
+    return in_participant_scope(
+        notebook_id, owner_notebook_id, _participant_ids_for(viewer_id)
+    )
 
 
 def _participant_scoped_source(
@@ -943,7 +956,7 @@ def _participant_scoped_source(
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
     if not source_readable_in_participant_scope(
-        notebook_id, detail, _participant_ids,
+        notebook_id, detail, _participant_ids_for(viewer_id),
         readable_notebook_id=readable_notebook_id,
     ):
         raise HTTPException(status_code=404, detail="Source not found")
@@ -1055,14 +1068,18 @@ async def upload_notebook_asset(notebook_id: str, file: UploadFile = File(...)) 
 
 
 @router.get("/notebooks/{notebook_id}/assets/{asset_id}", dependencies=[Depends(require_notebook_read)])
-def get_notebook_asset_file(notebook_id: str, asset_id: str) -> FileResponse:
+def get_notebook_asset_file(
+    notebook_id: str, asset_id: str, user: UserProfile = Depends(get_current_user)
+) -> FileResponse:
     # 路径里的 notebook_id 是**请求方当前的 active notebook**(权限就按它判,见
     # require_notebook_read),不是「资产必须正好属于这个库」。资产自己声明所属库,
     # 只要那个库在 active notebook 的有效参与集内就代理读取——参与集首项恒为 active
     # 自身,所以本库资产(knowhow 单元格图片、来源插图)的既有行为逐字不变,只是额外
     # 放行了「有效挂载的参考库」这一档,与上面来源详情/元素的代理读取同一条口径。
     asset = repository().get_notebook_asset(asset_id)
-    if asset is None or not _in_participant_scope(notebook_id, asset["notebook_id"]):
+    if asset is None or not _in_participant_scope(
+        notebook_id, asset["notebook_id"], user.id
+    ):
         raise HTTPException(status_code=404, detail="Asset not found")
     path = _asset_service().path_for(asset)
     if not path.is_file():

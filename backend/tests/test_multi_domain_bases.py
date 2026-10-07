@@ -29,7 +29,7 @@ class TestResolve:
         base = repo.create_notebook(NotebookCreate(name="base"))
         repo.mark_notebook_base(base.id)
         with repo._connect() as db:
-            got = repo._runtime.notebook_store.resolve_participants(db, a.id)
+            got = repo._runtime.notebook_store.resolve_participants(db, a.id, viewer_id="user-local")
         assert got == [(a.id, "personal")], "未挂载就不该吃到任何 base"
 
     def test_mounted_public_base_participates(self, repo):
@@ -38,7 +38,7 @@ class TestResolve:
         repo.mark_notebook_base(base.id)
         _mount(repo, a.id, [base.id])
         with repo._connect() as db:
-            got = dict(repo._runtime.notebook_store.resolve_participants(db, a.id))
+            got = dict(repo._runtime.notebook_store.resolve_participants(db, a.id, viewer_id="user-local"))
         assert got == {a.id: "personal", base.id: "base"}
 
     def test_multi_mount(self, repo):
@@ -49,7 +49,7 @@ class TestResolve:
         repo.mark_notebook_base(b2.id)
         _mount(repo, a.id, [b1.id, b2.id])
         with repo._connect() as db:
-            ids = repo._runtime.notebook_store.participant_ids(db, a.id)
+            ids = repo._runtime.notebook_store.participant_ids(db, a.id, viewer_id="user-local")
         assert set(ids) == {a.id, b1.id, b2.id}
 
     def test_participants_order_base_before_personal(self, repo):
@@ -68,7 +68,7 @@ class TestResolve:
         repo.mark_notebook_base(base_lib.id)
         _mount(repo, a.id, [personal_lib.id, base_lib.id])
         with repo._connect() as db:
-            got = repo._runtime.notebook_store.resolve_participants(db, a.id)
+            got = repo._runtime.notebook_store.resolve_participants(db, a.id, viewer_id="user-local")
         assert got[0] == (a.id, "personal"), "首项恒为 active 自身"
         mounted_ids = [nb_id for nb_id, _tier in got[1:]]
         assert mounted_ids == [base_lib.id, personal_lib.id], (
@@ -81,7 +81,7 @@ class TestResolve:
         mine = repo.create_notebook(NotebookCreate(name="我的模拟笔记"))
         _mount(repo, a.id, [mine.id])
         with repo._connect() as db:
-            got = dict(repo._runtime.notebook_store.resolve_participants(db, a.id))
+            got = dict(repo._runtime.notebook_store.resolve_participants(db, a.id, viewer_id="user-local"))
         assert got[mine.id] == "personal", "挂自己的库不应被提升为 base"
 
     def test_mounting_is_not_transitive(self, repo):
@@ -92,7 +92,7 @@ class TestResolve:
         _mount(repo, b.id, [c.id])
         _mount(repo, a.id, [b.id])
         with repo._connect() as db:
-            ids = repo._runtime.notebook_store.participant_ids(db, a.id)
+            ids = repo._runtime.notebook_store.participant_ids(db, a.id, viewer_id="user-local")
         assert set(ids) == {a.id, b.id}, "只看直接挂的一跳，C 不应出现"
 
     def test_edge_to_other_owners_personal_notebook_is_skipped(self, repo):
@@ -105,7 +105,7 @@ class TestResolve:
                 "UPDATE notebooks SET created_by=? WHERE id=?", (other.id, theirs.id)
             )
         with repo._connect() as db:
-            ids = repo._runtime.notebook_store.participant_ids(db, a.id)
+            ids = repo._runtime.notebook_store.participant_ids(db, a.id, viewer_id="user-local")
         assert ids == [a.id], "边不是授权凭证，易主后必须跳过"
 
     def test_demoted_public_base_is_skipped_then_restored(self, repo):
@@ -120,10 +120,10 @@ class TestResolve:
             )
         repo.set_notebook_personal(base.id)
         with repo._connect() as db:
-            assert repo._runtime.notebook_store.participant_ids(db, a.id) == [a.id]
+            assert repo._runtime.notebook_store.participant_ids(db, a.id, viewer_id="user-local") == [a.id]
         repo.mark_notebook_base(base.id)  # 重新发布 → 边自动恢复（从未删除）
         with repo._connect() as db:
-            assert set(repo._runtime.notebook_store.participant_ids(db, a.id)) == {a.id, base.id}
+            assert set(repo._runtime.notebook_store.participant_ids(db, a.id, viewer_id="user-local")) == {a.id, base.id}
 
     def test_list_mount_edges_reports_inactive(self, repo):
         a = repo.create_notebook(NotebookCreate(name="a"))
@@ -148,7 +148,7 @@ class TestResolve:
         _mount(repo, a.id, [b1.id])
         _mount(repo, a.id, [b2.id])
         with repo._connect() as db:
-            assert set(repo._runtime.notebook_store.participant_ids(db, a.id)) == {a.id, b2.id}
+            assert set(repo._runtime.notebook_store.participant_ids(db, a.id, viewer_id="user-local")) == {a.id, b2.id}
 
     def test_mountable_excludes_self_and_others_personal(self, repo):
         a = repo.create_notebook(NotebookCreate(name="a"))
@@ -164,15 +164,17 @@ class TestResolve:
         got = {n["id"] for n in repo.mountable_notebooks(a.id)}
         assert got == {mine.id, base.id}
 
-    def test_participant_resolution_uses_mounting_owner_not_requester(self, repo):
-        """owner 判定取「挂载方笔记本 A 的 created_by」而非发起解析的请求用户——
-        用两个真实用户才区分得出来,单一 user-local(拥有全部笔记本)测不出这条
-        不变量。被挂库刻意用个人库(非公共 base),逼 MOUNT_VALID_EXPR 走
-        created_by 分支而非 tier='base' 分支。只读共享的访客与库主必须解析出
-        同一个参与集(mount_sql.py 模块 docstring 的设计意图)。"""
-        from app.core.request_context import reset_request_user, set_request_user
+    def test_participant_resolution_follows_the_viewer(self, repo):
+        """M3:挂载只对挂载人、或自己本来就能读被挂库的人生效。
+
+        用两个真实用户才区分得出来,单一 user-local(拥有全部笔记本)测不出。被挂库
+        刻意用个人库(非公共 base),逼 MOUNT_VALID_EXPR 走 created_by 分支而非
+        tier='base' 分支。甲是 A 与被挂个人库的 owner(挂载人),乙是 A 的只读成员:
+        甲解析出带 lib 的参与集,乙读不了 lib 就解析不出;乙拿到 lib 的读权后生效,
+        收回即失效。参与集不再「与谁在提问无关」(那条旧契约已作废)。"""
         jia = repo.create_user("a00900005", "pw")  # 甲:A 与被挂个人库的 owner
-        yi = repo.create_user("a00900006", "pw")   # 乙:发起解析请求的另一用户
+        yi = repo.create_user("a00900006", "pw")   # 乙:A 的只读成员,读不了 lib
+        from app.core.request_context import reset_request_user, set_request_user
 
         tok = set_request_user(jia)
         try:
@@ -181,14 +183,22 @@ class TestResolve:
             _mount(repo, a.id, [lib.id])
         finally:
             reset_request_user(tok)
+        repo._runtime.sharing.add_member(a.id, yi.id)
 
-        tok = set_request_user(yi)  # 以乙的身份解析——乙既不拥有 a 也不拥有 lib
-        try:
+        def participants(viewer_id):
             with repo._connect() as db:
-                ids = repo._runtime.notebook_store.participant_ids(db, a.id)
-        finally:
-            reset_request_user(tok)
-        assert set(ids) == {a.id, lib.id}, "参与集只取决于 A 的 owner(甲),与发起请求的乙无关"
+                return repo._runtime.notebook_store.participant_ids(
+                    db, a.id, viewer_id=viewer_id
+                )
+
+        assert participants(jia.id) == [a.id, lib.id], "挂载人自己生效"
+        assert participants(yi.id) == [a.id], "乙读不了 lib:挂载对乙不生效"
+        assert participants("") == [a.id] and participants(None) == [a.id]
+        repo._runtime.sharing.add_member(lib.id, yi.id)
+        assert participants(yi.id) == [a.id, lib.id], "乙自己能读 lib 则生效"
+        repo._runtime.sharing.remove_member(lib.id, yi.id)
+        assert participants(yi.id) == [a.id], "收回读权即失效"
+
 
 class TestKgGate:
     """深入分析可用性门:_any_base_notebook_has_kg 按「本库是否挂载了该 base」判定,
@@ -215,7 +225,7 @@ class TestKgGate:
             {"local_id": "K1", "object_type": "concept",
              "payload": {"name": "Gain", "definition": "增益"}, "evidence": []},
         ], [])
-        assert repo._any_base_notebook_has_kg(a.id) is False
+        assert repo._any_base_notebook_has_kg(a.id, viewer_id="user-local") is False
 
     def test_mounted_base_with_kg_opens_gate(self, repo):
         a = repo.create_notebook(NotebookCreate(name="a"))
@@ -226,7 +236,7 @@ class TestKgGate:
              "payload": {"name": "Gain", "definition": "增益"}, "evidence": []},
         ], [])
         repo.replace_notebook_bases(a.id, [base.id], "user-local")
-        assert repo._any_base_notebook_has_kg(a.id) is True
+        assert repo._any_base_notebook_has_kg(a.id, viewer_id="user-local") is True
 
 
 class TestScaleEligible:
@@ -593,7 +603,7 @@ class TestApiUnauthorizedWrite:
         )
         assert resp.status_code == 200
         assert [b["id"] for b in resp.json()] == [shared["id"]]
-        assert repo_api.participant_notebook_ids(a["id"]) == [a["id"], shared["id"]]
+        assert repo_api.participant_notebook_ids(a["id"], viewer_id=c["u1_id"]) == [a["id"], shared["id"]]
 
     def test_mount_deactivates_when_the_share_is_revoked(self, two_users_client):
         """撤销只读分享 ⇒ 边保留但不生效,重新分享即自动恢复。
@@ -614,17 +624,17 @@ class TestApiUnauthorizedWrite:
             f"/api/notebooks/{a['id']}/bases", headers=c["u1"],
             json={"base_notebook_ids": [shared["id"]]},
         )
-        assert repo_api.participant_notebook_ids(a["id"]) == [a["id"], shared["id"]]
+        assert repo_api.participant_notebook_ids(a["id"], viewer_id=c["u1_id"]) == [a["id"], shared["id"]]
 
         repo_api.remove_member(shared["id"], c["u1_id"])
-        assert repo_api.participant_notebook_ids(a["id"]) == [a["id"]]
+        assert repo_api.participant_notebook_ids(a["id"], viewer_id=c["u1_id"]) == [a["id"]]
         edges = repo_api.list_notebook_bases(a["id"])
         assert [(e["id"], e["active"]) for e in edges] == [(shared["id"], False)], (
             "边必须保留、只是失效——静默删掉用户配置无法撤销"
         )
 
         repo_api.add_member(shared["id"], c["u1_id"])
-        assert repo_api.participant_notebook_ids(a["id"]) == [a["id"], shared["id"]]
+        assert repo_api.participant_notebook_ids(a["id"], viewer_id=c["u1_id"]) == [a["id"], shared["id"]]
 
     def test_group_grant_grants_mountable_status(self, two_users_client):
         """群组授权边同样让被挂库进入可挂候选,撤销授权即刻失效。
@@ -671,11 +681,11 @@ class TestApiUnauthorizedWrite:
             json={"base_notebook_ids": [theirs["id"]]},
         )
         assert resp.status_code == 200
-        assert repo_api.participant_notebook_ids(a["id"]) == [a["id"], theirs["id"]]
+        assert repo_api.participant_notebook_ids(a["id"], viewer_id=c["u1_id"]) == [a["id"], theirs["id"]]
 
         with repo_api._write() as db:
             db.execute("DELETE FROM notebook_grants WHERE id=?", ("gr-mount",))
-        assert repo_api.participant_notebook_ids(a["id"]) == [a["id"]]
+        assert repo_api.participant_notebook_ids(a["id"], viewer_id=c["u1_id"]) == [a["id"]]
         assert theirs["id"] not in {
             row["id"] for row in repo_api.mountable_notebooks(a["id"])
         }
@@ -895,7 +905,7 @@ class TestBorrowedMountReshare:
             json={"base_notebook_ids": [y["id"]]},
         )
         assert resp.status_code == 200, "① 未共享的 X 借入挂载 Y 必须成立"
-        assert repo.participant_notebook_ids(x["id"]) == [x["id"], y["id"]]
+        assert repo.participant_notebook_ids(x["id"], viewer_id=c["alice_id"]) == [x["id"], y["id"]]
         return repo, x, y, source_id
 
     def test_borrowed_mount_works_while_the_mounter_is_not_shared(
@@ -925,7 +935,7 @@ class TestBorrowedMountReshare:
         repo.add_member(x["id"], c["bob_id"])
         assert repo.user_can_read_notebook(x["id"], c["bob_id"]) is True
 
-        assert repo.participant_notebook_ids(x["id"]) == [x["id"]], (
+        assert repo.participant_notebook_ids(x["id"], viewer_id=c["alice_id"]) == [x["id"]], (
             "X 一被共享,借来的 Y 就必须退出参与集——否则检索会替 Carol 把全文交给 Bob"
         )
         for who in ("bob", "alice"):
@@ -945,10 +955,10 @@ class TestBorrowedMountReshare:
         c = three_users_client
         repo, x, y, source_id = self._stage(c)
         repo.add_member(x["id"], c["bob_id"])
-        assert repo.participant_notebook_ids(x["id"]) == [x["id"]]
+        assert repo.participant_notebook_ids(x["id"], viewer_id=c["alice_id"]) == [x["id"]]
 
         repo.remove_member(x["id"], c["bob_id"])
-        assert repo.participant_notebook_ids(x["id"]) == [x["id"], y["id"]]
+        assert repo.participant_notebook_ids(x["id"], viewer_id=c["alice_id"]) == [x["id"], y["id"]]
         detail = c["client"].get(
             f"/api/notebooks/{x['id']}/sources/{source_id}", headers=c["alice"]
         )
@@ -965,10 +975,10 @@ class TestBorrowedMountReshare:
         c = three_users_client
         repo, x, y, source_id = self._stage(c)
         _insert_grant(repo, x["id"], "user", c["bob_id"], c["alice_id"], "gr-x-bob")
-        assert repo.participant_notebook_ids(x["id"]) == [x["id"]]
+        assert repo.participant_notebook_ids(x["id"], viewer_id=c["alice_id"]) == [x["id"]]
         with repo._write() as db:
             db.execute("DELETE FROM notebook_grants WHERE id='gr-x-bob'")
-        assert repo.participant_notebook_ids(x["id"]) == [x["id"], y["id"]]
+        assert repo.participant_notebook_ids(x["id"], viewer_id=c["alice_id"]) == [x["id"], y["id"]]
 
     def test_everyone_grant_survives_the_mounter_being_shared(
         self, three_users_client
@@ -995,7 +1005,7 @@ class TestBorrowedMountReshare:
             json={"base_notebook_ids": [y["id"]]},
         ).status_code == 200
         repo.add_member(x["id"], c["bob_id"])
-        assert repo.participant_notebook_ids(x["id"]) == [x["id"], y["id"]]
+        assert repo.participant_notebook_ids(x["id"], viewer_id=c["alice_id"]) == [x["id"], y["id"]]
         got = client.get(
             f"/api/notebooks/{x['id']}/sources/{source_id}", headers=c["bob"]
         )
@@ -1030,12 +1040,12 @@ class TestBorrowedMountReshare:
             f"/api/notebooks/{x['id']}/bases", headers=c["alice"],
             json={"base_notebook_ids": [y["id"]]},
         ).status_code == 200
-        assert repo.participant_notebook_ids(x["id"]) == [x["id"], y["id"]]
+        assert repo.participant_notebook_ids(x["id"], viewer_id=c["alice_id"]) == [x["id"], y["id"]]
 
         repo.add_member(x["id"], c["bob_id"])
-        assert repo.participant_notebook_ids(x["id"]) == [x["id"]]
+        assert repo.participant_notebook_ids(x["id"], viewer_id=c["alice_id"]) == [x["id"]]
         repo.remove_member(x["id"], c["bob_id"])
-        assert repo.participant_notebook_ids(x["id"]) == [x["id"], y["id"]]
+        assert repo.participant_notebook_ids(x["id"], viewer_id=c["alice_id"]) == [x["id"], y["id"]]
 
     def test_gate_closed_edge_keeps_the_name_and_explains_the_exit(
         self, three_users_client
@@ -1093,7 +1103,7 @@ class TestBorrowedMountReshare:
             f"/api/notebooks/{x['id']}/bases", headers=c["alice"],
             json={"base_notebook_ids": [public["id"], own["id"]]},
         ).status_code == 200
-        assert set(repo.participant_notebook_ids(x["id"])) == {
+        assert set(repo.participant_notebook_ids(x["id"], viewer_id=c["alice_id"])) == {
             x["id"], public["id"], own["id"]
         }
 
@@ -1942,7 +1952,7 @@ class TestCopyingNotebookExcludedFromMounting:
                 "UPDATE notebooks SET status='copying' WHERE id=?", (mid_copy.id,)
             )
         with repo._connect() as db:
-            ids = repo._runtime.notebook_store.participant_ids(db, a.id)
+            ids = repo._runtime.notebook_store.participant_ids(db, a.id, viewer_id="user-local")
         assert ids == [a.id], "status='copying' 的库即便已有挂载边也不该进入参与集"
 
     def test_copying_notebook_becomes_eligible_once_copy_completes(self, repo):
@@ -1963,14 +1973,14 @@ class TestCopyingNotebookExcludedFromMounting:
                 "UPDATE notebooks SET status='copying' WHERE id=?", (mid_copy.id,)
             )
         with repo._connect() as db:
-            assert repo._runtime.notebook_store.participant_ids(db, a.id) == [a.id]
+            assert repo._runtime.notebook_store.participant_ids(db, a.id, viewer_id="user-local") == [a.id]
 
         with repo._write() as db:
             db.execute(
                 "UPDATE notebooks SET status='draft' WHERE id=?", (mid_copy.id,)
             )
         with repo._connect() as db:
-            got = set(repo._runtime.notebook_store.participant_ids(db, a.id))
+            got = set(repo._runtime.notebook_store.participant_ids(db, a.id, viewer_id="user-local"))
         assert got == {a.id, mid_copy.id}, "拷贝完成(status 翻回非 copying)后应立即恢复参与,无需重新挂载"
 
 

@@ -691,7 +691,7 @@ def test_comparison_peers_are_not_borrowed_from_an_unchecked_library():
     from app.services.communities import CommunityQueryService
 
     class _Kg:
-        def mounted_base_ids(self, _active):
+        def mounted_base_ids(self, _active, *, viewer_id=None):
             return ["kept-base", "dropped-base"]
 
     service = CommunityQueryService(
@@ -744,11 +744,11 @@ class _KgProbeCandidates:
     def _connect(self):
         return contextlib.nullcontext(None)
 
-    def _participant_notebook_ids(self, active_notebook_id):
+    def _participant_notebook_ids(self, active_notebook_id, *, viewer_id=None):
         # resolve_participants 的形状:首项恒为 active 本身。
         return [active_notebook_id, *self._mounted]
 
-    def _participant_tiers(self, db, active_notebook_id):
+    def _participant_tiers(self, db, active_notebook_id, *, viewer_id=None):
         notebook_ids = self._participant_notebook_ids(active_notebook_id)
         return notebook_ids, {
             notebook_id: ("personal" if index == 0 else "base")

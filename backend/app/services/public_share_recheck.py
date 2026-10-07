@@ -15,10 +15,10 @@ whole page unreadable, the same as the global branch losing a library: the
 same indistinguishable 404 an unknown token gets, and restoring the mount
 revives the same link.
 
-Today's mount predicate does not depend on who asks (``mount_sql``: the
-mounting notebook's owner decides); ``creator_id`` is carried so the per-viewer
-predicate (M3, PR-E6) is applied to the creator at this one call site when it
-lands.  An empty creator fails closed.
+The mount predicate depends on who asks (M3, ``mount_sql``: a mount is
+effective for the mounter, or for whoever can read the mounted library
+themselves), so the participant set is read AS ``creator_id`` -- the anonymous
+page binds no request user.  An empty creator fails closed.
 
 Which libraries the references come from:
 
@@ -131,7 +131,7 @@ def mounts_still_effective(
     notebook_id: str,
     creator_id: str,
     library_ids: Iterable[str],
-    participant_notebook_ids: Callable[[str], Iterable[str]],
+    participant_notebook_ids: Callable[..., Iterable[str]],
 ) -> bool:
     """True when every library in ``library_ids`` other than ``notebook_id``
     is still an effective participant of ``notebook_id`` for its creator.
@@ -143,4 +143,6 @@ def mounts_still_effective(
         return True
     if not creator_id:
         return False
-    return foreign <= set(participant_notebook_ids(notebook_id))
+    return foreign <= set(
+        participant_notebook_ids(notebook_id, viewer_id=creator_id)
+    )

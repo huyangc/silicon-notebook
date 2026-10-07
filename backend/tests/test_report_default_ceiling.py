@@ -102,6 +102,10 @@ def build_report_fixture(repo, placeholder: str) -> dict[str, Any]:
     insert(lib, "rep-lib-knowhow", "knowhow")
     memory(lib, alice.id, "rep-mem-lib", "rep-lib-memory")
     with repo._write() as db:
+        # E6-3: the participant reader is not yet bound to the run's viewer (M3), so
+        # only a library open to everybody -- a public base -- is mounted for the
+        # report run; E6-3 restores Alice's private library with her actor.
+        db.execute(f"UPDATE notebooks SET tier='base' WHERE id={ph}", (lib,))
         db.execute(
             "INSERT INTO notebook_bases"
             "(notebook_id,base_notebook_id,created_at,created_by) "

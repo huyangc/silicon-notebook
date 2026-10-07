@@ -295,7 +295,7 @@ class NotebookSummaryQuery:
         return self.queries.visible_pending_kg_source_count(db, notebook_id)
 
     def mounted_bases(
-        self, notebook_id: str, db: "object | None" = None
+        self, notebook_id: str, db: "object | None" = None, *, viewer_id: str | None
     ) -> "tuple[list[NotebookRef], list[str]]":
         """(参考库列表, 其中**已建 KG 的库 id**) —— 一次查询同时供 NotebookSummary 的
         base_notebooks、base_kg_notebook_ids 与 base_kg_available,避免每条 summary 各查
@@ -307,12 +307,17 @@ class NotebookSummaryQuery:
 
         零新增查询:`mounted_bases_row` 的**每一行本来就带 has_kg**(见两侧 QueryStore 的
         SQL:`EXISTS(... knowledge_objects ... ko.notebook_id = b.id) AS has_kg`),这里
-        只是不再把它 any(...) 掉。"""
+        只是不再把它 any(...) 掉。
+
+        挂载只对挂载人、或自己本来就能读被挂库的人生效(M3),所以摘要随查看者变化:
+        ``viewer_id`` 是必填关键字,``None`` 表示没有查看者(只剩公共库与 everyone)。"""
         if db is not None:
-            rows = self.queries.mounted_bases_row(db, notebook_id)
+            rows = self.queries.mounted_bases_row(db, notebook_id, viewer_id=viewer_id)
         else:
             with self.database.connect() as conn:
-                rows = self.queries.mounted_bases_row(conn, notebook_id)
+                rows = self.queries.mounted_bases_row(
+                    conn, notebook_id, viewer_id=viewer_id
+                )
         refs = [
             NotebookRef(id=r["id"], name=r["name"], tier=r["tier"] or "personal")
             for r in rows
@@ -362,7 +367,9 @@ class NotebookSummaryQuery:
 
         # 一次读取,两种投影:布尔 base_kg_available 与它的分解 base_kg_notebook_ids。
         # 自洽(非空 ⟺ 为真)因此是构造性的 —— 不存在两个独立求值的机会。
-        base_refs, base_kg_ids = self.mounted_bases(row["id"], connection)
+        base_refs, base_kg_ids = self.mounted_bases(
+            row["id"], connection, viewer_id=user_id
+        )
         options = indexing_options or self._indexing_option_map()
         desired_id = str(row["indexing_pipeline"] or "") if "indexing_pipeline" in keys else ""
         desired_version = (
@@ -609,7 +616,9 @@ class NotebookSummaryQuery:
             summary.local_evidence_available = local_evidence
             summary.ask_available = local_evidence or bool(
                 summary.base_kg_available
-                and self.queries.notebook_has_usable_base_kg(db, notebook_id)
+                and self.queries.notebook_has_usable_base_kg(
+                    db, notebook_id, viewer_id=user_id
+                )
             )
             # paper_meta_missing:「补全论文信息」按钮的显示门(见字段注释)。已在手的
             # 可见来源数是合规候选的严格超集(两者同排 memory/knowhow 合成源),为 0

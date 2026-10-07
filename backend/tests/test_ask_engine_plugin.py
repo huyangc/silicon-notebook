@@ -639,7 +639,11 @@ def _live_scoped_access(repo, active_id: str, actor_id: str):
         active_notebook_id=active_id,
         actor_id=actor_id,
         cancellation=None,
-        participant_notebook_ids=repo._runtime.notebook_store.participant_notebook_ids,
+        participant_notebook_ids=lambda notebook_id: (
+            repo._runtime.notebook_store.participant_notebook_ids(
+                notebook_id, viewer_id=actor_id,
+            )
+        ),
         all_visible_source_ids=repo._runtime.source_store.all_visible_source_ids,
         hidden_source_ids=repo._runtime.source_store.hidden_source_ids,
         search_elements=repo.retrieval.federated_retrieve_elements,

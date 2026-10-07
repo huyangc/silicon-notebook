@@ -478,7 +478,7 @@ class _RetrievalState:
         """
         with self._connect() as db:
             notebook_ids, tier_map = self.notebooks.participant_tiers(
-                db, active_notebook_id,
+                db, active_notebook_id, viewer_id="",  # E6-3
             )
         return tuple(
             (nid, tier_map.get(nid, "personal")) for nid in notebook_ids
@@ -525,7 +525,9 @@ class _RetrievalState:
             return any(
                 not self.notebook_copy_stats(notebook_id)["copyable"]
                 for notebook_id
-                in self.notebooks.participant_notebook_ids(active_notebook_id)
+                in self.notebooks.participant_notebook_ids(
+                    active_notebook_id, viewer_id="",  # E6-3
+                )
             )
         return any(
             not self.notebook_copy_stats(notebook_id)["copyable"]
@@ -830,8 +832,10 @@ class _RetrievalState:
                 )[1:]
             )
         if database is not None:
-            return self.knowledge.any_mounted_has_kg_on(database, notebook_id)
-        return self.knowledge.any_mounted_has_kg(notebook_id)
+            return self.knowledge.any_mounted_has_kg_on(
+                database, notebook_id, viewer_id="",  # E6-3
+            )
+        return self.knowledge.any_mounted_has_kg(notebook_id, viewer_id="")  # E6-3
 
     def _federated_rx_graph(self, *args, **kwargs):
         return self._peer._federated_rx_graph(*args, **kwargs)

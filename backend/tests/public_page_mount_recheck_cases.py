@@ -33,9 +33,17 @@ from tests.report_share_disclosure_cases import World, make_report, share, sourc
 _KEYS = count(1)
 
 
-def mounted_library(world: World) -> tuple[str, str]:
+def mounted_library(
+    world: World, *, readable_by_alice: bool = True
+) -> tuple[str, str]:
     """``(library id, a document source in it)``: an owner's library mounted on
-    the world's notebook."""
+    the world's notebook.
+
+    A mount is effective for the viewer who can read the library themselves, or
+    who mounted it (M3), and the anonymous page asks AS the share's creator --
+    Alice.  So by default Alice is also a reader of the library, which keeps the
+    scenarios below about the mount's lifecycle; ``readable_by_alice=False``
+    is the library only the mounter can read."""
     library = world.client.post(
         "/api/notebooks", json={"name": "参考库"}, headers=world.owner.headers
     ).json()["id"]
@@ -46,6 +54,8 @@ def mounted_library(world: World) -> tuple[str, str]:
         file_name="r.md", file_path="", file_size=1, file_hash="h",
         summary="", doc_type="",
     )
+    if readable_by_alice:
+        world.repo.add_member(library, world.alice.id)
     mount(world, [library])
     return library, source
 
@@ -120,6 +130,33 @@ def case_conversation_share_is_refused_while_its_mount_is_gone(world: World) -> 
     assert world.repo.conversation_share_state(world.notebook, cid)["share_token"] == ""
     mount(world, [library])
     assert publish(world, world.alice, cid, first).status_code == 200
+
+
+def case_a_mount_its_creator_cannot_read_is_not_served(world: World) -> None:
+    """M3: the owner mounts a private library on the shared notebook, and Alice
+    (a member who asks and publishes) cannot read it herself.  The mount is
+    effective for its mounter only, so a page quoting it is not issued, and one
+    already issued stops being served the moment Alice stops reading the
+    library -- the same indistinguishable 404 -- and revives when she reads it
+    again.  The mounter's own reading of the library is untouched."""
+    library, source = mounted_library(world, readable_by_alice=False)
+    cid, (first,) = seed_conversation(world, world.alice, [
+        answer([source_anchor(source, "k1", notebook_id=library, title="参考资料")]),
+    ])
+    lost = {"detail": "部分笔记本已无法访问，请重新选择范围。"}
+    refused = publish(world, world.alice, cid, first)
+    assert refused.status_code == 404 and refused.json() == lost
+    assert world.repo.participant_notebook_ids(
+        world.notebook, viewer_id=world.owner.id
+    ) == [world.notebook, library], "the mounter still has the mount"
+    world.repo.add_member(library, world.alice.id)
+    token = publish(world, world.alice, cid, first).json()["share_token"]
+    page = f"/api/public/conversations/{token}"
+    assert world.client.get(page).status_code == 200
+    world.repo.remove_member(library, world.alice.id)
+    assert world.client.get(page).status_code == 404
+    world.repo.add_member(library, world.alice.id)
+    assert world.client.get(page).status_code == 200
 
 
 def _knowledge_object(world: World, notebook_id: str) -> str:

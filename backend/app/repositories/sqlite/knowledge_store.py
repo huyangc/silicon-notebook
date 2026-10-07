@@ -43,7 +43,7 @@ from app.repositories.sqlite.memory_sql import (
     own_memory_source,
 )
 from app.repositories.sqlite.mount_sql import (
-    MOUNT_JOIN, MOUNT_VALID, MOUNTED_BASE_IDS_SUBQUERY,
+    MOUNT_EFFECTIVE_FOR_VIEWER, MOUNT_VIEWER_JOIN, MOUNTED_BASE_IDS_FOR_VIEWER_SUBQUERY,
 )
 
 
@@ -1548,25 +1548,31 @@ class KnowledgeStore:
             ).fetchone()[0])
 
     @staticmethod
-    def any_mounted_has_kg_on(db: sqlite3.Connection, notebook_id: str) -> bool:
+    def any_mounted_has_kg_on(
+        db: sqlite3.Connection, notebook_id: str, *, viewer_id: str | None
+    ) -> bool:
         """本库挂载的参考库中是否有任一已建 KG —— 驱动前端严格推理门控。
-        未挂载 → False(即便系统里存在有图的公共知识库)。"""
+        未挂载 → False(即便系统里存在有图的公共知识库)。
+        ``viewer_id`` 是必填关键字(M3:挂载只对挂载人或自己能读被挂库的人生效);
+        ``None``/空串 = 无查看者,只剩公共库与 ``everyone``。"""
         return bool(db.execute(
-            "SELECT EXISTS(SELECT 1 " + MOUNT_JOIN + MOUNT_VALID
+            "SELECT EXISTS(SELECT 1 " + MOUNT_VIEWER_JOIN + MOUNT_EFFECTIVE_FOR_VIEWER
             + " AND EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id))",
-            (notebook_id,),
+            (viewer_id, notebook_id),
         ).fetchone()[0])
 
-    def any_mounted_has_kg(self, notebook_id: str) -> bool:
+    def any_mounted_has_kg(self, notebook_id: str, *, viewer_id: str | None) -> bool:
         with self.database.connect() as db:
-            return self.any_mounted_has_kg_on(db, notebook_id)
+            return self.any_mounted_has_kg_on(db, notebook_id, viewer_id=viewer_id)
 
     def any_mounted_has_kg_compat(
-        self, notebook_id: str, db: "sqlite3.Connection | None" = None
+        self, notebook_id: str, db: "sqlite3.Connection | None" = None,
+        *, viewer_id: str | None
     ) -> bool:
         return (
-            self.any_mounted_has_kg_on(db, notebook_id) if db is not None
-            else self.any_mounted_has_kg(notebook_id)
+            self.any_mounted_has_kg_on(db, notebook_id, viewer_id=viewer_id)
+            if db is not None
+            else self.any_mounted_has_kg(notebook_id, viewer_id=viewer_id)
         )
 
     def retrieval_objects_compat(
@@ -1953,7 +1959,7 @@ class KnowledgeStore:
     @staticmethod
     def follow_start_row(db: sqlite3.Connection, object_id: str,
                          active_notebook_id: str, statuses,
-                         participant_ids=None):
+                         participant_ids=None, *, viewer_id: str | None):
         """起点授权门:只有 active 自己的对象、或 active 挂载的参考库里的对象,
         才能作为 follow_chain 的合法起点(未挂载的 tier='base' 库不算,即便它已发布)。
 
@@ -1975,8 +1981,8 @@ class KnowledgeStore:
                 f"FROM knowledge_objects ko JOIN notebooks n ON n.id=ko.notebook_id "
                 f"WHERE ko.id=? AND ko.status IN ({ph}) "
                 "AND (ko.notebook_id=? OR ko.notebook_id IN ("
-                + MOUNTED_BASE_IDS_SUBQUERY + "))",
-                (object_id, *statuses, active_notebook_id, active_notebook_id),
+                + MOUNTED_BASE_IDS_FOR_VIEWER_SUBQUERY + "))",
+                (object_id, *statuses, active_notebook_id, viewer_id, active_notebook_id),
             ).fetchone()
         ids = [str(value) for value in participant_ids]
         if not ids:

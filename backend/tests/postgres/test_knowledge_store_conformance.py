@@ -900,10 +900,10 @@ def test_mount_order_and_equal_score_relation_federation_are_id_stable(
             connection, "nb-personal"
         )
         query_store = PostgresQueryStore(knowledge_harness.database)
-        summary_rows = query_store.mounted_bases_row(connection, "nb-personal")
+        summary_rows = query_store.mounted_bases_row(connection, "nb-personal", viewer_id="user-golden")
 
     unified = PostgresUnifiedKgStore(knowledge_harness.database, now=lambda: NOW)
-    community_mounted = unified.mounted_base_ids("nb-personal")
+    community_mounted = unified.mounted_base_ids("nb-personal", viewer_id="user-golden")
     expected_bases = ["nb-duplicate-a", "nb-duplicate-z"]
     assert mounted == expected_bases
     assert [row["id"] for row in summary_rows] == expected_bases
@@ -1362,7 +1362,7 @@ def test_postgres_raw_graph_rows_keep_repository_json_text_contract(postgres_dat
             connection, "nb-personal", ["rel-json"]
         )
         start = store.follow_start_row(
-            connection, "ko-json-a", "nb-personal", USABLE_STATUSES
+            connection, "ko-json-a", "nb-personal", USABLE_STATUSES, viewer_id="user-golden"
         )
         relation_rows = store.follow_relation_evidence_rows(connection, ["rel-json"])
         object_rows = store.follow_object_rows(
@@ -6448,17 +6448,17 @@ def test_postgres_follow_start_row_accepts_an_explicit_participant_set(
     with postgres_database.connect() as connection:
         # 不传:挂载子查询逐字保留,未挂载的库不是合法起点。
         assert store.follow_start_row(
-            connection, "ko-peer", "nb-personal", USABLE_STATUSES
+            connection, "ko-peer", "nb-personal", USABLE_STATUSES, viewer_id="user-golden"
         ) is None
         # 显式 None 与不传必须等价。
         assert store.follow_start_row(
             connection, "ko-peer", "nb-personal", USABLE_STATUSES,
-            participant_ids=None,
+            participant_ids=None, viewer_id="user-golden",
         ) is None
         # 传覆盖集 -> 合法,且行的归属库如实。
         row = store.follow_start_row(
             connection, "ko-peer", "nb-personal", USABLE_STATUSES,
-            participant_ids=["nb-personal", "nb-base"],
+            participant_ids=["nb-personal", "nb-base"], viewer_id="user-golden",
         )
         assert row is not None
         assert row["notebook_id"] == "nb-base"
@@ -6467,7 +6467,7 @@ def test_postgres_follow_start_row_accepts_an_explicit_participant_set(
         # 「没有任何库参与」也本就没有合法起点。
         assert store.follow_start_row(
             connection, "ko-peer", "nb-personal", USABLE_STATUSES,
-            participant_ids=[],
+            participant_ids=[], viewer_id="user-golden",
         ) is None
 
 

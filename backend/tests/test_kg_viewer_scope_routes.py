@@ -146,6 +146,11 @@ def test_mounted_library_exposes_visible_sources_only_to_a_non_member(two_users_
     env = two_users_client
     c, repo = env.client, env.repo
     lib = c.post("/api/notebooks", headers=env.owner, json={"name": "lib"}).json()["id"]
+    # M3: a private library mounted on a shared notebook is effective only for those
+    # who can read it themselves, so the "reader who is not a member" of this
+    # contract is a reader of a library open to everybody -- a public base.  (E6-3
+    # pins the private case end to end once the route binds the asker.)
+    repo.mark_notebook_base(lib)
     with repo._write() as db:
         _source(db, lib, "src-lib", elements=[("el-lib", "LIB visible")])
         db.execute(

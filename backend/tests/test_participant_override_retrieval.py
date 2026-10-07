@@ -101,7 +101,7 @@ def islands(repo):
     # 前提确认:三者之间没有任何挂载边,所以挂载谓词只会返回它自己。
     with repo._connect() as db:
         for notebook_id in ids:
-            assert repo._runtime.notebook_store.participant_ids(db, notebook_id) == [
+            assert repo._runtime.notebook_store.participant_ids(db, notebook_id, viewer_id=_ACTOR) == [
                 notebook_id
             ]
     return tuple(ids), sources
@@ -488,17 +488,17 @@ def test_follow_start_row_resolves_a_start_in_any_override_participant(repo, isl
     with repo._connect() as db:
         # 不传 participant_ids:挂载子查询逐字保留,互不挂载 -> 起点不合法。
         assert repo.retrieval.candidates.knowledge.follow_start_row(
-            db, peer_object_id, active, USABLE_STATUSES,
+            db, peer_object_id, active, USABLE_STATUSES, viewer_id=_ACTOR,
         ) is None
         # 传覆盖集 -> 合法。
         row = repo.retrieval.candidates.knowledge.follow_start_row(
             db, peer_object_id, active, USABLE_STATUSES,
-            participant_ids=list(ids),
+            participant_ids=list(ids), viewer_id=_ACTOR,
         )
         assert row is not None and row["notebook_id"] == peer
         # 空清单是 fail-closed,不是「无限制」。
         assert repo.retrieval.candidates.knowledge.follow_start_row(
-            db, peer_object_id, active, USABLE_STATUSES, participant_ids=[],
+            db, peer_object_id, active, USABLE_STATUSES, participant_ids=[], viewer_id=_ACTOR,
         ) is None
 
 
@@ -520,10 +520,10 @@ def test_absent_participant_ids_is_byte_identical(repo):
             "SELECT id FROM knowledge_objects WHERE notebook_id=?", (base.id,),
         ).fetchone()["id"]
         implicit = repo.retrieval.candidates.knowledge.follow_start_row(
-            db, object_id, active.id, USABLE_STATUSES,
+            db, object_id, active.id, USABLE_STATUSES, viewer_id=_ACTOR,
         )
         explicit_none = repo.retrieval.candidates.knowledge.follow_start_row(
-            db, object_id, active.id, USABLE_STATUSES, participant_ids=None,
+            db, object_id, active.id, USABLE_STATUSES, participant_ids=None, viewer_id=_ACTOR,
         )
     assert implicit is not None
     assert dict(implicit) == dict(explicit_none)
@@ -815,7 +815,7 @@ def test_absent_override_keeps_mount_table(repo, islands):
     peer, by_name = _fold_fixture(repo, islands)
     hits = _fold_hits(peer, by_name)
     evidence = _evidence_context(repo)
-    expected = list(evidence.notebooks.participant_notebook_ids(active))
+    expected = list(evidence.notebooks.participant_notebook_ids(active, viewer_id=_ACTOR))
     assert expected == [active], "前提:互不挂载,挂载表只给 active 自己"
 
     reference_block, reference_map = evidence.knowledge_context(active, hits)
@@ -828,9 +828,9 @@ def test_absent_override_keeps_mount_table(repo, islands):
     original_fold = knowledge_port.cluster_fold
     original_relations = knowledge_port.in_network_relations
 
-    def _spy_predicate(notebook_id):
+    def _spy_predicate(notebook_id, **kwargs):
         predicate_calls.append(notebook_id)
-        return original_predicate(notebook_id)
+        return original_predicate(notebook_id, **kwargs)
 
     def _spy_fold(notebook_id, object_ids):
         fold_scopes.append(notebook_id)
@@ -941,7 +941,10 @@ def test_follow_chain_only_passes_participant_ids_under_an_override(repo, island
     graph.knowledge.follow_start_row = _spy
     try:
         graph.follow_chain(active, "ko-missing")
-        assert seen == [{}], "无覆盖时不得出现 participant_ids 关键字"
+        # 调用形状只多了必填的 ``viewer_id``(M3);``participant_ids`` 关键字仍不出现。
+        assert len(seen) == 1 and set(seen[0]) == {"viewer_id"}, (
+            "无覆盖时不得出现 participant_ids 关键字"
+        )
 
         seen.clear()
         with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):

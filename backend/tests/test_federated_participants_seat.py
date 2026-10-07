@@ -108,7 +108,7 @@ class _FakeNotebooks:
         self._pairs = list(pairs)
         self.reads = 0
 
-    def participant_tiers(self, db, active_notebook_id: str):
+    def participant_tiers(self, db, active_notebook_id: str, *, viewer_id=None):
         self.reads += 1
         assert active_notebook_id == self._pairs[0][0], (
             "resolve_participants 的首项恒为 active 本身,替身必须照抄这个约定"

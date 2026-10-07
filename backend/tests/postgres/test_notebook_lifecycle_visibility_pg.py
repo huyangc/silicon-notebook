@@ -210,7 +210,7 @@ def test_list_user_activity_scoped(postgres_repository, lifecycle):
 def test_mount_gate_participant_resolution(postgres_repository, lifecycle):
     store = postgres_repository._runtime.notebook_store
     with postgres_repository._connect() as db:
-        ids = set(store.participant_ids(db, lifecycle["viewer_id"]))
+        ids = set(store.participant_ids(db, lifecycle["viewer_id"], viewer_id=lifecycle["owner_id"]))
     assert ids == {lifecycle["viewer_id"], lifecycle["active_id"]}
 
 

@@ -610,7 +610,9 @@ class EvidenceContextService:
             }
         else:
             participants = set(
-                self.notebooks.participant_notebook_ids(active_notebook_id)
+                self.notebooks.participant_notebook_ids(
+                    active_notebook_id, viewer_id="",  # E6-3
+                )
             )
         rows = [
             item for item in items
@@ -1158,7 +1160,9 @@ class EvidenceContextService:
         # docstring:str 归一后逐值相同、零额外查询),所以这一行在生产上今天逐字不变。
         participants = resolve_retrieval_participant_ids(
             notebook_id,
-            lambda: self.notebooks.participant_notebook_ids(notebook_id),
+            lambda: self.notebooks.participant_notebook_ids(
+                notebook_id, viewer_id="",  # E6-3
+            ),
         )
         # T3(B2 有界化):需要折叠的 id 集合 = hit ids(本函数内 ``_canonical()``
         # 的全部调用点都只在这些 object_id 上查找)∪ priority_object_ids(防御性

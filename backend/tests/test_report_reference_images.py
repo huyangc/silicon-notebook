@@ -58,7 +58,7 @@ class _Notebooks:
     def tier_map(self, notebook_ids):
         return {}
 
-    def participant_notebook_ids(self, active_notebook_id):
+    def participant_notebook_ids(self, active_notebook_id, *, viewer_id=None):
         return [active_notebook_id]
 
 

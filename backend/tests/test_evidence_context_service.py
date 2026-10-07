@@ -13,7 +13,7 @@ class _Notebooks:
         tiers = {"active": "personal", "base": "base"}
         return {notebook_id: tiers[notebook_id] for notebook_id in notebook_ids if notebook_id in tiers}
 
-    def participant_notebook_ids(self, active_notebook_id):
+    def participant_notebook_ids(self, active_notebook_id, *, viewer_id=None):
         return [active_notebook_id, "base"]
 
 

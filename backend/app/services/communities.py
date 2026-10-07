@@ -76,7 +76,9 @@ class CommunityQueryService:
             active_notebook_id,
             lambda: (
                 active_notebook_id,
-                *self.unified_kg.mounted_base_ids(active_notebook_id),
+                *self.unified_kg.mounted_base_ids(
+                    active_notebook_id, viewer_id="",  # E6-3
+                ),
             ),
         )
         return list(scoped_participants(

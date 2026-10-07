@@ -21,8 +21,9 @@ from app.repositories.postgres.mount_sql import (
     MOUNT_JOIN as _MOUNT_JOIN,
     MOUNT_ORDER as _MOUNT_ORDER,
     MOUNT_ORIGIN_COLUMN as _MOUNT_ORIGIN_COLUMN,
-    MOUNT_VALID as _MOUNT_VALID,
+    MOUNT_EFFECTIVE_FOR_VIEWER as _MOUNT_EFFECTIVE_FOR_VIEWER,
     MOUNT_VALID_EXPR as _MOUNT_VALID_EXPR,
+    MOUNT_VIEWER_JOIN as _MOUNT_VIEWER_JOIN,
 )
 from app.domain.knowledge_contracts import USABLE_STATUSES  # noqa: F401
 from app.repositories.postgres.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
@@ -81,7 +82,15 @@ class NotebookStore:
         return {row["id"]: row["tier"] or "personal" for row in rows}
 
     @staticmethod
-    def resolve_participants(connection, active_notebook_id: str) -> list[tuple[str, str]]:
+    def resolve_participants(
+        connection, active_notebook_id: str, *, viewer_id: str | None
+    ) -> list[tuple[str, str]]:
+        """``[(notebook_id, tier)]``,首项恒为 active 本身。唯一的参与集定义点。
+
+        参与集随提问人变化(M3):挂载只对挂载人、或自己本来就能读被挂库的人生效,
+        公共库与 ``everyone`` 授权对所有人生效。``viewer_id`` 是**必填关键字**——
+        漏传当场 TypeError,不会静默回到「与谁在提问无关」的旧语义;``None`` / 空串
+        表示没有查看者,只剩公共库与 ``everyone``(失败即关)。"""
         active = connection.execute(
             "SELECT tier FROM notebooks WHERE id=%s", (active_notebook_id,)
         ).fetchone()
@@ -93,35 +102,43 @@ class NotebookStore:
         ]
         rows = connection.execute(
             "SELECT b.id AS id,b.tier AS tier "
-            + _MOUNT_JOIN
-            + _MOUNT_VALID
+            + _MOUNT_VIEWER_JOIN
+            + _MOUNT_EFFECTIVE_FOR_VIEWER
             + _MOUNT_ORDER,
-            (active_notebook_id,),
+            (viewer_id, active_notebook_id),
         ).fetchall()
         result.extend((row["id"], row["tier"] or "personal") for row in rows)
         return result
 
-    def participant_notebook_ids(self, active_notebook_id: str) -> list[str]:
+    def participant_notebook_ids(
+        self, active_notebook_id: str, *, viewer_id: str | None
+    ) -> list[str]:
         with self.database.connect() as connection:
-            return self.participant_ids(connection, active_notebook_id)
+            return self.participant_ids(
+                connection, active_notebook_id, viewer_id=viewer_id
+            )
 
     @staticmethod
-    def participant_ids(connection, active_notebook_id: str) -> list[str]:
+    def participant_ids(
+        connection, active_notebook_id: str, *, viewer_id: str | None
+    ) -> list[str]:
         return [
             notebook_id
             for notebook_id, _tier in NotebookStore.resolve_participants(
-                connection, active_notebook_id
+                connection, active_notebook_id, viewer_id=viewer_id
             )
         ]
 
     @staticmethod
-    def participant_rows(connection, active_notebook_id: str):
+    def participant_rows(
+        connection, active_notebook_id: str, *, viewer_id: str | None
+    ):
         bases = connection.execute(
             "SELECT b.id AS id,b.tier AS tier "
-            + _MOUNT_JOIN
-            + _MOUNT_VALID
+            + _MOUNT_VIEWER_JOIN
+            + _MOUNT_EFFECTIVE_FOR_VIEWER
             + _MOUNT_ORDER,
-            (active_notebook_id,),
+            (viewer_id, active_notebook_id),
         ).fetchall()
         active = connection.execute(
             "SELECT id,tier FROM notebooks WHERE id=%s", (active_notebook_id,)
@@ -129,12 +146,16 @@ class NotebookStore:
         return active, bases
 
     @staticmethod
-    def participant_tiers(connection, active_notebook_id: str):
+    def participant_tiers(
+        connection, active_notebook_id: str, *, viewer_id: str | None
+    ):
         """``([notebook_id, ...], {notebook_id: tier})`` —— 两半由同一次
         ``resolve_participants`` 派生,所以 tier map 的键集合**恒等于**那份 id 列表。
         消费方(``collection_enumeration._mount_participant_pairs``)按这条不变量把
         两半 zip 回 ``(id, tier)`` 对;要改成「map 里还带别的库」就必须同时改它。"""
-        pairs = NotebookStore.resolve_participants(connection, active_notebook_id)
+        pairs = NotebookStore.resolve_participants(
+            connection, active_notebook_id, viewer_id=viewer_id
+        )
         return [notebook_id for notebook_id, _tier in pairs], dict(pairs)
 
     @staticmethod

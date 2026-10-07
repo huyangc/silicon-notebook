@@ -473,7 +473,7 @@ class _FakeUnifiedKg:
         self._peers = dict(peers_by_notebook)
         self.comention_queries: list = []
 
-    def mounted_base_ids(self, active_notebook_id):
+    def mounted_base_ids(self, active_notebook_id, *, viewer_id=None):
         return ()
 
     def resolve_focal(self, notebook_id, key):
@@ -538,7 +538,7 @@ def test_comparison_peer_libraries_keep_the_nominal_active_in_peer_mode():
 def test_comparison_peer_libraries_still_strip_the_active_without_an_override():
     """对照臂:没有覆盖时首项照旧剥掉,与今天逐值相等。"""
     unified = _FakeUnifiedKg({})
-    unified.mounted_base_ids = lambda active: ("base-1", "base-2")
+    unified.mounted_base_ids = lambda active, *, viewer_id=None: ("base-1", "base-2")
     service = _community_service(unified)
 
     assert federated_ask_active() is False

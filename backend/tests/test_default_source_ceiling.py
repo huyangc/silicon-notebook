@@ -2132,8 +2132,20 @@ def real_readers(repo, emit=None, read_workers: int = 1) -> CeilingReaders:
         with sources.database.connect() as db:
             return sources.memory_source_ids(db, notebook_id)
 
+    notebooks = repo._runtime.notebook_store
+
+    def participants(notebook_id: str):
+        # E6-2: the participant reader takes a viewer.  These worlds predate M3
+        # (a library the notebook's owner mounted counts for whoever asks), so
+        # the reader is bound to the mounter -- the notebook's creator -- and
+        # keeps testing the ceiling, not the mount's audience.  E6-3 binds the
+        # run's actor in production and rewrites the worlds that need it.
+        return notebooks.participant_notebook_ids(
+            notebook_id, viewer_id=notebooks.get_row(notebook_id)["created_by"],
+        )
+
     return CeilingReaders(
-        participants=repo._runtime.notebook_store.participant_notebook_ids,
+        participants=participants,
         visible=sources.all_visible_source_ids,
         hidden=sources.hidden_source_ids,
         memory_sources=memory_sources,
@@ -2202,7 +2214,7 @@ def assert_default_ceiling_over_real_stores(repo, ids, read_workers: int = 1) ->
         ) is True
 
         ids["mount"](late)
-        assert late in repo._runtime.notebook_store.participant_notebook_ids(nb)
+        assert late in repo._runtime.notebook_store.participant_notebook_ids(nb, viewer_id=ids["alice"])
         assert notebook_in_scope(late) is False
         assert scoped_allowed_source_ids(late) == ()
 

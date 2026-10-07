@@ -3041,8 +3041,8 @@ def test_unchecked_library_mount_churn_does_not_spoil_completeness(scoped_corpus
     repo, active, base = scoped_corpus
     original = repo._runtime.notebook_store.participant_ids
 
-    def _unmount_then_resolve(db, notebook_id):
-        ids = list(original(db, notebook_id))
+    def _unmount_then_resolve(db, notebook_id, **kwargs):
+        ids = list(original(db, notebook_id, **kwargs))
         return [value for value in ids if value != base]
 
     with _library_unchecked(active):
