@@ -1142,10 +1142,21 @@ class UnifiedKgStore:
             )
             param = bound.param
         # Same lazy shape as the PG twin: the candidates are sorted in a
-        # subquery that ``LIMIT -1 OFFSET 0`` keeps from being flattened, and
-        # the support gate runs outside it, so it is evaluated on the rows in
-        # sort order until ``limit`` pass -- not on every candidate before the
-        # sort (96 seeds x 500 edges: 239 → 97 ms list, 200 → 83 ms viewer).
+        # subquery that ``LIMIT -1 OFFSET 0`` keeps from being flattened (a
+        # co-routine), and the support gate runs outside it, so it is evaluated
+        # on the rows in sort order until ``limit`` pass -- not on every
+        # candidate before the sort (96 seeds x 500 edges: 239 → 97 ms list,
+        # 200 → 83 ms viewer).
+        #
+        # The outer query deliberately has NO ``ORDER BY``: it scans the
+        # co-routine in the order the co-routine yields, i.e. the inner sort,
+        # and a filter keeps that order.  Repeating the ORDER BY outside was
+        # recognised as already satisfied only by newer planners (3.53 here);
+        # SQLite before that (CI's 3.45) adds a second sort after the gate,
+        # which has to see EVERY candidate before ``LIMIT`` -- the eager cost
+        # this shape exists to avoid.  The single, inner sort is pinned by
+        # ``test_sqlite_bound_weak_support_plans_probe_by_key_without_analyze``
+        # on the bundled SQLite and on 3.45.
         return execute_with_ceiling(
             db,
             f"SELECT cr.canonical_src, cr.edge_type, cr.canonical_tgt, cr.source_count, "
@@ -1158,8 +1169,6 @@ class UnifiedKgStore:
             f"      ORDER BY source_count ASC, canonical_tgt ASC, canonical_src ASC, "
             f"               edge_type ASC LIMIT -1 OFFSET 0) cr "
             f"WHERE {_weak_target_supported(condition)} "
-            f"ORDER BY cr.source_count ASC, cr.canonical_tgt ASC, cr.canonical_src ASC, "
-            f"         cr.edge_type ASC "
             f"LIMIT ?",
             [notebook_id, *canonical_ids, source_max, notebook_id, param, limit],
         ).fetchall()
