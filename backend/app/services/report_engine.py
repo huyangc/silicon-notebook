@@ -3793,15 +3793,15 @@ class ReportEngine:
         def _reference_library(ctx) -> dict:
             """Whether the cited source belongs to a mounted library, and which.
 
-            Uses the owning notebook, which the citation lookup already carries:
-            `tier` describes the library's own kind, so a mounted notebook the
-            user owns reports "personal" and would be miscounted as local.
-            An unresolved owner falls back to the tier signal rather than
-            guessing that the evidence is local (see `reference_library_fields`).
+            Owning notebook: the cited source's, else the library the evidence
+            context itself names (a knowledge object cited without a source has
+            no source, but its context carries the library it came from);
+            `tier` is the library's kind, never its identity, so it is only the
+            last fallback (see `reference_library_fields`).
             """
             source_id = str(ctx.get("source_id") or "")
             owner = str(
-                (citation_source_info.get(source_id) or {}).get("notebook_id", "")
+                (citation_source_info.get(source_id) or {}).get("notebook_id") or ctx.get("notebook_id") or ""
             ).strip()
             if owner:
                 return reference_library_fields(owner, notebook_id)
