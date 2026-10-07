@@ -3647,25 +3647,27 @@ class CandidateRetrievalService(_RetrievalState):
         )
         from app.services.vector_index import build_matrix, query_sims
         t0 = time.perf_counter()
-        effective_allowed = self._chunk_source_ceiling(
-            notebook_id, allowed_source_ids
-        )
-        if effective_allowed is _REPORT_CHUNK_AUTHORITY_FAILED:
-            return [], [], None
         # A pushed-down ceiling (the run's verdict binds nothing here) still
         # decides everything this lane decides IN PYTHON -- the sidecar plan,
         # the KNN filter, the lexical-failure banner role -- from the frozen
         # ceiling; only the SQL legs below go without the list, and what they
         # return is left to ``_retrieve_chunks``' verify-on-read (which
         # records the drift and re-runs bound) rather than silently dropped.
-        sql_unbound = False
-        if effective_allowed is None and allowed_source_ids is None:
-            from app.services.source_scope import unbound_ceiling
+        # ONE reading decides: the ceiling is taken first and the list is
+        # asked for only when it is None (bound, or flipped since), never
+        # "no list" from one reading and the ceiling from a later one.
+        from app.services.source_scope import unbound_ceiling
 
-            pushed_down = unbound_ceiling(notebook_id)
-            if pushed_down is not None:
-                sql_unbound = True
-                effective_allowed = pushed_down
+        pushed_down = (
+            unbound_ceiling(notebook_id) if allowed_source_ids is None else None
+        )
+        sql_unbound = pushed_down is not None
+        effective_allowed = (
+            pushed_down if sql_unbound
+            else self._chunk_source_ceiling(notebook_id, allowed_source_ids)
+        )
+        if effective_allowed is _REPORT_CHUNK_AUTHORITY_FAILED:
+            return [], [], None
         allowed = (
             effective_allowed if sql_unbound
             else frozenset(str(value) for value in effective_allowed)
@@ -4157,7 +4159,6 @@ class CandidateRetrievalService(_RetrievalState):
         """
         from app.services.source_scope import (
             current_source_scope,
-            run_ceiling_binds,
             scoped_allowed_source_ids,
             unbound_ceiling,
             verify_unbound_read,
@@ -4168,6 +4169,7 @@ class CandidateRetrievalService(_RetrievalState):
             return []
         source_mode: str | None = None
         source_ids: tuple[str, ...] = ()
+        unbound = None
         peer_ceiling = (
             None if scope is None else scope.source_ceiling_for(notebook_id)
         )
@@ -4181,19 +4183,20 @@ class CandidateRetrievalService(_RetrievalState):
             # short-circuit ``include`` with no ids to zero rows.
             source_mode = "include"
             source_ids = tuple(scoped_allowed_source_ids(notebook_id) or ())
-        elif (
-            scope is not None and scope.ceiling_active
-            and run_ceiling_binds(scope, notebook_id)
-        ):
-            source_mode = scope.mode
-            values = (
-                scope.source_ids | scope.hidden_source_ids
-                if source_mode == "include" else scope.source_ids
-            )
-            source_ids = tuple(sorted(values))
-        # Pushed down (the run's verdict binds nothing here): no list in the
-        # SQL, the rows are checked against the freeze below.
-        unbound = None if source_mode is not None else unbound_ceiling(notebook_id)
+        elif scope is not None and scope.ceiling_active:
+            # ONE reading of the verdict decides both the read mode and what
+            # it is verified against: a concurrent flip between "does it
+            # bind?" and "take the ceiling" must not leave an unbound read
+            # with nothing to check it by (#822 codex r3).  ``None`` -> the
+            # verdict binds (or just flipped): read with the list.
+            unbound = unbound_ceiling(notebook_id)
+            if unbound is None:
+                source_mode = scope.mode
+                values = (
+                    scope.source_ids | scope.hidden_source_ids
+                    if source_mode == "include" else scope.source_ids
+                )
+                source_ids = tuple(sorted(values))
 
         rows = []
         with self._connect() as db:

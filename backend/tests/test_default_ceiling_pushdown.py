@@ -720,3 +720,78 @@ def test_an_outsider_that_took_a_candidate_slot_and_scored_below_the_floor_flips
     assert scope_unbound, "the late source arrived after an unbound verdict"
     assert flipped, "the outsider in the raw pool flipped the verdict"
     assert hits and {hit.source_id for hit in hits} == {sid}
+
+
+def _flip_after_the_first_verdict(monkeypatch, scope, notebook_id):
+    """Deterministic interleave (#822 codex r3): the first verdict reading
+    answers "binds nothing", and a concurrent section records drift right
+    after it -- before the producer takes its next reading."""
+    import app.services.source_scope as source_scope_module
+
+    real = source_scope_module.run_ceiling_binds
+    fired = []
+
+    def verdict_then_concurrent_flip(scope_arg, library):
+        answer = real(scope_arg, library)
+        if not fired and library == notebook_id:
+            fired.append(answer)
+            record_ceiling_drift(scope, notebook_id)
+        return answer
+
+    monkeypatch.setattr(source_scope_module, "run_ceiling_binds",
+                        verdict_then_concurrent_flip)
+    return fired
+
+
+def test_the_contribution_hydrate_decides_and_verifies_from_one_reading(repo, monkeypatch):
+    """The hydrate's read mode and its verification ceiling come from ONE
+    verdict reading: a flip landing between "does it bind?" and "take the
+    ceiling" no longer leaves an unbound read with nothing to check it by."""
+    instance, bob, _alice = repo
+    nb = instance.create_notebook(NotebookCreate(name="kb")).id
+    sid = _add_source(instance, nb, [f"{TEXT} one " * 5])
+    candidates = instance.retrieval.candidates
+    with _ceiling(instance, nb, bob):
+        scope = current_source_scope()
+        assert run_ceiling_binds(scope, nb) is False      # the verdict, first
+        late = _add_source(instance, nb, [f"{TEXT} LATESECRET two " * 5])
+        with candidates._connect() as db:
+            chunk_ids = [row["id"] for row in db.execute(
+                "SELECT id FROM chunks WHERE notebook_id=?", (nb,),
+            ).fetchall()]
+        fired = _flip_after_the_first_verdict(monkeypatch, scope, nb)
+        hydrated = candidates.hydrate_retrieval_contribution_chunks(nb, bob, chunk_ids)
+
+    assert fired == [False], "the interleave happened after an unbound verdict"
+    assert hydrated and {chunk.source_id for chunk in hydrated} == {sid}
+    assert late not in {chunk.source_id for chunk in hydrated}
+
+
+def test_the_ann_lane_plans_from_the_reading_it_decided_by(repo, monkeypatch):
+    """The ANN lane takes the ceiling first and decides "no list" from that
+    same reading: with the flip landing in between, a report still plans its
+    sidecar coverage from the frozen ceiling and recalls the unfolded
+    source (before, it fell to an unplanned global ANN-only lane)."""
+    from app.services.retrieval_run import retrieval_run
+
+    instance, bob, _alice = repo
+    nb = instance.create_notebook(NotebookCreate(name="kb")).id
+    _add_source(instance, nb, ["indexed baseline text " * 20])
+    instance.rebuild_unified_kg(nb)
+    instance.build_scale_index(nb)
+    delta = _add_source(instance, nb, ["DELTA9000 fresh unfolded evidence " * 20])
+    idx = instance._scale_index(nb, allow_stale=True)
+    query = "DELTA9000 unfolded evidence"
+    candidates = instance.retrieval.candidates
+
+    with retrieval_run(run_kind="report_generation", actor_id=bob):
+        with _ceiling(instance, nb, bob):
+            fired = _flip_after_the_first_verdict(
+                monkeypatch, current_source_scope(), nb)
+            out = candidates._retrieve_chunks_ann(
+                nb, query, candidates._embed_query(query), idx, recall=10,
+            )
+
+    assert fired == [False]
+    assert out is not None
+    assert delta in {chunk.source_id for chunk in out[0]}
