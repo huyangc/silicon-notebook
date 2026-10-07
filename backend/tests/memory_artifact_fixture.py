@@ -840,6 +840,72 @@ def assert_a_re_stamp_never_hides_a_shared_change_of(repo, change: str) -> None:
     assert repo._runtime.scale_artifacts.load(notebook_id) is not None
 
 
+def assert_a_re_stamp_publishes_the_identity_it_verified(repo) -> None:
+    """codex #824 r1: a shared source whose ingestion commits AFTER the fold
+    verified the shared rows (the digest check) and before the re-stamp is
+    published must not be recorded as indexed without its content. The
+    re-stamp publishes the version and watermark captured before the check,
+    so the index is stale afterwards and the next fold takes the source in."""
+    notebook_id = seed_notebook_without_memory(repo)
+    repo.build_scale_index(notebook_id)
+    runtime = repo._runtime.scale_artifacts
+    confirm_a_memory(repo, notebook_id, next(_LATE_COUNTER))
+    projections = repo._runtime.scale_builder.projections
+    real_digest = projections.shared_content_digest
+    raced = "src-raced-after-check"
+
+    def digest_then_ingest(nb):
+        digest = real_digest(nb)
+        del projections.shared_content_digest  # once
+        with repo._write() as db:
+            db.execute(
+                sql(repo, "INSERT INTO sources (id,notebook_id,title,source_type,"
+                          "status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)"),
+                (raced, nb, "raced", "md", "ready", NOW, NOW),
+            )
+        repo.store_kg(nb, raced, [_object("r", "RACED")], [])
+        return digest
+
+    projections.shared_content_digest = digest_then_ingest
+    try:
+        stamped = repo.fold_scale_index_delta(notebook_id)
+    finally:
+        projections.__dict__.pop("shared_content_digest", None)
+    assert raced not in stamped["watermark_sources"], stamped["watermark_sources"]
+    assert stamped["version"] != runtime.version(notebook_id)
+    assert runtime.status(notebook_id)["state"] == "stale"
+    # the next fold sees the source as new and takes it in
+    folded = repo.fold_scale_index_delta(notebook_id)
+    assert raced in folded["watermark_sources"]
+    assert runtime.status(notebook_id)["state"] == "indexed"
+
+
+def assert_a_re_stamp_never_copies_a_graph_built_under_other_settings(repo) -> None:
+    """codex #824 r1: a graph-build setting (here the mention edge weight and
+    the synonym threshold) changed AND only the notebook's Memory changed:
+    the shared rows are the same, but the stored graph was built under the old
+    settings, so the fold must build in full rather than re-stamp the old
+    graph under a version that names the new settings."""
+    notebook_id = seed_notebook_without_memory(repo)
+    first = repo.build_scale_index(notebook_id)
+    runtime = repo._runtime.scale_artifacts
+    settings = repo._runtime.scale_builder.projections.settings
+    settings.mention_edge_weight = float(settings.mention_edge_weight) + 0.25
+    settings.ppr_emb_synonym_threshold = float(settings.ppr_emb_synonym_threshold) - 0.05
+    events = _capture_events(repo)
+    confirm_a_memory(repo, notebook_id, next(_LATE_COUNTER))
+    root = runtime.artifacts.scale_dir(notebook_id)
+    files_before = _file_identities(root)
+    folded = repo.fold_scale_index_delta(notebook_id)
+    assert [e["reason"] for e in events if e.get("kind") == "scale_fold_refused"] == [
+        "build_settings_changed"
+    ]
+    assert folded["build_id"] != first["build_id"]
+    assert folded["built_at"] > first["built_at"], "a full build, not a re-stamp"
+    assert _file_identities(root) != files_before
+    assert runtime.status(notebook_id)["state"] == "indexed"
+
+
 def assert_a_re_stamp_republishes_the_source_partition_companion(repo) -> None:
     """P3-2: the companion pairs on the main manifest's build id; a re-stamp
     mints a new one, so it must republish the companion under it (else the

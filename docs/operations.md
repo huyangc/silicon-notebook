@@ -388,7 +388,11 @@ A fold onto an index built before the upgrade is refused and replaced by a full 
 shared rows the index was built over are the same and the knowledge graph was not rebuilt since —
 the next fold republishes only the manifest (under a second at 1M objects; the source-partition
 companion is republished as after any fold); otherwise it runs a full build (event
-`scale_fold_refused`, reason `kg_rebuilt_since_build` or `shared_content_changed`). A build during
+`scale_fold_refused`, reason `kg_rebuilt_since_build`, `build_settings_changed` — a graph-build
+setting such as the synonym or mention-edge settings differs from the index's — or
+`shared_content_changed`). The re-stamp publishes the version and source watermark read before the
+shared rows were verified, so a shared source ingested meanwhile leaves the index stale and the next
+fold takes it in. A build during
 which memories keep reaching the index is discarded after one retry (event
 `scale_index_build_discarded`, reason `memory_appeared_during_build`); the live index stays as it
 was, and the next KG write re-arms automatic indexing, or you can run the build again by hand. Cost

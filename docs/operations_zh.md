@@ -299,7 +299,9 @@ manifest 字段。
 在升级前建成的索引上做 fold 会被拒绝并改为完整构建（事件 `scale_fold_refused`，原因 `memory_isolation`）。如果
 只有记忆发生变化（索引所依据的共享数据行没有变，且索引建成后知识图谱没有重建过），下一次 fold 只重写 manifest
 （1M 对象规模下不到 1 秒；来源分区伴随工件与每次 fold 一样重新发布）；否则改为完整构建（事件
-`scale_fold_refused`，原因 `kg_rebuilt_since_build` 或 `shared_content_changed`）。构建期间若持续有记忆进入
+`scale_fold_refused`，原因 `kg_rebuilt_since_build`、`build_settings_changed`（同义边、提及边等建图设置与索引
+建成时不同）或 `shared_content_changed`）。重写 manifest 时写入的是核对共享数据行之前读到的版本与来源水位，所以
+这期间新摄入的共享来源会让索引显示为过期，由下一次 fold 收进来。构建期间若持续有记忆进入
 索引，重试一次后丢弃（事件 `scale_index_build_discarded`，原因 `memory_appeared_during_build`），现有索引保持
 不变；下一次知识图谱写入会重新触发自动索引，也可以手动再建一次。没有记忆的笔记本的成本：执行的语句与从前
 相同，另外多出单行记忆探针和语句内排除。PostgreSQL 上，语句内排除的开销与不过滤相同；SQLite 上，整表读取慢
