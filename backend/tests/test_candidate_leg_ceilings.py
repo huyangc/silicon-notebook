@@ -844,6 +844,22 @@ def test_mixed_dimensions_keep_one_vector_space_across_both_halves(store, asker)
     assert shared_ids == ["rS"] and shared_mat.shape == (1, 3)
 
 
+def test_the_first_valid_row_picks_the_space_wherever_it_lives(store):
+    """The same rule when the FIRST valid row is the Memory one: the single
+    matrix would have been 2-dim, so the halves are too -- the 3-dim shared
+    row is the one skipped, never a second space for the shared half."""
+    repo, bob, alice = store
+    nb = _vectors_notebook(repo, bob, alice, [
+        ("rM", "src-mem-bob", [1.0, 0.0]), ("rS", "src-doc", [1.0, 0.0, 0.0]),
+    ])
+    with repo._connect() as db:
+        entry = repo.retrieval.candidates._relation_matrices(db, nb)
+    shared_ids, shared_mat, _pos, memory_ids, memory_mat = entry[:5]
+
+    assert (shared_ids, shared_mat.shape[0]) == ([], 0)
+    assert memory_ids == ["rM"] and memory_mat.shape == (1, 2)
+
+
 def test_the_relation_cache_keeps_the_key_the_cold_guard_peeks(relation_matrix):
     """The split relation entry lives under the key and version the large-
     notebook cold-matrix guard peeks (``_vector_matrix_warm``); moving it
