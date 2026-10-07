@@ -183,7 +183,7 @@ class _EmptySummaryQueries:
         return []
 
     @staticmethod
-    def mounted_bases_row(connection, notebook_id):
+    def mounted_bases_row(connection, notebook_id, *, viewer_id=None):
         return []
 
     @staticmethod
