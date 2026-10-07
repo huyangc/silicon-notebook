@@ -60,6 +60,9 @@ def _knowledge(source_id: str, *, notebook_id: str = "nb") -> RetrievedKnowledge
 
 
 def test_omitted_or_default_exclude_scope_preserves_historical_behavior():
+    """生产不可达(E1-2):每个问答入口都装默认天花板,检索闸不会在无 scope 下
+    运行。这里只钉原语自身在无 scope / exclude 空集下的形状;经入口的同一问题见
+    ``test_default_ceiling_entrypoints.py::test_an_all_selected_run_keeps_every_visible_chunk``。"""
     chunks = [
         RetrievedChunk("c1", "s1", "one", "", "one"),
         RetrievedChunk("c2", "s2", "two", "", "two"),
@@ -743,7 +746,11 @@ def test_all_selected_freeze_reopens_the_restricted_lane_once_sources_drift(
 def test_all_selected_freeze_without_drift_keeps_the_unscoped_lane(
     tmp_path, monkeypatch
 ):
-    """对照臂:宇宙没漂移时探针判定为 False,于是 KG 候选**路由**保持无 scope
+    """生产不可达(E1-2):手工冻结的 ``source_scope_context`` 不带裁决探针,
+    入口装的是 ``default_ceiling_context``;经入口的同一问题见
+    ``test_default_ceiling_entrypoints.py::test_the_entry_ceiling_routes_kg_candidates_by_drift``。
+
+    对照臂:宇宙没漂移时探针判定为 False,于是 KG 候选**路由**保持无 scope
     那一条(notebook ANN + 词法并集),受限词法 lane 一次都不能出现——即便天花板
     这份清单照样被冻结、照样在证据水合处生效。路由跟着 narrowing 走,过滤跟着
     ceiling 走,两者不同源。"""
@@ -802,11 +809,14 @@ def test_library_exclusion_denies_before_any_local_dimension_branch():
 
 
 def test_candidate_without_active_scope_does_not_touch_source_store():
+    """生产不可达(E1-2):问答、报告、MCP 入口都装默认天花板,候选服务不会在
+    无 scope 下被问漂移。这里只钉「只构造了部分字段的有界适配器,在无 scope 时
+    不碰可选的 ``sources`` 字段」;经入口的漂移探针见
+    ``test_default_ceiling_entrypoints.py::test_the_entry_ceilings_drift_probe_reads_the_store_and_finds_no_drift``。"""
     from app.services.retrieval_candidates import CandidateRetrievalService
 
-    # Some bounded adapters construct only the producer fields they use.  An
-    # omitted checkbox scope must retain the historical zero-probe path and
-    # therefore must not require the optional ``sources`` field at all.
+    # Some bounded adapters construct only the producer fields they use; a
+    # scope-less call must not require the optional ``sources`` field at all.
     candidate = CandidateRetrievalService.__new__(CandidateRetrievalService)
     assert candidate._unsafe_source_scope_restricted("nb") is False
 

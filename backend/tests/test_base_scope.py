@@ -123,29 +123,44 @@ def _notebook(*, bases=None, sources: int = 0,
 # ---------------------------------------------------------------------------
 
 
-def test_r2_omitted_base_scope_is_byte_identical_to_before_the_field_existed():
-    """R2: a caller that never supplies base_scope must observe unchanged
-    behavior — both the two-arg ``source_scope_context`` call shape AND an
-    explicit ``base_scope=None`` must agree, and mounted base libraries stay
-    fully open."""
+def test_r2_omitted_base_scope_freezes_each_mounted_library_to_its_visible_sources():
+    """R2 under the production ceiling (E1-2): a caller that never supplies
+    base_scope and one that passes ``base_scope=None`` agree -- and neither
+    leaves a mounted library open any more.  Every Ask entry installs the
+    default ceiling (``AskService._retrieval_ceiling`` ->
+    ``default_ceiling_context``), which freezes each mounted library to its
+    VISIBLE sources: its hidden projections (another member's Memory, its
+    Knowhow) and a library mounted after the freeze stay out."""
+    from app.services.source_scope import default_ceiling_context
+    from tests.test_ask_service_boundary import static_ceiling_readers
+
+    readers = static_ceiling_readers(
+        participants=lambda _nb: ("nb", "base"),
+        visible=lambda nb: ("base-source",) if nb == "base" else ("s1",),
+        hidden=lambda nb, _owner: ("base-hidden",) if nb == "base" else (),
+    )
     chunks = [
         RetrievedChunk("cb", "base-source", "base", "", "base", notebook_id="base"),
+        RetrievedChunk("ch", "base-hidden", "hidden", "", "hidden", notebook_id="base"),
+        RetrievedChunk("cl", "late-source", "late", "", "late", notebook_id="late-base"),
     ]
-    with source_scope_context("nb", SourceScope(mode="include", source_ids=["s1"])):
-        omitted = (
+
+    def observe():
+        return (
             source_allowed("base", "base-source"),
-            scoped_allowed_source_ids("base", ["b1"]),
+            source_allowed("base", "base-hidden"),
+            scoped_allowed_source_ids("base", ["base-source", "b1"]),
             [row.chunk_id for row in filter_retrieval_items("nb", "chunk", chunks)],
         )
-    with source_scope_context(
-        "nb", SourceScope(mode="include", source_ids=["s1"]), None
+
+    local = SourceScope(mode="include", source_ids=["s1"])
+    with default_ceiling_context("nb", "user", readers, local_scope=local):
+        omitted = observe()
+    with default_ceiling_context(
+        "nb", "user", readers, local_scope=local, base_scope=None,
     ):
-        explicit_none = (
-            source_allowed("base", "base-source"),
-            scoped_allowed_source_ids("base", ["b1"]),
-            [row.chunk_id for row in filter_retrieval_items("nb", "chunk", chunks)],
-        )
-    assert omitted == explicit_none == (True, ("b1",), ["cb"])
+        explicit_none = observe()
+    assert omitted == explicit_none == (True, False, ("base-source",), ["cb"])
 
 
 def test_r1_deselecting_a_base_library_does_not_trip_local_restricted():
@@ -621,8 +636,18 @@ def test_follow_chain_drops_hops_carried_by_an_unchecked_library():
     retrieval = RetrievalService(
         candidates=object(), graph=_Graph(), community_queries=lambda: []
     )
-    with source_scope_context(
-        "nb", None, BaseNotebookScope(mode="include", notebook_ids=["kept-base"]),
+    # The production shape (E1-2): the route's library narrowing reaches the
+    # run through the default ceiling every Ask entry installs.
+    from app.services.source_scope import default_ceiling_context
+    from tests.test_ask_service_boundary import static_ceiling_readers
+
+    readers = static_ceiling_readers(
+        participants=lambda _nb: ("nb", "kept-base", "dropped-base"),
+        visible=lambda nb: (f"s-{nb}", "s1"),
+    )
+    with default_ceiling_context(
+        "nb", "user", readers,
+        base_scope=BaseNotebookScope(mode="include", notebook_ids=["kept-base"]),
     ):
         result = retrieval.follow_chain("nb", "a")
 
@@ -1121,30 +1146,54 @@ def test_receipt_context_is_display_only_and_read_at_exactly_one_seam():
 
 def test_receipt_never_reaches_the_retrieval_gates():
     """Same requirement from the behavioural side: a receipt in context on its
-    own changes no filtering decision at all."""
+    own changes no filtering decision at all.  Judged under the production
+    ceiling (E1-2: every Ask entry installs ``default_ceiling_context``, so a
+    retrieval gate never runs without a scope): the same run with and without
+    the receipt -- which claims a narrower local selection and an excluded
+    library -- decides every gate identically."""
     from app.models.source_scope import (
         RetrievalScopeBaseReceipt,
         RetrievalScopeLocalReceipt,
         RetrievalScopeReceipt,
     )
-    from app.services.source_scope import retrieval_scope_receipt_context
+    from app.services.source_scope import (
+        default_ceiling_context,
+        retrieval_scope_receipt_context,
+    )
+    from tests.test_ask_service_boundary import static_ceiling_readers
 
+    readers = static_ceiling_readers(
+        participants=lambda _nb: ("nb", "b1"),
+        visible=lambda nb: ("s9",) if nb == "b1" else ("s1", "s2"),
+    )
     chunks = [
         RetrievedChunk("c1", "s1", "one", "", "one"),
         RetrievedChunk("c2", "s2", "two", "", "two"),
+        RetrievedChunk("cb", "s9", "base", "", "base", notebook_id="b1"),
     ]
+
+    def gates():
+        scope = current_source_scope()
+        return (
+            scope.source_ids, scope.base_mode, source_scope_restricted(),
+            base_scope_restricted(),
+            [row.chunk_id for row in filter_retrieval_items("nb", "chunk", chunks)],
+            scoped_allowed_source_ids("nb"), source_allowed("b1", "s9"),
+        )
+
+    with default_ceiling_context("nb", "user", readers):
+        without = gates()
     with retrieval_scope_receipt_context(RetrievalScopeReceipt(
         local=RetrievalScopeLocalReceipt(selected=1, total=2),
         bases=[RetrievalScopeBaseReceipt(
             notebook_id="b1", name="论文库", included=False
         )],
     )):
-        assert current_source_scope() is None
-        assert source_scope_restricted() is False
-        assert base_scope_restricted() is False
-        assert filter_retrieval_items("nb", "chunk", chunks) == chunks
-        assert scoped_allowed_source_ids("nb") is None
-        assert source_allowed("b1", "s9") is True
+        with default_ceiling_context("nb", "user", readers):
+            with_receipt = gates()
+    assert with_receipt == without
+    assert without[2:5] == (False, False, ["c1", "c2", "cb"])
+    assert without[6] is True
 
 
 def test_sync_ask_route_carries_the_receipt_into_the_service(monkeypatch):

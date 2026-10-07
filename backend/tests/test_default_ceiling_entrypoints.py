@@ -15,10 +15,13 @@ result:
 
 * ① HTTP ``/ask`` with no ``source_scope``, ② ``/ask/stream``, ③ the intent
   precheck ``/ask/intent`` (which runs under the same ceiling, pinned on the
-  scope it sees), ④ MCP ``ask_notebook``.  ⑤ the unscoped deep report is
-  pinned by ``test_report_api.py::test_report_create_without_any_scope_runs_
-  every_phase_under_the_default_ceiling`` and ``test_report_default_ceiling``
-  (+ PostgreSQL twin), which drive the same ceiling constructor.
+  scope it sees, and reads nothing until retrieval consumes it), ④ MCP
+  ``ask_notebook``, ⑤ an unscoped deep report (plan + generate through the
+  real report engine: Bob's Memory never reaches a report prompt, and a
+  plain notebook's report is byte-identical with and without the ceiling;
+  ``test_report_api.py`` / ``test_report_default_ceiling`` pin the phases).
+* A failing ceiling read fails the ask before any model call; a Stop during
+  the freeze cancels it.
 * Alice never gets Bob's Memory-derived content -- not by the element arm, the
   KG arms, the relation or walk channels -- and never the mounted library's
   hidden projections; her own Memory and the mounted library's visible
@@ -853,3 +856,99 @@ def test_an_unscoped_report_retrieves_only_what_its_creator_may_on_sqlite(
 
 def test_a_plain_notebook_report_is_unchanged_on_sqlite(sqlite_env, monkeypatch):
     assert_a_plain_notebook_report_is_unchanged(sqlite_env, monkeypatch)
+
+
+# ---------------------------------------------------------------------------
+# Service-entry rewrites of ``test_source_scope.py``'s scope-less cases
+# (:61, :742, :803).  Those originals call the primitives with no scope or a
+# hand-built freeze, which no Ask entry produces any more (each is marked
+# "生产不可达" there); these run the same questions under the ceiling the
+# entry really installs -- ``default_ceiling_context`` over
+# ``RepositoryRuntime.ceiling_readers()`` on a real store.
+# ---------------------------------------------------------------------------
+
+def _entry_ceiling(repo, notebook_id, owner_id):
+    from app.services.source_scope import default_ceiling_context
+
+    return default_ceiling_context(
+        notebook_id, owner_id, repo._runtime.ceiling_readers(),
+    )
+
+
+def _drift_lane(tmp_path, monkeypatch):
+    from tests.test_source_scope import _drift_lane_notebook
+
+    repo, notebook_id, add_source, add_object = _drift_lane_notebook(
+        tmp_path, monkeypatch
+    )
+    owner = repo.create_user("a00123456", "password-12").id
+    return repo, notebook_id, owner, add_source, add_object
+
+
+def test_an_all_selected_run_keeps_every_visible_chunk(tmp_path, monkeypatch):
+    """Rewrite of ``test_source_scope.py:61``: an all-selected ask (the
+    browser's default, or no ``source_scope`` at all) filters none of the
+    notebook's visible chunks at the result boundary."""
+    from app.services.retrieval import RetrievedChunk
+    from app.services.source_scope import filter_retrieval_items
+
+    repo, nb, owner, add_source, _add_object = _drift_lane(tmp_path, monkeypatch)
+    add_source("s1")
+    add_source("s2")
+    chunks = [
+        RetrievedChunk("c1", "s1", "one", "", "one"),
+        RetrievedChunk("c2", "s2", "two", "", "two"),
+    ]
+    with _entry_ceiling(repo, nb, owner):
+        assert filter_retrieval_items(nb, "chunk", chunks) == chunks
+
+
+@pytest.mark.parametrize("drifted", [False, True])
+def test_the_entry_ceiling_routes_kg_candidates_by_drift(tmp_path, monkeypatch, drifted):
+    """Rewrite of ``test_source_scope.py:742`` (and its drift twin above it):
+    without drift the KG candidate routing stays the unscoped one (no
+    restricted lexical lane, no allow-list); a source that finishes extraction
+    after the freeze reopens the restricted lane with the frozen list, before
+    the LIMIT, and its objects never become candidates."""
+    from tests.test_source_scope import _drift_probe_spy, _lexical_lane_spy
+
+    repo, nb, owner, add_source, add_object = _drift_lane(tmp_path, monkeypatch)
+    add_source("src-frozen")
+    add_object("frozen", "src-frozen", "bandgap reference")
+    candidates = repo.retrieval.candidates
+    lane = _lexical_lane_spy(candidates, monkeypatch)
+    probe = _drift_probe_spy(candidates, monkeypatch)
+
+    with _entry_ceiling(repo, nb, owner):
+        if drifted:
+            add_source("src-drifted")
+            add_object("drifted", "src-drifted", "bandgap reference")
+        hits = candidates._retrieve_scored(nb, "bandgap")
+
+    if drifted:
+        assert probe and probe[-1] is True, probe
+        assert ("kg_source_scoped_fts", ("src-frozen",)) in lane, lane
+        assert "src-drifted" not in {
+            evidence.source_id for hit in hits for evidence in hit.evidence
+        }
+    else:
+        # Pushed down (the verdict is "unbound"): the leg is handed no list,
+        # so the per-leg drift probe has nothing to judge and is not asked.
+        assert all(verdict is False for verdict in probe), probe
+        assert all(site != "kg_source_scoped_fts" for site, _allowed in lane), lane
+        assert all(allowed is None for _site, allowed in lane), lane
+        assert hits
+
+
+def test_the_entry_ceilings_drift_probe_reads_the_store_and_finds_no_drift(
+    tmp_path, monkeypatch,
+):
+    """Rewrite of ``test_source_scope.py:803``: the production candidate
+    service always runs under a ceiling, and its drift probe answers from the
+    real store -- False while the universe matches the freeze."""
+    repo, nb, owner, add_source, _add_object = _drift_lane(tmp_path, monkeypatch)
+    add_source("s1")
+    with _entry_ceiling(repo, nb, owner):
+        assert repo.retrieval.candidates._unsafe_source_scope_restricted(nb) is False
+        add_source("s-late")
+        assert repo.retrieval.candidates._unsafe_source_scope_restricted(nb) is True
