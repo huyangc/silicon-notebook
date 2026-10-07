@@ -331,19 +331,21 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
     （旧估算「4–8 次、130–260 ms」作废）。E1-2 改为**每次一行指纹读**（`all_visible_source_ids(nb, digest_for_owner=owner)`：两半各自按 id 排序的
     md5，SQL 一条语句；冻结侧摘要每个 scope 算一次），仍然每次现读、不缓存判定（codex #634）；另有 run 级判定 `run_ceiling_binds`（指纹 +
     外人 Memory 各一读，每 run 每库一次）决定是否下推清单。
-  - 实测（E1-2，同机同会话、负载 21–29，before = 不装天花板 / e13 = E1-3 形态（两份全集探针、不下推）/ after = 本分支，中位数 ms）：
+  - 实测（E1-2 评审修复轮后重测，同机同会话、负载 20–36，before = 今天 master（不装天花板）/ after = 本分支，MCP 每臂 3 次中位数，报告每臂 2 次，ms）：
 
     | 调用 | SQLite M0 | PG M0 | SQLite M1 | PG M1 |
     |---|---|---|---|---|
-    | MCP chunk | 43 / 184 / 148 | 299 / 897 / 310 | 110 / 315 / 244 | 294 / 695 / 534 |
-    | chunk+重排 | 46 / 418 / 213 | 306 / 1,674 / 476 | 120 / 610 / 335 | 519 / 1,607 / 792 |
-    | MCP reasoning | 199 / 1,002 / 495 | 715 / 1,721 / 1,325 | 545 / 1,520 / 980 | 1,115 / 2,430 / 1,650 |
-    | reasoning（无 memory:read） | 198 / 694 / 486 | 928 / 1,553 / 1,158 | 545 / 1,089 / 759 | 1,077 / 2,076 / 1,824 |
-    | 6 节报告 plan | 454–455 / 5,276–6,176 / 602–612 | 633–911 / 3,285–3,444 / 1,137–1,164 | 502–646 / 4,796–5,345 / 676–780 | 638–728 / 3,047–3,671 / 921–1,149 |
-    | 6 节报告 generate | 822–954 / 6,206–6,515 / 1,608–1,689 | 1,851–2,001 / 10,503–12,774 / 2,928–3,514 | 1,313–1,439 / 8,015–8,208 / 2,545–2,604 | 2,050–2,348 / 10,851–12,686 / 3,439–3,656 |
+    | MCP chunk | 57 → 163 | 151 → 426 | 111 → 249 | 300 → 611 |
+    | chunk+重排 | 57 → 239 | 274 → 424 | 118 → 337 | 306 → 694 |
+    | MCP reasoning | 230 → 503 | 849 → 1,234 | 414 → 919 | 1,003 → 1,271 |
+    | reasoning（无 memory:read） | 218 → 525 | 547 → 723 | 566 → 715 | 863 → 947 |
+    | 6 节报告 plan | 387–389 → 1,299–1,371 | 419–499 → 1,288–1,343 | 464–530 → 1,585–1,779 | 909–990 → 1,724–2,137 |
+    | 6 节报告 generate | 874–902 → 3,121–3,180 | 1,769–1,794 → 2,623–5,955 | 1,429–1,467 → 4,348–4,436 | 2,006–2,088 → 5,369–8,279 |
 
-    单次指纹读 SQLite 约 13–16 ms、PG 约 13–15 ms（负载下）；报告 generate 探针 66 次（e13 为 102 次、每次两读）。剩余差额是构造器（3+M 读）、
-    每 run 一次的判定读与每次探针的一行读。笔记本正在入库时探针报漂移会关掉全图/PPR/关系/精确查找通道——与浏览器路径相同，对 MCP 与报告是新变化（已写进产品文档）。
+    漂移检查（单行指纹读）：MCP chunk 4 次、加重排 8 次、reasoning 12 次；报告恒绑定清单（裁决 A），plan 32 次、generate 103 次。每次读：
+    逐个执行时 SQLite 12–28 ms、PG 12–40 ms；报告章节并发时 SQLite 36–134 ms、PG 17–53 ms（排队）。构造器 3+M 读（SQLite 25–66 ms、PG 32–215 ms）。
+    意图预检改惰性后零读取。「按库单调的 generation 整数」评估结论：现有列做不到——删除不留痕；隐藏半的成员关系取决于 `memory_items.status`
+    （确认/驳回 Memory 不改 `sources` 行）；`updated_at` 不是每次可见性变化都推进；要可靠只能加计数列与触发器（迁移 + 写放大），本 PR 不做。
   - 下推（P2-C2）：全选、未漂移、没有扣下个人记忆、库里没有外人个人记忆时，本笔记本的 producer 不绑定来源清单（`scoped_allowed_source_ids` 返回 None），
     读后核验，出现冻结外的来源即翻转判定并带清单重跑；其余情况经 id_binding 以单参数绑定。挂载库带逐库天花板后变热的三处：
     `scoped_allowed_source_ids(peer)` 已由 PR-A 的逐 scope 缓存消除；`communities._source_ceiling_kwargs` 改取逐 scope 的有序交出（不再每次排序）；
@@ -351,7 +353,7 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
 - **E1-2 的提交约束**：安装 `AskService.ask` 与删除插件自合成必须在**同一个提交**里（否则中间态会在构造器里面再叠一层不带逐库天花板的 scope）。
 - **E1-2 追加（第三、四轮与 E1-3 评审转来）**：把 `current_skipped_mounted_libraries()` 接到单库答案现有的「影响结果」提示面（与全局运行
   跳过回执同一处），文案用中文、不带内部术语；PostgreSQL 的 `CeilingReaders` 传 `read_workers=POSTGRES_MOUNTED_READ_WORKERS`；Memory 通道关闭时的
-  失败即关一行留到 E2-2；任何天花板下关系命中无证据会被边界丢弃（与浏览器路径相同），对 MCP 是新变化，文档要写。
+  失败即关一行留到 E2-2；结果边界上，上限绑定时无证据的关系/对象命中被丢弃，下推时与无范围运行一致（浏览器全选运行因此改为保留，Knowhow 单元格语义召回恢复），文档已写。
 - **E1-2 落地记录**：唯一安装点 `AskService._retrieval_ceiling`（`ask`、`preview_reasoning_intent`、facade 直调的 `ask_chunk_current` /
   `ask_reasoning_current`），读取器来自 `RepositoryRuntime.ceiling_readers()`（带 `read_workers` 与判定探针 `CeilingVerdictProbes`），每次读都带
   取消令牌（`cancellable_ceiling_readers` 移到 `source_scope.py`；PG 单语句 3 s 上限保留：活动库这几次读服务端约 11 ms）；未接线的服务拒绝提问。
@@ -359,6 +361,11 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
   `preview_reasoning_intent`（端口加关键字，方法数不变）。`global_run` 置 `ceilings_total`；`follow_chain` 早退与 `any_base_has_kg` 认它（冻结为空集的库
   不算有图）。答案新增 `skipped_libraries`（MCP 同名字段），前端在引用核对提示旁显示一句。漂移探针与下推见成本清单；`_ceiling_binds_uncached` 里
   本笔记本自己的空冻结不再直接判绑定，改由各项判据判（空库、未漂移、无外人 Memory 时不绑）。
+- **E1-2 评审修复轮**：报告运行恒绑定清单（裁决 A，`_report_run_active`）；下推的唯一入口是 `run_ceiling_binds` / `unbound_ceiling` /
+  `verify_unbound_read`（裁决 B，E2-2 的第二套撤回）；意图预检装惰性天花板（裁决 C，`lazy=True`，消费才读）；判定只增不减
+  （`_ceiling_bound_libraries`）、读前取天花板按成员关系核验、探针异常判绑定、Stop 也管判定探针；`follow_chain` 的 `ceilings_total` 分支在生产形态下
+  是死分支，已删；`global_run` 的 `ceilings_total` 有端到端钉子（结果边界丢弃未选中挂载库的条目）；`_frozen_universe_digests` 沿用读取器的
+  `ORDER BY id` 顺序；PG `ceiling_read_workers = min(4, pool_max)`；`live_universe_digests` 按签名判定、不再吞 TypeError；rig 的检索半程改经默认天花板。
 - **E1-3 必须做**：`_run_ask_notebook` 与 `search_notebook_context` 在 worker 线程内进入 `memory_access_context(allow_memory)`；
   `MemoryRetriever` 两个方法在通道关闭时返回空；MCP 入口不得开始提交 `local_scope`；报告 worker 用重装入口。
 - **E1-Z 文档要点名的用户可见变化**：挂载库的 Knowhow / 个人记忆投影不再参与单库问答，在该库内提问仍可用。
