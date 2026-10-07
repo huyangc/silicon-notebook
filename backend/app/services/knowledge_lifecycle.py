@@ -4858,7 +4858,11 @@ class KnowledgeLifecycleService:
         at most ``cap + 1`` objects."""
         own = set(scope.own_memory_object_ids())
         with self._connect() as db:
-            rows = self.knowledge.neighbor_relation_rows(db, notebook_id, [object_id])
+            # Under the viewer's rule: a relation is judged by its own source,
+            # so another member's Memory relation between two of the viewer's
+            # objects stays out (codex #824 r5).
+            rows = self.knowledge.neighbor_relation_rows(
+                db, notebook_id, [object_id], **store_viewer_kwargs(scope))
             edges, others = [], []
             for row in rows:
                 source, target = str(row["source_object_id"]), str(row["target_object_id"])

@@ -402,6 +402,42 @@ def _memory_relation(repo, s, rel_id, source_object, target_object, edge_type):
             (rel_id, s.nb, source_object, target_object, edge_type, _now()))
 
 
+def assert_a_foreign_memory_relation_between_own_objects_stays_out(repo, s, q) -> None:
+    """codex #824 r5: a relation is judged by its OWN source, not by its
+    endpoints'. A relation of B's Memory (historical or imported) joining two
+    of A's own Memory objects is B's: A's graph (edges AND totals), A's
+    neighbour view of her own object and her concept detail never carry it.
+    ``q`` adapts the placeholders to the backend."""
+    before = as_user(s.a, repo.unified_graph, s.nb, level="object")
+    with repo._write() as db:
+        db.execute(
+            q("INSERT INTO knowledge_relations (id,notebook_id,source_id,"
+              "source_object_id,target_object_id,edge_type,evidence,created_at) "
+              "VALUES (?,?,'src-mb',?,?,'bforeignedge','[]',?)"),
+            ("rel-b-on-a", s.nb, s.ids.secret, s.ids.definer_ma, _now()),
+        )
+    for limit in (None, 1, 80):
+        kwargs = {"level": "object"} if limit is None else {"level": "object", "limit": limit}
+        view = as_user(s.a, repo.unified_graph, s.nb, **kwargs)
+        assert "bforeignedge" not in repr(view["edges"]), (limit, view["edges"])
+        if limit is None:
+            assert view["total_edges"] == before["total_edges"], (view, before)
+    neighbours = as_user(s.a, repo.kg_neighbors, s.nb, s.ids.secret)
+    assert "bforeignedge" not in repr(neighbours)
+    assert s.ids.definer_ma not in _node_ids(neighbours)
+    detail = as_user(s.a, repo.concept_detail, s.nb, s.ids.secret_canonical)
+    assert [m["id"] for m in detail["members"]] == [s.ids.secret]
+    assert "bforeignedge" not in repr(detail["attached"]), detail["attached"]
+    # B cannot see A's objects at all, so the relation is in no view of B's
+    for_b = as_user(s.b, repo.unified_graph, s.nb, level="object")
+    assert "bforeignedge" not in repr(for_b)
+
+
+def test_a_foreign_memory_relation_between_own_objects_stays_out(repo):
+    s = build_scenario(repo, b_memory=True)
+    assert_a_foreign_memory_relation_between_own_objects_stays_out(repo, s, lambda x: x)
+
+
 def test_a_memory_relation_between_shared_objects_is_in_no_shared_graph(repo):
     """P3-5 (M12): a relation extracted from A's Memory that joins two
     SHARED objects is judged on its own source: it is in neither the shared

@@ -434,13 +434,18 @@ class KgViewerScope:
     ) -> List[Tuple[str, str, Any]]:
         """``(source, target, edge_type)`` of the live relations whose both
         endpoints are in ``object_ids``, each once, in read order: one
-        ``neighbor_relation_rows`` read per 900 ids."""
+        ``neighbor_relation_rows`` read per 900 ids, under the viewer's rule
+        (``store_viewer_kwargs``): a relation is judged by its OWN source, not
+        by its endpoints' -- a relation of another member's Memory joining two
+        of the viewer's own objects is that member's (codex #824 r5)."""
         members = set(object_ids)
         seen: set = set()
         out: List[Tuple[str, str, Any]] = []
+        viewer = store_viewer_kwargs(self)
         for start in range(0, len(object_ids), _ID_BATCH):
             for rel in knowledge.neighbor_relation_rows(
-                db, self.notebook_id, list(object_ids[start:start + _ID_BATCH])
+                db, self.notebook_id, list(object_ids[start:start + _ID_BATCH]),
+                **viewer,
             ):
                 key = (str(rel["source_object_id"]), str(rel["target_object_id"]),
                        rel["edge_type"])
