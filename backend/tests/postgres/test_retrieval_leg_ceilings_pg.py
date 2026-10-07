@@ -370,6 +370,90 @@ def test_pg_object_support_sources_plan(seeded, backfilled):
         assert "Index Cond: (ko.id = ANY (" in plan, plan
 
 
+def _pg_seam(postgres_settings, tmp_path, *, own_memory: bool):
+    """The SQLite twin's seam scenario on a PostgreSQL repository: written
+    through ``store_kg`` (the reverse index is filled by the real writer)."""
+    from app.core.request_context import reset_request_user, set_request_user
+    from app.models.schemas import NotebookCreate
+    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.embedding import FakeEmbedder
+    from app.services.source_scope import source_scope_context
+    from tests import test_retrieval_leg_ceilings as twin
+    from tests.model_testkit import bind_all_embedding_clients
+
+    postgres_settings.storage_dir = str(tmp_path / "pg-storage")
+    postgres_settings.event_log_enabled = False
+    postgres_settings.llm_log_enabled = False
+    repository = PostgresRepository(postgres_settings)
+    bind_all_embedding_clients(repository, FakeEmbedder(dim=16))
+    repository.settings.graph_ppr_enabled = False
+    try:
+        a = repository.create_user("a00000001", "pw123456")
+        b = repository.create_user("b00000002", "pw123456")
+        token = set_request_user(a)
+        try:
+            nb = repository.create_notebook(NotebookCreate(name="seam")).id
+            repository.add_member(nb, b.id)
+        finally:
+            reset_request_user(token)
+        with repository._write() as db:
+            db.execute(
+                "INSERT INTO sources(id,notebook_id,title,source_type,created_at,updated_at) "
+                "VALUES ('src-vis',%s,'v','markdown',%s,%s)", (nb, NOW, NOW))
+            if own_memory:
+                db.execute(
+                    "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
+                    "content_md,created_at,updated_at) VALUES "
+                    "('mem-b',%s,%s,'ask_answer','confirmed','t','x',%s,%s)",
+                    (nb, b.id, NOW, NOW))
+                db.execute(
+                    "INSERT INTO sources(id,notebook_id,title,source_type,memory_id,"
+                    "created_at,updated_at) VALUES ('src-mb',%s,'m','memory','mem-b',%s,%s)",
+                    (nb, NOW, NOW))
+        _store_seam(repository, nb, own_memory, twin)
+        scope = (twin._freeze(b.id, hidden=["src-mb"]) if own_memory else twin._freeze(a.id))
+        with source_scope_context(nb, scope):
+            _c, block, id_map, _h, _p = repository.retrieval.mixed_chunk_candidates(
+                nb, twin.SEAM_QUERY, twin.SEAM_QUERY, [twin.SEAM_QUERY])
+        return block, id_map
+    finally:
+        repository.close()
+
+
+def _store_seam(repository, nb, own_memory, twin):
+    def concept(local, name, sid, evidence=True):
+        return {"local_id": local, "object_type": "concept",
+                "payload": {"name": name, "section_path": "1"},
+                "evidence": [twin._ev(sid, f"{name} in {sid}")] if evidence else []}
+
+    repository.store_kg(nb, "src-vis", [
+        concept("A", "Mixture-of-Experts (MoE)", "src-vis"),
+        concept("B", "Router balance", "src-vis"),
+        concept("C", "Capacity factor", "src-vis", evidence=False),
+    ], [twin._edge("A", "B", "src-vis"), twin._edge("A", "C", "src-vis")])
+    if own_memory:
+        repository.store_kg(nb, "src-mb", [
+            concept("A", "Mixture-of-Experts (MoE)", "src-mb"),
+            concept("Z", "ZEBRAQUARTZ plan", "src-mb"),
+        ], [twin._edge("A", "Z", "src-mb")])
+    with repository._connect() as db:
+        assert db.execute(
+            "SELECT count(*) AS c FROM knowledge_object_sources WHERE notebook_id=%s", (nb,)
+        ).fetchone()["c"] > 0
+
+
+@pytest.mark.parametrize("own_memory", [False, True])
+def test_pg_mix_seam_is_byte_identical_to_master(postgres_settings, tmp_path, own_memory):
+    """No one else's Memory (none at all, or only the asker's own): the
+    all-selected overlay through ``mixed_chunk_candidates`` is master's block,
+    evidence-less ``Capacity factor`` and its chain line included."""
+    from tests import test_retrieval_leg_ceilings as twin
+
+    block, id_map = _pg_seam(postgres_settings, tmp_path, own_memory=own_memory)
+    assert block == (twin._MASTER_OWN if own_memory else twin._MASTER_PLAIN)
+    assert any(v["name"] == "Capacity factor" for v in id_map.values())
+
+
 def test_pg_unbound_statements_bind_no_list(seeded):
     """Without the keywords neither statement goes through ``execute_ids``,
     and the viewer form binds no list either."""

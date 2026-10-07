@@ -854,6 +854,171 @@ def test_mix_overlay_drops_nodes_of_an_excluded_library(repo, monkeypatch):
     assert {v["name"] for v in kg_id_map.values()} == {"Public root"}
 
 
+# ------------------------------------- B-5 overlay through the real seam
+
+SEAM_QUERY = "Mixture-of-Experts MoE"
+
+
+def _seed_seam(repo, nb, *, b_memory: bool):
+    """Written the way production writes it (``store_kg`` fills the reverse
+    index): a paper with three concepts, ``Capacity factor`` WITHOUT evidence,
+    and -- optionally -- B's Memory linking the same concept to a private one."""
+    def concept(local, name, sid, evidence=True):
+        return {"local_id": local, "object_type": "concept",
+                "payload": {"name": name, "section_path": "1"},
+                "evidence": [_ev(sid, f"{name} in {sid}")] if evidence else []}
+
+    repo.store_kg(nb, "src-vis", [
+        concept("A", "Mixture-of-Experts (MoE)", "src-vis"),
+        concept("B", "Router balance", "src-vis"),
+        concept("C", "Capacity factor", "src-vis", evidence=False),
+    ], [_edge("A", "B", "src-vis"), _edge("A", "C", "src-vis")])
+    if b_memory:
+        repo.store_kg(nb, "src-mb", [
+            concept("A", "Mixture-of-Experts (MoE)", "src-mb"),
+            concept("Z", "ZEBRAQUARTZ plan", "src-mb"),
+        ], [_edge("A", "Z", "src-mb")])
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT count(*) AS c FROM knowledge_object_sources WHERE notebook_id=?", (nb,)
+        ).fetchone()["c"] > 0  # the reverse index is real, not empty
+
+
+def _seam(repo, nb, scope):
+    with source_scope_context(nb, scope):
+        _c, block, id_map, _hits, _p = repo.retrieval.mixed_chunk_candidates(
+            nb, SEAM_QUERY, SEAM_QUERY, [SEAM_QUERY])
+    return block, id_map
+
+
+def _freeze(owner, hidden=()):
+    return {"mode": "include", "source_ids": ["src-vis"], "hidden_source_ids": list(hidden),
+            "narrowed": False, "owner_id": owner}
+
+
+# The blocks master (effa7e9ac) renders for these two runs, captured by running
+# the same scenario on an export of that commit.  The overlay leg there is
+# ``_mix_retrieve`` alone; the comparison below also replays this branch with
+# the backstop switched off, so a drift of the fixture shows up as a failure
+# of that half rather than as a silent pass.
+_MASTER_PLAIN = (
+    "k1001: [concept][personal] Mixture-of-Experts (MoE)\n"
+    "k1002: [concept][personal] Router balance\n"
+    'k1003: [concept][personal] Capacity factor  — ev: "A kind of C"\n'
+    "chain:\n"
+    "  [k1001] Mixture-of-Experts (MoE) --kind_of--> [k1003] Capacity factor  (tier=personal)"
+)
+_MASTER_OWN = (
+    "k1001: [concept][personal] Mixture-of-Experts (MoE)\n"
+    "k1002: [concept][personal] Mixture-of-Experts (MoE)\n"
+    "k1003: [concept][personal] ZEBRAQUARTZ plan\n"
+    "k1004: [concept][personal] Router balance\n"
+    'k1005: [concept][personal] Capacity factor  — ev: "A kind of C"\n'
+    "chain:\n"
+    "  [k1001] Mixture-of-Experts (MoE) --kind_of--> [k1005] Capacity factor  (tier=personal)"
+)
+
+
+def _assert_as_on_master(repo, monkeypatch, nb, scope, expected):
+    block, id_map = _seam(repo, nb, scope)
+    assert block == expected
+    with monkeypatch.context() as patch:
+        patch.setattr(RetrievalService, "_scoped_overlay",
+                      lambda _self, _nb, kg_block, kg_id_map: (kg_block, kg_id_map))
+        assert _seam(repo, nb, scope) == (block, id_map)
+
+
+def test_mix_seam_is_byte_identical_without_anyone_elses_memory(repo, monkeypatch):
+    """No Memory at all: the all-selected run's overlay is master's, byte for
+    byte -- evidence-less ``Capacity factor`` and its chain line included --
+    and the verdict does not bind."""
+    repo.settings.graph_ppr_enabled = False
+    nb, a = _shared(repo, b_memory=False)
+    _seed_seam(repo, nb, b_memory=False)
+    _assert_as_on_master(repo, monkeypatch, nb, _freeze(a), _MASTER_PLAIN)
+
+
+def test_mix_seam_is_byte_identical_with_only_the_askers_own_memory(repo, monkeypatch):
+    repo.settings.graph_ppr_enabled = False
+    nb, _a = _shared(repo)
+    b = _users(repo)["b00000002"]
+    _seed_seam(repo, nb, b_memory=True)
+    _assert_as_on_master(repo, monkeypatch, nb, _freeze(b, hidden=["src-mb"]), _MASTER_OWN)
+
+
+def test_mix_seam_keeps_another_members_memory_out(repo):
+    """Positive control on the same seam: A's all-selected run loses B's
+    Memory node (and only that); the verdict binds, so evidence-less nodes go
+    too -- the rule ``filter_retrieval_items`` applies to a KG hit."""
+    repo.settings.graph_ppr_enabled = False
+    nb, a = _shared(repo)
+    _seed_seam(repo, nb, b_memory=True)
+    unscoped = _seam(repo, nb, None)
+    assert "ZEBRAQUARTZ" in unscoped[0]
+    block, id_map = _seam(repo, nb, _freeze(a))
+    assert "ZEBRAQUARTZ" not in block
+    assert "Router balance" in block and "Mixture-of-Experts (MoE)" in block
+    assert {v["name"] for v in id_map.values()} <= {
+        v["name"] for v in unscoped[1].values()} - {"ZEBRAQUARTZ plan"}
+
+
+def test_mix_overlay_drift_after_the_verdict_is_judged_bound(repo, monkeypatch):
+    """The verdict said "does not bind", but a rendered node names a source
+    outside the freeze (a source added after it): the drift is recorded and
+    the library is judged as bound -- the late node goes, and so does an
+    evidence-less one."""
+    nb, a = _shared(repo, b_memory=False)
+    with repo._write() as db:
+        _source(db, nb, "src-late")
+    repo.store_kg(nb, "src-vis", [
+        _concept("P", "Public root", "src-vis"),
+        {"local_id": "E", "object_type": "concept",
+         "payload": {"name": "Bare node", "section_path": "1"}, "evidence": []},
+    ], [])
+    repo.store_kg(nb, "src-late", [_concept("L", "LATE NODE", "src-late")], [])
+    ids = _ids_by_name(repo, nb)
+    block, id_map = render_subgraph_context([
+        (_node(ids, nb, "Public root"), None, None),
+        (_node(ids, nb, "Bare node"), None, None),
+        (_node(ids, nb, "LATE NODE"), _edge_to("LATE QUOTE"), ids["Public root"]),
+    ], id_offset=1000, active_notebook_id=nb)
+    monkeypatch.setattr(repo.retrieval.candidates, "_mix_retrieve",
+                        lambda *_a: ([], block, dict(id_map), [], 0))
+    service = _service(repo, lambda _nb: False)
+    with source_scope_context(nb, _freeze(a)):
+        _c, kg_block, kg_id_map, _h, _p = service.mixed_chunk_candidates(
+            nb, "q", "", ["q"])
+        memo = dict(current_source_scope()._ceiling_binds_memo)
+    assert "LATE" not in kg_block and "Bare node" not in kg_block
+    assert {v["name"] for v in kg_id_map.values()} == {"Public root"}
+    assert memo == {nb: True}
+
+
+def test_mix_overlay_unbound_keeps_an_evidence_less_node(repo, monkeypatch):
+    """The same overlay without the late node: nothing outside the freeze,
+    the verdict does not bind, the evidence-less node stays (vacuously
+    within the ceiling, as in ``node_context_row_within_ceiling``)."""
+    nb, a = _shared(repo, b_memory=False)
+    repo.store_kg(nb, "src-vis", [
+        _concept("P", "Public root", "src-vis"),
+        {"local_id": "E", "object_type": "concept",
+         "payload": {"name": "Bare node", "section_path": "1"}, "evidence": []},
+    ], [])
+    ids = _ids_by_name(repo, nb)
+    block, id_map = render_subgraph_context([
+        (_node(ids, nb, "Public root"), None, None),
+        (_node(ids, nb, "Bare node"), _edge_to("BARE QUOTE"), ids["Public root"]),
+    ], id_offset=1000, active_notebook_id=nb)
+    monkeypatch.setattr(repo.retrieval.candidates, "_mix_retrieve",
+                        lambda *_a: ([], block, dict(id_map), [], 0))
+    with source_scope_context(nb, _freeze(a)):
+        _c, kg_block, kg_id_map, _h, _p = repo.retrieval.mixed_chunk_candidates(
+            nb, "q", "", ["q"])
+        memo = dict(current_source_scope()._ceiling_binds_memo)
+    assert (kg_block, kg_id_map) == (block, id_map)
+    assert memo == {nb: False}
+
+
 def test_merge_keeps_relation_endpoints(repo):
     """The overlay's node quote is its incoming edge's evidence, not checked
     against the ceiling (``RetrievalService._scoped_overlay``): sound only
