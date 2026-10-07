@@ -299,8 +299,10 @@ def test_sqlite_digest_statement_reads_by_notebook_index(sqlite_ids):
             ).fetchall()
         )
     lines = plan.splitlines()
-    assert not [line for line in lines if line.startswith(("SCAN v", "SCAN s", "SCAN sources"))], plan
-    assert any(line.startswith("SEARCH v USING") and "(notebook_id=?" in line for line in lines), plan
+    assert not [line for line in lines if line.startswith(("SCAN s", "SCAN sources"))], plan
+    assert any(
+        line.startswith("SEARCH sources USING") and "(notebook_id=?" in line for line in lines
+    ), plan
     assert any(
         line.startswith("SEARCH s USING INDEX idx_sources_nb_hidden_type") for line in lines
     ), plan
