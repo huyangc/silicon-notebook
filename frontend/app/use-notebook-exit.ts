@@ -22,11 +22,12 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
 import { useCopyResult, type CopyResult } from "./copy-result.ts";
 import { saveBlobAsFile } from "./download-file.ts";
-import { toUserMessage } from "./errors.ts";
+import { humanizedError, toUserMessage } from "./errors.ts";
 import { transferMemoriesInBatches } from "./memory-transfer.ts";
 import {
   EXIT_FAILED_TEXT,
   EXIT_UNVERIFIED_TEXT,
+  EXIT_WAIT_FOR_EXPORT_TEXT,
   incompleteConfirmText,
   incompleteFailedText,
   incompleteLateText,
@@ -332,6 +333,8 @@ export function useNotebookExit(handlers: {
     if (!current || current.phase !== "confirm") return;
     if (leavingRef.current.has(current.notebookId)) return;
     if (current.recounting || current.transfer !== "idle") return;
+    // 导出按页读取:导出没完就清除,后面的页读到空,文件「成功」却只有前一截,原件已删。
+    if (exportingRef.current.has(current.notebookId)) return;
     void sendLeave(current.notebookId, current.count);
   }, [sendLeave]);
 
@@ -364,6 +367,7 @@ export function useNotebookExit(handlers: {
   const openTransfer = useCallback(async () => {
     const current = flowRef.current;
     if (!current || current.phase !== "confirm" || current.transfer !== "idle" || current.leaving) return;
+    if (exportingRef.current.has(current.notebookId)) return; // 移动会让在途导出缺页
     const epoch = epochRef.current;
     update({ transfer: "loading", failure: "", notice: "" });
     let ids: string[];
@@ -402,6 +406,8 @@ export function useNotebookExit(handlers: {
   ) => {
     const current = flowRef.current;
     if (!current) return;
+    // 选择器还开着:拒绝并让它就地显示原因(移动会让在途导出缺页)。
+    if (exportingRef.current.has(current.notebookId)) throw humanizedError(EXIT_WAIT_FOR_EXPORT_TEXT);
     const epoch = epochRef.current;
     const id = current.notebookId;
     transferEpochRef.current = epoch;
