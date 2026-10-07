@@ -293,20 +293,15 @@ class ActiveSourceScope:
     # the set over when it inherits the local dimension.  No gate admits a
     # withheld id.
     #
-    # FAIL-CLOSED UNTIL E2-2.  The probe answers "drifted" whenever this set is
-    # non-empty, which switches the whole-graph walk, PPR, relation and
-    # exact-lookup channels off for that run.  Those channels are not
-    # partitioned by source: with the channel closed, the 1-hop walk still
-    # rendered the asker's own Memory-derived node names and relation chain
-    # into the answer prompt behind a live anchor (measured on a real store,
-    # third E1-1 review), because the walk checks only libraries that carry a
-    # per-notebook entry and the active notebook never does.  The original
-    # rationale -- keep these channels on for a user holding one confirmed
-    # Memory -- is superseded until E2-2 lands its per-node ceiling check on
-    # the walk (``retrieval_candidates._ceiling_scoped_subgraph``); E2-2 then
-    # removes that line and restores the channels.  Cost meanwhile: a caller
-    # without ``memory:read`` whose owner holds a confirmed Memory in the
-    # notebook runs without those four channels.
+    # The drift probe counts the set back in (the live hidden read is raw), so
+    # a closed channel alone is NOT drift: the whole-graph walk, PPR, relation
+    # and exact-lookup channels stay on and keep the asker's own Memory out by
+    # the ceiling itself (PR-E2) -- the walk judges every node of the scope's
+    # own notebook too (``retrieval_candidates._ceiling_scoped_subgraph``),
+    # PPR applies the ceiling before its cut, exact lookup pushes it into its
+    # probe, and the weak-support hint states it as a list, never by owner
+    # (``RetrievalService._weak_support_viewer_form``).  The verdict binds
+    # (``_ceiling_binds_uncached``): an unbounded read would include them.
     withheld_hidden_source_ids: frozenset[str] = frozenset()
     # Mounted libraries the default-ceiling constructors froze to
     # ``frozenset()`` because their visible-source list could not be read in
@@ -431,14 +426,16 @@ class ActiveSourceScope:
         )
 
     @cached_property
-    def _library_ceiling_memo(self) -> dict[tuple[str, bool], Any]:
+    def _library_ceiling_memo(self) -> dict[tuple[str, Any], Any]:
         """Per-run memo behind ``library_source_ceiling`` / ``scoped_allowed_
         source_ids``: ``(notebook_id, ordered?) -> ceiling``.  ``False`` keys
         hold the frozenset, ``True`` keys the ordered tuple SQL producers bind:
         the store's own ``ORDER BY id`` order (its collation, not Python's) for
         a per-library ceiling a default-ceiling constructor read -- pre-filled
         by ``source_scope_context`` from that read -- and ``sorted`` for every
-        other ceiling, computed on first use.
+        other ceiling, computed on first use.  ``"bindable"`` keys hold the
+        ``CeilingSet`` wrapper of a plain local ceiling
+        (``bindable_library_ceiling``).
 
         A scope is frozen for the run, so each library's normalised ceiling is
         a fixed value; a whole-library include list is ~49k ids and re-deriving
@@ -1342,6 +1339,26 @@ def _sorted_library_ceiling(scope: ActiveSourceScope, notebook_id: str) -> tuple
     return memo[key]
 
 
+def bindable_library_ceiling(
+    scope: ActiveSourceScope, notebook_id: str,
+) -> frozenset[str] | None:
+    """``library_source_ceiling`` as a ``CeilingSet``, so a store that binds
+    it builds its bound SQL form once per run (``CeilingSet.bound_forms``,
+    read by ``source_ceiling.ceiling_param`` and the exact probe).
+
+    A per-library ceiling already is one; the local include ceiling is the
+    union ``source_ids | hidden_source_ids`` -- a plain frozenset -- and is
+    wrapped once per scope, in the scope's own memo (it dies with the run)."""
+    ceiling = library_source_ceiling(scope, notebook_id)
+    if ceiling is None or isinstance(ceiling, CeilingSet):
+        return ceiling
+    memo = scope._library_ceiling_memo
+    key = (notebook_id, "bindable")
+    if key not in memo:
+        memo[key] = CeilingSet(ceiling)
+    return memo[key]
+
+
 def scoped_source_ceiling(notebook_id: str) -> frozenset[str] | None:
     """``library_source_ceiling`` for the current run's scope (``None`` without
     one).  ``None`` = no ceiling to push; ``frozenset()`` = deny everything."""
@@ -1962,13 +1979,6 @@ def _universe_matches(
 ) -> bool:
     """``source_scope_visible_universe_matches`` for a given scope's own
     notebook (the probe body, shared with ``run_ceiling_binds``)."""
-    if scope.withheld_hidden_source_ids:
-        # Fail-closed until E2-2 (see ``withheld_hidden_source_ids``): the
-        # asker's own Memory was withheld because the Memory channel is
-        # closed, and the non-partitioned channels this probe guards would
-        # still surface it.  Checked BEFORE the ``narrowed`` short-circuits,
-        # so a submitted scope without the narrowed bit cannot skip it.
-        return False
     if scope.narrowed is None or scope.narrowed or scope.mode != "include":
         return True
     if current_digests is not None:
@@ -2701,9 +2711,8 @@ def default_ceiling_context(
     reads as drift, and those channels -- which are not partitioned by
     source -- are switched off for that question instead of admitting a
     source outside the freeze, which is what the browser path already does.
-    Until E2-2, a run whose Memory channel is closed while the asker holds a
-    confirmed Memory in the notebook runs with those four channels off
-    outright (see ``withheld_hidden_source_ids``).
+    A closed Memory channel is not drift: those channels stay on and keep the
+    withheld sources out by the ceiling (see ``withheld_hidden_source_ids``).
     """
     if current_source_scope() is not None:
         yield

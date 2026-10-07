@@ -151,9 +151,9 @@ def seed_shared_notebook(env: dict, placeholder: str) -> dict:
             )
             # The KG extraction pipeline writes the object's reverse source
             # index and, on SQLite, its lexical shadow (PostgreSQL searches the
-            # payload itself).  A closed Memory channel runs on the
-            # source-restricted lexical lane until E2-2, which reads exactly
-            # these, so without them the visible object is unreachable there.
+            # payload itself).  A closed Memory channel binds the ceiling, and
+            # the bound KG reads judge an object through exactly these, so
+            # without them the visible object is unreachable there.
             for occurrence_source in dict.fromkeys(o[0] for o in occurrences):
                 db.execute(
                     "INSERT INTO knowledge_object_sources "

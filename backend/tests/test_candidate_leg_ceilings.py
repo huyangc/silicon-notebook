@@ -16,19 +16,14 @@ Audit rows pinned here, each by what an asker can observe:
 * D-5 (plugin half) -- a plugin element hit whose source is outside the frozen
   universe is dropped, not attributed to the active notebook.
 
-The closed-channel shape.  Master has no ``withheld_hidden_source_ids`` yet
-(E1-1 adds it and, until this lands, switches four channels off whenever it is
-non-empty).  The state that fail-closed line guards is "the freeze's hidden
-half lacks the asker's own Memory AND the drift probe agrees with the freeze".
-It is built here as a frozen include whose hidden half is empty and whose
-``owner_id`` is blank, so the drift probe re-reads the same (empty) hidden half
-and answers "no drift" -- exactly what E1-1's probe answers after subtracting
-the withheld sources -- and no channel is switched off.  The run's
-``ceiling_binds`` verdict, however, is "binds" there: with a blank owner every
-Memory source in the notebook counts as one the asker may not read (its
-``foreign_hidden`` arm).  So these cases exercise the per-node check's BOUND
-path; its unbound path with verify-on-read is pinned separately by the cases
-that take the verdict on a Memory-free notebook and only then change it.
+The closed-channel shape is PR-E1's: the default ceiling withholds the asker's
+own Memory (``withheld_hidden_source_ids``) and the drift probe counts it back,
+so no channel is switched off; the run's verdict binds (an unbounded read
+would include the withheld sources).  These cases therefore exercise the
+per-node check's BOUND path; its unbound path with verify-on-read is pinned by
+the cases that take the verdict -- through the production verdict probes
+(``_probes``), as every default ceiling does -- on a Memory-free notebook and
+only then change it.
 """
 from __future__ import annotations
 
@@ -41,7 +36,10 @@ from app.core.config import Settings
 from app.domain.retrieval import RetrievedElement
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
-from app.services.source_scope import source_scope_context
+from app.services.source_scope import (
+    CeilingVerdictProbes, current_source_scope, run_ceiling_binds,
+    source_scope_context,
+)
 from tests.model_testkit import bind_all_embedding_clients
 
 NOW = "2026-09-30T00:00:00"
@@ -146,6 +144,13 @@ def _scope(visible, hidden, owner):
     }
 
 
+def _probes(repo):
+    """The production verdict probes (``RepositoryRuntime.ceiling_readers``):
+    with them the run's verdict (``run_ceiling_binds``) is computed from the
+    store, as under every default ceiling; without them it always binds."""
+    return repo._runtime.ceiling_readers().verdict_probes
+
+
 # ---------------------------------------------------------------------------
 # B-5: the overlay's 1-hop walk under the local ceiling
 # ---------------------------------------------------------------------------
@@ -175,8 +180,8 @@ def walk(store):
     return repo, nb, bob, alice
 
 
-def _overlay(repo, nb, scope=None):
-    with source_scope_context(nb, scope):
+def _overlay(repo, nb, scope=None, **context):
+    with source_scope_context(nb, scope, **context):
         block, id_map, _hits, supports = (
             repo.retrieval.candidates._chunk_kg_overlay(nb, QUERY, QUERY, 1000)
         )
@@ -202,18 +207,21 @@ def test_open_channel_control_renders_the_askers_own_memory_node(walk):
 
 
 def test_closed_channel_never_renders_the_askers_own_memory(walk):
-    """The asker's own Memory withheld from the freeze (channel closed) and the
+    """Bob's own Memory withheld from the freeze (channel closed) and the
     drift probe agreeing: the walk still runs (no channel off), and neither the
     Memory-derived node, nor its name, nor a chain through a Memory-derived
     relation reaches the prompt or gets an anchor.  (The verdict binds here --
-    a blank owner reads no Memory, so every Memory source counts as foreign --
-    so this is the bound path; see the module docstring.)"""
-    repo, nb, _bob, _alice = walk
+    the withheld sources are outside the ceiling -- so this is the bound path;
+    see the module docstring.)"""
+    repo, nb, bob, _alice = walk
     candidates = repo.retrieval.candidates
+    closed = {"_withheld_hidden_source_ids": ["src-mem-bob"],
+              "_verdict_probes": _probes(repo)}
 
-    with source_scope_context(nb, _scope(["src-doc"], [], "")):
+    with source_scope_context(nb, _scope(["src-doc"], [], bob), **closed):
         assert candidates._unsafe_source_scope_restricted(nb) is False
-    block, id_map, supports = _overlay(repo, nb, _scope(["src-doc"], [], ""))
+        assert run_ceiling_binds(current_source_scope(), nb) is True
+    block, id_map, supports = _overlay(repo, nb, _scope(["src-doc"], [], bob), **closed)
 
     assert "Mixture-of-Experts" in block, "the walk ran: the seed is rendered"
     assert "ZEBRAQUARTZ" not in block and "SECRETMEMO" not in block
@@ -259,16 +267,11 @@ def test_the_walk_reaches_router_balance_only_through_rx(walk):
 
 
 def _verdict_binds(nb) -> bool:
-    """The run's ``ceiling_binds`` verdict as the public function reports it.
-    The two probes answer "nothing to exclude", so a True here can only come
-    from a drift the run recorded (verify-on-read) -- what the cases below
-    observe, without reading the scope's private memo."""
-    from app.services.source_scope import ceiling_binds, current_source_scope
-
-    return ceiling_binds(
-        current_source_scope(), nb,
-        drifted=lambda: False, foreign_hidden=lambda: False,
-    )
+    """The run's verdict (``run_ceiling_binds``) as the public function
+    reports it.  Monotone: once taken "does not bind" it turns True only on a
+    drift the run recorded (verify-on-read) -- what the cases below observe,
+    without reading the scope's private memo."""
+    return run_ceiling_binds(current_source_scope(), nb)
 
 
 # The cases below write KG rows attributed to ``src-late``, a source with no
@@ -286,8 +289,9 @@ def test_a_node_outside_the_ceiling_after_the_verdict_is_verified_on_read(
     whose only source the freeze never admitted: it is pruned and the run
     binds from now on."""
     repo, nb, bob = plain_walk
-    with source_scope_context(nb, _scope(["src-doc"], [], bob)):
-        assert repo.retrieval._ceiling_binds(nb) is False     # the verdict
+    with source_scope_context(nb, _scope(["src-doc"], [], bob),
+                              _verdict_probes=_probes(repo)):
+        assert _verdict_binds(nb) is False     # the verdict, taken first
         _object(repo, nb, "e7", "src-late", "Late gate",
                 _evidence("src-late", "elL", "late quote"))
         _relation(repo, nb, "rN", "src-doc", "e1", "e7",
@@ -313,8 +317,13 @@ def test_an_edge_outside_the_ceiling_after_the_verdict_is_verified_on_read(
     repo, nb, bob = plain_walk
     _object(repo, nb, "e8", "src-doc", "Gate network",
             _evidence("src-doc", "elG", "gating"))
-    with source_scope_context(nb, _scope(["src-doc"], [], bob)):
-        assert repo.retrieval._ceiling_binds(nb) is False
+    # No relation seeds: under a pushed-down verdict the relation channel
+    # reads without the list, and rL as a SEED would hand e8 to the walk as a
+    # seed of its own -- this case is about rL as a walked EDGE.
+    repo.settings.chunk_kg_relation_seed_top_n = 0
+    with source_scope_context(nb, _scope(["src-doc"], [], bob),
+                              _verdict_probes=_probes(repo)):
+        assert _verdict_binds(nb) is False
         # (``knowledge_relations.source_id`` references ``sources``; the
         # row is attributed by its evidence alone, the way a relation whose
         # source row is gone reads.)
@@ -344,27 +353,27 @@ def test_the_bound_path_drops_a_node_without_evidence(walk):
     _relation(repo, nb, "rE", "src-doc", "e1", "e6",
               _evidence("src-doc", "elA", "paper link"))
 
-    bound, _id_map, _supports = _overlay(repo, nb, _scope(["src-doc"], [], alice))
+    probes = _probes(repo)
+    bound, _id_map, _supports = _overlay(
+        repo, nb, _scope(["src-doc"], [], alice), _verdict_probes=probes)
     unbound, _id_map, _supports = _overlay(
-        repo, nb, _scope(["src-doc"], ["src-mem-bob"], bob))
+        repo, nb, _scope(["src-doc"], ["src-mem-bob"], bob), _verdict_probes=probes)
 
     assert "Capacity factor" not in bound
     assert "Capacity factor" in unbound
 
 
-def test_a_failing_verdict_probe_binds_instead_of_failing_the_ask(
-    walk, monkeypatch,
-):
-    """A probe that cannot answer (a pool timeout, say) makes the overlay take
-    its bound path; cancellation still propagates (quality review P3-7).
+def test_a_failing_verdict_probe_binds_instead_of_failing_the_ask(walk):
+    """A verdict probe that cannot answer (a pool timeout, say) makes the
+    overlay take its bound path (``source_scope._probe_or_bind``); a Stop
+    still propagates (quality review P3-7).
 
     The case that tells "binds" from "does not bind" (fix review P3-a): Bob,
     his own Memory in his ceiling, nothing outside it -- the ordinary verdict
     does not bind, so the evidence-less node e6 is used as read; with the probe
-    failing the run binds and e6 is dropped.  (After PR-E1 the verdict comes
-    from ``run_ceiling_binds``, which only probes a scope carrying
-    ``verdict_probes``: this case must then install the failing probe there,
-    or a probe-less scope binds regardless and the case proves nothing.)"""
+    failing the run binds and e6 is dropped.  The failing probe is installed
+    on the scope (``verdict_probes``): a probe-less scope binds regardless and
+    would prove nothing."""
     from app.domain.cancellation import AskCancelled
 
     repo, nb, bob, alice = walk
@@ -372,30 +381,31 @@ def test_a_failing_verdict_probe_binds_instead_of_failing_the_ask(
     _relation(repo, nb, "rE", "src-doc", "e1", "e6",
               _evidence("src-doc", "elA", "paper link"))
     bob_scope = _scope(["src-doc"], ["src-mem-bob"], bob)
-    healthy, _id_map, _supports = _overlay(repo, nb, bob_scope)
+    healthy, _id_map, _supports = _overlay(
+        repo, nb, bob_scope, _verdict_probes=_probes(repo))
     assert "Capacity factor" in healthy, "control: unbound keeps e6"
 
-    def _broken(_nb):
-        raise RuntimeError("pool timeout")
+    def _raising(exc):
+        def probe(*_args):
+            raise exc
+        return CeilingVerdictProbes(universe_digests=probe, foreign_hidden=probe)
 
-    monkeypatch.setattr(repo.retrieval, "_ceiling_binds", _broken)
-    failing, _id_map, _supports = _overlay(repo, nb, bob_scope)
+    failing, _id_map, _supports = _overlay(
+        repo, nb, bob_scope, _verdict_probes=_raising(RuntimeError("pool timeout")))
     assert "Mixture-of-Experts" in failing
     assert "Capacity factor" not in failing, "a failed probe binds"
-    block, id_map, _supports = _overlay(repo, nb, _scope(["src-doc"], [], alice))
+    block, id_map, _supports = _overlay(
+        repo, nb, _scope(["src-doc"], [], alice),
+        _verdict_probes=_raising(RuntimeError("pool timeout")))
     assert "Mixture-of-Experts" in block
     assert "ZEBRAQUARTZ" not in block and "e3" not in _objects(id_map)
 
-    def _cancelled(_nb):
-        raise AskCancelled()
-
-    monkeypatch.setattr(repo.retrieval, "_ceiling_binds", _cancelled)
     with pytest.raises(AskCancelled):
-        _overlay(repo, nb, _scope(["src-doc"], [], alice))
+        _overlay(repo, nb, bob_scope, _verdict_probes=_raising(AskCancelled()))
 
 
-def _seam(repo, nb, scope):
-    with source_scope_context(nb, scope):
+def _seam(repo, nb, scope, **context):
+    with source_scope_context(nb, scope, _verdict_probes=_probes(repo), **context):
         _chunks, block, id_map, hits, _ppr = repo.retrieval.mixed_chunk_candidates(
             nb, QUERY, QUERY, [QUERY],
         )
@@ -418,9 +428,10 @@ def test_closed_channel_through_the_mixed_candidate_seam(walk):
     """Same closed-channel shape through ``mixed_chunk_candidates`` (the seam
     chunk mode reads): no Memory-derived node name or anchor, while the walk
     itself still renders the paper's nodes."""
-    repo, nb, _bob, _alice = walk
+    repo, nb, bob, _alice = walk
 
-    block, id_map, hits = _seam(repo, nb, _scope(["src-doc"], [], ""))
+    block, id_map, hits = _seam(repo, nb, _scope(["src-doc"], [], bob),
+                                _withheld_hidden_source_ids=["src-mem-bob"])
 
     assert "Mixture-of-Experts" in block
     assert "ZEBRAQUARTZ" not in block
@@ -457,11 +468,11 @@ def test_a_notebook_without_memory_renders_byte_identically(plain_walk, monkeypa
     candidates = repo.retrieval.candidates
     scope = _scope(["src-doc"], [], bob)
 
-    checked = _overlay(repo, nb, scope)
+    checked = _overlay(repo, nb, scope, _verdict_probes=_probes(repo))
     monkeypatch.setattr(
         candidates, "_ceiling_scoped_subgraph", lambda subgraph, _scope: subgraph,
     )
-    unchecked = _overlay(repo, nb, scope)
+    unchecked = _overlay(repo, nb, scope, _verdict_probes=_probes(repo))
 
     assert "Capacity factor" in checked[0]
     assert checked == unchecked

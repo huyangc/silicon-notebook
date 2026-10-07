@@ -475,10 +475,9 @@ def test_source_ceiling_binds_honours_ceilings_total():
     ):
         scope = current_source_scope()
         assert scope.withheld_hidden_source_ids == frozenset({"src-memory-bob"})
-        # ``drifted`` is given as "no drift" on purpose: until E2-2 the drift
-        # probe itself fails closed on withheld ids, and this pin must keep
-        # holding once E2-2 removes that line -- the verdict's own withheld
-        # arm is what answers here.
+        # ``drifted`` is given as "no drift" on purpose: a withheld id is not
+        # drift (the probe counts it back), so the verdict's own withheld arm
+        # is what answers here.
         assert source_scope_module.ceiling_binds(
             scope, NB, drifted=lambda: False, foreign_hidden=lambda: False,
         ) is True, "own Memory withheld -> the ceiling must bind the re-read"
@@ -602,12 +601,15 @@ def test_closed_memory_channel_keeps_memory_out_of_the_hidden_half():
         assert "src-memory-bob" not in scoped_allowed_source_ids(NB)
         assert source_scope_restricted() is False
         assert current_source_scope_payload() is None
-        # Fail-closed until E2-2: with Memory withheld the probe reports
-        # drift even when the live universe matches, so the whole-graph, PPR,
-        # relation and exact-lookup channels are off for this run.
+        # A withheld source is not drift (PR-E2): the probe counts it back,
+        # so the whole-graph, PPR, relation and exact-lookup channels stay on
+        # and keep it out by the ceiling -- whose verdict binds.
         assert source_scope_visible_universe_matches(
             NB, ["src-a", "src-b"], ["src-knowhow", "src-memory-bob"],
-        ) is False
+        ) is True
+        assert source_scope_module.ceiling_binds(
+            scope, NB, drifted=lambda: False, foreign_hidden=lambda: False,
+        ) is True
     # Open channel, same store: nothing withheld, and the matching live
     # universe reads as no drift.
     with default_ceiling_context(NB, "bob", store.readers()):
@@ -621,7 +623,7 @@ def test_closed_channel_strips_memory_from_a_submitted_scope_too():
     """The constructor does not rely on "nobody submits a scope while closing
     the channel": a submitted all-selected freeze carrying the asker's own
     Memory in its hidden half (and, defensively, a Memory id in its visible
-    half) loses both, and the probe reports drift (fail-closed until E2-2)."""
+    half) loses both; the probe counts the withheld id back (no drift)."""
     store = _shared_store()
     submitted = {
         "mode": "include",
@@ -641,7 +643,7 @@ def test_closed_channel_strips_memory_from_a_submitted_scope_too():
         assert source_allowed(NB, "src-memory-bob") is False
         assert source_scope_visible_universe_matches(
             NB, ["src-a", "src-b"], ["src-knowhow", "src-memory-bob"],
-        ) is False
+        ) is True
         assert current_source_scope_payload() == {
             "mode": "include", "source_ids": ["src-a", "src-b"], "narrowed": False,
         }
@@ -652,11 +654,13 @@ def test_closed_channel_strips_memory_from_a_submitted_scope_too():
         assert source_allowed(NB, "src-memory-bob") is True
 
 
-def test_closed_channel_fails_closed_without_the_narrowed_bit():
-    """The fail-closed check comes BEFORE the probe's ``narrowed`` short-cuts:
-    a submitted include freeze that carries no narrowed bit (``narrowed`` is
-    None, which otherwise means "legacy scope, keep the channels") still
-    switches the non-partitioned channels off once Memory is withheld."""
+def test_closed_channel_without_the_narrowed_bit_still_binds_the_verdict():
+    """A submitted include freeze that carries no narrowed bit (``narrowed`` is
+    None: "legacy scope, keep the channels") with Memory withheld: the channels
+    stay on -- PR-E2 gives each of them the ceiling, so a withheld source is no
+    longer switched off through the drift probe -- and what keeps the withheld
+    Memory out is the ceiling, whose verdict binds (its withheld arm comes
+    before any narrowed short-cut)."""
     store = _shared_store()
     submitted = {
         "mode": "include",
@@ -672,7 +676,11 @@ def test_closed_channel_fails_closed_without_the_narrowed_bit():
         assert scope.withheld_hidden_source_ids == frozenset({"src-memory-bob"})
         assert source_scope_visible_universe_matches(
             NB, ["src-a", "src-b"], ["src-knowhow", "src-memory-bob"],
-        ) is False
+        ) is True
+        assert source_allowed(NB, "src-memory-bob") is False
+        assert source_scope_module.ceiling_binds(
+            scope, NB, drifted=lambda: False, foreign_hidden=lambda: False,
+        ) is True
     with default_ceiling_context(
         NB, "bob", store.readers(), local_scope=submitted,
     ):
@@ -1126,10 +1134,10 @@ def test_refresh_inside_a_closed_channel_keeps_the_withheld_memory():
             assert scope.hidden_source_ids == frozenset({"src-knowhow"})
             assert scope.withheld_hidden_source_ids == frozenset({"src-memory-bob"})
             assert source_allowed(NB, "src-memory-bob") is False
-            # Inherited, so the refreshed scope stays fail-closed too.
+            # Inherited, so the refreshed scope's probe still counts them back.
             assert source_scope_visible_universe_matches(
                 NB, live_visible, live_hidden,
-            ) is False
+            ) is True
 
 
 def test_refresh_without_a_library_dimension_admits_a_library_mounted_since_the_freeze():
@@ -2204,12 +2212,12 @@ def assert_default_ceiling_over_real_stores(repo, ids, read_workers: int = 1) ->
         scope = current_source_scope()
         assert scope.hidden_source_ids == frozenset({"src-knowhow"})
         assert scope.withheld_hidden_source_ids == frozenset({"src-memory-bob"})
-        # Fail-closed until E2-2: withheld Memory switches the
-        # non-partitioned channels off.
+        # A withheld source is not drift: the channels stay on and keep it
+        # out by the ceiling (PR-E2).
         assert source_scope_visible_universe_matches(
             nb, sources.all_visible_source_ids(nb),
             sources.hidden_source_ids(nb, bob),
-        ) is False
+        ) is True
 
 
 def test_default_ceiling_over_real_sqlite_stores(tmp_path, monkeypatch):

@@ -129,8 +129,8 @@ def _scope(visible, hidden, owner):
     }
 
 
-def _overlay(repo, nb, scope=None):
-    with source_scope_context(nb, scope):
+def _overlay(repo, nb, scope=None, **context):
+    with source_scope_context(nb, scope, **context):
         block, id_map, _hits, supports = (
             repo.retrieval.candidates._chunk_kg_overlay(nb, QUERY, QUERY, 1000)
         )
@@ -204,13 +204,14 @@ def test_pg_a_notebook_without_memory_renders_byte_identically(
     seed.rel("rD", "src-doc", "e1", "e4", doc)
     seed.rel("rE", "src-doc", "e1", "e6", doc)
     scope = _scope(["src-doc"], [], bob)
+    probes = repo._runtime.ceiling_readers().verdict_probes
 
-    checked = _overlay(repo, seed.nb, scope)
+    checked = _overlay(repo, seed.nb, scope, _verdict_probes=probes)
     monkeypatch.setattr(
         repo.retrieval.candidates, "_ceiling_scoped_subgraph",
         lambda subgraph, _scope: subgraph,
     )
-    unchecked = _overlay(repo, seed.nb, scope)
+    unchecked = _overlay(repo, seed.nb, scope, _verdict_probes=probes)
 
     assert "Capacity factor" in checked[0]
     assert checked == unchecked
@@ -308,8 +309,10 @@ def test_pg_an_edge_outside_the_ceiling_after_the_verdict_is_verified_on_read(
     """Twin of the SQLite case: verdict taken on a Memory-free notebook (does
     not bind), then a relation attributed only to a source outside the freeze
     links two admitted nodes -- the chain step is not rendered and the run
-    binds from now on."""
-    from app.services.source_scope import ceiling_binds, current_source_scope
+    binds from now on.  The verdict comes from the production probes, and no
+    relation seeds are taken, so rL reaches the walk as an EDGE (see the
+    SQLite twin)."""
+    from app.services.source_scope import current_source_scope, run_ceiling_binds
 
     bob, _alice = people
     seed = _Seed(repo, "late-edge")
@@ -317,17 +320,18 @@ def test_pg_an_edge_outside_the_ceiling_after_the_verdict_is_verified_on_read(
     doc = [_ev("src-doc", "elA", "MoE routing")]
     seed.obj("e1", "src-doc", "Mixture-of-Experts (MoE)", doc)
     seed.obj("e8", "src-doc", "Gate network", [_ev("src-doc", "elG", "gating")])
-    with source_scope_context(seed.nb, _scope(["src-doc"], [], bob)):
-        assert repo.retrieval._ceiling_binds(seed.nb) is False
+    repo.settings.chunk_kg_relation_seed_top_n = 0
+    with source_scope_context(
+        seed.nb, _scope(["src-doc"], [], bob),
+        _verdict_probes=repo._runtime.ceiling_readers().verdict_probes,
+    ):
+        assert run_ceiling_binds(current_source_scope(), seed.nb) is False
         seed.rel("rL", None, "e1", "e8", [_ev("src-late", "elL", "late link")])
         block, _id_map, _hits, _supports = (
             repo.retrieval.candidates._chunk_kg_overlay(
                 seed.nb, QUERY, QUERY, 1000)
         )
-        binds_after = ceiling_binds(
-            current_source_scope(), seed.nb,
-            drifted=lambda: False, foreign_hidden=lambda: False,
-        )
+        binds_after = run_ceiling_binds(current_source_scope(), seed.nb)
 
     assert "Gate network" in block
     assert not any(

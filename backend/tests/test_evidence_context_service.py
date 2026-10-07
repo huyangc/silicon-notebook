@@ -816,7 +816,9 @@ def test_relation_rows_are_verified_when_the_verdict_says_the_ceiling_does_not_b
     run): rows all inside the frozen ceiling are used as read with the
     canonical count; one row from a source outside it (added after the freeze)
     records the drift and the rows are judged as if the ceiling bound."""
-    from app.services.source_scope import current_source_scope, source_scope_context
+    from app.services.source_scope import (
+        ceiling_binds, current_source_scope, source_scope_context,
+    )
 
     inside = _CeilingRelationKnowledge()
     inside.RAW = [row for row in inside.RAW if row[4] != "s-out"]
@@ -838,7 +840,12 @@ def test_relation_rows_are_verified_when_the_verdict_says_the_ceiling_does_not_b
             settings=Settings(), ceiling_verdict=lambda _nb: False,
         )
         block, _ = service.knowledge_context("active", _relation_hits())
-        assert current_source_scope()._ceiling_binds_memo.get("active") is True
+        # The verdict is monotone: with both probes answering "nothing to
+        # exclude" it can only answer True because the read recorded the drift.
+        assert ceiling_binds(
+            current_source_scope(), "active",
+            drifted=lambda: False, foreign_hidden=lambda: False,
+        ) is True
     assert drifted.support_calls == []
     assert "k1 -[supports]-> k2 (×2源)" in block
     assert "related_to" not in block
