@@ -41,6 +41,7 @@ from app.repositories.postgres._store_utils import (
 )
 from app.repositories.postgres import memory_sql
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.id_binding import bind_ids, execute_ids, member_of
 from app.repositories.postgres.memory_sql import (
     memory_source_readable,
     memory_source_type_predicate,
@@ -69,6 +70,16 @@ VISIBLE_SOURCE_TYPES_PREDICATE = "source_type NOT IN ('memory','knowhow')"
 # READ COMMITTED 下会被并发的 Memory 增删漏掉,而漏掉的东西里包含概念名称)。
 # 文本由 `memory_sql.memory_source_type_predicate()` 渲染(共享定义点)。
 MEMORY_SOURCE_TYPE_PREDICATE = memory_source_type_predicate()
+
+# ``SourceStore.memory_source_ids(holders_among=...)`` (E4-7); SQLite twin
+# ``_MEMORY_HOLDERS_SQL``.  ``{member}`` is ``id_binding.member_of`` over the
+# notebook ids, executed through ``execute_ids`` (a custom plan); the
+# ``source_type IN`` term is ``idx_sources_nb_hidden_type``'s predicate.
+_MEMORY_HOLDERS_SQL = (
+    "SELECT DISTINCT notebook_id FROM sources WHERE {member} "
+    "AND source_type IN ('memory','knowhow') "
+    f"AND {MEMORY_SOURCE_TYPE_PREDICATE}"
+)
 
 # ``SourceStore.hidden_source_ids``;SQLite 侧 ``_HIDDEN_SOURCE_IDS_SQL`` 的孪生。
 _HIDDEN_SOURCE_IDS_SQL = (
@@ -780,10 +791,33 @@ class SourceStore:
             for row in rows
         ]
 
-    def memory_source_ids(self, connection: Any, notebook_id: str) -> list[str]:
+    def memory_source_ids(
+        self, connection: Any, notebook_id: str, *,
+        holders_among: Sequence[str] | None = None,
+    ) -> list[str]:
         """The notebook's private Memory synthetic source ids — the exact
         complement of the exclusion above; see the SQLite adapter for the
-        single-definition argument and the cost shape."""
+        single-definition argument and the cost shape.
+
+        ``holders_among`` (E4-7): which of these notebooks hold any Memory
+        source, in ONE statement; ``notebook_id`` is ignored.  The list is
+        bound through ``id_binding`` (one parameter, a custom plan); each
+        notebook is an index probe of ``idx_sources_nb_hidden_type``.
+        EXPLAIN pin: tests/postgres/test_kg_service_readers_pg.py."""
+        if holders_among is not None:
+            notebooks = sorted({str(nb) for nb in holders_among if nb})
+            if not notebooks:
+                return []
+            bound = bind_ids(notebooks)
+            return [
+                row["notebook_id"]
+                for row in execute_ids(
+                    connection,
+                    _MEMORY_HOLDERS_SQL.format(
+                        member=member_of("notebook_id", bound)),
+                    (bound.param,),
+                ).fetchall()
+            ]
         return [
             row["id"]
             for row in connection.execute(

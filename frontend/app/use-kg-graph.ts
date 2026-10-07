@@ -434,8 +434,13 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       if (targetNodeId && neighborhood?.locating_unavailable) {
         // 批 3·W4 T-W4-3：这个状态不再是「正在构建、稍等即可」的短暂窗口——大库的
         // 折叠图产物只由索引构建发布，在线路径不会再自己去建。所以文案不能承诺
-        // 一个没人会兑现的「完成后请重试」，只说清什么时候会有。
-        effectsRef.current.notify("库规模较大，图谱预览尚未生成，暂时无法定位该引用节点；下一次索引构建后可用");
+        // 一个没人会兑现的「完成后请重试」，只说清什么时候会有。预览已经生成、
+        // 只是里面没有这个节点时（预览比节点旧），不能说「尚未生成」。
+        effectsRef.current.notify(
+          neighborhood.preview_lacks_focus
+            ? "库规模较大，当前图谱预览里还没有这个引用节点，暂时无法定位；下一次索引构建后可用"
+            : "库规模较大，图谱预览尚未生成，暂时无法定位该引用节点；下一次索引构建后可用",
+        );
       } else if (targetNodeId && !focus.focusId) {
         effectsRef.current.notify("知识图谱已打开，但引用节点定位失败，请重试");
       }

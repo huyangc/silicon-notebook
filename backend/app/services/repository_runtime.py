@@ -453,6 +453,8 @@ def _build_notebook_domain(
         seats.queries,
         seats.kg_build_jobs,
         foundation.indexing_pipelines,
+        # E4-7: the counts' no-Memory short-circuit (``viewer_count_kwargs``).
+        memory_source_ids=seats.source_store.memory_source_ids,
     )
     # Source files resolve storage_dir through the database. Construct
     # BEFORE the catalog so its storage_dir callable can bind THIS store

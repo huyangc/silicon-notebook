@@ -3,11 +3,11 @@ a detail read names, not only on raw objects and owner columns.
 
 Three identities used to escape it:
 
-1. a folded CLUSTER (canonical id) none of whose members is owned by an
-   unreadable hidden source, but every member of which cites only such a
-   source — neighbour hydration returned the node, its private label and its
-   edge; a partly hidden cluster of that kind kept a label taken from the
-   hidden member (neighbours and concept detail);
+1. a folded CLUSTER (canonical id) whose members may be hidden — judged by
+   its members, relabelled by its first visible one.  (Until E4-7 a member
+   was also hidden when it cited only an unreadable source; since the D2/D4
+   alignment an object is hidden only by its own source, and such a member
+   stays with its unreadable evidence items dropped -- pinned below);
 2. a legacy SIBLING procedure owned by another user's Memory that carries a
    visible evidence item (merged) — its private name became a step of a
    visible procedure;
@@ -49,31 +49,33 @@ def neighbour_path(request, repo, monkeypatch):
 # ------------------------------------------------ 1. canonical identities
 def add_phantom(repo, s):
     """A concept OWNED by the visible source whose only evidence is A's
-    Memory (hidden from B by the evidence half), linked to the visible
-    Engram. Its cluster has no member owned by an unreadable source."""
+    Memory, linked to the visible Engram. Its cluster has no member owned by
+    an unreadable source: since E4-7 it is the visible source's object."""
     repo.store_kg(s.nb, "src-s", [
         {"local_id": "hub", "object_type": "concept",
          "payload": {"name": "Engram", "section_path": "1"},
          "evidence": [_ev("src-s", "el-s-occ")]},
         {"local_id": "ph", "object_type": "concept",
-         "payload": {"name": "A-PRIVATE Phantom", "section_path": "1"},
+         "payload": {"name": "Phantom", "section_path": "1"},
          "evidence": [_ev("src-ma", "el-ma-secret")]},
     ], [{"source_local_id": "ph", "target_local_id": "hub", "edge_type": "related_to",
          "evidence": []}])
     build_pre_isolation(repo, s.nb)
     with repo._write() as db:
-        phantom = _object_id(db, s.nb, "A-PRIVATE Phantom", "src-s")
+        phantom = _object_id(db, s.nb, "Phantom", "src-s")
     return phantom, repo.cluster_map(s.nb)[phantom]
 
 
 def add_gadget(repo, s):
-    """A cluster of two members, both OWNED by the visible source: one
-    evidenced by it, one only by A's Memory. The stored canonical name is the
-    hidden member's (the merge review may pick any member's name)."""
+    """A cluster of two members: one OWNED by the visible source, one owned
+    by A's Memory. The stored canonical name is the hidden member's (the
+    merge review may pick any member's name)."""
     repo.store_kg(s.nb, "src-s", [
         {"local_id": "g1", "object_type": "concept",
          "payload": {"name": "Gadget", "section_path": "G"},
          "evidence": [_ev("src-s", "el-s-def")]},
+    ], [])
+    repo.store_kg(s.nb, "src-ma", [
         {"local_id": "g2", "object_type": "concept",
          "payload": {"name": "Gadget", "section_path": "A-PRIVATE G"},
          "evidence": [_ev("src-ma", "el-ma-def")]},
@@ -82,10 +84,10 @@ def add_gadget(repo, s):
     with repo._write() as db:
         visible, hidden = (
             db.execute(
-                "SELECT id FROM knowledge_objects WHERE notebook_id=? AND source_id='src-s' "
-                "AND json_extract(payload,'$.section_path')=?", (s.nb, section),
+                "SELECT id FROM knowledge_objects WHERE notebook_id=? AND source_id=? "
+                "AND json_extract(payload,'$.section_path')=?", (s.nb, source, section),
             ).fetchone()["id"]
-            for section in ("G", "A-PRIVATE G"))
+            for source, section in (("src-s", "G"), ("src-ma", "A-PRIVATE G")))
     canonical = repo.cluster_map(s.nb)[visible]
     assert repo.cluster_map(s.nb)[hidden] == canonical
     with repo._write() as db:
@@ -103,28 +105,27 @@ def certify(repo, nb, certified):
 
 
 @pytest.mark.parametrize("certified", [True, False])
-def test_neighbours_omit_a_cluster_hidden_by_the_evidence_half(
+def test_neighbours_keep_a_cluster_whose_member_only_cites_foreign_memory(
     repo, neighbour_path, certified,
 ):
+    """E4-7 (D2/D4): the phantom is the visible source's object; B sees it
+    and its edge, and its evidence item from A's Memory never reaches B."""
     s = build_scenario(repo, b_memory=False)
     phantom, phantom_c = add_phantom(repo, s)
     certify(repo, s.nb, certified)
     owner = as_user(s.a, repo.kg_neighbors, s.nb, s.ids.engram_s)
     assert phantom_c in {n["id"] for n in owner["nodes"]}
     view = as_user(s.b, repo.kg_neighbors, s.nb, s.ids.engram_s)
-    assert phantom_c not in {n["id"] for n in view["nodes"]}
-    assert all(phantom_c not in (e["source_object_id"], e["target_object_id"])
-               for e in view["edges"])
+    assert phantom_c in {n["id"] for n in view["nodes"]}
     assert "A-PRIVATE" not in repr(view)
-    for focus in (phantom, phantom_c):
-        hidden = as_user(s.b, repo.kg_neighbors, s.nb, focus)
-        assert hidden["nodes"] == [] and hidden["edges"] == []
-    with pytest.raises(KeyError):
-        as_user(s.b, repo.concept_detail, s.nb, phantom_c)
+    detail = as_user(s.b, repo.concept_detail, s.nb, phantom_c)
+    assert [m["id"] for m in detail["members"]] == [phantom]
+    assert detail["members"][0]["evidence"] == [] and detail["evidence"] == []
+    assert "el-ma" not in repr(detail) and "src-ma" not in repr(detail)
 
 
 @pytest.mark.parametrize("certified", [True, False])
-def test_cluster_labels_never_come_from_an_evidence_hidden_member(repo, certified):
+def test_cluster_labels_never_come_from_a_hidden_member(repo, certified):
     s = build_scenario(repo, b_memory=False)
     visible, hidden, canonical = add_gadget(repo, s)
     certify(repo, s.nb, certified)
@@ -428,16 +429,19 @@ def seed_member_clusters(repo, nb, specs, *, ph="?", cast=""):
     return names
 
 
-# A 60-member suspect hub, five ordinary clusters (one suspect member, then
+# A 60-member hub (30 visible members first, then 30 hidden ones -- a large
+# hidden-member bound), five ordinary clusters (one hidden member, then
 # visible ones), a cluster whose first visible member is the 13th (12 hidden
-# members first) and a cluster with no visible member at all.
+# members first) and a cluster with no visible member at all.  Since E4-7
+# only an owned-by-foreign member (``h``) makes a cluster checked; ``s``
+# members are plain visible members.
 HUB = "K-hub"
 ORDINARY = [f"K-ord{index}" for index in range(5)]
 DEEP = "K-deep"
 DARK = "K-dark"
 MEMBER_SPECS = {
-    HUB: "s" * 60,
-    **{cid: "s" + "v" * 19 for cid in ORDINARY},
+    HUB: "v" * 30 + "h" * 30,
+    **{cid: "h" + "v" * 19 for cid in ORDINARY},
     DEEP: "h" * 12 + "v" * 5,
     DARK: "h" * 20,
 }
@@ -473,7 +477,7 @@ def test_a_suspect_hub_no_longer_sizes_every_clusters_member_window(repo, monkey
     certify(repo, s.nb, True)
     reader = reader_of(repo)
     scope = as_user(s.b, reader.for_notebook, s.nb)
-    assert scope.hidden_member_bound(HUB) == 60
+    assert scope.hidden_member_bound(HUB) == 30
     hydrated = count_hydrated_member_rows(reader.knowledge, monkeypatch)
     clusters = [HUB, *ORDINARY, DEEP]
     nodes, edges = neighbour_nodes(s.ids.engram_canonical, clusters)
@@ -483,7 +487,7 @@ def test_a_suspect_hub_no_longer_sizes_every_clusters_member_window(repo, monkey
     # One batched read of ``window`` rows per listed cluster (plus the focus
     # Engram cluster's two members: it is checked too), then the one widened
     # cluster's own page (members 9..17 of DEEP, one page of 16).  Before r3
-    # the shared window was 61: 60 + 5 × 20 + 17 + 2 = 179 rows in one read.
+    # the shared window was the hub's hidden bound + 1 for every cluster.
     assert hydrated == [len(clusters) * window + 2, len(MEMBER_SPECS[DEEP]) - window]
     assert sum(hydrated) <= (len(clusters) + 1) * window + len(MEMBER_SPECS[DEEP])
 
@@ -501,7 +505,7 @@ def test_a_cluster_is_labelled_by_a_visible_member_beyond_the_first_window(
                                (s.ids.engram_canonical,))
     labels = {n["id"]: n["payload"]["name"] for n in kept}
     assert labels[DEEP] == f"{DEEP} v12" and f"{DEEP} v12" in names.values()
-    assert labels[HUB] == f"{HUB} s0"
+    assert labels[HUB] == f"{HUB} v0"
     assert len(kept_edges) == 2 and "A-PRIVATE" not in repr(kept)
 
 
@@ -540,15 +544,15 @@ def test_a_concept_page_reads_the_page_size_not_the_hubs_suspect_count(repo, mon
     assert knowledge is repo._runtime.knowledge_query.knowledge
     hydrated = count_hydrated_member_rows(knowledge, monkeypatch)
     first = as_user(s.b, repo.concept_detail, s.nb, HUB, limit=5)
-    assert [m["payload"]["name"] for m in first["members"]] == [f"{HUB} s{i}" for i in range(5)]
-    assert first["canonical_name"] == f"{HUB} s0"
-    # Before r4: 5 + 1 + 60 suspects = a 66-row window, i.e. the whole hub.
+    assert [m["payload"]["name"] for m in first["members"]] == [f"{HUB} v{i}" for i in range(5)]
+    assert first["canonical_name"] == f"{HUB} v0"
+    # Before r4: 5 + 1 + the hub's hidden count = a window as large as the hub.
     assert hydrated == [6]
     second = as_user(s.b, repo.concept_detail, s.nb, HUB, limit=5,
                      after=first["next_cursor"])
     assert [m["payload"]["name"] for m in second["members"]] == [
-        f"{HUB} s{i}" for i in range(5, 10)]
-    assert second["canonical_name"] == f"{HUB} s0"
+        f"{HUB} v{i}" for i in range(5, 10)]
+    assert second["canonical_name"] == f"{HUB} v0"
     # The page, then the label's first-visible-member scan (was 61 rows).
     assert hydrated == [6, 6, window]
 

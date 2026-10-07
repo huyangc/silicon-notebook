@@ -2,8 +2,10 @@
 
 The object rule (``KgViewerScope.row_hidden``): an object is hidden from a
 viewer when its OWN ``source_id`` is a hidden source the viewer may not read
-(whatever its evidence says — merged and promoted objects carry the union),
-or when its evidence cites such a source and nothing the viewer may read.
+(whatever its evidence says — merged and promoted objects carry the union).
+Since E4-7 (plan §2 D2/D4) evidence never hides an object: an object owned by
+a readable source stays, and each evidence item attributed to an unreadable
+source is dropped on its own.
 Scenario helpers come from tests/test_kg_viewer_scope.py.
 """
 from __future__ import annotations
@@ -121,10 +123,11 @@ def test_a_scope_that_cannot_be_built_fails_the_request(repo, monkeypatch, endpo
         as_user(s.b, call[0], *call[1])
 
 
-# ------------------------------------ evidence-only hidden, reverse index (3)
+# ------------------------------- evidence never hides an object (E4-7, D4)
 def _add_dangling(repo, s):
     """Owned by the VISIBLE source, evidence only A's Memory + a source id
-    that no longer exists: hidden by the evidence half, NOT in the owned set."""
+    that no longer exists: the visible source's object (D4), whose two
+    evidence items are both unreadable to B."""
     repo.store_kg(s.nb, "src-s", [
         {"local_id": "d", "object_type": "concept",
          "payload": {"name": "Engram", "section_path": "DANGLING"},
@@ -145,13 +148,14 @@ def _add_dangling(repo, s):
 
 
 @pytest.mark.parametrize("certified", [False, True])
-def test_evidence_only_hidden_objects_with_and_without_a_certified_reverse_index(
+def test_an_object_of_a_readable_source_is_never_hidden_by_its_evidence(
     repo, certified,
 ):
-    """The evidence half is judged on each row. The reverse index only
-    narrows WHICH clusters are examined (certified: those with a member owned
-    by or citing an unreadable source; uncertified: all of them), so
-    certifying it must not change a single answer here."""
+    """E4-7 (D2 twin of ``foreign_memory_object_excluded``): the objects stay
+    visible to B -- their names are the visible source's -- and every
+    evidence item attributed to A's Memory (or to nothing readable) is
+    dropped from what B receives.  The reverse index is no longer consulted,
+    so certifying it changes nothing."""
     s = build_scenario(repo, b_memory=False)
     dangling, claim = _add_dangling(repo, s)
     with repo._write() as db:
@@ -160,21 +164,28 @@ def test_evidence_only_hidden_objects_with_and_without_a_certified_reverse_index
             (1 if certified else 0, s.nb),
         )
     for oid in (dangling, claim):
-        with pytest.raises(KeyError):
-            as_user(s.b, repo.node_context, s.nb, oid)
+        ctx = as_user(s.b, repo.node_context, s.nb, oid)
+        assert ctx["id"] == oid and ctx["occurrences"] == []
+        assert "A-PRIVATE" not in repr(ctx) and "el-ma" not in repr(ctx)
     canonical = _cluster_of(repo, s.nb, s.ids.engram_s)
     detail = as_user(s.b, repo.concept_detail, s.nb, canonical)
-    assert [m["id"] for m in detail["members"]] == [s.ids.engram_s]
-    assert detail["member_total"] == 1
-    assert "DANGLING" not in repr(detail)
+    assert [m["id"] for m in detail["members"]] == sorted([s.ids.engram_s, dangling])
+    assert detail["member_total"] == 2
+    by_id = {m["id"]: m for m in detail["members"]}
+    assert by_id[dangling]["evidence"] == []
+    assert "A-PRIVATE" not in repr(detail) and "src-ma" not in repr(detail)
     view = as_user(s.b, repo.kg_neighbors, s.nb, s.ids.engram_s)
-    assert claim not in {n["id"] for n in view["nodes"]}
+    # The claim as the view names it: its raw id, or its cluster where the
+    # view folds it (E4-2's pre-isolation build).
+    ids = {n["id"] for n in view["nodes"]}
+    assert claim in ids or repo.cluster_map(s.nb).get(claim) in ids, ids
 
 
 # ------------------------------------------------ paging property (3, 4d)
 def _fixed_hub(repo, s, pattern):
     """A cluster whose members have FIXED ids ``ko-hub-NN`` in pattern order:
-    V visible, H owned by A's Memory, D evidence-only hidden (dangling)."""
+    V visible, H owned by A's Memory, D owned by the visible source but
+    citing only A's Memory and a missing source (visible since E4-7)."""
     rows = []
     for index, kind in enumerate(pattern):
         source_id = "src-ma" if kind == "H" else "src-s"
@@ -197,8 +208,8 @@ def _fixed_hub(repo, s, pattern):
 @pytest.mark.parametrize("pattern,limit", [
     ("VHHHHH", 1),        # hidden tail after the only visible member
     ("HHVHHV", 1),        # hidden head, visible on every page boundary
-    ("VVDHVV", 2),        # evidence-only hidden right after a full page
-    ("VDDDDV", 1),        # a run of evidence-only hidden longer than any over-fetch
+    ("VVDHVV", 2),        # a D member right after a full page stays
+    ("VDDDDV", 1),        # a run of D members: all of them stay
     ("DHVHDVHVD", 2),
     ("VVVVVVV", 3),
     ("HDVVHDVV", 200),
@@ -207,7 +218,7 @@ def _fixed_hub(repo, s, pattern):
 def test_concept_pages_are_exact_around_hidden_members(repo, pattern, limit):
     s = build_scenario(repo, b_memory=False)
     canonical = _fixed_hub(repo, s, pattern)
-    expected = [f"ko-hub-{i:02d}" for i, kind in enumerate(pattern) if kind == "V"]
+    expected = [f"ko-hub-{i:02d}" for i, kind in enumerate(pattern) if kind in "VD"]
     if not expected:
         with pytest.raises(KeyError):
             as_user(s.b, repo.concept_detail, s.nb, canonical, limit=limit)
@@ -330,11 +341,10 @@ def test_statement_count_is_constant_in_the_number_of_unreadable_sources(
 ):
     """Each endpoint issues the same number of statements with 31 and with 301
     unreadable Memory sources: the owned-object set is ONE statement
-    (``relink_object_rows_for_source(source_ids=..., with_citing=True)``,
-    which also returns the citing set and the reverse-index certificate),
-    the clusters of a neighbourhood that
+    (``relink_object_rows_for_source(source_ids=...)``; since E4-7 the
+    owner rule needs no citing set), the clusters of a neighbourhood that
     need a check are read in ONE batched statement, and nothing issues a
-    per-source read or a per-cluster COUNT. (The suspect objects here stay
+    per-source read or a per-cluster COUNT. (The owned objects here stay
     under one 900-id fold batch.)"""
     s = build_scenario(repo, b_memory=False)
     _foreign_memories(repo, s, 30)

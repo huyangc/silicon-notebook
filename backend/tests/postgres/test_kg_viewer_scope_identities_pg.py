@@ -45,43 +45,46 @@ def _certify(repo, nb, certified):
 
 
 @pytest.mark.parametrize("certified", [True, False])
-def test_pg_neighbours_omit_a_cluster_hidden_by_the_evidence_half(
+def test_pg_neighbours_keep_a_cluster_whose_member_only_cites_foreign_memory(
     repo, neighbour_path, certified,
 ):
+    """E4-7 (D2/D4): owned by the visible source, so B sees it; its evidence
+    item from A's Memory never reaches B."""
     s = build_scenario(repo, b_memory=False)
     repo.store_kg(s.nb, "src-s", [
         {"local_id": "hub", "object_type": "concept",
          "payload": {"name": "Engram", "section_path": "1"},
          "evidence": [_ev("src-s", "el-s-occ")]},
         {"local_id": "ph", "object_type": "concept",
-         "payload": {"name": "A-PRIVATE Phantom", "section_path": "1"},
+         "payload": {"name": "Phantom", "section_path": "1"},
          "evidence": [_ev("src-ma", "el-ma-secret")]},
     ], [{"source_local_id": "ph", "target_local_id": "hub", "edge_type": "related_to",
          "evidence": []}])
     build_pre_isolation(repo, s.nb)
     with repo._runtime.database.connect() as db:
-        phantom = _object_id(db, s.nb, "A-PRIVATE Phantom", "src-s")
+        phantom = _object_id(db, s.nb, "Phantom", "src-s")
     phantom_c = repo.cluster_map(s.nb)[phantom]
     _certify(repo, s.nb, certified)
     owner = as_user(s.a, repo.kg_neighbors, s.nb, s.ids.engram_s)
     assert phantom_c in {n["id"] for n in owner["nodes"]}
     view = as_user(s.b, repo.kg_neighbors, s.nb, s.ids.engram_s)
-    assert phantom_c not in {n["id"] for n in view["nodes"]}
+    assert phantom_c in {n["id"] for n in view["nodes"]}
     assert "A-PRIVATE" not in repr(view)
-    for focus in (phantom, phantom_c):
-        hidden = as_user(s.b, repo.kg_neighbors, s.nb, focus)
-        assert hidden["nodes"] == [] and hidden["edges"] == []
-    with pytest.raises(KeyError):
-        as_user(s.b, repo.concept_detail, s.nb, phantom_c)
+    detail = as_user(s.b, repo.concept_detail, s.nb, phantom_c)
+    assert [m["id"] for m in detail["members"]] == [phantom]
+    assert detail["members"][0]["evidence"] == [] and detail["evidence"] == []
+    assert "el-ma" not in repr(detail) and "src-ma" not in repr(detail)
 
 
 @pytest.mark.parametrize("certified", [True, False])
-def test_pg_cluster_labels_never_come_from_an_evidence_hidden_member(repo, certified):
+def test_pg_cluster_labels_never_come_from_a_hidden_member(repo, certified):
     s = build_scenario(repo, b_memory=False)
     repo.store_kg(s.nb, "src-s", [
         {"local_id": "g1", "object_type": "concept",
          "payload": {"name": "Gadget", "section_path": "G"},
          "evidence": [_ev("src-s", "el-s-def")]},
+    ], [])
+    repo.store_kg(s.nb, "src-ma", [
         {"local_id": "g2", "object_type": "concept",
          "payload": {"name": "Gadget", "section_path": "A-PRIVATE G"},
          "evidence": [_ev("src-ma", "el-ma-def")]},
@@ -296,7 +299,7 @@ def test_pg_a_suspect_hub_no_longer_sizes_every_clusters_member_window(repo, mon
     _certify(repo, s.nb, True)
     reader = _reader(repo)
     scope = as_user(s.b, reader.for_notebook, s.nb)
-    assert scope.hidden_member_bound(HUB) == 60
+    assert scope.hidden_member_bound(HUB) == 30
     hydrated = count_hydrated_member_rows(reader.knowledge, monkeypatch)
     clusters = [HUB, *ORDINARY, DEEP]
     nodes, edges = neighbour_nodes(s.ids.engram_canonical, clusters)
@@ -319,7 +322,7 @@ def test_pg_a_cluster_is_labelled_by_a_visible_member_beyond_the_first_window(
     kept, kept_edges = as_user(s.b, scope.filter_neighbourhood, nodes, edges,
                                (s.ids.engram_canonical,))
     labels = {n["id"]: n["payload"]["name"] for n in kept}
-    assert labels == {HUB: f"{HUB} s0", DEEP: f"{DEEP} v12"}
+    assert labels == {HUB: f"{HUB} v0", DEEP: f"{DEEP} v12"}
     assert len(kept_edges) == 2 and "A-PRIVATE" not in repr(kept)
 
 
@@ -349,14 +352,14 @@ def test_pg_a_concept_page_reads_the_page_size_not_the_hubs_suspect_count(repo, 
     assert knowledge is repo._runtime.knowledge_query.knowledge
     hydrated = count_hydrated_member_rows(knowledge, monkeypatch)
     first = as_user(s.b, repo.concept_detail, s.nb, HUB, limit=5)
-    assert [m["payload"]["name"] for m in first["members"]] == [f"{HUB} s{i}" for i in range(5)]
-    assert first["canonical_name"] == f"{HUB} s0"
+    assert [m["payload"]["name"] for m in first["members"]] == [f"{HUB} v{i}" for i in range(5)]
+    assert first["canonical_name"] == f"{HUB} v0"
     assert hydrated == [6]
     second = as_user(s.b, repo.concept_detail, s.nb, HUB, limit=5,
                      after=first["next_cursor"])
     assert [m["payload"]["name"] for m in second["members"]] == [
-        f"{HUB} s{i}" for i in range(5, 10)]
-    assert second["canonical_name"] == f"{HUB} s0"
+        f"{HUB} v{i}" for i in range(5, 10)]
+    assert second["canonical_name"] == f"{HUB} v0"
     assert hydrated == [6, 6, window]
 
 

@@ -32,6 +32,7 @@ from app.repositories.ports import (
 )
 from app.repositories.sqlite import memory_sql
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.id_binding import bind_ids, drive_by
 from app.repositories.sqlite.memory_sql import (
     memory_source_readable,
     memory_source_type_predicate,
@@ -69,6 +70,16 @@ VISIBLE_SOURCE_TYPES_PREDICATE = "source_type NOT IN ('memory', 'knowhow')"
 # 文本由 `memory_sql.memory_source_type_predicate()` 渲染(两条判据的共享定义点),
 # 本模块不再手写 `'memory'` 字面量的这条判据。
 MEMORY_SOURCE_TYPE_PREDICATE = memory_source_type_predicate()
+
+# ``SourceStore.memory_source_ids(holders_among=...)`` (E4-7): which of a list of
+# notebooks hold a Memory source.  ``{drive}`` is ``id_binding.drive_by`` over the
+# notebook ids; the partial-index predicate of ``idx_sources_nb_hidden_type`` is
+# spelled out so the planner may seek it per notebook.
+_MEMORY_HOLDERS_SQL = (
+    "SELECT DISTINCT notebook_id FROM sources WHERE {drive} "
+    "AND source_type IN ('memory', 'knowhow') "
+    f"AND {MEMORY_SOURCE_TYPE_PREDICATE}"
+)
 
 # ``SourceStore.hidden_source_ids``(参数:notebook_id、查看者):该用户的隐藏投影来源,
 # 「对该用户可读」是 `memory_sql.memory_source_readable('s')`,不是它的手写副本。
@@ -750,7 +761,8 @@ class SourceStore:
         ]
 
     def memory_source_ids(
-        self, db: sqlite3.Connection, notebook_id: str
+        self, db: sqlite3.Connection, notebook_id: str, *,
+        holders_among: Optional[Sequence[str]] = None,
     ) -> List[str]:
         """The notebook's private Memory synthetic source ids.
 
@@ -768,7 +780,26 @@ class SourceStore:
         denominator, without a second spelling of "which sources are Memory".
         One query per notebook, same ``notebook_id``-prefixed index seek as the
         signal query, projecting the primary key only.
+
+        ``holders_among`` (E4-7): which of these notebooks hold any Memory
+        source, in ONE statement (the notebook list's counts).  The ids drive
+        the read (``drive_by``: one seek of the partial index
+        ``idx_sources_nb_hidden_type`` per notebook -- its predicate is
+        repeated so the planner may use it); ``notebook_id`` is ignored.
+        EXPLAIN pin: tests/test_kg_service_readers.py.
         """
+        if holders_among is not None:
+            notebooks = sorted({str(nb) for nb in holders_among if nb})
+            if not notebooks:
+                return []
+            bound = bind_ids(notebooks)
+            return [
+                row["notebook_id"]
+                for row in db.execute(
+                    _MEMORY_HOLDERS_SQL.format(drive=drive_by("notebook_id", bound)),
+                    (bound.param,),
+                ).fetchall()
+            ]
         return [
             row["id"]
             for row in db.execute(

@@ -85,6 +85,7 @@ from app.services.kg_analysis_precompute import (
     stamp_cluster_seq,
 )
 from app.services.model_work import notebook_model_artifact_scope
+from app.services.kg_viewer_scope import store_viewer_kwargs
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.kg.run_control import (
     KgBuildAborted,
@@ -438,6 +439,14 @@ class KnowledgeLifecycleService:
         viewer_scope: Callable[..., Any] = (
             lambda _notebook_id, _active_notebook_id=None: None
         ),
+        # M1 transition (E4-5 marker, E4-7 reader): ``(db, notebook_id) ->
+        # bool``, True while the notebook is not isolated yet
+        # (``unified_kg_state.memory_isolation_version <> 1``: 0 awaits the
+        # isolated rebuild, 2 the dangling-seed check) -- E4-5's
+        # ``MemoryIsolationStore.not_isolated``.  Such a notebook's graph
+        # views never serve a persisted artifact. None (the default, and
+        # every build before E4-5 is assembled) = always isolated.
+        memory_isolation_pending: "Callable[[Any, str], bool] | None" = None,
     ) -> None:
         self.settings = settings
         # batch-3-W1 T-5a (codex #663 R3 P2): the drain's row budget — one
@@ -477,6 +486,7 @@ class KnowledgeLifecycleService:
         self.get_notebook = get_notebook
         self._current_user_id = current_user_id
         self._viewer_scope = viewer_scope
+        self._isolation_pending = memory_isolation_pending
         self._invalidate_unified_cache = invalidate_unified_cache
         self._mark_unified_kg_dirty = mark_unified_kg_dirty
         self._mark_unified_kg_dirty_in_tx = mark_unified_kg_dirty_in_tx
@@ -4411,14 +4421,28 @@ class KnowledgeLifecycleService:
         (settings.viz_default_limit), and level='concept' is treated like
         'object' (the persisted folded viz graph is object-level only — the
         frontend always sends level=object, but we still defend the API for
-        level=concept / no-level callers that would otherwise slip through)."""
+        level=concept / no-level callers that would otherwise slip through).
+
+        M1 (permission remediation E4-7).  A notebook holding Memory is served
+        as the SHARED graph -- no member's Memory object or relation, the same
+        for every viewer, which is what the persisted artifacts hold (E4-6) --
+        plus the viewer's OWN Memory objects and the relations between them,
+        read from the live tables (``KgViewerScope.own_memory_graph``).  A
+        notebook still waiting for its isolated rebuild (the E4-5 marker)
+        serves no persisted artifact: a small one answers from the live
+        tables, a large one shows no preview.  A notebook without Memory
+        (no scope) is served exactly as before, plus one probe read."""
         with self._connect() as db:
             nb_count = self.knowledge.count_active_objects(db, notebook_id)
+        scope = self._viewer_scope(notebook_id)
+        artifacts = not self._memory_isolation_pending(notebook_id)
         if int(nb_count) > self.settings.viz_sync_build_max_objects:
             effective_limit = limit if limit is not None else self.settings.viz_default_limit
-            idx = self.scale_artifacts.viz_index(notebook_id)
+            idx = self.scale_artifacts.viz_index(notebook_id) if artifacts else None
             if idx is not None and getattr(idx, "viz_ids", None) is not None:
-                return self._unified_graph_bounded(notebook_id, idx, effective_limit)
+                return self._with_viewer_overlay(
+                    scope, self._unified_graph_bounded(notebook_id, idx, effective_limit),
+                    effective_limit)
             # No index available. `viz_building` used to be hardcoded True
             # here, which held only while viz_index still spawned a lazy build
             # for large notebooks. Since 批 3·W4 T-W4-3 it refuses that spawn
@@ -4455,7 +4479,7 @@ class KnowledgeLifecycleService:
                 or self.scale_artifacts.scale_build_claim_held_anywhere(
                     notebook_id)
             )
-            if not building:
+            if not building and artifacts:
                 # Publication race (codex #676 R5 P2): a build can publish
                 # its artifact and clear its marker BETWEEN the viz_index()
                 # probe above and the membership reads — reporting the
@@ -4472,8 +4496,10 @@ class KnowledgeLifecycleService:
                 idx = self.scale_artifacts.viz_index(
                     notebook_id, emit_refusal=False)
                 if idx is not None and getattr(idx, "viz_ids", None) is not None:
-                    return self._unified_graph_bounded(
-                        notebook_id, idx, effective_limit)
+                    return self._with_viewer_overlay(
+                        scope, self._unified_graph_bounded(
+                            notebook_id, idx, effective_limit),
+                        effective_limit)
             return {"nodes": [], "edges": [], "total_nodes": 0,
                     "total_edges": 0, "truncated": False,
                     "viz_building": building, "viz_unavailable": not building}
@@ -4484,10 +4510,11 @@ class KnowledgeLifecycleService:
         # compact arrays (no full re-fold). EQUIVALENT to the legacy slice
         # below (same node-id set / totals / shape). Small notebooks with no
         # index fall through unchanged.
-        if limit is not None and level != "concept":
+        if limit is not None and level != "concept" and artifacts:
             idx = self.scale_artifacts.viz_index(notebook_id)
             if idx is not None and getattr(idx, "viz_ids", None) is not None:
-                return self._unified_graph_bounded(notebook_id, idx, limit)
+                return self._with_viewer_overlay(
+                    scope, self._unified_graph_bounded(notebook_id, idx, limit), limit)
             if idx is None and notebook_id in self.scale_artifacts.viz_building:
                 # A background build was spawned inside _viz_index instead of
                 # blocking this request on a minutes-long full-graph fold.
@@ -4495,16 +4522,78 @@ class KnowledgeLifecycleService:
                 # the (also expensive) _unified_graph_full fallback below.
                 return {"nodes": [], "edges": [], "total_nodes": 0,
                         "total_edges": 0, "truncated": False, "viz_building": True}
-        full = self._unified_graph_full(notebook_id, level)
+        full = self._unified_graph_full(notebook_id, level, scope=scope)
         total_nodes, total_edges = len(full["nodes"]), len(full["edges"])
         from app.services.kg_merge import limit_graph_by_degree
         sliced = limit_graph_by_degree(full, limit) if limit is not None else full
-        return {
+        return self._with_viewer_overlay(scope, {
             "nodes": sliced["nodes"],
             "edges": self._annotate_edge_support(notebook_id, sliced["edges"]),
             "total_nodes": total_nodes,
             "total_edges": total_edges,
             "truncated": len(sliced["nodes"]) < total_nodes,
+        }, limit, concept_only=level == "concept", name_only=False, shared=True)
+
+    def _memory_isolation_pending(self, notebook_id: str) -> bool:
+        """Whether the notebook is not isolated yet (E4-5 marker ``<> 1``, one
+        primary-key read), or False when the reader is not wired."""
+        if self._isolation_pending is None:
+            return False
+        with self._connect() as db:
+            return bool(self._isolation_pending(db, notebook_id))
+
+    def _with_viewer_overlay(
+        self, scope, graph: dict, limit: Optional[int], *,
+        concept_only: bool = False, name_only: bool = True, shared: bool = False,
+    ) -> dict:
+        """The viewer's graph = the shared graph + the viewer's own Memory
+        (M1, E4-7).  ``graph`` is shared already when ``shared``; otherwise it
+        is a persisted artifact's answer.  An artifact built after the
+        isolation (E4-6) holds nobody's Memory; one built before it may, so
+        the answer is first put under the viewer rule
+        (``filter_neighbourhood``: hidden raw nodes and clusters with no
+        visible member dropped, partly hidden clusters relabelled -- only
+        when the scope filters) and the viewer's own raw Memory nodes are
+        dropped, with their edges, the totals following the drops.  The
+        owner overlay is appended after the shared nodes: at most ``limit`` of
+        the viewer's own Memory objects in insertion order, and the relations
+        among them; ``total_nodes`` / ``total_edges`` / ``truncated`` count
+        them too.  ``limit`` therefore bounds each layer on its own -- the
+        shared page holds at most ``limit`` nodes and the own overlay at most
+        ``limit`` more, so a response holds at most ``2 × limit`` nodes (and
+        exactly the shared page's when the viewer owns no Memory here).  No
+        scope: ``graph`` unchanged."""
+        if scope is None:
+            return graph
+        nodes, edges = graph["nodes"], graph["edges"]
+        total_nodes, total_edges = graph["total_nodes"], graph["total_edges"]
+        if not shared:
+            viewed_nodes, viewed_edges = (
+                scope.filter_neighbourhood(nodes, edges, ())
+                if scope.filters else (nodes, edges)
+            )
+            exclude = frozenset(scope.own_memory_object_ids())
+            kept = [n for n in viewed_nodes if str(n["id"]) not in exclude]
+            kept_ids = {str(n["id"]) for n in kept}
+            kept_edges = [
+                e for e in viewed_edges
+                if str(e["source_object_id"]) in kept_ids
+                and str(e["target_object_id"]) in kept_ids
+            ]
+            total_nodes -= len(nodes) - len(kept)
+            total_edges -= len(edges) - len(kept_edges)
+            nodes, edges = kept, kept_edges
+        own_nodes, own_edges, own_total = scope.own_memory_graph(
+            cap=limit, concept_only=concept_only, name_only=name_only)
+        nodes = list(nodes) + own_nodes
+        total_nodes += own_total
+        return {
+            **graph,
+            "nodes": nodes,
+            "edges": list(edges) + own_edges,
+            "total_nodes": total_nodes,
+            "total_edges": total_edges + len(own_edges),
+            "truncated": len(nodes) < total_nodes,
         }
 
     def _unified_graph_version(self, notebook_id: str) -> Tuple[int, int, int, int]:
@@ -4527,24 +4616,40 @@ class KnowledgeLifecycleService:
         with self._connect() as db:
             return self.unified_kg.graph_seq_row(db, notebook_id)
 
-    def _unified_graph_full(self, notebook_id: str, level: str = "concept") -> dict:
+    def _unified_graph_full(
+        self, notebook_id: str, level: str = "concept", *, scope: Any = None,
+    ) -> dict:
+        """The whole live graph, folded.  With a viewer ``scope`` (a notebook
+        holding Memory, E4-7): the SHARED graph, with no member's Memory
+        object or relation -- derived from the live rows WITHOUT them, so a
+        cluster label comes from a remaining member -- cached under its own
+        key: it is the same for every member viewing the notebook (foreign
+        Memory ∪ the viewer's own = all of it), and never confused with the
+        unfiltered entry a request that saw no Memory may have cached for the
+        same version."""
         self.get_notebook(notebook_id)
         version = self._unified_graph_version(notebook_id)
-        cached = self.unified_cache.get((notebook_id, level))
+        shared = scope is not None
+        key = (notebook_id, level, "memory_free") if shared else (notebook_id, level)
+        cached = self.unified_cache.get(key)
         if cached is not None and cached[0] == version:
             return cached[1]
         from app.services.kg_merge import derive_unified_graph
         with self._connect() as db:
             nrows = self.knowledge.unified_graph_rows(db, notebook_id)
+        relations = self.relations_for_notebook(notebook_id)
+        if shared:
+            nrows, relations = scope.drop_hidden_graph(
+                list(nrows), list(relations), shared=True)
         nodes = [{"id": r["id"], "object_type": r["object_type"], "payload": json.loads(r["payload"] or "{}")} for r in nrows]
         edges = [{"source_object_id": r["source_object_id"], "target_object_id": r["target_object_id"], "edge_type": r["edge_type"]}
-                 for r in self.relations_for_notebook(notebook_id)]
+                 for r in relations]
         g = derive_unified_graph(nodes, edges, self.cluster_map(notebook_id))
         if level == "concept":
             cids = {n["id"] for n in g["nodes"] if n["object_type"] == "concept"}
             g = {"nodes": [n for n in g["nodes"] if n["object_type"] == "concept"],
                  "edges": [e for e in g["edges"] if e["source_object_id"] in cids and e["target_object_id"] in cids]}
-        self.unified_cache[(notebook_id, level)] = (version, g)
+        self.unified_cache[key] = (version, g)
         return g
 
     def _viz_dict(self, idx):
@@ -4714,15 +4819,64 @@ class KnowledgeLifecycleService:
                 notebook_id, object_id, source_notebook_id
             )
         scope = self._viewer_scope(source_id, notebook_id)
-        if scope is None:
-            result = self._kg_neighbors_unchecked(source_id, object_id, cap)
+        artifacts = not self._memory_isolation_pending(source_id)
+        if scope is not None and scope.object_is_own_memory(source_id, object_id):
+            # M1 (E4-7): the viewer's own Memory object is in no persisted
+            # artifact (E4-6) -- its neighbourhood comes from the live tables.
+            # Decided by one primary-key read of the focus row's owner column
+            # (none when the viewer owns no Memory here).
+            result = self._own_memory_neighbors(source_id, object_id, cap, scope)
+        elif scope is None or not scope.filters:
+            result = self._kg_neighbors_unchecked(
+                source_id, object_id, cap, artifacts=artifacts)
         else:
-            result = self._viewer_scoped_neighbors(source_id, object_id, cap, scope)
+            result = self._viewer_scoped_neighbors(
+                source_id, object_id, cap, scope, artifacts=artifacts)
         result["source_notebook_id"] = source_id
         return result
 
+    def _own_memory_neighbors(
+        self, notebook_id: str, object_id: str, cap: int, scope,
+    ) -> dict:
+        """1-hop neighbourhood of one of the viewer's OWN Memory objects, from
+        the live tables: its relations whose other end is also the viewer's
+        own Memory object (a relation lives inside one source), at most
+        ``cap`` neighbours in relation order, named from their live rows.
+        Reads: the viewer's own Memory object ids (one statement, only on
+        this path), one relation read for the focus, one metadata read for
+        at most ``cap + 1`` objects."""
+        own = set(scope.own_memory_object_ids())
+        with self._connect() as db:
+            rows = self.knowledge.neighbor_relation_rows(db, notebook_id, [object_id])
+            edges, others = [], []
+            for row in rows:
+                source, target = str(row["source_object_id"]), str(row["target_object_id"])
+                other = target if source == object_id else source
+                if other == object_id or other not in own:
+                    continue
+                if other not in others:
+                    if len(others) >= cap:
+                        continue
+                    others.append(other)
+                edges.append({"source_object_id": source, "target_object_id": target,
+                              "edge_type": row["edge_type"]})
+            meta = {
+                str(r["id"]): r for r in self.knowledge.object_meta_rows_for_notebook(
+                    db, notebook_id, [object_id, *others])
+            }
+        nodes = [
+            {"id": oid, "object_type": meta[oid]["object_type"],
+             "payload": {"name": json.loads(meta[oid]["payload"] or "{}").get("name", "")
+                         if not isinstance(meta[oid]["payload"], dict)
+                         else meta[oid]["payload"].get("name", "")}}
+            for oid in [object_id, *others] if oid in meta
+        ]
+        return {"nodes": nodes, "edges": edges, "focus_id": object_id,
+                "focus_object_id": object_id}
+
     def _viewer_scoped_neighbors(
         self, notebook_id: str, object_id: str, cap: int, scope,
+        *, artifacts: bool = True,
     ) -> dict:
         """PR-A·A5 (rulings Q4 / M1): neighbour hydration under the viewer
         rule (``KgViewerScope.filter_neighbourhood``): hidden objects,
@@ -4735,10 +4889,14 @@ class KnowledgeLifecycleService:
         notebook's owned-hidden object count, at most ``cap`` more) and
         doubles while a full raw window leaves fewer than ``cap`` visible
         neighbours; the kept neighbours are then cut to ``cap`` in the raw
-        order."""
+        order.  The DB path's relation read takes the viewer (E4-4's
+        ``viewer_id``) so a relation of a hidden source between two visible
+        objects is not returned either."""
         budget = cap + min(len(scope.owned_hidden), cap)
         while True:
-            result = self._kg_neighbors_unchecked(notebook_id, object_id, budget)
+            result = self._kg_neighbors_unchecked(
+                notebook_id, object_id, budget, artifacts=artifacts,
+                store_kwargs=store_viewer_kwargs(scope))
             focus_id = result.get("focus_id") or object_id
             raw_neighbours = sum(1 for n in result.get("nodes", []) if n["id"] != focus_id)
             filtered = scope.filter_neighbourhood(
@@ -4760,9 +4918,12 @@ class KnowledgeLifecycleService:
         return {**result, "nodes": nodes, "edges": edges}
 
     def _kg_neighbors_unchecked(
-        self, notebook_id: str, object_id: str, cap: int
+        self, notebook_id: str, object_id: str, cap: int,
+        *, artifacts: bool = True, store_kwargs: Optional[dict] = None,
     ) -> dict:
-        """Participant-authorized neighbor read; caller already checked scope."""
+        """Participant-authorized neighbor read; caller already checked scope.
+        ``artifacts`` False (the M1 transition marker, E4-7): the persisted viz
+        is not consulted, as if absent."""
         focus_id = object_id
         with self._connect() as db:
             fold_rows = self.unified_kg.cluster_fold_rows(
@@ -4770,14 +4931,23 @@ class KnowledgeLifecycleService:
             )
         if fold_rows:
             focus_id = fold_rows[0]["canonical_id"]
-        idx = self.scale_artifacts.viz_index(notebook_id)
-        if idx is not None and getattr(idx, "viz_ids", None) is not None:
+        idx = self.scale_artifacts.viz_index(notebook_id) if artifacts else None
+        # The id→position map the viz path needs anyway (labels and edge
+        # orientation below).  A focus the artifact does not hold -- a
+        # stale artifact, or a pre-isolation mixed cluster the Memory-free
+        # artifact (E4-6) stores as its raw members -- falls through to the
+        # live DB path below; a large notebook answers
+        # ``locating_unavailable`` there, as with no artifact.
+        positions = (
+            idx.viz_node_index()
+            if idx is not None and getattr(idx, "viz_ids", None) is not None
+            else None
+        )
+        if positions is not None and focus_id in positions:
             from app.services.kg.scale_index import viz_neighbors
             nb = viz_neighbors(self._viz_dict(idx), focus_id, cap)
             nbr_ids = {n["id"] for n in nb["nodes"]}
-            # This path needs the id→position map anyway (edge orientation
-            # below), so resolving ≤cap+1 labels through it costs nothing extra.
-            positions = idx.viz_node_index()
+            # Resolving ≤cap+1 labels through ``positions`` costs nothing extra.
             name_by_id, type_by_id = self._viz_label_maps(
                 idx, [positions[fid] for fid in nbr_ids if fid in positions]
             )
@@ -4845,19 +5015,28 @@ class KnowledgeLifecycleService:
         with self._connect() as db:
             object_count = self.knowledge.count_active_objects(db, notebook_id)
         if int(object_count) > self.settings.viz_sync_build_max_objects:
-            return {
+            unavailable = {
                 "nodes": [],
                 "edges": [],
                 "focus_id": focus_id,
                 "focus_object_id": object_id,
                 "locating_unavailable": True,
             }
-        result = self._kg_neighbors_db(notebook_id, focus_id, cap)
+            if positions is not None:
+                # A preview exists but does not hold this focus (E4-7): the
+                # client says so instead of "no preview yet".
+                unavailable["preview_lacks_focus"] = True
+            return unavailable
+        result = self._kg_neighbors_db(
+            notebook_id, focus_id, cap, store_kwargs=store_kwargs)
         result["focus_id"] = focus_id
         result["focus_object_id"] = object_id
         return result
 
-    def _kg_neighbors_db(self, notebook_id: str, object_id: str, cap: int) -> dict:
+    def _kg_neighbors_db(
+        self, notebook_id: str, object_id: str, cap: int,
+        *, store_kwargs: Optional[dict] = None,
+    ) -> dict:
         """DB fallback for kg_neighbors: bounded 1-hop over knowledge_relations,
         folding concept endpoints to canonical ids (cluster_map) so the result
         matches the folded unified-graph view. `object_id` is interpreted as a
@@ -4869,7 +5048,8 @@ class KnowledgeLifecycleService:
             members_of.setdefault(c, []).append(m)
         raw_ids = set(members_of.get(object_id, [object_id]))
         with self._connect() as db:
-            rows = self.knowledge.neighbor_relation_rows(db, notebook_id, raw_ids)
+            rows = self.knowledge.neighbor_relation_rows(
+                db, notebook_id, raw_ids, **(store_kwargs or {}))
         # object_type + name lookup for the folded nodes we touch
         def canon(oid):
             return cmap.get(oid, oid)

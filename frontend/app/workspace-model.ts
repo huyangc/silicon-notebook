@@ -986,6 +986,9 @@ export type KgNeighborsResp = {
   focus_object_id?: string;
   /** The large-notebook viz artifact is not ready, so bounded focus is unavailable. */
   locating_unavailable?: boolean;
+  /** With `locating_unavailable`: a preview exists but does not hold this node
+   *  (it was built before the node, or it never carries it). */
+  preview_lacks_focus?: boolean;
   /** Participant that owns the resolved node; reads remain authorized by the active notebook. */
   source_notebook_id?: string;
 };

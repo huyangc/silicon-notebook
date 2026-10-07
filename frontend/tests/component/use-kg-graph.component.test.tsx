@@ -416,3 +416,35 @@ test("a load-more 404 ends paging instead of offering a retry that can only 404 
   await waitFor(() => expect(result.current.view.conceptDetail?.next_cursor).toBe("m9"));
   expect(result.current.view.conceptMembersExhausted).toBe(false);
 });
+
+// E4-7 (P3-D): a large notebook that cannot locate a cited node says WHY --
+// no preview yet, or a preview that does not hold this node.
+test.each([
+  [false, "库规模较大，图谱预览尚未生成，暂时无法定位该引用节点；下一次索引构建后可用"],
+  [true, "库规模较大，当前图谱预览里还没有这个引用节点，暂时无法定位；下一次索引构建后可用"],
+])("an unlocatable cited node (preview without it: %s) is explained", async (lacks, copy) => {
+  const harness = createTestKgAuthority();
+  harness.establish("user-a", "notebook-a");
+  kgApi.fetchUnifiedGraph.mockResolvedValue(graphResponse);
+  kgApi.fetchPendingMerges.mockResolvedValue([]);
+  kgApi.fetchUnifiedKgStatus.mockResolvedValue({ dirty: false });
+  kgApi.fetchKgNeighbors.mockResolvedValue({
+    ...emptyNeighbors,
+    focus_id: "ko-cited",
+    focus_object_id: "ko-cited",
+    locating_unavailable: true,
+    ...(lacks ? { preview_lacks_focus: true } : {}),
+  });
+  const fx = effects();
+  const { result } = renderHook(() => useKgGraph({
+    authority: harness.authority,
+    policy,
+    effects: fx,
+  }));
+
+  await act(async () => {
+    await result.current.openGraph("ko-cited");
+  });
+
+  expect(fx.notify).toHaveBeenCalledWith(copy);
+});
