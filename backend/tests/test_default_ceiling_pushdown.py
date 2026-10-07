@@ -508,3 +508,22 @@ def test_the_stop_reaches_the_verdict_probes():
     wrapped.verdict_probes.universe_digests("nb", "u")
     wrapped.verdict_probes.foreign_hidden("nb", "u")
     assert seen == [cancel, cancel]
+
+
+def test_a_probe_less_scope_answers_source_ceiling_binds_without_the_memo():
+    """E2-2's contract (follow-up 14): a scope with no verdict probes (every
+    installer but the store-wired default ceiling) answers exactly
+    ``source_ceiling_binds`` and never reads the run memo -- a stale "False"
+    left there cannot unbind it."""
+    from app.services.source_scope import source_scope_context
+
+    frozen = {"mode": "include", "source_ids": ["s1"], "narrowed": False}
+    with source_scope_context("nb", frozen):
+        scope = current_source_scope()
+        scope._ceiling_binds_memo["nb"] = False
+        assert scope._verdict_probes is None
+        assert run_ceiling_binds(scope, "nb") is scope.source_ceiling_binds("nb") is True
+        assert unbound_ceiling("nb") is None
+        assert scoped_allowed_source_ids("nb") == ("s1",)
+        assert run_ceiling_binds(scope, "other-library") is scope.source_ceiling_binds(
+            "other-library")
