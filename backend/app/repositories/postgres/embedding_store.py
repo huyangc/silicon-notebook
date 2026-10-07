@@ -344,10 +344,28 @@ class EmbeddingStore:
         return _compat_vector_rows(rows)
 
     @staticmethod
-    def relation_delta_rows(db, notebook_id: str, source_ids):
+    def relation_delta_rows(db, notebook_id: str, source_ids, *, with_source_id: bool = False):
+        """Relation vectors of the relations extracted from ``source_ids``.
+
+        ``with_source_id`` (PR-E2): ``False`` sends the historical statement
+        byte for byte.  ``True`` also returns each relation's ``source_id``
+        (a join instead of the ``IN`` subquery), so a caller mapping relations
+        to their sources -- the Memory relation cache -- reads one batch of
+        sources in one statement instead of one source per call.  Same
+        batched key probe either way: the source ids drive
+        ``idx_knowledge_relations_source``, the vectors are read by primary
+        key (``tests/postgres/test_store_evidence_ceiling_explain_pins.py``)."""
         values = list(source_ids)
         if not values:
             return []
+        if with_source_id:
+            return _compat_vector_rows(db.execute(
+                "SELECT re.relation_id AS vid,re.vector,kr.source_id "
+                "FROM knowledge_relations kr "
+                "JOIN relation_embeddings re ON re.relation_id=kr.id "
+                "WHERE kr.notebook_id=%s AND kr.source_id=ANY(%s) AND re.notebook_id=%s",
+                (notebook_id, values, notebook_id),
+            ).fetchall())
         rows = db.execute(
             "SELECT relation_id AS vid,vector FROM relation_embeddings "
             "WHERE notebook_id=%s AND relation_id IN "

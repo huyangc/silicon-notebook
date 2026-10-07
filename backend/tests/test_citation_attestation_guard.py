@@ -157,6 +157,14 @@ REGISTRY = {
      "splat:element_id"): (
         "no-element", (),
         "B-11: a chain hop's evidence item from another library keeps no locator", 1),
+    ("repositories/sqlite/knowledge_store.py", "KnowledgeStore._enrich_evidence",
+     'store:["element_id"]'): (
+        "no-element", (),
+        "B-11: an occurrence naming another library's element keeps no locator", 1),
+    ("repositories/postgres/knowledge_store.py", "KnowledgeStore._enrich_evidence",
+     'store:["element_id"]'): (
+        "no-element", (),
+        "B-11: an occurrence naming another library's element keeps no locator", 1),
     (EC, "EvidenceContextService.collection_item_citations", "Citation"): (
         "read-registered", _COLLECTION_PROOF,
         "enumerated element/KG rows (hydrated full text); document rows pass element_id='' (J3)", 2),

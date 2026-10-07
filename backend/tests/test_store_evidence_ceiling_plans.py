@@ -32,6 +32,7 @@ from app.core.config import Settings
 from app.domain.repository import RepositoryCompatibilitySeams
 from app.repositories.sqlite import database as sqlite_database
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.embedding_store import EmbeddingStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from tests import store_evidence_cases as cases
 
@@ -53,6 +54,8 @@ PRODUCTION_STATS = [
     ("knowledge_relations", "idx_knowledge_relations_nb_review", "8350000 8350000 2783333"),
     ("knowledge_relations", "idx_knowledge_relations_nb_created", "8350000 8350000 2"),
     ("knowledge_relations", "idx_knowledge_relations_source", "8350000 170"),
+    ("relation_embeddings", "idx_relation_embeddings_nb", "8350000 8350000"),
+    ("relation_embeddings", "sqlite_autoindex_relation_embeddings_1", "8350000 1"),
     ("knowledge_relations", "sqlite_autoindex_knowledge_relations_1", "8350000 1"),
     ("knowledge_objects", "sqlite_autoindex_knowledge_objects_1", "49008 1"),
     ("source_elements", "idx_source_elements_source", "2000000 40"),
@@ -85,6 +88,7 @@ def _seams() -> RepositoryCompatibilitySeams:
 
 def _seed(db: sqlite3.Connection) -> None:
     cases.seed(db.execute, "?")
+    cases.seed_relation_vectors(db.execute, "?", "AAAA")
     for chunk_id, source, text in cases.exact_chunks():
         db.execute(
             "INSERT INTO chunks(id,notebook_id,source_id,text,created_at) VALUES (?,?,?,?,?)",
@@ -284,7 +288,8 @@ def test_owner_library_reads_go_by_primary_keys(store, conn, statements):
         plan = _plan(conn, sql, params)
         assert "USING INDEX sqlite_autoindex_source_elements_1 (id=?)" in plan, plan
         assert "SEARCH os USING INDEX sqlite_autoindex_sources_1 (id=?)" in plan, plan
-        assert "SCAN" not in plan, plan
+        # Only the one-row owner constant (``o``) may be scanned.
+        assert "SCAN se" not in plan and "SCAN os" not in plan, plan
         assert "idx_sources_" not in plan, plan
 
 
@@ -305,5 +310,33 @@ def test_owner_forms_bind_no_list(store, conn, statements):
     enriched = store._enrich_evidence(conn, evidence, owner_notebook_id=cases.NB)
     assert [row["element_text"] for row in enriched][-1] == cases.OWN_TEXT
     sql, params = _only(statements, "se.element_type")
-    assert params[-1] == cases.NB and len(params) == 42
+    assert params[0] == cases.NB and len(params) == 42
     assert json.dumps(params)  # scalars only
+
+
+# --------------------------------------------- relation_delta_rows (E2-2)
+def test_relation_delta_rows_map_relations_to_sources_in_one_read(conn):
+    cases.check_relation_delta_rows(
+        lambda ids, **kwargs: EmbeddingStore.relation_delta_rows(conn, cases.NB, ids, **kwargs)
+    )
+
+
+def test_relation_delta_rows_default_statement_is_unchanged(conn, statements):
+    EmbeddingStore.relation_delta_rows(conn, cases.NB, ["s-01", "s-02"])
+    assert statements == [(
+        "SELECT relation_id AS vid, vector FROM relation_embeddings "
+        "WHERE notebook_id=? AND relation_id IN "
+        "(SELECT id FROM knowledge_relations WHERE notebook_id=? AND source_id IN (?,?))",
+        (cases.NB, cases.NB, "s-01", "s-02"),
+    )]
+
+
+def test_relation_delta_rows_with_sources_probe_by_source_then_primary_key(conn, statements):
+    EmbeddingStore.relation_delta_rows(
+        conn, cases.NB, [f"s-{n:02d}" for n in range(40)], with_source_id=True,
+    )
+    sql, params = _only(statements, "kr.source_id FROM knowledge_relations kr")
+    plan = _plan(conn, sql, params)
+    assert "SEARCH kr USING INDEX idx_knowledge_relations_source (source_id=?)" in plan, plan
+    assert "SEARCH re USING INDEX sqlite_autoindex_relation_embeddings_1 (relation_id=?)" in plan, plan
+    assert "SCAN" not in plan, plan

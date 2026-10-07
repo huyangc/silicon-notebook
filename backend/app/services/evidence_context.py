@@ -1748,22 +1748,39 @@ class EvidenceContextService:
                 filtered.append((tier, hit_notebook_id, evidence, hit_origin))
         filtered = _live_kg_evidence(filtered)
 
+        # Task 12（引用跳转）: 卡片元素批量读一次(knowhow 定位标签从这份行里解,
+        # 不管本次要建多少条引用——绝不逐条引用各查一次,运行效率是一等约束)。
+        # 同一份行也给出每个元素**实际所属的来源**,供下面的 B-11 判定。
+        element_ids = list(dict.fromkeys(
+            str(row[2].element_id) for row in filtered if row[2].element_id
+        ))
+        elements = self.sources.evidence_elements(element_ids) if element_ids else {}
+        element_source = {
+            element_id: str(row.get("source_id") or "")
+            for element_id, row in elements.items()
+        }
         source_rows, citation_source_info = self._source_rows_and_info(
-            row[2].source_id for row in filtered
+            [row[2].source_id for row in filtered] + list(element_source.values())
         )
-        # 台账 B-11:来源属于别的库(晋升进公共库的对象,证据仍指向推广者的私有库)
-        # 的那几行做成快照卡——证据存储的标题与片段,不带来源 / 元素指针,于是
-        # 既不按全局 id 现读那一库来源的现名,也不给附图与 knowhow 定位候选。
+        # 台账 B-11:来源属于别的库(晋升进公共库的对象,证据仍指向推广者的私有库),
+        # 或来源是本库、元素却属于别的库(混合指针)的那几行做成快照卡——证据存储的
+        # 标题与片段,不带来源 / 元素指针,于是既不按全局 id 现读那一库来源的现名,
+        # 也不给附图与 knowhow 定位候选。失败即关:两者有一个是外库就算外库。
         foreign = [
             _foreign_owned(source_rows.get(str(evidence.source_id or "")) or {}, origin)
+            or _foreign_owned(
+                source_rows.get(element_source.get(str(evidence.element_id or ""), "")) or {},
+                origin,
+            )
             for _tier, _nb, evidence, origin in filtered
         ]
-        # Task 12（引用跳转）: 批量按 element_id 查一次 knowhow 定位标签，不管
-        # 本次要建多少条引用——绝不逐条引用各查一次(运行效率是一等约束)。
-        knowhow_refs = self.knowhow_refs_for(
-            row[2].element_id for row, is_foreign in zip(filtered, foreign)
-            if not is_foreign
-        )
+        knowhow_refs = {
+            str(evidence.element_id): ref
+            for (_tier, _nb, evidence, _origin), is_foreign in zip(filtered, foreign)
+            if not is_foreign and evidence.element_id
+            for ref in (_knowhow_ref(elements.get(str(evidence.element_id))),)
+            if ref is not None
+        }
 
         citations: list[Citation] = []
         for (tier, hit_notebook_id, evidence, _origin), is_foreign in zip(filtered, foreign):
