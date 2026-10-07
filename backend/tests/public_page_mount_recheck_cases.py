@@ -164,13 +164,16 @@ def case_report_quoting_a_mounted_object_without_a_source_dies_with_its_mount(
 def case_report_quoting_a_mounted_library_it_can_no_longer_name_fails_closed(
     world: World,
 ) -> None:
-    """Marked as coming from a mounted library, but its object is gone: nothing
-    can show the library is still mounted, so the page is not served."""
+    """Marked as coming from a mounted library, written before the library was
+    stored on it, and its object is gone: nothing can show the library is
+    still mounted, so the page is not served -- and no new link is issued."""
     mounted_library(world)
     rid = make_report(world, world.alice, [
         _object_ref("ko-gone", "k1", mounted=True), source_ref(world.doc_source, "k2"),
     ])
-    token = share(world, world.alice, rid).json()["share_token"]
+    refused = share(world, world.alice, rid)
+    assert refused.status_code == 404
+    token = world.repo.share_report(world.notebook, rid)        # a link issued earlier
     assert world.client.get(f"/api/public/reports/{token}").status_code == 404
 
 
@@ -190,6 +193,127 @@ def case_report_of_local_citations_reads_no_ownership(world: World) -> None:
     world.monkeypatch.setattr(runtime.knowledge, "object_owners", refuse)
     world.monkeypatch.setattr(world.repo, "participant_notebook_ids", refuse)
     assert world.client.get(f"/api/public/reports/{token}").status_code == 200
+
+
+def _hidden_source(world: World, notebook_id: str, source_type: str) -> str:
+    source_id = f"src-{source_type}-{next(_KEYS)}"
+    world.repo._runtime.source_ingestion.sources.insert_source(
+        source_id=source_id, notebook_id=notebook_id, title="表格投影",
+        source_type=source_type, status="active", parse_status="parsed",
+        file_name="", file_path="", file_size=1, file_hash="h",
+        summary="", doc_type="",
+    )
+    return source_id
+
+
+def _memory_in(world: World, user, notebook_id: str, key: str) -> tuple[str, str]:
+    """A confirmed Memory of ``user`` in ``notebook_id`` and its projection source."""
+    service = world.repo._runtime.memory_service
+    candidate = service.create_candidate(
+        notebook_id, user.id, None, f"req-mnt-{key}-{next(_KEYS)}", f"记忆 {key}",
+        f"记忆 {key}：参考库里的个人记忆。", [], "reason", {}, [],
+    )
+    memory = service.confirm(candidate.id, user.id)
+    source_id = world.repo._runtime.source_ingestion.ingest_memory_source(
+        notebook_id, memory.id, memory.title, memory.content_md
+    )
+    assert source_id
+    return memory.id, source_id
+
+
+def _mounted_ref(source_id: str, key: str) -> dict:
+    """A citation of a mounted library's source written before the library was
+    stored on it (only the mark), so its library is read by source."""
+    return {**source_ref(source_id, key), "object_id": f"chunk-{key}",
+            "object_type": "chunk", "from_reference_library": True}
+
+
+def case_report_quoting_a_mounted_knowhow_projection_follows_its_mount(world: World) -> None:
+    """The library of a hidden projection source is read like any other
+    source's: a live mount serves the page, unmounting kills it, remounting
+    revives it."""
+    library, _source = mounted_library(world)
+    knowhow = _hidden_source(world, library, "knowhow")
+    rid = make_report(world, world.alice, [_mounted_ref(knowhow, "k1")])
+    token = share(world, world.alice, rid).json()["share_token"]
+    page = f"/api/public/reports/{token}"
+    assert world.client.get(page).status_code == 200
+    mount(world, [])
+    assert world.client.get(page).status_code == 404
+    mount(world, [library])
+    assert world.client.get(page).status_code == 200
+
+
+def case_report_quoting_the_authors_memory_in_a_mounted_library_follows_its_mount(
+    world: World,
+) -> None:
+    from tests.report_share_disclosure_cases import recorded
+
+    library, _source = mounted_library(world)
+    world.repo.add_member(library, world.alice.id)
+    memory_id, memory_source = _memory_in(world, world.alice, library, "am")
+    rid = make_report(world, world.alice, [
+        recorded(_mounted_ref(memory_source, "k1"), memory_id, world.alice),
+    ])
+    published = share(world, world.alice, rid, 1)
+    assert published.status_code == 200, published.text
+    page = f"/api/public/reports/{published.json()['share_token']}"
+    served = world.client.get(page)
+    assert served.status_code == 200 and served.json()["references"][0]["is_memory"] is True
+    mount(world, [])
+    assert world.client.get(page).status_code == 404
+
+
+def case_another_members_memory_in_a_mounted_library_is_never_served(world: World) -> None:
+    """Ownership is not readability: the mount is live and the library is
+    named, but the cited Memory is another member's, so the page stays 404."""
+    from tests.report_share_disclosure_cases import recorded
+
+    library, _source = mounted_library(world)
+    memory_id, memory_source = _memory_in(world, world.owner, library, "om")
+    rid = make_report(world, world.alice, [
+        recorded(_mounted_ref(memory_source, "k1"), memory_id, world.owner),
+    ])
+    token = world.repo.share_report(world.notebook, rid)
+    assert world.client.get(f"/api/public/reports/{token}").status_code == 404
+    mount(world, [library])
+    assert world.client.get(f"/api/public/reports/{token}").status_code == 404
+
+
+def case_report_naming_its_library_survives_a_deleted_source(world: World) -> None:
+    """A report generated since the library is stored on its citations: the
+    cited source is deleted from the mounted library, the mount is intact, the
+    page is served; unmounting kills it, remounting revives it."""
+    library, source = mounted_library(world)
+    rid = make_report(world, world.alice, [{
+        **source_ref(source, "k1"), "from_reference_library": True, "notebook_id": library,
+    }])
+    token = share(world, world.alice, rid).json()["share_token"]
+    sql = world.repo._runtime.global_ask_store._sql
+    with world.repo._runtime.database.write() as db:
+        db.execute(sql("DELETE FROM sources WHERE id=?"), (source,))
+    page = f"/api/public/reports/{token}"
+    assert world.client.get(page).status_code == 200
+    mount(world, [])
+    assert world.client.get(page).status_code == 404
+    mount(world, [library])
+    assert world.client.get(page).status_code == 200
+
+
+def case_report_share_is_refused_while_its_mount_is_gone(world: World) -> None:
+    """Like the conversation share: a report quoting a mounted library that is
+    no longer effective gets no link (it would 404 on its first open)."""
+    library, source = mounted_library(world)
+    rid = make_report(world, world.alice, [{
+        **source_ref(source, "k1"), "from_reference_library": True, "notebook_id": library,
+    }])
+    mount(world, [])
+    refused = share(world, world.alice, rid)
+    assert refused.status_code == 404
+    assert refused.json() == {"detail": "部分笔记本已无法访问，请重新选择范围。"}
+    assert world.repo.report_share_token(world.notebook, rid) == ""
+    mount(world, [library])
+    assert share(world, world.alice, rid).status_code == 200
 
 
 def case_report_page_dies_with_its_mount_and_revives(world: World) -> None:

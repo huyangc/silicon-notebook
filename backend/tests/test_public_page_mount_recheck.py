@@ -70,6 +70,31 @@ def test_report_ownership_is_read_only_for_mounted_or_unmarked_citations():
     assert report_library_ids([legacy], {}, {}) == set()
 
 
+def test_a_report_citation_stores_its_mounted_library_only():
+    """The engine's stored citation fields: a mounted library is named (so the
+    page can still re-check it after the cited source is deleted); local
+    evidence names none, keeping a local report's stored bytes."""
+    from app.services.report_engine import reference_library_fields
+
+    assert reference_library_fields("nb-b", "nb-a") == {
+        "from_reference_library": True, "notebook_id": "nb-b"}
+    assert reference_library_fields("nb-a", "nb-a") == {"from_reference_library": False}
+
+
+def test_a_stored_library_is_used_before_any_read():
+    from app.services.public_share_recheck import (
+        report_library_ids,
+        report_source_ids,
+        report_unresolved_object_ids,
+    )
+
+    named = {"source_id": "s-gone", "object_id": "ko-gone",
+             "from_reference_library": True, "notebook_id": "nb-b"}
+    assert report_source_ids([named]) == []
+    assert report_unresolved_object_ids([named], {}) == []
+    assert report_library_ids([named], {}, {}) == {"nb-b"}
+
+
 def test_the_check_reads_nothing_without_another_library_and_fails_closed():
     def never(_notebook_id):
         raise AssertionError("no other library: nothing to read")
