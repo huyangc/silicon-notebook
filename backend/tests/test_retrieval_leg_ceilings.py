@@ -38,7 +38,8 @@ from app.services.embedding import FakeEmbedder
 from app.services.kg.graph_reason import render_subgraph_context
 from app.services.retrieval_service import RetrievalService
 from app.services.source_scope import (
-    CeilingSet, current_source_scope, source_scope_context,
+    CeilingSet, CeilingVerdictProbes, current_source_scope, run_ceiling_binds,
+    source_scope_context,
 )
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients
@@ -101,13 +102,29 @@ def _shared(repo, *, b_memory=True):
     return nb, a.id
 
 
+def _probes(repo):
+    """The production verdict probes (``RepositoryRuntime.ceiling_readers``):
+    with them the run's verdict (``run_ceiling_binds``) is computed from the
+    store, as under every default ceiling; without them it always binds."""
+    return repo._runtime.ceiling_readers().verdict_probes
+
+
+# The verdict as it stood at the freeze -- nothing drifted, no other member's
+# Memory -- for cases where the library changes AFTER the verdict was taken.
+_STALE_PROBES = CeilingVerdictProbes(
+    universe_digests=lambda _nb, _owner: current_source_scope()._frozen_universe_digests,
+    foreign_hidden=lambda _nb, _owner: False,
+)
+
+
 @contextmanager
-def _all_selected(nb, owner, visible=("src-vis",)):
-    """The browser's all-selected freeze (and PR-E1's default ceiling shape)."""
+def _all_selected(nb, owner, visible=("src-vis",), *, probes=None):
+    """The browser's all-selected freeze (and PR-E1's default ceiling shape),
+    with ``probes`` as the scope's verdict probes."""
     with source_scope_context(nb, {
         "mode": "include", "source_ids": list(visible),
         "hidden_source_ids": [], "narrowed": False, "owner_id": owner,
-    }):
+    }, _verdict_probes=probes):
         yield
 
 
@@ -428,23 +445,15 @@ def test_weak_support_without_foreign_memory_is_identical_and_binds_no_list(
     spy = _Spy(repo.retrieval.candidates.unified_kg)
     monkeypatch.setattr(repo.retrieval.candidates, "unified_kg", spy)
 
-    with _all_selected(nb, a):
+    with _all_selected(nb, a, probes=_probes(repo)):
         scoped = repo.retrieval.weak_support_relations(nb, seeds)
-        memo = dict(current_source_scope()._ceiling_binds_memo)
+        bound = run_ceiling_binds(current_source_scope(), nb)
 
     assert scoped == unscoped and scoped
     # No bound statement: the fast path's only extra is the sample source column.
     assert spy.calls == [("weak_support_relation_rows", {}),
                          ("relation_endpoint_name_rows", {"with_source_id": True})]
-    assert memo == {nb: False}
-
-
-def _service(repo, verdict):
-    return RetrievalService(
-        candidates=repo.retrieval.candidates, graph=repo.retrieval.graph,
-        community_queries=repo.retrieval._community_queries,
-        ceiling_verdict=verdict,
-    )
+    assert bound is False
 
 
 def _bound_kwargs(spy):
@@ -460,18 +469,51 @@ def test_weak_support_fast_path_verifies_on_read_and_flips_the_run(repo, monkeyp
     -- in the viewer form, since the library still matches the freeze."""
     nb, a = _shared(repo)
     seeds = _seed_weak(repo, nb)
-    service = _service(repo, lambda _nb: False)
     spy = _Spy(repo.retrieval.candidates.unified_kg)
     monkeypatch.setattr(repo.retrieval.candidates, "unified_kg", spy)
 
-    with _all_selected(nb, a):
-        rows = service.weak_support_relations(nb, seeds)
-        memo = dict(current_source_scope()._ceiling_binds_memo)
+    with _all_selected(nb, a, probes=_STALE_PROBES):
+        rows = repo.retrieval.weak_support_relations(nb, seeds)
+        bound = run_ceiling_binds(current_source_scope(), nb)
 
     assert "SECRETPROJECT" not in {row.tgt_name for row in rows}
     assert _names(rows) == [("版图设计", "寄生电容")]
-    assert memo == {nb: True}
+    assert bound is True
     assert _bound_kwargs(spy) == [{"viewer_id": a}, {"viewer_id": a}]
+
+
+def test_weak_support_with_the_memory_channel_closed_never_hints_own_memory(
+    repo, monkeypatch,
+):
+    """An asker without ``memory:read`` (B, whose OWN Memory is ``src-mb``):
+    the default ceiling withholds ``src-mb`` and the drift probe counts it
+    back, so "not another member's Memory" (the viewer form) would admit it.
+    The run binds the frozen list instead, and the hint supported only by B's
+    own Memory does not show; with the channel open it does (control)."""
+    nb, _a = _shared(repo)
+    b = _users(repo)["b00000002"]
+    seeds = _seed_weak(repo, nb)
+    spy = _Spy(repo.retrieval.candidates.unified_kg)
+    monkeypatch.setattr(repo.retrieval.candidates, "unified_kg", spy)
+    freeze = {"mode": "include", "source_ids": ["src-vis"], "narrowed": False,
+              "owner_id": b}
+
+    with source_scope_context(nb, {**freeze, "hidden_source_ids": ["src-mb"]},
+                              _verdict_probes=_probes(repo)):
+        opened = repo.retrieval.weak_support_relations(nb, seeds)
+    assert "SECRETPROJECT" in {row.tgt_name for row in opened}  # control
+    spy.calls.clear()
+    with source_scope_context(nb, {**freeze, "hidden_source_ids": []},
+                              _withheld_hidden_source_ids=["src-mb"],
+                              _verdict_probes=_probes(repo)):
+        assert repo.retrieval.unsafe_source_scope_restricted(nb) is False
+        closed = repo.retrieval.weak_support_relations(nb, seeds)
+
+    assert "SECRETPROJECT" not in {row.tgt_name for row in closed}
+    assert _names(closed) == [("版图设计", "寄生电容")]
+    bound = _bound_kwargs(spy)
+    assert bound and all(set(kwargs["allowed_source_ids"]) == {"src-vis"}
+                         for kwargs in bound)
 
 
 def test_weak_support_binds_the_viewer_not_the_list_for_foreign_memory(
@@ -547,11 +589,11 @@ def test_a_sample_relation_without_a_source_drops_only_its_row(repo, monkeypatch
         db.execute("UPDATE knowledge_relations SET source_id=NULL WHERE notebook_id=?", (nb,))
     unscoped = repo.retrieval.weak_support_relations(nb, seeds)
     assert unscoped  # control: the unscoped hint still shows
-    with _all_selected(nb, a):
+    with _all_selected(nb, a, probes=_probes(repo)):
         rows = repo.retrieval.weak_support_relations(nb, seeds)
-        memo = dict(current_source_scope()._ceiling_binds_memo)
+        bound = run_ceiling_binds(current_source_scope(), nb)
     assert rows == []
-    assert memo == {nb: False}
+    assert bound is False
 
 
 def test_weak_support_is_off_for_a_narrowed_run(repo):
@@ -889,7 +931,7 @@ def _seed_seam(repo, nb, *, b_memory: bool):
 
 
 def _seam(repo, nb, scope):
-    with source_scope_context(nb, scope):
+    with source_scope_context(nb, scope, _verdict_probes=_probes(repo)):
         _c, block, id_map, _hits, _p = repo.retrieval.mixed_chunk_candidates(
             nb, SEAM_QUERY, SEAM_QUERY, [SEAM_QUERY])
     return block, id_map
@@ -900,26 +942,26 @@ def _freeze(owner, hidden=()):
             "narrowed": False, "owner_id": owner}
 
 
-# The blocks master (effa7e9ac) renders for these two runs, captured by running
-# the same scenario on an export of that commit.  The overlay leg there is
-# ``_mix_retrieve`` alone; the comparison below also replays this branch with
-# the backstop switched off, so a drift of the fixture shows up as a failure
-# of that half rather than as a silent pass.
+# The blocks master (33c095d26, PR-E1 merged) renders for these two runs under
+# the production verdict probes, captured by running the same scenario on an
+# export of that commit.  With PR-E1 an all-selected run that cannot exclude
+# anything pushes its ceiling down, so its seeds -- and this block, the
+# evidence-less ``Capacity factor`` as a seed of its own -- are those of a run
+# without a scope.  The overlay leg there is ``_mix_retrieve`` alone; the
+# comparison below also replays this branch with the backstop switched off,
+# so a drift of the fixture shows up as a failure of that half rather than as
+# a silent pass.
 _MASTER_PLAIN = (
     "k1001: [concept][personal] Mixture-of-Experts (MoE)\n"
     "k1002: [concept][personal] Router balance\n"
-    'k1003: [concept][personal] Capacity factor  — ev: "A kind of C"\n'
-    "chain:\n"
-    "  [k1001] Mixture-of-Experts (MoE) --kind_of--> [k1003] Capacity factor  (tier=personal)"
+    "k1003: [concept][personal] Capacity factor"
 )
 _MASTER_OWN = (
     "k1001: [concept][personal] Mixture-of-Experts (MoE)\n"
     "k1002: [concept][personal] Mixture-of-Experts (MoE)\n"
     "k1003: [concept][personal] ZEBRAQUARTZ plan\n"
     "k1004: [concept][personal] Router balance\n"
-    'k1005: [concept][personal] Capacity factor  — ev: "A kind of C"\n'
-    "chain:\n"
-    "  [k1001] Mixture-of-Experts (MoE) --kind_of--> [k1005] Capacity factor  (tier=personal)"
+    "k1005: [concept][personal] Capacity factor"
 )
 
 
@@ -934,8 +976,8 @@ def _assert_as_on_master(repo, monkeypatch, nb, scope, expected):
 
 def test_mix_seam_is_byte_identical_without_anyone_elses_memory(repo, monkeypatch):
     """No Memory at all: the all-selected run's overlay is master's, byte for
-    byte -- evidence-less ``Capacity factor`` and its chain line included --
-    and the verdict does not bind."""
+    byte -- evidence-less ``Capacity factor`` included -- and the verdict does
+    not bind."""
     repo.settings.graph_ppr_enabled = False
     nb, a = _shared(repo, b_memory=False)
     _seed_seam(repo, nb, b_memory=False)
@@ -988,14 +1030,13 @@ def test_mix_overlay_drift_after_the_verdict_is_judged_bound(repo, monkeypatch):
     ], id_offset=1000, active_notebook_id=nb)
     monkeypatch.setattr(repo.retrieval.candidates, "_mix_retrieve",
                         lambda *_a: ([], block, dict(id_map), [], 0))
-    service = _service(repo, lambda _nb: False)
-    with source_scope_context(nb, _freeze(a)):
-        _c, kg_block, kg_id_map, _h, _p = service.mixed_chunk_candidates(
+    with source_scope_context(nb, _freeze(a), _verdict_probes=_STALE_PROBES):
+        _c, kg_block, kg_id_map, _h, _p = repo.retrieval.mixed_chunk_candidates(
             nb, "q", "", ["q"])
-        memo = dict(current_source_scope()._ceiling_binds_memo)
+        bound = run_ceiling_binds(current_source_scope(), nb)
     assert "LATE" not in kg_block and "Bare node" not in kg_block
     assert {v["name"] for v in kg_id_map.values()} == {"Public root"}
-    assert memo == {nb: True}
+    assert bound is True
 
 
 def test_mix_overlay_unbound_keeps_an_evidence_less_node(repo, monkeypatch):
@@ -1015,12 +1056,12 @@ def test_mix_overlay_unbound_keeps_an_evidence_less_node(repo, monkeypatch):
     ], id_offset=1000, active_notebook_id=nb)
     monkeypatch.setattr(repo.retrieval.candidates, "_mix_retrieve",
                         lambda *_a: ([], block, dict(id_map), [], 0))
-    with source_scope_context(nb, _freeze(a)):
+    with source_scope_context(nb, _freeze(a), _verdict_probes=_probes(repo)):
         _c, kg_block, kg_id_map, _h, _p = repo.retrieval.mixed_chunk_candidates(
             nb, "q", "", ["q"])
-        memo = dict(current_source_scope()._ceiling_binds_memo)
+        bound = run_ceiling_binds(current_source_scope(), nb)
     assert (kg_block, kg_id_map) == (block, id_map)
-    assert memo == {nb: False}
+    assert bound is False
 
 
 @pytest.mark.parametrize("backfilled", [True, False])
@@ -1055,12 +1096,12 @@ def test_mix_overlay_does_not_count_an_evidence_item_without_a_source(
     ], id_offset=1000, active_notebook_id=nb)
     monkeypatch.setattr(repo.retrieval.candidates, "_mix_retrieve",
                         lambda *_a: ([], block, dict(id_map), [], 0))
-    with source_scope_context(nb, _freeze(a)):
+    with source_scope_context(nb, _freeze(a), _verdict_probes=_probes(repo)):
         _c, kg_block, kg_id_map, _h, _p = repo.retrieval.mixed_chunk_candidates(
             nb, "q", "", ["q"])
-        memo = dict(current_source_scope()._ceiling_binds_memo)
+        bound = run_ceiling_binds(current_source_scope(), nb)
     assert (kg_block, kg_id_map) == (block, id_map)
-    assert memo == {nb: False}
+    assert bound is False
 
 
 def test_merge_keeps_relation_endpoints(repo):

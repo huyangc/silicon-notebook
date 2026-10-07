@@ -2,15 +2,16 @@
 asker's own Memory (real SQLite store).
 
 Third E1-1 review, P2-3: with ``memory_access_context(False)`` the default
-ceiling withholds the asker's own Memory sources, but the whole-graph walk,
-PPR, relation and exact-lookup channels are not partitioned by source.  Before
-the fail-closed line in ``source_scope_visible_universe_matches`` the 1-hop
-walk rendered a Memory-derived node name and relation chain into ``kg_block``
--- the answer prompt -- behind a live anchor, and PPR / exact lookup put the
-Memory passage into their raw candidates.  Until E2-2 checks walk nodes
-against the local ceiling, a run with Memory withheld switches those channels
-off; this pins that on a real store, with the open channel as the control
-that shows the fixture does reach the Memory-derived rows.
+ceiling withholds the asker's own Memory sources.  Without a ceiling of their
+own, the 1-hop walk rendered a Memory-derived node name and relation chain
+into ``kg_block`` -- the answer prompt -- behind a live anchor, and PPR /
+exact lookup put the Memory passage into their raw candidates; PR-E1 switched
+those four channels off for such a run.  PR-E2 gives each its ceiling (the
+walk judges the current notebook's nodes, PPR filters before its cut, exact
+lookup pushes the ceiling into its probe), so the channels stay on and this
+pins, on a real store, that nothing of the asker's Memory leaks -- with the
+open channel as the control that shows the fixture does reach the
+Memory-derived rows.
 """
 from __future__ import annotations
 
@@ -109,6 +110,13 @@ def seeded(tmp_path, monkeypatch):
                 (oid, nb, "concept", "approved", "", json.dumps({"name": name}),
                  _evidence(sid, element, quote), sid, NOW, NOW),
             )
+            # The reverse index, as the store writes it: a new notebook's is
+            # certified, so a reader trusting it sees an object without these
+            # rows as sourceless.
+            db.execute(
+                "INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id) "
+                "VALUES (?,?,?)", (oid, sid, nb),
+            )
         for oid in ("e1", "e2"):
             db.execute(
                 "INSERT INTO concept_clusters (id,notebook_id,canonical_id,"
@@ -152,31 +160,41 @@ def test_open_channel_control_reaches_the_memory_derived_rows(seeded):
         assert _leaks(service.candidates._exact_lookup_chunks(nb, EXACT_QUERY))
 
 
-def test_closed_channel_switches_the_non_partitioned_channels_off(seeded):
+def test_closed_channel_keeps_the_channels_open_and_leaks_nothing(seeded):
+    """With the Memory channel closed the four channels stay ON (a withheld
+    source is not drift) and none of them surfaces the asker's own Memory:
+    the walk judges the current notebook's nodes by the ceiling, PPR applies
+    it before its cut, exact lookup pushes it into its probe, and the
+    relation channel's result boundary drops the Memory-derived relation."""
     repo, nb, bob = seeded
     service = repo.retrieval
     candidates = service.candidates
     with memory_access_context(False), default_ceiling_context(
         nb, bob, real_readers(repo),
     ):
-        assert candidates._unsafe_source_scope_restricted(nb) is True
+        assert candidates._unsafe_source_scope_restricted(nb) is False
         chunks, block, id_map, hits, ppr_count = service.mixed_chunk_candidates(
             nb, QUERY, QUERY, [QUERY],
         )
         raw = candidates._mix_retrieve(nb, QUERY, QUERY, [QUERY])
-        # The answer prompt's graph block: no Memory-derived node name, no
-        # relation chain through it, no live anchor for it.
+        # The walk ran (the paper's node is rendered) ...
+        assert "Mixture-of-Experts" in block
+        # ... but the answer prompt's graph block holds no Memory-derived node
+        # name, no relation chain through it, no live anchor for it.
         assert "ZEBRAQUARTZ" not in block and "kind_of" not in block
         assert not {"e2", "e3"} & {
             str((entry or {}).get("object_id") or "") for entry in id_map.values()
         }
         assert not _leaks(raw[1])
-        # PPR is off before I/O: it contributes nothing, not even to the raw
-        # candidate pool the result boundary later filters.
-        assert raw[4] == 0 and ppr_count == 0
+        # PPR runs and gives its slots to in-ceiling passages only.
+        assert raw[4] > 0 and ppr_count > 0
         assert not _leaks([chunk.text for chunk in raw[0]])
-        # Exact lookup and the active notebook's relation channel are off too.
-        assert candidates._exact_lookup_chunks(nb, EXACT_QUERY) == []
-        assert candidates.federated_retrieve_relations(nb, QUERY) == []
+        # Exact lookup runs with the ceiling in its probe: the Memory section
+        # named ``zebra_quartz_cmd`` is never found.
+        assert not _leaks(candidates._exact_lookup_chunks(nb, EXACT_QUERY))
+        assert "rM" not in {
+            relation.relation_id
+            for relation in candidates.federated_retrieve_relations(nb, QUERY)
+        }
         assert not _leaks([chunk.text for chunk in chunks])
         assert not {"e2", "e3"} & {hit.object_id for hit in hits}

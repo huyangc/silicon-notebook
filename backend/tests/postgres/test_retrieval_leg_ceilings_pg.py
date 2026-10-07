@@ -412,7 +412,7 @@ def _pg_seam(postgres_settings, tmp_path, *, own_memory: bool):
                     (nb, NOW, NOW))
         _store_seam(repository, nb, own_memory, twin)
         scope = (twin._freeze(b.id, hidden=["src-mb"]) if own_memory else twin._freeze(a.id))
-        with source_scope_context(nb, scope):
+        with source_scope_context(nb, scope, _verdict_probes=twin._probes(repository)):
             _c, block, id_map, _h, _p = repository.retrieval.mixed_chunk_candidates(
                 nb, twin.SEAM_QUERY, twin.SEAM_QUERY, [twin.SEAM_QUERY])
         return block, id_map
@@ -446,7 +446,8 @@ def _store_seam(repository, nb, own_memory, twin):
 def test_pg_mix_seam_is_byte_identical_to_master(postgres_settings, tmp_path, own_memory):
     """No one else's Memory (none at all, or only the asker's own): the
     all-selected overlay through ``mixed_chunk_candidates`` is master's block,
-    evidence-less ``Capacity factor`` and its chain line included."""
+    evidence-less ``Capacity factor`` included, under the production verdict
+    probes."""
     from tests import test_retrieval_leg_ceilings as twin
 
     block, id_map = _pg_seam(postgres_settings, tmp_path, own_memory=own_memory)

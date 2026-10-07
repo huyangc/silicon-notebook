@@ -8,30 +8,12 @@ from typing import Any
 from app.services.evidence_attestation import DEAD, attest_pointers
 from app.services.retrieval import NeighborExpansion
 from app.services.source_scope import (
-    CeilingSet, current_source_scope, filter_evidence, filter_retrieval_items,
-    library_source_ceiling, source_allowed,
+    bindable_library_ceiling, current_source_scope, filter_evidence,
+    filter_retrieval_items, library_source_ceiling, source_allowed,
     node_context_row_within_ceiling, record_ceiling_drift,
     scoped_node_context_row, scoped_source_ceiling, source_ceiling_exists,
-    subjectless_run_active,
+    subjectless_run_active, unbound_ceiling, verify_unbound_read,
 )
-
-
-def _bindable_ceiling(scope, notebook_id: str):
-    """``notebook_id``'s frozen ceiling as a ``CeilingSet``, so the store's
-    ``source_ceiling.ceiling_param`` builds its bound SQL form once per run.
-
-    A per-library ceiling already is one; the local include ceiling is the
-    union ``source_ids | hidden_source_ids`` (a plain frozenset), wrapped once
-    per retrieval run."""
-    from app.services.retrieval_run import memoized_retrieval_value
-
-    ceiling = library_source_ceiling(scope, notebook_id)
-    if ceiling is None or isinstance(ceiling, CeilingSet):
-        return ceiling
-    return memoized_retrieval_value(
-        ("weak_support_ceiling", id(scope), notebook_id or scope.notebook_id),
-        lambda: CeilingSet(ceiling),
-    )
 
 
 def _notebook_id(args, kwargs, *, keyword: str = "notebook_id") -> str:
@@ -458,8 +440,9 @@ class RetrievalService:
         the node's own evidence sources are read (one batched read per library
         by object id, ``object_support_source_rows``: the reverse index when
         certified, otherwise the evidence JSON projected to source ids in SQL)
-        and judged by the run's verdict -- the same one ``node_context`` and the
-        candidate layer use (``ceiling_binds``):
+        and judged by the run's verdict -- the candidate layer's
+        (``run_ceiling_binds``), read once per library BEFORE the read through
+        ``unbound_ceiling``:
 
         * binds → a node survives only with an in-ceiling source
           (``source_allowed``, the rule ``filter_retrieval_items`` applies to a
@@ -472,8 +455,9 @@ class RetrievalService:
           all: it is neither support nor drift, so it neither keeps a node
           under a binding verdict nor flips an unbound run (a node whose
           evidence names no source at all is treated as evidence-less).
-          The first source that is outside records the drift for the rest of the run
-          (``record_ceiling_drift``) and the library's nodes are judged as if
+          The first source that is outside the ceiling taken before the read
+          records the drift for the rest of the run (``verify_unbound_read``)
+          and the library's nodes are judged as if
           the verdict had bound.  So a library without anyone else's Memory and
           without drift renders byte for byte as it did, evidence-less objects
           included.
@@ -511,13 +495,17 @@ class RetrievalService:
                 governed.setdefault(owner, {})[key] = str(
                     kg_id_map[key].get("object_id") or "")
         for owner, keys in governed.items():
+            # ONE reading of the run's verdict, taken BEFORE the read: the
+            # ceiling the unbound overlay is verified against, or ``None``
+            # (it binds, or flipped since) -- never "unbound" from one reading
+            # and the ceiling from a later one.
+            unbound = unbound_ceiling(owner)
             sources = self._object_support_sources(owner, keys.values())
-            if not self._ceiling_binds(owner):
-                if all(source_allowed(owner, sid)
-                       for object_id in keys.values()
-                       for sid in sources.get(object_id, ())):
-                    continue
-                record_ceiling_drift(scope, owner)
+            if unbound is not None and verify_unbound_read(owner, unbound, (
+                sid for object_id in keys.values()
+                for sid in sources.get(object_id, ())
+            )):
+                continue
             dropped.update(
                 key for key, object_id in keys.items()
                 if not any(source_allowed(owner, sid)
@@ -725,23 +713,27 @@ class RetrievalService:
         (the channel is off, as before).  Otherwise, when a source ceiling binds
         the library:
 
-        * the run's verdict says it binds (``ceiling_binds``: another member's
-          Memory in the library, drift, a per-library freeze, a subjectless run)
+        * the run's verdict says it binds (``run_ceiling_binds``, read once
+          through ``unbound_ceiling`` before any read: another member's Memory
+          in the library, drift, a withheld Memory channel, a per-library
+          freeze, a subjectless run)
           → both store reads (``weak_support_relation_rows`` /
           ``relation_endpoint_name_rows``) are bounded: an edge is kept only
           when its TARGET still has an in-ceiling object and its sample relation
           itself is in-ceiling.  When the ceiling is this notebook's own
-          all-selected freeze and still matches the library
-          (``_weak_support_viewer_form``), "in-ceiling" is stated as "not
-          derived from another member's Memory" (``viewer_id``, one scalar);
+          all-selected freeze, nothing was withheld from it and it still
+          matches the library (``_weak_support_viewer_form``), "in-ceiling"
+          is stated as "not derived from another member's Memory"
+          (``viewer_id``, one scalar);
           otherwise the frozen list is bound once per statement
           (``allowed_source_ids``, a ``CeilingSet`` so its bound form is built
           once per run);
         * the verdict says it does not → the unbounded reads (no list bound,
           the statements of a run without a scope), verified on read: every
-          sample relation's ``source_id`` must be inside the frozen ceiling.
-          The first that is not records the drift for the rest of the run
-          (``record_ceiling_drift``, the verdict ``node_context`` shares) and
+          sample relation's ``source_id`` must be inside the frozen ceiling
+          taken before the read.  The first that is not records the drift for
+          the rest of the run (``record_ceiling_drift``, the monotone verdict
+          every reader shares) and
           the probe is re-read bound.  A sample relation with no source is
           outside too (as under ``allows`` and the bound statement) but is not
           a change after the freeze: it drops its own row only.  What the check
@@ -765,8 +757,12 @@ class RetrievalService:
         # allow-list to bind: the unbounded read, judged row by row, is all
         # there is for it.
         bindable = library_source_ceiling(scope, notebook_id) is not None
-        if not bindable or not self._ceiling_binds(notebook_id):
-            ceiling = library_source_ceiling(scope, notebook_id)
+        # ONE reading of the run's verdict (``run_ceiling_binds``), taken
+        # before the read: the frozen ceiling the unbounded read is verified
+        # against, or ``None`` when it binds (or flipped since).
+        unbound = unbound_ceiling(notebook_id) if bindable else None
+        if not bindable or unbound is not None:
+            ceiling = unbound
             drifted = []
 
             def inside(source_id: str) -> bool:
@@ -791,7 +787,7 @@ class RetrievalService:
             return self.candidates.weak_support_relations(
                 notebook_id, object_ids, viewer_id=scope.owner_id,
             )
-        ceiling = _bindable_ceiling(scope, notebook_id)
+        ceiling = bindable_library_ceiling(scope, notebook_id)
         if ceiling is None:  # unreachable (``bindable``); fail closed, never unbound
             return []
         return self.candidates.weak_support_relations(
@@ -811,21 +807,20 @@ class RetrievalService:
         per-call drift probe -- never memoised).  Then the ceiling is exactly
         "everything this asker may read", and what it excludes is another
         member's Memory, which ``memory_sql.foreign_memory_*`` states in SQL.
-        Anything else -- drift, a per-library or deny-all freeze, a global run
-        -- binds the list.
+        Anything else -- drift, a per-library or deny-all freeze, a global run,
+        a closed Memory channel -- binds the list.
 
-        ⚠ PR-E2 rebase onto E1 (must land in the same batch): E1's closed
-        Memory channel takes the asker's OWN Memory sources out of the ceiling
-        into ``withheld_hidden_source_ids`` while the drift probe counts them
-        back and reports "no drift".  "Not another member's Memory" would then
-        admit exactly the withheld sources.  The premise above must also
-        require ``not scope.withheld_hidden_source_ids`` (otherwise the list
-        form), or the probe must run with ``viewer_id=""`` when the channel is
-        closed -- with a test: an asker without ``memory:read`` gets no hint
-        supported only by their own Memory.
+        A closed Memory channel (``withheld_hidden_source_ids``) is the one
+        case where the drift probe and the ceiling disagree on purpose: the
+        asker's OWN Memory sources were taken out of the ceiling, and the
+        probe counts them back in and reports "no drift".  "Not another
+        member's Memory" would admit exactly those sources, so such a run binds
+        the list (pinned by
+        ``test_weak_support_with_the_memory_channel_closed_never_hints_own_memory``).
         """
         if (
             scope.subjectless
+            or scope.withheld_hidden_source_ids
             or scope.source_ceiling_for(notebook_id) is not None
             or (notebook_id and notebook_id != scope.notebook_id)
             or scope.mode != "include"

@@ -7,8 +7,8 @@ the owner-scoped ``hidden_source_ids``, ``memory_source_ids``), so the same
 assertions run here against PostgreSQL: another member's Memory never enters
 the ceiling, a mounted library contributes its visible sources only, a library
 mounted mid-run is refused, and a closed Memory channel withholds the asker's
-own Memory and switches the non-partitioned channels off (fail-closed until
-E2-2).
+own Memory without reading as drift (the non-partitioned channels stay on and
+keep it out by the ceiling, PR-E2).
 """
 from __future__ import annotations
 

@@ -193,12 +193,17 @@ def _ceiling_bound_exact_deps(deps, allowed_source_ids):
     before the one in-ceiling hit was ever read).  Used by the single-library
     lookup and the peer-mode leg alike; an empty ceiling is handled by the
     callers before any probe.
+
+    The ceiling is handed down AS GIVEN, never copied: the single-library
+    lookup passes the run's ``CeilingSet`` (``source_scope
+    .bindable_library_ceiling``), whose ``bound_forms`` the store reads, so
+    the ~49k-id bound form is built once per run, not once per probe.
     """
     if allowed_source_ids is None:
         return deps
     from dataclasses import replace
 
-    ceiling = tuple(allowed_source_ids)
+    ceiling = allowed_source_ids
     search = deps.exact_search
 
     def _exact_search(db, notebook_id, needle, k):
@@ -4952,17 +4957,20 @@ class CandidateRetrievalService(_RetrievalState):
         drifted run keeps the channel -- every hit, every section slot and
         every subtree fetch stays inside the frozen ceiling.
 
-        Which list is pushed follows the run's ``ceiling_binds`` verdict
-        (``_ceiling_binds_for``, memoised on the scope), the rule every other
-        re-read under an all-selected freeze follows:
+        Which list is pushed follows the run's verdict
+        (``source_scope.run_ceiling_binds``, memoised and monotone on the
+        scope), read ONCE, before the probe, through ``unbound_ceiling`` --
+        the form every pushed-down producer uses:
 
         * no scope, or no source ceiling binds this library -- no list, the
           historical call;
-        * the verdict binds (narrowed, drifted, a foreign hidden source, a
-          per-notebook freeze) -- ``_exact_lookup_ceiling``;
+        * the verdict binds (narrowed, drifted, a withheld Memory channel, a
+          foreign hidden source, a per-notebook freeze) --
+          ``_exact_lookup_ceiling``;
         * the verdict does not bind -- no list, the historical call and bytes,
-          verified on read: a returned chunk whose source the ceiling does not
-          allow records the drift and the lookup is re-run bound.
+          verified on read against the ceiling taken before it
+          (``verify_unbound_read``): a returned chunk from outside records the
+          drift and the lookup is re-run bound.
 
         Zero I/O -- no verdict probe either -- when the query names nothing
         probe-worthy (``exact_lookup_terms``).
@@ -4971,46 +4979,51 @@ class CandidateRetrievalService(_RetrievalState):
             return []
         from app.services.exact_lookup import exact_lookup_chunks, exact_lookup_terms
         from app.services.source_scope import (
-            current_source_scope, record_ceiling_drift, source_allowed,
+            current_source_scope, unbound_ceiling, verify_unbound_read,
         )
 
         limits = self._exact_lookup_limits()
         if not exact_lookup_terms(query, limits):
             return []
-        try:
-            scope = current_source_scope()
-            binding = scope is not None and scope.source_ceiling_binds(notebook_id)
-            allowed = (
-                self._exact_lookup_ceiling(notebook_id)
-                if binding and self._ceiling_binds_for(notebook_id) else None
-            )
-            if allowed is not None and not allowed:
-                return []
-            chunks = exact_lookup_chunks(
+
+        def lookup(allowed):
+            return exact_lookup_chunks(
                 _ceiling_bound_exact_deps(self._exact_lookup_deps(), allowed),
                 notebook_id, query, limits,
             )
-            if binding and allowed is None and not all(
-                source_allowed(notebook_id, chunk.source_id) for chunk in chunks
+
+        try:
+            scope = current_source_scope()
+            unbound = None
+            allowed = None
+            if scope is not None and scope.source_ceiling_binds(notebook_id):
+                unbound = unbound_ceiling(notebook_id)
+                if unbound is None:
+                    allowed = self._exact_lookup_ceiling(notebook_id)
+                    if allowed is not None and not allowed:
+                        return []
+            chunks = lookup(allowed)
+            if not verify_unbound_read(
+                notebook_id, unbound, (chunk.source_id for chunk in chunks),
             ):
-                record_ceiling_drift(scope, notebook_id)
+                # The verdict is now bound (monotone): the list is handed out.
                 allowed = self._exact_lookup_ceiling(notebook_id)
-                if not allowed:
+                if allowed is not None and not allowed:
                     return []
-                chunks = exact_lookup_chunks(
-                    _ceiling_bound_exact_deps(self._exact_lookup_deps(), allowed),
-                    notebook_id, query, limits,
-                )
+                chunks = lookup(allowed)
             return chunks
         except Exception as exc:  # noqa: BLE001 — 精确通道失败绝不拖垮检索
             self._note_model_error("chunk_exact_lookup", "", exc)
             return []
 
-    def _exact_lookup_ceiling(self, notebook_id: str) -> tuple:
+    def _exact_lookup_ceiling(self, notebook_id: str):
         """The source list a binding ceiling pushes into the exact probe.
 
-        The frozen ceiling itself (``scoped_allowed_source_ids(nb)``: visible
-        ∪ the asker's hidden half, memoised sorted per run), deliberately NOT
+        The frozen ceiling itself (``bindable_library_ceiling``: visible ∪ the
+        asker's hidden half -- the set ``scoped_allowed_source_ids(nb)``
+        hands out when the verdict binds -- as the run's ``CeilingSet``, so
+        the store builds its bound form once per run and never copies it into
+        a tuple first), deliberately NOT
         ``scoped_allowed_source_ids(nb, visible)``: the scope's own notebook
         legitimately holds the asker's Knowhow and own Memory projections,
         which are not visible sources, so intersecting with the live visible
@@ -5021,15 +5034,30 @@ class CandidateRetrievalService(_RetrievalState):
         The legacy local ``exclude`` shape materialises no list; it is
         expressed over the live visible universe instead (a direct service
         caller's shape -- production freezes every local scope to ``include``).
+        Only that shape takes the visible fallback: ``None`` otherwise means no
+        ceiling exists here, and the probe takes no list.
         """
-        from app.services.source_scope import scoped_allowed_source_ids
+        from app.services.source_scope import (
+            bindable_library_ceiling,
+            current_source_scope,
+            scoped_allowed_source_ids,
+        )
 
-        allowed = scoped_allowed_source_ids(notebook_id)
-        if allowed is None:
-            allowed = scoped_allowed_source_ids(
+        scope = current_source_scope()
+        if scope is None:
+            return None
+        ceiling = bindable_library_ceiling(scope, notebook_id)
+        if ceiling is not None:
+            return ceiling
+        if (
+            scope.ceiling_active
+            and scope.mode == "exclude"
+            and notebook_id in ("", scope.notebook_id)
+        ):
+            return scoped_allowed_source_ids(
                 notebook_id, self.sources.all_visible_source_ids(notebook_id),
             )
-        return tuple(allowed)
+        return None
 
     @staticmethod
     def _union_chunk_candidates(base: list, extra: list) -> list:
@@ -5279,8 +5307,9 @@ class CandidateRetrievalService(_RetrievalState):
         no member's ceiling, and a withheld source is in neither half of the
         freeze.
 
-        VERDICT AND VERIFY-ON-READ.  Per library, ``_ceiling_binds_for`` (the
-        run's memoised ``source_scope.ceiling_binds``) decides the rule:
+        VERDICT AND VERIFY-ON-READ.  Per library, the run's verdict
+        (``source_scope.run_ceiling_binds``, read once before the evidence read
+        through ``unbound_ceiling``) decides the rule:
 
         * binds -- a node survives only with at least one in-ceiling evidence
           item, and an edge's evidence is narrowed to that ceiling (an edge
@@ -5290,13 +5319,18 @@ class CandidateRetrievalService(_RetrievalState):
         * does not bind (all selected, nothing drifted, no foreign hidden
           source) -- the walk is used as read, byte for byte, but only after
           every governed node's and incoming edge's evidence is verified inside
-          the ceiling.  The first item outside records the drift
-          (``record_ceiling_drift``) and the whole library is re-judged as
-          binding -- the same contract as ``RetrievalService.node_context``.
+          the ceiling taken before the read.  The first item outside records
+          the drift (``verify_unbound_read``) and the whole library is
+          re-judged as binding -- the same contract as
+          ``RetrievalService.node_context``.  A verdict probe that fails
+          answers "binds" (``source_scope._probe_or_bind``), so a mix ask
+          never fails on it.
           An object with no evidence passes the check vacuously there, exactly
           as ``node_context_row_within_ceiling`` treats it.
         """
-        from app.services.source_scope import filter_evidence, record_ceiling_drift
+        from app.services.source_scope import (
+            filter_evidence, unbound_ceiling, verify_unbound_read,
+        )
 
         # Governed nodes only: {object_id: owning notebook id}.
         owners: Dict[str, str] = {}
@@ -5307,6 +5341,11 @@ class CandidateRetrievalService(_RetrievalState):
                 owners[str(node.get("object_id") or "")] = owner
         if not owners:
             return subgraph
+        # ONE reading of the run's verdict per library, BEFORE the evidence
+        # read: the ceiling an unbound walk is verified against, or ``None``
+        # (it binds, or flipped since) -- never "unbound" from one reading and
+        # the ceiling from a later one.
+        unbound = {library: unbound_ceiling(library) for library in set(owners.values())}
         evidence_by_object: Dict[str, list] = {}
         with self._connect() as db:
             for batch in self._in_batches(owners):
@@ -5314,26 +5353,30 @@ class CandidateRetrievalService(_RetrievalState):
                     evidence_by_object[str(row["id"])] = json.loads(
                         row["evidence"] or "[]"
                     )
-        binds = {
-            library: self._ceiling_binds_for(library)
-            for library in set(owners.values())
-        }
+        binds = {library: ceiling is None for library, ceiling in unbound.items()}
 
-        def _inside(library: str, items) -> bool:
-            items = list(items or ())
-            return len(filter_evidence(library, items)) == len(items)
+        def _sources(items):
+            return (
+                str(item.get("source_id") or "") if isinstance(item, dict)
+                else str(getattr(item, "source_id", "") or "")
+                for item in items or ()
+            )
 
-        for node, edge, _src_oid in subgraph:
-            object_id = str((node or {}).get("object_id") or "")
-            owner = owners.get(object_id)
-            if owner is None or binds[owner]:
-                continue
-            if not (
-                _inside(owner, evidence_by_object.get(object_id))
-                and _inside(owner, (edge or {}).get("evidence"))
-            ):
-                record_ceiling_drift(scope, owner)
-                binds[owner] = True
+        for library in [library for library, bound in binds.items() if not bound]:
+            # Every governed node's evidence and its incoming edge's evidence,
+            # judged by membership in the ceiling taken before the read; the
+            # first source outside flips the run (``record_ceiling_drift``)
+            # and the whole library is re-judged as binding.
+            binds[library] = not verify_unbound_read(library, unbound[library], (
+                source_id
+                for node, edge, _src_oid in subgraph
+                if owners.get(str((node or {}).get("object_id") or "")) == library
+                for items in (
+                    evidence_by_object.get(str((node or {}).get("object_id") or "")),
+                    (edge or {}).get("evidence"),
+                )
+                for source_id in _sources(items)
+            ))
         if not any(binds.values()):
             return subgraph
         out: list = []
@@ -5371,34 +5414,6 @@ class CandidateRetrievalService(_RetrievalState):
             out.append((node, edge, src_oid))
         return out
 
-    def _ceiling_binds_for(self, notebook_id: str) -> bool:
-        """This run's ``source_scope.ceiling_binds`` verdict for ``notebook_id``.
-
-        Production wires one ``kg_viewer_scope.NodeContextCeilingVerdict`` into
-        ``RetrievalService`` and it is memoised on the run's scope, so the
-        overlay and exact lookup share it with both ``node_context`` re-read
-        sites (a drift recorded by any of them binds all of them).  A service
-        constructed without that port (test doubles) gets the conservative
-        historical answer: every existing ceiling binds
-        (``source_ceiling_exists``).
-
-        A probe failure (a pool timeout reading the visible universe, say)
-        answers "binds" instead of failing the caller: the overlay and exact
-        lookup then take their bound paths, which are correct whatever the
-        verdict, and a whole mix ask no longer fails on a probe (quality
-        review P3-7).  Cancellation is never swallowed.
-        """
-        verdict = getattr(getattr(self, "_retrieval", None), "_ceiling_binds", None)
-        if not callable(verdict):
-            from app.services.source_scope import source_ceiling_exists
-
-            verdict = source_ceiling_exists
-        try:
-            return bool(verdict(notebook_id))
-        except (AskCancelled, RetrievalControlError):
-            raise
-        except Exception:  # noqa: BLE001 — an unanswerable verdict binds
-            return True
     def _chunk_kg_overlay(self, notebook_id: str, query: str, hl: str, id_offset: int):
         """种子(节点∪关系端点)→1-hop 子图→渲染。
 

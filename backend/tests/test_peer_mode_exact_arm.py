@@ -53,7 +53,13 @@ from app.services.retrieval_participants import (
     ParticipantOverride, participant_override,
 )
 from app.services.retrieval_run import retrieval_run
-from app.services.source_scope import source_scope_context, source_scope_restricted
+from app.services.source_scope import (
+    CeilingSet,
+    CeilingVerdictProbes,
+    current_source_scope,
+    source_scope_context,
+    source_scope_restricted,
+)
 
 
 _ACTOR = "user-peer-exact"
@@ -88,7 +94,6 @@ class ExactProbe:
     _exact_lookup_deps = _borrow("_exact_lookup_deps")
     _exact_lookup_limits = _borrow("_exact_lookup_limits")
     _exact_lookup_ceiling = _borrow("_exact_lookup_ceiling")
-    _ceiling_binds_for = _borrow("_ceiling_binds_for")
 
     def __init__(self, participants=("nb-a",), *, sections=None, visible=None,
                  failures=None, limit=_CANDIDATE_LIMIT, enabled=True,
@@ -119,6 +124,7 @@ class ExactProbe:
         # ``(notebook_id, term, allowed_source_ids)`` per probe: the ceiling the
         # service pushed down (``None`` = the historical call without one).
         self.ceilings: list = []
+        self.ceiling_objects: list = []
         self.model_errors: list = []
         self.seat_reads = 0
         self.visible_reads: list = []
@@ -180,7 +186,14 @@ class ExactProbe:
         allowed = kwargs.pop("allowed_source_ids", None)
         assert not kwargs, kwargs
         with self._lock:
-            self.ceilings.append((notebook_id, term, allowed))
+            # Recorded sorted (membership is the contract); the object itself
+            # too, so a case can see WHAT was handed down (a run's
+            # ``CeilingSet`` carries the store's bound-form memo).
+            self.ceilings.append((
+                notebook_id, term,
+                None if allowed is None else tuple(sorted(allowed)),
+            ))
+            self.ceiling_objects.append(allowed)
         failure = self._failures.get(notebook_id)
         if failure is not None:
             raise failure
@@ -657,8 +670,9 @@ def test_single_notebook_path_keeps_the_channel_under_every_scope(scope, enabled
     同一串存储调用;天花板在绑时下推给探针,不绑(无范围)时逐字是历史调用;
     参与集座位与联邦开关都不读,不发事件,命中不打库标,也不再现探来源漂移。
 
-    替身没有接判词端口,所以按保守的历史答案「天花板存在即绑」——全选冻结也
-    下推(生产上全选且未漂移的 run 走校验读,见下面的判词用例)。"""
+    这里的 scope 不带判词探针(``verdict_probes``),``run_ceiling_binds`` 按保守的
+    历史答案「天花板存在即绑」——全选冻结也下推(生产上默认天花板带探针,全选且
+    未漂移的 run 走校验读,见下面的判词用例)。"""
     probe = ExactProbe(
         ("nb-a", "nb-ref-1"),
         sections={"nb-a": _SECTIONS["nb-a"], "nb-ref-1": _SECTIONS["nb-b"]},
@@ -703,35 +717,44 @@ def test_a_narrowed_run_finds_the_in_ceiling_section_behind_a_full_window():
 
     assert _ids(merged) == [("", "in-1")]
     assert {allowed for _nid, _term, allowed in probe.ceilings} == {("src-nb-a",)}
+    # The run's own ceiling object goes down as is -- never copied into a
+    # tuple -- so the store's bound-form memo on it serves every probe.
+    assert probe.ceiling_objects and all(
+        isinstance(allowed, CeilingSet) for allowed in probe.ceiling_objects)
+    assert len({id(allowed) for allowed in probe.ceiling_objects}) == 1
 
 
 class _Verdict:
-    """``RetrievalService._ceiling_binds`` 的替身:判词固定,记下被问了哪些库。"""
+    """The scope's verdict probes (``CeilingVerdictProbes``, what every
+    default ceiling carries): nothing drifted; another member's Memory in the
+    library iff ``binds``.  Records which libraries the verdict was taken for."""
 
     def __init__(self, binds: bool):
         self.binds = binds
         self.asked: list = []
 
-    def __call__(self, notebook_id):
+    def probes(self) -> CeilingVerdictProbes:
+        return CeilingVerdictProbes(
+            universe_digests=self._digests, foreign_hidden=self._foreign_hidden,
+        )
+
+    def _digests(self, notebook_id, _owner):
         self.asked.append(notebook_id)
+        return current_source_scope()._frozen_universe_digests
+
+    def _foreign_hidden(self, _notebook_id, _owner):
         return self.binds
-
-
-def _with_verdict(probe, binds: bool) -> _Verdict:
-    verdict = _Verdict(binds)
-    probe._retrieval = SimpleNamespace(_ceiling_binds=verdict)
-    return verdict
 
 
 def test_an_unbinding_verdict_keeps_the_historical_call_when_nothing_is_outside():
     """全选、未漂移、无外人隐藏来源(判词为假):不下推清单,逐字是历史调用,
     结果全部在天花板内所以校验读通过、不重跑。"""
     probe = ExactProbe(("nb-a",))
-    verdict = _with_verdict(probe, binds=False)
+    verdict = _Verdict(binds=False)
     frozen = SourceScope(mode="include", source_ids=["src-nb-a"], narrowed=False)
 
     with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
-        with source_scope_context("nb-a", frozen):
+        with source_scope_context("nb-a", frozen, _verdict_probes=verdict.probes()):
             merged = probe._exact_lookup_chunks("nb-a", _QUERY)
 
     assert probe.steps == _SINGLE_PATH_STEPS
@@ -744,27 +767,24 @@ def test_an_unbinding_verdict_is_verified_on_read_and_rerun_bound():
     """判词为假之后库变了(冻结后新增的来源命中):校验读发现界外来源 → 记漂移、
     按天花板重跑一次;界外那一节既不返回也不再被整节取回。
 
-    断言只看可观察行为(质量评审 P3-6),不读 scope 的私有 memo:判词替身走公开的
-    ``source_scope.ceiling_binds``(两个探针都答「无可排除」),所以漂移被记下之后,
-    同一 run 里的下一次精确查找一开始就带清单,``ceiling_binds`` 也答 True。"""
-    from app.services.source_scope import ceiling_binds, current_source_scope
+    断言只看可观察行为(质量评审 P3-6),不读 scope 的私有 memo:判词走公开的
+    ``source_scope.run_ceiling_binds``(scope 带的两个探针都答「无可排除」),所以
+    漂移被记下之后,同一 run 里的下一次精确查找一开始就带清单,判词也答 True。"""
+    from app.services.source_scope import run_ceiling_binds
 
     def _run_verdict(notebook_id):
-        return ceiling_binds(
-            current_source_scope(), notebook_id,
-            drifted=lambda: False, foreign_hidden=lambda: False,
-        )
+        return run_ceiling_binds(current_source_scope(), notebook_id)
 
     probe = ExactProbe(
         ("nb-a",),
         sections={"nb-a": [("New > set_db", ["n1", "n2"], "src-new"),
                            ("Cmds > set_db", ["a1"], None)]},
     )
-    probe._retrieval = SimpleNamespace(_ceiling_binds=_run_verdict)
     frozen = SourceScope(mode="include", source_ids=["src-nb-a"], narrowed=False)
 
     with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
-        with source_scope_context("nb-a", frozen):
+        with source_scope_context("nb-a", frozen,
+                                  _verdict_probes=_Verdict(binds=False).probes()):
             assert _run_verdict("nb-a") is False
             merged = probe._exact_lookup_chunks("nb-a", _QUERY)
             first_run = [allowed for _nid, _term, allowed in probe.ceilings]
