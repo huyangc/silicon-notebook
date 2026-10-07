@@ -8,6 +8,7 @@ from app.services.embedding import FakeEmbedder
 from tests.model_testkit import bind_all_embedding_clients
 from tests.test_exact_lookup_ceiling_store import (
     PgSeed, check_closed_channel, check_narrowed_window,
+    check_probe_reads_the_ceiling_memo,
 )
 
 pytestmark = [pytest.mark.postgres_integration]
@@ -37,3 +38,7 @@ def test_pg_narrowed_window(backend):
 
 def test_pg_closed_channel(backend):
     check_closed_channel(backend)
+
+
+def test_pg_probe_reads_the_ceiling_memo(backend):
+    check_probe_reads_the_ceiling_memo(backend)

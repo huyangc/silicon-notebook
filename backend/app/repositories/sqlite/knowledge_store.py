@@ -349,6 +349,35 @@ def _legacy_sibling_steps(
     return steps
 
 
+_EXACT_PROBE_FORM = ("sqlite", "member_of")
+
+
+def _exact_probe_ceiling(allowed_source_ids):
+    """``chunk_exact_search``'s bound ceiling (``bind_ids(sort=True)``, one
+    JSON parameter), or ``None`` for an empty one (deny all).
+
+    A run's ceiling (``source_scope.CeilingSet``) carries its bound forms in
+    ``bound_forms``: the memo is read BEFORE any normalisation, so a run pays
+    the build once, not once per probe.  Its key names the backend AND the
+    SQL form (this ``member_of`` binding), because the same object also
+    carries ``source_ceiling.ceiling_param``'s form under its own key.  Any
+    other collection is normalised (blanks dropped, duplicates folded) and
+    bound fresh."""
+    forms = getattr(allowed_source_ids, "bound_forms", None)
+    if forms is not None:
+        bound = forms.get(_EXACT_PROBE_FORM)
+        if bound is None:
+            source_ids = [str(value) for value in allowed_source_ids if value]
+            if not source_ids:
+                return None
+            bound = forms[_EXACT_PROBE_FORM] = bind_ids(source_ids, sort=True)
+        return bound
+    source_ids = [str(value) for value in dict.fromkeys(allowed_source_ids) if value]
+    if not source_ids:
+        return None
+    return bind_ids(source_ids, sort=True)
+
+
 def _retrieval_evidence(raw: object) -> list[Evidence]:
     """Hydrate valid evidence cards while tolerating malformed legacy items."""
     if isinstance(raw, (str, bytes)):
@@ -3678,7 +3707,8 @@ class KnowledgeStore:
         as ONE JSON parameter (`id_binding.bind_ids(sort=True)`), tested with
         `member_of` (`+c.source_id IN`): the FTS5 MATCH drives, the list only
         filters, in both statistics states (production never runs ANALYZE;
-        `tests/test_store_evidence_ceiling_plans.py`).
+        `tests/test_store_evidence_ceiling_plans.py`).  A run's `CeilingSet`
+        keeps that bound form (`_exact_probe_ceiling`).
         """
         term = (needle or "").strip()
         if len(term) < 3 or k <= 0:
@@ -3695,10 +3725,9 @@ class KnowledgeStore:
                 "ORDER BY rank LIMIT ?",
                 (notebook_id, match_query, k)).fetchall()
         else:
-            source_ids = [str(value) for value in dict.fromkeys(allowed_source_ids) if value]
-            if not source_ids:
+            ceiling = _exact_probe_ceiling(allowed_source_ids)
+            if ceiling is None:
                 return []
-            ceiling = bind_ids(source_ids, sort=True)
             rows = db.execute(
                 "SELECT chunks_fts.chunk_id AS chunk_id, c.source_id AS source_id, "
                 "c.section_path AS section_path, bm25(chunks_fts) AS rank "
