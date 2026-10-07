@@ -1087,9 +1087,9 @@ class UnifiedKgStore:
         不变,至多传一个):目标端(``_WEAK_TARGET_OBJECTS``)要有一个对象的证据
         落在冻结天花板内(``source_ceiling.evidence_support_sql``,清单是一个 JSON
         参数),或不派生自别人的 Memory(``memory_sql.foreign_memory_object_excluded``)。
-        闸在 ``LIMIT`` 之前。PG 侧把候选先排好序再惰性判支撑(那里的执行时间由它
-        决定);这里保持直接写法,SQLite 的规划不按清单长度计价,49k 天花板上的
-        实测见 E2-1 修复报告。
+        闸在 ``LIMIT`` 之前,且与 PG 孪生一样按排序惰性求值:候选先在
+        ``LIMIT -1 OFFSET 0`` 子查询里排好序(阻止扁平化),外层逐行判支撑、
+        拿够 ``limit`` 行即停。
 
         判据是 `source_count`(支撑这条边的**不同文档**数)而不是 `support_count`
         (聚合掉的原始关系行数)。两者在 canonical 层经常差得很远:别名归一与 claim
@@ -1141,13 +1141,23 @@ class UnifiedKgStore:
                 authoritative=not UnifiedKgStore._source_index_backfilled(db, notebook_id),
             )
             param = bound.param
+        # Same lazy shape as the PG twin: the candidates are sorted in a
+        # subquery that ``LIMIT -1 OFFSET 0`` keeps from being flattened, and
+        # the support gate runs outside it, so it is evaluated on the rows in
+        # sort order until ``limit`` pass -- not on every candidate before the
+        # sort (96 seeds x 500 edges: 239 → 97 ms list, 200 → 83 ms viewer).
         return execute_with_ceiling(
             db,
             f"SELECT cr.canonical_src, cr.edge_type, cr.canonical_tgt, cr.source_count, "
             f"       cr.sample_relation_ids "
-            f"FROM canonical_relations cr "
-            f"WHERE cr.notebook_id=? AND cr.canonical_src IN ({placeholders}) "
-            f"  AND cr.source_count<=? AND {_weak_target_supported(condition)} "
+            f"FROM (SELECT notebook_id, canonical_src, edge_type, canonical_tgt, "
+            f"             source_count, sample_relation_ids "
+            f"      FROM canonical_relations "
+            f"      WHERE notebook_id=? AND canonical_src IN ({placeholders}) "
+            f"        AND source_count<=? "
+            f"      ORDER BY source_count ASC, canonical_tgt ASC, canonical_src ASC, "
+            f"               edge_type ASC LIMIT -1 OFFSET 0) cr "
+            f"WHERE {_weak_target_supported(condition)} "
             f"ORDER BY cr.source_count ASC, cr.canonical_tgt ASC, cr.canonical_src ASC, "
             f"         cr.edge_type ASC "
             f"LIMIT ?",

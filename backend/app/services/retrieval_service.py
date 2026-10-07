@@ -465,9 +465,14 @@ class RetrievalService:
           (``source_allowed``, the rule ``filter_retrieval_items`` applies to a
           KG hit; a node with no source is dropped);
         * does not bind → the overlay is used as is, verified on read: every
-          source a node names must be inside the frozen ceiling (a node naming
-          none passes, vacuously, as in ``node_context_row_within_ceiling``).
-          The first that is not records the drift for the rest of the run
+          source a node names must be inside the frozen ceiling.  A node with
+          no evidence passes vacuously -- the one case this shares with
+          ``node_context_row_within_ceiling``.  Unlike that check, an evidence
+          item that names no source (a blank ``source_id``) is not counted at
+          all: it is neither support nor drift, so it neither keeps a node
+          under a binding verdict nor flips an unbound run (a node whose
+          evidence names no source at all is treated as evidence-less).
+          The first source that is outside records the drift for the rest of the run
           (``record_ceiling_drift``) and the library's nodes are judged as if
           the verdict had bound.  So a library without anyone else's Memory and
           without drift renders byte for byte as it did, evidence-less objects
@@ -808,6 +813,16 @@ class RetrievalService:
         member's Memory, which ``memory_sql.foreign_memory_*`` states in SQL.
         Anything else -- drift, a per-library or deny-all freeze, a global run
         -- binds the list.
+
+        ⚠ PR-E2 rebase onto E1 (must land in the same batch): E1's closed
+        Memory channel takes the asker's OWN Memory sources out of the ceiling
+        into ``withheld_hidden_source_ids`` while the drift probe counts them
+        back and reports "no drift".  "Not another member's Memory" would then
+        admit exactly the withheld sources.  The premise above must also
+        require ``not scope.withheld_hidden_source_ids`` (otherwise the list
+        form), or the probe must run with ``viewer_id=""`` when the channel is
+        closed -- with a test: an asker without ``memory:read`` gets no hint
+        supported only by their own Memory.
         """
         if (
             scope.subjectless
