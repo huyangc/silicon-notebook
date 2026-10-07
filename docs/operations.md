@@ -396,8 +396,10 @@ shared rows were verified, so a shared source ingested meanwhile leaves the inde
 fold takes it in. A build during
 which memories keep reaching the index is discarded after one retry (event
 `scale_index_build_discarded`, reason `memory_appeared_during_build`); the live index stays as it
-was, and the next KG write re-arms automatic indexing, or you can run the build again by hand. Cost
-for a notebook without Memory: the statements it always ran, plus one-row Memory probes and an
+was, and the next KG write re-arms automatic indexing, or you can run the build again by hand. A
+fold that finds Memory among what it would publish publishes nothing and runs the full build
+instead (event `scale_fold_refused`, reason `memory_reached_fold`). Cost for a notebook without
+Memory: the statements it always ran, plus Memory id reads that find no Memory source and an
 in-statement exclusion. On PostgreSQL that exclusion costs the same as an unfiltered read. On
 SQLite a whole-table read costs 13–30 % more (measured at 300k rows: objects 147 → 195 ms,
 relations 149 → 174 ms, viz objects 271 → 293 ms).

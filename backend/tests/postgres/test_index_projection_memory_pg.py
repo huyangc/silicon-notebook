@@ -17,6 +17,8 @@ from app.repositories.postgres.repository import PostgresRepository
 from app.services.embedding import FakeEmbedder
 from tests.memory_artifact_fixture import (
     SECRET_NAMES,
+    assert_a_first_memory_committed_before_the_source_list_never_reaches_a_fold,
+    assert_a_fold_that_reached_memory_publishes_nothing_and_rebuilds,
     assert_a_memory_confirmed_mid_build_never_publishes,
     assert_a_memory_confirmed_at_the_object_read_never_reaches_a_published_index,
     assert_a_pre_isolation_index_is_rebuilt_once_its_memory_is_deleted,
@@ -55,6 +57,23 @@ def repo(postgres_settings: Settings):
         yield repository
     finally:
         repository.close()
+
+
+def test_pg_a_first_memory_committed_before_the_fold_source_list_never_reaches_the_fold(
+    repo16, monkeypatch
+):
+    """codex #824 r6 P1 under READ COMMITTED: the Memory commits between the
+    fold's earlier statements and its source list (``repo16``: the fold is
+    never refused for a dim drift first)."""
+    assert_a_first_memory_committed_before_the_source_list_never_reaches_a_fold(
+        repo16, monkeypatch)
+
+
+def test_pg_a_fold_that_reached_memory_publishes_nothing_and_rebuilds(
+    repo16, monkeypatch
+):
+    assert_a_fold_that_reached_memory_publishes_nothing_and_rebuilds(
+        repo16, monkeypatch)
 
 
 def _edges(idx):

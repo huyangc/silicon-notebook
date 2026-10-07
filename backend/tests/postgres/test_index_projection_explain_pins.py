@@ -230,7 +230,6 @@ def _captured_plans(postgres_database, capabilities_off: bool = True) -> dict[st
         and "source_id IN" not in s,
         "delta_relation_ids": lambda s: s.startswith("SELECT id FROM knowledge_relations")
         and "source_id IN" in s,
-        "has_memory": lambda s: s.startswith("SELECT EXISTS(SELECT 1 FROM sources"),
         "memory_source_ids": lambda s: s.startswith("SELECT id FROM sources")
         and "NOT (" not in s,
         "source_ids": lambda s: s.startswith("SELECT id FROM sources") and "NOT (" in s,
@@ -314,9 +313,9 @@ def test_memory_exclusion_statements_keep_their_index_paths(postgres_database):
     assert ("idx_knowledge_objects_source_id" in canonicals
             or "idx_knowledge_objects_source " in canonicals), canonicals
 
-    # the probe and the Memory source read use the (notebook_id, source_type) index
-    for name in ("has_memory", "memory_source_ids"):
-        assert "idx_sources_nb_hidden_type" in plans[name][0], (name, plans[name][0])
+    # the Memory source read uses the (notebook_id, source_type) index
+    assert "idx_sources_nb_hidden_type" in plans["memory_source_ids"][0], plans[
+        "memory_source_ids"][0]
 
     # shared_content_digest (build / fold / re-stamp only): each aggregate is
     # ONE hashed SubPlan over THIS notebook's Memory, no join, no every-
@@ -352,3 +351,97 @@ def test_memory_exclusion_statements_have_no_correlated_lookup_under_the_real_pl
                  "shared_objects", "shared_relations", "shared_clusters",
                  "shared_embeddings"):
         assert _sources_bounded_by_notebook(plans[name][0]), (name, plans[name][0])
+
+
+def _seed_plain(postgres_database) -> None:
+    """A second notebook with no Memory source at all, as many objects."""
+    with postgres_database.write() as db:
+        db.execute("SET LOCAL statement_timeout = '0'")
+        db.execute(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+            "created_at,updated_at,tier) "
+            "VALUES ('nb-plain','P','','','ready','u-a',%s,%s,'personal')",
+            (_NOW, _NOW),
+        )
+        db.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,created_at,updated_at) "
+            "SELECT 'plain-src-'||g,'nb-plain','t','upload',%s,%s "
+            "FROM generate_series(0,3999) g",
+            (_NOW, _NOW),
+        )
+        db.execute(
+            "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,payload,"
+            "source_id,created_at,updated_at) SELECT 'plain-ko-'||g,'nb-plain','concept',"
+            "'approved',jsonb_build_object('name','p'||g),'plain-src-'||(g%%4000),%s,%s "
+            "FROM generate_series(0,29999) g",
+            (_NOW, _NOW),
+        )
+    import psycopg
+
+    with psycopg.connect(postgres_database.settings.database_url, autocommit=True) as raw:
+        for table in ("sources", "knowledge_objects"):
+            raw.execute(f"VACUUM (ANALYZE) {table}")
+
+
+def _scan_nodes(plan: str) -> list:
+    """The plan's node lines (scan type and index), conditions left out."""
+    return [line.strip().lstrip("-> ").split("  ")[0] for line in plan.splitlines()
+            if not line.strip().startswith(("Index Cond:", "Filter:", "Recheck Cond:",
+                                            "Heap Fetches:"))]
+
+
+def test_a_notebook_without_memory_reads_its_source_list_as_before(postgres_database):
+    """codex #824 r6: the source list carries its Memory exclusion in the
+    statement for every notebook (no probe chooses the statement). On a
+    notebook without Memory it returns exactly the unfiltered read's rows
+    through the same plan nodes -- under the real planner and with the
+    capability switches -- and the Memory id / cluster reads, now issued for
+    it too, are driven by its (empty) Memory source set."""
+    from app.core.config import Settings
+    from app.repositories.postgres.index_projection_store import IndexProjectionStore
+
+    assert PostgresMigrator(postgres_database).migrate()
+    _seed(postgres_database)
+    _seed_plain(postgres_database)
+    log: list = []
+
+    @contextmanager
+    def recording_connect():
+        with postgres_database.connect() as db:
+            yield _Recording(db, log)
+
+    store = IndexProjectionStore(
+        Settings(database_url=postgres_database.settings.database_url,
+                 graph_fetch_page_rows=1000),
+        connect=recording_connect,
+        in_batches=lambda ids: [list(ids)],
+        ent_chunk_map=lambda _nb, paged=False: {},
+        mention_extra_edges=lambda _nb: [],
+        vector_matrix=lambda *_a, **_k: ([], None),
+    )
+    listed = store.source_ids("nb-plain")
+    assert store.memory_derived_ids("nb-plain", "knowledge_embeddings") == frozenset()
+    assert store.memory_derived_ids("nb-plain", "relation_embeddings") == frozenset()
+    assert store.memory_cluster_canonicals("nb-plain") == frozenset()
+    assert not [s for s, _p in log if s.startswith("SELECT EXISTS(")], log
+    (statement, params), = [(s, p) for s, p in log
+                            if s.startswith("SELECT id FROM sources") and "NOT (" in s]
+    bare = "SELECT id FROM sources WHERE notebook_id=%s"
+    with postgres_database.connect() as connection:
+        unfiltered = [row["id"] for row in connection.execute(bare, params).fetchall()]
+        assert listed == unfiltered and len(listed) == 4000
+        for off in (False, True):
+            filtered_plan = _plan(connection, statement, params, capabilities_off=off)
+            bare_plan = _plan(connection, bare, params, capabilities_off=off)
+            assert _scan_nodes(filtered_plan) == _scan_nodes(bare_plan), (
+                off, filtered_plan, bare_plan)
+            if off:
+                assert "Seq Scan" not in filtered_plan, filtered_plan
+        id_reads = [(s, p) for s, p in log
+                    if s.startswith(("SELECT id FROM knowledge_", "SELECT DISTINCT c."))]
+        assert len(id_reads) == 3, id_reads
+        for read, read_params in id_reads:
+            plan = _plan(connection, read, read_params)
+            assert "Seq Scan" not in plan and _no_per_row_subplan(plan), plan
+            assert "idx_sources_nb_hidden_type" in plan, plan
+            assert _sources_bounded_by_notebook(plan), plan

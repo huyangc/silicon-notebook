@@ -467,10 +467,10 @@ class ScaleIndexBuilder:
     def _memory_snapshot(self, notebook_id: str) -> tuple:
         """The notebook's Memory rows an artifact must not contain: its Memory
         source ids and the ids of the objects and relations derived from them.
-        One source read for a notebook without Memory."""
+        All three are read for every notebook (codex #824 r6): skipping the id
+        reads when the source read came back empty would miss a first Memory
+        committed between the reads."""
         sources = frozenset(self.projections.memory_source_ids(notebook_id))
-        if not sources:
-            return sources, frozenset(), frozenset()
         return (
             sources,
             self.projections.memory_derived_ids(notebook_id, "knowledge_embeddings"),
@@ -498,6 +498,21 @@ class ScaleIndexBuilder:
         return any(
             item in new_objects for group in objects for item in group
         ) or any(item in new_relations for item in relations)
+
+    _NO_MEMORY = (frozenset(), frozenset(), frozenset())
+
+    @classmethod
+    def _fold_reached_memory(
+        cls, seen: tuple, delta_sources, *, objects=(), relations=()
+    ) -> bool:
+        """The fold's pre-publish check (codex #824 r6), on the full build's
+        running union and ``_memory_reached``: a fold adds only delta-source
+        rows, none of which may be Memory, so EVERY Memory row it observed
+        counts -- not only one that appeared while it ran -- and so does a
+        Memory source among the delta sources."""
+        return bool(set(delta_sources) & seen[0]) or cls._memory_reached(
+            cls._NO_MEMORY, seen, objects=objects, relations=relations,
+        )
 
     def _build_attempt(
         self,
@@ -1097,6 +1112,10 @@ class ScaleIndexBuilder:
                         "error": type(exc).__name__,
                     })
 
+            # The pre-publish Memory check (codex #824 r6) observes the
+            # notebook's Memory rows before the fold's reads and again after
+            # them -- the full build's running union (``_observe_memory``).
+            memory_seen = self._memory_snapshot(notebook_id)
             # read BEFORE the fold's own reads, so it is never newer than the
             # content (a later re-stamp compares against it)
             shared_digest = self.projections.shared_content_digest(notebook_id)
@@ -1225,6 +1244,7 @@ class ScaleIndexBuilder:
                     )
                     manifest["has_chunk_ann_sources"] = True
 
+            relation_vector_ids: list = []
             if idx.relation_ann_path and idx.relation_ann_labels is not None:
                 relation_ids = self._delta_relation_ids(
                     notebook_id, delta["delta_sources"]
@@ -1251,6 +1271,22 @@ class ScaleIndexBuilder:
                 manifest["has_relation_ann"] = True
                 manifest["n_relation_ann"] = len(relation_labels)
 
+            memory_seen = self._observe_memory(notebook_id, memory_seen)
+            if self._fold_reached_memory(
+                memory_seen, delta["delta_sources"],
+                objects=(delta_nodes, kg_vector_ids),
+                relations=relation_vector_ids,
+            ):
+                # Nothing of this fold is published; the full build (which
+                # re-checks before its own publish) takes over.
+                self.event_log.emit(
+                    {
+                        "kind": "scale_fold_refused",
+                        "notebook_id": notebook_id,
+                        "reason": "memory_reached_fold",
+                    }
+                )
+                return self.build(notebook_id)
             scale_index_module.copy_fold_viz(str(live_dir), str(temporary))
             # M1: the Memory digest is read BEFORE the version (see ``build``);
             # a fold adds only delta-source rows, which are never Memory.

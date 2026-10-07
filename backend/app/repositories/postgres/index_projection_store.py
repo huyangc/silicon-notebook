@@ -180,13 +180,6 @@ _SHARED_RELATION_EMBEDDING_FACTS = (
 )
 
 
-def _when(present: bool, fragment: str) -> str:
-    """The Memory fragment only for a notebook that holds a Memory source: for
-    every other notebook (all base libraries, most personal ones) the statement
-    text -- and so its plan and cost -- stays exactly what it was."""
-    return fragment if present else ""
-
-
 def _without_rows(ids, matrix, excluded):
     """``(ids, matrix)`` minus the rows of the excluded ids (row-aligned)."""
     if not excluded or ids is None or not len(ids):
@@ -479,17 +472,6 @@ class IndexProjectionStore:
             for row in db.execute(_MEMORY_SOURCE_IDS_SQL, (notebook_id,)).fetchall()
         )
 
-    @staticmethod
-    def has_memory_source(db, notebook_id: str) -> bool:
-        """Whether the notebook holds any Memory-derived source at all -- one
-        index probe on ``idx_sources_nb_hidden_type (notebook_id, source_type)``."""
-        return bool(db.execute(
-            "SELECT EXISTS(SELECT 1 FROM sources WHERE notebook_id=%s AND "
-            + memory_sql.memory_source_type_predicate()
-            + ") AS present",
-            (notebook_id,),
-        ).fetchone()["present"])
-
     def memory_source_ids(self, notebook_id: str) -> List[str]:
         """The notebook's Memory source ids (small: one per confirmed memory)."""
         with self.connect() as db:
@@ -531,15 +513,16 @@ class IndexProjectionStore:
         members' Memory sources. This is the artifact's watermark and its fold
         delta, and a shared artifact must not list -- or count -- a member's
         private sources (M1); a Memory source therefore never becomes a fold
-        delta either, so its objects never reach an index. The exclusion is
-        appended behind the probe, so a notebook without Memory runs the very
-        statement it always ran."""
+        delta either, so its objects never reach an index. The exclusion is in
+        the statement for every notebook (codex #824 r6): under READ COMMITTED
+        each statement has its own snapshot, so a probe choosing the statement
+        would be outdated by a first Memory committed between the two. On a
+        notebook without Memory it reads the same index path and returns the
+        same rows as the unfiltered read
+        (``test_index_projection_explain_pins``)."""
         with self.connect() as db:
-            exclude = _when(
-                self.has_memory_source(db, notebook_id), _NOT_MEMORY_SOURCE
-            )
             return [r["id"] for r in db.execute(
-                "SELECT id FROM sources WHERE notebook_id=%s" + exclude,
+                "SELECT id FROM sources WHERE notebook_id=%s" + _NOT_MEMORY_SOURCE,
                 (notebook_id,)).fetchall()]
 
     def chunk_sources_for_ids(
@@ -662,10 +645,8 @@ class IndexProjectionStore:
         if sql is None:
             return frozenset()
         with self.connect() as db:
-            if not self.has_memory_source(db, notebook_id):
-                # One index probe instead of the id read: a notebook without
-                # Memory pays no statement it did not pay before the isolation.
-                return frozenset()
+            # One statement for every notebook, no probe before it (codex #824
+            # r6): a probe is outdated by a Memory confirmed right after it.
             return frozenset(
                 row["id"]
                 for row in db.execute(sql, (notebook_id, notebook_id)).fetchall()
@@ -676,10 +657,9 @@ class IndexProjectionStore:
         member -- the clusters a shared artifact must not fold anything into
         (the id is minted from a member's name, so folding a SHARED object into
         such a cluster would put the private name into the artifact's node id).
-        Empty, with one index probe, for a notebook without Memory."""
+        Driven by the notebook's Memory source ids (empty for a notebook
+        without Memory), with no probe before it (codex #824 r6)."""
         with self.connect() as db:
-            if not self.has_memory_source(db, notebook_id):
-                return frozenset()
             published = db.execute(
                 "SELECT cluster_generation FROM unified_kg_state "
                 "WHERE notebook_id=%s", (notebook_id,),
@@ -1074,7 +1054,7 @@ class IndexProjectionStore:
             # would still leave the private name in the persisted node ids.
             memory_canonicals = self._memory_canonicals_on(
                 db, notebook_id, published_generation
-            ) if self.has_memory_source(db, notebook_id) else frozenset()
+            )
             for page in _keyset_pages(
                 db, int(self.settings.graph_fetch_page_rows),
                 lambda cursor: (

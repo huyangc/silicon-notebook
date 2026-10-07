@@ -136,11 +136,18 @@ contributor constraints, not a second implementation history.
     same statements, with three differences: every object and relation read carries a
     per-statement Memory exclusion (a hashed `NOT IN` subquery; on PostgreSQL it measured the
     same as an unfiltered read, on SQLite a whole-table read costs 13–30 % more); there are
-    one-row Memory probes and Memory-source reads; and the viz derive reads a three-column
-    projection instead of whole rows. The version signal no longer probes for Memory. The ANN
-    feeds and the membership leg filter by Memory id sets read up front; the build keeps a
-    running union of the Memory rows it observes and retries, then discards, only when newly
-    appeared rows are held by the artifact.
+    Memory-source reads and Memory object / relation / cluster id reads driven by the (empty)
+    Memory source set; and the viz derive reads a three-column projection instead of whole
+    rows. No statement is chosen by an earlier Memory probe: under per-statement isolation a
+    first Memory committed between the two would outdate the probe, so the source list (the
+    watermark and the fold delta) excludes Memory in the statement for every notebook, and on a
+    notebook without Memory returns the unfiltered read's rows through the same plan nodes
+    (plan pins on both backends). The version signal does not probe for Memory. The ANN feeds
+    and the membership leg filter by Memory id sets read up front; the build keeps a running
+    union of the Memory rows it observes and retries, then discards, only when newly appeared
+    rows are held by the artifact. A fold observes Memory before and after its reads; if any
+    node, ANN label, relation label or delta source it would publish is Memory, it publishes
+    nothing, emits `scale_fold_refused` (`memory_reached_fold`) and runs the full build.
   - `backend/tests/test_memory_chunk_write_guard.py` scans `backend/app`, `scripts/` and
     `examples/` (and every `.sql` file there outside a `migrations` directory): every write of
     `chunks` must refuse a Memory source before the write or be listed with a checked reason,
