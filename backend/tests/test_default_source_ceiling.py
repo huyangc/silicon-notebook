@@ -1,9 +1,10 @@
 """The ONE default-ceiling constructor, ``ceilings_total`` and the Memory switch.
 
 Plan 2026-09-29 retrieval-permission remediation, task E1-1 (D1, D5, ledger
-E-1).  Nothing calls ``default_ceiling_context`` in production yet -- the entry
-points are switched over by E1-2/E1-3 -- so these tests pin the constructor's
-own contract:
+E-1).  Every Ask entry (``AskService._retrieval_ceiling``, E1-2), every MCP ask
+and every Deep Report phase (E1-3) install it; the entries are pinned end to
+end by ``test_default_ceiling_entrypoints.py``.  These tests pin the
+constructor's own contract:
 
 * no outer scope -> include ceiling = visible ∪ the asker's own hidden sources,
   plus a VISIBLE-only ceiling per mounted participant, while both persistable

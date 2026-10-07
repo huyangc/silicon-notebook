@@ -1807,13 +1807,16 @@ def run_search_once(
     * `retrieval_run(run_kind="ask_reasoning")` —— 请求级的查询向量 memo 与扇出
       预算,`kg_in_scope_for` 的 memo 也挂在它上面。**`event_log=None`**:那个
       事件汇是这条路上唯一会往库里写的旁路,主库只读,所以刻意不接;
-    * `source_scope_context(notebook, scope, None)` —— `scope_source_ids` 为空
-      时 `scope=None`,是个 no-op,与今天的 `AskService.ask` 同形(报告那半程
-      `_generate_report` 已与报告 worker 一样装默认天花板,不再是 no-op);非空时
+    * `default_ceiling_context(notebook, actor_id, runtime.ceiling_readers(),
+      local_scope=scope)` —— 与 `AskService._retrieval_ceiling` 同一个构造器、
+      同一份读取器(E1-2 起每个问答入口都装它,报告那半程 `_generate_report`
+      也一样)。`scope_source_ids` 为空时 `scope=None`:提问人的默认天花板
+      (本库可见来源 + 本人隐藏来源,挂载库只取可见来源),不算收窄;非空时
       装配成 `mode="include"` 的本地范围(与生产 `AskRequest.source_scope` /
       `SourceScope` 同一形状),调用方(`_search_loop`)已经用
       `resolve_scope_source_ids` 把题集声明的来源标题解析成这里的 id 列表
-      ——解析不到位的题从不会走到这里(codex #700 R3 P2)。
+      ——解析不到位的题从不会走到这里(codex #700 R3 P2)。所以 rig 的检索
+      墙钟含天花板的读取与漂移探针,与生产一致。
 
     注入面全部不接:`from_repository` 不传 `agent_profile` /
     `retrieval_experiences` / `identity_store`(见 `_construct_reasoning_retriever`
@@ -1825,7 +1828,7 @@ def run_search_once(
     from app.services.model_work import ModelPriority, model_work_scope
     from app.services.reasoning_retrieval import ReasoningRetriever
     from app.services.retrieval_run import retrieval_run
-    from app.services.source_scope import source_scope_context
+    from app.services.source_scope import default_ceiling_context
 
     retriever = ReasoningRetriever.from_repository(repo, settings, cancel_event)
     question = (prepared or {}).get("research_question") or item["question"]
@@ -1842,7 +1845,10 @@ def run_search_once(
             run_kind="ask_reasoning", event_log=None, actor_id=actor_id,
             cancel_event=cancel_event,
         ):
-            with source_scope_context(notebook, scope, None):
+            with default_ceiling_context(
+                notebook, actor_id, repo._runtime.ceiling_readers(),
+                local_scope=scope, cancel_event=cancel_event,
+            ):
                 return retriever.run(
                     notebook, question, "", on_step=on_step,
                     intent_queries=seeds or None,
