@@ -199,6 +199,8 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
     ("postgres/knowledge_store.py", "KnowledgeStore.drain_notebook_graph_rows_page"): tuple(
         s(ANY, BOUNDED, "ids of one drain page, _DELETE_OBJECT_BATCH_SIZE per statement")
         for _ in range(6)),
+    ("postgres/knowledge_store.py", "KnowledgeStore.object_owners"): (
+        s(JSONB, DRIVEN, "one public report's cited object ids, primary-key probes"),),
     ("postgres/knowledge_store.py", "KnowledgeStore.relink_relation_rows_for_objects"): (
         s(PG_EXP, BATCHED, "object ids, the caller batches with _in_relink_batches"),),
     ("postgres/knowledge_store.py", "KnowledgeStore.embedding_rows_for_objects"): (
@@ -528,6 +530,8 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(SQ_EXP, BATCHED, "ids of one drain page, one batch per statement"),
         s(SQ_EXP, BATCHED, "ids of one drain page, one batch per statement"),
     ),
+    ("sqlite/knowledge_store.py", "KnowledgeStore.object_owners"): (
+        s(JSON, DRIVEN, "one public report's cited object ids, primary-key probes"),),
     ("sqlite/knowledge_store.py", "KnowledgeStore.relink_relation_rows_for_objects"): (
         s(SQ_EXP, BATCHED, "object ids, the caller batches with _in_relink_batches"),),
     ("sqlite/knowledge_store.py", "KnowledgeStore.embedding_rows_for_objects"): (
