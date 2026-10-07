@@ -2918,17 +2918,23 @@ class CandidateRetrievalService(_RetrievalState):
         are verified on read and a row from outside the freeze flips the
         verdict and re-runs this call bound (``verify_unbound_read``).  The
         ceiling is taken BEFORE the read, so a concurrent flip between the read
-        and the check cannot wave an outsider through."""
+        and the check cannot wave an outsider through.  What is verified is the
+        RAW candidate pool every lane handed ``score_chunks``
+        (``observed_chunk_candidates``) plus the result, not only the scored
+        survivors: an outsider that took an ANN/FTS slot and was then scored
+        below the floor still crowded an in-ceiling candidate out."""
+        from app.services.retrieval import observed_chunk_candidates
         from app.services.source_scope import unbound_ceiling, verify_unbound_read
 
         unbound = None if allowed_source_ids is not None else unbound_ceiling(notebook_id)
-        result = self._retrieve_chunks_once(
-            notebook_id, query, recall, allowed_source_ids=allowed_source_ids,
-            producer_explicit=producer_explicit, drifted=drifted,
-        )
-        if not verify_unbound_read(
-            notebook_id, unbound, (chunk.source_id for chunk in result[0]),
-        ):
+        with observed_chunk_candidates() as candidate_sources:
+            result = self._retrieve_chunks_once(
+                notebook_id, query, recall, allowed_source_ids=allowed_source_ids,
+                producer_explicit=producer_explicit, drifted=drifted,
+            )
+        if not verify_unbound_read(notebook_id, unbound, itertools.chain(
+            candidate_sources, (chunk.source_id for chunk in result[0]),
+        )):
             result = self._retrieve_chunks_once(
                 notebook_id, query, recall,
                 producer_explicit=producer_explicit, drifted=drifted,
@@ -3688,10 +3694,14 @@ class CandidateRetrievalService(_RetrievalState):
             or len(source_counts) != len(source_names)
         )
         if allowed is not None and sidecar_missing:
-            if sql_unbound:
+            if sql_unbound and not is_report:
                 # Pushed down and no row→source sidecar to plan with: run the
                 # unscoped lane as is -- global ANN, exactly what a run
                 # without a scope does -- and let verify-on-read judge it.
+                # Not for a report: without a sidecar its index coverage
+                # cannot be confirmed, and a report's ANN-only lane would then
+                # miss a source the index does not hold yet; it takes the
+                # bounded fallback below, as a report with its list does.
                 allowed = None
             else:
                 # Older indexes have no row→source sidecar.  Do not run global
@@ -4384,13 +4394,17 @@ class CandidateRetrievalService(_RetrievalState):
             )
 
         # A pushed-down ceiling (no list) is verified on read against the
-        # ceiling taken before it; an outsider flips the run's verdict and
-        # this call re-runs bound.
+        # ceiling taken before it -- on the raw FTS candidates, not only the
+        # scored survivors (``observed_chunk_candidates``) -- and an outsider
+        # flips the run's verdict and this call re-runs bound.
+        from app.services.retrieval import observed_chunk_candidates
+
         unbound = unbound_ceiling(notebook_id)
-        hits = keyword_arm()
-        if not verify_unbound_read(
-            notebook_id, unbound, (getattr(hit, "source_id", "") for hit in hits),
-        ):
+        with observed_chunk_candidates() as candidate_sources:
+            hits = keyword_arm()
+        if not verify_unbound_read(notebook_id, unbound, itertools.chain(
+            candidate_sources, (getattr(hit, "source_id", "") for hit in hits),
+        )):
             hits = keyword_arm()
         return hits
 
