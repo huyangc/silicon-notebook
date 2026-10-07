@@ -58,7 +58,7 @@ from app.services.prompts import MEMORY_PREVIEW_SCHEMA_HINT, memory_preview_prom
 from app.services.knowledge_governance import PromotionTargetError
 from app.services.memory_service import NothingToExport
 from app.services.citation_markers import LOOSE_MARKER_RE
-from app.core.memory_inputs import MemoryInputError
+from app.core.memory_inputs import MemoryExportTooLarge, MemoryInputError
 from app.api.task_stream import task_stream_response
 from app.services.cancellation import AskCancelled
 from app.services.model_work import model_artifact_scope
@@ -309,7 +309,9 @@ def export_notebook_memories(
     starts (a purge running meanwhile can never cut the file short), then
     sent piece by piece. Read-gated: works only while the caller can read
     the notebook (404). No Memory of the caller here: 404
-    ``{"code": "nothing_to_export"}``, never an empty file."""
+    ``{"code": "nothing_to_export"}``, never an empty file. Content past
+    ``MEMORY_EXPORT_MAX_BYTES``: 413 ``{"code": "export_too_large",
+    "memory_count", "limit_bytes"}`` before anything is sent."""
     service = memory_membership_service()
     try:
         title = notebook_catalog_repository().get_notebook(notebook_id).name
@@ -319,6 +321,15 @@ def export_notebook_memories(
     except NothingToExport:
         raise HTTPException(
             status_code=404, detail={"code": "nothing_to_export", "memory_count": 0}
+        )
+    except MemoryExportTooLarge as exc:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "code": "export_too_large",
+                "memory_count": exc.memory_count,
+                "limit_bytes": exc.limit_bytes,
+            },
         )
     day = str(service.now())[:10].replace("-", "")
     filename = f"{safe_download_name(title, fallback='笔记本')}-记忆-{day}.md"

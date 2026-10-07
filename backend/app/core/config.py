@@ -498,6 +498,11 @@ class Settings(BaseSettings):
     # 大预算配置在排水中途 OperationalError: too many SQL variables。
     kg_graph_drain_page_rows: int = Field(
         2000, ge=50, le=20_000, validation_alias="KG_GRAPH_DRAIN_PAGE_ROWS")
+    # 成员导出自己在一本笔记本里的记忆:整份在一个快照里读进内存再发送(并发清除
+    # 截不短它),所以正文累计字节(UTF-8)有上限;超过就在发出第一个字节前以 413
+    # export_too_large 失败,读取也随即停止。默认 256 MB。
+    memory_export_max_bytes: int = Field(
+        256 * 1024 * 1024, ge=1, validation_alias="MEMORY_EXPORT_MAX_BYTES")
     # 代际重建在飞认领的崩溃兜底 TTL(小时级)。这不是正常释放通道——失败
     # 路径由 finally CAS 即时释放,TTL 只救「进程连 finally 都没跑到」的
     # 崩溃。下限护栏:必须显著大于大库一轮重聚簇的最坏墙钟(生产 484GB 库

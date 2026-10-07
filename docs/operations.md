@@ -198,6 +198,16 @@ the removal also drops the `kg_objects_fts` rows of the deleted objects (the Mem
 ordinary source deletion); `chunks_fts` keeps its rows for deleted chunks, exactly as after any other
 source deletion (a Memory source normally has no chunks).
 
+## Memory export size limit
+
+`MEMORY_EXPORT_MAX_BYTES` (default `268435456`, 256 MB; minimum 1) caps the content a member's
+Memory export (`GET /notebooks/{id}/memories/export`) holds in memory. The export reads all of
+the member's Memory in that notebook in one snapshot before sending, so the server keeps it
+in memory for the duration of the download; past the limit the read stops and the request
+answers 413 `export_too_large` with the item count and the limit, before anything is sent.
+Size it to the worker's memory: one export holds at most this much content (plus per-item
+metadata), and concurrent exports add up. Each item's content is at most 40,000 characters.
+
 ## Observability
 
 The backend emits structured logs through a single `EventLogger` (`app/core/event_logging.py`): one JSONL line per event under `.local/logs/` plus a brief console line. Logging is best-effort — it never breaks the request or pipeline it observes — and is a no-op for the LLM channel when no model is configured.

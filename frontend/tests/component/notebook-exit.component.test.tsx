@@ -1462,6 +1462,41 @@ test("导出进行中:确认退出与转移都不可用、旁边说明原因,取
   expect(deletes(calls)).toHaveLength(0);
 });
 
+test("导出超过上限(413 export_too_large):按钮显示「导出失败」,旁边留下原因;再导出时原因先清掉", async () => {
+  const user = userEvent.setup();
+  let status = 413;
+  installServer([
+    disclosure(2),
+    (call) => {
+      if (call.path !== "/api/notebooks/nb1/memories/export") return undefined;
+      return status === 413
+        ? json({ detail: { code: "export_too_large", memory_count: 2, limit_bytes: 10 } }, 413)
+        : new Response("# 记忆", { status: 200, headers: { "Content-Disposition": "attachment; filename=\"m.md\"" } });
+    },
+  ]);
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+  mount("bar");
+
+  await pressLeave(user);
+  const dialog = await panel();
+  await user.click(within(dialog).getByRole("button", { name: "导出为文件" }));
+  await within(dialog).findByRole("button", { name: "导出失败" });
+  expect(within(dialog).getByRole("alert")).toHaveTextContent(
+    "你在这个笔记本里的记忆内容太多，超过了一次导出的上限，没能导出。可以先把一部分转移到你的其他笔记本。",
+  );
+  // 「导出失败」到点还原,原因仍在按钮旁
+  await waitFor(
+    () => expect(within(dialog).getByRole("button", { name: "导出为文件" })).toBeInTheDocument(),
+    { timeout: 4000 },
+  );
+  expect(within(dialog).getByText(/超过了一次导出的上限/)).toBeInTheDocument();
+
+  status = 200;
+  await user.click(within(dialog).getByRole("button", { name: "导出为文件" }));
+  await within(dialog).findByRole("button", { name: "已导出" });
+  expect(within(dialog).queryByText(/超过了一次导出的上限/)).not.toBeInTheDocument();
+});
+
 test("导出进行中,绕过界面直接调用 confirm / openTransfer / submitTransfer 也都被拒绝", async () => {
   vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
   const gate = deferred<Response>();

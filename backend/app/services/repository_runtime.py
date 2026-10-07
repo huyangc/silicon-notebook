@@ -1441,6 +1441,7 @@ class RepositoryRuntime:
             # The self-exit ends memberships after purging Memory; it is a
             # constructor requirement, so it cannot be composed without it.
             membership=self.sharing,
+            export_max_bytes=self.settings.memory_export_max_bytes,
         )
         self.memory_retriever = MemoryRetriever(self.memory_store, query_embedder)
         self.catalog.memory_retriever = self.memory_retriever

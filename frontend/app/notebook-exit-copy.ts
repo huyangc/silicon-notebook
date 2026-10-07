@@ -11,6 +11,9 @@ export const EXIT_CHANGED_TEXT = "记忆数量有变化，请重新确认。";
 export const EXIT_CHANGED_TO_EMPTY_TEXT = "现在没有需要删除的记忆了，可以直接退出。";
 /** 导出还没完成时,退出和转移都要等:先删或先移走会让下载的文件缺掉后面的记忆。 */
 export const EXIT_WAIT_FOR_EXPORT_TEXT = "正在导出，导出完成后才能退出或转移，以免文件缺少内容。";
+/** 服务端 413 export_too_large:这本笔记本里你的记忆内容超过了一次导出能装下的量。 */
+export const EXPORT_TOO_LARGE_TEXT =
+  "你在这个笔记本里的记忆内容太多，超过了一次导出的上限，没能导出。可以先把一部分转移到你的其他笔记本。";
 
 /** 成功之后的提示:200 带服务端数到的条数,204(没有删)只说退出了。 */
 export const leftText = (deleted: number): string =>

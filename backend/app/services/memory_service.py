@@ -327,8 +327,11 @@ class MemoryService:
         owner_eligible: Callable[[str], bool] | None = None,
         *,
         membership: MembershipExitPort,
+        export_max_bytes: int = 256 * 1024 * 1024,
     ) -> None:
         self.store = store
+        # Content cap of one export's in-memory snapshot (``MEMORY_EXPORT_MAX_BYTES``).
+        self.export_max_bytes = int(export_max_bytes)
         self.ask_state = ask_state
         self.notebooks = notebooks
         self.embedder = embedder
@@ -1247,11 +1250,13 @@ class MemoryService:
         (the file still has them all): the download can never silently stop
         part-way. Nothing to export raises ``NothingToExport`` (HTTP 404)
         instead of handing out an empty file. Memory use: the items are held
-        while the file is sent (at most ``MEMORY_CONTENT_MAX_CHARS`` of
-        content each)."""
+        while the file is sent; their content is capped at
+        ``export_max_bytes`` (``MEMORY_EXPORT_MAX_BYTES``) — past it the read
+        stops with ``MemoryExportTooLarge`` (HTTP 413)."""
         self._require_notebook(notebook_id, user_id)
         items = self.store.memory_export_snapshot(
-            notebook_id, user_id, page_size=_EXPORT_PAGE
+            notebook_id, user_id, page_size=_EXPORT_PAGE,
+            max_bytes=self.export_max_bytes,
         )
         if not items:
             raise NothingToExport()

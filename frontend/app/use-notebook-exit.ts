@@ -22,12 +22,13 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
 import { useCopyResult, type CopyResult } from "./copy-result.ts";
 import { saveBlobAsFile } from "./download-file.ts";
-import { humanizedError, toUserMessage } from "./errors.ts";
+import { httpErrorStatus, humanizedError, toUserMessage } from "./errors.ts";
 import { transferMemoriesInBatches } from "./memory-transfer.ts";
 import {
   EXIT_FAILED_TEXT,
   EXIT_UNVERIFIED_TEXT,
   EXIT_WAIT_FOR_EXPORT_TEXT,
+  EXPORT_TOO_LARGE_TEXT,
   incompleteConfirmText,
   incompleteFailedText,
   incompleteLateText,
@@ -115,6 +116,8 @@ export function useNotebookExit(handlers: {
   // 正在导出的笔记本(按笔记本记,和导出结果 `export:<id>` 同一口径):另一本笔记本的退出
   // 面板不会因为这本的下载还没完而显示「正在导出…」、按钮被禁用。
   const exportingRef = useRef<Set<string>>(new Set());
+  // 导出失败且有可以说给用户听的原因(目前是「超过单次导出上限」),按笔记本记。
+  const exportReasonRef = useRef<Map<string, string>>(new Map());
   // 在途转移所属流程的 epoch(没有则为 null)。按流程认领:取消后重开的新流程(epoch 已变)
   // 不会被旧流程的转移置成「正在转移…」,旧转移落定也不会清掉新流程自己的在途标记。
   const transferEpochRef = useRef<number | null>(null);
@@ -351,12 +354,15 @@ export function useNotebookExit(handlers: {
     const id = current.notebookId;
     const key = `export:${id}`;
     exportingRef.current.add(id);
+    exportReasonRef.current.delete(id);
     bump();
     try {
       const { blob, filename } = await exportOwnMemories(id);
       saveBlobAsFile(blob, filename);
       exportResult.report(key, true);
-    } catch {
+    } catch (error) {
+      // 413 export_too_large:按钮上「导出失败」一闪而过,原因留在按钮旁直到下次导出。
+      if (httpErrorStatus(error) === 413) exportReasonRef.current.set(id, EXPORT_TOO_LARGE_TEXT);
       exportResult.report(key, false);
     } finally {
       exportingRef.current.delete(id);
@@ -457,6 +463,8 @@ export function useNotebookExit(handlers: {
     /** 在途请求已经拖过了 REVEAL_AFTER_MS:此时才把面板露出来。 */
     slow,
     exporting: flow !== null && exportingRef.current.has(flow.notebookId),
+    /** 上一次导出失败的原因(空串 = 没有可说明的原因),显示在导出键旁。 */
+    exportFailureReason: (flow ? exportReasonRef.current.get(flow.notebookId) : undefined) ?? "",
     exportResult: (flow ? exportResult.resultFor(`export:${flow.notebookId}`) : "idle") as CopyResult,
     transferExtractKg,
     setTransferExtractKg,

@@ -17,6 +17,7 @@ from app.models.memory import (
     PaginatedMemories,
 )
 from app.core.json_safety import strict_json_dumps
+from app.core.memory_inputs import MemoryExportTooLarge
 from app.repositories.identity_errors import (
     AgentTokenAccessConflictError,
     AgentTokenInactiveError,
@@ -1974,7 +1975,7 @@ class MemoryStore:
         return 0
 
     def memory_export_snapshot(
-        self, notebook_id: str, user_id: str, *, page_size: int
+        self, notebook_id: str, user_id: str, *, page_size: int, max_bytes: int
     ) -> list[MemoryRecord]:
         """This user's own Memory in one notebook, every status, oldest first
         (``created_at``, then id), read in ONE read-only REPEATABLE READ
@@ -1986,10 +1987,11 @@ class MemoryStore:
 
         Read-gated like every Memory read, owner-scoped like every Memory row.
         Statements stay bounded by ``page_size`` rows; the list holds every
-        item (at most ``MEMORY_CONTENT_MAX_CHARS`` of content each). Raises
-        ``RuntimeError`` when the pages disagree with the snapshot's count
-        (they cannot, inside one snapshot; the check refuses to hand out a
-        file that silently lacks items)."""
+        item; once their content passes ``max_bytes`` (UTF-8) the read stops
+        and ``MemoryExportTooLarge`` is raised. Raises ``RuntimeError`` when
+        the pages disagree with the snapshot's count (they cannot, inside one
+        snapshot; the check refuses to hand out a file that silently lacks
+        items)."""
         page = max(1, min(int(page_size), 500))
         with self.database.connect() as db:
             db.read_only = True
@@ -1999,10 +2001,16 @@ class MemoryStore:
                 f"SELECT count(*) AS n FROM memory_items m WHERE {where}", params
             ).fetchone()["n"])
             items: list[MemoryRecord] = []
+            size = 0
             after: tuple[Any, str] | None = None
             while True:
                 rows, after = self._export_page_on(db, notebook_id, user_id, after, page)
-                items.extend(self._record(row) for row in rows)
+                for row in rows:
+                    record = self._record(row)
+                    size += len(record.content_md.encode("utf-8"))
+                    if size > max_bytes:
+                        raise MemoryExportTooLarge(total, max_bytes)
+                    items.append(record)
                 if after is None:
                     break
         if len(items) != total:
