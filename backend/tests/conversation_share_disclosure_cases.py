@@ -262,6 +262,37 @@ def case_new_count_is_relative_to_the_published_watermark(world: World) -> None:
     advanced = publish(world, world.alice, cid, second, acknowledged=3)
     assert advanced.status_code == 200 and advanced.json()["shared_through_id"] == second
     assert disclose(world, world.alice, cid, second).json() == counts(3, 0)
+    # A boundary before the published watermark: the read refuses as the share does.
+    for attempt in (disclose(world, world.alice, cid, first),
+                    publish(world, world.alice, cid, first, acknowledged=2)):
+        assert attempt.status_code == 409 and attempt.json() == {"detail": STALE}
+
+
+def case_share_is_pinned_to_the_counted_boundary(world: World) -> None:
+    """An answer finishing between the count and the write is never published
+    uncounted: the share is pinned to the boundary the count was taken over,
+    also for a request without a boundary (an old client)."""
+    import app.api.ask_routes as routes
+
+    make_memory(world, world.alice, "a2")
+    cid, (first,) = seed_conversation(world, world.alice, [
+        answer([source_anchor(world.doc_source, "k1")]),
+    ])
+    counted = routes.require_conversation_acknowledged
+    late: list[str] = []
+
+    def answer_lands_after_the_count(disclosure, acknowledged):
+        counted(disclosure, acknowledged)
+        late.append(add_answer(
+            world, cid, answer(citations=[memory_citation(world, "a2")]), 20))
+
+    world.monkeypatch.setattr(
+        routes, "require_conversation_acknowledged", answer_lands_after_the_count)
+    published = publish(world, world.alice, cid, body=None)
+    assert published.status_code == 200, published.text
+    assert late and published.json()["shared_through_id"] == first
+    page = public_page(world, published.json()["share_token"]).json()
+    assert len(page["turns"]) == 1 and "is_memory" not in json.dumps(page)
 
 
 def case_disclosure_writes_nothing(world: World) -> None:
@@ -426,6 +457,61 @@ def global_case_new_count_is_relative_to_the_watermark(world: World) -> None:
     store = world.repo._runtime.global_ask_store
     assert store.conversation_share_state(cid, world.alice.id)["shared_through_id"] == first
     assert global_publish(world, world.alice, cid, second, 3).status_code == 200
+    # A boundary before the published watermark: the read refuses as the share does.
+    for attempt in (global_disclose(world, world.alice, cid, first),
+                    global_publish(world, world.alice, cid, first, 2)):
+        assert attempt.status_code == 409 and attempt.json() == {"detail": STALE}
+
+
+def global_case_share_is_pinned_to_the_counted_boundary(world: World) -> None:
+    import app.services.global_ask as service
+
+    make_memory(world, world.alice, "a2")
+    cid, (first,) = seed_global(world, world.alice, [
+        answer([source_anchor(world.doc_source, "k1", notebook_id=world.notebook)]),
+    ])
+    counted = service.require_conversation_acknowledged
+    store = world.repo._runtime.global_ask_store
+    late: list[str] = []
+
+    def job_finishes_after_the_count(disclosure, acknowledged):
+        counted(disclosure, acknowledged)
+        late.append(insert_job(
+            store, cid, world.alice.id, f"{cid}-late", "2026-01-01T00:00:20",
+            payload=_job(cid, f"{cid}-late",
+                         answer(citations=[memory_citation(world, "a2")]),
+                         [world.notebook]),
+        ))
+
+    world.monkeypatch.setattr(
+        service, "require_conversation_acknowledged", job_finishes_after_the_count)
+    published = global_publish(world, world.alice, cid)
+    assert published.status_code == 200, published.text
+    assert late and published.json()["shared_through_id"] == first
+    page = public_page(world, published.json()["share_token"]).json()
+    assert len(page["turns"]) == 1 and "is_memory" not in json.dumps(page)
+
+
+def global_case_an_unopenable_link_is_refused_before_asking(world: World) -> None:
+    """The authority sweep runs before the acknowledgement rule, and on the
+    disclosure read too: a library the round searched is lost, so the link
+    could not be opened -- 404, not a request to confirm Memory."""
+    make_memory(world, world.alice, "a1")
+    searched = world.client.post(
+        "/api/notebooks", json={"name": "被检索库"}, headers=world.owner.headers
+    ).json()["id"]
+    world.repo.add_member(searched, world.alice.id)
+    cid, (first,) = seed_global(world, world.alice, [
+        answer(citations=[memory_citation(world, "a1")]),
+    ], resolved=[world.notebook, searched])
+    assert global_disclose(world, world.alice, cid, first).json() == counts(1, 1)
+    world.repo.remove_member(searched, world.alice.id)
+    lost = {"detail": "部分笔记本已无法访问，请重新选择范围。"}
+    for attempt in (global_disclose(world, world.alice, cid, first),
+                    global_publish(world, world.alice, cid, first)):
+        assert attempt.status_code == 404 and attempt.json() == lost
+    store = world.repo._runtime.global_ask_store
+    assert store.conversation_share_state(cid, world.alice.id)["share_token"] == ""
 
 
 def global_case_disclosure_is_owner_only_and_reads_only(world: World) -> None:
