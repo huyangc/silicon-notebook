@@ -742,28 +742,44 @@ def test_an_unbinding_verdict_keeps_the_historical_call_when_nothing_is_outside(
 
 def test_an_unbinding_verdict_is_verified_on_read_and_rerun_bound():
     """判词为假之后库变了(冻结后新增的来源命中):校验读发现界外来源 → 记漂移、
-    按天花板重跑一次;界外那一节既不返回也不再被整节取回。"""
-    from app.services.source_scope import current_source_scope
+    按天花板重跑一次;界外那一节既不返回也不再被整节取回。
+
+    断言只看可观察行为(质量评审 P3-6),不读 scope 的私有 memo:判词替身走公开的
+    ``source_scope.ceiling_binds``(两个探针都答「无可排除」),所以漂移被记下之后,
+    同一 run 里的下一次精确查找一开始就带清单,``ceiling_binds`` 也答 True。"""
+    from app.services.source_scope import ceiling_binds, current_source_scope
+
+    def _run_verdict(notebook_id):
+        return ceiling_binds(
+            current_source_scope(), notebook_id,
+            drifted=lambda: False, foreign_hidden=lambda: False,
+        )
 
     probe = ExactProbe(
         ("nb-a",),
         sections={"nb-a": [("New > set_db", ["n1", "n2"], "src-new"),
                            ("Cmds > set_db", ["a1"], None)]},
     )
-    _with_verdict(probe, binds=False)
+    probe._retrieval = SimpleNamespace(_ceiling_binds=_run_verdict)
     frozen = SourceScope(mode="include", source_ids=["src-nb-a"], narrowed=False)
 
     with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with source_scope_context("nb-a", frozen):
+            assert _run_verdict("nb-a") is False
             merged = probe._exact_lookup_chunks("nb-a", _QUERY)
-            drift_recorded = current_source_scope()._ceiling_binds_memo.get("nb-a")
+            first_run = [allowed for _nid, _term, allowed in probe.ceilings]
+            probe.ceilings.clear()
+            again = probe._exact_lookup_chunks("nb-a", _QUERY)
+            binds_after = _run_verdict("nb-a")
 
-    assert _ids(merged) == [("", "a1")]
+    assert _ids(merged) == [("", "a1")] == _ids(again)
     # 两个名称各探一次:先是历史调用,再是按天花板的重跑。
+    assert first_run == [None, None, ("src-nb-a",), ("src-nb-a",)]
+    # 之后的查找直接带清单,不再先发一次不带清单的探针。
     assert [allowed for _nid, _term, allowed in probe.ceilings] == [
-        None, None, ("src-nb-a",), ("src-nb-a",),
+        ("src-nb-a",), ("src-nb-a",),
     ]
-    assert drift_recorded is True
+    assert binds_after is True
 
 
 def test_single_notebook_failure_keeps_its_historical_handling():

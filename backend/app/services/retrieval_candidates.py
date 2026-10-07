@@ -1389,6 +1389,12 @@ class CandidateRetrievalService(_RetrievalState):
         after (re)ingest. `table`/`id_col` are internal constants (not user input)."""
         from app.services.vector_index import build_matrix
 
+        if table == "relation_embeddings":
+            # The shared (Memory-free) half of the split relation entry; see
+            # ``_relation_matrices``.  Same key and version as before, so the
+            # cold-matrix guard's ``_vector_matrix_warm`` peek is unchanged.
+            shared_ids, shared_mat = self._relation_matrices(db, notebook_id)[:2]
+            return shared_ids, shared_mat
         version = self._vector_matrix_version(db, notebook_id, table)
         # 键↔loader 同源:截断维取 version 元组里那份(而非各自再读 settings),
         # 缓存键声称的空间与实际加载的空间 by construction 一致(T3/R4)。
@@ -1396,19 +1402,76 @@ class CandidateRetrievalService(_RetrievalState):
 
         def _load():
             rows = self.embeddings.vector_rows(db, notebook_id, table, id_col)
-            if table == "relation_embeddings":
-                # The per-notebook relation matrix is shared by every asker, so
-                # it holds only relations no Memory source derives (audit C-5);
-                # ``_memory_relation_matrix`` scores the Memory ones each
-                # caller's ceiling admits, live.  A notebook without Memory
-                # excludes nothing: the matrix it loaded before, unchanged.
-                excluded = self._memory_relation_ids(db, notebook_id)
-                if excluded:
-                    rows = [r for r in rows if r["vid"] not in excluded]
             return build_matrix(((r["vid"], r["vector"]) for r in rows),
                                 runtime_dim=runtime_dim)
 
         return self._vector_cache.get(f"{notebook_id}:matrix:{table}", version, _load)
+
+    def _relation_matrices(self, db: object, notebook_id: str) -> tuple:
+        """The notebook's relation vectors as ONE cached entry, split by D4.
+
+        ``(shared_ids, shared_mat, shared_pos, memory_ids, memory_mat,
+        memory_pos, memory_sources, memory_source_index)``, under the same key
+        and version (``_vector_matrix_version``) the whole matrix always had:
+
+        * the shared half holds the relations no Memory source derives -- what
+          every asker may score (audit C-5);
+        * the Memory half holds every Memory-derived relation with its source
+          (``memory_sources[memory_source_index[row]]``), so a request masks it
+          by ``source_allowed`` before scoring (``_relation_top_k``) and no
+          Memory row ever enters another member's results -- the chunk
+          brute-force path's cache-then-mask pattern.  Nothing is read per
+          request and the shared matrix is never copied (quality review P2-2:
+          the per-request read plus ``np.vstack`` cost 28 ms at 100 and 187 ms
+          at 1000 Memory sources);
+        * ``*_pos`` are each row's position in the whole-notebook read, so a
+          merge can order ties exactly as one whole matrix did (spec review P2).
+
+        A notebook without Memory has an empty Memory half and a shared half
+        equal to the whole matrix, row for row.  Building it costs, once per
+        version, one Memory-source read plus one ``relation_delta_rows`` read
+        per Memory source (the relation -> source map; the store returns no
+        source column).
+        """
+        import numpy as np
+
+        from app.services.vector_index import build_matrix
+
+        version = self._vector_matrix_version(db, notebook_id, "relation_embeddings")
+        runtime_dim = version[-1]
+
+        def _load():
+            rows = list(self.embeddings.vector_rows(
+                db, notebook_id, "relation_embeddings", "relation_id"))
+            position: Dict[Any, int] = {}
+            for index, row in enumerate(rows):
+                position.setdefault(row["vid"], index)
+            source_of = self._memory_relation_sources(db, notebook_id)
+            shared_ids, shared_mat = build_matrix(
+                ((r["vid"], r["vector"]) for r in rows
+                 if str(r["vid"]) not in source_of),
+                runtime_dim=runtime_dim,
+            )
+            memory_ids, memory_mat = build_matrix(
+                ((r["vid"], r["vector"]) for r in rows
+                 if str(r["vid"]) in source_of),
+                runtime_dim=runtime_dim,
+            )
+            memory_sources = tuple(sorted({
+                source_of[str(vid)] for vid in memory_ids}))
+            slot = {source: index for index, source in enumerate(memory_sources)}
+            return (
+                shared_ids, shared_mat,
+                np.asarray([position[vid] for vid in shared_ids], dtype=np.int64),
+                memory_ids, memory_mat,
+                np.asarray([position[vid] for vid in memory_ids], dtype=np.int64),
+                memory_sources,
+                np.asarray([slot[source_of[str(vid)]] for vid in memory_ids],
+                           dtype=np.intp),
+            )
+
+        return self._vector_cache.get(
+            f"{notebook_id}:matrix:relation_embeddings", version, _load)
     def _memory_source_ids(self, db: object, notebook_id: str) -> list:
         """The notebook's Memory source ids (``SourceStore.memory_source_ids``:
         one narrow indexed read, bounded by its Memory count).  Production
@@ -1424,75 +1487,98 @@ class CandidateRetrievalService(_RetrievalState):
             if value
         ]
 
-    def _memory_relation_ids(self, db: object, notebook_id: str) -> frozenset:
-        """Ids of the relations a Memory source derives (D4: the relation's own
-        ``source_id`` is a Memory source), any member's.  One Memory-source
-        read; a notebook without Memory stops there.  Otherwise one
-        ``relation_delta_rows`` read per ``_in_batches`` window of Memory
-        source ids -- bounded by the notebook's Memory graph, never by its
-        whole relation table."""
-        memory = self._memory_source_ids(db, notebook_id)
-        if not memory:
-            return frozenset()
-        ids: set = set()
-        for batch in self._in_batches(memory):
-            ids.update(
-                str(row["vid"])
-                for row in self.embeddings.relation_delta_rows(db, notebook_id, batch)
-            )
-        return frozenset(ids)
+    def _memory_relation_sources(self, db: object, notebook_id: str) -> Dict[str, str]:
+        """``{relation id: Memory source id}`` for every relation a Memory
+        source derives (D4: the relation's own ``source_id``), any member's.
+        One Memory-source read; a notebook without Memory stops there.
+        Otherwise one ``relation_delta_rows`` read per Memory source -- bounded
+        by the notebook's Memory graph, and paid only when
+        ``_relation_matrices`` rebuilds for a new version."""
+        mapping: Dict[str, str] = {}
+        for source_id in self._memory_source_ids(db, notebook_id):
+            for row in self.embeddings.relation_delta_rows(
+                db, notebook_id, [source_id],
+            ):
+                mapping[str(row["vid"])] = source_id
+        return mapping
 
-    def _memory_relation_matrix(self, db: object, notebook_id: str):
-        """``(ids, matrix)`` of the Memory-derived relations THIS run may read,
-        scored live next to the shared relation matrix (which never holds them,
-        see ``_vector_matrix``).
+    def _relation_top_k(self, db: object, notebook_id: str, query_vector, k: int):
+        """``(readable ids in whole-matrix order, top-k (id, sim) pairs)`` over
+        the relations THIS run may read.
 
-        "May read" is ``source_allowed(notebook_id, memory source)``: with no
-        scope every Memory relation, which keeps the unscoped union exactly
-        the relation set it always scored; under a ceiling only the asker's own
-        Memory the freeze admitted (another member's Memory is in no ceiling,
-        a withheld one in neither half of it).  ``([], None)`` when there is
-        nothing to add -- in particular for every notebook without Memory,
-        after one Memory-source read.
+        Readable = the shared half plus the Memory rows whose source
+        ``source_allowed`` admits: with no scope every Memory relation (the
+        set an unscoped run always scored), under a ceiling only the asker's
+        own Memory the freeze admitted.  The mask is applied to the Memory
+        half's similarity vector before any selection, so a masked row can
+        neither take a seat nor shift one; neither cached matrix is copied.
+
+        A notebook without Memory is scored exactly as before
+        (``top_k_sims`` over the one shared matrix).  Otherwise both halves
+        are scored and merged by (similarity desc, whole-matrix position), so
+        a run that reads every row ranks ties the way one whole matrix ordered
+        its rows (spec review P2).
         """
-        from app.services.source_scope import source_allowed
-        from app.services.vector_index import build_matrix, resolve_runtime_dim
-
-        memory = [
-            value for value in self._memory_source_ids(db, notebook_id)
-            if source_allowed(notebook_id, value)
-        ]
-        if not memory:
-            return [], None
-        rows: list = []
-        for batch in self._in_batches(memory):
-            rows.extend(self.embeddings.relation_delta_rows(db, notebook_id, batch))
-        if not rows:
-            return [], None
-        return build_matrix(
-            ((row["vid"], row["vector"]) for row in rows),
-            runtime_dim=resolve_runtime_dim(self.settings),
-        )
-
-    def _relation_scoring_matrix(self, db: object, notebook_id: str):
-        """The shared (Memory-free) relation matrix plus this run's readable
-        Memory relations, as one ``(ids, matrix)`` for ``top_k_sims``.  A fresh
-        array when anything is appended -- the cached matrix is never written.
-        Identical to the cached matrix (same objects) when nothing is."""
         import numpy as np
 
-        ids, mat = self._vector_matrix(
-            db, notebook_id, "relation_embeddings", "relation_id")
-        own_ids, own_mat = self._memory_relation_matrix(db, notebook_id)
-        if not own_ids:
-            return ids, mat
-        if not ids:
-            return own_ids, own_mat
-        if mat.shape[1] != own_mat.shape[1]:
-            # A dimension mismatch cannot be scored against one query vector;
-            # keep the shared matrix alone rather than fail the channel.
-            return ids, mat
-        return [*ids, *own_ids], np.vstack((mat, own_mat))
+        from app.services.source_scope import source_allowed
+        from app.services.vector_index import top_k_sims
+
+        if not self._memory_source_ids(db, notebook_id):
+            # No Memory source: the shared half IS the whole matrix (and a
+            # double that stubs ``_vector_matrix`` keeps working).
+            shared_ids, shared_mat = self._vector_matrix(
+                db, notebook_id, "relation_embeddings", "relation_id")
+            pairs = (
+                top_k_sims(query_vector, shared_ids, shared_mat, k)
+                if query_vector else []
+            )
+            return list(shared_ids), pairs
+        (shared_ids, shared_mat, shared_pos, memory_ids, memory_mat,
+         memory_pos, memory_sources, memory_slot) = self._relation_matrices(
+            db, notebook_id)
+        if not memory_ids:
+            pairs = (
+                top_k_sims(query_vector, shared_ids, shared_mat, k)
+                if query_vector else []
+            )
+            return list(shared_ids), pairs
+        admitted = np.fromiter(
+            (source_allowed(notebook_id, source) for source in memory_sources),
+            dtype=bool, count=len(memory_sources),
+        )
+        keep = np.nonzero(admitted[memory_slot])[0]
+        ids = [*shared_ids, *(memory_ids[int(row)] for row in keep)]
+        positions = np.concatenate((shared_pos, memory_pos[keep]))
+        order = np.argsort(positions, kind="stable")
+        readable = [ids[int(index)] for index in order]
+        if not query_vector or not ids or k <= 0:
+            return readable, []
+        q = np.asarray(query_vector, dtype=np.float32)
+        norm = float(np.linalg.norm(q))
+        if q.ndim != 1:
+            return readable, []
+        if norm == 0:
+            return readable, [(rid, 0.0) for rid in readable[:k]]
+        q = q / norm
+        parts = []
+        if shared_ids and shared_mat.size and shared_mat.shape[1] == q.shape[0]:
+            parts.append(shared_mat @ q)
+        elif shared_ids:
+            return readable, []
+        if len(keep) and memory_mat.size and memory_mat.shape[1] == q.shape[0]:
+            parts.append((memory_mat @ q)[keep])
+        elif len(keep):
+            return readable, []
+        sims = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
+        kk = min(k, len(sims))
+        if kk < len(sims):
+            threshold = np.partition(-sims, kk - 1)[kk - 1]
+            candidates = np.nonzero(-sims <= threshold)[0]
+        else:
+            candidates = np.arange(len(sims))
+        ranked = candidates[np.lexsort((positions[candidates], -sims[candidates]))]
+        return readable, [(ids[int(i)], float(sims[int(i)])) for i in ranked[:kk]]
 
     @staticmethod
     def _mask_vector_matrix(ids: List[str], mat, keep_ids):
@@ -1585,7 +1671,18 @@ class CandidateRetrievalService(_RetrievalState):
 
         ver = self.knowledge.object_version_row(db, notebook_id)
         version = ("kwtok", ver["c"], ver["ts"])
-        return self._vector_cache.get(f"{notebook_id}:kwtok", version, _build_shared)
+        cached = self._vector_cache.get(f"{notebook_id}:kwtok", version, _build_shared)
+        # An object THIS call saw with fewer evidence items than were read had
+        # some trimmed by the ceiling: its cached tokens would rank it by
+        # quotes this asker may not see, so it is tokenised live instead
+        # (quality review P3-11).  Untrimmed objects use the cache as before.
+        trimmed = {
+            obj["id"] for obj in objects
+            if len(obj.get("evidence", [])) != len(read.get(obj["id"], []))
+        }
+        if not trimmed:
+            return cached
+        return {oid: tokens for oid, tokens in cached.items() if oid not in trimmed}
     def _relations_with_names(self, db: object, notebook_id: str,
                               relation_ids: Optional[List[str]] = None) -> List[dict]:
         """关系 + 两端实体名 + evidence,预构建 keyword/embed 文本。JOIN 丢弃悬空边
@@ -1883,7 +1980,6 @@ class CandidateRetrievalService(_RetrievalState):
         触达本守卫;守卫保留为「未建索引的大库」的最后兜底,把 ask 路径钳制
         在 O(bounded)。已暖(_vector_cache 命中)或小库:字节不变,走原路径。"""
         from app.services.retrieval import score_relations
-        from app.services.vector_index import top_k_sims
 
         def live_relations(rows: List[dict]) -> List[dict]:
             return [row for row in rows if row["review_status"] != "rejected"]
@@ -1953,7 +2049,8 @@ class CandidateRetrievalService(_RetrievalState):
                 )
                 return []
             query_vector = self._embed_query(query)
-            rel_ids, rel_mat = self._relation_scoring_matrix(db, notebook_id)
+            rel_ids, top_pairs = self._relation_top_k(
+                db, notebook_id, query_vector, self.settings.relation_recall)
             if not rel_ids:
                 # 无向量覆盖(未配 embedder/未回填)→ 界定不了候选,回退全量。
                 relations = live_relations(
@@ -1961,8 +2058,6 @@ class CandidateRetrievalService(_RetrievalState):
                 )
                 relation_sims = None
             else:
-                top_pairs = top_k_sims(query_vector, rel_ids, rel_mat,
-                                       self.settings.relation_recall) if query_vector else []
                 if top_pairs:
                     top_ids = [rid for rid, _ in top_pairs]
                     relation_sims = dict(top_pairs)   # only K entries, not N
@@ -4888,8 +4983,10 @@ class CandidateRetrievalService(_RetrievalState):
         which are not visible sources, so intersecting with the live visible
         list would drop Knowhow sections from the lookup -- narrower than any
         run gets today.  The peer leg (``_peer_exact_leg``) keeps
-        ``(nb, visible)``: a peer's per-notebook ceiling is its visible list.  The legacy local ``exclude`` shape materialises no list; it
-        is expressed over the live visible universe instead (a direct service
+        ``(nb, visible)``: a peer's per-notebook ceiling is its visible list.
+
+        The legacy local ``exclude`` shape materialises no list; it is
+        expressed over the live visible universe instead (a direct service
         caller's shape -- production freezes every local scope to ``include``).
         """
         from app.services.source_scope import scoped_allowed_source_ids
@@ -5251,13 +5348,24 @@ class CandidateRetrievalService(_RetrievalState):
         constructed without that port (test doubles) gets the conservative
         historical answer: every existing ceiling binds
         (``source_ceiling_exists``).
+
+        A probe failure (a pool timeout reading the visible universe, say)
+        answers "binds" instead of failing the caller: the overlay and exact
+        lookup then take their bound paths, which are correct whatever the
+        verdict, and a whole mix ask no longer fails on a probe (quality
+        review P3-7).  Cancellation is never swallowed.
         """
         verdict = getattr(getattr(self, "_retrieval", None), "_ceiling_binds", None)
         if not callable(verdict):
             from app.services.source_scope import source_ceiling_exists
 
             verdict = source_ceiling_exists
-        return bool(verdict(notebook_id))
+        try:
+            return bool(verdict(notebook_id))
+        except (AskCancelled, RetrievalControlError):
+            raise
+        except Exception:  # noqa: BLE001 — an unanswerable verdict binds
+            return True
     def _chunk_kg_overlay(self, notebook_id: str, query: str, hl: str, id_offset: int):
         """种子(节点∪关系端点)→1-hop 子图→渲染。
 
