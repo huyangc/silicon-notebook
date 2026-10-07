@@ -26,7 +26,7 @@ export type PublicReportReferenceT = {
    * 同 `is_external` 一类的呈现标记；不带 `memory_id`）。缺字段（旧后端、非记忆引用）
    * 即「不是」。公开页只认这个布尔，不再从位置标签的字面猜。
    */
-  memory?: boolean;
+  is_memory?: boolean;
 };
 
 export type PublicReportT = {
@@ -98,7 +98,8 @@ export function publicReferenceNumber(
  * 引用出处的「位置」标签的公开页呈现（报告页与会话页共用，只此一份）。
  *
  * 作者的个人记忆被引用时，那条引用保留标题与摘录（去掉 `memory_id`），后端同时给它一个
- * 结构化布尔 `memory: true`。匿名读者需要看出这不是文档原文，所以位置标签统一显示
+ * 结构化布尔 `is_memory: true`（与 `is_external`、`is_image_reference` 同一命名）。
+ * 匿名读者需要看出这不是文档原文，所以位置标签统一显示
  * 「作者的个人记忆」（词表：Memory → 记忆，见 docs/ui-vocabulary.md）。
  *
  * ⚠ 只读这个布尔，**不**按位置标签的字面猜：芯片手册里一级章节恰好叫 "Memory" 很常见，
@@ -106,9 +107,9 @@ export function publicReferenceNumber(
  */
 export const PUBLIC_MEMORY_LOCATION_LABEL = "作者的个人记忆";
 export function publicReferenceLocation(
-  reference: { memory?: boolean; location?: string } | undefined,
+  reference: { is_memory?: boolean; location?: string } | undefined,
 ): string {
-  if (reference?.memory === true) return PUBLIC_MEMORY_LOCATION_LABEL;
+  if (reference?.is_memory === true) return PUBLIC_MEMORY_LOCATION_LABEL;
   return String(reference?.location || "");
 }
 

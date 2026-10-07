@@ -127,14 +127,14 @@ test("没被截断的引用不挂假提示", async () => {
   expect(screen.queryByText("（研究问题过长，已截断）")).toBeNull();
 });
 
-test("个人记忆引用（后端的结构化布尔 memory）保留标题与摘录，位置标签读作「作者的个人记忆」", async () => {
+test("个人记忆引用（后端的结构化布尔 is_memory）保留标题与摘录，位置标签读作「作者的个人记忆」", async () => {
   mocks.fetchPublicReport.mockResolvedValue({
     ...REPORT,
     references: [
       // 后端没有位置标签可给时，标签也照样出现（不能因为 location 为空就整行消失）。
-      { key: "k1", title: "我的笔记", file_name: "", location: "", snippet: "记忆摘录", memory: true },
+      { key: "k1", title: "我的笔记", file_name: "", location: "", snippet: "记忆摘录", is_memory: true },
       // 有位置标签的个人记忆：标签被统一换掉。
-      { key: "k2", title: "另一条笔记", file_name: "", location: "第 2 页", snippet: "另一条摘录", memory: true },
+      { key: "k2", title: "另一条笔记", file_name: "", location: "第 2 页", snippet: "另一条摘录", is_memory: true },
       { key: "k7", title: "乙文", file_name: "乙文", location: "p. 3", snippet: "乙摘录" },
     ],
   });
