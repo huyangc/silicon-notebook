@@ -151,6 +151,17 @@ def test_pg_graph_totals_do_not_depend_on_the_limit(repo):
         wide["total_nodes"], wide["total_edges"]), (narrow, wide)
 
 
+def test_pg_a_foreign_memory_relation_between_own_objects_stays_out(repo):
+    """Twin of the SQLite case (codex #824 r5)."""
+    from tests.test_kg_service_readers import (
+        assert_a_foreign_memory_relation_between_own_objects_stays_out,
+    )
+
+    s = build_scenario(repo, b_memory=True)
+    assert_a_foreign_memory_relation_between_own_objects_stays_out(
+        repo, s, lambda statement: statement.replace("?", "%s"))
+
+
 def test_pg_own_memory_neighbours_are_own_memory_objects_only(repo):
     s = build_scenario(repo, b_memory=False)
     view = as_user(s.a, repo.kg_neighbors, s.nb, s.ids.definer_ma)

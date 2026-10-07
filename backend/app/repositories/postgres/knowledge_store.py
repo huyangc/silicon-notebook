@@ -4749,13 +4749,15 @@ class KnowledgeStore:
         # parameter (id_binding exemption class 3 -- each member is an
         # endpoint key probe, the list's only purpose).
         member_list = sorted(member_set)
+        # ``source_id`` (M1): the relation's own source, so the caller can
+        # judge each relation by the viewer's rule (codex #824 r5).
         rels_out = db.execute(
-            "SELECT source_object_id, target_object_id, edge_type "
+            "SELECT source_object_id, target_object_id, edge_type, source_id "
             "FROM knowledge_relations WHERE notebook_id=%s AND source_object_id=ANY(%s)",
             (notebook_id, member_list),
         ).fetchall()
         rels_in = db.execute(
-            "SELECT source_object_id, target_object_id, edge_type "
+            "SELECT source_object_id, target_object_id, edge_type, source_id "
             "FROM knowledge_relations WHERE notebook_id=%s AND target_object_id=ANY(%s)",
             (notebook_id, member_list),
         ).fetchall()
@@ -4766,12 +4768,14 @@ class KnowledgeStore:
             other = rel["target_object_id"]
             if other not in member_set:
                 attached_ids.add(other)
-                rel_edges.append({"other": other, "edge_type": rel["edge_type"]})
+                rel_edges.append({"other": other, "edge_type": rel["edge_type"],
+                                  "source_id": rel["source_id"]})
         for rel in rels_in:
             other = rel["source_object_id"]
             if other not in member_set:
                 attached_ids.add(other)
-                rel_edges.append({"other": other, "edge_type": rel["edge_type"]})
+                rel_edges.append({"other": other, "edge_type": rel["edge_type"],
+                                  "source_id": rel["source_id"]})
 
         if attached_ids:
             candidates = list(attached_ids)

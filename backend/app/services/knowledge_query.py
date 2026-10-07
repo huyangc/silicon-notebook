@@ -849,6 +849,9 @@ class KnowledgeQueryService:
         seen = set()
         for edge in relation_edges:
             other = edge["other"]
+            if scope is not None and scope.relation_hidden(edge.get("source_id")):
+                # M1: a relation is judged by its own source (codex #824 r5)
+                continue
             if (
                 other in other_objects
                 and other_objects[other]["object_type"] != "concept"

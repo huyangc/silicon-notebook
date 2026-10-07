@@ -4506,30 +4506,33 @@ class KnowledgeStore:
         # parameter, each member an endpoint seek (``drive_by``).
         members = bind_ids(member_set)
         rels_out = db.execute(
-            f"SELECT source_object_id, target_object_id, edge_type "
+            f"SELECT source_object_id, target_object_id, edge_type, source_id "
             f"FROM knowledge_relations WHERE notebook_id=? "
             f"AND {drive_by('source_object_id', members)}",
             [notebook_id, members.param],
         ).fetchall()
         rels_in = db.execute(
-            f"SELECT source_object_id, target_object_id, edge_type "
+            f"SELECT source_object_id, target_object_id, edge_type, source_id "
             f"FROM knowledge_relations WHERE notebook_id=? "
             f"AND {drive_by('target_object_id', members)}",
             [notebook_id, members.param],
         ).fetchall()
 
+        # ``source_id`` (M1): the relation's own source (see the PG twin).
         attached_ids: set = set()
         rel_edges: List[dict] = []
         for rel in rels_out:
             other = rel["target_object_id"]
             if other not in member_set:
                 attached_ids.add(other)
-                rel_edges.append({"other": other, "edge_type": rel["edge_type"]})
+                rel_edges.append({"other": other, "edge_type": rel["edge_type"],
+                                  "source_id": rel["source_id"]})
         for rel in rels_in:
             other = rel["source_object_id"]
             if other not in member_set:
                 attached_ids.add(other)
-                rel_edges.append({"other": other, "edge_type": rel["edge_type"]})
+                rel_edges.append({"other": other, "edge_type": rel["edge_type"],
+                                  "source_id": rel["source_id"]})
 
         if attached_ids:
             candidates = list(attached_ids)
