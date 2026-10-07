@@ -2674,19 +2674,26 @@ def default_ceiling_context(
     long as unbudgeted ones.
 
     Once installed, runs that had no scope before (MCP ``ask_notebook``,
-    unscoped API asks, the report worker) start running the drift probe
+    unscoped API asks, the report worker) start checking for drift
     (``source_scope_visible_universe_matches``, asked before the whole-graph,
-    PPR, relation and exact-lookup channels): two reads per probe -- the
-    notebook's visible set and the owner's hidden half -- and 4-8 probes per
-    question (32.5 ms each at 49k sources in the first quality review, so
-    roughly 130-260 ms per question).  What that buys: while a notebook is
-    ingesting, a source that finishes after the freeze reads as drift, and
-    those channels -- which are not partitioned by source -- are switched off
-    for that question instead of admitting a source outside the freeze, which
-    is what the browser path already does.  The probe must stay per call, not
-    per run (codex #634 R1).  Until E2-2, a run whose Memory channel is closed
-    while the asker holds a confirmed Memory in the notebook runs with those
-    four channels off outright (see ``withheld_hidden_source_ids``).
+    PPR, relation and exact-lookup channels): each check is one single-row
+    fingerprint read (``live_universe_digests``) compared with the freeze's
+    own digest, never cached (codex #634).  Measured at 49k sources, load
+    20-36: 12-28 ms per read on SQLite and 12-40 ms on PostgreSQL when the
+    checks run one after another, 36-134 / 17-53 ms inside a report phase
+    whose sections check concurrently.  An MCP chunk question makes 4 checks,
+    with a rerank 8, a reasoning question 12; a 6-section report 32 while
+    planning and 103 while generating (a report phase always binds its list).
+    On top comes the run verdict (``run_ceiling_binds``: one fingerprint read
+    and one foreign-Memory read per run and library), which lets a run that
+    cannot exclude anything read without the list.  What the checks buy:
+    while a notebook is ingesting, a source that finishes after the freeze
+    reads as drift, and those channels -- which are not partitioned by
+    source -- are switched off for that question instead of admitting a
+    source outside the freeze, which is what the browser path already does.
+    Until E2-2, a run whose Memory channel is closed while the asker holds a
+    confirmed Memory in the notebook runs with those four channels off
+    outright (see ``withheld_hidden_source_ids``).
     """
     if current_source_scope() is not None:
         yield

@@ -170,26 +170,19 @@ class ReportExecutionCoordinator:
         (``cancellable_ceiling_readers``), so a Stop interrupts a SQLite read
         at once and waits at most one statement's 3 s cap on PostgreSQL.
 
-        COST, measured by the quality review on this branch (real stores,
-        49k visible sources, no mounted library, a 6-section report, two runs
-        per condition with both results shown; machine load 4 to tens, so
-        PostgreSQL's numbers are noisy): the constructor itself is 3 reads
-        per phase, 24-45 ms on SQLite and 26-405 ms on PostgreSQL.  What
-        dominates is that an installed ceiling turns on the per-call drift
-        probe (two full reads
-        of the notebook's visible set and hidden half per probe) for every
-        retrieval inside the phase, where the unscoped worker used to probe
-        nothing: a 6-section report probes 0 times in intent understanding,
-        32 in planning and 102 in generation (17 per section).  Wall clock
-        before / ceiling with the probe stubbed out / this branch: planning
-        404-469 / 825-983 / 11,646-11,692 ms on SQLite and 1,322-3,856 /
-        2,374-2,767 / 4,969-7,998 ms on PostgreSQL; generation 705-873 /
-        1,615-2,136 / 7,052-7,549 ms and 6,076-10,375 / 3,339-3,970 /
-        16,701-18,041 ms.  (PostgreSQL's "before" is noisy; the probe's share
-        there is after minus noprobe: +2.6-5.2 s planning, +13-14 s
-        generation.)  The probe's per-call cost is owned by E1-2 (a one-row
-        digest in place of the two full reads); the rest of the noprobe gap
-        is the frozen id list each chunk statement now binds.
+        COST (E1-2, real stores, 49k visible sources, a 6-section report, two
+        runs per condition, machine load 20-36): the constructor is 3 reads
+        per phase (+1 per mounted library), 25-52 ms on SQLite and 32-52 ms
+        on PostgreSQL without a mount.  A report phase always binds its
+        frozen list (``run_ceiling_binds`` -> ``_report_run_active``: the list
+        is also the ANN sidecar's coverage question), so every retrieval in
+        it runs the per-call drift check -- one single-row fingerprint read --
+        32 times while planning and 103 while generating; the sections run
+        concurrently, so each read queues (36-134 ms on SQLite, 17-53 ms on
+        PostgreSQL).  Wall clock without a ceiling (master) / this branch:
+        planning 387-389 / 1,299-1,371 ms on SQLite and 419-499 / 1,288-1,343
+        ms on PostgreSQL; generation 874-902 / 3,121-3,180 ms and 1,769-1,794
+        / 2,623-5,955 ms.
         """
         from app.services.source_scope import default_ceiling_context
 
