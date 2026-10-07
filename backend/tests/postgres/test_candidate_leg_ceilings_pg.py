@@ -280,6 +280,19 @@ def test_pg_unscoped_first_call_does_not_rank_a_later_scoped_one(repo, people):
     # X's only match is Bob's Memory quote: it never ranks for Alice.
     assert [object_id for object_id, _ in warm] == ["Y"]
 
+    # The shared cache itself holds no Memory-evidenced object, whoever built
+    # it (Alice's call just did; the unscoped one before it too).
+    with repo._runtime.database.connect() as db:
+        version_row = candidates.knowledge.object_version_row(db, seed.nb)
+    for warm_with in (None, alice_scope):
+        candidates._vector_cache.invalidate(f"{seed.nb}:kwtok")
+        ranking(warm_with)
+        tokens = candidates._vector_cache.get(
+            f"{seed.nb}:kwtok", ("kwtok", version_row["c"], version_row["ts"]),
+            lambda: pytest.fail("the cache was just warmed"),
+        )
+        assert "Y" in tokens and "X" not in tokens
+
     # ...and the other order (spec review P3): a scoped first caller leaves
     # no trimmed token set behind for a later unscoped one.
     candidates._vector_cache.invalidate(f"{seed.nb}:kwtok")
