@@ -2597,6 +2597,8 @@ class RepositoryRuntime:
                     # The one by-id fingerprint read citation producers may
                     # spend on attesting pointers (``evidence_attestation``).
                     evidence_reader=self.source_store,
+                    # M4: the author's Memory sources behind the share count.
+                    memory_sources=self.memory_store,
                     ask=self.ask_service(),
                     settings=self.settings,
                     event_log=self.event_log,

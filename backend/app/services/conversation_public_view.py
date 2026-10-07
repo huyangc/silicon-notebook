@@ -32,8 +32,12 @@ What never crosses, and why:
   buy the reader nothing because the public page deliberately cannot open full
   sources. The allowlist reads none of these keys, so they are dropped by
   construction — a *Memory* citation keeps its title/excerpt (self-publishing:
-  a user's own answer can only cite that user's own private Memory) but loses
-  its ``memory_id``.
+  a user's own answer can only cite that user's own private Memory, and the
+  share asked the author first, M4) but loses its ``memory_id``. In its place
+  the reference carries the boolean ``is_memory`` (only when true), its title
+  loses the engine's ``Memory · `` label prefix, and the page labels it as the
+  author's personal memory. The flag also covers evidence from the author's
+  Memory projection, which the route resolves in one batch per page.
 * the whole reasoning surface — ``reasoning_trace`` / ``intent`` /
   ``retrieval_scope`` / ``retrieval_query`` / ``top_relevance`` / ``mode`` /
   ``llm_mode`` / ``retrieval_effort`` / ``index_required``. Same "轨迹不外发"
@@ -62,13 +66,20 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 # Sunk to app.domain.conversation_public_view in B3 (app.repositories'
 # ask_state_store imports it directly there); re-exported here unchanged.
 from app.domain.conversation_public_view import MAX_TURNS
 # The one coercion every reader of a stored citation-check summary applies.
 from app.services.global_citation_check import coerce_check_summary
+# M4: which reference is the author's personal memory, and how its title reads
+# in public -- one definition shared with the report projection and the count.
+from app.services.share_disclosure import (
+    public_memory_title,
+    reference_memory_id,
+    unresolved_source_ids,
+)
 
 # Mirrors ``report_public_view``'s caps; the report body (``content_md``) is
 # left uncapped and the conversation answer body (``answer_md``) AND the
@@ -180,6 +191,26 @@ def referenced_asset_ids(
             if len(out) >= limit:
                 return out
     return out
+
+
+def memory_lookup_source_ids(row: dict[str, Any]) -> list[str]:
+    """Distinct ``source_id``s of the references the page will show whose
+    Memory identity is not a stored fact, across every projected turn: the
+    ids the route resolves against the author's Memory sources in ONE batch
+    per page (``share_disclosure.author_memory_sources``), so a reference from
+    the author's Memory projection can carry ``is_memory`` as well.
+
+    The same ``_turn_body_and_references`` selection the projection renders,
+    so the lookup asks about exactly the references that cross."""
+    references: list[Any] = []
+    turns = row.get("turns") if isinstance(row.get("turns"), list) else []
+    for turn in list(turns)[:MAX_TURNS]:
+        payload = turn.get("payload") if isinstance(turn, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        _answer_md, selected, _total = _turn_body_and_references(payload)
+        references.extend(reference for _key, reference in selected)
+    return unresolved_source_ids(references)
 
 
 def resolve_conversation_asset_alias(
@@ -361,8 +392,15 @@ def _select_references(
     ]
 
 
-def public_reference(key: str, reference: Any) -> dict[str, Any]:
+def public_reference(
+    key: str, reference: Any, memory_sources: Mapping[str, str] | None = None
+) -> dict[str, Any]:
     """One reference as an anonymous reader sees it: nothing addressable.
+
+    ``memory_sources`` is the author's Memory sources among the page's
+    references (``{source_id: memory_id}``, one batched read by the route);
+    a reference that is the author's Memory gets ``is_memory: True`` and a
+    title without the ``Memory · `` label prefix, any other none of either.
 
     Handles both wire shapes with one allowlist — ``AnswerAnchor`` (title in
     ``source_title``/``label``/``name``, excerpt in ``snippet``) and
@@ -376,8 +414,12 @@ def public_reference(key: str, reference: Any) -> dict[str, Any]:
     value sets ``title_truncated``/``snippet_truncated`` so the page can DISCLOSE
     the clip rather than drop the tail silently (codex #522 R3)."""
     row = reference if isinstance(reference, dict) else {}
+    is_memory = bool(reference_memory_id(row, memory_sources or {}))
+    raw_title = str(
+        row.get("source_title") or row.get("label") or row.get("name") or ""
+    ).strip()
     title, title_truncated = _text_flag(
-        row.get("source_title") or row.get("label") or row.get("name"),
+        public_memory_title(raw_title) if is_memory else raw_title,
         MAX_REFERENCE_TITLE_CHARS,
     )
     # Anchor excerpt is ``snippet``; citation excerpt is ``quoted_span``.
@@ -420,6 +462,8 @@ def public_reference(key: str, reference: Any) -> dict[str, Any]:
         # addressable" is this projection's whole rule — the marker plus the
         # title and excerpt is the disclosure, not the destination.
         "is_external": str(row.get("tier") or "") == "external",
+        # M4: absent unless true, so a page without Memory keeps its bytes.
+        **({"is_memory": True} if is_memory else {}),
         # Absent for a reference that passed (or was never checked), so a clean
         # answer's reference keeps exactly the keys it always had.
         **_verification_field(row),
@@ -451,7 +495,11 @@ def _citation_check_field(payload: dict) -> dict[str, Any]:
 
 
 def public_turn(
-    turn: Any, *, share_token: str, images_enabled: bool
+    turn: Any,
+    *,
+    share_token: str,
+    images_enabled: bool,
+    memory_sources: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """One Q&A turn projected from its stored ``AskResponse`` payload.
 
@@ -469,7 +517,10 @@ def public_turn(
     # already bounded to ``MAX_REFERENCES``; ``total`` is the pre-bound count so
     # truncation can still be disclosed.
     answer_md, selected, total = _turn_body_and_references(payload)
-    visible = [public_reference(key, reference) for key, reference in selected]
+    visible = [
+        public_reference(key, reference, memory_sources)
+        for key, reference in selected
+    ]
     notice = payload.get("completeness_notice")
     return {
         "question": _question_text(row.get("question")),
@@ -591,14 +642,20 @@ def _public_images(
 
 
 def public_conversation_payload(
-    row: dict[str, Any], *, share_token: str, images_enabled: bool
+    row: dict[str, Any],
+    *,
+    share_token: str,
+    images_enabled: bool,
+    memory_sources: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Assemble the anonymous view from a token-resolved conversation row.
 
     ``share_token`` and ``images_enabled`` are threaded down to every turn so
     answer-attached images can be projected as token-derived aliases (T4). The
     token is passed in rather than read from the row so this stays a pure
-    function; the route (which has the raw token) supplies it.
+    function; the route (which has the raw token) supplies it. So is
+    ``memory_sources``: the author's Memory sources among the page's references
+    (``memory_lookup_source_ids``), read once per page by the route.
 
     The caller (the anonymous route) has already run the live creator
     re-authorization and popped the GATE fields (``notebook_id``/``created_by``);
@@ -610,7 +667,10 @@ def public_conversation_payload(
         # The read watermark: "内容截至何时". Comes from ``shared_through_at``.
         "shared_at": _text(row.get("shared_through_at"), 64),
         "turns": [
-            _safe_turn(turn, share_token=share_token, images_enabled=images_enabled)
+            _safe_turn(
+                turn, share_token=share_token, images_enabled=images_enabled,
+                memory_sources=memory_sources,
+            )
             for turn in list(turns)[:MAX_TURNS]
         ],
         "truncated_turns": len(turns) > MAX_TURNS,
@@ -618,7 +678,11 @@ def public_conversation_payload(
 
 
 def _safe_turn(
-    turn: Any, *, share_token: str, images_enabled: bool
+    turn: Any,
+    *,
+    share_token: str,
+    images_enabled: bool,
+    memory_sources: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """``public_turn`` with a belt-and-suspenders fallback (codex T3 review).
 
@@ -630,7 +694,8 @@ def _safe_turn(
     the numbering the way position-based reference numbering was avoided)."""
     try:
         return public_turn(
-            turn, share_token=share_token, images_enabled=images_enabled
+            turn, share_token=share_token, images_enabled=images_enabled,
+            memory_sources=memory_sources,
         )
     except Exception:
         row = turn if isinstance(turn, dict) else {}

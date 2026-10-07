@@ -2,7 +2,14 @@ import re
 from datetime import datetime
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    PrivateAttr,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 from app.models.source_scope import (
     BaseNotebookScope,
@@ -1086,9 +1093,32 @@ class ConversationShareRequest(BaseModel):
     even if a newer answer landed between the client's read and this POST (the
     disclosure TOCTOU). Empty (a legacy / no-body client) falls back to
     "current latest". The body itself is optional so an empty POST still works.
+
+    ``acknowledged_memory_count`` (M4) is the number of the author's own
+    personal-memory entries the author saw in the disclosure and confirmed.
+    The server counts again over the exact range it is about to publish and
+    refuses (409 ``share_disclosure_required``) unless a count above zero is
+    acknowledged exactly; a client with nothing to confirm leaves it out, and
+    that body must never get a 422.
     """
 
     expected_through_id: str = ""
+    acknowledged_memory_count: StrictInt | None = Field(default=None, ge=0)
+
+
+class ConversationShareDisclosure(BaseModel):
+    """What a conversation share about to be published carries of the author's
+    own personal memory (M4), counted by the server over the exact range the
+    share would publish (``through_id``; empty = the newest completed turn).
+
+    ``memory_count``: distinct Memory entries of the author in that range.
+    ``new_memory_count``: those not already on the page the link serves now
+    (relative to the current watermark; 0 when the range ends at it, all of
+    them while the conversation is not shared).  Never above ``memory_count``.
+    """
+
+    memory_count: int
+    new_memory_count: int
 
 
 class ConversationShareResponse(BaseModel):
@@ -1140,6 +1170,11 @@ class PublicReference(BaseModel):
     # ``url`` on the authenticated ``Citation``/``AnswerAnchor`` is
     # deliberately absent from this shape, same rule as every other handle.
     is_external: bool = False
+    # M4: the reference is the author's own personal memory (a cited Memory,
+    # a Memory anchor, or evidence from the author's Memory projection). A
+    # marker, never the ``memory_id``; present only when true, so a page
+    # without Memory keeps exactly the bytes it had.
+    is_memory: bool = Field(default=False, exclude_if=lambda value: not value)
     # 全局问答终态引用核对未通过时的原因(``CitationVerification``),是回答
     # 时刻的快照;通过或未核对时整体缺席,干净的分享页逐字节不变。
     verification: Optional[CitationVerification] = Field(

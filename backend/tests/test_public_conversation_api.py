@@ -55,8 +55,30 @@ def _notebook(client: TestClient, headers: dict, name: str = "库") -> str:
 
 # A realistic reasoning-mode payload: anchor-marked body + one anchor carrying
 # every addressable field, so the endpoint's projection can be checked for
-# leaks end to end.
-def _reasoning_payload() -> dict:
+# leaks end to end. ``library_id`` is the mounted library the anchor's evidence
+# came from; an anchor naming a library is re-checked on every open (D-3), so
+# it must be a library really mounted on the conversation's notebook. Without
+# one the anchor is local evidence and carries no library, as the engine
+# writes it.
+def _reasoning_payload(library_id: str = "") -> dict:
+    payload = _reasoning_payload_with_library()
+    if library_id:
+        payload["anchors"][0]["notebook_id"] = library_id
+    else:
+        del payload["anchors"][0]["notebook_id"]
+    return payload
+
+
+def _mounted_library(client: TestClient, owner: dict, nb: str) -> str:
+    """A library of ``owner`` mounted on ``nb`` (same-owner mount)."""
+    library = _notebook(client, owner, "参考库")
+    mounted = client.put(f"/api/notebooks/{nb}/bases",
+                         json={"base_notebook_ids": [library]}, headers=owner)
+    assert mounted.status_code == 200, mounted.text
+    return library
+
+
+def _reasoning_payload_with_library() -> dict:
     return {
         "conclusion": "简要结论 [k1]。",
         "answer": "详细答案 [k1]。",
@@ -192,7 +214,8 @@ def test_anonymous_reader_gets_the_whitelisted_projection(client):
     NONE of the addressable ids or reasoning surface."""
     owner, owner_id = _new_user(client)
     nb = _notebook(client, owner)
-    cid = _seed_shared_conversation(nb, owner_id)
+    library = _mounted_library(client, owner, nb)
+    cid = _seed_shared_conversation(nb, owner_id, _reasoning_payload(library))
     token = _share(client, owner, nb, cid)
 
     # No Authorization header at all — this is the anonymous surface.
@@ -216,7 +239,7 @@ def test_anonymous_reader_gets_the_whitelisted_projection(client):
     # Nothing addressable, no reasoning surface, no gate field anywhere.
     raw = resp.text
     for token_str in (
-        "OBJ-secret", "SRC-secret", "ELE-secret", "NB-secret", "IMG-secret",
+        "OBJ-secret", "SRC-secret", "ELE-secret", library, "IMG-secret",
         "ASSET-secret", "轨迹泄露词", "检索泄露词",
         "notebook_id", "created_by", "reasoning_trace", "retrieval_query",
     ):
