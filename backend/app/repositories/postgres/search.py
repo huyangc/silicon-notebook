@@ -14,6 +14,7 @@ from app.repositories.postgres.access_sql import (
     read_access_params,
 )
 from app.repositories.postgres.id_binding import bind_ids, execute_bound, member_of
+from app.repositories.postgres.memory_sql import memory_derived_in_notebook
 
 
 PAYLOAD_NAME_EXPRESSION = '(payload ->> \'name\') COLLATE "C"'
@@ -1061,10 +1062,13 @@ def notebook_knowledge_rows(connection, notebook_id: str, needle: str, limit: in
 
 
 def mention_claim_rows(connection, notebook_id: str):
+    """提及桥扫描的 claim 文本(E4-2,裁决 M1:派生自 Memory 的 claim 不产生共享的
+    提及边/共提对;判据与 ``unified_kg_store`` 的建图读者同一个片段,理由见那边)。"""
     return connection.execute(
-        f"SELECT id,{PAYLOAD_NAME_EXPRESSION} AS nm FROM knowledge_objects "
-        "WHERE notebook_id=%s AND object_type='claim' AND status!='deprecated' "
-        "ORDER BY ordinal",
+        f"SELECT o.id,{PAYLOAD_NAME_EXPRESSION} AS nm FROM knowledge_objects o "
+        "WHERE o.notebook_id=%s AND o.object_type='claim' AND o.status!='deprecated' "
+        f"AND NOT {memory_derived_in_notebook('o')} "
+        "ORDER BY o.ordinal",
         (notebook_id,),
     ).fetchall()
 

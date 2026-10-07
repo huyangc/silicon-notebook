@@ -295,3 +295,81 @@ def test_community_graph_stream_and_rewrite_use_store_connections(repo, monkeypa
     assert events[wi - 1][1] == events[wi][1] == events[wi + 1][1]
     assert events[wi][1] in write_ids
     assert count >= 1
+
+
+# ------------------------------------------------ E4-2: Memory in communities
+def _published_community_generation(db, nb_id):
+    row = db.execute("SELECT community_generation FROM unified_kg_state "
+                     "WHERE notebook_id=?", (nb_id,)).fetchone()
+    return int(row[0]) if row else 0
+
+
+def test_communities_hold_no_memory_derived_member(repo):
+    """Ruling M1: the community graph is built from shared relations between
+    shared objects, so no community (members, names, reverse index) holds a
+    Memory-derived object -- while the shared graph still forms a community."""
+    from tests import memory_kg_seed_world as world
+
+    nb_id = world.seed(repo)
+    repo.rebuild_unified_kg(nb_id, force=True)
+    memory = world.memory_object_ids(repo, nb_id)
+    with repo._connect() as db:
+        members = db.execute("SELECT canonical_id, canonical_name FROM community_members "
+                             "WHERE notebook_id=?", (nb_id,)).fetchall()
+        comms = db.execute("SELECT member_ids FROM communities WHERE notebook_id=?",
+                           (nb_id,)).fetchall()
+    assert {r["canonical_id"] for r in members} == {
+        "K-grouped query attention", "K-multi query attention", "K-kv cache"}
+    assert not {r["canonical_id"] for r in members} & memory
+    assert all("secret" not in r["canonical_name"].lower() for r in members)
+    assert all(not set(json.loads(r["member_ids"])) & memory for r in comms)
+
+
+def test_summary_rows_drop_memory_members_of_a_pre_isolation_community(repo):
+    """A community published before the isolation can still list a Memory
+    object in member_ids (migration 0067 clears its summary, not its members).
+    The summary / ledger input read drops those ids, keeps the order of the
+    rest, and a notebook without Memory runs the unfiltered statement."""
+    from tests import memory_kg_seed_world as world
+
+    nb_id = world.seed(repo)
+    repo.rebuild_unified_kg(nb_id, force=True)
+    memory = world.object_ids_by_name(repo, nb_id, world.MEMORY_SOURCE)
+    legacy = ["K-kv cache", memory["SECRET-ALPHA plan"], "K-grouped query attention",
+              memory["Secret Beta budget"]]
+    with repo._write() as db:
+        gen = _published_community_generation(db, nb_id)
+        db.execute(
+            "INSERT INTO communities (id, notebook_id, level, member_ids, size, created_at, "
+            "generation) VALUES ('comm-legacy', ?, 0, ?, 4, ?, ?)",
+            (nb_id, json.dumps(legacy), NOW, gen),
+        )
+    store = repo._runtime.unified_kg
+    with repo._connect() as db:
+        rows = {r["id"]: json.loads(r["member_ids"])
+                for r in store.community_rows_for_summary(db, nb_id, 0)}
+    assert rows["comm-legacy"] == ["K-kv cache", "K-grouped query attention"]
+    assert all(not set(ids) & set(memory.values()) for ids in rows.values())
+
+    # without a Memory source: the very statement that ran before E4-2
+    plain = repo.create_notebook(NotebookCreate(name="no memory"))
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO communities (id, notebook_id, level, member_ids, size, created_at, "
+            "generation) VALUES ('comm-plain', ?, 0, '[\"a\", \"b\"]', 2, ?, 0)",
+            (plain.id, NOW),
+        )
+    seen = []
+    with repo._connect() as db:
+        db.set_trace_callback(seen.append)
+        try:
+            got = [dict(r) for r in store.community_rows_for_summary(db, plain.id, 0)]
+        finally:
+            db.set_trace_callback(None)
+    assert got == [{"id": "comm-plain", "member_ids": '["a", "b"]'}]
+    assert [s for s in seen if "FROM communities" in s] == [
+        "SELECT id, member_ids FROM communities WHERE notebook_id="
+        f"'{plain.id}' AND level=0 AND generation = COALESCE((SELECT "
+        "community_generation FROM unified_kg_state WHERE notebook_id = "
+        f"'{plain.id}'), 0)"
+    ]

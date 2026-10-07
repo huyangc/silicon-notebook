@@ -1061,3 +1061,14 @@ def test_relation_support_rows_issues_row_value_in_not_or_chain():
     assert " OR " not in capture.sql, (
         f"expected no OR-chain disjunction (the ~440x-slower form this "
         f"replaced), got: {capture.sql}")
+
+
+# ------------------------------------------ E4-2: Memory in canonical relations
+def test_canonical_relations_leave_memory_relations_and_endpoints_out(repo):
+    """Ruling M1 (E4-2): canonical relations and the community graph are built
+    from shared relations between shared objects only -- including the legacy
+    shape a cross-kind manual merge left behind (a SHARED relation whose
+    endpoint is a Memory-derived object). Body shared with the PostgreSQL twin."""
+    from tests import memory_kg_seed_world as world
+
+    world.assert_legacy_memory_endpoints_stay_out(repo)

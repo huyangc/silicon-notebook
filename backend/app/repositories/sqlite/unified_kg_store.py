@@ -17,7 +17,11 @@ Red lines preserved verbatim:
 - ``finish_rebuild_state`` must NOT touch kg_mutation_seq — the column is
   omitted from both the INSERT column list and the SET so an existing row's
   counter is preserved (bumping would make the gate never skip; resetting
-  would lose mutations that arrived mid-rebuild).
+  would lose mutations that arrived mid-rebuild). It clears ``dirty`` only
+  while ``kg_mutation_seq`` still equals the value the rebuild claimed with
+  (E4-2): a mutation that arrived mid-rebuild keeps the notebook dirty.
+- The graph-build inputs and the derived-layer readers leave Memory-derived
+  objects and relations out (E4-2, ruling M1; ``_not_memory``).
 """
 from __future__ import annotations
 
@@ -41,6 +45,8 @@ from app.repositories.sqlite.id_binding import (
 from app.repositories.sqlite.memory_sql import (
     foreign_memory_object_excluded,
     foreign_memory_relation_excluded,
+    memory_derived_in_notebook,
+    memory_source_type_predicate,
 )
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
 from app.repositories.sqlite.source_ceiling import (
@@ -75,6 +81,52 @@ _PUBLISHED_COMMUNITY_GEN = (
     "COALESCE((SELECT community_generation FROM unified_kg_state "
     "WHERE notebook_id = ?), 0)"
 )
+
+
+# E4-2(裁决 M1):建图输入与派生层读者排除「派生自 Memory」的对象/关系。PG 孪生
+# 同名段落是规范定义(判据为什么钉笔记本、为什么无条件拼进语句、实测数字);这边
+# 文本逐字相同(片段零参数)。SQLite 上相关 EXISTS 是逐行一次 `sources` 主键探查。
+
+
+def _not_memory(row_alias: str) -> str:
+    """``row_alias``(带 ``source_id``/``notebook_id`` 的对象或关系行)不派生自
+    本笔记本的 Memory 来源。零参数。"""
+    return "NOT " + memory_derived_in_notebook(row_alias)
+
+
+def _not_memory_object_ref(
+    object_column: str, notebook_ref: str, probe_alias: str
+) -> str:
+    """``object_column`` 指向的对象(按 id 引用)不派生自 Memory。零参数;
+    ``probe_alias.notebook_id = notebook_ref`` 的理由见 PG 孪生。"""
+    return (
+        f"NOT EXISTS (SELECT 1 FROM knowledge_objects {probe_alias} "
+        f"WHERE {probe_alias}.id = {object_column} "
+        f"AND {probe_alias}.notebook_id = {notebook_ref} "
+        f"AND {memory_derived_in_notebook(probe_alias)})"
+    )
+
+
+def _holds_memory_source(db: sqlite3.Connection, notebook_id: str) -> bool:
+    """本笔记本有没有任何 Memory 来源(`idx_sources_nb_hidden_type` 一次探查)。"""
+    return bool(db.execute(
+        "SELECT EXISTS(SELECT 1 FROM sources WHERE notebook_id=? AND "
+        f"{memory_source_type_predicate()})",
+        (notebook_id,),
+    ).fetchone()[0])
+
+
+# E4-5 交接:`memory_isolation_version` 由 SQLite v87 加列;为什么收尾写要置 1 见
+# PG 孪生同名常量。这边读库自己的 `user_version`(迁移每一步都推进它,列与版本号
+# 同一个事务落库),不 import `migrations.SCHEMA_VERSION`——那会与迁移模块里对本
+# store 的惰性 import 构成静态 import 环(架构守卫)。每次收尾一次 PRAGMA 读。
+_MEMORY_ISOLATION_SQLITE_VERSION = 87
+
+
+def _writes_isolation_marker(db: sqlite3.Connection) -> bool:
+    return int(db.execute("PRAGMA user_version").fetchone()[0]) >= (
+        _MEMORY_ISOLATION_SQLITE_VERSION
+    )
 
 
 # PR-D0·D0-2:对比兄弟的**来源级闸**谓词(PG 孪生同名函数,语义等价)。
@@ -190,9 +242,10 @@ class UnifiedKgStore:
         db: sqlite3.Connection, notebook_id: str, object_type: str,
     ):
         return db.execute(
-            "SELECT payload FROM knowledge_objects "
-            "WHERE notebook_id=? AND object_type=? AND status!='deprecated' "
-            "ORDER BY rowid", (notebook_id, object_type),
+            "SELECT o.payload AS payload FROM knowledge_objects o "
+            "WHERE o.notebook_id=? AND o.object_type=? AND o.status!='deprecated' "
+            f"AND {_not_memory('o')} "
+            "ORDER BY o.rowid", (notebook_id, object_type),
         )
 
     @staticmethod
@@ -200,9 +253,10 @@ class UnifiedKgStore:
         db: sqlite3.Connection, notebook_id: str, object_type: str,
     ):
         return db.execute(
-            "SELECT id, payload FROM knowledge_objects "
-            "WHERE notebook_id=? AND object_type=? AND status!='deprecated' "
-            "ORDER BY rowid", (notebook_id, object_type),
+            "SELECT o.id AS id, o.payload AS payload FROM knowledge_objects o "
+            "WHERE o.notebook_id=? AND o.object_type=? AND o.status!='deprecated' "
+            f"AND {_not_memory('o')} "
+            "ORDER BY o.rowid", (notebook_id, object_type),
         )
 
     @staticmethod
@@ -307,7 +361,10 @@ class UnifiedKgStore:
             f"  AND cs.member_object_id=kr.source_object_id AND cs.generation = {_PUBLISHED_CLUSTER_GEN} "
             "LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "
             f"  AND ct.member_object_id=kr.target_object_id AND ct.generation = {_PUBLISHED_CLUSTER_GEN} "
-            "WHERE kr.notebook_id=? AND kr.review_status!='rejected'",
+            "WHERE kr.notebook_id=? AND kr.review_status!='rejected' "
+            f"AND {_not_memory('kr')} "
+            f"AND {_not_memory_object_ref('kr.source_object_id', 'kr.notebook_id', 'xs')} "
+            f"AND {_not_memory_object_ref('kr.target_object_id', 'kr.notebook_id', 'xt')}",
             (notebook_id, notebook_id, notebook_id),
         )
 
@@ -318,12 +375,14 @@ class UnifiedKgStore:
             "SELECT cc.canonical_id AS cid, cc.canonical_name AS cname, ko.source_id AS src "
             "FROM concept_clusters cc JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
             "WHERE cc.notebook_id=? AND cc.object_type='concept' "
-            f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN}",
+            f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN} "
+            f"AND {_not_memory_object_ref('cc.member_object_id', 'cc.notebook_id', 'xo')}",
             (notebook_id, notebook_id),
         ).fetchall()
         claims = db.execute(
-            "SELECT id, json_extract(payload,'$.name') AS nm FROM knowledge_objects "
-            "WHERE notebook_id=? AND object_type='claim' AND status!='deprecated'",
+            "SELECT o.id AS id, json_extract(o.payload,'$.name') AS nm FROM knowledge_objects o "
+            "WHERE o.notebook_id=? AND o.object_type='claim' AND o.status!='deprecated' "
+            f"AND {_not_memory('o')}",
             (notebook_id,),
         ).fetchall()
         return clusters, claims
@@ -392,6 +451,9 @@ class UnifiedKgStore:
             "LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "
             f"AND ct.member_object_id=kr.target_object_id AND ct.generation = {_PUBLISHED_CLUSTER_GEN} "
             "WHERE kr.notebook_id=? AND kr.review_status!='rejected' "
+            f"AND {_not_memory('kr')} "
+            f"AND {_not_memory_object_ref('kr.source_object_id', 'kr.notebook_id', 'xs')} "
+            f"AND {_not_memory_object_ref('kr.target_object_id', 'kr.notebook_id', 'xt')} "
             "ORDER BY kr.id",
             (notebook_id, notebook_id, notebook_id),
         )
@@ -571,7 +633,8 @@ class UnifiedKgStore:
         row = db.execute(
             "SELECT derived_generation_counter AS generation, "
             "cluster_generation, community_generation, derived_catchup_from, "
-            "datetime('now') AS ts FROM unified_kg_state WHERE notebook_id = ?",
+            "datetime('now') AS ts, kg_mutation_seq "
+            "FROM unified_kg_state WHERE notebook_id = ?",
             (notebook_id,),
         ).fetchone()
         return {
@@ -580,6 +643,9 @@ class UnifiedKgStore:
             "community_generation": int(row["community_generation"]),
             "catchup_from": row["derived_catchup_from"],
             "ts": str(row["ts"]),
+            # 取号时的变更序号(E4-2):收尾清脏的基准,理由见 PG 孪生 docstring。
+            # SQLite 写锁全局串行,UPDATE 与这条读在同一个写事务里。
+            "kg_mutation_seq": int(row["kg_mutation_seq"]),
         }
 
     @staticmethod
@@ -727,6 +793,7 @@ class UnifiedKgStore:
         # 在飞代整体排除(codex #671 R2 P1):理由见 PG 孪生 docstring
         # (sqlite 的 payload 本就是 TEXT,契约天然满足)。
         # datetime() 双侧归一(#659 R13 教训:存储行的 offset 可能异源)。
+        # 派生自 Memory 的成员行不搬(E4-2 第二道防线,理由见 PG 孪生)。
         return db.execute(
             "SELECT c.member_object_id, c.object_type, "
             "MIN(o.payload) AS payload "
@@ -739,6 +806,7 @@ class UnifiedKgStore:
             "  WHERE u.notebook_id = ? AND derived_building_generation != 0) "
             "AND datetime(c.created_at) >= "
             "datetime(?, '-' || CAST(? AS TEXT) || ' seconds') "
+            f"AND {_not_memory_object_ref('c.member_object_id', 'c.notebook_id', 'xo')} "
             "AND (c.object_type, c.member_object_id) > (?, ?) "
             "GROUP BY c.object_type, c.member_object_id "
             "ORDER BY c.object_type, c.member_object_id "
@@ -963,12 +1031,17 @@ class UnifiedKgStore:
         cluster_count: int,
         now: str,
         published_generation: int,
+        *,
+        input_seq: Optional[int] = None,
     ) -> None:
         """The rebuild end-write: store the input version this rebuild consumed
-        and clear dirty. CRITICAL: MUST NOT touch kg_mutation_seq — omitted
-        from both the column list and the SET so an existing row's counter is
-        PRESERVED. UPDATE 分支带指针守卫(codex #671 R3 P2)——理由见 PG
-        孪生 docstring。"""
+        and clear dirty -- only when ``kg_mutation_seq`` still equals
+        ``input_seq`` (the claim's), otherwise dirty stays 1. CRITICAL: MUST NOT
+        touch kg_mutation_seq — omitted from both the column list and the SET so
+        an existing row's counter is PRESERVED. UPDATE 分支带指针守卫(codex #671
+        R3 P2);清脏守卫(E4-2)与隔离标记(E4-5 交接)
+        在同一条 upsert 里——理由见 PG 孪生 docstring;这边按库的 ``user_version``
+        判断列在不在(``_writes_isolation_marker``)。"""
         object_count = db.execute(
             "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
             (notebook_id,),
@@ -977,14 +1050,18 @@ class UnifiedKgStore:
             "SELECT COUNT(*) AS c FROM knowledge_relations WHERE notebook_id=?",
             (notebook_id,),
         ).fetchone()["c"]
+        marker_column, marker_value, marker_set = (
+            (", memory_isolation_version", ", 1", "memory_isolation_version=1,\n              ")
+            if _writes_isolation_marker(db) else ("", "", "")
+        )
         db.execute(
-            """
+            f"""
             INSERT INTO unified_kg_state
-            (notebook_id, dirty, cluster_input_version, last_rebuild_at, object_count, relation_count, cluster_count, updated_at)
-            VALUES (?, 0, ?, ?, ?, ?, ?, ?)
+            (notebook_id, dirty, cluster_input_version, last_rebuild_at, object_count, relation_count, cluster_count, updated_at{marker_column})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?{marker_value})
             ON CONFLICT(notebook_id) DO UPDATE SET
-              dirty=0,
-              cluster_input_version=excluded.cluster_input_version,
+              dirty=CASE WHEN unified_kg_state.kg_mutation_seq = ? THEN 0 ELSE 1 END,
+              {marker_set}cluster_input_version=excluded.cluster_input_version,
               last_rebuild_at=excluded.last_rebuild_at,
               object_count=excluded.object_count,
               relation_count=excluded.relation_count,
@@ -992,8 +1069,9 @@ class UnifiedKgStore:
               updated_at=excluded.updated_at
             WHERE unified_kg_state.cluster_generation = ?
             """,
-            (notebook_id, cluster_input_version, now, object_count,
-             relation_count, cluster_count, now, published_generation),
+            (notebook_id, 0 if input_seq == 0 else 1, cluster_input_version, now,
+             object_count, relation_count, cluster_count, now, input_seq,
+             published_generation),
         )
 
     # ---------------------------------------------------- canonical relations
@@ -1452,9 +1530,23 @@ class UnifiedKgStore:
     def community_rows_for_summary(
         db: sqlite3.Connection, notebook_id: str, level: int
     ) -> List[sqlite3.Row]:
+        """``(id, member_ids)``;``member_ids`` 不列派生自 Memory 的对象(E4-2)。
+        只对有 Memory 来源的库拼成员过滤、保序(``json_each`` 的 key 序);理由见 PG
+        孪生 docstring。"""
+        if not _holds_memory_source(db, notebook_id):
+            return db.execute(
+                "SELECT id, member_ids FROM communities WHERE notebook_id=? AND level=? "
+                f"AND generation = {_PUBLISHED_COMMUNITY_GEN}",
+                (notebook_id, level, notebook_id)).fetchall()
         return db.execute(
-            "SELECT id, member_ids FROM communities WHERE notebook_id=? AND level=? "
-            f"AND generation = {_PUBLISHED_COMMUNITY_GEN}",
+            "SELECT c.id AS id, CASE WHEN json_valid(c.member_ids) "
+            "AND json_type(c.member_ids) = 'array' THEN "
+            "(SELECT json_group_array(m) FROM (SELECT e.value AS m "
+            "FROM json_each(c.member_ids) e "
+            f"WHERE {_not_memory_object_ref('e.value', 'c.notebook_id', 'xm')} "
+            "ORDER BY e.key)) ELSE c.member_ids END AS member_ids "
+            "FROM communities c WHERE c.notebook_id=? AND c.level=? "
+            f"AND c.generation = {_PUBLISHED_COMMUNITY_GEN}",
             (notebook_id, level, notebook_id)).fetchall()
 
     @staticmethod
@@ -1831,6 +1923,7 @@ class UnifiedKgStore:
                       AND o.status IN ({placeholders})
                 WHERE c.notebook_id = ?
                   AND c.generation = {_PUBLISHED_CLUSTER_GEN}
+                  AND {_not_memory_object_ref('c.member_object_id', 'c.notebook_id', 'xo')}
                 GROUP BY c.object_type, c.canonical_id
               ) g
             ) b
@@ -1893,6 +1986,7 @@ class UnifiedKgStore:
                 f"     AND o.status IN ({placeholders}) "
                 f"WHERE c.notebook_id = ? AND c.object_type = 'concept' "
                 f"AND c.generation = {_PUBLISHED_CLUSTER_GEN} "
+                f"AND {_not_memory('o')} "
                 f"GROUP BY c.canonical_id "
                 f"ORDER BY members DESC, c.canonical_id ASC LIMIT ?",
                 (*USABLE_STATUSES, notebook_id, notebook_id, limit + 1),
@@ -2050,6 +2144,7 @@ class UnifiedKgStore:
                       AND t.notebook_id = r.notebook_id
                       AND t.status IN ({placeholders})
                 WHERE r.notebook_id = ?
+                  AND {_not_memory('r')}
               ) y
             ) x GROUP BY bucket
             """,

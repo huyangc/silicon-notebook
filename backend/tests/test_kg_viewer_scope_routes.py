@@ -16,6 +16,9 @@ import pytest
 from tests.test_kg_viewer_scope import _ev, _memory, _object_id, _source
 
 
+from tests.pre_isolation_graph import build_pre_isolation
+
+
 @pytest.fixture
 def two_users_client(monkeypatch, tmp_path):
     from fastapi.testclient import TestClient
@@ -65,7 +68,7 @@ def two_users_client(monkeypatch, tmp_path):
          "evidence": [_ev("src-s", "el-s-occ")]},
     ], [{"source_local_id": "x", "target_local_id": "c", "edge_type": "related_to",
          "evidence": []}])
-    repo.rebuild_unified_kg(nb)
+    build_pre_isolation(repo, nb)
     with repo._write() as db:
         ids = SimpleNamespace(
             engram_s=_object_id(db, nb, "Engram", "src-s"),
@@ -200,7 +203,7 @@ def test_routes_apply_the_rule_to_clusters_and_legacy_siblings(two_users_client)
          "evidence": [_ev("src-mm", "el-mm-secret")]},
     ], [{"source_local_id": "ph", "target_local_id": "hub", "edge_type": "related_to",
          "evidence": []}])
-    repo.rebuild_unified_kg(nb)
+    build_pre_isolation(repo, nb)
     with repo._write() as db:
         phantom = _object_id(db, nb, "M-PRIVATE Phantom", "src-s")
     phantom_c = repo.cluster_map(nb)[phantom]
