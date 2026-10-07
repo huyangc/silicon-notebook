@@ -4,10 +4,10 @@
 // （`{"expected_through_id": ...}`），只有作者确认过一个确数时才多一个
 // `acknowledged_memory_count`——零条个人记忆的会话，网络上看不出任何新增步骤。
 // 409 `share_disclosure_required` 转成带确数的 `ShareDisclosureRequired`（与报告分享
-// 同一个类型、同一个解析器，见 report-api.ts），其余失败照常走人话层。
+// 同一个类型、同一个解析器，见 share-failure.ts），其余失败照常走人话层。
 
 import { performApiRequest, type ApiRequestOptions } from "./api-client.ts";
-import { throwShareFailure } from "./report-api.ts";
+import { throwShareFailure } from "./share-failure.ts";
 import type { ConversationShareResponse } from "./workspace-model.ts";
 
 /** 披露端点的回执：服务端按「即将公开的确切范围」数出来的个人记忆条数。 */

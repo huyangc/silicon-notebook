@@ -595,12 +595,27 @@ test("真实 403（带 X-User-Message）：那句中文原因就地显示在按�
   expect(screen.getByRole("button", { name: /分享到这一条/ })).not.toBeDisabled();
 });
 
-test("公开成功：结果落在复制按钮上；复制失败时说「已公开，复制失败」", async () => {
-  stubClipboard(true);
+test("公开成功：结果落在公开按钮原来的位置上——「已公开」；不自动复制", async () => {
+  const writeText = stubClipboard();
   await openShareOn(1);
 
   fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
-  const failed = await screen.findByRole("button", { name: /已公开，复制失败/ });
-  expect(failed).toHaveClass("copy-result-failed");
+  const done = await screen.findByRole("button", { name: "已公开" });
+  expect(done).toHaveClass("copy-result-copied");
+  expect(writeText).not.toHaveBeenCalled();
   expect((screen.getByLabelText("分享链接") as HTMLInputElement).value).toContain("/c/gshr-token");
+});
+
+test("确认公开成功后，披露行是作者刚确认的确数，不退回 409 之前取到的旧数", async () => {
+  shareApi.disclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 0 });
+  shareApi.post.mockResolvedValueOnce(jsonResponse(409, {
+    detail: { code: "share_disclosure_required", memory_count: 3, new_memory_count: 3 },
+  }));
+  await openShareOn(1);
+
+  fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
+  fireEvent.click(await screen.findByRole("button", { name: "确认公开" }));
+  await screen.findByLabelText("分享链接");
+  expect(screen.getByText("公开页会包含 3 条你引用到的个人记忆摘录。")).toBeInTheDocument();
+  expect(screen.queryByText(/公开页会包含 1 条/)).toBeNull();
 });

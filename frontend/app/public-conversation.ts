@@ -35,6 +35,10 @@ export type PublicReferenceT = {
   title_truncated?: boolean;
   snippet_truncated?: boolean;
   file_name_truncated?: boolean;
+  /** 这条引用是作者的个人记忆（后端按存储行的 Memory 身份算出的结构化布尔，与 `is_external`
+   *  同类的呈现标记，不带 `memory_id`）。公开页据此把位置标签显示成「作者的个人记忆」，
+   *  不再从位置标签的字面猜。缺字段 = 不是。 */
+  memory?: boolean;
   /** The reference itself is an image element; its snippet is parser-generated
    * caption/description and must not be repeated as visible prose. */
   is_image_reference?: boolean;

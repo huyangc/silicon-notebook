@@ -21,6 +21,12 @@ export type PublicReportReferenceT = {
   title_truncated?: boolean;
   snippet_truncated?: boolean;
   file_name_truncated?: boolean;
+  /**
+   * 这条引用是**作者的个人记忆**（后端投影时按存储行的 Memory 身份算出的结构化布尔，
+   * 同 `is_external` 一类的呈现标记；不带 `memory_id`）。缺字段（旧后端、非记忆引用）
+   * 即「不是」。公开页只认这个布尔，不再从位置标签的字面猜。
+   */
+  memory?: boolean;
 };
 
 export type PublicReportT = {
@@ -91,16 +97,19 @@ export function publicReferenceNumber(
 /**
  * 引用出处的「位置」标签的公开页呈现（报告页与会话页共用，只此一份）。
  *
- * 作者的个人记忆被引用时，后端投影里它的位置标签是内部记号 `Memory`（那条引用保留标题
- * 与摘录、去掉 `memory_id`）。匿名读者看到「Memory」既读不懂，也看不出这不是文档原文，
- * 所以统一换成「作者的个人记忆」（词表：Memory → 记忆，见 docs/ui-vocabulary.md）。
- * 其余位置标签（页码、章节……）原样。
+ * 作者的个人记忆被引用时，那条引用保留标题与摘录（去掉 `memory_id`），后端同时给它一个
+ * 结构化布尔 `memory: true`。匿名读者需要看出这不是文档原文，所以位置标签统一显示
+ * 「作者的个人记忆」（词表：Memory → 记忆，见 docs/ui-vocabulary.md）。
+ *
+ * ⚠ 只读这个布尔，**不**按位置标签的字面猜：芯片手册里一级章节恰好叫 "Memory" 很常见，
+ * 按字符串匹配会把普通文档引用标成个人记忆。其余引用的位置标签（页码、章节……）原样。
  */
-export const MEMORY_LOCATION_MARK = "Memory";
 export const PUBLIC_MEMORY_LOCATION_LABEL = "作者的个人记忆";
-export function publicReferenceLocation(location: string | undefined): string {
-  const text = String(location || "");
-  return text === MEMORY_LOCATION_MARK ? PUBLIC_MEMORY_LOCATION_LABEL : text;
+export function publicReferenceLocation(
+  reference: { memory?: boolean; location?: string } | undefined,
+): string {
+  if (reference?.memory === true) return PUBLIC_MEMORY_LOCATION_LABEL;
+  return String(reference?.location || "");
 }
 
 /** remarkCitations 需要的最小引用形状（结构上兼容 AnswerReference）。 */

@@ -42,8 +42,10 @@ export type ShareTurn = {
   } | null;
 };
 
-/** 披露端点回来的个人记忆条数（服务端口径）。`memoryCount` = 公开页将包含的、你引用到的
- *  不同个人记忆条数；`newMemoryCount` = 其中相对当前已公开范围**新增**的条数。 */
+/** 披露端点（以及会话 409 `share_disclosure_required`）回来的个人记忆条数（服务端口径）。
+ *  `memoryCount` = 公开页将包含的、你引用到的不同个人记忆条数；`newMemoryCount` = 其中相对
+ *  **当前已公开水位**新增的条数（不是相对作者确认值多出几条）。前端据此推出「当前链接里已有
+ *  `memoryCount - newMemoryCount` 条」，所以新增恒 ≤ 总数。 */
 export type ServerMemoryDisclosure = { memoryCount: number; newMemoryCount: number };
 
 const isCount = (value: unknown): value is number =>
@@ -57,6 +59,8 @@ export function readServerMemoryDisclosure(raw: unknown): ServerMemoryDisclosure
   if (!isCount(body.memory_count)) return null;
   const added = body.new_memory_count;
   if (added !== undefined && !isCount(added)) return null;
+  // 新增是总数的子集：新增 > 总数是自相矛盾的回执，当作取数失败，绝不把当前条数压成 0 去猜。
+  if (added !== undefined && added > body.memory_count) return null;
   return { memoryCount: body.memory_count, newMemoryCount: added ?? 0 };
 }
 

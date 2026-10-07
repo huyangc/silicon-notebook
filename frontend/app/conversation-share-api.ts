@@ -68,10 +68,10 @@ export function notebookConversationShareApi(
     load: () => getConversationShare(notebookId, conversationId),
     loadTurns: () => getConversation(conversationId)
       .then((detail) => ({ turns: detail.turns || [], complete: true })),
-    // 没有确认值时按三个参数调用——与接入披露之前逐字相同；带确认值才多第四个参数。
-    share: (expectedThroughId, acknowledgedMemoryCount) => (acknowledgedMemoryCount === undefined
-      ? shareConversation(notebookId, conversationId, expectedThroughId)
-      : shareConversation(notebookId, conversationId, expectedThroughId, acknowledgedMemoryCount)),
+    // 没有确认值时第四个参数是 undefined，`JSON.stringify` 会丢掉它——网络上的请求体与接入
+    // 披露之前逐字节相同（由 `conversation-share-requests.component.test.tsx` 钉请求体字节）。
+    share: (expectedThroughId, acknowledgedMemoryCount) =>
+      shareConversation(notebookId, conversationId, expectedThroughId, acknowledgedMemoryCount),
     loadDisclosure: (throughId) => getConversationShareDisclosure(notebookId, conversationId, throughId),
     unshare: () => unshareConversation(notebookId, conversationId),
   };

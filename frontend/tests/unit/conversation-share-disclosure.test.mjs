@@ -74,7 +74,9 @@ test("readServerMemoryDisclosure accepts the endpoint shape and rejects anything
   assert.deepEqual(readServerMemoryDisclosure({ memory_count: 0 }), { memoryCount: 0, newMemoryCount: 0 });
   // Anything else is a failed fetch (null) -> the fallback copy, never a guessed number.
   for (const bad of [null, undefined, "3", [], {}, { memory_count: -1 }, { memory_count: 1.5 },
-    { memory_count: "2" }, { memory_count: 2, new_memory_count: -1 }, { memory_count: 2, new_memory_count: "1" }]) {
+    { memory_count: "2" }, { memory_count: 2, new_memory_count: -1 }, { memory_count: 2, new_memory_count: "1" },
+    // New is a subset of the total: "1 total, 3 new" contradicts itself -> failed fetch, no guessing.
+    { memory_count: 1, new_memory_count: 3 }]) {
     assert.equal(readServerMemoryDisclosure(bad), null, JSON.stringify(bad));
   }
 });
