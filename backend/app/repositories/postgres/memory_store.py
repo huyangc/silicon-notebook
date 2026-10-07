@@ -2516,7 +2516,7 @@ class MemoryStore:
         seen (READ COMMITTED re-checks a row it waited for).
 
         Order.  Memory rows are locked in Memory-id order, the order the Memory
-        purge locks them in (``_hard_delete_on``, PR-E5: ``SELECT … ORDER BY id
+        purge locks them in (``_hard_delete_on``: ``SELECT … ORDER BY id
         FOR UPDATE``); that shared order is what keeps a share and a purge of
         the same author out of a cycle.  Taking the Memory rows
         before the source rows is not what prevents it — the purge removes the
