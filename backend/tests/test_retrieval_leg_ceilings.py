@@ -854,7 +854,7 @@ def test_mix_overlay_drops_nodes_of_an_excluded_library(repo, monkeypatch):
     assert {v["name"] for v in kg_id_map.values()} == {"Public root"}
 
 
-def test_merge_does_not_repoint_relation_endpoints(repo):
+def test_merge_keeps_relation_endpoints(repo):
     """The overlay's node quote is its incoming edge's evidence, not checked
     against the ceiling (``RetrievalService._scoped_overlay``): sound only
     while no writer re-points a relation's endpoints across sources.  A manual

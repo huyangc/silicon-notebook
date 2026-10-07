@@ -115,7 +115,9 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "副本侧沿用原口径,源侧按快照的决定计数"),
     "backend/app/repositories/sqlite/sharing_store.py": (2, 0, 0, 3, 0,
         "PG 孪生同注记"),
-    "backend/app/repositories/postgres/unified_kg_store.py": (27, 10, 7, 24, 13,
+    "backend/app/repositories/postgres/unified_kg_store.py": (28, 10, 7, 25, 13,
+        "PR-E2·E2-1:弱支撑目标端 ``_WEAK_TARGET_OBJECTS`` 的簇成员读是 A 类"
+        "(已配 cluster 谓词),concept_clusters 出现数与 cluster 谓词各 +1;"
         "A 大头(30 站点已配谓词,含 codex #671 R1 补的 mention_seed_rows;LEFT JOIN 入 ON);B 已参数化:写新代三原语"
         "(write_cluster_map_generation/write_communities_generation/"
         "copy_forward_communities)+催收窗口读+回收分页(动态表名不进正则)"
@@ -127,7 +129,7 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "``community_member_peers`` 的带闸支是同一条 A 类读的第二份文本"
         "(缺省支必须逐字保留,否则无天花板的 run 不再是零行为变化),"
         "所以 community_members 出现数与 community 谓词各多一次"),
-    "backend/app/repositories/sqlite/unified_kg_store.py": (27, 10, 8, 24, 13,
+    "backend/app/repositories/sqlite/unified_kg_store.py": (28, 10, 8, 25, 13,
         "PG 孪生同注记(两侧 members 出现数差异来自 SQLite 无窗口函数的"
         "community_overview_on 分岔)"),
     "backend/app/repositories/source_subgraph_projection.py": (4, 0, 0, 2, 0,
