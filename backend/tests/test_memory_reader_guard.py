@@ -172,6 +172,12 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "KnowledgeStore.notebook_object_evidence_rows_paged": CALLER_FILTERED,
         # key-bounded (KG detail, completion, by-id)
         "KnowledgeStore.get_object_row": KEY_BOUNDED,
+        # PR-E7b (D-3): the public report page's ownership read -- by the cited
+        # object ids, answering only each object's library (no content); which
+        # citation may show is decided by report_foreign_memory_ids
+        # (SourceStore.source_owners is its sources-table twin, outside the
+        # three tables this guard scans)
+        "KnowledgeStore.object_owners": KEY_BOUNDED,
         "KnowledgeStore.node_context": KEY_BOUNDED,
         "_NODE_CONTEXT_DEFINES_SQL": KEY_BOUNDED,
         "_node_context_cluster_sql": KEY_BOUNDED,
