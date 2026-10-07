@@ -123,3 +123,44 @@ def test_a_global_run_reads_nothing_from_an_unselected_mounted_library(
                     "search_chunks"} <= walked, walked
     finally:
         repo.close()
+
+
+def test_a_reader_that_skips_the_override_still_yields_nothing(tmp_path, monkeypatch):
+    """Every participant reader today goes through the participant override, so
+    the runs above never even name the mounted library -- ``ceilings_total`` is
+    the boundary behind that.  Here the federated KG producer is made to return
+    the mounted library's hits as well (a reader that skipped the override, or
+    a library mounted after the plan): the result boundary
+    (``filter_retrieval_items`` -> ``covers_notebook``) must still drop every
+    one of them."""
+    import copy
+
+    from app.services.retrieval_candidates import CandidateRetrievalService
+
+    repo = kit.make_repo(tmp_path, monkeypatch)
+    try:
+        anchor, mounted = _anchor_mounting_an_unselected_library(repo)
+        leaked = repo.retrieval.candidates._retrieve_scored(mounted.id, TERM)
+        assert any(SECRET in json.dumps(hit.payload, ensure_ascii=False) for hit in leaked)
+        real = CandidateRetrievalService._federated_retrieve_impl
+        injected = []
+
+        def with_the_mounted_library(self, *args, **kwargs):
+            hits = list(real(self, *args, **kwargs))
+            for hit in leaked:
+                stray = copy.deepcopy(hit)
+                stray.notebook_id, stray.tier = mounted.id, "base"
+                hits.append(stray)
+            injected.append(len(leaked))
+            return hits
+
+        monkeypatch.setattr(CandidateRetrievalService, "_federated_retrieve_impl",
+                            with_the_mounted_library)
+        agent = kit.ScriptedAgent(_reflects(repo, anchor.id), plan_query=TERM)
+        answerer = kit.bind_models(repo, agent)
+        result = kit.global_answer(repo, [anchor.id], f"{TERM}的结论")
+
+        assert injected, "the federated KG producer ran with the stray hits"
+        _assert_nothing_from(mounted.id, answerer, result)
+    finally:
+        repo.close()
