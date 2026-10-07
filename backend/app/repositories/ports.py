@@ -2672,12 +2672,14 @@ class UnifiedKgStorePort(Protocol):
     def mention_edges_count(db: object, notebook_id: str) -> int: ...
     @staticmethod
     def mention_seed_rows(db: object, notebook_id: str) -> object: ...
+    # E2-1 (PR-E2): ``with_source_id`` adds the sample relation's own
+    # ``source_id`` column (fast-path verification); ``allowed_source_ids`` /
+    # ``viewer_id`` (at most one) resolve names only for sample relations that
+    # themselves come from an in-ceiling source / are not derived from another
+    # user's Memory.  Without keywords the statement and its columns are the
+    # historical ones.
     @staticmethod
-    # ``allowed_source_ids`` (PR-E2, E2-1 implements): ``None`` = unchanged; a
-    # collection = only rows whose sample relation itself comes from those
-    # sources (empty = []), and each returned row carries an extra
-    # ``source_id`` column.
-    def relation_endpoint_name_rows(db: object, notebook_id: str, relation_ids: list[str], *, allowed_source_ids: Sequence[str] | None = None) -> list[Any]: ...
+    def relation_endpoint_name_rows(db: object, notebook_id: str, relation_ids: list[str], *, allowed_source_ids: Iterable[str] | None = None, viewer_id: str | None = None, with_source_id: bool = False) -> list[Any]: ...
     @staticmethod
     def relation_support_rows(
         db: object, notebook_id: str, triples: list[tuple[str, str, str]]
@@ -2806,10 +2808,12 @@ class UnifiedKgStorePort(Protocol):
         *,
         after: "tuple | None" = None,
     ) -> "tuple[int, tuple | None]": ...
+    # E2-1 (PR-E2): with ``allowed_source_ids`` (the run's frozen ceiling;
+    # empty = deny all) or ``viewer_id`` (at most one), keep only edges whose
+    # TARGET still has an object supported inside the ceiling / not derived
+    # from another user's Memory; the gate is applied before ``LIMIT``.
+    # Without either keyword the statement is the historical one.
     @staticmethod
-    # ``allowed_source_ids`` (PR-E2, E2-1 implements): ``None`` = unchanged; a
-    # collection = only edges whose TARGET end is still supported by those
-    # sources (empty = []).
     def weak_support_relation_rows(
         db: object,
         notebook_id: str,
@@ -2817,7 +2821,8 @@ class UnifiedKgStorePort(Protocol):
         source_max: int,
         limit: int,
         *,
-        allowed_source_ids: Sequence[str] | None = None,
+        allowed_source_ids: Iterable[str] | None = None,
+        viewer_id: str | None = None,
     ) -> list[Any]: ...
     def mention_alias_candidate_batches(
         self, claims: Sequence[tuple[str, str]], aliases: Sequence[str]

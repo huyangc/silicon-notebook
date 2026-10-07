@@ -484,11 +484,12 @@ def test_relation_with_no_in_ceiling_row_is_not_rendered(repo):
     assert "relations:" not in block and "kind_of" not in block, block
 
 
-def _mk_promoted_object(repo):
+def _mk_promoted_object(repo, *, title="Private Current Name"):
     """A public library holding ``ko-prom``, promoted from a private library:
     its evidence still points at the private IMAGE element ``el-priv`` (with
-    an asset and a caption) of the private source ``s-priv``, and its payload
-    at a private knowhow row.  Returns ``(public notebook, hit)``."""
+    an asset, a caption and a knowhow locator) of the private source
+    ``s-priv`` -- titled ``title``, no file name -- and its payload at a
+    private knowhow row.  Returns ``(public notebook, hit)``."""
     from app.models.schemas import Evidence
     from app.services.retrieval import RetrievedKnowledge
 
@@ -497,12 +498,13 @@ def _mk_promoted_object(repo):
     _mk_src(repo, private.id, "s-priv")
     payload = {"name": "promoted", "table_id": "kt-priv", "rows": ["row-priv"]}
     with repo._write() as db:
-        db.execute("UPDATE sources SET title='Private Current Name' WHERE id='s-priv'")
+        db.execute("UPDATE sources SET title=?, file_name='' WHERE id='s-priv'", (title,))
         db.execute(
             "INSERT INTO source_elements(id,source_id,element_type,location_label,text,"
             "metadata,created_at) VALUES ('el-priv','s-priv','image','p1',"
             "'PRIVATE CURRENT TEXT',?,'2026-01-01T00:00:00Z')",
-            (json.dumps({"asset_id": "asset-priv", "caption": "PRIVATE CAPTION"}),))
+            (json.dumps({"asset_id": "asset-priv", "caption": "PRIVATE CAPTION",
+                         "knowhow": {"table_id": "kt-priv-el", "row_id": "row-priv-el"}}),))
         db.execute(
             "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,payload,"
             "evidence,source_id,created_at,updated_at) VALUES "
@@ -523,7 +525,10 @@ def _mk_promoted_object(repo):
     return public, hit
 
 
-def test_promoted_object_never_shows_the_promoters_private_text_or_title(repo):
+@pytest.mark.parametrize("private_title", ["Private Current Name", "   "])
+def test_promoted_object_never_shows_the_promoters_private_text_or_title(
+    repo, monkeypatch, private_title,
+):
     """PR-E2·E2-4(台账 B-11):一个晋升进公共库的对象,证据仍指向推广者私有库的
     元素与来源。提示词、引用锚点与引用卡里只出现存储时的片段与标题:不出现私有
     元素的现文、私有来源的现名,也不带私有库的来源 / 元素指针,于是没有私有图片、
@@ -531,9 +536,22 @@ def test_promoted_object_never_shows_the_promoters_private_text_or_title(repo):
 
     变异锚点:``_enrich_evidence`` 去掉库谓词 → 提示词与片段变成私有现文;
     ``knowledge_context`` 不做外库快照 → 锚点标题是私有现名、锚点带私有图;
-    ``citations_from`` 不按条目判外库 → 卡片带私有图与现名。都红。"""
-    public, hit = _mk_promoted_object(repo)
+    ``citations_from`` 不按条目判外库 → 卡片带私有图与现名。都红。
+
+    第二格:私有来源没有标题(纯空白)也没有文件名——外库判定必须看来源行的
+    所属库,而不是「有没有显示名」(复审 P1-1:判定曾依赖显示名,这一格全漏)。
+    knowhow 定位的批量读也不许收到外库元素(复审 P3-1)。"""
+    public, hit = _mk_promoted_object(repo, title=private_title)
     evidence_context = repo._runtime.evidence_context_component
+    knowhow_reads: list = []
+    real_knowhow_refs_for = evidence_context.knowhow_refs_for
+
+    def spy_knowhow_refs_for(element_ids):
+        element_ids = list(element_ids)
+        knowhow_reads.extend(element_ids)
+        return real_knowhow_refs_for(element_ids)
+
+    monkeypatch.setattr(evidence_context, "knowhow_refs_for", spy_knowhow_refs_for)
     block, id_map = repo._answer_context(public.id, [hit])
     (key,) = id_map
     anchors = repo._parse_answer_anchors(f"claim [{key}]", id_map)
@@ -553,6 +571,7 @@ def test_promoted_object_never_shows_the_promoters_private_text_or_title(repo):
     for private in ("PRIVATE CURRENT TEXT", "Private Current Name", "PRIVATE CAPTION",
                     "asset-priv", "kt-priv", "el-priv", "s-priv"):
         assert private not in rendered, private
+    assert "el-priv" not in knowhow_reads
     assert "stored snapshot" in block
     assert id_map[key]["source_title"] == "Stored Title"
     assert id_map[key]["source_foreign"] is True

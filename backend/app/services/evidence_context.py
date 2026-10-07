@@ -11,7 +11,7 @@ import re
 from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
 
 from app.core.config import Settings
-from app.domain.citation_origin import foreign_notebook_id
+from app.domain.citation_origin import foreign_notebook_id, owned_by_another_library
 from app.domain.reflect_action import (
     EXTERNAL_EVIDENCE_CONTEXT_CHARS, fold_control_characters,
 )
@@ -268,13 +268,8 @@ def _live_kg_evidence(filtered: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
 FOREIGN_SOURCE_KEY = "source_foreign"
 
 
-def _foreign_owned(row: Mapping[str, Any], owner_notebook_id: str) -> bool:
-    """THE rule "this source row belongs to another library than the citing
-    entry's" (ledger B-11): the row names an owning library and it is not
-    ``owner_notebook_id``.  A row without an owner (a vanished source) is not
-    called foreign -- there is nothing to resolve from it anyway."""
-    owner = str(row.get("notebook_id") or "")
-    return bool(owner) and owner != owner_notebook_id
+# The ledger B-11 rule, defined once in ``domain.citation_origin``.
+_foreign_owned = owned_by_another_library
 
 
 def _snapshot_foreign_entry(value: MutableMapping[str, Any]) -> None:
@@ -497,6 +492,24 @@ class EvidenceContextService:
             for source_id, value in self.citation_source_info(source_ids).items()
             if value["title"]
         }
+
+    def _source_rows_and_info(
+        self, source_ids: Iterable[str],
+    ) -> tuple[Mapping[str, Mapping[str, Any]], dict[str, dict[str, str]]]:
+        """One bounded ``source_metadata`` read, returned twice: the RAW rows
+        (every existing source, with its ``notebook_id`` whether or not it has a
+        display name) and ``citation_source_info`` built from those same rows.
+
+        The ledger B-11 "another library's source" decision is made on the raw
+        rows: ``citation_source_info`` leaves out a source with neither a title
+        nor a file name (a blank-titled source, a Memory source), and judging
+        ownership on its result would call such a foreign source "own" and keep
+        its pointers (fail-open).  No ids -> no read, as before."""
+        ids = list(dict.fromkeys(str(source_id) for source_id in source_ids if source_id))
+        if not ids:
+            return {}, {}
+        rows = self.source_metadata(ids)
+        return rows, self.citation_source_info(ids, metadata=rows)
 
     def citation_source_info(
         self,
@@ -1318,13 +1331,13 @@ class EvidenceContextService:
             _admit(hits, budget)
         _attest_kg_anchor_evidence(evidence_by_id)
 
-        citation_source_info = self.citation_source_info(
+        source_rows, citation_source_info = self._source_rows_and_info(
             value.get("source_id", "") for value in evidence_by_id.values()
         )
         for key, value in evidence_by_id.items():
             source_id = str(value.get("source_id") or "")
             source_info = citation_source_info.get(source_id) or {}
-            if _foreign_owned(source_info, origin_by_key[key]):
+            if _foreign_owned(source_rows.get(source_id) or {}, origin_by_key[key]):
                 _snapshot_foreign_entry(value)
                 continue
             if source_info.get("title"):
@@ -1735,14 +1748,14 @@ class EvidenceContextService:
                 filtered.append((tier, hit_notebook_id, evidence, hit_origin))
         filtered = _live_kg_evidence(filtered)
 
-        citation_source_info = self.citation_source_info(
+        source_rows, citation_source_info = self._source_rows_and_info(
             row[2].source_id for row in filtered
         )
         # 台账 B-11:来源属于别的库(晋升进公共库的对象,证据仍指向推广者的私有库)
         # 的那几行做成快照卡——证据存储的标题与片段,不带来源 / 元素指针,于是
         # 既不按全局 id 现读那一库来源的现名,也不给附图与 knowhow 定位候选。
         foreign = [
-            _foreign_owned(citation_source_info.get(evidence.source_id) or {}, origin)
+            _foreign_owned(source_rows.get(str(evidence.source_id or "")) or {}, origin)
             for _tier, _nb, evidence, origin in filtered
         ]
         # Task 12（引用跳转）: 批量按 element_id 查一次 knowhow 定位标签，不管
@@ -1754,6 +1767,9 @@ class EvidenceContextService:
 
         citations: list[Citation] = []
         for (tier, hit_notebook_id, evidence, _origin), is_foreign in zip(filtered, foreign):
+            # One decision: a foreign row's card has no element, so neither the
+            # knowhow lookup below nor any later image read can name one.
+            element_id = "" if is_foreign else evidence.element_id
             source_info = (
                 {"title": str(evidence.source_title or "")} if is_foreign
                 else citation_source_info.get(evidence.source_id) or {}
@@ -1766,13 +1782,13 @@ class EvidenceContextService:
             citations.append(Citation(
                 label=citation_label,
                 source_id="" if is_foreign else evidence.source_id,
-                element_id="" if is_foreign else evidence.element_id,
+                element_id=element_id,
                 location_label=evidence.location_label,
                 quoted_span=evidence.quoted_span,
                 source_file_name=source_info.get("file_name", ""),
                 tier=tier,
                 notebook_id=hit_notebook_id,
-                knowhow=None if is_foreign else knowhow_refs.get(evidence.element_id),
+                knowhow=knowhow_refs.get(element_id) if element_id else None,
             ))
         return citations
 

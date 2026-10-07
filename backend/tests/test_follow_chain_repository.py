@@ -248,3 +248,85 @@ def test_truncated_supernode_direct_guard_fails_closed(repo):
     assert repo._follow_chain(
         nb.id, ids["Premise A"], edge_type="derived_from",
         max_fan_out=8).inferences == []
+
+
+def _promote_first_hop_evidence(repo, nb, relation_ids):
+    """The first hop's relation lives in ``nb`` but its evidence points at a
+    private library's source and IMAGE element (asset, caption, knowhow
+    locator): the shape a promoted relation leaves (ledger B-11)."""
+    private = repo.create_notebook(NotebookCreate(name="private"))
+    metadata = {"asset_id": "asset-priv", "caption": "PRIVATE CAPTION",
+                "knowhow": {"table_id": "kt-priv", "row_id": "row-priv"}}
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id, notebook_id, title, source_type, created_at, updated_at) "
+            "VALUES ('s-priv', ?, 'Private Current Name', 'markdown', "
+            "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')", (private.id,))
+        db.execute(
+            "INSERT INTO source_elements(id,source_id,element_type,location_label,text,"
+            "metadata,created_at) VALUES ('el-priv','s-priv','image','p1',"
+            "'PRIVATE CURRENT TEXT',?,'2026-01-01T00:00:00Z')", (json.dumps(metadata),))
+        db.execute(
+            "UPDATE knowledge_relations SET evidence=? WHERE id=?",
+            (json.dumps([{
+                "quote": "Premise A leads to Bridge B", "confidence": 1.0,
+                "source_id": "s-priv", "element_id": "el-priv",
+                "source_title": "Stored Title",
+            }]), relation_ids[0]))
+
+
+PRIVATE_MARKS = ("Private Current Name", "PRIVATE CURRENT TEXT", "PRIVATE CAPTION",
+                 "asset-priv", "kt-priv", "el-priv", "s-priv")
+
+
+def test_promoted_hop_anchor_is_a_pointer_free_snapshot_without_a_scope(repo):
+    """PR-E2·E2-4(台账 B-11,推导链一面):无 scope 的运行里,关系在本库、证据
+    指向另一库来源与元素的一跳,锚点只有存储的标题与引文,没有来源 / 元素
+    指针,于是不会按全局 id 现读那一库来源的现名、也不挂那张私有图。
+
+    变异锚点:``GraphRetrievalService._snapshot_foreign_relation_evidence``
+    不改写外库条目 → 锚点标题变成私有现名并挂上私有图,红。"""
+    from app.services.kg.follow_chain import render_follow_chain_context
+
+    nb, ids, relation_ids = _seed_chain(repo)
+    _promote_first_hop_evidence(repo, nb, relation_ids)
+    result = repo.retrieval.follow_chain(
+        nb.id, ids["Premise A"], edge_type="derived_from", direction="out")
+    assert len(result.inferences) == 1
+    _block, id_map = render_follow_chain_context(
+        result.inferences, active_notebook_id=nb.id)
+    first = id_map["k2001"]
+    assert (first["source_id"], first["element_id"]) == ("", "")
+    assert first["source_title"] == "Stored Title"
+    anchors = repo._parse_answer_anchors("claim [k2001]", id_map)
+    repo._runtime.evidence_context_component.attach_citation_images(
+        [(anchor, (anchor.element_id,)) for anchor in anchors])
+    rendered = json.dumps(
+        [{k: str(v) for k, v in first.items()},
+         [anchor.model_dump() for anchor in anchors]], ensure_ascii=False)
+    for mark in PRIVATE_MARKS:
+        assert mark not in rendered, mark
+    assert anchors[0].source_title == "Stored Title"
+    assert not anchors[0].images
+
+
+def test_promoted_hop_never_reaches_a_scoped_run(repo):
+    """Under a source ceiling the promoted hop has no in-ceiling evidence and
+    the chain is dropped; nothing of the private library is rendered."""
+    from app.services.kg.follow_chain import render_follow_chain_context
+    from app.services.source_scope import source_scope_context
+
+    nb, ids, relation_ids = _seed_chain(repo)
+    _promote_first_hop_evidence(repo, nb, relation_ids)
+    with source_scope_context(
+        nb.id, {"mode": "include", "source_ids": ["s-other"], "narrowed": True}, None,
+    ):
+        result = repo.retrieval.follow_chain(
+            nb.id, ids["Premise A"], edge_type="derived_from", direction="out")
+    block, id_map = render_follow_chain_context(
+        result.inferences, active_notebook_id=nb.id)
+    rendered = block + json.dumps(
+        {k: {f: str(v) for f, v in value.items()} for k, value in id_map.items()},
+        ensure_ascii=False)
+    for mark in PRIVATE_MARKS:
+        assert mark not in rendered, mark

@@ -10,9 +10,14 @@ only admits sources of THIS library, so the other library's item is dropped
 for every viewer -- even for A, who owns that library -- and no current text
 of it is ever shown.
 
-That branch also passes ``owner_notebook_id``; removing it is an equivalent
-mutation here (the item is dropped either way, by the scope's actual-source
-check), so this test pins the outcome, not the keyword.
+That branch also passes ``owner_notebook_id``.  For an item that names the
+other library's source (the shape here) removing it changes nothing -- the
+scope drops the item either way -- so this test pins the outcome, not the
+keyword.  The two differ only for a MIXED pointer (an item naming a source of
+this library but an element of another): with the owner the element is not
+read, the item keeps its stored span and is shown; without it the element's
+real source is read back, judged unreadable and the item is dropped.  Neither
+shows the other library's text.
 """
 from __future__ import annotations
 

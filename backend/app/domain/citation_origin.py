@@ -42,3 +42,21 @@ def foreign_notebook_id(origin: object, active_notebook_id: object) -> str:
     if not origin_id:
         return ""
     return "" if origin_id == str(active_notebook_id or "") else origin_id
+
+
+def owned_by_another_library(source_row: object, owner_notebook_id: object) -> bool:
+    """THE ledger B-11 rule (PR-E2 E2-4): does this source row belong to
+    another library than the entry that cites it?
+
+    ``source_row`` is a RAW source row (a mapping with ``notebook_id``) --
+    never a display projection that may leave a nameless source out.  The row
+    names an owning library and it is not ``owner_notebook_id``.  A row
+    without an owner (a vanished source) is not called foreign: there is
+    nothing to resolve from it anyway.  Shared by the KG answer context, the
+    citation cards and the derived-chain hydration, which turn such an entry
+    into a pointer-free snapshot (stored title and excerpt, no source /
+    element pointer)."""
+    getter = getattr(source_row, "get", None)
+    owner = str((getter("notebook_id") if getter else "") or "")
+    return bool(owner) and owner != str(owner_notebook_id or "")
+
