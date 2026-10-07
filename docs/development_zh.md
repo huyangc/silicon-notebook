@@ -56,6 +56,13 @@
   `sharing_store.source_notebook_id(viewer_id=...)` 已经如此）；早于它的读者
   （`postgres/chunk_store.py` 里的 Memory 属主判断）仍自带手写谓词，在改动它们的变更里
   迁入。
+- `mount_sql.py` 的参与集**随查看者**（M3）：解析挂载的 store 方法（`participant_*`、
+  `resolve_participants`、`notebook_has_usable_base_kg`、`mounted_bases_row`、
+  `mounted_base_ids`、`any_mounted_has_kg*`、`follow_start_row`）都收必填 `viewer_id`。
+  服务层传 `retrieval_run.current_viewer_id()`（运行的 actor，否则请求用户，否则 `''`，
+  只剩公共库与 `everyone`），或在 `backend/tests/test_mount_viewer_guard.py` 登记过的
+  调用点显式传查看者；一律不许写字面量。按参与集建的进程级缓存以查看者的有效集合为键
+  （`graph_retrieval._participant_graph_cache_key`）。
 - 检索范围每类入口只有一个安装点：所有问答入口经 `AskService._retrieval_ceiling`
   （`source_scope.default_ceiling_context`，读取器来自 `RepositoryRuntime.ceiling_readers()`），
   报告各阶段经 `ReportExecutionCoordinator._default_ceiling` / `ReportEngine._refreshed_ceiling`，

@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-10-08（新增 §55 知识图谱里的 Memory 只属于本人；§56 会话公开分享先告知个人记忆，公开页每次打开复核用到的库；此前 2026-10-07 新增 §54 检索各腿按本次运行的来源天花板取数；此前 2026-09-30 新增 §52 笔记本拷贝不带 Memory；§53 成员退出与 Memory 的彻底删除；此前 2026-09-29 新增 §47 当前库保底席位与原文段下限；§48 全局问答引用核对：部分失败照常交付；§49 KG 对象定义的来源归因与 KG 详情按查看者过滤；§50 全局问答集合枚举引用按冻结参与集；§51 集合枚举与按篇读取原文认本次勾选的来源）
+更新日期：2026-10-08（新增 §55 知识图谱里的 Memory 只属于本人；§56 会话公开分享先告知个人记忆，公开页每次打开复核用到的库；§57 晋升对象由公共知识库自己承载出处；§58 挂载只对能读被挂库的人生效；此前 2026-10-07 新增 §54 检索各腿按本次运行的来源天花板取数；此前 2026-09-30 新增 §52 笔记本拷贝不带 Memory；§53 成员退出与 Memory 的彻底删除；此前 2026-09-29 新增 §47 当前库保底席位与原文段下限；§48 全局问答引用核对：部分失败照常交付；§49 KG 对象定义的来源归因与 KG 详情按查看者过滤；§50 全局问答集合枚举引用按冻结参与集；§51 集合枚举与按篇读取原文认本次勾选的来源）
 
 对照依据：[产品方案](silicon_notebook_fangan.md)。章节号指向原方案；“扩展”表示交付时延伸能力，不冒称原方案已有独立条款。
 
@@ -473,6 +473,12 @@ Agent profile、opaque token、scope/allowlist/过期与撤销、公开 onboardi
 **已交付，2026-10-08；§6 晋升（贡献到公共知识库）的延伸（来源范围与权限整改计划 PR-E8，审计 B-12；呈现方式按用户 2026-09-29 裁决「显示为可见来源」）。** 批准晋升时，公共库为每个原件（推广者的来源；个人记忆晋升时是那条记忆）建立或复用一个可见的「晋升自：<原标题>」来源（个人记忆为「晋升自个人记忆：<记忆标题>」），每条证据成为它的一个元素（通用晋升取原元素现文，读不到取保存的摘录；个人记忆晋升只保留成员批准的摘录；原件是成员个人记忆来源的条目一律丢弃；没有文本的丢弃），证据改指它们，原来源与所属笔记本只作展示键保留；合并进既有公共对象时只改写新进来的条目。于是挂载公共库的笔记本（挂载库只开放可见来源）与全局问答都能召回并引用晋升对象，引用卡显示原件标题、打开公共库的「晋升自」来源，推广者删除私有笔记本也不受影响。这类来源在详情显示类型「收录」，列表徽标为「已收录」或「不在图谱中」；不占上传文档名额；可删除（摘掉它的证据条目，只删失去全部证据的条目，被合并的原生条目保留）；不可重新解析，抽取入口拒绝它，不进任何文档管线；批准与删除并发时批准等待并重新写入来源。存量由迁移 PostgreSQL 0068 / SQLite v88 改写并把受影响的库标记待重建，双后端结果一致，SQLite 迁移用冻结副本且与运行时规则钉成相等。
 
 当前合同见[Memory 与 Agent MCP][memory]中的晋升段落与[运维][ops]的「公共知识库里晋升对象的出处」一节；回归入口：[批准与问答场景](backend/tests/promotion_provenance_cases.py)、[SQLite](backend/tests/test_promotion_provenance.py)、[PostgreSQL 孪生与计划钉子](backend/tests/postgres/test_promotion_provenance_pg.py)、[迁移场景](backend/tests/promotion_provenance_migration_cases.py)、[SQLite 迁移](backend/tests/test_promotion_provenance_migration.py)、[PostgreSQL 迁移](backend/tests/postgres/test_promotion_provenance_migration_pg.py)。
+
+## 58. 挂载只对能读被挂库的人生效（2026-10-08）
+
+**已交付，2026-10-08；「读权 ⇒ 可挂载」的延伸（来源范围与权限整改计划 PR-E6，用户裁决 M3，审计 N-6）。** 参与集随查看者解析：一条有效的挂载边，只对挂载人本人、自己本来就能读被挂库的人，以及公共库与 `everyone` 授权库的所有人生效。主人把私有库挂到共享笔记本后，成员提问时它在所有检索通道（段落、关键词、精确标识符、知识图谱、PPR、关系、弱支撑、叠加、社群、推导链）上零贡献，来源/资产代理与 MCP 取证对它一律 404，笔记本摘要里看不到它的名字与图谱标志；主人一切照旧；成员另获读权后即刻生效。查看者由 `current_viewer_id()` 给出（检索运行的 actor → 请求用户 → 无人），报告、全局问答与离开后接回的运行在工作线程上按运行的 actor 判，不取线程里的请求上下文；默认来源天花板按其 owner 解析参与集；无 actor 的后台路径只剩公共库与 `everyone`。联邦关系图、PPR 图与规模 PPR 合成图的进程缓存键在查看者有效集合窄于全部有效边时带上该集合的指纹：集合相同的人共用一份，含私有库的图不与读不了它的成员共用。公开页按分享创建者复核挂载（会话与报告两路）。
+
+当前合同见[产品/API][product]「挂载只对能读被挂库的人生效」与[开发规范][dev]的 `mount_sql` 条目；回归入口：[端到端](backend/tests/test_mount_viewer_e2e.py)（[PostgreSQL 孪生](backend/tests/postgres/test_mount_viewer_e2e_pg.py)）、[调用点守卫](backend/tests/test_mount_viewer_guard.py)、[store 矩阵](backend/tests/test_mount_viewer_store.py)、[片段契约](backend/tests/test_mount_sql_contract.py)、[公开页复核场景](backend/tests/public_page_mount_recheck_cases.py)。
 
 [product]: docs/product-and-api_zh.md
 [flow]: docs/product-and-api_zh.md#产品流程

@@ -69,6 +69,15 @@ contributor constraints, not a second implementation history.
   `sharing_store.source_notebook_id(viewer_id=...)` already do). Readers that predate it
   (the Memory-owner predicates in `postgres/chunk_store.py`) still carry their own
   predicate and move onto it in the change that touches them.
+- `mount_sql.py`'s participant set follows the viewer (M3): the store methods that
+  resolve a mount (`participant_*`, `resolve_participants`,
+  `notebook_has_usable_base_kg`, `mounted_bases_row`, `mounted_base_ids`,
+  `any_mounted_has_kg*`, `follow_start_row`) take a required `viewer_id`. Service code
+  passes `retrieval_run.current_viewer_id()` (the run's actor, else the request user,
+  else `''`, which leaves only public and `everyone` libraries) or an explicit viewer
+  at a site registered in `backend/tests/test_mount_viewer_guard.py`; never a literal.
+  Process caches built over a participant set key on the viewer's effective set
+  (`graph_retrieval._participant_graph_cache_key`).
 - Retrieval scopes have one installation per entry kind: every Ask entry goes through
   `AskService._retrieval_ceiling` (`source_scope.default_ceiling_context` over
   `RepositoryRuntime.ceiling_readers()`), report phases through
