@@ -548,22 +548,39 @@ class KnowledgeQueryService:
         Elements are re-read only from ``notebook_id`` -- the cluster's own
         library (ledger B-11, PR-E2 E2-4): an item of a member promoted from a
         private library keeps its stored quote and names its stored source,
-        which the viewer scope then judges like any other."""
+        which the viewer scope then judges like any other.
+
+        ``scope`` ``None`` (no viewer rule) judges nothing as unreadable; the
+        one enrichment read and the pointer rule below are the same."""
         attached_items = [item for entry in attached for item in entry["evidence"]]
+        # _enrich_evidence keeps only dict items: hand it exactly those, so the
+        # raw and enriched lists align index by index.
+        raws = [item for item in evidence + attached_items if isinstance(item, dict)]
+        own = sum(1 for item in evidence if isinstance(item, dict))
         with self.database.connect() as db:
             enriched = self.knowledge._enrich_evidence(
-                db, evidence + attached_items, owner_notebook_id=notebook_id,
+                db, raws, owner_notebook_id=notebook_id,
             )
-        # _enrich_evidence keeps only dict items, and filter_evidence already
-        # dropped everything else, so the two lists align index by index.
-        unreadable = {
-            id(raw) for raw, item in zip(evidence + attached_items, enriched)
+        unreadable = set() if scope is None else {
+            id(raw) for raw, item in zip(raws, enriched)
             if not scope.source_readable(item.get("source_id"))
         }
+        # B-11 mixed pointer: an item naming this library's source but an
+        # element of ANOTHER library comes back with its locator cleared
+        # (``element_id`` ""); the raw ``members[].evidence`` /
+        # ``attached[].evidence`` lists carry that same cleared locator, never
+        # the other library's element id the top-level evidence dropped.
+        cleared = {
+            id(raw): {**raw, "element_id": ""}
+            for raw, item in zip(raws, enriched)
+            if raw.get("element_id") and not item.get("element_id")
+        }
         for entry in [*members, *attached]:
-            entry["evidence"] = [i for i in entry["evidence"] if id(i) not in unreadable]
+            entry["evidence"] = [
+                cleared.get(id(i), i) for i in entry["evidence"] if id(i) not in unreadable
+            ]
         return [
-            item for raw, item in zip(evidence, enriched[:len(evidence)])
+            item for raw, item in zip(raws[:own], enriched[:own])
             if id(raw) not in unreadable
         ]
 
@@ -705,17 +722,11 @@ class KnowledgeQueryService:
             for object_id in member_ids
             for item in by_id.get(object_id, {}).get("evidence", [])
         ]
-        if scope is None:
-            with self.database.connect() as db:
-                # 台账 B-11:元素只从本簇所在的库现读(晋升成员的外库证据保留
-                # 存储时的摘录)。
-                evidence = self.knowledge._enrich_evidence(
-                    db, evidence, owner_notebook_id=notebook_id,
-                )
-        else:
-            evidence = self._viewer_resolved_evidence(
-                scope, evidence, members, attached, notebook_id,
-            )
+        # 台账 B-11:元素只从本簇所在的库现读(晋升成员的外库证据保留存储时的
+        # 摘录),指向别库元素的条目在顶层与原始列表里都清掉定位符。
+        evidence = self._viewer_resolved_evidence(
+            scope, evidence, members, attached, notebook_id,
+        )
         return {
             "canonical_id": canonical_id,
             "canonical_name": name,

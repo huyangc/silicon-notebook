@@ -23,7 +23,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.models.schemas import NotebookCreate
+from tests import test_kg_viewer_scope as kg_viewer_scope
 from tests.test_kg_viewer_scope import (  # noqa: F401  (``repo`` is a fixture)
     _ev,
     _source,
@@ -57,3 +60,57 @@ def test_viewer_scoped_concept_detail_never_reads_another_librarys_element(repo)
     other = as_user(s.b, repo.concept_detail, s.nb, canonical)
     assert "PRIVATE CURRENT TEXT" not in json.dumps(other, ensure_ascii=False, default=str)
     assert "stored snapshot" not in [item.get("element_text") for item in other["evidence"]]
+
+
+def check_mixed_pointer_never_reaches_the_raw_lists(
+    repo, helpers, b_memory, *, update_evidence_sql,
+):
+    """A MIXED pointer -- an item naming this library's source but an element
+    of ANOTHER library (``el-priv``, in A's private notebook) -- on a cluster
+    member AND on an attached neighbour.  Enrichment clears its locator in the
+    top-level ``evidence``; ``members[].evidence`` and ``attached[].evidence``
+    are the raw stored items and must carry that same cleared locator, never
+    the other library's element id (codex #823 r2 P2).  ``b_memory`` selects
+    the branch: with B's Memory in the library A's view runs under the viewer
+    rule, without it the detail is read unfiltered."""
+    s = helpers.build_scenario(repo, b_memory=b_memory)
+    private = helpers.as_user(s.a, repo.create_notebook, NotebookCreate(name="private")).id
+    mixed = {**helpers._ev("src-s", "el-priv"), "quoted_span": "mixed stored"}
+    with repo._write() as db:
+        helpers._source(db, private, "src-priv",
+                        elements=[("el-priv", "PRIVATE CURRENT TEXT")])
+    for object_id in (s.ids.engram_s, s.ids.definer_s):
+        with repo._write() as db:
+            stored = db.execute(
+                update_evidence_sql[0], (object_id,)).fetchone()["evidence"]
+            stored = json.loads(stored) if isinstance(stored, str) else stored
+            db.execute(update_evidence_sql[1],
+                       (json.dumps([*stored, mixed]), object_id))
+
+    detail = helpers.as_user(s.a, repo.concept_detail, s.nb, s.ids.engram_canonical)
+
+    dumped = json.dumps(detail, ensure_ascii=False, default=str)
+    assert "el-priv" not in dumped and "PRIVATE CURRENT TEXT" not in dumped
+    raw = [
+        item for entry in [*detail["members"], *detail["attached"]]
+        for item in entry["evidence"] if item.get("quoted_span") == "mixed stored"
+    ]
+    # The item stays (it names a readable source of this library), on the
+    # member and on the attached ``defines`` neighbour, without its locator.
+    assert len(raw) == 2, raw
+    assert all(item["element_id"] == "" and item["source_id"] == "src-s" for item in raw)
+    top = [item for item in detail["evidence"] if item.get("quoted_span") == "mixed stored"]
+    assert [item["element_id"] for item in top] == [""]
+
+
+_SQLITE_EVIDENCE_SQL = (
+    "SELECT evidence FROM knowledge_objects WHERE id=?",
+    "UPDATE knowledge_objects SET evidence=? WHERE id=?",
+)
+
+
+@pytest.mark.parametrize("b_memory", [True, False])
+def test_mixed_pointer_never_reaches_the_raw_lists(repo, b_memory):
+    check_mixed_pointer_never_reaches_the_raw_lists(
+        repo, kg_viewer_scope, b_memory, update_evidence_sql=_SQLITE_EVIDENCE_SQL,
+    )
