@@ -392,6 +392,9 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "SqliteMigrator._migration_1": MAINTENANCE,
         "SqliteMigrator._migration_29": MAINTENANCE,
         "SqliteMigrator._migration_87": MAINTENANCE,
+        # PR-E8: rewrites a public library's stored evidence; reads only that
+        # library's candidate objects by id and hands nothing to a reader
+        "SqliteMigrator._migration_88": MAINTENANCE,
     },
     "postgres/maintenance.py": {
         name: MAINTENANCE for name in (

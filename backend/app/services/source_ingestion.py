@@ -24,7 +24,7 @@ from app.domain.indexing_pipeline import (
 )
 from app.core.llm import cap_kwargs
 from app.domain.cancellation import CoreCancellation
-from app.domain.promotion_provenance import PROMOTION_SOURCE_TYPE
+from app.domain.promotion_source import PROMOTION_SOURCE_TYPE
 from app.domain.extensions import (
     ElementAssetLocation,
     ElementEnricherHostPort,

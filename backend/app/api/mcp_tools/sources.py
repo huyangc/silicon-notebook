@@ -18,7 +18,7 @@ from app.api.source_routes import (
 )
 from app.core.config import get_settings
 from app.core.memory_inputs import normalize_text
-from app.domain.promotion_provenance import PROMOTION_SOURCE_TYPE
+from app.domain.promotion_source import PROMOTION_SOURCE_TYPE
 from app.models.sources import SourceDetail
 from app.repositories.ports import DocumentCapacityExceeded, UploadedSourceFile
 from app.repositories.source_files import FILESYSTEM_NAME_MAX_BYTES, safe_filename

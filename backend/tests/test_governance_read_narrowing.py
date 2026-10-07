@@ -555,9 +555,13 @@ def test_promotion_merge_uses_matched_row_evidence(repo):
     result = repo.approve_promotion(cand["id"])
 
     assert result["base_object_id"] == existing
-    assert _evidence_of(repo, existing) == merge_evidence_lists(
-        base_evidence, src_evidence
-    )
+    merged = _evidence_of(repo, existing)
+    # PR-E8: the matched row's own evidence comes first, byte for byte; the
+    # incoming entries follow, rewritten onto the library's own promotion
+    # sources (their originals kept as display keys).
+    assert merged[:2] == merge_evidence_lists(base_evidence, [])
+    assert [entry["origin_source_id"] for entry in merged[2:]] == ["s-both", "s-src"]
+    assert all(entry["source_id"].startswith("src-promo-") for entry in merged[2:])
     # The decoy row was in the (now thinner) corpus read and must be untouched.
     assert _evidence_of(repo, decoy) == [
         {"source_id": "s-decoy", "element_id": "e-decoy", "quoted_span": "decoy"}
