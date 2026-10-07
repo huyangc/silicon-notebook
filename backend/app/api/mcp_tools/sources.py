@@ -18,6 +18,7 @@ from app.api.source_routes import (
 )
 from app.core.config import get_settings
 from app.core.memory_inputs import normalize_text
+from app.domain.promotion_provenance import PROMOTION_SOURCE_TYPE
 from app.models.sources import SourceDetail
 from app.repositories.ports import DocumentCapacityExceeded, UploadedSourceFile
 from app.repositories.source_files import FILESYSTEM_NAME_MAX_BYTES, safe_filename
@@ -557,7 +558,15 @@ def register_source_tools(
 
         def run() -> dict[str, Any]:
             with _owner_request_context(principal):
-                _own_source(repo, notebook_id, source_id)
+                if _own_source(repo, notebook_id, source_id).type == (
+                    PROMOTION_SOURCE_TYPE
+                ):
+                    # PR-E8: a promotion source has no file; parsing it would
+                    # clear the promoted objects its elements support.
+                    raise ValueError(
+                        "this source holds content promoted into a public "
+                        "library and cannot be re-parsed"
+                    )
                 # Fail before reporting a queued success. The worker repeats
                 # this gate so a pipeline switch after submit is still closed.
                 repo.require_indexing_pipeline_write(notebook_id)

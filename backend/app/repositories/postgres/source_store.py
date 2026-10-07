@@ -62,6 +62,13 @@ _UNSET = SOURCE_PAPER_META_UNSET
 # 只能整表扫这个 notebook 的全部源行，而且就发生在刚扫过同一批行之后。SQL 文本
 # 逐字不变。
 VISIBLE_SOURCE_TYPES_PREDICATE = "source_type NOT IN ('memory','knowhow')"
+# 晋升出处来源(PR-E8,``app.domain.promotion_provenance``)按上面的谓词**可见**:
+# 进来源列表、进挂载库与全局问答的天花板,这正是 B-12 的修法。但它不是用户导入的
+# 文档,任何文档管线都不处理它:KG 抽取目标(``rebuild`` 会先按证据清掉它支撑的
+# 晋升对象再让模型重抽)、待分析计数、论文元数据补抽、体检 H2/H3。这些语句在既有
+# 可见谓词之后再接这一句,作为独立的合取项而不是并进 ``NOT IN`` 列表:SQLite 的
+# 部分索引只认 WHERE 里逐字出现的索引谓词(SQLite 侧同名常量)。
+NOT_PROMOTION_SOURCE_PREDICATE = "source_type <> 'promotion'"
 
 
 # 「这一行是私有 Memory 的合成来源」的 SQL 谓词,与 SQLite 侧
@@ -115,6 +122,7 @@ _UNIVERSE_DIGEST_SQL = (
 # NotebookSummary.paper_meta_missing 的 EXISTS 探针)共用这一份保证口径不漂移。
 PAPER_META_ELIGIBLE_SQL = (
     " AND s.source_type NOT IN ('memory','knowhow')"
+    f" AND s.{NOT_PROMOTION_SOURCE_PREDICATE}"
     " AND s.doc_type IN ('','academic_paper')"
     " AND s.parse_status IN ('parsed','extracting','extracted')"
 )

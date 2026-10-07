@@ -3,6 +3,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from app.domain.promotion_provenance import PROMOTION_SOURCE_TYPE
+
 
 PDF_PYTHON_FALLBACK_WARNING_PREFIX = "[pdf-python-fallback]"
 
@@ -126,6 +128,9 @@ def paper_meta_status(
     if is_paper is not None:
         return "has_meta" if is_paper else "not_paper"
     if source_type in HIDDEN_SYNTHETIC_SOURCE_TYPES:
+        return None
+    if source_type == PROMOTION_SOURCE_TYPE:
+        # visible, but not an uploaded document (PR-E8): no paper metadata
         return None
     if doc_type not in PAPER_META_ELIGIBLE_DOC_TYPES:
         return None

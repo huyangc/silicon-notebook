@@ -22,6 +22,7 @@ from app.api.deps import (
     user_error,
 )
 from app.core.config import SOURCE_UPLOAD_MAX_FILES_PER_BATCH, get_settings
+from app.domain.promotion_provenance import PROMOTION_SOURCE_TYPE
 from app.models.identity import UserProfile
 from app.models.sources import (
     AddUrlSourcesRequest,
@@ -525,6 +526,10 @@ def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) 
     if mirrored:
         raise mirrored_notebook_error(mirrored)
     try:
+        # 晋升出处来源(PR-E8)可见、可删除,但没有文件可解析:重新解析会先按证据
+        # 清掉它支撑的晋升对象。权限通过之后才说原因(未授权仍是上面的 404)。
+        if source_repository().get_source(source_id).type == PROMOTION_SOURCE_TYPE:
+            raise user_error(409, "这份来源是收录到公共知识库的内容，不能重新解析。")
         # This URL carries only source_id, so the request dependency cannot
         # establish notebook-scoped model diagnostics. Resolve first, then bind
         # the synchronous source pipeline so deletion can redact its artifacts.
@@ -574,7 +579,8 @@ def reparse_sources(
         # ⚠ 只重解析**导入型**用户源(codex):memory/knowhow 隐藏合成源无 file_path、由各自
         # 投影服务维护;把它们喂给文档解析 process_source 只会标失败/清派生态,不是修复。
         # 与 H2/H3 判据同口径(那两项本就排除 memory/knowhow),这里挡住 body 里带来的 id。
-        if src.type in _HIDDEN_SOURCE_TYPES:
+        # 晋升出处来源(PR-E8)同理:没有文件,重解析只会清掉它支撑的晋升对象。
+        if src.type in _HIDDEN_SOURCE_TYPES or src.type == PROMOTION_SOURCE_TYPE:
             continue
         kg_scheduler.submit_job(repo.process_source, source_id)
         scheduled.append(source_id)

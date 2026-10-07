@@ -52,6 +52,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from psycopg import Error
 
 from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
+from app.repositories.postgres.source_store import NOT_PROMOTION_SOURCE_PREDICATE
 from app.repositories.postgres.memory_sql import (
     memory_source_type_predicate,
     own_memory_source,
@@ -384,6 +385,9 @@ def _pending_sql(*, visible_only: bool) -> str:
         "WHERE k.source_id=s.id AND k.source_id!='' LIMIT 1) source_kg ON TRUE "
         "WHERE s.notebook_id=%s "
         + visible_clause
+        # A promotion source (PR-E8) is never an extraction target, so it is
+        # never pending either -- in both counts.
+        + f"AND s.{NOT_PROMOTION_SOURCE_PREDICATE} "
         + "AND (source_kg.found IS NULL "
         "OR COALESCE(latest_kg.status,'completed')!='completed' "
         "OR COALESCE(latest_kg.error_message,'') "

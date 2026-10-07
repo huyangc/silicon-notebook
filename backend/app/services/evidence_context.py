@@ -12,6 +12,10 @@ from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
 
 from app.core.config import Settings
 from app.domain.citation_origin import foreign_notebook_id, owned_by_another_library
+from app.domain.promotion_provenance import (
+    is_promotion_source_type,
+    promotion_origin_title,
+)
 from app.domain.reflect_action import (
     EXTERNAL_EVIDENCE_CONTEXT_CHARS, fold_control_characters,
 )
@@ -533,6 +537,10 @@ class EvidenceContextService:
         for source_id in ids:
             row = rows.get(source_id) or {}
             title = source_display_title(row)
+            if is_promotion_source_type(row.get("source_type")):
+                # PR-E8: the card names the original ("晋升自：X" -> "X"); the
+                # card still opens the public library's promotion source.
+                title = promotion_origin_title(title)
             file_name = str(row.get("file_name") or "").strip()
             if title or file_name:
                 result[source_id] = {

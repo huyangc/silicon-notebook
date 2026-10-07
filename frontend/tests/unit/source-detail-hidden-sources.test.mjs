@@ -13,17 +13,55 @@ import assert from "node:assert/strict";
 import ts from "typescript";
 
 import { parseModule } from "../../test-support/semantic-source.mjs";
-import { sourceDetailManageable } from "../../app/source-management.ts";
+import {
+  sourceDetailManageable,
+  sourceDetailReparsable,
+  sourceTypeTag,
+} from "../../app/source-management.ts";
 
 const GATE = "sourceDetailManageable(sourceDetail.type)";
+const REPARSE_GATE = "sourceDetailReparsable(sourceDetail.type)";
 
 test("hidden source types are not manageable; imported documents are", () => {
   for (const type of ["memory", "knowhow"]) {
     assert.equal(sourceDetailManageable(type), false, type);
   }
-  for (const type of ["document", "pdf", "url", "markdown", ""]) {
+  for (const type of ["document", "pdf", "url", "markdown", "", "promotion"]) {
     assert.equal(sourceDetailManageable(type), true, type);
   }
+});
+
+test("a promotion source can be deleted but not re-parsed, and is labelled in Chinese", () => {
+  // PR-E8: the backend answers 409 to a re-parse of a promotion source.
+  assert.equal(sourceDetailReparsable("promotion"), false);
+  for (const type of ["memory", "knowhow"]) {
+    assert.equal(sourceDetailReparsable(type), false, type);
+  }
+  for (const type of ["document", "pdf", "url", "markdown", ""]) {
+    assert.equal(sourceDetailReparsable(type), true, type);
+  }
+  assert.equal(sourceTypeTag("promotion"), "收录");
+  assert.equal(sourceTypeTag("markdown"), null);
+});
+
+test("the header re-parse button is gated on the re-parse predicate", async () => {
+  const page = await parseModule("page.tsx");
+  const buttons = openingsWhere(
+    page,
+    (node) => node.tagName.getText() === "button"
+      && node.attributes.properties.some((attribute) =>
+        ts.isJsxAttribute(attribute)
+        && attribute.name.getText() === "onClick"
+        && attribute.initializer?.getText().includes("reparseSource()"))
+      && governingConditions(node).some((condition) => condition.includes(GATE)),
+  );
+  const header = buttons.filter((node) =>
+    !governingConditions(node).some((condition) => condition.includes("parse_quality_warning")));
+  assert.equal(header.length, 1, "the header re-parse button");
+  assert.ok(
+    governingConditions(header[0]).some((condition) => condition.includes(REPARSE_GATE)),
+    JSON.stringify(governingConditions(header[0])),
+  );
 });
 
 function staticAttribute(opening, name) {

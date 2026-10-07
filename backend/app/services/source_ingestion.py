@@ -24,6 +24,7 @@ from app.domain.indexing_pipeline import (
 )
 from app.core.llm import cap_kwargs
 from app.domain.cancellation import CoreCancellation
+from app.domain.promotion_provenance import PROMOTION_SOURCE_TYPE
 from app.domain.extensions import (
     ElementAssetLocation,
     ElementEnricherHostPort,
@@ -3022,7 +3023,7 @@ class SourceIngestionService:
         extraction_runs、不阻断流水线(摄取侧惯例,不用 note_model_error)。"""
         if not getattr(self.settings, "paper_meta_enabled", True):
             return "disabled"
-        if source.type in ("memory", "knowhow"):
+        if source.type in ("memory", "knowhow", PROMOTION_SOURCE_TYPE):
             return "skipped"
         # 抽取合格判定与「retype 到不合格类型清旧元数据」共用同一 predicate
         # (paper_meta_doc_type_eligible),单一定义点、不会各写一半再漂移。传入归一化

@@ -32,6 +32,7 @@ from app.repositories.sqlite.id_binding import (
     member_of,
     not_member_of,
 )
+from app.repositories.sqlite.source_store import NOT_PROMOTION_SOURCE_PREDICATE
 from app.repositories.sqlite.memory_sql import (
     hidden_type_index_term,
     memory_derived_in_notebook,
@@ -1332,11 +1333,15 @@ class KnowledgeStore:
         be handed to the extraction pipeline as a target, and even a knowhow
         table not yet projected (elements present, zero KOs) must not become an
         empty-KG extraction target — either would fabricate LLM-derived
-        case/procedure objects, violating the feature's zero-LLM invariant."""
+        case/procedure objects, violating the feature's zero-LLM invariant.
+        A promotion source (PR-E8) is visible but never a target either:
+        re-extracting it would first delete the promoted objects its evidence
+        supports (``source_store.NOT_PROMOTION_SOURCE_PREDICATE``)."""
         source_ids = [
             row["id"] for row in db.execute(
                 "SELECT id FROM sources WHERE notebook_id = ? "
-                "AND source_type NOT IN ('memory','knowhow')", (notebook_id,)
+                "AND source_type NOT IN ('memory','knowhow') "
+                f"AND {NOT_PROMOTION_SOURCE_PREDICATE}", (notebook_id,)
             ).fetchall()
         ]
         kg_source_ids = {
@@ -1391,6 +1396,7 @@ class KnowledgeStore:
             "FROM sources s WHERE s.notebook_id=? "
             "AND (? IS NULL OR (s.created_at,s.id)>(?,?)) "
             "AND s.source_type NOT IN ('memory','knowhow') "
+            f"AND s.{NOT_PROMOTION_SOURCE_PREDICATE} "
             "ORDER BY s.created_at,s.id LIMIT ?",
             (
                 notebook_id,
