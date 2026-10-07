@@ -26,6 +26,7 @@ from app.api.deps import (
     user_error,
 )
 from app.core.audit_actor import session_audit_principal
+from app.domain.knowhow_transfer import MEMORY_SOURCE, KnowhowTransferRefused
 from app.models.identity import UserProfile
 from app.models.knowhow import (
     VALID_ORIGINS,
@@ -1522,6 +1523,20 @@ def transfer_knowhow_table(
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="Table not found")
+    except KnowhowTransferRefused as exc:
+        # 插入事务在写入前拒绝了这张表的检索数据,整次复制/移动已回滚、源表原样。
+        # 负载由源表确定地生成,重试结果相同,所以给分类的用户错误而不是裸 500。
+        if exc.reason == MEMORY_SOURCE:
+            raise user_error(
+                409,
+                "这张表的内容关联到了个人记忆，记忆不能复制或移动到其他笔记本。"
+                "这次操作没有做任何改动。",
+            )
+        raise user_error(
+            422,
+            "这张表的搜索数据和表本身对不上，暂时无法复制或移动。"
+            "这次操作没有做任何改动，请联系管理员检查。",
+        )
     except _kh_transfer.SourceCleanupFailed as exc:
         # 复制已提交、清理源(拆投影/删源表)失败：副本已在目标存在，源仍在——
         # 结构化 409 让前端能诚实地告诉用户"重复不丢失"，而不是裸 500 诱导用户

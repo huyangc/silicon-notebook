@@ -133,10 +133,15 @@ def test_pending_blocks_writes_then_one_transaction_publishes_all_visible_source
     notebook = repo.create_notebook(NotebookCreate(name="pipeline"))
     first = _insert_source(repo, notebook.id, "alpha")
     second = _insert_source(repo, notebook.id, "beta")
-    hidden = _insert_source(repo, notebook.id, "private memory", source_type="memory")
+    hidden = _insert_source(repo, notebook.id, "private memory")
     repo._build_chunks_for_source(first)
     repo._build_chunks_for_source(second)
+    # Chunk it while it is still an ordinary row, then flip it to memory: a
+    # Memory source can no longer be chunked (E4-1 guard), and the point of this
+    # test is that a publish leaves pre-existing hidden chunk rows alone.
     repo._build_chunks_for_source(hidden)
+    with repo._write() as db:
+        db.execute("UPDATE sources SET source_type='memory' WHERE id=?", (hidden,))
     before = _chunk_texts(repo, notebook.id)
     with repo._write() as db:
         db.execute(

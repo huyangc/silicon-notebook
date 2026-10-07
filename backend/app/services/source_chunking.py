@@ -4,6 +4,7 @@ import threading
 from typing import Callable, Iterable
 
 from app.core.config import Settings
+from app.models.sources import MEMORY_SOURCE_TYPE
 from app.repositories.ports import ChunkStorePort, ChunkWrite, SourceStorePort
 from app.services.chunking import build_chunks
 from app.services.source_embedding import SourceEmbeddingService
@@ -135,6 +136,24 @@ class SourceChunkingService:
         except Exception:  # noqa: BLE001 - observability is fail-open
             pass
 
+    def _emit_memory_refused(self, notebook_id: str, source_id: str) -> None:
+        """内容无关事件:只带库 id、来源 id 与固定原因码,不带任何来源内容。"""
+        if self.event_log is None:
+            return
+        try:
+            self.event_log.emit(
+                {
+                    "kind": "memory_chunk_write_refused",
+                    "notebook_id": notebook_id,
+                    "source_id": source_id,
+                    "stage": "chunking",
+                    "status": "refused",
+                    "reason": "memory_source",
+                }
+            )
+        except Exception:  # noqa: BLE001 - observability is fail-open
+            pass
+
     def _validate_plugin_proposals(
         self,
         raw: Iterable[object],
@@ -255,6 +274,20 @@ class SourceChunkingService:
         给了就不再重读实时状态(见 published_identity 的 docstring)。"""
         src = self.sources.get_source(source_id)
         notebook_id = src.notebook_id
+        if src.type == MEMORY_SOURCE_TYPE:
+            # Memory 来源是用户私有的合成来源,而 chunk 是全员共享的段落索引:
+            # 本入口不分块、不写任何行、不置完成标记、不 bump dirty。这是服务层这一道;
+            # 每条写 chunks 表的路径另有自己的拒绝或登记(ChunkStore 两个写方法、KG 发布、
+            # Knowhow 转移、同步导入各自 `_refuse_memory_source`;整库镜像/只改已有行的路径
+            # 不拒,理由登记在 `test_memory_chunk_write_guard.py`;笔记本拷贝路径不走拒绝,拷哪些
+            # chunk 行由 sharing_store 给「含 Memory 来源的笔记本」用的那组拷贝语句的 chunks 查询
+            # 决定:只有一组时是 `_COPY_SNAPSHOT_QUERIES`,按次选择时(E5-1 的 `_copy_queries`)
+            # 是探针 `_COPY_DIRTY_SQL` 命中时返回的 `_MEMORY_COPY_SNAPSHOT_QUERIES`;该查询带
+            # `NOT memory_sql.memory_derived_*(别名)` 时 Memory 来源的行不被拷贝,守卫每次运行都
+            # 检查两个后端是否都带、并据此把这条路径登记为有守卫或无守卫)。
+            # 返回 "" = 没有回退警告(调用方只看它是否为真)。
+            self._emit_memory_refused(notebook_id, source_id)
+            return ""
         with self._notebook_lock(notebook_id):
             pipeline_id, _pipeline_version = (
                 frozen_identity

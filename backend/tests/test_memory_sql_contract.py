@@ -511,6 +511,17 @@ def test_memory_type_literal_is_single_sourced_and_matches_source_store():
     assert pg_source_store.MEMORY_SOURCE_TYPE_PREDICATE == pg_memory_sql.memory_source_type_predicate()
 
 
+def test_service_layer_memory_type_constant_equals_the_sql_side_one():
+    """服务层不能 import repositories,所以 `models.sources.MEMORY_SOURCE_TYPE`(服务层唯一写法,
+    `source_chunking` 与 `HIDDEN_SYNTHETIC_SOURCE_TYPES` 用它)与两个 `memory_sql` 各自声明一份;
+    这里钉住三者永远相等,任何一边改了类型值,当场红。"""
+    from app.models import sources as model_sources
+
+    assert model_sources.MEMORY_SOURCE_TYPE == memory_sql.MEMORY_SOURCE_TYPE
+    assert model_sources.MEMORY_SOURCE_TYPE == pg_memory_sql.MEMORY_SOURCE_TYPE
+    assert model_sources.MEMORY_SOURCE_TYPE in model_sources.HIDDEN_SYNTHETIC_SOURCE_TYPES
+
+
 # ------------------------------------------------------ query_store 旧常量归一
 class _RecordingDatabase:
     """Stands in for either backend's database: records each statement and

@@ -799,6 +799,11 @@ _ALLOWED_EXACT_MODULES = {
     "app.migration.shadow.transform",
     "app.repositories.postgres.sharing_store",
     "app.repositories.sqlite.sharing_store",
+    # E4-1b (app.migration.sync.import_): the importer refuses chunk rows of a
+    # Memory source and a ``source_type`` change to or from Memory, using the
+    # shared definition of "Memory source" (a pure SQL-fragment module with no
+    # imports of its own beyond ``re``) instead of restating the literal.
+    "app.repositories.postgres.memory_sql",
 }
 
 # Per-FILE additions. The set above is what every module in the package may

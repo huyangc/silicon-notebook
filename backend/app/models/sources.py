@@ -97,7 +97,12 @@ def extraction_warning_text(error_message: object) -> Optional[str]:
 
 
 # 论文元数据抽取的候选口径(与 SourceStore.sources_missing_paper_meta 的 WHERE 同源)。
-HIDDEN_SYNTHETIC_SOURCE_TYPES = ("memory", "knowhow")
+#: `sources.source_type` of a member's private Memory projection. The single service-layer
+#: spelling; `repositories/{sqlite,postgres}/memory_sql.MEMORY_SOURCE_TYPE` is the SQL-side
+#: one and `test_memory_sql_contract.py` pins the two equal (services may not import
+#: repositories, so the value is declared on both sides and guarded, not shared).
+MEMORY_SOURCE_TYPE = "memory"
+HIDDEN_SYNTHETIC_SOURCE_TYPES = (MEMORY_SOURCE_TYPE, "knowhow")
 PAPER_META_ELIGIBLE_DOC_TYPES = ("", "academic_paper")
 PAPER_META_ELIGIBLE_PARSE_STATUSES = ("parsed", "extracting", "extracted")
 

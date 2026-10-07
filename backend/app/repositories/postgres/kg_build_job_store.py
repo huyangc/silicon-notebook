@@ -15,8 +15,15 @@ from app.repositories.postgres._store_utils import (
 )
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.embedding_store import _validated_vector
+from app.repositories.postgres.memory_sql import (
+    MEMORY_SOURCE_NOT_CHUNKED,
+    memory_source_type_predicate,
+)
 from app.repositories.postgres.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
-from app.domain.indexing_pipeline import IndexingPipelineStalePlanError
+from app.domain.indexing_pipeline import (
+    IndexingPipelineMemorySourceError,
+    IndexingPipelineStalePlanError,
+)
 from app.models.sources import INDEXING_CHUNK_FALLBACK_WARNING_PREFIX
 from app.repositories.ports import (
     INDEXING_PIPELINE_PUBLISH_DELETE_BATCH,
@@ -25,6 +32,15 @@ from app.repositories.ports import (
 
 # 协议边界:staged 回退警告码的最大长度(具名常量,不是可调预算)。
 _STAGE_FALLBACK_WARNING_MAX_CHARS = 200
+
+
+#: The publish's Memory refusal: ONE statement, scoped to the notebook, answered by
+#: ``idx_sources_nb_hidden_type (notebook_id, source_type)``; its result (at most the
+#: notebook's own Memory sources) is intersected in Python with the snapshot the
+#: publish transaction already loaded.
+NOTEBOOK_MEMORY_SOURCES_SQL = (
+    "SELECT id FROM sources WHERE notebook_id=%s AND " + memory_source_type_predicate()
+)
 
 
 class KgBuildJobStore:
@@ -209,6 +225,24 @@ class KgBuildJobStore:
                 (self.now(), notebook_id),
             )
         return int(cursor.rowcount)
+
+    @staticmethod
+    def _refuse_memory_source(connection, notebook_id: str, snapshot: Sequence[str]) -> None:
+        """Refuse a publish whose snapshot (= the staged sources) includes a Memory
+        source: ONE bounded statement scoped to the notebook, intersected with the
+        snapshot the publish transaction already loaded, on that transaction's
+        connection and before the first live mutation. A Memory source is private
+        per user and must not own rows in the shared passage index. Today the
+        snapshot compare above already keeps such a source out (it is not a visible
+        type); this is the last line of defence should that predicate ever drift.
+        Like every chunk-write probe it protects against a source that IS Memory
+        now, not against the type changing later (see
+        ``ChunkStore._refuse_memory_source``). Raises
+        ``IndexingPipelineMemorySourceError`` so the job that ran the publish ends
+        with its own classified reason."""
+        rows = connection.execute(NOTEBOOK_MEMORY_SOURCES_SQL, (notebook_id,)).fetchall()
+        if {str(row["id"]) for row in rows} & set(snapshot):
+            raise IndexingPipelineMemorySourceError(MEMORY_SOURCE_NOT_CHUNKED)
 
     @staticmethod
     def _source_snapshot(connection, notebook_id: str, *, lock: bool) -> list[dict]:
@@ -762,6 +796,7 @@ class KgBuildJobStore:
             if len(kg_modes) > 1:
                 return False
             self._validate_stage_payloads(connection, payloads)
+            self._refuse_memory_source(connection, notebook_id, snapshot)
 
             if snapshot:
                 connection.execute(

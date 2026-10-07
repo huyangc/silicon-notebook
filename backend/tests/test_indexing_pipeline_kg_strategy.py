@@ -591,11 +591,14 @@ def test_plugin_kg_success_atomically_publishes_graph_facts_and_identity(
     hidden_id, hidden_element_id = _insert_source(
         repo, notebook.id, "Core-owned hidden memory."
     )
+    # Chunk it while it is still an ordinary row, then flip it to memory: a
+    # Memory source can no longer be chunked (E4-1 guard), and the point of this
+    # test is that a publish leaves pre-existing hidden chunk rows alone.
+    repo._build_chunks_for_source(hidden_id)
     with repo._write() as db:
         db.execute(
             "UPDATE sources SET source_type='memory' WHERE id=?", (hidden_id,)
         )
-    repo._build_chunks_for_source(hidden_id)
     repo.store_kg(
         notebook.id,
         hidden_id,

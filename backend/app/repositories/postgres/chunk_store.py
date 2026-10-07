@@ -25,6 +25,10 @@ from app.repositories.postgres.id_binding import (
     member_of,
     not_member_of,
 )
+from app.repositories.postgres.memory_sql import (
+    MEMORY_SOURCE_NOT_CHUNKED,
+    memory_source_type_predicate,
+)
 from app.repositories.postgres.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 from app.repositories.postgres.search import chunk_section_rows
 from app.domain.vector_index import encode_vector
@@ -36,6 +40,37 @@ from app.domain.indexing_pipeline import IndexingPipelineStalePlanError
 # one another, and a fixed batch keeps the statement shape stable no matter how
 # many evidence elements one query hit.
 CHUNK_ELEMENT_LOOKUP_BATCH = 500
+
+#: The refusal probe of the two write methods: a primary-key point lookup.
+MEMORY_PROBE_SQL = "SELECT 1 FROM sources WHERE id=%s AND " + memory_source_type_predicate()
+
+# ``ChunkStore.replace_source_chunks`` and ``ChunkStore.insert_rows`` raise
+# ``ValueError(MEMORY_SOURCE_NOT_CHUNKED)`` when the target source is a private
+# Memory projection. Passages are a SHARED index (every notebook member
+# retrieves from them) while Memory is private per user, so a Memory source
+# must never own a chunk row. The message and the type predicate come from
+# ``memory_sql`` (the one definition of "Memory source").
+#
+# Which chunk write paths refuse, and which do not (the static guard
+# ``tests/test_memory_chunk_write_guard.py`` enumerates every write of the
+# ``chunks`` table and fails on an unlisted one):
+#   * refuse with ``_refuse_memory_source``: this file's two methods, the KG
+#     build publish (``kg_build_job_store``), the Knowhow transfer insert
+#     (``knowhow_transfer_store``) and the sync import (``migration/sync``);
+#   * changes existing rows only / moves existing rows only: ``maintenance``
+#     and the ``migration`` mirrors, listed with that reason in the guard;
+#   * the notebook copy path (``NotebookCopyService.copy_notebook`` ->
+#     ``sharing_store.insert_copy_rows("chunks")``) does not call the refusal.
+#     Which chunk rows it copies is decided by the ``chunks`` query of the copy
+#     statement set ``sharing_store`` uses for a notebook that holds a Memory
+#     source: its only set ``_COPY_SNAPSHOT_QUERIES`` when there is one set, or,
+#     where ``SharingStore._copy_queries`` chooses per copy (task E5-1), the set
+#     it returns when its probe ``_COPY_DIRTY_SQL`` finds a Memory source,
+#     ``_MEMORY_COPY_SNAPSHOT_QUERIES``. When that query carries
+#     ``NOT memory_sql.memory_derived_*(<alias>)`` (``memory_derived_object``,
+#     ``memory_derived_in_notebook``) a Memory source's rows are not copied.
+#     The guard checks on every run, on both backends, whether it does and lists
+#     the path as guarded or unguarded accordingly (``copy_path_reason``).
 
 
 def _compat_element_ids(row: dict) -> dict:
@@ -252,6 +287,9 @@ class ChunkStore:
             for chunk in chunks
         ]
         with self.database.write() as connection:
+            # Probe on the write transaction's own connection, before the DELETE,
+            # so a refused write leaves whatever the source already owns untouched.
+            self._refuse_memory_source(connection, source_id)
             connection.execute("DELETE FROM chunks WHERE source_id=%s", (source_id,))
             execute_many(
                 connection,
@@ -273,6 +311,32 @@ class ChunkStore:
                     "UPDATE sources SET chunked_at=%s WHERE id=%s",
                     (normalize_timestamp(mark_chunked_at), source_id),
                 )
+
+    @staticmethod
+    def _refuse_memory_source(connection, source_id: str) -> None:
+        """Guard of the two ``ChunkStore`` write methods (``replace_source_chunks``,
+        ``insert_rows``): one primary-key probe per source per write call (never
+        per chunk row), on the CALLER's connection so it shares the write's
+        transaction. A Memory source is private per user and must not own rows
+        in the shared passage index. An unknown source id is not refused here;
+        the chunks foreign key rejects it on insert as before.
+
+        What this probe does NOT do: it protects a write at the moment the
+        source IS a Memory source; it cannot protect against the type changing
+        LATER. Under READ COMMITTED the probe is a plain SELECT and a concurrent
+        ``UPDATE sources SET source_type='memory'`` commits regardless (measured,
+        with no lock, ``FOR KEY SHARE`` and ``FOR SHARE`` on the probe alike), so
+        the invariant "no chunk under a Memory source" rests on
+        ``sources.source_type`` never changing after insert. That immutability is
+        enforced statically (``test_memory_chunk_write_guard.py``: no statement
+        other than an INSERT writes the column; the generic writers whose table can
+        be ``sources`` are listed there) and, for the sync import's
+        ``ON CONFLICT (id) DO UPDATE``, at run time: a package in which a source id
+        has a different type than at the target, one of the two being Memory, is
+        refused for the whole run before any table is applied."""
+        row = connection.execute(MEMORY_PROBE_SQL, (source_id,)).fetchone()
+        if row is not None:
+            raise ValueError(MEMORY_SOURCE_NOT_CHUNKED)
 
     def _insert_fts_rows(self, connection, rows: list) -> None:
         # PostgreSQL's GIN/trigram indexes update with chunks themselves.
@@ -367,6 +431,9 @@ class ChunkStore:
         ]
         if not values:
             return
+        # The transaction belongs to the caller; the probe runs on that same
+        # connection, in the same transaction as the INSERT below.
+        self._refuse_memory_source(connection, source_id)
         execute_many(
             connection,
             "INSERT INTO chunks"

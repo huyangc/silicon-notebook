@@ -8,10 +8,20 @@ from __future__ import annotations
 import sqlite3
 from typing import Callable
 
+from app.domain.knowhow_transfer import (
+    CHUNK_SOURCE_MISMATCH,
+    MEMORY_SOURCE,
+    KnowhowTransferRefused,
+)
 from app.repositories.chunk_elements import reverse_rows as chunk_element_reverse_rows
 from app.repositories.sqlite import knowhow_fingerprint
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.knowhow_history_store import record_change
+from app.repositories.sqlite.memory_sql import (
+    MEMORY_SOURCE_NOT_CHUNKED,
+    TRANSFER_CHUNK_SOURCE_MISMATCH,
+    memory_source_type_predicate,
+)
 
 # 插入 FK 顺序：表→列/行→资产→格/代码→隐藏源→元素→chunk→向量
 _BUSINESS_ORDER = ("columns", "rows", "assets", "cells", "cell_code")
@@ -26,6 +36,29 @@ def _insert_rows(db: sqlite3.Connection, table: str, rows: list) -> None:
             f"INSERT INTO {table} ({','.join(cols)}) VALUES ({placeholders})",
             [row[c] for c in cols],
         )
+
+
+#: 传输的 Memory 探针:对被传输来源做**一次**主键点查。
+MEMORY_PROBE_SQL = (
+    "SELECT 1 FROM sources WHERE id = ? AND " + memory_source_type_predicate()
+)
+
+
+def _refuse_memory_source(db: sqlite3.Connection, payload: dict) -> None:
+    """拒绝 chunk 行会归到 Memory 来源名下的传输:在插入事务自己的连接上,位于
+    ``sources`` 行落库之后、第一条 chunk 行之前。payload 里每条 chunk 行都必须指向
+    payload 自己的来源(否则拒绝:表传输不会产出挂在别的来源 id 下的 chunk),然后
+    对这**一个** id 做主键点查。Memory 来源是用户私有的,不许在共享段落索引里拥有行。
+    防的是「此刻就是 Memory」,不防类型事后被改(见 ``ChunkStore._refuse_memory_source``)。"""
+    chunk_rows = payload.get("chunks") or []
+    if not chunk_rows:
+        return
+    source = payload.get("source") or {}
+    source_id = str(source.get("id", ""))
+    if not source_id or any(str(row["source_id"]) != source_id for row in chunk_rows):
+        raise KnowhowTransferRefused(TRANSFER_CHUNK_SOURCE_MISMATCH, reason=CHUNK_SOURCE_MISMATCH)
+    if db.execute(MEMORY_PROBE_SQL, (source_id,)).fetchone() is not None:
+        raise KnowhowTransferRefused(MEMORY_SOURCE_NOT_CHUNKED, reason=MEMORY_SOURCE)
 
 
 # 逻辑表名 → 真实表名（键在 payload/校验里用逻辑名）
@@ -240,6 +273,7 @@ class KnowhowTransferStore:
                 _insert_rows(db, _TABLE_NAMES[key], payload.get(key) or [])
             if payload.get("source"):
                 _insert_rows(db, "sources", [payload["source"]])
+            _refuse_memory_source(db, payload)
             for key in _DERIVED_ORDER:
                 _insert_rows(db, _TABLE_NAMES[key], payload.get(key) or [])
 

@@ -20,6 +20,14 @@ class IndexingPipelineStalePlanError(RuntimeError):
     """A notebook/source generation changed while a whole-notebook plan ran."""
 
 
+class IndexingPipelineMemorySourceError(ValueError):
+    """A publish would put a Memory source's passages into the shared index.
+
+    A Memory source is private per user and never owns passages. The whole-notebook
+    publish refuses it, before its first live mutation; the job that ran it ends with
+    its own classified reason instead of an internal error."""
+
+
 class IndexingPipelineRebuildActiveError(RuntimeError):
     """A rebuild worker is active; desired intent must not be re-minted.
 

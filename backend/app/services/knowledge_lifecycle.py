@@ -51,6 +51,7 @@ from app.core.config import Settings
 from app.core.event_logging import EventLogger
 from app.domain.indexing_pipeline import (
     IndexingPipelineKgExtractionFailedError,
+    IndexingPipelineMemorySourceError,
     IndexingPipelineStalePlanError,
 )
 from app.models.sources import kg_analyzed_without_objects
@@ -95,6 +96,13 @@ from app.services.kg.run_control import (
 from app.services.kg.maintenance_jobs import KgMaintenanceJobs
 
 
+#: Classified reason of a whole-notebook publish that refused a Memory source (the
+#: passages of a member's private Memory never enter the shared index).
+INDEXING_PIPELINE_MEMORY_SOURCE_CODE = "indexing_pipeline_memory_source"
+INDEXING_PIPELINE_MEMORY_SOURCE_MESSAGE = (
+    "索引重建已停止：待发布的内容里混入了个人记忆，记忆不会进入共享检索。"
+    "请联系管理员检查。"
+)
 INTERNAL_KG_BUILD_ERROR_MESSAGE = (
     "知识图谱分析意外中断；已完成内容已保留，可继续分析未完成内容。"
 )
@@ -3233,13 +3241,23 @@ class KnowledgeLifecycleService:
             ):
                 self.kg_build_jobs.discard_indexing_pipeline_stage(job_id)
                 raise IndexingPipelineStalePlanError(notebook_id)
-            changed = self.kg_build_jobs.publish_indexing_pipeline_success(
-                job_id,
-                notebook_id,
-                pipeline_id,
-                pipeline_version,
-                pipeline_generation,
-            )
+            try:
+                changed = self.kg_build_jobs.publish_indexing_pipeline_success(
+                    job_id,
+                    notebook_id,
+                    pipeline_id,
+                    pipeline_version,
+                    pipeline_generation,
+                )
+            except IndexingPipelineMemorySourceError:
+                # The publish refused before its first live mutation: close the
+                # job with its own reason (this path has no outer handler that
+                # would), free the stage and the in-process build flag.
+                self.kg_build_jobs.discard_indexing_pipeline_stage(job_id)
+                self._fail_job_for_memory_source(job_id)
+                with self.kg_building_lock:
+                    self.kg_building.discard(notebook_id)
+                raise
             if not changed:
                 self.kg_build_jobs.discard_indexing_pipeline_stage(job_id)
                 self.kg_build_jobs.finish(
@@ -4113,6 +4131,9 @@ class KnowledgeLifecycleService:
                 latency_ms=_latency_ms(),
             )
             raise
+        except IndexingPipelineMemorySourceError:
+            self._fail_job_for_memory_source(job_id, latency_ms=_latency_ms())
+            raise
         except Exception:
             self.kg_build_jobs.finish(
                 job_id,
@@ -4136,6 +4157,19 @@ class KnowledgeLifecycleService:
                     )
             with self.kg_building_lock:
                 self.kg_building.discard(notebook_id)
+
+    def _fail_job_for_memory_source(self, job_id: str, *, latency_ms: int = 0) -> None:
+        """End a job whose publish refused a Memory source, with the classified,
+        content-free reason (not ``internal_error``)."""
+        self.kg_build_jobs.finish(
+            job_id,
+            "failed",
+            error_code=INDEXING_PIPELINE_MEMORY_SOURCE_CODE,
+            error_message=INDEXING_PIPELINE_MEMORY_SOURCE_MESSAGE,
+        )
+        self._emit_kg_build_event(
+            "kg_build_failed", self.kg_build_jobs.get(job_id), latency_ms=latency_ms
+        )
 
     def _settle_unentered_job(self, job_id: str, notebook_id: str) -> None:
         """兜住「行已建、但 _run_notebook_kg_job 还没进到自己的 try/finally」这个窗口。
