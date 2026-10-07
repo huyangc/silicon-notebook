@@ -2686,11 +2686,14 @@ def default_ceiling_context(
     PPR, relation and exact-lookup channels): each check is one single-row
     fingerprint read (``live_universe_digests``) compared with the freeze's
     own digest, never cached (codex #634).  Measured at 49k sources, load
-    20-36: 12-28 ms per read on SQLite and 12-40 ms on PostgreSQL when the
-    checks run one after another, 36-134 / 17-53 ms inside a report phase
-    whose sections check concurrently.  An MCP chunk question makes 4 checks,
-    with a rerank 8, a reasoning question 12; a 6-section report 32 while
-    planning and 103 while generating (a report phase always binds its list).
+    7-8: 9-23 ms per read on SQLite and 5-13 ms on PostgreSQL in an MCP
+    question, 11-16 / 6-10 ms inside a report phase (sections check
+    concurrently and wait for the GIL; up to ~130 / ~50 ms under load
+    20-36).  An MCP chunk question makes 3 checks, with a rerank 6, a
+    reasoning question 7-10; a 6-section report 3 while planning and 31
+    while generating.  A run whose list is pushed down skips the lexical
+    lane's routing check (``_lexical_gate_drift``): with no list it cannot
+    change anything.
     On top comes the run verdict (``run_ceiling_binds``: one fingerprint read
     and one foreign-Memory read per run and library), which lets a run that
     cannot exclude anything read without the list.  What the checks buy:

@@ -331,21 +331,26 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
     （旧估算「4–8 次、130–260 ms」作废）。E1-2 改为**每次一行指纹读**（`all_visible_source_ids(nb, digest_for_owner=owner)`：两半各自按 id 排序的
     md5，SQL 一条语句；冻结侧摘要每个 scope 算一次），仍然每次现读、不缓存判定（codex #634）；另有 run 级判定 `run_ceiling_binds`（指纹 +
     外人 Memory 各一读，每 run 每库一次）决定是否下推清单。
-  - 实测（E1-2 评审修复轮后重测，同机同会话、负载 20–36，before = 今天 master（不装天花板）/ after = 本分支，MCP 每臂 3 次中位数，报告每臂 2 次，ms）：
+  - 实测（E1-2 复审裁决 R1+R2 之后重测，同机同会话、负载 7–8，before = 今天 master（不装天花板）/ after = 本分支，MCP 每臂 3 次中位数，报告每臂 2 次，ms）：
 
     | 调用 | SQLite M0 | PG M0 | SQLite M1 | PG M1 |
     |---|---|---|---|---|
-    | MCP chunk | 57 → 163 | 151 → 426 | 111 → 249 | 300 → 611 |
-    | chunk+重排 | 57 → 239 | 274 → 424 | 118 → 337 | 306 → 694 |
-    | MCP reasoning | 230 → 503 | 849 → 1,234 | 414 → 919 | 1,003 → 1,271 |
-    | reasoning（无 memory:read） | 218 → 525 | 547 → 723 | 566 → 715 | 863 → 947 |
-    | 6 节报告 plan | 387–389 → 1,299–1,371 | 419–499 → 1,288–1,343 | 464–530 → 1,585–1,779 | 909–990 → 1,724–2,137 |
-    | 6 节报告 generate | 874–902 → 3,121–3,180 | 1,769–1,794 → 2,623–5,955 | 1,429–1,467 → 4,348–4,436 | 2,006–2,088 → 5,369–8,279 |
+    | MCP chunk | 33 → 104 | 51 → 100 | 79 → 154 | 86 → 146 |
+    | chunk+重排 | 35 → 148 | 63 → 131 | 81 → 215 | 84 → 194 |
+    | MCP reasoning | 162 → 319 | 313 → 399 | 412 → 634 | 519 → 701 |
+    | reasoning（无 memory:read） | 167 → 436 | 314 → 511 | 385 → 613 | 551 → 854 |
+    | 6 节报告 intent | 5–6 → 32–42 | 1 → 24 | 5–6 → 89–159 | 1–2 → 48–57 |
+    | 6 节报告 plan | 424–446 → 480–566 | 194–198 → 197–225 | 454–476 → 493–560 | 196–211 → 296–480 |
+    | 6 节报告 generate | 709–719 → 799–819 | 592–627 → 364–409 | 1,113–1,157 → 1,287–1,454 | 732–914 → 1,049–1,050 |
 
-    漂移检查（单行指纹读）：MCP chunk 4 次、加重排 8 次、reasoning 12 次；报告恒绑定清单（裁决 A），plan 32 次、generate 103 次。每次读：
-    逐个执行时 SQLite 12–28 ms、PG 12–40 ms；报告章节并发时 SQLite 36–134 ms、PG 17–53 ms（排队）。构造器 3+M 读（SQLite 25–66 ms、PG 32–215 ms）。
-    意图预检改惰性后零读取。「按库单调的 generation 整数」评估结论：现有列做不到——删除不留痕；隐藏半的成员关系取决于 `memory_items.status`
-    （确认/驳回 Memory 不改 `sources` 行）；`updated_at` 不是每次可见性变化都推进；要可靠只能加计数列与触发器（迁移 + 写放大），本 PR 不做。
+    漂移检查（单行指纹读）：MCP chunk 3 次、加重排 6 次、reasoning 7–10 次；报告 plan 3 次、generate 31 次（R1：报告与其它运行同样按判词下推；
+    R2：无清单时不探词法语言闸）。每次读：MCP 中 SQLite 9–23 ms、PG 5–13 ms；报告阶段内 SQLite 11–16 ms、PG 6–10 ms（章节并发时等 GIL，负载
+    20–36 下最多约 130 / 50 ms）。PG 报告 generate 比 master 快：master 的无范围报告在 chunk lane 绑定 4.9 万 id 的授权清单，本分支不绑。
+    报告 intent 阶段立即构建（读 `current_source_scope_payload()` 持久化 `understanding.source_scope`，惰性也会立刻构建）。意图预检惰性、零读取。
+    「按库单调的 generation 整数」：现有列做不到——删除不留痕；隐藏半的成员关系取决于 `memory_items.status`；`updated_at` 不是每次可见性变化都推进；
+    要可靠只能加计数列与触发器（迁移 + 写放大），本 PR 不做。**R3（报告阶段内通道闸只探一次）未做**：需要改产品合同（「验证后新增/删除来源时 I/O 前
+    跳过高风险通道」），交用户拍板；复审实测 R1+R3 相对 R1+R2 再省 SQLite generate 约 0.3 s、PG 约 0.2 s，风险是阶段内（几秒）新增或确认的来源在本阶段
+    剩余时间不再关闭四个非分区通道（后过滤仍在，但合同不认后过滤为授权）。
   - 下推（P2-C2）：全选、未漂移、没有扣下个人记忆、库里没有外人个人记忆时，本笔记本的 producer 不绑定来源清单（`scoped_allowed_source_ids` 返回 None），
     读后核验，出现冻结外的来源即翻转判定并带清单重跑；其余情况经 id_binding 以单参数绑定。挂载库带逐库天花板后变热的三处：
     `scoped_allowed_source_ids(peer)` 已由 PR-A 的逐 scope 缓存消除；`communities._source_ceiling_kwargs` 改取逐 scope 的有序交出（不再每次排序）；
@@ -361,7 +366,7 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
   `preview_reasoning_intent`（端口加关键字，方法数不变）。`global_run` 置 `ceilings_total`；`follow_chain` 早退与 `any_base_has_kg` 认它（冻结为空集的库
   不算有图）。答案新增 `skipped_libraries`（MCP 同名字段），前端在引用核对提示旁显示一句。漂移探针与下推见成本清单；`_ceiling_binds_uncached` 里
   本笔记本自己的空冻结不再直接判绑定，改由各项判据判（空库、未漂移、无外人 Memory 时不绑）。
-- **E1-2 评审修复轮**：报告运行恒绑定清单（裁决 A，`_report_run_active`）；下推的唯一入口是 `run_ceiling_binds` / `unbound_ceiling` /
+- **E1-2 评审修复轮**：报告运行一度恒绑定清单（裁决 A），复审 R1 改回与其它运行同样按判词下推（下推的 ANN lane 在 Python 侧用冻结天花板规划 sidecar 覆盖，未 fold 的来源仍经 `report_delta_fallback` 召回）；无清单时不探词法语言闸（R2）；判词计算按 scope 单飞；下推的唯一入口是 `run_ceiling_binds` / `unbound_ceiling` /
   `verify_unbound_read`（裁决 B，E2-2 的第二套撤回）；意图预检装惰性天花板（裁决 C，`lazy=True`，消费才读）；判定只增不减
   （`_ceiling_bound_libraries`）、读前取天花板按成员关系核验、探针异常判绑定、Stop 也管判定探针；`follow_chain` 的 `ceilings_total` 分支在生产形态下
   是死分支，已删；`global_run` 的 `ceilings_total` 有端到端钉子（结果边界丢弃未选中挂载库的条目）；`_frozen_universe_digests` 沿用读取器的

@@ -170,19 +170,26 @@ class ReportExecutionCoordinator:
         (``cancellable_ceiling_readers``), so a Stop interrupts a SQLite read
         at once and waits at most one statement's 3 s cap on PostgreSQL.
 
+        The intent phase builds the ceiling eagerly (not ``lazy`` like the Ask
+        intent precheck): it reads ``current_source_scope_payload()`` to
+        persist ``understanding.source_scope``, so a lazy install would be
+        built at once anyway.
+
         COST (E1-2, real stores, 49k visible sources, a 6-section report, two
-        runs per condition, machine load 20-36): the constructor is 3 reads
-        per phase (+1 per mounted library), 25-52 ms on SQLite and 32-52 ms
-        on PostgreSQL without a mount.  A report phase always binds its
-        frozen list (``run_ceiling_binds`` -> ``_report_run_active``: the list
-        is also the ANN sidecar's coverage question), so every retrieval in
-        it runs the per-call drift check -- one single-row fingerprint read --
-        32 times while planning and 103 while generating; the sections run
-        concurrently, so each read queues (36-134 ms on SQLite, 17-53 ms on
-        PostgreSQL).  Wall clock without a ceiling (master) / this branch:
-        planning 387-389 / 1,299-1,371 ms on SQLite and 419-499 / 1,288-1,343
-        ms on PostgreSQL; generation 874-902 / 3,121-3,180 ms and 1,769-1,794
-        / 2,623-5,955 ms.
+        runs per condition, machine load 7-8): the constructor is 3 reads per
+        phase (+1 per mounted library), ~20-35 ms on SQLite and ~20 ms on
+        PostgreSQL without a mount.  A report phase is judged by
+        ``run_ceiling_binds`` like any other run, so an all-selected,
+        undrifted report binds no list; what remains is the per-call drift
+        check of the non-partitioned channels -- one single-row fingerprint
+        read, 3 times while planning and 31 while generating (11-16 ms on
+        SQLite, 6-10 ms on PostgreSQL; the sections run concurrently and a
+        check waits for the GIL while the others compute).  Wall clock
+        without a ceiling (master) / this branch: planning 424-446 / 480-566
+        ms on SQLite and 194-198 / 197-225 ms on PostgreSQL; generation
+        709-719 / 799-819 ms and 592-627 / 364-409 ms (master's unscoped
+        report binds a 49k-id authority list in its chunk lane; this one does
+        not).
         """
         from app.services.source_scope import default_ceiling_context
 
