@@ -3149,6 +3149,41 @@ class CandidateRetrievalService(_RetrievalState):
         except Exception:  # noqa: BLE001 — telemetry never changes retrieval
             return
 
+    def _verified_question_rows(
+        self, notebook_id: str, actor_id: str, allowed_source_ids, limit: int,
+    ):
+        """``(allowed, rows)`` for the generated-question scan, verified on
+        read.  With the list pushed down (``scoped_allowed_source_ids``
+        returns ``None``) the scan reads unbound, so its rows are checked
+        against the ceiling taken BEFORE the read -- before the scan limit
+        and the ranking budget see them: questions of a source that finished
+        after the verdict must neither push the scan past
+        ``generated_question_max_scan_rows`` (which would silently fall back
+        to the baseline) nor rank.  An outsider flips the verdict and the scan
+        re-runs with the frozen list."""
+        from app.services.source_scope import (
+            scoped_allowed_source_ids,
+            unbound_ceiling,
+            verify_unbound_read,
+        )
+
+        def scan():
+            allowed = scoped_allowed_source_ids(notebook_id, allowed_source_ids)
+            return allowed, self.chunks.question_index_rows(
+                notebook_id,
+                actor_id=actor_id,
+                allowed_source_ids=allowed,
+                limit=limit,
+            )
+
+        unbound = None if allowed_source_ids is not None else unbound_ceiling(notebook_id)
+        allowed, rows = scan()
+        if not verify_unbound_read(
+            notebook_id, unbound, (row["source_id"] for row in rows),
+        ):
+            allowed, rows = scan()
+        return allowed, rows
+
     def _generated_question_supplement_optional(
         self,
         notebook_id: str,
@@ -3162,7 +3197,6 @@ class CandidateRetrievalService(_RetrievalState):
         """Evaluate the optional index behind one all-or-nothing boundary."""
         scored, _ids, _matrix = baseline
 
-        from app.services.source_scope import scoped_allowed_source_ids
         from app.services.retrieval import (
             RetrievalSupport,
             add_chunk_supports,
@@ -3170,13 +3204,9 @@ class CandidateRetrievalService(_RetrievalState):
         )
         from app.services.vector_index import build_matrix, top_k_sims
 
-        allowed = scoped_allowed_source_ids(notebook_id, allowed_source_ids)
         scan_limit = self.settings.generated_question_max_scan_rows
-        rows = self.chunks.question_index_rows(
-            notebook_id,
-            actor_id=actor_id,
-            allowed_source_ids=allowed,
-            limit=scan_limit + 1,
+        allowed, rows = self._verified_question_rows(
+            notebook_id, actor_id, allowed_source_ids, scan_limit + 1,
         )
         if len(rows) > scan_limit:
             self._emit_generated_question_query_event({
