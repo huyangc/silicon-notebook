@@ -544,10 +544,30 @@ class KnowledgeQueryService:
         after: str = "",
     ) -> dict:
         source_id = self._participant_source(notebook_id, source_notebook_id)
-        scope = filtering(self.viewer_scope(source_id, notebook_id))
+        raw_scope = self.viewer_scope(source_id, notebook_id)
+        scope = filtering(raw_scope)
         detail = self._concept_detail(
             source_id, canonical_id, limit=limit, after=after, scope=scope
         )
+        if not detail["members"] and raw_scope is not None:
+            # Not a canonical id (M1, codex #824 r4).  While a notebook awaits
+            # its isolated rebuild, the graph and search answer a mixed
+            # cluster by its first visible member's OBJECT id, and the
+            # viewer's own Memory concepts belong to no cluster at all: both
+            # must still open.  A member id resolves to its cluster (one
+            # bounded member lookup) unless the viewer may not see that
+            # member; an own Memory concept is its own single member.
+            resolved = self._resolve_concept_member(source_id, canonical_id, scope)
+            if resolved is not None:
+                canonical_id = resolved
+                detail = self._concept_detail(
+                    source_id, canonical_id, limit=limit, after=after, scope=scope
+                )
+            elif not after and raw_scope.object_is_own_memory(source_id, canonical_id):
+                return self._concept_detail(
+                    source_id, canonical_id, limit=limit, scope=scope,
+                    single_member=True,
+                )
         if (scope is not None and scope.cluster_needs_check(canonical_id)
                 and self.memory_isolation_pending(source_id)):
             # Awaiting the isolated rebuild: answered by the first visible
@@ -557,6 +577,20 @@ class KnowledgeQueryService:
             if answer is not None:
                 detail = {**detail, "canonical_id": answer}
         return detail
+
+    def _resolve_concept_member(
+        self, notebook_id: str, object_id: str, scope: Any,
+    ) -> Optional[str]:
+        """The canonical id of the published cluster ``object_id`` is a
+        member of, when the viewer may see that member (an id the viewer may
+        not see answers ``None``, exactly like an unknown one); ``None`` when
+        it is no member, or is its cluster's canonical id itself."""
+        if scope is not None and scope.object_hidden(object_id):
+            return None
+        with self.database.connect() as db:
+            rows = self.unified_kg.cluster_fold_rows(db, notebook_id, [object_id])
+        canonical = str(rows[0]["canonical_id"]) if rows else ""
+        return canonical if canonical and canonical != object_id else None
 
     def _viewer_cluster_page(
         self, scope: Any, notebook_id: str, canonical_id: str,
@@ -680,7 +714,12 @@ class KnowledgeQueryService:
         limit: Optional[int] = CONCEPT_DETAIL_PAGE_MAX,
         after: str = "",
         scope: Any = None,
+        single_member: bool = False,
     ) -> dict:
+        # ``single_member`` (M1): ``canonical_id`` is an object that belongs to
+        # no cluster -- the viewer's own Memory concept -- shown as a cluster
+        # of one (the caller decided the viewer may see it).
+        #
         # Hub-cluster member pagination (KG-4 application-side fix, R3·T-B2):
         # `concept_cluster_detail_rows` used to return every member (plus
         # full payload/evidence) unbounded — production has seen 8-9M cluster
@@ -704,7 +743,25 @@ class KnowledgeQueryService:
         fetch_limit = None if limit is None else limit + 1
         owned_members = 0
         exhausted = False
-        if scope is None:
+        if single_member:
+            row = self.knowledge.get_object_row(notebook_id, canonical_id)
+            cluster_rows = [] if (
+                row is None or row["object_type"] != "concept"
+                or row["status"] == "deprecated"
+            ) else [{
+                "member_object_id": str(row["id"]),
+                "object_type": row["object_type"],
+                "payload": row["payload"] if isinstance(row["payload"], str)
+                else json.dumps(row["payload"] or {}),
+                "evidence": row["evidence"] if isinstance(row["evidence"], str)
+                else json.dumps(row["evidence"] or []),
+            }]
+            name = (
+                str(json.loads(cluster_rows[0]["payload"] or "{}").get("name", "") or "")
+                if cluster_rows else ""
+            )
+            exhausted = True
+        elif scope is None:
             with self.database.connect() as db:
                 cluster_rows, name = self.knowledge.concept_cluster_detail_rows(
                     db, notebook_id, canonical_id, limit=fetch_limit, after=after
@@ -743,7 +800,8 @@ class KnowledgeQueryService:
         # merge) carries the first page's total forward instead of re-fetching
         # it.
         member_total = None
-        if not after and scope is not None and exhausted and next_cursor is None:
+        if not after and (scope is not None or single_member) and exhausted \
+                and next_cursor is None:
             # The page scan read the whole cluster: the count is what it kept.
             member_total = len(member_ids)
         elif not after:
