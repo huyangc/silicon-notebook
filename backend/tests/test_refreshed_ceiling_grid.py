@@ -54,7 +54,7 @@ class _Store:
 
     def readers(self) -> CeilingReaders:
         return CeilingReaders(
-            participants=lambda nb: [nb, *self.mounts],
+            participants=lambda nb, _viewer: [nb, *self.mounts],
             visible=lambda nb: list(self.visible_by.get(nb, [])),
             hidden=lambda nb, owner: list(self.hidden_by.get((nb, owner), [])),
             memory_sources=lambda nb: sorted(MEMORY) if nb == NB else [],

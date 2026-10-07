@@ -132,7 +132,7 @@ from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.retrieval_participants import (
     resolve_retrieval_participant_ids,
 )
-from app.services.retrieval_run import memoized_retrieval_value
+from app.services.retrieval_run import current_viewer_id, memoized_retrieval_value
 from app.services.source_scope import (
     CeilingSet,
     collection_ceiling_drifted,
@@ -590,7 +590,7 @@ class CollectionCatalogService:
                 resolve_retrieval_participant_ids(
                     active_notebook_id,
                     lambda: self._notebooks.participant_ids(
-                        db, active_notebook_id, viewer_id="",  # E6-3
+                        db, active_notebook_id, viewer_id=current_viewer_id(),
                     ),
                 )
             )

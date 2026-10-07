@@ -102,7 +102,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Callable, Iterator, Mapping, Optional, Sequence
+from typing import Callable, Iterable, Iterator, Mapping, Optional, Sequence
 
 # The exception lives in the dependency-free domain layer, NOT here, so that a
 # fail-soft ``except Exception`` handler in a module barred from reading the
@@ -388,7 +388,22 @@ def override_fingerprint(override: ParticipantOverride) -> str:
     process), and 8 bytes because this disambiguates ≤8-library combinations
     within one already-namespaced key, not a security boundary.
     """
-    payload = "|".join(sorted(override.notebook_ids)).encode("utf-8")
+    return override_fingerprint_for_ids(override.notebook_ids)
+
+
+def override_fingerprint_for_ids(notebook_ids: Iterable[str]) -> str:
+    """``override_fingerprint``'s digest of a plain participant id set.
+
+    The graph caches also key on a VIEWER's effective participant set (M3: a
+    mount counts only for a viewer who may read the mounted library), whenever
+    that set is narrower than every valid mount -- see
+    ``graph_retrieval._participant_graph_cache_key``.  The same algorithm on
+    purpose: an override and a viewer naming the same libraries build the
+    same graph, so they may share its entry.  Still not the security
+    boundary: every cached entry's version tuple enumerates its participants,
+    so a key collision between two different sets rebuilds, never serves.
+    """
+    payload = "|".join(sorted({str(value) for value in notebook_ids})).encode("utf-8")
     return hashlib.blake2s(payload, digest_size=8).hexdigest()
 
 
@@ -406,6 +421,7 @@ __all__ = [
     "current_participant_override",
     "federated_ask_active",
     "override_fingerprint",
+    "override_fingerprint_for_ids",
     "participant_override",
     "resolve_retrieval_participant_ids",
     "resolve_retrieval_participants",

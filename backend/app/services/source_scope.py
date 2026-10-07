@@ -2178,8 +2178,12 @@ class CeilingReaders:
     methods it already owns.  Production wiring (both backends implement all
     four on their ``SourceStore`` / ``NotebookStore``):
 
-    * ``participants(notebook_id)`` -- ``participant_notebook_ids``: the active
-      notebook first, then every mount that is valid right now;
+    * ``participants(notebook_id, viewer_id)`` -- ``participant_notebook_ids``:
+      the active notebook first, then every mount that is valid right now AND
+      effective for ``viewer_id`` (M3: the mounter, or a viewer who may read
+      the mounted library).  The ceiling passes its own ``owner_id`` -- the
+      asker / report author whose ceiling this is -- never an ambient request
+      user: a report or Global Ask worker builds its ceiling off the request;
     * ``visible(notebook_id)`` -- ``all_visible_source_ids``: ONE library's
       visible sources.  Deliberately one statement per library rather than the
       batched ``visible_source_ids_by_notebook``: a mounted library must fail
@@ -2219,7 +2223,7 @@ class CeilingReaders:
       and the constructor went from +16 ms to +245..+629 ms.
     """
 
-    participants: Callable[[str], Iterable[str]]
+    participants: Callable[[str, str], Iterable[str]]
     visible: Callable[[str], Iterable[str]]
     hidden: Callable[[str, str], Iterable[str]]
     memory_sources: Callable[[str], Iterable[str]]
@@ -2779,7 +2783,7 @@ def _fresh_default_ceiling(
     raise_if_cancelled(cancel_event)
     admits = _library_admits(notebook_id, base_scope)
     peers = tuple(dict.fromkeys(
-        str(value) for value in readers.participants(notebook_id)
+        str(value) for value in readers.participants(notebook_id, owner_id)
         if value and str(value) != notebook_id and admits(str(value))
     ))
     synthesize_local = local_scope is None
@@ -2978,7 +2982,7 @@ def refreshed_ceiling_context(
         if library in inherited
     }
     added = tuple(dict.fromkeys(
-        str(value) for value in readers.participants(notebook_id)
+        str(value) for value in readers.participants(notebook_id, owner_id)
         if value and str(value) != notebook_id
         and str(value) not in inherited and admits(str(value))
     ))

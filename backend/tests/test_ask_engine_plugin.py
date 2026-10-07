@@ -1919,7 +1919,7 @@ def _scope_capturing_plugin_service(captured: list[object]):
     runtime = build_extension_runtime((
         _bundle("alpha", _Provider("alpha.kg", answer=answer)),
     ))
-    participants = lambda _nb: ("nb", "base-1")  # noqa: E731
+    participants = lambda _nb, *_viewer: ("nb", "base-1")  # noqa: E731
     visible = lambda nb: ("base-doc",) if nb == "base-1" else ("source-doc",)  # noqa: E731
     hidden = lambda _nb, _actor: ("hidden-knowhow", "hidden-memory")  # noqa: E731
     service = _minimal_ask_service(
@@ -2036,7 +2036,7 @@ def test_plugin_ask_passes_an_outer_scope_through_untouched():
     captured: list[object] = []
     service = _scope_capturing_plugin_service(captured)
     service.ceiling_readers = static_ceiling_readers(
-        participants=lambda _nb: pytest.fail("an outer scope must not be re-read"),
+        participants=lambda _nb, _viewer: pytest.fail("an outer scope must not be re-read"),
     )
     outer = ResolvedSourceScope(
         mode="include", source_ids=["source-doc"], narrowed=True,

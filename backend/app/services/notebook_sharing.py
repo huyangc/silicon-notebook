@@ -1420,7 +1420,7 @@ class NotebookSharingService:
                 ):
                     raise KeyError(notebook_id)
                 row = fresh
-            notebook = self._summaries.from_row(db, row)
+            notebook = self._summaries.from_row(db, row, user_id=user_id)
         notebook.access = "reader"
         return notebook
 

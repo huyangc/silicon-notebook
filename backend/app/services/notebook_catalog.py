@@ -42,6 +42,7 @@ from app.repositories.ports import (
 # historical importers unchanged.
 from app.repositories.source_files import delete_source_file as _delete_source_file
 from app.services.knowledge_contracts import USABLE_STATUSES
+from app.services.retrieval_run import current_viewer_id
 from app.services import kg_viewer_scope as _kg_viewer_scope
 from app.services.kg_viewer_scope import (
     store_readers_take_viewer_id,
@@ -820,12 +821,18 @@ class NotebookCatalogService:
         )
 
     def get_notebook(self, notebook_id: str) -> NotebookSummary:
+        # The summary is the VIEWER's (N-6: which mounted libraries it names,
+        # which carry a KG): ``current_viewer_id()`` -- a report / Global Ask /
+        # reattached run's actor on its worker thread, else the requesting
+        # user, else nobody -- never ``identity.current_user()``, whose
+        # no-request fallback is the seeded local account.
+        viewer_id = current_viewer_id()
         return self._fill_document_limit(
             self._summaries.get(
                 notebook_id,
                 kg_building=notebook_id in self.kg_building,
                 paper_meta_backfilling=self._paper_meta_backfilling(notebook_id),
-                user_id=self._identity.current_user().id,
+                user_id=viewer_id or None,
             ),
             notebook_id,
         )

@@ -102,10 +102,6 @@ def build_report_fixture(repo, placeholder: str) -> dict[str, Any]:
     insert(lib, "rep-lib-knowhow", "knowhow")
     memory(lib, alice.id, "rep-mem-lib", "rep-lib-memory")
     with repo._write() as db:
-        # E6-3: the participant reader is not yet bound to the run's viewer (M3), so
-        # only a library open to everybody -- a public base -- is mounted for the
-        # report run; E6-3 restores Alice's private library with her actor.
-        db.execute(f"UPDATE notebooks SET tier='base' WHERE id={ph}", (lib,))
         db.execute(
             "INSERT INTO notebook_bases"
             "(notebook_id,base_notebook_id,created_at,created_by) "
@@ -399,7 +395,7 @@ class _FailingReaders:
 
     @staticmethod
     def build(message: str = "participants unavailable") -> CeilingReaders:
-        def fail(_notebook_id):
+        def fail(_notebook_id, _viewer_id):
             raise RuntimeError(message)
 
         return CeilingReaders(
@@ -460,7 +456,7 @@ def test_a_stop_during_the_ceiling_reads_ends_the_worker_quietly():
     reports = _Reports()
     engine = _NeverRunEngine()
 
-    def cancelled(_notebook_id):
+    def cancelled(_notebook_id, _viewer_id):
         raise AskCancelled()
 
     coordinator = ReportExecutionCoordinator(
@@ -542,7 +538,7 @@ def test_a_stop_before_a_mounted_library_is_read_ends_the_phase_quietly(phase):
     reports, engine, registry = _Reports(), _NeverRunEngine(), _SpyRegistry()
     lib_reads: list[str] = []
 
-    def participants(notebook_id):
+    def participants(notebook_id, _viewer_id):
         registry.cancel("rid")
         return [notebook_id, "lib"]
 
@@ -574,7 +570,7 @@ def test_a_stop_interrupting_an_active_notebook_read_ends_the_phase_quietly(phas
         return _store_read(["s1"])(notebook_id)
 
     coordinator = _coordinator_with(CeilingReaders(
-        participants=lambda notebook_id: [notebook_id], visible=visible,
+        participants=lambda notebook_id, _viewer: [notebook_id], visible=visible,
         hidden=lambda notebook_id, owner_id: [],
         memory_sources=lambda notebook_id: [],
     ), reports, engine, registry)
@@ -641,7 +637,7 @@ def test_a_stop_during_the_refresh_reads_cancels_the_report(
     engine = repo.report_execution.engine_factory(user_id=alice, cancel_event=stop)
     late_reads: list[str] = []
 
-    def participants(notebook_id):
+    def participants(notebook_id, _viewer_id):
         stop.set()
         if stop_at == "active":
             return _store_read([notebook_id])(notebook_id)

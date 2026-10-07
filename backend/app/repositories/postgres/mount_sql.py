@@ -13,7 +13,8 @@ PG 侧独有的事实只有一条:查看者行写成 `(SELECT NULLIF(CAST(%s AS 
 带查看者片段的其余说明都写在 SQLite 那一份:三值与布尔的分工(过滤用
 `MOUNT_EFFECTIVE_FOR_VIEWER`,投影与取反用 `MOUNT_EFFECTIVE_FOR_VIEWER_EXPR`),以及
 「两组片段并存」(参与集的七个 store 调用点已经切到带查看者的一组,各自收必填关键字
-`viewer_id`;服务层的查看者来源由任务 E6-3 接上)。
+`viewer_id`;服务层一律传 `retrieval_run.current_viewer_id()` 或显式查看者,
+由 `tests/test_mount_viewer_guard.py` 钉住)。
 """
 
 from app.repositories.postgres.access_sql import (

@@ -43,7 +43,9 @@ from app.services.retrieval_participants import (
     current_participant_override,
     federated_ask_active,
     override_fingerprint,
+    override_fingerprint_for_ids,
 )
+from app.services.retrieval_run import current_viewer_id, memoized_retrieval_value
 
 
 #: Rows per batched hnswlib ``knn_query`` in the cross-layer synonym bridge.
@@ -62,11 +64,25 @@ from app.services.retrieval_participants import (
 _XBRIDGE_QUERY_BLOCK = 4096
 
 
-def _participant_graph_cache_key(notebook_id: str, family: str) -> str:
+def _participant_graph_cache_key(
+    notebook_id: str, family: str, viewer_fingerprint: str = "",
+) -> str:
     """Process-level cache key for a graph built over the participant set.
 
     ``{nb}:{family}`` with no override -- byte for byte the historical key --
     and ``{nb}:{fingerprint}:{family}`` with one.
+
+    THE VIEWER'S EFFECTIVE SET (M3).  A mount counts only for a viewer who may
+    read the mounted library (or its mounter), so with no override one active
+    id still maps to several participant sets -- one per audience.
+    ``viewer_fingerprint`` is ``GraphRetrievalService._viewer_set_fingerprint``:
+    ``""`` when the viewer's effective set is EVERY valid mount (the mounter,
+    and any member who may read every mounted library), so the key stays the
+    historical one and all of them share one entry; otherwise the digest of
+    the effective set, in the same slot as an override's (before the family,
+    for the suffix eviction below), so a member never shares the mounter's
+    graph over a private library -- and two viewers with the same narrower set
+    share theirs.
 
     WHY AN OVERRIDE MAY ENTER A CACHE KEY WHEN A SOURCE SCOPE MUST NOT.
     ``source_scope.scoped_subgraph_nodes`` argues at length that putting the
@@ -93,9 +109,31 @@ def _participant_graph_cache_key(notebook_id: str, family: str) -> str:
     participants cannot silently turn a thrash into a leak.
     """
     override = current_participant_override()
-    if override is None:
-        return f"{notebook_id}:{family}"
-    return f"{notebook_id}:{override_fingerprint(override)}:{family}"
+    if override is not None:
+        return f"{notebook_id}:{override_fingerprint(override)}:{family}"
+    if viewer_fingerprint:
+        return f"{notebook_id}:{viewer_fingerprint}:{family}"
+    return f"{notebook_id}:{family}"
+
+
+def _viewer_set_fingerprint(
+    every_valid: Optional[Iterable[str]], effective_ids: Iterable[str],
+) -> str:
+    """The ``viewer_fingerprint`` of ``_participant_graph_cache_key``.
+
+    ``every_valid`` is the active notebook plus every VALID mount
+    (``GraphRetrievalService._valid_participant_ids``), ``None`` under a
+    participant override (the override's own fingerprint keys the graph).
+    ``""`` when the viewer's effective participant set is all of it -- the
+    historical key, shared by the mounter and every viewer who may read every
+    mounted library -- else the digest of the effective set.
+    """
+    if every_valid is None:
+        return ""
+    effective = {str(value) for value in effective_ids}
+    if effective == {str(value) for value in every_valid}:
+        return ""
+    return override_fingerprint_for_ids(effective)
 
 
 def _xbridge_similarities(dists) -> "np.ndarray":
@@ -460,6 +498,30 @@ class GraphRetrievalService(_RetrievalState):
         self.model_error_sink = model_error_sink
         self.database = database
 
+    def _valid_participant_ids(self, notebook_id: str) -> tuple:
+        """The active notebook plus every VALID mount, whoever is asking.
+
+        The reference the graph cache keys compare a viewer's effective set
+        against (``_viewer_set_fingerprint``): the mount edges' own validity
+        (``list_mount_edges_for_notebook``'s ``active``, i.e. ``MOUNT_VALID``)
+        is exactly the mounter's effective set, because a valid edge implies
+        its mounter may read the mounted library.  One small indexed read,
+        memoised per retrieval run, issued BEFORE a graph builder takes its
+        own connection so a PostgreSQL pool never lends two at once.
+        """
+        def read() -> tuple:
+            return (str(notebook_id), *(
+                str(edge["id"])
+                for edge in self.notebooks.list_mount_edges_for_notebook(
+                    notebook_id,
+                )
+                if edge["active"]
+            ))
+
+        return memoized_retrieval_value(
+            ("valid_mount_participants", notebook_id), read,
+        )
+
     def _federated_rx_graph(self, active_notebook_id: str):
         """Return a federated PyDiGraph merging base notebook(s) + active notebook.
 
@@ -489,12 +551,16 @@ class GraphRetrievalService(_RetrievalState):
         """
         from app.services.kg.graph_reason import build_rx_graph
         override = current_participant_override()
+        every_valid = (
+            self._valid_participant_ids(active_notebook_id)
+            if override is None else None
+        )
         with self._connect() as db:
             if override is None:
                 # Participating notebooks: active + all base notebooks (excl.
                 # active if active is itself base, to avoid duplication).
                 active_row, base_rows = self.notebooks.participant_rows(
-                    db, active_notebook_id, viewer_id="",  # E6-3
+                    db, active_notebook_id, viewer_id=current_viewer_id(),
                 )
                 active_tier = active_row["tier"] if active_row else "personal"
 
@@ -598,7 +664,12 @@ class GraphRetrievalService(_RetrievalState):
                     cluster_groups=cluster_groups or None)
 
             return self._vector_cache.get(
-                _participant_graph_cache_key(active_notebook_id, "fed_rxgraph"),
+                _participant_graph_cache_key(
+                    active_notebook_id, "fed_rxgraph",
+                    _viewer_set_fingerprint(
+                        every_valid, [nb_id for nb_id, _tier in participants],
+                    ),
+                ),
                 version, _load)
     def _ppr_graph(self, notebook_id: str):
         """Build (and version-cache) the graph-mode PPR graph: KG nodes + chunk
@@ -613,10 +684,13 @@ class GraphRetrievalService(_RetrievalState):
         # cache key carries its fingerprint; absent -> the live mount read and
         # the historical key, unchanged.
         override = current_participant_override()
+        every_valid = (
+            self._valid_participant_ids(notebook_id) if override is None else None
+        )
         with self._connect() as db:
             participants = (
                 self.notebooks.participant_ids(
-                    db, notebook_id, viewer_id="",  # E6-3
+                    db, notebook_id, viewer_id=current_viewer_id(),
                 )
                 if override is None
                 else [
@@ -701,7 +775,10 @@ class GraphRetrievalService(_RetrievalState):
             return build_ppr_graph(kg_nodes, chunk_ids, relations, memberships, cluster_groups, extra_edges=extra_edges)
 
         return self._vector_cache.get(
-            _participant_graph_cache_key(notebook_id, "ppr_graph"),
+            _participant_graph_cache_key(
+                notebook_id, "ppr_graph",
+                _viewer_set_fingerprint(every_valid, participants),
+            ),
             version, _load)
     def _mention_extra_edges(self, notebook_id: str) -> List[Tuple[str, str, float]]:
         """P2 共提桥 → 图 extra_edges:每条 mention_edges 行转一条软边
@@ -920,7 +997,8 @@ class GraphRetrievalService(_RetrievalState):
         if _bridge_edges:
             active_edges = list(active_edges) + _bridge_edges
         return active_edges
-    def _scale_combined_graph(self, notebook_id: str, base_indexes):
+    def _scale_combined_graph(self, notebook_id: str, base_indexes,
+                              viewer_fingerprint: str = ""):
         """Build (and version-cache) the query-INDEPENDENT combined base⊕active
         CSR graph used by scale_ppr. Version key = each base's manifest version +
         (conditionally) the active notebook's _scale_index_version — see the
@@ -1061,7 +1139,9 @@ class GraphRetrievalService(_RetrievalState):
             }
 
         return self._vector_cache.get(
-            _participant_graph_cache_key(notebook_id, "scale_combined"),
+            _participant_graph_cache_key(
+                notebook_id, "scale_combined", viewer_fingerprint,
+            ),
             version, _load)
 
     def _scale_chunk_id_set(self, index):
@@ -1122,11 +1202,17 @@ class GraphRetrievalService(_RetrievalState):
         #    long before reaching this line, because the override refuses to
         #    resolve for any active id but its own.
         override = current_participant_override()
+        viewer_fingerprint = ""
         if override is None:
+            every_valid = self._valid_participant_ids(notebook_id)
             with self._connect() as db:
-                base_ids = self.notebooks.participant_ids(
-                    db, notebook_id, viewer_id="",  # E6-3
-                )[1:]
+                participant_ids = self.notebooks.participant_ids(
+                    db, notebook_id, viewer_id=current_viewer_id(),
+                )
+            viewer_fingerprint = _viewer_set_fingerprint(
+                every_valid, participant_ids,
+            )
+            base_ids = participant_ids[1:]
         else:
             base_ids = [
                 participant_id
@@ -1153,7 +1239,9 @@ class GraphRetrievalService(_RetrievalState):
         #    not the query vector), so it is version-cached and reused across
         #    consecutive queries against the same active notebook — the splice cost
         #    is paid once per (base versions × active version) instead of per query.
-        graph = self._scale_combined_graph(notebook_id, base_indexes)
+        graph = self._scale_combined_graph(
+            notebook_id, base_indexes, viewer_fingerprint,
+        )
         combined_ids = graph["combined_ids"]
         combined_A = graph["combined_A"]
         combined_index = graph["combined_index"]
@@ -1641,7 +1729,7 @@ class GraphRetrievalService(_RetrievalState):
             override = current_participant_override()
             start = self.knowledge.follow_start_row(
                 db, start_object_id, active_notebook_id, USABLE_STATUSES,
-                viewer_id="",  # E6-3
+                viewer_id=current_viewer_id(),
                 **({} if override is None else {"participant_ids": [
                     participant_id
                     for participant_id, _tier
