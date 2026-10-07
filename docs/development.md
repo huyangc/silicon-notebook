@@ -87,6 +87,72 @@ contributor constraints, not a second implementation history.
   exception. Do not infer a grant kind from a nullable/empty principal id or bypass
   live read authority. Update the Memory authorization lock-site allowlist whenever
   the read predicate widens. The access-SQL and notebook-capability guards own these checks.
+- Knowledge-graph rows derived from a member's Memory belong to that member (ruling M1); keep
+  the readers, builders and guards below in step:
+  - Graph-build readers use `memory_derived_in_notebook` (the notebook-bound classifier) and
+    bind every by-id object probe to the referring row's notebook; the unbound
+    `memory_derived_object` makes PostgreSQL hash every Memory source of the deployment.
+  - KG readers take `viewer_id` with one meaning (`memory_sql.memory_viewer_filter`): `None` =
+    every row, `""` = no Memory-derived row, a user id = no row derived from another member's
+    Memory. For row readers `None` keeps the statement text unchanged; for the count readers
+    `None` keeps the results unchanged with zero live reads. Probes are bound to the row's
+    notebook (`foreign_memory_in_notebook_excluded`, `memory_derived_in_notebook`). The
+    type-count memo holds, per `(kg_reset_epoch, kg_mutation_seq)`, the shared half and every
+    member's Memory half from one statement (total minus the Memory-source-driven count);
+    `None` sums them, `""` reads the shared half, a user id adds one live read of the viewer's
+    own half (`own_memory_source`). Reads driven by Memory sources bind the source ids as an
+    `= ANY(ARRAY(subquery))` InitPlan on PostgreSQL; on SQLite they pin the join order
+    (`CROSS JOIN`) or use an uncorrelated `IN` / `NOT IN` list, and write
+    `hidden_type_index_term`.
+  - The five `memory_sql` fragments and their consumers (both backends unless named):
+    `memory_derived_in_notebook` (no bound parameter) — the shared tooling
+    `community_context_rows`, `duplicate_member_rows`, `edge_centrality_source_rows`, the `""`
+    branch of `memory_viewer_filter` and the graph-build readers;
+    `foreign_memory_in_notebook_excluded` (one parameter) — only through
+    `memory_viewer_filter`; `memory_viewer_filter` (three-valued) — the row readers of both
+    `knowledge_store` modules, PostgreSQL `search.py`'s `_candidate_rows_for_terms` and
+    `notebook_knowledge_rows` (PostgreSQL `query_store.search_notebook` reaches it through the
+    latter) and SQLite `query_store.search_notebook`; `own_memory_source` (one parameter) — both
+    `knowledge_counts_cache.memory_type_status_counts`, both `knowledge_store` `own_memory_only`
+    overlay reads and both `query_store.notebook_has_kg` own-Memory EXISTS;
+    `hidden_type_index_term` (no bound parameter; a SQLite planner hint, named alike on both
+    backends) — SQLite's two-halves count statement and own half, `knowledge_store`'s overlay
+    read and `_fts_viewer_filter`, and `query_store.notebook_has_kg`'s own-Memory EXISTS. The
+    earlier fragments gain consumers too: SQLite `knowledge_store._fts_viewer_filter` uses
+    `memory_source_readable` and `memory_source_type_predicate`; both `knowledge_counts_cache`
+    modules use `memory_source_type_predicate` for the Memory CTE of the two-halves statement.
+  - `kg_viewer_scope.KgViewerScope` is the Python twin of the `memory_sql` viewer fragments (an
+    object or relation is hidden only by its own source; each evidence item by its own), pinned
+    on both backends by `test_kg_viewer_scope_twins*`; services pass `viewer_id` to a KG store
+    reader only through `store_viewer_kwargs`, i.e. only when the notebook holds Memory the
+    viewer may not read. The assembly tripwires in `test_kg_viewer_scope_assembly.py` verify
+    that the switch (`STORE_READERS_TAKE_VIEWER_ID`) matches the keywords the stores take and
+    that the isolation-marker reader is wired.
+  - For a notebook without a Memory source, scale and viz artifacts are byte-identical to those
+    built before the Memory isolation except in three manifests: the main and viz manifests gain
+    `memory_isolation`, `memory_sources_digest` and `shared_content_digest`, and every version
+    list — the main, the viz and the source-partition companion's `parent_version` — carries the
+    pair (`memory_isolation`, 1), which every notebook's version now has. Their builds run the
+    same statements, with three differences: every object and relation read carries a
+    per-statement Memory exclusion (a hashed `NOT IN` subquery; on PostgreSQL it measured the
+    same as an unfiltered read, on SQLite a whole-table read costs 13–30 % more); there are
+    one-row Memory probes and Memory-source reads; and the viz derive reads a three-column
+    projection instead of whole rows. The version signal no longer probes for Memory. The ANN
+    feeds and the membership leg filter by Memory id sets read up front; the build keeps a
+    running union of the Memory rows it observes and retries, then discards, only when newly
+    appeared rows are held by the artifact.
+  - `backend/tests/test_memory_chunk_write_guard.py` scans `backend/app`, `scripts/` and
+    `examples/` (and every `.sql` file there outside a `migrations` directory): every write of
+    `chunks` must refuse a Memory source before the write or be listed with a checked reason,
+    and `sources.source_type` is written only by INSERT.
+  - `backend/tests/test_memory_reader_guard.py` keeps the reader inventory closed: every
+    function or SQL constant under `backend/app/repositories` that reads `knowledge_objects`,
+    `knowledge_relations` or `concept_clusters` by notebook is registered by name in one
+    category (viewer-taking reader, own-Memory read, shared tooling or build reader that
+    excludes all Memory, the count cache, key-, ceiling- or caller-bounded read, derived layer,
+    state probe, Memory side, copy, maintenance). An unregistered reader fails with its
+    `file:line`, a registered name that no longer reads fails too, and the viewer, own-Memory,
+    exclusion and count-cache categories are checked against the code.
 - Participant replacement belongs to `retrieval_participants.py`, only at retrieval
   consumption boundaries; `global_run.py` is its only installer. Authorization still
   uses the real mount/read predicate, and `source_scope.py` can narrow but never widen

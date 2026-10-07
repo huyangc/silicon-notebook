@@ -765,6 +765,30 @@ published 指针（`cluster_generation`/`community_generation`，无 state 行 �
 只会让受害者响亮作废），再按预算逐本回收残代。数值围栏
 （TTL/偏斜/回收页宽）见部署文档。
 
+**记忆派生行的结构隔离（裁决 M1）。** 由成员记忆派生的知识对象与关系只属于该成员，靠流水线上的几个
+隔离点保证，而不是靠展示时过滤：
+
+- **建图侧**：派生自成员个人记忆的知识对象与关系，从不作为共享概念簇的种子，也不成为其成员：个人记忆
+  对象始终自成一类（canonical 即其自身），并且不进入规范关系、提及桥与共提、社区及其摘要，也不计入簇
+  大小、最大簇和边出处分析。建图读者在各自语句里用绑定笔记本的 `memory_sql.memory_derived_in_notebook`
+  排除，催收搬运是第二道防线；重建收尾只在运行期间没有新变更时清脏标记。
+- **写侧**：增量融合入口 `incremental_fuse_source` 对记忆来源一次探针后直接返回（覆盖抽取与 scale fold
+  两个调用方），Tier-2 桥接候选池剔除记忆概念；冲突检测的读者在语句内排除记忆行；手工合并在
+  `merge_objects_in_transaction` 的加锁读里、任何写入之前复核两端是否派生自记忆，一方或两方来自记忆都
+  返回 409；按 id 写入知识对象或关系的接口对非创建者与「id 不存在」同答；通用贡献申请拒收记忆派生对象，
+  批准时在事务内复核；笔记本持有记忆来源时不能发布为公共知识库，排队的记忆分析在运行时复查。
+- **落盘工件**：共享笔记本落盘的知识图谱预览、检索索引及其来源分区伴随工件里不含任何成员的记忆：没有
+  记忆派生的对象或名称，没有只由记忆关系支撑的边，也不会把节点并入含记忆成员的簇；在索引构建期间被
+  确认或删除的记忆同样不会进入。工件 manifest 带 `memory_isolation` 字段，缺字段的旧工件一律不再提供。
+- **读侧**：KG store 读者带 `viewer_id`（`memory_sql.memory_viewer_filter`），服务层经
+  `kg_viewer_scope` 只在库里有查看者不能读的记忆时传入；共享工具（社区摘要、重复分组、边审核排序）对
+  所有人排除记忆行。`backend/tests/test_memory_reader_guard.py` 要求每个按笔记本读取这三张表的仓库读者
+  按名字登记类别，新读者不登记即红。
+- **段落**：记忆来源永远不分块，分块服务、段落存储、整本索引重建的发布、Knowhow 转移与同步导入各自拒绝。
+- **存量**：迁移 PostgreSQL 0067 / SQLite v87 删除旧版本混入共享派生层的内容，并在
+  `unified_kg_state.memory_isolation_version` 上标记待办；就绪后一轮后台任务检查并重建，完成后置 1。
+  操作与完成判据见[运维参考](./docs/operations_zh.md#知识图谱里的记忆隔离)。
+
 ### 3.6 深度报告
 
 深度报告由 `report_engine.py` 作为可取消后台 job 执行。阶段 1a 先做完全不读取语料的问题理解，停在 `intent_ready`；确认端点通过 store 级 compare-and-set 原子认领 `intent_ready → planning`，把用户已审阅的合同和澄清答案确定性冻结，不再做隐藏的二次 LLM 理解。阶段 1b 才做语料侦察与多视角大纲，停在 `outline_ready` 供用户编辑；覆盖/充分性探针先按逻辑组保留各自 first-N，再把跨主题/章节重复的 query 合并为一次检索，并在 report-wide leaf fanout 内并行 KG/element 叶子；聚合仍按原输入顺序。不可复制的大库不扫描整表 element，而从有界 chunk ANN 命中的 `element_ids` 恢复精确元素；ANN 不可用时才走有界 FTS 回退，精确短语/标识符仍是独立通道。阶段二在确认大纲后按 section 并行运行 reasoning 深挖并写成带证据纪律的 Markdown，内部检索问题可含澄清答案，但可见标题只使用确认后的研究问题。状态、逐节进度、下载、批量导出、取消与删除都通过 report API 暴露，不能在请求线程内同步跑完整报告。已认证的后端批量导出先由 repository SQL 完成 notebook/creator/done/nonempty 收窄并释放连接，再把不可变最小视图交给启动冻结的 single `report.exporter` Provider；默认内建 Markdown provider 是唯一默认实现，文件名/重复后缀和 ZIP 外壳继续归 core，不存在 fallback renderer。浏览器单篇 Markdown Blob 仍是已授权详情的本地呈现，不进入 backend Provider。

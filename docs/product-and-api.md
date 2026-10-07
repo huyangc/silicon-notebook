@@ -1395,6 +1395,10 @@ Knowhow ownership and authorization continue to use stable user ids (`created_by
 The row-detail drawer, and each physical branch in a row-title-group matrix, provide an explicit **智能补全空列** action. It produces suggestions only for stored-empty cells in that row (a missing value or exact empty string; whitespace-only stored content remains existing content). One request gathers two evidence channels: at most eight rows from the same table that fill a requested target column, preferring the same row-title group and then known-column similarity/coverage; and one bounded `ReasoningRetriever` run over the active notebook plus its currently valid explicit reference-library mounts. The latter follows the Ask `reasoning` planning, federated retrieval, reflection, graph expansion, and evidence-backed query-time chain-traversal family, but its completion-specific policy removes private Memory and the current table's own projection before candidates reach model reflection, and disables provenance-opaque PPR/community expansion as well as the exact-lookup identifier channel (its query is a JSON envelope, not a question, and would otherwise probe the envelope's own field names). It never invokes Ask answer synthesis, creates a conversation/job, or saves an Ask answer. The structured response contains a suggestion or abstention for each requested column, confidence, basis, accepted table-row ids and server-issued library-evidence keys, plus the final reasoning trace and bounded evidence cards. Unknown evidence keys are removed, and a suggestion left without a valid table or library citation becomes an abstention. When personal and base evidence conflict, synthesis follows the base evidence and says so. The draggable review dialog shows same-table references and inert library-evidence Markdown (no links or images) separately; users accept entries individually, and nothing is written automatically. Accepting a suggestion uses the normal cell update with `expected_before=""` and `origin="llm_complete"`, so a cell filled while the suggestion was being prepared is never overwritten and normal history and synchronization continue to apply. Both `reasoning_agent` and `knowhow_complete` must be configured and treat evidence as untrusted data through system-level instructions. Invalid reasoning responses, unavailable providers, retrieval/synthesis failures, and unparseable or unusable top-level synthesis responses return an explicit failure; malformed individual suggestions are filtered, downgraded, or converted to abstentions. No path returns a table-only or fabricated offline substitute.
 
 Ask citations that resolve to a knowhow cell jump straight to that row's detail drawer instead of the generic source view. A notebook's deep copy carries knowhow tables over in full — every table, column, row, cell, and code attachment gets a remapped id in the copy — without re-running embeddings, since cell text that didn't change keeps its existing vectors.
+Copying or moving a Knowhow table is refused and rolled back entirely when its passages would
+belong to a Memory projection or to any source other than the table's own hidden source; the user
+sees 409 (Memory) or 422 (passages under another source) with a plain message saying nothing
+changed.
 
 The external-Agent surface (HTTP + MCP, discrimination sets, code attachments) is documented under [Memory and Agent MCP](#memory-and-agent-mcp); the HTTP paths are listed under [APIs](#apis).
 
@@ -1985,6 +1989,101 @@ The committed deterministic Memory evaluation reports Recall@5, MRR, nDCG, and t
 zero-tolerance counters: candidate-to-formal-plane leakage, cross-user leakage, and
 cross-notebook leakage. The A/B harness compares no-Memory, KB-only, and
 KB+confirmed-Memory retrieval.
+
+### Memory in the knowledge graph
+
+Knowledge-graph objects and relations derived from a member's Memory belong to that member
+only, by structure rather than by a display filter.
+
+**Graph building and stored artifacts.** Knowledge-graph objects and relations derived from a
+member's Memory never seed or join a shared concept cluster: a Memory object is always its own
+canonical, and it is left out of canonical relations, the mention bridge and co-mentions,
+communities and their summaries, and the cluster-size, largest-cluster and edge-provenance
+analyses. A shared notebook's persisted knowledge-graph preview, retrieval index and
+source-partition companion never contain a member's Memory: no Memory-derived object or name, no
+edge that only a Memory relation supports, and no node folded into a cluster that holds a Memory
+member — including memories confirmed or deleted while such an index is being built. The
+knowledge-graph view and the neighbour view never show a member's Memory to anyone else; an edge
+that a notebook source also supports is shown and counted on that support alone.
+
+**Passages.** Passages are a shared index and Memory is private, so a Memory-derived source is
+never chunked: both the chunking service and the chunk store refuse the write (`memory sources
+are not chunked`), and a refused service call emits a content-free `memory_chunk_write_refused`
+event. A whole-notebook index rebuild whose publish would put a private Memory projection's
+passages into the shared index is refused before anything is published: the notebook keeps its
+previously published passages and the rebuild job ends `failed` with the classified reason
+`indexing_pipeline_memory_source` (「索引重建已停止：待发布的内容里混入了个人记忆，记忆不会进入共享检索。请联系管理员检查。」),
+with or without a KG build. The rebuild snapshot holds visible sources only, so this is a last
+line of defence.
+
+**Reads.** Knowledge-graph reads are scoped by the viewer: the knowledge list (rows, total and
+evidence items), type counts, KG search, the legacy graph, the graph and neighbour views, the
+notebook card's counts and `kg_ready`, the analytics card's knowledge counts and the search box's
+knowledge leg never show an object or relation derived from another member's Memory, nor an
+evidence item attributed to one. An object or relation is judged by the source it was extracted
+from; an evidence item by the source it names and by the source its quoted element lives in. The
+graph and neighbour views show the shared graph — the same for every member, and what the stored
+previews hold — plus the viewer's own Memory objects read live; `limit` bounds each of the two
+layers, so a graph response holds at most twice `limit` nodes. A token without `memory:read` sees
+no Memory-derived row, its own included, and the notebook's Memory count is 0 for it. Notebook
+counts, `kg_ready` and the analytics card's knowledge counts are the shared view plus the viewer's
+own Memory-derived objects. Index node/ANN counts and the share-preview size count the shared
+graph only. Rebuild-time totals (`unified_kg_status`, the analysis card's last-rebuild size) are
+counted once, when a rebuild ends, over every non-deprecated object and every relation of the
+notebook, Memory-derived ones included; they are numbers only and name no object.
+
+Knowledge-graph store reads take the viewer: another member's Memory-derived objects and
+relations are left out of the knowledge list and its total, type and board counts, `kg_ready`,
+the legacy graph, the unified graph's live path and the viewer's own-Memory overlay on the shared
+preview, neighbour edges, KG search (lexical candidates are filtered before their limit; ANN hits
+at hydration) and the notebook search box's knowledge leg; the viewer's own are included. Without
+`memory:read` no Memory-derived row is returned, the viewer's own included. Community summaries,
+duplicate groups and the edge-review ranking never include Memory-derived rows. The notebook list
+asks which of its notebooks hold Memory once per request, not once per notebook. While a notebook
+awaits its isolated rebuild, a KG search hit on a cluster that holds Memory the viewer may not read
+is answered by its first visible member, never by the cluster's id.
+
+**Writes, merges and publishing.** Knowledge objects and relations derived from a member's
+personal Memory belong to that member only: they never join a shared concept cluster, never appear
+as a merge suggestion or conflict candidate, and cannot be merged by hand or proposed through the
+knowledge list. Every write that addresses a knowledge object or relation by id —
+`PATCH /api/notebooks/{notebook_id}/knowledge/{knowledge_id}`, `POST …/knowledge/{knowledge_id}/merge`
+(both ids), `POST …/knowledge/{knowledge_id}/promote`,
+`POST /api/notebooks/{notebook_id}/relations/{rel_id}/review` — answers a caller who is not the
+Memory's creator exactly as it answers for an id that does not exist (404, same body); an object
+whose Memory row is gone belongs to nobody. For the creator, merge checks in this order: an object
+merged into itself or two different types → 400; a missing object → 404; one side from her Memory
+→ 409 「由个人记忆生成的知识对象不能与共享的知识对象合并」; both sides from her Memory → 409
+「由个人记忆生成的知识对象不能相互合并」. Proposing her own such object answers 409
+「由个人记忆生成的知识对象不能在这里申请贡献到公共知识库，请在你的记忆里提交」 and queues nothing; a Memory
+reaches a public library only through its creator's `POST /api/memories/{memory_id}/promote`.
+Nothing is written on a refusal. The upgrade migration closes open generic proposals of such
+objects as rejected (reason `memory_derived_object`, no reviewer); if one is approved anyway, the
+approval answers 409 「这条贡献申请指向由个人记忆生成的知识对象，已自动关闭」 and closes it as rejected,
+reviewed by the approving admin. Approving a proposal whose knowledge object no longer exists
+answers 409 「这条贡献申请对应的知识对象已不存在，申请已自动关闭」 and closes it as rejected (reason
+`object_missing`); an unknown proposal id stays 404. The review dialog shows the reason on the item
+and refreshes the queue. `POST /api/notebooks/{notebook_id}/tier` with `tier=base` answers 409
+「这本笔记本里还有成员的个人记忆，不能发布为公共知识库；请先让成员转移或删除自己的记忆」 while the notebook
+holds a knowledge-graph source generated from a member's Memory, and the tier is unchanged;
+withdrawing a publication (`tier=personal`) is never refused. The refusal is shown next to the
+publish control. Conversely a Memory-derived source is created only while the notebook is not a
+public library: a Memory confirmed before the notebook is published does not reach it — its queued
+analysis re-checks when it runs and ends without creating anything. With both guards, a Memory
+reaches a public library only through its creator's `POST /api/memories/{memory_id}/promote`.
+Checkup item H11 (read-only, `fix: none`, shown as a notice card, never rings the bell) counts the
+Memory sources a public library still holds — possible only for libraries published before these
+guards, or a public library received through sync import (which copies the `notebooks` row without
+going through publishing). The edge review queue, the bell's edge-review count and duplicate groups
+leave Memory-derived rows out for everyone.
+
+**Checkup.** `GET /api/notebooks/{id}/checkup` also lists four read-only items: H9 (the notebook's
+knowledge graph awaits the one-time background check and rebuild after the upgrade), H10 (approved
+generic promotions of Memory-derived objects), H11 (Memory sources a public library still holds,
+above) and H12 (ownerless Memory sources, above). All four are read-only (`fix: "none"`), shown as
+notice cards without a button, never counted in `healthy`, and never raise the bell. The upgrade
+and its completion check are described in
+[Operations: Memory isolation in the knowledge graph](./operations.md#memory-isolation-in-the-knowledge-graph).
 
 ## KG extraction trigger
 

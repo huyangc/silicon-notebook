@@ -163,6 +163,148 @@ id 随机，32 万条 Memory，机器负载均值约 45）：启动探测（`EXI
 之前返回 413 `export_too_large`，带条目数与上限。请按 worker 的内存来定：一次导出至多占用这么多正文（外加
 每条的少量元数据），同时进行的导出会叠加。单条正文至多 40,000 字符。
 
+## 知识图谱里的记忆隔离
+
+由成员记忆派生的知识图谱行只属于该成员（产品合同见
+[知识图谱里的记忆](./product-and-api_zh.md#知识图谱里的记忆)）。升级到 PostgreSQL 0067 / SQLite v87 会删除
+旧版本混进共享派生层的内容；迁移做不到的部分，由启动后的一轮后台任务重建。
+
+**部署前：普查。** 在升级**之前**取的生产快照上运行
+`PYTHONPATH=backend python3 scripts/memory_isolation_census.py --database-url <快照地址> --storage-dir <存储目录> --all-signals`。
+只读，不调模型。它会列出：
+
+- 启动后会被重建的每本笔记本：F 组是持有记忆来源的库，一定重建；G 组列出被排入的库及触发信号，加
+  `--all-signals` 时逐个信号单独判断；
+- 会被排入完整 scale 构建的每本笔记本：SCALE 组，即不可拷贝库中，持有隔离前 scale 索引的，或只有隔离前独立
+  可视化且对象数超过 `VIZ_SYNC_BUILD_MAX_OBJECTS` 的；
+- 每本的对象数和 `merge_review_pairs`，即上次重建送模型复核的歧义种子对数。再重建一次，送出的数量大致相同。
+
+普查有三点局限：`merge_review_pairs` 读的是 `kg_rebuild_checkpoint`，迁移会删掉 F 的检查点，所以升级后再跑，
+F 会显示为 0；这个数不含概念描述的模型调用，应视为下限；SCALE 列的是最终会排的集合，不反映排入的时机（scale
+构建要等该库知识图谱已隔离才排，见下文）。概念描述只重算证据有变化的部分；社区构建不调模型。dirty 库自上次
+重建以来 `kg_mutation_seq` 已经前进过，输入版本本来就变了：对迟早会被刷新的库，这笔复核花费是提前支付，不是
+新增；只有对永远不会被刷新的库才是新增。检查本身的实测成本：干净的 100 万对象库 3.3 秒、610 条语句（按缓存
+冷热为 3.2–11.1 秒）。
+
+**迁移。** 升级到 PostgreSQL 0067 / SQLite v87 是一个事务。汇总日志在 PostgreSQL 上写进 **PostgreSQL 服务器
+日志**（`RAISE LOG`），在 SQLite 上写进**应用日志**（`silicon_notebook.sqlite.maintenance`），字段与英文版相同
+（`affected_notebooks`、`memory_objects`、`clusters_removed`、`communities_removed`、`memory_chunks_removed`、
+`private_kept`、`promotions_rejected`、`conflicts_applied_on_shared_nodes`、`conflicts_applied_on_shared_edges`、
+`cross_owner_stripped`、`evidence_scan_notebooks`、`seed_check_notebooks`），只含计数。`private_kept` 是保留了
+手工合并进来的共享证据的记忆对象数，只有记忆主人可见。
+
+- 迁移若超过 `POSTGRES_STATEMENT_TIMEOUT_SECONDS`，或在 `POSTGRES_LOCK_TIMEOUT_SECONDS` 内拿不到锁：整个事务
+  回滚，服务报未就绪。调大后重启即可，不会留下半截状态。实测 2M 对象时最慢语句 1.9 秒。
+- 没有按被删一侧建索引的窄表，删除时要整表读一遍：按概念侧删除 mention 边，15.6M 行耗时 3.0 秒。证据扫描的
+  耗时随 F 中最大的那本线性增长，这里的「那本」指非公共库，或反向索引未认证的公共库：100 万对象 × 8 条证据为
+  2.3 秒；读完 200 万对象库的全部证据为 13.5 秒。
+- 开着变更捕获时，迁移的删除会进 change-log（实测 16 万条，耗时约多 10%），下一次导出会带上。可以升级前关闭
+  capture、升级后再开，也可以让导出带上这些删除（与 0065 的先例相同）。
+
+**改动过共享行的已应用冲突。** 迁移会删除所有引用记忆派生对象或关系的冲突候选，已应用的也删除。汇总日志中的
+`conflicts_applied_on_shared_nodes` / `_edges` 统计的是曾为记忆对象或关系改动过共享对象或关系的已应用冲突：
+节点「modify」把内容合并进了共享对象，节点「discard」把共享对象置为 `conflict` 状态，由记忆关系胜出的边
+「discard」把共享关系的审核状态置为 `rejected`。迁移不会还原这些行。要拿到清单，唯一的办法是在升级**之前**
+运行下面的只读 SQL（两种后端相同），升级后这些候选记录已不存在：
+
+```sql
+WITH m AS (SELECT ko.id FROM knowledge_objects ko JOIN sources ds ON ds.id = ko.source_id WHERE ds.source_type = 'memory'),
+     mr AS (SELECT kr.id FROM knowledge_relations kr JOIN sources ds ON ds.id = kr.source_id WHERE ds.source_type = 'memory')
+SELECT k.id, k.notebook_id, k.kind, k.resolution, k.winner_ref, k.left_ref, k.right_ref
+FROM kg_conflict_candidates k
+WHERE k.status = 'applied' AND (
+  (k.kind = 'node' AND (
+     (k.resolution = 'modify' AND (k.left_ref IN (SELECT id FROM m) OR k.right_ref IN (SELECT id FROM m))
+      AND (CASE WHEN k.winner_ref IN (k.left_ref, k.right_ref) THEN k.winner_ref ELSE k.left_ref END) NOT IN (SELECT id FROM m))
+     OR (k.resolution = 'discard' AND k.winner_ref IN (k.left_ref, k.right_ref) AND k.winner_ref IN (SELECT id FROM m)
+      AND (CASE WHEN k.winner_ref = k.left_ref THEN k.right_ref ELSE k.left_ref END) NOT IN (SELECT id FROM m))))
+  OR (k.kind = 'edge' AND k.resolution = 'discard' AND k.winner_ref IN (k.left_ref, k.right_ref)
+      AND k.winner_ref IN (SELECT id FROM mr)
+      AND (CASE WHEN k.winner_ref = k.left_ref THEN k.right_ref ELSE k.left_ref END) IN (SELECT id FROM knowledge_relations)
+      AND (CASE WHEN k.winner_ref = k.left_ref THEN k.right_ref ELSE k.left_ref END) NOT IN (SELECT id FROM mr)))
+ORDER BY k.notebook_id, k.id;
+```
+
+**已收录的记忆内容（体检 H10）。** H10 大于 0 表示经通用申请路径批准的贡献把记忆内容拷进了公共知识库。迁移与
+体检对已批准的申请都不做改动，由部署负责人决定；决定前先用下面的 SQL 列出（两种后端相同）：
+
+```sql
+SELECT pc.id AS candidate_id, pc.notebook_id AS source_notebook_id, pc.object_id AS memory_object_id,
+       b.notebook_id AS public_notebook_id, b.id AS public_object_id,
+       CASE WHEN b.source_candidate_id = pc.id THEN 'created_from_memory' ELSE 'absorbed_memory_evidence' END AS how
+FROM promotion_candidates pc
+JOIN knowledge_objects b ON b.source_candidate_id = pc.id OR (pc.base_match_id <> '' AND b.id = pc.base_match_id)
+WHERE pc.status = 'approved' AND pc.object_type <> 'memory'
+  AND EXISTS (SELECT 1 FROM knowledge_objects ko WHERE ko.id = pc.object_id AND ko.notebook_id = pc.notebook_id
+      AND EXISTS (SELECT 1 FROM sources ds WHERE ds.id = ko.source_id AND ds.source_type = 'memory'))
+ORDER BY pc.id, b.id;
+```
+
+**标记。** `unified_kg_state.memory_isolation_version`：
+
+- 0 = 等待隔离重建（持有记忆来源的库——包括持有记忆来源的公共知识库，由同一个启动后台任务重建，无需手动，
+  这类库由体检 H11 提示——以及检查后排入的库）；
+- 2 = 等待启动后检查（其余所有有簇的库，包括公共知识库和副本；副本会补一行默认值的 state）；
+- 1 = 已隔离。
+
+**就绪后的后台任务。** 服务报告就绪后跑一轮：
+
+- 先检查所有 2（事件 `memory_isolation_seed_checked`，结果 `queued` / `clean`，带信号名 `dirty` / `seed` /
+  `stale_reference`）；排入的库按迁移处理 F 的方式重置并置 0；
+- 再经普通重建路径重建所有 0（`memory_isolation_rebuild_started` / `_completed`）；只有重建正常返回后标记才
+  置 1；
+- `_deferred` 表示该库维护槽被占用（用户在刷新图谱或补上关联，或离线 CLI 在跑），定时器每次启动最多补跑
+  20×30 秒，之后由下次启动接着做；
+- `_failed`（阶段与异常类名）保留标记，下次启动重试。
+
+后台任务不会删除管理员的合并决定：入队时只删除 sentinel 一侧所铸对象已不存在的合并候选。被取代代次的簇和
+社区里可能残留已删除记忆的文本。读者只读发布代，所以看不到；这些残留会在下一次重建前的回收中，或在启动恢复
+（`_reap_stale_community_generations` 及其簇孪生）时删除。启动恢复每次启动至多回收 40 页
+（`_RECOVERY_REAP_PAGES_BUDGET`），有催收欠账（`derived_catchup_from`）的库会被跳过，所以大库可能要多次启动
+才清完。
+
+本版本起，手动「刷新图谱」或 `backend/app/scripts/recluster_kg.py` 也能完成一个库。重建只有在运行期间没有新的
+知识图谱变更时才清除笔记本的脏标记；否则脏标记保留，由下一次重建处理。任何一次真正重新聚类的重建也会把
+`memory_isolation_version` 置 1；输入未变的跳过路径不经过这一步，由隔离重建后台任务自己置标记。
+
+**完成判据**：下面这条 SQL 返回 0（两种后端相同），即各库体检 H9 为 0：
+
+```sql
+SELECT count(*) FROM unified_kg_state u JOIN notebooks n ON n.id = u.notebook_id
+WHERE u.memory_isolation_version <> 1 AND n.status NOT IN ('copying','deleting','importing');
+```
+
+**并且**各库的索引状态里没有隔离前的工件（见下文）。权威划分：数据库重建队列看本标记，磁盘工件看工件自己的
+manifest 字段。
+
+**可视化与 scale 索引。** 隔离升级之后，升级前建成的索引和可视化在重建完成之前一律不再使用，适用于所有笔记本
+（含或不含记忆，公共库也一样）：manifest 里没有 `memory_isolation` 字段的工件不再提供；索引状态显示为过期，
+节点数和 ANN 条数为 0；对象数不超过 `VIZ_SYNC_BUILD_MAX_OBJECTS` 的笔记本在第一次读取时当场重建可视化，更大的
+笔记本在其 scale 索引构建发布之前不显示预览。知识图谱语义检索按精确版本读取索引，所以在笔记本的索引重建完成
+之前，检索只返回词法结果。因此升级前建成的每个索引都会多做一次完整构建，只读已存的向量和数据行，不调用模型
+（1M 对象约 100 秒）。
+
+- `SCALE_INDEX_AUTO_ENABLED` 为真时，迁移后的处理为下列不可拷贝笔记本排入这次完整构建（事件
+  `memory_isolation_scale_queued`），不论 tier、不论是否持有记忆：知识图谱已隔离（标记为 1），并且持有隔离前
+  scale 索引，或只有隔离前独立可视化且对象数超过 `VIZ_SYNC_BUILD_MAX_OBJECTS`。重建被推迟或失败的库，要等其
+  重建成功后再排；每次启动只重排仍未盖戳的。
+- 其余情况请手动构建：开关为假时；以及可拷贝库（不超过 `NOTEBOOK_COPY_MAX_ROWS` 行）手工建过 scale 索引、或有
+  超过该阈值的可视化时，无论是否开启自动，都必须手动构建。
+
+在升级前建成的索引上做 fold 会被拒绝并改为完整构建（事件 `scale_fold_refused`，原因 `memory_isolation`）。如果
+只有记忆发生变化（索引所依据的共享数据行没有变，且索引建成后知识图谱没有重建过），下一次 fold 只重写 manifest
+（1M 对象规模下不到 1 秒；来源分区伴随工件与每次 fold 一样重新发布）；否则改为完整构建（事件
+`scale_fold_refused`，原因 `kg_rebuilt_since_build` 或 `shared_content_changed`）。构建期间若持续有记忆进入
+索引，重试一次后丢弃（事件 `scale_index_build_discarded`，原因 `memory_appeared_during_build`），现有索引保持
+不变；下一次知识图谱写入会重新触发自动索引，也可以手动再建一次。没有记忆的笔记本的成本：执行的语句与从前
+相同，另外多出单行记忆探针和语句内排除。PostgreSQL 上，语句内排除的开销与不过滤相同；SQLite 上，整表读取慢
+13–30%（30 万行实测：对象 147 → 195 ms，关系 149 → 174 ms，viz 对象 271 → 293 ms）。
+
+**隔离完成前的图谱视图。** 笔记本在隔离重建完成之前（`memory_isolation_version <> 1`），图谱视图与邻居视图
+不会使用落盘预览：小库直接读实时数据；大库的图谱视图不显示预览，大库的邻居视图会说明暂时无法定位该节点，
+并区分是图谱预览尚未生成，还是当前预览里还没有这个节点，下一次索引构建后可用。邻居焦点不在落盘预览里时，
+也按同样方式处理。
+
 ## 可观测性 / 日志
 
 后端通过统一的 `EventLogger`（`app/core/event_logging.py`）输出结构化日志：每条事件一行 JSONL 写入 `.local/logs/`，并附控制台简要行。写日志是 best-effort，绝不影响它所观测的请求或管线；未配置模型时 LLM 通道为 no-op。
@@ -714,6 +856,13 @@ PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --j
 这个版本之后就再也导不进去了——改为在源环境重新导出（跑这个版本的源端会自动产出 v2；已有的
 v1 文件没有转换器）。若升级目标端时还有 v1 包在途（已导出、还没导入），直接丢弃，等源端也
 升级之后重新导出。
+
+导入会在应用任何表之前整轮拒绝两类包：包里带有私有 Memory 投影的段落（会进入目标端共享段落索引），或包里
+某来源 id 的类型与目标端不同、且其中一方是 Memory。目标端不写入任何内容（`--dry-run` 同样拒绝）；报错给出
+涉及来源的数量和最多 20 个 id（按序排列，其余记为 "(and N more)"），并说明怎么处理：段落一类，把源环境升级到
+本版本（其 schema 迁移会删除这些段落）后重新导出**全量**包再导入，被拒的包不能续跑；类型冲突一类，报错会
+说明同一来源 id 在两个环境里类型不同（受支持的路径不会产生这种状态），并用中文提示先核对两边、让类型一致后
+再同步。
 
 用 `--full` 可以在不动捕获开关、不直接改水位表的前提下，主动重置某个目标的基线——比如隔了
 很久没导出过，或者单纯想给出一个自包含、不依赖 `base_package_id` 链上任何更早的包就能导入
