@@ -90,6 +90,17 @@
   （signal 行、按绑定路径判据逐条核对的 KG 行、Knowhow 目录里各表的投影源）对冻结天花板
   核对，出现天花板外的来源就记下漂移（`source_scope.record_collection_ceiling_drift`），
   这次读取与之后的每次读取都改为绑定。
+- 回答上下文的关系行不绑定来源清单：被来源范围覆盖的库读关系行时带上 `source_id`
+  （每条边每个来源一行），在 Python 里按本次运行冻结的范围判定——范围起约束时过滤并计数，
+  不起约束时读后核验（发现越界行即记为漂移）。因此每个带冻结 include 范围的 HTTP 提问都要付
+  这次读取（4.9 万来源库实测 +0.3–9 ms，随每条边的来源数增长）。更省的核验方式（用这些行的
+  `MAX(created_at)` 与冻结时刻比较）需要范围对象带上冻结时间戳，目前未实现。
+- 所有提问人共用的按库检索缓存（关键词词项、关系向量矩阵）只由非 Memory 派生内容构建，
+  所以谁先构建都不改变缓存内容，缓存键也只属于笔记本本身。Memory 派生关系放在同一个缓存
+  条目里另行存放，带上来源，每次按提问人的天花板掩码；证据被天花板裁剪过的对象现场分词。
+  冷构建时按每 900 个 Memory 来源一次 `relation_delta_rows(with_source_id=True)` 读取，
+  得到 Memory 关系到来源的映射（2 万条共享关系旁有 1,000 个 Memory 来源：与逐来源读取相比，
+  PostgreSQL 0.90 s → 0.70 s，SQLite 6.1 s → 3.7 s）。
 - 可变运行态归 `RepositoryRuntime`，`REPORT_CANCELLATIONS` 是刻意保留的进程全局
   例外，与 coordinator 和兼容函数共享同一身份。领域 builder 只接较早的 frozen
   bundle，不接 runtime 本身；保留窄迟绑定 accessor 与启动副作用顺序。组合后受支持
@@ -177,12 +188,16 @@
   `+col IN (…)`，清单只做过滤（14–20 ms）；`drive_by` 是「逐个查清单里每个 id」的显式写法。
   生产库没有规划统计信息，所以计划在有没有 `sqlite_stat1` 时都必须成立，计划钉子两种状态
   各跑一遍。
+- 由有界主键窗口驱动、大天花板只做过滤的语句，PostgreSQL 谓词可以写在无统计的表达式上
+  （如 `graph_hydrate_rows` 的 `(c.source_id||'')`），使 custom plan 跳过逐元素的 MCV 估算
+  （49k 个 id：规划 146 ms → 5 ms），相当于 SQLite 的一元 `+`。
 
 绑定层从不改变成员：id 原样绑定（包括空串和空白 id），非字符串 id 抛 `TypeError`；去重由
 store 决定，两个后端一致。清单只有属于以下三类之一时才能直接绑定：**构造上有界**（一页或
 `LIMIT` 窗口、排序后的主键窗口、一次运行的笔记本、固定的状态集合、单个来源的元素 id）；
 **分批的键探针**（id 就是语句要读写的行的键，也是它唯一的选择性谓词，PostgreSQL 每条不超过
-1024 个、SQLite 不超过 900 个占位符）；**由清单驱动、只占一个参数**（整份清单就是要读的键
+1024 个、SQLite 不超过 900 个占位符；如 `relation_delta_rows`，调用方按每批不超过 900 个传入
+增量来源或 Memory 来源的 id）；**由清单驱动、只占一个参数**（整份清单就是要读的键
 集合，如 `visible_source_scope_snapshot`）。清单用来过滤一条由别的东西驱动的语句时，永远不
 属于豁免。`backend/tests/test_id_list_binding_guard.py` 扫描两个 repository 目录，任何既没
 改走模块、也没在那里登记类别与理由的 id 清单绑定都会报红。刻意不采用：补集清单（冻结的

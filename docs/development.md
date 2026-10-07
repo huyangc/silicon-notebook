@@ -113,6 +113,23 @@ contributor constraints, not a second implementation history.
   frozen ceiling, and one outside it records the drift
   (`source_scope.record_collection_ceiling_drift`) so that read and every later one
   binds.
+- Relation lines of the answer context bind no source list: a library covered by a
+  source ceiling reads its relation rows with `source_id` (one row per edge and source)
+  and judges them in Python against the run's frozen ceiling — filtering and counting
+  when the ceiling binds, verifying on read (a row outside records the drift) when it
+  does not. Every HTTP question with a frozen include ceiling therefore pays this read
+  (measured +0.3–9 ms on a 49k-source library, growing with sources per edge). A
+  cheaper verification (comparing `MAX(created_at)` of the rows with the freeze
+  instant) would need the scope to carry its freeze timestamp; it is not implemented.
+- Per-notebook retrieval caches shared by every asker (keyword tokens, the relation
+  vector matrix) are built only from content no Memory source derives, so who builds
+  them first never changes what they hold and their keys stay the notebook's alone.
+  Memory-derived relations live in the same cache entry, apart, with their source, and
+  are masked per request by the asker's ceiling; objects whose evidence a ceiling
+  trimmed are tokenised live. The cold build maps Memory relations to their sources
+  with one `relation_delta_rows(with_source_id=True)` read per 900 Memory sources
+  (1,000 Memory sources beside 20k shared relations: PostgreSQL 0.90 s → 0.70 s,
+  SQLite 6.1 s → 3.7 s against one read per source).
 - `RepositoryRuntime` owns mutable operational state; `REPORT_CANCELLATIONS` is the
   explicit process-global exception shared by identity with the coordinator and
   compatibility functions. Domain builders take earlier frozen bundles, never the
@@ -224,6 +241,11 @@ measurements; the facts that shape the rule, measured on a 49,000-source noteboo
   `+col IN (…)` so the list only filters (14–20 ms); `drive_by` is the explicit form
   for "seek every listed id". Production databases carry no planner statistics, so a
   plan must hold with and without `sqlite_stat1`, and the plan pins run in both.
+- Where a bounded primary-key window drives a statement and a large ceiling only
+  filters it, the PostgreSQL predicate may test a statistics-free expression
+  (`(c.source_id||'')`, as `graph_hydrate_rows` does) so the custom plan skips the
+  per-element most-common-value estimate (49k ids: 146 ms → 5 ms planning) — the
+  counterpart of SQLite's unary `+`.
 
 The binding layer never changes membership: ids are bound exactly as given (empty
 and blank ids included) and a non-string id raises `TypeError`; de-duplication is the
@@ -232,7 +254,8 @@ one of three classes: **bounded by construction** (a page or `LIMIT` window, a
 ranked primary-key window, one run's notebooks, a fixed status set, one source's
 element ids); **batched key probe** (the ids are the keys the statement reads or
 writes, its only selective predicate, at most 1024 per statement on PostgreSQL and
-900 placeholders on SQLite); **driven by the list, one parameter** (the whole list is
+900 placeholders on SQLite; e.g. `relation_delta_rows`, whose callers pass delta or
+Memory source ids in batches of at most 900); **driven by the list, one parameter** (the whole list is
 the set of keys to read, e.g. `visible_source_scope_snapshot`). A list that filters a
 statement driven by something else is never exempt. `backend/tests/test_id_list_binding_guard.py`
 scans both repository directories and fails on any id-list binding that is neither
