@@ -292,6 +292,32 @@ class SourceStore:
             ).fetchall()
         return {row["id"]: row["notebook_id"] for row in rows}
 
+    def source_owners(self, source_ids: Sequence[str]) -> dict[str, str]:
+        """``{source_id: notebook_id}`` for those of ``source_ids`` that exist,
+        of ANY type -- the hidden Memory and Knowhow projections included; a
+        deleted id is absent.
+
+        Ownership only, for the public report page's mount re-check (D-3):
+        which library a cited source lives in, so a citation of a mounted
+        library's projection is re-checked against the mount like any other.
+        No content and no readability leave this read; whether another
+        member's Memory may be published is decided before it, by
+        ``share_disclosure.report_foreign_memory_ids``.  Same shape as
+        ``visible_source_owners`` without its type predicate: ONE jsonb
+        parameter unnested once and probed through the primary key
+        (``test_public_page_owner_explain_pins``).
+        """
+        ids = list(dict.fromkeys(str(value) for value in source_ids if value))
+        if not ids:
+            return {}
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT s.id,s.notebook_id FROM sources s WHERE s.id = ANY(ARRAY("
+                "SELECT jsonb_array_elements_text(%s::jsonb)))",
+                (json.dumps(ids),),
+            ).fetchall()
+        return {row["id"]: row["notebook_id"] for row in rows}
+
     def hidden_source_ids(self, notebook_id: str, owner_id: str) -> list[str]:
         """Hidden Memory/Knowhow projection participants **for one user**, in
         stable id order — see the SQLite adapter for why the Memory owner

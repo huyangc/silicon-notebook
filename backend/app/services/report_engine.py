@@ -653,6 +653,22 @@ def unregister_cancel(report_id: str, event: threading.Event) -> None:
     REPORT_CANCELLATIONS.unregister(report_id, event)
 
 
+def reference_library_fields(owner: str, notebook_id: str) -> dict:
+    """A stored report citation's library fields from its source's owning
+    notebook: ``from_reference_library`` always, and -- only for evidence from
+    a mounted library -- that library as ``notebook_id`` (the convention of
+    ``Citation.notebook_id``: local evidence carries none, so a report of local
+    citations keeps its stored bytes).
+
+    The public report page re-checks the mount of every library its citations
+    come from on each open (D-3); the stored library still names it after the
+    cited source is deleted. Internal to the stored report: the public
+    projection is an allowlist and never names a library."""
+    if owner and owner != notebook_id:
+        return {"from_reference_library": True, "notebook_id": owner}
+    return {"from_reference_library": False}
+
+
 def _memory_ids_within(
     lines: Sequence[tuple[str, str]], *, start: int, limit: int
 ) -> list[str]:
@@ -3774,22 +3790,22 @@ class ReportEngine:
                 "title", str(ctx.get("source_title") or "").strip()
             )
 
-        def _from_reference_library(ctx) -> bool:
-            """True when the cited source belongs to a mounted library.
+        def _reference_library(ctx) -> dict:
+            """Whether the cited source belongs to a mounted library, and which.
 
             Uses the owning notebook, which the citation lookup already carries:
             `tier` describes the library's own kind, so a mounted notebook the
             user owns reports "personal" and would be miscounted as local.
             An unresolved owner falls back to the tier signal rather than
-            guessing that the evidence is local.
+            guessing that the evidence is local (see `reference_library_fields`).
             """
             source_id = str(ctx.get("source_id") or "")
             owner = str(
                 (citation_source_info.get(source_id) or {}).get("notebook_id", "")
             ).strip()
             if owner:
-                return owner != notebook_id
-            return str(ctx.get("tier") or "") == "base"
+                return reference_library_fields(owner, notebook_id)
+            return {"from_reference_library": str(ctx.get("tier") or "") == "base"}
 
         def _source_file_name(ctx):
             source_id = str(ctx.get("source_id") or "")
@@ -3875,7 +3891,7 @@ class ReportEngine:
                             # Whether the evidence came from a mounted library,
                             # decided by owning notebook rather than by tier: a
                             # mounted notebook the user owns stays "personal".
-                            "from_reference_library": _from_reference_library(ctx),
+                            **_reference_library(ctx),
                             "provenance": dict(ctx.get("provenance") or {}),
                         })
                         # 报告引用附图(T6):候选 = 自身 element_id ∪ chunk 的
