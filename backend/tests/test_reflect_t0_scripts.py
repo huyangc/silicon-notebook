@@ -1329,8 +1329,8 @@ def test_resolve_scope_source_ids_fails_loud_on_zero_or_ambiguous_matches(
 
 def test_run_search_once_applies_the_resolved_source_scope(rrepo, monkeypatch):
     """`scope_source_ids` 非空时,`retriever.run` 执行期间的
-    `current_source_scope()` 必须是 `mode="include"` + 那份 id 集合——
-    `source_scope_context(notebook, None, None)` 那条 no-op 分支不该被走到。
+    `current_source_scope()` 必须是 `mode="include"` + 那份 id 集合——提交的
+    本地范围原样装进默认天花板,而不是被换成全库可见来源。
     """
     from app.services.reasoning_retrieval import ReasoningRetriever
     from app.services.source_scope import current_source_scope
@@ -1356,11 +1356,12 @@ def test_run_search_once_applies_the_resolved_source_scope(rrepo, monkeypatch):
     assert captured["source_ids"] == {"src-qwen", "src-deepseek-v2"}
 
 
-def test_run_search_once_leaves_scope_a_no_op_when_no_ids_are_given(
+def test_run_search_once_runs_under_the_default_ceiling_when_no_ids_are_given(
     rrepo, monkeypatch,
 ):
-    """改动前的默认行为逐字不变:`scope_source_ids=None`(未声明范围的题)
-    仍然是 `source_scope_context(notebook, None, None)` 的 no-op。"""
+    """E1-2:未声明范围的题(`scope_source_ids=None`)与生产 `AskService.ask`
+    一样跑在提问人的默认天花板里——全选、不算收窄——而不是无 scope;否则 rig
+    测出的是没有天花板的检索成本。"""
     from app.services.reasoning_retrieval import ReasoningRetriever
     from app.services.source_scope import current_source_scope
 
@@ -1379,7 +1380,11 @@ def test_run_search_once_leaves_scope_a_no_op_when_no_ids_are_given(
         prepared=None, on_step=lambda step: None, cancel_event=threading.Event(),
         actor_id="t0-owner",
     )
-    assert captured["scope"] is None
+    scope = captured["scope"]
+    assert scope is not None, "the rig must retrieve under the default ceiling"
+    assert scope.mode == "include" and scope.narrowed is False
+    assert scope.owner_id == "t0-owner" and scope.ceilings_total
+    assert not scope.source_provided and not scope.base_provided
 
 
 def _search_loop_args(database_url: str) -> Any:
