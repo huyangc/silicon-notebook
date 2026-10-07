@@ -233,6 +233,47 @@ def test_rebuild_pass_sets_the_marker_through_the_ordinary_slot(
         repository.close()
 
 
+def test_the_pass_leaves_shared_only_totals_even_when_the_input_looks_unchanged_pg(
+    upgraded, postgres_settings
+):
+    """Twin of the SQLite case: the queued notebook is reclustered even when
+    its stored input version matches, so ``unified_kg_status`` counts the
+    shared graph only afterwards."""
+    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.memory_isolation_rebuild import MemoryIsolationRebuild
+
+    database, _before, _after = upgraded
+    repository = PostgresRepository(postgres_settings)
+    try:
+        lifecycle = repository._runtime.knowledge_lifecycle
+        service = MemoryIsolationRebuild.for_repository(repository)
+        service._purge_bridge_candidates(cases.NB_F)
+        with database.write() as db:
+            db.execute(
+                "UPDATE unified_kg_state SET cluster_input_version=%s, object_count=999, "
+                "relation_count=999, cluster_count=GREATEST(cluster_count, 1) "
+                "WHERE notebook_id=%s",
+                (lifecycle._cluster_input_version(cases.NB_F), cases.NB_F),
+            )
+        service.run_pass()
+        with database.connect() as db:
+            shared_objects = db.execute(
+                "SELECT COUNT(*) AS c FROM knowledge_objects ko JOIN sources s "
+                "ON s.id = ko.source_id WHERE ko.notebook_id=%s "
+                "AND ko.status<>'deprecated' AND s.source_type<>'memory'",
+                (cases.NB_F,)).fetchone()["c"]
+            shared_relations = db.execute(
+                "SELECT COUNT(*) AS c FROM knowledge_relations kr JOIN sources s "
+                "ON s.id = kr.source_id WHERE kr.notebook_id=%s "
+                "AND s.source_type<>'memory'",
+                (cases.NB_F,)).fetchone()["c"]
+        status = repository.unified_kg_status(cases.NB_F)
+        assert _marker(database, cases.NB_F) == 1
+        assert (status["objects"], status["relations"]) == (shared_objects, shared_relations)
+    finally:
+        repository.close()
+
+
 def _gx_rows(database):
     with database.connect() as db:
         texts = [r["t"] for r in db.execute(
@@ -382,10 +423,14 @@ def test_marker_reads_and_write_use_the_state_primary_key(postgres_database):
         mark = _plan(
             db, "UPDATE unified_kg_state SET memory_isolation_version = 1 "
             "WHERE notebook_id = %s AND memory_isolation_version = 0", ("nb-pin-50",))
+        forget = _plan(
+            db, "UPDATE unified_kg_state SET cluster_input_version = '' "
+            "WHERE notebook_id = %s AND memory_isolation_version = 0", ("nb-pin-50",))
         pending = _plan(
             db, f"SELECT u.notebook_id {store._PENDING_FROM} ORDER BY u.notebook_id")
     assert "pk_unified_kg_state" in is_pending, is_pending
     assert "pk_unified_kg_state" in mark, mark
+    assert "pk_unified_kg_state" in forget, forget
     # one pass over the state table, notebooks reached by primary key
     assert pending.count(" on unified_kg_state") == 1, pending
     assert "pk_notebooks" in pending, pending

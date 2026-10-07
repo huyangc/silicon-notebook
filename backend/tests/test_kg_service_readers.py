@@ -589,10 +589,12 @@ def test_a_notebook_pending_its_isolated_rebuild_serves_no_artifact(
         # No preview consulted: the client says "no preview yet".
         assert "preview_lacks_focus" not in neighbours
     else:
-        # The live shared graph (S3): the Engram cluster folded, the visible
-        # procedure and claim as raw objects -- and nothing of A's.
+        # The live shared graph (S3): the Engram cluster folded -- and, while
+        # the notebook awaits its isolated rebuild, answered by its first
+        # visible member's id, since it holds A's Memory (E4-8 ruling B) --
+        # the visible procedure and claim as raw objects, nothing of A's.
         assert _node_ids(view) == {
-            s.ids.engram_canonical, s.ids.flow, s.ids.definer_s}, view
+            s.ids.engram_s, s.ids.flow, s.ids.definer_s}, view
         assert "SecretProject" not in repr(view) + repr(neighbours)
     monkeypatch.setattr(lifecycle, "_isolation_pending", lambda _db, _nb: False)
     as_user(s.b, repo.unified_graph, s.nb, level="object", limit=80)

@@ -425,6 +425,9 @@ class MemoryIsolationRebuild:
         from app.services.kg_merge import purge_bridge_canonical_ids
 
         with self._database.write() as db:
+            # The rebuild below must recluster, never skip on an unchanged
+            # input version: the skip path writes no end-state totals.
+            self._store.forget_cluster_input_version(db, notebook_id)
             objects = self._store.memory_objects(db, notebook_id)
             if not objects:
                 return

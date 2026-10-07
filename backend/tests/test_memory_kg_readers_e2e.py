@@ -534,19 +534,26 @@ def case_pending_isolation_answers_a_folded_hit_by_a_visible_member(world, monke
 
 
 def case_legacy_mixed_cluster_reads(world, monkeypatch):
-    """A cluster that still mixes a shared and a Memory member: every read
-    that shows the cluster or its parts shows only what A may read."""
-    # (the cluster's own id is the one thing a cluster that still mixes
-    # members may carry on these reads: the plan calls the seeded id out for
-    # the search only, and the search case above pins that)
+    """A cluster that still mixes a shared and a Memory member, in a notebook
+    awaiting its isolated rebuild: every read that shows the cluster or its
+    parts shows only what A may read -- the cluster id minted from B's Memory
+    name included: the graph, the neighbour view and concept detail answer
+    the cluster by its first visible member's object id, like the search."""
     for path in ("/knowledge?type=concept&limit=200", "/knowledge-types", "/graph",
                  "/unified-kg?level=object", "/unified-kg?level=concept",
                  f"/objects/{world.ids.mqa}/neighbors",
                  f"/objects/{world.ids.gqa}/neighbors",
-                 f"/objects/{world.ids.mqa}/context",
-                 f"/concepts/{SEED}/detail"):
-        assert_clean(world, get(world, "A", path), f"A legacy {path}", tolerate=(SEED,))
-    detail = get(world, "A", f"/concepts/{SEED}/detail").json()
+                 f"/objects/{world.ids.mqa}/context"):
+        assert_clean(world, get(world, "A", path), f"A legacy {path}")
+    graph = get(world, "A", "/unified-kg?level=object").json()
+    assert world.ids.mqa in {n["id"] for n in graph["nodes"]}, graph["nodes"]
+    neighbours = get(world, "A", f"/objects/{world.ids.gqa}/neighbors").json()
+    assert world.ids.mqa in {n["id"] for n in neighbours["nodes"]}, neighbours
+    # asked by the seeded id (which A is never shown), detail still names no seed
+    detail_response = get(world, "A", f"/concepts/{SEED}/detail")
+    detail = detail_response.json()
+    assert detail["canonical_id"] == world.ids.mqa
+    assert PRIVATE not in json.dumps(detail, ensure_ascii=False).lower(), detail
     assert [m["id"] for m in detail["members"]] == [world.ids.mqa]
     assert detail["member_total"] == 1
     # B's own Memory object is B's: its context opens for B, is missing for A
