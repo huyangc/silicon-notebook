@@ -234,6 +234,11 @@ REGISTRY = {
     ("services/report_engine.py", "ReportEngine._assemble._sub", 'dict:"element_id"'): (
         "global-unreachable", _import_gate("services/report_engine.py"),
         "deep reports run per notebook, never under a global run plan", 1),
+    # The same stored-citation literal: its splat adds the citation's library
+    # fields (``reference_library_fields``), never a locator.
+    ("services/report_engine.py", "ReportEngine._assemble._sub", "splat:element_id"): (
+        "global-unreachable", _import_gate("services/report_engine.py"),
+        "deep reports run per notebook, never under a global run plan", 1),
     ("services/notebook_sharing.py", "NotebookCopyService.copy_notebook", 'dict:"element_id"'): (
         "global-unreachable", _import_gate("services/notebook_sharing.py"),
         "notebook copy job remaps stored rows", 1),
