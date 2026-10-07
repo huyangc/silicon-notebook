@@ -933,6 +933,11 @@ class DatabaseSnapshot:
     kg_state_rows: Dict[Tuple[Any, ...], Dict[str, Any]] = field(
         default_factory=dict
     )
+    # what a state row v87 INSERTS must look like: every column's declared
+    # default, and the notebooks holding a Memory source / any cluster
+    kg_state_defaults: Dict[str, Any] = field(default_factory=dict)
+    memory_source_notebooks: "frozenset[Any]" = frozenset()
+    cluster_notebooks: "frozenset[Any]" = frozenset()
 
 
 def _digest_update(h: "hashlib._Hash", value: Any) -> None:
@@ -1054,6 +1059,40 @@ def _special_table_rows(
     return rows
 
 
+def _column_defaults(
+    meta_conn: sqlite3.Connection, info: Sequence[Tuple[Any, ...]]
+) -> Dict[str, Any]:
+    """``{column: value of its declared DEFAULT}`` (``None`` for a column
+    without one) -- the values a row INSERTed without that column holds."""
+    return {
+        row[1]: (
+            None if row[4] is None
+            else _comparable(meta_conn.execute(f"SELECT {row[4]}").fetchone()[0])
+        )
+        for row in info
+    }
+
+
+def _notebooks_where(
+    meta_conn: sqlite3.Connection,
+    tables: Dict[str, "TableSnapshot"],
+    table: str,
+    condition: str = "1",
+) -> "frozenset[Any]":
+    """The notebook ids ``table`` holds a row for (matching ``condition``);
+    empty when the table or the columns do not exist in this schema."""
+    snapshot = tables.get(table)
+    if snapshot is None or "notebook_id" not in snapshot.column_names:
+        return frozenset()
+    try:
+        rows = meta_conn.execute(
+            f'SELECT DISTINCT notebook_id FROM "{table}" WHERE {condition}'
+        ).fetchall()
+    except sqlite3.OperationalError:  # e.g. no source_type column yet
+        return frozenset()
+    return frozenset(row[0] for row in rows)
+
+
 def _sqlite_read_uri(database: Path, *, immutable: bool = False) -> str:
     encoded_path = quote(Path(database).as_posix(), safe="/")
     suffix = "&immutable=1" if immutable else ""
@@ -1085,6 +1124,7 @@ def snapshot_database(
         special_rows: Dict[str, Dict[Tuple[Any, ...], Dict[str, Any]]] = {}
         cluster_v24_projection: "ClusterDedupeProjection | None" = None
         kg_state_rows: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+        kg_state_defaults: Dict[str, Any] = {}
         for kind, name, sql in master:
             if kind != "table":
                 continue
@@ -1132,6 +1172,7 @@ def snapshot_database(
                 kg_state_rows = _special_table_rows(
                     meta_conn, name, all_column_names, pk_columns
                 )
+                kg_state_defaults = _column_defaults(meta_conn, info)
         return DatabaseSnapshot(
             user_version=user_version,
             tables=tables,
@@ -1139,6 +1180,10 @@ def snapshot_database(
             special_rows=special_rows,
             cluster_v24_projection=cluster_v24_projection,
             kg_state_rows=kg_state_rows,
+            kg_state_defaults=kg_state_defaults,
+            memory_source_notebooks=_notebooks_where(
+                meta_conn, tables, "sources", "source_type = 'memory'"),
+            cluster_notebooks=_notebooks_where(meta_conn, tables, "concept_clusters"),
         )
     finally:
         meta_conn.close()
@@ -1194,31 +1239,76 @@ def _empty_normalized() -> Dict[str, int]:
 # gets exactly one reset -- marker 0, dirty 1, both mutation counters +1, the
 # three derived-layer sequences -1, updated_at restamped -- and every other
 # column is untouched; any other row is byte-identical apart from the new
-# column (1, or 2 for a seed-check candidate). A queued notebook without a state row gets one
-# (marker 0, dirty 1). Anything else is a discrepancy. The verifier does not
-# re-derive WHICH notebooks were queued (the migration's own tests pin that);
-# it pins that queueing can only take this one documented shape.
+# column (1, or 2 for a seed-check candidate). A notebook without a state row
+# gets one of two inserted shapes, every other column at its declared default:
+# marker 0 with dirty 1 for a notebook holding a Memory source (queued), or
+# marker 2 with the default dirty for a notebook with clusters and no Memory
+# source (a copied library awaiting the dangling-seed check). Anything else --
+# marker 1 or another value, another column moved, a notebook the rule does
+# not name -- is a discrepancy. Beyond that, the verifier does not re-derive
+# WHICH existing rows were queued (the migration's own tests pin that); it
+# pins that queueing can only take these documented shapes.
 _V87_RESET_COLUMNS = frozenset({
     "memory_isolation_version", "dirty", "kg_mutation_seq",
     "cluster_mutation_seq", "community_seq", "canonical_rel_seq",
     "mention_seq", "updated_at",
 })
+_V87_INSERTED_COLUMNS = frozenset({
+    "notebook_id", "updated_at", "memory_isolation_version", "dirty",
+})
+
+
+def _v87_inserted_row_shape(
+    post: Dict[str, Any],
+    defaults: Dict[str, Any],
+    memory_notebooks: "frozenset[Any]",
+    cluster_notebooks: "frozenset[Any]",
+) -> Optional[str]:
+    """``"queued"`` / ``"seed_check"`` for a state row v87 may insert, else
+    ``None`` (see the comment above ``_V87_RESET_COLUMNS``)."""
+    notebook = post.get("notebook_id")
+    if not post.get("updated_at") or any(
+        post.get(column) != defaults.get(column)
+        for column in post if column not in _V87_INSERTED_COLUMNS
+    ):
+        return None
+    marker = post.get("memory_isolation_version")
+    if marker == 0 and post.get("dirty") == 1 and notebook in memory_notebooks:
+        return "queued"
+    if (
+        marker == 2
+        and post.get("dirty") == defaults.get("dirty")
+        and notebook in cluster_notebooks
+        and notebook not in memory_notebooks
+    ):
+        return "seed_check"
+    return None
 
 
 def _compare_memory_isolation_queue(
     pre_rows: Dict[Tuple[Any, ...], Dict[str, Any]],
     post_rows: Dict[Tuple[Any, ...], Dict[str, Any]],
     normalized: Dict[str, int],
+    *,
+    defaults: Dict[str, Any],
+    memory_notebooks: "frozenset[Any]",
+    cluster_notebooks: "frozenset[Any]",
 ) -> List[str]:
+    """``defaults``, ``memory_notebooks`` and ``cluster_notebooks`` describe
+    the upgraded database (``DatabaseSnapshot.kg_state_defaults`` and the two
+    notebook sets): v87 deletes no source, and leaves the clusters of a
+    notebook without Memory as they were."""
     problems: List[str] = []
     queued = 0
     for key, post in post_rows.items():
         marker = post.get("memory_isolation_version")
         pre = pre_rows.get(key)
         if pre is None:
-            if marker != 0 or post.get("dirty") != 1:
+            shape = _v87_inserted_row_shape(
+                post, defaults, memory_notebooks, cluster_notebooks)
+            if shape is None:
                 problems.append("migration-v87-unexpected-state-row")
-            else:
+            elif shape == "queued":
                 queued += 1
             continue
         if marker in (1, 2):
@@ -1594,7 +1684,10 @@ def compare_snapshots(
             and pre.user_version < 87 <= post.user_version
         ):
             queue_problems = _compare_memory_isolation_queue(
-                pre.kg_state_rows, post.kg_state_rows, normalized
+                pre.kg_state_rows, post.kg_state_rows, normalized,
+                defaults=post.kg_state_defaults,
+                memory_notebooks=post.memory_source_notebooks,
+                cluster_notebooks=post.cluster_notebooks,
             )
             for problem in queue_problems:
                 note(name, problem)

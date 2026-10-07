@@ -114,7 +114,9 @@ def test_v87_queue_normalization_accepts_only_the_documented_reset():
 
     def run(post):
         normalized = {"memory_isolation_queued": 0}
-        return module._compare_memory_isolation_queue(pre, post, normalized), normalized
+        return module._compare_memory_isolation_queue(
+            pre, post, normalized, defaults={}, memory_notebooks=frozenset(),
+            cluster_notebooks=frozenset()), normalized
 
     problems, normalized = run({("nb-a",): queued, ("nb-b",): untouched})
     assert problems == [] and normalized["memory_isolation_queued"] == 1
@@ -138,6 +140,78 @@ def test_v87_queue_normalization_accepts_only_the_documented_reset():
         "migration-v87-marker-value"]
     # a vanished row
     assert run({("nb-a",): queued})[0] == ["row-count-changed"]
+
+
+def test_v87_accepts_only_the_two_documented_inserted_state_rows():
+    """codex #824 r6/r7: a notebook without a state row gets one of two shapes,
+    every other column at its declared default -- marker 0 / dirty 1 for a
+    notebook holding a Memory source (queued), marker 2 / default dirty for a
+    notebook with clusters and no Memory source (a copied library awaiting
+    the dangling-seed check). Marker 1, another value, a moved column or a
+    notebook the rule does not name is still a discrepancy."""
+    module = _load_verifier()
+    defaults = {"notebook_id": None, "dirty": 0, "kg_mutation_seq": 0,
+                "community_seq": -1, "cluster_input_version": "",
+                "updated_at": None, "memory_isolation_version": 1}
+    base = {"dirty": 0, "kg_mutation_seq": 0, "community_seq": -1,
+            "cluster_input_version": "", "updated_at": "t1"}
+    queued = {**base, "notebook_id": "nb-mem", "memory_isolation_version": 0,
+              "dirty": 1}
+    seed = {**base, "notebook_id": "nb-copy", "memory_isolation_version": 2}
+
+    def run(*rows, memory=("nb-mem",), clusters=("nb-copy", "nb-mem")):
+        normalized = {"memory_isolation_queued": 0}
+        problems = module._compare_memory_isolation_queue(
+            {}, {(row["notebook_id"],): row for row in rows}, normalized,
+            defaults=defaults, memory_notebooks=frozenset(memory),
+            cluster_notebooks=frozenset(clusters))
+        return problems, normalized["memory_isolation_queued"]
+
+    assert run(queued, seed) == ([], 1)  # only the Memory notebook is queued
+    unexpected = ["migration-v87-unexpected-state-row"]
+    # the seed-check insert: clusters and no Memory source, dirty at its default
+    assert run({**seed, "memory_isolation_version": 1})[0] == unexpected
+    assert run({**seed, "memory_isolation_version": 3})[0] == unexpected
+    assert run({**seed, "dirty": 1})[0] == unexpected
+    assert run({**seed, "community_seq": 5})[0] == unexpected
+    assert run({**seed, "updated_at": ""})[0] == unexpected
+    assert run(seed, clusters=())[0] == unexpected
+    assert run(seed, memory=("nb-copy",))[0] == unexpected
+    # the queued insert: a Memory source, dirty 1, nothing else moved
+    assert run({**queued, "dirty": 0})[0] == unexpected
+    assert run({**queued, "kg_mutation_seq": 1})[0] == unexpected
+    assert run(queued, memory=())[0] == unexpected
+
+
+def test_deployed_v86_copy_with_clusters_and_no_state_row_verifies(tmp_path):
+    """codex #824 r7: a v86 database holding a notebook with clusters but no
+    ``unified_kg_state`` row (a copied library) -- v87 legitimately inserts
+    the seed-check row (marker 2) and the snapshot verifies."""
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as forged:
+        _rollback_v87(forged)
+        forged.execute("PRAGMA user_version = 86")
+        forged.execute("DELETE FROM unified_kg_state WHERE notebook_id='nb-fixture'")
+        forged.execute(
+            "INSERT INTO concept_clusters (id, notebook_id, canonical_id, "
+            "member_object_id, canonical_name, created_at) VALUES "
+            "('cc-copy', 'nb-fixture', 'can-copy', 'ko-copy', 'n', "
+            "'2024-01-02T03:04:05')"
+        )
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 86
+    assert result.normalized["memory_isolation_queued"] == 0
+    with sqlite3.connect(database) as original:  # the original is untouched
+        assert original.execute(
+            "SELECT COUNT(*) FROM unified_kg_state").fetchone()[0] == 0
 
 
 def _rollback_v86(db: sqlite3.Connection) -> None:
