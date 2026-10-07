@@ -411,6 +411,59 @@ a large notebook the neighbour view says the node cannot be located yet — that
 built, or that the current preview does not hold this node — until the next index build. A
 neighbour focus the stored preview does not hold is answered the same way.
 
+## Promotion provenance in public libraries
+
+A knowledge object promoted into a public library now carries the library's own provenance: one
+visible source of type `promotion` (「晋升自：<original title>」) per original and one element per
+evidence entry (product contract: the promotion paragraphs of
+[Memory and Agent MCP](./product-and-api.md#memory-and-agent-mcp)). Approvals
+write it from this version on; upgrading to **PostgreSQL 0068 / SQLite v88** rewrites what was
+approved before.
+
+**The migration.** One transaction, data only (no schema change), no model call. Per public library
+(`notebooks.tier = 'base'`) it takes the objects whose evidence names a source that is not one of
+the library's own — through the evidence reverse index where that index is attested complete
+(`unified_kg_state.source_index_backfilled = 1` and no unfinished `source_index_backfills` row),
+otherwise by reading every object's evidence — and rewrites each such entry: the original element's
+current text if it still exists (a member's Memory element is never read), else the stored excerpt,
+else the entry is dropped. Its summary line goes to the PostgreSQL server log (`RAISE LOG`) or the
+SQLite application log (`silicon_notebook.sqlite.maintenance`):
+`promotion-provenance migration: libraries=… objects_rewritten=… entries_rewritten=…
+entries_dropped=… objects_without_evidence=…` (counts only). `objects_without_evidence` counts
+objects whose every entry was dropped; every source ceiling leaves them out of answers from now
+on, and a curator can delete or re-promote them.
+
+- Cost: proportional to the reverse-index rows of the attested public libraries (an index scan on
+  `idx_kos_notebook` with an anti-join on the library's own sources) plus the evidence of the
+  candidate objects; a public library whose reverse index is not attested has every object's
+  evidence read, which on PostgreSQL measured 13.5 s for a 2M-object library under 0067. The pool's
+  `POSTGRES_STATEMENT_TIMEOUT_SECONDS` / `POSTGRES_LOCK_TIMEOUT_SECONDS` apply; on a timeout the
+  transaction rolls back, startup reports "not ready", and a restart with a larger value retries.
+- Take a backup before upgrading: the rewrite is not reversible by the application. Reverting the
+  code afterwards leaves the data readable (the promotion sources are ordinary visible sources).
+
+**Confirming it ran.** `SELECT count(*) FROM sources WHERE source_type = 'promotion'` shows the
+promotion sources created. No public-library entry may still name another notebook's source; on
+PostgreSQL (it reads all public-library evidence, so run it off-peak):
+
+```sql
+SELECT ko.notebook_id, count(*) AS foreign_entries
+FROM notebooks n
+JOIN knowledge_objects ko ON ko.notebook_id = n.id
+CROSS JOIN LATERAL jsonb_array_elements(
+  CASE WHEN jsonb_typeof(ko.evidence) = 'array' THEN ko.evidence ELSE '[]'::jsonb END
+) AS ev(item)
+WHERE n.tier = 'base' AND jsonb_typeof(ev.item) = 'object'
+  AND NOT EXISTS (SELECT 1 FROM sources s
+                  WHERE s.id = COALESCE(ev.item ->> 'source_id', '')
+                    AND s.notebook_id = ko.notebook_id)
+GROUP BY ko.notebook_id;
+```
+
+It returns no rows after the upgrade. A promotion source is listed in the library with the type
+「收录」; it is never re-parsed, never a KG analysis target and never reported by the missing-chunks
+checkup, so it needs no maintenance. Deleting it deletes the promoted objects its evidence supports.
+
 ## Observability
 
 The backend emits structured logs through a single `EventLogger` (`app/core/event_logging.py`): one JSONL line per event under `.local/logs/` plus a brief console line. Logging is best-effort — it never breaks the request or pipeline it observes — and is a no-op for the LLM channel when no model is configured.

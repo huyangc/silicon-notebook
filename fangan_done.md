@@ -468,6 +468,12 @@ Agent profile、opaque token、scope/allowlist/过期与撤销、公开 onboardi
 
 当前合同见[产品/API][product]的会话与报告公开分享护栏、[全局会话分享](docs/product-and-api_zh.md#全局会话分享)；回归入口：[分享披露场景](backend/tests/conversation_share_disclosure_cases.py)、[公开页复核场景](backend/tests/public_page_mount_recheck_cases.py)、[PostgreSQL 孪生](backend/tests/postgres/test_conversation_share_disclosure_pg.py)。
 
+## 57. 晋升对象由公共知识库自己承载出处（2026-10-08）
+
+**已交付，2026-10-08；§6 晋升（贡献到公共知识库）的延伸（来源范围与权限整改计划 PR-E8，审计 B-12；呈现方式按用户 2026-09-29 裁决「显示为可见来源」）。** 批准晋升时，公共库为每个原件（推广者的来源；个人记忆晋升时是那条记忆）建立或复用一个可见的「晋升自：<原标题>」来源（个人记忆为「晋升自个人记忆：<记忆标题>」），每条证据成为它的一个元素（原元素现文，读不到取保存的摘录，都没有则丢弃；从不读取个人记忆的元素），证据改指它们，原来源与所属笔记本只作展示键保留；合并进既有公共对象时只改写新进来的条目。于是挂载公共库的笔记本（挂载库只开放可见来源）与全局问答都能召回并引用晋升对象，引用卡显示原件标题、打开公共库的「晋升自」来源，推广者删除私有笔记本也不受影响。这类来源在来源列表显示「收录」/「已收录」，可删除（连带删去它支撑的晋升对象），不可重新解析，不进知识图谱分析、待分析计数、论文信息补抽与缺分块体检。存量由迁移 PostgreSQL 0068 / SQLite v88 按同一规则改写，双后端结果一致且与批准路径的规则同源。
+
+当前合同见[Memory 与 Agent MCP][memory]中的晋升段落与[运维][ops]的「公共知识库里晋升对象的出处」一节；回归入口：[批准与问答场景](backend/tests/promotion_provenance_cases.py)、[SQLite](backend/tests/test_promotion_provenance.py)、[PostgreSQL 孪生与计划钉子](backend/tests/postgres/test_promotion_provenance_pg.py)、[迁移场景](backend/tests/promotion_provenance_migration_cases.py)、[SQLite 迁移](backend/tests/test_promotion_provenance_migration.py)、[PostgreSQL 迁移](backend/tests/postgres/test_promotion_provenance_migration_pg.py)。
+
 [product]: docs/product-and-api_zh.md
 [flow]: docs/product-and-api_zh.md#产品流程
 [retrieval]: docs/product-and-api_zh.md#检索模式问答
