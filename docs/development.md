@@ -113,6 +113,14 @@ contributor constraints, not a second implementation history.
   frozen ceiling, and one outside it records the drift
   (`source_scope.record_collection_ceiling_drift`) so that read and every later one
   binds.
+- Retrieval legs that may read without the source list -- the chunk lanes and
+  contribution hydration, exact lookup, the mix walk and its overlay backstop, the
+  weak-support hint -- read the run's verdict (`source_scope.run_ceiling_binds`) ONCE,
+  before the read: `unbound_ceiling(nb)` returns the frozen ceiling the read is then
+  verified against (`verify_unbound_read`), or `None` (bind: take the list) -- never
+  "no list" from one reading and the ceiling from a later one. A store that binds the
+  ceiling gets the run's `CeilingSet` (`bindable_library_ceiling`) uncopied and reads
+  its `bound_forms` memo, keyed by backend and SQL form, before normalising the ids.
 - Relation lines of the answer context bind no source list: a library covered by a
   source ceiling reads its relation rows with `source_id` (one row per edge and source)
   and judges them in Python against the run's frozen ceiling — filtering and counting

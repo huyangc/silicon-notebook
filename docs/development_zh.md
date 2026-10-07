@@ -90,6 +90,12 @@
   （signal 行、按绑定路径判据逐条核对的 KG 行、Knowhow 目录里各表的投影源）对冻结天花板
   核对，出现天花板外的来源就记下漂移（`source_scope.record_collection_ceiling_drift`），
   这次读取与之后的每次读取都改为绑定。
+- 可能不带来源清单读取的检索腿——chunk 各 lane 与贡献水合、精确查找、mix 漫游及其叠加块
+  后盾、弱支撑提示——在读取**之前**只读一次本次运行的判词（`source_scope.run_ceiling_binds`）：
+  `unbound_ceiling(nb)` 返回读后用来核验的冻结天花板（`verify_unbound_read`），或返回 `None`
+  （约束：取清单）——绝不能一次读出「不带清单」、另一次再去取天花板。绑定天花板的 store 拿到的是
+  本次运行未经复制的 `CeilingSet`（`bindable_library_ceiling`），并在规范化 id 之前读取它的
+  `bound_forms` 备忘（键含后端与 SQL 形态）。
 - 回答上下文的关系行不绑定来源清单：被来源范围覆盖的库读关系行时带上 `source_id`
   （每条边每个来源一行），在 Python 里按本次运行冻结的范围判定——范围起约束时过滤并计数，
   不起约束时读后核验（发现越界行即记为漂移）。因此每个带冻结 include 范围的 HTTP 提问都要付
