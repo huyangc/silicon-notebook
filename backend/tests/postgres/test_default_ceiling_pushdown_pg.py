@@ -15,7 +15,7 @@ All scopes are the PRODUCTION default ceiling (``default_ceiling_context`` over
   the plan cache;
 * a narrowed run (the control) binds the list, never through the plan cache;
 * another member's Memory in the library binds the list;
-* a report phase binds the list;
+* a report phase pushes the list down like any other run;
 * a source outside the freeze that appears after the verdict is caught on read
   and the leg re-runs bound.
 """
@@ -197,19 +197,30 @@ def test_pg_another_members_memory_binds_the_list(library):
     assert not any(cid.startswith("c-src-mem") for cid in scored + keyword)
 
 
-def test_pg_a_report_run_keeps_binding_the_list(library):
+def test_pg_a_report_run_pushes_the_list_down(library):
+    """A Deep Report phase is judged like any other run: no 49k-id list is
+    bound (and so none can fall to a generic plan), its statements are the
+    unscoped run's, and a source added before the freeze is recalled."""
     from app.services.retrieval_run import retrieval_run
 
     repo, nb, bob, _alice, statements = library
+    _insert_source(repo, nb, "src-delta", "bandgap reference delta")
     _legs(repo, nb)
+    statements.clear()
+    unscoped = _legs(repo, nb)
+    unscoped_trace = list(statements)
 
     with retrieval_run(run_kind="report_generation", actor_id=bob):
         with _ceiling(repo, nb, bob):
+            _legs(repo, nb)               # the verdict's own reads, once
+            assert run_ceiling_binds(current_source_scope(), nb) is False
             statements.clear()
-            _legs(repo, nb)
-            assert run_ceiling_binds(current_source_scope(), nb) is True
+            scoped = _legs(repo, nb)
+            trace = list(statements)
 
-    assert _source_list_bound(statements)
+    assert not _source_list_bound(trace)
+    assert trace == unscoped_trace and scoped == unscoped
+    assert any(cid.startswith("c-src-delta") for cid in scoped[0] + scoped[1])
 
 
 @pytest.mark.parametrize("leg", ["chunks", "keyword"])

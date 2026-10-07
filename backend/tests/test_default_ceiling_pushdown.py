@@ -9,10 +9,11 @@ verdict always binds and would make every push-down assertion vacuous.)
 Pinned:
 
 * the statement trace of an unconstrained run equals the unscoped run's, on
-  the FTS-degraded lane and on the ANN ∪ FTS lane; a narrowed run, another
-  member's Memory in the library, and a Deep Report phase all bind the list;
-* a report phase under the default ceiling still recalls a source the scale
-  index has not folded yet (``report_delta_fallback``);
+  the FTS-degraded lane and on the ANN ∪ FTS lane; a narrowed run and another
+  member's Memory in the library bind the list;
+* a Deep Report phase pushes the list down like any other run and still
+  recalls a source the scale index has not folded yet
+  (``report_delta_fallback``), on both lanes;
 * a lexical failure on the pushed-down ANN lane is still the supplementary
   arm's failure -- no ``chunk_fts`` banner;
 * per producer, a source that appears after the verdict was taken is caught
@@ -211,21 +212,33 @@ def test_another_members_memory_makes_the_verdict_bind_the_list(library):
     assert _binds_a_list(trace)
 
 
-def test_a_report_run_keeps_binding_the_list(library):
-    """The frozen list is also the ANN sidecar's coverage question in a
-    report (sources a stale index does not hold are recalled by FTS), so a
-    report phase binds it even when the verdict would push it down."""
+def test_a_report_run_pushes_the_list_down_and_still_recalls_an_unfolded_source(
+    library, request,
+):
+    """A Deep Report phase is judged like any other run (PR-E1 re-review R1):
+    all selected, no drift, no other member's Memory -> its chunk legs get no
+    source list.  The pushed-down ANN lane still plans its sidecar coverage
+    from the frozen ceiling in Python, so a source uploaded after the last
+    scale-index fold is still recalled (``report_delta_fallback``); on the
+    FTS-degraded lane the run issues no list-bound statement at all."""
     from app.services.retrieval_run import retrieval_run
 
     repo, nb, _sid, bob, _alice, statements = library
+    delta = _add_source(repo, nb, ["DELTA9000 fresh unfolded evidence " * 20])
     _run_legs(repo, nb)
+    candidates = repo.retrieval.candidates
 
     with retrieval_run(run_kind="report_generation", actor_id=bob):
         with _ceiling(repo, nb, bob):
-            _result, trace = _trace(statements, lambda: _run_legs(repo, nb))
-            assert run_ceiling_binds(current_source_scope(), nb) is True
+            assert run_ceiling_binds(current_source_scope(), nb) is False
+            assert scoped_allowed_source_ids(nb) is None
+            hits, trace = _trace(statements, lambda: candidates._retrieve_chunks(
+                nb, "DELTA9000 unfolded evidence", 10)[0])
+            assert nb not in current_source_scope()._ceiling_bound_libraries
 
-    assert _binds_a_list(trace)
+    assert delta in {hit.source_id for hit in hits}
+    if "fts_degraded" in request.node.callspec.id:
+        assert trace and not _binds_a_list(trace)
 
 
 def test_a_report_under_the_default_ceiling_recalls_an_unfolded_source(repo):
@@ -557,3 +570,26 @@ def test_the_node_context_verdict_reads_the_one_row_fingerprint(repo, monkeypatc
         assert verdict(nb) is False
     assert ("visible", "digest") in reads
     assert ("visible", "full") not in reads
+
+
+@pytest.mark.parametrize("narrowed", [False, True])
+def test_the_lexical_gate_is_not_probed_without_a_list(library, monkeypatch, narrowed):
+    """PR-E1 re-review R2: with the list pushed down the lexical
+    corpus-language gate has nothing a drift verdict could change (no list ->
+    "not bounded"), so the chunk lane and the keyword arm do not read the
+    fingerprint for it.  A narrowed run (a list) still probes per call."""
+    repo, nb, sid, bob, _alice, _statements = library
+    candidates = repo.retrieval.candidates
+    probed = []
+    real = type(candidates)._unsafe_source_scope_restricted
+
+    def spy(self, notebook_id):
+        probed.append(notebook_id)
+        return real(self, notebook_id)
+
+    monkeypatch.setattr(type(candidates), "_unsafe_source_scope_restricted", spy)
+    local = {"mode": "include", "source_ids": [sid], "narrowed": True} if narrowed else None
+    with _ceiling(repo, nb, bob, local_scope=local):
+        _run_legs(repo, nb)
+        candidates._retrieve_chunks_multi(nb, ["bandgap reference", "bandgap detail"])
+    assert bool(probed) is narrowed, probed

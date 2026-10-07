@@ -553,6 +553,25 @@ class _RetrievalState:
     def _notebook_has_kg(self, notebook_id: str) -> bool:
         return self.knowledge.has_kg(notebook_id)
 
+    def _lexical_gate_drift(self, notebook_id: str) -> bool:
+        """The lexical corpus-language gate's drift input (``chunk_lane.
+        _lexical_gate_drift_probe``): ``_unsafe_source_scope_restricted``,
+        except that a list pushed down (the run's verdict binds nothing here,
+        so the producer gets NO list) is not probed at all.  With no list the
+        gate answers "not bounded" whatever the drift verdict says
+        (``_lexical_gate_source_scoped``); a producer's own unattested list in
+        such a run is routed as undrifted.  Either way the verdict only ever
+        picks the lexical TERM SET, never admits a row (the source predicate
+        is pushed down regardless, and an outsider read without the list is
+        caught by verify-on-read), so skipping it costs no safety.  The
+        channel gates (``_unsafe_source_scope_restricted``) keep probing every
+        call."""
+        from app.services.source_scope import unbound_ceiling
+
+        if unbound_ceiling(notebook_id) is not None:
+            return False
+        return self._unsafe_source_scope_restricted(notebook_id)
+
     def _unsafe_source_scope_restricted(self, notebook_id: str) -> bool:
         """Whether non-partitioned channels must be disabled before I/O.
 
