@@ -4063,9 +4063,40 @@
           "title": "ConversationRenameRequest",
           "type": "object"
         },
-        "ConversationShareRequest": {
-          "description": "The client's disclosure boundary for a share / \"update to latest\" (codex\n#522 R2 P1).\n\n``expected_through_id`` is the newest answer id the client saw in the SAME\nturns it computed its disclosure from. The store pins the watermark to\nexactly that answer, so the published snapshot equals the disclosed one —\neven if a newer answer landed between the client's read and this POST (the\ndisclosure TOCTOU). Empty (a legacy / no-body client) falls back to\n\"current latest\". The body itself is optional so an empty POST still works.",
+        "ConversationShareDisclosure": {
+          "description": "What a conversation share about to be published carries of the author's\nown personal memory (M4), counted by the server over the exact range the\nshare would publish (``through_id``; empty = the newest completed turn).\n\n``memory_count``: distinct Memory entries of the author in that range.\n``new_memory_count``: those not already on the page the link serves now\n(relative to the current watermark; 0 when the range ends at it, all of\nthem while the conversation is not shared).  Never above ``memory_count``.",
           "properties": {
+            "memory_count": {
+              "title": "Memory Count",
+              "type": "integer"
+            },
+            "new_memory_count": {
+              "title": "New Memory Count",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "memory_count",
+            "new_memory_count"
+          ],
+          "title": "ConversationShareDisclosure",
+          "type": "object"
+        },
+        "ConversationShareRequest": {
+          "description": "The client's disclosure boundary for a share / \"update to latest\" (codex\n#522 R2 P1).\n\n``expected_through_id`` is the newest answer id the client saw in the SAME\nturns it computed its disclosure from. The store pins the watermark to\nexactly that answer, so the published snapshot equals the disclosed one —\neven if a newer answer landed between the client's read and this POST (the\ndisclosure TOCTOU). Empty (a legacy / no-body client) falls back to\n\"current latest\". The body itself is optional so an empty POST still works.\n\n``acknowledged_memory_count`` (M4) is the number of the author's own\npersonal-memory entries the author saw in the disclosure and confirmed.\nThe server counts again over the exact range it is about to publish and\nrefuses (409 ``share_disclosure_required``) unless a count above zero is\nacknowledged exactly; a client with nothing to confirm leaves it out, and\nthat body must never get a 422.",
+          "properties": {
+            "acknowledged_memory_count": {
+              "anyOf": [
+                {
+                  "minimum": 0.0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Acknowledged Memory Count"
+            },
             "expected_through_id": {
               "default": "",
               "title": "Expected Through Id",
@@ -9844,6 +9875,11 @@
               "title": "Is Image Reference",
               "type": "boolean"
             },
+            "is_memory": {
+              "default": false,
+              "title": "Is Memory",
+              "type": "boolean"
+            },
             "key": {
               "default": "",
               "title": "Key",
@@ -9954,6 +9990,11 @@
             "file_name_truncated": {
               "default": false,
               "title": "File Name Truncated",
+              "type": "boolean"
+            },
+            "is_memory": {
+              "default": false,
+              "title": "Is Memory",
               "type": "boolean"
             },
             "key": {
@@ -17269,7 +17310,7 @@
           ]
         },
         "post": {
-          "description": "Publish this conversation behind a link AND advance the watermark.\n\n``expected_through_id`` is a JOB id on this surface (the notebook-scoped\ntwin pins an answer id): the newest completed turn the client saw in what\nit disclosed. It pins the published snapshot to exactly that turn, closing\nthe window where a turn finishing between the client's disclosure read and\nthis POST would otherwise be published without the user ever reviewing it.",
+          "description": "Publish this conversation behind a link AND advance the watermark.\n\n``expected_through_id`` is a JOB id on this surface (the notebook-scoped\ntwin pins an answer id): the newest completed turn the client saw in what\nit disclosed. It pins the published snapshot to exactly that turn, closing\nthe window where a turn finishing between the client's disclosure read and\nthis POST would otherwise be published without the user ever reviewing it.\n\nM4: with the author's own Memory in that range, ``acknowledged_memory_count``\nmust equal the server's count (409 ``share_disclosure_required`` with the\ncounts otherwise; no token, no watermark move). Without Memory the body and\nthe response are what they were before.",
           "operationId": "share_global_conversation_route_api_global_ask_conversations__conversation_id__share_post",
           "parameters": [
             {
@@ -17322,6 +17363,59 @@
             }
           },
           "summary": "Share Global Conversation Route",
+          "tags": [
+            "global-ask"
+          ]
+        }
+      },
+      "/api/global-ask/conversations/{conversation_id}/share/disclosure": {
+        "get": {
+          "description": "How many of the author's own Memory entries a share pinned at\n``through_id`` (a JOB id; empty = the newest completed turn) would publish,\nand how many of them the page the link serves now does not carry yet (M4).\nOwner only and refused like the POST (``_share_call``); writes nothing.",
+          "operationId": "global_conversation_share_disclosure_route_api_global_ask_conversations__conversation_id__share_disclosure_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "conversation_id",
+              "required": true,
+              "schema": {
+                "title": "Conversation Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "through_id",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Through Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ConversationShareDisclosure"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Global Conversation Share Disclosure Route",
           "tags": [
             "global-ask"
           ]
@@ -20759,7 +20853,7 @@
           "summary": "Get Conversation Share Route"
         },
         "post": {
-          "description": "Publish one conversation behind an unguessable link AND advance the read\nwatermark — \"share\" and \"update to latest\" are the same call (design doc\n§四), so the button label alone decides which one the user thinks they\npressed.\n\n``expected_through_id`` (the newest answer the client saw in the turns it\ndisclosed) pins the watermark to EXACTLY that answer (codex #522 R2 P1): the\npublished snapshot then equals the disclosed one, closing the TOCTOU where an\nin-flight answer completes (or another tab adds a turn) between the client's\ndisclosure read and this POST and the watermark would otherwise jump to an\nunreviewed, unconsented answer. When the disclosed boundary answer has since\nbeen deleted the store raises ``ConversationShareWatermarkStale`` → 409, so\nthe user reloads and re-reviews rather than publishing \"latest\" silently.\nAn empty/absent body falls back to \"current latest\" (legacy behaviour).\n\nRow-level gated (creator-only). Only conversations with at least one written\nanswer can be shared (design doc §七 item 5): an in-flight or never-answered\nconversation has nothing completed to show. ``share_conversation`` enforces\nthat ATOMICALLY — it raises ``ConversationHasNoShareableAnswer`` inside the\nsame write transaction and never mints a token (codex #522 R5), so there is\nno NULL-watermark row to compensate away afterwards. This replaced the old\nshare-then-check path (mint a NULL-watermark token, then a second\n``discard_unwatermarked_share`` rolls it back), which could leave a permanent\ntoken-without-watermark row if the process died between the two steps.",
+          "description": "Publish one conversation behind an unguessable link AND advance the read\nwatermark — \"share\" and \"update to latest\" are the same call (design doc\n§四), so the button label alone decides which one the user thinks they\npressed.\n\n``expected_through_id`` (the newest answer the client saw in the turns it\ndisclosed) pins the watermark to EXACTLY that answer (codex #522 R2 P1): the\npublished snapshot then equals the disclosed one, closing the TOCTOU where an\nin-flight answer completes (or another tab adds a turn) between the client's\ndisclosure read and this POST and the watermark would otherwise jump to an\nunreviewed, unconsented answer. When the disclosed boundary answer has since\nbeen deleted the store raises ``ConversationShareWatermarkStale`` → 409, so\nthe user reloads and re-reviews rather than publishing \"latest\" silently.\nAn empty/absent body falls back to \"current latest\" (legacy behaviour).\n\nRow-level gated (creator-only). Only conversations with at least one written\nanswer can be shared (design doc §七 item 5): an in-flight or never-answered\nconversation has nothing completed to show. ``share_conversation`` enforces\nthat ATOMICALLY — it raises ``ConversationHasNoShareableAnswer`` inside the\nsame write transaction and never mints a token (codex #522 R5), so there is\nno NULL-watermark row to compensate away afterwards. This replaced the old\nshare-then-check path (mint a NULL-watermark token, then a second\n``discard_unwatermarked_share`` rolls it back), which could leave a permanent\ntoken-without-watermark row if the process died between the two steps.\n\nM4: the server counts the author's own Memory over the exact range it is\nabout to publish (``_conversation_share_count``) and, when there is any,\npublishes only with ``acknowledged_memory_count`` equal to that count;\notherwise 409 ``share_disclosure_required`` with the counts, no token\nissued and the watermark untouched. The share is then pinned to the\nboundary that range ended at, so an answer finishing in between is never\npublished uncounted. Without Memory the flow and the response are what\nthey were before.",
           "operationId": "share_conversation_route_api_notebooks__notebook_id__conversations__conversation_id__share_post",
           "parameters": [
             {
@@ -20821,6 +20915,65 @@
             }
           },
           "summary": "Share Conversation Route"
+        }
+      },
+      "/api/notebooks/{notebook_id}/conversations/{conversation_id}/share/disclosure": {
+        "get": {
+          "description": "How many of the author's own Memory entries a share pinned at\n``through_id`` (an answer id; empty = the newest answer, the same meaning\nas the POST's ``expected_through_id``) would publish, and how many of them\nthe page the link serves now does not carry yet (M4).\n\nRead before sharing so the author is asked with the server's number; the\nbrowser never counts Memory itself. Same creator gate and the same\nrefusals as the POST, and nothing is written. The number is advisory: the\nPOST counts again over the range it publishes.",
+          "operationId": "conversation_share_disclosure_route_api_notebooks__notebook_id__conversations__conversation_id__share_disclosure_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "conversation_id",
+              "required": true,
+              "schema": {
+                "title": "Conversation Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "through_id",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Through Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ConversationShareDisclosure"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Conversation Share Disclosure Route"
         }
       },
       "/api/notebooks/{notebook_id}/duplicates": {
@@ -28121,7 +28274,7 @@
       },
       "/api/public/conversations/{token}": {
         "get": {
-          "description": "The one conversation read that needs no session — the token is the whole\ngrant (T3). Mirrors ``report_routes.public_report_route``.\n\nDeliberately has NO ``Depends(get_current_user)``: this is the anonymous\nsurface. That also means no request user is bound, so nothing here may call\nan owner-scoped repository method — ``current_user`` falls back to the seeded\nadmin when the ContextVar is unset, which would silently run as an\nadministrator. ``public_conversation_by_token`` takes the token alone for\nexactly that reason, and the payload is an explicit allowlist rather than the\nstored row.",
+          "description": "The one conversation read that needs no session — the token is the whole\ngrant (T3). Mirrors ``report_routes.public_report_route``.\n\nDeliberately has NO ``Depends(get_current_user)``: this is the anonymous\nsurface. That also means no request user is bound, so nothing here may call\nan owner-scoped repository method — ``current_user`` falls back to the seeded\nadmin when the ContextVar is unset, which would silently run as an\nadministrator. ``public_conversation_by_token`` takes the token alone for\nexactly that reason, and the payload is an explicit allowlist rather than the\nstored row.\n\nM4: a reference that is the creator's own personal memory carries\n``is_memory``; the creator's Memory sources among the shown references are\nread in ONE batch per page, with the creator's id passed explicitly.",
           "operationId": "public_conversation_route_api_public_conversations__token__get",
           "parameters": [
             {
