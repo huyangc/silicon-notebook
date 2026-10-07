@@ -72,6 +72,10 @@ class KnowledgeQueryService:
         self.current_user_id = current_user_id
         self.queries = queries
         self.viewer_scope = viewer_scope
+        # E4-7: ``notebook_id -> bool``, the M1 transition marker (``<> 1``),
+        # bound by ``RepositoryRuntime.wire_knowledge_lifecycle`` to the
+        # lifecycle's reader once that exists; False = isolated (today).
+        self.memory_isolation_pending: Callable[[str], bool] = lambda _nb: False
 
     def backfill_kg_fts(self, notebook_id: str) -> int:
         self.catalog.get_notebook(notebook_id)
@@ -198,19 +202,31 @@ class KnowledgeQueryService:
         page judged in ONE batched member read (``cluster_labels``), never
         one read per hit.  The FTS leg is filtered in the store once it takes
         ``viewer_id`` (E4-4); this pass covers the ANN leg (a pre-isolation
-        index included) and keeps the answer right before that."""
+        index included) and keeps the answer right before that.
+
+        While the notebook awaits its isolated rebuild (the E4-5 marker
+        ``<> 1``) a checked cluster's canonical id may still be minted from a
+        hidden member's name (``K-<seed>``), so such a hit is answered by its
+        first visible member's OBJECT id instead -- same name, the canonical
+        id not in the response, and still openable; once isolated, the
+        canonical id again (one marker read, only when a checked cluster is
+        on the page)."""
         ids = [hit["object_id"] for hit in hits]
         hidden = frozenset() if folded else scope.owned_hidden.intersection(ids)
-        labels = scope.cluster_labels(ids) if folded else {}
+        firsts = scope.cluster_first_visible(ids) if folded else {}
+        pending = bool(firsts) and self.memory_isolation_pending(scope.notebook_id)
         kept = []
         for hit in hits:
             if hit["object_id"] in hidden:
                 continue
-            if hit["object_id"] in labels:
-                name = labels[hit["object_id"]]
-                if name is None:
+            if hit["object_id"] in firsts:
+                row = firsts[hit["object_id"]]
+                if row is None:
                     continue
-                hit = {**hit, "name": name}
+                hit = {**hit, "name": str(
+                    json.loads(row["payload"] or "{}").get("name", "") or "")}
+                if pending:
+                    hit["object_id"] = str(row["member_object_id"])
             kept.append(hit)
         return kept
 

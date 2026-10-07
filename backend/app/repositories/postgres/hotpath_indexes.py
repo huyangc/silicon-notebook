@@ -271,7 +271,12 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
         # notebook_knowledge_rows's SQL text, so the partial predicate is
         # implied even under a generic (parameter-value-blind) plan -- the
         # same literal-vs-bound-parameter mechanics documented at length on
-        # idx_source_elements_nonblank below.
+        # idx_source_elements_nonblank below.  The E4-4 viewer filter
+        # (``viewer_id``) is APPENDED after the ILIKE group and leaves both
+        # the literal and the expression untouched; the viewer form keeps this
+        # index custom and generic (tests/postgres/
+        # test_memory_kg_readers_explain_pins.py), the viewer-free text stays
+        # byte-identical.
         predicate="status != 'deprecated'",
         predicate_shape="status <> 'deprecated'::text",
         # 目录侧的第三/第四维期望(质量评审 P1 的实证场景:少写 COLLATE "C" 的

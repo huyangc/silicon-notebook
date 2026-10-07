@@ -438,16 +438,19 @@ class KgViewerScope:
         (``row_hidden``), not only through ``owned_hidden``: that set holds
         live objects, and the DB neighbour path can return a deprecated one
         (merges keep the merged-away object's relations) whose owner is an
-        unreadable source."""
+        unreadable source.  Only ``id`` and ``source_id`` are used: with the
+        E4-4 stores assembled the read skips the evidence JSON
+        (``with_evidence=False``, the same seam as ``viewer_id``)."""
         owned = self.owned_hidden
         hidden = {oid for oid in object_ids if oid in owned}
         known = set(hidden)
         rest = sorted({oid for oid in object_ids if oid not in owned})
+        narrow = {"with_evidence": False} if store_readers_take_viewer_id() else {}
         if rest:
             with self._reader.connect() as db:
                 for start in range(0, len(rest), _ID_BATCH):
                     for row in self._reader.knowledge.object_evidence_rows(
-                        db, rest[start:start + _ID_BATCH]
+                        db, rest[start:start + _ID_BATCH], **narrow
                     ):
                         known.add(str(row["id"]))
                         if self.row_hidden(row["source_id"]):
@@ -554,13 +557,21 @@ class KgViewerScope:
         are absent from the answer (they keep their own name).  ONE batched
         member read for all of them (``_first_visible_members``), whatever
         their number -- KG search's folded hits and neighbour hydration."""
-        checked = list(dict.fromkeys(
-            str(cid) for cid in canonical_ids if self.cluster_needs_check(str(cid))))
         return {
             cid: None if row is None
             else str(json.loads(row["payload"] or "{}").get("name", "") or "")
-            for cid, row in self._first_visible_members(checked).items()
+            for cid, row in self.cluster_first_visible(canonical_ids).items()
         }
+
+    def cluster_first_visible(
+        self, canonical_ids: Sequence[str],
+    ) -> Dict[str, Optional[Dict[str, Any]]]:
+        """The member rows behind ``cluster_labels``: for every id that needs
+        the check, its first visible member row (``member_object_id``,
+        ``payload``) or ``None``; the same one batched read."""
+        checked = list(dict.fromkeys(
+            str(cid) for cid in canonical_ids if self.cluster_needs_check(str(cid))))
+        return self._first_visible_members(checked)
 
     def object_is_own_memory(self, notebook_id: str, object_id: str) -> bool:
         """Whether ``object_id`` is an object of the viewer's OWN Memory

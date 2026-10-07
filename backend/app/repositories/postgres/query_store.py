@@ -44,6 +44,7 @@ from app.repositories.postgres.memory_sql import (
     memory_derived_object,
     memory_derived_relation,
     no_memory_member_cluster,
+    own_memory_source,
 )
 from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
 from app.repositories.postgres.search import (
@@ -168,15 +169,20 @@ class QueryStore:
 
     @staticmethod
     def knowledge_type_count_rows(
-        db: Any, notebook_id: str, statuses: tuple[str, ...]
+        db: Any, notebook_id: str, statuses: tuple[str, ...],
+        *, viewer_id: "str | None" = None,
     ) -> "list[dict]":
         # Served from the seq-gated count cache (one GROUP BY per kg_mutation_seq
         # instead of per open/list/poll). Returns row-like dicts with the same
         # ["object_type"] / ["c"] keys the callers read. Empty statuses falls
         # out of type_counts' own empty-whitelist handling (returns {}) —
-        # mirrors sqlite query_store.knowledge_type_count_rows.
+        # mirrors sqlite query_store.knowledge_type_count_rows. ``viewer_id``
+        # (E4-4, M1): None = every object; "" = the shared view (no member's
+        # Memory-derived object); a user id = the shared view plus that user's
+        # own Memory-derived objects (one bounded live query).
         from app.repositories.postgres import knowledge_counts_cache
-        counts = knowledge_counts_cache.type_counts(db, notebook_id, statuses)
+        counts = knowledge_counts_cache.type_counts(
+            db, notebook_id, statuses, viewer_id=viewer_id)
         return [{"object_type": ot, "c": c} for ot, c in counts.items()]
 
     @staticmethod
@@ -280,13 +286,38 @@ class QueryStore:
         ).fetchall()
 
     @staticmethod
-    def notebook_has_kg(db: Any, notebook_id: str) -> bool:
-        row = db.execute(
-            "SELECT EXISTS(SELECT 1 FROM knowledge_objects "
-            "WHERE notebook_id=%s) AS exists",
-            (notebook_id,),
+    def notebook_has_kg(
+        db: Any, notebook_id: str, *, viewer_id: "str | None" = None,
+    ) -> bool:
+        """``kg_ready`` (E4-4, M1), ``viewer_id`` as in ``count_active_objects``:
+        None = any object at all (today's statement, byte-identical); "" = an
+        object of the shared view; a user id = the shared view, or else one
+        derived from that user's own Memory (see the SQLite twin).  The shared
+        half is the cached count (every status), never a scan of the notebook:
+        an EXISTS that must skip every Memory object took 41-69 ms on a
+        notebook of 20k Memory objects."""
+        if viewer_id is None:
+            row = db.execute(
+                "SELECT EXISTS(SELECT 1 FROM knowledge_objects "
+                "WHERE notebook_id=%s) AS exists",
+                (notebook_id,),
+            ).fetchone()
+            return bool(row["exists"])
+        from app.repositories.postgres import knowledge_counts_cache
+        shared = knowledge_counts_cache.shared_type_status_counts(db, notebook_id)
+        if shared or not viewer_id:
+            return bool(shared)
+        # The own half as an EXISTS driven by the viewer's Memory sources
+        # (InitPlan on ``idx_sources_nb_hidden_type``, then the source_id
+        # index), stopping at the first object.
+        own = db.execute(
+            "SELECT EXISTS(SELECT 1 FROM knowledge_objects o "
+            "WHERE o.source_id = ANY(ARRAY(SELECT s.id FROM sources s "
+            f"WHERE s.notebook_id=%s AND {own_memory_source('s')})) "
+            "AND o.notebook_id=%s) AS exists",
+            (notebook_id, viewer_id, notebook_id),
         ).fetchone()
-        return bool(row["exists"])
+        return bool(own["exists"])
 
     @staticmethod
     def notebook_has_usable_kg(db: Any, notebook_id: str) -> bool:
@@ -1549,7 +1580,11 @@ class QueryStore:
                 item["updated_at"] = iso_timestamp(item["updated_at"])
         return {"items": page, "has_more": has_more, "next_cursor": next_cursor}
 
-    def notebook_analytics(self, notebook_id: str) -> NotebookAnalytics:
+    def notebook_analytics(
+        self, notebook_id: str, *, viewer_id: "str | None" = None,
+    ) -> NotebookAnalytics:
+        """``viewer_id`` scopes ``knowledge_counts`` only, with the meaning of
+        ``knowledge_type_count_rows`` (E4-4, M1)."""
         with self.database.connect() as db:
             exists = db.execute(
                 f"SELECT 1 FROM notebooks WHERE id = %s AND {access_sql.NOTEBOOK_LIVE_SQL}",
@@ -1590,7 +1625,8 @@ class QueryStore:
             # seq-gated count cache (non-deprecated) — same GROUP BY, memoized;
             # mirrors sqlite query_store.notebook_analytics.
             from app.repositories.postgres import knowledge_counts_cache
-            knowledge_counts = knowledge_counts_cache.type_counts(db, notebook_id)
+            knowledge_counts = knowledge_counts_cache.type_counts(
+                db, notebook_id, viewer_id=viewer_id)
             # Memory-derived AND knowhow-projection hidden synthetic sources
             # (source_type IN ('memory', 'knowhow')) are excluded — this feeds
             # the /analytics 看板 parse_status distribution, a user-facing
@@ -1899,8 +1935,12 @@ class QueryStore:
         return " ".join(parts)
 
     def search_notebook(
-        self, notebook_id: str, query: str
+        self, notebook_id: str, query: str, *, viewer_id: "str | None" = None,
     ) -> NotebookSearchResponse:
+        """``viewer_id`` scopes the KG leg (E4-4, M1; see
+        ``search.notebook_knowledge_rows``): None = unchanged, "" = the shared
+        view, a user id = no other member's.  The source and element legs
+        already hide Memory for everyone."""
         needle = query.strip().lower()
         with self.database.connect() as db:
             notebook = db.execute(
@@ -1974,7 +2014,8 @@ class QueryStore:
                     )
                 )
             knowledge_rows = (
-                notebook_knowledge_rows(db, notebook_id, needle, cap)
+                notebook_knowledge_rows(
+                    db, notebook_id, needle, cap, viewer_id=viewer_id)
                 if len(hits) < cap else ()
             )
             for row in knowledge_rows:

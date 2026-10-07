@@ -63,6 +63,11 @@ from collections import OrderedDict
 from typing import Dict, Optional, Tuple
 
 from app.repositories.sqlite.access_sql import NOTEBOOK_LIVE_SQL
+from app.repositories.sqlite.memory_sql import (
+    hidden_type_index_term,
+    memory_source_type_predicate,
+    own_memory_source,
+)
 
 # non-deprecated is the "active" set most call sites want; USABLE_STATUSES is the
 # narrower reviewed set from knowledge_contracts (imported lazily to avoid a
@@ -101,12 +106,36 @@ def _version_key(db: sqlite3.Connection, notebook_id: str) -> Tuple[int, int]:
     return (epoch, seq)
 
 
-def type_status_counts(
+#: Cold count (E4-4, ruling M1): ONE statement computes both halves from one
+#: snapshot — the shared half (no Memory-derived object) and every member's
+#: Memory half.  The total is the same covering-index GROUP BY as before; the
+#: Memory half is driven by the notebook's Memory sources (materialised id
+#: list, then ``idx_knowledge_objects_source``; ``+mo.notebook_id`` keeps the
+#: planner off the notebook index); shared = total − Memory.  Both halves are
+#: memoized together on ``(kg_reset_epoch, kg_mutation_seq)``; an object never
+#: changes half, so freshness is the old memo's.  See the PostgreSQL twin's
+#: module docstring for why nothing viewer-specific is cached.
+_TYPE_STATUS_HALVES_SQL = (
+    "WITH total AS (SELECT object_type, status, COUNT(*) AS c FROM knowledge_objects "
+    "WHERE notebook_id=? GROUP BY object_type, status), "
+    "memory AS (SELECT mo.object_type, mo.status, COUNT(*) AS c FROM knowledge_objects mo "
+    "WHERE mo.source_id IN (SELECT s.id FROM sources s "
+    f"WHERE s.notebook_id=? AND {hidden_type_index_term('s')} "
+    f"AND {memory_source_type_predicate('s.source_type')}) "
+    "AND +mo.notebook_id=? GROUP BY mo.object_type, mo.status) "
+    "SELECT t.object_type, t.status, t.c - COALESCE(m.c, 0) AS c, "
+    "COALESCE(m.c, 0) AS m FROM total t LEFT JOIN memory m "
+    "ON m.object_type = t.object_type AND m.status = t.status"
+)
+
+_Counts = Dict[Tuple[str, str], int]
+
+
+def _type_status_halves(
     db: sqlite3.Connection, notebook_id: str
-) -> Dict[Tuple[str, str], int]:
-    """``{(object_type, status): count}`` for the notebook, memoized on
-    ``(kg_reset_epoch, kg_mutation_seq)``. Returns a shared read-only dict —
-    callers must not mutate it."""
+) -> "Tuple[_Counts, _Counts, _Counts]":
+    """``(shared, every member's Memory, total)``, memoized together on
+    ``(kg_reset_epoch, kg_mutation_seq)``; shared read-only dicts."""
     version = _version_key(db, notebook_id)
     with _LOCK:
         hit = _MEMO.get(notebook_id)
@@ -115,30 +144,79 @@ def type_status_counts(
             return hit[1]
 
     rows = db.execute(
-        "SELECT object_type, status, COUNT(*) AS c FROM knowledge_objects "
-        "WHERE notebook_id=? GROUP BY object_type, status",
-        (notebook_id,),
+        _TYPE_STATUS_HALVES_SQL, (notebook_id, notebook_id, notebook_id)
     ).fetchall()
-    counts: Dict[Tuple[str, str], int] = {
-        (r["object_type"], r["status"]): int(r["c"]) for r in rows
-    }
+    shared = {(r["object_type"], r["status"]): int(r["c"]) for r in rows if int(r["c"])}
+    memory = {(r["object_type"], r["status"]): int(r["m"]) for r in rows if int(r["m"])}
+    total = {(r["object_type"], r["status"]): int(r["c"]) + int(r["m"]) for r in rows}
+    halves = (shared, memory, total)
 
     with _LOCK:
-        _MEMO[notebook_id] = (version, counts)
+        _MEMO[notebook_id] = (version, halves)
         _MEMO.move_to_end(notebook_id)
         while len(_MEMO) > _MAX_NOTEBOOKS:
             _MEMO.popitem(last=False)
-    return counts
+    return halves
+
+
+def shared_type_status_counts(db: sqlite3.Connection, notebook_id: str) -> "_Counts":
+    """The cached shared half: counts of objects NOT derived from any Memory."""
+    return _type_status_halves(db, notebook_id)[0]
+
+
+def memory_type_status_counts(
+    db: sqlite3.Connection, notebook_id: str, viewer_id: str,
+) -> "_Counts":
+    """The viewer's OWN Memory half, read live (never memoized); ``""`` owns
+    none. Driven by the viewer's Memory sources (``idx_sources_nb_hidden_type``
+    → ``idx_knowledge_objects_source``); see the PostgreSQL twin."""
+    if not viewer_id:
+        return {}
+    # ``CROSS JOIN`` pins SQLite's join order (sources first): without ANALYZE
+    # the planner otherwise derives ``o.notebook_id=?`` from the join and walks
+    # every object of the notebook instead of the few Memory sources.
+    rows = db.execute(
+        "SELECT o.object_type, o.status, COUNT(*) AS c FROM sources s "
+        "CROSS JOIN knowledge_objects o "
+        f"WHERE s.notebook_id=? AND {hidden_type_index_term('s')} "
+        f"AND {own_memory_source('s')} "
+        "AND o.source_id = s.id AND o.notebook_id = s.notebook_id "
+        "GROUP BY o.object_type, o.status",
+        (notebook_id, viewer_id),
+    ).fetchall()
+    return {(r["object_type"], r["status"]): int(r["c"]) for r in rows}
+
+
+def type_status_counts(
+    db: sqlite3.Connection, notebook_id: str, *, viewer_id: "Optional[str]" = None,
+) -> "_Counts":
+    """``{(object_type, status): count}`` as ``viewer_id`` may see it.
+    ``None`` = every object (both cached halves: today's result, zero live
+    reads); ``""`` = the cached shared half; a user id = the shared half plus
+    that user's own Memory objects (one live read). Read-only result."""
+    shared, _memory, total = _type_status_halves(db, notebook_id)
+    if viewer_id is None:
+        return total
+    own = memory_type_status_counts(db, notebook_id, viewer_id)
+    if not own:
+        return shared
+    merged = dict(shared)
+    for key, count in own.items():
+        merged[key] = merged.get(key, 0) + count
+    return merged
 
 
 def type_counts(
     db: sqlite3.Connection,
     notebook_id: str,
     statuses: "Optional[Tuple[str, ...]]" = None,
+    *,
+    viewer_id: "Optional[str]" = None,
 ) -> Dict[str, int]:
     """``{object_type: count}`` filtered to ``statuses`` (a whitelist), or to
-    all-but-``deprecated`` when ``statuses is None``."""
-    raw = type_status_counts(db, notebook_id)
+    all-but-``deprecated`` when ``statuses is None``; ``viewer_id`` as in
+    ``type_status_counts``."""
+    raw = type_status_counts(db, notebook_id, viewer_id=viewer_id)
     allow = set(statuses) if statuses is not None else None
     out: Dict[str, int] = {}
     for (object_type, status), c in raw.items():
@@ -151,9 +229,12 @@ def type_counts(
     return out
 
 
-def active_object_count(db: sqlite3.Connection, notebook_id: str) -> int:
-    """Total non-deprecated object count."""
-    raw = type_status_counts(db, notebook_id)
+def active_object_count(
+    db: sqlite3.Connection, notebook_id: str, *, viewer_id: "Optional[str]" = None,
+) -> int:
+    """Total non-deprecated object count (``viewer_id`` as in
+    ``type_status_counts``)."""
+    raw = type_status_counts(db, notebook_id, viewer_id=viewer_id)
     return sum(c for (_ot, status), c in raw.items() if status != _DEPRECATED)
 
 
@@ -162,13 +243,17 @@ def object_type_total(
     notebook_id: str,
     object_type: str,
     status: "Optional[str]" = None,
+    *,
+    viewer_id: "Optional[str]" = None,
 ) -> int:
     """The ``/knowledge`` list-pagination total for one ``object_type`` — served
     as a slice of the seq-gated ``type_status_counts`` memo instead of a fresh
     per-request ``COUNT(*)``. A falsy ``status`` counts ALL statuses (including
     deprecated), identical to the bare ``WHERE notebook_id=? AND object_type=?``
-    count it replaces; a truthy status is one dict lookup."""
-    raw = type_status_counts(db, notebook_id)
+    count it replaces; a truthy status is one dict lookup. ``viewer_id`` as in
+    ``type_status_counts`` — the total counts exactly the rows the viewer's
+    page statement can return."""
+    raw = type_status_counts(db, notebook_id, viewer_id=viewer_id)
     if status:
         return raw.get((object_type, status), 0)
     return sum(c for (ot, _st), c in raw.items() if ot == object_type)
@@ -344,7 +429,7 @@ def warm_all(db: sqlite3.Connection, progress=None) -> int:
     total = len(ids)
     for i, notebook_id in enumerate(ids, start=1):
         try:
-            type_status_counts(db, notebook_id)
+            shared_type_status_counts(db, notebook_id)
             pending_source_count(db, notebook_id)
             visible_pending_source_count(db, notebook_id)
             chunk_count(db, notebook_id)

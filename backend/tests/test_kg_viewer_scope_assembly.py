@@ -32,6 +32,8 @@ SEAM_READERS = (
     ("queries", "search_notebook", "viewer_id"),
     # The list page's element read asks for sources only (E4-4, P3-B).
     ("knowledge", "_enrich_evidence", "sources_only"),
+    # The neighbour filter's owner read skips the evidence JSON (P2-2).
+    ("knowledge", "object_evidence_rows", "with_evidence"),
 )
 
 

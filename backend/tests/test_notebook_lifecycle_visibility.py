@@ -55,7 +55,7 @@ import pytest
 
 from app.core.config import Settings
 from app.repositories.sqlite.knowledge_counts_cache import (
-    type_status_counts as _real_type_status_counts,
+    shared_type_status_counts as _real_shared_type_status_counts,
 )
 from app.services.sqlite_repository import SQLiteRepository
 
@@ -398,9 +398,11 @@ def test_warm_all_selection_face(repo, lifecycle, monkeypatch):
 
     def _recording(db, notebook_id):
         seen.append(notebook_id)
-        return _real_type_status_counts(db, notebook_id)
+        return _real_shared_type_status_counts(db, notebook_id)
 
-    monkeypatch.setattr(knowledge_counts_cache, "type_status_counts", _recording)
+    # warm_all primes the shared-view memo (E4-4: the memo holds no Memory;
+    # the per-viewer Memory half is read live and never warmed).
+    monkeypatch.setattr(knowledge_counts_cache, "shared_type_status_counts", _recording)
     with repo._connect() as db:
         knowledge_counts_cache.warm_all(db)
 
