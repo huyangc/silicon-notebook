@@ -834,7 +834,7 @@ def test_without_a_query_vector_the_bounded_fallback_is_readable_and_in_order(
     ])
     candidates = repo.retrieval.candidates
     monkeypatch.setattr(candidates, "_embed_query", lambda _query: None)
-    repo.settings.relation_recall = 1
+    repo.settings.relation_recall = 2
     hydrated: list = []
     real = candidates._relations_with_names
     monkeypatch.setattr(
@@ -846,7 +846,8 @@ def test_without_a_query_vector_the_bounded_fallback_is_readable_and_in_order(
     with source_scope_context(nb, _scope(["src-doc"], ["src-mem-alice"], alice)):
         candidates._retrieve_relations_scored(nb, "link rO")
 
-    assert hydrated == [["rO"]]
+    # Whole-matrix order (rO was stored before rD), never Bob's rF.
+    assert hydrated == [["rO", "rD"]]
 
 
 # ---------------------------------------------------------------------------
