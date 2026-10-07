@@ -913,7 +913,7 @@ def test_mount_order_and_equal_score_relation_federation_are_id_stable(
     participant_ids = ["nb-personal", *community_mounted]
     service._connect = knowledge_harness.database.connect
     service.notebooks = SimpleNamespace(
-        participant_tiers=lambda _db, _active: (
+        participant_tiers=lambda _db, _active, **_viewer: (
             participant_ids,
             {notebook_id: "base" for notebook_id in community_mounted}
             | {"nb-personal": "personal"},
@@ -4003,7 +4003,7 @@ def test_federation_base_tie_break_is_knowledge_only(monkeypatch):
     service = CandidateRetrievalService.__new__(CandidateRetrievalService)
     service._connect = lambda: nullcontext(SimpleNamespace())
     service.notebooks = SimpleNamespace(
-        participant_tiers=lambda _db, _active: (
+        participant_tiers=lambda _db, _active, **_viewer: (
             ["nb-personal", "nb-base"],
             {"nb-personal": "personal", "nb-base": "base"},
         )
