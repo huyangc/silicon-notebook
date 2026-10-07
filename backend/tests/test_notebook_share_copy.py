@@ -1953,14 +1953,17 @@ def _insert_rows(repo, rows):
 def test_a_memory_object_merged_into_a_shared_one_leaves_no_memory_text_in_the_copy(
     repo, client
 ):
-    """spec review B1,走真实的手工合并路径:alice 的 Memory 对象并进共享对象后,共享对象的
-    证据里夹着 Memory 原文、标题与定位。整本拷贝与分享链接拷贝的副本里都没有它们;接收者
-    读副本的知识列表也看不到。"""
-    from app.models.knowledge import MergeRequest
+    """spec review B1:alice 的 Memory 对象并进共享对象后,共享对象的证据里夹着 Memory
+    原文、标题与定位。整本拷贝与分享链接拷贝的副本里都没有它们;接收者读副本的知识列表
+    也看不到。手工合并 Memory 对象自 E4-3 起被拒绝,这里按迁移前手工合并留下的状态直接用
+    SQL 构造(``memory_purge_cases.legacy_merge``)。"""
+    from types import SimpleNamespace
+
+    from tests.memory_purge_cases import Sql, legacy_merge
 
     nb = memory_cases.PROBE_NOTEBOOK
     _insert_rows(repo, memory_cases.probe_world(nb))
-    repo.merge_knowledge(nb, "ko-mem-p", MergeRequest(into_id="ko-shared-p"))
+    legacy_merge(SimpleNamespace(sql=Sql(repo, postgres=False)), nb, "ko-mem-p", "ko-shared-p")
     with repo._connect() as db:
         merged = db.execute(
             "SELECT evidence FROM knowledge_objects WHERE id='ko-shared-p'"

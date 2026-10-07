@@ -2,7 +2,7 @@
 
 承 `docs/superpowers/specs/2026-07-22-pipeline-damage-recovery-design.md`「二·体检层」。
 把已经存在的判据(store 查询 / maintenance 计数 / 索引状态)**只读地聚合**成 per-notebook
-的 H2–H10 体检结果,供 T3 的 `GET /notebooks/{id}/checkup` 端点消费。
+的 H2–H12 体检结果,供 T3 的 `GET /notebooks/{id}/checkup` 端点消费。
 
 设计红线:
 - **只读**:本 service 不写库、不调 LLM / embedding / rerank。体检就是聚合已有判据。
@@ -95,7 +95,7 @@ _H45_CACHE_TTL = 300.0
 
 @dataclass(frozen=True)
 class CheckupItem:
-    """单个体检项的结果。``code`` 是内部代号(H2..H10),``fix`` 是修复动作枚举
+    """单个体检项的结果。``code`` 是内部代号(H2..H12),``fix`` 是修复动作枚举
     (reparse|backfill_vectors|extract_kg|fold_index|rebuild_index|none;none = 只读项,系统自行处理)——都是内部契约,
     面向用户的文案由前端映射。``sample`` 是有界的 source_id 样本(H4–H8 是计数型,sample
     留空;H2/H3 给前端展示命中的源)。"""
@@ -204,7 +204,7 @@ def h45_version_key(unified_kg: Any):
 
 
 class CheckupService:
-    """per-notebook 的只读体检聚合器(H2–H10)。
+    """per-notebook 的只读体检聚合器(H2–H12)。
 
     collaborators 全部由 RepositoryRuntime 注入为窄 callable seam,便于单测直接构造
     (无需给 facade 打桩):
@@ -314,7 +314,7 @@ class CheckupService:
 
     # ------------------------------------------------------------------ run
     def run(self, notebook_id: str) -> CheckupResult:
-        """聚合 H2–H10,返回结构化结果。任一可修复项(fix 不是 "none")count>0 即
+        """聚合 H2–H12,返回结构化结果。任一可修复项(fix 不是 "none")count>0 即
         ``healthy=False``;只读项(H9/H10)照常列在 checks 里,不影响 healthy。"""
         # 活跃租约快照取一次,H2/H3 共用(active 集通常个位数,一次集合减法)。租约的读法
         # 由注入方在锁下取快照,这里拿到的已是不可变副本。

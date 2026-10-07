@@ -341,7 +341,7 @@ export function showPaperMetaBackfill(
   return sources.some((source) => source.paper_meta_status === "missing");
 }
 
-// 流水线体检(P2)。/checkup 响应体是内部契约:code(H2..H10)与 fix(修复动作枚举)
+// 流水线体检(P2)。/checkup 响应体是内部契约:code(H2..H12)与 fix(修复动作枚举)
 // 都是内部代号,面向用户的界面词由 vocabulary.ts 的 CHECKUP_ISSUE / CHECKUP_FIX 映射。
 // sample 只给 source_id(前端自取标题);H4–H8 是计数/布尔型,sample 为空。
 export type CheckupItem = {

@@ -765,9 +765,12 @@ def _cost_seed(
 @pytest.mark.parametrize("branch", ["bruteforce", "ann"])
 def test_pg_fusion_statements_do_not_grow_with_memory_sources(pg_repository, monkeypatch, branch):
     """Twin of the SQLite cost pin (quality review P1-1 / F2): brute force is
-    flat over 0 / 5 / 1,000 Memory sources; ANN is flat over 0 / 5 and costs
-    exactly what 1,000 deprecated ordinary concepts in the same places cost
-    (the existing bounded doubling loop), never one read per Memory source."""
+    flat over 0 / 5 / 1,000 Memory sources, and so is ANN: the scale index
+    leaves Memory-derived objects out of its ANN labels (E4-6), so 1,000
+    Memory concepts never crowd the window and cost what none cost -- never
+    one read per Memory source, and never more than 1,000 deprecated ordinary
+    concepts in the same places (which do crowd it: the existing bounded
+    doubling loop)."""
     from app.services.kg_merge import _norm
 
     with pg_repository._runtime.database.write() as db:
@@ -803,10 +806,11 @@ def test_pg_fusion_statements_do_not_grow_with_memory_sources(pg_repository, mon
             ).fetchall()}
         assert pairs == {tuple(sorted(("K-" + _norm("MoE Gating"),
                                        "K-" + _norm("Expert Routing"))))}, (label, pairs)
-    assert counts["0"] == counts["5"], counts
+    assert counts["0"] == counts["5"] == counts["1000"], counts
     if branch == "bruteforce":
-        assert counts["5"] == counts["1000"], counts
-    assert counts["1000"] == counts["deprecated"], counts
+        assert counts["1000"] == counts["deprecated"], counts
+    else:
+        assert counts["1000"] <= counts["deprecated"], counts
 
 
 # --------------------------------------------------------------------------

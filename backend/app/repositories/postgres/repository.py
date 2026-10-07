@@ -60,6 +60,17 @@ class PostgresRepository(RepositoryFacade):
                 element_enricher_host=element_enricher_host,
                 reflect_action_host=reflect_action_host,
             )
+            # Ruling M1 (E4-5 / E4-7): the lifecycle reads the isolation marker
+            # through this backend's store (the neutral runtime cannot import
+            # it); the function itself, so the assembly tripwire can check it
+            # by identity.
+            from app.repositories.postgres.memory_isolation_store import (
+                MemoryIsolationStore,
+            )
+
+            self._runtime.knowledge_lifecycle._isolation_pending = (
+                MemoryIsolationStore.not_isolated
+            )
         except BaseException:
             # Covers failures after bundle creation but before the facade has a
             # usable runtime (service/cache/file composition included).
@@ -86,7 +97,7 @@ class PostgresRepository(RepositoryFacade):
 
     @property
     def checkup(self):
-        """P2 体检聚合(H2–H10)——与 SQLiteRepository.checkup 同构(镜像 ``maintenance`` 的每后端各
+        """P2 体检聚合(H2–H12)——与 SQLiteRepository.checkup 同构(镜像 ``maintenance`` 的每后端各
         一份模式),只是 database/queries/maintenance 落到 postgres。checkup 本身后端中性(注入
         queries + count seam,不 import 任何后端),故两后端共用同一 service;H7/H8 走 scale artifacts
         (文件系统层、后端无关)。facade 是 lru_cache 单例 → checkup 单例,H7/H8 进程内缓存跨请求存活。"""

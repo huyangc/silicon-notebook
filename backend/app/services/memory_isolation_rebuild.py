@@ -89,25 +89,6 @@ from typing import Any, Callable, Dict, List
 from app.repositories.ports import KgMaintenanceAlreadyRunning
 
 JOB_NAME = "unifiedkg-memory-isolation"
-#: The manifest field every isolating scale / viz build writes, and its
-#: current value (PR-E4's E4-6: ``index_projection_store``'s
-#: ``MEMORY_ISOLATION_ARTIFACT_MARKER`` / ``MEMORY_ISOLATION_ARTIFACT_VERSION``,
-#: read by ``IndexProjectionStore.built_before_memory_isolation``).
-#: tests/test_memory_isolation_rebuild.py pins
-#: :func:`manifest_predates_memory_isolation` equal to that function once both
-#: are in one tree.
-SCALE_MANIFEST_ISOLATION_FIELD = "memory_isolation"
-SCALE_MANIFEST_ISOLATION_VERSION = 1
-
-
-def manifest_predates_memory_isolation(manifest: Any) -> bool:
-    """A published scale index built before the isolation: its manifest does
-    not carry the isolation field at the current version. Such an artifact is
-    served to no reader until rebuilt (E4-6 ruling, every notebook, every
-    tier)."""
-    field = manifest.get(SCALE_MANIFEST_ISOLATION_FIELD) if isinstance(
-        manifest, dict) else None
-    return field != SCALE_MANIFEST_ISOLATION_VERSION
 DEFAULT_BUSY_RETRY_SECONDS = 30.0
 DEFAULT_BUSY_RETRY_ROUNDS = 20
 
@@ -218,8 +199,9 @@ class MemoryIsolationRebuild:
 
     def pre_isolation_scale_notebook_ids(self) -> List[str]:
         """Notebooks whose PUBLISHED scale index predates the isolation
-        (:func:`manifest_predates_memory_isolation` on the published manifest,
-        read through the artifact store's own inventory
+        (``IndexProjectionStore.built_before_memory_isolation`` on the
+        published manifest, through the runtime's ``projections`` seat; read
+        through the artifact store's own inventory
         ``indexed_notebook_ids`` / ``read_manifest`` -- no table), and that are
         NOT copyable: the ones the automatic index path owns. A copyable (small)
         notebook's pre-isolation artifact is rebuilt by the operator
@@ -246,34 +228,16 @@ class MemoryIsolationRebuild:
         # budget rebuilds its viz on its first read and is not queued.
         limit = int(getattr(self._scale.settings, "viz_sync_build_max_objects", 0))
         known = set(scale_roots)
-        for notebook_id in self._viz_root_notebook_ids():
+        # The published standalone viz roots come from the artifact store's own
+        # inventory (``viz_notebook_ids``: scratch / rollback directories
+        # excluded by the same rule as ``indexed_notebook_ids``).
+        for notebook_id in artifacts.viz_notebook_ids():
             if notebook_id in known:
                 continue
             if self._needs_full_build(notebook_id, artifacts.viz_dir(notebook_id),
                                       min_objects=limit):
                 found.append(notebook_id)
         return sorted(found)
-
-    def _viz_root_notebook_ids(self) -> List[str]:
-        """The published standalone visualisation roots
-        (``{storage_dir}/kg_viz/<notebook>`` carrying ``manifest.json``; the
-        atomic-build scratch / rollback directories excluded, the same rule as
-        the store's ``indexed_notebook_ids``). A filesystem inventory only."""
-        from app.repositories.filesystem.scale_artifact_store import (
-            SCRATCH_INFIX,
-            SCRATCH_SUFFIXES,
-        )
-        from pathlib import Path
-
-        root = Path(str(self._scale.artifacts.viz_dir("_"))).parent
-        if not root.is_dir():
-            return []
-        return sorted(
-            entry.name for entry in root.iterdir()
-            if entry.is_dir() and not entry.name.endswith(SCRATCH_SUFFIXES)
-            and SCRATCH_INFIX not in entry.name
-            and (entry / "manifest.json").is_file()
-        )
 
     def _needs_full_build(self, notebook_id: str, directory: Any,
                           min_objects: int | None = None) -> bool:
@@ -284,7 +248,8 @@ class MemoryIsolationRebuild:
         artifacts = self._scale.artifacts
         try:
             manifest = artifacts.read_manifest(directory)
-            if manifest is None or not manifest_predates_memory_isolation(manifest):
+            if manifest is None or not (
+                    self._scale.projections.built_before_memory_isolation(manifest)):
                 return False
             with self._database.connect() as db:
                 if self._store.not_isolated(db, notebook_id):

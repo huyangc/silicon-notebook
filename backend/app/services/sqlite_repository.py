@@ -92,6 +92,14 @@ class SQLiteRepository(RepositoryFacade):
             element_enricher_host=element_enricher_host,
             reflect_action_host=reflect_action_host,
         )
+        # Ruling M1 (E4-5 / E4-7): the lifecycle reads the isolation marker
+        # through this backend's store (the neutral runtime cannot import it);
+        # the function itself, so the assembly tripwire can check it by identity.
+        from app.repositories.sqlite.memory_isolation_store import MemoryIsolationStore
+
+        self._runtime.knowledge_lifecycle._isolation_pending = (
+            MemoryIsolationStore.not_isolated
+        )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrator = SqliteMigrator(self._runtime.database, self.settings)
         self._migrator.initialize(migrate=migrate, seed=seed)
@@ -224,7 +232,7 @@ class SQLiteRepository(RepositoryFacade):
 
     @property
     def checkup(self) -> CheckupService:
-        """P2 体检聚合(H2–H10),**懒构造在后端相关的 facade 这一层**(而非中性 repository_runtime:
+        """P2 体检聚合(H2–H12),**懒构造在后端相关的 facade 这一层**(而非中性 repository_runtime:
         neutrality 守卫禁止它 import sqlite/postgres,而 checkup 依赖 maintenance 的 COUNT + sqlite
         QueryStore)。复用本 facade 的 ``maintenance`` adapter 做 H4/H5 计数;其余 seam 从 runtime
         取(database/scale/活跃租约快照/state_signature)。lru_cache 的 facade 单例 → 单个 checkup
