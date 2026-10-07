@@ -2084,6 +2084,7 @@ class KnowledgeStore:
             dict.fromkeys(e.get("element_id") for e in evidence if e.get("element_id"))
         )
         details = {}
+        foreign_elements: set = set()
         if element_ids:
             ph = ",".join("?" for _ in element_ids)
             if owner_notebook_id is None:
@@ -2093,12 +2094,26 @@ class KnowledgeStore:
                     element_ids,
                 ).fetchall()
             else:
+                # One statement: the element's own library comes back with it,
+                # and only an element of ``owner_notebook_id`` returns its
+                # columns -- another library's element answers "exists, not
+                # yours" and nothing else (its text never crosses the wire).
                 rows = db.execute(
-                    f"SELECT se.id, se.source_id, se.element_type, se.location_label, se.text "
+                    f"SELECT se.id, os.notebook_id AS element_notebook_id, "
+                    f"CASE WHEN os.notebook_id=o.nb THEN se.source_id END AS source_id, "
+                    f"CASE WHEN os.notebook_id=o.nb THEN se.element_type END AS element_type, "
+                    f"CASE WHEN os.notebook_id=o.nb THEN se.location_label END AS location_label, "
+                    f"CASE WHEN os.notebook_id=o.nb THEN se.text END AS text "
                     f"FROM source_elements se{_OWN_ELEMENT_JOIN} "
-                    f"WHERE se.id IN ({ph}) AND +os.notebook_id=?",
-                    (*element_ids, owner_notebook_id),
+                    f"CROSS JOIN (SELECT ? AS nb) o "
+                    f"WHERE se.id IN ({ph})",
+                    (owner_notebook_id, *element_ids),
                 ).fetchall()
+                foreign_elements = {
+                    row["id"] for row in rows
+                    if row["element_notebook_id"] != owner_notebook_id
+                }
+                rows = [row for row in rows if row["id"] not in foreign_elements]
             details = {row["id"]: row for row in rows}
         out = []
         for e in evidence:
@@ -2114,6 +2129,10 @@ class KnowledgeStore:
                 })
             else:
                 enriched["element_text"] = e.get("quoted_span", "")
+                if e.get("element_id", "") in foreign_elements:
+                    # B-11 mixed pointer: the item names an element of ANOTHER
+                    # library -- keep the stored quote, drop the locator.
+                    enriched["element_id"] = ""
             enriched["quoted_span"] = e.get("quoted_span", "")
             enriched["source_title"] = e.get("source_title", "") or enriched.get("source_id", "")
             out.append(enriched)

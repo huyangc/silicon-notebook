@@ -109,6 +109,12 @@ def seed(execute: Callable[[str, tuple], Any], mark: str) -> None:
         # A legacy promoted procedure: no payload steps, a section of its own.
         ("ko-leg", NB, "procedure", {"name": "legacy step", "section_path": "LS"},
          _foreign_evidence(), ""),
+        # A MIXED pointer: names this library's source but another library's
+        # element.
+        ("ko-mixed", NB, "concept", {"name": "mixed"}, json.dumps([{
+            "source_id": "s-01", "element_id": "el-priv",
+            "quoted_span": "mixed stored", "source_title": "Doc s-01",
+        }]), "s-01"),
         ("ko-x", PRIV, "concept", {"name": "x"}, "[]", "s-priv"),
         ("ko-y", PRIV, "concept", {"name": "y"}, "[]", "s-priv"),
     ]
@@ -202,6 +208,13 @@ def check_node_context_owner(node_context: Callable[[str], dict]) -> None:
     assert occurrence["quoted_span"] == STORED_SPAN
     assert occurrence["source_title"] == STORED_TITLE
     assert occurrence["source_id"] == "s-priv"
+    # The other library's element is not even named.
+    assert occurrence["element_id"] == ""
+    # A mixed pointer (own source, another library's element): the stored
+    # quote, the own source, and no element locator.
+    (mixed,) = node_context("ko-mixed")["occurrences"]
+    assert (mixed["source_id"], mixed["element_id"]) == ("s-01", "")
+    assert mixed["element_text"] == "mixed stored"
     procedure = node_context("ko-proc")
     assert PRIVATE_TEXT not in json.dumps(procedure, ensure_ascii=False, default=str)
     assert [step["element_text"] for step in procedure["steps"]] == [STORED_QUOTE]
@@ -249,3 +262,29 @@ def check_follow_relation_evidence(read: Callable[..., list]) -> None:
     assert titles["kr-8"] == PRIVATE_TITLE
     scoped = {dict(row)["id"] for row in read(["kr-1", "kr-7", "kr-8"], notebook_id=NB)}
     assert scoped == {"kr-1", "kr-7"}
+
+
+def seed_relation_vectors(execute: Callable[[str, tuple], Any], mark: str, vector: Any) -> None:
+    """One relation vector per relation of the fixture (both libraries)."""
+    for relation_id, notebook, *_rest in RELATIONS:
+        execute(
+            "INSERT INTO relation_embeddings(relation_id,notebook_id,vector,created_at) "
+            "VALUES (?,?,?,?)".replace("?", mark),
+            (relation_id, notebook, vector, NOW),
+        )
+
+
+def check_relation_delta_rows(read: Callable[..., list]) -> None:
+    """``read(source_ids, **kwargs)`` -> ``relation_delta_rows`` rows (E2-2's
+    Memory relation cache maps relations to sources in one batched read)."""
+    sources = ["s-01", "s-02", "s-05", "s-99"]
+    plain = [dict(row) for row in read(sources)]
+    assert {row["vid"] for row in plain} == {"kr-1", "kr-2", "kr-3", "kr-6", "kr-def"}
+    assert all("source_id" not in row for row in plain)
+    sourced = [dict(row) for row in read(sources, with_source_id=True)]
+    assert {(row["vid"], row["source_id"]) for row in sourced} == {
+        ("kr-1", "s-01"), ("kr-2", "s-02"), ("kr-3", "s-02"), ("kr-6", "s-05"),
+        ("kr-def", "s-01"),
+    }
+    assert all(row["vector"] for row in sourced)
+    assert read([], with_source_id=True) == []

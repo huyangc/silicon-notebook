@@ -136,11 +136,30 @@ class EmbeddingStore:
         ).fetchall()
 
     @staticmethod
-    def relation_delta_rows(db, notebook_id: str, source_ids):
+    def relation_delta_rows(db, notebook_id: str, source_ids, *, with_source_id: bool = False):
+        """Relation vectors of the relations extracted from ``source_ids``.
+
+        ``with_source_id`` (PR-E2): ``False`` sends the historical statement
+        byte for byte; ``True`` also returns each relation's ``source_id``
+        (a join instead of the ``IN`` subquery) so the Memory relation cache
+        maps one batch of sources in one statement.  The source ids drive
+        ``idx_knowledge_relations_source`` (both notebook predicates carry a
+        unary ``+``: without statistics a notebook-prefixed index would
+        otherwise win and walk the whole notebook) and the vectors are read by primary
+        key, in every statistics state
+        (``tests/test_store_evidence_ceiling_plans.py``)."""
         values = list(source_ids)
         if not values:
             return []
         ph = ",".join("?" for _ in values)
+        if with_source_id:
+            return db.execute(
+                f"SELECT re.relation_id AS vid, re.vector, kr.source_id "
+                f"FROM knowledge_relations kr "
+                f"JOIN relation_embeddings re ON re.relation_id=kr.id "
+                f"WHERE +kr.notebook_id=? AND kr.source_id IN ({ph}) AND +re.notebook_id=?",
+                (notebook_id, *values, notebook_id),
+            ).fetchall()
         return db.execute(
             f"SELECT relation_id AS vid, vector FROM relation_embeddings "
             f"WHERE notebook_id=? AND relation_id IN "

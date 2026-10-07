@@ -527,7 +527,7 @@ def _mk_promoted_object(repo, *, title="Private Current Name"):
 
 @pytest.mark.parametrize("private_title", ["Private Current Name", "   "])
 def test_promoted_object_never_shows_the_promoters_private_text_or_title(
-    repo, monkeypatch, private_title,
+    repo, private_title,
 ):
     """PR-E2·E2-4(台账 B-11):一个晋升进公共库的对象,证据仍指向推广者私有库的
     元素与来源。提示词、引用锚点与引用卡里只出现存储时的片段与标题:不出现私有
@@ -540,18 +540,9 @@ def test_promoted_object_never_shows_the_promoters_private_text_or_title(
 
     第二格:私有来源没有标题(纯空白)也没有文件名——外库判定必须看来源行的
     所属库,而不是「有没有显示名」(复审 P1-1:判定曾依赖显示名,这一格全漏)。
-    knowhow 定位的批量读也不许收到外库元素(复审 P3-1)。"""
+    私有元素带 knowhow 定位(``kt-priv-el``),卡片与锚点都不许带出(复审 P3-1)。"""
     public, hit = _mk_promoted_object(repo, title=private_title)
     evidence_context = repo._runtime.evidence_context_component
-    knowhow_reads: list = []
-    real_knowhow_refs_for = evidence_context.knowhow_refs_for
-
-    def spy_knowhow_refs_for(element_ids):
-        element_ids = list(element_ids)
-        knowhow_reads.extend(element_ids)
-        return real_knowhow_refs_for(element_ids)
-
-    monkeypatch.setattr(evidence_context, "knowhow_refs_for", spy_knowhow_refs_for)
     block, id_map = repo._answer_context(public.id, [hit])
     (key,) = id_map
     anchors = repo._parse_answer_anchors(f"claim [{key}]", id_map)
@@ -571,7 +562,6 @@ def test_promoted_object_never_shows_the_promoters_private_text_or_title(
     for private in ("PRIVATE CURRENT TEXT", "Private Current Name", "PRIVATE CAPTION",
                     "asset-priv", "kt-priv", "el-priv", "s-priv"):
         assert private not in rendered, private
-    assert "el-priv" not in knowhow_reads
     assert "stored snapshot" in block
     assert id_map[key]["source_title"] == "Stored Title"
     assert id_map[key]["source_foreign"] is True
@@ -580,6 +570,64 @@ def test_promoted_object_never_shows_the_promoters_private_text_or_title(
     assert anchors[0].knowhow is None and not anchors[0].images
     assert cards[0].label.startswith("Stored Title")
     assert cards[0].knowhow is None and not cards[0].images
+
+
+def test_mixed_pointer_card_and_anchor_carry_no_foreign_element(repo):
+    """B-11 mixed pointer, fail-closed: evidence that names THIS library's
+    source but ANOTHER library's (image, knowhow-located) element.  The
+    anchor keeps its own source (live title) but no element locator -- the
+    store does not even name the other library's element -- and the card is
+    a pointer-free snapshot; neither carries the private image, caption or
+    knowhow locator.
+
+    Mutation anchors: the store clearing no foreign element locator, or the
+    card judging only the named source, turns this red."""
+    from app.models.schemas import Evidence
+    from app.services.retrieval import RetrievedKnowledge
+
+    public, _hit = _mk_promoted_object(repo)
+    _mk_src(repo, public.id, "s-pub")
+    with repo._write() as db:
+        db.execute("UPDATE sources SET title='Public Live Title' WHERE id='s-pub'")
+        db.execute(
+            "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,payload,"
+            "evidence,source_id,created_at,updated_at) VALUES "
+            "('ko-mixed',?,'concept','approved',?,?,'s-pub',"
+            "'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+            (public.id, json.dumps({"name": "mixed"}), json.dumps([{
+                "source_id": "s-pub", "element_id": "el-priv",
+                "quoted_span": "mixed snapshot", "source_title": "Stored Public",
+            }])))
+    hit = RetrievedKnowledge(
+        object_id="ko-mixed", object_type="concept", payload={"name": "mixed"},
+        evidence=[Evidence(
+            source_id="s-pub", source_title="Stored Public", element_id="el-priv",
+            element_type="image", location_label="p1",
+            quoted_span="mixed snapshot", confidence=1.0,
+        )],
+    )
+    evidence_context = repo._runtime.evidence_context_component
+    block, id_map = repo._answer_context(public.id, [hit])
+    (key, value), = id_map.items()
+    assert (value["source_id"], value["element_id"]) == ("s-pub", "")
+    assert value["source_title"] == "Public Live Title"
+    anchors = repo._parse_answer_anchors(f"claim [{key}]", id_map)
+    cards = evidence_context.citations_from(
+        [hit], {"el-priv"}, "fallback", notebook_id=public.id,
+    )
+    evidence_context.attach_citation_images([
+        *((anchor, (anchor.element_id,)) for anchor in anchors),
+        *((card, (card.element_id,)) for card in cards),
+    ])
+    assert (cards[0].source_id, cards[0].element_id) == ("", "")
+    assert cards[0].knowhow is None and not cards[0].images
+    assert not anchors[0].images and anchors[0].element_id == ""
+    rendered = json.dumps(
+        [block, [anchor.model_dump() for anchor in anchors],
+         [card.model_dump() for card in cards]], ensure_ascii=False)
+    for private in ("PRIVATE CURRENT TEXT", "PRIVATE CAPTION", "asset-priv",
+                    "kt-priv", "el-priv"):
+        assert private not in rendered, private
 
 
 def test_own_library_titles_images_and_pointers_still_resolve_live(repo):

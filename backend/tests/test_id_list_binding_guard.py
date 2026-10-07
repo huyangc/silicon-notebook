@@ -104,7 +104,8 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
     ("postgres/embedding_store.py", "EmbeddingStore.vector_rows_for_ids"): (
         s(ANY, BATCHED, "vector keys; every caller batches (in_batches / _IN_CHUNK)"),),
     ("postgres/embedding_store.py", "EmbeddingStore.relation_delta_rows"): (
-        s(ANY, BATCHED, "delta source ids, callers batch with _in_batches (<= 900)"),),
+        s(ANY, BATCHED, "delta or Memory source ids; one batched read (<= 900)"),
+        s(ANY, BATCHED, "delta or Memory source ids; one batched read (<= 900)"),),
     ("postgres/embedding_store.py", "EmbeddingStore.knowledge_delta_rows"): (
         s(ANY, BATCHED, "delta source ids, callers batch with _in_batches (<= 900)"),),
     ("postgres/embedding_store.py", "EmbeddingStore.element_delta_rows"): (
@@ -470,7 +471,7 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
     ("sqlite/embedding_store.py", "EmbeddingStore.vector_rows_for_ids"): (
         s(SQ_EXP, BATCHED, "vector keys; every caller batches (in_batches / _IN_CHUNK)"),),
     ("sqlite/embedding_store.py", "EmbeddingStore.relation_delta_rows"): (
-        s(SQ_EXP, BATCHED, "delta source ids, callers batch with _in_batches (<= 900)"),),
+        s(SQ_EXP, BATCHED, "delta or Memory source ids; one batched read (<= 900)"),),
     ("sqlite/embedding_store.py", "EmbeddingStore.knowledge_delta_rows"): (
         s(SQ_EXP, BATCHED, "delta source ids, callers batch with _in_batches (<= 900)"),),
     ("sqlite/embedding_store.py", "EmbeddingStore.element_delta_rows"): (

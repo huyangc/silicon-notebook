@@ -29,6 +29,7 @@ import pytest
 
 from app.domain.repository import RepositoryCompatibilitySeams
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.embedding_store import EmbeddingStore
 from app.repositories.postgres.id_binding import execute_ids
 from app.repositories.postgres.knowledge_store import KnowledgeStore
 from app.repositories.postgres.migrator import PostgresMigrator
@@ -71,6 +72,7 @@ def _seed(database: PostgresDatabase) -> None:
     with database.write() as db:
         db.execute("SET LOCAL statement_timeout = '0'")
         cases.seed(db.execute, "%s")
+        cases.seed_relation_vectors(db.execute, "%s", b"\x00\x00\x00\x00")
         for ordinal, (chunk_id, source, text) in enumerate(cases.exact_chunks()):
             db.execute(
                 "INSERT INTO chunks(id,notebook_id,source_id,text,ordinal,element_ids,"
@@ -113,10 +115,15 @@ def _seed(database: PostgresDatabase) -> None:
             "FROM generate_series(0, %s) g",
             (cases.NB, cases.NOW, BULK - 1),
         )
+        db.execute(
+            "INSERT INTO relation_embeddings(relation_id,notebook_id,vector,created_at) "
+            "SELECT id, notebook_id, '\\x00000000'::bytea, created_at "
+            "FROM knowledge_relations WHERE id LIKE 'krb-%%'"
+        )
     with psycopg.connect(database.settings.database_url, autocommit=True) as raw:
         raw.execute(
             "VACUUM (ANALYZE) sources, source_elements, knowledge_objects, "
-            "knowledge_relations, chunks, notebooks"
+            "knowledge_relations, relation_embeddings, chunks, notebooks"
         )
 
 
@@ -316,9 +323,9 @@ def test_owner_library_evidence_read_goes_by_primary_keys(database, monkeypatch)
             owner_notebook_id=cases.NB,
         )
         store._element_texts(db, element_ids, owner_notebook_id=cases.NB)
-    by_element = {row["element_id"]: row["element_text"] for row in enriched}
-    assert by_element["el-own"] == cases.OWN_TEXT
-    assert by_element["el-priv"] == ""  # not read: no stored span in this probe
+    assert enriched[0]["element_text"] == cases.OWN_TEXT
+    # Another library's element: not read, and its locator is dropped.
+    assert (enriched[1]["element_id"], enriched[1]["element_text"]) == ("", "")
     for marker in ("se.element_type", "SELECT se.id, se.text"):
         sql, params, _options = recorder.only(marker)
         plan = _plan(database, sql, params)
@@ -327,3 +334,38 @@ def test_owner_library_evidence_read_goes_by_primary_keys(database, monkeypatch)
         assert "Seq Scan on" not in plan, plan
         assert "notebooks" not in plan, plan
         assert "idx_sources_" not in plan, plan
+
+
+# --------------------------------------------- relation_delta_rows (E2-2)
+def test_relation_delta_rows_contract(database):
+    cases.check_relation_delta_rows(_on_connection(
+        database,
+        lambda db, ids, **kwargs: EmbeddingStore.relation_delta_rows(db, cases.NB, ids, **kwargs),
+    ))
+
+
+def test_relation_delta_rows_default_statement_is_unchanged(database, monkeypatch):
+    recorder = _Recorder(monkeypatch)
+    with database.connect() as db:
+        EmbeddingStore.relation_delta_rows(db, cases.NB, ["s-01", "s-02"])
+    sql, params, options = recorder.only("relation_embeddings")
+    assert sql == (
+        "SELECT relation_id AS vid,vector FROM relation_embeddings "
+        "WHERE notebook_id=%s AND relation_id IN "
+        "(SELECT id FROM knowledge_relations WHERE notebook_id=%s AND source_id=ANY(%s))"
+    )
+    assert list(params) == [cases.NB, cases.NB, ["s-01", "s-02"]] and options == {}
+
+
+def test_relation_delta_rows_with_sources_probe_by_source_then_primary_key(database, monkeypatch):
+    recorder = _Recorder(monkeypatch)
+    sources = [f"sb-{n:05d}" for n in range(0, BULK, 300)]
+    with database.connect() as db:
+        EmbeddingStore.relation_delta_rows(db, cases.NB, sources, with_source_id=True)
+    sql, params, _options = recorder.only("kr.source_id FROM knowledge_relations kr")
+    with database.connect() as db:
+        rows = db.execute(f"EXPLAIN (COSTS OFF) {sql}", params).fetchall()
+    plan = "\n".join(str(row["QUERY PLAN"]) for row in rows)
+    assert "idx_knowledge_relations_source" in plan, plan
+    assert "pk_relation_embeddings" in plan, plan
+    assert "Seq Scan on knowledge_relations" not in plan, plan
