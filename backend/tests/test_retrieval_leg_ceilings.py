@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 from contextlib import contextmanager
 
 import pytest
@@ -304,10 +305,16 @@ def test_weak_support_store_keeps_only_targets_supported_inside_the_ceiling(
     with repo._write() as db:
         _raw_kg(db, nb, backfilled=backfilled)
     with repo._connect() as db:
-        def probe(**kwargs):
-            return sorted(r["canonical_tgt"] for r in UnifiedKgStore
-                          .weak_support_relation_rows(db, nb, ["ko-s"], 2, 24, **kwargs))
+        def ordered(**kwargs):
+            return [r["canonical_tgt"] for r in UnifiedKgStore
+                    .weak_support_relation_rows(db, nb, ["ko-s"], 2, 24, **kwargs)]
 
+        def probe(**kwargs):
+            return sorted(ordered(**kwargs))
+
+        ordered_unbounded = ordered()
+        ordered_listed = ordered(allowed_source_ids=["src-vis"])
+        ordered_as_a = ordered(viewer_id=a)
         unbounded = probe()
         listed = probe(allowed_source_ids=["src-vis"])
         as_a = probe(viewer_id=a)
@@ -324,6 +331,11 @@ def test_weak_support_store_keeps_only_targets_supported_inside_the_ceiling(
     # The list form and the viewer form agree for A (B's Memory is the only
     # thing A's all-selected ceiling excludes).
     assert listed == as_a == ["K-good", "ko-t1", "ko-t5"]
+    # Order: the bound forms return the unbounded statement's rows in its own
+    # order (source_count, canonical_tgt, ...), minus the unsupported ones --
+    # the outer query keeps the sorted co-routine's order (no second sort).
+    assert ordered_listed == ordered_as_a == [
+        target for target in ordered_unbounded if target in set(listed)]
     # B reads B's own Memory; nobody reads anyone's.
     assert as_b == unbounded
     assert as_nobody == as_a
@@ -662,11 +674,19 @@ def test_sqlite_bound_weak_support_plans_probe_by_key_without_analyze(
     assert ("SEARCH canonical_relations USING INDEX sqlite_autoindex_canonical_relations_1 "
             "(notebook_id=? AND canonical_src=?)") in probe_plan, probe_plan
     # Lazy: the sorted candidates are a co-routine the gate reads in order --
-    # one sort (inside), none after the gate.
+    # one sort, INSIDE the co-routine (before the outer ``SCAN cr``), none
+    # after the gate.  Holds on the bundled SQLite and on CI's older one
+    # (3.45), whose planner would add a second, outer sort if the outer query
+    # repeated the ORDER BY.
     assert "CO-ROUTINE cr" in probe_plan, probe_plan
     assert probe_plan.count("USE TEMP B-TREE FOR ORDER BY") == 1, probe_plan
-    assert "SEARCH ko EXISTS USING INDEX sqlite_autoindex_knowledge_objects_1 (id=?)" \
-        in probe_plan, probe_plan
+    assert probe_plan.index("USE TEMP B-TREE FOR ORDER BY") < probe_plan.index(
+        "SCAN cr"), probe_plan
+    # The target's objects by primary key (newer SQLite labels the probe of an
+    # EXISTS subquery "SEARCH ko EXISTS", older ones "SEARCH ko").
+    assert re.search(
+        r"SEARCH ko (EXISTS )?USING INDEX sqlite_autoindex_knowledge_objects_1 \(id=\?\)",
+        probe_plan), probe_plan
     assert "(notebook_id=? AND canonical_id=?)" in probe_plan, probe_plan
     if form == "viewer":
         assert "SEARCH fs USING INDEX sqlite_autoindex_sources_1 (id=?)" in probe_plan
