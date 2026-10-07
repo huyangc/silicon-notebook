@@ -439,14 +439,6 @@ class KnowledgeLifecycleService:
         viewer_scope: Callable[..., Any] = (
             lambda _notebook_id, _active_notebook_id=None: None
         ),
-        # M1 transition (E4-5 marker, E4-7 reader): ``(db, notebook_id) ->
-        # bool``, True while the notebook is not isolated yet
-        # (``unified_kg_state.memory_isolation_version <> 1``: 0 awaits the
-        # isolated rebuild, 2 the dangling-seed check) -- E4-5's
-        # ``MemoryIsolationStore.not_isolated``.  Such a notebook's graph
-        # views never serve a persisted artifact. None (the default, and
-        # every build before E4-5 is assembled) = always isolated.
-        memory_isolation_pending: "Callable[[Any, str], bool] | None" = None,
     ) -> None:
         self.settings = settings
         # batch-3-W1 T-5a (codex #663 R3 P2): the drain's row budget — one
@@ -486,7 +478,17 @@ class KnowledgeLifecycleService:
         self.get_notebook = get_notebook
         self._current_user_id = current_user_id
         self._viewer_scope = viewer_scope
-        self._isolation_pending = memory_isolation_pending
+        # M1 transition (E4-5 marker, E4-7 reader): ``(db, notebook_id) ->
+        # bool``, True while the notebook is not isolated yet
+        # (``unified_kg_state.memory_isolation_version <> 1``: 0 awaits the
+        # isolated rebuild, 2 the dangling-seed check).  Such a notebook's
+        # graph views never serve a persisted artifact; None = always
+        # isolated.  Not a constructor parameter: this service is built by the
+        # backend-neutral runtime, which cannot import a backend store, so
+        # each backend's repository constructor assigns its own
+        # ``MemoryIsolationStore.not_isolated`` here right after the runtime is
+        # wired (tests/test_kg_viewer_scope_assembly.py checks it by identity).
+        self._isolation_pending: "Callable[[Any, str], bool] | None" = None
         self._invalidate_unified_cache = invalidate_unified_cache
         self._mark_unified_kg_dirty = mark_unified_kg_dirty
         self._mark_unified_kg_dirty_in_tx = mark_unified_kg_dirty_in_tx

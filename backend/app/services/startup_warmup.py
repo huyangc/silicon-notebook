@@ -912,11 +912,15 @@ def _sweep_orphan_memory_sources(repo) -> None:
     so a bug in the catch-up can never turn a successful startup into "error".
     With nothing to sweep it is one ``EXISTS`` probe and no job.
 
-    ORDER: when the ruling-M1 isolated rebuild (``_rebuild_memory_isolated_notebooks``,
-    E4-5) is also present, THIS step runs first. Every orphan deleted while a
-    notebook is being rebuilt bumps that notebook's graph sequence and makes the
-    rebuild's result stale, so sweeping first saves a second rebuild. (Correct
-    either way -- a rebuild already tolerates concurrent deletes -- just cheaper.)"""
+    ORDER: this step is SUBMITTED before the ruling-M1 isolated rebuild
+    (``_rebuild_memory_isolated_notebooks``, E4-5), but the two then run
+    concurrently: the sweep (``memory-orphan-sweep``) is not a maintenance
+    operation, so ``background_jobs`` runs it on a plain daemon thread, while
+    the isolated rebuild (``unifiedkg-``) takes the heavy maintenance pool.
+    Submission order is the only ordering. An orphan deleted while its
+    notebook is being rebuilt bumps the notebook's graph sequence, so that
+    rebuild leaves the notebook dirty for the next one -- correct either way
+    (a rebuild tolerates concurrent deletes), only sometimes one rebuild more."""
     try:
         from app.services.memory_orphan_sweep import MemoryOrphanSweep
 

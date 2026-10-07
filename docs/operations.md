@@ -329,6 +329,12 @@ ORDER BY pc.id, b.id;
 - `_failed` (stage and exception class) keeps the marker; the notebook is retried at the next
   start.
 
+The startup orphan-Memory sweep (`memory-orphan-sweep`) is submitted before this pass, but the two
+run concurrently — the sweep on an ordinary daemon thread, this pass in the heavy maintenance pool —
+so submission order is the only ordering. An orphan the sweep deletes while its notebook is being
+rebuilt leaves that notebook dirty for its next rebuild; the result is correct either way, at worst
+one rebuild more.
+
 The pass never deletes a curator's merge decision: when a notebook is queued, only a merge
 candidate whose sentinel side was minted from an object that no longer exists is removed. Text of
 a deleted Memory can survive in a superseded generation of clusters or communities. No reader reads

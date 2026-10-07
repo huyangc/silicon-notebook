@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 class CheckupItem(BaseModel):
     """单个体检项。``count``>0 即命中;``sample`` 是有界的 source_id 样本(H2/H3 给前端展示,
-    H4–H10 是计数型、留空);``fix`` 是修复动作枚举
+    H4–H12 是计数型、留空);``fix`` 是修复动作枚举
     (reparse|backfill_vectors|extract_kg|fold_index|rebuild_index|none;none = 只读项)。"""
 
     code: str

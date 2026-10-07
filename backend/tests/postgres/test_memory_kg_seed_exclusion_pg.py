@@ -67,6 +67,10 @@ def test_a_rebuild_puts_no_memory_derived_object_in_any_cluster_pg(repo):
     assert _state(repo, nb_id)["dirty"] == 0
 
 
+def test_rebuild_totals_count_the_shared_graph_only_pg(repo):
+    world.assert_rebuild_totals_count_the_shared_graph_only(repo)
+
+
 def test_seed_streams_and_mention_claims_leave_memory_out_pg(repo):
     nb_id = world.seed(repo)
     store = repo._runtime.unified_kg
@@ -317,6 +321,12 @@ def _captured(postgres_database, notebook_id: str) -> dict[str, tuple]:
         list(store.community_graph_rows(db, notebook_id)[1])
         store.community_rows_for_summary(db, notebook_id, 0)
         store.catchup_window_members(db, notebook_id, 0, "2026-01-01T00:00:00+00:00", 5, 100)
+        # finish_rebuild_state's two end-state totals (the statements it runs
+        # before its upsert; the upsert itself is a write, not planned here)
+        from app.repositories.postgres import unified_kg_store as kg_module
+
+        db.execute(kg_module._END_STATE_OBJECT_COUNT_SQL, (notebook_id,))
+        db.execute(kg_module._END_STATE_RELATION_COUNT_SQL, (notebook_id,))
     store.cluster_size_histogram(notebook_id)
     store.largest_clusters(notebook_id)
     store.relation_provenance_counts(notebook_id)
@@ -333,6 +343,9 @@ def _captured(postgres_database, notebook_id: str) -> dict[str, tuple]:
         "provenance": lambda s: "unknown_bucket" in s,
         "probe": lambda s: s.startswith("SELECT EXISTS(SELECT 1 FROM sources"),
         "catchup": lambda s: "make_interval" in s,
+        "end_objects": lambda s: s.startswith("SELECT COUNT(*) AS c FROM knowledge_objects o "),
+        "end_relations": lambda s: s.startswith(
+            "SELECT COUNT(*) AS c FROM knowledge_relations kr "),
     }
     found = {}
     for name, matches in roles.items():
@@ -411,7 +424,7 @@ _FRAGMENTS = {
     "seed_payload": 1, "stream_seed": 1, "canonical_relations": 3,
     "mention_clusters": 1, "mention_claims": 1, "community_graph": 3,
     "community_summary": 1, "histogram": 1, "largest": 1, "provenance": 1,
-    "probe": 0, "catchup": 1,
+    "probe": 0, "catchup": 1, "end_objects": 1, "end_relations": 1,
 }
 
 

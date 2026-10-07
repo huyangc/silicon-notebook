@@ -47,6 +47,11 @@
   对象数(谓词同迁移 0067 / v87 第 3 步,状态换成 approved)。它们的 payload 与原始证据已拷进
   公共库;是否改写那些公共对象由部署负责人决定,系统不动,所以同样 ``fix="none"``、只计数。
   未注入 ``approved_memory_promotions`` 时恒为 0。
+- H11(只读,裁决 M1,E4-3):本库已是**公共知识库**、却仍持有的 Memory 来源数——只可能来自
+  「含 Memory 不能发布」守卫之前就已发布的库,或经同步导入得到的公共库(按表复制 notebooks
+  行,不经过 set_tier)。成员的记忆归成员处理(转移或删除),系统不动,``fix="none"``、只计数;
+  ``notebooks`` 主键加 ``sources(notebook_id, source_type)`` 索引的有界计数,搭 H2/H3/H6 的读
+  快照。未注入 ``public_library_memory_sources`` 时恒为 0。
 - H12(只读,E5-3 / 审计 N-5):本库里仍在的无主 Memory 来源数(``memory_id`` 被既有拷贝清空,
   或其 Memory 已被硬删/不再确认)。启动后的孤儿清扫(``memory_orphan_sweep``)会清掉它们;
   ``fix="none"``:没有用户修复动作,只计数。``(notebook_id, source_type)`` 索引限到本库,不缓存。
@@ -315,7 +320,7 @@ class CheckupService:
     # ------------------------------------------------------------------ run
     def run(self, notebook_id: str) -> CheckupResult:
         """聚合 H2–H12,返回结构化结果。任一可修复项(fix 不是 "none")count>0 即
-        ``healthy=False``;只读项(H9/H10)照常列在 checks 里,不影响 healthy。"""
+        ``healthy=False``;只读项(H9–H12)照常列在 checks 里,不影响 healthy。"""
         # 活跃租约快照取一次,H2/H3 共用(active 集通常个位数,一次集合减法)。租约的读法
         # 由注入方在锁下取快照,这里拿到的已是不可变副本。
         active = set(self._active_source_ids() or ())

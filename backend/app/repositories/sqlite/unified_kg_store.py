@@ -94,6 +94,17 @@ def _not_memory(row_alias: str) -> str:
     return "NOT " + memory_derived_in_notebook(row_alias)
 
 
+# 重建收尾写进 `unified_kg_state` 的规模只计共享部分(理由见 PG 孪生同名常量)。
+_END_STATE_OBJECT_COUNT_SQL = (
+    "SELECT COUNT(*) AS c FROM knowledge_objects o "
+    f"WHERE o.notebook_id=? AND o.status!='deprecated' AND {_not_memory('o')}"
+)
+_END_STATE_RELATION_COUNT_SQL = (
+    "SELECT COUNT(*) AS c FROM knowledge_relations kr "
+    f"WHERE kr.notebook_id=? AND {_not_memory('kr')}"
+)
+
+
 def _not_memory_object_ref(
     object_column: str, notebook_ref: str, probe_alias: str
 ) -> str:
@@ -1043,12 +1054,10 @@ class UnifiedKgStore:
         在同一条 upsert 里——理由见 PG 孪生 docstring;这边按库的 ``user_version``
         判断列在不在(``_writes_isolation_marker``)。"""
         object_count = db.execute(
-            "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
-            (notebook_id,),
+            _END_STATE_OBJECT_COUNT_SQL, (notebook_id,),
         ).fetchone()["c"]
         relation_count = db.execute(
-            "SELECT COUNT(*) AS c FROM knowledge_relations WHERE notebook_id=?",
-            (notebook_id,),
+            _END_STATE_RELATION_COUNT_SQL, (notebook_id,),
         ).fetchone()["c"]
         marker_column, marker_value, marker_set = (
             (", memory_isolation_version", ", 1", "memory_isolation_version=1,\n              ")

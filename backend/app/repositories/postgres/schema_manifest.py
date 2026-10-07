@@ -418,7 +418,9 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # content structurally isolated) add unified_kg_state.memory_isolation_version
 # (integer NOT NULL DEFAULT 1: 0 = this notebook's shared derived graph was
 # built before the isolation and awaits the post-readiness rebuild of
-# app/services/memory_isolation_rebuild.py; 1 = isolated) and clean the
+# app/services/memory_isolation_rebuild.py; 2 = a notebook with clusters but
+# no Memory source, awaiting that pass's dangling-seed check, which moves it
+# to 0 or 1; 1 = isolated) and clean the
 # pre-isolation derived rows of notebooks holding Memory sources (whole
 # clusters with a Memory member, the derived layers naming them, mixed
 # evidence, chunks under Memory sources). No table, index, FK or

@@ -18,7 +18,17 @@ constant has no enclosing function: ``knowledge_counts_cache._TYPE_STATUS_HALVES
 is registered under its own name). A site is a *reader by notebook* when its
 string literals (plain, f-string parts, implicit concatenation) contain
 ``FROM`` / ``JOIN`` one of the three tables (a ``DELETE FROM`` is a write, not a
-read) and mention ``notebook_id``.
+read) and mention ``notebook_id``. A ``FROM`` / ``JOIN`` whose table is
+interpolated (``f"FROM {table_sql}"`` or ``sql.SQL("FROM {}")``) counts as a
+read of every table that a module-level catalog the site uses names as a bare
+string (PostgreSQL search's ``_SEARCH_TARGETS``), so an interpolated reader is
+inventoried too.
+
+Deliberately outside the inventory: a read by primary key (no ``notebook_id``;
+e.g. ``object_evidence_rows``, judged by the viewer in ``KgViewerScope``'s Python
+twin on the rows it returns) and a method with no SQL of its own that delegates
+to a registered site (``type_counts`` / ``count_active_objects`` call the
+count-cache statements, registered where they are written).
 
 Registration is by name, never by line number: ``_REGISTRY`` maps a module path
 relative to ``backend/app/repositories`` -- ``*/name.py`` means the module of that
@@ -59,6 +69,11 @@ _READ = re.compile(
     r"(?<!DELETE\s)\b(?:FROM|JOIN)\s+(" + "|".join(_TABLES) + r")\b", re.IGNORECASE,
 )
 _BY_NOTEBOOK = re.compile(r"\bnotebook_id\b")
+# A FROM / JOIN whose table is interpolated: an f-string part ending at the
+# placeholder (``f"FROM {table_sql}"``) or a ``sql.SQL("FROM {}")`` template.
+_INTERPOLATED_READ = re.compile(
+    r"(?<!DELETE\s)\b(?:FROM|JOIN)[ \t]*(?:\{\}|$)", re.IGNORECASE | re.MULTILINE,
+)
 
 # -- categories ---------------------------------------------------------------
 VIEWER_READER = "viewer_reader"
@@ -223,6 +238,9 @@ _REGISTRY: dict[str, dict[str, str]] = {
     },
     "postgres/search.py": {
         "notebook_knowledge_rows": VIEWER_READER,
+        # interpolated table (``_SEARCH_TARGETS``): the legacy lexical arms
+        # that knowledge_candidate_rows_for_terms takes with a viewer filter
+        "_candidate_rows_for_terms": VIEWER_READER,
         "mention_claim_rows": BUILD_READER,
         "_knn_candidate_rows_for_terms": CEILING_BOUNDED,
     },
@@ -285,8 +303,11 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "UnifiedKgStore.ppr_version_rows": STATE_PROBE,
         "UnifiedKgStore.concept_clusters_count": STATE_PROBE,
         "UnifiedKgStore.distinct_cluster_count": STATE_PROBE,
+        # the rebuild's end-state totals (finish_rebuild_state runs them): the
+        # shared graph only, so no member's Memory count can be derived
+        "_END_STATE_OBJECT_COUNT_SQL": BUILD_READER,
+        "_END_STATE_RELATION_COUNT_SQL": BUILD_READER,
         # maintenance
-        "UnifiedKgStore.finish_rebuild_state": MAINTENANCE,
         "UnifiedKgStore.write_cluster_map_generation": MAINTENANCE,
     },
     "*/index_projection_store.py": {
@@ -344,6 +365,11 @@ _REGISTRY: dict[str, dict[str, str]] = {
     },
     "*/kg_build_job_store.py": {
         "KgBuildJobStore._delete_source_kg": MAINTENANCE,
+    },
+    "sqlite/notebook_delete_job_store.py": {
+        # interpolated FTS shadow of knowledge_objects: a rowid page read that
+        # only feeds the notebook delete's DELETE
+        "NotebookDeleteJobStore.delete_fts_shadow_page": MAINTENANCE,
     },
     "sqlite/migrations.py": {
         "SqliteMigrator._migration_1": MAINTENANCE,
@@ -465,10 +491,27 @@ def scan_source(source: str, path: str) -> list[Site]:
     tree = ast.parse(source)
     prose = _docstring_ids(tree)
     sites: list[Site] = []
+    # Module-level catalogs that name one of the tables as a bare string (e.g.
+    # PostgreSQL search's ``_SEARCH_TARGETS``): a site that reads FROM an
+    # interpolated table and uses such a catalog reads the tables it names.
+    catalogs: dict[str, set[str]] = {}
+    for child in ast.iter_child_nodes(tree):
+        if isinstance(child, (ast.Assign, ast.AnnAssign)):
+            name = _assign_name(child)
+            named = {
+                n.value for n in ast.walk(child)
+                if isinstance(n, ast.Constant) and n.value in _TABLES
+            }
+            if name is not None and named:
+                catalogs[name] = named
 
     def consider(node: ast.AST, qualname: str) -> None:
         text = _text(node, prose)
-        tables = tuple(sorted({m.group(1).lower() for m in _READ.finditer(text)}))
+        tables = {m.group(1).lower() for m in _READ.finditer(text)}
+        if _INTERPOLATED_READ.search(text):
+            for catalog in _names(node) & catalogs.keys():
+                tables |= catalogs[catalog]
+        tables = tuple(sorted(tables))
         if tables and _BY_NOTEBOOK.search(text):
             sites.append(Site(path, qualname, tables, _params(node), _names(node),
                               diagnostic_lines=(node.lineno,)))
@@ -620,3 +663,35 @@ def test_an_unregistered_reader_is_reported_with_its_location():
     assert _where(site) == f"backend/app/repositories/sqlite/knowledge_store.py:{def_line} Store.reader"
     # the same name registered for either backend is found by name, not by line
     assert category_of(site, {"*/knowledge_store.py": {"Store.reader": KEY_BOUNDED}}) == KEY_BOUNDED
+
+
+_INTERPOLATED = '''
+_TARGETS = {("knowledge_objects", "id"): "knowledge_objects", ("chunks", "id"): "chunks"}
+_GRAPH_TABLES = frozenset({"knowledge_relations"})
+
+
+def reader(db, table, notebook_id):
+    target = _TARGETS[(table, "id")]
+    return db.execute(f"SELECT id FROM {target} WHERE notebook_id=%s", (notebook_id,))
+
+
+def templated(db, notebook_id):
+    for table in _GRAPH_TABLES:
+        db.execute(sql.SQL("SELECT 1 FROM {} WHERE notebook_id=%s").format(table))
+
+
+def deleter(db, notebook_id):
+    for table in _GRAPH_TABLES:
+        db.execute(sql.SQL("DELETE FROM {} WHERE notebook_id=%s").format(table))
+
+
+def untargeted(db, table, notebook_id):
+    return db.execute(f"SELECT id FROM {table} WHERE notebook_id=%s", (notebook_id,))
+'''
+
+
+def test_an_interpolated_table_is_read_through_the_catalog_it_comes_from():
+    found = {s.qualname: s for s in scan_source(_INTERPOLATED, "postgres/synthetic.py")}
+    assert set(found) == {"reader", "templated"}
+    assert found["reader"].tables == ("knowledge_objects",)
+    assert found["templated"].tables == ("knowledge_relations",)
