@@ -593,3 +593,46 @@ def test_the_lexical_gate_is_not_probed_without_a_list(library, monkeypatch, nar
         _run_legs(repo, nb)
         candidates._retrieve_chunks_multi(nb, ["bandgap reference", "bandgap detail"])
     assert bool(probed) is narrowed, probed
+
+
+def test_concurrent_sections_compute_the_verdict_once(repo):
+    """Report sections ask the same verdict at once: one computes it (its two
+    probe reads), the others wait and read the memo."""
+    import threading
+    import time
+    from dataclasses import replace
+
+    from app.services.source_scope import CeilingVerdictProbes
+
+    instance, bob, _alice = repo
+    nb = instance.create_notebook(NotebookCreate(name="kb")).id
+    _add_source(instance, nb, [f"{TEXT} one " * 5])
+    readers = instance._runtime.ceiling_readers()
+    calls = []
+
+    def slow_digests(*args):
+        calls.append(args)
+        time.sleep(0.05)
+        return readers.verdict_probes.universe_digests(*args)
+
+    counted = replace(readers, verdict_probes=CeilingVerdictProbes(
+        universe_digests=slow_digests,
+        foreign_hidden=readers.verdict_probes.foreign_hidden,
+    ))
+    with default_ceiling_context(nb, bob, counted):
+        scope = current_source_scope()
+        answers = []
+        barrier = threading.Barrier(6)
+
+        def section():
+            barrier.wait()
+            answers.append(run_ceiling_binds(scope, nb))
+
+        threads = [threading.Thread(target=section) for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5)
+
+    assert answers == [False] * 6
+    assert len(calls) == 1, calls
