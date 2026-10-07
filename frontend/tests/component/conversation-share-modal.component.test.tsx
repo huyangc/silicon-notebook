@@ -844,3 +844,20 @@ test("R10 轮次取不全（兜底文案）时更新撞上 409：确数仍然上
   expect(await screen.findByText("更新后公开页共 2 条你引用到的个人记忆摘录（新增 1 条）。")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "确认公开" })).toBeInTheDocument();
 });
+
+test("R5 披露回执还在路上：只显示「正在加载…」，不画发布按钮；回执到了才出现", async () => {
+  notShared();
+  let settle: (value: { memory_count: number; new_memory_count: number }) => void = () => {};
+  mocks.getConversationShareDisclosure.mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+
+  renderModal();
+
+  await waitFor(() => expect(mocks.getConversationShareDisclosure).toHaveBeenCalledTimes(1));
+  expect(screen.getByText("正在加载…")).toBeInTheDocument();
+  // 作者还没看到数字，点不到发布（点了也只会换来一次不必要的 409）。
+  expect(screen.queryByRole("button", { name: "生成分享链接" })).toBeNull();
+
+  settle({ memory_count: 2, new_memory_count: 0 });
+  expect(await screen.findByRole("button", { name: "生成分享链接" })).toBeInTheDocument();
+  expect(screen.getByText("公开页会包含 2 条你引用到的个人记忆摘录。")).toBeInTheDocument();
+});
