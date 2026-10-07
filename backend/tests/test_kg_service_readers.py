@@ -435,6 +435,24 @@ def test_overlay_edges_join_two_overlay_nodes(repo, path):
     assert len(view["nodes"]) <= 2 * kwargs["limit"]
 
 
+@pytest.mark.parametrize("path", ["full", "artifact"])
+def test_graph_totals_do_not_depend_on_the_limit(repo, path):
+    """codex #824 r2: the totals describe the whole graph the viewer may see,
+    so ``limit`` (which cuts the own-Memory overlay too) never changes them
+    -- the own-Memory edges whose other end fell outside the cut included."""
+    s = build_scenario(repo, b_memory=False)
+    _memory_relation(repo, s, "rel-mem-own", s.ids.engram_ma, s.ids.definer_ma,
+                     "ownedge")
+    if path == "artifact":
+        assert repo._runtime.scale_artifacts.build_viz(s.nb) is not None
+    narrow = as_user(s.a, repo.unified_graph, s.nb, level="object", limit=1)
+    wide = as_user(s.a, repo.unified_graph, s.nb, level="object", limit=80)
+    assert len(wide["edges"]) > len(narrow["edges"]), "fixture: the cut drops an edge"
+    assert (narrow["total_nodes"], narrow["total_edges"]) == (
+        wide["total_nodes"], wide["total_edges"]), (narrow, wide)
+    assert narrow["truncated"] is True
+
+
 def test_a_closed_channel_hides_the_owners_own_memory_from_the_graph(repo, monkeypatch):
     s = build_scenario(repo, b_memory=False)
     monkeypatch.setattr(kg_viewer_scope, "memory_channel_allowed", lambda: False)
