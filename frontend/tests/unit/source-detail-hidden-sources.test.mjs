@@ -16,6 +16,7 @@ import { parseModule } from "../../test-support/semantic-source.mjs";
 import {
   sourceDeleteMessage,
   sourceDetailManageable,
+  sourceIsPending,
   sourceDetailReparsable,
   sourceTypeTag,
 } from "../../app/source-management.ts";
@@ -141,13 +142,26 @@ test("the detail dialog gates reparse, delete and the command catalog on the sou
       (node) => node.tagName.getText() === "CommandCatalogSection",
     ),
   };
+  // 命令目录只读文档：收录来源也不能出现入口，所以它要的是更窄的那条判据
+  // （sourceDetailReparsable 已包含 sourceDetailManageable）。
+  const requiredGate = { "命令目录": REPARSE_GATE };
   for (const [name, nodes] of Object.entries(targets)) {
     assert.equal(nodes.length, 1, `${name}：page.tsx 里应当恰好一处（入口被改名或删除？守卫失效）`);
     const conditions = governingConditions(nodes[0]);
+    const gate = requiredGate[name] ?? GATE;
     assert.ok(
-      conditions.some((condition) => condition.includes(GATE)),
-      `${name} 的外层条件里没有 ${GATE}：记忆 / Knowhow 来源会显示一个必然失败的入口`
+      conditions.some((condition) => condition.includes(gate)),
+      `${name} 的外层条件里没有 ${gate}：记忆 / Knowhow / 收录来源会显示一个必然失败的入口`
         + `（现有条件：${JSON.stringify(conditions)}）`,
     );
   }
+});
+
+test("a promotion source is never 'still processing' (no source poll, not counted as parsing)", () => {
+  assert.equal(sourceIsPending({ type: "promotion", parse_status: "extracted" }), false);
+  // stored before the terminal state was written: still not pending
+  assert.equal(sourceIsPending({ type: "promotion", parse_status: "parsed" }), false);
+  assert.equal(sourceIsPending({ type: "markdown", parse_status: "parsed" }), true);
+  assert.equal(sourceIsPending({ type: "markdown", parse_status: "extracted" }), false);
+  assert.equal(sourceIsPending({ type: "markdown", parse_status: "failed" }), false);
 });

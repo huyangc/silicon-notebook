@@ -195,6 +195,7 @@ import {
 import {
   sourceDeleteMessage,
   sourceDetailManageable,
+  sourceIsPending,
   sourceDetailReparsable,
   sourceTypeTag,
 } from "./source-management";
@@ -840,6 +841,7 @@ export default function Home() {
     sourceScopeSelection,
     sourcesTotal,
     notebookSourceTotal,
+    notebookDocumentCount,
     sourcesPage,
     sourcesPageLoading,
     sourcesCollapsed,
@@ -1907,7 +1909,7 @@ export default function Home() {
   // 加载全部来源时，当前这份 sources 只是子集/某一页，按它数出来的 0 不能说明
   // 真的没有来源在处理——那会把「用户正在搜索」误判成「没有处理中的文档」。
   const pendingSourceCount = sourceQuery.trim() === "" && sources.length === notebookSourceTotal
-    ? sources.filter((source) => !["extracted", "failed"].includes(source.parse_status)).length
+    ? sources.filter((source) => sourceIsPending(source)).length
     : null;
   // 自动模式没有勾选框可选——sourceScopeBlocked 在自动模式下恒等于「本地与参考库
   // 证据全空」（effective 选择恒为全选，为空只能是笔记本本身零来源零挂载库），所以
@@ -3725,7 +3727,7 @@ export default function Home() {
     // applies only on Enter), not necessarily what produced the current page — so optimistically
     // bumping it risks either a stale count or a phantom filtered page. This matches the pre-#332
     // baseline (URL import never touched sourcesTotal); the file-upload path's own unconditional
-    // bump is pre-existing and out of scope here. 文档上限门控也读 notebookSourceTotal，
+    // bump is pre-existing and out of scope here. 文档上限门控读的 notebookDocumentCount 同步 +N，
     // 故链接导入 +N 后满额判定同步跟进。
     const stillOwned = () => sourceLibrary.captureOwner() === owner;
     await loadNotebookCollection({ guard: stillOwned });
@@ -4862,12 +4864,14 @@ export default function Home() {
   const isReader = currentNotebook?.access === "reader";
   // 文档数量上限:管理员豁免(写路径 owner-only ⇒ 当前用户即 owner);document_limit
   // 只在 getNotebook 详情里是真值(列表投影是 0 哨兵),故 0/缺失当「未知」不门控。
-  // 计数用 notebookSourceTotal(不受来源搜索过滤影响的真实可见文档总数),不用 sourcesTotal
+  // 计数用 notebookDocumentCount(不受来源搜索过滤影响、不含收录来源的文档数),不用 sourcesTotal
   // ——后者在搜索态是匹配子集计数,会让满额笔记本在搜索时误判未满。
   const docCapacity = resolveDocumentCapacity({
     isAdmin: currentUser?.role === "admin",
     documentLimit: currentNotebook?.document_limit,
-    documentCount: notebookSourceTotal,
+    // PR-E8:公共知识库的收录来源列出、计入 notebookSourceTotal,但不占文档名额——
+    // 门控与「文档 X / 上限」指示用后端同口径的 notebookDocumentCount。
+    documentCount: notebookDocumentCount,
   });
   const atDocCapacityHint = "已达该笔记本的文档数量上限，无法继续添加文档。";
   const sourceUploadConfigLoading = sourceUploadMaxBytes === null
@@ -7062,8 +7066,9 @@ export default function Home() {
                   发起/取消/确认在后端都是 owner-only 且按 notebook 收窄，对一个只是被
                   挂载进来的库发起会花这个库的钱、写那个库的知识——授权语义是错的，
                   入口连出现都不该出现（与上方重新解析/删除同一条判据）。记忆 / Knowhow
-                  同步行同样不出现：命令目录只接受用户导入的文档，后端对它们回 404。 */}
-              {!sourceDetailBaseId && currentNotebookId && sourceDetailManageable(sourceDetail.type) && (
+                  同步行同样不出现：命令目录只接受用户导入的文档，后端对它们回 404。
+                  公共库的收录来源也不是文档（后端同样回 404），与「重新解析」同一条判据。 */}
+              {!sourceDetailBaseId && currentNotebookId && sourceDetailReparsable(sourceDetail.type) && (
                 <CommandCatalogSection
                   notebookId={currentNotebookId}
                   sourceId={sourceDetail.id}

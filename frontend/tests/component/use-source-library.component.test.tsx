@@ -950,3 +950,50 @@ test("owner-inactive view fields stay referentially stable across re-renders", (
     expect(later.sourceElements).toBe(first.sourceElements);
   }
 });
+
+test("a public library's promotion sources are never polled and never take a document slot", async () => {
+  // PR-E8: a promotion source is never parsed or analysed. Even with a
+  // non-terminal stored status (data written before the terminal state), the
+  // list must not start the 1.5 s source poll, and the document-limit count
+  // is the backend's visible_document_count, not the list total.
+  vi.useFakeTimers();
+  render(<Harness />);
+  const promoted = (id: string, parseStatus: string): SourceSummary => ({
+    ...source(id, "notebook-a", parseStatus),
+    type: "promotion",
+    title: `晋升自：${id}`,
+  });
+  const uploads = Array.from({ length: 15 }, (_, index) => source(`doc-${index}`, "notebook-a"));
+  const promotions = [
+    promoted("promo-terminal", "extracted"),
+    ...Array.from({ length: 5 }, (_, index) => promoted(`promo-${index}`, "parsed")),
+  ];
+  act(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a", notebookId: "notebook-a", workspaceEpoch: 1,
+      page: {
+        items: [...uploads, ...promotions], total_count: 21, offset: 0, limit: 50,
+        visible_document_count: 15,
+      },
+    });
+  });
+  await act(async () => {
+    vi.advanceTimersByTime(10_000);
+  });
+  expect(api.getSource).not.toHaveBeenCalled();
+  expect(effects.setStatusText).not.toHaveBeenCalledWith(expect.stringContaining("正在处理来源"));
+  expect(value!.notebookSourceTotal).toBe(21);
+  expect(value!.notebookDocumentCount).toBe(15);
+
+  // deleting a promotion source does not free a document slot; deleting an
+  // uploaded document does
+  api.deleteSource.mockResolvedValue(undefined);
+  api.listSources.mockResolvedValue({
+    items: [...uploads, ...promotions], total_count: 21, offset: 0, limit: 50,
+    visible_document_count: 15,
+  });
+  await act(async () => {
+    await value!.deleteSource(promotions[1]);
+  });
+  expect(value!.notebookDocumentCount).toBe(15);
+});

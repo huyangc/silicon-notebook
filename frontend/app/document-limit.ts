@@ -8,6 +8,8 @@
 // 管理员豁免:加源写路径是 owner-only(成员表只有只读角色),当前用户恒等于
 // owner,故按当前用户角色判定 admin 即等价于「owner 是 admin」,正确。
 
+import { PROMOTION_SOURCE_TYPE } from "./source-management.ts";
+
 export type DocumentCapacity = {
   /** 是否展示「文档 X / 上限」指示并参与门控。管理员或上限未知时为 false。 */
   show: boolean;
@@ -56,4 +58,24 @@ export function documentUploadBlockReason(
     return `当前仅可再上传 ${remaining} 个文档，已选择 ${stagedCount} 个。请移除 ${excess} 个文件后再上传。`;
   }
   return null;
+}
+
+/** 一页来源响应里的「上传文档数」（文档数量上限的计数口径）：后端在未带搜索词的
+ *  页上下发 `visible_document_count`（不含收录来源，它们列出、计入总数，但不占名额）；
+ *  旧后端不下发时退回总数。本地仍在删除中、被从这一页滤掉的来源与总数同样扣除——
+ *  但滤掉的收录来源本就不在这个计数里，不再扣。 */
+export function pageDocumentCount(
+  page: {
+    total_count: number;
+    visible_document_count?: number | null;
+    items: readonly { id: string; type?: string }[];
+  },
+  keptIds: ReadonlySet<string>,
+): number {
+  const counted = typeof page.visible_document_count === "number";
+  const base = counted ? page.visible_document_count as number : page.total_count;
+  const removed = page.items.filter(
+    (item) => !keptIds.has(item.id) && (!counted || item.type !== PROMOTION_SOURCE_TYPE),
+  ).length;
+  return Math.max(0, base - removed);
 }

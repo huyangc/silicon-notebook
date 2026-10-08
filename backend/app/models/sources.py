@@ -239,6 +239,13 @@ class PaginatedSources(BaseModel):
     total_count: int
     offset: int
     limit: int
+    # PR-E8: the uploaded-document count the per-notebook document limit is
+    # enforced against (``visible_document_count``: the visible sources minus
+    # a public library's promotion sources, which are listed and counted in
+    # ``total_count`` but never take a document slot). Only on an unfiltered
+    # page (no ``q``) -- a filtered COUNT is not the notebook's; ``None`` there.
+    # Read in the same COUNT statement as ``total_count``.
+    visible_document_count: Optional[int] = None
 
 
 class PaginatedSourceElements(BaseModel):

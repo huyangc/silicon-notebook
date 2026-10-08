@@ -63,6 +63,10 @@ def test_the_promotion_source_is_never_a_pipeline_target(world):
     cases.the_promotion_source_is_never_a_pipeline_target(world)
 
 
+def test_the_command_catalog_and_library_profile_skip_the_promotion_source(world):
+    cases.the_command_catalog_and_library_profile_skip_the_promotion_source(world)
+
+
 def test_a_memory_original_is_dropped_by_the_approval_store(world):
     cases.a_memory_original_is_dropped_by_the_approval_store(world)
 
@@ -141,11 +145,22 @@ def test_reparse_routes_refuse_a_promotion_source(client_world, monkeypatch):
     assert world.evidence(base_object)[0]["source_id"] == world.promotion_source
 
 
+def test_command_catalog_routes_answer_a_promotion_source_as_missing(client_world):
+    client, world = client_world
+    response = client.get(
+        f"/api/notebooks/{world.base}/sources/{world.promotion_source}"
+        "/command-catalog/preview"
+    )
+    assert response.status_code == 404, response.text
+
+
 def test_promotion_sources_never_take_an_uploaded_document_slot(tmp_path, monkeypatch):
     """A public library owned by an ordinary user (an admin may publish one)
     keeps its owner's document limit: 15 uploads plus 6 promotion sources
     from other people's contributions, and the owner can still add one more
-    (the limit is 20); the list's total still counts all 22."""
+    (the limit is 20); the list's total still counts all 22, and its
+    ``visible_document_count`` -- what the upload gate and the 「文档 X / 上限」
+    indicator read -- says 16 (a filtered page carries none)."""
     from app.api import deps, source_routes
     from app.core.config import get_settings
     from app.main import create_app
@@ -182,7 +197,7 @@ def test_promotion_sources_never_take_an_uploaded_document_slot(tmp_path, monkey
                 db.execute(
                     "INSERT INTO sources (id,notebook_id,title,source_type,status,"
                     "parse_status,created_at,updated_at) VALUES (?,?,?,'promotion',"
-                    "'active','parsed','t','t')",
+                    "'active','extracted','t','t')",
                     (f"src-promo-cap-{index}", nb_id, f"晋升自：原件{index}"),
                 )
         assert repo.visible_document_count(nb_id) == 15
@@ -190,6 +205,11 @@ def test_promotion_sources_never_take_an_uploaded_document_slot(tmp_path, monkey
         assert response.status_code == 200, response.text
         listing = client.get(f"/api/notebooks/{nb_id}/sources", headers=headers).json()
         assert listing["total_count"] == 22
+        assert listing["visible_document_count"] == 16
+        filtered = client.get(
+            f"/api/notebooks/{nb_id}/sources", params={"q": "f1"}, headers=headers
+        ).json()
+        assert filtered["visible_document_count"] is None
     finally:
         deps.repository.cache_clear()
         get_settings.cache_clear()

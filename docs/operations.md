@@ -443,11 +443,11 @@ entries_dropped=… objects_without_evidence=…` (counts only). `objects_withou
 entry was dropped; every source ceiling leaves them out of answers from now on, and a curator can delete or re-promote
 them.
 
-- Cost: proportional to the reverse-index rows of the attested public libraries (an index scan on `idx_kos_notebook`
-  with an anti-join on the library's own sources), one read of those libraries' evidence for entries without a source
-  id, and the evidence of the objects that hold a foreign entry (only those are expanded); a library whose reverse index
-  is not attested has every object's evidence read. Measured on PostgreSQL: a 1.04M-object unattested library with
-  2.04M evidence items and 10k foreign entries took about 7 s in all, the slowest statement 4.3 s. The pool's
+- Cost: every public library's evidence is read once, because an entry without a source id can sit on any object and
+  no index finds it; an attested reverse index (`idx_kos_notebook`, anti-joined on the library's own sources) therefore
+  no longer spares that read, and only narrows which objects are expanded to those holding a foreign entry. Measured on
+  PostgreSQL (the full-read case): a 1.04M-object library with 2.04M evidence items and 10k foreign entries took about
+  7 s in all, the slowest statement 4.3 s. The pool's
   `POSTGRES_STATEMENT_TIMEOUT_SECONDS` / `POSTGRES_LOCK_TIMEOUT_SECONDS` apply; on a timeout the transaction rolls back,
   startup reports "not ready", and a restart with a larger value retries.
 - Take a backup before upgrading: the rewrite is not reversible by the application. Reverting the code afterwards
@@ -479,7 +479,9 @@ uploaded-document limit. No pipeline touches it: KG extraction refuses it at its
 and `extract_source` cannot clear its objects, and the re-extraction and `scripts/build_chunks.py` rosters leave it
 out), it is not a KG analysis target, not counted as pending, not asked for paper metadata, not chunked, not part of an
 indexing-pipeline source snapshot, not given element vectors, image or source-fact backfills, and not reported by the
-missing-chunks checkup — it needs no maintenance. Deleting it removes its entries from the evidence of the objects that
+missing-chunks checkup, not read by the command catalog, and not counted in the library profile's corpus statistics —
+it needs no maintenance. Its `parse_status` is the terminal `extracted`, so the source list never shows it as still
+processing. Deleting it removes its entries from the evidence of the objects that
 cite it and deletes only the objects left without evidence; a native object a promotion was merged into keeps its own
 evidence.
 

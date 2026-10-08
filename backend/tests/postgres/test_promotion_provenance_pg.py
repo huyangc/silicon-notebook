@@ -74,6 +74,10 @@ def test_pg_the_promotion_source_is_never_a_pipeline_target(world):
     cases.the_promotion_source_is_never_a_pipeline_target(world)
 
 
+def test_pg_the_command_catalog_and_library_profile_skip_the_promotion_source(world):
+    cases.the_command_catalog_and_library_profile_skip_the_promotion_source(world)
+
+
 def test_pg_a_memory_original_is_dropped_by_the_approval_store(world):
     cases.a_memory_original_is_dropped_by_the_approval_store(world)
 

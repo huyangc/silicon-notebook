@@ -35,6 +35,16 @@ export function sourceDeleteMessage(sourceType: string, title: string): string {
   return `确定删除“${title}”吗？它的解析元素、候选知识和由该来源生成的已批准知识也会一起移除。`;
 }
 
+/**
+ * 来源是否仍在处理（解析/分析在途）——来源列表轮询与「还在解析」计数的唯一判据。
+ * 收录来源从不解析也不分析：后端写入的就是终态（parse_status = "extracted"），
+ * 这里再按类型排除一次，存量里若还有别的状态也不会被当成在途而无限轮询。
+ */
+export function sourceIsPending(source: { type?: string; parse_status: string }): boolean {
+  if (source.type === PROMOTION_SOURCE_TYPE) return false;
+  return !["extracted", "failed"].includes(source.parse_status);
+}
+
 /** 来源类型标签：收录来源给中文名，其余沿用原来的类型串。 */
 export function sourceTypeTag(sourceType: string): string | null {
   return sourceType === PROMOTION_SOURCE_TYPE ? "收录" : null;

@@ -317,6 +317,9 @@ export type PaginatedSources = {
   total_count: number;
   offset: number;
   limit: number;
+  /** 文档数量上限的计数口径（可见来源减去公共知识库的收录来源，与后端
+   *  `_visible_document_count_on` 同口径）。只在未带搜索词的一页上下发。 */
+  visible_document_count?: number | null;
 };
 
 export const SOURCES_PAGE_SIZE = 50;

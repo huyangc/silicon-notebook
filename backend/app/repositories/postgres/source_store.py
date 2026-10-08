@@ -474,9 +474,12 @@ class SourceStore:
                 (notebook_id, like, like, notebook_id, like, notebook_id, like)
             )
         with self.database.connect() as connection:
-            total = connection.execute(
-                f"SELECT COUNT(*) AS c FROM sources {where}", params
-            ).fetchone()["c"]
+            counted = connection.execute(
+                "SELECT COUNT(*) AS c, "
+                f"COUNT(*) FILTER (WHERE {NOT_PROMOTION_SOURCE_PREDICATE}) AS d "
+                f"FROM sources {where}", params
+            ).fetchone()
+            total = counted["c"]
             rows = connection.execute(
                 f"SELECT * FROM sources {where} "
                 "ORDER BY created_at,id COLLATE \"C\" LIMIT %s OFFSET %s",
@@ -484,7 +487,9 @@ class SourceStore:
             ).fetchall()
             items = self.sources_from_rows(connection, rows)
         return PaginatedSources(
-            items=items, total_count=total, offset=offset, limit=limit
+            items=items, total_count=total, offset=offset, limit=limit,
+            # PR-E8: the document-limit count (SQLite twin)
+            visible_document_count=None if needle else int(counted["d"]),
         )
 
     def visible_document_count(self, notebook_id: str) -> int:
@@ -850,6 +855,7 @@ class SourceStore:
             for row in connection.execute(
                 "SELECT parse_status, COUNT(*) AS c FROM sources "
                 f"WHERE notebook_id=%s AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
+                f"AND {NOT_PROMOTION_SOURCE_PREDICATE} "
                 "GROUP BY parse_status",
                 (notebook_id,),
             ).fetchall()
