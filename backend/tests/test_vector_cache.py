@@ -781,3 +781,52 @@ def test_concurrent_followers_count_one_outcome_per_get() -> None:
     # 预热后的第三次才是 hit
     cache.get("nb:kwtok", ("v1",), loader)
     assert cache.stats()["hits"] == 1
+
+
+def test_a_participant_fingerprint_is_not_a_family_and_not_a_bucket():
+    """``{nb}:{fingerprint}:{family}`` (a participant override's, or a
+    viewer's effective set -- ``graph_retrieval._participant_graph_cache_key``)
+    belongs to ``family``'s bucket, the same as the historical
+    ``{nb}:{family}``; a 16-hex SEGMENT is never a family."""
+    from app.services.vector_cache import key_family, quota_bucket
+
+    for key in ("nb-1:0123456789abcdef:fed_rxgraph", "nb-1:fed_rxgraph"):
+        assert key_family(key) == "fed_rxgraph"
+        assert quota_bucket(key) == "fed_rxgraph"
+    assert quota_bucket("nb-1:0123456789abcdef:ppr_graph") == "ppr_graph"
+    assert key_family("nb-1:matrix:knowledge_embeddings") == "matrix"
+    # A one-segment tail that happens to be hex stays what it was.
+    assert quota_bucket("nb-1:0123456789abcdef") == "0123456789abcdef"
+
+
+def test_fingerprinted_graph_keys_obey_the_family_quota(caplog):
+    """E6-3 review P2-1: twenty libraries' graphs under fingerprinted keys
+    keep only ``per_family_entries`` of them -- not one bucket per viewer set
+    -- and the eviction is booked and logged under the family's own name."""
+    import logging
+
+    cache = VectorCache(max_entries=1024, per_family_entries=8, max_bytes=0)
+    keys = [f"nb-{i}:{i:016x}:fed_rxgraph" for i in range(20)]
+    with caplog.at_level(logging.DEBUG, logger="silicon_notebook.vector_cache"):
+        for key in keys:
+            cache.get(key, version=1, loader=lambda: {})
+    stats = cache.stats()
+    assert stats["entries"] == 8
+    assert stats["entries_by_family"] == {"fed_rxgraph": 8}
+    assert stats["evictions_by_family"] == {"fed_rxgraph": 12}
+    assert [key for key in keys if cache.peek(key, version=1)] == keys[12:]
+    evicted = [r.getMessage() for r in caplog.records if "evict" in r.getMessage()]
+    assert len(evicted) == 12
+    assert all("family=fed_rxgraph " in line for line in evicted), evicted[:2]
+
+
+def test_historical_and_fingerprinted_keys_share_one_bucket():
+    """The mounter's historical key and a member's fingerprinted key of the
+    same family compete for the same eight slots."""
+    cache = VectorCache(max_entries=1024, per_family_entries=2, max_bytes=0)
+    cache.get("nb-1:ppr_graph", version=1, loader=lambda: {})
+    cache.get("nb-1:00000000000000aa:ppr_graph", version=1, loader=lambda: {})
+    cache.get("nb-2:ppr_graph", version=1, loader=lambda: {})
+    assert not cache.peek("nb-1:ppr_graph", version=1)
+    assert cache.peek("nb-1:00000000000000aa:ppr_graph", version=1)
+    assert cache.peek("nb-2:ppr_graph", version=1)

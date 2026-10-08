@@ -325,6 +325,12 @@ class NotebookSummaryQuery:
         ]
         return (refs, [str(r["id"]) for r in rows if bool(r["has_kg"])])
 
+    def viewer_from_row(self, connection: object, row: Any) -> NotebookSummary:
+        """``from_row`` for the current viewer (``current_viewer_id()``: the
+        retrieval run's actor, else the requesting user, else nobody) -- the
+        summary's mounts are the viewer's (N-6)."""
+        return self.from_row(connection, row, user_id=current_viewer_id() or None)
+
     def from_row(
         self,
         connection: object,

@@ -77,7 +77,10 @@ contributor constraints, not a second implementation history.
   else `''`, which leaves only public and `everyone` libraries) or an explicit viewer
   at a site registered in `backend/tests/test_mount_viewer_guard.py`; never a literal.
   Process caches built over a participant set key on the viewer's effective set
-  (`graph_retrieval._participant_graph_cache_key`).
+  (`graph_retrieval._participant_graph_cache_key`; the viewer digest has its own
+  BLAKE2s personalisation, apart from a participant override's, and
+  `vector_cache.quota_bucket` drops the 16-hex fingerprint segment so every
+  variant counts against its family's quota).
 - Retrieval scopes have one installation per entry kind: every Ask entry goes through
   `AskService._retrieval_ceiling` (`source_scope.default_ceiling_context` over
   `RepositoryRuntime.ceiling_readers()`), report phases through

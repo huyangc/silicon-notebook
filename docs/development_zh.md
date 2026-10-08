@@ -62,7 +62,9 @@
   服务层传 `retrieval_run.current_viewer_id()`（运行的 actor，否则请求用户，否则 `''`，
   只剩公共库与 `everyone`），或在 `backend/tests/test_mount_viewer_guard.py` 登记过的
   调用点显式传查看者；一律不许写字面量。按参与集建的进程级缓存以查看者的有效集合为键
-  （`graph_retrieval._participant_graph_cache_key`）。
+  （`graph_retrieval._participant_graph_cache_key`；查看者指纹用独立的 BLAKE2s
+  personalisation，与参与集覆盖的指纹分开；`vector_cache.quota_bucket` 剥掉 16 位十六进制
+  指纹段，各变体都计入所属族的配额）。
 - 检索范围每类入口只有一个安装点：所有问答入口经 `AskService._retrieval_ceiling`
   （`source_scope.default_ceiling_context`，读取器来自 `RepositoryRuntime.ceiling_readers()`），
   报告各阶段经 `ReportExecutionCoordinator._default_ceiling` / `ReportEngine._refreshed_ceiling`，

@@ -140,8 +140,13 @@ class NotebookStore:
             + _MOUNT_ORDER,
             (viewer_id, active_notebook_id),
         ).fetchall()
+        # ``created_by`` (the mounter) rides along: the mounter's effective set
+        # is every valid mount by construction, so the graph cache key skips
+        # its reference read for them (``graph_retrieval
+        # ._viewer_graph_participants``).
         active = connection.execute(
-            "SELECT id,tier FROM notebooks WHERE id=%s", (active_notebook_id,)
+            "SELECT id,tier,created_by FROM notebooks WHERE id=%s",
+            (active_notebook_id,),
         ).fetchone()
         return active, bases
 

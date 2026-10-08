@@ -1222,12 +1222,15 @@ they cannot read. The mount list on the settings page (`GET .../bases`) is the
 mounter's configuration view and is unchanged.
 
 Who "the viewer" is: the asker for an Ask (HTTP, stream, MCP), the report's
-author for its planning and generation, the user who started a Global Ask job or
-a detached ask that a returning client reattaches to — taken from the run itself
-on its worker thread, never from whatever request happens to be ambient — the
-token's owner for MCP reads, and the share's creator when an anonymous public
-page re-checks its mounts. A background path with no run and no request user has
-no viewer and sees only public libraries and `everyone`-granted ones.
+author for its planning and generation, the user who started a detached ask
+that a returning client reattaches to — taken from the run itself on its worker
+thread, never from whatever request happens to be ambient — the token's owner
+for MCP reads, and the share's creator when an anonymous public page re-checks
+its mounts. A background path with no run and no request user has no viewer and
+sees only public libraries and `everyone`-granted ones. Global Ask is not a
+mount reader at all: it searches exactly the libraries the asker selected
+(each checked for the asker's own read access), so a library mounted on a
+selected notebook takes part only when it is selected itself.
 
 ### A deep copy carries the mounts that still hold for the recipient
 
