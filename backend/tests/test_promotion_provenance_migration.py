@@ -84,6 +84,10 @@ _BATTERY = [
     [{"source_id": "s-mem", "element_id": "el-m", "quoted_span": "mem"}],
     [{"source_id": "s-a", "element_id": "el-1", "quoted_span": "x" * 900},
      {"source_id": "s-b", "element_id": "el-b", "quoted_span": ""}],
+    # no quote, and the live element text is longer than the excerpt: the
+    # card's text is the clipped live text (pins the frozen excerpt length)
+    [{"source_id": "s-a", "element_id": "el-long", "quoted_span": "",
+      "source_title": "A"}],
 ]
 
 
@@ -95,7 +99,8 @@ def test_the_frozen_v88_rule_equals_the_live_planner(evidence, memory):
     own = {"s-own"}
     notebooks = {"s-a": "nb-p", "s-b": "nb-p", "s-own": "nb-base", "s-mem": "nb-p"}
     live = {"el-1": ("s-a", "LIVE ONE"), "el-2": ("s-a", "LIVE TWO"),
-            "el-b": ("s-other", "WRONG SOURCE"), "el-m": ("s-mem", "MEM")}
+            "el-b": ("s-other", "WRONG SOURCE"), "el-m": ("s-mem", "MEM"),
+            "el-long": ("s-a", "z" * 900)}
     frozen = sqlite_migrations._v88_plan(
         "nb-base", evidence, own_source_ids=own, source_notebooks=notebooks,
         origin_elements=live, fallback_origin_notebook_id="nb-fallback",

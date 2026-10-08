@@ -12,6 +12,15 @@ from __future__ import annotations
 #: ``sources.source_type`` of a public library's synthetic promotion source.
 PROMOTION_SOURCE_TYPE = "promotion"
 
+#: Every promotion source id starts with this (content-addressed ids:
+#: ``promotion_provenance.promotion_source_id``, 0068, v88), and no other
+#: source id does -- so a reader holding only ids can tell one apart.
+PROMOTION_SOURCE_ID_PREFIX = "src-promo-"
+
+
+def is_promotion_source_id(source_id: object) -> bool:
+    return str(source_id or "").startswith(PROMOTION_SOURCE_ID_PREFIX)
+
 PROMOTION_TITLE_PREFIX = "晋升自："
 MEMORY_PROMOTION_TITLE_PREFIX = "晋升自个人记忆："
 

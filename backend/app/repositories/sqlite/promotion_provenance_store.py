@@ -94,7 +94,7 @@ def write_plan(
         "INSERT INTO sources (id,notebook_id,title,source_type,status,"
         "parse_status,file_name,file_path,source_url,file_size,file_hash,summary,"
         "doc_type,created_at,updated_at) "
-        "VALUES (?,?,?,?,'active','parsed','','','',0,'','','',?,?) "
+        "VALUES (?,?,?,?,'active','extracted','','','',0,'','','',?,?) "
         "ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at",
         [
             (row.id, base_notebook_id, row.title, PROMOTION_SOURCE_TYPE, now, now)

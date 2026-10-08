@@ -226,12 +226,12 @@ EXPECTED_EVIDENCE = {
 
 EXPECTED_SOURCES = {
     # id: (notebook, title, type, status, parse_status)
-    _promo(BASE, "s-p"): (BASE, "晋升自：原件甲", "promotion", "active", "parsed"),
-    _promo(BASE, "s-x"): (BASE, "晋升自：已删原件", "promotion", "active", "parsed"),
+    _promo(BASE, "s-p"): (BASE, "晋升自：原件甲", "promotion", "active", "extracted"),
+    _promo(BASE, "s-x"): (BASE, "晋升自：已删原件", "promotion", "active", "extracted"),
     _promo(BASE, memory_origin_key("mem-pp2")): (
-        BASE, "晋升自个人记忆：增益记忆", "promotion", "active", "parsed"),
-    _promo(BASE, ""): (BASE, "晋升自：无来源", "promotion", "active", "parsed"),
-    _promo(BASE2, "s-p"): (BASE2, "晋升自：原件甲", "promotion", "active", "parsed"),
+        BASE, "晋升自个人记忆：增益记忆", "promotion", "active", "extracted"),
+    _promo(BASE, ""): (BASE, "晋升自：无来源", "promotion", "active", "extracted"),
+    _promo(BASE2, "s-p"): (BASE2, "晋升自：原件甲", "promotion", "active", "extracted"),
 }
 
 

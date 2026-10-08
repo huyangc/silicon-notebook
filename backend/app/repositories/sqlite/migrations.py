@@ -5424,7 +5424,7 @@ class SqliteMigrator:
                         "INSERT INTO sources (id, notebook_id, title, source_type, "
                         "status, parse_status, file_name, file_path, source_url, "
                         "file_size, file_hash, summary, doc_type, created_at, updated_at) "
-                        "VALUES (?, ?, ?, ?, 'active', 'parsed', '', '', '', 0, '', '', "
+                        "VALUES (?, ?, ?, ?, 'active', 'extracted', '', '', '', 0, '', '', "
                         "'', ?, ?) ON CONFLICT(id) DO NOTHING",
                         [(source_id, library_id, title, _V88_PROMOTION_TYPE, now, now)
                          for source_id, title in sources],

@@ -26,7 +26,9 @@
 --     told apart from a generic one and takes the generic rule below;
 --   * any other entry: one source per original
 --     (src-promo-md5(<library>|<original source id>)), titled '晋升自：' ||
---     the entry's stored source_title; text = the original element's current
+--     the entry's stored source_title (status 'active', parse_status
+--     'extracted': a terminal state, it is never parsed or extracted); text =
+--     the original element's current
 --     text when the element still exists and belongs to the named source,
 --     otherwise the stored quoted_span;
 --   * an entry with no text is dropped (an object left without evidence is
@@ -194,7 +196,7 @@ INSERT INTO sources (id, notebook_id, title, source_type, status, parse_status,
                      file_name, file_path, source_url, file_size, file_hash,
                      summary, doc_type, created_at, updated_at)
 SELECT d.promo_source_id, d.base_id, d.promo_title, 'promotion',
-       'active', 'parsed', '', '', '', 0, '', '', '', now(), now()
+       'active', 'extracted', '', '', '', 0, '', '', '', now(), now()
 FROM (
   SELECT DISTINCT ON (r.promo_source_id) r.promo_source_id, r.base_id,
          r.promo_title, r.object_id, r.ord

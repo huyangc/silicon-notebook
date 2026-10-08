@@ -1928,16 +1928,20 @@ and cite the promoted object, its citation card names the original title and ope
 deleting the promoter's private notebook changes nothing. In the source detail its type reads 「收录」; in the source
 list its badge reads 「已收录」 while some object's evidence still cites it, and 「不在图谱中」 once none does (for
 example after the knowledge graph was deleted or fully re-analysed: a promotion source is never re-analysed, so a
-curator re-promotes instead). It does not take one of the owner's uploaded-document slots (the source list's total
-still counts it). It can be deleted: its entries are removed from the evidence of every object citing it, and only an
+curator re-promotes instead). Its `parse_status` is the terminal `extracted`, and the frontend never treats it as
+still processing (it is not polled and not counted as parsing). It does not take one of the owner's uploaded-document
+slots: the source list's `total_count` still counts it, while `visible_document_count` (present on an unfiltered
+page only, `null` when `q` filters it) counts uploaded documents only and is what the upload gate and the 「文档 X /
+上限」 indicator read. It can be deleted: its entries are removed from the evidence of every object citing it, and only an
 object left with no evidence is deleted — a native object a promotion was merged into keeps its own evidence and stays;
 the delete confirmation says so. It cannot be re-parsed (`POST /api/sources/{source_id}/parse` answers 409
 「这份来源是收录到公共知识库的内容，不能重新解析。」, the batch `…/sources/reparse` skips it, the MCP `reparse_source`
 refuses it), and no document pipeline processes it: KG extraction refuses it at its single entry (so the offline
 re-extraction and `extract_source` cannot clear its objects), and it is never a KG analysis or re-extraction target,
 never counted as pending analysis, never asked for paper metadata, never chunked or put in an indexing-pipeline source
-snapshot, never given element vectors, image or source-fact backfills, and never reported by the missing-chunks
-checkup. An approval racing the deletion of the same promotion source waits for the deletion and writes the source
+snapshot, never given element vectors, image or source-fact backfills, never reported by the missing-chunks
+checkup, never read by the command catalog (its routes answer 404 and the source detail shows no entry), and never
+counted in the library profile's corpus statistics. An approval racing the deletion of the same promotion source waits for the deletion and writes the source
 again. Data approved before the upgrade is rewritten by the PostgreSQL `0068` / SQLite v88 migration (see Operations).
 Deleting a notebook cascades all members' private Memory bound to it, so the delete dialog
 warns about that lifecycle consequence without exposing member identities or counts.

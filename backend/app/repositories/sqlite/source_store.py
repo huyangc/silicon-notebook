@@ -456,8 +456,11 @@ class SourceStore:
             like = f"%{needle}%"
             params += [notebook_id, like, like, notebook_id, like, notebook_id, like]
         with self.database.connect() as db:
-            total = db.execute(
-                f"SELECT COUNT(*) c FROM sources {where}", params).fetchone()["c"]
+            counted = db.execute(
+                "SELECT COUNT(*) c, "
+                f"COUNT(*) FILTER (WHERE {NOT_PROMOTION_SOURCE_PREDICATE}) d "
+                f"FROM sources {where}", params).fetchone()
+            total = counted["c"]
             rows = db.execute(
                 f"SELECT * FROM sources {where} "
                 # 同上:并列 created_at 下没有次键,翻页会重复/漏行,而且与来源
@@ -466,7 +469,12 @@ class SourceStore:
                 (*params, limit, offset),
             ).fetchall()
             items = self.sources_from_rows(db, rows)
-        return PaginatedSources(items=items, total_count=total, offset=offset, limit=limit)
+        return PaginatedSources(
+            items=items, total_count=total, offset=offset, limit=limit,
+            # PR-E8: the document-limit count, same rule as
+            # ``_visible_document_count_on``; only meaningful unfiltered
+            visible_document_count=None if needle else int(counted["d"]),
+        )
 
     def visible_document_count(self, notebook_id: str) -> int:
         """本笔记本「用户可见文档」数量 —— 与 list_sources_page 的 total_count 逐字
@@ -837,6 +845,7 @@ class SourceStore:
             for row in db.execute(
                 "SELECT parse_status, COUNT(*) AS c FROM sources "
                 f"WHERE notebook_id = ? AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
+                f"AND {NOT_PROMOTION_SOURCE_PREDICATE} "
                 "GROUP BY parse_status",
                 (notebook_id,),
             ).fetchall()

@@ -142,7 +142,8 @@ def approval_writes_library_owned_provenance(world: World) -> None:
     assert source == {
         "notebook_id": world.base, "title": f"晋升自：{ORIGIN_TITLE}",
         "source_type": PROMOTION_SOURCE_TYPE, "status": "active",
-        "parse_status": "parsed",
+        # terminal: the browser never polls it as "still processing"
+        "parse_status": "extracted",
     }
     (element,) = world.rows(
         "SELECT id,source_id,element_type,text FROM source_elements WHERE source_id=?",
@@ -363,6 +364,28 @@ def the_promotion_source_is_never_a_pipeline_target(world: World) -> None:
     # it never takes an uploaded-document slot, while the list still counts it
     assert repo.visible_document_count(world.base) == 0
     assert repo.list_sources_page(world.base).total_count == 1
+
+
+def the_command_catalog_and_library_profile_skip_the_promotion_source(
+    world: World,
+) -> None:
+    """Two more document pipelines leave it out: the command catalog answers
+    it like a missing source (its parse status is terminal, so the parsed
+    gate alone would let it through), and the library profile's corpus
+    statistics -- documents, parse-status counts, the live-evidence set --
+    describe the uploaded documents only. The public library here holds the
+    promotion source and nothing else."""
+    repo = world.repo
+    try:
+        repo.command_catalog.preview(world.base, world.promotion_source)
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("the command catalog read a promotion source")
+    stats = repo._runtime.agent_profile_jobs.corpus_stats(world.base)
+    assert stats.documents == 0
+    assert world.promotion_source not in stats.visible_ids
+    assert (stats.documents_parse_failed, stats.documents_not_parsed) == (0, 0)
 
 
 def the_source_summary_says_whether_its_objects_are_still_in_the_graph(

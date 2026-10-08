@@ -70,6 +70,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, Sequence
 
+from app.domain.promotion_source import PROMOTION_SOURCE_TYPE
 from app.core.llm import cap_kwargs
 from app.repositories.ports import (
     CATALOG_MAX_CANDIDATE_PAGE,
@@ -1245,6 +1246,10 @@ class CommandCatalogService:
         """
         source = self.sources.get_source(source_id)
         if getattr(source, "notebook_id", "") != notebook_id:
+            raise KeyError(source_id)
+        if getattr(source, "type", "") == PROMOTION_SOURCE_TYPE:
+            # PR-E8: a public library's promotion source is not a document;
+            # the catalog reads documents only (answered like a missing one).
             raise KeyError(source_id)
         return source
 

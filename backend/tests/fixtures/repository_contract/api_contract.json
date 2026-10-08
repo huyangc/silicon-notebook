@@ -9408,6 +9408,17 @@
             "total_count": {
               "title": "Total Count",
               "type": "integer"
+            },
+            "visible_document_count": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Visible Document Count"
             }
           },
           "required": [

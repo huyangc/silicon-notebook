@@ -16,6 +16,8 @@ import {
   ownsSourceDeleteRefresh,
 } from "./source-delete-state.ts";
 import { clampSourcePage, sourcePageRequestIsCurrent } from "./source-page-state.ts";
+import { PROMOTION_SOURCE_TYPE, sourceIsPending } from "./source-management.ts";
+import { pageDocumentCount } from "./document-limit.ts";
 import { sourceElementDomId } from "./source-detail-state.ts";
 import {
   crossLibrarySourceNotebookId,
@@ -98,6 +100,8 @@ export function useSourceLibrary({
   );
   const [sourcesTotal, setSourcesTotal] = useState(0);
   const [notebookSourceTotal, setNotebookSourceTotal] = useState(0);
+  // 文档数量上限的计数（不含收录来源）；与 notebookSourceTotal 同步维护。
+  const [notebookDocumentCount, setNotebookDocumentCount] = useState(0);
   const [sourcesPage, setSourcesPage] = useState(0);
   const [sourcesPageLoading, setSourcesPageLoading] = useState(false);
   const [sourcesCollapsed, setSourcesCollapsedState] = useState(false);
@@ -199,6 +203,7 @@ export function useSourceLibrary({
     setSourceScopeSelection(defaultSourceScopeSelection());
     setSourcesTotal(0);
     setNotebookSourceTotal(0);
+    setNotebookDocumentCount(0);
     setSourcesPage(0);
     setSourceQueryState("");
     setSourceDetail(null);
@@ -266,6 +271,9 @@ export function useSourceLibrary({
     setSourceScopeSelection(defaultSourceScopeSelection());
     setSourcesTotal(visibleTotal);
     setNotebookSourceTotal(visibleTotal);
+    setNotebookDocumentCount(pageDocumentCount(
+      input.page, new Set(filtered.items.map((item) => item.id)),
+    ));
     setSourcesPage(0);
     setSourceQueryState("");
     setSourceDetail(null);
@@ -453,7 +461,12 @@ export function useSourceLibrary({
     committedListWindowRef.current = { page: pageNum, q };
     setSources(filtered.items);
     setSourcesTotal(visibleTotal);
-    if (!q) setNotebookSourceTotal(visibleTotal);
+    if (!q) {
+      setNotebookSourceTotal(visibleTotal);
+      setNotebookDocumentCount(pageDocumentCount(
+        result, new Set(filtered.items.map((item) => item.id)),
+      ));
+    }
     setSourcesPage(pageNum);
     setSourcesPageLoading(false);
     pageAbortRef.current = null;
@@ -499,6 +512,7 @@ export function useSourceLibrary({
     ]);
     setSourcesTotal((total) => total + addedCount);
     setNotebookSourceTotal((total) => total + addedCount);
+    setNotebookDocumentCount((count) => count + addedCount);
     return true;
   }
 
@@ -513,6 +527,7 @@ export function useSourceLibrary({
       ...created,
     ]);
     setNotebookSourceTotal((total) => total + created.length);
+    setNotebookDocumentCount((count) => count + created.length);
     return true;
   }
 
@@ -675,6 +690,10 @@ export function useSourceLibrary({
       setSourceScopeSelection((previous) => removeSourceFromSelection(previous, source.id));
       if (wasVisible) setSourcesTotal((total) => Math.max(0, total - 1));
       setNotebookSourceTotal((total) => Math.max(0, total - 1));
+      // 收录来源不占文档名额，删掉它不改变上限计数
+      if (source.type !== PROMOTION_SOURCE_TYPE) {
+        setNotebookDocumentCount((count) => Math.max(0, count - 1));
+      }
       effectsRef.current.invalidateKnowledge();
       effectsRef.current.setToast("来源已删除");
       void Promise.allSettled([
@@ -721,7 +740,7 @@ export function useSourceLibrary({
   const ownerIsActive = currentOwner() !== null;
   const visibleSources = ownerIsActive ? sources : NO_SOURCES;
   const hasPending = visibleSources.some(
-    (source) => !["extracted", "failed"].includes(source.parse_status),
+    (source) => sourceIsPending(source),
   );
 
   useEffect(() => {
@@ -734,7 +753,7 @@ export function useSourceLibrary({
     let timer: number | undefined;
     let delay = SOURCE_POLL_INITIAL_MS;
     const first = sourcesRef.current.filter(
-      (source) => !["extracted", "failed"].includes(source.parse_status),
+      (source) => sourceIsPending(source),
     );
     if (first.length) {
       effectsRef.current.setStatusText(
@@ -744,7 +763,7 @@ export function useSourceLibrary({
     const tick = async () => {
       if (cancelled || !owns(owner)) return;
       const pending = sourcesRef.current.filter(
-        (source) => !["extracted", "failed"].includes(source.parse_status),
+        (source) => sourceIsPending(source),
       );
       if (pending.length === 0) {
         pollCountRef.current = 0;
@@ -841,6 +860,7 @@ export function useSourceLibrary({
       : inactiveScopeSelectionRef.current,
     sourcesTotal: ownerIsActive ? sourcesTotal : 0,
     notebookSourceTotal: ownerIsActive ? notebookSourceTotal : 0,
+    notebookDocumentCount: ownerIsActive ? notebookDocumentCount : 0,
     sourcesPage: ownerIsActive ? sourcesPage : 0,
     sourcesPageLoading: ownerIsActive ? sourcesPageLoading : false,
     sourcesCollapsed,

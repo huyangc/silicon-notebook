@@ -56,6 +56,7 @@ from typing import AbstractSet, Any, Mapping, Optional, Sequence, Tuple
 # The type value and the titles live in the readers' leaf module; re-exported.
 from app.domain.promotion_source import (  # noqa: F401 - re-exported
     MEMORY_PROMOTION_TITLE_PREFIX,
+    PROMOTION_SOURCE_ID_PREFIX,
     PROMOTION_SOURCE_TYPE,
     PROMOTION_TITLE_PREFIX,
     is_promotion_source_type,
@@ -97,7 +98,7 @@ def memory_origin_key(memory_id: str) -> str:
 
 def promotion_source_id(base_notebook_id: str, origin_key: str) -> str:
     """``src-promo-`` + md5(``<library>|<origin key>``)."""
-    return "src-promo-" + _digest(str(base_notebook_id), str(origin_key))
+    return PROMOTION_SOURCE_ID_PREFIX + _digest(str(base_notebook_id), str(origin_key))
 
 
 def promotion_element_id(source_id: str, origin_element_id: str, text: str) -> str:

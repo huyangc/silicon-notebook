@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { documentUploadBlockReason, resolveDocumentCapacity } from "../../app/document-limit.ts";
+import {
+  documentUploadBlockReason,
+  pageDocumentCount,
+  resolveDocumentCapacity,
+} from "../../app/document-limit.ts";
 
 test("未满额:显示指示但不门控", () => {
   const cap = resolveDocumentCapacity({ isAdmin: false, documentLimit: 20, documentCount: 5 });
@@ -67,4 +71,26 @@ test("已经满额时给出可操作原因；未知上限和管理员不做前�
   const admin = resolveDocumentCapacity({ isAdmin: true, documentLimit: 20, documentCount: 20 });
   assert.equal(documentUploadBlockReason(unknown, 99), null);
   assert.equal(documentUploadBlockReason(admin, 99), null);
+});
+
+test("收录来源不占文档名额:15 篇 + 6 个收录时入口可用、指示 15/20", () => {
+  // PR-E8: the list total counts 21, the backend's visible_document_count 15.
+  const items = [
+    ...Array.from({ length: 15 }, (_, i) => ({ id: `d${i}`, type: "markdown" })),
+    ...Array.from({ length: 6 }, (_, i) => ({ id: `p${i}`, type: "promotion" })),
+  ];
+  const page = { total_count: 21, visible_document_count: 15, items };
+  const kept = new Set(items.map((item) => item.id));
+  const count = pageDocumentCount(page, kept);
+  assert.equal(count, 15);
+  const cap = resolveDocumentCapacity({ isAdmin: false, documentLimit: 20, documentCount: count });
+  assert.equal(cap.atCapacity, false);
+  assert.equal(`${cap.count} / ${cap.limit}`, "15 / 20");
+  assert.equal(documentUploadBlockReason(cap, 1), null);
+  // a source still being deleted locally is taken off -- but a promotion
+  // source never was in the count
+  const deleting = new Set([...kept].filter((id) => id !== "d0" && id !== "p0"));
+  assert.equal(pageDocumentCount(page, deleting), 14);
+  // an older backend without the field: the total, as before
+  assert.equal(pageDocumentCount({ total_count: 21, items }, kept), 21);
 });

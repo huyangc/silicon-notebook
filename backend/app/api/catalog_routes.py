@@ -21,6 +21,7 @@ from app.api.deps import (
     user_error,
 )
 from app.api.source_routes import _HIDDEN_SOURCE_TYPES
+from app.domain.promotion_source import PROMOTION_SOURCE_TYPE
 from app.core.audit_actor import session_audit_principal
 from app.models.command_catalog import (
     CommandCatalogApplyRequest,
@@ -153,6 +154,8 @@ def _owned_source(notebook_id: str, source_id: str) -> None:
         meta is None
         or meta["notebook_id"] != notebook_id
         or meta["source_type"] in _HIDDEN_SOURCE_TYPES
+        # PR-E8: a promotion source is not a document either
+        or meta["source_type"] == PROMOTION_SOURCE_TYPE
     ):
         raise HTTPException(status_code=404, detail="Source not found")
 

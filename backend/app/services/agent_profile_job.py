@@ -46,6 +46,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
+from app.domain.promotion_source import is_promotion_source_id
 from app.repositories.ports import (
     AGENT_OBSERVATION_SAMPLE_MAX,
     AGENT_PROFILE_INTERNAL_FAILURE_MESSAGE,
@@ -1712,8 +1713,11 @@ class AgentProfileConsolidationService:
         """
         with self.database.connect() as db:
             signals = list(self.sources.source_change_signal_rows(db, notebook_id))
+            # PR-E8: a public library's promotion sources are listed but are
+            # not documents; the library profile describes documents only
             visible_ids = [
-                str(row[0]) for row in signals if bool(row[3])
+                str(row[0]) for row in signals
+                if bool(row[3]) and not is_promotion_source_id(row[0])
             ]
             parse_status_rows = list(
                 self.sources.visible_parse_status_counts(db, notebook_id)
