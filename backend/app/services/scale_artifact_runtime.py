@@ -25,6 +25,7 @@ from app.repositories.scale_build_lock import (
     ScaleBuildLockAttempt,
     ScaleBuildLockLost,
 )
+from app.services.offline_batch import offline_batch_active
 
 
 # Outcome of one admission attempt in ``_admit_scale_op`` — the three cases a
@@ -2574,6 +2575,8 @@ class ScaleArtifactRuntime:
         }
 
     def maybe_enqueue_fold(self, notebook_id: str) -> None:
+        if offline_batch_active():  # 离线批量不逐源加载整份索引(offline_batch)
+            return
         if not self.settings.scale_auto_fold_on_add:
             return
         try:
@@ -2586,6 +2589,8 @@ class ScaleArtifactRuntime:
             )
 
     def maybe_auto_index(self, notebook_id: str) -> None:
+        if offline_batch_active():  # 先于 auto_index_checked,不污染已检查集合
+            return
         if not self.settings.scale_index_auto_enabled:
             return
         if notebook_id in self.auto_index_checked:

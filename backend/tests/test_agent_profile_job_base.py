@@ -1482,3 +1482,21 @@ def test_mixed_dead_and_unsampled_evidence_never_renders_the_all_gone_marker(har
     assert "all supporting documents are gone" not in prompt
     assert "+2 more still in the library" in prompt
     assert "1 no longer in the library" in prompt
+
+
+def test_offline_batch_scope_bumps_the_signal_but_never_starts_base(harness, monkeypatch):
+    from app.services.offline_batch import OfflineBatchPolicy, offline_batch_scope
+
+    submitter = _Submitter()
+    _with_submitter(monkeypatch, submitter)
+    service = _service(harness, client=_Client(_reply([])))
+
+    with offline_batch_scope(OfflineBatchPolicy()):
+        for _ in range(4):  # 越过阈值 3
+            service.note_corpus_change(NOTEBOOK_ID)
+
+    assert submitter.calls == []
+    assert _job(harness)["pending_signal"] == 4
+    # 出了 scope 后下一次变更照常越阈值触发,计数没有丢。
+    service.note_corpus_change(NOTEBOOK_ID)
+    assert [call["name"] for call in submitter.calls] == [f"agentprofile-{NOTEBOOK_ID}"]

@@ -77,6 +77,7 @@ from app.services.notebook_metadata import (
     MetadataRefreshCoordinator, fallback_metadata, synthesize_metadata,
     notebook_metadata_refresh_suppressed,
 )
+from app.services.offline_batch import kg_extraction_deferred
 from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
 from app.services.source_element_enrichment import enrich_source_elements
@@ -1282,6 +1283,8 @@ class SourceIngestionService:
 
     def should_extract_kg(self, notebook_id: str) -> bool:
         """摄取期是否抽 KG:全局开关开,或该 notebook 已有 KG(续抽保持完整)。"""
+        if kg_extraction_deferred():  # 离线 ingest 不抽 KG(offline_batch)
+            return False
         return self.settings.kg_auto_extract or self.notebook_has_kg(notebook_id)
 
     def _note_notebook_ingestion(self, notebook_id: str, delta: int) -> None:

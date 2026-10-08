@@ -12,6 +12,9 @@
 `ingest`、`all`、`reparse` 在来源处理期间默认跳过笔记本名称／描述自动刷新，失败来源
 也跳过，结束时不补刷，无需额外参数。来源摘要和论文信息照常处理；已有笔记本字段值及
 自动／手动归属保持不变，后续网页端操作仍能正常刷新自动字段。
+`ingest`、`all`、`reparse`、`kg` 还会跳过逐源的规模检索索引自动构建／增量排队和智能体
+理解整合触发（触发计数照常累加，在线服务在之后的变更时整合）。`ingest` 即使目标笔记本
+已有知识图谱也不抽取；随后运行 `kg`，它收尾时重建统一知识图谱与规模检索索引。
 旧脚本继续支持，尾部参数、
 退出码、锁、确认标志和信号处理均保持原意。Shell/Python 入口保留调用目录，输入/输出
 参数中的相对路径含义不变（npm 按项目根运行）。普通应用命令不自动启动插件配套服务；
@@ -1573,7 +1576,9 @@ python scripts/mineru_batch_parse.py --only-failed  # 只重跑上次失败的�
 `ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`reparse`、`backfill-source-index`、`backfill-chunk-elements`、`backfill-images` 会按 `DATABASE_URL` 选择 SQLite 或 PostgreSQL。PostgreSQL 直连维护严格属于离线操作：先停止 API 和全部后台 writer，再给命令追加 `--confirm-service-stopped`。该参数只声明运维人员已经停服，不会自行停止服务。数据库级 advisory lock 会 fail-fast 阻止两个维护 CLI 重叠；来源、完整/限量 KG 目标、metadata、reextract、向量、关系和反向索引驱动均使用有界 keyset 分页——包括 `index` 阶段的整库向量矩阵加载，现在按页有界读取而不是一条无界 `SELECT`。大库离线维护仍可能在这些流程里**其余**的长语句上撞到在线默认的 `POSTGRES_STATEMENT_TIMEOUT_SECONDS`（`30`，按交互式请求定的——这是仓库默认值，生产实际值以部署配置为准）；给维护 CLI 进程本身的环境变量调大该值（例如 `86400`）——矩阵加载已不再是流水线里最大的单条语句，但离线流水线的其余部分（以及慢盘上的分页矩阵读取本身）仍受同一条逐语句超时约束。在线维护仍应走应用/API，`--dry-run` 不打开 repository——**除 `backfill-images` 外**：它的 dry-run 是一次只读的**数据库**演练（要读每个来源的元素与 chunk 才报得出能补多少张），所以在 PostgreSQL 上同样需要 `--confirm-service-stopped`。`vectors-to-blob` 刻意只支持 SQLite，因为 PostgreSQL 向量已经是 `bytea`；PostgreSQL 会在打开 repository 前明确拒绝。
 
 把一个目录里的 Markdown(及偶发 PDF)离线复用现有管线灌进库。分两阶段:
-先 `ingest`(无 LLM、快,chunk 问答即可用),再 `kg`(LLM 抽取,单独可恢复)。
+先 `ingest`(无 LLM、快,chunk 问答即可用),再 `kg`(LLM 抽取,单独可恢复)。超大批量
+优先用 `ingest` 再 `kg`,而不是 `all`;并在 CLI 环境里设 `MALLOC_ARENA_MAX=2`,限制多
+工作线程下 glibc arena 碎片。
 
 ```bash
 # 1) 解析+分块+向量(无 LLM):新建库须用 --notebook-name 指定名字
