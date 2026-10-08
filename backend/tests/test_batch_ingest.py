@@ -3732,8 +3732,18 @@ def test_run_reparse_workers_see_offline_batch(repo, tmp_path, monkeypatch):
     _seed_missing_elements_source(repo, nb_id, tmp_path, "src-rs")
     seen = []
     monkeypatch.setattr(repo, "process_source", lambda sid: _observe_scope(seen))
-    bi.run_reparse(repo, nb_id, no_rebuild=True)
+    rebuilt = []
+
+    def _rebuild(nb, progress=None, force=False, fresh=False):
+        # 主线程收尾(rebuild 尾部会调 maybe_auto_index)同样要在作用域内
+        _observe_scope(rebuilt)
+        return 0
+
+    monkeypatch.setattr(repo, "rebuild_unified_kg", _rebuild)
+    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb: 0)
+    bi.run_reparse(repo, nb_id)
     assert seen == [(True, False)]
+    assert rebuilt == [(True, False)]
 
 
 def test_run_reparse_notes_existing_scale_index_not_updated(
