@@ -363,7 +363,8 @@ def the_promotion_source_is_never_a_pipeline_target(world: World) -> None:
     assert world.rows("SELECT id FROM knowledge_objects WHERE id=?", (base_object,))
     # it never takes an uploaded-document slot, while the list still counts it
     assert repo.visible_document_count(world.base) == 0
-    assert repo.list_sources_page(world.base).total_count == 1
+    page = repo.list_sources_page(world.base)
+    assert (page.total_count, page.visible_document_count) == (1, 0)
 
 
 def the_command_catalog_and_library_profile_skip_the_promotion_source(
