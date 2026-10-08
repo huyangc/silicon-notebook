@@ -42,7 +42,12 @@ from app.services.image_backfill_phase import (
     run_backfill_images,
 )
 from app.services.knowledge_lifecycle import ModelSkipPolicy
-from app.services.notebook_metadata import suppress_notebook_metadata_refresh
+from app.services.offline_batch import (
+    OfflineBatchPolicy,
+    current_offline_batch_policy,
+    in_offline_batch_scope,
+    offline_batch_scope,
+)
 from app.services.repository import UploadedSourceFile
 from app.services.maintenance_cli import (
     MaintenanceCliError,
@@ -135,15 +140,17 @@ def _resolve_tracked_future(
     function: Callable[..., object],
     args: tuple[object, ...],
     kwargs: dict[str, object],
+    policy: OfflineBatchPolicy,
 ) -> None:
     """Run accepted work only after atomically claiming its visible token."""
     if not completion.set_running_or_notify_cancel():
         return
     try:
-        # Per-source title/description synthesis serializes a whole notebook's
-        # ingestion pool. Offline work skips it, including failed-source paths;
+        # Pool threads do not inherit ContextVars: replay the submitter's offline
+        # batch scope (default policy outside any scope, e.g. run_metadata) so
+        # notebook-wide per-source hooks stay off, failed-source paths included;
         # the context resets before a shared executor can accept online work.
-        with suppress_notebook_metadata_refresh():
+        with offline_batch_scope(policy):
             result = function(*args, **kwargs)
     except BaseException as exc:
         completion.set_exception(exc)
@@ -167,7 +174,8 @@ def _submit_tracked_future(
     """
     completion: Future[object] = Future()
     accepted.add(completion)
-    submit(_resolve_tracked_future, completion, function, args, kwargs)
+    policy = current_offline_batch_policy() or OfflineBatchPolicy()
+    submit(_resolve_tracked_future, completion, function, args, kwargs, policy)
     return completion
 
 
@@ -464,6 +472,7 @@ def ensure_notebook(
     return repo.create_notebook(NotebookCreate(name=name)).id
 
 
+@in_offline_batch_scope(OfflineBatchPolicy(defer_kg_extraction=True))
 def run_ingest(
     repo: BatchIngestRepository,
     notebook_id: str,
@@ -481,6 +490,10 @@ def run_ingest(
     `parsed` 同样既是活跃过渡态又是中断残留态。要判准需要持久化的完成标记与活跃租约
     (schema 变更),见 docs/superpowers/specs/2026-07-22-pipeline-damage-recovery-design.md。
     存量补救走显式的 `reparse` 子命令(它按「有没有 source_elements」选目标)。
+
+    ingest 永不抽 KG,即使目标 notebook 已有 KG(offline_batch 的 defer_kg_extraction);
+    也不触发逐源的 scale index 构建/fold 排队与理解整合。收尾若该 notebook 已有 scale
+    index,会提示新来源尚未入索引:跑 `kg`(收尾重建统一 KG 与索引)或 `index`。
     """
     log = log or (lambda _e: None)
     counts = {"uploaded": 0, "skipped": 0, "failed": 0}
@@ -570,6 +583,13 @@ def run_ingest(
     counts["sources_embedded"] = backfill_chunk_embeddings(
         repo, notebook_id, missing_only=True
     )
+    if repo.maintenance.has_scale_index(notebook_id):
+        print(
+            "提示:本次新增来源尚未进入规模检索索引;"
+            "请运行 kg(收尾会重建统一 KG 与索引)或 index。",
+            flush=True,
+        )
+        log({"phase": "ingest", "status": "scale_index_not_updated"})
     return counts
 
 
@@ -682,6 +702,7 @@ def _report_model_skips(policy: ModelSkipPolicy | None) -> None:
     )
 
 
+@in_offline_batch_scope(OfflineBatchPolicy())
 def run_kg(repo: BatchIngestRepository, notebook_id: str,
            limit: int | None = None, log: LogFn | None = None,
            no_rebuild: bool = False, rebuild_only: bool = False, fresh: bool = False,
@@ -864,6 +885,7 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
     return res
 
 
+@in_offline_batch_scope(OfflineBatchPolicy())
 def run_all(repo: BatchIngestRepository, notebook_id: str,
             files: Iterable[Path],
             log: LogFn | None = None, report_interval: int = 15,
@@ -932,8 +954,9 @@ def run_all(repo: BatchIngestRepository, notebook_id: str,
             if new_files:
                 repo.upload_sources(
                     notebook_id,
-                    [UploadedSourceFile(file_name=p.name, content_type="", content=p.read_bytes())
-                     for p in new_files],
+                    # 生成器:upload_sources 逐个消费,同一时刻只持有一个文件的字节。
+                    (UploadedSourceFile(file_name=p.name, content_type="", content=p.read_bytes())
+                     for p in new_files),
                     scheduler=_sched,             # 每个新 source 作为 process_source job 并发
                 )
             for sid in reparse_sids:
@@ -994,6 +1017,7 @@ def run_all(repo: BatchIngestRepository, notebook_id: str,
     return res
 
 
+@in_offline_batch_scope(OfflineBatchPolicy())
 def run_reparse(repo: BatchIngestRepository, notebook_id: str,
                 limit: int | None = None,
                 log: LogFn | None = None, report_interval: int = 15,

@@ -81,6 +81,7 @@ from app.services.collection_catalog import ENUMERABLE_ELEMENT_KINDS
 from app.services.kg.json_utils import safe_json
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.model_work import model_artifact_scope
+from app.services.offline_batch import offline_batch_active
 from app.services.prompts import (
     AGENT_OBSERVATION_UNTRUSTED_INSTRUCTION,
     AGENT_PROFILE_OVERLAY_SCHEMA_HINT,
@@ -1290,6 +1291,8 @@ class AgentProfileConsolidationService:
             # Read straight off Settings, with no local fallback default: a
             # second spelling of "5" here would be the number that silently
             # wins whenever the real one moves.
+            if offline_batch_active():  # 计数照累加,整合留给在线服务(offline_batch)
+                return
             if pending < int(self.settings.agent_profile_base_trigger):
                 return
             self.start_base(notebook_id)

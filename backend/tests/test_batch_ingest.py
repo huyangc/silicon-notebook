@@ -3581,3 +3581,109 @@ def test_question_index_cli_uses_maintenance_port(capsys):
     assert calls[0][1]["workers"] == 3
     assert calls[0][1]["force"] is True
     assert "question-index done" in capsys.readouterr().out
+
+
+# ───────────────────────── offline_batch scope 贯穿各阶段 ─────────────────────────
+def _observe_scope(sink):
+    from app.services.offline_batch import kg_extraction_deferred, offline_batch_active
+
+    sink.append((offline_batch_active(), kg_extraction_deferred()))
+
+
+def test_run_ingest_workers_see_offline_batch_with_kg_deferred(repo, tmp_path, monkeypatch):
+    d = _make_md_dir(tmp_path, n=2)
+    nb_id = bi.ensure_notebook(repo, None, "nb-scope-ingest")
+    seen = []
+    orig = repo.upload_sources
+
+    def spy(*args, **kwargs):
+        _observe_scope(seen)
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "upload_sources", spy)
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=2)
+    assert seen and all(item == (True, True) for item in seen)
+    from app.services.offline_batch import offline_batch_active
+
+    assert not offline_batch_active()
+
+
+def test_run_ingest_notes_new_sources_missing_from_existing_scale_index(
+    repo, tmp_path, monkeypatch, capsys
+):
+    d = _make_md_dir(tmp_path, n=1)
+    nb_id = bi.ensure_notebook(repo, None, "nb-scope-note")
+    logs = []
+    monkeypatch.setattr(repo.maintenance, "has_scale_index", lambda nb: False)
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), log=logs.append)
+    assert "规模检索索引" not in capsys.readouterr().out
+    monkeypatch.setattr(repo.maintenance, "has_scale_index", lambda nb: True)
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), log=logs.append)
+    assert "规模检索索引" in capsys.readouterr().out
+    assert any(e.get("status") == "scale_index_not_updated" for e in logs)
+
+
+def _stub_all_tail(repo, monkeypatch):
+    monkeypatch.setattr(
+        repo, "rebuild_unified_kg",
+        lambda nb, progress=None, force=False, fresh=False: 0,
+    )
+    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb: 0)
+
+
+def test_run_all_workers_see_offline_batch_without_kg_deferral(repo, tmp_path, monkeypatch):
+    bind_chat_client(repo, "kg_extract", _StubLLM())
+    d = _make_md_dir(tmp_path, n=2)
+    nb_id = bi.ensure_notebook(repo, None, "nb-scope-all")
+    _stub_all_tail(repo, monkeypatch)
+    seen = []
+    monkeypatch.setattr(repo, "process_source", lambda sid: _observe_scope(seen))
+    res = bi.run_all(repo, nb_id, bi.iter_files(d))
+    assert res["new"] == 3 and len(seen) == 3
+    assert all(item == (True, False) for item in seen)
+
+
+def test_run_all_streams_file_bytes_into_upload_sources(repo, tmp_path, monkeypatch):
+    d = _make_md_dir(tmp_path, n=2)
+    nb_id = bi.ensure_notebook(repo, None, "nb-scope-stream")
+    _stub_all_tail(repo, monkeypatch)
+    reads = {"n": 0}
+    orig_read = Path.read_bytes
+
+    def counting_read(self):
+        reads["n"] += 1
+        return orig_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", counting_read)
+    consumed = []
+
+    def fake_upload(notebook_id, files, scheduler=None, **_kw):
+        assert not isinstance(files, (list, tuple))
+        base = reads["n"]
+        for i, f in enumerate(files, 1):
+            assert reads["n"] == base + i   # 每消费一个才读一个文件
+            consumed.append(f.file_name)
+        return []
+
+    monkeypatch.setattr(repo, "upload_sources", fake_upload)
+    bi.run_all(repo, nb_id, bi.iter_files(d))
+    assert len(consumed) == 3
+
+
+def test_run_kg_extraction_workers_see_offline_batch(repo, monkeypatch):
+    nb_id = bi.ensure_notebook(repo, None, "nb-scope-kg")
+    _seed_sources(repo, nb_id, 2, "src-off")
+    seen = []
+    monkeypatch.setattr(
+        repo._runtime.source_ingestion, "run_extraction",
+        lambda sid, **_kw: _observe_scope(seen),
+    )
+    monkeypatch.setattr(repo._runtime.source_ingestion, "set_source_status", lambda *a, **k: None)
+    monkeypatch.setattr(
+        repo, "rebuild_unified_kg",
+        lambda nb, progress=None, force=False, fresh=False: 0,
+    )
+    _bind_chat(repo, "kg_extract", _StubLLM())
+    res = bi.run_kg(repo, nb_id)
+    assert res["extracted"] == 2
+    assert len(seen) == 2 and all(item == (True, False) for item in seen)

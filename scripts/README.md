@@ -276,6 +276,9 @@ preflight + database-wide advisory lock，锁竞争会以状态码 2 退出。`-
 `ingest`、`all`、`reparse` 默认跳过笔记本名称和描述的自动刷新，结束时也不补刷，
 无需追加开关。来源摘要、论文信息和后续分析仍照常执行；名称／描述的自动状态保留，
 后续网页端操作仍可触发刷新。
+`ingest`、`all`、`reparse`、`kg` 还会跳过逐源的规模检索索引自动构建／增量排队与
+智能体理解整合触发（触发计数照常累加，由在线服务在之后的变更时整合）；`ingest`
+即使目标笔记本已有知识图谱也不抽取，需随后运行 `kg`，它收尾时重建统一知识图谱与规模检索索引。
 
 ```bash
 PYTHONPATH=backend python scripts/batch_ingest.py index \

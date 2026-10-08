@@ -16,6 +16,12 @@ name/description refresh throughout source processing, including failures, and
 do not refresh at the end. No extra flag is required. Source summaries and paper
 metadata still run; notebook field values and automatic/manual ownership are
 preserved, so subsequent online operations can refresh automatic fields normally.
+The `ingest`, `all`, `reparse`, and `kg` phases also skip the per-source automatic
+scale-index build and fold queueing and the agent-understanding consolidation
+trigger (the trigger counter still accumulates, so the online service consolidates
+at its next corpus change). `ingest` never extracts KG, even into a notebook that
+already has one; run `kg` afterwards, which rebuilds the unified KG and the scale
+index at its end.
 Existing scripts remain supported; their trailing arguments, exit codes, locking,
 confirmation flags and signal handling are retained. The shell/Python entry keeps
 the caller's working directory, so relative input/output arguments keep their meaning
@@ -1986,7 +1992,9 @@ before opening a repository.
 
 Ingest a directory of Markdown (and the occasional PDF) through the existing
 pipeline, in two phases: `ingest` (no LLM, fast — chunk Q&A works immediately),
-then `kg` (LLM extraction, separately resumable).
+then `kg` (LLM extraction, separately resumable). For a very large run, prefer
+`ingest` then `kg` over `all`, and set `MALLOC_ARENA_MAX=2` in the CLI environment to
+limit glibc arena fragmentation across many worker threads.
 
 ```bash
 # 1) parse + chunk + embeddings (no LLM); --notebook-name is required when creating a notebook
