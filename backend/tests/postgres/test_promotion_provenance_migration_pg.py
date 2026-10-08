@@ -66,57 +66,63 @@ def test_pg_summary_counts_match_the_sqlite_log(postgres_database):
     with psycopg.connect(postgres_database.settings.database_url) as raw:
         raw.execute(body, prepare=False)
         counts = raw.execute(
-            "SELECT (SELECT count(DISTINCT base_id) FROM pp_rewrite),"
+            "SELECT (SELECT count(DISTINCT base_id) FROM pp_new_evidence),"
             "(SELECT count(*) FROM pp_new_evidence),"
             "(SELECT count(*) FROM pp_rewrite WHERE body <> ''),"
             "(SELECT count(*) FROM pp_rewrite WHERE body = ''),"
-            "(SELECT count(*) FROM pp_new_evidence WHERE evidence = '[]'::jsonb)"
+            "(SELECT count(*) FROM pp_new_evidence WHERE NOT EXISTS ("
+            "SELECT 1 FROM jsonb_array_elements(evidence) AS ev(item) "
+            "WHERE jsonb_typeof(ev.item) = 'object'))"
         ).fetchone()
         raw.rollback()
     # = test_migration_logs_counts_only on SQLite
-    assert counts == (2, 6, 5, 1, 1)
+    assert counts == (2, 8, 6, 2, 2)
 
 
 def test_pg_candidate_and_expansion_statements_keep_index_paths(postgres_database):
-    """A public library with 20,000 objects whose reverse index is attested:
-    the candidate read is driven by idx_kos_notebook and anti-joins the
-    library's own sources (read by notebook, never the whole table), and the
-    expansion reads the candidates by primary key."""
+    """Under the DEFAULT planner settings (nothing switched off), with a
+    20,000-object personal notebook beside a small attested public library:
+    the candidate read drives the library's reverse index through
+    idx_kos_notebook, its evidence scan reads the library's objects through a
+    notebook index (never the whole table), and the foreign-entry filter of
+    step 3 reads the candidates by primary key."""
     _seed_at_67(postgres_database)
     with postgres_database.write() as db:
         db.execute("SET LOCAL statement_timeout = '0'")
         db.execute(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+            "created_at,updated_at,tier) VALUES ('nb-pp-filler','F','','','ready',%s,"
+            "now(),now(),'personal')", (cases.USER,))
+        db.execute(
             "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,source_id,"
-            "payload,evidence,created_at,updated_at) SELECT 'kb-'||g,%s,'claim',"
-            "'approved','s-b','{}'::jsonb,'[]'::jsonb,now(),now() "
-            "FROM generate_series(0,19999) g", (cases.BASE,))
+            "payload,evidence,created_at,updated_at) SELECT 'kf-'||g,'nb-pp-filler',"
+            "'claim','approved','s-p','{}'::jsonb,'[]'::jsonb,now(),now() "
+            "FROM generate_series(0,19999) g")
         db.execute(
             "INSERT INTO knowledge_object_sources(object_id,source_id,notebook_id) "
-            "SELECT 'kb-'||g,'s-b',%s FROM generate_series(0,19999) g", (cases.BASE,))
+            "SELECT 'kf-'||g,'s-p','nb-pp-filler' FROM generate_series(0,19999) g")
     with psycopg.connect(postgres_database.settings.database_url, autocommit=True) as raw:
-        for table in ("knowledge_objects", "knowledge_object_sources", "sources"):
+        for table in ("knowledge_objects", "knowledge_object_sources", "sources",
+                      "promotion_candidates", "memory_items"):
             raw.execute(f"VACUUM (ANALYZE) {table}")
     body = MIGRATION.read_text(encoding="utf-8")
-    prefix = body[: body.index("-- 2. Candidate objects.")]
+    prefix = body[: body.index("-- 2. Candidate objects")]
     candidate = body[body.index("CREATE TEMP TABLE pp_cand"):body.index("ANALYZE pp_cand;")]
     candidate_select = candidate[candidate.index("SELECT"):].rstrip().rstrip(";")
-    expansion = body[body.index("CREATE TEMP TABLE pp_item"):body.index("ANALYZE pp_item;")]
-    expansion_select = expansion[expansion.index("SELECT"):].rstrip().rstrip(";")
+    objects = body[body.index("CREATE TEMP TABLE pp_obj"):body.index("ANALYZE pp_obj;")]
+    objects_select = objects[objects.index("SELECT"):].rstrip().rstrip(";")
     with psycopg.connect(postgres_database.settings.database_url) as raw:
         raw.execute(prefix, prepare=False)
-        raw.execute("SET LOCAL enable_seqscan=off")
-        raw.execute("SET LOCAL enable_bitmapscan=off")
         cand_plan = "\n".join(
             row[0] for row in raw.execute(f"EXPLAIN (COSTS OFF) {candidate_select}"))
         raw.execute(candidate, prepare=False)
         raw.execute("ANALYZE pp_cand")
-        item_plan = "\n".join(
-            row[0] for row in raw.execute(f"EXPLAIN (COSTS OFF) {expansion_select}"))
+        obj_plan = "\n".join(
+            row[0] for row in raw.execute(f"EXPLAIN (COSTS OFF) {objects_select}"))
         raw.rollback()
     assert "idx_kos_notebook" in cand_plan, cand_plan
-    assert "Anti Join" in cand_plan, cand_plan
     assert "Seq Scan on knowledge_object_sources" not in cand_plan, cand_plan
-    assert "Seq Scan on sources" not in cand_plan, cand_plan
     assert "Seq Scan on knowledge_objects" not in cand_plan, cand_plan
-    assert "pk_knowledge_objects" in item_plan, item_plan
-    assert "Seq Scan on knowledge_objects" not in item_plan, item_plan
+    assert "idx_knowledge_objects_nb_" in cand_plan, cand_plan
+    assert "pk_knowledge_objects" in obj_plan, obj_plan
+    assert "Seq Scan on knowledge_objects" not in obj_plan, obj_plan

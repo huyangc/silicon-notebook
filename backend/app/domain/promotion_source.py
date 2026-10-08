@@ -36,3 +36,16 @@ def promotion_origin_title(title: str) -> str:
 
 def is_promotion_source_type(source_type: object) -> bool:
     return str(source_type or "") == PROMOTION_SOURCE_TYPE
+
+
+class PromotionSourceNotExtractable(ValueError):
+    """KG extraction refused for a promotion source: it has no document, and
+    re-extracting it would first delete the promoted objects its elements
+    support (``SourceIngestionService.run_extraction`` is the one gate every
+    extraction caller -- reextract CLI, ``extract_source``, jobs -- passes)."""
+
+    def __init__(self, source_id: str) -> None:
+        super().__init__(
+            f"source {source_id} holds content promoted into a public library "
+            "and is never extracted"
+        )

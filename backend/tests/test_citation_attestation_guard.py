@@ -256,6 +256,10 @@ REGISTRY = {
     ("domain/promotion_provenance.py", "plan_promotion_evidence", "splat:element_id"): (
         "global-unreachable", _import_gate("domain/promotion_provenance.py"),
         "promotion approval rewrites stored evidence on write", 1),
+    # ... and its frozen v88 copy, run by the SQLite migration only.
+    ("repositories/sqlite/migrations.py", "_v88_plan", "splat:element_id"): (
+        "global-unreachable", _import_gate("repositories/sqlite/migrations.py"),
+        "the v88 migration rewrites stored evidence at startup", 1),
     ("repositories/sqlite/memory_store.py", "MemoryStore._validate_evidence_ref_on", "splat:element_id"): (
         "global-unreachable", _import_gate("repositories/sqlite/memory_store.py"),
         "Memory evidence validation on write", 1),

@@ -23,6 +23,18 @@ export function sourceDetailReparsable(sourceType: string): boolean {
   return sourceDetailManageable(sourceType) && sourceType !== PROMOTION_SOURCE_TYPE;
 }
 
+/**
+ * 删除来源的确认文案。收录来源不生成知识，它是已收录知识条目的证据：删除后这些条目
+ * 失去这份证据，只靠它支撑的条目一起删除，还有其他证据的条目保留（后端
+ * `GovernanceStore.detach_promotion_sources_on`）。
+ */
+export function sourceDeleteMessage(sourceType: string, title: string): string {
+  if (sourceType === PROMOTION_SOURCE_TYPE) {
+    return `确定删除“${title}”吗？它支撑的已收录知识条目会失去这份证据：只靠它支撑的条目会一起删除，还有其他证据的条目会保留。`;
+  }
+  return `确定删除“${title}”吗？它的解析元素、候选知识和由该来源生成的已批准知识也会一起移除。`;
+}
+
 /** 来源类型标签：收录来源给中文名，其余沿用原来的类型串。 */
 export function sourceTypeTag(sourceType: string): string | null {
   return sourceType === PROMOTION_SOURCE_TYPE ? "收录" : null;

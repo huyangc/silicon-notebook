@@ -24,7 +24,10 @@ from app.domain.indexing_pipeline import (
 )
 from app.core.llm import cap_kwargs
 from app.domain.cancellation import CoreCancellation
-from app.domain.promotion_source import PROMOTION_SOURCE_TYPE
+from app.domain.promotion_source import (
+    PROMOTION_SOURCE_TYPE,
+    PromotionSourceNotExtractable,
+)
 from app.domain.extensions import (
     ElementAssetLocation,
     ElementEnricherHostPort,
@@ -282,6 +285,12 @@ class SourceIngestionService:
         # (narrow test doubles) removes the sources only.
         memory_detach: Optional[Callable[[Any, List[dict]], Any]] = None,
         memory_after_teardown: Optional[Callable[[Any, Any], None]] = None,
+        # PR-E8: ``promotion_detach(db, rows, now)`` runs for the promotion
+        # sources of a teardown after the source lock and before the clear:
+        # it removes those sources' entries from the evidence of the objects
+        # citing them and deletes only the objects left without evidence, so
+        # a native public object a promotion was merged into survives.
+        promotion_detach: Optional[Callable[[Any, List[dict], str], Any]] = None,
     ) -> None:
         self.settings = settings
         self.notebooks = notebooks
@@ -313,6 +322,7 @@ class SourceIngestionService:
         self.clear_sources_extraction_state = clear_sources_extraction_state
         self.memory_detach = memory_detach
         self.memory_after_teardown = memory_after_teardown
+        self.promotion_detach = promotion_detach
         self.begin_extraction_run = begin_extraction_run
         self.finish_extraction_run = finish_extraction_run
         self.notebook_tier = notebook_tier
@@ -2435,6 +2445,15 @@ class SourceIngestionService:
             if locked is not None
             else self.sources.lock_sources_for_teardown_tx(db, source_ids)
         )
+        promotion_rows = [
+            dict(row) for row in rows
+            if row.get("source_type") == PROMOTION_SOURCE_TYPE
+        ]
+        if promotion_rows and self.promotion_detach is not None:
+            # PR-E8: a promotion source's objects lose its entries first; only
+            # an object left without evidence is deleted (the clear below then
+            # finds nothing of this source to delete).
+            self.promotion_detach(db, promotion_rows, self.now())
         by_notebook: dict[str, List[str]] = {}
         for row in rows:
             by_notebook.setdefault(row["notebook_id"], []).append(row["id"])
@@ -2664,6 +2683,10 @@ class SourceIngestionService:
         if control is not None:
             control.raise_if_aborted()
         source: SourceDetail = self.sources.get_source(source_id)
+        if source.type == PROMOTION_SOURCE_TYPE:
+            # PR-E8: the one gate every extraction caller passes (reextract
+            # CLI, extract_source, jobs) -- before anything is cleared.
+            raise PromotionSourceNotExtractable(source_id)
         elements = self.source_elements(source_id)
         staged_indexing = bool(indexing_stage_job_id)
         # 历史源 catch-up:补论文元数据(幂等,有行即跳)。ensure_paper_metadata 的

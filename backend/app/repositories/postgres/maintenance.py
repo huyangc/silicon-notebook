@@ -277,7 +277,7 @@ class PostgresMaintenanceAdapter:
             rows = db.execute(
                 "SELECT id FROM sources WHERE notebook_id=%s "
                 "AND id COLLATE \"C\">%s "
-                "AND source_type NOT IN ('memory','knowhow') "
+                "AND source_type NOT IN ('memory','knowhow') AND source_type <> 'promotion' "
                 "ORDER BY id COLLATE \"C\" LIMIT %s",
                 (notebook_id, after_id, int(limit)),
             ).fetchall()
@@ -292,7 +292,7 @@ class PostgresMaintenanceAdapter:
             rows = db.execute(
                 "SELECT id,title FROM sources WHERE notebook_id=%s "
                 "AND id COLLATE \"C\">%s "
-                "AND source_type NOT IN ('memory','knowhow') "
+                "AND source_type NOT IN ('memory','knowhow') AND source_type <> 'promotion' "
                 "ORDER BY id COLLATE \"C\" LIMIT %s",
                 (notebook_id, after_id, int(limit)),
             ).fetchall()
@@ -338,7 +338,7 @@ class PostgresMaintenanceAdapter:
             rows = db.execute(
                 "SELECT s.id FROM sources s WHERE s.notebook_id=%s "
                 "AND s.id COLLATE \"C\">%s "
-                "AND s.source_type NOT IN ('memory','knowhow') "
+                "AND s.source_type NOT IN ('memory','knowhow') AND s.source_type <> 'promotion' "
                 "AND NOT EXISTS (SELECT 1 FROM source_elements e "
                 "WHERE e.source_id=s.id) "
                 "ORDER BY s.id COLLATE \"C\" LIMIT %s",
@@ -411,7 +411,7 @@ class PostgresMaintenanceAdapter:
         with self._runtime.database.write() as db:
             db.execute(
                 "UPDATE sources SET doc_type=%s WHERE notebook_id=%s "
-                "AND source_type NOT IN ('memory','knowhow')",
+                "AND source_type NOT IN ('memory','knowhow') AND source_type <> 'promotion'",
                 (doc_type, notebook_id),
             )
 
@@ -1084,7 +1084,7 @@ class PostgresMaintenanceAdapter:
                 "SELECT COUNT(*) c FROM source_elements e "
                 "JOIN sources s ON s.id = e.source_id "
                 "WHERE s.notebook_id=%s "
-                "AND s.source_type NOT IN ('memory', 'knowhow') "
+                "AND s.source_type NOT IN ('memory', 'knowhow') AND s.source_type <> 'promotion' "
                 f"AND {_NONBLANK_TEXT_SQL} "
                 "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                 "WHERE v.element_id = e.id)" + clause,
@@ -1156,7 +1156,7 @@ class PostgresMaintenanceAdapter:
                     "SELECT e.id FROM source_elements e "
                     "JOIN sources s ON s.id=e.source_id "
                     "WHERE s.notebook_id=%s "
-                    "AND s.source_type NOT IN ('memory', 'knowhow') "
+                    "AND s.source_type NOT IN ('memory', 'knowhow') AND s.source_type <> 'promotion' "
                     f"AND {_NONBLANK_TEXT_SQL} "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                     "WHERE v.element_id=e.id)" + clause
@@ -1253,7 +1253,7 @@ class PostgresMaintenanceAdapter:
                     "SELECT e.id, e.source_id, e.text FROM source_elements e "
                     "JOIN sources s ON s.id = e.source_id "
                     "WHERE s.notebook_id=%s "
-                    "AND s.source_type NOT IN ('memory', 'knowhow') "
+                    "AND s.source_type NOT IN ('memory', 'knowhow') AND s.source_type <> 'promotion' "
                     f"AND {_NONBLANK_TEXT_SQL} "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                     "WHERE v.element_id = e.id)" + clause + " ORDER BY e.id COLLATE \"C\"",
@@ -1287,7 +1287,7 @@ class PostgresMaintenanceAdapter:
                     "SELECT e.id,e.source_id,e.text FROM source_elements e "
                     "JOIN sources s ON s.id=e.source_id "
                     "WHERE s.notebook_id=%s "
-                    "AND s.source_type NOT IN ('memory','knowhow') "
+                    "AND s.source_type NOT IN ('memory','knowhow') AND s.source_type <> 'promotion' "
                     f"AND {_NONBLANK_TEXT_SQL} AND e.id COLLATE \"C\">%s "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                     "WHERE v.element_id=e.id)" + clause + " "
@@ -1313,7 +1313,7 @@ class PostgresMaintenanceAdapter:
                     "SELECT DISTINCT e.source_id FROM source_elements e "
                     "JOIN sources s ON s.id = e.source_id "
                     "WHERE s.notebook_id=%s "
-                    "AND s.source_type NOT IN ('memory', 'knowhow') "
+                    "AND s.source_type NOT IN ('memory', 'knowhow') AND s.source_type <> 'promotion' "
                     f"AND {_NONBLANK_TEXT_SQL} "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                     "WHERE v.element_id = e.id)",
@@ -2100,7 +2100,7 @@ class PostgresMaintenanceAdapter:
         with self._runtime.database.connect() as db:
             rows = db.execute(
                 "SELECT id, file_name, file_path FROM sources "
-                "WHERE notebook_id=%s AND source_type NOT IN ('memory','knowhow') "
+                "WHERE notebook_id=%s AND source_type NOT IN ('memory','knowhow') AND source_type <> 'promotion' "
                 "AND (lower(file_name) LIKE '%%.md' OR lower(file_name) LIKE '%%.markdown') "
                 # 比较键与排序键写同一个 collation，与本文件全部兄弟分页器同
                 # 口径。**今天这是纵深防御而不是修 bug**：`0001_initial.sql` 把
@@ -2340,7 +2340,7 @@ class PostgresMaintenanceAdapter:
         with self._runtime.database.connect() as db:
             rows = db.execute(
                 "SELECT id FROM sources WHERE notebook_id=%s AND id COLLATE \"C\">%s "
-                "AND source_type NOT IN ('memory','knowhow') "
+                "AND source_type NOT IN ('memory','knowhow') AND source_type <> 'promotion' "
                 "ORDER BY id COLLATE \"C\" LIMIT %s",
                 (notebook_id, after_id, max(1, min(int(limit), 2000))),
             ).fetchall()
@@ -2360,7 +2360,7 @@ class PostgresMaintenanceAdapter:
         with self._runtime.database.write() as db:
             source = db.execute(
                 "SELECT id FROM sources WHERE id=%s AND notebook_id=%s "
-                "AND source_type NOT IN ('memory','knowhow') FOR UPDATE",
+                "AND source_type NOT IN ('memory','knowhow') AND source_type <> 'promotion' FOR UPDATE",
                 (source_id, notebook_id),
             ).fetchone()
             if source is None:

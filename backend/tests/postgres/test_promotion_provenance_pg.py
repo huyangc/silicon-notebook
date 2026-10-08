@@ -74,6 +74,18 @@ def test_pg_the_promotion_source_is_never_a_pipeline_target(world):
     cases.the_promotion_source_is_never_a_pipeline_target(world)
 
 
+def test_pg_a_memory_original_is_dropped_by_the_approval_store(world):
+    cases.a_memory_original_is_dropped_by_the_approval_store(world)
+
+
+def test_pg_deleting_the_promotion_source_keeps_a_native_object_merged_into(world):
+    cases.deleting_the_promotion_source_keeps_a_native_object_merged_into(world)
+
+
+def test_pg_the_source_summary_says_whether_its_objects_are_still_in_the_graph(world):
+    cases.the_source_summary_says_whether_its_objects_are_still_in_the_graph(world)
+
+
 def test_pg_the_answer_context_reads_the_entry_as_the_librarys_own(world):
     cases.the_answer_context_reads_the_entry_as_the_librarys_own(world)
 
@@ -108,8 +120,8 @@ class _CapturingConnection:
 
 
 def _plan(connection, sql: str, params: tuple) -> str:
-    connection.execute("SET LOCAL enable_seqscan=off")
-    connection.execute("SET LOCAL enable_bitmapscan=off")
+    """EXPLAIN under the DEFAULT planner settings (nothing switched off), so a
+    pin names the index the planner really picks."""
     rows = connection.execute(
         f"EXPLAIN (COSTS OFF) {sql}", params, prepare=False
     ).fetchall()
@@ -162,7 +174,7 @@ def test_pg_kg_target_page_keeps_its_plan_with_the_promotion_term(world):
     """The extra ``source_type <> 'promotion'`` conjunct is a filter on the
     rows the notebook index already drives; it adds no scan."""
     database = world.repo._runtime.database
-    _bulk(database, world.base)
+    _bulk(database, world.private)
     with database.connect() as db:
         captured = _CapturingConnection(db)
         world.repo._runtime.knowledge.source_build_state_page(
@@ -171,3 +183,68 @@ def test_pg_kg_target_page_keeps_its_plan_with_the_promotion_term(world):
         plan = _plan(db, sql, params)
     assert "promotion" in sql
     assert "Seq Scan on sources" not in plan, plan
+    # default planner: the notebook-scoped visible-identity index drives;
+    # the promotion term is a Filter on its rows (heap read, no new scan)
+    assert "idx_sources_visible_identity" in plan, plan
+    assert "source_type <> 'promotion'" in plan, plan
+
+
+# ---------------------------------------------------------------------------
+# approval vs. delete of the same promotion source (two connections)
+# ---------------------------------------------------------------------------
+
+def test_pg_an_approval_racing_the_promotion_source_delete_waits_and_reinserts(
+    world, postgres_settings,
+):
+    """T1 is ``delete_source``'s teardown: it holds the promotion source
+    ``FOR UPDATE``, removes what cites it and the row, and commits. T2 is an
+    approval from the same original writing its plan meanwhile. The source
+    upsert must WAIT for T1 (``ON CONFLICT DO UPDATE`` locks the conflicting
+    row; ``DO NOTHING`` would skip it) and, once T1 has committed, insert the
+    source and its element again -- an approved object never ends up citing a
+    source that is gone."""
+    import threading
+    import time
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from app.repositories.postgres.promotion_provenance_store import (
+        plan_for_library, write_plan,
+    )
+
+    url = postgres_settings.database_url
+    source_id = world.promotion_source
+    t1 = psycopg.connect(url, row_factory=dict_row)
+    t2 = psycopg.connect(url, row_factory=dict_row)
+    times: dict[str, float] = {}
+    try:
+        plan = plan_for_library(t2, world.base, [
+            cases.evidence("s-priv", "s-priv-001", f"{cases.TERM} 结论")])
+        t2.rollback()
+        (element_row,) = plan.elements
+        t1.execute("SELECT id FROM sources WHERE id = %s FOR UPDATE", (source_id,))
+
+        def approve():
+            write_plan(t2, world.base, plan, cases.NOW)
+            times["t2_written"] = time.monotonic()
+            t2.commit()
+
+        thread = threading.Thread(target=approve)
+        thread.start()
+        time.sleep(0.5)
+        t1.execute("DELETE FROM knowledge_object_sources WHERE source_id = %s", (source_id,))
+        t1.execute("DELETE FROM source_elements WHERE source_id = %s", (source_id,))
+        t1.execute("DELETE FROM sources WHERE id = %s", (source_id,))
+        t1.commit()
+        times["t1_committed"] = time.monotonic()
+        thread.join(10)
+        assert not thread.is_alive()
+    finally:
+        t1.close()
+        t2.close()
+    assert times["t2_written"] >= times["t1_committed"], times
+    assert world.rows("SELECT id FROM sources WHERE id=?", (source_id,)) == [
+        {"id": source_id}]
+    assert world.rows("SELECT id FROM source_elements WHERE id=?", (element_row.id,)) == [
+        {"id": element_row.id}]

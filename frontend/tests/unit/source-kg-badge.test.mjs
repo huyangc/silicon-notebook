@@ -49,10 +49,16 @@ test("旧后端不发新字段时逐字回到原来的两态", () => {
 
 test("收录来源显示「已收录」,不是永远降不下来的「待分析」", () => {
   // PR-E8:公共知识库里由「贡献到公共知识库」生成的来源从不交给分析,两个字段都为假。
-  const badge = sourceKgBadge({ type: "promotion", kg_extracted: false, kg_analyzed_empty: false });
+  // 后端对收录来源的 kg_extracted = 仍有知识条目引用它
+  const badge = sourceKgBadge({ type: "promotion", kg_extracted: true, kg_analyzed_empty: false });
   assert.equal(badge.state, "promoted");
   assert.equal(badge.label, "已收录");
   assert.notEqual(badge.label, "待分析");
+  // 已没有条目引用它(图谱被删除或重分析清掉):不说「已收录」也不说「待分析」
+  const detached = sourceKgBadge({ type: "promotion", kg_extracted: false });
+  assert.equal(detached.state, "promoted_detached");
+  assert.equal(detached.label, "不在图谱中");
+  assert.ok(!detached.className.includes("source-kg-badge--in"));
   // 其它类型不受影响
   assert.equal(sourceKgBadge({ type: "markdown" }).state, "pending");
 });

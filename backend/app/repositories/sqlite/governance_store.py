@@ -1792,6 +1792,43 @@ class GovernanceStore:
             )
         return stripped
 
+    @staticmethod
+    def detach_promotion_sources_on(
+        connection: sqlite3.Connection, rows: List[dict], now: str
+    ) -> List[str]:
+        """Mirror of the PostgreSQL twin (PR-E8): strip a promotion source's
+        entries, delete only the objects left without evidence."""
+        by_notebook: Dict[str, List[str]] = {}
+        for row in rows:
+            by_notebook.setdefault(str(row["notebook_id"]), []).append(str(row["id"]))
+        deleted: List[str] = []
+        for notebook_id in sorted(by_notebook):
+            stripped = GovernanceStore.strip_sources_evidence_on(
+                connection, notebook_id, by_notebook[notebook_id], now
+            )
+            if not stripped:
+                continue
+            found = id_bind_ids(stripped, sort=True)
+            emptied = sorted(
+                str(row["id"])
+                for row in connection.execute(
+                    "SELECT id, evidence FROM knowledge_objects "
+                    f"WHERE {id_drive_by('id', found)}",
+                    (found.param,),
+                ).fetchall()
+                if not any(
+                    isinstance(item, dict)
+                    for item in json.loads(row["evidence"] or "[]")
+                )
+            )
+            for offset in range(0, len(emptied), _REVIEW_ENDPOINT_LOOKUP_BATCH):
+                KnowledgeStore._delete_object_id_batch(
+                    connection, notebook_id,
+                    emptied[offset:offset + _REVIEW_ENDPOINT_LOOKUP_BATCH],
+                )
+            deleted.extend(emptied)
+        return deleted
+
     # -------------------------------------------------- knowledge mutation
     @staticmethod
     def update_object_in_transaction(

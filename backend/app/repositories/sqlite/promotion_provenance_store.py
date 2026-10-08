@@ -4,7 +4,7 @@ Twin of ``app/repositories/postgres/promotion_provenance_store.py`` -- the rule
 is ``app.domain.promotion_provenance`` and the cost and step notes are written
 there once.  SQLite specifics: the two primary-key probes are DRIVEN by the
 bound id list (``drive_by``: one seek per id of one object's evidence), and the
-inserts skip an existing id (``ON CONFLICT(id) DO NOTHING``).
+upserts are the PostgreSQL ones in SQLite's dialect (``write_plan``).
 """
 from __future__ import annotations
 
@@ -34,25 +34,28 @@ def plan_for_library(
 ) -> PromotionPlan:
     """Read what the rule needs in the caller's transaction and plan."""
     source_notebooks: dict[str, str] = {}
+    memory_sources: set[str] = set()
     source_ids = evidence_source_ids(evidence)
     if source_ids:
         bound = bind_ids(source_ids)
-        source_notebooks = {
-            str(row["id"]): str(row["notebook_id"])
-            for row in connection.execute(
-                f"SELECT id,notebook_id FROM sources WHERE {drive_by('id', bound)}",
-                (bound.param,),
-            ).fetchall()
-        }
+        for row in connection.execute(
+            "SELECT id,notebook_id,"
+            f"({memory_source_type_predicate()}) AS is_memory "
+            f"FROM sources WHERE {drive_by('id', bound)}",
+            (bound.param,),
+        ).fetchall():
+            source_notebooks[str(row["id"])] = str(row["notebook_id"])
+            if row["is_memory"]:
+                memory_sources.add(str(row["id"]))
     own = {
         source_id for source_id, notebook_id in source_notebooks.items()
         if notebook_id == base_notebook_id
     }
     origin_elements: dict[str, OriginElement] = {}
-    element_ids = foreign_element_ids(evidence, own)
-    if element_ids:
+    element_ids = foreign_element_ids(evidence, own | memory_sources)
+    if element_ids and memory is None:
         bound = bind_ids(element_ids)
-        # A Memory source's element is never read (PostgreSQL twin).
+        # A Memory original is dropped by the rule (PostgreSQL twin).
         origin_elements = {
             str(row["id"]): OriginElement(str(row["source_id"]), str(row["text"] or ""))
             for row in connection.execute(
@@ -71,6 +74,7 @@ def plan_for_library(
         origin_elements=origin_elements,
         fallback_origin_notebook_id=fallback_origin_notebook_id,
         memory=memory,
+        memory_source_ids=memory_sources,
     )
 
 
@@ -81,7 +85,9 @@ def write_plan(
     now: str,
 ) -> None:
     """Insert the plan's promotion sources and elements, reusing existing
-    ones, and touch the sources' ``updated_at`` (PostgreSQL twin)."""
+    ones; an existing source gets its ``updated_at`` bumped (PostgreSQL twin:
+    there the upsert is what serialises against a concurrent delete; SQLite's
+    single writer already does, the statement is kept the same)."""
     if not plan.sources:
         return
     connection.executemany(
@@ -89,7 +95,7 @@ def write_plan(
         "parse_status,file_name,file_path,source_url,file_size,file_hash,summary,"
         "doc_type,created_at,updated_at) "
         "VALUES (?,?,?,?,'active','parsed','','','',0,'','','',?,?) "
-        "ON CONFLICT(id) DO NOTHING",
+        "ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at",
         [
             (row.id, base_notebook_id, row.title, PROMOTION_SOURCE_TYPE, now, now)
             for row in plan.sources
@@ -106,11 +112,6 @@ def write_plan(
             )
             for row in plan.elements
         ],
-    )
-    bound = bind_ids([row.id for row in plan.sources])
-    connection.execute(
-        f"UPDATE sources SET updated_at=? WHERE {drive_by('id', bound)}",
-        (now, bound.param),
     )
 
 

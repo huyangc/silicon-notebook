@@ -23,6 +23,7 @@ from app.models.sources import (
 from app.domain.source_display import summary_display_title
 from app.models.question_suggestions import QUESTION_SUGGESTION_REVISION_PAGE_SIZE
 from app.repositories.postgres.memory_sql import memory_source_type_predicate
+from app.domain.promotion_source import PROMOTION_SOURCE_TYPE
 from app.repositories.ports import (
     SOURCE_PAPER_META_UNSET,
     DocumentCapacityExceeded,
@@ -495,9 +496,12 @@ class SourceStore:
         """The visible-document COUNT on a caller-provided connection — shared
         by the read path and the atomic capacity gate inside the creation write
         transactions (mirrors the SQLite twin)."""
+        # PR-E8: a promotion source never takes an uploaded-document slot
+        # (SQLite twin).
         row = connection.execute(
             "SELECT COUNT(*) AS c FROM sources WHERE notebook_id=%s "
-            f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}",
+            f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
+            f"AND {NOT_PROMOTION_SOURCE_PREDICATE}",
             (notebook_id,),
         ).fetchone()
         return int(row["c"])
@@ -1793,6 +1797,25 @@ class SourceStore:
             (source_id, row_id),
         )
 
+    @staticmethod
+    def _promotion_sources_in_graph(connection, rows) -> set:
+        """PR-E8: see the SQLite twin."""
+        ids = sorted({
+            str(row["id"]) for row in rows
+            if row["source_type"] == PROMOTION_SOURCE_TYPE
+        })
+        if not ids:
+            return set()
+        bound = bind_ids(ids)
+        return {
+            str(found["source_id"]) for found in execute_ids(
+                connection,
+                "SELECT DISTINCT source_id FROM knowledge_object_sources "
+                f"WHERE {member_of('source_id', bound)}",
+                (bound.param,),
+            ).fetchall()
+        }
+
     def source_from_row(
         self,
         connection,
@@ -1834,6 +1857,11 @@ class SourceStore:
                 (source_id, source_id, source_id, source_id),
             ).fetchone()["ok"]
         )
+        if row["source_type"] == PROMOTION_SOURCE_TYPE:
+            # PR-E8: see the SQLite twin -- cited by some object's evidence.
+            kg_extracted = source_id in self._promotion_sources_in_graph(
+                connection, [row]
+            )
         meta = (
             self.paper_meta_for_sources(connection, [source_id]).get(source_id)
             if paper_meta is _UNSET
@@ -1958,6 +1986,7 @@ class SourceStore:
             # error_message」这个输入。
             return extraction_warning_text(latest_error.get(source_id, ""))
 
+        kg_extracted_ids |= self._promotion_sources_in_graph(connection, rows)
         output: list[SourceSummary] = []
         for row in rows:
             source_id = row["id"]

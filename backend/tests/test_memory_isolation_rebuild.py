@@ -42,7 +42,9 @@ def repo(tmp_path, monkeypatch):
     with database.write() as db:
         db.execute("ALTER TABLE unified_kg_state DROP COLUMN memory_isolation_version")
         db.execute("PRAGMA user_version = 86")
-    assert SqliteMigrator(database, repository.settings).migrate() == [87, 88]
+    # v87 alone: v88 (PR-E8) rewrites and marks dirty the public library's
+    # promotion copy this world keeps (ko-pub) -- not this pass's subject.
+    SqliteMigrator(database, repository.settings)._migration_87()
     return repository
 
 
@@ -575,7 +577,9 @@ def _make_repo(tmp_path, monkeypatch):
     with database.write() as db:
         db.execute("ALTER TABLE unified_kg_state DROP COLUMN memory_isolation_version")
         db.execute("PRAGMA user_version = 86")
-    assert SqliteMigrator(database, repository.settings).migrate() == [87, 88]
+    # v87 alone: v88 (PR-E8) rewrites and marks dirty the public library's
+    # promotion copy this world keeps (ko-pub) -- not this pass's subject.
+    SqliteMigrator(database, repository.settings)._migration_87()
     return repository
 
 

@@ -192,7 +192,12 @@ import {
   type CatalogConfirmRequest,
   type CatalogReviewRequest,
 } from "./command-catalog-panel";
-import { sourceDetailManageable, sourceDetailReparsable, sourceTypeTag } from "./source-management";
+import {
+  sourceDeleteMessage,
+  sourceDetailManageable,
+  sourceDetailReparsable,
+  sourceTypeTag,
+} from "./source-management";
 import { ModelServicePanel, ModelServiceSummaryButton } from "./model-service-panel";
 import {
   ModelTestCoordinator,
@@ -3844,7 +3849,7 @@ export default function Home() {
       : rootModals.captureWorkspaceOwner();
     openInfoModal({
       title: "删除来源",
-      message: `确定删除“${source.title}”吗？它的解析元素、候选知识和由该来源生成的已批准知识也会一起移除。`,
+      message: sourceDeleteMessage(source.type, source.title),
       actions: [
         { label: "取消", action: () => {} },
         {

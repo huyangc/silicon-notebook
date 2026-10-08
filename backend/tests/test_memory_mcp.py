@@ -4251,6 +4251,31 @@ async def test_reparse_source_queues_one_job_and_refuses_a_source_being_parsed(
 
 
 @pytest.mark.anyio
+async def test_reparse_source_refuses_a_promotion_source(mcp_env, scheduled_jobs):
+    """PR-E8: a public library's promotion source has no document; parsing it
+    would clear the promoted objects its elements support. The tool refuses
+    it and queues nothing (the browser routes are pinned in
+    test_promotion_provenance.py)."""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+            "parse_status,created_at,updated_at) VALUES ('src-promo-mcp',?,"
+            "'晋升自：原件','promotion','active','parsed','t','t')",
+            (notebook_id,),
+        )
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        refused = await client.call("reparse_source", {"source_id": "src-promo-mcp"})
+    assert refused.isError
+    assert "promoted into a public library" in refused.content[0].text
+    assert scheduled_jobs == []
+
+
+@pytest.mark.anyio
 async def test_reparse_source_refuses_pipeline_pending_before_queue(
     mcp_env, scheduled_jobs
 ):

@@ -448,6 +448,11 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
     ("postgres/unified_kg_store.py", "UnifiedKgStore.relation_provenance_counts"): (
         s(ANY, NOT_IDS, "the fixed provenance bucket names"),),
     # ---------------------------------------------------------------- SQLite
+    # PR-E8 v88: a frozen migration (no live binding module); each list is one
+    # object's evidence (its foreign source ids, then its element ids).
+    ("sqlite/migrations.py", "SqliteMigrator._migration_88"): (
+        s(JSON, BOUNDED, "the source ids of one object's evidence"),
+        s(JSON, BOUNDED, "the element ids of one object's evidence"),),
     ("sqlite/ask_state_store.py", "AskStateStore.recent_user_ask_traces"): (
         s(SQ_EXP, BOUNDED, "job ids of the page just read under LIMIT"),),
     ("sqlite/ask_state_store.py", "AskStateStore.recent_completed_ask_runs"): (

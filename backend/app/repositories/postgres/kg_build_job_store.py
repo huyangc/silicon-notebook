@@ -19,7 +19,10 @@ from app.repositories.postgres.memory_sql import (
     MEMORY_SOURCE_NOT_CHUNKED,
     memory_source_type_predicate,
 )
-from app.repositories.postgres.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
+from app.repositories.postgres.source_store import (
+    NOT_PROMOTION_SOURCE_PREDICATE,
+    VISIBLE_SOURCE_TYPES_PREDICATE,
+)
 from app.domain.indexing_pipeline import (
     IndexingPipelineMemorySourceError,
     IndexingPipelineStalePlanError,
@@ -248,7 +251,8 @@ class KgBuildJobStore:
     def _source_snapshot(connection, notebook_id: str, *, lock: bool) -> list[dict]:
         rows = connection.execute(
             "SELECT id,updated_at FROM sources WHERE notebook_id=%s AND "
-            f"{VISIBLE_SOURCE_TYPES_PREDICATE} ORDER BY id COLLATE \"C\""
+            f"{VISIBLE_SOURCE_TYPES_PREDICATE} AND {NOT_PROMOTION_SOURCE_PREDICATE} "
+            "ORDER BY id COLLATE \"C\""
             + (" FOR UPDATE" if lock else ""),
             (notebook_id,),
         ).fetchall()

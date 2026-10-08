@@ -25,13 +25,17 @@ The rule, defined once here and applied by both backends' approval paths
   mounted run, can be deleted, cannot be re-parsed), titled
   ``晋升自：<original title>`` (a Memory promotion: ``晋升自个人记忆：<Memory
   title>``; approval publishes it, by design).
-* Each foreign entry becomes one element of that source.  Its text is the
-  original element's CURRENT text when the same transaction can still read it
-  (the element exists, belongs to the source the entry names, and that source
-  is not a member's Memory -- the stores never read a Memory element here),
-  otherwise the entry's stored ``quoted_span``; an entry with neither is
-  dropped (an object
-  left without evidence is then dropped by every ceiling: fail closed).
+* An entry whose original is a member's MEMORY source is dropped (fail
+  closed, ruling M1: the approval paths refuse Memory-derived objects, so only
+  pre-guard data can carry one; nothing of a Memory is published by this
+  rewrite).
+* Each other foreign entry becomes one element of that source.  For a generic
+  promotion its text is the original element's CURRENT text when the same
+  transaction can still read it (the element exists and belongs to the source
+  the entry names), otherwise the entry's stored ``quoted_span``; a Memory
+  promotion's cards keep only the stored ``quoted_span`` (the excerpt the
+  member approved for publication).  An entry with no text is dropped (an
+  object left without evidence is then dropped by every ceiling: fail closed).
 * The entry is rewritten to point at the new source and element; the original
   ``source_id`` and its notebook stay on the entry only as display keys
   (``origin_source_id`` / ``origin_notebook_id``); the stored ``source_title``
@@ -173,13 +177,18 @@ def plan_promotion_evidence(
     origin_elements: Mapping[str, OriginElement],
     fallback_origin_notebook_id: str = "",
     memory: Optional[Tuple[str, str]] = None,
+    memory_source_ids: AbstractSet[str] = frozenset(),
 ) -> PromotionPlan:
     """Rewrite ``evidence`` for ``base_notebook_id`` (module docstring).
 
     ``own_source_ids``: the entries' source ids that belong to the library.
     ``source_notebooks``: live source id -> its notebook (the origin notebook).
     ``origin_elements``: live element id -> its source and current text.
-    ``memory``: ``(memory_id, memory_title)`` for a Memory promotion.
+    ``memory``: ``(memory_id, memory_title)`` for a Memory promotion: its
+    cards keep only the excerpt the member approved (no live text).
+    ``memory_source_ids``: entries whose original is a member's Memory source
+    are DROPPED (fail closed: M1, nothing of a Memory reaches a public
+    library through this rewrite).
     Non-dict items and own entries are kept unchanged, in place.
     """
     rewritten: list = []
@@ -196,8 +205,14 @@ def plan_promotion_evidence(
             rewritten.append(item)
             kept += 1
             continue
+        if origin_source_id in memory_source_ids:
+            dropped += 1
+            continue
         origin_element_id = str(item.get("element_id") or "")
-        live = origin_elements.get(origin_element_id) if origin_element_id else None
+        live = (
+            origin_elements.get(origin_element_id)
+            if origin_element_id and memory is None else None
+        )
         live_text = (
             live.text if live is not None and live.source_id == origin_source_id
             else ""
