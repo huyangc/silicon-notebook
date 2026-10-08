@@ -105,9 +105,6 @@ _SITES = {
      "_RetrievalState._any_base_notebook_has_kg", "any_mounted_has_kg_on"):
         (_CURRENT, 1, _RUN_VIEWER),
     ("app/services/retrieval_candidates.py",
-     "_RetrievalState._federated_graph_is_large", "participant_notebook_ids"):
-        (_CURRENT, 1, _RUN_VIEWER),
-    ("app/services/retrieval_candidates.py",
      "_RetrievalState._mount_participants", "participant_tiers"):
         (_CURRENT, 1, _RUN_VIEWER),
     # -- explicit viewers.
@@ -126,10 +123,11 @@ _SITES = {
      "RepositoryRuntime._viewer_participant_notebook_ids",
      "participant_notebook_ids"):
         (_EXPLICIT, 1, "the ceiling's participant reader: the ceiling's owner"),
-    ("app/services/graph_retrieval.py",
-     "GraphRetrievalService._viewer_graph_participants.read", "participant_rows"):
+    ("app/services/retrieval_candidates.py",
+     "_RetrievalState._viewer_graph_participants.read", "participant_rows"):
         (_EXPLICIT, 1, "current_viewer_id() bound once: the same value keys "
-                       "the per-run memo and the read"),
+                       "the per-run memo and the read (graph families and "
+                       "their size guard)"),
     ("app/services/notebook_catalog.py", "NotebookSummaryQuery.mounted_bases",
      "mounted_bases_row"):
         (_EXPLICIT, 2, "the summary's user (N-6); one call per connection branch"),

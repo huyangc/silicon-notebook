@@ -7,6 +7,7 @@ by their owning stores.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import itertools
 import logging
@@ -245,6 +246,48 @@ def keyword_arm_available(settings) -> bool:
     if not federated_ask_active():
         return True
     return bool(settings.global_ask_keyword_arm_enabled)
+
+
+#: BLAKE2s personalisation of the viewer-set digest.  It must NOT be the
+#: override fingerprint's (``retrieval_participants.override_fingerprint``,
+#: unpersonalised): the two key the same slot of the same families, and the
+#: graphs they name are NOT interchangeable -- an override carries no tiers
+#: (``global_ask`` builds it with ``tiers={}``, so every node of its
+#: ``fed_rxgraph`` is stamped ``personal``) while a viewer's set carries the
+#: libraries' real tiers (a public library is ``base``: rendered as
+#: ``[base]`` and weighted as authoritative by ``kg/graph_reason``).  One
+#: shared digest would hand whichever asked second the other's tier stamps.
+_VIEWER_FINGERPRINT_PERSON = b"m3viewer"
+
+
+def _viewer_set_fingerprint(
+    every_valid: Iterable[str], effective_ids: Iterable[str],
+) -> str:
+    """The ``viewer_fingerprint`` of ``_participant_graph_cache_key``.
+
+    ``every_valid`` is the active notebook plus every VALID mount
+    (``_RetrievalState._valid_participant_ids``).  ``""`` when the
+    viewer's effective participant set is all of it -- the historical key,
+    shared by the mounter and every viewer who may read every mounted library
+    -- else a digest of the effective set: sorted (membership, not fan-out
+    order), BLAKE2s so every worker process agrees, in its own namespace
+    (``_VIEWER_FINGERPRINT_PERSON``).
+    """
+    effective = {str(value) for value in effective_ids}
+    if effective == {str(value) for value in every_valid}:
+        return ""
+    payload = "|".join(sorted(effective)).encode("utf-8")
+    return hashlib.blake2s(
+        payload, digest_size=8, person=_VIEWER_FINGERPRINT_PERSON,
+    ).hexdigest()
+
+
+def _row_value(row, column: str):
+    """``row[column]``, or ``None`` for a row shape without that column."""
+    try:
+        return row[column]
+    except (KeyError, IndexError):
+        return None
 
 
 def _hydrated_chunk_row(r) -> dict:
@@ -490,6 +533,63 @@ class _RetrievalState:
             (nid, tier_map.get(nid, "personal")) for nid in notebook_ids
         )
 
+    def _valid_participant_ids(self, notebook_id: str) -> tuple:
+        """The active notebook plus every VALID mount, whoever is asking.
+
+        The reference the graph cache keys compare a viewer's effective set
+        against (``_viewer_set_fingerprint``): the mount edges' own validity
+        (``list_mount_edges_for_notebook``'s ``active``, i.e. ``MOUNT_VALID``)
+        is exactly the mounter's effective set, because a valid edge implies
+        its mounter may read the mounted library.  One small indexed read on
+        its own pooled connection, never while a graph builder holds one.
+        """
+        return (str(notebook_id), *(
+            str(edge["id"])
+            for edge in self.notebooks.list_mount_edges_for_notebook(notebook_id)
+            if edge["active"]
+        ))
+
+    def _viewer_graph_participants(self, notebook_id: str) -> tuple:
+        """``(((notebook_id, tier), ...), viewer_fingerprint)`` with no override.
+
+        The three graph families' participant set for ``current_viewer_id()``
+        -- the active notebook first, then every mount effective for that
+        viewer (``participant_rows``) -- and the cache-key fingerprint of that
+        set, taken TOGETHER and memoised per retrieval run under the viewer:
+        every graph build of one run reads one snapshot, so a mount changed
+        mid-run can neither widen a run in flight nor mint a second key (and a
+        rebuild) halfway through a long report.  The size guard in front of
+        those builds (``_federated_graph_is_large``) reads this same snapshot,
+        so it judges exactly the set they will build.  The mounter's own set is every
+        valid mount by construction (a valid edge implies the mounter may read
+        the mounted library), so for the mounter the reference read is skipped
+        and the key is the historical one.  With no run, no memo: each build
+        reads afresh, as before.
+        """
+        viewer = current_viewer_id()
+
+        def read() -> tuple:
+            with self._connect() as db:
+                active_row, base_rows = self.notebooks.participant_rows(
+                    db, notebook_id, viewer_id=viewer,
+                )
+            # Active first, then every base effective for the viewer.
+            participants = ((
+                notebook_id, active_row["tier"] if active_row else "personal",
+            ),) + tuple((r["id"], r["tier"]) for r in base_rows)
+            if viewer and active_row is not None and (
+                _row_value(active_row, "created_by") == viewer
+            ):
+                return participants, ""
+            return participants, _viewer_set_fingerprint(
+                self._valid_participant_ids(notebook_id),
+                [participant for participant, _tier in participants],
+            )
+
+        return memoized_retrieval_value(
+            ("graph_participants", notebook_id, viewer), read,
+        )
+
     def _federated_graph_is_large(self, active_notebook_id: str) -> bool:
         """Is any library the lanes behind this guard WILL BUILD OVER too big?
 
@@ -499,12 +599,15 @@ class _RetrievalState:
         about to construct". Answering a narrower question than the builder asks
         admits a build the guard exists to refuse.
 
-        * **No override** -> the raw mount-table id list, UNFILTERED by
-          `notebook_in_scope`, exactly as before PR-C. That is not an oversight
-          and unchecking a huge reference library deliberately does NOT turn the
-          guard back off: `graph_retrieval._federated_rx_graph` still builds
-          from `participant_rows` and `_ppr_graph` still from `participant_ids`,
-          i.e. over EVERY mounted library, checked or not (the library dimension
+        * **No override** -> the SAME participant snapshot the graphs build
+          from: `_viewer_graph_participants` (the viewer's effective mounts,
+          memoised per run), UNFILTERED by `notebook_in_scope`. Same source,
+          not a second live read: a library unmounted (or a read access
+          withdrawn) mid-run is gone from a live read but still in the snapshot
+          `_ppr_graph` / `_federated_rx_graph` build from, so a live guard would
+          wave the multi-GB build through. Unchecking a huge reference library
+          deliberately does NOT turn the guard back off: both graphs build over
+          EVERY effective mounted library, checked or not (the library dimension
           is filtered out of the walk's RESULT by `scoped_subgraph_nodes`, for
           the process-cache reason argued in its docstring). Filtering here
           alone would let a small personal notebook with one unchecked 9M-object
@@ -528,12 +631,12 @@ class _RetrievalState:
         )
 
         if current_participant_override() is None:
+            participants, _fingerprint = self._viewer_graph_participants(
+                active_notebook_id,
+            )
             return any(
                 not self.notebook_copy_stats(notebook_id)["copyable"]
-                for notebook_id
-                in self.notebooks.participant_notebook_ids(
-                    active_notebook_id, viewer_id=current_viewer_id(),
-                )
+                for notebook_id, _tier in participants
             )
         return any(
             not self.notebook_copy_stats(notebook_id)["copyable"]

@@ -23,7 +23,6 @@ statement per window -- and it is bounded, deliberately:
 """
 from __future__ import annotations
 
-import hashlib
 import heapq
 import json
 import math
@@ -75,7 +74,7 @@ def _participant_graph_cache_key(
     THE VIEWER'S EFFECTIVE SET (M3).  A mount counts only for a viewer who may
     read the mounted library (or its mounter), so with no override one active
     id still maps to several participant sets -- one per audience.
-    ``viewer_fingerprint`` is ``_viewer_set_fingerprint``:
+    ``viewer_fingerprint`` is ``retrieval_candidates._viewer_set_fingerprint``:
     ``""`` when the viewer's effective set is EVERY valid mount (the mounter,
     and any member who may read every mounted library), so the key stays the
     historical one and all of them share one entry; otherwise the digest of
@@ -118,48 +117,6 @@ def _participant_graph_cache_key(
     if viewer_fingerprint:
         return f"{notebook_id}:{viewer_fingerprint}:{family}"
     return f"{notebook_id}:{family}"
-
-
-#: BLAKE2s personalisation of the viewer-set digest.  It must NOT be the
-#: override fingerprint's (``retrieval_participants.override_fingerprint``,
-#: unpersonalised): the two key the same slot of the same families, and the
-#: graphs they name are NOT interchangeable -- an override carries no tiers
-#: (``global_ask`` builds it with ``tiers={}``, so every node of its
-#: ``fed_rxgraph`` is stamped ``personal``) while a viewer's set carries the
-#: libraries' real tiers (a public library is ``base``: rendered as
-#: ``[base]`` and weighted as authoritative by ``kg/graph_reason``).  One
-#: shared digest would hand whichever asked second the other's tier stamps.
-_VIEWER_FINGERPRINT_PERSON = b"m3viewer"
-
-
-def _viewer_set_fingerprint(
-    every_valid: Iterable[str], effective_ids: Iterable[str],
-) -> str:
-    """The ``viewer_fingerprint`` of ``_participant_graph_cache_key``.
-
-    ``every_valid`` is the active notebook plus every VALID mount
-    (``GraphRetrievalService._valid_participant_ids``).  ``""`` when the
-    viewer's effective participant set is all of it -- the historical key,
-    shared by the mounter and every viewer who may read every mounted library
-    -- else a digest of the effective set: sorted (membership, not fan-out
-    order), BLAKE2s so every worker process agrees, in its own namespace
-    (``_VIEWER_FINGERPRINT_PERSON``).
-    """
-    effective = {str(value) for value in effective_ids}
-    if effective == {str(value) for value in every_valid}:
-        return ""
-    payload = "|".join(sorted(effective)).encode("utf-8")
-    return hashlib.blake2s(
-        payload, digest_size=8, person=_VIEWER_FINGERPRINT_PERSON,
-    ).hexdigest()
-
-
-def _row_value(row, column: str):
-    """``row[column]``, or ``None`` for a row shape without that column."""
-    try:
-        return row[column]
-    except (KeyError, IndexError):
-        return None
 
 
 def _xbridge_similarities(dists) -> "np.ndarray":
@@ -523,61 +480,6 @@ class GraphRetrievalService(_RetrievalState):
         self.model_clients = model_clients
         self.model_error_sink = model_error_sink
         self.database = database
-
-    def _valid_participant_ids(self, notebook_id: str) -> tuple:
-        """The active notebook plus every VALID mount, whoever is asking.
-
-        The reference the graph cache keys compare a viewer's effective set
-        against (``_viewer_set_fingerprint``): the mount edges' own validity
-        (``list_mount_edges_for_notebook``'s ``active``, i.e. ``MOUNT_VALID``)
-        is exactly the mounter's effective set, because a valid edge implies
-        its mounter may read the mounted library.  One small indexed read on
-        its own pooled connection, never while a graph builder holds one.
-        """
-        return (str(notebook_id), *(
-            str(edge["id"])
-            for edge in self.notebooks.list_mount_edges_for_notebook(notebook_id)
-            if edge["active"]
-        ))
-
-    def _viewer_graph_participants(self, notebook_id: str) -> tuple:
-        """``(((notebook_id, tier), ...), viewer_fingerprint)`` with no override.
-
-        The three graph families' participant set for ``current_viewer_id()``
-        -- the active notebook first, then every mount effective for that
-        viewer (``participant_rows``) -- and the cache-key fingerprint of that
-        set, taken TOGETHER and memoised per retrieval run under the viewer:
-        every graph build of one run reads one snapshot, so a mount changed
-        mid-run can neither widen a run in flight nor mint a second key (and a
-        rebuild) halfway through a long report.  The mounter's own set is every
-        valid mount by construction (a valid edge implies the mounter may read
-        the mounted library), so for the mounter the reference read is skipped
-        and the key is the historical one.  With no run, no memo: each build
-        reads afresh, as before.
-        """
-        viewer = current_viewer_id()
-
-        def read() -> tuple:
-            with self._connect() as db:
-                active_row, base_rows = self.notebooks.participant_rows(
-                    db, notebook_id, viewer_id=viewer,
-                )
-            # Active first, then every base effective for the viewer.
-            participants = ((
-                notebook_id, active_row["tier"] if active_row else "personal",
-            ),) + tuple((r["id"], r["tier"]) for r in base_rows)
-            if viewer and active_row is not None and (
-                _row_value(active_row, "created_by") == viewer
-            ):
-                return participants, ""
-            return participants, _viewer_set_fingerprint(
-                self._valid_participant_ids(notebook_id),
-                [participant for participant, _tier in participants],
-            )
-
-        return memoized_retrieval_value(
-            ("graph_participants", notebook_id, viewer), read,
-        )
 
     def _federated_rx_graph(self, active_notebook_id: str):
         """Return a federated PyDiGraph merging base notebook(s) + active notebook.

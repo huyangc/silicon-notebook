@@ -31,7 +31,9 @@ prompts it received ARE the retrieval result):
   the same libraries as a member's set keys a different entry (its graph
   carries no tiers).  Per run, the participant set and its key are one
   snapshot: the mounter pays no reference read, a member one, and a mount
-  removed mid-run neither rekeys nor rebuilds that run's graph.
+  removed mid-run neither rekeys nor rebuilds that run's graph -- and the
+  PPR fallback's size guard judges that same snapshot, so a huge library
+  unmounted mid-run still refuses the fallback build.
 * Below the ceiling, which would mask any single reader: every service-layer
   participant reader (the retrieval seat, the reference-KG gate, the chain's
   start row, the collection map, the typed enumeration, enumerated-row
@@ -803,6 +805,52 @@ def assert_graph_participants_are_one_snapshot_per_run(env, monkeypatch) -> None
     assert built == [], built
 
 
+def assert_the_size_guard_judges_the_graphs_snapshot(env, monkeypatch) -> None:
+    """The PPR fallback's size guard (``_federated_graph_is_large``) reads the
+    SAME per-run participant snapshot the graphs build from.  ``b`` is made a
+    library too big to build over; Alice's run refuses the fallback, then
+    ``b`` is unmounted mid-run -- a live read would no longer see it and wave
+    the multi-GB build through, while the run's snapshot (what ``_ppr_graph``
+    would build) still holds it: the fallback must still be refused."""
+    repo = repository()
+    graph = repo.retrieval.graph
+    candidates = repo.retrieval.candidates
+    a, b = env["notebook"].id, env["library"].id
+    real_stats = candidates.notebook_copy_stats
+    monkeypatch.setattr(
+        candidates, "notebook_copy_stats",
+        lambda notebook_id: {**real_stats(notebook_id), "copyable": notebook_id != b},
+    )
+    builds: list[str] = []
+    monkeypatch.setattr(
+        graph, "_ppr_graph",
+        lambda notebook_id: builds.append(notebook_id) or (_ for _ in ()).throw(
+            AssertionError("the PPR fallback was built")),
+    )
+    refused: list[dict] = []
+    real_emit = graph.event_log.emit
+
+    def emit(event, *args, **kwargs):
+        if event.get("kind") == "ppr_fallback_refused":
+            refused.append(dict(event))
+        return real_emit(event, *args, **kwargs)
+
+    monkeypatch.setattr(graph.event_log, "emit", emit)
+
+    def fallback_twice_around_an_unmount():
+        graph._ppr_retrieve(a, QUESTION)
+        with repo._write() as db:
+            db.execute(
+                "DELETE FROM notebook_bases WHERE notebook_id="
+                f"{env['ph']} AND base_notebook_id={env['ph']}", (a, b),
+            )
+        graph._ppr_retrieve(a, QUESTION)
+
+    _in_run(env["alice"], env["bob"], fallback_twice_around_an_unmount)
+    assert builds == [], "the guard waved the fallback build through"
+    assert len(refused) == 2, refused
+
+
 # ---------------------------------------------------------------------------
 # Background runs: the run's actor, not the ambient request
 # ---------------------------------------------------------------------------
@@ -1048,3 +1096,7 @@ def test_scale_graph_keys_follow_the_effective_set_on_sqlite(sqlite_env, monkeyp
 
 def test_graph_participants_are_one_snapshot_per_run_on_sqlite(sqlite_env, monkeypatch):
     assert_graph_participants_are_one_snapshot_per_run(sqlite_env, monkeypatch)
+
+
+def test_the_size_guard_judges_the_graphs_snapshot_on_sqlite(sqlite_env, monkeypatch):
+    assert_the_size_guard_judges_the_graphs_snapshot(sqlite_env, monkeypatch)

@@ -24,6 +24,7 @@ from tests.test_mount_viewer_e2e import (
     assert_no_actor_no_request_reads_only_public_libraries,
     assert_override_and_viewer_graphs_stay_apart,
     assert_scale_graph_keys_follow_the_effective_set,
+    assert_the_size_guard_judges_the_graphs_snapshot,
     assert_the_mount_counts_only_for_its_readers,
     build_world,
 )
@@ -94,3 +95,7 @@ def test_graph_participants_are_one_snapshot_per_run_on_postgres(
     postgres_env, monkeypatch,
 ):
     assert_graph_participants_are_one_snapshot_per_run(postgres_env, monkeypatch)
+
+
+def test_the_size_guard_judges_the_graphs_snapshot_on_postgres(postgres_env, monkeypatch):
+    assert_the_size_guard_judges_the_graphs_snapshot(postgres_env, monkeypatch)
