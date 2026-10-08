@@ -4,6 +4,39 @@
 逐条对代码复核）。与 `2026-09-29-scope-ceiling-remediation.md`（PR-A～PR-D）并行交付；本计划只规划
 那份计划没有覆盖的部分，已在执行的发现逐条标出分支。
 
+**状态（收官记录）：全部 15 个整改 PR 已合入，最后一个是 #828（PR-E6）。** 本文件从此是「已落地」的事实记录：
+正文里的「做法 / 验收 / 变异」保留为当时的计划原文；每个 PR 节末尾的「落地记录」写实际合入的结果和相对计划的偏离，
+与正文冲突处以落地记录为准；§13 汇总累积更正的去向和仍待用户拍板的事项。
+
+15 个整改 PR = PR-E0、PR-A、PR-B、PR-C、PR-D、PR-F，以及 PR-E1～E8（其中 E7 拆成 E7 与 E7b 两个 PR）；另有 1 个顺带修
+master 上守卫测试红的 #816，同属本轮。PR-A～D、PR-F 的计划在姊妹计划 `2026-09-29-scope-ceiling-remediation.md` 与
+`2026-09-29-ceiling-sql-hazards.md`，它们的落地记录在 §5 开头。
+
+合入顺序（按 GitHub 合入时间，日期为 UTC；PR 内部分任务的 head 以各落地记录为准）：
+
+| 序 | PR | 内容 | 编号 | 合入日期 | 合入时 head |
+| --- | --- | --- | --- | --- | --- |
+| 1 | PR-E0 | 共享判据 `memory_sql.py` | #804 | 2026-09-29 | `115f994e8` |
+| 2 | PR-C | 当前库保底席位与原文段下限 | #805 | 2026-09-29 | `33e540f82` |
+| 3 | PR-D | 全局引用核对：部分失败整体交付，检索时指纹 | #814 | 2026-09-30 | `5ee930efa` |
+| 4 | PR-F | id 清单一律经 `id_binding` 绑定 | #815 | 2026-09-30 | `8d6535049` |
+| 5 | PR-A | KG 对象上下文认来源天花板；KG 详情按查看者过滤 | #806 | 2026-09-30 | `c4aab652d` |
+| 6 | （守卫修正） | id 清单守卫的站点身份不含行号 | #816 | 2026-09-30 | `718882a30` |
+| 7 | PR-E3 | 来源与元素读取按 Memory 属主 | #818 | 2026-09-30 | `c827ac6b7` |
+| 8 | PR-B | 集合枚举与按篇读原文认本次勾选的来源 | #817 | 2026-09-30 | `41e73f61a` |
+| 9 | PR-E5 | 拷贝不带 Memory；成员退出的告知—导出—删除（M2、M5） | #820 | 2026-10-07 | `5911f30e2` |
+| 10 | PR-E7 | 报告公开前的 Memory 披露与确认；回答 id 接口校验属主 | #819 | 2026-10-07 | `b0a819427` |
+| 11 | PR-E1 | 所有问答入口装默认天花板 | #822 | 2026-10-07 | `0b8abc252` |
+| 12 | PR-E2 | 检索各腿按天花板取数 | #823 | 2026-10-07 | `fd1f3e834` |
+| 13 | PR-E7b | 会话公开分享的服务端披露；公开页复核（E7-5 + E7-6） | #825 | 2026-10-07 | `ec80b1e19` |
+| 14 | PR-E4 | KG 的 Memory 结构隔离（含迁移 0067 / v87） | #824 | 2026-10-07 | `82e4986ad` |
+| 15 | PR-E8 | 晋升对象的公共库自有出处（含迁移 0068 / v88） | #826 | 2026-10-08 | `38f3aa537` |
+| 16 | PR-E6 | 挂载只对能读被挂库的人生效（M3、N-6） | #828 | 见下注 | `7b031d553` |
+
+注：#828 在写本记录时 codex 评审第 1 轮已无意见、CI 仍在运行；本记录所在的文档 PR 以它的 head 为基底，合入顺序排在它之后，
+合入日期以 `gh pr view 828` 为准。实际合入顺序与 §4 的计划表不同：E5 因 M5 范围扩大（退出合同 v2、前端流程、后端快照导出）
+晚于 E3；E7 拆成 E7 / E7b 两个 PR，E7b 因 `ask_routes.py` 要等 E1 先合入而晚于 E1。
+
 路径约定：`$R` = `/Users/huzhifeng/workspace/silicon-notebook`（实现方换算成自己的 worktree 根）。
 行号以 master @ 9bacb8d6 为准，PostgreSQL 在前、SQLite 在括号里；实现前按函数名重新定位。
 
@@ -19,7 +52,7 @@
 只开放可见来源；硬删除 Memory / 成员退出 / 账号删除清掉全部派生行；按回答 id 的接口校验会话属主；
 收窄时本人隐藏来源不参与、只改文档；部署管理员看回答全文是审计权限，写进文档；E-2～E-5 并入 PR-B）。
 
-**在途分支（文件被占用，本计划的任务不得在它们合入前改这些文件）**
+**在途分支（开工时快照：文件被占用，本计划的任务不得在它们合入前改这些文件；这四条分支现已全部合入，见头部状态表）**
 
 | 分支 / worktree | 计划 | 占用文件（与本计划相关的） |
 | --- | --- | --- |
@@ -35,6 +68,7 @@
 与 `git -C $R show origin/master:backend/app/repositories/sqlite/migrations.py | grep -n "SCHEMA_VERSION ="`
 核对；被占则顺延并同步 `schema_manifest.py`、迁移测试与本段。PG 同号文件并存不会产生 git 冲突，会静默重号，
 所以这一步不可省。
+**实际**：E4 用 0067 / v87（#824），E8 用 0068 / v88（#826），开 PR 前各核对一次，没有撞号；其余 PR（含 E6）不带迁移。
 
 **棘轮**（`scripts/architecture_boundary_baseline.json`，零余量双向：变长违规，变短也必须同 diff 下调）：
 `ports_protocol_method_count` 966 只减不增（给既有协议方法加关键字参数允许，新增方法不允许）；
@@ -44,6 +78,12 @@
 `NotebookCopyService.copy_notebook` 640、`MemoryService.transfer` 389、`rebuild_unified_kg` 482、
 `rebuild_communities` 413、`complete_relations_for_source` 425、`_process_source_scoped` 352、
 `RepositoryRuntime.__init__` 145。各任务写明如何在其内设计。
+**棘轮的终值**：`ports_protocol_method_count` 终值 969（开工记的 966 到 969 来自开工之后合入的、与本轮无关的系统更新通知；本轮各 PR 没有
+净增协议方法，PR-A 曾加过 `object_ids_citing_sources` 又撤回，其余只给既有方法加关键字）。函数上限的终值：`ask_notebook` 142→115、
+`AskService.ask_chunk` 332→323、`_draft_reasoning_response` 698→597、`ReasoningRetriever.run` 1294→1282；`RepositoryFacade.__init__`
+477→471（E4 唯一一处收缩）；`_run_reasoning_stage` 515、`copy_notebook` 640、`MemoryService.transfer` 389、`rebuild_unified_kg` 482、
+`rebuild_communities` 413、`complete_relations_for_source` 425、`_process_source_scoped` 352、`RepositoryRuntime.__init__` 145、
+`ReportEngine._draft_section` 266 不变。合入时基线都是零松弛（只有上面这些收缩）。
 
 ## 1. 台账勘误
 
@@ -234,19 +274,22 @@
 
 ### 3.2 上线后重建（PR-E4，`$R/backend/app/services/memory_isolation_rebuild.py`）
 
-- 同时把 `kg_merge.CLUSTER_ALGO_VERSION` 从 3 升到 4（`kg_merge.py:52`），使非强制重建必然重算。
+- ~~同时把 `kg_merge.CLUSTER_ALGO_VERSION` 从 3 升到 4~~（**落地时没有升号，仍为 3**）：迁移已把 `kg_mutation_seq` 加 1 并删掉已决候选，二者都进入
+  聚类输入版本，受影响的库本来就会重算；升号对没有 Memory 的库（含最大的公共库）是纯开销——下一次未变化的非强制重建会从「跳过」
+  变成全量重聚，并按新版本清掉 `kg_merge_review` 的检查点，让所有自动候选重新送模型。重建对受影响的库改为在后台任务里先清掉已存的
+  聚类输入版本（`forget_cluster_input_version`），确保它真的重新聚类，而不是靠升号（见 §3.4）。
 - `startup_warmup.py` 在 `mark_ready()` **之后**新增一步 `_rebuild_memory_isolated_notebooks(repo)`（仿 `_reproject_legacy_knowhow_tables`，
   :869；吞异常，不影响就绪）：查 `memory_isolation_version = 0` 的库，交给**一个**后台工作线程逐库执行，走与
   `POST /unified-kg/rebuild` 相同的 `KgMaintenanceJobs` 路径（共享租约/claim 与进度），以系统 actor 调
   `rebuild_unified_kg(force=False)`。它会连带重算规范关系、提及桥、社区、可视化与自动索引（5919-5941）。
-- 成功时置 `memory_isolation_version = 1`：写在重建成功落库调用的那个 store 方法里，不在 `rebuild_unified_kg` 函数体里
+- 成功时置 `memory_isolation_version = 1`（落地时标记取值是 0 / 1 / 2，见 §3.4）：写在重建成功落库调用的那个 store 方法里，不在 `rebuild_unified_kg` 函数体里
   （482 行零余量）。任何一次重建（包括手动）都会顺带清掉标记，这是对的，因为上线后的重建天然隔离。
 - 失败：发内容无关事件 `memory_isolation_rebuild_failed`（库 id、阶段、异常类名），下次启动重试；也可以手动点重建或跑
   `backend/app/scripts/recluster_kg.py`。
 - 过渡期读侧：F 内未完成重建的库，`KnowledgeLifecycleService.unified_graph` **不读**迁移前的可视化工件——对象数 ≤
   `viz_sync_build_max_objects` 时走全量路径（带 D2 谓词），否则返回既有的「可视化未构建」形态（E4-7）。其余读者本来就走 D2 谓词。
 - 成本：聚类是流式的；模型花费只落在新出现的歧义种子对的 `kg_merge_review`（有检查点）与描述签名变了的簇的
-  `kg_concept_description`（签名复用）；社区是纯图计算，不调模型；可视化超过同步阈值时重新挂到自动索引上。
+  `kg_concept_description`（签名复用）——**这个说法只在不升 `CLUSTER_ALGO_VERSION` 时成立**，因为检查点以该版本号为键，升号会让全部检查点作废；社区是纯图计算，不调模型；可视化超过同步阈值时重新挂到自动索引上。
 - 运维怎么确认完成：`SELECT count(*) FROM unified_kg_state WHERE memory_isolation_version = 0` 为 0；checkup 新增只读项
   「Memory 隔离重建待完成：N 个库」；事件 `memory_isolation_rebuild_started/completed/failed`。步骤写进 `docs/operations*.md`。
 
@@ -254,6 +297,31 @@
 
 E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chunk 写入拒绝、E4-3 的跨类合并拒绝，加上
 `test_memory_reader_guard.py` 的建图侧登记。
+
+### 3.4 落地记录（#824，PG `0067_memory_kg_isolation.sql` / SQLite v87）
+
+- **标记取值是 0 / 1 / 2**，不是计划的 0 / 1：0 = 含 Memory 来源的库，等待隔离重建；1 = 已隔离（新建的库默认 1）；2 = 开工时没有 Memory
+  来源、但仍带着簇的库（例如最后一条 Memory 在升级前已删除，簇名、描述或社区文本可能还留着当时的 Memory 内容），就绪后只做
+  「悬空种子」检查，不清理其他东西。公共库可以落在 F 里（先有 Memory 来源、后来被设为公共库；`memory_service` 把该来源留在原处）。
+- **迁移内容比 §3.1 多三项**：删除 `source_type='memory'` 来源名下已有的 chunk 及其向量 / 问题 / 元素行（正常为零行，E4-1b 的存量清理）；
+  把排队中的「通用路径晋升 Memory 派生对象」提议驳回（`status='rejected'`，`reason='memory_derived_object'`，`reviewed_by` 为空）；
+  清掉点名这些簇的 `concept_merge_candidates` / `kg_conflict_candidates`（冲突候选另按 node 与 edge 两种口径处理）。证据扫描只在需要
+  的库上做（F 内非公共库，以及反向索引没有被证明完整的公共库）。全程单事务，实测 17.7–29.0 s，没有任何单条语句逼近 30 s 的语句超时。
+- **后台任务**（`memory_isolation_rebuild.py`，就绪之后一个工作线程）：先处理标记 2 的库，再经普通重建槽处理标记 0 的库；重建**强制真正重新聚类**
+  ——任务在同一写事务里先 `forget_cluster_input_version` 清掉已存的聚类输入版本（原先在「输入看起来没变」时重建会走跳过路径，不刷新总数，
+  是评审发现的缺口）；成功置 1，失败发 `memory_isolation_rebuild_failed` 下次启动重试；启动恢复每次至多回收 40 页（`_RECOVERY_REAP_PAGES_BUDGET`）。
+  隔离完成后仍持有隔离前 scale 索引或大型可视化的库，排入一次完整构建。
+- **`finish_rebuild_state` 并发守卫**（计划外，评审发现）：重建进行中到达新变更（例如删了一条 Memory 来源）时，清脏只在重建开始时记下的
+  `kg_mutation_seq` 与完成时相等才做，同一条 upsert 写 `memory_isolation_version = 1`；重建结束写入的对象 / 关系 / 簇总数只计共享部分
+  （否则总数相减可推出记忆条数）。
+- **有意的全站失效**：升级前建成的所有 scale 索引与可视化一律不再使用，不分 tier、不论是否含 Memory（清单里缺 `memory_isolation` 字段即拒绝，
+  索引状态报 stale、0 个节点）；对象数不超过 `VIZ_SYNC_BUILD_MAX_OBJECTS` 的小库首次读取时重建可视化，大库在 scale 构建完成前不显示预览，
+  KG 语义检索在重建前只返回词法结果。每个索引多做一次完整构建（不调模型，100 万对象约 100 s）。
+- **顺带修了 master 上既有的 PG 时区缺陷**：`_resolve_mode` 过去按字符串比较 `built_at`（本机时区）与 `last_rebuild_at`（UTC），东八区里 KG 重建后
+  8 小时内的下一次索引操作被误判为更早而选 fold；改为按时刻比较。
+- **体检新增四个只读项**（不响铃、不计入 healthy）：H9 等待隔离、H10 已批准的 Memory 派生晋升、H11 公共库仍持有 Memory、H12 无主 Memory 来源（E5-3 先落地）。
+- **运维**：升级前在生产快照上跑只读普查 `scripts/memory_isolation_census.py --all-signals --storage-dir …` 估算重建范围与模型花费；
+  「已应用的、改过共享对象的 Memory 侧冲突」迁移只计数、不还原，升级前跑运维文档里的只读 SQL 是拿到清单的唯一办法（`docs/operations*.md`）。
 
 ## 4. PR 划分与顺序
 
@@ -277,6 +345,41 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
 单库无挂载、无外人 Memory 的库字节不变；热函数零余量；`ports.py` 只加关键字参数；不在合成或终态核对里加权限分支；
 测试按可观测行为断言，不钉行号。关键用例写明它必须抓住的变异。
 
+### PR-A / PR-B / PR-C / PR-D / PR-F 落地记录（姊妹计划的 PR）
+
+这五个 PR 的任务书在 `2026-09-29-scope-ceiling-remediation.md`（A–D）与 `2026-09-29-ceiling-sql-hazards.md`（F），本计划 §0 的在途分支表占着它们的文件。
+这里只记合入结果和与本计划的接缝；设计与验收以姊妹计划为准。
+
+- **PR-C #805**（2026-09-29，head `33e540f82`，7 提交）：当前笔记本在每一处机械截断上保留保底席位 `min(CHUNK_MMR_K, ceil(CHUNK_MMR_K × CHUNK_FEDERATION_ACTIVE_RESERVE))`
+  （默认 0.25，即 4 席；越界值拒绝启动；它同时是回滚开关）。覆盖 chunk 模式 MMR 与配额、答案渲染截断、mix 截断、reasoning 前缀、分章节合成、
+  深度报告撰写；全局问答没有主体库，席位按库在最佳命中序中共享，库填不满的席位顺延。reasoning 合成里 Knowhow、花名册、读文档与表格块先照常渲染，
+  只有挤掉保底段落时才缩小（下限不超过分区的一半）。`select_chunk_candidates` 两个端口各加必填关键字 `active_notebook_id`，协议方法数不变，基线不动。
+  无挂载库的笔记本除非结构化块会把精确段落挤出，字节不变（对 master 的 600 例 A/B：0 例在 master 未挤出处变化）。
+- **PR-D #814**（2026-09-30，head `5ee930efa`，34 提交）：落实用户裁决「检索层负责权限」——全局回答不再被终态引用核对整体作废，每条引用与锚点只按完整性判定
+  （`changed` / `source_gone` / `unverifiable`），失败的打标，回答带 `citation_check`，读者在回答下方看到一句提示。检索时指纹只有一个接缝
+  （`FederatedRunPlan.on_evidence`，经 `evidence_attestation` 覆盖文档总览、目录枚举、KG 对象、`follow_chain`、表格分析）；
+  peer 模式下每个检索命中都写明所属库；J2：检索时已悬空的元素不产生卡片。两个静态登记表（D9 引用/定位器构造登记；检索命中来源守卫）。
+  与本计划的接缝：§12 的 J2 决定、E7-5 的 `is_memory` 标记都叠在它的 `citation_check` 与公开页投影上。
+- **PR-F #815**（2026-09-30，head `8d6535049`，17 提交）：随数据规模增长的 id 清单（冻结的来源天花板可达 4.9 万）一律经新的
+  `repositories/{postgres,sqlite}/id_binding.py` 绑定为一个参数（PG 文本 `string_to_array` + `prepare=False`，永远 custom plan；SQLite JSON 参数 + 只过滤不驱动的 `+col IN`），
+  修的是 master 上今天就可达的缺陷：PG 在同连接第 11 次起切 generic plan，49k 来源时 chunk FTS 常见词从 1.4 s 变 3.1–3.8 s 并越过 3 s 超时，SQLite 在清单超过 32,766 变量上限时
+  KG 词法通道被 fail-open 吞成空通道。新增静态守卫 `test_id_list_binding_guard.py`（本计划后续各任务凡绑定数据规模的 id 清单——来源天花板、Memory 来源清单——都遵守它：不一 id 一占位符，不用 `= ANY(%s)`），
+  被吞掉的词法失败事件加内容无关的 `reason`（`statement_timeout` / `variable_limit` / `other`）。代价：每次都要规划（49k 时 5–11 ms，有高频值约 83 ms）。
+  **#816**（同日）：守卫的站点身份误含 `node.lineno`，被 `test_test_architecture_policy` 判红（master 上全量套件 exit 1），改为 `(module, scope, kind)`，行号只放进失败信息。
+- **PR-A #806**（2026-09-30，head `c4aab652d`，40 提交）：`node_context` 返回定义出处（`definition_basis` / `definition_source_id` / `definition_element_id`），
+  `defines` 证据有序有界地回落到第一条范围内证据，概念簇融合描述只在能证明全部成员来源都在范围内时使用（用户裁决 Q1，严格；超过 `NODE_CONTEXT_CLUSTER_MEMBER_PROBE = 2000`
+  行的簇在绑定的天花板下失败即关）；来源范围只在能排除东西时才绑定重查（`source_scope.ceiling_binds`，每个运行与库判一次），全选且未变化的运行与无范围运行逐字节相同。
+  KG 详情三个读取（对象上下文、概念详情、邻居）按查看者可读来源过滤（Q4 / M1 的第一半，`kg_viewer_scope.py`）：他人 Memory 抽出的对象、出处、定义、簇标签不再出现，
+  对象只靠他人 Memory 存在时详情答「不存在」；笔记本主人与部署管理员**不**绕过。无不可读隐藏来源的笔记本走短路，探测 0.7–0.9 ms、响应逐字节不变；
+  含 300 条他人 Memory 来源的 PG 上，成员邻居 375→12.5 ms，概念详情 419→13.0 ms。同一 PR 把「特性不许留一半」的交付规则写进 `docs/development*.md`，并带入本轮计划与审计台账。
+  **后续在 E4 里改了的口径**：对象的隐藏判据从「证据触及他人 Memory 且无可读来源」改成「主 `source_id` ∈ 他人 Memory 来源」（D2、D4 一致，E4-5 迁移剥离存量混合证据后两者等价）。
+- **PR-B #817**（2026-09-30，head `41e73f61a`，26 提交）：收窄勾选时集合枚举与 `read_document` 不再整体撤掉——来源清单、公式 / 表格 / 图片 / 代码块清单、知识对象清单只统计、列出勾选来源，
+  卡片标题注明「（仅勾选的来源）」，点名未勾选文档与点名不存在文档得到完全相同的回应；全选时地图、清单、计数、续跑游标、卡片与此前逐字节相同。判词每个检索 run 只算一次
+  （`reasoning_retrieval.ceiling_binds_for_run`，孪生判词 `source_scope.ceiling_binds` 只差 `foreign_hidden` 一条分支）；续跑游标绑定产生时的天花板，换了就报「资料有变动」；
+  标记是粘性的、不进续跑键。全局问答没有「当前笔记本」：地图不显示当前库份额，来源清单没有 `scope` 选项，不注入锚点库画像，Knowhow 完整枚举在全局、收窄或漂移时让路。
+  天花板只作为一个参数经 `source_ceiling` 与 `id_binding` 绑定，没有第二套实现。本计划「并入 PR-B」的 E-2～E-6 补充均在此落地（D15：无主体 run 的枚举引用按冻结参与集复核；
+  D16：六个入口必须显式传 `ceiling_binds`，由守卫钉住）。PG 49k 来源：全选默认路径不绑天花板 KG 页 1.5 ms（无条件下推版本是 116 ms），收窄时 dense 49k 页 65→9–14 ms。
+
 ### PR-E0 共享判据
 
 **E0-1 `memory_sql.py` 与旧常量归一**（sonnet）
@@ -291,6 +394,15 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
 - 文档：`docs/development*.md`「依赖、授权与状态所有权」段加一句：`memory_sql.py` 与 `access_sql.py` / `mount_sql.py` 同样双后端同步维护（归 E0-Z）。
 
 **E0-Z**（sonnet）：上述文档；baseline 不涉及。
+
+**PR-E0 落地记录（#804，2026-09-29，head `115f994e8`，2 提交）**
+- 计划的六个片段原样落地：`memory_source_readable`、`foreign_memory_object_excluded`、`foreign_memory_relation_excluded`、`memory_derived_object`、`memory_derived_relation`、`no_memory_member_cluster`；
+  全部是排除形式的相关子查询，至多绑定一个标量（查看者），从不绑可读来源数组。`query_store` 的两个旧常量改为引用它们：`_NOT_MEMORY_OWNED_SQL` 的文本换成计划规定的写法
+  （内层别名 `ds`、限定 `source_type`），语义与旧文本相同，有差分用例与黄金结果钉住；簇常量文本逐字节不变。
+- **计划外的加固**：外层别名用 `fullmatch` 校验并按小写与内层别名比对（大写别名曾能把相关条件绑到内层表上，静默改变语义）；`'memory'` 字面量只出现一处（`MEMORY_SOURCE_TYPE`），
+  测试钉住它与两个 `source_store` 常量一致；PG 六个片段各有 EXPLAIN pin；两个后端片段文本有镜像测试（`%s` 换 `?` 后逐字相同）。10 个变异全部被抓。
+- **没有用户可见变化**，未附更新说明。此后各 PR 在同一对文件里追加了读侧变体（`memory_viewer_filter`、`own_memory_source`、`memory_derived_in_notebook`、
+  `foreign_memory_in_notebook_excluded`、`memory_cluster` 系列等），但「谁的 Memory 可读」「什么叫派生自 Memory」始终只有这一个定义点，由 `test_memory_reader_guard.py`（E4）登记所有读者。
 
 ### PR-E1 默认天花板
 
@@ -417,6 +529,28 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
 - `docs/development*.md`：默认天花板守卫与 `ceilings_total` 一句。`architecture.md` 数据流里的 scope 安装点。
 - baseline：`ask_notebook` 下调到实测值。
 
+**PR-E1 落地记录（#822，2026-10-07，head `0b8abc252`，70 提交；E1-1、E1-2、E1-3 同一个 PR）**
+- **范围**：所有问答入口都经 `AskService._retrieval_ceiling` 这一个安装点冻结提问人的默认上限（可见来源 ∪ 本人隐藏来源；挂载库只取它的可见来源；置 `ceilings_total`）：
+  不带来源范围的 API 提问与流式、MCP `ask_notebook`、插件回答引擎、两个意图预检（惰性上限，检索真读它时才构建）、未选范围的深度报告各阶段与自动确认刷新。
+  读取失败时提问直接失败，读取期间按停止即取消；`test_default_ceiling_guard.py` 用相等断言钉住全部安装点。MCP 的 `memory:read` 同时约束 Memory 通道与上限。
+- **与计划的偏离**：
+  1. E1-1（构造器）、E1-3（MCP / 报告）与 E1-2（问答入口安装）按计划分在三个波次，落地时合成一个 PR；插件引擎的自合成与 `AskService.ask` 的安装在同一提交里（计划的「提交约束」）。
+  2. **成本裁决**：漂移探针改为每次读一行 md5 指纹（不缓存判定，codex #634）；全选、未漂移、未扣下个人记忆、库里没有他人 Memory 的运行不绑定来源清单，读后核验、越界即翻转为绑定；
+     复审裁决 R1（报告也按判词下推，不恒绑清单）+ R2（无清单时不探词法语言闸，零语义变化）落地，实测报告回到 master 之上 +0.15–0.25 s、不改合同。实测表与单语句形态见 E1-2 成本清单。
+     **R3 未做**（报告阶段内通道闸只探一次，需要改「I/O 前跳过高风险通道」的合同），见 §13 待拍板。
+  3. **Memory 通道关闭时的泄漏**（第三轮实测）先由 E1 加一行失败即关（漂移探针判漂移、四个通道关闭），**正式修法在 E2-2 落地（#823）后那一行已删除**：
+     通道关闭时四个通道恢复，各自按天花板挡住扣下的本人 Memory。
+  4. **计划外的用户可见项**：挂载库这次读不出来（逐库 5 s、阶段合计 10 s）时，该库本次不参与，答案新增 `skipped_libraries`（浏览器与 MCP 同名），前端在引用核对提示旁显示一句
+     （更新说明 `mounted-library-skip-notice.md`）——原先「是否要告知」列在待用户决定里，现已解决。
+  5. 用户可见变化已写进文档与更新说明：挂载库的 Knowhow 表与个人记忆投影不再参与单库问答（在该库内提问不受影响，`shared-notebook-memory-stays-private.md`）；
+     上限绑定时无证据的关系 / 对象命中被丢弃，下推时与无范围运行一致（浏览器的全选运行因此保留这些命中，Knowhow 单元格语义召回恢复）。
+  6. 意图预检的两维冻结经 `preview_reasoning_intent` 的关键字参数交给安装点，协议方法数不变（969）；`global_run` 置 `ceilings_total`，有端到端钉子。
+- **验证**：`check.sh` 后端 16561 / vitest 1567；整条 PG 泳道 1426；43 个变异全部被杀；rebase 到 #819 / #820 之后的 master。
+- **已知代价（交用户知悉）**：6 个挂载库的构造器串行比今天慢约 15 ms（天花板本身的 frozenset 与交出元组约 10–12 ms，参与者读约 1 ms）；PG 0/1 挂载与并行读时反而更快。
+- **本节上面「E1-2 必须做」「E1-2 追加」的各项均已落地**；plan-corrections 的第 4、4b、4c、12 项在 E1 范围内的结论分别是：插件自合成与安装同一提交（已做）；
+  探针成本与下推（已做，见上）；`cancellable_ceiling_readers` 移到 `source_scope.py`、PG 单语句 3 s 上限保留（活动库这几次读服务端约 11 ms）；
+  `current_skipped_mounted_libraries()` 接到答案提示面（已做）、通道关闭泄漏（E2-2 已修）、「任何天花板下关系命中无证据会被边界丢弃」写进了文档。
+
 ### PR-E2 检索各腿按天花板（波次 3，PR-A/B/C 合入后）
 
 **E2-1 服务层腿**（sonnet）
@@ -478,6 +612,24 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
 晋升对象外库证据按快照呈现）；`fangan_todo.md` 删去「逐库精确臂的已知残余……下推进 `chunk_exact_search`」那一句，
 `fangan_done.md` 记完成；baseline 不涉及（E2 碰到的函数均无上限）。
 
+**PR-E2 落地记录（#823，2026-10-07，head `fd1f3e834`，61 提交；codex 4 轮）**
+- **范围与计划一致**（B-2～B-6、B-9～B-11、C-5、D-5 插件半、N-4）：PPR 在 `ppr_top_chunks` 截断之前按逐库天花板过滤，整库被拒的库直接出榜；推导链每一跳过证据边界、任一跳无界内证据整条丢弃；
+  弱支撑提示只给目标端仍有界内支撑、且样本关系出自界内来源的边；mix 叠加的漫游与渲染块后盾只保留界内支撑节点；关系行与「×N源」只计界内来源；精确查找把天花板下推进探针，
+  收窄时照常可用、单库与全局逐库一致；关键词词项与关系向量这两个所有提问人共用的缓存不再含 Memory 派生内容；插件引擎越界命中丢弃；晋升对象外库证据按存储时的快照呈现。
+- **与计划的偏离**：
+  1. **判词入口只有 E1 的一套**：E2-2 最初自带的第二套 chunk 下推在 E2-2 内撤回；其余各腿都改成「读之前取一次判词（`unbound_ceiling`），读后 `verify_unbound_read` 核验」，
+     E2-1 也收敛到 `run_ceiling_binds`。**不带判词探针的 scope 一律按约束处理**（叠加漫游、精确查找、弱支撑里无证据节点被丢）；默认天花板带探针，全选且无他人 Memory 时与 master 逐字节相同。
+     字节一致用例的 master 字面量因此在 `33c095d26` 上用生产探针重抓。
+  2. **PPR 的遍历有界**：越过被拒候选的遍历最多 8 窗 × 900，够不着就少返回几条并记 `ppr_ceiling_walk_exhausted`（计划写的是「截断前过滤」，没有写遍历预算；评审的 P1 要求）。
+  3. **E2-1 与 E2-3 同 PR 合入**（E2-3 的 PPR 过滤与 E2-1 的服务层腿共享接缝）。
+  4. **缓存构建**：Memory 关系另行缓存、逐次掩码，冷构建按每 900 个来源批量读（1000 个 Memory 来源：PG 0.90→0.70 s，SQLite 6.1→3.7 s）；弱支撑查看者形态只在本库全选、未漂移、未扣下个人记忆时使用，
+     其余绑定清单（PG 规划 325 ms→0.3–0.6 ms）。
+  5. **`_enrich_evidence` 的 `owner_notebook_id`（E2-4）与 E4-4 的 `sources_only` 取并集**：给 owner 时走 CASE 形态，`sources_only` 也作用在这条语句上；两个关键字在 `ports.py`、facade、两个 `knowledge_store.py` 同时保留。
+  6. **CI 暴露的本机盲点**：CI 钉 SQLite 3.45（本机 3.53），`test_retrieval_leg_ceilings.py` 的计划钉在 3.45 上多一次外层排序，红过一次；SQL 改写后两个版本都成立。
+- **接缝**：#822 为 Memory 通道关闭临时关掉的四个通道在这里恢复；E4 的 `owner_notebook_id` 三个调用点（`knowledge_query._viewer_resolved_evidence`、`_concept_detail`、`kg_viewer_scope.list_evidence_hidden`）按 E2-4 的关键字接入。
+- **验证**：`check.sh` 后端 16729 / vitest 1567；整条 PG 泳道 1478；`ReasoningRetriever.run` 基线 1282、ports 969 未松弛；E2 组装与收敛另加 12 条变异全部变红。
+  文档：`docs/product-and-api*.md`、`docs/development*.md`、`docs/agent-mcp-memory-sop*.md`、`fangan_done.md` §54、两条更新说明。
+
 ### PR-E3 来源/元素读取按 Memory 属主（波次 3，PR-D 合入后）
 
 **E3-1**（sonnet）
@@ -494,6 +646,21 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
   一律 404（与不存在不可区分），对自己的 Memory 200；可预测元素 id 同样 404；catalog 七个端点对 Memory / Knowhow 来源 404。
 - 变异：`source_notebook_id` 忽略 `viewer_id`，端点矩阵必须红。
 - **E3-Z**：`docs/product-and-api*.md` Memory 一节（Memory 来源与元素只对创建者可读；catalog 不接受隐藏来源）。
+
+**PR-E3 落地记录（#818，2026-09-30，head `c827ac6b7`，7 提交）**
+- Memory 来源及其元素只对创建该记忆的成员打开：`GET /sources/{id}`、`/elements`、`/elements-page`、三个活跃笔记本代理端点、MCP `get_cited_element`，对其他读者（含笔记本主人）、对无创建者的孤儿 Memory 来源
+  一律得到与「id 不存在」**完全相同**的 404（状态码、响应体、响应头，且执行的是同一条闸门语句，由语句追踪测试钉住 HTTP 与 MCP 两条路径）；Knowhow 投影来源是共享内容，每个读者照常可读。
+  Agent 令牌还须有 `memory:read`（界面「读取已确认记忆」）才能打开令牌主人自己的 Memory 来源——这就是 plan-corrections 第 2 项（`get_cited_element` 对同库 Memory 来源不设防）的落地。
+- 闸门是 `sharing_store.source_notebook_id(viewer_id=)` / `(visible_only=)`，**两个关键字恰好传一个，否则 `TypeError` / `ValueError`**（无闸模式已取消），只绑一个标量参数，消费 `memory_sql.memory_source_readable`；
+  `hidden_source_ids` 同样消费该片段，使「谁的 Memory 进天花板」与读取端点同源。
+- **计划外的两件事（评审与用户答复后补入）**：通用 `DELETE /api/sources/{id}` 与 `POST …/parse` 能删除 / 重解析成员的 Memory 投影来源（重解析还回显标题），现在对 Memory 与 Knowhow 投影来源对所有调用方
+  （含创建者）一律 404——记忆经记忆接口删除、由记忆服务重新摄取；前端来源详情窗对这两类来源不再显示「重新解析」「删除来源」、降级解析提示与命令目录入口（AST 接线守卫 + 判据单测钉住）。
+  命令目录七个端点对 Memory / Knowhow 投影来源同样 404（`_owned_source`）。
+- **与计划的偏离**：计划把 `source_notebook_id(viewer_id=)` 的端口关键字放到 E3-Z / E4-4 落地；实际在 E3 自己的 PR 里落地（`ports.py` 只加关键字，Protocol 方法数仍 969，`facade_surface.json` 只登记新增消费点）；
+  MCP `get_cited_element` 复用本次调用刚刷新的 principal 判 `memory:read`，每次多一条闸门读，工具描述已写明。
+- **登记不修**：PG `hidden_source_ids` 的 hashed SubPlan 按 `created_by` 取查看者跨所有笔记本的全部记忆行（每用户 2000 条：冷 72–83 ms、热约 10 ms），旧语句计划相同，不是本 PR 的回归。
+- **验证**：全量非 PG `-n 4` 16362 passed；前端 vitest 1470、`test:node` 2849；PG 9 个相关文件 176 passed，新语句 EXPLAIN 钉为 `pk_sources` 点查 + `pk_memory_items` 探针；13 个变异全部报红。
+  文档 `docs/product-and-api*.md` Memory 一节与四处端点说明、`docs/development*.md`、`release-notes/memory-readable-only-by-its-owner.md`。
 
 ### PR-E4 KG 的 Memory 结构隔离
 
@@ -607,6 +774,39 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
 `fangan_done.md` 按 `silicon_notebook_fangan.md` 的 Memory 章节记完成；新守卫 `test_memory_reader_guard.py` 在此任务落地
 （此时所有读者都已接入）。
 
+**PR-E4 落地记录（#824，2026-10-07，head `82e4986ad`，21 提交；codex 9 轮）**
+- **合入方式**：组装分支有 202 个提交，GitHub 拒绝 rebase 合入这么大的 PR（本地重放零冲突仍 `rebaseable=false`），改为按任务压成 21 个提交（树与压缩前逐字节相同）后合入；
+  今后超大 PR 一开始就按任务分组提交。
+- **范围**：E4-1（含 E4-1b）～E4-8 与 E4-Z 全部落地——写侧（记忆来源永不分块、不做簇种子或成员、增量融合早退、冲突与重复分组排除、手工合并 409、含记忆的笔记本不能设为公共知识库）、
+  建图输入排除（规范关系、提及桥与共提、社区及摘要、簇分析）、落盘工件（可视化、scale 索引与 ANN 标签、来源分区伴随工件）、读侧（知识列表与总数、类型计数、旧版与统一图谱、邻居、KG 搜索 FTS 与 ANN、
+  看板计数与 `kg_ready`、分析卡片、搜索框知识部分、MCP KG 腿）、存量迁移与重建（§3.4）。查看者只多看到本人的 Memory 对象；共享工具（社区摘要、重复分组、边审核排序）对所有人排除 Memory。
+- **与计划的偏离**：
+  1. **标记 0 / 1 / 2、不升 `CLUSTER_ALGO_VERSION`、迁移多三项、`finish_rebuild_state` 并发守卫、全站工件失效、PG 时区修复**：见 §3.4。
+  2. **通道关闭（plan-corrections 第 1 项）**：令牌没有 `memory:read` 时，KG 腿连本人的 Memory 派生行也不出，笔记本摘要里的记忆条数显示为 0（`viewer_identity` 在通道关闭时传 `""`，KG 腿因此排除本人的 Memory 派生行）。
+     端到端矩阵用 E1 的真实 `memory_access_context(False)` 关闭通道（路由包装与无 `memory:read` 的 MCP token），并有通道开放的对照；生产代码不需要为此再改。
+  3. **`load(allow_stale=True)` 的读者（第 8 项）**：隔离前建成的 scale 索引一律不再提供给任何读者（清单缺 `memory_isolation` 字段即拒绝），所以关系 ANN、KG ANN、chunk ANN、关系补全、Tier-2 里「隔离前索引里的 id」
+     不存在；折叠名 `K-<记忆种子名>` 的外露路径随之关闭。KG 语义检索在重建前只返回词法结果。
+  4. **大库图谱视图（第 9 项）**：共享工件保持无 Memory，查看者本人的 Memory 对象（最多 limit 个）及其之间的边叠加在工件应答上（总数与 `truncated` 同步），所以「B 自己浏览图时看得到自己的 Memory 对象」成立；
+     `test_kg_delete_job.py` 补回「删除后图谱视图无节点」的断言。
+  5. **隔离重建未完成期间**（组装裁决 B）：含有查看者不可读记忆的簇，在搜索命中、图谱视图的节点与边、邻居视图（含焦点）、概念详情的 `canonical_id` 上一律用第一个可见成员的对象 id 作答，不返回簇 id
+     （`KgViewerScope.pending_answer_ids` 与 `answer_graph_by`）。前端影响仅限过渡期：点击被改写的节点时概念详情返回空，节点上下文照常打开。
+  6. **重建不走跳过路径**（组装裁决 C）：选了在后台任务里清聚类输入版本（`forget_cluster_input_version`），没选 `force=True`，不改 facade 签名与 ports；评审发现原先「输入看起来没变」时重建会走跳过路径、不刷新总数。
+  7. **E4-3 的治理收口**：任何涉及调用方自己 Memory 派生对象的手工合并返回 409（对共享对象、对另一条 Memory 对象都一样，所以「同一成员自己的两条记忆派生对象不许互并」是现状），涉及他人 Memory 的返回与未知 id 相同的 404；
+     检查只在 `merge_objects_in_transaction` 的加锁语句里做一处；通用晋升路径（`POST …/knowledge/{id}/promote`）对 Memory 派生对象 409，审核队列里已有的这类提议在批准时返回 409 并自动关闭为已驳回，
+     Memory 只能由创建者从 `POST /api/memories/{id}/promote` 进入公共库。
+  8. **E4-1 / E4-1b**：`build_chunks_for_source` 返回类型是 `str`（回落告警码），遇 Memory 来源返回 `""`，不是计划写的 0；同步导入遇类型冲突与 Memory 来源的 chunk 整轮拒绝（预检，不写任何表、不写 `sync_imports` 行；被拒的包不可续传，需升级源环境后重导出全量包）；
+     图谱发布探针限定到本笔记本（原先是整库扫描）；所有写 `chunks` 的路径经 `test_memory_chunk_write_guard.py` 登记或拒绝，拷贝路径的判定同时认 master 形态与 E5-1 的 `_MEMORY_COPY_SNAPSHOT_QUERIES`（第 11 项）。
+  9. **读者登记守卫** `test_memory_reader_guard.py` 的类别是 13 个而不是计划的 5 个（`viewer_reader`、`own_memory`、`shared_tooling`、`count_cache`、`key_bounded`、`build_reader`、`ceiling_bounded`、`caller_filtered`、
+     `derived_layer`、`state_probe`、`memory_side`、`copy`、`maintenance`），因为扫描范围里还有约 200 个写入、维护、拷贝、检索腿与版本探针读者；另有 `test_kg_viewer_scope_assembly.py`（E1 硬导入、store 关键字开关、隔离标记读者接线）。
+  10. **端口与基线**：`ports.py` 只加关键字（969 不变）；唯一的基线收缩是 `RepositoryFacade.__init__` 477→471，热函数长度不变。
+- **plan-corrections 第 3、6、10、13 项在此落地**：看板 / `kg_ready` / `get_build_status` 的 `kg.ready` 是共享口径加本人 Memory 对象，`scale_index.n_nodes` / `n_ann` / `has_unindexed_content` 是共享口径（Memory 从不进索引）；
+  迁移驳回排队中的通用晋升提议、清点名这些簇的合并 / 冲突候选；运维文档写明「已应用的、改过共享对象的 Memory 侧冲突」只计数不还原、升级前跑只读 SQL；
+  `finish_rebuild_state` 的 `kg_mutation_seq` 相等才清脏并写 `memory_isolation_version = 1`。
+- **验证**：`check.sh` 后端 17022 / vitest 1580 / `test:node` 2861；整条 PG 泳道 1616；`check_backend_extended.sh` 529；端到端矩阵 `test_memory_kg_readers_e2e.py`（SQLite + PG 孪生，经真实路由）；各子任务关键用例都做过变异。
+  文档：`docs/product-and-api*.md`（「知识图谱里的记忆」）、`docs/operations*.md`（迁移与重建、普查、只读 SQL、工件失效）、`docs/development*.md`、`architecture.md`、`fangan_done.md` §55、四条更新说明。
+- **部署约束**（PR 描述已列）：迁移在服务启动时、就绪之前执行（单事务，拿不到锁则回滚并报未就绪），隔离重建只在就绪之后跑；E4-1b 的同步导入拒绝提示依赖本 PR 的迁移，须同批发布；
+  升级前在生产快照上跑普查脚本；**`concept_clusters` 在跨环境同步里属于 SYNCED，未迁移环境导入的行会带默认标记 1，需要确认同步有 schema 版本门**（见 §13）。
+
 ### PR-E5 拷贝与删除清理
 
 **E5-2 删除路径**（opus，波次 1）
@@ -617,7 +817,7 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
   `$R/backend/app/repositories/sqlite/governance_store.py`（撤回这些 Memory 处于 `proposed` 的晋升候选，否则 `promotion_candidates` 成孤儿）；
   新建 `$R/backend/tests/test_memory_purge.py`；改写 `$R/backend/tests/test_memory_promotion.py:472-541`（:533-538「重新加入后 Memory 回来」改为不再回来）、
   扩展 `$R/backend/tests/test_memory_api.py`（:629 起的硬删用例补派生行断言）。
-- 规则：成员退出、被移除、被全员踢出时，**先**清 Memory 再删成员行（中途崩溃只会留下「已无 Memory 的成员」）；只在移除后该用户对
+- 规则（**已被 §12 的 M5 取代**：被移除、被全员踢出一律不删，只有本人确认后的退出才删；落地合同见 PR-E5 落地记录。以下为计划原文）：成员退出、被移除、被全员踢出时，**先**清 Memory 再删成员行（中途崩溃只会留下「已无 Memory 的成员」）；只在移除后该用户对
   该库**不再有读权**时清理（仍经群组授权可读的，没有真正离开）。群组授权撤销、取消共享**不清理**：权限常是临时的，Memory 保留但因
   D2 谓词对任何人不可见，恢复权限即恢复。已批准的晋升独立于 Memory（E8 给它公共库自有出处），不动。
 - 验收：硬删、批量删、退出之后，该 Memory 的来源、元素、元素向量、KG 对象/关系/出现、簇成员行、`knowledge_object_sources` 全部为零，
@@ -641,10 +841,47 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
   `source_type = 'memory' AND (memory_id IS NULL OR memory_id = '' OR NOT EXISTS (SELECT 1 FROM memory_items m WHERE m.id = s.memory_id AND m.status = 'confirmed'))`）、
   `$R/backend/app/services/checkup.py`（只读计数项）；新建 `$R/backend/tests/test_memory_orphan_sweep.py`。
 - 验收：既有拷贝留下的无主 Memory 来源（N-5）与硬删残留在启动后被 `delete_source` 清掉；清扫幂等；checkup 显示剩余数。
-  分页常量为命名协议常量，不改变结果。变异：条件漏掉 `memory_id IS NULL`，N-5 夹具必须红。
+  分页常量为命名协议常量，不改变结果。失败语义（落地时的解释）：单个来源删除失败 → 记事件、跳过、留待下次启动；连续 3 次失败（`MAX_CONSECUTIVE_FAILURES`）
+  → 判定为系统性故障，结束本轮，剩余留到下次启动（严格的「首个失败就停」会让一个毒行永远挡住 id 更大的所有孤儿）。
+  变异（**原句「条件漏掉 `memory_id IS NULL`，N-5 夹具必须红」作废**——`NOT EXISTS` 对 NULL 天然成立，该变异不可能红；`IS NULL` 与 `= ''` 相对 `NOT EXISTS` 都是冗余，
+  只作为「存在 id 为空串的 Memory 行」这种反常数据的防线，由专门用例钉住）：去掉 `NOT EXISTS` 子句，硬删 / 非 confirmed / 悬空三种形态用例必须红；去掉 `m.status = 'confirmed'`，同样必须红；
+  清扫只删 `sources` 行、不走 `delete_source`，派生行断言必须红。
 
 **E5-Z**：`docs/product-and-api*.md` 深拷贝一节（Memory 一律不带）与 Memory 一节（硬删/退出清理、授权撤销保留的理由）；
 `docs/operations*.md` 孤儿清扫。
+
+**PR-E5 落地记录（#820，2026-10-07，head `5911f30e2`，67 提交；codex 4 轮）**
+- **M2（拷贝）**：深拷贝——给自己拷一份与经分享链接投递的一份——一律不带任何成员（含本人）的 Memory 及其派生内容：Memory 来源、元素与向量、派生的知识对象 / 关系 / 事实与向量、任一端是 Memory 对象的关系、
+  「Memory 的簇」、以及 Memory 借给保留行的证据条目；分享预览数量不含 Memory。全部在快照 SQL 里做，`copy_notebook` 服务层零改动（640 行上限不动）。
+- **M5（退出）**：只有本人退出、并在告知条数得到确认之后，才永久删除本人在该库的记忆；确认前可「导出为文件」或「转移到其他笔记本」。收回访问权的操作（主人移除成员、全员踢出、取消链接分享、撤销授权、组管理员移出群组）
+  一律不删，记忆保留且在其主人失去访问期间任何人都读不到；删除整本笔记本删除其中的一切。**退出合同 v2**（取代 §12 的第一版，也取代 E5-2 原文的规则段）：
+  `GET /notebooks/{id}/membership/exit-disclosure` → `{memory_count}`（本人在该库、任何状态、此刻退出会删的条数；主人 / 非成员 / 仍经授权可读时为 0）；
+  `DELETE /notebooks/{id}/membership[?acknowledged_memory_count=A]`，服务端在成员行锁下领取此刻要删的 C 条：
+
+  | 情形 | 响应 |
+  | --- | --- |
+  | C=0，A 缺省或为 0 | 204 |
+  | A 缺省或 A≠C（包括 C=0 而 A>0） | 409 `exit_disclosure_required`，带 C；什么都没删 |
+  | A=C>0，清理并完成 | 200 `{deleted_memory_count: C}` |
+  | 清掉 d 条，但期间又新存了 r 条未确认的 | 409 `exit_incomplete`，带 d 与 r；仍是成员 |
+  | 清理中途失败 | 503 `exit_incomplete`，带 d 与 r（d 可为 0）；仍是成员，可安全重试 |
+
+  客户端每一句话里的数字都来自服务端响应；DELETE 的网络失败或代理超时算「未知」而不是「失败」，客户端重读列表与告知后如实陈述三种状态之一；取消或导航后迟到的响应仍要告知用户。
+  另有 `GET /notebooks/{id}/memories/export`（Markdown 附件，逐条补闭未闭合的代码围栏、原始 HTML 块和注释，一条记忆的内容不会吞掉后面的条目；评审 r3 的 P1「导出进行中仍可确认退出」→ 前端守卫 + 后端快照导出 + `MEMORY_EXPORT_MAX_BYTES`）；
+  `POST /api/memories/transfer` 一次至多 200 条，前端分批。前端「退出共享」的两个入口共用一个确认流程（写明条数与不可恢复；条数为 0 时与今天相同）。
+- **一条移除路径**：硬删、批量删、弃用、转移移动、摄取后清理、退出与无主来源清扫全部走 `remove_memory_sources`（组合期注入 Memory 钩子），与 `delete_source` 共用同一个 teardown 事务体：外来证据行锁按 id 顺序在一条语句里取
+  （两人同时退出不死锁）；整簇删除（跨代）并连带删除点名这些簇的合并 / 冲突候选；手工合并进共享对象的证据被剥离而不删共享对象（N-1）；Memory 做种子的簇不再把名字和描述留在共享成员行上（B2）；标记待重建。
+  同一笔记本的一页（退出、批量删除）语句数固定、不随条数增长（3000 条带 KG 的记忆在 PG 上退出耗时 19.3 s → 2.37 s）。**计划写的「`transfer` 本身不动」落地时变为：转移的「移动」那一半也走这条移除**（`transfer` 仍是 389 行，基线不动）。
+- **E5-3 孤儿清扫**：服务就绪后后台跑一次，走同一条 Memory 来源移除，每页按笔记本切成至多 200 个的批次（一次调用的事务只锁、只标脏一个笔记本），失败后逐个重试、毒行不挡其余，
+  连续 3 次失败结束本轮；事件只带标识符与计数。体检 H12 只读显示剩余数量，**只读项不计入 `healthy`、不让铃铛提示「可修复的问题」**。PG 与 SQLite 都证明了派生表经 `delete_source` 清零；
+  SQLite 唯有 `kg_objects_fts`、`chunks_fts` 两张 FTS5 影子表会残留行（既有行为，任何来源删除后同样；测试断言「残留行指向的对象 / chunk 已不存在」）。
+- **E5-1 的三处偏离**：① 含 Memory 成员的簇**整簇**不带（不是只排除成员行与 canonical 为 Memory 对象的行）——因为 `canonical_id` 是 `K-<种子名>`，canonical 名字与描述被复制到簇的每一行，混合旧簇会把 Memory 文字带进共享名字；
+  其余成员在重建前成为单例。② 分享预览的节点 / 边数来自 `load_notebook_scale_facts`（经 `NotebookSharingService.notebook_copy_stats`），不在 `sharing_store`，所以在服务层按同口径扣减（改了计划文件清单之外的 `notebook_sharing.py`）。
+  ③ 副本「标脏」靠快照给根行打标、`insert_copy_rows` 在 store 层写 `unified_kg_state.dirty=1`，不经变更协调器（「`copy_notebook` 从不调用变更协调器」的冻结矩阵仍成立）；原库含 Memory 或成簇没整理到最新时，副本的「概念合并」显示「待重建」。
+  遗留给 E4-5 的旧混合证据（非 Memory 对象的 `evidence` 里夹着 Memory 元素 / 来源 id）：拷贝带过去的只是解析不到任何东西的不透明 id，没有 Memory 文字；E4-5 迁移剥离。
+- **验证**：`check.sh` 后端 16157 → 修复轮后全量非 PG 16794；前端 vitest 1528、`test:node` 2856；整条 PG 泳道 1235；两端共享场景 `memory_purge_cases` 与 PG 交错测试 S1–S9、两人同时退出不死锁；
+  变异：退出与清除两端 31 个、清扫约 20 个、拷贝排除与前端各轮，全部杀死。文档 `docs/product-and-api*.md`、`docs/operations*.md`、`docs/user-manual_zh.md`、`fangan_done.md` §52 / §53、两条更新说明。
+- **合入顺序**：#819（E7）在本 PR 之后合入——分享按 Memory id 顺序加锁，要与本 PR 的 `_hard_delete_on` 一致才能排除成环；#819 的死锁测试因此改调 `_hard_delete_on`，替换手抄的锁语句。
 
 ### PR-E6 挂载仅对挂载人生效
 
@@ -655,25 +892,29 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
   返回空而非他库；矩阵——主人把自己的私有库 b 挂到已共享的 a：主人有效，成员 m 无效，m 另有 b 的读权（成员/授权/owner）则有效；
   `tier='base'` 与 `everyone` 授权对所有人有效；`a.created_by` 为 NULL 时只对能读 b 的人有效；空查看者只剩 base / everyone；借入支
   （第 4 支）与未共享门行为不变；`NOTEBOOK_LIVE_SQL` 仍挡住所有支。
-- 变异：去掉 `v.uid = a.created_by` 支，「主人有效」必须红；把它换成 `true`，「成员无效」必须红。
+- 变异（**原句「去掉 `v.uid = a.created_by` 支，主人有效必须红」作废**——它是等价变异）：把查看者支换成 `true`，「成员无效」必须红；把挂载人支 `v.uid = a.created_by` 加回查看者支，
+  SQLite 结构断言与 PG EXPLAIN pin 必须红（行为上它是等价变异，只能由结构与计划守住）；去掉布尔列的 `COALESCE`，两后端「对此人无效的边」用例必须红。
 
-**E6-1 落地记录（提交 d9688ba6，分支 `claude/mount-viewer-scope`）**
-- 公开名：`MOUNT_VIEWER_JOIN`（两个参数，顺序 `(viewer_id, notebook_id)`）、`MOUNT_EFFECTIVE_FOR_VIEWER_EXPR`（零参数，可当布尔列）、
-  `MOUNT_EFFECTIVE_FOR_VIEWER`、`MOUNTED_BASE_IDS_FOR_VIEWER_SUBQUERY`。读权支直接复用 `access_sql.read_access_clause`。
-- **挂载人支被「MOUNT_VALID ∧ 读权支」完全蕴含**（边成立时挂载人自己必能读被挂库），保留它只为短路后面的 EXISTS；所以上面
-  「去掉挂载人支，主人有效必须红」是等价变异，行为上杀不死，只由文本派生断言守住。M3 的实际语义即：挂载只对**自己能读被挂库**的
-  查看者生效。
-- 查看者值先 `NULLIF(…,'')`，空串与 None 同为无查看者（只剩 base / everyone）。`notebooks.created_by` 可空且无回填，NULL 挂载人时只对
-  能读被挂库的人生效。
-- **E6-2 要切换的 store 调用点**（PG / SQLite）：`NotebookStore.resolve_participants`（`notebook_store.py:88` / `:81`）、`participant_rows`
-  （`:113` / `:100`）、`QueryStore.notebook_has_usable_base_kg`（`query_store.py:315` / `:375`）、`mounted_bases_row`（`:447` / `:565`）、
-  `UnifiedKgStore.mounted_base_ids`（`unified_kg_store.py:1422` / `:1338`）、`KnowledgeStore.any_mounted_has_kg_on`（`knowledge_store.py:1177` / `:1021`）、
-  `follow_start_row`（`:1653` / `:1423`）。保持不变：`list_mount_edges`、`mountable_notebooks`、`valid_copied_mount_base_ids`、`mounted_public_base_ids`。
-- **E6-3 的查看者来源**：报告、全局问答、离开后接回的运行在工作线程上执行，查看者取检索运行的 `actor_id`，不取 HTTP 请求上下文。
-  后台路径经 `get_notebook` → `NotebookSummaryQuery.get` 间接求值 `mounted_bases_row` / `notebook_has_usable_base_kg`，E6-3 逐一确认
-  各调用方读不读这两个字段。`services/communities.py:311` 的模块级 `mounted_base_ids` 无调用方，E6-3 删除。
-- `test_notebook_update_authorization_free.py` 按名字点名谓词常量，E6-2 把新名字加进名单。
-- 请求路径调用点的完整清单见实现报告，E6-3 动手前用 grep 按函数名重新核对（其它 PR 合入后行号会变）。
+**E6-1 落地记录（#828 的 E6-1 提交）**
+- 公开名：`MOUNT_VIEWER_JOIN`（两个参数，顺序 `(viewer_id, notebook_id)`）、`MOUNT_EFFECTIVE_FOR_VIEWER`（WHERE 过滤后缀，裸合取项，三值）、`MOUNTED_BASE_IDS_FOR_VIEWER_SUBQUERY`、
+  `MOUNT_EFFECTIVE_FOR_VIEWER_EXPR`（`COALESCE(…, FALSE)`，恒为真布尔，用于投影列与 `NOT (…)`，不许当正向过滤条件）。查看者支 = `b.tier='base' OR read_access_clause(b, v.uid)`，
+  读权直接复用 `access_sql.read_access_clause`。
+- **挂载人支 `v.uid = a.created_by` 已删除。** 它被「MOUNT_VALID ∧ 查看者支」完全蕴含：边成立时挂载人自己必能读被挂库；复评在两后端 2,500 个随机世界上比对新旧两版，真值差异为 0，所以留着它没有任何行为作用。
+  而它引用挂载方 `a`，会把整个查看者支从 `b` 上的限制条件变成 join 条件、不再下推，计划器随之翻成「hash join + 顺序扫描 notebooks」：真实形状夹具上 custom plan 在 3,000–6,000 本翻转，
+  generic plan 到 8,000 本仍翻转。把整个谓词包进 `COALESCE` 再当过滤条件是同一类回退，所以过滤后缀保持裸合取项、投影与取反用 `COALESCE` 版（这样后来调用方写 `NOT (…)` 也构造上安全）。
+- 现在由三道守着：① SQLite 契约的文本断言——查看者支逐字等于「公共库 ∨ read_access_clause」、不引用 `a.`，过滤后缀是裸合取项、布尔列是 COALESCE 版；② PG EXPLAIN pin（`test_mount_sql_viewer_pg.py`）——
+  3,000 / 6,000 / 8,000 本三档，custom 与 generic（`PREPARE` + `force_generic_plan`）两种计划、三种形状、四类查看者（含空查看者）都不得顺序扫描访问控制表，外加正对照：两种已知坏写法在各档会翻的格子里
+  必须出现 `Seq Scan on notebooks`，pin 一旦失去鉴别力先红；③ 行为矩阵里「挂载人与 u-all 的有序结果逐行等于旧片段」守着蕴含。
+- M3 的实际语义即：挂载只对**自己能读被挂库**的查看者生效。查看者值先 `NULLIF(…,'')`，空串与 None 同为无查看者（只剩 base / everyone）。`notebooks.created_by` 可空且无回填，
+  挂载人为 NULL 时只对能读被挂库的人生效。裸谓词在空查看者、挂载人为 NULL、被挂库 owner 为 NULL 时求出 NULL；对外布尔列已 COALESCE 成 FALSE，两后端各有「对此人无效的边」用例钉住。
+- **E6-2 要切换的 store 调用点**（PG / SQLite）：`NotebookStore.resolve_participants`、`participant_rows`、`QueryStore.notebook_has_usable_base_kg`、`mounted_bases_row`、
+  `UnifiedKgStore.mounted_base_ids`、`KnowledgeStore.any_mounted_has_kg_on`、`follow_start_row`（行号以实现时重新定位为准）。保持不变：`list_mount_edges`、`mountable_notebooks`、
+  `valid_copied_mount_base_ids`、`mounted_public_base_ids`。
+- **E6-3 的查看者来源**：报告、全局问答、离开后接回的运行在工作线程上执行，查看者取检索运行的 `actor_id`，不取 HTTP 请求上下文。后台路径经 `get_notebook` →
+  `NotebookSummaryQuery.get` 间接求值 `mounted_bases_row` / `notebook_has_usable_base_kg`，E6-3 逐一确认各调用方读不读这两个字段。`services/communities.py` 的模块级 `mounted_base_ids` 无调用方，E6-3 删除。
+  `test_notebook_update_authorization_free.py` 按名字点名谓词常量，新名字已加进名单。
+- E6-3 的文件清单另加两个 `mount_sql.py`（docstring 的「两组片段并存」改成切换后的终态）与 `test_mount_sql_viewer_pg.py`。**Agent 令牌**：查看者取令牌的主人；令牌的笔记本允许清单决定它能指定哪些笔记本，
+  指定某本笔记本后，它挂载的参考库随这本笔记本走，与主人在浏览器里看到的一致（主人自己能读的挂载库才算数），不再逐个对照允许清单；全局问答只检索所选的笔记本，每一本都必须在允许清单里，不展开挂载。
 
 **E6-2 store 与端口**（sonnet，波次 5）
 - 文件：`$R/backend/app/repositories/postgres/notebook_store.py`、`$R/backend/app/repositories/sqlite/notebook_store.py`、
@@ -702,6 +943,29 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
 
 **E6-Z**：`docs/product-and-api*.md`「读权 ⇒ 可挂载」一节加 M3 与 N-6；`docs/development*.md` 的 `mount_sql` 条目改为「随查看者」；
 `architecture.md` 参与集解析。
+
+**PR-E6 落地记录（#828，head `7b031d553`，12 提交，基于含 PR-E8 的 `b8f4278ce`；合入日期见头部注）**
+- **范围**：M3 与 N-6 全部落地——参与集随查看者解析：一条有效的挂载边只对挂载人本人、自己本来就能读被挂库的人，以及公共库（`tier='base'`）与 `everyone` 授权库的所有人生效。
+  主人把私有库挂到共享笔记本后，成员提问时该库在所有检索通道上零贡献，来源 / 资产代理与 MCP 取证对它一律 404，笔记本摘要里看不到它的名字与图谱标志（N-6）；主人一切照旧；成员另获读权后即刻生效。
+  七个 store 调用点收**必填**关键字 `viewer_id`（漏传当场 TypeError；`ports.py` 只改签名，969 不变；`participant_rows` 的 active 行附带 `created_by`）。
+- **`current_viewer_id()` 三级**：检索运行的 `actor_id` → 请求用户（`get_request_user()`，含 `AUTH_OPTIONAL` 的本地回落）→ `''`（无人，只剩公共库与 `everyone`，**不回落本地账号**，也不调 `identity.current_user()`）。
+  报告与离开后接回的运行在工作线程上按运行的 actor 判；默认天花板按它的 owner 取参与集（因此 `CeilingReaders.participants` 改为接收 `(notebook_id, viewer_id)`——计划文件清单之外的 `source_scope.py` 也改了）。
+  来源代理与资产代理按请求用户、MCP 按令牌属主、公开页按分享创建者取参与集。
+- **全局问答不读挂载**（计划没有写明的结构事实）：它只检索勾选的库（`ParticipantOverride`，每个库都核过读权），挂在被选笔记本上的库只有自己也被勾选时才参与，M3 在这个结构上不适用。
+- **图缓存键**：联邦关系图 / PPR 图 / 规模合成图在查看者的有效集合窄于全部有效边时，键带上该集合的指纹（独立 BLAKE2s 命名空间，与全局问答覆盖分开，覆盖的图不带 tier；`override_fingerprint_for_ids` 与覆盖指纹同一算法）；
+  `vector_cache` 的配额桶剥掉指纹段，每族上限对所有变体生效（评审 P2：指纹键绕过每族配额）。集合相同的人共用缓存，含私有库的图不与读不了它的成员共用；有效集合等于全部有效边时键逐字不变。
+  **每个运行的参与集与键是同一份快照**：挂载人免掉参照读，运行中途改挂载不换键、不重建；PPR 兜底的成本闸 `_federated_graph_is_large` 读同一份运行内快照（`_RetrievalState._viewer_graph_participants`），
+  运行中途撤掉大库也拒绝兜底（收尾复核 P2）。
+- **E7-5 交接已兑现**：三处 `mounts_still_effective` 调用点（`_public_conversation_or_404`、`_conversation_share_count`、`_report_mounts_still_effective`）经 `creator_id` 取参与集、`viewer_id=creator`，
+  匿名路由不取 `current_viewer_id()`；`public_page_mount_recheck_cases.py` 补「挂载人自己能读、创建者读不了」的报告版用例。
+- **守卫**：`test_mount_viewer_guard.py` 禁止字面量查看者，每个调用点按（类型、文件、函数、方法、调用次数）登记并按多重集比对；`test_participant_override_guard.py` 白名单同步；
+  `test_mount_viewer_e2e.py`（SQLite + PG 孪生）经真实路由覆盖全通道零贡献、代理 404、摘要名字与 KG 标志、主人照旧、成员获读权后生效、逐通道读者、图缓存共用与分离（fed / PPR / 规模，计数）、
+  覆盖与查看者分开、运行内单快照、报告与接回按 actor、全局问答只读勾选的库、无 actor 失败即关、加入共享的摘要与 GET 一致。
+- **PG 实测**：6000 本笔记本，最坏 +0.17 ms 往返，典型库快 2.5 倍。
+- **验证**：`check.sh` 后端 17341 / vitest 1618；全量非 PG 17986；整条 PG 泳道 1656（中间一轮 `test_memory_sql_explain_pins` 红过一次，属已知并行泳道下的计划钉偶红：本 PR 对该 SQL 与文件的 diff 为空，单跑 3/3 绿，最终轮绿）；
+  基线零松弛；变异：接线退回无查看者（逐调用点 12 处）、缓存键去指纹（fed / ppr / scale）、指纹共用命名空间、配额不剥指纹段、去掉运行内 memo、去掉挂载人跳过、摘要两处、资产路由、加入摘要、查看者顺序、天花板读者、守卫第二次调用、成本闸改回现读，各自变红。
+  文档：`docs/product-and-api*.md`「挂载只对能读被挂库的人生效」、`docs/development*.md` 的 `mount_sql` 条目、`architecture.md` 参与集解析、`fangan_done.md` §58、`release-notes/mounted-private-library-for-its-readers.md`。
+- **待拍板**：`mount_sql` 的读权支不含系统管理员旁路（见 §13）。
 
 ### PR-E7 回答级与分享
 
@@ -743,6 +1007,40 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
 **E7-Z**：`docs/product-and-api*.md` 报告公开分享护栏与会话公开分享护栏（服务端披露、`share_disclosure_required`、非作者不得公开含作者 Memory
 的报告）、回答 id 接口属主规则、公开页复核挂载；「管理员用户活动日志」一节写明部署管理员查看用户回答全文属审计权限。
 
+**PR-E7 落地记录（E7-2 / E7-3 / E7-4 = #819；E7-5 / E7-6 = PR-E7b #825）**
+
+**#819**（2026-10-07，head `b0a819427`，30 提交；在 #820 之后合入）
+- **报告披露的计数比计划宽**：`GET …/reports/{rid}/share/disclosure` 返回 `{memory_count, foreign_memory_count}`。`memory_count` 是「被引用 ∪ 被使用」的作者本人不同个人记忆的条数——除引用外，还包括规划与生成时引擎记下的记录
+  （大纲规划看到的记忆条目、各章节的已确认记忆块、检索在规划与生成过程中交出的每个来源背后的作者个人记忆，含深挖 Agent 的中间观察、全篇综合载荷、章节上下文），因为正文可以不带引用标记地转述这些内容；
+  检索结果大到无法完整记录时，规划或生成直接失败，而不是少计。早于本版本的报告只能按引用识别，文档里写明了这一限度。
+- **非作者的处理与计划不同**：除报告创建者外的任何人（含笔记本主人与部署管理员）在 disclosure GET 与 share POST 上得到与「报告不存在」相同的 404；`require_publishable` 仍对越过这道检查的非作者给 403 与固定中文句，
+  规则因此双保险。计划写的「有写权限的成员分享 → 403」改为「只有报告创建者能公开」。引用了**其他成员**个人记忆的报告（`foreign_memory_count > 0`）：分享 POST 一律 403；此前已公开的这类报告，公开页**每次打开都重新核对**，
+  返回与撤销的链接相同的 404，作者页面说明链接已无法打开、只提供「取消分享」；公开页响应带 `Cache-Control: no-store`。
+- **发布**：`POST …/share` 带 `acknowledged_memory_count`；服务端先在请求里算一次，再在发 token 的同一事务内重算一次，条数高于确认值才返回 409（`detail` 之下的 `share_disclosure_required`，带 `memory_count` / `new_memory_count`）；
+  PG 上该事务对没有存下记录的被引用来源背后的 Memory 行（按 Memory id 顺序）与来源行（按来源 id 顺序）加共享锁——与 #820 的 `_hard_delete_on` 同序，所以必须在 #820 之后合入，死锁测试改调 `_hard_delete_on`。
+  已公开的报告再次分享直接返回原链接；撤销从不询问；复合引用标记 `[k3001, k99]` 只剔除未知 key，已知的保留；管理员审计详情不再带出内部的 `memory_id` / `memory_owner_id`。
+- **前端（E7-3）**：确认条就地展开在「分享」按钮正下方（不放页顶横幅），文案是「公开页可能包含来自 N 条个人记忆的内容。」+「确认公开」+「取消」，条数有变化时说明「条数有变化（新增 M 条）」，焦点进入确认条、Esc 关闭并回到「分享」按钮；
+  引用其他成员记忆的报告直接在按钮下方说明、不生成链接；发布成功但复制失败显示「已公开，复制失败」。（§6 里「会包含 {N} 条你引用到的个人记忆摘录」的措辞因计数口径变宽而改为「可能包含来自 N 条……」。）
+- **E7-4**：接受回答 id 的接口（`memory-preview`、`memory-preview/stream`、`from-answer`、`feedback`）要求调用者能读该笔记本**且**是该回答所属会话的创建者，否则一律 404 `Answer not found`；
+  无会话的回答也 404；`answer_owner`（返回库主人）保持原名原义、docstring 写明不作授权用。**存量**：修复前「用他人回答存成的记忆」可能已存在，只读 SQL 见 §13。
+- 验证：`check.sh` 后端 15814；PG 泳道 336；共享场景在 SQLite 与 PG 上各跑一遍真实路由；规划、章节、投影证据、深挖观察、综合载荷各有一个用真实引擎的用例；外来记忆拒绝、公开页复核、溢出、锁的两半、分享与清除不成环（死锁测试）都有覆盖与 EXPLAIN 钉子。
+  文档 `docs/product-and-api*.md`（报告公开分享护栏、回答 id 接口属主、管理员活动日志属审计权限）、更新说明 `report-share-memory-confirm.md`。
+
+**PR-E7b #825**（E7-5 + E7-6，2026-10-07，head `ec80b1e19`，21 提交；codex r1 P2「隐藏投影」、r2 P1「无来源对象引用按 ctx 库身份」，r4 无意见；在 #822 之后合入）
+- E7-6（会话分享弹窗与公开页标签）不再单独开 PR，叠在 E7-5 的后端合同上同批合入——前端的 `is_memory` 字段必须与后端同时到。
+- **披露**：新增 `GET /notebooks/{nb}/conversations/{cid}/share/disclosure?through_id=` 与 `GET /global-ask/conversations/{cid}/share/disclosure?through_id=`，返回 `{memory_count, new_memory_count}`，只按这次恰好要公开的范围计数
+  （直接引用的记忆、记忆锚点、来自作者个人记忆投影的证据），`new_memory_count` 相对当前已公开水位；它跑分享会跑的全部检查（创建者门、边界失效或回退、无回答、全局侧的读权扫描、笔记本侧的挂载预检），不写入任何东西。
+  `POST …/share`：`memory_count > 0` 且确认值不相等 → 409，不发 token、不推进水位；分享钉在计数时的边界上，计数之后才完成的回答不会未经确认就被公开；零 Memory 时与以前完全相同。
+- **公开投影**：作者 Memory 的引用带 `is_memory: true`，非记忆引用省略该字段（响应逐字节不变），并去掉标题里的 `Memory · ` 前缀；前端弹窗条数只来自服务端，不再本地数 `citations[].memory_id`，条数变化时要求再次确认、不自动复制链接。
+- **D-2**：全局会话每轮复核的集合恒含 `resolved_notebook_ids`（resolved ∪ cited）。**影响面**：分享者失去其中任何一个库的读权、或该库被删除，已发出的链接就失效，分享 POST 也被拒——这是计划裁决的行为，已写进发布说明。
+- **D-3**：会话页、会话图片端点、报告页每次打开都以创建者身份复核引用到的挂载库，任一不再有效则返回与未知 token 相同的 404（挂载恢复后同一条链接复活）；会话公开页带 `no-store`。
+  报告引用只存 id，所以对标记为挂载库或早于该标记的引用，按来源、再按知识对象各批量查一次所属库（新增 `KnowledgeStore.object_owners` 与 `source_owners`，PG jsonb 单参数 / SQLite `json_each`，有 EXPLAIN pin；
+  已登记进 `test_memory_reader_guard`）；标记为挂载库却查不出所属库的引用失败即关；引用现在会存下所属库 `notebook_id`（只在报告内部，从不出现在公开页），被引来源删除后仍能指认。笔记本侧分享时挂载已失效则直接 404。
+  **会话侧没有 403 路径是合同本意**（会话只带作者自己的内容）。
+- **E6 交接已兑现**：三处 `mounts_still_effective` 调用点在 #828 里改为按创建者取参与集。
+- 验证：场景模块 `conversation_share_disclosure_cases.py`、`public_page_mount_recheck_cases.py` 在 SQLite 与 PG 上经真实路由跑通；30 组变异全部变红；全量非 PG 17227；前端 vitest 1604、`test:node` 2860；规格与质量评审各一轮，11 条 finding 全部修完、无驳回。
+  文档 `docs/product-and-api*.md`（会话分享护栏、全局会话分享）、`fangan_done.md` §56、更新说明 `conversation-share-memory-confirm.md`、`public-links-follow-library-access.md`。
+
 ### PR-E8 晋升对象的公共库自有出处（B-12）
 
 **E8-1**（opus，波次 4，E2、E4 合入后）
@@ -765,6 +1063,31 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
 - 验收：公共库挂到个人库，单库问答与全局问答都能召回并引用晋升对象，引用卡打开的是公共库的「晋升自」来源；推广者私有库删除后晋升对象照常可用；
   迁移前后双后端一致。变异：可见类型漏加 `promotion`，「挂载库单库问答召回晋升对象」必须红。
 - **E8-Z**：`docs/product-and-api*.md` 晋升一节；`docs/operations*.md` 迁移确认；`docs/ui-vocabulary.md` 来源类型中文标签。
+
+**PR-E8 落地记录（#826，2026-10-08，head `38f3aa537`，11 提交；codex 1 轮无意见；迁移 PG `0068_promotion_provenance.sql` / SQLite v88）**
+- **机制与计划一致**：批准晋升时，公共库为每个原件建立或复用一个可见的 `source_type='promotion'` 来源（内容寻址 id `src-promo-` + md5(`<公共库>|<原件键>`)，原件键是原来源 id，Memory 晋升是 `memory:<id>`；幂等），
+  标题「晋升自：<原标题>」，个人记忆晋升为「晋升自个人记忆：<记忆标题>」；每条证据写成该来源的一个 `source_elements` 行（元素 id `el-promo-` + md5），证据改指公共库自己的来源与元素，
+  原来源与所属笔记本只作展示键（`origin_source_id` / `origin_notebook_id`）保留；合并进既有对象时只改写新进来的条目。文本规则：通用晋升取原元素现文、读不到取保存的摘录；个人记忆晋升只用成员批准时的摘录
+  （从不读 Memory 元素现文）；原件是成员 Memory 来源的条目一律丢弃（失败即关）；没有文本的条目丢弃。挂载运行与全局问答都能召回并引用晋升对象，引用卡显示原件标题，打开的是公共库的「晋升自」来源，
+  推广者删除私有库不受影响。
+- **与计划的偏离**：
+  1. **可见谓词是排除式**：计划写「`promotion` 加入 `VISIBLE_SOURCE_TYPES_PREDICATE`」，但该谓词是 `NOT IN ('memory','knowhow')`，`promotion` 本来就可见，挂载天花板与 E7b 的 `visible_source_owners` 自然放行，没有改它。
+     真正要做的是反方向：把 `promotion` **排除出**各文档管线——KG 抽取目标与待分析计数（不排除的话「全部重新分析」会先按证据删掉晋升对象再让模型重抽）、论文元数据、体检 H3、元素向量 / 图片 / 事实补齐、
+     索引管线来源快照、命令目录、知识库画像语料统计；抽取入口按类型拒绝；新常量 `NOT_PROMOTION_SOURCE_PREDICATE` 作为独立合取项追加，不并进 NOT IN 列表（以免 SQLite 部分索引失效）。变异也相应改成「把 promotion 加进排除列表」。
+  2. **来源在界面里的行为**（评审收尾复核补入）：详情类型显示「收录」，列表徽标在仍被对象引用时显示「已收录」、否则「不在图谱中」；解析状态是终态 `extracted`，前端也按类型判断，从不当作「处理中」（不轮询、不计入解析中）；
+     不占上传文档名额——列表 `total_count` 仍计入，新增 `visible_document_count`（只在未筛选页返回）只数上传文档，上传入口与「文档 X / 上限」读它；不可重新解析（单个 409、批量跳过、MCP 拒绝）；
+     删除时只摘掉它的证据条目、只删失去全部证据的对象（被合并的原生对象保留）。
+  3. **批准 × 删除并发**：来源插入 `ON CONFLICT (id) DO UPDATE`，批准等删除结束后重新写入。
+  4. **存量迁移**：候选 = 公共库全部对象里含外库条目者（含无 `source_id` 的条目，合并的对象保留原 id），单事务、只改数据，把受影响的库置脏并 bump mutation seq；SQLite 用冻结副本，钉住与运行时规划器相等
+     （含「无摘录且现文超过 500 字」）。0068 会把每个公共库的全部证据扫一遍：104 万对象 / 204 万条证据全程约 7 s，最慢一条语句 4.3 s（默认 30 s 语句超时内）。
+  5. **没有证据卡的 Memory 晋升**（`safe_memory_evidence` 为空）不建来源，晋升对象在任何天花板下召回不到（升级前同样如此）；计划只规定「每条证据写一个元素」，没有把 Memory 正文当证据发布。
+  6. **plan-corrections 第 5 项（经通用路径已批准的 Memory 派生对象）的落地**：判据取 `status='approved'` 的 E4-3 谓词；迁移 0067 不处理它们，只由体检 H10 只读计数；0068 对其中指向 Memory 来源的证据条目一律丢弃（评审 P1「迁移会把 Memory 摘录公开」之后的裁决；改写后条目不再是外库条目，天然幂等），
+     **是否下架 / 剥离 / 删除这些对象仍待用户裁决**（§13）。
+- **PG 实测代价**（6 万来源含 1k promotion）：`source_build_rows` 5.76 / 3.65 ms、`source_build_state_page` 7.08 / 6.73 ms、`count_sources_missing_kg` 130.6 / 127.8 ms、pending（visible）145.9 / 142.8 ms（有 / 无 promotion 条件，计划变化是 Index Only Scan → Bitmap Heap Scan / Index Scan）；
+  SQLite 的 EXPLAIN QUERY PLAN 不变、部分索引仍命中。
+- **验证**：`check.sh` 后端 17306、前端 vitest 1618、`test:node` 2869；PG 整条泳道 1735（修复轮 2 受影响文件 286）；基线零松弛；变异 10 + 15 + 16 条全部变红。
+  文档 `docs/product-and-api*.md` 晋升一节、`docs/operations*.md`（迁移确认、核对 SQL、成本、日常运行）、`docs/ui-vocabulary.md`、`fangan_done.md` §57、更新说明 `contributed-knowledge-cited-from-public-library.md`。
+- **升级注意**：先备份（改写在应用层不可逆）；受影响的公共库会被置脏，升级后触发派生层重建。
 
 ### 并入 PR-B（`claude/enumeration-source-ceiling` 已接手 E-2～E-6；运行中的简报未含的，补以下内容）
 
@@ -800,6 +1123,7 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
 - 服务端按**即将公开的确切范围**重算：`memory_count > 0` 且 `acknowledged_memory_count != memory_count` → 409，
   `{"code": "share_disclosure_required", "memory_count": N, "new_memory_count": M}`，不发 token、不推进水位；等于 0 时不要求确认（今天的流程字节不变）。
 - 报告由非作者（有写权限的成员）分享且 `memory_count > 0` → 403「报告引用了作者本人的个人记忆，只有作者可以公开分享」（N-7；M4 规定由作者决定）。
+  **落地时更严**：非创建者（含主人与管理员）在 disclosure 与 share 上一律得到与「报告不存在」相同的 404，403 作为越过该检查后的兜底；另有 `foreign_memory_count`（引用他人个人记忆）使分享 403、公开页打开即 404。见 PR-E7 落地记录。
 - 已公开之后：会话受水位约束，新轮次只能经带确认的 POST 推进水位；报告只有 `done` 才能分享，`done` 不能重新生成（`report_routes.py:499-512`），
   内容在分享时就固定了。所以「已公开的分享事后多出 Memory 引用」这种情形不存在，不需要回溯处理。
 
@@ -826,6 +1150,8 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
 - 确认条放在报告标题行正下方、右对齐的独立一行（操作行是不换行的 flex，内联会挤压按钮）；403 时只留「取消」。
 
 ## 7. 并行执行编排
+
+（执行前的编排计划，保留作历史；实际的执行与合入顺序见头部状态表，各任务的结果见 §5 的落地记录。波次 5 的两个任务与 E6-Z 在 #828 里一并完成。）
 
 每波同一文件只归一个任务；跨波、跨 PR 同文件按 §4 的合入顺序 rebase。`docs/product-and-api*.md`、`docs/development*.md`、`docs/operations*.md`、
 `architecture.md`、`fangan_*.md`、`scripts/architecture_boundary_baseline.json`、`ports.py` **只由各 PR 的 Z 任务改**，Z 任务按合入顺序串行
@@ -959,7 +1285,7 @@ PG 泳道 `scripts/check_postgres.sh`（本机一次性测试库；动迁移的 
 - **晋升出处的呈现（E8-1）**：推荐默认值——公共库的来源列表里显示「晋升自：<原标题>」合成来源（按原件聚合，只读，不可重新解析，删除它即删除它支撑的晋升对象）。
   替代方案是把它做成隐藏类型，但「挂载库只开放可见来源」会让晋升对象在挂载运行里继续被剪掉（B-12 不解决），除非放宽那条已定裁决。
   两者的产品后果不同，所以列在这里；不回复即按推荐默认实现。
-  **用户裁决（2026-09-29）：显示为可见来源**，即上面的推荐默认值。
+  **用户裁决（2026-09-29）：显示为可见来源**，即上面的推荐默认值。已在 #826 落地（PR-E8 落地记录）；落地时唯一的新问题是标题里的「晋升」二字与界面词汇表冲突，见 §13。
 
 ## 12. 执行期间的用户裁决与主 agent 决定（2026-09-29）
 
@@ -979,3 +1305,65 @@ PG 泳道 `scripts/check_postgres.sh`（本机一次性测试库；动迁移的 
   无法在预算内验证，不用融合描述，定义回落到范围内的证据原文。
 - **（主 agent）检索时已不存在的元素（J2）**：单库与全局一致，不生成引用卡；本次运行登记过指纹、之后被删除的元素照常生成引用卡并标
   「资料已删除」；只持有指针的登记不能覆盖已有记录。
+
+## 13. 收官汇总（全部 PR 合入后）
+
+### 13.1 累积更正的去向
+
+收官前累积记下的范围补充（编号 1–13，含 4b、4c）与 13 行计划正文更正，逐条落点如下（同一 PR 内的几行合并为一行）；「已写回」指本文件正文已按落地结果改写。
+
+| 更正项 | 结果 |
+| --- | --- |
+| 1 通道关闭时本人 Memory 派生对象也不可见（E4-4 / E4-7 / E4-8） | 已由 #824 以「`viewer_identity` 在通道关闭时传 `""`、摘要记忆条数为 0、端到端矩阵用真实 `memory_access_context(False)`」的方式解决；E1 收尾文档没有越权声称 search 已覆盖（见 PR-E4 落地记录偏离 2） |
+| 2 `get_cited_element` 对同库 Memory 来源不设防（E3-1） | 已由 #818 解决：HTTP 与 MCP 对他人 / 孤儿 Memory 来源同一个 404，令牌无 `memory:read` 时对本人 Memory 来源同样 404 |
+| 3 计数里含 Memory 派生对象（E4-7） | 已由 #824 解决：`counts`、`kg_ready`、`get_build_status` 的 `kg.ready` 是共享口径加本人 Memory 对象；`scale_index.n_nodes` / `n_ann`、`has_unindexed_content` 是共享口径 |
+| 4 E1-2：插件自合成与安装同一提交；MCP 入口只留 `memory_access_context`；`ceiling_binds` 在 withheld 非空时判绑定；探针成本；成本清单换新数字 | 已由 #822 解决并已写回 E1 小节（成本表是 R1 + R2 之后的实测） |
+| 4b E1-2 成本（阻塞级）：每次现读一行摘要，不缓存判定，不新增端口方法，无外人 Memory 时下推 | 已由 #822 解决；摘要读取是现有 `all_visible_source_ids` 的 `digest_for_owner` 关键字，协议方法数仍 969；`scripts/reflect_shadow_rig.py` 的检索半程改经默认天花板 |
+| 4c `cancellable_ceiling_readers`、PG 3 s 单语句上限、`get_build_status` 的计数 | 已由 #822 / #824 解决：读取器取消令牌移到 `source_scope.py`；活动库天花板读服务端约 11 ms，3 s 上限保留；计数归 E4-7 |
+| 5 经通用路径批准的 Memory 派生对象（E8-1） | 已由 #826 部分解决：Memory 来源条目丢弃、证据换成公共库自有出处；**是否下架仍待拍板**（§13.2 第 3 条） |
+| 6 E4-5：驳回排队中的通用晋升提议、清引用 Memory 的合并 / 冲突候选 | 已由 #824 的 0067 解决（见 §3.4） |
+| 7 E6-3 文件清单（两个 `mount_sql.py`、`test_mount_sql_viewer_pg.py`）与 Agent 令牌的查看者 | 已由 #828 解决，已写回 E6-1 落地记录 |
+| 8 E4-4 验收逐个覆盖 `load(allow_stale=True)` 的读者 | 已由 #824 以「隔离前建成的索引一律不再提供」的方式解决（PR-E4 落地记录偏离 3），不是逐读者水合过滤 |
+| 9 E4-7：大库图谱视图不含本人 Memory 对象 | 已由 #824 采纳建议：工件保持共享无 Memory，本人 Memory 对象叠加在应答上（偏离 4） |
+| 10 E4-Z 运维文本（已应用的 Memory 侧冲突只计数不还原，升级前跑只读 SQL） | 已写入 `docs/operations*.md`（#824） |
+| 11 E5-1 ↔ E4-1b 接缝 | 已由 #824 解决：`test_memory_chunk_write_guard.py` 的拷贝判定同时认 master 形态与 `_MEMORY_COPY_SNAPSHOT_QUERIES` / `memory_derived_in_notebook` 形态 |
+| 12 E1-2 三条新增（提示面、通道关闭泄漏、关系命中无证据被丢弃、rebase 五步） | 已由 #822 / #823 解决：`skipped_libraries` 接到答案提示面；通道关闭泄漏的正式修法在 E2-2，E1 的临时失败即关一行随 #823 删除；无证据命中被丢弃已写进文档 |
+| 13 E4-2：`finish_rebuild_state` 并发下无条件写 `dirty=0` | 已由 #824 解决：`kg_mutation_seq` 相等才清脏，同一条 upsert 写 `memory_isolation_version = 1` |
+| E5-3 变异句、失败语义 | 已写回 E5-3 小节 |
+| §3.2 的「模型花费只落在新出现的歧义种子对」 | 已写回 §3.2：只有不升 `CLUSTER_ALGO_VERSION` 才成立，实际没有升号 |
+| D1 句（`report_engine` 走透传）、E1-1 落地记录整段、E1-2 要做清单与成本清单 | 已在 D1 与 E1 小节按 `refreshed_ceiling_context` 与五字段读取器写好，PR-E1 落地记录补终值 |
+| E6-1 落地记录整段与变异句 | 已替换（挂载人支已删除，三道守卫，三条新变异） |
+| E5-2 规则段（被移除、被全员踢出时先清 Memory） | 已标注被 M5 取代；退出合同 v2 抄进 PR-E5 落地记录（§12 的 M5 条目保留当时的第一版措辞） |
+| E4-1b、E5-1、E7-2、E4-3 小节 | 已写进 PR-E4 / PR-E5 / PR-E7 落地记录的偏离项 |
+
+### 13.2 待拍板汇总（最终版）
+
+下面每一条都是用户尚未裁决的事项，括号里是当前落地的默认处理，默认处理都已合入、不阻塞。
+
+1. **系统管理员旁路（#828）**：`mount_sql` 的读权支用 `read_access_clause`，不含系统管理员旁路。管理员看共享库时，被挂的私有库对他不生效，可能与路由层的读权口径不一致。（现状：原样不含旁路。）
+2. **「晋升自」用词（#826）**：`docs/ui-vocabulary.md` 禁止界面出现「晋升」，而 9-29 裁决的合成来源标题是「晋升自：<原标题>」/「晋升自个人记忆：<记忆标题>」。是否改成「收录自：」之类。（现状：保留裁决原文，在词汇文档里注明为「数据，不是界面文案」，标题不进词表守卫。）
+3. **经通用路径已批准进公共库的 Memory 派生对象（E4-3 存疑 1 / E8 / 体检 H10）**：这些对象已经把 Memory 内容和原始证据带进了公共库。下架、只替换证据，还是剥离 / 删除只靠 Memory 证据支撑的对象？（现状：0067 不处理，体检 H10 只读计数；0068 对其中指向 Memory 来源的证据条目一律丢弃。）
+   同一条下的三个迁移边界（#826）：合并进既有对象的个人记忆晋升条目在迁移里无法与通用晋升区分，按通用规则处理（只读普通来源现文，不读 Memory）；一个 Memory 晋升的对象后来又被通用晋升合并时，迁移看到的标签是「晋升自个人记忆」但不读这类条目现文，只保留已批准的摘录；
+   通用晋升取原元素完整现文，可能比评审人在候选里看到的摘录长。（现状：均按计划行为保留。）
+4. **E4-5 的 dirty 库（#824）**：升级时没有 Memory、但仍带簇且 `dirty = 1` 的库，现状是与悬空库同样入队做完整隔离重建（新增 LLM 合并复核费用；没有调度器会自动重建 dirty 库，所以是新增成本而不是提前）；
+   另一种做法是等用户点「刷新图谱」，但那样做不到隔离。上线前先跑 `scripts/memory_isolation_census.py --all-signals` 看范围与费用，再决定是否接受。
+5. **R3（#822）**：报告阶段内通道闸只探一次。需要改「验证后新增 / 删除来源时 I/O 前跳过高风险通道」的产品合同；复审实测 R1 + R3 相对 R1 + R2 再省 SQLite generate 约 0.3 s、PG 约 0.2 s，风险是阶段内（几秒）新增或确认的来源在本阶段剩余时间不再关闭四个非分区通道
+   （后过滤仍在，但合同不认后过滤为授权）。（现状：只做了 R1 + R2。）
+6. **六个挂载库的构造器比今天慢约 15 ms（#822）**：天花板本身的 frozenset 与交出元组约 10–12 ms，参与者读约 1 ms；0/1 挂载与 PG 并行读时反而更快。（现状：接受。）
+7. **主人删除整本笔记本时成员的记忆**：级联删除，成员无告知、无导出。是否也要告知 / 导出。（现状：沿用 M5 的措辞「删除整本笔记本删除其中的一切」。）
+8. **本人退出群组**：记忆不删，但本人看不到。是否也走告知—导出—删除。（现状：不删，同组管理员移出群组一样不删。）
+9. **同一成员自己的两条 Memory 派生对象不许手工合并**（#824：任何涉及调用方自己 Memory 派生对象的合并都 409）：是否放开。（现状：不放开。）
+10. **修复前「用他人回答存成的记忆」存量（#819）**：E7-4 之后接口只作用于自己的回答，但此前可能已存在。只读核对 SQL：
+    ```sql
+    -- PostgreSQL
+    SELECT COUNT(*) FROM memory_items m
+    JOIN answers a ON a.id = m.source_answer_id
+    LEFT JOIN conversations c ON c.id = a.conversation_id
+    WHERE m.origin = 'ask_answer'
+      AND (c.id IS NULL OR c.created_by IS DISTINCT FROM m.created_by);
+    -- SQLite 同一条语句，把 IS DISTINCT FROM 换成 IS NOT；列出时把 COUNT(*) 换成 m.id, m.created_by, m.notebook_id, m.source_answer_id
+    ```
+    是否清理、如何清理由用户定。（现状：不处理。）
+11. **上线前确认项（#824，不是裁决但要有人确认）**：`concept_clusters` 在跨环境同步里属于 SYNCED，未迁移环境导入的行会带默认标记 1，需要确认同步有 schema 版本门；E4-1b 的同步导入拒绝提示依赖 0067，须同批发布。
+
+已经关闭、不再是待拍板的：成员退出时 Memory 的去留（M5，#820）；晋升出处的呈现（显示为可见来源，#826）；挂载库读不出时是否告知用户（`skipped_libraries`，#822）；E5-2 在被移除时硬删成员 Memory（被 M5 取代，别人的操作一律不删）。
