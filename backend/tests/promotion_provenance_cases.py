@@ -386,6 +386,13 @@ def the_command_catalog_and_library_profile_skip_the_promotion_source(
     assert stats.documents == 0
     assert world.promotion_source not in stats.visible_ids
     assert (stats.documents_parse_failed, stats.documents_not_parsed) == (0, 0)
+    # the parse-status counts leave it out by type, not by its status: a row
+    # carrying a non-terminal status is still not "a document not parsed yet"
+    for status in ("queued", "failed"):
+        world.write("UPDATE sources SET parse_status=? WHERE id=?",
+                    (status, world.promotion_source))
+        stats = repo._runtime.agent_profile_jobs.corpus_stats(world.base)
+        assert (stats.documents_parse_failed, stats.documents_not_parsed) == (0, 0)
 
 
 def the_source_summary_says_whether_its_objects_are_still_in_the_graph(
