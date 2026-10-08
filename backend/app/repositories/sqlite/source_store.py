@@ -25,6 +25,7 @@ from app.domain.evidence_fingerprint import element_text_sha
 from app.domain.source_display import summary_display_title
 from app.models.question_suggestions import QUESTION_SUGGESTION_REVISION_PAGE_SIZE
 from app.repositories.sqlite.memory_sql import memory_source_type_predicate
+from app.domain.promotion_source import PROMOTION_SOURCE_TYPE
 from app.repositories.ports import (
     SOURCE_PAPER_META_UNSET,
     DocumentCapacityExceeded,
@@ -481,9 +482,13 @@ class SourceStore:
         inside the creation write transactions (``insert_source`` /
         ``insert_source_if_absent``), so the ceiling can never be enforced
         against a different count than the one the UI reports."""
+        # PR-E8: a promotion source is listed (and counted in the list's
+        # total) but is not an uploaded document, so it never takes one of the
+        # owner's document slots -- the approval that writes it is a curator's.
         row = db.execute(
             "SELECT COUNT(*) AS c FROM sources "
-            f"WHERE notebook_id = ? AND {VISIBLE_SOURCE_TYPES_PREDICATE}",
+            f"WHERE notebook_id = ? AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
+            f"AND {NOT_PROMOTION_SOURCE_PREDICATE}",
             (notebook_id,),
         ).fetchone()
         return int(row["c"])
@@ -2006,6 +2011,27 @@ class SourceStore:
         )
 
     # -------------------------------------------------------------- hydration
+    @staticmethod
+    def _promotion_sources_in_graph(db: sqlite3.Connection, rows) -> set:
+        """PR-E8: the promotion sources among ``rows`` that some object's
+        evidence still cites (the reverse index; both writers of a promotion
+        source maintain it). Nothing is read when ``rows`` holds none, so a
+        library without promotions issues exactly the statements it did."""
+        ids = sorted({
+            str(row["id"]) for row in rows
+            if row["source_type"] == PROMOTION_SOURCE_TYPE
+        })
+        if not ids:
+            return set()
+        bound = bind_ids(ids)
+        return {
+            str(found["source_id"]) for found in db.execute(
+                "SELECT DISTINCT source_id FROM knowledge_object_sources "
+                f"WHERE {drive_by('source_id', bound)}",
+                (bound.param,),
+            ).fetchall()
+        }
+
     def source_from_row(
         self,
         db: sqlite3.Connection,
@@ -2058,6 +2084,10 @@ class SourceStore:
             "    'retry_incomplete=1')=0",
             (row["id"], row["id"], row["id"], row["id"]),
         ).fetchone()[0])
+        if row["source_type"] == PROMOTION_SOURCE_TYPE:
+            # PR-E8: a promotion source mints no object; it is "in the graph"
+            # while some object's evidence still cites it.
+            kg_extracted = row["id"] in self._promotion_sources_in_graph(db, [row])
         pm = (
             self.paper_meta_for_sources(db, [row["id"]]).get(row["id"])
             if paper_meta is _UNSET else paper_meta
@@ -2202,6 +2232,7 @@ class SourceStore:
             # error_message」这个输入——见该函数 docstring。
             return extraction_warning_text(latest_error.get(source_id))
 
+        kg_extracted_ids |= self._promotion_sources_in_graph(db, rows)
         out: List[SourceSummary] = []
         for row in rows:
             sid = row["id"]

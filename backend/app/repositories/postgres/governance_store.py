@@ -2012,6 +2012,53 @@ class GovernanceStore:
             )
         return stripped
 
+    @staticmethod
+    def detach_promotion_sources_on(
+        connection: Any, rows: List[dict], now: str
+    ) -> List[str]:
+        """PR-E8: deleting a public library's promotion source removes ITS
+        entries from the evidence of every object citing it, and deletes only
+        the objects left with no evidence entry at all.
+
+        The generic teardown deletes every object whose evidence names the
+        source, which is right for an object the source minted but would
+        delete a NATIVE object a promotion was merged into (its own document's
+        evidence included). A promotion source mints nothing (promoted objects
+        carry ``source_id = ''``), so every citing object goes through
+        ``strip_sources_evidence_on`` (same candidate rule, id-ordered lock,
+        reverse-index rows removed); the teardown that follows finds nothing
+        of these sources left. Returns the deleted object ids."""
+        by_notebook: Dict[str, List[str]] = {}
+        for row in rows:
+            by_notebook.setdefault(str(row["notebook_id"]), []).append(str(row["id"]))
+        deleted: List[str] = []
+        for notebook_id in sorted(by_notebook):
+            stripped = GovernanceStore.strip_sources_evidence_on(
+                connection, notebook_id, by_notebook[notebook_id], now
+            )
+            if not stripped:
+                continue
+            found = id_bind_ids(sorted(stripped))
+            emptied = sorted(
+                str(row["id"])
+                for row in id_execute_ids(
+                    connection,
+                    "SELECT id, evidence FROM knowledge_objects "
+                    f"WHERE {id_member_of('id', found)}",
+                    (found.param,),
+                ).fetchall()
+                if not any(
+                    isinstance(item, dict) for item in json_value(row["evidence"], [])
+                )
+            )
+            for offset in range(0, len(emptied), _REVIEW_ENDPOINT_LOOKUP_BATCH):
+                KnowledgeStore._delete_object_id_batch(
+                    connection, notebook_id,
+                    emptied[offset:offset + _REVIEW_ENDPOINT_LOOKUP_BATCH],
+                )
+            deleted.extend(emptied)
+        return deleted
+
     # -------------------------------------------------- knowledge mutation
     @staticmethod
     def update_object_in_transaction(

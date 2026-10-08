@@ -398,7 +398,9 @@ def test_the_census_reports_every_signal_and_writes_nothing(repo, capsys, monkey
     assert json.loads(out[-1])["g_queued"] == 1
     assert digest() == before
 
-    SqliteMigrator(database, repo.settings).migrate()
+    # v87 alone: v88 (PR-E8) rewrites and marks dirty this world's public
+    # promotion copy (ko-pub), which the census would then rightly report
+    SqliteMigrator(database, repo.settings)._migration_87()
     after = census.census(url)
     assert after["phase"] == "post-upgrade"
     assert sorted(_by_set(after, "F")) == sorted(cases.F_NOTEBOOKS)

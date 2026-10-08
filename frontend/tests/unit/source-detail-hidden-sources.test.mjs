@@ -14,6 +14,7 @@ import ts from "typescript";
 
 import { parseModule } from "../../test-support/semantic-source.mjs";
 import {
+  sourceDeleteMessage,
   sourceDetailManageable,
   sourceDetailReparsable,
   sourceTypeTag,
@@ -42,6 +43,14 @@ test("a promotion source can be deleted but not re-parsed, and is labelled in Ch
   }
   assert.equal(sourceTypeTag("promotion"), "收录");
   assert.equal(sourceTypeTag("markdown"), null);
+});
+
+test("deleting a promotion source says what happens to the objects it supports", () => {
+  const promotion = sourceDeleteMessage("promotion", "晋升自：原件");
+  assert.match(promotion, /失去这份证据/);
+  assert.match(promotion, /还有其他证据的条目会保留/);
+  const document = sourceDeleteMessage("markdown", "论文");
+  assert.match(document, /由该来源生成的已批准知识也会一起移除/);
 });
 
 test("the header re-parse button is gated on the re-parse predicate", async () => {

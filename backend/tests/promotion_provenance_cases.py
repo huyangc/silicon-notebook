@@ -185,9 +185,10 @@ def a_second_promotion_from_the_same_original_reuses_its_source(world: World) ->
     assert {entry["element_id"] for entry in entries} == {row["id"] for row in elements}
 
 
-def a_merge_rewrites_only_the_incoming_entries(world: World) -> None:
-    """Promoting onto an existing public object (same seed) keeps that
-    object's own evidence byte for byte and rewrites only the new entries."""
+def _merge_into_native(world: World):
+    """A native public object (its own document ``s-pub``) that a promotion
+    from ``s-priv`` is merged into; returns ``(object id, native entry,
+    evidence before)``."""
     repo, sql = world.repo, world.sql
     native = seed_document(repo, sql, world.base, "s-pub", "公共原件", [f"{TERM} 公共原文"])
     native_entry = evidence("s-pub", native[0], f"{TERM} 公共原文", title="公共原件")
@@ -207,6 +208,13 @@ def a_merge_rewrites_only_the_incoming_entries(world: World) -> None:
     proposal = repo.propose_promotion(world.private, incoming)
     result = repo.approve_promotion(proposal["id"])
     assert result["merged_into"] == public_object
+    return public_object, native_entry, before
+
+
+def a_merge_rewrites_only_the_incoming_entries(world: World) -> None:
+    """Promoting onto an existing public object (same seed) keeps that
+    object's own evidence byte for byte and rewrites only the new entries."""
+    public_object, _native, before = _merge_into_native(world)
     after = world.evidence(public_object)
     assert after[0] == before[0]
     assert after[1]["source_id"] == world.promotion_source
@@ -237,6 +245,10 @@ def a_memory_promotion_is_titled_after_the_memory(world: World) -> None:
         world.private, world.user_id, answer_id, "增益记忆", LIVE_TEXT, [],
     )
     proposal = repo.propose_memory_promotion(memory.id, world.user_id)
+    # the cited element changes after the member proposed: the approval
+    # publishes the card the member approved, never the element's live text
+    world.write("UPDATE source_elements SET text=? WHERE id='s-priv-000'",
+                ("CHANGED LIVE TEXT",))
     result = repo.approve_promotion(proposal["id"])
     expected = promotion_source_id(world.base, memory_origin_key(memory.id))
     (source,) = world.rows("SELECT title,source_type FROM sources WHERE id=?", (expected,))
@@ -250,12 +262,62 @@ def a_memory_promotion_is_titled_after_the_memory(world: World) -> None:
     assert element["text"] == LIVE_TEXT
 
 
+def a_memory_original_is_dropped_by_the_approval_store(world: World) -> None:
+    """M1, fail closed: an entry whose original is a member's Memory source is
+    dropped by the approval-side planner -- neither its element's text nor
+    its stored excerpt is published (the approval paths refuse such objects
+    anyway; this is the store's own floor)."""
+    repo = world.repo
+    world.write(
+        "INSERT INTO memory_items (id,notebook_id,created_by,origin,status,title,"
+        "content_md,created_at,updated_at) VALUES ('mem-floor',?,?,'ask_answer',"
+        "'confirmed','私人记忆','x',?,?)", (world.private, world.user_id, NOW, NOW))
+    world.write(
+        "INSERT INTO sources (id,notebook_id,title,source_type,memory_id,created_at,"
+        "updated_at) VALUES ('s-pmem',?,'私人记忆','memory','mem-floor',?,?)",
+        (world.private, NOW, NOW))
+    world.write(
+        "INSERT INTO source_elements (id,source_id,element_type,location_label,text,"
+        "metadata,created_at) VALUES ('el-pmem','s-pmem','paragraph','p1',"
+        "'PRIVATE MEMORY TEXT','{}',?)", (NOW,))
+    if type(repo).__name__ == "PostgresRepository":
+        from app.repositories.postgres import promotion_provenance_store as store
+    else:
+        from app.repositories.sqlite import promotion_provenance_store as store
+    with repo._runtime.database.connect() as db:
+        plan = store.plan_for_library(db, world.base, [
+            evidence("s-pmem", "el-pmem", "memory excerpt"),
+            evidence("s-priv", "s-priv-000", STORED_QUOTE),
+        ])
+    assert [entry["origin_source_id"] for entry in plan.evidence] == ["s-priv"]
+    assert (plan.rewritten, plan.dropped) == (1, 1)
+    assert all("PRIVATE MEMORY" not in row.text and row.text != "memory excerpt"
+               for row in plan.elements)
+
+
 def deleting_the_promotion_source_deletes_the_objects_it_supports(world: World) -> None:
     (base_object,) = world.approved["base_object_ids"]
     world.repo.delete_source(world.promotion_source)
     assert world.rows("SELECT id FROM knowledge_objects WHERE id=?", (base_object,)) == []
     assert world.rows(
         "SELECT id FROM source_elements WHERE source_id=?", (world.promotion_source,)) == []
+
+
+def deleting_the_promotion_source_keeps_a_native_object_merged_into(world: World) -> None:
+    """A native public object a promotion was merged into survives the
+    deletion of the promotion source: it loses exactly that source's entries
+    (and their reverse-index rows); only an object left without evidence --
+    the approved copy -- is deleted."""
+    public_object, native_entry, _before = _merge_into_native(world)
+    (promoted_copy,) = world.approved["base_object_ids"]
+    world.repo.delete_source(world.promotion_source)
+    assert world.evidence(public_object) == [native_entry]
+    index = {row["source_id"] for row in world.rows(
+        "SELECT source_id FROM knowledge_object_sources WHERE object_id=?",
+        (public_object,))}
+    assert index == {"s-pub"}
+    assert world.rows("SELECT id FROM knowledge_objects WHERE id=?", (promoted_copy,)) == []
+    assert world.rows("SELECT id FROM sources WHERE id=?", (world.promotion_source,)) == []
 
 
 def the_promotion_source_is_never_a_pipeline_target(world: World) -> None:
@@ -282,6 +344,44 @@ def the_promotion_source_is_never_a_pipeline_target(world: World) -> None:
     summary = {source.id: source for source in repo.list_sources(world.base)}[
         world.promotion_source]
     assert summary.paper_meta_status is None
+    # the offline re-extraction / chunk-build roster and the element-vector
+    # backfill leave it out, and extraction itself refuses it before clearing
+    # anything (the one gate every extraction caller passes)
+    assert world.promotion_source not in repo.maintenance.user_source_ids_page(world.base)
+    assert world.promotion_source not in repo.maintenance.missing_element_vector_source_ids(
+        world.base)
+    from app.domain.promotion_source import PromotionSourceNotExtractable
+
+    (base_object,) = world.approved["base_object_ids"]
+    try:
+        repo.extract_source(world.promotion_source)
+    except PromotionSourceNotExtractable:
+        pass
+    else:
+        raise AssertionError("extract_source accepted a promotion source")
+    assert world.rows("SELECT id FROM knowledge_objects WHERE id=?", (base_object,))
+    # it never takes an uploaded-document slot, while the list still counts it
+    assert repo.visible_document_count(world.base) == 0
+    assert repo.list_sources_page(world.base).total_count == 1
+
+
+def the_source_summary_says_whether_its_objects_are_still_in_the_graph(
+    world: World,
+) -> None:
+    """The badge signal: a promotion source's ``kg_extracted`` is "some
+    object's evidence still cites it" (single and page summaries alike)."""
+    repo = world.repo
+
+    def summaries():
+        listed = {source.id: source for source in repo.list_sources(world.base)}
+        return (listed[world.promotion_source].kg_extracted,
+                repo.get_source(world.promotion_source).kg_extracted)
+
+    assert summaries() == (True, True)
+    (base_object,) = world.approved["base_object_ids"]
+    world.write("DELETE FROM knowledge_object_sources WHERE object_id=?", (base_object,))
+    world.write("DELETE FROM knowledge_objects WHERE id=?", (base_object,))
+    assert summaries() == (False, False)
 
 
 def the_answer_context_reads_the_entry_as_the_librarys_own(world: World) -> None:
@@ -360,6 +460,10 @@ def global_ask_cites_the_promoted_object(world: World) -> None:
     cited = _promotion_references(world, result.answer)
     assert cited, [ref.model_dump() for ref in _references(result.answer)]
     assert all(ref.notebook_id == world.base for ref in cited)
+    labels = [getattr(ref, "label", "") or getattr(ref, "source_title", "")
+              for ref in cited]
+    assert any(ORIGIN_TITLE in label for label in labels), labels
+    assert not any(label.startswith("晋升自") for label in labels), labels
     assert "citation_check" not in result.answer.model_dump(mode="json")
 
 

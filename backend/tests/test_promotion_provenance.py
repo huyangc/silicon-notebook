@@ -63,6 +63,18 @@ def test_the_promotion_source_is_never_a_pipeline_target(world):
     cases.the_promotion_source_is_never_a_pipeline_target(world)
 
 
+def test_a_memory_original_is_dropped_by_the_approval_store(world):
+    cases.a_memory_original_is_dropped_by_the_approval_store(world)
+
+
+def test_deleting_the_promotion_source_keeps_a_native_object_merged_into(world):
+    cases.deleting_the_promotion_source_keeps_a_native_object_merged_into(world)
+
+
+def test_the_source_summary_says_whether_its_objects_are_still_in_the_graph(world):
+    cases.the_source_summary_says_whether_its_objects_are_still_in_the_graph(world)
+
+
 def test_the_answer_context_reads_the_entry_as_the_librarys_own(world):
     cases.the_answer_context_reads_the_entry_as_the_librarys_own(world)
 
@@ -129,6 +141,60 @@ def test_reparse_routes_refuse_a_promotion_source(client_world, monkeypatch):
     assert world.evidence(base_object)[0]["source_id"] == world.promotion_source
 
 
+def test_promotion_sources_never_take_an_uploaded_document_slot(tmp_path, monkeypatch):
+    """A public library owned by an ordinary user (an admin may publish one)
+    keeps its owner's document limit: 15 uploads plus 6 promotion sources
+    from other people's contributions, and the owner can still add one more
+    (the limit is 20); the list's total still counts all 22."""
+    from app.api import deps, source_routes
+    from app.core.config import get_settings
+    from app.main import create_app
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'cap.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
+    monkeypatch.setenv("USER_UPLOAD_DOCUMENT_LIMIT", "20")
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    get_settings.cache_clear()
+    deps.repository.cache_clear()
+    monkeypatch.setattr(source_routes.kg_scheduler, "submit_job", lambda fn, *a, **k: None)
+    client = TestClient(create_app())
+    try:
+        client.post("/api/auth/register", json={"username": "c00123456", "password": "pw"})
+        token = client.post(
+            "/api/auth/login", json={"username": "c00123456", "password": "pw"}
+        ).json()["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        nb_id = client.post("/api/notebooks", json={"name": "n"}, headers=headers).json()["id"]
+
+        def import_files(n, start=0):
+            return client.post(
+                f"/api/notebooks/{nb_id}/sources/import",
+                json={"files": [{"file_name": f"f{start + i}.pdf"} for i in range(n)]},
+                headers=headers,
+            )
+
+        assert import_files(15).status_code == 200
+        repo = deps.repository()
+        with repo._write() as db:
+            for index in range(6):
+                db.execute(
+                    "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+                    "parse_status,created_at,updated_at) VALUES (?,?,?,'promotion',"
+                    "'active','parsed','t','t')",
+                    (f"src-promo-cap-{index}", nb_id, f"晋升自：原件{index}"),
+                )
+        assert repo.visible_document_count(nb_id) == 15
+        response = import_files(1, start=15)
+        assert response.status_code == 200, response.text
+        listing = client.get(f"/api/notebooks/{nb_id}/sources", headers=headers).json()
+        assert listing["total_count"] == 22
+    finally:
+        deps.repository.cache_clear()
+        get_settings.cache_clear()
+
+
 # ---------------------------------------------------------------------------
 # the pure rule
 # ---------------------------------------------------------------------------
@@ -187,6 +253,24 @@ def test_the_rewrite_is_idempotent():
     again = _plan(first.evidence, own_source_ids={first.sources[0].id})
     assert again.evidence == first.evidence
     assert again.sources == ()
+
+
+def test_a_memory_original_is_dropped_and_a_memory_card_keeps_its_quote():
+    entries = [
+        {"source_id": "s-mem", "element_id": "el-m", "quoted_span": "mem",
+         "source_title": "M"},
+        {"source_id": "s-a", "element_id": "el-1", "quoted_span": "card",
+         "source_title": "A"},
+    ]
+    live = {"el-1": OriginElement("s-a", "LIVE"), "el-m": OriginElement("s-mem", "MEM")}
+    generic = _plan(entries, origin_elements=live, memory_source_ids={"s-mem"})
+    assert [entry["origin_source_id"] for entry in generic.evidence] == ["s-a"]
+    assert (generic.rewritten, generic.dropped) == (1, 1)
+    assert [row.text for row in generic.elements] == ["LIVE"]
+    memory = _plan(entries, origin_elements=live, memory_source_ids={"s-mem"},
+                   memory=("mem-1", "记忆"))
+    assert [row.text for row in memory.elements] == ["card"]
+    assert memory.sources[0].title == "晋升自个人记忆：记忆"
 
 
 def test_the_card_title_is_the_original():

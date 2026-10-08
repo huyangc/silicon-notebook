@@ -41,29 +41,30 @@ def plan_for_library(
 ) -> PromotionPlan:
     """Read what the rule needs in the caller's transaction and plan."""
     source_notebooks: dict[str, str] = {}
+    memory_sources: set[str] = set()
     source_ids = evidence_source_ids(evidence)
     if source_ids:
         bound = bind_ids(source_ids)
-        source_notebooks = {
-            str(row["id"]): str(row["notebook_id"])
-            for row in execute_ids(
-                connection,
-                f"SELECT id,notebook_id FROM sources WHERE {member_of('id', bound)}",
-                (bound.param,),
-            ).fetchall()
-        }
+        for row in execute_ids(
+            connection,
+            "SELECT id,notebook_id,"
+            f"({memory_source_type_predicate()}) AS is_memory "
+            f"FROM sources WHERE {member_of('id', bound)}",
+            (bound.param,),
+        ).fetchall():
+            source_notebooks[str(row["id"])] = str(row["notebook_id"])
+            if row["is_memory"]:
+                memory_sources.add(str(row["id"]))
     own = {
         source_id for source_id, notebook_id in source_notebooks.items()
         if notebook_id == base_notebook_id
     }
     origin_elements: dict[str, OriginElement] = {}
-    element_ids = foreign_element_ids(evidence, own)
-    if element_ids:
+    element_ids = foreign_element_ids(evidence, own | memory_sources)
+    if element_ids and memory is None:
         bound = bind_ids(element_ids)
-        # A Memory source's element is never read: such an entry keeps only
-        # the excerpt already stored with it (it cannot reach a public library
-        # through the approval paths, M1; this keeps a stray one from carrying
-        # more of a Memory than it already did).
+        # An entry whose original is a Memory source is dropped by the rule;
+        # the join keeps a Memory element out of this read on its own as well.
         origin_elements = {
             str(row["id"]): OriginElement(str(row["source_id"]), str(row["text"] or ""))
             for row in execute_ids(
@@ -83,6 +84,7 @@ def plan_for_library(
         origin_elements=origin_elements,
         fallback_origin_notebook_id=fallback_origin_notebook_id,
         memory=memory,
+        memory_source_ids=memory_sources,
     )
 
 
@@ -90,8 +92,15 @@ def write_plan(
     connection: Any, base_notebook_id: str, plan: PromotionPlan, now: str
 ) -> None:
     """Insert the plan's promotion sources and elements, reusing existing
-    ones (content-addressed ids), and touch the sources' ``updated_at`` so the
-    change signal sees the new elements."""
+    ones (content-addressed ids).
+
+    An existing source is UPDATED (``updated_at``), never skipped: ``DO
+    NOTHING`` takes no lock, so an approval racing ``delete_source`` (which
+    holds the row ``FOR UPDATE`` while it tears the source down) would see the
+    doomed row, skip it, and commit an object whose evidence names a source
+    that is gone.  ``DO UPDATE`` waits for that lock; when the delete commits
+    the row is re-inserted, and its elements after it.  The bump is also the
+    change signal for the elements this approval adds."""
     if not plan.sources:
         return
     stamp = normalize_timestamp(now)
@@ -101,7 +110,7 @@ def write_plan(
         "file_name,file_path,source_url,file_size,file_hash,summary,doc_type,"
         "created_at,updated_at) "
         "VALUES (%s,%s,%s,%s,'active','parsed','','','',0,'','','',%s,%s) "
-        "ON CONFLICT (id) DO NOTHING",
+        "ON CONFLICT (id) DO UPDATE SET updated_at=EXCLUDED.updated_at",
         [
             (row.id, base_notebook_id, row.title, PROMOTION_SOURCE_TYPE, stamp, stamp)
             for row in plan.sources
@@ -119,12 +128,6 @@ def write_plan(
             )
             for row in plan.elements
         ],
-    )
-    bound = bind_ids([row.id for row in plan.sources])
-    execute_ids(
-        connection,
-        f"UPDATE sources SET updated_at=%s WHERE {member_of('id', bound)}",
-        (stamp, bound.param),
     )
 
 

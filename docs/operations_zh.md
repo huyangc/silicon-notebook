@@ -321,23 +321,31 @@ manifest 字段。
 [Memory 与 Agent MCP](./product-and-api_zh.md#memory-与-agent-mcp) 里关于晋升的段落）。本版本起批准晋升即按此写入；
 升级到 **PostgreSQL 0068 / SQLite v88** 时改写升级前已批准的数据。
 
-**迁移。** 一个事务，只改数据（不改表结构），不调用模型。按公共知识库（`notebooks.tier = 'base'`）找出证据里
-指向「不是本库来源」的对象——反向索引被确认完整时（`unified_kg_state.source_index_backfilled = 1` 且没有未完成的
-`source_index_backfills` 行）经反向索引查找，否则逐个读取对象证据——逐条改写：原元素还在时取它的现文（从不读取
-成员个人记忆的元素），否则取证据里保存的摘录，两者都没有则丢弃该条。摘要行在 PostgreSQL 写进服务器日志
-（`RAISE LOG`），在 SQLite 写进应用日志（`silicon_notebook.sqlite.maintenance`）：
+**迁移。** 一个事务，只改数据（不改表结构），不调用模型。按公共知识库（`notebooks.tier = 'base'`）找出证据里指向
+「不是本库来源」的对象——反向索引被确认完整时（`unified_kg_state.source_index_backfilled = 1` 且没有未完成的
+`source_index_backfills` 行）经反向索引查找，另外扫一遍本库证据找没有来源 id 的条目（反向索引不收这种条目）；未确认完整
+的库逐个读取全部对象证据——逐条改写：
+
+- 原件是成员**个人记忆来源**的条目**一律丢弃**（失败即关，裁决 M1：只有记忆隔离闸口出现之前批准的数据可能带有）；
+- 由已批准的**个人记忆晋升**建立的对象按现在的批准规则改写：每条记忆一个「晋升自个人记忆：<记忆标题>」来源，证据卡
+  只保留保存的摘录。合并进既有对象的个人记忆晋升在迁移里无法与通用晋升区分，按通用规则处理；
+- 其他条目：原元素还在时取它的现文，否则取保存的摘录，两者都没有则丢弃。
+
+每个被改写的库都标记为 dirty 并把 `kg_mutation_seq` 加一（与一次批准相同），派生层按新证据重建。摘要行在 PostgreSQL
+写进服务器日志（`RAISE LOG`），在 SQLite 写进应用日志（`silicon_notebook.sqlite.maintenance`）：
 `promotion-provenance migration: libraries=… objects_rewritten=… entries_rewritten=…
 entries_dropped=… objects_without_evidence=…`（只有计数）。`objects_without_evidence` 是证据全部被丢弃的对象数；
 此后任何来源范围都不会让它们进入回答，管理员可以删除或重新晋升。
 
-- 成本：与已确认完整的公共库的反向索引行数成正比（`idx_kos_notebook` 索引扫描，按本库来源做反连接），再加候选
-  对象的证据；反向索引未确认完整的公共库要读取全部对象的证据，0067 在 PostgreSQL 上实测 200 万对象的库读完要
-  13.5 秒。连接池的 `POSTGRES_STATEMENT_TIMEOUT_SECONDS` / `POSTGRES_LOCK_TIMEOUT_SECONDS` 生效；超时则事务回滚、
-  启动报告「未就绪」，调大后重启即重试。
+- 成本：与已确认完整的公共库的反向索引行数成正比（`idx_kos_notebook` 索引扫描，按本库来源做反连接），加一遍这些库
+  证据里找无来源 id 条目的读取，再加含外库条目的对象的证据（只展开这些对象）；反向索引未确认完整的库要读取全部对象的
+  证据。PostgreSQL 实测：104 万对象、204 万条证据、1 万条外库条目的未确认库，全程约 7 秒，最慢一条语句 4.3 秒。连接池的
+  `POSTGRES_STATEMENT_TIMEOUT_SECONDS` / `POSTGRES_LOCK_TIMEOUT_SECONDS` 生效；超时则事务回滚、启动报告「未就绪」，
+  调大后重启即重试。
 - 升级前先备份：应用层无法撤销这次改写。之后若回退代码，数据仍可读（晋升来源就是普通可见来源）。
 
-**确认已完成。** `SELECT count(*) FROM sources WHERE source_type = 'promotion'` 显示建立的晋升来源数。公共库里
-不应再有指向别的笔记本来源的证据；PostgreSQL 上可这样核对（它会读取公共库的全部证据，请在低峰执行）：
+**确认已完成。** `SELECT count(*) FROM sources WHERE source_type = 'promotion'` 显示建立的晋升来源数。公共库里不应再有
+指向别的笔记本来源或没有来源 id 的证据；PostgreSQL 上可这样核对（它会读取公共库的全部证据，请在低峰执行）：
 
 ```sql
 SELECT ko.notebook_id, count(*) AS foreign_entries
@@ -353,8 +361,13 @@ WHERE n.tier = 'base' AND jsonb_typeof(ev.item) = 'object'
 GROUP BY ko.notebook_id;
 ```
 
-升级后它不返回任何行。晋升来源在公共库的来源列表里显示类型「收录」；它不会被重新解析、不是知识图谱分析目标、
-也不会被缺分块体检项报告，无需维护。删除它即删去它支撑的晋升对象。
+升级后它不返回任何行（没有来源 id 的条目也算在内，迁移会改写它）。
+
+**日常运行。** 晋升来源的详情类型显示「收录」；来源列表里仍有知识条目引用它时徽标显示「已收录」，已无条目引用时显示
+「不在图谱中」。它不占库主的上传文档名额。任何管线都不处理它：知识图谱抽取在入口拒绝它（`scripts/reextract_notebook.py`
+与 `extract_source` 都清不掉它的对象，重抽与 `scripts/build_chunks.py` 的名单也不含它），它不是分析目标、不计入待分析、
+不补抽论文信息、不分块、不进索引管线的来源快照、不补元素向量、图片与来源事实，也不被缺分块体检项报告，无需维护。删除它
+时从引用它的知识条目证据里摘掉它的条目，只删除因此失去全部证据的条目；被合并进来的本库原生条目保留自己的证据。
 
 ## 可观测性 / 日志
 

@@ -16,7 +16,10 @@ from app.repositories.sqlite.memory_sql import (
     MEMORY_SOURCE_NOT_CHUNKED,
     memory_source_type_predicate,
 )
-from app.repositories.sqlite.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
+from app.repositories.sqlite.source_store import (
+    NOT_PROMOTION_SOURCE_PREDICATE,
+    VISIBLE_SOURCE_TYPES_PREDICATE,
+)
 from app.repositories.ports import (
     INDEXING_PIPELINE_PUBLISH_DELETE_BATCH,
     KgBuildAlreadyRunning,
@@ -287,7 +290,8 @@ class KgBuildJobStore:
                 "COALESCE(MAX(se.created_at),'') AS element_updated_at "
                 "FROM sources s LEFT JOIN source_elements se ON se.source_id=s.id "
                 "WHERE s.notebook_id=? AND "
-                f"{VISIBLE_SOURCE_TYPES_PREDICATE} GROUP BY s.id,s.updated_at "
+                f"{VISIBLE_SOURCE_TYPES_PREDICATE} AND s.{NOT_PROMOTION_SOURCE_PREDICATE} "
+                "GROUP BY s.id,s.updated_at "
                 "ORDER BY s.id",
                 (notebook_id,),
             ).fetchall()
@@ -787,7 +791,8 @@ class KgBuildJobStore:
                 "COALESCE(MAX(se.created_at),'') AS element_updated_at "
                 "FROM sources s LEFT JOIN source_elements se ON se.source_id=s.id "
                 "WHERE s.notebook_id=? AND "
-                f"{VISIBLE_SOURCE_TYPES_PREDICATE} GROUP BY s.id,s.updated_at "
+                f"{VISIBLE_SOURCE_TYPES_PREDICATE} AND s.{NOT_PROMOTION_SOURCE_PREDICATE} "
+                "GROUP BY s.id,s.updated_at "
                 "ORDER BY s.id", (notebook_id,),
             ).fetchall()
             current_snapshot = [

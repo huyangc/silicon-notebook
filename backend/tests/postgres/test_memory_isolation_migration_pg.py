@@ -166,7 +166,10 @@ def test_rebuild_pass_sets_the_marker_through_the_ordinary_slot(
     from app.services.memory_isolation_rebuild import MemoryIsolationRebuild
 
     database, _before, _after = upgraded
-    repository = PostgresRepository(postgres_settings)
+    # migrate=False: the world stays at 0067 (0068, PR-E8, would rewrite and
+    # mark dirty this world's public promotion copy ko-pub -- not this pass's
+    # subject; the SQLite twin applies v87 alone the same way)
+    repository = PostgresRepository(postgres_settings, migrate=False)
     try:
         seen: list[dict] = []
         log = repository._runtime.event_log

@@ -12,7 +12,8 @@
 
 import { PROMOTION_SOURCE_TYPE } from "./source-management.ts";
 
-export type SourceKgBadgeState = "analyzed" | "analyzed_empty" | "pending" | "promoted";
+export type SourceKgBadgeState =
+  | "analyzed" | "analyzed_empty" | "pending" | "promoted" | "promoted_detached";
 
 export type SourceKgBadge = {
   state: SourceKgBadgeState;
@@ -46,11 +47,19 @@ const BADGES: Record<SourceKgBadgeState, Omit<SourceKgBadge, "state">> = {
   },
   // 公共知识库里由「贡献到公共知识库」生成的来源（后端 source_type = "promotion"）：
   // 它的内容就是已收录知识条目的证据，从不交给分析，所以既不是「待分析」也不该被
-  // 「分析新增」计入。用「已入库」的绿色实心态：它支撑的知识条目确实在图谱里。
+  // 「分析新增」计入。后端对这类来源的 `kg_extracted` 表示「仍有知识条目引用它」，
+  // 为真才用「已入库」的绿色实心态。
   promoted: {
     label: "已收录",
-    title: "已收录：这份来源是贡献到公共知识库的内容，它支撑的知识条目已在知识图谱中",
+    title: "已收录：这份来源是贡献到公共知识库的内容，它支撑的知识条目在知识图谱中",
     className: "source-kg-badge source-kg-badge--in",
+  },
+  // 同一类来源，但已没有知识条目引用它（例如知识图谱被删除或全部重新分析后清掉了）。
+  // 它不会被重新分析补回，所以既不说「待分析」，也不借用绿色。
+  promoted_detached: {
+    label: "不在图谱中",
+    title: "这份来源是贡献到公共知识库的内容，它支撑的知识条目已不在知识图谱中；需要时请重新贡献",
+    className: "source-kg-badge",
   },
 };
 
@@ -59,11 +68,11 @@ export function sourceKgBadge(source: {
   kg_extracted?: boolean;
   kg_analyzed_empty?: boolean;
 }): SourceKgBadge {
-  // 顺序即优先级：收录来源先判（它从不分析，两个字段都为假）；然后真有知识对象就是
-  // 「已分析」，不看第二个字段——两者本该互斥，万一后端给出矛盾组合（旧行 + 新字段
+  // 顺序即优先级：收录来源先判（它从不分析，按「仍被引用」分两态）；然后真有知识对象
+  // 就是「已分析」，不看第二个字段——两者本该互斥，万一后端给出矛盾组合（旧行 + 新字段
   // 回填），显示更强的那个事实，不显示更弱的。
   const state: SourceKgBadgeState = source.type === PROMOTION_SOURCE_TYPE
-    ? "promoted"
+    ? (source.kg_extracted ? "promoted" : "promoted_detached")
     : source.kg_extracted
       ? "analyzed"
       : source.kg_analyzed_empty

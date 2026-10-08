@@ -314,6 +314,112 @@ _V87_MEMORY_DERIVED_KR = (
     "AND ds.source_type = 'memory')"
 )
 
+# ---------------------------------------------------------------------------
+# v88 (PR-E8): a FROZEN copy of the promotion-provenance rule as it stood when
+# v88 was written (``app.domain.promotion_provenance.plan_promotion_evidence``;
+# PostgreSQL 0068 spells the same rule in frozen SQL). A later change to the
+# live planner must not change what this migration does to a database that has
+# not run it yet; tests/test_promotion_provenance_migration.py pins
+# ``_v88_plan`` equal to the live planner over a battery of shapes, so a drift
+# is a failing test, not a silent fork.
+# ---------------------------------------------------------------------------
+_V88_PROMOTION_TYPE = "promotion"
+_V88_MEMORY_TYPE = "memory"
+_V88_TITLE = "晋升自："
+_V88_MEMORY_TITLE = "晋升自个人记忆："
+_V88_EXCERPT_CHARS = 500
+_V88_DEFAULT_ELEMENT_TYPE = "paragraph"
+
+
+def _v88_digest(*parts: str) -> str:
+    import hashlib
+
+    return hashlib.md5("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _v88_plan(
+    base_notebook_id: str,
+    evidence: list,
+    *,
+    own_source_ids: "set[str] | frozenset[str]",
+    source_notebooks: "dict[str, str]",
+    origin_elements: "dict[str, tuple[str, str]]",
+    fallback_origin_notebook_id: str,
+    memory: "tuple[str, str] | None",
+    memory_source_ids: "set[str] | frozenset[str]",
+) -> "tuple[list, list, list, int, int]":
+    """Frozen rule: ``(evidence, sources, elements, rewritten, dropped)`` with
+    ``sources`` as ``(id, title)`` and ``elements`` as ``(id, source_id,
+    element_type, location_label, text, metadata)``, first-seen order;
+    ``origin_elements`` maps an element id to ``(source_id, text)``."""
+    rewritten: list = []
+    sources: dict = {}
+    elements: dict = {}
+    kept = dropped = 0
+    for item in evidence or ():
+        if not isinstance(item, dict):
+            rewritten.append(item)
+            kept += 1
+            continue
+        origin = str(item.get("source_id") or "")
+        if origin in own_source_ids:
+            rewritten.append(item)
+            kept += 1
+            continue
+        if origin in memory_source_ids:
+            dropped += 1
+            continue
+        origin_element = str(item.get("element_id") or "")
+        live = (
+            origin_elements.get(origin_element)
+            if origin_element and memory is None else None
+        )
+        live_text = live[1] if live is not None and live[0] == origin else ""
+        stored = item.get("quoted_span")
+        stored = stored if isinstance(stored, str) else ""
+        text = live_text or stored
+        if not text:
+            dropped += 1
+            continue
+        if memory is not None:
+            source_id = "src-promo-" + _v88_digest(
+                str(base_notebook_id), f"memory:{memory[0]}")
+            title = _V88_MEMORY_TITLE + str(memory[1] or "")
+        else:
+            source_id = "src-promo-" + _v88_digest(str(base_notebook_id), origin)
+            stored_title = item.get("source_title")
+            title = _V88_TITLE + (stored_title if isinstance(stored_title, str) else "")
+        sources.setdefault(source_id, (source_id, title))
+        origin_notebook = (
+            source_notebooks.get(origin) or fallback_origin_notebook_id or ""
+        )
+        element_id = "el-promo-" + _v88_digest(source_id, origin_element, text)
+        element_type = item.get("element_type")
+        location_label = item.get("location_label")
+        elements.setdefault(element_id, (
+            element_id, source_id,
+            element_type if isinstance(element_type, str) and element_type
+            else _V88_DEFAULT_ELEMENT_TYPE,
+            location_label if isinstance(location_label, str) else "",
+            text,
+            {"promotion": {
+                "origin_source_id": origin,
+                "origin_element_id": origin_element,
+                "origin_notebook_id": origin_notebook,
+            }},
+        ))
+        rewritten.append({
+            **item,
+            "source_id": source_id,
+            "element_id": element_id,
+            "quoted_span": stored or text[:_V88_EXCERPT_CHARS],
+            "origin_source_id": origin,
+            "origin_notebook_id": origin_notebook,
+        })
+    return (rewritten, list(sources.values()), list(elements.values()),
+            len(rewritten) - kept, dropped)
+
+
 def _now() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
@@ -5169,31 +5275,24 @@ class SqliteMigrator:
         """PR-E8 (ledger B-12) promotion provenance, parity with PostgreSQL
         ``0068_promotion_provenance.sql`` -- read that file's header first:
         the scope (public libraries), the candidate rule (attested reverse
-        index, else every object's evidence), the rewrite and the idempotency
-        argument are written there once and hold here unchanged.
+        index plus a scan for entries without a source id, else every
+        object's evidence), the Memory rules, the rewrite, the dirty mark and
+        the idempotency argument are written there once and hold here
+        unchanged.
 
         SQLite specifics:
 
         * One ``BEGIN IMMEDIATE`` transaction including the ``user_version``
           stamp (same shape as v87).
-        * The rewrite of each candidate object is the approval paths' own
-          planner and writer (``promotion_provenance_store.plan_for_library``
-          / ``write_plan``, rule in ``app.domain.promotion_provenance``), run
-          library by library and object by object in id order -- so "the
-          first entry names the source / element" is the same order 0068's
-          ``DISTINCT ON`` takes, and the rows are the runtime's rows;
-          ``tests/test_promotion_provenance_migration.py`` pins both against
-          the PostgreSQL file on one shared world.
-        * The candidate notebook of an approved promotion
-          (``source_candidate_id``) is the fallback origin notebook, as on
-          PostgreSQL.
+        * The rule is the FROZEN ``_v88_plan`` (pinned equal to the live
+          planner by tests/test_promotion_provenance_migration.py) and every
+          statement is written here, not borrowed from a live store. Objects
+          are rewritten library by library, object by object in id order, so
+          "the first entry names the source / element" is the order 0068's
+          ``DISTINCT ON`` takes.
+        * The library's own source ids are read once: an object whose every
+          entry names one of them is skipped without another read.
         """
-        from app.repositories.sqlite.knowledge_store import KnowledgeStore
-        from app.repositories.sqlite.promotion_provenance_store import (
-            plan_for_library,
-            write_plan,
-        )
-
         counts = {"libraries": set(), "objects_rewritten": 0,
                   "entries_rewritten": 0, "entries_dropped": 0,
                   "objects_without_evidence": 0}
@@ -5209,28 +5308,53 @@ class SqliteMigrator:
             ).fetchall()
             for library in libraries:
                 library_id = str(library["id"])
+                own = {
+                    str(row["id"]) for row in db.execute(
+                        "SELECT id FROM sources WHERE notebook_id = ?", (library_id,)
+                    ).fetchall()
+                }
                 if library["attested"]:
-                    candidates = db.execute(
-                        "SELECT DISTINCT kos.object_id AS id "
-                        "FROM knowledge_object_sources kos "
-                        "WHERE kos.notebook_id = ? AND NOT EXISTS (SELECT 1 FROM "
-                        "sources s WHERE s.id = kos.source_id AND s.notebook_id = ?) "
-                        "ORDER BY kos.object_id",
-                        (library_id, library_id),
-                    ).fetchall()
+                    candidate_ids = {
+                        str(row["id"]) for row in db.execute(
+                            "SELECT DISTINCT kos.object_id AS id "
+                            "FROM knowledge_object_sources kos "
+                            "WHERE kos.notebook_id = ? AND NOT EXISTS (SELECT 1 FROM "
+                            "sources s WHERE s.id = kos.source_id "
+                            "AND s.notebook_id = ?)",
+                            (library_id, library_id),
+                        ).fetchall()
+                    }
+                    # the reverse index holds no row for an entry WITHOUT a
+                    # source id: one scan of the library's evidence for those
+                    candidate_ids |= {
+                        str(row["id"]) for row in db.execute(
+                            "SELECT DISTINCT ko.id AS id FROM knowledge_objects ko "
+                            "JOIN json_each(CASE WHEN json_valid(ko.evidence) "
+                            "AND json_type(ko.evidence) = 'array' "
+                            "THEN ko.evidence ELSE '[]' END) AS item "
+                            "WHERE ko.notebook_id = ? AND item.type = 'object' "
+                            "AND COALESCE(json_extract(item.value, '$.source_id'), '') = ''",
+                            (library_id,),
+                        ).fetchall()
+                    }
                 else:
-                    candidates = db.execute(
-                        "SELECT id FROM knowledge_objects WHERE notebook_id = ? "
-                        "ORDER BY id",
-                        (library_id,),
-                    ).fetchall()
-                for candidate in candidates:
+                    candidate_ids = {
+                        str(row["id"]) for row in db.execute(
+                            "SELECT id FROM knowledge_objects WHERE notebook_id = ?",
+                            (library_id,),
+                        ).fetchall()
+                    }
+                for object_id in sorted(candidate_ids):
                     row = db.execute(
-                        "SELECT ko.id, ko.evidence, pc.notebook_id AS candidate_notebook "
+                        "SELECT ko.id, ko.evidence, pc.notebook_id AS candidate_notebook, "
+                        "CASE WHEN pc.object_type = 'memory' THEN pc.object_id END "
+                        "AS memory_id, COALESCE(mi.title, '') AS memory_title "
                         "FROM knowledge_objects ko LEFT JOIN promotion_candidates pc "
                         "ON pc.id = NULLIF(ko.source_candidate_id, '') "
+                        "LEFT JOIN memory_items mi ON pc.object_type = 'memory' "
+                        "AND mi.id = pc.object_id "
                         "WHERE ko.id = ? AND ko.notebook_id = ?",
-                        (candidate["id"], library_id),
+                        (object_id, library_id),
                     ).fetchone()
                     if row is None:
                         continue
@@ -5240,27 +5364,104 @@ class SqliteMigrator:
                         continue
                     if not isinstance(evidence, list):
                         continue
-                    plan = plan_for_library(
-                        db, library_id, evidence,
-                        fallback_origin_notebook_id=str(row["candidate_notebook"] or ""),
-                    )
-                    if not (plan.rewritten or plan.dropped):
+                    foreign = [
+                        str(item.get("source_id") or "") for item in evidence
+                        if isinstance(item, dict)
+                        and str(item.get("source_id") or "") not in own
+                    ]
+                    if not foreign:
                         continue
+                    origins = sorted({value for value in foreign if value})
+                    source_notebooks: dict[str, str] = {}
+                    memory_sources: set[str] = set()
+                    if origins:
+                        for found in db.execute(
+                            "SELECT id, notebook_id, source_type FROM sources "
+                            "WHERE id IN (SELECT value FROM json_each(?))",
+                            (json.dumps(origins),),
+                        ).fetchall():
+                            source_notebooks[str(found["id"])] = str(found["notebook_id"])
+                            if found["source_type"] == _V88_MEMORY_TYPE:
+                                memory_sources.add(str(found["id"]))
+                    memory = (
+                        (str(row["memory_id"]), str(row["memory_title"] or ""))
+                        if row["memory_id"] is not None else None
+                    )
+                    origin_elements: dict[str, tuple[str, str]] = {}
+                    element_ids = sorted({
+                        str(item.get("element_id") or "") for item in evidence
+                        if isinstance(item, dict)
+                        and str(item.get("source_id") or "") not in own
+                        and str(item.get("source_id") or "") not in memory_sources
+                        and item.get("element_id")
+                    })
+                    if element_ids and memory is None:
+                        for found in db.execute(
+                            "SELECT e.id, e.source_id, e.text FROM source_elements e "
+                            "JOIN sources s ON s.id = e.source_id "
+                            "WHERE e.id IN (SELECT value FROM json_each(?)) "
+                            "AND s.source_type <> 'memory'",
+                            (json.dumps(element_ids),),
+                        ).fetchall():
+                            origin_elements[str(found["id"])] = (
+                                str(found["source_id"]), str(found["text"] or ""))
+                    new_evidence, sources, elements, rewritten, dropped = _v88_plan(
+                        library_id, evidence,
+                        own_source_ids=own,
+                        source_notebooks=source_notebooks,
+                        origin_elements=origin_elements,
+                        fallback_origin_notebook_id=str(row["candidate_notebook"] or ""),
+                        memory=memory,
+                        memory_source_ids=memory_sources,
+                    )
                     counts["libraries"].add(library_id)
                     counts["objects_rewritten"] += 1
-                    counts["entries_rewritten"] += plan.rewritten
-                    counts["entries_dropped"] += plan.dropped
-                    if not plan.evidence:
+                    counts["entries_rewritten"] += rewritten
+                    counts["entries_dropped"] += dropped
+                    if not any(isinstance(item, dict) for item in new_evidence):
                         counts["objects_without_evidence"] += 1
-                    write_plan(db, library_id, plan, now)
-                    rewritten = json.dumps(plan.evidence, ensure_ascii=False)
+                    db.executemany(
+                        "INSERT INTO sources (id, notebook_id, title, source_type, "
+                        "status, parse_status, file_name, file_path, source_url, "
+                        "file_size, file_hash, summary, doc_type, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, 'active', 'parsed', '', '', '', 0, '', '', "
+                        "'', ?, ?) ON CONFLICT(id) DO NOTHING",
+                        [(source_id, library_id, title, _V88_PROMOTION_TYPE, now, now)
+                         for source_id, title in sources],
+                    )
+                    db.executemany(
+                        "INSERT INTO source_elements (id, source_id, element_type, "
+                        "location_label, text, metadata, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
+                        [(element_id, source_id, element_type, label, text,
+                          json.dumps(metadata, ensure_ascii=False), now)
+                         for element_id, source_id, element_type, label, text, metadata
+                         in elements],
+                    )
                     db.execute(
                         "UPDATE knowledge_objects SET evidence = ? WHERE id = ?",
-                        (rewritten, row["id"]),
+                        (json.dumps(new_evidence, ensure_ascii=False), object_id),
                     )
-                    KnowledgeStore.replace_object_sources(
-                        db, str(row["id"]), library_id, rewritten
+                    db.execute(
+                        "DELETE FROM knowledge_object_sources WHERE object_id = ?",
+                        (object_id,),
                     )
+                    db.executemany(
+                        "INSERT OR IGNORE INTO knowledge_object_sources "
+                        "(object_id, source_id, notebook_id) VALUES (?, ?, ?)",
+                        [(object_id, source_id, library_id) for source_id in sorted({
+                            item["source_id"] for item in new_evidence
+                            if isinstance(item, dict) and item.get("source_id")
+                        })],
+                    )
+            # Every touched library: dirty, kg_mutation_seq + 1 (0068 step 10).
+            db.executemany(
+                "INSERT INTO unified_kg_state (notebook_id, dirty, kg_mutation_seq, "
+                "updated_at) VALUES (?, 1, 1, ?) ON CONFLICT(notebook_id) DO UPDATE "
+                "SET dirty = 1, kg_mutation_seq = unified_kg_state.kg_mutation_seq + 1, "
+                "updated_at = excluded.updated_at",
+                [(library_id, now) for library_id in sorted(counts["libraries"])],
+            )
             db.execute("PRAGMA user_version = 88")
         # Content-free: counts only (docs/operations.md).
         logger.info(

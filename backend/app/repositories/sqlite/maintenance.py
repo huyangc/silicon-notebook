@@ -302,7 +302,7 @@ class SQLiteMaintenanceAdapter:
         with self._runtime.database.connect() as db:
             rows = db.execute(
                 "SELECT id FROM sources WHERE notebook_id=? AND id>? "
-                "AND source_type NOT IN ('memory','knowhow') "
+                "AND source_type NOT IN ('memory','knowhow') AND source_type <> 'promotion' "
                 "ORDER BY id LIMIT ?",
                 (notebook_id, after_id, int(limit)),
             ).fetchall()
@@ -316,7 +316,7 @@ class SQLiteMaintenanceAdapter:
         with self._runtime.database.connect() as db:
             rows = db.execute(
                 "SELECT id,title FROM sources WHERE notebook_id=? AND id>? "
-                "AND source_type NOT IN ('memory','knowhow') "
+                "AND source_type NOT IN ('memory','knowhow') AND source_type <> 'promotion' "
                 "ORDER BY id LIMIT ?",
                 (notebook_id, after_id, int(limit)),
             ).fetchall()
@@ -362,7 +362,7 @@ class SQLiteMaintenanceAdapter:
         with self._runtime.database.connect() as db:
             rows = db.execute(
                 "SELECT s.id FROM sources s WHERE s.notebook_id=? AND s.id>? "
-                "AND s.source_type NOT IN ('memory','knowhow') "
+                "AND s.source_type NOT IN ('memory','knowhow') AND s.source_type <> 'promotion' "
                 "AND NOT EXISTS (SELECT 1 FROM source_elements e "
                 "WHERE e.source_id=s.id) ORDER BY s.id LIMIT ?",
                 (notebook_id, after_id, int(limit)),
@@ -426,7 +426,7 @@ class SQLiteMaintenanceAdapter:
         with self._runtime.database.write() as db:
             db.execute(
                 "UPDATE sources SET doc_type=? WHERE notebook_id=? "
-                "AND source_type NOT IN ('memory','knowhow')",
+                "AND source_type NOT IN ('memory','knowhow') AND source_type <> 'promotion'",
                 (doc_type, notebook_id),
             )
 
@@ -737,7 +737,7 @@ class SQLiteMaintenanceAdapter:
                     "SELECT e.id, e.source_id, e.text FROM source_elements e "
                     "JOIN sources s ON s.id = e.source_id "
                     "WHERE s.notebook_id=? "
-                    "AND s.source_type NOT IN ('memory', 'knowhow') "
+                    "AND s.source_type NOT IN ('memory', 'knowhow') AND s.source_type <> 'promotion' "
                     "AND TRIM(e.text, ?) != '' "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                     "WHERE v.element_id = e.id)" + clause,
@@ -803,7 +803,7 @@ class SQLiteMaintenanceAdapter:
                     "SELECT e.id FROM source_elements e "
                     "JOIN sources s ON s.id=e.source_id "
                     "WHERE s.notebook_id=? "
-                    "AND s.source_type NOT IN ('memory', 'knowhow') "
+                    "AND s.source_type NOT IN ('memory', 'knowhow') AND s.source_type <> 'promotion' "
                     "AND TRIM(e.text, ?) != '' "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                     "WHERE v.element_id=e.id)" + clause + " ORDER BY e.id",
@@ -923,7 +923,7 @@ class SQLiteMaintenanceAdapter:
                     "SELECT e.id, e.source_id, e.text FROM source_elements e "
                     "JOIN sources s ON s.id=e.source_id "
                     "WHERE s.notebook_id=? AND e.id>? "
-                    "AND s.source_type NOT IN ('memory', 'knowhow') "
+                    "AND s.source_type NOT IN ('memory', 'knowhow') AND s.source_type <> 'promotion' "
                     "AND TRIM(e.text, ?) != '' "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                     "WHERE v.element_id=e.id)" + clause + " ORDER BY e.id LIMIT ?",
@@ -956,7 +956,7 @@ class SQLiteMaintenanceAdapter:
                     "SELECT DISTINCT e.source_id FROM source_elements e "
                     "JOIN sources s ON s.id = e.source_id "
                     "WHERE s.notebook_id=? "
-                    "AND s.source_type NOT IN ('memory', 'knowhow') "
+                    "AND s.source_type NOT IN ('memory', 'knowhow') AND s.source_type <> 'promotion' "
                     "AND TRIM(e.text, ?) != '' "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v WHERE v.element_id = e.id)",
                     (notebook_id, PY_WHITESPACE),
@@ -984,7 +984,7 @@ class SQLiteMaintenanceAdapter:
                 "SELECT COUNT(*) c FROM source_elements e "
                 "JOIN sources s ON s.id = e.source_id "
                 "WHERE s.notebook_id=? "
-                "AND s.source_type NOT IN ('memory', 'knowhow') "
+                "AND s.source_type NOT IN ('memory', 'knowhow') AND s.source_type <> 'promotion' "
                 "AND TRIM(e.text, ?) != '' "
                 "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                 "WHERE v.element_id = e.id)" + clause,
@@ -1866,7 +1866,7 @@ class SQLiteMaintenanceAdapter:
         with self._runtime.database.connect() as db:
             rows = db.execute(
                 "SELECT id, file_name, file_path FROM sources "
-                "WHERE notebook_id=? AND source_type NOT IN ('memory','knowhow') "
+                "WHERE notebook_id=? AND source_type NOT IN ('memory','knowhow') AND source_type <> 'promotion' "
                 "AND (lower(file_name) LIKE '%.md' OR lower(file_name) LIKE '%.markdown') "
                 "AND id > ? ORDER BY id LIMIT ?",
                 (notebook_id, after_id, int(limit)),
@@ -2133,7 +2133,7 @@ class SQLiteMaintenanceAdapter:
                 str(row["id"])
                 for row in db.execute(
                     "SELECT id FROM sources WHERE notebook_id=? AND id>? "
-                    "AND source_type NOT IN ('memory','knowhow') "
+                    "AND source_type NOT IN ('memory','knowhow') AND source_type <> 'promotion' "
                     "ORDER BY id LIMIT ?",
                     (notebook_id, after_id, max(1, min(int(limit), 2000))),
                 ).fetchall()
@@ -2153,7 +2153,7 @@ class SQLiteMaintenanceAdapter:
         with self._runtime.database.write() as db:
             source = db.execute(
                 "SELECT id FROM sources WHERE id=? AND notebook_id=? "
-                "AND source_type NOT IN ('memory','knowhow')",
+                "AND source_type NOT IN ('memory','knowhow') AND source_type <> 'promotion'",
                 (source_id, notebook_id),
             ).fetchone()
             if source is None:

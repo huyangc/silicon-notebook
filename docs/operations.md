@@ -421,30 +421,41 @@ write it from this version on; upgrading to **PostgreSQL 0068 / SQLite v88** rew
 approved before.
 
 **The migration.** One transaction, data only (no schema change), no model call. Per public library
-(`notebooks.tier = 'base'`) it takes the objects whose evidence names a source that is not one of
-the library's own — through the evidence reverse index where that index is attested complete
-(`unified_kg_state.source_index_backfilled = 1` and no unfinished `source_index_backfills` row),
-otherwise by reading every object's evidence — and rewrites each such entry: the original element's
-current text if it still exists (a member's Memory element is never read), else the stored excerpt,
-else the entry is dropped. Its summary line goes to the PostgreSQL server log (`RAISE LOG`) or the
-SQLite application log (`silicon_notebook.sqlite.maintenance`):
+(`notebooks.tier = 'base'`) it takes the objects whose evidence names a source that is not one of the library's own —
+through the evidence reverse index where that index is attested complete
+(`unified_kg_state.source_index_backfilled = 1` and no unfinished `source_index_backfills` row), plus one scan of the
+library's evidence for entries with no source id (the reverse index holds none for them); a library whose index is not
+attested has every object's evidence read — and rewrites each such entry:
+
+- an entry whose original is a member's **Memory source is dropped** (fail closed, ruling M1: only data approved before
+  the Memory guards can carry one);
+- an object created by an approved **Memory promotion** is rewritten as the approval does now: one
+  「晋升自个人记忆：<Memory title>」 source per Memory, and its cards keep only their stored excerpt. A Memory promotion
+  that was merged into an existing object cannot be told apart from a generic one there, and takes the generic rule;
+- any other entry: the original element's current text if it still exists, else the stored excerpt; an entry with
+  neither is dropped.
+
+Every library it touched is marked dirty with its `kg_mutation_seq` bumped (as an approval does), so the derived layers
+rebuild from the new evidence. Its summary line goes to the PostgreSQL server log (`RAISE LOG`) or the SQLite
+application log (`silicon_notebook.sqlite.maintenance`):
 `promotion-provenance migration: libraries=… objects_rewritten=… entries_rewritten=…
-entries_dropped=… objects_without_evidence=…` (counts only). `objects_without_evidence` counts
-objects whose every entry was dropped; every source ceiling leaves them out of answers from now
-on, and a curator can delete or re-promote them.
+entries_dropped=… objects_without_evidence=…` (counts only). `objects_without_evidence` counts objects whose every
+entry was dropped; every source ceiling leaves them out of answers from now on, and a curator can delete or re-promote
+them.
 
-- Cost: proportional to the reverse-index rows of the attested public libraries (an index scan on
-  `idx_kos_notebook` with an anti-join on the library's own sources) plus the evidence of the
-  candidate objects; a public library whose reverse index is not attested has every object's
-  evidence read, which on PostgreSQL measured 13.5 s for a 2M-object library under 0067. The pool's
-  `POSTGRES_STATEMENT_TIMEOUT_SECONDS` / `POSTGRES_LOCK_TIMEOUT_SECONDS` apply; on a timeout the
-  transaction rolls back, startup reports "not ready", and a restart with a larger value retries.
-- Take a backup before upgrading: the rewrite is not reversible by the application. Reverting the
-  code afterwards leaves the data readable (the promotion sources are ordinary visible sources).
+- Cost: proportional to the reverse-index rows of the attested public libraries (an index scan on `idx_kos_notebook`
+  with an anti-join on the library's own sources), one read of those libraries' evidence for entries without a source
+  id, and the evidence of the objects that hold a foreign entry (only those are expanded); a library whose reverse index
+  is not attested has every object's evidence read. Measured on PostgreSQL: a 1.04M-object unattested library with
+  2.04M evidence items and 10k foreign entries took about 7 s in all, the slowest statement 4.3 s. The pool's
+  `POSTGRES_STATEMENT_TIMEOUT_SECONDS` / `POSTGRES_LOCK_TIMEOUT_SECONDS` apply; on a timeout the transaction rolls back,
+  startup reports "not ready", and a restart with a larger value retries.
+- Take a backup before upgrading: the rewrite is not reversible by the application. Reverting the code afterwards
+  leaves the data readable (the promotion sources are ordinary visible sources).
 
-**Confirming it ran.** `SELECT count(*) FROM sources WHERE source_type = 'promotion'` shows the
-promotion sources created. No public-library entry may still name another notebook's source; on
-PostgreSQL (it reads all public-library evidence, so run it off-peak):
+**Confirming it ran.** `SELECT count(*) FROM sources WHERE source_type = 'promotion'` shows the promotion sources
+created. No public-library entry may still name another notebook's source or no source; on PostgreSQL (it reads all
+public-library evidence, so run it off-peak):
 
 ```sql
 SELECT ko.notebook_id, count(*) AS foreign_entries
@@ -460,9 +471,17 @@ WHERE n.tier = 'base' AND jsonb_typeof(ev.item) = 'object'
 GROUP BY ko.notebook_id;
 ```
 
-It returns no rows after the upgrade. A promotion source is listed in the library with the type
-「收录」; it is never re-parsed, never a KG analysis target and never reported by the missing-chunks
-checkup, so it needs no maintenance. Deleting it deletes the promoted objects its evidence supports.
+It returns no rows after the upgrade (an entry without a source id counts here too, and the migration rewrites it).
+
+**Running with promotion sources.** A promotion source's detail shows the type 「收录」; the source list shows the badge
+「已收录」 while some object still cites it, 「不在图谱中」 once none does. It does not count against the owner's
+uploaded-document limit. No pipeline touches it: KG extraction refuses it at its entry (so `scripts/reextract_notebook.py`
+and `extract_source` cannot clear its objects, and the re-extraction and `scripts/build_chunks.py` rosters leave it
+out), it is not a KG analysis target, not counted as pending, not asked for paper metadata, not chunked, not part of an
+indexing-pipeline source snapshot, not given element vectors, image or source-fact backfills, and not reported by the
+missing-chunks checkup — it needs no maintenance. Deleting it removes its entries from the evidence of the objects that
+cite it and deletes only the objects left without evidence; a native object a promotion was merged into keeps its own
+evidence.
 
 ## Observability
 
