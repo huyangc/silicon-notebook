@@ -1288,11 +1288,11 @@ class AgentProfileConsolidationService:
             if not profile_wiring_active(self.settings, self.profiles):
                 return
             pending = self.profiles.bump_signal(notebook_id, BASE_CHAIN_OWNER)
+            if offline_batch_active():  # 计数照累加,下一次来源变更或手动重建时整合(offline_batch)
+                return
             # Read straight off Settings, with no local fallback default: a
             # second spelling of "5" here would be the number that silently
             # wins whenever the real one moves.
-            if offline_batch_active():  # 计数照累加,整合留给在线服务(offline_batch)
-                return
             if pending < int(self.settings.agent_profile_base_trigger):
                 return
             self.start_base(notebook_id)

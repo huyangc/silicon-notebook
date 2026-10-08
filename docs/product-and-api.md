@@ -18,12 +18,15 @@ Offline `batch ingest`, `batch all`, and `batch reparse` skip automatic notebook
 name/description refresh by default, including failed sources, with no final
 refresh. Existing field values and automatic/manual ownership remain unchanged;
 later online source operations can refresh automatic fields as usual. Source
-summaries, paper metadata, embedding, and KG processing retain their behavior.
+summaries, paper metadata, and embedding retain their behavior, as does KG
+extraction in `batch all` and `batch reparse`.
 These phases (and `batch kg`) also skip the per-source automatic scale-index
 build/fold queueing and the agent-understanding consolidation trigger (the trigger
-counter still accumulates; the online service consolidates later). `batch ingest`
-never extracts KG, even into a notebook that already has one: run `batch kg`
-afterwards, which rebuilds the unified KG and the scale index at its end.
+counter still accumulates, so consolidation runs at the notebook's next source
+change or a manual rebuild). `batch ingest` never extracts KG, even into a notebook
+that already has one: run `batch kg` afterwards. `batch kg` and `batch all` rebuild
+the unified KG at their end and rebuild the scale index only for a base-tier
+notebook or one that already has an index.
 
 Source type corrections refresh automatic fields as well. Online source parsing/reparsing refreshes automatic fields after the source summary is
 stored; a failed parse also refreshes, using that source's title without its error
