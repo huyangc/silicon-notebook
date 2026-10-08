@@ -82,8 +82,23 @@ test("source-library hook is narrow and does not depend on other workspace domai
     "./source-page-state.ts",
     "./source-scope.ts",
     "./workspace-model.ts",
+    // 两个纯来源判据模块（PR-E8：收录来源不算处理中、不占文档名额）。它们只许
+    // 互相引用，下面钉住，这样放行它们不会把别的工作区领域间接带进 hook。
+    "./source-management.ts",
+    "./document-limit.ts",
   ]);
   assert.deepEqual(modules.filter((module) => !allowed.has(module)), []);
+  for (const [leaf, reachable] of [
+    ["source-management.ts", []],
+    ["document-limit.ts", ["./source-management.ts"]],
+  ]) {
+    const leafModules = importsIn(await parseModule(leaf)).map((item) => item.module);
+    assert.deepEqual(
+      leafModules.filter((module) => !reachable.includes(module)),
+      [],
+      `${leaf} 必须保持纯判据模块`,
+    );
+  }
   assert.doesNotMatch(hook.getText(hook), /\b(setCurrentNotebook|setKnowledge|setCheckup)\b/);
   assert.match(
     hook.getText(hook),

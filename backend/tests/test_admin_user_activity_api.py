@@ -570,7 +570,8 @@ def test_notebook_sources_allowed_for_self(client):
     resp = client.get(f"/api/admin/users/{uid_a}/notebooks/{nb_id}/sources", headers=a)
     assert resp.status_code == 200
     body = resp.json()
-    assert body == {"items": [], "total_count": 0, "offset": 0, "limit": 50}
+    assert body == {"items": [], "total_count": 0, "offset": 0, "limit": 50,
+                    "visible_document_count": 0}
 
 
 def test_notebook_sources_carry_the_composed_display_title(client):
