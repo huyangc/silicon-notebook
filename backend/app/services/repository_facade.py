@@ -4321,11 +4321,7 @@ class RepositoryFacade:
         return self._runtime.notebook_summaries.knowledge_type_counts(db, notebook_id)
 
     def _notebook_from_row(self, db: object, row: object) -> NotebookSummary:
-        from app.services.retrieval_run import current_viewer_id
-
-        return self._runtime.notebook_summaries.from_row(
-            db, row, user_id=current_viewer_id() or None,
-        )
+        return self._runtime.notebook_summaries.viewer_from_row(db, row)
 
     def _source_from_row(self, db: object, row: object) -> SourceSummary:
         return self._runtime.source_store.source_from_row(db, row)

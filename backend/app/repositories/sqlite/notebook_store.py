@@ -117,14 +117,19 @@ class NotebookStore:
     def participant_rows(
         db: sqlite3.Connection, active_notebook_id: str, *, viewer_id: str | None
     ):
-        """(active_row, base_rows) —— 形状与全局唯一 base 时代一致,消费方无需改动。"""
+        """(active_row, base_rows) —— 形状与全局唯一 base 时代一致,消费方无需改动。
+
+        active_row 另带 ``created_by``(挂载人):挂载人对本库的有效集合按构造就是
+        全部有效边,图缓存键据此免掉一次参照读(``graph_retrieval
+        ._viewer_graph_participants``)。"""
         base_rows = db.execute(
             "SELECT b.id AS id, b.tier AS tier "
             + MOUNT_VIEWER_JOIN + MOUNT_EFFECTIVE_FOR_VIEWER + MOUNT_ORDER,
             (viewer_id, active_notebook_id),
         ).fetchall()
         active_row = db.execute(
-            "SELECT id, tier FROM notebooks WHERE id=?", (active_notebook_id,),
+            "SELECT id, tier, created_by FROM notebooks WHERE id=?",
+            (active_notebook_id,),
         ).fetchone()
         return active_row, base_rows
 

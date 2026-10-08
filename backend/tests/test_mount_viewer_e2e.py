@@ -24,10 +24,14 @@ prompts it received ARE the retrieval result):
 * Bob's notebook summary names no ``b`` and flags no ``b`` knowledge graph
   (N-6); Alice's does.
 * Once Bob is given read access to ``b``, all of the above flips for him.
-* The graph caches: Bob's federated / PPR graph is not Alice's (a different
-  key, built separately, without ``b``); Carol, another member who may not
-  read ``b`` either, shares Bob's entry; once Bob may read ``b`` he shares
-  Alice's (cache hits counted).
+* The graph caches: Bob's federated / PPR / combined-scale graph is not
+  Alice's (a different key, built separately, without ``b``); Carol, another
+  member who may not read ``b`` either, shares Bob's entry; once Bob may read
+  ``b`` he shares Alice's (cache hits counted).  A Global Ask override over
+  the same libraries as a member's set keys a different entry (its graph
+  carries no tiers).  Per run, the participant set and its key are one
+  snapshot: the mounter pays no reference read, a member one, and a mount
+  removed mid-run neither rekeys nor rebuilds that run's graph.
 * Below the ceiling, which would mask any single reader: every service-layer
   participant reader (the retrieval seat, the reference-KG gate, the chain's
   start row, the collection map, the typed enumeration, enumerated-row
@@ -35,9 +39,11 @@ prompts it received ARE the retrieval result):
   graph) reaches ``b`` for Alice and not for Bob, whoever the ambient request
   user is.
 * Background runs take the viewer from the run's actor, never from the
-  thread's ambient request: a report, a Global Ask job and a detached
-  (reattachable) ask run for Bob read nothing of ``b`` even when the ambient
-  request user is Alice, and run for Alice with the ambient user Bob read it.
+  thread's ambient request: a report and a detached (reattachable) ask run
+  for Bob read nothing of ``b`` even when the ambient request user is Alice,
+  and run for Alice with the ambient user Bob read it.  A Global Ask job is
+  not a mount reader at all -- its participants are the selected libraries,
+  so ``b`` mounted on a selected ``a`` stays out even for Alice.
 
 ``build_world`` / ``assert_*`` are backend neutral;
 ``tests/postgres/test_mount_viewer_e2e_pg.py`` runs them on PostgreSQL.
@@ -109,84 +115,129 @@ def build_world(database_url: str, tmp_path, monkeypatch, placeholder: str) -> d
     env["carol_profile"] = env["service"].create_agent_profile(
         env["carol"].id, "Carol agent", "",
     )
+    env["ph"] = placeholder
     _seed(env, placeholder)
     return env
 
 
-def _seed(env: dict, ph: str) -> None:
+def _insert_source(notebook_id, source_id):
+    repository()._runtime.source_store.insert_source(
+        source_id=source_id, notebook_id=notebook_id,
+        title=f"{TERM} {source_id}", source_type="markdown",
+        status="active", parse_status="parsed", file_name=f"{source_id}.md",
+        file_path="", file_size=0, file_hash="", summary="", doc_type="",
+        memory_id="",
+    )
+
+
+def _insert_passage(notebook_id, source_id, element_id, chunk_id, text):
     repo = repository()
     runtime = repo._runtime
-    sources = runtime.source_store
-    a, b = env["notebook"].id, env["library"].id
-
-    def source(notebook_id, source_id):
-        sources.insert_source(
-            source_id=source_id, notebook_id=notebook_id,
-            title=f"{TERM} {source_id}", source_type="markdown",
-            status="active", parse_status="parsed", file_name=f"{source_id}.md",
-            file_path="", file_size=0, file_hash="", summary="", doc_type="",
-            memory_id="",
+    with repo._write() as db:
+        runtime.source_store.replace_elements(
+            db, source_id,
+            [SourceElementWrite(element_id, "paragraph", "p1", text, {})],
+            created_at=NOW,
+        )
+        runtime.chunk_store.insert_rows(
+            db, notebook_id, source_id,
+            [ChunkWrite(chunk_id, text, "1", (element_id,))],
+            created_at=NOW,
         )
 
-    def passage(notebook_id, source_id, element_id, chunk_id, text):
-        with repo._write() as db:
-            sources.replace_elements(
-                db, source_id,
-                [SourceElementWrite(element_id, "paragraph", "p1", text, {})],
-                created_at=NOW,
-            )
-            runtime.chunk_store.insert_rows(
-                db, notebook_id, source_id,
-                [ChunkWrite(chunk_id, text, "1", (element_id,))],
-                created_at=NOW,
-            )
 
-    def kg_object(notebook_id, object_id, source_id, element_id, name):
-        evidence = json.dumps([{
-            "source_id": source_id, "source_title": source_id,
-            "element_id": element_id, "element_type": "paragraph",
-            "location_label": "p1", "quoted_span": name, "confidence": 1.0,
-        }])
-        with repo._write() as db:
+def _insert_kg_object(ph, notebook_id, object_id, source_id, element_id, name):
+    repo = repository()
+    evidence = json.dumps([{
+        "source_id": source_id, "source_title": source_id,
+        "element_id": element_id, "element_type": "paragraph",
+        "location_label": "p1", "quoted_span": name, "confidence": 1.0,
+    }])
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,"
+            "created_at,updated_at) VALUES "
+            f"({ph},{ph},'concept','approved','',{ph},{ph},{ph},{ph},{ph})",
+            (object_id, notebook_id,
+             json.dumps({"name": name, "definition": name}),
+             evidence, source_id, NOW, NOW),
+        )
+        db.execute(
+            "INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id) "
+            f"VALUES ({ph},{ph},{ph})",
+            (object_id, source_id, notebook_id),
+        )
+        if ph == "?":
             db.execute(
-                "INSERT INTO knowledge_objects "
-                "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,"
-                "created_at,updated_at) VALUES "
-                f"({ph},{ph},'concept','approved','',{ph},{ph},{ph},{ph},{ph})",
-                (object_id, notebook_id,
-                 json.dumps({"name": name, "definition": name}),
-                 evidence, source_id, NOW, NOW),
+                "INSERT INTO kg_objects_fts(object_id,notebook_id,name) VALUES (?,?,?)",
+                (object_id, notebook_id, name),
             )
-            db.execute(
-                "INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id) "
-                f"VALUES ({ph},{ph},{ph})",
-                (object_id, source_id, notebook_id),
-            )
-            if ph == "?":
-                db.execute(
-                    "INSERT INTO kg_objects_fts(object_id,notebook_id,name) VALUES (?,?,?)",
-                    (object_id, notebook_id, name),
-                )
-        repo._embed_objects_batch(notebook_id, [
-            {"_oid": object_id, "payload": {"name": name}},
-        ])
+    repo._embed_objects_batch(notebook_id, [
+        {"_oid": object_id, "payload": {"name": name}},
+    ])
+
+
+def _mount(ph, notebook_id, library_id, mounter_id):
+    repo = repository()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO notebook_bases(notebook_id,base_notebook_id,created_at,"
+            f"created_by) VALUES ({ph},{ph},{ph},{ph})",
+            (notebook_id, library_id, NOW, mounter_id),
+        )
+    repo.collection_catalog.invalidate()
+
+
+def add_public_library(env: dict, ph: str, tag: str) -> str:
+    """A PUBLIC (``tier='base'``) library of Carol's -- one passage and one
+    concept marked ``PUB{tag}`` -- mounted on ``a`` by Alice.  Every viewer
+    may read it, so it counts for Bob too."""
+    from app.api.deps import notebook_catalog_repository
+    from app.models.schemas import NotebookCreate
+
+    marker = set_request_user(env["carol"])
+    try:
+        library = notebook_catalog_repository().create_notebook(
+            NotebookCreate(name=f"Public library {tag}")
+        ).id
+    finally:
+        reset_request_user(marker)
+    source_id, element_id = f"src-pub-{tag}", f"el-pub-{tag}"
+    _insert_source(library, source_id)
+    _insert_passage(library, source_id, element_id, f"chunk-pub-{tag}",
+                    f"{TERM} latency public passage PUB{tag}")
+    _insert_kg_object(ph, library, f"ko-pub-{tag}", source_id, element_id,
+                      f"{TERM} latency public concept PUB{tag}")
+    repo = repository()
+    with repo._write() as db:
+        db.execute(f"UPDATE notebooks SET tier='base' WHERE id={ph}", (library,))
+    repo.backfill_chunk_fts(library)
+    repo.rebuild_unified_kg(library)
+    _mount(ph, env["notebook"].id, library, env["alice"].id)
+    return library
+
+
+def _seed(env: dict, ph: str) -> None:
+    repo = repository()
+    a, b = env["notebook"].id, env["library"].id
 
     # The shared notebook: one source, one passage, one concept.
-    source(a, OWN["source"])
-    passage(a, OWN["source"], OWN["element"], OWN["chunk"], OWN["text"])
-    kg_object(a, OWN["object"], OWN["source"], OWN["element"],
-              f"{TERM} latency shared concept VISKGMARK")
+    _insert_source(a, OWN["source"])
+    _insert_passage(a, OWN["source"], OWN["element"], OWN["chunk"], OWN["text"])
+    _insert_kg_object(ph, a, OWN["object"], OWN["source"], OWN["element"],
+                      f"{TERM} latency shared concept VISKGMARK")
 
     # Alice's private library b.
     lib_text = f"{TERM} latency library passage {MARK}CHUNK {EXACT}"
-    source(b, LIB["source"])
-    passage(b, LIB["source"], LIB["element"], LIB["chunk"], lib_text)
-    kg_object(b, LIB["object"], LIB["source"], LIB["element"],
-              f"{TERM} latency library concept {MARK}KG")
-    kg_object(b, LIB["object2"], LIB["source"], LIB["element"],
-              f"{TERM} latency library mechanism {MARK}KGTWO")
-    kg_object(b, LIB["object3"], LIB["source"], LIB["element"],
-              f"{TERM} latency library origin {MARK}KGTHREE")
+    _insert_source(b, LIB["source"])
+    _insert_passage(b, LIB["source"], LIB["element"], LIB["chunk"], lib_text)
+    _insert_kg_object(ph, b, LIB["object"], LIB["source"], LIB["element"],
+                      f"{TERM} latency library concept {MARK}KG")
+    _insert_kg_object(ph, b, LIB["object2"], LIB["source"], LIB["element"],
+                      f"{TERM} latency library mechanism {MARK}KGTWO")
+    _insert_kg_object(ph, b, LIB["object3"], LIB["source"], LIB["element"],
+                      f"{TERM} latency library origin {MARK}KGTHREE")
     with repo._write() as db:
         # A two-hop ``kind_of`` chain (concept -> concept): b1 -> b2 -> b3.
         for relation, start, end in (
@@ -211,14 +262,8 @@ def _seed(env: dict, ph: str) -> None:
     env["asset_id"] = AssetService(repo).save_source_image(
         b, LIB["source"], "b.png", "image/png", PNG, env["alice"].id,
     )["id"]
-    with repo._write() as db:
-        for mounting in (a, env["empty"].id):
-            db.execute(
-                "INSERT INTO notebook_bases(notebook_id,base_notebook_id,created_at,"
-                f"created_by) VALUES ({ph},{ph},{ph},{ph})",
-                (mounting, b, NOW, env["alice"].id),
-            )
-    repo.collection_catalog.invalidate()
+    for mounting in (a, env["empty"].id):
+        _mount(ph, mounting, b, env["alice"].id)
 
 
 def grant_bob_the_library(env: dict) -> None:
@@ -624,6 +669,140 @@ def assert_every_participant_reader_follows_the_run_actor(env) -> None:
     assert _participant_readers(env, env["bob"], env["alice"]) == shown
 
 
+def _in_run(user, bystander, call):
+    """``call()`` in a retrieval run whose actor is ``user``, while the
+    ambient request user is ``bystander``."""
+    from app.services.retrieval_run import retrieval_run
+
+    marker = set_request_user(bystander)
+    try:
+        with retrieval_run(run_kind="ask_reasoning", actor_id=user.id):
+            return call()
+    finally:
+        reset_request_user(marker)
+
+
+def assert_override_and_viewer_graphs_stay_apart(env, monkeypatch) -> None:
+    """A member's effective set {a, P} (P a public library; b dropped by M3)
+    and a Global Ask override over the same [a, P] build DIFFERENT
+    ``fed_rxgraph`` entries: the override carries no tiers (every node
+    ``personal``), the member's set the real ones (P is ``base``)."""
+    from app.services.retrieval_participants import (
+        ParticipantOverride,
+        participant_override,
+    )
+
+    graph = repository().retrieval.graph
+    a = env["notebook"].id
+    public = add_public_library(env, env["ph"], "T")
+    tally = _CacheTally(graph._vector_cache, monkeypatch)
+    bob, alice = env["bob"], env["alice"]
+
+    def tier_of(built, object_id):
+        rx, _index_to_id, id_to_index = built
+        return rx[id_to_index[object_id]]["tier"]
+
+    viewer = _in_run(bob, alice, lambda: graph._federated_rx_graph(a))
+
+    def overridden():
+        override = ParticipantOverride(
+            notebook_ids=(a, public), tiers={}, attested_actor_id=bob.id,
+        )
+        with participant_override(override):
+            return graph._federated_rx_graph(a)
+
+    globally = _in_run(bob, alice, overridden)
+    built = [key for key in tally.builds if key.endswith(":fed_rxgraph")]
+    assert len(built) == 2 and built[0] != built[1], built
+    assert built[0] != f"{a}:fed_rxgraph", "Bob's set is narrower than every mount"
+    assert tier_of(viewer, "ko-pub-T") == "base"
+    assert tier_of(globally, "ko-pub-T") == "personal"
+    assert LIB["object"] not in viewer[2] and LIB["object"] not in globally[2]
+
+
+def assert_scale_graph_keys_follow_the_effective_set(env, monkeypatch) -> None:
+    """The combined scale graph: Bob (cannot read b) still has a library to
+    splice -- the public S -- so his combined graph is keyed by his effective
+    set, apart from Alice's historical key; Carol, with the same set, is
+    served Bob's entry."""
+    repo = repository()
+    graph = repo.retrieval.graph
+    a = env["notebook"].id
+    public = add_public_library(env, env["ph"], "S")
+    for library in (env["library"].id, public):
+        repo.build_scale_index(library)
+    tally = _CacheTally(graph._vector_cache, monkeypatch)
+
+    def ranked(user, bystander):
+        return {chunk for chunk, _score in _in_run(
+            user, bystander, lambda: graph._scale_ppr_impl(a, QUESTION),
+        )}
+
+    alice_chunks = ranked(env["alice"], env["bob"])
+    bob_chunks = ranked(env["bob"], env["alice"])
+    carol_chunks = ranked(env["carol"], env["alice"])
+    built = [key for key in tally.builds if key.endswith(":scale_combined")]
+    assert len(built) == 2, tally.builds
+    alice_key, bob_key = built
+    assert alice_key == f"{a}:scale_combined"
+    assert bob_key.startswith(f"{a}:") and bob_key != alice_key
+    assert tally.calls.count(bob_key) == 2, "Carol is served Bob's entry"
+    assert LIB["chunk"] in alice_chunks and "chunk-pub-S" in alice_chunks
+    assert LIB["chunk"] not in bob_chunks and "chunk-pub-S" in bob_chunks
+    assert carol_chunks == bob_chunks
+
+
+def assert_graph_participants_are_one_snapshot_per_run(env, monkeypatch) -> None:
+    """Per run, the graph families read their participant set and its key
+    reference ONCE: the mounter pays no reference read at all; a member pays
+    one for every graph of the run; and a mount removed mid-run changes
+    neither the key nor the graph of that run (no orphan entry, no rebuild)."""
+    repo = repository()
+    graph = repo.retrieval.graph
+    store = repo._runtime.notebook_store
+    a, b = env["notebook"].id, env["library"].id
+    reads: list[str] = []
+    real = store.list_mount_edges_for_notebook
+
+    def counted(notebook_id):
+        reads.append(notebook_id)
+        return real(notebook_id)
+
+    monkeypatch.setattr(store, "list_mount_edges_for_notebook", counted)
+    tally = _CacheTally(graph._vector_cache, monkeypatch)
+
+    def every_graph():
+        for _ in range(2):
+            graph._federated_rx_graph(a)
+            graph._ppr_graph(a)
+            graph._scale_ppr_impl(a, QUESTION)
+
+    _in_run(env["alice"], env["bob"], every_graph)
+    assert reads == [], "the mounter's set is every valid mount: no reference read"
+    _in_run(env["bob"], env["alice"], every_graph)
+    assert reads == [a], "one reference read per run, whatever it builds"
+
+    tally.builds.clear()
+    tally.calls.clear()
+
+    def build_unmount_build():
+        graph._federated_rx_graph(a)
+        with repo._write() as db:
+            db.execute(
+                "DELETE FROM notebook_bases WHERE notebook_id="
+                f"{env['ph']} AND base_notebook_id={env['ph']}", (a, b),
+            )
+        graph._federated_rx_graph(a)
+
+    _in_run(env["alice"], env["bob"], build_unmount_build)
+    keys = [key for key in tally.calls if key.endswith(":fed_rxgraph")]
+    built = [key for key in tally.builds if key.endswith(":fed_rxgraph")]
+    assert keys == [f"{a}:fed_rxgraph"] * 2, keys
+    # Alice's graph is warm from the run above: both builds are hits, the
+    # second against the run's own snapshot (with b), not the unmounted table.
+    assert built == [], built
+
+
 # ---------------------------------------------------------------------------
 # Background runs: the run's actor, not the ambient request
 # ---------------------------------------------------------------------------
@@ -705,13 +884,22 @@ def _global_as(env, actor, bystander, notebook_ids) -> tuple[object, str]:
     return result, model.text()
 
 
-def assert_a_global_ask_reads_by_its_actor(env) -> None:
+def assert_a_global_ask_reads_the_selected_libraries_only(env) -> None:
+    """Global Ask is NOT a mount reader: its participant set is the libraries
+    the asker selected (``ParticipantOverride(resolved_ids)``), so M3 does not
+    apply on this structure -- a mount is never consulted.  The discriminating
+    half: Alice, the mounter and a reader of ``b``, asks over ``a`` alone --
+    a mount read for her would bring ``b`` in, the override does not.  Bob
+    likewise.  Selecting ``b`` explicitly reads it (the positive control), and
+    each job runs with the other user as the ambient request user."""
     a, b = env["notebook"].id, env["library"].id
-    result, prompts = _global_as(env, env["bob"], env["alice"], [a])
-    assert MARK not in prompts, "b reached Bob's Global Ask"
-    assert b not in json.dumps(
-        result.answer.model_dump(mode="json"), ensure_ascii=False,
-    )
+    for actor, bystander in ((env["alice"], env["bob"]), (env["bob"], env["alice"])):
+        result, prompts = _global_as(env, actor, bystander, [a])
+        assert "VISKGMARK" in prompts or "VISMARK" in prompts
+        assert MARK not in prompts, "an unselected mounted library was read"
+        assert b not in json.dumps(
+            result.answer.model_dump(mode="json"), ensure_ascii=False,
+        )
     _result, prompts = _global_as(env, env["alice"], env["bob"], [a, b])
     assert MARK in prompts, "Alice's Global Ask over b must read it"
 
@@ -828,8 +1016,8 @@ def test_a_report_reads_the_mount_by_its_author_on_sqlite(sqlite_env, monkeypatc
     assert_a_report_reads_the_mount_by_its_author(sqlite_env, monkeypatch)
 
 
-def test_a_global_ask_reads_by_its_actor_on_sqlite(sqlite_env):
-    assert_a_global_ask_reads_by_its_actor(sqlite_env)
+def test_a_global_ask_reads_the_selected_libraries_only_on_sqlite(sqlite_env):
+    assert_a_global_ask_reads_the_selected_libraries_only(sqlite_env)
 
 
 def test_a_detached_ask_reads_by_its_actor_on_sqlite(sqlite_env):
@@ -848,3 +1036,15 @@ def test_a_join_summary_is_the_joiners_on_sqlite(sqlite_env):
 
 def test_every_participant_reader_follows_the_run_actor_on_sqlite(sqlite_env):
     assert_every_participant_reader_follows_the_run_actor(sqlite_env)
+
+
+def test_override_and_viewer_graphs_stay_apart_on_sqlite(sqlite_env, monkeypatch):
+    assert_override_and_viewer_graphs_stay_apart(sqlite_env, monkeypatch)
+
+
+def test_scale_graph_keys_follow_the_effective_set_on_sqlite(sqlite_env, monkeypatch):
+    assert_scale_graph_keys_follow_the_effective_set(sqlite_env, monkeypatch)
+
+
+def test_graph_participants_are_one_snapshot_per_run_on_sqlite(sqlite_env, monkeypatch):
+    assert_graph_participants_are_one_snapshot_per_run(sqlite_env, monkeypatch)

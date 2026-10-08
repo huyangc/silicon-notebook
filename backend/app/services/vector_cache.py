@@ -45,6 +45,7 @@ pop，不无界增长；仍在使用（in-flight load 或排队等待者）时�
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from collections import OrderedDict
 from typing import Any, Callable, Dict, Hashable, Tuple
@@ -141,23 +142,44 @@ def estimate_entry_bytes(value: Any, _depth: int = 0) -> int:
 # 也没有选「以 notebook 为单位整组淘汰」那条:它要从 key 反解 nb 前缀、要在淘汰时
 # 扫全族凑出「同一库的全部变体」,而按变体分桶用一行 partition 就得到同样的不变量,
 # 且对「某条路径只加载了其中一张表」这种不齐的现实更稳。
+#: 参与集指纹段:``{nb}:{fingerprint}:{family}``(``graph_retrieval
+#: ._participant_graph_cache_key``——参与集覆盖或查看者的有效集合)里那 16 位
+#: 十六进制。它区分「同一个库的不同参与集」,不是一个族:不剥掉的话,每个参与集
+#: 都自成一个只有一条的桶,「每族 N 条」对它们永远不生效。键族名都是单词
+#: (``matrix``/``kwtok``/``fed_rxgraph``…),不会是 16 位十六进制。
+_PARTICIPANT_FINGERPRINT = re.compile(r"[0-9a-f]{16}")
+
+
+def _quota_tail(key: str) -> "str | None":
+    """第一个冒号之后的后缀,参与集指纹段剥掉;没有冒号 → ``None``。"""
+    _head, separator, tail = key.partition(":")
+    if not separator:
+        return None
+    first, inner, rest = tail.partition(":")
+    if inner and _PARTICIPANT_FINGERPRINT.fullmatch(first):
+        return rest
+    return tail
+
+
 def quota_bucket(key: str) -> str:
     """LRU 上限的执法桶名(见上)。``{nb}:matrix:relation_embeddings`` →
-    ``matrix:relation_embeddings``;``{nb}:kwtok`` → ``kwtok``;没有冒号的裸键
-    → ``""``。"""
-    _head, separator, tail = key.partition(":")
-    return tail if separator else ""
+    ``matrix:relation_embeddings``;``{nb}:kwtok`` → ``kwtok``;
+    ``{nb}:{fingerprint}:fed_rxgraph`` → ``fed_rxgraph``(与 ``{nb}:fed_rxgraph``
+    同桶);没有冒号的裸键 → ``""``。"""
+    tail = _quota_tail(key)
+    return "" if tail is None else tail
 
 
 def key_family(key: str) -> str:
-    """键族名:``{notebook}:{family}[:{variant}]`` 的中段。
+    """键族名:``{notebook}:[{fingerprint}:]{family}[:{variant}]`` 的族段。
 
     ``{nb}:matrix:knowledge_embeddings`` → ``matrix``(四张 embedding 表因此
-    归一族);``{nb}:kwtok`` → ``kwtok``;没有冒号的 key(测试里的裸键)→ ``""``,
-    统一落进一个匿名族。notebook id 形如 ``nb-<hex>``,不含冒号。
+    归一族);``{nb}:kwtok`` → ``kwtok``;``{nb}:{fingerprint}:ppr_graph`` →
+    ``ppr_graph``;没有冒号的 key(测试里的裸键)→ ``""``,统一落进一个匿名族。
+    notebook id 形如 ``nb-<hex>``,不含冒号。
     """
-    head, separator, tail = key.partition(":")
-    if not separator:
+    tail = _quota_tail(key)
+    if tail is None:
         return ""
     family, _, _variant = tail.partition(":")
     return family

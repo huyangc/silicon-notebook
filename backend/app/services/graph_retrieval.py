@@ -23,6 +23,7 @@ statement per window -- and it is bounded, deliberately:
 """
 from __future__ import annotations
 
+import hashlib
 import heapq
 import json
 import math
@@ -43,7 +44,6 @@ from app.services.retrieval_participants import (
     current_participant_override,
     federated_ask_active,
     override_fingerprint,
-    override_fingerprint_for_ids,
 )
 from app.services.retrieval_run import current_viewer_id, memoized_retrieval_value
 
@@ -75,14 +75,18 @@ def _participant_graph_cache_key(
     THE VIEWER'S EFFECTIVE SET (M3).  A mount counts only for a viewer who may
     read the mounted library (or its mounter), so with no override one active
     id still maps to several participant sets -- one per audience.
-    ``viewer_fingerprint`` is ``GraphRetrievalService._viewer_set_fingerprint``:
+    ``viewer_fingerprint`` is ``_viewer_set_fingerprint``:
     ``""`` when the viewer's effective set is EVERY valid mount (the mounter,
     and any member who may read every mounted library), so the key stays the
     historical one and all of them share one entry; otherwise the digest of
     the effective set, in the same slot as an override's (before the family,
     for the suffix eviction below), so a member never shares the mounter's
     graph over a private library -- and two viewers with the same narrower set
-    share theirs.
+    share theirs.  Same slot, different namespace: the viewer digest is
+    personalised (``_VIEWER_FINGERPRINT_PERSON``), because an override's graph
+    carries no tiers and a viewer's does, so the two never share an entry.
+    The 16-hex segment is not a quota bucket: ``vector_cache.quota_bucket``
+    drops it, so every variant counts against its family's per-family cap.
 
     WHY AN OVERRIDE MAY ENTER A CACHE KEY WHEN A SOURCE SCOPE MUST NOT.
     ``source_scope.scoped_subgraph_nodes`` argues at length that putting the
@@ -116,24 +120,46 @@ def _participant_graph_cache_key(
     return f"{notebook_id}:{family}"
 
 
+#: BLAKE2s personalisation of the viewer-set digest.  It must NOT be the
+#: override fingerprint's (``retrieval_participants.override_fingerprint``,
+#: unpersonalised): the two key the same slot of the same families, and the
+#: graphs they name are NOT interchangeable -- an override carries no tiers
+#: (``global_ask`` builds it with ``tiers={}``, so every node of its
+#: ``fed_rxgraph`` is stamped ``personal``) while a viewer's set carries the
+#: libraries' real tiers (a public library is ``base``: rendered as
+#: ``[base]`` and weighted as authoritative by ``kg/graph_reason``).  One
+#: shared digest would hand whichever asked second the other's tier stamps.
+_VIEWER_FINGERPRINT_PERSON = b"m3viewer"
+
+
 def _viewer_set_fingerprint(
-    every_valid: Optional[Iterable[str]], effective_ids: Iterable[str],
+    every_valid: Iterable[str], effective_ids: Iterable[str],
 ) -> str:
     """The ``viewer_fingerprint`` of ``_participant_graph_cache_key``.
 
     ``every_valid`` is the active notebook plus every VALID mount
-    (``GraphRetrievalService._valid_participant_ids``), ``None`` under a
-    participant override (the override's own fingerprint keys the graph).
-    ``""`` when the viewer's effective participant set is all of it -- the
-    historical key, shared by the mounter and every viewer who may read every
-    mounted library -- else the digest of the effective set.
+    (``GraphRetrievalService._valid_participant_ids``).  ``""`` when the
+    viewer's effective participant set is all of it -- the historical key,
+    shared by the mounter and every viewer who may read every mounted library
+    -- else a digest of the effective set: sorted (membership, not fan-out
+    order), BLAKE2s so every worker process agrees, in its own namespace
+    (``_VIEWER_FINGERPRINT_PERSON``).
     """
-    if every_valid is None:
-        return ""
     effective = {str(value) for value in effective_ids}
     if effective == {str(value) for value in every_valid}:
         return ""
-    return override_fingerprint_for_ids(effective)
+    payload = "|".join(sorted(effective)).encode("utf-8")
+    return hashlib.blake2s(
+        payload, digest_size=8, person=_VIEWER_FINGERPRINT_PERSON,
+    ).hexdigest()
+
+
+def _row_value(row, column: str):
+    """``row[column]``, or ``None`` for a row shape without that column."""
+    try:
+        return row[column]
+    except (KeyError, IndexError):
+        return None
 
 
 def _xbridge_similarities(dists) -> "np.ndarray":
@@ -505,21 +531,52 @@ class GraphRetrievalService(_RetrievalState):
         against (``_viewer_set_fingerprint``): the mount edges' own validity
         (``list_mount_edges_for_notebook``'s ``active``, i.e. ``MOUNT_VALID``)
         is exactly the mounter's effective set, because a valid edge implies
-        its mounter may read the mounted library.  One small indexed read,
-        memoised per retrieval run, issued BEFORE a graph builder takes its
-        own connection so a PostgreSQL pool never lends two at once.
+        its mounter may read the mounted library.  One small indexed read on
+        its own pooled connection, never while a graph builder holds one.
         """
+        return (str(notebook_id), *(
+            str(edge["id"])
+            for edge in self.notebooks.list_mount_edges_for_notebook(notebook_id)
+            if edge["active"]
+        ))
+
+    def _viewer_graph_participants(self, notebook_id: str) -> tuple:
+        """``(((notebook_id, tier), ...), viewer_fingerprint)`` with no override.
+
+        The three graph families' participant set for ``current_viewer_id()``
+        -- the active notebook first, then every mount effective for that
+        viewer (``participant_rows``) -- and the cache-key fingerprint of that
+        set, taken TOGETHER and memoised per retrieval run under the viewer:
+        every graph build of one run reads one snapshot, so a mount changed
+        mid-run can neither widen a run in flight nor mint a second key (and a
+        rebuild) halfway through a long report.  The mounter's own set is every
+        valid mount by construction (a valid edge implies the mounter may read
+        the mounted library), so for the mounter the reference read is skipped
+        and the key is the historical one.  With no run, no memo: each build
+        reads afresh, as before.
+        """
+        viewer = current_viewer_id()
+
         def read() -> tuple:
-            return (str(notebook_id), *(
-                str(edge["id"])
-                for edge in self.notebooks.list_mount_edges_for_notebook(
-                    notebook_id,
+            with self._connect() as db:
+                active_row, base_rows = self.notebooks.participant_rows(
+                    db, notebook_id, viewer_id=viewer,
                 )
-                if edge["active"]
-            ))
+            # Active first, then every base effective for the viewer.
+            participants = ((
+                notebook_id, active_row["tier"] if active_row else "personal",
+            ),) + tuple((r["id"], r["tier"]) for r in base_rows)
+            if viewer and active_row is not None and (
+                _row_value(active_row, "created_by") == viewer
+            ):
+                return participants, ""
+            return participants, _viewer_set_fingerprint(
+                self._valid_participant_ids(notebook_id),
+                [participant for participant, _tier in participants],
+            )
 
         return memoized_retrieval_value(
-            ("valid_mount_participants", notebook_id), read,
+            ("graph_participants", notebook_id, viewer), read,
         )
 
     def _federated_rx_graph(self, active_notebook_id: str):
@@ -551,28 +608,19 @@ class GraphRetrievalService(_RetrievalState):
         """
         from app.services.kg.graph_reason import build_rx_graph
         override = current_participant_override()
-        every_valid = (
-            self._valid_participant_ids(active_notebook_id)
-            if override is None else None
-        )
+        viewer_fingerprint = ""
+        if override is None:
+            # Participating notebooks: active + every base effective for the
+            # viewer, with their tiers (``_viewer_graph_participants``).
+            pairs, viewer_fingerprint = self._viewer_graph_participants(
+                active_notebook_id,
+            )
+            participants = list(pairs)
+        else:
+            participants = list(
+                self._retrieval_participants(active_notebook_id)
+            )
         with self._connect() as db:
-            if override is None:
-                # Participating notebooks: active + all base notebooks (excl.
-                # active if active is itself base, to avoid duplication).
-                active_row, base_rows = self.notebooks.participant_rows(
-                    db, active_notebook_id, viewer_id=current_viewer_id(),
-                )
-                active_tier = active_row["tier"] if active_row else "personal"
-
-                # Build participating list: active first, then all base
-                # notebooks.
-                participants = [(active_notebook_id, active_tier)] + [
-                    (r["id"], r["tier"]) for r in base_rows
-                ]
-            else:
-                participants = list(
-                    self._retrieval_participants(active_notebook_id)
-                )
             # Version key: per-notebook (nb_id, relations (count, max created_at,
             # per-review-status counts), objects (count, max updated_at),
             # concept_clusters (count, max created_at)). Object coverage makes
@@ -665,10 +713,7 @@ class GraphRetrievalService(_RetrievalState):
 
             return self._vector_cache.get(
                 _participant_graph_cache_key(
-                    active_notebook_id, "fed_rxgraph",
-                    _viewer_set_fingerprint(
-                        every_valid, [nb_id for nb_id, _tier in participants],
-                    ),
+                    active_notebook_id, "fed_rxgraph", viewer_fingerprint,
                 ),
                 version, _load)
     def _ppr_graph(self, notebook_id: str):
@@ -681,24 +726,21 @@ class GraphRetrievalService(_RetrievalState):
         from app.services.kg.edge_schema import EDGE_SCHEMA_VERSION
         from app.services.kg.ppr import build_ppr_graph
         # Override in place -> the participant set comes from the seat and the
-        # cache key carries its fingerprint; absent -> the live mount read and
-        # the historical key, unchanged.
+        # cache key carries its fingerprint; absent -> the viewer's set
+        # (``_viewer_graph_participants``), under the historical key whenever
+        # that set is every valid mount.
         override = current_participant_override()
-        every_valid = (
-            self._valid_participant_ids(notebook_id) if override is None else None
-        )
+        viewer_fingerprint = ""
+        if override is None:
+            pairs, viewer_fingerprint = self._viewer_graph_participants(notebook_id)
+            participants = [participant for participant, _tier in pairs]
+        else:
+            participants = [
+                participant_id
+                for participant_id, _tier
+                in self._retrieval_participants(notebook_id)
+            ]
         with self._connect() as db:
-            participants = (
-                self.notebooks.participant_ids(
-                    db, notebook_id, viewer_id=current_viewer_id(),
-                )
-                if override is None
-                else [
-                    participant_id
-                    for participant_id, _tier
-                    in self._retrieval_participants(notebook_id)
-                ]
-            )
             # O(1) monotonic seq triple (kg_mutation_seq, cluster_mutation_seq,
             # mention_seq) per participant instead of 5 COUNT/MAX scans over
             # relations/objects/chunks/clusters + the mention read. kg_mutation_seq
@@ -776,8 +818,7 @@ class GraphRetrievalService(_RetrievalState):
 
         return self._vector_cache.get(
             _participant_graph_cache_key(
-                notebook_id, "ppr_graph",
-                _viewer_set_fingerprint(every_valid, participants),
+                notebook_id, "ppr_graph", viewer_fingerprint,
             ),
             version, _load)
     def _mention_extra_edges(self, notebook_id: str) -> List[Tuple[str, str, float]]:
@@ -1204,15 +1245,8 @@ class GraphRetrievalService(_RetrievalState):
         override = current_participant_override()
         viewer_fingerprint = ""
         if override is None:
-            every_valid = self._valid_participant_ids(notebook_id)
-            with self._connect() as db:
-                participant_ids = self.notebooks.participant_ids(
-                    db, notebook_id, viewer_id=current_viewer_id(),
-                )
-            viewer_fingerprint = _viewer_set_fingerprint(
-                every_valid, participant_ids,
-            )
-            base_ids = participant_ids[1:]
+            pairs, viewer_fingerprint = self._viewer_graph_participants(notebook_id)
+            base_ids = [participant for participant, _tier in pairs][1:]
         else:
             base_ids = [
                 participant_id

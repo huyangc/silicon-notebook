@@ -9,26 +9,31 @@ may read it (or for its mounter).  The store methods that resolve a mount
 ``viewer_id`` keyword, so forgetting it is a ``TypeError``.  What a keyword
 cannot stop is the wrong VALUE: ``viewer_id=""`` / ``None`` quietly turns a
 mounter's own private library off, and a hard-coded or stale identity turns
-it ON for someone else.  This guard pins the value at every call site under
-``backend/app`` outside the two store packages:
+it ON for someone else.  This guard pins the value at every CALL under
+``backend/app`` outside the two store packages, one registry entry per call
+site with its call COUNT:
 
-* ``viewer_id=current_viewer_id()`` -- the retrieval run's actor, else the
-  requesting user, else nobody (``retrieval_run.current_viewer_id``); or
-* an explicit viewer at a REGISTERED site (``_EXPLICIT_VIEWER_SITES``): the
-  anonymous public pages (the share's creator), MCP (the token's owner), the
-  source proxy routes (the authenticated user), the ceiling (its owner), the
-  catalog (the summary's user), the facade pass-throughs;
-* never a literal (``""``, ``None``, a string) -- anywhere.
+* ``current`` -- ``viewer_id=current_viewer_id()``: the retrieval run's actor,
+  else the requesting user, else nobody (``retrieval_run.current_viewer_id``);
+* ``explicit`` -- any other non-literal viewer, at a site whose registration
+  names who that viewer is: the anonymous public pages (the share's creator),
+  MCP (the token's owner), the source proxy routes (the authenticated user),
+  the ceiling (its owner), the catalog (the summary's user), the facade
+  pass-throughs, the graph builders' once-bound memo viewer;
+* ``seam`` -- no ``viewer_id`` at all: a call through an injected
+  one-argument seam (``Callable[[str], ...]``) or a service method that
+  resolves its own viewer; the registration names where that viewer is bound;
+* never a literal (``""``, ``None``, a string) -- anywhere, any site.
 
-A call WITHOUT ``viewer_id`` is a call through an injected one-argument seam
-(``Callable[[str], ...]``) or a service method that resolves its own viewer;
-each such site is registered in ``_SEAM_SITES`` with the place its viewer is
-bound.  Both registries are compared by EQUALITY, so a removed site is as loud
-as an added one.
+The registry is compared with the observed calls as a MULTISET of
+``(kind, path, function, method)``: a second call added to an already
+registered function -- with any viewer -- changes a count and goes red, as
+does a removed one or a call that changed kind.
 """
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from pathlib import Path
 
 
@@ -59,67 +64,112 @@ _VIEWER_METHODS = frozenset({
 
 _CURRENT_VIEWER = "current_viewer_id"
 
-#: ``(path, qualname, method)`` -> who the explicit viewer is.
-_EXPLICIT_VIEWER_SITES = {
+_CURRENT = "current"
+_EXPLICIT = "explicit"
+_SEAM = "seam"
+
+_RUN_VIEWER = "current_viewer_id(): the run's actor, else the request user"
+
+#: ``(path, function, method) -> (kind, calls, who the viewer is)``.
+_SITES = {
+    # -- current_viewer_id(): the retrieval layer, resolved at call time.
+    ("app/services/collection_catalog.py",
+     "CollectionCatalogService.collection_map.<lambda>", "participant_ids"):
+        (_CURRENT, 1, _RUN_VIEWER),
+    ("app/services/collection_enumeration.py",
+     "CollectionEnumerationService._closing_participants.<lambda>",
+     "participant_ids"):
+        (_CURRENT, 1, _RUN_VIEWER),
+    ("app/services/collection_enumeration.py",
+     "CollectionEnumerationService._mount_participant_pairs", "participant_tiers"):
+        (_CURRENT, 1, _RUN_VIEWER),
+    ("app/services/communities.py",
+     "CommunityQueryService.mounted_base_ids.<lambda>", "mounted_base_ids"):
+        (_CURRENT, 1, _RUN_VIEWER),
+    ("app/services/evidence_context.py",
+     "EvidenceContextService.collection_item_citations", "participant_notebook_ids"):
+        (_CURRENT, 1, _RUN_VIEWER),
+    ("app/services/evidence_context.py",
+     "EvidenceContextService.knowledge_context.<lambda>", "participant_notebook_ids"):
+        (_CURRENT, 1, _RUN_VIEWER),
+    ("app/services/graph_retrieval.py",
+     "GraphRetrievalService._follow_chain", "follow_start_row"):
+        (_CURRENT, 1, _RUN_VIEWER),
+    ("app/services/repository_runtime.py",
+     "RepositoryRuntime._participant_notebook_ids", "participant_notebook_ids"):
+        (_CURRENT, 1, _RUN_VIEWER + " (knowledge_query, lifecycle, plugin seams)"),
+    ("app/services/retrieval_candidates.py",
+     "_RetrievalState._any_base_notebook_has_kg", "any_mounted_has_kg"):
+        (_CURRENT, 1, _RUN_VIEWER),
+    ("app/services/retrieval_candidates.py",
+     "_RetrievalState._any_base_notebook_has_kg", "any_mounted_has_kg_on"):
+        (_CURRENT, 1, _RUN_VIEWER),
+    ("app/services/retrieval_candidates.py",
+     "_RetrievalState._federated_graph_is_large", "participant_notebook_ids"):
+        (_CURRENT, 1, _RUN_VIEWER),
+    ("app/services/retrieval_candidates.py",
+     "_RetrievalState._mount_participants", "participant_tiers"):
+        (_CURRENT, 1, _RUN_VIEWER),
+    # -- explicit viewers.
     ("app/api/source_routes.py", "_participant_ids_for.participant_ids",
      "participant_notebook_ids"):
-        "the source proxy / asset routes' authenticated user",
+        (_EXPLICIT, 1, "the source proxy / asset routes' authenticated user"),
     ("app/api/mcp_tools/citations.py",
      "register_citation_tools.get_cited_element.load.<lambda>",
      "participant_notebook_ids"):
-        "MCP: the token's owner",
+        (_EXPLICIT, 1, "MCP: the token's owner"),
     ("app/services/public_share_recheck.py", "mounts_still_effective",
      "participant_notebook_ids"):
-        "anonymous public pages (conversation page + images, share "
-        "preflight, public report): the share's creator",
+        (_EXPLICIT, 1, "anonymous public pages (conversation page + images, "
+                       "share preflight, public report): the share's creator"),
     ("app/services/repository_runtime.py",
      "RepositoryRuntime._viewer_participant_notebook_ids",
      "participant_notebook_ids"):
-        "the ceiling's participant reader: the ceiling's owner",
+        (_EXPLICIT, 1, "the ceiling's participant reader: the ceiling's owner"),
+    ("app/services/graph_retrieval.py",
+     "GraphRetrievalService._viewer_graph_participants.read", "participant_rows"):
+        (_EXPLICIT, 1, "current_viewer_id() bound once: the same value keys "
+                       "the per-run memo and the read"),
     ("app/services/notebook_catalog.py", "NotebookSummaryQuery.mounted_bases",
      "mounted_bases_row"):
-        "the summary's user (N-6)",
+        (_EXPLICIT, 2, "the summary's user (N-6); one call per connection branch"),
     ("app/services/notebook_catalog.py", "NotebookSummaryQuery.from_row",
      "mounted_bases"):
-        "the summary's user (N-6)",
+        (_EXPLICIT, 1, "the summary's user (N-6)"),
     ("app/services/notebook_catalog.py", "NotebookSummaryQuery.get",
      "notebook_has_usable_base_kg"):
-        "the summary's user (N-6)",
+        (_EXPLICIT, 1, "the summary's user (N-6)"),
     ("app/services/repository_facade.py",
      "RepositoryFacade._any_base_notebook_has_kg", "any_mounted_has_kg_compat"):
-        "facade pass-through of its caller's viewer",
+        (_EXPLICIT, 1, "facade pass-through of its caller's viewer"),
     ("app/services/repository_facade.py", "RepositoryFacade._mounted_bases",
      "mounted_bases"):
-        "facade pass-through of its caller's viewer",
+        (_EXPLICIT, 1, "facade pass-through of its caller's viewer"),
     ("app/services/repository_facade.py",
      "RepositoryFacade.participant_notebook_ids", "participant_notebook_ids"):
-        "facade pass-through of its caller's viewer",
-}
-
-#: ``(path, qualname, method)`` called WITHOUT ``viewer_id`` -> where the
-#: viewer of that seam is bound.
-_SEAM_SITES = {
+        (_EXPLICIT, 1, "facade pass-through of its caller's viewer"),
+    # -- seams: no viewer at the call, bound where the registration says.
     ("app/api/source_routes.py", "in_participant_scope",
      "participant_notebook_ids"):
-        "injected ``_participant_ids_for(user.id)``",
+        (_SEAM, 1, "injected ``_participant_ids_for(user.id)``"),
     ("app/services/knowledge_query.py",
      "KnowledgeQueryService._participant_source", "participant_notebook_ids"):
-        "injected ``RepositoryRuntime._participant_notebook_ids`` "
-        "(current_viewer_id at call time)",
+        (_SEAM, 1, "injected ``RepositoryRuntime._participant_notebook_ids``"),
     ("app/services/knowledge_lifecycle.py",
      "KnowledgeLifecycleService._participant_source_notebook",
      "participant_notebook_ids"):
-        "injected ``RepositoryRuntime._participant_notebook_ids``",
+        (_SEAM, 1, "injected ``RepositoryRuntime._participant_notebook_ids``"),
     ("app/services/plugin_ask_engine.py",
      "PluginRetrievalAccess.__init__", "participant_notebook_ids"):
-        "injected ``AskService.ask_engine_participant_notebooks`` = "
-        "``RepositoryRuntime._participant_notebook_ids``",
-    ("app/services/ask_service.py",
-     "AskService.ask_chunk", "mounted_base_ids"):
-        "``CommunityQueryService.mounted_base_ids`` (current_viewer_id inside)",
+        (_SEAM, 1, "injected ``AskService.ask_engine_participant_notebooks`` = "
+                   "``RepositoryRuntime._participant_notebook_ids``"),
+    ("app/services/ask_service.py", "AskService.ask_chunk", "mounted_base_ids"):
+        (_SEAM, 1, "``CommunityQueryService.mounted_base_ids`` "
+                   "(current_viewer_id inside)"),
     ("app/services/reasoning_retrieval.py",
      "ReasoningRetriever._action_expand_community", "mounted_base_ids"):
-        "``CommunityQueryService.mounted_base_ids`` (current_viewer_id inside)",
+        (_SEAM, 1, "``CommunityQueryService.mounted_base_ids`` "
+                   "(current_viewer_id inside)"),
 }
 
 
@@ -174,23 +224,44 @@ def _is_current_viewer(node) -> bool:
     )
 
 
-def _classify(sites):
-    literals, explicit, seams, current = [], set(), set(), set()
+def _classify(sites) -> tuple[list[str], Counter]:
+    """``(literal viewers, Counter of (kind, path, function, method))``."""
+    literals: list[str] = []
+    observed: Counter = Counter()
     for path, qualname, name, viewer in sites:
-        key = (path, qualname, name)
         if viewer is None:
-            seams.add(key)
+            kind = _SEAM
         elif any(isinstance(n, ast.Constant) for n in ast.walk(viewer)):
             literals.append(f"{path}::{qualname} {name}(viewer_id={ast.unparse(viewer)})")
+            continue
         elif _is_current_viewer(viewer):
-            current.add(key)
+            kind = _CURRENT
         else:
-            explicit.add(key)
-    return literals, explicit, seams, current
+            kind = _EXPLICIT
+        observed[(kind, path, qualname, name)] += 1
+    return literals, observed
+
+
+def _expected(registry) -> Counter:
+    return Counter({
+        (kind, *key): calls for key, (kind, calls, _reason) in registry.items()
+    })
+
+
+def _registry_problems(observed: Counter, registry) -> list[str]:
+    expected = _expected(registry)
+    problems = []
+    for site in sorted(set(observed) | set(expected)):
+        if observed[site] != expected[site]:
+            problems.append(
+                f"{site}: observed {observed[site]} call(s), registered "
+                f"{expected[site]}"
+            )
+    return problems
 
 
 def test_no_participant_read_passes_a_literal_viewer():
-    literals, _explicit, _seams, _current = _classify(_production_sites())
+    literals, _observed = _classify(_production_sites())
     assert not literals, (
         "participant reads with a literal viewer -- an empty viewer turns the "
         "mounter's own private library off, a fixed one turns it on for "
@@ -199,60 +270,59 @@ def test_no_participant_read_passes_a_literal_viewer():
     )
 
 
-def test_explicit_viewers_are_exactly_the_registered_sites():
-    _literals, explicit, _seams, _current = _classify(_production_sites())
-    assert explicit == set(_EXPLICIT_VIEWER_SITES), (
-        "unregistered explicit viewers: "
-        f"{sorted(explicit - set(_EXPLICIT_VIEWER_SITES))}; stale registrations: "
-        f"{sorted(set(_EXPLICIT_VIEWER_SITES) - explicit)}"
+def test_every_participant_read_is_registered_with_its_viewer_and_count():
+    _literals, observed = _classify(_production_sites())
+    problems = _registry_problems(observed, _SITES)
+    assert not problems, (
+        "participant reads differ from the registry (kind, path, function, "
+        "method -> call count); a new call names its viewer and is registered "
+        "with who that viewer is:\n  " + "\n  ".join(problems)
     )
 
 
-def test_viewerless_calls_are_exactly_the_registered_seams():
-    _literals, _explicit, seams, _current = _classify(_production_sites())
-    registered = set(_SEAM_SITES)
-    assert seams == registered, (
-        "a viewer-dependent read without viewer_id must be an injected seam "
-        f"registered with where its viewer is bound; unregistered: "
-        f"{sorted(seams - registered)}; stale: {sorted(registered - seams)}"
-    )
+def test_every_registration_names_who_the_viewer_is():
+    blank = [key for key, (_kind, calls, reason) in _SITES.items()
+             if not reason.strip() or calls < 1]
+    assert not blank, blank
 
 
-def test_the_retrieval_layer_resolves_the_viewer_at_call_time():
-    """The run-scoped retrieval consumers (candidates, graph, enumeration,
-    catalog, evidence, communities, the runtime's one-argument reader) all
-    read ``current_viewer_id()`` -- the positive half: a site rerouted to a
-    registered explicit value would leave these files without one."""
-    _literals, _explicit, _seams, current = _classify(_production_sites())
-    files = {path for path, _qualname, _name in current}
-    assert files == {
-        "app/services/retrieval_candidates.py",
-        "app/services/graph_retrieval.py",
-        "app/services/collection_enumeration.py",
-        "app/services/collection_catalog.py",
-        "app/services/evidence_context.py",
-        "app/services/communities.py",
-        "app/services/repository_runtime.py",
-    }, sorted(files)
+def _probe(tmp_path, source: str):
+    path = tmp_path / "probe.py"
+    path.write_text(source, encoding="utf-8")
+    return [("probe.py", q, n, v) for q, n, v in _qualified_calls(path)]
 
 
-def test_the_guard_sees_literals_and_seams():
+def test_the_guard_sees_literals_seams_and_a_second_call(tmp_path):
     """Positive control on a synthetic module: a literal ``""`` / ``None`` is
-    reported, ``current_viewer_id()`` is not, a bare call is a seam."""
-    source = (
-        "def f(store, db, nb, current_viewer_id):\n"
+    reported, ``current_viewer_id()`` is ``current``, a bare call is a seam --
+    and a SECOND call in an already registered function, even with a
+    non-literal viewer, breaks the count."""
+    sites = _probe(tmp_path, (
+        "def f(store, db, nb, current_viewer_id, someone):\n"
         "    store.participant_ids(db, nb, viewer_id='')\n"
         "    store.participant_rows(db, nb, viewer_id=None)\n"
         "    store.participant_tiers(db, nb, viewer_id=current_viewer_id())\n"
         "    store.mounted_base_ids(nb)\n"
-    )
-    import tempfile
+        "    store.participant_notebook_ids(nb, viewer_id=someone)\n"
+    ))
+    literals, observed = _classify(sites)
+    assert len(literals) == 2
+    registry = {
+        ("probe.py", "f", "participant_tiers"): (_CURRENT, 1, "run"),
+        ("probe.py", "f", "mounted_base_ids"): (_SEAM, 1, "seam"),
+        ("probe.py", "f", "participant_notebook_ids"): (_EXPLICIT, 1, "who"),
+    }
+    assert _registry_problems(observed, registry) == []
 
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "probe.py"
-        path.write_text(source, encoding="utf-8")
-        sites = [("probe.py", q, n, v) for q, n, v in _qualified_calls(path)]
-    literals, explicit, seams, current = _classify(sites)
-    assert len(literals) == 2 and not explicit
-    assert current == {("probe.py", "f", "participant_tiers")}
-    assert seams == {("probe.py", "f", "mounted_base_ids")}
+    doubled = _probe(tmp_path, (
+        "def f(store, db, nb, current_viewer_id, someone, other):\n"
+        "    store.participant_tiers(db, nb, viewer_id=current_viewer_id())\n"
+        "    store.mounted_base_ids(nb)\n"
+        "    store.participant_notebook_ids(nb, viewer_id=someone)\n"
+        "    store.participant_notebook_ids(nb, viewer_id=other.id)\n"
+    ))
+    _literals, observed = _classify(doubled)
+    assert _registry_problems(observed, registry) == [
+        "('explicit', 'probe.py', 'f', 'participant_notebook_ids'): "
+        "observed 2 call(s), registered 1"
+    ]
