@@ -18,10 +18,12 @@ metadata still run; notebook field values and automatic/manual ownership are
 preserved, so subsequent online operations can refresh automatic fields normally.
 The `ingest`, `all`, `reparse`, and `kg` phases also skip the per-source automatic
 scale-index build and fold queueing and the agent-understanding consolidation
-trigger (the trigger counter still accumulates, so the online service consolidates
-at its next corpus change). `ingest` never extracts KG, even into a notebook that
-already has one; run `kg` afterwards, which rebuilds the unified KG and the scale
-index at its end.
+trigger (the trigger counter still accumulates, so consolidation runs at the
+notebook's next source change or a manual rebuild). `ingest` never extracts KG,
+even into a notebook that already has one; run `kg` afterwards. `kg` and `all`
+rebuild the unified KG at their end and rebuild the scale index only for a
+base-tier notebook or one that already has an index; `ingest` and `reparse` print a
+notice when an existing index was not updated (run `kg` or `index`).
 Existing scripts remain supported; their trailing arguments, exit codes, locking,
 confirmation flags and signal handling are retained. The shell/Python entry keeps
 the caller's working directory, so relative input/output arguments keep their meaning

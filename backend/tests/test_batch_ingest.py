@@ -3687,3 +3687,66 @@ def test_run_kg_extraction_workers_see_offline_batch(repo, monkeypatch):
     res = bi.run_kg(repo, nb_id)
     assert res["extracted"] == 2
     assert len(seen) == 2 and all(item == (True, False) for item in seen)
+
+
+def test_run_all_isolates_unreadable_file_instead_of_aborting(repo, tmp_path, monkeypatch):
+    """流式读取把读失败挪到上传中途:单个读不出的文件计入 failed,其余照常上传。"""
+    d = _make_md_dir(tmp_path, n=2)
+    nb_id = bi.ensure_notebook(repo, None, "nb-scope-unreadable")
+    _stub_all_tail(repo, monkeypatch)
+    files = bi.iter_files(d)
+    bad = files[1]
+    orig_read = Path.read_bytes
+    hashed = set()
+
+    def flaky_read(self):
+        # 预扫描算哈希那一次放行;流式上传时再读才失败(文件中途被删/网络盘抖动)
+        if self == bad and self in hashed:
+            raise PermissionError("gone")
+        hashed.add(self)
+        return orig_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", flaky_read)
+    monkeypatch.setattr(repo, "process_source", lambda sid: None)
+    logs = []
+    res = bi.run_all(repo, nb_id, files, log=logs.append)
+    assert res["new"] == 3
+    assert res["failed"] == 1 and res["extracted"] == 2
+    assert any(e.get("path") == str(bad) and e.get("status") == "failed" for e in logs)
+
+
+def _seed_missing_elements_source(repo, nb_id, tmp_path, sid):
+    now = "2026-01-01T00:00:00"
+    p = tmp_path / f"{sid}.md"
+    p.write_text("# R\n\nBody paragraph " + "r" * 200, encoding="utf-8")
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+            "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, nb_id, sid, "document", p.name, str(p), 0, sid, "", "", "parsed", now, now))
+
+
+def test_run_reparse_workers_see_offline_batch(repo, tmp_path, monkeypatch):
+    nb_id = bi.ensure_notebook(repo, None, "nb-scope-reparse")
+    _seed_missing_elements_source(repo, nb_id, tmp_path, "src-rs")
+    seen = []
+    monkeypatch.setattr(repo, "process_source", lambda sid: _observe_scope(seen))
+    bi.run_reparse(repo, nb_id, no_rebuild=True)
+    assert seen == [(True, False)]
+
+
+def test_run_reparse_notes_existing_scale_index_not_updated(
+    repo, tmp_path, monkeypatch, capsys
+):
+    nb_id = bi.ensure_notebook(repo, None, "nb-scope-reparse-note")
+    _seed_missing_elements_source(repo, nb_id, tmp_path, "src-rn")
+    monkeypatch.setattr(repo, "process_source", lambda sid: None)
+    monkeypatch.setattr(repo.maintenance, "has_scale_index", lambda nb: True)
+    logs = []
+    bi.run_reparse(repo, nb_id, no_rebuild=True, log=logs.append)
+    assert "规模检索索引" in capsys.readouterr().out
+    assert any(
+        e.get("phase") == "reparse" and e.get("status") == "scale_index_not_updated"
+        for e in logs
+    )

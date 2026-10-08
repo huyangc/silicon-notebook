@@ -26,7 +26,7 @@ from concurrent.futures import (
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
+from typing import Callable, Iterable, Iterator, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from app.core.config import Settings
 from app.core.request_context import (
@@ -147,8 +147,9 @@ def _resolve_tracked_future(
         return
     try:
         # Pool threads do not inherit ContextVars: replay the submitter's offline
-        # batch scope (default policy outside any scope, e.g. run_metadata) so
-        # notebook-wide per-source hooks stay off, failed-source paths included;
+        # batch scope so notebook-wide per-source hooks stay off, failed-source
+        # paths included. Outside any scope (e.g. run_metadata) the default policy
+        # applies on purpose: every caller of this helper is an offline phase;
         # the context resets before a shared executor can accept online work.
         with offline_batch_scope(policy):
             result = function(*args, **kwargs)
@@ -583,14 +584,25 @@ def run_ingest(
     counts["sources_embedded"] = backfill_chunk_embeddings(
         repo, notebook_id, missing_only=True
     )
-    if repo.maintenance.has_scale_index(notebook_id):
-        print(
-            "提示:本次新增来源尚未进入规模检索索引;"
-            "请运行 kg(收尾会重建统一 KG 与索引)或 index。",
-            flush=True,
-        )
-        log({"phase": "ingest", "status": "scale_index_not_updated"})
+    _report_scale_index_not_updated(
+        repo, notebook_id, log, "ingest",
+        "kg(收尾会重建统一 KG 与索引)或 index",
+    )
     return counts
+
+
+def _report_scale_index_not_updated(
+    repo: BatchIngestRepository,
+    notebook_id: str,
+    log: LogFn,
+    phase: str,
+    remedy: str,
+) -> None:
+    """离线作用域挡掉了逐源 fold/auto-index:已有索引的库要明说它没跟上。"""
+    if not repo.maintenance.has_scale_index(notebook_id):
+        return
+    print(f"提示:本次变更的来源尚未进入规模检索索引;请运行 {remedy}。", flush=True)
+    log({"phase": phase, "status": "scale_index_not_updated"})
 
 
 def backfill_chunk_embeddings(
@@ -885,6 +897,26 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
     return res
 
 
+def _stream_uploads(
+    paths: Iterable[Path], res: dict[str, int], log: LogFn
+) -> Iterator[UploadedSourceFile]:
+    """逐个读文件交给 upload_sources:同一时刻只持有一个文件的字节。
+
+    读失败(文件被删、权限、网络盘抖动)按单文件隔离,计入 failed 并继续——流式
+    读取把读失败挪到了上传中途,不隔离的话一个坏文件就会中止整轮、留下半批 queued。
+    """
+    for p in paths:
+        try:
+            content = p.read_bytes()
+        except OSError as exc:
+            res["failed"] += 1
+            print(f"[upload] {p.name} ✗ {type(exc).__name__}: {exc}", flush=True)
+            log({"phase": "all", "path": str(p), "status": "failed",
+                 "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        yield UploadedSourceFile(file_name=p.name, content_type="", content=content)
+
+
 @in_offline_batch_scope(OfflineBatchPolicy())
 def run_all(repo: BatchIngestRepository, notebook_id: str,
             files: Iterable[Path],
@@ -954,9 +986,7 @@ def run_all(repo: BatchIngestRepository, notebook_id: str,
             if new_files:
                 repo.upload_sources(
                     notebook_id,
-                    # 生成器:upload_sources 逐个消费,同一时刻只持有一个文件的字节。
-                    (UploadedSourceFile(file_name=p.name, content_type="", content=p.read_bytes())
-                     for p in new_files),
+                    _stream_uploads(new_files, res, log),
                     scheduler=_sched,             # 每个新 source 作为 process_source job 并发
                 )
             for sid in reparse_sids:
@@ -1113,16 +1143,17 @@ def run_reparse(repo: BatchIngestRepository, notebook_id: str,
             print("reparse: 无缺 elements 的源,跳过", flush=True)
             return res
 
-        if no_rebuild:
-            return res
-        print("rebuild: 跨文档聚类中(概念多时较慢,无输出≠卡死)…", flush=True)
-        with _PoolReporter(report_interval, total=0, log=log, label="rebuild 阶段"):
-            clusters = repo.rebuild_unified_kg(notebook_id, progress=_rebuild_progress,
-                                               force=False, fresh=False)
-            res["clusters"] = clusters
-            log({"phase": "reparse", "status": "rebuilt", "clusters": clusters})
-            print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)
-            res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id)
+        if not no_rebuild:
+            print("rebuild: 跨文档聚类中(概念多时较慢,无输出≠卡死)…", flush=True)
+            with _PoolReporter(report_interval, total=0, log=log, label="rebuild 阶段"):
+                clusters = repo.rebuild_unified_kg(notebook_id, progress=_rebuild_progress,
+                                                   force=False, fresh=False)
+                res["clusters"] = clusters
+                log({"phase": "reparse", "status": "rebuilt", "clusters": clusters})
+                print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)
+                res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id)
+        # reparse 自己不建索引;逐源 fold 与 rebuild 尾部的 auto-index 都被离线作用域挡掉。
+        _report_scale_index_not_updated(repo, notebook_id, log, "reparse", "index")
         return res
     finally:
         repo.settings.kg_auto_extract = orig_auto

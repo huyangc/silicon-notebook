@@ -12,13 +12,16 @@ is active these hooks are skipped:
 * automatic scale-index build (``ScaleArtifactRuntime.maybe_auto_index``) and
   fold queueing (``maybe_enqueue_fold``);
 * the agent-understanding consolidation trigger (``note_corpus_change`` still
-  bumps its durable counter so the online service consolidates later);
+  bumps its durable counter, so consolidation runs at the notebook's next
+  source change or a manual rebuild);
 * with ``OfflineBatchPolicy.defer_kg_extraction`` also per-source KG extraction
   (``SourceIngestionService.should_extract_kg``), so ``ingest`` never runs an
   LLM even into a notebook that already has a KG.
 
 The batch phases do the notebook-wide work once at their end instead: ``kg`` /
-``all`` rebuild the unified KG and the scale index explicitly.
+``all`` rebuild the unified KG, and rebuild the scale index explicitly for a
+base-tier notebook or one that already has an index; ``ingest`` / ``reparse``
+print a notice when an existing index was left behind.
 
 The scope lives in a ``ContextVar``.  ``kg.scheduler.submit_job`` replays the
 submitter's context in its worker; plain thread pools do not, so such callers
