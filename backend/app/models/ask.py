@@ -344,6 +344,24 @@ ASK_CLIENT_REQUEST_ID_MAX_CHARS = 128
 _CLIENT_REQUEST_ID_CHARS = re.compile(r"^[A-Za-z0-9._:-]+$")
 
 
+def normalized_client_request_id(value: Optional[str]) -> Optional[str]:
+    """The one spelling of an Ask idempotency key: surrounding whitespace
+    dropped, blank read as no key (``None``), only ``[A-Za-z0-9._:-]``
+    accepted (``ValueError`` otherwise). ``AskRequest`` validates through it,
+    and the MCP ``ask`` normalises with it BEFORE the key names a waiter slot,
+    so every spelling of one key shares one slot."""
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if not _CLIENT_REQUEST_ID_CHARS.fullmatch(value):
+        raise ValueError(
+            "client_request_id may only contain letters, digits, '.', '_', ':' and '-'"
+        )
+    return value
+
+
 class AskIntentPreviewRequest(BaseModel):
     question: str = Field(min_length=1, max_length=ASK_QUESTION_MAX_CHARS)
     conversation_id: Optional[str] = Field(default=None, max_length=200)
@@ -457,16 +475,7 @@ class AskRequest(BaseModel):
     @field_validator("client_request_id")
     @classmethod
     def validate_client_request_id(cls, value: Optional[str]) -> Optional[str]:
-        if value is None:
-            return None
-        value = value.strip()
-        if not value:
-            return None
-        if not _CLIENT_REQUEST_ID_CHARS.fullmatch(value):
-            raise ValueError(
-                "client_request_id may only contain letters, digits, '.', '_', ':' and '-'"
-            )
-        return value
+        return normalized_client_request_id(value)
 
     @field_validator("asked_at")
     @classmethod

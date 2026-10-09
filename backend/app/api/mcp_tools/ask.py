@@ -42,6 +42,7 @@ from app.models.ask import (
     AskResponse,
     QueryIntentAnswer,
     QueryIntentContract,
+    normalized_client_request_id,
     stored_ask_question,
 )
 from app.models.global_ask import GlobalAskIntentPreviewRequest, GlobalAskRequest
@@ -219,6 +220,18 @@ _EVIDENCE_NO_KEY = (
     'output="evidence" 不接受 client_request_id：仅检索的结果不保存，'
     "无法接回或重读，失败了直接再问一次即可"
 )
+
+
+def _normalized_key(client_request_id: str) -> str:
+    """``client_request_id`` in ``AskRequest``'s own spelling
+    (``normalized_client_request_id``), ``""`` for no key."""
+    try:
+        return normalized_client_request_id(client_request_id) or ""
+    except ValueError:
+        raise AgentToolError(
+            "invalid_argument",
+            "client_request_id 只能包含字母、数字以及 . _ : -",
+        ) from None
 
 
 def _validate_output(
@@ -1121,6 +1134,9 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
     ) -> dict[str, Any]:
         reply, clean = _validate_inputs(question, conversation_id, mode, intent, notebooks)
         plugin = _plugin_mode(mode)
+        # One spelling of the key from here on: " retry" and "retry" attach to
+        # one job, so they must also share one waiter slot.
+        client_request_id = _normalized_key(client_request_id)
         _validate_output(output, plugin, clean, conversation_id, client_request_id)
         if client_request_id and len(client_request_id) > 128:
             raise AgentToolError("invalid_argument", "client_request_id 最多 128 个字符")

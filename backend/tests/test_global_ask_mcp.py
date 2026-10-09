@@ -1149,6 +1149,28 @@ async def test_a_browser_job_returned_by_start_itself_is_not_found(adapter, monk
 
 
 @pytest.mark.anyio
+async def test_a_global_key_reaches_the_service_in_its_one_spelling(adapter):
+    """The MCP layer normalises ``client_request_id`` once, so the global
+    replay and start see the same key a notebook ask would."""
+    handlers, _, _, service = adapter
+    keys: list = []
+
+    def replay(payload, **kwargs):
+        keys.append(payload.client_request_id)
+        return None
+
+    def start(payload, **kwargs):
+        keys.append(payload.client_request_id)
+        return job()
+
+    service.replay, service.start = replay, start
+    await handlers["ask"](
+        "问题", None, notebooks=BOTH, mode="chunk", client_request_id="  g-key ",
+    )
+    assert keys == ["g-key", "g-key"]
+
+
+@pytest.mark.anyio
 async def test_a_global_retry_differing_only_in_whitespace_is_the_same_job(adapter):
     """The MCP global path spells the question as the notebook store does, so
     ``"  Q?\\n"`` and ``"Q?"`` under one key are one submission: the retry is
