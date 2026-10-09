@@ -19,6 +19,12 @@ import urllib.request
 
 POLL_SECONDS = 0.05
 CONTROL_MARGIN_SECONDS = 5.0
+# ``running`` probes a lease by holding it for an instant, so a one-shot
+# non-blocking claim can lose to a probe (``status`` from another terminal,
+# the launcher's own handshake) and not only to an owner. A probe lets go
+# within this window; an owner holds the lease for its whole life.
+CLAIM_WINDOW_SECONDS = 1.0
+CLAIM_POLL_SECONDS = 0.005
 WORKER = Path(__file__).with_name("extension_service_worker.py")
 
 
@@ -96,6 +102,25 @@ def lock(path: Path, *, blocking: bool = True):
     fd = safe_open(path, os.O_RDWR | os.O_CREAT)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        yield fd
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def claim(path: Path):
+    """Take a lease another owner may hold, tolerating momentary probes."""
+    fd = safe_open(path, os.O_RDWR | os.O_CREAT)
+    try:
+        deadline = time.monotonic() + CLAIM_WINDOW_SECONDS
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(CLAIM_POLL_SECONDS)
         yield fd
     finally:
         os.close(fd)
@@ -249,7 +274,7 @@ def supervise(directory: Path, payload: dict) -> int:
         worker_state = read_json(Path(service["worker_state"])).get("state")
         return process.poll() is None and worker_state not in ("exited", "failed")
 
-    with lock(directory / "runtime.lock", blocking=False) as runtime_fd, lock(directory / "supervisor.lock", blocking=False):
+    with claim(directory / "runtime.lock") as runtime_fd, claim(directory / "supervisor.lock"):
         failure = ""
         publish("starting")
         try:

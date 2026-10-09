@@ -296,6 +296,27 @@ def test_another_terminal_can_inspect_and_cancel_startup(directory, tmp_path):
             future.result(timeout=3)
 
 
+def test_a_momentary_probe_does_not_fail_the_supervisor_claim(directory, tmp_path):
+    # ``running`` probes by holding a lease for an instant; a supervisor that
+    # met such a probe on its one-shot claim exited before publishing anything,
+    # failing startup (CI #772, #833). Hold supervisor.lock until the
+    # supervisor owns runtime.lock -- it is then claiming the lease we hold --
+    # and let go well inside the claim window.
+    with ThreadPoolExecutor() as executor:
+        with runtime.lock(directory / "supervisor.lock"):
+            future = executor.submit(manager.start, directory, [service(tmp_path)], "probed", None)
+            eventually(lambda: runtime.running(directory))
+            time.sleep(runtime.CLAIM_WINDOW_SECONDS / 5)
+        assert future.result(timeout=15) == {"state": "ready", "reused": False}
+
+
+def test_a_lease_held_past_the_claim_window_still_fails_the_supervisor(directory, tmp_path):
+    with runtime.lock(directory / "supervisor.lock"):
+        with pytest.raises(runtime.ServiceError, match="supervisor_start_failed"):
+            manager.start(directory, [service(tmp_path)], "owned", None)
+    assert not runtime.running(directory)
+
+
 def test_guard_retains_lease_after_supervisor_crash_preventing_overlap(directory, tmp_path):
     item = service(tmp_path)
     item["shutdown_timeout_seconds"] = 0.7
