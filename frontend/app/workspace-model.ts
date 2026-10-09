@@ -232,9 +232,11 @@ export type AgentTokenSummary = {
   revoked_at?: string | null;
   last_used_at?: string | null;
   created_at: string;
+  /** 服务端是否还留有这个 token 的明文(未撤销且不是旧版本签发)。列表不返回明文本身。 */
+  copyable: boolean;
 };
 
-export type AgentTokenIssued = Omit<AgentTokenSummary, "profile_name" | "revoked_at" | "last_used_at"> & {
+export type AgentTokenIssued = Omit<AgentTokenSummary, "profile_name" | "revoked_at" | "last_used_at" | "copyable"> & {
   token: string;
 };
 

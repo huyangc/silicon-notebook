@@ -4,6 +4,15 @@ import assert from "node:assert/strict";
 import {
   AGENT_ACCESS_PAGE_SIZE,
   AGENT_SCOPE_OPTIONS,
+  agentTokenStatus,
+  allowedNotebookSummary,
+  expiryAfterDays,
+  isOwnerOnlyScope,
+  matchedExpiryPreset,
+  ownerTiersUnusable,
+  setAllNotebooks,
+  setAllScopes,
+  whitelistHasOwnedNotebook,
   agentPageHasMore,
   agentPagePath,
   agentTokenAccessChanged,
@@ -31,20 +40,20 @@ test("new token drafts stay least-privileged and default to one notebook", () =>
   const draft = agentTokenDraft("notebook-1");
 
   assert.deepEqual(draft.notebook_ids, ["notebook-1"]);
-  assert.deepEqual(draft.scopes, ["knowledge:read", "memory:read"]);
-  assert.equal(draft.scopes.includes("memory:propose"), false);
+  assert.deepEqual(draft.scopes, ["read"]);
+  assert.equal(draft.scopes.includes("contribute"), false);
 });
 
 test("token request always includes its default notebook exactly once", () => {
   const payload = agentTokenRequest("profile-1", {
     default_notebook_id: "notebook-1",
     notebook_ids: ["notebook-2", "notebook-1", "notebook-2"],
-    scopes: ["memory:read", "memory:read"],
+    scopes: ["read", "read"],
     expires_at: "2030-01-02T03:04:05",
   });
 
   assert.deepEqual(payload.notebook_ids, ["notebook-1", "notebook-2"]);
-  assert.deepEqual(payload.scopes, ["memory:read"]);
+  assert.deepEqual(payload.scopes, ["read"]);
   assert.equal(payload.agent_profile_id, "profile-1");
   assert.equal(payload.expires_at, new Date("2030-01-02T03:04:05").toISOString());
 });
@@ -60,7 +69,7 @@ test("issue validation requires a profile, default notebook, scopes, and expiry"
   const valid = {
     default_notebook_id: "notebook-1",
     notebook_ids: ["notebook-1"],
-    scopes: ["memory:read"],
+    scopes: ["read"],
     expires_at: "2030-01-02T03:04:05",
   };
 
@@ -70,20 +79,66 @@ test("issue validation requires a profile, default notebook, scopes, and expiry"
   assert.equal(canIssueAgentToken("profile-1", { ...valid, expires_at: "" }), false);
 });
 
-test("scope options expose all and only the approved capabilities", () => {
+test("scope options expose exactly the five tiers, each with a label and a description", () => {
   assert.deepEqual(AGENT_SCOPE_OPTIONS.map((item) => item.value), [
-    "knowledge:read",
-    "memory:read",
-    "memory:read_candidates",
-    "memory:propose",
-    "ask:execute",
-    "knowhow:code",
-    "sources:write",
-    "sources:delete",
-    "maintenance:execute",
-    "agent_profile:read",
-    "agent_observation:write",
+    "read",
+    "ask",
+    "contribute",
+    "manage",
+    "delete",
   ]);
+  assert.deepEqual(AGENT_SCOPE_OPTIONS.map((item) => item.label), ["读取", "问答", "提交", "管理", "删除"]);
+  assert.deepEqual(
+    AGENT_SCOPE_OPTIONS.filter((item) => item.ownerOnly).map((item) => item.value),
+    ["manage", "delete"],
+  );
+  for (const option of AGENT_SCOPE_OPTIONS) assert.ok(option.description.length > 6, option.value);
+});
+
+test("owner-only tiers need an owned notebook in the whitelist", () => {
+  const owned = new Set(["nb-own"]);
+  const draft = { default_notebook_id: "nb-shared", notebook_ids: ["nb-shared"], scopes: ["read", "manage"], expires_at: "2030-01-02T03:04" };
+
+  assert.equal(whitelistHasOwnedNotebook(draft, owned), false);
+  assert.equal(ownerTiersUnusable(draft, owned), true);
+  assert.equal(canIssueAgentToken("profile-1", draft, owned), false);
+  assert.equal(canIssueAgentToken("profile-1", draft), true);
+  assert.equal(ownerTiersUnusable({ ...draft, scopes: ["read"] }, owned), false);
+  assert.equal(
+    canIssueAgentToken("profile-1", { ...draft, notebook_ids: ["nb-shared", "nb-own"] }, owned),
+    true,
+  );
+  assert.equal(canSaveAgentTokenAccess({ ...draft, scopes: ["read"], notebook_ids: ["nb-shared"] }, draft, owned), false);
+  assert.equal(isOwnerOnlyScope("delete"), true);
+  assert.equal(isOwnerOnlyScope("read"), false);
+});
+
+test("select-all helpers skip locked tiers and keep the default notebook", () => {
+  assert.deepEqual(setAllScopes(["read"], ["read", "ask", "contribute"], true), ["read", "ask", "contribute"]);
+  assert.deepEqual(setAllScopes(["read", "ask", "manage"], ["read", "ask"], false), ["manage"]);
+  assert.deepEqual(setAllNotebooks(["a"], ["a", "b", "c"], "a", true), ["a", "b", "c"]);
+  assert.deepEqual(setAllNotebooks(["a", "b", "c"], ["a", "b"], "a", false), ["a", "c"]);
+});
+
+test("expiry presets fill a local wall-clock value and are matched by date", () => {
+  const now = new Date(2030, 0, 10, 12, 0, 0);
+  assert.equal(expiryAfterDays(7, now), "2030-01-17T12:00");
+  assert.equal(matchedExpiryPreset("2030-01-17T09:30", now), 7);
+  assert.equal(matchedExpiryPreset("2030-02-09T12:00", now), 30);
+  assert.equal(matchedExpiryPreset("2030-04-10T12:00", now), 90);
+  assert.equal(matchedExpiryPreset("2030-01-18T12:00", now), null);
+  assert.equal(matchedExpiryPreset("", now), null);
+});
+
+test("token status and notebook summary follow the list-readability rules", () => {
+  const now = Date.parse("2030-01-01T00:00:00Z");
+  assert.equal(agentTokenStatus({ revoked_at: "2029-01-01T00:00:00Z", expires_at: "2031-01-01T00:00:00Z" }, now), "revoked");
+  assert.equal(agentTokenStatus({ expires_at: "2029-12-31T00:00:00Z" }, now), "expired");
+  assert.equal(agentTokenStatus({ expires_at: null }, now), "active");
+  assert.equal(agentTokenStatus({ expires_at: "2031-01-01T00:00:00Z" }, now), "active");
+  assert.deepEqual(allowedNotebookSummary(["甲", "乙", "丙"], false), { text: "甲、乙、丙", folded: false });
+  assert.deepEqual(allowedNotebookSummary(["甲", "乙", "丙", "丁"], false), { text: "甲、乙、丙 等 4 个", folded: true });
+  assert.deepEqual(allowedNotebookSummary(["甲", "乙", "丙", "丁"], true), { text: "甲、乙、丙、丁", folded: false });
 });
 
 test("the Agent access page owns one semantic Agent-access surface", async () => {
@@ -106,7 +161,10 @@ test("the Agent access page owns one semantic Agent-access surface", async () =>
   assert.equal(copyImports.has("copyTextSafely"), true);
   assert.match(visibleCopy, /笔记本白名单/);
   assert.match(visibleCopy, /过期时间/);
-  assert.match(visibleCopy, /明文 token 仅显示这一次/);
+  assert.match(visibleCopy, /之后也能在下方列表再次复制/);
+  assert.doesNotMatch(visibleCopy, /仅显示这一次/);
+  assert.match(visibleCopy, /旧版本签发，无法再复制/);
+  assert.match(visibleCopy, /隐藏已撤销和已过期/);
   assert.match(visibleCopy, /自动复制失败/);
   assert.match(visibleCopy, /Agent MCP 接入说明链接/);
   assert.match(visibleCopy, /链接本身不包含 token/);
@@ -135,13 +193,13 @@ test("edit drafts round-trip the stored access and drop retired scopes", () => {
   const token = {
     default_notebook_id: "notebook-1",
     notebook_ids: ["notebook-2", "notebook-1"],
-    scopes: ["memory:read", "retired:scope"],
+    scopes: ["read", "retired:scope"],
     expires_at: "2030-01-01T19:04:00Z",
   };
   const draft = agentTokenEditDraft(token);
 
   assert.deepEqual(draft.notebook_ids, ["notebook-1", "notebook-2"]);
-  assert.deepEqual(draft.scopes, ["memory:read"]);
+  assert.deepEqual(draft.scopes, ["read"]);
   assert.equal(draft.expires_at, utcIsoToLocalDateTime(token.expires_at));
   assert.equal(localDateTimeToUtcIso(draft.expires_at), "2030-01-01T19:04:00.000Z");
 });
@@ -158,22 +216,22 @@ test("access updates are full replacements that carry the opened snapshot, never
     agent_profile_id: "profile-1",
     default_notebook_id: "notebook-1",
     notebook_ids: ["notebook-1"],
-    scopes: ["knowledge:read", "retired:scope"],
+    scopes: ["read", "retired:scope"],
   };
   const payload = agentTokenAccessRequest({
     default_notebook_id: "notebook-1",
     notebook_ids: ["notebook-2"],
-    scopes: ["knowledge:read", "knowledge:read"],
+    scopes: ["read", "read"],
     expires_at: "",
   }, original);
 
   assert.deepEqual(Object.keys(payload).sort(), ["default_notebook_id", "expected", "expires_at", "notebook_ids", "scopes"]);
   assert.deepEqual(payload.notebook_ids, ["notebook-1", "notebook-2"]);
-  assert.deepEqual(payload.scopes, ["knowledge:read"]);
+  assert.deepEqual(payload.scopes, ["read"]);
   assert.equal(payload.expires_at, null);
   // 前置条件是打开时服务端给的原样配置(含已下线 scope、缺省的到期时间归一为 null)。
   assert.deepEqual(payload.expected, {
-    scopes: ["knowledge:read", "retired:scope"],
+    scopes: ["read", "retired:scope"],
     default_notebook_id: "notebook-1",
     notebook_ids: ["notebook-1"],
     expires_at: null,
@@ -186,11 +244,11 @@ test("an untouched expiry is sent back exactly as stored, an edited one is conve
   const original = {
     default_notebook_id: "notebook-1",
     notebook_ids: ["notebook-1"],
-    scopes: ["memory:read"],
+    scopes: ["read"],
     // 带秒:datetime-local 只到分钟,从草稿重算必然丢精度。
     expires_at: "2026-11-01T06:30:45Z",
   };
-  const untouched = { ...agentTokenEditDraft(original), scopes: ["memory:read", "knowledge:read"] };
+  const untouched = { ...agentTokenEditDraft(original), scopes: ["read", "ask"] };
   assert.equal(agentTokenAccessRequest(untouched, original).expires_at, "2026-11-01T06:30:45Z");
 
   const edited = { ...untouched, expires_at: "2031-02-03T04:05" };
@@ -205,14 +263,14 @@ test("saving an edit requires a complete draft that differs from the stored acce
   const token = {
     default_notebook_id: "notebook-1",
     notebook_ids: ["notebook-1"],
-    scopes: ["memory:read"],
+    scopes: ["read"],
     expires_at: "2030-01-01T19:04:00Z",
   };
   const unchanged = agentTokenEditDraft(token);
 
   assert.equal(agentTokenAccessChanged(token, unchanged), false);
   assert.equal(canSaveAgentTokenAccess(token, unchanged), false);
-  assert.equal(canSaveAgentTokenAccess(token, { ...unchanged, scopes: ["memory:read", "knowledge:read"] }), true);
+  assert.equal(canSaveAgentTokenAccess(token, { ...unchanged, scopes: ["read", "ask"] }), true);
   assert.equal(canSaveAgentTokenAccess(token, { ...unchanged, notebook_ids: ["notebook-1", "notebook-2"] }), true);
   assert.equal(canSaveAgentTokenAccess(token, { ...unchanged, scopes: [] }), false);
   assert.equal(canSaveAgentTokenAccess(token, { ...unchanged, expires_at: "" }), false);
@@ -222,7 +280,7 @@ test("saving an edit requires a complete draft that differs from the stored acce
   );
   // 已下线的 scope 在草稿里被剔除,于是「原样保存」也算一次有效修改——正是它把废 scope 清掉。
   assert.equal(
-    canSaveAgentTokenAccess({ ...token, scopes: ["memory:read", "retired:scope"] }, unchanged),
+    canSaveAgentTokenAccess({ ...token, scopes: ["read", "retired:scope"] }, unchanged),
     true,
   );
 });
