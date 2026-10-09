@@ -1,5 +1,7 @@
 from typing import Literal
 
+from app.domain.agent_tools import OWNER_ONLY_TIERS_MESSAGE
+
 
 class BuiltinAdminDemotionError(ValueError):
     """The seeded recovery administrator must always retain admin access."""
@@ -45,7 +47,5 @@ class AgentOwnerOnlyTierError(ValueError):
     笔记本:这两档只对主人拥有的笔记本生效,组合用不了。文案可直接展示,路由用
     ``user_error`` 映射成 422。"""
 
-    MESSAGE = "管理和删除权限只对你拥有的笔记本生效，所选笔记本里没有你拥有的"
-
     def __init__(self) -> None:
-        super().__init__(self.MESSAGE)
+        super().__init__(OWNER_ONLY_TIERS_MESSAGE)

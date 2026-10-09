@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from app.api.deps import USER_MESSAGE_HEADER
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
-from app.domain.agent_tools import AgentAccessDenied
+from app.domain.agent_tools import OWNER_ONLY_TIERS_MESSAGE, AgentAccessDenied
 from app.models.identity import AgentTokenAccess
 from app.repositories.identity_errors import (
     AgentOwnerOnlyTierError,
@@ -978,9 +978,7 @@ def test_manage_and_delete_need_an_owned_notebook_in_the_allowlist(token_context
     for tier in ("manage", "delete"):
         with pytest.raises(AgentOwnerOnlyTierError) as refused:
             _issue(service, bob, profile, notebook, scopes=["read", tier])
-        assert str(refused.value) == (
-            "管理和删除权限只对你拥有的笔记本生效，所选笔记本里没有你拥有的"
-        )
+        assert str(refused.value) == OWNER_ONLY_TIERS_MESSAGE
     member_token = _issue(service, bob, profile, notebook, scopes=["read"])
     with pytest.raises(AgentOwnerOnlyTierError):
         service.update_agent_token_access(
@@ -1145,7 +1143,7 @@ def test_secret_endpoint_and_owner_only_tier_errors_are_user_messages(
 
     # manage/delete without an owned notebook: 422 the page can show as is,
     # on both issue and edit.
-    owner_only = "管理和删除权限只对你拥有的笔记本生效，所选笔记本里没有你拥有的"
+    owner_only = OWNER_ONLY_TIERS_MESSAGE
     repository()._runtime.memory_service.notebooks.add_member(notebook_id, bob_id)
     bob_profile = client.post(
         "/api/agent-profiles", headers=bob_headers, json={"name": "Bob agent"}
