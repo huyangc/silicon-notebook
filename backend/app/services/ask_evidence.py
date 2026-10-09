@@ -1,14 +1,17 @@
 """Pure helpers for the retrieval-only ask output (``output="evidence"``).
 
-The synthesis context is one string with ``kN: ...`` lines plus an ``id_map``
-describing each key.  These functions cut it back into per-key items without
-touching the repository, a model or the request scope, so the chunk and the
-reasoning paths share one splitting rule and one anchor source.
+The synthesis context is one string with ``kN: ...`` entries plus an
+``id_map`` describing each key.  These functions cut it back into per-key
+items at the boundaries recorded while it was assembled (``context_spans``)
+without touching the repository, a model or the request scope, so the chunk
+and the reasoning paths share one splitting rule and one anchor source.
 """
 from __future__ import annotations
 
 import re
 from typing import Any, Callable, Mapping, Sequence
+
+from app.services.context_spans import Span, recorded_spans
 
 from app.models.ask import (
     AnswerAnchor,
@@ -42,10 +45,6 @@ _SECTION_KEY_STRIDE = 10000
 # overview / ``read_document`` excerpts, collection-preview rows and workbook
 # results all write it too.
 _OBJECT_TYPE_KINDS = frozenset({"chunk", "memory", "external"})
-
-# A section heading ``_bounded_context_append`` / ``_append_memory_context``
-# put in front of the next block: it trails the previous key's segment.
-_TRAILING_HEADING_RE = re.compile(r"(?:\n\n|\A)\[[^\]\n]+\]\n?\Z")
 
 # The kind whose delivered/selected counts are reported only under by_kind.
 MEMORY_KIND = "memory"
@@ -100,38 +99,66 @@ def kind_for_key(key: str, id_map: Mapping[str, Mapping[str, Any]]) -> str:
     return "kg" if object_type else "chunk"
 
 
-def _strip_heading(text: str) -> str:
-    return _TRAILING_HEADING_RE.sub("", text).strip("\n")
-
-
-def split_context_by_keys(
-    context_block: str, ordered_keys: Sequence[str]
+def split_context_by_spans(
+    context_block: str,
+    spans: "Sequence[Span] | None",
+    ordered_keys: Sequence[str],
 ) -> tuple[list[tuple[str, str]], list[str]]:
-    """Cut ``context_block`` into ``(key, text)`` segments.
+    """Cut ``context_block`` into ``(key, text)`` segments at the boundaries
+    its assemblers recorded (``context_spans``), never at boundaries found in
+    the text.
 
-    A key starts where a line begins with ``{key}: `` (the same boundary rule
-    as ``_bounded_context_append``'s admission regex).  Text before the first
-    key is returned as one ``("", text)`` segment when, once section headings
-    are removed, anything is left.  Keys that never occur in the block are
-    returned in the second list (they were budgeted out of the context).
+    A keyed span becomes ``(key, text)`` with the renderer's ``"kN: "`` head
+    removed; its key must be one of ``ordered_keys`` (the id_map) and seen for
+    the first time, otherwise the span is delivered as keyless content.
+    Keyless content becomes ``("", text)``; neighbouring keyless pieces with
+    only whitespace glue between them are one segment.  Glue an assembler
+    registered (separators, section headings) is dropped -- nothing else is.
+    Without a complete span record the whole block is one keyless segment.
+    Keys of ``ordered_keys`` without a segment of their own are returned in
+    the second list: they were budgeted out, or cannot be attributed.
     """
-    starts: list[tuple[int, int, str]] = []
-    missing: list[str] = []
-    for key in dict.fromkeys(ordered_keys):
-        match = re.search(rf"(?m)^{re.escape(key)}: ", context_block)
-        if match is None:
-            missing.append(key)
-        else:
-            starts.append((match.start(), match.end(), key))
-    starts.sort()
+    wanted = set(ordered_keys)
+    if not _covers(spans, len(context_block)):
+        spans = (Span("", 0, len(context_block)),) if context_block else ()
     segments: list[tuple[str, str]] = []
-    leading = _strip_heading(context_block[: starts[0][0]] if starts else context_block)
-    if leading.strip():
-        segments.append(("", leading))
-    for index, (_, text_start, key) in enumerate(starts):
-        end = starts[index + 1][0] if index + 1 < len(starts) else len(context_block)
-        segments.append((key, _strip_heading(context_block[text_start:end])))
-    return segments, missing
+    seen: set[str] = set()
+    pending_glue = ""
+    joinable = False
+    for span in spans or ():
+        piece = context_block[span.start:span.end]
+        if span.glue:
+            pending_glue += piece
+            continue
+        key = span.key if (
+            span.key in wanted and span.key not in seen
+            and piece.startswith(f"{span.key}:")
+        ) else ""
+        if key:
+            seen.add(key)
+            head = len(key) + (2 if piece.startswith(f"{key}: ") else 1)
+            segments.append((key, piece[head:]))
+            joinable = False
+        elif joinable and not pending_glue.strip():
+            segments[-1] = ("", segments[-1][1] + pending_glue + piece)
+        else:
+            segments.append(("", piece))
+            joinable = True
+        pending_glue = ""
+    segments = [(key, text) for key, text in segments if key or text.strip()]
+    return segments, [key for key in dict.fromkeys(ordered_keys) if key not in seen]
+
+
+def _covers(spans: "Sequence[Span] | None", length: int) -> bool:
+    """Whether ``spans`` tile ``[0, length)`` in order with no gap."""
+    if not spans:
+        return False
+    position = 0
+    for span in spans:
+        if span.start != position or span.end < span.start:
+            return False
+        position = span.end
+    return position == length
 
 
 def build_ask_evidence(
@@ -145,6 +172,7 @@ def build_ask_evidence(
     recalled: int = 0,
     selected: int | None = None,
     budget_chars: int = 0,
+    spans: "Sequence[Span] | None" = None,
     **fields: Any,
 ) -> AskEvidence:
     """Assemble an ``AskEvidence`` from the synthesis context and its id_map.
@@ -155,8 +183,12 @@ def build_ask_evidence(
     defaults to delivered + omitted (non-memory).  Totals exclude memory;
     memory is reported only in ``counts.by_kind``.  ``fields`` carries the
     remaining ``AskEvidence`` fields (``retrieval_query``, ``intent``, ...).
+    The boundaries are the ones recorded while ``context_block`` was
+    assembled (``context_spans.recorded_spans``); ``spans`` overrides them.
     """
-    segments, missing = split_context_by_keys(context_block, list(id_map))
+    if spans is None:
+        spans = recorded_spans(context_block)
+    segments, missing = split_context_by_spans(context_block, spans, list(id_map))
     anchors = {
         anchor.key: anchor
         for anchor in parse_anchors(

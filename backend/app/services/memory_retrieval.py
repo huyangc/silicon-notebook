@@ -17,6 +17,7 @@ from app.services.retrieval import (
     cosine,
     keyword_basis,
 )
+from app.services.context_spans import entry_lines
 from app.services.source_scope import memory_channel_allowed
 from app.services.vector_index import decode_vector
 
@@ -187,4 +188,4 @@ class MemoryRetriever:
                 "provenance": dict(hit.provenance),
                 "relevance": float(hit.score),
             }
-        return ("\n".join(lines) if lines else "(none)"), id_map
+        return entry_lines(lines), id_map

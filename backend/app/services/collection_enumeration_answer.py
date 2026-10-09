@@ -40,6 +40,7 @@ from app.models.ask import (
     TypedCollectionResult,
 )
 from app.services.collection_catalog import COLLECTION_MAP_MAX_CHARS
+from app.services.context_spans import entry_lines, joined
 from app.services.collection_enumeration import (
     MAX_EVIDENCE_REFS,
     SOURCE_ROW_FIELD_SEPARATOR,
@@ -658,7 +659,7 @@ def _outcome_block(
     omitted = len(outcome.items) - shown
     if omitted > 0:
         lines.append(f"(+{omitted} more rows in the result card)")
-    return "\n".join(lines)
+    return entry_lines(lines)
 
 
 @dataclass
@@ -878,7 +879,7 @@ def enumeration_prompt_block(
         # row-bound, so the next outcome could not spend them either.
 
     return EnumerationPreview(
-        text="\n\n".join(blocks),
+        text=joined(blocks, "\n\n"),
         shown_rows=shown_rows,
         evidence_by_id=evidence_by_id,
     )

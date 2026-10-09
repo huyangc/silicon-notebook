@@ -11,6 +11,7 @@ from app.models.ask import Citation
 from app.repositories.ports import SourceStorePort
 from app.services.cancellation import CancelEvent, raise_if_cancelled
 from app.services.collection_enumeration import SourceItem
+from app.services.context_spans import entry_lines
 from app.services.evidence_attestation import attest_read
 from app.services.source_scope import citation_active_id
 
@@ -234,4 +235,4 @@ def prepare_source_overview(
             "不代表覆盖所有章节或全文，请仅依据这些原文介绍，并明确概述范围有限。"
         )
     _attest_cited(elements, citations)
-    return SourceOverview("\n".join(lines), id_map, citations, note)
+    return SourceOverview(entry_lines(lines, empty=""), id_map, citations, note)
