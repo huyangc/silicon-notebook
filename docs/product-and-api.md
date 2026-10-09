@@ -1709,6 +1709,16 @@ Exceptions surface only as stable error codes; FastMCP schema errors occur befor
 and remain transport/request audit events. Only when the copy truly cannot be shrunk any further
 does the call fail outright, rather than returning a silently truncated result.
 
+The one exception to the 12,000-byte budget is `ask` with `output="evidence"` (described
+below), whose response is sized by the synthesis budget instead: `min(EVIDENCE_TOTAL_TEXT_LIMIT, 12,000 +
+3 × max(budget_chars, context_chars, longest item text) + EVIDENCE_ITEM_OVERHEAD_BYTES × number_of_items)`
+bytes, where `EVIDENCE_TOTAL_TEXT_LIMIT = 524_288` is the hard server-side ceiling and
+`EVIDENCE_ITEM_OVERHEAD_BYTES = 3_000` is the per-item allowance for identifiers and labels (the same
+`max(...)` is each item's text cap). When the evidence is larger than the hard ceiling, every item's
+`text` is first cut by one common ratio (ending in `…`) and the remaining overflow is fitted the usual
+way; all cut characters are reported in `truncation.omitted_characters`. Every other tool keeps the
+12,000-byte rail byte for byte.
+
 `list_notebooks` requires **no tier at all**: the entire check is a live token and the
 notebooks inside its allowlist the owner can still read. Every session can therefore discover
 its notebooks regardless of how narrow the token is.
@@ -1878,6 +1888,64 @@ budget applies in two stages: each anchor's `provenance` is fitted to 500 charac
 individually first, and only then is the anchors list as a whole compressed to 3,500;
 citations are pre-fitted to 1,800 characters, so a large citation set cannot crowd out the
 answer text.
+
+**Retrieval only: `output="evidence"`.** `ask` also takes `output` (`"answer"`, the default and the
+behaviour above, or `"evidence"`). `"evidence"` runs the same retrieval and **skips the final
+synthesis**, returning the evidence the synthesis step would have received. Its rails, all checked
+before any work: single notebook only (several `notebooks` or a `gconv-` conversation is
+`invalid_argument`; global Ask has no evidence output); the built-in modes `reasoning` and `chunk`
+only (a deployment `ask.engine` mode is refused with a readable message, because a plugin engine
+retrieves and synthesizes by itself and has no standalone evidence to return); no
+`client_request_id` (`invalid_argument`: nothing is stored that a key could re-attach to, so a failed
+call is simply asked again); an unknown `output` value is `invalid_argument`. It needs only the `ask`
+tier, the same gate as an answer (no extra `read` requirement); the retrieval ceiling, the Memory
+channel, the empty-notebook gate, the job's `memory_access` record and the delivery recheck are the
+answer's, and the call is booked in the Agent ledger only when delivered. In `reasoning` the question
+is still understood first and the call may still return `needs_clarification` (call again with the same
+`question`, `notebooks`, `conversation_id` and `output`). `conversation_id` passes `ask`'s own
+conversation check (yours, in that notebook, else `not_found`) and then supplies **read-only** history
+for follow-up rewriting and question understanding: **nothing is appended** and no conversation is
+created; the response echoes the id when its history was used, else `""`. The call is recorded as an
+ask job (`output='evidence'`, visible in activity and Question Analysis as 「仅检索」) with no
+conversation and no stored answer, and it does not enter the learning paths (trace/language
+sampling, completion observers, retrieval experience, reflect) or the bell. Its job row's
+`conversation_id` is empty, so deleting a conversation never removes it; it goes only with its
+notebook. `get_ask` on its job id is `invalid_argument` (there is no stored content to page). Known
+performance trait: the learning-path samplers exclude these rows with an `output = 'answer'`
+predicate that no index covers, applied after the indexed lookup; with a very large share of
+retrieval-only calls those samples scan more rows and may need an index that includes `output`.
+
+The response is `{"notebook_id", "status": "retrieved", "output": "evidence", "mode", "evidence_kind",
+"conversation_id", "retrieval_query", "intent", "counts", "budget", "content_is_untrusted_evidence": true,
+"items": [...], "notice", "skipped_libraries", "index_required", "truncation"}`. `evidence_kind` is
+`retrieval`, `document_overview`, `structured_enumeration` or `none`. Each item carries `key` (the `kN`
+label the synthesis context uses), `kind` (`chunk`, `kg`, `memory`, `element`, `collection`, `external`,
+`spreadsheet` — a deterministic workbook analysis result —, `document_read`, `context`; decided from the
+key band and the fields its producer wrote, so an element row of a collection preview is `collection`
+and a `read_document` excerpt is `document_read`), the verbatim `text` of that fragment, the same handle
+fields an answer's `anchors` carry (`object_id`, `object_type`, `label`, `source_title`,
+`location_label`, `source_id`, `element_id`, `tier`, `relevance`, `provenance`, plus `knowhow` /
+`memory_id` / `url` when applicable), produced by the same anchor parser, and the `ref` an answer
+citation would carry (an `el` ref for a source element, a `mem` ref for a Memory item), so
+`read_reference` resolves an item exactly as it resolves an answer citation (`get_knowhow_row` takes
+the `knowhow` pair). Items are cut at the boundaries recorded while the context was assembled, never
+re-found in the finished text: a passage line that looks like another key (`k2: …`) or a passage ending
+in a bracketed line stays in its own item; only the separators and section headings the assemblers
+inserted are left out, and text that cannot be attributed to a key is returned verbatim as a
+`kind="context"` item with its keys counted as `omitted`. `counts` is `{recalled, selected, delivered,
+omitted, by_kind}`: the totals **exclude Memory** (Memory appears only under `by_kind`, so its count
+never leaks through arithmetic), and `delivered` is what actually fitted the synthesis budget
+(`omitted` is the difference). Without the `read` tier, Memory items are removed before truncation and
+from `by_kind`. The special branches follow the answer: a document overview returns the evidence it
+prepared itself (or its notice with no items), and a complete structured enumeration short-circuit
+returns the deterministically rendered result as one `kind="context"` item; a reasoning call with no
+retrieval evidence, or without a configured main model, returns `evidence_kind="none"` with a notice
+instead of items. The evidence is sized by the synthesis budget, not the 12,000-byte rail (see the
+exception above): neither the 20-row cap nor the 2,000-character text cap applies, and the whole set is
+returned in one call, never paged. MCP clients usually cap tool output on their own, so they need that
+cap raised (see the [Agent MCP memory SOP](./agent-mcp-memory-sop.md)). Registered difference: in
+`reasoning`, evidence is always assembled as one single-pass context, even for a question the answer
+would synthesize section by section, and the evidence-refinement model call is skipped.
 
 **Refs and `read_reference`.** `search` hits and every `ask`/`get_ask` citation carry an opaque
 `ref` (`base64url(json)` without padding; not signed -- `read_reference` re-runs the original
@@ -3867,7 +3935,7 @@ On the page, a card shows its edit and delete controls only to its author and to
 
 While an Ask response is being generated, or a Deep Report is in `pending`, `running`, `planning`, or `generating`, the waiting surface mounts the same compact wish carousel. It fetches at most `WAITING_WISH_KIND_LIMIT = 5` priority-ordered bugs and the same number of features separately so non-votable plans cannot fill the window, then merges them by vote count, creation time, and id. It advances every `WAITING_WISH_ROTATION_MS = 8,000` milliseconds, pauses on pointer hover, keyboard focus, an in-flight vote, or the reduced-motion preference, and also provides previous/next controls. A card projects the kind and full title only; “view full details” opens the Wish Wall, so the detail body is not silently clipped. Users may agree or remove agreement in place; the control is disabled in flight and its success or failure is shown beside it. A carousel load failure never blocks the Ask or report job itself.
 
-Administrators have a global **Question Analysis** page at `/admin/questions`. It combines user-authored questions from ordinary Ask jobs and Deep Reports, rather than requiring the administrator to drill into one user at a time. The valid original question is persisted and returned without an additional analysis-view truncation; for legacy completed Ask jobs, the full question recorded with the answer takes precedence over the older abbreviated job text. Unexpired question projections retained after notebook deletion remain visible for the configured user-activity retention period; expired projections and retained rows whose notebook is live are excluded. **Global Ask** jobs aggregate here too: each is a `type="ask"` row with `scope="global"`, belongs to no notebook (`notebook_id`/`notebook_name` are empty), and the notebook column shows the fixed 「全局问答」 (Global Ask). Each row also carries `submitted_via`, the entry point that submitted it: `web` for the session-authenticated browser/HTTP surfaces (`POST /api/notebooks/{id}/ask`, `/ask/stream`, `/reports`; a global job's web surface is `POST /api/global-ask/ask`), `mcp` for the MCP tool (`ask` for both a notebook job and a global one), and the empty string for "not recorded" — every row created before this field existed, plus in-process callers that pass no entry point. The value is set only by the server entry point, never by a request field, and is not inferred for historical rows; the page shows it as 「网页」/「MCP」/「未记录」 in a 调用方式 column, and notebook-deletion retention keeps it. It supports source type (`ask` or `report`), a **scope** filter (`scope=notebook|global`, i.e. 笔记本内/全局; omitted shows both), submission surface (`submitted_via=web|mcp`), user, and question-text filters; returns newest-first rows with the user, notebook, status, and creation time; and reports counts for total questions, Ask questions, Deep Reports, **global Ask questions**, and distinct active users under the current filter — the global count is a subset of the Ask count, since a global job is the same kind of question as a notebook one and differs only in retrieval. The search rail is `ADMIN_QUESTIONS_QUERY_MAX_CHARS = 200` Unicode code points. Offset pagination defaults to `ADMIN_QUESTIONS_DEFAULT_LIMIT = 50` rows and accepts at most `ADMIN_QUESTIONS_MAX_LIMIT = 200` rows per request. The page pages through results with the shared pagination control (row range and total, previous/next, page count, jump to page; hidden when everything fits on one page), keeps the current table visible and marked busy while the next page loads, and when a page comes back empty because questions were removed while it was open, falls back to the new last page instead of showing an empty page. The HTTP surface is `GET /api/admin/questions`; it is administrator-only and follows the existing `USER_ACTIVITY_VIEW_ENABLED` observability gate. When that gate is off, the account-menu entry is hidden and direct navigation explains that the deployment has not enabled the capability. This first version is a searchable aggregate for human analysis and does not send question content to an additional model.
+Administrators have a global **Question Analysis** page at `/admin/questions`. It combines user-authored questions from ordinary Ask jobs and Deep Reports, rather than requiring the administrator to drill into one user at a time. The valid original question is persisted and returned without an additional analysis-view truncation; for legacy completed Ask jobs, the full question recorded with the answer takes precedence over the older abbreviated job text. Unexpired question projections retained after notebook deletion remain visible for the configured user-activity retention period; expired projections and retained rows whose notebook is live are excluded. **Global Ask** jobs aggregate here too: each is a `type="ask"` row with `scope="global"`, belongs to no notebook (`notebook_id`/`notebook_name` are empty), and the notebook column shows the fixed 「全局问答」 (Global Ask). Each row also carries `submitted_via`, the entry point that submitted it: `web` for the session-authenticated browser/HTTP surfaces (`POST /api/notebooks/{id}/ask`, `/ask/stream`, `/reports`; a global job's web surface is `POST /api/global-ask/ask`), `mcp` for the MCP tool (`ask` for both a notebook job and a global one), and the empty string for "not recorded" — every row created before this field existed, plus in-process callers that pass no entry point. The value is set only by the server entry point, never by a request field, and is not inferred for historical rows; the page shows it as 「网页」/「MCP」/「未记录」 in a 调用方式 column, and notebook-deletion retention keeps it. Each ask row also carries `output` (`answer` by default, `evidence` for an `ask(output="evidence")` call); the page shows 「仅检索」 beside the source for the latter, and retention keeps it. It supports source type (`ask` or `report`), a **scope** filter (`scope=notebook|global`, i.e. 笔记本内/全局; omitted shows both), submission surface (`submitted_via=web|mcp`), user, and question-text filters; returns newest-first rows with the user, notebook, status, and creation time; and reports counts for total questions, Ask questions, Deep Reports, **global Ask questions**, and distinct active users under the current filter — the global count is a subset of the Ask count, since a global job is the same kind of question as a notebook one and differs only in retrieval. The search rail is `ADMIN_QUESTIONS_QUERY_MAX_CHARS = 200` Unicode code points. Offset pagination defaults to `ADMIN_QUESTIONS_DEFAULT_LIMIT = 50` rows and accepts at most `ADMIN_QUESTIONS_MAX_LIMIT = 200` rows per request. The page pages through results with the shared pagination control (row range and total, previous/next, page count, jump to page; hidden when everything fits on one page), keeps the current table visible and marked busy while the next page loads, and when a page comes back empty because questions were removed while it was open, falls back to the new last page instead of showing an empty page. The HTTP surface is `GET /api/admin/questions`; it is administrator-only and follows the existing `USER_ACTIVITY_VIEW_ENABLED` observability gate. When that gate is off, the account-menu entry is hidden and direct navigation explains that the deployment has not enabled the capability. This first version is a searchable aggregate for human analysis and does not send question content to an additional model.
 
 ## APIs
 

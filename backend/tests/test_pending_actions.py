@@ -414,7 +414,7 @@ def test_pending_actions_running_ask_item_fields(repo):
 
 
 def test_pending_actions_running_retrieval_only_ask_is_absent(repo):
-    """A running ``output='evidence'`` job (MCP ask_notebook, retrieval only) has
+    """A running ``output='evidence'`` job (MCP ask, retrieval only) has
     no conversation to open, so it never shows as an in-flight question."""
     nb = _seed_user_nb(repo, "user-a")
     _insert_ask_job(repo, "askjob-answer", nb, "user-a")

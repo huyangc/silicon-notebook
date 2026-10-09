@@ -201,7 +201,7 @@ class ActivityAsk(BaseModel):
     # (a pre-migration row, or an in-process caller that skipped the
     # keyword). See app.models.ask.SubmittedVia for the write-side vocabulary.
     submitted_via: StoredSubmittedVia = ""
-    # "evidence" = a retrieval-only MCP ask_notebook call: it returned the
+    # "evidence" = a retrieval-only MCP ask call (output="evidence"): it returned the
     # synthesis evidence and stored no answer and no conversation. Every other
     # row, and every global/report row, is "answer". See app.models.ask.AskOutput.
     output: StoredAskOutput = "answer"
@@ -297,7 +297,7 @@ class AdminQuestionItem(BaseModel):
     status: str
     created_at: str
     submitted_via: StoredSubmittedVia = ""
-    # "evidence" = a retrieval-only MCP ask_notebook call: it returned the
+    # "evidence" = a retrieval-only MCP ask call (output="evidence"): it returned the
     # synthesis evidence and stored no answer and no conversation. Every other
     # row, and every global/report row, is "answer". See app.models.ask.AskOutput.
     output: StoredAskOutput = "answer"
@@ -403,7 +403,7 @@ class AskDetail(BaseModel):
     status: str = ""
     asked_at: str = ""
     answered_at: str = ""
-    # "evidence" = a retrieval-only MCP ask_notebook call: it returned the
+    # "evidence" = a retrieval-only MCP ask call (output="evidence"): it returned the
     # synthesis evidence and stored no answer and no conversation. Every other
     # row, and every global/report row, is "answer". See app.models.ask.AskOutput.
     output: StoredAskOutput = "answer"

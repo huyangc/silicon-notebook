@@ -225,16 +225,22 @@ def _route_fake_asks_through_ask_with_job(service, monkeypatch) -> None:
     """
     real = service.ask_with_job
 
-    def ask_with_job(notebook_id, payload, *, submitted_via="", attach_only=False, stop=None):
+    def ask_with_job(
+        notebook_id, payload, *, submitted_via="", attach_only=False, stop=None,
+        output="answer",
+    ):
         fake = service.__dict__.get("ask")
         if fake is None:
             return real(
                 notebook_id, payload, submitted_via=submitted_via,
-                attach_only=attach_only, stop=stop,
+                attach_only=attach_only, stop=stop, output=output,
             )
         if attach_only:
             return None
-        return fake(notebook_id, payload, submitted_via=submitted_via), FAKE_ASK_JOB_ID
+        # ``output`` reaches a fake only when it is not the default, so the
+        # many answer-mode fakes keep their two-keyword signature.
+        extra = {"output": output} if output != "answer" else {}
+        return fake(notebook_id, payload, submitted_via=submitted_via, **extra), FAKE_ASK_JOB_ID
 
     monkeypatch.setattr(service, "ask_with_job", ask_with_job)
 
@@ -6896,7 +6902,7 @@ async def test_agent_observations_are_still_accepted_on_a_mirrored_notebook(
     )) == 1
 
 
-# --- ask_notebook(output="evidence"): retrieval only, no synthesis ----------
+# --- ask(output="evidence"): retrieval only, no synthesis (from #832) -------
 def _evidence_anchor(key: str, source_id: str = "", element_id: str = "", **extra):
     from app.models.ask import AnswerAnchor
 
@@ -6938,7 +6944,7 @@ def _evidence_item(key: str, text: str, kind: str = "chunk", **anchor_kwargs):
     )
 
 
-async def _evidence_calls(mcp_env, calls):
+async def _evidence_calls(mcp_env, calls, tool="ask"):
     """Run ``(arguments, token)`` pairs in order, one lifespan for all of them
     (an app's MCP session manager can start only once)."""
     app = mcp_env["app"]
@@ -6948,10 +6954,7 @@ async def _evidence_calls(mcp_env, calls):
             async with OfficialMcpClient(
                 app, token or mcp_env["token_a"].token, manage_lifespan=False
             ) as client:
-                _payload(await client.call(
-                    "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-                ))
-                results.append(await client.call("ask_notebook", arguments))
+                results.append(await client.call(tool, arguments))
     return results
 
 
@@ -6960,16 +6963,18 @@ async def _evidence_call(mcp_env, arguments, token=None):
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_schema_advertises_output_defaulting_to_answer(mcp_env):
+async def test_ask_schema_advertises_output_defaulting_to_answer(mcp_env):
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
         listed = await client.session.list_tools()
-    tool = next(item for item in listed.tools if item.name == "ask_notebook")
+    names = {item.name for item in listed.tools}
+    assert "ask_notebook" not in names, "ask_notebook is folded into ask"
+    tool = next(item for item in listed.tools if item.name == "ask")
     assert tool.inputSchema["properties"]["output"]["default"] == "answer"
     assert 'output="evidence"' in tool.description
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_default_output_is_answer_and_budget_is_unchanged(
+async def test_ask_default_output_is_answer_and_budget_is_unchanged(
     mcp_env, monkeypatch
 ):
     service = mcp_env["service"]
@@ -6991,17 +6996,18 @@ async def test_ask_notebook_default_output_is_answer_and_budget_is_unchanged(
         mcp_env, {"question": "default", "mode": "chunk"}
     ))
     assert answer["status"] == "answered"
-    assert seen == {"submitted_via": "mcp", "output": "answer"}
+    # The answer output is the default: the engine is asked for an answer.
+    assert seen == {"submitted_via": "mcp"}
     _assert_budgeted(answer)
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_evidence_returns_the_whole_context_uncapped(
+async def test_ask_evidence_returns_the_whole_context_uncapped(
     mcp_env, monkeypatch
 ):
     """The evidence is sized by the synthesis budget: more than RESULT_LIMIT
-    items and items longer than TEXT_LIMIT survive whole, and a handle from an
-    item resolves through get_cited_element."""
+    items and items longer than TEXT_LIMIT survive whole, and an item's ref
+    resolves through read_reference."""
     repo = repository()
     notebook_id = mcp_env["notebook"].id
     seeded = _seed_cited_source(repo, notebook_id, "evid", text="证据原文")
@@ -7025,15 +7031,18 @@ async def test_ask_notebook_evidence_returns_the_whole_context_uncapped(
         return _evidence_result(items)
 
     monkeypatch.setattr(mcp_env["service"], "ask", fake_ask)
-    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        payload = _payload(await client.call("ask_notebook", {
-            "question": "evidence", "mode": "chunk", "output": "evidence",
-        }))
-        handle = payload["items"][3]
-        resolved = _payload(await client.call("get_cited_element", {
-            "source_id": handle["source_id"], "element_id": handle["element_id"],
-        }))
+    app = mcp_env["app"]
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(
+            app, mcp_env["token_a"].token, manage_lifespan=False
+        ) as client:
+            payload = _payload(await client.call("ask", {
+                "question": "evidence", "mode": "chunk", "output": "evidence",
+            }))
+            handle = payload["items"][3]
+            resolved = _payload(await client.call(
+                "read_reference", {"ref": handle["ref"]}
+            ))
     assert seen == {
         "submitted_via": "mcp", "output": "evidence", "conversation_id": None,
     }
@@ -7060,7 +7069,7 @@ async def test_ask_notebook_evidence_returns_the_whole_context_uncapped(
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_evidence_total_is_capped_at_the_hard_limit(
+async def test_ask_evidence_total_is_capped_at_the_hard_limit(
     mcp_env, monkeypatch
 ):
     from app.api.mcp_tools._shared import EVIDENCE_TOTAL_TEXT_LIMIT
@@ -7090,7 +7099,8 @@ def test_evidence_payload_far_over_the_cap_converges_in_a_few_passes(monkeypatch
     serializes the response a handful of times instead of thousands.  The
     result still fits, every cut is reported in ``omitted_characters``, and
     every item is kept (the cut is shared, not taken from the tail)."""
-    from app.api.mcp_tools import _shared, memory_context
+    from app.api.mcp_tools import _shared, evidence_page
+    from app.api.mcp_tools import ask as ask_module
     from app.api.mcp_tools._shared import EVIDENCE_TOTAL_TEXT_LIMIT
 
     calls = {"n": 0}
@@ -7101,13 +7111,15 @@ def test_evidence_payload_far_over_the_cap_converges_in_a_few_passes(monkeypatch
         return real(value)
 
     monkeypatch.setattr(_shared, "_serialized_size", counting)
-    monkeypatch.setattr(memory_context, "_serialized_size", counting)
+    monkeypatch.setattr(evidence_page, "_serialized_size", counting)
     items = [
         _evidence_item(f"k{i}", ("证据" * 1_500) + f"\n第{i}条") for i in range(300)
     ]
     evidence = _evidence_result(items, budget_chars=2_000_000)
 
-    payload = memory_context._evidence_payload("nb-x", evidence, True)
+    payload = evidence_page.evidence_page(
+        "nb-x", evidence, True, ask_module._anchor_row
+    )
 
     size = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
     assert size <= EVIDENCE_TOTAL_TEXT_LIMIT
@@ -7127,7 +7139,7 @@ def test_evidence_payload_far_over_the_cap_converges_in_a_few_passes(monkeypatch
 
 
 def test_evidence_payload_within_budget_is_not_pretrimmed():
-    from app.api.mcp_tools.memory_context import _pretrim_evidence_text
+    from app.api.mcp_tools.evidence_page import _pretrim_evidence_text
 
     rows = [{"text": "短证据"}]
     payload = {"items": rows}
@@ -7136,12 +7148,12 @@ def test_evidence_payload_within_budget_is_not_pretrimmed():
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_evidence_packs_off_the_event_loop(mcp_env, monkeypatch):
-    """Packing a large evidence payload is CPU work: it runs on a worker
-    thread, never on the event loop's thread."""
+async def test_ask_evidence_packs_off_the_event_loop(mcp_env, monkeypatch):
+    """Packing a large evidence payload is CPU work: it runs on the call's
+    worker thread, never on the event loop's thread."""
     import threading
 
-    from app.api.mcp_tools import memory_context
+    from app.api.mcp_tools import ask as ask_module
 
     monkeypatch.setattr(
         mcp_env["service"], "get_notebook",
@@ -7152,13 +7164,13 @@ async def test_ask_notebook_evidence_packs_off_the_event_loop(mcp_env, monkeypat
         lambda *a, **k: _evidence_result([_evidence_item("k1", "text")]),
     )
     threads: list = []
-    real = memory_context._evidence_payload
+    real = ask_module.evidence_page
 
     def spy(*args):
         threads.append(threading.current_thread())
         return real(*args)
 
-    monkeypatch.setattr(memory_context, "_evidence_payload", spy)
+    monkeypatch.setattr(ask_module, "evidence_page", spy)
     loop_thread = threading.current_thread()
     payload = _payload(await _evidence_call(mcp_env, {
         "question": "off loop", "mode": "chunk", "output": "evidence",
@@ -7168,7 +7180,7 @@ async def test_ask_notebook_evidence_packs_off_the_event_loop(mcp_env, monkeypat
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_evidence_reasoning_still_asks_to_clarify(
+async def test_ask_evidence_reasoning_still_asks_to_clarify(
     mcp_env, monkeypatch
 ):
     monkeypatch.setattr(
@@ -7193,12 +7205,12 @@ async def test_ask_notebook_evidence_reasoning_still_asks_to_clarify(
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_evidence_writes_no_conversation_or_answer(
+async def test_ask_evidence_writes_no_conversation_or_answer(
     mcp_env, monkeypatch
 ):
-    """Through the REAL service: an evidence call logs a job but creates no
-    conversation and saves no answer (an empty library notebook is made
-    askable so retrieval runs and finds nothing)."""
+    """Through the REAL service: an evidence call logs one retrieval-only job
+    (output='evidence', its Memory channel recorded) but creates no
+    conversation and saves no answer; get_ask has nothing to read for it."""
     service = mcp_env["service"]
     monkeypatch.setattr(
         service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
@@ -7206,9 +7218,19 @@ async def test_ask_notebook_evidence_writes_no_conversation_or_answer(
     conversations_before = _conversations_row_count(mcp_env)
     with repository()._write() as db:
         answers_before = db.execute("SELECT COUNT(*) AS n FROM answers").fetchone()["n"]
-    payload = _payload(await _evidence_call(mcp_env, {
-        "question": "nothing here", "mode": "chunk", "output": "evidence",
-    }))
+    ask_only = _agent_token(mcp_env, ["ask"])
+    app = mcp_env["app"]
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(app, ask_only, manage_lifespan=False) as client:
+            payload = _payload(await client.call("ask", {
+                "question": "nothing here", "mode": "chunk", "output": "evidence",
+            }))
+            with repository()._write() as db:
+                row = db.execute(
+                    "SELECT id, output, memory_access, conversation_id, submitted_via "
+                    "FROM ask_jobs ORDER BY created_at DESC LIMIT 1"
+                ).fetchone()
+            reread = await client.call("get_ask", {"job_id": row["id"]})
     assert payload["status"] == "retrieved"
     assert payload["conversation_id"] == ""
     assert _conversations_row_count(mcp_env) == conversations_before
@@ -7216,10 +7238,15 @@ async def test_ask_notebook_evidence_writes_no_conversation_or_answer(
         assert db.execute("SELECT COUNT(*) AS n FROM answers").fetchone()["n"] == (
             answers_before
         )
+    assert row["output"] == "evidence" and row["conversation_id"] == ""
+    assert row["submitted_via"] == "mcp"
+    assert row["memory_access"] == 0, "an ask-only token ran with Memory closed"
+    assert _error_code(reread) == "invalid_argument"
+    assert "仅检索" in _error(reread)
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_rejects_a_bad_output_and_evidence_on_plugin_modes(
+async def test_ask_rejects_a_bad_output_and_evidence_on_plugin_modes(
     mcp_env, monkeypatch
 ):
     monkeypatch.setattr(
@@ -7233,22 +7260,63 @@ async def test_ask_notebook_rejects_a_bad_output_and_evidence_on_plugin_modes(
         ({"question": "q", "mode": "niuma.analog", "output": "evidence"}, None),
         ({"question": "q", "mode": "unknown.engine", "output": "evidence"}, None),
     ])
-    assert bad.isError
-    assert "output must be one of: answer, evidence" in bad.content[0].text
+    assert _error_code(bad) == "invalid_argument"
+    assert "output 只能是 answer 或 evidence" in _error(bad)
 
-    assert plugin.isError
-    text = plugin.content[0].text
+    assert _error_code(plugin) == "invalid_argument"
+    text = _error(plugin)
     assert 'output="evidence" 只支持 mode="reasoning" 或 "chunk"' in text
     assert "没有可单独返回的检索证据" in text
 
-    assert unknown.isError and "mode must be one of" in unknown.content[0].text
+    assert _error_code(unknown) == "invalid_argument"
+    assert "mode 只能是以下之一" in _error(unknown)
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_evidence_accepts_a_conversation_id(mcp_env, monkeypatch):
+async def test_ask_evidence_is_single_notebook_and_takes_no_client_request_id(
+    mcp_env, monkeypatch
+):
+    """Evidence exists for the single-notebook path only: several notebooks
+    or a global conversation are refused, and so is a client_request_id
+    (nothing is stored that a key could re-attach to). All before any work."""
+    calls: list = []
+    monkeypatch.setattr(mcp_env["service"], "ask", lambda *a, **k: calls.append(1))
+    two = [mcp_env["notebook"].id, mcp_env["other"].id]
+    several, global_conv, keyed = await _evidence_calls(mcp_env, [
+        ({"question": "q", "mode": "chunk", "output": "evidence",
+          "notebooks": two}, None),
+        ({"question": "q", "mode": "chunk", "output": "evidence",
+          "conversation_id": "gconv-a"}, None),
+        ({"question": "q", "mode": "chunk", "output": "evidence",
+          "client_request_id": "evidence-key"}, None),
+    ])
+    for refused in (several, global_conv):
+        assert _error_code(refused) == "invalid_argument"
+        assert "只支持单个笔记本" in _error(refused)
+    assert _error_code(keyed) == "invalid_argument"
+    assert "client_request_id" in _error(keyed)
+    assert calls == []
+
+
+@pytest.mark.anyio
+async def test_ask_evidence_accepts_a_conversation_id(mcp_env, monkeypatch):
+    """conversation_id passes ask's own conversation check (yours, this
+    notebook) and reaches the engine as read-only history."""
+    from app.api.mcp_tools import ask as ask_module
+
     monkeypatch.setattr(
         mcp_env["service"], "get_notebook",
         lambda _id: _fake_notebook_summary(mcp_env),
+    )
+    monkeypatch.setattr(
+        ask_module, "notebook_access_repository",
+        lambda: SimpleNamespace(conversation_owner=lambda cid: mcp_env["alice"].id),
+    )
+    monkeypatch.setattr(
+        mcp_env["service"], "get_conversation",
+        lambda cid: SimpleNamespace(
+            id=cid, notebook_id=mcp_env["notebook"].id, turns=[],
+        ),
     )
     seen: dict = {}
 
@@ -7268,7 +7336,7 @@ async def test_ask_notebook_evidence_accepts_a_conversation_id(mcp_env, monkeypa
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_evidence_filters_memory_without_memory_read(
+async def test_ask_evidence_filters_memory_without_memory_read(
     mcp_env, monkeypatch
 ):
     monkeypatch.setattr(
@@ -7307,18 +7375,57 @@ async def test_ask_notebook_evidence_filters_memory_without_memory_read(
 
     assert [item["key"] for item in full["items"]] == ["k1", "k3001"]
     assert full["items"][1]["memory_id"] == "mem-1"
+    assert full["items"][1]["ref"] == _mem_ref(mcp_env["notebook"].id, "mem-1")
     assert full["counts"]["by_kind"]["memory"] == {"selected": 1, "delivered": 1}
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_evidence_refuses_an_empty_library_like_answer_mode(
+@pytest.mark.parametrize("change, code", [
+    ("revoked", "token_inactive"),
+    ("read_removed", "scope_missing"),
+])
+async def test_ask_evidence_is_delivered_under_the_token_as_it_is_now(
+    mcp_env, change, code,
+):
+    """The answer path's delivery recheck holds for evidence too: a token
+    revoked, or stripped of ``read`` while a Memory-open retrieval ran, gets
+    get_ask's refusal and no evidence."""
+    service, alice = mcp_env["service"], mcp_env["alice"]
+    token = mcp_env["token_a"]
+    repo = repository()
+    _seed_answerable(repo, mcp_env["notebook"].id, f"evdeliver{change}")
+    real_evidence = service._runtime.ask_component.ask_evidence
+
+    def changing(*args, **kwargs):
+        if change == "revoked":
+            service.revoke_agent_token(alice.id, token.id)
+        else:
+            _set_token_tiers(mcp_env, token.id, ["ask"])
+        return real_evidence(*args, **kwargs)
+
+    service._runtime.ask_component.ask_evidence = changing
+    try:
+        refused = await _evidence_call(mcp_env, {
+            "question": "What evidence exists?", "mode": "chunk",
+            "output": "evidence",
+        })
+    finally:
+        del service._runtime.ask_component.ask_evidence
+    assert _error_code(refused) == code
+    assert "evidence exists in this notebook" not in _error(refused)
+    if change == "read_removed":
+        assert "「读取」" in _error(refused)
+
+
+@pytest.mark.anyio
+async def test_ask_evidence_refuses_an_empty_library_like_answer_mode(
     mcp_env,
 ):
     rejected = await _evidence_call(mcp_env, {
         "question": "anything", "mode": "chunk", "output": "evidence",
     })
     assert rejected.isError
-    assert "来源" in rejected.content[0].text
+    assert "来源" in _error(rejected)
 
 
 def test_budget_response_defaults_are_unchanged_and_kwargs_widen_it():

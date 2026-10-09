@@ -32,8 +32,11 @@ from app.domain.agent_tools import (
 from app.domain.ask_engine import AskPluginEngineError
 from app.domain.cancellation import AskExecutorGone, AskFollowFailed, AskWaitAbandoned
 from app.models.ask import (
+    ASK_OUTPUTS,
     ASK_QUESTION_MAX_CHARS,
     ASK_UNDERSTANDING_MS_MAX,
+    EVIDENCE_OUTPUT_MODE_REFUSAL,
+    AskEvidence,
     AskIntentConfirmation,
     AskRequest,
     AskResponse,
@@ -64,6 +67,7 @@ from ._shared import (
 )
 from ._messages import chinese_value_error
 from .ask_pages import answer_page
+from .evidence_page import evidence_page
 from .memory_context import _memory_read_allowed
 from .refs import element_ref, memory_ref
 
@@ -201,6 +205,40 @@ def _validate_inputs(
             "intent 格式不合法，需要 {intent_token, answers, resolved_question?}，"
             "出错的字段：" + _validation_fields(exc),
         ) from None
+
+
+_EVIDENCE_SINGLE_NOTEBOOK = (
+    'output="evidence" 只支持单个笔记本的提问：请只传一个笔记本（或不传 notebooks，'
+    "用默认笔记本），也不要接着全局会话（gconv-）问"
+)
+_EVIDENCE_NOT_STORED = (
+    '这是仅检索（output="evidence"）的提问：它不保存回答或证据，'
+    "get_ask 没有内容可读；需要时请重新提问"
+)
+_EVIDENCE_NO_KEY = (
+    'output="evidence" 不接受 client_request_id：仅检索的结果不保存，'
+    "无法接回或重读，失败了直接再问一次即可"
+)
+
+
+def _validate_output(
+    output: str, plugin: bool, notebooks: list[str] | None,
+    conversation_id: str, client_request_id: str,
+) -> None:
+    """``output``'s rails, before any repository work. ``evidence`` (retrieval
+    only, no synthesis) exists for the single-notebook path and the two
+    built-in modes; it stores no answer, so there is nothing a key could
+    re-attach to or ``get_ask`` could page."""
+    if output not in ASK_OUTPUTS:
+        raise AgentToolError("invalid_argument", "output 只能是 answer 或 evidence")
+    if output != "evidence":
+        return
+    if plugin:
+        raise AgentToolError("invalid_argument", EVIDENCE_OUTPUT_MODE_REFUSAL)
+    if (notebooks and len(notebooks) > 1) or conversation_id.startswith("gconv-"):
+        raise AgentToolError("invalid_argument", _EVIDENCE_SINGLE_NOTEBOOK)
+    if client_request_id:
+        raise AgentToolError("invalid_argument", _EVIDENCE_NO_KEY)
 
 
 # --------------------------------------------------------------- routing
@@ -407,8 +445,8 @@ def _auto_confirm(contract: QueryIntentContract, understanding_ms: int) -> AskIn
 
 _CLARIFICATION_NEXT_STEP = (
     "尚未检索，也未创建会话或任务。把 intent.ambiguities 里 required 为 true 的每一项"
-    "转述给用户（options 只是候选），然后用同一个 question、同样的 notebooks 与 "
-    "conversation_id 再调 ask，传 intent="
+    "转述给用户（options 只是候选），然后用同一个 question、同样的 notebooks、"
+    "conversation_id 与 output 再调 ask，传 intent="
     '{"intent_token": <本响应的 intent_token>, "answers": [{"id", "answer"}], '
     '"resolved_question": <可选>}。句柄一小时内有效。'
 )
@@ -714,7 +752,7 @@ def _plugin_failure(exc: AskPluginEngineError) -> AgentToolError:
 def _run_notebook(
     repo: Any, principal: Any, notebook_id: str, question: str, mode: str,
     conversation: Any, reply: _IntentReply | None, client_request_id: str,
-    stop: threading.Event,
+    stop: threading.Event, output: str = "answer",
 ) -> dict[str, Any]:
     """The single-notebook path's blocking body (``ask_current`` semantics:
     the memory channel, mounted libraries, plugin engines, the
@@ -722,6 +760,11 @@ def _run_notebook(
 
     ``memory:read`` (the ``read`` tier) opens or closes the private-Memory
     channel for everything run here, entered IN this worker thread.
+
+    ``output="evidence"`` (retrieval only, built-in modes, never keyed) runs
+    the same gates and understanding step, then ``ask_current``'s
+    retrieval-only twin, and returns ``evidence_page`` -- the context the
+    synthesis would have read, unpaged -- after the same delivery recheck.
     """
     allow_memory = _memory_read_allowed(repo, principal, notebook_id)
     conversation_id = conversation.id if conversation is not None else ""
@@ -770,7 +813,8 @@ def _run_notebook(
                     confirmation = _auto_confirm(contract, understanding_ms)
                 request.intent = confirmation
                 attached = repo.ask_with_job(
-                    notebook_id, request, submitted_via="mcp", stop=stop
+                    notebook_id, request, submitted_via="mcp", stop=stop,
+                    output=output,
                 )
         except UnknownAskMode:
             # Availability flipped between the mode check and dispatch.
@@ -795,6 +839,9 @@ def _run_notebook(
     live, allow_now = _recheck_notebook_delivery(
         repo, principal, notebook_id, job_id, ran_with_memory=allow_memory,
     )
+    if isinstance(response, AskEvidence):
+        _record_agent_call(repo, live, notebook_id, "ask:execute")
+        return evidence_page(notebook_id, response, allow_now, _anchor_row)
     with _owner_request_context(live):
         # The job row is the one source of the trace (the same one get_ask
         # reads), so the first page's trace cursor matches every later one.
@@ -1003,6 +1050,9 @@ def _read_notebook_job(
         detail = repo.ask_job_detail(job_id)
     except KeyError:
         raise AgentToolError("not_found", _JOB_NOT_FOUND) from None
+    if detail.get("output") == "evidence":
+        # A retrieval-only job stored no answer: nothing to page.
+        raise AgentToolError("invalid_argument", _EVIDENCE_NOT_STORED)
     response = None
     if detail.get("status") == "done":
         answer = repo.ask_answer_detail(str(detail.get("answer_id") or ""))
@@ -1049,17 +1099,29 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
             "next_citation_offset / next_coverage_offset / trace.next_offset. "
             "client_request_id makes a retry safe: the same key returns the job "
             "it already started (waiting for it if it is still running) instead "
-            "of asking again. Requires the ask permission; private Memory takes "
-            "part only with the read permission too."
+            "of asking again. output=\"evidence\" (one notebook, reasoning or "
+            "chunk, no client_request_id) runs the same retrieval -- reasoning "
+            "still understands first and may return needs_clarification -- but "
+            "skips the final synthesis and returns, in this one call and unpaged, "
+            "the evidence the synthesis would have been given (status="
+            "\"retrieved\", items each with a `ref` for read_reference). Its size "
+            "follows the synthesis budget, not the 12,000-byte one, so raise the "
+            "client's tool-output limit; conversation_id is read for history, "
+            "never appended to, and nothing is saved but a retrieval-only job "
+            "record (get_ask has nothing to read for it). Requires the ask "
+            "permission; private Memory takes part only with the read permission "
+            "too."
         ),
     )
     async def ask(
         question: str, ctx: Context, notebooks: list[str] | None = None,
         conversation_id: str = "", mode: str = "reasoning",
         intent: dict[str, Any] | None = None, client_request_id: str = "",
+        output: str = "answer",
     ) -> dict[str, Any]:
         reply, clean = _validate_inputs(question, conversation_id, mode, intent, notebooks)
         plugin = _plugin_mode(mode)
+        _validate_output(output, plugin, clean, conversation_id, client_request_id)
         if client_request_id and len(client_request_id) > 128:
             raise AgentToolError("invalid_argument", "client_request_id 最多 128 个字符")
         repo = repository_provider()
@@ -1070,6 +1132,8 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
         def run() -> dict[str, Any]:
             principal = _live_principal(repo)
             kind, target, conversation = _route(repo, principal, clean, conversation_id)
+            if kind == "global" and output == "evidence":
+                raise AgentToolError("invalid_argument", _EVIDENCE_SINGLE_NOTEBOOK)
             if kind == "global":
                 if plugin:
                     raise AgentToolError(
@@ -1093,7 +1157,7 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
             if not client_request_id:
                 return _run_notebook(
                     repo, principal, notebook_id, question, mode, conversation,
-                    reply, client_request_id, stop,
+                    reply, client_request_id, stop, output,
                 )
             with _waiter_slot(principal.owner_id, "key:" + client_request_id):
                 return _run_notebook(

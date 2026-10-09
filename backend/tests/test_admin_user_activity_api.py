@@ -396,7 +396,7 @@ def test_activity_type_query_returns_only_questions(client):
 
 
 def test_retrieval_only_ask_is_marked_in_activity_detail_and_survives_notebook_delete(client):
-    """An ``output='evidence'`` job (MCP ask_notebook, retrieval only) is an ask
+    """An ``output='evidence'`` job (MCP ask, retrieval only) is an ask
     row in the activity stream and its detail, marked ``output="evidence"``;
     answer rows say ``"answer"``. Deleting the notebook keeps the mark on the
     retained projection (live row and retained row agree)."""

@@ -75,6 +75,7 @@
         "created_by": "<user-id-1>",
         "error": "",
         "id": "<askjob-id-1>",
+        "memory_access": 1,
         "mode": "reasoning",
         "notebook_id": "<nb-id-1>",
         "output": "answer",
@@ -645,6 +646,7 @@
         "created_by": "<user-id-1>",
         "error": "",
         "id": "<askjob-id-1>",
+        "memory_access": 1,
         "mode": "reasoning",
         "notebook_id": "<nb-id-1>",
         "output": "answer",
@@ -1207,6 +1209,11 @@
       {
         "name": "idx_answers_nb",
         "sql_sha256": "4dd3b821c5d7e5f8d3f580307fc007c3126a9fd18d9b415e494ab26c0cd127f1",
+        "type": "index"
+      },
+      {
+        "name": "idx_ask_intent_handles_expires",
+        "sql_sha256": "0913905a75909b10f3843af9d8ce7806cdf4b601d85e9c1dfef1cc6af654f301",
         "type": "index"
       },
       {
@@ -2000,8 +2007,13 @@
         "type": "table"
       },
       {
+        "name": "ask_intent_handles",
+        "sql_sha256": "783d349abd5ddcff113d18ca38af65c7f7746256333b366245cd989749dc631d",
+        "type": "table"
+      },
+      {
         "name": "ask_jobs",
-        "sql_sha256": "e133f6d7d5e4fcc596c7add6d7ddbcaad463ce1b0c3ccf65515b22f3a0eea47e",
+        "sql_sha256": "2b88e48b47d4483f72b7b81383008be99c8e059d6881e7343f9241698e6c1cfb",
         "type": "table"
       },
       {
@@ -3275,6 +3287,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 90
+    "user_version": 91
   }
 }

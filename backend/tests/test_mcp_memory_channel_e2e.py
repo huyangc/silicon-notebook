@@ -340,9 +340,9 @@ async def assert_memory_channel_through_mcp(env: dict, monkeypatch) -> None:
 
 async def _ask_evidence(app, raw_token: str, notebook_id: str, question: str) -> dict:
     async with OfficialMcpClient(app, raw_token, manage_lifespan=False) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        return _payload(await client.call("ask_notebook", {
+        return _payload(await client.call("ask", {
             "question": question, "mode": "reasoning", "output": "evidence",
+            "notebooks": [notebook_id],
         }))
 
 
@@ -469,7 +469,7 @@ async def test_search_formal_memory_channel_on_sqlite(sqlite_env, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_evidence_memory_channel_and_ceiling_on_sqlite(
+async def test_mcp_ask_evidence_memory_channel_and_ceiling_on_sqlite(
     sqlite_env, monkeypatch
 ):
     await assert_evidence_channel_through_mcp(sqlite_env, monkeypatch)

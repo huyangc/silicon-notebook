@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 RESULT_LIMIT = 20
 TEXT_LIMIT = 2_000
 TOTAL_TEXT_LIMIT = 12_000
-# ``ask_notebook(output="evidence")`` returns the context the synthesis would
+# ``ask(output="evidence")`` returns the context the synthesis would
 # have been given, so its size follows the synthesis budget, not the 12,000
 # above. The per-item allowance covers the handle/metadata fields wrapped
 # around each item's text; the hard cap keeps one reply bounded whatever the
@@ -503,7 +503,7 @@ def _budget_response(
 ) -> dict[str, Any]:
     """Return a useful response that strictly fits the public MCP JSON budget.
 
-    The three trailing keywords exist for ``ask_notebook(output="evidence")``
+    The three trailing keywords exist for ``ask(output="evidence")``
     alone: a total other than ``TOTAL_TEXT_LIMIT``, a list cap other than
     ``RESULT_LIMIT``, and the list whose rows carry the per-row ``provenance``
     to fit (``anchors`` for every other tool). So does
