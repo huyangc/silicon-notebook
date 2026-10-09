@@ -50,7 +50,7 @@ def test_begin_creates_running_job_and_conversation(repo):
 
 
 def test_begin_evidence_job_writes_a_log_row_but_no_conversation(repo):
-    """``output="evidence"`` (MCP ask_notebook, retrieval only): one ask_jobs row
+    """``output="evidence"`` (MCP ask, retrieval only): one ask_jobs row
     marked 'evidence' with an empty conversation id, no conversations row, and
     the caller's ``payload.conversation_id`` left exactly as sent (the engine
     may read that conversation's history; it never appends to it)."""

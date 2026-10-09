@@ -255,9 +255,11 @@ claude mcp list
 
 接回有边界。`get_ask` 与重复的 `client_request_id` 只覆盖同一主人经 MCP 发起的任务；浏览器发起的任务返回 `not_found`。运行时开放了私人记忆通道（凭证带 `read`）的单库任务，只接回给当前能读记忆的凭证：你的另一个没有 `read` 的凭证用 `get_ask` 或同 key 重试会得到 `scope_missing` 并点名「读取」，因为存下的回答可能含有私人记忆。未读记忆的任务和全局任务（从不读私人记忆）对你的任何凭证都能接回。把 `client_request_id` 用于不同的问题、模式或会话会报 `invalid_argument`（每个问题用新 key）。同一个 key 或任务同时最多 2 个调用在等，第三个得到 `busy`（改用 `get_ask` 读结果）；被取消或断开的调用只是停止等待，不取消任务；由其他服务进程持有的任务（单库或全局）只要还在推进就一直跟随，连续 30 分钟没有任何进展才返回 `unavailable`（稍后用 `get_ask` 查看）。`ask` 不会交回仍在进行的回答：跟踪反复出错时同样返回 `unavailable`，稍后用 `get_ask` 读取结果。交付回答时重新鉴权：回答准备期间凭证若被撤销、失去 `ask` 级别、笔记本被移出白名单，或（读过私人记忆的回答）失去 `read`，`ask` 返回与 `get_ask` 相同的拒绝，不交回回答。
 
+只检索：`ask(question, notebooks=[一个 id] 或不传, mode="reasoning"|"chunk", output="evidence")` 跑同样的检索，返回合成本应读到的证据，不生成回答（status 为 `retrieved`，一次返回、不分页，见「大响应」）。每条证据都带可交给 `read_reference` 的 `ref`。它只要求 `ask` 级别，私人记忆规则不变（有 `read` 才含记忆条目），`conversation_id` 只读其历史、不追加，不保存会话和回答，在活动记录里标「仅检索」。上面的交付时重新鉴权同样适用。
+
 ### 大响应
 
-所有工具的响应都在 12,000 字节预算内，只有一个例外：`output="evidence"` 的 `ask_notebook` 跳过最终合成，
+所有工具的响应都在 12,000 字节预算内，只有一个例外：`output="evidence"` 的 `ask` 跳过最终合成，
 把合成那一步本应收到的整份证据一次返回、不分页。它的大小跟随合成预算，服务端硬顶 524,288 字节（见产品与 API
 参考中的例外说明），可能远大于其它任何结果。MCP 客户端通常自带工具输出上限，更大的响应会被截断。**Claude Code**
 的这个上限就是环境变量 `MAX_MCP_OUTPUT_TOKENS`；使用 `output="evidence"` 之前，请在启动 `claude` 的 shell 里
@@ -429,6 +431,8 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 | `ask` 报 `[invalid_argument]`「这个 client_request_id 已用于另一个问题」 | 该 key 已用在不同的问题、模式或会话上（单库与全局一致）。每个问题换新的 `client_request_id`；只有完全相同的重试才复用。 |
 | 明知存在的任务或 key，`ask`/`get_ask` 报 `[not_found]`「没有找到这个问答任务」 | 接回只覆盖同一主人经 MCP 发起的任务：浏览器发起或他人发起的任务在这里读不到。 |
 | `ask` 报 `[busy]`「这个问答已有调用在等待结果」 | 该 key 或任务已有两个调用在等。不要并发重试，用 `get_ask(job_id)` 读结果。 |
+| `ask(output="evidence")` 的结果在客户端被截断，或被替换成「太大」之类的提示 | 是客户端自己的工具输出上限，不是服务端：证据按合成预算定大小（最多 524,288 字节），不走 12,000 字节护栏。调高该上限（§4「大响应」；Claude Code 里是 `MAX_MCP_OUTPUT_TOKENS`）。 |
+| `ask(output="evidence")` 报 `[invalid_argument]`，说只支持单个笔记本或不接受 `client_request_id` | 仅检索只用于单个笔记本（`notebooks` 只传一个或不传，不接全局会话 `gconv-`）、只用内置模式，且不接受 `client_request_id`：它不保存任何可接回的内容。对它的任务 id 调 `get_ask` 同样是 `invalid_argument`。调用失败时直接再问一次。 |
 | `ask` 报 `[unavailable]`，说回答在别处仍显示进行中但没有执行者 | 任务属于其他服务进程，已连续 30 分钟没有任何进展。任务并未取消；稍后用 `get_ask` 查看，或换新 key 重新提问。 |
 | `reasoning` 档的 `ask` 正常返回 `status: "needs_clarification"` 而没有答案 | 不是故障：这是与网页端相同的问题理解步骤发现了会改变检索方向的歧义，此时没有建会话也没有建任务。把 `intent.ambiguities` 里 `required` 为 true 的问题转述给用户，拿到回答后用同一个 `question`、`notebooks`、`conversation_id` 再调一次，并传 `intent={"intent_token": <响应里的 intent_token>, "answers": [{"id", "answer"}], "resolved_question": <可选，确认后的问法>}`。`chunk` 档没有理解步骤。 |
 | `ask` 报 `[invalid_argument]`「请先回答所有必填澄清问题」或「问题理解与当前问题不匹配」 | 回传的答案没通过与 HTTP `/ask` 相同的冻结校验：必填歧义缺答案，或这次的 `question` 与首次调用不一致。补齐答案、保持 `question` 与首次调用完全相同后重试。 |

@@ -53,7 +53,7 @@ async def test_search_formal_memory_channel_on_postgres(
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_evidence_memory_channel_and_ceiling_on_postgres(
+async def test_mcp_ask_evidence_memory_channel_and_ceiling_on_postgres(
     postgres_env, monkeypatch
 ):
     await assert_evidence_channel_through_mcp(postgres_env, monkeypatch)

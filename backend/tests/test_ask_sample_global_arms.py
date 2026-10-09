@@ -267,7 +267,7 @@ def test_the_step_budget_bounds_what_leaves_the_database_for_global_rows(repo):
 
 
 def test_a_retrieval_only_ask_is_in_no_learning_sample(repo):
-    """An ``output='evidence'`` job (MCP ask_notebook, retrieval only) stored no
+    """An ``output='evidence'`` job (MCP ask, retrieval only) stored no
     answer: it is not an ask the member made *and got an answer to*, so none of
     the three samplers (P1 overlay trace, P2 experience runs, P3 language) may
     read it -- its steps, its question or its mode."""

@@ -1290,6 +1290,13 @@ notebook 闸。缺档时工具报错是写明缺哪一档的中文文案（例�
 `omitted_fields`）。异常只返回稳定错误码；FastMCP schema 错误发生在工具体之前，归 transport/request
 audit。只有拷贝真的缩无可缩时才整次拒绝，不会返回被静默截断的结果。
 
+12,000 字节预算只有一个例外：`output="evidence"` 的 `ask`（见下），其响应大小由合成预算决定：
+`min(EVIDENCE_TOTAL_TEXT_LIMIT, 12,000 + 3 × max(budget_chars, context_chars, 最长单条 text) + EVIDENCE_ITEM_OVERHEAD_BYTES × 条目数)` 字节，
+其中 `EVIDENCE_TOTAL_TEXT_LIMIT = 524_288` 是服务端硬顶，`EVIDENCE_ITEM_OVERHEAD_BYTES = 3_000` 是每条给标识符与
+标签留的余量（同一个 `max(...)` 也是单条 text 的上限）。证据超过硬顶时，先把每条 `text` 按同一比例裁短（以 `…`
+结尾），剩余超出再按常规收敛；所有被裁掉的字符都计入 `truncation.omitted_characters`。其它所有工具的 12,000
+字节护栏逐字节不变。
+
 `list_notebooks` **不需要任何档位**：判据只有 token 存活，并只列出白名单内主人仍有读权限的笔记本。
 因此无论 token 权限收得多窄，session 都能正常发现自己的笔记本。
 
@@ -1409,6 +1416,45 @@ knowhow 投影来源的 citation 也带与 anchor 相同的
 被算术还原出来。anchors 与 citations 各自最多 20 行。响应预算分两步：先把**每一条** anchor 的
 `provenance` 各自压到 500 字符，然后才把 anchors 整体压到 3,500 字符；citations 另外预压到
 1,800 字符，使大体量引用不会挤掉正文。
+
+**只检索：`output="evidence"`。** `ask` 还接受 `output`（`"answer"`，默认，即上文行为；或 `"evidence"`）。
+`"evidence"` 跑同样的检索，但**跳过最终合成**，返回合成那一步本应收到的证据。它的护栏都在动手之前检查：只用于
+单个笔记本（传多个 `notebooks` 或接全局会话 `gconv-` 报 `invalid_argument`；全局问答没有证据输出）；只支持内置
+模式 `reasoning` 与 `chunk`（部署级 `ask.engine` 模式会被拒绝并给出可读文案，因为插件引擎自行检索并合成，没有
+可单独返回的检索证据）；不接受 `client_request_id`（`invalid_argument`：它不保存任何可接回的内容，失败了直接
+再问一次）；`output` 取值非法报 `invalid_argument`。它只要求 `ask` 级别，与回答同一道闸（不额外要求 `read`）；
+检索天花板、Memory 通道、空库闸、任务行的 `memory_access` 记录与交付时重新鉴权都与回答一致，调用只在成功交付时
+记入 Agent 调用账本。`reasoning` 下仍先理解问题，调用仍可能返回 `needs_clarification`（用同一个 `question`、
+`notebooks`、`conversation_id` 与 `output` 再调一次）。`conversation_id` 先过 `ask` 自己的会话检查（属于你、
+在该笔记本，否则 `not_found`），之后只提供**只读**历史，用于追问改写与问题理解：**不会向该会话追加任何内容**，
+也不新建会话；用了历史时响应回传该 id，否则为 `""`。这次调用记为一条提问任务（`output='evidence'`，在活动
+记录与提问分析里标「仅检索」），不建会话、不存回答，也不进学习链路（轨迹/语言采样、完成观察者、检索经验、
+reflect）和铃铛。该任务行的 `conversation_id` 为空，删除会话不会删掉它，它只随笔记本删除。对它的任务 id 调
+`get_ask` 报 `invalid_argument`（没有保存的内容可分页）。已知性能特征：学习链路的采样用 `output = 'answer'`
+谓词排除这些行，该谓词不在任何索引里、是索引查找之后的后置过滤；仅检索调用占比很大时，这两类采样要多扫行，
+可能需要一个包含 `output` 的索引。
+
+响应形如 `{"notebook_id", "status": "retrieved", "output": "evidence", "mode", "evidence_kind",
+"conversation_id", "retrieval_query", "intent", "counts", "budget", "content_is_untrusted_evidence": true,
+"items": [...], "notice", "skipped_libraries", "index_required", "truncation"}`。`evidence_kind` 取 `retrieval`、
+`document_overview`、`structured_enumeration` 或 `none`。每条 item 带 `key`（合成上下文里的 `kN` 标号）、`kind`
+（`chunk`、`kg`、`memory`、`element`、`collection`、`external`、`spreadsheet`（电子表格确定性分析结果）、
+`document_read`、`context`；按号段与产出方写下的字段判定，所以集合清单预览里的元素行是 `collection`、按篇读取的
+原文摘录是 `document_read`）、该片段的原样 `text`、与回答 `anchors` 相同的句柄字段（`object_id`、`object_type`、
+`label`、`source_title`、`location_label`、`source_id`、`element_id`、`tier`、`relevance`、`provenance`，适用时
+还有 `knowhow` / `memory_id` / `url`，由同一个锚点解析器产出），以及回答引用会带的 `ref`（来源元素是 `el` ref，
+Memory 条目是 `mem` ref），所以 `read_reference` 解析它的方式与解析回答引用完全一致（`knowhow` 对交给
+`get_knowhow_row`）。条目按上下文装配时记录下来的边界切分，从不在拼好的文本里重新查找：原文里一行看起来像另一个键
+（`k2: …`）或以方括号行结尾，都仍属于它自己的条目；只省略装配器自己插入的分隔符与分节标题；无法归属到某个键的
+文本作为 `kind="context"` 的条目原样返回，其中的键计入 `omitted`。`counts` 为
+`{recalled, selected, delivered, omitted, by_kind}`：各总数**不含 Memory**（Memory 只出现在 `by_kind` 里，其条数
+不会被算术泄漏），`delivered` 是实际装进合成预算的条数（`omitted` 为差值）。没有 `read` 档时，Memory 条目在截断前
+被剔除并从 `by_kind` 中删去。特殊分支与回答一致：文档概览返回它自己准备的证据（或只带 notice、无条目）；结构化
+完整枚举短路把确定性渲染的整段结果作为一条 `kind="context"` 的 item 返回；`reasoning` 没有检索证据或未配置
+主模型时，返回 `evidence_kind="none"` 加 notice，不带条目。证据按合成预算定大小，而不是 12,000 字节护栏（见上文
+例外）：20 行上限与 2,000 字符文本上限都不适用，整份证据一次返回、不分页。MCP 客户端通常自带工具输出上限，需要
+调高（见 [Agent MCP 记忆 SOP](./agent-mcp-memory-sop_zh.md)）。已登记差异：`reasoning` 下证据一律按单次装配成
+一份上下文，即便回答会对该问题分节合成；证据精炼的模型调用也被跳过。
 
 **`ref` 与 `read_reference`。** `search` 的命中与 `ask`/`get_ask` 的每条引用都带不透明的 `ref`
 （无填充的 `base64url(json)`；不签名——`read_reference` 每次调用都重跑原读取的全部鉴权）。
@@ -2936,7 +2982,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 问答正在生成，以及深度报告处于 `pending`、`running`、`planning` 或 `generating` 时，等待区域会挂载同一个紧凑许愿轮播。轮播分别读取最多 `WAITING_WISH_KIND_LIMIT = 5` 条按优先级排序的问题反馈与同样数量的功能需求，因此不会被不可投票的更新计划占满；合并后先按点赞数、再按发布时间与 id 排序。默认每 `WAITING_WISH_ROTATION_MS = 8,000` 毫秒切换一条，鼠标悬停、键盘焦点进入、用户正在投票或系统启用“减少动态效果”时暂停，并提供上一个/下一个手动切换。卡片只投影类型和完整标题，详细说明通过「查看完整说明」进入许愿墙，不静默截断正文。用户可在卡片上赞同或取消赞同，投票中的控件禁用，结果或错误紧邻控件显示；轮播加载失败不会影响问答或报告本身继续生成。
 
-管理员可从全局 `/admin/questions` 进入**提问分析**，把普通问答任务与深度报告中的用户原始提问汇总到一个地方，不再要求先按用户下钻。通过既有校验的原始提问会完整保存和返回，提问分析视图不会再额外截断；对于历史上已完成的问答任务，优先使用答案记录中的完整提问恢复旧任务里被缩略的正文。笔记本删除后保留的提问投影，在配置的用户活动保留期内仍会进入分析；已到期投影，以及仍存在同 id 笔记本的保留行不会重复计入。**全局问答**的作业同样汇总在这里：每条是一行 `type="ask"` 且 `scope="global"` 的记录，不属于任何笔记本，`notebook_id`/`notebook_name` 恒为空串，笔记本列显示固定的「全局问答」。每条结果另带 `submitted_via`，即提交这条提问的入口：`web` 表示登录会话鉴权的网页/HTTP 提交面（`POST /api/notebooks/{id}/ask`、`/ask/stream`、`/reports`，全局问答对应 `POST /api/global-ask/ask`），`mcp` 表示 MCP 工具（笔记本内问答与全局问答都是 `ask`），空串表示「未记录」——该字段上线前创建的全部历史行，以及不传入口的进程内调用。取值只由服务端入口写入，不接受请求字段指定，也不为历史行做推断；页面在「调用方式」列显示为「网页」「MCP」「未记录」，删除笔记本后的留存投影保留原值。页面支持按来源类型（`ask` 或 `report`）、**提问范围**（`scope=notebook|global`，即「笔记本内」与「全局」，省略时两者都出现）、调用方式（`submitted_via=web|mcp`）、用户和提问正文筛选；结果按新到旧展示用户、笔记本、状态和创建时间；汇总卡片按当前筛选条件统计提问总数、问答数、深度报告数、**全局问答数**与去重后的活跃用户数——全局问答数是问答数的子集，与笔记本内问答同属一类问题，只在检索方式上不同。搜索上限为 `ADMIN_QUESTIONS_QUERY_MAX_CHARS = 200` 个 Unicode 码点；offset 分页默认每页 `ADMIN_QUESTIONS_DEFAULT_LIMIT = 50` 条，单次请求最多 `ADMIN_QUESTIONS_MAX_LIMIT = 200` 条。页面用全站共用的分页控件翻页（当前行区间与总数、上一页/下一页、总页数、跳页；只有一页时不出现），翻页期间保留当前表格并标为忙碌；停留的页因提问减少而整页落空时退回新的最后一页，不显示空页。HTTP 端点为 `GET /api/admin/questions`，仅管理员可读，并沿用 `USER_ACTIVITY_VIEW_ENABLED` 用户活动可观测总闸；总闸关闭时账户菜单隐藏入口，直接访问页面也会明确说明当前部署未开启该能力。首版提供可搜索、可筛选的人工分析视图，不会把提问内容额外发送给模型。
+管理员可从全局 `/admin/questions` 进入**提问分析**，把普通问答任务与深度报告中的用户原始提问汇总到一个地方，不再要求先按用户下钻。通过既有校验的原始提问会完整保存和返回，提问分析视图不会再额外截断；对于历史上已完成的问答任务，优先使用答案记录中的完整提问恢复旧任务里被缩略的正文。笔记本删除后保留的提问投影，在配置的用户活动保留期内仍会进入分析；已到期投影，以及仍存在同 id 笔记本的保留行不会重复计入。**全局问答**的作业同样汇总在这里：每条是一行 `type="ask"` 且 `scope="global"` 的记录，不属于任何笔记本，`notebook_id`/`notebook_name` 恒为空串，笔记本列显示固定的「全局问答」。每条结果另带 `submitted_via`，即提交这条提问的入口：`web` 表示登录会话鉴权的网页/HTTP 提交面（`POST /api/notebooks/{id}/ask`、`/ask/stream`、`/reports`，全局问答对应 `POST /api/global-ask/ask`），`mcp` 表示 MCP 工具（笔记本内问答与全局问答都是 `ask`），空串表示「未记录」——该字段上线前创建的全部历史行，以及不传入口的进程内调用。取值只由服务端入口写入，不接受请求字段指定，也不为历史行做推断；页面在「调用方式」列显示为「网页」「MCP」「未记录」，删除笔记本后的留存投影保留原值。每条提问还带 `output`（默认 `answer`；`ask(output="evidence")` 的调用为 `evidence`），后者在来源列旁标「仅检索」，留存投影同样保留。页面支持按来源类型（`ask` 或 `report`）、**提问范围**（`scope=notebook|global`，即「笔记本内」与「全局」，省略时两者都出现）、调用方式（`submitted_via=web|mcp`）、用户和提问正文筛选；结果按新到旧展示用户、笔记本、状态和创建时间；汇总卡片按当前筛选条件统计提问总数、问答数、深度报告数、**全局问答数**与去重后的活跃用户数——全局问答数是问答数的子集，与笔记本内问答同属一类问题，只在检索方式上不同。搜索上限为 `ADMIN_QUESTIONS_QUERY_MAX_CHARS = 200` 个 Unicode 码点；offset 分页默认每页 `ADMIN_QUESTIONS_DEFAULT_LIMIT = 50` 条，单次请求最多 `ADMIN_QUESTIONS_MAX_LIMIT = 200` 条。页面用全站共用的分页控件翻页（当前行区间与总数、上一页/下一页、总页数、跳页；只有一页时不出现），翻页期间保留当前表格并标为忙碌；停留的页因提问减少而整页落空时退回新的最后一页，不显示空页。HTTP 端点为 `GET /api/admin/questions`，仅管理员可读，并沿用 `USER_ACTIVITY_VIEW_ENABLED` 用户活动可观测总闸；总闸关闭时账户菜单隐藏入口，直接访问页面也会明确说明当前部署未开启该能力。首版提供可搜索、可筛选的人工分析视图，不会把提问内容额外发送给模型。
 
 ## API
 

@@ -278,7 +278,7 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # delete) with the frozen ``_v89_tiers`` rule. See ``_migration_89``.
 # v90 (paired with PostgreSQL 0070_ask_job_output.sql) adds
 # ask_jobs.output and retained_user_activity.output (TEXT NOT NULL DEFAULT
-# 'answer'): 'evidence' marks a retrieval-only MCP ask_notebook call that
+# 'answer'): 'evidence' marks a retrieval-only MCP ask call that
 # produced no answer and no conversation. No backfill -- every existing row
 # is an answer. See ``_migration_90``.
 # v91 (paired with PostgreSQL 0071_ask_intent_handles.sql) adds the

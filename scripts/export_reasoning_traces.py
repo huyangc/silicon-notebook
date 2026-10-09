@@ -159,7 +159,7 @@ def _fetch_jobs(reader: _Reader, notebooks: Sequence[str]) -> list[dict]:
     if notebooks:
         clauses.append(f"notebook_id IN ({_in_clause(reader, notebooks)})")
         params = list(notebooks)
-    # 仅检索(`ask_notebook(output="evidence")`)的作业没有合成、没有答案:
+    # 仅检索(`ask(output="evidence")`)的作业没有合成、没有答案:
     # 它不是一次推理 run,导出它会把半截轨迹混进基线(与学习链路采样同一条
     # `output = 'answer'` 排除)。还没迁到这一列的旧库里每一行都是回答,不加谓词。
     if _has_column(reader, "ask_jobs", "output"):
