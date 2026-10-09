@@ -2910,6 +2910,72 @@ async def test_transport_rejects_missing_token_and_untrusted_origin(mcp_env):
 
 
 @pytest.mark.anyio
+async def test_transport_401_names_the_reason_only_for_a_matching_token(mcp_env):
+    """A malformed, unknown or tampered token gets the one ``token_invalid``
+    answer (no token-existence oracle); a token whose hash matched but that no
+    longer authorizes anything says why, in readable copy."""
+    app = mcp_env["app"]
+    service = mcp_env["service"]
+    request = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "security-test", "version": "1"},
+        },
+    }
+    revoked = service.issue_agent_token(
+        mcp_env["alice"].id, mcp_env["profile_a"].id, ["read"],
+        mcp_env["notebook"].id, [mcp_env["notebook"].id], None,
+    )
+    service.revoke_agent_token(mcp_env["alice"].id, revoked.id)
+    disabled_profile = service.create_agent_profile(mcp_env["alice"].id, "Retired", "")
+    disabled = service.issue_agent_token(
+        mcp_env["alice"].id, disabled_profile.id, ["read"],
+        mcp_env["notebook"].id, [mcp_env["notebook"].id], None,
+    )
+    service.update_agent_profile(
+        disabled_profile.id, mcp_env["alice"].id, {"status": "revoked"}
+    )
+
+    async def post(token: str):
+        return await http.post(
+            "/mcp",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "accept": "application/json, text/event-stream",
+            },
+            json=request,
+        )
+
+    async with app.router.lifespan_context(app):
+        await _wait_for_ready(app)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+            follow_redirects=True,
+        ) as http:
+            answers = {
+                "garbage": await post("not-a-token"),
+                "unknown": await post("snm_token-missing.secret"),
+                "tampered": await post(mcp_env["token_a"].token + "x"),
+                "revoked": await post(revoked.token),
+                "disabled": await post(disabled.token),
+            }
+    invalid = {"detail": "invalid or expired Agent token", "code": "token_invalid"}
+    for name in ("garbage", "unknown", "tampered"):
+        assert answers[name].status_code == 401, name
+        assert answers[name].json() == invalid, name
+    assert answers["revoked"].status_code == 401
+    assert answers["revoked"].json()["code"] == "token_revoked"
+    assert "已撤销" in answers["revoked"].json()["detail"]
+    assert answers["disabled"].status_code == 401
+    assert answers["disabled"].json()["code"] == "profile_disabled"
+
+
+@pytest.mark.anyio
 async def test_runtime_transport_requires_https_only_for_remote_clients(mcp_env):
     app = mcp_env["app"]
     request = {
