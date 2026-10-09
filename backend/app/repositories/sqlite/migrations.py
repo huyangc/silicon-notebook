@@ -272,7 +272,11 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # rewrites every public library's evidence entries that name another
 # notebook's source to the library's own 'promotion' sources and elements
 # (app.domain.promotion_provenance). No schema change. See ``_migration_88``.
-SCHEMA_VERSION = 88
+# v89 (paired with PostgreSQL 0069_agent_token_tiers.sql) adds the nullable
+# agent_access_tokens.token_plain column (no backfill) and rewrites every
+# token's scopes_json to the five tiers (read / ask / contribute / manage /
+# delete) with the frozen ``_v89_tiers`` rule. See ``_migration_89``.
+SCHEMA_VERSION = 89
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
 # when v87 was written (a migration must not change meaning when the live
@@ -313,6 +317,37 @@ _V87_MEMORY_DERIVED_KR = (
     "EXISTS (SELECT 1 FROM sources ds WHERE ds.id = kr.source_id "
     "AND ds.source_type = 'memory')"
 )
+
+# ---------------------------------------------------------------------------
+# v89: a FROZEN copy of the capability -> tier rule as it stood when v89 was
+# written (PostgreSQL 0069 spells the same rule in SQL; read its header). A
+# tier is granted by its own name or by its main capability; the result is in
+# this order. tests/test_agent_token_tiers_migration.py pins it against the
+# live ``app.domain.agent_tools`` vocabulary.
+# ---------------------------------------------------------------------------
+_V89_TIER_RULES = (
+    ("read", ("read", "knowledge:read", "memory:read")),
+    ("ask", ("ask", "ask:execute")),
+    ("contribute", ("contribute", "memory:propose")),
+    ("manage", ("manage", "sources:write", "maintenance:execute")),
+    ("delete", ("delete", "sources:delete")),
+)
+
+
+def _v89_tiers(scopes_json: Any) -> list[str]:
+    """The tiers one stored ``scopes_json`` value migrates to. A value that is
+    not a JSON array, and array items that are not strings, grant nothing."""
+    try:
+        scopes = json.loads(scopes_json) if scopes_json is not None else []
+    except (TypeError, ValueError):
+        scopes = []
+    held = (
+        {item for item in scopes if isinstance(item, str)}
+        if isinstance(scopes, list)
+        else set()
+    )
+    return [tier for tier, granting in _V89_TIER_RULES if held.intersection(granting)]
+
 
 # ---------------------------------------------------------------------------
 # v88 (PR-E8): a FROZEN copy of the promotion-provenance rule as it stood when
@@ -5472,6 +5507,38 @@ class SqliteMigrator:
             counts["objects_without_evidence"],
         )
 
+    def _migration_89(self) -> None:
+        """Agent token tiers and re-copyable tokens, parity with PostgreSQL
+        ``0069_agent_token_tiers.sql`` -- read that file's header first: the
+        rule, the order, the empty-tier case and the idempotency argument are
+        written there once.
+
+        SQLite specifics: one ``BEGIN IMMEDIATE`` transaction including the
+        ``user_version`` stamp (same shape as v87/v88); the rewrite runs in
+        Python with the frozen ``_v89_tiers`` and writes only rows whose
+        value changes.
+        """
+        with self.database.write(operation="sqlite.migration.89") as db:
+            self.database.begin_immediate(db)
+            self.add_column_if_missing(db, "agent_access_tokens", "token_plain", "TEXT")
+            rows = db.execute(
+                "SELECT id, scopes_json FROM agent_access_tokens ORDER BY id"
+            ).fetchall()
+            changed = 0
+            for row in rows:
+                tiers = json.dumps(_v89_tiers(row[1]), ensure_ascii=False)
+                if tiers != row[1]:
+                    db.execute(
+                        "UPDATE agent_access_tokens SET scopes_json = ? WHERE id = ?",
+                        (tiers, row[0]),
+                    )
+                    changed += 1
+            db.execute("PRAGMA user_version = 89")
+        # Content-free: counts only (docs/operations.md).
+        logger.info(
+            "agent-token-tiers migration: tokens=%d rewritten=%d", len(rows), changed
+        )
+
     def _seed(self) -> None:
         now = _now()
         with self._connect() as db:
@@ -5579,11 +5646,11 @@ class SqliteMigrator:
         applied: list[int] = []
         for version in range(current + 1, SCHEMA_VERSION + 1):
             getattr(self, f"_migration_{version}")()
-            # v25, v78, v87 and v88 stamp themselves inside the same BEGIN
+            # v25, v78, v87, v88 and v89 stamp themselves inside the same BEGIN
             # IMMEDIATE transaction as their irreversible data/schema changes.
             # Preserve the existing migration/stamp behavior byte-for-byte for
             # all other versions.
-            if version not in {25, 78, 87, 88}:
+            if version not in {25, 78, 87, 88, 89}:
                 with self._connect() as db:
                     db.execute(f"PRAGMA user_version = {version}")
             applied.append(version)

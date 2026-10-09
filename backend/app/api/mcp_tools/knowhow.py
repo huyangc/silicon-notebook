@@ -120,7 +120,7 @@ def register_knowhow_tools(
             "Save a code attachment for one knowhow cell (design doc §⑥-4): "
             "the code body itself, stored alongside the cell — never "
             "indexed, embedded, or retrievable as notebook knowledge. "
-            "Requires the knowhow:code scope."
+            "Requires the token's contribute permission."
         )
     )
     async def put_knowhow_cell_code(

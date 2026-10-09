@@ -5223,5 +5223,52 @@ MIGRATION_MANIFEST[(87, 88)] = {
     "views": {},
 }
 
+
+# v89 (Agent token tiers, parity with PostgreSQL 0069_agent_token_tiers.sql):
+# the nullable ``agent_access_tokens.token_plain`` column (no backfill) and a
+# rewrite of every token's scopes_json to the five tiers. The frozen v9 fixture
+# predates the Agent tables, so every hop creates agent_access_tokens fresh
+# and observes only the ALTERed text: the table ends with a plain column
+# definition, so SQLite splices the new column in place of the closing
+# parenthesis (the GLOBAL_ASK_TABLES_V77 position; verified against a real
+# ALTERed table). No row changes in the fixture (it holds no token).
+AGENT_TOKEN_PLAIN_COLUMNS = {
+    "agent_access_tokens": {
+        "token_plain": ("token_plain", "TEXT", 0, None, 0),
+    },
+}
+AGENT_ACCESS_TOKENS_TABLE_V89 = EXPECTED_MEMORY_TABLES["agent_access_tokens"].replace(
+    "created_at TEXT NOT NULL\n                )",
+    "created_at TEXT NOT NULL\n                , token_plain TEXT)",
+)
+MIGRATION_MANIFEST = {
+    (key[0], 89, *key[2:]): {
+        **manifest,
+        "tables": {
+            **manifest["tables"],
+            **(
+                {"agent_access_tokens": AGENT_ACCESS_TOKENS_TABLE_V89}
+                if "agent_access_tokens" in manifest["tables"]
+                else {}
+            ),
+        },
+        "columns": {
+            **manifest["columns"],
+            "agent_access_tokens": {
+                **manifest["columns"].get("agent_access_tokens", {}),
+                **AGENT_TOKEN_PLAIN_COLUMNS["agent_access_tokens"],
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(88, 89)] = {
+    "tables": {},
+    "columns": AGENT_TOKEN_PLAIN_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

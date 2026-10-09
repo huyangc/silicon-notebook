@@ -161,7 +161,7 @@ def register_source_tools(
             "summary excerpts, and parse/extraction state. Hidden Memory and "
             "Knowhow projection rows and sources from mounted reference "
             "notebooks are excluded. Follow `next_offset` until it is null to "
-            "read the complete inventory. Requires knowledge:read scope."
+            "read the complete inventory. Requires the read permission."
         )
     )
     async def list_sources(
@@ -256,7 +256,7 @@ def register_source_tools(
             "in the background, so poll get_source_status for the outcome. "
             "Re-adding byte-identical content returns the existing source "
             "(`reused: true`) instead of creating a duplicate. Requires the "
-            "sources:write scope and ownership of the notebook."
+            "manage permission and ownership of the notebook."
         )
     )
     async def add_source_text(
@@ -331,7 +331,7 @@ def register_source_tools(
             "Use this for PDF, Word, PowerPoint, spreadsheets, Markdown bundles, "
             "and other registered formats; keep add_source_text for authored "
             "Markdown already available as text. Poll get_source_status after "
-            "the queued response. Requires sources:write scope and notebook "
+            "the queued response. Requires the manage permission and notebook "
             "ownership."
         )
     )
@@ -416,7 +416,7 @@ def register_source_tools(
             "Only PDFs are accepted -- the server probes the URL first and "
             "refuses anything that is not one, or that it cannot reach. "
             "Parsing runs in the background; poll get_source_status. Requires "
-            "the sources:write scope and ownership of the notebook."
+            "the manage permission and ownership of the notebook."
         )
     )
     async def add_source_url(url: str, ctx: Context) -> dict[str, Any]:
@@ -547,7 +547,7 @@ def register_source_tools(
             "a failed or degraded parse. The work is queued in the background "
             "and this returns immediately -- poll get_source_status to see the "
             "result. Refuses while that source is already being parsed. "
-            "Requires the sources:write scope and ownership of the notebook."
+            "Requires the manage permission and ownership of the notebook."
         )
     )
     async def reparse_source(source_id: str, ctx: Context) -> dict[str, Any]:
@@ -602,8 +602,8 @@ def register_source_tools(
             "Delete one source that an Agent added to the selected notebook, "
             "together with everything derived from it. Sources a PERSON added "
             "are refused: use this only to clean up your own uploads. "
-            "Irreversible. Requires the sources:delete scope (which "
-            "sources:write does not imply) and ownership of the notebook."
+            "Irreversible. Requires the delete permission (which "
+            "manage does not imply) and ownership of the notebook."
         )
     )
     async def delete_source(source_id: str, ctx: Context) -> dict[str, Any]:

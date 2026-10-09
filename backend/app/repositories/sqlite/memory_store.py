@@ -109,6 +109,7 @@ class MemoryStore:
             revoked_at=row["revoked_at"],
             last_used_at=row["last_used_at"],
             created_at=row["created_at"],
+            copyable=bool(row["token_plain"]) and row["revoked_at"] is None,
         )
 
     def create_agent_profile(
@@ -181,6 +182,7 @@ class MemoryStore:
         default_notebook_id: str,
         notebook_ids: Sequence[str],
         expires_at: str | None,
+        token_plain: str | None = None,
     ) -> AgentTokenSummary:
         now = self.now()
         with self.database.write() as db:
@@ -194,7 +196,7 @@ class MemoryStore:
             db.execute(
                 "INSERT INTO agent_access_tokens "
                 "(id,agent_profile_id,token_hash,scopes_json,default_notebook_id,"
-                "expires_at,created_at) VALUES (?,?,?,?,?,?,?)",
+                "expires_at,created_at,token_plain) VALUES (?,?,?,?,?,?,?,?)",
                 (
                     token_id,
                     agent_profile_id,
@@ -203,6 +205,7 @@ class MemoryStore:
                     default_notebook_id,
                     expires_at,
                     now,
+                    token_plain,
                 ),
             )
             db.executemany(
@@ -243,7 +246,8 @@ class MemoryStore:
         now = self.now()
         with self.database.write() as db:
             cursor = db.execute(
-                "UPDATE agent_access_tokens SET revoked_at=COALESCE(revoked_at,?) "
+                "UPDATE agent_access_tokens SET revoked_at=COALESCE(revoked_at,?),"
+                "token_plain=NULL "
                 "WHERE id=? AND EXISTS (SELECT 1 FROM agent_profiles p "
                 "WHERE p.id=agent_access_tokens.agent_profile_id AND p.owner_id=?)",
                 (now, token_id, owner_id),
@@ -257,6 +261,22 @@ class MemoryStore:
             ).fetchone()
             notebooks = self._token_notebooks_on(db, token_id)
         return self._token(row, notebooks)
+
+    def agent_token_secret(
+        self, token_id: str, owner_id: str
+    ) -> tuple[bool, str | None] | None:
+        """``(revoked, token_plain)`` of one of ``owner_id``'s own tokens, or
+        ``None`` when the token does not exist or belongs to someone else."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT t.revoked_at,t.token_plain FROM agent_access_tokens t "
+                "JOIN agent_profiles p ON p.id=t.agent_profile_id "
+                "WHERE t.id=? AND p.owner_id=?",
+                (token_id, owner_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return row["revoked_at"] is not None, row["token_plain"]
 
     def update_agent_token_access(
         self,
@@ -332,6 +352,9 @@ class MemoryStore:
         if row is None:
             return None
         result = dict(row)
+        # The plaintext never travels with the auth row (authentication
+        # compares the hash only).
+        result.pop("token_plain", None)
         result["notebook_ids"] = sorted(_json_list(result.pop("notebook_ids_json")))
         return result
 

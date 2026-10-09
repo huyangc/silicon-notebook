@@ -11,7 +11,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 
 from app.core.event_logging import EventLogger
-from app.domain.agent_tools import AGENT_SCOPES
+from app.domain.agent_tools import (
+    AGENT_OWNER_ONLY_TIERS,
+    AGENT_SCOPES,
+    AgentAccessDenied,
+    capability_tier,
+)
 from app.models.identity import (
     AgentPrincipal,
     AgentProfile,
@@ -25,6 +30,11 @@ from app.models.memory import (
     MemoryRecord,
     MemoryUpdate,
     PaginatedMemories,
+)
+from app.repositories.identity_errors import (
+    AgentOwnerOnlyTierError,
+    AgentTokenInactiveError,
+    AgentTokenSecretUnavailableError,
 )
 from app.repositories.ports import (
     AskStateStorePort,
@@ -555,6 +565,14 @@ class MemoryService:
         for notebook_id in clean_notebooks:
             if not self.notebooks.user_can_read_notebook(notebook_id, owner_id):
                 raise PermissionError(notebook_id)
+        # ``manage`` / ``delete`` only ever act on a notebook the owner owns
+        # (``_writable_notebook``); a token whose allowlist names none could
+        # never use them, so refuse the combination instead of issuing it.
+        if AGENT_OWNER_ONLY_TIERS.intersection(clean_scopes) and not any(
+            self.notebooks.user_can_access_notebook(notebook_id, owner_id)
+            for notebook_id in clean_notebooks
+        ):
+            raise AgentOwnerOnlyTierError()
         return clean_scopes, clean_notebooks, expires_at
 
     def issue_agent_token(
@@ -581,6 +599,7 @@ class MemoryService:
             default_notebook_id,
             clean_notebooks,
             expires_at,
+            token_plain=raw_token,
         )
         return AgentTokenIssued(
             id=summary.id,
@@ -602,6 +621,23 @@ class MemoryService:
         self, owner_id: str, token_id: str
     ) -> AgentTokenSummary:
         return self.store.revoke_agent_token(token_id, owner_id)
+
+    def agent_token_secret(self, owner_id: str, token_id: str) -> str:
+        """The stored plaintext of one of ``owner_id``'s own tokens.
+
+        ``KeyError`` when the token does not exist or is someone else's (the
+        route answers 404 for both); ``AgentTokenInactiveError("revoked")``
+        for a revoked token; ``AgentTokenSecretUnavailableError`` for a token
+        issued before plaintext was kept."""
+        state = self.store.agent_token_secret(token_id, owner_id)
+        if state is None:
+            raise KeyError(token_id)
+        revoked, token_plain = state
+        if revoked:
+            raise AgentTokenInactiveError("revoked")
+        if not token_plain:
+            raise AgentTokenSecretUnavailableError(token_id)
+        return token_plain
 
     def update_agent_token_access(
         self,
@@ -627,25 +663,42 @@ class MemoryService:
         )
 
     def resolve_agent_token(self, raw_token: str) -> AgentPrincipal | None:
+        return self.resolve_agent_token_status(raw_token)[0]
+
+    def resolve_agent_token_status(
+        self, raw_token: str
+    ) -> tuple[AgentPrincipal | None, str]:
+        """Authenticate a raw bearer token and say why it failed.
+
+        The second element is ``""`` on success, else one of
+        ``token_invalid`` (malformed, unknown, or a hash mismatch -- the three
+        are indistinguishable so a caller learns nothing about which token
+        ids exist), ``token_revoked``, ``token_expired``, ``profile_disabled``
+        or ``owner_ineligible``. The specific reasons are only ever reported
+        after the hash matched, i.e. to a caller holding the real token.
+        ``last_used_at`` is touched only on success."""
         match = _AGENT_TOKEN_RE.fullmatch(raw_token or "")
         if match is None:
-            return None
+            return None, "token_invalid"
         token_id = match.group(1)
         row = self.store.agent_token_auth_row(token_id)
         supplied_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
         expected_hash = str(row["token_hash"]) if row else "0" * 64
         if not hmac.compare_digest(supplied_hash, expected_hash) or row is None:
-            return None
+            return None, "token_invalid"
+        reason = self._auth_row_failure(row, _utc_now())
+        if reason:
+            return None, reason
         principal = self._principal_from_auth_row(token_id, row)
         if principal is None:
-            return None
+            return None, "token_invalid"
         now = _utc_now()
         current = _parse_time(now)
         touch_before = (
             current - timedelta(seconds=_TOKEN_TOUCH_SECONDS)
         ).isoformat().replace("+00:00", "Z")
         self.store.touch_agent_token(token_id, now, touch_before)
-        return principal
+        return principal, ""
 
     def refresh_agent_principal(self, token_id: str) -> AgentPrincipal | None:
         """Refresh live state for an already bearer-authenticated token id.
@@ -657,17 +710,22 @@ class MemoryService:
             token_id, self.store.agent_token_auth_row(token_id)
         )
 
+    def _auth_row_failure(self, row: Mapping[str, Any], now: str) -> str:
+        """Why an auth row no longer authorizes anything, ``""`` if it does."""
+        if row["revoked_at"] is not None:
+            return "token_revoked"
+        if _is_expired(row["expires_at"], now):
+            return "token_expired"
+        if row["profile_status"] != "active":
+            return "profile_disabled"
+        if self.owner_eligible is not None and not self.owner_eligible(row["owner_id"]):
+            return "owner_ineligible"
+        return ""
+
     def _principal_from_auth_row(
         self, token_id: str, row: Mapping[str, Any] | None
     ) -> AgentPrincipal | None:
-        now = _utc_now()
-        if (
-            row is None
-            or row["profile_status"] != "active"
-            or row["revoked_at"] is not None
-            or _is_expired(row["expires_at"], now)
-            or (self.owner_eligible is not None and not self.owner_eligible(row["owner_id"]))
-        ):
+        if row is None or self._auth_row_failure(row, _utc_now()):
             return None
         return AgentPrincipal(
             profile_id=row["agent_profile_id"],
@@ -684,29 +742,33 @@ class MemoryService:
     def require_agent_access(
         self, principal: AgentPrincipal, scope: str, notebook_id: str
     ) -> None:
+        """Live re-check that ``principal`` may exercise capability ``scope``
+        on ``notebook_id``; raises ``AgentAccessDenied`` (a
+        ``PermissionError``) naming why. ``scope`` is a capability
+        (``knowledge:read``, ...), mapped to the tier the token must hold; an
+        unknown capability raises ``ValueError``."""
+        tier = capability_tier(scope)
         row = self.store.agent_token_auth_row(principal.token_id)
         if (
             row is None
             or row["owner_id"] != principal.owner_id
             or row["agent_profile_id"] != principal.profile_id
-            or row["profile_status"] != "active"
-            or row["revoked_at"] is not None
-            or _is_expired(row["expires_at"], _utc_now())
-            or (self.owner_eligible is not None and not self.owner_eligible(row["owner_id"]))
+            or self._auth_row_failure(row, _utc_now())
         ):
-            raise PermissionError(notebook_id)
+            raise AgentAccessDenied("inactive", notebook_id=notebook_id)
         current_scopes = {
             str(item) for item in json.loads(row["scopes_json"] or "[]")
         }
-        current_notebooks = set(row["notebook_ids"])
-        if (
-            scope not in current_scopes
-            or notebook_id not in current_notebooks
-            or not self.notebooks.user_can_read_notebook(
-                notebook_id, principal.owner_id
+        if tier not in current_scopes:
+            raise AgentAccessDenied(
+                "scope_missing", notebook_id=notebook_id, tier=tier
             )
+        if notebook_id not in set(row["notebook_ids"]):
+            raise AgentAccessDenied("notebook_not_allowed", notebook_id=notebook_id)
+        if not self.notebooks.user_can_read_notebook(
+            notebook_id, principal.owner_id
         ):
-            raise PermissionError(notebook_id)
+            raise AgentAccessDenied("notebook_unreadable", notebook_id=notebook_id)
 
     @staticmethod
     def _patch(patch: MemoryUpdate | Mapping[str, Any] | None) -> tuple[dict, str]:

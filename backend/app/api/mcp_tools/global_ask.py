@@ -7,6 +7,9 @@ from typing import Any, Callable
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import ValidationError
 
+from app.domain.agent_tools import (
+    capability_tier, principal_has_capability, scope_missing_message,
+)
 from app.models.ask import ASK_UNDERSTANDING_MS_MAX, AskIntentConfirmation
 from app.models.global_ask import (
     GlobalAskIntentPreviewRequest, GlobalAskJob, GlobalAskRequest,
@@ -67,9 +70,11 @@ def _authorize(repo: Any, *, token_id: str = "", answer: bool = True) -> Any:
         raise _ToolPermissionError("Agent 凭证已失效，请在 Agent 接入中检查凭证状态") from None
     if principal is None:
         raise _ToolPermissionError("Agent 凭证已失效，请在 Agent 接入中检查凭证状态")
-    required = {"knowledge:read", "ask:execute"} if answer else {"knowledge:read"}
-    if not required.issubset(set(principal.scopes)):
-        raise _ToolPermissionError("权限不足，请在 Agent 接入中为此凭证添加所需的知识读取或问答权限")
+    # Starting/reading/cancelling an answer needs the ``ask`` tier alone;
+    # opening a cited element's original text is a read (``read`` tier).
+    capability = "ask:execute" if answer else "knowledge:read"
+    if not principal_has_capability(principal, capability):
+        raise _ToolPermissionError(scope_missing_message(capability_tier(capability)))
     return principal
 
 
@@ -302,7 +307,7 @@ def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[],
         "Returns a background job (or the clarification pause above); poll get_global_ask and "
         "follow next_coverage_offset for all coverage receipts. "
         "Use client_request_id for safe submission retries. "
-        "Requires ask:execute and knowledge:read. Searches document evidence only."
+        "Requires the token's ask permission. Searches document evidence only."
     ))
     @_safe_errors
     async def ask_global(
@@ -401,7 +406,7 @@ def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[],
         "counts them (checked/failed/changed/source_gone/unverifiable) and each failed "
         "citation carries verification; the answer is still delivered whole. "
         "Each call rechecks token and historical scope authorization. "
-        "Requires ask:execute and knowledge:read."
+        "Requires the token's ask permission."
     ))
     @_safe_errors
     async def get_global_ask(
@@ -425,7 +430,7 @@ def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[],
     @server.tool(description=(
         "Request cancellation of an owned global Ask job. No notebook selection needed. "
         "Follow next_coverage_offset with get_global_ask for all coverage receipts. "
-        "Requires ask:execute and knowledge:read, plus live access to its frozen scope."
+        "Requires the token's ask permission, plus live access to its frozen scope."
     ))
     @_safe_errors
     async def cancel_global_ask(job_id: str, ctx: Context) -> dict[str, Any]:
@@ -446,7 +451,7 @@ def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[],
         "and element_id from its citations. Follow next_offset for complete text. "
         "Checks citation membership, live read rights and token allowlist. A citation that "
         "carries verification (it failed the answer's citation check) cannot be opened; its "
-        "stored quoted_span in get_global_ask is what the answer read. Requires knowledge:read."
+        "stored quoted_span in get_global_ask is what the answer read. Requires the token's read permission."
     ))
     @_safe_errors
     async def get_global_cited_element(

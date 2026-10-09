@@ -649,6 +649,15 @@ async def _run_with_progress(
     return result[0]
 
 
+_TOKEN_FAILURE_DETAIL = {
+    "token_invalid": "invalid or expired Agent token",
+    "token_revoked": "此 Agent 凭证已撤销，请在 Agent 接入页重新签发",
+    "token_expired": "此 Agent 凭证已过期，请在 Agent 接入页调整有效期或重新签发",
+    "profile_disabled": "此凭证所属的 Agent 已停用，请在 Agent 接入页重新启用后再连接",
+    "owner_ineligible": "凭证主人的账号当前不能使用 Agent 接入，请联系管理员",
+}
+
+
 class AgentBearerMiddleware:
     """Authenticate opaque Agent Bearer tokens without retaining raw values."""
 
@@ -686,12 +695,17 @@ class AgentBearerMiddleware:
             else ""
         )
         service = self.repository_provider()
-        principal = await anyio.to_thread.run_sync(
-            service.resolve_agent_token, raw_token
+        principal, reason = await anyio.to_thread.run_sync(
+            service.resolve_agent_token_status, raw_token
         )
         if principal is None:
+            # A specific reason is only ever produced after the token's hash
+            # matched; a malformed/unknown/mismatched token stays the single
+            # ``token_invalid`` answer (no token-existence oracle).
+            code = reason if reason in _TOKEN_FAILURE_DETAIL else "token_invalid"
             await JSONResponse(
-                {"detail": "invalid or expired Agent token"}, status_code=401
+                {"detail": _TOKEN_FAILURE_DETAIL[code], "code": code},
+                status_code=401,
             )(scope, receive, send)
             return
 

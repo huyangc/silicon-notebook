@@ -37,7 +37,7 @@ def register_maintenance_tools(
             "you check on it. Refuses (do not retry immediately) while a "
             "build is already running for this notebook -- poll "
             "get_build_status until it clears instead. Requires the "
-            "maintenance:execute scope and ownership of the notebook."
+            "manage permission and ownership of the notebook."
         )
     )
     async def build_kg(ctx: Context) -> dict[str, Any]:
@@ -107,7 +107,7 @@ def register_maintenance_tools(
             "low-traffic window instead of running now. Refuses if the "
             "notebook is too small to need a retrieval index (small "
             "notebooks are served without one). Requires the "
-            "maintenance:execute scope and ownership of the notebook."
+            "manage permission and ownership of the notebook."
         )
     )
     async def build_retrieval_index(

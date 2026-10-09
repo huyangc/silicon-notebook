@@ -55,7 +55,7 @@ def register_profile_tools(
             "understanding every member sees; 'mine' is this token holder's "
             "own private overlay, if one has been written yet. Read-only: "
             "any member of the notebook may call it, not only the owner. "
-            "Requires the agent_profile:read scope."
+            "Requires the read permission."
         )
     )
     async def get_notebook_profile(ctx: Context) -> dict[str, Any]:
@@ -109,7 +109,7 @@ def register_profile_tools(
             "(codex #535 R4: a bounded idempotency window, registered -- a "
             "separate everlasting key table is not worth its own migration "
             "for a retry contract measured in seconds). Requires the "
-            "agent_observation:write scope; unlike source-management writes, "
+            "contribute permission; unlike source-management writes, "
             "this one does NOT require notebook ownership -- see "
             "get_notebook_profile for the read side of the same feature."
         )
