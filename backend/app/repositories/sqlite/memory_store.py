@@ -342,7 +342,12 @@ class MemoryStore:
         # 这种两份配置都没授权过的组合。单条 SELECT 在 SQLite 里读的是同一快照。
         with self.database.connect() as db:
             row = db.execute(
-                "SELECT t.*,p.owner_id,p.name AS profile_name,p.status AS profile_status,"
+                # Explicit columns: the stored plaintext (token_plain) is never read
+                # on the authentication path, which compares the hash only.
+                "SELECT t.id,t.agent_profile_id,t.token_hash,t.scopes_json,"
+                "t.default_notebook_id,t.expires_at,t.revoked_at,t.last_used_at,"
+                "t.created_at,"
+                "p.owner_id,p.name AS profile_name,p.status AS profile_status,"
                 "(SELECT json_group_array(n.notebook_id) FROM agent_token_notebooks n "
                 "WHERE n.token_id=t.id) AS notebook_ids_json "
                 "FROM agent_access_tokens t JOIN agent_profiles p "
@@ -352,9 +357,6 @@ class MemoryStore:
         if row is None:
             return None
         result = dict(row)
-        # The plaintext never travels with the auth row (authentication
-        # compares the hash only).
-        result.pop("token_plain", None)
         result["notebook_ids"] = sorted(_json_list(result.pop("notebook_ids_json")))
         return result
 
