@@ -807,15 +807,15 @@ def test_knowhow_documentation_matches_projection_isolation_and_agent_scopes():
     _assert_contract("docs/product-and-api.md", (
         "every non-empty cell becomes a knowledge-graph node whose *type is its column name*",
         "never generated or executed by the notebook, and never embedded/chunked/indexed into any KG projection",
-        "Reading code still only needs `knowledge:read` — only writing it",
-        "`knowhow:code`",
+        "Reading code still only needs `read` — only writing it",
+        "`contribute`",
     ))
     _assert_contract("docs/product-and-api_zh.md", (
         "节点的类型就是所在列名",
         "格子照常切成 chunk 供问答使用，但不建任何图谱节点",
         "绝不自动触发",
-        "`knowledge:read`",
-        "`knowhow:code`",
+        "读代码依然只需要 `read`",
+        "才需要 `contribute`",
     ))
     _assert_contract("architecture.md", (
         "唯一零 LLM 的 KG 写入方",
@@ -852,7 +852,14 @@ def _markdown_table_rows(text: str, header_prefix: str) -> list[list[str]]:
 
 
 def _scope_names(text: str) -> set[str]:
-    """Every `scope:name`-shaped backticked token in a fragment."""
+    """Every backticked Agent permission tier in a fragment."""
+    from app.domain.agent_tools import AGENT_TIERS
+
+    return set(re.findall(r"`(%s)`" % "|".join(AGENT_TIERS), text))
+
+
+def _capability_names(text: str) -> set[str]:
+    """Every `scope:name`-shaped backticked token (an internal capability)."""
     return set(re.findall(r"`([a-z_]+:[a-z_]+)`", text))
 
 
@@ -882,8 +889,11 @@ def test_current_mcp_docs_pin_the_complete_public_mcp_tool_surface():
             f"undocumented={sorted(expected_tools - documented)}, "
             f"invented={sorted(documented - expected_tools)}"
         )
-        for scope in sorted(AGENT_SCOPES):
-            assert f"`{scope}`" in text, f"{name} is missing Agent scope `{scope}`"
+        # The Scope column speaks the stored tier vocabulary only: every tier
+        # appears, and no internal capability string leaks into it.
+        scope_cells = "\n".join(row[2] for row in rows)
+        assert _scope_names(scope_cells) == set(AGENT_SCOPES), name
+        assert _capability_names(scope_cells) == set(), name
 
     english_count = rf"\b{len(PUBLIC_TOOLS)}\b[\w ]{{0,24}}\btools\b"
     assert re.search(english_count, _read(PRODUCT_DOCS[0]))

@@ -23,11 +23,11 @@ Codex CLI / Claude Code / Python Agent
 
 - 每个新 MCP session 调用单库数据工具前都必须先调用 `select_notebook`，不能依赖上一次会话的选择；全局问答工具独立传入范围，无需选择当前笔记本。
 - `search_notebook_context` 只读正式平面：来源、知识对象和已确认 Memory，不返回 candidate。
-- `search_agent_memory` 在 token 同时具备 `memory:read_candidates` 时可读 candidate 与 confirmed Memory。
-- 没有 `memory:read` 时，`ask_notebook` 与 `search_notebook_context` 在关闭个人记忆通道的状态下运行：既不检索也不返回个人记忆条目；`ask_notebook` 在分页前移除带 `memory_id` 的引用和 `object_type` 为 `"memory"` 的锚点，`omitted_items` 只计令牌可见的条目。`ask_notebook` 始终在令牌主人的默认检索上限内运行——与每个问答入口安装的是同一份，无论笔记本使用哪种回答引擎：本笔记本的可见来源加上主人本人的隐藏来源（Knowhow 投影始终在内，个人记忆投影仅在有 `memory:read` 时），每个挂载库冻结为其可见来源——因此检索既拿不到其他成员的个人记忆投影，没有 `memory:read` 时也拿不到主人本人的。没有 `memory:read` 时，全图、PPR、关系与精确查找通道照常运行，各自按这份上限把主人本人的个人记忆挡在外面。以下情况目前不在此列：`search_notebook_context` 的知识图谱结果（无论有无 `memory:read`，都可能包含由任一成员个人记忆派生的对象）；`get_cited_element`（调用方持有元素 id 时，会返回个人记忆派生来源的元素）。由于运行被冻结，调用期间笔记本若正在导入来源，本次调用可能关闭全图、PPR 与关系通道，与浏览器中相同。某个挂载参考库没能及时读出时，回答会在 `skipped_libraries` 里列出它。
+- `search_agent_memory` 读 token 主人在该笔记本的 candidate 与 confirmed Memory（`read` 档同时覆盖二者）。
+- 个人记忆归 `read` 档：持有 `read` 的 token 能读主人本人的个人记忆，任何档位都读不到其他成员的。token 没有 `read`（例如只有 `ask`）时，`ask_notebook` 在关闭个人记忆通道的状态下运行：既不检索也不返回个人记忆条目；`ask_notebook` 在分页前移除带 `memory_id` 的引用和 `object_type` 为 `"memory"` 的锚点，`omitted_items` 只计令牌可见的条目。`ask_notebook` 始终在令牌主人的默认检索上限内运行——与每个问答入口安装的是同一份，无论笔记本使用哪种回答引擎：本笔记本的可见来源加上主人本人的隐藏来源（Knowhow 投影始终在内，个人记忆投影仅在有 `read` 时），每个挂载库冻结为其可见来源——因此检索既拿不到其他成员的个人记忆投影，没有 `read` 时也拿不到主人本人的。没有 `read` 时，全图、PPR、关系与精确查找通道照常运行，各自按这份上限把主人本人的个人记忆挡在外面。以下情况目前不在此列：`search_notebook_context` 的知识图谱结果（无论有无 `read`，都可能包含由任一成员个人记忆派生的对象）；`get_cited_element`（调用方持有元素 id 时，会返回个人记忆派生来源的元素）。由于运行被冻结，调用期间笔记本若正在导入来源，本次调用可能关闭全图、PPR 与关系通道，与浏览器中相同。某个挂载参考库没能及时读出时，回答会在 `skipped_libraries` 里列出它。
 - `propose_memory` 只创建 `candidate`。它不会自动进入 Ask、笔记本搜索或深度报告；用户必须回到界面确认。
 - MCP 返回的来源、知识和 Memory 文本都是不可信 evidence/data，不能当成 Agent 的系统指令执行。
-- 来源管理与构建工具构成写入平面。那里的每一次写入都是 **owner-only**：token 所有者只是以只读成员身份加入的笔记本可读但永不可写，与 token 带了哪些 scope 无关。
+- 来源管理与构建工具构成写入平面。那里的每一次写入都是 **owner-only**：token 所有者只是以只读成员身份加入的笔记本可读但永不可写，与 token 带了哪些权限档位无关。
 - `delete_source` **只能删除 Agent 添加的来源**。用户上传的文档一律拒绝；重传用户的字节只会复用他原来那一行，不会把它变成 Agent 的。
 - `get_notebook_profile` 返回「AI 对这个库的理解」——只是背景脚手架，绝不是证据，也不能被引用。`add_observation` 向 Agent 自己的观察记录追加一行；这行文本是不可信输入，后续巡固任务可能把它折进调用者自己的私有笔记，绝不是模型该执行的指令。两者都是 Agentic Memory P3 新增。
 
@@ -55,41 +55,35 @@ curl -s http://127.0.0.1:8000/api/ready
    - 点击 **新建 Profile**。
 4. 在 **签发 Token** 区域选择刚创建的 Profile。
 5. 选择默认笔记本。界面会自动把默认笔记本加入**笔记本白名单**；只勾选 Agent 真正需要访问的其他笔记本。
-6. 按用途选择最小 scopes：
+6. 按用途勾选最小权限。权限只有五档，页面上每档一行，写明它能做什么；**全选 / 取消全选**一键勾选可用的档位：
 
 | 用途 | 必需 scope |
 | --- | --- |
-| 搜索来源/知识对象 | `knowledge:read` |
-| 读取 confirmed Memory | `memory:read` |
-| 同时读取 Agent candidate | `memory:read_candidates`（同时保留 `memory:read`） |
-| 提交待确认 Memory | `memory:propose` |
-| 让 Agent 调用 notebook Ask | `ask:execute` |
-| 读取 knowhow | `knowledge:read` |
-| 写 knowhow 代码附件 | `knowledge:read` + `knowhow:code` |
-| 把一条引用还原回原文 | `knowledge:read` |
-| 查询某份来源的解析/抽取状态 | `knowledge:read` |
-| 添加来源（文本或 PDF URL）、重新解析来源 | `sources:write`（owner-only） |
-| 删除 **Agent 自己添加的**来源 | `sources:delete`（owner-only；`sources:write` 不蕴含它） |
-| 读取构建状态 | `knowledge:read` |
-| 触发知识图谱分析或检索索引构建 | `maintenance:execute`（owner-only） |
-| 读取「AI 对这个库的理解」 | `agent_profile:read` |
-| 向 Agent 自己的观察记录追加一行 | `agent_observation:write` |
+| 搜索来源/知识对象、读取 knowhow、把引用还原回原文、查询来源解析状态与构建状态 | `read`（读取） |
+| 读取主人本人的个人记忆（confirmed 与 candidate）、读取「AI 对这个库的理解」 | `read`（读取） |
+| 让 Agent 调用笔记本问答或全局问答 | `ask`（问答；不依赖 `read`） |
+| 提交待确认 Memory、写 knowhow 代码附件、向 Agent 自己的观察记录追加一行 | `contribute`（提交） |
+| 添加来源（文本、文件或 PDF URL）、重新解析来源、触发知识图谱分析或检索索引构建 | `manage`（管理；仅对你拥有的笔记本生效） |
+| 删除 **Agent 自己添加的**来源 | `delete`（删除；仅对你拥有的笔记本生效；`manage` 不蕴含它） |
 
-本 SOP 的完整 Memory 示例选择：`knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`。不需要 Ask 或代码写入就不要勾选相应权限。
+本 SOP 的完整 Memory 示例选择：`read` 与 `contribute`。不需要问答就不要勾选 `ask`。
 
-上表里真正属于写入平面的只有三个 scope——`sources:write`、`sources:delete` 与
-`maintenance:execute`——不确实需要归档文档或跑构建就不要授予：第一个改变笔记本的内容，
-第三个改变分析开销，`sources:delete` 不可逆。旁边那两项状态读取（`get_source_status`、
-`get_build_status`）只需要 `knowledge:read`。`agent_observation:write` 与 `knowhow:code` 同样
-是 scope 驱动而非 owner-only：它的爆炸半径结构上只到 Agent 自己的观察记录，所以 token 所有者
-只是以只读成员身份加入的笔记本也能用它写入。经它写下的文本是不可信输入，理解巡固任务可能把
-它折进调用者自己的覆盖层，绝不会成为证据，也绝不会被引用。
+写入平面只有两档——`manage` 与 `delete`——不确实需要归档文档或跑构建就不要授予：`manage`
+改变笔记本内容与分析开销，`delete` 不可逆。两档都只对 token 所有者**拥有**的笔记本生效：白名单里
+一个自己拥有的笔记本都没有时，签发和修改都会拒绝勾选它们（页面上这两档会变灰并说明原因）；
+白名单里以只读成员身份加入的笔记本，运行时同样写不进去。`contribute` 则由档位决定而非
+owner-only：knowhow 代码附件是惰性数据，观察记录的爆炸半径结构上只到 Agent 自己的那一行，
+所以 token 所有者只是以只读成员身份加入的笔记本也能用它写入。经它写下的观察文本是不可信输入，
+理解巡固任务可能把它折进调用者自己的覆盖层，绝不会成为证据，也绝不会被引用。
 
-`list_notebooks` 与 `select_notebook` 不需要任何 scope——判据只有 token 存活、笔记本在白名单内、
+`list_notebooks` 与 `select_notebook` 不需要任何档位——判据只有 token 存活、笔记本在白名单内、
 且对它有读权限——因此再小权限的 token 也能正常开始一个 session。
 
-7. 设置短有效期。网页会把浏览器本地时间转换成带时区的 UTC 瞬间；后端拒绝没有时区的时间。
-8. 点击 **签发 Token**，立即复制明文 token。它只显示一次；已签发列表只保留脱敏摘要。签发回执同时显示 **Agent MCP 接入说明链接**。把该链接和 token 作为两个独立值交给 Agent：公开 Markdown 会告诉它本部署的精确 MCP 地址与客户端配置步骤，而链接本身绝不包含 token。该说明可匿名通过 `GET /api/agent-mcp/onboarding` 读取，因此 Agent 在 MCP 尚未配置前也能先读懂如何接入。
+缺档时工具报错会直接写出缺的是哪一档（例如「此凭证缺少「读取」权限，请在 Agent 接入页为它勾选后重试」），
+而不是只给一个笔记本 id。
+
+7. 设置短有效期：可以点 **7 天 / 30 天 / 90 天** 快捷项，也可以手填。网页会把浏览器本地时间转换成带时区的 UTC 瞬间；后端拒绝没有时区的时间。
+8. 点击 **签发 Token** 并复制明文 token。之后也可以在 **已签发 Token** 列表里对这一行点 **复制 token** 再次复制（只有 token 主人能取回，经 `GET /api/agent-tokens/{token_id}/secret`）；撤销后不能再复制，本版本之前签发的 token 只存了哈希，也无法再复制，需要时重新签发。列表本身从不携带明文。签发回执同时显示 **Agent MCP 接入说明链接**。把该链接和 token 作为两个独立值交给 Agent：公开 Markdown 会告诉它本部署的精确 MCP 地址与客户端配置步骤，而链接本身绝不包含 token。该说明可匿名通过 `GET /api/agent-mcp/onboarding` 读取，因此 Agent 在 MCP 尚未配置前也能先读懂如何接入。
 
 不要把真实 token 写入 Git、README 或脚本参数。只通过可信渠道把它单独交给目标 Agent，不要拼进接入说明 URL；配置完成后交由客户端的 secret/环境变量机制保存，后续对话不要反复回显。后续示例都从环境变量读取。
 
@@ -133,7 +127,7 @@ curl -s http://127.0.0.1:8000/api/ready
 先在**将要启动 Codex 的同一个 shell**中设置 token：
 
 ```bash
-export SILICON_NOTEBOOK_AGENT_TOKEN='<界面只显示一次的 token>'
+export SILICON_NOTEBOOK_AGENT_TOKEN='<从 Agent 接入页复制的 token>'
 ```
 
 注册 Streamable HTTP 服务：
@@ -179,7 +173,7 @@ Claude Code 会在连接时解析 header 里的 `${VAR}`，因此 token 根本�
 （在 Claude Code 2.1.226 上实测）：
 
 ```bash
-export SILICON_NOTEBOOK_AGENT_TOKEN='<界面只显示一次的 token>'
+export SILICON_NOTEBOOK_AGENT_TOKEN='<从 Agent 接入页复制的 token>'
 
 claude mcp add --transport http silicon-notebook \
   'http://127.0.0.1:8000/mcp/' \
@@ -298,7 +292,7 @@ claude mcp list
 把本轮已经核验的结论通过 propose_memory 提交为 candidate，写明 reason、task_context、evidence_refs 和稳定 client_request_id；不要声称它已经进入正式知识库。
 ```
 
-若 token 带 `agent_profile:read`，可以让 Agent 在检索前先调用 `get_notebook_profile` 看一眼此前留下的背景笔记（绝不是证据，也不能被引用）。若 token 带 `agent_observation:write`，可以要求它调用 `add_observation`，写下一句它在本轮任务中注意到的事实性短句——这行文本是不可信输入，后续后台任务可能把它折进调用者自己的笔记里。
+若 token 带 `read`，可以让 Agent 在检索前先调用 `get_notebook_profile` 看一眼此前留下的背景笔记（绝不是证据，也不能被引用）。若 token 带 `contribute`，可以要求它调用 `add_observation`，写下一句它在本轮任务中注意到的事实性短句——这行文本是不可信输入，后续后台任务可能把它折进调用者自己的笔记里。
 
 ## 6. 可直接运行的官方 MCP client 示例
 
@@ -311,7 +305,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r backend/requirements.txt
 
-export SILICON_NOTEBOOK_AGENT_TOKEN='<界面只显示一次的 token>'
+export SILICON_NOTEBOOK_AGENT_TOKEN='<从 Agent 接入页复制的 token>'
 python scripts/example_mcp_memory_client.py \
   --query '当前库有哪些可复用的工程经验？' \
   --propose \
@@ -337,9 +331,9 @@ python scripts/example_mcp_memory_client.py --notebook-id '<notebook-id>' ...
 
 脚本不会打印 bearer token。默认 `client_request_id` 会拼接 notebook id，使同一 Profile 对同一笔记本重复运行保持幂等；需要新的候选时显式传入新的 `--client-request-id`。
 
-加 `--profile`（需要 `agent_profile:read`）还会调用 `get_notebook_profile`，只打印块数与字符数——绝不打印正文，因为这个脚本的输出常被复制粘贴进聊天或日志。
+加 `--profile`（需要 `read`）还会调用 `get_notebook_profile`，只打印块数与字符数——绝不打印正文，因为这个脚本的输出常被复制粘贴进聊天或日志。
 
-要验证非文本摄取，可加 `--source-file path/to/manual.pdf`（也可传 DOCX、PPTX、XLS/XLSX、Markdown、CSV 或 Markdown ZIP），并可选 `--source-title '显示标题'`。这需要 `sources:write`；脚本会把本地精确字节编码成 base64 交给 `add_source_file`，服务端随后排入与浏览器同一解析注册表路径。Markdown ZIP 中应按引用的相对路径保留所有 `.md`/`.markdown` 与图片；后台把原压缩包存为一个来源，并在解析时把命中图片落资产。
+要验证非文本摄取，可加 `--source-file path/to/manual.pdf`（也可传 DOCX、PPTX、XLS/XLSX、Markdown、CSV 或 Markdown ZIP），并可选 `--source-title '显示标题'`。这需要 `manage`；脚本会把本地精确字节编码成 base64 交给 `add_source_file`，服务端随后排入与浏览器同一解析注册表路径。Markdown ZIP 中应按引用的相对路径保留所有 `.md`/`.markdown` 与图片；后台把原压缩包存为一个来源，并在解析时把命中图片落资产。
 
 ## 7. 回到界面确认候选 Memory
 
@@ -353,18 +347,18 @@ python scripts/example_mcp_memory_client.py --notebook-id '<notebook-id>' ...
 ## 8. 验收清单
 
 - `curl /api/ready` 返回 ready。
-- 界面中 token 的默认 notebook 在白名单内，scope 与用途一致。
+- 界面中 token 的默认 notebook 在白名单内，权限档位与用途一致。
 - `codex mcp list` 显示 `silicon-notebook`，或 `claude mcp list` 对它显示 `✔ Connected`。
 - 新 session 先 `list_notebooks`，再成功 `select_notebook`。
 - `search_notebook_context` 不返回未确认 candidate。
-- 具备 `memory:read_candidates` 时，`search_agent_memory` 能召回刚提交的 candidate。
+- 具备 `read` 时，`search_agent_memory` 能召回刚提交的 candidate。
 - candidate 在界面显示为“待确认 / Agent 提议”，确认前不进入正式 Ask/搜索/报告。
-- token 带 `sources:write` 时：`add_source_text` 接受 Agent 撰写的 Markdown，`add_source_file` 至少验证一份本地 PDF/PPTX/DOCX/工作簿或 Markdown ZIP；两者都返回来源 id，`get_source_status` 最终报告解析完成，来源列表把它显示为中性的「Agent 添加」徽标。
-- token 带 `maintenance:execute` 时：`build_kg` 返回任务 id，`get_build_status` 能反映它；已有构建在跑时被拒绝是预期的排队信号，不是失败。
+- token 带 `manage` 时：`add_source_text` 接受 Agent 撰写的 Markdown，`add_source_file` 至少验证一份本地 PDF/PPTX/DOCX/工作簿或 Markdown ZIP；两者都返回来源 id，`get_source_status` 最终报告解析完成，来源列表把它显示为中性的「Agent 添加」徽标。
+- token 带 `manage` 时：`build_kg` 返回任务 id，`get_build_status` 能反映它；已有构建在跑时被拒绝是预期的排队信号，不是失败。
 - `delete_source` 对用户上传的来源拒绝，只有 Agent 添加的来源才能删成功。
-- 带 `ask:execute` 时：`mode="reasoning"` 的 `ask_notebook` 能跑完，不会被客户端超时掐断——运行期间客户端应能看到周期性进度。
-- token 带 `agent_profile:read` 时：`get_notebook_profile` 返回 `enabled` 与 `base`/`mine` 块（特性关闭或该库尚未生成过理解时返回 `enabled: false` 与空块）。
-- token 带 `agent_observation:write` 时：`add_observation` 立即返回 `observation_id`；用同一个 `client_request_id` 重复调用返回同一个 id（`deduplicated: true`）。
+- 带 `ask` 时：`mode="reasoning"` 的 `ask_notebook` 能跑完，不会被客户端超时掐断——运行期间客户端应能看到周期性进度。
+- token 带 `read` 时：`get_notebook_profile` 返回 `enabled` 与 `base`/`mine` 块（特性关闭或该库尚未生成过理解时返回 `enabled: false` 与空块）。
+- token 带 `contribute` 时：`add_observation` 立即返回 `observation_id`；用同一个 `client_request_id` 重复调用返回同一个 id（`deduplicated: true`）。
 - 示例结束后撤销测试 token；若不再需要该身份，再停用 Profile。
 
 ### 用 curl 手工验证传输层
@@ -413,10 +407,11 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 
 | 症状 | 检查与处理 |
 | --- | --- |
-| `401 invalid or expired Agent token` | token 是否复制完整、是否过期/撤销；环境变量是否在启动 Agent 的同一进程环境中。 |
+| `401`，`code` 为 `token_invalid`（`invalid or expired Agent token`） | token 是否复制完整；环境变量是否在启动 Agent 的同一进程环境中。格式错误、不存在与不匹配一律是这一个答复，不泄露 token 是否存在。 |
+| `401`，`code` 为 `token_revoked` / `token_expired` / `profile_disabled` / `owner_ineligible` | 只有 token 完整且匹配时才会给出具体原因：分别是已撤销（重新签发）、已过期（**修改权限**里调整有效期或重新签发）、所属 Profile 已停用（重新启用）、主人账号当前不具备 Agent 接入资格（联系管理员）。`detail` 是可直接展示的中文说明。 |
 | `select_notebook must be called before this tool` | 这是新 session；先重新调用 `list_notebooks` 和 `select_notebook`。 |
 | `notebook is outside the token allowlist` | 在 **Agent 接入 → 已签发 Token** 对该 token 点 **修改权限**，把该 notebook 加进白名单（下一次工具调用起生效）；或为它签发新 token。只加真正需要的 notebook。 |
-| scope/permission error | 对照上方 scope 表，用 **修改权限** 只补上缺的 scope，或重新签发最小权限 token。token scope 不可在客户端侧提升。 |
+| 「此凭证缺少「…」权限」 | 报错写明了缺的是哪一档。对照上方权限表，用 **修改权限** 只补上那一档，或重新签发最小权限 token。档位不可在客户端侧提升。 |
 | Codex 看不到服务 | 运行 `codex mcp list`，确认环境变量已在启动 Codex 前导出，然后新开 session/重启 app 或 extension。 |
 | 配置客户端时 `404` 或连接被拒 | 先照签发回执的接入说明**逐字**重试它印出的那个地址。补结尾斜杠、或回落到 `<host>:8000/mcp/`，都只适用于确认是直连后端的地址：有代理时它可能只路由公布的那条路径，后端端口可能是私有的，硬去够那个端口还可能把 token 降级成明文（第 4 节）。 |
 | `POST /mcp` 回 `307 Temporary Redirect` | 预期行为——MCP 应用挂在 `/mcp`，自身路由是 `/`。直接把 `/mcp/` 写进配置，不要指望客户端一定跟随重定向。 |
@@ -429,11 +424,11 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 | Claude Code 把 `${...}` 当成 token 原样发出 | 变量没有在启动 `claude` 的 shell 里导出，或变量名拼错——未定义的变量会被原样透传。导出后新开会话。 |
 | 换个目录后 `claude mcp list` 看不到该服务 | `claude mcp add` 默认写入项目级（按目录）作用域。改用 `-s user` 重新添加。 |
 | 本机 HTTP 可以，远程不安全 | loopback 用 HTTP 没问题。远程当前**默认也允许**明文 HTTP——后端只打一条启动告警并放宽 Host/Origin 校验——于是 Bearer token 每一跳都是明文。填上域名不等于自动安全：明文 HTTP 只在可信内网可接受，跨不受信网络必须设置 `MCP_REQUIRE_HTTPS=1` 并把 `MCP_PUBLIC_URL` 指向公开 HTTPS `/mcp`。 |
-| 只看到 confirmed，看不到 candidate | token 还需要 `memory:read_candidates`；正式上下文工具本来就刻意排除 candidate。 |
+| 只看到 confirmed，看不到 candidate | `search_agent_memory` 用 `read` 档就能读到 candidate；正式上下文工具（`search_notebook_context`、`ask_notebook`）本来就刻意排除 candidate。 |
 | Python 示例缺少 `mcp`/`httpx` | 激活项目虚拟环境并安装 `backend/requirements.txt`。 |
 | `build_kg` 拒绝：已有构建在运行 | 这是预期的排队信号，不是错误。笔记本级单飞守卫正在生效；轮询 `get_build_status` 直到它清空，不要立刻重试。 |
 | `delete_source` 拒绝：该来源由用户添加 | 设计如此。MCP 只能删除 Agent 添加的来源；界面来源列表用「Agent 添加」徽标标出哪些是。用户的文档请在界面删除。 |
-| 某个来源或构建写入工具在一个读得到的笔记本上被拒 | 来源管理与构建写入一律 owner-only。白名单里可能包含 token 所有者只是以只读成员身份加入的笔记本：那里读得到，但这些写入永远进不去。唯一例外是 `knowhow:code` 的格子代码写入——它按设计由 scope 决定，只读成员也可写。 |
+| 某个来源或构建写入工具在一个读得到的笔记本上被拒 | 来源管理与构建写入一律 owner-only。白名单里可能包含 token 所有者只是以只读成员身份加入的笔记本：那里读得到，但这些写入永远进不去。唯一例外是 `contribute` 档的格子代码写入与观察记录——它们按设计由档位决定，只读成员也可写。另外，签发或修改时白名单里没有自己拥有的笔记本，`manage`/`delete` 根本勾不上。 |
 | 笔记本复制之后，Agent 添加的来源删不掉了 | 设计如此。深拷贝会清空来源出处，副本里的每一份来源都算用户添加。 |
 | `add_source_text` 回传 `reused: true` | 本笔记本已有逐字节相同的内容，因此复用既有来源而不新建重复行。若那一行原本是用户上传的，它仍算用户添加，不能经 MCP 删除。 |
 | `add_source_file` 拒绝 base64 或 PDF/PPTX/DOCX/工作簿/ZIP 后缀 | 传严格标准 base64，不要空白或 `data:` 前缀，并在 `file_name` 保留原始受支持扩展名。解码后的文件须非空且不超过部署的单来源上传上限。 |
@@ -445,11 +440,13 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 
 在 **Agent 接入 → 已签发 Token** 点击 **撤销**，再在同一行点 **确认撤销**，服务端会在后续每次数据工具调用时重新检查实时 token 状态。停用 Agent Profile 会让它的全部 token 立即失效。
 
-只想调整已有 token 能做什么时，点它的 **修改权限**：scopes、默认笔记本、白名单与过期时间一起保存，Agent 的下一次工具调用即按新配置执行，无需重签或重新配置客户端。已撤销的 token 不能修改。修改不会再次显示明文；token 本身丢失或泄露时，仍应签发新 token 并撤销旧的。
+只想调整已有 token 能做什么时，点它的 **修改权限**：权限档位、默认笔记本、白名单与过期时间一起保存，Agent 的下一次工具调用即按新配置执行，无需重签或重新配置客户端。已撤销的 token 不能修改。忘了复制的 token 可以在列表里点 **复制 token** 取回（本版本之前签发的除外）；token **泄露**时不要再复制它，应签发新 token 并撤销旧的。
 
 轮换时先签发新的短期 token、更新运行环境并验证新 session，再撤销旧 token。不要复用已经出现在日志、shell history 或客户端明文配置中的 token。
+
+升级到五档权限的版本时，已有 token（含已撤销的）按「持有该档主权限就给整档」自动换算：`knowledge:read` 或 `memory:read` → `read`，`ask:execute` → `ask`，`memory:propose` → `contribute`，`sources:write` 或 `maintenance:execute` → `manage`，`sources:delete` → `delete`。因此原来只有 `knowledge:read` 的 token 换算后也能读主人本人的个人记忆。只持有次要权限（例如只有 `agent_profile:read`）的 token 换算后没有任何档位，所有数据工具都会报缺档，需要在 **修改权限** 里至少勾一档。
 
 
 ## 认证迁移期间的所有者准入
 
-Agent token不能替代本人本地密码与统一认证的关联证明。Agent初次认证和每次数据工具调用都会复验所有者的本站状态及迁移资格，已建立的MCP会话同样适用。从仅统一认证阶段起，所有者必须具有当前身份源的有效映射；已停用、未关联或共享内置账号失去访问资格。迁移收口阶段仍保留启用账号的已有机器访问，供切换前盘点和处置。已满足迁移条件的所有者保持原token scope和笔记本白名单。浏览器SSO过期不能单独感知平台离职状态，须执行运维参考规定的账号停用/生命周期流程。
+Agent token不能替代本人本地密码与统一认证的关联证明。Agent初次认证和每次数据工具调用都会复验所有者的本站状态及迁移资格，已建立的MCP会话同样适用。从仅统一认证阶段起，所有者必须具有当前身份源的有效映射；已停用、未关联或共享内置账号失去访问资格。迁移收口阶段仍保留启用账号的已有机器访问，供切换前盘点和处置。已满足迁移条件的所有者保持原token权限档位和笔记本白名单。浏览器SSO过期不能单独感知平台离职状态，须执行运维参考规定的账号停用/生命周期流程。

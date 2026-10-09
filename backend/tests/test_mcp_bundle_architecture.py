@@ -173,7 +173,7 @@ def test_frontend_scope_options_equal_the_core_scope_vocabulary() -> None:
     block = source.split("export const AGENT_SCOPE_OPTIONS = [", 1)[1].split(
         "] as const;", 1
     )[0]
-    frontend_scopes = re.findall(r'value:\s*"([a-z_]+:[a-z_]+)"', block)
+    frontend_scopes = re.findall(r'value:\s*"([a-z_]+)"', block)
     assert len(frontend_scopes) == len(set(frontend_scopes))
     assert set(frontend_scopes) == set(AGENT_SCOPES)
 

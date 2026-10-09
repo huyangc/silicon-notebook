@@ -681,35 +681,38 @@ PostgreSQL KG 词法 producer 在同一召回词项和额度下选择 SQL 路径
 
 ### 3.4 Memory 与 Agent MCP
 
-`app.api.mcp_server` 只拥有唯一 FastMCP/SSE transport、Bearer middleware 与 session manager；`app.api.mcp_tool_host` 是唯一 FastMCP tool registration exit。它从 `app.api.mcp_tools` 八个显式 registrar 捕获精确 28-tool core 目录，`mcp_server.PUBLIC_TOOLS` 就是这份活目录（`CORE_TOOLS` 是同名别名），文档/smoke 守卫全部由它派生，不存在第二份手抄。core handler 的 schema/validation/auth/I/O 顺序不变，统一 live token/scope/allowlist/membership 复核、owner-only 写策略、一次 progress wrapper 与 output budget；异常只映射稳定公开码。注册与 listing 零 repository/model I/O。原先「追加 startup-frozen、显式信任的进程内 `agent.tool_provider` contributor descriptor」那一半零消费者，已整体移除。
+`app.api.mcp_server` 只拥有唯一 FastMCP/SSE transport、Bearer middleware 与 session manager；`app.api.mcp_tool_host` 是唯一 FastMCP tool registration exit。它从 `app.api.mcp_tools` 八个显式 registrar 捕获精确 28-tool core 目录，`mcp_server.PUBLIC_TOOLS` 就是这份活目录（`CORE_TOOLS` 是同名别名），文档/smoke 守卫全部由它派生，不存在第二份手抄。core handler 的 schema/validation/auth/I/O 顺序不变，统一 live token/档位/allowlist/membership 复核、owner-only 写策略、一次 progress wrapper 与 output budget；异常只映射稳定公开码。注册与 listing 零 repository/model I/O。原先「追加 startup-frozen、显式信任的进程内 `agent.tool_provider` contributor descriptor」那一半零消费者，已整体移除。
 
 Ask 回答先生成不落库的 preview，用户编辑确认后写入 owner-private confirmed Memory；LLM 不可用时
 使用确定性 preview。外部 Agent 通过 `propose_memory` 只能写 candidate；同一用户、同一 notebook
-下具备 `memory:read_candidates` 的 Agent token 可立即在候选平面召回。网页 Ask、notebook 搜索、
+下具备 `read` 档的 Agent token 可立即在候选平面召回。网页 Ask、notebook 搜索、
 Deep Report 与 `search_notebook_context` 只投影 confirmed；rejected/deprecated 在两个平面都排除。
 
-MCP 以 scoped opaque Agent token 认证，普通 notebook 工具先 `select_notebook`；全局问答独立选库。数据工具每次重新检查
-token 是否撤销/过期、profile 状态、scope、allowlist 与用户当前 notebook 访问权，不能仅信 session
+MCP 以带权限档位的 opaque Agent token 认证，普通 notebook 工具先 `select_notebook`；全局问答独立选库。token 只存五档
+（`read`/`ask`/`contribute`/`manage`/`delete`），代码在调用点仍按细粒度能力请求，`app.domain.agent_tools`
+的一张映射表把能力归到档位；`require_agent_access` 拒绝时抛带原因（失效/缺档/不在白名单/已无读权）与
+中文文案的 `AgentAccessDenied`，HTTP knowhow 路由仍一律映射 404。数据工具每次重新检查
+token 是否撤销/过期、profile 状态、档位、allowlist 与用户当前 notebook 访问权，不能仅信 session
 缓存。Memory→KG 由创建者提案；admin queue 只展示脱敏后的结构化提取候选与服务端验证过的
 evidence，不提供原始 revision/provenance 浏览。批准前会重新校验 Memory 当前仍为 confirmed 且
 创建者仍有访问权，再经既有 dedupe/merge 创建或合并一个或多个 Base KG 对象，并在 API/审计中
 保存完整 `base_object_ids`；私有 Memory 行仍归原创建者。
 
-工具、scope 与参数目录统一见[产品/API：Memory 与 Agent MCP](./docs/product-and-api_zh.md#memory-与-agent-mcp)，
+工具、权限档位与参数目录统一见[产品/API：Memory 与 Agent MCP](./docs/product-and-api_zh.md#memory-与-agent-mcp)，
 接入步骤见[Agent MCP SOP](./docs/agent-mcp-memory-sop_zh.md)。
 全局问答工具独立解析参与库，普通 notebook 工具使用 session 选择；两者都必须逐次实时授权。
 
 来源管理与构建工具的权限面刻意比浏览器窄（P2 后浏览器 HTTP 面的六个内容写能力已翻 admin、组管理员可写，MCP/Agent 面**仍恒 owner**、刻意不跟——长期 token 是独立凭据）。`add_source_text`/`add_source_file`/`add_source_url`/
-`reparse_source` 需 `sources:write`，`build_kg`/`build_retrieval_index` 需
-`maintenance:execute`，六者一律 **owner-only**：token 的白名单可能包含 owner 只是以只读成员
+`reparse_source` 与 `build_kg`/`build_retrieval_index` 都需 `manage` 档，六者一律 **owner-only**
+（签发/修改 token 时勾 `manage`/`delete` 也要求白名单里至少有一个 owner 拥有的笔记本）：token 的白名单可能包含 owner 只是以只读成员
 身份加入的笔记本，在那里发起写入或后台构建等于把共享的读侧升级成写侧。`delete_source` 另需
-`sources:delete`（`sources:write` 不蕴含它），并且**只能删除 Agent 添加的来源**——判据是 v48
+`delete` 档（`manage` 不蕴含它），并且**只能删除 Agent 添加的来源**——判据是 v48
 `sources.agent_profile_id` 非空的 `agent_created` 投影，与证明笔记本归属的是同一次单行读取；
 判据是「某个 Agent 添加过」而非「本 profile 添加过」，否则轮换掉的 profile 会留下永远删不掉的
 来源。出处只在 INSERT 分支写入，因此同内容去重复用用户的行时该列保持为空，笔记本深拷贝也会
 显式清空它——重传用户的字节无法把它洗成 Agent 可删的来源；该列缺失时投影默认 false，闸门
 fail closed。`get_source_status`/`get_build_status`/`get_cited_element` 是只读，停在
-`knowledge:read` 与成员可读口径。
+`read` 档与成员可读口径。
 
 ### 3.5 KG 与索引维护
 

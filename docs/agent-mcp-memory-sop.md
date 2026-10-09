@@ -21,11 +21,11 @@ Codex CLI / Claude Code / Python Agent
 
 - Every new MCP session must call `select_notebook` before a notebook-bound data tool; global Ask tools accept an independent scope.
 - `search_notebook_context` returns only formal source/KG/confirmed-Memory context.
-- `search_agent_memory` may also return candidates when the token has `memory:read_candidates`.
-- Without `memory:read`, `ask_notebook` and `search_notebook_context` run with the private-Memory channel closed: Memory items are neither searched nor returned, and `ask_notebook` removes citations carrying a `memory_id` and anchors with `object_type: "memory"` before paging, so `omitted_items` counts only what the token may see. `ask_notebook` always runs under the token owner's default retrieval ceiling — the same one every Ask entry installs, whatever answer engine the notebook uses: the notebook's visible sources plus the owner's own hidden sources (Knowhow projections always, Memory projections only with `memory:read`), each mounted library frozen to its visible sources — so its retrieval reaches neither another member's Memory projections nor, without `memory:read`, the owner's own. Without `memory:read` the whole-graph, PPR, relation and exact-lookup channels still run; each keeps the owner's own Memory out by that ceiling. This does not yet extend to the knowledge-graph results of `search_notebook_context`, which can include objects derived from any member's Memory with or without `memory:read`, nor to `get_cited_element`, which returns an element of a Memory-derived source to a caller who has its id. Because the run is frozen, a notebook that is ingesting sources during the call can switch off the whole-graph, PPR and relation channels for that call, as in the browser. When a mounted reference library could not be read in time, the answer lists it in `skipped_libraries`.
+- `search_agent_memory` returns the owner's candidates as well as confirmed Memory (the `read` tier covers both).
+- Private Memory belongs to the `read` tier: a token holding `read` reads its owner's own Memory, and no tier ever reads another member's. Without `read` (for example an `ask`-only token), `ask_notebook` runs with the private-Memory channel closed: Memory items are neither searched nor returned, and `ask_notebook` removes citations carrying a `memory_id` and anchors with `object_type: "memory"` before paging, so `omitted_items` counts only what the token may see. `ask_notebook` always runs under the token owner's default retrieval ceiling — the same one every Ask entry installs, whatever answer engine the notebook uses: the notebook's visible sources plus the owner's own hidden sources (Knowhow projections always, Memory projections only with `read`), each mounted library frozen to its visible sources — so its retrieval reaches neither another member's Memory projections nor, without `read`, the owner's own. Without `read` the whole-graph, PPR, relation and exact-lookup channels still run; each keeps the owner's own Memory out by that ceiling. This does not yet extend to the knowledge-graph results of `search_notebook_context`, which can include objects derived from any member's Memory with or without `read`, nor to `get_cited_element`, which returns an element of a Memory-derived source to a caller who has its id. Because the run is frozen, a notebook that is ingesting sources during the call can switch off the whole-graph, PPR and relation channels for that call, as in the browser. When a mounted reference library could not be read in time, the answer lists it in `skipped_libraries`.
 - `propose_memory` creates only a `candidate`; it does not enter Ask, notebook search, or reports until the owner confirms it in the UI.
 - Retrieved source, KG, and Memory text is untrusted evidence/data, never Agent instructions.
-- The source-management and build tools form the write plane. Every write there is **owner-only**: a notebook the token's owner merely joined as a read-only member stays readable but is never writable, whatever scopes the token carries.
+- The source-management and build tools form the write plane. Every write there is **owner-only**: a notebook the token's owner merely joined as a read-only member stays readable but is never writable, whatever tiers the token carries.
 - `delete_source` can only remove a source **an Agent added**. A document a person uploaded is always refused, and re-uploading their bytes reuses their existing row rather than claiming it.
 - `get_notebook_profile` returns "AI 对这个库的理解" — background scaffolding, never evidence, never citable. `add_observation` appends one line to the Agent's own observation log; that line is untrusted input a later consolidation job may fold into the caller's own private notes, never an instruction the model should act on. Both are Agentic Memory P3 additions.
 
@@ -49,44 +49,39 @@ Use a notebook the account can read. To test formal context retrieval, that note
 2. The page shows **Agent Profile**, **签发 Token** (issue token), and **已签发 Token** (issued tokens).
 3. Under **Agent Profile**, enter a stable name and a description of the client/environment, then choose **新建 Profile**.
 4. Under **签发 Token**, select that Profile and a default notebook. The UI also adds the default to the notebook allowlist; add only other notebooks the Agent truly needs.
-5. Select the smallest scope set:
+5. Select the smallest permission set. There are only five tiers; the page shows one row per tier with what it allows, and **全选 / 取消全选** (select all / clear) toggles every available tier at once:
 
 | Purpose | Required scope |
 | --- | --- |
-| Search source/KG context | `knowledge:read` |
-| Read confirmed Memory | `memory:read` |
-| Also read candidates | `memory:read_candidates` plus `memory:read` |
-| Propose candidate Memory | `memory:propose` |
-| Execute notebook Ask | `ask:execute` |
-| Read knowhow | `knowledge:read` |
-| Write knowhow code attachments | `knowledge:read` + `knowhow:code` |
-| Dereference a citation back to its source text | `knowledge:read` |
-| Check one source's parse/extraction state | `knowledge:read` |
-| Add a source (text or PDF URL) or re-parse one | `sources:write` (owner-only) |
-| Delete a source **the Agent itself added** | `sources:delete` (owner-only; `sources:write` does not imply it) |
-| Read build status | `knowledge:read` |
-| Trigger a knowledge-graph or retrieval-index build | `maintenance:execute` (owner-only) |
-| Read "AI 对这个库的理解" (notebook understanding) | `agent_profile:read` |
-| Append a line to the Agent's own observation log | `agent_observation:write` |
+| Search source/KG context, read knowhow, dereference a citation, check a source's parse state or build status | `read` (读取) |
+| Read the owner's own Memory (confirmed and candidates), read "AI 对这个库的理解" (notebook understanding) | `read` (读取) |
+| Ask a notebook or run a global Ask | `ask` (问答; does not need `read`) |
+| Propose candidate Memory, write knowhow code attachments, append to the Agent's own observation log | `contribute` (提交) |
+| Add a source (text, file or PDF URL), re-parse one, trigger a knowledge-graph or retrieval-index build | `manage` (管理; only on notebooks you own) |
+| Delete a source **the Agent itself added** | `delete` (删除; only on notebooks you own; `manage` does not imply it) |
 
-The complete example uses `knowledge:read`, `memory:read`, `memory:read_candidates`, and `memory:propose`.
+The complete example uses `read` and `contribute`. Leave `ask` off unless the Agent needs to ask.
 
-Only three of those scopes are the write plane — `sources:write`, `sources:delete`, and
-`maintenance:execute` — and they are the ones to withhold unless the Agent is genuinely
-expected to file documents or run builds: the first changes what the notebook contains, the
-third changes what it costs to analyze, and `sources:delete` is irreversible. The status
-reads beside them (`get_source_status`, `get_build_status`) need only `knowledge:read`.
-`agent_observation:write` is scope-driven rather than owner-only (like `knowhow:code`): its
-blast radius is structurally capped at the Agent's own observation log, so it works even for
-a token whose owner joined the notebook as a read-only member. Text written through it is
-untrusted input the notebook-understanding consolidation job may fold into the caller's own
-overlay — it never becomes evidence and is never cited.
+Only two tiers are the write plane — `manage` and `delete` — and they are the ones to withhold
+unless the Agent is genuinely expected to file documents or run builds: `manage` changes what
+the notebook contains and what it costs to analyze, and `delete` is irreversible. Both act only
+on notebooks the token's owner **owns**: issuing or editing a token with either is refused when
+its allowlist names no notebook the owner owns (the page greys both out and says why), and a
+notebook the owner merely joined as a read-only member stays unwritable at run time.
+`contribute` is tier-driven rather than owner-only: knowhow code attachments are inert data and
+an observation's blast radius is structurally capped at the Agent's own log, so it works even
+for a token whose owner joined the notebook as a read-only member. Observation text is untrusted
+input the notebook-understanding consolidation job may fold into the caller's own overlay — it
+never becomes evidence and is never cited.
 
-`list_notebooks` and `select_notebook` require no scope at all — a live token, an allowlisted
+`list_notebooks` and `select_notebook` require no tier at all — a live token, an allowlisted
 notebook, and read access to it are the whole check — so every session can start even with a
 minimal token.
 
-6. Set a short expiry and issue the token. Copy the plaintext immediately; it is displayed only once. The receipt also shows an **Agent MCP onboarding instructions** link. Give the Agent that link and the token as two separate values: the public Markdown tells it the deployment's exact MCP endpoint and client configuration steps, while the link itself never contains the token. The same document is available anonymously at `GET /api/agent-mcp/onboarding`, so an Agent can read it before MCP is configured.
+A tool refused for a missing tier names that tier in its error (for example
+「此凭证缺少「读取」权限，请在 Agent 接入页为它勾选后重试」) instead of returning only a notebook id.
+
+6. Set a short expiry (the **7 天 / 30 天 / 90 天** shortcuts fill it in; you can still edit it) and issue the token, then copy the plaintext. You can copy it again later with **复制 token** on its row in the issued-token list (owner only, through `GET /api/agent-tokens/{token_id}/secret`); a revoked token cannot be copied, and a token issued before this version stored only a hash and cannot be copied again — issue a new one if needed. The list itself never carries the plaintext. The receipt also shows an **Agent MCP onboarding instructions** link. Give the Agent that link and the token as two separate values: the public Markdown tells it the deployment's exact MCP endpoint and client configuration steps, while the link itself never contains the token. The same document is available anonymously at `GET /api/agent-mcp/onboarding`, so an Agent can read it before MCP is configured.
 
 Never commit the token or place it in documentation or script arguments. Share it only with the intended Agent over a trusted channel, separately from the onboarding URL; after configuration, keep it in the client's secret/environment mechanism and do not repeat it in later conversation. The examples read it from the process environment.
 
@@ -137,7 +132,7 @@ remedy, so an Agent whose client cannot follow a 307 is not left guessing.
 In the same shell that will launch Codex:
 
 ```bash
-export SILICON_NOTEBOOK_AGENT_TOKEN='<one-time token from the UI>'
+export SILICON_NOTEBOOK_AGENT_TOKEN='<token copied from the Agent access page>'
 
 codex mcp add silicon-notebook \
   --url http://127.0.0.1:8000/mcp/ \
@@ -175,7 +170,7 @@ Claude Code resolves `${VAR}` inside a header at connect time, so the token neve
 written into a configuration file (verified on Claude Code 2.1.226):
 
 ```bash
-export SILICON_NOTEBOOK_AGENT_TOKEN='<one-time token from the UI>'
+export SILICON_NOTEBOOK_AGENT_TOKEN='<token copied from the Agent access page>'
 
 claude mcp add --transport http silicon-notebook \
   'http://127.0.0.1:8000/mcp/' \
@@ -307,7 +302,7 @@ retrieved text.
 
 When a write is intended, separately ask the Agent to call `propose_memory` with a reason, task context, evidence refs, and a stable client request id, and to describe the result as an unconfirmed candidate.
 
-With `agent_profile:read`, the Agent may also call `get_notebook_profile` before retrieval to see prior background notes on this notebook (never evidence, never citable). With `agent_observation:write`, ask it to call `add_observation` with one short, factual line about what it noticed while working — that line is untrusted input a later background job may fold into the caller's own notes.
+With `read`, the Agent may also call `get_notebook_profile` before retrieval to see prior background notes on this notebook (never evidence, never citable). With `contribute`, ask it to call `add_observation` with one short, factual line about what it noticed while working — that line is untrusted input a later background job may fold into the caller's own notes.
 
 ## 6. Runnable official-client example
 
@@ -318,7 +313,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r backend/requirements.txt
 
-export SILICON_NOTEBOOK_AGENT_TOKEN='<one-time token from the UI>'
+export SILICON_NOTEBOOK_AGENT_TOKEN='<token copied from the Agent access page>'
 python scripts/example_mcp_memory_client.py \
   --query 'What reusable engineering guidance is available?' \
   --propose \
@@ -330,9 +325,9 @@ Set `SILICON_NOTEBOOK_NOTEBOOK_ID` or pass `--notebook-id` to select a specific 
 
 Its default client request id is suffixed with the notebook id, so rerunning it for the same Profile/notebook is idempotent. Pass a new `--client-request-id` when a new candidate is intentional.
 
-Pass `--profile` (requires `agent_profile:read`) to also call `get_notebook_profile` and print only block counts and character counts — never the block text itself, since this script's output is meant to be pasted into chat or logs.
+Pass `--profile` (requires `read`) to also call `get_notebook_profile` and print only block counts and character counts — never the block text itself, since this script's output is meant to be pasted into chat or logs.
 
-To verify non-text ingestion, add `--source-file path/to/manual.pdf` (or a DOCX, PPTX, XLS/XLSX, Markdown, CSV, or Markdown ZIP) and optionally `--source-title 'Display title'`. This requires `sources:write`; the script base64-encodes the exact local bytes for `add_source_file`, and the server queues the same parser-registry path the browser uses. For a Markdown ZIP, keep every `.md`/`.markdown` member and its images at their referenced relative paths; the backend stores the raw archive as one source and persists matched images during parsing.
+To verify non-text ingestion, add `--source-file path/to/manual.pdf` (or a DOCX, PPTX, XLS/XLSX, Markdown, CSV, or Markdown ZIP) and optionally `--source-title 'Display title'`. This requires `manage`; the script base64-encodes the exact local bytes for `add_source_file`, and the server queues the same parser-registry path the browser uses. For a Markdown ZIP, keep every `.md`/`.markdown` member and its images at their referenced relative paths; the backend stores the raw archive as one source and persists matched images during parsing.
 
 ## 7. Review the candidate in the UI
 
@@ -341,18 +336,18 @@ Return to **Private Memory**, filter status to **待确认** and origin to **Age
 ## 8. Acceptance checklist
 
 - `/api/ready` is ready.
-- The token's default notebook is allowlisted and scopes match the use case.
+- The token's default notebook is allowlisted and its tiers match the use case.
 - `codex mcp list` shows `silicon-notebook`, or `claude mcp list` reports it `✔ Connected`.
 - A new session calls `list_notebooks`, then `select_notebook` successfully.
 - `search_notebook_context` excludes unconfirmed candidates.
-- With `memory:read_candidates`, `search_agent_memory` recalls the proposed candidate.
+- With `read`, `search_agent_memory` recalls the proposed candidate.
 - The UI shows the candidate as pending and Agent-proposed.
-- When the token carries `sources:write`: `add_source_text` accepts authored Markdown, while `add_source_file` accepts at least one local PDF/PPTX/DOCX/workbook or Markdown ZIP; both return a source id, `get_source_status` eventually reports it parsed, and the source list shows it with the neutral 「Agent 添加」 badge.
-- When the token carries `maintenance:execute`: `build_kg` returns a job id and `get_build_status` reflects it; a refusal while another build runs is the expected queueing signal, not a failure.
+- When the token carries `manage`: `add_source_text` accepts authored Markdown, while `add_source_file` accepts at least one local PDF/PPTX/DOCX/workbook or Markdown ZIP; both return a source id, `get_source_status` eventually reports it parsed, and the source list shows it with the neutral 「Agent 添加」 badge.
+- When the token carries `manage`: `build_kg` returns a job id and `get_build_status` reflects it; a refusal while another build runs is the expected queueing signal, not a failure.
 - `delete_source` refuses a source that a person uploaded, and succeeds only on one the Agent added.
-- With `ask:execute`: an `ask_notebook` call in `mode="reasoning"` runs to completion instead of being cut off by the client's timeout — the client should show periodic progress while it runs.
-- When the token carries `agent_profile:read`: `get_notebook_profile` returns `enabled` plus `base`/`mine` blocks (or `enabled: false` with empty blocks if the feature is off or nothing has been consolidated yet).
-- When the token carries `agent_observation:write`: `add_observation` returns an `observation_id` immediately, and a repeated call with the same `client_request_id` returns the same id (`deduplicated: true`).
+- With `ask`: an `ask_notebook` call in `mode="reasoning"` runs to completion instead of being cut off by the client's timeout — the client should show periodic progress while it runs.
+- When the token carries `read`: `get_notebook_profile` returns `enabled` plus `base`/`mine` blocks (or `enabled: false` with empty blocks if the feature is off or nothing has been consolidated yet).
+- When the token carries `contribute`: `add_observation` returns an `observation_id` immediately, and a repeated call with the same `client_request_id` returns the same id (`deduplicated: true`).
 - The verification token is revoked after the test; disable the Profile if it is no longer needed.
 
 ### Verify the transport by hand
@@ -403,10 +398,11 @@ A `401` at step 1 is a token problem. `400 Missing session ID` at step 3 means t
 
 | Symptom | Check |
 | --- | --- |
-| `401 invalid or expired Agent token` | Token completeness, expiry/revocation, and whether the environment variable existed before the Agent process started. |
+| `401` with `code` `token_invalid` (`invalid or expired Agent token`) | Token completeness, and whether the environment variable existed before the Agent process started. A malformed, unknown or mismatched token always gets this one answer, so it never reveals whether a token exists. |
+| `401` with `code` `token_revoked` / `token_expired` / `profile_disabled` / `owner_ineligible` | Reported only for a complete, matching token: it was revoked (issue a new one), expired (adjust the expiry in **修改权限** or issue a new one), its Profile is disabled (re-enable it), or the owner's account may not use Agent access right now (ask an administrator). `detail` is readable Chinese copy. |
 | `select_notebook must be called before this tool` | Start every new session with `list_notebooks` and `select_notebook`. |
 | Notebook outside allowlist | In **Agent 接入 → 已签发 Token**, choose **修改权限** on that token and add the notebook to its allowlist (applies from the next tool call), or issue a new token for it. |
-| Scope/permission error | Add only the required scope with **修改权限** on the issued token, or issue a new least-privilege token; a client cannot elevate it. |
+| 「此凭证缺少「…」权限」 (a missing tier) | The error names the missing tier. Add only that tier with **修改权限** on the issued token, or issue a new least-privilege token; a client cannot elevate it. |
 | Codex cannot see the server | Run `codex mcp list`, export the token before starting Codex, and start a new session/restart the app or extension. |
 | `404`, or a refused connection, while configuring a client | Retry the endpoint the deployment publishes, exactly as the token receipt's onboarding instructions print it. Adding a trailing slash, or falling back to `<host>:8000/mcp/`, applies only to a confirmed backend-direct endpoint: a proxy may route only the published path, its backend port may be private, and reaching for that port can also drop the token to cleartext (§4). |
 | `307 Temporary Redirect` on `POST /mcp` | Expected — the MCP app is mounted at `/mcp` with its own root route. Configure `/mcp/` instead of relying on the client to follow the redirect. |
@@ -418,12 +414,12 @@ A `401` at step 1 is a token problem. `400 Missing session ID` at step 3 means t
 | `400 Bad Request: Missing session ID` | A tool call reached the server before `initialize` plus `notifications/initialized`, or the `MCP-Session-Id` header was lost. Real clients handle this; hand-written `curl` must not skip it (§8). |
 | Claude Code sends a literal `${...}` as the token | The variable was not exported in the shell that launched `claude`, or its name is misspelled — an undefined variable is passed through verbatim. Export it and start a new session. |
 | `claude mcp list` does not show the server in another directory | `claude mcp add` defaults to the local, per-directory scope. Re-add it with `-s user`. |
-| Candidate is missing | Add `memory:read_candidates`; formal context intentionally excludes candidates. |
+| Candidate is missing | `search_agent_memory` reads candidates with `read`; formal context (`search_notebook_context`, `ask_notebook`) intentionally excludes them. |
 | Python cannot import `mcp`/`httpx` | Activate the project venv and install `backend/requirements.txt`. |
 | Remote plain HTTP | Loopback HTTP is fine. Remotely, plain HTTP is currently *allowed* by default — the backend only logs a startup warning and relaxes Host/Origin checks — so the bearer token crosses every hop in cleartext. A configured hostname does not make a deployment secure: treat plain HTTP as acceptable only on a trusted private network, and set `MCP_REQUIRE_HTTPS=1` with `MCP_PUBLIC_URL` on the public HTTPS `/mcp` URL for anything crossing an untrusted one. |
 | `build_kg` refuses: a build is already running | Expected queueing signal, not an error. The notebook-scoped single-flight guard is doing its job; poll `get_build_status` until it clears instead of retrying immediately. |
 | `delete_source` refuses: added by a user | By design. Only sources an Agent added are removable through MCP. The browser's source list shows which ones those are with the 「Agent 添加」 badge; a person's document must be deleted in the UI. |
-| A source or build write tool refuses on a notebook that reads fine | Source-management and build writes are owner-only. The allowlist may include a notebook the token's owner only joined as a read-only member; reading works there, and those writes never do. The one exception is the `knowhow:code` cell-code write, which is scope-driven by design and works for a read-only member. |
+| A source or build write tool refuses on a notebook that reads fine | Source-management and build writes are owner-only. The allowlist may include a notebook the token's owner only joined as a read-only member; reading works there, and those writes never do. The one exception is the `contribute` tier (cell-code writes and observations), which is tier-driven by design and works for a read-only member. Also, `manage`/`delete` cannot even be selected while the allowlist names no notebook you own. |
 | A source the Agent added is no longer deletable after a notebook copy | By design. A deep copy clears source provenance, so every source in the copy counts as user-added. |
 | `add_source_text` returns `reused: true` | Byte-identical content already exists in this notebook, so the existing source is returned instead of a duplicate. If it was originally uploaded by a person, it stays user-added and is not deletable through MCP. |
 | `add_source_file` refuses base64 or a PDF/PPTX/DOCX/workbook/ZIP suffix | Send strict standard base64 with no whitespace or `data:` prefix, and keep the original supported extension in `file_name`. The decoded file must be non-empty and within the deployment's per-source upload cap. |
@@ -435,11 +431,13 @@ A `401` at step 1 is a token problem. `400 Missing session ID` at step 3 means t
 
 Use **Agent access → issued tokens → 撤销 (revoke)**, then **确认撤销** (confirm) on the same row. Every data tool rechecks live token state. Disabling a Profile invalidates all its tokens immediately.
 
-To change what an existing token may do, choose **修改权限** (edit access) on it instead: scopes, default notebook, allowlist, and expiry are saved together and the Agent's next tool call sees them, with no reissue or client reconfiguration. Revoked tokens cannot be edited. Editing never reveals the plaintext again; if the token itself was lost or exposed, issue a new one and revoke the old one.
+To change what an existing token may do, choose **修改权限** (edit access) on it instead: tiers, default notebook, allowlist, and expiry are saved together and the Agent's next tool call sees them, with no reissue or client reconfiguration. Revoked tokens cannot be edited. A token you forgot to copy can be copied again from the list with **复制 token** (except tokens issued before this version); if a token was **exposed**, do not copy it again — issue a new one and revoke the old one.
 
 For rotation, issue and verify a new short-lived token first, update the Agent environment, then revoke the old token. Do not reuse a token that appeared in logs, shell history, or plaintext client configuration.
+
+When a deployment upgrades to the five tiers, existing tokens (revoked ones included) are converted by "holding a tier's main permission grants the whole tier": `knowledge:read` or `memory:read` → `read`, `ask:execute` → `ask`, `memory:propose` → `contribute`, `sources:write` or `maintenance:execute` → `manage`, `sources:delete` → `delete`. A token that held only `knowledge:read` therefore also reads its owner's own Memory after the upgrade. A token that held only secondary permissions (for example only `agent_profile:read`) ends with no tier: every data tool reports a missing tier until at least one is selected in **修改权限**.
 
 
 ## Owner eligibility during authentication migration
 
-Agent tokens do not replace a human's local-password plus SSO account-linking proof. Every Agent authentication and data-tool invocation also checks the owner's current site status and migration eligibility, including existing MCP sessions. From SSO-only onward the owner needs an active identity mapping in the selected namespace; disabled, unlinked or shared built-in owners lose access. Binding-required leaves active owners' existing machine access available for the migration inventory. Eligible owners keep their token scopes and notebook allowlist. Browser SSO expiry alone cannot detect provider-side offboarding; follow the explicit account-disable/lifecycle procedure in the operations reference.
+Agent tokens do not replace a human's local-password plus SSO account-linking proof. Every Agent authentication and data-tool invocation also checks the owner's current site status and migration eligibility, including existing MCP sessions. From SSO-only onward the owner needs an active identity mapping in the selected namespace; disabled, unlinked or shared built-in owners lose access. Binding-required leaves active owners' existing machine access available for the migration inventory. Eligible owners keep their token tiers and notebook allowlist. Browser SSO expiry alone cannot detect provider-side offboarding; follow the explicit account-disable/lifecycle procedure in the operations reference.
