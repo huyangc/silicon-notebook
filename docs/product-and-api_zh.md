@@ -1300,11 +1300,11 @@ token 只得到 `{"detail": "invalid or expired Agent token", "code": "token_inv
 **存量迁移（SQLite v89 / PostgreSQL `0069_agent_token_tiers.sql`）。** 每个 token（含已撤销的）的
 `scopes_json` 按「持有该档主权限就给整档」改写为档位：`knowledge:read` 或 `memory:read` → `read`，
 `ask:execute` → `ask`，`memory:propose` → `contribute`，`sources:write` 或 `maintenance:execute` →
-`manage`，`sources:delete` → `delete`，按这个顺序排列；已是档位的值原样保留，迁移可重复执行。
+`manage`，`sources:delete` → `delete`，按这个顺序排列；已是档位的值保留（按上述规范顺序重排），迁移可重复执行。
 个人记忆并入 `read`：原来只有 `knowledge:read` 的 token 迁移后也能读主人本人的个人记忆（含 candidate），
 这是用户知情接受的变化。只持有次要权限（例如只有 `agent_profile:read`、`knowhow:code`）的 token 迁移后
 档位为空，运行时一律报缺档，编辑时至少勾一档才能保存。同一迁移新增可空的 `token_plain` 列，存量为
-NULL，即旧 token 不可再复制。
+NULL，即旧 token 不可再复制。升级后如何核对这类空档 token 见[运维参考](./operations_zh.md#agent-token-权限五档)。
 
 `ask_notebook` 的 `mode` 参数接受 `"reasoning"`（**默认**；与网页端两种界面同一引擎，先理解问题再检索，见下）、`"chunk"`，或任何已注册且实时可用的部署
 `ask.engine` mode id（详见[部署问答引擎](#部署问答引擎askengine)一节）；校验方式与

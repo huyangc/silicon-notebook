@@ -493,6 +493,33 @@ processing. Deleting it removes its entries from the evidence of the objects tha
 cite it and deletes only the objects left without evidence; a native object a promotion was merged into keeps its own
 evidence.
 
+## Agent token permission tiers
+
+Upgrading to **PostgreSQL 0069 / SQLite v89** rewrites every Agent token's permissions (revoked ones
+included) to five tiers (`read` / `ask` / `contribute` / `manage` / `delete`) by "holding a tier's
+main permission grants the whole tier" (full rule in
+[Memory and Agent MCP](./product-and-api.md#memory-and-agent-mcp)), and adds the nullable
+`token_plain` column, NULL for existing rows (older tokens cannot be copied again). One transaction,
+no model calls; its cost is proportional to the number of token rows.
+
+**Migration log** (counts only): SQLite writes
+`agent-token-tiers migration: tokens=… rewritten=… emptied=…` to the application log
+(`silicon_notebook.sqlite.maintenance`); PostgreSQL writes
+`agent-token-tiers migration: tokens=… emptied=…` to the server log (`RAISE LOG`). `emptied` is the
+number of **non-revoked** tokens left with no tier — they held only secondary permissions (only
+`agent_profile:read`, say), and every data tool now reports a missing tier for them.
+
+**Check after the upgrade.** On PostgreSQL:
+
+```sql
+SELECT count(*) FROM agent_access_tokens
+WHERE scopes_json = '[]'::jsonb AND revoked_at IS NULL;
+```
+
+On SQLite use `scopes_json = '[]'` instead. When the count is not 0, the owners of those tokens must
+open **Agent access** (`/agents`), choose **修改权限** (edit access) on each and re-grant the tiers it
+needs (or revoke it and issue a new one); until then those tokens can do nothing.
+
 ## Observability
 
 The backend emits structured logs through a single `EventLogger` (`app/core/event_logging.py`): one JSONL line per event under `.local/logs/` plus a brief console line. Logging is best-effort — it never breaks the request or pipeline it observes — and is a no-op for the LLM channel when no model is configured.

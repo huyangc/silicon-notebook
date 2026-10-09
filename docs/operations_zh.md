@@ -375,6 +375,28 @@ GROUP BY ko.notebook_id;
 也不计入知识库画像的语料统计，无需维护。它的 `parse_status` 是终态 `extracted`，来源列表从不把它显示为处理中。删除它
 时从引用它的知识条目证据里摘掉它的条目，只删除因此失去全部证据的条目；被合并进来的本库原生条目保留自己的证据。
 
+## Agent token 权限五档
+
+升级到 **PostgreSQL 0069 / SQLite v89** 时，每个 Agent token（含已撤销的）的权限改写为五档
+（`read` / `ask` / `contribute` / `manage` / `delete`），规则是「持有该档主权限就给整档」（完整规则见
+[Memory 与 Agent MCP](./product-and-api_zh.md#memory-与-agent-mcp)）；同时新增可空的 `token_plain` 列，
+存量为 NULL（旧 token 不可再复制）。一个事务，不调用模型，成本与 token 行数成正比。
+
+**迁移日志**（只有计数）：SQLite 写进应用日志（`silicon_notebook.sqlite.maintenance`）
+`agent-token-tiers migration: tokens=… rewritten=… emptied=…`；PostgreSQL 写进服务器日志（`RAISE LOG`）
+`agent-token-tiers migration: tokens=… emptied=…`。`emptied` 是**未撤销**且换算后一档都没有的 token 数——
+它们原来只持有次要权限（例如只有 `agent_profile:read`），升级后所有数据工具都会报缺档。
+
+**升级后核对。** PostgreSQL 上：
+
+```sql
+SELECT count(*) FROM agent_access_tokens
+WHERE scopes_json = '[]'::jsonb AND revoked_at IS NULL;
+```
+
+SQLite 上把条件换成 `scopes_json = '[]'`。结果不为 0 时，这些 token 的主人需要在 **Agent 接入**页（`/agents`）
+对它们点 **修改权限**、重新勾选所需的档位（或撤销后重新签发）；在此之前这些 token 什么也做不了。
+
 ## 可观测性 / 日志
 
 后端通过统一的 `EventLogger`（`app/core/event_logging.py`）输出结构化日志：每条事件一行 JSONL 写入 `.local/logs/`，并附控制台简要行。写日志是 best-effort，绝不影响它所观测的请求或管线；未配置模型时 LLM 通道为 no-op。
