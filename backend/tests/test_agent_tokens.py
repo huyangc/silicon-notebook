@@ -1186,3 +1186,35 @@ def test_secret_endpoint_and_owner_only_tier_errors_are_user_messages(
     assert edit.status_code == 422
     assert edit.headers.get(USER_MESSAGE_HEADER) == "1"
     assert edit.json()["detail"] == owner_only
+
+
+def test_a_wrong_secret_never_learns_why_a_real_token_id_is_dead(token_context):
+    """The specific 401 reasons are only for a caller holding the real token.
+    A wrong secret on a revoked, expired or disabled-profile token id gets the
+    same ``token_invalid`` as an id that never existed, so nobody can probe
+    which token ids exist or what state they are in."""
+    service, alice, _bob, notebook, _other = token_context
+    profile = service.create_agent_profile(alice.id, "Probe target", "")
+    revoked = _issue(service, alice, profile, notebook)
+    service.revoke_agent_token(alice.id, revoked.id)
+    expired = _issue(
+        service, alice, profile, notebook,
+        expires_at=(datetime.now(timezone.utc) - timedelta(minutes=1))
+        .replace(microsecond=0).isoformat(),
+    )
+    retired = service.create_agent_profile(alice.id, "Retired", "")
+    disabled = _issue(service, alice, retired, notebook)
+    service.update_agent_profile(retired.id, alice.id, {"status": "revoked"})
+
+    # The real tokens do get their reasons ...
+    assert service.resolve_agent_token_status(revoked.token)[1] == "token_revoked"
+    assert service.resolve_agent_token_status(expired.token)[1] == "token_expired"
+    assert service.resolve_agent_token_status(disabled.token)[1] == "profile_disabled"
+    # ... a wrong secret on the same ids does not.
+    for issued in (revoked, expired, disabled):
+        assert service.resolve_agent_token_status(
+            f"snm_{issued.id}.wrong"
+        ) == (None, "token_invalid"), issued.id
+        assert service.resolve_agent_token_status(
+            issued.token[:-1] + ("A" if issued.token[-1] != "A" else "B")
+        ) == (None, "token_invalid"), issued.id
