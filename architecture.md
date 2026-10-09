@@ -826,8 +826,8 @@ FTS/KG，Ask 上下文不含（隔离不变量有专门测试守护）；`implem
 并保留正常的变更历史和投影调度。
 
 外部 Agent 面（REST `/api/agent/knowhow/*` 与四个 knowhow MCP 工具）与会话路由共用同一服务核心：
-双鉴权依赖同时接受登录会话与 `snm_` Agent token，读取需 `knowledge:read`、代码写入需
-`knowhow:code`，跨 owner 探测一律统一 404、不暴露存在性。判别集按列全量返回（刻意不做语义预筛），
+双鉴权依赖同时接受登录会话与 `snm_` Agent token，读取需 `read` 档（内部能力 `knowledge:read`）、代码写入需
+`contribute` 档（内部能力 `knowhow:code`），跨 owner 探测一律统一 404、不暴露存在性。判别集按列全量返回（刻意不做语义预筛），
 行详情机器视图把图片剥成占位文本并附代码本体，供外部 Agent 自带判别/修复逻辑消费。
 
 每张 knowhow 表带完整变更历史（`knowhow_changes` + `knowhow_milestones`，schema v26）。每个写事务方法
