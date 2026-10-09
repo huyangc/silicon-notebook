@@ -5,7 +5,7 @@ import json
 import re
 import threading
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -31,12 +31,15 @@ from app.models.identity import (
     AgentTokenAccessUpdate,
     AgentTokenCreate,
     AgentTokenIssued,
+    AgentTokenSecret,
     AgentTokenSummary,
     UserProfile,
 )
 from app.repositories.identity_errors import (
+    AgentOwnerOnlyTierError,
     AgentTokenAccessConflictError,
     AgentTokenInactiveError,
+    AgentTokenSecretUnavailableError,
 )
 from app.models.memory import (
     AnswerMemoryLinksRequest,
@@ -167,6 +170,8 @@ async def issue_agent_token(
         )
     except KeyError:
         raise _not_found("Agent profile not found")
+    except AgentOwnerOnlyTierError as exc:
+        raise user_error(422, str(exc))
     except (PermissionError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -191,6 +196,28 @@ async def revoke_agent_token(
         return await run_in_threadpool(service.revoke_agent_token, user.id, token_id)
     except KeyError:
         raise _not_found("Agent token not found")
+
+
+@memory_router.get("/agent-tokens/{token_id}/secret", response_model=AgentTokenSecret)
+async def get_agent_token_secret(
+    token_id: str,
+    response: Response,
+    user: UserProfile = Depends(get_current_user),
+    service: MemoryRepository = Depends(memory_service),
+) -> AgentTokenSecret:
+    """The plaintext of one of the caller's own tokens, for copying it again.
+
+    Someone else's token and an unknown id are the same 404."""
+    try:
+        token = await run_in_threadpool(service.agent_token_secret, user.id, token_id)
+    except KeyError:
+        raise user_error(404, "没有找到这个 Token，可能已被删除")
+    except AgentTokenInactiveError:
+        raise user_error(409, "已撤销的 token 不能再复制")
+    except AgentTokenSecretUnavailableError:
+        raise user_error(409, "这个 token 签发于旧版本，无法再次复制，如需请重新签发")
+    response.headers["Cache-Control"] = "no-store"
+    return AgentTokenSecret(token=token)
 
 
 @memory_router.put("/agent-tokens/{token_id}/access", response_model=AgentTokenSummary)
@@ -221,6 +248,8 @@ async def update_agent_token_access(
         raise user_error(409, "所属 Agent Profile 已停用，这个 Token 已失效")
     except PermissionError:
         raise user_error(422, "白名单里有你已无权访问的笔记本，请取消勾选后再保存")
+    except AgentOwnerOnlyTierError as exc:
+        raise user_error(422, str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 

@@ -33,3 +33,19 @@ class AgentTokenInactiveError(Exception):
 class AgentTokenAccessConflictError(Exception):
     """整体替换 token 访问配置时带的 ``expected`` 前置条件不再成立:配置在编辑器
     打开之后已被别处改过。拒写而不是后写覆盖,免得旧编辑器悄悄恢复刚收回的权限。"""
+
+
+class AgentTokenSecretUnavailableError(Exception):
+    """一个没有存明文的 Agent token(签发于明文存储上线之前):无法再次复制,
+    只能重新签发。路由映射成 409。"""
+
+
+class AgentOwnerOnlyTierError(ValueError):
+    """签发/编辑 token 时勾了「管理」或「删除」,白名单里却没有 token 主人拥有的
+    笔记本:这两档只对主人拥有的笔记本生效,组合用不了。文案可直接展示,路由用
+    ``user_error`` 映射成 422。"""
+
+    MESSAGE = "管理和删除权限只对你拥有的笔记本生效，所选笔记本里没有你拥有的"
+
+    def __init__(self) -> None:
+        super().__init__(self.MESSAGE)

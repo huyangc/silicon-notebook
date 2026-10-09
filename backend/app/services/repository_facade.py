@@ -1411,8 +1411,16 @@ class RepositoryFacade:
             expected,
         )
 
+    def agent_token_secret(self, owner_id: str, token_id: str) -> str:
+        return self._runtime.memory_service.agent_token_secret(owner_id, token_id)
+
     def resolve_agent_token(self, raw_token: str) -> "AgentPrincipal | None":
         return self._runtime.memory_service.resolve_agent_token(raw_token)
+
+    def resolve_agent_token_status(
+        self, raw_token: str
+    ) -> "tuple[AgentPrincipal | None, str]":
+        return self._runtime.memory_service.resolve_agent_token_status(raw_token)
 
     def refresh_agent_principal(self, token_id: str) -> "AgentPrincipal | None":
         return self._runtime.memory_service.refresh_agent_principal(token_id)

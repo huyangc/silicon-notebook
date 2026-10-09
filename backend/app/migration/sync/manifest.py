@@ -574,7 +574,10 @@ _LOCAL: tuple[TableSyncSpec, ...] = (
     TableSyncSpec("auth_identity_audit", SyncClass.LOCAL),
     TableSyncSpec("auth_transactions", SyncClass.LOCAL),
     TableSyncSpec("agent_profiles", SyncClass.LOCAL),
-    TableSyncSpec("agent_access_tokens", SyncClass.LOCAL),
+    TableSyncSpec(
+        "agent_access_tokens", SyncClass.LOCAL,
+        notes="含可再次复制的 token 明文(token_plain)，绝不随笔记本同步",
+    ),
     TableSyncSpec("agent_token_notebooks", SyncClass.LOCAL),
     TableSyncSpec("model_service_status", SyncClass.LOCAL),
     TableSyncSpec("system_model_service_status", SyncClass.LOCAL),

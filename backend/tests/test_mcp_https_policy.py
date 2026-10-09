@@ -74,8 +74,8 @@ def test_validate_rejects_public_urls_unsafe_for_agent_onboarding(public_url):
 
 
 class _StubRepo:
-    def resolve_agent_token(self, raw):  # no valid token → 401 path
-        return None
+    def resolve_agent_token_status(self, raw):  # no valid token → 401 path
+        return None, "token_invalid"
 
 
 async def _drive_middleware(require_https, scheme, client_host):

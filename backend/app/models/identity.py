@@ -214,6 +214,14 @@ class AgentTokenSummary(BaseModel):
     revoked_at: Optional[str] = None
     last_used_at: Optional[str] = None
     created_at: str
+    # The plaintext is stored (issued after plaintext storage shipped) and the
+    # token is not revoked: ``GET /agent-tokens/{id}/secret`` can return it.
+    # The list never carries the plaintext itself.
+    copyable: bool = False
+
+
+class AgentTokenSecret(BaseModel):
+    token: str
 
 
 class AgentTokenIssued(BaseModel):

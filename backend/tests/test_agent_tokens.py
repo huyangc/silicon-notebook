@@ -10,10 +10,13 @@ from fastapi.testclient import TestClient
 from app.api.deps import USER_MESSAGE_HEADER
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
+from app.domain.agent_tools import AgentAccessDenied
 from app.models.identity import AgentTokenAccess
 from app.repositories.identity_errors import (
+    AgentOwnerOnlyTierError,
     AgentTokenAccessConflictError,
     AgentTokenInactiveError,
+    AgentTokenSecretUnavailableError,
 )
 from app.services.sqlite_repository import (
     SQLiteRepository,
@@ -48,14 +51,14 @@ def _issue(service, owner, profile, notebook, *, scopes=None, expires_at=None):
     return service.issue_agent_token(
         owner.id,
         profile.id,
-        scopes or ["memory:read", "memory:read_candidates"],
+        scopes or ["read"],
         notebook.id,
         [notebook.id],
         expires_at,
     )
 
 
-def test_token_is_hashed_and_raw_value_is_returned_only_at_issue(token_context):
+def test_token_is_hashed_and_the_list_never_carries_the_raw_value(token_context):
     service, alice, _bob, notebook, _other = token_context
     profile = service.create_agent_profile(alice.id, "Claude Code", "Local agent")
 
@@ -66,12 +69,18 @@ def test_token_is_hashed_and_raw_value_is_returned_only_at_issue(token_context):
     assert listed[0].id == issued.id
     assert not hasattr(listed[0], "token")
     assert "hash" not in listed[0].model_dump()
+    assert issued.token not in listed[0].model_dump_json()
+    assert listed[0].copyable is True
     with service.store.database.connect() as db:
         row = db.execute(
-            "SELECT token_hash FROM agent_access_tokens WHERE id=?", (issued.id,)
+            "SELECT token_hash,token_plain FROM agent_access_tokens WHERE id=?",
+            (issued.id,),
         ).fetchone()
     assert row["token_hash"] == hashlib.sha256(issued.token.encode()).hexdigest()
     assert issued.token not in row["token_hash"]
+    # The plaintext is kept for re-copying, but never travels with the auth row.
+    assert row["token_plain"] == issued.token
+    assert "token_plain" not in service.store.agent_token_auth_row(issued.id)
 
 
 def test_owner_disabled_after_agent_auth_is_rechecked_for_live_session(token_context, repo):
@@ -137,7 +146,7 @@ def test_foreign_profile_and_notebook_cannot_be_used_to_issue_token(token_contex
         service.issue_agent_token(
             bob.id,
             bob_profile.id,
-            ["memory:read"],
+            ["read"],
             notebook.id,
             [notebook.id],
             None,
@@ -146,14 +155,14 @@ def test_foreign_profile_and_notebook_cannot_be_used_to_issue_token(token_contex
         service.issue_agent_token(
             alice.id,
             alice_profile.id,
-            ["memory:read"],
+            ["read"],
             notebook.id,
             [other.id],
             None,
         )
 
     service.notebooks.add_member(notebook.id, bob.id)
-    bob_token = _issue(service, bob, bob_profile, notebook, scopes=["memory:read"])
+    bob_token = _issue(service, bob, bob_profile, notebook, scopes=["read"])
     principal = service.resolve_agent_token(bob_token.token)
     assert principal is not None
     service.notebooks.remove_member(notebook.id, bob.id)
@@ -229,7 +238,7 @@ def test_live_principal_refresh_uses_token_id_and_rejects_revoked_or_disabled_st
     refreshed = service.refresh_agent_principal(issued.id)
     assert refreshed is not None
     assert refreshed.token_id == issued.id
-    assert refreshed.scopes == ["memory:read", "memory:read_candidates"]
+    assert refreshed.scopes == ["read"]
 
     service.revoke_agent_token(alice.id, issued.id)
     assert service.refresh_agent_principal(issued.id) is None
@@ -257,7 +266,7 @@ def test_update_access_replaces_scopes_notebooks_and_default_live(token_context)
     profile = service.create_agent_profile(alice.id, "Editable", "")
     issued = _issue(
         service, alice, profile, notebook,
-        scopes=["memory:read", "memory:read_candidates"],
+        scopes=["read"],
     )
     with service.store.database.connect() as db:
         original_hash = db.execute(
@@ -269,18 +278,18 @@ def test_update_access_replaces_scopes_notebooks_and_default_live(token_context)
     assert stale_principal is not None
 
     updated = service.update_agent_token_access(
-        alice.id, issued.id, ["memory:propose"], other.id, [other.id], None
+        alice.id, issued.id, ["contribute"], other.id, [other.id], None
     )
 
     assert updated.id == issued.id
-    assert updated.scopes == ["memory:propose"]
+    assert updated.scopes == ["contribute"]
     assert updated.default_notebook_id == other.id
     assert updated.notebook_ids == [other.id]
     assert updated.agent_profile_id == profile.id
     assert updated.created_at == issued.created_at
 
     listed = service.list_agent_tokens(alice.id)[0]
-    assert listed.scopes == ["memory:propose"]
+    assert listed.scopes == ["contribute"]
     assert listed.default_notebook_id == other.id
     assert listed.notebook_ids == [other.id]
     with service.store.database.connect() as db:
@@ -297,7 +306,7 @@ def test_update_access_replaces_scopes_notebooks_and_default_live(token_context)
     # the live principal carries the new scopes/allowlist immediately.
     principal = service.resolve_agent_token(issued.token)
     assert principal is not None
-    assert principal.scopes == ["memory:propose"]
+    assert principal.scopes == ["contribute"]
     assert principal.notebook_ids == [other.id]
     assert principal.default_notebook_id == other.id
 
@@ -326,7 +335,7 @@ def test_update_access_expiry_clear_expire_and_restore_follow_issue_rules(
         notebook,
         expires_at="2030-01-02T03:04:05+00:00",
     )
-    scopes = ["memory:read", "memory:read_candidates"]
+    scopes = ["read"]
 
     cleared = service.update_agent_token_access(
         alice.id, issued.id, scopes, notebook.id, [notebook.id], None
@@ -358,13 +367,13 @@ def test_update_access_expected_snapshot_refuses_a_stale_editor(token_context):
     profile = service.create_agent_profile(alice.id, "Two tabs", "")
     issued = _issue(
         service, alice, profile, notebook,
-        scopes=["memory:read", "sources:delete"],
+        scopes=["read", "delete"],
         expires_at="2030-01-02T03:04:05+00:00",
     )
     # Both editors open from the same stored configuration (a client may
     # echo the expiry in any offset and list members in any order).
     opened = AgentTokenAccess(
-        scopes=["sources:delete", "memory:read"],
+        scopes=["delete", "read"],
         default_notebook_id=notebook.id,
         notebook_ids=[notebook.id],
         expires_at="2030-01-02T11:04:05+08:00",
@@ -372,25 +381,25 @@ def test_update_access_expected_snapshot_refuses_a_stale_editor(token_context):
 
     # Tab B narrows the token.
     narrowed = service.update_agent_token_access(
-        alice.id, issued.id, ["memory:read"], notebook.id, [notebook.id],
+        alice.id, issued.id, ["read"], notebook.id, [notebook.id],
         "2030-01-02T03:04:05+00:00", opened,
     )
-    assert narrowed.scopes == ["memory:read"]
+    assert narrowed.scopes == ["read"]
 
     # Tab A, still holding the old snapshot, only meant to add a notebook; it
-    # must not silently restore sources:delete.
+    # must not silently restore delete.
     with pytest.raises(AgentTokenAccessConflictError):
         service.update_agent_token_access(
-            alice.id, issued.id, ["memory:read", "sources:delete"], notebook.id,
+            alice.id, issued.id, ["read", "delete"], notebook.id,
             [notebook.id, other.id], "2030-01-02T03:04:05+00:00", opened,
         )
     listed = service.list_agent_tokens(alice.id)[0]
-    assert listed.scopes == ["memory:read"]
+    assert listed.scopes == ["read"]
     assert listed.notebook_ids == [notebook.id]
 
     # Without a precondition the replace is last-writer-wins by contract.
     service.update_agent_token_access(
-        alice.id, issued.id, ["memory:read"], notebook.id, [notebook.id, other.id],
+        alice.id, issued.id, ["read"], notebook.id, [notebook.id, other.id],
         None,
     )
     assert sorted(service.list_agent_tokens(alice.id)[0].notebook_ids) == sorted(
@@ -432,9 +441,9 @@ def test_auth_row_reads_one_access_snapshot_across_a_concurrent_edit(
     service, alice, _bob, notebook, other = token_context
     store = service.store
     profile = service.create_agent_profile(alice.id, "Interleaved", "")
-    issued = _issue(service, alice, profile, notebook, scopes=["sources:delete"])
-    old = (["sources:delete"], [notebook.id])
-    new = (["knowledge:read"], sorted([notebook.id, other.id]))
+    issued = _issue(service, alice, profile, notebook, scopes=["delete"])
+    old = (["delete"], [notebook.id])
+    new = (["read"], sorted([notebook.id, other.id]))
 
     reader = _EditAfterFirstRead(
         store.database.connect(),
@@ -459,11 +468,11 @@ def test_empty_expiry_string_means_no_expiry_on_issue_and_update(token_context):
     service, alice, _bob, notebook, _other = token_context
     profile = service.create_agent_profile(alice.id, "Blank expiry", "")
     issued = service.issue_agent_token(
-        alice.id, profile.id, ["memory:read"], notebook.id, [notebook.id], ""
+        alice.id, profile.id, ["read"], notebook.id, [notebook.id], ""
     )
     assert issued.expires_at is None
     updated = service.update_agent_token_access(
-        alice.id, issued.id, ["memory:read"], notebook.id, [notebook.id], ""
+        alice.id, issued.id, ["read"], notebook.id, [notebook.id], ""
     )
     assert updated.expires_at is None
     assert service.list_agent_tokens(alice.id)[0].expires_at is None
@@ -474,7 +483,7 @@ def test_update_access_rejects_revoked_disabled_foreign_and_invalid_input(
 ):
     service, alice, bob, notebook, other = token_context
     profile = service.create_agent_profile(alice.id, "Guarded", "")
-    scopes = ["memory:read"]
+    scopes = ["read"]
 
     revoked = _issue(service, alice, profile, notebook, scopes=scopes)
     service.revoke_agent_token(alice.id, revoked.id)
@@ -583,7 +592,7 @@ def test_profile_and_token_endpoints_are_owner_private(tmp_path, monkeypatch):
         headers=alice_headers,
         json={
             "agent_profile_id": profile["id"],
-            "scopes": ["memory:read", "memory:read_candidates"],
+            "scopes": ["read"],
             "default_notebook_id": notebook_id,
             "notebook_ids": [notebook_id],
         },
@@ -648,7 +657,7 @@ def test_token_api_rejects_unknown_scope_and_default_outside_allowlist(
         headers=headers,
         json={
             "agent_profile_id": profile_id,
-            "scopes": ["memory:read"],
+            "scopes": ["read"],
             "default_notebook_id": notebook_id,
             "notebook_ids": ["another-notebook"],
         },
@@ -659,7 +668,7 @@ def test_token_api_rejects_unknown_scope_and_default_outside_allowlist(
         headers=headers,
         json={
             "agent_profile_id": profile_id,
-            "scopes": ["memory:read"],
+            "scopes": ["read"],
             "default_notebook_id": notebook_id,
             "notebook_ids": [notebook_id],
             "expires_at": "not-a-date",
@@ -671,7 +680,7 @@ def test_token_api_rejects_unknown_scope_and_default_outside_allowlist(
         headers=headers,
         json={
             "agent_profile_id": profile_id,
-            "scopes": ["memory:read"],
+            "scopes": ["read"],
             "default_notebook_id": notebook_id,
             "notebook_ids": [notebook_id],
             "expires_at": "2030-01-02T03:04:05",
@@ -705,7 +714,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
         headers=alice_headers,
         json={
             "agent_profile_id": profile_id,
-            "scopes": ["memory:read"],
+            "scopes": ["read"],
             "default_notebook_id": notebook_id,
             "notebook_ids": [notebook_id],
         },
@@ -717,7 +726,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
         f"/api/agent-tokens/{token_id}/access",
         headers=alice_headers,
         json={
-            "scopes": ["memory:read", "memory:propose"],
+            "scopes": ["read", "contribute"],
             "default_notebook_id": other_notebook_id,
             "notebook_ids": [other_notebook_id],
             "expires_at": None,
@@ -725,7 +734,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
     )
     assert updated.status_code == 200, updated.text
     body = updated.json()
-    assert sorted(body["scopes"]) == ["memory:propose", "memory:read"]
+    assert sorted(body["scopes"]) == ["contribute", "read"]
     assert body["default_notebook_id"] == other_notebook_id
     assert body["notebook_ids"] == [other_notebook_id]
 
@@ -740,7 +749,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
         f"/api/agent-tokens/{token_id}/access",
         headers=bob_headers,
         json={
-            "scopes": ["memory:read"],
+            "scopes": ["read"],
             "default_notebook_id": bob_notebook_id,
             "notebook_ids": [bob_notebook_id],
             "expires_at": None,
@@ -752,7 +761,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
         "/api/agent-tokens/token-does-not-exist/access",
         headers=bob_headers,
         json={
-            "scopes": ["memory:read"],
+            "scopes": ["read"],
             "default_notebook_id": bob_notebook_id,
             "notebook_ids": [bob_notebook_id],
             "expires_at": None,
@@ -768,7 +777,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
         f"/api/agent-tokens/{token_id}/access",
         headers=alice_headers,
         json={
-            "scopes": ["memory:read"],
+            "scopes": ["read"],
             "default_notebook_id": other_notebook_id,
             "notebook_ids": [other_notebook_id],
             "expires_at": None,
@@ -784,7 +793,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
         headers=alice_headers,
         json={
             "agent_profile_id": profile_id,
-            "scopes": ["memory:read"],
+            "scopes": ["read"],
             "default_notebook_id": notebook_id,
             "notebook_ids": [notebook_id],
         },
@@ -795,12 +804,12 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
         f"/api/agent-tokens/{live['id']}/access",
         headers=alice_headers,
         json={
-            "scopes": ["memory:read", "memory:propose"],
+            "scopes": ["read", "contribute"],
             "default_notebook_id": notebook_id,
             "notebook_ids": [notebook_id],
             "expires_at": None,
             "expected": {
-                "scopes": ["memory:read", "memory:propose"],
+                "scopes": ["read", "contribute"],
                 "default_notebook_id": notebook_id,
                 "notebook_ids": [notebook_id],
                 "expires_at": None,
@@ -814,12 +823,12 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
         f"/api/agent-tokens/{live['id']}/access",
         headers=alice_headers,
         json={
-            "scopes": ["memory:read", "memory:propose"],
+            "scopes": ["read", "contribute"],
             "default_notebook_id": notebook_id,
             "notebook_ids": [notebook_id],
             "expires_at": None,
             "expected": {
-                "scopes": ["memory:read"],
+                "scopes": ["read"],
                 "default_notebook_id": notebook_id,
                 "notebook_ids": [notebook_id],
                 "expires_at": None,
@@ -833,7 +842,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
         f"/api/agent-tokens/{live['id']}/access",
         headers=alice_headers,
         json={
-            "scopes": ["memory:read"],
+            "scopes": ["read"],
             "default_notebook_id": notebook_id,
             "notebook_ids": [notebook_id, bob_notebook_id],
             "expires_at": None,
@@ -852,7 +861,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
         headers=alice_headers,
         json={
             "agent_profile_id": disabled_profile_id,
-            "scopes": ["memory:read"],
+            "scopes": ["read"],
             "default_notebook_id": notebook_id,
             "notebook_ids": [notebook_id],
         },
@@ -866,7 +875,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
         f"/api/agent-tokens/{disabled_token['id']}/access",
         headers=alice_headers,
         json={
-            "scopes": ["memory:read", "memory:propose"],
+            "scopes": ["read", "contribute"],
             "default_notebook_id": notebook_id,
             "notebook_ids": [notebook_id],
             "expires_at": None,
@@ -881,7 +890,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
         f"/api/agent-tokens/{live['id']}/access",
         headers=alice_headers,
         json={
-            "scopes": ["memory:read"],
+            "scopes": ["read"],
             "default_notebook_id": notebook_id,
             "notebook_ids": [notebook_id],
         },
@@ -893,7 +902,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
         f"/api/agent-tokens/{live['id']}/access",
         headers=alice_headers,
         json={
-            "scopes": ["memory:read"],
+            "scopes": ["read"],
             "default_notebook_id": notebook_id,
             "notebook_ids": [notebook_id],
             "expires_at": None,
@@ -901,3 +910,279 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
         },
     )
     assert extra_field.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Five tiers, structured refusals, re-copyable tokens, 401 reasons.
+# ---------------------------------------------------------------------------
+
+
+def test_capabilities_map_to_tiers_and_refusals_name_the_reason(token_context):
+    service, alice, _bob, notebook, other = token_context
+    profile = service.create_agent_profile(alice.id, "Tiers", "")
+    issued = _issue(service, alice, profile, notebook, scopes=["read"])
+    principal = service.resolve_agent_token(issued.token)
+
+    # ``read`` covers knowledge, the owner's Memory and its candidates.
+    for capability in ("knowledge:read", "memory:read", "memory:read_candidates",
+                       "agent_profile:read"):
+        assert service.require_agent_access(principal, capability, notebook.id) is None
+
+    with pytest.raises(AgentAccessDenied) as missing:
+        service.require_agent_access(principal, "ask:execute", notebook.id)
+    assert (missing.value.reason, missing.value.tier) == ("scope_missing", "ask")
+    assert str(missing.value) == "此凭证缺少「问答」权限，请在 Agent 接入页为它勾选后重试"
+    assert notebook.id not in str(missing.value)
+
+    with pytest.raises(AgentAccessDenied) as outside:
+        service.require_agent_access(principal, "knowledge:read", other.id)
+    assert outside.value.reason == "notebook_not_allowed"
+    assert outside.value.notebook_id == other.id
+
+    # Still a PermissionError: every caller that maps a deny to 404 keeps doing so.
+    assert isinstance(outside.value, PermissionError)
+
+    # A capability nobody declared is a programming error, not a silent deny.
+    with pytest.raises(ValueError, match="unknown Agent capability"):
+        service.require_agent_access(principal, "read", notebook.id)
+
+    service.revoke_agent_token(alice.id, issued.id)
+    with pytest.raises(AgentAccessDenied) as inactive:
+        service.require_agent_access(principal, "knowledge:read", notebook.id)
+    assert inactive.value.reason == "inactive"
+
+
+def test_unreadable_allowlisted_notebook_is_its_own_reason(token_context):
+    service, alice, bob, notebook, _other = token_context
+    profile = service.create_agent_profile(bob.id, "Member", "")
+    service.notebooks.add_member(notebook.id, bob.id)
+    issued = _issue(service, bob, profile, notebook, scopes=["read"])
+    principal = service.resolve_agent_token(issued.token)
+    service.notebooks.remove_member(notebook.id, bob.id)
+    with pytest.raises(AgentAccessDenied) as denied:
+        service.require_agent_access(principal, "knowledge:read", notebook.id)
+    assert denied.value.reason == "notebook_unreadable"
+
+
+def test_legacy_capability_strings_are_no_longer_issuable(token_context):
+    service, alice, _bob, notebook, _other = token_context
+    profile = service.create_agent_profile(alice.id, "Legacy", "")
+    with pytest.raises(ValueError, match="unsupported agent scopes"):
+        _issue(service, alice, profile, notebook, scopes=["knowledge:read"])
+
+
+def test_manage_and_delete_need_an_owned_notebook_in_the_allowlist(token_context):
+    service, alice, bob, notebook, _other = token_context
+    service.notebooks.add_member(notebook.id, bob.id)
+    profile = service.create_agent_profile(bob.id, "Member writer", "")
+    for tier in ("manage", "delete"):
+        with pytest.raises(AgentOwnerOnlyTierError) as refused:
+            _issue(service, bob, profile, notebook, scopes=["read", tier])
+        assert str(refused.value) == (
+            "管理和删除权限只对你拥有的笔记本生效，所选笔记本里没有你拥有的"
+        )
+    member_token = _issue(service, bob, profile, notebook, scopes=["read"])
+    with pytest.raises(AgentOwnerOnlyTierError):
+        service.update_agent_token_access(
+            bob.id, member_token.id, ["read", "manage"], notebook.id,
+            [notebook.id], None,
+        )
+    # The owner may hold them on the notebook she owns.
+    owner_profile = service.create_agent_profile(alice.id, "Owner writer", "")
+    owner_token = _issue(
+        service, alice, owner_profile, notebook, scopes=["manage", "delete"]
+    )
+    assert owner_token.scopes == ["manage", "delete"]
+
+
+def test_secret_is_owner_only_cleared_on_revoke_and_absent_for_legacy(token_context):
+    service, alice, bob, notebook, _other = token_context
+    profile = service.create_agent_profile(alice.id, "Copy again", "")
+    issued = _issue(service, alice, profile, notebook)
+
+    assert service.agent_token_secret(alice.id, issued.id) == issued.token
+    with pytest.raises(KeyError):
+        service.agent_token_secret(bob.id, issued.id)
+    with pytest.raises(KeyError):
+        service.agent_token_secret(alice.id, "token-missing")
+
+    # A token issued before plaintext storage (token_plain NULL).
+    legacy = _issue(service, alice, profile, notebook)
+    with service.store.database.write() as db:
+        db.execute(
+            "UPDATE agent_access_tokens SET token_plain=NULL WHERE id=?", (legacy.id,)
+        )
+    with pytest.raises(AgentTokenSecretUnavailableError):
+        service.agent_token_secret(alice.id, legacy.id)
+    listed = {item.id: item for item in service.list_agent_tokens(alice.id)}
+    assert listed[legacy.id].copyable is False
+    assert listed[issued.id].copyable is True
+    # Authentication compares the hash only: the legacy token still works.
+    assert service.resolve_agent_token(legacy.token) is not None
+
+    revoked = service.revoke_agent_token(alice.id, issued.id)
+    assert revoked.copyable is False
+    with pytest.raises(AgentTokenInactiveError):
+        service.agent_token_secret(alice.id, issued.id)
+    with service.store.database.connect() as db:
+        assert db.execute(
+            "SELECT token_plain FROM agent_access_tokens WHERE id=?", (issued.id,)
+        ).fetchone()[0] is None
+
+
+def test_resolve_status_names_why_a_matching_token_fails(token_context, repo):
+    service, alice, _bob, notebook, _other = token_context
+    profile = service.create_agent_profile(alice.id, "Statuses", "")
+    good = _issue(service, alice, profile, notebook)
+    principal, reason = service.resolve_agent_token_status(good.token)
+    assert principal is not None and reason == ""
+
+    # Malformed, unknown and tampered tokens are one indistinguishable answer.
+    assert service.resolve_agent_token_status("nonsense") == (None, "token_invalid")
+    assert service.resolve_agent_token_status(
+        "snm_token-missing.secret"
+    ) == (None, "token_invalid")
+    assert service.resolve_agent_token_status(good.token + "x") == (None, "token_invalid")
+
+    expired = _issue(
+        service, alice, profile, notebook,
+        expires_at=(datetime.now(timezone.utc) - timedelta(minutes=1))
+        .replace(microsecond=0).isoformat(),
+    )
+    assert service.resolve_agent_token_status(expired.token) == (None, "token_expired")
+
+    revoked = _issue(service, alice, profile, notebook)
+    service.revoke_agent_token(alice.id, revoked.id)
+    assert service.resolve_agent_token_status(revoked.token) == (None, "token_revoked")
+
+    service.update_agent_profile(profile.id, alice.id, {"status": "revoked"})
+    assert service.resolve_agent_token_status(good.token) == (None, "profile_disabled")
+
+    other_profile = service.create_agent_profile(alice.id, "Eligibility", "")
+    eligible = _issue(service, alice, other_profile, notebook)
+    repo._runtime.identity.auth.set_account_status(
+        alice.id, "disabled", actor_id="user-local"
+    )
+    assert service.resolve_agent_token_status(eligible.token) == (
+        None, "owner_ineligible"
+    )
+
+
+def test_secret_endpoint_and_owner_only_tier_errors_are_user_messages(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'token-secret.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.main import create_app
+
+    client = TestClient(create_app())
+    alice_headers, _ = _register(client, "h00119008")
+    bob_headers, bob_id = _register(client, "i00119009")
+    notebook_id = client.post(
+        "/api/notebooks", headers=alice_headers, json={"name": "Secret API"}
+    ).json()["id"]
+    profile_id = client.post(
+        "/api/agent-profiles", headers=alice_headers, json={"name": "Agent"}
+    ).json()["id"]
+    issued = client.post(
+        f"/api/agent-profiles/{profile_id}/tokens",
+        headers=alice_headers,
+        json={
+            "agent_profile_id": profile_id,
+            "scopes": ["read", "ask"],
+            "default_notebook_id": notebook_id,
+            "notebook_ids": [notebook_id],
+        },
+    ).json()
+    listed = client.get("/api/agent-tokens", headers=alice_headers).json()
+    assert listed[0]["copyable"] is True
+    assert issued["token"] not in json.dumps(listed)
+
+    secret = client.get(
+        f"/api/agent-tokens/{issued['id']}/secret", headers=alice_headers
+    )
+    assert secret.status_code == 200
+    assert secret.json() == {"token": issued["token"]}
+    assert secret.headers["cache-control"] == "no-store"
+
+    foreign = client.get(f"/api/agent-tokens/{issued['id']}/secret", headers=bob_headers)
+    missing = client.get("/api/agent-tokens/token-nope/secret", headers=bob_headers)
+    assert foreign.status_code == missing.status_code == 404
+    assert foreign.json() == missing.json()
+
+    client.delete(f"/api/agent-tokens/{issued['id']}", headers=alice_headers)
+    revoked = client.get(
+        f"/api/agent-tokens/{issued['id']}/secret", headers=alice_headers
+    )
+    assert revoked.status_code == 409
+    assert revoked.headers.get(USER_MESSAGE_HEADER) == "1"
+    assert revoked.json()["detail"] == "已撤销的 token 不能再复制"
+
+    legacy = client.post(
+        f"/api/agent-profiles/{profile_id}/tokens",
+        headers=alice_headers,
+        json={
+            "agent_profile_id": profile_id,
+            "scopes": ["read"],
+            "default_notebook_id": notebook_id,
+            "notebook_ids": [notebook_id],
+        },
+    ).json()
+    from app.api.deps import repository
+
+    with repository()._runtime.memory_service.store.database.write() as db:
+        db.execute(
+            "UPDATE agent_access_tokens SET token_plain=NULL WHERE id=?",
+            (legacy["id"],),
+        )
+    old = client.get(f"/api/agent-tokens/{legacy['id']}/secret", headers=alice_headers)
+    assert old.status_code == 409
+    assert old.headers.get(USER_MESSAGE_HEADER) == "1"
+    assert old.json()["detail"] == "这个 token 签发于旧版本，无法再次复制，如需请重新签发"
+
+    # manage/delete without an owned notebook: 422 the page can show as is,
+    # on both issue and edit.
+    owner_only = "管理和删除权限只对你拥有的笔记本生效，所选笔记本里没有你拥有的"
+    repository()._runtime.memory_service.notebooks.add_member(notebook_id, bob_id)
+    bob_profile = client.post(
+        "/api/agent-profiles", headers=bob_headers, json={"name": "Bob agent"}
+    ).json()["id"]
+    refused = client.post(
+        f"/api/agent-profiles/{bob_profile}/tokens",
+        headers=bob_headers,
+        json={
+            "agent_profile_id": bob_profile,
+            "scopes": ["read", "manage"],
+            "default_notebook_id": notebook_id,
+            "notebook_ids": [notebook_id],
+        },
+    )
+    assert refused.status_code == 422
+    assert refused.headers.get(USER_MESSAGE_HEADER) == "1"
+    assert refused.json()["detail"] == owner_only
+    bob_token = client.post(
+        f"/api/agent-profiles/{bob_profile}/tokens",
+        headers=bob_headers,
+        json={
+            "agent_profile_id": bob_profile,
+            "scopes": ["read"],
+            "default_notebook_id": notebook_id,
+            "notebook_ids": [notebook_id],
+        },
+    ).json()
+    edit = client.put(
+        f"/api/agent-tokens/{bob_token['id']}/access",
+        headers=bob_headers,
+        json={
+            "scopes": ["read", "delete"],
+            "default_notebook_id": notebook_id,
+            "notebook_ids": [notebook_id],
+            "expires_at": None,
+        },
+    )
+    assert edit.status_code == 422
+    assert edit.headers.get(USER_MESSAGE_HEADER) == "1"
+    assert edit.json()["detail"] == owner_only

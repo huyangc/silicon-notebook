@@ -646,7 +646,12 @@ class MemoryRepository(Protocol):
         default_notebook_id: str, notebook_ids: Sequence[str],
         expires_at: str | None, expected: AgentTokenAccess | None = None,
     ) -> AgentTokenSummary: ...
+    def agent_token_secret(self, owner_id: str, token_id: str) -> str: ...
     def resolve_agent_token(self, raw_token: str) -> AgentPrincipal | None: ...
+    # (principal, "") or (None, reason code); see MemoryService.
+    def resolve_agent_token_status(
+        self, raw_token: str
+    ) -> tuple[AgentPrincipal | None, str]: ...
     def refresh_agent_principal(self, token_id: str) -> AgentPrincipal | None: ...
     def require_agent_access(
         self, principal: AgentPrincipal, scope: str, notebook_id: str
@@ -3980,6 +3985,7 @@ class MemoryStorePort(Protocol):
         self, token_id: str, owner_id: str, agent_profile_id: str,
         token_hash: str, scopes: Sequence[str], default_notebook_id: str,
         notebook_ids: Sequence[str], expires_at: str | None,
+        token_plain: str | None = None,
     ) -> AgentTokenSummary: ...
     def list_agent_tokens(
         self, owner_id: str, offset: int = 0, limit: int = 100
@@ -3987,6 +3993,10 @@ class MemoryStorePort(Protocol):
     def revoke_agent_token(
         self, token_id: str, owner_id: str
     ) -> AgentTokenSummary: ...
+    # (revoked, plaintext) of the owner's own token; None = absent or foreign.
+    def agent_token_secret(
+        self, token_id: str, owner_id: str
+    ) -> tuple[bool, str | None] | None: ...
     def update_agent_token_access(
         self, token_id: str, owner_id: str, scopes: Sequence[str],
         default_notebook_id: str, notebook_ids: Sequence[str],

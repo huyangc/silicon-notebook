@@ -7,6 +7,7 @@ import anyio
 from mcp.server.fastmcp import Context, FastMCP
 
 from app.api.source_routes import source_readable_in_participant_scope
+from app.domain.agent_tools import principal_has_capability
 from app.services.evidence_context import _knowhow_ref
 from app.services.source_display import source_display_title
 
@@ -39,9 +40,9 @@ def register_citation_tools(
             "on it. Discloses nothing beyond what an answer in the selected "
             "notebook already may cite -- the notebook's own sources plus the "
             "reference libraries it currently mounts. A memory-derived source "
-            "is readable only by the person who saved that memory, and only "
-            "when this token has memory:read (shown as 读取已确认记忆 on the "
-            "Agent access page); otherwise it fails like an unknown id."
+            "is readable only by the person who saved that memory (this "
+            "token's read permission covers it); another member's fails like "
+            "an unknown id."
         )
     )
     async def get_cited_element(
@@ -68,9 +69,14 @@ def register_citation_tools(
                 # its three repeated reads on every call of a tool Agents run
                 # in a loop. The gate is one statement that answers None for a
                 # missing id and a refused Memory source alike, so both raise
-                # the identical KeyError after the identical reads.
+                # the identical KeyError after the identical reads. Since the
+                # tier merge both capabilities map to the ``read`` tier, so
+                # this always opens the owner's own Memory here; it stays an
+                # explicit capability check so the mapping stays the one rule.
                 viewer_id = (
-                    principal.owner_id if "memory:read" in principal.scopes else ""
+                    principal.owner_id
+                    if principal_has_capability(principal, "memory:read")
+                    else ""
                 )
                 readable_notebook_id = repo.source_notebook_id(
                     source_id, viewer_id=viewer_id
