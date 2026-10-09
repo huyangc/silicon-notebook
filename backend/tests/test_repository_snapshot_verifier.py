@@ -50,12 +50,51 @@ FIXTURE_SECRETS = (
 )
 
 
+def _rollback_v89(db: sqlite3.Connection) -> None:
+    """Undo _migration_89 (Agent token tiers, parity with PostgreSQL
+    0069_agent_token_tiers.sql): the nullable agent_access_tokens.token_plain
+    column. The fixture holds no token, so the tier rewrite changed no row.
+    v88 is data only and has nothing to undo, so every older rollback starts
+    here (through _rollback_v87)."""
+    db.execute("ALTER TABLE agent_access_tokens DROP COLUMN token_plain")
+
+
+def test_deployed_v88_database_verifies_agent_token_plaintext_column(tmp_path):
+    """A deployed v88 database is missing exactly _migration_89's schema
+    addition: the nullable ``agent_access_tokens.token_plain`` (no default,
+    no backfill). No row changes: the fixture holds no Agent token."""
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as upgraded_db:
+        columns = {
+            row[1]: (row[2], row[3], row[4])
+            for row in upgraded_db.execute("PRAGMA table_info(agent_access_tokens)")
+        }
+        assert columns["token_plain"] == ("TEXT", 0, None)
+
+    with sqlite3.connect(database) as rollback:
+        _rollback_v89(rollback)
+        rollback.execute("PRAGMA user_version = 88")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 88
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+
+
 def _rollback_v87(db: sqlite3.Connection) -> None:
     """Undo _migration_87 (ruling M1: unified_kg_state.memory_isolation_version,
     parity with PostgreSQL 0067_memory_kg_isolation.sql) before forging any
     older deployed schema: a pure column addition on the schema side (the
     fixture holds no Memory source, so the data half changed no row) -- same
-    shape as _rollback_v68."""
+    shape as _rollback_v68. v89 is undone first (newest-first)."""
+    _rollback_v89(db)
     db.execute("ALTER TABLE unified_kg_state DROP COLUMN memory_isolation_version")
 
 

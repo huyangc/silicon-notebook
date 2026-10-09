@@ -170,8 +170,10 @@ async def issue_agent_token(
         )
     except KeyError:
         raise _not_found("Agent profile not found")
-    except AgentOwnerOnlyTierError as exc:
-        raise user_error(422, str(exc))
+    except AgentOwnerOnlyTierError:
+        raise user_error(
+            422, "管理和删除权限只对你拥有的笔记本生效，所选笔记本里没有你拥有的"
+        )
     except (PermissionError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -248,8 +250,10 @@ async def update_agent_token_access(
         raise user_error(409, "所属 Agent Profile 已停用，这个 Token 已失效")
     except PermissionError:
         raise user_error(422, "白名单里有你已无权访问的笔记本，请取消勾选后再保存")
-    except AgentOwnerOnlyTierError as exc:
-        raise user_error(422, str(exc))
+    except AgentOwnerOnlyTierError:
+        raise user_error(
+            422, "管理和删除权限只对你拥有的笔记本生效，所选笔记本里没有你拥有的"
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
