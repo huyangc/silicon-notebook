@@ -266,9 +266,9 @@ REGISTRY = {
     ("repositories/postgres/memory_store.py", "MemoryStore._validate_evidence_ref_on", "splat:element_id"): (
         "global-unreachable", _import_gate("repositories/postgres/memory_store.py"),
         "Memory evidence validation on write", 1),
-    ("api/mcp_tools/memory_context.py", "_anchor_row", 'dict:"element_id"'): (
-        "single-notebook-only", _import_gate("api/mcp_tools/memory_context.py"),
-        "MCP ask_notebook output (answer anchors and evidence items): a notebook ask, never a global run", 1),
+    ("api/mcp_tools/ask.py", "_anchor_row", 'dict:"element_id"'): (
+        "single-notebook-only", _import_gate("api/mcp_tools/ask.py"),
+        "MCP ask (single-notebook) output (answer anchors and evidence items): a notebook ask, never a global run", 1),
 }
 
 CLASSIFICATIONS = {

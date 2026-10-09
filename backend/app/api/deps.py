@@ -77,6 +77,11 @@ def notebook_store_port() -> NotebookStorePort:
     # repositories/*/mount_sql.py —— 挂载边不是授权凭证,库易主/降级后边仍在但不生效。
     return repository()._runtime.notebook_store  # type: ignore[attr-defined]
 
+def ask_intent_handle_repository():
+    """The MCP ``ask`` clarification-handle store (v90/0070)."""
+    return repository()._runtime.ask_intent_handles  # type: ignore[attr-defined]
+
+
 def ask_stream_repository() -> AskStreamPort:
     return repository()
 

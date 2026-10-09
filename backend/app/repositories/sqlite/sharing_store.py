@@ -1142,7 +1142,7 @@ class SharingStore:
         """The notebook ``source_id`` belongs to, or ``None``.
 
         ``viewer_id`` is the Memory owner gate of every source/element read
-        (`/sources/{id}`, the participant-scope proxy, MCP `get_cited_element`):
+        (`/sources/{id}`, the participant-scope proxy, MCP `read_reference`):
         with it, a Memory source whose `memory_items.created_by` is not the
         viewer answers ``None`` — exactly what a missing id answers, from the
         same single statement, so a refusal is indistinguishable from "does not

@@ -115,7 +115,7 @@ scripts/dev.sh                # 同时起 backend(:8000)+ frontend(:3000),Ctrl+C
 ### `example_mcp_memory_client.py` —— 外部 Agent MCP/Memory 接入示例
 
 用官方 Python MCP client 连接已经启动的 `/mcp`，完成工具发现、默认/指定 notebook
-选择、正式上下文检索与 Agent Memory 检索；加 `--propose` 后提交一条幂等 candidate 并
+概况读取、正式上下文检索与 Agent Memory 检索；加 `--propose` 后提交一条幂等 candidate 并
 立即从 Agent Memory 召回。token 只从 `SILICON_NOTEBOOK_AGENT_TOKEN` 读取且不打印。
 
 ```bash

@@ -25,14 +25,18 @@ from mcp.client.streamable_http import streamable_http_client
 # step with the runbook, which tells readers to configure the form that
 # does not depend on a client preserving method/body/Authorization.
 DEFAULT_URL = "http://127.0.0.1:8000/mcp/"
-REQUIRED_TOOLS = {
-    "list_notebooks",
-    "select_notebook",
-    "search_agent_memory",
-    "search_notebook_context",
-    "propose_memory",
-    "add_source_file",
-}
+# ``tools/list`` shows only what this token's permissions can use, so the
+# required set grows with the options asked for (see ``_required_tools``).
+REQUIRED_TOOLS = {"list_notebooks", "get_notebook", "search"}
+
+
+def _required_tools(args: argparse.Namespace) -> set[str]:
+    required = set(REQUIRED_TOOLS)
+    if args.propose:
+        required.add("propose_memory")  # the contribute permission
+    if args.source_file:
+        required.add("add_source")  # the manage permission
+    return required
 
 
 def _payload(result: Any) -> dict[str, Any]:
@@ -60,7 +64,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument(
         "--notebook-id",
         default=os.getenv("SILICON_NOTEBOOK_NOTEBOOK_ID", ""),
-        help="Allowlisted notebook id; otherwise the token default is selected.",
+        help="Allowlisted notebook id; otherwise the token's default notebook.",
     )
     parser.add_argument(
         "--query",
@@ -80,7 +84,7 @@ def _arguments() -> argparse.Namespace:
         "--memory-content",
         default=(
             "The silicon-notebook MCP quickstart completed an authenticated session, "
-            "selected the intended notebook, and exercised the Memory tools."
+            "read the intended notebook, and exercised the Memory tools."
         ),
     )
     parser.add_argument(
@@ -92,8 +96,8 @@ def _arguments() -> argparse.Namespace:
         "--profile",
         action="store_true",
         help=(
-            "Also call get_notebook_profile (Agentic Memory P3, requires "
-            "agent_profile:read) and print only block counts and character "
+            "Also print get_notebook's profile section (Agentic Memory P3, "
+            "the read permission) as block counts and character "
             "counts -- never the block text itself, since this script's "
             "output is meant to be pasted into chat/logs."
         ),
@@ -103,7 +107,7 @@ def _arguments() -> argparse.Namespace:
         default="",
         help=(
             "Upload one local PDF/PPTX/DOCX/XLSX/Markdown/ZIP source through "
-            "add_source_file (requires the manage permission)."
+            "add_source (requires the manage permission)."
         ),
     )
     parser.add_argument(
@@ -140,12 +144,12 @@ def _print_result(label: str, payload: dict[str, Any]) -> None:
 
 def _print_profile_summary(payload: dict[str, Any]) -> None:
     """Print only shape (block counts, character counts) for
-    ``get_notebook_profile`` -- never the block text itself. Unlike
+    ``get_notebook``'s ``profile`` -- never the block text itself. Unlike
     ``_print_result``, this deliberately does not dump the payload verbatim:
     the blocks are prompt scaffolding about how this notebook has been used,
     and a quickstart script's output is the kind of thing that gets pasted
     into chat or committed to a log."""
-    print("\nNotebook understanding (get_notebook_profile)")
+    print("\nNotebook understanding (get_notebook profile)")
     if not payload.get("enabled", False):
         print("  enabled: false (feature is off, or nothing consolidated yet)")
         return
@@ -182,28 +186,34 @@ async def _run(args: argparse.Namespace) -> None:
         await session.initialize()
 
         tools = {tool.name for tool in (await session.list_tools()).tools}
-        missing = sorted(REQUIRED_TOOLS - tools)
+        missing = sorted(_required_tools(args) - tools)
         if missing:
-            raise RuntimeError(f"server is missing required tools: {', '.join(missing)}")
+            raise RuntimeError(
+                "this token cannot use required tools (missing permission or an "
+                f"older server): {', '.join(missing)}"
+            )
         print(f"Connected to {args.url}; server exposes {len(tools)} tools.")
 
         listed = _payload(await session.call_tool("list_notebooks", {"limit": 20}))
         notebook = _choose_notebook(listed.get("items", []), args.notebook_id)
         notebook_id = str(notebook["notebook_id"])
-        selected = _payload(
-            await session.call_tool(
-                "select_notebook", {"notebook_id": notebook_id}
-            )
-        )
-        print(f"Selected {selected.get('name', notebook_id)} ({notebook_id}).")
+        # Stateless tools: every notebook-bound call names its notebook.
+        # ``profile`` is only in get_notebook(include="all"); the default
+        # include="status" is the cheap polling shape without it.
+        overview_args: dict[str, Any] = {"notebook_id": notebook_id}
+        if args.profile:
+            overview_args["include"] = "all"
+        overview = _payload(await session.call_tool("get_notebook", overview_args))
+        print(f"Using {overview.get('name', notebook_id)} ({notebook_id}).")
         if args.source_file:
             source_path = Path(args.source_file).expanduser()
             if not source_path.is_file():
                 raise RuntimeError(f"source file does not exist: {source_path}")
             uploaded = _payload(
                 await session.call_tool(
-                    "add_source_file",
+                    "add_source",
                     {
+                        "notebook_id": notebook_id,
                         "file_name": source_path.name,
                         "content_base64": base64.b64encode(
                             source_path.read_bytes()
@@ -216,20 +226,24 @@ async def _run(args: argparse.Namespace) -> None:
 
         formal = _payload(
             await session.call_tool(
-                "search_notebook_context", {"query": args.query, "limit": 5}
+                "search",
+                {"query": args.query, "limit": 5, "notebook_id": notebook_id},
             )
         )
         memories = _payload(
             await session.call_tool(
-                "search_agent_memory", {"query": args.query, "limit": 5}
+                "search",
+                {
+                    "query": args.query, "limit": 5, "include": "memory",
+                    "notebook_id": notebook_id,
+                },
             )
         )
         _print_result("Formal notebook context (confirmed plane)", formal)
         _print_result("Agent Memory (candidate + confirmed when scoped)", memories)
 
         if args.profile:
-            profile = _payload(await session.call_tool("get_notebook_profile", {}))
-            _print_profile_summary(profile)
+            _print_profile_summary(overview.get("profile", {}))
 
         if args.propose:
             request_id = f"{args.client_request_id}:{notebook_id}"[:200]
@@ -247,14 +261,18 @@ async def _run(args: argparse.Namespace) -> None:
                         },
                         "evidence_refs": [],
                         "client_request_id": request_id,
+                        "notebook_id": notebook_id,
                     },
                 )
             )
             _print_result("Candidate Memory proposed for UI review", proposal)
             formal_after = _payload(
                 await session.call_tool(
-                    "search_notebook_context",
-                    {"query": args.memory_title, "limit": 5},
+                    "search",
+                    {
+                        "query": args.memory_title, "limit": 5,
+                        "notebook_id": notebook_id,
+                    },
                 )
             )
             proposed_id = proposal.get("memory_id")
@@ -269,8 +287,11 @@ async def _run(args: argparse.Namespace) -> None:
             )
             recalled = _payload(
                 await session.call_tool(
-                    "search_agent_memory",
-                    {"query": args.memory_title, "limit": 5},
+                    "search",
+                    {
+                        "query": args.memory_title, "limit": 5,
+                        "include": "memory", "notebook_id": notebook_id,
+                    },
                 )
             )
             _print_result("Candidate recalled from Agent Memory", recalled)

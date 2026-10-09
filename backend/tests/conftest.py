@@ -143,6 +143,7 @@ _REAL_SQLITE_MIGRATION_MODULES = {
     "test_agent_observation_store.py",
     "test_agent_token_tiers_migration.py",
     "test_ask_job_output_migration.py",
+    "test_ask_intent_handle_store.py",
     "test_agent_profile_job_observations.py",
     "test_agent_profile_store.py",
     "test_catalog_store.py",

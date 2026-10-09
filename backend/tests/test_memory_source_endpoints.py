@@ -4,7 +4,7 @@ A Memory projection source (``sources.source_type='memory'``) belongs to the
 member who created the memory (``memory_items.created_by``), not to the
 notebook. Before this change any reader of the notebook -- the notebook owner
 included -- could open another member's Memory projection through the plain
-source endpoints, the participant-scope proxy, or MCP ``get_cited_element``,
+source endpoints, the participant-scope proxy, or MCP ``read_reference`` (element refs),
 and read its full text element by element (the element ids are predictable:
 ``el-<source_id>-0001``). The command catalog accepted it too, echoing its
 title back.
@@ -255,7 +255,7 @@ def test_participant_predicate_requires_the_gated_notebook_id():
 
 
 # --------------------------------------------------------------------------- #
-# MCP get_cited_element
+# MCP read_reference (element refs)
 # --------------------------------------------------------------------------- #
 
 
@@ -263,7 +263,7 @@ class _CaptureServer:
     def __init__(self):
         self.handlers = {}
 
-    def tool(self, *, description):
+    def tool(self, *, description, tier=None):
         def register(handler):
             self.handlers[handler.__name__] = handler
             return handler
@@ -271,7 +271,7 @@ class _CaptureServer:
 
 
 def _mcp_reads(monkeypatch, principal, notebook_id, source_id, element_id):
-    """Run the real ``get_cited_element`` body with its synchronous ``load``
+    """Run the real ``read_reference`` body with its synchronous ``load``
     executed on THIS thread, and return (outcome, normalized statements).
 
     ``_selected_notebook`` (the shared authentication choke point, identical
@@ -281,10 +281,11 @@ def _mcp_reads(monkeypatch, principal, notebook_id, source_id, element_id):
     import anyio
 
     from app.api.mcp_tools import citations
+    from app.api.mcp_tools.refs import element_ref
 
     monkeypatch.setattr(
         citations, "_selected_notebook",
-        lambda ctx, repo, scope: (principal, notebook_id),
+        lambda repo, ref_notebook_id, scope, record=True: (principal, notebook_id),
     )
 
     async def inline(ctx, work, *, label):
@@ -293,12 +294,13 @@ def _mcp_reads(monkeypatch, principal, notebook_id, source_id, element_id):
     monkeypatch.setattr(citations, "_run_with_progress", inline)
     server = _CaptureServer()
     citations.register_citation_tools(server, repository)
-    handler = server.handlers["get_cited_element"]
+    handler = server.handlers["read_reference"]
+    ref = element_ref(notebook_id, source_id, element_id)
     outcome: list = []
 
     def run():
         try:
-            outcome.append(anyio.run(handler, source_id, element_id, None))
+            outcome.append(anyio.run(handler, ref, None))
         except KeyError as exc:
             outcome.append(("KeyError", exc.args))
 
@@ -320,7 +322,7 @@ def _mcp_reads(monkeypatch, principal, notebook_id, source_id, element_id):
         ("alice", ["ask"], "src-e31-mem-alice"),
     ],
 )
-def test_get_cited_element_refusal_runs_the_same_reads_as_a_missing_id(
+def test_read_reference_element_refusal_runs_the_same_reads_as_a_missing_id(
     seeded, monkeypatch, user, scopes, refused
 ):
     from app.api.deps import mcp_memory_repository
@@ -355,10 +357,13 @@ def _error_text(result) -> str:
     return json.dumps([item.text for item in result.content], ensure_ascii=False)
 
 
-async def _cite(client, source_id, element_id=None):
-    return await client.call("get_cited_element", {
-        "source_id": source_id,
-        "element_id": element_id or _element_id(source_id),
+async def _cite(client, notebook_id, source_id, element_id=None):
+    from app.api.mcp_tools.refs import element_ref
+
+    return await client.call("read_reference", {
+        "ref": element_ref(
+            notebook_id, source_id, element_id or _element_id(source_id)
+        ),
     })
 
 
@@ -379,24 +384,22 @@ def _token(seeded, user: str, scopes: list[str]) -> str:
         # ``read`` (which covers memory:read): exactly one's own Memory, plus
         # shared content. A token without ``read`` cannot call the tool at
         # all; the Memory gate for such a principal is pinned by
-        # test_get_cited_element_refusal_runs_the_same_reads_as_a_missing_id.
+        # test_read_reference_element_refusal_runs_the_same_reads_as_a_missing_id.
         ("alice", ["read"],
          {"src-e31-mem-alice", "src-e31-knowhow", "src-e31-doc"}),
         ("bob", ["read"],
          {"src-e31-mem-bob", "src-e31-knowhow", "src-e31-doc"}),
     ],
 )
-async def test_get_cited_element_honours_memory_owner_and_memory_read(
+async def test_read_reference_element_honours_memory_owner_and_memory_read(
     seeded, user, scopes, readable
 ):
     token = _token(seeded, user, scopes)
+    notebook_id = seeded["notebook_id"]
     async with OfficialMcpClient(seeded["app"], token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": seeded["notebook_id"]}
-        ))
-        missing_text = _error_text(await _cite(client, MISSING))
+        missing_text = _error_text(await _cite(client, notebook_id, MISSING))
         for source_id, *_rest in _SOURCES:
-            result = await _cite(client, source_id)
+            result = await _cite(client, notebook_id, source_id)
             if source_id in readable:
                 assert _payload(result)["text"] == _TEXT[source_id], source_id
                 continue
@@ -408,7 +411,7 @@ async def test_get_cited_element_honours_memory_owner_and_memory_read(
         # Predictable element id, paired with a source the caller CAN open:
         # the element must belong to that source, so this is a miss too.
         crossed = await _cite(
-            client, "src-e31-doc", _element_id("src-e31-mem-bob" if user == "alice"
+            client, notebook_id, "src-e31-doc", _element_id("src-e31-mem-bob" if user == "alice"
                                                else "src-e31-mem-alice")
         )
         assert crossed.isError

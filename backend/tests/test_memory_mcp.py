@@ -5,6 +5,8 @@ import base64
 import json
 import logging
 import pathlib
+import threading
+import re
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
 
@@ -22,6 +24,7 @@ from app.api.deps import (
     repository,
 )
 from app.api.mcp_server import PUBLIC_TOOLS as mcp_server_public_tools
+from app.api.mcp_server import TOOL_TIERS
 from app.core.config import get_settings
 from app.core.request_context import reset_request_user, set_request_user
 from app.api.source_routes import document_capacity_message
@@ -44,6 +47,60 @@ def _payload(result):
         return result.structuredContent
     assert len(result.content) == 1
     return json.loads(result.content[0].text)
+
+
+_AGENT_ERROR = re.compile(r"\[([a-z_]+)\] (.*)", re.S)
+
+
+def _assert_agent_error_is_chinese(result) -> None:
+    """Every error the Agent error model produced in this suite speaks Chinese.
+
+    Wired into ``OfficialMcpClient.call``, so every MCP test (this module's
+    and every module importing the client) enforces it on every refusal: the
+    text after ``[<code>]`` must contain CJK -- an English detail leaking
+    through the boundary fails the test that triggered it."""
+    if not result.isError:
+        return
+    text = " ".join(getattr(item, "text", "") for item in result.content)
+    match = _AGENT_ERROR.search(text)
+    if match is None:
+        return  # SDK-level errors (unknown tool, argument schema) are not ours
+    assert any("\u4e00" <= char <= "\u9fff" for char in match.group(2)), text
+
+
+def _ref(payload: dict) -> str:
+    """A ``read_reference`` handle, encoded independently of the server code:
+    ``base64url(json)`` without padding (docs: MCP ref format)."""
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _el_ref(notebook_id: str, source_id: str, element_id: str) -> str:
+    return _ref({"k": "el", "n": notebook_id, "s": source_id, "e": element_id})
+
+
+def _mem_ref(notebook_id: str, memory_id: str) -> str:
+    return _ref({"k": "mem", "n": notebook_id, "m": memory_id})
+
+
+def _set_token_tiers(mcp_env, token_id: str, tiers: list[str]) -> None:
+    """Edit one of Alice's tokens in place (default notebook only)."""
+    notebook_id = mcp_env["notebook"].id
+    mcp_env["service"].update_agent_token_access(
+        mcp_env["alice"].id, token_id, tiers, notebook_id, [notebook_id], None
+    )
+
+
+def _error(result) -> str:
+    """The Agent-facing error text of a failed tool call."""
+    assert result.isError, result
+    return " ".join(getattr(item, "text", "") for item in result.content)
+
+
+def _error_code(result) -> str:
+    text = _error(result)
+    start = text.index("[") + 1
+    return text[start:text.index("]", start)]
 
 
 def _assert_budgeted(payload: dict) -> None:
@@ -148,9 +205,38 @@ class OfficialMcpClient:
         # Passing a progress_callback is what makes the SDK put a
         # `progressToken` in the request's `_meta`; without one the server's
         # `Context.report_progress` short-circuits and nothing is sent.
-        return await self.session.call_tool(
+        result = await self.session.call_tool(
             name, arguments or {}, progress_callback=progress_callback
         )
+        _assert_agent_error_is_chinese(result)
+        return result
+
+
+FAKE_ASK_JOB_ID = "askjob-fake"
+
+
+def _route_fake_asks_through_ask_with_job(service, monkeypatch) -> None:
+    """Keep the engine fakes these tests install on ``service.ask`` working.
+
+    The MCP ``ask`` tool calls ``ask_with_job`` (the same engine, plus the
+    durable job id). When a test has replaced ``ask`` on the facade instance,
+    ``ask_with_job`` answers through that fake under ``FAKE_ASK_JOB_ID``;
+    otherwise the real ``ask_with_job`` runs untouched.
+    """
+    real = service.ask_with_job
+
+    def ask_with_job(notebook_id, payload, *, submitted_via="", attach_only=False, stop=None):
+        fake = service.__dict__.get("ask")
+        if fake is None:
+            return real(
+                notebook_id, payload, submitted_via=submitted_via,
+                attach_only=attach_only, stop=stop,
+            )
+        if attach_only:
+            return None
+        return fake(notebook_id, payload, submitted_via=submitted_via), FAKE_ASK_JOB_ID
+
+    monkeypatch.setattr(service, "ask_with_job", ask_with_job)
 
 
 @pytest.fixture
@@ -215,6 +301,7 @@ def mcp_env(tmp_path, monkeypatch):
     bob_token = service.issue_agent_token(
         bob.id, bob_profile.id, scopes, notebook.id, [notebook.id], None
     )
+    _route_fake_asks_through_ask_with_job(service, monkeypatch)
     return {
         "app": app,
         "sharing": sharing,
@@ -234,42 +321,98 @@ def mcp_env(tmp_path, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_official_client_exposes_exact_public_tool_contract(mcp_env):
-    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        listed = await client.session.list_tools()
+async def test_official_client_lists_only_the_tools_the_token_tiers_can_use(mcp_env):
+    """``tools/list`` is filtered by the caller's live tiers; ``list_notebooks``
+    is always listed; calling an unlisted tool still reaches it and is refused
+    with ``scope_missing`` (filtering is a convenience, never the gate)."""
+    full_token = _agent_token(
+        mcp_env, ["read", "ask", "contribute", "manage", "delete"],
+        user="bob", notebook_ids=[_bob_owned_notebook_id(mcp_env)],
+    )
+    app = mcp_env["app"]
+    async with app.router.lifespan_context(app):
+        await _assert_tier_filtered_listing(mcp_env, full_token)
+
+
+async def _assert_tier_filtered_listing(mcp_env, full_token: str) -> None:
+    app = mcp_env["app"]
+    async with OfficialMcpClient(app, full_token, manage_lifespan=False) as client:
+        full = [tool.name for tool in (await client.session.list_tools()).tools]
+    assert tuple(full) == mcp_server_public_tools
+
+    async with OfficialMcpClient(
+        app, mcp_env["token_a"].token, manage_lifespan=False
+    ) as client:
+        listed = {tool.name for tool in (await client.session.list_tools()).tools}
         notebooks = _payload(await client.call("list_notebooks"))
         assert [item["notebook_id"] for item in notebooks["items"]] == [
             mcp_env["notebook"].id
         ]
-        assert (await client.call(
-            "select_notebook", {"notebook_id": mcp_env["other"].id}
-        )).isError
-    assert {tool.name for tool in listed.tools} == PUBLIC_TOOLS
+        outside = await client.call(
+            "get_notebook", {"notebook_id": mcp_env["other"].id}
+        )
+        assert _error_code(outside) == "notebook_not_allowed"
+        unlisted = await client.call("delete_source", {"source_id": "x"})
+        assert _error_code(unlisted) == "scope_missing"
+        assert "「删除」" in _error(unlisted)
+    assert listed == {
+        name for name, tier in TOOL_TIERS.items()
+        if tier in (None, "read", "ask", "contribute")
+    }
+
+    async with OfficialMcpClient(
+        app, mcp_env["restricted"].token, manage_lifespan=False
+    ) as client:
+        read_only = {tool.name for tool in (await client.session.list_tools()).tools}
+        # An in-place tier edit shows on the very next listing.
+        _set_token_tiers(mcp_env, mcp_env["restricted"].id, ["read", "ask"])
+        widened = {tool.name for tool in (await client.session.list_tools()).tools}
+    assert read_only == {
+        name for name, tier in TOOL_TIERS.items() if tier in (None, "read")
+    }
+    assert "ask" not in read_only and "ask" in widened
 
 
 @pytest.mark.anyio
-async def test_notebook_selection_is_required_and_session_scoped(mcp_env):
+async def test_tools_are_stateless_and_default_to_the_token_notebook(mcp_env):
+    """No selection step exists: a fresh session can call any notebook-bound
+    tool at once, an omitted notebook_id means the token's default notebook,
+    and an explicit one is re-authorized on every call."""
     app = mcp_env["app"]
+    two_notebooks = mcp_env["service"].issue_agent_token(
+        mcp_env["alice"].id, mcp_env["profile_a"].id, ["read"],
+        mcp_env["notebook"].id, [mcp_env["notebook"].id, mcp_env["other"].id],
+        None,
+    )
     async with app.router.lifespan_context(app):
+        for _ in range(2):  # two independent sessions, no shared state
+            async with OfficialMcpClient(
+                app, mcp_env["token_a"].token, manage_lifespan=False
+            ) as client:
+                default = _payload(await client.call(
+                    "search", {"include": "memory", "query": "anything"}
+                ))
+                assert default["notebook_id"] == mcp_env["notebook"].id
+                overview = _payload(await client.call("get_notebook"))
+                assert overview["notebook_id"] == mcp_env["notebook"].id
+                assert overview["is_default"] is True
+                # The cheap polling shape: no profile read unless asked for.
+                assert "profile" not in overview
+                assert set(overview["kg"]) == {
+                    "ready", "building", "pending_sources", "job",
+                }
         async with OfficialMcpClient(
-            app, mcp_env["token_a"].token, manage_lifespan=False
-        ) as first:
-            missing = await first.call("search_agent_memory", {"query": "anything"})
-            assert missing.isError
-            selected = _payload(await first.call(
-                "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+            app, two_notebooks.token, manage_lifespan=False
+        ) as client:
+            explicit = _payload(await client.call(
+                "get_notebook", {"notebook_id": mcp_env["other"].id}
             ))
-            assert selected["notebook_id"] == mcp_env["notebook"].id
-            assert not (await first.call(
-                "search_agent_memory", {"query": "anything"}
-            )).isError
-
-        async with OfficialMcpClient(
-            app, mcp_env["token_a"].token, manage_lifespan=False
-        ) as second:
-            assert (await second.call(
-                "search_agent_memory", {"query": "anything"}
-            )).isError
+            assert explicit["notebook_id"] == mcp_env["other"].id
+            assert explicit["is_default"] is False
+            # The next call without notebook_id is back on the default:
+            # nothing was "selected".
+            again = _payload(await client.call("get_notebook"))
+            assert again["notebook_id"] == mcp_env["notebook"].id
 
 
 @pytest.mark.anyio
@@ -281,7 +424,6 @@ async def test_candidate_is_agent_recallable_across_owner_profiles_but_not_noteb
         async with OfficialMcpClient(
             app, mcp_env["token_a"].token, manage_lifespan=False
         ) as creator:
-            _payload(await creator.call("select_notebook", {"notebook_id": notebook_id}))
             created = _payload(await creator.call("propose_memory", {
                 "title": "Kelvin guard ring",
                 "content_md": content,
@@ -310,20 +452,19 @@ async def test_candidate_is_agent_recallable_across_owner_profiles_but_not_noteb
             assert [item.id for item in memories.items].count(memory_id) == 1
             assert created["status"] == "candidate"
             detail = _payload(await creator.call(
-                "get_memory", {"memory_id": memory_id}
+                "read_reference", {"ref": _mem_ref(mcp_env["notebook"].id, memory_id)}
             ))
             assert detail["status"] == "candidate"
             notebook_hits = _payload(await creator.call(
-                "search_notebook_context", {"query": "kelvin guard-ring"}
+                "search", {"query": "kelvin guard-ring"}
             ))
             assert memory_id not in {item.get("memory_id") for item in notebook_hits["items"]}
 
         async with OfficialMcpClient(
             app, mcp_env["token_b"].token, manage_lifespan=False
         ) as peer:
-            _payload(await peer.call("select_notebook", {"notebook_id": notebook_id}))
             recalled = _payload(await peer.call(
-                "search_agent_memory", {"query": "kelvin guard-ring"}
+                "search", {"include": "memory", "query": "kelvin guard-ring"}
             ))
             hit = next(item for item in recalled["items"] if item["memory_id"] == memory_id)
             assert hit["status"] == "candidate"
@@ -331,16 +472,15 @@ async def test_candidate_is_agent_recallable_across_owner_profiles_but_not_noteb
             assert hit["created_by_agent"] == "Claude Code"
             mcp_env["service"].confirm_memory(memory_id, mcp_env["alice"].id)
             formal = _payload(await peer.call(
-                "search_notebook_context", {"query": "kelvin guard-ring"}
+                "search", {"query": "kelvin guard-ring"}
             ))
             assert memory_id in {item.get("memory_id") for item in formal["items"]}
 
         async with OfficialMcpClient(
             app, mcp_env["bob_token"].token, manage_lifespan=False
         ) as foreign:
-            _payload(await foreign.call("select_notebook", {"notebook_id": notebook_id}))
             hits = _payload(await foreign.call(
-                "search_agent_memory", {"query": "kelvin guard-ring"}
+                "search", {"include": "memory", "query": "kelvin guard-ring"}
             ))
             assert memory_id not in {item["memory_id"] for item in hits["items"]}
 
@@ -353,9 +493,8 @@ async def test_access_is_rechecked_after_revoke_and_membership_loss(mcp_env):
         async with OfficialMcpClient(
             app, mcp_env["bob_token"].token, manage_lifespan=False
         ) as client:
-            _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
             mcp_env["sharing"].remove_member(notebook_id, mcp_env["bob"].id)
-            assert (await client.call("search_notebook_context", {"query": "x"})).isError
+            assert (await client.call("search", {"query": "x"})).isError
 
         mcp_env["service"].revoke_agent_token(
             mcp_env["alice"].id, mcp_env["token_a"].id
@@ -386,9 +525,6 @@ async def test_same_profile_lower_scope_token_cannot_reuse_an_initialized_sessio
         async with OfficialMcpClient(
             app, mcp_env["token_b"].token, manage_lifespan=False
         ) as client:
-            _payload(await client.call(
-                "select_notebook", {"notebook_id": notebook_id}
-            ))
             assert client.http is not None
             assert client.mcp_session_id
             response = await client.http.post(
@@ -443,15 +579,12 @@ async def test_ask_tool_reuses_formal_ask_and_rejects_retired_graph_alias(mcp_en
 
     bind_chat_client(repo, "ask_answer", _AnswerClient())
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         graph = await client.call(
-            "ask_notebook", {"question": "What is here?", "mode": "graph"}
+            "ask", {"question": "What is here?", "mode": "graph"}
         )
         assert graph.isError
         answer = _payload(await client.call(
-            "ask_notebook", {"question": "What evidence exists?", "mode": "chunk"}
+            "ask", {"question": "What evidence exists?", "mode": "chunk"}
         ))
         assert answer["mode"] == "chunk"
         assert "answer" in answer
@@ -484,7 +617,7 @@ async def test_ask_tool_reuses_formal_ask_and_rejects_retired_graph_alias(mcp_en
         # Passing the returned conversation_id back continues the same
         # conversation instead of silently starting a new one.
         followup = _payload(await client.call(
-            "ask_notebook",
+            "ask",
             {
                 "question": "What else is here?",
                 "mode": "chunk",
@@ -496,12 +629,639 @@ async def test_ask_tool_reuses_formal_ask_and_rejects_retired_graph_alias(mcp_en
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_signals_the_three_completion_memory_chains(
+async def test_ask_returns_its_job_get_ask_rereads_it_and_a_key_replays_it(mcp_env):
+    """The single-notebook path returns the durable ``askjob-`` id; ``get_ask``
+    re-reads the same answer (owner only); a retried ``client_request_id``
+    returns the job it already ran instead of running the engine again."""
+    from app.services.sqlite_repository import _now
+
+    repo = repository()
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+            "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("mcp-job-source", mcp_env["notebook"].id, "Evidence", "markdown",
+             "extracted", "parsed", "e.md", "", 0, "", "", "textbook", now, now),
+        )
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("mcp-job-chunk", mcp_env["notebook"].id, "mcp-job-source",
+             "evidence exists in this notebook", "1", "[]", now),
+        )
+    calls: list = []
+
+    class _AnswerClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            calls.append(1)
+            return '{"answer":"Evidence exists [k1].","grounded":true}'
+
+    bind_chat_client(repo, "ask_answer", _AnswerClient())
+    app = mcp_env["app"]
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(
+            app, mcp_env["token_a"].token, manage_lifespan=False
+        ) as client:
+            first = _payload(await client.call("ask", {
+                "question": "What evidence exists?", "mode": "chunk",
+                "client_request_id": "mcp-retry-1",
+            }))
+            assert first["status"] == "answered"
+            assert first["job_id"].startswith("askjob-")
+            assert first["scope"] == {
+                "kind": "notebook", "notebook_ids": [mcp_env["notebook"].id],
+            }
+            assert first["citations"]
+            engine_calls = len(calls)
+            replay = _payload(await client.call("ask", {
+                "question": "What evidence exists?", "mode": "chunk",
+                "client_request_id": "mcp-retry-1",
+            }))
+            assert replay["job_id"] == first["job_id"]
+            assert replay["answer"] == first["answer"]
+            assert len(calls) == engine_calls, "a replayed key must not run the engine"
+            # Surrounding whitespace is not a different question: the stored
+            # question and the comparison share one normaliser.
+            spaced = _payload(await client.call("ask", {
+                "question": "  What evidence exists?\n", "mode": "chunk",
+                "client_request_id": "mcp-retry-1",
+            }))
+            assert spaced["job_id"] == first["job_id"]
+            assert len(calls) == engine_calls
+            reread = _payload(await client.call("get_ask", {"job_id": first["job_id"]}))
+            assert reread["answer"] == first["answer"]
+            assert reread["status"] == "answered"
+            assert [row.get("ref") for row in reread["citations"]] == [
+                row.get("ref") for row in first["citations"]
+            ]
+            for bad in ("askjob-does-not-exist", "nonsense"):
+                missing = await client.call("get_ask", {"job_id": bad})
+                assert _error_code(missing) == "not_found"
+            # The first page's trace comes from the same job row get_ask reads.
+            assert reread["trace"]["total"] == first["trace"]["total"]
+            # The same key for ANOTHER question never returns the old answer.
+            reused = await client.call("ask", {
+                "question": "A different question entirely?", "mode": "chunk",
+                "client_request_id": "mcp-retry-1",
+            })
+            assert _error_code(reused) == "invalid_argument"
+            assert "client_request_id 已用于另一个问题" in _error(reused)
+            assert len(calls) == engine_calls
+        async with OfficialMcpClient(
+            app, mcp_env["bob_token"].token, manage_lifespan=False
+        ) as foreign:
+            refused = await foreign.call("get_ask", {"job_id": first["job_id"]})
+            assert _error_code(refused) == "not_found"
+            assert first["job_id"] not in _error(refused)
+
+
+def _seed_answerable(repo, notebook_id: str, tag: str) -> None:
+    from app.services.sqlite_repository import _now
+
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+            "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (f"src-{tag}", notebook_id, "Evidence", "markdown", "extracted",
+             "parsed", "e.md", "", 0, "", "", "textbook", now, now),
+        )
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (f"chunk-{tag}", notebook_id, f"src-{tag}",
+             "evidence exists in this notebook", "1", "[]", now),
+        )
+
+
+@pytest.mark.anyio
+async def test_a_retry_attaches_to_the_running_job_and_follows_it(mcp_env):
+    """The attach-while-running branch of the real ``ask_current_with_job``:
+    a second call under the same key, made while the first one is still
+    executing, runs no engine of its own -- it follows the running job (in
+    this process: its cancel handle is registered) and returns its answer."""
+    repo = repository()
+    _seed_answerable(repo, mcp_env["notebook"].id, "attach")
+    entered, release = threading.Event(), threading.Event()
+    calls: list = []
+
+    class _SlowAnswer:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            calls.append(1)
+            entered.set()
+            assert release.wait(10)
+            return '{"answer":"Evidence exists [k1].","grounded":true}'
+
+    bind_chat_client(repo, "ask_answer", _SlowAnswer())
+    arguments = {
+        "question": "What evidence exists?", "mode": "chunk",
+        "client_request_id": "mcp-attach-1",
+    }
+    results: dict = {}
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        async def first():
+            results["first"] = _payload(await client.call("ask", arguments))
+
+        async def second():
+            await anyio.to_thread.run_sync(entered.wait, 10)
+            results["second"] = _payload(await client.call("ask", arguments))
+
+        async def releaser():
+            await anyio.to_thread.run_sync(entered.wait, 10)
+            await anyio.sleep(0.6)  # the attached call is polling by now
+            release.set()
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(first)
+            tg.start_soon(second)
+            tg.start_soon(releaser)
+    assert results["first"]["job_id"] == results["second"]["job_id"]
+    assert results["second"]["answer"] == results["first"]["answer"]
+    assert len(calls) == 1, "the attached retry must not run a second engine"
+
+
+@pytest.mark.anyio
+async def test_a_raced_key_named_for_another_conversation_is_invalid_argument(
+    mcp_env, monkeypatch,
+):
+    """The race-recovery branch (the probe saw no job, the store's atomic
+    insert found one): the check compares the caller's ORIGINAL
+    conversation_id, saved before the store rewrites the payload to the
+    existing job's -- so a same-key retry naming another conversation is
+    refused instead of silently returning the old answer."""
+    from app.repositories.sqlite.ask_state_store import AskStateStore
+
+    repo = repository()
+    _seed_answerable(repo, mcp_env["notebook"].id, "race")
+
+    class _AnswerClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            calls.append(1)
+            return '{"answer":"Evidence exists [k1].","grounded":true}'
+
+    calls: list = []
+    bind_chat_client(repo, "ask_answer", _AnswerClient())
+    keyed = {
+        "question": "What evidence exists?", "mode": "chunk",
+        "client_request_id": "mcp-race-conv-1",
+    }
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        first = _payload(await client.call("ask", keyed))
+        other = _payload(await client.call("ask", {
+            "question": "Another thread?", "mode": "chunk",
+        }))
+        assert other["conversation_id"] != first["conversation_id"]
+        # Skip the fast probe: the call reaches begin_or_attach_durable_job,
+        # as a concurrent retry landing between probe and insert does.
+        monkeypatch.setattr(
+            AskStateStore, "find_job_for_client_request", lambda *_a, **_k: None
+        )
+        before = len(calls)
+        raced = await client.call("ask", {
+            **keyed, "conversation_id": other["conversation_id"],
+        })
+        same = _payload(await client.call("ask", keyed))
+    assert _error_code(raced) == "invalid_argument"
+    assert same["job_id"] == first["job_id"]
+    assert len(calls) == before, "neither raced retry may run an engine of its own"
+
+
+def _answering_notebook(mcp_env, tag: str) -> list:
+    """Seed the default notebook so a chunk ask answers; the engine calls."""
+    repo = repository()
+    _seed_answerable(repo, mcp_env["notebook"].id, tag)
+    calls: list = []
+
+    class _AnswerClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            calls.append(1)
+            return '{"answer":"Evidence exists [k1].","grounded":true}'
+
+    bind_chat_client(repo, "ask_answer", _AnswerClient())
+    return calls
+
+
+@pytest.mark.anyio
+async def test_a_memory_open_job_is_not_replayed_to_an_ask_only_token(mcp_env):
+    """A job that ran with the private-Memory channel open (its token held
+    ``read``) may hold Memory in its stored answer and trace. A token of the
+    same owner that may not read Memory now gets ``scope_missing`` naming
+    「读取」 on BOTH replay paths -- ``get_ask`` and a keyed retry -- while the
+    token that may read Memory replays it as before."""
+    calls = _answering_notebook(mcp_env, "memon")
+    _set_token_tiers(mcp_env, mcp_env["token_b"].id, ["ask"])
+    keyed = {
+        "question": "What evidence exists?", "mode": "chunk",
+        "client_request_id": "mcp-memory-on-1",
+    }
+    app = mcp_env["app"]
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(
+            app, mcp_env["token_a"].token, manage_lifespan=False
+        ) as client:
+            first = _payload(await client.call("ask", keyed))
+            same_token_read = _payload(
+                await client.call("get_ask", {"job_id": first["job_id"]})
+            )
+            same_token_retry = _payload(await client.call("ask", keyed))
+        async with OfficialMcpClient(
+            app, mcp_env["token_b"].token, manage_lifespan=False
+        ) as client:
+            read = await client.call("get_ask", {"job_id": first["job_id"]})
+            retried = await client.call("ask", keyed)
+    assert repository().ask_job_origin(first["job_id"])["memory_access"] is True
+    assert same_token_read["answer"] == first["answer"]
+    assert same_token_retry["job_id"] == first["job_id"]
+    for refused in (read, retried):
+        assert _error_code(refused) == "scope_missing"
+        assert "「读取」" in _error(refused)
+    assert len(calls) == 1, "no replay may run an engine of its own"
+
+
+@pytest.mark.anyio
+async def test_a_memory_closed_job_replays_freely(mcp_env):
+    """A job that ran with the Memory channel closed (an ``ask``-only token)
+    holds no Memory: ``get_ask`` and a keyed retry replay it, for that token
+    and for one that may read Memory alike."""
+    calls = _answering_notebook(mcp_env, "memoff")
+    _set_token_tiers(mcp_env, mcp_env["token_b"].id, ["ask"])
+    keyed = {
+        "question": "What evidence exists?", "mode": "chunk",
+        "client_request_id": "mcp-memory-off-1",
+    }
+    app = mcp_env["app"]
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(
+            app, mcp_env["token_b"].token, manage_lifespan=False
+        ) as client:
+            first = _payload(await client.call("ask", keyed))
+            read = _payload(await client.call("get_ask", {"job_id": first["job_id"]}))
+            retried = _payload(await client.call("ask", keyed))
+        async with OfficialMcpClient(
+            app, mcp_env["token_a"].token, manage_lifespan=False
+        ) as client:
+            wider = _payload(await client.call("get_ask", {"job_id": first["job_id"]}))
+    assert repository().ask_job_origin(first["job_id"])["memory_access"] is False
+    assert read["answer"] == first["answer"] == wider["answer"]
+    assert retried["job_id"] == first["job_id"]
+    assert len(calls) == 1
+
+
+def _answer_after(mcp_env, tag: str, during_run) -> list:
+    """Seed an answerable notebook whose engine runs ``during_run`` (once)
+    before it answers -- the moment a token changes under a running ask."""
+    repo = repository()
+    _seed_answerable(repo, mcp_env["notebook"].id, tag)
+    calls: list = []
+
+    class _ChangingAnswer:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                during_run()
+            return '{"answer":"Evidence exists [k1].","grounded":true}'
+
+    bind_chat_client(repo, "ask_answer", _ChangingAnswer())
+    return calls
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("change, code", [
+    ("revoked", "token_inactive"),
+    ("allowlist", "not_found"),
+    ("read_removed", "scope_missing"),
+])
+async def test_a_notebook_answer_is_delivered_under_the_token_as_it_is_now(
+    mcp_env, change, code,
+):
+    """An executing ``ask`` re-authorizes when it hands back the answer: a
+    token revoked, moved off the notebook, or stripped of ``read`` (the run
+    had Memory open) while the engine ran gets get_ask's refusal and no
+    answer. The answer is saved all the same."""
+    service, alice = mcp_env["service"], mcp_env["alice"]
+    token = mcp_env["token_a"]
+
+    def during_run():
+        if change == "revoked":
+            service.revoke_agent_token(alice.id, token.id)
+        elif change == "allowlist":
+            service.update_agent_token_access(
+                alice.id, token.id, ["read", "ask"], mcp_env["other"].id,
+                [mcp_env["other"].id], None,
+            )
+        else:
+            _set_token_tiers(mcp_env, token.id, ["ask"])
+
+    calls = _answer_after(mcp_env, f"deliver{change}", during_run)
+    async with OfficialMcpClient(mcp_env["app"], token.token) as client:
+        refused = await client.call("ask", {
+            "question": "What evidence exists?", "mode": "chunk",
+        })
+    assert _error_code(refused) == code
+    assert "Evidence exists" not in _error(refused)
+    if change == "read_removed":
+        assert "「读取」" in _error(refused)
+    assert len(calls) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("change, code", [
+    ("revoked", "token_inactive"),
+    ("read_removed", "scope_missing"),
+])
+async def test_an_attached_caller_is_reauthorized_when_the_job_finishes(
+    mcp_env, change, code,
+):
+    """A keyed retry that attached to the running job is re-authorized when
+    the job ends: its token, changed meanwhile, is refused, while the caller
+    whose token did not change receives the answer."""
+    service, alice = mcp_env["service"], mcp_env["alice"]
+    repo = repository()
+    _seed_answerable(repo, mcp_env["notebook"].id, f"attach{change}")
+    entered, release = threading.Event(), threading.Event()
+    calls: list = []
+
+    class _SlowAnswer:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            calls.append(1)
+            entered.set()
+            assert release.wait(10)
+            return '{"answer":"Evidence exists [k1].","grounded":true}'
+
+    bind_chat_client(repo, "ask_answer", _SlowAnswer())
+    arguments = {
+        "question": "What evidence exists?", "mode": "chunk",
+        "client_request_id": f"mcp-deliver-{change}",
+    }
+    results: dict = {}
+    app = mcp_env["app"]
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(
+            app, mcp_env["token_a"].token, manage_lifespan=False
+        ) as first_client, OfficialMcpClient(
+            app, mcp_env["token_b"].token, manage_lifespan=False
+        ) as second_client:
+            async def first():
+                results["first"] = await first_client.call("ask", arguments)
+
+            async def second():
+                await anyio.to_thread.run_sync(entered.wait, 10)
+                results["second"] = await second_client.call("ask", arguments)
+
+            async def changer():
+                await anyio.to_thread.run_sync(entered.wait, 10)
+                await anyio.sleep(0.6)  # the attached call is polling by now
+                if change == "revoked":
+                    service.revoke_agent_token(alice.id, mcp_env["token_b"].id)
+                else:
+                    _set_token_tiers(mcp_env, mcp_env["token_b"].id, ["ask"])
+                release.set()
+
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(first)
+                tg.start_soon(second)
+                tg.start_soon(changer)
+    delivered = _payload(results["first"])
+    assert delivered["answer"]
+    assert _error_code(results["second"]) == code
+    assert "Evidence exists" not in _error(results["second"])
+    assert len(calls) == 1
+
+
+@pytest.mark.anyio
+async def test_a_key_spent_in_another_notebook_is_invalid_argument(mcp_env):
+    repo = repository()
+    _seed_answerable(repo, mcp_env["notebook"].id, "conflict")
+
+    class _AnswerClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return '{"answer":"Evidence exists [k1].","grounded":true}'
+
+    bind_chat_client(repo, "ask_answer", _AnswerClient())
+    two_notebooks = mcp_env["service"].issue_agent_token(
+        mcp_env["alice"].id, mcp_env["profile_a"].id, ["read", "ask"],
+        mcp_env["notebook"].id, [mcp_env["notebook"].id, mcp_env["other"].id],
+        None,
+    )
+    async with OfficialMcpClient(mcp_env["app"], two_notebooks.token) as client:
+        _payload(await client.call("ask", {
+            "question": "q", "mode": "chunk", "client_request_id": "mcp-cross-1",
+        }))
+        crossed = await client.call("ask", {
+            "question": "q", "mode": "chunk", "client_request_id": "mcp-cross-1",
+            "notebooks": [mcp_env["other"].id],
+        })
+    assert _error_code(crossed) == "invalid_argument"
+
+
+@pytest.mark.anyio
+async def test_browser_started_jobs_are_not_reachable_through_mcp(mcp_env):
+    """A job the browser started -- even the token owner's own -- is
+    ``not_found`` to ``get_ask``, and its key is never attached to."""
+    from app.models.ask import AskRequest
+
+    repo = repository()
+    _seed_answerable(repo, mcp_env["notebook"].id, "browser")
+
+    class _AnswerClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return '{"answer":"Evidence exists [k1].","grounded":true}'
+
+    bind_chat_client(repo, "ask_answer", _AnswerClient())
+    marker = set_request_user(mcp_env["alice"])
+    try:
+        _response, job_id = repo.ask_with_job(
+            mcp_env["notebook"].id,
+            AskRequest(question="web q", mode="chunk", client_request_id="web-key-1"),
+            submitted_via="web",
+        )
+    finally:
+        reset_request_user(marker)
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        read = await client.call("get_ask", {"job_id": job_id})
+        attached = await client.call("ask", {
+            "question": "web q", "mode": "chunk", "client_request_id": "web-key-1",
+        })
+    assert _error_code(read) == "not_found"
+    assert job_id not in _error(read)
+    assert _error_code(attached) == "not_found"
+
+
+def test_an_attached_wait_lets_go_on_stop_and_bounds_a_foreign_job(monkeypatch):
+    """``_wait_for_job`` is a pure wait: ``stop`` ends it, and a job no
+    executor in this process owns is followed only for the bounded time."""
+    from app.domain.cancellation import AskExecutorGone, AskWaitAbandoned
+    from app.services import ask_service as ask_service_module
+
+    owner = SimpleNamespace(
+        ask_state=SimpleNamespace(
+            ask_job_progress=lambda job_id: {"status": "running", "trace_steps": 0}
+        ),
+        cancellations=SimpleNamespace(get=lambda job_id: None),
+    )
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(AskWaitAbandoned):
+        ask_service_module.AskService._wait_for_job(owner, "askjob-x", stop=stop)
+    monkeypatch.setattr(ask_service_module, "ATTACH_STALL_SECONDS", 0.0)
+    with pytest.raises(AskExecutorGone):
+        ask_service_module.AskService._wait_for_job(owner, "askjob-x")
+
+
+def test_a_local_job_is_followed_past_the_stall_window_and_a_progressing_foreign_one_too(
+    monkeypatch,
+):
+    """The no-progress window only applies to a job NOT executing here, and
+    only while it shows no progress: a local job and a foreign job that keeps
+    tracing are both followed to the end."""
+    from app.domain.cancellation import AskExecutorGone
+    from app.services import ask_service as ask_service_module
+
+    monkeypatch.setattr(ask_service_module, "ATTACH_STALL_SECONDS", 0.15)
+    monkeypatch.setattr(ask_service_module.time, "sleep", lambda _s: None)
+
+    def owner(rows, local):
+        states = iter(rows)
+        return SimpleNamespace(
+            ask_state=SimpleNamespace(
+                ask_job_progress=lambda job_id: next(states),
+                ask_answer_detail=lambda answer_id: None,
+            ),
+            cancellations=SimpleNamespace(get=lambda job_id: object() if local else None),
+        )
+
+    def running(steps):
+        return {"status": "running", "trace_steps": steps}
+
+    clock = iter(range(0, 1000))
+    monkeypatch.setattr(ask_service_module.time, "monotonic", lambda: next(clock) * 0.1)
+    still = [running(1)] * 5 + [{"status": "cancelled"}]
+    assert ask_service_module.AskService._wait_for_job(owner(still, True), "j") is None
+    progressing = [running(n) for n in range(1, 6)] + [{"status": "cancelled"}]
+    assert ask_service_module.AskService._wait_for_job(owner(progressing, False), "j") is None
+    with pytest.raises(AskExecutorGone):
+        ask_service_module.AskService._wait_for_job(owner(still, False), "j")
+
+
+@pytest.mark.anyio
+async def test_a_cancelled_call_releases_its_waiter_even_after_the_heartbeat_died(monkeypatch):
+    """The cancel->stop translation does not depend on the heartbeat: here the
+    first progress write fails (the heartbeat ends), and cancelling the call
+    afterwards still sets the waiter's stop."""
+    import anyio
+
+    from app.api.mcp_tools import _shared
+
+    monkeypatch.setattr(_shared, "PROGRESS_HEARTBEAT_SECONDS", 0.01)
+    beats: list = []
+
+    async def failing_progress(*_a, **_k):
+        beats.append(1)
+        raise RuntimeError("stream closed")
+
+    ctx = SimpleNamespace(report_progress=failing_progress)
+    stop = threading.Event()
+    released = threading.Event()
+
+    def wait_until_stopped():
+        if stop.wait(10):
+            released.set()
+        return "late"
+
+    with anyio.move_on_after(0.3):
+        await _shared._run_with_progress(
+            ctx, wait_until_stopped, label="ask", on_cancel=stop.set
+        )
+    assert beats, "the heartbeat never ran, so it could not have died first"
+    assert released.wait(2), "the waiter was not released after the cancel"
+
+
+def test_a_done_job_without_its_answer_row_reads_as_failed():
+    from app.api.mcp_tools.ask import notebook_view
+
+    view = notebook_view(
+        "askjob-x", "nb-1", None,
+        {"status": "done", "trace": [], "conversation_id": "conv-x"}, True,
+    )
+    assert view["status"] == "failed"
+    assert view["coverage_counts"]["searched"] == 0
+    assert view["error"]
+
+
+def test_the_page_falls_back_to_the_conclusion_when_the_answer_is_empty():
+    from app.api.mcp_tools.ask import notebook_view
+
+    response = SimpleNamespace(
+        answer="", conclusion="只有结论", answer_id="ans-1", conversation_id="conv-1",
+        mode="chunk", grounded=True, anchors=[], citations=[],
+    )
+    view = notebook_view("askjob-x", "nb-1", response, {"status": "done", "trace": []}, True)
+    assert view["answer"] == "只有结论"
+    assert view["status"] == "answered"
+    assert view["coverage_counts"]["searched"] == 1
+
+
+@pytest.mark.anyio
+async def test_ask_routes_by_the_number_of_notebooks(mcp_env, monkeypatch):
+    """Omitted -> default notebook; one -> that notebook; 2-8 -> global; more
+    than 8 is refused, and a plugin engine is single-notebook only."""
+    service = mcp_env["service"]
+    monkeypatch.setattr(service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env))
+    asked: list = []
+    monkeypatch.setattr(
+        service, "ask",
+        lambda notebook_id, payload, **_k: (asked.append(notebook_id), SimpleNamespace(
+            answer_id="ans-route", answer="ok", conclusion="ok", grounded=True,
+            evidence_level="grounded", mode="chunk", conversation_id="conv-route",
+            anchors=[], citations=[],
+        ))[1],
+    )
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        default = _payload(await client.call("ask", {"question": "q", "mode": "chunk"}))
+        assert default["scope"]["notebook_ids"] == [mcp_env["notebook"].id]
+        one = _payload(await client.call("ask", {
+            "question": "q", "mode": "chunk", "notebooks": [mcp_env["notebook"].id],
+        }))
+        assert one["job_id"] == FAKE_ASK_JOB_ID
+        assert asked == [mcp_env["notebook"].id] * 2
+        too_many = await client.call("ask", {
+            "question": "q", "mode": "chunk",
+            "notebooks": [f"nb-{index}" for index in range(9)],
+        })
+        assert _error_code(too_many) == "invalid_argument"
+        outside = await client.call("ask", {
+            "question": "q", "mode": "chunk", "notebooks": [mcp_env["other"].id],
+        })
+        assert _error_code(outside) == "notebook_not_allowed"
+    assert asked == [mcp_env["notebook"].id] * 2
+
+
+@pytest.mark.anyio
+async def test_mcp_ask_signals_the_three_completion_memory_chains(
     mcp_env, monkeypatch
 ):
     """Agentic Memory PR-3(T7):MCP 的提问也算数。
 
-    ``ask_notebook`` 经 ``RepositoryFacade.ask`` → ``AskService.ask_current``,
+    ``ask`` 经 ``RepositoryFacade.ask`` → ``AskService.ask_current``,
     在 PR-3 之前那一层从不触发 ``_note_ask_completed``,于是三条记忆链路对
     Agent 的提问完全零计数——而 Agent 的提问恰恰是「这个库越用越熟」最主要的
     输入。这里走的是**生产接线**:``create_app()`` 的完成观察者 host 加三个内建
@@ -571,11 +1331,8 @@ async def test_ask_notebook_signals_the_three_completion_memory_chains(
     monkeypatch.setattr(background_jobs, "submit", _submit)
 
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         answer = _payload(await client.call(
-            "ask_notebook", {"question": "What evidence exists?", "mode": "chunk"}
+            "ask", {"question": "What evidence exists?", "mode": "chunk"}
         ))
     assert answer["conversation_id"]
     assert completion_jobs, "MCP 提问必须提交一个提问完成 job"
@@ -604,7 +1361,7 @@ def _fake_notebook_summary(mcp_env):
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_projects_precise_anchor_and_citation_fields(
+async def test_mcp_ask_projects_precise_anchor_and_citation_fields(
     mcp_env, monkeypatch
 ):
     """P1 mutation guard: exact-value assertions (not presence/upper-bound
@@ -672,9 +1429,8 @@ async def test_ask_notebook_projects_precise_anchor_and_citation_fields(
         ),
     )
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         answer = _payload(await client.call(
-            "ask_notebook", {"question": "precise fields", "mode": "chunk"}
+            "ask", {"question": "precise fields", "mode": "chunk"}
         ))
 
     anchors = answer["anchors"]
@@ -694,6 +1450,13 @@ async def test_ask_notebook_projects_precise_anchor_and_citation_fields(
     for citation in citations:
         assert "notebook_id" not in citation
         assert "memory_id" not in citation
+    # Every citation that points at an element carries its read_reference
+    # handle, bound to the asked notebook (the default one here).
+    notebook_id = mcp_env["notebook"].id
+    assert [citation["ref"] for citation in citations] == [
+        _el_ref(notebook_id, "citation-source-1", "citation-element-1"),
+        _el_ref(notebook_id, "citation-source-2", "citation-element-2"),
+    ]
 
     # field_limits truncation is exact: value[:limit-1] + "…" (len == limit).
     assert citations[0]["quoted_span"] == long_quoted_span[:199] + "…"
@@ -706,7 +1469,7 @@ async def test_ask_notebook_projects_precise_anchor_and_citation_fields(
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_passes_the_external_evidence_url_through(
+async def test_mcp_ask_passes_the_external_evidence_url_through(
     mcp_env, monkeypatch
 ):
     """T4(reflect 插件动作,设计文档 §七):已认证的 Agent 面看得到外部证据的
@@ -765,9 +1528,8 @@ async def test_ask_notebook_passes_the_external_evidence_url_through(
         ),
     )
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         answer = _payload(await client.call(
-            "ask_notebook", {"question": "external passthrough", "mode": "reasoning"}
+            "ask", {"question": "external passthrough", "mode": "reasoning"}
         ))
 
     external_anchor, library_anchor = answer["anchors"]
@@ -792,17 +1554,13 @@ async def test_a_url_is_dropped_whole_rather_than_clipped_under_budget(
     (或它转述给的人)会去打开它,落在另一个页面或什么都没有,全程没有任何信号
     说这里丢过东西。所以预算要么花得起整条 URL,要么整条不发。
 
-    把 ``citations_budget_chars`` 收紧到必然触发裁剪,断言输出里**没有**任何
-    以「…」结尾的 url、也没有 url 的任何真前缀。"""
+    URL 长到一页放不下全部 12 条,断言输出里**没有**任何以「…」结尾的 url、
+    也没有 url 的任何真前缀;放不下的引用整条留给下一页(next_citation_offset)。"""
     service = mcp_env["service"]
-    notebook_id = mcp_env["notebook"].id
     monkeypatch.setattr(service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env))
-    from app.api.mcp_tools import memory_context
-
-    monkeypatch.setattr(memory_context, "CITATIONS_BUDGET_CHARS", 400)
 
     urls = [
-        f"https://example.org/papers/{index}/" + ("segment/" * 20)
+        f"https://example.org/papers/{index}/" + ("segment/" * 150)
         for index in range(12)
     ]
     monkeypatch.setattr(
@@ -825,21 +1583,21 @@ async def test_a_url_is_dropped_whole_rather_than_clipped_under_budget(
         ),
     )
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         answer = _payload(await client.call(
-            "ask_notebook", {"question": "url budget", "mode": "reasoning"}
+            "ask", {"question": "url budget", "mode": "reasoning"}
         ))
 
     emitted = [row["url"] for row in answer["citations"] if "url" in row]
-    # 预算确实咬到了(否则这条用例是空转)。
+    # 预算确实咬到了(否则这条用例是空转),没放下的整条留到下一页。
     assert len(emitted) < len(urls)
+    assert answer["next_citation_offset"] == len(answer["citations"])
     for value in emitted:
         assert value in urls, f"emitted a url that is not one of the originals: {value}"
         assert not value.endswith("…")
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_preserves_answer_text_under_realistic_citation_load(
+async def test_mcp_ask_preserves_answer_text_under_realistic_citation_load(
     mcp_env, monkeypatch
 ):
     """P0: with a realistic (non-adversarial) CJK payload -- an answer sized
@@ -898,9 +1656,8 @@ async def test_ask_notebook_preserves_answer_text_under_realistic_citation_load(
         ),
     )
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         answer = _payload(await client.call(
-            "ask_notebook", {"question": "realistic load", "mode": "chunk"}
+            "ask", {"question": "realistic load", "mode": "chunk"}
         ))
     # The core guardrail: answer survives byte-for-byte, and the response
     # still fits the public MCP JSON budget.
@@ -909,25 +1666,22 @@ async def test_ask_notebook_preserves_answer_text_under_realistic_citation_load(
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_rejects_conversation_id_over_max_length(mcp_env):
+async def test_mcp_ask_rejects_conversation_id_over_max_length(mcp_env):
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         rejected = await client.call(
-            "ask_notebook",
+            "ask",
             {
                 "question": "anything",
                 "mode": "chunk",
                 "conversation_id": "c" * 201,
             },
         )
-        assert rejected.isError
-        assert "too long" in rejected.content[0].text
+        assert _error_code(rejected) == "invalid_argument"
+        assert "conversation_id 过长" in _error(rejected)
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_rejects_a_question_over_max_length(mcp_env):
+async def test_mcp_ask_rejects_a_question_over_max_length(mcp_env):
     """MCP 这个 ask 入口与 /ask、/ask/stream 受同一条长度闸约束。
 
     公开分享页把每轮 question 原样发给匿名访客,所以「原样返回」只有在**每个**写入
@@ -941,29 +1695,27 @@ async def test_ask_notebook_rejects_a_question_over_max_length(mcp_env):
     from app.models.ask import ASK_QUESTION_MAX_CHARS
 
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         rejected = await client.call(
-            "ask_notebook",
+            "ask",
             {"question": "问" * (ASK_QUESTION_MAX_CHARS + 1), "mode": "chunk"},
         )
         assert rejected.isError
         text = rejected.content[0].text
         # 可操作:说清上限、当前长度和出路,不是一句裸 "invalid"。
-        assert "question too long" in text
+        assert _error_code(rejected) == "invalid_argument"
+        assert "question 过长" in text
         assert str(ASK_QUESTION_MAX_CHARS) in text
-        assert "source" in text
+        assert "来源" in text
 
         # 恰好等于上限**不因长度**被拒(空转保护:恒拒的实现过不了)。空库仍会以
         # 「先添加来源」拒绝——那正好证明请求已经走过了长度闸、进到了可用性判定。
         at_cap = await client.call(
-            "ask_notebook",
+            "ask",
             {"question": "问" * ASK_QUESTION_MAX_CHARS, "mode": "chunk"},
         )
-        assert at_cap.isError
-        assert "too long" not in at_cap.content[0].text
-        assert "来源" in at_cap.content[0].text
+        assert _error_code(at_cap) == "unavailable"
+        assert "过长" not in _error(at_cap)
+        assert "来源" in _error(at_cap)
 
 
 def _ask_jobs_row_count(mcp_env) -> int:
@@ -984,7 +1736,7 @@ def _required_ambiguity(contract: dict) -> dict:
 
 async def _clarification_for(client, question: str) -> dict:
     result = await client.call(
-        "ask_notebook", {"question": question, "mode": "reasoning"},
+        "ask", {"question": question, "mode": "reasoning"},
     )
     assert not result.isError, result
     payload = _payload(result)
@@ -993,7 +1745,7 @@ async def _clarification_for(client, question: str) -> dict:
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_reasoning_returns_a_review_view_and_a_handle(
+async def test_mcp_ask_reasoning_returns_a_review_view_and_a_handle(
     mcp_env, monkeypatch
 ):
     """网页端的「理解不了就交回调用端」在 MCP 上的形态:结构化结果,不是错误。
@@ -1021,12 +1773,11 @@ async def test_ask_notebook_reasoning_returns_a_review_view_and_a_handle(
     jobs_before = _ask_jobs_row_count(mcp_env)
     conversations_before = _conversations_row_count(mcp_env)
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         payload = await _clarification_for(client, "分析一下")
     assert payload["mode"] == "reasoning"
-    assert payload["notebook_id"] == mcp_env["notebook"].id
+    assert payload["scope"] == {
+        "kind": "notebook", "notebook_ids": [mcp_env["notebook"].id],
+    }
     assert payload["intent_token"]
     review = payload["intent"]
     # 审阅视图 = 浏览器审阅面板展示的那部分;检索分解留在服务端的合同里,不回传。
@@ -1045,7 +1796,7 @@ async def test_ask_notebook_reasoning_returns_a_review_view_and_a_handle(
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_reasoning_resubmits_the_answered_contract(
+async def test_mcp_ask_reasoning_resubmits_the_answered_contract(
     mcp_env, monkeypatch
 ):
     """第二次调用带句柄与回答:引擎收到的 `AskRequest.intent` 与浏览器提交的
@@ -1075,13 +1826,28 @@ async def test_ask_notebook_reasoning_resubmits_the_answered_contract(
         )
 
     monkeypatch.setattr(service, "ask", capturing_ask)
-    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
-        first = await _clarification_for(client, "分析一下")
+    app = mcp_env["app"]
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(
+            app, mcp_env["token_a"].token, manage_lifespan=False
+        ) as client:
+            first = await _clarification_for(client, "分析一下")
         row = _required_ambiguity(first["intent"])
-        result = await client.call("ask_notebook", {
+        # The handle is stored server-side (ask_intent_handles), not on the MCP
+        # session: a brand-new session answers it.
+        async with OfficialMcpClient(
+            app, mcp_env["token_a"].token, manage_lifespan=False
+        ) as client:
+            result = await _answer_clarification(client, first, row)
+    assert not result.isError, result
+    payload = _payload(result)
+    assert payload["status"] == "answered"
+    assert payload["answer_id"] == "ans-clarified"
+    _assert_clarified(payload, seen, first, row)
+
+
+async def _answer_clarification(client, first, row):
+    return await client.call("ask", {
             "question": "分析一下", "mode": "reasoning",
             "intent": {
                 "intent_token": first["intent_token"],
@@ -1089,10 +1855,9 @@ async def test_ask_notebook_reasoning_resubmits_the_answered_contract(
                 "answers": [{"id": row["id"], "answer": "CMOS 反相器"}],
             },
         })
-    assert not result.isError, result
-    payload = _payload(result)
-    assert payload["status"] == "answered"
-    assert payload["answer_id"] == "ans-clarified"
+
+
+def _assert_clarified(payload, seen, first, row) -> None:
     # 回答摘要:Agent 能告诉用户这次是按什么理解答的。
     assert payload["intent"]["resolved_question"] == "分析 CMOS 反相器的阈值电压"
     assert payload["intent"]["assumptions"] == ["按 0.18um 工艺"]
@@ -1112,7 +1877,7 @@ async def test_ask_notebook_reasoning_resubmits_the_answered_contract(
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_reasoning_rejects_an_unanswered_or_mismatched_intent(
+async def test_mcp_ask_reasoning_rejects_an_unanswered_or_mismatched_intent(
     mcp_env, monkeypatch
 ):
     """与 HTTP `/ask` 同一条冻结校验、同一句用户文案;不通过时 `repo.ask` 不被调用。"""
@@ -1128,36 +1893,33 @@ async def test_ask_notebook_reasoning_rejects_an_unanswered_or_mismatched_intent
 
     monkeypatch.setattr(service, "ask", never_ask)
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         first = await _clarification_for(client, "分析一下")
         token = first["intent_token"]
         answer_row = {
             "id": _required_ambiguity(first["intent"])["id"], "answer": "CMOS 反相器",
         }
-        unanswered = await client.call("ask_notebook", {
+        unanswered = await client.call("ask", {
             "question": "分析一下", "mode": "reasoning",
             "intent": {"intent_token": token, "answers": []},
         })
-        mismatched = await client.call("ask_notebook", {
+        mismatched = await client.call("ask", {
             "question": "分析 CMOS 反相器", "mode": "reasoning",
             "intent": {"intent_token": token, "answers": [answer_row]},
         })
-        malformed = await client.call("ask_notebook", {
+        malformed = await client.call("ask", {
             "question": "分析一下", "mode": "reasoning",
             "intent": {"contract": {"objective": "分析一下"}, "answers": []},
         })
-        unknown = await client.call("ask_notebook", {
+        unknown = await client.call("ask", {
             "question": "分析一下", "mode": "reasoning",
             "intent": {"intent_token": "no-such-token", "answers": [answer_row]},
         })
-        wrong_mode = await client.call("ask_notebook", {
+        wrong_mode = await client.call("ask", {
             "question": "分析一下", "mode": "chunk",
             "intent": {"intent_token": token, "answers": [answer_row]},
         })
         blank = await client.call(
-            "ask_notebook", {"question": "   ", "mode": "reasoning"},
+            "ask", {"question": "   ", "mode": "reasoning"},
         )
     assert unanswered.isError
     assert "请先回答所有必填澄清问题" in unanswered.content[0].text
@@ -1175,11 +1937,11 @@ async def test_ask_notebook_reasoning_rejects_an_unanswered_or_mismatched_intent
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_reasoning_understanding_sees_the_conversation_history(
+async def test_mcp_ask_reasoning_understanding_sees_the_conversation_history(
     mcp_env, monkeypatch
 ):
-    """理解步骤拿到的历史块与 `/ask/intent` 相同(最近几轮的用户提问),但陌生
-    `conversation_id` 按本工具既有口径静默视为无历史,而不是 404。"""
+    """理解步骤拿到的历史块与 `/ask/intent` 相同(最近几轮的用户提问);别人的或
+    不存在的 `conversation_id` 是 not_found,不再静默另开会话,也不跑理解步骤。"""
     from app.models.ask import QueryIntentContract
 
     service = mcp_env["service"]
@@ -1195,7 +1957,7 @@ async def test_ask_notebook_reasoning_understanding_sees_the_conversation_histor
     owners = {"conv-mine": mcp_env["alice"].id, "conv-bob": mcp_env["bob"].id}
     monkeypatch.setattr(service, "preview_reasoning_intent", fake_preview)
     # 归属走访问仓库这个端口(与 ask_routes._intent_history 同源),不走 facade。
-    from app.api.mcp_tools import memory_context as memory_context_module
+    from app.api.mcp_tools import ask as memory_context_module
 
     monkeypatch.setattr(
         memory_context_module, "notebook_access_repository",
@@ -1204,7 +1966,7 @@ async def test_ask_notebook_reasoning_understanding_sees_the_conversation_histor
     monkeypatch.setattr(
         service, "get_conversation",
         lambda cid: SimpleNamespace(
-            notebook_id=mcp_env["notebook"].id,
+            id=cid, notebook_id=mcp_env["notebook"].id,
             turns=[SimpleNamespace(question="先说说 CMOS 反相器"),
                    SimpleNamespace(question="它的阈值电压呢")],
         ),
@@ -1218,22 +1980,29 @@ async def test_ask_notebook_reasoning_understanding_sees_the_conversation_histor
         ),
     )
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
-        for cid in ("conv-mine", "conv-bob", "conv-unknown"):
-            result = await client.call("ask_notebook", {
+        result = await client.call("ask", {
+            "question": "接着分析它的噪声容限", "mode": "reasoning",
+            "conversation_id": "conv-mine",
+        })
+        assert not result.isError, result
+        for cid in ("conv-bob", "conv-unknown", "x-unknown-shape"):
+            refused = await client.call("ask", {
                 "question": "接着分析它的噪声容限", "mode": "reasoning",
                 "conversation_id": cid,
             })
-            assert not result.isError, result
-    assert histories == [
-        "User: 先说说 CMOS 反相器\nUser: 它的阈值电压呢", "", "",
-    ]
+            assert _error_code(refused) == "not_found", cid
+            assert cid not in _error(refused)
+        # Naming another notebook than the conversation's own is not_found too.
+        conflicting = await client.call("ask", {
+            "question": "接着分析它的噪声容限", "mode": "reasoning",
+            "conversation_id": "conv-mine", "notebooks": [mcp_env["other"].id],
+        })
+        assert _error_code(conflicting) == "not_found"
+    assert histories == ["User: 先说说 CMOS 反相器\nUser: 它的阈值电压呢"]
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_reasoning_clarifies_a_topic_rich_contract_by_handle(
+async def test_mcp_ask_reasoning_clarifies_a_topic_rich_contract_by_handle(
     mcp_env, monkeypatch
 ):
     """质量评审 P1-2 的反例:16 个满长主题的合同远超 12,000 字节预算。合同不回传、
@@ -1269,13 +2038,10 @@ async def test_ask_notebook_reasoning_clarifies_a_topic_rich_contract_by_handle(
 
     monkeypatch.setattr(service, "ask", capturing_ask)
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         first = await _clarification_for(client, "分析一下")
         assert first["truncation"]["truncated"] is False
         assert first["intent"]["ambiguities"][0]["options"] == ["A", "B"]
-        result = await client.call("ask_notebook", {
+        result = await client.call("ask", {
             "question": "分析一下", "mode": "reasoning",
             "intent": {"intent_token": first["intent_token"],
                        "answers": [{"id": "ambiguity-1", "answer": "A"}]},
@@ -1287,14 +2053,14 @@ async def test_ask_notebook_reasoning_clarifies_a_topic_rich_contract_by_handle(
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_reasoning_delivers_every_required_row_of_a_maximal_contract(
+async def test_mcp_ask_reasoning_delivers_every_required_row_of_a_maximal_contract(
     mcp_env, monkeypatch
 ):
     """复核 P1 的反例:合同在每个字段上限都打满时,审阅视图必须仍把每条必答歧义的
     id/required/问题(至少展示上限那么长)、句柄与续跑说明完整投递——收敛裁剪不许
     静默丢行,否则 Agent 会永远答不齐服务端要求的必答项。丢掉的只能是 options/
     reason/描述列表这些附加物,并如实计入 truncation。"""
-    from app.api.mcp_tools import memory_context as memory_context_module
+    from app.api.mcp_tools import ask as memory_context_module
     from app.models.ask import QueryIntentContract
 
     service = mcp_env["service"]
@@ -1327,20 +2093,17 @@ async def test_ask_notebook_reasoning_delivers_every_required_row_of_a_maximal_c
 
     monkeypatch.setattr(service, "ask", capturing_ask)
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         first = await _clarification_for(client, "分析一下")
         rows = first["intent"]["ambiguities"]
         assert [row["id"] for row in rows] == [f"ambiguity-{i}" for i in range(1, 9)]
         assert all(row["required"] is True for row in rows)
         assert all(len(row["question"]) == 300 for row in rows)
         assert first["next_step"] == memory_context_module._CLARIFICATION_NEXT_STEP
-        assert len(first["intent_token"]) == 16
+        assert len(first["intent_token"]) == 32  # 192 random bits
         assert first["truncation"]["truncated"] is True
         assert first["truncation"]["omitted_items"] > 0
         assert len(json.dumps(first, ensure_ascii=False)) <= MCP_OUTPUT_BUDGET
-        result = await client.call("ask_notebook", {
+        result = await client.call("ask", {
             "question": "分析一下", "mode": "reasoning",
             "intent": {"intent_token": first["intent_token"],
                        "answers": [{"id": row["id"], "answer": "A"} for row in rows]},
@@ -1351,11 +2114,12 @@ async def test_ask_notebook_reasoning_delivers_every_required_row_of_a_maximal_c
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_intent_token_dies_with_the_notebook_selection(
+async def test_mcp_ask_intent_token_is_bound_to_its_notebook(
     mcp_env, monkeypatch
 ):
-    """句柄绑定在签发它的笔记本上:同一会话里重新 select_notebook 后,旧句柄配同一个
-    问题回传也必须被拒(`objective == question` 的冻结校验拦不住这一种)。"""
+    """句柄绑定在签发它的笔记本上:同一会话里把同一个问题、同一个句柄发给另一个
+    笔记本(notebook_id 换了)也必须被拒(`objective == question` 的冻结校验拦不住
+    这一种)。"""
     service = mcp_env["service"]
     monkeypatch.setattr(
         service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
@@ -1373,25 +2137,43 @@ async def test_ask_notebook_intent_token_dies_with_the_notebook_selection(
         mcp_env["notebook"].id, [mcp_env["notebook"].id, mcp_env["other"].id], None,
     )
     async with OfficialMcpClient(mcp_env["app"], two_notebooks.token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         first = await _clarification_for(client, "分析一下")
         answers = [{"id": _required_ambiguity(first["intent"])["id"], "answer": "X"}]
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["other"].id}
-        ))
-        rejected = await client.call("ask_notebook", {
+        rejected = await client.call("ask", {
             "question": "分析一下", "mode": "reasoning",
+            "notebooks": [mcp_env["other"].id],
             "intent": {"intent_token": first["intent_token"], "answers": answers},
         })
-    assert rejected.isError
-    assert "intent_token 无效或已过期" in rejected.content[0].text
+        # The handle is bound to its conversation too: the same notebook, but
+        # answered inside a conversation it was not issued for, is refused.
+        from app.api.mcp_tools import ask as ask_module
+
+        monkeypatch.setattr(
+            ask_module, "notebook_access_repository",
+            lambda: SimpleNamespace(
+                conversation_owner=lambda cid: mcp_env["alice"].id
+            ),
+        )
+        monkeypatch.setattr(
+            service, "get_conversation",
+            lambda cid: SimpleNamespace(
+                id=cid, notebook_id=mcp_env["notebook"].id, turns=[],
+            ),
+        )
+        elsewhere = await client.call("ask", {
+            "question": "分析一下", "mode": "reasoning",
+            "conversation_id": "conv-other-thread",
+            "intent": {"intent_token": first["intent_token"], "answers": answers},
+        })
+    assert _error_code(rejected) == "invalid_argument"
+    assert "intent_token 无效或已过期" in _error(rejected)
+    assert _error_code(elsewhere) == "invalid_argument"
+    assert "intent_token 无效或已过期" in _error(elsewhere)
     assert calls == []
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_reasoning_handles_long_questions_without_a_model(
+async def test_mcp_ask_reasoning_handles_long_questions_without_a_model(
     mcp_env, monkeypatch
 ):
     """质量评审 P1-1/P1-2 的回归:模型未配置时,>1000 字的清晰问题要能自动确认到
@@ -1416,11 +2198,8 @@ async def test_ask_notebook_reasoning_handles_long_questions_without_a_model(
     long_vague = "分析一下这个流程" + "，并说明其中每一步的依据" * 80
     assert len(long_clear) > 1000 and 900 < len(long_vague) < 1000
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         answered = await client.call(
-            "ask_notebook", {"question": long_clear, "mode": "reasoning"},
+            "ask", {"question": long_clear, "mode": "reasoning"},
         )
         clarified = await _clarification_for(client, long_vague)
     assert not answered.isError, answered
@@ -1431,12 +2210,12 @@ async def test_ask_notebook_reasoning_handles_long_questions_without_a_model(
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_reasoning_clamps_a_runaway_understanding_clock(
+async def test_mcp_ask_reasoning_clamps_a_runaway_understanding_clock(
     mcp_env, monkeypatch
 ):
     """理解阶段真跑过一小时也只是把 understanding_ms 夹到上限,不能让
     `AskIntentConfirmation` 的校验把整次调用丢掉——这个面从不放弃在执行的调用。"""
-    from app.api.mcp_tools import memory_context as memory_context_module
+    from app.api.mcp_tools import ask as memory_context_module
     from app.models.ask import ASK_UNDERSTANDING_MS_MAX
 
     service = mcp_env["service"]
@@ -1459,11 +2238,8 @@ async def test_ask_notebook_reasoning_clamps_a_runaway_understanding_clock(
         memory_context_module, "time", SimpleNamespace(monotonic=lambda: next(ticks))
     )
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         result = await client.call(
-            "ask_notebook",
+            "ask",
             {"question": "CMOS 反相器的阈值电压由什么决定", "mode": "reasoning"},
         )
     assert not result.isError, result
@@ -1472,7 +2248,7 @@ async def test_ask_notebook_reasoning_clamps_a_runaway_understanding_clock(
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_chunk_mode_is_not_blocked_by_the_reasoning_gate(
+async def test_mcp_ask_chunk_mode_is_not_blocked_by_the_reasoning_gate(
     mcp_env, monkeypatch
 ):
     """同一句模糊问题在 chunk 模式下不撞 T3 新增的这道闸(闸只对 reasoning 生效)。"""
@@ -1490,11 +2266,8 @@ async def test_ask_notebook_chunk_mode_is_not_blocked_by_the_reasoning_gate(
         ),
     )
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         result = await client.call(
-            "ask_notebook", {"question": "分析一下", "mode": "chunk"},
+            "ask", {"question": "分析一下", "mode": "chunk"},
         )
     # 若在这套夹具下因别的原因失败,失败原因也必须不是这道闸的文案。
     if result.isError:
@@ -1505,7 +2278,7 @@ async def test_ask_notebook_chunk_mode_is_not_blocked_by_the_reasoning_gate(
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_reasoning_auto_confirms_a_clear_question(
+async def test_mcp_ask_reasoning_auto_confirms_a_clear_question(
     mcp_env, monkeypatch
 ):
     """清晰问题不暂停:服务端按浏览器自动确认的同一形态(理解结果的
@@ -1528,11 +2301,8 @@ async def test_ask_notebook_reasoning_auto_confirms_a_clear_question(
     monkeypatch.setattr(service, "ask", capturing_ask)
     question = "CMOS 反相器的阈值电压由什么决定"
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         result = await client.call(
-            "ask_notebook", {"question": question, "mode": "reasoning"},
+            "ask", {"question": question, "mode": "reasoning"},
         )
     assert not result.isError, result
     payload = _payload(result)
@@ -1550,7 +2320,7 @@ async def test_ask_notebook_reasoning_auto_confirms_a_clear_question(
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_defaults_to_reasoning_when_mode_is_omitted(
+async def test_mcp_ask_defaults_to_reasoning_when_mode_is_omitted(
     mcp_env, monkeypatch
 ):
     """不传 `mode` 就是 reasoning(与网页端两种界面提交的同一引擎)。
@@ -1577,10 +2347,7 @@ async def test_ask_notebook_defaults_to_reasoning_when_mode_is_omitted(
     monkeypatch.setattr(service, "ask", capturing_ask)
     question = "CMOS 反相器的阈值电压由什么决定"
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
-        result = await client.call("ask_notebook", {"question": question})
+        result = await client.call("ask", {"question": question})
     assert not result.isError, result
     payload = _payload(result)
     assert payload["status"] == "answered"
@@ -1623,7 +2390,7 @@ class _ReasoningSeqLLM:
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_reasoning_answers_a_notebook_without_a_kg(mcp_env):
+async def test_mcp_ask_reasoning_answers_a_notebook_without_a_kg(mcp_env):
     """无图但有来源的笔记本,经 MCP 的 reasoning 也必须拿到真答案。
 
     MCP 侧本来就没有 KG 闸(`mcp_tools/*` 与 `mcp_server.py` 里没有 `has_kg` /
@@ -1683,11 +2450,8 @@ async def test_ask_notebook_reasoning_answers_a_notebook_without_a_kg(mcp_env):
         async with OfficialMcpClient(
             mcp_env["app"], mcp_env["token_a"].token
         ) as client:
-            _payload(await client.call(
-                "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-            ))
             result = await client.call(
-                "ask_notebook",
+                "ask",
                 {"question": "阈值电压由什么决定", "mode": "reasoning"},
             )
     finally:
@@ -1697,9 +2461,8 @@ async def test_ask_notebook_reasoning_answers_a_notebook_without_a_kg(mcp_env):
     payload = _payload(result)
     assert payload["mode"] == "reasoning"
     # 不是那句零源早退,而且整个回答里不再出现「先建图」的旧措辞。
-    assert "没有可检索的来源" not in payload["conclusion"]
     assert "没有可检索的来源" not in payload["answer"]
-    assert "知识图谱" not in payload["conclusion"]
+    assert "知识图谱" not in payload["answer"]
     assert llm.answer_prompts, "reasoning 没跑到合成,被某个前置闸挡住了"
     assert responses and responses[-1].kg_required is True
     assert responses[-1].llm_mode != "deterministic"
@@ -1726,7 +2489,7 @@ class _FakeAskEngineHost:
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_rejects_an_unregistered_mode(mcp_env, monkeypatch):
+async def test_mcp_ask_rejects_an_unregistered_mode(mcp_env, monkeypatch):
     """Unknown mode id -> actionable error listing the built-in modes.
 
     The runtime accessor itself is made to raise, exercising
@@ -1740,15 +2503,12 @@ async def test_ask_notebook_rejects_an_unregistered_mode(mcp_env, monkeypatch):
     monkeypatch.setattr("app.bootstrap.application_extension_runtime", boom)
 
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         rejected = await client.call(
-            "ask_notebook", {"question": "anything", "mode": "unknown.engine"}
+            "ask", {"question": "anything", "mode": "unknown.engine"}
         )
     assert rejected.isError
     text = rejected.content[0].text
-    assert "mode must be one of" in text
+    assert "mode 只能是以下之一" in text
     assert "chunk" in text
     assert "reasoning" in text
     # Distinguishable from the "registered but unavailable" wording below.
@@ -1756,7 +2516,7 @@ async def test_ask_notebook_rejects_an_unregistered_mode(mcp_env, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_accepts_a_registered_available_plugin_mode(
+async def test_mcp_ask_accepts_a_registered_available_plugin_mode(
     mcp_env, monkeypatch
 ):
     """A live plugin ask.engine mode passes validation and reaches AskRequest
@@ -1794,11 +2554,8 @@ async def test_ask_notebook_accepts_a_registered_available_plugin_mode(
     monkeypatch.setattr(service, "ask", fake_ask)
 
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": notebook_id}
-        ))
         answer = _payload(await client.call(
-            "ask_notebook", {"question": "plugin engine", "mode": "niuma.analog"}
+            "ask", {"question": "plugin engine", "mode": "niuma.analog"}
         ))
 
     assert captured["mode"] == "niuma.analog"
@@ -1806,7 +2563,7 @@ async def test_ask_notebook_accepts_a_registered_available_plugin_mode(
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_rejects_a_registered_but_unavailable_plugin_mode(
+async def test_mcp_ask_rejects_a_registered_but_unavailable_plugin_mode(
     mcp_env, monkeypatch
 ):
     monkeypatch.setattr(
@@ -1817,21 +2574,18 @@ async def test_ask_notebook_rejects_a_registered_but_unavailable_plugin_mode(
     )
 
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         rejected = await client.call(
-            "ask_notebook", {"question": "anything", "mode": "niuma.analog"}
+            "ask", {"question": "anything", "mode": "niuma.analog"}
         )
     assert rejected.isError
     text = rejected.content[0].text
     assert "暂不可用" in text
     # Distinguishable from the "not registered" wording above.
-    assert "mode must be one of" not in text
+    assert "mode 只能是以下之一" not in text
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_unregistered_mode_lists_only_live_plugin_modes(
+async def test_mcp_ask_unregistered_mode_lists_only_live_plugin_modes(
     mcp_env, monkeypatch
 ):
     """The advertised legal-mode list must include live plugin modes and must
@@ -1847,21 +2601,18 @@ async def test_ask_notebook_unregistered_mode_lists_only_live_plugin_modes(
     )
 
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         rejected = await client.call(
-            "ask_notebook", {"question": "anything", "mode": "unknown.engine"}
+            "ask", {"question": "anything", "mode": "unknown.engine"}
         )
     assert rejected.isError
     text = rejected.content[0].text
-    assert "mode must be one of" in text
+    assert "mode 只能是以下之一" in text
     assert "corp.alive" in text
     assert "corp.dead" not in text
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_translates_plugin_engine_failures(
+async def test_mcp_ask_translates_plugin_engine_failures(
     mcp_env, monkeypatch
 ):
     """A plugin failure must reach the Agent as an actionable sentence plus
@@ -1886,11 +2637,8 @@ async def test_ask_notebook_translates_plugin_engine_failures(
     monkeypatch.setattr(service, "ask", failing_ask)
 
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         failed = await client.call(
-            "ask_notebook", {"question": "anything", "mode": "niuma.analog"}
+            "ask", {"question": "anything", "mode": "niuma.analog"}
         )
     assert failed.isError
     text = failed.content[0].text
@@ -1899,7 +2647,7 @@ async def test_ask_notebook_translates_plugin_engine_failures(
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_translates_the_availability_race(
+async def test_mcp_ask_translates_the_availability_race(
     mcp_env, monkeypatch
 ):
     """Mode passes _validate_ask_mode, then the dispatcher's own re-check
@@ -1925,11 +2673,8 @@ async def test_ask_notebook_translates_the_availability_race(
     monkeypatch.setattr(service, "ask", racing_ask)
 
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         failed = await client.call(
-            "ask_notebook", {"question": "anything", "mode": "niuma.analog"}
+            "ask", {"question": "anything", "mode": "niuma.analog"}
         )
     assert failed.isError
     text = failed.content[0].text
@@ -1938,7 +2683,7 @@ async def test_ask_notebook_translates_the_availability_race(
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_translates_the_hosts_own_unavailable_recheck(
+async def test_mcp_ask_translates_the_hosts_own_unavailable_recheck(
     mcp_env, monkeypatch
 ):
     """codex #603 R3 P2: the host re-checks availability inside dispatch and
@@ -1965,11 +2710,8 @@ async def test_ask_notebook_translates_the_hosts_own_unavailable_recheck(
     monkeypatch.setattr(service, "ask", unavailable_ask)
 
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         failed = await client.call(
-            "ask_notebook", {"question": "anything", "mode": "niuma.analog"}
+            "ask", {"question": "anything", "mode": "niuma.analog"}
         )
     assert failed.isError
     text = failed.content[0].text
@@ -1978,7 +2720,7 @@ async def test_ask_notebook_translates_the_hosts_own_unavailable_recheck(
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_filters_memory_citations_without_memory_read_scope(
+async def test_mcp_ask_filters_memory_citations_without_memory_read_scope(
     mcp_env, monkeypatch
 ):
     """Additional locked-in fix: chunk/reasoning ask unconditionally builds a
@@ -2025,21 +2767,20 @@ async def test_ask_notebook_filters_memory_citations_without_memory_read_scope(
     )
     # The MCP session manager can only .run() once per app instance, so both
     # tokens share one outer lifespan (mirrors
-    # test_notebook_selection_is_required_and_session_scoped's pattern).
+    # test_tools_are_stateless_and_default_to_the_token_notebook's pattern).
     app = mcp_env["app"]
     async with app.router.lifespan_context(app):
         async with OfficialMcpClient(
             app, ask_only_token.token, manage_lifespan=False
         ) as client:
-            _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
             without_scope = _payload(await client.call(
-                "ask_notebook", {"question": "memory scoping", "mode": "chunk"}
+                "ask", {"question": "memory scoping", "mode": "chunk"}
             ))
         memory_ids = {c.get("memory_id") for c in without_scope["citations"]}
         assert "mem-1" not in memory_ids
         assert any(c["source_id"] == "source-1" for c in without_scope["citations"])
         # A scope-filtered row leaves NO trace in the truncation stats (this is
-        # the search_notebook_context gate's behaviour, and it is the point):
+        # the search(include="formal") gate's behaviour, and it is the point):
         # a non-zero `omitted_items` here would tell a token without
         # memory:read exactly how many private Memory citations back this
         # answer -- the count is itself the disclosure.
@@ -2049,15 +2790,14 @@ async def test_ask_notebook_filters_memory_citations_without_memory_read_scope(
         async with OfficialMcpClient(
             app, full_token.token, manage_lifespan=False
         ) as client:
-            _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
             with_scope = _payload(await client.call(
-                "ask_notebook", {"question": "memory scoping", "mode": "chunk"}
+                "ask", {"question": "memory scoping", "mode": "chunk"}
             ))
         assert any(c.get("memory_id") == "mem-1" for c in with_scope["citations"])
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_drops_memory_anchors_without_memory_read_scope(
+async def test_mcp_ask_drops_memory_anchors_without_memory_read_scope(
     mcp_env, monkeypatch
 ):
     """E1-3: anchors are filtered like citations -- ``object_type == 'memory'``
@@ -2109,9 +2849,8 @@ async def test_ask_notebook_drops_memory_anchors_without_memory_read_scope(
             async with OfficialMcpClient(
                 app, issued.token, manage_lifespan=False
             ) as client:
-                _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
                 results[name] = _payload(await client.call(
-                    "ask_notebook", {"question": "anchor scoping", "mode": "chunk"}
+                    "ask", {"question": "anchor scoping", "mode": "chunk"}
                 ))
 
     kept = results["without"]["anchors"]
@@ -2130,7 +2869,7 @@ async def test_ask_notebook_drops_memory_anchors_without_memory_read_scope(
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_memory_citation_count_is_not_recoverable_from_omitted(
+async def test_mcp_ask_memory_citation_count_is_not_recoverable_from_omitted(
     mcp_env, monkeypatch
 ):
     """The scope filter must run BEFORE the RESULT_LIMIT slice.
@@ -2147,18 +2886,9 @@ async def test_ask_notebook_memory_citation_count_is_not_recoverable_from_omitte
     exactly as the two visible populations differ — never in a way that lets
     the second token solve for 4.
     """
-    from app.api.mcp_tools import memory_context
-
     service = mcp_env["service"]
     notebook_id = mcp_env["notebook"].id
     monkeypatch.setattr(service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env))
-    # Lift the citations sub-budget for this case only. At its real 1,800 chars
-    # a 20-row page does not fit (~150 chars/row even with every field empty),
-    # so the budget's own pre-fit would drop rows and fold ITS omissions into
-    # the same counter — masking the ordering bug this test exists to catch.
-    # The sub-budget has its own coverage in
-    # test_ask_notebook_preserves_answer_text_under_realistic_citation_load.
-    monkeypatch.setattr(memory_context, "CITATIONS_BUDGET_CHARS", 20_000)
 
     memory_positions = {2, 7, 13, 22}
 
@@ -2197,46 +2927,40 @@ async def test_ask_notebook_memory_citation_count_is_not_recoverable_from_omitte
         async with OfficialMcpClient(
             app, full_token.token, manage_lifespan=False
         ) as client:
-            _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
             with_scope = _payload(await client.call(
-                "ask_notebook", {"question": "leak probe", "mode": "chunk"}
+                "ask", {"question": "leak probe", "mode": "chunk"}
             ))
         async with OfficialMcpClient(
             app, ask_only_token.token, manage_lifespan=False
         ) as client:
-            _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
             without_scope = _payload(await client.call(
-                "ask_notebook", {"question": "leak probe", "mode": "chunk"}
+                "ask", {"question": "leak probe", "mode": "chunk"}
             ))
 
     assert len(with_scope["citations"]) == 20
     assert len(without_scope["citations"]) == 20, (
-        "过滤发生在切片之前,21 条非 Memory 引用足以填满这一页"
+        "过滤发生在分页之前,21 条非 Memory 引用足以填满这一页"
     )
     assert not any(c.get("memory_id") for c in without_scope["citations"])
-    # 25 - 20 = 5 with the scope, 21 - 20 = 1 without. The unscoped token sees a
-    # SMALLER omitted count, so subtracting cannot recover 4; the pre-fix code
-    # reported 5 to both, and 20 - 16 = 4 fell straight out.
-    assert with_scope["truncation"]["omitted_items"] == 5
-    assert without_scope["truncation"]["omitted_items"] == 1
-    assert (
-        len(without_scope["citations"])
-        + without_scope["truncation"]["omitted_items"]
-        == 21
-    ), "无 memory:read 的 token 只该看到非 Memory 的那 21 条,总量不得泄露 25"
+    # Citations page with their own cursor: the totals and cursors are taken
+    # from the FILTERED list, so the token without memory:read can never
+    # solve for the 4 Memory citations it does not see.
+    assert with_scope["total_citations"] == 25
+    assert without_scope["total_citations"] == 21, (
+        "无 memory:read 的 token 只该看到非 Memory 的那 21 条,总量不得泄露 25"
+    )
+    assert with_scope["next_citation_offset"] == 20
+    assert without_scope["next_citation_offset"] == 20
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_rejects_empty_notebook(mcp_env):
+async def test_mcp_ask_rejects_empty_notebook(mcp_env):
     """PR#334 硬约束覆盖 MCP 这个 user-facing ask 入口:空库(无任何可检索证据)的
     ask_notebook 与 /ask、/ask/stream 一致被拒绝,不产生凭空回答(codex 第10轮 P2)。
     mcp_env['notebook'] 由 fixture 建空,未 seed 证据。"""
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         rejected = await client.call(
-            "ask_notebook", {"question": "anything", "mode": "chunk"}
+            "ask", {"question": "anything", "mode": "chunk"}
         )
         assert rejected.isError
         assert "来源" in rejected.content[0].text
@@ -2269,9 +2993,8 @@ async def test_each_data_tool_enforces_its_minimal_live_scope_and_output_budget(
     async with OfficialMcpClient(
         mcp_env["app"], mcp_env["restricted"].token
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         recalled = _payload(await client.call(
-            "search_agent_memory", {"query": "budget-marker", "limit": 50}
+            "search", {"include": "memory", "query": "budget-marker", "limit": 50}
         ))
         # The ``read`` tier covers the owner's candidates as well (one tier
         # for every read since the tier merge).
@@ -2282,13 +3005,13 @@ async def test_each_data_tool_enforces_its_minimal_live_scope_and_output_budget(
         assert len(confirmed_hit["content"]) <= 2_000
         assert len(recalled["items"]) <= 20
         detail = _payload(await client.call(
-            "get_memory", {"memory_id": confirmed.id}
+            "read_reference", {"ref": _mem_ref(mcp_env["notebook"].id, confirmed.id)}
         ))
         assert isinstance(detail["tags"], list)
         assert all(len(tag) <= 200 for tag in detail["tags"])
         assert len(json.dumps(detail, ensure_ascii=False)) <= 12_000
         assert not (await client.call(
-            "search_notebook_context", {"query": "budget-marker"}
+            "search", {"query": "budget-marker"}
         )).isError
         # Every tool outside the ``read`` tier is refused.
         refused_propose = await client.call(
@@ -2304,14 +3027,14 @@ async def test_each_data_tool_enforces_its_minimal_live_scope_and_output_budget(
         )
         assert refused_propose.isError
         refused_ask = await client.call(
-            "ask_notebook", {"question": "No scope", "mode": "chunk"}
+            "ask", {"question": "No scope", "mode": "chunk"}
         )
         assert refused_ask.isError
         assert "缺少「问答」权限" in refused_ask.content[0].text
         assert not (await client.call("list_sources")).isError
         # Agentic Memory P3 (T3): the two newest data tools, each pinned by
         # their own tier like everything else above.
-        assert not (await client.call("get_notebook_profile", {})).isError
+        assert not (await client.call("get_notebook", {"include": "all"})).isError
         assert (await client.call("add_observation", {
             "text": "No scope", "client_request_id": "budget-no-scope",
         })).isError
@@ -2327,11 +3050,11 @@ async def test_each_data_tool_enforces_its_minimal_live_scope_and_output_budget(
 # this test's adversarial-data style at a smaller scale.
 _MEMORY_TOOLS = {
     "list_notebooks",
-    "select_notebook",
-    "search_agent_memory",
-    "search_notebook_context",
-    "get_memory",
-    "ask_notebook",
+    "get_notebook",
+    "search:memory",
+    "search:formal",
+    "read_reference:mem",
+    "ask",
     "propose_memory",
 }
 
@@ -2492,20 +3215,20 @@ async def test_all_seven_official_client_tool_responses_have_strict_serialized_b
     ) as client:
         responses = {
             "list_notebooks": _payload(await client.call("list_notebooks")),
-            "select_notebook": _payload(await client.call(
-                "select_notebook", {"notebook_id": notebook_id}
+            "get_notebook": _payload(await client.call(
+                "get_notebook", {"notebook_id": notebook_id}
             )),
-            "search_agent_memory": _payload(await client.call(
-                "search_agent_memory", {"query": "budget", "limit": 20}
+            "search:memory": _payload(await client.call(
+                "search", {"include": "memory", "query": "budget", "limit": 20}
             )),
-            "search_notebook_context": _payload(await client.call(
-                "search_notebook_context", {"query": "budget", "limit": 20}
+            "search:formal": _payload(await client.call(
+                "search", {"query": "budget", "limit": 20}
             )),
-            "get_memory": _payload(await client.call(
-                "get_memory", {"memory_id": record.id}
+            "read_reference:mem": _payload(await client.call(
+                "read_reference", {"ref": _mem_ref(mcp_env["notebook"].id, record.id)}
             )),
-            "ask_notebook": _payload(await client.call(
-                "ask_notebook", {"question": "budget", "mode": "chunk"}
+            "ask": _payload(await client.call(
+                "ask", {"question": "budget", "mode": "chunk"}
             )),
             "propose_memory": _payload(await client.call(
                 "propose_memory",
@@ -2524,21 +3247,25 @@ async def test_all_seven_official_client_tool_responses_have_strict_serialized_b
     assert set(responses) == _MEMORY_TOOLS
     assert responses["list_notebooks"]["items"][0]["counts"]["sources"] == 7
     assert responses["list_notebooks"]["items"][0]["counts"]["memories"] == 3
-    assert responses["select_notebook"]["kg_status"]["dirty"] is True
-    assert responses["select_notebook"]["kg_status"]["objects"] == 42
-    agent_items = responses["search_agent_memory"]["items"]
+    assert responses["get_notebook"]["kg_status"]["dirty"] is True
+    assert responses["get_notebook"]["kg_status"]["objects"] == 42
+    agent_items = responses["search:memory"]["items"]
     assert sum(_json_chars(item["provenance"]) for item in agent_items) <= 2_000
     assert agent_items[0]["memory_id"] == record.id
-    context_items = responses["search_notebook_context"]["items"]
+    assert agent_items[0]["ref"] == _mem_ref(notebook_id, record.id)
+    context_items = responses["search:formal"]["items"]
     assert sum(_json_chars(item["provenance"]) for item in context_items) <= 2_000
     assert context_items[0]["source_id"] == "source-0"
     assert context_items[0]["element_id"] == "element-0"
-    detail = responses["get_memory"]
+    # A ref is whole or absent, never clipped into a handle that decodes to
+    # nothing.
+    assert context_items[0]["ref"] == _el_ref(notebook_id, "source-0", "element-0")
+    detail = responses["read_reference:mem"]
     assert _json_chars(detail["provenance"]) <= 2_000
     assert _json_chars(detail["tags"]) <= 1_500
     assert detail["memory_id"] == record.id
     assert detail["notebook_id"] == notebook_id
-    ask = responses["ask_notebook"]
+    ask = responses["ask"]
     assert ask["conversation_id"] == "conversation-budget-id"
     assert _json_chars(ask["anchors"]) <= 3_500
     assert ask["anchors"]
@@ -2566,7 +3293,7 @@ async def test_all_seven_official_client_tool_responses_have_strict_serialized_b
 
 
 @pytest.mark.anyio
-async def test_search_agent_memory_hydrates_fresh_records_and_drops_terminal_races(
+async def test_search_memory_hydrates_fresh_records_and_drops_terminal_races(
     mcp_env, monkeypatch
 ):
     service = mcp_env["service"]
@@ -2617,9 +3344,8 @@ async def test_search_agent_memory_hydrates_fresh_records_and_drops_terminal_rac
     async with OfficialMcpClient(
         mcp_env["app"], mcp_env["token_a"].token
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         result = _payload(await client.call(
-            "search_agent_memory", {"query": "race", "limit": 20}
+            "search", {"include": "memory", "query": "race", "limit": 20}
         ))
 
     assert len(result["items"]) == 1
@@ -2639,7 +3365,6 @@ async def test_propose_memory_preserves_legitimate_nested_null_and_sdk_normaliza
     async with OfficialMcpClient(
         mcp_env["app"], mcp_env["token_a"].token
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         created = _payload(await client.call("propose_memory", {
             "title": "Nested null",
             "content_md": "Legitimate optional values remain null.",
@@ -2650,7 +3375,7 @@ async def test_propose_memory_preserves_legitimate_nested_null_and_sdk_normaliza
             "client_request_id": "nested-null-request",
         }))
         detail = _payload(await client.call(
-            "get_memory", {"memory_id": created["memory_id"]}
+            "read_reference", {"ref": _mem_ref(mcp_env["notebook"].id, created["memory_id"])}
         ))
         assert detail["provenance"]["task_context"] == {
             "nested": [{"value": None}],
@@ -2680,7 +3405,7 @@ async def test_propose_memory_preserves_legitimate_nested_null_and_sdk_normaliza
             "client_request_id": "normalized-nonfinite-request",
         }))
         normalized_detail = _payload(await client.call(
-            "get_memory", {"memory_id": normalized["memory_id"]}
+            "read_reference", {"ref": _mem_ref(mcp_env["notebook"].id, normalized["memory_id"])}
         ))
         assert normalized_detail["provenance"]["task_context"]["value"] is None
         assert normalized_detail["provenance"]["evidence_refs"] == [{
@@ -2777,7 +3502,10 @@ async def test_propose_memory_rejects_unbounded_envelopes_before_live_service_wo
     async with OfficialMcpClient(
         mcp_env["app"], mcp_env["token_a"].token
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        # The SDK client lists tools once to learn their output schemas, and
+        # a tier-filtered listing reads the live token row: done up front so
+        # the spy below counts only what the invalid calls themselves cost.
+        await client.session.list_tools()
         original_refresh = service.refresh_agent_principal
         live_calls = 0
         create_calls = 0
@@ -2822,7 +3550,6 @@ async def test_propose_memory_accepts_payloads_within_exact_core_json_limits(mcp
     async with OfficialMcpClient(
         mcp_env["app"], mcp_env["token_a"].token
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         created = _payload(await client.call("propose_memory", {
             "title": "Exact Core envelope",
             "content_md": "Former MCP-only sub-budgets must not narrow Core.",
@@ -2843,7 +3570,6 @@ async def test_propose_memory_delegates_exact_tag_normalization_to_core(mcp_env)
     async with OfficialMcpClient(
         mcp_env["app"], mcp_env["token_a"].token
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         created = _payload(await client.call("propose_memory", {
             "title": "Shared tag contract",
             "content_md": "Twenty raw values deduplicate after the raw cap.",
@@ -2854,7 +3580,7 @@ async def test_propose_memory_delegates_exact_tag_normalization_to_core(mcp_env)
             "client_request_id": "shared-tag-contract",
         }))
         detail = _payload(await client.call(
-            "get_memory", {"memory_id": created["memory_id"]}
+            "read_reference", {"ref": _mem_ref(mcp_env["notebook"].id, created["memory_id"])}
         ))
 
     assert detail["tags"] == [
@@ -3074,7 +3800,6 @@ async def test_knowhow_tools_list_tables_and_discrimination(mcp_env):
     table_id, row_id, method_id = _seed_knowhow_table(mcp_env["notebook"].id)
 
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        await client.call("select_notebook", {"notebook_id": mcp_env["notebook"].id})
         tables = _payload(await client.call("list_knowhow_tables"))
         assert [item["id"] for item in tables["items"]] == [table_id]
         assert tables["items"][0]["anchor_column_id"]
@@ -3094,13 +3819,12 @@ async def test_knowhow_tools_get_row_and_put_cell_code_is_scope_gated(mcp_env):
     app = mcp_env["app"]
     # Two sequential client sessions against the same app instance: the
     # underlying StreamableHTTPSessionManager can only be .run() once, so
-    # (mirrors test_notebook_selection_is_required_and_session_scoped above)
+    # (mirrors test_tools_are_stateless_and_default_to_the_token_notebook above)
     # share ONE outer lifespan and pass manage_lifespan=False to each client.
     async with app.router.lifespan_context(app):
         async with OfficialMcpClient(
             app, mcp_env["restricted"].token, manage_lifespan=False
         ) as client:
-            await client.call("select_notebook", {"notebook_id": mcp_env["notebook"].id})
             row = _payload(await client.call("get_knowhow_row", {"row_id": row_id}))
             assert row["title"] == "过冲振铃"
             assert row["code"] == []
@@ -3126,7 +3850,6 @@ async def test_knowhow_tools_get_row_and_put_cell_code_is_scope_gated(mcp_env):
         async with OfficialMcpClient(
             app, code_token.token, manage_lifespan=False
         ) as client:
-            await client.call("select_notebook", {"notebook_id": mcp_env["notebook"].id})
             put_result = _payload(await client.call(
                 "put_knowhow_cell_code",
                 {
@@ -3144,7 +3867,7 @@ async def test_knowhow_tools_get_row_and_put_cell_code_is_scope_gated(mcp_env):
 
 @pytest.mark.anyio
 async def test_knowhow_tools_reject_a_row_from_a_notebook_outside_the_session(mcp_env):
-    """Data-isolation cross-check (mirrors get_memory's own notebook_id
+    """Data-isolation cross-check (mirrors read_reference's own Memory notebook_id
     mismatch guard): a row_id resolved to a DIFFERENT notebook than the one
     currently selected on this MCP session must not be readable, even though
     the token's own allowlist covers both notebooks."""
@@ -3155,7 +3878,6 @@ async def test_knowhow_tools_reject_a_row_from_a_notebook_outside_the_session(mc
     )
 
     async with OfficialMcpClient(mcp_env["app"], both_notebooks_token.token) as client:
-        await client.call("select_notebook", {"notebook_id": mcp_env["notebook"].id})
         row_result = await client.call("get_knowhow_row", {"row_id": other_row_id})
         assert row_result.isError
         discrimination_result = await client.call(
@@ -3184,7 +3906,6 @@ async def test_knowhow_agent_tool_responses_respect_serialized_budget(mcp_env):
     )
 
     async with OfficialMcpClient(mcp_env["app"], code_token.token) as client:
-        await client.call("select_notebook", {"notebook_id": mcp_env["notebook"].id})
 
         discrimination = _payload(
             await client.call("get_knowhow_discrimination", {"table_id": table_id})
@@ -3204,7 +3925,7 @@ async def test_knowhow_agent_tool_responses_respect_serialized_budget(mcp_env):
         _assert_budgeted(row)
 
 
-# --- get_cited_element: 引用点查 -------------------------------------------
+# --- read_reference: 引用点查 -------------------------------------------
 # 界面上「点 [k] 看原文」的 MCP 等价物。能力面刻意不超过一次 Ask 已经授权披露的
 # 范围,所以它复用的是浏览器代理读取那条同一份判据
 # (`source_routes.source_readable_in_participant_scope`),而不是另写一遍。
@@ -3257,7 +3978,7 @@ def _seed_cited_source(
 
 
 @pytest.mark.anyio
-async def test_get_cited_element_dereferences_a_citation_to_its_source_text(mcp_env):
+async def test_read_reference_element_dereferences_a_citation_to_its_source_text(mcp_env):
     """Happy path with exact values (not presence checks) for every projected
     field, so a mutation to any one of them shows up here:
       - the element's own type/text/location, keyed by the id that was asked
@@ -3287,10 +4008,9 @@ async def test_get_cited_element_dereferences_a_citation_to_its_source_text(mcp_
     )
 
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
 
-        payload = _payload(await client.call("get_cited_element", {
-            "source_id": plain["source_id"], "element_id": plain["element_id"],
+        payload = _payload(await client.call("read_reference", {
+            "ref": _el_ref(mcp_env["notebook"].id, plain["source_id"], plain["element_id"]),
         }))
         assert payload["source_id"] == "src-cited-plain"
         assert payload["element_id"] == "el-cited-plain"
@@ -3304,20 +4024,20 @@ async def test_get_cited_element_dereferences_a_citation_to_its_source_text(mcp_
         assert "file_path" not in payload and "error_message" not in payload
         _assert_budgeted(payload)
 
-        knowhow_payload = _payload(await client.call("get_cited_element", {
-            "source_id": cell["source_id"], "element_id": cell["element_id"],
+        knowhow_payload = _payload(await client.call("read_reference", {
+            "ref": _el_ref(mcp_env["notebook"].id, cell["source_id"], cell["element_id"]),
         }))
         assert knowhow_payload["knowhow"] == {"table_id": "tbl-7", "row_id": "row-9"}
         assert knowhow_payload["element_type"] == "knowhow_cell"
 
-        paper_payload = _payload(await client.call("get_cited_element", {
-            "source_id": paper["source_id"], "element_id": paper["element_id"],
+        paper_payload = _payload(await client.call("read_reference", {
+            "ref": _el_ref(mcp_env["notebook"].id, paper["source_id"], paper["element_id"]),
         }))
         assert paper_payload["source_title"] == "Attention Is All You Need"
 
 
 @pytest.mark.anyio
-async def test_get_cited_element_rejects_ids_it_cannot_ground(mcp_env):
+async def test_read_reference_element_rejects_ids_it_cannot_ground(mcp_env):
     """Three misses that must all fail rather than return *something*.
 
     The middle one is the load-bearing case, and it is an AUTHORIZATION check,
@@ -3336,32 +4056,30 @@ async def test_get_cited_element_rejects_ids_it_cannot_ground(mcp_env):
     )
 
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
 
-        assert (await client.call("get_cited_element", {
-            "source_id": plain["source_id"], "element_id": "el-does-not-exist",
+        assert (await client.call("read_reference", {
+            "ref": _el_ref(mcp_env["notebook"].id, plain["source_id"], "el-does-not-exist"),
         })).isError
-        crossed = await client.call("get_cited_element", {
-            "source_id": plain["source_id"],
-            "element_id": elsewhere["element_id"],
+        crossed = await client.call("read_reference", {
+            "ref": _el_ref(mcp_env["notebook"].id, plain["source_id"], elsewhere["element_id"]),
         })
         assert crossed.isError, "元素必须属于入参 source,否则就是一次跨来源探测"
         assert "别的来源的正文" not in json.dumps(
             [item.text for item in crossed.content], ensure_ascii=False
         )
-        assert (await client.call("get_cited_element", {
-            "source_id": "src-does-not-exist",
-            "element_id": plain["element_id"],
+        assert (await client.call("read_reference", {
+            "ref": _el_ref(mcp_env["notebook"].id, "src-does-not-exist", plain["element_id"]),
         })).isError
 
 
 @pytest.mark.anyio
-async def test_get_cited_element_requires_knowledge_read_and_a_selected_notebook(
+async def test_read_reference_rechecks_the_read_tier_and_the_refs_notebook(
     mcp_env,
 ):
-    """The two authentication gates every data tool shares, on this one:
-    a token without the ``read`` tier and a session that never called
-    ``select_notebook``."""
+    """The gates every data tool shares, on this one: a token without the
+    ``read`` tier, a ref naming a notebook outside the allowlist, and a ref
+    that is not one of the three documented shapes. The ref itself grants
+    nothing -- it is re-authorized on every call."""
     repo = repository()
     no_read = mcp_env["service"].issue_agent_token(
         mcp_env["alice"].id, mcp_env["profile_b"].id, ["ask"],
@@ -3370,7 +4088,7 @@ async def test_get_cited_element_requires_knowledge_read_and_a_selected_notebook
     notebook_id = mcp_env["notebook"].id
     seeded = _seed_cited_source(repo, notebook_id, "gated")
     arguments = {
-        "source_id": seeded["source_id"], "element_id": seeded["element_id"],
+        "ref": _el_ref(notebook_id, seeded["source_id"], seeded["element_id"]),
     }
 
     app = mcp_env["app"]
@@ -3378,28 +4096,42 @@ async def test_get_cited_element_requires_knowledge_read_and_a_selected_notebook
         async with OfficialMcpClient(
             app, no_read.token, manage_lifespan=False
         ) as restricted:
-            _payload(await restricted.call(
-                "select_notebook", {"notebook_id": notebook_id}
-            ))
-            refused = await restricted.call("get_cited_element", arguments)
-            assert refused.isError
-            assert "缺少「读取」权限" in refused.content[0].text
+            refused = await restricted.call("read_reference", arguments)
+            assert _error_code(refused) == "scope_missing"
+            assert "缺少「读取」权限" in _error(refused)
 
         async with OfficialMcpClient(
             app, mcp_env["token_a"].token, manage_lifespan=False
         ) as client:
-            assert (await client.call("get_cited_element", arguments)).isError
-            _payload(await client.call(
-                "select_notebook", {"notebook_id": notebook_id}
-            ))
-            assert not (await client.call("get_cited_element", arguments)).isError
+            assert not (await client.call("read_reference", arguments)).isError
+            foreign = await client.call("read_reference", {
+                "ref": _el_ref(
+                    mcp_env["other"].id, seeded["source_id"], seeded["element_id"]
+                ),
+            })
+            assert _error_code(foreign) == "notebook_not_allowed"
+            for malformed in (
+                "not-base64!!",
+                _ref({"k": "el", "n": notebook_id, "s": seeded["source_id"]}),
+                _ref({"k": "el", "n": notebook_id, "s": "s", "e": "e", "x": "1"}),
+                _ref({"k": "zzz", "n": notebook_id}),
+                _ref({"k": "mem", "n": notebook_id, "m": ""}),
+                _ref(["el", notebook_id]),
+                "",
+            ):
+                bad = await client.call("read_reference", {"ref": malformed})
+                assert _error_code(bad) == "invalid_argument", malformed
+            negative = await client.call(
+                "read_reference", {**arguments, "offset": -1}
+            )
+            assert _error_code(negative) == "invalid_argument"
 
 
 @pytest.mark.anyio
-async def test_get_cited_element_follows_the_participant_set_not_the_allowlist(
+async def test_read_reference_element_follows_the_participant_set_not_the_allowlist(
     mcp_env,
 ):
-    """Scope is the SELECTED notebook's live participant set (itself plus the
+    """Scope is the REF'S notebook's live participant set (itself plus the
     reference libraries it currently mounts) — NOT the token's allowlist.
 
     The allowlist deliberately does NOT cover ``other`` and DOES cover a third
@@ -3444,22 +4176,18 @@ async def test_get_cited_element_follows_the_participant_set_not_the_allowlist(
     )
 
     async with OfficialMcpClient(mcp_env["app"], scoped_token.token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
 
-        assert (await client.call("get_cited_element", {
-            "source_id": unmounted_doc["source_id"],
-            "element_id": unmounted_doc["element_id"],
+        assert (await client.call("read_reference", {
+            "ref": _el_ref(mcp_env["notebook"].id, unmounted_doc["source_id"], unmounted_doc["element_id"]),
         })).isError, "在 allowlist 里但不在参与集内:能选中 ≠ 来源可读"
-        assert (await client.call("get_cited_element", {
-            "source_id": base_doc["source_id"],
-            "element_id": base_doc["element_id"],
+        assert (await client.call("read_reference", {
+            "ref": _el_ref(mcp_env["notebook"].id, base_doc["source_id"], base_doc["element_id"]),
         })).isError, "未挂载时,别的库的来源与不存在同义"
 
         service.replace_notebook_bases(notebook_id, [other_id], mcp_env["alice"].id)
 
-        mounted = _payload(await client.call("get_cited_element", {
-            "source_id": base_doc["source_id"],
-            "element_id": base_doc["element_id"],
+        mounted = _payload(await client.call("read_reference", {
+            "ref": _el_ref(mcp_env["notebook"].id, base_doc["source_id"], base_doc["element_id"]),
         }))
         assert mounted["text"] == "参考库里的原文"
         assert mounted["location_label"] == "第 9 页"
@@ -3468,29 +4196,163 @@ async def test_get_cited_element_follows_the_participant_set_not_the_allowlist(
         _assert_budgeted(mounted)
 
         # The mount did not widen the allowlist axis back open either.
-        assert (await client.call("get_cited_element", {
-            "source_id": unmounted_doc["source_id"],
-            "element_id": unmounted_doc["element_id"],
+        assert (await client.call("read_reference", {
+            "ref": _el_ref(mcp_env["notebook"].id, unmounted_doc["source_id"], unmounted_doc["element_id"]),
         })).isError
 
-        assert (await client.call("get_cited_element", {
-            "source_id": base_memory["source_id"],
-            "element_id": base_memory["element_id"],
+        assert (await client.call("read_reference", {
+            "ref": _el_ref(mcp_env["notebook"].id, base_memory["source_id"], base_memory["element_id"]),
         })).isError, "跨库的隐藏合成源一律不代理"
         # Same notebook, but a Memory projection with no creator row reads for
         # nobody (and this token has no memory:read either): the owner gate
         # answers exactly what a missing id answers. The full matrix (own vs
         # another member's Memory, with and without memory:read) lives in
         # test_memory_source_endpoints.py.
-        assert (await client.call("get_cited_element", {
-            "source_id": own_memory["source_id"],
-            "element_id": own_memory["element_id"],
+        assert (await client.call("read_reference", {
+            "ref": _el_ref(mcp_env["notebook"].id, own_memory["source_id"], own_memory["element_id"]),
         })).isError, "无创建者的 Memory 来源对任何人都与不存在同义"
 
 
+@pytest.mark.anyio
+async def test_refs_round_trip_and_long_text_pages(mcp_env, monkeypatch):
+    """The refs a search hit and a proposal hand out are exactly what
+    ``read_reference`` resolves; a Memory ref answers ``not_found`` once the
+    item is retired or when it names another notebook; long text pages
+    through ``next_offset`` without losing a character."""
+    repo = repository()
+    service = mcp_env["service"]
+    notebook_id = mcp_env["notebook"].id
+    long_text = "长原文段落。" * 2_500
+    seeded = _seed_cited_source(repo, notebook_id, "long", text=long_text)
+    monkeypatch.setattr(
+        service,
+        "search_notebook",
+        lambda *args, **kwargs: SimpleNamespace(hits=[SimpleNamespace(
+            memory_id="", scope="Source", label="长原文", text="长原文段落。",
+            source_id=seeded["source_id"], element_id=seeded["element_id"],
+            provenance={},
+        )]),
+    )
+    two_notebooks = service.issue_agent_token(
+        mcp_env["alice"].id, mcp_env["profile_a"].id,
+        ["read", "contribute"],
+        notebook_id, [notebook_id, mcp_env["other"].id], None,
+    )
+    async with OfficialMcpClient(mcp_env["app"], two_notebooks.token) as client:
+        hit = _payload(await client.call("search", {"query": "长原文"}))["items"][0]
+        assert hit["ref"] == _el_ref(notebook_id, seeded["source_id"], seeded["element_id"])
+        offset, pages = 0, []
+        while True:
+            page = _payload(await client.call(
+                "read_reference", {"ref": hit["ref"], "offset": offset}
+            ))
+            _assert_budgeted(page)
+            assert page["kind"] == "el"
+            assert page["total_characters"] == len(long_text)
+            pages.append(page["text"])
+            if page["next_offset"] is None:
+                break
+            assert page["next_offset"] == offset + len(page["text"])
+            offset = page["next_offset"]
+        assert len(pages) > 1 and "".join(pages) == long_text
+
+        created = _payload(await client.call("propose_memory", {
+            "title": "可回读的候选", "content_md": "候选正文",
+            "reason": "ref round trip", "task_context": {"task": "ref"},
+            "evidence_refs": [], "client_request_id": "ref-round-trip",
+        }))
+        assert created["ref"] == _mem_ref(notebook_id, created["memory_id"])
+        opened = _payload(await client.call(
+            "read_reference", {"ref": created["ref"]}
+        ))
+        assert opened["kind"] == "mem"
+        assert opened["text"] == "候选正文" and opened["status"] == "candidate"
+        # The same memory named under another (allowlisted) notebook.
+        elsewhere = await client.call("read_reference", {
+            "ref": _mem_ref(mcp_env["other"].id, created["memory_id"]),
+        })
+        assert _error_code(elsewhere) == "not_found"
+        service.reject_memory(created["memory_id"], mcp_env["alice"].id)
+        retired = await client.call("read_reference", {"ref": created["ref"]})
+        assert _error_code(retired) == "not_found"
+        assert created["memory_id"] not in _error(retired)
+
+
+@pytest.mark.anyio
+async def test_argument_validation_and_unknown_tools_speak_the_error_model(mcp_env):
+    """FastMCP validates arguments before any tool body runs; those refusals
+    are translated too (field names only, never the submitted values)."""
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        missing = await client.call("search", {})
+        assert _error_code(missing) == "invalid_argument"
+        assert "query（缺少）" in _error(missing)
+        wrong_type = await client.call("search", {"query": "x", "limit": "abc"})
+        assert _error_code(wrong_type) == "invalid_argument"
+        assert "limit" in _error(wrong_type) and "abc" not in _error(wrong_type)
+        not_a_string = await client.call("read_reference", {"ref": 5})
+        assert _error_code(not_a_string) == "invalid_argument"
+        unknown = await client.call("select_notebook", {"notebook_id": "x"})
+        assert _error_code(unknown) == "not_found"
+        blank = await client.call("get_notebook", {"notebook_id": "   "})
+        assert _error_code(blank) == "invalid_argument"
+        # A ref id that is blank after stripping never falls back to the
+        # token's default notebook.
+        blank_ref = await client.call("read_reference", {
+            "ref": _ref({"k": "el", "n": " ", "s": "s", "e": "e"}),
+        })
+        assert _error_code(blank_ref) == "invalid_argument"
+
+
+@pytest.mark.anyio
+async def test_a_forged_memory_ref_to_another_members_memory_is_not_found(mcp_env):
+    """Bob shares Alice's notebook. Forging a mem ref with Alice's memory id
+    (Bob can learn ids, never content) reads like a missing id, and the
+    response never echoes the id."""
+    service = mcp_env["service"]
+    notebook_id = mcp_env["notebook"].id
+    alice_memory = service.create_memory_candidate(
+        notebook_id, mcp_env["alice"].id, mcp_env["profile_a"].id,
+        "forged-ref", "Alice 的私有记忆", "只属于 Alice 的内容", [], "test",
+    )
+    service.confirm_memory(alice_memory.id, mcp_env["alice"].id)
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["bob_token"].token) as client:
+        forged = await client.call("read_reference", {
+            "ref": _mem_ref(notebook_id, alice_memory.id),
+        })
+    assert _error_code(forged) == "not_found"
+    assert alice_memory.id not in _error(forged)
+    assert "只属于 Alice 的内容" not in _error(forged)
+
+
+@pytest.mark.anyio
+async def test_a_global_citation_ref_to_another_users_job_is_refused(mcp_env):
+    """The real global Ask service refuses a gel ref naming a job that is not
+    the token owner's; the id is not echoed."""
+    from app.api.deps import global_ask_repository
+    from app.models.global_ask import GlobalAskJob
+
+    store = global_ask_repository()
+    bob = mcp_env["bob"]
+    foreign_job = GlobalAskJob.model_validate({
+        "job_id": "gask-bob-only", "conversation_id": "gconv-bob-only",
+        "status": "done", "question": "Bob 的问题",
+        "created_at": "2026-10-09T00:00:00+00:00",
+        "notebook_scope": {"mode": "all", "notebook_ids": []},
+        "resolved_notebook_ids": [mcp_env["notebook"].id],
+    })
+    store.create(foreign_job, bob.id, "bob-request", "{}", "web", new_conversation=True)
+    gel = _ref({"k": "gel", "j": "gask-bob-only", "e": "el-anything"})
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        refused = await client.call("read_reference", {"ref": gel})
+        job_read = await client.call("get_ask", {"job_id": "gask-bob-only"})
+    assert _error_code(refused) == "not_found"
+    assert "gask-bob-only" not in _error(refused)
+    assert _error_code(job_read) == "not_found"
+
+
 # --------------------------------------------------------------------------- #
-# Agent source inventory and management: list_sources / add_source_text /
-# add_source_url / get_source_status / reparse_source / delete_source.
+# Agent source inventory and management: list_sources / add_source (Markdown) /
+# add_source (url) / list_sources(source_id=...) / reparse_source / delete_source.
 # --------------------------------------------------------------------------- #
 _SOURCE_READ = ["read"]
 _SOURCE_WRITE = ["read", "manage"]
@@ -3537,7 +4399,7 @@ def _bob_owned_notebook_id(mcp_env) -> str:
 async def test_list_sources_pages_the_selected_notebooks_visible_inventory(mcp_env):
     """The MCP inventory reuses the browser list's visibility and title rules.
 
-    It lists only direct, user-visible rows of the selected notebook; hidden
+    It lists only direct, user-visible rows of the named notebook; hidden
     synthetic rows and mounted-library rows stay out. Pagination remains
     followable through ``next_offset`` and the response never exposes private
     source diagnostics.
@@ -3605,10 +4467,10 @@ async def test_list_sources_pages_the_selected_notebooks_visible_inventory(mcp_e
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_READ)
     ) as client:
-        assert (await client.call("list_sources")).isError
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": notebook_id}
-        ))
+        # The mounted library's own inventory is not reachable by naming it
+        # either: it is outside this token's allowlist.
+        outside = await client.call("list_sources", {"notebook_id": other_id})
+        assert _error_code(outside) == "notebook_not_allowed"
         first = _payload(await client.call(
             "list_sources", {"offset": 0, "limit": 1}
         ))
@@ -3691,7 +4553,7 @@ def reachable_pdf_url(monkeypatch):
 def scheduled_jobs(monkeypatch):
     """Capture background submissions instead of running them.
 
-    Both add_source_text and reparse_source hand parsing to
+    Both add_source (Markdown) and reparse_source hand parsing to
     ``kg_scheduler.submit_job``. Letting that run would start a real
     parse/embed/extract pipeline on a worker thread mid-test; capturing it
     keeps these tests about the tool contract AND lets them assert that the
@@ -3725,7 +4587,7 @@ def _source_row_exists(repo, source_id: str) -> bool:
 
 
 @pytest.mark.anyio
-async def test_add_source_text_files_agent_authored_markdown(mcp_env, scheduled_jobs):
+async def test_add_source_markdown_files_agent_authored_markdown(mcp_env, scheduled_jobs):
     """Happy path with exact values: the row exists, carries this Agent's
     profile id in the raw provenance column, is queued for the ordinary
     background parse, and reports itself as Agent-added."""
@@ -3735,8 +4597,7 @@ async def test_add_source_text_files_agent_authored_markdown(mcp_env, scheduled_
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        payload = _payload(await client.call("add_source_text", {
+        payload = _payload(await client.call("add_source", {
             "title": "时钟树收敛方案",
             "content_md": "# 时钟树\n\n先做 useful skew。\n",
         }))
@@ -3770,7 +4631,7 @@ async def test_add_source_text_files_agent_authored_markdown(mcp_env, scheduled_
         ("notes.zip", b"PK\x03\x04zip-placeholder"),
     ],
 )
-async def test_add_source_file_accepts_registered_binary_formats(
+async def test_add_source_file_group_accepts_registered_binary_formats(
     mcp_env, scheduled_jobs, file_name, payload
 ):
     repo = repository()
@@ -3778,8 +4639,7 @@ async def test_add_source_file_accepts_registered_binary_formats(
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        result = _payload(await client.call("add_source_file", {
+        result = _payload(await client.call("add_source", {
             "file_name": file_name,
             "content_base64": base64.b64encode(payload).decode("ascii"),
         }))
@@ -3793,7 +4653,7 @@ async def test_add_source_file_accepts_registered_binary_formats(
 
 
 @pytest.mark.anyio
-async def test_add_source_file_rejects_invalid_envelopes_before_repository_work(
+async def test_add_source_file_group_rejects_invalid_envelopes_before_repository_work(
     mcp_env, monkeypatch, scheduled_jobs
 ):
     from app.api.mcp_tools import sources
@@ -3807,7 +4667,6 @@ async def test_add_source_file_rejects_invalid_envelopes_before_repository_work(
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         for arguments in (
             {"file_name": "bad.exe", "content_base64": "YQ=="},
             {"file_name": "paper.pdf", "content_base64": "not base64"},
@@ -3817,14 +4676,14 @@ async def test_add_source_file_rejects_invalid_envelopes_before_repository_work(
                 "content_base64": base64.b64encode(b"123456789").decode("ascii"),
             },
         ):
-            assert (await client.call("add_source_file", arguments)).isError
+            assert (await client.call("add_source", arguments)).isError
 
     assert repo.list_sources(notebook_id) == []
     assert scheduled_jobs == []
 
 
 @pytest.mark.anyio
-async def test_add_source_text_reusing_a_user_source_does_not_claim_it(
+async def test_add_source_markdown_reusing_a_user_source_does_not_claim_it(
     mcp_env, scheduled_jobs
 ):
     """Content dedup must not launder provenance.
@@ -3853,10 +4712,7 @@ async def test_add_source_text_reusing_a_user_source_does_not_claim_it(
     app = mcp_env["app"]
     async with app.router.lifespan_context(app):
         async with OfficialMcpClient(app, token, manage_lifespan=False) as client:
-            _payload(await client.call(
-                "select_notebook", {"notebook_id": notebook_id}
-            ))
-            payload = _payload(await client.call("add_source_text", {
+            payload = _payload(await client.call("add_source", {
                 "title": "换个标题", "content_md": body,
             }))
             assert payload["source_id"] == human[0].id
@@ -3876,7 +4732,7 @@ async def test_add_source_text_reusing_a_user_source_does_not_claim_it(
 
 
 @pytest.mark.anyio
-async def test_add_source_text_rejects_bad_envelopes_before_touching_the_repo(
+async def test_add_source_markdown_rejects_bad_envelopes_before_touching_the_repo(
     mcp_env, monkeypatch, scheduled_jobs
 ):
     """Blank title, blank body and an over-limit body all fail, and none of
@@ -3898,20 +4754,19 @@ async def test_add_source_text_rejects_bad_envelopes_before_touching_the_repo(
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        assert (await client.call("add_source_text", {
+        assert (await client.call("add_source", {
             "title": "   ", "content_md": "有内容",
         })).isError
-        assert (await client.call("add_source_text", {
+        assert (await client.call("add_source", {
             "title": "标题", "content_md": "   \n  ",
         })).isError
-        too_big = await client.call("add_source_text", {
+        too_big = await client.call("add_source", {
             "title": "标题", "content_md": oversized,
         })
         assert too_big.isError
         assert len(oversized) < 64 < len(oversized.encode("utf-8"))
         # Just under the same ceiling still lands.
-        assert not (await client.call("add_source_text", {
+        assert not (await client.call("add_source", {
             "title": "标题", "content_md": "ok",
         })).isError
 
@@ -3919,7 +4774,7 @@ async def test_add_source_text_rejects_bad_envelopes_before_touching_the_repo(
 
 
 @pytest.mark.anyio
-async def test_add_source_text_keeps_the_stored_file_name_within_the_fs_limit(
+async def test_add_source_markdown_keeps_the_stored_file_name_within_the_fs_limit(
     mcp_env, scheduled_jobs
 ):
     """A maximum-length CJK title must still produce a WRITABLE file name.
@@ -3945,8 +4800,7 @@ async def test_add_source_text_keeps_the_stored_file_name_within_the_fs_limit(
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        payload = _payload(await client.call("add_source_text", {
+        payload = _payload(await client.call("add_source", {
             "title": longest, "content_md": "正文",
         }))
         # Over-long titles are SHORTENED, never refused: the file write happens
@@ -3978,7 +4832,7 @@ async def test_add_source_text_keeps_the_stored_file_name_within_the_fs_limit(
 
 
 @pytest.mark.anyio
-async def test_add_source_text_stores_the_submitted_title_not_the_file_name(
+async def test_add_source_markdown_stores_the_submitted_title_not_the_file_name(
     mcp_env, scheduled_jobs
 ):
     """The title and the file name are two different values.
@@ -3999,8 +4853,7 @@ async def test_add_source_text_stores_the_submitted_title_not_the_file_name(
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        payload = _payload(await client.call("add_source_text", {
+        payload = _payload(await client.call("add_source", {
             "title": title, "content_md": "正文内容",
         }))
 
@@ -4017,7 +4870,7 @@ async def test_add_source_text_stores_the_submitted_title_not_the_file_name(
 
 
 @pytest.mark.anyio
-async def test_add_source_text_honours_the_notebook_document_limit(
+async def test_add_source_markdown_honours_the_notebook_document_limit(
     mcp_env, scheduled_jobs, reachable_pdf_url
 ):
     """The per-notebook document ceiling lives in the ROUTER, not in
@@ -4032,11 +4885,10 @@ async def test_add_source_text_honours_the_notebook_document_limit(
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        assert not (await client.call("add_source_text", {
+        assert not (await client.call("add_source", {
             "title": "第一篇", "content_md": "第一篇正文",
         })).isError
-        full = await client.call("add_source_text", {
+        full = await client.call("add_source", {
             "title": "第二篇", "content_md": "第二篇正文",
         })
         assert full.isError
@@ -4044,10 +4896,10 @@ async def test_add_source_text_honours_the_notebook_document_limit(
         # not read one way in the web UI and another way to an Agent (and it
         # must not be English, which the frontend error layer would swallow).
         assert document_capacity_message(1, 1, 1) in full.content[0].text
-        # add_source_url refuses the same way rather than passing through the
+        # add_source (url) refuses the same way rather than passing through the
         # ingestion service's separate over-limit wording.
         url_full = await client.call(
-            "add_source_url", {"url": reachable_pdf_url}
+            "add_source", {"url": reachable_pdf_url}
         )
         assert url_full.isError
         assert document_capacity_message(1, 1, 1) in url_full.content[0].text
@@ -4056,7 +4908,7 @@ async def test_add_source_text_honours_the_notebook_document_limit(
 
 
 @pytest.mark.anyio
-async def test_add_source_text_race_loser_is_refused_by_the_store_gate(
+async def test_add_source_markdown_race_loser_is_refused_by_the_store_gate(
     mcp_env, scheduled_jobs, monkeypatch
 ):
     """穿参守卫(codex 评审):关闭「预检与插入之间名额被并发占走 / 匹配行被删」
@@ -4075,15 +4927,14 @@ async def test_add_source_text_race_loser_is_refused_by_the_store_gate(
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        assert not (await client.call("add_source_text", {
+        assert not (await client.call("add_source", {
             "title": "第一篇", "content_md": "第一篇正文",
         })).isError
         monkeypatch.setattr(
             mcp_sources, "_reject_when_notebook_is_full",
             lambda repo, notebook_id, adding: 1,
         )
-        full = await client.call("add_source_text", {
+        full = await client.call("add_source", {
             "title": "第二篇", "content_md": "第二篇正文",
         })
         assert full.isError
@@ -4093,7 +4944,7 @@ async def test_add_source_text_race_loser_is_refused_by_the_store_gate(
 
 
 @pytest.mark.anyio
-async def test_add_source_text_still_dedups_when_the_notebook_is_full(
+async def test_add_source_markdown_still_dedups_when_the_notebook_is_full(
     mcp_env, scheduled_jobs
 ):
     """A full notebook must not break the documented idempotence.
@@ -4116,20 +4967,19 @@ async def test_add_source_text_still_dedups_when_the_notebook_is_full(
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        first = _payload(await client.call("add_source_text", {
+        first = _payload(await client.call("add_source", {
             "title": "第一篇", "content_md": body,
         }))
         assert first["reused"] is False
 
         # Now the notebook is exactly full.
         identity.set_user_document_limit_override("user-local", mcp_env["alice"].id, 1)
-        assert (await client.call("add_source_text", {
+        assert (await client.call("add_source", {
             "title": "新内容", "content_md": "完全不同的正文",
         })).isError, "满库仍然拒绝真正新增的文档"
 
         # Same bytes, different title: still a reuse, still allowed.
-        again = _payload(await client.call("add_source_text", {
+        again = _payload(await client.call("add_source", {
             "title": "换个标题重试", "content_md": body,
         }))
         assert again["reused"] is True
@@ -4139,7 +4989,7 @@ async def test_add_source_text_still_dedups_when_the_notebook_is_full(
 
 
 @pytest.mark.anyio
-async def test_add_source_url_explains_a_rejected_url_and_a_missing_parser(
+async def test_add_source_url_group_explains_a_rejected_url_and_a_missing_parser(
     mcp_env, scheduled_jobs
 ):
     """Two refusals, neither of which touches the network.
@@ -4157,14 +5007,12 @@ async def test_add_source_url_explains_a_rejected_url_and_a_missing_parser(
 
     async with app.router.lifespan_context(app):
         async with OfficialMcpClient(app, token, manage_lifespan=False) as client:
-            _payload(await client.call(
-                "select_notebook", {"notebook_id": notebook_id}
-            ))
             unconfigured = await client.call(
-                "add_source_url", {"url": "https://example.test/a.pdf"}
+                "add_source", {"url": "https://example.test/a.pdf"}
             )
-            assert unconfigured.isError
-            text = unconfigured.content[0].text
+            assert _error_code(unconfigured) == "unavailable"
+            text = _error(unconfigured)
+            assert "PDF 解析" in text
             assert "MINERU" not in text.upper()
 
             repo._runtime.source_ingestion.mineru_cloud_client = (
@@ -4172,11 +5020,13 @@ async def test_add_source_url_explains_a_rejected_url_and_a_missing_parser(
             )
             try:
                 rejected = await client.call(
-                    "add_source_url", {"url": "ftp://example.test/a.pdf"}
+                    "add_source", {"url": "ftp://example.test/a.pdf"}
                 )
-                assert rejected.isError
-                assert "http" in rejected.content[0].text
-                assert (await client.call("add_source_url", {"url": "  "})).isError
+                assert _error_code(rejected) == "invalid_argument"
+                assert "http" in _error(rejected)
+                assert _error_code(
+                    await client.call("add_source", {"url": "  "})
+                ) == "invalid_argument"
             finally:
                 del repo._runtime.source_ingestion.mineru_cloud_client
 
@@ -4185,7 +5035,7 @@ async def test_add_source_url_explains_a_rejected_url_and_a_missing_parser(
 
 
 @pytest.mark.anyio
-async def test_add_source_url_files_an_agent_owned_pdf(
+async def test_add_source_url_group_files_an_agent_owned_pdf(
     mcp_env, scheduled_jobs, reachable_pdf_url
 ):
     """The success path, with the network stubbed out at both gates.
@@ -4200,9 +5050,8 @@ async def test_add_source_url_files_an_agent_owned_pdf(
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         payload = _payload(await client.call(
-            "add_source_url", {"url": reachable_pdf_url}
+            "add_source", {"url": reachable_pdf_url}
         ))
 
     assert set(payload) == {
@@ -4225,7 +5074,7 @@ async def test_add_source_url_files_an_agent_owned_pdf(
 
 
 @pytest.mark.anyio
-async def test_get_source_status_projects_state_without_the_private_diagnostics(
+async def test_list_sources_status_projects_state_without_the_private_diagnostics(
     mcp_env,
 ):
     """The projection is exactly the parse/extraction state, plus a DERIVED
@@ -4245,9 +5094,8 @@ async def test_get_source_status_projects_state_without_the_private_diagnostics(
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_READ)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         payload = _payload(await client.call(
-            "get_source_status", {"source_id": seeded["source_id"]}
+            "list_sources", {"source_id": seeded["source_id"]}
         ))
 
     assert payload["source_id"] == seeded["source_id"]
@@ -4266,15 +5114,15 @@ async def test_get_source_status_projects_state_without_the_private_diagnostics(
 async def test_source_tools_see_the_selected_notebook_only_never_the_mounted_set(
     mcp_env,
 ):
-    """Scope for these tools is the SELECTED notebook itself.
+    """Scope for these tools is the NAMED notebook itself.
 
-    ``get_cited_element`` reads across the participant set because an answer
+    ``read_reference`` reads across the participant set because an answer
     may quote a mounted reference library. Managing documents is the opposite:
     a mounted library's sources belong to another notebook whose owner never
     agreed to an Agent re-parsing or deleting them. So ``other`` is mounted
     here — proving the refusal comes from the notebook boundary and not from
     the source being unreachable — and hidden memory/knowhow projection rows
-    are refused even inside the selected notebook.
+    are refused even inside the named notebook.
     """
     repo = repository()
     service = mcp_env["service"]
@@ -4289,10 +5137,8 @@ async def test_source_tools_see_the_selected_notebook_only_never_the_mounted_set
     token = _agent_token(mcp_env, _SOURCE_FULL)
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        assert not (await client.call("get_cited_element", {
-            "source_id": mounted["source_id"],
-            "element_id": mounted["element_id"],
+        assert not (await client.call("read_reference", {
+            "ref": _el_ref(mcp_env["notebook"].id, mounted["source_id"], mounted["element_id"]),
         })).isError
         for tool in ("get_source_status", "reparse_source", "delete_source"):
             assert (await client.call(
@@ -4326,7 +5172,6 @@ async def test_reparse_source_queues_one_job_and_refuses_a_source_being_parsed(
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         payload = _payload(await client.call(
             "reparse_source", {"source_id": seeded["source_id"]}
         ))
@@ -4344,8 +5189,8 @@ async def test_reparse_source_queues_one_job_and_refuses_a_source_being_parsed(
             busy = await client.call(
                 "reparse_source", {"source_id": seeded["source_id"]}
             )
-        assert busy.isError
-        assert "pars" in busy.content[0].text.lower()
+        assert _error_code(busy) == "busy"
+        assert "正在解析" in _error(busy)
 
     # The refused call queued nothing extra.
     assert len(scheduled_jobs) == 1
@@ -4369,10 +5214,9 @@ async def test_reparse_source_refuses_a_promotion_source(mcp_env, scheduled_jobs
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         refused = await client.call("reparse_source", {"source_id": "src-promo-mcp"})
-    assert refused.isError
-    assert "promoted into a public library" in refused.content[0].text
+    assert _error_code(refused) == "forbidden"
+    assert "提升到公共库" in _error(refused)
     assert scheduled_jobs == []
 
 
@@ -4392,13 +5236,19 @@ async def test_reparse_source_refuses_pipeline_pending_before_queue(
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         result = await client.call(
             "reparse_source", {"source_id": seeded["source_id"]}
         )
+        added = await client.call("add_source", {
+            "title": "管线未就绪", "content_md": "管线未就绪时不该落库排队",
+        })
 
-    assert result.isError
+    # The HTTP twin's 409 copy (main.py), as ``unavailable`` -- never internal.
+    assert _error_code(result) == "unavailable"
+    assert "索引管线当前不可用" in _error(result)
     assert scheduled_jobs == []
+    if added.isError:
+        assert _error_code(added) == "unavailable"
 
 
 @pytest.mark.anyio
@@ -4418,16 +5268,15 @@ async def test_delete_source_removes_an_agent_source_but_never_a_user_one(
     token = _agent_token(mcp_env, _SOURCE_FULL)
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        agent_source = _payload(await client.call("add_source_text", {
+        agent_source = _payload(await client.call("add_source", {
             "title": "Agent 写的", "content_md": "Agent 自己的产物。",
         }))["source_id"]
 
         refused = await client.call(
             "delete_source", {"source_id": human["source_id"]}
         )
-        assert refused.isError
-        assert "user" in refused.content[0].text.lower()
+        assert _error_code(refused) == "forbidden"
+        assert "用户添加的" in _error(refused)
         assert _source_row_exists(repo, human["source_id"]), (
             "用户添加的来源必须原样留在库里"
         )
@@ -4478,23 +5327,20 @@ async def test_source_scopes_do_not_imply_one_another(
         async with OfficialMcpClient(
             app, _agent_token(mcp_env, _SOURCE_READ), manage_lifespan=False
         ) as reader:
-            _payload(await reader.call(
-                "select_notebook", {"notebook_id": notebook_id}
-            ))
             # knowledge:read really does open the read tool on this very source,
             # so the four refusals that follow are not "this session can do
             # nothing here".
             assert not (await reader.call(
-                "get_source_status", {"source_id": seeded}
+                "list_sources", {"source_id": seeded}
             )).isError
-            assert (await reader.call("add_source_text", {
+            assert (await reader.call("add_source", {
                 "title": "无权", "content_md": "无权",
             })).isError
-            assert (await reader.call("add_source_file", {
+            assert (await reader.call("add_source", {
                 "file_name": "无权.pdf", "content_base64": "YQ==",
             })).isError
             assert (await reader.call(
-                "add_source_url", {"url": reachable_pdf_url}
+                "add_source", {"url": reachable_pdf_url}
             )).isError
             assert (await reader.call(
                 "reparse_source", {"source_id": seeded}
@@ -4506,18 +5352,15 @@ async def test_source_scopes_do_not_imply_one_another(
         async with OfficialMcpClient(
             app, _agent_token(mcp_env, _SOURCE_WRITE), manage_lifespan=False
         ) as writer:
-            _payload(await writer.call(
-                "select_notebook", {"notebook_id": notebook_id}
-            ))
-            agent_source = _payload(await writer.call("add_source_text", {
+            agent_source = _payload(await writer.call("add_source", {
                 "title": "可写", "content_md": "可写的正文",
             }))["source_id"]
-            assert not (await writer.call("add_source_file", {
+            assert not (await writer.call("add_source", {
                 "file_name": "可写.pdf", "content_base64": "YQ==",
             })).isError
             # The same URL and the same source id the reader was refused.
             assert not (await writer.call(
-                "add_source_url", {"url": reachable_pdf_url}
+                "add_source", {"url": reachable_pdf_url}
             )).isError
             assert not (await writer.call(
                 "reparse_source", {"source_id": seeded}
@@ -4529,13 +5372,10 @@ async def test_source_scopes_do_not_imply_one_another(
         async with OfficialMcpClient(
             app, _agent_token(mcp_env, _SOURCE_DELETE), manage_lifespan=False
         ) as deleter:
-            _payload(await deleter.call(
-                "select_notebook", {"notebook_id": notebook_id}
-            ))
-            assert (await deleter.call("add_source_text", {
+            assert (await deleter.call("add_source", {
                 "title": "只许删", "content_md": "只许删",
             })).isError, "sources:delete 不蕴含 sources:write"
-            assert (await deleter.call("add_source_file", {
+            assert (await deleter.call("add_source", {
                 "file_name": "只许删.pdf", "content_base64": "YQ==",
             })).isError, "sources:delete 不蕴含 sources:write"
             assert (await deleter.call(
@@ -4574,10 +5414,7 @@ async def test_delete_source_accepts_a_row_stamped_by_a_sibling_agent_profile(
             _agent_token(mcp_env, _SOURCE_WRITE, profile=mcp_env["profile_b"]),
             manage_lifespan=False,
         ) as codex:
-            _payload(await codex.call(
-                "select_notebook", {"notebook_id": notebook_id}
-            ))
-            source_id = _payload(await codex.call("add_source_text", {
+            source_id = _payload(await codex.call("add_source", {
                 "title": "Codex 建的", "content_md": "另一个 Agent 的产物。",
             }))["source_id"]
         assert _stored_provenance(repo, source_id) == mcp_env["profile_b"].id
@@ -4587,9 +5424,6 @@ async def test_delete_source_accepts_a_row_stamped_by_a_sibling_agent_profile(
             _agent_token(mcp_env, _SOURCE_DELETE, profile=mcp_env["profile_a"]),
             manage_lifespan=False,
         ) as claude_code:
-            _payload(await claude_code.call(
-                "select_notebook", {"notebook_id": notebook_id}
-            ))
             deleted = _payload(await claude_code.call(
                 "delete_source", {"source_id": source_id}
             ))
@@ -4599,29 +5433,59 @@ async def test_delete_source_accepts_a_row_stamped_by_a_sibling_agent_profile(
 
 
 @pytest.mark.anyio
-async def test_source_tools_require_a_selected_notebook(mcp_env, scheduled_jobs):
-    """The gate every data tool here shares: no select_notebook, no tool."""
+async def test_source_tools_reauthorize_the_notebook_each_call_names(
+    mcp_env, scheduled_jobs
+):
+    """The gate every data tool here shares: the notebook a call names is
+    checked against the live allowlist on that very call -- there is no
+    session selection to lean on, and nothing is queued for a refused one."""
+    other_id = mcp_env["other"].id
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_FULL)
     ) as client:
-        assert (await client.call("add_source_text", {
-            "title": "未选库", "content_md": "未选库",
-        })).isError
-        assert (await client.call("add_source_file", {
-            "file_name": "未选库.pdf", "content_base64": "YQ==",
-        })).isError
-        assert (await client.call("add_source_url", {
-            "url": "https://example.test/a.pdf",
-        })).isError
-        assert (await client.call(
-            "get_source_status", {"source_id": "src-anything"}
-        )).isError
-        assert (await client.call(
-            "reparse_source", {"source_id": "src-anything"}
-        )).isError
-        assert (await client.call(
-            "delete_source", {"source_id": "src-anything"}
-        )).isError
+        for name, arguments in (
+            ("add_source", {"title": "库外", "content_md": "库外"}),
+            ("add_source", {"file_name": "库外.pdf", "content_base64": "YQ=="}),
+            ("add_source", {"url": "https://example.test/a.pdf"}),
+            ("list_sources", {"source_id": "src-anything"}),
+            ("list_sources", {}),
+            ("reparse_source", {"source_id": "src-anything"}),
+            ("delete_source", {"source_id": "src-anything"}),
+        ):
+            refused = await client.call(
+                name, {**arguments, "notebook_id": other_id}
+            )
+            assert _error_code(refused) == "notebook_not_allowed", name
+        # An unknown source in the token's own notebook is not_found, never an
+        # internal repr of the missing id.
+        missing = await client.call("list_sources", {"source_id": "src-anything"})
+        assert _error_code(missing) == "not_found"
+        assert "src-anything" not in _error(missing)
+        assert "来源" in _error(missing)
+    assert scheduled_jobs == []
+
+
+@pytest.mark.anyio
+async def test_add_source_takes_exactly_one_input_group(mcp_env, scheduled_jobs):
+    """``add_source`` merges the three retired creation tools; mixing or
+    omitting their input groups is refused before any repository work."""
+    payload = base64.b64encode(b"%PDF-1.4 tiny").decode("ascii")
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _SOURCE_FULL)
+    ) as client:
+        for arguments in (
+            {},
+            {"title": "只有标题"},
+            {"content_md": "正文", "url": "https://example.test/a.pdf"},
+            {"content_md": "正文", "file_name": "a.pdf", "content_base64": payload},
+            {"file_name": "a.pdf", "content_base64": payload,
+             "url": "https://example.test/a.pdf"},
+            {"url": "https://example.test/a.pdf", "title": "url 不带标题"},
+            {"url": "   "},
+        ):
+            refused = await client.call("add_source", arguments)
+            assert _error_code(refused) == "invalid_argument", arguments
+    assert scheduled_jobs == []
 
 
 @pytest.mark.anyio
@@ -4655,32 +5519,33 @@ async def test_source_writes_are_refused_in_a_read_only_shared_notebook(
     )
 
     async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         # Reading is exactly what a read-only member may do.
         assert not (await client.call(
-            "get_source_status", {"source_id": seeded["source_id"]}
+            "list_sources", {"source_id": seeded["source_id"]}
         )).isError
-        assert (await client.call("add_source_text", {
+        assert _error_code(await client.call("add_source", {
             "title": "只读成员", "content_md": "只读成员写不进来",
-        })).isError
-        assert (await client.call("add_source_file", {
+        })) == "owner_only"
+        assert _error_code(await client.call("add_source", {
             "file_name": "只读成员.pdf", "content_base64": "YQ==",
-        })).isError
-        assert (await client.call(
+        })) == "owner_only"
+        assert _error_code(await client.call(
             "reparse_source", {"source_id": seeded["source_id"]}
-        )).isError
+        )) == "owner_only"
         # Agent-added is NOT sufficient: ownership is checked first, so even a
         # row this token's own profile stamped stays untouchable from here.
-        assert (await client.call(
+        refused = await client.call(
             "delete_source", {"source_id": seeded["source_id"]}
-        )).isError
+        )
+        assert _error_code(refused) == "owner_only"
+        assert "拥有的笔记本" in _error(refused)
 
     assert _source_row_exists(repo, seeded["source_id"])
     assert len(repo.list_sources(notebook_id)) == 1
     assert scheduled_jobs == []
     # codex #616 R1 P2:被 owner-only 那道闸拒掉的写同样不留痕。这些调用过了
     # require_agent_access(读权成立)、倒在第二道闸上——记账若发生在第一道闸
-    # 之后就会把「没发生的操作」写进账里。只读那一次(get_source_status)照常
+    # 之后就会把「没发生的操作」写进账里。只读那一次(list_sources(source_id=...))照常
     # 记一行,证明这里挡掉的是被拒绝的写,不是整条记账。
     calls = repo.agent_observations.list_calls(
         notebook_id, mcp_env["bob"].id, limit=50
@@ -4707,7 +5572,7 @@ async def test_knowhow_code_write_is_allowed_in_a_read_only_shared_notebook(
     divergence cannot drift silently.
 
     Bob is a read-only member of Alice's notebook: the very share where his
-    ``add_source_text`` is refused accepts his cell-code write.
+    ``add_source (Markdown)`` is refused accepts his cell-code write.
     """
     table_id, row_id, method_id = _seed_knowhow_table(mcp_env["notebook"].id)
     bob_token = _agent_token(
@@ -4715,9 +5580,6 @@ async def test_knowhow_code_write_is_allowed_in_a_read_only_shared_notebook(
     )
 
     async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         put_result = _payload(await client.call(
             "put_knowhow_cell_code",
             {
@@ -4734,10 +5596,10 @@ async def test_knowhow_code_write_is_allowed_in_a_read_only_shared_notebook(
 
 # --- build/maintenance tools -------------------------------------------
 # "maintenance:execute" was already a valid AGENT_SCOPES entry (and offered by
-# the token-creation UI) before build_kg/build_retrieval_index existed to
+# the token-creation UI) before build(target="kg")/build_retrieval_index existed to
 # consume it -- these tests cover that closing of the loop, plus the
-# read-only get_build_status that sits on "knowledge:read" like the source
-# tools' own get_source_status does.
+# read-only get_notebook that sits on "knowledge:read" like the source
+# tools' own list_sources(source_id=...) does.
 _MAINTENANCE = ["read", "manage"]
 
 
@@ -4781,7 +5643,7 @@ def _mark_notebook_base_tier(repo, notebook_id: str) -> None:
 
 
 @pytest.mark.anyio
-async def test_build_kg_refuses_when_no_chat_model_is_configured(mcp_env):
+async def test_build_kg_target_refuses_when_no_chat_model_is_configured(mcp_env):
     """Default mcp_env clears every chat/embedding provider env var, so this
     reproduces a deployment with no LLM configured -- the same state
     kg_routes.build_kg's own 409 guards against -- without any extra setup.
@@ -4791,22 +5653,21 @@ async def test_build_kg_refuses_when_no_chat_model_is_configured(mcp_env):
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _MAINTENANCE)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        refused = await client.call("build_kg", {})
-        assert refused.isError
-        text = refused.content[0].text
-        assert "chat model" in text.lower()
+        refused = await client.call("build", {"target": "kg"})
+        assert _error_code(refused) == "unavailable"
+        text = _error(refused)
+        assert "对话模型" in text
         assert "MINERU" not in text and "OPENAI" not in text.upper()
 
 
 @pytest.mark.anyio
-async def test_build_kg_queues_one_job_and_refuses_a_concurrent_second_call(
+async def test_build_kg_target_queues_one_job_and_refuses_a_concurrent_second_call(
     mcp_env, scheduled_kg_jobs
 ):
     """Happy path with exact values, plus the durable per-notebook
     single-flight (kg_build_jobs' own conditional unique index) surfacing as
     the router's own Chinese busy sentence -- 409 semantics, not an error the
-    caller should retry differently; poll get_build_status instead."""
+    caller should retry differently; poll get_notebook instead."""
     repo = repository()
     notebook_id = mcp_env["notebook"].id
     bind_chat_client(repo, "kg_extract", _KgExtractStub())
@@ -4814,28 +5675,27 @@ async def test_build_kg_queues_one_job_and_refuses_a_concurrent_second_call(
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _MAINTENANCE)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        started = _payload(await client.call("build_kg", {}))
+        started = _payload(await client.call("build", {"target": "kg"}))
         assert started["mode"] == "incremental"
         assert started["status"] == "building"
         assert started["job_id"]
         _assert_budgeted(started)
 
         # P3-3: the poll chain an Agent actually follows -- build_kg's own
-        # response is a point-in-time echo, get_build_status is the thing
+        # response is a point-in-time echo, get_notebook is the thing
         # meant to be re-read afterward. `prepare_notebook_kg_job` marks the
         # in-process `kg_building` flag synchronously (before
         # background_jobs.submit is even reached), so this is visible without
         # the stubbed submission ever running.
-        polled = _payload(await client.call("get_build_status", {}))
+        polled = _payload(await client.call("get_notebook", {"include": "all"}))
         assert polled["kg"]["building"] is True
         assert polled["kg"]["job"] is not None
         assert polled["kg"]["job"]["job_id"] == started["job_id"]
         _assert_budgeted(polled)
 
-        busy = await client.call("build_kg", {})
-        assert busy.isError
-        assert "当前笔记本已有知识图谱分析任务正在运行" in busy.content[0].text
+        busy = await client.call("build", {"target": "kg"})
+        assert _error_code(busy) == "busy"
+        assert "当前笔记本已有知识图谱分析任务正在运行" in _error(busy)
 
     assert len(scheduled_kg_jobs) == 1
     fn, args, kwargs = scheduled_kg_jobs[0]
@@ -4849,7 +5709,7 @@ async def test_build_kg_queues_one_job_and_refuses_a_concurrent_second_call(
 
 
 @pytest.mark.anyio
-async def test_build_retrieval_index_validates_when_before_touching_an_eligible_notebook(
+async def test_build_index_target_validates_when_before_touching_an_eligible_notebook(
     mcp_env
 ):
     """`when` outside {now, idle} must be refused BEFORE the repository is
@@ -4874,10 +5734,9 @@ async def test_build_retrieval_index_validates_when_before_touching_an_eligible_
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _MAINTENANCE)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        bad_when = await client.call("build_retrieval_index", {"when": "soon"})
-        assert bad_when.isError
-        assert "when" in bad_when.content[0].text.lower()
+        bad_when = await client.call("build", {"target": "index", "when": "soon"})
+        assert _error_code(bad_when) == "invalid_argument"
+        assert "when" in _error(bad_when)
 
     # No immediate-build side effect: neither queued nor (would-be
     # synchronous) building/already_building.
@@ -4886,29 +5745,28 @@ async def test_build_retrieval_index_validates_when_before_touching_an_eligible_
 
 
 @pytest.mark.anyio
-async def test_build_retrieval_index_lets_ineligibility_through(mcp_env):
+async def test_build_index_target_lets_ineligibility_through(mcp_env):
     """A fresh mcp_env notebook (personal tier, no index, few chunks) is
     ineligible by construction -- the service layer's own readable message
     ("notebook too small and not base-tier...") comes through unedited,
-    exactly like add_source_url lets add_url_sources' rejection wording
+    exactly like add_source (url) lets add_url_sources' rejection wording
     through."""
     notebook_id = mcp_env["notebook"].id
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _MAINTENANCE)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        ineligible = await client.call("build_retrieval_index", {"when": "now"})
-        assert ineligible.isError
-        assert "too small" in ineligible.content[0].text.lower()
+        ineligible = await client.call("build", {"target": "index", "when": "now"})
+        assert _error_code(ineligible) == "forbidden"
+        assert "规模太小" in _error(ineligible)
 
 
 @pytest.mark.anyio
-async def test_build_retrieval_index_queues_for_the_low_traffic_window(mcp_env):
+async def test_build_index_target_queues_for_the_low_traffic_window(mcp_env):
     """when='idle' on an eligible (base-tier) notebook queues instead of
     starting immediately -- exercising the one branch of `trigger()` that
     never spawns real indexing work, so this needs no embedder stub.
 
-    Also covers the get_build_status read-back an Agent actually polls with
+    Also covers the get_notebook read-back an Agent actually polls with
     (P2-1's mutation-guarded scale_index key-priority fix): queue_position
     AND total_chunks/unindexed_sources must all be in the SAME response --
     before the fix, alphabetical field-limit truncation silently dropped the
@@ -4928,17 +5786,16 @@ async def test_build_retrieval_index_queues_for_the_low_traffic_window(mcp_env):
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _MAINTENANCE)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         queued = _payload(await client.call(
-            "build_retrieval_index", {"when": "idle"}
+            "build", {"target": "index", "when": "idle"}
         ))
         assert queued == {
-            "status": "queued", "notebook_id": notebook_id,
+            "target": "index", "status": "queued", "notebook_id": notebook_id,
             "truncation": queued["truncation"],
         }
         _assert_budgeted(queued)
 
-        status = _payload(await client.call("get_build_status", {}))
+        status = _payload(await client.call("get_notebook", {"include": "all"}))
         scale_index = status["scale_index"]
         assert scale_index["state"] == "queued"
         assert "queue_position" in scale_index
@@ -4952,7 +5809,7 @@ async def test_build_retrieval_index_queues_for_the_low_traffic_window(mcp_env):
 
 
 @pytest.mark.anyio
-async def test_get_build_status_reports_kg_and_scale_index_state(mcp_env):
+async def test_get_notebook_build_status_reports_kg_and_scale_index_state(mcp_env):
     """The one read behind both build tools: kg (ready/building/pending
     sources/current job) and scale_index (exists/building/eligible/state)
     sub-objects both present in a single call, readable by a plain
@@ -4961,8 +5818,7 @@ async def test_get_build_status_reports_kg_and_scale_index_state(mcp_env):
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_READ)
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        status = _payload(await client.call("get_build_status", {}))
+        status = _payload(await client.call("get_notebook", {"include": "all"}))
         assert status["kg"]["ready"] is False
         assert status["kg"]["building"] is False
         assert status["kg"]["pending_sources"] == 0
@@ -4973,13 +5829,31 @@ async def test_get_build_status_reports_kg_and_scale_index_state(mcp_env):
 
 
 @pytest.mark.anyio
-async def test_maintenance_tools_require_a_selected_notebook(mcp_env):
+async def test_build_validates_target_and_the_named_notebook(mcp_env, scheduled_kg_jobs):
+    """``build`` merges the two retired build tools: an unknown target, a
+    ``when`` on the knowledge graph (it always starts now) and an unknown
+    ``when`` are refused before any repository work; a notebook outside the
+    allowlist is refused on the call that names it."""
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _MAINTENANCE)
     ) as client:
-        assert (await client.call("build_kg", {})).isError
-        assert (await client.call("build_retrieval_index", {})).isError
-        assert (await client.call("get_build_status", {})).isError
+        for arguments in (
+            {"target": "graph"},
+            {"target": "kg", "when": "now"},
+            {"target": "index", "when": "tomorrow"},
+        ):
+            refused = await client.call("build", arguments)
+            assert _error_code(refused) == "invalid_argument", arguments
+        for target in ("kg", "index"):
+            outside = await client.call(
+                "build", {"target": target, "notebook_id": mcp_env["other"].id}
+            )
+            assert _error_code(outside) == "notebook_not_allowed", target
+        outside_read = await client.call(
+            "get_notebook", {"notebook_id": mcp_env["other"].id}
+        )
+        assert _error_code(outside_read) == "notebook_not_allowed"
+    assert scheduled_kg_jobs == []
 
 
 @pytest.mark.anyio
@@ -4989,7 +5863,7 @@ async def test_read_alone_opens_no_build_and_manage_opens_them(
     """Tier gates prove nothing about a build that would have failed
     anyway, so this configures kg_extract (a call WOULD succeed) and still
     shows the read-only token refused -- ``read`` alone reads
-    get_build_status but opens neither build tool nor a source write, while
+    get_notebook but opens neither build tool nor a source write, while
     ``manage`` (source writes and builds are one tier since the tier merge)
     opens the build."""
     repo = repository()
@@ -5001,27 +5875,21 @@ async def test_read_alone_opens_no_build_and_manage_opens_them(
         async with OfficialMcpClient(
             app, _agent_token(mcp_env, _SOURCE_READ), manage_lifespan=False
         ) as reader:
-            _payload(await reader.call(
-                "select_notebook", {"notebook_id": notebook_id}
-            ))
             # read really does open the read tool here, so the refusals
             # below are not "this session can do nothing".
-            assert not (await reader.call("get_build_status", {})).isError
-            refused = await reader.call("build_kg", {})
+            assert not (await reader.call("get_notebook", {})).isError
+            refused = await reader.call("build", {"target": "kg"})
             assert refused.isError
             assert "缺少「管理」权限" in refused.content[0].text
-            assert (await reader.call("build_retrieval_index", {})).isError
-            assert (await reader.call("add_source_text", {
+            assert (await reader.call("build", {"target": "index", })).isError
+            assert (await reader.call("add_source", {
                 "title": "无权", "content_md": "无权",
             })).isError
 
         async with OfficialMcpClient(
             app, _agent_token(mcp_env, _MAINTENANCE), manage_lifespan=False
         ) as maintainer:
-            _payload(await maintainer.call(
-                "select_notebook", {"notebook_id": notebook_id}
-            ))
-            assert not (await maintainer.call("build_kg", {})).isError
+            assert not (await maintainer.call("build", {"target": "kg"})).isError
 
     assert len(scheduled_kg_jobs) == 1
 
@@ -5057,10 +5925,9 @@ async def test_maintenance_writes_are_refused_in_a_read_only_shared_notebook(
     )
 
     async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        assert not (await client.call("get_build_status", {})).isError
-        assert (await client.call("build_kg", {})).isError
-        assert (await client.call("build_retrieval_index", {})).isError
+        assert not (await client.call("get_notebook", {"include": "all"})).isError
+        assert (await client.call("build", {"target": "kg"})).isError
+        assert (await client.call("build", {"target": "index", })).isError
 
     assert scheduled_kg_jobs == []
 
@@ -5069,7 +5936,7 @@ async def test_maintenance_writes_are_refused_in_a_read_only_shared_notebook(
 #
 # An MCP client does not wait forever. Claude Code aborts a tool call that has
 # sent neither a response nor a progress notification for N seconds, and
-# `ask_notebook` in `reasoning` mode runs for minutes -- so without a heartbeat
+# `ask` in `reasoning` mode runs for minutes -- so without a heartbeat
 # the client gives up on a call the server is still executing successfully.
 #
 # The trap these tests exist for is that the fix is TWO things, and either one
@@ -5083,7 +5950,7 @@ async def test_maintenance_writes_are_refused_in_a_read_only_shared_notebook(
 
 
 def _slow_ask(mcp_env, monkeypatch, seconds: float):
-    """Point `ask_notebook` at an answer that takes `seconds` to produce."""
+    """Point `ask` at an answer that takes `seconds` to produce."""
     import time as _time
 
     service = mcp_env["service"]
@@ -5108,7 +5975,7 @@ async def test_a_slow_tool_heartbeats_progress_to_the_client(mcp_env, monkeypatc
 
     Mutation guards (all three verified by replay, see task report):
       1. `json_response=True` on the FastMCP constructor -> zero beats
-      2. deleting the `_run_with_progress` wrapper at ask_notebook's call site
+      2. deleting the `_run_with_progress` wrapper at ask's call site
          (back to a bare `anyio.to_thread.run_sync`) -> zero beats
       3. moving the heartbeat's `report_progress` after the work -> zero beats
     """
@@ -5123,11 +5990,8 @@ async def test_a_slow_tool_heartbeats_progress_to_the_client(mcp_env, monkeypatc
         beats.append((asyncio.get_running_loop().time(), progress, message))
 
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         answer = _payload(await client.call(
-            "ask_notebook", {"question": "What evidence exists?", "mode": "chunk"},
+            "ask", {"question": "What evidence exists?", "mode": "chunk"},
             progress_callback=on_progress,
         ))
         finished_at = asyncio.get_running_loop().time()
@@ -5145,7 +6009,7 @@ async def test_a_slow_tool_heartbeats_progress_to_the_client(mcp_env, monkeypatc
     # The message names the tool and the elapsed seconds and NOTHING else --
     # no question text, no notebook or source name. Same rule the telemetry
     # events follow, and this string goes to a client we do not control.
-    assert all(message.startswith("ask_notebook: ") for _, _, message in beats)
+    assert all(message.startswith("ask: ") for _, _, message in beats)
     assert all("evidence" not in message for _, _, message in beats)
 
 
@@ -5179,18 +6043,15 @@ async def test_no_progress_is_sent_when_the_client_did_not_ask_for_it(
         return None
 
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         answer = _payload(await client.call(
-            "ask_notebook", {"question": "What evidence exists?", "mode": "chunk"}
+            "ask", {"question": "What evidence exists?", "mode": "chunk"}
         ))
         silent = list(sent)
         # Both directions in one test on purpose: asserting only "nothing was
         # sent" would still pass with the heartbeat deleted outright, which is
         # not the property being pinned.
         _payload(await client.call(
-            "ask_notebook", {"question": "What evidence exists?", "mode": "chunk"},
+            "ask", {"question": "What evidence exists?", "mode": "chunk"},
             progress_callback=on_progress,
         ))
 
@@ -5218,21 +6079,18 @@ async def test_a_tool_error_survives_the_heartbeat_task_group(mcp_env, monkeypat
     )
 
     def boom(*args, **kwargs):
-        raise ValueError("this exact sentence must reach the Agent")
+        raise ValueError("这句原话必须原样到达 Agent")
 
     monkeypatch.setattr(service, "ask", boom)
 
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
-        _payload(await client.call(
-            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
-        ))
         failed = await client.call(
-            "ask_notebook", {"question": "anything", "mode": "chunk"}
+            "ask", {"question": "anything", "mode": "chunk"}
         )
 
     assert failed.isError
     text = failed.content[0].text
-    assert "this exact sentence must reach the Agent" in text
+    assert "这句原话必须原样到达 Agent" in text
     assert "TaskGroup" not in text and "ExceptionGroup" not in text
 
 
@@ -5291,8 +6149,8 @@ async def test_the_mcp_transport_answers_over_sse_not_buffered_json(mcp_env):
     assert json_only.status_code == 406
 
 # --- Agentic Memory P3 (T3): notebook understanding + observation log -----
-# get_notebook_profile ("agent_profile:read") and add_observation
-# ("agent_observation:write") -- the 21st and 22nd tools.
+# get_notebook's ``profile`` (``read`` tier) and add_observation
+# (``contribute`` tier).
 _PROFILE_READ = ["read"]
 _OBSERVATION_WRITE = ["contribute"]
 
@@ -5315,7 +6173,7 @@ def _write_profile_block(
 
 
 @pytest.mark.anyio
-async def test_get_notebook_profile_returns_base_and_only_own_overlay(mcp_env):
+async def test_get_notebook_profile_section_returns_base_and_only_own_overlay(mcp_env):
     """Grouping is by each row's OWN ``owner_id`` column -- never by
     guessing which labels "belong" to which chain from their names.
 
@@ -5365,11 +6223,11 @@ async def test_get_notebook_profile_returns_base_and_only_own_overlay(mcp_env):
     token = _agent_token(mcp_env, _PROFILE_READ)
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        payload = _payload(await client.call("get_notebook_profile", {}))
+        overview = _payload(await client.call("get_notebook", {"include": "all"}))
 
+    assert overview["notebook_id"] == notebook_id
+    payload = overview["profile"]
     assert payload["enabled"] is True
-    assert payload["notebook_id"] == notebook_id
     assert payload["shared"] == [
         {
             "label": "corpus_shape",
@@ -5388,7 +6246,7 @@ async def test_get_notebook_profile_returns_base_and_only_own_overlay(mcp_env):
 
 
 @pytest.mark.anyio
-async def test_get_notebook_profile_never_leaks_evidence_source_ids(mcp_env):
+async def test_get_notebook_profile_section_never_leaks_evidence_source_ids(mcp_env):
     """``evidence``/``revision``/``updated_origin``/``history`` are a
     WHITELIST exclusion, not redaction after the fact -- a token holding
     only ``agent_profile:read`` (no ``knowledge:read``) must not be able to
@@ -5402,42 +6260,39 @@ async def test_get_notebook_profile_never_leaks_evidence_source_ids(mcp_env):
     token = _agent_token(mcp_env, _PROFILE_READ)
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        payload = _payload(await client.call("get_notebook_profile", {}))
+        overview = _payload(await client.call("get_notebook", {"include": "all"}))
 
-    serialized = json.dumps(payload, ensure_ascii=False)
+    serialized = json.dumps(overview, ensure_ascii=False)
+    payload = overview["profile"]
     assert "src-should-never-leak-9f21" not in serialized
     assert "evidence" not in payload["shared"][0]
     assert set(payload["shared"][0].keys()) == {"label", "value", "updated_at"}
 
 
 @pytest.mark.anyio
-async def test_get_notebook_profile_reports_disabled_instead_of_failing(
+async def test_get_notebook_profile_section_reports_disabled_instead_of_failing(
     mcp_env, monkeypatch
 ):
     notebook_id = mcp_env["notebook"].id
     token = _agent_token(mcp_env, _PROFILE_READ)
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         monkeypatch.setenv("AGENT_PROFILE_ENABLED", "false")
         get_settings.cache_clear()
         try:
-            payload = _payload(await client.call("get_notebook_profile", {}))
+            overview = _payload(await client.call("get_notebook", {"include": "all"}))
         finally:
             monkeypatch.setenv("AGENT_PROFILE_ENABLED", "true")
             get_settings.cache_clear()
 
-    payload.pop("truncation")
-    assert payload == {
-        "notebook_id": notebook_id, "enabled": False, "shared": [], "mine": [],
-    }
+    assert overview["notebook_id"] == notebook_id
+    assert overview["profile"] == {"enabled": False, "shared": [], "mine": []}
 
 
 @pytest.mark.anyio
 async def test_add_observation_fails_loudly_when_disabled(mcp_env, monkeypatch):
     """The deliberate counterpart of
-    ``test_get_notebook_profile_reports_disabled_instead_of_failing`` right
+    ``test_get_notebook_profile_section_reports_disabled_instead_of_failing`` right
     above: the READ side degrades to ``enabled: False`` because a caller
     cannot act on a closed sign, but the WRITE side must not go on quietly
     accumulating rows a now-disabled consolidation pass will never read (see
@@ -5448,7 +6303,6 @@ async def test_add_observation_fails_loudly_when_disabled(mcp_env, monkeypatch):
     token = _agent_token(mcp_env, _OBSERVATION_WRITE)
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         monkeypatch.setenv("AGENT_PROFILE_ENABLED", "false")
         get_settings.cache_clear()
         try:
@@ -5474,7 +6328,6 @@ async def test_add_observation_is_idempotent_per_client_request_id(mcp_env):
     token = _agent_token(mcp_env, _OBSERVATION_WRITE)
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         first = _payload(await client.call("add_observation", {
             "text": "Tried exact_lookup for part numbers; worked well.",
             "client_request_id": "obs-1",
@@ -5502,7 +6355,7 @@ async def test_add_observation_is_allowed_for_a_read_only_shared_notebook(mcp_en
     two Agent write surfaces use DIFFERENT authority models on purpose (see
     ``mcp_server._writable_notebook``'s own docstring, point 2 of its "two
     writes" section). Bob is a read-only member of Alice's notebook -- the
-    very share where his ``add_source_text`` is refused accepts his
+    very share where his ``add_source (Markdown)`` is refused accepts his
     observation write, into HIS OWN overlay only.
 
     P3 mutation guard (verified manually, then reverted -- see task report):
@@ -5515,7 +6368,6 @@ async def test_add_observation_is_allowed_for_a_read_only_shared_notebook(mcp_en
     bob_token = _agent_token(mcp_env, _OBSERVATION_WRITE, user="bob")
 
     async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         result = _payload(await client.call("add_observation", {
             "text": "Bob's own usage note.",
             "client_request_id": "bob-obs-1",
@@ -5559,7 +6411,6 @@ async def test_add_observation_landing_after_member_removal_is_compensated(
     monkeypatch.setattr(store, "append_observation", append_then_remove)
 
     async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         result = await client.call("add_observation", {
             "text": "landed after removal", "client_request_id": "race-1",
         })
@@ -5598,7 +6449,10 @@ async def test_token_level_failure_after_append_keeps_the_rows(
     monkeypatch.setattr(store, "append_observation", append_then_revoke_token)
 
     async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        # Discover tools first, as every client does on connect: the SDK
+        # otherwise lists them lazily right AFTER this call to validate its
+        # output, i.e. with the token this very call revokes.
+        await client.session.list_tools()
         # Revocation after the commit must not silently remove the terminal
         # JSON-RPC acknowledgement and leave the official client waiting.
         with anyio.fail_after(5):
@@ -5619,7 +6473,6 @@ async def test_add_observation_requires_its_own_scope(mcp_env):
     token = _agent_token(mcp_env, ["read"])
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         assert (await client.call("add_observation", {
             "text": "No scope for this.", "client_request_id": "no-scope-1",
         })).isError
@@ -5640,7 +6493,6 @@ async def test_admitted_tool_call_is_recorded_in_the_callers_own_ledger(mcp_env)
     token = _agent_token(mcp_env, _SOURCE_READ)
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         _payload(await client.call("list_knowhow_tables", {}))
 
     calls = repo.agent_observations.list_calls(
@@ -5665,7 +6517,6 @@ async def test_call_ledger_records_nothing_when_the_switch_is_off(
     token = _agent_token(mcp_env, _SOURCE_READ)
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         monkeypatch.setenv("AGENT_CALL_LOG_ENABLED", "false")
         get_settings.cache_clear()
         try:
@@ -5690,7 +6541,6 @@ async def test_call_ledger_records_nothing_while_the_master_gate_is_off(
     token = _agent_token(mcp_env, _SOURCE_READ)
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         monkeypatch.setenv("AGENT_PROFILE_ENABLED", "false")
         get_settings.cache_clear()
         try:
@@ -5718,7 +6568,6 @@ async def test_a_failing_ledger_write_never_fails_the_tool_call(
         raise RuntimeError("ledger is on fire")
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         monkeypatch.setattr(
             type(repo.agent_observations), "append_call", explode, raising=True
         )
@@ -5746,7 +6595,6 @@ async def test_denied_calls_leave_no_trace_in_the_ledger(mcp_env):
     token = _agent_token(mcp_env, _SOURCE_READ)
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         # 这个 token 没有 sources:write,删除一律拒绝。
         assert (await client.call(
             "delete_source", {"source_id": "src-nope"}
@@ -5783,7 +6631,6 @@ async def test_call_ledger_row_landing_after_member_removal_is_compensated(
     monkeypatch.setattr(store, "append_call", append_then_remove)
 
     async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         result = await client.call("list_knowhow_tables", {})
 
     assert not result.isError, "补偿清理把工具调用也弄失败了"
@@ -5796,7 +6643,7 @@ async def test_call_ledger_row_landing_after_member_removal_is_compensated(
 async def test_candidate_read_refused_by_the_later_scope_leaves_no_ledger_row(
     mcp_env, monkeypatch,
 ):
-    """codex #616 R5 P2:``get_memory`` 在收口之后还有一道闸——候选条目要求
+    """codex #616 R5 P2:``read_reference`` 的 Memory 分支在收口之后还有一道闸——候选条目要求
     ``memory:read_candidates``。收口自动记账会把被那道闸拒掉的读也记进去,与
     「被拒绝的调用不留痕」相反。成功的那次照常记一行,证明这里推迟的是记账时机,
     不是把这条路径整个排除在外。
@@ -5831,11 +6678,10 @@ async def test_candidate_read_refused_by_the_later_scope_leaves_no_ledger_row(
     async with OfficialMcpClient(
         mcp_env["app"], mcp_env["restricted"].token
     ) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         assert (await client.call(
-            "get_memory", {"memory_id": candidate.id}
+            "read_reference", {"ref": _mem_ref(mcp_env["notebook"].id, candidate.id)}
         )).isError
-        _payload(await client.call("get_memory", {"memory_id": confirmed.id}))
+        _payload(await client.call("read_reference", {"ref": _mem_ref(mcp_env["notebook"].id, confirmed.id)}))
 
     calls = repo.agent_observations.list_calls(
         notebook_id, mcp_env["alice"].id, limit=50
@@ -5855,7 +6701,6 @@ async def test_refused_delete_of_a_user_added_source_leaves_no_ledger_row(mcp_en
     token = _agent_token(mcp_env, _SOURCE_DELETE)
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         assert (await client.call(
             "delete_source", {"source_id": seeded["source_id"]}
         )).isError
@@ -5878,9 +6723,8 @@ async def test_a_lookup_that_finds_nothing_still_leaves_a_ledger_row(mcp_env):
     token = _agent_token(mcp_env, _SOURCE_READ)
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         assert (await client.call(
-            "get_source_status", {"source_id": "src-does-not-exist"}
+            "list_sources", {"source_id": "src-does-not-exist"}
         )).isError
 
     calls = repo.agent_observations.list_calls(
@@ -5968,19 +6812,23 @@ async def test_agent_content_writes_are_refused_on_a_mirrored_notebook(
     token = _agent_token(mcp_env, _SOURCE_FULL)
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         assert not (await client.call(
-            "get_source_status", {"source_id": seeded["source_id"]}
+            "list_sources", {"source_id": seeded["source_id"]}
         )).isError
-        assert (await client.call("add_source_text", {
+        refused = await client.call("add_source", {
             "title": "镜像", "content_md": "镜像上写不进来",
-        })).isError
-        assert (await client.call(
+        })
+        assert _error_code(refused) == "mirrored"
+        assert "prod-shanghai" in _error(refused)
+        assert _error_code(await client.call(
             "reparse_source", {"source_id": seeded["source_id"]}
-        )).isError
-        assert (await client.call(
+        )) == "mirrored"
+        assert _error_code(await client.call(
             "delete_source", {"source_id": seeded["source_id"]}
-        )).isError
+        )) == "mirrored"
+        assert _error_code(await client.call(
+            "build", {"target": "kg"}
+        )) == "mirrored"
 
     assert _source_row_exists(repo, seeded["source_id"])
     assert len(repo.list_sources(notebook_id)) == 1
@@ -6006,11 +6854,10 @@ async def test_agent_knowhow_code_write_is_refused_on_a_mirrored_notebook(mcp_en
     token = _agent_token(mcp_env, ["read", "contribute"])
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        assert (await client.call("put_knowhow_cell_code", {
+        assert _error_code(await client.call("put_knowhow_cell_code", {
             "row_id": row_id, "column_id": method_id,
             "code_text": "print('mirror')", "language": "python",
-        })).isError
+        })) == "mirrored"
         # Reading the same row still works — the fence refuses writes, not use.
         row = _payload(await client.call("get_knowhow_row", {"row_id": row_id}))
         assert row["code"] == []
@@ -6038,7 +6885,6 @@ async def test_agent_observations_are_still_accepted_on_a_mirrored_notebook(
     token = _agent_token(mcp_env, _OBSERVATION_WRITE)
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         accepted = _payload(await client.call("add_observation", {
             "text": "Mirrored library: exact_lookup worked here too.",
             "client_request_id": "obs-mirrored-1",

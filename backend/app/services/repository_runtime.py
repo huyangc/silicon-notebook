@@ -300,6 +300,10 @@ class _PersistenceSeats:
     # this. See ExtensionToggleStorePort in repositories/ports.py.
     extension_toggles: Any
     wishes: Any
+    # MCP ``ask`` clarification handles (v90/0070): opaque token -> the
+    # understood contract, one hour, purged on write. Read only by
+    # ``mcp_tools.ask`` through ``deps.ask_intent_handle_repository``.
+    ask_intent_handles: Any
     source_store: Any
     chunk_store: Any
     # Task 25: reports-table row persistence is seam-free (the shared
@@ -402,6 +406,7 @@ def _build_persistence_seats(
         agent_observations=bundle.agent_observations,
         extension_toggles=bundle.extension_toggles,
         wishes=bundle.wishes,
+        ask_intent_handles=bundle.ask_intent_handles,
         source_store=bundle.sources,
         chunk_store=bundle.chunks,
         report_store=bundle.reports,
@@ -1092,6 +1097,7 @@ class RepositoryRuntime:
         self.agent_observations = seats.agent_observations
         self.extension_toggles = seats.extension_toggles
         self.wishes = seats.wishes
+        self.ask_intent_handles = seats.ask_intent_handles
         self.source_store = seats.source_store
         self.chunk_store = seats.chunk_store
         self.report_store = seats.report_store
@@ -1219,7 +1225,7 @@ class RepositoryRuntime:
 
     # 触发面(2026-09-22 PR-3·T7 起扩到全部三个提问面,推翻 codex #535 R4 P2 当时
     # 登记的「同步不计入」口径):流式 AskExecutionCoordinator 的 done 分支、同步
-    # `POST /notebooks/{id}/ask`、MCP `ask_notebook`。后两者经 `RepositoryFacade.ask`
+    # `POST /notebooks/{id}/ask`、MCP `ask`。后两者经 `RepositoryFacade.ask`
     # → `AskService.ask_current`,那一层是**只有它们**才经过的唯一收口,流式面调
     # 的是引擎入口 `AskService.ask`,不嵌套、不双计(论证见 `ask_service.py` 的
     # `AskService._note_ask_completed` docstring)。改这条边界就是在改三条链共同
@@ -2447,7 +2453,7 @@ class RepositoryRuntime:
         The one place the four store reads behind a default retrieval ceiling
         are bound, so both installers -- the report worker and the Ask
         service (``AskService._retrieval_ceiling``, which every Ask entry
-        reaches: HTTP, stream, MCP ``ask_notebook``, extension engines and the
+        reaches: HTTP, stream, MCP ``ask``, extension engines and the
         intent prechecks) -- freeze from the same reads: the participant set (``mount_sql.py``), ONE
         library's visible sources, the raw owner-scoped hidden half, and the
         notebook's Memory source ids.  ``memory_source_ids`` takes the caller's
@@ -2744,7 +2750,7 @@ class RepositoryRuntime:
                 ask_engine_visible_sources=self.source_store.all_visible_source_ids,
                 ask_engine_hidden_sources=self.source_store.hidden_source_ids,
                 # Agentic Memory PR-3(T7):同步 `POST /ask` 与 MCP
-                # `ask_notebook` 的提问完成钩子。⚠ 三参,与协调器那个座位同一份
+                # `ask` 的提问完成钩子。⚠ 三参,与协调器那个座位同一份
                 # bound method、同一条边界;交的是 `_note_ask_completed` 本身,
                 # `ask_current` 只负责在答案交付之后把它交给后台跑一次。
                 note_ask_completed=self._note_ask_completed,

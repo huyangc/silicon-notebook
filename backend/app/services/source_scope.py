@@ -2150,7 +2150,7 @@ def memory_access_context(allowed: bool) -> Iterator[None]:
 
     A context variable of its own rather than a field of ``ActiveSourceScope``:
     an MCP token without ``memory:read`` must close the channel for
-    ``search_notebook_context`` too, and that tool installs no retrieval scope.
+    ``search(include="formal")`` too, and that tool installs no retrieval scope.
 
     TIGHTEN-ONLY.  ``memory_access_context(True)`` inside a frame that closed
     the channel leaves it closed: the frame that closed it is the one that
@@ -2694,7 +2694,7 @@ def default_ceiling_context(
     collections (unbudgeted: ~5; every 1 000 steps: ~208) and take about as
     long as unbudgeted ones.
 
-    Once installed, runs that had no scope before (MCP ``ask_notebook``,
+    Once installed, runs that had no scope before (MCP ``ask``,
     unscoped API asks, the report worker) start checking for drift
     (``source_scope_visible_universe_matches``, asked before the whole-graph,
     PPR, relation and exact-lookup channels): each check is one single-row

@@ -15,7 +15,7 @@ reaches -- so this guard pins the structure, with equality assertions, over
   ``refreshed_ceiling_context`` only by the report engine's refresh;
 * ``AskService._retrieval_ceiling`` wraps exactly the Ask entry points:
   ``_engine_scope`` (entered by ``ask`` -- HTTP, stream, detached jobs, MCP
-  ``ask_notebook``, extension engines -- and by ``ask_evidence``, the
+  ``ask``, extension engines -- and by ``ask_evidence``, the
   retrieval-only output), ``preview_reasoning_intent`` (both intent
   prechecks) and the two current-user engine calls; the engines themselves
   are reached only through those;

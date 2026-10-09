@@ -47,6 +47,7 @@ from app.core.internal_observability import (
 )
 from app.domain.retrieval_experience import project_run_step, project_trace_step
 from app.models.ask import (
+    stored_ask_question,
     ActiveAskJob,
     AskRequest,
     AskResponse,
@@ -337,6 +338,7 @@ class AskStateStore:
         *,
         submitted_via: StoredSubmittedVia = "",
         output: StoredAskOutput = "answer",
+        memory_access: bool = True,
     ) -> tuple[str, str]:
         """建/接续会话 + 插入 running 的 ask_jobs 行,一个写事务原子提交。
         就地把解析出的 conversation_id 写回 payload(与基线同一时点——在事务内、
@@ -355,7 +357,7 @@ class AskStateStore:
         writing the key would make a repeated keyed call trip the unique index
         instead of keeping its always-create semantics. Only
         ``begin_or_attach_durable_job`` honours (and stores) the key."""
-        question = payload.question.strip()
+        question = stored_ask_question(payload.question)
         now = self.seams.now()
         job_id = self.seams.new_id("askjob")
         with self.database.write() as db:
@@ -373,7 +375,8 @@ class AskStateStore:
                 payload.conversation_id = conversation_id
             self._insert_job_row(
                 db, job_id, notebook_id, conversation_id, user_id, mode, payload, now,
-                client_request_id=None, submitted_via=submitted_via, output=output)
+                client_request_id=None, submitted_via=submitted_via,
+                memory_access=memory_access, output=output)
         return job_id, conversation_id
 
     @staticmethod
@@ -390,15 +393,16 @@ class AskStateStore:
         client_request_id: "str | None",
         submitted_via: StoredSubmittedVia,
         output: StoredAskOutput = "answer",
+        memory_access: bool,
     ) -> None:
         db.execute(
             "INSERT INTO ask_jobs (id,notebook_id,conversation_id,created_by,mode,question,"
             "asked_at,client_request_id,status,trace_json,answer_id,error,created_at,"
-            "updated_at,submitted_via,output) "
-            "VALUES (?,?,?,?,?,?,?,?, 'running','','','',?,?,?,?)",
+            "updated_at,submitted_via,output,memory_access) "
+            "VALUES (?,?,?,?,?,?,?,?, 'running','','','',?,?,?,?,?)",
             (job_id, notebook_id, conversation_id, user_id, mode,
-             payload.question.strip(), payload.asked_at, client_request_id,
-             now, now, submitted_via, output))
+             stored_ask_question(payload.question), payload.asked_at, client_request_id,
+             now, now, submitted_via, output, 1 if memory_access else 0))
 
     def find_job_for_client_request(
         self, user_id: str, client_request_id: str,
@@ -414,6 +418,49 @@ class AskStateStore:
         return {"job_id": row["id"], "notebook_id": row["notebook_id"],
                 "conversation_id": row["conversation_id"]}
 
+    def ask_job_origin(self, job_id: str) -> "dict | None":
+        """Who started ``job_id``, where, on which surface, and with what
+        question -- the facts the MCP ``ask``/``get_ask`` tools check before
+        attaching to or reading a job (no trace, no answer) -- including
+        ``memory_access``, whether the run had the private-Memory channel
+        open. ``None`` when the job does not exist."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT notebook_id, created_by, submitted_via, question, mode, "
+                "conversation_id, memory_access FROM ask_jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "notebook_id": row["notebook_id"],
+            "created_by": row["created_by"],
+            "submitted_via": row["submitted_via"] or "",
+            "question": row["question"],
+            "mode": row["mode"],
+            "conversation_id": row["conversation_id"],
+            "memory_access": bool(row["memory_access"]),
+        }
+
+    def ask_job_progress(self, job_id: str) -> "dict | None":
+        """The cheap poll of an attached waiter: the job's ``status``,
+        ``answer_id`` and how many trace steps it has written so far
+        (``trace_steps``, a count over the append-only ``ask_trace_steps``,
+        never the steps themselves). ``None`` when the job does not exist."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT status, answer_id, (SELECT COUNT(*) FROM ask_trace_steps "
+                "WHERE job_id=?) AS trace_steps FROM ask_jobs WHERE id=?",
+                (job_id, job_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "status": row["status"],
+            "answer_id": row["answer_id"] or "",
+            "trace_steps": int(row["trace_steps"] or 0),
+        }
+
     def begin_or_attach_durable_job(
         self,
         notebook_id: str,
@@ -422,6 +469,7 @@ class AskStateStore:
         user_id: str,
         *,
         submitted_via: StoredSubmittedVia = "",
+        memory_access: bool = True,
     ) -> tuple[str, str, bool]:
         """``begin_durable_job`` with the submission's idempotency key honoured.
 
@@ -443,9 +491,10 @@ class AskStateStore:
         key = payload.client_request_id
         if not key:
             job_id, conversation_id = self.begin_durable_job(
-                notebook_id, payload, mode, user_id, submitted_via=submitted_via)
+                notebook_id, payload, mode, user_id, submitted_via=submitted_via,
+                memory_access=memory_access)
             return job_id, conversation_id, False
-        question = payload.question.strip()
+        question = stored_ask_question(payload.question)
         now = self.seams.now()
         job_id = self.seams.new_id("askjob")
         with self.database.write() as db:
@@ -458,7 +507,8 @@ class AskStateStore:
             payload.conversation_id = conversation_id
             self._insert_job_row(
                 db, job_id, notebook_id, conversation_id, user_id, mode, payload, now,
-                client_request_id=key, submitted_via=submitted_via)
+                client_request_id=key, submitted_via=submitted_via,
+                memory_access=memory_access)
         return job_id, conversation_id, False
 
     @staticmethod

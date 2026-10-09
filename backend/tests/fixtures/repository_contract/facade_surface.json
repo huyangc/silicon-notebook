@@ -1677,7 +1677,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/maintenance.py",
-        "scope": "<module>.register_maintenance_tools.build_kg.run",
+        "scope": "<module>._start_kg_build",
         "target": "_runtime"
       },
       {
@@ -4812,7 +4812,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/sources.py",
-        "scope": "<module>.register_source_tools.add_source_url.run",
+        "scope": "<module>._add_url_source",
         "target": "add_url_sources"
       },
       {
@@ -4833,7 +4833,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/memory_context.py",
-        "scope": "<module>.register_memory_context_tools.search_agent_memory.load",
+        "scope": "<module>._memory_rows",
         "target": "agent_memory_hits"
       }
     ],
@@ -4892,8 +4892,8 @@
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/mcp_tools/profiles.py",
-        "scope": "<module>.register_profile_tools.get_notebook_profile.load",
+        "path": "backend/app/api/mcp_tools/session.py",
+        "scope": "<module>._profile_block",
         "target": "agent_profile"
       }
     ],
@@ -4979,12 +4979,6 @@
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/mcp_tools/memory_context.py",
-        "scope": "<module>._ask_actionable",
-        "target": "ask"
-      },
-      {
-        "kind": "attribute",
         "path": "backend/app/eval/inference.py",
         "scope": "<module>.run_inference",
         "target": "ask"
@@ -5007,6 +5001,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', payload: 'AskRequest', *, submitted_via: 'StoredSubmittedVia' = '') -> 'AskResponse'"
+  },
+  "ask_answer_detail": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/ask.py",
+        "scope": "<module>._read_notebook_job",
+        "target": "ask_answer_detail"
+      }
+    ],
+    "kind": "method",
+    "owner": "AskStateStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, answer_id: 'str') -> \"'dict | None'\""
   },
   "ask_chunk": {
     "consumers": [
@@ -5039,6 +5048,18 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/ask.py",
+        "scope": "<module>._read_notebook_job",
+        "target": "ask_job_detail"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/ask.py",
+        "scope": "<module>._run_notebook",
+        "target": "ask_job_detail"
+      },
+      {
+        "kind": "attribute",
         "path": "scripts/verify_repository_snapshot.py",
         "scope": "<module>.exercise_reads",
         "target": "ask_job_detail"
@@ -5049,6 +5070,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, job_id: 'str') -> 'dict'"
+  },
+  "ask_job_origin": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/ask.py",
+        "scope": "<module>._read_notebook_job",
+        "target": "ask_job_origin"
+      }
+    ],
+    "kind": "method",
+    "owner": "AskStateStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, job_id: 'str') -> \"'dict | None'\""
   },
   "ask_reasoning": {
     "consumers": [
@@ -5064,6 +5100,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', payload: 'AskRequest', on_trace=None, cancel_event: 'CancelEvent' = None) -> 'AskResponse'"
+  },
+  "ask_with_job": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/ask.py",
+        "scope": "<module>._run_notebook",
+        "target": "ask_with_job"
+      }
+    ],
+    "kind": "method",
+    "owner": "AskService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', payload: 'AskRequest', *, submitted_via: 'StoredSubmittedVia' = '', attach_only: 'bool' = False) -> \"'tuple[AskResponse | None, str] | None'\""
   },
   "audit_labels_for_user_ids": {
     "consumers": [
@@ -5921,7 +5972,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/memory_context.py",
-        "scope": "<module>.register_memory_context_tools.propose_memory.create",
+        "scope": "<module>.register_memory_proposal_tools.propose_memory.create",
         "target": "create_memory_candidate"
       }
     ],
@@ -6452,7 +6503,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/citations.py",
-        "scope": "<module>.register_citation_tools.get_cited_element.load",
+        "scope": "<module>._read_element",
         "target": "evidence_elements"
       }
     ],
@@ -6494,7 +6545,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/maintenance.py",
-        "scope": "<module>.register_maintenance_tools.build_kg.run",
+        "scope": "<module>._start_kg_build",
         "target": "execute_notebook_kg_job"
       }
     ],
@@ -6608,7 +6659,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/maintenance.py",
-        "scope": "<module>.register_maintenance_tools.build_kg.run",
+        "scope": "<module>._start_kg_build",
         "target": "fail_notebook_kg_job_submission"
       }
     ],
@@ -6685,8 +6736,8 @@
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/mcp_tools/memory_context.py",
-        "scope": "<module>._reasoning_intent_history",
+        "path": "backend/app/api/mcp_tools/ask.py",
+        "scope": "<module>._conversation",
         "target": "get_conversation"
       },
       {
@@ -6919,14 +6970,14 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/mcp_tools/memory_context.py",
-        "scope": "<module>.register_memory_context_tools.get_memory.load",
+        "path": "backend/app/api/mcp_tools/citations.py",
+        "scope": "<module>._read_memory",
         "target": "get_memory"
       },
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/memory_context.py",
-        "scope": "<module>.register_memory_context_tools.search_agent_memory.load",
+        "scope": "<module>._memory_rows",
         "target": "get_memory"
       }
     ],
@@ -7006,20 +7057,20 @@
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/mcp_tools/memory_context.py",
-        "scope": "<module>._run_ask_notebook",
+        "path": "backend/app/api/mcp_tools/ask.py",
+        "scope": "<module>._run_notebook",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/session.py",
+        "scope": "<module>.register_session_tools.get_notebook.load",
         "target": "get_notebook"
       },
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/session.py",
         "scope": "<module>.register_session_tools.list_notebooks.load",
-        "target": "get_notebook"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/mcp_tools/session.py",
-        "scope": "<module>.register_session_tools.select_notebook.load",
         "target": "get_notebook"
       },
       {
@@ -7386,12 +7437,6 @@
         "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.index_status",
         "target": "index_status"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/mcp_tools/maintenance.py",
-        "scope": "<module>.register_maintenance_tools.get_build_status.load",
-        "target": "index_status"
       }
     ],
     "kind": "method",
@@ -7586,6 +7631,12 @@
         "kind": "attribute",
         "path": "backend/app/api/agent_profile_routes.py",
         "scope": "<module>._observation_agent_names",
+        "target": "list_agent_profiles"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/citations.py",
+        "scope": "<module>._read_memory",
         "target": "list_agent_profiles"
       }
     ],
@@ -8519,7 +8570,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/citations.py",
-        "scope": "<module>.register_citation_tools.get_cited_element.load",
+        "scope": "<module>._read_element.<lambda>",
         "target": "participant_notebook_ids"
       }
     ],
@@ -8633,7 +8684,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/maintenance.py",
-        "scope": "<module>.register_maintenance_tools.build_kg.run",
+        "scope": "<module>._start_kg_build",
         "target": "prepare_notebook_kg_job"
       }
     ],
@@ -8659,8 +8710,8 @@
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/mcp_tools/memory_context.py",
-        "scope": "<module>._run_ask_notebook",
+        "path": "backend/app/api/mcp_tools/ask.py",
+        "scope": "<module>._run_notebook.<lambda>",
         "target": "preview_reasoning_intent"
       },
       {
@@ -8690,13 +8741,13 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/sources.py",
-        "scope": "<module>._upload_agent_source.<lambda>",
+        "scope": "<module>._add_url_source.<lambda>",
         "target": "process_source"
       },
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/sources.py",
-        "scope": "<module>.register_source_tools.add_source_url.run.<lambda>",
+        "scope": "<module>._upload_agent_source.<lambda>",
         "target": "process_source"
       },
       {
@@ -9289,6 +9340,18 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/ask.py",
+        "scope": "<module>._read_notebook_job",
+        "target": "require_agent_access"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/citations.py",
+        "scope": "<module>._read_memory",
+        "target": "require_agent_access"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/mcp_tools/memory_context.py",
         "scope": "<module>._memory_read_allowed",
         "target": "require_agent_access"
@@ -9296,13 +9359,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/memory_context.py",
-        "scope": "<module>.register_memory_context_tools.get_memory.load",
-        "target": "require_agent_access"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/mcp_tools/memory_context.py",
-        "scope": "<module>.register_memory_context_tools.search_agent_memory.load",
+        "scope": "<module>._memory_rows",
         "target": "require_agent_access"
       }
     ],
@@ -10074,6 +10131,12 @@
         "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.scale_index_status",
         "target": "scale_index_status"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/session.py",
+        "scope": "<module>.register_session_tools.get_notebook.load",
+        "target": "scale_index_status"
       }
     ],
     "kind": "method",
@@ -10087,7 +10150,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/memory_context.py",
-        "scope": "<module>.register_memory_context_tools.search_notebook_context.load",
+        "scope": "<module>._formal_rows",
         "target": "search_notebook"
       },
       {
@@ -10414,7 +10477,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/citations.py",
-        "scope": "<module>.register_citation_tools.get_cited_element.load",
+        "scope": "<module>._read_element",
         "target": "source_metadata"
       }
     ],
@@ -10429,7 +10492,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/citations.py",
-        "scope": "<module>.register_citation_tools.get_cited_element.load",
+        "scope": "<module>._read_element",
         "target": "source_notebook_id"
       }
     ],
@@ -10660,7 +10723,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/maintenance.py",
-        "scope": "<module>.register_maintenance_tools.build_retrieval_index.run",
+        "scope": "<module>.register_maintenance_tools.build.run",
         "target": "trigger_scale_index_rebuild"
       }
     ],
@@ -10711,7 +10774,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/session.py",
-        "scope": "<module>.register_session_tools.select_notebook.load",
+        "scope": "<module>.register_session_tools.get_notebook.load",
         "target": "unified_kg_status"
       },
       {
@@ -11069,12 +11132,6 @@
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/session.py",
         "scope": "<module>.register_session_tools.list_notebooks.load",
-        "target": "user_can_read_notebook"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/mcp_tools/session.py",
-        "scope": "<module>.register_session_tools.select_notebook.load",
         "target": "user_can_read_notebook"
       },
       {

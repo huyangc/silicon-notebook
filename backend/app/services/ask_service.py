@@ -82,6 +82,7 @@ from app.models.ask import (
     ExternalEvidenceSection,
     AskRequest,
     AskResponse,
+    stored_ask_question,
     Citation,
     ConversationBulkDeleteResult,
     ModelError,
@@ -141,6 +142,10 @@ def _answer_text(data: dict) -> str:
 
 # 待确认中心「进行中的提问」的推送入口(同步 Ask 路径)。``pending_bus`` 是叶子
 # 模块,模块级 import 不构成 import SCC。
+from app.domain.cancellation import (
+    ATTACH_STALL_SECONDS, AskExecutorGone, AskWaitAbandoned,
+)
+from app.repositories.ports import AskRequestKeyConflict, AskRequestKeyReused
 from app.services.pending_bus import publish_snapshot
 from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
@@ -182,6 +187,7 @@ from app.services.source_scope import (
     cancellable_ceiling_readers,
     citation_active_id,
     default_ceiling_context,
+    memory_channel_allowed,
     partition_memory_sources,
     source_scope_restricted,
     subjectless_run_active,
@@ -1363,7 +1369,7 @@ class AskService:
         """THE retrieval ceiling of every Ask entry -- the one installation.
 
         HTTP ``/ask`` (with or without ``source_scope``), ``/ask/stream`` and
-        detached jobs, MCP ``ask_notebook``, extension engines and the two
+        detached jobs, MCP ``ask``, extension engines and the two
         intent prechecks (``preview_reasoning_intent``) all come through here,
         so none of them can run without a ceiling:
         ``source_scope.default_ceiling_context`` for ``user_id`` over the
@@ -1410,6 +1416,132 @@ class AskService:
         with stack:
             yield
 
+    def ask_current_with_job(
+        self, notebook_id: str, payload: AskRequest, *,
+        submitted_via: StoredSubmittedVia = "", attach_only: bool = False,
+        stop: "threading.Event | None" = None, output: AskOutput = "answer",
+    ) -> "tuple[AskResponse | AskEvidence | None, str] | None":
+        """``ask_current`` that also reports its durable job id (the MCP ``ask``).
+
+        ``output="evidence"`` (retrieval only) is never keyed: it runs
+        ``_ask_evidence_current`` and reports that job's id.
+
+        Unlike the synchronous HTTP ``POST /ask`` (which accepts but never
+        honours ``client_request_id``), the key is honoured here with the
+        streaming coordinator's semantics: a job this user already created
+        under the key is attached to instead of running a second engine, and
+        followed to its terminal state (polled every 0.5 s, backing off to
+        5 s). Returns ``(response, job_id)``; ``response`` is ``None`` when an
+        attached job ended cancelled or failed (the caller reads the job row).
+        A key already spent in another notebook raises
+        ``AskRequestKeyConflict``. ``attach_only`` returns ``None`` when the
+        key names no job yet, so the caller can run its own preflight first.
+        """
+        key = getattr(payload, "client_request_id", None)
+        if output == "evidence" and key:
+            raise ValueError("an evidence request takes no client_request_id")
+        if key:
+            existing = self.ask_state.find_job_for_client_request(
+                self.current_user_id(), key
+            )
+            if existing is not None:
+                if existing["notebook_id"] != notebook_id:
+                    raise AskRequestKeyConflict(key)
+                self._require_same_request(
+                    existing["job_id"], payload, submitted_via,
+                    getattr(payload, "conversation_id", None),
+                )
+                payload.conversation_id = existing["conversation_id"]
+                return (
+                    self._wait_for_job(existing["job_id"], stop=stop),
+                    existing["job_id"],
+                )
+        if attach_only:
+            return None
+        sink: list[str] = []
+        response = self.ask_current(
+            notebook_id, payload, submitted_via=submitted_via, keyed=bool(key),
+            job_sink=sink, stop=stop, output=output,
+        )
+        return response, sink[0]
+
+    def _require_same_request(
+        self, job_id: str, payload: AskRequest, submitted_via: str,
+        conversation_id: "str | None",
+    ) -> None:
+        """An attached key must name THIS request: same surface, question
+        (compared in its stored spelling, ``stored_ask_question``), mode and
+        -- when the caller named one -- conversation. ``conversation_id`` is
+        the caller's ORIGINAL value: the store's attach rewrites the payload's
+        to the existing job's. A key reused for a different question would
+        otherwise silently return the old answer.
+
+        And the attaching caller must be allowed what the run was: a job that
+        ran with the private-Memory channel open (``memory_access``; a row
+        without the fact counts as open) is refused to a caller whose channel
+        is closed now (``reason == "memory"``) -- its stored answer and trace
+        may hold Memory that stripping citations does not remove."""
+        origin = self.ask_state.ask_job_origin(job_id) or {}
+        if submitted_via and origin.get("submitted_via") != submitted_via:
+            raise AskRequestKeyReused("surface")
+        mode = self._resolve_ask_mode(getattr(payload, "mode", None)).id
+        if (
+            origin.get("question") != stored_ask_question(payload.question)
+            or origin.get("mode") != mode
+            or (conversation_id and origin.get("conversation_id") != conversation_id)
+        ):
+            raise AskRequestKeyReused("question")
+        if origin.get("memory_access", True) and not memory_channel_allowed():
+            raise AskRequestKeyReused("memory")
+
+    def _wait_for_job(
+        self, job_id: str, *, stop: "threading.Event | None" = None,
+    ) -> "AskResponse | None":
+        """Follow an attached job to its terminal state; its saved answer, if any.
+
+        A pure wait, never an execution: ``stop`` (set when the waiting call
+        is cancelled) ends it at once with ``AskWaitAbandoned``, leaving the
+        job untouched. A job executing in THIS process (its cancel handle is
+        registered) is followed at a short fixed interval for as long as it
+        runs -- its executor is alive by construction. A job owned by another
+        process is polled with backoff (0.5 s -> 5 s) and given up only after
+        ``ATTACH_STALL_SECONDS`` WITHOUT PROGRESS (no new trace step): no
+        heartbeat column exists, so a job that keeps tracing on another worker
+        is followed however long it runs, while an orphaned row ends the wait
+        with ``AskExecutorGone`` instead of holding the caller forever.
+
+        Each poll is ``ask_job_progress`` (status, answer id and a COUNT of
+        trace steps), never the full trace: a long reasoning job followed for
+        an hour would otherwise re-read and re-parse every step every poll.
+        """
+        backoff = 0.5
+        progress = None
+        last_progress = time.monotonic()
+        while True:
+            detail = self.ask_state.ask_job_progress(job_id)
+            if detail is None:
+                return None
+            if detail.get("status") != "running":
+                break
+            if stop is not None and stop.is_set():
+                raise AskWaitAbandoned()
+            marker = detail.get("trace_steps")
+            if marker != progress:
+                progress, last_progress = marker, time.monotonic()
+            local = self.cancellations.get(job_id) is not None
+            if not local and time.monotonic() - last_progress > ATTACH_STALL_SECONDS:
+                raise AskExecutorGone()
+            pause = 0.5 if local else backoff
+            if stop is not None:
+                stop.wait(pause)
+            else:
+                time.sleep(pause)
+            backoff = min(5.0, backoff * 2)
+        if detail.get("status") != "done":
+            return None
+        answer = self.ask_state.ask_answer_detail(str(detail.get("answer_id") or ""))
+        return None if answer is None else AskResponse.model_validate(answer["payload"])
+
     def ask_current(
         self,
         notebook_id: str,
@@ -1417,6 +1549,9 @@ class AskService:
         *,
         submitted_via: StoredSubmittedVia = "",
         output: AskOutput = "answer",
+        keyed: bool = False,
+        job_sink: "list[str] | None" = None,
+        stop: "threading.Event | None" = None,
     ) -> "AskResponse | AskEvidence":
         """Run the synchronous Ask surface through the durable job lifecycle.
 
@@ -1428,10 +1563,16 @@ class AskService:
         ``output="evidence"`` leaves here before any of that, for
         ``_ask_evidence_current``: a job row without a conversation, no answer,
         no completion hook and no bell push.
+
+        ``keyed`` / ``job_sink`` serve ``ask_current_with_job`` only (the MCP
+        ``ask``): the key is honoured (an attached job is followed, its
+        answer or ``None`` returned) and the durable job id is appended to
+        ``job_sink``. The HTTP ``POST /ask`` passes neither.
         """
         if output == "evidence":
             return self._ask_evidence_current(
-                notebook_id, payload, submitted_via=submitted_via
+                notebook_id, payload, submitted_via=submitted_via,
+                job_sink=job_sink,
             )
         if output != "answer":
             raise ValueError("output must be one of: answer, evidence")
@@ -1439,9 +1580,36 @@ class AskService:
         mode = self._resolve_ask_mode(getattr(payload, "mode", None))
         self.validate_reasoning_submission(notebook_id, payload)
         cancel_event = threading.Event()
-        job_id, _conversation_id = self.begin_job_current(
-            notebook_id, payload, mode.id, cancel_event, submitted_via=submitted_via
-        )
+        if keyed:
+            # A concurrent retry may land the same key between the probe in
+            # ``ask_current_with_job`` and this insert; the store's lookup and
+            # insert are atomic and report it.
+            self.notebooks.get_notebook(notebook_id)
+            # Saved before the store's attach rewrites it to the existing
+            # job's conversation.
+            requested_conversation = getattr(payload, "conversation_id", None)
+            job_id, _conversation_id, attached = (
+                self.ask_state.begin_or_attach_durable_job(
+                    notebook_id, payload, mode.id, user_id,
+                    submitted_via=submitted_via,
+                    memory_access=memory_channel_allowed(),
+                )
+            )
+            if job_sink is not None:
+                job_sink.append(job_id)
+            if attached:
+                self._require_same_request(
+                    job_id, payload, submitted_via, requested_conversation
+                )
+                return self._wait_for_job(job_id, stop=stop)
+            self.cancellations.register(job_id, cancel_event)
+        else:
+            job_id, _conversation_id = self.begin_job_current(
+                notebook_id, payload, mode.id, cancel_event,
+                submitted_via=submitted_via,
+            )
+            if job_sink is not None:
+                job_sink.append(job_id)
         # 待确认中心的「进行中的提问」:起点一次、终点一次,中间不推(同步路径没有
         # 进度点)。`finally` 覆盖全部四个终态出口——三条抛出的和一条正常返回的——
         # 而不是在每个 `finish_job` 旁边各抄一遍;抄四遍迟早会漏掉后来新增的那条,
@@ -1500,7 +1668,8 @@ class AskService:
             publish_snapshot(user_id)
 
     def _ask_evidence_current(
-        self, notebook_id: str, payload: AskRequest, *, submitted_via: StoredSubmittedVia
+        self, notebook_id: str, payload: AskRequest, *, submitted_via: StoredSubmittedVia,
+        job_sink: "list[str] | None" = None,
     ) -> AskEvidence:
         """The retrieval-only twin of ``ask_current`` (``output="evidence"``).
 
@@ -1530,6 +1699,9 @@ class AskService:
             notebook_id, payload, mode.id, cancel_event,
             submitted_via=submitted_via, output="evidence",
         )
+        if job_sink is not None:
+            # The MCP ``ask`` reads the row's Memory flag before delivering.
+            job_sink.append(job_id)
         try:
             evidence = self.ask_evidence(
                 notebook_id,
@@ -1585,7 +1757,7 @@ class AskService:
     ) -> "Callable[[Any], None]":
         """同步提问面的轨迹落库端 —— 与 durable 协调器同形的 ``on_trace``。
 
-        没有它,同步 ``POST /ask`` 与 MCP ``ask_notebook`` 跑完一轮 reasoning 之后
+        没有它,同步 ``POST /ask`` 与 MCP ``ask`` 跑完一轮 reasoning 之后
         ``ask_trace_steps`` 里一步都没有(本机试跑:流式 job 24 步、同步 job 0 步)。
         而三条记忆链路的**样本**正是从那张表读的
         (``recent_completed_ask_runs`` / ``recent_user_ask_traces``):PR-3 的完成
@@ -1653,7 +1825,7 @@ class AskService:
 
         **两条路各自恰好通知一次**,这条性质由 job 生命周期保证,不是靠去重:
 
-        * 同步面(``POST /notebooks/{id}/ask`` 与 MCP ``ask_notebook``,两者都经
+        * 同步面(``POST /notebooks/{id}/ask`` 与 MCP ``ask``,两者都经
           ``RepositoryFacade.ask``)是**唯一**会走到 ``ask_current`` 的调用方;
           其中 ``output="evidence"``(仅检索)在建 job 之前就分流到
           ``_ask_evidence_current``,那条路**一次都不**通知——它没有答案,三条
@@ -1770,6 +1942,8 @@ class AskService:
         job_id, conversation_id = self.ask_state.begin_durable_job(
             notebook_id, payload, mode, self.current_user_id(),
             submitted_via=submitted_via, output=output,
+            # The run's Memory channel, recorded for the MCP replay gate.
+            memory_access=memory_channel_allowed(),
         )
         self.cancellations.register(job_id, cancel_event)
         return job_id, conversation_id
@@ -2258,7 +2432,7 @@ class AskService:
             return QueryIntentContract(**final)
 
         # Repository-level compatibility callers may not have used the HTTP
-        # preview endpoint (MCP ``ask_notebook`` no longer takes this branch:
+        # preview endpoint (MCP ``ask`` no longer takes this branch:
         # it runs the same understanding in-call and always arrives with a
         # confirmed intent).  Preserve zero-extra-model-call behavior for clear
         # questions, while still failing closed on deterministic missing
@@ -4919,7 +5093,7 @@ class AskService:
             detail=intent_projection.as_json_mapping(),
             # The understanding phase runs before this durable job exists (in
             # ``/ask/intent`` for the browser, inside the same tool call for
-            # MCP ``ask_notebook``), so this stage cannot time it.  Whoever ran
+            # MCP ``ask``), so this stage cannot time it.  Whoever ran
             # it reports what it measured; without that the replayed trace
             # would silently drop the whole phase from the run's total.  Two
             # reporters, one slot: a reviewed intent carries the client's

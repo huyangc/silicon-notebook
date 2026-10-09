@@ -6,7 +6,7 @@ The answer is delivered whole, the turn carries ``citation_check`` (only when
 surface that reads a finished global turn back from ``global_ask_jobs`` must
 therefore hand both through unchanged -- the owner's job and conversation reads
 (which the SSE terminal frame reuses), the public share snapshot, the
-administrator's activity detail and MCP ``get_global_ask`` -- and a clean turn
+administrator's activity detail and MCP ``get_ask`` -- and a clean turn
 must carry neither key anywhere.
 
 Same arrangement as ``global_ask_share_cases``: the store is one implementation
@@ -22,7 +22,8 @@ from types import SimpleNamespace
 from typing import Any
 
 from app.api.admin_routes import _global_ask_detail
-from app.api.mcp_tools.global_ask import _job_page
+from app.api.mcp_tools.ask_pages import answer_page
+from app.api.mcp_tools.global_ask import global_view
 from app.models.ask import PublicConversation
 from app.services.conversation_public_view import public_conversation_payload
 from app.services.global_ask import _public_turn_row
@@ -168,6 +169,11 @@ def case_admin_detail_carries_the_markers(store):
             details[job_id] = _global_ask_detail(record, viewer=admin).model_dump(mode="json")
     _assert_partial(details["gjob-partial"]["answer"])
     assert not _NEW_KEYS & keys_anywhere(details["gjob-clean"])
+
+
+def _job_page(job):
+    """The MCP ``ask`` / ``get_ask`` page of one global job."""
+    return answer_page(global_view(job))
 
 
 def case_mcp_page_carries_the_summary_under_coverage(store):

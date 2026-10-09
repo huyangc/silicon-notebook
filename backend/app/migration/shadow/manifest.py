@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=90, postgres_version=70, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=91, postgres_version=71, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -855,6 +855,12 @@ _TABLES = (
     # a lease for a run that is not happening on it, which would block that
     # environment's own exports and hold its prune-log floor down.
     TableSpec("sync_export_runs", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 108),
+    # SQLite v90 / PostgreSQL 0070: the MCP ``ask`` clarification handles. A
+    # handle lives one hour and names a contract understood by THIS backend
+    # for a question asked of it; copying one across the shadow pair would
+    # hand the target a pause it never issued. LOCAL_EPHEMERAL, no
+    # replication key.
+    TableSpec("ask_intent_handles", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 109),
 )
 
 MANIFEST = Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)

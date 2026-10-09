@@ -2,8 +2,8 @@
 
 Two members share one notebook.  Alice has a confirmed Memory whose derived
 source carries an element and a knowledge-graph object; Bob has none.  Every
-call goes through the official in-process MCP client, the real ``ask_notebook``
-/ ``search_notebook_context`` handlers, the real Ask service and the real
+call goes through the official in-process MCP client, the real ``ask``
+/ ``search`` (``include="formal"``) handlers, the real Ask service and the real
 stores -- only the answer model is a stub, and it cites every evidence key it
 was shown, so the prompt it received IS the retrieval result.
 
@@ -15,7 +15,7 @@ What must hold (each assertion names the mutation it catches in the report):
 * Alice with ``memory:read``: her Memory is retrieved as before.
 * Bob, full scopes: none of Alice's Memory-derived content, ever -- the ask
   runs under the default ceiling, whose hidden half is the asker's own.
-* ``search_notebook_context`` without ``memory:read``: no Memory item and no
+* ``search`` (formal) without ``memory:read``: no Memory item and no
   Memory store query; with it, the Memory item is returned.  Deliberately
   NOT asserted: that search's knowledge-graph leg omits Memory-derived
   objects.  It does not today -- it returns ``MEMKGSECRET`` to every token,
@@ -62,7 +62,7 @@ MIXED_MEMORY_QUOTE = f"{TERM} bandwidth mixed occurrence MIXMEMQUOTE"
 FULL_SCOPES = ["read", "ask", "contribute"]
 # Without the ``read`` tier the Memory channel stays closed. Since the tier
 # merge reading Memory is part of ``read``, so the closed variant is an
-# ask-only token (``ask_notebook`` needs ``ask`` alone).
+# ask-only token (``ask`` needs the ``ask`` tier alone).
 NO_MEMORY_SCOPES = ["ask"]
 
 
@@ -265,17 +265,16 @@ def _wire_text(payload: dict) -> str:
 
 async def _ask(app, raw_token: str, notebook_id: str, question: str) -> dict:
     async with OfficialMcpClient(app, raw_token, manage_lifespan=False) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         return _payload(await client.call(
-            "ask_notebook", {"question": question, "mode": "reasoning"}
+            "ask",
+            {"question": question, "mode": "reasoning", "notebook_id": notebook_id},
         ))
 
 
 async def _search(app, raw_token: str, notebook_id: str, query: str) -> dict:
     async with OfficialMcpClient(app, raw_token, manage_lifespan=False) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         return _payload(await client.call(
-            "search_notebook_context", {"query": query}
+            "search", {"query": query, "notebook_id": notebook_id}
         ))
 
 
@@ -423,7 +422,7 @@ async def assert_search_channel_through_mcp(env: dict, monkeypatch) -> None:
     store_calls = _MemoryStoreCalls(monkeypatch)
     app = env["app"]
     async with app.router.lifespan_context(app):
-        # ``search_notebook_context`` needs ``read``, and since the tier merge
+        # ``search`` needs ``read``, and since the tier merge
         # ``read`` also opens the Memory channel, so a token alone can no
         # longer reach the closed branch. It is still live (the second live
         # check can refuse when the token is narrowed between the two), so
@@ -460,12 +459,12 @@ def sqlite_env(tmp_path, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_memory_channel_and_ceiling_on_sqlite(sqlite_env, monkeypatch):
+async def test_mcp_ask_memory_channel_and_ceiling_on_sqlite(sqlite_env, monkeypatch):
     await assert_memory_channel_through_mcp(sqlite_env, monkeypatch)
 
 
 @pytest.mark.anyio
-async def test_search_notebook_context_memory_channel_on_sqlite(sqlite_env, monkeypatch):
+async def test_search_formal_memory_channel_on_sqlite(sqlite_env, monkeypatch):
     await assert_search_channel_through_mcp(sqlite_env, monkeypatch)
 
 

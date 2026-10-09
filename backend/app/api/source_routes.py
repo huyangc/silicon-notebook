@@ -256,7 +256,7 @@ def _document_capacity_limit(
 ) -> "int | None":
     """只取 owner 有效上限(admin 豁免 → None),**不数当前文档数**。
 
-    给只需要把上限穿进建源事务、不做预检的调用方(MCP add_source_text 的去重
+    给只需要把上限穿进建源事务、不做预检的调用方(MCP add_source (Markdown) 的去重
     命中分支——那条路预期复用既有行,COUNT 是白算的,而它是 Agent 幂等重试的
     热路径)。admin 豁免判据只写在这一处,_document_capacity 在它之上补 COUNT。"""
     repo = repo if repo is not None else source_repository()
@@ -853,7 +853,7 @@ def source_elements_page(
 #
 # 判据本体(下面两个不带下划线的函数)刻意不依赖 FastAPI,也不自己去取参与集——它们
 # 收一个 `participant_notebook_ids` 可调用对象。理由是这条合同现在有**第二个**消费方:
-# MCP 的 `get_cited_element`(外部 Agent 把 Ask 回执里的 source_id/element_id 解引用回
+# MCP 的 `read_reference`(外部 Agent 把 Ask 回执里的 source_id/element_id 解引用回
 # 原文),它没有 Request、没有 HTTPException,拿到的是注入的 repository 而不是 deps 里的
 # 全局 port。让两处各写一遍谓词就是这份红线最典型的失效方式,所以判据只写一次,
 # 「怎么取参与集」和「不满足时抛什么」留给各自的调用方。
@@ -890,7 +890,7 @@ def source_readable_in_participant_scope(
     id 在那条语句里同样得到 ``None``,调用方据此在读任何别的东西之前就按「不存在」
     拒绝,所以两者走完全相同的读、给出完全相同的 404。这里再要求它非空且与 ``detail``
     同库,是让判据本身离不开那道闸:新的调用方漏掉属主闸就拿不到这个参数。Agent 令牌
-    没有 `memory:read` 时查看者传 `''`,连本人的 Memory 也读不到(MCP `get_cited_element`)。
+    没有 `memory:read` 时查看者传 `''`,连本人的 Memory 也读不到(MCP `read_reference`)。
     """
     if readable_notebook_id is None or readable_notebook_id != detail.notebook_id:
         return False

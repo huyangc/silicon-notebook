@@ -39,14 +39,14 @@ def postgres_env(postgres_scope, tmp_path, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_memory_channel_and_ceiling_on_postgres(
+async def test_mcp_ask_memory_channel_and_ceiling_on_postgres(
     postgres_env, monkeypatch
 ):
     await assert_memory_channel_through_mcp(postgres_env, monkeypatch)
 
 
 @pytest.mark.anyio
-async def test_search_notebook_context_memory_channel_on_postgres(
+async def test_search_formal_memory_channel_on_postgres(
     postgres_env, monkeypatch
 ):
     await assert_search_channel_through_mcp(postgres_env, monkeypatch)

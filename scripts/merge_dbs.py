@@ -267,6 +267,9 @@ SKIP_SECONDARY_TABLES = [
     # 算,合进 primary 只会凭空造出一个没有进程在续心跳的租约 —— 挡住 primary
     # 自己的导出,并把 prune-log 的 seq 下界一直压住,直到它过期被当成死租约。
     "sync_export_runs",
+    # v90 MCP ask 澄清句柄:一小时有效、是副库自己发给 Agent 的一次暂停,合进
+    # primary 毫无意义(原句柄指向的是副库那边理解出的合同)。只保 primary。
+    "ask_intent_handles",
 ]
 
 # 导入后清空(引用可再生的 kg_index 产物, 逼部署侧干净重建)

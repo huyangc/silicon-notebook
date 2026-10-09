@@ -91,7 +91,7 @@ async def run() -> None:
             notebook_catalog_repository,
             repository,
         )
-        from app.api.mcp_server import PUBLIC_TOOLS
+        from app.api.mcp_server import PUBLIC_TOOLS, TOOL_TIERS
         from app.core.config import get_settings
         from app.core.request_context import reset_request_user, set_request_user
         from app.main import create_app
@@ -100,7 +100,9 @@ async def run() -> None:
         # PUBLIC_TOOLS and create_memory_mcp both derive from the same default
         # frozen combined catalog. Comparing the export with live list_tools()
         # therefore catches a stale core or provider manifest instead of
-        # allowing two hand-maintained lists to agree with each other.
+        # allowing two hand-maintained lists to agree with each other. A token
+        # holding every tier sees all of it; a narrower one sees exactly the
+        # tools its tiers declare (``TOOL_TIERS``).
         #
         # The import belongs HERE, not at module scope, with the other `app.*`
         # imports: they are deliberately deferred until after `os.environ` is
@@ -127,21 +129,35 @@ async def run() -> None:
         first = service.issue_agent_token(
             owner.id, first_profile.id, scopes, notebook.id, [notebook.id], None
         )
+        everything = service.issue_agent_token(
+            owner.id, first_profile.id,
+            ["read", "ask", "contribute", "manage", "delete"],
+            notebook.id, [notebook.id], None,
+        )
         second = service.issue_agent_token(
             owner.id, second_profile.id, scopes, notebook.id, [notebook.id], None
         )
 
         async with app.router.lifespan_context(app):
             await wait_for_ready(app)
+            async with Client(app, everything.token) as full:
+                listed = await full.session.list_tools()
+                assert [item.name for item in listed.tools] == list(PUBLIC_TOOLS)
             async with Client(app, first.token) as creator:
                 listed = await creator.session.list_tools()
-                assert {item.name for item in listed.tools} == tools
-                assert (await creator.call(
-                    "search_agent_memory", {"query": "probe"}
-                )).isError
-                payload(await creator.call(
-                    "select_notebook", {"notebook_id": notebook.id}
-                ))
+                assert {item.name for item in listed.tools} == {
+                    name for name, tier in TOOL_TIERS.items()
+                    if tier is None or tier in scopes
+                }
+                # Stateless: no selection step; the token's default notebook.
+                overview = payload(await creator.call("get_notebook"))
+                assert overview["notebook_id"] == notebook.id
+                # The one ask tool reaches the notebook gate: an empty notebook
+                # is refused with the error model's code and Chinese copy.
+                empty = await creator.call(
+                    "ask", {"question": "probe", "mode": "chunk"}
+                )
+                assert empty.isError and "[unavailable]" in empty.content[0].text
                 created = payload(await creator.call(
                     "propose_memory",
                     {
@@ -155,27 +171,30 @@ async def run() -> None:
                 ))
                 memory_id = created["memory_id"]
                 formal = payload(await creator.call(
-                    "search_notebook_context", {"query": "mcp-smoke-probe"}
+                    "search", {"query": "mcp-smoke-probe"}
                 ))
                 assert memory_id not in {
                     item.get("memory_id") for item in formal["items"]
                 }
 
             async with Client(app, second.token) as peer:
-                assert (await peer.call(
-                    "search_agent_memory", {"query": "mcp-smoke-probe"}
-                )).isError
-                payload(await peer.call(
-                    "select_notebook", {"notebook_id": notebook.id}
-                ))
                 recalled = payload(await peer.call(
-                    "search_agent_memory", {"query": "mcp-smoke-probe"}
+                    "search", {"query": "mcp-smoke-probe", "include": "memory"}
                 ))
-                assert memory_id in {item["memory_id"] for item in recalled["items"]}
+                hit = next(
+                    item for item in recalled["items"]
+                    if item["memory_id"] == memory_id
+                )
+                opened = payload(await peer.call(
+                    "read_reference", {"ref": hit["ref"]}
+                ))
+                assert opened["memory_id"] == memory_id
+                assert opened["status"] == "candidate"
 
     print(
         f"memory MCP smoke: OK "
-        f"({len(tools)} tools, session isolation, candidate plane isolation)"
+        f"({len(tools)} tools, tier-filtered listing, stateless calls, "
+        f"candidate plane isolation, ref round trip)"
     )
 
 

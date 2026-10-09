@@ -357,7 +357,7 @@ def test_the_migration_collapses_duplicate_rows_before_taking_the_key(
             "('c-2','nb-1',0,'com-1','b',0.0,1)"
         )
 
-    assert migrator.migrate() == 70
+    assert migrator.migrate() == 71
 
     with postgres_database.connect() as conn:
         kos = conn.execute(

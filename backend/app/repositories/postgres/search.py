@@ -1076,7 +1076,7 @@ def notebook_knowledge_rows(
     *, viewer_id: str | None = None,
 ):
     """The KG leg of the notebook search box (HTTP ``/search`` and MCP
-    ``search_notebook_context``).  ``viewer_id`` (E4-4, M1) appends
+    ``search(include="formal")``).  ``viewer_id`` (E4-4, M1) appends
     ``memory_viewer_filter`` after the ILIKE group: ``None`` keeps the text
     byte-identical (and ``idx_knowledge_objects_nb_payload_trgm``'s literal
     ``status!='deprecated'`` partial predicate implied, see hotpath_indexes);

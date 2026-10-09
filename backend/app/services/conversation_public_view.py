@@ -272,7 +272,7 @@ def _question_text(value: Any) -> str:
     "Whole" is only a *bounded* promise because of that write-side rail — an
     anonymous response is otherwise unbounded by client input (the finding codex
     #525 R1 P2 raised against the report projection, closed for Ask by
-    ``AskRequest.question``'s ``max_length`` and by ``ask_notebook``'s matching
+    ``AskRequest.question``'s ``max_length`` and by ``ask``'s matching
     refusal on the MCP surface).
     ``test_public_question_is_bounded_by_the_write_side_rail`` pins the two
     halves together so neither can be relaxed without the other failing.

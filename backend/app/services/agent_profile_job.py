@@ -1859,7 +1859,7 @@ class AgentProfileConsolidationService:
 
         ⚠ Since 2026-09-22 (PR-3, T7) ALL THREE ask surfaces reach this:
         ``POST /ask/stream`` through ``AskExecutionCoordinator``, and both the
-        synchronous ``POST /ask`` and the MCP ``ask_notebook`` through
+        synchronous ``POST /ask`` and the MCP ``ask`` through
         ``AskService._note_ask_completed`` (see that docstring for why exactly
         one notification per delivered answer falls out of the job lifecycle
         rather than out of de-duplication). The previous note here — "the

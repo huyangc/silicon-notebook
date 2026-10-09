@@ -71,7 +71,7 @@ _PUBLISHED = (
 def test_cluster_member_rows_keeps_index_only_scan_with_the_predicate(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 70
+    assert PostgresMigrator(postgres_database).migrate() == 71
     _seed(postgres_database, "nb-ios", 5000)
     with postgres_database.connect() as connection:
         plan = _plan(
@@ -91,7 +91,7 @@ def test_cluster_member_rows_keeps_index_only_scan_with_the_predicate(
 def test_version_facts_cluster_component_scans_the_created_gen_index(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 70
+    assert PostgresMigrator(postgres_database).migrate() == 71
     _seed(postgres_database, "nb-vf", 5000)
     with postgres_database.connect() as connection:
         plan = _plan(
@@ -186,7 +186,7 @@ def test_node_context_ceiling_queries_never_seq_scan(postgres_database, authorit
     from app.domain.knowledge_contracts import NODE_CONTEXT_CLUSTER_MEMBER_PROBE
     from app.repositories.postgres.knowledge_store import _node_context_cluster_sql
 
-    assert PostgresMigrator(postgres_database).migrate() == 70
+    assert PostgresMigrator(postgres_database).migrate() == 71
     _seed_node_context_explain(postgres_database)
     notebook_id = _NC_EXPLAIN_NOTEBOOK
     cluster_sql = _node_context_cluster_sql(authoritative=authoritative)
@@ -221,7 +221,7 @@ def test_node_context_legacy_sibling_queries_never_seq_scan(postgres_database):
         _LEGACY_SIBLINGS_UNSECTIONED_SQL,
     )
 
-    assert PostgresMigrator(postgres_database).migrate() == 70
+    assert PostgresMigrator(postgres_database).migrate() == 71
     _seed_node_context_explain(postgres_database)
     notebook_id = _NC_EXPLAIN_NOTEBOOK
     first_page = (notebook_id, normalize_timestamp("0001-01-01T00:00:00+00:00"), "")
@@ -252,7 +252,7 @@ def test_node_context_defines_query_walks_the_target_index_in_id_order(postgres_
     定义者按主键回表,不顺扫。"""
     from app.repositories.postgres.knowledge_store import _NODE_CONTEXT_DEFINES_SQL
 
-    assert PostgresMigrator(postgres_database).migrate() == 70
+    assert PostgresMigrator(postgres_database).migrate() == 71
     _seed_node_context_explain(postgres_database)
     params = (_NC_EXPLAIN_NOTEBOOK, "ko-42", 8)
     with postgres_database.connect() as connection:
@@ -268,7 +268,7 @@ def test_node_context_defines_query_walks_the_target_index_in_id_order(postgres_
 
 
 def test_concept_clusters_count_skip_gate_leg_stays_index_only(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 70
+    assert PostgresMigrator(postgres_database).migrate() == 71
     _seed(postgres_database, "nb-cnt", 5000)
     with postgres_database.connect() as connection:
         plan = _plan(
@@ -291,7 +291,7 @@ def test_viewer_scope_owned_and_citing_read_seeks_the_source_indexes(postgres_da
     issues."""
     from app.repositories.postgres.knowledge_store import KnowledgeStore
 
-    assert PostgresMigrator(postgres_database).migrate() == 70
+    assert PostgresMigrator(postgres_database).migrate() == 71
     _seed_node_context_explain(postgres_database)
     notebook_id = _NC_EXPLAIN_NOTEBOOK
     with postgres_database.write() as db:

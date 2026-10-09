@@ -20,7 +20,7 @@ prompts it received ARE the retrieval result):
 * Bob reads ``b``'s source through the source proxy
   (``/notebooks/a/sources/{id}``, its elements and element page), ``b``'s
   asset through the asset proxy, and ``b``'s element through MCP
-  ``get_cited_element``: 404 / error every time.  Alice: served.
+  ``read_reference`` (element ref): 404 / error every time.  Alice: served.
 * Bob's notebook summary names no ``b`` and flags no ``b`` knowledge graph
   (N-6); Alice's does.
 * Once Bob is given read access to ``b``, all of the above flips for him.
@@ -61,6 +61,7 @@ import httpx
 import pytest
 
 from app.api.deps import identity_repository, notebook_sharing_repository, repository
+from app.api.mcp_tools.refs import element_ref
 from app.core.request_context import reset_request_user, set_request_user
 from app.repositories.ports import ChunkWrite, SourceElementWrite
 from tests.model_testkit import bind_chat_client
@@ -429,9 +430,8 @@ async def _asks(http, headers, env, model, *, reads_b: bool) -> tuple[str, str]:
 
 async def _cited_element(app, raw_token, notebook_id):
     async with OfficialMcpClient(app, raw_token, manage_lifespan=False) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        return await client.call("get_cited_element", {
-            "source_id": LIB["source"], "element_id": LIB["element"],
+        return await client.call("read_reference", {
+            "ref": element_ref(notebook_id, LIB["source"], LIB["element"]),
         })
 
 

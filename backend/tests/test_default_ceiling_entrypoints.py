@@ -16,7 +16,7 @@ result:
 * ① HTTP ``/ask`` with no ``source_scope``, ② ``/ask/stream``, ③ the intent
   precheck ``/ask/intent`` (which runs under the same ceiling, pinned on the
   scope it sees, and reads nothing until retrieval consumes it), ④ MCP
-  ``ask_notebook``, ⑤ an unscoped deep report (plan + generate through the
+  ``ask``, ⑤ an unscoped deep report (plan + generate through the
   real report engine: Bob's Memory never reaches a report prompt, and a
   plain notebook's report is byte-identical with and without the ceiling;
   ``test_report_api.py`` / ``test_report_default_ceiling`` pin the phases).
@@ -362,11 +362,11 @@ async def ask_stream(http, headers, notebook_id) -> dict:
 
 
 async def ask_mcp(app, raw_token: str, notebook_id: str) -> dict:
-    """④ MCP ``ask_notebook``."""
+    """④ MCP ``ask``."""
     async with OfficialMcpClient(app, raw_token, manage_lifespan=False) as client:
-        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
         return _payload(await client.call(
-            "ask_notebook", {"question": QUESTION, "mode": "reasoning"},
+            "ask",
+            {"question": QUESTION, "mode": "reasoning", "notebook_id": notebook_id},
         ))
 
 
@@ -446,7 +446,7 @@ async def assert_every_entry_runs_under_the_default_ceiling(env: dict, monkeypat
         mcp = await ask_mcp(app, token(env, "alice", FULL_SCOPES), notebook_id)
         _assert_alice_sees_only_what_she_may(
             "\n".join(model.prompts), json.dumps(mcp, ensure_ascii=False),
-            "④ MCP ask_notebook",
+            "④ MCP ask",
         )
 
         # ④ without memory:read, with Bob's Memory in the notebook and the
@@ -493,9 +493,10 @@ async def assert_a_skipped_library_is_named_in_the_answer(env: dict, monkeypatch
         assert LIBRARY_VISIBLE not in "\n".join(model.prompts)
 
         mcp = await ask_mcp(app, token(env, "alice", FULL_SCOPES), notebook_id)
-        assert mcp["skipped_libraries"] == [
+        assert mcp["coverage"]["skipped_notebooks"] == [
             {"notebook_id": library_id, "name": "Private reference library"},
         ]
+        assert mcp["coverage"]["skipped"] == 1
 
 
 def _stable(response: dict) -> dict:

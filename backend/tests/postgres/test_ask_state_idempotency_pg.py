@@ -196,3 +196,59 @@ def test_lookup_insert_race_attaches_to_the_committed_winner(postgres_repository
     assert loser.conversation_id == conv_id
     assert _count(repo, "SELECT COUNT(*) AS n FROM ask_jobs WHERE notebook_id=%s", (nb,)) == 1
     assert _count(repo, "SELECT COUNT(*) AS n FROM conversations WHERE notebook_id=%s", (nb,)) == 1
+
+
+def test_ask_job_origin_reads_the_stored_request_facts(postgres_repository):
+    """Twin of tests/test_ask_jobs.py's ``ask_job_origin`` test: the facts the
+    MCP ``ask``/``get_ask`` tools check, with the question in its stored
+    (``stored_ask_question``) spelling."""
+    repo = postgres_repository
+    store = repo._runtime.ask_state
+    uid = repo.current_user().id
+    nb = repo.create_notebook(NotebookCreate(name="origin-pg")).id
+    job_id, conv_id, _ = store.begin_or_attach_durable_job(
+        nb,
+        AskRequest(question="  Q?\n", mode="chunk", client_request_id="origin-key-1"),
+        "chunk", uid, submitted_via="mcp",
+    )
+    assert store.ask_job_origin(job_id) == {
+        "notebook_id": nb, "created_by": uid, "submitted_via": "mcp",
+        "question": "Q?", "mode": "chunk", "conversation_id": conv_id,
+        # Not passed: a run records the channel as open unless told otherwise.
+        "memory_access": True,
+    }
+    assert store.ask_job_origin("askjob-missing") is None
+    closed_keyed, _conv, _ = store.begin_or_attach_durable_job(
+        nb,
+        AskRequest(question="Q?", mode="chunk", client_request_id="origin-key-2"),
+        "chunk", uid, submitted_via="mcp", memory_access=False,
+    )
+    closed_plain, _conv = store.begin_durable_job(
+        nb, AskRequest(question="Q?", mode="chunk"), "chunk", uid,
+        submitted_via="mcp", memory_access=False,
+    )
+    assert store.ask_job_origin(closed_keyed)["memory_access"] is False
+    assert store.ask_job_origin(closed_plain)["memory_access"] is False
+
+
+def test_ask_job_progress_counts_trace_steps_without_reading_them(postgres_repository):
+    """The attached waiter's cheap poll: status, answer id and the number of
+    trace steps written so far (twin of tests/test_ask_jobs.py)."""
+    repo = postgres_repository
+    store = repo._runtime.ask_state
+    uid = repo.current_user().id
+    nb = repo.create_notebook(NotebookCreate(name="progress")).id
+    job_id, _conv, _ = store.begin_or_attach_durable_job(
+        nb,
+        AskRequest(question="Q?", mode="chunk", client_request_id="progress-key-1"),
+        "chunk", uid, submitted_via="mcp",
+    )
+    assert store.ask_job_progress(job_id) == {
+        "status": "running", "answer_id": "", "trace_steps": 0,
+    }
+    store.append_trace(nb, job_id, {"step": "search"}, uid)
+    store.append_trace(nb, job_id, {"step": "answer"}, uid)
+    assert store.ask_job_progress(job_id)["trace_steps"] == 2
+    store.finish_job(job_id, "cancelled")
+    assert store.ask_job_progress(job_id)["status"] == "cancelled"
+    assert store.ask_job_progress("askjob-missing") is None

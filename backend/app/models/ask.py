@@ -329,6 +329,14 @@ class QueryIntentContract(BaseModel):
 # deliverable, not something to slip in silently here.
 ASK_QUESTION_MAX_CHARS = 4000
 
+
+def stored_ask_question(question: str) -> str:
+    """The one spelling of a question an ``ask_jobs`` row stores -- and the
+    one a resubmission is compared in. Both stores write through it, and the
+    MCP ``ask`` key check compares through it, so a retry differing only in
+    surrounding whitespace is the same request."""
+    return str(question or "").strip()
+
 # Upper bound of ``AskRequest.client_request_id``. A UUID is 36 characters; the
 # bound leaves room for a prefixed client scheme without letting a caller store
 # arbitrary text in a unique-indexed column.
@@ -348,7 +356,7 @@ class AskIntentPreviewRequest(BaseModel):
 
 # Ceiling on the reported understanding-phase wall clock (one hour). Mirrored
 # by `frontend/app/ask-intent-model.ts::UNDERSTANDING_MS_LIMIT`; MCP
-# `ask_notebook` clamps its own server-side measurement to it.
+# `ask` clamps its own server-side measurement to it.
 ASK_UNDERSTANDING_MS_MAX = 3_600_000
 
 
@@ -358,7 +366,7 @@ class AskIntentConfirmation(BaseModel):
     answers: List[QueryIntentAnswer] = Field(default_factory=list, max_length=8)
     # Wall-clock of the understanding phase. The browser measures it (the phase
     # runs in /ask/intent, before any durable job exists, so the server cannot
-    # time it there); MCP ask_notebook measures it server-side because its
+    # time it there); MCP ask measures it server-side because its
     # understanding runs inside the same call. Reported back only so the
     # persisted trace keeps that phase; it never feeds retrieval. Bounded so a
     # bad client cannot inflate a run's reported total.
@@ -368,9 +376,9 @@ class AskIntentConfirmation(BaseModel):
 
 
 # Which submission surface created an ask_jobs/reports row: the web app's
-# session-authenticated HTTP surface, or the MCP tool ``ask_notebook``. Only
+# session-authenticated HTTP surface, or the MCP tool ``ask``. Only
 # the server-side entry points (ask_routes.py, report_routes.py,
-# mcp_tools/memory_context.py) may choose a literal here -- it is a
+# mcp_tools/ask.py) may choose a literal here -- it is a
 # keyword-only argument threaded explicitly through the service/store layers,
 # deliberately NOT a field on any client-writable request model (that would
 # let a browser claim "mcp"). "" ("not recorded") is not part of this alias:

@@ -50,11 +50,43 @@ FIXTURE_SECRETS = (
 )
 
 
+def _rollback_v91(db: sqlite3.Connection) -> None:
+    """Undo _migration_91 (the MCP ``ask`` clarification handles, parity with
+    PostgreSQL 0071_ask_intent_handles.sql): one table and its index, plus
+    ``ask_jobs.memory_access`` (its DEFAULT 1 is the whole backfill, so no
+    row changes). The fixture holds no handle. Every older rollback starts
+    here (through _rollback_v90)."""
+    db.execute("DROP TABLE ask_intent_handles")
+    db.execute("ALTER TABLE ask_jobs DROP COLUMN memory_access")
+
+
+def test_deployed_v90_database_verifies_ask_intent_handles(tmp_path):
+    """A deployed v90 database is missing exactly _migration_91's table and
+    its ``ask_jobs.memory_access`` column."""
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as rollback:
+        _rollback_v91(rollback)
+        rollback.execute("PRAGMA user_version = 90")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 90
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+
+
 def _rollback_v90(db: sqlite3.Connection) -> None:
     """Undo _migration_90 (ask job output kind, parity with PostgreSQL
     0070_ask_job_output.sql): ``output`` on ask_jobs and
     retained_user_activity. The default is the whole backfill, so no row
-    changed. Every older rollback starts here (through _rollback_v89)."""
+    changed. v91 is undone first (newest-first)."""
+    _rollback_v91(db)
     db.execute("ALTER TABLE ask_jobs DROP COLUMN output")
     db.execute("ALTER TABLE retained_user_activity DROP COLUMN output")
 
@@ -62,7 +94,8 @@ def _rollback_v90(db: sqlite3.Connection) -> None:
 def test_deployed_v89_database_verifies_ask_job_output_column(tmp_path):
     """A deployed v89 database is missing exactly _migration_90's schema
     addition: ``output`` TEXT NOT NULL DEFAULT 'answer' on ask_jobs and
-    retained_user_activity. No row backfill beyond the default."""
+    retained_user_activity (and _migration_91's, undone with it). No row
+    backfill beyond the default."""
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
     upgraded = module.SQLiteRepository(

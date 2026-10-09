@@ -235,10 +235,10 @@ def test_cancel_endpoint_wins_before_final_answer_save_atomically(tmp_path, monk
     real_begin = store.begin_durable_job
     real_save = store.save_answer_for_job
 
-    def capture_begin(notebook_id, payload, mode, user_id, *, submitted_via="", output="answer"):
+    def capture_begin(notebook_id, payload, mode, user_id, *, submitted_via="", **kwargs):
         result = real_begin(
-            notebook_id, payload, mode, user_id,
-            submitted_via=submitted_via, output=output)
+            notebook_id, payload, mode, user_id, submitted_via=submitted_via, **kwargs
+        )
         captured["job_id"], captured["conversation_id"] = result
         job_started.set()
         return result
@@ -302,10 +302,10 @@ def test_sync_ask_cancel_endpoint_returns_no_final_answer_or_empty_conversation(
     real_begin = store.begin_durable_job
     real_save = store.save_answer_for_job
 
-    def capture_begin(notebook_id, payload, mode, user_id, *, submitted_via="", output="answer"):
+    def capture_begin(notebook_id, payload, mode, user_id, *, submitted_via="", **kwargs):
         result = real_begin(
-            notebook_id, payload, mode, user_id,
-            submitted_via=submitted_via, output=output)
+            notebook_id, payload, mode, user_id, submitted_via=submitted_via, **kwargs
+        )
         captured["job_id"], captured["conversation_id"] = result
         job_started.set()
         return result
@@ -363,11 +363,11 @@ def test_begin_and_finish_delegate_persistence_to_runtime_ask_state(repo, monkey
     store = repo._runtime.ask_state
     real_begin, real_finish = store.begin_durable_job, store.finish_job
 
-    def spy_begin(notebook_id, payload, mode, user_id, *, submitted_via="", output="answer"):
+    def spy_begin(notebook_id, payload, mode, user_id, *, submitted_via="", **kwargs):
         seen.append(("begin", user_id))
         return real_begin(
-            notebook_id, payload, mode, user_id,
-            submitted_via=submitted_via, output=output)
+            notebook_id, payload, mode, user_id, submitted_via=submitted_via, **kwargs
+        )
 
     def spy_finish(job_id, status, *, answer_id="", error=""):
         seen.append(("finish", status))
@@ -604,3 +604,57 @@ def test_delivery_loop_closes_the_queue_when_the_client_disconnects():
 
     assert len(asyncio.run(drain_finished())) == 1
     assert finished.closed.is_set()
+
+
+def test_ask_job_origin_reads_the_stored_request_facts(repo):
+    """The facts the MCP ``ask``/``get_ask`` tools check before attaching to
+    or reading a job, with the question in its stored spelling (PostgreSQL
+    twin: tests/postgres/test_ask_state_idempotency_pg.py)."""
+    store = repo._runtime.ask_state
+    uid = repo.current_user().id
+    nb = repo.create_notebook(NotebookCreate(name="origin")).id
+    job_id, conv_id, _ = store.begin_or_attach_durable_job(
+        nb,
+        AskRequest(question="  Q?\n", mode="chunk", client_request_id="origin-key-1"),
+        "chunk", uid, submitted_via="mcp",
+    )
+    assert store.ask_job_origin(job_id) == {
+        "notebook_id": nb, "created_by": uid, "submitted_via": "mcp",
+        "question": "Q?", "mode": "chunk", "conversation_id": conv_id,
+        # Not passed: a run records the channel as open unless told otherwise.
+        "memory_access": True,
+    }
+    assert store.ask_job_origin("askjob-missing") is None
+    closed_keyed, _conv, _ = store.begin_or_attach_durable_job(
+        nb,
+        AskRequest(question="Q?", mode="chunk", client_request_id="origin-key-2"),
+        "chunk", uid, submitted_via="mcp", memory_access=False,
+    )
+    closed_plain, _conv = store.begin_durable_job(
+        nb, AskRequest(question="Q?", mode="chunk"), "chunk", uid,
+        submitted_via="mcp", memory_access=False,
+    )
+    assert store.ask_job_origin(closed_keyed)["memory_access"] is False
+    assert store.ask_job_origin(closed_plain)["memory_access"] is False
+
+
+def test_ask_job_progress_counts_trace_steps_without_reading_them(repo):
+    """The attached waiter's cheap poll: status, answer id and the number of
+    trace steps written so far (PostgreSQL twin: tests/postgres/test_ask_state_idempotency_pg.py)."""
+    store = repo._runtime.ask_state
+    uid = repo.current_user().id
+    nb = repo.create_notebook(NotebookCreate(name="progress")).id
+    job_id, _conv, _ = store.begin_or_attach_durable_job(
+        nb,
+        AskRequest(question="Q?", mode="chunk", client_request_id="progress-key-1"),
+        "chunk", uid, submitted_via="mcp",
+    )
+    assert store.ask_job_progress(job_id) == {
+        "status": "running", "answer_id": "", "trace_steps": 0,
+    }
+    store.append_trace(nb, job_id, {"step": "search"}, uid)
+    store.append_trace(nb, job_id, {"step": "answer"}, uid)
+    assert store.ask_job_progress(job_id)["trace_steps"] == 2
+    store.finish_job(job_id, "cancelled")
+    assert store.ask_job_progress(job_id)["status"] == "cancelled"
+    assert store.ask_job_progress("askjob-missing") is None

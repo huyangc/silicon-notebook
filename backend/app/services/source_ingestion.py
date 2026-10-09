@@ -1111,7 +1111,7 @@ class SourceIngestionService:
 
         ``UploadedSourceFile.title`` likewise applies to CREATED rows only, and
         is what a caller whose display name is NOT its file name (MCP's
-        ``add_source_text``: the user supplies a title, the file name is derived
+        ``add_source (Markdown)``: the user supplies a title, the file name is derived
         from it) uses to keep the two apart. Empty falls back to ``file_name``,
         which is every browser/CLI caller.
 

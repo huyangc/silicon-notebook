@@ -256,7 +256,7 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "响应由 tests/test_ask_modes_api.py::"
         "test_ask_reasoning_without_intent_gives_422_with_the_ambiguity_question 与 "
         "tests/test_memory_mcp.py::"
-        "test_ask_notebook_reasoning_rejects_an_unanswered_or_mismatched_intent"
+        "test_mcp_ask_reasoning_rejects_an_unanswered_or_mismatched_intent"
         "(MCP 侧同一函数、同三句文案)覆盖。"
     ),
     "app/api/auth_routes.py::register": (

@@ -478,7 +478,7 @@ def test_fullwidth_latin_and_halfwidth_katakana_are_not_chinese():
 
 
 def test_sync_ask_paths_notify_the_three_memory_chains():
-    """PR-3·T7 起,同步面(ask_current —— POST /ask 与 MCP ask_notebook 的共同
+    """PR-3·T7 起,同步面(ask_current —— POST /ask 与 MCP ask 的共同
     收口)也触发三条 note_ask_completed 链。这条用例是上一版
     ``test_sync_ask_paths_deliberately_do_not_notify_inference`` 的正向翻面:
     当时的口径是「同步不计入」,而本机试跑证明 MCP 侧的提问恰恰是这三条链最重要
