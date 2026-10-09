@@ -168,7 +168,7 @@ def _assert_common(plan: str) -> None:
 
 
 def test_page_with_reverse_index_keeps_keyset_scan_and_object_probe(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 68
+    assert PostgresMigrator(postgres_database).migrate() == 69
     _seed(postgres_database, backfilled=True)
     store = KnowledgeStore(postgres_database, _seams())
     after = ("2026-09-01T01:00:00+00:00", f"{NOTEBOOK}-ko-3600")
@@ -184,7 +184,7 @@ def test_page_with_reverse_index_keeps_keyset_scan_and_object_probe(postgres_dat
 
 
 def test_count_with_reverse_index_never_seeks_per_ceiling_id(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 68
+    assert PostgresMigrator(postgres_database).migrate() == 69
     _seed(postgres_database, backfilled=True)
     store = KnowledgeStore(postgres_database, _seams())
     for name, ceiling in CEILINGS.items():
@@ -195,7 +195,7 @@ def test_count_with_reverse_index_never_seeks_per_ceiling_id(postgres_database):
 
 
 def test_uncertified_index_reads_evidence_json_not_the_reverse_index(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 68
+    assert PostgresMigrator(postgres_database).migrate() == 69
     _seed(postgres_database, backfilled=False)
     store = KnowledgeStore(postgres_database, _seams())
     for name, ceiling in CEILINGS.items():
@@ -214,7 +214,7 @@ def test_control_without_statement_settings_the_49k_page_goes_parallel(postgres_
     """Control for the "no Gather" pins: the same custom plan WITHOUT
     ``execute_with_ceiling``'s settings is parallel here, so their absence
     above is the settings' doing, not the fixture's size."""
-    assert PostgresMigrator(postgres_database).migrate() == 68
+    assert PostgresMigrator(postgres_database).migrate() == 69
     _seed(postgres_database, backfilled=True)
     store = KnowledgeStore(postgres_database, _seams())
     with postgres_database.connect() as connection:
@@ -231,7 +231,7 @@ def test_ceiling_statements_never_become_server_side_prepared(postgres_database)
     ``source_ceiling`` module docstring).  Pin that the store's ceiling
     statements are sent unprepared however often they run, and that the check
     itself can see a prepared statement (control)."""
-    assert PostgresMigrator(postgres_database).migrate() == 68
+    assert PostgresMigrator(postgres_database).migrate() == 69
     _seed(postgres_database, backfilled=True)
     store = KnowledgeStore(postgres_database, _seams())
     prepared_sql = (

@@ -6,7 +6,7 @@
   },
   "expected_snapshot": {
     "path": "expected_snapshot.json",
-    "sha256": "32d49b844603d41ce6e13db5a1878bbdf5f4451e0f5fd63b7c66c569dace234c",
+    "sha256": "098193a2b2c14d134c622fb0eabe519f3db47a29a25fed7ddc1e1bd2f2a4fefa",
     "size": 109453
   },
   "schema_version": 9,

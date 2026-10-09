@@ -1958,7 +1958,7 @@
       },
       {
         "name": "agent_access_tokens",
-        "sql_sha256": "422fbf0a05c41604a7849112c8f3a3d78c21b211a5b5ac2de2e4522ad4533a23",
+        "sql_sha256": "f2087eaeb80478010d50289ff64ee655d94b31e50ff329ca7e7f986976e17e63",
         "type": "table"
       },
       {
@@ -3272,6 +3272,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 88
+    "user_version": 89
   }
 }
