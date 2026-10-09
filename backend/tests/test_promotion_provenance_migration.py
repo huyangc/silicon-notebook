@@ -12,7 +12,7 @@ Pinned here:
   entries are untouched;
 * the literal expectation equals what the runtime planner computes;
 * idempotent: re-running changes nothing;
-* fresh database: user_version 88; a v86 database migrates [87, 88];
+* fresh database: at the current version; a v86 database migrates 87 onwards;
 * the PostgreSQL file names the same rule (prefixes, separator, bound).
 """
 from __future__ import annotations
@@ -63,7 +63,8 @@ def _seed_at_v87(database) -> None:
 def test_upgrade_rewrites_foreign_entries_to_the_librarys_own_provenance(repo):
     database = repo._runtime.database
     _seed_at_v87(database)
-    assert SqliteMigrator(database, repo.settings).migrate() == [88]
+    # v89 (Agent token tiers) follows; this world holds no token.
+    assert SqliteMigrator(database, repo.settings).migrate() == [88, 89]
     cases.assert_migrated(_snapshot(database))
 
 
@@ -148,13 +149,15 @@ def test_migration_logs_counts_only(repo, caplog):
 
 def test_fresh_database_is_at_v88_and_v86_migrates_both(repo):
     database = repo._runtime.database
-    assert SCHEMA_VERSION == 88
+    assert SCHEMA_VERSION >= 88
     with database.connect() as db:
-        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == 88
+        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
     with database.write() as db:
         db.execute("ALTER TABLE unified_kg_state DROP COLUMN memory_isolation_version")
         db.execute("PRAGMA user_version = 86")
-    assert SqliteMigrator(database, repo.settings).migrate() == [87, 88]
+    assert SqliteMigrator(database, repo.settings).migrate() == list(
+        range(87, SCHEMA_VERSION + 1)
+    )
 
 
 def test_the_postgresql_file_spells_the_same_rule():
