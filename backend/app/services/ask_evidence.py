@@ -1,0 +1,187 @@
+"""Pure helpers for the retrieval-only ask output (``output="evidence"``).
+
+The synthesis context is one string with ``kN: ...`` lines plus an ``id_map``
+describing each key.  These functions cut it back into per-key items without
+touching the repository, a model or the request scope, so the chunk and the
+reasoning paths share one splitting rule and one anchor source.
+"""
+from __future__ import annotations
+
+import re
+from typing import Any, Callable, Mapping, Sequence
+
+from app.models.ask import (
+    AnswerAnchor,
+    AskEvidence,
+    AskEvidenceCounts,
+    AskEvidenceItem,
+    AskEvidenceKindCount,
+)
+
+# Key-number bands.  They mirror ``AskService._MIX_KG_KEY_BASE`` (1000),
+# ``_MEMORY_KEY_BASE`` (3000), ``_ELEMENT_KEY_BASE`` (4000),
+# ``_COLLECTION_KEY_BASE`` (5000), ``_EXTERNAL_KEY_BASE`` (6000) and
+# ``_DOCUMENT_READ_KEY_BASE`` (7000); ``test_ask_evidence`` pins them equal.
+# They are repeated here (not imported) so this module stays a leaf that
+# ``ask_service`` can import.
+_KG_BASE = 1000
+_MEMORY_BASE = 3000
+_ELEMENT_BASE = 4000
+_COLLECTION_BASE = 5000
+_EXTERNAL_BASE = 6000
+_DOCUMENT_READ_BASE = 7000
+
+# An object_type that names the kind outright wins over the number band.
+_OBJECT_TYPE_KINDS = frozenset({"chunk", "memory", "external"})
+
+# A section heading ``_bounded_context_append`` / ``_append_memory_context``
+# put in front of the next block: it trails the previous key's segment.
+_TRAILING_HEADING_RE = re.compile(r"(?:\n\n|\A)\[[^\]\n]+\]\n?\Z")
+
+# The kind whose delivered/selected counts are reported only under by_kind.
+MEMORY_KIND = "memory"
+
+
+def kind_for_key(key: str, id_map: Mapping[str, Mapping[str, Any]]) -> str:
+    object_type = str((id_map.get(key) or {}).get("object_type") or "")
+    if object_type in _OBJECT_TYPE_KINDS:
+        return object_type
+    match = re.fullmatch(r"k(\d+)", key)
+    if match is None:
+        return "context"
+    number = int(match.group(1))
+    if number >= _DOCUMENT_READ_BASE:
+        return "document_read"
+    if number >= _EXTERNAL_BASE:
+        return "external"
+    if number >= _COLLECTION_BASE:
+        return "collection"
+    if number >= _ELEMENT_BASE:
+        return "element"
+    if number >= _MEMORY_BASE:
+        return "memory"
+    if number >= _KG_BASE:
+        return "kg"
+    return "chunk"
+
+
+def _strip_heading(text: str) -> str:
+    return _TRAILING_HEADING_RE.sub("", text).strip("\n")
+
+
+def split_context_by_keys(
+    context_block: str, ordered_keys: Sequence[str]
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Cut ``context_block`` into ``(key, text)`` segments.
+
+    A key starts where a line begins with ``{key}: `` (the same boundary rule
+    as ``_bounded_context_append``'s admission regex).  Text before the first
+    key is returned as one ``("", text)`` segment when, once section headings
+    are removed, anything is left.  Keys that never occur in the block are
+    returned in the second list (they were budgeted out of the context).
+    """
+    starts: list[tuple[int, int, str]] = []
+    missing: list[str] = []
+    for key in dict.fromkeys(ordered_keys):
+        match = re.search(rf"(?m)^{re.escape(key)}: ", context_block)
+        if match is None:
+            missing.append(key)
+        else:
+            starts.append((match.start(), match.end(), key))
+    starts.sort()
+    segments: list[tuple[str, str]] = []
+    leading = _strip_heading(context_block[: starts[0][0]] if starts else context_block)
+    if leading.strip():
+        segments.append(("", leading))
+    for index, (_, text_start, key) in enumerate(starts):
+        end = starts[index + 1][0] if index + 1 < len(starts) else len(context_block)
+        segments.append((key, _strip_heading(context_block[text_start:end])))
+    return segments, missing
+
+
+def build_ask_evidence(
+    context_block: str,
+    id_map: Mapping[str, Mapping[str, Any]],
+    *,
+    parse_anchors: Callable[[str, Mapping[str, Mapping[str, Any]]], list[AnswerAnchor]],
+    mode: str,
+    evidence_kind: str = "retrieval",
+    relevance: Mapping[str, float] | None = None,
+    recalled: int = 0,
+    selected: int | None = None,
+    budget_chars: int = 0,
+    **fields: Any,
+) -> AskEvidence:
+    """Assemble an ``AskEvidence`` from the synthesis context and its id_map.
+
+    ``parse_anchors`` is ``EvidenceContextService.parse_anchors`` (injected to
+    avoid an import cycle); anchors are built from ``"[k1][k2]..."`` so every
+    handle field comes from the same code the answer mode uses.  ``selected``
+    defaults to delivered + omitted (non-memory).  Totals exclude memory;
+    memory is reported only in ``counts.by_kind``.  ``fields`` carries the
+    remaining ``AskEvidence`` fields (``retrieval_query``, ``intent``, ...).
+    """
+    segments, missing = split_context_by_keys(context_block, list(id_map))
+    anchors = {
+        anchor.key: anchor
+        for anchor in parse_anchors(
+            "".join(f"[{key}]" for key, _ in segments if key), id_map
+        )
+    }
+    relevance = relevance or {}
+    items: list[AskEvidenceItem] = []
+    by_kind: dict[str, AskEvidenceKindCount] = {}
+    for key, text in segments:
+        kind = kind_for_key(key, id_map) if key else "context"
+        items.append(AskEvidenceItem(
+            key=key,
+            kind=kind,  # type: ignore[arg-type]
+            text=text,
+            anchor=anchors.get(key),
+            relevance=relevance.get(key),
+        ))
+        if key:
+            bucket = by_kind.setdefault(kind, AskEvidenceKindCount())
+            bucket.delivered += 1
+            bucket.selected += 1
+    omitted_non_memory = 0
+    for key in missing:
+        kind = kind_for_key(key, id_map)
+        by_kind.setdefault(kind, AskEvidenceKindCount()).selected += 1
+        if kind != MEMORY_KIND:
+            omitted_non_memory += 1
+    delivered = sum(
+        count.delivered for kind, count in by_kind.items() if kind != MEMORY_KIND
+    )
+    selected_total = delivered + omitted_non_memory if selected is None else selected
+    counts = AskEvidenceCounts(
+        recalled=recalled,
+        selected=selected_total,
+        delivered=delivered,
+        omitted=omitted_non_memory,
+        by_kind=by_kind,
+    )
+    return AskEvidence(
+        mode=mode,
+        evidence_kind=evidence_kind,  # type: ignore[arg-type]
+        items=items,
+        counts=counts,
+        budget_chars=budget_chars,
+        context_chars=len(context_block),
+        **fields,
+    )
+
+
+class _EvidenceAssemblyClient:
+    """Stand-in answer client for the evidence path.
+
+    The reasoning structured-evidence assembly only reads ``.configured`` (and
+    ``.model``) off the answer client as a gate; it must never call a model on
+    the evidence path, so ``chat_json`` fails loudly instead.
+    """
+
+    configured = True
+    model = ""
+
+    def chat_json(self, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("evidence output never calls the answer model")

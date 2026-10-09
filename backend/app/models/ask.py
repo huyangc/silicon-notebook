@@ -1,6 +1,6 @@
 import re
 from datetime import datetime
-from typing import Annotated, Any, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union, get_args
 
 from pydantic import (
     BaseModel,
@@ -388,6 +388,16 @@ SubmittedVia = Literal["web", "mcp"]
 # Literals flatten per PEP 586, so this is exactly `Literal["", "web", "mcp"]`
 # -- `typing.get_args(StoredSubmittedVia) == ("", *typing.get_args(SubmittedVia))`.
 StoredSubmittedVia = Literal["", SubmittedVia]
+
+
+# What an ask returns: the synthesized "answer" (default), or only the
+# retrieved "evidence" the synthesis would have been fed ("evidence" skips the
+# final model call and is recorded as retrieval-only in ask_jobs.output).
+AskOutput = Literal["answer", "evidence"]
+ASK_OUTPUTS: tuple[str, ...] = get_args(AskOutput)
+# The stored-value vocabulary of ask_jobs.output (never empty: pre-migration
+# rows read back as "answer").
+StoredAskOutput = AskOutput
 
 
 class AskRequest(BaseModel):
@@ -1029,6 +1039,60 @@ class AskResponse(BaseModel):
 # today and the route stores it, so adding one would change behaviour at the
 # bottom end -- a different change from bounding the top.
 CONVERSATION_TITLE_MAX_CHARS = 200
+
+
+AskEvidenceKind = Literal[
+    "chunk", "kg", "memory", "element", "collection", "external",
+    "document_read", "context",
+]
+
+
+class AskEvidenceItem(BaseModel):
+    """One piece of the context the synthesis would have been given."""
+
+    # The "k12" key in the synthesis context; "" for an unkeyed block.
+    key: str = ""
+    kind: AskEvidenceKind
+    # The synthesis prompt's text for that key, verbatim (without the "kN: "
+    # prefix and the trailing section heading).
+    text: str
+    anchor: Optional[AnswerAnchor] = None
+    relevance: Optional[float] = None
+
+
+class AskEvidenceKindCount(BaseModel):
+    selected: int = 0
+    delivered: int = 0
+
+
+class AskEvidenceCounts(BaseModel):
+    # Totals never include memory; memory only appears in ``by_kind``.
+    recalled: int = 0
+    selected: int = 0
+    delivered: int = 0
+    omitted: int = 0
+    by_kind: Dict[str, AskEvidenceKindCount] = Field(default_factory=dict)
+
+
+class AskEvidence(BaseModel):
+    """Retrieval-only result of ``output="evidence"`` (no synthesis)."""
+
+    mode: str
+    evidence_kind: Literal[
+        "retrieval", "document_overview", "structured_enumeration", "none"
+    ]
+    # Set only when a valid conversation's history was read (never appended).
+    conversation_id: str = ""
+    retrieval_query: str = ""
+    items: List[AskEvidenceItem] = Field(default_factory=list)
+    counts: AskEvidenceCounts = Field(default_factory=AskEvidenceCounts)
+    budget_chars: int = 0
+    context_chars: int = 0
+    notice: str = ""
+    intent: Optional[QueryIntentContract] = None
+    skipped_libraries: List[RetrievalScopeBaseReceipt] = Field(default_factory=list)
+    index_required: bool = False
+    model_errors: List[ModelError] = Field(default_factory=list)
 
 
 class ConversationRenameRequest(BaseModel):
