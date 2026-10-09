@@ -50,12 +50,54 @@ FIXTURE_SECRETS = (
 )
 
 
+def _rollback_v90(db: sqlite3.Connection) -> None:
+    """Undo _migration_90 (ask job output kind, parity with PostgreSQL
+    0070_ask_job_output.sql): ``output`` on ask_jobs and
+    retained_user_activity. The default is the whole backfill, so no row
+    changed. Every older rollback starts here (through _rollback_v89)."""
+    db.execute("ALTER TABLE ask_jobs DROP COLUMN output")
+    db.execute("ALTER TABLE retained_user_activity DROP COLUMN output")
+
+
+def test_deployed_v89_database_verifies_ask_job_output_column(tmp_path):
+    """A deployed v89 database is missing exactly _migration_90's schema
+    addition: ``output`` TEXT NOT NULL DEFAULT 'answer' on ask_jobs and
+    retained_user_activity. No row backfill beyond the default."""
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as upgraded_db:
+        for table in ("ask_jobs", "retained_user_activity"):
+            columns = {
+                row[1]: (row[2], row[3], row[4])
+                for row in upgraded_db.execute(f"PRAGMA table_info({table})")
+            }
+            assert columns["output"] == ("TEXT", 1, "'answer'")
+        assert {
+            row[0] for row in upgraded_db.execute("SELECT output FROM ask_jobs")
+        } <= {"answer"}
+
+    with sqlite3.connect(database) as rollback:
+        _rollback_v90(rollback)
+        rollback.execute("PRAGMA user_version = 89")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 89
+    assert result.final_user_version == module.SCHEMA_VERSION
+
+
 def _rollback_v89(db: sqlite3.Connection) -> None:
     """Undo _migration_89 (Agent token tiers, parity with PostgreSQL
     0069_agent_token_tiers.sql): the nullable agent_access_tokens.token_plain
     column. The fixture holds no token, so the tier rewrite changed no row.
     v88 is data only and has nothing to undo, so every older rollback starts
-    here (through _rollback_v87)."""
+    here (through _rollback_v87). v90 is undone first (newest-first)."""
+    _rollback_v90(db)
     db.execute("ALTER TABLE agent_access_tokens DROP COLUMN token_plain")
 
 

@@ -186,6 +186,22 @@ test("提问与报告标出调用方式；未记录与认不出的值不挂标�
 });
 
 
+test("只检索的提问挂「仅检索」标签；回答模式与缺省字段不挂", () => {
+  const { container } = stream([
+    ask({ id: "ask-ev", output: "evidence" }),
+    ask({ id: "ask-ans", output: "answer" }),
+    ask({ id: "ask-old" }),
+  ]);
+  const rows = container.querySelectorAll(".activity-row");
+  const chips = (row: Element) =>
+    Array.from(row.querySelectorAll(".activity-chip")).map((chip) => chip.textContent);
+
+  expect(chips(rows[0])).toContain("仅检索");
+  expect(chips(rows[1])).not.toContain("仅检索");
+  expect(chips(rows[2])).not.toContain("仅检索");
+});
+
+
 test("空标题渲染占位符，不回落到文件名", () => {
   stream([source({ display_title: "   ", file_name: "q3-report.pdf" })]);
   expect(screen.getByText("（无标题）")).toBeInTheDocument();

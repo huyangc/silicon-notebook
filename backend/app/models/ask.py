@@ -395,6 +395,13 @@ StoredSubmittedVia = Literal["", SubmittedVia]
 # final model call and is recorded as retrieval-only in ask_jobs.output).
 AskOutput = Literal["answer", "evidence"]
 ASK_OUTPUTS: tuple[str, ...] = get_args(AskOutput)
+# The refusal for ``output="evidence"`` on an extension engine: it retrieves
+# and synthesizes inside one opaque provider call, so it has no evidence of its
+# own to hand back. One text for the MCP validator and the Ask service.
+EVIDENCE_OUTPUT_MODE_REFUSAL = (
+    'output="evidence" 只支持 mode="reasoning" 或 "chunk"：'
+    "扩展引擎自行检索并合成，没有可单独返回的检索证据"
+)
 # The stored-value vocabulary of ask_jobs.output (never empty: pre-migration
 # rows read back as "answer").
 StoredAskOutput = AskOutput

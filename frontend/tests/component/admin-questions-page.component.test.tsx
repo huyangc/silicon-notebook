@@ -109,6 +109,25 @@ test("每条提问标出调用方式，历史行显示未记录", async () => {
   expect(within(rows[2]).getByText("未记录")).toBeInTheDocument();
 });
 
+test("只检索的提问在来源列标出「仅检索」，回答模式不标", async () => {
+  mocks.fetchAdminQuestions.mockResolvedValue({
+    ...page,
+    items: [
+      { ...page.items[0], id: "ask-ev", output: "evidence" },
+      { ...page.items[0], id: "ask-ans", output: "answer" },
+      { ...page.items[0], id: "ask-old" },
+    ],
+    total: 3,
+  });
+  render(<AdminQuestionsPage />);
+
+  const table = await screen.findByRole("table");
+  const rows = within(table).getAllByRole("row").slice(1);
+  expect(within(rows[0]).getByText("仅检索")).toBeInTheDocument();
+  expect(within(rows[1]).queryByText("仅检索")).not.toBeInTheDocument();
+  expect(within(rows[2]).queryByText("仅检索")).not.toBeInTheDocument();
+});
+
 test("按调用方式筛选时带参重新加载并回到第一页", async () => {
   mocks.fetchAdminQuestions.mockResolvedValue({ ...page, total: 120 });
   const user = userEvent.setup();

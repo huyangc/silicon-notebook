@@ -1093,7 +1093,7 @@ class _RecordingAskState:
     def __init__(self, calls: list):
         self.calls = calls
 
-    def begin_durable_job(self, notebook_id, payload, mode, user_id, *, submitted_via=""):
+    def begin_durable_job(self, notebook_id, payload, mode, user_id, *, submitted_via="", output="answer"):
         payload.conversation_id = "conv-t5"
         return "askjob-t5", "conv-t5"
 

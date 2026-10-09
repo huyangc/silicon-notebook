@@ -92,11 +92,16 @@ def test_kind_for_key_bands_and_object_type_priority():
     assert kind_for_key("k6004", empty) == "external"
     assert kind_for_key("k7005", empty) == "document_read"
     assert kind_for_key("weird", empty) == "context"
-    # object_type wins for chunk/memory/external, but not for other types.
+    # A KG-only reasoning round numbers its objects from k1.
+    assert kind_for_key("k1", {"k1": {"object_type": "claim"}}) == "kg"
+    assert kind_for_key("k1", {"k1": {"object_type": "chunk"}}) == "chunk"
+    # object_type wins for chunk/memory/external/element; any other typed
+    # entry below the KG band is a KG object.
     assert kind_for_key("k1500", {"k1500": {"object_type": "chunk"}}) == "chunk"
     assert kind_for_key("k1", {"k1": {"object_type": "memory"}}) == "memory"
     assert kind_for_key("k1", {"k1": {"object_type": "external"}}) == "external"
-    assert kind_for_key("k1", {"k1": {"object_type": "knowledge"}}) == "chunk"
+    assert kind_for_key("k1", {"k1": {"object_type": "knowledge"}}) == "kg"
+    assert kind_for_key("k4001", {"k4001": {"object_type": "element"}}) == "element"
 
 
 def test_build_anchors_match_parse_anchors_field_for_field():

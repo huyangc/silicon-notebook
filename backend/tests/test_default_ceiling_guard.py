@@ -14,10 +14,11 @@ reaches -- so this guard pins the structure, with equality assertions, over
   report worker (``ReportExecutionCoordinator._default_ceiling``);
   ``refreshed_ceiling_context`` only by the report engine's refresh;
 * ``AskService._retrieval_ceiling`` wraps exactly the Ask entry points:
-  ``ask`` (HTTP, stream, detached jobs, MCP ``ask_notebook``, extension
-  engines), ``preview_reasoning_intent`` (both intent prechecks) and the two
-  current-user engine calls; the engines themselves are reached only through
-  those;
+  ``_engine_scope`` (entered by ``ask`` -- HTTP, stream, detached jobs, MCP
+  ``ask_notebook``, extension engines -- and by ``ask_evidence``, the
+  retrieval-only output), ``preview_reasoning_intent`` (both intent
+  prechecks) and the two current-user engine calls; the engines themselves
+  are reached only through those;
 * no installer is imported under another name, and the production
   ``AskService`` is built with ``ceiling_readers``.
 
@@ -82,10 +83,30 @@ def test_every_ask_entry_goes_through_the_one_installation():
     index = _index()
     ask = "app/services/ask_service.py"
     assert _call_sites(index, "_retrieval_ceiling") == {
-        (ask, "<module>.AskService.ask"),
+        (ask, "<module>.AskService._engine_scope"),
         (ask, "<module>.AskService.preview_reasoning_intent"),
         (ask, "<module>.AskService.ask_chunk_current"),
         (ask, "<module>.AskService.ask_reasoning_current"),
+    }
+    # ``_engine_scope`` (model-work priority + the ceiling + the retrieval
+    # run) is entered by the answer dispatch and by the retrieval-only output,
+    # and by nothing else: an evidence call runs under exactly the gates the
+    # answer it stands in for runs under.
+    assert _call_sites(index, "_engine_scope") == {
+        (ask, "<module>.AskService.ask"),
+        (ask, "<module>.AskService.ask_evidence"),
+    }
+    # The reasoning orchestrator is reached from the answer entry and from
+    # the retrieval-only entry, both of which run inside ``_engine_scope``.
+    assert _call_sites(index, "_run_reasoning_stage") == {
+        (ask, "<module>.AskService.ask_reasoning"),
+        (ask, "<module>.AskService._reasoning_evidence"),
+    }
+    assert _call_sites(index, "_reasoning_evidence") == {
+        (ask, "<module>.AskService.ask_evidence"),
+    }
+    assert _call_sites(index, "_chunk_evidence") == {
+        (ask, "<module>.AskService.ask_evidence"),
     }
     # The engines are reached only from inside an installation: ``ask``
     # dispatches by name (``getattr(self, spec.handler)``), the two

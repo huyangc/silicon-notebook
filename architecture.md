@@ -467,7 +467,8 @@ SQLite/PostgreSQL bundle 中分别绑定参数占位符，持有用户所有的�
 执行器、公平窗口、阶段预算、取消令牌以及回执与证据指纹的唯一返回接缝）。装一半不是降级而是错误：
 检索层与 ask 层读的是两个不同谓词，分开安装会让它们互相矛盾。逐库天花板是**完整**的
 （`ceilings_total`）：计划没选中的库、运行中途新挂载的库在每道闸上都不参与。
-单库问答的范围安装点同样只有一个：`AskService.ask`（HTTP 同步/流式/后台作业、MCP `ask_notebook`、
+单库问答的范围安装点同样只有一个：`AskService._engine_scope`（同时服务 `ask` 与只检索不合成的
+`ask_evidence`：HTTP 同步/流式/后台作业、MCP `ask_notebook`（含 `output="evidence"`）、
 扩展回答引擎）与意图预检 `preview_reasoning_intent` 都经 `AskService._retrieval_ceiling` 调
 `source_scope.default_ceiling_context`（读取器由 `RepositoryRuntime.ceiling_readers()` 唯一接线）：
 路由冻结过的维度原样使用，没提交的维度冻结为提问人的默认上限（可见来源 ∪ 本人隐藏来源，挂载库只取

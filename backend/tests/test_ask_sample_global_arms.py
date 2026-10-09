@@ -45,11 +45,12 @@ def _step(summary, kind="retrieve"):
 
 
 def _ask(db, job_id, notebook_id, user_id, created_at, *, question="nb?", status="done",
-         mode="reasoning", steps=()):
+         mode="reasoning", steps=(), output="answer"):
     db.execute(
         "INSERT INTO ask_jobs(id,notebook_id,conversation_id,created_by,mode,question,status,"
-        "answer_id,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        (job_id, notebook_id, "", user_id, mode, question, status, "", "", created_at, created_at))
+        "answer_id,error,created_at,updated_at,output) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        (job_id, notebook_id, "", user_id, mode, question, status, "", "", created_at, created_at,
+         output))
     for seq, step in enumerate(steps):
         db.execute(
             "INSERT INTO ask_trace_steps(job_id,seq,step_json,created_at) VALUES(?,?,?,?)",
@@ -263,3 +264,26 @@ def test_the_step_budget_bounds_what_leaves_the_database_for_global_rows(repo):
     finally:
         merge_module._trace_steps = original
     assert received == [3]
+
+
+def test_a_retrieval_only_ask_is_in_no_learning_sample(repo):
+    """An ``output='evidence'`` job (MCP ask_notebook, retrieval only) stored no
+    answer: it is not an ask the member made *and got an answer to*, so none of
+    the three samplers (P1 overlay trace, P2 experience runs, P3 language) may
+    read it -- its steps, its question or its mode."""
+    with repo._write() as db:
+        _ask(db, "ask-answer", "nb-a", USER, "2026-08-01T10:00:00+00:00",
+             question="这是中文问题", steps=[_step("answered")])
+        _ask(db, "ask-evidence", "nb-a", USER, "2026-08-01T11:00:00+00:00",
+             question="an english evidence question", steps=[_step("evidence")],
+             output="evidence")
+    ask_state = repo._runtime.ask_state
+    traces = ask_state.recent_user_ask_traces("nb-a", USER, job_limit=10, step_limit=600)
+    assert [row["job_id"] for row in traces] == ["ask-answer"]
+    assert [step["summary"] for step in traces[0]["steps"]] == ["answered"]
+    for partition in (None, "nb-a"):
+        runs = ask_state.recent_completed_ask_runs(
+            job_limit=40, step_limit=600, notebook_id=partition)
+        assert [run["run_id"] for run in runs] == ["ask-answer"]
+        assert len(runs[0]["steps"]) == 1
+    assert ask_state.recent_user_ask_languages(USER, limit=30) == [{"language": "zh"}]

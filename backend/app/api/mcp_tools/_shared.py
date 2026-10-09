@@ -34,6 +34,13 @@ logger = logging.getLogger(__name__)
 RESULT_LIMIT = 20
 TEXT_LIMIT = 2_000
 TOTAL_TEXT_LIMIT = 12_000
+# ``ask_notebook(output="evidence")`` returns the context the synthesis would
+# have been given, so its size follows the synthesis budget, not the 12,000
+# above. The per-item allowance covers the handle/metadata fields wrapped
+# around each item's text; the hard cap keeps one reply bounded whatever the
+# budget configuration says.
+EVIDENCE_ITEM_OVERHEAD_BYTES = 3_000
+EVIDENCE_TOTAL_TEXT_LIMIT = 524_288
 OUTPUT_SCALAR_LIMIT = 6_000
 OUTPUT_KEY_LIMIT = 120
 OUTPUT_MAPPING_LIMIT = 20
@@ -185,6 +192,7 @@ def _sanitize_output(
     *,
     field: str = "",
     field_limits: Mapping[str, int] | None = None,
+    list_limit: int = RESULT_LIMIT,
 ) -> Any:
     """Deterministically bound arbitrary adapter data before final packing."""
     if isinstance(value, str):
@@ -272,12 +280,13 @@ def _sanitize_output(
                 depth + 1,
                 field=key,
                 field_limits=field_limits,
+                list_limit=list_limit,
             )
         return result
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
         entries = list(value)
-        if len(entries) > RESULT_LIMIT:
-            _mark_truncated(stats, items=len(entries) - RESULT_LIMIT)
+        if len(entries) > list_limit:
+            _mark_truncated(stats, items=len(entries) - list_limit)
         return [
             _sanitize_output(
                 child,
@@ -285,8 +294,9 @@ def _sanitize_output(
                 depth + 1,
                 field=field,
                 field_limits=field_limits,
+                list_limit=list_limit,
             )
-            for child in entries[:RESULT_LIMIT]
+            for child in entries[:list_limit]
         ]
     text = str(value)
     return _sanitize_output(text, stats, depth)
@@ -460,10 +470,21 @@ def _budget_response(
     anchor_provenance_budget_chars: int | None = None,
     citations_budget_chars: int | None = None,
     intent_budget_chars: int | None = None,
+    total_budget_bytes: int | None = None,
+    list_limit: int = RESULT_LIMIT,
+    provenance_list_key: str = "anchors",
 ) -> dict[str, Any]:
-    """Return a useful response that strictly fits the public MCP JSON budget."""
+    """Return a useful response that strictly fits the public MCP JSON budget.
+
+    The three trailing keywords exist for ``ask_notebook(output="evidence")``
+    alone: a total other than ``TOTAL_TEXT_LIMIT``, a list cap other than
+    ``RESULT_LIMIT``, and the list whose rows carry the per-row ``provenance``
+    to fit (``anchors`` for every other tool). Left at their defaults the
+    behaviour is byte-identical.
+    """
+    total_budget = TOTAL_TEXT_LIMIT if total_budget_bytes is None else total_budget_bytes
     stats: dict[str, Any] = {
-        "budget_chars": TOTAL_TEXT_LIMIT,
+        "budget_chars": total_budget,
         "truncated": False,
         "omitted_items": 0,
         "omitted_map_entries": 0,
@@ -472,10 +493,15 @@ def _budget_response(
     }
     if initial_omitted_items:
         _mark_truncated(stats, items=initial_omitted_items)
-    result = _sanitize_output(dict(value), stats, field_limits=field_limits)
+    result = _sanitize_output(
+        dict(value), stats, field_limits=field_limits, list_limit=list_limit
+    )
     anchors = result.get("anchors")
-    if anchor_provenance_budget_chars is not None and isinstance(anchors, list):
-        for anchor in anchors:
+    provenance_rows = result.get(provenance_list_key)
+    if anchor_provenance_budget_chars is not None and isinstance(
+        provenance_rows, list
+    ):
+        for anchor in provenance_rows:
             if isinstance(anchor, dict) and "provenance" in anchor:
                 anchor["provenance"] = _fit_value_to_chars(
                     anchor["provenance"],
@@ -525,7 +551,7 @@ def _budget_response(
             stats=stats,
         )
     result["truncation"] = stats
-    while _serialized_size(result) > TOTAL_TEXT_LIMIT:
+    while _serialized_size(result) > total_budget:
         # Prefer retaining the first useful record: shrink evidence text/maps,
         # then extra records. Identifiers are the last scalar class reduced.
         if _shrink_longest_string(result, stats):

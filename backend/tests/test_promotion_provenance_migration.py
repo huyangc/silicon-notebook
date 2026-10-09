@@ -64,7 +64,7 @@ def test_upgrade_rewrites_foreign_entries_to_the_librarys_own_provenance(repo):
     database = repo._runtime.database
     _seed_at_v87(database)
     # v89 (Agent token tiers) follows; this world holds no token.
-    assert SqliteMigrator(database, repo.settings).migrate() == [88, 89]
+    assert SqliteMigrator(database, repo.settings).migrate() == [88, 89, 90]
     cases.assert_migrated(_snapshot(database))
 
 

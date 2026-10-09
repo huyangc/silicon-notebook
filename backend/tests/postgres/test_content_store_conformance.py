@@ -365,7 +365,7 @@ def content_harness(request) -> ContentHarness:
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 69
+    assert PostgresMigrator(database).migrate() == 70
     _seed_catalog(database)
     yield ContentHarness(
         database=database,
@@ -1435,7 +1435,7 @@ def test_postgres_bulk_delete_cannot_remove_a_concurrently_continued_conversatio
     from app.repositories.postgres.database import PostgresDatabase
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 69
+    assert PostgresMigrator(postgres_database).migrate() == 70
     _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresAskStateStore(postgres_database, seams)
@@ -1569,7 +1569,7 @@ def test_postgres_final_save_and_explicit_delete_do_not_deadlock_or_orphan(
     from app.repositories.postgres.database import PostgresDatabase
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 69
+    assert PostgresMigrator(postgres_database).migrate() == 70
     _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresAskStateStore(postgres_database, seams)
@@ -1697,7 +1697,7 @@ def test_postgres_report_cancel_commit_beats_blocked_terminal_write(
     from app.repositories.postgres.database import PostgresDatabase
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 69
+    assert PostgresMigrator(postgres_database).migrate() == 70
     _seed_catalog(postgres_database)
     seams = _seams()
     report = PostgresReportStore(
@@ -1932,7 +1932,7 @@ def test_postgres_code_mutation_wins_against_conditional_transfer_delete(
     """Code is fingerprinted business state and locks the table aggregate."""
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 69
+    assert PostgresMigrator(postgres_database).migrate() == 70
     _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
@@ -2401,7 +2401,7 @@ def test_postgres_memory_search_filters_scope_before_candidate_limit(
     from app.repositories.postgres.migrator import PostgresMigrator
     from psycopg.types.json import Jsonb
 
-    assert PostgresMigrator(postgres_database).migrate() == 69
+    assert PostgresMigrator(postgres_database).migrate() == 70
     _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresMemoryStore(
@@ -2486,7 +2486,7 @@ def test_postgres_memory_search_total_is_exact_beyond_candidate_page(
     from app.repositories.postgres.migrator import PostgresMigrator
     from psycopg.types.json import Jsonb
 
-    assert PostgresMigrator(postgres_database).migrate() == 69
+    assert PostgresMigrator(postgres_database).migrate() == 70
     _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresMemoryStore(
@@ -2628,7 +2628,7 @@ def test_postgres_projector_commits_terminal_knowhow_graph(
     from app.repositories.postgres.source_store import SourceStore
     from app.services.knowhow.projection import KnowhowProjector
 
-    assert PostgresMigrator(postgres_database).migrate() == 69
+    assert PostgresMigrator(postgres_database).migrate() == 70
     _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
@@ -2745,7 +2745,7 @@ def test_postgres_projector_and_delete_leave_no_projection_orphans(
     from app.repositories.postgres.source_store import SourceStore
     from app.services.knowhow.projection import KnowhowProjector
 
-    assert PostgresMigrator(postgres_database).migrate() == 69
+    assert PostgresMigrator(postgres_database).migrate() == 70
     _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
@@ -2862,7 +2862,7 @@ def test_postgres_delete_route_cleans_source_created_after_initial_snapshot(
     from app.repositories.postgres.source_store import SourceStore
     from app.services.knowhow.projection import KnowhowProjector
 
-    assert PostgresMigrator(postgres_database).migrate() == 69
+    assert PostgresMigrator(postgres_database).migrate() == 70
     _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
@@ -2977,7 +2977,7 @@ def test_postgres_two_projectors_serialize_whole_pass_and_newest_wins(
     from app.repositories.postgres.source_store import SourceStore
     from app.services.knowhow.projection import KnowhowProjector
 
-    assert PostgresMigrator(postgres_database).migrate() == 69
+    assert PostgresMigrator(postgres_database).migrate() == 70
     _seed_catalog(postgres_database)
     seams = _seams()
 
@@ -3096,7 +3096,7 @@ def test_postgres_source_elements_for_chunking_extracts_metadata_keys(
     from app.repositories.postgres.chunk_store import ChunkStore
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 69
+    assert PostgresMigrator(postgres_database).migrate() == 70
     _seed_catalog(postgres_database)
     mark = "%s"
     with postgres_database.write() as connection:
@@ -3156,7 +3156,7 @@ def _asset_gc_maintenance(postgres_database, tmp_path):
 def _asset_gc_fixture(postgres_database, tmp_path):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 69
+    assert PostgresMigrator(postgres_database).migrate() == 70
     _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresKnowhowStore(
@@ -3254,7 +3254,7 @@ def test_postgres_source_elements_after_walk_equals_the_whole_source_read(
     from app.repositories.postgres.migrator import PostgresMigrator
     from app.repositories.postgres.source_store import SourceStore
 
-    assert PostgresMigrator(postgres_database).migrate() == 69
+    assert PostgresMigrator(postgres_database).migrate() == 70
     _seed_catalog(postgres_database)
     seams = _seams()
     mark = "%s"
@@ -3437,6 +3437,72 @@ def test_the_three_samplers_also_see_global_asks(content_harness):
     only = ask.recent_user_ask_traces("nb-global-only", "user-content", job_limit=10, step_limit=600)
     assert [row["job_id"] for row in only] == ["gask-only"]
     assert [s["summary"] for s in only[0]["steps"]] == ["g"]
+
+
+def test_a_retrieval_only_ask_has_no_conversation_and_is_in_no_learning_sample(
+    content_harness,
+):
+    """PostgreSQL twin of ``test_a_retrieval_only_ask_is_in_no_learning_sample``:
+    an ``output='evidence'`` job writes an ask_jobs row (conversation '' and no
+    conversations row), is marked in the detail projection, and is read by
+    none of the three samplers."""
+    ask = content_harness.ask
+    answered, _conv = ask.begin_durable_job(
+        "nb-content", AskRequest(question="这是中文问题"), "reasoning", "user-content"
+    )
+    ask.finish_job(answered, "done")
+    ask.append_trace(
+        "nb-content", answered,
+        {"step_type": "retrieve", "summary": "answered", "detail": {"count": 1}},
+        "user-content",
+    )
+    with content_harness.database.connect() as connection:
+        conversations_before = connection.execute(
+            "SELECT COUNT(*) AS n FROM conversations"
+        ).fetchone()["n"]
+    payload = AskRequest(
+        question="an english evidence question", conversation_id="conv-mine"
+    )
+    evidence, conversation_id = ask.begin_durable_job(
+        "nb-content", payload, "reasoning", "user-content",
+        submitted_via="mcp", output="evidence",
+    )
+    ask.finish_job(evidence, "done")
+    ask.append_trace(
+        "nb-content", evidence,
+        {"step_type": "retrieve", "summary": "evidence", "detail": {"count": 1}},
+        "user-content",
+    )
+
+    assert conversation_id == ""
+    assert payload.conversation_id == "conv-mine"
+    with content_harness.database.connect() as connection:
+        row = connection.execute(
+            "SELECT conversation_id,output,submitted_via FROM ask_jobs WHERE id=%s",
+            (evidence,),
+        ).fetchone()
+        conversations_after = connection.execute(
+            "SELECT COUNT(*) AS n FROM conversations"
+        ).fetchone()["n"]
+    assert dict(row) == {
+        "conversation_id": "", "output": "evidence", "submitted_via": "mcp",
+    }
+    assert conversations_after == conversations_before
+    assert ask.ask_job_detail(evidence)["output"] == "evidence"
+    assert ask.ask_job_detail(answered)["output"] == "answer"
+
+    traces = ask.recent_user_ask_traces(
+        "nb-content", "user-content", job_limit=10, step_limit=600)
+    assert [t["job_id"] for t in traces] == [answered]
+    assert [s["summary"] for s in traces[0]["steps"]] == ["answered"]
+    for partition in (None, "nb-content"):
+        runs = ask.recent_completed_ask_runs(
+            job_limit=40, step_limit=600, notebook_id=partition)
+        assert evidence not in [run["run_id"] for run in runs]
+        assert answered in [run["run_id"] for run in runs]
+    assert ask.recent_user_ask_languages("user-content", limit=30)[0] == {
+        "language": "zh"
+    }
 
 
 def test_the_postgres_attribution_predicate_agrees_with_the_python_rule_and_runs_before_the_limit(

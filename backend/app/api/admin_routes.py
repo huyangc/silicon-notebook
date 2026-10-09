@@ -669,6 +669,7 @@ def get_admin_user_ask_detail(
                 mode=job["mode"],
                 status=job["status"],
                 asked_at=job.get("asked_at") or "",
+                output=job.get("output") or "answer",
                 answered_at=answered_at,
                 error=_activity_failure_text(user, job["error"]),
                 trace=job["trace"],

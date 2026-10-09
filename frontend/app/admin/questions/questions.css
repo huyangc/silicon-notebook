@@ -32,6 +32,7 @@
 .questions-kind-ask { color: #174ec8; background: #eaf1ff; }
 .questions-kind-report { color: #705000; background: #fff4d4; }
 .questions-scope-global { margin-left: 6px; color: #0f7a5c; background: #e3f7ee; }
+.questions-scope-retrieval { margin-left: 6px; color: #8a5a00; background: #fdf0d5; }
 .questions-via { color: var(--muted); background: var(--soft); }
 .questions-via-mcp { color: #5b2bb5; background: #f1eaff; }
 .questions-status { color: var(--muted); background: var(--soft); }

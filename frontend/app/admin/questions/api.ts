@@ -17,6 +17,8 @@ export type AdminQuestionItem = {
   type: AdminQuestionKind;
   scope: AdminQuestionScope;
   submitted_via: "" | SubmittedVia;
+  /** "evidence" = 只检索、没有生成回答；缺省按 "answer"。 */
+  output?: "answer" | "evidence";
   id: string;
   user_id: string;
   username: string;

@@ -69,7 +69,7 @@ def _count(store, connection, supported, excluding):
 def test_postgres_and_sqlite_agree_on_pages_and_counts(
     postgres_database, tmp_path, monkeypatch, backfilled,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 69
+    assert PostgresMigrator(postgres_database).migrate() == 70
     with postgres_database.write() as connection:
         fx.seed(lambda sql, params: connection.execute(sql, params), "%s",
                 backfilled=backfilled,
@@ -104,7 +104,7 @@ def test_postgres_and_sqlite_agree_on_pages_and_counts(
 
 
 def test_postgres_no_ceiling_statements_are_byte_identical(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 69
+    assert PostgresMigrator(postgres_database).migrate() == 70
     with postgres_database.write() as connection:
         fx.seed(lambda sql, params: connection.execute(sql, params), "%s",
                 backfilled=True,
@@ -153,7 +153,7 @@ def test_postgres_no_ceiling_statements_are_byte_identical(postgres_database):
 
 
 def _seeded_store(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 69
+    assert PostgresMigrator(postgres_database).migrate() == 70
     with postgres_database.write() as connection:
         fx.seed(lambda sql, params: connection.execute(sql, params), "%s",
                 backfilled=True,

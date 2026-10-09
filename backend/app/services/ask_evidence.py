@@ -32,7 +32,7 @@ _EXTERNAL_BASE = 6000
 _DOCUMENT_READ_BASE = 7000
 
 # An object_type that names the kind outright wins over the number band.
-_OBJECT_TYPE_KINDS = frozenset({"chunk", "memory", "external"})
+_OBJECT_TYPE_KINDS = frozenset({"chunk", "memory", "external", "element"})
 
 # A section heading ``_bounded_context_append`` / ``_append_memory_context``
 # put in front of the next block: it trails the previous key's segment.
@@ -60,7 +60,9 @@ def kind_for_key(key: str, id_map: Mapping[str, Mapping[str, Any]]) -> str:
         return "element"
     if number >= _MEMORY_BASE:
         return "memory"
-    if number >= _KG_BASE:
+    # Below the KG band only a chunk-typed (or untyped) entry is a chunk: a
+    # reasoning round with no chunks numbers its KG objects from k1.
+    if number >= _KG_BASE or object_type:
         return "kg"
     return "chunk"
 

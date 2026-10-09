@@ -161,7 +161,7 @@ _SITES = {
      "PluginRetrievalAccess.__init__", "participant_notebook_ids"):
         (_SEAM, 1, "injected ``AskService.ask_engine_participant_notebooks`` = "
                    "``RepositoryRuntime._participant_notebook_ids``"),
-    ("app/services/ask_service.py", "AskService.ask_chunk", "mounted_base_ids"):
+    ("app/services/ask_service.py", "AskService._chunk_retrieve", "mounted_base_ids"):
         (_SEAM, 1, "``CommunityQueryService.mounted_base_ids`` "
                    "(current_viewer_id inside)"),
     ("app/services/reasoning_retrieval.py",

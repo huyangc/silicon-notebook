@@ -115,6 +115,7 @@ function AskDetailPane({
       }
     : item;
   const isGlobal = detail?.scope === "global" || item.scope === "global";
+  const retrievalOnly = (detail?.output ?? item.output) === "evidence";
   // 全局问答的引用来自多个笔记本:把详情端点给出的库名并入引用小卡片消费的那份
   // 映射(该用户当前仍可读到的库),否则跨库引用只能显示 id。
   const mergedNotebookNames = detail?.notebook_names
@@ -129,6 +130,7 @@ function AskDetailPane({
         {userFacingModeLabel(item.mode) ? (
           <span className="activity-chip">{userFacingModeLabel(item.mode)}</span>
         ) : null}
+        {retrievalOnly ? <span className="activity-chip">仅检索</span> : null}
         {isGlobal ? <span className="activity-chip">全局</span> : null}
         <span className="activity-detail-time">
           {formatQuestionTime(item.asked_at || item.created_at, now)}
@@ -154,7 +156,10 @@ function AskDetailPane({
         <div className="detail-error">{endedWithoutTextCopy}</div>
       ) : null}
       {showPersistedTrace ? <ReasoningTracePanel steps={persistedTrace} /> : null}
-      {answer ? (
+      {retrievalOnly && !loading && !error ? (
+        <div className="empty">仅检索，未生成回答</div>
+      ) : null}
+      {answer && !retrievalOnly ? (
         <div className="activity-answer">
           <AnswerView
             answer={answer}
@@ -174,7 +179,7 @@ function AskDetailPane({
           />
         </div>
       ) : null}
-      {!loading && !error && !answer && !failure && !endedWithoutTextCopy
+      {!loading && !error && !retrievalOnly && !answer && !failure && !endedWithoutTextCopy
         && !retentionItem.notebook_deleted_at ? (
         <div className="empty">这次提问没有留下答案</div>
       ) : null}

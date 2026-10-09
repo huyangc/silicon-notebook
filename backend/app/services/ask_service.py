@@ -69,9 +69,15 @@ from app.domain.gap_consult import (
     gap_consult_host_is_dormant,
 )
 from app.models.ask import (
+    EVIDENCE_OUTPUT_MODE_REFUSAL,
     TRACE_ANCHOR_EVIDENCE_IDS_MAX,
     AnswerAnchor,
+    AskEvidence,
+    AskEvidenceCounts,
+    AskEvidenceItem,
+    AskEvidenceKindCount,
     AskGapSuggestion,
+    AskOutput,
     ExternalEvidenceConflict,
     ExternalEvidenceSection,
     AskRequest,
@@ -108,7 +114,14 @@ from app.services.document_read_answer import document_read_block_reserve
 # A leaf that imports nothing from ``app`` (see its module docstring): reading
 # the detached turn costs one import and creates no edge to the participant
 # override module this file is barred from.
-from app.services.federated_run import current_detached_ask_turn
+from app.services.federated_run import (
+    DetachedAskTurn,
+    current_detached_ask_turn,
+    detached_ask_turn,
+)
+# A leaf (it imports only ``app.models.ask``): the retrieval-only output's
+# context splitter and anchor-sourced item builder.
+from app.services.ask_evidence import _EvidenceAssemblyClient, build_ask_evidence
 from app.services.evidence_context import anchor_image_targets
 from app.services.model_work import MalformedModelResponse, ModelNotConfiguredError
 
@@ -193,6 +206,102 @@ _NO_RETRIEVAL_EVIDENCE_MESSAGE = (
     "当前检索没有找到足以支撑回答的来源证据。资料可能已经导入，"
     "但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。"
 )
+
+# The chunk engine's deterministic "nothing retrieved" sentence: its answer
+# (``ask_chunk``) and its retrieval-only output (``_chunk_evidence``) say the
+# same thing about the same empty retrieval.
+_CHUNK_NO_EVIDENCE_MESSAGE = (
+    "No indexed content matches this question yet. Upload sources or build chunks."
+)
+
+@dataclass(frozen=True)
+class _ChunkRetrieval:
+    """What ``AskService._chunk_retrieve`` hands back: the chunk engine's
+    retrieval result, consumed by the answer (``ask_chunk``) and by the
+    retrieval-only output (``_chunk_evidence``) alike."""
+
+    selected: list
+    historical_selected: list
+    kg_block: str
+    kg_id_map: dict
+    kg_hits: list
+    overlay_on: bool
+    baseline_chunk_candidates: list
+    baseline_kg_truncated: bool
+    recalled: int
+    source_graph_status: Any
+
+
+@dataclass(frozen=True)
+class _ReasoningContext:
+    """``AskService._assemble_reasoning_context``'s result: the reasoning
+    synthesis context and everything ``_answer_reasoning`` reports about it."""
+
+    context_block: str
+    id_map: dict
+    counts: dict
+    # The baseline-manifest capture (``baseline_sink``'s payload).
+    baseline: dict
+    has_external: bool
+    admitted_external: set
+
+
+@dataclass(frozen=True)
+class _OverviewPrep:
+    """The document-overview branch's prepared evidence, before synthesis
+    (``AskService._prepare_document_overview``)."""
+
+    intent: Any
+    catalog: Any
+    prepared: Any
+    notice: str
+
+
+def _evidence_relevance(id_map: Mapping[str, Mapping[str, Any]], hits) -> dict:
+    """``{key: relevance}`` for the keys whose object one of ``hits`` is
+    (a chunk by ``chunk_id``, anything else by ``object_id``; an element's
+    retrieval ``score`` stands in for relevance)."""
+    by_object: dict[str, float] = {}
+    for hit in hits:
+        object_id = str(
+            getattr(hit, "chunk_id", "") or getattr(hit, "object_id", "")
+            or getattr(hit, "element_id", "") or ""
+        )
+        value = getattr(hit, "relevance", None)
+        if value is None:
+            value = getattr(hit, "score", None)
+        if object_id and isinstance(value, (int, float)) and object_id not in by_object:
+            by_object[object_id] = float(value)
+    return {
+        key: by_object[str(entry.get("object_id") or "")]
+        for key, entry in id_map.items()
+        if str(entry.get("object_id") or "") in by_object
+    }
+
+
+def _recount_selected(evidence: AskEvidence, selected: Mapping[str, int]) -> None:
+    """Replace the "selected" side of ``evidence.counts`` with what retrieval
+    actually selected per kind (``build_ask_evidence`` only sees the id_map,
+    i.e. what survived assembly).  A kind never reports fewer selected than
+    delivered; the totals exclude memory and ``omitted`` is what was
+    selected but not delivered."""
+    counts = evidence.counts
+    for kind, number in selected.items():
+        if not number and kind not in counts.by_kind:
+            continue
+        bucket = counts.by_kind.setdefault(kind, AskEvidenceKindCount())
+        bucket.selected = max(int(number), bucket.delivered)
+    counts.selected = sum(
+        bucket.selected for kind, bucket in counts.by_kind.items()
+        if kind != "memory"
+    )
+    counts.omitted = max(0, counts.selected - counts.delivered)
+
+
+# ``output="evidence"`` (retrieval only, no synthesis) exists for the two
+# built-in engines. An extension engine retrieves and synthesizes inside one
+# opaque provider call, so there is no evidence of its own to hand back.
+EVIDENCE_OUTPUT_MODES = frozenset({"chunk", "reasoning"})
 
 # 外部证据段的块头,与它在 ``_bounded_context_append`` 里占掉的字符数。数出来
 # 而不是写死一个宽松的常数:那个预算的作用只是「别把已经算好的块再切一刀」,
@@ -771,6 +880,26 @@ class DefaultResponseDraftStage:
         return self._service._draft_reasoning_response(stage, runtime)
 
 
+class EvidenceDraftStage:
+    """The ``ResponseDraftStage`` of a retrieval-only reasoning Ask.
+
+    Same shape as ``DefaultResponseDraftStage``; its body
+    (``AskService._draft_reasoning_evidence``) assembles the context the
+    synthesis would have received and stops there -- no answer model call.
+    It is chosen per run by ``AskService._response_draft_stage_for`` and is
+    never injectable: the evidence a caller gets back must be the core's own
+    assembly, not a deployment's.
+    """
+
+    __slots__ = ("_service",)
+
+    def __init__(self, service: "AskService") -> None:
+        self._service = service
+
+    def draft_response(self, stage, runtime):
+        return self._service._draft_reasoning_evidence(stage, runtime)
+
+
 # The heading of the reasoning passage segment.  The passage floor charges it
 # (``AskService._assemble_structured_evidence``), so both read this one value.
 _REASONING_CHUNK_HEADING = "Retrieved chunks"
@@ -1086,11 +1215,56 @@ class AskService:
         frozen ask_modes registry (fast/global aliases included). Unknown modes
         raise UnknownAskMode — never a silent fall-through. on_trace only
         reaches streaming engines (mirrors the frozen route-runner split)."""
+        spec = self._resolve_ask_mode(getattr(payload, "mode", None))
+        handler = getattr(self, spec.handler)
+        # Plugin engines construct their own stable-kind retrieval run in
+        # ``ask_plugin_engine`` so plugin mode ids never enter the allowed
+        # observability vocabulary. Built-ins keep their frozen path.
+        plugin = spec.handler == "ask_plugin_engine"
+        with self._engine_scope(
+            spec, notebook_id, payload, user_id=user_id, job_id=job_id,
+            cancel_event=cancel_event, run=not plugin,
+        ):
+            if plugin:
+                return handler(
+                    notebook_id, payload, user_id=user_id, job_id=job_id,
+                    on_trace=on_trace, cancel_event=cancel_event,
+                )
+            if spec.streaming:
+                return handler(
+                    notebook_id, payload, user_id=user_id, job_id=job_id,
+                    on_trace=on_trace, cancel_event=cancel_event,
+                )
+            return handler(
+                notebook_id, payload, user_id=user_id, job_id=job_id,
+                cancel_event=cancel_event,
+            )
+
+    @contextmanager
+    def _engine_scope(
+        self,
+        spec,
+        notebook_id: str,
+        payload: AskRequest,
+        *,
+        user_id: str,
+        job_id: str,
+        cancel_event: CancelEvent,
+        run: bool,
+    ):
+        """The one place an Ask engine is entered: model-work priority, THE
+        retrieval ceiling (``_retrieval_ceiling``) and, for the built-in
+        engines (``run=True``), the request-local retrieval run.
+
+        ``ask`` (every answer) and ``ask_evidence`` (the retrieval-only
+        output) both come through here, so an evidence call runs under the
+        same ceiling, the same ``run_kind`` (``ask_<mode>``) and the same
+        Memory channel as the answer it stands in for -- it cannot reach a
+        piece of evidence the answer could not.
+        """
         from app.services.retrieval_run import retrieval_run
         from app.services.model_work import ModelPriority, model_work_scope
 
-        spec = self._resolve_ask_mode(getattr(payload, "mode", None))
-        handler = getattr(self, spec.handler)
         with model_work_scope(
             priority=ModelPriority.INTERACTIVE,
             parent_id=job_id,
@@ -1104,14 +1278,9 @@ class AskService:
             base_scope=getattr(payload, "base_scope", None),
             cancel_event=cancel_event,
         ):
-            # Plugin engines construct their own stable-kind retrieval run in
-            # ``ask_plugin_engine`` so plugin mode ids never enter the allowed
-            # observability vocabulary. Built-ins keep their frozen path.
-            if spec.handler == "ask_plugin_engine":
-                return handler(
-                    notebook_id, payload, user_id=user_id, job_id=job_id,
-                    on_trace=on_trace, cancel_event=cancel_event,
-                )
+            if not run:
+                yield
+                return
             # All built-in Ask modes share the same request-local query-embedding
             # memo.  Ask keeps its historical internal concurrency: the
             # report-only database fan-out gate is deliberately absent here.
@@ -1122,15 +1291,49 @@ class AskService:
                 actor_id=user_id,
                 cancel_event=cancel_event,
             ):
-                if spec.streaming:
-                    return handler(
-                        notebook_id, payload, user_id=user_id, job_id=job_id,
-                        on_trace=on_trace, cancel_event=cancel_event,
-                    )
-                return handler(
+                yield
+
+    def ask_evidence(
+        self,
+        notebook_id: str,
+        payload: AskRequest,
+        *,
+        user_id: str,
+        job_id: str = "",
+        cancel_event: CancelEvent = None,
+        on_trace: "Callable[[Any], None] | None" = None,
+    ) -> AskEvidence:
+        """Retrieval only (``output="evidence"``): run the engine named by
+        ``payload.mode`` up to the point where it would call the answer model
+        and return the context that call would have received.
+
+        Built-in modes only (``EVIDENCE_OUTPUT_MODES``); anything else raises
+        ``ValueError`` with ``EVIDENCE_OUTPUT_MODE_REFUSAL``.  Persists nothing
+        itself: no conversation, no answer (the durable lifecycle around it is
+        ``_ask_evidence_current``'s).
+        """
+        spec = self._resolve_ask_mode(getattr(payload, "mode", None))
+        if spec.id not in EVIDENCE_OUTPUT_MODES:
+            raise ValueError(EVIDENCE_OUTPUT_MODE_REFUSAL)
+        with self._engine_scope(
+            spec, notebook_id, payload, user_id=user_id, job_id=job_id,
+            cancel_event=cancel_event, run=True,
+        ):
+            if spec.id == "chunk":
+                evidence = self._chunk_evidence(
                     notebook_id, payload, user_id=user_id, job_id=job_id,
                     cancel_event=cancel_event,
                 )
+            else:
+                evidence = self._reasoning_evidence(
+                    notebook_id, payload, user_id=user_id, job_id=job_id,
+                    on_trace=on_trace, cancel_event=cancel_event,
+                )
+            # Both read the installed ceiling, so they stay inside the scope
+            # -- the same two facts ``_save_answer`` stamps on an answer.
+            evidence.skipped_libraries = self._skipped_libraries(notebook_id)
+            evidence.index_required = self._needs_index(notebook_id)
+        return evidence
 
     @contextmanager
     def _retrieval_ceiling(
@@ -1194,15 +1397,30 @@ class AskService:
             yield
 
     def ask_current(
-        self, notebook_id: str, payload: AskRequest, *, submitted_via: StoredSubmittedVia = ""
-    ) -> AskResponse:
+        self,
+        notebook_id: str,
+        payload: AskRequest,
+        *,
+        submitted_via: StoredSubmittedVia = "",
+        output: AskOutput = "answer",
+    ) -> "AskResponse | AskEvidence":
         """Run the synchronous Ask surface through the durable job lifecycle.
 
         Streaming and synchronous callers now share the same state-store
         primitives: create/touch conversation plus running job atomically,
         pass the job into the engine's atomic final save, then finalize and
         unregister. The job id remains internal to this blocking protocol.
+
+        ``output="evidence"`` leaves here before any of that, for
+        ``_ask_evidence_current``: a job row without a conversation, no answer,
+        no completion hook and no bell push.
         """
+        if output == "evidence":
+            return self._ask_evidence_current(
+                notebook_id, payload, submitted_via=submitted_via
+            )
+        if output != "answer":
+            raise ValueError("output must be one of: answer, evidence")
         user_id = self.current_user_id()
         mode = self._resolve_ask_mode(getattr(payload, "mode", None))
         self.validate_reasoning_submission(notebook_id, payload)
@@ -1266,6 +1484,100 @@ class AskService:
             return response
         finally:
             publish_snapshot(user_id)
+
+    def _ask_evidence_current(
+        self, notebook_id: str, payload: AskRequest, *, submitted_via: StoredSubmittedVia
+    ) -> AskEvidence:
+        """The retrieval-only twin of ``ask_current`` (``output="evidence"``).
+
+        Recorded, not remembered: one ``ask_jobs`` row (``output='evidence'``,
+        no conversation) with its trace, and nothing else -- no conversation is
+        created or appended, no answer is saved, the three memory chains are
+        not notified (``_note_ask_completed``) and the bell is not pushed
+        (``publish_snapshot``; the store keeps evidence jobs out of the bell's
+        running list as well).
+
+        A ``conversation_id`` the caller owns in this notebook is read, never
+        written: its history feeds the follow-up rewrite and the reasoning
+        understanding exactly as it would for an answer, through a
+        ``DetachedAskTurn`` -- the seat ``_prepare_turn`` already answers from
+        without touching ``ask_state`` and ``_save_answer`` already refuses
+        to write under.  Anyone else's id, or one that does not exist, reads
+        as no history (the answer path's silent rule, no error).
+        """
+        user_id = self.current_user_id()
+        mode = self._resolve_ask_mode(getattr(payload, "mode", None))
+        if mode.id not in EVIDENCE_OUTPUT_MODES:
+            raise ValueError(EVIDENCE_OUTPUT_MODE_REFUSAL)
+        self.validate_reasoning_submission(notebook_id, payload)
+        # Read BEFORE the job exists: the store's evidence begin never
+        # resolves a conversation, so the caller's id is taken as sent.
+        turn = self._read_only_evidence_turn(
+            notebook_id, payload.conversation_id, user_id
+        )
+        cancel_event = threading.Event()
+        job_id, _conversation_id = self.begin_job_current(
+            notebook_id, payload, mode.id, cancel_event,
+            submitted_via=submitted_via, output="evidence",
+        )
+        try:
+            with detached_ask_turn(turn):
+                evidence = self.ask_evidence(
+                    notebook_id,
+                    payload,
+                    user_id=user_id,
+                    job_id=job_id,
+                    cancel_event=cancel_event,
+                    on_trace=self._durable_trace_sink(
+                        notebook_id, job_id, user_id, cancel_event
+                    ),
+                )
+        except AskCancelled:
+            self.finish_job(job_id, "cancelled")
+            raise
+        except BaseException as exc:
+            self.finish_job(job_id, "failed", error=f"{type(exc).__name__}: {exc}")
+            raise
+        self.finish_job(job_id, "done")
+        return evidence
+
+    def _read_only_evidence_turn(
+        self, notebook_id: str, conversation_id: Optional[str], user_id: str
+    ) -> DetachedAskTurn:
+        """The prior turns an evidence call may READ (never append to).
+
+        Ownership is ``conversation_user_history``'s predicate -- byte for
+        byte ``ensure_conversation``'s continuation check (this notebook, this
+        member) -- so a foreign or unknown id yields ``""`` and the turn
+        carries no history and no conversation id.  The full history (each
+        turn's ``conclusion``) is then projected from the same conversation
+        the way ``_conversation_histories`` projects it: the last five turns,
+        ``User: …\nAssistant: …``.  A conversation with no answered turn
+        contributes nothing, so its id is not echoed either.
+        """
+        cid = str(conversation_id or "")
+        if not cid:
+            return DetachedAskTurn(conversation_id="")
+        if not self.ask_state.conversation_user_history(
+            notebook_id, cid, user_id, 5
+        ).strip():
+            return DetachedAskTurn(conversation_id="")
+        try:
+            detail = self.ask_state.get_conversation(cid)
+        except (KeyError, ValueError):
+            return DetachedAskTurn(conversation_id="")
+        turns = list(detail.turns)[-5:]
+        if detail.notebook_id != notebook_id or not turns:
+            return DetachedAskTurn(conversation_id="")
+        return DetachedAskTurn(
+            conversation_id=cid,
+            history="\n".join(
+                f"User: {turn.question}\n"
+                f"Assistant: {str(turn.response.conclusion or '').strip()}"
+                for turn in turns
+            ),
+            user_history="\n".join(f"User: {turn.question}" for turn in turns),
+        )
 
     def _durable_trace_sink(
         self, notebook_id: str, job_id: str, user_id: str, cancel_event
@@ -1342,6 +1654,9 @@ class AskService:
 
         * 同步面(``POST /notebooks/{id}/ask`` 与 MCP ``ask_notebook``,两者都经
           ``RepositoryFacade.ask``)是**唯一**会走到 ``ask_current`` 的调用方;
+          其中 ``output="evidence"``(仅检索)在建 job 之前就分流到
+          ``_ask_evidence_current``,那条路**一次都不**通知——它没有答案,三条
+          链路的样本 SQL 也按 ``ask_jobs.output = 'answer'`` 把它排除在外;
         * 流式/持久面(``AskExecutionCoordinator.start``)调的是引擎入口
           ``AskService.ask``,不经过 ``ask_current``,它在 worker 的 ``done``
           分支里调自己那份 ``_note_ask_completed``。协调器若哪天改走
@@ -1448,12 +1763,12 @@ class AskService:
 
     def begin_job_current(
         self, notebook_id: str, payload, mode: str, cancel_event,
-        *, submitted_via: StoredSubmittedVia = "",
+        *, submitted_via: StoredSubmittedVia = "", output: AskOutput = "answer",
     ) -> tuple[str, str]:
         self.notebooks.get_notebook(notebook_id)
         job_id, conversation_id = self.ask_state.begin_durable_job(
             notebook_id, payload, mode, self.current_user_id(),
-            submitted_via=submitted_via,
+            submitted_via=submitted_via, output=output,
         )
         self.cancellations.register(job_id, cancel_event)
         return job_id, conversation_id
@@ -2711,6 +3026,52 @@ class AskService:
         except Exception:  # noqa: BLE001 — 风格提示是背景,不是必需品
             return ""
 
+    def _chunk_synthesis_context(
+        self, chunks, kg_block, kg_id_map, memory_hits, *,
+        overlay_on: bool, notebook_id: str,
+    ) -> tuple:
+        """The chunk engine's synthesis context: ``(context_block, id_map,
+        budget_chars)`` exactly as ``_answer_chunks`` (``overlay_on=False``)
+        or ``_answer_mix`` (``overlay_on=True``) hands it to the answer model.
+
+        Both of them and the retrieval-only ``_chunk_evidence`` call this one
+        function, so the evidence an Agent receives IS the context the answer
+        would have been written from -- by construction, not by a test.
+        Reached as ``AskService._chunk_synthesis_context(self, ...)`` from the
+        two answer helpers so their narrow test doubles keep working.
+        """
+        if overlay_on:
+            # chunk 段编号 k1..kN,KG 段从 _MIX_KG_KEY_BASE 起;若 chunk 数逼近 base 会在
+            # 合并 id_map 时撞 KG key(静默覆盖)。按 base-1 硬截(token 预算下通常远不及此)。
+            chunks = chunks[: AskService._MIX_KG_KEY_BASE - 1]
+            chunk_block, chunk_id_map = self._chunk_answer_context(
+                chunks, budget_chars=10**9, notebook_id=notebook_id)
+            if kg_block and kg_block != "(none)":
+                context_block = f"{chunk_block}\n\n[Knowledge graph]\n{kg_block}"
+            else:
+                context_block = chunk_block
+            id_map = {**chunk_id_map, **kg_id_map}
+        else:
+            # 当前库保底席位被 `enforce_active_floor` 换在尾部;渲染预算装不下时先丢
+            # 排名最低的非保底行,保底行不被截掉(同一个 `active_reserve_rule`)。
+            seats = active_reserve_seats(self.settings)
+            budget = self.settings.chunk_answer_budget_chars
+            chunks = spare_reserved_rows(
+                chunks, budget, active_reserve_rule(seats, chunks, notebook_id),
+                protected_chars=budget * seats // max(1, int(self.settings.chunk_mmr_k)))
+            context_block, id_map = self._chunk_answer_context(
+                chunks, notebook_id=notebook_id)
+        context_block, id_map = self._append_memory_context(
+            context_block, id_map, memory_hits or []
+        )
+        # mix: the chunk segment is not re-budgeted (selection already spent
+        # the token budget), so its bound is the block itself.
+        budget_chars = (
+            len(context_block) if overlay_on
+            else self.settings.chunk_answer_budget_chars
+        )
+        return context_block, id_map, budget_chars
+
     def _answer_chunks(
         self,
         question,
@@ -2730,16 +3091,9 @@ class AskService:
         ``style_block``:Agentic Memory P3(T8)——调用方按本次提问 user_id 点读
         并渲染好的风格提示,空串=接入前逐字行为(见 ``_search_profile_style_block``)。"""
         raise_if_cancelled(cancel_event)
-        # 当前库保底席位被 `enforce_active_floor` 换在尾部;渲染预算装不下时先丢
-        # 排名最低的非保底行,保底行不被截掉(同一个 `active_reserve_rule`)。
-        seats = active_reserve_seats(self.settings)
-        budget = self.settings.chunk_answer_budget_chars
-        chunks = spare_reserved_rows(
-            chunks, budget, active_reserve_rule(seats, chunks, notebook_id),
-            protected_chars=budget * seats // max(1, int(self.settings.chunk_mmr_k)))
-        context_block, id_map = self._chunk_answer_context(chunks, notebook_id=notebook_id)
-        context_block, id_map = self._append_memory_context(
-            context_block, id_map, memory_hits or []
+        context_block, id_map, budget_chars = AskService._chunk_synthesis_context(
+            self, chunks, "", {}, memory_hits,
+            overlay_on=False, notebook_id=notebook_id,
         )
         if baseline_sink is not None:
             baseline_sink.clear()
@@ -2747,7 +3101,7 @@ class AskService:
                 "context_block": context_block,
                 "id_map": dict(id_map),
                 "ordered_handles": tuple(id_map),
-                "budget_chars": self.settings.chunk_answer_budget_chars,
+                "budget_chars": budget_chars,
             })
         llm_client = llm_client or self.model_clients.chat("ask_answer")
         raw = llm_client.chat_json(
@@ -2786,19 +3140,10 @@ class AskService:
         返回 (answer, llm_grounded, anchors)。notebook_id:转发给 _chunk_answer_context
         解 anchor.tier(见其 docstring);chunk 自带 notebook_id(跨库召回)优先,
         这只是单库 chunk 的回退值。``style_block``:见 ``_answer_chunks`` 同名参数。"""
-        # chunk 段编号 k1..kN,KG 段从 _MIX_KG_KEY_BASE 起;若 chunk 数逼近 base 会在
-        # 合并 id_map 时撞 KG key(静默覆盖)。按 base-1 硬截(token 预算下通常远不及此)。
-        chunks = chunks[: self._MIX_KG_KEY_BASE - 1]
         raise_if_cancelled(cancel_event)
-        chunk_block, chunk_id_map = self._chunk_answer_context(
-            chunks, budget_chars=10**9, notebook_id=notebook_id)
-        if kg_block and kg_block != "(none)":
-            context_block = f"{chunk_block}\n\n[Knowledge graph]\n{kg_block}"
-        else:
-            context_block = chunk_block
-        id_map = {**chunk_id_map, **kg_id_map}
-        context_block, id_map = self._append_memory_context(
-            context_block, id_map, memory_hits or []
+        context_block, id_map, budget_chars = AskService._chunk_synthesis_context(
+            self, chunks, kg_block, kg_id_map, memory_hits,
+            overlay_on=True, notebook_id=notebook_id,
         )
         if baseline_sink is not None:
             baseline_sink.clear()
@@ -2806,7 +3151,7 @@ class AskService:
                 "context_block": context_block,
                 "id_map": dict(id_map),
                 "ordered_handles": tuple(id_map),
-                "budget_chars": len(context_block),
+                "budget_chars": budget_chars,
             })
         llm_client = llm_client or self.model_clients.chat("ask_answer")
         raw = llm_client.chat_json(
@@ -2996,86 +3341,38 @@ class AskService:
         )
         return answer, grounded, anchors, False
 
-    def _answer_reasoning(
+    def _assemble_reasoning_context(
         self,
         notebook_id,
         question,
         top_hits,
         elements,
-        history="",
+        *,
         cancel_event: CancelEvent = None,
         chunks=None,
         chains=None,
         memory_hits=None,
-        answer_client=None,
         kg_context_chars: int | None = None,
         chunk_context_chars: int | None = None,
         element_items: int = 6,
         structured_block: str = "",
         structured_map: dict | None = None,
         collection_map_block: str = "",
-        counts_sink: dict | None = None,
-        baseline_sink: dict | None = None,
-        sectioned: bool = False,
         key_offset: int = 0,
-        section_title: str = "",
-        section_index: int = 0,
-        section_total: int = 0,
-        style_block: str = "",
         external_evidence=(),
-        external_sink: set | None = None,
-        *,
         trailing_chunks=(),
-    ):
-        """Synthesise the reasoning-mode answer. When PPR chunks are present they
-        become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
-        chain segment k1001+ (mirrors _answer_mix's keying), with final synthesis
-        still handled by ``ask_answer``. Otherwise KG-only (legacy).
-        Direct ``SourceElement`` passages use the isolated k4001+ namespace and
-        are first-class citations rather than unbound prompt decoration; at most
-        ``element_items`` are admitted, chosen by retrieval relevance descending
-        (tie-break ``element_id``) rather than insertion order.
-        ``collection_map_block`` is the run's deterministic collection counts,
-        placed at the head of the source partition and carrying no ``[k]`` id
-        (see ``collection_enumeration_answer.collection_map_block``). Context refinement
-        uses ``evidence_refine`` while final synthesis uses ``ask_answer``. Returns
-        (answer, llm_grounded, anchors, counts) where ``counts`` reports how many
-        KG/chunk/element entries actually entered the prompt (``included_kg``/
-        ``included_chunks``/``included_elements``).
+        refine: bool = True,
+    ) -> "_ReasoningContext":
+        """The reasoning synthesis context, assembled exactly as
+        ``_answer_reasoning`` sends it (its parameters, same meaning; see that
+        docstring): partitions, budgets, keys, the external segment and the
+        per-partition counts, plus the baseline-manifest capture.
 
-        按节合成(设计文档 §3.1)复用这同一个装配器。``sectioned`` 是**唯一**的模式
-        判定(不看标题真值,见 ``prompts._answer_section_directive``):它开着时
-        ``key_offset`` 把本节的每一段 ``[k]`` 号整体平移(见
-        ``outline_synthesis.OUTLINE_SECTION_KEY_STRIDE``),prompt 多一段节级指令,
-        证据精炼跳过。缺省为「不在按节合成里」,单次合成路径逐字节不变。节模式下
-        调用方只传该节绑定的证据,Memory / 推导链 / 集合地图 / 结构化预览一律不传
-        ——它们不可被大纲绑定,留在回退路径上(v1 刻意的边界)。``style_block``:
-        见 ``_answer_chunks`` 同名参数,单次合成与按节合成共用调用方传入的同一份。
-
-        ``external_evidence``: 插件 reflect 动作带回的库外材料
-        (``domain.reflect_action.ExternalEvidence``,设计文档
-        ``2026-09-13-reflect-plugin-action-design_zh.md`` §6.2)。缺省空元组,
-        此时上下文块、id_map 与 prompt 与接入这个特性之前逐字节相等。与 Memory /
-        推导链**不**同的一条边界:按节合成每一节都装同一份外部块(见
-        ``_answer_reasoning_sections``)——外部材料不属于任何一节的大纲绑定,
-        但它恰恰是本轮唯一库里查不到的东西,只喂给某一节等于让别的节在同一篇
-        答案里对着一个自己看不见的 ``[k]`` 号写作。号段由 ``key_offset``
-        隔开,各节的外部键互不相交。
-
-        ``external_sink``:调用方传入的集合,本次**真的装进了 prompt** 的那批
-        ``ExternalEvidence.key`` 会被 update 进去。引用侧据此过滤——被预算丢掉
-        的条目模型从没见过,不给它发引用(设计文档 §6.3)。
-
-        ``trailing_chunks``:**不属于本节绑定证据**的兜底原文段(按节合成里由
-        ``outline_synthesis`` 注入的未绑定精确命中,见
-        ``OutlineSectionSlice.exact_chunks``)。它们单独成一段
-        「Exact-lookup passages」,装在本节绑定的原文段与元素**之后**,只用这两
-        段吃完后剩余的那点预算;不排序(保持注入序)、不走前缀席位。缺省空元组,
-        此时上下文块、id_map 与 counts 逐字节等于接这个参数之前。**为什么必须
-        排在后面**:``chunks`` 段按相关度排序,而精确命中的相关度常为 1.0、本节
-        绑定块可能更低——同一段里混装等于让模型没绑进本节的原文按构造吃掉整份
-        预算,绑到 source element 的节也一样(chunk 段先于 element 段装配)。
-
+        ``refine`` runs the optional ``evidence_refine`` call that prepends a
+        model-written summary.  ``_answer_reasoning`` refines outside the
+        sectioned mode; the retrieval-only output (``refine=False``) does not,
+        because that summary is not evidence -- it carries no ``[k]`` -- and it
+        would be one more model call on a path that promises none.
         """
         raise_if_cancelled(cancel_event)
         chunks = chunks or []
@@ -3230,12 +3527,7 @@ class AskService:
             )
         id_map = {**source_map, **kg_map}
         total_context_budget = chunk_budget + kg_budget
-        answer_client = answer_client or self.model_clients.chat("ask_answer")
-        # 按节合成不做证据精炼。两条理由都硬:①精炼是**每次装配一次**模型调用,
-        # 节模式下会把 k 次合成变成 2k 次调用——成本合同只承诺了合成那一半;
-        # ②精炼是给「上下文太大、要先挑重点」准备的,而一节的切片至多 8 条绑定
-        # 证据,本来就没有中段可丢。
-        if not sectioned:
+        if refine:
             refine_client = self.model_clients.chat("evidence_refine")
             context_block = self._refine_context(
                 question, context_block, refine_client, cancel_event,
@@ -3252,8 +3544,6 @@ class AskService:
             )
         )
         has_external = context_block != pre_external_block
-        if external_sink is not None:
-            external_sink.update(admitted_external)
         # Partition the merged *source* map (structured preview + chunks +
         # elements) by numeric key range rather than trusting chunk_id_map /
         # element_id_map's sizes from before the append: _bounded_context_append
@@ -3303,35 +3593,145 @@ class AskService:
             # ``_append_external_context``)。
             **external_counts,
         }
+        baseline = {
+            "context_block": context_block,
+            "id_map": dict(id_map),
+            "ordered_handles": tuple(id_map),
+            # 上界含外部段:``budget_chars`` 的合同是「这段上下文不会超过它」
+            # (``test_answer_quality_contract`` 直接断言
+            # ``len(context_block) <= budget_chars``),而外部段是在总预算
+            # 截断之后另加的一份独立预算。记成总预算本身会让这条不变量在
+            # 有外部证据的一轮上假红;记成「总预算 + 本次外部段实际占用」
+            # 才是真实上界——而且是**实际**占用而不是名义上限
+            # ``EXTERNAL_EVIDENCE_CONTEXT_CHARS``,否则零外部证据的一轮会
+            # 报出一个从来没打算花的额度。
+            "budget_chars": (
+                total_context_budget
+                + len(context_block) - len(pre_external_block)
+            ),
+            "capture_error_count": int(
+                baseline_admission.get("ambiguous_truncations") or 0
+            ),
+        }
+        return _ReasoningContext(
+            context_block=context_block,
+            id_map=id_map,
+            counts=counts,
+            baseline=baseline,
+            has_external=has_external,
+            admitted_external=set(admitted_external),
+        )
+
+    def _answer_reasoning(
+        self,
+        notebook_id,
+        question,
+        top_hits,
+        elements,
+        history="",
+        cancel_event: CancelEvent = None,
+        chunks=None,
+        chains=None,
+        memory_hits=None,
+        answer_client=None,
+        kg_context_chars: int | None = None,
+        chunk_context_chars: int | None = None,
+        element_items: int = 6,
+        structured_block: str = "",
+        structured_map: dict | None = None,
+        collection_map_block: str = "",
+        counts_sink: dict | None = None,
+        baseline_sink: dict | None = None,
+        sectioned: bool = False,
+        key_offset: int = 0,
+        section_title: str = "",
+        section_index: int = 0,
+        section_total: int = 0,
+        style_block: str = "",
+        external_evidence=(),
+        external_sink: set | None = None,
+        *,
+        trailing_chunks=(),
+    ):
+        """Synthesise the reasoning-mode answer. When PPR chunks are present they
+        become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
+        chain segment k1001+ (mirrors _answer_mix's keying), with final synthesis
+        still handled by ``ask_answer``. Otherwise KG-only (legacy).
+        Direct ``SourceElement`` passages use the isolated k4001+ namespace and
+        are first-class citations rather than unbound prompt decoration; at most
+        ``element_items`` are admitted, chosen by retrieval relevance descending
+        (tie-break ``element_id``) rather than insertion order.
+        ``collection_map_block`` is the run's deterministic collection counts,
+        placed at the head of the source partition and carrying no ``[k]`` id
+        (see ``collection_enumeration_answer.collection_map_block``). Context refinement
+        uses ``evidence_refine`` while final synthesis uses ``ask_answer``. Returns
+        (answer, llm_grounded, anchors, counts) where ``counts`` reports how many
+        KG/chunk/element entries actually entered the prompt (``included_kg``/
+        ``included_chunks``/``included_elements``).
+
+        按节合成(设计文档 §3.1)复用这同一个装配器。``sectioned`` 是**唯一**的模式
+        判定(不看标题真值,见 ``prompts._answer_section_directive``):它开着时
+        ``key_offset`` 把本节的每一段 ``[k]`` 号整体平移(见
+        ``outline_synthesis.OUTLINE_SECTION_KEY_STRIDE``),prompt 多一段节级指令,
+        证据精炼跳过。缺省为「不在按节合成里」,单次合成路径逐字节不变。节模式下
+        调用方只传该节绑定的证据,Memory / 推导链 / 集合地图 / 结构化预览一律不传
+        ——它们不可被大纲绑定,留在回退路径上(v1 刻意的边界)。``style_block``:
+        见 ``_answer_chunks`` 同名参数,单次合成与按节合成共用调用方传入的同一份。
+
+        ``external_evidence``: 插件 reflect 动作带回的库外材料
+        (``domain.reflect_action.ExternalEvidence``,设计文档
+        ``2026-09-13-reflect-plugin-action-design_zh.md`` §6.2)。缺省空元组,
+        此时上下文块、id_map 与 prompt 与接入这个特性之前逐字节相等。与 Memory /
+        推导链**不**同的一条边界:按节合成每一节都装同一份外部块(见
+        ``_answer_reasoning_sections``)——外部材料不属于任何一节的大纲绑定,
+        但它恰恰是本轮唯一库里查不到的东西,只喂给某一节等于让别的节在同一篇
+        答案里对着一个自己看不见的 ``[k]`` 号写作。号段由 ``key_offset``
+        隔开,各节的外部键互不相交。
+
+        ``external_sink``:调用方传入的集合,本次**真的装进了 prompt** 的那批
+        ``ExternalEvidence.key`` 会被 update 进去。引用侧据此过滤——被预算丢掉
+        的条目模型从没见过,不给它发引用(设计文档 §6.3)。
+
+        ``trailing_chunks``:**不属于本节绑定证据**的兜底原文段(按节合成里由
+        ``outline_synthesis`` 注入的未绑定精确命中,见
+        ``OutlineSectionSlice.exact_chunks``)。它们单独成一段
+        「Exact-lookup passages」,装在本节绑定的原文段与元素**之后**,只用这两
+        段吃完后剩余的那点预算;不排序(保持注入序)、不走前缀席位。缺省空元组,
+        此时上下文块、id_map 与 counts 逐字节等于接这个参数之前。**为什么必须
+        排在后面**:``chunks`` 段按相关度排序,而精确命中的相关度常为 1.0、本节
+        绑定块可能更低——同一段里混装等于让模型没绑进本节的原文按构造吃掉整份
+        预算,绑到 source element 的节也一样(chunk 段先于 element 段装配)。
+
+        """
+        context = self._assemble_reasoning_context(
+            notebook_id, question, top_hits, elements,
+            cancel_event=cancel_event, chunks=chunks, chains=chains,
+            memory_hits=memory_hits, kg_context_chars=kg_context_chars,
+            chunk_context_chars=chunk_context_chars, element_items=element_items,
+            structured_block=structured_block, structured_map=structured_map,
+            collection_map_block=collection_map_block, key_offset=key_offset,
+            external_evidence=external_evidence, trailing_chunks=trailing_chunks,
+            # 按节合成不做证据精炼。两条理由都硬:①精炼是**每次装配一次**模型调用,
+            # 节模式下会把 k 次合成变成 2k 次调用——成本合同只承诺了合成那一半;
+            # ②精炼是给「上下文太大、要先挑重点」准备的,而一节的切片至多 8 条绑定
+            # 证据,本来就没有中段可丢。
+            refine=not sectioned,
+        )
+        context_block, id_map, has_external = (
+            context.context_block, context.id_map, context.has_external)
+        answer_client = answer_client or self.model_clients.chat("ask_answer")
+        if external_sink is not None:
+            external_sink.update(context.admitted_external)
         # Fill the sink BEFORE the model call: when the answer client raises
         # or returns malformed JSON, the synthesis trace must still report the
         # evidence that really was assembled and sent, not zeros
         # (codex PR#391 round-2).
         if counts_sink is not None:
             counts_sink.clear()
-            counts_sink.update(counts)
+            counts_sink.update(context.counts)
         if baseline_sink is not None:
             baseline_sink.clear()
-            baseline_sink.update({
-                "context_block": context_block,
-                "id_map": dict(id_map),
-                "ordered_handles": tuple(id_map),
-                # 上界含外部段:``budget_chars`` 的合同是「这段上下文不会超过它」
-                # (``test_answer_quality_contract`` 直接断言
-                # ``len(context_block) <= budget_chars``),而外部段是在总预算
-                # 截断之后另加的一份独立预算。记成总预算本身会让这条不变量在
-                # 有外部证据的一轮上假红;记成「总预算 + 本次外部段实际占用」
-                # 才是真实上界——而且是**实际**占用而不是名义上限
-                # ``EXTERNAL_EVIDENCE_CONTEXT_CHARS``,否则零外部证据的一轮会
-                # 报出一个从来没打算花的额度。
-                "budget_chars": (
-                    total_context_budget
-                    + len(context_block) - len(pre_external_block)
-                ),
-                "capture_error_count": int(
-                    baseline_admission.get("ambiguous_truncations") or 0
-                ),
-            })
+            baseline_sink.update(context.baseline)
         raw = answer_client.chat_json(
             [{"role": "user", "content": answer_prompt(
                 question, context_block, history,
@@ -3373,7 +3773,7 @@ class AskService:
         # 解析直接丢弃 —— 这正是号段偏移要买到的东西。合法标记两种口径结果相同
         # (号段互不相交),差别只在幻觉这一种情况上。
         anchors = self._parse_answer_anchors(answer, id_map)
-        return answer, llm_grounded, anchors, counts
+        return answer, llm_grounded, anchors, context.counts
 
     def _answer_reasoning_sections(
         self,
@@ -3609,14 +4009,18 @@ class AskService:
     # chunk engine
     # ------------------------------------------------------------------
 
-    def _try_document_overview(
-        self, notebook_id, payload, conversation_id, history, style_block,
-        *, user_id, job_id, cancel_event, user_history="",
-    ):
+    def _prepare_document_overview(
+        self, notebook_id, payload, *, cancel_event,
+    ) -> "_OverviewPrep | None":
+        """The document-overview branch up to its synthesis: the question's
+        overview intent and the evidence prepared for it (catalog, or one
+        source's sampled reading), or a notice that stands in for that
+        evidence.  ``None`` = not an overview question.  Shared by the
+        answer (``_try_document_overview``) and the retrieval-only output
+        (``_chunk_evidence``)."""
         from app.services.document_overview import overview_intent, resolve_overview_source
-        from app.services.document_catalog_overview import catalog_coverage_note, prepare_catalog_overview, supplement_missing_summaries
+        from app.services.document_catalog_overview import prepare_catalog_overview, supplement_missing_summaries
         from app.services.document_source_overview import prepare_source_overview
-        from app.services.document_guide import GUIDE_SCHEMA_HINT, guide_style_instruction, render_document_guide
         from app.services.reasoning_retrieval import (
             ceiling_binds_for_run, document_source_admitted,
         )
@@ -3661,6 +4065,25 @@ class AskService:
                 )
             elif source is not None:
                 notice = "当前无法读取文档正文，请稍后重试。"
+        return _OverviewPrep(
+            intent=intent, catalog=catalog, prepared=prepared, notice=notice,
+        )
+
+    def _try_document_overview(
+        self, notebook_id, payload, conversation_id, history, style_block,
+        *, user_id, job_id, cancel_event, user_history="",
+    ):
+        from app.services.document_catalog_overview import catalog_coverage_note
+        from app.services.document_guide import GUIDE_SCHEMA_HINT, guide_style_instruction, render_document_guide
+
+        # Unbound on purpose: the overview tests drive this with a narrow
+        # stand-in for ``self``.
+        overview = AskService._prepare_document_overview(
+            self, notebook_id, payload, cancel_event=cancel_event)
+        if overview is None:
+            return None
+        intent, catalog = overview.intent, overview.catalog
+        prepared, notice = overview.prepared, overview.notice
         errors: list = []
         token = _ASK_MODEL_ERRORS.set(errors)
         answer, anchors, ok, attempted = "", [], False, False
@@ -3760,6 +4183,213 @@ class AskService:
         raise_if_cancelled(cancel_event)
         return question, turn.conversation_id, history, self._search_profile_style_block(user_id), scoped_conversation_history(turn.user_history)
 
+    def _chunk_stage_emitter(self, notebook_id: str) -> "Callable[..., None]":
+        """The chunk engine's ``ask_stage`` telemetry: one event per stage
+        with its latency since ``started`` (shared by ``ask_chunk`` and the
+        retrieval-only ``_chunk_evidence``)."""
+        def ask_stage(name: str, started: float, **extra) -> None:
+            self.event_log.emit({
+                "kind": "ask_stage", "notebook_id": notebook_id, "stage": name,
+                "latency_ms": round((time.perf_counter() - started) * 1000), **extra,
+            })
+
+        return ask_stage
+
+    def _chunk_retrieve(
+        self, notebook_id: str, retrieval_query: str, history: str,
+        style_block: str, *, cancel_event: CancelEvent, ask_stage,
+    ) -> "_ChunkRetrieval":
+        """The chunk engine's retrieval, from query expansion to the selected
+        source-graph activation -- everything ``ask_chunk`` does before it
+        reaches for the answer model, moved verbatim so the retrieval-only
+        output (``_chunk_evidence``) runs the very same code.  The caller owns
+        the model-error sink and ``ask_stage`` (the stage telemetry)."""
+        _t = time.perf_counter()
+        from app.services.query_rewrite import expand_query
+        from app.services.retrieval import (
+            est_tokens,
+            partition_generated_question_chunks,
+            quota_fuse_baseline_first,
+        )
+        ex = None
+        raise_if_cancelled(cancel_event)
+        if self.settings.query_rewrite_enabled:
+            ex = expand_query(self.model_clients.chat("query_rewrite"),
+                              retrieval_query, history,
+                              max_subqueries=self.settings.chunk_max_subqueries,
+                              corpus_langs=self.candidates.notebook_languages(notebook_id),
+                              # codex #535 R7 P2:chunk 规划同样收风格块,
+                              # 否则「注入规划与合成两处」只对 reasoning 成立。
+                              style_block=style_block,
+                              cancel_event=cancel_event)
+            sub_queries = [s.query for s in ex.sub_queries]
+        else:
+            sub_queries = [retrieval_query]
+        # 对比题:焦点兄弟追加为子查询(chunk 无 agent 循环,借 expand 的 comparison
+        # 字段触发)。共提优先、社区回退(resolve_comparison_peers)。无 base → 跳过。
+        # 共提兄弟不应被社区层开关单独关死——P2 实测社区层对兄弟无效,操作员关
+        # community_layer 时 mention 桥仍需生效(与 reasoning 分支行为对齐)。
+        if ex and ex.comparison and (self.settings.community_layer_enabled
+                                      or self.settings.mention_bridge_enabled):
+            communities = self.communities()
+            for pname in communities.comparison_peer_names(
+                    communities.mounted_base_ids(notebook_id),
+                    ex.comparison["focal"], retrieval_query,
+                    top_k=self.settings.community_peers_topk,
+                    candidates=self.settings.community_rerank_candidates,
+                    cap_factor=self.settings.reasoning_community_peers_cap_factor):
+                if pname not in sub_queries:
+                    sub_queries.append(pname)
+        hl = " ".join(ex.high_level_keywords) if ex else ""
+        # Bilingual keyword string (high+low level, both corpus languages) for
+        # the CHUNK lexical union — this is how "FTS carries the 2nd language"
+        # reaches chunks (not just the KG-name/relation FTS). Computed ONCE;
+        # merged into whichever candidate branch runs below (dedup by chunk_id).
+        kw_str = " ".join(ex.high_level_keywords + ex.low_level_keywords) if ex else ""
+        kw_hits = (self.candidates.keyword_chunk_candidates(notebook_id, kw_str)
+                   if kw_str.strip() else [])
+        # Exact-identifier fast path: when the question names a full command
+        # (`set_db`), locate its section precisely and take the WHOLE section,
+        # so the 600-char chunker cannot hand back the prose while dropping the
+        # Arguments table. Zero model calls; a question without an identifier
+        # does no I/O at all. Computed ONCE per ask, like kw_hits above, and
+        # merged into whichever candidate branch runs below.
+        exact_hits = (self.candidates.exact_lookup_chunks(notebook_id, retrieval_query)
+                      if self.settings.exact_lookup_enabled else [])
+        ask_stage("expand_query", _t, n=len(sub_queries))
+
+        # ── 检索 + 选择 ──
+        # mix(overlay 开 + rerank 配齐 + 有 KG):三路并池 → rerank 排序 → token 预算截。
+        # 否则走现状 chunk-only(MMR / quota_fuse),与历史字节等价。
+        # W2.2:一次读齐 chunk-path flag/knob → 不可变 plan;overlay_on / strategy /
+        # 各 knob 下面统一读 plan(不再就地读 self.settings)。plan.overlay_on 与旧三元
+        # AND 逐字等价,答案/引用分支继续按 overlay_on 分派。
+        plan = self.candidates.chunk_plan(notebook_id, sub_queries)
+        overlay_on = plan.overlay_on
+        kg_block, kg_id_map, kg_hits = "", {}, []
+        baseline_chunk_candidates = []
+        _t = time.perf_counter()
+        raise_if_cancelled(cancel_event)
+        if plan.strategy == "mix":
+            candidates, kg_block, kg_id_map, kg_hits, concept_walk_n = (
+                self.candidates.mixed_chunk_candidates(
+                    notebook_id, retrieval_query, hl, sub_queries))
+            # Direct historical producers replace a question-only
+            # canonical row on collision, so the optional score/position
+            # cannot influence rerank tie order or token truncation.
+            candidates = _merge_direct_chunk_hits(candidates, kw_hits)
+            candidates = _merge_direct_chunk_hits(candidates, exact_hits)
+            raise_if_cancelled(cancel_event)
+            baseline_candidates, supplemental_candidates = (
+                partition_generated_question_chunks(candidates)
+            )
+            rerank_client = self.model_clients.rerank("retrieval_rerank")
+            order = rerank_client.rerank(
+                retrieval_query, [c.text for c in baseline_candidates],
+                on_error=lambda e: self.model_errors.note_model_error(
+                    "rerank",
+                    e,
+                    workload_id="retrieval_rerank",
+                ))
+            raise_if_cancelled(cancel_event)
+            ranked = [baseline_candidates[i] for i in order]
+            if supplemental_candidates:
+                supplemental_order = rerank_client.rerank(
+                    retrieval_query,
+                    [c.text for c in supplemental_candidates],
+                    on_error=lambda e: self.model_errors.note_model_error(
+                        "rerank",
+                        e,
+                        workload_id="retrieval_rerank",
+                    ),
+                )
+                ranked.extend(
+                    supplemental_candidates[i] for i in supplemental_order
+                )
+            baseline_chunk_candidates = list(baseline_candidates)
+            kg_budget = self.settings.max_entity_tokens + self.settings.max_relation_tokens
+            untruncated_kg_block = kg_block
+            kg_block = self.evidence_context.truncate_kg_block(kg_block, kg_budget)
+            baseline_kg_truncated = kg_block != untruncated_kg_block
+            chunk_budget = max(0, self.settings.max_total_tokens
+                               - est_tokens(kg_block) - self._MIX_PROMPT_BUFFER_TOKENS)
+            from app.services import chunk_federation as seats
+            from app.services.retrieval import (
+                mix_reserve_rules, select_with_reserves_baseline_first)
+
+            # Graph → exact → active/per-library floors in ONE budget.
+            selected = select_with_reserves_baseline_first(
+                ranked, chunk_budget, mix_reserve_rules(
+                    self.settings, ranked, exact_hits, notebook_id,
+                    active_seats=seats.active_reserve_seats(self.settings),
+                    library_seats_total=seats.peer_library_reserve_seats(
+                        self.settings)))
+            recalled = len(candidates)
+            ask_stage("mix_rerank", _t, recall=len(candidates),
+                      selected=len(selected), kg_nodes=len(kg_id_map),
+                      concept_walk=concept_walk_n)
+        elif plan.strategy == "multi":
+            baseline_kg_truncated = False
+            collected, per_query, _ids, _mat = (
+                self.candidates.retrieve_chunk_candidates_multi(notebook_id, sub_queries))
+            raise_if_cancelled(cancel_event)
+            # ∪ bilingual-keyword chunk hits: merge into collected (best relevance)
+            # and add as an extra per_query group so quota_fuse can surface them.
+            if kw_hits:
+                _merge_multi_direct_chunk_hits(collected, kw_hits)
+                per_query = per_query + [{c.chunk_id: c for c in kw_hits}]
+            # ∪ exact-identifier whole-section hits, treated identically:
+            # its own per_query group (one per library across libraries) is
+            # what lets quota_fuse surface a low-relevance section chunk.
+            if exact_hits:
+                _merge_multi_direct_chunk_hits(collected, exact_hits)
+                per_query = per_query + exact_query_groups(exact_hits)
+            baseline_chunk_candidates, _supplemental_candidates = (
+                partition_generated_question_chunks(list(collected.values()))
+            )
+            selected, _counts = quota_fuse_baseline_first(
+                collected, per_query, plan.fuse_k,
+                relevance=lambda c: c.relevance, active_notebook_id=notebook_id)
+            recalled = len(collected)
+            ask_stage("retrieve_fuse", _t, recall=len(collected), selected=len(selected))
+        else:
+            baseline_kg_truncated = False
+            scored, ids, mat = self.candidates.retrieve_chunk_candidates(
+                notebook_id, sub_queries[0])
+            # Match feature-off MMR input when a direct producer collides
+            # with a question-only supplement.
+            scored = _merge_direct_chunk_hits(scored, kw_hits)
+            scored = _merge_direct_chunk_hits(scored, exact_hits)
+            baseline_chunk_candidates, _supplemental_candidates = (
+                partition_generated_question_chunks(scored)
+            )
+            raise_if_cancelled(cancel_event)
+            selected = self.candidates.select_chunk_candidates(
+                scored, ids, mat, plan.mmr_k, plan.mmr_lambda,
+                active_notebook_id=notebook_id)
+            recalled = len(scored)
+            ask_stage("retrieve_mmr", _t, recall=len(scored), selected=len(selected))
+
+        historical_selected = list(selected)
+        selected, source_graph_status = self._activate_selected_source_graph(
+            notebook_id,
+            historical_selected,
+            top_hits=kg_hits,
+            max_results=self.settings.ppr_top_chunks,
+        )
+        return _ChunkRetrieval(
+            selected=selected,
+            historical_selected=historical_selected,
+            kg_block=kg_block,
+            kg_id_map=kg_id_map,
+            kg_hits=kg_hits,
+            overlay_on=overlay_on,
+            baseline_chunk_candidates=baseline_chunk_candidates,
+            baseline_kg_truncated=baseline_kg_truncated,
+            recalled=recalled,
+            source_graph_status=source_graph_status,
+        )
+
     def ask_chunk(
         self,
         notebook_id: str,
@@ -3772,13 +4402,7 @@ class AskService:
         """chunk-native 通用问答:大召回 → MMR 多样性精选 → 长上下文综合 →
         引用绑回 chunk。KG overlay 可选:有图且配了 rerank 走三路 mix,否则 chunk-only。"""
         ask_started = time.perf_counter()
-
-        def ask_stage(name: str, started: float, **extra) -> None:
-            self.event_log.emit({
-                "kind": "ask_stage", "notebook_id": notebook_id, "stage": name,
-                "latency_ms": round((time.perf_counter() - started) * 1000), **extra,
-            })
-
+        ask_stage = self._chunk_stage_emitter(notebook_id)
         question, conversation_id, history, style_block, user_history = self._prepare_chunk_question(
             notebook_id, payload, user_id=user_id, job_id=job_id,
             cancel_event=cancel_event,
@@ -3803,176 +4427,15 @@ class AskService:
                     ),
                     workload_id="ask_answer",
                 )
-            _t = time.perf_counter()
-            from app.services.query_rewrite import expand_query
-            from app.services.retrieval import (
-                est_tokens,
-                partition_generated_question_chunks,
-                quota_fuse_baseline_first,
+            r = self._chunk_retrieve(
+                notebook_id, retrieval_query, history, style_block,
+                cancel_event=cancel_event, ask_stage=ask_stage,
             )
-            ex = None
-            raise_if_cancelled(cancel_event)
-            if self.settings.query_rewrite_enabled:
-                ex = expand_query(self.model_clients.chat("query_rewrite"),
-                                  retrieval_query, history,
-                                  max_subqueries=self.settings.chunk_max_subqueries,
-                                  corpus_langs=self.candidates.notebook_languages(notebook_id),
-                                  # codex #535 R7 P2:chunk 规划同样收风格块,
-                                  # 否则「注入规划与合成两处」只对 reasoning 成立。
-                                  style_block=style_block,
-                                  cancel_event=cancel_event)
-                sub_queries = [s.query for s in ex.sub_queries]
-            else:
-                sub_queries = [retrieval_query]
-            # 对比题:焦点兄弟追加为子查询(chunk 无 agent 循环,借 expand 的 comparison
-            # 字段触发)。共提优先、社区回退(resolve_comparison_peers)。无 base → 跳过。
-            # 共提兄弟不应被社区层开关单独关死——P2 实测社区层对兄弟无效,操作员关
-            # community_layer 时 mention 桥仍需生效(与 reasoning 分支行为对齐)。
-            if ex and ex.comparison and (self.settings.community_layer_enabled
-                                          or self.settings.mention_bridge_enabled):
-                communities = self.communities()
-                for pname in communities.comparison_peer_names(
-                        communities.mounted_base_ids(notebook_id),
-                        ex.comparison["focal"], retrieval_query,
-                        top_k=self.settings.community_peers_topk,
-                        candidates=self.settings.community_rerank_candidates,
-                        cap_factor=self.settings.reasoning_community_peers_cap_factor):
-                    if pname not in sub_queries:
-                        sub_queries.append(pname)
-            hl = " ".join(ex.high_level_keywords) if ex else ""
-            # Bilingual keyword string (high+low level, both corpus languages) for
-            # the CHUNK lexical union — this is how "FTS carries the 2nd language"
-            # reaches chunks (not just the KG-name/relation FTS). Computed ONCE;
-            # merged into whichever candidate branch runs below (dedup by chunk_id).
-            kw_str = " ".join(ex.high_level_keywords + ex.low_level_keywords) if ex else ""
-            kw_hits = (self.candidates.keyword_chunk_candidates(notebook_id, kw_str)
-                       if kw_str.strip() else [])
-            # Exact-identifier fast path: when the question names a full command
-            # (`set_db`), locate its section precisely and take the WHOLE section,
-            # so the 600-char chunker cannot hand back the prose while dropping the
-            # Arguments table. Zero model calls; a question without an identifier
-            # does no I/O at all. Computed ONCE per ask, like kw_hits above, and
-            # merged into whichever candidate branch runs below.
-            exact_hits = (self.candidates.exact_lookup_chunks(notebook_id, retrieval_query)
-                          if self.settings.exact_lookup_enabled else [])
-            ask_stage("expand_query", _t, n=len(sub_queries))
-
-            # ── 检索 + 选择 ──
-            # mix(overlay 开 + rerank 配齐 + 有 KG):三路并池 → rerank 排序 → token 预算截。
-            # 否则走现状 chunk-only(MMR / quota_fuse),与历史字节等价。
-            # W2.2:一次读齐 chunk-path flag/knob → 不可变 plan;overlay_on / strategy /
-            # 各 knob 下面统一读 plan(不再就地读 self.settings)。plan.overlay_on 与旧三元
-            # AND 逐字等价,答案/引用分支继续按 overlay_on 分派。
-            plan = self.candidates.chunk_plan(notebook_id, sub_queries)
-            overlay_on = plan.overlay_on
-            kg_block, kg_id_map, kg_hits = "", {}, []
-            baseline_chunk_candidates = []
-            _t = time.perf_counter()
-            raise_if_cancelled(cancel_event)
-            if plan.strategy == "mix":
-                candidates, kg_block, kg_id_map, kg_hits, concept_walk_n = (
-                    self.candidates.mixed_chunk_candidates(
-                        notebook_id, retrieval_query, hl, sub_queries))
-                # Direct historical producers replace a question-only
-                # canonical row on collision, so the optional score/position
-                # cannot influence rerank tie order or token truncation.
-                candidates = _merge_direct_chunk_hits(candidates, kw_hits)
-                candidates = _merge_direct_chunk_hits(candidates, exact_hits)
-                raise_if_cancelled(cancel_event)
-                baseline_candidates, supplemental_candidates = (
-                    partition_generated_question_chunks(candidates)
-                )
-                rerank_client = self.model_clients.rerank("retrieval_rerank")
-                order = rerank_client.rerank(
-                    retrieval_query, [c.text for c in baseline_candidates],
-                    on_error=lambda e: self.model_errors.note_model_error(
-                        "rerank",
-                        e,
-                        workload_id="retrieval_rerank",
-                    ))
-                raise_if_cancelled(cancel_event)
-                ranked = [baseline_candidates[i] for i in order]
-                if supplemental_candidates:
-                    supplemental_order = rerank_client.rerank(
-                        retrieval_query,
-                        [c.text for c in supplemental_candidates],
-                        on_error=lambda e: self.model_errors.note_model_error(
-                            "rerank",
-                            e,
-                            workload_id="retrieval_rerank",
-                        ),
-                    )
-                    ranked.extend(
-                        supplemental_candidates[i] for i in supplemental_order
-                    )
-                baseline_chunk_candidates = list(baseline_candidates)
-                kg_budget = self.settings.max_entity_tokens + self.settings.max_relation_tokens
-                untruncated_kg_block = kg_block
-                kg_block = self.evidence_context.truncate_kg_block(kg_block, kg_budget)
-                baseline_kg_truncated = kg_block != untruncated_kg_block
-                chunk_budget = max(0, self.settings.max_total_tokens
-                                   - est_tokens(kg_block) - self._MIX_PROMPT_BUFFER_TOKENS)
-                from app.services import chunk_federation as seats
-                from app.services.retrieval import (
-                    mix_reserve_rules, select_with_reserves_baseline_first)
-
-                # Graph → exact → active/per-library floors in ONE budget.
-                selected = select_with_reserves_baseline_first(
-                    ranked, chunk_budget, mix_reserve_rules(
-                        self.settings, ranked, exact_hits, notebook_id,
-                        active_seats=seats.active_reserve_seats(self.settings),
-                        library_seats_total=seats.peer_library_reserve_seats(
-                            self.settings)))
-                ask_stage("mix_rerank", _t, recall=len(candidates),
-                          selected=len(selected), kg_nodes=len(kg_id_map),
-                          concept_walk=concept_walk_n)
-            elif plan.strategy == "multi":
-                baseline_kg_truncated = False
-                collected, per_query, _ids, _mat = (
-                    self.candidates.retrieve_chunk_candidates_multi(notebook_id, sub_queries))
-                raise_if_cancelled(cancel_event)
-                # ∪ bilingual-keyword chunk hits: merge into collected (best relevance)
-                # and add as an extra per_query group so quota_fuse can surface them.
-                if kw_hits:
-                    _merge_multi_direct_chunk_hits(collected, kw_hits)
-                    per_query = per_query + [{c.chunk_id: c for c in kw_hits}]
-                # ∪ exact-identifier whole-section hits, treated identically:
-                # its own per_query group (one per library across libraries) is
-                # what lets quota_fuse surface a low-relevance section chunk.
-                if exact_hits:
-                    _merge_multi_direct_chunk_hits(collected, exact_hits)
-                    per_query = per_query + exact_query_groups(exact_hits)
-                baseline_chunk_candidates, _supplemental_candidates = (
-                    partition_generated_question_chunks(list(collected.values()))
-                )
-                selected, _counts = quota_fuse_baseline_first(
-                    collected, per_query, plan.fuse_k,
-                    relevance=lambda c: c.relevance, active_notebook_id=notebook_id)
-                ask_stage("retrieve_fuse", _t, recall=len(collected), selected=len(selected))
-            else:
-                baseline_kg_truncated = False
-                scored, ids, mat = self.candidates.retrieve_chunk_candidates(
-                    notebook_id, sub_queries[0])
-                # Match feature-off MMR input when a direct producer collides
-                # with a question-only supplement.
-                scored = _merge_direct_chunk_hits(scored, kw_hits)
-                scored = _merge_direct_chunk_hits(scored, exact_hits)
-                baseline_chunk_candidates, _supplemental_candidates = (
-                    partition_generated_question_chunks(scored)
-                )
-                raise_if_cancelled(cancel_event)
-                selected = self.candidates.select_chunk_candidates(
-                    scored, ids, mat, plan.mmr_k, plan.mmr_lambda,
-                    active_notebook_id=notebook_id)
-                ask_stage("retrieve_mmr", _t, recall=len(scored), selected=len(selected))
-
-            historical_selected = list(selected)
-            selected, source_graph_status = self._activate_selected_source_graph(
-                notebook_id,
-                historical_selected,
-                top_hits=kg_hits,
-                max_results=self.settings.ppr_top_chunks,
-            )
+            selected, historical_selected = r.selected, r.historical_selected
+            kg_block, kg_id_map, kg_hits = r.kg_block, r.kg_id_map, r.kg_hits
+            overlay_on = r.overlay_on
+            baseline_chunk_candidates = r.baseline_chunk_candidates
+            baseline_kg_truncated = r.baseline_kg_truncated
 
             answer, llm_grounded, anchors = "", False, []
             synth_failed = False
@@ -4066,7 +4529,7 @@ class AskService:
                 conclusion = (
                     f"Retrieved {len(selected)} relevant passage(s) for this question."
                     if selected else
-                    "No indexed content matches this question yet. Upload sources or build chunks.")
+                    _CHUNK_NO_EVIDENCE_MESSAGE)
 
             response = AskResponse(
                 answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
@@ -4083,6 +4546,108 @@ class AskService:
             user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
         ask_stage("total", ask_started)
         return response
+
+    def _chunk_evidence(
+        self,
+        notebook_id: str,
+        payload: AskRequest,
+        *,
+        user_id: str,
+        job_id: str = "",
+        cancel_event: CancelEvent = None,
+    ) -> AskEvidence:
+        """``ask_chunk`` up to the answer model, returning its context.
+
+        Same steps in the same order -- history (``_prepare_chunk_question``),
+        the document-overview branch, the follow-up rewrite, Memory, the
+        retrieval (``_chunk_retrieve``) and the synthesis context
+        (``_chunk_synthesis_context``) -- and it stops where ``ask_chunk``
+        would read the ``ask_answer`` client.  No "answer model not
+        configured" note: nothing here needs that model.
+        """
+        ask_started = time.perf_counter()
+        ask_stage = self._chunk_stage_emitter(notebook_id)
+        question, conversation_id, history, style_block, _user_history = (
+            self._prepare_chunk_question(
+                notebook_id, payload, user_id=user_id, job_id=job_id,
+                cancel_event=cancel_event,
+            )
+        )
+        overview = self._prepare_document_overview(
+            notebook_id, payload, cancel_event=cancel_event)
+        if overview is not None:
+            raise_if_cancelled(cancel_event)
+            return self._overview_evidence(
+                overview, conversation_id=conversation_id,
+                retrieval_query=payload.question,
+            )
+        retrieval_query = self._rewrite_followup_query(history, question, cancel_event)
+        memory_hits = self._memory_hits(user_id, notebook_id, retrieval_query)
+        err_sink: list = []
+        err_token = _ASK_MODEL_ERRORS.set(err_sink)
+        try:
+            r = self._chunk_retrieve(
+                notebook_id, retrieval_query, history, style_block,
+                cancel_event=cancel_event, ask_stage=ask_stage,
+            )
+            raise_if_cancelled(cancel_event)
+            if not (r.selected or r.kg_id_map or memory_hits):
+                evidence = AskEvidence(
+                    mode="chunk", evidence_kind="none",
+                    notice=_CHUNK_NO_EVIDENCE_MESSAGE,
+                    counts=AskEvidenceCounts(recalled=r.recalled),
+                )
+            else:
+                context_block, id_map, budget_chars = self._chunk_synthesis_context(
+                    r.selected, r.kg_block, r.kg_id_map, memory_hits,
+                    overlay_on=r.overlay_on, notebook_id=notebook_id,
+                )
+                evidence = build_ask_evidence(
+                    context_block, id_map,
+                    parse_anchors=self._parse_answer_anchors,
+                    mode="chunk",
+                    relevance=_evidence_relevance(
+                        id_map, (*r.selected, *r.kg_hits, *memory_hits)),
+                    recalled=r.recalled,
+                    budget_chars=budget_chars,
+                )
+                _recount_selected(evidence, {
+                    "chunk": len({c.chunk_id for c in r.selected}),
+                    **({"kg": len(r.kg_id_map)} if r.kg_id_map else {}),
+                    **({"memory": len(memory_hits)} if memory_hits else {}),
+                })
+        finally:
+            _ASK_MODEL_ERRORS.reset(err_token)
+        evidence.conversation_id = conversation_id
+        evidence.retrieval_query = retrieval_query
+        evidence.model_errors = [ModelError(**e) for e in err_sink]
+        ask_stage("total", ask_started)
+        return evidence
+
+    def _overview_evidence(
+        self, overview: "_OverviewPrep", *, conversation_id: str,
+        retrieval_query: str,
+    ) -> AskEvidence:
+        """The document-overview branch's own evidence: what its synthesis
+        would have been given, or -- when a notice stands in for the evidence
+        (no such document in range, body unreadable) -- that notice alone."""
+        if overview.notice:
+            evidence = AskEvidence(
+                mode="chunk", evidence_kind="document_overview",
+                notice=overview.notice,
+            )
+        else:
+            prepared = overview.prepared
+            evidence = build_ask_evidence(
+                str(prepared.context_block or ""), dict(prepared.id_map or {}),
+                parse_anchors=self._parse_answer_anchors,
+                mode="chunk", evidence_kind="document_overview",
+                budget_chars=self.settings.chunk_answer_budget_chars,
+                notice=str(getattr(prepared, "coverage_note", "") or ""),
+            )
+        evidence.conversation_id = conversation_id
+        evidence.retrieval_query = retrieval_query
+        return evidence
 
     # ------------------------------------------------------------------
     # reasoning engine
@@ -4117,6 +4682,47 @@ class AskService:
             runtime=runtime,
         )
         return self._run_reasoning_stage(prepared, runtime).response
+
+    def _reasoning_evidence(
+        self,
+        notebook_id: str,
+        payload: AskRequest,
+        *,
+        user_id: str,
+        job_id: str = "",
+        on_trace=None,
+        cancel_event: CancelEvent = None,
+    ) -> AskEvidence:
+        """``ask_reasoning`` with ``output="evidence"``: the same prepared
+        input and the same orchestrator (``_run_reasoning_stage``); the draft
+        stage is ``EvidenceDraftStage`` and the commit boundary saves
+        nothing (``_commit_reasoning_draft``)."""
+        import dataclasses
+
+        from app.application.ask_reasoning import ReasoningRetrievalRuntime
+        from app.services.retrieval_run import current_retrieval_run
+        from app.services.source_scope import current_source_scope
+
+        runtime = ReasoningRetrievalRuntime(
+            scope=current_source_scope(),
+            retrieval_run=current_retrieval_run(),
+            cancellation=cancel_event,
+            trace_sink=on_trace,
+            connection_probe=self.retrieval_connection_probe,
+        )
+        prepared = self._prepare_reasoning_ask(
+            notebook_id, payload, user_id=user_id, job_id=job_id,
+            runtime=runtime,
+        )
+        prepared = dataclasses.replace(prepared, output="evidence")
+        return self._run_reasoning_stage(prepared, runtime).evidence
+
+    def _response_draft_stage_for(self, prepared):
+        """The draft stage for this run: the (injectable) answer stage, or --
+        for a retrieval-only run -- the core's own ``EvidenceDraftStage``."""
+        if prepared.output == "evidence":
+            return EvidenceDraftStage(self)
+        return self.response_draft_stage
 
     def _assert_reasoning_runtime(
         self, runtime, point: str, *, notebook_id: str, user_id: str,
@@ -4409,6 +5015,18 @@ class AskService:
             user_id=draft.user_id,
         )
         raise_if_cancelled(runtime.cancellation)
+        if prepared.output == "evidence":
+            # Retrieval only: nothing is saved, on any path.  The evidence is
+            # the draft stage's, or -- for the orchestrator's short circuits,
+            # which never reach that stage -- read off their response.
+            evidence = draft.evidence or self._short_circuit_evidence(
+                response, prepared)
+            evidence.model_errors = list(response.model_errors)
+            return CommittedReasoningAnswer(
+                response=response,
+                baseline_manifest=draft.baseline_manifest,
+                evidence=evidence,
+            )
         response.answer_id = self._save_answer(
             draft.notebook_id,
             draft.question,
@@ -4421,6 +5039,55 @@ class AskService:
         return CommittedReasoningAnswer(
             response=response,
             baseline_manifest=draft.baseline_manifest,
+        )
+
+    @staticmethod
+    def _short_circuit_evidence(response: AskResponse, prepared) -> AskEvidence:
+        """The evidence of a reasoning run that ended in one of the
+        orchestrator's short circuits (``_run_reasoning_stage``) -- none of
+        them reaches a draft stage, so their deterministic response is all
+        there is:
+
+        * the answer model is not configured -> ``"none"``, the response's
+          sentence as the notice and its ``missing_config`` error;
+        * a complete structured enumeration -> ``"structured_enumeration"``:
+          the deterministically rendered result as ONE ``context`` item (it is
+          the whole result, exactly what the answer would have shown);
+        * nothing retrievable in scope -> ``"none"`` with the response's
+          sentence.
+        """
+        common = {
+            "mode": "reasoning",
+            "conversation_id": prepared.conversation_id,
+            "retrieval_query": response.retrieval_query,
+            "intent": response.intent,
+        }
+        unconfigured = any(
+            error.message == "missing_config" for error in response.model_errors
+        )
+        if response.llm_mode == "structured" and not unconfigured:
+            coverage = response.result_coverage
+            returned = int(coverage.returned_rows) if coverage else 0
+            known = int(coverage.known_total_rows) if coverage else 0
+            text = response.answer or response.conclusion
+            return AskEvidence(
+                evidence_kind="structured_enumeration",
+                items=[AskEvidenceItem(key="", kind="context", text=text)],
+                counts=AskEvidenceCounts(
+                    recalled=known, selected=returned, delivered=returned,
+                    omitted=(
+                        0 if coverage is None or coverage.complete
+                        else max(0, known - returned)
+                    ),
+                ),
+                context_chars=len(text),
+                notice=response.completeness_notice,
+                **common,
+            )
+        return AskEvidence(
+            evidence_kind="none",
+            notice=response.conclusion,
+            **common,
         )
 
     def _drop_dangling_references(self, response) -> None:
@@ -4943,7 +5610,12 @@ class AskService:
         self, response: AskResponse, prepared, limits, trace, *,
         top_hits, chunks, elements, cancel_event, on_trace,
     ) -> None:
-        """Attach post-draft, non-citable outside material before persistence."""
+        """Attach post-draft, non-citable outside material before persistence.
+
+        Not for a retrieval-only run: outside sources are consulted to
+        supplement an answer, and ``output="evidence"`` writes none."""
+        if prepared.output == "evidence":
+            return
         gap_steps: list[TraceStep] = []
         gap_deadline = time.monotonic() + self.settings.ask_gap_consult_timeout_seconds
         suggestions, egress = self._consult_gap_sources(
@@ -5441,7 +6113,7 @@ class AskService:
                 user_id=user_id,
             )
             draft = execute_response_draft_stage(
-                self.response_draft_stage,
+                self._response_draft_stage_for(prepared),
                 ResponseDraftInput(
                     prepared=prepared,
                     intent_contract=intent_contract,
@@ -6499,4 +7171,125 @@ class AskService:
             job_id=prepared.job_id,
             asked_at=prepared.asked_at,
             baseline_manifest=final_baseline_manifest,
+        )
+
+    def _draft_reasoning_evidence(self, stage, runtime):
+        """``EvidenceDraftStage``'s body: the retrieval evidence -> the context
+        the synthesis would have received, and no answer.
+
+        Mirrors ``_draft_reasoning_response`` up to its synthesis call: the
+        collection-map block, the structured side
+        (``_assemble_structured_evidence``, against an answer client that
+        only says "configured" and refuses any call), the same "is there any
+        evidence" disjunction, and ``_assemble_reasoning_context`` with
+        ``refine=False``.  Two registered differences: a run the answer would
+        have written section by section (exhaustive effort with an outline)
+        is assembled as ONE context here -- the single-synthesis assembly the
+        sectioned path itself falls back to; and the optional model-written
+        refine summary is left out (it is not evidence).
+
+        The returned draft carries a minimal ``AskResponse`` (identity fields
+        and the trace) so the stage-boundary type checks and
+        ``_commit_reasoning_draft``'s identity sweep apply unchanged; the
+        commit boundary returns ``draft.evidence`` and saves nothing.
+        """
+        from app.application.ask_reasoning import (
+            ReasoningResponseDraft,
+            ReasoningRetrievalRuntime,
+            ResponseDraftInput,
+            StageBoundaryError,
+        )
+        from app.services.collection_enumeration_answer import collection_map_block
+
+        if type(stage) is not ResponseDraftInput:
+            raise StageBoundaryError("invalid reasoning response draft input")
+        if type(runtime) is not ReasoningRetrievalRuntime:
+            raise StageBoundaryError("invalid reasoning response draft runtime")
+        prepared = stage.prepared
+        limits = prepared.limits
+        cancel_event = runtime.cancellation
+        trace = list(stage.trace)
+        raise_if_cancelled(cancel_event)
+        map_block = collection_map_block(stage.collection_map_text)
+        (structured_block, structured_map, _result_sets, _enumeration_dropped,
+         _collection_citations, _read_dropped) = self._assemble_structured_evidence(
+            stage, _EvidenceAssemblyClient(), map_block)
+        common = {
+            "conversation_id": prepared.conversation_id,
+            "retrieval_query": prepared.research_question,
+            "intent": stage.intent_contract,
+        }
+        if not (stage.top_hits or stage.elements or stage.chunks or stage.chains
+                or stage.memory_hits or stage.structured_batch is not None
+                or stage.enumerations or map_block or stage.external_evidence):
+            evidence = AskEvidence(
+                mode="reasoning", evidence_kind="none",
+                notice=_NO_RETRIEVAL_EVIDENCE_MESSAGE, **common,
+            )
+        else:
+            context = self._assemble_reasoning_context(
+                prepared.notebook_id, prepared.research_question,
+                list(stage.top_hits), list(stage.elements),
+                cancel_event=cancel_event, chunks=list(stage.chunks),
+                chains=list(stage.chains), memory_hits=list(stage.memory_hits),
+                kg_context_chars=limits.kg_context_chars,
+                chunk_context_chars=limits.chunk_context_chars,
+                element_items=limits.answer_element_items,
+                structured_block=structured_block, structured_map=structured_map,
+                collection_map_block=map_block,
+                external_evidence=stage.external_evidence,
+                refine=False,
+            )
+            manifest = stage.candidate_manifest
+            recalled = (
+                len(manifest.candidate_knowledge) + len(manifest.candidate_chunks)
+                + len(manifest.candidate_elements)
+                if manifest is not None else
+                len(stage.top_hits) + len(stage.chunks) + len(stage.elements)
+            )
+            evidence = build_ask_evidence(
+                context.context_block, context.id_map,
+                parse_anchors=self._parse_answer_anchors,
+                mode="reasoning",
+                relevance=_evidence_relevance(context.id_map, (
+                    *stage.top_hits, *stage.chunks, *stage.elements,
+                    *stage.memory_hits)),
+                recalled=recalled,
+                budget_chars=int(context.baseline.get("budget_chars") or 0),
+                **common,
+            )
+            _recount_selected(evidence, {
+                "chunk": len({item.chunk_id for item in stage.chunks}),
+                "kg": len({hit.object_id for hit in stage.top_hits})
+                + len(stage.chains),
+                "element": len(stage.elements),
+                "external": len(stage.external_evidence),
+                "memory": len(stage.memory_hits),
+            })
+        step = TraceStep(
+            step_type="skip",
+            summary=f"仅检索：已返回 {len(evidence.items)} 条证据，未生成回答",
+            detail={"counts": evidence.counts.model_dump()},
+        )
+        trace.append(step)
+        if runtime.trace_sink:
+            runtime.trace_sink(step)
+        response = AskResponse(
+            answer_id="", conclusion="", llm_mode="deterministic",
+            conversation_id=prepared.conversation_id,
+            retrieval_query=prepared.research_question,
+            reasoning_trace=trace, intent=stage.intent_contract,
+            retrieval_effort=prepared.retrieval_effort,
+            kg_required=stage.kg_required,
+        )
+        response.mode = "reasoning"
+        return ReasoningResponseDraft(
+            notebook_id=prepared.notebook_id,
+            question=prepared.question,
+            response=response,
+            conversation_id=prepared.conversation_id,
+            user_id=prepared.user_id,
+            job_id=prepared.job_id,
+            asked_at=prepared.asked_at,
+            evidence=evidence,
         )

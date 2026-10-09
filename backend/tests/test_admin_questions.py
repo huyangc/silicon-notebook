@@ -185,6 +185,50 @@ def test_admin_questions_filters_by_submitted_via(client):
     assert retained_web["items"][0]["submitted_via"] == "web"
 
 
+def test_admin_questions_marks_retrieval_only_asks(client):
+    """The question overview carries ``output`` on every row: a retrieval-only
+    MCP ask is ``"evidence"``; answers, global asks and reports are
+    ``"answer"``."""
+    user_headers, user_id = _register(client, "d00000009")
+    notebook = client.post(
+        "/api/notebooks", headers=user_headers, json={"name": "仅检索"}
+    ).json()
+    from app.api.deps import repository
+
+    now = "2026-09-15T08:00:00+00:00"
+    with repository()._write() as db:
+        for job_id, output in (("ask-ans", "answer"), ("ask-evi", "evidence")):
+            db.execute(
+                "INSERT INTO ask_jobs(id,notebook_id,conversation_id,created_by,mode,"
+                "question,status,created_at,updated_at,submitted_via,output) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (job_id, notebook["id"], "", user_id, "chunk", f"问题 {job_id}",
+                 "done", now, now, "mcp", output),
+            )
+        db.execute(
+            "INSERT INTO reports(id,notebook_id,question,created_by,status,"
+            "created_at,updated_at,submitted_via) VALUES (?,?,?,?,?,?,?,?)",
+            ("report-1", notebook["id"], "报告", user_id, "done", now, now, "web"),
+        )
+    admin = _admin(client)
+    body = client.get("/api/admin/questions", headers=admin).json()
+    assert {item["id"]: item["output"] for item in body["items"]} == {
+        "ask-ans": "answer", "ask-evi": "evidence", "report-1": "answer",
+    }
+    # Still counted as questions asked: the overview is the question log.
+    assert body["stats"]["asks"] == 2
+
+    assert client.delete(
+        f"/api/notebooks/{notebook['id']}", headers=user_headers
+    ).status_code == 202
+    from app.services import background_jobs
+    background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
+    retained = client.get("/api/admin/questions", headers=admin).json()
+    assert {item["id"]: item["output"] for item in retained["items"]} == {
+        "ask-ans": "answer", "ask-evi": "evidence", "report-1": "answer",
+    }
+
+
 def test_admin_questions_includes_global_ask_jobs(client):
     """一条全局问答(global_ask_conversations + global_ask_jobs)在总览里现身:
     type=ask、scope=global、notebook_id/notebook_name 为空、submitted_via 来自

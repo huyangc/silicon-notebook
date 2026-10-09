@@ -25,8 +25,11 @@ from app.core.memory_inputs import (
     normalize_title,
 )
 from app.models.ask import (
+    ASK_OUTPUTS,
+    EVIDENCE_OUTPUT_MODE_REFUSAL,
     ASK_QUESTION_MAX_CHARS,
     ASK_UNDERSTANDING_MS_MAX,
+    AskEvidence,
     AskIntentConfirmation,
     AskRequest,
     QueryIntentAnswer,
@@ -41,7 +44,10 @@ from app.services.search_concurrency import run_under_search_gate
 from app.services.source_scope import memory_access_context
 
 from ._shared import (
+    EVIDENCE_ITEM_OVERHEAD_BYTES,
+    EVIDENCE_TOTAL_TEXT_LIMIT,
     RESULT_LIMIT,
+    TOTAL_TEXT_LIMIT,
     TEXT_LIMIT,
     _PENDING_INTENTS_ATTR,
     _budget_response,
@@ -156,7 +162,9 @@ def _validate_ask_mode(mode: str) -> None:
     raise ValueError(f"mode must be one of: {', '.join(legal_modes)}")
 
 
-def _ask_actionable(repo: Any, notebook_id: str, payload: AskRequest) -> Any:
+def _ask_actionable(
+    repo: Any, notebook_id: str, payload: AskRequest, output: str = "answer"
+) -> Any:
     """Translate ask failures the way ``ask_routes._plugin_engine_http_error``
     does for the browser -- an MCP tool error IS the Agent-facing copy, and a
     bare stable code (``plugin_engine_failed``) or a bare mode id (the
@@ -164,7 +172,7 @@ def _ask_actionable(repo: Any, notebook_id: str, payload: AskRequest) -> Any:
     ``AskCancelled`` and every other exception pass through untouched.
     """
     try:
-        return repo.ask(notebook_id, payload, submitted_via="mcp")
+        return repo.ask(notebook_id, payload, submitted_via="mcp", output=output)
     except UnknownAskMode:
         # Availability flipped between _validate_ask_mode and dispatch; same
         # wording as the pre-dispatch "registered but unavailable" rejection.
@@ -337,7 +345,7 @@ def _confirm_pending_intent(
 
 def _validate_ask_notebook_inputs(
     question: str, conversation_id: str, mode: str,
-    intent: Mapping[str, Any] | None,
+    intent: Mapping[str, Any] | None, output: str = "answer",
 ) -> _IntentReply | None:
     """Every ``ask_notebook`` input rail that must fail BEFORE any durable state.
 
@@ -362,6 +370,11 @@ def _validate_ask_notebook_inputs(
     * ``reasoning`` needs a non-blank question: the understanding step it
       goes through has nothing to understand otherwise (``/ask/intent``
       refuses the same with ``min_length=1``). Other modes are untouched.
+    * ``output`` -- ``answer`` (default) or ``evidence``. Evidence skips the
+      final synthesis and hands back the retrieved context, which only the
+      two built-in modes can separate from their own synthesis: a plugin
+      engine retrieves and writes in one opaque step. ``conversation_id`` is
+      NOT refused with it -- the history is read, never appended to.
     * ``intent`` -- the Agent's reply to a clarification this session handed
       out: the handle plus the answers (``_IntentReply``). Only its SHAPE is
       checked here, so a malformed one reads as a field list rather than a
@@ -389,6 +402,10 @@ def _validate_ask_notebook_inputs(
         raise ValueError("conversation_id too long")
     if mode == "reasoning" and not question.strip():
         raise ValueError("question 不能为空")
+    if output not in ASK_OUTPUTS:
+        raise ValueError(f"output must be one of: {', '.join(ASK_OUTPUTS)}")
+    if output == "evidence" and mode not in _BUILTIN_ASK_MODES:
+        raise ValueError(EVIDENCE_OUTPUT_MODE_REFUSAL)
     if intent is None:
         return None
     if mode != "reasoning":
@@ -437,7 +454,7 @@ def _reasoning_intent_history(
 def _run_ask_notebook(
     ctx: Context, repo: Any, principal: Any, notebook_id: str, question: str,
     mode: str, conversation_id: str, reply: _IntentReply | None,
-    allow_memory: bool,
+    allow_memory: bool, output: str = "answer",
 ) -> Any:
     """``ask_notebook``'s blocking body: resolve a clarification reply if one
     came in, the availability gate, then -- for a reasoning question nobody
@@ -540,12 +557,14 @@ def _run_ask_notebook(
                 conversation_id=conversation_id or None,
                 intent=confirmation,
             ),
+            output,
         )
 
 
 _CLARIFICATION_NEXT_STEP = (
     "尚未检索，也未创建会话或任务。把 intent.ambiguities 里 required 为 true 的每一项"
-    "转述给用户（options 只是候选），然后用同一个 question 再调 ask_notebook，传 intent="
+    "转述给用户（options 只是候选），然后用同一个 question 与其它参数（含 output）"
+    "再调 ask_notebook，传 intent="
     '{"intent_token": <本响应的 intent_token>, "answers": [{"id", "answer"}], '
     '"resolved_question": <可选>}。'
 )
@@ -682,6 +701,161 @@ def _clarification_payload(pending: _PendingIntent) -> dict[str, Any]:
         "澄清问题超出 MCP 响应预算，无法完整投递给调用方"
         "（reason: clarification_over_budget）"
     )
+
+
+def _anchor_row(anchor: Any) -> dict[str, Any]:
+    """One anchor as the Agent sees it (``ask_notebook`` answers and evidence)."""
+    row = {
+        "key": anchor.key,
+        "object_id": anchor.object_id,
+        "object_type": anchor.object_type,
+        "label": anchor.label,
+        "source_title": anchor.source_title,
+        "location_label": anchor.location_label,
+        "source_id": anchor.source_id,
+        "element_id": anchor.element_id,
+        "tier": anchor.tier,
+        "provenance": anchor.provenance,
+    }
+    # External evidence (a reflect plugin action's out-of-library
+    # material) is the only anchor carrying a URL, and that URL is its
+    # ONLY handle: source_id/element_id are structurally empty there,
+    # so without this the Agent gets a citation no other tool can
+    # resolve. Omitted when empty, same rule as the keys below.
+    if anchor.url:
+        row["url"] = anchor.url
+    if anchor.knowhow is not None:
+        row["knowhow"] = {
+            "table_id": anchor.knowhow.table_id,
+            "row_id": anchor.knowhow.row_id,
+        }
+    return row
+
+
+def _citation_row(citation: Any) -> dict[str, Any]:
+    """One citation as the Agent sees it."""
+    row = {
+        "label": citation.label,
+        "source_id": citation.source_id,
+        "element_id": citation.element_id,
+        "location_label": citation.location_label,
+        "quoted_span": citation.quoted_span,
+        "source_file_name": citation.source_file_name,
+        "tier": citation.tier,
+        "content_is_untrusted_evidence": True,
+    }
+    # Both keys are omitted when empty, matching get_cited_element's
+    # rule for the same field: a citation from the notebook the Agent
+    # itself selected carries notebook_id="", and a non-Memory citation
+    # carries memory_id="". Emitting the empty string says nothing the
+    # caller does not already know and spends response budget on every
+    # citation of every answer -- and this is the one tool whose payload
+    # actually competes for that budget (see CITATIONS_BUDGET_CHARS).
+    if citation.notebook_id:
+        row["notebook_id"] = citation.notebook_id
+    if citation.memory_id:
+        row["memory_id"] = citation.memory_id
+    if citation.url:  # 见锚点那一段:外部引用唯一可解析的句柄
+        row["url"] = citation.url
+    if citation.knowhow is not None:
+        row["knowhow"] = {
+            "table_id": citation.knowhow.table_id,
+            "row_id": citation.knowhow.row_id,
+        }
+    return row
+
+
+def _is_memory_evidence(item: Any) -> bool:
+    anchor = item.anchor
+    return item.kind == "memory" or (
+        anchor is not None and anchor.object_type == "memory"
+    )
+
+
+def _evidence_row(item: Any) -> dict[str, Any]:
+    """One evidence item: the synthesis text plus the anchor's resolvable handle.
+
+    The handle fields come from ``_anchor_row``, the same builder the answer
+    mode uses, so a key's handle is identical in both modes. Empty optional
+    keys are omitted: every key here spends response budget on every item.
+    """
+    row: dict[str, Any] = {"key": item.key, "kind": item.kind, "text": item.text}
+    anchor = item.anchor
+    if anchor is not None:
+        row.update(_anchor_row(anchor))
+        if anchor.notebook_id:
+            row["notebook_id"] = anchor.notebook_id
+        if anchor.object_type == "memory":
+            row["memory_id"] = anchor.object_id
+        if anchor.source_file_name:
+            row["source_file_name"] = anchor.source_file_name
+    if item.relevance is not None:
+        row["relevance"] = item.relevance
+    return row
+
+
+def _evidence_payload(
+    notebook_id: str, evidence: AskEvidence, allow_memory: bool
+) -> dict[str, Any]:
+    """``ask_notebook(output="evidence")``: the context the synthesis would
+    have been given, sized by the synthesis budget rather than the 12,000-byte
+    one (``EVIDENCE_TOTAL_TEXT_LIMIT`` is the hard cap).
+
+    Memory is filtered BEFORE counting and truncation, for the reason
+    ``_strip_memory_items`` documents: the response must carry no trace of how
+    many Memory rows the token could not see. The server totals already
+    exclude Memory, so only ``by_kind.memory`` needs to go.
+    """
+    items = [
+        item for item in evidence.items
+        if allow_memory or not _is_memory_evidence(item)
+    ]
+    counts = evidence.counts.model_dump()
+    if not allow_memory:
+        counts["by_kind"] = {
+            kind: value for kind, value in counts["by_kind"].items()
+            if kind != "memory"
+        }
+    text_chars = max(
+        [evidence.budget_chars, evidence.context_chars]
+        + [len(item.text) for item in items]
+    )
+    total = min(
+        EVIDENCE_TOTAL_TEXT_LIMIT,
+        TOTAL_TEXT_LIMIT + 3 * text_chars
+        + EVIDENCE_ITEM_OVERHEAD_BYTES * len(items),
+    )
+    return _budget_response({
+        "notebook_id": notebook_id,
+        "status": "retrieved",
+        "output": "evidence",
+        "mode": evidence.mode,
+        "evidence_kind": evidence.evidence_kind,
+        "conversation_id": evidence.conversation_id,
+        "retrieval_query": evidence.retrieval_query,
+        "counts": counts,
+        "budget": {
+            "budget_chars": evidence.budget_chars,
+            "context_chars": evidence.context_chars,
+        },
+        "content_is_untrusted_evidence": True,
+        "items": [_evidence_row(item) for item in items],
+        "notice": evidence.notice,
+        "skipped_libraries": [
+            {"notebook_id": row.notebook_id, "name": row.name}
+            for row in evidence.skipped_libraries
+        ],
+        "index_required": evidence.index_required,
+        **_intent_entry(evidence),
+    }, field_limits={"text": text_chars, "object_type": 100, "kind": 40,
+                     "label": 300, "source_title": 300, "location_label": 300,
+                     "source_file_name": 300, "notice": 1_000,
+                     "retrieval_query": 1_000, "resolved_question": 1_000,
+                     "entities": 200, "assumptions": 300, "constraints": 300,
+                     "excluded_topics": 300, "question": 500},
+        anchor_provenance_budget_chars=500, provenance_list_key="items",
+        intent_budget_chars=1_500, total_budget_bytes=total,
+        list_limit=max(RESULT_LIMIT, len(items)))
 
 
 def _answer_entries(answer: Any) -> dict[str, Any]:
@@ -967,16 +1141,27 @@ def register_memory_context_tools(
             "required ambiguity needs an answer, and the token lives only in "
             "this MCP session. Answered responses carry status=\"answered\" and, in "
             "reasoning mode, an intent summary of the wording and "
-            "assumptions the run used."
+            "assumptions the run used. output=\"evidence\" (built-in modes "
+            "only) runs the same retrieval -- reasoning still understands "
+            "first and may return needs_clarification -- but skips the final "
+            "synthesis and returns the evidence the synthesis would have "
+            "been given, with status=\"retrieved\": every item carries a "
+            "handle get_cited_element / get_memory / get_knowhow_row can "
+            "resolve. Its size follows the synthesis budget, not the 12,000 "
+            "byte one, so raise the client's tool-output limit; "
+            "conversation_id is accepted (history is read, never appended) "
+            "and nothing is saved as a conversation or answer -- the call is "
+            "logged as retrieval-only."
         )
     )
     async def ask_notebook(
         question: str, ctx: Context, mode: str = "reasoning",
         conversation_id: str = "", intent: dict[str, Any] | None = None,
+        output: str = "answer",
     ) -> dict[str, Any]:
         _validate_ask_mode(mode)
         reply = _validate_ask_notebook_inputs(
-            question, conversation_id, mode, intent
+            question, conversation_id, mode, intent, output
         )
         repo = repository_provider()
         principal, notebook_id = await anyio.to_thread.run_sync(
@@ -987,7 +1172,7 @@ def register_memory_context_tools(
             allow = _memory_read_allowed(repo, principal, notebook_id)
             return allow, _run_ask_notebook(
                 ctx, repo, principal, notebook_id, question, mode,
-                conversation_id, reply, allow,
+                conversation_id, reply, allow, output,
             )
 
         allow_memory, outcome = await _run_with_progress(
@@ -995,66 +1180,14 @@ def register_memory_context_tools(
         )
         if isinstance(outcome, _PendingIntent):
             return _clarification_payload(outcome)
+        if isinstance(outcome, AskEvidence):
+            return _evidence_payload(notebook_id, outcome, allow_memory)
         answer = outcome
         anchors, visible_citations = _strip_memory_items(answer, allow_memory)
-        anchor_rows = []
-        for anchor in anchors[:RESULT_LIMIT]:
-            row = {
-                "key": anchor.key,
-                "object_id": anchor.object_id,
-                "object_type": anchor.object_type,
-                "label": anchor.label,
-                "source_title": anchor.source_title,
-                "location_label": anchor.location_label,
-                "source_id": anchor.source_id,
-                "element_id": anchor.element_id,
-                "tier": anchor.tier,
-                "provenance": anchor.provenance,
-            }
-            # External evidence (a reflect plugin action's out-of-library
-            # material) is the only anchor carrying a URL, and that URL is its
-            # ONLY handle: source_id/element_id are structurally empty there,
-            # so without this the Agent gets a citation no other tool can
-            # resolve. Omitted when empty, same rule as the keys below.
-            if anchor.url:
-                row["url"] = anchor.url
-            if anchor.knowhow is not None:
-                row["knowhow"] = {
-                    "table_id": anchor.knowhow.table_id,
-                    "row_id": anchor.knowhow.row_id,
-                }
-            anchor_rows.append(row)
-        citation_rows = []
-        for citation in visible_citations[:RESULT_LIMIT]:
-            row = {
-                "label": citation.label,
-                "source_id": citation.source_id,
-                "element_id": citation.element_id,
-                "location_label": citation.location_label,
-                "quoted_span": citation.quoted_span,
-                "source_file_name": citation.source_file_name,
-                "tier": citation.tier,
-                "content_is_untrusted_evidence": True,
-            }
-            # Both keys are omitted when empty, matching get_cited_element's
-            # rule for the same field: a citation from the notebook the Agent
-            # itself selected carries notebook_id="", and a non-Memory citation
-            # carries memory_id="". Emitting the empty string says nothing the
-            # caller does not already know and spends response budget on every
-            # citation of every answer -- and this is the one tool whose payload
-            # actually competes for that budget (see CITATIONS_BUDGET_CHARS).
-            if citation.notebook_id:
-                row["notebook_id"] = citation.notebook_id
-            if citation.memory_id:
-                row["memory_id"] = citation.memory_id
-            if citation.url:  # 见锚点那一段:外部引用唯一可解析的句柄
-                row["url"] = citation.url
-            if citation.knowhow is not None:
-                row["knowhow"] = {
-                    "table_id": citation.knowhow.table_id,
-                    "row_id": citation.knowhow.row_id,
-                }
-            citation_rows.append(row)
+        anchor_rows = [_anchor_row(item) for item in anchors[:RESULT_LIMIT]]
+        citation_rows = [
+            _citation_row(item) for item in visible_citations[:RESULT_LIMIT]
+        ]
         return _budget_response({
             "notebook_id": notebook_id,
             "status": "answered",

@@ -66,14 +66,15 @@ def _insert_ask(connection, job_id, notebook_id, created_by, created_at, **kw) -
     connection.execute(
         "INSERT INTO ask_jobs "
         "(id,notebook_id,conversation_id,created_by,mode,question,status,asked_at,"
-        "answer_id,error,created_at,updated_at,submitted_via) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        "answer_id,error,created_at,updated_at,submitted_via,output) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
         (
             job_id, notebook_id, kw.get("conversation_id", ""), created_by,
             kw.get("mode", "chunk"), kw.get("question", "q?"),
             kw.get("status", "completed"), kw.get("asked_at", ""),
             kw.get("answer_id", ""), kw.get("error", ""),
             created_at, created_at, kw.get("submitted_via", ""),
+            kw.get("output", "answer"),
         ),
     )
 
@@ -163,7 +164,7 @@ def _insert_global_ask(connection, job_id, conv_id, user_id, created_at, *,
 
 @pytest.fixture
 def store(postgres_database, postgres_settings):
-    assert PostgresMigrator(postgres_database).migrate() == 69
+    assert PostgresMigrator(postgres_database).migrate() == 70
     return PostgresQueryStore(postgres_database, postgres_settings)
 
 
@@ -389,6 +390,71 @@ def test_admin_question_overview_submitted_via_filter_and_stats(
     }
     assert {item["id"] for item in web_only["items"]} == {
         "ask-web", "report-web",
+    }
+
+
+def test_retrieval_only_ask_is_marked_in_overview_activity_and_retained_rows(
+    postgres_database, store
+):
+    """PG twin of the SQLite ``output`` projection tests: the question overview
+    and the activity stream carry ``output`` ('evidence' for a retrieval-only
+    MCP ask, 'answer' everywhere else, report/global arms included), the
+    notebook-delete projection keeps the original value, and a RUNNING
+    retrieval-only job is never a pending action."""
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u1")
+        _insert_notebook(connection, "n1", "u1")
+        _insert_ask(connection, "ask-ans", "n1", "u1", NOW, question="答案提问")
+        _insert_ask(connection, "ask-evi", "n1", "u1", NOW, question="证据提问",
+                    output="evidence")
+        _insert_ask(connection, "askjob-run-ans", "n1", "u1", NOW,
+                    status="running", question="在途")
+        _insert_ask(connection, "askjob-run-evi", "n1", "u1", NOW,
+                    status="running", question="在途证据", output="evidence")
+        _insert_report(connection, "report-1", "n1", "u1", NOW, question="报告")
+
+    def _overview():
+        return {
+            item["id"]: item["output"]
+            for item in store.list_admin_questions(limit=50)["items"]
+            if item["id"] in {"ask-ans", "ask-evi", "report-1"}
+        }
+
+    expected = {"ask-ans": "answer", "ask-evi": "evidence", "report-1": "answer"}
+    assert _overview() == expected
+    activity = store.list_user_activity("u1", limit=50)
+    assert {
+        item["id"]: item["output"]
+        for item in activity["items"] if item["type"] == "ask"
+    } == {
+        "ask-ans": "answer", "ask-evi": "evidence",
+        "askjob-run-ans": "answer", "askjob-run-evi": "evidence",
+    }
+    bell = [
+        it["job_id"] for it in store.pending_actions_projection_rows("u1")["items"]
+        if it["type"] == "ask"
+    ]
+    assert bell == ["askjob-run-ans"]
+
+    from app.repositories.postgres.notebook_store import NotebookStore
+
+    NotebookStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        # The real clock, not NOW: the retained rows must still be inside
+        # their retention window when read back (a fixed date goes stale).
+        now=lambda: datetime.now(timezone.utc),
+        activity_retention_days=180,
+    ).delete_row_and_orphan_embeddings("n1")
+    assert _overview() == expected
+    retained = store.list_user_activity(
+        "u1", include_inaccessible_questions=True, limit=50)
+    assert {
+        item["id"]: item["output"]
+        for item in retained["items"] if item["type"] == "ask"
+    } == {
+        "ask-ans": "answer", "ask-evi": "evidence",
+        "askjob-run-ans": "answer", "askjob-run-evi": "evidence",
     }
 
 

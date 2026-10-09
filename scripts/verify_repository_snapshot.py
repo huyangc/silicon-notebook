@@ -5270,5 +5270,66 @@ MIGRATION_MANIFEST[(88, 89)] = {
     "views": {},
 }
 
+# v90 (ask job output kind, parity with PostgreSQL 0070_ask_job_output.sql):
+# ``output`` TEXT NOT NULL DEFAULT 'answer' on ask_jobs and
+# retained_user_activity. No new table, index, trigger or view; the default is
+# the whole backfill (every pre-existing row produced an answer).
+ASK_JOB_OUTPUT_COLUMNS = {
+    "ask_jobs": {
+        "output": ("output", "TEXT", 1, "'answer'", 0),
+    },
+    "retained_user_activity": {
+        "output": ("output", "TEXT", 1, "'answer'", 0),
+    },
+}
+# retained_user_activity ends with a PRIMARY KEY table constraint, so (as in
+# v74) SQLite's ALTER TABLE ADD COLUMN splices the new definition right after
+# the last real column -- the v74 ``submitted_via`` -- and before that clause.
+RETAINED_USER_ACTIVITY_OUTPUT_FROM = (
+    "submitted_via TEXT NOT NULL DEFAULT '',\n                  PRIMARY KEY"
+)
+RETAINED_USER_ACTIVITY_OUTPUT_TO = (
+    "submitted_via TEXT NOT NULL DEFAULT '', output TEXT NOT NULL DEFAULT 'answer',\n"
+    "                  PRIMARY KEY"
+)
+MIGRATION_MANIFEST = {
+    (key[0], 90, *key[2:]): {
+        **manifest,
+        "tables": {
+            **manifest["tables"],
+            **(
+                {
+                    "retained_user_activity": manifest["tables"][
+                        "retained_user_activity"
+                    ].replace(
+                        RETAINED_USER_ACTIVITY_OUTPUT_FROM,
+                        RETAINED_USER_ACTIVITY_OUTPUT_TO,
+                    )
+                }
+                if "retained_user_activity" in manifest["tables"]
+                else {}
+            ),
+        },
+        "columns": {
+            **manifest["columns"],
+            **{
+                table: {
+                    **manifest["columns"].get(table, {}),
+                    **columns,
+                }
+                for table, columns in ASK_JOB_OUTPUT_COLUMNS.items()
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(89, 90)] = {
+    "tables": {},
+    "columns": ASK_JOB_OUTPUT_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

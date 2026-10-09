@@ -39,7 +39,7 @@
 - `backend/app/application` 的 application stage envelope 保持不可变、依赖轻量。
   有意扩展显式 import allowlist，不放开会绑定 `app` 的裸根 import。Ask/Report stage
   接缝保持精确 source scope、retrieval run、actor、取消 token 和 connection probe
-  的身份；在既有边界重验授权，违反契约直接失败。stage wrapper 不持数据库连接或外层
+  的身份；只检索的 Ask（`output="evidence"`）在提交边界被拒绝保存：不写回答也不写会话。在既有边界重验授权，违反契约直接失败。stage wrapper 不持数据库连接或外层
   leaf-I/O 槽位；core 拥有最终审计与落库。终态后 observer 不得改写已提交产物或
   逆转 `done`；`report.completed_observer` 另不得启动检索/模型工作。修改 Ask 完成
   路径时保留其既有 observer 顺序、失败隔离与成本。

@@ -1286,6 +1286,11 @@ notebook 闸。缺档时工具报错是写明缺哪一档的中文文案（例�
 `omitted_fields`）。异常只返回稳定错误码；FastMCP schema 错误发生在工具体之前，归 transport/request
 audit。只有拷贝真的缩无可缩时才整次拒绝，不会返回被静默截断的结果。
 
+12,000 字节预算只有一个例外：`output="evidence"` 的 `ask_notebook`（见下），其响应大小由合成预算决定：
+`min(EVIDENCE_TOTAL_TEXT_LIMIT, 12,000 + 3 × budget_chars + EVIDENCE_ITEM_OVERHEAD_BYTES × 条目数)` 字节，
+其中 `EVIDENCE_TOTAL_TEXT_LIMIT = 524_288` 是服务端硬顶，`EVIDENCE_ITEM_OVERHEAD_BYTES = 3_000` 是每条给标识符与
+标签留的余量。其它所有工具的 12,000 字节护栏逐字节不变。
+
 `list_notebooks` 与 `select_notebook` **不需要任何档位**：判据只有 token 存活、目标笔记本在
 白名单内、且对它有读权限。因此无论 token 权限收得多窄，session 都能正常起步。
 
@@ -1377,6 +1382,34 @@ knowhow 投影来源的 citation 也带与 anchor 相同的
 被算术还原出来。anchors 与 citations 各自最多 20 行。响应预算分两步：先把**每一条** anchor 的
 `provenance` 各自压到 500 字符，然后才把 anchors 整体压到 3,500 字符；citations 另外预压到
 1,800 字符，使大体量引用不会挤掉正文。
+
+`ask_notebook` 还接受 `output`（`"answer"`，默认，行为与上文逐字节一致；或 `"evidence"`）。`"evidence"` 跑同样
+的检索，但**跳过最终合成**，返回合成那一步本应收到的证据。它只支持内置模式 `reasoning` 与 `chunk`；部署级
+`ask.engine` 模式会被拒绝并给出可读文案，因为插件引擎自行检索并合成，没有可单独返回的检索证据。`output`
+取值非法时报 `output must be one of: answer, evidence`。它只要求 `ask` 档，与回答模式同一道闸（不额外要求
+`read` 档），检索天花板、Memory 通道与调用记账同回答模式完全一致。`reasoning` 下仍先理解问题，调用仍可能返回
+`needs_clarification`（`intent_token` 续接不绑定 `output`：用同一个 `question` 与其它参数，含 `output`，再调一次）。
+`conversation_id` 与回答模式同样接受：合法（同 owner、同笔记本）的 id 提供只读历史，用于追问改写与问题理解；
+外来或不存在的 id 静默不带历史；**不会向该会话追加任何内容**，也不新建会话；用了历史时响应回传该 id，否则为 `""`。
+这次调用记为一条提问任务（出现在活动记录与提问分析里，标「仅检索」），不建会话、不存回答，也不进学习链路
+（轨迹/语言采样、完成观察者、检索经验、reflect）和铃铛。
+
+响应形如 `{"status": "retrieved", "output": "evidence", "mode", "evidence_kind", "conversation_id",
+"retrieval_query", "intent", "counts", "budget", "content_is_untrusted_evidence": true, "items": [...],
+"notice", "skipped_libraries", "index_required", "truncation"}`。`evidence_kind` 取 `retrieval`、`document_overview`、
+`structured_enumeration` 或 `none`。每条 item 带 `key`（合成上下文里的 `kN` 标号）、`kind`（`chunk`、`kg`、
+`memory`、`element`、`collection`、`external`、`document_read`、`context`）、该片段的原样 `text`，以及与回答
+`anchors` 相同的句柄字段（`object_id`、`object_type`、`label`、`source_title`、`location_label`、`source_id`、
+`element_id`、`tier`、`relevance`、`provenance`，适用时还有 `knowhow` / `memory_id` / `url`），由同一个锚点解析器
+产出，所以 `get_cited_element`、`get_memory`、`get_knowhow_row` 解析它们的方式与解析回答锚点完全一致。`counts` 为
+`{recalled, selected, delivered, omitted, by_kind}`：各总数**不含 Memory**（Memory 只出现在 `by_kind` 里，其条数不会被
+算术泄漏），`delivered` 是实际装进合成预算的条数（`omitted` 为差值）。没有 `read` 档时，Memory 条目在截断前
+被剔除并从 `by_kind` 中删去，`delivered` 按剩余条目重算。特殊分支与回答模式一致：文档概览返回它自己准备的证据
+（或只带 notice、无条目）；结构化完整枚举短路把确定性渲染的整段结果作为一条 `kind="context"` 的 item 返回；
+`reasoning` 没有检索证据或未配置主模型时，返回 `evidence_kind="none"` 加 notice，不带条目。证据按合成预算定大小，
+而不是 12,000 字节护栏（见上文例外）：20 行上限与 2,000 字符文本上限都不适用，整份证据一次返回、不分页。MCP
+客户端通常自带工具输出上限，需要调高（见 [Agent MCP 记忆 SOP](./agent-mcp-memory-sop_zh.md)）。已登记差异：
+`reasoning` 下证据一律按单次装配成一份上下文，即便回答模式会对该问题分节合成；证据精炼的模型调用也被跳过。
 
 `get_cited_element` 把一条引用还原回原文：按 `ask_notebook` 或 `search_notebook_context` 返回的
 `source_id` 与 `element_id` 原样传入，取回该元素自身的文本、它在文档中的位置和文档显示标题。
@@ -2896,7 +2929,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 问答正在生成，以及深度报告处于 `pending`、`running`、`planning` 或 `generating` 时，等待区域会挂载同一个紧凑许愿轮播。轮播分别读取最多 `WAITING_WISH_KIND_LIMIT = 5` 条按优先级排序的问题反馈与同样数量的功能需求，因此不会被不可投票的更新计划占满；合并后先按点赞数、再按发布时间与 id 排序。默认每 `WAITING_WISH_ROTATION_MS = 8,000` 毫秒切换一条，鼠标悬停、键盘焦点进入、用户正在投票或系统启用“减少动态效果”时暂停，并提供上一个/下一个手动切换。卡片只投影类型和完整标题，详细说明通过「查看完整说明」进入许愿墙，不静默截断正文。用户可在卡片上赞同或取消赞同，投票中的控件禁用，结果或错误紧邻控件显示；轮播加载失败不会影响问答或报告本身继续生成。
 
-管理员可从全局 `/admin/questions` 进入**提问分析**，把普通问答任务与深度报告中的用户原始提问汇总到一个地方，不再要求先按用户下钻。通过既有校验的原始提问会完整保存和返回，提问分析视图不会再额外截断；对于历史上已完成的问答任务，优先使用答案记录中的完整提问恢复旧任务里被缩略的正文。笔记本删除后保留的提问投影，在配置的用户活动保留期内仍会进入分析；已到期投影，以及仍存在同 id 笔记本的保留行不会重复计入。**全局问答**的作业同样汇总在这里：每条是一行 `type="ask"` 且 `scope="global"` 的记录，不属于任何笔记本，`notebook_id`/`notebook_name` 恒为空串，笔记本列显示固定的「全局问答」。每条结果另带 `submitted_via`，即提交这条提问的入口：`web` 表示登录会话鉴权的网页/HTTP 提交面（`POST /api/notebooks/{id}/ask`、`/ask/stream`、`/reports`，全局问答对应 `POST /api/global-ask/ask`），`mcp` 表示 MCP 工具（笔记本内问答是 `ask_notebook`，全局问答是 `ask_global`），空串表示「未记录」——该字段上线前创建的全部历史行，以及不传入口的进程内调用。取值只由服务端入口写入，不接受请求字段指定，也不为历史行做推断；页面在「调用方式」列显示为「网页」「MCP」「未记录」，删除笔记本后的留存投影保留原值。页面支持按来源类型（`ask` 或 `report`）、**提问范围**（`scope=notebook|global`，即「笔记本内」与「全局」，省略时两者都出现）、调用方式（`submitted_via=web|mcp`）、用户和提问正文筛选；结果按新到旧展示用户、笔记本、状态和创建时间；汇总卡片按当前筛选条件统计提问总数、问答数、深度报告数、**全局问答数**与去重后的活跃用户数——全局问答数是问答数的子集，与笔记本内问答同属一类问题，只在检索方式上不同。搜索上限为 `ADMIN_QUESTIONS_QUERY_MAX_CHARS = 200` 个 Unicode 码点；offset 分页默认每页 `ADMIN_QUESTIONS_DEFAULT_LIMIT = 50` 条，单次请求最多 `ADMIN_QUESTIONS_MAX_LIMIT = 200` 条。页面用全站共用的分页控件翻页（当前行区间与总数、上一页/下一页、总页数、跳页；只有一页时不出现），翻页期间保留当前表格并标为忙碌；停留的页因提问减少而整页落空时退回新的最后一页，不显示空页。HTTP 端点为 `GET /api/admin/questions`，仅管理员可读，并沿用 `USER_ACTIVITY_VIEW_ENABLED` 用户活动可观测总闸；总闸关闭时账户菜单隐藏入口，直接访问页面也会明确说明当前部署未开启该能力。首版提供可搜索、可筛选的人工分析视图，不会把提问内容额外发送给模型。
+管理员可从全局 `/admin/questions` 进入**提问分析**，把普通问答任务与深度报告中的用户原始提问汇总到一个地方，不再要求先按用户下钻。通过既有校验的原始提问会完整保存和返回，提问分析视图不会再额外截断；对于历史上已完成的问答任务，优先使用答案记录中的完整提问恢复旧任务里被缩略的正文。笔记本删除后保留的提问投影，在配置的用户活动保留期内仍会进入分析；已到期投影，以及仍存在同 id 笔记本的保留行不会重复计入。**全局问答**的作业同样汇总在这里：每条是一行 `type="ask"` 且 `scope="global"` 的记录，不属于任何笔记本，`notebook_id`/`notebook_name` 恒为空串，笔记本列显示固定的「全局问答」。每条结果另带 `submitted_via`，即提交这条提问的入口：`web` 表示登录会话鉴权的网页/HTTP 提交面（`POST /api/notebooks/{id}/ask`、`/ask/stream`、`/reports`，全局问答对应 `POST /api/global-ask/ask`），`mcp` 表示 MCP 工具（笔记本内问答是 `ask_notebook`，全局问答是 `ask_global`），空串表示「未记录」——该字段上线前创建的全部历史行，以及不传入口的进程内调用。取值只由服务端入口写入，不接受请求字段指定，也不为历史行做推断；页面在「调用方式」列显示为「网页」「MCP」「未记录」，删除笔记本后的留存投影保留原值。每条提问还带 `output`（默认 `answer`；`ask_notebook(output="evidence")` 的调用为 `evidence`），后者在来源列旁标「仅检索」，留存投影同样保留。页面支持按来源类型（`ask` 或 `report`）、**提问范围**（`scope=notebook|global`，即「笔记本内」与「全局」，省略时两者都出现）、调用方式（`submitted_via=web|mcp`）、用户和提问正文筛选；结果按新到旧展示用户、笔记本、状态和创建时间；汇总卡片按当前筛选条件统计提问总数、问答数、深度报告数、**全局问答数**与去重后的活跃用户数——全局问答数是问答数的子集，与笔记本内问答同属一类问题，只在检索方式上不同。搜索上限为 `ADMIN_QUESTIONS_QUERY_MAX_CHARS = 200` 个 Unicode 码点；offset 分页默认每页 `ADMIN_QUESTIONS_DEFAULT_LIMIT = 50` 条，单次请求最多 `ADMIN_QUESTIONS_MAX_LIMIT = 200` 条。页面用全站共用的分页控件翻页（当前行区间与总数、上一页/下一页、总页数、跳页；只有一页时不出现），翻页期间保留当前表格并标为忙碌；停留的页因提问减少而整页落空时退回新的最后一页，不显示空页。HTTP 端点为 `GET /api/admin/questions`，仅管理员可读，并沿用 `USER_ACTIVITY_VIEW_ENABLED` 用户活动可观测总闸；总闸关闭时账户菜单隐藏入口，直接访问页面也会明确说明当前部署未开启该能力。首版提供可搜索、可筛选的人工分析视图，不会把提问内容额外发送给模型。
 
 ## API
 
@@ -3312,7 +3345,7 @@ workload 做有界规划，不引入 Anthropic SDK 一类通用 Agent。模型�
 
 四个端点（均为只读，权限口径镜像 `debug_logs._resolve_owner`：被查看的 `user_id` 等于当前用户自己的 id，或当前用户是 admin，否则 403）。三者另受独立部署开关 `USER_ACTIVITY_VIEW_ENABLED` 门控（默认 **true**——「活动」是 `/dev/logs` 默认 tab，若沿用默认关闭的 `DEBUG_LOGS_ENABLED`，普通部署一打开页面就 404；两个开关相互独立，`DEBUG_LOGS_ENABLED` 只继续管「模型调用」视图背后的 `/api/debug/logs/...`）。前端没有别的途径拿到这个部署时取值，因此 `GET /system/config` 的 `SystemConfiguration` 响应把它作为 `user_activity_view_enabled` 一并下发；`/dev/logs` 据此在关闭时隐藏「活动」tab、把 `view` 默认落到 `llm`（`?view=activity` 深链同样被归一，不会打开一个端点全 404 的视图）。字段缺失（旧后端 + 新前端）按 `true` 处理，与后端自身默认值一致，不藏掉一个其实可用的 tab。左栏复用的 `GET /admin/users/{user_id}/notebooks` 权限口径同样是 self-or-admin 而非仅 admin，普通用户查看自己的活动才能读到自己的笔记本清单：
 
-- `GET /admin/users/{user_id}/activity?activity_type=&notebook_id=&since=&until=&before_ts=&before_id=&limit=` —— 上文活动流；可选 `activity_type` 只能为 `ask`、`source` 或 `report`，省略时仍返回混合流。提问与报告条目带与提问分析同一口径的 `submitted_via`（`web`、`mcp`，或表示未记录的 `''`）；活动流对已记录的值标出「网页」「MCP」，未记录的行不挂标签。
+- `GET /admin/users/{user_id}/activity?activity_type=&notebook_id=&since=&until=&before_ts=&before_id=&limit=` —— 上文活动流；可选 `activity_type` 只能为 `ask`、`source` 或 `report`，省略时仍返回混合流。提问与报告条目带与提问分析同一口径的 `submitted_via`（`web`、`mcp`，或表示未记录的 `''`）；活动流对已记录的值标出「网页」「MCP」，未记录的行不挂标签。提问条目与提问详情还带 `output`（`answer` 或 `evidence`，默认 `answer`）；`evidence` 条目在活动流标「仅检索」，详情写「仅检索，未生成回答」且不渲染答案面板。
 - `GET /admin/users/{user_id}/notebooks/{notebook_id}/sources?offset=&limit=` —— 该笔记本的来源清单（`limit` 默认 50、上限 200；左栏面板用「加载更多来源」逐页取回）；`notebook_id` 不属于 `user_id` 时 404。
 - `GET /admin/users/{user_id}/asks/{job_id}` —— 单条提问详情；存活提问包含问题/答案/轨迹，未到期的删除后摘要只包含问题/状态/删除信息，`answer=null` 且轨迹为空。`error` 只对管理员携带失败原文，本人自助调用恒为空串。`job_id` 不属于 `user_id`、本人自助调用已无笔记本实时读权、或摘要已到期时均为 404。`job_id` 同时服务全局问答作业：响应带 `scope="global"`、参与库集合 `notebook_ids`，以及其中该用户当前仍可读的库名 `notebook_names`（已删除或已失权的库不在其中）；管理员保留完整审计记录，即使被查看用户之后失去了某个参与库的读权，详情仍可打开——和笔记本内提问同一条规则。本人自助读取则套用全局问答页面自己的读权规则：**参与集合里任何一个库不再可读，整条详情就是 404**，不会只隐藏那一个库、露出其余部分。与提问详情相同，这两条判定和答案投影在 adapter 的同一个事务里完成：事务持有该作业行与每个参与库的读权链直到响应组装完毕，请求中途的撤权或删库不会把已失效的答案带过提交边界。
 - `GET /admin/users/{user_id}/reports/{report_id}` —— 单份报告详情；存活报告包含研究问题、深度、状态、时间戳、`error`（只对管理员携带失败原文，本人自助调用为空串）、`content_md` 与 `references`，未到期的删除后摘要（仅管理员）只包含研究问题/状态/删除信息，`content_md` 与 `references` 为空。与提问详情相同，adapter 在组装响应期间持有笔记本生命周期锁与报告行。报告不是 `user_id` 创建的、本人自助调用已无笔记本实时读权、或摘要已到期时均为 404。

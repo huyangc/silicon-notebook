@@ -24,7 +24,7 @@ class _StubAskState:
         self.finished = []
         self.done = threading.Event()
 
-    def begin_durable_job(self, notebook_id, payload, mode, user_id, *, submitted_via=""):
+    def begin_durable_job(self, notebook_id, payload, mode, user_id, *, submitted_via="", output="answer"):
         payload.conversation_id = "conv-1"
         return "askjob-1", "conv-1"
 

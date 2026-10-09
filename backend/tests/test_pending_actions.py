@@ -371,8 +371,8 @@ def _insert_ask_job(repo, job_id, notebook_id, created_by, **kw):
     with repo._connect() as db:
         db.execute(
             "INSERT INTO ask_jobs (id,notebook_id,conversation_id,created_by,mode,"
-            "question,asked_at,status,trace_json,answer_id,error,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,'','','',?,?)",
+            "question,asked_at,status,trace_json,answer_id,error,created_at,updated_at,"
+            "output) VALUES (?,?,?,?,?,?,?,?,'','','',?,?,?)",
             (
                 job_id, notebook_id, kw.get("conversation_id", f"conv-{job_id}"),
                 created_by, kw.get("mode", "reasoning"),
@@ -381,6 +381,7 @@ def _insert_ask_job(repo, job_id, notebook_id, created_by, **kw):
                 kw.get("status", "running"),
                 kw.get("created_at", "2026-07-07T03:00:00+00:00"),
                 kw.get("created_at", "2026-07-07T03:00:00+00:00"),
+                kw.get("output", "answer"),
             ),
         )
 
@@ -410,6 +411,18 @@ def test_pending_actions_running_ask_item_fields(repo):
     assert len(item["title"]) < len(long_question)
     # 在途提问不响铃:它是状态展示,不是「待你确认」的动作。
     assert out["count"] == 0
+
+
+def test_pending_actions_running_retrieval_only_ask_is_absent(repo):
+    """A running ``output='evidence'`` job (MCP ask_notebook, retrieval only) has
+    no conversation to open, so it never shows as an in-flight question."""
+    nb = _seed_user_nb(repo, "user-a")
+    _insert_ask_job(repo, "askjob-answer", nb, "user-a")
+    _insert_ask_job(repo, "askjob-evidence", nb, "user-a", output="evidence",
+                    conversation_id="")
+    asks = [it["job_id"] for it in repo.pending_actions("user-a")["items"]
+            if it["type"] == "ask"]
+    assert asks == ["askjob-answer"]
 
 
 def test_pending_actions_running_ask_owner_isolation(repo):
