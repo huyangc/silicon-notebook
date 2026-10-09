@@ -2931,6 +2931,14 @@ async def test_transport_401_names_the_reason_only_for_a_matching_token(mcp_env)
         mcp_env["notebook"].id, [mcp_env["notebook"].id], None,
     )
     service.revoke_agent_token(mcp_env["alice"].id, revoked.id)
+    from datetime import datetime, timedelta, timezone
+
+    expired = service.issue_agent_token(
+        mcp_env["alice"].id, mcp_env["profile_a"].id, ["read"],
+        mcp_env["notebook"].id, [mcp_env["notebook"].id],
+        (datetime.now(timezone.utc) - timedelta(minutes=1))
+        .replace(microsecond=0).isoformat(),
+    )
     disabled_profile = service.create_agent_profile(mcp_env["alice"].id, "Retired", "")
     disabled = service.issue_agent_token(
         mcp_env["alice"].id, disabled_profile.id, ["read"],
@@ -2961,11 +2969,18 @@ async def test_transport_401_names_the_reason_only_for_a_matching_token(mcp_env)
                 "garbage": await post("not-a-token"),
                 "unknown": await post("snm_token-missing.secret"),
                 "tampered": await post(mcp_env["token_a"].token + "x"),
+                # A real but dead token id with a wrong secret must not learn
+                # why it is dead (no token-existence/state oracle).
+                "revoked-wrong": await post(f"snm_{revoked.id}.wrong"),
+                "expired-wrong": await post(f"snm_{expired.id}.wrong"),
+                "disabled-wrong": await post(disabled.token + "x"),
                 "revoked": await post(revoked.token),
+                "expired": await post(expired.token),
                 "disabled": await post(disabled.token),
             }
     invalid = {"detail": "invalid or expired Agent token", "code": "token_invalid"}
-    for name in ("garbage", "unknown", "tampered"):
+    for name in ("garbage", "unknown", "tampered", "revoked-wrong",
+                 "expired-wrong", "disabled-wrong"):
         assert answers[name].status_code == 401, name
         assert answers[name].json() == invalid, name
     assert answers["revoked"].status_code == 401
@@ -2973,6 +2988,8 @@ async def test_transport_401_names_the_reason_only_for_a_matching_token(mcp_env)
     assert "已撤销" in answers["revoked"].json()["detail"]
     assert answers["disabled"].status_code == 401
     assert answers["disabled"].json()["code"] == "profile_disabled"
+    assert answers["expired"].status_code == 401
+    assert answers["expired"].json()["code"] == "token_expired"
 
 
 @pytest.mark.anyio
