@@ -553,8 +553,8 @@ single-library short circuit: the run degrades to a ONE-LEG federation that sear
 visibly worse, but still an answer with receipts.
 
 The four global MCP tools do not require `select_notebook`. `ask_global`, `get_global_ask` and
-`cancel_global_ask` require both `ask:execute` and `knowledge:read`; `get_global_cited_element` requires
-`knowledge:read`. `ask_global` accepts `mode` (`chunk` default, or `reasoning`) and `retrieval_effort`
+`cancel_global_ask` require only the `ask` tier (no longer `read` as well); `get_global_cited_element` requires
+the `read` tier. `ask_global` accepts `mode` (`chunk` default, or `reasoning`) and `retrieval_effort`
 (only `standard` is honoured; any other value still runs at `standard`). This surface has no
 clarification-handle store: a `reasoning` call runs the understanding pass once in-call, auto-confirms a
 clear question, and for an ambiguous one creates nothing durable and returns
@@ -874,8 +874,8 @@ management rights. **But two owner-only capabilities deliberately do not flip**:
 `notebook:mount` (mount configuration) and `notebook:configure` (`share_token` link
 sharing) stay owner — see "Mount configuration and link sharing stay owner-only"
 below. **The Agent/MCP
-surface is also untouched**: `sources:write` / `sources:delete` /
-`maintenance:execute` remain owner-only — a long-lived token is a separate
+surface is also untouched**: the `manage` / `delete` tiers (source writes, source
+deletion, builds) remain owner-only — a long-lived token is a separate
 credential whose owner may have been granted admin long after it was issued, and
 the MCP write tools' blast radius (deleting documents) is what that owner gate was
 created for. The browser HTTP surface widened to admin while the Agent token surface
@@ -1470,7 +1470,7 @@ under `/api/notebooks/{id}/sources/{source_id}`, and MCP `get_cited_element` ope
 source only for the member who created the Memory; every other reader of the notebook, the
 notebook owner included, gets the same 404 as for an id that does not exist, and so does
 everyone for a Memory source whose Memory record is gone. An Agent token also needs
-`memory:read` to open its owner's own Memory source. Knowhow projection sources are shared
+the `read` tier (which carries `memory:read`) to open its owner's own Memory source. Knowhow projection sources are shared
 notebook content and stay readable to every reader of the notebook. The command catalog
 accepts no hidden source: its seven `.../sources/{sid}/command-catalog` endpoints answer
 404 for a Memory or Knowhow projection source, as for a missing one. Nor do the generic
@@ -1500,7 +1500,7 @@ after a start.
 
 The lifecycle is `candidate | confirmed | rejected | deprecated`. An Agent can create only
 `candidate`; all authorized Agent profiles belonging to the same user and selected notebook
-may retrieve it when the token includes `memory:read_candidates`. A candidate is never
+may retrieve it when the token holds the `read` tier. A candidate is never
 returned by formal notebook Ask, notebook search, Deep Report, or
 `search_notebook_context`. Confirmation moves it into that formal plane. Rejected and
 deprecated records are excluded from both planes. Retrieval first requires relevance;
@@ -1534,15 +1534,33 @@ The MCP proposal envelope uses these exact Core limits and does not impose narro
 The raw tag list is capped before trimming/deduplication, and blank tags are rejected.
 
 The **Agent access** page (`/agents`, a first-level account-menu entry; the global Memory page
-links to it) creates stable Agent profiles and one-time plaintext tokens. A token has an expiry,
-a default notebook, a notebook allowlist, and the smallest needed subset of `knowledge:read`,
-`memory:read`, `memory:read_candidates`, `memory:propose`, `ask:execute`, `knowhow:code`,
-`sources:write`, `sources:delete`, `maintenance:execute`, `agent_profile:read`, and
-`agent_observation:write`; it can be revoked immediately.
+links to it) creates stable Agent profiles and issues tokens. A token has an expiry, a default
+notebook, a notebook allowlist, and the smallest needed set of permission tiers — storage and
+the API know exactly five: `read` (sources/knowledge/Knowhow, the owner's own confirmed and
+candidate Memory, notebook understanding, cited original text, source and build status), `ask`
+(notebook and global Ask; does not need `read`), `contribute` (Memory candidates, Knowhow code
+attachments, observations), `manage` (add/re-parse sources, start graph and retrieval-index
+builds; only on notebooks the owner owns) and `delete` (delete Agent-added sources only; only on
+notebooks the owner owns). Code still asks for fine-grained capabilities (`knowledge:read`,
+`sources:write`, …) and the call ledger still records them; one table maps each capability to its
+tier. Issuing with a legacy capability string or any unknown value is a 422
+`unsupported agent scopes`. Selecting `manage` or `delete` while the allowlist names no notebook
+the owner owns is a 422 「管理和删除权限只对你拥有的笔记本生效，所选笔记本里没有你拥有的」
+(user-facing copy) on both issue and edit. A token can be revoked immediately.
+
+Tokens can be copied again after issue: the server stores the plaintext at issue time
+(`agent_access_tokens.token_plain`); authentication still compares the hash only. Each
+`GET /api/agent-tokens` row carries `copyable` (plaintext present and not revoked) but never the
+plaintext. `GET /api/agent-tokens/{token_id}/secret` returns `{ "token": "..." }` with
+`Cache-Control: no-store`, to the token's owner only — someone else's token and an unknown id are
+the same 404; a revoked token is 409 「已撤销的 token 不能再复制」; a token issued before this
+version (hash only) is 409 「这个 token 签发于旧版本，无法再次复制，如需请重新签发」. Revoking clears
+the plaintext.
+
 An issued token's access can be edited in place: `PUT /api/agent-tokens/{token_id}/access`
-replaces scopes, default notebook, allowlist, and expiry together (all four fields are required;
+replaces tiers, default notebook, allowlist, and expiry together (all four fields are required;
 `expires_at: null` means no expiry) under the same validation as issuing, while the token hash,
-Profile, and creation time stay unchanged and the plaintext is never shown again. Because every
+Profile, and creation time stay unchanged. Because every
 Agent tool call rereads live token state, the change applies from the next call without
 reissuing or reconfiguring the client; moving an expired token's expiry into the future makes it
 usable again; an empty-string `expires_at` means no expiry, like `null`, on both issue and edit.
@@ -1556,7 +1574,7 @@ editing for revoked tokens and for tokens of a disabled Profile, and asks for an
 confirmation before revoking. Install the backend
 requirements (which include the official `mcp>=1.26.0` client/server SDK), start the backend,
 then connect to the Streamable HTTP server at `/mcp/` (`/mcp` reaches it through a 307).
-The one-time token receipt also links to anonymous `GET /api/agent-mcp/onboarding`, a
+The token receipt also links to anonymous `GET /api/agent-mcp/onboarding`, a
 machine-readable Markdown handoff that prints `MCP_PUBLIC_URL` verbatim as the endpoint to
 configure — never a rewritten variant, since a proxy may publish only that exact route — while
 stating that a backend-direct `POST /mcp` is a 307 to `/mcp/`, so an Agent whose client does not
@@ -1621,7 +1639,7 @@ rejected rather than interpreted in the server's local timezone.
 For Codex, place the issued token in an environment variable and register the server:
 
 ```bash
-export SILICON_NOTEBOOK_AGENT_TOKEN='<one-time-issued-token>'
+export SILICON_NOTEBOOK_AGENT_TOKEN='<token copied from the Agent access page>'
 codex mcp add silicon-notebook --url 'http://127.0.0.1:8000/mcp/' \
   --bearer-token-env-var SILICON_NOTEBOOK_AGENT_TOKEN
 ```
@@ -1656,23 +1674,26 @@ catalog -- it is the same list as `mcp_server.CORE_TOOLS`:
 
 | Group | Tools | Scope |
 | --- | --- | --- |
-| Memory / context | `list_notebooks`, `select_notebook`, `search_agent_memory`, `search_notebook_context`, `get_memory`, `ask_notebook`, `propose_memory` | `knowledge:read` / `memory:read` / `memory:read_candidates` / `memory:propose` / `ask:execute` |
-| Knowhow | `list_knowhow_tables`, `get_knowhow_discrimination`, `get_knowhow_row` | `knowledge:read` |
-| Knowhow code write | `put_knowhow_cell_code` | `knowhow:code` |
-| Citation point-read | `get_cited_element` | `knowledge:read` |
-| Source management | `add_source_text`, `add_source_file`, `add_source_url`, `reparse_source` | `sources:write` (owner-only) |
-| Source deletion | `delete_source` | `sources:delete` (owner-only, Agent-added rows only) |
-| Source read | `list_sources`, `get_source_status` | `knowledge:read` |
-| Build | `build_kg`, `build_retrieval_index` | `maintenance:execute` (owner-only) |
-| Build read | `get_build_status` | `knowledge:read` |
-| Notebook understanding (agent) | `get_notebook_profile`, `add_observation` | `agent_profile:read` / `agent_observation:write` |
-| Global Ask | `ask_global`, `get_global_ask`, `cancel_global_ask`, `get_global_cited_element` | `ask:execute` / `knowledge:read`; see Global Ask below |
+| Memory / context | `list_notebooks`, `select_notebook`, `search_agent_memory`, `search_notebook_context`, `get_memory`, `ask_notebook`, `propose_memory` | none for the first two; `read` / `ask` (`ask_notebook`) / `contribute` (`propose_memory`) |
+| Knowhow | `list_knowhow_tables`, `get_knowhow_discrimination`, `get_knowhow_row` | `read` |
+| Knowhow code write | `put_knowhow_cell_code` | `contribute` |
+| Citation point-read | `get_cited_element` | `read` |
+| Source management | `add_source_text`, `add_source_file`, `add_source_url`, `reparse_source` | `manage` (owner-only) |
+| Source deletion | `delete_source` | `delete` (owner-only, Agent-added rows only) |
+| Source read | `list_sources`, `get_source_status` | `read` |
+| Build | `build_kg`, `build_retrieval_index` | `manage` (owner-only) |
+| Build read | `get_build_status` | `read` |
+| Notebook understanding (agent) | `get_notebook_profile`, `add_observation` | `read` / `contribute` |
+| Global Ask | `ask_global`, `get_global_ask`, `cancel_global_ask`, `get_global_cited_element` | `ask` (first three) / `read` (original text); see Global Ask below |
 
 The deployed server-local frozen catalog is authoritative for discovery and onboarding: it is
 exactly the 28 tools above, derived live from the eight core registrars, and
 `mcp_server.PUBLIC_TOOLS` is that same list rather than a second hand-kept copy. Every call
-repeats live token/scope/allowlist/membership checks, and every write scope is forced through the
-owner-only notebook gate. Results are copied into a bounded shape while being built -- no deeper than 5 levels, with
+repeats live token/tier/allowlist/membership checks, and both the `manage` and `delete` tiers are
+forced through the owner-only notebook gate. A tool refused for a missing tier says which tier in
+Chinese (e.g. 「此凭证缺少「读取」权限，请在 Agent 接入页为它勾选后重试」) instead of returning only a
+notebook id; an inactive token, a notebook outside the allowlist, and an owner who lost read access
+each have their own readable sentence. Results are copied into a bounded shape while being built -- no deeper than 5 levels, with
 per-field/map/list limits applied one entry at a time -- so an oversized container is never fully
 materialized before being cut down. That bounded copy is then progressively and visibly shrunk
 (longest strings, then map entries, then list items, then identifiers as a last resort) until it
@@ -1682,12 +1703,31 @@ Exceptions surface only as stable error codes; FastMCP schema errors occur befor
 and remain transport/request audit events. Only when the copy truly cannot be shrunk any further
 does the call fail outright, rather than returning a silently truncated result.
 
-`list_notebooks` and `select_notebook` require **no scope at all**: the entire check is a
+`list_notebooks` and `select_notebook` require **no tier at all**: the entire check is a
 live token, a notebook inside its allowlist, and read access to that notebook. Every session
 can therefore bootstrap regardless of how narrow the token is.
 
-The server rechecks scope, allowlist, token state, and notebook access on data calls;
+The server rechecks tiers, allowlist, token state, and notebook access on data calls;
 retrieved text is untrusted evidence, not executable Agent instructions.
+
+Bearer authentication failures on the MCP transport are always 401 with a `{"detail", "code"}`
+body. A malformed, unknown, or hash-mismatched token only ever gets
+`{"detail": "invalid or expired Agent token", "code": "token_invalid"}` (it never reveals whether
+a token exists); only after the hash matched does the server name the reason — `token_revoked`,
+`token_expired`, `profile_disabled` or `owner_ineligible` — with Chinese `detail` copy.
+`last_used_at` is touched only on success.
+
+**Migration (SQLite v89 / PostgreSQL `0069_agent_token_tiers.sql`).** Every token's `scopes_json`
+(revoked ones included) is rewritten to tiers by "holding a tier's main permission grants the
+whole tier": `knowledge:read` or `memory:read` → `read`, `ask:execute` → `ask`, `memory:propose` →
+`contribute`, `sources:write` or `maintenance:execute` → `manage`, `sources:delete` → `delete`, in
+that order; values that already are tiers are kept, so the migration can run again. Private
+Memory folds into `read`: a token that held only `knowledge:read` reads its owner's own Memory
+(candidates included) after the upgrade — an accepted, informed change. A token that held only
+secondary permissions (only `agent_profile:read` or `knowhow:code`, say) ends with no tier, is
+refused at run time, and must get at least one tier before an edit can be saved. The same
+migration adds the nullable `token_plain` column, NULL for existing rows: older tokens cannot be
+copied again.
 
 `ask_notebook`'s `mode` parameter admits `"reasoning"` (the **default**; the same engine both web UI modes submit, which understands the question before retrieving, see below), `"chunk"`, or any registered,
 live-available deployment `ask.engine` mode id (see [Deployment Ask
@@ -1779,7 +1819,7 @@ what lists these. `notebook_id`,
 `tier` is `external` — see [Reflect plugin actions](#reflect-plugin-actions-askreflect_action) —
 and is likewise carried on an anchor of that tier), and a knowhow-projected citation carries the
 same `knowhow: {table_id, row_id}` pair anchors use. Rows whose `memory_id` is set require
-`memory:read` — without that scope the whole row is filtered out **before** the result cap
+the `read` tier — without it (an `ask`-only token, say) the whole row is filtered out **before** the result cap
 and does not contribute to the truncation count, because reporting it would leak the private
 Memory count by arithmetic. Anchors and citations are each capped at 20 rows. The response
 budget applies in two stages: each anchor's `provenance` is fitted to 500 characters
@@ -1792,7 +1832,7 @@ answer text.
 that element's own text, its location inside the document, and the document's display title.
 It discloses nothing beyond what an answer in the selected notebook may already cite — the
 notebook's own sources plus the reference libraries it currently mounts. A Memory-derived
-source is returned only to the Memory's creator and only when the token has `memory:read`;
+source is returned only to the Memory's creator and only when the token has the `read` tier;
 otherwise it fails exactly like an unknown id.
 
 **Source management.** Every tool here that names a `source_id` resolves it inside the
@@ -1801,7 +1841,7 @@ otherwise it fails exactly like an unknown id.
 deliberately spans the mounted reference libraries because an answer's citations already do.
 
 `list_sources(offset=0, limit=20)` is the read-side inventory for the selected notebook and
-requires `knowledge:read`. It reuses the HTTP Sources panel's `list_sources_page` projection,
+requires the `read` tier. It reuses the HTTP Sources panel's `list_sources_page` projection,
 including its stable `(created_at, id)` order and its single visibility predicate: direct
 user-visible imported sources only, excluding hidden Memory/Knowhow projection rows and
 sources owned by mounted reference notebooks. Each row returns `source_id`, the canonical
@@ -1849,11 +1889,11 @@ refuses while that source's parse lock is held (a bounded ~0.5-second probe, not
 that lock spans two LLM calls, so a parse genuinely in flight will still be in flight a
 second later).
 
-`delete_source` is irreversible and deliberately narrow. It needs `sources:delete`, which
-`sources:write` does not imply, **and** the row must have been added by an Agent. The
+`delete_source` is irreversible and deliberately narrow. It needs the `delete` tier, which
+`manage` does not imply, **and** the row must have been added by an Agent. The
 criterion is the `agent_created` boolean — the projection of the v48 `sources.agent_profile_id`
 provenance column being non-NULL — so a document a person uploaded can never be removed
-through this surface, no matter which scopes a token carries. The criterion is "some Agent
+through this surface, no matter which tiers a token carries. The criterion is "some Agent
 added this row", not "this profile did": Agent identities get rotated and revoked, and a
 source left by a retired profile would otherwise be undeletable forever. Provenance is
 written on the INSERT branch only, so re-uploading a person's bytes reuses their row and
@@ -1882,7 +1922,7 @@ those calls are refused. Reads keep the member-readable rule their HTTP twins us
 The four knowhow tools mirror the HTTP surface at `/api/agent/knowhow/...` (see
 [APIs](#apis)) through the same service functions, so HTTP and MCP never drift on
 response shape. `list_knowhow_tables`, `get_knowhow_discrimination`, and
-`get_knowhow_row` need `knowledge:read`. `get_knowhow_discrimination` returns, for a
+`get_knowhow_row` need the `read` tier. `get_knowhow_discrimination` returns, for a
 table with a row-title column (400 otherwise), every row's title plus each
 procedure-kind column's `{column_id, column_name, text, code_status}` — enough for an
 Agent to run its own discrimination logic and pick which fix applies. `get_knowhow_row`
@@ -1892,13 +1932,13 @@ already wrote for one cell's method — never generated or executed by the noteb
 never embedded/chunked/indexed into any KG projection — whose freshness (`implemented`
 / `stale` / `none`) is derived at read time from a content hash of the cell; the
 discrimination set carries only that status, never the code body, to stay small.
-Reading code still only needs `knowledge:read` — only writing it
-(`put_knowhow_cell_code`, and the mirrored HTTP `PUT`/`DELETE .../code`) needs
-`knowhow:code`, so a token that must read existing code before writing a new version
-needs both scopes.
+Reading code still only needs `read` — only writing it
+(`put_knowhow_cell_code`, and the mirrored HTTP `PUT`/`DELETE .../code`; internal capability
+`knowhow:code`) needs `contribute`, so a token that must read existing code before writing a new
+version needs both tiers.
 
-Unlike the source-management and build writes above, `knowhow:code` is deliberately
-**not** owner-only: an Agent's write capability here is entirely scope-driven (design
+Unlike the source-management and build writes above, the `contribute` code write is deliberately
+**not** owner-only: an Agent's write capability here is entirely tier-driven (design
 doc §⑥-4), so a token whose owner joined a shared notebook as a read-only member can
 still save a cell code attachment there. A code attachment is inert — never executed,
 indexed, embedded, or projected into retrieval or the KG — while deleting or
@@ -1906,17 +1946,17 @@ re-parsing a document reaches every member's retrieval, which is why the two sur
 carry different authority models. The divergence is a recorded decision, pinned on
 both sides by `backend/tests/test_memory_mcp.py`.
 
-**Notebook understanding (Agentic Memory P3).** `get_notebook_profile` (scope
-`agent_profile:read`) reads the same [notebook understanding blocks](#notebook-understanding-blocks)
+**Notebook understanding (Agentic Memory P3).** `get_notebook_profile` (the
+`read` tier) reads the same [notebook understanding blocks](#notebook-understanding-blocks)
 the web UI's "AI 对这个库的理解" panel shows: the shared `base` layer plus the caller's own
 `mine` overlay (never another member's), each block projected down to `{label, value,
 updated_at}` only — no `evidence` source ids, no `revision`, no change history, so a token
-holding only this scope cannot use the response to probe source ids it has no other way to
+cannot use the response to probe source ids it has no other way to
 read. Every value is marked `content_is_untrusted_evidence: true` and `citable: false` in the
 response; it is prompt scaffolding for planning, never something to cite. When
 `AGENT_PROFILE_ENABLED` is off, or the notebook has no consolidated understanding yet, the
 tool returns `enabled: false` with empty blocks rather than erroring. `add_observation`
-(scope `agent_observation:write`) appends one short line — at most
+(the `contribute` tier) appends one short line — at most
 `AGENT_OBSERVATION_TEXT_MAX_CHARS` (500) characters — to the caller's own observation log for
 this notebook, deduplicated per `client_request_id` the same way `propose_memory` is. The
 idempotency window is **bounded by ring retention** (a registered contract, not a defect):
@@ -2096,7 +2136,7 @@ evidence item attributed to one. An object or relation is judged by the source i
 from; an evidence item by the source it names and by the source its quoted element lives in. The
 graph and neighbour views show the shared graph — the same for every member, and what the stored
 previews hold — plus the viewer's own Memory objects read live; `limit` bounds each of the two
-layers, so a graph response holds at most twice `limit` nodes. A token without `memory:read` sees
+layers, so a graph response holds at most twice `limit` nodes. A token without the `read` tier (which carries `memory:read`) sees
 no Memory-derived row, its own included, and the notebook's Memory count is 0 for it. Notebook
 counts, `kg_ready` and the analytics card's knowledge counts are the shared view plus the viewer's
 own Memory-derived objects. Index node/ANN counts, the share-preview size and the rebuild-time
@@ -2109,7 +2149,7 @@ relations are left out of the knowledge list and its total, type and board count
 the legacy graph, the unified graph's live path and the viewer's own-Memory overlay on the shared
 preview, neighbour edges, KG search (lexical candidates are filtered before their limit; ANN hits
 at hydration) and the notebook search box's knowledge leg; the viewer's own are included. Without
-`memory:read` no Memory-derived row is returned, the viewer's own included. Community summaries,
+the `memory:read` capability (a token without the `read` tier) no Memory-derived row is returned, the viewer's own included. Community summaries,
 duplicate groups and the edge-review ranking never include Memory-derived rows. The notebook list
 asks which of its notebooks hold Memory once per request, not once per notebook. While a notebook
 awaits its isolated rebuild, a cluster that holds Memory the viewer may not read is answered by its
@@ -3213,7 +3253,7 @@ The report sample's ownership predicate is `reports.created_by`, which is the re
 `AGENT_PROFILE_ENABLED` (default true) is the single gate behind all of injection, the consolidation trigger, and both API surfaces' visibility **on the understanding side** (the last three rows above follow their own independent `RETRIEVAL_EXPERIENCE_ENABLED`, see the next section) — turning it off returns byte-identical pre-feature behavior everywhere at once: no injection, no trace step, no consolidation job is ever queued, the API reports `enabled=false` with empty blocks rather than 404 (so the client can tell "off" apart from "not yet consolidated"), and the rebuild endpoint 409s.
 
 **Agent observations feed the overlay, untrusted (Agentic Memory P3).** An external Agent
-holding the `agent_observation:write` scope may call the MCP tool `add_observation` to append
+holding the `contribute` tier may call the MCP tool `add_observation` to append
 one short line — "I noticed X while working in this notebook" — to its own
 `(notebook, owner)` observation log at any time, independent of any consolidation run. This
 is raw, **untrusted** input: unlike the member's own asks and reports above, the model
@@ -3257,7 +3297,7 @@ by convention: ring eviction runs **per kind** (a burst of retrieval can therefo
 evict notes a member accumulated over weeks — each kind has its own 200-row ring), and
 the consolidation read pins `kind='note'` **in SQL**, so call accounting cannot reach a
 model prompt even if a future caller forgets it exists. Recording is keyed on the
-**capability scope** the call was admitted under (`ask:execute`, `knowledge:read`, …),
+**capability** the call was admitted under (`ask:execute`, `knowledge:read`, … — the fine-grained capability code asks for, not the five tiers a token stores),
 not the tool's name: the single choke point every notebook-scoped tool already passes
 through receives that scope as an argument it must supply to be admitted at all, so a
 newly added tool is recorded without its author doing anything — at the registered cost
@@ -3809,8 +3849,8 @@ Key local beta APIs:
 - Memory: `GET /api/memories`, `GET /api/notebooks/{id}/memories`, `GET|PATCH /api/memories/{memory_id}`, `POST /api/memories/{memory_id}/confirm|reject|deprecate|promote`, `POST /api/answers/{answer_id}/memory-preview/stream` (browser; `/memory-preview` remains JSON-compatible), `POST /api/notebooks/{id}/memories/from-answer`
   - Endpoints that take an answer id (`POST /api/answers/{answer_id}/memory-preview`, `.../memory-preview/stream`, `POST /api/answers/{answer_id}/feedback`, and `POST /api/notebooks/{notebook_id}/memories/from-answer`) act only on the caller's own answers: the caller must be able to read the notebook AND must have created the answer's conversation. Another member's answer (the notebook owner included), an answer without a conversation, and an unknown id all return the same 404 `Answer not found`. `answer_owner` in the sharing store returns the notebook owner and is not used for authorisation.
   - A deployment admin reading a user's answers through the admin user activity log is audit access; it is a separate, admin-only read and is not subject to the answer-owner rule.
-- Agent access: anonymous machine-readable onboarding at `GET /api/agent-mcp/onboarding`; authenticated `GET|POST /api/agent-profiles`, `PATCH /api/agent-profiles/{profile_id}`, `POST /api/agent-profiles/{profile_id}/tokens`, `GET /api/agent-tokens`, `PUT /api/agent-tokens/{token_id}/access`, `DELETE /api/agent-tokens/{token_id}`; Streamable HTTP MCP is mounted at `/mcp`
-- Knowhow agent surface: `GET /api/agent/knowhow/tables?notebook_id=`, `GET /api/agent/knowhow/tables/{table_id}/discrimination`, `GET /api/agent/knowhow/rows/{row_id}`, `GET|PUT|DELETE /api/agent/knowhow/rows/{row_id}/cells/{column_id}/code` — reachable by either a signed-in session or an Agent Bearer token; reads need `knowledge:read`, code writes need `knowhow:code` (see [Memory and Agent MCP](#memory-and-agent-mcp))
+- Agent access: anonymous machine-readable onboarding at `GET /api/agent-mcp/onboarding`; authenticated `GET|POST /api/agent-profiles`, `PATCH /api/agent-profiles/{profile_id}`, `POST /api/agent-profiles/{profile_id}/tokens`, `GET /api/agent-tokens`, `GET /api/agent-tokens/{token_id}/secret` (copy the plaintext again, owner only), `PUT /api/agent-tokens/{token_id}/access`, `DELETE /api/agent-tokens/{token_id}`; Streamable HTTP MCP is mounted at `/mcp`
+- Knowhow agent surface: `GET /api/agent/knowhow/tables?notebook_id=`, `GET /api/agent/knowhow/tables/{table_id}/discrimination`, `GET /api/agent/knowhow/rows/{row_id}`, `GET|PUT|DELETE /api/agent/knowhow/rows/{row_id}/cells/{column_id}/code` — reachable by either a signed-in session or an Agent Bearer token; reads need the `read` tier, code writes need the `contribute` tier (see [Memory and Agent MCP](#memory-and-agent-mcp))
 - Unified KG: `POST .../unified-kg/rebuild`, `GET .../unified-kg`, `GET .../unified-kg/pending-merges`, `POST .../unified-kg/merges/{id}/confirm|reject`
 - **KG maintenance:** the three actions below require `kg:write` and have no LLM-configuration prerequisite. They start background jobs; starts return `{status, notebook_id, job_id}`, not result counts. Their notebook-read status endpoints return `{job_id, notebook_id, status, running, ...counters}`, with `status=running|succeeded|failed|idle`.
 
@@ -3935,7 +3975,7 @@ identical.
 
 A deployment plugin may register one or more complete Ask engines. Each `PROVIDER` exposes a frozen descriptor (`mode_id`, user-facing label/description, and `requires_kg`) plus one synchronous `answer()` method. That method still runs synchronously inside the detached durable Ask worker, but the host constructs every extension `AskMode` with `streaming=true`: `/ask-modes` projects matching `streaming=true` and `streams_trace=true`, and the official browser executes the mode through `POST /notebooks/{id}/ask/stream`. The normal `POST .../ask` compatibility route remains blocking. The mode id must begin with that plugin's own id followed by `.`, and duplicate, malformed, empty, or over-limit descriptors fail startup closed. Built-in and retired ids contain no dot, while plugin ids are already unique, so the namespace prefix is the collision proof rather than a second reserved-word list.
 
-The provider receives the current question and only three core-owned ports. `RetrievalAccessPort.search()` wraps the existing scoped candidate path: the frozen source scope and mounted-base scope reach SQLite/PostgreSQL before candidate `LIMIT`, and private-Memory projections — including the caller's own — are excluded from the plugin universe structurally: a plugin citation has no channel to carry the Memory identity the MCP `memory:read` filter recognizes, so Memory never enters the plugin retrieval face at all (notebook-shared Knowhow projections stay in); results expose bounded text/title/location plus a run-local opaque evidence handle, never a notebook/source/element/chunk id. `fetch()` recognizes only a handle already issued by that same port. `EngineModelPort.complete()` uses the `plugin_engine` chat workload through the normal registry, scheduler, circuit breaker, logging, and cancellation path without exposing a URL, key, raw client, or physical binding. `EngineTraceSink.step()` admits bounded generic `plugin` trace steps. Each admitted, clipped step is stored once, assigned a core-measured `duration_ms` equal to the wall-clock interval since the preceding admitted step (or engine-stage start for the first), and immediately forwarded to the durable worker's core-owned `on_trace` sink, which persists it before emitting the NDJSON `progress` event. Provider return freezes the terminal timestamp before core validates request identity, evidence handles, and citation markers. Only a passing admission publishes `扩展引擎执行完成`; provider or admission failure publishes `扩展引擎执行失败`. This timed terminal `plugin` step sits outside the provider-authored step budget; its interval covers the tail since the last admitted step, or the complete engine stage when the provider emitted none, without charging core admission latency. Consequently the frontend's existing sum of step durations represents the whole extension-engine stage without trusting provider-authored timing. The first malformed or over-budget call appends and streams one core-owned timed `扩展引擎步骤已截断` marker outside the provider budget; later malformed/over-budget calls emit nothing. No already-delivered step is mutated, so live progress, durable rows, and a successful final `AskResponse` carry the identical append-only trace. Explicit cancellation keeps the existing post-cancel trace-write gate.
+The provider receives the current question and only three core-owned ports. `RetrievalAccessPort.search()` wraps the existing scoped candidate path: the frozen source scope and mounted-base scope reach SQLite/PostgreSQL before candidate `LIMIT`, and private-Memory projections — including the caller's own — are excluded from the plugin universe structurally: a plugin citation has no channel to carry the Memory identity the MCP private-Memory filter (the `memory:read` capability) recognizes, so Memory never enters the plugin retrieval face at all (notebook-shared Knowhow projections stay in); results expose bounded text/title/location plus a run-local opaque evidence handle, never a notebook/source/element/chunk id. `fetch()` recognizes only a handle already issued by that same port. `EngineModelPort.complete()` uses the `plugin_engine` chat workload through the normal registry, scheduler, circuit breaker, logging, and cancellation path without exposing a URL, key, raw client, or physical binding. `EngineTraceSink.step()` admits bounded generic `plugin` trace steps. Each admitted, clipped step is stored once, assigned a core-measured `duration_ms` equal to the wall-clock interval since the preceding admitted step (or engine-stage start for the first), and immediately forwarded to the durable worker's core-owned `on_trace` sink, which persists it before emitting the NDJSON `progress` event. Provider return freezes the terminal timestamp before core validates request identity, evidence handles, and citation markers. Only a passing admission publishes `扩展引擎执行完成`; provider or admission failure publishes `扩展引擎执行失败`. This timed terminal `plugin` step sits outside the provider-authored step budget; its interval covers the tail since the last admitted step, or the complete engine stage when the provider emitted none, without charging core admission latency. Consequently the frontend's existing sum of step durations represents the whole extension-engine stage without trusting provider-authored timing. The first malformed or over-budget call appends and streams one core-owned timed `扩展引擎步骤已截断` marker outside the provider budget; later malformed/over-budget calls emit nothing. No already-delivered step is mutated, so live progress, durable rows, and a successful final `AskResponse` carry the identical append-only trace. Explicit cancellation keeps the existing post-cancel trace-write gate.
 
 `RetrievalAccessPort` also exposes a bounded KG read surface spanning the current notebook plus mounted reference libraries. `search_kg(query, k, object_types=())` runs BM25+semantic fusion over knowledge objects. `object_types` must be a `tuple`/`list` whose entries are all `str`; anything else — a bare `str` such as `"concept"` (which would otherwise iterate character-by-character rather than naming one type), a non-`str` element, or any other container shape — raises `plugin_engine_invalid_kg_request` before any budget is spent. Within a validly-shaped request, only entries naming one of `concept`/`claim`/`formula`/`procedure` survive; an unrecognized type name is silently dropped, and if the filter started non-empty but nothing recognized survives, the call returns `()` without spending budget. `kg_neighbors(evidence_key, k, edge_type="", direction="both")` expands one hop from a KG handle already issued by `search_kg`/`kg_neighbors` earlier in the same run; an element handle, a handle from another run, an empty string, or an `edge_type` outside the twelve kinds core's KG edge schema defines (`defines`/`about`/`supports`/`derived_from`/`depends_on`/`contrasts_with`/`prerequisite_of`/`part_of`/`composed_of`/`kind_of`/`used_in`/`precedes`) all return `()` at no cost, while a `direction` other than `both`/`out`/`in` raises `plugin_engine_invalid_kg_request`. In a genuinely narrowed run (`source_scope_restricted`, the channel question — not the frozen all-selected ceiling), `kg_neighbors` on an active-notebook anchor closes entirely and returns `()` at no cost: its bounded expansion carries no source predicate below its read window, so out-of-scope neighbors could consume the window and filter-after could never recover rows that were not returned — the same discipline that closes the built-in graph channels for restricted runs. Anchors in a mounted base stay open under local narrowing (the library dimension is whole-notebook checkboxes; the two dimensions are orthogonal by contract). The two calls share one budget, `ASK_PLUGIN_ENGINE_KG_SEARCH_MAX_CALLS`, independent of `search()`'s own pool; exceeding it raises `plugin_engine_kg_call_limit`. Four points define the contract a provider must respect: **(1) citability** — a KG hit's `evidence_key` is non-empty, and so may enter `citations`, only when the object carries at least one evidence binding whose source and element are still live and has a name, definition, or verbatim excerpt to actually show (the rare case where none of those exist is likewise treated as context-only); an empty-key hit ("context-only") may inform the answer's reasoning but is registered nowhere a citation or a `kg_neighbors` anchor could reach it — submitting it as a citation gets it dropped from the citations tuple and disclosed in the trailing plugin trace step, the same way a forged handle is now handled, rather than rejecting the whole answer; **(2) citation target** — a cited KG handle's persisted `Citation` opens the object's *first surviving evidence element*, never a graph node view; **(3) no edge labels or truncation signal** — `kg_neighbors` never reports which edge kind produced a given neighbor (call once per `edge_type` to attribute by edge) or whether a full page was truncated (assume it may be), and each direction is separately capped by core's own expansion limit regardless of the requested `k`; **(4) two-lane candidate routing** — an un-narrowed plugin run passes no explicit source list, so the KG seam keeps its notebook ANN + lexical fusion and applies the run's frozen ceiling at evidence hydrate (scope-less callers such as MCP get a synthesized all-selected ceiling of the same shape the browser freezes, `narrowed=false`, never producing a user-visible scope receipt); a genuinely narrowed run pushes its frozen keys and takes the source-restricted lexical lane whose predicate lands before `LIMIT`. Registered dual cost of the un-narrowed lane: the caller's own Memory-derived hits pass the ceiling, occupy candidate slots inside `k`, and are then dropped whole by the port's out-of-universe rule — a run whose top hits are Memory-derived can return fewer than `k` usable results. `kg_overview()` returns the same bounded (≤ 600 characters, `KG_OVERVIEW_MAX_CHARS`) collection-map text the built-in reasoning engine injects into its own prompt — enumerable-collection counts, the four knowledge-object type counts, and source counts for the current scope — memoized once per run (repeat calls return the same string) and not a parseable format by contract; a graph-less notebook's overview simply omits the knowledge-object line, which a provider should read as a signal to route away from the KG port. In a genuinely narrowed run the overview is suppressed entirely (empty string, no underlying count) for the same reason the neighbor channel closes: its counting seam applies only the library dimension, so it would otherwise hand a scoped run whole-notebook aggregates it may not read.
 

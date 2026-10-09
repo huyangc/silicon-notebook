@@ -479,8 +479,8 @@ SQL 执行和连接池获取使用剩余时限；数据库网络故障的传输�
 为**单腿联邦**，只检索第一个库，明显劣化但仍然给出答案与回执。
 
 四个 MCP 全局工具不依赖 `select_notebook`：`ask_global`、`get_global_ask` 与
-`cancel_global_ask` 同时要求 `ask:execute` 和 `knowledge:read`；`get_global_cited_element`
-要求 `knowledge:read`。`ask_global` 新增 `mode`（`chunk` 默认 / `reasoning`）与
+`cancel_global_ask` 只要求 `ask` 档（不再同时要求读取档）；`get_global_cited_element`
+要求 `read` 档。`ask_global` 新增 `mode`（`chunk` 默认 / `reasoning`）与
 `retrieval_effort`（只支持 `standard`，传别的值也按 `standard` 执行）。MCP 面没有澄清句柄存储：
 `reasoning` 调用在本次调用内跑一次问题理解，理解无歧义则自动确认并建任务，需澄清则不建任何
 durable 行，直接返回 `{"status": "needs_clarification", "intent", "understanding_ms", "next_step"}`，
@@ -702,8 +702,8 @@ MCP 的 `list_notebooks` / `select_notebook` 提供给外部 Agent（截断到 5
 `(group_admins, admin)` 边；撤销共享时同组两行一起删，共享清单把两行折叠成一条并标注管理权。
 **但三类 owner 专属能力刻意不翻**：`notebook:delete`（删库，爆炸半径整本库且 owner 不可
 撤销）、`notebook:mount`（挂载配置）与 `notebook:configure`（`share_token` 链接分享）恒
-owner——见下文「挂载配置与链接分享恒 owner」。**Agent/MCP 面也一个字不动**：`sources:write` /
-`sources:delete` / `maintenance:execute` 仍是 owner-only 红线——长期 token 是独立凭据，其
+owner——见下文「挂载配置与链接分享恒 owner」。**Agent/MCP 面也一个字不动**：`manage` /
+`delete` 两档（来源写入、来源删除、构建）仍是 owner-only 红线——长期 token 是独立凭据，其
 owner 可能在签发后很久才被授管理权，MCP 写工具删文档的爆炸半径正是这道 owner 门当初要防的。
 浏览器 HTTP 面已放宽 admin、Agent token 面没有，是刻意分歧不是疏漏，组管理员的写权只在浏览器
 界面生效。
@@ -1111,7 +1111,7 @@ notebook 卡片数量和 notebook Memory 标签是同一份数据的 notebook �
 `/elements-page`，`/api/notebooks/{id}/sources/{source_id}` 下的三个活跃笔记本读取，以及 MCP
 `get_cited_element`，只对创建该 Memory 的成员打开 Memory 来源；笔记本的其他读者（包括笔记本
 owner）得到与不存在的 id 相同的 404；Memory 记录已不存在的 Memory 来源对所有人都是如此。Agent
-令牌还须有 `memory:read` 才能打开其主人自己的 Memory 来源。Knowhow 投影来源是笔记本共享内容，
+令牌还须有 `read` 档（`memory:read` 能力归它）才能打开其主人自己的 Memory 来源。Knowhow 投影来源是笔记本共享内容，
 笔记本的每个读者照常可读。命令目录不接受任何隐藏来源：它的七个
 `.../sources/{sid}/command-catalog` 端点对 Memory 或 Knowhow 投影来源返回 404，与不存在的来源相同。通用的来源写入也不接受：
 `DELETE /api/sources/{id}` 与 `POST /api/sources/{id}/parse` 对 Memory 或 Knowhow 投影来源向所有
@@ -1131,7 +1131,7 @@ Memory 来源：无主来源合并进共享对象的证据被剥掉（共享对�
 没有按钮；启动之后通常为 0。
 
 生命周期为 `candidate | confirmed | rejected | deprecated`。Agent 只能创建 `candidate`；
-token 具备 `memory:read_candidates` 时，同一用户、当前所选 notebook 下获授权的所有 Agent
+token 具备 `read` 档时，同一用户、当前所选 notebook 下获授权的所有 Agent
 profile 都可检索它。Candidate 永远不会进入正式 notebook Ask、notebook 搜索、Deep Report
 或 `search_notebook_context`；只有用户确认后才进入正式平面。Rejected/deprecated 在两个
 平面都排除。检索先判断相关性，权威只在同等相关或冲突证据间生效：
@@ -1158,13 +1158,28 @@ MCP 提案严格使用这些 Core 上限，不再叠加更窄的重复限制。
 tag 原始列表会先按 20 条限额校验，再 trim/去重；空白 tag 直接拒绝。
 
 “Agent 接入”页（`/agents`，账户菜单一级入口；总 Memory 页也有链接指向它）可创建稳定
-Agent profile，以及明文只显示一次的 token。
-Token 有过期时间、默认 notebook、notebook allowlist，并只授予所需的
-`knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`、
-`ask:execute`、`knowhow:code`、`sources:write`、`sources:delete`、`maintenance:execute`、
-`agent_profile:read`、`agent_observation:write` 子集；可即时撤销。已签发 token 的访问配置可以原地修改：`PUT /api/agent-tokens/{token_id}/access`
-整体替换 scopes、默认 notebook、allowlist 与过期时间（四个字段都必填，`expires_at: null` 表示无到期
-时间），校验规则与签发完全相同；token 哈希、所属 Profile 与创建时间不变，明文也不会再次显示。Agent
+Agent profile 并签发 token。
+Token 有过期时间、默认 notebook、notebook allowlist，并只授予所需的权限档位——存储与对外 API
+只有五档：`read`（读取：来源/知识/Knowhow、主人本人的 confirmed 与 candidate 个人记忆、库理解、
+引用原文、来源与构建状态）、`ask`（问答：笔记本问答与全局问答，不依赖 `read`）、`contribute`
+（提交：记忆候选、Knowhow 代码附件、观察记录）、`manage`（管理：添加/重新解析来源、触发图谱与
+检索索引构建；仅对 owner 拥有的笔记本生效）、`delete`（删除：只删 Agent 自己添加的来源；仅对
+owner 拥有的笔记本生效）。代码内部仍按细粒度能力（`knowledge:read`、`sources:write` 等）请求
+权限、调用记录仍记能力名，一张映射表把能力归到档位；请求旧能力串或未知值签发一律 422
+`unsupported agent scopes`。签发与修改时勾了 `manage` 或 `delete`、而 allowlist 里没有一个
+owner 自己拥有的笔记本，返回 422「管理和删除权限只对你拥有的笔记本生效，所选笔记本里没有你拥有的」
+（用户可见文案）。可即时撤销。
+
+Token 签发后可以再次复制：服务端在签发时保存明文（`agent_access_tokens.token_plain`），鉴权仍只按
+哈希比对。`GET /api/agent-tokens` 的每行带 `copyable`（明文在且未撤销）但从不带明文；
+`GET /api/agent-tokens/{token_id}/secret` 返回 `{ "token": "..." }`，带 `Cache-Control: no-store`，
+只对 token 主人开放——别人的 token 与不存在的 id 同为 404；已撤销返回 409「已撤销的 token 不能再复制」；
+签发于本版本之前（只存了哈希）的返回 409「这个 token 签发于旧版本，无法再次复制，如需请重新签发」。
+撤销会同时清空明文。
+
+已签发 token 的访问配置可以原地修改：`PUT /api/agent-tokens/{token_id}/access`
+整体替换权限档位、默认 notebook、allowlist 与过期时间（四个字段都必填，`expires_at: null` 表示无到期
+时间），校验规则与签发完全相同；token 哈希、所属 Profile 与创建时间不变。Agent
 每次工具调用都会重读实时 token 状态，所以修改从下一次调用起生效，无需重签或重新配置客户端；把已过期
 token 的过期时间改到将来会让它重新可用；签发与修改时 `expires_at` 传空串与 `null` 同义，都表示无到期
 时间。可选的 `expected` 对象携带编辑器上次读到的四个访问字段：给出且存储中的配置此后已变时，写入返回
@@ -1219,7 +1234,7 @@ MCP 层的 idle 计时。
 Codex 推荐把签发的 token 放入环境变量，再注册服务：
 
 ```bash
-export SILICON_NOTEBOOK_AGENT_TOKEN='<一次性显示的 token>'
+export SILICON_NOTEBOOK_AGENT_TOKEN='<从 Agent 接入页复制的 token>'
 codex mcp add silicon-notebook --url 'http://127.0.0.1:8000/mcp/' \
   --bearer-token-env-var SILICON_NOTEBOOK_AGENT_TOKEN
 ```
@@ -1248,33 +1263,48 @@ scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 
 | 分组 | 工具 | Scope |
 | --- | --- | --- |
-| Memory / 上下文 | `list_notebooks`、`select_notebook`、`search_agent_memory`、`search_notebook_context`、`get_memory`、`ask_notebook`、`propose_memory` | `knowledge:read` / `memory:read` / `memory:read_candidates` / `memory:propose` / `ask:execute` |
-| Knowhow 读取 | `list_knowhow_tables`、`get_knowhow_discrimination`、`get_knowhow_row` | `knowledge:read` |
-| Knowhow 代码写入 | `put_knowhow_cell_code` | `knowhow:code` |
-| 引用点查 | `get_cited_element` | `knowledge:read` |
-| 来源管理 | `add_source_text`、`add_source_file`、`add_source_url`、`reparse_source` | `sources:write`（owner-only） |
-| 来源删除 | `delete_source` | `sources:delete`（owner-only，且仅限 Agent 添加的来源） |
-| 来源读取 | `list_sources`、`get_source_status` | `knowledge:read` |
-| 构建 | `build_kg`、`build_retrieval_index` | `maintenance:execute`（owner-only） |
-| 构建状态读取 | `get_build_status` | `knowledge:read` |
-| 库理解（Agent） | `get_notebook_profile`、`add_observation` | `agent_profile:read` / `agent_observation:write` |
-| 全局问答 | `ask_global`、`get_global_ask`、`cancel_global_ask`、`get_global_cited_element` | `ask:execute` / `knowledge:read`；见全局问答合同 |
+| Memory / 上下文 | `list_notebooks`、`select_notebook`、`search_agent_memory`、`search_notebook_context`、`get_memory`、`ask_notebook`、`propose_memory` | 前两个无需档位；`read` / `ask`（`ask_notebook`）/ `contribute`（`propose_memory`） |
+| Knowhow 读取 | `list_knowhow_tables`、`get_knowhow_discrimination`、`get_knowhow_row` | `read` |
+| Knowhow 代码写入 | `put_knowhow_cell_code` | `contribute` |
+| 引用点查 | `get_cited_element` | `read` |
+| 来源管理 | `add_source_text`、`add_source_file`、`add_source_url`、`reparse_source` | `manage`（owner-only） |
+| 来源删除 | `delete_source` | `delete`（owner-only，且仅限 Agent 添加的来源） |
+| 来源读取 | `list_sources`、`get_source_status` | `read` |
+| 构建 | `build_kg`、`build_retrieval_index` | `manage`（owner-only） |
+| 构建状态读取 | `get_build_status` | `read` |
+| 库理解（Agent） | `get_notebook_profile`、`add_observation` | `read` / `contribute` |
+| 全局问答 | `ask_global`、`get_global_ask`、`cancel_global_ask`、`get_global_cited_element` | `ask`（前三个）/ `read`（读原文）；见全局问答合同 |
 
 实际部署以 server-local frozen catalog 作为 discovery 与 onboarding 的权威清单：它精确等于上表
 28 个工具，由八个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
-手抄。每次调用都重新检查 live token/scope/allowlist/成员权，所有写 scope 都强制经过 owner-only
-notebook 闸。结果在构造时就被复制进有界形状——深度不超过 5 层，逐字段/map/list 施加上限——超大容器不会
+手抄。每次调用都重新检查 live token/档位/allowlist/成员权，`manage` 与 `delete` 两档都强制经过 owner-only
+notebook 闸。缺档时工具报错是写明缺哪一档的中文文案（例：「此凭证缺少「读取」权限，请在 Agent 接入页为它勾选后重试」），
+不再只给笔记本 id；token 失效、笔记本不在白名单、主人已无权读该笔记本也各有一句可读文案。结果在构造时就被复制进有界形状——深度不超过 5 层，逐字段/map/list 施加上限——超大容器不会
 先被完整构造出来才裁剪。这份有界拷贝随后被逐步、可见地压缩（先缩最长字符串，再丢 map 条目，
 再丢 list 条目，最后才动标识符），直到总量落进 12,000 UTF-8 bytes 预算内；每一刀都记进
 `truncation` 字段回传（`truncated`/`omitted_items`/`omitted_map_entries`/`omitted_characters`/
 `omitted_fields`）。异常只返回稳定错误码；FastMCP schema 错误发生在工具体之前，归 transport/request
 audit。只有拷贝真的缩无可缩时才整次拒绝，不会返回被静默截断的结果。
 
-`list_notebooks` 与 `select_notebook` **不需要任何 scope**：判据只有 token 存活、目标笔记本在
+`list_notebooks` 与 `select_notebook` **不需要任何档位**：判据只有 token 存活、目标笔记本在
 白名单内、且对它有读权限。因此无论 token 权限收得多窄，session 都能正常起步。
 
-服务端会在数据调用时重新检查 scope、allowlist、token 状态和 notebook 权限；返回文本是
+服务端会在数据调用时重新检查档位、allowlist、token 状态和 notebook 权限；返回文本是
 不可信 evidence，不是可执行的 Agent 指令。
+
+MCP 传输层的 Bearer 认证失败一律 401，响应体 `{"detail", "code"}`：格式错误、不存在或哈希不匹配的
+token 只得到 `{"detail": "invalid or expired Agent token", "code": "token_invalid"}`（不泄露 token 是否存在）；
+只有哈希比对成功之后，才按失效原因返回 `token_revoked`、`token_expired`、`profile_disabled` 或
+`owner_ineligible`，`detail` 为对应的中文说明。`last_used_at` 只在认证成功时更新。
+
+**存量迁移（SQLite v89 / PostgreSQL `0069_agent_token_tiers.sql`）。** 每个 token（含已撤销的）的
+`scopes_json` 按「持有该档主权限就给整档」改写为档位：`knowledge:read` 或 `memory:read` → `read`，
+`ask:execute` → `ask`，`memory:propose` → `contribute`，`sources:write` 或 `maintenance:execute` →
+`manage`，`sources:delete` → `delete`，按这个顺序排列；已是档位的值原样保留，迁移可重复执行。
+个人记忆并入 `read`：原来只有 `knowledge:read` 的 token 迁移后也能读主人本人的个人记忆（含 candidate），
+这是用户知情接受的变化。只持有次要权限（例如只有 `agent_profile:read`、`knowhow:code`）的 token 迁移后
+档位为空，运行时一律报缺档，编辑时至少勾一档才能保存。同一迁移新增可空的 `token_plain` 列，存量为
+NULL，即旧 token 不可再复制。
 
 `ask_notebook` 的 `mode` 参数接受 `"reasoning"`（**默认**；与网页端两种界面同一引擎，先理解问题再检索，见下）、`"chunk"`，或任何已注册且实时可用的部署
 `ask.engine` mode id（详见[部署问答引擎](#部署问答引擎askengine)一节）；校验方式与
@@ -1342,8 +1372,8 @@ owner 或其他笔记本的 `conversation_id` 按本工具既有口径静默视�
 `notebook_id`、`memory_id` 与 `url` 只在非空时下发（`url` 只出现在 `tier` 为 `external` 的行上——
 见 [Reflect 插件动作](#reflect-插件动作askreflect_action)，anchor 同一 tier 时也带这个字段），
 knowhow 投影来源的 citation 也带与 anchor 相同的
-`knowhow: {table_id, row_id}`。`memory_id` 非空的行需要 `memory:read`——没有该
-scope 时整行在结果截断**之前**被过滤，且不计入截断计数，否则那个被隐藏的私有 Memory 条数会
+`knowhow: {table_id, row_id}`。`memory_id` 非空的行需要 `read` 档——没有该
+档（例如只有 `ask` 的 token）时整行在结果截断**之前**被过滤，且不计入截断计数，否则那个被隐藏的私有 Memory 条数会
 被算术还原出来。anchors 与 citations 各自最多 20 行。响应预算分两步：先把**每一条** anchor 的
 `provenance` 各自压到 500 字符，然后才把 anchors 整体压到 3,500 字符；citations 另外预压到
 1,800 字符，使大体量引用不会挤掉正文。
@@ -1351,14 +1381,14 @@ scope 时整行在结果截断**之前**被过滤，且不计入截断计数，�
 `get_cited_element` 把一条引用还原回原文：按 `ask_notebook` 或 `search_notebook_context` 返回的
 `source_id` 与 `element_id` 原样传入，取回该元素自身的文本、它在文档中的位置和文档显示标题。
 它披露的范围不超过当前所选笔记本的答案本来就可以引用的内容——本库来源加上它当前挂载的参考库。
-由 Memory 派生的来源只返回给该 Memory 的创建者，且令牌须有 `memory:read`；否则与未知 id 的失败
+由 Memory 派生的来源只返回给该 Memory 的创建者，且令牌须有 `read` 档；否则与未知 id 的失败
 完全相同。
 
 **来源管理。** 这一组里凡是接受 `source_id` 的工具，都只在**当前所选笔记本内**解析它——不含
 挂载的参与库，也不含隐藏的 `memory`/`knowhow` 投影行。这比 `get_cited_element` 更窄：后者刻意
 覆盖已挂载的参考库，因为答案的引用本来就会指向那里。
 
-`list_sources(offset=0, limit=20)` 是当前所选笔记本的只读来源目录，需要 `knowledge:read`。
+`list_sources(offset=0, limit=20)` 是当前所选笔记本的只读来源目录，需要 `read` 档。
 它直接复用网页 Sources 面板的 `list_sources_page` 投影、稳定的 `(created_at, id)` 顺序与同一份
 可见性谓词：只列本库直接持有、用户可见的导入来源，不列隐藏的 Memory/Knowhow 投影行，也不把
 挂载参考库持有的来源混进来。每行返回 `source_id`、统一规则生成的显示 `title`、`file_name`、
@@ -1395,9 +1425,9 @@ Markdown bundle 解析器按与浏览器上传完全相同的方式持久化相�
 来源的解析锁被占用时直接拒绝（约 0.5 秒的有界探测而非等待——那把锁跨越两次模型调用，真的
 正在解析的来源一秒后仍在解析）。
 
-`delete_source` 不可逆，权限刻意收窄：需要 `sources:delete`（`sources:write` 不蕴含它），
+`delete_source` 不可逆，权限刻意收窄：需要 `delete` 档（`manage` 不蕴含它），
 **并且**该来源必须是 Agent 添加的。判据是 `agent_created` 布尔——v48 `sources.agent_profile_id`
-非空的投影——所以用户上传的文档无论 token 带什么 scope 都删不掉。判据是「某个 Agent 添加过」
+非空的投影——所以用户上传的文档无论 token 带什么档位都删不掉。判据是「某个 Agent 添加过」
 而不是「本 profile 添加过」：Agent 身份会轮换、会撤销，按 profile 判会让退役身份留下永远删不掉
 的来源。出处只在 INSERT 分支写入，因此重传用户的字节只会复用他那一行、仍算用户添加，笔记本
 深拷贝还会显式清空该列——副本一律视为用户添加。来源列表与详情响应同样暴露这个 `agent_created`
@@ -1418,7 +1448,7 @@ Markdown bundle 解析器按与浏览器上传完全相同的方式持久化相�
 
 四个 knowhow 工具与 `/api/agent/knowhow/...` 下的 HTTP 端点（见 [API](#api)）共用同一套
 service 函数，HTTP 与 MCP 不会在响应形状上走样。`list_knowhow_tables`、
-`get_knowhow_discrimination`、`get_knowhow_row` 需要 `knowledge:read`；
+`get_knowhow_discrimination`、`get_knowhow_row` 需要 `read` 档；
 `get_knowhow_discrimination` 对设有行标题列的表按行返回标题，以及每个方法步骤列的
 `{column_id, column_name, text, code_status}`（表未设行标题列则返回 400），供 Agent
 据此跑自己的判别逻辑挑选适用的修复方法。`get_knowhow_row` 返回一行的完整格子文本
@@ -1426,24 +1456,24 @@ service 函数，HTTP 与 MCP 不会在响应形状上走样。`list_knowhow_tab
 是外部 Agent 针对某格方法已经写好的代码——notebook 从不生成也不执行，也从不进
 embedding/chunk/索引/KG 投影——其新鲜度（`implemented`/`stale`/`none`）在读取时用格子
 当前内容的 hash 与附件保存时的 hash 比对推导；判别集只带这个三态，不带代码本体，以控制
-体积。读代码依然只需要 `knowledge:read`；只有写入（`put_knowhow_cell_code`，以及对应的
-HTTP `PUT`/`DELETE .../code`）才需要 `knowhow:code`——一个既要读现有代码又要写新版本的
-token，两个 scope 都要授予。
+体积。读代码依然只需要 `read`；只有写入（`put_knowhow_cell_code`，以及对应的
+HTTP `PUT`/`DELETE .../code`，内部能力 `knowhow:code`）才需要 `contribute`——一个既要读现有代码又要写新版本的
+token，两档都要授予。
 
-与上面来源与构建面的 owner-only 写入不同，`knowhow:code` 刻意**不加 owner 轴**：Agent
-在这里的写能力完全由 scope 决定（设计文档 §⑥-4），owner 只是以只读成员身份加入的共享
+与上面来源与构建面的 owner-only 写入不同，`contribute` 档的代码写入刻意**不加 owner 轴**：Agent
+在这里的写能力完全由档位决定（设计文档 §⑥-4），owner 只是以只读成员身份加入的共享
 笔记本，也能保存格子代码附件。代码附件是惰性数据——从不执行、不进索引/embedding/KG
 投影，而删除或重新解析文档会波及每个成员的检索，两个面因此采用不同的权限模型。这处
 分歧是拍板取舍不是疏漏，`backend/tests/test_memory_mcp.py` 对两侧行为各钉一条测试。
 
-**库理解（Agentic Memory P3）。** `get_notebook_profile`（scope `agent_profile:read`）读取
+**库理解（Agentic Memory P3）。** `get_notebook_profile`（`read` 档）读取
 的正是网页端「AI 对这个库的理解」面板同一份数据：共享 `base` 层加调用者自己的 `mine`
 覆盖层（绝不是别人的），每块只投影 `{label, value, updated_at}`——不带 `evidence` 来源
-id、不带 `revision`、不带变更历史，因此只持有这一个 scope 的 token 无法借此探测本无权
+id、不带 `revision`、不带变更历史，因此 token 无法借此探测本无权
 读取的来源 id。响应里每块都标 `content_is_untrusted_evidence: true` 与
 `citable: false`：它是规划用的提示脚手架，绝不能被引用。`AGENT_PROFILE_ENABLED` 关闭、
 或该库尚未生成过理解时，工具返回 `enabled: false` 与空块，而不是报错。
-`add_observation`（scope `agent_observation:write`）向调用者自己在该库的观察队列追加一行
+`add_observation`（`contribute` 档）向调用者自己在该库的观察队列追加一行
 不超过 `AGENT_OBSERVATION_TEXT_MAX_CHARS`（500）字符的记录，按 `client_request_id` 幂等去
 重（与 `propose_memory` 同一套机制）。幂等窗口**以环形保留为界**（登记的合同而非缺陷）：
 当 `AGENT_OBSERVATION_RING_MAX` 条更新的观察把某行淘汰后，重试它的旧 `client_request_id`
@@ -1564,7 +1594,7 @@ KB+confirmed-Memory 三种检索条件。
 其他成员个人记忆派生的对象或关系，也不会出现归属于这类记忆的证据条目。对象和关系按它被抽取出来的来源判断；
 证据条目按它标注的来源、以及它引用的元素实际所在的来源判断。图谱视图与邻居视图显示共享图谱（对所有成员
 相同，也就是落盘预览里的内容），再加上查看者本人的记忆对象（实时读取）；`limit` 分别限制这两层，因此一次
-图谱响应最多有 `limit` 的两倍个节点。没有 `memory:read` 权限的令牌看不到任何由记忆派生的内容（包括自己的），
+图谱响应最多有 `limit` 的两倍个节点。没有 `read` 档（`memory:read` 能力归它）的令牌看不到任何由记忆派生的内容（包括自己的），
 笔记本的记忆条数对它显示为 0。笔记本计数、`kg_ready` 与分析卡片的知识计数为共享口径加上查看者本人的记忆
 派生对象。索引节点数与 ANN 条数、分享预览的规模，以及重建时的总数（`unified_kg_status`、分析卡片的
 上次整理规模；在重建结束时对未弃用对象与关系统计一次）只计共享部分，从中推算不出任何成员的记忆条数。
@@ -1572,7 +1602,7 @@ KB+confirmed-Memory 三种检索条件。
 知识图谱的存储层读取按查看者进行：知识列表及其总数、类型计数与看板计数、`kg_ready`、旧版图谱、统一图谱的
 实时路径与共享预览之上的本人记忆叠加、邻居边、知识图谱搜索（词法候选在截断前过滤，ANN 结果在水合时过滤）
 以及笔记本搜索框的知识腿，都不包含其他成员个人记忆派生的对象和关系，但包含查看者本人的。没有 `memory:read`
-权限时，不返回任何由记忆派生的行，本人的也不返回。社区摘要、重复分组与边审核排序从不包含记忆派生的行。
+能力（即令牌没有 `read` 档）时，不返回任何由记忆派生的行，本人的也不返回。社区摘要、重复分组与边审核排序从不包含记忆派生的行。
 笔记本列表每次请求只查询一次哪些笔记本持有记忆，而不是逐个笔记本查询。笔记本在隔离重建完成之前，含有查看者
 不能读的记忆的簇一律用该簇第一个可见成员的对象 id 作答，不返回簇的标识：图谱搜索命中、图谱视图的节点与边、
 邻居视图（含焦点）以及概念详情的 `canonical_id` 都是如此。`GET .../concepts/{id}/detail` 能用这样的成员 id
@@ -2382,7 +2412,7 @@ Agent 维护一份低成本、经 LLM 巡固的、关于笔记本的理解摘要
 
 `AGENT_PROFILE_ENABLED`（默认 true）是**理解块这一侧**的唯一总闸（上表最后三行的检索经验跟随另一把独立开关 `RETRIEVAL_EXPERIENCE_ENABLED`，见下一节），同时管住注入、巡固触发与两个 API 面的可见性——关闭后处处逐字回到接入前：不注入、不记 trace 步、不排巡固，API 不是 404 而是返回 `enabled=false` 且两个列表为空（让前端能区分「关了」与「还没形成理解」），重建端点 409。
 
-**Agent 观察记录喂覆盖层，且不可信（Agentic Memory P3）。** 持有 `agent_observation:write` scope
+**Agent 观察记录喂覆盖层，且不可信（Agentic Memory P3）。** 持有 `contribute` 档
 的外部 Agent 可随时调用 MCP 工具 `add_observation`，向自己在这个 `(笔记本, 用户)` 下的观察
 队列追加一行——「我在处理这个库时发现了 X」——与任何一次巡固运行完全解耦。这是原始、
 **不可信**的输入：与上面这一位成员自己的提问/报告不同，写下观察的是另一方而非其覆盖层
@@ -2416,7 +2446,7 @@ Agent 维护一份低成本、经 LLM 巡固的、关于笔记本的理解摘要
 两种行互不侵占，这一条由读写两侧同时保证，不靠约定：环形淘汰**按 kind 分组**（一次密集
 检索因此绝不可能挤掉成员攒了很久的短句——两种各有自己的 200 条环），巡固读取在 **SQL 里**
 钉死 `kind='note'`，所以哪怕将来某个调用方忘了调用记账的存在，它也进不了模型 prompt。
-记的是这次调用被准许时用的**能力档**（`ask:execute`、`knowledge:read`…）而不是工具名：
+记的是这次调用被准许时用的**能力**（`ask:execute`、`knowledge:read`…，即代码内部请求的细粒度能力，不是 token 存的五档）而不是工具名：
 那个唯一收口本来就要收到能力档才能放行，所以新加的工具天然被记上、不需要作者记得去登记；
 代价是同一档下的两个工具在记录里读起来一样（已登记）。被**鉴权**拒绝的调用不留痕（一份「谁被拒了」
 的日志是另一种东西，隐私后果也不同）——**包括收口之后才做的那些鉴权**。这样的闸一共三道，
@@ -2914,8 +2944,8 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - Memory：`GET /api/memories`、`GET /api/notebooks/{id}/memories`、`GET|PATCH /api/memories/{memory_id}`、`POST /api/memories/{memory_id}/confirm|reject|deprecate|promote`、`POST /api/answers/{answer_id}/memory-preview/stream`（网页端；`/memory-preview` 保持 JSON 兼容）、`POST /api/notebooks/{id}/memories/from-answer`
   - 接受回答 id 的接口（`POST /api/answers/{answer_id}/memory-preview`、`.../memory-preview/stream`、`POST /api/answers/{answer_id}/feedback`、`POST /api/notebooks/{notebook_id}/memories/from-answer`）只作用于调用者自己的回答：调用者必须能读该笔记本，并且必须是该回答所属会话的创建者。他人的回答（含笔记本所有者）、没有会话的回答、不存在的回答 id 一律返回同一个 404 `Answer not found`。共享存储里的 `answer_owner` 返回的是笔记本所有者，不用于授权。
   - 部署管理员通过「用户活动日志」查看用户回答全文属于审计权限，是独立的、仅管理员可用的读取通道，不受回答属主规则约束。
-- Agent 接入：匿名机器可读说明 `GET /api/agent-mcp/onboarding`；认证管理面 `GET|POST /api/agent-profiles`、`PATCH /api/agent-profiles/{profile_id}`、`POST /api/agent-profiles/{profile_id}/tokens`、`GET /api/agent-tokens`、`PUT /api/agent-tokens/{token_id}/access`、`DELETE /api/agent-tokens/{token_id}`；Streamable HTTP MCP 挂载在 `/mcp`
-- Knowhow agent 接入面：`GET /api/agent/knowhow/tables?notebook_id=`、`GET /api/agent/knowhow/tables/{table_id}/discrimination`、`GET /api/agent/knowhow/rows/{row_id}`、`GET|PUT|DELETE /api/agent/knowhow/rows/{row_id}/cells/{column_id}/code`——session 或 Agent Bearer token 均可访问；读需要 `knowledge:read`，代码写入需要 `knowhow:code`（见 [Memory 与 Agent MCP](#memory-与-agent-mcp)）
+- Agent 接入：匿名机器可读说明 `GET /api/agent-mcp/onboarding`；认证管理面 `GET|POST /api/agent-profiles`、`PATCH /api/agent-profiles/{profile_id}`、`POST /api/agent-profiles/{profile_id}/tokens`、`GET /api/agent-tokens`、`GET /api/agent-tokens/{token_id}/secret`（再次复制明文，仅主人）、`PUT /api/agent-tokens/{token_id}/access`、`DELETE /api/agent-tokens/{token_id}`；Streamable HTTP MCP 挂载在 `/mcp`
+- Knowhow agent 接入面：`GET /api/agent/knowhow/tables?notebook_id=`、`GET /api/agent/knowhow/tables/{table_id}/discrimination`、`GET /api/agent/knowhow/rows/{row_id}`、`GET|PUT|DELETE /api/agent/knowhow/rows/{row_id}/cells/{column_id}/code`——session 或 Agent Bearer token 均可访问；读需要 `read` 档，代码写入需要 `contribute` 档（见 [Memory 与 Agent MCP](#memory-与-agent-mcp)）
 - 统一 KG：`POST .../unified-kg/rebuild`、`GET .../unified-kg`、`GET .../unified-kg/pending-merges`、`POST .../unified-kg/merges/{id}/confirm|reject`
 - **图谱维护：** 以下三个动作均要求 `kg:write`，且没有配置 LLM 的前置条件。它们发起后台任务，返回 `{status, notebook_id, job_id}`，不在启动响应中返回结果数量。只需笔记本读权的状态端点返回 `{job_id, notebook_id, status, running, ...计数}`，其中 `status=running|succeeded|failed|idle`。
 
@@ -3030,7 +3060,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 部署插件可以注册一个或多个完整问答引擎。每个 `PROVIDER` 暴露冻结描述符（`mode_id`、面向用户的名称/说明、`requires_kg`）和一个同步 `answer()` 方法。该方法仍在 detached durable Ask worker 内同步执行，但 host 会把每个 extension `AskMode` 构造成 `streaming=true`：`/ask-modes` 同步投影 `streaming=true` 与 `streams_trace=true`，正式浏览器通过 `POST /notebooks/{id}/ask/stream` 执行；普通 `POST .../ask` 兼容路由继续同步阻塞。`mode_id` 必须以该插件自己的 id 加 `.` 为前缀；重复、畸形、空值或超限描述符都会让启动 fail-closed。内建和已退役 mode id 都不含点号，而插件 id 本身全局唯一，因此插件前缀就是防碰撞边界，不另维护第二份保留字表。
 
-provider 只收到当前问题和三个由核心拥有的端口。`RetrievalAccessPort.search()` 包裹既有带范围候选路径：冻结的来源范围与挂载公共库范围会在 SQLite/PostgreSQL 的候选 `LIMIT` 之前生效；私有 Memory 投影（**含调用者自己的**）被**结构性排除**在插件宇宙之外——插件引用没有渠道携带 MCP `memory:read` 过滤所识别的 Memory 身份，所以 Memory 根本不进入插件检索面（notebook 级共享的 Knowhow 投影保留）；结果只暴露有界正文、标题、位置和本次 run 内的不透明证据句柄，不暴露 notebook/source/element/chunk id。`fetch()` 只认同一端口已经签发过的句柄。`EngineModelPort.complete()` 通过常规模型 registry、调度、熔断、日志和取消路径使用 `plugin_engine` chat workload，不暴露 URL、密钥、raw client 或物理 binding。`EngineTraceSink.step()` 准入有界的通用 `plugin` 轨迹步骤：每个通过护栏并裁剪后的步骤只登记一次，由核心把自上一条准入步骤（首条则从引擎阶段开始）以来的墙钟间隔写入 `duration_ms`，再立即转发到 durable worker 的 core-owned `on_trace` sink；该 sink 先持久化，再发送 NDJSON `progress`。provider 返回时先冻结终止时点，再由核心校验请求身份、证据句柄与引用标记；只有准入通过才发布「扩展引擎执行完成」，provider 或准入失败则发布「扩展引擎执行失败」。这条带耗时的终止 `plugin` 步骤位于 provider 自写步骤预算之外，覆盖最后一条准入步骤之后的尾段；若 provider 未发任何步骤则覆盖整个引擎阶段，且不把核心准入耗时混进来。因此前端既有的步骤耗时求和就是完整插件引擎耗时，无需信任 provider 自报时间。首个畸形或超预算调用会在 provider 预算之外追加并实时发送一条核心计时的「扩展引擎步骤已截断」标记，后续畸形/超预算调用不再发步骤；核心不改写任何已经交付的旧步骤，所以 live progress、durable rows 与成功 final `AskResponse` 的轨迹保持 append-only 且逐字一致。显式取消维持既有的取消后轨迹写入闸门。
+provider 只收到当前问题和三个由核心拥有的端口。`RetrievalAccessPort.search()` 包裹既有带范围候选路径：冻结的来源范围与挂载公共库范围会在 SQLite/PostgreSQL 的候选 `LIMIT` 之前生效；私有 Memory 投影（**含调用者自己的**）被**结构性排除**在插件宇宙之外——插件引用没有渠道携带 MCP 个人记忆过滤（`memory:read` 能力）所识别的 Memory 身份，所以 Memory 根本不进入插件检索面（notebook 级共享的 Knowhow 投影保留）；结果只暴露有界正文、标题、位置和本次 run 内的不透明证据句柄，不暴露 notebook/source/element/chunk id。`fetch()` 只认同一端口已经签发过的句柄。`EngineModelPort.complete()` 通过常规模型 registry、调度、熔断、日志和取消路径使用 `plugin_engine` chat workload，不暴露 URL、密钥、raw client 或物理 binding。`EngineTraceSink.step()` 准入有界的通用 `plugin` 轨迹步骤：每个通过护栏并裁剪后的步骤只登记一次，由核心把自上一条准入步骤（首条则从引擎阶段开始）以来的墙钟间隔写入 `duration_ms`，再立即转发到 durable worker 的 core-owned `on_trace` sink；该 sink 先持久化，再发送 NDJSON `progress`。provider 返回时先冻结终止时点，再由核心校验请求身份、证据句柄与引用标记；只有准入通过才发布「扩展引擎执行完成」，provider 或准入失败则发布「扩展引擎执行失败」。这条带耗时的终止 `plugin` 步骤位于 provider 自写步骤预算之外，覆盖最后一条准入步骤之后的尾段；若 provider 未发任何步骤则覆盖整个引擎阶段，且不把核心准入耗时混进来。因此前端既有的步骤耗时求和就是完整插件引擎耗时，无需信任 provider 自报时间。首个畸形或超预算调用会在 provider 预算之外追加并实时发送一条核心计时的「扩展引擎步骤已截断」标记，后续畸形/超预算调用不再发步骤；核心不改写任何已经交付的旧步骤，所以 live progress、durable rows 与成功 final `AskResponse` 的轨迹保持 append-only 且逐字一致。显式取消维持既有的取消后轨迹写入闸门。
 
 `RetrievalAccessPort` 现在还暴露一套有界 KG 读端口，覆盖当前 notebook 加已挂载参考库。`search_kg(query, k, object_types=())` 对知识对象跑 BM25+语义融合。`object_types` 必须是元素全为 `str` 的 `tuple`/`list`；否则——裸 `str`（如 `"concept"`，会被当容器逐字符拆开而不是命中一个类型名）、非 `str` 元素，或任何其他容器形态——在花掉预算之前就抛 `plugin_engine_invalid_kg_request`。形状合法的请求里，只有命中 `concept`/`claim`/`formula`/`procedure` 四类之一的条目会保留；未知类型名会被静默丢弃，若过滤器起初非空但最终一个都没留下，调用直接返回 `()`、不消耗预算。`kg_neighbors(evidence_key, k, edge_type="", direction="both")` 以本 run 内 `search_kg`/`kg_neighbors` 已签发过的 KG 句柄为锚展开一跳；元素句柄、别的 run 的句柄、空字符串，或 `edge_type` 不在核心 KG 边 schema 定义的十二类之内（`defines`/`about`/`supports`/`derived_from`/`depends_on`/`contrasts_with`/`prerequisite_of`/`part_of`/`composed_of`/`kind_of`/`used_in`/`precedes`）都一律返回 `()`、不计入预算，而 `direction` 取值不是 `both`/`out`/`in` 之一会抛 `plugin_engine_invalid_kg_request`。真收窄的 run（`source_scope_restricted` 的通道语义，不是冻结全选的天花板语义）里，`kg_neighbors` 对**当前库**锚点整体关闭、直接返回 `()` 且不计预算：一跳展开的有界读取之下没有来源谓词，界外邻居会占满窗口、事后过滤救不回没被返回的行——与内建图通道在受限 run 中关闭是同一条纪律。挂载参考库的锚点在本地收窄下保持开放（库维度是整库勾选，两维正交是登记契约）。两个调用共享一份预算 `ASK_PLUGIN_ENGINE_KG_SEARCH_MAX_CALLS`，与 `search()` 自己的池子相互独立；超限抛 `plugin_engine_kg_call_limit`。四条契约插件必须遵守：**①可引用性**——KG 命中的 `evidence_key` 只有在对象至少有一条来源与元素仍存活、且能给出名称/定义/原文摘录里至少一样可展示内容的证据绑定时才非空、才能进 `citations`（三者都拿不到的罕见情形同样按仅供上下文处理）；空 key（「仅供上下文」）可以喂给模型的推理，但既进不了任何引用登记表，也不会被注册成 `kg_neighbors` 的合法锚点——把它塞进 citations 会像伪造句柄一样被移除并在轨迹末尾的插件披露步中披露，而不是拒绝整份答案；**②引用落点**——被引用的 KG 句柄，其持久化 `Citation` 打开的是该对象**首条存活证据元素**，不是图谱节点视图；**③不带边标签与截断信号**——`kg_neighbors` 不会告诉你某个邻居来自哪类边（要按边归因就按 `edge_type` 逐类各调一次）也不会告诉你满页是否代表还有更多（应假定还有），且每个方向另受核心自己的展开上限约束、与请求的 `k` 无关；**④两 lane 候选路由**——未收窄的插件 run 不下推显式来源清单，KG 接缝因此保持 notebook ANN＋词法融合、把 run 的冻结天花板留到证据 hydrate 应用（MCP 这类无 scope 调用会得到与浏览器冻结快照同形状的合成全选天花板，`narrowed=false`，绝不产生用户可见 scope 回执）；真收窄的 run 仍下推冻结 key，走「词法谓词在 `LIMIT` 前」的来源受限 lane。未收窄 lane 的已登记对偶代价：调用者自己的 Memory 派生命中会过天花板、占据 `k` 内的候选名额、再被端口的宇宙外丢弃规则整体丢掉——top 命中恰为 Memory 派生时，可用结果可能少于 `k` 条。`kg_overview()` 返回与内建 reasoning 引擎注入自己 prompt 的**同一份**有界（≤ 600 字符，`KG_OVERVIEW_MAX_CHARS`）集合地图文本——各可枚举集合计数、知识对象四类分类计数与当前范围的来源数——每 run 只算一次（memo，重复调用拿到同一份字符串），格式不属于契约、不应被解析；无图的库返回的文本自然不含知识对象那一行，插件应把它当作「该少走 KG 通道」的信号。真收窄的 run 里 overview 整体抑制（返回空串、不发底层计数）——理由与邻居通道关闭相同：它的计数接缝只认库维度，否则会把整库聚合计数交给一个不许读全库的 run。
 
