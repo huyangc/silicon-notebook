@@ -119,11 +119,12 @@ scripts/dev.sh                # 同时起 backend(:8000)+ frontend(:3000),Ctrl+C
 立即从 Agent Memory 召回。token 只从 `SILICON_NOTEBOOK_AGENT_TOKEN` 读取且不打印。
 
 ```bash
-export SILICON_NOTEBOOK_AGENT_TOKEN='<界面签发且只显示一次的 token>'
+export SILICON_NOTEBOOK_AGENT_TOKEN='<从 Agent 接入页复制的 token>'
 python scripts/example_mcp_memory_client.py --query '有哪些可复用经验？' --propose
 ```
 
-完整的界面签发、scope、Codex/Claude 配置、人审与撤销步骤见
+token 签发后可以在 Agent 接入页的「已签发 Token」列表里随时再次复制（本版本之前签发的除外，需要时重新签发）。
+完整的界面签发、权限档位、Codex/Claude 配置、人审与撤销步骤见
 [`docs/agent-mcp-memory-sop_zh.md`](../docs/agent-mcp-memory-sop_zh.md)。
 
 ### `check.sh` —— 本地全量自检(提交/PR 前)
