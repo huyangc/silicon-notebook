@@ -387,7 +387,12 @@ class MemoryStore:
         # 白名单」这种两份配置都没授权过的组合。
         with self.database.connect() as db:
             row = db.execute(
-                "SELECT t.*,p.owner_id,p.name AS profile_name,p.status AS profile_status,"
+                # Explicit columns: the stored plaintext (token_plain) is never read
+                # on the authentication path, which compares the hash only.
+                "SELECT t.id,t.agent_profile_id,t.token_hash,t.scopes_json,"
+                "t.default_notebook_id,t.expires_at,t.revoked_at,t.last_used_at,"
+                "t.created_at,"
+                "p.owner_id,p.name AS profile_name,p.status AS profile_status,"
                 "COALESCE((SELECT array_agg(n.notebook_id ORDER BY n.notebook_id COLLATE \"C\") "
                 "FROM agent_token_notebooks n WHERE n.token_id=t.id),ARRAY[]::text[]) "
                 "AS auth_notebook_ids "
@@ -398,9 +403,6 @@ class MemoryStore:
             if row is None:
                 return None
             result = dict(row)
-            # The plaintext never travels with the auth row (authentication
-            # compares the hash only).
-            result.pop("token_plain", None)
             result["scopes_json"] = json.dumps(
                 json_value(result.get("scopes_json"), []),
                 ensure_ascii=False,
