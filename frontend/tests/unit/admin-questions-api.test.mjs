@@ -43,6 +43,25 @@ test("调用方式筛选以 submitted_via 查询参数发出，未选时不带�
   }
 });
 
+test("提问项的 output 字段原样透传，缺省时保持缺省", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    items: [
+      { type: "ask", id: "a1", output: "evidence" },
+      { type: "ask", id: "a2" },
+    ],
+    stats: { total: 2, asks: 2, reports: 0, active_users: 1, global_asks: 0 },
+    total: 2, offset: 0, limit: 50,
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+  try {
+    const page = await fetchAdminQuestions({});
+    assert.equal(page.items[0].output, "evidence");
+    assert.equal(page.items[1].output, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("范围筛选以 scope 查询参数发出，未选时不带该参数", async () => {
   const originalFetch = globalThis.fetch;
   const urls = [];

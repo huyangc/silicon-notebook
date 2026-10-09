@@ -250,6 +250,14 @@ claude mcp list
 上限：改用 `mode="chunk"` 提问，或把重活交给天生立即返回的后台工具
 （`build_kg` / `build_retrieval_index`，再轮询 `get_build_status`）。
 
+### 大响应
+
+所有工具的响应都在 12,000 字节预算内，只有一个例外：`output="evidence"` 的 `ask_notebook` 跳过最终合成，
+把合成那一步本应收到的整份证据一次返回、不分页。它的大小跟随合成预算，服务端硬顶 524,288 字节（见产品与 API
+参考中的例外说明），可能远大于其它任何结果。MCP 客户端通常自带工具输出上限，更大的响应会被截断。**Claude Code**
+的这个上限就是环境变量 `MAX_MCP_OUTPUT_TOKENS`；使用 `output="evidence"` 之前，请在启动 `claude` 的 shell 里
+导出更高的值（例如 `export MAX_MCP_OUTPUT_TOKENS=200000`）。其它客户端有各自对应的设置。
+
 ## 5. 在 Agent 对话中做第一次调用
 
 全局问答可直接调用 `ask_global`，无需 `select_notebook`。例如：
@@ -419,6 +427,7 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 | `reasoning` 档的 `ask_notebook` 正常返回 `status: "needs_clarification"` 而没有答案 | 不是故障：这是与网页端相同的问题理解步骤发现了会改变检索方向的歧义，此时没有建会话也没有建任务。把 `intent.ambiguities` 里 `required` 为 true 的问题转述给用户，拿到回答后用同一个 `question` 再调一次，并传 `intent={"intent_token": <响应里的 intent_token>, "answers": [{"id", "answer"}], "resolved_question": <可选，确认后的问法>}`；`chunk` 档没有理解步骤。 |
 | `reasoning` 档的 `ask_notebook` 报「请先回答所有必填澄清问题」或「问题理解与当前问题不匹配」 | 回传的答案没通过与 HTTP `/ask` 相同的冻结校验：必填歧义缺答案，或这次的 `question` 与首次调用不一致。补齐答案、保持 `question` 与首次调用完全相同后重试。 |
 | `reasoning` 档的 `ask_notebook` 报「intent_token 无效或已过期」 | 澄清合同只在当前 MCP 会话内、当前选中的笔记本下保留最近 8 份；换了会话、重新调过 `select_notebook`（会清空本会话全部句柄）或过了 8 次澄清后句柄失效。不带 `intent` 重新提问即可拿到新的合同。成功提交后句柄仍有效，引擎失败可用同一份答案重试。 |
+| `ask_notebook(output="evidence")` 的结果在客户端被截断，或被替换成「过大」提示 | 是客户端自己的工具输出上限，不是服务端：证据按合成预算定大小（最多 524,288 字节），不受 12,000 字节护栏约束。调高该上限（第 4 节「大响应」；Claude Code 用 `MAX_MCP_OUTPUT_TOKENS`）。 |
 | `POST /mcp/` 返回 `406 Not Acceptable` | 该请求只接受了 `application/json`。传输以 SSE 应答，长任务的 progress 通知才到得了客户端；请发 `accept: application/json, text/event-stream`——这是 Streamable HTTP 规范的要求，所有真实客户端本来就这么发。 |
 | `400 Bad Request: Missing session ID` | 工具调用发生在 `initialize` + `notifications/initialized` 之前，或 `MCP-Session-Id` 头丢了。正式客户端会自动处理；手写 `curl` 不能跳过（第 8 节）。 |
 | Claude Code 把 `${...}` 当成 token 原样发出 | 变量没有在启动 `claude` 的 shell 里导出，或变量名拼错——未定义的变量会被原样透传。导出后新开会话。 |

@@ -339,6 +339,74 @@ async def assert_memory_channel_through_mcp(env: dict, monkeypatch) -> None:
         assert "MIXMEMQUOTE" not in prompt and "MIXMEMQUOTE" not in _wire_text(foreign)
 
 
+async def _ask_evidence(app, raw_token: str, notebook_id: str, question: str) -> dict:
+    async with OfficialMcpClient(app, raw_token, manage_lifespan=False) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        return _payload(await client.call("ask_notebook", {
+            "question": question, "mode": "reasoning", "output": "evidence",
+        }))
+
+
+def _evidence_text(payload: dict) -> str:
+    return "\n".join(item["text"] for item in payload["items"])
+
+
+async def assert_evidence_channel_through_mcp(env: dict, monkeypatch) -> None:
+    """``output="evidence"`` rides the SAME Memory channel and ceiling as the
+    answer mode: the evidence IS what the synthesis would have read, so the
+    assertions mirror ``assert_memory_channel_through_mcp`` over the wire's
+    ``items``; and nothing is synthesised or saved."""
+    ids = env["seeded"]
+    notebook_id = env["notebook"].id
+    planner = _ReasoningModel()
+    synthesis = _ReasoningModel()
+    bind_chat_client(repository(), "reasoning_agent", planner)
+    for workload in ("evidence_refine", "ask_answer"):
+        bind_chat_client(repository(), workload, synthesis)
+    store_calls = _MemoryStoreCalls(monkeypatch)
+    app = env["app"]
+    conversations_before = len(repository().list_conversations(notebook_id))
+
+    async with app.router.lifespan_context(app):
+        closed = await _ask_evidence(
+            app, token(env, "alice", NO_MEMORY_SCOPES), notebook_id, QUESTION
+        )
+        assert closed["status"] == "retrieved" and closed["output"] == "evidence"
+        assert store_calls.calls == 0, "Memory 通道关闭时不得查询 Memory 存储"
+        assert "memory" not in closed["counts"]["by_kind"]
+        assert not any(
+            item["kind"] == "memory" or item.get("object_type") == "memory"
+            for item in closed["items"]
+        )
+        for secret in MEMORY_SECRETS + ("MIXMEMQUOTE",):
+            assert secret not in _evidence_text(closed)
+            assert secret not in _wire_text(closed)
+        assert "VISELEMMARK" in _evidence_text(closed) or "VISKGMARK" in _evidence_text(closed)
+
+        opened = await _ask_evidence(
+            app, token(env, "alice", FULL_SCOPES), notebook_id, QUESTION
+        )
+        assert store_calls.calls > 0
+        text = _evidence_text(opened)
+        for secret in MEMORY_SECRETS:
+            assert secret in text, f"{secret}: 本人有 memory:read 时 Memory 应照旧参与"
+        assert any(
+            item.get("memory_id") == ids["memory_id"] for item in opened["items"]
+        ), opened["items"]
+
+        calls_before = store_calls.calls
+        foreign = await _ask_evidence(
+            app, token(env, "bob", FULL_SCOPES), notebook_id, QUESTION
+        )
+        assert store_calls.calls > calls_before
+        for secret in MEMORY_SECRETS + ("MIXMEMQUOTE",):
+            assert secret not in _evidence_text(foreign), f"{secret} 泄漏给了另一位成员"
+            assert secret not in _wire_text(foreign)
+
+    assert synthesis.prompts == [], "证据模式不得调用回答/精炼模型"
+    assert len(repository().list_conversations(notebook_id)) == conversations_before
+
+
 def _source_ids(answer: dict) -> set[str]:
     return {
         row["source_id"]
@@ -397,3 +465,10 @@ async def test_ask_notebook_memory_channel_and_ceiling_on_sqlite(sqlite_env, mon
 @pytest.mark.anyio
 async def test_search_notebook_context_memory_channel_on_sqlite(sqlite_env, monkeypatch):
     await assert_search_channel_through_mcp(sqlite_env, monkeypatch)
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_evidence_memory_channel_and_ceiling_on_sqlite(
+    sqlite_env, monkeypatch
+):
+    await assert_evidence_channel_through_mcp(sqlite_env, monkeypatch)

@@ -276,7 +276,12 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # agent_access_tokens.token_plain column (no backfill) and rewrites every
 # token's scopes_json to the five tiers (read / ask / contribute / manage /
 # delete) with the frozen ``_v89_tiers`` rule. See ``_migration_89``.
-SCHEMA_VERSION = 89
+# v90 (paired with PostgreSQL 0070_ask_job_output.sql) adds
+# ask_jobs.output and retained_user_activity.output (TEXT NOT NULL DEFAULT
+# 'answer'): 'evidence' marks a retrieval-only MCP ask_notebook call that
+# produced no answer and no conversation. No backfill -- every existing row
+# is an answer. See ``_migration_90``.
+SCHEMA_VERSION = 90
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
 # when v87 was written (a migration must not change meaning when the live
@@ -5546,6 +5551,27 @@ class SqliteMigrator:
             "agent-token-tiers migration: tokens=%d rewritten=%d emptied=%d",
             len(rows), changed, emptied,
         )
+
+    def _migration_90(self) -> None:
+        """Ask job output kind, parity with PostgreSQL
+        ``0070_ask_job_output.sql``. See SCHEMA_VERSION's docstring.
+
+        ``NOT NULL DEFAULT 'answer'`` is the whole backfill: every row that
+        exists before this version produced an answer. The accepted value set
+        lives in ``app.models.ask.AskOutput``, not a CHECK, the same way
+        ``submitted_via`` does. ``add_column_if_missing`` keeps the migration
+        re-runnable.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "ask_jobs", "output", "TEXT NOT NULL DEFAULT 'answer'"
+            )
+            self.add_column_if_missing(
+                db,
+                "retained_user_activity",
+                "output",
+                "TEXT NOT NULL DEFAULT 'answer'",
+            )
 
     def _seed(self) -> None:
         now = _now()

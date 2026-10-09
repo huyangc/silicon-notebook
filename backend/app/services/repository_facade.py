@@ -73,6 +73,8 @@ from app.models.sources import (
 )
 from app.models.ask import (
     AnswerAnchor,
+    AskEvidence,
+    AskOutput,
     AskRequest,
     AskResponse,
     Citation,
@@ -3785,16 +3787,24 @@ class RepositoryFacade:
             notebook_id, payload, cancel_event)
 
     def ask(
-        self, notebook_id: str, payload: AskRequest, *, submitted_via: StoredSubmittedVia = ""
-    ) -> AskResponse:
+        self,
+        notebook_id: str,
+        payload: AskRequest,
+        *,
+        submitted_via: StoredSubmittedVia = "",
+        output: AskOutput = "answer",
+    ) -> AskResponse | AskEvidence:
         """Dispatch to the retrieval handler named by payload.mode, resolved
         through the ask_modes registry. Unknown modes raise UnknownAskMode (the
         API layer returns 422) — never a silent fall-through to the legacy
         path. The blocking surface uses the same internal durable-job and
         atomic-final-save lifecycle as the streaming coordinator; its job id
-        is not added to the AskResponse protocol."""
+        is not added to the AskResponse protocol. ``output="evidence"``
+        (built-in modes only) stops before synthesis and returns the
+        ``AskEvidence`` the answer would have been written from, saving no
+        conversation and no answer."""
         return self._runtime.ask_component.ask_current(
-            notebook_id, payload, submitted_via=submitted_via
+            notebook_id, payload, submitted_via=submitted_via, output=output
         )
 
     def preview_reasoning_intent(

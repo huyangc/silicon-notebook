@@ -88,6 +88,15 @@
               "title": "Notebook Name",
               "type": "string"
             },
+            "output": {
+              "default": "answer",
+              "enum": [
+                "answer",
+                "evidence"
+              ],
+              "title": "Output",
+              "type": "string"
+            },
             "question": {
               "default": "",
               "title": "Question",
@@ -656,6 +665,15 @@
             },
             "notebook_name": {
               "title": "Notebook Name",
+              "type": "string"
+            },
+            "output": {
+              "default": "answer",
+              "enum": [
+                "answer",
+                "evidence"
+              ],
+              "title": "Output",
               "type": "string"
             },
             "question": {
@@ -2132,6 +2150,15 @@
               },
               "title": "Notebook Names",
               "type": "object"
+            },
+            "output": {
+              "default": "answer",
+              "enum": [
+                "answer",
+                "evidence"
+              ],
+              "title": "Output",
+              "type": "string"
             },
             "question": {
               "default": "",
@@ -29235,6 +29262,7 @@
       "job_id": "askjob-api",
       "mode": "reasoning",
       "notebook_id": "nb-api",
+      "output": "answer",
       "question": "trace fixture gain",
       "status": "done",
       "trace": [

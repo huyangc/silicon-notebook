@@ -435,7 +435,13 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # agent_access_tokens.token_plain column (no backfill) and rewrite every
 # token's scopes_json to the five tiers. No table, index, FK or unique-surface
 # change.
+# SQLite v90 / PostgreSQL 0070 add output (text, NOT NULL DEFAULT 'answer') to
+# ask_jobs and retained_user_activity -- 'evidence' marks a retrieval-only MCP
+# ask call that stored no answer and no conversation. The default is the whole
+# backfill; allowed values are pinned by the API model
+# (app.models.ask.AskOutput), not a CHECK. No table, index, FK or
+# unique-surface change.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=89,
-    postgres_version=69,
+    sqlite_version=90,
+    postgres_version=70,
 )

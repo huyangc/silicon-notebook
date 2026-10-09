@@ -3,7 +3,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.internal_observability import public_trace_steps, sanitize_answer_payload
-from app.models.ask import StoredSubmittedVia
+from app.models.ask import StoredAskOutput, StoredSubmittedVia
 from app.models.common import Evidence
 
 
@@ -201,6 +201,10 @@ class ActivityAsk(BaseModel):
     # (a pre-migration row, or an in-process caller that skipped the
     # keyword). See app.models.ask.SubmittedVia for the write-side vocabulary.
     submitted_via: StoredSubmittedVia = ""
+    # "evidence" = a retrieval-only MCP ask_notebook call: it returned the
+    # synthesis evidence and stored no answer and no conversation. Every other
+    # row, and every global/report row, is "answer". See app.models.ask.AskOutput.
+    output: StoredAskOutput = "answer"
     notebook_name: str = ""
     notebook_deleted_at: str = ""
     retained_until: str = ""
@@ -293,6 +297,10 @@ class AdminQuestionItem(BaseModel):
     status: str
     created_at: str
     submitted_via: StoredSubmittedVia = ""
+    # "evidence" = a retrieval-only MCP ask_notebook call: it returned the
+    # synthesis evidence and stored no answer and no conversation. Every other
+    # row, and every global/report row, is "answer". See app.models.ask.AskOutput.
+    output: StoredAskOutput = "answer"
 
 
 class AdminQuestionStats(BaseModel):
@@ -395,6 +403,10 @@ class AskDetail(BaseModel):
     status: str = ""
     asked_at: str = ""
     answered_at: str = ""
+    # "evidence" = a retrieval-only MCP ask_notebook call: it returned the
+    # synthesis evidence and stored no answer and no conversation. Every other
+    # row, and every global/report row, is "answer". See app.models.ask.AskOutput.
+    output: StoredAskOutput = "answer"
     # 失败原文只给管理员;本人自助读取恒为空串(admin_routes._activity_failure_text)。
     error: str = ""
     trace: List[dict] = Field(default_factory=list)

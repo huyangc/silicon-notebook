@@ -123,6 +123,12 @@ class DetachedAskTurn:
     instead of looked up, and the persistence step at the other end of the run
     returns without writing.
 
+    The second writer is the retrieval-only notebook Ask
+    (``AskService._ask_evidence_current``, ``output="evidence"``): it reads
+    the caller's own conversation history (never appends to it) and hands it
+    down the same way, so the engine neither creates nor leases a
+    conversation, and nothing at the other end is saved.
+
     ``history`` / ``user_history`` default to empty rather than to None: every
     consumer concatenates them into a prompt block, and "no history" and "an
     empty history" must not be two shapes on that path.
@@ -292,8 +298,10 @@ def detached_ask_turn(turn: DetachedAskTurn) -> Iterator[None]:
     Nesting is refused, including a nested turn equal to the installed one, for
     the reason ``participant_override`` spells out: two writers each believing
     they own the run means whichever exits first restores a seat the other is
-    still using.  There is exactly one writer by contract -- the manager in
-    ``global_run`` -- so nesting is a wiring bug in every form.
+    still using.  There are exactly two writers by contract -- the manager in
+    ``global_run`` and the retrieval-only notebook Ask
+    (``AskService._ask_evidence_current``) -- and neither runs inside the
+    other, so nesting is a wiring bug in every form.
 
     ⛔ ENTER AND EXIT IN THE SAME CONTEXT.  ``ContextVar.reset(token)`` raises
     when the token was created elsewhere, so this must not be entered on one

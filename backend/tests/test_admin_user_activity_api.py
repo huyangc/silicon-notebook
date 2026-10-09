@@ -111,14 +111,14 @@ def _insert_paper_meta(db, source_id, notebook_id, paper_title, *, is_paper=1) -
 def _insert_ask_job(db, job_id, notebook_id, created_by, created_at, *,
                      conversation_id="", question="q?", mode="chunk",
                      status="completed", asked_at="", answer_id="", error="",
-                     submitted_via="") -> None:
+                     submitted_via="", output="answer") -> None:
     db.execute(
         "INSERT INTO ask_jobs "
         "(id,notebook_id,conversation_id,created_by,mode,question,status,asked_at,"
-        "answer_id,error,created_at,updated_at,submitted_via) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "answer_id,error,created_at,updated_at,submitted_via,output) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (job_id, notebook_id, conversation_id, created_by, mode, question, status,
-         asked_at, answer_id, error, created_at, created_at, submitted_via),
+         asked_at, answer_id, error, created_at, created_at, submitted_via, output),
     )
 
 
@@ -393,6 +393,54 @@ def test_activity_type_query_returns_only_questions(client):
     assert body["items"][0]["question"] == "用户现在关注什么？"
     # 没显式传 submitted_via 的历史行 -> 默认 "" (未记录)。
     assert body["items"][0]["submitted_via"] == ""
+
+
+def test_retrieval_only_ask_is_marked_in_activity_detail_and_survives_notebook_delete(client):
+    """An ``output='evidence'`` job (MCP ask_notebook, retrieval only) is an ask
+    row in the activity stream and its detail, marked ``output="evidence"``;
+    answer rows say ``"answer"``. Deleting the notebook keeps the mark on the
+    retained projection (live row and retained row agree)."""
+    owner = _auth(client, 61)
+    owner_id = _me(client, owner)
+    notebook_id = _create_notebook(client, owner, "仅检索标记")
+    with _repo()._write() as db:
+        _insert_ask_job(
+            db, "ask-answer", notebook_id, owner_id, "2026-08-01T10:00:00+00:00",
+            question="有回答的问题", submitted_via="mcp",
+        )
+        _insert_ask_job(
+            db, "ask-evidence", notebook_id, owner_id, "2026-08-01T11:00:00+00:00",
+            question="只检索的问题", status="done", submitted_via="mcp",
+            output="evidence",
+        )
+
+    def _outputs(headers, **params):
+        body = client.get(
+            f"/api/admin/users/{owner_id}/activity",
+            params={"activity_type": "ask", **params}, headers=headers,
+        ).json()
+        return {item["id"]: item["output"] for item in body["items"]}
+
+    assert _outputs(owner) == {"ask-answer": "answer", "ask-evidence": "evidence"}
+    detail = client.get(f"/api/admin/users/{owner_id}/asks/ask-evidence", headers=owner)
+    assert detail.status_code == 200
+    assert detail.json()["output"] == "evidence"
+    assert detail.json()["answer"] is None
+    answer_detail = client.get(f"/api/admin/users/{owner_id}/asks/ask-answer", headers=owner)
+    assert answer_detail.json()["output"] == "answer"
+
+    assert client.delete(
+        f"/api/notebooks/{notebook_id}", headers=owner
+    ).status_code == 202
+    from app.services import background_jobs
+    background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
+    admin = _auth_admin(client)
+    assert _outputs(admin) == {"ask-answer": "answer", "ask-evidence": "evidence"}
+    questions = client.get("/api/admin/questions", headers=admin).json()
+    assert {
+        item["id"]: item["output"]
+        for item in questions["items"] if item["id"].startswith("ask-")
+    } == {"ask-answer": "answer", "ask-evidence": "evidence"}
 
 
 def test_activity_type_query_rejects_unknown_value(client):

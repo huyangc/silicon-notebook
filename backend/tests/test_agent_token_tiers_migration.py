@@ -59,7 +59,7 @@ def _snapshot(database) -> dict:
 def test_upgrade_rewrites_every_token_to_tiers(repo):
     database = repo._runtime.database
     _seed_at_v88(database)
-    assert SqliteMigrator(database, repo.settings).migrate() == [89]
+    assert SqliteMigrator(database, repo.settings).migrate() == [89, 90]
     cases.assert_migrated(_snapshot(database))
 
 
@@ -90,9 +90,9 @@ def test_migration_logs_counts_only(repo, caplog):
 
 def test_fresh_database_is_at_v89_with_a_nullable_plaintext_column(repo):
     database = repo._runtime.database
-    assert SCHEMA_VERSION == 89
+    assert SCHEMA_VERSION >= 89
     with database.connect() as db:
-        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == 89
+        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
         column = {
             row[1]: (row[2], row[3], row[4])
             for row in db.execute("PRAGMA table_info(agent_access_tokens)")

@@ -262,6 +262,17 @@ make the tool call short rather than to keep raising ceilings: ask in `mode="chu
 push the heavy work onto the background tools (`build_kg` / `build_retrieval_index`, then
 poll `get_build_status`) which return immediately by design.
 
+### Large responses
+
+Every tool keeps its response inside a 12,000-byte budget except one: `ask_notebook` with
+`output="evidence"` skips the final synthesis and returns the whole evidence the synthesis step
+would have received, in one call and unpaged. Its size follows the synthesis budget and is capped
+server-side at 524,288 bytes (see the exception in the product and API reference), so it can be far
+larger than any other result. MCP clients usually cap tool output themselves and cut a larger
+response off. In **Claude Code** that cap is the `MAX_MCP_OUTPUT_TOKENS` environment variable; export
+a higher value (for example `export MAX_MCP_OUTPUT_TOKENS=200000`) in the shell that launches
+`claude` before using `output="evidence"`. Other clients have their own equivalent setting.
+
 ## 5. First Agent task
 
 Global Ask calls `ask_global` directly, without `select_notebook`. For example:
@@ -410,6 +421,7 @@ A `401` at step 1 is a token problem. `400 Missing session ID` at step 3 means t
 | A `reasoning` `ask_notebook` returns normally with `status: "needs_clarification"` and no answer | Not a failure: the same understanding step the web UI runs found an ambiguity that would change the retrieval direction, and no conversation or job was created. Relay every `intent.ambiguities` row whose `required` is true to the user, then call again with the same `question` and `intent={"intent_token": <from the response>, "answers": [{"id", "answer"}], "resolved_question": <optional confirmed wording>}`. `chunk` mode has no understanding step. |
 | A `reasoning` `ask_notebook` fails with "请先回答所有必填澄清问题" or "问题理解与当前问题不匹配" | The reply failed the same freeze validation HTTP `/ask` applies: a required ambiguity has no answer, or this call's `question` differs from the first call's. Fill in the answers, keep `question` identical to the first call, and retry. |
 | A `reasoning` `ask_notebook` fails with "intent_token 无效或已过期" | Clarification contracts live only in the current MCP session, under the currently selected notebook, and only the latest 8 are kept; a new session, another `select_notebook` call (which clears every handle of the session), or 8 further clarifications invalidate the handle. Ask again without `intent` to get a fresh contract. A handle survives a successful submission, so a failed engine run can be retried with the same answers. |
+| An `ask_notebook(output="evidence")` result is cut off or replaced by a "too large" message on the client side | The client's own tool-output cap, not the server: evidence is sized by the synthesis budget (up to 524,288 bytes) rather than the 12,000-byte rail. Raise the cap (§4 "Large responses"; in Claude Code, `MAX_MCP_OUTPUT_TOKENS`). |
 | `406 Not Acceptable` on `POST /mcp/` | The request accepted only `application/json`. The transport answers over SSE so progress notifications can reach the client during a long call; send `accept: application/json, text/event-stream`, which the Streamable HTTP spec requires and every real client already does. |
 | `400 Bad Request: Missing session ID` | A tool call reached the server before `initialize` plus `notifications/initialized`, or the `MCP-Session-Id` header was lost. Real clients handle this; hand-written `curl` must not skip it (§8). |
 | Claude Code sends a literal `${...}` as the token | The variable was not exported in the shell that launched `claude`, or its name is misspelled — an undefined variable is passed through verbatim. Export it and start a new session. |

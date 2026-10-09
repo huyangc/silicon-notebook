@@ -243,6 +243,7 @@ export default function AdminQuestionsPage() {
                           <td>
                             <span className={`questions-kind questions-kind-${item.type}`}>{item.type === "ask" ? "问答" : "深度报告"}</span>
                             {item.scope === "global" && <span className="questions-scope questions-scope-global">全局</span>}
+                            {item.type === "ask" && item.output === "evidence" && <span className="questions-scope questions-scope-retrieval">仅检索</span>}
                           </td>
                           <td><span className={`questions-via questions-via-${item.submitted_via || "unknown"}`}>{submittedViaLabel(item.submitted_via)}</span></td>
                           <td className="questions-question">{item.question}</td>

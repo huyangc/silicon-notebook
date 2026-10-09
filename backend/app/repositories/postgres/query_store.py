@@ -930,7 +930,7 @@ class QueryStore:
             "COALESCE(NULLIF(u.username,''),a.created_by) AS username,"
             "a.notebook_id,COALESCE(n.name,'') AS notebook_name,"
             "COALESCE(NULLIF(ans.question,''),a.question) AS question,"
-            "a.status,a.created_at,a.submitted_via FROM ask_jobs a "
+            "a.status,a.created_at,a.submitted_via,a.output FROM ask_jobs a "
             "JOIN users u ON u.id=a.created_by "
             "LEFT JOIN answers ans ON ans.id=a.answer_id "
             "LEFT JOIN notebooks n ON n.id=a.notebook_id "
@@ -939,14 +939,15 @@ class QueryStore:
             "COALESCE(NULLIF(u.username,''),g.user_id) AS username,"
             "''::text AS notebook_id,''::text AS notebook_name,"
             "COALESCE(g.payload_json::jsonb->>'question','') AS question,"
-            "g.status,NULLIF(g.created_at,'')::timestamptz AS created_at,g.submitted_via "
+            "g.status,NULLIF(g.created_at,'')::timestamptz AS created_at,g.submitted_via,"
+            "'answer'::text AS output "
             "FROM global_ask_jobs g JOIN users u ON u.id=g.user_id "
             "UNION ALL "
             "SELECT 'report'::text AS type,'notebook'::text AS scope,r.id,"
             "r.created_by AS user_id,"
             "COALESCE(NULLIF(u.username,''),r.created_by) AS username,"
             "r.notebook_id,COALESCE(n.name,'') AS notebook_name,r.question,"
-            "r.status,r.created_at,r.submitted_via FROM reports r "
+            "r.status,r.created_at,r.submitted_via,'answer'::text AS output FROM reports r "
             "JOIN users u ON u.id=r.created_by "
             "LEFT JOIN notebooks n ON n.id=r.notebook_id "
             "UNION ALL "
@@ -954,7 +955,7 @@ class QueryStore:
             "h.record_id AS id,h.actor_id AS user_id,"
             "COALESCE(NULLIF(u.username,''),h.actor_id) AS username,"
             "h.notebook_id,h.notebook_name,h.question,h.status,h.created_at,"
-            "h.submitted_via "
+            "h.submitted_via,h.output "
             "FROM retained_user_activity h "
             "LEFT JOIN users u ON u.id=h.actor_id "
             "WHERE h.activity_type IN ('ask','report') "
@@ -994,7 +995,7 @@ class QueryStore:
             rows = db.execute(
                 cte
                 + "SELECT type,scope,id,user_id,username,notebook_id,notebook_name,"
-                "question,status,created_at,submitted_via FROM questions "
+                "question,status,created_at,submitted_via,output FROM questions "
                 + where
                 + f" ORDER BY {_absolute_instant('created_at')} DESC,"
                 "id COLLATE \"C\" DESC LIMIT %s OFFSET %s",
@@ -1243,7 +1244,7 @@ class QueryStore:
                 ask_params.extend(ask_range_params)
                 ask_rows = db.execute(
                     "SELECT id, notebook_id, created_at, asked_at, conversation_id, "
-                    "question, mode, status, answer_id, error, submitted_via FROM ask_jobs "
+                    "question, mode, status, answer_id, error, submitted_via, output FROM ask_jobs "
                     f"WHERE created_by = %s{ask_notebook_clause}"
                     f"{ask_range_clause} "
                     f"ORDER BY {_absolute_instant('created_at')} DESC, "
@@ -1424,6 +1425,7 @@ class QueryStore:
                     "answer_id": row["answer_id"],
                     "error": row["error"],
                     "submitted_via": row["submitted_via"],
+                    "output": row["output"],
                 }
             )
         for row in global_rows:
@@ -1515,6 +1517,7 @@ class QueryStore:
                     "answer_id": "",
                     "error": "",
                     "submitted_via": row["submitted_via"],
+                    "output": row["output"],
                 }
             elif row["activity_type"] == "source":
                 item = {
@@ -1711,6 +1714,9 @@ class QueryStore:
             "nb.name AS notebook_name "
             "FROM ask_jobs j JOIN notebooks nb ON nb.id = j.notebook_id "
             f"WHERE j.created_by = %s AND j.status IN ({placeholders}) "
+            # A retrieval-only (output='evidence') run has no conversation to
+            # open, so it is never a pending action.
+            "AND j.output = 'answer' "
             f"AND nb.{access_sql.NOTEBOOK_LIVE_SQL} AND "
             + access_sql.read_access_clause()
             + f" ORDER BY {_absolute_instant('j.created_at')} DESC, j.id DESC "

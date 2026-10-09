@@ -56,6 +56,7 @@ from app.models.ask import (
     ConversationTurn,
     FeedbackRequest,
     FeedbackResponse,
+    StoredAskOutput,
     StoredSubmittedVia,
 )
 from app.domain.global_ask_attribution import attribution_sql
@@ -327,6 +328,7 @@ class AskStateStore:
         user_id: str,
         *,
         submitted_via: StoredSubmittedVia = "",
+        output: StoredAskOutput = "answer",
     ) -> tuple[str, str]:
         """建/接续会话 + 插入 running 的 ask_jobs 行,一个写事务原子提交。
         就地把解析出的 conversation_id 写回 payload(与基线同一时点——在事务内、
@@ -334,7 +336,12 @@ class AskStateStore:
         使随后的 handler(_ensure_conversation)接续同一会话、不另建。
         返回 (job_id, conversation_id)。cancel-event 注册留在 facade 编排。
 
-        ALWAYS creates. ``payload.client_request_id`` is deliberately NOT
+        ``output="evidence"``(仅检索的 MCP 提问):不建/不续会话,job 行
+        conversation_id 为 ''、output 为 'evidence',``payload.conversation_id``
+        原样保留(引擎只读其历史、绝不追加)。其余恒为 'answer'。
+
+        ALWAYS creates a job (and, unless ``output="evidence"``, a
+        conversation). ``payload.client_request_id`` is deliberately NOT
         persisted here (the row's key stays NULL): this is the non-idempotent
         begin the synchronous ``/ask`` route and compatibility callers use, and
         writing the key would make a repeated keyed call trip the unique index
@@ -345,12 +352,20 @@ class AskStateStore:
         job_id = self.seams.new_id("askjob")
         with self.database.write() as db:
             self.database.begin_guarded_write(db)
-            conversation_id = self.ensure_conversation(
-                db, notebook_id, payload.conversation_id, question, user_id)
-            payload.conversation_id = conversation_id
+            if output == "evidence":
+                # Retrieval-only: no conversation is created or touched and
+                # ``payload.conversation_id`` stays as the caller sent it (it
+                # may name a conversation the engine reads history from, never
+                # one it appends to). The job row carries '' so no surface
+                # mistakes it for a re-attachable in-flight conversation.
+                conversation_id = ""
+            else:
+                conversation_id = self.ensure_conversation(
+                    db, notebook_id, payload.conversation_id, question, user_id)
+                payload.conversation_id = conversation_id
             self._insert_job_row(
                 db, job_id, notebook_id, conversation_id, user_id, mode, payload, now,
-                client_request_id=None, submitted_via=submitted_via)
+                client_request_id=None, submitted_via=submitted_via, output=output)
         return job_id, conversation_id
 
     @staticmethod
@@ -366,14 +381,16 @@ class AskStateStore:
         *,
         client_request_id: "str | None",
         submitted_via: StoredSubmittedVia,
+        output: StoredAskOutput = "answer",
     ) -> None:
         db.execute(
             "INSERT INTO ask_jobs (id,notebook_id,conversation_id,created_by,mode,question,"
             "asked_at,client_request_id,status,trace_json,answer_id,error,created_at,"
-            "updated_at,submitted_via) VALUES (?,?,?,?,?,?,?,?, 'running','','','',?,?,?)",
+            "updated_at,submitted_via,output) "
+            "VALUES (?,?,?,?,?,?,?,?, 'running','','','',?,?,?,?)",
             (job_id, notebook_id, conversation_id, user_id, mode,
              payload.question.strip(), payload.asked_at, client_request_id,
-             now, now, submitted_via))
+             now, now, submitted_via, output))
 
     def find_job_for_client_request(
         self, user_id: str, client_request_id: str,
@@ -633,7 +650,7 @@ class AskStateStore:
         with self.database.connect() as db:
             job_rows = db.execute(
                 "SELECT id, question, status, created_at FROM ask_jobs "
-                "WHERE notebook_id = ? AND created_by = ? "
+                "WHERE notebook_id = ? AND created_by = ? AND output = 'answer' "
                 "ORDER BY created_at DESC, id DESC LIMIT ?",
                 (notebook_id, user_id, job_limit),
             ).fetchall()
@@ -650,7 +667,8 @@ class AskStateStore:
                 step_rows = db.execute(
                     "SELECT t.job_id AS job_id, t.step_json AS step_json "
                     "FROM ask_trace_steps t JOIN ask_jobs j ON j.id = t.job_id "
-                    f"WHERE j.notebook_id = ? AND j.created_by = ? AND t.job_id IN ({placeholders}) "
+                    f"WHERE j.notebook_id = ? AND j.created_by = ? AND j.output = 'answer' "
+                    f"AND t.job_id IN ({placeholders}) "
                     "ORDER BY j.created_at DESC, j.id DESC, t.seq ASC LIMIT ?",
                     (notebook_id, user_id, *by_job.keys(), step_limit),
                 ).fetchall()
@@ -768,7 +786,7 @@ class AskStateStore:
                 # ReasoningRetriever(mode 恒 reasoning)注入,chunk/graph run
                 # 学出的确定性行为翻成 reflect 建议既不可执行,还会在非
                 # reasoning 流量占主导的部署里挤占全部 offered 席位。
-                "AND mode = 'reasoning' "
+                "AND mode = 'reasoning' AND output = 'answer' "
                 f"{partition_sql}"
                 "ORDER BY created_at DESC, id DESC LIMIT ?",
                 (*partition_params, job_limit),
@@ -782,7 +800,7 @@ class AskStateStore:
                 step_rows = db.execute(
                     "SELECT t.job_id AS job_id, t.step_json AS step_json "
                     "FROM ask_trace_steps t JOIN ask_jobs j ON j.id = t.job_id "
-                    f"WHERE t.job_id IN ({placeholders}) "
+                    f"WHERE t.job_id IN ({placeholders}) AND j.output = 'answer' "
                     "ORDER BY j.created_at DESC, j.id DESC, t.seq ASC LIMIT ?",
                     (*by_run.keys(), step_limit),
                 ).fetchall()
@@ -936,7 +954,7 @@ class AskStateStore:
         with self.database.connect() as db:
             rows = db.execute(
                 "SELECT question, created_at FROM ask_jobs "
-                "WHERE created_by = ? AND status = 'done' "
+                "WHERE created_by = ? AND status = 'done' AND output = 'answer' "
                 # codex #535 R10 P2:julianday 先行——created_at 文本序在 offset
                 # 混排(DST/合库)下不是时间序,采样会漏掉更新的问题;与 PG 的
                 # timestamptz 序对齐(「Ask 会话即时入历史」同款红线)。
@@ -961,7 +979,8 @@ class AskStateStore:
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT id,notebook_id,conversation_id,created_by,mode,question,status,"
-                "answer_id,error,asked_at FROM ask_jobs WHERE id=?", (job_id,)).fetchone()
+                "answer_id,error,asked_at,output FROM ask_jobs WHERE id=?",
+                (job_id,)).fetchone()
             if row is None:
                 raise KeyError(job_id)
             trace = self.read_trace(db, job_id)
@@ -973,7 +992,7 @@ class AskStateStore:
                 "conversation_id": row["conversation_id"], "created_by": row["created_by"],
                 "mode": row["mode"], "question": row["question"], "status": row["status"],
                 "trace": trace, "answer_id": row["answer_id"], "error": row["error"],
-                "asked_at": row["asked_at"] or ""}
+                "asked_at": row["asked_at"] or "", "output": row["output"]}
 
     def ask_answer_detail(self, answer_id: str) -> "dict | None":
         """按 answer_id 直查单条答案(一条主键查询,不加载会话其余轮次)。
@@ -1021,7 +1040,7 @@ class AskStateStore:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT id,notebook_id,conversation_id,created_by,mode,question,status,"
-                "answer_id,error,asked_at FROM ask_jobs WHERE id=? AND created_by=?",
+                "answer_id,error,asked_at,output FROM ask_jobs WHERE id=? AND created_by=?",
                 (job_id, actor_id),
             ).fetchone()
             if row is not None and db.execute(
@@ -1044,6 +1063,7 @@ class AskStateStore:
                     "answer_id": row["answer_id"],
                     "error": row["error"],
                     "asked_at": row["asked_at"] or "",
+                    "output": row["output"],
                 }
                 answer_detail = None
                 if row["answer_id"]:

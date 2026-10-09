@@ -160,7 +160,7 @@ def test_rerun_changes_nothing_and_never_requeues_a_finished_notebook(upgraded):
 def test_fresh_database_has_the_marker_defaulting_to_isolated(repo):
     database = repo._runtime.database
     with database.connect() as db:
-        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == 89
+        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == sqlite_migrations.SCHEMA_VERSION
         column = {
             row[1]: (row[2], row[3], row[4])
             for row in db.execute("PRAGMA table_info(unified_kg_state)")

@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 69
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 70
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -69,10 +69,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 69
-    assert migrator.migrate() == 69
-    assert migrator.current_version() == 69
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 69
+    assert migrator.migrate() == 70
+    assert migrator.migrate() == 70
+    assert migrator.current_version() == 70
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 70
 
 
 @pytest.mark.postgres_integration
@@ -80,7 +80,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 69
+    assert migrator.migrate() == 70
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -163,7 +163,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 69
+        assert PostgresMigrator(databases[1]).migrate() == 70
     finally:
         for database in databases:
             database.close()
@@ -257,6 +257,7 @@ def test_packaged_index_migration_phases_are_exact():
         (67, "memory_kg_isolation"),
         (68, "promotion_provenance"),
         (69, "agent_token_tiers"),
+        (70, "ask_job_output"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -746,6 +747,8 @@ def test_packaged_index_migration_phases_are_exact():
     assert index_declarations(68) == []
     # Migration 69 (Agent token tiers) adds a nullable column: no index.
     assert index_declarations(69) == []
+    # Migration 70 (ask job output kind) adds a defaulted column: no index.
+    assert index_declarations(70) == []
     # Spelled without ``IF NOT EXISTS`` on purpose, and that is asserted
     # rather than merely commented: app/migration/shadow/postgres_catalog.py
     # parses CREATE INDEX straight out of these files to build the catalog

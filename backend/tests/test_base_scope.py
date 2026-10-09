@@ -1273,7 +1273,7 @@ def test_streaming_receipt_reaches_the_detached_worker():
     done = threading.Event()
 
     class _State:
-        def begin_durable_job(self, notebook_id, payload, mode, user_id, *, submitted_via=""):
+        def begin_durable_job(self, notebook_id, payload, mode, user_id, *, submitted_via="", output="answer"):
             payload.conversation_id = "conv-1"
             return "askjob-1", "conv-1"
 

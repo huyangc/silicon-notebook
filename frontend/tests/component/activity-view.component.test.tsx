@@ -811,6 +811,34 @@ test("选中一条提问时取回它的详情，并复用既有推理轨迹面�
 });
 
 
+test("只检索的提问详情说明未生成回答，不渲染答案面板也不说「没有留下答案」", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([ask("a1", "这次问了什么")]));
+  mocks.fetchUserAskDetail.mockResolvedValue({
+    job_id: "a1",
+    notebook_id: "nb-1",
+    conversation_id: "",
+    question: "这次问了什么",
+    mode: "reasoning",
+    status: "done",
+    output: "evidence",
+    asked_at: "2026-08-04T10:29:00",
+    answered_at: "2026-08-04T10:31:00",
+    error: "",
+    trace: [],
+    answer: null,
+  });
+  const { container } = view();
+
+  await user.click(await screen.findByText("这次问了什么"));
+
+  expect(await screen.findByText("仅检索，未生成回答")).toBeInTheDocument();
+  expect(container.querySelector(".activity-answer")).toBeNull();
+  expect(screen.queryByText("这次提问没有留下答案")).not.toBeInTheDocument();
+});
+
+
 // F2:选中一条报告时取回它的只读详情正文,复用 report-view.tsx 的 ReportMarkdown。
 test("选中一条报告时取回它的详情，报告正文渲染出来", async () => {
   const user = userEvent.setup();

@@ -38,6 +38,8 @@ export type ActivityAsk = {
   error: string;
   /** 提交入口；空串表示未记录，界面文案见 submitted-via.ts。 */
   submitted_via: "" | SubmittedVia;
+  /** "evidence" = 只检索、没有生成回答的提问；缺省按 "answer"（旧后端不带该字段）。 */
+  output?: "answer" | "evidence";
   notebook_name?: string;
   notebook_deleted_at?: string;
   retained_until?: string;
@@ -111,6 +113,8 @@ export type AskDetail = {
   question: string;
   mode: string;
   status: string;
+  /** "evidence" = 只检索、没有生成回答；缺省按 "answer"。 */
+  output?: "answer" | "evidence";
   asked_at: string;
   answered_at: string;
   error: string;

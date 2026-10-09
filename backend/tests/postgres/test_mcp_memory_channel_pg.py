@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from tests.test_mcp_memory_channel_e2e import (
+    assert_evidence_channel_through_mcp,
     assert_memory_channel_through_mcp,
     assert_search_channel_through_mcp,
     build_mcp_app,
@@ -49,3 +50,10 @@ async def test_search_notebook_context_memory_channel_on_postgres(
     postgres_env, monkeypatch
 ):
     await assert_search_channel_through_mcp(postgres_env, monkeypatch)
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_evidence_memory_channel_and_ceiling_on_postgres(
+    postgres_env, monkeypatch
+):
+    await assert_evidence_channel_through_mcp(postgres_env, monkeypatch)

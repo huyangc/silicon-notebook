@@ -49,6 +49,48 @@ def test_begin_creates_running_job_and_conversation(repo):
     assert row["submitted_via"] == ""
 
 
+def test_begin_evidence_job_writes_a_log_row_but_no_conversation(repo):
+    """``output="evidence"`` (MCP ask_notebook, retrieval only): one ask_jobs row
+    marked 'evidence' with an empty conversation id, no conversations row, and
+    the caller's ``payload.conversation_id`` left exactly as sent (the engine
+    may read that conversation's history; it never appends to it)."""
+    nb = _nb(repo)
+    store = repo._runtime.ask_state
+    user_id = repo.current_user().id
+    with repo._connect() as db:
+        conversations_before = db.execute(
+            "SELECT COUNT(*) AS n FROM conversations"
+        ).fetchone()["n"]
+
+    payload = AskRequest(question="Q-evidence?", mode="chunk", conversation_id="conv-mine")
+    job_id, conversation_id = store.begin_durable_job(
+        nb.id, payload, "chunk", user_id, submitted_via="mcp", output="evidence")
+
+    assert conversation_id == ""
+    assert payload.conversation_id == "conv-mine"
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT conversation_id,mode,status,answer_id,submitted_via,output "
+            "FROM ask_jobs WHERE id=?", (job_id,)
+        ).fetchone()
+        conversations_after = db.execute(
+            "SELECT COUNT(*) AS n FROM conversations"
+        ).fetchone()["n"]
+    assert dict(row) == {
+        "conversation_id": "", "mode": "chunk", "status": "running",
+        "answer_id": "", "submitted_via": "mcp", "output": "evidence",
+    }
+    assert conversations_after == conversations_before
+    assert repo.ask_job_detail(job_id)["output"] == "evidence"
+
+    # The default stays an answer job with its own conversation.
+    answer_payload = AskRequest(question="Q-answer?", mode="chunk")
+    answer_job, answer_conversation = store.begin_durable_job(
+        nb.id, answer_payload, "chunk", user_id, submitted_via="mcp")
+    assert answer_conversation
+    assert repo.ask_job_detail(answer_job)["output"] == "answer"
+
+
 def test_begin_preserves_full_valid_question(repo):
     nb = _nb(repo)
     question = "完整提问：" + "电路噪声分析" * 60
@@ -193,8 +235,10 @@ def test_cancel_endpoint_wins_before_final_answer_save_atomically(tmp_path, monk
     real_begin = store.begin_durable_job
     real_save = store.save_answer_for_job
 
-    def capture_begin(notebook_id, payload, mode, user_id, *, submitted_via=""):
-        result = real_begin(notebook_id, payload, mode, user_id, submitted_via=submitted_via)
+    def capture_begin(notebook_id, payload, mode, user_id, *, submitted_via="", output="answer"):
+        result = real_begin(
+            notebook_id, payload, mode, user_id,
+            submitted_via=submitted_via, output=output)
         captured["job_id"], captured["conversation_id"] = result
         job_started.set()
         return result
@@ -258,8 +302,10 @@ def test_sync_ask_cancel_endpoint_returns_no_final_answer_or_empty_conversation(
     real_begin = store.begin_durable_job
     real_save = store.save_answer_for_job
 
-    def capture_begin(notebook_id, payload, mode, user_id, *, submitted_via=""):
-        result = real_begin(notebook_id, payload, mode, user_id, submitted_via=submitted_via)
+    def capture_begin(notebook_id, payload, mode, user_id, *, submitted_via="", output="answer"):
+        result = real_begin(
+            notebook_id, payload, mode, user_id,
+            submitted_via=submitted_via, output=output)
         captured["job_id"], captured["conversation_id"] = result
         job_started.set()
         return result
@@ -317,9 +363,11 @@ def test_begin_and_finish_delegate_persistence_to_runtime_ask_state(repo, monkey
     store = repo._runtime.ask_state
     real_begin, real_finish = store.begin_durable_job, store.finish_job
 
-    def spy_begin(notebook_id, payload, mode, user_id, *, submitted_via=""):
+    def spy_begin(notebook_id, payload, mode, user_id, *, submitted_via="", output="answer"):
         seen.append(("begin", user_id))
-        return real_begin(notebook_id, payload, mode, user_id, submitted_via=submitted_via)
+        return real_begin(
+            notebook_id, payload, mode, user_id,
+            submitted_via=submitted_via, output=output)
 
     def spy_finish(job_id, status, *, answer_id="", error=""):
         seen.append(("finish", status))

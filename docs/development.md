@@ -48,7 +48,8 @@ contributor constraints, not a second implementation history.
 - Application stage envelopes under `backend/app/application` stay immutable and
   dependency-light. Extend its explicit import allowlist deliberately; do not allow bare
   root imports that bind `app`. Ask/Report stage seams must preserve the exact source
-  scope, retrieval run, actor, cancellation token, and connection probe. Revalidate
+  scope, retrieval run, actor, cancellation token, and connection probe. Evidence-only Ask
+  (`output="evidence"`) is refused at the commit boundary: it never saves an answer or conversation. Revalidate
   authority at the existing boundaries; violations fail loudly. Stage wrappers hold
   neither a database connection nor an outer leaf-I/O slot. Core owns final audit and
   persistence. Post-terminal observers cannot rewrite committed artifacts or reverse
