@@ -675,6 +675,34 @@ def test_every_workload_reads_stray_backslashes_literally():
         provider.close()
 
 
+def test_every_workload_reads_a_duplicated_opening_as_the_object_written():
+    # DeepSeek-V4-Flash, 2026-10-09: ``{"{"answer": ...}``. query_rewrite is
+    # not a repair workload and dropping the duplicated opening is not a
+    # repair; a stray backslash inside is read after the prefix and both
+    # absorptions are reported.
+    bs = "\\"
+    obj = '{"query":"增益 50' + bs + '%"}'
+    events = _EventLog()
+    provider = _provider(chat=_Chat('{"' + obj), events=events)
+    try:
+        raw = provider.chat("query_rewrite").chat_json(
+            [{"role": "user", "content": "q"}], '{"query":""}'
+        )
+
+        assert json.loads(raw) == {"query": "增益 50" + bs + "%"}
+        repairs = [
+            (event["status"], event["reason"])
+            for event in events.events
+            if event.get("kind") == "model_json_repair"
+        ]
+        assert sorted(repairs) == [
+            ("escaped", "stray_backslash"), ("trimmed", "duplicated_open"),
+        ]
+        assert "增益" not in json.dumps(events.events, ensure_ascii=False)
+    finally:
+        provider.close()
+
+
 def test_unapproved_workload_remains_strict_when_repair_is_on():
     provider = _provider(chat=_Chat('{query: "q"}'))
     try:

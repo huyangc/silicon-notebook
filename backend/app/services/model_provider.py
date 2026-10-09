@@ -638,6 +638,10 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                 self._emit_json_repair_event(
                     status="trimmed", reason="trailing_data"
                 )
+            if parsed.duplicated_open:
+                self._emit_json_repair_event(
+                    status="trimmed", reason="duplicated_open"
+                )
             if parsed.stray_backslashes:
                 self._emit_json_repair_event(
                     status="escaped", reason="stray_backslash"
