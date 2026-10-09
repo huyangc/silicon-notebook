@@ -127,7 +127,8 @@
 
 .agent-token-actions {
   display: flex;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
@@ -161,7 +162,8 @@ strong.agent-access-warn { font-weight: 600; }
 .agent-token-list .agent-token-fold { min-height: 0; margin-left: 4px; border: 0; padding: 0; background: none; color: var(--blue); font-size: 11px; }
 .agent-token-list button.copied { border-color: #b7dcc5; color: var(--green); }
 .agent-token-list .agent-token-legacy { font-size: 11px; }
-.agent-token-manual { display: grid; gap: 4px; }
+.agent-token-manual { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; }
+.agent-token-manual .agent-token-copy-feedback { grid-column: 1 / -1; }
 .agent-token-manual input { width: 100%; min-height: 34px; border: 1px solid #cfd6e1; border-radius: 9px; padding: 0 10px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 .agent-token-confirm { color: #a52d2d; font-size: 12px; }
@@ -206,6 +208,9 @@ strong.agent-access-warn { font-weight: 600; }
 
 @media (max-width: 560px) {
   .agent-issued-token { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 720px) {
   .agent-token-row { align-items: stretch; flex-direction: column; }
   .agent-token-actions { justify-content: flex-start; }
 }

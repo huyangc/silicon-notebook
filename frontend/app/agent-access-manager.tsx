@@ -9,7 +9,7 @@
 // (按钮自身 + 紧邻处),不走本组件顶部那条加载/签发共用的错误条。保存是整体替换
 // (`PUT /agent-tokens/{id}/access`),服务端每次工具调用都实时重读 token 状态,所以
 // 保存成功即对已连接的 Agent 生效,不需要重签或重连。
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Check, Copy, KeyRound, Pencil, Plus, X } from "lucide-react";
 
 import {
@@ -54,6 +54,8 @@ import "./agent-access.css";
 /** 「已保存」在行内停留的时长;与许愿墙卡片提示同一量级。 */
 const TOKEN_SAVED_NOTICE_MS = 3000;
 const TOKEN_COPIED_NOTICE_MS = 3000;
+/** 剪贴板不可用时明文会摆在页面上,到点自动收起。 */
+const TOKEN_MANUAL_VISIBLE_MS = 60_000;
 
 type RowCopyState =
   | { status: "copying" }
@@ -112,6 +114,8 @@ function AgentAccessFields({
   disabled?: boolean;
 }) {
   const [filter, setFilter] = useState("");
+  // 签发表单与行内编辑器可能同时挂载,说明节点的 id 必须按实例区分。
+  const idPrefix = useId();
   const known = new Set(notebooks.map((notebook) => notebook.id));
   const owned = useMemo(() => ownedNotebookIdSet(notebooks), [notebooks]);
   const options = [
@@ -172,7 +176,7 @@ function AgentAccessFields({
           <button type="button" disabled={disabled || !anyScopeOn} onClick={() => setDraft((current) => ({ ...current, scopes: setAllScopes(current.scopes, selectableScopes, false) }))}>取消全选</button>
         </div>
         {AGENT_SCOPE_OPTIONS.map((scope) => {
-          const hintId = `agent-scope-hint-${scope.value}`;
+          const hintId = `${idPrefix}-scope-hint-${scope.value}`;
           const blocked = scope.ownerOnly && ownerBlocked;
           return (
             <div className="agent-scope-row" key={scope.value}>
@@ -240,6 +244,8 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
   const issuedTokenRef = useRef<HTMLTextAreaElement | null>(null);
   const mountedRef = useRef(true);
   const copyTimersRef = useRef(new Map<string, number>());
+  const copyInflightRef = useRef(new Set<string>());
+  const selectedProfileRef = useRef("");
   const manualTokenRefs = useRef(new Map<string, HTMLInputElement | null>());
 
   useEffect(() => subscribeMemorySessionAbort(sessionSignal, () => {
@@ -267,6 +273,17 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
   }, []);
 
   useEffect(() => {
+    // 行变成已撤销 / 不再可复制(含被列表刷新替换)后,摆在页面上的明文必须收起。
+    const stale = Object.entries(rowCopy).filter(([id, state]) => {
+      if (state.status !== "manual") return false;
+      const row = tokens.find((token) => token.id === id);
+      return !row || row.revoked_at || !row.copyable;
+    });
+    if (!stale.length) return;
+    stale.forEach(([id]) => setRowCopyState(id, null));
+  }, [tokens, rowCopy]);
+
+  useEffect(() => {
     if (!savedTokenId) return;
     const timer = window.setTimeout(() => setSavedTokenId(null), TOKEN_SAVED_NOTICE_MS);
     return () => window.clearTimeout(timer);
@@ -290,7 +307,14 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
       agentApi<NotebookSummary[]>("/notebooks", { signal: controller.signal }),
     ]).then(([nextProfiles, nextTokens, nextNotebooks]) => {
       if (controller.signal.aborted || epoch !== requestEpochRef.current) return;
-      setProfiles(nextProfiles);
+      // 选中的 Profile 若在后面的页里(刷新回到第一页后不在 nextProfiles 里),不能丢掉它。
+      const keptId = selectedProfileRef.current;
+      setProfiles((currentProfiles) => {
+        const kept = keptId && !nextProfiles.some((profile) => profile.id === keptId)
+          ? currentProfiles.find((profile) => profile.id === keptId)
+          : undefined;
+        return kept ? [...nextProfiles, kept] : nextProfiles;
+      });
       setTokens(withNewerSaves(nextTokens, saveSeq));
       profileOffsetRef.current = nextProfiles.length;
       tokenOffsetRef.current = nextTokens.length;
@@ -299,9 +323,12 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
       setNotebooks(nextNotebooks);
       const activeProfiles = nextProfiles.filter((profile) => profile.status === "active");
       // 只有一个启用中的 Profile 时自动选中;有多个时不替用户挑,保留仍有效的当前选择。
-      setSelectedProfile((current) => activeProfiles.some((profile) => profile.id === current)
-        ? current
-        : activeProfiles.length === 1 ? activeProfiles[0].id : "");
+      setSelectedProfile((current) => {
+        if (activeProfiles.some((profile) => profile.id === current)) return current;
+        // 当前选择在后面的页里:只要第一页没有它的停用记录,就保留(服务端签发时仍会复核)。
+        if (current && agentPageHasMore(nextProfiles) && !nextProfiles.some((profile) => profile.id === current)) return current;
+        return activeProfiles.length === 1 ? activeProfiles[0].id : "";
+      });
       setDraft((current) => {
         if (current.default_notebook_id && nextNotebooks.some((notebook) => notebook.id === current.default_notebook_id)) {
           return current;
@@ -472,12 +499,14 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
       method: "PATCH",
       body: JSON.stringify({ status: "revoked" }),
     });
-    if (profile) setRefresh((value) => value + 1);
+    if (!profile) return;
+    if (selectedProfileRef.current === profileId) setSelectedProfile("");
+    setRefresh((value) => value + 1);
   }
 
   async function issueToken(event: FormEvent) {
     event.preventDefault();
-    if (!canIssueAgentToken(selectedProfile, draft)) return;
+    if (!canIssueAgentToken(selectedProfile, draft, ownedIds)) return;
     const token = await mutate<AgentTokenIssued>(
       `/agent-profiles/${encodeURIComponent(selectedProfile)}/tokens`,
       { method: "POST", body: JSON.stringify(agentTokenRequest(selectedProfile, draft)) },
@@ -525,26 +554,42 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
     }
   }
 
-  /** 行内「复制 token」:先向服务端取明文,再写剪贴板。结果(复制中/已复制/失败)全部落在这一行。 */
+  /** 行内「复制 token」。安全上下文里在点击的同一同步栈里就把「正在取明文的 Blob」交给
+   *  clipboard.write,保住用户激活;没有 ClipboardItem(生产常见的 http://<IP>)时退回
+   *  「先取明文再 copyTextSafely」。结果(复制中/已复制/复制失败)全部落在这一行。 */
   async function copyTokenSecret(tokenId: string) {
-    if (rowCopy[tokenId]?.status === "copying" || sessionSignal.aborted) return;
+    if (copyInflightRef.current.has(tokenId) || sessionSignal.aborted) return;
+    copyInflightRef.current.add(tokenId);
     const controller = new AbortController();
     mutationControllersRef.current.add(controller);
     setRowCopyState(tokenId, { status: "copying" });
     try {
-      const { token: secret } = await agentApi<{ token: string }>(
+      const secretPromise = agentApi<{ token: string }>(
         `/agent-tokens/${encodeURIComponent(tokenId)}/secret`,
         { signal: controller.signal },
-      );
+      ).then((result) => result.token);
+      let written: Promise<boolean> | null = null;
+      try {
+        if (typeof ClipboardItem !== "undefined" && typeof navigator !== "undefined" && typeof navigator.clipboard?.write === "function") {
+          const blob = secretPromise.then((value) => new Blob([value], { type: "text/plain" }));
+          blob.catch(() => undefined);
+          written = navigator.clipboard
+            .write([new ClipboardItem({ "text/plain": blob })])
+            .then(() => true, () => false);
+        }
+      } catch {
+        written = null;
+      }
+      const secret = await secretPromise;
       if (controller.signal.aborted || !mountedRef.current) return;
-      const copied = await copyTextSafely(secret);
+      const copied = (written ? await written : false) || await copyTextSafely(secret);
       if (!mountedRef.current) return;
       if (copied) {
         setRowCopyState(tokenId, { status: "copied" }, TOKEN_COPIED_NOTICE_MS);
         return;
       }
-      // 剪贴板不可用:把明文放进紧邻的只读框并全选,用户按 Ctrl/Cmd+C 即可。
-      setRowCopyState(tokenId, { status: "manual", secret });
+      // 剪贴板不可用:把明文放进紧邻的只读框并全选;到点自动收起,也可手动「隐藏」。
+      setRowCopyState(tokenId, { status: "manual", secret }, TOKEN_MANUAL_VISIBLE_MS);
       window.setTimeout(() => {
         const input = manualTokenRefs.current.get(tokenId);
         input?.focus();
@@ -552,12 +597,22 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
       }, 0);
     } catch (cause) {
       if (!controller.signal.aborted && mountedRef.current) {
-        setRowCopyState(tokenId, { status: "error", text: toUserMessage(cause, "复制失败，请稍后重试") });
+        setRowCopyState(tokenId, { status: "error", text: toUserMessage(cause, "复制失败，请稍后重试") }, TOKEN_COPIED_NOTICE_MS);
         // 409:已撤销或旧版本签发——按服务端现状刷新这一行的「复制」入口。
         if (httpErrorStatus(cause) === 409) void reloadLoadedTokens();
       }
     } finally {
       mutationControllersRef.current.delete(controller);
+      copyInflightRef.current.delete(tokenId);
+      // 中止/卸载路径没有写终态时,不许让这一行永远停在「复制中…」。
+      if (mountedRef.current) {
+        setRowCopy((current) => {
+          if (current[tokenId]?.status !== "copying") return current;
+          const next = { ...current };
+          delete next[tokenId];
+          return next;
+        });
+      }
     }
   }
 
@@ -569,6 +624,7 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
 
   async function revokeToken(tokenId: string) {
     setConfirmRevokeId(null);
+    setRowCopyState(tokenId, null);
     const token = await mutate<AgentTokenSummary>(`/agent-tokens/${encodeURIComponent(tokenId)}`, { method: "DELETE" });
     if (!token) return;
     setJustRevokedId(tokenId);
@@ -587,6 +643,7 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
     setEdit((current) => current && { ...current, draft: update(current.draft) });
   }
 
+  selectedProfileRef.current = selectedProfile;
   const ownedIds = useMemo(() => ownedNotebookIdSet(notebooks), [notebooks]);
   const notebookNames = useMemo(
     () => new Map(notebooks.map((notebook) => [notebook.id, notebook.name])),
@@ -760,7 +817,7 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
                         {token.copyable ? (
                           <button type="button" className={copy?.status === "copied" ? "copied" : undefined} disabled={copy?.status === "copying"} onClick={() => { void copyTokenSecret(token.id); }}>
                             {copy?.status === "copied" ? <Check size={13} /> : <Copy size={13} />}
-                            {copy?.status === "copying" ? "复制中…" : copy?.status === "copied" ? "已复制" : "复制 token"}
+                            {copy?.status === "copying" ? "复制中…" : copy?.status === "copied" ? "已复制" : copy?.status === "error" ? "复制失败" : "复制 token"}
                           </button>
                         ) : (
                           <em className="agent-token-legacy">旧版本签发，无法再复制</em>
@@ -778,6 +835,7 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
                   <div className="agent-token-manual">
                     <span className="agent-token-copy-feedback" aria-live="polite">自动复制失败，token 已全选，请按 Ctrl/Cmd+C 复制。</span>
                     <input readOnly aria-label={`${token.profile_name} 的明文 token`} value={copy.secret} ref={(node) => { manualTokenRefs.current.set(token.id, node); }} onFocus={(event) => event.currentTarget.select()} />
+                    <button type="button" onClick={() => setRowCopyState(token.id, null)}>隐藏</button>
                   </div>
                 )}
                 {editing && (
