@@ -86,10 +86,10 @@ from app.models.sources import (
     UploadedSourceSummary,
 )
 from app.models.ask import (
-    AnswerAnchor, AskRequest, AskResponse, Citation, ConversationDetail,
+    AnswerAnchor, AskEvidence, AskOutput, AskRequest, AskResponse, Citation, ConversationDetail,
     ConversationBulkDeleteResult, ConversationSummary, FeedbackRequest,
     FeedbackResponse, NotebookSearchResponse, QueryIntentContract, RuleCard,
-    StoredSubmittedVia,
+    StoredAskOutput, StoredSubmittedVia,
 )
 from app.models.knowledge import (
     DuplicateGroup, KnowledgeGraph, KnowledgeTypeCount, KnowledgeUpdate, MergeRequest,
@@ -1073,8 +1073,13 @@ class AskExecutionPort(Protocol):
         self, notebook_id: str, payload: AskRequest
     ) -> "FollowupResolution": ...
     def ask(
-        self, notebook_id: str, payload: AskRequest, *, submitted_via: StoredSubmittedVia = ""
-    ) -> AskResponse: ...
+        self,
+        notebook_id: str,
+        payload: AskRequest,
+        *,
+        submitted_via: StoredSubmittedVia = "",
+        output: AskOutput = "answer",
+    ) -> AskResponse | AskEvidence: ...
     def ask_chunk(self, notebook_id: str, payload: AskRequest, cancel_event: CancelEvent = None) -> AskResponse: ...
     def ask_reasoning(self, notebook_id: str, payload: AskRequest, on_trace: Callable[[Any], None] | None = None, cancel_event: CancelEvent = None) -> AskResponse: ...
 
@@ -3646,6 +3651,7 @@ class AskStateStorePort(Protocol):
         user_id: str,
         *,
         submitted_via: StoredSubmittedVia = "",
+        output: StoredAskOutput = "answer",
     ) -> tuple[str, str]: ...
     def begin_or_attach_durable_job(
         self,

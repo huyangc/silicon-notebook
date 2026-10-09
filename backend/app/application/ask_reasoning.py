@@ -13,7 +13,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 from app.core.ask_retrieval_policy import AskRetrievalLimits
 from app.domain.cancellation import CancelEvent
-from app.models.ask import AskResponse, QueryIntentContract
+from app.models.ask import AskEvidence, AskResponse, QueryIntentContract
 
 
 class StageBoundaryError(RuntimeError):
@@ -144,6 +144,9 @@ class PreparedReasoningAsk:
     job_id: str
     asked_at: str
     retrieval_effort: str
+    # "evidence" stops after retrieval: the draft stage returns the context
+    # the synthesis would have received and the commit stage saves nothing.
+    output: str = "answer"
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,6 +303,7 @@ class ReasoningResponseDraft:
     job_id: str
     asked_at: str
     baseline_manifest: object | None = None
+    evidence: AskEvidence | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +312,7 @@ class CommittedReasoningAnswer:
 
     response: AskResponse
     baseline_manifest: object | None = None
+    evidence: AskEvidence | None = None
 
 
 def execute_reasoning_retrieval_stage(
