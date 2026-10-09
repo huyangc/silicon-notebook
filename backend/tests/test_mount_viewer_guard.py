@@ -112,7 +112,7 @@ _SITES = {
      "participant_notebook_ids"):
         (_EXPLICIT, 1, "the source proxy / asset routes' authenticated user"),
     ("app/api/mcp_tools/citations.py",
-     "register_citation_tools.get_cited_element.load.<lambda>",
+     "_read_element.<lambda>",
      "participant_notebook_ids"):
         (_EXPLICIT, 1, "MCP: the token's owner"),
     ("app/services/public_share_recheck.py", "mounts_still_effective",

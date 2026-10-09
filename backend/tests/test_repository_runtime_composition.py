@@ -148,6 +148,7 @@ RUNTIME_ATTRIBUTES = [
     "spreadsheet_analysis",
     "unified_kg",
     "wishes",
+    "ask_intent_handles",
 ]
 
 

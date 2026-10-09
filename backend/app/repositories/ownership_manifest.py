@@ -657,7 +657,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>._prepare_complete_knowhow_row', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.optimize_knowhow_cell_stream', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/mcp_tools/_shared.py', scope='<module>.refuse_if_mirrored', kind='attribute', target='_runtime'),
-            ConsumerSite(path='backend/app/api/mcp_tools/maintenance.py', scope='<module>.register_maintenance_tools.build_kg.run', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/mcp_tools/maintenance.py', scope='<module>._start_kg_build', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._report_llm_ready', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.export_reports_endpoint', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.generate_report', kind='attribute', target='_runtime'),
@@ -1239,7 +1239,7 @@ SURFACE_MEMBERS = (
         owner='SourceIngestionService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/mcp_tools/sources.py', scope='<module>.register_source_tools.add_source_url.run', kind='attribute', target='add_url_sources'),
+            ConsumerSite(path='backend/app/api/mcp_tools/sources.py', scope='<module>._add_url_source', kind='attribute', target='add_url_sources'),
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.import_url_sources', kind='attribute', target='add_url_sources'),
         ),
         patches=(
@@ -1250,7 +1250,7 @@ SURFACE_MEMBERS = (
         owner='RepositoryRuntime.memory_retriever',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>.register_memory_context_tools.search_agent_memory.load', kind='attribute', target='agent_memory_hits'),
+            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._memory_rows', kind='attribute', target='agent_memory_hits'),
         ),
         patches=(
         ),
@@ -1275,7 +1275,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/agent_profile_routes.py', scope='<module>._profile_store', kind='attribute', target='agent_profile'),
             ConsumerSite(path='backend/app/api/mcp_tools/profiles.py', scope='<module>.register_profile_tools.add_observation.run', kind='attribute', target='agent_profile'),
-            ConsumerSite(path='backend/app/api/mcp_tools/profiles.py', scope='<module>.register_profile_tools.get_notebook_profile.load', kind='attribute', target='agent_profile'),
+            ConsumerSite(path='backend/app/api/mcp_tools/session.py', scope='<module>._profile_block', kind='attribute', target='agent_profile'),
         ),
         patches=(
         ),
@@ -1327,10 +1327,19 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.ask', kind='attribute', target='ask'),
-            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._ask_actionable', kind='attribute', target='ask'),
             ConsumerSite(path='backend/app/eval/inference.py', scope='<module>.run_inference', kind='attribute', target='ask'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='ask'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='ask'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='ask_answer_detail',
+        owner='AskStateStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/mcp_tools/ask.py', scope='<module>._read_notebook_job', kind='attribute', target='ask_answer_detail'),
         ),
         patches=(
         ),
@@ -1352,7 +1361,19 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.cancel_ask_job', kind='attribute', target='ask_job_detail'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.get_ask_job', kind='attribute', target='ask_job_detail'),
+            ConsumerSite(path='backend/app/api/mcp_tools/ask.py', scope='<module>._read_notebook_job', kind='attribute', target='ask_job_detail'),
+            ConsumerSite(path='backend/app/api/mcp_tools/ask.py', scope='<module>._run_notebook', kind='attribute', target='ask_job_detail'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='ask_job_detail'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='ask_job_origin',
+        owner='AskStateStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/mcp_tools/ask.py', scope='<module>._read_notebook_job', kind='attribute', target='ask_job_origin'),
         ),
         patches=(
         ),
@@ -1363,6 +1384,16 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/services/ask_modes.py', scope='<module>.ASK_MODES', kind='registry', target='ask_reasoning'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='ask_with_job',
+        owner='AskService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/mcp_tools/ask.py', scope='<module>._run_notebook', kind='attribute', target='ask_with_job'),
         ),
         patches=(
         ),
@@ -1717,7 +1748,7 @@ SURFACE_MEMBERS = (
         owner='MemoryService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>.register_memory_context_tools.propose_memory.create', kind='attribute', target='create_memory_candidate'),
+            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>.register_memory_proposal_tools.propose_memory.create', kind='attribute', target='create_memory_candidate'),
         ),
         patches=(
         ),
@@ -1978,7 +2009,7 @@ SURFACE_MEMBERS = (
         owner='SourceStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/mcp_tools/citations.py', scope='<module>.register_citation_tools.get_cited_element.load', kind='attribute', target='evidence_elements'),
+            ConsumerSite(path='backend/app/api/mcp_tools/citations.py', scope='<module>._read_element', kind='attribute', target='evidence_elements'),
         ),
         patches=(
         ),
@@ -2000,7 +2031,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='execute_notebook_kg_job'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='execute_notebook_kg_job'),
-            ConsumerSite(path='backend/app/api/mcp_tools/maintenance.py', scope='<module>.register_maintenance_tools.build_kg.run', kind='attribute', target='execute_notebook_kg_job'),
+            ConsumerSite(path='backend/app/api/mcp_tools/maintenance.py', scope='<module>._start_kg_build', kind='attribute', target='execute_notebook_kg_job'),
         ),
         patches=(
         ),
@@ -2056,7 +2087,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='fail_notebook_kg_job_submission'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='fail_notebook_kg_job_submission'),
-            ConsumerSite(path='backend/app/api/mcp_tools/maintenance.py', scope='<module>.register_maintenance_tools.build_kg.run', kind='attribute', target='fail_notebook_kg_job_submission'),
+            ConsumerSite(path='backend/app/api/mcp_tools/maintenance.py', scope='<module>._start_kg_build', kind='attribute', target='fail_notebook_kg_job_submission'),
         ),
         patches=(
         ),
@@ -2099,7 +2130,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._intent_history', kind='attribute', target='get_conversation'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.get_conversation', kind='attribute', target='get_conversation'),
-            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._reasoning_intent_history', kind='attribute', target='get_conversation'),
+            ConsumerSite(path='backend/app/api/mcp_tools/ask.py', scope='<module>._conversation', kind='attribute', target='get_conversation'),
             ConsumerSite(path='backend/tests/test_admin_user_activity_api.py', scope='<module>.test_ask_detail_does_not_load_full_conversation_history', kind='patch', target='get_conversation'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='get_conversation'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='get_conversation'),
@@ -2175,8 +2206,8 @@ SURFACE_MEMBERS = (
         owner='MemoryService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>.register_memory_context_tools.get_memory.load', kind='attribute', target='get_memory'),
-            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>.register_memory_context_tools.search_agent_memory.load', kind='attribute', target='get_memory'),
+            ConsumerSite(path='backend/app/api/mcp_tools/citations.py', scope='<module>._read_memory', kind='attribute', target='get_memory'),
+            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._memory_rows', kind='attribute', target='get_memory'),
         ),
         patches=(
         ),
@@ -2197,9 +2228,9 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.relink_kg', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.resolve_conflicts', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.review_all_unified_kg_merges', kind='attribute', target='get_notebook'),
-            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._run_ask_notebook', kind='attribute', target='get_notebook'),
+            ConsumerSite(path='backend/app/api/mcp_tools/ask.py', scope='<module>._run_notebook', kind='attribute', target='get_notebook'),
+            ConsumerSite(path='backend/app/api/mcp_tools/session.py', scope='<module>.register_session_tools.get_notebook.load', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/mcp_tools/session.py', scope='<module>.register_session_tools.list_notebooks.load', kind='attribute', target='get_notebook'),
-            ConsumerSite(path='backend/app/api/mcp_tools/session.py', scope='<module>.register_session_tools.select_notebook.load', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._report_scope_recheck', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.confirm_report_intent', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.create_report', kind='attribute', target='get_notebook'),
@@ -2311,7 +2342,6 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.index_status', kind='attribute', target='index_status'),
-            ConsumerSite(path='backend/app/api/mcp_tools/maintenance.py', scope='<module>.register_maintenance_tools.get_build_status.load', kind='attribute', target='index_status'),
         ),
         patches=(
         ),
@@ -2427,6 +2457,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/agent_profile_routes.py', scope='<module>._observation_agent_names', kind='attribute', target='list_agent_profiles'),
+            ConsumerSite(path='backend/app/api/mcp_tools/citations.py', scope='<module>._read_memory', kind='attribute', target='list_agent_profiles'),
         ),
         patches=(
         ),
@@ -2805,7 +2836,7 @@ SURFACE_MEMBERS = (
         owner='NotebookStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/mcp_tools/citations.py', scope='<module>.register_citation_tools.get_cited_element.load', kind='attribute', target='participant_notebook_ids'),
+            ConsumerSite(path='backend/app/api/mcp_tools/citations.py', scope='<module>._read_element.<lambda>', kind='attribute', target='participant_notebook_ids'),
         ),
         patches=(
         ),
@@ -2853,7 +2884,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='prepare_notebook_kg_job'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='prepare_notebook_kg_job'),
-            ConsumerSite(path='backend/app/api/mcp_tools/maintenance.py', scope='<module>.register_maintenance_tools.build_kg.run', kind='attribute', target='prepare_notebook_kg_job'),
+            ConsumerSite(path='backend/app/api/mcp_tools/maintenance.py', scope='<module>._start_kg_build', kind='attribute', target='prepare_notebook_kg_job'),
         ),
         patches=(
         ),
@@ -2865,7 +2896,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.preview_ask_intent.run_preview', kind='attribute', target='preview_reasoning_intent'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.preview_ask_intent_stream.run_preview', kind='attribute', target='preview_reasoning_intent'),
-            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._run_ask_notebook', kind='attribute', target='preview_reasoning_intent'),
+            ConsumerSite(path='backend/app/api/mcp_tools/ask.py', scope='<module>._run_notebook.<lambda>', kind='attribute', target='preview_reasoning_intent'),
             ConsumerSite(path='backend/tests/test_ask_modes_api.py', scope='<module>.test_auto_is_a_retired_alias_for_reasoning', kind='patch', target='preview_reasoning_intent'),
         ),
         patches=(
@@ -2877,8 +2908,8 @@ SURFACE_MEMBERS = (
         owner='SourceIngestionService',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/mcp_tools/sources.py', scope='<module>._add_url_source.<lambda>', kind='attribute', target='process_source'),
             ConsumerSite(path='backend/app/api/mcp_tools/sources.py', scope='<module>._upload_agent_source.<lambda>', kind='attribute', target='process_source'),
-            ConsumerSite(path='backend/app/api/mcp_tools/sources.py', scope='<module>.register_source_tools.add_source_url.run.<lambda>', kind='attribute', target='process_source'),
             ConsumerSite(path='backend/app/api/mcp_tools/sources.py', scope='<module>.register_source_tools.reparse_source.run', kind='attribute', target='process_source'),
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.import_url_sources.<lambda>', kind='attribute', target='process_source'),
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.reparse_sources', kind='attribute', target='process_source'),
@@ -3099,9 +3130,10 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/mcp_tools/_shared.py', scope='<module>._selected_notebook', kind='attribute', target='require_agent_access'),
+            ConsumerSite(path='backend/app/api/mcp_tools/ask.py', scope='<module>._read_notebook_job', kind='attribute', target='require_agent_access'),
+            ConsumerSite(path='backend/app/api/mcp_tools/citations.py', scope='<module>._read_memory', kind='attribute', target='require_agent_access'),
             ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._memory_read_allowed', kind='attribute', target='require_agent_access'),
-            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>.register_memory_context_tools.get_memory.load', kind='attribute', target='require_agent_access'),
-            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>.register_memory_context_tools.search_agent_memory.load', kind='attribute', target='require_agent_access'),
+            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._memory_rows', kind='attribute', target='require_agent_access'),
         ),
         patches=(
         ),
@@ -3349,6 +3381,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.scale_index_status', kind='attribute', target='scale_index_status'),
+            ConsumerSite(path='backend/app/api/mcp_tools/session.py', scope='<module>.register_session_tools.get_notebook.load', kind='attribute', target='scale_index_status'),
         ),
         patches=(
         ),
@@ -3358,7 +3391,7 @@ SURFACE_MEMBERS = (
         owner='NotebookCatalogService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>.register_memory_context_tools.search_notebook_context.load', kind='attribute', target='search_notebook'),
+            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._formal_rows', kind='attribute', target='search_notebook'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='search_notebook'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='search_notebook'),
         ),
@@ -3509,7 +3542,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/catalog_routes.py', scope='<module>._owned_source', kind='attribute', target='source_metadata'),
-            ConsumerSite(path='backend/app/api/mcp_tools/citations.py', scope='<module>.register_citation_tools.get_cited_element.load', kind='attribute', target='source_metadata'),
+            ConsumerSite(path='backend/app/api/mcp_tools/citations.py', scope='<module>._read_element', kind='attribute', target='source_metadata'),
         ),
         patches=(
         ),
@@ -3519,7 +3552,7 @@ SURFACE_MEMBERS = (
         owner='NotebookSharingService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/mcp_tools/citations.py', scope='<module>.register_citation_tools.get_cited_element.load', kind='attribute', target='source_notebook_id'),
+            ConsumerSite(path='backend/app/api/mcp_tools/citations.py', scope='<module>._read_element', kind='attribute', target='source_notebook_id'),
         ),
         patches=(
         ),
@@ -3640,7 +3673,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_scale_index', kind='attribute', target='trigger_scale_index_rebuild'),
-            ConsumerSite(path='backend/app/api/mcp_tools/maintenance.py', scope='<module>.register_maintenance_tools.build_retrieval_index.run', kind='attribute', target='trigger_scale_index_rebuild'),
+            ConsumerSite(path='backend/app/api/mcp_tools/maintenance.py', scope='<module>.register_maintenance_tools.build.run', kind='attribute', target='trigger_scale_index_rebuild'),
         ),
         patches=(
         ),
@@ -3671,7 +3704,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.unified_kg_status', kind='attribute', target='unified_kg_status'),
-            ConsumerSite(path='backend/app/api/mcp_tools/session.py', scope='<module>.register_session_tools.select_notebook.load', kind='attribute', target='unified_kg_status'),
+            ConsumerSite(path='backend/app/api/mcp_tools/session.py', scope='<module>.register_session_tools.get_notebook.load', kind='attribute', target='unified_kg_status'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='unified_kg_status'),
         ),
         patches=(
@@ -3851,7 +3884,6 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/mcp_tools/_shared.py', scope='<module>._record_agent_call', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/mcp_tools/profiles.py', scope='<module>.register_profile_tools.add_observation.run', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/mcp_tools/session.py', scope='<module>.register_session_tools.list_notebooks.load', kind='attribute', target='user_can_read_notebook'),
-            ConsumerSite(path='backend/app/api/mcp_tools/session.py', scope='<module>.register_session_tools.select_notebook.load', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.public_report_route', kind='attribute', target='user_can_read_notebook'),
         ),
         patches=(

@@ -836,7 +836,7 @@ def case_no_memory_notebook_is_byte_identical(world, monkeypatch):
 
 # ------------------------------------------------------------------ MCP
 async def run_mcp_cases(world, monkeypatch) -> None:
-    """MCP ``search_notebook_context``: its knowledge leg for A and for B."""
+    """MCP ``search`` (formal): its knowledge leg for A and for B."""
     from tests.test_memory_mcp import OfficialMcpClient, _payload
 
     repo = world.repo
@@ -853,9 +853,8 @@ async def run_mcp_cases(world, monkeypatch) -> None:
 
     async def search(who: str, query: str) -> dict:
         async with OfficialMcpClient(app, tokens[who].token, manage_lifespan=False) as client:
-            _payload(await client.call("select_notebook", {"notebook_id": world.nb}))
             return _payload(await client.call(
-                "search_notebook_context", {"query": query, "limit": 40}))
+                "search", {"query": query, "limit": 40, "notebook_id": world.nb}))
 
     def labels(payload) -> set:
         return {item["label"] for item in payload["items"]}
@@ -926,5 +925,5 @@ def test_a_notebook_without_memory_is_byte_identical_through_the_routes(tmp_path
 
 
 @pytest.mark.anyio
-async def test_mcp_search_notebook_context_knowledge_leg(tmp_path, monkeypatch):
+async def test_mcp_search_formal_knowledge_leg(tmp_path, monkeypatch):
     await run_mcp_cases(_world_of("isolated", tmp_path, monkeypatch), monkeypatch)

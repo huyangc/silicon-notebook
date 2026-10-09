@@ -2393,7 +2393,7 @@ def test_report_half_survives_a_full_load_of_empty_search_summaries(harness):
 
 # ----------------------------------------------- PR-3 T7: the synchronous seat
 #
-# 同步 `POST /notebooks/{id}/ask` 与 MCP `ask_notebook` 共用 `RepositoryFacade.ask`
+# 同步 `POST /notebooks/{id}/ask` 与 MCP `ask` 共用 `RepositoryFacade.ask`
 # → `AskService.ask_current`。这一组钉的是那个新座位:接线在、arity 对、落点在
 # 答案交付之后、fail-open,以及三条链拿到的参数与 durable 面逐字同源。
 
@@ -2672,7 +2672,7 @@ def test_a_synchronous_repository_ask_reaches_all_three_memory_chains(
     tmp_path, monkeypatch
 ):
     """端到端(真 facade、真 runtime、真 `repo.ask`——`POST /notebooks/{id}/ask`
-    与 MCP `ask_notebook` 两条路由体里就是这一句):chunk 模式下 P1 与 P3 各被
+    与 MCP `ask` 两条路由体里就是这一句):chunk 模式下 P1 与 P3 各被
     通知一次,P2(经验蒸馏)被 `mode_id == "reasoning"` 闸挡住。
 
     三条链的参数在这里才真正可核对:P1 拿 (notebook_id, user_id),P2 只拿

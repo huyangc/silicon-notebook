@@ -6,7 +6,7 @@ Two statements changed in this task, both built from
 
 * `sharing_store._VIEWER_SOURCE_NOTEBOOK_SQL` -- `source_notebook_id(source_id,
   viewer_id=...)`, the first read of `/sources/{id}`, its element endpoints, the
-  participant-scope proxy and MCP `get_cited_element`. Another member's Memory,
+  participant-scope proxy and MCP `read_reference` (element refs). Another member's Memory,
   an orphaned Memory row and a missing id all answer None from this one
   statement; calling without a gate is a TypeError (no ungated mode).
 * `source_store._HIDDEN_SOURCE_IDS_SQL` -- `hidden_source_ids`, now consuming

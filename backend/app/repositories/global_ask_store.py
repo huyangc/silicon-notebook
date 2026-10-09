@@ -98,7 +98,7 @@ class GlobalAskStore:
         # The submission's idempotency id and the two record-parity instants
         # live in their own columns, not in the payload; a narrower SELECT
         # simply does not carry them.
-        for field in ("client_request_id", "asked_at", "updated_at"):
+        for field in ("client_request_id", "asked_at", "updated_at", "submitted_via"):
             try:
                 setattr(result, field, row[field] or "")
             except (KeyError, IndexError):

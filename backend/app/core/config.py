@@ -814,7 +814,7 @@ class Settings(BaseSettings):
     scale_build_failure_backoff_max_seconds: int = Field(
         1800, ge=1, validation_alias="SCALE_BUILD_FAILURE_BACKOFF_MAX_SECONDS"
     )
-    # 笔记本全文搜索(HTTP /notebooks/{id}/search 与 MCP search_notebook_context 两入口
+    # 笔记本全文搜索(HTTP /notebooks/{id}/search 与 MCP search(include="formal") 两入口
     # 共用一个闸)的进程级并发上限。默认 4 与前端集合页搜索自身的并行扇出档位
     # (frontend/app/collection-search.ts 的 SEARCH_FANOUT_LIMIT)一致:单个用户的整库
     # 搜索不被自己的扇出卡住,第二个并发打字者则等待而非把又一轮全表扫描压进连接池。

@@ -2096,7 +2096,7 @@ class RepositoryFacade:
         lookup ``upload_sources`` uses for its dedup short-circuit.
 
         Exposed on the facade so a caller can ASK whether an upload would be a
-        reuse before committing to one. MCP's ``add_source_text`` needs that to
+        reuse before committing to one. MCP's ``add_source (Markdown)`` needs that to
         order two independent rules correctly: the per-notebook document ceiling
         must not refuse a call that is about to add no document at all. Reusing
         this method rather than re-deriving "have I seen these bytes" keeps one
@@ -2111,7 +2111,7 @@ class RepositoryFacade:
         """The narrow source-card projection (one SQL, no paper-author/element
         -count/KG hydration), keyed by source id.
 
-        Exposed on the facade for MCP's ``get_cited_element``: a citation
+        Exposed on the facade for MCP's ``read_reference``: a citation
         point-read needs the owning notebook, the source type and the display
         -title columns, and nothing else — ``get_source`` would fan out into
         paper authors, an element ``COUNT(*)``, a KG ``EXISTS`` and the private
@@ -3807,6 +3807,21 @@ class RepositoryFacade:
             notebook_id, payload, submitted_via=submitted_via, output=output
         )
 
+    def ask_with_job(
+        self, notebook_id: str, payload: AskRequest, *,
+        submitted_via: StoredSubmittedVia = "", attach_only: bool = False,
+        stop: Any = None, output: AskOutput = "answer",
+    ) -> "tuple[AskResponse | AskEvidence | None, str] | None":
+        """``ask`` plus its durable job id, honouring ``client_request_id``
+        (attach to the job the key already created; ``stop`` abandons a pure
+        wait). The MCP ``ask`` tool's seat; the HTTP protocol is unchanged.
+        ``output="evidence"`` is ``ask``'s retrieval-only output (never
+        keyed). See ``AskService.ask_current_with_job``."""
+        return self._runtime.ask_component.ask_current_with_job(
+            notebook_id, payload, submitted_via=submitted_via,
+            attach_only=attach_only, stop=stop, output=output,
+        )
+
     def preview_reasoning_intent(
         self, notebook_id: str, question: str, history: str = "",
         cancel_event: CancelEvent = None, *,
@@ -3920,7 +3935,7 @@ class RepositoryFacade:
         的内联谓词一致;此 helper v1 只供新代码使用,存量调用点不迁移)。
 
         公开(v1 落地时叫 `_participant_notebook_ids`,零调用点)是因为它现在有了
-        facade **外部**的消费方:MCP 的 `get_cited_element` 拿注入的 repository 去做
+        facade **外部**的消费方:MCP 的 `read_reference` 拿注入的 repository 去做
         「引用点查」的参与集校验——deps 里的 `notebook_store_port()` 是浏览器侧
         (FastAPI 依赖)的取数口,MCP 不经过它。唯一定义点仍是 mount_sql.py。
 
@@ -4087,6 +4102,12 @@ class RepositoryFacade:
         """从 ask_trace_steps 子表按 seq 顺序读回一个 job 的完整轨迹(容错细节
         在 AskStateStore.read_trace;冻结签名 delegate,骑调用者连接)。"""
         return self._runtime.ask_state.read_trace(db, job_id)
+
+    def ask_job_origin(self, job_id: str) -> "dict | None":
+        """Creator, notebook, submission surface, question, mode,
+        conversation and Memory-channel flag of one Ask job (``None`` if
+        absent): what the MCP ``get_ask`` checks before reading a job."""
+        return self._runtime.ask_state.ask_job_origin(job_id)
 
     def ask_job_detail(self, job_id: str) -> dict:
         """Return a live ask job only; retained summaries are admin-guarded."""

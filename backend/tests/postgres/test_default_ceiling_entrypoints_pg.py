@@ -2,7 +2,7 @@
 
 The whole application (``create_app()``) runs on PostgreSQL and the same
 assertions go through the same real surfaces: HTTP ``/ask`` without a scope,
-``/ask/stream``, the intent precheck and MCP ``ask_notebook`` never hand the
+``/ask/stream``, the intent precheck and MCP ``ask`` never hand the
 asker another member's Memory-derived content or a mounted library's hidden
 projections; a skipped mounted library is named in the answer; a plain
 notebook answers the same with and without the ceiling; a failing ceiling

@@ -820,7 +820,7 @@ def test_clarification_gate_message_truncates_a_single_overlong_question():
 def test_plan_query_intent_fallback_topic_fits_the_contract_for_a_long_question():
     """问题超过 1000 字且没有可用的模型主题(模型未配置/超时/JSON 坏了)时,兜底主题
     过去把整段原文塞进 `QueryIntentTopic.question`,合同本身构造不出来——HTTP
-    `/ask/intent` 会 500,MCP `ask_notebook` 会吐一段裸 pydantic 转储。"""
+    `/ask/intent` 会 500,MCP `ask` 会吐一段裸 pydantic 转储。"""
     from app.models.ask import QueryIntentContract
 
     question = "CMOS 反相器" + "的阈值电压由什么决定" * 120
@@ -834,7 +834,7 @@ def test_plan_query_intent_fallback_topic_fits_the_contract_for_a_long_question(
 
 
 def test_conversation_intent_history_keeps_the_last_five_user_turns():
-    """HTTP `/ask/intent` 与 MCP `ask_notebook` 共用的历史块:只取最近五轮、只取
+    """HTTP `/ask/intent` 与 MCP `ask` 共用的历史块:只取最近五轮、只取
     用户提问(助手回答是语料派生的,不得进入不读语料的理解步骤)。"""
     from types import SimpleNamespace
 

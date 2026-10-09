@@ -474,7 +474,7 @@ async def search_notebook(
     # OpenAPI 的 operation.description,而 OpenAPI 形状是冻结契约
     # (tests/test_repository_api_contract.py)。给内部读者的解释不该改公开契约。
     #
-    # Z8 (P0 止血): 服务端并发闸,与 MCP search_notebook_context 共用同一个信号量
+    # Z8 (P0 止血): 服务端并发闸,与 MCP search(include="formal") 共用同一个信号量
     # (见 search_concurrency 模块 docstring)。
     #
     # 刻意是 async def 而不是同步路由。同步路由跑在 Starlette 的 anyio 线程池里
@@ -515,7 +515,7 @@ def _intent_history(repo, notebook_id: str, conversation_id: str | None,
     if detail.notebook_id != notebook_id:
         raise HTTPException(status_code=404, detail="Conversation not found")
     # Only the user's own wording may resolve references; the shared helper
-    # documents why and keeps MCP ask_notebook's history block identical.
+    # documents why and keeps MCP ask's history block identical.
     return conversation_intent_history(detail.turns)
 
 
@@ -681,7 +681,7 @@ def _validate_confirmed_reasoning_intent(
         if resolution.gate_message:
             raise user_error(422, resolution.gate_message)
         return resolution
-    # Same rail MCP ask_notebook runs on a confirmed intent; the ValueError
+    # Same rail MCP ask runs on a confirmed intent; the ValueError
     # text is complete user copy, so it is the 422 detail verbatim.
     try:
         validate_confirmed_intent(

@@ -455,7 +455,7 @@ def test_reasoning_trace_omits_memory_step_without_hits(tmp_path, monkeypatch):
 def test_the_synchronous_ask_surface_persists_the_same_trace_as_the_stream(
     tmp_path, monkeypatch
 ):
-    """PR-3 同源缺口:同步 `POST /ask` 与 MCP `ask_notebook` 也要把轨迹落进
+    """PR-3 同源缺口:同步 `POST /ask` 与 MCP `ask` 也要把轨迹落进
     `ask_trace_steps`。
 
     这一条之前是空的——`ask_current` 调引擎时不传 `on_trace`,于是同步面跑完一轮

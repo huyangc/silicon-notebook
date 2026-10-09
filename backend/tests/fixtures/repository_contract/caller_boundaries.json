@@ -295,7 +295,7 @@
       "kind": "independent_private",
       "path": "backend/app/api/mcp_tools/maintenance.py",
       "reason": "API readiness checks the process-owned model provider",
-      "scope": "<module>.register_maintenance_tools.build_kg.run",
+      "scope": "<module>._start_kg_build",
       "target": "_runtime"
     },
     {

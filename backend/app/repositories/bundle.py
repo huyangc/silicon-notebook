@@ -13,6 +13,7 @@ from app.repositories.ports import (
     CatalogStorePort,
     ChunkStorePort,
     EmbeddingStorePort,
+    AskIntentHandleStorePort,
     ExtensionToggleStorePort,
     GovernanceStorePort,
     GroupStorePort,
@@ -70,6 +71,7 @@ class PersistenceBundle(Protocol):
     agent_observations: AgentObservationStorePort
     extension_toggles: ExtensionToggleStorePort
     wishes: WishStorePort
+    ask_intent_handles: AskIntentHandleStorePort
 
 
 class PersistenceBundleFactory(Protocol):

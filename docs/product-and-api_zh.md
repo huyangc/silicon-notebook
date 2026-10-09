@@ -227,7 +227,7 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 `feedback_at`（首次写入为准）。失败时另记原始异常文本，只对管理员可读，所有者读到的仍是固定的
 中文提示句。请求体新增可选字段 `asked_at`：与笔记本内 `AskRequest.asked_at` 同一条规则——空串或
 带时区偏移的 ISO-8601 瞬间，不参与幂等请求的身份判定。`submitted_via` 只由服务端入口写入：网页
-`POST /api/global-ask/ask` 固定记 `web`，MCP 工具 `ask_global` 固定记 `mcp`。这些字段上线前创建的
+`POST /api/global-ask/ask` 固定记 `web`，MCP 工具 `ask` 固定记 `mcp`。这些字段上线前创建的
 历史行：`asked_at`/`updated_at`/失败原文留空串，不做重建；`submitted_via` 从所属会话当时记录的值
 回填。
 
@@ -478,22 +478,19 @@ SQL 执行和连接池获取使用剩余时限；数据库网络故障的传输�
 `CHUNK_FEDERATION_ENABLED=0` 是联邦通道的紧急闸。它不会让全局问答退回单库短路：本次 run 退化
 为**单腿联邦**，只检索第一个库，明显劣化但仍然给出答案与回执。
 
-四个 MCP 全局工具不依赖 `select_notebook`：`ask_global`、`get_global_ask` 与
-`cancel_global_ask` 只要求 `ask` 档（不再同时要求读取档）；`get_global_cited_element`
-要求 `read` 档。`ask_global` 新增 `mode`（`chunk` 默认 / `reasoning`）与
-`retrieval_effort`（只支持 `standard`，传别的值也按 `standard` 执行）。MCP 面没有澄清句柄存储：
-`reasoning` 调用在本次调用内跑一次问题理解，理解无歧义则自动确认并建任务，需澄清则不建任何
-durable 行，直接返回 `{"status": "needs_clarification", "intent", "understanding_ms", "next_step"}`，
-由调用方把必答项揉进新的 `question` 文本、用同一 `notebook_scope`/`conversation_id` 重新调用。
-`get_global_ask` 返回 `mode`，推理轨迹按 `trace_offset` 独立分页，结果放在嵌套的
-`trace: {steps, offset, next_offset, total}` 里（每步只给 kind/summary/duration 与一段带截断
-标记的 detail）；为守住 20 个顶层键的上限，纯回声字段 `answer_offset` 与 `citation_offset` 已被
-去掉，`next_answer_offset`、`next_citation_offset` 与
-`next_coverage_offset` 分别延续正文、引用和检索回执分页；回执保留完整数量，未检索和降级
-库列表共用 `coverage_offset` 继续读取。部分失败的回答把引用核对汇总放在 `coverage.citation_check`
-（结果顶层仍为 20 个键），每条未通过的引用带 `verification`，不新增锚点输出；`get_global_cited_element`
-对带标记的元素返回工具错误，文案与 HTTP 下钻同一句，引用里存下的 `quoted_span` 就是回答读到的内容。引用元数据可按 MCP 共用预算披露压缩，原文点查则通过 `next_offset`
-取回完整文本。正文页、标识和后续分页游标不得静默截断。结果附带网页会话路径
+MCP `ask` 在 `notebooks` 传 2–8 个笔记本（或 `conversation_id` 以 `gconv-` 开头）时进入这套引擎；
+只要求 `ask` 档，整个任务在一次同步调用内跑完（路由、澄清与分页契约见下文「MCP 问答」）。`mode` 为
+`reasoning`（默认）或 `chunk`，原 `retrieval_effort` 参数已删除。`reasoning` 调用在本次调用内跑一次
+问题理解，理解无歧义则自动确认并建任务，需澄清则不建任何 durable 行，直接返回
+`{"status": "needs_clarification", "intent_token", "intent", "understanding_ms", "next_step"}`。
+推理轨迹按 `trace_offset` 独立分页，结果放在嵌套的 `trace: {steps, offset, next_offset, total}` 里
+（每步只给 kind/summary/duration 与一段带截断标记的 detail）；`next_answer_offset`、
+`next_citation_offset` 与 `next_coverage_offset` 分别延续正文、引用和检索回执分页；回执保留完整
+数量，未检索和降级库列表共用 `coverage_offset` 继续读取。部分失败的回答把引用核对汇总放在
+`coverage.citation_check`，每条未通过的引用带 `verification`，不新增锚点输出；`read_reference`
+对带标记的引用返回工具错误，文案与 HTTP 下钻同一句，引用里存下的 `quoted_span` 就是回答读到的内容。
+引用元数据可按 MCP 共用预算披露压缩，原文点查则通过 `read_reference` 的 `next_offset` 取回完整文本。
+正文页、标识和后续分页游标不得静默截断。结果附带网页会话路径
 `/ask?conversation_id=...`。`list_notebooks` 新增 `offset`/`query`，返回 `total`/`next_offset`，
 搜索遍历完整实时白名单，不能把第一页误当成全局范围。
 
@@ -501,11 +498,11 @@ durable 行，直接返回 `{"status": "needs_clarification", "intent", "underst
 
 来源侧栏初始全选所有可见导入来源，每行提供复选框，并提供“全选”/“清空”。当前选择同时传入不读语料的问答意图预检、问答执行和新建深度报告，约束当前 notebook 的内容块、来源元素、知识证据与关系、图路径/PPR 输出以及报告检索。范围被收窄时，隐藏的 Memory/Knowhow 投影证据也不参与，因为这些内部来源没有面向用户的复选框。这份隐藏证据里两种来源的范围不同：Knowhow 投影是笔记本级共享的，会进入每位成员的上限；Memory 投影按创建者私有，只进创建者自己的上限，且过滤就发生在那一次读取里。每个入口都会冻结一份上限——没带范围的请求拿到下文的默认上限——所以问答、意图预检、MCP 提问与深度报告都不会经元素、知识图谱对象、关系或图漫游检索到另一位成员的 Memory 投影。这条上限同样管住**知识证据的二次读取**：KG 命中进答案提示词时，它的定义、引文片段与引用定位不是复用召回时那份证据，而是按对象 id 重新查一次原始证据列；只要上限在这次运行里**绑定**该对象所在的库，那次重查就过同一条来源上限——上限全部拒绝、这是一次全局问答或该库带着自己冻结的逐库上限、用户收窄了勾选、冻结之后该库的来源变过、或者该库里有提问者读不到的隐藏来源（另一位成员的 Memory）。否则——全部勾选、冻结后没有变化、也没有提问者读不到的隐藏来源——上限排除不了任何东西，重查不带上限，返回的与不带范围的运行完全相同。这个判定每次运行、每个库只做一次，在该库第一次重查时做，代价至多是一次该库可见来源的读取和三次按其 Memory/Knowhow 数量有界的读取。所以一个对象可以凭范围内的来源被召回，但它贡献的那句原文、以及引用卡指向的来源，恒是范围内的那些（一条出处只有在它标注的来源与它的元素实际所在的来源都在范围内时才算）；若一个对象在范围内一条证据都不剩，整条命中被丢掉，而不是留一个没有引文的名字。定义同样过这条上限：概念簇的融合描述只在能证明簇内没有任何成员的证据来源落在上限之外、也没有任何成员由上限之外的来源创建时才用（严格——融合描述是模型对全部成员的融合，归因不到任何单一来源；证据里一个来源都没有的成员也算在上限之外）。证明时一条语句最多读该簇 2,000 个成员行（`NODE_CONTEXT_CLUSTER_MEMBER_PROBE`）；成员更多的簇在这个预算内无从证明，所以在绑定的上限下不用它的融合描述，定义按混合簇的规则回落。这项检查的开销不随簇变大（PostgreSQL 实测：1,000 到 200,000 个成员时中位数 5–9 ms，不带上限约 0.5 ms）。没有被证明的描述时，用第一条上限内的 `defines` 证据（按关系 id 顺序扫描定义者，最多八个；被拒绝的 `defines` 关系与已弃用或已被合并掉的定义者在计数之前就被跳过，有没有上限都一样，所以它们既不提供文字、也不占这八个名额），再没有就用引文片段。没有证据的定义者只能贡献它的名字，归因不到任何来源，所以上限生效时不走这条回落。流程的每一步先归因再显示——归到它引用的元素所在的来源；元素已不存在或这一步没有引用元素时，归到创建该对象的那个来源——来源在范围外的步骤整条丢掉，步骤名也不返回；范围内的步骤保留步骤名与原文。旧式同节兄弟流程只保留由范围内来源创建（或没有记录创建来源）、且至少有一条证据的元素实际位于范围内来源的兄弟，步骤原文取该兄弟第一条这样的证据；标注了范围内来源、元素却属于别的来源的证据不算。对象没有章节路径时，兄弟按每页 500 行读取，凑够 500 个范围内的兄弟或读满 5,000 行流程对象（`NODE_CONTEXT_LEGACY_SIBLING_SCAN`）即停；对象自己那一步最先取，所以读满上限只可能漏掉别的兄弟，不会漏掉对象自己那一步。不带上限时这条路径仍是原来的任意 500 行样本。对象自己的章节路径是创建它的那个来源的标题路径，只在该来源属于范围内时返回；对象名保留。对象上下文端点读同一份对象上下文，上限换成**查看者**的可读来源（见 `GET .../objects/{object_id}/context`）。已挂载的参考库是独立参与者，始终保持在范围内。非当前笔记本的参与库按**该库当前可见的来源**这一条天花板贡献，所以它的隐藏 Memory/Knowhow 投影是结构性不参与跨库原文通道，而不是事后被过滤掉——请求用户通常不是参考库的成员，而那半边隐藏证据本来就按成员收。取消勾选某个参考库会在任何查询发出之前把它移出参与集，它因此对任何通道都零贡献。
 
-`AskIntentPreviewRequest`、`AskRequest` 和 `ReportCreate` 接受可选的顶层 `source_scope`：`{ "mode": "include" | "exclude", "source_ids": string[] }`。`include` 只放行列出的当前 notebook 可见来源；`exclude` 放行除列出来源以外的所有当前 notebook 可见来源。省略该字段不再等于不设上限：每个入口——HTTP `/ask` 与 `/ask/stream`、意图预检、MCP `ask_notebook`、扩展回答引擎以及深度报告的每个阶段——都经唯一的安装点冻结提问人的**默认上限**：本笔记本的可见来源加提问人本人的隐藏来源（Knowhow 投影；个人记忆投影在个人记忆通道关闭时不含），每个挂载库冻结为其可见来源。它的约束方式与全选冻结相同，但不是用户的选择：不算收窄、不显示回执，报告的 `understanding.source_scope` 仍持久化为 null。未指定范围创建的深度报告，其问题理解、规划与生成阶段都在创建者的默认上限内运行；已保存的范围在每个阶段重新冻结后原样使用；自动确认刷新任一维度后，刷新结果在该上限内重新安装。上限读取失败时该提问或阶段失败，绝不在无上限的情况下运行；读取期间按下停止会取消它。`exclude` 加空列表是前端表达“当前所有可见导入来源”的紧凑形式。API 入口会校验每个显式范围并冻结为明确的 include 列表；服务端还会按当前可见来源总数计算 `narrowed`，覆盖客户端提交的同名值：冻结“当前全选”的快照不能被误判成真的排除了来源。因此全选运行（包括只有一篇文章的 notebook）保留对话历史和正常图扩展/推理通道；KG 候选生成也保留 notebook ANN＋词法并集，只在 evidence hydrate 时应用冻结上限。只有集合真的变小、冻结后来源宇宙发生漂移、或 producer 自己传入显式 allow-list，才进入来源受限的 KG 词法 lane。该 lane 中 `source_index_backfilled=false` 的语义是“历史完整性尚未验证”，绝不是“没有来源行”：词法查询会在 `LIMIT` 前检查权威 evidence，标记为 true 时才用 `knowledge_object_sources` 快速谓词。新 notebook 把空反查索引初始化为完整，在线 KG 写入沿既有事务持续维护；历史/导入 notebook 仍用离线 `backfill-source-index` 完成认证和提速。服务端会为全选运行私下快照当时已有的隐藏 Memory/Knowhow 参与者 id，真正收窄才排除它们；这些 id 不进入公开 scope 响应或持久化合同。两种模式都在来源可分区候选与结果校验中保留冻结快照，所以并发新增来源不会扩大已在运行的请求。只要快照能排除任何东西，它就被物化成 allow-list 并下推到 producer 的 `LIMIT` 之前——不能**假定**「全选快照等于实时宇宙」而省掉谓词：这份快照既不是 producer 的宇宙，也不是一个实时集合：它的隐藏半按请求人读取，而不带清单的 producer 读到的是每一位成员的隐藏半（全检索路径上只有生成式问题扫描及其水合自己重新推导了这条 owner 谓词），而且那层相等关系只在被检查的那一瞬间成立。所以改为**证明**它，每次运行每个库一次（`ceiling_binds` 判定）：运行没有收窄、没有扣下任何个人记忆、实时宇宙的指纹仍与冻结时一致、库里也没有提问人读不到的隐藏来源（另一位成员的个人记忆）。只有这时，本笔记本的 producer 才不带清单读取——读到的与无范围运行完全相同——而且每次这样的读取都会核验：一行来自冻结之外的来源（判定之后才完成的来源），就把本次运行余下的判定翻成绑定，并带清单重跑这一次调用，所以它既到不了答案，也占不了 Top-K 名额。收窄或漂移的运行、库里有其他成员个人记忆的笔记本、以及每个挂载库，都照常带清单，以单个参数绑定。producer 自己传入的显式 allow-list 同样一律与冻结清单**取交集**而不是原样透传，因为 producer 那份清单是实时枚举出来的。全选快照真正改变的是**路由**而不是过滤：既然它没有收窄任何东西，需要选 lane 的 producer——首当其冲是词法语料语言闸——就把它当作未收窄、保留无范围运行的那条快路径，同时照常在 SQL 里应用清单。那道闸对来源受限运行的豁免，前提是「来源谓词已经把扫描收窄了」；全选的谓词覆盖整库，套用豁免恰好复原了这道闸本来要挡的无界探针集合。冻结后宇宙漂移会让运行重新变成真正有界，也随之回到受限 lane。若当前可见来源全集与全选快照不再一致，无法安全隔离的整图通道会在 I/O 前关闭。这项检查每次调用都重新读取实时宇宙、从不缓存，读取的只是一行：两半（可见来源；提问人的隐藏来源）各自按 id 排序后的 md5 指纹，与冻结时的指纹比较。所以提问期间笔记本若正在导入来源，本次提问可能关闭全图、PPR 与关系通道（精确查找照常运行，天花板下推进探针）——浏览器里一直如此，现在 MCP 提问与报告也一样。个人记忆通道关闭（没有 `memory:read` 的智能体令牌）时，这些通道照常可用：从上限里扣下的提问人本人的个人记忆不算漂移，各通道自己按上限把它挡在外面（见下文「各检索腿按本次运行的来源天花板取数」）。在结果边界，上限**绑定**时没有证据的关系或对象命中会被丢弃；上限下推时（全选、未漂移、库里没有提问人读不到的隐藏来源，本笔记本冻结为空也算），结果边界与不带范围的运行完全一致：没有证据的命中照常保留，问题涉及 Knowhow 类型时 Knowhow 单元格对象的语义召回照常运行。这对浏览器的全选运行是一处变化——以前它丢弃这些命中并跳过这路召回，现在与 MCP、API 的无范围运行相同。后端对外库、隐藏或已失效的来源 id 返回 422；若本地有效范围为空且未挂载参考库，问答/意图预检/报告创建返回 409。浏览器同步禁用问答输入和新建报告控件，但仍可查看既有报告。报告会把解析后的公开范围持久化在问题理解合同中，在意图确认与生成前重新校验，并为规划和写作重新水合私有参与者快照。
+`AskIntentPreviewRequest`、`AskRequest` 和 `ReportCreate` 接受可选的顶层 `source_scope`：`{ "mode": "include" | "exclude", "source_ids": string[] }`。`include` 只放行列出的当前 notebook 可见来源；`exclude` 放行除列出来源以外的所有当前 notebook 可见来源。省略该字段不再等于不设上限：每个入口——HTTP `/ask` 与 `/ask/stream`、意图预检、MCP `ask`、扩展回答引擎以及深度报告的每个阶段——都经唯一的安装点冻结提问人的**默认上限**：本笔记本的可见来源加提问人本人的隐藏来源（Knowhow 投影；个人记忆投影在个人记忆通道关闭时不含），每个挂载库冻结为其可见来源。它的约束方式与全选冻结相同，但不是用户的选择：不算收窄、不显示回执，报告的 `understanding.source_scope` 仍持久化为 null。未指定范围创建的深度报告，其问题理解、规划与生成阶段都在创建者的默认上限内运行；已保存的范围在每个阶段重新冻结后原样使用；自动确认刷新任一维度后，刷新结果在该上限内重新安装。上限读取失败时该提问或阶段失败，绝不在无上限的情况下运行；读取期间按下停止会取消它。`exclude` 加空列表是前端表达“当前所有可见导入来源”的紧凑形式。API 入口会校验每个显式范围并冻结为明确的 include 列表；服务端还会按当前可见来源总数计算 `narrowed`，覆盖客户端提交的同名值：冻结“当前全选”的快照不能被误判成真的排除了来源。因此全选运行（包括只有一篇文章的 notebook）保留对话历史和正常图扩展/推理通道；KG 候选生成也保留 notebook ANN＋词法并集，只在 evidence hydrate 时应用冻结上限。只有集合真的变小、冻结后来源宇宙发生漂移、或 producer 自己传入显式 allow-list，才进入来源受限的 KG 词法 lane。该 lane 中 `source_index_backfilled=false` 的语义是“历史完整性尚未验证”，绝不是“没有来源行”：词法查询会在 `LIMIT` 前检查权威 evidence，标记为 true 时才用 `knowledge_object_sources` 快速谓词。新 notebook 把空反查索引初始化为完整，在线 KG 写入沿既有事务持续维护；历史/导入 notebook 仍用离线 `backfill-source-index` 完成认证和提速。服务端会为全选运行私下快照当时已有的隐藏 Memory/Knowhow 参与者 id，真正收窄才排除它们；这些 id 不进入公开 scope 响应或持久化合同。两种模式都在来源可分区候选与结果校验中保留冻结快照，所以并发新增来源不会扩大已在运行的请求。只要快照能排除任何东西，它就被物化成 allow-list 并下推到 producer 的 `LIMIT` 之前——不能**假定**「全选快照等于实时宇宙」而省掉谓词：这份快照既不是 producer 的宇宙，也不是一个实时集合：它的隐藏半按请求人读取，而不带清单的 producer 读到的是每一位成员的隐藏半（全检索路径上只有生成式问题扫描及其水合自己重新推导了这条 owner 谓词），而且那层相等关系只在被检查的那一瞬间成立。所以改为**证明**它，每次运行每个库一次（`ceiling_binds` 判定）：运行没有收窄、没有扣下任何个人记忆、实时宇宙的指纹仍与冻结时一致、库里也没有提问人读不到的隐藏来源（另一位成员的个人记忆）。只有这时，本笔记本的 producer 才不带清单读取——读到的与无范围运行完全相同——而且每次这样的读取都会核验：一行来自冻结之外的来源（判定之后才完成的来源），就把本次运行余下的判定翻成绑定，并带清单重跑这一次调用，所以它既到不了答案，也占不了 Top-K 名额。收窄或漂移的运行、库里有其他成员个人记忆的笔记本、以及每个挂载库，都照常带清单，以单个参数绑定。producer 自己传入的显式 allow-list 同样一律与冻结清单**取交集**而不是原样透传，因为 producer 那份清单是实时枚举出来的。全选快照真正改变的是**路由**而不是过滤：既然它没有收窄任何东西，需要选 lane 的 producer——首当其冲是词法语料语言闸——就把它当作未收窄、保留无范围运行的那条快路径，同时照常在 SQL 里应用清单。那道闸对来源受限运行的豁免，前提是「来源谓词已经把扫描收窄了」；全选的谓词覆盖整库，套用豁免恰好复原了这道闸本来要挡的无界探针集合。冻结后宇宙漂移会让运行重新变成真正有界，也随之回到受限 lane。若当前可见来源全集与全选快照不再一致，无法安全隔离的整图通道会在 I/O 前关闭。这项检查每次调用都重新读取实时宇宙、从不缓存，读取的只是一行：两半（可见来源；提问人的隐藏来源）各自按 id 排序后的 md5 指纹，与冻结时的指纹比较。所以提问期间笔记本若正在导入来源，本次提问可能关闭全图、PPR 与关系通道（精确查找照常运行，天花板下推进探针）——浏览器里一直如此，现在 MCP 提问与报告也一样。个人记忆通道关闭（没有 `memory:read` 的智能体令牌）时，这些通道照常可用：从上限里扣下的提问人本人的个人记忆不算漂移，各通道自己按上限把它挡在外面（见下文「各检索腿按本次运行的来源天花板取数」）。在结果边界，上限**绑定**时没有证据的关系或对象命中会被丢弃；上限下推时（全选、未漂移、库里没有提问人读不到的隐藏来源，本笔记本冻结为空也算），结果边界与不带范围的运行完全一致：没有证据的命中照常保留，问题涉及 Knowhow 类型时 Knowhow 单元格对象的语义召回照常运行。这对浏览器的全选运行是一处变化——以前它丢弃这些命中并跳过这路召回，现在与 MCP、API 的无范围运行相同。后端对外库、隐藏或已失效的来源 id 返回 422；若本地有效范围为空且未挂载参考库，问答/意图预检/报告创建返回 409。浏览器同步禁用问答输入和新建报告控件，但仍可查看既有报告。报告会把解析后的公开范围持久化在问题理解合同中，在意图确认与生成前重新校验，并为规划和写作重新水合私有参与者快照。
 
 **范围冻结绝不关掉 chunk 向量检索。** 冻结的来源清单是**过滤**，不是**通道选择**。库有没有建 chunk ANN（scale 索引）是这个**库**的属性，与这次请求勾了几个来源无关，所以 chunk 通道的降级判据对带范围与不带范围的请求是同一把守卫：只有大库（`copyable=false`）或整库 chunk 数超过 `CHUNK_BRUTEFORCE_MAX_CHUNKS` 才退到有界 FTS 词法候选。没有 ANN 索引的**小库**，带范围的请求照常走**按允许来源有界**的暴力向量路径：chunk 文本行只读选中来源，向量则取与无范围请求**同一份**版本键控的整库矩阵缓存，再在**打分之前掩码**到允许 chunk 上。带范围的请求因此不比无范围多物化任何东西，「别为小库全表物化」这条顾虑在这条路径上不成立；而掩码正是它仍然只是**过滤**的原因——候选列表与返回的相似度/多样性矩阵行都严格是允许 chunk 的子集，被排除的内容既不参与 Top-K，也不作为 MMR 的多样性对照。已接受的代价是每次请求一次子集拷贝（全选冻结即拷贝整库那么大）。运维事件 `chunk_bruteforce_skipped(large_library_no_ann)` 因此只在大库/超阈值库出现，它携带的 `n_chunks` 恒为整库真实计数，且与开库路径共用同一份 seq-gated 计数 memo（不是允许来源内的计数，也不是候选数，更不会是占位值）。联邦 chunk 腿「只借用常驻索引」的那一条腿在同一个事件上用**另一个原因** `peek_no_warm_ann`：一个索引建好且健康的大参考库，只要索引此刻不常驻，就照样降级为有界 FTS；那里的 `n_chunks` 只是诊断值，因为决定降级的是 lane 而不是这个计数。用「清单非 `None`」直接判定「这是有界查询、可以只走词法」曾是一处生产缺陷：界面发出的每一次问答都携带冻结清单（全选冻结也带清单），于是所有未建索引的库在 UI 路径上完全失去 chunk 语义召回，中文问句检索英文语料首轮恒空。与之相对，**路由**语义——词法语料语言闸读到的 `source_restricted`——仍然只由真实收窄/冻结后漂移决定，从不由「清单非 `None`」推断。
 
-这个检索范围有**两个互相独立的维度**，都由问答意图预检/执行和新建深度报告共用、都默认全选：当前 notebook 每个可见导入来源一个复选框（`source_scope`），每个已挂载参考库**整库**一个复选框（`base_scope`，不展开到库内来源）。`AskIntentPreviewRequest`、`AskRequest` 和 `ReportCreate` 在 `source_scope` 之外接受可选的顶层 `base_scope`：`{ "mode": "include" | "exclude", "notebook_ids": string[] }`。`include` 只放行列出的挂载库；`exclude` 放行除列出库以外的全部挂载库；省略该字段时每个挂载库都参与，但**只经它的可见来源**——挂载库的 Knowhow 与个人记忆投影属于那个库自己的成员，所以在单库提问里不再参与（在该库内提问仍可用）。这些逐库上限在提问开始时冻结，且是完整的：之后才挂载的库不参与。提问开始时，如果某个挂载参考库的来源清单没能及时读出（每个库 5 秒，全部挂载库合计 10 秒），该库不参与本次回答——它不会在没有限制的情况下被检索——回答里会注明哪个参考库没有参与（`AskResponse.skipped_libraries`：`[{notebook_id, name, included: false}]`，库名是当时的快照，没有时整键缺席；MCP `ask_notebook` 返回同名字段）。再问一次通常就会包含。`notebook_ids` 只能指向当前已挂载到该 notebook 的参考库（否则 422）；与 `source_scope` 完全一样，API 入口把每一次提交——包括 `exclude` 加空列表——冻结成显式 include 快照，并在服务端重算 `narrowed`、忽略客户端提交的同名值。冻结对报告最要紧：解析后的范围持久化在问题理解合同里，并在意图确认与生成前原样重新应用，所以报告创建之后新挂载的参考库不会静默参与它。
+这个检索范围有**两个互相独立的维度**，都由问答意图预检/执行和新建深度报告共用、都默认全选：当前 notebook 每个可见导入来源一个复选框（`source_scope`），每个已挂载参考库**整库**一个复选框（`base_scope`，不展开到库内来源）。`AskIntentPreviewRequest`、`AskRequest` 和 `ReportCreate` 在 `source_scope` 之外接受可选的顶层 `base_scope`：`{ "mode": "include" | "exclude", "notebook_ids": string[] }`。`include` 只放行列出的挂载库；`exclude` 放行除列出库以外的全部挂载库；省略该字段时每个挂载库都参与，但**只经它的可见来源**——挂载库的 Knowhow 与个人记忆投影属于那个库自己的成员，所以在单库提问里不再参与（在该库内提问仍可用）。这些逐库上限在提问开始时冻结，且是完整的：之后才挂载的库不参与。提问开始时，如果某个挂载参考库的来源清单没能及时读出（每个库 5 秒，全部挂载库合计 10 秒），该库不参与本次回答——它不会在没有限制的情况下被检索——回答里会注明哪个参考库没有参与（`AskResponse.skipped_libraries`：`[{notebook_id, name, included: false}]`，库名是当时的快照，没有时整键缺席；MCP `ask` 把它放在 `coverage.skipped`）。再问一次通常就会包含。`notebook_ids` 只能指向当前已挂载到该 notebook 的参考库（否则 422）；与 `source_scope` 完全一样，API 入口把每一次提交——包括 `exclude` 加空列表——冻结成显式 include 快照，并在服务端重算 `narrowed`、忽略客户端提交的同名值。冻结对报告最要紧：解析后的范围持久化在问题理解合同里，并在意图确认与生成前原样重新应用，所以报告创建之后新挂载的参考库不会静默参与它。
 
 两个维度**正交**。`source_scope` 的收窄关的是**当前库自己**的通道（PPR、私有 Memory、社区报告、弱支撑关系、报告整库画像）；取消一个参考库的勾选绝不能顺带关掉其中任何一个，否则用户「少借一个库」就要为此付出当前库检索质量下降的代价。按名称精确查找不因收窄而关闭（chunk 与 reasoning 模式都一样）：本次运行的来源天花板下推进探针，只有天花板内的小节能占探针窗口与节名额。跨库通道各自认库维度：集合枚举与集合地图、联邦候选检索、社区扩展、图漫游、`follow_chain`、证据装配，以及 **KG 可用性闸**。最后这一个是**判据**而非结果过滤——本库无图、唯一带图的库被取消勾选时必须判「无图」，否则 `kg_required` 不翻真、graph 路径会跑在一份这次不许读的图上；它经与候选检索同一个 `resolve_participants` 收口解析参与库，判据是**冻结的选择**（提交过即认），不看是否收窄。会话历史是唯一同时认两个维度的闸：上一轮答案可能引用了用户刚取消勾选的那个库的内容。
 
@@ -693,7 +690,7 @@ P2 兑现了这两格。内容管理能力（来源增删/重解析、构建触�
   `tier`、`created_by`、`is_shared` 经这个端点根本写不进来——未知键是 422，不是静默忽略。
 
 这些字段就是普通的用户可见内容:`primary_domain` 在库内搜索框里可被匹配到，`purpose` 会经
-MCP 的 `list_notebooks` / `select_notebook` 提供给外部 Agent（截断到 500 字符）。所以它们是
+MCP 的 `list_notebooks` / `get_notebook` 提供给外部 Agent（截断到 500 字符）。所以它们是
 **内容邻接**的——描述这个库讲什么——正落在内容管理权本来的范围里。「拆端点或逐字段校验、
 让非 owner 只能改名」这条路评估过并否决:为纯描述性元数据增加一道真实的接缝不划算，而同一个
 组管理员本来就能把这个库里每一份来源增删重解析。
@@ -931,7 +928,7 @@ scale_index 各与其母格同为 admin，mount 与 configure 同为 owner）；
 `everyone` 授权的库）所有人。Alice 把自己的私有库 B 挂到自己的笔记本 A，再把 A 共享给
 Bob：Alice 照旧检索 B；对 Bob 来说 B 不存在。B 的段落、元素、知识图谱对象、关系与社群在
 任何检索通道上都进不了他的提问；来源与资产的代理读取（`/notebooks/A/sources/{id}`、
-`.../elements`、`.../elements-page`、`.../assets/{id}`）与 MCP `get_cited_element` 对 B 的
+`.../elements`、`.../elements-page`、`.../assets/{id}`）与 MCP `read_reference` 对 B 的
 内容一律 404，与不存在的 id 无从区分。给 Bob 开通 B 的读权后，这条挂载对他也随即生效，
 无需重新配置。
 
@@ -1109,7 +1106,7 @@ notebook 卡片数量和 notebook Memory 标签是同一份数据的 notebook �
 
 这条隐藏合成源及其元素与 Memory 本身一样私有。`GET /api/sources/{id}` 及其 `/elements`、
 `/elements-page`，`/api/notebooks/{id}/sources/{source_id}` 下的三个活跃笔记本读取，以及 MCP
-`get_cited_element`，只对创建该 Memory 的成员打开 Memory 来源；笔记本的其他读者（包括笔记本
+`read_reference`，只对创建该 Memory 的成员打开 Memory 来源；笔记本的其他读者（包括笔记本
 owner）得到与不存在的 id 相同的 404；Memory 记录已不存在的 Memory 来源对所有人都是如此。Agent
 令牌还须有 `read` 档（`memory:read` 能力归它）才能打开其主人自己的 Memory 来源。Knowhow 投影来源是笔记本共享内容，
 笔记本的每个读者照常可读。命令目录不接受任何隐藏来源：它的七个
@@ -1133,7 +1130,7 @@ Memory 来源：无主来源合并进共享对象的证据被剥掉（共享对�
 生命周期为 `candidate | confirmed | rejected | deprecated`。Agent 只能创建 `candidate`；
 token 具备 `read` 档时，同一用户、当前所选 notebook 下获授权的所有 Agent
 profile 都可检索它。Candidate 永远不会进入正式 notebook Ask、notebook 搜索、Deep Report
-或 `search_notebook_context`；只有用户确认后才进入正式平面。Rejected/deprecated 在两个
+或 `search`（`include="formal"`）；只有用户确认后才进入正式平面。Rejected/deprecated 在两个
 平面都排除。检索先判断相关性，权威只在同等相关或冲突证据间生效：
 `candidate < personal 原始证据 < confirmed Memory < base KG/base 原始证据`。
 
@@ -1203,9 +1200,9 @@ loopback HTTP；默认允许远程明文 HTTP 并放宽 Host/Origin（DNS-rebind
 
 **长任务发心跳，传输走 SSE。** MCP 客户端不会无限等一次工具调用：Claude Code 用的是
 *idle* 超时——一次调用在若干秒内既没给出响应、也没发过任何 progress 通知就被中断——别的
-客户端则是每次调用一个固定上限。`reasoning` 档的 `ask_notebook` 动辄跑几分钟（规划、联邦
-检索、反思循环、答案合成），`build_kg` 更久，所以没有心跳时客户端会放弃一次服务端仍在正常
-执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 28 个 core 工具的阻塞主体一律
+客户端则是每次调用一个固定上限。`reasoning` 档的 `ask` 动辄跑几分钟（理解、规划、联邦
+检索、反思循环、答案合成），部署的插件引擎可能更久，所以没有心跳时客户端会放弃一次服务端仍在正常
+执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 17 个 core 工具的阻塞主体一律
 跑在同一道心跳下，**每 5 秒**一拍，内容只有工具名与已耗墙钟秒数——绝不带问题原文、笔记本或
 来源名称，与观测事件同一条口径。不需要它的场合是免费的：客户端没有在请求 `_meta` 里带
 `progressToken` 时该通知是 no-op，而第一拍要等满一个间隔，所以毫秒级返回的工具（绝大多数）
@@ -1242,7 +1239,7 @@ codex mcp add silicon-notebook --url 'http://127.0.0.1:8000/mcp/' \
 Codex 持久化的是环境变量名，不是 token 值。Agent shell 子进程中的临时 `export` 无法修改
 当前客户端的父进程环境。Agent 可以保存 URL/配置；若没有获准使用的持久 secret 机制，必须请
 用户在启动 Codex 的环境中设置变量并重启。`codex mcp list` 只证明配置项存在；只有新 session
-发现 MCP，并成功执行 `list_notebooks` 与 `select_notebook`，才算认证接入成功。
+发现 MCP，并成功执行 `list_notebooks` 与 `get_notebook`，才算认证接入成功。
 
 当前本机 Claude Code CLI 接受 HTTP transport 和显式 Authorization header，并会在连接时按启动它
 的进程环境解析 header 里的 `${VAR}`：
@@ -1257,26 +1254,33 @@ header 必须单引号，否则 shell 会先展开它；这样落到配置里的
 `-s user` 时该配置只在当前目录生效。若客户端不支持插值，落盘的就是原始 header：应使用最小
 scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 
-每个新 MCP session 必须先调用 `select_notebook`，再调用绑定单个笔记本的数据工具。全局问答工具独立传入范围，不要求或改变当前选中的笔记本。默认 core 的二十八个工具如下；
-`mcp_server.PUBLIC_TOOLS` 就是下面这 28 条本身，不是更大的组合目录——它与 `mcp_server.CORE_TOOLS`
+工具无状态：没有「选择笔记本」这一步。所有绑定单个笔记本的工具都有可选参数 `notebook_id`，不传即为
+token 的默认笔记本（`list_notebooks` 用 `is_default` 标出）。每个工具注册时声明所需档位，`tools/list`
+只列出当前 token 档位够用的工具（`list_notebooks` 恒列）；调用未列出的工具仍以 `scope_missing` 拒绝。
+搜索结果和问答引用带不透明的 `ref`（无填充的 `base64url(json)`），由 `read_reference` 解析，且每次调用都
+重跑原读取的全部鉴权。报错统一为 `[<code>] <中文说明>`，code 取值 `token_inactive`、`scope_missing`、
+`notebook_not_allowed`、`notebook_unreadable`、`owner_only`、`forbidden`、`not_found`、`invalid_argument`、`busy`、
+`mirrored`、`unavailable`、`internal`。`ValueError` 只有在文本以中文开头（或属于已知校验器形状并被译成中文）
+时才作为 `invalid_argument` 带出原文；其他意外错误一律是 `internal`，文本从不回显。默认 core 的十七个工具如下；
+`mcp_server.PUBLIC_TOOLS` 就是下面这 17 条本身，不是更大的组合目录——它与 `mcp_server.CORE_TOOLS`
 是同一份清单：
 
 | 分组 | 工具 | Scope |
 | --- | --- | --- |
-| Memory / 上下文 | `list_notebooks`、`select_notebook`、`search_agent_memory`、`search_notebook_context`、`get_memory`、`ask_notebook`、`propose_memory` | 前两个无需档位；`read` / `ask`（`ask_notebook`）/ `contribute`（`propose_memory`） |
+| 发现 | `list_notebooks` | 无需档位 |
+| 笔记本概况（计数、构建状态、库理解） | `get_notebook` | `read` |
+| 搜索与点查 | `search`、`read_reference` | `read` |
+| 问答（同步；单库或 2–8 库） | `ask`、`get_ask` | `ask` |
+| 提交 | `propose_memory`、`add_observation` | `contribute` |
+| 来源读取 | `list_sources` | `read` |
+| 来源管理 | `add_source`、`reparse_source` | `manage`（owner-only） |
+| 来源删除 | `delete_source` | `delete`（owner-only，且仅限 Agent 添加的来源） |
+| 构建 | `build` | `manage`（owner-only） |
 | Knowhow 读取 | `list_knowhow_tables`、`get_knowhow_discrimination`、`get_knowhow_row` | `read` |
 | Knowhow 代码写入 | `put_knowhow_cell_code` | `contribute` |
-| 引用点查 | `get_cited_element` | `read` |
-| 来源管理 | `add_source_text`、`add_source_file`、`add_source_url`、`reparse_source` | `manage`（owner-only） |
-| 来源删除 | `delete_source` | `delete`（owner-only，且仅限 Agent 添加的来源） |
-| 来源读取 | `list_sources`、`get_source_status` | `read` |
-| 构建 | `build_kg`、`build_retrieval_index` | `manage`（owner-only） |
-| 构建状态读取 | `get_build_status` | `read` |
-| 库理解（Agent） | `get_notebook_profile`、`add_observation` | `read` / `contribute` |
-| 全局问答 | `ask_global`、`get_global_ask`、`cancel_global_ask`、`get_global_cited_element` | `ask`（前三个）/ `read`（读原文）；见全局问答合同 |
 
 实际部署以 server-local frozen catalog 作为 discovery 与 onboarding 的权威清单：它精确等于上表
-28 个工具，由八个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
+17 个工具，由九个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
 手抄。每次调用都重新检查 live token/档位/allowlist/成员权，`manage` 与 `delete` 两档都强制经过 owner-only
 notebook 闸。缺档时工具报错是写明缺哪一档的中文文案（例：「此凭证缺少「读取」权限，请在 Agent 接入页为它勾选后重试」），
 不再只给笔记本 id；token 失效、笔记本不在白名单、主人已无权读该笔记本也各有一句可读文案。结果在构造时就被复制进有界形状——深度不超过 5 层，逐字段/map/list 施加上限——超大容器不会
@@ -1286,15 +1290,8 @@ notebook 闸。缺档时工具报错是写明缺哪一档的中文文案（例�
 `omitted_fields`）。异常只返回稳定错误码；FastMCP schema 错误发生在工具体之前，归 transport/request
 audit。只有拷贝真的缩无可缩时才整次拒绝，不会返回被静默截断的结果。
 
-12,000 字节预算只有一个例外：`output="evidence"` 的 `ask_notebook`（见下），其响应大小由合成预算决定：
-`min(EVIDENCE_TOTAL_TEXT_LIMIT, 12,000 + 3 × max(budget_chars, context_chars, 最长单条 text) + EVIDENCE_ITEM_OVERHEAD_BYTES × 条目数)` 字节，
-其中 `EVIDENCE_TOTAL_TEXT_LIMIT = 524_288` 是服务端硬顶，`EVIDENCE_ITEM_OVERHEAD_BYTES = 3_000` 是每条给标识符与
-标签留的余量（同一个 `max(...)` 也是单条 text 的上限）。证据超过硬顶时，先把每条 `text` 按同一比例裁短（以 `…`
-结尾），剩余超出再按常规收敛；所有被裁掉的字符都计入 `truncation.omitted_characters`。其它所有工具的 12,000
-字节护栏逐字节不变。
-
-`list_notebooks` 与 `select_notebook` **不需要任何档位**：判据只有 token 存活、目标笔记本在
-白名单内、且对它有读权限。因此无论 token 权限收得多窄，session 都能正常起步。
+`list_notebooks` **不需要任何档位**：判据只有 token 存活，并只列出白名单内主人仍有读权限的笔记本。
+因此无论 token 权限收得多窄，session 都能正常发现自己的笔记本。
 
 服务端会在数据调用时重新检查档位、allowlist、token 状态和 notebook 权限；返回文本是
 不可信 evidence，不是可执行的 Agent 指令。
@@ -1313,19 +1310,52 @@ token 只得到 `{"detail": "invalid or expired Agent token", "code": "token_inv
 档位为空，运行时一律报缺档，编辑时至少勾一档才能保存。同一迁移新增可空的 `token_plain` 列，存量为
 NULL，即旧 token 不可再复制。升级后如何核对这类空档 token 见[运维参考](./operations_zh.md#agent-token-权限五档)。
 
-`ask_notebook` 的 `mode` 参数接受 `"reasoning"`（**默认**；与网页端两种界面同一引擎，先理解问题再检索，见下）、`"chunk"`，或任何已注册且实时可用的部署
-`ask.engine` mode id（详见[部署问答引擎](#部署问答引擎askengine)一节）；校验方式与
-`question`/`conversation_id` 相同——给一句直白可操作的文案，而不是抛一个不可读的
-`ValidationError` 转储。传一个未注册的 mode 会收到列出当前合法 mode id 的报错；传一个
-已注册但暂不可用的 mode（例如插件密钥未配置）会收到独立的文案，不与前者混同；调用过程中
-插件引擎自身失败同样如此呈现——一句可读文案后跟括注的稳定 reason code。插件引擎单次调用
-可能比内建 mode 长得多，客户端的读超时需要留出相应余量；心跳/超时机制与本节其余工具共用，
-见上文「长任务发心跳，传输走 SSE」一段。
+**MCP 问答（`ask`、`get_ask`）。** 一个同步的 `ask(question, notebooks?, conversation_id?, mode?, intent?,
+client_request_id?)` 取代原先的单库与全局问答工具，只需要 `ask` 档。路由按顺序：`conversation_id` 以
+`gconv-` 开头是全局（跨笔记本）会话（`notebooks` 可省略，沿用会话范围）；以 `conv-` 开头则接续该
+笔记本会话，笔记本取自会话本身；会话不属于 token 主人、不在白名单内，或与显式 `notebooks` 冲突，
+一律 `not_found`（不再静默新开会话）。其余情况 `notebooks` 省略即 `[默认笔记本]`；1 个 id 走单库引擎
+（`askjob-` 任务），2–8 个 id 走全局问答（`gask-` 任务，见[全局问答](#全局问答)），超过 8 个报
+`invalid_argument`。`conversation_id` 至多 200 字符，`client_request_id` 至多 128 字符。
 
-`mode="reasoning"` 时，`ask_notebook` 与网页端走同一套「先理解问题、清晰就继续、理解不了就交回
+`mode` 接受 `"reasoning"`（**默认**；与网页端两种界面同一引擎，先理解问题再检索，见下）、`"chunk"`，或任何已注册且实时可用的部署
+`ask.engine` mode id（详见[部署问答引擎](#部署问答引擎askengine)一节，仅限单库）。传一个未注册的 mode
+会收到列出当前合法 mode id 的 `invalid_argument`；传一个已注册但暂不可用的 mode（例如插件密钥未配置）
+会收到独立的 `unavailable` 文案，不与前者混同；调用过程中插件引擎自身失败同样如此呈现——一句可读文案
+后跟括注的稳定 reason code。原 `retrieval_effort` 参数已不存在。插件引擎单次调用可能比内建 mode 长得多，
+客户端的读超时需要留出相应余量；见上文「长任务发心跳，传输走 SSE」一段。
+
+两条路径都在调用内**同步**跑到终态（心跳保持传输存活），客户端断开从不取消任务：任务继续运行，
+用 `get_ask(job_id)` 重读。MCP 没有取消工具。单库路径保留浏览器 `ask` 的全部语义（个人记忆通道、
+挂载库、插件引擎、空库闸、`submitted_via="mcp"`），并额外返回任务 id。`client_request_id` 重试会拿到
+已启动的任务（仍在运行就等它）而不是重复提问。把同一 key 用于不同的问题、模式、会话或笔记本范围，
+报 `invalid_argument`（单库与全局一致）；key 若已被浏览器发起的任务占用则报 `not_found`，因为接回只
+覆盖同一 owner 经 MCP 发起的任务。单库任务会记下运行时私人记忆通道是否开放（`ask_jobs.memory_access`，SQLite v90 / PostgreSQL 0070；此前的行按开放计）；
+对这样的任务，当前读不了记忆（没有 `read` 级别）的凭证用 `get_ask` 或同 key 重试会得到 `scope_missing`
+并点名「读取」，因为它存下的回答和轨迹可能含有私人记忆。通道关闭时运行的任务，同一主人的任何 MCP 凭证都能接回；
+全局任务从不读取私人记忆（对等模式运行），没有这道闸。等待有上限且可放弃：同一（owner，key 或任务）同时最多 2 个调用在等，
+第三个得到 `busy`；被取消或断开的调用只是停止等待，从不取消任务；由其他进程持有的任务没有心跳可证明
+它还活着，只要它的轨迹还在增长就一直跟随，连续 30 分钟没有任何进展才返回 `unavailable`（稍后用
+`get_ask` 读取）；本进程内执行的任务一直跟到结束。单库任务与全局任务同一规则。同步的 `ask` 只返回已结束的任务：
+跟踪全局任务连续两次出错而任务仍在进行时，返回 `unavailable`，稍后用 `get_ask` 读取结果。交付回答时重新鉴权：
+运行或等待可能持续数分钟，`ask` 交回任何已存内容之前都会重读凭证并套用 `get_ask` 的规则（凭证有效、`ask`
+级别、笔记本仍在白名单且可读，开了私人记忆的单库任务还要 `read` 级别）。期间被撤销、降级或移出笔记本的
+凭证得到 `get_ask` 同样的拒绝、拿不到回答；回答照常保存，调用只在成功交付时记入 Agent 调用账本。页里的 `trace` 中，每步的
+`summary` 与 `detail` 各截到 400 字并以 `summary_truncated` / `detail_truncated` 标明，引用了长问题的步骤
+不会让回答取不回来。
+两类任务返回同一页形状：`status`（`answered`/`failed`/`cancelled`，或 `needs_clarification`）、`job_id`、
+`conversation_id`、`answer_id`、`answer` 与 `next_answer_offset`、`citations`（每条带 `ref`）与
+`next_citation_offset`、`coverage`（全局：上述回执；单库：被跳过的参考库记在 `coverage.skipped`）
+与 `next_coverage_offset`、`trace`（分页，`trace.next_offset`）、`reasoning` 档的 `intent` 摘要，
+以及单库路径的 `anchors`。`get_ask(job_id, answer_offset?, citation_offset?, coverage_offset?,
+trace_offset?)` 按任务 id（`askjob-` 或 `gask-`）重读任意一页；每次调用都重新检查 token、白名单与读权限。
+它只覆盖经 MCP 发起、且属于同一 owner 的任务：浏览器发起的任务（两类都是）、他人的任务或未知 id
+一律 `not_found`。已完成但答案行缺失的任务读作 `failed`，绝不是空的 `answered` 页；答案为空时回退到
+结论；`ask` 首页与每次 `get_ask` 的 trace 取自同一条任务行，游标因此一致。
+
+`mode="reasoning"` 时，`ask` 与网页端走同一套「先理解问题、清晰就继续、理解不了就交回
 调用端」的逻辑。未带 `intent` 的调用先由服务端执行与 `POST /ask/intent` 完全相同的不读语料的
-问题理解（同一个 `preview_reasoning_intent`；历史块同样只取该会话最近五轮的用户提问；属于其他
-owner 或其他笔记本的 `conversation_id` 按本工具既有口径静默视为无历史，而不是像 HTTP 那样 404）。
+问题理解（历史块同样只取该会话最近五轮的用户提问）。
 理解结果清晰时，服务端按网页端自动确认的同一形态（`resolved_question` 取理解结果、`answers`
 为空、`understanding_ms` 为服务端量到的理解耗时并夹到 `ASK_UNDERSTANDING_MS_MAX`）在同一次调用
 里继续检索并返回答案。存在阻断性歧义时调用**正常返回**而不是报工具错误：`{"status":
@@ -1334,9 +1364,11 @@ owner 或其他笔记本的 `conversation_id` 按本工具既有口径静默视�
 不做任何检索。审阅视图就是浏览器审阅面板展示的那部分：`resolved_question`、`intent_type`、
 `result_scope`、`entities`、`comparison_axes`、`constraints`、`excluded_topics`、`assumptions`、
 `ambiguities[]`（`id`/`question`/`reason`/`required`/`options`）与 `confidence`；**不含**
-`mandatory_topics` 等检索分解。整份 `QueryIntentContract` 留在服务端、按 `intent_token` 挂在
-当前 MCP 会话上（与 `select_notebook` 的会话态同一机制），并绑定 owner 与笔记本，每会话只保留
-最近 8 份。这与浏览器「拿到整份合同再原样回传」在传输形态上不同，是刻意的：合同里问题原文出现
+`mandatory_topics` 等检索分解。整份 `QueryIntentContract` 留在服务端的 `ask_intent_handles` 表
+（SQLite v90 / PostgreSQL `0070_ask_intent_handles.sql`）里，以 `intent_token`（至少 128 位随机）为键，
+绑定 owner 与范围（单库：笔记本 id 加会话 id；全局：排序后的笔记本 id（或继承的范围）加会话 id），并记录问题的 SHA-256
+（问题本身由下面的冻结校验把关），**一小时**后过期，过期行在写入时顺手清理。句柄落在存储而不是 MCP 会话里，所以重连后仍然有效。这与浏览器
+「拿到整份合同再原样回传」在传输形态上不同，是刻意的：合同里问题原文出现
 多次再加全部检索查询，中文长问题或多主题合同放不进 12,000 字节的 MCP 响应预算，被削短的合同又
 不能回传，句柄把 Agent 侧的逐字回传成本降为零。审阅视图只用于展示，但有一条不变量：服务端事后
 要求回答的每条歧义行（`id`、`required`、至少展示上限 300 字的 `question`）、`intent_token` 与
@@ -1345,36 +1377,29 @@ owner 或其他笔记本的 `conversation_id` 按本工具既有口径静默视�
 核验歧义行、句柄、说明都完整的那一档才会返回。最贫的一档对模型可能产出的任何合同都放得下，万一
 放不下则以 `reason: clarification_over_budget` 的工具错误响亮失败，绝不静默少投一条必答行。
 调用方把 `intent.ambiguities` 中 `required` 为 true 的每项
-拿去问用户，然后用同一个 `question` 再调一次，传 `intent={"intent_token": <句柄>, "answers":
+拿去问用户，然后用同一个 `question`、`notebooks` 与 `conversation_id` 再调一次，传 `intent={"intent_token": <句柄>, "answers":
 [{"id", "answer"}], "resolved_question": <可选，确认后的问法；留空沿用理解结果>}`。服务端据句柄
 取回合同，在建任务前执行与 HTTP `/ask` 同一函数的冻结校验（`objective` 必须与 `question` 逐字
 相等、必填歧义必须都有答案），不通过以工具错误返回同一句用户文案；通过后交给引擎的
-`AskRequest.intent` 与浏览器提交的 `AskIntentConfirmation` 逐字段一致，`understanding_ms` 由
-服务端从首次调用带过来，澄清一轮的轨迹 intent 步因此不会丢耗时。句柄无效或过期（换会话、重新
-`select_notebook`——它会清空本会话的全部句柄、被更新的 8 份挤出）报「intent_token 无效或已过期」，
-不带 `intent` 重新提问即可；成功提交后句柄刻意不作废，引擎失败或传输中断时可用同一份答案重试而
+意图与浏览器提交的 `AskIntentConfirmation` 逐字段一致，`understanding_ms` 由
+服务端从首次调用带过来，澄清一轮的轨迹 intent 步因此不会丢耗时。句柄无效或过期报
+`invalid_argument`，提示不带 `intent` 重新提问即可；成功提交后句柄刻意不作废，引擎失败或传输中断时可用同一份答案重试而
 不必再付一次理解调用。`intent`
-只在 `reasoning` 下合法，`chunk` 与插件模式传了直接报错；`reasoning` 下空白问题也直接报错。已回答
-的响应新增 `status: "answered"`，`reasoning` 档另带 `intent` 摘要（`resolved_question`、
+只在 `reasoning` 下合法，`chunk` 与插件模式传了直接报错；`reasoning` 下空白问题也直接报错。
+`reasoning` 档的回答另带 `intent` 摘要（`resolved_question`、
 `result_scope`、`entities`、`assumptions`、`constraints`、`excluded_topics`、
-`clarification_answers`，独立子预算 1,500 字符，有界因而不会像无界那样挤占答案正文），`chunk` 与插件模式的响应除
-新增的 `status` 外不变。**成本登记**：此前 MCP 的 reasoning 调用零额外模型调用、且检索种子只有
-原问题一条；现在每次未带 `intent` 的 reasoning 调用多一次理解模型调用，理解出的必答主题（至多
-`reasoning_max_subqueries` 个）与网页端一样成为检索权威——这是用户裁决的「与网页端一致」的代价，
-没有降级开关。**兼容性**：澄清返回不含 `answer`/`answer_id`/`conversation_id`，按 `status`
-分派；只读 `answer` 的脚本化调用方要先看 `status`。这替代了此前只看措辞的确定性歧义闸：是否追问
-现在由理解模型决定，以结构化结果而不是错误文案返回，而且同样在任何持久状态建立之前。那两条规则
+`clarification_answers`，独立子预算 1,500 字符，有界因而不会像无界那样挤占答案正文）。**成本登记**：每次未带 `intent`
+的 reasoning 调用多一次理解模型调用，理解出的必答主题（至多
+`reasoning_max_subqueries` 个）与网页端一样成为检索权威，没有降级开关。**兼容性**：澄清返回不含
+`answer`/`answer_id`/`conversation_id`，按 `status` 分派。是否追问现在由理解模型决定，以结构化结果而不是
+错误文案返回，而且同样在任何持久状态建立之前。那两条规则
 （无法解析的指代、纯泛化请求）只在没有有效理解结果时才作为必答歧义行出现（见 `reasoning` 模式下
 共用意图规划器一段）。
 
-`ask_notebook` 接受可选的 `conversation_id`（至多 200 字符，与 `AskIntentPreviewRequest.conversation_id`
-同一上限），并回传本次答案实际记入的 `conversation_id`。传入 id 即接续该会话跨轮对话——包括
-另一个 Agent profile 或网页端开启的会话——前提是它属于同一 owner 且同一个已选笔记本。属于
-其他笔记本或其他 owner 的 id **不报错**：服务端会静默新建一个会话，调用方通过比对回传 id 与
-自己发出的 id 即可察觉。每个 anchor 另带 `source_id`、`element_id`，knowhow 投影节点还带
-`knowhow: {table_id, row_id}`。新增的 `citations` 回退列表携带非 anchor 证据的 `label`、
+单库答案里的每个 anchor 另带 `source_id`、`element_id`、不透明的 `ref`，knowhow 投影节点还带
+`knowhow: {table_id, row_id}`。新增的 `citations` 回退列表携带非 anchor 证据的 `label`、`ref`、
 `source_id`、`element_id`、`location_label`、`quoted_span`、`source_file_name` 与 `tier`；
-逐步推理回答的 `citations` 现在也含真正进入合成 prompt 的原文段卡（按最终喂给模型的那份
+逐步推理回答的 `citations` 也含真正进入合成 prompt 的原文段卡（按最终喂给模型的那份
 `id_map` 回过滤，被字符预算挤掉的段不计入）：零锚点回退时前端正是据此在引用区列出它们；
 `notebook_id`、`memory_id` 与 `url` 只在非空时下发（`url` 只出现在 `tier` 为 `external` 的行上——
 见 [Reflect 插件动作](#reflect-插件动作askreflect_action)，anchor 同一 tier 时也带这个字段），
@@ -1385,53 +1410,20 @@ knowhow 投影来源的 citation 也带与 anchor 相同的
 `provenance` 各自压到 500 字符，然后才把 anchors 整体压到 3,500 字符；citations 另外预压到
 1,800 字符，使大体量引用不会挤掉正文。
 
-`ask_notebook` 还接受 `output`（`"answer"`，默认，行为与上文逐字节一致；或 `"evidence"`）。`"evidence"` 跑同样
-的检索，但**跳过最终合成**，返回合成那一步本应收到的证据。它只支持内置模式 `reasoning` 与 `chunk`；部署级
-`ask.engine` 模式会被拒绝并给出可读文案，因为插件引擎自行检索并合成，没有可单独返回的检索证据。`output`
-取值非法时报 `output must be one of: answer, evidence`。它只要求 `ask` 档，与回答模式同一道闸（不额外要求
-`read` 档），检索天花板、Memory 通道与调用记账同回答模式完全一致。`reasoning` 下仍先理解问题，调用仍可能返回
-`needs_clarification`（`intent_token` 续接不绑定 `output`：用同一个 `question` 与其它参数，含 `output`，再调一次）。
-`conversation_id` 与回答模式同样接受：合法（同 owner、同笔记本）的 id 提供只读历史，用于追问改写与问题理解；
-外来或不存在的 id 静默不带历史；**不会向该会话追加任何内容**，也不新建会话；用了历史时响应回传该 id，否则为 `""`。
-这次调用记为一条提问任务（出现在活动记录与提问分析里，标「仅检索」），不建会话、不存回答，也不进学习链路
-（轨迹/语言采样、完成观察者、检索经验、reflect）和铃铛。该任务行的 `conversation_id` 为空，所以删除会话（包括
-它读过历史的那个会话）不会删掉它；它只随笔记本删除（之后与其它提问一样进入活动留存投影）。已知性能特征：学习
-链路的采样（按笔记本的轨迹采样、按用户的语言采样）用 `output = 'answer'` 谓词排除这些行，该谓词不在任何索引里、
-是在索引查找之后的后置过滤；仅检索调用占比很大时，这两类采样要多扫行，可能需要一个包含 `output` 的索引。
+**`ref` 与 `read_reference`。** `search` 的命中与 `ask`/`get_ask` 的每条引用都带不透明的 `ref`
+（无填充的 `base64url(json)`；不签名——`read_reference` 每次调用都重跑原读取的全部鉴权）。
+`read_reference(ref, offset?)` 取回它背后的文本：一个来源元素（自身文本、在文档中的位置和文档显示标题）、
+主人自己的一条 Memory，或全局回答引用的元素。披露范围不超过 ref 所属笔记本的答案本来就可以引用的内容——
+本库来源加上它当前挂载的参考库；由 Memory 派生的来源只返回给该 Memory 的创建者且须有 `read` 档；
+Memory 条目（含 candidate）只对其主人且须有 `read` 档；全局引用只在任务属于调用者、引用属于该任务
+且通过了回答的引用核对时可读。其余情况与未知 ref 的失败完全相同（`not_found`）；无法解析的 ref
+报 `invalid_argument`。长文本沿 `next_offset` 继续读。
 
-响应形如 `{"status": "retrieved", "output": "evidence", "mode", "evidence_kind", "conversation_id",
-"retrieval_query", "intent", "counts", "budget", "content_is_untrusted_evidence": true, "items": [...],
-"notice", "skipped_libraries", "index_required", "truncation"}`。`evidence_kind` 取 `retrieval`、`document_overview`、
-`structured_enumeration` 或 `none`。每条 item 带 `key`（合成上下文里的 `kN` 标号）、`kind`（`chunk`、`kg`、
-`memory`、`element`、`collection`、`external`、`spreadsheet`（电子表格确定性分析结果）、`document_read`、
-`context`；按号段与产出方写下的字段判定，所以集合清单预览里的元素行是 `collection`、按篇读取的原文摘录是
-`document_read`）、该片段的原样 `text`，以及与回答
-`anchors` 相同的句柄字段（`object_id`、`object_type`、`label`、`source_title`、`location_label`、`source_id`、
-`element_id`、`tier`、`relevance`、`provenance`，适用时还有 `knowhow` / `memory_id` / `url`），由同一个锚点解析器
-产出，所以 `get_cited_element`、`get_memory`、`get_knowhow_row` 解析它们的方式与解析回答锚点完全一致。条目按
-上下文装配时记录下来的边界切分，从不在拼好的文本里重新查找：原文里一行看起来像另一个键（`k2: …`）或以方括号行
-结尾，都仍属于它自己的条目；只省略装配器自己插入的分隔符与分节标题；无法归属到某个键的文本作为
-`kind="context"` 的条目原样返回，其中的键计入 `omitted`。`counts` 为
-`{recalled, selected, delivered, omitted, by_kind}`：各总数**不含 Memory**（Memory 只出现在 `by_kind` 里，其条数不会被
-算术泄漏），`delivered` 是实际装进合成预算的条数（`omitted` 为差值）。没有 `read` 档时，Memory 条目在截断前
-被剔除并从 `by_kind` 中删去，`delivered` 按剩余条目重算。特殊分支与回答模式一致：文档概览返回它自己准备的证据
-（或只带 notice、无条目）；结构化完整枚举短路把确定性渲染的整段结果作为一条 `kind="context"` 的 item 返回；
-`reasoning` 没有检索证据或未配置主模型时，返回 `evidence_kind="none"` 加 notice，不带条目。证据按合成预算定大小，
-而不是 12,000 字节护栏（见上文例外）：20 行上限与 2,000 字符文本上限都不适用，整份证据一次返回、不分页。MCP
-客户端通常自带工具输出上限，需要调高（见 [Agent MCP 记忆 SOP](./agent-mcp-memory-sop_zh.md)）。已登记差异：
-`reasoning` 下证据一律按单次装配成一份上下文，即便回答模式会对该问题分节合成；证据精炼的模型调用也被跳过。
-
-`get_cited_element` 把一条引用还原回原文：按 `ask_notebook` 或 `search_notebook_context` 返回的
-`source_id` 与 `element_id` 原样传入，取回该元素自身的文本、它在文档中的位置和文档显示标题。
-它披露的范围不超过当前所选笔记本的答案本来就可以引用的内容——本库来源加上它当前挂载的参考库。
-由 Memory 派生的来源只返回给该 Memory 的创建者，且令牌须有 `read` 档；否则与未知 id 的失败
-完全相同。
-
-**来源管理。** 这一组里凡是接受 `source_id` 的工具，都只在**当前所选笔记本内**解析它——不含
-挂载的参与库，也不含隐藏的 `memory`/`knowhow` 投影行。这比 `get_cited_element` 更窄：后者刻意
+**来源管理。** 这一组里凡是接受 `source_id` 的工具，都只在**目标笔记本内**（`notebook_id`，默认 token 的默认笔记本）解析它——不含
+挂载的参与库，也不含隐藏的 `memory`/`knowhow` 投影行。这比 `read_reference` 更窄：后者刻意
 覆盖已挂载的参考库，因为答案的引用本来就会指向那里。
 
-`list_sources(offset=0, limit=20)` 是当前所选笔记本的只读来源目录，需要 `read` 档。
+`list_sources(notebook_id?, source_id?, offset=0, limit=20)` 是目标笔记本的只读来源目录，需要 `read` 档。
 它直接复用网页 Sources 面板的 `list_sources_page` 投影、稳定的 `(created_at, id)` 顺序与同一份
 可见性谓词：只列本库直接持有、用户可见的导入来源，不列隐藏的 Memory/Knowhow 投影行，也不把
 挂载参考库持有的来源混进来。每行返回 `source_id`、统一规则生成的显示 `title`、`file_name`、
@@ -1440,32 +1432,36 @@ knowhow 投影来源的 citation 也带与 anchor 相同的
 限制，最大 20。响应同时给出 `total_count`、实际 `offset`/`limit` 与 `next_offset`，调用方沿
 `next_offset` 读到 `null` 即拿全；若共用 12,000-byte 响应护栏不得不移除页尾条目，服务端会按
 真正发出的条数重算 `next_offset`，不会让翻页跳过用户数据，并仍由 `truncation` 元数据显式披露。
+传 `source_id` 则改为返回**这一份**来源的完整解析/抽取状态（字段见下文原状态轮询），Agent 据此判断
+刚添加的来源是否已可被提问。
 
-`add_source_text` 用 Agent 提供的文本建立一份 Markdown 文档来源：`title` 至多
+`add_source(notebook_id?, title?, content_md?, file_name?, content_base64?, url?)` 添加**一份**文档，
+三组输入**恰好给一组**（否则 `invalid_argument`）：（1）`content_md`（须配 `title`）用 Agent 提供的文本建立一份
+Markdown 文档来源：`title` 至多
 200 字符，`content_md` 必须非空且不超过本部署的 `SOURCE_UPLOAD_MAX_MB` 单文件上限（按存储的
 UTF-8 字节计）。提交的标题逐字存进来源行的标题；磁盘文件名是另一个**派生**值——经净化、压到
 200 UTF-8 字节（好让 `{source_id}_` 前缀与 `.md` 后缀一起仍装得进 255 字节的路径组件）、再缀上
-后缀——标题过长时被压缩的只有这个文件名，存下来的标题不受影响。重复提交
-逐字节相同的内容会复用既有来源并回传 `reused: true`，不产生重复行。`add_source_file` 通过
-`content_base64` 接收本地文件的精确字节，只允许严格标准 base64（无空白、无 data URI 前缀），
-同时接收原始 `file_name` 与可选标题。文件后缀准入直接来自后端解析注册表，因此与浏览器本地上传
+后缀——标题过长时被压缩的只有这个文件名，存下来的标题不受影响。（2）`file_name` + `content_base64`（可选
+`title`）通过 `content_base64` 接收本地文件的精确字节，只允许严格标准 base64（无空白、无 data URI 前缀），
+同时接收原始 `file_name`。文件后缀准入直接来自后端解析注册表，因此与浏览器本地上传
 支持面一致：PDF、Markdown、DOCX、PPTX、CSV、XLSX/XLS 与 Markdown ZIP 均可上传。解码结果须
 非空且不超过部署普通单来源上限；文件名须装入一个 255-byte UTF-8 文件系统组件，可选标题沿用
 200 字符来源标题上限。MCP 层不会自己拆 ZIP：原字节进入普通上传/去重/后台调度路径，再由内建
-Markdown bundle 解析器按与浏览器上传完全相同的方式持久化相对路径图片。`add_source_url` 按 URL
-添加 PDF，服务端会先探测，取不到或不是 PDF 一律拒绝。三者都受笔记本文档数量上限约束，唯一的
+Markdown bundle 解析器按与浏览器上传完全相同的方式持久化相对路径图片。（3）`url` 按 URL
+添加 PDF，服务端会先探测，取不到或不是 PDF 一律拒绝。重复提交
+逐字节相同的内容会复用既有来源并回传 `reused: true`，不产生重复行。三组都受笔记本文档数量上限约束，唯一的
 例外是「重复提交解析到既有来源」——它不新增文档，在已满时仍然放行，否则上面那条幂等承诺恰好
 会在最需要重试的时候失效。上限的权威强制在建源写事务**内部**（与浏览器上传/URL 导入端点同一
 道闸），两个并发建源不可能同时占走最后一个名额；只有纯元数据登记的 `/sources/import` 端点仍
 只做预检。解析
-在后台进行，用 `get_source_status` 轮询：它返回 `parse_status`、`status`、`element_count`、
+在后台进行，用 `list_sources(source_id=...)` 轮询：它返回 `parse_status`、`status`、`element_count`、
 `kg_extracted`（图谱里是否有这份来源的知识对象）、`kg_analyzed_empty`（分析**跑完了**、而这份
 文档确实没有可整理的知识——正文极少或整份是没有图注的扫描件）、`agent_created`，以及派生的
 `parse_failed` 布尔与
 `parse_quality_warning`，而不是原始 `error_message`（后者是逐字保存的 `str(exc)`，经常带着
 服务端绝对路径）。`parse_quality_warning` 是 MinerU 降级信号：即使来源已到 `extracted`，版面、
 公式与表格仍可能有误，准备引用它的 Agent 需要知道这一点。`reparse_source` 重跑一份来源的解析与抽取；该
-来源的解析锁被占用时直接拒绝（约 0.5 秒的有界探测而非等待——那把锁跨越两次模型调用，真的
+来源的解析锁被占用时以 `busy` 拒绝（约 0.5 秒的有界探测而非等待——那把锁跨越两次模型调用，真的
 正在解析的来源一秒后仍在解析）。
 
 `delete_source` 不可逆，权限刻意收窄：需要 `delete` 档（`manage` 不蕴含它），
@@ -1476,13 +1472,14 @@ Markdown bundle 解析器按与浏览器上传完全相同的方式持久化相�
 深拷贝还会显式清空该列——副本一律视为用户添加。来源列表与详情响应同样暴露这个 `agent_created`
 布尔，网页端来源列表把它渲染成中性的「Agent 添加」徽标。
 
-**构建。** `build_kg` 触发增量知识图谱抽取（已抽取的来源跳过，此前部分失败的来源重试），
-`build_retrieval_index` 触发检索索引重建，`when="now"`（默认）立即开始、`when="idle"` 排进
-下一个空闲窗口。两者都是 owner-only、立即返回，由 `get_build_status` 轮询——它同时给出图谱
+**构建。** `build(target="kg"|"index", when?, notebook_id?)` 发起后台构建并立即返回。`target="kg"`（默认）触发增量
+知识图谱抽取（已抽取的来源跳过，此前部分失败的来源重试；`when` 不适用，传了报 `invalid_argument`），
+`target="index"` 触发检索索引重建，`when="now"`（默认）立即开始、`when="idle"` 排进下一个空闲窗口。
+两者都需要 `manage` 档、owner-only，由 `get_notebook`（默认 `include="status"`）轮询——它同时给出图谱
 状态（就绪/构建中、待处理来源数、当前任务阶段与进度）与检索索引状态（是否存在/构建中/排队中、
-队列位次、下一个空闲窗口）。`build_kg` 因该笔记本已有构建在跑而拒绝，是**排队信号而不是错误**：
-笔记本级单飞守卫正在生效，调用方应轮询 `get_build_status` 直到它清空，而不是立刻重试。
-`build_retrieval_index` 在笔记本规模不足以需要索引时拒绝。`get_build_status` 是纯读取，笔记本
+队列位次、下一个空闲窗口）。`build` 因该笔记本已有构建在跑而以 `busy` 拒绝，是**排队信号而不是错误**：
+笔记本级单飞守卫正在生效，调用方应轮询 `get_notebook` 直到它清空，而不是立刻重试。
+`target="index"` 在笔记本规模不足以需要索引时以 `forbidden` 拒绝。`get_notebook` 是纯读取，笔记本
 的任何成员都可调用。
 
 整个来源与构建面的写入一律 owner-only。token 的白名单可能包含 owner 只是以只读成员身份加入的
@@ -1509,13 +1506,13 @@ token，两档都要授予。
 投影，而删除或重新解析文档会波及每个成员的检索，两个面因此采用不同的权限模型。这处
 分歧是拍板取舍不是疏漏，`backend/tests/test_memory_mcp.py` 对两侧行为各钉一条测试。
 
-**库理解（Agentic Memory P3）。** `get_notebook_profile`（`read` 档）读取
-的正是网页端「AI 对这个库的理解」面板同一份数据：共享 `base` 层加调用者自己的 `mine`
-覆盖层（绝不是别人的），每块只投影 `{label, value, updated_at}`——不带 `evidence` 来源
+**库理解（Agentic Memory P3）。** `get_notebook(include="all")`（`read` 档；默认的
+`include="status"` 不带它）在响应里加上 `profile`，读取的正是网页端「AI 对这个库的理解」面板同一份数据：
+共享 `shared` 层（每个成员都看到的那层）加调用者自己的 `mine` 覆盖层（绝不是别人的），每块只投影 `{label, value, updated_at}`——不带 `evidence` 来源
 id、不带 `revision`、不带变更历史，因此 token 无法借此探测本无权
 读取的来源 id。响应里每块都标 `content_is_untrusted_evidence: true` 与
-`citable: false`：它是规划用的提示脚手架，绝不能被引用。`AGENT_PROFILE_ENABLED` 关闭、
-或该库尚未生成过理解时，工具返回 `enabled: false` 与空块，而不是报错。
+`citable: false`：它是规划用的提示脚手架，绝不能被引用。`AGENT_PROFILE_ENABLED` 关闭时，
+profile 返回 `enabled: false` 与空块，而不是报错；该库尚未生成过理解时返回 `enabled: true` 与空列表。
 `add_observation`（`contribute` 档）向调用者自己在该库的观察队列追加一行
 不超过 `AGENT_OBSERVATION_TEXT_MAX_CHARS`（500）字符的记录，按 `client_request_id` 幂等去
 重（与 `propose_memory` 同一套机制）。幂等窗口**以环形保留为界**（登记的合同而非缺陷）：
@@ -1525,7 +1522,7 @@ id、不带 `revision`、不带变更历史，因此 token 无法借此探测本
 `_writable_notebook` owner-only 门的 Agent 写（第一个是 `put_knowhow_cell_code`）：爆炸半径
 结构上只到 token 持有者自己的覆盖层而非整库检索，因此只读成员自己的 Agent 也能用它；这条
 观察记录的用途与边界详见下面「Notebook understanding blocks」一节。特性关闭时
-`add_observation` 直接报错，而不是静默收下一批永远不会被巡固任务读取的数据。
+`add_observation` 以 `unavailable` 失败，而不是静默收下一批永远不会被巡固任务读取的数据。
 
 只有 `confirmed` Memory 可发起 KG 晋升。创建者提交后，admin queue 展示脱敏后的结构化提取
 候选与服务端验证过的 evidence，而不是原始 Memory revision/provenance 浏览器。提案会固定精确的
@@ -1719,7 +1716,7 @@ id）、`POST …/knowledge/{knowledge_id}/promote`、`POST /api/notebooks/{note
 因此新建的记录一律 `total_sources = 0`，`kg_build_started` 事件的 `total_sources`
 恒为 `0`。worker 用**与它接下来真正要跑的那一批完全相同**的谓词与限额自己数目标
 ——清空重建走的是删除相位**之后**，让计数与抽取循环看到同一个世界——并在把阶段
-切到 `extracting` 之前回填持久总数。**running 期间**，`get_build_status` 的 `total` 为 `0` 只出现在
+切到 `extracting` 之前回填持久总数。**running 期间**，`get_notebook` 的 `total` 为 `0` 只出现在
 `probing` 阶段，网页端此时显示「正在连接模型服务…」，不带任何数字。**终态行**同样
 可能带着 `total = 0`：要么这次构建确实没有目标，要么它在跑到计数点之前就失败或被
 中断（清空重建的起始探测失败、崩溃后由启动恢复结算）——中断卡片因此可能显示
@@ -2136,7 +2133,7 @@ worker。每段起步一次模型调用；一段里的 flag 形状参数超过 `
 
 - 两层知识库：每个 notebook 带 `tier`（`base` | `personal`，默认 `personal`）。`chunk` 基线与 `reasoning` 的 `search_chunks` 共用的原文段落通道按**参与集**读取 chunk（当前笔记本 + 本次勾选的参考库），开关是 `CHUNK_FEDERATION_ENABLED`（默认 true，false 回到只读当前 notebook）、上界是 `CHUNK_FEDERATION_MAX_PARTICIPANTS`（默认 8，超出按挂载顺序截断并发 `chunk_federation_truncated` 事件）；参考库的来源天花板是「该库当前可见来源」，隐藏的 Memory/Knowhow 投影结构性不参与，非当前库的大库只借用已常驻索引、不冷加载、缺席时退回有界词法。参与集里每个库走的是同一条 chunk 生产者、同一个 0..1 融合量纲，所以跨库合并直接比分：自己最高分低于本次臂内全场最高分 × `CHUNK_FEDERATION_PEER_FLOOR`（默认 0.5）的库，在 `CHUNK_RECALL` 预算里拿不到保底名额，只参与剩余名额竞争——挂了一堆与本题无关的参考库，不再每挂一个就让答得上的那个库少一条原文。设 0 回到「每库保底一条」的旧合并。召回是联邦的，选择层同样是联邦感知的：一个子查询的融合配额不会因为多挂了库而被重切（各库对同一子查询的命中并进该子查询的同一组），当前笔记本另有保底份额——只要有参考库段落参与竞争、它又有合格候选，最终入选段落里至少占 `min(CHUNK_MMR_K, ceil(CHUNK_MMR_K × CHUNK_FEDERATION_ACTIVE_RESERVE))` 席（默认 0.25，即 4 席），合格候选不足时以实际数量为上限、正文相同的只算一条，设 0 关闭——因为当前笔记本是主体、挂载的参考库是补充。合格指：不是只来自生成问题索引的补充命中、不是纯图谱命中、相关度至少 0.12（精确标识符通道取回的不受这条限制）；排序本已选中的本库段落即使不够资格被拉进来，也照样计入份额。在 MMR 与配额融合两条分支里，这条保底作用在**最终选择之后**（所有生产者都贡献完），代价出在排名最靠后的参考库席位上，不会把答案变长——保底行占的正是这些尾部位置，所以入选段落超出 `CHUNK_ANSWER_BUDGET_CHARS` 时，答案渲染先丢排名最低的非保底行（整行丢、顺序不变，全部装得下时不变）；在 mix 分支里它是最终 token 切分的最后一条保底规则（见下文 `chunk`）；全局问答的 mix 切分没有主体库，改为把同样数量的席位分给各参与库；在 `reasoning` 合成、按节合成与深度报告撰写里，它是原文段顺序里紧随精确前缀的一段前缀，并由原文段下限挡住结构化块的挤占（见「尚未构建知识图谱的笔记本」）。保底只约束机械切分（排序 + token / 字符预算），不覆盖证据精炼、大纲绑定这类模型判断。每条召回腿自己的候选窗仍是每库每子查询 `CHUNK_RECALL`（默认 200），合并后压回同一预算。可选 KG overlay / PPR 在此之上再加入 federated KG 上下文与 base-backed chunk，`reasoning` 使用 federated KG 路径。KG overlay 命中参考库的知识对象时，它的 evidence 反查回**该库自己的**原文段落（此前只反查当前笔记本，于是「引了参考库的知识对象，却拿不出它的原文」）；这条反查受同一套约束：参与的库先与 chunk 腿的参与集求交（`CHUNK_FEDERATION_MAX_PARTICIPANTS` 对这条腿同样是上界，超出的库连一次读都不发生），然后只取该库当前可见的来源、被取消勾选的参考库整库跳过（连来源枚举都不发生），并且只走已建好的 element→chunk 反查索引——尚未回填该索引的参考库这一轮不出原文，并发一条内容无关的 `kg_source_chunks_peer_unindexed` 事件。exact-score 的 `base` 次序只适用于知识对象命中：`federated_retrieve()` 不改相关度分数，分数更高的 personal hit 仍排在前面；`federated_retrieve_relations()` 的关系命中仍只按 score 排序。回答合成阶段另有独立规则：当 base 与 personal 证据冲突时，以 base 立场为准并指出差异。引用携带其 tier（`AnswerAnchor.tier`：`personal` | `base` | `external`，第三个取值来自 reflect 插件动作带回的外部证据，见 [Reflect 插件动作](#reflect-插件动作askreflect_action)），Ask 在每条引用上渲染 `base`/`personal` 标记；`external` 这一档的锚点不叠这枚逐条标记（引用卡自己的类型标记已经写着「外部」，两枚并排会读成两个不同的事实），但仍计入「来源分布」汇总标签的第三格。`Citation.notebook_id` / `AnswerAnchor.notebook_id`只在证据来自其它参与库时非空（等于当前笔记本时归一为 `""`）；所有 Ask 模式——包括 图谱子图锚点、挂载的私有库与 spreadsheet 工作簿——都遵守这条规则，界面据此显示来源库名，「在图谱中定位」也定位到该库。
 
-- **搜索并发上限**：笔记本全文搜索——`GET /notebooks/{notebook_id}/search` 与 MCP 的 `search_notebook_context` 工具——共用一个**进程级**并发上限（默认 4，部署可经 `SEARCH_CONCURRENCY_LIMIT` 调整），整个后端进程同时最多这么多个搜索在跑，不按笔记本、不按用户、不按入口分别计算。第 5 个及以后的并发搜索请求会**等待**而不是被拒绝，且这个等待**没有超时**：搜索结果不会因为并发争抢而被收窄或拒绝，只会被延后。
+- **搜索并发上限**：笔记本全文搜索——`GET /notebooks/{notebook_id}/search` 与 MCP 的 `search` 工具——共用一个**进程级**并发上限（默认 4，部署可经 `SEARCH_CONCURRENCY_LIMIT` 调整），整个后端进程同时最多这么多个搜索在跑，不按笔记本、不按用户、不按入口分别计算。第 5 个及以后的并发搜索请求会**等待**而不是被拒绝，且这个等待**没有超时**：搜索结果不会因为并发争抢而被收窄或拒绝，只会被延后。
 
 ## 检索模式（问答）
 
@@ -2230,7 +2227,7 @@ chunk 检索、chunk×graph mix 与 `reasoning`（含分节合成）三条答案
 
 **跨文档 KG 上的 PPR（`reasoning` 的 retrieve 步使用）。** 经 `federated_retrieve` 取种子（KG 实体 + 其源 chunk；`RELATION_RETRIEVAL_ENABLED=true` 时再融合关系索引命中）作为 HippoRAG 式**个性化 PageRank**（`GRAPH_PPR_ENABLED`，默认开）的个性化向量，通过共享知识图谱把相关度跨文档传播；排名靠前的 chunk 喂出接地答案，`[k]` 锚点指向 chunk 引用。关掉 `GRAPH_PPR_ENABLED` 只是让这条通道不再参与混合：reasoning 的反思循环记一条 `skip` 轨迹步，`chunk` 的 mix 分支则把它当空候选列表——两边都不会回退到 BFS 漫游。
 
-**`reasoning` —— 意图优先的 agentic 深挖检索。** 正式界面先调用 `/ask/intent/stream`（`/ask/intent` 保留 JSON 兼容）；清晰意图自动继续时，用户原句是首轮权威检索种子，模型规范化仅作补充；歧义经用户审阅后，以确认措辞为权威。这一步最多使用当前会话最近五个用户问题，不使用语料派生的助手回答，也不读取语料或创建持久 conversation/job。清晰请求自动确认，阻断性歧义以内联审阅等待补充。`/ask` 与 `/ask/stream` 在原始 `question` 之外接收已审阅的 `intent`；后端确定性冻结合同，形成唯一内部研究问题，供 Memory 检索、PPR、证据检索与答案合成共用。确认后的检索方向直接成为首轮子查询，不再执行旧的第二次问题规划；反思阶段可以按证据增加查询，但不能替换合同。超出该档位首轮宽度的方向不会被丢弃：一段确定性补种在 PPR / 精确查找 seed pass 之后、反思循环之前按合同顺序执行它们，最多占用共享推理步骤预算的一半，每条执行过的方向都产生一条普通的 `retrieve` 轨迹步。一份 run 内的注册表把每个已审阅方向映射到唯一简称(默认截断点撞出同一简称时依次加宽,仍撞则追加序号后缀),并可反查回方向原文——模型自始至终只看得到简称、也只会用简称重提;`add_subquery` 提交经这份注册表解析后,命中尚未执行的方向会按方向自己的完整契约原文执行(账目记在方向身份上,不是裸简称),命中已经执行过的方向(无论是补种执行的还是此前某轮 `add_subquery` 补上的)则判定为重复、不重跑检索。每一轮反思提示都会看到当前仍未覆盖的方向,好让模型优先把自己的预算花在这些方向上;等反思循环结束,才会按这份终态把仍未覆盖的方向记成一条 `skip` 步——不是按预算刚耗尽那一刻的旧账,若反思期间已经全部补齐则不落这一步。响应持久化确认后的 `intent`、暴露内部 `retrieval_query`，并在正式检索前以 `intent` 作为首个引擎轨迹步骤；会话里保存/显示的仍是原始问题。轨迹覆盖整轮而不只是检索段：问题理解跑在持久 job 之前，界面自行合成理解阶段的前几步（理解中 → 已理解或待澄清 → 已确认）拼在后端步骤之前，不再为它另设轨迹之外的提示条；该阶段的客户端墙钟以可选且有上限的 `intent.understanding_ms` 回传（绝不参与检索），成为持久 `intent` 步的 `duration_ms`。后端在 Memory 检索之前推送 `intent` 步；命中私有记忆时记 `memory` 步，它记录的是**召回**而非归因（归因由答案里的 `[k]` 引用承担），零命中则记一条带耗时的 `skip` 步，让候选查询与 embedding 调用的耗时留在总耗时里。答案生成之后记 `synthesis` 步——那次生成通常是整轮最长的一段，既要可见也要计入轨迹总耗时；它的引用数取绑定锚点，不取检索到的证据卡数。未携带 `intent` 的直接兼容调用保留清晰问题的旧路径，但遇到确定性无法解析的指代或纯泛化请求会 fail closed。该 422 的文案会逐条列出需要补充的信息（例如「你提到的对象具体是什么？请给出名称或简要背景。」），至多 8 条、每条至多 500 字符，不含用户原文。清晰问题走这条旧路径零额外模型调用、零额外读取，与历史行为逐字节相同。只有确定性澄清闸判定指代不清或纯泛化请求命中时，才依次执行：①读取该请求 `conversation_id` 指向的、归属当前用户与当前笔记本的会话里仅含用户问句的最近五轮（语料盲，不含助手回答；不属本人本库、无 `conversation_id` 或无历史时与今天一样 422）；②用既有 `query_rewrite` 工作负载把跟进句改写成独立问题（未配置、失败或改写为空时与今天一样 422）；③对改写句重新判同一把确定性闸：仍命中则 422，且文案恒取自原句（改写产物绝不进入错误文案，不含改写产物）；放行则改写句成为内部 `retrieval_query` 与 `intent.resolved_question`，而 `intent.objective`、会话里保存/显示的问题、`result_scope` 与完整性要求一律仍按原句判定（改写丢了「全部」等要求不得静默降级为 ranked）。`intent` 轨迹步的 `duration_ms`：携带 `intent` 时采信客户端 `understanding_ms`；未携带 `intent` 但跑过上述改写时记服务端改写耗时；两者都没有时为空——不新增轨迹步，`AskRequest` 不加字段。MCP `ask_notebook` 不经这条路径：它在调用内已跑带会话历史（最近五个用户问句）的模型理解步并以澄清句柄回传（见上文 MCP 一节），跟进句由那一步解析，与此处的改写机制相互独立。随后委托 `ReasoningRetriever` 检索（走上文所述的 PPR 传播）、反思是否充分，按需扩图/加子查询直到能回答，并经 NDJSON stream（`/ask/stream`）输出 `reasoning_trace`。遇到显式推导问题时可调用 `follow_chain`：通过两轮有界邻接抽样复用既有 source/target 索引，再确定性检查类型、状态、审核、evidence 与 `validity_scope`；两条存储关系作为可引用前提，`A→C` 只作为带「推断」标记的查询期结论。高度节点抽样被截断且无法证明不存在直接边时，宁可不推。上面的精确标识符通道以两种方式接进这个循环，两者都零模型调用，且覆盖 `reasoning` 问答与每一节深度报告检索（报告引擎逐字复用 `ReasoningRetriever`）；knowhow 智能补全按策略位主动关闭它（补全的查询是 JSON 信封而非问题，否则会在每次请求上探测信封自身的字段名）。权威问题本身点名了标识符时，初检索之后无条件跑一次确定性 seed pass（记 `exact_lookup` 轨迹步，界面显示「精查」），打分用的是它实际探测到的名称本身而非整句问题——把精确命中拿去和长问题里一堆无关词打分会把它的相关度拖低到丢字符预算、甚至拖过接地判定阈值；反思模型也可以在某个被点名命令的完整定义仍未覆盖时，主动选择 `exact_lookup` 动作并给出 `exact_term`，打分方式相同。该动作与 seed pass 共用同一把名称形状闸——低选择度的任意短串会被拒绝，而不是变成全库子串扫描——每个名称一次 run 内只探测一次（seed pass 共用同一份账目），agent 主动调用每 run 至多 3 次，被跳过、重复或零收益的尝试都会带着模型能据此调整的理由回喂给下一轮反思（按理由/名称去重，同一个非法输入不会让账目无限增长）。问题里没有标识符时不发任何调用，也不多出轨迹步。严格 / KG 接地。
+**`reasoning` —— 意图优先的 agentic 深挖检索。** 正式界面先调用 `/ask/intent/stream`（`/ask/intent` 保留 JSON 兼容）；清晰意图自动继续时，用户原句是首轮权威检索种子，模型规范化仅作补充；歧义经用户审阅后，以确认措辞为权威。这一步最多使用当前会话最近五个用户问题，不使用语料派生的助手回答，也不读取语料或创建持久 conversation/job。清晰请求自动确认，阻断性歧义以内联审阅等待补充。`/ask` 与 `/ask/stream` 在原始 `question` 之外接收已审阅的 `intent`；后端确定性冻结合同，形成唯一内部研究问题，供 Memory 检索、PPR、证据检索与答案合成共用。确认后的检索方向直接成为首轮子查询，不再执行旧的第二次问题规划；反思阶段可以按证据增加查询，但不能替换合同。超出该档位首轮宽度的方向不会被丢弃：一段确定性补种在 PPR / 精确查找 seed pass 之后、反思循环之前按合同顺序执行它们，最多占用共享推理步骤预算的一半，每条执行过的方向都产生一条普通的 `retrieve` 轨迹步。一份 run 内的注册表把每个已审阅方向映射到唯一简称(默认截断点撞出同一简称时依次加宽,仍撞则追加序号后缀),并可反查回方向原文——模型自始至终只看得到简称、也只会用简称重提;`add_subquery` 提交经这份注册表解析后,命中尚未执行的方向会按方向自己的完整契约原文执行(账目记在方向身份上,不是裸简称),命中已经执行过的方向(无论是补种执行的还是此前某轮 `add_subquery` 补上的)则判定为重复、不重跑检索。每一轮反思提示都会看到当前仍未覆盖的方向,好让模型优先把自己的预算花在这些方向上;等反思循环结束,才会按这份终态把仍未覆盖的方向记成一条 `skip` 步——不是按预算刚耗尽那一刻的旧账,若反思期间已经全部补齐则不落这一步。响应持久化确认后的 `intent`、暴露内部 `retrieval_query`，并在正式检索前以 `intent` 作为首个引擎轨迹步骤；会话里保存/显示的仍是原始问题。轨迹覆盖整轮而不只是检索段：问题理解跑在持久 job 之前，界面自行合成理解阶段的前几步（理解中 → 已理解或待澄清 → 已确认）拼在后端步骤之前，不再为它另设轨迹之外的提示条；该阶段的客户端墙钟以可选且有上限的 `intent.understanding_ms` 回传（绝不参与检索），成为持久 `intent` 步的 `duration_ms`。后端在 Memory 检索之前推送 `intent` 步；命中私有记忆时记 `memory` 步，它记录的是**召回**而非归因（归因由答案里的 `[k]` 引用承担），零命中则记一条带耗时的 `skip` 步，让候选查询与 embedding 调用的耗时留在总耗时里。答案生成之后记 `synthesis` 步——那次生成通常是整轮最长的一段，既要可见也要计入轨迹总耗时；它的引用数取绑定锚点，不取检索到的证据卡数。未携带 `intent` 的直接兼容调用保留清晰问题的旧路径，但遇到确定性无法解析的指代或纯泛化请求会 fail closed。该 422 的文案会逐条列出需要补充的信息（例如「你提到的对象具体是什么？请给出名称或简要背景。」），至多 8 条、每条至多 500 字符，不含用户原文。清晰问题走这条旧路径零额外模型调用、零额外读取，与历史行为逐字节相同。只有确定性澄清闸判定指代不清或纯泛化请求命中时，才依次执行：①读取该请求 `conversation_id` 指向的、归属当前用户与当前笔记本的会话里仅含用户问句的最近五轮（语料盲，不含助手回答；不属本人本库、无 `conversation_id` 或无历史时与今天一样 422）；②用既有 `query_rewrite` 工作负载把跟进句改写成独立问题（未配置、失败或改写为空时与今天一样 422）；③对改写句重新判同一把确定性闸：仍命中则 422，且文案恒取自原句（改写产物绝不进入错误文案，不含改写产物）；放行则改写句成为内部 `retrieval_query` 与 `intent.resolved_question`，而 `intent.objective`、会话里保存/显示的问题、`result_scope` 与完整性要求一律仍按原句判定（改写丢了「全部」等要求不得静默降级为 ranked）。`intent` 轨迹步的 `duration_ms`：携带 `intent` 时采信客户端 `understanding_ms`；未携带 `intent` 但跑过上述改写时记服务端改写耗时；两者都没有时为空——不新增轨迹步，`AskRequest` 不加字段。MCP `ask` 不经这条路径：它在调用内已跑带会话历史（最近五个用户问句）的模型理解步并以澄清句柄回传（见上文 MCP 一节），跟进句由那一步解析，与此处的改写机制相互独立。随后委托 `ReasoningRetriever` 检索（走上文所述的 PPR 传播）、反思是否充分，按需扩图/加子查询直到能回答，并经 NDJSON stream（`/ask/stream`）输出 `reasoning_trace`。遇到显式推导问题时可调用 `follow_chain`：通过两轮有界邻接抽样复用既有 source/target 索引，再确定性检查类型、状态、审核、evidence 与 `validity_scope`；两条存储关系作为可引用前提，`A→C` 只作为带「推断」标记的查询期结论。高度节点抽样被截断且无法证明不存在直接边时，宁可不推。上面的精确标识符通道以两种方式接进这个循环，两者都零模型调用，且覆盖 `reasoning` 问答与每一节深度报告检索（报告引擎逐字复用 `ReasoningRetriever`）；knowhow 智能补全按策略位主动关闭它（补全的查询是 JSON 信封而非问题，否则会在每次请求上探测信封自身的字段名）。权威问题本身点名了标识符时，初检索之后无条件跑一次确定性 seed pass（记 `exact_lookup` 轨迹步，界面显示「精查」），打分用的是它实际探测到的名称本身而非整句问题——把精确命中拿去和长问题里一堆无关词打分会把它的相关度拖低到丢字符预算、甚至拖过接地判定阈值；反思模型也可以在某个被点名命令的完整定义仍未覆盖时，主动选择 `exact_lookup` 动作并给出 `exact_term`，打分方式相同。该动作与 seed pass 共用同一把名称形状闸——低选择度的任意短串会被拒绝，而不是变成全库子串扫描——每个名称一次 run 内只探测一次（seed pass 共用同一份账目），agent 主动调用每 run 至多 3 次，被跳过、重复或零收益的尝试都会带着模型能据此调整的理由回喂给下一轮反思（按理由/名称去重，同一个非法输入不会让账目无限增长）。问题里没有标识符时不发任何调用，也不多出轨迹步。严格 / KG 接地。
 
 Ask 与深度报告共用的意图规划器保留用户要求的详细程度。用户未要求的公式、实现细节、整套基准、所有模型规模或全库穷举，不得被提升成必答主题或硬约束；检索查询变体只是找资料的辅助手段，不是额外答题义务。明确指向当前文档或笔记本的指代保留给后续检索解析，不读取语料或推断来源身份；真正缺失的比较对象仍需澄清。规范化不得编造对象身份或把主语替换成“待指明模型”占位，需自由文本回答的澄清也不得把“请补充名称”当成答案选项。是否追问归理解模型决定：模型返回通过形状校验的合同时，只由它自己的判断和歧义行决定网页内联确认卡、MCP 澄清句柄或深度报告「补充问题信息」是否出现，这个/它/that 之类的措辞由模型结合问题和仅含用户提问的历史自行解析。两条措辞规则——无法解析的指代（如 这个/它/that）与纯泛化请求（如 帮我总结）——只在没有有效理解结果时兜底：模型未配置、调用失败或输出未通过形状校验（缺问题文本的歧义行、或歧义行超过合同上限，都算未通过）。有效理解明确给出 `needs_clarification=true` 时一定追问：模型给的歧义行全是可选时，补一条通用必答问题。未携带 `intent`、不跑理解模型的直接兼容调用仍只靠这两条规则把关。
 
@@ -2494,12 +2491,12 @@ Agent 维护一份低成本、经 LLM 巡固的、关于笔记本的理解摘要
 代价是同一档下的两个工具在记录里读起来一样（已登记）。被**鉴权**拒绝的调用不留痕（一份「谁被拒了」
 的日志是另一种东西，隐私后果也不同）——**包括收口之后才做的那些鉴权**。这样的闸一共三道，
 每一道都关掉自动记账、在自己放行之后再记：写类工具在 `require_agent_access` 之后的
-owner-only 检查、`get_memory` 读候选条目要求的 `memory:read_candidates`、以及
+owner-only 检查、`read_reference` 读候选 Memory 要求的 `memory:read_candidates`、以及
 `delete_source` 那条「Agent 令牌只许删 Agent 自己添加的资料」。所以这条不变式是
 「**每一道鉴权**都过了才记」，而不是「在收口处记」。
 
 **已登记的划线：查不到不是鉴权。** 一次点名了不存在的 id、或那份资料属于别的笔记本的调用
-（`get_cited_element`、knowhow 那几个读、`get_source_status`，以及 `delete_source` 自己的
+（`read_reference`、knowhow 那几个读、`list_sources(source_id=...)`，以及 `delete_source` 自己的
 not-found 分支）**仍然留一行**。两个理由都是刻意的。一是它**是真的**——这个 Agent 确实对
 这个库发起过这种调用，而记账回答的是「谁在怎么用这个库」，一次摸错 id 与一次成功同样是
 答案。二是另一条路在这个代码库里站不住：按查不到过滤意味着十来个工具每一个都要记得先关掉
@@ -2538,7 +2535,7 @@ not-found 分支）**仍然留一行**。两个理由都是刻意的。一是它
 | 每 `(笔记本, 用户)` 的调用记录环形上限 | 200 条，与上面那条观察环**各自独立**——每种只在自己那一档里淘汰，谁也挤不掉谁 |
 | 调用记录的取数宽度 | 默认最近 20 条（`call_limit`，上限即 200 条环）——独立查询、独立清单 |
 
-**已登记取舍。** 笔记本深拷贝不带这两张表——副本从零重新形成自己的理解，这是刻意设计：理解块描述的是 Agent 对**这一本**笔记本使用方式的体会，不是来源材料本身该被继承的事实。三个提问面——同步 `POST /ask`、流式 `POST /ask/stream` 与 MCP `ask_notebook`——都在**答案交付之后**各推进一次覆盖层计数器（2026-09-22 起；此前同步与 MCP 两面从不触发提问完成钩子，经验蒸馏与回答偏好归纳对它们同样零计数）：同步与 MCP 经 `ask_current` 通知，流式经 durable 协调器通知，两条路互不嵌套、各自恰好一次；取消与失败不计。离线评测 `app/eval/inference.py` 经同一个入口提问，因此**同样计数**——这是登记而不是豁免：评测建的是真实 `ask_jobs` 行，与用量口径一致，把它单独摘出去反而要在记账路径上加一个只有评测走得到的分支。单人笔记本的底座与覆盖层链路刻意**不**合并执行——各自照常排队与运行，登记为 P1 的简化而非正确性要求。任一链路的巡固失败仍会消费认领时刻快照下的 `pending_signal` 计数，因此失败的一轮需要重新攒满阈值才会重试，把成本封在「每个阈值批次至多一次模型调用」，而不是对随后每一次变更都重试。把成员移出共享笔记本会经成员移除路径清空其覆盖层（`kick_all_members` 刻意**不**清理——已登记的例外，因为读侧参与集闸本就让被踢出成员的覆盖层在每个消费方那里都不可达）。
+**已登记取舍。** 笔记本深拷贝不带这两张表——副本从零重新形成自己的理解，这是刻意设计：理解块描述的是 Agent 对**这一本**笔记本使用方式的体会，不是来源材料本身该被继承的事实。三个提问面——同步 `POST /ask`、流式 `POST /ask/stream` 与 MCP `ask`——都在**答案交付之后**各推进一次覆盖层计数器（2026-09-22 起；此前同步与 MCP 两面从不触发提问完成钩子，经验蒸馏与回答偏好归纳对它们同样零计数）：同步与 MCP 经 `ask_current` 通知，流式经 durable 协调器通知，两条路互不嵌套、各自恰好一次；取消与失败不计。离线评测 `app/eval/inference.py` 经同一个入口提问，因此**同样计数**——这是登记而不是豁免：评测建的是真实 `ask_jobs` 行，与用量口径一致，把它单独摘出去反而要在记账路径上加一个只有评测走得到的分支。单人笔记本的底座与覆盖层链路刻意**不**合并执行——各自照常排队与运行，登记为 P1 的简化而非正确性要求。任一链路的巡固失败仍会消费认领时刻快照下的 `pending_signal` 计数，因此失败的一轮需要重新攒满阈值才会重试，把成本封在「每个阈值批次至多一次模型调用」，而不是对随后每一次变更都重试。把成员移出共享笔记本会经成员移除路径清空其覆盖层（`kick_all_members` 刻意**不**清理——已登记的例外，因为读侧参与集闸本就让被踢出成员的覆盖层在每个消费方那里都不可达）。
 
 ### 检索策略经验
 
@@ -2908,7 +2905,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 每轮问题与会话标题完整返回。引用元数据仍受上限约束，通过 `title_truncated`／`snippet_truncated`／`file_name_truncated` 披露截断。
 
-问题护栏覆盖 `POST /notebooks/{id}/ask`、`/ask/stream`、`/ask/intent`、`/ask/intent/stream`（422），也覆盖 MCP `ask_notebook`（可读的 “question too long” 错误）。`PATCH /conversations/{id}` 超出重命名护栏返回 422；自动标题取问题前 60 字，MCP 没有重命名工具。两项前端护栏（`ASK_INPUT_LIMITS`）均按 Unicode 码点计数，只拒绝提交、不裁输入。
+问题护栏覆盖 `POST /notebooks/{id}/ask`、`/ask/stream`、`/ask/intent`、`/ask/intent/stream`（422），也覆盖 MCP `ask`（可读的 “question too long” 错误）。`PATCH /conversations/{id}` 超出重命名护栏返回 422；自动标题取问题前 60 字，MCP 没有重命名工具。两项前端护栏（`ASK_INPUT_LIMITS`）均按 Unicode 码点计数，只拒绝提交、不裁输入。
 
 护栏上线前写入的问题／标题仍可能超长，公开投影保持不截断；补齐该缺口需要显式披露，不能静默裁剪。投影常量定义于 `services/conversation_public_view.py`，写入限制定义于 `models/ask.py`。
 
@@ -2939,7 +2936,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 问答正在生成，以及深度报告处于 `pending`、`running`、`planning` 或 `generating` 时，等待区域会挂载同一个紧凑许愿轮播。轮播分别读取最多 `WAITING_WISH_KIND_LIMIT = 5` 条按优先级排序的问题反馈与同样数量的功能需求，因此不会被不可投票的更新计划占满；合并后先按点赞数、再按发布时间与 id 排序。默认每 `WAITING_WISH_ROTATION_MS = 8,000` 毫秒切换一条，鼠标悬停、键盘焦点进入、用户正在投票或系统启用“减少动态效果”时暂停，并提供上一个/下一个手动切换。卡片只投影类型和完整标题，详细说明通过「查看完整说明」进入许愿墙，不静默截断正文。用户可在卡片上赞同或取消赞同，投票中的控件禁用，结果或错误紧邻控件显示；轮播加载失败不会影响问答或报告本身继续生成。
 
-管理员可从全局 `/admin/questions` 进入**提问分析**，把普通问答任务与深度报告中的用户原始提问汇总到一个地方，不再要求先按用户下钻。通过既有校验的原始提问会完整保存和返回，提问分析视图不会再额外截断；对于历史上已完成的问答任务，优先使用答案记录中的完整提问恢复旧任务里被缩略的正文。笔记本删除后保留的提问投影，在配置的用户活动保留期内仍会进入分析；已到期投影，以及仍存在同 id 笔记本的保留行不会重复计入。**全局问答**的作业同样汇总在这里：每条是一行 `type="ask"` 且 `scope="global"` 的记录，不属于任何笔记本，`notebook_id`/`notebook_name` 恒为空串，笔记本列显示固定的「全局问答」。每条结果另带 `submitted_via`，即提交这条提问的入口：`web` 表示登录会话鉴权的网页/HTTP 提交面（`POST /api/notebooks/{id}/ask`、`/ask/stream`、`/reports`，全局问答对应 `POST /api/global-ask/ask`），`mcp` 表示 MCP 工具（笔记本内问答是 `ask_notebook`，全局问答是 `ask_global`），空串表示「未记录」——该字段上线前创建的全部历史行，以及不传入口的进程内调用。取值只由服务端入口写入，不接受请求字段指定，也不为历史行做推断；页面在「调用方式」列显示为「网页」「MCP」「未记录」，删除笔记本后的留存投影保留原值。每条提问还带 `output`（默认 `answer`；`ask_notebook(output="evidence")` 的调用为 `evidence`），后者在来源列旁标「仅检索」，留存投影同样保留。页面支持按来源类型（`ask` 或 `report`）、**提问范围**（`scope=notebook|global`，即「笔记本内」与「全局」，省略时两者都出现）、调用方式（`submitted_via=web|mcp`）、用户和提问正文筛选；结果按新到旧展示用户、笔记本、状态和创建时间；汇总卡片按当前筛选条件统计提问总数、问答数、深度报告数、**全局问答数**与去重后的活跃用户数——全局问答数是问答数的子集，与笔记本内问答同属一类问题，只在检索方式上不同。搜索上限为 `ADMIN_QUESTIONS_QUERY_MAX_CHARS = 200` 个 Unicode 码点；offset 分页默认每页 `ADMIN_QUESTIONS_DEFAULT_LIMIT = 50` 条，单次请求最多 `ADMIN_QUESTIONS_MAX_LIMIT = 200` 条。页面用全站共用的分页控件翻页（当前行区间与总数、上一页/下一页、总页数、跳页；只有一页时不出现），翻页期间保留当前表格并标为忙碌；停留的页因提问减少而整页落空时退回新的最后一页，不显示空页。HTTP 端点为 `GET /api/admin/questions`，仅管理员可读，并沿用 `USER_ACTIVITY_VIEW_ENABLED` 用户活动可观测总闸；总闸关闭时账户菜单隐藏入口，直接访问页面也会明确说明当前部署未开启该能力。首版提供可搜索、可筛选的人工分析视图，不会把提问内容额外发送给模型。
+管理员可从全局 `/admin/questions` 进入**提问分析**，把普通问答任务与深度报告中的用户原始提问汇总到一个地方，不再要求先按用户下钻。通过既有校验的原始提问会完整保存和返回，提问分析视图不会再额外截断；对于历史上已完成的问答任务，优先使用答案记录中的完整提问恢复旧任务里被缩略的正文。笔记本删除后保留的提问投影，在配置的用户活动保留期内仍会进入分析；已到期投影，以及仍存在同 id 笔记本的保留行不会重复计入。**全局问答**的作业同样汇总在这里：每条是一行 `type="ask"` 且 `scope="global"` 的记录，不属于任何笔记本，`notebook_id`/`notebook_name` 恒为空串，笔记本列显示固定的「全局问答」。每条结果另带 `submitted_via`，即提交这条提问的入口：`web` 表示登录会话鉴权的网页/HTTP 提交面（`POST /api/notebooks/{id}/ask`、`/ask/stream`、`/reports`，全局问答对应 `POST /api/global-ask/ask`），`mcp` 表示 MCP 工具（笔记本内问答与全局问答都是 `ask`），空串表示「未记录」——该字段上线前创建的全部历史行，以及不传入口的进程内调用。取值只由服务端入口写入，不接受请求字段指定，也不为历史行做推断；页面在「调用方式」列显示为「网页」「MCP」「未记录」，删除笔记本后的留存投影保留原值。页面支持按来源类型（`ask` 或 `report`）、**提问范围**（`scope=notebook|global`，即「笔记本内」与「全局」，省略时两者都出现）、调用方式（`submitted_via=web|mcp`）、用户和提问正文筛选；结果按新到旧展示用户、笔记本、状态和创建时间；汇总卡片按当前筛选条件统计提问总数、问答数、深度报告数、**全局问答数**与去重后的活跃用户数——全局问答数是问答数的子集，与笔记本内问答同属一类问题，只在检索方式上不同。搜索上限为 `ADMIN_QUESTIONS_QUERY_MAX_CHARS = 200` 个 Unicode 码点；offset 分页默认每页 `ADMIN_QUESTIONS_DEFAULT_LIMIT = 50` 条，单次请求最多 `ADMIN_QUESTIONS_MAX_LIMIT = 200` 条。页面用全站共用的分页控件翻页（当前行区间与总数、上一页/下一页、总页数、跳页；只有一页时不出现），翻页期间保留当前表格并标为忙碌；停留的页因提问减少而整页落空时退回新的最后一页，不显示空页。HTTP 端点为 `GET /api/admin/questions`，仅管理员可读，并沿用 `USER_ACTIVITY_VIEW_ENABLED` 用户活动可观测总闸；总闸关闭时账户菜单隐藏入口，直接访问页面也会明确说明当前部署未开启该能力。首版提供可搜索、可筛选的人工分析视图，不会把提问内容额外发送给模型。
 
 ## API
 
@@ -2998,7 +2995,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
   | 补上关联 | `/kg/relink` | `relinking` | `/kg/relink/status` | `isolated_before, edges_added, isolated_after` |
   | 删除知识图谱 | `/kg/delete` | `deleting` | `/kg/delete/status` | `objects_deleted, relations_deleted`（成功前为零） |
 
-  三者共用每库维护槽，重复／冲突点击返回指明占用动作的 409。维护槽与抽取（`buildkg-`／`rebuildkg-`，含 MCP `build_kg`）双向互斥；索引管线切换保留已存意图并返回自己的可重试 409。同进程脚本直接删图也受维护槽约束。槽与状态仅属于当前服务进程（生产为 `--workers 1`），不覆盖独立 CLI 进程。`idle` 包含未运行、进程重启或槽被另一维护类型占用。客户端有界轮询，忙碌状态按笔记本隔离，终态刷新当前图谱范围；重新合并另刷新待合并与统一状态。独立的 `GET .../unified-kg/status` 描述可视化构建。
+  三者共用每库维护槽，重复／冲突点击返回指明占用动作的 409。维护槽与抽取（`buildkg-`／`rebuildkg-`，含 MCP `build(target="kg")`）双向互斥；索引管线切换保留已存意图并返回自己的可重试 409。同进程脚本直接删图也受维护槽约束。槽与状态仅属于当前服务进程（生产为 `--workers 1`），不覆盖独立 CLI 进程。`idle` 包含未运行、进程重启或槽被另一维护类型占用。客户端有界轮询，忙碌状态按笔记本隔离，终态刷新当前图谱范围；重新合并另刷新待合并与统一状态。独立的 `GET .../unified-kg/status` 描述可视化构建。
 
   **重新合并** 不要求 LLM；已配置的 `kg_merge_review`／`kg_concept_description` 可做 fail-open 增强。内容版本未变会跳过，修改聚类配置后强制重聚仍仅 CLI 支持。待审队列按规范组件对保留确定性的最高分代表；拒绝／暂缓决策经过已确认合并后仍形成组件 cannot-link。一次人工决策原子锁定并结算同对全部重复行，刷新待审代次时在同一事务重放实时决策。拒绝全 pending 对只移出队列，不置脏／重建；撤销含任一 confirmed 行的对会使物化合并失效。确认 pending 对立即重聚；遇槽占用 409 时，浏览器在占用任务结束后重试，暂时失败保留标记，受轮询次数上限约束。这仅是标签页内 best-effort；刷新会丢标记，持久后路是「待重建」与人工点击，没有服务端重试队列。
 
@@ -3107,7 +3104,7 @@ provider 只收到当前问题和三个由核心拥有的端口。`RetrievalAcce
 
 `RetrievalAccessPort` 现在还暴露一套有界 KG 读端口，覆盖当前 notebook 加已挂载参考库。`search_kg(query, k, object_types=())` 对知识对象跑 BM25+语义融合。`object_types` 必须是元素全为 `str` 的 `tuple`/`list`；否则——裸 `str`（如 `"concept"`，会被当容器逐字符拆开而不是命中一个类型名）、非 `str` 元素，或任何其他容器形态——在花掉预算之前就抛 `plugin_engine_invalid_kg_request`。形状合法的请求里，只有命中 `concept`/`claim`/`formula`/`procedure` 四类之一的条目会保留；未知类型名会被静默丢弃，若过滤器起初非空但最终一个都没留下，调用直接返回 `()`、不消耗预算。`kg_neighbors(evidence_key, k, edge_type="", direction="both")` 以本 run 内 `search_kg`/`kg_neighbors` 已签发过的 KG 句柄为锚展开一跳；元素句柄、别的 run 的句柄、空字符串，或 `edge_type` 不在核心 KG 边 schema 定义的十二类之内（`defines`/`about`/`supports`/`derived_from`/`depends_on`/`contrasts_with`/`prerequisite_of`/`part_of`/`composed_of`/`kind_of`/`used_in`/`precedes`）都一律返回 `()`、不计入预算，而 `direction` 取值不是 `both`/`out`/`in` 之一会抛 `plugin_engine_invalid_kg_request`。真收窄的 run（`source_scope_restricted` 的通道语义，不是冻结全选的天花板语义）里，`kg_neighbors` 对**当前库**锚点整体关闭、直接返回 `()` 且不计预算：一跳展开的有界读取之下没有来源谓词，界外邻居会占满窗口、事后过滤救不回没被返回的行——与内建图通道在受限 run 中关闭是同一条纪律。挂载参考库的锚点在本地收窄下保持开放（库维度是整库勾选，两维正交是登记契约）。两个调用共享一份预算 `ASK_PLUGIN_ENGINE_KG_SEARCH_MAX_CALLS`，与 `search()` 自己的池子相互独立；超限抛 `plugin_engine_kg_call_limit`。四条契约插件必须遵守：**①可引用性**——KG 命中的 `evidence_key` 只有在对象至少有一条来源与元素仍存活、且能给出名称/定义/原文摘录里至少一样可展示内容的证据绑定时才非空、才能进 `citations`（三者都拿不到的罕见情形同样按仅供上下文处理）；空 key（「仅供上下文」）可以喂给模型的推理，但既进不了任何引用登记表，也不会被注册成 `kg_neighbors` 的合法锚点——把它塞进 citations 会像伪造句柄一样被移除并在轨迹末尾的插件披露步中披露，而不是拒绝整份答案；**②引用落点**——被引用的 KG 句柄，其持久化 `Citation` 打开的是该对象**首条存活证据元素**，不是图谱节点视图；**③不带边标签与截断信号**——`kg_neighbors` 不会告诉你某个邻居来自哪类边（要按边归因就按 `edge_type` 逐类各调一次）也不会告诉你满页是否代表还有更多（应假定还有），且每个方向另受核心自己的展开上限约束、与请求的 `k` 无关；**④两 lane 候选路由**——未收窄的插件 run 不下推显式来源清单，KG 接缝因此保持 notebook ANN＋词法融合、把 run 的冻结天花板留到证据 hydrate 应用（MCP 这类无 scope 调用会得到与浏览器冻结快照同形状的合成全选天花板，`narrowed=false`，绝不产生用户可见 scope 回执）；真收窄的 run 仍下推冻结 key，走「词法谓词在 `LIMIT` 前」的来源受限 lane。未收窄 lane 的已登记对偶代价：调用者自己的 Memory 派生命中会过天花板、占据 `k` 内的候选名额、再被端口的宇宙外丢弃规则整体丢掉——top 命中恰为 Memory 派生时，可用结果可能少于 `k` 条。`kg_overview()` 返回与内建 reasoning 引擎注入自己 prompt 的**同一份**有界（≤ 600 字符，`KG_OVERVIEW_MAX_CHARS`）集合地图文本——各可枚举集合计数、知识对象四类分类计数与当前范围的来源数——每 run 只算一次（memo，重复调用拿到同一份字符串），格式不属于契约、不应被解析；无图的库返回的文本自然不含知识对象那一行，插件应把它当作「该少走 KG 通道」的信号。真收窄的 run 里 overview 整体抑制（返回空串、不发底层计数）——理由与邻居通道关闭相同：它的计数接缝只认库维度，否则会把整库聚合计数交给一个不许读全库的 run。
 
-provider 返回 Markdown 和按顺序排列的已签发句柄。核心对每个返回的句柄与每个 `[kN]`/`【kN】` 标记做**逐项**准入，而不是整份 fail-closed：只有结果形状本身违规——answer 不是 `str`、citations 不是 `tuple`、或端口类型不对——才拒绝整份答案，稳定错误码 `invalid_plugin_engine_result`；唯一另一种整份拒绝是正文被摘除殆尽，见本段末尾。在形状合法的结果内部，伪造、跨 run 或没有证据的句柄在核心私有账本里查无记录、因而没有证据可展示：该条引用被移除，正文里指向它的标记一并删除，剩余合法引用重新压缩编号、正文标记同步改写（一组标记若成员全部非法，会连括号一起删掉，而不只删非法成员）；一个从一开始就不匹配引用标记语法的疑似括号组（如 `[k1, nope]`）同样整组从正文摘除，但**只在该组读起来确实是引用标记时**——组内某个分隔片段完全由空白分隔的 `k<数字>` 词构成，因而也覆盖模型常见笔误、漏了逗号的 `[k1 k2]`。普通括号散文原样保留：`[k8s 官方文档](https://kubernetes.io)`、`[k1000 档]`、`【定义 [k1]】` 都不动。这道收窄是承重的，因为这条规则的角色变了：它过去是命中即整份拒绝（响亮），现在是就地删掉用户可见的正文（静默），所以必须精确到什么才算「读起来像引用」。摘除也绝不会铸出新标记：删掉一个括号组会让两侧文本拼接，而拼接出来的可能正是一个从未过核验的标记样组（`[k1[k9]2]` 在非法的内层 `[k9]` 被删后变成 `[k12]`，`[k1[k9, nope]2]` 则晚一轮走到同一处）。所以已核验的标记会先被隔离出来，残留组反复摘除到不动点之后才放回去。摘除每一轮跑的是**两条**正则而不是一条：疑似组扫描刻意不跨行（否则会跨段落误吞普通散文），而引用标记语法本身把换行当作词间空白，所以 `[k1,\n[k9]k2]` → `[k1,\nk2]` 这类拼接对前者完全隐形，却照样会被渲染并绑定成引用。由于把已核验标记隔离出去之后，正文里按构造不存在任何合法标记，摘除阶段看到的每一个引用标记命中都必然是拼接残留，一律移除。最后放回去的只有核心自己写的规范形式 `[k1]` / `[k1, k2]`——最终正文里的每个标记都指向一条存活引用，「未核验的引用外观绝不上屏」因此是无条件成立的，而不只是对规矩的输入成立。检索到却从未在正文被标记的条目走相反的路径：它会**保留**在引用回退列表里、只是不产生锚点——与内建模式「citations ⊇ anchors」是同一种形状——而不是被丢弃。citations 元组长度仍有一道 sanity 上限（`plugin_engine_citation_limit`），按两个检索池合算——`(ASK_PLUGIN_ENGINE_SEARCH_MAX_CALLS + ASK_PLUGIN_ENGINE_KG_SEARCH_MAX_CALLS) × ASK_PLUGIN_ENGINE_RETRIEVAL_MAX_K`——因为两个池子的每次调用都可能签发到单次上限那么多句柄；超过这道上限的结果会被**截断**到上限而不是拒绝（错误码仍登记在错误码表里作兜底映射，但准入本身不再抛出它）。以上每一种降级都会被披露、绝不静默：核心在持久化轨迹末尾追加一条 `step_type="plugin"` 的步骤（前端已有标签「扩展」），summary 固定为「引用核验未全部通过」，detail 逐类列出触发了哪几种情况、各命中多少条——例如「2 条引用无法核验，已移除」「正文中 1 个引用标记无法核验，已移除」「1 条引用未在正文中被引用，仅列入引用列表」「引用条数超过本次可签发上限，超出部分已忽略」「正文中 N 处疑似引用标记无法解析，已移除」。披露正是让这种删除具备正当性的原因：旧的 fail-closed 设计的理由是「删除坏锚点会让无根据正文看起来已接地、却又拿不出任何东西来证明」；现在有了这条可见的轨迹末尾披露步，这层顾虑已经被解决——只要散文仍在、仅仅是全部引用都因核验不通过而被移除，答案仍照常保存，citations 元组为空，`grounded`/`evidence_level` 按无存活证据答案的既有规则回落到未接地/推断默认值。但若摘除之后只剩空白——整份答案本来就是一个无法核验的引用，没有任何散文可留——则整份拒绝，稳定错误码 `plugin_engine_unverified_citation`（它既有的兜底文案「扩展引擎返回了无法核验的引用」描述的正是这种情形），而不是持久化一条空白回答气泡。核心仍从私有账本构造 `Citation` 与 `AnswerAnchor`，并且只在复核 mode/notebook/question/conversation/actor/job/run/scope 身份**之后**经普通 durable answer 接缝保存——这道复核与 durable citation 的构造逐字不变。MCP 的 `ask_notebook` 同样走这套逐项准入：调用不再因部分引用核验失败而报错，而是返回降级后的正文与核验通过的那部分 citations；披露轨迹步同样随答案持久化（浏览器端可见），MCP 响应形状在 v1 不新增字段。公开会话投影继续使用原白名单。v1 刻意不接收历史、意图预检、PPR/社区/图漫游、repository、`Settings`、连接或 service locator，Deep Report 也仍够不到它。自动 UI 模式隐藏扩展分组并固定提交内建的 `reasoning` 引擎标准档；高级模式把可用引擎作为第三分组；MCP 的 `ask_notebook` 把同一个已注册且实时可用的 mode id 同样接纳为其 `mode` 参数取值，与内建的 `chunk`/`reasoning` 并列——响应形状（`answer_markdown` 的标记归一化为 `[kN]`，加一份 `citations` 列表）与内建模式相同，会话历史仍不进插件引擎，`conversation_id` 只影响 UI 侧的轮次分组。`mode` 传一个未注册的 id 会收到列出当前合法 mode id 的报错；已注册但暂不可用的 id（例如插件密钥未配置）会收到独立的可操作文案，不与前者混同；调用过程中插件引擎自身失败同样如此呈现——一句可读文案后跟括注的稳定 reason code，绝不是裸 code 或一段无法理解的 traceback。`/ask-modes` 失败时全部内建模式仍可用，并在下一个真正提交成功的工作区重试。
+provider 返回 Markdown 和按顺序排列的已签发句柄。核心对每个返回的句柄与每个 `[kN]`/`【kN】` 标记做**逐项**准入，而不是整份 fail-closed：只有结果形状本身违规——answer 不是 `str`、citations 不是 `tuple`、或端口类型不对——才拒绝整份答案，稳定错误码 `invalid_plugin_engine_result`；唯一另一种整份拒绝是正文被摘除殆尽，见本段末尾。在形状合法的结果内部，伪造、跨 run 或没有证据的句柄在核心私有账本里查无记录、因而没有证据可展示：该条引用被移除，正文里指向它的标记一并删除，剩余合法引用重新压缩编号、正文标记同步改写（一组标记若成员全部非法，会连括号一起删掉，而不只删非法成员）；一个从一开始就不匹配引用标记语法的疑似括号组（如 `[k1, nope]`）同样整组从正文摘除，但**只在该组读起来确实是引用标记时**——组内某个分隔片段完全由空白分隔的 `k<数字>` 词构成，因而也覆盖模型常见笔误、漏了逗号的 `[k1 k2]`。普通括号散文原样保留：`[k8s 官方文档](https://kubernetes.io)`、`[k1000 档]`、`【定义 [k1]】` 都不动。这道收窄是承重的，因为这条规则的角色变了：它过去是命中即整份拒绝（响亮），现在是就地删掉用户可见的正文（静默），所以必须精确到什么才算「读起来像引用」。摘除也绝不会铸出新标记：删掉一个括号组会让两侧文本拼接，而拼接出来的可能正是一个从未过核验的标记样组（`[k1[k9]2]` 在非法的内层 `[k9]` 被删后变成 `[k12]`，`[k1[k9, nope]2]` 则晚一轮走到同一处）。所以已核验的标记会先被隔离出来，残留组反复摘除到不动点之后才放回去。摘除每一轮跑的是**两条**正则而不是一条：疑似组扫描刻意不跨行（否则会跨段落误吞普通散文），而引用标记语法本身把换行当作词间空白，所以 `[k1,\n[k9]k2]` → `[k1,\nk2]` 这类拼接对前者完全隐形，却照样会被渲染并绑定成引用。由于把已核验标记隔离出去之后，正文里按构造不存在任何合法标记，摘除阶段看到的每一个引用标记命中都必然是拼接残留，一律移除。最后放回去的只有核心自己写的规范形式 `[k1]` / `[k1, k2]`——最终正文里的每个标记都指向一条存活引用，「未核验的引用外观绝不上屏」因此是无条件成立的，而不只是对规矩的输入成立。检索到却从未在正文被标记的条目走相反的路径：它会**保留**在引用回退列表里、只是不产生锚点——与内建模式「citations ⊇ anchors」是同一种形状——而不是被丢弃。citations 元组长度仍有一道 sanity 上限（`plugin_engine_citation_limit`），按两个检索池合算——`(ASK_PLUGIN_ENGINE_SEARCH_MAX_CALLS + ASK_PLUGIN_ENGINE_KG_SEARCH_MAX_CALLS) × ASK_PLUGIN_ENGINE_RETRIEVAL_MAX_K`——因为两个池子的每次调用都可能签发到单次上限那么多句柄；超过这道上限的结果会被**截断**到上限而不是拒绝（错误码仍登记在错误码表里作兜底映射，但准入本身不再抛出它）。以上每一种降级都会被披露、绝不静默：核心在持久化轨迹末尾追加一条 `step_type="plugin"` 的步骤（前端已有标签「扩展」），summary 固定为「引用核验未全部通过」，detail 逐类列出触发了哪几种情况、各命中多少条——例如「2 条引用无法核验，已移除」「正文中 1 个引用标记无法核验，已移除」「1 条引用未在正文中被引用，仅列入引用列表」「引用条数超过本次可签发上限，超出部分已忽略」「正文中 N 处疑似引用标记无法解析，已移除」。披露正是让这种删除具备正当性的原因：旧的 fail-closed 设计的理由是「删除坏锚点会让无根据正文看起来已接地、却又拿不出任何东西来证明」；现在有了这条可见的轨迹末尾披露步，这层顾虑已经被解决——只要散文仍在、仅仅是全部引用都因核验不通过而被移除，答案仍照常保存，citations 元组为空，`grounded`/`evidence_level` 按无存活证据答案的既有规则回落到未接地/推断默认值。但若摘除之后只剩空白——整份答案本来就是一个无法核验的引用，没有任何散文可留——则整份拒绝，稳定错误码 `plugin_engine_unverified_citation`（它既有的兜底文案「扩展引擎返回了无法核验的引用」描述的正是这种情形），而不是持久化一条空白回答气泡。核心仍从私有账本构造 `Citation` 与 `AnswerAnchor`，并且只在复核 mode/notebook/question/conversation/actor/job/run/scope 身份**之后**经普通 durable answer 接缝保存——这道复核与 durable citation 的构造逐字不变。MCP 的 `ask` 同样走这套逐项准入：调用不再因部分引用核验失败而报错，而是返回降级后的正文与核验通过的那部分 citations；披露轨迹步同样随答案持久化（浏览器端可见），MCP 响应形状在 v1 不新增字段。公开会话投影继续使用原白名单。v1 刻意不接收历史、意图预检、PPR/社区/图漫游、repository、`Settings`、连接或 service locator，Deep Report 也仍够不到它。自动 UI 模式隐藏扩展分组并固定提交内建的 `reasoning` 引擎标准档；高级模式把可用引擎作为第三分组；MCP 的 `ask` 把同一个已注册且实时可用的 mode id 同样接纳为其 `mode` 参数取值，与内建的 `chunk`/`reasoning` 并列——响应形状（`answer_markdown` 的标记归一化为 `[kN]`，加一份 `citations` 列表）与内建模式相同，会话历史仍不进插件引擎，`conversation_id` 只影响 UI 侧的轮次分组。`mode` 传一个未注册的 id 会收到列出当前合法 mode id 的报错；已注册但暂不可用的 id（例如插件密钥未配置）会收到独立的可操作文案，不与前者混同；调用过程中插件引擎自身失败同样如此呈现——一句可读文案后跟括注的稳定 reason code，绝不是裸 code 或一段无法理解的 traceback。`/ask-modes` 失败时全部内建模式仍可用，并在下一个真正提交成功的工作区重试。
 
 | 问答引擎护栏 | 默认值 | 合法范围 / 结构上限 |
 | --- | ---: | ---: |
@@ -3217,7 +3214,7 @@ provider 返回 Markdown 和按顺序排列的已签发句柄。核心对每个�
 
 **公开分享**：`conversation_public_view.public_reference` 给既有引用投影新增 `is_external`（`tier == "external"`），刻意**不**投影 `url`。匿名 `/c/{token}` 读者会被告知这条材料来自库外，能看到标题与摘录，但拿不到任何可打开的链接——与这份投影对所有内部 id 早已适用的「无可寻址物」规则完全一致。
 
-**MCP**：`ask_notebook` 的 `anchors` 与 `citations` 携带与 HTTP 端点相同的 `url` 字段，只在 `tier` 为 `external` 的行上出现（`exclude_if` 空串，没有外部证据的既有 payload 因此逐字节不变）。
+**MCP**：`ask` 的 `anchors` 与 `citations` 携带与 HTTP 端点相同的 `url` 字段，只在 `tier` 为 `external` 的行上出现（`exclude_if` 空串，没有外部证据的既有 payload 因此逐字节不变）。
 
 **注册红线（启动期，响亮失败）**：动作名必须匹配 `^[a-z][a-z0-9_]{2,31}$`，且不得与 14 个核心 reflect 动作 id、或 15 个 reflect schema 顶层字段名中的任何一个相撞（两者的并集是 `RESERVED_REFLECT_KEYS`）——否则一个插件动作要么与核心动作同名，要么会把自己的参数写进一个核心 schema 槽位。参数名不得是 `name` 或 `reason`，数量至多 `REFLECT_ACTION_PARAMETERS_MAX`（4）个；`enum` 参数的取值数必须在 2 到 `REFLECT_ACTION_ENUM_VALUES_MAX`（8）个之间——下界为 2 是因为 schema hint 校验层靠有没有 `|` 字符判定「这是个枚举」，单值枚举会让模型看到一个封闭选项，校验层却把它当自由文本放行。每一段插件写的字符串——动作描述、每个参数描述、来源标签——只校验、绝不静默夹取：超长或带控制字符（含换行）直接注册失败（`ExtensionRegistryError`，启动失败），因为描述符是启动期就该审过的部署配置，不是运行期可以夹一刀的用户数据。
 

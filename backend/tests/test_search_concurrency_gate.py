@@ -2,7 +2,7 @@
 
 ``search_notebook`` runs an unindexed three-leg ILIKE scan. Before this gate,
 neither the HTTP ``GET /notebooks/{id}/search`` route nor the MCP
-``search_notebook_context`` tool put any limit on how many of those scans
+``search`` tool (``include="formal"``) put any limit on how many of those scans
 could run at once -- a handful of concurrent typists (the collection view
 fans one search out per visible notebook) could exhaust the whole DB
 connection pool.
@@ -362,17 +362,17 @@ class _FakeCtx:
         pass
 
 
-def _capture_search_notebook_context(monkeypatch, repo):
+def _capture_mcp_search(monkeypatch, repo):
     """Register the real ``memory_context`` tools against a minimal capturing
     server (mirrors ``tests/test_mcp_bundle_architecture.py``'s
     ``_CaptureServer``) and hand back the actual, unmodified
-    ``search_notebook_context`` coroutine function -- not a reimplementation
+    ``search`` coroutine function -- not a reimplementation
     of it."""
 
     captured: dict[str, object] = {}
 
     class _CaptureServer:
-        def tool(self, *, description: str):
+        def tool(self, *, description: str, tier=None):
             def register(function):
                 captured[function.__name__] = function
                 return function
@@ -380,12 +380,12 @@ def _capture_search_notebook_context(monkeypatch, repo):
 
     principal = SimpleNamespace(owner_id="user-mcp", profile_name="agent-mcp")
 
-    def fake_selected_notebook(ctx, repo_arg, scope, record=True):
+    def fake_selected_notebook(repo_arg, notebook_id, scope, record=True):
         return principal, "nb-mcp"
 
     monkeypatch.setattr(memory_context, "_selected_notebook", fake_selected_notebook)
     memory_context.register_memory_context_tools(_CaptureServer(), lambda: repo)
-    return captured["search_notebook_context"]
+    return captured["search"]
 
 
 def test_both_entry_points_use_the_same_gate_helper() -> None:
@@ -418,7 +418,7 @@ def test_mcp_entry_point_shares_the_gate_with_the_http_entry_point(monkeypatch) 
         lambda: _fake_http_repo(probe, release),
     )
     mcp_repo = _FakeMcpRepo(probe, "mcp-caller", release)
-    search_notebook_context = _capture_search_notebook_context(monkeypatch, mcp_repo)
+    mcp_search = _capture_mcp_search(monkeypatch, mcp_repo)
 
     async def scenario() -> None:
         holders = [
@@ -428,7 +428,7 @@ def test_mcp_entry_point_shares_the_gate_with_the_http_entry_point(monkeypatch) 
         await _await_holders(probe, search_concurrency_limit(), "the 4 HTTP holders")
 
         mcp_call = asyncio.create_task(
-            search_notebook_context(query="q", ctx=_FakeCtx(), limit=12)
+            mcp_search(query="q", ctx=_FakeCtx(), limit=12)
         )
         await asyncio.sleep(0.25)
         assert "mcp-caller" not in probe.entered, (
@@ -538,12 +538,12 @@ def test_a_cancelled_mcp_search_keeps_its_permit_until_its_thread_finishes(
         lambda: _fake_http_repo(probe, release),
     )
     mcp_repo = _FakeMcpRepo(probe, "mcp-caller", release)
-    search_notebook_context = _capture_search_notebook_context(monkeypatch, mcp_repo)
+    mcp_search = _capture_mcp_search(monkeypatch, mcp_repo)
 
     async def scenario() -> None:
         await _start_one_abandoned_search(
             probe,
-            lambda: search_notebook_context(query="q", ctx=_FakeCtx(), limit=12),
+            lambda: mcp_search(query="q", ctx=_FakeCtx(), limit=12),
         )
         # The newcomers are HTTP callers: the abandoned MCP scan must hold a
         # permit out of the SAME pool they draw from.
@@ -680,7 +680,7 @@ def test_mcp_tool_takes_the_gate_before_dispatching_its_worker_thread() -> None:
     handler = next(
         node for node in ast.walk(tree)
         if isinstance(node, ast.AsyncFunctionDef)
-        and node.name == "search_notebook_context"
+        and node.name == "search"
     )
 
     gate_calls = [
@@ -689,7 +689,7 @@ def test_mcp_tool_takes_the_gate_before_dispatching_its_worker_thread() -> None:
         and getattr(node.func, "id", "") == "run_under_search_gate"
     ]
     assert len(gate_calls) == 1, (
-        "search_notebook_context must run its search through the shared "
+        "search(include=formal) must run its search through the shared "
         "run_under_search_gate helper exactly once"
     )
     assert not [

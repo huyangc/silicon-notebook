@@ -1,9 +1,10 @@
 """Scoped Streamable HTTP MCP adapter for notebook-bound Agent Memory.
 
 The adapter deliberately contains no product SQL.  It authenticates an Agent
-token, keeps only the selected notebook on the MCP session object, and calls
-the already-composed Memory/retrieval/Ask services.  Every data tool rechecks
-the live token row, scope, allowlist, and notebook membership.
+token and calls the already-composed Memory/retrieval/Ask services.  It is
+stateless: every notebook-bound tool names its notebook explicitly
+(``notebook_id``, defaulting to the token's default notebook), and every data
+tool rechecks the live token row, tier, allowlist, and notebook membership.
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ from starlette.responses import JSONResponse
 
 from app.core.config import get_settings
 from app.core.request_context import reset_request_user, set_request_user
+from app.domain.agent_tools import AgentAccessDenied
 from app.models.identity import AgentPrincipal, UserProfile
 from app.services.reasoning_retrieval import profile_wiring_active
 
@@ -57,19 +59,43 @@ OUTPUT_INTEGER_LIMIT = 9_999_999_999_999_999
 # signal that anything was lost.  A URL that is absent is a citation you cannot
 # follow; a URL that is wrong is a citation that leads somewhere else.  Only the
 # second one can mislead, so the budget spends the whole field or none of it.
-WHOLE_OR_NOTHING_FIELDS = frozenset({"url"})
+#
+# ``ref`` (an opaque ``read_reference`` handle, see ``mcp_tools.refs``) is the
+# same kind of value: half a base64 handle decodes to nothing, so it is kept
+# whole or dropped, never clipped.
+WHOLE_OR_NOTHING_FIELDS = frozenset({"url", "ref"})
 # Heartbeat interval for the MCP progress notifications emitted while a tool's
 # blocking body runs. See `_run_with_progress` for why they exist at all; the
 # value only has to be comfortably under the SHORTEST idle timeout any client
 # applies, and every beat is one small SSE frame, so it is cheap to be
 # generous. It is not a timeout of ours: nothing here gives up on the work.
 PROGRESS_HEARTBEAT_SECONDS = 5.0
-_SELECTED_ATTR = "_silicon_notebook_selected_notebook"
-# Clarification contracts ask_notebook parked on the session (see
-# memory_context._PendingIntent). select_notebook resets the store: a handle
-# is scoped to the notebook it was issued under, and resetting on the event
-# loop also means no worker thread ever races to create it.
-_PENDING_INTENTS_ATTR = "_silicon_notebook_pending_intents"
+class AgentToolError(Exception):
+    """The one error shape an Agent sees from this surface.
+
+    ``code`` is a stable machine-readable word (``token_inactive``,
+    ``scope_missing``, ``notebook_not_allowed``, ``notebook_unreadable``,
+    ``owner_only``, ``forbidden``, ``not_found``, ``invalid_argument``, ``busy``,
+    ``mirrored``, ``unavailable``, ``internal``); ``message`` is Chinese copy
+    for the Agent to relay. ``str(exc)`` is ``[<code>] <message>`` -- FastMCP
+    prefixes it with ``Error executing tool <name>: ``. Tools raise it
+    directly where they know the answer; everything else is translated once,
+    centrally, by ``mcp_tool_host``'s registration wrapper.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        self.message = message
+        super().__init__(f"[{code}] {message}")
+
+
+class OwnerOnlyError(PermissionError):
+    """The owner-only write gate refused: the token owner only reads here."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "这个操作只对凭证主人拥有的笔记本生效；凭证主人在这个笔记本里只有读取权限"
+        )
 _MCP_PRINCIPAL: contextvars.ContextVar[AgentPrincipal | None] = (
     contextvars.ContextVar("mcp_agent_principal", default=None)
 )
@@ -227,7 +253,7 @@ def _sanitize_output(
                 "dirty", "last_rebuild_at", "objects", "relations", "clusters",
                 "viz_building",
             ),
-            # get_build_status's scale_index sub-object: the QUEUED shape
+            # get_notebook's scale_index sub-object: the QUEUED shape
             # alone (state + the base 8 + 5 queue fields + a conditional
             # last_built_at/last_build_ms pair) plus the shared setdefault
             # tail (stale/n_nodes/n_chunks/n_ann/n_chunk_ann/has_chunk_ann)
@@ -422,7 +448,7 @@ def _fit_value_to_chars(
             continue
         if _shrink_longest_string(wrapper, stats, identifiers=True):
             continue
-        raise ValueError(f"MCP {field} metadata exceeds sub-budget")
+        raise AgentToolError("internal", "结果超出 MCP 响应预算，暂时无法返回")
     return wrapper[field]
 
 
@@ -455,7 +481,7 @@ def _fit_aggregate_field_to_chars(
         )
         if _serialized_chars(fitted) >= current_size:
             if fitted == {}:
-                raise ValueError(f"MCP aggregate {field} exceeds sub-budget")
+                raise AgentToolError("internal", "结果超出 MCP 响应预算，暂时无法返回")
             fitted = {}
             _mark_truncated(stats, fields=1)
         parent[field] = fitted
@@ -568,14 +594,14 @@ def _budget_response(
             continue
         if _shrink_longest_string(result, stats, identifiers=True):
             continue
-        raise ValueError("MCP response metadata exceeds output budget")
+        raise AgentToolError("internal", "结果超出 MCP 响应预算，暂时无法返回")
     return result
 
 
 def _principal() -> AgentPrincipal:
     principal = _MCP_PRINCIPAL.get()
     if principal is None:
-        raise PermissionError("Agent authentication required")
+        raise AgentAccessDenied("inactive")
     return principal
 
 
@@ -584,8 +610,27 @@ def _live_principal(repo: Any) -> AgentPrincipal:
     # use it only for the bound token id, never as an authorization snapshot.
     principal = repo.refresh_agent_principal(_principal().token_id)
     if principal is None:
-        raise PermissionError("Agent token or profile is no longer active")
+        raise AgentAccessDenied("inactive")
     return principal
+
+
+def _resolve_notebook_id(principal: AgentPrincipal, notebook_id: Any) -> str:
+    """The notebook a call names: ``notebook_id``, or the token's default.
+
+    Only resolves the id; authorization is ``require_agent_access``'s job.
+    """
+    # The type is FastMCP's argument validation's job (``TieredFastMCP``).
+    if not notebook_id:
+        chosen = principal.default_notebook_id
+    else:
+        chosen = notebook_id.strip()
+        if not chosen:
+            raise AgentToolError("invalid_argument", "notebook_id 不能是空白")
+    if not chosen:
+        raise AgentToolError(
+            "invalid_argument", "此凭证没有默认笔记本，请传 notebook_id"
+        )
+    return chosen
 
 
 @contextmanager
@@ -608,18 +653,19 @@ def _owner_request_context(principal: AgentPrincipal):
 
 
 async def _run_with_progress(
-    ctx: Context, work: Callable[[], Any], *, label: str
+    ctx: Context, work: Callable[[], Any], *, label: str,
+    on_cancel: Callable[[], None] | None = None,
 ) -> Any:
     """Run one tool's blocking body in a worker thread, heart-beating meanwhile.
 
     MCP clients do not wait indefinitely for a tool. Claude Code applies an
     *idle* timeout -- it aborts a call that has produced neither a response nor
     a progress notification for N seconds -- and other clients apply a flat
-    per-call ceiling. `ask_notebook` in `reasoning` mode routinely runs for
+    per-call ceiling. `ask` in `reasoning` mode routinely runs for
     minutes (plan, federated retrieval, reflect loop, synthesis), so without a
     heartbeat the client gives up on a call the server is still successfully
     executing, and the Agent sees a transport error where the answer was about
-    to arrive. Trigger `build_kg`, and a whole notebook's extraction was
+    to arrive. Trigger `build(target="kg")`, and a whole notebook's extraction was
     already under way when the client walked out.
 
     Two properties make this free where it is not needed:
@@ -645,6 +691,7 @@ async def _run_with_progress(
     """
     result: list[Any] = []
     failure: list[Exception] = []
+    finished = False
 
     async def heartbeat() -> None:
         started = time.monotonic()
@@ -665,15 +712,31 @@ async def _run_with_progress(
                 return
 
     async def runner() -> None:
+        nonlocal finished
         try:
             result.append(await anyio.to_thread.run_sync(work))
         except Exception as exc:
             failure.append(exc)
         finally:
+            finished = True
             tg.cancel_scope.cancel()
+
+    async def cancel_watch() -> None:
+        # Its own task, independent of the heartbeat (which may already have
+        # stopped after a failed progress write): it is cancelled either by
+        # the runner finishing (``finished`` is then set) or by the CALL being
+        # cancelled (client disconnect, MCP cancel) while the work still runs.
+        # The worker thread cannot be interrupted, so ``on_cancel`` is how a
+        # pure wait learns to let go; an executing body runs on to completion.
+        try:
+            await anyio.sleep_forever()
+        finally:
+            if not finished and on_cancel is not None:
+                on_cancel()
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(heartbeat)
+        tg.start_soon(cancel_watch)
         tg.start_soon(runner)
 
     if failure:
@@ -853,24 +916,33 @@ def _record_agent_call(
 
 
 def _selected_notebook(
-    ctx: Context, repo: Any, scope: str, record: bool = True
+    repo: Any, notebook_id: str, scope: str, record: bool = True
 ) -> tuple[AgentPrincipal, str]:
+    """Authorize one call against the notebook it names.
+
+    ``notebook_id`` is the tool's own argument (empty = the token's default
+    notebook, ``_resolve_notebook_id``). Nothing is kept between calls: every
+    call re-reads the token row, its tiers and allowlist, and notebook
+    membership.
+    """
     principal = _live_principal(repo)
-    notebook_id = getattr(ctx.session, _SELECTED_ATTR, "")
-    if not notebook_id:
-        raise ValueError("select_notebook must be called before this tool")
-    # Re-reads token state, current scopes/allowlist, and notebook membership.
+    notebook_id = _resolve_notebook_id(principal, notebook_id)
+    # Re-reads token state, current tiers/allowlist, and notebook membership.
     repo.require_agent_access(
         principal, scope, notebook_id
     )
-    # ``record=False`` is passed by exactly one caller — ``_writable_notebook``,
-    # which still has a gate to apply. See ``_record_agent_call``'s first
-    # property for why the ledger must not run ahead of it.
+    # ``record=False`` is passed by callers that still have a gate to apply
+    # (``_writable_notebook``, ``read_reference``'s Memory branch). See
+    # ``_record_agent_call``'s first property for why the ledger must not run
+    # ahead of it.
     if record:
         _record_agent_call(repo, principal, notebook_id, scope)
     return principal, notebook_id
+
+
 def _writable_notebook(
-    ctx: Context, repo: Any, scope: str, record: bool = True, fenced: bool = True
+    repo: Any, notebook_id: str, scope: str, record: bool = True,
+    fenced: bool = True,
 ) -> tuple[AgentPrincipal, str]:
     """``_selected_notebook`` plus the OWNER-ONLY write gate.
 
@@ -966,13 +1038,13 @@ def _writable_notebook(
       ids never collide.
 
     ``fenced=False`` opts one caller out of the mirror check while keeping the
-    owner gate — exactly one tool passes it, ``build_retrieval_index``, and the
+    owner gate — exactly one tool passes it, ``build(target="index")``, and the
     reason is the HTTP twin's: a retrieval index is a TARGET-LOCAL derived
     artifact outside the sync closure (design doc section 6), so a mirror must
     be able to rebuild it. The browser side expresses the same split by putting
     those two endpoints on their own capability ``scale_index:write``; this
     surface has no capability table, so it says it with this argument.
-    ``build_kg`` keeps the fence: it writes knowledge rows, which an import
+    ``build(target="kg")`` keeps the fence: it writes knowledge rows, which an import
     does replace.
     """
     # ``record=False``: the call ledger only books calls that cleared EVERY
@@ -980,12 +1052,11 @@ def _writable_notebook(
     # read-only member reaching for a write tool passes ``require_agent_access``
     # and is refused here — recording before that would fill the ledger with
     # operations that never happened (codex #616 R1 P2).
-    principal, notebook_id = _selected_notebook(ctx, repo, scope, record=False)
+    principal, notebook_id = _selected_notebook(
+        repo, notebook_id, scope, record=False
+    )
     if not repo.user_can_access_notebook(notebook_id, principal.owner_id):
-        raise PermissionError(
-            "this write operation requires owning the notebook; the token "
-            "owner only has read access here"
-        )
+        raise OwnerOnlyError()
     if fenced:
         refuse_if_mirrored(repo, notebook_id)
     # ``record=False`` 再往下传一层:``delete_source`` 在这道闸之后**还有**一道
@@ -1006,17 +1077,16 @@ class MirroredNotebookError(RuntimeError):
     can name the source environment, exactly like the HTTP ``detail`` does.
 
     The message says the same thing the HTTP ``detail``'s ``message`` says
-    (``deps._mirror_message``), in English because every message on this surface
-    is written for an Agent rather than for the browser UI — the two must not
-    drift into telling the same user two different stories about why a write
-    was refused.
+    (``deps._mirror_message``), in Chinese like every other Agent-facing
+    message on this surface; ``mcp_tool_host`` maps it to the ``mirrored``
+    error code. The two must not drift into telling the same user two
+    different stories about why a write was refused.
     """
 
     def __init__(self, sync_origin: str) -> None:
         self.sync_origin = sync_origin
         super().__init__(
-            f"this notebook is a mirror synced from {sync_origin!r}; its "
-            "content can only be changed in that source environment"
+            f"此笔记本是从 {sync_origin} 同步的镜像，内容只能在源环境修改"
         )
 
 

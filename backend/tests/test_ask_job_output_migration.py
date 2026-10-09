@@ -67,7 +67,7 @@ def test_v89_rows_stay_answers_and_rerun_changes_nothing(repo):
             (NOW, NOW))
         db.execute("PRAGMA user_version = 89")
 
-    assert SqliteMigrator(database, repo.settings).migrate() == [90]
+    assert SqliteMigrator(database, repo.settings).migrate() == [90, 91]
     with database.connect() as db:
         assert db.execute("SELECT output FROM ask_jobs WHERE id='j1'").fetchone()[0] == "answer"
         assert _output_column(db, "retained_user_activity") == ("TEXT", 1, "'answer'")

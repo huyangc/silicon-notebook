@@ -12,7 +12,7 @@ pytestmark = pytest.mark.postgres_integration
 
 @pytest.fixture
 def store(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 70
+    assert PostgresMigrator(postgres_database).migrate() == 71
     return GlobalAskStore(postgres_database, marker="%s")
 
 
@@ -28,6 +28,8 @@ def job(identifier="job-a", conversation_id="conversation-a"):
 def test_global_job_roundtrip_owner_isolation_and_cascade(store):
     value = job()
     store.create(value, "user-a", "request-a", "request payload", "mcp", new_conversation=True)
+    # The submission surface is read back from the job row's own column.
+    value.submitted_via = "mcp"
     assert store.job(value.job_id, "user-a") == value
     assert store.request_job("user-a", "request-a") == (value, "request payload")
     assert store.conversation(value.conversation_id, "user-a").submitted_via == "mcp"
@@ -519,7 +521,7 @@ def _guarded_store(postgres_database):
     from app.repositories.postgres import access_sql
     from app.repositories.postgres.read_authority_lock import lock_reader_access_on
 
-    assert PostgresMigrator(postgres_database).migrate() == 70
+    assert PostgresMigrator(postgres_database).migrate() == 71
     return GlobalAskStore(
         postgres_database, marker="%s", access_sql=access_sql,
         read_authority_lock=lock_reader_access_on,

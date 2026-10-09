@@ -23,12 +23,19 @@ def register_knowhow_tools(
     server: FastMCP, repository_provider: Callable[[], Any]
 ) -> None:
     @server.tool(
-        description="List knowhow tables (structured tabular knowledge) in the selected notebook."
+        description=(
+            "List knowhow tables (structured tabular knowledge) in a notebook "
+            "(notebook_id omitted = the token's default notebook). Requires the "
+            "read permission."
+        ),
+        tier="read",
     )
-    async def list_knowhow_tables(ctx: Context, limit: int = RESULT_LIMIT) -> dict[str, Any]:
+    async def list_knowhow_tables(
+        ctx: Context, limit: int = RESULT_LIMIT, notebook_id: str = "",
+    ) -> dict[str, Any]:
         repo = repository_provider()
         principal, notebook_id = await anyio.to_thread.run_sync(
-            _selected_notebook, ctx, repo, "knowledge:read"
+            _selected_notebook, repo, notebook_id, "knowledge:read"
         )
 
         def load() -> list[dict[str, Any]]:
@@ -51,13 +58,17 @@ def register_knowhow_tools(
             "title plus its procedure/method columns' net text and "
             "code_status (implemented/stale/none), for picking which "
             "rows/methods still need generated code. The table must have a "
-            "row-title (anchor) column configured."
-        )
+            "row-title (anchor) column configured. notebook_id omitted = the "
+            "token's default notebook. Requires the read permission."
+        ),
+        tier="read",
     )
-    async def get_knowhow_discrimination(table_id: str, ctx: Context) -> dict[str, Any]:
+    async def get_knowhow_discrimination(
+        table_id: str, ctx: Context, notebook_id: str = "",
+    ) -> dict[str, Any]:
         repo = repository_provider()
         principal, notebook_id = await anyio.to_thread.run_sync(
-            _selected_notebook, ctx, repo, "knowledge:read"
+            _selected_notebook, repo, notebook_id, "knowledge:read"
         )
 
         def load() -> dict[str, Any]:
@@ -84,13 +95,17 @@ def register_knowhow_tools(
             "Get one knowhow row's full machine view: every column's "
             "kind/net-text (plus steps for a procedure column, items for an "
             "entity column), plus any existing code attachments for its "
-            "columns."
-        )
+            "columns. notebook_id omitted = the token's default notebook. "
+            "Requires the read permission."
+        ),
+        tier="read",
     )
-    async def get_knowhow_row(row_id: str, ctx: Context) -> dict[str, Any]:
+    async def get_knowhow_row(
+        row_id: str, ctx: Context, notebook_id: str = "",
+    ) -> dict[str, Any]:
         repo = repository_provider()
         principal, notebook_id = await anyio.to_thread.run_sync(
-            _selected_notebook, ctx, repo, "knowledge:read"
+            _selected_notebook, repo, notebook_id, "knowledge:read"
         )
 
         def load() -> dict[str, Any]:
@@ -120,15 +135,18 @@ def register_knowhow_tools(
             "Save a code attachment for one knowhow cell (design doc §⑥-4): "
             "the code body itself, stored alongside the cell — never "
             "indexed, embedded, or retrievable as notebook knowledge. "
-            "Requires the token's contribute permission."
-        )
+            "notebook_id omitted = the token's default notebook. Requires the "
+            "token's contribute permission."
+        ),
+        tier="contribute",
     )
     async def put_knowhow_cell_code(
-        row_id: str, column_id: str, code_text: str, ctx: Context, language: str = "",
+        row_id: str, column_id: str, code_text: str, ctx: Context,
+        language: str = "", notebook_id: str = "",
     ) -> dict[str, Any]:
         repo = repository_provider()
         principal, notebook_id = await anyio.to_thread.run_sync(
-            _selected_notebook, ctx, repo, "knowhow:code"
+            _selected_notebook, repo, notebook_id, "knowhow:code"
         )
         # The target-end write fence, applied directly because this tool
         # deliberately does NOT go through ``_writable_notebook`` (design doc

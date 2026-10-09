@@ -116,6 +116,11 @@ class GlobalAskAnswer(BaseModel):
     completeness_notice: str = "回答仅使用本次命中的有限原文，不代表逐篇穷尽检查。"
 
 class GlobalAskJob(BaseModel):
+    # The submission surface ("web" / "mcp"), read back from the job row's own
+    # column by the store. Excluded from every dump: it is not part of the
+    # stored payload or any HTTP response; the MCP tools read it to keep
+    # browser-started jobs out of ``get_ask``.
+    submitted_via: str = Field(default="", exclude=True)
     job_id: str
     conversation_id: str
     status: Literal["running", "done", "failed", "cancelled", "interrupted"]
@@ -213,7 +218,7 @@ def global_citation_flagged(job: "GlobalAskJob", element_id: str) -> bool:
     """Whether a citation of ``element_id`` in this job failed the terminal check.
 
     Every drill-down that opens what a global citation points at (the HTTP
-    ``/jobs/{id}/citations/{element}`` read and MCP ``get_global_cited_element``)
+    ``/jobs/{id}/citations/{element}`` read and MCP ``read_reference (gel)``)
     asks this and answers 404 for a flagged one: the card stays in the answer
     with its stored excerpt, only the way into the original is closed. Anchors
     and citations are both consulted -- the browser opens a card from either --

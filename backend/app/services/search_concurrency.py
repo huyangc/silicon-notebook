@@ -6,7 +6,7 @@ takes tens of seconds, and BEFORE this module there was zero server-side
 limit on how many of those scans could run at once. The frontend's own
 collection view fans out one search per *visible* notebook in parallel
 (``frontend/app/collection-search.ts`` -- ``SEARCH_FANOUT_LIMIT``), and the
-MCP ``search_notebook_context`` tool is a second, independent entry point
+MCP ``search(include="formal")`` tool is a second, independent entry point
 into the very same repository call. Three users typing in a shared workspace
 at once was enough to exhaust the whole DB connection pool (default size 10).
 
@@ -125,7 +125,7 @@ def search_concurrency_gate() -> asyncio.Semaphore:
 
     Shared by both entry points: the HTTP ``GET /notebooks/{id}/search``
     route (``app.api.ask_routes.search_notebook``) and the MCP
-    ``search_notebook_context`` tool (``app.api.mcp_tools.memory_context``).
+    ``search(include="formal")`` tool (``app.api.mcp_tools.memory_context``).
     Neither should acquire this object directly: go through
     ``run_under_search_gate``, which owns the acquire/release protocol that
     keeps a cancelled request's permit tied to its still-running thread. This

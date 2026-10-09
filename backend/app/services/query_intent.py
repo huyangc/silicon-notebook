@@ -536,7 +536,7 @@ def conversation_intent_history(turns: Iterable[Any]) -> str:
     Only the user's own wording of the last five turns may resolve references.
     Assistant answers are corpus-derived and would let retrieved material bias
     this otherwise corpus-blind step indirectly. One construction shared by
-    the HTTP ``/ask/intent`` preview and MCP ``ask_notebook``'s in-call
+    the HTTP ``/ask/intent`` preview and MCP ``ask``'s in-call
     understanding, so the two entry points cannot drift on what the model is
     allowed to look at.
     """
@@ -560,7 +560,7 @@ def validate_confirmed_intent(
 
     The one rail every entry point that accepts a confirmed intent runs
     before a durable Ask job exists -- HTTP ``/ask`` and ``/ask/stream``
-    translate the ``ValueError`` into a 422, MCP ``ask_notebook`` surfaces it
+    translate the ``ValueError`` into a 422, MCP ``ask`` surfaces it
     as the tool error verbatim. The messages are complete user copy, so a
     caller may show them as-is. ``objective`` must be the question byte for
     byte: a contract reviewed for one question never confirms another.
@@ -588,7 +588,7 @@ def clarification_gate_message(seed: dict) -> str:
     """Render a deterministic-ambiguity gate's error text with the questions.
 
     Every fail-closed clarification gate (HTTP direct ``/ask``, the engine's
-    compatibility branch, MCP ``ask_notebook``) shares this one construction
+    compatibility branch, MCP ``ask``) shares this one construction
     so the wording and rules -- at most ``AMBIGUITY_ROWS_MAX`` rows, each
     capped at ``AMBIGUITY_QUESTION_MAX_CHARS`` (the same named ceilings
     ``QueryIntentAmbiguity`` enforces), numbered with circled digits, blank

@@ -10,40 +10,58 @@ from mcp.server.fastmcp import FastMCP
 
 from app.api import mcp_server
 from app.api.mcp_tools.citations import register_citation_tools
-from app.api.mcp_tools.global_ask import register_global_ask_tools
+from app.api.mcp_tools.ask import register_ask_tools
 from app.api.mcp_tools.knowhow import register_knowhow_tools
 from app.api.mcp_tools.maintenance import register_maintenance_tools
-from app.api.mcp_tools.memory_context import register_memory_context_tools
+from app.api.mcp_tools.memory_context import (
+    register_memory_context_tools,
+    register_memory_proposal_tools,
+)
 from app.api.mcp_tools.profiles import register_profile_tools
 from app.api.mcp_tools.session import register_session_tools
 from app.api.mcp_tools.sources import register_source_tools
-from app.domain.agent_tools import AGENT_SCOPES
+from app.domain.agent_tools import AGENT_SCOPES, AGENT_TIERS
 
 
 _REGISTRARS = (
     register_session_tools,
     register_memory_context_tools,
-    register_knowhow_tools,
     register_citation_tools,
+    register_ask_tools,
+    register_memory_proposal_tools,
+    register_profile_tools,
     register_source_tools,
     register_maintenance_tools,
-    register_profile_tools,
-    register_global_ask_tools,
+    register_knowhow_tools,
 )
 
 
 class _CaptureServer:
     def __init__(self) -> None:
         self.names: list[str] = []
+        self.tiers: dict[str, str | None] = {}
 
-    def tool(self, *, description: str):
+    def tool(self, *, description: str, tier: str | None):
         assert type(description) is str and description
+        assert tier is None or tier in AGENT_TIERS
 
         def register(function):
             self.names.append(function.__name__)
+            self.tiers[function.__name__] = tier
             return function
 
         return register
+
+
+class _LegacyAdapter:
+    """A plain FastMCP behind the registrars' ``tool(description, tier)``
+    seat: the descriptor oracle knows nothing about tiers."""
+
+    def __init__(self, server: FastMCP) -> None:
+        self.server = server
+
+    def tool(self, *, description: str, tier: str | None):
+        return self.server.tool(description=description)
 
 
 def _poison_provider():
@@ -76,13 +94,146 @@ async def test_server_construction_and_tool_listing_do_zero_repository_work() ->
 async def test_unified_host_preserves_every_core_tool_descriptor() -> None:
     legacy = FastMCP("legacy descriptor oracle")
     for registrar in _REGISTRARS:
-        registrar(legacy, _poison_provider)
+        registrar(_LegacyAdapter(legacy), _poison_provider)
     unified, _app = mcp_server.create_memory_mcp(_poison_provider)
     legacy_tools = await legacy.list_tools()
     unified_tools = await unified.list_tools()
     assert [tool.model_dump(mode="json") for tool in unified_tools] == [
         tool.model_dump(mode="json") for tool in legacy_tools
     ]
+
+
+def test_every_tool_declares_its_tier_once_and_only_discovery_is_tierless() -> None:
+    capture = _CaptureServer()
+    for registrar in _REGISTRARS:
+        registrar(capture, _poison_provider)
+    assert dict(mcp_server.TOOL_TIERS) == capture.tiers
+    assert [name for name, tier in capture.tiers.items() if tier is None] == [
+        "list_notebooks"
+    ]
+    # Every tier opens at least one tool: a tier a token can hold but no tool
+    # reads would be a permission without a door.
+    assert {tier for tier in capture.tiers.values() if tier} == set(AGENT_TIERS)
+
+
+@pytest.mark.anyio
+async def test_tools_list_is_filtered_by_the_live_tiers_of_the_bound_principal() -> None:
+    from types import SimpleNamespace
+
+    from app.api.mcp_tools._shared import _MCP_PRINCIPAL
+
+    live = {"scopes": ["read"]}
+    reads: list[str] = []
+
+    def refresh(token_id):
+        reads.append(token_id)
+        return SimpleNamespace(scopes=list(live["scopes"])) if live["scopes"] else None
+
+    repo = SimpleNamespace(refresh_agent_principal=refresh)
+    server, _app = mcp_server.create_memory_mcp(lambda: repo)
+    marker = _MCP_PRINCIPAL.set(SimpleNamespace(token_id="token-1"))
+    try:
+        read_only = [tool.name for tool in await server.list_tools()]
+        live["scopes"] = ["ask", "delete"]
+        edited = [tool.name for tool in await server.list_tools()]
+        live["scopes"] = []
+        inactive = [tool.name for tool in await server.list_tools()]
+    finally:
+        _MCP_PRINCIPAL.reset(marker)
+    tiers = mcp_server.TOOL_TIERS
+    assert read_only == [
+        name for name in mcp_server.PUBLIC_TOOLS if tiers[name] in (None, "read")
+    ]
+    assert edited == [
+        name for name in mcp_server.PUBLIC_TOOLS
+        if tiers[name] in (None, "ask", "delete")
+    ]
+    assert inactive == ["list_notebooks"]
+    assert reads == ["token-1"] * 3
+
+
+def test_tool_exceptions_map_to_one_chinese_error_model() -> None:
+    from pydantic import BaseModel, ValidationError
+
+    from app.api.mcp_tool_host import agent_tool_error
+    from app.api.mcp_tools._shared import (
+        AgentToolError, MirroredNotebookError, OwnerOnlyError,
+    )
+    from app.domain.agent_tools import AgentAccessDenied
+    from app.core.memory_inputs import MemoryInputError
+    from app.domain.indexing_pipeline import (
+        IndexingPipelineRebuildActiveError,
+        IndexingPipelineUnavailableError,
+    )
+    from app.repositories.ports import ChunkLexicalSearchTimeout
+    from app.services.global_ask import GlobalAskError
+
+    class _Shape(BaseModel):
+        value: int
+
+    try:
+        _Shape(value="x")
+    except ValidationError as exc:
+        validation = exc
+
+    cases = [
+        (AgentAccessDenied("inactive"), "token_inactive", "已失效"),
+        (AgentAccessDenied("scope_missing", tier="manage"), "scope_missing", "「管理」"),
+        (AgentAccessDenied("notebook_not_allowed"), "notebook_not_allowed", "白名单"),
+        (AgentAccessDenied("notebook_unreadable"), "notebook_unreadable", "无权访问"),
+        (OwnerOnlyError(), "owner_only", "拥有的笔记本"),
+        (MirroredNotebookError("prod-a"), "mirrored", "prod-a"),
+        (KeyError("private-id-sentinel"), "not_found", "来源"),
+        (PermissionError("private-sentinel"), "not_found", "来源"),
+        (ValueError("中文的参数说明"), "invalid_argument", "中文的参数说明"),
+        (ValueError("title must not be blank"), "invalid_argument", "title 不能为空"),
+        (ValueError("tags may contain at most 20 values"), "invalid_argument", "最多 20 项"),
+        # An incidental English ValueError is not an argument error: internal,
+        # never echoed (the sentence would otherwise reach the Agent).
+        (ValueError("invalid literal for int() with base 10: 'x'"), "internal", "服务内部错误"),
+        # Containing a CJK character is not approved copy; starting with one is.
+        (ValueError("invalid literal for int() with base 10: '一'"), "internal", "服务内部错误"),
+        (MemoryInputError("some new validator wording"), "invalid_argument", "参数不合法"),
+        (AgentToolError("forbidden", "此操作不被允许"), "forbidden", "不被允许"),
+        (IndexingPipelineUnavailableError("plugin.x"), "unavailable", "索引管线当前不可用"),
+        (IndexingPipelineRebuildActiveError(), "busy", "索引重建正在进行"),
+        (ChunkLexicalSearchTimeout("private-sentinel"), "unavailable", "检索超时"),
+        (validation, "invalid_argument", "value"),
+        (GlobalAskError(404, "问答任务不存在"), "not_found", "问答任务不存在"),
+        (GlobalAskError(409, "仍在回答"), "busy", "仍在回答"),
+        (GlobalAskError(422, "范围不对"), "invalid_argument", "范围不对"),
+        (GlobalAskError(503, "正在关闭"), "unavailable", "正在关闭"),
+        (RuntimeError("private-sentinel /etc/secret"), "internal", "服务内部错误"),
+        (AgentToolError("busy", "原样"), "busy", "原样"),
+    ]
+    for exc, code, fragment in cases:
+        mapped = agent_tool_error(exc, tool="list_sources")
+        assert mapped.code == code, exc
+        assert fragment in mapped.message, (exc, mapped.message)
+        assert str(mapped) == f"[{code}] {mapped.message}"
+        assert "private" not in mapped.message, exc
+        assert "sentinel" not in mapped.message, exc
+
+
+@pytest.mark.anyio
+async def test_the_registration_wrapper_translates_what_a_tool_raises() -> None:
+    from types import SimpleNamespace
+
+    from mcp.shared.memory import create_connected_server_and_client_session
+
+    from app.api.mcp_tools._shared import _MCP_PRINCIPAL
+
+    server, _app = mcp_server.create_memory_mcp(
+        lambda: SimpleNamespace(refresh_agent_principal=lambda _token: None)
+    )
+    # No bound principal: every data tool refuses as an inactive token.
+    async with create_connected_server_and_client_session(server._mcp_server) as client:
+        result = await client.call_tool("search", {"query": "x"})
+    assert result.isError
+    assert result.content[0].text.endswith(
+        "[token_inactive] 此凭证已失效（已撤销、已过期或所属 Agent 已停用），请在 Agent 接入页检查"
+    )
+    assert _MCP_PRINCIPAL.get() is None
 
 
 def test_composition_has_exactly_one_core_tool_registration_seat() -> None:

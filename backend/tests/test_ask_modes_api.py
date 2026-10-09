@@ -191,7 +191,7 @@ def test_ask_stream_runs_through_the_runtime_ask_service(tmp_path, monkeypatch):
 
 def test_ask_sync_and_stream_record_web_submission_channel(tmp_path, monkeypatch):
     """网页的两个提交面 -- 同步 /ask 与流式 /ask/stream -- 都必须把建出的
-    ask_jobs 行记成 submitted_via == "web"，与 MCP ask_notebook 记的 "mcp"
+    ask_jobs 行记成 submitted_via == "web"，与 MCP ask 记的 "mcp"
     (见 test_memory_mcp.py) 和未记录的 "" 区分开。"""
     import json
 

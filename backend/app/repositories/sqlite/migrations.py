@@ -281,7 +281,13 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # 'answer'): 'evidence' marks a retrieval-only MCP ask_notebook call that
 # produced no answer and no conversation. No backfill -- every existing row
 # is an answer. See ``_migration_90``.
-SCHEMA_VERSION = 90
+# v91 (paired with PostgreSQL 0071_ask_intent_handles.sql) adds the
+# ask_intent_handles table: the MCP ``ask`` tool's clarification contracts,
+# kept server-side for one hour under an opaque token, and the
+# ask_jobs.memory_access flag (INTEGER NOT NULL DEFAULT 1: whether the run had
+# the private-Memory channel open; existing rows read as "may hold Memory").
+# No backfill. See ``_migration_91``.
+SCHEMA_VERSION = 91
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
 # when v87 was written (a migration must not change meaning when the live
@@ -5572,6 +5578,47 @@ class SqliteMigrator:
                 "output",
                 "TEXT NOT NULL DEFAULT 'answer'",
             )
+
+    def _migration_91(self) -> None:
+        """MCP ``ask`` clarification handles, parity with PostgreSQL
+        ``0071_ask_intent_handles.sql``.
+
+        One row per clarification the MCP ``ask`` tool handed out: the opaque
+        ``token`` (>= 128 random bits) is the key the Agent sends back, the
+        understood contract stays here (an Agent never echoes it through the
+        12 KB output budget), and ``scope_key`` / ``question_sha256`` bind the
+        handle to its owner, its notebook scope and its question. Rows expire
+        after an hour and are purged opportunistically on every write;
+        nothing reads an expired row. ``token`` carries an explicit
+        ``NOT NULL`` beside its ``PRIMARY KEY`` (SQLite rowid tables accept a
+        NULL there, PostgreSQL does not).
+
+        ``ask_jobs.memory_access`` records whether the run had the
+        private-Memory channel open (``memory:read``). The MCP replay paths
+        (``get_ask``, a keyed retry) refuse a job that ran with it open to a
+        caller whose channel is closed now: the stored answer and trace may
+        hold Memory. ``DEFAULT 1`` is the safe reading of every row written
+        before the flag existed -- "may hold Memory" -- so it needs no
+        backfill.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "ask_jobs", "memory_access", "INTEGER NOT NULL DEFAULT 1"
+            )
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS ask_intent_handles (
+                    token TEXT NOT NULL PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    scope_key TEXT NOT NULL,
+                    question_sha256 TEXT NOT NULL,
+                    contract_json TEXT NOT NULL,
+                    understanding_ms INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_ask_intent_handles_expires
+                    ON ask_intent_handles(expires_at);
+            """)
 
     def _seed(self) -> None:
         now = _now()

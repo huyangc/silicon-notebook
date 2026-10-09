@@ -46,13 +46,13 @@ def test_pg_upgrade_rewrites_foreign_entries_to_the_librarys_own_provenance(
     postgres_database,
 ):
     _seed_at_67(postgres_database)
-    assert PostgresMigrator(postgres_database).migrate() == 70
+    assert PostgresMigrator(postgres_database).migrate() == 71
     cases.assert_migrated(_snapshot(postgres_database))
 
 
 def test_pg_reexecuting_the_frozen_sql_changes_nothing(postgres_database):
     _seed_at_67(postgres_database)
-    assert PostgresMigrator(postgres_database).migrate() == 70
+    assert PostgresMigrator(postgres_database).migrate() == 71
     after = _snapshot(postgres_database)
     with postgres_database.write() as db:
         db.execute(MIGRATION.read_text(encoding="utf-8"), prepare=False)

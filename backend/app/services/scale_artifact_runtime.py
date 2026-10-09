@@ -15,6 +15,7 @@ import weakref
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator, Optional
 
+from app.domain.notebook_build_status import kg_build_view
 from app.repositories.filesystem.scale_artifact_store import MANIFEST_ABSENT
 from app.repositories.scale_build_lock import (
     SCALE_BUILD_LOCK_UNAVAILABLE,
@@ -1730,21 +1731,7 @@ class ScaleArtifactRuntime:
         notebook = self.get_notebook(notebook_id)
         unified = self.unified_status(notebook_id)
         return {
-            "kg": {
-                "ready": bool(notebook.kg_ready),
-                "building": bool(notebook.kg_building),
-                "pending_sources": int(notebook.kg_pending_sources),
-                "job": (
-                    notebook.kg_build.model_dump(mode="json")
-                    if notebook.kg_build
-                    else None
-                ),
-            },
-            "unified_kg": {
-                "dirty": bool(unified.get("dirty", False)),
-                "building": bool(unified.get("viz_building", False)),
-                "last_rebuild_at": unified.get("last_rebuild_at", ""),
-            },
+            **kg_build_view(notebook, unified),
             "scale_index": self.status(notebook_id),
         }
 

@@ -50,6 +50,7 @@ BUNDLE_STORE_PORTS = {
     "agent_observations": "AgentObservationStorePort",
     "extension_toggles": "ExtensionToggleStorePort",
     "wishes": "WishStorePort",
+    "ask_intent_handles": "AskIntentHandleStorePort",
 }
 
 
@@ -178,3 +179,29 @@ def test_newly_neutral_service_type_hints_resolve_without_backend_names():
     assert get_type_hints(KgMutationCoordinator.bump_cluster_mutation_seq)[
         "connection"
     ] is object
+
+
+# Every port that was ``@runtime_checkable`` when the MCP intent-handle port
+# landed (a decorator once moved onto the new class and silently left
+# WishStorePort). New ports may join; none may drop out unnoticed.
+_RUNTIME_CHECKABLE_PORTS = frozenset({
+    "AgentProfileStorePort", "AskStateStorePort", "CatalogStorePort",
+    "ChunkStorePort", "EmbeddingStorePort", "EvidenceKnowledgeContextPort",
+    "ExtensionToggleStorePort", "GovernanceStorePort", "GroupStorePort",
+    "IdentityStorePort", "IndexProjectionStorePort", "KgBuildJobStorePort",
+    "KnowhowHistoryStorePort", "KnowhowStorePort", "KnowhowTransferStorePort",
+    "KnowledgeStorePort", "MemoryStorePort", "ModelStatusStorePort",
+    "NotebookDeleteJobStorePort", "NotebookStorePort", "QueryStorePort",
+    "ReasoningModelProvider", "ReportStorePort", "RepositoryDatabasePort",
+    "SharingStorePort", "SourceStorePort", "UnifiedKgStorePort", "WishStorePort",
+})
+
+
+def test_runtime_checkable_ports_stay_runtime_checkable():
+    from app.repositories import ports
+
+    lost = sorted(
+        name for name in _RUNTIME_CHECKABLE_PORTS
+        if not getattr(getattr(ports, name), "_is_runtime_protocol", False)
+    )
+    assert lost == []

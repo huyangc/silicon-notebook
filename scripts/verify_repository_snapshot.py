@@ -5331,5 +5331,55 @@ MIGRATION_MANIFEST[(89, 90)] = {
     "views": {},
 }
 
+# v91 (parity with PostgreSQL 0071_ask_intent_handles.sql): the adapter-local
+# ask_intent_handles table (the MCP ``ask`` clarification handles) and its
+# expiry index, plus ``ask_jobs.memory_access`` INTEGER NOT NULL DEFAULT 1
+# (whether the run had the private-Memory channel open; the default is the
+# whole backfill: an earlier row reads as "may hold Memory"). No trigger or
+# view.
+ASK_JOBS_MEMORY_ACCESS_COLUMNS = {
+    "ask_jobs": {
+        "memory_access": ("memory_access", "INTEGER", 1, "1", 0),
+    },
+}
+ASK_INTENT_HANDLE_TABLES = {
+    "ask_intent_handles": """CREATE TABLE ask_intent_handles (
+                    token TEXT NOT NULL PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    scope_key TEXT NOT NULL,
+                    question_sha256 TEXT NOT NULL,
+                    contract_json TEXT NOT NULL,
+                    understanding_ms INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                )""",
+}
+ASK_INTENT_HANDLE_INDEXES = {
+    "idx_ask_intent_handles_expires": (
+        "CREATE INDEX idx_ask_intent_handles_expires\n"
+        "                    ON ask_intent_handles(expires_at)"
+    ),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 91, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **ASK_INTENT_HANDLE_TABLES},
+        "columns": {
+            **manifest["columns"],
+            "ask_jobs": {
+                **manifest["columns"].get("ask_jobs", {}),
+                **ASK_JOBS_MEMORY_ACCESS_COLUMNS["ask_jobs"],
+            },
+        },
+        "indexes": {**manifest["indexes"], **ASK_INTENT_HANDLE_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(90, 91)] = {
+    "tables": ASK_INTENT_HANDLE_TABLES,
+    "columns": ASK_JOBS_MEMORY_ACCESS_COLUMNS,
+    "indexes": ASK_INTENT_HANDLE_INDEXES, "triggers": {}, "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

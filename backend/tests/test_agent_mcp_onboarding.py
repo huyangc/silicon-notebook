@@ -16,7 +16,8 @@ def test_onboarding_document_is_public_and_uses_configured_mcp_url(monkeypatch):
     assert response.headers["cache-control"] == "no-store"
     assert "https://notebook.example.test/mcp" in response.text
     assert "Authorization: Bearer <AGENT_TOKEN>" in response.text
-    assert "select_notebook" in response.text
+    assert "select_notebook" not in response.text
+    assert "get_notebook" in response.text and "read_reference" in response.text
     assert "propose_memory" in response.text
     assert "export SILICON_NOTEBOOK_AGENT_TOKEN" not in response.text
     # The interpolated header form must stay ON OFFER next to the placeholder.

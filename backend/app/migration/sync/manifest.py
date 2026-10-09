@@ -597,6 +597,9 @@ _LOCAL: tuple[TableSyncSpec, ...] = (
     # PR-3b 在途导出租约（SQLite v85 / PostgreSQL 0065）：一行 = 本环境此刻正在
     # 跑的一次不限定范围的导出。比上面几张更本地——它不是记账，是一次活着的运行。
     TableSyncSpec("sync_export_runs", SyncClass.LOCAL, notes="PR-3b 在途导出租约"),
+    # MCP ask 的澄清句柄（SQLite v90 / PostgreSQL 0070）：一小时有效，是本环境
+    # 发给 Agent 的一次暂停，不随笔记本同步。
+    TableSyncSpec("ask_intent_handles", SyncClass.LOCAL, notes="MCP ask 澄清句柄"),
 )
 
 SYNC_MANIFEST: tuple[TableSyncSpec, ...] = _SYNCED + _SYNCED_WITH_MAPPING + _LOCAL

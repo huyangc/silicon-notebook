@@ -35,7 +35,7 @@ API_ROOT = ROOT / "app" / "api"
 # called with `attach_only=True` (a keyed re-submission's read-only attach
 # probe, which never inserts a row -- see AskExecutionCoordinator.
 # attach_existing / repository_facade.start_ask_stream).
-_TARGET_ATTRS = frozenset({"ask", "create_report", "start_ask_stream"})
+_TARGET_ATTRS = frozenset({"ask", "ask_with_job", "create_report", "start_ask_stream"})
 _VALID_VALUES = frozenset({"web", "mcp"})
 
 # The global Ask twin: `global_ask_service().start(...)` creates a
@@ -149,7 +149,9 @@ def test_every_ask_report_entry_point_records_submitted_via():
     compliant_count = 0
 
     for rel, scope, attr, call in _iter_candidate_calls():
-        if attr == "start_ask_stream" and _is_true_constant(_kwarg(call, "attach_only")):
+        if attr in {"start_ask_stream", "ask_with_job"} and _is_true_constant(
+            _kwarg(call, "attach_only")
+        ):
             # Read-only attach probe for a keyed re-submission -- never
             # inserts an ask_jobs row, so it carries no submitted_via.
             continue
@@ -174,8 +176,8 @@ def test_every_ask_report_entry_point_records_submitted_via():
     # 自检：防止扫描范围本身写错导致上面的断言空转（比如 API_ROOT 拼错、接收者
     # 名称收窄过头扫不到任何调用点）。真实合规调用点见 app/api/ask_routes.py 的
     # `.ask(...)`/`.start_ask_stream(...)`（两处）、app/api/report_routes.py 的
-    # `.create_report(...)`、app/api/mcp_tools/memory_context.py 的 `.ask(...)`、
-    # app/api/mcp_tools/global_ask.py 的直接调用 `global_ask_service().start(...)`、
+    # `.create_report(...)`、app/api/mcp_tools/ask.py 的 `.ask_with_job(...)`
+    # 与直接调用 `global_ask_service().start(...)`、
     # app/api/global_ask_routes.py 经 `_call(...)` 间接转发的同一个 `.start(...)`。
     assert compliant_count >= 6, (
         f"只扫到 {compliant_count} 个合规调用点，守卫可能没有真的扫描到入口"

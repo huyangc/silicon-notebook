@@ -38,6 +38,7 @@ POSTGRES_BUSINESS_TABLES = (
     "agent_notebook_profile",
     "agent_observations",
     "agent_profile_jobs",
+    "ask_intent_handles",
     "agent_profiles",
     "agent_token_notebooks",
     "answers",
@@ -441,7 +442,12 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # backfill; allowed values are pinned by the API model
 # (app.models.ask.AskOutput), not a CHECK. No table, index, FK or
 # unique-surface change.
+# SQLite v91 / PostgreSQL 0071 add the adapter-local ask_intent_handles table
+# (the MCP ``ask`` clarification handles; token primary key plus
+# idx_ask_intent_handles_expires; no FK) and ask_jobs.memory_access (integer
+# NOT NULL DEFAULT 1: whether the run had the private-Memory channel open; no
+# backfill, no index).
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=90,
-    postgres_version=70,
+    sqlite_version=91,
+    postgres_version=71,
 )

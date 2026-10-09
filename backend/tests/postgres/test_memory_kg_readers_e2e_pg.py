@@ -3,7 +3,7 @@ world, the same cases, through the real HTTP routes on a real PostgreSQL
 schema -- member A viewing a shared notebook where member B owns a confirmed
 Memory, B browsing its own, a token without ``memory:read``, a notebook still
 awaiting its isolated rebuild, a notebook without Memory, and MCP
-``search_notebook_context``.
+``search`` (``include="formal"``).
 
 Plus the EXPLAIN pin of the one statement this task changed on the
 PostgreSQL side: the rebuild's end-state counts (``finish_rebuild_state``).
@@ -79,7 +79,7 @@ def test_pg_a_notebook_without_memory_is_byte_identical_through_the_routes(
 
 
 @pytest.mark.anyio
-async def test_pg_mcp_search_notebook_context_knowledge_leg(pg_world, monkeypatch):
+async def test_pg_mcp_search_formal_knowledge_leg(pg_world, monkeypatch):
     await run_mcp_cases(pg_world("isolated"), monkeypatch)
 
 

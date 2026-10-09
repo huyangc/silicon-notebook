@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import logging
+import queue
 import threading
 import time
 from typing import Any, Mapping
@@ -17,6 +18,9 @@ from app.core.ask_retrieval_policy import DEFAULT_RETRIEVAL_EFFORT
 # The same ceiling the anonymous page renders by; the share-time authority
 # sweep below is bounded by it so one click can never deserialize more turns
 # than a public read of the same conversation already does.
+from app.domain.cancellation import (
+    ATTACH_STALL_SECONDS, AskExecutorGone, AskFollowFailed, AskWaitAbandoned,
+)
 from app.domain.conversation_public_view import MAX_TURNS
 from app.domain.global_ask_attribution import touched_notebook_ids
 from app.models.ask import AskRequest, QueryIntentContract, TraceStep
@@ -101,11 +105,19 @@ class _PreparedIntentPreview:
 _REPLACE_UNAVAILABLE = "上一条问题已无法替换，请刷新对话后重新提交。"
 
 
+# ``GlobalAskError.reason`` of a ``client_request_id`` already spent on a
+# different question (409 on HTTP). Callers map by this code, never by copy.
+REQUEST_KEY_REUSED = "request_key_reused"
+
+
 class GlobalAskError(Exception):
-    def __init__(self, status_code, message):
+    def __init__(self, status_code, message, reason=""):
         super().__init__(message)
         self.status_code = status_code
         self.message = message
+        # Optional machine-readable cause for callers that must tell 409s
+        # apart (e.g. REQUEST_KEY_REUSED vs a conversation still answering).
+        self.reason = reason
 
 
 def _now():
@@ -927,7 +939,9 @@ class GlobalAskService:
             return None
         job, old_request = previous
         if not self._same_request(old_request, payload.model_dump_json()):
-            raise GlobalAskError(409, "请求标识已用于其他问题，请重新提交。")
+            raise GlobalAskError(
+                409, "请求标识已用于其他问题，请重新提交。", REQUEST_KEY_REUSED
+            )
         self._check(job.resolved_notebook_ids, user_id, allowed_notebook_ids, authority_check)
         return job
 
@@ -1085,7 +1099,10 @@ class GlobalAskService:
                     # string compare here would make the race-recovery branch
                     # reject a legacy-shaped row the fast path accepts.
                     if not self._same_request(previous[1], request_json):
-                        raise GlobalAskError(409, "请求标识已用于其他问题，请重新提交。") from exc
+                        raise GlobalAskError(
+                            409, "请求标识已用于其他问题，请重新提交。",
+                            REQUEST_KEY_REUSED,
+                        ) from exc
                     self._check(previous[0].resolved_notebook_ids, user_id, allowed, authority_check)
                     return previous[0]
                 if isinstance(exc, ReplacedJobUnavailable):
@@ -1549,6 +1566,82 @@ class GlobalAskService:
                 return events
         self._follow(events, job_id, user_id, allowed_notebook_ids)
         return events
+
+    def wait(self, job_id, *, user_id, allowed_notebook_ids=None, stop=None):
+        """Block until ``job_id`` is terminal and return it (the MCP ``ask``).
+
+        Built on :meth:`attach`, so authority is checked first and on every
+        follower tick; the queue is drained to its sentinel, then the job is
+        read once more as the authority on the final state (a ``gone`` frame
+        surfaces here as the same ``GlobalAskError`` ``get_job`` raises).
+        Waiting executes and cancels nothing: ``stop`` (a ``threading.Event``
+        set when the waiting caller is cancelled) closes the delivery queue --
+        which ends a store follower at its next check -- and raises
+        ``AskWaitAbandoned``; the run itself is untouched.
+
+        A job executing in THIS process (its live feed is registered) is
+        followed for as long as it runs. One run by another process is
+        followed through the store follower, whose frames are the progress
+        evidence (it emits one only when the trace or coverage moved): after
+        ``ATTACH_STALL_SECONDS`` with no frame the wait closes the queue and
+        raises ``AskExecutorGone`` -- the notebook wait's rule -- instead of
+        holding the caller on a row whose executor died. Nothing is cancelled.
+
+        It returns ONLY a terminal job. A queue that ended while the row still
+        reads ``running`` -- the follower's own ``error`` frame (a store read
+        broke), or a feed that closed in a race -- is followed again, the
+        no-progress clock carried over; a follower that fails a second time
+        raises ``AskFollowFailed`` instead of handing back a running row.
+        """
+        last_progress = time.monotonic()
+        follow_failures = 0
+        while True:
+            events = self.attach(
+                job_id, user_id=user_id, allowed_notebook_ids=allowed_notebook_ids
+            )
+            failed, last_progress = self._drain(events, job_id, stop, last_progress)
+            job = self.get_job(
+                job_id, user_id=user_id, allowed_notebook_ids=allowed_notebook_ids
+            )
+            if job.status != "running":
+                return job
+            if failed:
+                follow_failures += 1
+                if follow_failures > 1:
+                    raise AskFollowFailed()
+
+    def _drain(self, events, job_id, stop, last_progress):
+        """``wait``'s read of one delivery queue up to its sentinel: returns
+        whether the follower reported its own failure, and the time of the
+        last progress frame. Raises ``AskWaitAbandoned`` on ``stop`` and
+        ``AskExecutorGone`` on a foreign job past ``ATTACH_STALL_SECONDS``
+        without progress, closing the queue either way."""
+
+        def let_go():
+            close = getattr(events, "close", None)
+            if close is not None:
+                close()
+
+        failed = False
+        while True:
+            if stop is not None and stop.is_set():
+                let_go()
+                raise AskWaitAbandoned()
+            try:
+                item = events.get(timeout=0.5)
+            except queue.Empty:
+                with self._lock:
+                    local = job_id in self._live
+                if not local and time.monotonic() - last_progress > ATTACH_STALL_SECONDS:
+                    let_go()
+                    raise AskExecutorGone() from None
+                continue
+            if item is None:
+                return failed, last_progress
+            if isinstance(item, dict) and item.get("event") == "error":
+                failed = True
+                continue
+            last_progress = time.monotonic()
 
     def _follow(self, events, job_id, user_id, allowed_notebook_ids=None):
         """Poll the store on this ONE client's behalf until the job ends.

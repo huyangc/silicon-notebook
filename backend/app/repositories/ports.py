@@ -115,7 +115,7 @@ class UploadedSourceFile:
     # 这份来源的**显示标题**，与 file_name 分开。
     #
     # 浏览器上传里两者天然同源（用户给的就是文件名），所以 upload_sources 一直拿
-    # file_name 当 title 用。但合成来源的调用方（MCP 的 add_source_text：用户给的是
+    # file_name 当 title 用。但合成来源的调用方（MCP 的 add_source (Markdown)：用户给的是
     # 一个**标题**，文件名是它派生出来的）两者并不同——file_name 会被 safe_filename
     # 净化、按文件系统字节预算截断、再缀上 `.md`，把它写进 title 就是拿一条派生的
     # 路径串冒充用户提交的标题。
@@ -156,6 +156,20 @@ class AskRequestKeyConflict(RuntimeError):
             f"client_request_id {client_request_id!r} belongs to a job in another notebook"
         )
         self.client_request_id = client_request_id
+
+
+class AskRequestKeyReused(RuntimeError):
+    """An Ask ``client_request_id`` this user already spent on a job that is
+    NOT this request's: another question/mode/conversation (``reason ==
+    "question"``), a job started on another submission surface (``reason ==
+    "surface"``, e.g. a browser job reached from MCP), or a job that ran with
+    the private-Memory channel open reached by a caller whose channel is closed
+    (``reason == "memory"``: its stored answer may hold Memory). Never attached
+    to."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"client_request_id reused ({reason})")
+        self.reason = reason
 
 
 class ConversationShareWatermarkStale(RuntimeError):
@@ -487,6 +501,26 @@ class ExtensionToggleStorePort(Protocol):
     def set_extension_runtime_enabled(
         self, plugin_id: str, enabled: bool, actor_id: str
     ) -> dict: ...
+
+
+class AskIntentHandleStorePort(Protocol):
+    """MCP ``ask`` clarification handles (v90/0070): an opaque token keyed
+    to the understood contract, for one hour. ``put`` purges expired rows;
+    ``get`` answers None for an expired, unknown or foreign token."""
+
+    def put_intent_handle(
+        self,
+        *,
+        token: str,
+        owner_id: str,
+        scope_key: str,
+        question_sha256: str,
+        contract: dict,
+        understanding_ms: int,
+        ttl_seconds: int,
+    ) -> None: ...
+
+    def get_intent_handle(self, token: str, *, owner_id: str) -> "dict | None": ...
 
 
 @runtime_checkable
@@ -3652,6 +3686,7 @@ class AskStateStorePort(Protocol):
         *,
         submitted_via: StoredSubmittedVia = "",
         output: StoredAskOutput = "answer",
+        memory_access: bool = True,
     ) -> tuple[str, str]: ...
     def begin_or_attach_durable_job(
         self,
@@ -3661,10 +3696,13 @@ class AskStateStorePort(Protocol):
         user_id: str,
         *,
         submitted_via: StoredSubmittedVia = "",
+        memory_access: bool = True,
     ) -> tuple[str, str, bool]: ...
     def find_job_for_client_request(
         self, user_id: str, client_request_id: str,
     ) -> dict | None: ...
+    def ask_job_origin(self, job_id: str) -> dict | None: ...
+    def ask_job_progress(self, job_id: str) -> dict | None: ...
     def append_trace(
         self,
         notebook_id: str,
@@ -6252,7 +6290,7 @@ class AgentObservationStorePort(Protocol):
            through ~17 call sites, each of which is one edit away from
            silently logging nothing. The registered cost of that choice:
            two tools admitted under the same scope are indistinguishable in
-           the ledger (``search_notebook_context`` and
+           the ledger (``search(include="formal")`` and
            ``list_knowhow_tables`` both read back as ``knowledge:read``).
 
         4. **Failure is never the caller's problem.** This ledger is
