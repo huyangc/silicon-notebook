@@ -50,6 +50,13 @@ AGENT_CAPABILITY_TIER = MappingProxyType(
 #: allowlist (``MemoryService._validate_agent_access``).
 AGENT_OWNER_ONLY_TIERS = frozenset({"manage", "delete"})
 
+#: The one user-facing refusal for issuing/editing ``manage``/``delete`` without
+#: an owned notebook in the allowlist. Raised as ``AgentOwnerOnlyTierError`` and
+#: shown verbatim by the token routes (``user_error(422, ...)``, registered as a
+#: dynamic site in tests/test_user_error.py; the vocabulary guard runs over it
+#: in tests/test_agent_tools_vocabulary.py).
+OWNER_ONLY_TIERS_MESSAGE = "管理和删除权限只对你拥有的笔记本生效，所选笔记本里没有你拥有的"
+
 
 def capability_tier(capability: str) -> str:
     """The tier that grants ``capability``. An unknown capability is a

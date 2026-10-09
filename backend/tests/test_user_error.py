@@ -177,6 +177,12 @@ def test_no_bare_chinese_4xx_http_exception():
 # 写清楚为什么它仍然满足「中文用户文案」这个契约、以及谁在覆盖它。
 # 键用「文件::函数名」而不是行号——行号会被无关改动推移。
 ALLOWED_DYNAMIC_USER_ERROR = {
+    "app/api/memory_routes.py::issue_agent_token": (
+        "唯一的动态实参是 app/domain/agent_tools.py 的中文模块常量 OWNER_ONLY_TIERS_MESSAGE(签发/修改 token 勾了「管理」「删除」而白名单里没有自己拥有的笔记本),AgentOwnerOnlyTierError 也只用它构造;不拼异常原文。tests/test_agent_tools_vocabulary.py 对它跑词汇守卫;tests/test_agent_tokens.py 覆盖签发与修改两条 422。"
+    ),
+    "app/api/memory_routes.py::update_agent_token_access": (
+        "唯一的动态实参是 app/domain/agent_tools.py 的中文模块常量 OWNER_ONLY_TIERS_MESSAGE(签发/修改 token 勾了「管理」「删除」而白名单里没有自己拥有的笔记本),AgentOwnerOnlyTierError 也只用它构造;不拼异常原文。tests/test_agent_tools_vocabulary.py 对它跑词汇守卫;tests/test_agent_tokens.py 覆盖签发与修改两条 422。"
+    ),
     "app/api/knowledge_routes.py::merge_knowledge": (
         "唯一的动态实参是 MemoryKnowledgeMergeRefused.user_message:它只可能是 "
         "app/domain/memory_kg_isolation.py 的两个中文模块常量之一(CROSS_CLASS_MESSAGE / "

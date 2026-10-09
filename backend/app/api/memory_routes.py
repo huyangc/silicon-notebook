@@ -24,6 +24,7 @@ from app.api.deps import (
     require_notebook_read,
     user_error,
 )
+from app.domain.agent_tools import OWNER_ONLY_TIERS_MESSAGE
 from app.models.identity import (
     AgentProfile,
     AgentProfileCreate,
@@ -171,9 +172,7 @@ async def issue_agent_token(
     except KeyError:
         raise _not_found("Agent profile not found")
     except AgentOwnerOnlyTierError:
-        raise user_error(
-            422, "管理和删除权限只对你拥有的笔记本生效，所选笔记本里没有你拥有的"
-        )
+        raise user_error(422, OWNER_ONLY_TIERS_MESSAGE)
     except (PermissionError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -251,9 +250,7 @@ async def update_agent_token_access(
     except PermissionError:
         raise user_error(422, "白名单里有你已无权访问的笔记本，请取消勾选后再保存")
     except AgentOwnerOnlyTierError:
-        raise user_error(
-            422, "管理和删除权限只对你拥有的笔记本生效，所选笔记本里没有你拥有的"
-        )
+        raise user_error(422, OWNER_ONLY_TIERS_MESSAGE)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
