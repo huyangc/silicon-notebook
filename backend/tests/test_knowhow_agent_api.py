@@ -2,7 +2,8 @@
 """knowhow-tables PR-2+3 Task 10: Agent HTTP surface (design doc §⑥) — table
 list / discrimination set / row detail / cell-level code attachments,
 reachable by EITHER a signed-in session or an Agent Bearer token carrying the
-``knowledge:read`` (reads) / ``knowhow:code`` (code writes) scope.
+``read`` tier (the ``knowledge:read`` capability, reads) / ``contribute`` tier
+(``knowhow:code``, code writes).
 
 Three groups:
   - Group A: pure unit tests for ``app.services.knowhow.api``'s new pure
@@ -546,7 +547,7 @@ def test_agent_token_with_knowledge_read_scope_can_read_tables_and_row(tmp_path,
     client = _client(tmp_path, monkeypatch)
     owner_h, nb, table, row, col = _seed(client, "a00002040")
     owner_id = _user_id(client, owner_h)
-    issued = _issue_token(owner_id, ["knowledge:read"], nb)
+    issued = _issue_token(owner_id, ["read"], nb)
     agent_h = _agent_headers(issued.token)
 
     assert client.get(f"/api/agent/knowhow/tables?notebook_id={nb}", headers=agent_h).status_code == 200
@@ -557,7 +558,7 @@ def test_agent_token_missing_scope_cannot_write_code(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     owner_h, nb, table, row, col = _seed(client, "a00002041")
     owner_id = _user_id(client, owner_h)
-    issued = _issue_token(owner_id, ["knowledge:read"], nb)
+    issued = _issue_token(owner_id, ["read"], nb)
     agent_h = _agent_headers(issued.token)
     url = f"/api/agent/knowhow/rows/{row['id']}/cells/{col}/code"
 
@@ -573,7 +574,7 @@ def test_agent_token_with_code_scope_can_write_and_attribution_reaches_row_detai
     owner_h, nb, table, row, col = _seed(client, "a00002042")
     owner_id = _user_id(client, owner_h)
     issued = _issue_token(
-        owner_id, ["knowledge:read", "knowhow:code"], nb, name="CodeAgent"
+        owner_id, ["read", "contribute"], nb, name="CodeAgent"
     )
     agent_h = _agent_headers(issued.token)
     url = f"/api/agent/knowhow/rows/{row['id']}/cells/{col}/code"
@@ -662,7 +663,7 @@ def test_agent_token_code_write_records_agent_origin(tmp_path, monkeypatch):
     owner_h, nb, table, row, col = _seed(client, "a00002050")
     owner_id = _user_id(client, owner_h)
     issued = _issue_token(
-        owner_id, ["knowledge:read", "knowhow:code"], nb, name="CodeAgent"
+        owner_id, ["read", "contribute"], nb, name="CodeAgent"
     )
     agent_h = _agent_headers(issued.token)
     url = f"/api/agent/knowhow/rows/{row['id']}/cells/{col}/code"
@@ -709,7 +710,7 @@ def test_agent_token_notebook_not_in_allowlist_returns_404(tmp_path, monkeypatch
     owner_h, nb, table, row, col = _seed(client, "a00002043")
     owner_id = _user_id(client, owner_h)
     other_nb = _mk_notebook(client, owner_h, name="Other")
-    issued = _issue_token(owner_id, ["knowledge:read"], other_nb)
+    issued = _issue_token(owner_id, ["read"], other_nb)
     agent_h = _agent_headers(issued.token)
 
     assert client.get(
@@ -724,7 +725,7 @@ def test_agent_token_revoked_returns_401(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     owner_h, nb, table, row, col = _seed(client, "a00002044")
     owner_id = _user_id(client, owner_h)
-    issued = _issue_token(owner_id, ["knowledge:read"], nb)
+    issued = _issue_token(owner_id, ["read"], nb)
     agent_h = _agent_headers(issued.token)
     _app_repo().revoke_agent_token(owner_id, issued.id)
 
@@ -738,7 +739,7 @@ def test_agent_token_expired_returns_401(tmp_path, monkeypatch):
     owner_h, nb, table, row, col = _seed(client, "a00002045")
     owner_id = _user_id(client, owner_h)
     past = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
-    issued = _issue_token(owner_id, ["knowledge:read"], nb, expires_at=past)
+    issued = _issue_token(owner_id, ["read"], nb, expires_at=past)
     agent_h = _agent_headers(issued.token)
 
     resp = client.get(f"/api/agent/knowhow/tables?notebook_id={nb}", headers=agent_h)
@@ -826,7 +827,7 @@ def test_agent_token_cell_code_write_is_refused_on_a_mirrored_notebook(
     owner_h, nb, table, row, col = _seed(client, "a00002092")
     owner_id = _user_id(client, owner_h)
     issued = _issue_token(
-        owner_id, ["knowledge:read", "knowhow:code"], nb, name="MirrorAgent"
+        owner_id, ["read", "contribute"], nb, name="MirrorAgent"
     )
     agent_h = _agent_headers(issued.token)
     url = f"/api/agent/knowhow/rows/{row['id']}/cells/{col}/code"

@@ -59,11 +59,11 @@ MEMORY_ELEMENT = f"{TERM} bandwidth memory element MEMELEMSECRET"
 MEMORY_KG = f"{TERM} bandwidth memory concept MEMKGSECRET"
 MEMORY_SECRETS = ("MEMITEMSECRET", "MEMELEMSECRET", "MEMKGSECRET")
 MIXED_MEMORY_QUOTE = f"{TERM} bandwidth mixed occurrence MIXMEMQUOTE"
-FULL_SCOPES = [
-    "knowledge:read", "memory:read", "memory:read_candidates",
-    "memory:propose", "ask:execute",
-]
-NO_MEMORY_SCOPES = ["knowledge:read", "ask:execute"]
+FULL_SCOPES = ["read", "ask", "contribute"]
+# Without the ``read`` tier the Memory channel stays closed. Since the tier
+# merge reading Memory is part of ``read``, so the closed variant is an
+# ask-only token (``ask_notebook`` needs ``ask`` alone).
+NO_MEMORY_SCOPES = ["ask"]
 
 
 def build_mcp_app(database_url: str, tmp_path, monkeypatch) -> dict:
@@ -353,9 +353,20 @@ async def assert_search_channel_through_mcp(env: dict, monkeypatch) -> None:
     store_calls = _MemoryStoreCalls(monkeypatch)
     app = env["app"]
     async with app.router.lifespan_context(app):
-        closed = await _search(
-            app, token(env, "alice", ["knowledge:read"]), notebook_id, TERM
-        )
+        # ``search_notebook_context`` needs ``read``, and since the tier merge
+        # ``read`` also opens the Memory channel, so a token alone can no
+        # longer reach the closed branch. It is still live (the second live
+        # check can refuse when the token is narrowed between the two), so
+        # it is closed here at that check and must then query nothing.
+        from app.api.mcp_tools import memory_context
+
+        with monkeypatch.context() as patched:
+            patched.setattr(
+                memory_context, "_memory_read_allowed", lambda *_args: False
+            )
+            closed = await _search(
+                app, token(env, "alice", ["read"]), notebook_id, TERM
+            )
         assert store_calls.calls == 0, "Memory 通道关闭时不得查询 Memory 存储"
         assert not any(item.get("memory_id") for item in closed["items"])
         assert all(item["type"] != "memory" for item in closed["items"])
@@ -364,7 +375,7 @@ async def assert_search_channel_through_mcp(env: dict, monkeypatch) -> None:
         assert any(item.get("source_id") == "src-visible" for item in closed["items"])
 
         opened = await _search(
-            app, token(env, "alice", ["knowledge:read", "memory:read"]),
+            app, token(env, "alice", ["read"]),
             notebook_id, TERM,
         )
         assert store_calls.calls > 0

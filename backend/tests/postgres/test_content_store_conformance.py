@@ -2187,7 +2187,7 @@ def test_memory_agent_token_round_trip_uses_connection_cursor_batch(content_harn
         "user-content",
         profile.id,
         "sha256-token-hash",
-        ["knowledge:read", "memory:read"],
+        ["read", "ask"],
         "nb-content",
         ["nb-content"],
         "2026-08-01T00:00:00+00:00",
@@ -2196,8 +2196,33 @@ def test_memory_agent_token_round_trip_uses_connection_cursor_batch(content_harn
     assert issued.agent_profile_id == profile.id
     assert issued.default_notebook_id == "nb-content"
     assert issued.notebook_ids == ["nb-content"]
-    assert issued.scopes == ["knowledge:read", "memory:read"]
+    assert issued.scopes == ["read", "ask"]
+    assert issued.copyable is False  # no plaintext stored for this one
     assert store.list_agent_tokens("user-content") == [issued]
+
+
+def test_memory_agent_token_plaintext_is_owner_scoped_and_cleared_on_revoke(
+    content_harness,
+):
+    """``token_plain`` (PG 0069) round-trips for the owner only, makes the
+    summary copyable, never travels with the auth row, and revoking clears it."""
+    store = content_harness.memory
+    profile = store.create_agent_profile("user-content", "Copy again", "")
+    issued = store.create_agent_token(
+        "agent-token-content-plain", "user-content", profile.id,
+        "sha256-token-hash-plain", ["read"], "nb-content", ["nb-content"], None,
+        token_plain="snm_agent-token-content-plain.secret",
+    )
+    assert issued.copyable is True
+    assert store.agent_token_secret(issued.id, "user-content") == (
+        False, "snm_agent-token-content-plain.secret"
+    )
+    assert store.agent_token_secret(issued.id, "user-other") is None
+    assert store.agent_token_secret("agent-token-missing", "user-content") is None
+    assert "token_plain" not in store.agent_token_auth_row(issued.id)
+    revoked = store.revoke_agent_token(issued.id, "user-content")
+    assert revoked.copyable is False
+    assert store.agent_token_secret(issued.id, "user-content") == (True, None)
 
 
 def test_memory_agent_token_access_update_round_trip_and_rejects_when_inactive(
@@ -2217,7 +2242,7 @@ def test_memory_agent_token_access_update_round_trip_and_rejects_when_inactive(
         "user-content",
         profile.id,
         "sha256-token-hash-update",
-        ["knowledge:read"],
+        ["read"],
         "nb-content",
         ["nb-content"],
         None,
@@ -2226,14 +2251,14 @@ def test_memory_agent_token_access_update_round_trip_and_rejects_when_inactive(
     updated = store.update_agent_token_access(
         issued.id,
         "user-content",
-        ["memory:propose"],
+        ["contribute"],
         "nb-content",
         ["nb-content"],
         "2027-01-01T00:00:00+00:00",
     )
     assert updated.id == issued.id
     assert updated.agent_profile_id == profile.id
-    assert updated.scopes == ["memory:propose"]
+    assert updated.scopes == ["contribute"]
     assert updated.default_notebook_id == "nb-content"
     assert updated.notebook_ids == ["nb-content"]
     assert updated.expires_at is not None
@@ -2242,20 +2267,20 @@ def test_memory_agent_token_access_update_round_trip_and_rejects_when_inactive(
     # expected precondition: PostgreSQL echoes an offset timestamp, so a
     # client snapshot in the normalized ``Z`` form must still match ...
     snapshot = AgentTokenAccess(
-        scopes=["memory:propose"],
+        scopes=["contribute"],
         default_notebook_id="nb-content",
         notebook_ids=["nb-content"],
         expires_at="2027-01-01T00:00:00Z",
     )
     matched = store.update_agent_token_access(
-        issued.id, "user-content", ["memory:propose", "memory:read"],
+        issued.id, "user-content", ["contribute", "read"],
         "nb-content", ["nb-content"], "2027-01-01T00:00:00+00:00", snapshot,
     )
-    assert sorted(matched.scopes) == ["memory:propose", "memory:read"]
+    assert sorted(matched.scopes) == ["contribute", "read"]
     # ... while a snapshot that is now stale is refused without writing.
     with pytest.raises(AgentTokenAccessConflictError):
         store.update_agent_token_access(
-            issued.id, "user-content", ["memory:propose"], "nb-content",
+            issued.id, "user-content", ["contribute"], "nb-content",
             ["nb-content"], None, snapshot,
         )
     assert store.list_agent_tokens("user-content") == [matched]
@@ -2264,7 +2289,7 @@ def test_memory_agent_token_access_update_round_trip_and_rejects_when_inactive(
     # A different owner's scoped lookup does not find this token.
     with pytest.raises(KeyError):
         store.update_agent_token_access(
-            issued.id, "user-other", ["memory:propose"], "nb-content",
+            issued.id, "user-other", ["contribute"], "nb-content",
             ["nb-content"], None,
         )
 
@@ -2272,7 +2297,7 @@ def test_memory_agent_token_access_update_round_trip_and_rejects_when_inactive(
     store.revoke_agent_token(issued.id, "user-content")
     with pytest.raises(AgentTokenInactiveError) as exc_info:
         store.update_agent_token_access(
-            issued.id, "user-content", ["memory:read"], "nb-content",
+            issued.id, "user-content", ["read"], "nb-content",
             ["nb-content"], None,
         )
     assert exc_info.value.reason == "revoked"
@@ -2285,7 +2310,7 @@ def test_memory_agent_token_access_update_round_trip_and_rejects_when_inactive(
         "user-content",
         profile.id,
         "sha256-token-hash-disabled",
-        ["memory:read"],
+        ["read"],
         "nb-content",
         ["nb-content"],
         None,
@@ -2293,7 +2318,7 @@ def test_memory_agent_token_access_update_round_trip_and_rejects_when_inactive(
     store.update_agent_profile(profile.id, "user-content", {"status": "revoked"})
     with pytest.raises(AgentTokenInactiveError) as exc_info:
         store.update_agent_token_access(
-            live_token.id, "user-content", ["memory:read"], "nb-content",
+            live_token.id, "user-content", ["read"], "nb-content",
             ["nb-content"], None,
         )
     assert exc_info.value.reason == "profile_disabled"
@@ -2326,13 +2351,13 @@ def test_memory_agent_token_auth_row_reads_one_snapshot_across_a_concurrent_edit
         "user-content",
         profile.id,
         "sha256-token-hash-snapshot",
-        ["sources:delete"],
+        ["delete"],
         "nb-content",
         ["nb-content"],
         None,
     )
-    old = (["sources:delete"], ["nb-content"])
-    new = (["knowledge:read"], sorted(["nb-content", "nb-content-extra"]))
+    old = (["delete"], ["nb-content"])
+    new = (["read"], sorted(["nb-content", "nb-content-extra"]))
     real_connect = store.database.connect
     fired = []
 

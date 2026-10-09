@@ -842,9 +842,9 @@ async def run_mcp_cases(world, monkeypatch) -> None:
     repo = world.repo
     tokens = {}
     for who, user_id, scopes in (
-        ("A", world.a_id, ["knowledge:read", "memory:read"]),
-        ("B", world.b_id, ["knowledge:read", "memory:read"]),
-        ("B-no-memory", world.b_id, ["knowledge:read"]),
+        ("A", world.a_id, ["read"]),
+        ("B", world.b_id, ["read"]),
+        ("B-no-memory", world.b_id, ["read"]),
     ):
         profile = repo.create_agent_profile(user_id, f"agent-{who}", "")
         tokens[who] = repo.issue_agent_token(
@@ -868,11 +868,19 @@ async def run_mcp_cases(world, monkeypatch) -> None:
         assert {"ZQPRIV alpha plan", "ZQPRIV beta budget"} <= labels(own)
         shared = await search("A", "Multi-Query")
         assert MQA in labels(shared)
-        # B's own token WITHOUT memory:read: the tool closes E1's real Memory
-        # channel, so neither a Memory-derived knowledge row nor a Memory item
-        # comes back (with memory:read, above, both do).
+        # B's own token with its Memory channel CLOSED: neither a
+        # Memory-derived knowledge row nor a Memory item comes back (open,
+        # above, both do). Since the tier merge ``read`` itself opens Memory,
+        # so the channel is closed at its live check (as a token narrowed
+        # between the two checks would see it), not by the token's tiers.
         assert any(item["type"] == "memory" for item in own["items"]), own
-        closed_payload = await search("B-no-memory", "ZQPRIV")
+        from app.api.mcp_tools import memory_context
+
+        with monkeypatch.context() as patched:
+            patched.setattr(
+                memory_context, "_memory_read_allowed", lambda *_args: False
+            )
+            closed_payload = await search("B-no-memory", "ZQPRIV")
         closed = json.dumps(closed_payload, ensure_ascii=False)
         assert PRIVATE not in closed.lower(), closed[:500]
         assert [item for item in closed_payload["items"]

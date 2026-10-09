@@ -200,13 +200,7 @@ def mcp_env(tmp_path, monkeypatch):
         reset_request_user(marker)
     profile_a = service.create_agent_profile(alice.id, "Claude Code", "")
     profile_b = service.create_agent_profile(alice.id, "Codex", "")
-    scopes = [
-        "knowledge:read",
-        "memory:read",
-        "memory:read_candidates",
-        "memory:propose",
-        "ask:execute",
-    ]
+    scopes = ["read", "ask", "contribute"]
     token_a = service.issue_agent_token(
         alice.id, profile_a.id, scopes, notebook.id, [notebook.id], None
     )
@@ -214,7 +208,7 @@ def mcp_env(tmp_path, monkeypatch):
         alice.id, profile_b.id, scopes, notebook.id, [notebook.id], None
     )
     restricted = service.issue_agent_token(
-        alice.id, profile_b.id, ["memory:read"], notebook.id, [notebook.id], None
+        alice.id, profile_b.id, ["read"], notebook.id, [notebook.id], None
     )
     bob_profile = service.create_agent_profile(bob.id, "Foreign", "")
     sharing.add_member(notebook.id, bob.id)
@@ -1375,7 +1369,7 @@ async def test_ask_notebook_intent_token_dies_with_the_notebook_selection(
     monkeypatch.setattr(service, "ask", never_ask)
     two_notebooks = service.issue_agent_token(
         mcp_env["alice"].id, mcp_env["profile_a"].id,
-        ["knowledge:read", "memory:read", "ask:execute"],
+        ["read", "ask"],
         mcp_env["notebook"].id, [mcp_env["notebook"].id, mcp_env["other"].id], None,
     )
     async with OfficialMcpClient(mcp_env["app"], two_notebooks.token) as client:
@@ -2021,13 +2015,10 @@ async def test_ask_notebook_filters_memory_citations_without_memory_read_scope(
     monkeypatch.setattr(service, "ask", fake_ask)
 
     ask_only_token = service.issue_agent_token(
-        mcp_env["alice"].id, mcp_env["profile_a"].id, ["ask:execute"],
+        mcp_env["alice"].id, mcp_env["profile_a"].id, ["ask"],
         notebook_id, [notebook_id], None,
     )
-    full_scopes = [
-        "knowledge:read", "memory:read", "memory:read_candidates",
-        "memory:propose", "ask:execute",
-    ]
+    full_scopes = ["read", "ask", "contribute"]
     full_token = service.issue_agent_token(
         mcp_env["alice"].id, mcp_env["profile_a"].id, full_scopes,
         notebook_id, [notebook_id], None,
@@ -2105,10 +2096,10 @@ async def test_ask_notebook_drops_memory_anchors_without_memory_read_scope(
     monkeypatch.setattr(service, "ask", fake_ask)
     with_token = service.issue_agent_token(
         mcp_env["alice"].id, mcp_env["profile_a"].id,
-        ["memory:read", "ask:execute"], notebook_id, [notebook_id], None,
+        ["read", "ask"], notebook_id, [notebook_id], None,
     )
     without_token = service.issue_agent_token(
-        mcp_env["alice"].id, mcp_env["profile_a"].id, ["ask:execute"],
+        mcp_env["alice"].id, mcp_env["profile_a"].id, ["ask"],
         notebook_id, [notebook_id], None,
     )
     app = mcp_env["app"]
@@ -2193,11 +2184,11 @@ async def test_ask_notebook_memory_citation_count_is_not_recoverable_from_omitte
     monkeypatch.setattr(service, "ask", fake_ask)
     full_token = service.issue_agent_token(
         mcp_env["alice"].id, mcp_env["profile_a"].id,
-        ["knowledge:read", "memory:read", "ask:execute"],
+        ["read", "ask"],
         notebook_id, [notebook_id], None,
     )
     ask_only_token = service.issue_agent_token(
-        mcp_env["alice"].id, mcp_env["profile_a"].id, ["ask:execute"],
+        mcp_env["alice"].id, mcp_env["profile_a"].id, ["ask"],
         notebook_id, [notebook_id], None,
     )
 
@@ -2282,7 +2273,9 @@ async def test_each_data_tool_enforces_its_minimal_live_scope_and_output_budget(
         recalled = _payload(await client.call(
             "search_agent_memory", {"query": "budget-marker", "limit": 50}
         ))
-        assert candidate.id not in {item["memory_id"] for item in recalled["items"]}
+        # The ``read`` tier covers the owner's candidates as well (one tier
+        # for every read since the tier merge).
+        assert candidate.id in {item["memory_id"] for item in recalled["items"]}
         confirmed_hit = next(
             item for item in recalled["items"] if item["memory_id"] == confirmed.id
         )
@@ -2294,10 +2287,11 @@ async def test_each_data_tool_enforces_its_minimal_live_scope_and_output_budget(
         assert isinstance(detail["tags"], list)
         assert all(len(tag) <= 200 for tag in detail["tags"])
         assert len(json.dumps(detail, ensure_ascii=False)) <= 12_000
-        assert (await client.call(
+        assert not (await client.call(
             "search_notebook_context", {"query": "budget-marker"}
         )).isError
-        assert (await client.call(
+        # Every tool outside the ``read`` tier is refused.
+        refused_propose = await client.call(
             "propose_memory",
             {
                 "title": "No",
@@ -2307,14 +2301,17 @@ async def test_each_data_tool_enforces_its_minimal_live_scope_and_output_budget(
                 "evidence_refs": [],
                 "client_request_id": "no-scope",
             },
-        )).isError
-        assert (await client.call(
+        )
+        assert refused_propose.isError
+        refused_ask = await client.call(
             "ask_notebook", {"question": "No scope", "mode": "chunk"}
-        )).isError
-        assert (await client.call("list_sources")).isError
+        )
+        assert refused_ask.isError
+        assert "缺少「问答」权限" in refused_ask.content[0].text
+        assert not (await client.call("list_sources")).isError
         # Agentic Memory P3 (T3): the two newest data tools, each pinned by
-        # their own scope like everything else above.
-        assert (await client.call("get_notebook_profile", {})).isError
+        # their own tier like everything else above.
+        assert not (await client.call("get_notebook_profile", {})).isError
         assert (await client.call("add_observation", {
             "text": "No scope", "client_request_id": "budget-no-scope",
         })).isError
@@ -3018,15 +3015,15 @@ async def test_knowhow_tools_get_row_and_put_cell_code_is_scope_gated(mcp_env):
     # share ONE outer lifespan and pass manage_lifespan=False to each client.
     async with app.router.lifespan_context(app):
         async with OfficialMcpClient(
-            app, mcp_env["token_a"].token, manage_lifespan=False
+            app, mcp_env["restricted"].token, manage_lifespan=False
         ) as client:
             await client.call("select_notebook", {"notebook_id": mcp_env["notebook"].id})
             row = _payload(await client.call("get_knowhow_row", {"row_id": row_id}))
             assert row["title"] == "过冲振铃"
             assert row["code"] == []
 
-            # token_a's scopes (knowledge:read/memory:*/ask:execute) do not
-            # include knowhow:code -> the write is rejected.
+            # The restricted token holds only ``read``; a code write needs
+            # ``contribute`` -> the write is rejected.
             denied = await client.call(
                 "put_knowhow_cell_code",
                 {
@@ -3036,11 +3033,11 @@ async def test_knowhow_tools_get_row_and_put_cell_code_is_scope_gated(mcp_env):
             )
             assert denied.isError
 
-        # A second token WITH knowhow:code can write; get_knowhow_row then
+        # A second token WITH contribute can write; get_knowhow_row then
         # surfaces the attachment (including updated_by attribution).
         code_token = mcp_env["service"].issue_agent_token(
             mcp_env["alice"].id, mcp_env["profile_a"].id,
-            ["knowledge:read", "knowhow:code"], mcp_env["notebook"].id,
+            ["read", "contribute"], mcp_env["notebook"].id,
             [mcp_env["notebook"].id], None,
         )
         async with OfficialMcpClient(
@@ -3070,7 +3067,7 @@ async def test_knowhow_tools_reject_a_row_from_a_notebook_outside_the_session(mc
     the token's own allowlist covers both notebooks."""
     other_table_id, other_row_id, other_method_id = _seed_knowhow_table(mcp_env["other"].id)
     both_notebooks_token = mcp_env["service"].issue_agent_token(
-        mcp_env["alice"].id, mcp_env["profile_a"].id, ["knowledge:read"],
+        mcp_env["alice"].id, mcp_env["profile_a"].id, ["read"],
         mcp_env["notebook"].id, [mcp_env["notebook"].id, mcp_env["other"].id], None,
     )
 
@@ -3099,7 +3096,7 @@ async def test_knowhow_agent_tool_responses_respect_serialized_budget(mcp_env):
     )
     code_token = mcp_env["service"].issue_agent_token(
         mcp_env["alice"].id, mcp_env["profile_a"].id,
-        ["knowledge:read", "knowhow:code"], mcp_env["notebook"].id,
+        ["read", "contribute"], mcp_env["notebook"].id,
         [mcp_env["notebook"].id], None,
     )
 
@@ -3280,9 +3277,13 @@ async def test_get_cited_element_requires_knowledge_read_and_a_selected_notebook
     mcp_env,
 ):
     """The two authentication gates every data tool shares, on this one:
-    a token without ``knowledge:read`` (the restricted fixture holds only
-    ``memory:read``) and a session that never called ``select_notebook``."""
+    a token without the ``read`` tier and a session that never called
+    ``select_notebook``."""
     repo = repository()
+    no_read = mcp_env["service"].issue_agent_token(
+        mcp_env["alice"].id, mcp_env["profile_b"].id, ["ask"],
+        mcp_env["notebook"].id, [mcp_env["notebook"].id], None,
+    )
     notebook_id = mcp_env["notebook"].id
     seeded = _seed_cited_source(repo, notebook_id, "gated")
     arguments = {
@@ -3292,12 +3293,14 @@ async def test_get_cited_element_requires_knowledge_read_and_a_selected_notebook
     app = mcp_env["app"]
     async with app.router.lifespan_context(app):
         async with OfficialMcpClient(
-            app, mcp_env["restricted"].token, manage_lifespan=False
+            app, no_read.token, manage_lifespan=False
         ) as restricted:
             _payload(await restricted.call(
                 "select_notebook", {"notebook_id": notebook_id}
             ))
-            assert (await restricted.call("get_cited_element", arguments)).isError
+            refused = await restricted.call("get_cited_element", arguments)
+            assert refused.isError
+            assert "缺少「读取」权限" in refused.content[0].text
 
         async with OfficialMcpClient(
             app, mcp_env["token_a"].token, manage_lifespan=False
@@ -3353,7 +3356,7 @@ async def test_get_cited_element_follows_the_participant_set_not_the_allowlist(
     )
     unmounted_doc = _seed_cited_source(repo, unmounted.id, "allowlisted-only")
     scoped_token = service.issue_agent_token(
-        mcp_env["alice"].id, mcp_env["profile_a"].id, ["knowledge:read"],
+        mcp_env["alice"].id, mcp_env["profile_a"].id, ["read"],
         notebook_id, [notebook_id, unmounted.id], None,
     )
 
@@ -3406,10 +3409,10 @@ async def test_get_cited_element_follows_the_participant_set_not_the_allowlist(
 # Agent source inventory and management: list_sources / add_source_text /
 # add_source_url / get_source_status / reparse_source / delete_source.
 # --------------------------------------------------------------------------- #
-_SOURCE_READ = ["knowledge:read"]
-_SOURCE_WRITE = ["knowledge:read", "sources:write"]
-_SOURCE_DELETE = ["knowledge:read", "sources:delete"]
-_SOURCE_FULL = ["knowledge:read", "sources:write", "sources:delete"]
+_SOURCE_READ = ["read"]
+_SOURCE_WRITE = ["read", "manage"]
+_SOURCE_DELETE = ["read", "delete"]
+_SOURCE_FULL = ["read", "manage", "delete"]
 
 
 def _agent_token(
@@ -3430,6 +3433,21 @@ def _agent_token(
         mcp_env[user].id, profile.id, scopes,
         notebook_ids[0], notebook_ids, None,
     ).token
+
+
+def _bob_owned_notebook_id(mcp_env) -> str:
+    """A notebook Bob owns. Issuing ``manage``/``delete`` needs one owned
+    notebook in the allowlist; adding it next to Alice's (where Bob is only a
+    reader) is how a token reaches the runtime owner-only gate at all."""
+    from app.api.deps import notebook_catalog_repository
+
+    marker = set_request_user(mcp_env["bob"])
+    try:
+        return notebook_catalog_repository().create_notebook(
+            NotebookCreate(name="Bob owns this")
+        ).id
+    finally:
+        reset_request_user(marker)
 
 
 @pytest.mark.anyio
@@ -4544,7 +4562,14 @@ async def test_source_writes_are_refused_in_a_read_only_shared_notebook(
             "UPDATE sources SET agent_profile_id=? WHERE id=?",
             (mcp_env["bob_profile"].id, seeded["source_id"]),
         )
-    bob_token = _agent_token(mcp_env, _SOURCE_FULL, user="bob")
+    # Without a notebook he owns, the token cannot even be issued with these
+    # tiers; with one, it reaches the runtime owner-only gate below.
+    with pytest.raises(ValueError, match="只对你拥有的笔记本生效"):
+        _agent_token(mcp_env, _SOURCE_FULL, user="bob")
+    bob_token = _agent_token(
+        mcp_env, _SOURCE_FULL, user="bob",
+        notebook_ids=[notebook_id, _bob_owned_notebook_id(mcp_env)],
+    )
 
     async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
         _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
@@ -4603,7 +4628,7 @@ async def test_knowhow_code_write_is_allowed_in_a_read_only_shared_notebook(
     """
     table_id, row_id, method_id = _seed_knowhow_table(mcp_env["notebook"].id)
     bob_token = _agent_token(
-        mcp_env, ["knowledge:read", "knowhow:code"], user="bob"
+        mcp_env, ["read", "contribute"], user="bob"
     )
 
     async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
@@ -4630,7 +4655,7 @@ async def test_knowhow_code_write_is_allowed_in_a_read_only_shared_notebook(
 # consume it -- these tests cover that closing of the loop, plus the
 # read-only get_build_status that sits on "knowledge:read" like the source
 # tools' own get_source_status does.
-_MAINTENANCE = ["knowledge:read", "maintenance:execute"]
+_MAINTENANCE = ["read", "manage"]
 
 
 @pytest.fixture
@@ -4875,14 +4900,15 @@ async def test_maintenance_tools_require_a_selected_notebook(mcp_env):
 
 
 @pytest.mark.anyio
-async def test_maintenance_and_source_scopes_do_not_imply_one_another(
+async def test_read_alone_opens_no_build_and_manage_opens_them(
     mcp_env, scheduled_kg_jobs
 ):
-    """Scope gates prove nothing about a build that would have failed
+    """Tier gates prove nothing about a build that would have failed
     anyway, so this configures kg_extract (a call WOULD succeed) and still
-    shows the unscoped token refused -- knowledge:read alone reads
-    get_build_status but opens neither write tool, and maintenance:execute
-    does not imply sources:write either."""
+    shows the read-only token refused -- ``read`` alone reads
+    get_build_status but opens neither build tool nor a source write, while
+    ``manage`` (source writes and builds are one tier since the tier merge)
+    opens the build."""
     repo = repository()
     notebook_id = mcp_env["notebook"].id
     bind_chat_client(repo, "kg_extract", _KgExtractStub())
@@ -4890,16 +4916,21 @@ async def test_maintenance_and_source_scopes_do_not_imply_one_another(
 
     async with app.router.lifespan_context(app):
         async with OfficialMcpClient(
-            app, _agent_token(mcp_env, _SOURCE_WRITE), manage_lifespan=False
-        ) as writer:
-            _payload(await writer.call(
+            app, _agent_token(mcp_env, _SOURCE_READ), manage_lifespan=False
+        ) as reader:
+            _payload(await reader.call(
                 "select_notebook", {"notebook_id": notebook_id}
             ))
-            # knowledge:read really does open the read tool here, so the two
-            # refusals below are not "this session can do nothing".
-            assert not (await writer.call("get_build_status", {})).isError
-            assert (await writer.call("build_kg", {})).isError
-            assert (await writer.call("build_retrieval_index", {})).isError
+            # read really does open the read tool here, so the refusals
+            # below are not "this session can do nothing".
+            assert not (await reader.call("get_build_status", {})).isError
+            refused = await reader.call("build_kg", {})
+            assert refused.isError
+            assert "缺少「管理」权限" in refused.content[0].text
+            assert (await reader.call("build_retrieval_index", {})).isError
+            assert (await reader.call("add_source_text", {
+                "title": "无权", "content_md": "无权",
+            })).isError
 
         async with OfficialMcpClient(
             app, _agent_token(mcp_env, _MAINTENANCE), manage_lifespan=False
@@ -4907,9 +4938,6 @@ async def test_maintenance_and_source_scopes_do_not_imply_one_another(
             _payload(await maintainer.call(
                 "select_notebook", {"notebook_id": notebook_id}
             ))
-            assert (await maintainer.call("add_source_text", {
-                "title": "无权", "content_md": "无权",
-            })).isError, "maintenance:execute 不蕴含 sources:write"
             assert not (await maintainer.call("build_kg", {})).isError
 
     assert len(scheduled_kg_jobs) == 1
@@ -4940,7 +4968,10 @@ async def test_maintenance_writes_are_refused_in_a_read_only_shared_notebook(
     notebook_id = mcp_env["notebook"].id
     bind_chat_client(repo, "kg_extract", _KgExtractStub())
     _mark_notebook_base_tier(repo, notebook_id)
-    bob_token = _agent_token(mcp_env, _MAINTENANCE, user="bob")
+    bob_token = _agent_token(
+        mcp_env, _MAINTENANCE, user="bob",
+        notebook_ids=[notebook_id, _bob_owned_notebook_id(mcp_env)],
+    )
 
     async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
         _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
@@ -5179,8 +5210,8 @@ async def test_the_mcp_transport_answers_over_sse_not_buffered_json(mcp_env):
 # --- Agentic Memory P3 (T3): notebook understanding + observation log -----
 # get_notebook_profile ("agent_profile:read") and add_observation
 # ("agent_observation:write") -- the 21st and 22nd tools.
-_PROFILE_READ = ["agent_profile:read"]
-_OBSERVATION_WRITE = ["agent_observation:write"]
+_PROFILE_READ = ["read"]
+_OBSERVATION_WRITE = ["contribute"]
 
 
 def _write_profile_block(
@@ -5502,7 +5533,7 @@ async def test_token_level_failure_after_append_keeps_the_rows(
 @pytest.mark.anyio
 async def test_add_observation_requires_its_own_scope(mcp_env):
     notebook_id = mcp_env["notebook"].id
-    token = _agent_token(mcp_env, ["knowledge:read"])
+    token = _agent_token(mcp_env, ["read"])
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
         _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
@@ -5680,13 +5711,29 @@ async def test_call_ledger_row_landing_after_member_removal_is_compensated(
 
 @pytest.mark.anyio
 async def test_candidate_read_refused_by_the_later_scope_leaves_no_ledger_row(
-    mcp_env,
+    mcp_env, monkeypatch,
 ):
     """codex #616 R5 P2:``get_memory`` 在收口之后还有一道闸——候选条目要求
     ``memory:read_candidates``。收口自动记账会把被那道闸拒掉的读也记进去,与
     「被拒绝的调用不留痕」相反。成功的那次照常记一行,证明这里推迟的是记账时机,
-    不是把这条路径整个排除在外。"""
+    不是把这条路径整个排除在外。
+
+    五档合并后 ``memory:read_candidates`` 与 ``memory:read`` 同属「读取」档,
+    只靠档位已无法让第二道闸单独拒绝;这里让第二道闸在两次检查之间被拒(等价于
+    凭证恰在其间被收窄或撤销),钉住的仍是同一件事:记账发生在所有闸之后。"""
+    from app.domain.agent_tools import AgentAccessDenied
+
     repo = repository()
+    live_check = repo.require_agent_access
+
+    def narrowed_between_checks(principal, capability, notebook_id):
+        if capability == "memory:read_candidates":
+            raise AgentAccessDenied(
+                "scope_missing", notebook_id=notebook_id, tier="read"
+            )
+        return live_check(principal, capability, notebook_id)
+
+    monkeypatch.setattr(repo, "require_agent_access", narrowed_between_checks)
     notebook_id = mcp_env["notebook"].id
     candidate = mcp_env["service"].create_memory_candidate(
         notebook_id, mcp_env["alice"].id, mcp_env["profile_a"].id,
@@ -5873,7 +5920,7 @@ async def test_agent_knowhow_code_write_is_refused_on_a_mirrored_notebook(mcp_en
     notebook_id = mcp_env["notebook"].id
     table_id, row_id, method_id = _seed_knowhow_table(notebook_id)
     _mark_notebook_mirrored(notebook_id)
-    token = _agent_token(mcp_env, ["knowledge:read", "knowhow:code"])
+    token = _agent_token(mcp_env, ["read", "contribute"])
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
         _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
