@@ -95,13 +95,99 @@ def test_kind_for_key_bands_and_object_type_priority():
     # A KG-only reasoning round numbers its objects from k1.
     assert kind_for_key("k1", {"k1": {"object_type": "claim"}}) == "kg"
     assert kind_for_key("k1", {"k1": {"object_type": "chunk"}}) == "chunk"
-    # object_type wins for chunk/memory/external/element; any other typed
-    # entry below the KG band is a KG object.
+    # chunk/memory/external are written by one producer each: decisive.
     assert kind_for_key("k1500", {"k1500": {"object_type": "chunk"}}) == "chunk"
     assert kind_for_key("k1", {"k1": {"object_type": "memory"}}) == "memory"
     assert kind_for_key("k1", {"k1": {"object_type": "external"}}) == "external"
     assert kind_for_key("k1", {"k1": {"object_type": "knowledge"}}) == "kg"
     assert kind_for_key("k4001", {"k4001": {"object_type": "element"}}) == "element"
+    # Chunk-path document overview numbers its elements from k1.
+    assert kind_for_key("k3", {"k3": {"object_type": "element"}}) == "element"
+
+
+def test_kind_for_key_follows_the_real_producers_id_maps():
+    """Each band producer's real id_map entry shape -> its kind.  "element"
+    is written by several producers, so above the KG band the band decides,
+    and the k6001+ band is split by the definition workbook results write."""
+    from app.services.collection_enumeration_answer import _preview_evidence
+    from app.services.spreadsheet_analysis import SPREADSHEET_RESULT_DEFINITION
+
+    # read_document excerpts (document_source_overview, key_offset 7000).
+    read = {"k7001": {"object_id": "e1", "object_type": "element",
+                      "element_id": "e1", "source_id": "s1"}}
+    assert kind_for_key("k7001", read) == "document_read"
+
+    # Collection preview rows: element / source / KG-object rows.
+    class _Element:
+        element_id = "e1"; location_label = "p.1"; source_title = "Doc"
+        text = "row"; tier = "personal"
+
+    class _Source:
+        source_id = "s1"; source_title = "Doc"; doc_type_label = "论文"
+        tier = "personal"
+
+    class _KgObject:
+        object_id = "o1"; object_type = "claim"; name = "c"; tier = "personal"
+
+    for collection, item in (
+        ("elements", _Element()), ("sources", _Source()), ("kg_objects", _KgObject()),
+    ):
+        entry = _preview_evidence(collection, item, None)
+        assert kind_for_key("k5001", {"k5001": entry}) == "collection", collection
+
+    # Workbook results share k6001+ with external evidence.
+    for object_type in ("element", "source"):
+        table = {"k6001": {"object_id": "x", "object_type": object_type,
+                           "definition": SPREADSHEET_RESULT_DEFINITION}}
+        assert kind_for_key("k6001", table) == "spreadsheet", object_type
+    external = {"k6001": {"object_id": "u", "object_type": "external",
+                          "definition": "外部材料"}}
+    assert kind_for_key("k6001", external) == "external"
+
+    # Sectioned synthesis shifts every band by i * 10000.
+    from app.services import ask_evidence as module
+    from app.services.outline_synthesis import OUTLINE_SECTION_KEY_STRIDE
+
+    assert module._SECTION_KEY_STRIDE == OUTLINE_SECTION_KEY_STRIDE
+    assert kind_for_key("k10001", {}) == "chunk"
+    assert kind_for_key("k15001", {"k15001": {"object_type": "element"}}) == "collection"
+    assert kind_for_key("k17001", {"k17001": {"object_type": "element"}}) == "document_read"
+
+
+def test_build_counts_keep_element_and_band_kinds_apart():
+    """A round with element blocks, a read_document excerpt, a collection row
+    and a workbook result reports each under its own kind (an element-typed
+    excerpt or workbook row must not inflate ``element``)."""
+    from app.services.spreadsheet_analysis import SPREADSHEET_RESULT_DEFINITION
+
+    id_map = {
+        "k4001": _entry("element", "e1", source_id="s1", element_id="e1"),
+        "k5001": _entry("element", "e2", source_id="s1", element_id="e2"),
+        "k6001": _entry("source", "s2", source_id="s2",
+                        definition=SPREADSHEET_RESULT_DEFINITION),
+        "k7001": _entry("element", "e3", source_id="s1", element_id="e3"),
+    }
+    context = "k4001: el\nk5001: row\nk6001: [spreadsheet] t\nk7001: excerpt"
+    evidence = build_ask_evidence(
+        context, id_map, parse_anchors=_service().parse_anchors, mode="reasoning",
+    )
+    assert [item.kind for item in evidence.items] == [
+        "element", "collection", "spreadsheet", "document_read",
+    ]
+    assert {k: (v.selected, v.delivered) for k, v in evidence.counts.by_kind.items()} == {
+        "element": (1, 1), "collection": (1, 1), "spreadsheet": (1, 1),
+        "document_read": (1, 1),
+    }
+    # _recount_selected with the reasoning selection keeps those kinds apart.
+    from app.services.ask_service import _recount_selected
+
+    _recount_selected(evidence, {"chunk": 0, "kg": 0, "element": 1,
+                                 "external": 0, "memory": 0})
+    assert evidence.counts.by_kind["element"].selected == 1
+    assert "external" not in evidence.counts.by_kind
+    assert evidence.counts.selected == 4
+    assert evidence.counts.delivered == 4
+    assert evidence.counts.omitted == 0
 
 
 def test_build_anchors_match_parse_anchors_field_for_field():

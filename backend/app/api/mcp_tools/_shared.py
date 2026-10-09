@@ -463,6 +463,7 @@ def _fit_aggregate_field_to_chars(
 
 def _budget_response(
     value: Mapping[str, Any], *, initial_omitted_items: int = 0,
+    initial_omitted_characters: int = 0,
     field_limits: Mapping[str, int] | None = None,
     provenance_budget_chars: int | None = None,
     tags_budget_chars: int | None = None,
@@ -479,8 +480,10 @@ def _budget_response(
     The three trailing keywords exist for ``ask_notebook(output="evidence")``
     alone: a total other than ``TOTAL_TEXT_LIMIT``, a list cap other than
     ``RESULT_LIMIT``, and the list whose rows carry the per-row ``provenance``
-    to fit (``anchors`` for every other tool). Left at their defaults the
-    behaviour is byte-identical.
+    to fit (``anchors`` for every other tool). So does
+    ``initial_omitted_characters``: text the caller already cut before
+    packing (the evidence pre-trim), reported like ``initial_omitted_items``.
+    Left at their defaults the behaviour is byte-identical.
     """
     total_budget = TOTAL_TEXT_LIMIT if total_budget_bytes is None else total_budget_bytes
     stats: dict[str, Any] = {
@@ -491,8 +494,11 @@ def _budget_response(
         "omitted_characters": 0,
         "omitted_fields": 0,
     }
-    if initial_omitted_items:
-        _mark_truncated(stats, items=initial_omitted_items)
+    if initial_omitted_items or initial_omitted_characters:
+        _mark_truncated(
+            stats, items=initial_omitted_items,
+            characters=initial_omitted_characters,
+        )
     result = _sanitize_output(
         dict(value), stats, field_limits=field_limits, list_limit=list_limit
     )

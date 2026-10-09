@@ -443,6 +443,43 @@ def test_retrieval_only_ask_is_marked_in_activity_detail_and_survives_notebook_d
     } == {"ask-answer": "answer", "ask-evidence": "evidence"}
 
 
+def test_retained_retrieval_only_ask_detail_keeps_output(client):
+    """After the notebook is deleted the ask detail is served from the
+    retained projection; a retrieval-only ask must still say
+    ``output="evidence"`` there (not fall back to the model default
+    ``"answer"``), and an answer-mode ask still says ``"answer"``."""
+    owner = _auth(client, 62)
+    owner_id = _me(client, owner)
+    notebook_id = _create_notebook(client, owner, "仅检索保留详情")
+    with _repo()._write() as db:
+        _insert_ask_job(
+            db, "ask-ret-answer", notebook_id, owner_id,
+            "2026-08-01T10:00:00+00:00", question="有回答", submitted_via="mcp",
+        )
+        _insert_ask_job(
+            db, "ask-ret-evidence", notebook_id, owner_id,
+            "2026-08-01T11:00:00+00:00", question="只检索", status="done",
+            submitted_via="mcp", output="evidence",
+        )
+    assert client.delete(
+        f"/api/notebooks/{notebook_id}", headers=owner
+    ).status_code == 202
+    from app.services import background_jobs
+    background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
+    admin = _auth_admin(client)
+    for job_id, expected in (
+        ("ask-ret-answer", "answer"), ("ask-ret-evidence", "evidence"),
+    ):
+        detail = client.get(
+            f"/api/admin/users/{owner_id}/asks/{job_id}", headers=admin,
+        )
+        assert detail.status_code == 200, job_id
+        body = detail.json()
+        assert body["retained_until"], job_id
+        assert body["answer"] is None, job_id
+        assert body["output"] == expected, job_id
+
+
 def test_activity_type_query_rejects_unknown_value(client):
     a = _auth(client, 34)
     uid_a = _me(client, a)

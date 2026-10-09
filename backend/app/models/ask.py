@@ -1050,7 +1050,7 @@ CONVERSATION_TITLE_MAX_CHARS = 200
 
 AskEvidenceKind = Literal[
     "chunk", "kg", "memory", "element", "collection", "external",
-    "document_read", "context",
+    "spreadsheet", "document_read", "context",
 ]
 
 

@@ -403,8 +403,10 @@ async def assert_evidence_channel_through_mcp(env: dict, monkeypatch) -> None:
             assert secret not in _evidence_text(foreign), f"{secret} 泄漏给了另一位成员"
             assert secret not in _wire_text(foreign)
 
-    assert synthesis.prompts == [], "证据模式不得调用回答/精炼模型"
-    assert len(repository().list_conversations(notebook_id)) == conversations_before
+        # Read while the lifespan is still open: on PostgreSQL leaving it
+        # closes the repository's pool.
+        assert synthesis.prompts == [], "证据模式不得调用回答/精炼模型"
+        assert len(repository().list_conversations(notebook_id)) == conversations_before
 
 
 def _source_ids(answer: dict) -> set[str]:

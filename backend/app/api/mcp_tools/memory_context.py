@@ -1,5 +1,6 @@
 """Memory recall, formal context, Ask, and Memory proposal MCP tools."""
 
+import json
 import logging
 import secrets
 import time
@@ -52,6 +53,7 @@ from ._shared import (
     _PENDING_INTENTS_ATTR,
     _budget_response,
     _record_agent_call,
+    _serialized_size,
     _owner_request_context,
     _run_with_progress,
     _selected_notebook,
@@ -825,7 +827,8 @@ def _evidence_payload(
         TOTAL_TEXT_LIMIT + 3 * text_chars
         + EVIDENCE_ITEM_OVERHEAD_BYTES * len(items),
     )
-    return _budget_response({
+    rows = [_evidence_row(item) for item in items]
+    payload = {
         "notebook_id": notebook_id,
         "status": "retrieved",
         "output": "evidence",
@@ -839,7 +842,7 @@ def _evidence_payload(
             "context_chars": evidence.context_chars,
         },
         "content_is_untrusted_evidence": True,
-        "items": [_evidence_row(item) for item in items],
+        "items": rows,
         "notice": evidence.notice,
         "skipped_libraries": [
             {"notebook_id": row.notebook_id, "name": row.name}
@@ -847,7 +850,11 @@ def _evidence_payload(
         ],
         "index_required": evidence.index_required,
         **_intent_entry(evidence),
-    }, field_limits={"text": text_chars, "object_type": 100, "kind": 40,
+    }
+    return _budget_response(
+        payload, initial_omitted_characters=_pretrim_evidence_text(
+            payload, rows, total),
+        field_limits={"text": text_chars, "object_type": 100, "kind": 40,
                      "label": 300, "source_title": 300, "location_label": 300,
                      "source_file_name": 300, "notice": 1_000,
                      "retrieval_query": 1_000, "resolved_question": 1_000,
@@ -856,6 +863,48 @@ def _evidence_payload(
         anchor_provenance_budget_chars=500, provenance_list_key="items",
         intent_budget_chars=1_500, total_budget_bytes=total,
         list_limit=max(RESULT_LIMIT, len(items)))
+
+
+# Headroom the pre-trim leaves for what packing adds after it measured: the
+# ``truncation`` block, an ellipsis per cut text, rounding of the ratio.
+_EVIDENCE_PRETRIM_SLACK_BYTES = 4_096
+
+
+def _pretrim_evidence_text(
+    payload: dict[str, Any], rows: list[dict[str, Any]], total: int
+) -> int:
+    """Cut every item's ``text`` by one common ratio so the payload lands
+    near ``total`` in a single pass, and return the characters removed.
+
+    ``_budget_response``'s convergence loop re-serializes the whole response
+    and halves one string per step: on a payload far above the 524,288-byte
+    cap that is thousands of half-megabyte dumps.  One proportional cut first
+    leaves the loop a few steps of residue.  Every cut is reported (the caller
+    passes the count as ``initial_omitted_characters``) and ends in the same
+    "…" the loop writes.  Within budget nothing is touched.
+    """
+    excess = _serialized_size(payload) - total
+    if excess <= 0:
+        return 0
+    sizes = [
+        len(json.dumps(row["text"], ensure_ascii=False).encode("utf-8"))
+        for row in rows
+    ]
+    text_bytes = sum(sizes)
+    if not text_bytes:
+        return 0
+    ratio = max(
+        0.0, (text_bytes - excess - _EVIDENCE_PRETRIM_SLACK_BYTES) / text_bytes
+    )
+    omitted = 0
+    for row in rows:
+        text = row["text"]
+        keep = int(len(text) * ratio)
+        if keep >= len(text):
+            continue
+        row["text"] = text[: max(0, keep - 1)] + "…"
+        omitted += max(0, len(text) - len(row["text"]))
+    return omitted
 
 
 def _answer_entries(answer: Any) -> dict[str, Any]:
@@ -1181,7 +1230,7 @@ def register_memory_context_tools(
         if isinstance(outcome, _PendingIntent):
             return _clarification_payload(outcome)
         if isinstance(outcome, AskEvidence):
-            return _evidence_payload(notebook_id, outcome, allow_memory)
+            return await anyio.to_thread.run_sync(_evidence_payload, notebook_id, outcome, allow_memory)
         answer = outcome
         anchors, visible_citations = _strip_memory_items(answer, allow_memory)
         anchor_rows = [_anchor_row(item) for item in anchors[:RESULT_LIMIT]]
