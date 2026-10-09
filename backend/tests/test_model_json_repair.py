@@ -753,6 +753,10 @@ def test_a_duplicated_opening_reads_stray_backslashes_after_the_prefix(
         ),
         # Only one duplicated opening is dropped.
         ('{"{ {"answer": "a", "grounded": true}', ANSWER_SCHEMA),
+        # At most one stray quote before the second opening.
+        ('{""{"answer": "a", "grounded": true}', ANSWER_SCHEMA),
+        # At most one ``}`` after the inner object: the duplicated opening's.
+        ('{"{"answer": "a", "grounded": true}}}', ANSWER_SCHEMA),
         # The inner object shares no field with the hint.
         ('{"{"other": "a"}', ANSWER_SCHEMA),
     ],
