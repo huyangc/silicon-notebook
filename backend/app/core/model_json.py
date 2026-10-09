@@ -5,10 +5,11 @@ request without enforcing it. Keep valid JSON byte-for-byte unchanged and use
 the repair parser only for complete object-shaped replies. Repaired string
 values are accepted only when they remain verbatim in the raw response, so
 syntax recovery cannot silently rewrite an answer, query, or action argument.
-Two deviations with a single reading are not repairs and are absorbed for
+Three deviations with a single reading are not repairs and are absorbed for
 every workload: a backslash that starts no JSON escape (LaTeX ``\\mathrm``,
-``50\\%``) is read as the literal characters written, and stray closing
-punctuation after a complete object is dropped.
+``50\\%``) is read as the literal characters written, stray closing
+punctuation after a complete object is dropped, and a duplicated opening
+(``{"{"answer": ...}``) is read as the complete object the model restarted.
 """
 from __future__ import annotations
 
@@ -33,6 +34,11 @@ class ModelJsonObject:
     #: ``_escape_stray_backslashes``); ``content`` is the reply with each such
     #: backslash doubled, so it decodes to exactly the characters written.
     stray_backslashes: bool = False
+    #: The reply opened twice -- ``{"{``, ``{\n{`` -- and the complete object
+    #: after the duplicated opening was taken (see ``_duplicated_open_object``);
+    #: ``content`` is that object's own text, byte-for-byte apart from
+    #: ``stray_backslashes``.
+    duplicated_open: bool = False
 
 
 class ModelJsonRepairError(ValueError):
@@ -693,6 +699,54 @@ def _leading_object(content: str) -> str | None:
     return stripped[:end]
 
 
+# A reply that opened twice: an outer ``{``, optionally a stray quote, then
+# the object the model actually wrote. DeepSeek-V4-Flash answer syntheses came
+# back as ``{"{"answer": ...}`` from 2026-10-09; dropping the duplicated
+# opening leaves a complete object. Only what may follow that object differs
+# from ``_TRAILING_NOISE_RE``: at most one ``}`` (the duplicated opening's own
+# closer) and quotes. A ``]`` would mean the lost prefix opened an array --
+# ``{"sections":[{...}]}`` missing ``"sections":[`` -- and the inner object is
+# then a nested item, not the reply.
+_DUPLICATED_OPEN_RE = re.compile(r'\s*\{\s*"?\s*(?=\{)')
+_DUPLICATED_OPEN_TAIL_RE = re.compile(r'[\s"]*(?:\}[\s"]*)?')
+
+
+def _duplicated_open_object(
+    content: str, schema_hint: str,
+) -> tuple[str, bool, bool] | None:
+    """Return ``(object, stray_backslashes, trailing_data)`` for a reply that
+    opened twice, or ``None``.
+
+    The prefix is dropped before stray backslashes are read: the stray quote
+    of ``{"{`` flips every quote after it, so reading backslashes over the
+    whole reply would misplace string boundaries. The inner object must share
+    a top-level field with the hint; without a hint nothing corroborates that
+    it is the reply rather than a nested value, and the reply stays malformed.
+    """
+    match = _DUPLICATED_OPEN_RE.match(content)
+    if match is None:
+        return None
+    example = _schema_example(schema_hint)
+    if not example:
+        return None
+    remainder = content[match.end():]
+    unescaped = _escape_stray_backslashes(remainder)
+    readings = [(remainder, False)]
+    if unescaped != remainder:
+        readings.append((unescaped, True))
+    for text, stray in readings:
+        try:
+            value, end = _DECODER.raw_decode(text)
+        except ValueError:
+            continue
+        if not isinstance(value, dict) or not set(value).intersection(example):
+            return None
+        if _DUPLICATED_OPEN_TAIL_RE.fullmatch(text, end) is None:
+            return None
+        return text[:end], stray, bool(text[end:].strip())
+    return None
+
+
 def parse_model_json_object(
     content: str,
     schema_hint: str,
@@ -706,7 +760,8 @@ def parse_model_json_object(
         _strict_object(content)
     except ModelJsonRepairError as strict_error:
         # Not repairs: what the model wrote is delivered with its one reading
-        # (stray backslashes literal, stray closers after the object dropped),
+        # (stray backslashes literal, stray closers after the object dropped,
+        # a duplicated opening before it dropped),
         # so this applies to every workload regardless of repair mode.
         unescaped = _escape_stray_backslashes(content)
         stray = unescaped != content
@@ -721,6 +776,15 @@ def parse_model_json_object(
         if leading is not None:
             return ModelJsonObject(
                 content=leading, trailing_data=True, stray_backslashes=stray,
+            )
+        duplicated = _duplicated_open_object(content, schema_hint)
+        if duplicated is not None:
+            inner, inner_stray, inner_trailing = duplicated
+            return ModelJsonObject(
+                content=inner,
+                duplicated_open=True,
+                stray_backslashes=inner_stray,
+                trailing_data=inner_trailing,
             )
         if not allow_repair or strict_error.reason == "non_object":
             raise

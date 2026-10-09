@@ -672,3 +672,138 @@ def test_strict_json_is_not_flagged_as_trailing_data():
 
     assert result.trailing_data is False
     assert result.content == raw
+
+
+# DeepSeek-V4-Flash answer syntheses, 2026-10-09: the reply opened twice and
+# then wrote the whole answer object. 22 of 30 rejected replies parsed after
+# dropping the duplicated opening; the other 8 were corrupted fragments.
+DUPLICATED_ANSWER = '{"answer": "完整答案 [k1]", "grounded": true}'
+
+
+@pytest.mark.parametrize("allow_repair", [False, True])
+@pytest.mark.parametrize(
+    ("prefix", "trailer"),
+    [
+        ('{"', ""),
+        ("{\n", ""),
+        ('{ " ', ""),
+        ("  {\n  ", "\n"),
+        # The model closed the duplicated opening too.
+        ('{"', "}"),
+        ("{", '"}\n'),
+    ],
+)
+def test_a_duplicated_opening_is_read_as_the_object_written(
+    prefix, trailer, allow_repair
+):
+    result = parse_model_json_object(
+        prefix + DUPLICATED_ANSWER + trailer,
+        ANSWER_SCHEMA,
+        allow_repair=allow_repair,
+    )
+
+    assert result.duplicated_open is True
+    assert result.repaired is False
+    assert result.stray_backslashes is False
+    assert result.trailing_data is bool(trailer.strip())
+    assert result.content == DUPLICATED_ANSWER
+    shape = validate_model_json_shape(result.content, ANSWER_SCHEMA)
+    assert shape.content == DUPLICATED_ANSWER
+
+
+@pytest.mark.parametrize("allow_repair", [False, True])
+def test_a_duplicated_opening_reads_stray_backslashes_after_the_prefix(
+    allow_repair,
+):
+    # The stray quote of ``{"{`` flips every quote after it; read over the
+    # whole reply, ``don't`` would open a string and ``50\%`` would be missed.
+    bs = "\\"
+    obj = '{"answer": "don\'t drop 50' + bs + '% ' + bs + 'mathrm{V}", "grounded": true}'
+
+    result = parse_model_json_object(
+        '{"' + obj, ANSWER_SCHEMA, allow_repair=allow_repair,
+    )
+
+    assert result.duplicated_open and result.stray_backslashes
+    assert json.loads(result.content) == {
+        "answer": "don't drop 50" + bs + "% " + bs + "mathrm{V}",
+        "grounded": True,
+    }
+
+
+@pytest.mark.parametrize("allow_repair", [False, True])
+@pytest.mark.parametrize(
+    ("raw", "schema"),
+    [
+        # Corrupted fragments from the same day: nothing usable to take.
+        ('{"{ }', ANSWER_SCHEMA),
+        ('{"{\n  \n}', ANSWER_SCHEMA),
+        ('{"  ', ANSWER_SCHEMA),
+        # Truncated after the duplicated opening.
+        ('{"{"answer": "部分答', ANSWER_SCHEMA),
+        # Two objects side by side, or the inner object followed by fields:
+        # the inner object is a nested value, not the reply.
+        ('{ {"answer": "a"}, {"answer": "b"} }', ANSWER_SCHEMA),
+        ('{"{"answer":"a"}": 1, "grounded": true}', ANSWER_SCHEMA),
+        # A lost ``"sections":[`` prefix: the inner object is an array item
+        # that happens to share ``title`` with the hint.
+        (
+            '{"{"title": "x", "body": "y"}]}',
+            '{"title":"","sections":[{"title":"","body":""}]}',
+        ),
+        # Only one duplicated opening is dropped.
+        ('{"{ {"answer": "a", "grounded": true}', ANSWER_SCHEMA),
+        # The inner object shares no field with the hint.
+        ('{"{"other": "a"}', ANSWER_SCHEMA),
+    ],
+)
+def test_a_duplicated_opening_without_one_reading_stays_malformed(
+    raw, schema, allow_repair
+):
+    with pytest.raises(ModelJsonRepairError):
+        parse_model_json_object(raw, schema, allow_repair=allow_repair)
+
+
+@pytest.mark.parametrize(
+    ("allow_repair", "reason"),
+    [(False, "invalid_json"), (True, "incomplete_object")],
+)
+def test_an_unusable_duplicated_opening_keeps_its_rejection_reason(
+    allow_repair, reason
+):
+    # A fragment whose remainder is ``{}`` is not re-labelled
+    # ``missing_expected_key``: the rejection reason in events.jsonl stays
+    # comparable with the replies rejected before this absorption existed.
+    with pytest.raises(ModelJsonRepairError) as caught:
+        parse_model_json_object('{"{ }', ANSWER_SCHEMA, allow_repair=allow_repair)
+
+    assert caught.value.reason == reason
+
+
+def test_a_duplicated_opening_needs_a_schema_hint_to_corroborate_it():
+    with pytest.raises(ModelJsonRepairError):
+        parse_model_json_object(
+            '{"' + DUPLICATED_ANSWER, "", allow_repair=False,
+        )
+
+
+def test_valid_json_with_a_brace_key_is_not_a_duplicated_opening():
+    raw = '{"{x": 1, "answer": "a", "grounded": true}'
+
+    result = parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=False)
+
+    assert result.content == raw
+    assert result.duplicated_open is False
+
+
+def test_a_nested_leading_object_is_not_taken_as_the_reply():
+    # The inner object is followed by more fields: it is a nested value. The
+    # strict path rejects it; the repair path judges the balanced whole by its
+    # own rules (keeping every field), never by the duplicated-opening reading.
+    raw = '{ {"x": 1}, "answer": "a", "grounded": true}'
+
+    with pytest.raises(ModelJsonRepairError):
+        parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=False)
+    repaired = parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=True)
+    assert repaired.duplicated_open is False
+    assert json.loads(repaired.content)["answer"] == "a"
