@@ -6238,6 +6238,89 @@ async def test_ask_notebook_evidence_total_is_capped_at_the_hard_limit(
     )
 
 
+def test_evidence_payload_far_over_the_cap_converges_in_a_few_passes(monkeypatch):
+    """Megabytes of evidence against the 524,288-byte cap: one proportional
+    pre-trim lands the payload near the cap, so the convergence loop
+    serializes the response a handful of times instead of thousands.  The
+    result still fits, every cut is reported in ``omitted_characters``, and
+    every item is kept (the cut is shared, not taken from the tail)."""
+    from app.api.mcp_tools import _shared, memory_context
+    from app.api.mcp_tools._shared import EVIDENCE_TOTAL_TEXT_LIMIT
+
+    calls = {"n": 0}
+    real = _shared._serialized_size
+
+    def counting(value):
+        calls["n"] += 1
+        return real(value)
+
+    monkeypatch.setattr(_shared, "_serialized_size", counting)
+    monkeypatch.setattr(memory_context, "_serialized_size", counting)
+    items = [
+        _evidence_item(f"k{i}", ("证据" * 1_500) + f"\n第{i}条") for i in range(300)
+    ]
+    evidence = _evidence_result(items, budget_chars=2_000_000)
+
+    payload = memory_context._evidence_payload("nb-x", evidence, True)
+
+    size = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    assert size <= EVIDENCE_TOTAL_TEXT_LIMIT
+    assert calls["n"] < 60
+    assert len(payload["items"]) == 300
+    truncation = payload["truncation"]
+    assert truncation["truncated"] is True
+    assert truncation["omitted_items"] == 0
+    cut = sum(len(item.text) for item in items) - sum(
+        len(row["text"]) for row in payload["items"]
+    )
+    assert truncation["omitted_characters"] == cut
+    assert all(row["text"].endswith("…") for row in payload["items"])
+    # Still most of the cap is evidence text, not an over-eager cut.
+    text_bytes = sum(len(row["text"].encode("utf-8")) for row in payload["items"])
+    assert text_bytes > EVIDENCE_TOTAL_TEXT_LIMIT // 2
+
+
+def test_evidence_payload_within_budget_is_not_pretrimmed():
+    from app.api.mcp_tools.memory_context import _pretrim_evidence_text
+
+    rows = [{"text": "短证据"}]
+    payload = {"items": rows}
+    assert _pretrim_evidence_text(payload, rows, 12_000) == 0
+    assert rows == [{"text": "短证据"}]
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_evidence_packs_off_the_event_loop(mcp_env, monkeypatch):
+    """Packing a large evidence payload is CPU work: it runs on a worker
+    thread, never on the event loop's thread."""
+    import threading
+
+    from app.api.mcp_tools import memory_context
+
+    monkeypatch.setattr(
+        mcp_env["service"], "get_notebook",
+        lambda _id: _fake_notebook_summary(mcp_env),
+    )
+    monkeypatch.setattr(
+        mcp_env["service"], "ask",
+        lambda *a, **k: _evidence_result([_evidence_item("k1", "text")]),
+    )
+    threads: list = []
+    real = memory_context._evidence_payload
+
+    def spy(*args):
+        threads.append(threading.current_thread())
+        return real(*args)
+
+    monkeypatch.setattr(memory_context, "_evidence_payload", spy)
+    loop_thread = threading.current_thread()
+    payload = _payload(await _evidence_call(mcp_env, {
+        "question": "off loop", "mode": "chunk", "output": "evidence",
+    }))
+    assert payload["status"] == "retrieved"
+    assert len(threads) == 1 and threads[0] is not loop_thread
+
+
 @pytest.mark.anyio
 async def test_ask_notebook_evidence_reasoning_still_asks_to_clarify(
     mcp_env, monkeypatch

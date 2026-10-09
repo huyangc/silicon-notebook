@@ -209,11 +209,19 @@ class AskStateStore:
         return new_id
 
     def conversation_history(
-        self, db: sqlite3.Connection, conversation_id: str, limit: int = 5
+        self, db: "sqlite3.Connection | None", conversation_id: str, limit: int = 5
     ) -> str:
         """Build the prior-turns history block (oldest->newest, last `limit`
         turns) from stored answer payloads. Uses each turn's `conclusion`
-        (provenance markers already stripped). Returns "" when no prior turns."""
+        (provenance markers already stripped). Returns "" when no prior turns.
+
+        ``db=None`` reads on a connection of its own -- the retrieval-only
+        Ask's read of a conversation it must never write
+        (``AskService._read_only_evidence_turn``); ownership is checked by
+        the caller through ``conversation_user_history`` first."""
+        if db is None:
+            with self.database.connect() as own:
+                return self._conversation_histories(own, conversation_id, limit)[0]
         return self._conversation_histories(db, conversation_id, limit)[0]
 
     def _conversation_histories(
@@ -1096,7 +1104,7 @@ class AskStateStore:
             retained = db.execute(
                 "SELECT record_id,notebook_id,actor_id,notebook_name,"
                 "conversation_id,mode,question,status,asked_at,deleted_at,"
-                "expires_at FROM retained_user_activity "
+                "expires_at,output FROM retained_user_activity "
                 "WHERE activity_type='ask' AND record_id=? "
                 "AND actor_id=? "
                 "AND julianday(expires_at)>julianday('now') "
@@ -1119,6 +1127,7 @@ class AskStateStore:
                     "answer_id": "",
                     "error": "",
                     "asked_at": retained["asked_at"] or "",
+                    "output": retained["output"],
                     "notebook_name": retained["notebook_name"],
                     "notebook_deleted_at": retained["deleted_at"],
                     "retained_until": retained["expires_at"],

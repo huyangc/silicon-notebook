@@ -1705,9 +1705,13 @@ does the call fail outright, rather than returning a silently truncated result.
 
 The one exception to the 12,000-byte budget is `ask_notebook` with `output="evidence"` (described
 below), whose response is sized by the synthesis budget instead: `min(EVIDENCE_TOTAL_TEXT_LIMIT, 12,000 +
-3 × budget_chars + EVIDENCE_ITEM_OVERHEAD_BYTES × number_of_items)` bytes, where `EVIDENCE_TOTAL_TEXT_LIMIT
-= 524_288` is the hard server-side ceiling and `EVIDENCE_ITEM_OVERHEAD_BYTES = 3_000` is the per-item
-allowance for identifiers and labels. Every other tool keeps the 12,000-byte rail byte for byte.
+3 × max(budget_chars, context_chars, longest item text) + EVIDENCE_ITEM_OVERHEAD_BYTES × number_of_items)`
+bytes, where `EVIDENCE_TOTAL_TEXT_LIMIT = 524_288` is the hard server-side ceiling and
+`EVIDENCE_ITEM_OVERHEAD_BYTES = 3_000` is the per-item allowance for identifiers and labels (the same
+`max(...)` is each item's text cap). When the evidence is larger than the hard ceiling, every item's
+`text` is first cut by one common ratio (ending in `…`) and the remaining overflow is fitted the usual
+way; all cut characters are reported in `truncation.omitted_characters`. Every other tool keeps the
+12,000-byte rail byte for byte.
 
 `list_notebooks` and `select_notebook` require **no tier at all**: the entire check is a
 live token, a notebook inside its allowlist, and read access to that notebook. Every session
@@ -1851,14 +1855,22 @@ a foreign or unknown id silently contributes no history, and **nothing is append
 conversation and no conversation is created; the response echoes the id when its history was used,
 else `""`. The call is recorded as an ask job (visible in activity and Question Analysis, labelled
 「仅检索」) with no conversation and no stored answer, and it does not enter the learning paths
-(trace/language sampling, completion observers, retrieval experience, reflect) or the bell.
+(trace/language sampling, completion observers, retrieval experience, reflect) or the bell. Its job
+row's `conversation_id` is empty, so deleting a conversation (including the one whose history it read)
+never removes it; it goes only with its notebook (and then lives on in the activity-retention projection
+like any other ask). Known performance trait: the learning-path samplers (the per-notebook trace sample
+and the per-user language sample) exclude these rows with an `output = 'answer'` predicate that no index
+covers, applied after the indexed lookup; with a very large share of retrieval-only calls those samples
+scan more rows and may need an index that includes `output`.
 
 The response is `{"status": "retrieved", "output": "evidence", "mode", "evidence_kind", "conversation_id",
 "retrieval_query", "intent", "counts", "budget", "content_is_untrusted_evidence": true, "items": [...],
 "notice", "skipped_libraries", "index_required", "truncation"}`. `evidence_kind` is `retrieval`,
 `document_overview`, `structured_enumeration` or `none`. Each item carries `key` (the `kN` label the
 synthesis context uses), `kind` (`chunk`, `kg`, `memory`, `element`, `collection`, `external`,
-`document_read`, `context`), the verbatim `text` of that fragment, and the same handle fields an answer's
+`spreadsheet` — a deterministic workbook analysis result —, `document_read`, `context`; decided from the
+key band and the fields its producer wrote, so an element row of a collection preview is `collection`
+and a `read_document` excerpt is `document_read`), the verbatim `text` of that fragment, and the same handle fields an answer's
 `anchors` carry (`object_id`, `object_type`, `label`, `source_title`, `location_label`, `source_id`,
 `element_id`, `tier`, `relevance`, `provenance`, plus `knowhow` / `memory_id` / `url` when applicable),
 produced by the same anchor parser, so `get_cited_element`, `get_memory` and `get_knowhow_row` resolve

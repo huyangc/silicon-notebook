@@ -108,6 +108,13 @@ def test_every_ask_entry_goes_through_the_one_installation():
     assert _call_sites(index, "_chunk_evidence") == {
         (ask, "<module>.AskService.ask_evidence"),
     }
+    # The retrieval-only entry installs its own read-only detached turn, so
+    # it writes no conversation whoever calls it; the global manager is the
+    # only other writer of that seat (``federated_run.detached_ask_turn``).
+    assert _call_sites(index, "detached_ask_turn") == {
+        ("app/services/global_run.py", "<module>.global_ask_run"),
+        (ask, "<module>.AskService.ask_evidence"),
+    }
     # The engines are reached only from inside an installation: ``ask``
     # dispatches by name (``getattr(self, spec.handler)``), the two
     # current-user calls wrap theirs, and nothing calls the extension engine

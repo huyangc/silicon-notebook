@@ -105,3 +105,34 @@ def test_nonexistent_conversation_returns_empty_not_raise(postgres_repository):
     nb = repo.create_notebook(NotebookCreate(name="t")).id
 
     assert store.conversation_user_history(nb, "conv-does-not-exist", uid) == ""
+
+
+def test_conversation_history_without_a_caller_connection_matches_the_answer_path(
+    postgres_repository,
+):
+    """``conversation_history(None, ...)`` (the retrieval-only Ask's read of a
+    conversation it never writes) reads on its own connection and returns the
+    answer path's full projection byte for byte -- including a legacy turn
+    whose payload no longer validates as an ``AskResponse``."""
+    import json
+
+    repo = postgres_repository
+    store = repo._runtime.ask_state
+    uid = repo.current_user().id
+    nb = repo.create_notebook(NotebookCreate(name="t")).id
+    conv_id = _seed_conversation(store, nb, uid, ["第一问"])
+    with store.database.write() as db:
+        db.execute(
+            "INSERT INTO answers (id, conversation_id, notebook_id, question, "
+            "payload, created_at) VALUES (%s,%s,%s,%s,%s::jsonb, now())",
+            ("ans-legacy-pg", conv_id, nb, "旧问题",
+             json.dumps({"conclusion": "旧结论", "citations": "not-a-list"},
+                        ensure_ascii=False)),
+        )
+
+    result = store.conversation_history(None, conv_id)
+
+    with store.database.write() as db:
+        expected, _ = store._conversation_histories(db, conv_id)
+    assert result == expected
+    assert result.endswith("User: 旧问题\nAssistant: 旧结论")

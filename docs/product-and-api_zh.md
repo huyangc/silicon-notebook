@@ -1287,9 +1287,11 @@ notebook 闸。缺档时工具报错是写明缺哪一档的中文文案（例�
 audit。只有拷贝真的缩无可缩时才整次拒绝，不会返回被静默截断的结果。
 
 12,000 字节预算只有一个例外：`output="evidence"` 的 `ask_notebook`（见下），其响应大小由合成预算决定：
-`min(EVIDENCE_TOTAL_TEXT_LIMIT, 12,000 + 3 × budget_chars + EVIDENCE_ITEM_OVERHEAD_BYTES × 条目数)` 字节，
+`min(EVIDENCE_TOTAL_TEXT_LIMIT, 12,000 + 3 × max(budget_chars, context_chars, 最长单条 text) + EVIDENCE_ITEM_OVERHEAD_BYTES × 条目数)` 字节，
 其中 `EVIDENCE_TOTAL_TEXT_LIMIT = 524_288` 是服务端硬顶，`EVIDENCE_ITEM_OVERHEAD_BYTES = 3_000` 是每条给标识符与
-标签留的余量。其它所有工具的 12,000 字节护栏逐字节不变。
+标签留的余量（同一个 `max(...)` 也是单条 text 的上限）。证据超过硬顶时，先把每条 `text` 按同一比例裁短（以 `…`
+结尾），剩余超出再按常规收敛；所有被裁掉的字符都计入 `truncation.omitted_characters`。其它所有工具的 12,000
+字节护栏逐字节不变。
 
 `list_notebooks` 与 `select_notebook` **不需要任何档位**：判据只有 token 存活、目标笔记本在
 白名单内、且对它有读权限。因此无论 token 权限收得多窄，session 都能正常起步。
@@ -1392,13 +1394,18 @@ knowhow 投影来源的 citation 也带与 anchor 相同的
 `conversation_id` 与回答模式同样接受：合法（同 owner、同笔记本）的 id 提供只读历史，用于追问改写与问题理解；
 外来或不存在的 id 静默不带历史；**不会向该会话追加任何内容**，也不新建会话；用了历史时响应回传该 id，否则为 `""`。
 这次调用记为一条提问任务（出现在活动记录与提问分析里，标「仅检索」），不建会话、不存回答，也不进学习链路
-（轨迹/语言采样、完成观察者、检索经验、reflect）和铃铛。
+（轨迹/语言采样、完成观察者、检索经验、reflect）和铃铛。该任务行的 `conversation_id` 为空，所以删除会话（包括
+它读过历史的那个会话）不会删掉它；它只随笔记本删除（之后与其它提问一样进入活动留存投影）。已知性能特征：学习
+链路的采样（按笔记本的轨迹采样、按用户的语言采样）用 `output = 'answer'` 谓词排除这些行，该谓词不在任何索引里、
+是在索引查找之后的后置过滤；仅检索调用占比很大时，这两类采样要多扫行，可能需要一个包含 `output` 的索引。
 
 响应形如 `{"status": "retrieved", "output": "evidence", "mode", "evidence_kind", "conversation_id",
 "retrieval_query", "intent", "counts", "budget", "content_is_untrusted_evidence": true, "items": [...],
 "notice", "skipped_libraries", "index_required", "truncation"}`。`evidence_kind` 取 `retrieval`、`document_overview`、
 `structured_enumeration` 或 `none`。每条 item 带 `key`（合成上下文里的 `kN` 标号）、`kind`（`chunk`、`kg`、
-`memory`、`element`、`collection`、`external`、`document_read`、`context`）、该片段的原样 `text`，以及与回答
+`memory`、`element`、`collection`、`external`、`spreadsheet`（电子表格确定性分析结果）、`document_read`、
+`context`；按号段与产出方写下的字段判定，所以集合清单预览里的元素行是 `collection`、按篇读取的原文摘录是
+`document_read`）、该片段的原样 `text`，以及与回答
 `anchors` 相同的句柄字段（`object_id`、`object_type`、`label`、`source_title`、`location_label`、`source_id`、
 `element_id`、`tier`、`relevance`、`provenance`，适用时还有 `knowhow` / `memory_id` / `url`），由同一个锚点解析器
 产出，所以 `get_cited_element`、`get_memory`、`get_knowhow_row` 解析它们的方式与解析回答锚点完全一致。`counts` 为

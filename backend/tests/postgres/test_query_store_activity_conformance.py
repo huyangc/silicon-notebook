@@ -458,6 +458,47 @@ def test_retrieval_only_ask_is_marked_in_overview_activity_and_retained_rows(
     }
 
 
+def test_retained_retrieval_only_ask_detail_keeps_output_postgres(
+    postgres_database, store
+):
+    """PG twin of the SQLite retained-detail test: after the notebook is
+    deleted, the guarded admin detail of a retrieval-only ask is served from
+    ``retained_user_activity`` and still says ``output="evidence"`` (an
+    answer-mode row still says ``"answer"``)."""
+    from app.repositories.postgres.ask_state_store import AskStateStore
+    from app.repositories.postgres.notebook_store import NotebookStore
+    from app.services.repository_runtime import RepositoryCompatibilitySeams
+
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u1")
+        _insert_notebook(connection, "n1", "u1")
+        _insert_ask(connection, "ask-ans", "n1", "u1", NOW, question="答案提问")
+        _insert_ask(connection, "ask-evi", "n1", "u1", NOW, question="证据提问",
+                    output="evidence")
+    NotebookStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: datetime.now(timezone.utc),
+        activity_retention_days=180,
+    ).delete_row_and_orphan_embeddings("n1")
+    asks = AskStateStore(postgres_database, RepositoryCompatibilitySeams(
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: datetime.now(timezone.utc),
+        copy_chunk_size=lambda: 100,
+        remap_json_ids=lambda value, _mapping: value,
+        in_chunk_size=lambda: 100,
+    ))
+    outputs = {}
+    for job_id in ("ask-ans", "ask-evi"):
+        with asks.guarded_ask_detail(
+            job_id, actor_id="u1", reader_id=None
+        ) as snapshot:
+            assert snapshot["job"]["retained_until"]
+            assert snapshot["answer_detail"] is None
+            outputs[job_id] = snapshot["job"]["output"]
+    assert outputs == {"ask-ans": "answer", "ask-evi": "evidence"}
+
+
 def test_admin_question_overview_includes_global_ask_jobs(postgres_database, store):
     """PG 孪生(与 SQLite 侧 test_admin_questions.py 同一条理由):一条全局问答
     在总览里现身为 type=ask、scope=global,notebook_id/notebook_name 为空,

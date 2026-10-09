@@ -943,6 +943,31 @@ def test_export_window_excludes_rows_outside_it(sqlite_db, tmp_path):
     assert out.read_text("utf-8").strip() == ""
 
 
+def test_export_skips_retrieval_only_jobs(sqlite_db, tmp_path):
+    """A database with the ``ask_jobs.output`` column: an
+    ``output='evidence'`` job (retrieval only, no synthesis, no answer) is not
+    a reasoning run and is left out; answer jobs still export.  The fixture
+    without the column (every other test here) is the pre-migration shape."""
+    conn = sqlite3.connect(sqlite_db)
+    conn.execute(
+        "ALTER TABLE ask_jobs ADD COLUMN output TEXT NOT NULL DEFAULT 'answer'")
+    conn.execute(
+        "INSERT INTO ask_jobs VALUES (?,?,?,?,?,?,?,?,?)",
+        ("job-2", "nb-1", "reasoning", "done", "",
+         "t0:A-q02:A_kg:legacy:standard:reasoning", "2026-09-08T01:30:00", "",
+         "evidence"),
+    )
+    conn.execute("INSERT INTO ask_trace_steps VALUES (?,?,?)", (
+        "job-2", 0, json.dumps({"step_type": "skip", "summary": "s", "detail": {}}),
+    ))
+    conn.commit()
+    conn.close()
+    out = tmp_path / "rows.jsonl"
+    assert export.main(["--database-url", str(sqlite_db), "--out", str(out)]) == 0
+    rows = [json.loads(line) for line in out.read_text("utf-8").splitlines()]
+    assert [row["question_key"] for row in rows] == ["A-q01"]
+
+
 # --- 分析 CLI ---------------------------------------------------------------
 
 

@@ -388,6 +388,102 @@ def test_a_foreign_or_unknown_conversation_reads_as_no_history(repo, foreign):
     assert evidence.items
 
 
+def test_a_direct_engine_call_writes_no_conversation(repo):
+    """``AskService.ask_evidence`` itself guarantees nothing is written: called
+    directly (no ``_ask_evidence_current`` around it, no job) it neither
+    creates a conversation nor appends to an owned one, and still reads the
+    owned one's history.  Inside another detached turn it refuses loudly."""
+    from app.services.federated_run import DetachedAskTurn, detached_ask_turn
+
+    notebook = _seed_chunks(repo, _TEXTS)
+    bind_chat_client(repo, "ask_answer", _Recorder())
+    bind_chat_client(repo, "query_rewrite", _Recorder(rewritten="expert capacity"))
+    service = repo._runtime.ask_component
+
+    service.ask_evidence(
+        notebook.id, AskRequest(question="expert routing", mode="chunk"),
+        user_id="direct-user",
+    )
+    assert _rows(repo, "SELECT id FROM conversations") == []
+    assert _rows(repo, "SELECT id FROM answers") == []
+
+    first = repo.ask(
+        notebook.id, AskRequest(question="What limits an expert?", mode="chunk"))
+    owner = _rows(
+        repo, "SELECT created_by FROM conversations WHERE id=?",
+        (first.conversation_id,))[0]["created_by"]
+    before = _rows(repo, "SELECT id, updated_at FROM conversations")
+    rewrite = _Recorder(rewritten="expert training")
+    bind_chat_client(repo, "query_rewrite", rewrite)
+    evidence = service.ask_evidence(
+        notebook.id,
+        AskRequest(question="and how is it trained?", mode="chunk",
+                   conversation_id=first.conversation_id),
+        user_id=owner,
+    )
+    assert evidence.conversation_id == first.conversation_id
+    assert any("User: What limits an expert?" in prompt for prompt, _ in rewrite.calls)
+    assert _rows(repo, "SELECT id, updated_at FROM conversations") == before
+    assert _rows(repo, "SELECT COUNT(*) AS n FROM answers") == [{"n": 1}]
+
+    with detached_ask_turn(DetachedAskTurn(conversation_id="")):
+        with pytest.raises(ValueError, match="already installed"):
+            service.ask_evidence(
+                notebook.id, AskRequest(question="q", mode="chunk"),
+                user_id=owner,
+            )
+    assert _rows(repo, "SELECT id, updated_at FROM conversations") == before
+
+
+def test_an_old_turn_that_no_longer_validates_still_feeds_the_history(repo):
+    """The read-only history comes from the answer path's raw-JSON projection
+    (``conversation_user_history`` + ``conversation_history``), not from a
+    rebuilt ``ConversationDetail``: an old payload ``AskResponse`` rejects
+    still contributes its turn, exactly as it does when answering."""
+    from pydantic import ValidationError
+
+    from app.models.ask import AskResponse as _AskResponse
+
+    notebook = _seed_chunks(repo, _TEXTS)
+    bind_chat_client(repo, "ask_answer", _Recorder())
+    bind_chat_client(repo, "query_rewrite", _Recorder(rewritten="expert capacity"))
+    first = repo.ask(
+        notebook.id, AskRequest(question="What limits an expert?", mode="chunk"))
+    cid = first.conversation_id
+    owner = _rows(
+        repo, "SELECT created_by FROM conversations WHERE id=?", (cid,)
+    )[0]["created_by"]
+    legacy = {"conclusion": "旧结论：容量上限", "citations": "not-a-list"}
+    with pytest.raises(ValidationError):
+        _AskResponse(**legacy)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO answers (id, conversation_id, notebook_id, question, "
+            "payload, created_at) VALUES (?,?,?,?,?,?)",
+            ("ans-legacy", cid, notebook.id, "旧问题：容量怎么算？",
+             json.dumps(legacy, ensure_ascii=False), _now()))
+    # The old read (a rebuilt ConversationDetail) loses the whole history.
+    with pytest.raises(ValueError):
+        repo._runtime.ask_state.get_conversation(cid)
+
+    service = repo._runtime.ask_component
+    turn = service._read_only_evidence_turn(notebook.id, cid, owner)
+    assert turn.conversation_id == cid
+    assert "User: 旧问题：容量怎么算？\nAssistant: 旧结论：容量上限" in turn.history
+    assert turn.user_history.endswith("User: 旧问题：容量怎么算？")
+    # Same projection as the answer path's prepared turn.
+    with repo._connect() as db:
+        full, user_only = repo._runtime.ask_state._conversation_histories(db, cid)
+    assert (turn.history, turn.user_history) == (full, user_only)
+
+    rewrite = _Recorder(rewritten="capacity formula")
+    bind_chat_client(repo, "query_rewrite", rewrite)
+    evidence = _evidence(
+        repo, notebook.id, "那训练呢？", conversation_id=cid)
+    assert evidence.conversation_id == cid
+    assert any("旧问题：容量怎么算？" in prompt for prompt, _ in rewrite.calls)
+
+
 # --------------------------------------------------------------------------
 # reasoning
 # --------------------------------------------------------------------------

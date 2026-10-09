@@ -1308,14 +1308,25 @@ class AskService:
         and return the context that call would have received.
 
         Built-in modes only (``EVIDENCE_OUTPUT_MODES``); anything else raises
-        ``ValueError`` with ``EVIDENCE_OUTPUT_MODE_REFUSAL``.  Persists nothing
-        itself: no conversation, no answer (the durable lifecycle around it is
-        ``_ask_evidence_current``'s).
+        ``ValueError`` with ``EVIDENCE_OUTPUT_MODE_REFUSAL``.
+
+        Writes no conversation and no answer, whoever calls it: the engine
+        runs under a ``DetachedAskTurn`` installed HERE (not by the caller),
+        the seat ``_prepare_turn`` answers from without touching ``ask_state``
+        and ``_save_answer`` refuses to write under.  The turn carries the
+        read-only history of ``payload.conversation_id`` when ``user_id`` owns
+        it in this notebook (``_read_only_evidence_turn``), else none.  Called
+        inside another detached turn it fails loudly (``detached_ask_turn``
+        refuses nesting).  The job row and trace are the caller's
+        (``_ask_evidence_current``).
         """
         spec = self._resolve_ask_mode(getattr(payload, "mode", None))
         if spec.id not in EVIDENCE_OUTPUT_MODES:
             raise ValueError(EVIDENCE_OUTPUT_MODE_REFUSAL)
-        with self._engine_scope(
+        turn = self._read_only_evidence_turn(
+            notebook_id, payload.conversation_id, user_id
+        )
+        with detached_ask_turn(turn), self._engine_scope(
             spec, notebook_id, payload, user_id=user_id, job_id=job_id,
             cancel_event=cancel_event, run=True,
         ):
@@ -1499,39 +1510,34 @@ class AskService:
 
         A ``conversation_id`` the caller owns in this notebook is read, never
         written: its history feeds the follow-up rewrite and the reasoning
-        understanding exactly as it would for an answer, through a
-        ``DetachedAskTurn`` -- the seat ``_prepare_turn`` already answers from
-        without touching ``ask_state`` and ``_save_answer`` already refuses
-        to write under.  Anyone else's id, or one that does not exist, reads
-        as no history (the answer path's silent rule, no error).
+        understanding exactly as it would for an answer (``ask_evidence``
+        installs the read-only ``DetachedAskTurn`` itself).  Anyone else's id,
+        or one that does not exist, reads as no history (the answer path's
+        silent rule, no error).
         """
         user_id = self.current_user_id()
         mode = self._resolve_ask_mode(getattr(payload, "mode", None))
         if mode.id not in EVIDENCE_OUTPUT_MODES:
             raise ValueError(EVIDENCE_OUTPUT_MODE_REFUSAL)
         self.validate_reasoning_submission(notebook_id, payload)
-        # Read BEFORE the job exists: the store's evidence begin never
-        # resolves a conversation, so the caller's id is taken as sent.
-        turn = self._read_only_evidence_turn(
-            notebook_id, payload.conversation_id, user_id
-        )
         cancel_event = threading.Event()
+        # The store's evidence begin never resolves a conversation: the row's
+        # conversation_id is '' and the caller's id is read by ask_evidence.
         job_id, _conversation_id = self.begin_job_current(
             notebook_id, payload, mode.id, cancel_event,
             submitted_via=submitted_via, output="evidence",
         )
         try:
-            with detached_ask_turn(turn):
-                evidence = self.ask_evidence(
-                    notebook_id,
-                    payload,
-                    user_id=user_id,
-                    job_id=job_id,
-                    cancel_event=cancel_event,
-                    on_trace=self._durable_trace_sink(
-                        notebook_id, job_id, user_id, cancel_event
-                    ),
-                )
+            evidence = self.ask_evidence(
+                notebook_id,
+                payload,
+                user_id=user_id,
+                job_id=job_id,
+                cancel_event=cancel_event,
+                on_trace=self._durable_trace_sink(
+                    notebook_id, job_id, user_id, cancel_event
+                ),
+            )
         except AskCancelled:
             self.finish_job(job_id, "cancelled")
             raise
@@ -1546,37 +1552,29 @@ class AskService:
     ) -> DetachedAskTurn:
         """The prior turns an evidence call may READ (never append to).
 
-        Ownership is ``conversation_user_history``'s predicate -- byte for
-        byte ``ensure_conversation``'s continuation check (this notebook, this
-        member) -- so a foreign or unknown id yields ``""`` and the turn
-        carries no history and no conversation id.  The full history (each
-        turn's ``conclusion``) is then projected from the same conversation
-        the way ``_conversation_histories`` projects it: the last five turns,
-        ``User: …\nAssistant: …``.  A conversation with no answered turn
-        contributes nothing, so its id is not echoed either.
+        Both reads are the answer path's own: ownership and the question-only
+        text come from ``conversation_user_history`` (``ensure_conversation``'s
+        continuation predicate -- this notebook, this member -- and byte for
+        byte ``_conversation_histories``' user projection); the full text comes
+        from ``conversation_history`` (``_conversation_histories``' full
+        projection over the raw answer JSON, the last five turns).  No
+        ``AskResponse`` is rebuilt, so an old payload that no longer validates
+        still contributes its turn exactly as it does when answering.  A
+        foreign or unknown id, or a conversation with no answered turn, gives
+        no history and no conversation id.
         """
         cid = str(conversation_id or "")
         if not cid:
             return DetachedAskTurn(conversation_id="")
-        if not self.ask_state.conversation_user_history(
+        user_history = self.ask_state.conversation_user_history(
             notebook_id, cid, user_id, 5
-        ).strip():
-            return DetachedAskTurn(conversation_id="")
-        try:
-            detail = self.ask_state.get_conversation(cid)
-        except (KeyError, ValueError):
-            return DetachedAskTurn(conversation_id="")
-        turns = list(detail.turns)[-5:]
-        if detail.notebook_id != notebook_id or not turns:
+        )
+        if not user_history.strip():
             return DetachedAskTurn(conversation_id="")
         return DetachedAskTurn(
             conversation_id=cid,
-            history="\n".join(
-                f"User: {turn.question}\n"
-                f"Assistant: {str(turn.response.conclusion or '').strip()}"
-                for turn in turns
-            ),
-            user_history="\n".join(f"User: {turn.question}" for turn in turns),
+            history=self.ask_state.conversation_history(None, cid, 5),
+            user_history=user_history,
         )
 
     def _durable_trace_sink(

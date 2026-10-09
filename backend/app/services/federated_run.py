@@ -124,7 +124,7 @@ class DetachedAskTurn:
     returns without writing.
 
     The second writer is the retrieval-only notebook Ask
-    (``AskService._ask_evidence_current``, ``output="evidence"``): it reads
+    (``AskService.ask_evidence``, ``output="evidence"``): it reads
     the caller's own conversation history (never appends to it) and hands it
     down the same way, so the engine neither creates nor leases a
     conversation, and nothing at the other end is saved.
@@ -300,7 +300,7 @@ def detached_ask_turn(turn: DetachedAskTurn) -> Iterator[None]:
     they own the run means whichever exits first restores a seat the other is
     still using.  There are exactly two writers by contract -- the manager in
     ``global_run`` and the retrieval-only notebook Ask
-    (``AskService._ask_evidence_current``) -- and neither runs inside the
+    (``AskService.ask_evidence``) -- and neither runs inside the
     other, so nesting is a wiring bug in every form.
 
     ⛔ ENTER AND EXIT IN THE SAME CONTEXT.  ``ContextVar.reset(token)`` raises

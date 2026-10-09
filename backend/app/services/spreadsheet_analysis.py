@@ -32,6 +32,11 @@ PLAN_OPERATIONS = frozenset({"profile", "aggregate", "top", "filter"})
 AGGREGATIONS = frozenset({"sum", "avg", "min", "max", "count"})
 FILTER_OPERATORS = frozenset({"eq", "ne", "gt", "gte", "lt", "lte", "contains"})
 SPREADSHEET_PLAN_MAX_FILTERS = 8
+# The ``definition`` every workbook result writes into its synthesis id_map
+# entry (and the ``quoted_span`` of its citation).  ``ask_evidence.kind_for_key``
+# reads it to tell a table result from external evidence: both live in the
+# k6001+ band, and a result's ``object_type`` is "element"/"source", not a kind.
+SPREADSHEET_RESULT_DEFINITION = "电子表格确定性分析结果"
 SPREADSHEET_PLAN_MAX_COLUMNS = 20
 _SPREADSHEET_CONTEXT_TERMS = (
     "excel", "workbook", "spreadsheet", "worksheet", "sheet", "table", "data",
@@ -1290,7 +1295,7 @@ class SpreadsheetAnalysisService:
             source_id=manifest["source_id"],
             element_id=element_id,
             location_label=f"{sheet['name']}!{sheet['range']}",
-            quoted_span="电子表格确定性分析结果",
+            quoted_span=SPREADSHEET_RESULT_DEFINITION,
             source_file_name=manifest.get("source_file_name", ""),
             tier=notebook_tiers.get(origin_notebook_id, "personal"),
             notebook_id=foreign_notebook_id(
@@ -1347,7 +1352,7 @@ def spreadsheet_prompt_block(
             "object_id": element_id or result.source_id,
             "object_type": "element" if element_id else "source",
             "name": f"{result.sheet}!{result.range}",
-            "definition": "电子表格确定性分析结果",
+            "definition": SPREADSHEET_RESULT_DEFINITION,
             "snippet": lines[-1],
             "source_id": result.source_id,
             "element_id": element_id,

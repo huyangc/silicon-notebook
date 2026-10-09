@@ -134,16 +134,38 @@ def _batched(values: Sequence[str], size: int = 400) -> Iterable[Sequence[str]]:
         yield values[start:start + size]
 
 
+def _has_column(reader: _Reader, table: str, column: str) -> bool:
+    """`table` 是否有 `column`(只读探测;两个后端各一条元数据查询)。"""
+    if reader.is_postgres:
+        return bool(reader.query(
+            "SELECT 1 AS present FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = ? "
+            "AND column_name = ?",
+            [table, column],
+        ))
+    return any(
+        row["name"] == column for row in reader.query(f"PRAGMA table_info({table})")
+    )
+
+
 def _fetch_jobs(reader: _Reader, notebooks: Sequence[str]) -> list[dict]:
     sql = (
         "SELECT id, notebook_id, mode, status, answer_id, client_request_id, "
         "CAST(created_at AS TEXT) AS created_at, "
         "CAST(trace_json AS TEXT) AS trace_json FROM ask_jobs"
     )
+    clauses: list[str] = []
     params: list[Any] = []
     if notebooks:
-        sql += f" WHERE notebook_id IN ({_in_clause(reader, notebooks)})"
+        clauses.append(f"notebook_id IN ({_in_clause(reader, notebooks)})")
         params = list(notebooks)
+    # 仅检索(`ask_notebook(output="evidence")`)的作业没有合成、没有答案:
+    # 它不是一次推理 run,导出它会把半截轨迹混进基线(与学习链路采样同一条
+    # `output = 'answer'` 排除)。还没迁到这一列的旧库里每一行都是回答,不加谓词。
+    if _has_column(reader, "ask_jobs", "output"):
+        clauses.append("output = 'answer'")
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
     return reader.query(sql + " ORDER BY id", params)
 
 

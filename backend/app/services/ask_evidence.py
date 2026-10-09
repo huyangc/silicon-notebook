@@ -17,6 +17,7 @@ from app.models.ask import (
     AskEvidenceItem,
     AskEvidenceKindCount,
 )
+from app.services.spreadsheet_analysis import SPREADSHEET_RESULT_DEFINITION
 
 # Key-number bands.  They mirror ``AskService._MIX_KG_KEY_BASE`` (1000),
 # ``_MEMORY_KEY_BASE`` (3000), ``_ELEMENT_KEY_BASE`` (4000),
@@ -31,8 +32,16 @@ _COLLECTION_BASE = 5000
 _EXTERNAL_BASE = 6000
 _DOCUMENT_READ_BASE = 7000
 
-# An object_type that names the kind outright wins over the number band.
-_OBJECT_TYPE_KINDS = frozenset({"chunk", "memory", "external", "element"})
+# Sectioned synthesis shifts every band by ``i * OUTLINE_SECTION_KEY_STRIDE``
+# (``outline_synthesis``); the band is read after removing that shift, exactly
+# as ``AskService._assemble_reasoning_context`` partitions its counts.
+_SECTION_KEY_STRIDE = 10000
+
+# object_types that only one producer ever writes: they name the kind outright,
+# whatever band the key is in.  ``"element"`` is NOT one of them: document
+# overview / ``read_document`` excerpts, collection-preview rows and workbook
+# results all write it too.
+_OBJECT_TYPE_KINDS = frozenset({"chunk", "memory", "external"})
 
 # A section heading ``_bounded_context_append`` / ``_append_memory_context``
 # put in front of the next block: it trails the previous key's segment.
@@ -43,28 +52,52 @@ MEMORY_KIND = "memory"
 
 
 def kind_for_key(key: str, id_map: Mapping[str, Mapping[str, Any]]) -> str:
-    object_type = str((id_map.get(key) or {}).get("object_type") or "")
+    """The evidence kind of ``key``, from the fields its producer wrote.
+
+    Producers and what they write (the rule follows them, not a guess):
+
+    * ``evidence_context`` chunk / memory / external evidence: ``object_type``
+      "chunk" / "memory" / "external" -- decisive in any band;
+    * KG objects (``render_subgraph_context``): their graph type ("claim",
+      "entity", ...) from k1001 in mix, or from k1 in a reasoning round with
+      no chunks -- typed, below the memory band;
+    * element blocks (k4001+), collection-preview rows (k5001+,
+      ``collection_enumeration_answer``: "element"/"source"/graph types),
+      ``read_document`` excerpts (k7001+, "element") -- the band decides,
+      because their ``object_type`` names the row, not the producer;
+    * workbook results (k6001+, ``spreadsheet_prompt_block``: "element" or
+      "source") share the band with external evidence and are told apart by
+      the ``definition`` they always write;
+    * a document overview in the chunk path numbers its elements from k1
+      ("element" below the KG band).
+    """
+    entry = id_map.get(key) or {}
+    object_type = str(entry.get("object_type") or "")
     if object_type in _OBJECT_TYPE_KINDS:
         return object_type
     match = re.fullmatch(r"k(\d+)", key)
     if match is None:
         return "context"
-    number = int(match.group(1))
-    if number >= _DOCUMENT_READ_BASE:
+    band = int(match.group(1)) % _SECTION_KEY_STRIDE
+    if band >= _DOCUMENT_READ_BASE:
         return "document_read"
-    if number >= _EXTERNAL_BASE:
+    if band >= _EXTERNAL_BASE:
+        if entry.get("definition") == SPREADSHEET_RESULT_DEFINITION:
+            return "spreadsheet"
         return "external"
-    if number >= _COLLECTION_BASE:
+    if band >= _COLLECTION_BASE:
         return "collection"
-    if number >= _ELEMENT_BASE:
+    if band >= _ELEMENT_BASE:
         return "element"
-    if number >= _MEMORY_BASE:
+    if band >= _MEMORY_BASE:
         return "memory"
-    # Below the KG band only a chunk-typed (or untyped) entry is a chunk: a
-    # reasoning round with no chunks numbers its KG objects from k1.
-    if number >= _KG_BASE or object_type:
+    if band >= _KG_BASE:
         return "kg"
-    return "chunk"
+    if object_type == "element":
+        return "element"
+    # Below the KG band only an untyped entry is a chunk: a reasoning round
+    # with no chunks numbers its KG objects from k1.
+    return "kg" if object_type else "chunk"
 
 
 def _strip_heading(text: str) -> str:
