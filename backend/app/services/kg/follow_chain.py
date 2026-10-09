@@ -30,6 +30,7 @@ from app.services.kg.edge_schema import (
 )
 # ``source_scope`` is a zero-``app``-import leaf, so this keeps the renderer as
 # import-light as ``citation_origin`` does and adds no cycle.
+from app.services.context_spans import entry_lines
 from app.services.source_scope import citation_active_id
 
 # Only relations with a well-understood transitive interpretation are enabled
@@ -635,7 +636,7 @@ def render_follow_chain_context(
                 + json.dumps(inference.validity_scope, ensure_ascii=False, sort_keys=True)
             )
 
-    return "\n".join(lines), id_map
+    return entry_lines(lines, empty=""), id_map
 
 
 __all__ = [

@@ -44,6 +44,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
+from app.services.context_spans import Glue, concat
 from app.services.document_source_overview import supplemental_excerpt_header
 
 
@@ -144,13 +145,14 @@ def document_read_prompt_block(
         # in exactly one place (see that function's docstring).
         header = supplemental_excerpt_header(key, title)
         note = str(getattr(outcome, "coverage_note", "") or "")
-        blocks.append(header + (f"{note}\n" if note else "") + context_block)
+        blocks.append(concat(
+            Glue(header), *((note, Glue("\n")) if note else ()), context_block))
         evidence_by_id.update(getattr(outcome, "id_map", {}) or {})
         citations.extend(getattr(outcome, "citations", ()) or ())
     if not blocks:
         return DocumentReadPreview()
     return DocumentReadPreview(
-        text=DOCUMENT_READ_GUIDANCE + "".join(blocks),
+        text=concat(DOCUMENT_READ_GUIDANCE, *blocks),
         evidence_by_id=evidence_by_id,
         citations=citations,
     )

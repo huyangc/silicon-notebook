@@ -1408,7 +1408,10 @@ knowhow 投影来源的 citation 也带与 anchor 相同的
 `document_read`）、该片段的原样 `text`，以及与回答
 `anchors` 相同的句柄字段（`object_id`、`object_type`、`label`、`source_title`、`location_label`、`source_id`、
 `element_id`、`tier`、`relevance`、`provenance`，适用时还有 `knowhow` / `memory_id` / `url`），由同一个锚点解析器
-产出，所以 `get_cited_element`、`get_memory`、`get_knowhow_row` 解析它们的方式与解析回答锚点完全一致。`counts` 为
+产出，所以 `get_cited_element`、`get_memory`、`get_knowhow_row` 解析它们的方式与解析回答锚点完全一致。条目按
+上下文装配时记录下来的边界切分，从不在拼好的文本里重新查找：原文里一行看起来像另一个键（`k2: …`）或以方括号行
+结尾，都仍属于它自己的条目；只省略装配器自己插入的分隔符与分节标题；无法归属到某个键的文本作为
+`kind="context"` 的条目原样返回，其中的键计入 `omitted`。`counts` 为
 `{recalled, selected, delivered, omitted, by_kind}`：各总数**不含 Memory**（Memory 只出现在 `by_kind` 里，其条数不会被
 算术泄漏），`delivered` 是实际装进合成预算的条数（`omitted` 为差值）。没有 `read` 档时，Memory 条目在截断前
 被剔除并从 `by_kind` 中删去，`delivered` 按剩余条目重算。特殊分支与回答模式一致：文档概览返回它自己准备的证据

@@ -23,6 +23,7 @@ from app.services.kg.edge_schema import (
 )
 # ``source_scope`` is a zero-``app``-import leaf, so this keeps the renderer as
 # import-light as ``citation_origin`` does and adds no cycle.
+from app.services.context_spans import entry_lines
 from app.services.source_scope import citation_active_id
 
 # Default reasoning edge types (well-populated: derived_from=4160, supports=6068,
@@ -419,7 +420,7 @@ def render_subgraph_context(
         lines.append("chain:")
         lines.extend(chain_lines)
 
-    return ("\n".join(lines) if lines else "(none)"), id_map
+    return entry_lines(lines), id_map
 
 
 # Prompt + schema for adversarial edge verification

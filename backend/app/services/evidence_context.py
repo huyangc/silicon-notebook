@@ -38,6 +38,7 @@ from app.services.retrieval import (
 from app.services.retrieval_participants import resolve_retrieval_participant_ids
 from app.services.retrieval_run import current_viewer_id
 from app.services.citation_markers import MARKER_RE, marker_keys
+from app.services.context_spans import clip, entry_lines
 from app.services.source_display import source_display_title
 from app.services.source_element_selection import deduplicate_source_chunks_in_order
 from app.services.source_scope import (
@@ -865,7 +866,7 @@ class EvidenceContextService:
             refs = self.knowhow_refs_for(single_element_keys.values())
             for key, element_id in single_element_keys.items():
                 evidence_by_id[key]["knowhow"] = refs.get(element_id)
-        return ("\n".join(lines) if lines else "(none)"), evidence_by_id
+        return entry_lines(lines), evidence_by_id
 
     def element_context(
         self,
@@ -942,7 +943,7 @@ class EvidenceContextService:
             )
             for value in evidence_by_id.values():
                 value["knowhow"] = refs.get(value["element_id"])
-        return ("\n".join(lines) if lines else "(none)"), evidence_by_id
+        return entry_lines(lines), evidence_by_id
 
     def external_context(
         self,
@@ -1067,7 +1068,7 @@ class EvidenceContextService:
         if truncation_sink is not None:
             truncation_sink["truncated"] = truncated
             truncation_sink["rejected"] = rejected
-        return ("\n".join(lines) if lines else "(none)"), evidence_by_id
+        return entry_lines(lines), evidence_by_id
 
     def external_citations(self, items: Sequence[Any]) -> list[Citation]:
         """Fallback-list rows for external evidence.
@@ -1453,7 +1454,7 @@ class EvidenceContextService:
                     relation_used += separator + len(item)
                 if rendered:
                     lines.append("relations: " + "; ".join(rendered))
-        return ("\n".join(lines) if lines else "(none)"), evidence_by_id
+        return entry_lines(lines), evidence_by_id
 
     def parse_anchors(
         self,
@@ -1966,4 +1967,7 @@ class EvidenceContextService:
                 break
             lines.append(line)
             used += tokens
-        return "\n".join(lines)
+        kept = "\n".join(lines)
+        # Whole lines from the front: the kept text is the block's prefix
+        # (``clip`` carries the block's recorded entries over to it).
+        return clip(block, len(kept)) if block.startswith(kept) else kept

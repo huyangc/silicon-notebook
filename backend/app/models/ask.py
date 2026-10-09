@@ -1060,8 +1060,10 @@ class AskEvidenceItem(BaseModel):
     # The "k12" key in the synthesis context; "" for an unkeyed block.
     key: str = ""
     kind: AskEvidenceKind
-    # The synthesis prompt's text for that key, verbatim (without the "kN: "
-    # prefix and the trailing section heading).
+    # The synthesis prompt's text for that key, verbatim, cut at the
+    # boundaries recorded while the context was assembled
+    # (``context_spans``): without the "kN: " prefix; only separators and
+    # section headings the assemblers themselves inserted are left out.
     text: str
     anchor: Optional[AnswerAnchor] = None
     relevance: Optional[float] = None

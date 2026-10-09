@@ -119,9 +119,10 @@ from app.services.federated_run import (
     current_detached_ask_turn,
     detached_ask_turn,
 )
-# A leaf (it imports only ``app.models.ask``): the retrieval-only output's
-# context splitter and anchor-sourced item builder.
+# Leaves: the retrieval-only output's context splitter and anchor-sourced item
+# builder, and the boundary recorder every context assembler writes through.
 from app.services.ask_evidence import _EvidenceAssemblyClient, build_ask_evidence
+from app.services.context_spans import Glue, clip, concat, recording_spans
 from app.services.evidence_context import anchor_image_targets
 from app.services.model_work import MalformedModelResponse, ModelNotConfiguredError
 
@@ -1318,7 +1319,9 @@ class AskService:
         it in this notebook (``_read_only_evidence_turn``), else none.  Called
         inside another detached turn it fails loudly (``detached_ask_turn``
         refuses nesting).  The job row and trace are the caller's
-        (``_ask_evidence_current``).
+        (``_ask_evidence_current``).  The whole run records where every
+        context entry and heading went (``context_spans.recording_spans``):
+        items are cut at those boundaries, never re-found in the text.
         """
         spec = self._resolve_ask_mode(getattr(payload, "mode", None))
         if spec.id not in EVIDENCE_OUTPUT_MODES:
@@ -1326,7 +1329,7 @@ class AskService:
         turn = self._read_only_evidence_turn(
             notebook_id, payload.conversation_id, user_id
         )
-        with detached_ask_turn(turn), self._engine_scope(
+        with detached_ask_turn(turn), recording_spans(), self._engine_scope(
             spec, notebook_id, payload, user_id=user_id, job_id=job_id,
             cancel_event=cancel_event, run=True,
         ):
@@ -2286,7 +2289,7 @@ class AskService:
             hits, id_offset=self._MEMORY_KEY_BASE
         )
         if block and block != "(none)":
-            context_block = f"{context_block}\n\n[Confirmed Memory]\n{block}"
+            context_block = concat(context_block, Glue("\n\n[Confirmed Memory]\n"), block)
         return context_block, {**id_map, **memory_map}
 
     @staticmethod
@@ -2309,7 +2312,7 @@ class AskService:
         remaining = max(0, int(budget_chars) - len(context_block))
         if remaining <= len(prefix):
             return context_block, id_map
-        rendered = (prefix + block)[:remaining]
+        rendered = clip(concat(Glue(prefix), block), remaining)
         if admission_sink is not None and len(prefix) + len(block) > remaining:
             admission_sink["ambiguous_truncations"] = int(
                 admission_sink.get("ambiguous_truncations") or 0
@@ -2318,7 +2321,7 @@ class AskService:
         for key, value in block_map.items():
             if re.search(rf"(?m)^{re.escape(str(key))}:", rendered):
                 merged[key] = value
-        return context_block + rendered, merged
+        return concat(context_block, rendered), merged
 
     def _append_external_context(
         self, context_block: str, id_map: dict, items, *, key_offset: int
@@ -3045,7 +3048,7 @@ class AskService:
             chunk_block, chunk_id_map = self._chunk_answer_context(
                 chunks, budget_chars=10**9, notebook_id=notebook_id)
             if kg_block and kg_block != "(none)":
-                context_block = f"{chunk_block}\n\n[Knowledge graph]\n{kg_block}"
+                context_block = concat(chunk_block, Glue("\n\n[Knowledge graph]\n"), kg_block)
             else:
                 context_block = chunk_block
             id_map = {**chunk_id_map, **kg_id_map}
@@ -3521,7 +3524,7 @@ class AskService:
         context_block = source_context
         if kg_context:
             context_block = (
-                f"{context_block}\n\n{kg_context}" if context_block else kg_context
+                concat(context_block, Glue("\n\n"), kg_context) if context_block else kg_context
             )
         id_map = {**source_map, **kg_map}
         total_context_budget = chunk_budget + kg_budget
@@ -3531,7 +3534,7 @@ class AskService:
                 question, context_block, refine_client, cancel_event,
                 budget_chars=total_context_budget,
             )
-        context_block = context_block[:total_context_budget]
+        context_block = clip(context_block, total_context_budget)
         # 外部证据段拼在最后,自带独立预算——理由见 ``_append_external_context``。
         # ``has_external`` 是 answer_prompt 那条规则唯一的闸:块真的进了上下文
         # 才追加规则句(设计文档 §九 不变量 9 的另一半在 reflect 侧)。
@@ -6246,7 +6249,7 @@ class AskService:
                 document_reads, roster_map=structured_map)
             if not preview.text:
                 return structured_block, False
-            combined = (f"{structured_block}\n\n{preview.text}"
+            combined = (concat(structured_block, Glue("\n\n"), preview.text)
                         if structured_block else preview.text)
             from app.services.collection_enumeration_answer import (
                 COLLECTION_MAP_BLOCK_MAX_CHARS,
@@ -6270,7 +6273,7 @@ class AskService:
             if room is not None and len(combined) > int(room):
                 # 只因原文段下限才放不下:整块不装,但给模型留一句固定说明
                 # (放得下时才写),免得它以为本轮没读过文档。
-                noted = (f"{structured_block}\n\n{DOCUMENT_READ_OMITTED_NOTICE}"
+                noted = (concat(structured_block, Glue("\n\n"), DOCUMENT_READ_OMITTED_NOTICE)
                          if structured_block else DOCUMENT_READ_OMITTED_NOTICE)
                 return (noted if len(noted) <= int(room) else structured_block), True
             citation_updates = {
@@ -6320,7 +6323,7 @@ class AskService:
             if spreadsheet_block:
                 structured_map.update(spreadsheet_map)
                 return (
-                    f"{structured_block}\n\n{spreadsheet_block}"
+                    concat(structured_block, Glue("\n\n"), spreadsheet_block)
                     if structured_block else spreadsheet_block
                 )
         except Exception as exc:  # noqa: BLE001 - cards survive prompt degradation
@@ -6545,7 +6548,7 @@ class AskService:
                     )
                     if preview.text:
                         structured_block = (
-                            f"{structured_block}\n\n{preview.text}"
+                            concat(structured_block, Glue("\n\n"), preview.text)
                             if structured_block else preview.text
                         )
                     else:

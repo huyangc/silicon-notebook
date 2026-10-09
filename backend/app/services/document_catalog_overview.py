@@ -14,6 +14,7 @@ from app.services.collection_enumeration_answer import (
     enumeration_prompt_block,
     typed_collection_results,
 )
+from app.services.context_spans import Glue, concat
 from app.services.reasoning_retrieval import CollectionEnumerationOutcome
 from app.services.source_scope import collection_ceiling_drifted, current_source_scope
 
@@ -131,7 +132,8 @@ def prepare_catalog_overview(
     note = catalog_coverage_note(result)
     raise_if_cancelled(cancel_event)
     return CatalogOverview(
-        context_block=wrapper + preview.text if preview.text else "",
+        context_block=(concat(_SUMMARY_GUIDANCE, Glue("\n\n"), preview.text)
+                       if preview.text else ""),
         id_map=preview.evidence_by_id,
         citations={item.item_id: citations[item.item_id]
                    for item in result.items if item.item_id in citations},
@@ -178,7 +180,8 @@ def supplement_missing_summaries(
         )
         remaining_elements -= element_share
         if original.context_block:
-            catalog.context_block += header + original.context_block
+            catalog.context_block = concat(
+                catalog.context_block, Glue(header), original.context_block)
             catalog.id_map.update(original.id_map)
             catalog.citations.update({c.element_id: c for c in original.citations})
         catalog.coverage_note += "\n目录中缺少摘要的文档：" + original.coverage_note

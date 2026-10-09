@@ -1874,7 +1874,11 @@ and a `read_document` excerpt is `document_read`), the verbatim `text` of that f
 `anchors` carry (`object_id`, `object_type`, `label`, `source_title`, `location_label`, `source_id`,
 `element_id`, `tier`, `relevance`, `provenance`, plus `knowhow` / `memory_id` / `url` when applicable),
 produced by the same anchor parser, so `get_cited_element`, `get_memory` and `get_knowhow_row` resolve
-them exactly as they resolve answer anchors. `counts` is `{recalled, selected, delivered, omitted,
+them exactly as they resolve answer anchors. Items are cut at the boundaries recorded while the context
+was assembled, never re-found in the finished text: a passage line that looks like another key (`k2: …`)
+or a passage ending in a bracketed line stays in its own item; only the separators and section headings
+the assemblers inserted are left out, and text that cannot be attributed to a key is returned verbatim as
+a `kind="context"` item with its keys counted as `omitted`. `counts` is `{recalled, selected, delivered, omitted,
 by_kind}`: the totals **exclude Memory** (Memory appears only under `by_kind`, so its count never leaks
 through arithmetic), and `delivered` is what actually fitted the synthesis budget (`omitted` is the
 difference). Without the `read` tier, Memory items are removed before truncation and from `by_kind`, and

@@ -23,6 +23,7 @@ from app.models.ask import (
 )
 from app.repositories.analysis_artifacts import AnalysisArtifactStore
 from app.services.cancellation import AskCancelled, raise_if_cancelled
+from app.services.context_spans import entry_lines
 from app.services.evidence_attestation import DEAD, attest_pointers
 from app.services.source_scope import citation_active_id
 
@@ -1317,6 +1318,7 @@ def spreadsheet_prompt_block(
     ``result_rows`` header and the rows shown never disagree with a cut.
     """
     lines: list[str] = []
+    starts: list[int] = []
     evidence: dict[str, dict[str, Any]] = {}
 
     def append_line(line: str) -> bool:
@@ -1340,6 +1342,7 @@ def spreadsheet_prompt_block(
             f"result_rows={result.coverage.total_rows}"
         ):
             break
+        starts.append(len(lines) - 1)  # the rows below belong to this key
         can_append_rows = not headers or append_line(" | ".join(headers))
         for row in result.rows[: max(1, preview_rows)]:
             if not can_append_rows or not append_line(
@@ -1373,4 +1376,4 @@ def spreadsheet_prompt_block(
             "relevance": 1.0,
             "knowhow": None,
         }
-    return "\n".join(lines), evidence
+    return entry_lines(lines, empty="", starts=starts), evidence

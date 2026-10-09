@@ -5,6 +5,7 @@ import re
 from dataclasses import replace
 from typing import Any
 
+from app.services.context_spans import entry_lines
 from app.services.evidence_attestation import DEAD, attest_pointers
 from app.services.retrieval import NeighborExpansion
 from app.services.source_scope import (
@@ -911,7 +912,7 @@ class _OverlayStructure:
         if chain:
             lines.append("chain:")
             lines.extend(chain)
-        return "\n".join(lines) if lines else "(none)"
+        return entry_lines(lines)
 
     @classmethod
     def parse(cls, kg_block: str, kg_id_map: dict) -> "_OverlayStructure | None":

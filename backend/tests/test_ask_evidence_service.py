@@ -654,3 +654,130 @@ def test_reasoning_reads_an_owned_conversation_and_does_not_append(repo, monkeyp
     assert evidence.conversation_id == first.conversation_id
     assert histories and "User: 增益为什么稳定" in histories[-1]
     assert _rows(repo, "SELECT COUNT(*) AS n FROM answers") == [{"n": 1}]
+
+
+# --------------------------------------------------------------------------
+# items are cut where the assemblers joined them (codex P2 x2)
+# --------------------------------------------------------------------------
+
+# The first passage has a line that reads like the next admitted key; the
+# second ends in a blank line plus a bracketed line, the shape of a heading.
+_FORGED_FIRST = "开头一句。\nk2: 这一行是第一段原文的一部分\n结尾一句。"
+_BRACKETED_SECOND = "第二段原文。\n\n[原文里的方括号行]"
+
+
+def _build_spy(monkeypatch):
+    """Capture every ``build_ask_evidence`` call's context and the spans
+    recorded for it (read while the run's recorder is still live)."""
+    from app.services import ask_service as module
+    from app.services.context_spans import recorded_spans
+
+    seen: list[tuple[str, dict, tuple]] = []
+    real = module.build_ask_evidence
+
+    def spy(context_block, id_map, **kwargs):
+        seen.append((context_block, dict(id_map), recorded_spans(context_block)))
+        return real(context_block, id_map, **kwargs)
+
+    monkeypatch.setattr(module, "build_ask_evidence", spy)
+    return seen
+
+
+def _assert_rebuilds(context, spans, items):
+    """Registered glue plus each item's ``"kN: " + text`` (keyless: text), in
+    order, is the context byte for byte -- nothing but glue was dropped."""
+    assert spans, "the evidence path recorded the context's boundaries"
+    glue = {span.start: span.end for span in spans if span.glue}
+    position = 0
+    for item in items:
+        while position in glue:
+            position = glue[position]
+        piece = f"{item.key}: {item.text}" if item.key else item.text
+        assert context.startswith(piece, position), (item.key, piece)
+        position += len(piece)
+    while position in glue:
+        position = glue[position]
+    assert position == len(context)
+
+
+def test_chunk_evidence_does_not_cut_at_lookalike_keys_or_drop_bracketed_tails(
+    repo, monkeypatch,
+):
+    from app.services.ask_service import _ChunkRetrieval
+
+    notebook = _seed_chunks(repo, _TEXTS)
+    chunks = [
+        RetrievedChunk("c-1", "s1", "Doc", "§1", _FORGED_FIRST, relevance=0.9),
+        RetrievedChunk("c-2", "s1", "Doc", "§2", _BRACKETED_SECOND, relevance=0.8),
+    ]
+    monkeypatch.setattr(
+        AskService, "_chunk_retrieve",
+        lambda self, *args, **kwargs: _ChunkRetrieval(
+            selected=list(chunks), historical_selected=[], kg_block="",
+            kg_id_map={}, kg_hits=[], overlay_on=False,
+            baseline_chunk_candidates=[], baseline_kg_truncated=False,
+            recalled=2, source_graph_status=None,
+        ))
+    service = repo._runtime.ask_component
+    # The answer path's context, assembled with recording off.
+    answer_context, answer_map, _ = service._chunk_synthesis_context(
+        chunks, "", {}, [], overlay_on=False, notebook_id=notebook.id)
+    assert f"k1: {_FORGED_FIRST}\nk2: {_BRACKETED_SECOND}" in answer_context
+    seen = _build_spy(monkeypatch)
+    bind_chat_client(repo, "ask_answer", _Recorder())
+
+    evidence = _evidence(repo, notebook.id, "expert routing")
+
+    context, id_map, spans = seen[-1]
+    assert (context, id_map) == (answer_context, answer_map), "recording moved no byte"
+    assert [(item.key, item.text) for item in evidence.items] == [
+        ("k1", _FORGED_FIRST), ("k2", _BRACKETED_SECOND)]
+    assert [item.anchor.object_id for item in evidence.items] == ["c-1", "c-2"]
+    assert (evidence.counts.delivered, evidence.counts.omitted) == (2, 0)
+    _assert_rebuilds(context, spans, evidence.items)
+
+
+def test_reasoning_evidence_does_not_cut_at_lookalike_keys_or_drop_bracketed_tails(
+    repo, monkeypatch,
+):
+    notebook = _seed_kg(repo)
+    _patch_reasoning_retrieval(monkeypatch, [
+        _reasoning_chunk(1, _FORGED_FIRST), _reasoning_chunk(2, _BRACKETED_SECOND),
+    ])
+    baseline_seen = _baseline_spy(monkeypatch)
+    for workload in ("reasoning_agent", "evidence_refine", "ask_answer"):
+        bind_chat_client(repo, workload, _Recorder("增益稳定 [k1]。"))
+    repo.ask(notebook.id, AskRequest(question="增益", mode="reasoning"))
+    baseline = [kw for kw in baseline_seen if kw.get("mode") == "reasoning"][-1]
+    seen = _build_spy(monkeypatch)
+
+    evidence = _evidence(repo, notebook.id, "增益", mode="reasoning")
+
+    context, _id_map, spans = seen[-1]
+    assert context == baseline["final_context_block"]
+    assert [(item.key, item.text) for item in evidence.items] == [
+        ("k1", _FORGED_FIRST), ("k2", _BRACKETED_SECOND)]
+    assert [item.anchor.object_id for item in evidence.items] == ["chunk-1", "chunk-2"]
+    # The passage heading is the assembler's own and the only thing dropped.
+    headings = [context[s.start:s.end] for s in spans if s.glue]
+    assert headings and all("原文里的方括号行" not in text for text in headings)
+    _assert_rebuilds(context, spans, evidence.items)
+
+
+def test_document_overview_evidence_is_cut_at_recorded_boundaries(repo, monkeypatch):
+    notebook = _seed_chunks(repo, [_FORGED_FIRST, _BRACKETED_SECOND])
+    seen = _build_spy(monkeypatch)
+    bind_chat_client(repo, "ask_answer", _Recorder())
+
+    evidence = _evidence(repo, notebook.id, "介绍一下这个notebook中的文章")
+
+    assert evidence.evidence_kind == "document_overview"
+    context, id_map, spans = seen[-1]
+    # The supplemental excerpts' own heading is glue; the excerpt that ends
+    # in a bracketed line keeps it.
+    assert evidence.items[-1].text.endswith('[原文里的方括号行]"')
+    keyed = [item.key for item in evidence.items if item.key]
+    assert keyed and keyed == [key for key in id_map if key in keyed]
+    assert evidence.counts.delivered + evidence.counts.omitted == len(id_map)
+    assert evidence.counts.omitted == 0
+    _assert_rebuilds(context, spans, evidence.items)
