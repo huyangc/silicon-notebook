@@ -69,8 +69,18 @@ beforeEach(() => {
   try { window.localStorage.clear(); } catch { /* 存储不可用时本来就不会持久化 */ }
 });
 
+const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+const originalExecCommand = Object.getOwnPropertyDescriptor(document, "execCommand");
+
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  // 用例改过的剪贴板/execCommand 要还原,否则测试顺序会影响结果。
+  if (originalClipboard) Object.defineProperty(navigator, "clipboard", originalClipboard);
+  else Reflect.deleteProperty(navigator, "clipboard");
+  if (originalExecCommand) Object.defineProperty(document, "execCommand", originalExecCommand);
+  else Reflect.deleteProperty(document, "execCommand");
 });
 
 test("已签发 token 可以回来修改权限,保存后行内确认并按整体替换提交", async () => {
@@ -451,7 +461,17 @@ test("笔记本超过 8 个才出现筛选框,全选只作用于当前可见项"
   expect(within(books).queryByRole("checkbox", { name: "材料5" })).not.toBeInTheDocument();
   await user.click(within(books).getByRole("button", { name: "全选" }));
   // 默认笔记本 + 3 个电路笔记本(默认笔记本若是电路0则重叠)。
-  expect(within(books).getByText(/已选 [34] \/ 10/)).toBeInTheDocument();
+  // 默认笔记本是 many[0](电路0),与可见的 3 个电路笔记本重叠 => 正好 3 个。
+  expect(within(books).getByText("已选 3 / 10")).toBeInTheDocument();
+  // 筛选下的取消全选只动可见项:先在筛选外勾一个材料笔记本,再取消。
+  await user.clear(filter);
+  await user.click(within(books).getByRole("checkbox", { name: "材料5" }));
+  await user.type(filter, "电路");
+  await user.click(within(books).getByRole("button", { name: "取消全选" }));
+  expect(within(books).getByText("已选 2 / 10")).toBeInTheDocument();
+  await user.clear(filter);
+  expect(within(books).getByRole("checkbox", { name: "材料5" })).toBeChecked();
+  await user.click(within(books).getByRole("checkbox", { name: "材料5" }));
   await user.clear(filter);
   expect(within(books).getByRole("checkbox", { name: "材料5" })).not.toBeChecked();
 });
@@ -513,7 +533,7 @@ test("复制 token 失败:错误落在该行;剪贴板不可用时在紧邻处�
   await user.click(within(row).getByRole("button", { name: "复制 token" }));
   expect(await within(row).findByRole("alert")).toHaveTextContent("无法再次复制");
 
-  await user.click(within(row).getByRole("button", { name: "复制 token" }));
+  await user.click(within(row).getByRole("button", { name: "复制失败" }));
   const manual = await within(row).findByRole("textbox", { name: "Claude Code 的明文 token" });
   expect(manual).toHaveValue("sk-secret-2");
   expect(within(row).getByText(/自动复制失败/)).toBeInTheDocument();
@@ -558,4 +578,142 @@ test("列表行显示状态、白名单笔记本名(超过 3 个折叠可展开)
   await user.click(screen.getByRole("checkbox", { name: "隐藏已撤销和已过期" }));
   expect(tokenRow("旧代理")).toHaveTextContent("已过期");
   setItem.mockRestore();
+});
+
+test("编辑器与签发表单同时挂载时,权限说明的 id 不冲突,编辑器里的说明也能读到", async () => {
+  routeRequests(baseRoutes({ "GET /agent-profiles": () => [{ ...profileOne, name: "档案甲" }] }));
+  const user = userEvent.setup();
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findByText("Claude Code", { selector: "strong" });
+  await user.click(within(tokenRow("Claude Code")).getByRole("button", { name: /修改权限/ }));
+  const editor = screen.getByRole("form", { name: "修改 Claude Code 的 token 权限" });
+
+  expect(within(editor).getByRole("checkbox", { name: "管理" })).toHaveAccessibleDescription(/仅对你拥有的笔记本生效/);
+  expect(within(editor).getByRole("checkbox", { name: "读取" })).toHaveAccessibleDescription(/读取笔记本里的资料/);
+  const ids = Array.from(document.querySelectorAll("[id]")).map((node) => node.id);
+  expect(new Set(ids).size).toBe(ids.length);
+});
+
+test("本地存储里的 hide-inactive=0 在挂载时就显示已撤销的行;getItem 抛错也照常工作", async () => {
+  routeRequests(baseRoutes());
+  window.localStorage.setItem("agent-access:hide-inactive", "0");
+  const first = render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findByText("Codex");
+  expect(screen.getByRole("checkbox", { name: "隐藏已撤销和已过期" })).not.toBeChecked();
+  first.unmount();
+
+  vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("blocked"); });
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findByText("Claude Code", { selector: "strong" });
+  expect(screen.getByRole("checkbox", { name: "隐藏已撤销和已过期" })).toBeChecked();
+  expect(screen.queryByText("Codex")).not.toBeInTheDocument();
+});
+
+test("刚撤销的行在隐藏已撤销时仍留着,并显示已撤销标签", async () => {
+  let revoked = false;
+  routeRequests(baseRoutes({
+    "GET /agent-tokens": () => [revoked ? { ...activeToken, revoked_at: "2026-09-03T00:00:00Z", copyable: false } : activeToken],
+    "DELETE /agent-tokens/token-1": () => { revoked = true; return {}; },
+  }));
+  const user = userEvent.setup();
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findByText("Claude Code");
+  await user.click(within(tokenRow("Claude Code")).getByRole("button", { name: "撤销" }));
+  await user.click(within(tokenRow("Claude Code")).getByRole("button", { name: "确认撤销" }));
+  await waitFor(() => expect(tokenRow("Claude Code")).toHaveTextContent("已撤销"));
+  expect(screen.getByRole("checkbox", { name: "隐藏已撤销和已过期" })).toBeChecked();
+});
+
+test("复制失败:按钮自身显示复制失败并按自己的计时器恢复", async () => {
+  routeRequests(baseRoutes({
+    "GET /agent-tokens/token-1/secret": () => { throw humanizedError("这个 token 签发于旧版本，无法再次复制，如需请重新签发", 409); },
+  }));
+  const user = userEvent.setup();
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findByText("Claude Code");
+  const row = tokenRow("Claude Code");
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  await user.click(within(row).getByRole("button", { name: "复制 token" }));
+  expect(await within(row).findByRole("button", { name: "复制失败" })).toBeInTheDocument();
+  expect(within(row).getByRole("alert")).toHaveTextContent("无法再次复制");
+  await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+  expect(within(row).queryByRole("button", { name: "复制失败" })).not.toBeInTheDocument();
+  expect(within(row).queryByRole("alert")).not.toBeInTheDocument();
+});
+
+test("连点复制只发一次请求", async () => {
+  let resolveSecret!: (value: unknown) => void;
+  routeRequests(baseRoutes({
+    "GET /agent-tokens/token-1/secret": () => new Promise((resolve) => { resolveSecret = resolve; }),
+  }));
+  const user = userEvent.setup();
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findByText("Claude Code");
+  const button = within(tokenRow("Claude Code")).getByRole("button", { name: "复制 token" });
+  await act(async () => { button.click(); button.click(); });
+  expect(requestsTo("GET /agent-tokens/token-1/secret")).toHaveLength(1);
+  await act(async () => { resolveSecret({ token: "sk-x" }); });
+  void user;
+});
+
+test("剪贴板不可用时明文可手动隐藏,并在 60 秒后自动收起", async () => {
+  routeRequests(baseRoutes({ "GET /agent-tokens/token-1/secret": () => ({ token: "sk-secret-3" }) }));
+  const user = userEvent.setup();
+  Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+  Object.defineProperty(document, "execCommand", { value: () => false, configurable: true });
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findByText("Claude Code");
+  const row = tokenRow("Claude Code");
+
+  await user.click(within(row).getByRole("button", { name: "复制 token" }));
+  expect(await within(row).findByRole("textbox", { name: "Claude Code 的明文 token" })).toHaveValue("sk-secret-3");
+  await user.click(within(row).getByRole("button", { name: "隐藏" }));
+  expect(within(row).queryByRole("textbox")).not.toBeInTheDocument();
+
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  await user.click(within(row).getByRole("button", { name: "复制 token" }));
+  expect(await within(row).findByRole("textbox")).toBeInTheDocument();
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_100); });
+  expect(within(row).queryByRole("textbox")).not.toBeInTheDocument();
+});
+
+test("安全上下文里点击同一同步栈就交给 clipboard.write,明文取回后写入", async () => {
+  class FakeItem { constructor(public data: Record<string, Promise<Blob>>) {} }
+  vi.stubGlobal("ClipboardItem", FakeItem);
+  const write = vi.fn(async (items: FakeItem[]) => { await items[0].data["text/plain"]; });
+  let resolveSecret!: (value: unknown) => void;
+  routeRequests(baseRoutes({
+    "GET /agent-tokens/token-1/secret": () => new Promise((resolve) => { resolveSecret = resolve; }),
+  }));
+  const user = userEvent.setup();
+  Object.defineProperty(navigator, "clipboard", { value: { write }, configurable: true });
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findByText("Claude Code");
+  const row = tokenRow("Claude Code");
+  await user.click(within(row).getByRole("button", { name: "复制 token" }));
+  // 明文还没回来,write 已经在点击里同步发起。
+  expect(write).toHaveBeenCalledTimes(1);
+  await act(async () => { resolveSecret({ token: "sk-secret-4" }); });
+  expect(await within(row).findByRole("button", { name: "已复制" })).toBeInTheDocument();
+});
+
+test("刷新后不丢掉第二页里已选中的 Profile", async () => {
+  const page1 = Array.from({ length: 25 }, (_, index) => ({ ...profileOne, id: `p1-${index}`, name: `档案${index}` }));
+  const later = { ...profileOne, id: "p2-0", name: "第二页档案" };
+  routeRequests(baseRoutes({
+    "GET /agent-profiles": (_options, path) => (pageOffset(path) === 0 ? page1 : [later]),
+    "POST /agent-profiles/p2-0/tokens": () => ({ ...activeToken, token: "sk-new" }),
+  }));
+  const user = userEvent.setup();
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findByRole("button", { name: "加载更多 Profile" });
+  await user.click(screen.getByRole("button", { name: "加载更多 Profile" }));
+  const select = within(issueForm()).getByRole("combobox", { name: "Profile" });
+  await user.selectOptions(select, "p2-0");
+  const issue = within(issueForm()).getByRole("button", { name: /签发 Token/ });
+  await waitFor(() => expect(issue).toBeEnabled());
+  await user.click(issue);
+  await screen.findByLabelText("新签发的明文 token");
+  await waitFor(() => expect(requestsTo("GET /agent-profiles").length).toBeGreaterThan(1 + 1));
+  expect(within(issueForm()).getByRole("combobox", { name: "Profile" })).toHaveValue("p2-0");
 });
