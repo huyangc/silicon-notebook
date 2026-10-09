@@ -142,6 +142,28 @@
   font-weight: 600;
 }
 
+.agent-access-group-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.agent-access-group-head .agent-access-count { margin-right: auto; color: #747d8c; font-size: 12px; }
+.agent-config-block .agent-access-group-head button { min-height: 28px; font-size: 11px; padding: 0 9px; }
+.agent-scope-row { display: grid; gap: 2px; }
+.agent-access-hint { margin-left: 24px; color: #747d8c; font-size: 11px; line-height: 1.5; }
+.agent-access-warn { color: #9a4e12; font-size: 12px; margin: 0; }
+strong.agent-access-warn { font-weight: 600; }
+.agent-expiry-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: -4px; }
+.agent-config-block .agent-expiry-presets button { min-height: 28px; font-size: 11px; padding: 0 10px; }
+.agent-config-block .agent-expiry-presets button.selected,
+.agent-config-block .agent-expiry-presets button[aria-pressed="true"] { border-color: var(--blue); background: #eaf0ff; color: #1b4fcb; font-weight: 600; }
+.agent-token-filter { margin: 2px 0; }
+.agent-token-status { margin-left: 6px; border-radius: 999px; padding: 1px 8px; background: #eef0f5; color: #6b7381; font-size: 11px; font-weight: 600; }
+.agent-token-status.active { background: #e6f5ec; color: #1d7a45; }
+.agent-token-status.expired { background: #fff1e0; color: #9a4e12; }
+.agent-token-status.revoked { background: #f1f1f4; color: #8a93a1; }
+.agent-token-list .agent-token-fold { min-height: 0; margin-left: 4px; border: 0; padding: 0; background: none; color: var(--blue); font-size: 11px; }
+.agent-token-list button.copied { border-color: #b7dcc5; color: var(--green); }
+.agent-token-list .agent-token-legacy { font-size: 11px; }
+.agent-token-manual { display: grid; gap: 4px; }
+.agent-token-manual input { width: 100%; min-height: 34px; border: 1px solid #cfd6e1; border-radius: 9px; padding: 0 10px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+
 .agent-token-confirm { color: #a52d2d; font-size: 12px; }
 
 .agent-token-editor { border-color: #cdd9f5; background: #f7f9ff; }
