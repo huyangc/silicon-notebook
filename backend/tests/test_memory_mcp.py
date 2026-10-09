@@ -794,6 +794,50 @@ async def test_a_retry_attaches_to_the_running_job_and_follows_it(mcp_env):
 
 
 @pytest.mark.anyio
+async def test_whitespace_spellings_of_one_key_share_the_waiter_cap(
+    mcp_env, monkeypatch,
+):
+    """``AskRequest`` strips the key, so "retry", " retry" and "retry " name
+    one job; they must also take one waiter slot. Two are admitted, the third
+    spelling is ``busy`` -- not a third waiter on the same job."""
+    from app.api.mcp_tools import ask as ask_module
+
+    entered = threading.Semaphore(0)
+    release = threading.Event()
+    keys: list = []
+
+    def holding(repo, principal, notebook_id, question, mode, conversation,
+                reply, client_request_id, stop, *rest):
+        keys.append(client_request_id)
+        entered.release()
+        assert release.wait(10)
+        return {"status": "answered"}
+
+    monkeypatch.setattr(ask_module, "_run_notebook", holding)
+    results: dict = {}
+    app = mcp_env["app"]
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(
+            app, mcp_env["token_a"].token, manage_lifespan=False
+        ) as client:
+            async def call(name, key):
+                results[name] = await client.call("ask", {
+                    "question": "q", "mode": "chunk", "client_request_id": key,
+                })
+
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(call, "first", "retry")
+                await anyio.to_thread.run_sync(entered.acquire)
+                tg.start_soon(call, "second", " retry")
+                await anyio.to_thread.run_sync(entered.acquire)
+                await call("third", "retry ")
+                release.set()
+    assert _error_code(results["third"]) == "busy"
+    assert not results["first"].isError and not results["second"].isError
+    assert keys == ["retry", "retry"], "the key reaches the run in one spelling"
+
+
+@pytest.mark.anyio
 async def test_a_raced_key_named_for_another_conversation_is_invalid_argument(
     mcp_env, monkeypatch,
 ):
