@@ -689,9 +689,7 @@ class MemoryService:
         reason = self._auth_row_failure(row, _utc_now())
         if reason:
             return None, reason
-        principal = self._principal_from_auth_row(token_id, row)
-        if principal is None:
-            return None, "token_invalid"
+        principal = self._principal_of(token_id, row)
         now = _utc_now()
         current = _parse_time(now)
         touch_before = (
@@ -727,6 +725,11 @@ class MemoryService:
     ) -> AgentPrincipal | None:
         if row is None or self._auth_row_failure(row, _utc_now()):
             return None
+        return self._principal_of(token_id, row)
+
+    @staticmethod
+    def _principal_of(token_id: str, row: Mapping[str, Any]) -> AgentPrincipal:
+        """The principal an auth row describes (no liveness check)."""
         return AgentPrincipal(
             profile_id=row["agent_profile_id"],
             profile_name=row["profile_name"],

@@ -103,7 +103,7 @@ def _arguments() -> argparse.Namespace:
         default="",
         help=(
             "Upload one local PDF/PPTX/DOCX/XLSX/Markdown/ZIP source through "
-            "add_source_file (requires sources:write)."
+            "add_source_file (requires the manage permission)."
         ),
     )
     parser.add_argument(
