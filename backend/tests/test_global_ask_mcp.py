@@ -192,7 +192,8 @@ def test_coverage_cursor_advances_when_only_the_longer_list_has_remaining_items(
 def adapter(monkeypatch):
     principal = SimpleNamespace(
         token_id="token-a", owner_id="owner-a", profile_name="Agent",
-        scopes=["ask:execute", "knowledge:read"], notebook_ids=["nb-a"],
+        # ``ask`` alone starts/reads/cancels a global answer (no ``read``).
+        scopes=["ask"], notebook_ids=["nb-a"],
     )
     repo = SimpleNamespace(refresh_agent_principal=lambda _: principal)
     service = SimpleNamespace()
@@ -236,7 +237,7 @@ async def test_start_without_selection_preserves_scope_and_passes_live_authority
     assert kwargs["authority_check"]() == ["nb-a"]
     principal.notebook_ids = ["nb-b"]
     assert kwargs["authority_check"]() == ["nb-b"]
-    principal.scopes = ["knowledge:read"]
+    principal.scopes = ["read"]
     with pytest.raises(PermissionError):
         kwargs["authority_check"]()
 
@@ -384,12 +385,22 @@ async def test_ask_global_reasoning_needs_clarification_creates_nothing(adapter)
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("name", ["ask_global", "get_global_ask", "cancel_global_ask"])
-async def test_answer_operations_require_both_scopes_before_service_access(adapter, name):
+async def test_answer_operations_require_the_ask_tier_before_service_access(adapter, name):
     handlers, principal, _, _ = adapter
-    principal.scopes = ["knowledge:read"]
+    principal.scopes = ["read"]
     arguments = {"question": "问题"} if name == "ask_global" else {"job_id": "job-a"}
-    with pytest.raises(PermissionError):
+    with pytest.raises(PermissionError, match="缺少「问答」权限"):
         await handlers[name](ctx=None, **arguments)
+
+
+@pytest.mark.anyio
+async def test_cited_element_reads_require_the_read_tier(adapter):
+    handlers, principal, _, _ = adapter
+    principal.scopes = ["ask"]
+    with pytest.raises(PermissionError, match="缺少「读取」权限"):
+        await handlers["get_global_cited_element"](
+            ctx=None, job_id="job-a", element_id="el-a"
+        )
 
 
 @pytest.mark.anyio
@@ -468,7 +479,7 @@ def test_large_cjk_answer_and_citations_are_resumable_without_skipped_identity()
 @pytest.mark.anyio
 async def test_citation_original_text_pages_and_knowledge_only_scope(adapter):
     handlers, principal, _, service = adapter
-    principal.scopes = ["knowledge:read"]
+    principal.scopes = ["read"]
     full_text = "原文😀\n" * 1700
     calls = []
 
@@ -635,7 +646,7 @@ async def test_a_flagged_citation_cannot_be_opened_and_a_clean_one_still_can(ada
     from app.services.global_ask import GlobalAskError
 
     handlers, principal, _, service = adapter
-    principal.scopes = ["knowledge:read"]
+    principal.scopes = ["read"]
     saved = _engine_job(check=_CHECK)
     calls, opened = [], []
 

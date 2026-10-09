@@ -311,10 +311,13 @@ def _mcp_reads(monkeypatch, principal, notebook_id, source_id, element_id):
 @pytest.mark.parametrize(
     ("user", "scopes", "refused"),
     [
-        ("alice", ["knowledge:read", "memory:read"], "src-e31-mem-bob"),
-        ("alice", ["knowledge:read", "memory:read"], "src-e31-mem-orphan"),
-        # Without memory:read even the token owner's own Memory is refused.
-        ("alice", ["knowledge:read"], "src-e31-mem-alice"),
+        ("alice", ["read"], "src-e31-mem-bob"),
+        ("alice", ["read"], "src-e31-mem-orphan"),
+        # A principal without the ``read`` tier (``memory:read`` belongs to
+        # it): even the token owner's own Memory is refused at the owner gate.
+        # The harness bypasses the tool's own ``read`` check on purpose, so
+        # this pins the Memory gate itself.
+        ("alice", ["ask"], "src-e31-mem-alice"),
     ],
 )
 def test_get_cited_element_refusal_runs_the_same_reads_as_a_missing_id(
@@ -373,13 +376,14 @@ def _token(seeded, user: str, scopes: list[str]) -> str:
 @pytest.mark.parametrize(
     ("user", "scopes", "readable"),
     [
-        # With memory:read: exactly one's own Memory, plus shared content.
-        ("alice", ["knowledge:read", "memory:read"],
+        # ``read`` (which covers memory:read): exactly one's own Memory, plus
+        # shared content. A token without ``read`` cannot call the tool at
+        # all; the Memory gate for such a principal is pinned by
+        # test_get_cited_element_refusal_runs_the_same_reads_as_a_missing_id.
+        ("alice", ["read"],
          {"src-e31-mem-alice", "src-e31-knowhow", "src-e31-doc"}),
-        ("bob", ["knowledge:read", "memory:read"],
+        ("bob", ["read"],
          {"src-e31-mem-bob", "src-e31-knowhow", "src-e31-doc"}),
-        # Without memory:read: not even the token owner's own Memory.
-        ("alice", ["knowledge:read"], {"src-e31-knowhow", "src-e31-doc"}),
     ],
 )
 async def test_get_cited_element_honours_memory_owner_and_memory_read(

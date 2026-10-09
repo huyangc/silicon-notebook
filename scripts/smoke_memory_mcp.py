@@ -121,13 +121,7 @@ async def run() -> None:
             )
         finally:
             reset_request_user(marker)
-        scopes = [
-            "knowledge:read",
-            "memory:read",
-            "memory:read_candidates",
-            "memory:propose",
-            "ask:execute",
-        ]
+        scopes = ["read", "ask", "contribute"]
         first_profile = service.create_agent_profile(owner.id, "smoke-a", "")
         second_profile = service.create_agent_profile(owner.id, "smoke-b", "")
         first = service.issue_agent_token(
