@@ -5522,11 +5522,18 @@ class SqliteMigrator:
             self.database.begin_immediate(db)
             self.add_column_if_missing(db, "agent_access_tokens", "token_plain", "TEXT")
             rows = db.execute(
-                "SELECT id, scopes_json FROM agent_access_tokens ORDER BY id"
+                "SELECT id, scopes_json, revoked_at FROM agent_access_tokens "
+                "ORDER BY id"
             ).fetchall()
             changed = 0
+            # Live tokens left without any tier: refused at run time until
+            # their owner re-grants one on /agents (docs/operations.md).
+            emptied = 0
             for row in rows:
-                tiers = json.dumps(_v89_tiers(row[1]), ensure_ascii=False)
+                granted = _v89_tiers(row[1])
+                if not granted and row[2] is None:
+                    emptied += 1
+                tiers = json.dumps(granted, ensure_ascii=False)
                 if tiers != row[1]:
                     db.execute(
                         "UPDATE agent_access_tokens SET scopes_json = ? WHERE id = ?",
@@ -5536,7 +5543,8 @@ class SqliteMigrator:
             db.execute("PRAGMA user_version = 89")
         # Content-free: counts only (docs/operations.md).
         logger.info(
-            "agent-token-tiers migration: tokens=%d rewritten=%d", len(rows), changed
+            "agent-token-tiers migration: tokens=%d rewritten=%d emptied=%d",
+            len(rows), changed, emptied,
         )
 
     def _seed(self) -> None:

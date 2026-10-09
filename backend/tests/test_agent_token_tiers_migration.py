@@ -80,10 +80,11 @@ def test_migration_logs_counts_only(repo, caplog):
         SqliteMigrator(database, repo.settings).migrate()
     lines = [r.getMessage() for r in caplog.records
              if "agent-token-tiers migration" in r.getMessage()]
-    # every seeded row changes (tk-empty's "[]" is already canonical)
+    # every seeded row changes (tk-empty's "[]" is already canonical);
+    # emptied counts the live rows that end with no tier
     assert lines == [
         f"agent-token-tiers migration: tokens={len(cases.TOKENS)} "
-        f"rewritten={len(cases.TOKENS) - 1}"
+        f"rewritten={len(cases.TOKENS) - 1} emptied={cases.EMPTIED_LIVE}"
     ]
 
 

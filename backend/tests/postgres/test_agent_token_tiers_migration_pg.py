@@ -50,7 +50,7 @@ def test_pg_reexecuting_the_frozen_sql_changes_nothing(postgres_database):
     after = _snapshot(postgres_database)
     with postgres_database.write() as db:
         body = MIGRATION.read_text(encoding="utf-8")
-        update = body[body.index("UPDATE agent_access_tokens"):]
+        update = body[body.index("UPDATE agent_access_tokens"):body.index("DO $tt$")]
         assert db.execute(update, prepare=False).rowcount == 0
         db.execute(body, prepare=False)
     assert _snapshot(postgres_database) == after
@@ -66,3 +66,19 @@ def test_pg_plaintext_column_is_nullable_c_collated_text(postgres_database):
         ).fetchone()
     assert (column["data_type"], column["is_nullable"], column["column_default"],
             column["collation_name"]) == ("text", "YES", None, "C")
+
+
+def test_pg_operator_check_counts_the_live_tokens_left_without_a_tier(
+    postgres_database,
+):
+    """The check query docs/operations.md gives operators (and the count the
+    migration's RAISE LOG summary reports) finds exactly the live tokens that
+    ended with no tier -- the SQLite twin logs the same number."""
+    _seed_at_68(postgres_database)
+    assert PostgresMigrator(postgres_database).migrate() == 69
+    with postgres_database.connect() as db:
+        count = db.execute(
+            "SELECT count(*) AS n FROM agent_access_tokens "
+            "WHERE scopes_json = '[]'::jsonb AND revoked_at IS NULL"
+        ).fetchone()["n"]
+    assert count == cases.EMPTIED_LIVE

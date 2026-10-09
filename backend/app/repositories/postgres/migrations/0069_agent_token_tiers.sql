@@ -21,6 +21,11 @@
 --    is refused at run time until its owner picks a tier. Values that are not
 --    a JSON array, and array items that are not strings, grant nothing.
 --
+-- A content-free summary goes to the PostgreSQL server log (RAISE LOG):
+-- tokens=<rows> emptied=<live rows left with no tier>. Those tokens are refused
+-- at run time until their owner re-grants a tier on /agents
+-- (docs/operations.md, "Agent token permission tiers").
+--
 -- Idempotent: tier names map to themselves, so a second run computes the
 -- same array and the WHERE clause skips every row. No index, FK or unique
 -- surface changes; agent_access_tokens is read by primary key only.
@@ -54,3 +59,16 @@ FROM (
 ) AS x
 WHERE x.id = t.id
   AND t.scopes_json IS DISTINCT FROM x.tiers;
+
+DO $tt$
+DECLARE
+  total bigint;
+  emptied bigint;
+BEGIN
+  SELECT count(*),
+         count(*) FILTER (WHERE scopes_json = '[]'::jsonb AND revoked_at IS NULL)
+    INTO total, emptied
+    FROM agent_access_tokens;
+  RAISE LOG 'agent-token-tiers migration: tokens=% emptied=%', total, emptied;
+END
+$tt$;

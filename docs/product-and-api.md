@@ -1721,13 +1721,15 @@ a token exists); only after the hash matched does the server name the reason —
 (revoked ones included) is rewritten to tiers by "holding a tier's main permission grants the
 whole tier": `knowledge:read` or `memory:read` → `read`, `ask:execute` → `ask`, `memory:propose` →
 `contribute`, `sources:write` or `maintenance:execute` → `manage`, `sources:delete` → `delete`, in
-that order; values that already are tiers are kept, so the migration can run again. Private
+that order; values that already are tiers are kept (normalised to that canonical order), so the
+migration can run again. Private
 Memory folds into `read`: a token that held only `knowledge:read` reads its owner's own Memory
 (candidates included) after the upgrade — an accepted, informed change. A token that held only
 secondary permissions (only `agent_profile:read` or `knowhow:code`, say) ends with no tier, is
 refused at run time, and must get at least one tier before an edit can be saved. The same
 migration adds the nullable `token_plain` column, NULL for existing rows: older tokens cannot be
-copied again.
+copied again. How to find the tokens left with no tier after an upgrade is in the
+[operations reference](./operations.md#agent-token-permission-tiers).
 
 `ask_notebook`'s `mode` parameter admits `"reasoning"` (the **default**; the same engine both web UI modes submit, which understands the question before retrieving, see below), `"chunk"`, or any registered,
 live-available deployment `ask.engine` mode id (see [Deployment Ask

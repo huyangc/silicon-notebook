@@ -45,6 +45,11 @@ TOKENS = {
     "tk-nonstring": ('[1, null, "knowledge:read"]', False, ["read"]),
 }
 EXPECTED = {token_id: tiers for token_id, (_, _, tiers) in TOKENS.items()}
+# Live (not revoked) tokens that end with no tier: the operator check counts these.
+EMPTIED_LIVE = sum(
+    1 for _, revoked, tiers in TOKENS.values() if not revoked and not tiers
+)
+assert EMPTIED_LIVE == 4  # tk-knowhow, tk-profile, tk-empty, tk-object
 
 
 def seed(db, *, postgres: bool) -> None:
