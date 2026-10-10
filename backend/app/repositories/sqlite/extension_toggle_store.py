@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from app.repositories.auth_store import AuthStore
+from app.repositories.identity_errors import AuthStoreError
 from app.repositories.sqlite.database import SqliteDatabase
 
 
@@ -34,8 +36,9 @@ class ExtensionToggleStore:
     不改变老部署行为的唯一原因:全新库、或从未有管理员碰过这张表的老库,
     ``extension_runtime_disabled_ids`` 恒为空集。"""
 
-    def __init__(self, database: SqliteDatabase) -> None:
+    def __init__(self, database: SqliteDatabase, auth: AuthStore) -> None:
         self.database = database
+        self.auth = auth
 
     def extension_runtime_disabled_ids(self) -> frozenset[str]:
         with self.database.connect() as db:
@@ -53,13 +56,19 @@ class ExtensionToggleStore:
         return [_row(row) for row in rows]
 
     def set_extension_runtime_enabled(
-        self, plugin_id: str, enabled: bool, actor_id: str
+        self, plugin_id: str, enabled: bool, actor_id: str,
+        *, require_sso_admin: bool = False,
     ) -> dict:
         """Upsert 该插件的运行时开关;授权在写事务内按 actor 现时角色复检
         (镜像 ``identity_store.set_user_role``:非 admin 或已停用 → ``PermissionError``,
         不写入),避免读到已被降权或停用的旧状态。行原地更新(``updated_at`` 前进),
         不会因为反复开关而堆出历史行——这张表只存「当前」状态,审计的是最近
         一次操作而非操作序列。
+
+        写事务就是认证全局锁(``BEGIN IMMEDIATE``,改角色/停用账号走的同一把)。
+        ``require_sso_admin`` 时(启用提供 ``auth.provider`` 的插件)在这个事务内
+        复查「有内置管理员以外的在用管理员」,没有就 ``AuthStoreError("no_sso_admin")``、
+        不写入——检查与写入之间不可能插进一次降级/停用。
 
         ``plugin_id`` 只做最小护栏——空串/纯空白直接拒绝。「必须在已装载的
         deployment 插件集合内」这条更强的校验留给路由层(它才知道 registry
@@ -69,11 +78,14 @@ class ExtensionToggleStore:
             raise ValueError("empty plugin_id")
         with self.database.write() as db:
             self.database.begin_immediate(db)
+            self.auth.lock(db)
             actor = db.execute(
                 "SELECT role, status FROM users WHERE id = ?", (actor_id,)
             ).fetchone()
             if actor is None or actor["role"] != "admin" or actor["status"] != "active":
                 raise PermissionError("admin role required")
+            if require_sso_admin and not self.auth.sso_admin_exists(db):
+                raise AuthStoreError("no_sso_admin")
             # 取时必须在 begin_immediate 之后:在锁外取时,一个先取时、后拿锁
             # 的请求会用更旧的时间戳盖掉更新的写,让 updated_at 倒退。
             now = _now()

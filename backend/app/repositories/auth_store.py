@@ -207,10 +207,16 @@ class AuthStore:
         """Whether an active administrator other than the built-in one exists:
         the built-in account cannot sign in through unified authentication."""
         with self.database.connect() as db:
-            return self._execute(
-                db, "SELECT 1 FROM users WHERE status='active' AND role='admin' AND id<>? LIMIT 1",
-                (_BUILTIN_USER_ID,),
-            ).fetchone() is not None
+            return self.sso_admin_exists(db)
+
+    def sso_admin_exists(self, db):
+        """``has_sso_admin`` on the caller's connection. A caller that must keep
+        the answer true until it commits (enabling the provider plugin) reads it
+        after ``lock(db)``: every role/status change takes that lock first."""
+        return self._execute(
+            db, "SELECT 1 FROM users WHERE status='active' AND role='admin' AND id<>? LIMIT 1",
+            (_BUILTIN_USER_ID,),
+        ).fetchone() is not None
 
     def _put_transaction(self, db, purpose, proof, payload, ttl_seconds):
         if ttl_seconds <= 0 or not proof:

@@ -499,7 +499,8 @@ class ExtensionToggleStorePort(Protocol):
     def list_extension_runtime_toggles(self) -> list[dict]: ...
 
     def set_extension_runtime_enabled(
-        self, plugin_id: str, enabled: bool, actor_id: str
+        self, plugin_id: str, enabled: bool, actor_id: str,
+        *, require_sso_admin: bool = False,
     ) -> dict: ...
 
 

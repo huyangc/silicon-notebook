@@ -31,10 +31,12 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from psycopg import errors
 
+from app.repositories.identity_errors import AuthStoreError
 from app.repositories.postgres.extension_toggle_store import (
     ACTOR_ADMIN_ROLE_LOCK_SQL,
     ExtensionToggleStore,
 )
+from app.repositories.postgres.identity_store import IdentityStore
 
 NOW = "2026-08-29T00:00:00+00:00"
 
@@ -61,7 +63,8 @@ def store(request) -> ExtensionToggleStore:
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(database).migrate() == 72
-    return ExtensionToggleStore(database)
+    identity = IdentityStore(database, request.getfixturevalue("postgres_settings"))
+    return ExtensionToggleStore(database, identity.auth)
 
 
 def test_no_rows_means_every_plugin_is_enabled(store):
@@ -257,3 +260,87 @@ def test_set_extension_runtime_enabled_holds_a_real_row_lock_on_the_actor(store)
         finally:
             allow_release.set()
         assert holder.result(timeout=15) == "released"
+
+
+def _seed_unified_auth_admins(database) -> None:
+    """The built-in administrator (who cannot sign in under unified auth) plus
+    two administrators who can."""
+    with database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
+            "username,password_hash,password_salt,password_iterations) "
+            "VALUES ('user-local','local@example.test','admin','admin','active',%s,%s,"
+            "'admin','','',0) "
+            "ON CONFLICT (id) DO UPDATE SET role='admin',status='active'",
+            (NOW, NOW),
+        )
+    _seed_user(database, user_id="user-sso-1", username="a00000011", role="admin")
+    _seed_user(database, user_id="user-sso-2", username="a00000012", role="admin")
+
+
+def _remove_admin(store, attribute: str, actor: str, target: str):
+    if attribute == "role":
+        return store.auth.identity.set_user_role(actor, target, "user")
+    return store.auth.set_account_status(target, "disabled", actor_id=actor)
+
+
+@pytest.mark.parametrize("attribute", ["role", "status"])
+def test_enabling_unified_auth_rechecks_the_sso_admin_inside_the_write(store, attribute):
+    """PG twin of the same-named SQLite test (codex #837 R3): with the last
+    administrator other than the built-in one demoted or disabled, enabling
+    with ``require_sso_admin`` is refused in the write transaction and writes
+    nothing; a plain toggle write is not gated."""
+    _seed_unified_auth_admins(store.database)
+    _remove_admin(store, attribute, "user-local", "user-sso-1")
+    _remove_admin(store, attribute, "user-local", "user-sso-2")
+
+    with pytest.raises(AuthStoreError, match="no_sso_admin"):
+        store.set_extension_runtime_enabled(
+            "auth-plugin", True, "user-local", require_sso_admin=True,
+        )
+    assert store.list_extension_runtime_toggles() == []
+    assert store.set_extension_runtime_enabled("auth-plugin", False, "user-local")["enabled"] is False
+
+    with store.database.write() as connection:
+        connection.execute("UPDATE users SET role='admin',status='active' WHERE id='user-sso-2'")
+    enabled = store.set_extension_runtime_enabled(
+        "auth-plugin", True, "user-local", require_sso_admin=True,
+    )
+    assert enabled["enabled"] is True
+
+
+@pytest.mark.parametrize("attribute", ["role", "status"])
+def test_enabling_unified_auth_serializes_with_admin_role_and_status_changes(
+    store, monkeypatch, attribute,
+):
+    """PG twin of the same-named SQLite test (codex #837 R3). The concurrent
+    demotion/disable is made by a different administrator than the enabling
+    actor, so the two share no row lock: only the authentication advisory lock
+    — taken by the toggle write and by every role/status change — can make it
+    wait until the enabling write commits. The pause stays under the fixture's
+    one-second lock_timeout."""
+    _seed_unified_auth_admins(store.database)
+    real_check = store.auth.sso_admin_exists
+    checked, release = threading.Event(), threading.Event()
+
+    def paused_check(db):
+        answer = real_check(db)
+        checked.set()
+        assert release.wait(timeout=10)
+        return answer
+
+    monkeypatch.setattr(store.auth, "sso_admin_exists", paused_check)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        enabling = executor.submit(
+            store.set_extension_runtime_enabled,
+            "auth-plugin", True, "user-local", require_sso_admin=True,
+        )
+        try:
+            assert checked.wait(timeout=10)
+            removal = executor.submit(_remove_admin, store, attribute, "user-sso-2", "user-sso-1")
+            with pytest.raises(TimeoutError):
+                removal.result(timeout=0.3)
+        finally:
+            release.set()
+        assert enabling.result(timeout=10)["enabled"] is True
+        removal.result(timeout=10)
