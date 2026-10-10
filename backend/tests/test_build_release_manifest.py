@@ -213,6 +213,15 @@ def test_header_tolerates_crlf_bom_blank_lines_colons_and_paired_quotes(repo, tm
     assert notes["h"]["body"] == "a\n---\nb"  # 正文里的 --- 不是文件头结束
 
 
+@pytest.mark.parametrize("raw,expected", [
+    ('"甲"', "甲"), ("'甲'", "甲"), ('"甲" 与 "乙"', '"甲" 与 "乙"'),
+    ("'甲' 与 '乙'", "'甲' 与 '乙'"), ('"甲\'', '"甲\''), ('甲"', '甲"'),
+])
+def test_title_quotes_are_stripped_only_when_they_wrap_the_whole_value(repo, tmp_path, raw, expected):
+    commit(repo, "c1", {"release-notes/t.md": note_file(title=raw)})
+    assert build(repo, tmp_path)["notes"][0]["title"] == expected
+
+
 @pytest.mark.parametrize("name", ["has space.md", "-lead.md", "中文.md"])
 def test_unsafe_note_id_fails_naming_the_file(repo, tmp_path, name):
     commit(repo, "c1", {f"release-notes/{name}": note_file("text")})
