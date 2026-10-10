@@ -2465,6 +2465,51 @@ def test_draft_section_reads_latex_backslashes_as_written(repo, monkeypatch):
     assert notes == []
 
 
+def test_draft_section_reads_a_duplicated_opening_as_the_object_written(
+    repo, monkeypatch
+):
+    # DeepSeek-V4-Flash, 2026-10-09: ``{"{"answer": ...}``; a section that
+    # opens twice drafts the object the model restarted.
+    body = "## 小节\n正文 [k1]。"
+    reply = json.dumps({"markdown": body, "grounded": True}, ensure_ascii=False)
+    out, attempts, notes, calls = _draft_with(repo, monkeypatch, ['{"' + reply])
+
+    assert calls == 1
+    assert out["markdown"] == body
+    assert attempts == [("success", "")]
+    assert notes == []
+
+
+def test_draft_section_repairs_a_missing_delimiter(repo, monkeypatch):
+    body = "## 小节\n" + "正文" * 1500 + " [k1]。"
+    reply = '{"markdown": ' + json.dumps(body, ensure_ascii=False) + ' "grounded": true,}'
+    out, attempts, notes, calls = _draft_with(repo, monkeypatch, [reply])
+
+    assert calls == 1
+    assert out["markdown"] == body
+    assert attempts == [("success", "")]
+    assert notes == []
+
+
+def test_draft_section_rejects_a_repair_that_would_drop_a_paragraph(
+    repo, monkeypatch
+):
+    # json-repair read ``"A" "B",`` as body ``A`` plus a key ``B","grounded``;
+    # the section must retry rather than draft only its first paragraph.
+    shortened = '{"markdown": "第一段 [k1]。" "第二段 [k2]。", "grounded": true}'
+    whole = json.dumps(
+        {"markdown": "第一段 [k1]。第二段 [k2]。", "grounded": True},
+        ensure_ascii=False,
+    )
+    out, attempts, notes, calls = _draft_with(
+        repo, monkeypatch, [shortened, whole],
+    )
+
+    assert calls == 2
+    assert out["markdown"] == "第一段 [k1]。第二段 [k2]。"
+    assert attempts == [("malformed", "string_changed"), ("success", "")]
+
+
 def test_draft_section_unparseable_reply_fails_as_malformed_not_empty(
     repo, monkeypatch
 ):
@@ -2475,10 +2520,12 @@ def test_draft_section_unparseable_reply_fails_as_malformed_not_empty(
 
     assert calls == 2
     assert out["markdown"] == "" and out.get("failed") is True
-    assert attempts == [("malformed", "invalid_json"), ("malformed", "invalid_json")]
+    # report_section is a repair workload: an object whose braces do not
+    # balance is refused before repair as ``incomplete_object``.
+    assert attempts == [("malformed", "incomplete_object")] * 2
     assert out["error"] == "模型返回的本节内容无法解析,已重试"
     assert "思维链" not in out["error"]
-    assert [getattr(note, "reason", "") for note in notes] == ["invalid_json"]
+    assert [getattr(note, "reason", "") for note in notes] == ["incomplete_object"]
 
 
 def test_draft_section_scheduler_rejection_keeps_its_reason_code(
@@ -2563,7 +2610,7 @@ def test_draft_section_parse_failure_notes_only_the_reason(repo, monkeypatch):
     )
 
     [noted] = notes
-    assert getattr(noted, "reason", "") == "invalid_json"
+    assert getattr(noted, "reason", "") == "incomplete_object"
     assert "PRIVATE-REPLY" not in str(noted)
     assert out["error"] == "模型返回的本节内容无法解析,已重试"
 

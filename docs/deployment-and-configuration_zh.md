@@ -1252,9 +1252,10 @@ Excel 专业分析由部署项 `SPREADSHEET_ANALYSIS_ENABLED` 总控；摄取护
 不新增模型绑定。`ANALYSIS_FAILURE_RETENTION_DAYS` 同时控制问题记录强读闸和隔离副本寿命。
 精确默认值与校验范围见[产品与 API 参考](./product-and-api_zh.md#excel-专业分析与解析问题自动归档)。
 
-`MODEL_JSON_REPAIR_MODE` 只作用于 `reasoning_agent` 与 `ask_answer`。`off` 保持严格拒绝，
+`MODEL_JSON_REPAIR_MODE` 只作用于 `reasoning_agent`、`ask_answer` 与深度报告的 workload
+（`report_outline`、`report_sufficiency`、`report_section`、`report_summary`）。`off` 保持严格拒绝，
 `shadow` 记录响应是否可安全修复但仍拒绝，`on` 接受保守修复（默认）。它不会补全被截断的
-输出，也不会放松 schema、类型或正文安全校验；修复事件不含业务内容，并用模型调用的安全
+输出，也不会放松 schema、类型或正文安全校验，修复只许恢复分隔符、不会丢弃挪动或编造文本；修复事件不含业务内容，并用模型调用的安全
 `support_id` 做关联。与这项配置无关，所有 chat workload 都接受「完整对象之后只跟着零散闭合
 标点」的回复（记为 `model_json_repair` 的 `status: "trimmed"`），并把不构成 JSON 转义的反斜杠
 （如 LaTeX 的 `50\%`）按写下的字符读（记为 `status: "escaped"`）；两者都不算修复。

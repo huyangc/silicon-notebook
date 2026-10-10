@@ -178,15 +178,16 @@ def _string_items(value: Any) -> list[str]:
     return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
-def _section_reply(raw: Any, schema_hint: str) -> dict:
+def _section_reply(raw: Any, schema_hint: str, *, allow_repair: bool) -> dict:
     """One section reply through the shared model-JSON boundary.
 
     The scheduled client already did this; doing it again here keeps a
     direct client (tests, a plugin runtime) on the same contract -- a
     complete object followed by a stray ``"}`` drafts instead of failing
-    ``json.loads`` with "Extra data" (2026-09-29).
+    ``json.loads`` with "Extra data" (2026-09-29), and a repair the scheduled
+    client would accept for ``report_section`` is accepted here too.
     """
-    parsed = parse_model_json_object(raw, schema_hint, allow_repair=False)
+    parsed = parse_model_json_object(raw, schema_hint, allow_repair=allow_repair)
     return json.loads(validate_model_json_shape(parsed.content, schema_hint).content)
 
 
@@ -2672,7 +2673,10 @@ class ReportEngine:
             attempt_status, attempt_reason = "error", ""
             failure_error: Optional[Exception] = None
             try:
-                data = _section_reply(ask_model(), schema_hint)
+                data = _section_reply(
+                    ask_model(), schema_hint,
+                    allow_repair=self.settings.model_json_repair_mode == "on",
+                )
                 markdown = _prose(data.get("markdown"))
                 llm_grounded = data.get("grounded", False) is True
                 raw_claims = data.get("claims")

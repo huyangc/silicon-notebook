@@ -811,3 +811,66 @@ def test_a_nested_leading_object_is_not_taken_as_the_reply():
     repaired = parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=True)
     assert repaired.duplicated_open is False
     assert json.loads(repaired.content)["answer"] == "a"
+
+
+OUTLINE_SCHEMA = '{"sections":[{"title":"","scope":"","sub_queries":[""]}]}'
+
+
+@pytest.mark.parametrize(
+    ("raw", "schema"),
+    [
+        # Two adjacent strings: json-repair kept only the first as the body
+        # and turned the second, with the field after it, into one key.
+        ('{"markdown":"正文 A 段" "正文 B 段","grounded":true}', SECTION_SCHEMA),
+        ('{"markdown":"第一段", "第二段" ,"grounded":true}', SECTION_SCHEMA),
+        ('{"markdown":"正文 [k1]。" "正文","grounded":true,}', SECTION_SCHEMA),
+        # A repeated key under repair kept only the last outline.
+        (
+            '{"sections":[{"title":"一","scope":"a"}],'
+            '"sections":[{"title":"二"}],}',
+            OUTLINE_SCHEMA,
+        ),
+        ('{answer: "a", answer: "b", grounded: true}', ANSWER_SCHEMA),
+    ],
+)
+def test_repair_rejects_text_that_moved_or_vanished(raw, schema):
+    with pytest.raises(ModelJsonRepairError) as caught:
+        parse_model_json_object(raw, schema, allow_repair=True)
+
+    assert caught.value.reason == "string_changed"
+
+
+@pytest.mark.parametrize(
+    ("raw", "schema", "expected"),
+    [
+        (
+            '{"markdown":"第一段\n第二段 50\\% [k1]。" "grounded":true,}',
+            SECTION_SCHEMA,
+            {"markdown": "第一段\n第二段 50\\% [k1]。", "grounded": True},
+        ),
+        (
+            "{'markdown':'他说\"好\" [k1]。','grounded':true}",
+            SECTION_SCHEMA,
+            {"markdown": '他说"好" [k1]。', "grounded": True},
+        ),
+        (
+            '{"sections":[{"title":"一","scope":"a" "sub_queries":["q1" "q2"]},'
+            '{"title":"二" "scope":"b"}]}',
+            OUTLINE_SCHEMA,
+            {"sections": [
+                {"title": "一", "scope": "a", "sub_queries": ["q1", "q2"]},
+                {"title": "二", "scope": "b"},
+            ]},
+        ),
+        (
+            '{answer: "x", grounded: true, score: 1.50, n: -2,}',
+            ANSWER_SCHEMA,
+            {"answer": "x", "grounded": True, "score": 1.5, "n": -2},
+        ),
+    ],
+)
+def test_repair_that_restores_delimiters_keeps_every_token(raw, schema, expected):
+    repaired = parse_model_json_object(raw, schema, allow_repair=True)
+
+    assert repaired.repaired is True
+    assert json.loads(repaired.content) == expected
