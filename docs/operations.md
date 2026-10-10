@@ -772,6 +772,10 @@ WantedBy=multi-user.target
   redacted poison record and stops progress. Do not delete or skip the event. Stop the
   worker, preserve both databases and `$WORK_DIR`, diagnose the source/target drift, and use
   a new reviewed recovery procedure/run rather than mutating control tables by hand.
+- A conflict on the `users` table's `lower(username)` expression unique index cannot be
+  parked and stops the shadow the same way; it comes from a case-only rename cycle in the
+  source (usernames that differ only by letter case trading places). Remove the cycle in the
+  source, then restart replication as a new reviewed run.
 - Retention runs best-effort in the worker. It deletes only old, FULL-verified prefixes while
   respecting active verifier barriers, replay checkpoints, poison positions, and a minimum
   seven-day/100,000-event tail. Before a first successful FULL verification it retains the
@@ -1257,7 +1261,10 @@ cadence" above for the chain-head rule and the two ways out this error offers).
 `--create-missing-users` creates a credential-less local user for
 every source `username` the target has no match for (§4 of the design doc); without it,
 references to an unmatched user fall back to each table's own rule (skip the row, null the
-column, or fail the whole notebook, depending on the column). `--verify-files` re-checks every
+column, or fail the whole notebook, depending on the column). A user it would create whose
+username differs from an existing target username only by ASCII letter case is refused before
+the import is claimed (a dry run too), pair by pair (`源 X ↔ 目标 Y`): rename one side first.
+`--verify-files` re-checks every
 copied file's sha256 during the import instead of trusting the package's `checksums.json` alone
 — slower, use it when the package traveled over an untrusted or lossy transport.
 `--resume` must be passed explicitly to continue an import that was interrupted partway (its
@@ -3286,7 +3293,7 @@ There is no authentication stage, migration state machine or retirement step. A 
 Start with the disabled [W3 example](../examples/extensions/w3-auth/README.md). Verify token/userinfo success and failure payloads, immutable subject/non-reassignment, callback registration, PKCE capability, CA trust, session expiry and offboarding responsibility against the real provider. Unit tests use fakes and do not establish real connectivity.
 
 1. Install the plugin, configure the public callback origins and the provider's environment references, and check that the provider usernames (employee numbers) are written the same way as the site `username` values they should match: matching is exact and case-sensitive.
-2. Before enabling, make sure at least one active administrator **other than the built-in one** can get in through external login: their username equals their employee number exactly (direct login), or they know their account's password and can link it on their first external login. The built-in administrator `admin` works only while the plugin is disabled; it cannot sign in under external authentication. The `/admin/extensions` switch prechecks before it enables a plugin that provides `auth.provider`: an unusable deployment configuration (anonymous access on, no callback origin, frontend and callback origins differing in scheme or host, production without https) or no such administrator refuses the switch (409) with the reason. The precheck can only confirm the administrator exists; confirming they can actually get in remains yours.
+2. Before enabling, make sure at least one active administrator **other than the built-in one** can get in through external login: their username equals their employee number exactly (direct login), or they know their account's password and can link it on their first external login. The built-in administrator `admin` works only while the plugin is disabled; it cannot sign in under external authentication. The `/admin/extensions` switch prechecks before it enables a plugin that provides `auth.provider`: an unusable deployment configuration (anonymous access on, no callback origin, frontend and callback origins differing in scheme or host, production without https) or no such administrator refuses the switch (409) with the reason. The same check runs at startup: a service whose deployment configuration enables such a plugin while no such administrator exists refuses to start (`no_sso_admin`, with the same reason), so disable the plugin, make an administrator and enable it again. The precheck can only confirm the administrator exists; confirming they can actually get in remains yours. Also ask the holders of accounts whose password is shared or known to others to change it before you enable: an account that has never signed in through external login can be linked by anyone who knows its password.
 3. Enable the plugin. The login page then shows only the external-login button; local login, registration and self-service password change are refused, and existing local sessions, **your own included**, stop working at once: sign in again through external login.
 4. Verify a direct login with a matching account, a link of an older account (username and password) and a new-account creation, then a second login of each.
 5. Rollback is disabling the plugin: the site returns to local login with its accounts and passwords as they were. While an administrator can still get in, switch it off on `/admin/extensions`. **When actually locked out** (no administrator can get in through external login) the admin switch is out of reach: set the plugin entry to `enabled = false` in the deployment configuration (the extensions file `EXTENSIONS_CONFIG` names) and restart, then sign in as the built-in administrator. Users created as new accounts by external login have no password, so they cannot log in locally until an administrator resets it.

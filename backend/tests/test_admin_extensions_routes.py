@@ -487,6 +487,15 @@ def _as_auth_provider_plugin(client: TestClient) -> None:
     client.app.state.extension_admin_projection = projection
 
 
+def test_admin_switch_lockout_check_keys_on_the_sdk_auth_point():
+    """The route keeps its own copy of the point id (the API layer does not
+    import the plugin SDK); a drift would silently skip the lockout pre-check."""
+    from app.api import admin_routes
+    from app.extension_sdk.auth import AUTH_PROVIDER_POINT
+
+    assert admin_routes._AUTH_PROVIDER_POINT == AUTH_PROVIDER_POINT
+
+
 def test_enabling_an_auth_provider_plugin_refuses_a_lockout(
     tmp_path, monkeypatch, frozen_runtime_reset
 ):

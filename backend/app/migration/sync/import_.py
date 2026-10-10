@@ -252,6 +252,7 @@ from app.migration.sync.identity import (
     UserMapping,
     UserProjection,
     build_user_mapping,
+    case_variant_collisions,
 )
 from app.migration.sync.manifest import (
     MappingKind,
@@ -2670,6 +2671,32 @@ def _assert_required_identities_resolve(
         "(docs/incremental-sync-design.md §3.2), so the import would abort "
         f"partway through. {problems}. Re-run with --create-missing-users, or "
         "create those users at the target first."
+    )
+
+
+def _refuse_case_variant_users(
+    mapping: UserMapping, target_users: Sequence[UserProjection]
+) -> None:
+    """Refuse, in the identity read snapshot and so before the import is
+    claimed (a dry run included), a package whose user creation would collide
+    on the target's lower(username) unique index.
+
+    Matching stays exact: ``A1`` in the package is NOT the target's ``a1``,
+    and folding them into one account would hand one person's content to
+    another. But creating ``A1`` beside ``a1`` is refused by the index after
+    the import has been claimed and its earlier writes made, so the pair is
+    named here and an operator renames one side."""
+    pairs = case_variant_collisions(mapping.unmatched, target_users)
+    if not pairs:
+        return
+    listed = "；".join(
+        f"源 {source} ↔ 目标 {target}，请在一侧改名" for source, target in pairs
+    )
+    raise SyncImportError(
+        "--create-missing-users cannot create these package users: each "
+        "differs from an existing target user only by letter case, which the "
+        "target's case-insensitive username index refuses (matching stays "
+        f"exact, docs/incremental-sync-design.md §4). {listed}"
     )
 
 
@@ -7053,12 +7080,13 @@ def _import(
             return _report(manifest, ledger, _EMPTY_MAPPING, already_applied=True)
         context.importer_user_id = _resolve_importer(backend, conn, importer_user_id)
         package_users = _package_users(package_dir)
+        target_users = _target_users(backend, conn)
         try:
-            mapping = build_user_mapping(
-                package_users, _target_users(backend, conn)
-            )
+            mapping = build_user_mapping(package_users, target_users)
         except ValueError as exc:
             raise SyncImportError(f"identity mapping is ambiguous: {exc}") from None
+        if create_missing_users:
+            _refuse_case_variant_users(mapping, target_users)
         groups, groups_to_create = _build_group_mapping(backend, conn, context)
         _assert_required_identities_resolve(
             context,
