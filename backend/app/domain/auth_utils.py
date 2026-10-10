@@ -23,6 +23,28 @@ def normalize_username(username: str) -> str:
     return (username or "").strip().lower()
 
 
+_ASCII_LOWER = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
+)
+
+
+def ascii_lower(value: str) -> str:
+    """Fold only A-Z to a-z, the way SQL ``lower(username)`` folds on every
+    backend: SQLite's built-in lower() and PostgreSQL's lower() over the
+    ``COLLATE "C"`` username column both leave non-ASCII letters alone.
+    Deliberately not ``str.lower()``: a value compared with
+    ``lower(username)`` (or predicting a collision on the
+    ``lower(username)`` unique index) must fold exactly as the database does,
+    or an administrator-chosen name such as ``Ä123`` could never be found by
+    its exact spelling."""
+    return value.translate(_ASCII_LOWER)
+
+
+def username_lookup_key(username: str) -> str:
+    """The key to compare with SQL ``lower(username)``: trimmed, ASCII-folded."""
+    return ascii_lower((username or "").strip())
+
+
 def is_valid_username(username: str) -> bool:
     return bool(USERNAME_RE.match((username or "").strip()))
 

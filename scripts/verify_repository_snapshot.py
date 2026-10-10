@@ -1695,6 +1695,17 @@ def compare_snapshots(
             for problem in queue_problems:
                 note(name, problem)
             continue
+        if (
+            name == "auth_transactions"
+            and pre.user_version < 92 <= post.user_version
+        ):
+            # _migration_92 discards every pending auth transaction (they
+            # expire within minutes), so across v92 the table must come out
+            # EMPTY -- any surviving row still fails, only the discard is
+            # admitted. Its schema is unchanged and checked above.
+            if post_table.row_count:
+                note(name, "migration-v92-auth-transactions-not-empty")
+            continue
         if name in SPECIAL_TABLES:
             problems: List[str] = []
             pre_special_rows = {

@@ -109,6 +109,72 @@ def test_v92_drop_outside_the_allowlist_still_fails(tmp_path):
     assert "external_identities" in result.changed_tables
 
 
+def _v91_with_pending_auth_transaction(module, tmp_path):
+    """The committed fixture rolled back to v91, holding one pending auth
+    transaction as a backup taken mid-sign-in would."""
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    rollback = sqlite3.connect(database)
+    with rollback:
+        rollback_v92(rollback)
+        rollback.execute(
+            "INSERT INTO auth_transactions"
+            "(token_digest,purpose,browser_digest,payload,expires_at) "
+            "VALUES ('digest-pending','choice','browser-digest','{}',4102444800)"
+        )
+        rollback.execute("PRAGMA user_version = 91")
+    rollback.close()
+    return database, storage
+
+
+def test_v92_discarding_pending_auth_transactions_verifies(tmp_path):
+    """_migration_92 deletes every pending auth transaction on purpose; across
+    v92 an emptied auth_transactions is the expected outcome, not a
+    row-count change."""
+    module = _load_verifier()
+    database, storage = _v91_with_pending_auth_transaction(module, tmp_path)
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 91
+    assert result.changed_tables == []
+
+
+def test_v92_auth_transactions_that_survive_the_upgrade_still_fail(
+    tmp_path, monkeypatch
+):
+    """The exemption admits only the discard: a row left in auth_transactions
+    after crossing v92 fails closed."""
+    from app.repositories.sqlite import migrations
+
+    module = _load_verifier()
+    database, storage = _v91_with_pending_auth_transaction(module, tmp_path)
+    original = migrations.SqliteMigrator._migration_92
+
+    def keep_a_row(self):
+        original(self)
+        with self.database.write() as db:
+            db.execute(
+                "INSERT INTO auth_transactions"
+                "(token_digest,purpose,browser_digest,payload,expires_at) "
+                "VALUES ('digest-kept','choice','browser-digest','{}',4102444800)"
+            )
+
+    monkeypatch.setattr(migrations.SqliteMigrator, "_migration_92", keep_a_row)
+    result = module.verify_snapshot(database, storage)
+
+    assert not result.ok
+    assert result.changed_tables == ["auth_transactions"]
+    assert any(
+        "migration-v92-auth-transactions-not-empty" in item
+        for item in result.discrepancies
+    ), result.discrepancies
+
+
 def _rollback_v91(db: sqlite3.Connection) -> None:
     """Undo _migration_91 (the MCP ``ask`` clarification handles, parity with
     PostgreSQL 0071_ask_intent_handles.sql): one table and its index, plus

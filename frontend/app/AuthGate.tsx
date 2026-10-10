@@ -99,7 +99,7 @@ function LocalLoginGate({ capabilities, onAuthenticated }: AuthGateProps) {
             <button type="button" className={mode === "register" ? "active" : ""} disabled={busy} onClick={() => { setMode("register"); setError(""); }}>注册</button>
           </div>}
           <label className="auth-label">用户名
-            <input className="auth-input" value={username} autoFocus disabled={busy} onChange={(event) => setUsername(event.target.value.toLowerCase())} placeholder="a12345678" />
+            <input className="auth-input" value={username} autoFocus disabled={busy} onChange={(event) => setUsername(mode === "register" ? event.target.value.toLowerCase() : event.target.value)} placeholder="a12345678" />
           </label>
           {mode === "register" && usernameHint && <div className="auth-hint">{usernameHint}</div>}
           <label className="auth-label">密码

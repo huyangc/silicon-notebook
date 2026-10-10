@@ -503,6 +503,27 @@ class AuthStoreContract:
         assert complete(identity, "W0012345")["user"].id == user.id
         assert other.id != user.id
 
+    def test_a_non_ascii_name_is_found_by_its_exact_spelling(self, identity):
+        # SQL lower(username) folds only A-Z on both backends (SQLite's
+        # lower(), PostgreSQL's over the COLLATE "C" column), so every value
+        # compared with it folds only A-Z too: "Ä" is never "ä".
+        user, _ = identity.register_user_with_session("a12345678", "pw")
+        other, _ = identity.register_user_with_session("b12345678", "pw")
+        identity.auth.set_username(user.id, "ÄB123", actor_id="user-local")
+        assert identity.login_with_password("ÄB123", "pw")[0].id == user.id
+        assert identity.login_with_password("Äb123", "pw")[0].id == user.id
+        assert identity.login_with_password("äb123", "pw") is None
+        with pytest.raises(AuthStoreError, match="username_conflict"):
+            identity.auth.set_username(other.id, "Äb123", actor_id="user-local")
+        sso_on(identity)
+        with pytest.raises(AuthStoreError, match="username_case_conflict"):
+            identity.auth.create(choice(identity, "Äb123", subject="employee-9"), PROOF, session_seconds=600)
+        pending = choice(identity, "W0012345", subject="employee-7")
+        with pytest.raises(AuthStoreError, match="link_verification_failed"):
+            identity.auth.link(pending, PROOF, "äb123", "pw", session_seconds=600)
+        linked, _ = identity.auth.link(pending, PROOF, "ÄB123", "pw", session_seconds=600)
+        assert (linked.id, linked.username) == (user.id, "W0012345")
+
     @pytest.mark.parametrize("operation", ["status", "username"])
     def test_account_controls_require_an_active_admin_and_spare_self_and_builtin(self, identity, operation):
         actor, _ = identity.register_user_with_session("a12345678", "pw")

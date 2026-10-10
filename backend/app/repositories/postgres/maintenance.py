@@ -16,6 +16,7 @@ from app.repositories.postgres._store_utils import (
     normalize_timestamp,
     sqlite_compatible_row,
 )
+from app.domain.auth_utils import ascii_lower
 from app.domain.image_backfill import ImageBackfillConcurrentChange
 from app.repositories.chunk_elements import (
     decode_element_ids,
@@ -200,8 +201,8 @@ class PostgresMaintenanceAdapter:
                 if not owner:
                     return None
                 candidates = db.execute(
-                    "SELECT * FROM users WHERE lower(username)=lower(%s)",
-                    (owner,),
+                    "SELECT * FROM users WHERE lower(username)=%s",
+                    (ascii_lower(owner),),
                 ).fetchall()
                 if len(candidates) != 1:
                     return None

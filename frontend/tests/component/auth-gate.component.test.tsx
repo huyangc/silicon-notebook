@@ -84,3 +84,26 @@ test("local sign-in stores the token and enters the workspace", async () => {
   await waitFor(() => expect(onAuthenticated).toHaveBeenCalledWith(expect.objectContaining({ id: "u1" })));
   expect(getToken()).toBe("local-token");
 });
+
+test("local sign-in submits the username exactly as typed, letter case included", async () => {
+  // The server folds only A-Z (as SQL lower(username) does); a browser-side
+  // toLowerCase would turn an administrator-chosen "Ä123" into "ä123".
+  const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ token: "local-token", user }));
+  vi.stubGlobal("fetch", fetch);
+  const actor = userEvent.setup();
+  render(<AuthGate capabilities={capabilities()} onAuthenticated={() => undefined} />);
+
+  await actor.type(screen.getByLabelText("用户名"), "Ä123");
+  await actor.type(screen.getByLabelText("密码"), "pw");
+  await actor.click(screen.getByRole("button", { name: "本地登录" }));
+  await waitFor(() => expect(fetch).toHaveBeenCalled());
+  expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toMatchObject({ username: "Ä123" });
+});
+
+test("registration still lowercases what is typed", async () => {
+  render(<AuthGate capabilities={capabilities()} onAuthenticated={() => undefined} />);
+  const actor = userEvent.setup();
+  await actor.click(screen.getByRole("button", { name: "注册" }));
+  await actor.type(screen.getByLabelText("用户名"), "A12345678");
+  expect(screen.getByLabelText("用户名")).toHaveValue("a12345678");
+});
