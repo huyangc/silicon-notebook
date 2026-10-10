@@ -8,7 +8,7 @@ import {
   type ReleaseNotesBuild,
 } from "./release-notes-api.ts";
 
-export type ReleaseNotesNotice = { build: ReleaseNotesBuild; notes: ReleaseNote[] };
+export type ReleaseNotesNotice = { build: ReleaseNotesBuild; notes: ReleaseNote[]; moreCount: number };
 
 /**
  * 登录后每个用户 id、每次页面加载只向服务端问一次「有没有该看的更新说明」。
@@ -31,7 +31,7 @@ export function useReleaseNotes(userId: string | null, authChecked: boolean) {
         if (cancelled) return;
         askedRef.current.add(userId);
         if (response.available && response.build && response.notes.length > 0) {
-          setNotice({ build: response.build, notes: response.notes });
+          setNotice({ build: response.build, notes: response.notes, moreCount: response.more_count ?? 0 });
         }
       })
       .catch(() => {

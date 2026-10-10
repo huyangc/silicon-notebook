@@ -148,6 +148,7 @@ test("系统更新弹窗在 page 接线:hook 取数、槽位按 notice 打开、
   assert.deepEqual(modals[0].bindings, {
     build: "releaseNotes.notice.build",
     notes: "releaseNotes.notice.notes",
+    moreCount: "releaseNotes.notice.moreCount",
     onClose: '() => rootModals.requestClose("release-notes", "button")',
     interactive: 'rootModals.view("release-notes").topmost',
     zIndex: 'rootModals.view("release-notes").zIndex',

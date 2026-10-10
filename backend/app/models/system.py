@@ -106,21 +106,37 @@ class ReleaseNotesBuild(BaseModel):
 
 
 class ReleaseNoteItem(BaseModel):
-    """One user-facing update note (markdown body written by hand)."""
+    """One user-facing update note: header (level/audience/title) + optional markdown body."""
 
     model_config = ConfigDict(extra="forbid")
 
     id: str
     ordinal: int
+    level: Literal["feature", "change", "fix", "internal"]
+    audience: Literal["all", "admin"]
+    title: str
     body: str
 
 
 class ReleaseNotesResponse(BaseModel):
-    """Notes this user has not seen yet, newest first.
+    """Headline notes (at most 5) this user has not seen yet.
 
-    ``available=false`` means the deployment carries no usable manifest; the
-    client then shows nothing (and nothing was recorded for the user).
+    ``notes`` only carries the headline levels; ``more_count`` counts the pending
+    fixes plus headline notes beyond the cap. ``available=false`` means the
+    deployment carries no usable manifest; the client then shows nothing (and
+    nothing was recorded for the user).
     """
+
+    model_config = ConfigDict(extra="forbid")
+
+    available: bool
+    build: ReleaseNotesBuild | None
+    notes: list[ReleaseNoteItem]
+    more_count: int
+
+
+class ReleaseNotesHistoryResponse(BaseModel):
+    """Every note visible to this user up to the running build, newest first."""
 
     model_config = ConfigDict(extra="forbid")
 

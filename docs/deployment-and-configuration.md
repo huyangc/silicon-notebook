@@ -253,7 +253,7 @@ Before launching the backend, `npm run start` regenerates `release-manifest.json
 root with the same `scripts/build_release_manifest.py` that `pack.sh` uses, so a
 `git pull` + `npm run start` deployment gets the in-app "system updated" notice. It needs the
 checkout to be a **full (non-shallow) clone** of `master`; the version string is HEAD's commit
-date plus short sha. Unlike packing, a failure here (shallow clone, empty or badly named note,
+date plus short sha. Unlike packing, a failure here (shallow clone, a note with an invalid front matter or a bad name,
 no git, or a checkout that is not a repository root) only warns and deletes any old manifest —
 the services still start, just without update notices.
 
@@ -499,7 +499,7 @@ target. Because the build host and target share OS/arch, every bundled binary ru
 `pack.sh` also writes `release-manifest.json` at the bundle root (via
 `scripts/build_release_manifest.py`): the build's mainline ordinal plus every
 `release-notes/*.md`, which drives the in-app "system updated" notice. It needs the **full
-(non-shallow) git history** — a shallow clone, an empty note or an invalid note file name
+(non-shallow) git history** — a shallow clone, a note with a missing or invalid front matter or an invalid note file name
 fails the pack. Ordinals assume master's first-parent lineage, so **build production
 packages from `master`**; a branch build may skip notes. Without git (or when the source tree is not itself a repository root) the pack warns
 loudly, writes no manifest, and that bundle shows no update notices.

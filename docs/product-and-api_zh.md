@@ -2965,14 +2965,16 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 ## 系统更新通知
 
-升级之后，每个登录用户会在一次性的「系统已更新」弹窗里看到自己还没看过的、手写的更新说明。每个用户可感知的改动都可以附带一个 `release-notes/<slug>.md`（中文，一两句话）；文件名即说明的 id，所以改文件名等于新说明。`scripts/build_release_manifest.py`（离线打包时由 `scripts/pack.sh` 调用，在 git 检出上由 `npm run start` 调用）在包根目录或仓库根目录写出 `release-manifest.json`：当前构建的版本与序号，加上每条说明及其正文。
+升级之后，每个登录用户会在一次性的「系统已更新」弹窗里看到自己还没看过的重点更新说明。用户需要知道的改动附带一个 `release-notes/<slug>.md`，文件头声明 `level`（`change`、`feature`、`fix` 或 `internal`）、`audience`（`all` 或 `admin`）和一行中文 `title`，其后是可选的简短正文；文件名即说明的 id，所以改文件名等于新说明。`scripts/build_release_manifest.py`（离线打包时由 `scripts/pack.sh` 调用，在 git 检出上由 `npm run start` 调用）在包根目录或仓库根目录写出 `release-manifest.json`（`schema` 2）：当前构建的版本与序号，加上每条说明的级别、受众、标题与正文。文件头缺失或不合法会让清单生成失败。
+
+受众为 `all`，或为 `admin` 且用户是系统管理员时，说明对该用户可见。弹窗只列待看且可见的 `change` 与 `feature` 两级说明——`change` 在前，同级新的在前——最多五条，每条显示标题，正文点开才展开。待看的 `fix` 说明和第五条之后的重点说明计入 `more_count`，汇总成「另有 N 项修复与改进」，并链到「更新记录」页（`/updates`，账号菜单里也有入口）；`internal` 不计数。没有待看的重点说明时不弹窗、也不推进基线，这些修复会在下次有重点说明时一起计数。「更新记录」页列出到当前构建为止所有可见说明，新的在前；`internal` 默认隐藏，勾选「显示后台改进」后显示。
 
 版本用**主线序号**比较，而不是全局的「上一个线上版本」：序号是某个提交的 `git rev-list --count --first-parent`，一条说明的序号是把它的文件加进来的那个 first-parent 提交的序号。master 以 rebase 合入，序号只增不减。每个用户只存一个整数 `users.seen_release_ordinal`（SQLite v86 / PostgreSQL 0066；`NULL` = 从未记录，不回填），待看说明恰好是 `seen < note.ordinal <= build.ordinal` 的那些。所以基准是**按用户**的——该用户上次看到的版本——跳过了好几个版本的用户会一次看到全部说明，最新在前。
 
 - **新用户静默。** 基线为 `NULL` 的用户第一次 `GET` 时，接口把当前构建序号写入（条件写，只在仍为 `NULL` 时生效）并返回空列表：新账号，或本功能首次上线时的存量账号，不会被展示它们从未错过的历史。
 - **回滚不打扰。** 当前构建序号低于已存基线时没有任何待看说明。标记已看只会抬高基线（取 `max`），所以回滚后再次升级不会重复弹出用户已经看过的通知。
 - **`through_ordinal` 防止多标。** 前端传它拿到的 `build.ordinal`；服务端存 `max(现值, min(through_ordinal, build.ordinal))`。弹窗展示期间服务端又升级，点关闭不会把新版本也标成已看。
-- **清单缺失或损坏即关闭功能。** 两个端点都按「不可用」处理：`GET` 返回 `available=false` 且绝不写库；清单损坏（`schema` 不对、字段类型错误、id 重复、正文为空）只记原因码，不记说明正文。解析结果按路径缓存，文件的 inode、mtime 或大小任一变化即重新读取。
+- **清单缺失或损坏即关闭功能。** 两个端点都按「不可用」处理：`GET` 返回 `available=false` 且绝不写库；清单损坏（`schema` 不是 2、字段类型或枚举值错误、标题为空、id 重复）只记原因码，不记说明正文。解析结果按路径缓存，文件的 inode、mtime 或大小任一变化即重新读取。
 
 ## 许愿墙与全局提问分析
 
@@ -2997,7 +2999,8 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - `POST /api/notebooks/{id}/paper-meta/backfill` —— owner 触发的论文元数据补抽（后台、幂等可续跑），返回 `{queued}`；LLM 未配置 409。来源面板的「补全论文信息」按钮**只在确有活可干时显示**：`NotebookSummary` 的 `paper_meta_missing`（仅单库 `GET /api/notebooks/{id}` 精确回填，按补抽排队同口径的 EXISTS 探针计算；列表投影与旧后端为 `null`＝未计算）为 `false` 且当前可见来源页没有 `paper_meta_status="missing"` 的行时隐藏；`null`/缺失按旧行为继续显示（隐藏只能由显式的 `false` 触发），补抽运行期间保持可见以承载「补全中…」态
 - `GET /api/system/config` —— 登录后可读的非敏感浏览器配置；当前返回 `source_upload_max_bytes`（来源选择器使用的部署上限字节值）、`source_upload_max_files_per_batch`（固定的单次请求文件数护栏），以及供 Markdown 压缩包上传配对预检使用（见上文「引用附图（本段附图）」）的 `source_image_max_bytes` / `source_image_max_per_source`（镜像 `MINERU_MAX_IMAGE_BYTES` / `MINERU_MAX_IMAGES_PER_SOURCE`；旧后端缺字段时为 `null`，含义是「拿不到这个上限，交给服务端护栏兜底」；`0` 是合法值，语义是「一张都不持久化」，等效于图片存储关闭）与 `source_images_enabled`（镜像 `MINERU_RETURN_IMAGES`；缺字段按 `true` 处理，因为该开关此前从不存在，不能让旧部署凭空弹出假警告）
 - `GET /api/system/extensions` —— 登录后可读的 build-time workspace UI contribution 元数据投影。响应只含 API version、稳定的 plugin/display/version/contribution 标识、实时 availability，以及 `disabled | unavailable | null` 三态固定原因；绝不下发 capability 名、依赖/信任拓扑、endpoint、路径、凭据或异常文本。production 已把既有 Agent Profile 入口注册为 `workspace.side_panel` 的 `builtin.ask_agent_profile.workspace_panel`。浏览器只在 workspace 成功提交后按 actor generation 读取一次；集合页和未登录不调用，同用户切库复用，旧后端/缺行/不可用均 fail closed。插件入口点击前不读取 Agent Profile 数据。
-- `GET /api/me/release-notes` —— 登录后可读；返回 `{available, build: {version, ordinal} | null, notes: [{id, ordinal, body}]}`，即该用户还没看过的更新说明，最新在前（同序号按 id）。`available=false`（没有可用清单）不写库；从未记录过基线的用户会被静默记一份基线并返回空列表。见[系统更新通知](#系统更新通知)。
+- `GET /api/me/release-notes` —— 登录后可读；返回 `{available, build: {version, ordinal} | null, notes: [{id, ordinal, level, audience, title, body}], more_count}`：该用户可见、待看的重点说明最多五条（`change` 在 `feature` 前，同级最新在前，同序号按 id），以及其余待看重点说明与 `fix` 说明的条数。`available=false`（没有可用清单）不写库；从未记录过基线的用户会被静默记一份基线并返回空列表。见[系统更新通知](#系统更新通知)。
+- `GET /api/me/release-notes/history` —— 登录后可读；返回 `{available, build, notes}`：该用户可见、序号不超过当前构建的全部说明（含 `internal`），最新在前。不读也不写用户状态。
 - `POST /api/me/release-notes/seen` body `{through_ordinal}` —— 登录后可调；把用户已看基线抬到 `min(through_ordinal, build.ordinal)`，绝不降低；204；清单不可用时不写库；非整数或负数返回 422。
 - `GET /api/admin/extensions` —— 仅系统管理员可读的已加载部署插件拓扑只读投影（每个插件恰好 6 个白名单字段），外加每行当前的运行时开关状态；见[部署插件](#部署插件)。
 - `PATCH /api/admin/extensions/{plugin_id}` —— 仅系统管理员可调，不重启地开关一个已装载 deployment 插件的运行时准入；见[部署插件](#部署插件)。

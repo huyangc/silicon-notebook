@@ -158,6 +158,15 @@ test("菜单提供站内使用手册入口", async () => {
   expect(screen.getByRole("menuitem", { name: "使用手册" })).toHaveAttribute("href", "/manual");
 });
 
+test("菜单提供更新记录入口", async () => {
+  const user = userEvent.setup();
+  renderMenu();
+
+  await user.click(screen.getByRole("button", { name: "账户菜单" }));
+
+  expect(screen.getByRole("menuitem", { name: "更新记录" })).toHaveAttribute("href", "/updates");
+});
+
 test("Agent 接入是账户菜单的一级入口,不必先进私有记忆", async () => {
   const user = userEvent.setup();
   renderMenu();

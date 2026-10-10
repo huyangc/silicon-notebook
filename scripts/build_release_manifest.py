@@ -11,10 +11,25 @@ so the ordinal grows monotonically along master's first-parent history.
                      note file. A note that arrived through a merge commit is attributed
                      to that merge commit (``git log -m --first-parent``). Editing a note
                      later does not move it; deleting and re-adding it does.
-  * note.body      — read from ``git show HEAD:<path>`` (never the working tree), stripped.
+  * note.level / audience / title — from the file header (see below).
+  * note.body      — everything after the header, read from ``git show HEAD:<path>``
+                     (never the working tree), stripped; may be empty.
 
-Failure is loud and non-zero: shallow repo (ordinals would be wrong), empty note body,
-unsafe note id, or any git error. Nothing is written on failure.
+Note file format (hand-parsed, no YAML dependency)::
+
+    ---
+    level: feature        # feature | change | fix | internal
+    audience: all         # all | admin
+    title: 报告可以导出为 Word 文件
+    ---
+    optional markdown body
+
+All three header keys are required, may not repeat, and unknown keys are rejected.
+Length limits on title/body are NOT enforced here (a too-long note must never make a
+production start lose the whole manifest); backend/tests/test_release_notes.py guards them.
+
+Failure is loud and non-zero: shallow repo (ordinals would be wrong), missing/malformed
+note header, unsafe note id, or any git error. Nothing is written on failure.
 
 Only ``release-notes/*.md`` directly under the directory are notes; ``README.md`` is the
 authoring guide and is excluded. Note ids (file name minus ``.md``) must match
@@ -36,7 +51,10 @@ import tempfile
 NOTES_DIR = "release-notes"
 README_NAME = "README.md"
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
-SCHEMA = 1
+SCHEMA = 2
+LEVELS = ("feature", "change", "fix", "internal")
+AUDIENCES = ("all", "admin")
+_HEADER_KEYS = ("level", "audience", "title")
 
 
 class ManifestError(Exception):
@@ -122,6 +140,44 @@ def _note_paths(repo: Path) -> list[str]:
     return paths
 
 
+def parse_note_text(text: str, path: str) -> dict:
+    """Split a note file into ``{level, audience, title, body}``; raise ``ManifestError``."""
+    lines = text.removeprefix("\ufeff").replace("\r\n", "\n").split("\n")
+    if lines[0] != "---":
+        raise ManifestError(f"{path}: 说明缺少文件头(文件须以 --- 开头)")
+    try:
+        end = lines.index("---", 1)
+    except ValueError:
+        raise ManifestError(f"{path}: 说明文件头没有以单独一行 --- 结束") from None
+    header: dict[str, str] = {}
+    for raw in lines[1:end]:
+        if not raw.strip():
+            continue
+        key, sep, value = raw.partition(":")
+        key, value = key.strip(), value.strip()
+        if not sep:
+            raise ManifestError(f"{path}: 文件头行格式应为 key: value")
+        if key not in _HEADER_KEYS:
+            raise ManifestError(f"{path}: 文件头出现未知键 {key!r}")
+        if key in header:
+            raise ManifestError(f"{path}: 文件头键 {key} 重复")
+        header[key] = value
+    for key in _HEADER_KEYS:
+        if key not in header:
+            raise ManifestError(f"{path}: 文件头缺少必填键 {key}")
+    if header["level"] not in LEVELS:
+        raise ManifestError(f"{path}: level 只能是 {' | '.join(LEVELS)}")
+    if header["audience"] not in AUDIENCES:
+        raise ManifestError(f"{path}: audience 只能是 {' | '.join(AUDIENCES)}")
+    title = header["title"]
+    if len(title) >= 2 and title[0] == title[-1] and title[0] in "\"'":
+        title = title[1:-1].strip()
+    if not title:
+        raise ManifestError(f"{path}: title 不能为空")
+    body = "\n".join(lines[end + 1 :]).strip()
+    return {"level": header["level"], "audience": header["audience"], "title": title, "body": body}
+
+
 def _note(repo: Path, path: str, adds: dict[str, str], ordinals: dict[str, int]) -> dict:
     note_id = path[len(NOTES_DIR) + 1 : -len(".md")]
     if not SAFE_ID.match(note_id):
@@ -130,13 +186,11 @@ def _note(repo: Path, path: str, adds: dict[str, str], ordinals: dict[str, int])
         text = _git_bytes(repo, "show", f"HEAD:{path}").decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ManifestError(f"{path}: 说明不是合法的 UTF-8 文本") from exc
-    body = text.removeprefix("\ufeff").strip()
-    if not body:
-        raise ManifestError(f"{path}: 说明正文为空")
+    parsed = parse_note_text(text, path)
     sha = adds.get(path)
     if sha is None or sha not in ordinals:
         raise ManifestError(f"{path}: 在主线历史里找不到引入它的提交")
-    return {"id": note_id, "ordinal": ordinals[sha], "sha": sha, "body": body}
+    return {"id": note_id, "ordinal": ordinals[sha], "sha": sha, **parsed}
 
 
 def build_manifest(repo: Path, version: str) -> dict:

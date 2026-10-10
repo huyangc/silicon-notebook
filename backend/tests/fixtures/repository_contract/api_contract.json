@@ -10494,8 +10494,16 @@
         },
         "ReleaseNoteItem": {
           "additionalProperties": false,
-          "description": "One user-facing update note (markdown body written by hand).",
+          "description": "One user-facing update note: header (level/audience/title) + optional markdown body.",
           "properties": {
+            "audience": {
+              "enum": [
+                "all",
+                "admin"
+              ],
+              "title": "Audience",
+              "type": "string"
+            },
             "body": {
               "title": "Body",
               "type": "string"
@@ -10504,14 +10512,31 @@
               "title": "Id",
               "type": "string"
             },
+            "level": {
+              "enum": [
+                "feature",
+                "change",
+                "fix",
+                "internal"
+              ],
+              "title": "Level",
+              "type": "string"
+            },
             "ordinal": {
               "title": "Ordinal",
               "type": "integer"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
             }
           },
           "required": [
             "id",
             "ordinal",
+            "level",
+            "audience",
+            "title",
             "body"
           ],
           "title": "ReleaseNoteItem",
@@ -10537,9 +10562,9 @@
           "title": "ReleaseNotesBuild",
           "type": "object"
         },
-        "ReleaseNotesResponse": {
+        "ReleaseNotesHistoryResponse": {
           "additionalProperties": false,
-          "description": "Notes this user has not seen yet, newest first.\n\n``available=false`` means the deployment carries no usable manifest; the\nclient then shows nothing (and nothing was recorded for the user).",
+          "description": "Every note visible to this user up to the running build, newest first.",
           "properties": {
             "available": {
               "title": "Available",
@@ -10567,6 +10592,45 @@
             "available",
             "build",
             "notes"
+          ],
+          "title": "ReleaseNotesHistoryResponse",
+          "type": "object"
+        },
+        "ReleaseNotesResponse": {
+          "additionalProperties": false,
+          "description": "Headline notes (at most 5) this user has not seen yet.\n\n``notes`` only carries the headline levels; ``more_count`` counts the pending\nfixes plus headline notes beyond the cap. ``available=false`` means the\ndeployment carries no usable manifest; the client then shows nothing (and\nnothing was recorded for the user).",
+          "properties": {
+            "available": {
+              "title": "Available",
+              "type": "boolean"
+            },
+            "build": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ReleaseNotesBuild"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "more_count": {
+              "title": "More Count",
+              "type": "integer"
+            },
+            "notes": {
+              "items": {
+                "$ref": "#/components/schemas/ReleaseNoteItem"
+              },
+              "title": "Notes",
+              "type": "array"
+            }
+          },
+          "required": [
+            "available",
+            "build",
+            "notes",
+            "more_count"
           ],
           "title": "ReleaseNotesResponse",
           "type": "object"
@@ -18993,7 +19057,7 @@
       },
       "/api/me/release-notes": {
         "get": {
-          "description": "本账号还没看过的系统更新说明(最新在前)。清单缺失/损坏 → ``available=false``\n且不写库;账号从未记录过基线时,静默把当前版本记为已看并返回空列表。",
+          "description": "本账号还没看过的系统更新重点(最多 5 条,「变化」在前,各自新的在前),\n另给 ``more_count`` = 超出的重点数 + 待看的「修复」数(后台改进不计)。没有重点时\n``notes`` 为空,前端不弹窗也不推进基线。受众为 admin 的说明只对管理员可见。\n清单缺失/损坏 → ``available=false`` 且不写库;账号从未记录过基线时,静默把\n当前版本记为已看并返回空列表。",
           "operationId": "my_release_notes_api_me_release_notes_get",
           "responses": {
             "200": {
@@ -19008,6 +19072,25 @@
             }
           },
           "summary": "My Release Notes"
+        }
+      },
+      "/api/me/release-notes/history": {
+        "get": {
+          "description": "历次系统更新记录(含后台改进,新的在前),登录即可。只按受众过滤,\n不读也不写本账号的已看基线;清单缺失/损坏 → ``available=false``。",
+          "operationId": "my_release_notes_history_api_me_release_notes_history_get",
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ReleaseNotesHistoryResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            }
+          },
+          "summary": "My Release Notes History"
         }
       },
       "/api/me/release-notes/seen": {

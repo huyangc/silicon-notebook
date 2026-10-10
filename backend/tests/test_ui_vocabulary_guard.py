@@ -547,3 +547,15 @@ def test_更新说明干净时守卫通过(tmp_path, monkeypatch):
     (notes / "ok.md").write_text("现在可以把回答分享给同事了。\n", encoding="utf-8")
     monkeypatch.setattr(guard, "RELEASE_NOTES_DIR", notes)
     assert guard.main() == 0
+
+
+def test_更新说明文件头的纯英文键值行不触发而中文标题会被扫到(tmp_path, monkeypatch):
+    notes = tmp_path / "release-notes"
+    notes.mkdir()
+    (notes / "h.md").write_text(
+        "---\nlevel: feature\naudience: admin\ntitle: 新增 chunk 的重建\n---\n正文正常。\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(guard, "RELEASE_NOTES_DIR", notes)
+    # 只有含中文的 title 行(第 4 行)被扫;level/audience 这类 ASCII 行不会。
+    assert [(line, term) for line, term, _ in guard.scan_release_note(notes / "h.md")] == [(4, "chunk")]

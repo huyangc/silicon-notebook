@@ -210,7 +210,7 @@ npm run stop
 启动后端之前，`npm run start` 会用与 `pack.sh` 相同的 `scripts/build_release_manifest.py`
 在仓库根目录重新生成 `release-manifest.json`，因此「`git pull` + `npm run start`」的部署方式
 也会弹出应用内的「系统已更新」提示。它要求检出是 `master` 的**完整(非浅克隆)克隆**；版本串
-为 HEAD 的提交日期加短 sha。与打包不同，这里生成失败(浅克隆、说明正文为空或文件名不合规、
+为 HEAD 的提交日期加短 sha。与打包不同，这里生成失败(浅克隆、说明文件头缺失或不合法或文件名不合规、
 没有 git、检出不是仓库根目录)只会警告并删除旧清单——服务照常启动，只是不弹更新提示。
 
 设 `SKIP_BUILD=1` 可复用已构建好的 `frontend/.next`(如预构建镜像场景)。可用
@@ -411,7 +411,7 @@ bash scripts/pack.sh          # → dist/silicon_notebook_<version>_<os>-<arch>.
 
 `pack.sh` 还会在包根目录写 `release-manifest.json`(由 `scripts/build_release_manifest.py`
 生成):记录本次构建的主线序号和全部 `release-notes/*.md`,用来驱动应用内的「系统已更新」
-提示。它需要**完整(非浅克隆)的 git 历史**——浅克隆、说明正文为空或说明文件名不合规都会让
+提示。它需要**完整(非浅克隆)的 git 历史**——浅克隆、说明文件头缺失或不合法或说明文件名不合规都会让
 打包失败。序号以 master 的 first-parent 主线为准,所以**生产包应从 `master` 构建**;从分支
 构建可能漏掉说明。没有 git(或源码树本身不是仓库根目录)时打包会响亮警告、不生成清单,该包不会弹出更新提示。
 

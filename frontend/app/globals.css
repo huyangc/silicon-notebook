@@ -13915,3 +13915,47 @@ select.group-input {
 
 .release-notes-item > :first-child { margin-top: 0; }
 .release-notes-item > :last-child { margin-bottom: 0; }
+
+/* 标题行:有正文时是整行可点的按钮(按下态由全站 button:active 基线给出),无正文时是同款静态行。 */
+.release-notes-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+button.release-notes-toggle { cursor: pointer; }
+.release-notes-toggle strong { flex: 1 1 auto; min-width: 0; }
+.release-notes-caret { flex: 0 0 auto; color: var(--muted); font-size: 12px; }
+
+.release-notes-level {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #eaf1ff;
+  color: #174ec8;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.6;
+}
+
+.release-notes-level.change { background: #fff3e0; color: #9a5b00; }
+.release-notes-level.fix { background: #e8f6ec; color: #1d7a3c; }
+.release-notes-level.internal { background: #eef0f4; color: #5b6472; }
+
+.release-notes-body { margin-top: 8px; color: #333b49; font-size: 14px; }
+
+/* 「另有 N 项…」一行固定在列表下、按钮区上,和头、底栏一样不参与让高。 */
+.release-notes-more {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 10px 24px 0;
+  color: var(--muted);
+  font-size: 13px;
+}

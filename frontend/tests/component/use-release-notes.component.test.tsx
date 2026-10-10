@@ -13,7 +13,8 @@ import { useReleaseNotes } from "../../app/use-release-notes";
 const payload = {
   available: true,
   build: { version: "v1", ordinal: 10 },
-  notes: [{ id: "a", ordinal: 9, body: "x" }],
+  notes: [{ id: "a", ordinal: 9, level: "feature", audience: "all", title: "t", body: "x" }],
+  more_count: 3,
 };
 
 beforeEach(() => {
@@ -24,6 +25,7 @@ test("有待看说明时给出 notice", async () => {
   mocks.fetchReleaseNotes.mockResolvedValue(payload);
   const { result } = renderHook(() => useReleaseNotes("u1", true));
   await waitFor(() => expect(result.current.notice?.build.ordinal).toBe(10));
+  expect(result.current.notice?.moreCount).toBe(3);
   act(() => result.current.clear());
   expect(result.current.notice).toBeNull();
 });
@@ -75,8 +77,8 @@ test("未完成鉴权或未登录时不取", () => {
 });
 
 test.each([
-  ["清单不可用", { available: false, build: null, notes: [] }],
-  ["没有待看说明", { available: true, build: { version: "v1", ordinal: 10 }, notes: [] }],
+  ["清单不可用", { available: false, build: null, notes: [], more_count: 0 }],
+  ["没有待看说明", { available: true, build: { version: "v1", ordinal: 10 }, notes: [], more_count: 2 }],
 ])("%s 时不出 notice", async (_name, response) => {
   mocks.fetchReleaseNotes.mockResolvedValue(response);
   const { result } = renderHook(() => useReleaseNotes("u1", true));
