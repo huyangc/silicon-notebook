@@ -819,6 +819,10 @@ _ALLOWED_BY_FILE = {
     # It is the only file that may: export.py/import_.py stay engine-only, and
     # nothing in this package may reach the service layer during an import.
     "scale_rebuild.py": {"app.services.scale_build_cli"},
+    # identity.py refuses source/target usernames that differ only by ASCII
+    # case using the same folding the auth store compares with (a pure
+    # stdlib-only helper), instead of a second copy that could drift.
+    "identity.py": {"app.domain.auth_utils"},
 }
 
 
