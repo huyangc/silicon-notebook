@@ -703,6 +703,35 @@ def _value_tokens(value: Any) -> list[str]:
     return [token for token in tokens if token]
 
 
+def _single_quoted_as_json(body: str) -> str:
+    r"""A single-quoted body spelled as a double-quoted JSON body.
+
+    Read as the repair parser reads it: ``\'`` is a quote, JSON escapes keep
+    their meaning (``\"`` included), a backslash that starts none is literal
+    (``50\%``), and a bare ``"`` is a character of the text.
+    """
+    out: list[str] = []
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char == "\\":
+            if body[index + 1:index + 2] == "'":
+                out.append("'")
+                index += 2
+                continue
+            if _starts_json_escape(body, index + 1):
+                out.append(body[index:index + 2])
+                index += 2
+                continue
+            out.append("\\\\")
+        elif char == '"':
+            out.append('\\"')
+        else:
+            out.append(char)
+        index += 1
+    return "".join(out)
+
+
 def _raw_tokens(raw: str) -> list[str] | None:
     """Keys and scalar values the model wrote, in order, or ``None``.
 
@@ -731,7 +760,7 @@ def _raw_tokens(raw: str) -> list[str] | None:
                 end += 2 if text[end] == "\\" else 1
             body = text[index + 1:end]
             if char == "'":
-                body = body.replace("\\'", "'").replace('"', '\\"')
+                body = _single_quoted_as_json(body)
             try:
                 tokens.append(json.loads(f'"{body}"', strict=False))
             except ValueError:
