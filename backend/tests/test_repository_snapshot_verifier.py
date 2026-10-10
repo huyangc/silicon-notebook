@@ -175,6 +175,63 @@ def test_v92_auth_transactions_that_survive_the_upgrade_still_fail(
     ), result.discrepancies
 
 
+def _v91_with_audit_row(module, tmp_path):
+    """The committed fixture rolled back to v91, holding one identity audit
+    row (grant_reference filled) as a deployed v91 server would."""
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    rollback = sqlite3.connect(database)
+    with rollback:
+        rollback_v92(rollback)
+        rollback.execute(
+            "INSERT INTO auth_identity_audit"
+            "(id,actor_id,target_user_id,action,provider_namespace,subject,"
+            "created_at,grant_reference) "
+            "VALUES ('audit-1','actor','target','link','ns','subj',"
+            "'2026-01-01T00:00:00+00:00','grant-ref')"
+        )
+        rollback.execute("PRAGMA user_version = 91")
+    rollback.close()
+    return database, storage
+
+
+def test_v92_compares_surviving_columns_of_a_table_that_lost_a_column(tmp_path):
+    """auth_identity_audit loses grant_reference at v92; every other column of
+    its rows must still be compared, not just the row count."""
+    module = _load_verifier()
+    database, storage = _v91_with_audit_row(module, tmp_path)
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.changed_tables == []
+
+
+def test_v92_changed_surviving_column_of_a_trimmed_table_fails(
+    tmp_path, monkeypatch
+):
+    from app.repositories.sqlite import migrations
+
+    module = _load_verifier()
+    database, storage = _v91_with_audit_row(module, tmp_path)
+    original = migrations.SqliteMigrator._migration_92
+
+    def corrupt_action(self):
+        original(self)
+        with self.database.write() as db:
+            db.execute("UPDATE auth_identity_audit SET action='unlink'")
+
+    monkeypatch.setattr(migrations.SqliteMigrator, "_migration_92", corrupt_action)
+    result = module.verify_snapshot(database, storage)
+
+    assert not result.ok
+    assert result.changed_tables == ["auth_identity_audit"]
+    assert any("row-digest-changed" in item for item in result.discrepancies)
+
+
 def _rollback_v91(db: sqlite3.Connection) -> None:
     """Undo _migration_91 (the MCP ``ask`` clarification handles, parity with
     PostgreSQL 0071_ask_intent_handles.sql): one table and its index, plus
