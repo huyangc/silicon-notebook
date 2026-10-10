@@ -98,14 +98,19 @@ def test_owner_resolution_follows_the_current_username_after_rename(postgres_rep
 
 
 @pytest.mark.postgres_integration
-@pytest.mark.parametrize("conflicting_name", ["corpuid"])
-def test_owner_resolution_rejects_ambiguous_case_variant_names(postgres_repository, conflicting_name):
+def test_owner_resolution_cannot_meet_case_variant_names(postgres_repository):
+    """idx_users_username_lower (0072) keeps a case-insensitive name to one
+    account; the resolver's ambiguity refusal is now a defensive branch."""
+    import psycopg
+
     first = postgres_repository.create_user("a00123456", "pw123456")
     second = postgres_repository.create_user("a00123457", "pw123456")
     with postgres_repository._runtime.database.write() as db:
         db.execute("UPDATE users SET username='CorpUID' WHERE id=%s", (first.id,))
-        db.execute("UPDATE users SET username=%s WHERE id=%s", (conflicting_name,second.id))
-    assert postgres_repository.maintenance.resolve_owner_profile(conflicting_name) is None
+    with pytest.raises(psycopg.errors.UniqueViolation, match="idx_users_username_lower"):
+        with postgres_repository._runtime.database.write() as db:
+            db.execute("UPDATE users SET username='corpuid' WHERE id=%s", (second.id,))
+    assert postgres_repository.maintenance.resolve_owner_profile("corpuid").id == first.id
 
 
 @pytest.mark.postgres_integration

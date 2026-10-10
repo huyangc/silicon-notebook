@@ -1292,16 +1292,20 @@ def test_owner_resolution_forgets_the_name_before_a_rename(repo):
     assert repo.maintenance.resolve_owner_profile("a00123456") is None
 
 
-@pytest.mark.parametrize("conflicting_name", ["corpuid"])
-def test_owner_resolution_rejects_ambiguous_case_variant_names(repo, conflicting_name):
+def test_owner_resolution_cannot_meet_case_variant_names(repo):
+    """idx_users_username_lower (SQLite v92 / PostgreSQL 0072) keeps a
+    case-insensitive name to one account, so the resolver's ambiguity refusal
+    is a defensive branch the schema no longer lets data reach."""
+    import sqlite3
+
     first = repo.create_user("a00123456", "pw123456")
     second = repo.create_user("a00123457", "pw123456")
     with repo._connect() as db:
         db.execute("UPDATE users SET username='CorpUID' WHERE id=?", (first.id,))
-        db.execute("UPDATE users SET username=? WHERE id=?", (conflicting_name,second.id))
-    assert repo.maintenance.resolve_owner_profile(conflicting_name) is None
-    with pytest.raises(SystemExit):
-        bi._resolve_owner_profile(repo, conflicting_name)
+    with pytest.raises(sqlite3.IntegrityError, match="idx_users_username_lower"):
+        with repo._connect() as db:
+            db.execute("UPDATE users SET username='corpuid' WHERE id=?", (second.id,))
+    assert repo.maintenance.resolve_owner_profile("corpuid").id == first.id
 
 
 def test_owner_resolution_keeps_default_admin_and_rejects_non_names(repo):

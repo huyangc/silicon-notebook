@@ -106,7 +106,8 @@ class IdentityStore:
         if not is_valid_username(username):
             raise ValueError("invalid username")
         normalized = normalize_username(username)
-        self.auth.check_name(connection, normalized)
+        email = f"{normalized}@users.silicon-notebook.local"
+        self.auth.check_name(connection, normalized, email=email)
         user_id = f"user-{uuid4().hex}"
         now = utc_now()
         password_hash, password_salt, iterations = hash_password(password)
@@ -117,7 +118,7 @@ class IdentityStore:
             "VALUES (%s,%s,%s,'user','active',%s,%s,%s,%s,%s,%s) RETURNING *",
             (
                 user_id,
-                f"{normalized}@users.silicon-notebook.local",
+                email,
                 normalized,
                 normalized,
                 password_hash,
@@ -143,7 +144,7 @@ class IdentityStore:
             with self.database.write() as connection:
                 user, profile = self._create_user_in_txn(connection, username, password)
         except errors.UniqueViolation as exc:
-            if exc.diag.constraint_name in {"idx_users_username", "uq_users_email"}:
+            if exc.diag.constraint_name in {"idx_users_username", "idx_users_username_lower", "uq_users_email"}:
                 raise ValueError("username already exists") from exc
             raise
         return self._user_profile(user, profile)
@@ -160,7 +161,7 @@ class IdentityStore:
                 user, profile = self._create_user_in_txn(connection, username, password)
                 token = self._insert_session_in_txn(connection, user["id"])
         except errors.UniqueViolation as exc:
-            if exc.diag.constraint_name in {"idx_users_username", "uq_users_email"}:
+            if exc.diag.constraint_name in {"idx_users_username", "idx_users_username_lower", "uq_users_email"}:
                 raise ValueError("username already exists") from exc
             raise
         return (self._user_profile(user, profile), token)

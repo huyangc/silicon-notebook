@@ -264,6 +264,11 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "错误码选),未知码用固定中文兜底,异常原文不外泄。真实响应由 "
         "tests/test_admin_users.py 的停用/改名用例覆盖。"
     ),
+    "app/api/admin_routes.py::_require_unified_auth_ready": (
+        "detail 只取自同文件 _UNIFIED_AUTH_ENABLE_REFUSALS 里的中文字面量(按配置检查"
+        "的稳定错误码选),未知码用固定中文兜底,异常原文不外泄。真实响应由 "
+        "tests/test_admin_extensions_routes.py 的启用统一认证预检用例覆盖。"
+    ),
     "app/api/auth_routes.py::register": (
         "detail 是同函数内两个中文字面量的三元选择（「用户名已被占用」/"
         "「用户名不合法」），异常原文只用于分类、不外泄。真实响应由 "

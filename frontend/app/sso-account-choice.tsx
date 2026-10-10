@@ -11,7 +11,7 @@ import {
   type SsoChoice,
 } from "./auth";
 import { consumeSsoReturnLocation } from "./auth-return-location";
-import { toUserMessage } from "./errors";
+import { httpErrorStatus, toUserMessage } from "./errors";
 
 type ChoiceDeps = {
   link?: typeof linkSsoAccount;
@@ -41,6 +41,8 @@ export function SsoAccountChoice({
   const [linkError, setLinkError] = useState("");
   const [createError, setCreateError] = useState("");
   const [done, setDone] = useState(false);
+  // 后端 410：本次待选已作废（过期/已使用/状态变化），再提交也不会成功，只能回登录重来。
+  const [voided, setVoided] = useState(false);
 
   function signIn(result: { token: string; user: AuthUser }) {
     setToken(result.token);
@@ -50,7 +52,7 @@ export function SsoAccountChoice({
 
   async function submitLink(event: FormEvent) {
     event.preventDefault();
-    if (busy || done) return;
+    if (busy || done || voided) return;
     if (!loginName.trim() || !password) {
       setLinkError("请输入老账号的用户名和密码");
       return;
@@ -63,12 +65,13 @@ export function SsoAccountChoice({
     } catch (err) {
       setPassword("");
       setLinkError(toUserMessage(err, "关联未完成，请重试"));
+      if (httpErrorStatus(err) === 410) setVoided(true);
       setBusy(null);
     }
   }
 
   async function submitCreate() {
-    if (busy || done) return;
+    if (busy || done || voided) return;
     setLinkError("");
     setCreateError("");
     setBusy("create");
@@ -76,6 +79,7 @@ export function SsoAccountChoice({
       signIn(await create(pending.pending_id));
     } catch (err) {
       setCreateError(toUserMessage(err, "新建账号未完成，请重试"));
+      if (httpErrorStatus(err) === 410) setVoided(true);
       setBusy(null);
     }
   }
@@ -92,7 +96,8 @@ export function SsoAccountChoice({
     navigate(consumeSsoReturnLocation());
   }
 
-  const locked = busy !== null || done;
+  const returnLocked = busy !== null || done;
+  const locked = returnLocked || voided;
   return <>
     <h1 className="auth-title">统一认证账号 {pending.external_username} 在本站还没有对应账号</h1>
     {pending.display_name && <p className="auth-copy">姓名：{pending.display_name}</p>}
@@ -123,7 +128,7 @@ export function SsoAccountChoice({
       </button>
     </section>
 
-    <button className="auth-cancel" type="button" disabled={locked} aria-busy={busy === "cancel"} onClick={() => { void returnToLogin(); }}>
+    <button className="auth-cancel" type="button" disabled={returnLocked} aria-busy={busy === "cancel"} onClick={() => { void returnToLogin(); }}>
       {busy === "cancel" ? "正在返回…" : "返回登录"}
     </button>
   </>;

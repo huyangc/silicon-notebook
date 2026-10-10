@@ -66,6 +66,9 @@ def _roll_back_to_66(database) -> None:
             "ALTER TABLE auth_identity_audit ADD COLUMN grant_reference TEXT "
             "COLLATE \"C\" NOT NULL DEFAULT ''"
         )
+        # ...and remove what 72 adds, so its replay can add it again.
+        db.execute("DROP INDEX idx_users_username_lower")
+        db.execute("ALTER TABLE users DROP COLUMN sso_linked_at")
         # 68 (PR-E8) and later go too: the ledger must stay gapless
         db.execute("DELETE FROM silicon_schema_migrations WHERE version >= 67")
 

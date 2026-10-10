@@ -4426,16 +4426,22 @@ The optional `auth.provider` deployment plugin authenticates external identities
 
 **The switch.** External authentication is on exactly when the deployment configures an `auth.provider` plugin, that plugin is enabled (the host's provider description is non-empty) and the callback configuration is valid. There is no persisted stage or administrator-driven migration state. Disabling the plugin returns the site to local login; that is the emergency path. An invalid configuration (for example `AUTH_OPTIONAL`, a public/frontend origin mismatch, or a non-HTTPS production callback without `AUTH_ALLOW_INSECURE_HTTP`) is reported as a startup/capability error and never silently degrades to local login.
 
-**Identity key.** The only key is `users.username == identity.username` (the provider's username, i.e. the employee number), compared exactly and case-sensitively. There is no `(namespace, subject)` mapping table; `subject` and namespace are written only to the session columns (`auth_sessions.external_subject` / `provider_namespace`) and to audit rows. The anonymous `user-local` account of `AUTH_OPTIONAL` can never be matched, linked or created.
+**Precheck before switching on (lockout guard).** Before an administrator **enables** a plugin that provides `auth.provider` through `PATCH /admin/extensions/{plugin_id}`, the deployment configuration above is checked as if that plugin were enabled (`AUTH_OPTIONAL` forbidden, `AUTH_PUBLIC_BASE_URL` required, frontend and callback origins on the same scheme and host, https in production unless `AUTH_ALLOW_INSECURE_HTTP`), and the site must have at least one administrator with `status='active'`, `role='admin'` who is not `user-local` (the built-in administrator cannot sign in under external authentication). Any failure returns 409 with a Chinese explanation and writes no switch row. Disabling is never restricted. The way back when actually locked out is in the [operations guide](./operations.md#external-authentication-enablement-and-rollback): disable the plugin in the deployment configuration and restart.
+
+**Identity key.** The only key is `users.username == identity.username` (the provider's username, i.e. the employee number), compared exactly and case-sensitively. There is no `(namespace, subject)` mapping table; `subject` and namespace are written only to the session columns (`auth_sessions.external_subject` / `provider_namespace`) and to audit rows. The anonymous `user-local` account of `AUTH_OPTIONAL` can never be matched, linked or created. A provider username is validated by the same rule as an administrator rename (non-empty, no surrounding whitespace, no control characters, within the length rail); an identity that fails it is refused at the callback.
+
+**Linked mark.** `users.sso_linked_at` records when the account first signed in through external authentication (written on a direct login when still empty, and on a successful link or a creation). An account carrying it can no longer be linked by anyone through its password; neither an administrator rename nor a password reset clears it.
 
 **Login flow.**
 
 1. `POST /auth/sso/start` begins the login; the callback returns to the frontend with a one-time handoff code, then `POST /auth/sso/complete {code}` decides:
-   - An account with `username` equal to the provider username exists and is active: an SSO session is issued (`status: "authenticated"`). A non-active account returns `account_inactive`.
+   - An account with `username` equal to the provider username exists and is active: an SSO session is issued (`status: "authenticated"`) and `sso_linked_at` is written when empty. A non-active account returns `account_inactive`.
    - No such account: `status: "choice_required"` with `pending_id`, `external_username` and `display_name`. The pending choice is stored as a one-time authentication transaction (TTL `AUTH_TRANSACTION_TTL_SECONDS`) bound to the browser proof cookie.
 2. The user then picks one of:
-   - **Link an old account** (`POST /auth/sso/link`): enter the old account's username and password. An unknown name and a wrong password return the same `link_verification_failed` message and do not consume the pending choice, so the user may retry; an expired or already used choice returns `invalid_transaction`. The old account must be active, not `user-local` and have a local password. In one write transaction the service rechecks that no account named after the provider username has appeared meanwhile (otherwise `stale_transaction`), renames the old account to the provider username (keeping its user ID, data and role; the display name takes the provider value when non-empty), bumps its `auth_revision`, deletes all of its older sessions, audits `sso_linked` and issues an SSO session.
-   - **Do not link, use a new account** (`POST /auth/sso/create`): after the same recheck, creates an ordinary `user` with no password named after the provider username, audits `sso_created`, issues a session and consumes the choice. The UI states that data of the old account will not appear in the new one.
+   - **Link an old account** (`POST /auth/sso/link`): enter the old account's username and password. An unknown name and a wrong password return the same `link_verification_failed` message and do not consume the pending choice, so the user may retry. The old account must be active (otherwise `account_inactive`), not `user-local` (`link_target_invalid`) and have a local password; **after** the password check passes, an old account that already carries `sso_linked_at` returns `link_target_linked` ("该账号已关联过统一认证账号，不能再关联；如有疑问请联系管理员。"), while a wrong password still returns `link_verification_failed`, so whether the account was linked never leaks. In one write transaction the service rechecks that no account named after the provider username has appeared meanwhile (otherwise `stale_transaction`), renames the old account to the provider username (keeping its user ID, data and role; the display name takes the provider value when non-empty), writes `sso_linked_at`, bumps its `auth_revision`, deletes all of its older sessions, audits `sso_linked` and issues an SSO session.
+   - **Do not link, use a new account** (`POST /auth/sso/create`): after the same recheck, creates an ordinary `user` with no password (carrying `sso_linked_at`) named after the provider username, audits `sso_created`, issues a session and consumes the choice. The UI states that data of the old account will not appear in the new one.
+   - When the employee number differs from another existing account only by letter case, linking a different account or creating one returns `username_case_conflict` ("本站已有只差大小写的同名账号，请选择「关联老账号」并输入该账号的密码。"); other conflicts, such as the built-in administrator's name, return `username_conflict`.
+   - Status codes: when the pending choice is spent -- `invalid_transaction` (expired, used or a different browser), `stale_transaction`, `external_auth_expired` -- link and create return **410**, and the frontend locks the form and offers only "back to login"; every other link/create error is 409. The Chinese messages do not depend on the status code.
    - **Back to login** (`POST /auth/sso/cancel`, 204) discards the pending choice.
 3. There is no self-service re-linking after choosing a new account; the user asks an administrator (below).
 
@@ -4447,10 +4453,11 @@ OAuth state, browser proof (a host-only HttpOnly SameSite cookie), PKCE when sup
 
 **Administrator tools** (on the existing `/admin/users` list; both delete the user's sessions, bump `auth_revision` and are audited):
 
-- `PATCH /admin/users/{id}/status {status: "active" | "disabled"}` enables or disables an account; an administrator cannot change their own.
-- `PATCH /admin/users/{id}/username {username}` renames an account with a uniqueness check; `user-local` cannot be renamed.
+- `PATCH /admin/users/{id}/status {status: "active" | "disabled"}` enables or disables an account.
+- `PATCH /admin/users/{id}/username {username}` renames an account: unique case-insensitively (a clash with another account is 409 "用户名已被占用"); the name must be non-empty, without surrounding whitespace or control characters and within the length rail (otherwise 400). A rename keeps `sso_linked_at` and the account's placeholder email; registering the account's old name afterwards gets the ordinary "用户名已被占用" (400), not a constraint error.
+- Neither may target **the signed-in administrator themselves** (409 "不能修改当前登录的账号") nor **change `user-local`'s status or username** (409 "内置管理员账号不可修改"); a non-administrator gets 403 and a missing target 404.
 
-Together they repair a mistaken "new account" choice: disable the new account, then rename the old account to the employee number. Account status is rechecked for Agent authentication and each data-tool call.
+Together they repair a mistaken "new account" choice, in this order: disable the mistakenly created account and rename it to something else (freeing the employee number), then rename the old account to the employee number; the old account's next external login signs in directly (writing `sso_linked_at` then). Account status is rechecked for Agent authentication and each data-tool call.
 
 All routes below are under `/api`. Public routes still enforce their transaction purpose and browser proof; ordinary extension routes remain session protected.
 
@@ -4460,11 +4467,12 @@ All routes below are under `/api`. Public routes still enforce their transaction
 | `POST /auth/sso/start` | Begin external login; returns `authorization_url` |
 | `GET /auth/sso/callback` | Fixed callback; validates state/proof and exchanges the code through the provider |
 | `POST /auth/sso/complete` | `{code}`; returns `authenticated` token/user or `choice_required` |
-| `POST /auth/sso/link` | `{pending_id, login_name, password}`; verifies the old account, renames it to the employee number, returns token/user |
-| `POST /auth/sso/create` | `{pending_id}`; creates a passwordless ordinary user, returns token/user |
+| `POST /auth/sso/link` | `{pending_id, login_name, password}`; verifies the old account, renames it to the employee number, returns token/user; 410 when the pending choice is spent, 409 for `link_verification_failed`, `link_target_linked`, `username_case_conflict` and other errors |
+| `POST /auth/sso/create` | `{pending_id}`; creates a passwordless ordinary user, returns token/user; 410 when the pending choice is spent, otherwise 409 |
 | `POST /auth/sso/cancel` | `{pending_id}`; 204, discards the pending choice |
-| `PATCH /admin/users/{id}/status` | Administrator-only enable/disable; not on oneself |
-| `PATCH /admin/users/{id}/username` | Administrator-only rename; unique, not `user-local` |
+| `PATCH /admin/users/{id}/status` | Administrator-only enable/disable; not on oneself, not on `user-local` (both 409) |
+| `PATCH /admin/users/{id}/username` | Administrator-only rename; unique case-insensitively; not oneself, not `user-local` (both 409) |
+| `PATCH /admin/extensions/{plugin_id}` | Enabling a plugin that provides `auth.provider` runs the lockout precheck first; failure is 409 with no row written; disabling is unrestricted |
 
 Core authentication rails (reject over-limit input; never truncate identities):
 

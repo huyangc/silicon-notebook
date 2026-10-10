@@ -1044,3 +1044,57 @@ def test_account_controls_refuse_non_admin_self_builtin_and_missing(client, rout
     own = client.patch(f"/api/admin/users/{user_id}/{route}", headers=user_headers, json=payload)
     assert own.status_code == 409
     assert own.json()["detail"] == "不能修改当前登录的账号"
+
+
+def test_admin_corrects_a_mistaken_new_account_in_the_documented_order(client):
+    """docs/operations「纠正误选新账号」: disable the mistaken new account and
+    rename it away first, then give the old account the employee number; the
+    old account's next unified login signs in directly."""
+    from app.api.deps import identity_repository
+    from tests.auth_store_contract import PROOF, Host, choice, complete
+
+    admin_token = _auth_admin(client)
+    old_headers = _auth(client, "a12345678")
+    old_id = _user_id(client, admin_token, "a12345678")
+    identity = identity_repository()
+    host = Host()
+    identity.auth.use_provider(host)
+    mistaken, _ = identity.auth.create(choice(identity, "W0012345"), PROOF, session_seconds=600)
+    # Back to local login for the administrator's own session.
+    host.enabled = False
+    assert client.get("/api/notebooks", headers=old_headers).status_code == 200
+    steps = (
+        (mistaken.id, "status", {"status": "disabled"}),
+        (mistaken.id, "username", {"username": "W0012345-mistaken"}),
+        (old_id, "username", {"username": "W0012345"}),
+    )
+    for user_id, route, payload in steps:
+        response = client.patch(
+            f"/api/admin/users/{user_id}/{route}", headers=admin_token, json=payload
+        )
+        assert response.status_code == 200, (route, response.text)
+    rows = {r["id"]: r for r in client.get("/api/admin/users", headers=admin_token).json()}
+    assert (rows[old_id]["username"], rows[old_id]["status"]) == ("W0012345", "active")
+    assert (rows[mistaken.id]["username"], rows[mistaken.id]["status"]) == (
+        "W0012345-mistaken", "disabled",
+    )
+    host.enabled = True
+    signed_in = complete(identity, "W0012345")
+    assert (signed_in["status"], signed_in["user"].id) == ("authenticated", old_id)
+
+
+def test_registering_a_renamed_accounts_old_name_reads_as_taken(client):
+    """A rename keeps the email minted from the old name; registering that
+    name again is the ordinary "name taken" answer, not a constraint crash."""
+    admin = _auth_admin(client)
+    _auth(client, "a12345678")
+    user_id = _user_id(client, admin, "a12345678")
+    renamed = client.patch(
+        f"/api/admin/users/{user_id}/username", headers=admin, json={"username": "W0012345"}
+    )
+    assert renamed.status_code == 200, renamed.text
+    again = client.post(
+        "/api/auth/register", json={"username": "a12345678", "password": "pw"}
+    )
+    assert again.status_code == 400
+    assert again.json()["detail"] == "用户名已被占用"

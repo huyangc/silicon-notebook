@@ -869,6 +869,34 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     ]
 
 
+def test_auth_simplify_migration_refuses_usernames_differing_only_by_case(
+    postgres_database,
+):
+    """0072 adds the unique idx_users_username_lower; a database already holding
+    a case clash fails the upgrade with the clashing names and stays at 71."""
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    migrator = PostgresMigrator(postgres_database)
+    assert migrator.migrate(target_version=71) == 71
+    with postgres_database.write() as connection:
+        for user_id, name in (("user-a", "a12345678"), ("user-b", "A12345678")):
+            connection.execute(
+                "INSERT INTO users(id,email,display_name,role,status,username,created_at,updated_at) "
+                "VALUES (%s,%s,%s,'user','active',%s,now(),now())",
+                (user_id, user_id + "@x", user_id, name),
+            )
+    with pytest.raises(Exception, match="differ only by letter case.*a12345678"):
+        migrator.migrate()
+    with postgres_database.write() as connection:
+        connection.execute("UPDATE users SET username='b12345678' WHERE id='user-b'")
+    assert migrator.migrate() == 72
+    with postgres_database.connect() as connection:
+        definition = connection.execute(
+            "SELECT indexdef FROM pg_indexes WHERE indexname='idx_users_username_lower'"
+        ).fetchone()
+    assert definition is not None and "UNIQUE" in definition["indexdef"]
+
+
 def test_auth_migrations_preserve_legacy_password_and_session(
     postgres_database, postgres_settings,
 ):
@@ -955,6 +983,7 @@ def test_auth_migrations_preserve_legacy_password_and_session(
     assert [dict(row)["action"] for row in audit] == ["account_status:active"]
     assert "grant_reference" not in dict(audit[0])
     assert pending["n"] == 0
+    assert legacy["sso_linked_at"] is None
 
     store = IdentityStore(postgres_database, postgres_settings)
     authenticated = store.authenticate_user("A00123456", "legacy-password")

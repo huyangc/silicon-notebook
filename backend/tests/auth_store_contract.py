@@ -190,6 +190,80 @@ class AuthStoreContract:
             identity.auth.link(pending, PROOF, "a12345678", "pw", session_seconds=600)
         assert row(identity, "SELECT username FROM users WHERE id=?", (old.id,))["username"] == "a12345678"
 
+    def test_a_claimed_account_cannot_be_linked_by_another_unified_login(self, identity):
+        user, _ = identity.register_user_with_session("a12345678", "pw")
+        sso_on(identity)
+        assert row(identity, "SELECT sso_linked_at FROM users WHERE id=?", (user.id,))["sso_linked_at"] is None
+        pending = choice(identity, "W0012345", subject="employee-7")
+        identity.auth.link(pending, PROOF, "a12345678", "pw", session_seconds=600)
+        assert row(identity, "SELECT sso_linked_at FROM users WHERE id=?", (user.id,))["sso_linked_at"] is not None
+        other = choice(identity, "W0099999", subject="employee-8")
+        # A wrong password never learns whether the account was claimed.
+        with pytest.raises(AuthStoreError, match="link_verification_failed"):
+            identity.auth.link(other, PROOF, "W0012345", "wrong", session_seconds=600)
+        with pytest.raises(AuthStoreError, match="link_target_linked"):
+            identity.auth.link(other, PROOF, "W0012345", "pw", session_seconds=600)
+        assert row(identity, "SELECT username FROM users WHERE id=?", (user.id,))["username"] == "W0012345"
+        # The administrator rename keeps the mark.
+        identity.auth.set_username(user.id, "W0012346", actor_id="user-local")
+        with pytest.raises(AuthStoreError, match="link_target_linked"):
+            identity.auth.link(other, PROOF, "W0012346", "pw", session_seconds=600)
+
+    def test_a_reset_password_does_not_make_a_created_account_linkable(self, identity):
+        sso_on(identity)
+        created, _ = identity.auth.create(choice(identity, "P0000001"), PROOF, session_seconds=600)
+        assert row(identity, "SELECT sso_linked_at FROM users WHERE id=?", (created.id,))["sso_linked_at"] is not None
+        identity.admin_reset_user_password("user-local", created.id, "reset-pw")
+        pending = choice(identity, "W0012345", subject="employee-8")
+        with pytest.raises(AuthStoreError, match="link_target_linked"):
+            identity.auth.link(pending, PROOF, "P0000001", "reset-pw", session_seconds=600)
+
+    def test_direct_sign_in_marks_the_account_once(self, identity):
+        user, _ = identity.register_user_with_session("a12345678", "pw")
+        sso_on(identity)
+        complete(identity, "a12345678")
+        first = row(identity, "SELECT sso_linked_at FROM users WHERE id=?", (user.id,))["sso_linked_at"]
+        assert first is not None
+        complete(identity, "a12345678")
+        assert row(identity, "SELECT sso_linked_at FROM users WHERE id=?", (user.id,))["sso_linked_at"] == first
+
+    def test_an_administrator_corrects_a_mistaken_new_account(self, identity):
+        """The documented order: disable the mistaken account and give it
+        another name, then give the old account the employee number; the next
+        unified login signs in the old account directly."""
+        host = sso_on(identity)
+        host.enabled = False
+        old, _ = identity.register_user_with_session("a12345678", "pw")
+        host.enabled = True
+        mistaken, _ = identity.auth.create(choice(identity, "W0012345"), PROOF, session_seconds=600)
+        identity.auth.set_account_status(mistaken.id, "disabled", actor_id="user-local")
+        identity.auth.set_username(mistaken.id, "W0012345-mistaken", actor_id="user-local")
+        identity.auth.set_username(old.id, "W0012345", actor_id="user-local")
+        assert row(identity, "SELECT sso_linked_at FROM users WHERE id=?", (old.id,))["sso_linked_at"] is None
+        result = complete(identity, "W0012345")
+        assert (result["status"], result["user"].id) == ("authenticated", old.id)
+        assert row(identity, "SELECT sso_linked_at FROM users WHERE id=?", (old.id,))["sso_linked_at"] is not None
+
+    def test_provider_username_follows_the_account_name_rule(self, identity):
+        sso_on(identity)
+        for bad in (" W0012345", "W0012345 ", "W00\x0712345", "W" * 513):
+            with pytest.raises(AuthStoreError, match="invalid_identity"):
+                handoff(identity, bad)
+
+    def test_registration_refuses_a_name_whose_placeholder_email_is_held(self, identity):
+        user, _ = identity.register_user_with_session("a12345678", "pw")
+        identity.auth.set_username(user.id, "W0012345", actor_id="user-local")
+        with pytest.raises(ValueError, match="username already exists"):
+            identity.register_user_with_session("a12345678", "pw")
+
+    def test_sso_admin_presence_ignores_the_builtin_administrator(self, identity):
+        assert not identity.auth.has_sso_admin()
+        user, _ = identity.register_user_with_session("a12345678", "pw")
+        identity.set_user_role("user-local", user.id, "admin")
+        assert identity.auth.has_sso_admin()
+        identity.auth.set_account_status(user.id, "disabled", actor_id="user-local")
+        assert not identity.auth.has_sso_admin()
+
     def test_link_and_create_are_stale_once_the_name_exists(self, identity):
         host = sso_on(identity)
         host.enabled = False
@@ -229,7 +303,7 @@ class AuthStoreContract:
         identity.register_user_with_session("a12345678", "pw")
         host.enabled = True
         pending = choice(identity, "A12345678")
-        with pytest.raises(AuthStoreError, match="username_conflict"):
+        with pytest.raises(AuthStoreError, match="username_case_conflict"):
             identity.auth.create(pending, PROOF, session_seconds=600)
 
     def test_concurrent_choices_commit_one_account(self, identity):

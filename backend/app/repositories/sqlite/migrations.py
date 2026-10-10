@@ -290,8 +290,9 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # v92 (paired with PostgreSQL 0072_auth_simplify.sql) drops the staged-cutover
 # authentication policy (auth_policy, auth_policy_audit), the
 # external_identities mapping, users.local_login_name and
-# auth_identity_audit.grant_reference, and empties auth_transactions. See
-# ``_migration_92``.
+# auth_identity_audit.grant_reference, and empties auth_transactions; it adds
+# users.sso_linked_at (nullable TEXT, no backfill) and the unique
+# idx_users_username_lower over lower(username). See ``_migration_92``.
 SCHEMA_VERSION = 92
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
@@ -5717,8 +5718,19 @@ class SqliteMigrator:
         a new payload shape and are discarded. An external login now signs in
         the account whose username equals the provider username, and unified
         authentication follows the provider plugin switch rather than a stored
-        policy. The whole change and the version stamp share one BEGIN
-        IMMEDIATE transaction; every step tolerates a re-run.
+        policy.
+
+        Adds ``users.sso_linked_at`` (nullable TEXT, no backfill: when the
+        account first signed in through unified authentication; an account
+        that carries it can no longer be claimed through the link step) and
+        the unique ``idx_users_username_lower`` over ``lower(username)``,
+        which keeps the case-insensitive local-login lookup to one row in
+        place of the dropped ``idx_users_local_login_name``. Names that differ
+        only by letter case refuse the upgrade with a readable error rather
+        than letting the index build fail anonymously or picking one.
+
+        The whole change and the version stamp share one BEGIN IMMEDIATE
+        transaction; every step tolerates a re-run.
         """
         with self.database.write(operation="sqlite.migration.92") as db:
             self.database.begin_immediate(db)
@@ -5733,6 +5745,23 @@ class SqliteMigrator:
                 if column in columns:
                     db.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
             db.execute("DELETE FROM auth_transactions")
+            self.add_column_if_missing(db, "users", "sso_linked_at", "TEXT")
+            clashes = [
+                row[0] for row in db.execute(
+                    "SELECT lower(username) FROM users WHERE username<>'' "
+                    "GROUP BY lower(username) HAVING count(*)>1 ORDER BY 1"
+                )
+            ]
+            if clashes:
+                raise RuntimeError(
+                    "SQLite v92: usernames that differ only by letter case must "
+                    "be resolved before upgrading (rename all but one of each, "
+                    "then start again): " + ", ".join(clashes)
+                )
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower "
+                "ON users(lower(username)) WHERE username<>''"
+            )
             db.execute("PRAGMA user_version = 92")
 
     def migrate(self) -> list[int]:

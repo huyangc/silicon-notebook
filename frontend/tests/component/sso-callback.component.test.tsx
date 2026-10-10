@@ -222,3 +222,41 @@ test("cancel: a failed discard still returns to login (the choice expires on its
   await userEvent.setup().click(await screen.findByRole("button", { name: "返回登录" }));
   await waitFor(() => expect(replace).toHaveBeenCalledWith("/"));
 });
+
+test("link: a voided choice (410) shows the backend text, locks link and create, leaves only return to login", async () => {
+  window.history.replaceState(null, "", "/auth/sso/callback?code=handoff");
+  mocks.completeSsoLogin.mockResolvedValue(choice);
+  mocks.linkSsoAccount.mockRejectedValueOnce(humanizedError("本次选择已过期，请返回登录重新开始", 410));
+  render(<SsoCallbackPage />);
+  const actor = userEvent.setup();
+
+  await actor.type(await screen.findByLabelText("老账号用户名"), "a12345678");
+  await actor.type(screen.getByLabelText("老账号密码"), "pw");
+  await actor.click(screen.getByRole("button", { name: "关联并登录" }));
+  await waitFor(() => expect(screen.getByRole("form", { name: "关联老账号" })).toHaveTextContent("本次选择已过期，请返回登录重新开始"));
+  expect(screen.getByRole("button", { name: "关联并登录" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "使用新账号" })).toBeDisabled();
+  expect(screen.getByLabelText("老账号用户名")).toBeDisabled();
+  expect(screen.getByRole("button", { name: "返回登录" })).toBeEnabled();
+});
+
+test("create: a voided choice (410) locks everything but return to login; 409 stays retryable", async () => {
+  window.history.replaceState(null, "", "/auth/sso/callback?code=handoff");
+  mocks.completeSsoLogin.mockResolvedValue(choice);
+  mocks.createSsoAccount
+    .mockRejectedValueOnce(humanizedError("本站已有只差大小写的同名账号，请选择「关联老账号」", 409))
+    .mockRejectedValueOnce(humanizedError("本次选择已被使用", 410));
+  render(<SsoCallbackPage />);
+  const actor = userEvent.setup();
+
+  await actor.click(await screen.findByRole("button", { name: "使用新账号" }));
+  await waitFor(() => expect(screen.getByRole("region", { name: "不关联，使用新账号" })).toHaveTextContent("只差大小写的同名账号"));
+  expect(screen.getByRole("button", { name: "使用新账号" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "关联并登录" })).toBeEnabled();
+
+  await actor.click(screen.getByRole("button", { name: "使用新账号" }));
+  await waitFor(() => expect(screen.getByRole("region", { name: "不关联，使用新账号" })).toHaveTextContent("本次选择已被使用"));
+  expect(screen.getByRole("button", { name: "使用新账号" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "关联并登录" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "返回登录" })).toBeEnabled();
+});

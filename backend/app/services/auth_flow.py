@@ -15,14 +15,36 @@ AUTH_FRONTEND_CALLBACK_PATH = "/auth/sso/callback"
 AUTH_DEFAULT_PROVIDER_LABEL = "统一认证"
 
 
+def check_unified_auth_settings(settings: Settings) -> None:
+    """The deployment settings unified authentication needs, checked without
+    a provider: at startup for an enabled provider, and by the administrator
+    switch before it turns a provider plugin on."""
+    if settings.auth_optional:
+        raise AuthProviderError("anonymous_auth_forbidden")
+    if not settings.auth_public_base_url:
+        raise AuthProviderError("callback_not_configured")
+    frontend = settings.auth_frontend_base_url or settings.auth_public_base_url
+    # Browser proof uses a host-only SameSite cookie. A public reverse proxy
+    # keeps the browser and callback on the same host, including local ports.
+    # Same scheme too: the cookie is Secure exactly when the public origin is https.
+    public = urlsplit(settings.auth_public_base_url)
+    if (urlsplit(frontend).hostname, urlsplit(frontend).scheme) != (public.hostname, public.scheme):
+        raise AuthProviderError("callback_origin_mismatch")
+    if settings.environment.lower() in {"prod", "production"} and not (
+        settings.auth_allow_insecure_http
+    ) and (urlsplit(frontend).scheme != "https" or public.scheme != "https"):
+        raise AuthProviderError("https_required")
+
+
 class AuthFlowService:
+    """Per-request orchestration. It never attaches the provider to the store:
+    the composition root does that once (``create_application_repository``),
+    so building a flow never mutates shared state."""
+
     def __init__(self, store, host: AuthProviderHostPort, settings: Settings):
         self.store = store
         self.host = host
         self.settings = settings
-        # The store reads "unified auth is on" from this same host, so session
-        # resolution and local-credential refusals follow the provider switch.
-        store.use_provider(host)
 
     def validate_configuration(self):
         """The enabled provider's descriptor, or None while local login applies.
@@ -33,24 +55,7 @@ class AuthFlowService:
         descriptor = self.host.describe()
         if descriptor is None:
             return None
-        if self.settings.auth_optional:
-            raise AuthProviderError("anonymous_auth_forbidden")
-        if not self.settings.auth_public_base_url:
-            raise AuthProviderError("callback_not_configured")
-        frontend = self.settings.auth_frontend_base_url or self.settings.auth_public_base_url
-        # Browser proof uses a host-only SameSite cookie. A public reverse proxy
-        # keeps the browser and callback on the same host, including local ports.
-        # Same scheme too: the cookie is Secure exactly when the public origin is https.
-        public = urlsplit(self.settings.auth_public_base_url)
-        if (urlsplit(frontend).hostname, urlsplit(frontend).scheme) != (public.hostname, public.scheme):
-            raise AuthProviderError("callback_origin_mismatch")
-        if self.settings.environment.lower() in {"prod", "production"} and not (
-            self.settings.auth_allow_insecure_http
-        ) and (
-            urlsplit(frontend).scheme != "https"
-            or urlsplit(self.settings.auth_public_base_url).scheme != "https"
-        ):
-            raise AuthProviderError("https_required")
+        check_unified_auth_settings(self.settings)
         self.host.ensure_available()
         return descriptor
 

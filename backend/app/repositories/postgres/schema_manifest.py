@@ -447,7 +447,8 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # SQLite v92 / PostgreSQL 0072 drop auth_policy, auth_policy_audit,
 # external_identities (with idx_external_identities_active_user),
 # users.local_login_name (with idx_users_local_login_name) and
-# auth_identity_audit.grant_reference.
+# auth_identity_audit.grant_reference, and add users.sso_linked_at (nullable,
+# no backfill) plus the unique idx_users_username_lower over lower(username).
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
     sqlite_version=92,
     postgres_version=72,

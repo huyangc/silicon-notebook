@@ -466,6 +466,68 @@ def test_patch_survives_a_refresh_failure(
     assert _deployment_row(body)["runtime_enabled"] is False
 
 
+def _as_auth_provider_plugin(client: TestClient) -> None:
+    """Make corp.sample project an ``auth.provider`` contribution, as the
+    unified-authentication plugin does; nothing else about it changes."""
+    from dataclasses import replace
+
+    from app.extensions.admin_projection import AdminExtensionContributionProjection
+
+    original = client.app.state.extension_admin_projection
+
+    def projection():
+        return tuple(
+            replace(row, contributions=(
+                *row.contributions,
+                AdminExtensionContributionProjection("corp.sample.auth", "auth.provider", "provider"),
+            )) if row.id == _DEPLOYMENT_PLUGIN_ID else row
+            for row in original()
+        )
+
+    client.app.state.extension_admin_projection = projection
+
+
+def test_enabling_an_auth_provider_plugin_refuses_a_lockout(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    """Turning unified authentication on must not lock everyone out: the
+    deployment settings must be usable and an administrator other than the
+    built-in one (unusable under unified authentication) must exist. Turning
+    it off is never refused."""
+    client = _deployment_plugin_client(tmp_path, monkeypatch)
+    _as_auth_provider_plugin(client)
+    headers = _auth_admin(client)
+    url = f"/api/admin/extensions/{_DEPLOYMENT_PLUGIN_ID}"
+    assert client.patch(url, json={"enabled": False}, headers=headers).status_code == 200
+
+    unconfigured = client.patch(url, json={"enabled": True}, headers=headers)
+    assert unconfigured.status_code == 409
+    assert "AUTH_PUBLIC_BASE_URL" in unconfigured.json()["detail"]
+    assert unconfigured.headers["X-User-Message"] == "1"
+
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("AUTH_PUBLIC_BASE_URL", "http://localhost")
+    get_settings.cache_clear()
+    _auth(client)
+    no_admin = client.patch(url, json={"enabled": True}, headers=headers)
+    assert no_admin.status_code == 409
+    assert no_admin.json()["detail"].startswith("不能启用统一认证：站内还没有内置管理员以外的在用管理员")
+    # Neither refusal wrote the switch.
+    assert _deployment_row(
+        client.get("/api/admin/extensions", headers=headers).json()
+    )["runtime_enabled"] is False
+
+    users = client.get("/api/admin/users", headers=headers).json()
+    user_id = next(row["id"] for row in users if row["username"] == "z00998877")
+    assert client.patch(
+        f"/api/admin/users/{user_id}/role", headers=headers, json={"role": "admin"}
+    ).status_code == 200
+    enabled = client.patch(url, json={"enabled": True}, headers=headers)
+    assert enabled.status_code == 200, enabled.text
+    assert enabled.json()["runtime_enabled"] is True
+
+
 def test_system_extensions_response_is_unchanged(client):
     """The pre-existing /system/extensions surface must not shift shape."""
 

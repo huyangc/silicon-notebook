@@ -19,6 +19,7 @@ from app.api.deps import (
 )
 from app.core.cache import CacheAdmin, make_cache_backend
 from app.core.config import get_settings
+from app.domain.auth_provider import AuthProviderError
 from app.domain.memory_kg_isolation import PromotionRefused
 from app.domain.share_disclosure import without_memory_record
 from app.models.admin import (
@@ -75,6 +76,7 @@ from app.services.extension_toggles import (
     refresh_extension_admission,
 )
 from app.services.model_status import ModelStatusService
+from app.services.auth_flow import check_unified_auth_settings
 from app.services.source_display import source_display_title
 from app.repositories.identity_errors import (
     AuthStoreError,
@@ -1019,6 +1021,44 @@ def list_admin_extensions(
 # 进程内「写库 + 发布」的串行闸（用途与取舍见 handler 内注释）。
 _RUNTIME_TOGGLE_WRITE_LOCK = threading.Lock()
 
+# 扩展点名的字面量（api 层不 import 扩展 SDK）：提供它的插件一启用，统一认证就开启。
+_AUTH_PROVIDER_POINT = "auth.provider"
+_UNIFIED_AUTH_ENABLE_REFUSALS = {
+    "anonymous_auth_forbidden": (
+        "不能启用统一认证：当前部署开启了匿名访问（SILICON_NOTEBOOK_AUTH_OPTIONAL），"
+        "请先在部署配置中关闭并重启。"
+    ),
+    "callback_not_configured": (
+        "不能启用统一认证：部署配置缺少统一认证回调地址（AUTH_PUBLIC_BASE_URL）。"
+    ),
+    "callback_origin_mismatch": (
+        "不能启用统一认证：前端地址（AUTH_FRONTEND_BASE_URL）与回调地址"
+        "（AUTH_PUBLIC_BASE_URL）的协议或主机不一致。"
+    ),
+    "https_required": (
+        "不能启用统一认证：生产环境的前端与回调地址必须使用 https"
+        "（或在部署配置中显式设置 AUTH_ALLOW_INSECURE_HTTP）。"
+    ),
+    "no_sso_admin": (
+        "不能启用统一认证：站内还没有内置管理员以外的在用管理员。内置管理员在统一认证下"
+        "无法登录，请先把一个能经统一认证进入的账号（用户名就是其工号）设为管理员。"
+    ),
+}
+
+
+def _require_unified_auth_ready() -> None:
+    """启用 auth.provider 插件前的防锁死预检：按「该插件已启用」检查部署配置，
+    并要求至少一名非内置的在用管理员。不通过就 409、不写行；停用不受限。"""
+    try:
+        check_unified_auth_settings(get_settings())
+        code = "" if identity_repository().auth.has_sso_admin() else "no_sso_admin"
+    except AuthProviderError as exc:
+        code = exc.code
+    if code:
+        raise user_error(409, _UNIFIED_AUTH_ENABLE_REFUSALS.get(
+            code, "不能启用统一认证：部署配置不满足要求，请检查后重试。"
+        ))
+
 
 @router.patch(
     "/admin/extensions/{plugin_id}", response_model=AdminExtensionRuntimeResult
@@ -1045,15 +1085,22 @@ def update_admin_extension_runtime(
     更早的快照。刷新失败是防御性的：写已经落库，只是这一个进程的内存快照要
     等下一轮轮询才追上——见下面的 ``except`` 分支。
     """
+    # 启用一个提供 auth.provider 的插件就是开启统一认证：先过
+    # _require_unified_auth_ready 防锁死预检，不通过 409 且不写行；停用不设限
+    # （停用即回到本地登录）。（写在注释里：docstring 是冻结的 OpenAPI 描述。）
     if user.role != "admin":
         raise user_error(403, "仅管理员可管理扩展运行时开关")
-    loaded_deployment_ids = {
-        row.id
+    loaded_deployment = {
+        row.id: row
         for row in _extension_admin_projection(request)
         if row.trust == "deployment"
     }
-    if plugin_id not in loaded_deployment_ids:
+    if plugin_id not in loaded_deployment:
         raise user_error(404, "该扩展不存在或不支持运行时开关")
+    enables_unified_auth = payload.enabled and any(
+        item.point == _AUTH_PROVIDER_POINT
+        for item in loaded_deployment[plugin_id].contributions
+    )
     store = extension_toggle_repository()
     # 「写库 + 发布」在本进程内串行化（codex #635 R5 P2）：两个管理员并发改同
     # 一个插件、且较早那次的回读恰好失败时，若不加锁，较早请求的本地回退会
@@ -1061,6 +1108,8 @@ def update_admin_extension_runtime(
     # 这一类倒置在进程内就不可能发生；跨进程的并发写本就按轮询收敛（成文
     # 契约）。管理员开关是低频操作，这把锁没有吞吐代价。
     with _RUNTIME_TOGGLE_WRITE_LOCK:
+        if enables_unified_auth:
+            _require_unified_auth_ready()
         try:
             row = store.set_extension_runtime_enabled(
                 plugin_id, payload.enabled, user.id

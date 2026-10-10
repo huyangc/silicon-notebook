@@ -1128,6 +1128,7 @@
         "password_salt": "<password_salt>",
         "role": "user",
         "seen_release_ordinal": null,
+        "sso_linked_at": null,
         "status": "active",
         "updated_at": "<timestamp>",
         "username": "a00123456"
@@ -1144,6 +1145,7 @@
         "password_salt": "<password_salt>",
         "role": "admin",
         "seen_release_ordinal": null,
+        "sso_linked_at": null,
         "status": "active",
         "updated_at": "<timestamp>",
         "username": "admin"
@@ -1160,6 +1162,7 @@
         "password_salt": "<password_salt>",
         "role": "user",
         "seen_release_ordinal": null,
+        "sso_linked_at": null,
         "status": "active",
         "updated_at": "<timestamp>",
         "username": "b00654321"
@@ -1919,6 +1922,11 @@
         "type": "index"
       },
       {
+        "name": "idx_users_username_lower",
+        "sql_sha256": "487bfe99325a169febfccbc9ea24f2898b4aa7d3b7215389658fffc18e94d38d",
+        "type": "index"
+      },
+      {
         "name": "idx_wish_votes_user",
         "sql_sha256": "fc17d6f8463bc757991c169375df664128173d11b02d998588d9bccc7c5469da",
         "type": "index"
@@ -2540,7 +2548,7 @@
       },
       {
         "name": "users",
-        "sql_sha256": "20d9c769165a5d70b7c2b01791756346b9290bd41782887071fd4388669ad855",
+        "sql_sha256": "c1d17b3010c3a061cb8612f9ab684cca8542dbf6a503aecf39f23e71d4d179d7",
         "type": "table"
       },
       {

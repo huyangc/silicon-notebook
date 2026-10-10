@@ -5398,7 +5398,9 @@ MIGRATION_MANIFEST[(90, 91)] = {
 # matters: they expire within minutes). A lineage below v78 never sees those
 # objects at all, so they leave its "added" sets; a lineage from v78 on drops
 # them through the allowlists. auth_identity_audit keeps SQLite's DROP COLUMN
-# rewrite of the v78 text.
+# rewrite of the v78 text. Every lineage gains the nullable
+# users.sso_linked_at (no backfill) and the unique idx_users_username_lower
+# over lower(username).
 AUTH_SIMPLIFY_DROPPED_TABLES = frozenset(
     {"auth_policy", "auth_policy_audit", "external_identities"}
 )
@@ -5409,6 +5411,15 @@ AUTH_SIMPLIFY_DROPPED_COLUMNS = {
     "users": frozenset({"local_login_name"}),
     "auth_identity_audit": frozenset({"grant_reference"}),
 }
+AUTH_SIMPLIFY_USER_COLUMNS = {
+    "sso_linked_at": ("sso_linked_at", "TEXT", 0, None, 0),
+}
+AUTH_SIMPLIFY_INDEXES = {
+    "idx_users_username_lower": (
+        "CREATE UNIQUE INDEX idx_users_username_lower "
+        "ON users(lower(username)) WHERE username<>''"
+    ),
+}
 AUTH_IDENTITY_AUDIT_TABLE_V92 = AUTH_SUNSET_SCHEMA["tables"][
     "auth_identity_audit"
 ].replace("subject TEXT NOT NULL, grant_reference TEXT NOT NULL DEFAULT '',\n"
@@ -5417,6 +5428,17 @@ assert AUTH_IDENTITY_AUDIT_TABLE_V92 != AUTH_SUNSET_SCHEMA["tables"]["auth_ident
 
 
 def _auth_simplify_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    manifest = {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "users": {
+                **manifest["columns"].get("users", {}),
+                **AUTH_SIMPLIFY_USER_COLUMNS,
+            },
+        },
+        "indexes": {**manifest["indexes"], **AUTH_SIMPLIFY_INDEXES},
+    }
     if "auth_policy" in manifest["tables"]:
         return {
             **manifest,
@@ -5459,7 +5481,8 @@ MIGRATION_MANIFEST = {
     for key, manifest in MIGRATION_MANIFEST.items()
 }
 MIGRATION_MANIFEST[(91, 92)] = {
-    "tables": {}, "columns": {}, "indexes": {}, "triggers": {}, "views": {},
+    "tables": {}, "columns": {"users": AUTH_SIMPLIFY_USER_COLUMNS},
+    "indexes": AUTH_SIMPLIFY_INDEXES, "triggers": {}, "views": {},
     "dropped_tables": AUTH_SIMPLIFY_DROPPED_TABLES,
     "dropped_indexes": AUTH_SIMPLIFY_DROPPED_INDEXES,
     "dropped_columns": AUTH_SIMPLIFY_DROPPED_COLUMNS,

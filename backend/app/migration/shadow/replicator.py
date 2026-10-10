@@ -183,6 +183,22 @@ _UNIQUE_PREDICATES = {
 }
 
 
+# Unique indexes over an expression rather than plain columns. Parking rewrites
+# a column value, which cannot be aimed at an expression key, so these get no
+# parking surface: a conflict on one stays deferred and stops the run like any
+# other unparkable conflict. The source enforces the same index, so only a
+# transient rename cycle can reach it. Pinned by name with the exact key and
+# predicate tokens, so a new expression index still fails closed until it is
+# reviewed here.
+_EXPRESSION_UNIQUE_INDEXES = {
+    # SQLite v92 / PostgreSQL 0072: case-insensitive username uniqueness.
+    "idx_users_username_lower": (
+        (("lower", "username", "collate", '"C"'),),
+        ("username", "<>", "''"),
+    ),
+}
+
+
 class Direction(StrEnum):
     SQLITE_TO_POSTGRES = "sqlite_to_postgres"
     POSTGRES_TO_SQLITE = "postgres_to_sqlite"
@@ -611,10 +627,17 @@ def _build_unique_surfaces(manifest: Manifest) -> dict[str, _UniqueSurface]:
         if constraint.table in specs and constraint.kind in {"p", "u"}:
             raw.append((name, constraint.table, constraint.columns, None))
     seen_predicates: set[str] = set()
+    seen_expressions: set[str] = set()
     for name, index in EXPECTED_OPERATIONAL_INDEXES.items():
         if index.table not in specs:
             continue
         if not index.unique:
+            continue
+        expression_pin = _EXPRESSION_UNIQUE_INDEXES.get(name)
+        if expression_pin is not None:
+            if expression_pin != (index.keys, index.predicate_tokens):
+                raise ValueError(f"{_SCHEMA_LABEL} expression unique index pin drifted")
+            seen_expressions.add(name)
             continue
         columns: list[str] = []
         for key in index.keys:
@@ -631,6 +654,8 @@ def _build_unique_surfaces(manifest: Manifest) -> dict[str, _UniqueSurface]:
         raw.append((name, index.table, tuple(columns), predicate))
     if seen_predicates != set(_UNIQUE_PREDICATES):
         raise ValueError(f"{_SCHEMA_LABEL} partial unique predicate pins drifted")
+    if seen_expressions != set(_EXPRESSION_UNIQUE_INDEXES):
+        raise ValueError(f"{_SCHEMA_LABEL} expression unique index pins drifted")
     for guard in replication_guard_specs(manifest):
         raw.append((guard.name, guard.table, guard.columns, None))
 

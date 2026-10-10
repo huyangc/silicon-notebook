@@ -21,21 +21,31 @@ def auth_flow() -> AuthFlowService:
     return AuthFlowService(identity_repository().auth, application_auth_provider(), get_settings())
 
 
-def _error(exc):
+_MESSAGES = {
+    "link_verification_failed": "用户名或密码错误",
+    "link_target_invalid": "该账号不能关联统一认证，请联系管理员。",
+    "link_target_linked": "该账号已关联过统一认证账号，不能再关联；如有疑问请联系管理员。",
+    "username_conflict": "统一认证账号名与本站已有账号冲突，请联系管理员处理。",
+    "username_case_conflict": "本站已有只差大小写的同名账号，请选择「关联老账号」并输入该账号的密码。",
+    "invalid_transaction": "认证操作已过期或已使用，请重新登录。",
+    "stale_transaction": "认证状态已变化，请重新登录。",
+    "external_auth_expired": "统一认证登录已过期，请重新登录。",
+    "account_inactive": "账号已停用，请联系管理员。",
+}
+# On the choice page these mean the pending choice is spent: 410 tells the
+# page to lock the form and offer only "back to login".
+_PENDING_GONE = frozenset({"invalid_transaction", "stale_transaction", "external_auth_expired"})
+
+
+def _error(exc, *, pending=False):
     # Both stores and providers expose closed, content-free categories. Unknown
     # values use a fixed message; no exception/HTTP response text leaves here.
     code = getattr(exc, "code", str(exc))
-    messages = {
-        "link_verification_failed": "用户名或密码错误",
-        "link_target_invalid": "该账号不能关联统一认证，请联系管理员。",
-        "username_conflict": "统一认证账号名与本站已有账号冲突，请联系管理员处理。",
-        "invalid_transaction": "认证操作已过期或已使用，请重新登录。",
-        "stale_transaction": "认证状态已变化，请重新登录。",
-        "external_auth_expired": "统一认证登录已过期，请重新登录。",
-        "account_inactive": "账号已停用，请联系管理员。",
-    }
-    return user_error(409 if not isinstance(exc, AuthProviderError) else 503,
-                      messages.get(code, "认证操作未完成，请重新尝试或联系管理员检查配置。"))
+    if isinstance(exc, AuthProviderError):
+        status = 503
+    else:
+        status = 410 if pending and code in _PENDING_GONE else 409
+    return user_error(status, _MESSAGES.get(code, "认证操作未完成，请重新尝试或联系管理员检查配置。"))
 
 
 def _origin(request, flow):
@@ -128,7 +138,7 @@ def link(payload: SsoLink, request: Request, response: Response):
         user, token = flow.link(payload.pending_id, _proof(request, flow),
                                 payload.login_name, payload.password)
     except (ValueError, AuthProviderError) as exc:
-        raise _error(exc) from None
+        raise _error(exc, pending=True) from None
     return AuthResult(user=user, token=token)
 
 
@@ -140,7 +150,7 @@ def create(payload: SsoChoice, request: Request, response: Response):
     try:
         user, token = flow.create(payload.pending_id, _proof(request, flow))
     except (ValueError, AuthProviderError) as exc:
-        raise _error(exc) from None
+        raise _error(exc, pending=True) from None
     return AuthResult(user=user, token=token)
 
 
