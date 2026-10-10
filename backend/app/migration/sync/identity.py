@@ -13,6 +13,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from app.domain.auth_utils import ascii_lower
+
 
 @dataclass(frozen=True)
 class UserProjection:
@@ -81,19 +83,6 @@ def build_user_mapping(
 
     unmatched.sort(key=lambda user: user.username)
     return UserMapping(matched=MappingProxyType(matched), unmatched=tuple(unmatched))
-
-
-_ASCII_LOWER = str.maketrans(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
-)
-
-
-def ascii_lower(value: str) -> str:
-    """Fold only A-Z to a-z. Deliberately not ``str.lower()``: the comparison
-    this serves predicts a collision on the target's lower(username) unique
-    index, and widening the fold to non-ASCII letters would flag pairs the
-    index does not treat as equal on every backend."""
-    return value.translate(_ASCII_LOWER)
 
 
 def case_variant_collisions(

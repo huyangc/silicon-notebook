@@ -26,6 +26,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Callable, Iterator, Optional, Sequence
 
+from app.domain.auth_utils import ascii_lower
 from app.domain.image_backfill import ImageBackfillConcurrentChange
 from app.repositories.chunk_elements import (
     decode_element_ids,
@@ -198,8 +199,8 @@ class SQLiteMaintenanceAdapter:
                 if not owner:
                     return None
                 candidates = db.execute(
-                    "SELECT * FROM users WHERE lower(username)=lower(?)",
-                    (owner,),
+                    "SELECT * FROM users WHERE lower(username)=?",
+                    (ascii_lower(owner),),
                 ).fetchall()
                 if len(candidates) != 1:
                     return None

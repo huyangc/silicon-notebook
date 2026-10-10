@@ -17,7 +17,7 @@ import json
 import secrets
 import time
 
-from app.domain.auth_utils import PASSWORD_HASH_ITERATIONS, normalize_username, verify_password
+from app.domain.auth_utils import PASSWORD_HASH_ITERATIONS, ascii_lower, username_lookup_key, verify_password
 from app.domain.auth_provider import (
     AUTH_PROVIDER_SUBJECT_MAX_CHARS, AUTH_PROVIDER_USERNAME_MAX_CHARS,
     AUTH_PROVIDER_DISPLAY_NAME_MAX_CHARS, AUTH_PROVIDER_NAMESPACE_MAX_CHARS,
@@ -107,9 +107,10 @@ class AuthStore:
         return self.identity._user_profile(user, row)
 
     def local_account(self, db, login_name, *, for_update=False):
-        """The one account a local login name names (case-insensitive)."""
+        """The one account a local login name names (ASCII case-insensitive,
+        folded as SQL lower(username) folds: ``Ä123`` matches only ``Ä123``)."""
         sql = "SELECT * FROM users WHERE lower(username)=?" + (" FOR UPDATE" if for_update and self.postgres else "")
-        return self._execute(db, sql, (normalize_username(login_name),)).fetchone()
+        return self._execute(db, sql, (username_lookup_key(login_name),)).fetchone()
 
     def owner_eligible(self, user_id):
         with self.database.connect() as db:
@@ -194,8 +195,8 @@ class AuthStore:
         account also needs its placeholder email free: an administrator rename
         keeps the email minted from the old name, so registering that old name
         again must read as "name taken", not as a unique-constraint crash."""
-        sql = "SELECT id FROM users WHERE id<>? AND (lower(username)=lower(?)"
-        params = [user_id, username]
+        sql = "SELECT id FROM users WHERE id<>? AND (lower(username)=?"
+        params = [user_id, ascii_lower(username)]
         if email is not None:
             sql += " OR email=?"
             params.append(email)
@@ -318,7 +319,7 @@ class AuthStore:
         case variant is one the person can resolve by linking that account.
         idx_users_username_lower keeps the holder to at most one row."""
         holder = self._execute(
-            db,"SELECT id,username FROM users WHERE id<>? AND lower(username)=lower(?)",(user_id,username),
+            db,"SELECT id,username FROM users WHERE id<>? AND lower(username)=?",(user_id,ascii_lower(username)),
         ).fetchone()
         if holder is None:
             return
