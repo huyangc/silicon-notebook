@@ -56,12 +56,18 @@ def _service(
     )
 
 
+_REPORT_WORKLOADS = (
+    "report_outline", "report_sufficiency", "report_section", "report_summary",
+)
+
+
 def _registry(
     *,
     maximum: int = 2,
     chat_model: str = "",
     thinking_modes=None,
     bind_reasoning: bool = False,
+    bind_report: bool = False,
 ) -> SystemModelServiceRegistry:
     services = {
         "chat": _service("chat", "chat", maximum, model=chat_model),
@@ -79,6 +85,8 @@ def _registry(
     }
     if bind_reasoning:
         bindings["reasoning_agent"] = "chat"
+    if bind_report:
+        bindings.update(dict.fromkeys(_REPORT_WORKLOADS, "chat"))
     return SystemModelServiceRegistry(
         services, bindings, thinking_modes
     )
@@ -699,6 +707,76 @@ def test_every_workload_reads_a_duplicated_opening_as_the_object_written():
             ("escaped", "stray_backslash"), ("trimmed", "duplicated_open"),
         ]
         assert "增益" not in json.dumps(events.events, ensure_ascii=False)
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize(
+    ("workload", "raw", "schema", "expected"),
+    [
+        (
+            "report_section",
+            '{"markdown": "正文 [k1]。" "grounded": true,}',
+            '{"markdown":"","grounded":true}',
+            {"markdown": "正文 [k1]。", "grounded": True},
+        ),
+        (
+            "report_outline",
+            '{"sections": [{"title": "一", "scope": "a"} {"title": "二", "scope": "b"}]}',
+            '{"sections":[{"title":"","scope":""}]}',
+            {"sections": [
+                {"title": "一", "scope": "a"}, {"title": "二", "scope": "b"},
+            ]},
+        ),
+        (
+            "report_sufficiency",
+            "{verdicts: [{title: '一', sufficiency: '充足'}]}",
+            '{"verdicts":[{"title":"","sufficiency":""}]}',
+            {"verdicts": [{"title": "一", "sufficiency": "充足"}]},
+        ),
+        (
+            "report_summary",
+            '{"summary": "总结 [k1]。", "coverage": [],}',
+            '{"summary":"","coverage":[]}',
+            {"summary": "总结 [k1]。", "coverage": []},
+        ),
+    ],
+)
+def test_deep_report_workloads_repair_complete_json_syntax_faults(
+    workload, raw, schema, expected,
+):
+    events = _EventLog()
+    provider = _provider(
+        registry=_registry(bind_report=True), chat=_Chat(raw), events=events,
+    )
+    try:
+        delivered = provider.chat(workload).chat_json([], schema)
+
+        assert json.loads(delivered) == expected
+        repair = next(
+            event for event in events.events
+            if event.get("kind") == "model_json_repair"
+        )
+        assert repair["status"] == "repaired"
+        assert repair["workload_id"] == workload
+    finally:
+        provider.close()
+
+
+def test_deep_report_repair_never_shortens_a_section_body():
+    provider = _provider(
+        registry=_registry(bind_report=True),
+        chat=_Chat(
+            '{"markdown": "第一段 [k1]。" "第二段 [k2]。", "grounded": true}'
+        ),
+    )
+    try:
+        with pytest.raises(provider_mod.ModelInvocationError) as caught:
+            provider.chat("report_section").chat_json(
+                [], '{"markdown":"","grounded":true}'
+            )
+
+        assert caught.value.code == "malformed_response"
     finally:
         provider.close()
 

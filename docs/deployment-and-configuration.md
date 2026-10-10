@@ -1551,10 +1551,13 @@ Professional workbook analysis is deployment-controlled by
 controls both the issue read boundary and quarantine-copy lifetime. Exact defaults and
 validation ranges live in the [Product and API reference](./product-and-api.md#professional-excel-analysis-and-automatic-parsing-issue-archive).
 
-`MODEL_JSON_REPAIR_MODE` applies only to `reasoning_agent` and `ask_answer`.
+`MODEL_JSON_REPAIR_MODE` applies only to `reasoning_agent`, `ask_answer` and the Deep
+Report workloads (`report_outline`, `report_sufficiency`, `report_section`,
+`report_summary`).
 `off` keeps strict rejection, `shadow` records whether a response would be safely
 repairable but still rejects it, and `on` accepts conservative repairs (the default).
-It does not complete truncated output or relax schema/type/prose safety checks.
+It does not complete truncated output or relax schema/type/prose safety checks, and
+a repair may restore delimiters only: it never drops, moves or authors text.
 Independent of this setting, every chat workload accepts a complete object followed
 only by stray closing punctuation (recorded as `model_json_repair` `status: "trimmed"`)
 and reads a backslash that starts no JSON escape, such as LaTeX `50\%`, as the

@@ -71,7 +71,17 @@ _WORKER_ENVIRONMENT_VARIABLES = ("WEB_CONCURRENCY", "UVICORN_WORKERS")
 _MODEL_CONFIG_RELOAD_INTERVAL_SECONDS = 1.0
 logger = logging.getLogger("silicon_notebook.model_provider")
 
-_JSON_REPAIR_WORKLOADS = frozenset({"reasoning_agent", "ask_answer"})
+# Deep Report joins Ask: a repair restores delimiters only (the token
+# sequence the model wrote must survive it, see ``model_json``), so a long
+# section body cannot come back shortened.
+_JSON_REPAIR_WORKLOADS = frozenset({
+    "reasoning_agent",
+    "ask_answer",
+    "report_outline",
+    "report_sufficiency",
+    "report_section",
+    "report_summary",
+})
 
 _MODEL_SCHEMA_FAILURE_REASONS = frozenset({
     "invalid_type",

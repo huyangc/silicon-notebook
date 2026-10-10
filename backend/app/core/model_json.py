@@ -671,6 +671,80 @@ def _validate_repaired_shape(
         elif isinstance(item, dict):
             pending.extend(item.values())
     _assert_json_domain(value)
+    if _value_tokens(value) != _raw_tokens(raw):
+        raise ModelJsonRepairError("string_changed")
+
+
+# A bare token in the raw reply: anything up to whitespace, a JSON delimiter
+# or a quote (``_BARE_TOKEN_RE`` also spans quotes; it judges masked text).
+_RAW_BARE_TOKEN_RE = re.compile(r"""[^\s{}\[\]:,"']+""")
+
+
+def _token_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _value_tokens(value: Any) -> list[str]:
+    """Keys and scalar values of ``value`` in document order, as text."""
+    tokens: list[str] = []
+    pending: list[Any] = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            for key, child in reversed(list(item.items())):
+                pending.append(child)
+                pending.append(key)
+        elif isinstance(item, list):
+            pending.extend(reversed(item))
+        else:
+            tokens.append(_token_text(item))
+    return [token for token in tokens if token]
+
+
+def _raw_tokens(raw: str) -> list[str] | None:
+    """Keys and scalar values the model wrote, in order, or ``None``.
+
+    Repair may restore delimiters only. Every check before this one looks at
+    strings one at a time, so text could still move: two adjacent strings
+    (``"A" "B",``) came back as a value ``A`` and a key ``B","grounded`` --
+    the second paragraph and the field after it gone -- and a repeated key
+    kept only its last value. Comparing the whole sequence catches both: a
+    repair that drops, merges, splits, reorders or authors a token is
+    rejected. Strings decode as the delivered reply would (stray backslashes
+    literal); a string that cannot be decoded has no reading to compare.
+    Empty strings are skipped on both sides (``{"a":,"b":1}`` repairs to an
+    empty value, which authors no text).
+    """
+    text = _escape_stray_backslashes(raw)
+    tokens: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char.isspace() or char in "{}[]:,":
+            index += 1
+            continue
+        if char in {'"', "'"}:
+            end = index + 1
+            while end < len(text) and text[end] != char:
+                end += 2 if text[end] == "\\" else 1
+            body = text[index + 1:end]
+            if char == "'":
+                body = body.replace("\\'", "'").replace('"', '\\"')
+            try:
+                tokens.append(json.loads(f'"{body}"', strict=False))
+            except ValueError:
+                return None
+            index = end + 1
+            continue
+        match = _RAW_BARE_TOKEN_RE.match(text, index)
+        token = match.group()
+        if _JSON_NUMBER_RE.fullmatch(token):
+            token = _token_text(json.loads(token))
+        tokens.append(token)
+        index = match.end()
+    return [token for token in tokens if token]
 
 
 _DECODER = json.JSONDecoder()
