@@ -1123,7 +1123,6 @@
         "email": "a00123456@users.silicon-notebook.local",
         "id": "<user-id-1>",
         "last_seen_at": null,
-        "local_login_name": "a00123456",
         "password_hash": "<password_hash>",
         "password_iterations": 200000,
         "password_salt": "<password_salt>",
@@ -1140,7 +1139,6 @@
         "email": "local-user@silicon-notebook.dev",
         "id": "<user-id-2>",
         "last_seen_at": null,
-        "local_login_name": "admin",
         "password_hash": "<password_hash>",
         "password_iterations": 200000,
         "password_salt": "<password_salt>",
@@ -1157,7 +1155,6 @@
         "email": "b00654321@users.silicon-notebook.local",
         "id": "<user-id-3>",
         "last_seen_at": null,
-        "local_login_name": "b00654321",
         "password_hash": "<password_hash>",
         "password_iterations": 200000,
         "password_salt": "<password_salt>",
@@ -1394,11 +1391,6 @@
       {
         "name": "idx_element_embeddings_source",
         "sql_sha256": "1b8dd5c3a3b9639247543190697ab3d4e4c1de935b7805502cf3c7c9dac759cd",
-        "type": "index"
-      },
-      {
-        "name": "idx_external_identities_active_user",
-        "sql_sha256": "2b9a609cc3a8e59edefe37fb1b9ab757747a66e22f5c8997486afb01717b49b3",
         "type": "index"
       },
       {
@@ -1922,11 +1914,6 @@
         "type": "index"
       },
       {
-        "name": "idx_users_local_login_name",
-        "sql_sha256": "5ee07cb362c75be396e836af3e7f250d362233731df7528cee74025c1fc7329b",
-        "type": "index"
-      },
-      {
         "name": "idx_users_username",
         "sql_sha256": "611bc0564c5f43d8133c0338b59cf46700be365953340d3e662cd834a78b0140",
         "type": "index"
@@ -2023,17 +2010,7 @@
       },
       {
         "name": "auth_identity_audit",
-        "sql_sha256": "f1f4bf9c20482d432907ce82629487e983d685ac9d24ed193b7c93b536ac7963",
-        "type": "table"
-      },
-      {
-        "name": "auth_policy",
-        "sql_sha256": "84730facfa2be522284f89a0ae8d1552f05bd0d3c53dbe7222020e3a3d7e2022",
-        "type": "table"
-      },
-      {
-        "name": "auth_policy_audit",
-        "sql_sha256": "c78450af9b2a85d03039498e891adfae3b4a457989c29e6bac1653935715debf",
+        "sql_sha256": "3000cd24ef6e71e01a324ccd62fcd9400dbd9de383f2a9793023cfaf6a08d940",
         "type": "table"
       },
       {
@@ -2159,11 +2136,6 @@
       {
         "name": "extension_runtime_toggles",
         "sql_sha256": "256d7a9030fcd6673ed7ee5b5d3ac5a74ae917ad20330a32b34d1fb86a69afea",
-        "type": "table"
-      },
-      {
-        "name": "external_identities",
-        "sql_sha256": "4631fc48a785dcf0bbcceaa20c77014b9578956a0135478d575308b306c262b5",
         "type": "table"
       },
       {
@@ -2568,7 +2540,7 @@
       },
       {
         "name": "users",
-        "sql_sha256": "06f024431d71ceb2c309d481831f8c679bc6246c6a953e7a86344ac93c5cd037",
+        "sql_sha256": "20d9c769165a5d70b7c2b01791756346b9290bd41782887071fd4388669ad855",
         "type": "table"
       },
       {
@@ -3287,6 +3259,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 91
+    "user_version": 92
   }
 }

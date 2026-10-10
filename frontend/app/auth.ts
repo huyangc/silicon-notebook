@@ -30,56 +30,34 @@ export type AuthUser = {
   search_profile: unknown;
 };
 
-export type AuthMode = "local" | "dual" | "binding_required" | "sso_only" | "retired";
-
 /** Public, deployment-selected authentication surface.  The provider's private
  * protocol never crosses this boundary; the browser only receives a generic
- * capability and an optional display label for assistive text. */
+ * capability and an optional display label.  With unified authentication on,
+ * local_login and local_registration are both false. */
 export type AuthCapabilities = {
-  mode: AuthMode;
+  sso_login: boolean;
   local_login: boolean;
   local_registration: boolean;
-  sso_login: boolean;
-  binding_allowed: boolean;
   provider_label: string;
 };
 
-export type IdentityInfo = {
-  linked: boolean;
-  local_login_name: string | null;
-  external_username: string | null;
-  display_name: string | null;
-  /** True only for an SSO auto-enrolled account while local passwords still work. */
-  migration_available?: boolean;
+/** An SSO identity whose employee number matches no local username: the user
+ * either links an older password account or creates a new one. */
+export type SsoChoice = {
+  status: "choice_required";
+  pending_id: string;
+  external_username: string;
+  display_name: string;
 };
 
 export type SsoCompletion =
   | { status: "authenticated"; token: string; user: AuthUser }
-  | {
-    status: "binding_required";
-    pending_id: string;
-    local_login_name: string;
-    external_username: string;
-    display_name: string;
-  }
-  | {
-    status: "confirmation_required";
-    pending_id: string;
-    external_username: string;
-    display_name: string;
-    /** auto_enroll: an unmapped SSO login whose employee number matches no account. */
-    purpose: "enroll" | "recover" | "replace" | "auto_enroll";
-    target_user_id: string | null;
-    target_username: string | null;
-    previous_external_username?: string | null;
-  };
+  | SsoChoice;
 
 export const LOCAL_AUTH_CAPABILITIES: AuthCapabilities = {
-  mode: "local",
+  sso_login: false,
   local_login: true,
   local_registration: true,
-  sso_login: false,
-  binding_allowed: false,
   provider_label: "",
 };
 
@@ -126,8 +104,8 @@ export async function registerUser(
 export async function loginUser(
   username: string,
   password: string
-): Promise<{ token: string; user: AuthUser; migration_required?: boolean }> {
-  const result = await authFetch<{ token: string; user: AuthUser; migration_required?: boolean }>("/auth/login", { username, password });
+): Promise<{ token: string; user: AuthUser }> {
+  const result = await authFetch<{ token: string; user: AuthUser }>("/auth/login", { username, password });
   return { ...result, user: normalizeAuthUser(result.user) };
 }
 
@@ -137,45 +115,45 @@ export async function fetchAuthCapabilities(): Promise<AuthCapabilities> {
     tag: "auth",
     credentials: "include",
   });
-  const modes: readonly AuthMode[] = ["local", "dual", "binding_required", "sso_only", "retired"];
-  if (!modes.includes(result.mode)
+  if (typeof result.sso_login !== "boolean"
     || typeof result.local_login !== "boolean"
     || typeof result.local_registration !== "boolean"
-    || typeof result.sso_login !== "boolean"
-    || typeof result.binding_allowed !== "boolean"
     || typeof result.provider_label !== "string") {
     throw new TypeError("authentication capabilities response is invalid");
   }
-  return result;
+  return {
+    sso_login: result.sso_login,
+    local_login: result.local_login,
+    local_registration: result.local_registration,
+    provider_label: result.provider_label,
+  };
 }
 
-async function ssoStart(path: string, body: unknown): Promise<string> {
+/** Starts a browser-bound external sign-in.  It deliberately returns only an
+ * authorization URL; identity tokens remain in the server/plugin boundary. */
+export async function startSsoLogin(): Promise<string> {
   saveSsoReturnLocation();
-  const result = await requestJson<{ authorization_url: string }>(path, {
+  const result = await requestJson<{ authorization_url: string }>("/auth/sso/start", {
     tag: "auth",
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({}),
     credentials: "include",
   });
   if (!result.authorization_url) throw new TypeError("authentication redirect is missing");
   return result.authorization_url;
 }
 
-/** Starts a browser-bound external sign-in.  It deliberately returns only an
- * authorization URL; identity tokens remain in the server/plugin boundary. */
-export function startSsoLogin(): Promise<string> {
-  return ssoStart("/auth/sso/start", {});
-}
-
-export function startIdentityBinding(currentPassword: string): Promise<string> {
-  return ssoStart("/me/identity-binding/start", { current_password: currentPassword });
-}
-
-/** A deployment-issued, scoped one-time grant permits only enrollment or
- * recovery.  The browser never submits a target user ID. */
-export function startSsoGrant(grantToken: string, purpose: "enroll" | "recover" | "replace"): Promise<string> {
-  return ssoStart("/auth/sso/grant/start", { grant_token: grantToken, purpose });
+/** The pending SSO choice is bound to this browser's cookie, never to a token. */
+function ssoPendingRequest(path: string, body: unknown): Promise<{ token: string; user: AuthUser }> {
+  return requestJson<{ token: string; user: AuthUser }>(path, {
+    auth: "none",
+    tag: "auth",
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    credentials: "include",
+  }).then((result) => ({ ...result, user: normalizeAuthUser(result.user) }));
 }
 
 export async function completeSsoLogin(code: string): Promise<SsoCompletion> {
@@ -193,32 +171,20 @@ export async function completeSsoLogin(code: string): Promise<SsoCompletion> {
   return result;
 }
 
-export async function confirmIdentityBinding(pendingId: string): Promise<{ token: string; user: AuthUser }> {
-  const result = await requestJson<{ token: string; user: AuthUser }>("/me/identity-binding/confirm", {
-    tag: "auth",
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pending_id: pendingId }),
-    credentials: "include",
-  });
-  return { ...result, user: normalizeAuthUser(result.user) };
+/** Links an older password account to the pending SSO identity.  A wrong name
+ * or password leaves the pending choice usable, so the form can retry. */
+export function linkSsoAccount(pendingId: string, loginName: string, password: string): Promise<{ token: string; user: AuthUser }> {
+  return ssoPendingRequest("/auth/sso/link", { pending_id: pendingId, login_name: loginName, password });
 }
 
-/** Moves the current SSO identity from this auto-enrolled account onto the
- * older password account; the response session belongs to that older account. */
-export async function migrateToLegacyAccount(loginName: string, password: string): Promise<{ token: string; user: AuthUser }> {
-  const result = await requestJson<{ token: string; user: AuthUser }>("/me/identity-migration", {
-    tag: "auth",
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ login_name: loginName, password }),
-    credentials: "include",
-  });
-  return { ...result, user: normalizeAuthUser(result.user) };
+/** Creates a new account named after the pending SSO identity. */
+export function createSsoAccount(pendingId: string): Promise<{ token: string; user: AuthUser }> {
+  return ssoPendingRequest("/auth/sso/create", { pending_id: pendingId });
 }
 
-export async function cancelIdentityBinding(pendingId: string): Promise<void> {
-  const res = await performApiRequest("/me/identity-binding/cancel", {
+export async function cancelSsoChoice(pendingId: string): Promise<void> {
+  const res = await performApiRequest("/auth/sso/cancel", {
+    auth: "none",
     tag: "auth",
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -226,10 +192,6 @@ export async function cancelIdentityBinding(pendingId: string): Promise<void> {
     credentials: "include",
   });
   if (!res.ok) await throwHumanizedHttpError(res, "auth");
-}
-
-export function fetchMyIdentities(): Promise<IdentityInfo> {
-  return requestJson<IdentityInfo>("/me/identities", { tag: "auth", credentials: "include", unauthorized: "preserve" });
 }
 
 export async function logoutUser(): Promise<void> {
@@ -254,8 +216,8 @@ export async function changeMyPassword(oldPassword: string, newPassword: string)
 }
 
 export async function fetchMe(): Promise<AuthUser> {
-  // Startup needs to distinguish an S2 migration token from an expired SSO
-  // session before the global 401 policy clears browser state.
+  // Startup handles a rejected session itself (clearRejectedToken) instead of
+  // the global clear-and-reload 401 policy.
   const user = await requestJson<AuthUser>("/me", { tag: "auth", unauthorized: "preserve" });
   return normalizeAuthUser(user);
 }

@@ -5,15 +5,15 @@
 This is an independently packageable deployment extension for Silicon
 Notebook's `auth.provider` point. It has no frontend package and exposes no
 HTTP route. Core owns the public start/callback endpoints, OAuth state,
-browser proof, PKCE values, target local account, identity mapping and site
-session. The plugin receives only one authorization code exchange and returns
+browser proof, PKCE values, the exact-username account match, the
+link-or-create choice and site session. The plugin receives only one authorization code exchange and returns
 `ExternalIdentity(provider_namespace, subject, username, display_name)`.
 
 The checked-in TOML is disabled. To evaluate it, install this directory into
 the backend interpreter, copy `extensions.example.toml` outside the checkout,
 export `W3_LOGIN_ORIGIN`, `W3_CLIENT_ID`, `W3_CLIENT_SECRET`, and optionally
-`W3_CA_BUNDLE`, then enable the copied entry and select it through core's auth
-policy. Never place the secret or a private endpoint directly in committed
+`W3_CA_BUNDLE`, then enable the copied entry; enabling it is what turns external
+authentication on, and disabling it returns the site to local login. Never place the secret or a private endpoint directly in committed
 TOML. The login origin must be HTTPS; the optional CA variable names a PEM
 bundle trusted by `httpx`. Redirects are disabled and every request is bounded
 by both the plugin timeout and the host's remaining deadline.
@@ -30,14 +30,16 @@ The adapter implements the observed W3 flow:
 - userinfo: `GET /saaslogin1/oauth2/userinfo`, using the documented query-token
   form by default or a deployment-confirmed Bearer header mode.
 
-`uid` must be a non-empty JSON string and always becomes `username`.
+`uid` must be a non-empty JSON string and always becomes `username`; core
+matches site accounts by that username exactly (case-sensitive).
 `displayNameCn`, then `displayName`, then `uid` supplies the display name.
 The default `subject_field` is also `uid`. **Do not deploy that default until
 the provider confirms that `uid` is unique within `provider_namespace`, stable
 across rename/client upgrades, and never reassigned.** If W3 supplies a
 separate immutable identifier, explicitly configure that top-level field as
-`subject_field`; changing it or the namespace requires an identity migration,
-not an in-place plugin upgrade.
+`subject_field`; changing it or the namespace is an identity change to review (they are
+recorded on sessions and audit rows, not used as a key), not a routine plugin
+upgrade.
 
 `pkce_supported=false` records the current unknown rather than guessing. Turn
 it on only after the provider and registered callback have been verified.

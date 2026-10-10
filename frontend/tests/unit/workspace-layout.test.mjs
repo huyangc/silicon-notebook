@@ -134,7 +134,8 @@ test("修改密码弹窗在 page 接线:菜单回调打开、内置管理员隐�
     menus[0].bindings.onChangePassword,
     '() => { rootModals.open("password-change", rootModals.captureActorOwner()); }',
   );
-  assert.equal(menus[0].bindings.canChangePassword, '(authCapabilities?.mode === "local" || authCapabilities?.mode === "dual") && currentUser.id !== "user-local"');
+  // 统一认证启用时本人改密码被后端拒绝;入口只看 local_login 能力位。
+  assert.equal(menus[0].bindings.canChangePassword, 'Boolean(authCapabilities?.local_login) && currentUser.id !== "user-local"');
 });
 
 
@@ -158,23 +159,16 @@ test("系统更新弹窗在 page 接线:hook 取数、槽位按 notice 打开、
 });
 
 
-// 「迁移旧账号」入口只在后端给出 migration_available 时出现;组件测试只测菜单本身,
-// 这里钉住 page 的两截接线(可见谓词 + 提交回调)。
-test("迁移旧账号在 page 接线:按 migration_available 显示、提交与进行中都归页面级 owner", () => {
-  assert.deepEqual(
-    importsFrom(page, "./use-identity-migration").map((item) => item.imported),
-    ["useIdentityMigration"],
-  );
+test("账号菜单不再有统一身份关联/迁移入口", () => {
   const menus = jsxElements(page, "AccountMenu");
   assert.equal(menus.length, 1);
-  assert.equal(menus[0].bindings.canMigrateIdentity, "Boolean(identityInfo?.migration_available)");
-  assert.equal(menus[0].bindings.onMigrateIdentity, "identityMigration.run");
-  assert.equal(menus[0].bindings.migrationInFlight, "identityMigration.inFlight");
-  assert.ok(callSitesIn(findFunction(page, "Home")).some((call) => call.target === "useIdentityMigration"));
+  for (const removed of ["canBindIdentity", "canMigrateIdentity", "onMigrateIdentity", "onStartIdentityBinding"]) {
+    assert.equal(menus[0].bindings[removed], undefined, `${removed} 已随账号迁移一起删除`);
+  }
 });
 
 
-// 另一个标签页换号/登出/迁移后，本页必须按新 token 整页重建；安装点在 page 根部，只装一次。
+// 另一个标签页换号/登出后，本页必须按新 token 整页重建；安装点在 page 根部，只装一次。
 test("跨标签页会话同步在 page 根部安装一次,变更时整页重载", () => {
   assert.ok(importsFrom(page, "./auth-session").some((item) => item.imported === "subscribeTokenChanges"));
   const installs = callSitesIn(findFunction(page, "Home")).filter((call) => call.target === "subscribeTokenChanges");

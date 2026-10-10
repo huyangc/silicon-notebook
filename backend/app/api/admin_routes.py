@@ -19,7 +19,6 @@ from app.api.deps import (
 )
 from app.core.cache import CacheAdmin, make_cache_backend
 from app.core.config import get_settings
-from app.domain.auth_policy import AuthStoreError
 from app.domain.memory_kg_isolation import PromotionRefused
 from app.domain.share_disclosure import without_memory_record
 from app.models.admin import (
@@ -39,8 +38,11 @@ from app.models.admin import (
     AdminPasswordResetRequest,
     AdminPasswordResetResult,
     AdminUserNotebook,
+    AdminUserAccountResult,
     AdminUserRoleResult,
     AdminUserRoleUpdate,
+    AdminUserStatusUpdate,
+    AdminUsernameUpdate,
     AdminUserUploadLimitResult,
     AdminUserUsage,
     AskDetail,
@@ -75,6 +77,7 @@ from app.services.extension_toggles import (
 from app.services.model_status import ModelStatusService
 from app.services.source_display import source_display_title
 from app.repositories.identity_errors import (
+    AuthStoreError,
     BuiltinAdminDemotionError,
     BuiltinAdminPasswordError,
     SelfDemotionError,
@@ -236,6 +239,58 @@ def update_admin_user_role(
     return AdminUserRoleResult(**result)
 
 
+_ACCOUNT_ERRORS = {
+    "admin_required": (403, "仅管理员可管理用户账号"),
+    "self_forbidden": (409, "不能修改当前登录的账号"),
+    "builtin_account": (409, "内置管理员账号不可修改"),
+    "username_conflict": (409, "用户名已被占用"),
+    "invalid_username": (400, "用户名不能为空，且不能含首尾空白或控制字符"),
+}
+
+
+def _account_error(exc: AuthStoreError) -> HTTPException:
+    if str(exc) == "account_not_found":
+        return HTTPException(status_code=404, detail="User not found")
+    status, detail = _ACCOUNT_ERRORS.get(str(exc), (409, "账号操作未完成，请刷新后重试"))
+    return user_error(status, detail)
+
+
+@router.patch("/admin/users/{user_id}/status", response_model=AdminUserAccountResult)
+def update_admin_user_status(
+    user_id: str,
+    payload: AdminUserStatusUpdate,
+    user: UserProfile = Depends(get_current_user),
+) -> AdminUserAccountResult:
+    """停用/启用账号。停用即吊销其全部浏览器会话；Agent token 随账号状态失效。"""
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可管理用户账号")
+    try:
+        result = identity_repository().auth.set_account_status(
+            user_id, payload.status, actor_id=user.id
+        )
+    except AuthStoreError as exc:
+        raise _account_error(exc) from None
+    return AdminUserAccountResult(**result)
+
+
+@router.patch("/admin/users/{user_id}/username", response_model=AdminUserAccountResult)
+def update_admin_username(
+    user_id: str,
+    payload: AdminUsernameUpdate,
+    user: UserProfile = Depends(get_current_user),
+) -> AdminUserAccountResult:
+    """改用户名（统一认证按用户名精确匹配账号）。吊销其全部浏览器会话。"""
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可管理用户账号")
+    try:
+        result = identity_repository().auth.set_username(
+            user_id, payload.username, actor_id=user.id
+        )
+    except AuthStoreError as exc:
+        raise _account_error(exc) from None
+    return AdminUserAccountResult(**result)
+
+
 @router.post(
     "/admin/users/{user_id}/reset-password", response_model=AdminPasswordResetResult
 )
@@ -260,8 +315,6 @@ def reset_admin_user_password(
         )
     except BuiltinAdminPasswordError:
         raise user_error(409, "内置管理员密码由部署配置决定，请修改环境变量后重启生效")
-    except AuthStoreError:
-        raise user_error(403, "本站密码重置已关闭，请使用账号迁移恢复流程。") from None
     except PermissionError:
         raise user_error(403, "仅管理员可重置用户密码")
     except KeyError:
@@ -1017,8 +1070,6 @@ def update_admin_extension_runtime(
             # 管理员会话在两次检查之间被别的会话降权，是可以想象的竞态，答案必须
             # 和上面同一句话，而不是一条陌生的堆栈。
             raise user_error(403, "仅管理员可管理扩展运行时开关")
-        except AuthStoreError:
-            raise user_error(409, "当前认证插件不能直接停用，请先完成认证维护预检。") from None
         try:
             refresh_extension_admission(store)
         except Exception as exc:

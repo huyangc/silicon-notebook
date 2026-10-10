@@ -12,12 +12,9 @@ import {
   HeartHandshake,
   MessagesSquare,
   SlidersHorizontal,
-  UserCheck,
   Users,
   Wand2,
 } from "lucide-react";
-
-import { IdentityMigrationForm, type IdentityMigrationOutcome } from "./identity-migration-form";
 
 
 type AccountMenuProps = {
@@ -41,15 +38,6 @@ type AccountMenuProps = {
   onToggleAdvancedMode: () => void;
   onOpenSearchProfile: () => void;
   onChangePassword: () => void;
-  /** S1 已登录用户可在此处再次验证本地密码，发起统一身份关联。 */
-  canBindIdentity: boolean;
-  linkedIdentityName: string | null;
-  onStartIdentityBinding: (currentPassword: string) => Promise<void>;
-  /** 统一认证自动开户账号在本地密码仍有效时，可把统一身份迁回自己的旧账号。 */
-  canMigrateIdentity?: boolean;
-  onMigrateIdentity?: (loginName: string, password: string) => Promise<IdentityMigrationOutcome>;
-  /** 页面持有的迁移进行中标记；表单或菜单关闭都不释放。 */
-  migrationInFlight?: boolean;
   onLogout: () => void | Promise<void>;
 };
 
@@ -69,20 +57,9 @@ export function AccountMenu({
   onToggleAdvancedMode,
   onOpenSearchProfile,
   onChangePassword,
-  canBindIdentity,
-  linkedIdentityName,
-  onStartIdentityBinding,
-  canMigrateIdentity = false,
-  onMigrateIdentity,
-  migrationInFlight = false,
   onLogout,
 }: AccountMenuProps) {
   const [open, setOpen] = useState(false);
-  const [bindingOpen, setBindingOpen] = useState(false);
-  const [bindingPassword, setBindingPassword] = useState("");
-  const [bindingError, setBindingError] = useState("");
-  const [bindingBusy, setBindingBusy] = useState(false);
-  const [migrationOpen, setMigrationOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -115,21 +92,6 @@ export function AccountMenu({
   }, [open]);
 
   const accountRole = role === "admin" ? "管理员" : "用户";
-
-  async function beginIdentityBinding() {
-    if (!bindingPassword) {
-      setBindingError("请输入当前密码");
-      return;
-    }
-    setBindingError("");
-    setBindingBusy(true);
-    try {
-      await onStartIdentityBinding(bindingPassword);
-    } catch {
-      setBindingError("无法发起关联，请稍后重试");
-      setBindingBusy(false);
-    }
-  }
 
   return (
     <div className="user-menu" ref={menuRef}>
@@ -262,58 +224,6 @@ export function AccountMenu({
               <span>修改密码</span>
             </button>
           )}
-          {canBindIdentity && (
-            <div className="identity-binding-menu-item">
-              <button
-                className="user-logout"
-                type="button"
-                role="menuitem"
-                aria-expanded={bindingOpen}
-                onClick={() => {
-                  setBindingOpen((value) => !value);
-                  setBindingError("");
-                }}
-              >
-                <KeyRound size={16} />
-                <span>关联统一身份</span>
-              </button>
-              {bindingOpen && (
-                <form className="identity-binding-form" onSubmit={(event) => { event.preventDefault(); void beginIdentityBinding(); }}>
-                  <p>请验证当前密码，随后将跳转到统一登录页面确认身份。</p>
-                  <label>当前密码
-                    <input type="password" autoComplete="current-password" value={bindingPassword} disabled={bindingBusy}
-                      onChange={(event) => setBindingPassword(event.target.value)} />
-                  </label>
-                  {bindingError && <p className="identity-binding-error" role="alert">{bindingError}</p>}
-                  <div className="identity-binding-actions">
-                    <button type="button" disabled={bindingBusy} onClick={() => { setBindingOpen(false); setBindingPassword(""); setBindingError(""); }}>取消</button>
-                    <button type="submit" disabled={bindingBusy}>{bindingBusy ? "正在跳转…" : "验证并继续"}</button>
-                  </div>
-                </form>
-              )}
-            </div>
-          )}
-          {canMigrateIdentity && onMigrateIdentity && (
-            <div className="identity-binding-menu-item">
-              <button
-                className="user-logout"
-                type="button"
-                role="menuitem"
-                aria-expanded={migrationOpen}
-                title="把当前统一身份迁到你原来的本站账号，旧账号的数据保持不变"
-                onClick={() => setMigrationOpen((value) => !value)}
-              >
-                <UserCheck size={16} />
-                <span>迁移旧账号</span>
-              </button>
-              {migrationOpen && (
-                <IdentityMigrationForm inFlight={migrationInFlight} onSubmit={onMigrateIdentity} onClose={() => setMigrationOpen(false)} />
-              )}
-            </div>
-          )}
-          {linkedIdentityName && (
-            <div className="identity-linked-status" role="status">已关联统一身份：{linkedIdentityName}</div>
-          )}
           {showAdminUsage && (
             <a
               className="user-logout"
@@ -323,12 +233,6 @@ export function AccountMenu({
             >
               <BarChart3 size={16} />
               <span>用户总览</span>
-            </a>
-          )}
-          {showAdminUsage && (
-            <a className="user-logout" role="menuitem" href="/admin/auth" title="查看认证迁移预检、策略、账号与迁移凭证">
-              <KeyRound size={16} />
-              <span>认证迁移</span>
             </a>
           )}
           {showAdminUsage && activityViewEnabled && (

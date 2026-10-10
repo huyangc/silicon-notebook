@@ -188,7 +188,7 @@ class PostgresMaintenanceAdapter:
     # -- backend-neutral batch maintenance ----------------------------------
 
     def resolve_owner_profile(self, owner: Optional[str]):
-        """Resolve a unique current/local login name without guessing its owner."""
+        """Resolve a unique case-insensitive username without guessing its owner."""
         with self._runtime.database.connect() as db:
             if owner is None:
                 user = db.execute(
@@ -200,9 +200,8 @@ class PostgresMaintenanceAdapter:
                 if not owner:
                     return None
                 candidates = db.execute(
-                    "SELECT * FROM users WHERE lower(username)=lower(%s) "
-                    "OR lower(local_login_name)=lower(%s)",
-                    (owner,owner),
+                    "SELECT * FROM users WHERE lower(username)=lower(%s)",
+                    (owner,),
                 ).fetchall()
                 if len(candidates) != 1:
                     return None

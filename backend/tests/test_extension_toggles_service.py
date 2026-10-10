@@ -526,7 +526,7 @@ def _extension_runtime_double():
         gap_consult=object(),
         element_enrichers=object(),
         reflect_actions=object(),
-        auth_provider=object(),
+        auth_provider=SimpleNamespace(describe=lambda: None),
     )
 
 
@@ -534,7 +534,7 @@ def _composed_repository_double(store, calls=None):
     recorder = [] if calls is None else calls
     return SimpleNamespace(
         _runtime=SimpleNamespace(extension_toggles=store, identity=SimpleNamespace(
-            auth=SimpleNamespace(get_policy=lambda: {"mode": "local", "retired_at": None})
+            auth=SimpleNamespace(use_provider=lambda _host: None)
         )),
         close=lambda: recorder.append("close"),
     )

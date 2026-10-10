@@ -24,6 +24,7 @@ import type { AdminUserUsage } from "../../app/admin/usage/api.ts";
 // 的 usageSummaryDefaults)。
 const USAGE_SUMMARY_DEFAULTS = {
   last_seen: null as string | null,
+  status: "active" as const,
   storage_bytes: 0,
   questions_30d: 0,
   questions_failed: 0,

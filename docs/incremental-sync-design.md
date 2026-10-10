@@ -125,7 +125,7 @@ knowhow_changes 与 knowhow_milestones 是编辑历史，归本层，可随开�
 | --- | --- |
 | 用户交互 | conversations、answers、ask_jobs、ask_trace_steps、feedback、reports、global_ask_conversations、global_ask_jobs、retrieval_experiences、agent_observations、agent_notebook_profile、retained_user_activity、wishes、wish_votes |
 | 运行态与作业 | kg_build_jobs、kg_rebuild_checkpoint、kg_cluster_scratch、kg_canonical_scratch、kg_relation_completion_state、merge_review_jobs、extraction_runs、catalog_jobs、catalog_candidates、promotion_candidates、concept_merge_candidates、kg_conflict_candidates、concept_whitelist、indexing_pipeline_stages、indexing_pipeline_stage_sources、source_index_backfills、knowledge_source_fact_backfills、chunk_element_backfills、notebook_delete_jobs、notebook_delete_files、agent_profile_jobs、notebook_share_requests |
-| 身份与系统 | users、user_profiles、external_identities、auth_*、agent_profiles、agent_access_tokens、agent_token_notebooks、model_service_status、system_model_service_status、app_settings、extension_runtime_toggles、command catalog |
+| 身份与系统 | users、user_profiles、auth_*、agent_profiles、agent_access_tokens、agent_token_notebooks、model_service_status、system_model_service_status、app_settings、extension_runtime_toggles、command catalog |
 | 同步控制（PR-2 起，v83/0063） | sync_export_state（源端每个目标环境的导出水位）、sync_imports（目标端已引入的包与报告）、sync_import_progress（逐表断点） |
 
 users 不同步但导入时可能**创建**：见 §4。
@@ -136,9 +136,9 @@ users 不同步但导入时可能**创建**：见 §4。
   仅供映射，不写入目标端 users。
 - 导入时先构造 `source_user_id → target_user_id`：目标端按 username 精确匹配；匹配不到时，
   若 `--create-missing-users` 打开则按源端投影建一个无凭据的本地用户，否则按 §3.2 表内规则
-  处理。**建出来的账号不能自动认领**：外部认证对未绑定身份报 `identity_not_linked`，注册又
-  拒绝已占用的 username，所以导入报告要把这批用户单独列出并提示管理员按既有的恢复授权/
-  身份绑定流程处理；导入器不做自动绑定。
+  处理。建出来的无凭据账号 username 与源端相同；若该 username 就是统一认证返回的工号，
+  该用户下次统一登录会按精确 username 直接进入这个账号，否则需管理员核对（停用/改用户名）。
+  导入报告要把这批用户单独列出；导入器不做任何认证侧绑定。
 - 组按 `groups.name` 匹配，匹配不到则创建；匹配上的组把源端 `groups.id` 重映射为目标端 id
   （`groups.name` 没有唯一索引，不重映射会以源 id 再插一份，下次导入撞歧义）。目标端同名组
   重复、或源组 id 与目标端另一个名字的组撞 id，都硬失败。

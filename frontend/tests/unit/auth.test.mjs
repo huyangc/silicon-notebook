@@ -8,7 +8,9 @@ import {
   loginUser,
   logoutUser,
   setToken,
-  startIdentityBinding,
+  cancelSsoChoice,
+  createSsoAccount,
+  linkSsoAccount,
   startSsoLogin,
 } from "../../app/auth.ts";
 
@@ -86,13 +88,18 @@ test("public capabilities decide the visible authentication modes", async () => 
     assert.equal(init.credentials, "include");
     assert.equal(init.headers.has("Authorization"), false);
     return new Response(JSON.stringify({
-      mode: "dual", local_login: true, local_registration: false, sso_login: true,
-      binding_allowed: true, provider_label: "internal",
+      sso_login: true, local_login: false, local_registration: false, provider_label: "internal",
     }), { headers: { "Content-Type": "application/json" } });
   };
   const result = await fetchAuthCapabilities();
-  assert.equal(result.mode, "dual");
-  assert.equal(result.sso_login, true);
+  assert.deepEqual(result, { sso_login: true, local_login: false, local_registration: false, provider_label: "internal" });
+});
+
+test("a capabilities response missing a field is rejected rather than guessed", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    sso_login: true, local_login: false, provider_label: "internal",
+  }), { headers: { "Content-Type": "application/json" } });
+  await assert.rejects(fetchAuthCapabilities(), TypeError);
 });
 
 test("SSO starts and completion keep browser proof in cookies and tokens out of URLs", async () => {
@@ -103,23 +110,48 @@ test("SSO starts and completion keep browser proof in cookies and tokens out of 
       return new Response(JSON.stringify({ authorization_url: "https://identity.example/authorize" }), { headers: { "Content-Type": "application/json" } });
     }
     return new Response(JSON.stringify({
-      status: "binding_required", pending_id: "p1", local_login_name: "a12345678", external_username: "alice", display_name: "Alice",
+      status: "choice_required", pending_id: "p1", external_username: "e12345678", display_name: "Alice",
     }), { headers: { "Content-Type": "application/json" } });
   };
   assert.equal(await startSsoLogin(), "https://identity.example/authorize");
   const completion = await completeSsoLogin("handoff-code");
-  assert.equal(completion.status, "binding_required");
+  assert.equal(completion.status, "choice_required");
   assert.equal(calls[0].init.credentials, "include");
   assert.equal(calls[1].init.credentials, "include");
   assert.equal(calls[1].init.body, JSON.stringify({ code: "handoff-code" }));
 });
 
-test("binding start sends the local verification only in its request body", async () => {
+test("link, create and cancel send only the pending id (and the old credentials) in cookie-bound bodies", async () => {
+  const calls = [];
   globalThis.fetch = async (url, init) => {
-    assert.equal(url, "http://127.0.0.1:8000/api/me/identity-binding/start");
-    assert.equal(init.body, JSON.stringify({ current_password: "verify-me" }));
-    assert.equal(init.credentials, "include");
-    return new Response(JSON.stringify({ authorization_url: "https://identity.example/authorize" }), { headers: { "Content-Type": "application/json" } });
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith("/auth/sso/cancel")) return new Response(null, { status: 204 });
+    return new Response(JSON.stringify({ token: "sso-token", user: { id: "u1", ui_mode: "nonsense" } }), { headers: { "Content-Type": "application/json" } });
   };
-  assert.equal(await startIdentityBinding("verify-me"), "https://identity.example/authorize");
+  setToken("unrelated-bearer");
+  const linked = await linkSsoAccount("p1", "a12345678", "old-pw");
+  assert.equal(linked.token, "sso-token");
+  assert.equal(linked.user.ui_mode, "auto");
+  await createSsoAccount("p1");
+  await cancelSsoChoice("p1");
+  assert.deepEqual(calls.map((call) => call.url), [
+    "http://127.0.0.1:8000/api/auth/sso/link",
+    "http://127.0.0.1:8000/api/auth/sso/create",
+    "http://127.0.0.1:8000/api/auth/sso/cancel",
+  ]);
+  assert.equal(calls[0].init.body, JSON.stringify({ pending_id: "p1", login_name: "a12345678", password: "old-pw" }));
+  assert.equal(calls[1].init.body, JSON.stringify({ pending_id: "p1" }));
+  assert.equal(calls[2].init.body, JSON.stringify({ pending_id: "p1" }));
+  for (const call of calls) {
+    assert.equal(call.init.credentials, "include");
+    assert.equal(call.init.headers.has("Authorization"), false);
+  }
+  clearToken();
+});
+
+test("a rejected link surfaces the server's Chinese detail for the form", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({ detail: "用户名或密码不正确" }), {
+    status: 409, headers: { "Content-Type": "application/json", "X-User-Message": "1" },
+  });
+  await assert.rejects(linkSsoAccount("p1", "a12345678", "wrong"), (error) => error.message === "用户名或密码不正确");
 });

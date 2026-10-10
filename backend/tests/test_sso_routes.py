@@ -1,10 +1,11 @@
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
-from app.api import auth_routes, sso_routes
+from app.api import auth_routes, sso_routes, system_routes
+from app.api.deps import get_current_user
 from app.core.config import Settings
 from app.domain.auth_provider import (
     AuthProviderDescriptor,
@@ -17,14 +18,17 @@ from app.services.sqlite_repository import SQLiteRepository
 
 class Provider:
     def __init__(self):
-        self.identity = ExternalIdentity("corp.production", "employee-17", "b87654321", "统一姓名")
+        self.identity = ExternalIdentity("corp.production", "employee-17", "W0012345", "统一姓名")
         self.calls = []
         self.available = True
+        self.enabled = True
         self.availability_checks = 0
 
     def describe(self):
+        if not self.enabled:
+            return None
         return AuthProviderDescriptor("corp.auth", "corp.auth.provider", "corp.auth",
-            "corp.production", "generation-1", "统一登录", "https://identity.test/authorize", True)
+            "corp.production", "generation-1", "统一认证", "https://identity.test/authorize", True)
 
     def ensure_available(self):
         self.availability_checks += 1
@@ -49,22 +53,28 @@ def setup(tmp_path, monkeypatch):
     repo = SQLiteRepository(settings)
     identity = repo._runtime.identity
     provider = Provider()
+    provider.enabled = False
     flow = AuthFlowService(identity.auth, provider, settings)
     monkeypatch.setattr(sso_routes, "auth_flow", lambda: flow)
     monkeypatch.setattr(auth_routes, "identity_repository", lambda: identity)
+    monkeypatch.setattr(system_routes, "identity_repository", lambda: identity)
+
+    async def current_user(request: Request):
+        token = request.headers.get("Authorization", "")[7:]
+        user = identity.resolve_session(token)
+        if user is None:
+            raise HTTPException(status_code=401)
+        yield user
+
     app = FastAPI()
     app.include_router(auth_routes.auth_router, prefix="/api")
     app.include_router(sso_routes.sso_router, prefix="/api")
+    app.include_router(system_routes.router, prefix="/api")
+    app.dependency_overrides[get_current_user] = current_user
     client = TestClient(app, base_url="http://localhost", follow_redirects=False)
     yield client, identity, provider, flow
     client.close()
     repo.close()
-
-
-def _dual(identity):
-    identity.auth.set_policy("dual", actor_id="user-local", expected_revision=0,
-        plugin_id="corp.auth", provider_id="corp.auth", provider_namespace="corp.production",
-        config_generation="generation-1")
 
 
 def _local_user(client, name="a12345678"):
@@ -73,7 +83,8 @@ def _local_user(client, name="a12345678"):
     return response.json()
 
 
-def _complete(client, start):
+def _complete(client, start=None):
+    start = start or client.post("/api/auth/sso/start")
     assert start.status_code == 200, start.text
     params = parse_qs(urlsplit(start.json()["authorization_url"]).query)
     callback = client.get("/api/auth/sso/callback", params={"state": params["state"][0], "code": "provider-code"})
@@ -84,17 +95,25 @@ def _complete(client, start):
     return client.post("/api/auth/sso/complete", json={"code": query["code"][0]})
 
 
-def test_local_default_needs_no_external_plugin(setup):
+def _choice(client):
+    response = _complete(client)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "choice_required", body
+    return body
+
+
+def test_local_login_needs_no_external_plugin(setup):
     client, identity, provider, flow = setup
     caps = client.get("/api/auth/capabilities").json()
-    assert caps["mode"] == "local" and caps["local_login"]
-    assert not caps["sso_login"]
+    assert caps == {"sso_login": False, "local_login": True, "local_registration": True,
+                    "provider_label": "统一认证"}
     assert client.post("/api/auth/sso/start").status_code == 503
     assert provider.calls == []
     assert provider.availability_checks == 0
 
 
-def test_local_register_and_login_preserve_complete_legacy_user_payload(setup):
+def test_local_register_and_login_keep_the_complete_user_payload(setup):
     client, identity, provider, flow = setup
     registered = _local_user(client)
     profile = identity.resolve_session(registered["token"]).model_dump(mode="json")
@@ -107,59 +126,154 @@ def test_local_register_and_login_preserve_complete_legacy_user_payload(setup):
     assert provider.calls == []
 
 
-def test_binding_stage_adds_migration_flag_to_complete_user_payload(setup):
+def test_enabled_provider_hides_local_login_and_refuses_local_credentials(setup):
     client, identity, provider, flow = setup
-    registered = _local_user(client)
-    _dual(identity)
-    identity.auth.set_policy("binding_required", actor_id="user-local", expected_revision=1)
-    response = client.post("/api/auth/login", json={"username": "a12345678", "password": "local-password"})
-    assert response.status_code == 200
-    assert response.json()["migration_required"] is True
-    assert response.json()["user"] == registered["user"]
-    assert identity.resolve_session(response.json()["token"]) is None
+    local = _local_user(client)
+    headers = {"Authorization": "Bearer " + local["token"]}
+    provider.enabled = True
+    caps = client.get("/api/auth/capabilities").json()
+    assert caps == {"sso_login": True, "local_login": False, "local_registration": False,
+                    "provider_label": "统一认证"}
+    closed = "已启用统一认证，请使用统一认证登录"
+    login = client.post("/api/auth/login", json={"username": "a12345678", "password": "local-password"})
+    register = client.post("/api/auth/register", json={"username": "b12345678", "password": "pw"})
+    for response in (login, register):
+        assert response.status_code == 403
+        assert response.json()["detail"] == closed
+        assert response.headers["x-user-message"] == "1"
+    # The local session no longer authenticates while unified auth is on.
+    password = client.patch("/api/me/password", headers=headers,
+                            json={"old_password": "local-password", "new_password": "x"})
+    assert password.status_code == 401
+    assert identity.resolve_session(local["token"]) is None
+    # Switching the plugin off is the way back to local passwords.
+    provider.enabled = False
+    assert identity.resolve_session(local["token"]).username == "a12345678"
+    assert client.post("/api/auth/login", json={"username": "a12345678",
+                       "password": "local-password"}).status_code == 200
 
 
-def test_local_first_confirmation_keeps_id_and_old_password_name(setup):
+def test_password_change_is_refused_for_an_sso_session(setup):
     client, identity, provider, flow = setup
-    original = _local_user(client)
-    _dual(identity)
-    headers = {"Authorization": "Bearer " + original["token"]}
-    complete = _complete(client, client.post("/api/me/identity-binding/start",
-        json={"current_password": "local-password"}, headers=headers))
-    assert complete.status_code == 200, complete.text
-    preview = complete.json()
-    assert preview["status"] == "binding_required"
-    assert preview["local_login_name"] == "a12345678"
-    assert preview["external_username"] == "b87654321"
-    assert identity.auth.identities(original["user"]["id"])["linked"] is False
-    confirmed = client.post("/api/me/identity-binding/confirm",
-        json={"pending_id": preview["pending_id"]}, headers=headers)
-    assert confirmed.status_code == 200, confirmed.text
-    assert confirmed.json()["user"]["id"] == original["user"]["id"]
-    assert confirmed.json()["user"]["username"] == "b87654321"
-    assert identity.resolve_session(original["token"]) is None
-    old = client.post("/api/auth/login", json={"username": "a12345678", "password": "local-password"})
-    assert old.status_code == 200 and old.json()["user"]["id"] == original["user"]["id"]
-    assert client.post("/api/auth/login", json={"username": "b87654321", "password": "local-password"}).status_code == 401
-    direct = _complete(client, client.post("/api/auth/sso/start"))
-    assert direct.status_code == 200, direct.text
-    assert direct.json()["user"]["id"] == original["user"]["id"]
-    assert provider.calls[0]["code_verifier"]
+    _local_user(client)
+    provider.enabled = True
+    provider.identity = ExternalIdentity("corp.production", "employee-17", "a12345678", "统一姓名")
+    signed_in = _complete(client).json()
+    assert signed_in["status"] == "authenticated"
+    response = client.patch("/api/me/password", headers={"Authorization": "Bearer " + signed_in["token"]},
+                            json={"old_password": "local-password", "new_password": "x"})
+    assert response.status_code == 403
+    assert response.json()["detail"] == "已启用统一认证，请使用统一认证登录"
 
 
-def test_sso_name_does_not_claim_unlinked_same_name(setup):
+def test_exact_username_signs_in_directly(setup):
     client, identity, provider, flow = setup
-    _local_user(client, "b87654321")
-    _dual(identity)
-    response = _complete(client, client.post("/api/auth/sso/start"))
-    assert response.status_code == 409
-    assert "尚未关联" in response.json()["detail"]
+    local = _local_user(client)
+    provider.enabled = True
+    provider.identity = ExternalIdentity("corp.production", "employee-17", "a12345678", "统一姓名")
+    response = _complete(client)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "authenticated"
+    assert body["user"]["id"] == local["user"]["id"]
+    assert identity.resolve_session(body["token"]).id == local["user"]["id"]
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_choice_then_link_moves_the_old_account_onto_the_external_name(setup):
+    client, identity, provider, flow = setup
+    local = _local_user(client)
+    provider.enabled = True
+    choice = _choice(client)
+    assert choice["external_username"] == "W0012345"
+    assert choice["display_name"] == "统一姓名"
+    assert set(choice) == {"status", "pending_id", "external_username", "display_name"}
+    wrong = client.post("/api/auth/sso/link", json={"pending_id": choice["pending_id"],
+                        "login_name": "a12345678", "password": "wrong"})
+    unknown = client.post("/api/auth/sso/link", json={"pending_id": choice["pending_id"],
+                          "login_name": "z99999999", "password": "local-password"})
+    for response in (wrong, unknown):
+        assert response.status_code == 409
+        assert response.json()["detail"] == "用户名或密码错误"
+        assert response.headers["x-user-message"] == "1"
+    linked = client.post("/api/auth/sso/link", json={"pending_id": choice["pending_id"],
+                         "login_name": "a12345678", "password": "local-password"})
+    assert linked.status_code == 200, linked.text
+    assert set(linked.json()) == {"token", "user"}
+    assert linked.json()["user"]["id"] == local["user"]["id"]
+    assert linked.json()["user"]["username"] == "W0012345"
+    assert identity.resolve_session(local["token"]) is None
+    replay = client.post("/api/auth/sso/link", json={"pending_id": choice["pending_id"],
+                         "login_name": "a12345678", "password": "local-password"})
+    assert replay.status_code == 409
+    assert replay.json()["detail"] == "认证操作已过期或已使用，请重新登录。"
+
+
+def test_choice_then_create_makes_a_new_passwordless_account(setup):
+    client, identity, provider, flow = setup
+    _local_user(client)
+    provider.enabled = True
+    choice = _choice(client)
+    created = client.post("/api/auth/sso/create", json={"pending_id": choice["pending_id"]})
+    assert created.status_code == 200, created.text
+    user = created.json()["user"]
+    assert (user["username"], user["display_name"], user["role"]) == ("W0012345", "统一姓名", "user")
+    assert identity.resolve_session(created.json()["token"]).id == user["id"]
+    # The next login matches the new account directly.
+    assert _complete(client).json()["user"]["id"] == user["id"]
+
+
+def test_stale_choice_and_disabled_account_messages(setup):
+    client, identity, provider, flow = setup
+    provider.enabled = True
+    first = _choice(client)
+    second = _choice(client)
+    assert client.post("/api/auth/sso/create", json={"pending_id": first["pending_id"]}).status_code == 200
+    stale = client.post("/api/auth/sso/create", json={"pending_id": second["pending_id"]})
+    assert stale.status_code == 409
+    assert stale.json()["detail"] == "认证状态已变化，请重新登录。"
+    created = identity.auth._execute
+    with identity.database.connect() as db:
+        user_id = created(db, "SELECT id FROM users WHERE username='W0012345'").fetchone()["id"]
+    identity.auth.set_account_status(user_id, "disabled", actor_id="user-local")
+    inactive = _complete(client)
+    assert inactive.status_code == 409
+    assert inactive.json()["detail"] == "账号已停用，请联系管理员。"
+
+
+def test_choice_is_bound_to_the_browser_and_cancel_discards_it(setup):
+    client, identity, provider, flow = setup
+    provider.enabled = True
+    choice = _choice(client)
+    saved = dict(client.cookies)
+    client.cookies.clear()
+    no_proof = client.post("/api/auth/sso/create", json={"pending_id": choice["pending_id"]})
+    assert no_proof.status_code == 400
+    client.cookies.update(saved)
+    assert client.post("/api/auth/sso/cancel", json={"pending_id": choice["pending_id"]}).status_code == 204
+    gone = client.post("/api/auth/sso/create", json={"pending_id": choice["pending_id"]})
+    assert gone.status_code == 409
+    with identity.database.connect() as db:
+        assert db.execute("SELECT count(*) FROM users WHERE username='W0012345'").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("route,payload", [
+    ("complete", {"code": "x"}),
+    ("link", {"pending_id": "x", "login_name": "a", "password": "b"}),
+    ("create", {"pending_id": "x"}),
+    ("cancel", {"pending_id": "x"}),
+])
+def test_choice_routes_reject_foreign_origins(setup, route, payload):
+    client, identity, provider, flow = setup
+    provider.enabled = True
+    response = client.post(f"/api/auth/sso/{route}", json=payload, headers={"Origin": "https://other.test"})
+    assert response.status_code == 403
 
 
 @pytest.mark.parametrize("provider_response", [{"code": "private-code"}, {"error": "private-error"}])
 def test_callback_without_browser_proof_redirects_to_sanitized_recovery(setup, provider_response):
     client, identity, provider, flow = setup
-    _dual(identity)
+    provider.enabled = True
     start = client.post("/api/auth/sso/start")
     state = parse_qs(urlsplit(start.json()["authorization_url"]).query)["state"][0]
     client.cookies.clear()
@@ -171,41 +285,9 @@ def test_callback_without_browser_proof_redirects_to_sanitized_recovery(setup, p
     assert provider.calls == []
 
 
-def test_binding_is_rejected_after_original_session_logout(setup):
-    client, identity, provider, flow = setup
-    original = _local_user(client)
-    _dual(identity)
-    headers = {"Authorization": "Bearer " + original["token"]}
-    preview = _complete(client, client.post("/api/me/identity-binding/start",
-        json={"current_password": "local-password"}, headers=headers)).json()
-    assert client.post("/api/auth/logout", headers=headers).status_code == 204
-    response = client.post("/api/me/identity-binding/confirm",
-        json={"pending_id": preview["pending_id"]}, headers=headers)
-    assert response.status_code == 400
-    assert not identity.auth.identities(original["user"]["id"])["linked"]
-
-
-def test_binding_cancel_and_other_browser_cannot_confirm(setup):
-    client, identity, provider, flow = setup
-    original = _local_user(client)
-    _dual(identity)
-    headers = {"Authorization": "Bearer " + original["token"]}
-    preview = _complete(client, client.post("/api/me/identity-binding/start",
-        json={"current_password": "local-password"}, headers=headers)).json()
-    saved = dict(client.cookies)
-    client.cookies.clear()
-    response = client.post("/api/me/identity-binding/confirm",
-        json={"pending_id": preview["pending_id"]}, headers=headers)
-    assert response.status_code == 400
-    client.cookies.update(saved)
-    assert client.post("/api/me/identity-binding/cancel",
-        json={"pending_id": preview["pending_id"]}, headers=headers).status_code == 204
-    assert not identity.auth.identities(original["user"]["id"])["linked"]
-
-
 def test_browser_origin_and_duplicate_callback_are_rejected(setup):
     client, identity, provider, flow = setup
-    _dual(identity)
+    provider.enabled = True
     assert client.post("/api/auth/sso/start", headers={"Origin": "https://other.test"}).status_code == 403
     response = client.get("/api/auth/sso/callback?state=one&state=two&code=foo")
     assert response.status_code == 303 and "error=" in response.headers["location"]
@@ -214,20 +296,25 @@ def test_browser_origin_and_duplicate_callback_are_rejected(setup):
     assert provider.calls == []
 
 
-def test_production_origin_and_provider_changes_fail_closed(setup):
+def test_invalid_configuration_fails_closed_instead_of_falling_back(setup):
     client, identity, provider, flow = setup
-    _dual(identity)
+    provider.enabled = True
     flow.settings.auth_frontend_base_url = "https://different.test"
     assert client.get("/api/auth/capabilities").status_code == 503
     flow.settings.auth_frontend_base_url = "http://localhost:3000"
     flow.settings.auth_optional = True
     assert client.get("/api/auth/capabilities").status_code == 503
+    flow.settings.auth_optional = False
+    provider.available = False
+    assert client.get("/api/auth/capabilities").status_code == 503
+    # Local passwords stay refused while the enabled provider is unusable.
+    assert client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).status_code == 403
 
 
 def test_logout_cancels_other_tab_login_even_with_old_browser_cookie(setup):
     client, identity, provider, flow = setup
     local = _local_user(client)
-    _dual(identity)
+    provider.enabled = True
     start = client.post("/api/auth/sso/start")
     state = parse_qs(urlsplit(start.json()["authorization_url"]).query)["state"][0]
     old_cookies = dict(client.cookies)
@@ -236,73 +323,6 @@ def test_logout_cancels_other_tab_login_even_with_old_browser_cookie(setup):
     callback = client.get("/api/auth/sso/callback", params={"state": state, "code": "provider-code"})
     assert "error=" in callback.headers["location"]
     assert provider.calls == []
-
-
-def test_replacement_plugin_cannot_impersonate_selected_provider(setup, monkeypatch):
-    from dataclasses import replace
-
-    client, identity, provider, flow = setup
-    _dual(identity)
-    descriptor = provider.describe()
-    monkeypatch.setattr(provider, "describe", lambda: replace(descriptor, plugin_id="other.plugin"))
-    assert client.get("/api/auth/capabilities").status_code == 503
-
-
-def test_configuration_maintenance_keeps_mode_and_supports_restart(setup, monkeypatch):
-    from dataclasses import replace
-
-    client, identity, provider, flow = setup
-    _dual(identity)
-    admin = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()
-    headers = {"Authorization": "Bearer " + admin["token"]}
-    provider.available = False
-    response = client.patch("/api/admin/auth/provider-configuration", headers=headers,
-        json={"expected_revision": 1, "configuration_generation": "generation-2"})
-    assert response.status_code == 200, response.text
-    assert response.json()["mode"] == "dual"
-    assert client.get("/api/auth/capabilities").status_code == 503
-    descriptor = provider.describe()
-    monkeypatch.setattr(provider, "describe", lambda: replace(descriptor, configuration_generation="generation-2"))
-    provider.available = True
-    assert client.get("/api/auth/capabilities").status_code == 200
-
-
-def test_authorized_replacement_keeps_account_and_exposes_restricted_audit(setup):
-    client, identity, provider, flow = setup
-    original = _local_user(client)
-    _dual(identity)
-    headers = {"Authorization": "Bearer " + original["token"]}
-    preview = _complete(client, client.post("/api/me/identity-binding/start",
-        json={"current_password": "local-password"}, headers=headers)).json()
-    linked = client.post("/api/me/identity-binding/confirm",
-        json={"pending_id": preview["pending_id"]}, headers=headers).json()
-    admin = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()
-    admin_headers = {"Authorization": "Bearer " + admin["token"]}
-    grant = client.post("/api/admin/auth/grants", headers=admin_headers,
-        json={"purpose": "replace", "subject": "employee-18", "target_user_id": original["user"]["id"]})
-    assert grant.status_code == 200, grant.text
-    provider.identity = ExternalIdentity("corp.production", "employee-18", "c12345678", "新姓名")
-    replacement = _complete(client, client.post("/api/auth/sso/grant/start",
-        json={"purpose": "replace", "grant_token": grant.json()["grant_token"]})).json()
-    assert replacement["target_user_id"] == original["user"]["id"]
-    assert replacement["target_username"] == "b87654321"
-    assert identity.resolve_session(linked["token"]) is not None
-    confirmed = client.post("/api/me/identity-binding/confirm", json={"pending_id": replacement["pending_id"]})
-    assert confirmed.status_code == 200, confirmed.text
-    assert confirmed.json()["user"]["id"] == original["user"]["id"]
-    assert confirmed.json()["user"]["username"] == "c12345678"
-    assert identity.resolve_session(linked["token"]) is None
-    audit = client.get("/api/admin/auth/audit?limit=2&offset=0", headers=admin_headers)
-    assert audit.status_code == 200 and audit.headers["cache-control"] == "no-store"
-    assert len(audit.json()["items"]) == 2 and audit.json()["total"] == 4
-    next_page = client.get("/api/admin/auth/audit?limit=2&offset=2", headers=admin_headers).json()
-    assert len(next_page["items"]) == 2
-    assert "grant_completed:replace" in {item["action"] for item in audit.json()["items"] + next_page["items"]}
-    assert grant.json()["grant_token"] not in audit.text
-    assert client.get("/api/admin/auth/audit").status_code == 401
-    user_headers = {"Authorization": "Bearer " + confirmed.json()["token"]}
-    assert client.get("/api/admin/auth/audit", headers=user_headers).status_code == 403
-    assert client.get("/api/admin/auth/audit?limit=201", headers=admin_headers).status_code == 422
 
 
 def test_provider_failure_uses_fixed_public_message(setup, monkeypatch):
@@ -314,69 +334,9 @@ def test_provider_failure_uses_fixed_public_message(setup, monkeypatch):
     assert "secret-provider-response" not in response.text
 
 
-def test_configuration_maintenance_rejects_noncanonical_generation_without_write(setup):
-    client, identity, _provider, _flow = setup
-    _dual(identity)
-    admin = client.post(
-        "/api/auth/login", json={"username": "admin", "password": "admin"}
-    ).json()
-    headers = {"Authorization": "Bearer " + admin["token"]}
-
-    rejected = client.patch(
-        "/api/admin/auth/provider-configuration",
-        headers=headers,
-        json={
-            "expected_revision": 1,
-            "configuration_generation": "Generation-2",
-        },
-    )
-    assert rejected.status_code == 422
-    unchanged = identity.auth.get_policy()
-    assert unchanged["revision"] == 1
-    assert unchanged["config_generation"] == "generation-1"
-
-    accepted = client.patch(
-        "/api/admin/auth/provider-configuration",
-        headers=headers,
-        json={
-            "expected_revision": 1,
-            "configuration_generation": "generation-2",
-        },
-    )
-    assert accepted.status_code == 200, accepted.text
-    updated = identity.auth.get_policy()
-    assert updated["revision"] == 2
-    assert updated["config_generation"] == "generation-2"
-
-
-def test_unavailable_provider_blocks_capabilities_and_policy_write_without_revision(setup):
-    client, identity, provider, _flow = setup
-    _dual(identity)
-    admin = client.post(
-        "/api/auth/login", json={"username": "admin", "password": "admin"}
-    ).json()
-    headers = {"Authorization": "Bearer " + admin["token"]}
-    provider.available = False
-
-    assert client.get("/api/auth/capabilities").status_code == 503
-    rejected = client.patch(
-        "/api/admin/auth/policy",
-        headers=headers,
-        json={
-            "mode": "binding_required",
-            "expected_revision": 1,
-            "allow_rollback": False,
-        },
-    )
-    assert rejected.status_code == 503
-    policy = identity.auth.get_policy()
-    assert policy["mode"] == "dual"
-    assert policy["revision"] == 1
-
-
 def test_production_http_intranet_origin_needs_explicit_opt_in(setup):
     client, identity, provider, flow = setup
-    _dual(identity)
+    provider.enabled = True
     flow.settings.environment = "production"
     flow.settings.auth_public_base_url = "http://notebook.corp.example"
     flow.settings.auth_frontend_base_url = "http://notebook.corp.example"
@@ -398,7 +358,7 @@ def test_production_http_intranet_origin_needs_explicit_opt_in(setup):
 
 def test_public_and_frontend_origins_must_share_a_scheme(setup):
     client, identity, provider, flow = setup
-    _dual(identity)
+    provider.enabled = True
     flow.settings.auth_allow_insecure_http = True
     flow.settings.auth_public_base_url = "https://notebook.corp.example"
     flow.settings.auth_frontend_base_url = "http://notebook.corp.example"
@@ -409,116 +369,3 @@ def test_public_and_frontend_origins_must_share_a_scheme(setup):
     assert client.get("/api/auth/capabilities").status_code == 200
     flow.settings.auth_frontend_base_url = "https://notebook.corp.example"
     assert client.get("/api/auth/capabilities").status_code == 200
-
-
-def _auto_enrolled(client, identity, flow):
-    """Legacy account a12345678 plus an SSO auto account for employee b87654321."""
-    legacy = _local_user(client)
-    _dual(identity)
-    flow.settings.auth_sso_auto_accounts = True
-    completed = _complete(client, client.post("/api/auth/sso/start"))
-    assert completed.status_code == 200, completed.text
-    assert completed.json()["purpose"] == "auto_enroll"
-    confirmed = client.post("/api/me/identity-binding/confirm",
-        json={"pending_id": completed.json()["pending_id"]})
-    assert confirmed.status_code == 200, confirmed.text
-    assert confirmed.json()["user"]["id"] != legacy["user"]["id"]
-    return legacy, confirmed.json()
-
-
-def test_auto_enroll_route_requires_confirmation_without_local_session(setup):
-    client, identity, provider, flow = setup
-    _dual(identity)
-    flow.settings.auth_sso_auto_accounts = True
-    total = identity.auth.inventory_page()["total"]
-    completed = _complete(client, client.post("/api/auth/sso/start"))
-    assert completed.status_code == 200, completed.text
-    assert completed.headers["cache-control"] == "no-store"
-    body = completed.json()
-    assert (body["status"], body["purpose"], body["external_username"], body["display_name"]) == (
-        "confirmation_required", "auto_enroll", "b87654321", "统一姓名")
-    assert "token" not in body and identity.auth.inventory_page()["total"] == total
-    assert client.post("/api/me/identity-binding/cancel",
-        json={"pending_id": body["pending_id"]}).status_code == 204
-    assert identity.auth.inventory_page()["total"] == total
-    retry = _complete(client, client.post("/api/auth/sso/start")).json()
-    confirmed = client.post("/api/me/identity-binding/confirm", json={"pending_id": retry["pending_id"]})
-    assert confirmed.status_code == 200, confirmed.text
-    assert (confirmed.json()["user"]["username"], confirmed.json()["user"]["role"]) == ("b87654321", "user")
-    assert identity.auth.inventory_page()["total"] == total + 1
-
-
-def test_auto_accounts_link_existing_employee_number_without_confirmation(setup):
-    client, identity, provider, flow = setup
-    legacy = _local_user(client, "b87654321")
-    _dual(identity)
-    flow.settings.auth_sso_auto_accounts = True
-    completed = _complete(client, client.post("/api/auth/sso/start"))
-    assert completed.status_code == 200, completed.text
-    assert completed.json()["status"] == "authenticated"
-    assert completed.json()["user"]["id"] == legacy["user"]["id"]
-    assert completed.json()["user"]["display_name"] == "统一姓名"
-
-
-def test_auto_account_conflict_uses_fixed_message(setup):
-    client, identity, provider, flow = setup
-    first = _local_user(client, "b87654321")
-    _dual(identity)
-    admin = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()
-    client.patch(f"/api/admin/auth/accounts/{first['user']['id']}", json={"status": "disabled"},
-        headers={"Authorization": "Bearer " + admin["token"]})
-    flow.settings.auth_sso_auto_accounts = True
-    response = _complete(client, client.post("/api/auth/sso/start"))
-    assert response.status_code == 409
-    assert response.json()["detail"] == "账号已停用，请联系管理员。"
-
-
-def test_identity_migration_route_swaps_to_legacy_account(setup):
-    client, identity, provider, flow = setup
-    legacy, auto = _auto_enrolled(client, identity, flow)
-    headers = {"Authorization": "Bearer " + auto["token"]}
-    info = client.get("/api/me/identities", headers=headers)
-    assert info.status_code == 200 and info.json()["migration_available"] is True
-    assert client.post("/api/me/identity-migration", headers={**headers, "Origin": "https://other.test"},
-        json={"login_name": "a12345678", "password": "local-password"}).status_code == 403
-    assert client.post("/api/me/identity-migration", headers=headers,
-        json={"login_name": "a12345678", "password": "local-password", "extra": 1}).status_code == 422
-    migrated = client.post("/api/me/identity-migration", headers={**headers, "Origin": "http://localhost:3000"},
-        json={"login_name": "a12345678", "password": "local-password"})
-    assert migrated.status_code == 200, migrated.text
-    assert migrated.headers["cache-control"] == "no-store"
-    body = migrated.json()
-    assert set(body) == {"token", "user"}
-    assert body["user"]["id"] == legacy["user"]["id"] and body["user"]["username"] == "b87654321"
-    assert client.get("/api/me/identities", headers=headers).status_code == 401
-    fresh = client.get("/api/me/identities", headers={"Authorization": "Bearer " + body["token"]})
-    assert fresh.json()["linked"] is True and fresh.json()["migration_available"] is False
-
-
-def test_identity_migration_route_rejections(setup):
-    client, identity, provider, flow = setup
-    legacy, auto = _auto_enrolled(client, identity, flow)
-    headers = {"Authorization": "Bearer " + auto["token"]}
-    wrong = client.post("/api/me/identity-migration", headers=headers,
-        json={"login_name": "a12345678", "password": "wrong"})
-    missing = client.post("/api/me/identity-migration", headers=headers,
-        json={"login_name": "a99999999", "password": "local-password"})
-    assert wrong.status_code == missing.status_code == 409
-    assert wrong.json()["detail"] == missing.json()["detail"] == "旧账号登录名或密码不正确。"
-    admin = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()
-    client.patch(f"/api/admin/auth/accounts/{legacy['user']['id']}", json={"status": "disabled"},
-        headers={"Authorization": "Bearer " + admin["token"]})
-    inactive = client.post("/api/me/identity-migration", headers=headers,
-        json={"login_name": "a12345678", "password": "local-password"})
-    assert inactive.status_code == 409 and inactive.json()["detail"] == "旧账号已停用，请联系管理员。"
-    client.patch(f"/api/admin/auth/accounts/{legacy['user']['id']}", json={"status": "active"},
-        headers={"Authorization": "Bearer " + admin["token"]})
-    local = client.post("/api/auth/login", json={"username": "a12345678", "password": "local-password"}).json()
-    by_local = client.post("/api/me/identity-migration", headers={"Authorization": "Bearer " + local["token"]},
-        json={"login_name": "a12345678", "password": "local-password"})
-    assert by_local.status_code == 409 and "统一认证登录" in by_local.json()["detail"]
-    assert client.get("/api/me/identities",
-        headers={"Authorization": "Bearer " + local["token"]}).json()["migration_available"] is False
-    assert client.post("/api/me/identity-migration",
-        json={"login_name": "a12345678", "password": "local-password"}).status_code == 401
-    assert client.get("/api/me/identities", headers=headers).json()["migration_available"] is True

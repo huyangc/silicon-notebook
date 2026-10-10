@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 
@@ -12,29 +12,35 @@ afterEach(() => {
   window.history.replaceState(null, "", "/");
 });
 
-function authenticationServer(migration: boolean, firstCapabilitiesFailure?: 404 | 503 | "network", options: { repeatFailure?: boolean; role?: string } = {}) {
+type ServerOptions = {
+  /** /me rejects the bearer (expired, or a local session after SSO was switched on). */
+  rejected?: boolean;
+  firstCapabilitiesFailure?: 404 | 503 | "network";
+  repeatFailure?: boolean;
+  role?: string;
+  ssoLogin?: boolean;
+};
+
+function authenticationServer(options: ServerOptions = {}) {
   const requests: string[] = [];
   let capabilitiesAttempts = 0;
+  const ssoLogin = options.ssoLogin ?? true;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const path = new URL(String(input), window.location.origin).pathname;
     requests.push(path);
     if (path === "/api/ready") return Response.json({ ready: true });
     if (path === "/api/auth/capabilities") {
-      if ((capabilitiesAttempts++ === 0 || options.repeatFailure) && firstCapabilitiesFailure) {
-        if (firstCapabilitiesFailure === "network") throw new TypeError("offline");
-        return Response.json({ detail: "capabilities unavailable" }, { status: firstCapabilitiesFailure });
+      if ((capabilitiesAttempts++ === 0 || options.repeatFailure) && options.firstCapabilitiesFailure) {
+        if (options.firstCapabilitiesFailure === "network") throw new TypeError("offline");
+        return Response.json({ detail: "capabilities unavailable" }, { status: options.firstCapabilitiesFailure });
       }
       return Response.json({
-        mode: "binding_required", local_login: true, local_registration: false,
-        sso_login: true, binding_allowed: true, provider_label: "统一登录",
+        sso_login: ssoLogin, local_login: !ssoLogin, local_registration: !ssoLogin, provider_label: "W3",
       });
     }
-    if (path === "/api/me") return migration
-      ? Response.json({ detail: "migration only" }, { status: 401 })
+    if (path === "/api/me") return options.rejected
+      ? Response.json({ detail: "session rejected" }, { status: 401 })
       : Response.json({ id: "user-1", username: "alice", role: options.role ?? "user", ui_mode: "auto", search_profile: null });
-    if (path === "/api/me/identities") return Response.json({
-      linked: !migration, local_login_name: "a12345678", external_username: migration ? null : "alice", display_name: "Alice",
-    });
     if (path === "/api/health") return Response.json({ status: "ok", llm_configured: false });
     if (path === "/api/notebooks") return Response.json([]);
     if (path === "/api/me/pending-actions") return Response.json({ count: 0, items: [] });
@@ -47,23 +53,19 @@ function authenticationServer(migration: boolean, firstCapabilitiesFailure?: 404
   return requests;
 }
 
-test("restoring a migration token keeps binding available without business requests or subscriptions", async () => {
-  const requests = authenticationServer(true);
-  setToken("migration-token");
+test("a rejected session under unified authentication returns to the provider button only", async () => {
+  const requests = authenticationServer({ rejected: true });
+  setToken("old-local-session");
   render(<Home />);
-  await screen.findByRole("heading", { name: "关联统一身份" });
-  await act(async () => {
-    window.history.pushState(null, "", "/#notebook=private-notebook");
-    window.dispatchEvent(new PopStateEvent("popstate"));
-  });
-  expect(getToken()).toBe("migration-token");
-  expect(requests).toEqual([
-    "/api/ready", "/api/auth/capabilities", "/api/me", "/api/me/identities",
-  ]);
+  expect(await screen.findByRole("button", { name: "使用W3登录" })).toBeInTheDocument();
+  expect(screen.queryByLabelText("用户名")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
+  expect(getToken()).toBe("");
+  expect(requests).toEqual(["/api/ready", "/api/auth/capabilities", "/api/me"]);
 });
 
-test("a business user restored in the same migration stage still receives pending actions", async () => {
-  const requests = authenticationServer(false);
+test("a restored SSO session receives pending actions", async () => {
+  const requests = authenticationServer();
   setToken("sso-token");
   render(<Home />);
   await waitFor(() => expect(requests).toContain("/api/me/pending-actions/stream"));
@@ -71,26 +73,21 @@ test("a business user restored in the same migration stage still receives pendin
   expect(getToken()).toBe("sso-token");
 });
 
-test.each([503, "network"] as const)("capabilities failure %s preserves a migration token and retries before presenting login", async (failure) => {
-  const requests = authenticationServer(true, failure);
-  setToken("migration-token");
+test.each([503, "network"] as const)("capabilities failure %s keeps login closed until a retry succeeds", async (failure) => {
+  const requests = authenticationServer({ firstCapabilitiesFailure: failure });
   render(<Home />);
   expect(await screen.findByRole("alert")).toHaveTextContent("认证状态暂时无法确认");
   expect(screen.queryByLabelText("用户名")).not.toBeInTheDocument();
-  expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
-  expect(getToken()).toBe("migration-token");
-  expect(requests).toEqual(["/api/ready", "/api/auth/capabilities", "/api/me"]);
+  expect(screen.queryByRole("button", { name: "使用W3登录" })).not.toBeInTheDocument();
+  expect(requests).toEqual(["/api/ready", "/api/auth/capabilities"]);
 
   await userEvent.setup().click(screen.getByRole("button", { name: "重试" }));
-  await screen.findByRole("heading", { name: "关联统一身份" });
+  expect(await screen.findByRole("button", { name: "使用W3登录" })).toBeInTheDocument();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-  expect(getToken()).toBe("migration-token");
-  expect(requests).not.toContain("/api/me/pending-actions");
-  expect(requests).not.toContain("/api/me/pending-actions/stream");
 });
 
 test("an explicitly absent capabilities endpoint retains legacy local login", async () => {
-  authenticationServer(false, 404);
+  authenticationServer({ firstCapabilitiesFailure: 404 });
   render(<Home />);
   expect(await screen.findByRole("button", { name: "本地登录" })).toBeInTheDocument();
   expect(screen.getByLabelText("用户名")).toBeInTheDocument();
@@ -98,7 +95,7 @@ test("an explicitly absent capabilities endpoint retains legacy local login", as
 });
 
 test("provider maintenance does not block an existing administrator SSO session", async () => {
-  const requests = authenticationServer(false, 503, { repeatFailure: true, role: "admin" });
+  const requests = authenticationServer({ firstCapabilitiesFailure: 503, repeatFailure: true, role: "admin" });
   setToken("valid-admin-sso");
   render(<Home />);
   await waitFor(() => expect(requests).toContain("/api/me/pending-actions/stream"));
@@ -107,30 +104,26 @@ test("provider maintenance does not block an existing administrator SSO session"
   expect(getToken()).toBe("valid-admin-sso");
   expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
   await userEvent.setup().click(screen.getByRole("button", { name: "账户菜单" }));
-  expect(screen.getByRole("menuitem", { name: "认证迁移" })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: "用户总览" })).toBeInTheDocument();
+  expect(screen.queryByRole("menuitem", { name: "认证迁移" })).not.toBeInTheDocument();
   expect(screen.queryByRole("menuitem", { name: "修改密码" })).not.toBeInTheDocument();
   expect(screen.queryByRole("menuitem", { name: "关联统一身份" })).not.toBeInTheDocument();
 });
 
-test.each(["invalid-token", "migration-token"])("unknown capabilities preserve rejected %s across retries without business access", async (token) => {
-  const requests = authenticationServer(true, 503, { repeatFailure: true });
-  setToken(token);
+test("a signed-in user may change their password only while local login is on", async () => {
+  authenticationServer({ ssoLogin: false });
+  setToken("local-session");
   render(<Home />);
-  await screen.findByRole("alert");
-  await userEvent.setup().click(screen.getByRole("button", { name: "重试" }));
-  await screen.findByRole("alert");
-  expect(getToken()).toBe(token);
-  expect(requests).toEqual([
-    "/api/ready", "/api/auth/capabilities", "/api/me", "/api/auth/capabilities", "/api/me",
-  ]);
-  expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
+  await userEvent.setup().click(await screen.findByRole("button", { name: "账户菜单" }));
+  expect(screen.getByRole("menuitem", { name: "修改密码" })).toBeInTheDocument();
 });
 
-test("unknown capabilities without a bearer keep new login controls closed", async () => {
-  const requests = authenticationServer(false, 503);
+test("a rejected session with unknown capabilities is cleared and login stays closed", async () => {
+  const requests = authenticationServer({ rejected: true, firstCapabilitiesFailure: 503, repeatFailure: true });
+  setToken("invalid-token");
   render(<Home />);
   await screen.findByRole("alert");
-  expect(screen.queryByLabelText("用户名")).not.toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "统一登录" })).not.toBeInTheDocument();
-  expect(requests).toEqual(["/api/ready", "/api/auth/capabilities"]);
+  expect(getToken()).toBe("");
+  expect(requests).toEqual(["/api/ready", "/api/auth/capabilities", "/api/me"]);
+  expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
 });

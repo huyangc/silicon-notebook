@@ -288,34 +288,58 @@ def _constraint(name: str, table: str, clause: str) -> ConstraintContract:
     )
 
 
+# Statement-level drops (never the ``-- DROP INDEX CONCURRENTLY ...`` rollback
+# notes in comments): a dropped table takes its columns, constraints and
+# indexes with it. Each builder applies a migration's creates and drops in
+# file order, so a later migration may recreate a dropped name.
+_DROP_TABLE = re.compile(rf"(?mi)^\s*DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?({_IDENT})\s*;")
+_DROP_INDEX = re.compile(
+    rf"(?mi)^\s*DROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?({_IDENT})\s*;"
+)
+_DROP_COLUMN = re.compile(rf"^DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?({_IDENT})$", re.I)
+
+
+def _in_order(*matches: Any) -> list[tuple[str, Any]]:
+    """``(kind, match)`` pairs from several finditer streams, in file order."""
+    events = [(kind, match) for kind, stream in matches for match in stream]
+    return sorted(events, key=lambda event: event[1].start())
+
+
 def _expected_constraints() -> dict[str, ConstraintContract]:
     result: dict[str, ConstraintContract] = {}
+
+    def add(name: str, contract: ConstraintContract) -> None:
+        previous = result.setdefault(name, contract)
+        if previous != contract:
+            raise ValueError("packaged PostgreSQL constraint contract is ambiguous")
+
     for migration in _MIGRATIONS:
         text = migration.sql
-        for create in re.finditer(rf"\bCREATE\s+TABLE\s+({_IDENT})\s*\(", text, re.I):
-            body, _ = _balanced(text, create.end() - 1)
-            for item in _split_top_level(body):
-                match = re.match(
-                    rf"\s*CONSTRAINT\s+({_IDENT})\s+(.+)$", item, re.I | re.S
-                )
-                if match:
-                    contract = _constraint(
-                        match.group(1), create.group(1), match.group(2)
-                    )
-                    previous = result.setdefault(match.group(1), contract)
-                    if previous != contract:
-                        raise ValueError(
-                            "packaged PostgreSQL constraint contract is ambiguous"
-                        )
-        for alter in re.finditer(
-            rf"\bALTER\s+TABLE\s+({_IDENT})\s+ADD\s+CONSTRAINT\s+({_IDENT})\s+([^;]+);",
-            text,
-            re.I | re.S,
+        for kind, match in _in_order(
+            ("create", re.finditer(rf"\bCREATE\s+TABLE\s+({_IDENT})\s*\(", text, re.I)),
+            ("alter", re.finditer(
+                rf"\bALTER\s+TABLE\s+({_IDENT})\s+ADD\s+CONSTRAINT\s+({_IDENT})\s+([^;]+);",
+                text,
+                re.I | re.S,
+            )),
+            ("drop", _DROP_TABLE.finditer(text)),
         ):
-            contract = _constraint(alter.group(2), alter.group(1), alter.group(3))
-            previous = result.setdefault(alter.group(2), contract)
-            if previous != contract:
-                raise ValueError("packaged PostgreSQL constraint contract is ambiguous")
+            if kind == "drop":
+                for name in [n for n, c in result.items() if c.table == match.group(1)]:
+                    del result[name]
+            elif kind == "alter":
+                add(match.group(2), _constraint(match.group(2), match.group(1), match.group(3)))
+            else:
+                body, _ = _balanced(text, match.end() - 1)
+                for item in _split_top_level(body):
+                    constraint = re.match(
+                        rf"\s*CONSTRAINT\s+({_IDENT})\s+(.+)$", item, re.I | re.S
+                    )
+                    if constraint:
+                        add(
+                            constraint.group(1),
+                            _constraint(constraint.group(1), match.group(1), constraint.group(2)),
+                        )
     return result
 
 
@@ -376,19 +400,26 @@ def _expected_columns() -> dict[str, dict[str, ColumnContract]]:
     result: dict[str, dict[str, ColumnContract]] = {}
     for migration in _MIGRATIONS:
         text = migration.sql
-        for create in re.finditer(rf"\bCREATE\s+TABLE\s+({_IDENT})\s*\(", text, re.I):
-            body, _ = _balanced(text, create.end() - 1)
-            table = create.group(1)
-            columns = result.setdefault(table, {})
-            for item in _split_top_level(body):
-                match = re.match(rf"\s*({_IDENT})\s+(.+)$", item, re.I | re.S)
-                if match is None or match.group(1).lower() == "constraint":
-                    continue
-                columns[match.group(1)] = _column_contract(match.group(2))
-        for alter in re.finditer(
-            rf"\bALTER\s+TABLE\s+({_IDENT})\s+([^;]+);", text, re.I | re.S
+        for kind, match in _in_order(
+            ("create", re.finditer(rf"\bCREATE\s+TABLE\s+({_IDENT})\s*\(", text, re.I)),
+            ("alter", re.finditer(
+                rf"\bALTER\s+TABLE\s+({_IDENT})\s+([^;]+);", text, re.I | re.S
+            )),
+            ("drop", _DROP_TABLE.finditer(text)),
         ):
-            table = alter.group(1)
+            table = match.group(1)
+            if kind == "drop":
+                result.pop(table, None)
+                continue
+            if kind == "create":
+                body, _ = _balanced(text, match.end() - 1)
+                columns = result.setdefault(table, {})
+                for item in _split_top_level(body):
+                    column = re.match(rf"\s*({_IDENT})\s+(.+)$", item, re.I | re.S)
+                    if column is None or column.group(1).lower() == "constraint":
+                        continue
+                    columns[column.group(1)] = _column_contract(column.group(2))
+                continue
             # One ALTER TABLE may carry SEVERAL comma-separated actions:
             # ``ADD COLUMN a ..., ADD COLUMN b ...``. Reading only the first
             # one -- and swallowing its siblings as part of its definition --
@@ -396,16 +427,18 @@ def _expected_columns() -> dict[str, dict[str, ColumnContract]]:
             # mis-read notebooks.indexing_pipeline as NOT NULL, because the
             # trailing "NOT NULL" of a LATER column landed inside the first
             # column's definition text. Split on top-level commas and contract
-            # each ADD COLUMN separately; every other action (ADD CONSTRAINT,
-            # ALTER COLUMN, DROP COLUMN) is not a column definition and is
-            # skipped here exactly as it was before.
-            for item in _split_top_level(alter.group(2)):
+            # each ADD COLUMN separately, and forget each DROP COLUMN; every
+            # other action (ADD CONSTRAINT, ALTER COLUMN) is not a column
+            # definition and is skipped here exactly as it was before.
+            for item in _split_top_level(match.group(2)):
                 added = _ADD_COLUMN.match(item)
-                if added is None:
-                    continue
-                result.setdefault(table, {})[added.group(1)] = _column_contract(
-                    added.group(2)
-                )
+                dropped = _DROP_COLUMN.match(item.strip())
+                if added is not None:
+                    result.setdefault(table, {})[added.group(1)] = _column_contract(
+                        added.group(2)
+                    )
+                elif dropped is not None:
+                    result.get(table, {}).pop(dropped.group(1), None)
     return result
 
 
@@ -419,7 +452,18 @@ def _expected_indexes(
         re.I | re.S,
     )
     for migration in _MIGRATIONS:
-        for match in pattern.finditer(migration.sql):
+        for kind, match in _in_order(
+            ("create", pattern.finditer(migration.sql)),
+            ("drop_index", _DROP_INDEX.finditer(migration.sql)),
+            ("drop_table", _DROP_TABLE.finditer(migration.sql)),
+        ):
+            if kind == "drop_index":
+                result.pop(match.group(1), None)
+                continue
+            if kind == "drop_table":
+                for name in [n for n, i in result.items() if i.table == match.group(1)]:
+                    del result[name]
+                continue
             body, end = _balanced(migration.sql, match.end() - 1)
             tail = migration.sql[end : migration.sql.find(";", end)]
             predicate = re.search(r"\bWHERE\s+(.+)$", tail, re.I | re.S)

@@ -26,6 +26,8 @@ export type AdminUserUsage = {
   last_active: string | null;
   is_online: boolean;
   role_mutable: boolean;
+  // 账号状态:停用的账号不能登录(含统一认证),其会话已被吊销。
+  status: AdminUserStatus;
   // 有效文档上限(有覆盖用覆盖、否则全局默认)与「是否为该用户单独设置过」标记。
   upload_limit: number;
   upload_limit_overridden: boolean;
@@ -199,6 +201,43 @@ export async function updateAdminUserUploadLimit(
   if (res.status === 403) await throwForbiddenSentinel(res);
   if (!res.ok) await throwHumanizedHttpError(res, "admin");
   return res.json();
+}
+
+export type AdminUserStatus = "active" | "disabled";
+
+/** 读 PATCH 响应体里的某个字符串字段;响应体缺字段或不是 JSON 时退回请求值。 */
+async function patchedField(res: Response, field: string, requested: string): Promise<string> {
+  try {
+    const body = (await res.json()) as Record<string, unknown> | null;
+    const value = body?.[field];
+    return typeof value === "string" && value ? value : requested;
+  } catch {
+    return requested;
+  }
+}
+
+// 停用/启用账号。后端拒绝操作自己;停用即吊销其全部会话。镜像 updateAdminUserRole
+// 的 403 哨兵分流 + 人话层错误处理。
+export async function updateAdminUserStatus(userId: string, status: AdminUserStatus): Promise<AdminUserStatus> {
+  const res = await performApiRequest(
+    `/admin/users/${encodeURIComponent(userId)}/status`,
+    { tag: "admin", method: "PATCH", body: JSON.stringify({ status }) },
+  );
+  if (res.status === 403) await throwForbiddenSentinel(res);
+  if (!res.ok) await throwHumanizedHttpError(res, "admin");
+  return (await patchedField(res, "status", status)) === "disabled" ? "disabled" : "active";
+}
+
+// 改用户名(唯一性由后端校验,冲突时给出可展示的中文 detail)。改名后该用户全部
+// 会话被吊销。返回生效后的用户名。
+export async function updateAdminUsername(userId: string, username: string): Promise<string> {
+  const res = await performApiRequest(
+    `/admin/users/${encodeURIComponent(userId)}/username`,
+    { tag: "admin", method: "PATCH", body: JSON.stringify({ username }) },
+  );
+  if (res.status === 403) await throwForbiddenSentinel(res);
+  if (!res.ok) await throwHumanizedHttpError(res, "admin");
+  return patchedField(res, "username", username);
 }
 
 export type AdminPasswordReset = { id: string; username: string };

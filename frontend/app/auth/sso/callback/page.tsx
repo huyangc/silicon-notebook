@@ -1,35 +1,25 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import {
-  cancelIdentityBinding,
-  completeSsoLogin,
-  confirmIdentityBinding,
-  fetchAuthCapabilities,
-  getToken,
-  setToken,
-  type SsoCompletion,
-} from "../../../auth";
+import { completeSsoLogin, setToken, type SsoChoice } from "../../../auth";
 import { toUserMessage } from "../../../errors";
-import { IdentityBindingConfirmation, type LocalLoginState } from "../../../identity-binding-confirmation";
 import { consumeSsoReturnLocation } from "../../../auth-return-location";
+import { SsoAccountChoice } from "../../../sso-account-choice";
 
 type CallbackState =
   | { kind: "working" }
   | { kind: "error"; copy: string }
-  | { kind: "preview"; pending: Exclude<SsoCompletion, { status: "authenticated" }> };
+  | { kind: "choice"; pending: SsoChoice };
 
 function callbackErrorMessage(key: string | null): string {
-  if (key === "cancelled") return "已取消统一登录，请返回后重试。";
-  return "统一登录未完成，请返回后重试。";
+  if (key === "cancelled") return "已取消统一认证登录，请返回后重试。";
+  return "统一认证登录未完成，请返回后重试。";
 }
 
 /** The URL may contain only the server-issued one-time handoff code.  It is
  * consumed immediately and removed before any network completion can render. */
 export default function SsoCallbackPage() {
   const [state, setState] = useState<CallbackState>({ kind: "working" });
-  const [busy, setBusy] = useState(false);
-  const [localLogin, setLocalLogin] = useState<LocalLoginState>("loading");
   const completionStarted = useRef(false);
 
   useEffect(() => {
@@ -50,66 +40,29 @@ export default function SsoCallbackPage() {
           window.location.replace(consumeSsoReturnLocation());
           return;
         }
-        setState({ kind: "preview", pending: result });
-        if (result.status === "confirmation_required" && result.purpose === "auto_enroll") {
-          loadLocalLogin();
+        if (result.status === "choice_required") {
+          setState({ kind: "choice", pending: result });
+          return;
         }
+        setState({ kind: "error", copy: callbackErrorMessage(null) });
       })
-      .catch((err) => setState({ kind: "error", copy: toUserMessage(err, "统一登录未完成，请返回后重试。") }));
+      .catch((err) => setState({ kind: "error", copy: toUserMessage(err, "统一认证登录未完成，请返回后重试。") }));
   }, []);
-
-  function loadLocalLogin() {
-    setLocalLogin("loading");
-    void fetchAuthCapabilities()
-      .then((caps) => setLocalLogin(caps.local_login ? "allowed" : "closed"))
-      .catch(() => setLocalLogin("unknown"));
-  }
-
-  async function confirm() {
-    if (state.kind !== "preview") return;
-    if (state.pending.status === "binding_required" && !getToken()) {
-      setState({ kind: "error", copy: "本地验证已失效，请返回后重新开始关联。" });
-      return;
-    }
-    setBusy(true);
-    try {
-      const result = await confirmIdentityBinding(state.pending.pending_id);
-      setToken(result.token);
-      window.location.replace(consumeSsoReturnLocation());
-    } catch (err) {
-      setState({ kind: "error", copy: toUserMessage(err, "关联未完成，请返回后重试。") });
-      setBusy(false);
-    }
-  }
-
-  async function cancel() {
-    if (state.kind !== "preview") return;
-    setBusy(true);
-    try {
-      await cancelIdentityBinding(state.pending.pending_id);
-      window.location.replace(consumeSsoReturnLocation());
-    } catch (err) {
-      setState({ kind: "error", copy: toUserMessage(err, "取消关联失败，请稍后重试。") });
-      setBusy(false);
-    }
-  }
 
   return (
     <main className="auth-gate">
       <section className="auth-card auth-callback-card" aria-live="polite">
         <div className="auth-brand">silicon-notebook</div>
-        {state.kind === "working" && <><h1 className="auth-title">正在完成统一登录</h1><p className="auth-copy">请稍候。</p></>}
+        {state.kind === "working" && <><h1 className="auth-title">正在完成统一认证登录</h1><p className="auth-copy">请稍候。</p></>}
         {state.kind === "error" && <>
-          <h1 className="auth-title">统一登录未完成</h1>
+          <h1 className="auth-title">统一认证登录未完成</h1>
           <p className="auth-error" role="alert">{state.copy}</p>
           <a className="auth-return" href="/" onClick={(event) => {
             event.preventDefault();
             window.location.replace(consumeSsoReturnLocation());
           }}>返回登录页</a>
         </>}
-        {state.kind === "preview" && <>
-          <IdentityBindingConfirmation pending={state.pending} busy={busy} localLogin={localLogin} onRetryLocalLogin={loadLocalLogin} onConfirm={() => { void confirm(); }} onCancel={() => { void cancel(); }} />
-        </>}
+        {state.kind === "choice" && <SsoAccountChoice pending={state.pending} />}
       </section>
     </main>
   );

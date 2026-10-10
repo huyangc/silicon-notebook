@@ -132,10 +132,10 @@ class IdentityStore:
         if exists:
             raise ValueError("username already exists")
         db.execute(
-            "INSERT INTO users (id, email, display_name, role, status, username, local_login_name, "
+            "INSERT INTO users (id, email, display_name, role, status, username, "
             "password_hash, password_salt, password_iterations, created_at, updated_at) "
-            "VALUES (?, ?, ?, 'user', 'active', ?, ?, ?, ?, ?, ?, ?)",
-            (user_id, email, norm, norm, norm, pw_hash, pw_salt, pw_iters, now, now),
+            "VALUES (?, ?, ?, 'user', 'active', ?, ?, ?, ?, ?, ?)",
+            (user_id, email, norm, norm, pw_hash, pw_salt, pw_iters, now, now),
         )
         db.execute(
             "INSERT INTO user_profiles (id, user_id, memory_mode, domain_focus, created_at, updated_at) "
@@ -167,15 +167,11 @@ class IdentityStore:
             return (profile, self._insert_session_in_txn(db, profile.id))
 
     def authenticate_user(self, username: str, password: str) -> UserProfile | None:
-        from app.domain.auth_utils import normalize_username, verify_password
+        from app.domain.auth_utils import verify_password
 
-        norm = normalize_username(username)
         with self.database.write() as db:
-            if not self.auth.local_login_allowed(db):
-                return None
-            user = db.execute(
-                "SELECT * FROM users WHERE local_login_name = ?", (norm,)
-            ).fetchone()
+            self.auth.require_local_write(db)
+            user = self.auth.local_account(db, username)
             if user is None or user["status"] != "active":
                 return None
             if not verify_password(
@@ -199,16 +195,12 @@ class IdentityStore:
         同一写事务让登录与改密在同一把写锁上串行:登录排在改密前,它插的会话
         会被改密事务的 DELETE 带走;排在后,旧密码直接验证失败。verify 的
         PBKDF2(~30ms)因此进了写锁——登录低频,原子性优先(与改密同一取舍)。"""
-        from app.domain.auth_utils import normalize_username, verify_password
+        from app.domain.auth_utils import verify_password
 
-        norm = normalize_username(username)
         with self.database.write() as db:
             self.database.begin_immediate(db)
-            if not self.auth.local_login_allowed(db):
-                return None
-            user = db.execute(
-                "SELECT * FROM users WHERE local_login_name = ?", (norm,)
-            ).fetchone()
+            self.auth.require_local_write(db)
+            user = self.auth.local_account(db, username)
             if user is None or user["status"] != "active":
                 return None
             if not verify_password(
@@ -234,7 +226,6 @@ class IdentityStore:
         with self.database.write() as db:
             self.auth.lock(db)
             db.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
-        self.auth.cancel_for_session(token)
 
     def audit_labels_for_user_ids(self, user_ids) -> dict[str, str]:
         """Resolve at most 512 exact ids, in SQLite-safe chunks of at most 200."""
@@ -496,7 +487,7 @@ class IdentityStore:
         pw_hash, pw_salt, pw_iters = hash_password(new_password)
         with self.database.write() as db:
             self.database.begin_immediate(db)
-            self.auth.require_local_write(db)
+            self.auth.lock(db)
             actor = db.execute(
                 "SELECT role, status FROM users WHERE id = ?", (actor_id,)
             ).fetchone()

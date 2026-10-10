@@ -796,6 +796,29 @@
           "title": "AdminQuestionsResponse",
           "type": "object"
         },
+        "AdminUserAccountResult": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "username": {
+              "title": "Username",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "username",
+            "status"
+          ],
+          "title": "AdminUserAccountResult",
+          "type": "object"
+        },
         "AdminUserNotebook": {
           "properties": {
             "conversations": {
@@ -893,6 +916,24 @@
             "role"
           ],
           "title": "AdminUserRoleUpdate",
+          "type": "object"
+        },
+        "AdminUserStatusUpdate": {
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "enum": [
+                "active",
+                "disabled"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "title": "AdminUserStatusUpdate",
           "type": "object"
         },
         "AdminUserUploadLimitResult": {
@@ -1031,6 +1072,11 @@
               "title": "Sources",
               "type": "integer"
             },
+            "status": {
+              "default": "active",
+              "title": "Status",
+              "type": "string"
+            },
             "storage_bytes": {
               "default": 0,
               "title": "Storage Bytes",
@@ -1063,6 +1109,20 @@
             "reports"
           ],
           "title": "AdminUserUsage",
+          "type": "object"
+        },
+        "AdminUsernameUpdate": {
+          "additionalProperties": false,
+          "properties": {
+            "username": {
+              "title": "Username",
+              "type": "string"
+            }
+          },
+          "required": [
+            "username"
+          ],
+          "title": "AdminUsernameUpdate",
           "type": "object"
         },
         "AgentCallOut": {
@@ -2681,11 +2741,6 @@
         },
         "AuthResult": {
           "properties": {
-            "migration_required": {
-              "default": false,
-              "title": "Migration Required",
-              "type": "boolean"
-            },
             "token": {
               "title": "Token",
               "type": "string"
@@ -2699,132 +2754,6 @@
             "user"
           ],
           "title": "AuthResult",
-          "type": "object"
-        },
-        "AuthenticationAccountUpdate": {
-          "additionalProperties": false,
-          "properties": {
-            "status": {
-              "enum": [
-                "active",
-                "disabled"
-              ],
-              "title": "Status",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status"
-          ],
-          "title": "AuthenticationAccountUpdate",
-          "type": "object"
-        },
-        "AuthenticationConfigurationUpdate": {
-          "additionalProperties": false,
-          "properties": {
-            "configuration_generation": {
-              "maxLength": 128,
-              "minLength": 1,
-              "title": "Configuration Generation",
-              "type": "string"
-            },
-            "expected_revision": {
-              "minimum": 0.0,
-              "title": "Expected Revision",
-              "type": "integer"
-            }
-          },
-          "required": [
-            "expected_revision",
-            "configuration_generation"
-          ],
-          "title": "AuthenticationConfigurationUpdate",
-          "type": "object"
-        },
-        "AuthenticationGrantCreate": {
-          "additionalProperties": false,
-          "properties": {
-            "purpose": {
-              "enum": [
-                "enroll",
-                "recover",
-                "replace"
-              ],
-              "title": "Purpose",
-              "type": "string"
-            },
-            "subject": {
-              "minLength": 1,
-              "title": "Subject",
-              "type": "string"
-            },
-            "target_user_id": {
-              "default": "",
-              "title": "Target User Id",
-              "type": "string"
-            }
-          },
-          "required": [
-            "purpose",
-            "subject"
-          ],
-          "title": "AuthenticationGrantCreate",
-          "type": "object"
-        },
-        "AuthenticationGrantStart": {
-          "additionalProperties": false,
-          "properties": {
-            "grant_token": {
-              "minLength": 1,
-              "title": "Grant Token",
-              "type": "string"
-            },
-            "purpose": {
-              "enum": [
-                "enroll",
-                "recover",
-                "replace"
-              ],
-              "title": "Purpose",
-              "type": "string"
-            }
-          },
-          "required": [
-            "purpose",
-            "grant_token"
-          ],
-          "title": "AuthenticationGrantStart",
-          "type": "object"
-        },
-        "AuthenticationPolicyUpdate": {
-          "additionalProperties": false,
-          "properties": {
-            "allow_rollback": {
-              "default": false,
-              "title": "Allow Rollback",
-              "type": "boolean"
-            },
-            "expected_revision": {
-              "minimum": 0.0,
-              "title": "Expected Revision",
-              "type": "integer"
-            },
-            "mode": {
-              "enum": [
-                "dual",
-                "binding_required",
-                "sso_only",
-                "retired"
-              ],
-              "title": "Mode",
-              "type": "string"
-            }
-          },
-          "required": [
-            "mode",
-            "expected_revision"
-          ],
-          "title": "AuthenticationPolicyUpdate",
           "type": "object"
         },
         "BaseNotebookScope": {
@@ -2860,35 +2789,6 @@
             }
           },
           "title": "BaseNotebookScope",
-          "type": "object"
-        },
-        "BindingConfirm": {
-          "additionalProperties": false,
-          "properties": {
-            "pending_id": {
-              "minLength": 1,
-              "title": "Pending Id",
-              "type": "string"
-            }
-          },
-          "required": [
-            "pending_id"
-          ],
-          "title": "BindingConfirm",
-          "type": "object"
-        },
-        "BindingStart": {
-          "additionalProperties": false,
-          "properties": {
-            "current_password": {
-              "title": "Current Password",
-              "type": "string"
-            }
-          },
-          "required": [
-            "current_password"
-          ],
-          "title": "BindingStart",
           "type": "object"
         },
         "BoardEdge": {
@@ -5651,25 +5551,6 @@
             }
           },
           "title": "HTTPValidationError",
-          "type": "object"
-        },
-        "IdentityMigration": {
-          "additionalProperties": false,
-          "properties": {
-            "login_name": {
-              "title": "Login Name",
-              "type": "string"
-            },
-            "password": {
-              "title": "Password",
-              "type": "string"
-            }
-          },
-          "required": [
-            "login_name",
-            "password"
-          ],
-          "title": "IdentityMigration",
           "type": "object"
         },
         "IndexingPipelineOptionResponse": {
@@ -12658,6 +12539,21 @@
           "title": "SpreadsheetResultRow",
           "type": "object"
         },
+        "SsoChoice": {
+          "additionalProperties": false,
+          "properties": {
+            "pending_id": {
+              "minLength": 1,
+              "title": "Pending Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pending_id"
+          ],
+          "title": "SsoChoice",
+          "type": "object"
+        },
         "SsoComplete": {
           "additionalProperties": false,
           "properties": {
@@ -12671,6 +12567,31 @@
             "code"
           ],
           "title": "SsoComplete",
+          "type": "object"
+        },
+        "SsoLink": {
+          "additionalProperties": false,
+          "properties": {
+            "login_name": {
+              "title": "Login Name",
+              "type": "string"
+            },
+            "password": {
+              "title": "Password",
+              "type": "string"
+            },
+            "pending_id": {
+              "minLength": 1,
+              "title": "Pending Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pending_id",
+            "login_name",
+            "password"
+          ],
+          "title": "SsoLink",
           "type": "object"
         },
         "StructuredBatchCoverage": {
@@ -14262,309 +14183,6 @@
           "summary": "Get Admin Model Output Artifact"
         }
       },
-      "/api/admin/auth/accounts": {
-        "get": {
-          "operationId": "accounts_api_admin_auth_accounts_get",
-          "parameters": [
-            {
-              "in": "query",
-              "name": "offset",
-              "required": false,
-              "schema": {
-                "default": 0,
-                "minimum": 0,
-                "title": "Offset",
-                "type": "integer"
-              }
-            },
-            {
-              "in": "query",
-              "name": "limit",
-              "required": false,
-              "schema": {
-                "default": 100,
-                "maximum": 200,
-                "minimum": 1,
-                "title": "Limit",
-                "type": "integer"
-              }
-            }
-          ],
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {}
-                }
-              },
-              "description": "Successful Response"
-            },
-            "422": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/HTTPValidationError"
-                  }
-                }
-              },
-              "description": "Validation Error"
-            }
-          },
-          "summary": "Accounts"
-        }
-      },
-      "/api/admin/auth/accounts/{user_id}": {
-        "patch": {
-          "operationId": "update_account_api_admin_auth_accounts__user_id__patch",
-          "parameters": [
-            {
-              "in": "path",
-              "name": "user_id",
-              "required": true,
-              "schema": {
-                "title": "User Id",
-                "type": "string"
-              }
-            }
-          ],
-          "requestBody": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AuthenticationAccountUpdate"
-                }
-              }
-            },
-            "required": true
-          },
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {}
-                }
-              },
-              "description": "Successful Response"
-            },
-            "422": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/HTTPValidationError"
-                  }
-                }
-              },
-              "description": "Validation Error"
-            }
-          },
-          "summary": "Update Account"
-        }
-      },
-      "/api/admin/auth/audit": {
-        "get": {
-          "operationId": "audit_api_admin_auth_audit_get",
-          "parameters": [
-            {
-              "in": "query",
-              "name": "offset",
-              "required": false,
-              "schema": {
-                "default": 0,
-                "minimum": 0,
-                "title": "Offset",
-                "type": "integer"
-              }
-            },
-            {
-              "in": "query",
-              "name": "limit",
-              "required": false,
-              "schema": {
-                "default": 100,
-                "maximum": 200,
-                "minimum": 1,
-                "title": "Limit",
-                "type": "integer"
-              }
-            }
-          ],
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {}
-                }
-              },
-              "description": "Successful Response"
-            },
-            "422": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/HTTPValidationError"
-                  }
-                }
-              },
-              "description": "Validation Error"
-            }
-          },
-          "summary": "Audit"
-        }
-      },
-      "/api/admin/auth/grants": {
-        "post": {
-          "operationId": "create_grant_api_admin_auth_grants_post",
-          "requestBody": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AuthenticationGrantCreate"
-                }
-              }
-            },
-            "required": true
-          },
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {}
-                }
-              },
-              "description": "Successful Response"
-            },
-            "422": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/HTTPValidationError"
-                  }
-                }
-              },
-              "description": "Validation Error"
-            }
-          },
-          "summary": "Create Grant"
-        }
-      },
-      "/api/admin/auth/migration": {
-        "get": {
-          "operationId": "migration_api_admin_auth_migration_get",
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {}
-                }
-              },
-              "description": "Successful Response"
-            }
-          },
-          "summary": "Migration"
-        }
-      },
-      "/api/admin/auth/policy": {
-        "get": {
-          "operationId": "policy_api_admin_auth_policy_get",
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {}
-                }
-              },
-              "description": "Successful Response"
-            }
-          },
-          "summary": "Policy"
-        },
-        "patch": {
-          "operationId": "update_policy_api_admin_auth_policy_patch",
-          "requestBody": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AuthenticationPolicyUpdate"
-                }
-              }
-            },
-            "required": true
-          },
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {}
-                }
-              },
-              "description": "Successful Response"
-            },
-            "422": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/HTTPValidationError"
-                  }
-                }
-              },
-              "description": "Validation Error"
-            }
-          },
-          "summary": "Update Policy"
-        }
-      },
-      "/api/admin/auth/provider-configuration": {
-        "patch": {
-          "operationId": "prepare_configuration_api_admin_auth_provider_configuration_patch",
-          "requestBody": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AuthenticationConfigurationUpdate"
-                }
-              }
-            },
-            "required": true
-          },
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {}
-                }
-              },
-              "description": "Successful Response"
-            },
-            "422": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/HTTPValidationError"
-                  }
-                }
-              },
-              "description": "Validation Error"
-            }
-          },
-          "summary": "Prepare Configuration"
-        }
-      },
-      "/api/admin/auth/retirement-cleanup": {
-        "post": {
-          "operationId": "retirement_cleanup_api_admin_auth_retirement_cleanup_post",
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {}
-                }
-              },
-              "description": "Successful Response"
-            }
-          },
-          "summary": "Retirement Cleanup"
-        }
-      },
       "/api/admin/cache": {
         "get": {
           "description": "响应缓存现状：总量、命中率、按模型分布。仅 admin，纯读。\n\nby_tag 按模型名分组——决定「换了哪个模型服务、该清哪一份」时看的就是它。\n命中/未命中是**进程内**计数（重启归零）：缓存实例按路径记忆化，所以这是全进程\n的口径，而不是某一个 LLM client 自己的那一份。",
@@ -15515,6 +15133,56 @@
           "summary": "Update Admin User Role"
         }
       },
+      "/api/admin/users/{user_id}/status": {
+        "patch": {
+          "description": "停用/启用账号。停用即吊销其全部浏览器会话；Agent token 随账号状态失效。",
+          "operationId": "update_admin_user_status_api_admin_users__user_id__status_patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminUserStatusUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AdminUserAccountResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update Admin User Status"
+        }
+      },
       "/api/admin/users/{user_id}/upload-limit": {
         "patch": {
           "description": "给某用户设/清「每笔记本文档数量上限」覆盖值(limit=null 清除、回落全局默认)。\n仅 admin。返回改动后该用户的生效上限与是否仍为覆盖值。",
@@ -15563,6 +15231,56 @@
             }
           },
           "summary": "Update Admin User Upload Limit"
+        }
+      },
+      "/api/admin/users/{user_id}/username": {
+        "patch": {
+          "description": "改用户名（统一认证按用户名精确匹配账号）。吊销其全部浏览器会话。",
+          "operationId": "update_admin_username_api_admin_users__user_id__username_patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminUsernameUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AdminUserAccountResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update Admin Username"
         }
       },
       "/api/agent-mcp/onboarding": {
@@ -16487,6 +16205,37 @@
           "summary": "Callback"
         }
       },
+      "/api/auth/sso/cancel": {
+        "post": {
+          "operationId": "cancel_api_auth_sso_cancel_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoChoice"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Cancel"
+        }
+      },
       "/api/auth/sso/complete": {
         "post": {
           "operationId": "complete_api_auth_sso_complete_post",
@@ -16523,14 +16272,14 @@
           "summary": "Complete"
         }
       },
-      "/api/auth/sso/grant/start": {
+      "/api/auth/sso/create": {
         "post": {
-          "operationId": "grant_start_api_auth_sso_grant_start_post",
+          "operationId": "create_api_auth_sso_create_post",
           "requestBody": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AuthenticationGrantStart"
+                  "$ref": "#/components/schemas/SsoChoice"
                 }
               }
             },
@@ -16540,7 +16289,9 @@
             "200": {
               "content": {
                 "application/json": {
-                  "schema": {}
+                  "schema": {
+                    "$ref": "#/components/schemas/AuthResult"
+                  }
                 }
               },
               "description": "Successful Response"
@@ -16556,7 +16307,45 @@
               "description": "Validation Error"
             }
           },
-          "summary": "Grant Start"
+          "summary": "Create"
+        }
+      },
+      "/api/auth/sso/link": {
+        "post": {
+          "operationId": "link_api_auth_sso_link_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoLink"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AuthResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Link"
         }
       },
       "/api/auth/sso/start": {
@@ -18824,165 +18613,6 @@
             }
           },
           "summary": "Me"
-        }
-      },
-      "/api/me/identities": {
-        "get": {
-          "operationId": "identities_api_me_identities_get",
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {}
-                }
-              },
-              "description": "Successful Response"
-            }
-          },
-          "summary": "Identities"
-        }
-      },
-      "/api/me/identity-binding/cancel": {
-        "post": {
-          "operationId": "cancel_api_me_identity_binding_cancel_post",
-          "requestBody": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BindingConfirm"
-                }
-              }
-            },
-            "required": true
-          },
-          "responses": {
-            "204": {
-              "description": "Successful Response"
-            },
-            "422": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/HTTPValidationError"
-                  }
-                }
-              },
-              "description": "Validation Error"
-            }
-          },
-          "summary": "Cancel"
-        }
-      },
-      "/api/me/identity-binding/confirm": {
-        "post": {
-          "operationId": "confirm_api_me_identity_binding_confirm_post",
-          "requestBody": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BindingConfirm"
-                }
-              }
-            },
-            "required": true
-          },
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/AuthResult"
-                  }
-                }
-              },
-              "description": "Successful Response"
-            },
-            "422": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/HTTPValidationError"
-                  }
-                }
-              },
-              "description": "Validation Error"
-            }
-          },
-          "summary": "Confirm"
-        }
-      },
-      "/api/me/identity-binding/start": {
-        "post": {
-          "operationId": "binding_start_api_me_identity_binding_start_post",
-          "requestBody": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BindingStart"
-                }
-              }
-            },
-            "required": true
-          },
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {}
-                }
-              },
-              "description": "Successful Response"
-            },
-            "422": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/HTTPValidationError"
-                  }
-                }
-              },
-              "description": "Validation Error"
-            }
-          },
-          "summary": "Binding Start"
-        }
-      },
-      "/api/me/identity-migration": {
-        "post": {
-          "operationId": "identity_migration_api_me_identity_migration_post",
-          "requestBody": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/IdentityMigration"
-                }
-              }
-            },
-            "required": true
-          },
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/AuthResult"
-                  }
-                }
-              },
-              "description": "Successful Response"
-            },
-            "422": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/HTTPValidationError"
-                  }
-                }
-              },
-              "description": "Validation Error"
-            }
-          },
-          "summary": "Identity Migration"
         }
       },
       "/api/me/password": {

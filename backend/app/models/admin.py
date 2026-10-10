@@ -62,6 +62,8 @@ class AdminUserUsage(BaseModel):
     id: str
     username: str
     role: str
+    # active | disabled:管理员可停用/启用(PATCH /admin/users/{id}/status)。
+    status: str = "active"
     created_at: str
     notebooks: int
     sources: int
@@ -114,6 +116,24 @@ class AdminUserRoleResult(BaseModel):
     id: str
     username: str
     role: Literal["admin", "user"]
+
+
+class AdminUserStatusUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["active", "disabled"]
+
+
+class AdminUsernameUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    username: str
+
+
+class AdminUserAccountResult(BaseModel):
+    id: str
+    username: str
+    status: str
 
 
 class AdminPasswordResetRequest(BaseModel):

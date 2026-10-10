@@ -96,22 +96,18 @@ def test_owner_disabled_after_agent_auth_is_rechecked_for_live_session(token_con
         service.require_agent_access(principal, "memory:read", notebook.id)
 
 
-def test_unlinked_agent_owner_loses_access_only_at_sso_cutover(token_context, repo):
+def test_agent_owner_eligibility_ignores_the_unified_auth_switch(token_context, repo):
+    """Only users.status decides whether a token owner is eligible: turning
+    unified authentication on changes how people sign in, not their tokens."""
+    from tests.auth_store_contract import Host
+
     service, alice, _bob, notebook, _other = token_context
-    profile = service.create_agent_profile(alice.id, "Migration eligibility", "")
+    profile = service.create_agent_profile(alice.id, "Switch eligibility", "")
     issued = _issue(service, alice, profile, notebook)
     principal = service.resolve_agent_token(issued.token)
-    auth = repo._runtime.identity.auth
-    auth.set_policy("dual", actor_id="user-local", expected_revision=0,
-        plugin_id="corp.auth", provider_id="corp.auth", provider_namespace="corp.prod", config_generation="v1")
-    auth.set_policy("binding_required", actor_id="user-local", expected_revision=1)
+    repo._runtime.identity.auth.use_provider(Host())
     assert service.resolve_agent_token(issued.token) is not None
-    # Model a site already cut over; preflight eligibility has separate tests.
-    with repo._write() as db:
-        db.execute("UPDATE auth_policy SET mode='sso_only' WHERE id=1")
-    assert service.resolve_agent_token(issued.token) is None
-    with pytest.raises(PermissionError):
-        service.require_agent_access(principal, "memory:read", notebook.id)
+    service.require_agent_access(principal, "memory:read", notebook.id)
 
 
 def test_resolve_returns_scoped_principal_and_enforces_notebook_allowlist(token_context):

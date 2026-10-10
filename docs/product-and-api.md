@@ -79,7 +79,7 @@ model services, offline fallbacks and the non-Docker deployment workflow are doc
 
 - [Source uploads and parsing](#source-uploads-and-parsing): documents, workbooks and Markdown image bundles; background ingestion and visible quality warnings.
 - [Product Flow](#product-flow): notebooks, grounded Ask, knowledge browsing, private Memory and Deep Reports.
-- [Accounts and usage](#accounts-and-usage), [group sharing](#group-knowledge-sharing), and [external authentication](#external-authentication-and-local-credential-retirement).
+- [Accounts and usage](#accounts-and-usage), [group sharing](#group-knowledge-sharing), and [external authentication](#external-authentication).
 - [Retrieval modes](#retrieval-modes-ask): general Q&A and iterative reasoning, with [user-selected source scope](#source-selected-retrieval-scope).
 - [Knowhow tables](#knowhow-tables) and [Memory / Agent MCP](#memory-and-agent-mcp).
 - [Deep Report lifecycle](#deep-report-lifecycle-and-execution-limits), [public report sharing](#public-report-share-guardrails), and [public conversation sharing](#public-conversation-share-guardrails).
@@ -124,7 +124,7 @@ The description creates one image element, without a duplicate paragraph element
 
 ## Accounts and usage
 
-Local authentication supports registration with one letter followed by eight digits (for example `a12345678`, stored lowercase), password login and opaque Bearer sessions. These controls follow the current [authentication policy](#external-authentication-and-local-credential-retirement). Users see owned notebooks and large shared notebooks they explicitly joined. The built-in `admin` is seeded on first boot and owns legacy notebooks; its password comes from `SILICON_NOTEBOOK_ADMIN_PASSWORD` (local default `admin`, which must change for production/non-loopback startup). `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` is for local/no-auth testing.
+Local authentication supports registration with one letter followed by eight digits (for example `a12345678`, stored lowercase), password login and opaque Bearer sessions. These controls are available only while [external authentication](#external-authentication) is off. Users see owned notebooks and large shared notebooks they explicitly joined. The built-in `admin` is seeded on first boot and owns legacy notebooks; its password comes from `SILICON_NOTEBOOK_ADMIN_PASSWORD` (local default `admin`, which must change for production/non-loopback startup). `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` is for local/no-auth testing.
 
 | Account operation | Contract |
 | --- | --- |
@@ -4420,56 +4420,51 @@ Explicitly not yet built (a phased sequencing choice, not a silent gap): correla
 - A PostgreSQL query cancellation (`psycopg.errors.QueryCanceled` — statement timeout or an administrative cancel) that reaches the top of the request stack on a non-streaming response returns a structured `503` (`detail` plus a machine-readable `code: "query_timeout"`) and emits a `query_timeout` event carrying the paired `kind=http` row's request id, method/path and, when the route names one, `notebook_id` — instead of falling through to a bare, unobservable `500`. On a streaming response that has already started, no status code can be rewritten — the stream aborts, but the same `query_timeout` event (marked `streaming: true`) is still emitted from an outermost ASGI observer. The frontend still shows its existing generic 5xx "service unavailable" copy (no new user-facing text ships; `frontend/app/errors.ts` deliberately generalizes every 5xx). The pre-existing savepoint-bounded probes (e.g. the chunk lexical-recall budget in `knowledge_store.py`) are unaffected — they catch and convert their own `QueryCanceled` into a domain-specific exception before it ever reaches this handler.
 
 
-## External authentication and local credential retirement
+## External authentication
 
 The optional `auth.provider` deployment plugin authenticates external identities; core retains site users, sessions and resource authorization. The W3 example lives in `examples/extensions/w3-auth`, is independently packageable and is disabled by default. It is an OAuth2 code/userinfo adapter, not an assertion of OIDC support or verified connectivity to a real IDaaS.
 
-The persistent policy is `local → dual → binding_required → sso_only → retired`. Local remains the default. Dual supports existing password operations and explicit local-first linking. Binding-required disables registration/password changes and restricts password sessions to migration; they cannot access business HTTP or streams. SSO-only rejects local sessions and passwords. Retired permanently disallows a return to passwords and removes local credential material. Policy changes require a real administrator session and revision match; the database rechecks cutover eligibility. A plugin failure never changes policy.
+**The switch.** External authentication is on exactly when the deployment configures an `auth.provider` plugin, that plugin is enabled (the host's provider description is non-empty) and the callback configuration is valid. There is no persisted stage or administrator-driven migration state. Disabling the plugin returns the site to local login; that is the emergency path. An invalid configuration (for example `AUTH_OPTIONAL`, a public/frontend origin mismatch, or a non-HTTPS production callback without `AUTH_ALLOW_INSECURE_HTTP`) is reported as a startup/capability error and never silently degrades to local login.
 
-An existing user must verify their current local password, complete external authentication and confirm the displayed identity. Core preserves `users.id`, assets, roles, preferences and internal email. The verified external username becomes `users.username`; the original `local_login_name` remains the password login name only during coexistence/migration. SSO uses the unique `(provider_namespace, subject)` mapping, never a username/email match; the only exception is the opt-in employee-number auto link described below, which then records a mapping like any other. Cross-account username or legacy-name conflicts abort the whole binding. Display names do not identify accounts.
+**Identity key.** The only key is `users.username == identity.username` (the provider's username, i.e. the employee number), compared exactly and case-sensitively. There is no `(namespace, subject)` mapping table; `subject` and namespace are written only to the session columns (`auth_sessions.external_subject` / `provider_namespace`) and to audit rows. The anonymous `user-local` account of `AUTH_OPTIONAL` can never be matched, linked or created.
 
-OAuth state, browser proof, PKCE when supported, original local session, policy/configuration generation and one-time handoff are core-owned. External access tokens remain within the provider call. The callback URL contains only a short-lived handoff code; the browser must also hold a host-only HttpOnly SameSite cookie. Confirming a binding additionally requires the original local bearer. Logout, reset, disable, replay or stage/configuration changes invalidate pending authority. Existing SSO sessions have an absolute limit measured from verified external authentication; sliding access cannot extend it. Browser-authenticated NDJSON/SSE delivery rechecks sessions before every emitted frame. The `/mcp` transport retains its own per-request and per-tool Agent checks, including current owner eligibility; an already committed write can still return its terminal acknowledgement after token revocation, while subsequent access is denied.
+**Login flow.**
 
-The login page uses the authentication capabilities response to select its controls. Only an absent legacy endpoint (404) permits a local-login fallback. A saved bearer is restored independently of provider readiness, so a valid business session remains usable during provider maintenance. Without a valid business session, network and service failures show a retryable authentication-state error without discarding a saved migration credential. SSO login and binding preserve a validated same-site return location, including invitation queries and notebook hashes, and consume it after successful completion. External return locations are rejected.
+1. `POST /auth/sso/start` begins the login; the callback returns to the frontend with a one-time handoff code, then `POST /auth/sso/complete {code}` decides:
+   - An account with `username` equal to the provider username exists and is active: an SSO session is issued (`status: "authenticated"`). A non-active account returns `account_inactive`.
+   - No such account: `status: "choice_required"` with `pending_id`, `external_username` and `display_name`. The pending choice is stored as a one-time authentication transaction (TTL `AUTH_TRANSACTION_TTL_SECONDS`) bound to the browser proof cookie.
+2. The user then picks one of:
+   - **Link an old account** (`POST /auth/sso/link`): enter the old account's username and password. An unknown name and a wrong password return the same `link_verification_failed` message and do not consume the pending choice, so the user may retry; an expired or already used choice returns `invalid_transaction`. The old account must be active, not `user-local` and have a local password. In one write transaction the service rechecks that no account named after the provider username has appeared meanwhile (otherwise `stale_transaction`), renames the old account to the provider username (keeping its user ID, data and role; the display name takes the provider value when non-empty), bumps its `auth_revision`, deletes all of its older sessions, audits `sso_linked` and issues an SSO session.
+   - **Do not link, use a new account** (`POST /auth/sso/create`): after the same recheck, creates an ordinary `user` with no password named after the provider username, audits `sso_created`, issues a session and consumes the choice. The UI states that data of the old account will not appear in the new one.
+   - **Back to login** (`POST /auth/sso/cancel`, 204) discards the pending choice.
+3. There is no self-service re-linking after choosing a new account; the user asks an administrator (below).
 
-Provider configuration generations use the same stable-identifier grammar as provider IDs: they start with a lowercase letter and contain lowercase letters or digits, with single `.`, `_`, or `-` separators between segments. Invalid generations are rejected before the policy revision changes.
+OAuth state, browser proof (a host-only HttpOnly SameSite cookie), PKCE when supported, Origin validation and the one-time handoff are core-owned. External access tokens remain within the provider call. The callback URL contains only a short-lived handoff code. SSO sessions have an absolute limit measured from verified external authentication (`AUTH_SSO_SESSION_SECONDS`); sliding access cannot extend it. Browser-authenticated NDJSON/SSE delivery rechecks sessions before every emitted frame. The `/mcp` transport retains its own per-request and per-tool Agent checks; Agent owner eligibility depends only on `users.status = 'active'`, token rows are retained, and an already committed write can still return its terminal acknowledgement after revocation while subsequent access is denied. Browser absolute expiry alone is not an IDaaS offboarding signal: operators must establish the provider's subject stability, non-reassignment and offboarding procedure.
+
+**Local credentials while it is on.** `POST /auth/login`, `POST /auth/register` and a user's own password change are refused with 403 ("已启用统一认证，请使用统一认证登录"). Existing `auth_source = 'local'` sessions stop resolving, so the frontend returns to the login page. An administrator's password reset stays available: a user who forgot the old password gets a reset and can then complete the link step. With the switch off, local login behaves exactly as before.
+
+**Frontend.** The login page uses `GET /auth/capabilities` to select its controls: when `sso_login` is true only the "log in with {provider_label}" button is shown; otherwise the local login/registration form. Only an absent endpoint (404) permits a local-login fallback. A saved bearer is restored independently of provider readiness. SSO login preserves a validated same-site return location (including invitation queries and notebook hashes) and consumes it after completion; external return locations are rejected. Sessions are synchronised across tabs through the storage listener.
+
+**Administrator tools** (on the existing `/admin/users` list; both delete the user's sessions, bump `auth_revision` and are audited):
+
+- `PATCH /admin/users/{id}/status {status: "active" | "disabled"}` enables or disables an account; an administrator cannot change their own.
+- `PATCH /admin/users/{id}/username {username}` renames an account with a uniqueness check; `user-local` cannot be renamed.
+
+Together they repair a mistaken "new account" choice: disable the new account, then rename the old account to the employee number. Account status is rechecked for Agent authentication and each data-tool call.
 
 All routes below are under `/api`. Public routes still enforce their transaction purpose and browser proof; ordinary extension routes remain session protected.
 
 | Route | Contract |
 | --- | --- |
-| `GET /auth/capabilities` | Public minimal mode, local login/registration, SSO/binding flags and provider label |
+| `GET /auth/capabilities` | `{sso_login, local_login, local_registration, provider_label}`; with SSO on, local login and registration are false |
 | `POST /auth/sso/start` | Begin external login; returns `authorization_url` |
-| `POST /me/identity-binding/start` | Original bearer plus `current_password`; returns authorization URL |
-| `GET /auth/sso/callback` | Fixed callback; validates state/proof and exchanges code through provider |
-| `POST /auth/sso/complete` | `{code}`; returns authenticated token/user or explicit binding/grant confirmation preview |
-| `POST /me/identity-binding/confirm` | `{pending_id}`; atomically commits mapping/name and rotates session |
-| `POST /me/identity-binding/cancel` | `{pending_id}`; discards pending confirmation |
-| `GET /me/identities` | Own linked status, external name, temporary local login name and `migration_available`; migration credentials accepted |
-| `POST /me/identity-migration` | SSO session of an auto-enrolled account plus `{login_name, password}` of the user's older site account; moves the identity onto that account and returns its `{token, user}` |
-| `GET/PATCH /admin/auth/policy` | Persistent policy; writes require expected revision and explicit rollback flag |
-| `GET /admin/auth/migration` | Preflight counts and policy; not a claim of real IDaaS acceptance |
-| `GET /admin/auth/accounts` | Paged migration inventory, including disabled accounts |
-| `GET /admin/auth/audit` | Administrator-only paged identity/grant/account-status audit; no credentials or raw provider payloads |
-| `PATCH /admin/auth/provider-configuration` | Prepare a new configuration generation without changing mode, provider or namespace; invalidates in-flight authentication |
-| `PATCH /admin/auth/accounts/{user_id}` | Explicit account enable/disable; revokes its site sessions |
-| `POST /admin/auth/grants` | Admin-issued, expiring enrollment/recovery/replacement grant for one exact external subject |
-| `POST /auth/sso/grant/start` | Redeem grant and authenticate its exact external subject; enrollment never adopts existing assets |
-| `POST /admin/auth/retirement-cleanup` | Idempotent cleanup after the durable retirement marker |
-
-Existing `POST /auth/login` returns optional `migration_required=true` in binding-required mode; its token is not a business credential. New SSO users are ordinary users without a local password. Late-user recovery requires an administrator grant fixed to an existing user ID plus the user's external authentication and confirmation. The grant entry remains available while a migration-only session is present, so recovery does not require clearing browser storage. Without `AUTH_SSO_AUTO_ACCOUNTS` no automatic account creation occurs, and account data is never merged.
-
-With `AUTH_SSO_AUTO_ACCOUNTS=true`, an unmapped `login` in a non-local stage looks for accounts other than `user-local` whose `username` or `local_login_name` equals the provider username, ignoring case. The decision is taken when the identity is staged and recomputed inside the completing write; if the answer has changed (a password reset or other `auth_revision` change on the candidate, a new same-name account, the subject mapped meanwhile, or the switch turned off) completion fails with `stale_transaction` or `identity_not_linked` instead of choosing another target.
-
-- One candidate, active and without any mapping (active or historical) in the current namespace: the mapping is created, `username`/`display_name` take the provider values, the audit records `sso_auto_linked`, and `complete` returns `authenticated` directly. The role is left as it is, so an administrator account stays an administrator.
-- One candidate that is disabled returns `account_inactive`; one that already has a mapping in the namespace, or more than one candidate, returns `identity_conflict`.
-- No candidate: `complete` returns `confirmation_required` with `purpose: "auto_enroll"`, `external_username` and `display_name`, and nothing is written yet. `POST /me/identity-binding/confirm` (no site bearer needed) creates an ordinary passwordless `user` named after the provider username, maps it and audits `sso_auto_enrolled`; `cancel` discards it. The confirmation page tells the user that data from an older site account will not appear there and offers the alternative: sign in locally and bind (while local login is open) or ask an administrator.
-
-An auto-enrolled account can move its identity back to the user's older account. `migration_available` is true only for the caller's own active mapping on an account whose audit contains `sso_auto_enrolled`, while the stage is `dual` or `binding_required` and not retired. `POST /me/identity-migration` requires such an account's SSO session (a local session is refused), looks the old account up by normalized `local_login_name` and verifies its password; an unknown name and a wrong password return the same message. The old account must be active, not `user-local`, and have no mapping in the namespace. One transaction then moves the mapping to the old account, gives it the provider username and display name, disables the auto account with an empty username, bumps both `auth_revision` values, revokes both accounts' sessions, audits `identity_migrated` and `sso_auto_account_retired`, and issues an SSO session for the old account that ends at the caller's original absolute expiry. The old account keeps its user ID and data; the auto account's content is not moved. A `recover` grant may also target a subject currently held by an auto-enrolled account; completing it performs the same move (with the grant reference on both audit rows) in any non-local stage. A subject held by any other account is still refused as `identity_conflict`.
-
-Replacing an already linked identity requires an administrator-issued `replace` grant fixed to the original site user ID and the exact new external subject in the current namespace. Confirmation previews the original account and new identity. After the user authenticates and explicitly confirms, one transaction disables the previous mapping and old SSO sessions, retains historical subject ownership, and activates the new mapping without changing the site user ID, assets or role. Failed or cancelled attempts leave the original mapping intact. Grant issuance, use and completion, bindings, renames and account-status changes have durable restricted audit records, independent of temporary authentication transactions. Account inventory and audit both use the pagination rails below.
-
-Account status is rechecked for Agent authentication and each data-tool call; an active current-namespace identity is additionally required in SSO-only/retired mode. Binding-required retains active owners’ Agent access while they migrate. Token rows are retained; current owner eligibility is enforced on every call. Browser absolute expiry alone does not provide an IDaaS offboarding signal. Operators must establish the provider's subject stability, non-reassignment and offboarding procedure before production cutover. Two migrated named administrators, all active accounts resolved, and subsequent direct SSO login evidence are required by the cutover preflight; shared built-in admin must be disabled.
+| `GET /auth/sso/callback` | Fixed callback; validates state/proof and exchanges the code through the provider |
+| `POST /auth/sso/complete` | `{code}`; returns `authenticated` token/user or `choice_required` |
+| `POST /auth/sso/link` | `{pending_id, login_name, password}`; verifies the old account, renames it to the employee number, returns token/user |
+| `POST /auth/sso/create` | `{pending_id}`; creates a passwordless ordinary user, returns token/user |
+| `POST /auth/sso/cancel` | `{pending_id}`; 204, discards the pending choice |
+| `PATCH /admin/users/{id}/status` | Administrator-only enable/disable; not on oneself |
+| `PATCH /admin/users/{id}/username` | Administrator-only rename; unique, not `user-local` |
 
 Core authentication rails (reject over-limit input; never truncate identities):
 
@@ -4478,7 +4473,6 @@ Core authentication rails (reject over-limit input; never truncate identities):
 | `AUTH_TRANSACTION_TTL_SECONDS` | Default 600; 60–1800 seconds |
 | `AUTH_SSO_SESSION_SECONDS` | Default 28800; 300–86400 seconds |
 | `AUTH_PROVIDER_TIMEOUT_SECONDS` | Default 15; greater than 0, at most 60 seconds |
-| `AUTH_SSO_AUTO_ACCOUNTS` | Default `false`; employee-number auto link/enrollment for unmapped SSO logins |
 | `AUTH_PROVIDER_ID_MAX_CHARS` | 128 |
 | `AUTH_PROVIDER_NAMESPACE_MAX_CHARS` | 256 |
 | `AUTH_PROVIDER_CONFIGURATION_GENERATION_MAX_CHARS` | 128 |
@@ -4488,7 +4482,5 @@ Core authentication rails (reject over-limit input; never truncate identities):
 | `AUTH_PROVIDER_USERNAME_MAX_CHARS` | 512 |
 | `AUTH_PROVIDER_DISPLAY_NAME_MAX_CHARS` | 512 |
 | `AUTH_PROVIDER_AUTHORIZATION_URL_MAX_CHARS` | 8192 |
-| `AUTH_CUTOVER_MIN_ADMINS` | 2 |
-| `AUTH_INVENTORY_PAGE_SIZE` / `AUTH_INVENTORY_PAGE_MAX` | Default 100; maximum 200 |
 
-The host admits one provider; it bounds simultaneous provider workers and rejects late results. A timed-out trusted plugin can retain its worker slot until its call returns. Provider transport-specific limits belong to the example's README pair. Installation, staged rollout and recovery are owned by the deployment and operations references.
+The host admits one provider; it bounds simultaneous provider workers and rejects late results. A timed-out trusted plugin can retain its worker slot until its call returns. Provider transport-specific limits belong to the example's README pair. Installation, enabling and rollback are owned by the deployment and operations references.

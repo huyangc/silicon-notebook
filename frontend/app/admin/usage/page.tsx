@@ -4,10 +4,10 @@ import {
   Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState,
   type RefObject,
 } from "react";
-import { fetchAuthCapabilities, fetchMe, LOCAL_AUTH_CAPABILITIES } from "../../auth.ts";
+import { fetchMe } from "../../auth.ts";
 import { clampPopoverLeft } from "../../effort-picker-logic";
 import { PageHeader } from "../../components/PageHeader.tsx";
-import { httpErrorStatus, toUserMessage } from "../../errors.ts";
+import { toUserMessage } from "../../errors.ts";
 import { Pagination } from "../../Pagination";
 import { useClientPagination } from "../../use-client-pagination.ts";
 import {
@@ -16,10 +16,13 @@ import {
   fetchUploadLimitDefault,
   FORBIDDEN_SENTINEL,
   resetAdminUserPassword,
+  updateAdminUsername,
   updateAdminUserRole,
+  updateAdminUserStatus,
   updateAdminUserUploadLimit,
   updateUploadLimitDefault,
   type AdminUserRole,
+  type AdminUserStatus,
   type AdminUserUsage,
 } from "./api.ts";
 import {
@@ -61,7 +64,7 @@ function initialSheet(): UsageSheet {
 const FEEDBACK_TTL_MS = 6000;
 
 type Notice = { kind: "ok" | "error"; text: string };
-type RowNoticeCell = "role" | "limit" | "password";
+type RowNoticeCell = "role" | "limit" | "password" | "status" | "username";
 type RowNotice = Notice & { userId: string; cell: RowNoticeCell };
 
 function CellFeedback({ notice }: { notice: Notice }) {
@@ -392,6 +395,84 @@ function ResetPasswordCell({
   );
 }
 
+type RenameUserButtonProps = {
+  user: AdminUserUsage;
+  editing: boolean;
+  lockedByOther: boolean;
+  pending: boolean;
+  anyPending: boolean;
+  /** 弹出层打开时,本单元格的用户名反馈显示在弹出层里(就近);收起后由外层显示。 */
+  notice: Notice | null;
+  input: string;
+  onInput: (value: string) => void;
+  onOpen: () => void;
+  onCancel: () => void;
+  onSubmit: () => void;
+};
+
+/** 改用户名:与重置密码同形——入口按钮常驻,输入框与确认放进锚定弹出层。 */
+function RenameUserButton({
+  user, editing, lockedByOther, pending, anyPending, notice,
+  input, onInput, onOpen, onCancel, onSubmit,
+}: RenameUserButtonProps) {
+  const anchorRef = useRef<HTMLDivElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const pos = useAnchoredPopover({ open: editing, pending, anchorRef, popoverRef, onCancel });
+
+  return (
+    <div className="usage-limit-view" ref={anchorRef}>
+      <button
+        type="button"
+        className={`usage-role-button${editing ? " usage-role-button-open" : ""}`}
+        disabled={anyPending || lockedByOther}
+        aria-haspopup="dialog"
+        aria-expanded={editing}
+        onClick={() => (editing ? onCancel() : onOpen())}
+      >改用户名</button>
+      {editing && (
+        <div
+          className="usage-limit-popover"
+          role="dialog"
+          aria-label={`修改 ${user.username} 的用户名`}
+          ref={popoverRef}
+          style={pos === null ? undefined : { left: pos.left, top: pos.top }}
+        >
+          <div className="usage-limit-popover-title">改用户名 · {user.username}</div>
+          <div className="usage-limit-popover-row">
+            <input
+              className="usage-limit-input usage-limit-input-password"
+              type="text"
+              autoComplete="off"
+              value={input}
+              disabled={pending}
+              autoFocus
+              aria-label={`${user.username} 的新用户名`}
+              onChange={(event) => onInput(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Enter") onSubmit(); }}
+            />
+            <button
+              type="button"
+              className="usage-role-button usage-role-button-confirm"
+              disabled={pending}
+              onClick={onSubmit}
+            >
+              {pending ? "保存中…" : "保存"}
+            </button>
+            <button
+              type="button"
+              className="usage-role-button"
+              disabled={pending}
+              onClick={onCancel}
+            >取消</button>
+          </div>
+          <span className="usage-settings-hint">改名后该用户的所有浏览器会话将被登出。统一认证登录按用户名与工号对应。</span>
+          {notice && <CellFeedback notice={notice} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // 展开行里的笔记本清单:`GET /admin/users/{id}/notebooks` 整份返回(一个用户的笔记本数
 // 没有上限),界面每页 USER_NOTEBOOK_PAGE_SIZE 本。
 const USER_NOTEBOOK_PAGE_SIZE = 20;
@@ -441,7 +522,11 @@ export default function AdminUsagePage() {
   const [nbCache, setNbCache] = useState<Record<string, NotebookCacheEntry>>({});
   const [onlineIds, setOnlineIds] = useState<Set<string>>(new Set());
   const [currentUserId, setCurrentUserId] = useState("");
-  const [localPasswordsAllowed, setLocalPasswordsAllowed] = useState(false);
+  const [confirmingStatus, setConfirmingStatus] = useState<{ userId: string; status: AdminUserStatus } | null>(null);
+  const [statusPendingId, setStatusPendingId] = useState("");
+  const [renamingId, setRenamingId] = useState("");
+  const [renameInput, setRenameInput] = useState("");
+  const [renamePendingId, setRenamePendingId] = useState("");
   const [confirmingRole, setConfirmingRole] = useState<{ userId: string; role: AdminUserRole } | null>(null);
   const [rolePendingId, setRolePendingId] = useState("");
   const [uploadLimitDefault, setUploadLimitDefault] = useState<number | null>(null);
@@ -476,16 +561,15 @@ export default function AdminUsagePage() {
           return;
         }
         setCurrentUserId(me.id);
-        const [rows, limitDefault, authCapabilities] = await Promise.all([
+        // 重置密码在启用统一认证后仍保留:用户忘了老账号密码时,管理员重置后才能完成关联。
+        const [rows, limitDefault] = await Promise.all([
           fetchAdminUsers(),
           fetchUploadLimitDefault(),
-          fetchAuthCapabilities().catch((error) => httpErrorStatus(error) === 404 ? LOCAL_AUTH_CAPABILITIES : null),
         ]);
         setState({ kind: "ready", rows });
         setUploadLimitDefault(limitDefault);
         setDefaultInput(String(limitDefault));
         setOnlineIds(new Set(rows.filter((r) => r.is_online).map((r) => r.id)));
-        setLocalPasswordsAllowed(authCapabilities?.mode === "local" || authCapabilities?.mode === "dual");
       } catch (e) {
         // 哨兵先判(分流到专用无权限视图),其余一律过人话层——此前这里直出
         // e.message,断网时页面上会写「加载失败:Failed to fetch」。
@@ -683,11 +767,81 @@ export default function AdminUsagePage() {
     setResetInput("");
   }
 
+  function failRowAction(target: AdminUserUsage, cell: RowNoticeCell, error: unknown, fallback: string): void {
+    if (error instanceof Error && error.message === FORBIDDEN_SENTINEL) {
+      setState({ kind: "forbidden" });
+      return;
+    }
+    setRowNotice({ userId: target.id, cell, kind: "error", text: toUserMessage(error, fallback) });
+  }
+
+  // 停用即吊销其全部会话;后端拒绝操作自己(界面也不给本人按钮)。
+  async function submitStatusChange(target: AdminUserUsage, status: AdminUserStatus) {
+    setStatusPendingId(target.id);
+    setRowNotice(null);
+    try {
+      const applied = await updateAdminUserStatus(target.id, status);
+      setState((previous) => previous.kind === "ready"
+        ? { kind: "ready", rows: previous.rows.map((row) => row.id === target.id ? { ...row, status: applied } : row) }
+        : previous);
+      setConfirmingStatus(null);
+      setRowNotice({
+        userId: target.id,
+        cell: "status",
+        kind: "ok",
+        text: applied === "disabled" ? `已停用 ${target.username}，其登录已全部失效` : `已启用 ${target.username}`,
+      });
+    } catch (error) {
+      failRowAction(target, "status", error, "账号状态更新失败，请稍后重试");
+    } finally {
+      setStatusPendingId("");
+    }
+  }
+
+  async function submitRename(target: AdminUserUsage) {
+    const next = renameInput.trim();
+    if (!next) {
+      setRowNotice({ userId: target.id, cell: "username", kind: "error", text: "请输入新用户名" });
+      return;
+    }
+    if (next === target.username) {
+      setRowNotice({ userId: target.id, cell: "username", kind: "error", text: "新用户名与当前相同" });
+      return;
+    }
+    setRenamePendingId(target.id);
+    setRowNotice(null);
+    try {
+      const applied = await updateAdminUsername(target.id, next);
+      setState((previous) => previous.kind === "ready"
+        ? { kind: "ready", rows: previous.rows.map((row) => row.id === target.id ? { ...row, username: applied } : row) }
+        : previous);
+      setRenamingId("");
+      setRenameInput("");
+      setRowNotice({
+        userId: target.id,
+        cell: "username",
+        kind: "ok",
+        text: `已将 ${target.username} 改名为 ${applied}，该用户需重新登录`,
+      });
+    } catch (error) {
+      failRowAction(target, "username", error, "用户名修改失败，请稍后重试");
+    } finally {
+      setRenamePendingId("");
+    }
+  }
+
+  function cancelRename() {
+    setRenamingId("");
+    setRenameInput("");
+  }
+
   function resetRowInteractions() {
     setExpanded(null);
     setConfirmingRole(null);
+    setConfirmingStatus(null);
     setEditingLimitId("");
     cancelResetPassword();
+    cancelRename();
     setRowNotice(null);
   }
 
@@ -813,7 +967,8 @@ export default function AdminUsagePage() {
               <SortableHeader label="最近活跃" sortKey="last_active" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
               <th>用户分析</th>
               <SortableHeader label="文档上限" sortKey="upload_limit" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
-              {localPasswordsAllowed && <th>密码</th>}
+              <th>账号</th>
+              <th>密码</th>
               <th>权限管理</th>
             </tr>
           </thead>
@@ -823,6 +978,8 @@ export default function AdminUsagePage() {
             const entry = nbCache[u.id];
             const isOnline = onlineIds.has(u.id);
             const roleNotice = noticeFor(u.id, "role");
+            const statusNotice = noticeFor(u.id, "status");
+            const usernameNotice = noticeFor(u.id, "username");
             return (
               <Fragment key={u.id}>
                 <tr className={isOpen ? "usage-row-expanded" : undefined}>
@@ -845,6 +1002,7 @@ export default function AdminUsagePage() {
                       title={isOnline ? "在线" : "离线"}
                     />
                     <span className="usage-username">{u.username}</span>
+                    {u.status === "disabled" && <span className="usage-tag usage-tag-disabled">已停用</span>}
                   </td>
                   <td>
                     {u.role === "admin"
@@ -884,7 +1042,70 @@ export default function AdminUsagePage() {
                       />
                     )}
                   </td>
-                  {localPasswordsAllowed && <td className="usage-limit-cell">
+                  <td className="usage-limit-cell">
+                    {u.id === "user-local" ? (
+                      <span className="usage-role-locked" title="内置管理员账号由部署配置决定">受保护</span>
+                    ) : u.id === currentUserId ? (
+                      <span className="usage-role-locked" title="不能停用或改名当前登录的账号">本人</span>
+                    ) : (
+                      <div className="usage-cell-stack">
+                        <span className="usage-account-actions">
+                          <span className={`usage-tag${u.status === "disabled" ? " usage-tag-disabled" : ""}`}>
+                            {u.status === "disabled" ? "已停用" : "正常"}
+                          </span>
+                          {confirmingStatus?.userId === u.id ? (
+                            <span className="usage-role-confirm">
+                              <button
+                                type="button"
+                                className="usage-role-button usage-role-button-confirm"
+                                disabled={statusPendingId === u.id}
+                                aria-busy={statusPendingId === u.id}
+                                onClick={() => void submitStatusChange(u, confirmingStatus.status)}
+                              >
+                                {statusPendingId === u.id
+                                  ? "更新中…"
+                                  : confirmingStatus.status === "disabled" ? "确认停用" : "确认启用"}
+                              </button>
+                              <button
+                                type="button"
+                                className="usage-role-button"
+                                disabled={statusPendingId === u.id}
+                                onClick={() => setConfirmingStatus(null)}
+                              >取消</button>
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="usage-role-button"
+                              disabled={Boolean(statusPendingId)}
+                              onClick={() => { setRowNotice(null); setConfirmingStatus({
+                                userId: u.id,
+                                status: u.status === "disabled" ? "active" : "disabled",
+                              }); }}
+                            >
+                              {u.status === "disabled" ? "启用" : "停用"}
+                            </button>
+                          )}
+                          <RenameUserButton
+                            user={u}
+                            editing={renamingId === u.id}
+                            lockedByOther={Boolean(renamingId) && renamingId !== u.id}
+                            pending={renamePendingId === u.id}
+                            anyPending={Boolean(renamePendingId)}
+                            notice={renamingId === u.id ? usernameNotice : null}
+                            input={renameInput}
+                            onInput={setRenameInput}
+                            onOpen={() => { setRenamingId(u.id); setRenameInput(u.username); setRowNotice(null); }}
+                            onCancel={cancelRename}
+                            onSubmit={() => void submitRename(u)}
+                          />
+                        </span>
+                        {statusNotice && <CellFeedback notice={statusNotice} />}
+                        {renamingId !== u.id && usernameNotice && <CellFeedback notice={usernameNotice} />}
+                      </div>
+                    )}
+                  </td>
+                  <td className="usage-limit-cell">
                     {u.id === "user-local" ? (
                       <span className="usage-role-locked" title="内置管理员密码由部署配置决定">受保护</span>
                     ) : u.id === currentUserId ? (
@@ -904,7 +1125,7 @@ export default function AdminUsagePage() {
                         onSubmit={() => void submitResetPassword(u)}
                       />
                     )}
-                  </td>}
+                  </td>
                   <td>
                     <div className="usage-cell-stack">
                       {!u.role_mutable ? (
@@ -947,7 +1168,7 @@ export default function AdminUsagePage() {
                 </tr>
                 {isOpen && (
                   <tr className="usage-subrow">
-                    <td colSpan={13}>
+                    <td colSpan={14}>
                       {/* 用户摘要:仅依赖行数据 u,与笔记本明细的加载状态无关,故不受
                           entry 是否就绪影响,始终无条件渲染(规格 §3 B6/Phase C)。 */}
                       <div className="usage-summary" role="group" aria-label="用户摘要">

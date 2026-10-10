@@ -130,9 +130,6 @@ class Settings(BaseSettings):
     # https。代价是授权码与会话令牌在网络上明文传输、浏览器证明 cookie 不带 Secure；
     # 只在受信内网打开。默认关闭，未打开时非回环 http 仍在启动期被拒。
     auth_allow_insecure_http: bool = Field(False, validation_alias="AUTH_ALLOW_INSECURE_HTTP")
-    # 统一认证未映射的登录按工号(IdP username)自动关联同名账号或自动开普通账号。
-    # 打开即信任 IdP 工号与本站用户名一致;默认关闭,关闭时未关联登录仍被拒绝。
-    auth_sso_auto_accounts: bool = Field(False, validation_alias="AUTH_SSO_AUTO_ACCOUNTS")
     auth_transaction_ttl_seconds: int = Field(
         600, ge=60, le=1800, validation_alias="AUTH_TRANSACTION_TTL_SECONDS"
     )
@@ -1925,14 +1922,14 @@ class Settings(BaseSettings):
                 )
         return self
 
-    def validate_authentication_bootstrap(self, mode: str, *, retired: bool) -> None:
-        """Validate production credentials against the locked database policy.
+    def validate_authentication_bootstrap(self) -> None:
+        """Refuse a production seed of the default built-in admin password.
 
-        Both database initializers call this before any password seed. URL or
-        environment flags cannot supply evidence that credentials are retired.
+        Both database initializers call this before the password seed. The
+        built-in admin stays a local account even under unified auth: switching
+        the provider plugin off is the way back to it.
         """
-        no_local_credentials = mode == "sso_only" or (mode == "retired" and retired)
-        if self.environment.strip().lower() in {"prod", "production"} and not no_local_credentials:
+        if self.environment.strip().lower() in {"prod", "production"}:
             if not self.admin_password.strip() or self.admin_password == "admin":
                 raise ValueError("production requires a non-default SILICON_NOTEBOOK_ADMIN_PASSWORD")
 
