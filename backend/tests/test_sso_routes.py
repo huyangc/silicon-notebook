@@ -426,3 +426,40 @@ def test_public_and_frontend_origins_must_share_a_scheme(setup):
     assert client.get("/api/auth/capabilities").status_code == 200
     flow.settings.auth_frontend_base_url = "https://notebook.corp.example"
     assert client.get("/api/auth/capabilities").status_code == 200
+
+
+def test_startup_refuses_an_enabled_provider_without_a_unified_admin(tmp_path, monkeypatch):
+    """An enabled provider with only the built-in administrator (who cannot sign
+    in through unified authentication) would lock everyone out, so composing the
+    application repository is refused, the same pre-check the admin switch runs."""
+    import dataclasses
+    import sqlite3
+
+    from app import bootstrap
+    from app.extensions import default_extension_runtime
+
+    provider = Provider()
+    runtime = dataclasses.replace(default_extension_runtime(), auth_provider=provider)
+    monkeypatch.setattr(bootstrap, "application_extension_runtime", lambda: runtime)
+    settings = Settings(_env_file=None, database_url=f"sqlite:///{tmp_path}/boot.db",
+        storage_dir=str(tmp_path / "storage"), auth_optional=False,
+        auth_public_base_url="http://localhost", auth_frontend_base_url="http://localhost:3000",
+        event_log_enabled=False, llm_log_enabled=False)
+
+    with pytest.raises(AuthProviderError) as refused:
+        bootstrap.create_application_repository(settings)
+    assert refused.value.code == "no_sso_admin"
+    assert refused.value.__notes__ == [bootstrap.NO_SSO_ADMIN_AT_STARTUP]
+    assert "内置管理员以外的在用管理员" in bootstrap.NO_SSO_ADMIN_AT_STARTUP
+    assert "停用统一认证插件" in bootstrap.NO_SSO_ADMIN_AT_STARTUP
+
+    provider.enabled = False
+    repository = bootstrap.create_application_repository(settings)
+    try:
+        repository._runtime.identity.create_user("z00998877", "local-password")
+    finally:
+        repository.close()
+    with sqlite3.connect(tmp_path / "boot.db") as db:
+        db.execute("UPDATE users SET role='admin' WHERE username='z00998877'")
+    provider.enabled = True
+    bootstrap.create_application_repository(settings).close()

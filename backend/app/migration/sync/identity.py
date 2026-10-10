@@ -81,3 +81,37 @@ def build_user_mapping(
 
     unmatched.sort(key=lambda user: user.username)
     return UserMapping(matched=MappingProxyType(matched), unmatched=tuple(unmatched))
+
+
+_ASCII_LOWER = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
+)
+
+
+def ascii_lower(value: str) -> str:
+    """Fold only A-Z to a-z. Deliberately not ``str.lower()``: the comparison
+    this serves predicts a collision on the target's lower(username) unique
+    index, and widening the fold to non-ASCII letters would flag pairs the
+    index does not treat as equal on every backend."""
+    return value.translate(_ASCII_LOWER)
+
+
+def case_variant_collisions(
+    unmatched: Iterable[UserProjection],
+    target_users: Iterable[UserProjection],
+) -> list[tuple[str, str]]:
+    """``(source username, target username)`` pairs where an unmatched source
+    user differs from an existing target user only by ASCII letter case.
+    Matching stays exact (``build_user_mapping``); this only names the pairs
+    that creating the source user would collide on, sorted for a stable
+    message."""
+    by_folded: dict[str, list[str]] = {}
+    for user in target_users:
+        if user.username:
+            by_folded.setdefault(ascii_lower(user.username), []).append(user.username)
+    return sorted(
+        (user.username, target)
+        for user in unmatched
+        if user.username
+        for target in by_folded.get(ascii_lower(user.username), ())
+    )

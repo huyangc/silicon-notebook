@@ -105,11 +105,34 @@ def create_application_repository(settings: Settings) -> NotebookRepository:
         # refusals. Then refuse to start with an enabled, unusable provider.
         auth_store = repository._runtime.identity.auth
         auth_store.use_provider(runtime.auth_provider)
-        AuthFlowService(auth_store, runtime.auth_provider, settings).validate_configuration()
+        flow = AuthFlowService(auth_store, runtime.auth_provider, settings)
+        if flow.validate_configuration() is not None:
+            refuse_unified_auth_lockout(auth_store)
     except BaseException:
         repository.close()
         raise
     return repository
+
+
+NO_SSO_ADMIN_AT_STARTUP = (
+    "不能以启用统一认证的状态启动：站内还没有内置管理员以外的在用管理员。内置管理员在"
+    "统一认证下无法登录，请先停用统一认证插件、把一个能经统一认证进入的账号（用户名就是"
+    "其工号）设为管理员，再启用。"
+)
+
+
+def refuse_unified_auth_lockout(auth_store) -> None:
+    """Startup counterpart of the admin switch's lockout pre-check: an enabled
+    provider with no active administrator besides the built-in one (who cannot
+    sign in through unified authentication) would leave nobody able to
+    administer the site, so composition is refused rather than started."""
+    from app.domain.auth_provider import AuthProviderError
+
+    if auth_store.has_sso_admin():
+        return
+    error = AuthProviderError("no_sso_admin")
+    error.add_note(NO_SSO_ADMIN_AT_STARTUP)
+    raise error
 
 
 def prime_extension_admission(repository: NotebookRepository) -> None:

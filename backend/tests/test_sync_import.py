@@ -742,6 +742,37 @@ def test_create_missing_users_makes_the_unmatched_ones_local(
     assert member["user_id"] == created["id"]
 
 
+def test_a_case_variant_of_a_target_user_is_refused_before_the_claim(
+    source, target, tmp_path
+):
+    """Matching stays exact, so the package's ``A1`` is not the target's
+    ``a1``; but creating ``A1`` would collide on the target's lower(username)
+    unique index after the run was claimed. The pair is named while only
+    reading -- in a dry run too -- and nothing is claimed or created."""
+    _add_user(target["repo"], "user-target-a1", "a1")
+    with source["repo"]._write() as db:
+        db.execute("UPDATE users SET username='A1' WHERE id=?", (BOB[0],))
+    package = _export(source, tmp_path / "out-case")
+
+    for dry_run in (True, False):
+        with pytest.raises(SyncImportError) as failure:
+            _import(target, package, create_missing_users=True, dry_run=dry_run)
+        assert "源 A1 ↔ 目标 a1，请在一侧改名" in str(failure.value)
+
+    assert _count(target["repo"], "SELECT COUNT(*) FROM sync_imports") == 0
+    assert _count(target["repo"], "SELECT COUNT(*) FROM users WHERE username='A1'") == 0
+    # Without user creation there is nothing to collide on: matching is exact.
+    report = _import(target, package, dry_run=True)
+    assert "A1" in report.user_mapping.unmatched
+
+
+def test_ascii_lower_folds_only_ascii_letters():
+    from app.migration.sync.identity import ascii_lower
+
+    assert ascii_lower("AbZ-9_ä") == "abz-9_ä"
+    assert ascii_lower("ÄÖ") == "ÄÖ"
+
+
 def test_an_unmappable_member_row_is_skipped_not_fatal(source, target, package):
     report = _import(target, package)
 
