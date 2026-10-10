@@ -41,6 +41,17 @@ def _has_control(value: str) -> bool:
     return any(ord(c) < 32 or ord(c) == 127 for c in value)
 
 
+def valid_account_username(value) -> bool:
+    """One rule for every name an account can be given outside registration:
+    a provider username about to become (or match) an account name, and an
+    administrator's rename. Non-empty, no surrounding whitespace, no control
+    characters, within the provider username rail."""
+    return (
+        isinstance(value, str) and bool(value) and value == value.strip()
+        and len(value) <= AUTH_PROVIDER_USERNAME_MAX_CHARS and not _has_control(value)
+    )
+
+
 class AuthStore:
     def __init__(self, database, settings, identity, *, postgres=False):
         self.database = database
@@ -178,10 +189,27 @@ class AuthStore:
         self._execute(db, "UPDATE users SET last_seen_at=? WHERE id=? AND (last_seen_at IS NULL OR last_seen_at<?)", (now,user_id,now))
         return token
 
-    def check_name(self, db, username, user_id=""):
-        row = self._execute(db, "SELECT id FROM users WHERE id<>? AND lower(username)=lower(?)", (user_id, username)).fetchone()
-        if row:
+    def check_name(self, db, username, user_id="", *, email=None):
+        """Refuse a name some other account holds in any letter case. A new
+        account also needs its placeholder email free: an administrator rename
+        keeps the email minted from the old name, so registering that old name
+        again must read as "name taken", not as a unique-constraint crash."""
+        sql = "SELECT id FROM users WHERE id<>? AND (lower(username)=lower(?)"
+        params = [user_id, username]
+        if email is not None:
+            sql += " OR email=?"
+            params.append(email)
+        if self._execute(db, sql + ")", tuple(params)).fetchone():
             raise AuthStoreError("username already exists")
+
+    def has_sso_admin(self):
+        """Whether an active administrator other than the built-in one exists:
+        the built-in account cannot sign in through unified authentication."""
+        with self.database.connect() as db:
+            return self._execute(
+                db, "SELECT 1 FROM users WHERE status='active' AND role='admin' AND id<>? LIMIT 1",
+                (_BUILTIN_USER_ID,),
+            ).fetchone() is not None
 
     def _put_transaction(self, db, purpose, proof, payload, ttl_seconds):
         if ttl_seconds <= 0 or not proof:
@@ -230,6 +258,10 @@ class AuthStore:
         rails = {"provider_namespace":AUTH_PROVIDER_NAMESPACE_MAX_CHARS,"subject":AUTH_PROVIDER_SUBJECT_MAX_CHARS,"username":AUTH_PROVIDER_USERNAME_MAX_CHARS,"display_name":AUTH_PROVIDER_DISPLAY_NAME_MAX_CHARS}
         if any(len(values[key]) > limit or _has_control(values[key]) for key,limit in rails.items()):
             raise AuthStoreError("invalid_identity")
+        # The provider username becomes an account name: the administrator
+        # rename rule applies to it too.
+        if not valid_account_username(values["username"]):
+            raise AuthStoreError("invalid_identity")
         with self._write() as db:
             payload = self._take(db,transaction["claim"],browser_proof,"claim")
             namespace = self._require_namespace(payload)
@@ -272,19 +304,27 @@ class AuthStore:
                         "external_username":values["username"],"display_name":values["display_name"]}
             if user["status"] != "active":
                 raise AuthStoreError("account_inactive")
+            # The first unified sign-in marks the account as claimed.
+            self._execute(
+                db,"UPDATE users SET sso_linked_at=? WHERE id=? AND sso_linked_at IS NULL",
+                (self._now(),user["id"]),
+            )
             token = self._sso_session(db, user["id"], payload, session_seconds)
             return {"status":"authenticated","user":self._profile(db,user),"token":token}
 
     def _require_name_free(self, db, username, user_id=""):
-        """A real account holding the exact name now makes the choice stale;
-        the built-in account or a case variant is a lasting conflict."""
-        holder = self._execute(db,"SELECT id FROM users WHERE username=? AND id<>?",(username,user_id)).fetchone()
-        if holder is not None and holder["id"] != _BUILTIN_USER_ID:
-            raise AuthStoreError("stale_transaction")
-        try:
-            self.check_name(db, username, user_id)
-        except AuthStoreError:
-            raise AuthStoreError("username_conflict") from None
+        """A real account holding the exact name now makes the choice stale.
+        The built-in account is a lasting conflict; another account holding a
+        case variant is one the person can resolve by linking that account.
+        idx_users_username_lower keeps the holder to at most one row."""
+        holder = self._execute(
+            db,"SELECT id,username FROM users WHERE id<>? AND lower(username)=lower(?)",(user_id,username),
+        ).fetchone()
+        if holder is None:
+            return
+        if holder["id"] == _BUILTIN_USER_ID:
+            raise AuthStoreError("username_conflict")
+        raise AuthStoreError("stale_transaction" if holder["username"] == username else "username_case_conflict")
 
     def link(self, pending_id, browser_proof, login_name, password, *, session_seconds):
         """Rename a password-verified existing account to the external name.
@@ -303,14 +343,20 @@ class AuthStore:
                 raise AuthStoreError("link_verification_failed")
             if old["id"] == _BUILTIN_USER_ID:
                 raise AuthStoreError("link_target_invalid")
+            # Only after the password check, so a wrong guess never learns
+            # whether the account was already claimed by a unified login.
+            if old["sso_linked_at"] is not None:
+                raise AuthStoreError("link_target_linked")
             if old["status"] != "active":
                 raise AuthStoreError("account_inactive")
             self._require_name_free(db, values["username"], old["id"])
             self._remaining(payload, session_seconds)
             self._take(db,pending_id,browser_proof,"choice")
+            now = self._now()
             self._execute(
-                db,"UPDATE users SET username=?,display_name=?,auth_revision=auth_revision+1,updated_at=? WHERE id=?",
-                (values["username"],values["display_name"],self._now(),old["id"]),
+                db,"UPDATE users SET username=?,display_name=?,sso_linked_at=?,"
+                "auth_revision=auth_revision+1,updated_at=? WHERE id=?",
+                (values["username"],values["display_name"],now,now,old["id"]),
             )
             self._execute(db,"DELETE FROM auth_sessions WHERE user_id=?",(old["id"],))
             self._audit(db,old["id"],old["id"],"sso_linked",values["provider_namespace"],values["subject"])
@@ -327,7 +373,7 @@ class AuthStore:
             self._require_name_free(db, values["username"])
             user_id = "user-" + secrets.token_hex(AUTH_TOKEN_BYTES)
             now = self._now()
-            self._execute(db,"INSERT INTO users(id,email,display_name,role,status,username,created_at,updated_at) VALUES (?,?,?,'user','active',?,?,?)",(user_id,user_id+"@users.silicon-notebook.local",values["display_name"],values["username"],now,now))
+            self._execute(db,"INSERT INTO users(id,email,display_name,role,status,username,sso_linked_at,created_at,updated_at) VALUES (?,?,?,'user','active',?,?,?,?)",(user_id,user_id+"@users.silicon-notebook.local",values["display_name"],values["username"],now,now,now))
             self._execute(db,"INSERT INTO user_profiles(id,user_id,memory_mode,domain_focus,created_at,updated_at) VALUES (?,?,'manual',?,?,?)",("profile-"+user_id,user_id,"[]",now,now))
             self._audit(db,user_id,user_id,"sso_created",values["provider_namespace"],values["subject"])
             token = self._sso_session(db, user_id, payload, session_seconds)
@@ -388,10 +434,7 @@ class AuthStore:
             return {"id":user_id,"username":target["username"],"status":status}
 
     def set_username(self, user_id, username, *, actor_id):
-        if (
-            not isinstance(username,str) or not username or username != username.strip()
-            or len(username) > AUTH_PROVIDER_USERNAME_MAX_CHARS or _has_control(username)
-        ):
+        if not valid_account_username(username):
             raise AuthStoreError("invalid_username")
         with self._write() as db:
             target = self._admin_target(db, actor_id, user_id)

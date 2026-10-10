@@ -355,6 +355,23 @@ test("账号列显示状态;停用需二次确认,按下后按钮进入忙态,�
   expect(target.getByRole("button", { name: "启用" })).toBeEnabled();
 });
 
+test("A 行状态更新在途时，其他行的停用按钮与 A 行的确认/取消都停用（全局互斥）", async () => {
+  primeCommonMocks();
+  mocks.fetchAdminUsers.mockResolvedValue([rows[0], rows[1], { ...rows[1], id: "user-other", username: "a00999999" }]);
+  mocks.updateAdminUserStatus.mockReturnValue(new Promise(() => undefined));
+  const user = userEvent.setup();
+
+  render(<AdminUsagePage />);
+  const target = await targetRow();
+  const other = within((await screen.findByText("a00999999")).closest("tr") as HTMLTableRowElement);
+  await user.click(target.getByRole("button", { name: "停用" }));
+  await user.click(target.getByRole("button", { name: "确认停用" }));
+
+  expect(target.getByRole("button", { name: "更新中…" })).toBeDisabled();
+  expect(target.getByRole("button", { name: "取消" })).toBeDisabled();
+  expect(other.getByRole("button", { name: "停用" })).toBeDisabled();
+});
+
 test("已停用账号可启用;失败时错误落在账号单元格并可重试", async () => {
   primeCommonMocks();
   mocks.fetchAdminUsers.mockResolvedValue([rows[0], { ...rows[1], status: "disabled" }]);

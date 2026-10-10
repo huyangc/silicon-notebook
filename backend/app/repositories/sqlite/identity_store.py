@@ -121,11 +121,11 @@ class IdentityStore:
         if not is_valid_username(username):
             raise ValueError("invalid username")
         norm = normalize_username(username)
-        self.auth.check_name(db, norm)
+        email = f"{norm}@users.silicon-notebook.local"
+        self.auth.check_name(db, norm, email=email)
         user_id = _new_user_id()
         now = _now()
         pw_hash, pw_salt, pw_iters = hash_password(password)
-        email = f"{norm}@users.silicon-notebook.local"
         exists = db.execute(
             "SELECT 1 FROM users WHERE username = ?", (norm,)
         ).fetchone()

@@ -1058,7 +1058,7 @@ export default function AdminUsagePage() {
                               <button
                                 type="button"
                                 className="usage-role-button usage-role-button-confirm"
-                                disabled={statusPendingId === u.id}
+                                disabled={Boolean(statusPendingId)}
                                 aria-busy={statusPendingId === u.id}
                                 onClick={() => void submitStatusChange(u, confirmingStatus.status)}
                               >
@@ -1069,7 +1069,7 @@ export default function AdminUsagePage() {
                               <button
                                 type="button"
                                 className="usage-role-button"
-                                disabled={statusPendingId === u.id}
+                                disabled={Boolean(statusPendingId)}
                                 onClick={() => setConfirmingStatus(null)}
                               >取消</button>
                             </span>

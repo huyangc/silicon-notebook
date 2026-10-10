@@ -274,10 +274,39 @@ def test_v92_drops_the_staged_auth_schema_and_keeps_credentials(tmp_path):
     assert "idx_auth_identity_audit_created" in indexes
     assert "local_login_name" not in user_columns
     assert "grant_reference" not in audit_columns
+    assert "idx_users_username_lower" in indexes
+    assert user["sso_linked_at"] is None
     assert (user["username"], user["password_hash"], user["password_salt"]) == (
         "a12345678", password[0], password[1],
     )
     assert session[0] == "user-existing"
     assert [row["action"] for row in audit] == ["account_status:active"]
     assert pending == 0
+    database.close_local()
+
+
+def test_v92_refuses_usernames_that_differ_only_by_case(tmp_path):
+    """idx_users_username_lower keeps the case-insensitive login lookup to one
+    row; a database already holding a case clash fails the upgrade with the
+    clashing names instead of picking one, and stays at v91."""
+    from tests.sqlite_migration_testkit import rollback_v92
+
+    database, settings = _fresh_migrated_database(tmp_path)
+    with database.write() as db:
+        rollback_v92(db)
+        for user_id, name in (("user-a", "a12345678"), ("user-b", "A12345678")):
+            db.execute(
+                "INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at) "
+                "VALUES (?,?,?,'user','active',?,'t','t')",
+                (user_id, user_id + "@x", user_id, name),
+            )
+        db.execute("PRAGMA user_version = 91")
+
+    with pytest.raises(RuntimeError, match="differ only by letter case.*a12345678"):
+        SqliteMigrator(database, settings).migrate()
+    with database.connect() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 91
+        assert db.execute(
+            "SELECT count(*) FROM sqlite_master WHERE name='auth_policy'"
+        ).fetchone()[0] == 1
     database.close_local()

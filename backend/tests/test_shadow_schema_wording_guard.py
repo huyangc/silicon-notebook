@@ -243,6 +243,7 @@ def test_every_partial_unique_index_has_a_pinned_predicate():
     """
     from app.migration.shadow.manifest import MANIFEST
     from app.migration.shadow.replicator import (
+        _EXPRESSION_UNIQUE_INDEXES,
         _UNIQUE_PREDICATES,
         _build_unique_surfaces,
     )
@@ -256,7 +257,12 @@ def test_every_partial_unique_index_has_a_pinned_predicate():
     from app.migration.shadow.replicator import EXPECTED_OPERATIONAL_INDEXES
 
     for name, index in EXPECTED_OPERATIONAL_INDEXES.items():
-        if index.unique and index.predicate_tokens:
+        if index.unique and name in _EXPRESSION_UNIQUE_INDEXES:
+            # An expression key cannot be parked; the pin carries its key and
+            # predicate tokens instead (see the replicator's comment).
+            assert _EXPRESSION_UNIQUE_INDEXES[name] == (index.keys, index.predicate_tokens), name
+            assert name not in surfaces, name
+        elif index.unique and index.predicate_tokens:
             assert name in _UNIQUE_PREDICATES, f"unpinned partial unique index: {name}"
             assert _UNIQUE_PREDICATES[name][1] == index.predicate_tokens, name
 

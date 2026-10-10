@@ -329,6 +329,25 @@ test("点击停用:按钮立即进入忙碌态(禁用+忙碌文案),服务端响
 });
 
 
+test("启用被后端前置校验拒绝(409):原文就近显示在该行开关旁,不出现全局横幅", async () => {
+  mocks.fetchMe.mockResolvedValue({ id: "user-local", role: "admin" });
+  mocks.fetchLoadedExtensions.mockResolvedValue(topology([
+    deploymentExtension({ id: "corp.sample", runtimeEnabled: false }),
+    deploymentExtension({ id: "corp.other", runtimeEnabled: false }),
+  ]));
+  mocks.setExtensionRuntimeEnabled.mockRejectedValue(humanizedError("统一认证插件配置不完整，无法启用", 409));
+  const user = userEvent.setup();
+
+  render(<AdminExtensionsPage />);
+  const row = await screen.findByRole("row", { name: /corp\.sample/ });
+  await user.click(within(row).getByRole("button", { name: "启用 corp.sample" }));
+
+  expect(await within(row).findByRole("alert")).toHaveTextContent("操作没成功：统一认证插件配置不完整，无法启用");
+  const otherRow = screen.getByRole("row", { name: /corp\.other/ });
+  expect(within(otherRow).queryByRole("alert")).toBeNull();
+  expect(within(row).getByRole("button", { name: "启用 corp.sample" })).not.toBeDisabled();
+});
+
 test("失败:行内错误文案(经 toUserMessage),不出现全局横幅,按钮恢复可用", async () => {
   mocks.fetchMe.mockResolvedValue({ id: "user-local", role: "admin" });
   mocks.fetchLoadedExtensions.mockResolvedValue(topology([deploymentExtension()]));

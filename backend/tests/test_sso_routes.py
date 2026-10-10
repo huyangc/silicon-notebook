@@ -54,6 +54,8 @@ def setup(tmp_path, monkeypatch):
     identity = repo._runtime.identity
     provider = Provider()
     provider.enabled = False
+    # The composition root attaches the provider once; the per-request flow does not.
+    identity.auth.use_provider(provider)
     flow = AuthFlowService(identity.auth, provider, settings)
     monkeypatch.setattr(sso_routes, "auth_flow", lambda: flow)
     monkeypatch.setattr(auth_routes, "identity_repository", lambda: identity)
@@ -205,7 +207,9 @@ def test_choice_then_link_moves_the_old_account_onto_the_external_name(setup):
     assert identity.resolve_session(local["token"]) is None
     replay = client.post("/api/auth/sso/link", json={"pending_id": choice["pending_id"],
                          "login_name": "a12345678", "password": "local-password"})
-    assert replay.status_code == 409
+    # A spent choice is gone (410): the page locks the form and offers only
+    # "back to login".
+    assert replay.status_code == 410
     assert replay.json()["detail"] == "认证操作已过期或已使用，请重新登录。"
 
 
@@ -230,7 +234,7 @@ def test_stale_choice_and_disabled_account_messages(setup):
     second = _choice(client)
     assert client.post("/api/auth/sso/create", json={"pending_id": first["pending_id"]}).status_code == 200
     stale = client.post("/api/auth/sso/create", json={"pending_id": second["pending_id"]})
-    assert stale.status_code == 409
+    assert stale.status_code == 410
     assert stale.json()["detail"] == "认证状态已变化，请重新登录。"
     created = identity.auth._execute
     with identity.database.connect() as db:
@@ -252,9 +256,62 @@ def test_choice_is_bound_to_the_browser_and_cancel_discards_it(setup):
     client.cookies.update(saved)
     assert client.post("/api/auth/sso/cancel", json={"pending_id": choice["pending_id"]}).status_code == 204
     gone = client.post("/api/auth/sso/create", json={"pending_id": choice["pending_id"]})
-    assert gone.status_code == 409
+    assert gone.status_code == 410
     with identity.database.connect() as db:
         assert db.execute("SELECT count(*) FROM users WHERE username='W0012345'").fetchone()[0] == 0
+
+
+def test_expired_external_authentication_is_gone_for_the_choice(setup):
+    client, identity, provider, flow = setup
+    _local_user(client)
+    provider.enabled = True
+    choice = _choice(client)
+    flow.settings.auth_sso_session_seconds = 0
+    for route, payload in (
+        ("link", {"pending_id": choice["pending_id"], "login_name": "a12345678",
+                  "password": "local-password"}),
+        ("create", {"pending_id": choice["pending_id"]}),
+    ):
+        expired = client.post(f"/api/auth/sso/{route}", json=payload)
+        assert expired.status_code == 410, route
+        assert expired.json()["detail"] == "统一认证登录已过期，请重新登录。"
+
+
+def test_an_account_claimed_by_a_unified_login_cannot_be_linked_again(setup):
+    client, identity, provider, flow = setup
+    _local_user(client)
+    provider.enabled = True
+    provider.identity = ExternalIdentity("corp.production", "employee-17", "a12345678", "统一姓名")
+    assert _complete(client).json()["status"] == "authenticated"
+    provider.identity = ExternalIdentity("corp.production", "employee-18", "W0099999", "别人")
+    choice = _choice(client)
+    wrong = client.post("/api/auth/sso/link", json={"pending_id": choice["pending_id"],
+                        "login_name": "a12345678", "password": "wrong"})
+    assert wrong.status_code == 409
+    assert wrong.json()["detail"] == "用户名或密码错误"
+    linked = client.post("/api/auth/sso/link", json={"pending_id": choice["pending_id"],
+                         "login_name": "a12345678", "password": "local-password"})
+    assert linked.status_code == 409
+    assert linked.json()["detail"] == "该账号已关联过统一认证账号，不能再关联；如有疑问请联系管理员。"
+    assert linked.headers["x-user-message"] == "1"
+
+
+def test_a_case_variant_name_points_the_person_at_linking(setup):
+    client, identity, provider, flow = setup
+    _local_user(client)
+    provider.enabled = True
+    provider.identity = ExternalIdentity("corp.production", "employee-17", "A12345678", "统一姓名")
+    choice = _choice(client)
+    created = client.post("/api/auth/sso/create", json={"pending_id": choice["pending_id"]})
+    assert created.status_code == 409
+    assert created.json()["detail"] == (
+        "本站已有只差大小写的同名账号，请选择「关联老账号」并输入该账号的密码。"
+    )
+    # The built-in administrator's name stays the other conflict.
+    provider.identity = ExternalIdentity("corp.production", "employee-19", "admin", "统一姓名")
+    builtin = client.post("/api/auth/sso/create", json={"pending_id": _choice(client)["pending_id"]})
+    assert builtin.status_code == 409
+    assert builtin.json()["detail"] == "统一认证账号名与本站已有账号冲突，请联系管理员处理。"
 
 
 @pytest.mark.parametrize("route,payload", [

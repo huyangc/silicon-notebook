@@ -32,7 +32,7 @@ Repository composition（2026-07-11～12）及 application boundary（2026-07-21
 
 **已交付；方案 §3、§13、v1.0。** 多账号隔离、会话、管理员授权、密码管理及笔记本链接分享已落地；群组交付记录另见第 31 节。权限和分享方式见[产品/API][product]。
 
-**SSO 代码已交付，生产切换未验收（2026-09-20）。** 外部 `auth.provider`、w3-auth 示例及本地凭据迁移/退役链路已实现；不把插件交付等同于真实 IDaaS 联调或生产切换完成。边界见[外部认证](docs/product-and-api_zh.md#外部认证与本地凭据退役)、[认证部署](docs/deployment-and-configuration_zh.md#外部认证部署)和[迁移运维](docs/operations_zh.md#认证迁移与退役)。回归入口：[认证宿主](backend/tests/test_auth_provider_host.py)。
+**统一认证代码已交付，生产切换未验收（2026-10-10 简化）。** 外部 `auth.provider` 与 w3-auth 示例已实现：统一认证返回的工号与本站用户名精确一致（区分大小写）即直接登录，否则由用户选择凭密码关联老账号或新建账号；插件开关即开启，停用插件即回退到本地登录，不再有阶段、迁移或退役状态机。不把插件交付等同于真实 IDaaS 联调或生产切换完成。边界见[外部认证](docs/product-and-api_zh.md#外部认证)、[认证部署](docs/deployment-and-configuration_zh.md#外部认证部署)和[启用与回退](docs/operations_zh.md#统一认证的启用与回退)。回归入口：[认证宿主](backend/tests/test_auth_provider_host.py)、[认证存储契约](backend/tests/auth_store_contract.py)。
 
 [历史交付记录][h3]。
 

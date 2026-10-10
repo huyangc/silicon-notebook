@@ -3435,16 +3435,22 @@ workload 做有界规划，不引入 Anthropic SDK 一类通用 Agent。模型�
 
 **开关。** 统一认证开启，当且仅当部署配置了 `auth.provider` 插件、该插件处于启用状态（host 的 provider 描述非空）且回调配置合法。没有持久化阶段，也没有管理员推进的迁移状态。停用插件即回到本地登录，这就是应急通道。配置不合法（例如 `AUTH_OPTIONAL`、公开/前端 origin 不一致、生产环境回调非HTTPS且未设 `AUTH_ALLOW_INSECURE_HTTP`）时，启动或能力接口报错，不会静默降级成本地登录。
 
-**身份键。** 唯一的键是 `users.username == identity.username`（provider 返回的用户名，即工号），精确比较、区分大小写。不再有 `(namespace, subject)` 映射表；`subject` 与 namespace 只写入会话列（`auth_sessions.external_subject` / `provider_namespace`）和审计行。`AUTH_OPTIONAL` 的匿名账号 `user-local` 永远不能被匹配、关联或同名创建。
+**开关前置校验（防锁死）。** 管理员经 `PATCH /admin/extensions/{plugin_id}` **启用**一个提供 `auth.provider` 的插件之前，先按「该插件已启用」检查上述部署配置（`AUTH_OPTIONAL` 禁止、`AUTH_PUBLIC_BASE_URL` 必填、前端与回调地址同协议同主机、生产环境需 https 除非 `AUTH_ALLOW_INSECURE_HTTP`），并要求站内至少有一名 `status='active'`、`role='admin'` 且不是 `user-local` 的管理员（内置管理员在统一认证下无法登录）。任一不满足返回409并用中文说明原因，开关行不写入。停用不做限制。真被锁住时的回退见[运维手册](./operations_zh.md#统一认证的启用与回退)：在部署配置里停用插件后重启。
+
+**身份键。** 唯一的键是 `users.username == identity.username`（provider 返回的用户名，即工号），精确比较、区分大小写。不再有 `(namespace, subject)` 映射表；`subject` 与 namespace 只写入会话列（`auth_sessions.external_subject` / `provider_namespace`）和审计行。`AUTH_OPTIONAL` 的匿名账号 `user-local` 永远不能被匹配、关联或同名创建。provider 用户名按管理员改名的同一条规则校验（非空、无首尾空白、无控制字符、不超长），不合格的身份在回调阶段即被拒绝。
+
+**已关联标记。** `users.sso_linked_at` 记录账号第一次经统一认证登录的时间（直接登录时若为空则写入，关联成功、新建时写入）。带这个标记的账号不能再被任何人凭密码关联；管理员改名、重置密码都不清除它。
 
 **登录流程。**
 
 1. `POST /auth/sso/start` 发起登录；回调带一次性交接码回到前端，再由 `POST /auth/sso/complete {code}` 判定：
-   - 存在 `username` 等于 provider 用户名且处于启用状态的账号：直接签发SSO会话（`status: "authenticated"`）；账号非启用返回 `account_inactive`。
+   - 存在 `username` 等于 provider 用户名且处于启用状态的账号：直接签发SSO会话（`status: "authenticated"`），`sso_linked_at` 为空时写入当前时间；账号非启用返回 `account_inactive`。
    - 不存在这样的账号：返回 `status: "choice_required"`，带 `pending_id`、`external_username`、`display_name`。待选择状态存为一次性认证事务（TTL 为 `AUTH_TRANSACTION_TTL_SECONDS`），并绑定浏览器证明cookie。
 2. 用户随后二选一：
-   - **关联老账号**（`POST /auth/sso/link`）：输入老账号的用户名和密码。未知用户名与错误密码返回同一条 `link_verification_failed` 消息，且不消耗待选择状态，可重新输入；待选择状态过期或已用返回 `invalid_transaction`。老账号必须启用、不是 `user-local` 且有本地密码。同一写事务内先复查期间没有出现以 provider 用户名命名的账号（否则 `stale_transaction`），再把老账号改名为 provider 用户名（用户ID、数据、角色不变；显示名在 provider 值非空时采用该值），`auth_revision` 加一，删除其全部旧会话，写审计 `sso_linked`，并签发SSO会话。
-   - **不关联，使用新账号**（`POST /auth/sso/create`）：同样复查后，以 provider 用户名新建无密码的普通 `user`，写审计 `sso_created`，签发会话并消耗待选择状态。界面会说明老账号的数据不会出现在新账号里。
+   - **关联老账号**（`POST /auth/sso/link`）：输入老账号的用户名和密码。未知用户名与错误密码返回同一条 `link_verification_failed` 消息，且不消耗待选择状态，可重新输入。老账号必须启用（否则 `account_inactive`）、不是 `user-local`（`link_target_invalid`）且有本地密码；密码校验**通过之后**，若老账号已带 `sso_linked_at`，返回 `link_target_linked`（「该账号已关联过统一认证账号，不能再关联；如有疑问请联系管理员。」），密码错误时仍是 `link_verification_failed`，不泄露是否已关联。同一写事务内先复查期间没有出现以 provider 用户名命名的账号（否则 `stale_transaction`），再把老账号改名为 provider 用户名（用户ID、数据、角色不变；显示名在 provider 值非空时采用该值），写入 `sso_linked_at`，`auth_revision` 加一，删除其全部旧会话，写审计 `sso_linked`，并签发SSO会话。
+   - **不关联，使用新账号**（`POST /auth/sso/create`）：同样复查后，以 provider 用户名新建无密码的普通 `user`（带 `sso_linked_at`），写审计 `sso_created`，签发会话并消耗待选择状态。界面会说明老账号的数据不会出现在新账号里。
+   - 工号与另一个已有账号只差大小写时，关联其它账号或新建都返回 `username_case_conflict`（「本站已有只差大小写的同名账号，请选择「关联老账号」并输入该账号的密码。」）；与内置管理员等其他冲突返回 `username_conflict`。
+   - 状态码：待选择状态已作废——`invalid_transaction`（过期、已用或浏览器不符）、`stale_transaction`、`external_auth_expired`——时 link/create 返回 **410**，前端据此锁住表单、只留「返回登录」；link/create 的其余错误返回409。中文文案不随状态码变化。
    - **返回登录**（`POST /auth/sso/cancel`，204）丢弃待选择状态。
 3. 选了新账号之后不提供自助再关联，需找管理员（见下）。
 
@@ -3456,10 +3462,11 @@ OAuth state、浏览器证明（host-only、HttpOnly、SameSite cookie）、平�
 
 **管理员工具**（在现有 `/admin/users` 用户列表上；两项都会删除该用户的会话、`auth_revision` 加一并写审计）：
 
-- `PATCH /admin/users/{id}/status {status: "active" | "disabled"}` 启用/停用账号；管理员不能操作自己。
-- `PATCH /admin/users/{id}/username {username}` 改用户名，校验唯一性；`user-local` 不可改名。
+- `PATCH /admin/users/{id}/status {status: "active" | "disabled"}` 启用/停用账号。
+- `PATCH /admin/users/{id}/username {username}` 改用户名：不区分大小写唯一（与其它账号冲突返回409「用户名已被占用」），用户名须非空、无首尾空白、无控制字符、不超长（否则400）。改名不清除 `sso_linked_at`，也不改账号的占位 email；此后有人注册该账号的旧名会得到普通的「用户名已被占用」（400），而不是约束错误。
+- 两项都**不能操作当前登录的自己**（409「不能修改当前登录的账号」），也**不能改 `user-local` 的状态或用户名**（409「内置管理员账号不可修改」）；非管理员403，目标不存在404。
 
-两者合用即可纠正误选「新账号」：停用新账号，再把老账号的用户名改成工号。Agent初验及每次数据工具调用都复验账号状态。
+两者合用即可纠正误选「新账号」，顺序是：先把误建的新账号停用并改成别的用户名（腾出工号），再把老账号的用户名改成工号；老账号下次统一认证直接登录（届时写入 `sso_linked_at`）。Agent初验及每次数据工具调用都复验账号状态。
 
 下表均以 `/api` 为前缀。公开入口仍校验事务用途及浏览器证明；普通插件路由仍要求本站会话。
 
@@ -3469,11 +3476,12 @@ OAuth state、浏览器证明（host-only、HttpOnly、SameSite cookie）、平�
 | `POST /auth/sso/start` | 发起外部登录，返回 `authorization_url` |
 | `GET /auth/sso/callback` | 固定回调，校验state/证明后调用认证插件换取身份 |
 | `POST /auth/sso/complete` | `{code}`，返回 `authenticated` 的token/user 或 `choice_required` |
-| `POST /auth/sso/link` | `{pending_id, login_name, password}`，验证老账号后改名为工号，返回token/user |
-| `POST /auth/sso/create` | `{pending_id}`，新建无密码普通用户，返回token/user |
+| `POST /auth/sso/link` | `{pending_id, login_name, password}`，验证老账号后改名为工号，返回token/user；待选择状态作废时410，`link_verification_failed`、`link_target_linked`、`username_case_conflict` 等其余错误409 |
+| `POST /auth/sso/create` | `{pending_id}`，新建无密码普通用户，返回token/user；待选择状态作废时410，其余错误409 |
 | `POST /auth/sso/cancel` | `{pending_id}`，204，丢弃待选择状态 |
-| `PATCH /admin/users/{id}/status` | 仅管理员启用/停用账号；不能操作自己 |
-| `PATCH /admin/users/{id}/username` | 仅管理员改用户名；唯一，不可改 `user-local` |
+| `PATCH /admin/users/{id}/status` | 仅管理员启用/停用账号；不能操作自己、不能改 `user-local`（均409） |
+| `PATCH /admin/users/{id}/username` | 仅管理员改用户名；不区分大小写唯一；不能改自己、不能改 `user-local`（均409） |
+| `PATCH /admin/extensions/{plugin_id}` | 启用提供 `auth.provider` 的插件前做防锁死前置校验，不通过409且不写行；停用不限 |
 
 核心认证限额（超限输入一律拒绝，不截断身份）：
 

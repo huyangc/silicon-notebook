@@ -51,8 +51,11 @@ def rollback_v92(db: sqlite3.Connection) -> None:
     'local' policy row every v78-v91 server wrote; ``users.local_login_name``
     comes back with v78's backfill (the username) and its unique index; and
     ``auth_identity_audit`` is rebuilt with its ``grant_reference`` column.
-    Callers lower ``user_version`` themselves.
+    v92's additions -- ``users.sso_linked_at`` and ``idx_users_username_lower``
+    -- are removed. Callers lower ``user_version`` themselves.
     """
+    db.execute("DROP INDEX idx_users_username_lower")
+    db.execute("ALTER TABLE users DROP COLUMN sso_linked_at")
     for name in ("auth_policy", "external_identities", "auth_policy_audit"):
         db.execute(V78_AUTH_TABLES[name])
     db.execute(
