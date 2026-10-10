@@ -13950,6 +13950,8 @@ button.release-notes-toggle { cursor: pointer; }
 .release-notes-level.internal { background: #eef0f4; color: #5b6472; }
 
 .release-notes-body { margin-top: 8px; color: #333b49; font-size: 14px; }
+.release-notes-body > :first-child { margin-top: 0; }
+.release-notes-body > :last-child { margin-bottom: 0; }
 
 /* 「另有 N 项…」一行固定在列表下、按钮区上,和头、底栏一样不参与让高。 */
 .release-notes-more {

@@ -170,7 +170,7 @@ def parse_note_text(text: str, path: str) -> dict:
     if header["audience"] not in AUDIENCES:
         raise ManifestError(f"{path}: audience 只能是 {' | '.join(AUDIENCES)}")
     title = header["title"]
-    if len(title) >= 2 and title[0] == title[-1] and title[0] in "\"'":
+    if len(title) >= 2 and title[0] == title[-1] and title[0] in "\"'" and title[0] not in title[1:-1]:
         title = title[1:-1].strip()
     if not title:
         raise ManifestError(f"{path}: title 不能为空")

@@ -37,7 +37,7 @@ MANIFEST_SCHEMA = 2
 
 LEVELS = ("feature", "change", "fix", "internal")
 AUDIENCES = ("all", "admin")
-# Dialog headline levels; the order is also the sort priority (change before feature).
+# Levels shown as dialog headlines (a set, not a priority: headlines sort newest first).
 HEADLINE_LEVELS = ("change", "feature")
 HEADLINE_LIMIT = 5
 
@@ -214,7 +214,7 @@ def release_notes_for_user(
         seen, manifest.build.ordinal, manifest.notes, is_admin=is_admin
     )
     headline = [n for n in pending if n.level in HEADLINE_LEVELS]
-    headline.sort(key=lambda n: (HEADLINE_LEVELS.index(n.level), -n.ordinal, n.id))
+    headline.sort(key=lambda n: (-n.ordinal, n.id))
     fixes = sum(1 for n in pending if n.level == "fix")
     return ReleaseNotesResponse(
         available=True,

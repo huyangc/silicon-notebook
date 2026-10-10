@@ -532,14 +532,22 @@ def _baselined(client, manifest_file, notes, build=200, headers=None):
     return headers
 
 
-def test_headline_orders_change_before_feature_then_newest_first(client, manifest_file):
+def test_headline_orders_newest_first_across_levels(client, manifest_file):
     headers = _baselined(client, manifest_file, [
         ("f-new", 190, "", "feature"), ("c-old", 110, "", "change"),
         ("f-old", 120, "", "feature"), ("c-new", 150, "", "change"),
     ])
     body = _get_notes(client, headers)
-    assert [n["id"] for n in body["notes"]] == ["c-new", "c-old", "f-new", "f-old"]
+    assert [n["id"] for n in body["notes"]] == ["f-new", "c-new", "f-old", "c-old"]
     assert body["more_count"] == 0
+
+
+def test_headline_ties_on_ordinal_break_by_id_ascending(client, manifest_file):
+    headers = _baselined(client, manifest_file, [
+        ("b", 150, "", "feature"), ("a", 150, "", "change"), ("c", 150, "", "feature"),
+    ])
+    body = _get_notes(client, headers)
+    assert [n["id"] for n in body["notes"]] == ["a", "b", "c"]
 
 
 def test_headline_is_capped_and_overflow_plus_fixes_feed_more_count(client, manifest_file):
@@ -582,7 +590,7 @@ def test_admin_notes_only_reach_admins(client, manifest_file):
     mine = _get_notes(client, user)
     assert [n["id"] for n in mine["notes"]] == ["pub"] and mine["more_count"] == 0
     theirs = _get_notes(client, admin)
-    assert [n["id"] for n in theirs["notes"]] == ["pub", "adm"]
+    assert [n["id"] for n in theirs["notes"]] == ["adm", "pub"]
     assert theirs["more_count"] == 1
 
 

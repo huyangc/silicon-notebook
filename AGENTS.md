@@ -111,7 +111,8 @@ carrier they name; neither entry point is a second product or architecture sourc
   marked displayable remain internal.
 - Before handing off a change, decide whether users need to know about it or do something because
   of it. If they do, the same change adds a `release-notes/<slug>.md` with a `level`
-  (`change`/`feature` reach the post-upgrade notice; `fix`/`internal` only the update history),
+  (`change`/`feature` are listed in the post-upgrade notice, `fix` is only counted there, `internal`
+  appears only on the update-history page),
   an `audience` and a one-line `title`. One feature gets one note: extend an unshipped note instead
   of adding another. Read `release-notes/README.md` before writing one: describe the visible outcome
   in the words the UI shows, claim only shipped and verified behavior, and leave out anything
