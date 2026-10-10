@@ -753,8 +753,9 @@ def test_packaged_index_migration_phases_are_exact():
     assert index_declarations(70) == []
     # Migration 71 (MCP ask clarification handles) adds one expiry index.
     assert index_declarations(71) == [(False, "idx_ask_intent_handles_expires")]
-    # Migration 72 (auth simplification) only drops: no index declared.
-    assert index_declarations(72) == []
+    # Migration 72 (auth simplification) replaces the dropped
+    # local_login_name unique index with one on lower(username).
+    assert index_declarations(72) == [(True, "idx_users_username_lower")]
     # Spelled without ``IF NOT EXISTS`` on purpose, and that is asserted
     # rather than merely commented: app/migration/shadow/postgres_catalog.py
     # parses CREATE INDEX straight out of these files to build the catalog
