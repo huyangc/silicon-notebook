@@ -874,3 +874,19 @@ def test_repair_that_restores_delimiters_keeps_every_token(raw, schema, expected
 
     assert repaired.repaired is True
     assert json.loads(repaired.content) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "answer"),
+    [
+        # codex #835 R1: single-quoted escapes are read as the repair parser
+        # reads them, so a faithful repair is not refused as string_changed.
+        ("{'answer': 'He said \\\"yes\\\"', 'grounded': true}", 'He said "yes"'),
+        ("{'answer': '50\\%', 'grounded': true}", "50\\%"),
+        ("{'answer': 'say \"hi\"', 'grounded': true}", 'say "hi"'),
+    ],
+)
+def test_single_quoted_escapes_keep_a_faithful_repair(raw, answer):
+    repaired = parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=True)
+
+    assert json.loads(repaired.content) == {"answer": answer, "grounded": True}
