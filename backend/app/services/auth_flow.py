@@ -12,6 +12,7 @@ from app.domain.auth_provider import AuthProviderError, AuthProviderHostPort
 AUTH_BROWSER_PROOF_BYTES = 32
 AUTH_CALLBACK_PATH = "/api/auth/sso/callback"
 AUTH_FRONTEND_CALLBACK_PATH = "/auth/sso/callback"
+AUTH_DEFAULT_PROVIDER_LABEL = "统一认证"
 
 
 class AuthFlowService:
@@ -19,10 +20,18 @@ class AuthFlowService:
         self.store = store
         self.host = host
         self.settings = settings
+        # The store reads "unified auth is on" from this same host, so session
+        # resolution and local-credential refusals follow the provider switch.
+        store.use_provider(host)
 
-    def validate_configuration(self, policy=None):
-        policy = policy if policy is not None else self.store.get_policy()
-        if policy["mode"] == "local":
+    def validate_configuration(self):
+        """The enabled provider's descriptor, or None while local login applies.
+
+        An enabled provider with an unusable callback configuration raises
+        instead of falling back to local passwords.
+        """
+        descriptor = self.host.describe()
+        if descriptor is None:
             return None
         if self.settings.auth_optional:
             raise AuthProviderError("anonymous_auth_forbidden")
@@ -42,28 +51,17 @@ class AuthFlowService:
             or urlsplit(self.settings.auth_public_base_url).scheme != "https"
         ):
             raise AuthProviderError("https_required")
-        descriptor = self.host.describe()
-        if descriptor is None or (
-            descriptor.plugin_id != policy["plugin_id"]
-            or descriptor.provider_id != policy["provider_id"]
-            or descriptor.provider_namespace != policy["provider_namespace"]
-            or descriptor.configuration_generation != policy["config_generation"]
-        ):
-            raise AuthProviderError("provider_configuration_mismatch")
         self.host.ensure_available()
         return descriptor
 
     def capabilities(self):
-        policy = self.store.get_policy()
-        mode = policy["mode"]
         descriptor = self.validate_configuration()
+        sso = descriptor is not None
         return {
-            "mode": mode,
-            "local_login": mode in {"local", "dual", "binding_required"},
-            "local_registration": mode in {"local", "dual"},
-            "sso_login": mode != "local" and descriptor is not None,
-            "binding_allowed": mode in {"dual", "binding_required"},
-            "provider_label": descriptor.public_label if descriptor else "统一登录",
+            "sso_login": sso,
+            "local_login": not sso,
+            "local_registration": not sso,
+            "provider_label": descriptor.public_label if sso else AUTH_DEFAULT_PROVIDER_LABEL,
         }
 
     @property
@@ -86,16 +84,19 @@ class AuthFlowService:
             {"code": code} if code else {"error": error}
         )
 
-    def start(self, purpose, browser_proof, *, session_token="", password="", grant_token=""):
+    def _require_enabled(self):
         descriptor = self.validate_configuration()
         if descriptor is None:
             raise AuthProviderError("sso_disabled")
+        return descriptor
+
+    def start(self, browser_proof):
+        descriptor = self._require_enabled()
         verifier = secrets.token_urlsafe(AUTH_BROWSER_PROOF_BYTES) if descriptor.supports_pkce else ""
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode() if verifier else None
         state = self.store.begin(
-            purpose, browser_proof, ttl_seconds=self.settings.auth_transaction_ttl_seconds,
-            session_token=session_token, password=password, pkce_verifier=verifier,
-            grant_token=grant_token,
+            browser_proof, ttl_seconds=self.settings.auth_transaction_ttl_seconds,
+            pkce_verifier=verifier,
         )
         return self.host.authorization_url(
             state=state, redirect_uri=self.callback_url, code_challenge=challenge,
@@ -117,14 +118,20 @@ class AuthFlowService:
         )
 
     def complete(self, code, browser_proof):
-        self.validate_configuration()
-        return self.store.inspect_completion(
+        self._require_enabled()
+        return self.store.complete(
             code, browser_proof, session_seconds=self.settings.auth_sso_session_seconds,
         )
 
-    def confirm(self, pending_id, browser_proof, session_token):
-        self.validate_configuration()
-        return self.store.confirm(
-            pending_id, browser_proof, session_token=session_token,
+    def link(self, pending_id, browser_proof, login_name, password):
+        self._require_enabled()
+        return self.store.link(
+            pending_id, browser_proof, login_name, password,
             session_seconds=self.settings.auth_sso_session_seconds,
+        )
+
+    def create(self, pending_id, browser_proof):
+        self._require_enabled()
+        return self.store.create(
+            pending_id, browser_proof, session_seconds=self.settings.auth_sso_session_seconds,
         )

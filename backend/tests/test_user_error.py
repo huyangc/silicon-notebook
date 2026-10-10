@@ -259,6 +259,11 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "test_mcp_ask_reasoning_rejects_an_unanswered_or_mismatched_intent"
         "(MCP 侧同一函数、同三句文案)覆盖。"
     ),
+    "app/api/admin_routes.py::_account_error": (
+        "detail 只取自同文件 _ACCOUNT_ERRORS 里的中文字面量(按 AuthStoreError 的稳定"
+        "错误码选),未知码用固定中文兜底,异常原文不外泄。真实响应由 "
+        "tests/test_admin_users.py 的停用/改名用例覆盖。"
+    ),
     "app/api/auth_routes.py::register": (
         "detail 是同函数内两个中文字面量的三元选择（「用户名已被占用」/"
         "「用户名不合法」），异常原文只用于分类、不外泄。真实响应由 "

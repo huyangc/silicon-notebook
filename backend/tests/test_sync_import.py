@@ -2304,23 +2304,25 @@ def test_an_imported_group_arrives_with_no_invitation_link(
     assert store.join_by_invite("invite-from-source", user_id=ALICE[1]) is None
 
 
-# ------------------------------------------- created users cannot sign in yet
+# ------------------------------------------- how created users sign in
 
 
-def test_created_users_are_reported_as_needing_a_recovery_grant(
+def test_created_users_are_reported_with_how_they_sign_in(
     source, target, package
 ):
-    """Nothing in this repository binds an external identity to a local account
-    by matching usernames, so a user this import mints owns rows but cannot be
-    signed in to. The report has to say so -- the CLI prints warnings and puts
-    them in --json, so one warning covers both surfaces."""
+    """A user this import mints owns rows but has no password; it is signed in
+    to only by a matching unified-auth username or after an administrator
+    resets its password or username. The report has to say so -- the CLI
+    prints warnings and puts them in --json, so one warning covers both
+    surfaces."""
     report = _import(target, package, create_missing_users=True)
 
     assert report.user_mapping.created
-    grant = [w for w in report.warnings if "recover" in w]
-    assert grant, report.warnings
-    assert "/admin/auth/grants" in grant[0]
-    assert grant[0] in json.dumps(report.as_json(), ensure_ascii=False)
+    notice = [w for w in report.warnings if "no password" in w]
+    assert notice, report.warnings
+    assert "/admin/users/{id}/reset-password" in notice[0]
+    assert "/admin/users/{id}/username" in notice[0]
+    assert notice[0] in json.dumps(report.as_json(), ensure_ascii=False)
 
 
 def test_the_replaced_directories_are_dropped_before_the_run_is_recorded_done(

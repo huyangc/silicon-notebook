@@ -484,6 +484,6 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 升级到五档权限的版本时，已有 token（含已撤销的）按「持有该档主权限就给整档」自动换算：`knowledge:read` 或 `memory:read` → `read`，`ask:execute` → `ask`，`memory:propose` → `contribute`，`sources:write` 或 `maintenance:execute` → `manage`，`sources:delete` → `delete`。因此原来只有 `knowledge:read` 的 token 换算后也能读主人本人的个人记忆。只持有次要权限（例如只有 `agent_profile:read`）的 token 换算后没有任何档位，所有数据工具都会报缺档，需要在 **修改权限** 里至少勾一档。
 
 
-## 认证迁移期间的所有者准入
+## 统一认证下的所有者准入
 
-Agent token不能替代本人本地密码与统一认证的关联证明。Agent初次认证和每次数据工具调用都会复验所有者的本站状态及迁移资格，已建立的MCP会话同样适用。从仅统一认证阶段起，所有者必须具有当前身份源的有效映射；已停用、未关联或共享内置账号失去访问资格。迁移收口阶段仍保留启用账号的已有机器访问，供切换前盘点和处置。已满足迁移条件的所有者保持原token权限档位和笔记本白名单。浏览器SSO过期不能单独感知平台离职状态，须执行运维参考规定的账号停用/生命周期流程。
+Agent初次认证和每次数据工具调用都会复验所有者的本站账号仍为 `active`，已建立的MCP会话同样适用；账号被停用后立即失去访问资格，不再有单独的身份映射要求。符合条件的所有者保持原token权限档位和笔记本白名单。浏览器SSO过期不能单独感知平台离职状态，须执行运维参考规定的账号停用/生命周期流程。

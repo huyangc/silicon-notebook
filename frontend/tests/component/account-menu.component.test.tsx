@@ -33,9 +33,6 @@ function renderMenu(
       onToggleAdvancedMode={onToggleAdvancedMode}
       onOpenSearchProfile={onOpenSearchProfile}
       onChangePassword={onChangePassword}
-      canBindIdentity={false}
-      linkedIdentityName={null}
-      onStartIdentityBinding={async () => undefined}
       onLogout={onLogout}
     />,
   );

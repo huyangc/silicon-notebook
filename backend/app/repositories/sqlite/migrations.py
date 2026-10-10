@@ -287,7 +287,12 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # ask_jobs.memory_access flag (INTEGER NOT NULL DEFAULT 1: whether the run had
 # the private-Memory channel open; existing rows read as "may hold Memory").
 # No backfill. See ``_migration_91``.
-SCHEMA_VERSION = 91
+# v92 (paired with PostgreSQL 0072_auth_simplify.sql) drops the staged-cutover
+# authentication policy (auth_policy, auth_policy_audit), the
+# external_identities mapping, users.local_login_name and
+# auth_identity_audit.grant_reference, and empties auth_transactions. See
+# ``_migration_92``.
+SCHEMA_VERSION = 92
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
 # when v87 was written (a migration must not change meaning when the live
@@ -5623,9 +5628,7 @@ class SqliteMigrator:
     def _seed(self) -> None:
         now = _now()
         with self._connect() as db:
-            db.execute("INSERT INTO auth_policy(id) VALUES(1) ON CONFLICT(id) DO NOTHING")
-            policy = db.execute("SELECT * FROM auth_policy WHERE id=1").fetchone()
-            self.settings.validate_authentication_bootstrap(policy["mode"], retired=bool(policy["retired_at"]))
+            self.settings.validate_authentication_bootstrap()
             db.execute(
                 """
                 INSERT OR IGNORE INTO users
@@ -5659,15 +5662,14 @@ class SqliteMigrator:
             )
             # 把内置 user-local 升级为 admin（id 不变=现有 notebook 零迁移）：
             # 每次启动据 settings.admin_password 重置 admin 密码（改密=改环境变量后重启）。
-            if policy["mode"] in ("local", "dual", "binding_required") and not policy["retired_at"]:
-                from app.domain.auth_utils import hash_password
-                pw_hash, pw_salt, pw_iters = hash_password(self.settings.admin_password)
-                db.execute(
-                    "UPDATE users SET role='admin', username='admin', local_login_name='admin', "
-                    "password_hash=?, password_salt=?, password_iterations=?, updated_at=? "
-                    "WHERE id='user-local'",
-                    (pw_hash, pw_salt, pw_iters, now),
-                )
+            from app.domain.auth_utils import hash_password
+            pw_hash, pw_salt, pw_iters = hash_password(self.settings.admin_password)
+            db.execute(
+                "UPDATE users SET role='admin', username='admin', "
+                "password_hash=?, password_salt=?, password_iterations=?, updated_at=? "
+                "WHERE id='user-local'",
+                (pw_hash, pw_salt, pw_iters, now),
+            )
             from app.domain.kg.names import normalize_name as _wl_norm
             builtin_whitelist = [
                 "VCO", "PLL", "LNA", "BJT", "MOS", "MOSFET", "CMOS", "FET",
@@ -5705,6 +5707,34 @@ class SqliteMigrator:
                     ),
                 )
 
+    def _migration_92(self) -> None:
+        """Simplified unified authentication, parity with PostgreSQL
+        ``0072_auth_simplify.sql``.
+
+        Drops the staged-cutover policy and its audit, the (namespace, subject)
+        identity mapping, ``users.local_login_name`` and
+        ``auth_identity_audit.grant_reference``; pending OAuth transactions use
+        a new payload shape and are discarded. An external login now signs in
+        the account whose username equals the provider username, and unified
+        authentication follows the provider plugin switch rather than a stored
+        policy. The whole change and the version stamp share one BEGIN
+        IMMEDIATE transaction; every step tolerates a re-run.
+        """
+        with self.database.write(operation="sqlite.migration.92") as db:
+            self.database.begin_immediate(db)
+            for table in ("auth_policy_audit", "auth_policy", "external_identities"):
+                db.execute(f"DROP TABLE IF EXISTS {table}")
+            db.execute("DROP INDEX IF EXISTS idx_users_local_login_name")
+            for table, column in (
+                ("users", "local_login_name"),
+                ("auth_identity_audit", "grant_reference"),
+            ):
+                columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+                if column in columns:
+                    db.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+            db.execute("DELETE FROM auth_transactions")
+            db.execute("PRAGMA user_version = 92")
+
     def migrate(self) -> list[int]:
         with self._connect() as db:
             current = int(db.execute("PRAGMA user_version").fetchone()[0])
@@ -5727,11 +5757,11 @@ class SqliteMigrator:
         applied: list[int] = []
         for version in range(current + 1, SCHEMA_VERSION + 1):
             getattr(self, f"_migration_{version}")()
-            # v25, v78, v87, v88 and v89 stamp themselves inside the same BEGIN
-            # IMMEDIATE transaction as their irreversible data/schema changes.
-            # Preserve the existing migration/stamp behavior byte-for-byte for
-            # all other versions.
-            if version not in {25, 78, 87, 88, 89}:
+            # v25, v78, v87, v88, v89 and v92 stamp themselves inside the same
+            # BEGIN IMMEDIATE transaction as their irreversible data/schema
+            # changes. Preserve the existing migration/stamp behavior
+            # byte-for-byte for all other versions.
+            if version not in {25, 78, 87, 88, 89, 92}:
                 with self._connect() as db:
                     db.execute(f"PRAGMA user_version = {version}")
             applied.append(version)

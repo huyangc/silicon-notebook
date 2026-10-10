@@ -328,15 +328,15 @@ _IMPORT_FINAL_STATUS = "draft"
 _GROUP_PRINCIPAL_TYPES = frozenset({"group", "group_admins"})
 
 # A user created by ``--create-missing-users``: no credentials, and the same
-# placeholder email shape external-auth enrollment mints
-# (``app/repositories/auth_store.py``). Bytes, not characters -- token_hex
-# doubles it, matching that enrollment path's id width.
+# placeholder email shape a unified-auth account creation mints
+# (``AuthStore.create`` in ``app/repositories/auth_store.py``). Bytes, not
+# characters -- token_hex doubles it.
 _CREATED_USER_ID_BYTES = 16
 _CREATED_USER_EMAIL_DOMAIN = "users.silicon-notebook.local"
 # Deliberately NOT the source user's role: a package carries whatever role the
 # SOURCE environment gave a person, and honouring it would let an import grant
-# administrator rights in the target environment. External-auth enrollment
-# writes the same literal for the same reason.
+# administrator rights in the target environment. Unified-auth account
+# creation writes the same literal for the same reason.
 _CREATED_USER_ROLE = "user"
 
 # The importer's own output, written beside the package it applied. Not
@@ -494,24 +494,18 @@ _BASE_PACKAGE_ID_KEY = "base_package_id"
 _SCOPED_KEY = "scoped"
 
 # What an operator has to do next for every user ``--create-missing-users``
-# minted. Nothing in this repository links an external identity to a local
-# account by matching usernames: ``AuthStore._complete`` refuses an unmapped
-# identity with ``identity_not_linked``, and the enrollment purpose refuses a
-# username that is already taken (``check_name``) -- which a created user's is.
-# The only way in is an administrator issuing a 'recover' grant naming that
-# account (``AuthStore.issue_grant``, surfaced at ``POST
-# /admin/auth/grants``), which the person then completes through the external
-# provider. Until then the account exists and owns rows but nobody can sign in
-# to it. Said in the report rather than implemented here: minting an identity
-# binding from a username match is precisely the trust decision that flow
-# exists to keep out of automation's hands.
-_CREATED_USERS_NEED_A_GRANT = (
-    "{count} user(s) were created for this import and have NO way to sign in "
-    "yet: they carry no credentials and no external identity binding, and "
-    "nothing links one by username. An administrator must issue a 'recover' "
-    "grant for each (POST /admin/auth/grants, purpose='recover'), which the "
-    "person completes through the external provider. See "
-    "user_mapping.created for the ids."
+# minted. A created account carries the package username and no password.
+# Under unified authentication a provider login signs in the account whose
+# username is exactly the provider username (``AuthStore.complete``), so the
+# person gets in when the two names agree; with local login, or when they
+# differ, an administrator sets a password or the username first. Said in the
+# report rather than done here: the operator knows which case applies.
+_CREATED_USERS_SIGN_IN = (
+    "{count} user(s) were created for this import with no password. Under "
+    "unified authentication each signs in when their provider username equals "
+    "the account username; otherwise an administrator must reset the password "
+    "(POST /admin/users/{{id}}/reset-password) or change the username "
+    "(PATCH /admin/users/{{id}}/username). See user_mapping.created for the ids."
 )
 
 # Detailed skip entries kept in the report. Beyond this only the count grows,
@@ -2683,8 +2677,8 @@ def _create_missing_users(
     backend: _Backend, unmatched: Sequence[UserProjection]
 ) -> dict[str, str]:
     """One credential-free local user per unmatched source user, written the
-    way external-auth enrollment writes a first-login user
-    (``app/repositories/auth_store.py``): placeholder email, empty password
+    way unified-auth account creation writes a first-login user
+    (``AuthStore.create``): placeholder email, empty password
     material, plain 'user' role. Returns ``source id -> new target id``."""
     if not unmatched:
         return {}
@@ -6981,14 +6975,10 @@ def import_package(
     Preflight already hashed the same bytes in this same run, so it is off by
     default and exists for an operator who wants the copy itself checked.
 
-    ``create_missing_users`` mints a local account for every package user this
-    environment does not have, so their rows keep an author. **Those accounts
-    cannot be signed in to until an administrator issues a 'recover' grant for
-    each** (``POST /admin/auth/grants``, ``purpose='recover'``, completed by
-    the person through the external provider). No code here binds an external
-    identity by matching usernames -- see ``_CREATED_USERS_NEED_A_GRANT`` for
-    why that is deliberate. The report says so too, in ``warnings``, and the
-    ids are in ``user_mapping.created``.
+    ``create_missing_users`` mints a password-less local account for every
+    package user this environment does not have, so their rows keep an author.
+    How each person then signs in is in ``_CREATED_USERS_SIGN_IN``; the report
+    says so too, in ``warnings``, and the ids are in ``user_mapping.created``.
 
     **A SQLite target must be quiesced** -- see the module docstring. The
     report carries a warning whenever the target is SQLite.
@@ -7127,7 +7117,7 @@ def _import(
             created.update(_create_missing_users(backend, mapping.unmatched))
             context.users.update(created)
             if created:
-                ledger.warn(_CREATED_USERS_NEED_A_GRANT.format(count=len(created)))
+                ledger.warn(_CREATED_USERS_SIGN_IN.format(count=len(created)))
         elif mapping.unmatched:
             ledger.warn(
                 f"{len(mapping.unmatched)} package user(s) have no target "

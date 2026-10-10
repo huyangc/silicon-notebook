@@ -150,7 +150,7 @@ async def get_current_user(request: Request) -> AsyncIterator[UserProfile]:
         if user is None:
             raise HTTPException(status_code=401, detail="invalid or expired session")
     elif settings.auth_optional:
-        if await run_in_threadpool(lambda: repo.auth.get_policy()["mode"]) != "local":
+        if repo.auth.sso_namespace():
             raise HTTPException(status_code=401, detail="authentication required")
         user = await run_in_threadpool(repo.current_user)  # ContextVar 未设 → seeded admin
     else:

@@ -87,8 +87,8 @@ def test_postgres_adapter_implements_every_batch_maintenance_method():
 
 
 @pytest.mark.postgres_integration
-@pytest.mark.parametrize("owner", ["CorpUID", "corpuid", " CORPuid ", "a00123456", "A00123456"])
-def test_owner_resolution_preserves_user_id_after_sso_rename(postgres_repository, owner):
+@pytest.mark.parametrize("owner", ["CorpUID", "corpuid", " CORPuid "])
+def test_owner_resolution_follows_the_current_username_after_rename(postgres_repository, owner):
     user = postgres_repository.create_user("a00123456", "pw123456")
     with postgres_repository._runtime.database.write() as db:
         db.execute("UPDATE users SET username='CorpUID' WHERE id=%s", (user.id,))
@@ -98,8 +98,8 @@ def test_owner_resolution_preserves_user_id_after_sso_rename(postgres_repository
 
 
 @pytest.mark.postgres_integration
-@pytest.mark.parametrize("conflicting_name", ["corpuid", "a00123456"])
-def test_owner_resolution_rejects_ambiguous_current_or_legacy_names(postgres_repository, conflicting_name):
+@pytest.mark.parametrize("conflicting_name", ["corpuid"])
+def test_owner_resolution_rejects_ambiguous_case_variant_names(postgres_repository, conflicting_name):
     first = postgres_repository.create_user("a00123456", "pw123456")
     second = postgres_repository.create_user("a00123457", "pw123456")
     with postgres_repository._runtime.database.write() as db:

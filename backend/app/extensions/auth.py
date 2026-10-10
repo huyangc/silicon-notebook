@@ -124,8 +124,16 @@ class AuthProviderHost:
         )
 
     def describe(self) -> AuthProviderDescriptor | None:
+        """The provider while it is enabled; None when none is loaded or an
+        administrator switched its plugin off (unified auth then turns off and
+        local login applies again). A loaded, enabled provider that is
+        momentarily unavailable is still described: that fails closed."""
         provider = self._provider
-        return None if provider is None else provider.descriptor
+        if provider is None or self._registry.plugin_runtime_disabled(
+            provider.descriptor.plugin_id
+        ):
+            return None
+        return provider.descriptor
 
     def ensure_available(self) -> None:
         """Fail closed unless the frozen provider is admitted right now."""

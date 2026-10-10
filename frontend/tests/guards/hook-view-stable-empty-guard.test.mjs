@@ -80,7 +80,6 @@ const NOT_A_VIEW_OWNER = new Map([
     "use-dialog-focus.ts",
     "浮层面板的焦点/Tab 陷阱/Escape 约定,返回 void:没有 notebook/actor 视图,也没有返回字段可判",
   ],
-  ["use-identity-migration.ts", "账号迁移的 single-flight 布尔与提交命令，不持有 notebook/actor 视图或集合"],
   [
     "use-kg-owner.ts",
     "KG 三个领域 owner 共用的 actor/notebook/generation 门。它只返回判定函数与生命周期"

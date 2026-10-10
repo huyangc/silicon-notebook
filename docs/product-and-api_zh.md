@@ -60,7 +60,7 @@ Silicon Notebook 是团队知识工作区，后端使用 FastAPI，前端使用 
 
 - [来源上传与解析](#来源上传与解析)：文档、工作簿、Markdown 图片压缩包，后台摄取与可见的解析质量提示。
 - [产品流程](#产品流程)：笔记本、带引用的问答、知识浏览、私有记忆和深度报告。
-- [账号与使用统计](#账号与使用统计)、[群组共享](#群组知识共享)与[外部认证](#外部认证与本地凭据退役)。
+- [账号与使用统计](#账号与使用统计)、[群组共享](#群组知识共享)与[外部认证](#外部认证)。
 - [检索模式](#检索模式问答)：通用问答与逐步推理，以及[用户勾选的来源范围](#按来源选择检索范围)。
 - [Knowhow 表](#knowhow-表)与 [Memory / Agent MCP](#memory-与-agent-mcp)。
 - [深度报告生命周期](#深度报告生命周期与执行护栏)、[报告公开分享](#报告公开分享护栏)与[会话公开分享](#问答会话公开分享护栏)。
@@ -105,7 +105,7 @@ MinerU 图片在来源内联展示，图注可搜索。Markdown 图片的 `alt` 
 
 ## 账号与使用统计
 
-本地认证支持自助注册（一个字母加八位数字，例如 `a12345678`，存储为小写）、密码登录与不透明 Bearer 会话；可用操作受当前[认证策略](#外部认证与本地凭据退役)约束。用户看到自己的笔记本及主动加入的大型共享笔记本。首次启动初始化内置 `admin`，并将旧笔记本归给它；密码来自 `SILICON_NOTEBOOK_ADMIN_PASSWORD`（本机默认 `admin`，生产／非回环部署必须修改）。`SILICON_NOTEBOOK_AUTH_OPTIONAL=true` 用于本机免认证测试。
+本地认证支持自助注册（一个字母加八位数字，例如 `a12345678`，存储为小写）、密码登录与不透明 Bearer 会话；这些入口仅在[外部认证](#外部认证)关闭时可用。用户看到自己的笔记本及主动加入的大型共享笔记本。首次启动初始化内置 `admin`，并将旧笔记本归给它；密码来自 `SILICON_NOTEBOOK_ADMIN_PASSWORD`（本机默认 `admin`，生产／非回环部署必须修改）。`SILICON_NOTEBOOK_AUTH_OPTIONAL=true` 用于本机免认证测试。
 
 | 账号操作 | 契约 |
 | --- | --- |
@@ -3429,65 +3429,59 @@ workload 做有界规划，不引入 Anthropic SDK 一类通用 Agent。模型�
 - PostgreSQL 查询取消（`psycopg.errors.QueryCanceled`——语句超时或运维主动取消）在**非流式**响应上冒泡到请求栈顶层时，返回结构化 `503`（`detail` 加机器可读的 `code: "query_timeout"`），并发出一条 `query_timeout` 事件（带与配对 `kind=http` 行相同的请求 id、method/path，路由带 notebook 维度时一并携带）——而不再是裸的、不可观测的 `500`。**流式**响应一旦已开始就无法改写状态码——流会中断，但同一条 `query_timeout` 事件（标 `streaming: true`）仍由最外层 ASGI 观察者发出。前端仍显示既有通用 5xx「服务暂时不可用」文案（不新增用户可见文案；`frontend/app/errors.ts` 对所有 5xx 都刻意泛化）。既有的 savepoint 有界探测（例如 `knowledge_store.py` 的 chunk 词法召回预算）不受影响——它们在自己的调用点就已捕获并转换为领域异常，QueryCanceled 到不了这个 handler。
 
 
-## 外部认证与本地凭据退役
+## 外部认证
 
 可选的 `auth.provider` 部署插件负责外部身份认证；本站保留业务用户、会话和资源权限。W3示例位于 `examples/extensions/w3-auth`，可独立打包且默认关闭。它实现OAuth2授权码及userinfo适配，不代表平台已支持OIDC，也不代表已经连通真实IDaaS。
 
-持久化策略为 `local → dual → binding_required → sso_only → retired`，默认仍为local。dual保留密码操作并允许用户主动关联；binding_required关闭注册/改密，密码会话只能迁移，不能访问业务HTTP或订阅；sso_only拒绝本地会话和密码；retired不可逆地关闭本地认证并清理密码材料。阶段修改要求真实管理员会话及版本匹配，数据库在提交时复验切换条件。插件故障不会改变认证阶段。
+**开关。** 统一认证开启，当且仅当部署配置了 `auth.provider` 插件、该插件处于启用状态（host 的 provider 描述非空）且回调配置合法。没有持久化阶段，也没有管理员推进的迁移状态。停用插件即回到本地登录，这就是应急通道。配置不合法（例如 `AUTH_OPTIONAL`、公开/前端 origin 不一致、生产环境回调非HTTPS且未设 `AUTH_ALLOW_INSECURE_HTTP`）时，启动或能力接口报错，不会静默降级成本地登录。
 
-已有用户先验证当前本站密码，再统一认证并确认展示的身份。原 `users.id`、资产、角色、偏好及内部邮箱保持不变；可信外部用户名成为 `users.username`，原 `local_login_name` 仅在并存/迁移期继续用于密码登录。SSO只按唯一的 `(provider_namespace, subject)` 映射登录，不按用户名或邮箱认领；唯一例外是下文需显式开启的按工号自动关联，关联后同样落成映射。与他人正式用户名或旧登录名冲突时整个绑定回滚。显示姓名不用于身份匹配。
+**身份键。** 唯一的键是 `users.username == identity.username`（provider 返回的用户名，即工号），精确比较、区分大小写。不再有 `(namespace, subject)` 映射表；`subject` 与 namespace 只写入会话列（`auth_sessions.external_subject` / `provider_namespace`）和审计行。`AUTH_OPTIONAL` 的匿名账号 `user-local` 永远不能被匹配、关联或同名创建。
 
-state、浏览器证明、平台支持时的PKCE、原本站会话、策略/配置代次和一次性交接均由主仓控制。外部token不离开插件调用。回调跳转只携带短时交接码，浏览器还必须持有host-only、HttpOnly、SameSite证明cookie；绑定确认另需原本站Bearer。退出、重置密码、停用、重放及阶段/配置变化会使待办证明失效。SSO绝对期限从可信外部认证开始计算，滑动访问不能延长；网页认证的NDJSON/SSE每帧发送前复验会话。`/mcp` 继续由其协议逐请求、逐工具检查Agent凭据及所有者资格；已提交写入可以在token撤销后返回终态确认，后续访问仍被拒绝。
+**登录流程。**
 
-登录页面按认证能力响应选择入口。只有旧版端点不存在（404）时才回退到本地登录。已保存凭据的会话恢复独立于认证插件就绪状态，因此有效业务会话在插件维护期间仍可使用。没有有效业务会话时，网络或服务异常显示可重试的认证状态错误，保留已保存的迁移凭据。SSO 登录和绑定会保存经过校验的本站返回地址，包括邀请查询参数和笔记本哈希位置，成功完成后消费该地址；拒绝站外返回地址。
+1. `POST /auth/sso/start` 发起登录；回调带一次性交接码回到前端，再由 `POST /auth/sso/complete {code}` 判定：
+   - 存在 `username` 等于 provider 用户名且处于启用状态的账号：直接签发SSO会话（`status: "authenticated"`）；账号非启用返回 `account_inactive`。
+   - 不存在这样的账号：返回 `status: "choice_required"`，带 `pending_id`、`external_username`、`display_name`。待选择状态存为一次性认证事务（TTL 为 `AUTH_TRANSACTION_TTL_SECONDS`），并绑定浏览器证明cookie。
+2. 用户随后二选一：
+   - **关联老账号**（`POST /auth/sso/link`）：输入老账号的用户名和密码。未知用户名与错误密码返回同一条 `link_verification_failed` 消息，且不消耗待选择状态，可重新输入；待选择状态过期或已用返回 `invalid_transaction`。老账号必须启用、不是 `user-local` 且有本地密码。同一写事务内先复查期间没有出现以 provider 用户名命名的账号（否则 `stale_transaction`），再把老账号改名为 provider 用户名（用户ID、数据、角色不变；显示名在 provider 值非空时采用该值），`auth_revision` 加一，删除其全部旧会话，写审计 `sso_linked`，并签发SSO会话。
+   - **不关联，使用新账号**（`POST /auth/sso/create`）：同样复查后，以 provider 用户名新建无密码的普通 `user`，写审计 `sso_created`，签发会话并消耗待选择状态。界面会说明老账号的数据不会出现在新账号里。
+   - **返回登录**（`POST /auth/sso/cancel`，204）丢弃待选择状态。
+3. 选了新账号之后不提供自助再关联，需找管理员（见下）。
 
-身份源配置代次与 provider ID 使用同一套稳定标识符语法：以小写字母开头，各段只含小写字母或数字，段间可用单个 `.`、`_` 或 `-` 分隔。非法代次会在策略版本变化前被拒绝。
+OAuth state、浏览器证明（host-only、HttpOnly、SameSite cookie）、平台支持时的PKCE、Origin校验和一次性交接均由主仓控制。外部token不离开插件调用。回调跳转只携带短时交接码。SSO会话有从可信外部认证起算的绝对期限（`AUTH_SSO_SESSION_SECONDS`），滑动访问不能延长；网页认证的NDJSON/SSE每帧发送前复验会话。`/mcp` 继续由其协议逐请求、逐工具检查Agent凭据；Agent所有者资格只看 `users.status = 'active'`，token行保留，已提交写入可以在撤销后返回终态确认，后续访问仍被拒绝。浏览器绝对过期本身不是IDaaS离职信号：运维必须确认 provider 的 subject 稳定性、不复用及离职流程。
+
+**开启期间的本地凭据。** `POST /auth/login`、`POST /auth/register` 及本人改密码返回403（「已启用统一认证，请使用统一认证登录」）。已有的 `auth_source = 'local'` 会话不再有效，前端回到登录页。管理员重置密码保留：忘记老密码的用户由管理员重置后即可完成关联。关闭开关后本地登录一切照旧。
+
+**前端。** 登录页按 `GET /auth/capabilities` 选择入口：`sso_login` 为真时只显示「使用{provider_label}登录」按钮，否则显示本地登录/注册表单。只有该端点不存在（404）才回退到本地登录。已保存凭据的会话恢复独立于认证插件就绪状态。SSO 登录会保存经过校验的本站返回地址（含邀请查询参数和笔记本哈希位置），完成后消费；拒绝站外返回地址。会话通过 storage 监听在标签页间同步。
+
+**管理员工具**（在现有 `/admin/users` 用户列表上；两项都会删除该用户的会话、`auth_revision` 加一并写审计）：
+
+- `PATCH /admin/users/{id}/status {status: "active" | "disabled"}` 启用/停用账号；管理员不能操作自己。
+- `PATCH /admin/users/{id}/username {username}` 改用户名，校验唯一性；`user-local` 不可改名。
+
+两者合用即可纠正误选「新账号」：停用新账号，再把老账号的用户名改成工号。Agent初验及每次数据工具调用都复验账号状态。
 
 下表均以 `/api` 为前缀。公开入口仍校验事务用途及浏览器证明；普通插件路由仍要求本站会话。
 
 | 接口 | 合同 |
 | --- | --- |
-| `GET /auth/capabilities` | 最小公开能力：阶段、本地登录/注册、统一登录/关联开关及标签 |
+| `GET /auth/capabilities` | `{sso_login, local_login, local_registration, provider_label}`；统一认证开启时本地登录与注册均为 false |
 | `POST /auth/sso/start` | 发起外部登录，返回 `authorization_url` |
-| `POST /me/identity-binding/start` | 原Bearer及 `current_password`，返回授权地址 |
-| `GET /auth/sso/callback` | 固定回调，校验state/证明后调用认证插件 |
-| `POST /auth/sso/complete` | `{code}`，返回登录token/user或明确的绑定/授权开通确认预览 |
-| `POST /me/identity-binding/confirm` | `{pending_id}`，原子提交关联与名称并轮换会话 |
-| `POST /me/identity-binding/cancel` | `{pending_id}`，取消待确认事务 |
-| `GET /me/identities` | 本人的关联状态、统一名称、临时本地登录名及 `migration_available`；可接受迁移凭据 |
-| `POST /me/identity-migration` | 自动开户账号的SSO会话及本人旧账号的 `{login_name, password}`；把统一身份迁到旧账号并返回其 `{token, user}` |
-| `GET/PATCH /admin/auth/policy` | 持久化策略；修改需预期版本及显式回退标志 |
-| `GET /admin/auth/migration` | 预检计数及策略，不等同于真实IDaaS验收 |
-| `GET /admin/auth/accounts` | 分页迁移清单，包含已停用账号 |
-| `GET /admin/auth/audit` | 仅管理员可分页读取关联、授权和账号状态审计；不含凭据或原始认证响应 |
-| `PATCH /admin/auth/provider-configuration` | 准备新配置代次，保持阶段、provider和身份源；使在途认证失效 |
-| `PATCH /admin/auth/accounts/{user_id}` | 显式启用/停用账号并撤销其本站会话 |
-| `POST /admin/auth/grants` | 管理员签发绑定精确外部subject的限时新用户/历史恢复/身份更换凭证 |
-| `POST /auth/sso/grant/start` | 兑换授权并认证指定外部subject；新开通不能继承历史资产 |
-| `POST /admin/auth/retirement-cleanup` | 写入退役标记后可重试的凭据清理 |
+| `GET /auth/sso/callback` | 固定回调，校验state/证明后调用认证插件换取身份 |
+| `POST /auth/sso/complete` | `{code}`，返回 `authenticated` 的token/user 或 `choice_required` |
+| `POST /auth/sso/link` | `{pending_id, login_name, password}`，验证老账号后改名为工号，返回token/user |
+| `POST /auth/sso/create` | `{pending_id}`，新建无密码普通用户，返回token/user |
+| `POST /auth/sso/cancel` | `{pending_id}`，204，丢弃待选择状态 |
+| `PATCH /admin/users/{id}/status` | 仅管理员启用/停用账号；不能操作自己 |
+| `PATCH /admin/users/{id}/username` | 仅管理员改用户名；唯一，不可改 `user-local` |
 
-原 `POST /auth/login` 在收口期可返回 `migration_required=true`，此token不能用于业务。纯SSO新用户只获普通用户身份且无本地密码。晚到老用户需管理员签发固定原用户ID的恢复凭证，再由本人统一认证和确认；持有迁移会话时仍提供管理员凭证入口，无需清除浏览器存储才能恢复。未开启 `AUTH_SSO_AUTO_ACCOUNTS` 时不自动建号；任何情况下都不合并账号数据。
+核心认证限额（超限输入一律拒绝，不截断身份）：
 
-开启 `AUTH_SSO_AUTO_ACCOUNTS=true` 后，非local阶段中未映射的 `login` 会查找 `user-local` 以外、`username` 或 `local_login_name` 与IdP用户名相同（不区分大小写）的账号。判定在暂存身份时做出，并在完成的写事务内重新计算；结论变化（候选账号重置密码等导致 `auth_revision` 改变、出现同名新账号、subject 已被映射、开关已关闭）时以 `stale_transaction` 或 `identity_not_linked` 失败，不会改选其他目标。
-
-- 恰有一个候选、启用且在当前身份源下没有任何映射（有效或历史）：建立映射，`username`/`display_name` 取IdP值，审计记 `sso_auto_linked`，`complete` 直接返回 `authenticated`。角色保持不变，管理员账号仍是管理员。
-- 唯一候选已停用返回 `account_inactive`；候选已有本身份源映射或多于一个候选返回 `identity_conflict`。
-- 没有候选：`complete` 返回 `confirmation_required`，`purpose: "auto_enroll"` 并带 `external_username`、`display_name`，此时不写任何数据。`POST /me/identity-binding/confirm`（无需本站Bearer）才新建以IdP用户名命名、无本地密码的普通 `user`、建立映射并审计 `sso_auto_enrolled`；`cancel` 则丢弃。确认页明确告知旧账号中的数据不会出现在新账号里，并给出替代路径：本地登录仍开放时用旧账号登录后关联，否则联系管理员。
-
-自动开户账号可以把统一身份迁回本人旧账号。仅当调用者本人的有效映射位于审计中含 `sso_auto_enrolled` 的账号、且阶段为 `dual` 或 `binding_required`（未退役）时，`migration_available` 为 true。`POST /me/identity-migration` 要求这种账号的SSO会话（本地会话被拒），按规范化后的 `local_login_name` 查找旧账号并校验密码；账号不存在与密码错误返回同一条消息。旧账号须启用、不是 `user-local`，且在本身份源下没有映射。随后在同一事务中把映射转到旧账号、旧账号改用IdP用户名和显示姓名、停用自动账号并清空其用户名、两个账号的 `auth_revision` 均递增并撤销各自会话、审计 `identity_migrated` 与 `sso_auto_account_retired`，并为旧账号签发SSO会话，其到期时间不晚于调用者原会话的绝对期限。旧账号的用户ID和数据保持不变；自动账号中的内容不搬迁。`recover` 授权也可指向当前被自动开户账号占用的subject，完成时执行相同迁移（两条审计都带授权引用），适用于任一非local阶段；subject被其他账号占用时仍以 `identity_conflict` 拒绝。
-
-更换已关联的统一账号必须由管理员签发 `replace` 凭证，固定原本站用户ID及当前身份源中的精确新subject。确认页展示原账号与新统一身份；用户认证并明确确认后，在同一事务中停用旧映射和旧SSO会话、保留历史subject归属并激活新映射，原用户ID、资产和角色不变。失败或取消不会改变原映射。授权签发、使用、完成以及关联、改名和账号状态变更均保留受限持久审计，不依赖短期认证事务。账号清单和审计均采用下表分页限制。
-
-Agent初验及每次数据工具调用都复验账号状态；仅统一认证和退役阶段还要求当前身份源的有效映射。关联收口期保留启用账号的Agent访问，便于迁移。token记录保留，每次调用实时检查所有者资格。浏览器绝对期限不能代替IDaaS离职通知；上线前必须确定subject稳定性、不可重分配及离职处置流程。切换预检要求两名已迁移的具名管理员、全部启用账号有结论及后续直接SSO登录记录；内置共享管理员必须停用。
-
-主仓认证限制如下，超限拒绝，不截断身份：
-
-| 配置/常量 | 数值 |
+| 配置/常量 | 值 |
 | --- | --- |
 | `AUTH_TRANSACTION_TTL_SECONDS` | 默认600，60–1800秒 |
 | `AUTH_SSO_SESSION_SECONDS` | 默认28800，300–86400秒 |
 | `AUTH_PROVIDER_TIMEOUT_SECONDS` | 默认15，大于0且不超过60秒 |
-| `AUTH_SSO_AUTO_ACCOUNTS` | 默认 `false`；未映射统一登录按工号自动关联/开户 |
 | `AUTH_PROVIDER_ID_MAX_CHARS` | 128 |
 | `AUTH_PROVIDER_NAMESPACE_MAX_CHARS` | 256 |
 | `AUTH_PROVIDER_CONFIGURATION_GENERATION_MAX_CHARS` | 128 |
@@ -3497,7 +3491,5 @@ Agent初验及每次数据工具调用都复验账号状态；仅统一认证和
 | `AUTH_PROVIDER_USERNAME_MAX_CHARS` | 512 |
 | `AUTH_PROVIDER_DISPLAY_NAME_MAX_CHARS` | 512 |
 | `AUTH_PROVIDER_AUTHORIZATION_URL_MAX_CHARS` | 8192 |
-| `AUTH_CUTOVER_MIN_ADMINS` | 2 |
-| `AUTH_INVENTORY_PAGE_SIZE` / `AUTH_INVENTORY_PAGE_MAX` | 默认100，最多200 |
 
-宿主只接纳一个provider，限制同时执行的调用，并拒绝超时后返回的结果；超时插件若仍未返回，会继续占用其执行槽位。供应商传输限制归示例README对维护。安装、分阶段发布及恢复见部署和运维参考。
+host 只接纳一个 provider，限制 provider 并发 worker 并拒绝迟到结果。超时的受信插件在调用返回前仍可能占用 worker 槽。provider 传输层专属限制见示例 README 中英配对。安装、启用与回退由部署和运维文档负责。

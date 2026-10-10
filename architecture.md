@@ -924,6 +924,6 @@ G0–G3 分级、环境隔离、并发和 CI 要求统一见[开发文档的验�
 
 外部认证通过 `app.domain.auth_provider.AuthProviderHostPort` 注入，SDK合同由 `app.extension_sdk.auth` 拥有，`app.extensions.auth` 负责单provider、冻结描述、参数/输出验证、实时admission和受限deadline。主仓不import W3示例。独立打包的 `examples/extensions/w3-auth` 只实现供应商协议，不获得本站repository、密码、会话或资源授权。
 
-组合根在数据库迁移和extension admission prime之后复验持久化认证策略。固定主仓认证路由是未登录协议入口；普通插件HTTP路由的登录依赖不变。认证流程由 `app.services.auth_flow` 编排，外部网络调用始终发生在数据库事务之外；`identity.auth` 持有后端共用的AuthStore，经SQLite/PostgreSQL适配统一锁住策略行后执行映射、一次性凭证和会话提交。新权限不扩散到兼容facade。
+组合根在数据库迁移和extension admission prime之后把认证provider接入 `identity.auth`，并拒绝以已启用但配置不可用的provider启动。统一认证是否开启不持久化：provider插件已装载且未被管理员停用（`describe()` 非空）即开启，停用插件即回到本地登录。固定主仓认证路由是未登录协议入口；普通插件HTTP路由的登录依赖不变。认证流程由 `app.services.auth_flow` 编排，外部网络调用始终发生在数据库事务之外；`identity.auth` 持有后端共用的AuthStore，经SQLite（BEGIN IMMEDIATE）/PostgreSQL（事务级advisory lock）统一加锁后执行一次性凭证、账号匹配/关联/新建和会话提交。新权限不扩散到兼容facade。
 
-`users.id` 是业务身份主键；正式外部用户名和临时本地登录名分开存储。唯一外部映射、凭据来源、绝对期限及持久化迁移阶段决定准入。Agent初验和工具调用使用同一所有者准入，网页认证流式响应每帧复验会话；MCP由其协议逐请求和逐工具检查，保留已提交写入的终态确认。插件不可更改阶段或签发本站会话。关闭本地认证不删除业务用户、权限和资产；完整运行合同与迁移操作分别归产品/API和运维参考。
+`users.id` 是业务身份主键；外部登录按 `users.username` 与provider用户名精确匹配（内置 `user-local` 永不匹配），对不上时由本人关联老账号（老账号密码验证）或新建账号。会话来源（本地/统一认证）与绝对期限决定准入：统一认证开启时本地会话失效，关闭时统一认证会话失效。Agent初验和工具调用只看所有者账号状态，网页认证流式响应每帧复验会话；MCP由其协议逐请求和逐工具检查，保留已提交写入的终态确认。插件不可签发本站会话。完整运行合同与运维操作分别归产品/API和运维参考。

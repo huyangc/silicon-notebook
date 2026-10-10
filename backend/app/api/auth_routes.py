@@ -2,6 +2,7 @@ from fastapi import APIRouter, Request, Response
 
 from app.api.deps import identity_repository, user_error
 from app.models.identity import AuthRequest, AuthResult
+from app.repositories.identity_errors import AuthStoreError
 from app.services.auth_utils import is_valid_username
 
 auth_router = APIRouter(prefix="/auth")
@@ -21,7 +22,7 @@ def register(payload: AuthRequest) -> AuthResult:
         )
     except ValueError as exc:
         if str(exc) == "local_auth_disabled":
-            raise user_error(403, "本站注册已关闭，请使用统一登录或联系管理员开通。") from None
+            raise user_error(403, "已启用统一认证，请使用统一认证登录") from None
         # 两个分支都是写给用户的中文文案（异常原文只用来分类，不外泄），
         # 所以同样带出处标记。AST 扫描只认字面量 detail，这处是变量间接
         # 引用，需要手工登记。
@@ -34,18 +35,14 @@ def register(payload: AuthRequest) -> AuthResult:
 def login(payload: AuthRequest) -> AuthResult:
     """验证与建会话必须走同一个 store 方法(单写事务):拆成 authenticate_user +
     create_session 会与改密/重置的会话吊销竞态,让旧密码登录的会话逃过吊销。"""
-    repo = identity_repository()
-    if repo.auth.get_policy()["mode"] in {"sso_only", "retired"}:
-        raise user_error(403, "本站密码登录已关闭，请使用统一登录。")
     try:
-        result = repo.login_with_password(payload.username, payload.password)
-    except ValueError:
-        raise user_error(403, "本站密码登录已关闭，请使用统一登录。") from None
+        result = identity_repository().login_with_password(payload.username, payload.password)
+    except AuthStoreError:
+        raise user_error(403, "已启用统一认证，请使用统一认证登录") from None
     if result is None:
         raise user_error(401, "用户名或密码错误")
     user, token = result
-    return AuthResult(token=token, user=user,
-                      migration_required=repo.auth.get_policy()["mode"] == "binding_required")
+    return AuthResult(token=token, user=user)
 
 
 @auth_router.post("/logout", status_code=204)
@@ -55,7 +52,6 @@ def logout(request: Request, response: Response) -> None:
     header = request.headers.get("Authorization", "")
     token = header[7:].strip() if header.lower().startswith("bearer ") else ""
     if token:
-        identity_repository().auth.cancel_for_session(token)
         identity_repository().delete_session(token)
     for name in ("__Host-sn-auth-browser", "sn-auth-browser-dev"):
         proof = request.cookies.get(name, "")

@@ -222,3 +222,62 @@ def test_v78_schema_and_version_stamp_roll_back_together_on_interruption(
             "SELECT local_login_name FROM users WHERE id='user-existing'"
         ).fetchone()[0] == "legacy-login"
     database.close_local()
+
+
+def test_v92_drops_the_staged_auth_schema_and_keeps_credentials(tmp_path):
+    """A v91 database (forged from the current schema with rollback_v92) loses
+    the staged-auth tables, users.local_login_name and the audit grant
+    reference; passwords, sessions and audit rows survive and pending OAuth
+    transactions are discarded. A second run is a no-op."""
+    from app.domain.auth_utils import hash_password
+    from tests.sqlite_migration_testkit import rollback_v92
+
+    database, settings = _fresh_migrated_database(tmp_path)
+    password = hash_password("pw")
+    with database.write() as db:
+        rollback_v92(db)
+        db.execute(
+            "INSERT INTO users (id,email,display_name,role,status,username,password_hash,"
+            "password_salt,password_iterations,created_at,updated_at) "
+            "VALUES ('user-existing','e@x','E','user','active','a12345678',?,?,?,'t','t')",
+            password,
+        )
+        db.execute("UPDATE users SET local_login_name='legacy-alias' WHERE id='user-existing'")
+        db.execute(
+            "INSERT INTO auth_sessions (token,user_id,created_at,expires_at,last_seen_at) "
+            "VALUES ('kept-session','user-existing','t','9999','t')"
+        )
+        db.execute(
+            "INSERT INTO auth_identity_audit (id,actor_id,target_user_id,action,"
+            "provider_namespace,subject,grant_reference,created_at) "
+            "VALUES ('audit-1','user-local','user-existing','account_status:active','','','ref','t')"
+        )
+        db.execute(
+            "INSERT INTO auth_transactions (token_digest,purpose,browser_digest,payload,expires_at) "
+            "VALUES ('d','login','b','{}',4102444800)"
+        )
+        db.execute("PRAGMA user_version = 91")
+
+    assert SqliteMigrator(database, settings).migrate() == [92]
+    assert SqliteMigrator(database, settings).migrate() == []
+    with database.connect() as db:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        indexes = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        user_columns = {row[1] for row in db.execute("PRAGMA table_info(users)")}
+        audit_columns = {row[1] for row in db.execute("PRAGMA table_info(auth_identity_audit)")}
+        user = dict(db.execute("SELECT * FROM users WHERE id='user-existing'").fetchone())
+        session = db.execute("SELECT user_id FROM auth_sessions WHERE token='kept-session'").fetchone()
+        audit = [dict(row) for row in db.execute("SELECT * FROM auth_identity_audit")]
+        pending = db.execute("SELECT count(*) FROM auth_transactions").fetchone()[0]
+    assert not {"auth_policy", "auth_policy_audit", "external_identities"} & tables
+    assert not {"idx_users_local_login_name", "idx_external_identities_active_user"} & indexes
+    assert "idx_auth_identity_audit_created" in indexes
+    assert "local_login_name" not in user_columns
+    assert "grant_reference" not in audit_columns
+    assert (user["username"], user["password_hash"], user["password_salt"]) == (
+        "a12345678", password[0], password[1],
+    )
+    assert session[0] == "user-existing"
+    assert [row["action"] for row in audit] == ["account_status:active"]
+    assert pending == 0
+    database.close_local()

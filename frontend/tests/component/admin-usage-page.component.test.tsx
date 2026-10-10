@@ -1,11 +1,12 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   fetchMe: vi.fn(),
-  fetchAuthCapabilities: vi.fn(),
   fetchAdminUsers: vi.fn(),
+  updateAdminUserStatus: vi.fn(),
+  updateAdminUsername: vi.fn(),
   fetchOnlineIds: vi.fn(),
   updateAdminUserRole: vi.fn(),
   updateAdminUserUploadLimit: vi.fn(),
@@ -16,10 +17,12 @@ const mocks = vi.hoisted(() => ({
   fetchAnalysisIssues: vi.fn(),
 }));
 
-vi.mock("../../app/auth.ts", () => ({ fetchMe: mocks.fetchMe, fetchAuthCapabilities: mocks.fetchAuthCapabilities, LOCAL_AUTH_CAPABILITIES: { mode: "local" } }));
+vi.mock("../../app/auth.ts", () => ({ fetchMe: mocks.fetchMe }));
 vi.mock("../../app/admin/usage/api.ts", () => ({
   FORBIDDEN_SENTINEL: "forbidden",
   fetchAdminUsers: mocks.fetchAdminUsers,
+  updateAdminUserStatus: mocks.updateAdminUserStatus,
+  updateAdminUsername: mocks.updateAdminUsername,
   fetchOnlineIds: mocks.fetchOnlineIds,
   updateAdminUserRole: mocks.updateAdminUserRole,
   updateAdminUserUploadLimit: mocks.updateAdminUserUploadLimit,
@@ -44,13 +47,13 @@ import { humanizedError } from "../../app/errors";
 
 beforeEach(() => {
   window.history.replaceState({}, "", "/admin/usage");
-  mocks.fetchAuthCapabilities.mockResolvedValue({ mode: "local", local_login: true, local_registration: true, sso_login: false, binding_allowed: false, provider_label: "" });
 });
 
 // 展开区「用户摘要」用的默认口径值(规格 §3 B1–B5/Phase C)；单个用例需要不同数值时
 // 用 `{ ...rows[n], 字段: 值 }` 覆盖,不必每处手写全部字段。
 const usageSummaryDefaults = {
   last_seen: null as string | null,
+  status: "active" as "active" | "disabled",
   storage_bytes: 0,
   questions_30d: 0,
   questions_failed: 0,
@@ -102,7 +105,6 @@ const rows = [
 // 每个用例都要自备实现(vitest 配了 restoreMocks,测试间会清实现)。
 function primeCommonMocks() {
   mocks.fetchMe.mockResolvedValue({ id: "user-local", role: "admin" });
-  mocks.fetchAuthCapabilities.mockResolvedValue({ mode: "local", local_login: true, local_registration: true, sso_login: false, binding_allowed: false, provider_label: "" });
   mocks.fetchAdminUsers.mockResolvedValue(rows);
   mocks.fetchOnlineIds.mockResolvedValue([]);
   mocks.fetchUploadLimitDefault.mockResolvedValue(20);
@@ -323,22 +325,119 @@ test("管理员行的文档上限显示不限且不可编辑", async () => {
   expect(builtin.queryByRole("button", { name: "编辑" })).toBeNull();
 });
 
-test.each([humanizedError("认证服务暂不可用", 503), new TypeError("offline")])("认证能力读取失败时保留用户总览但不开放密码操作: %s", async (error) => {
+test("重置密码不依赖认证方式:统一认证启用时也保留(用于关联老账号前的找回)", async () => {
   primeCommonMocks();
-  mocks.fetchAuthCapabilities.mockRejectedValue(error);
-  render(<AdminUsagePage />);
-  const target = await targetRow();
-  expect(target.getByRole("button", { name: "设为管理员" })).toBeInTheDocument();
-  expect(target.queryByRole("button", { name: "重置密码" })).toBeNull();
-  expect(screen.queryByRole("columnheader", { name: "密码" })).toBeNull();
-});
-
-test("旧版认证能力端点不存在时保留本地密码管理", async () => {
-  primeCommonMocks();
-  mocks.fetchAuthCapabilities.mockRejectedValue(humanizedError("未找到", 404));
   render(<AdminUsagePage />);
   const target = await targetRow();
   expect(target.getByRole("button", { name: "重置密码" })).toBeInTheDocument();
+  expect(screen.getByRole("columnheader", { name: "密码" })).toBeInTheDocument();
+});
+
+test("账号列显示状态;停用需二次确认,按下后按钮进入忙态,结果落在该单元格", async () => {
+  primeCommonMocks();
+  let resolveStatus: (value: "disabled") => void = () => undefined;
+  mocks.updateAdminUserStatus.mockReturnValue(new Promise((resolve) => { resolveStatus = resolve; }));
+  const user = userEvent.setup();
+
+  render(<AdminUsagePage />);
+  const target = await targetRow();
+  expect(target.getByText("正常")).toBeInTheDocument();
+
+  await user.click(target.getByRole("button", { name: "停用" }));
+  expect(mocks.updateAdminUserStatus).not.toHaveBeenCalled();
+  await user.click(target.getByRole("button", { name: "确认停用" }));
+  expect(mocks.updateAdminUserStatus).toHaveBeenCalledWith("user-target", "disabled");
+  expect(target.getByRole("button", { name: "更新中…" })).toBeDisabled();
+
+  resolveStatus("disabled");
+  expect(await target.findByRole("status")).toHaveTextContent("已停用 a00123456，其登录已全部失效");
+  expect(target.getAllByText("已停用").length).toBeGreaterThan(0);
+  expect(target.getByRole("button", { name: "启用" })).toBeEnabled();
+});
+
+test("已停用账号可启用;失败时错误落在账号单元格并可重试", async () => {
+  primeCommonMocks();
+  mocks.fetchAdminUsers.mockResolvedValue([rows[0], { ...rows[1], status: "disabled" }]);
+  mocks.updateAdminUserStatus.mockRejectedValueOnce(humanizedError("操作有冲突，请刷新后重试", 409));
+  mocks.updateAdminUserStatus.mockResolvedValueOnce("active");
+  const user = userEvent.setup();
+
+  render(<AdminUsagePage />);
+  const target = await targetRow();
+  await user.click(target.getByRole("button", { name: "启用" }));
+  await user.click(target.getByRole("button", { name: "确认启用" }));
+  expect(await target.findByRole("alert")).toHaveTextContent("操作有冲突，请刷新后重试");
+
+  await user.click(target.getByRole("button", { name: "确认启用" }));
+  expect(await target.findByRole("status")).toHaveTextContent("已启用 a00123456");
+  expect(target.getByText("正常")).toBeInTheDocument();
+});
+
+test("改用户名在弹出层里提交,成功后行内用户名更新并就近提示", async () => {
+  primeCommonMocks();
+  mocks.updateAdminUsername.mockResolvedValue("e12345678");
+  const user = userEvent.setup();
+
+  render(<AdminUsagePage />);
+  const target = await targetRow();
+  await user.click(target.getByRole("button", { name: "改用户名" }));
+  const dialog = await screen.findByRole("dialog", { name: "修改 a00123456 的用户名" });
+  const input = within(dialog).getByLabelText("a00123456 的新用户名");
+  expect(input).toHaveValue("a00123456");
+  await user.clear(input);
+  await user.type(input, "e12345678");
+  await user.click(within(dialog).getByRole("button", { name: "保存" }));
+
+  expect(mocks.updateAdminUsername).toHaveBeenCalledWith("user-target", "e12345678");
+  expect(await screen.findByText("已将 a00123456 改名为 e12345678，该用户需重新登录")).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.getByText("e12345678")).toBeInTheDocument();
+  expect(screen.queryByText("a00123456")).toBeNull();
+});
+
+async function submitRename(user: ReturnType<typeof userEvent.setup>, next: string) {
+  const target = await targetRow();
+  await user.click(target.getByRole("button", { name: "改用户名" }));
+  const field = within(await screen.findByRole("dialog", { name: "修改 a00123456 的用户名" })).getByLabelText("a00123456 的新用户名");
+  await user.clear(field);
+  await user.type(field, next);
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "保存" }));
+}
+
+test("改用户名提交后保存键进入忙态", async () => {
+  primeCommonMocks();
+  mocks.updateAdminUsername.mockReturnValue(new Promise(() => undefined));
+  const user = userEvent.setup();
+  render(<AdminUsagePage />);
+  await submitRename(user, "e12345678");
+  await waitFor(() => expect(within(screen.getByRole("dialog")).getByRole("button", { name: "保存中…" })).toBeDisabled());
+});
+
+test("改用户名冲突时错误显示在弹出层内,输入保留可修改后重试", async () => {
+  primeCommonMocks();
+  mocks.updateAdminUsername.mockRejectedValueOnce(humanizedError("用户名已被占用", 409));
+  const user = userEvent.setup();
+  render(<AdminUsagePage />);
+  await submitRename(user, "admin");
+  await waitFor(() => expect(within(screen.getByRole("dialog")).getByRole("alert")).toHaveTextContent("用户名已被占用"));
+  expect(within(screen.getByRole("dialog")).getByLabelText("a00123456 的新用户名")).toHaveValue("admin");
+  expect(within(screen.getByRole("dialog")).getByRole("button", { name: "保存" })).toBeEnabled();
+});
+
+test("内置管理员与本人行不提供停用与改名", async () => {
+  const selfAdmin = { ...rows[1], id: "user-admin2", username: "b00123456", role: "admin" };
+  mocks.fetchMe.mockResolvedValue({ id: "user-admin2", role: "admin" });
+  mocks.fetchAdminUsers.mockResolvedValue([...rows, selfAdmin]);
+  mocks.fetchOnlineIds.mockResolvedValue([]);
+  mocks.fetchUploadLimitDefault.mockResolvedValue(20);
+
+  render(<AdminUsagePage />);
+  const selfRow = within((await screen.findByText("b00123456")).closest("tr") as HTMLTableRowElement);
+  expect(selfRow.queryByRole("button", { name: "停用" })).toBeNull();
+  expect(selfRow.queryByRole("button", { name: "改用户名" })).toBeNull();
+  const builtin = within(screen.getByText("admin").closest("tr") as HTMLTableRowElement);
+  expect(builtin.queryByRole("button", { name: "停用" })).toBeNull();
+  expect(builtin.queryByRole("button", { name: "改用户名" })).toBeNull();
 });
 
 test("管理员可为普通用户重置密码;内置管理员与本人行受保护", async () => {
@@ -360,7 +459,8 @@ test("管理员可为普通用户重置密码;内置管理员与本人行受保�
   // 内置管理员(user-local)也是这份 fixture 里当前登录的用户,取先判定的
   // "受保护"分支,而不是"本人"。
   const builtinRow = screen.getByText("admin").closest("tr");
-  expect(within(builtinRow as HTMLTableRowElement).getByText("受保护")).toBeInTheDocument();
+  // 账号列与密码列各有一处「受保护」。
+  expect(within(builtinRow as HTMLTableRowElement).getAllByText("受保护")).toHaveLength(2);
 });
 
 test("非内置管理员看自己那行显示「本人」而非重置按钮", async () => {
@@ -382,7 +482,8 @@ test("非内置管理员看自己那行显示「本人」而非重置按钮", as
 
   render(<AdminUsagePage />);
   const selfRow = within((await screen.findByText("b00123456")).closest("tr") as HTMLTableRowElement);
-  expect(selfRow.getByText("本人")).toBeInTheDocument();
+  // 账号列与密码列各有一处「本人」。
+  expect(selfRow.getAllByText("本人")).toHaveLength(2);
   expect(selfRow.queryByRole("button", { name: "重置密码" })).toBeNull();
   // 别的普通用户行仍有重置入口
   const target = await targetRow();
@@ -596,7 +697,7 @@ test("展开区新增用户摘要不改变主表列头数量与文案", async ()
   });
   expect(headers).toEqual([
     "", "用户名", "角色", "注册时间", "笔记本", "来源", "提问", "报告",
-    "最近活跃", "用户分析", "文档上限", "密码", "权限管理",
+    "最近活跃", "用户分析", "文档上限", "账号", "密码", "权限管理",
   ]);
 });
 

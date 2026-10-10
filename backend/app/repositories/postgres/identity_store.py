@@ -112,13 +112,12 @@ class IdentityStore:
         password_hash, password_salt, iterations = hash_password(password)
         user = connection.execute(
             "INSERT INTO users "
-            "(id,email,display_name,role,status,username,local_login_name,password_hash,password_salt,"
+            "(id,email,display_name,role,status,username,password_hash,password_salt,"
             "password_iterations,created_at,updated_at) "
-            "VALUES (%s,%s,%s,'user','active',%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+            "VALUES (%s,%s,%s,'user','active',%s,%s,%s,%s,%s,%s) RETURNING *",
             (
                 user_id,
                 f"{normalized}@users.silicon-notebook.local",
-                normalized,
                 normalized,
                 normalized,
                 password_hash,
@@ -167,14 +166,11 @@ class IdentityStore:
         return (self._user_profile(user, profile), token)
 
     def authenticate_user(self, username: str, password: str) -> UserProfile | None:
-        from app.domain.auth_utils import normalize_username, verify_password
+        from app.domain.auth_utils import verify_password
 
         with self.database.write() as connection:
-            if not self.auth.local_login_allowed(connection):
-                return None
-            user = connection.execute(
-                "SELECT * FROM users WHERE local_login_name=%s", (normalize_username(username),)
-            ).fetchone()
+            self.auth.require_local_write(connection)
+            user = self.auth.local_account(connection, username)
             if user is None or user["status"] != "active" or not verify_password(
                 password,
                 user["password_hash"],
@@ -194,15 +190,11 @@ class IdentityStore:
         R1 P1)。改密/重置同样先 FOR UPDATE 该行,两者因此在行锁上串行——登录
         排在改密前,插的会话会被改密的 DELETE 带走;排在后,旧密码直接失败。
         语义与 SQLite 侧逐字一致。"""
-        from app.domain.auth_utils import normalize_username, verify_password
+        from app.domain.auth_utils import verify_password
 
         with self.database.write() as db:
-            if not self.auth.local_login_allowed(db):
-                return None
-            user = db.execute(
-                "SELECT * FROM users WHERE local_login_name=%s FOR UPDATE",
-                (normalize_username(username),),
-            ).fetchone()
+            self.auth.require_local_write(db)
+            user = self.auth.local_account(db, username, for_update=True)
             if user is None or user["status"] != "active":
                 return None
             if not verify_password(
@@ -228,7 +220,6 @@ class IdentityStore:
         with self.database.write() as connection:
             self.auth.lock(connection)
             connection.execute("DELETE FROM auth_sessions WHERE token=%s", (token,))
-        self.auth.cancel_for_session(token)
 
     def audit_labels_for_user_ids(self, user_ids) -> dict[str, str]:
         """PostgreSQL parity for bounded legacy audit-id resolution."""
@@ -500,7 +491,6 @@ class IdentityStore:
         # 镜像 change_user_password:哈希提前算,缩短持锁时间。
         pw_hash, pw_salt, pw_iters = hash_password(new_password)
         with self.database.write() as db:
-            self.auth.require_local_write(db)
             _actor, target = self._lock_actor_and_target(db, actor_id, user_id)
             if target is None:
                 raise KeyError(user_id)

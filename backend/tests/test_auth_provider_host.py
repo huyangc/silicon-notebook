@@ -194,6 +194,12 @@ def test_live_admin_admission_disables_authorization_and_exchange():
         (_Bundle(provider, trust="deployment"),),
         disabled_ids_provider=lambda: disabled,
     ).auth_provider
+    assert host.describe().plugin_id == "test.auth"
+    disabled.add("test.auth")
+    # Switching the plugin off is what turns unified authentication off.
+    assert host.describe() is None
+    disabled.discard("test.auth")
+    assert host.describe().plugin_id == "test.auth"
     disabled.add("test.auth")
 
     with pytest.raises(AuthProviderError) as availability_error:
@@ -257,16 +263,7 @@ def test_application_bootstrap_rejects_an_unavailable_configured_provider(
     repository = SimpleNamespace(
         _runtime=SimpleNamespace(
             identity=SimpleNamespace(
-                auth=SimpleNamespace(
-                    get_policy=lambda: {
-                        "mode": "dual",
-                        "retired_at": None,
-                        "plugin_id": "test.auth",
-                        "provider_id": "test",
-                        "provider_namespace": "test.production",
-                        "config_generation": "initial",
-                    }
-                )
+                auth=SimpleNamespace(use_provider=lambda _host: None)
             )
         ),
         close=lambda: closed.append(True),

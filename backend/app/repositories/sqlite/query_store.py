@@ -780,7 +780,7 @@ class QueryStore:
     def list_user_usage(self) -> list[dict[str, Any]]:
         with self.database.connect() as db:
             users = db.execute(
-                "SELECT id, username, display_name, role, created_at, last_seen_at "
+                "SELECT id, username, display_name, role, status, created_at, last_seen_at "
                 "FROM users ORDER BY created_at, id"
             ).fetchall()
             notebooks = {
@@ -1079,6 +1079,7 @@ class QueryStore:
                     "id": user["id"],
                     "username": user["username"] or user["display_name"] or user["id"],
                     "role": user["role"],
+                    "status": user["status"],
                     "created_at": user["created_at"],
                     # 最近上线(规格 §3 B1):users.last_seen_at 由会话 touch 同
                     # 事务节流写入,登出后仍保留;与 last_active 的"产出动作"

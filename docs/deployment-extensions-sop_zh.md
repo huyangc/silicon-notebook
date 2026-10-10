@@ -291,7 +291,7 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 
 每个扩展点给的是窄的、point-specific 的 context——绝不是万能 service locator——并各自声明了 contribution 必须 `require` 哪些 capability 才拿得到访问端口。动手前先读那份 Protocol 与它的模块 docstring：该扩展点的 fail-open 与取消规则写在那里。
 
-一个 `auth.provider` contribution 是本次部署在启动时冻结的唯一外部身份 provider。它的纯函数 `describe()` 与 `authorization_parameters()` 给出稳定 provider id、身份源命名空间、配置代次、公开标签、固定 HTTPS 授权端点、PKCE 支持情况及 provider 自己的静态参数。core 拒绝插件提供 `state`、`redirect_uri`、`code_challenge` 或 `code_challenge_method`，再自行加入这些值。`authenticate_code()` 只收到授权码、core 固定的回调、可选 verifier 与单调时钟 deadline，并返回 `ExternalIdentity(provider_namespace, subject, username, display_name)`。它拿不到浏览器 `Request`、cookies、本站 token 或密码、repository、目标 user id、角色或会话签发器。公开 start/callback 路由、state 与浏览器证明、账号关联、用户名冲突及本站会话都归 core。provider 失败一律关闭，并映射为有类型、无内容的错误；原始 token、上游响应与异常原文都不能穿过宿主。本地模式可以没有 provider，但任何模式都不能有两个。这个扩展点不开放匿名插件路由：免登录回调是 core 的固定路由，只调用窄宿主。
+一个 `auth.provider` contribution 是本次部署在启动时冻结的唯一外部身份 provider。它的纯函数 `describe()` 与 `authorization_parameters()` 给出稳定 provider id、身份源命名空间、配置代次、公开标签、固定 HTTPS 授权端点、PKCE 支持情况及 provider 自己的静态参数。core 拒绝插件提供 `state`、`redirect_uri`、`code_challenge` 或 `code_challenge_method`，再自行加入这些值。`authenticate_code()` 只收到授权码、core 固定的回调、可选 verifier 与单调时钟 deadline，并返回 `ExternalIdentity(provider_namespace, subject, username, display_name)`。它拿不到浏览器 `Request`、cookies、本站 token 或密码、repository、目标 user id、角色或会话签发器。公开 start/callback 路由、state 与浏览器证明、用户名精确匹配、关联或新建的选择及本站会话都归 core。provider 失败一律关闭，并映射为有类型、无内容的错误；原始 token、上游响应与异常原文都不能穿过宿主。没有启用的 provider 时站点使用本地登录，任何情况下都不能有两个。这个扩展点不开放匿名插件路由：免登录回调是 core 的固定路由，只调用窄宿主。
 
 `ask.engine` provider 登记一份 `mode_id` 以自身插件 id 开头的描述符，并返回 `AskEngineResult(answer_markdown, citations)`。它只收到当前问题及检索、模型、轨迹、取消端口。检索返回有界证据和本次 run 内的不透明句柄；只能引用本次调用中由同一端口签发的句柄，并在 Markdown 放入对应 `[kN]` 或 `【kN】` 标记。核心对整份引用 fail-closed 校验、自己构造 durable citations，并在保存前复核 run 身份。除元素 `search()`/`fetch()` 外，`RetrievalAccessPort` 还暴露一套有界 KG 读端口——`search_kg(query, k, object_types=())`、`kg_neighbors(evidence_key, k, edge_type="", direction="both")`、`kg_overview()`——`search_kg` 与 `kg_neighbors` 共享一份独立预算（`ASK_PLUGIN_ENGINE_KG_SEARCH_MAX_CALLS`）；KG 命中只有存在存活证据绑定才可引用，引用打开的是该对象首条存活证据元素（不是图谱视图），邻居结果不带边类型标签与截断信号。完整契约细节与护栏见[产品与 API 参考](./product-and-api_zh.md#部署问答引擎askengine)。v1 刻意没有会话历史、意图预检、PPR/社区/图漫游、repository、settings、连接、raw model client 或实时轨迹接口；实时可用性通过时会在浏览器高级模式的第三分组出现，MCP 的 `ask` 也会（仅单个笔记本）把同一个已注册且实时可用的 mode id 接纳为其 `mode` 参数——插件引擎单次调用可能比内建 mode 长得多，调用方的客户端读超时需要留出真正的余量。
 
@@ -640,7 +640,7 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 
 **上表里除运行时开关之外的每一行都是重启进程。** 装载层依旧没有热更新，这一半没有变：registry 只在启动时冻结一次，**哪些插件存在**在进程生命周期内是个事实，不是每次请求都要重新推导的移动目标。运行时开关是叠在这层拓扑之上的另一层，薄得多：它从不改变谁被装载，只决定一个已经装载的 deployment 插件此刻是否服务请求。发起改动的那个进程立即生效；同一部署里的其它服务进程在一个刷新周期内收敛；离线 CLI/批处理进程只在自己启动那一刻读一次，运行期间不会再变。
 
-通用运行时开关不得停用当前非本地认证策略选中的 `auth.provider`。该 provider 是本部署的登录依赖；更换或移除必须走认证策略自己的维护/预检与重启流程。把它当成可选工作区插件会让所有人员登录路径一起失效，因此通用管理员开关会拒绝这个目标，不能把“临时停用”当作认证模式切换。
+通用运行时开关把 `auth.provider` 当作普通插件：停用它即关闭统一认证、回到本地登录，这是文档约定的应急通道。仅用统一认证登录的用户在管理员重置之前没有本地密码，回退前应先通知。
 
 离线 CLI（`scripts/batch_ingest.py` 等）构建同一个 runtime，因而装载同一份插件拓扑。批处理任务卡在某个插件上时，修的是配置文件——绝不是「这一次跑就把变量清掉」，那会悄悄给这个任务一份与服务不同的组合。
 
@@ -811,8 +811,8 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 
 ## 13. W3 认证示例（`examples/extensions/w3-auth`）
 
-`examples/extensions/w3-auth/` 是一个可独立构建的 `auth.provider` Python 包；它没有前端包，也没有插件 HTTP router。示例 TOML 明确写着 `enabled = false`，所以默认 checkout 不会 import 它，也不会开放 SSO。把它装进后端解释器，将 TOML 复制到仓库外，通过命名的环境变量提供 HTTPS 登录 origin、client id、client secret 与可选 CA bundle，然后再启用，并由 core 认证策略选中它。manifest 与所有部署插件一样受 `EXTENSION_API_VERSION` 发现检查；core 从不直接 import 这个示例包。
+`examples/extensions/w3-auth/` 是一个可独立构建的 `auth.provider` Python 包；它没有前端包，也没有插件 HTTP router。示例 TOML 明确写着 `enabled = false`，所以默认 checkout 不会 import 它，也不会开放 SSO。把它装进后端解释器，将 TOML 复制到仓库外，通过命名的环境变量提供 HTTPS 登录 origin、client id、client secret 与可选 CA bundle，然后启用；启用插件即开启统一认证。manifest 与所有部署插件一样受 `EXTENSION_API_VERSION` 发现检查；core 从不直接 import 这个示例包。
 
 适配器实现 README 对登记的固定 W3 路径：浏览器授权、JSON 授权码兑换、再读取 JSON userinfo。它不跟随重定向；TLS 校验始终打开，并可配置自定义 CA；socket timeout 受宿主剩余 deadline 再次压低。userinfo query-token 模式对应当前取得的供应商示例；Bearer 模式必须在平台确认后显式配置。两种模式都不记录或返回 token、完整 URL、上游响应或异常原文。
 
-W3 `uid` 必须是原始非空字符串：不强转、不转小写、不裁空白、不截断，并作为 `username`。显示姓名依次取 `displayNameCn` → `displayName` → `uid`。默认也以 `uid` 作为 `subject`；平台确认它的命名空间、稳定性与不可重分配合同之前，不得按这条身份规则上线。若另有已经确认的顶层不可变主体字段，可显式将它设为 `subject_field`，而 `username` 仍为 `uid`。改变该字段或 `provider_namespace` 是身份迁移，不是普通包升级。包内 README 与 README_zh 是其私有设置及平台确认门槛的运维来源。
+W3 `uid` 必须是原始非空字符串：不强转、不转小写、不裁空白、不截断，并作为 `username`。显示姓名依次取 `displayNameCn` → `displayName` → `uid`。默认也以 `uid` 作为 `subject`；平台确认它的命名空间、稳定性与不可重分配合同之前，不得按这条身份规则上线。若另有已经确认的顶层不可变主体字段，可显式将它设为 `subject_field`，而 `username` 仍为 `uid`。core 只按 `username` 匹配用户，`subject` 与 `provider_namespace` 只记录在会话和审计行里而不作为键；但改变它们仍是需要评审的身份变更，不是普通包升级。包内 README 与 README_zh 是其私有设置及平台确认门槛的运维来源。

@@ -116,6 +116,10 @@
   background: var(--soft); color: var(--muted); font-size: 12px; white-space: nowrap;
 }
 .usage-tag-admin, .usage-limit-tag-custom { border-color: var(--blue); background: var(--panel); color: var(--blue); }
+.usage-tag-disabled { border-color: var(--danger); background: var(--panel); color: var(--danger); }
+.usage-username + .usage-tag-disabled { margin-left: 6px; }
+/* 「账号」列:状态药丸 + 停用/启用 + 改用户名同一行,反馈落在下方(usage-cell-stack)。 */
+.usage-account-actions { display: inline-flex; align-items: center; gap: 6px; flex-wrap: nowrap; }
 
 /* ——— 展开区 ——— */
 .usage-subrow td { padding: 4px 14px 14px 40px; background: var(--soft); white-space: normal; }

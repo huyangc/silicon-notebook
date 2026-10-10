@@ -82,7 +82,6 @@ KG_JOB_RESTART_MESSAGE = (
 # Tables whose rows the startup sequence may legitimately touch; every one is
 # compared row-by-row against the documented allowance instead of digest-only.
 SPECIAL_TABLES = (
-    "auth_policy",
     "users",
     "user_profiles",
     "concept_whitelist",
@@ -795,11 +794,6 @@ _BUILTIN_OBJECT_SCHEMAS = {
 # Stable values for every startup-insertable row.  Timestamp, password hash,
 # and salt columns are explicitly volatile; no other key or value is accepted.
 SEED_MANIFEST = {
-    "auth_policy": {"1": {
-        "id": 1, "mode": "local", "revision": 0, "provider_id": "",
-        "provider_namespace": "", "config_generation": "", "plugin_id": "",
-        "retired_at": None, "updated_by": "",
-    }},
     "users": {
         "user-local": {
             "id": "user-local",
@@ -1572,6 +1566,13 @@ def compare_snapshots(
         after = post.schema_objects.get(kind, {})
         expected_added = migration_manifest.get(key, {})
         for name in sorted(set(before) - set(after)):
+            if kind == "table" and name in migration_manifest.get(
+                "dropped_tables", frozenset()
+            ):
+                # v92 retires whole tables (the staged-auth policy and the
+                # identity mapping); the same manifest allowlist as
+                # dropped_indexes, and any other drop still fails closed.
+                continue
             if kind == "table":
                 note(name, "table-dropped")
             elif kind == "index" and name in migration_manifest.get(
@@ -1587,7 +1588,9 @@ def compare_snapshots(
             if before[name] == after[name]:
                 continue
             if kind == "table":
-                if name in migration_manifest.get("columns", {}):
+                if name in migration_manifest.get(
+                    "columns", {}
+                ) or name in migration_manifest.get("dropped_columns", {}):
                     # A manifested bare-column ALTER (e.g. sources.memory_id)
                     # rewrites sqlite_master's stored CREATE TABLE text, so the
                     # raw before/after SQL always differs here. The per-column
@@ -1621,16 +1624,10 @@ def compare_snapshots(
                 continue
             if kind == "table":
                 relocation_table = relocation_active and name == "notebook_object_schemas"
-                policy_seed = (
-                    name == "auth_policy"
-                    and list(post.special_rows.get(name, {}).values())
-                    == [SEED_MANIFEST["auth_policy"]["1"]]
-                )
                 if (
                     post.tables[name].row_count
                     and name not in MEMORY_FTS_SHADOW_TABLES
                     and not relocation_table
-                    and not policy_seed
                 ):
                     note(name, "migration-added-table-not-empty")
                 else:
@@ -1644,7 +1641,13 @@ def compare_snapshots(
         post_table = post.tables.get(name)
         if post_table is None:
             continue
-        pre_columns = {column[0]: column for column in pre_table.columns}
+        dropped_columns = frozenset(
+            migration_manifest.get("dropped_columns", {}).get(name, ())
+        )
+        pre_columns = {
+            column[0]: column for column in pre_table.columns
+            if column[0] not in dropped_columns
+        }
         post_columns = {column[0]: column for column in post_table.columns}
         if set(pre_columns) - set(post_columns):
             note(name, "column-removed")
@@ -1694,7 +1697,10 @@ def compare_snapshots(
             continue
         if name in SPECIAL_TABLES:
             problems: List[str] = []
-            pre_special_rows = pre.special_rows.get(name, {})
+            pre_special_rows = {
+                key: {k: v for k, v in row.items() if k not in dropped_columns}
+                for key, row in pre.special_rows.get(name, {}).items()
+            }
             if relocation_active and name == "object_schemas":
                 pre_special_rows = {
                     key: row for key, row in pre_special_rows.items()
@@ -1722,6 +1728,10 @@ def compare_snapshots(
             continue
         if pre_table.row_count != post_table.row_count:
             note(name, "row-count-changed")
+        elif dropped_columns:
+            # The pre digest covers a manifested dropped column the post
+            # table no longer has; the row count is all that stays comparable.
+            continue
         elif pre_table.digest != post_table.digest:
             note(name, "row-digest-changed")
 
@@ -5379,6 +5389,80 @@ MIGRATION_MANIFEST[(90, 91)] = {
     "tables": ASK_INTENT_HANDLE_TABLES,
     "columns": ASK_JOBS_MEMORY_ACCESS_COLUMNS,
     "indexes": ASK_INTENT_HANDLE_INDEXES, "triggers": {}, "views": {},
+}
+
+# v92 (parity with PostgreSQL 0072_auth_simplify.sql): the staged-auth policy,
+# its audit and the identity mapping are dropped with their indexes, and so are
+# users.local_login_name and auth_identity_audit.grant_reference; pending
+# auth_transactions rows are discarded (none survive a backup restore that
+# matters: they expire within minutes). A lineage below v78 never sees those
+# objects at all, so they leave its "added" sets; a lineage from v78 on drops
+# them through the allowlists. auth_identity_audit keeps SQLite's DROP COLUMN
+# rewrite of the v78 text.
+AUTH_SIMPLIFY_DROPPED_TABLES = frozenset(
+    {"auth_policy", "auth_policy_audit", "external_identities"}
+)
+AUTH_SIMPLIFY_DROPPED_INDEXES = frozenset(
+    {"idx_users_local_login_name", "idx_external_identities_active_user"}
+)
+AUTH_SIMPLIFY_DROPPED_COLUMNS = {
+    "users": frozenset({"local_login_name"}),
+    "auth_identity_audit": frozenset({"grant_reference"}),
+}
+AUTH_IDENTITY_AUDIT_TABLE_V92 = AUTH_SUNSET_SCHEMA["tables"][
+    "auth_identity_audit"
+].replace("subject TEXT NOT NULL, grant_reference TEXT NOT NULL DEFAULT '',\n"
+          "                 created_at", "subject TEXT NOT NULL, created_at")
+assert AUTH_IDENTITY_AUDIT_TABLE_V92 != AUTH_SUNSET_SCHEMA["tables"]["auth_identity_audit"]
+
+
+def _auth_simplify_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    if "auth_policy" in manifest["tables"]:
+        return {
+            **manifest,
+            "tables": {
+                **{
+                    name: sql for name, sql in manifest["tables"].items()
+                    if name not in AUTH_SIMPLIFY_DROPPED_TABLES
+                },
+                "auth_identity_audit": AUTH_IDENTITY_AUDIT_TABLE_V92,
+            },
+            "columns": {
+                **manifest["columns"],
+                "users": {
+                    name: definition
+                    for name, definition in manifest["columns"]["users"].items()
+                    if name != "local_login_name"
+                },
+            },
+            "indexes": {
+                name: sql for name, sql in manifest["indexes"].items()
+                if name not in AUTH_SIMPLIFY_DROPPED_INDEXES
+            },
+        }
+    return {
+        **manifest,
+        "dropped_tables": (
+            frozenset(manifest.get("dropped_tables", frozenset()))
+            | AUTH_SIMPLIFY_DROPPED_TABLES
+        ),
+        "dropped_indexes": (
+            frozenset(manifest.get("dropped_indexes", frozenset()))
+            | AUTH_SIMPLIFY_DROPPED_INDEXES
+        ),
+        "dropped_columns": AUTH_SIMPLIFY_DROPPED_COLUMNS,
+    }
+
+
+MIGRATION_MANIFEST = {
+    (key[0], 92, *key[2:]): _auth_simplify_manifest(manifest)
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(91, 92)] = {
+    "tables": {}, "columns": {}, "indexes": {}, "triggers": {}, "views": {},
+    "dropped_tables": AUTH_SIMPLIFY_DROPPED_TABLES,
+    "dropped_indexes": AUTH_SIMPLIFY_DROPPED_INDEXES,
+    "dropped_columns": AUTH_SIMPLIFY_DROPPED_COLUMNS,
 }
 
 if __name__ == "__main__":

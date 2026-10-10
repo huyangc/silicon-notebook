@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from app.migration.sync.capture import expected_sqlite_trigger_names
+from tests.sqlite_migration_testkit import rollback_v92
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -50,12 +51,71 @@ FIXTURE_SECRETS = (
 )
 
 
+def test_deployed_v91_database_verifies_auth_simplification(tmp_path):
+    """A deployed v91 database still holds the staged-auth policy (its seeded
+    'local' row), the empty identity mapping, users.local_login_name and
+    auth_identity_audit.grant_reference. _migration_92 drops exactly those;
+    every surviving users row is unchanged apart from the dropped column."""
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as rollback:
+        rollback_v92(rollback)
+        rollback.execute("PRAGMA user_version = 91")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 91
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+    with sqlite3.connect(database) as original:
+        # The verifier never writes the original: the forged v91 objects stay.
+        assert original.execute("PRAGMA user_version").fetchone()[0] == 91
+
+
+def test_v92_drop_outside_the_allowlist_still_fails(tmp_path):
+    """The dropped-table/column allowlists name exactly v92's objects: a v91
+    database carrying any other table that disappears still fails closed."""
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as rollback:
+        rollback_v92(rollback)
+        rollback.execute("PRAGMA user_version = 91")
+    manifest = module.MIGRATION_MANIFEST[(91, 92)]
+    assert manifest["dropped_tables"] == frozenset(
+        {"auth_policy", "auth_policy_audit", "external_identities"}
+    )
+    assert manifest["dropped_columns"] == {
+        "users": frozenset({"local_login_name"}),
+        "auth_identity_audit": frozenset({"grant_reference"}),
+    }
+    original = dict(manifest)
+    try:
+        module.MIGRATION_MANIFEST[(91, 92)] = {
+            **manifest, "dropped_tables": frozenset({"auth_policy"}),
+        }
+        result = module.verify_snapshot(database, storage)
+    finally:
+        module.MIGRATION_MANIFEST[(91, 92)] = original
+    assert not result.ok
+    assert "external_identities" in result.changed_tables
+
+
 def _rollback_v91(db: sqlite3.Connection) -> None:
     """Undo _migration_91 (the MCP ``ask`` clarification handles, parity with
     PostgreSQL 0071_ask_intent_handles.sql): one table and its index, plus
     ``ask_jobs.memory_access`` (its DEFAULT 1 is the whole backfill, so no
-    row changes). The fixture holds no handle. Every older rollback starts
-    here (through _rollback_v90)."""
+    row changes). The fixture holds no handle. v92 is undone first; every
+    older rollback starts here (through _rollback_v90)."""
+    rollback_v92(db)
     db.execute("DROP TABLE ask_intent_handles")
     db.execute("ALTER TABLE ask_jobs DROP COLUMN memory_access")
 

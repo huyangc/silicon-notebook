@@ -108,16 +108,12 @@ import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup"
 import {
   fetchAuthCapabilities,
   fetchMe,
-  fetchMyIdentities,
   LOCAL_AUTH_CAPABILITIES,
   logoutUser,
-  startIdentityBinding,
   updateUiMode,
   type AuthCapabilities,
   type AuthUser,
-  type IdentityInfo,
 } from "./auth";
-import { useIdentityMigration } from "./use-identity-migration";
 import { autoModeAskPlaceholder, isAdvanced, normalizeUiMode, type UiMode } from "./ui-mode.ts";
 import {
   describeIndexingPipelineState,
@@ -639,11 +635,8 @@ export default function Home() {
   const uiMode: UiMode = normalizeUiMode(currentUser?.ui_mode);
   const [authChecked, setAuthChecked] = useState(false);
   const [authCapabilities, setAuthCapabilities] = useState<AuthCapabilities | null>(null);
-  const [migrationSession, setMigrationSession] = useState(false);
   const [authRestoreError, setAuthRestoreError] = useState("");
   const [authRestoreRetry, setAuthRestoreRetry] = useState(0);
-  const [identityInfo, setIdentityInfo] = useState<IdentityInfo | null>(null);
-  const identityMigration = useIdentityMigration();
   // 另一个标签页换了或清了 token：本页的用户与按 actor 归属的状态已失效，整页重载重建。
   useEffect(() => subscribeTokenChanges(() => window.location.reload()), []);
   const [health, setHealth] = useState<Health | null>(null);
@@ -1129,8 +1122,7 @@ export default function Home() {
   const analyticsLoadScopeRef = useRef(new AnalyticsLoadScope());
   const modelStatusRequestRef = useRef(0);
   const modelTestCoordinatorRef = useRef(new ModelTestCoordinator());
-  // A restored migration token can complete identity binding but cannot read
-  // business data. Subscribe only after /me has established a business user.
+  // Subscribe only after /me has established a business user.
   const pending = usePendingActions(Boolean(authChecked && currentUser));
   const latestScaleIndexDoneEventKey = latestScaleIndexDoneKey(
     pending.doneItems,
@@ -1619,7 +1611,6 @@ export default function Home() {
     let cancelled = false;
     async function restoreAuthentication() {
       setAuthRestoreError("");
-      setMigrationSession(false);
       let capabilities: AuthCapabilities | null = null;
       try {
         capabilities = await fetchAuthCapabilities();
@@ -1676,22 +1667,9 @@ export default function Home() {
           }
         }
       } catch (error) {
-        // S2 accepts an SSO session at /me but deliberately rejects a local
-        // migration token. Verify it through the dedicated identity endpoint
-        // before preserving it; an expired SSO token must return to login.
-        if (!capabilities) {
-          // Without the policy we cannot distinguish an expired session from
-          // a migration-only credential. Preserve it until a successful retry.
-          if (!cancelled) setAuthRestoreError("认证状态暂时无法确认，请稍后重试。");
-        } else if (capabilities.mode === "binding_required" && httpErrorStatus(error) === 401) {
-          try {
-            await fetchMyIdentities();
-            if (!cancelled) setMigrationSession(true);
-          } catch (identityError) {
-            if (httpErrorStatus(identityError) === 401) clearRejectedToken(restoreToken);
-            else if (!cancelled) setAuthRestoreError("认证状态暂时无法确认，请稍后重试。");
-          }
-        } else if (httpErrorStatus(error) === 401) {
+        // A rejected session (expired, or a local session after unified
+        // authentication was switched on) returns to the login page.
+        if (httpErrorStatus(error) === 401) {
           clearRejectedToken(restoreToken);
         } else if (!cancelled) {
           setAuthRestoreError("认证状态暂时无法确认，请稍后重试。");
@@ -1703,18 +1681,6 @@ export default function Home() {
     void restoreAuthentication();
     return () => { cancelled = true; };
   }, [serviceReady, authRestoreRetry]);
-
-  useEffect(() => {
-    if (!currentUser || !authCapabilities?.binding_allowed) {
-      setIdentityInfo(null);
-      return;
-    }
-    let cancelled = false;
-    void fetchMyIdentities()
-      .then((identity) => { if (!cancelled) setIdentityInfo(identity); })
-      .catch(() => { if (!cancelled) setIdentityInfo(null); });
-    return () => { cancelled = true; };
-  }, [currentUser?.id, authCapabilities?.binding_allowed]);
 
   // 浏览器返回/前进:hash 是唯一的真相源,读它切视图。一律传 "none"——
   // 浏览器已经改过 URL,任何再写都会污染历史栈。
@@ -4796,11 +4762,6 @@ export default function Home() {
     window.location.reload();
   }
 
-  async function handleStartIdentityBinding(currentPassword: string) {
-    const authorizationUrl = await startIdentityBinding(currentPassword);
-    window.location.assign(authorizationUrl);
-  }
-
   function openModelPanel(serviceId: string | null = null) {
     if (!rootModals.open("model-service", rootModals.captureActorOwner())) return;
     setHighlightedModelServiceId(serviceId);
@@ -5045,7 +5006,7 @@ export default function Home() {
     </div></div>;
   }
   if (!currentUser) {
-    return <AuthGate capabilities={authCapabilities!} migrationSession={migrationSession} onAuthenticated={(u) => {
+    return <AuthGate capabilities={authCapabilities!} onAuthenticated={(u) => {
       activateWorkspaceOwners(u.id);
       setCurrentUser(u);
       setStatusText("");
@@ -5107,9 +5068,7 @@ export default function Home() {
             initials={accountBadge}
             memoryActive={outerView === "memory"}
             showAdminUsage={canSeeAdminUsage(currentUser.role)}
-            canChangePassword={(authCapabilities?.mode === "local" || authCapabilities?.mode === "dual") && currentUser.id !== "user-local"}
-            canBindIdentity={Boolean(authCapabilities?.binding_allowed && !identityInfo?.linked)}
-            linkedIdentityName={identityInfo?.linked ? identityInfo.external_username : null}
+            canChangePassword={Boolean(authCapabilities?.local_login) && currentUser.id !== "user-local"}
             advancedMode={isAdvanced(uiMode)}
             searchProfileEnabled={userSearchProfileEnabled}
             activityViewEnabled={userActivityViewEnabled}
@@ -5131,10 +5090,6 @@ export default function Home() {
                 .finally(() => { rootModals.publish(lease); });
             }}
             onChangePassword={() => { rootModals.open("password-change", rootModals.captureActorOwner()); }}
-            onStartIdentityBinding={handleStartIdentityBinding}
-            canMigrateIdentity={Boolean(identityInfo?.migration_available)}
-            onMigrateIdentity={identityMigration.run}
-            migrationInFlight={identityMigration.inFlight}
             onLogout={() => handleLogout().catch(reportError)}
           />
         </div>

@@ -66,7 +66,7 @@ def test_upgrade_rewrites_foreign_entries_to_the_librarys_own_provenance(repo):
     # v89 (Agent token tiers), v90 (ask job output) and v91 (ask
     # clarification handles) follow;
     # this world holds no token and no handle.
-    assert SqliteMigrator(database, repo.settings).migrate() == [88, 89, 90, 91]
+    assert SqliteMigrator(database, repo.settings).migrate() == [88, 89, 90, 91, 92]
     cases.assert_migrated(_snapshot(database))
 
 

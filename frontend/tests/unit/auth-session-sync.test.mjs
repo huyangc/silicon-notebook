@@ -17,7 +17,7 @@ globalThis.window = {
   removeEventListener: (type, handler) => { if (type === "storage") listeners.delete(handler); },
 };
 
-const { beginSessionHandoff, setToken, subscribeTokenChanges } = await import("../../app/auth-session.ts");
+const { setToken, subscribeTokenChanges } = await import("../../app/auth-session.ts");
 
 const TOKEN_KEY = "silicon_notebook_token";
 
@@ -55,11 +55,10 @@ for (const [label, key, value] of [
   });
 }
 
-test("the handoff marker and unrelated keys never reload", () => {
+test("unrelated keys never reload", () => {
   const tab = subscribed();
-  otherTabWrites("silicon_notebook_session_handoff:h", JSON.stringify({ token: "auto-account", expiresAt: 1 }));
+  otherTabWrites("silicon_notebook_sso_return_location", "/");
   otherTabWrites("some_other_key", "value");
-  beginSessionHandoff("auto-account");
   assert.equal(tab.reloads(), 0);
   tab.unsubscribe();
 });

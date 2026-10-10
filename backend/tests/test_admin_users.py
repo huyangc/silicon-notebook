@@ -951,3 +951,96 @@ def test_role_update_validates_target_and_role(client):
         headers=admin,
         json={"role": "owner"},
     ).status_code == 422
+
+
+def _user_id(client, admin, username):
+    return {
+        row["username"]: row
+        for row in client.get("/api/admin/users", headers=admin).json()
+    }[username]["id"]
+
+
+def test_admin_users_lists_account_status(client):
+    admin = _auth_admin(client)
+    _auth(client, "z00123456")
+    rows = {r["username"]: r for r in client.get("/api/admin/users", headers=admin).json()}
+    assert rows["z00123456"]["status"] == "active"
+    assert rows["admin"]["status"] == "active"
+
+
+def test_admin_disables_and_enables_an_account(client):
+    admin = _auth_admin(client)
+    user_headers = _auth(client, "z00123456")
+    user_id = _user_id(client, admin, "z00123456")
+
+    disabled = client.patch(
+        f"/api/admin/users/{user_id}/status", headers=admin, json={"status": "disabled"}
+    )
+    assert disabled.status_code == 200, disabled.text
+    assert disabled.json() == {"id": user_id, "username": "z00123456", "status": "disabled"}
+    # Disabling revokes the account's sessions at once.
+    assert client.get("/api/notebooks", headers=user_headers).status_code == 401
+    rows = {r["username"]: r for r in client.get("/api/admin/users", headers=admin).json()}
+    assert rows["z00123456"]["status"] == "disabled"
+    assert client.post(
+        "/api/auth/login", json={"username": "z00123456", "password": "pw"}
+    ).status_code == 401
+
+    enabled = client.patch(
+        f"/api/admin/users/{user_id}/status", headers=admin, json={"status": "active"}
+    )
+    assert enabled.status_code == 200
+    assert client.post(
+        "/api/auth/login", json={"username": "z00123456", "password": "pw"}
+    ).status_code == 200
+
+
+def test_admin_renames_an_account_uniquely(client):
+    admin = _auth_admin(client)
+    user_headers = _auth(client, "z00123456")
+    _auth(client, "y00123456")
+    user_id = _user_id(client, admin, "z00123456")
+
+    taken = client.patch(
+        f"/api/admin/users/{user_id}/username", headers=admin, json={"username": "Y00123456"}
+    )
+    assert taken.status_code == 409
+    assert taken.json()["detail"] == "用户名已被占用"
+    assert taken.headers["X-User-Message"] == "1"
+    blank = client.patch(
+        f"/api/admin/users/{user_id}/username", headers=admin, json={"username": " "}
+    )
+    assert blank.status_code == 400
+
+    renamed = client.patch(
+        f"/api/admin/users/{user_id}/username", headers=admin, json={"username": "W0012345"}
+    )
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json() == {"id": user_id, "username": "W0012345", "status": "active"}
+    assert client.get("/api/notebooks", headers=user_headers).status_code == 401
+    assert "W0012345" in {r["username"] for r in client.get("/api/admin/users", headers=admin).json()}
+
+
+@pytest.mark.parametrize("route,payload", [
+    ("status", {"status": "disabled"}),
+    ("username", {"username": "W0012345"}),
+])
+def test_account_controls_refuse_non_admin_self_builtin_and_missing(client, route, payload):
+    admin = _auth_admin(client)
+    user_headers = _auth(client, "z00123456")
+    _auth(client, "y00123456")
+    user_id = _user_id(client, admin, "z00123456")
+    other_id = _user_id(client, admin, "y00123456")
+
+    forbidden = client.patch(f"/api/admin/users/{other_id}/{route}", headers=user_headers, json=payload)
+    assert forbidden.status_code == 403
+    assert client.patch(f"/api/admin/users/missing/{route}", headers=admin, json=payload).status_code == 404
+    assert client.patch(
+        f"/api/admin/users/{user_id}/role", headers=admin, json={"role": "admin"}
+    ).status_code == 200
+    builtin = client.patch(f"/api/admin/users/user-local/{route}", headers=user_headers, json=payload)
+    assert builtin.status_code == 409
+    assert builtin.json()["detail"] == "内置管理员账号不可修改"
+    own = client.patch(f"/api/admin/users/{user_id}/{route}", headers=user_headers, json=payload)
+    assert own.status_code == 409
+    assert own.json()["detail"] == "不能修改当前登录的账号"

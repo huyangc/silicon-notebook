@@ -48,6 +48,7 @@ function adminUser(overrides: Partial<AdminUserUsage> = {}): AdminUserUsage {
     upload_limit: 20,
     upload_limit_overridden: false,
     last_seen: null,
+    status: "active",
     storage_bytes: 0,
     questions_30d: 0,
     questions_failed: 0,

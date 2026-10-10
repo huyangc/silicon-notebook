@@ -40,6 +40,11 @@ const APPROVED_MESSAGE_READS = Object.freeze({
     count: 1,
     reason: "the password-reset catch reads only the forbidden control-flow sentinel",
   },
+  "admin/usage/page.tsx|<module>.AdminUsagePage.failRowAction|property|message": {
+    count: 1,
+    reason: "the shared catch of the account-status and rename actions reads only the forbidden "
+      + "control-flow sentinel; everything else goes through toUserMessage",
+  },
   "dev/logs/activity/ActivityView.tsx|<module>.isForbidden|property|message": {
     count: 1,
     reason: "the activity view's shared predicate reads only the forbidden control-flow sentinel",

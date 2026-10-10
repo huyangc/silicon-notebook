@@ -1275,8 +1275,8 @@ def test_ensure_notebook_explicit_owner(repo):
     assert cb == u.id and cb2 == u.id
 
 
-@pytest.mark.parametrize("owner", ["CorpUID", "corpuid", " CORPuid ", "a00123456", "A00123456"])
-def test_owner_resolution_preserves_user_id_after_sso_rename(repo, owner):
+@pytest.mark.parametrize("owner", ["CorpUID", "corpuid", " CORPuid "])
+def test_owner_resolution_follows_the_current_username_after_rename(repo, owner):
     user = repo.create_user("a00123456", "pw123456")
     with repo._connect() as db:
         db.execute("UPDATE users SET username='CorpUID' WHERE id=?", (user.id,))
@@ -1285,8 +1285,15 @@ def test_owner_resolution_preserves_user_id_after_sso_rename(repo, owner):
     assert resolved.username == "CorpUID"
 
 
-@pytest.mark.parametrize("conflicting_name", ["corpuid", "a00123456"])
-def test_owner_resolution_rejects_ambiguous_current_or_legacy_names(repo, conflicting_name):
+def test_owner_resolution_forgets_the_name_before_a_rename(repo):
+    user = repo.create_user("a00123456", "pw123456")
+    with repo._connect() as db:
+        db.execute("UPDATE users SET username='CorpUID' WHERE id=?", (user.id,))
+    assert repo.maintenance.resolve_owner_profile("a00123456") is None
+
+
+@pytest.mark.parametrize("conflicting_name", ["corpuid"])
+def test_owner_resolution_rejects_ambiguous_case_variant_names(repo, conflicting_name):
     first = repo.create_user("a00123456", "pw123456")
     second = repo.create_user("a00123457", "pw123456")
     with repo._connect() as db:

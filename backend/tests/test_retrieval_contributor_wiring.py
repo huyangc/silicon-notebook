@@ -225,7 +225,7 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
         gap_consult=gap_host,
         element_enrichers=element_enricher_host,
         reflect_actions=reflect_action_host,
-        auth_provider=object(),
+        auth_provider=SimpleNamespace(describe=lambda: None),
     )
     captured = {}
 
@@ -241,7 +241,7 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
                     extension_runtime_disabled_ids=frozenset
                 ),
                 identity=SimpleNamespace(auth=SimpleNamespace(
-                    get_policy=lambda: {"mode": "local", "retired_at": None}
+                    use_provider=lambda _host: None
                 )),
             ),
             close=lambda: None,

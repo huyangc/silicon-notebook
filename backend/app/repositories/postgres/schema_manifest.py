@@ -46,11 +46,8 @@ POSTGRES_BUSINESS_TABLES = (
     "ask_jobs",
     "ask_trace_steps",
     "auth_sessions",
-    "auth_policy",
-    "auth_policy_audit",
     "auth_identity_audit",
     "auth_transactions",
-    "external_identities",
     "canonical_relations",
     "catalog_candidates",
     "catalog_jobs",
@@ -447,7 +444,11 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # idx_ask_intent_handles_expires; no FK) and ask_jobs.memory_access (integer
 # NOT NULL DEFAULT 1: whether the run had the private-Memory channel open; no
 # backfill, no index).
+# SQLite v92 / PostgreSQL 0072 drop auth_policy, auth_policy_audit,
+# external_identities (with idx_external_identities_active_user),
+# users.local_login_name (with idx_users_local_login_name) and
+# auth_identity_audit.grant_reference.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=91,
-    postgres_version=71,
+    sqlite_version=92,
+    postgres_version=72,
 )

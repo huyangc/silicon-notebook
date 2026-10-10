@@ -567,10 +567,7 @@ _LOCAL: tuple[TableSyncSpec, ...] = (
     # 身份与系统
     TableSyncSpec("users", SyncClass.LOCAL),
     TableSyncSpec("user_profiles", SyncClass.LOCAL),
-    TableSyncSpec("external_identities", SyncClass.LOCAL),
     TableSyncSpec("auth_sessions", SyncClass.LOCAL),
-    TableSyncSpec("auth_policy", SyncClass.LOCAL),
-    TableSyncSpec("auth_policy_audit", SyncClass.LOCAL),
     TableSyncSpec("auth_identity_audit", SyncClass.LOCAL),
     TableSyncSpec("auth_transactions", SyncClass.LOCAL),
     TableSyncSpec("agent_profiles", SyncClass.LOCAL),

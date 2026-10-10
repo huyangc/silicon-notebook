@@ -3,6 +3,11 @@ from typing import Literal
 from app.domain.agent_tools import OWNER_ONLY_TIERS_MESSAGE
 
 
+class AuthStoreError(ValueError):
+    """A stable content-free authentication rejection code (the message is
+    the code; routes map it to user-facing Chinese copy)."""
+
+
 class BuiltinAdminDemotionError(ValueError):
     """The seeded recovery administrator must always retain admin access."""
 

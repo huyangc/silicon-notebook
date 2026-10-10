@@ -100,8 +100,8 @@ def create_application_repository(settings: Settings) -> NotebookRepository:
     try:
         from app.services.auth_flow import AuthFlowService
 
-        policy = repository._runtime.identity.auth.get_policy()
-        settings.validate_authentication_bootstrap(policy["mode"], retired=bool(policy["retired_at"]))
+        # Attaches the provider to the identity store (unified auth follows its
+        # switch) and refuses to start with an enabled, unusable provider.
         AuthFlowService(repository._runtime.identity.auth, runtime.auth_provider, settings).validate_configuration()
     except BaseException:
         repository.close()

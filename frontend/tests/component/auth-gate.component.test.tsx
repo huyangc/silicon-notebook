@@ -4,7 +4,7 @@ import { afterEach, expect, test, vi } from "vitest";
 
 import type { AuthCapabilities, AuthUser } from "../../app/auth";
 import { AuthGate } from "../../app/AuthGate";
-import { getToken, setToken } from "../../app/auth";
+import { getToken } from "../../app/auth";
 
 afterEach(() => { vi.unstubAllGlobals(); localStorage.clear(); sessionStorage.clear(); });
 
@@ -13,79 +13,74 @@ const user: AuthUser = {
 };
 
 function capabilities(overrides: Partial<AuthCapabilities> = {}): AuthCapabilities {
-  return {
-    mode: "local", local_login: true, local_registration: true, sso_login: false,
-    binding_allowed: false, provider_label: "", ...overrides,
-  };
+  return { sso_login: false, local_login: true, local_registration: true, provider_label: "", ...overrides };
 }
 
-test("dual mode keeps local credentials and presents a generic unified-login action", () => {
-  render(<AuthGate capabilities={capabilities({ mode: "dual", sso_login: true, binding_allowed: true })} onAuthenticated={() => undefined} />);
+const ssoOn = capabilities({ sso_login: true, local_login: false, local_registration: false, provider_label: "W3" });
 
-  expect(screen.getByRole("button", { name: "本地登录" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "统一登录" })).toBeInTheDocument();
-  expect(screen.queryByText("W3")).not.toBeInTheDocument();
-});
-
-test("SSO-only mode hides all local password and registration controls", () => {
-  render(<AuthGate capabilities={capabilities({ mode: "sso_only", local_login: false, local_registration: false, sso_login: true })} onAuthenticated={() => undefined} />);
-
-  expect(screen.getByRole("button", { name: "统一登录" })).toBeInTheDocument();
-  expect(screen.queryByLabelText("用户名")).not.toBeInTheDocument();
-  expect(screen.queryByText("注册")).not.toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "需要迁移帮助？" })).toBeInTheDocument();
-});
-
-test("migration mode verifies local credentials without entering a workspace", async () => {
-  const onAuthenticated = vi.fn();
-  const actor = userEvent.setup();
-  render(<AuthGate capabilities={capabilities({ mode: "binding_required", local_login: true, sso_login: true })} onAuthenticated={onAuthenticated} />);
+test("local mode keeps username, password and registration, with no unified-login button", () => {
+  render(<AuthGate capabilities={capabilities()} onAuthenticated={() => undefined} />);
 
   expect(screen.getByLabelText("用户名")).toBeInTheDocument();
+  expect(screen.getByLabelText("密码")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "注册" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "本地登录" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /^使用.*登录$/ })).not.toBeInTheDocument();
+});
+
+test("unified authentication shows only the provider button and hides passwords and registration", () => {
+  render(<AuthGate capabilities={ssoOn} onAuthenticated={() => undefined} />);
+
+  expect(screen.getByRole("button", { name: "使用W3登录" })).toBeInTheDocument();
+  expect(screen.queryByLabelText("用户名")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
   expect(screen.queryByText("注册")).not.toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "统一登录" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "验证并关联统一身份" })).toBeEnabled();
-  await actor.type(screen.getByLabelText("用户名"), "a12345678");
-  await actor.type(screen.getByLabelText("密码"), "pw");
-  expect(screen.getByRole("button", { name: "验证并关联统一身份" })).toBeEnabled();
-  expect(onAuthenticated).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: "本地登录" })).not.toBeInTheDocument();
 });
 
-test("migration help requires an explicit grant purpose", async () => {
-  const actor = userEvent.setup();
-  render(<AuthGate capabilities={capabilities({ mode: "sso_only", local_login: false, local_registration: false, sso_login: true })} onAuthenticated={() => undefined} />);
-
-  await actor.click(screen.getByRole("button", { name: "需要迁移帮助？" }));
-  expect(screen.getByLabelText("迁移凭证")).toBeInTheDocument();
-  expect(screen.getByRole("radio", { name: "新建账号" })).toBeChecked();
-  expect(screen.getByRole("radio", { name: "恢复账号" })).not.toBeChecked();
-  expect(screen.getByRole("radio", { name: "更换统一账号" })).not.toBeChecked();
-  await actor.click(screen.getByRole("radio", { name: "更换统一账号" }));
-  expect(screen.getByRole("radio", { name: "更换统一账号" })).toBeChecked();
+test("an empty provider label falls back to a generic unified-authentication label", () => {
+  render(<AuthGate capabilities={{ ...ssoOn, provider_label: "  " }} onAuthenticated={() => undefined} />);
+  expect(screen.getByRole("button", { name: "使用统一认证登录" })).toBeInTheDocument();
 });
 
-test("a restored migration session can recover through an administrator grant without its forgotten password", async () => {
-  setToken("migration-session");
+test("the provider button shows a busy state and redirects to the authorization URL", async () => {
   const browser = window;
   const assign = vi.fn();
   vi.stubGlobal("window", new Proxy(browser, { get(target, key) {
-    if (key === "location") return { origin: browser.location.origin, pathname: "/", search: "", hash: "", assign };
+    if (key === "location") return { origin: browser.location.origin, pathname: "/", search: "?group_invite=x", hash: "", assign };
     return Reflect.get(target, key);
   } }));
-  const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ authorization_url: "https://identity.example/authorize" }), { status: 200 }));
+  let respond: (value: Response) => void = () => undefined;
+  const fetch = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => new Promise<Response>((resolve) => { respond = resolve; }));
   vi.stubGlobal("fetch", fetch);
+  render(<AuthGate capabilities={ssoOn} onAuthenticated={() => undefined} />);
+
+  await userEvent.setup().click(screen.getByRole("button", { name: "使用W3登录" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "正在跳转…" })).toBeDisabled());
+  respond(Response.json({ authorization_url: "https://identity.example/authorize" }));
+  await waitFor(() => expect(assign).toHaveBeenCalledWith("https://identity.example/authorize"));
+  expect(String(fetch.mock.calls[0][0])).toContain("/auth/sso/start");
+  expect(sessionStorage.getItem("silicon_notebook_sso_return_location")).toBe("/?group_invite=x");
+});
+
+test("a failed start is reported beside the provider button and the button is usable again", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 503 })));
+  render(<AuthGate capabilities={ssoOn} onAuthenticated={() => undefined} />);
+
+  await userEvent.setup().click(screen.getByRole("button", { name: "使用W3登录" }));
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", { name: "使用W3登录" })).toBeEnabled());
+});
+
+test("local sign-in stores the token and enters the workspace", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ token: "local-token", user })));
   const onAuthenticated = vi.fn();
   const actor = userEvent.setup();
-  render(<AuthGate migrationSession capabilities={capabilities({ mode: "binding_required", sso_login: true })} onAuthenticated={onAuthenticated} />);
-  expect(screen.getByRole("button", { name: "验证并关联统一身份" })).toBeDisabled();
-  await actor.click(screen.getByRole("button", { name: "需要迁移帮助？" }));
-  await actor.type(screen.getByLabelText("迁移凭证"), "admin-recovery-grant");
-  await actor.click(screen.getByRole("radio", { name: "恢复账号" }));
-  await actor.click(screen.getByRole("button", { name: "验证凭证并继续" }));
-  await waitFor(() => expect(assign).toHaveBeenCalledWith("https://identity.example/authorize"));
-  expect(fetch).toHaveBeenCalledTimes(1);
-  expect(String(fetch.mock.calls[0][0])).toContain("/auth/sso/grant/start");
-  expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ grant_token: "admin-recovery-grant", purpose: "recover" });
-  expect(getToken()).toBe("migration-session");
-  expect(onAuthenticated).not.toHaveBeenCalled();
+  render(<AuthGate capabilities={capabilities()} onAuthenticated={onAuthenticated} />);
+
+  await actor.type(screen.getByLabelText("用户名"), "a12345678");
+  await actor.type(screen.getByLabelText("密码"), "pw");
+  await actor.click(screen.getByRole("button", { name: "本地登录" }));
+  await waitFor(() => expect(onAuthenticated).toHaveBeenCalledWith(expect.objectContaining({ id: "u1" })));
+  expect(getToken()).toBe("local-token");
 });

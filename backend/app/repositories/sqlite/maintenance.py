@@ -190,17 +190,16 @@ class SQLiteMaintenanceAdapter:
     # -- identity / notebooks -------------------------------------------------
 
     def resolve_owner_profile(self, owner: Optional[str]):
-        """Resolve a case-insensitive current/local login name, or the default
-        admin (owner=None). Missing or ambiguous names return None."""
+        """Resolve a case-insensitive username, or the default admin
+        (owner=None). Missing or ambiguous names return None."""
         with self._runtime.database.connect() as db:
             if owner is not None:
                 owner = owner.strip()
                 if not owner:
                     return None
                 candidates = db.execute(
-                    "SELECT * FROM users WHERE lower(username)=lower(?) "
-                    "OR lower(local_login_name)=lower(?)",
-                    (owner,owner),
+                    "SELECT * FROM users WHERE lower(username)=lower(?)",
+                    (owner,),
                 ).fetchall()
                 if len(candidates) != 1:
                     return None
