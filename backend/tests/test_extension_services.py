@@ -42,9 +42,18 @@ def service(tmp_path, *, key="demo/main", command=None, probe=None, mode="manage
     }
 
 
-def eventually(predicate, timeout=5):
+# Cold-starting a real supervisor (python + imports) can take well over the
+# default 5s when the suite runs under ``-n 12``; waits that depend on it use this.
+COLD_START_SECONDS = 30
+
+
+def eventually(predicate, timeout=5, abort=None):
+    # ``abort`` runs on every miss so a start that already died raises its real
+    # error instead of being waited out.
     deadline = time.monotonic() + timeout
     while not predicate():
+        if abort:
+            abort()
         assert time.monotonic() < deadline
         time.sleep(0.02)
 
@@ -288,7 +297,8 @@ def test_another_terminal_can_inspect_and_cancel_startup(directory, tmp_path):
     item["startup_timeout_seconds"] = 30
     with ThreadPoolExecutor() as executor:
         future = executor.submit(manager.start, directory, [item], "pending", None)
-        eventually(lambda: manager.status(directory)["state"] == "starting")
+        eventually(lambda: manager.status(directory)["state"] == "starting",
+                   COLD_START_SECONDS, lambda: future.done() and future.result())
         began = time.monotonic()
         assert manager.stop(directory, None)["state"] == "stopped"
         assert time.monotonic() - began < 3
@@ -427,7 +437,9 @@ def test_interrupted_launcher_rolls_back_its_unready_session(directory, tmp_path
     process.stdin.close()
     process.stdin = None
     try:
-        eventually(lambda: manager.status(directory)["state"] == "starting")
+        def exited():
+            assert process.poll() is None, f"launcher exited early: {process.communicate()}"
+        eventually(lambda: manager.status(directory)["state"] == "starting", COLD_START_SECONDS, exited)
         process.send_signal(interruption)
         process.communicate(timeout=10)
         assert process.returncode == 130
