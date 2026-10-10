@@ -1,0 +1,12 @@
+.updates-page { max-width: 760px; margin: 0 auto; padding: 30px 24px 56px; }
+.updates-page h1 { margin: 0 0 6px; font-size: 26px; letter-spacing: -.02em; }
+.updates-build { margin: 0 0 18px; color: var(--muted); font-size: 13px; }
+.updates-filter { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 14px; color: var(--muted); font-size: 13px; }
+.updates-list { margin: 0; padding: 0; list-style: none; }
+.updates-item { padding: 16px 0; border-top: 1px solid var(--line); line-height: 1.6; }
+.updates-item-head { display: flex; align-items: center; gap: 8px; font-size: 15px; }
+.updates-item-body { margin-top: 8px; color: #333b49; font-size: 14px; }
+.updates-item-body > :first-child { margin-top: 0; }
+.updates-item-body > :last-child { margin-bottom: 0; }
+.updates-empty, .updates-status { color: var(--muted); }
+.updates-status.error { color: var(--red); }

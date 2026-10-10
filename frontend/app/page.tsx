@@ -6864,6 +6864,7 @@ export default function Home() {
         <ReleaseNotesModal
           build={releaseNotes.notice.build}
           notes={releaseNotes.notice.notes}
+          moreCount={releaseNotes.notice.moreCount}
           onClose={() => rootModals.requestClose("release-notes", "button")}
           interactive={rootModals.view("release-notes").topmost}
           zIndex={rootModals.view("release-notes").zIndex}

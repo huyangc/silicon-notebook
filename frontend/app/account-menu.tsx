@@ -5,6 +5,7 @@ import {
   BookOpen,
   Bot,
   ChevronDown,
+  History,
   KeyRound,
   LogOut,
   Puzzle,
@@ -185,6 +186,15 @@ export function AccountMenu({
           >
             <HeartHandshake size={16} />
             <span>许愿墙</span>
+          </a>
+          <a
+            className="user-logout"
+            role="menuitem"
+            href="/updates"
+            title="查看历次系统更新"
+          >
+            <History size={16} />
+            <span>更新记录</span>
           </a>
           <a
             className="user-logout"

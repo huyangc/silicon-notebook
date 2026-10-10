@@ -30,6 +30,7 @@ from app.repositories.identity_errors import (
 from app.models.model_services import ModelServicesStatus
 from app.models.sources import DetectDocTypesRequest, DetectedDocType
 from app.models.system import (
+    ReleaseNotesHistoryResponse,
     ReleaseNotesResponse,
     ReleaseNotesSeenRequest,
     SystemConfiguration,
@@ -46,6 +47,7 @@ from app.services.release_notes import (
     load_release_manifest,
     mark_release_notes_seen,
     release_notes_for_user,
+    release_notes_history,
 )
 from app.services.reasoning_retrieval import search_profile_wiring_active
 
@@ -97,10 +99,25 @@ def update_my_ui_mode(
 def my_release_notes(
     user: UserProfile = Depends(get_current_user),
 ) -> ReleaseNotesResponse:
-    """本账号还没看过的系统更新说明(最新在前)。清单缺失/损坏 → ``available=false``
-    且不写库;账号从未记录过基线时,静默把当前版本记为已看并返回空列表。"""
+    """本账号还没看过的系统更新重点(最多 5 条,「变化」在前,各自新的在前),
+    另给 ``more_count`` = 超出的重点数 + 待看的「修复」数(后台改进不计)。没有重点时
+    ``notes`` 为空,前端不弹窗也不推进基线。受众为 admin 的说明只对管理员可见。
+    清单缺失/损坏 → ``available=false`` 且不写库;账号从未记录过基线时,静默把
+    当前版本记为已看并返回空列表。"""
     return release_notes_for_user(
-        identity_repository(), user.id, load_release_manifest()
+        identity_repository(), user.id, load_release_manifest(),
+        is_admin=user.role == "admin",
+    )
+
+
+@router.get("/me/release-notes/history", response_model=ReleaseNotesHistoryResponse)
+def my_release_notes_history(
+    user: UserProfile = Depends(get_current_user),
+) -> ReleaseNotesHistoryResponse:
+    """历次系统更新记录(含后台改进,新的在前),登录即可。只按受众过滤,
+    不读也不写本账号的已看基线;清单缺失/损坏 → ``available=false``。"""
+    return release_notes_history(
+        load_release_manifest(), is_admin=user.role == "admin"
     )
 
 

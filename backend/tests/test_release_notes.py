@@ -1,18 +1,22 @@
 """系统更新通知:清单读取、待看说明计算、每账号已看基线与两条接口。
 
 覆盖:
-  * ``parse_release_manifest`` 的形状校验(schema/字段类型/重复 id/空正文)。
+  * ``parse_release_manifest`` 的形状校验(schema/字段类型/级别与受众枚举/标题/重复 id)。
   * ``load_release_manifest``:缺失/损坏 → None,日志只记原因码不记正文,
     按 (mtime, size) 缓存。
-  * ``pending_release_notes``:边界含右不含左、回滚、NULL 之外的相等、排序。
+  * ``pending_release_notes``:边界含右不含左、回滚、NULL 之外的相等、排序、受众可见性。
+  * 弹窗重点/计数分级(``release_notes_for_user``)与更新记录(``release_notes_history``)。
+  * ``release-notes/*.md`` 真实目录的文案长度守卫。
   * SQLite IdentityStore 的三个端口方法(条件初始化、原子取 max)。
   * GET/POST /api/me/release-notes[/seen] 的端到端语义。
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import os
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -38,14 +42,20 @@ def _isolate():
     set_request_user(None)
 
 
-def _manifest(build_ordinal=100, notes=(), version="20260929-abc1234", schema=1):
+def _manifest(build_ordinal=100, notes=(), version="20260929-abc1234", schema=2):
+    """``notes`` entries: ``(id, ordinal, body[, level[, audience]])``; the title is
+    ``t-<id>``. Default level ``change`` / audience ``all``."""
+    out = []
+    for nid, ordinal, body, *rest in notes:
+        level, audience = (list(rest) + ["change", "all"][len(rest):])[:2]
+        out.append({
+            "id": nid, "ordinal": ordinal, "sha": "b" * 40,
+            "level": level, "audience": audience, "title": f"t-{nid}", "body": body,
+        })
     return {
         "schema": schema,
         "build": {"version": version, "sha": "a" * 40, "ordinal": build_ordinal},
-        "notes": [
-            {"id": nid, "ordinal": ordinal, "sha": "b" * 40, "body": body}
-            for nid, ordinal, body in notes
-        ],
+        "notes": out,
     }
 
 
@@ -58,10 +68,21 @@ def test_parse_accepts_a_well_formed_manifest():
     )
     assert parsed.build.version == "20260929-abc1234"
     assert parsed.build.ordinal == 100
-    assert [(n.id, n.ordinal, n.body) for n in parsed.notes] == [
-        ("a", 90, "说明 A"),
-        ("b", 95, "说明 B"),
+    assert [(n.id, n.ordinal, n.level, n.audience, n.title, n.body) for n in parsed.notes] == [
+        ("a", 90, "change", "all", "t-a", "说明 A"),
+        ("b", 95, "change", "all", "t-b", "说明 B"),
     ]
+
+
+def test_parse_accepts_an_empty_body():
+    parsed = parse_release_manifest(_manifest(notes=[("a", 1, "")]))
+    assert parsed.notes[0].body == ""
+
+
+def _with_field(**changes):
+    raw = _manifest(notes=[("a", 1, "x")])
+    raw["notes"][0].update(changes)
+    return raw
 
 
 @pytest.mark.parametrize(
@@ -69,7 +90,8 @@ def test_parse_accepts_a_well_formed_manifest():
     [
         ([], "not_an_object"),
         ("x", "not_an_object"),
-        (_manifest(schema=2), "unsupported_schema"),
+        (_manifest(schema=1), "unsupported_schema"),
+        (_manifest(schema=3), "unsupported_schema"),
         ({**_manifest(), "schema": True}, "unsupported_schema"),
         ({k: v for k, v in _manifest().items() if k != "schema"}, "unsupported_schema"),
         ({**_manifest(), "build": []}, "bad_build"),
@@ -82,7 +104,15 @@ def test_parse_accepts_a_well_formed_manifest():
         (_manifest(notes=[("", 1, "x")]), "bad_note"),
         (_manifest(notes=[("a", "1", "x")]), "bad_note"),
         (_manifest(notes=[("a", 1.5, "x")]), "bad_note"),
-        (_manifest(notes=[("a", 1, "   ")]), "bad_note"),
+        (_with_field(body=None), "bad_note"),
+        (_with_field(level="urgent"), "bad_note"),
+        (_with_field(level=None), "bad_note"),
+        (_with_field(audience="staff"), "bad_note"),
+        (_with_field(audience=None), "bad_note"),
+        (_with_field(title=""), "bad_note"),
+        (_with_field(title="   "), "bad_note"),
+        (_with_field(title=3), "bad_note"),
+        (_with_field(title=None), "bad_note"),
         (_manifest(notes=[("a", 1, "x"), ("a", 2, "y")]), "duplicate_note"),
     ],
 )
@@ -104,7 +134,7 @@ def test_load_missing_file_is_unavailable_without_a_warning(tmp_path, caplog):
 def test_load_corrupt_file_logs_the_reason_code_never_the_body(tmp_path, caplog):
     path = tmp_path / "release-manifest.json"
     secret = "内部说明正文-不许进日志"
-    path.write_text('{"schema": 1, "build": ' + secret, encoding="utf-8")
+    path.write_text('{"schema": 2, "build": ' + secret, encoding="utf-8")
     with caplog.at_level(logging.WARNING, logger="silicon_notebook.release_notes"):
         assert load_release_manifest(path) is None
     text = " ".join(r.getMessage() for r in caplog.records)
@@ -179,35 +209,50 @@ def test_load_notices_the_file_disappearing(tmp_path):
 # --------------------------------------------------------------------------- #
 # 3. 待看说明
 # --------------------------------------------------------------------------- #
-def _notes(*pairs):
-    return [ReleaseNote(nid, ordinal, f"body-{nid}") for nid, ordinal in pairs]
+def _notes(*specs):
+    """``(id, ordinal[, level[, audience]])`` -> ReleaseNote (defaults change / all)."""
+    out = []
+    for nid, ordinal, *rest in specs:
+        level, audience = (list(rest) + ["change", "all"][len(rest):])[:2]
+        out.append(ReleaseNote(nid, ordinal, level, audience, f"t-{nid}", f"body-{nid}"))
+    return out
+
+
+def _pending(seen, build, notes, is_admin=False):
+    return pending_release_notes(seen, build, notes, is_admin=is_admin)
 
 
 def test_pending_is_exclusive_of_seen_and_inclusive_of_build():
     notes = _notes(("at-seen", 10), ("just-after", 11), ("at-build", 20), ("beyond", 21))
-    ids = [n.id for n in pending_release_notes(10, 20, notes)]
+    ids = [n.id for n in _pending(10, 20, notes)]
     assert ids == ["at-build", "just-after"]
+
+
+def test_pending_hides_admin_notes_from_everyone_else():
+    notes = _notes(("pub", 15), ("adm", 16, "change", "admin"))
+    assert [n.id for n in _pending(10, 20, notes)] == ["pub"]
+    assert [n.id for n in _pending(10, 20, notes, is_admin=True)] == ["adm", "pub"]
 
 
 def test_pending_is_newest_first_and_ties_break_by_id_ascending():
     notes = _notes(("z", 15), ("a", 15), ("old", 12), ("new", 18))
-    ids = [n.id for n in pending_release_notes(10, 20, notes)]
+    ids = [n.id for n in _pending(10, 20, notes)]
     assert ids == ["new", "a", "z", "old"]
 
 
 def test_pending_is_empty_after_a_rollback():
     notes = _notes(("n1", 10), ("n2", 20))
     # 用户已看到 30,现在跑的是更老的 25:不弹任何东西。
-    assert pending_release_notes(30, 25, notes) == []
+    assert _pending(30, 25, notes) == []
 
 
 def test_pending_is_empty_when_seen_equals_build():
-    assert pending_release_notes(20, 20, _notes(("n", 20))) == []
+    assert _pending(20, 20, _notes(("n", 20))) == []
 
 
 def test_pending_from_zero_baseline_includes_everything_up_to_build():
     notes = _notes(("n1", 1), ("n2", 2))
-    assert [n.id for n in pending_release_notes(0, 2, notes)] == ["n2", "n1"]
+    assert [n.id for n in _pending(0, 2, notes)] == ["n2", "n1"]
 
 
 # --------------------------------------------------------------------------- #
@@ -310,13 +355,13 @@ def test_get_requires_auth(client, manifest_file):
 def test_unavailable_manifest_returns_empty_and_writes_nothing(client, manifest_file):
     headers = _login(client)  # manifest 文件不存在
     body = client.get("/api/me/release-notes", headers=headers).json()
-    assert body == {"available": False, "build": None, "notes": []}
+    assert body == {"available": False, "build": None, "notes": [], "more_count": 0}
     assert _seen(client, _user_id(client, headers)) is None
     # 损坏的文件同样不写库。
     path, _write = manifest_file
     path.write_text("{not json", encoding="utf-8")
     body = client.get("/api/me/release-notes", headers=headers).json()
-    assert body == {"available": False, "build": None, "notes": []}
+    assert body == {"available": False, "build": None, "notes": [], "more_count": 0}
     assert client.post(
         "/api/me/release-notes/seen", json={"through_ordinal": 50}, headers=headers
     ).status_code == 204
@@ -358,6 +403,9 @@ def test_first_call_initializes_silently_then_next_upgrade_shows_the_new_notes(
         ("a-new", 110, "新说明 A"),
         ("b-new", 110, "新说明 B"),
     ]
+    assert second["more_count"] == 0
+    assert second["notes"][0]["title"] == "t-newest"
+    assert second["notes"][0]["level"] == "change" and second["notes"][0]["audience"] == "all"
     # GET 本身不推进基线:没确认前每次都还在。
     assert _seen(client, uid) == 100
     assert len(client.get("/api/me/release-notes", headers=headers).json()["notes"]) == 3
@@ -465,3 +513,158 @@ def test_auth_optional_local_user_gets_a_baseline_too(tmp_path, monkeypatch, man
         "/api/me/release-notes/seen", json={"through_ordinal": 110}
     ).status_code == 204
     assert client.get("/api/me/release-notes").json()["notes"] == []
+
+
+# --------------------------------------------------------------------------- #
+# 6. 弹窗分级:重点 / 上限 / 计数 / 受众
+# --------------------------------------------------------------------------- #
+def _get_notes(client, headers):
+    return client.get("/api/me/release-notes", headers=headers).json()
+
+
+def _baselined(client, manifest_file, notes, build=200, headers=None):
+    """Register a user, baseline them at 100, then publish ``notes`` at ``build``."""
+    _path, write = manifest_file
+    write(100)
+    headers = headers or _login(client)
+    client.get("/api/me/release-notes", headers=headers)
+    write(build, notes)
+    return headers
+
+
+def test_headline_orders_change_before_feature_then_newest_first(client, manifest_file):
+    headers = _baselined(client, manifest_file, [
+        ("f-new", 190, "", "feature"), ("c-old", 110, "", "change"),
+        ("f-old", 120, "", "feature"), ("c-new", 150, "", "change"),
+    ])
+    body = _get_notes(client, headers)
+    assert [n["id"] for n in body["notes"]] == ["c-new", "c-old", "f-new", "f-old"]
+    assert body["more_count"] == 0
+
+
+def test_headline_is_capped_and_overflow_plus_fixes_feed_more_count(client, manifest_file):
+    notes = [(f"f{i}", 110 + i, "", "feature") for i in range(7)]  # 7 重点
+    notes += [("x1", 150, "", "fix"), ("x2", 151, "", "fix"), ("x3", 152, "", "fix")]
+    notes += [("i1", 160, "", "internal"), ("i2", 161, "", "internal")]
+    headers = _baselined(client, manifest_file, notes)
+    body = _get_notes(client, headers)
+    assert [n["id"] for n in body["notes"]] == ["f6", "f5", "f4", "f3", "f2"]
+    # 超出 2 条重点 + 3 条修复;后台改进不计。
+    assert body["more_count"] == 2 + 3
+
+
+def test_without_a_headline_nothing_is_shown_but_fixes_wait_to_be_counted(
+    client, manifest_file
+):
+    headers = _baselined(client, manifest_file, [
+        ("x", 150, "", "fix"), ("i", 160, "", "internal"),
+    ])
+    uid = _user_id(client, headers)
+    body = _get_notes(client, headers)
+    assert body["available"] is True and body["notes"] == [] and body["more_count"] == 1
+    assert _seen(client, uid) == 100  # GET 不推进基线,fix 留给下次有重点时一起计数
+
+
+def test_admin_notes_only_reach_admins(client, manifest_file):
+    _path, write = manifest_file
+    write(100)
+    user = _login(client)
+    admin = {"Authorization": "Bearer " + client.post(
+        "/api/auth/login", json={"username": "admin", "password": "admin"}
+    ).json()["token"]}
+    client.get("/api/me/release-notes", headers=user)
+    client.get("/api/me/release-notes", headers=admin)
+    write(200, [
+        ("pub", 150, "", "change", "all"),
+        ("adm", 160, "", "feature", "admin"),
+        ("adm-fix", 170, "", "fix", "admin"),
+    ])
+    mine = _get_notes(client, user)
+    assert [n["id"] for n in mine["notes"]] == ["pub"] and mine["more_count"] == 0
+    theirs = _get_notes(client, admin)
+    assert [n["id"] for n in theirs["notes"]] == ["pub", "adm"]
+    assert theirs["more_count"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# 7. 更新记录
+# --------------------------------------------------------------------------- #
+def _history(client, headers=None):
+    return client.get("/api/me/release-notes/history", headers=headers)
+
+
+def test_history_requires_auth(client, manifest_file):
+    assert _history(client).status_code == 401
+
+
+def test_history_unavailable_manifest(client, manifest_file):
+    headers = _login(client)
+    assert _history(client, headers).json() == {"available": False, "build": None, "notes": []}
+
+
+def test_history_lists_everything_up_to_the_build_newest_first_without_touching_the_baseline(
+    client, manifest_file
+):
+    _path, write = manifest_file
+    write(200, [
+        ("a", 100, "", "internal"), ("b", 150, "正文", "fix"), ("c", 150, "", "feature"),
+        ("adm", 160, "", "change", "admin"), ("future", 201, "", "change"),
+    ])
+    headers = _login(client)
+    uid = _user_id(client, headers)
+    body = _history(client, headers).json()
+    assert body["available"] is True
+    assert body["build"] == {"version": "20260929-abc1234", "ordinal": 200}
+    # 含 internal;admin 说明与超出当前版本的都不给普通用户;同序按 id 升序。
+    assert [n["id"] for n in body["notes"]] == ["b", "c", "a"]
+    assert body["notes"][0] == {
+        "id": "b", "ordinal": 150, "level": "fix", "audience": "all",
+        "title": "t-b", "body": "正文",
+    }
+    assert _seen(client, uid) is None  # 既不读也不写基线
+
+    admin = {"Authorization": "Bearer " + client.post(
+        "/api/auth/login", json={"username": "admin", "password": "admin"}
+    ).json()["token"]}
+    assert [n["id"] for n in _history(client, admin).json()["notes"]] == ["adm", "b", "c", "a"]
+
+
+# --------------------------------------------------------------------------- #
+# 8. 真实目录守卫:每条说明都能被清单生成脚本解析,标题/正文不得超长
+# --------------------------------------------------------------------------- #
+_ROOT = Path(__file__).resolve().parents[2]
+TITLE_MAX = 30  # code points
+BODY_MAX = 160  # code points, after strip
+
+
+def _load_manifest_script():
+    spec = importlib.util.spec_from_file_location(
+        "build_release_manifest_for_guard", _ROOT / "scripts" / "build_release_manifest.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _real_note_files() -> list[Path]:
+    return sorted(
+        p for p in (_ROOT / "release-notes").glob("*.md") if p.name != "README.md"
+    )
+
+
+def test_every_real_release_note_parses_and_stays_short():
+    gen = _load_manifest_script()
+    problems: list[str] = []
+    for path in _real_note_files():
+        rel = f"release-notes/{path.name}"
+        try:
+            parsed = gen.parse_note_text(path.read_text(encoding="utf-8"), rel)
+        except gen.ManifestError as exc:
+            problems.append(str(exc))
+            continue
+        if len(parsed["title"]) > TITLE_MAX:
+            problems.append(f"{rel}: 标题 {len(parsed['title'])} 字,超过 {TITLE_MAX}")
+        if len(parsed["body"]) > BODY_MAX:
+            problems.append(f"{rel}: 正文 {len(parsed['body'])} 字,超过 {BODY_MAX}")
+    assert not problems, "\n".join(problems)

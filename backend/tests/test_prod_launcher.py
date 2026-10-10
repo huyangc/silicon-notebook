@@ -214,7 +214,10 @@ def _launch(scripts: Path, root: Path, env: dict[str, str]) -> subprocess.Comple
 
 def test_prod_launcher_generates_the_release_manifest_from_the_checkout(tmp_path: Path) -> None:
     root, scripts, _fake_bin, _next_bin, env = _prepare_launcher(tmp_path)
-    _commit_checkout(root, env, {"report-export.md": "报告现在可以导出为 Word 文件。\n"})
+    _commit_checkout(root, env, {"report-export.md": (
+        "---\nlevel: feature\naudience: all\ntitle: 报告可以导出为 Word 文件\n---\n"
+        "报告现在可以导出为 Word 文件。\n"
+    )})
 
     completed = _launch(scripts, root, env)
 
@@ -224,8 +227,13 @@ def test_prod_launcher_generates_the_release_manifest_from_the_checkout(tmp_path
     assert manifest["build"]["sha"] == head
     assert manifest["build"]["ordinal"] == 1
     assert re.fullmatch(rf"\d{{8}}-{head[:7]}", manifest["build"]["version"])
-    assert [(n["id"], n["ordinal"], n["body"]) for n in manifest["notes"]] == [
-        ("report-export", 1, "报告现在可以导出为 Word 文件。")
+    assert manifest["schema"] == 2
+    assert [
+        (n["id"], n["ordinal"], n["level"], n["audience"], n["title"], n["body"])
+        for n in manifest["notes"]
+    ] == [
+        ("report-export", 1, "feature", "all", "报告可以导出为 Word 文件",
+         "报告现在可以导出为 Word 文件。")
     ]
     assert f"release manifest: {root / 'release-manifest.json'}" in completed.stdout
 
