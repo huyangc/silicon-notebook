@@ -906,6 +906,11 @@ class TableSnapshot:
     virtual: bool
     row_count: int
     digest: str
+    # For a table a migration manifest may drop columns from: the digest over
+    # the columns that SURVIVE that drop, and the dropped set it excludes, so
+    # the post-migration table can be compared on every surviving column.
+    survivor_digest: str = ""
+    survivor_dropped: "frozenset[str]" = frozenset()
 
 
 @dataclass(frozen=True)
@@ -1093,6 +1098,15 @@ def _sqlite_read_uri(database: Path, *, immutable: bool = False) -> str:
     return f"file:{encoded_path}?mode=ro{suffix}"
 
 
+def _droppable_columns() -> Dict[str, "frozenset[str]"]:
+    """Every column any migration manifest may drop, by table."""
+    droppable: Dict[str, set] = {}
+    for manifest in MIGRATION_MANIFEST.values():
+        for table, columns in manifest.get("dropped_columns", {}).items():
+            droppable.setdefault(table, set()).update(columns)
+    return {table: frozenset(columns) for table, columns in droppable.items()}
+
+
 def snapshot_database(
     db_path: Path, column_plan: Optional[Dict[str, Tuple[str, ...]]] = None
 ) -> DatabaseSnapshot:
@@ -1143,6 +1157,17 @@ def snapshot_database(
                 if virtual
                 else _table_digest(digest_conn, name, digest_columns, pk_columns)
             )
+            survivor_dropped = frozenset(
+                set(all_column_names) & _droppable_columns().get(name, frozenset())
+            )
+            survivor_digest = ""
+            if survivor_dropped and not virtual:
+                survivor_digest = _table_digest(
+                    digest_conn,
+                    name,
+                    tuple(c for c in digest_columns if c not in survivor_dropped),
+                    pk_columns,
+                )
             tables[name] = TableSnapshot(
                 columns=columns,
                 column_names=all_column_names,
@@ -1151,6 +1176,8 @@ def snapshot_database(
                 virtual=virtual,
                 row_count=row_count,
                 digest=digest,
+                survivor_digest=survivor_digest,
+                survivor_dropped=survivor_dropped,
             )
             if name == "concept_clusters" and user_version < 29:
                 cluster_v24_projection = _cluster_v24_projection(
@@ -1741,8 +1768,15 @@ def compare_snapshots(
             note(name, "row-count-changed")
         elif dropped_columns:
             # The pre digest covers a manifested dropped column the post
-            # table no longer has; the row count is all that stays comparable.
-            continue
+            # table no longer has, so compare every SURVIVING column instead:
+            # the pre digest taken without the dropped columns against the
+            # post digest (which already spans only the pre columns it kept).
+            if pre_table.survivor_dropped != (
+                dropped_columns & set(pre_table.column_names)
+            ):
+                note(name, "dropped-column-projection-unavailable")
+            elif pre_table.survivor_digest != post_table.digest:
+                note(name, "row-digest-changed")
         elif pre_table.digest != post_table.digest:
             note(name, "row-digest-changed")
 

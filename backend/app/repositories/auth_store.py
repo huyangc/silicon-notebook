@@ -109,7 +109,7 @@ class AuthStore:
     def local_account(self, db, login_name, *, for_update=False):
         """The one account a local login name names (ASCII case-insensitive,
         folded as SQL lower(username) folds: ``Ä123`` matches only ``Ä123``)."""
-        sql = "SELECT * FROM users WHERE lower(username)=?" + (" FOR UPDATE" if for_update and self.postgres else "")
+        sql = "SELECT * FROM users WHERE lower(username)=? AND username<>''" + (" FOR UPDATE" if for_update and self.postgres else "")
         return self._execute(db, sql, (username_lookup_key(login_name),)).fetchone()
 
     def owner_eligible(self, user_id):
@@ -195,7 +195,7 @@ class AuthStore:
         account also needs its placeholder email free: an administrator rename
         keeps the email minted from the old name, so registering that old name
         again must read as "name taken", not as a unique-constraint crash."""
-        sql = "SELECT id FROM users WHERE id<>? AND (lower(username)=?"
+        sql = "SELECT id FROM users WHERE id<>? AND (lower(username)=? AND username<>''"
         params = [user_id, ascii_lower(username)]
         if email is not None:
             sql += " OR email=?"
@@ -319,7 +319,7 @@ class AuthStore:
         case variant is one the person can resolve by linking that account.
         idx_users_username_lower keeps the holder to at most one row."""
         holder = self._execute(
-            db,"SELECT id,username FROM users WHERE id<>? AND lower(username)=?",(user_id,ascii_lower(username)),
+            db,"SELECT id,username FROM users WHERE id<>? AND lower(username)=? AND username<>''",(user_id,ascii_lower(username)),
         ).fetchone()
         if holder is None:
             return

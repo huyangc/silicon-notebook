@@ -199,7 +199,7 @@ class SQLiteMaintenanceAdapter:
                 if not owner:
                     return None
                 candidates = db.execute(
-                    "SELECT * FROM users WHERE lower(username)=?",
+                    "SELECT * FROM users WHERE lower(username)=? AND username<>''",
                     (ascii_lower(owner),),
                 ).fetchall()
                 if len(candidates) != 1:
