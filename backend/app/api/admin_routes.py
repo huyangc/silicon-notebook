@@ -1046,18 +1046,22 @@ _UNIFIED_AUTH_ENABLE_REFUSALS = {
 }
 
 
+def _unified_auth_refusal(code: str) -> HTTPException:
+    """启用 auth.provider 插件被拒时的 409：文案按稳定错误码取。"""
+    return user_error(409, _UNIFIED_AUTH_ENABLE_REFUSALS.get(
+        code, "不能启用统一认证：部署配置不满足要求，请检查后重试。"
+    ))
+
+
 def _require_unified_auth_ready() -> None:
-    """启用 auth.provider 插件前的防锁死预检：按「该插件已启用」检查部署配置，
-    并要求至少一名非内置的在用管理员。不通过就 409、不写行；停用不受限。"""
+    """启用 auth.provider 插件前的防锁死预检之一：按「该插件已启用」检查部署
+    配置（纯 settings，可在事务外）。「至少一名非内置的在用管理员」不在这里查：
+    它必须与开关写入同一事务、与改角色/停用账号同一把锁，由 store 的
+    ``require_sso_admin`` 负责（codex #837 R3）。不通过就 409、不写行。"""
     try:
         check_unified_auth_settings(get_settings())
-        code = "" if identity_repository().auth.has_sso_admin() else "no_sso_admin"
     except AuthProviderError as exc:
-        code = exc.code
-    if code:
-        raise user_error(409, _UNIFIED_AUTH_ENABLE_REFUSALS.get(
-            code, "不能启用统一认证：部署配置不满足要求，请检查后重试。"
-        ))
+        raise _unified_auth_refusal(exc.code) from None
 
 
 @router.patch(
@@ -1086,8 +1090,9 @@ def update_admin_extension_runtime(
     等下一轮轮询才追上——见下面的 ``except`` 分支。
     """
     # 启用一个提供 auth.provider 的插件就是开启统一认证：先过
-    # _require_unified_auth_ready 防锁死预检，不通过 409 且不写行；停用不设限
-    # （停用即回到本地登录）。（写在注释里：docstring 是冻结的 OpenAPI 描述。）
+    # _require_unified_auth_ready 的配置预检，再由 store 在写事务内、持认证锁
+    # 复查非内置在用管理员（require_sso_admin）；任一不通过 409 且不写行；停用
+    # 不设限（停用即回到本地登录）。（写在注释里：docstring 是冻结的 OpenAPI 描述。）
     if user.role != "admin":
         raise user_error(403, "仅管理员可管理扩展运行时开关")
     loaded_deployment = {
@@ -1112,8 +1117,12 @@ def update_admin_extension_runtime(
             _require_unified_auth_ready()
         try:
             row = store.set_extension_runtime_enabled(
-                plugin_id, payload.enabled, user.id
+                plugin_id, payload.enabled, user.id,
+                require_sso_admin=enables_unified_auth,
             )
+        except AuthStoreError as exc:
+            # 事务内复查发现没有内置管理员以外的在用管理员（no_sso_admin）。
+            raise _unified_auth_refusal(str(exc)) from None
         except PermissionError:
             # 理论上不可达——上面已经检过角色——但绝不能把它泄漏成一条 500：一个
             # 管理员会话在两次检查之间被别的会话降权，是可以想象的竞态，答案必须

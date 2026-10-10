@@ -161,7 +161,7 @@ class SqlitePersistenceBundleFactory:
         agent_observations = AgentObservationStore(
             database, new_id=seams.new_id, now=seams.now
         )
-        extension_toggles = ExtensionToggleStore(database)
+        extension_toggles = ExtensionToggleStore(database, identity.auth)
         wishes = WishStore(database, new_id=seams.new_id, now=seams.now)
         ask_intent_handles = AskIntentHandleStore(database, now=seams.now)
         return SqlitePersistenceBundle(

@@ -23,7 +23,9 @@ import pytest
 
 from app.core.config import Settings
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.identity_errors import AuthStoreError
 from app.repositories.sqlite.extension_toggle_store import ExtensionToggleStore
+from app.repositories.sqlite.identity_store import IdentityStore
 from app.repositories.sqlite.migrations import SCHEMA_VERSION, SqliteMigrator
 
 
@@ -40,8 +42,13 @@ def database(tmp_path: Path) -> SqliteDatabase:
 
 
 @pytest.fixture
-def store(database: SqliteDatabase) -> ExtensionToggleStore:
-    return ExtensionToggleStore(database)
+def identity(database: SqliteDatabase, tmp_path: Path) -> IdentityStore:
+    return IdentityStore(database, Settings(database_url=f"sqlite:///{tmp_path / 'test.db'}"))
+
+
+@pytest.fixture
+def store(database: SqliteDatabase, identity: IdentityStore) -> ExtensionToggleStore:
+    return ExtensionToggleStore(database, identity.auth)
 
 
 def _seed_user(database: SqliteDatabase, *, user_id: str, role: str) -> None:
@@ -215,3 +222,92 @@ def test_a_demoted_or_disabled_actor_is_rechecked_at_write_time_not_at_call_time
         db.execute("UPDATE users SET role='admin',status='active' WHERE id=?", ("user-was-admin",))
     assert store.set_extension_runtime_enabled("plugin-e",True,"user-was-admin")["enabled"] is True
     assert store.extension_runtime_disabled_ids() == frozenset()
+
+
+def _seed_unified_auth_admins(database: SqliteDatabase) -> None:
+    """The built-in administrator (who cannot sign in under unified auth) plus
+    two administrators who can."""
+    with database.write() as db:
+        db.execute(
+            "INSERT OR IGNORE INTO users(id,email,display_name,role,status,created_at,"
+            "updated_at) VALUES ('user-local','local@example.test','admin','admin','active',?,?)",
+            (NOW, NOW),
+        )
+        db.execute("UPDATE users SET role='admin',status='active' WHERE id='user-local'")
+    _seed_user(database, user_id="user-sso-1", role="admin")
+    _seed_user(database, user_id="user-sso-2", role="admin")
+
+
+def _remove_admin(identity: IdentityStore, attribute: str, actor: str, target: str):
+    if attribute == "role":
+        return identity.set_user_role(actor, target, "user")
+    return identity.auth.set_account_status(target, "disabled", actor_id=actor)
+
+
+@pytest.mark.parametrize("attribute", ["role", "status"])
+def test_enabling_unified_auth_rechecks_the_sso_admin_inside_the_write(
+    store: ExtensionToggleStore, database: SqliteDatabase, identity: IdentityStore,
+    attribute: str,
+):
+    """codex #837 R3: the "an administrator other than the built-in one is
+    active" invariant is read inside the toggle's own write transaction.
+    Once the last such administrator is demoted or disabled, enabling with
+    ``require_sso_admin`` is refused and writes nothing; a plain toggle write
+    (disabling, or a plugin that is not an auth provider) is not gated."""
+    _seed_unified_auth_admins(database)
+    _remove_admin(identity, attribute, "user-local", "user-sso-1")
+    _remove_admin(identity, attribute, "user-local", "user-sso-2")
+
+    with pytest.raises(AuthStoreError, match="no_sso_admin"):
+        store.set_extension_runtime_enabled(
+            "auth-plugin", True, "user-local", require_sso_admin=True,
+        )
+    assert store.list_extension_runtime_toggles() == []
+    assert store.set_extension_runtime_enabled("auth-plugin", False, "user-local")["enabled"] is False
+
+    with database.write() as db:
+        db.execute("UPDATE users SET role='admin',status='active' WHERE id='user-sso-2'")
+    enabled = store.set_extension_runtime_enabled(
+        "auth-plugin", True, "user-local", require_sso_admin=True,
+    )
+    assert enabled["enabled"] is True
+
+
+@pytest.mark.parametrize("attribute", ["role", "status"])
+def test_enabling_unified_auth_serializes_with_admin_role_and_status_changes(
+    store: ExtensionToggleStore, database: SqliteDatabase, identity: IdentityStore,
+    monkeypatch, attribute: str,
+):
+    """codex #837 R3: while the enabling write holds its transaction (paused
+    right after its administrator check), a concurrent demotion/disable —
+    here by a different administrator, so no row is shared with the enabling
+    actor — must wait until the enabling write commits. Otherwise it could
+    land between the check and the write."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    _seed_unified_auth_admins(database)
+    real_check = store.auth.sso_admin_exists
+    checked, release = threading.Event(), threading.Event()
+
+    def paused_check(db):
+        answer = real_check(db)
+        checked.set()
+        assert release.wait(timeout=10)
+        return answer
+
+    monkeypatch.setattr(store.auth, "sso_admin_exists", paused_check)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        enabling = executor.submit(
+            store.set_extension_runtime_enabled,
+            "auth-plugin", True, "user-local", require_sso_admin=True,
+        )
+        try:
+            assert checked.wait(timeout=10)
+            removal = executor.submit(_remove_admin, identity, attribute, "user-sso-2", "user-sso-1")
+            with pytest.raises(TimeoutError):
+                removal.result(timeout=0.5)
+        finally:
+            release.set()
+        assert enabling.result(timeout=10)["enabled"] is True
+        removal.result(timeout=10)
