@@ -203,6 +203,21 @@ test("coverage: total=null 渲染「总数未知」,绝不写成 /0", () => {
 });
 
 
+// 技术债 C2:「部分结果」标注的悬停提示此前是 overflow_semantics 的原值 explicit_partial。
+test("coverage: 部分结果标注的悬停提示是中文，不吐 overflow_semantics 代号", () => {
+  const answer = baseAnswer();
+  answer.result_sets = [collectionResult({
+    coverage: {
+      returned_total: 30, total: 60, complete: false,
+      truncated_reason: "budget", overflow_semantics: "explicit_partial",
+    },
+  })];
+  renderAnswer(answer);
+  const reason = screen.getByText("已明确标注为部分结果（已达本轮枚举上限）");
+  expect(reason).toHaveAttribute("title", "结果未全部列出");
+});
+
+
 test("coverage: concurrent_change 是终态,单独一句话,不与普通「部分结果」合并", () => {
   const answer = baseAnswer();
   answer.result_sets = [collectionResult({
