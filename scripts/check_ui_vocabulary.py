@@ -621,7 +621,8 @@ def scan_user_error(path: Path) -> tuple[int, list[tuple[int, str, str]]]:
     non-vacuity floor, so a rename that silently empties the scan is caught.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    resolver = _IndirectCopy(tree)
+    # 绝大多数后端文件没有 user_error 站点:解析器(要建整棵树的父节点表)按需才建。
+    resolver: _IndirectCopy | None = None
     sites, hits = 0, set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -631,6 +632,7 @@ def scan_user_error(path: Path) -> tuple[int, list[tuple[int, str, str]]]:
         if name != USER_ERROR:
             continue
         sites += 1
+        resolver = resolver or _IndirectCopy(tree)
         kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
         message = kwargs.get("message", node.args[1] if len(node.args) > 1 else None)
         for text in resolver.units(message):
