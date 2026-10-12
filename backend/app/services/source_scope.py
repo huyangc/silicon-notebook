@@ -23,7 +23,7 @@ silent, so both names appear in every accessor:
    is not true of the universe a producer actually reads.
 2. NARROWING -- "did the user actually shrink this dimension, so a channel must
    be switched off?"  False for a full selection: declining to narrow must not
-   cost the user their PPR, private Memory, community reports or corpus
+   cost the user their PPR, private Memory or corpus
    profile.  Ask ``source_scope_restricted()`` / ``base_scope_restricted()``.
 
 ⚠ Dimension 1 answers what a producer must FILTER by; dimension 2 answers which
@@ -57,7 +57,7 @@ library.  Gates that mean "…for the current library" read
 
 ⚠ ``source_scope_restricted()`` reads the LOCAL dimension only, on purpose.  It
 gates the ACTIVE notebook's own non-source-partitionable channels (PPR, private
-Memory, community reports, weak-support relations, exact-section lookup, the
+Memory, weak-support relations, exact-section lookup, the
 report corpus profile), and unchecking one borrowed reference library is not a
 reason to switch any of those off.  Library-dimension consumers ask
 ``notebook_in_scope`` / ``scoped_participants`` / ``base_scope_*`` instead.
@@ -552,7 +552,7 @@ class ActiveSourceScope:
         ``base_restricted``.  A per-notebook ceiling freezes what each
         participant may contribute; it never expresses that the user shrank
         anything, and a federated run that selected everything must not lose
-        its history, PPR, Memory or community reports to a bookkeeping freeze.
+        its history, PPR or Memory to a bookkeeping freeze.
         """
         if self.narrowed is not None:
             return self.narrowed
@@ -1037,7 +1037,7 @@ def base_scope_restricted() -> bool:
 
     ⚠ Orthogonal to ``source_scope_restricted`` and never to be folded into it:
     unchecking one borrowed library is not a reason to disable the ACTIVE
-    notebook's PPR, private Memory, community reports or corpus profile.
+    notebook's PPR, private Memory or corpus profile.
     """
     scope = current_source_scope()
     return bool(scope and scope.base_restricted)

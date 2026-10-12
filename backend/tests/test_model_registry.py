@@ -1,6 +1,7 @@
 """Strict startup configuration for system-owned model services."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,8 @@ import pytest
 from app.core.config import Settings
 from app.services.model_registry import (
     BINDING_GAP_PREFIX,
+    IGNORABLE_RETIRED_WORKLOADS,
+    RETIRED_WORKLOADS,
     WORKLOADS,
     ModelBindingGapError,
     SystemModelServiceRegistry,
@@ -32,12 +35,11 @@ _EXPECTED_WORKLOADS = {
     "notebook_metadata": ("chat", "background", "笔记本信息提取"),
     "paper_metadata": ("chat", "background", "论文元数据提取"),
     "chunk_question_generation": ("chat", "background", "分块问题生成"),
-    "kg_extract": ("chat", "background", "知识抽取"),
+    "kg_extract": ("chat", "background", "知识分析"),
     "kg_refine": ("chat", "background", "知识细化"),
-    "kg_glean": ("chat", "background", "知识补充抽取"),
+    "kg_glean": ("chat", "background", "知识补充分析"),
     "kg_merge_review": ("chat", "background", "知识合并审核"),
     "kg_concept_description": ("chat", "background", "概念描述生成"),
-    "kg_community_summary": ("chat", "background", "知识社区摘要"),
     "kg_conflict_review": ("chat", "background", "知识冲突审核"),
     "schema_induction": ("chat", "interactive", "知识类型归纳"),
     "memory_preview": ("chat", "interactive", "记忆预览"),
@@ -166,7 +168,6 @@ def test_chat_workloads_have_an_exhaustive_analysis_area():
             "kg_glean",
             "kg_merge_review",
             "kg_concept_description",
-            "kg_community_summary",
             "kg_conflict_review",
             "schema_induction",
         },
@@ -707,7 +708,7 @@ def test_strict_load_reports_both_halves_in_one_message(tmp_path):
         SystemModelServiceRegistry.load(_settings(path, strict=True), _ALL_KEYS)
 
     message = str(exc_info.value)
-    assert "知识补充抽取（kg_glean）" in message
+    assert "知识补充分析（kg_glean）" in message
     assert "已退役、升级后请删除的绑定：graph_chain_verify（[bindings]）" in message
     assert message.index("缺少绑定") < message.index("已退役")
 
@@ -788,7 +789,7 @@ def test_the_log_rendering_drops_the_path_and_any_key_it_cannot_vouch_for():
     logged = loggable_binding_gap(["kg_glean"], unknown)
 
     assert logged.startswith(BINDING_GAP_PREFIX)
-    assert "知识补充抽取（kg_glean）" in logged
+    assert "知识补充分析（kg_glean）" in logged
     assert "已退役、升级后请删除的绑定：graph_chain_verify（[bindings]）" in logged
     assert (
         "未知、疑似拼写错误的绑定：ask_anwser（[bindings]），"
@@ -837,4 +838,197 @@ def test_the_strict_refusal_is_its_own_exception_type_carrying_both_renderings(
     assert str(error) != error.loggable()
     assert str(path) in str(error)
     assert str(path) not in error.loggable()
-    assert "知识补充抽取（kg_glean）" in error.loggable()
+    assert "知识补充分析（kg_glean）" in error.loggable()
+
+
+# ---------------------------------------------------------------------------
+# 社区摘要退役(用户裁决 8):kg_community_summary 是「已退役且可忽略」的 id。
+# 每份部署的 model-services.toml 都按模板绑过它,install.sh 不改已存在的文件;
+# 残留的两行只打一条脱敏提示、照常启动。其它未知 id 仍按 #779 拒启。
+# ---------------------------------------------------------------------------
+
+_BASELINE_TEMPLATE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "model_services"
+    / "model-services.example.1e842854.toml"
+)
+_TEMPLATE_KEYS = {
+    "SYSTEM_GENERAL_API_KEY": "general-secret",
+    "SYSTEM_REASONING_API_KEY": "reasoning-secret",
+    "SYSTEM_EMBEDDING_API_KEY": "embedding-secret",
+    "SYSTEM_RERANK_API_KEY": "rerank-secret",
+}
+_REGISTRY_LOGGER = "silicon_notebook.model_registry"
+
+
+def test_the_ignorable_ledger_is_exactly_the_community_summary_id():
+    """例外刻意最小:只有这一个 id,且它必须同时在退役名单里、不在现行目录里。"""
+    assert IGNORABLE_RETIRED_WORKLOADS == frozenset({"kg_community_summary"})
+    assert IGNORABLE_RETIRED_WORKLOADS <= RETIRED_WORKLOADS
+    assert not IGNORABLE_RETIRED_WORKLOADS & set(WORKLOADS)
+    # graph_chain_verify 仍是「退役但要删」——不随这次例外一起被放过。
+    assert "graph_chain_verify" not in IGNORABLE_RETIRED_WORKLOADS
+
+
+def test_the_pre_retirement_template_passes_the_strict_preflight_verbatim(caplog):
+    """基线 1e842854 的模板原样(两张表都绑着 kg_community_summary)喂给新版严格
+    预检必须通过:这就是每个部署升级时手里那份文件的形状。"""
+    baseline = _BASELINE_TEMPLATE.read_text(encoding="utf-8")
+    current = (
+        Path(__file__).resolve().parents[2] / "model-services.example.toml"
+    ).read_text(encoding="utf-8")
+    # 夹具确实是「当前模板 + 恰好那两行」,不是另一份随手写的配置。
+    assert [
+        line for line in baseline.splitlines() if line not in current.splitlines()
+    ] == ['kg_community_summary = "general"', 'kg_community_summary = "disabled"']
+
+    with caplog.at_level(logging.WARNING, logger=_REGISTRY_LOGGER):
+        registry = SystemModelServiceRegistry.load(
+            _settings(_BASELINE_TEMPLATE, strict=True), _TEMPLATE_KEYS
+        )
+
+    assert all(registry.service_for(workload_id) for workload_id in WORKLOADS)
+    assert registry.unknown_bindings() == ()
+    hints = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _REGISTRY_LOGGER
+    ]
+    assert hints == [
+        "model-bindings: MODEL_SERVICES_CONFIG 指向的文件的 [bindings]/[thinking] "
+        "里有已退役、可忽略的工作负载：kg_community_summary（[bindings]/[thinking]）。"
+        "已忽略，不影响启动；可以删除这些行。"
+    ]
+
+
+@pytest.mark.parametrize("table", ["[bindings]", "[thinking]"])
+def test_a_leftover_community_summary_line_in_either_table_is_ignored(
+    tmp_path, caplog, table
+):
+    body = _all_services() + "\n" + _bindings()
+    if table == "[bindings]":
+        # 指向一个已删掉的 service 也照样忽略:分流发生在一切校验之前。
+        body += '\nkg_community_summary = "service_removed_with_it"\n'
+    else:
+        body += '\n[thinking]\nkg_community_summary = "disabled"\n'
+    path = _write_config(tmp_path / "models.toml", body)
+
+    with caplog.at_level(logging.WARNING, logger=_REGISTRY_LOGGER):
+        registry = SystemModelServiceRegistry.load(
+            _settings(path, strict=True), _ALL_KEYS
+        )
+
+    assert registry.unknown_bindings() == ()
+    assert registry.service_for("kg_community_summary") is None
+    logged = [r.getMessage() for r in caplog.records if r.name == _REGISTRY_LOGGER]
+    assert len(logged) == 1
+    assert f"kg_community_summary（{table}）" in logged[0]
+
+
+def test_other_unknown_ids_still_refuse_next_to_the_ignorable_one(tmp_path):
+    """例外不外溢:同一份文件里别的未知 id、别的退役 id 照样拒启;拒启消息里不
+    点名可忽略的那个(它不需要运维动作)。"""
+    path = _write_config(
+        tmp_path / "models.toml",
+        _all_services()
+        + "\n"
+        + _bindings(
+            extra='\nkg_community_summary = "general"\n'
+            'kg_community_summaryy = "general"\n'
+            'graph_chain_verify = "general"\n'
+        )
+        + '\n[thinking]\nkg_community_summary = "disabled"\n',
+    )
+
+    with pytest.raises(ModelBindingGapError) as exc_info:
+        SystemModelServiceRegistry.load(_settings(path, strict=True), _ALL_KEYS)
+
+    message = exc_info.value.loggable()
+    assert "已退役、升级后请删除的绑定：graph_chain_verify（[bindings]）" in message
+    assert "未知、疑似拼写错误的绑定：kg_community_summaryy（[bindings]）" in message
+    assert "kg_community_summary（" not in message
+
+
+def test_non_strict_load_does_not_list_the_ignorable_id_as_unknown(tmp_path):
+    """放行档的启动告警(「未知或已退役的 id」)也不再点它:它已经有自己的提示。"""
+    path = _write_config(
+        tmp_path / "models.toml",
+        _all_services()
+        + "\n"
+        + _bindings(
+            extra='\nkg_community_summary = "general"\nask_anwser = "general"\n'
+        ),
+    )
+
+    registry = SystemModelServiceRegistry.load(_settings(path), _ALL_KEYS)
+
+    assert registry.unknown_bindings() == ("ask_anwser",)
+
+
+def test_the_ignorable_hint_never_carries_the_path_or_the_file_s_text(
+    tmp_path, caplog
+):
+    """提示行只由代码里的名单与表名拼成:配置路径、服务 id、密钥环境变量名、
+    以及文件里的其它键都不进日志。"""
+    config_dir = tmp_path / "private-config-dir"
+    config_dir.mkdir()
+    path = _write_config(
+        config_dir / "models.toml",
+        _all_services()
+        + "\n"
+        + _bindings(extra='\nkg_community_summary = "general"\n')
+        + '\n[thinking]\nkg_community_summary = "disabled"\n',
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=_REGISTRY_LOGGER):
+        SystemModelServiceRegistry.load(_settings(path, strict=True), _ALL_KEYS)
+
+    logged = [r.getMessage() for r in caplog.records if r.name == _REGISTRY_LOGGER]
+    assert len(logged) == 1
+    line = logged[0]
+    assert line.startswith(BINDING_GAP_PREFIX)
+    assert str(tmp_path) not in line and "private-config-dir" not in line
+    assert "models.toml" not in line
+    assert "GENERAL_KEY" not in line and "llm.example" not in line
+    assert '"general"' not in line and "general" not in line
+    assert "\n" not in line
+
+
+def test_product_docs_list_exactly_the_live_chat_workloads_by_area():
+    """product-and-api 两份文档的「模型功能分类」表与各处 chat workload 计数必须
+    与注册表一致。这张表曾漏掉 gap_consult_query / external_evidence_answer、计数
+    停在 27 而无人发现;退役 kg_community_summary 时顺手钉住。"""
+    import re
+
+    chat = {k: w for k, w in WORKLOADS.items() if w.kind == "chat"}
+    expected = {}
+    for workload_id, workload in chat.items():
+        expected.setdefault(workload.analysis_area, set()).add(workload_id)
+    root = Path(__file__).resolve().parents[2]
+    for name, count_patterns in (
+        (
+            "docs/product-and-api.md",
+            (r"all (\d+) chat workloads", r"\((\d+) total\)",
+             r"(\d+) structured chat workloads"),
+        ),
+        (
+            "docs/product-and-api_zh.md",
+            (r"全部 (\d+) 个 chat workload", r"共 (\d+) 个",
+             r"当前 (\d+) 个结构化 chat workload"),
+        ),
+        ("architecture.md", (r"全部 (\d+) 个 chat workload",)),
+    ):
+        text = (root / name).read_text(encoding="utf-8")
+        for pattern in count_patterns:
+            assert [int(n) for n in re.findall(pattern, text)] == [len(chat)], (
+                name, pattern
+            )
+        if name == "architecture.md":
+            continue
+        listed = {}
+        for area, cells in re.findall(
+            r"^\| [^|`]*`([a-z]+)` \| ((?:`[a-z_]+`[,、 ]*)+) \|$", text, re.M
+        ):
+            listed[area] = set(re.findall(r"`([a-z_]+)`", cells))
+        assert listed == expected, name

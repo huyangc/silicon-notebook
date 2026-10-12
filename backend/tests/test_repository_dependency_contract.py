@@ -30,7 +30,6 @@ RETIRED_RETRIEVAL_PRIVATES = {
 LIFECYCLE_STORE_CALLS = {
     "knowledge": {
         "active_object_count",
-        "community_context_rows",
         "completion_advance_state",
         "completion_candidate_rows",
         "completion_element_rows",
@@ -135,7 +134,6 @@ LIFECYCLE_STORE_CALLS = {
         "discard_board_dependent_kg_analysis_artifacts",
         "community_graph_rows",
         "community_member_ids",
-        "community_reports",
         "community_rows_for_summary",
         "concept_clusters_count",
         # codex #772 r16: `_unified_graph_version` reads the four-part graph
@@ -172,7 +170,6 @@ LIFECYCLE_STORE_CALLS = {
         "scratch_vector_rows",
         "seed_payload_rows",
         "set_community_seq",
-        "set_community_summary",
         "state_row",
         "stream_seed_rows",
         # 批 3·W2 代际原语:取号/释放/在飞复读/写新代/翻转/催收/回收。

@@ -613,6 +613,22 @@ found in — an id that exists only in `[thinking]` is not findable in
 `[bindings]`. The message carries ids, labels and table names only — never a
 secret or an endpoint.
 
+One retired id is the exception: `kg_community_summary` (the community-report
+summarizer, retired as dead code — it was never called at runtime). Every
+`model-services.toml` generated before its retirement binds it in both tables,
+so a leftover `kg_community_summary` line in `[bindings]` or `[thinking]` does
+**not** refuse startup; it is ignored and the backend log carries one hint line
+(no path, no file text):
+
+```text
+model-bindings: MODEL_SERVICES_CONFIG 指向的文件的 [bindings]/[thinking] 里有已退役、可忽略的工作负载：kg_community_summary（[bindings]/[thinking]）。已忽略，不影响启动；可以删除这些行。
+```
+
+Deleting the two lines on upgrade is optional. Hot reload treats them the same
+way. Any other unknown or retired id still refuses startup as described above.
+This allowance is scheduled for removal two releases after the retirement;
+after that a leftover line refuses like any other retired id.
+
 **That line never prints the configuration file's path** — it says
 "MODEL_SERVICES_CONFIG 指向的文件", so look the TOML up through that environment
 variable. The backend runs as `uvicorn … >>"$BACKEND_LOG" 2>&1`, which makes
@@ -1306,7 +1322,6 @@ KG_REFINE_ENABLED            # extraction self-verify: drop hallucinated nodes (
 KG_GLEANING_ENABLED          # extra rounds asking the LLM for MISSED nodes (default true)
 KG_GLEANING_ROUNDS           # gleaning rounds when enabled (default 1)
 KG_CONCEPT_DESC_ENABLED      # LLM-fuse cross-doc concept-cluster descriptions (default true)
-KG_COMMUNITY_SUMMARY_ENABLED # LLM community reports during rebuild (community layer; default false)
 ANSWER_CONTEXT_BUDGET_CHARS  # answer-context assembly char budget (default 6000; not read by a deep report's sections — see the retrieval behaviour-change note)
 RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF ranking vs keyword+semantic fusion (default false)
 RETRIEVAL_RRF_K              # reciprocal-rank-fusion k (default 60)

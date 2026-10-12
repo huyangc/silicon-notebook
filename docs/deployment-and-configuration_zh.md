@@ -504,6 +504,18 @@ id 按「已退役」与「疑似拼错」分开写，因为这两种要做的�
 表——只写在 `[thinking]` 里的陈旧 id，在 `[bindings]` 里是翻不到的。消息里只有 id、中文标签和
 表名，不含任何密钥或 endpoint。
 
+有一个已退役 id 例外：`kg_community_summary`（主题板块摘要生成，运行时从未被调用，作为死代码
+退役）。退役之前生成的 `model-services.toml` 两张表里都绑着它，所以 `[bindings]` 或
+`[thinking]` 里残留的 `kg_community_summary` 行**不会**导致拒启：它被忽略，后端日志里只留一行
+提示（不含路径、不含文件内容）：
+
+```text
+model-bindings: MODEL_SERVICES_CONFIG 指向的文件的 [bindings]/[thinking] 里有已退役、可忽略的工作负载：kg_community_summary（[bindings]/[thinking]）。已忽略，不影响启动；可以删除这些行。
+```
+
+升级时删不删这两行都可以，热重载同样对待。其它未知或已退役的 id 仍按上文拒启。这条放行计划在
+退役两个版本后移除，届时残留行会像其它已退役 id 一样拒启。
+
 **这一行不会打印配置文件的路径**——它写的是「MODEL_SERVICES_CONFIG 指向的文件」，请照着这个
 环境变量去找那份 TOML。原因是后端以 `uvicorn … >>"$BACKEND_LOG" 2>&1` 启动，stderr 就是日志
 文件，所以启动失败不再抛 traceback，只打印这一行。同理，来自配置文件的陈旧 id 只有形如
@@ -1032,7 +1044,6 @@ KG_REFINE_ENABLED            # 抽取自校验：丢弃幻觉节点（默认 tru
 KG_GLEANING_ENABLED          # 额外几轮让 LLM 找回漏抽节点（默认 true）
 KG_GLEANING_ROUNDS           # 开启时的 gleaning 轮数（默认 1）
 KG_CONCEPT_DESC_ENABLED      # LLM 融合跨文档概念簇描述（默认 true）
-KG_COMMUNITY_SUMMARY_ENABLED # rebuild 期生成 LLM 社区报告（社区层；默认 false）
 ANSWER_CONTEXT_BUDGET_CHARS  # 答案上下文装配字符预算（默认 6000；深度报告的节不再读取，见检索段的行为变化说明）
 RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF 排序，替代关键词+语义融合（默认 false）
 RETRIEVAL_RRF_K              # RRF 的 k（默认 60）

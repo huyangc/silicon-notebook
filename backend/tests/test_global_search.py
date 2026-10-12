@@ -1,7 +1,7 @@
 import json
 import pytest
 from app.core.config import Settings
-from app.models.schemas import NotebookCreate, AskRequest
+from app.models.schemas import AskRequest
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients
@@ -9,14 +9,10 @@ from tests.model_testkit import bind_chat_client
 
 
 class _GlobalLLM:
-    """Handles three schema shapes: community-report (title), map (points), reduce (answer)."""
+    """Handles two schema shapes: map (points), reduce (answer)."""
     configured = True
     def __init__(self): self.map_calls = 0; self.reduce_calls = 0
     def chat_json(self, messages, schema_hint, **kwargs):
-        if '"title"' in schema_hint:
-            # community report summarization
-            return json.dumps({"title": "Cascode", "summary": "Cascode techniques overview.",
-                               "findings": ["cascode raises output resistance", "limits swing"]})
         if '"points"' in schema_hint:
             self.map_calls += 1
             return json.dumps({"points": [{"description": "cascode boosts output resistance", "score": 90}]})
@@ -34,25 +30,11 @@ def repo(tmp_path, monkeypatch):
     return r
 
 
-def _claim(lid, name):
-    return {"local_id": lid, "object_type": "claim", "payload": {"name": name, "section_path": "1"}, "evidence": []}
-
-
-def _prep_reports(repo):
-    nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo.store_kg(nb.id, None, [_claim("A", "cascode raises output resistance"),
-                                _claim("B", "cascode limits swing")],
-                  [{"source_local_id": "A", "target_local_id": "B", "edge_type": "supports", "evidence": []}])
-    repo.rebuild_communities(nb.id)
-    repo.settings.kg_community_summary_enabled = True
-    bind_chat_client(repo, "ask_answer", _GlobalLLM())
-    repo.summarize_communities(nb.id)   # generate reports via stub
-    return nb
-
-
 # P4-5: test_global_ask_synthesizes_from_reports and test_global_ask_no_reports_graceful
 # deleted — they tested _ask_global (GraphRAG map-reduce) which was retired in P4-5.
-# get_community_reports / rebuild_communities / summarize_communities are kept dormant.
+# The dormant community-report summarizer (summarize_communities /
+# get_community_reports, the kg_community_summary workload) was retired later;
+# rebuild_communities stays because retrieval reads the community boards.
 
 def test_global_ask_missing_notebook_raises(repo):
     # P4-5: mode="global" now aliases to "chunk" via _RETIRED_MODES.

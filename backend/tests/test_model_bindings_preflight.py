@@ -113,7 +113,7 @@ def test_a_missing_binding_logs_the_message_and_stops_the_process(
     message = str(exc_info.value)
     logged = [record.getMessage() for record in caplog.records]
     assert logged == [message]
-    assert "知识补充抽取（kg_glean）" in message
+    assert "知识补充分析（kg_glean）" in message
     assert "记忆向量（memory_embedding）" in message
     assert "MODEL_SERVICES_CONFIG 指向的文件" in message
     # 两处都不带配置路径;异常链也被切断,原异常不会跟着 traceback 一起出去。
@@ -132,6 +132,46 @@ def test_a_stale_binding_alone_is_enough_to_refuse(monkeypatch, tmp_path):
 
     with pytest.raises(SystemExit, match="graph_chain_verify"):
         _model_bindings_preflight(settings)
+
+
+def test_a_leftover_ignorable_retired_binding_still_starts(
+    monkeypatch, tmp_path, caplog
+):
+    """社区摘要退役(裁决 8):升级前生成的配置两张表都还绑着
+    kg_community_summary。严格预检照常放行,只留一条脱敏提示。"""
+    monkeypatch.setenv("PREFLIGHT_KEY", "secret")
+    config = _config(
+        tmp_path,
+        extra='kg_community_summary = "chat"\n'
+        '[thinking]\nkg_community_summary = "disabled"\n',
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert _model_bindings_preflight(_settings(config)) is None
+
+    hints = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "silicon_notebook.model_registry"
+    ]
+    assert len(hints) == 1
+    assert "kg_community_summary（[bindings]/[thinking]）" in hints[0]
+    assert config not in hints[0] and str(tmp_path) not in hints[0]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_an_unknown_id_beside_the_ignorable_one_still_refuses(monkeypatch, tmp_path):
+    monkeypatch.setenv("PREFLIGHT_KEY", "secret")
+    settings = _settings(_config(
+        tmp_path,
+        extra='kg_community_summary = "chat"\nask_anwser = "chat"\n',
+    ))
+
+    with pytest.raises(SystemExit) as exc_info:
+        _model_bindings_preflight(settings)
+
+    assert "ask_anwser（[bindings]）" in str(exc_info.value)
+    assert "kg_community_summary" not in str(exc_info.value)
 
 
 def test_a_stale_key_that_is_not_shaped_like_an_id_never_reaches_the_log(
@@ -339,7 +379,7 @@ def test_a_missing_binding_stops_the_real_process_without_a_traceback(tmp_path):
 
     assert result.returncode == 1
     assert "model-bindings: " in result.stderr
-    assert "知识补充抽取（kg_glean）" in result.stderr
+    assert "知识补充分析（kg_glean）" in result.stderr
     assert "graph_chain_verify（[bindings]）" in result.stderr
     assert "MODEL_SERVICES_CONFIG 指向的文件" in result.stderr
     assert "Traceback" not in result.stderr

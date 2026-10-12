@@ -117,7 +117,6 @@
         "find_notebook_by_share_token",
         "finish_ask_job",
         "fold_scale_index_delta",
-        "get_community_reports",
         "get_conflict_candidate",
         "get_conversation",
         "get_knowhow_cell_code",
@@ -291,7 +290,6 @@
         "storage_dir",
         "store_kg",
         "submit_feedback",
-        "summarize_communities",
         "transfer_memories",
         "trigger_scale_index_rebuild",
         "unified_graph",
@@ -352,7 +350,7 @@
   "core_models_service_imports": {
     "allowed": []
   },
-  "ports_protocol_method_count": 978,
+  "ports_protocol_method_count": 976,
   "function_length_ceiling": {
     "backend/app/extensions/ask.py::AskCompletedObserverHost.observe_application": 154,
     "backend/app/extensions/parser_chain.py::ParserProviderChainHost._run": 307,

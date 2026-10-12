@@ -75,7 +75,6 @@ KG_WORKLOADS = frozenset({
     "kg_glean",
     "kg_merge_review",
     "kg_concept_description",
-    "kg_community_summary",
     "kg_conflict_review",
 })
 
