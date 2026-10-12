@@ -20,13 +20,17 @@
   共用的唯一执行顺序):调用方先锁 notebook root，再用
   `MEMBER_PROBE_FOR_SHARE_SQL` 或本文件的 direct/group grant-chain probe 锁住一条
   当前有效的 self-service 读权链，直到详情响应对象组装完。
-* `postgres/memory_store.py`:`_read_access_clause`、`_answer_save_scope_exists`、
+* `postgres/memory_store.py`:`_read_access_clause`(经
+  `live_read_access_exists_clause`,带笔记本存活谓词)、`_answer_save_scope_exists`、
   `validate_promotion_approval_access_on`(用列引用形式)。
+* `postgres/query_store.py`:本人自助读的 ask_jobs/reports(活动概览「只看提问/只看
+  报告」、铃铛待确认报告)经 `live_read_access_exists_clause`。
 * `postgres/mount_sql.py::MOUNT_VALID_EXPR` —— 「读权 ⇒ 可挂载」,用列引用形式嵌入,
   不消费任何参数。
 * `postgres/search.py::_memory_match_predicates` —— Memory 词法检索的读权过滤
   (被 `memory_candidate_ids` / `memory_match_count` / `memory_page_candidate_ids`
-  三个入口共用),与 `_read_access_clause` 同形,是本次收口前的第三份独立复刻。
+  三个入口共用),与 `_read_access_clause` 同形(同样经
+  `live_read_access_exists_clause`),是本次收口前的第三份独立复刻。
 * ⚠ **三段式带锁写法,刻意保留**(`postgres/memory_store.py` 的
   `create_candidate_with_initial_revision`、答案存 Memory 的写事务分支、
   `_lock_memory_aggregate_on`):它们先 `SELECT created_by FROM notebooks ... FOR SHARE`
@@ -459,6 +463,23 @@ def read_access_exists_clause(
         f"WHERE {nb_alias}.id={row_alias}.notebook_id "
         f"AND {read_access_clause(nb_alias, member_alias, grant_alias='access_ng', group_alias='access_ngm', group_admin_alias='access_nga')})"
     )
+
+
+def live_read_access_exists_clause(
+    row_alias: str = "m",
+    nb_alias: str = "access_nb",
+    member_alias: str = "access_nm",
+) -> str:
+    """`read_access_exists_clause` 加笔记本存活谓词:copying/deleting/importing 的库
+    里的行读不到。理由与 SQLite 那一份同款(Memory 读查询、自助活动/铃铛里的
+    ask_jobs/reports 读)。
+
+    存活谓词追加在**同一个** EXISTS 里、已按主键取到的那行 notebooks 上,不新增
+    占位符——参数仍是 `read_access_params(user_id)`,调用点的参数元组不用改。
+    通用的 `read_access_exists_clause` 刻意不动(管理员统计等别的消费者)。
+    """
+    base = read_access_exists_clause(row_alias, nb_alias, member_alias)
+    return f"{base[:-1]} AND {nb_alias}.{NOTEBOOK_LIVE_SQL})"
 
 
 # 读权/管理权片段消费几个位置参数——从谓词自己的占位符数**推导**而不是手写常量。

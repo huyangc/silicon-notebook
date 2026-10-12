@@ -416,8 +416,12 @@ class MemoryService:
         # KeyError is NOT the pre-ingest "nothing created yet" case above —
         # ingest already ran — so it must trigger cleanup, not a silent return.
         try:
+            # Existence, not read authority over a live notebook: a notebook
+            # flipped to deleting mid-ingest must not read as "memory gone"
+            # and start a cleanup racing the delete job, which removes it all.
             still_confirmed = (
-                self.store.memory_for_user(memory_id, user_id).status == "confirmed"
+                self.store.memory_for_user(memory_id, user_id, live_only=False).status
+                == "confirmed"
             )
         except KeyError:
             still_confirmed = False

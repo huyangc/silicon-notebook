@@ -250,3 +250,41 @@ def test_find_by_token(postgres_repository, lifecycle):
     assert store.find_by_token(tokens[lifecycle["active_id"]]) == lifecycle["active_id"]
     assert store.find_by_token(tokens[lifecycle["copying_id"]]) is None
     assert store.find_by_token(tokens[lifecycle["deleting_id"]]) is None
+
+
+# --------------------------------------------------------------------------
+# K3:Memory 读者与本人自助的 ask_jobs/reports 读带笔记本存活谓词(PG 全量,不抽查:
+# 这些语句经 `live_read_access_exists_clause` 拼接,`postgres/search.py` 的 Memory
+# 候选还有自己独立的一份谓词)。场景与断言与 SQLite 侧共用 `tests/memory_live_cases.py`。
+# --------------------------------------------------------------------------
+from tests import memory_live_cases as live_cases  # noqa: E402
+
+
+@pytest.fixture
+def memory_world(postgres_settings, tmp_path):
+    from app.repositories.postgres.repository import PostgresRepository
+
+    postgres_settings.storage_dir = str(tmp_path / "postgres-storage")
+    postgres_settings.event_log_enabled = False
+    postgres_settings.llm_log_enabled = False
+    postgres_settings.embed_dim = live_cases.EMBED_DIM
+    repository = PostgresRepository(postgres_settings)
+    try:
+        yield live_cases.build_world(repository, postgres=True)
+    finally:
+        repository.close()
+
+
+@pytest.mark.parametrize("state", live_cases.NON_LIVE_STATES)
+def test_memory_readers_hide_non_live_notebooks(memory_world, state):
+    live_cases.assert_readers_follow_lifecycle(memory_world, state)
+
+
+@pytest.mark.parametrize("state", live_cases.NON_LIVE_STATES)
+def test_memory_writes_refused_in_non_live_notebook(memory_world, state):
+    live_cases.assert_writes_refused_then_allowed(memory_world, state)
+
+
+@pytest.mark.parametrize("state", live_cases.NON_LIVE_STATES)
+def test_memory_kg_ingest_recheck_ignores_notebook_lifecycle(memory_world, state):
+    live_cases.assert_ingest_recheck_survives_lifecycle_flip(memory_world, state)

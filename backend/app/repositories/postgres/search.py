@@ -10,7 +10,7 @@ from psycopg import sql
 from app.repositories.lexical_query import has_cjk
 from app.repositories.like_pattern import LIKE_ESCAPE_CHAR, escape_like_pattern
 from app.repositories.postgres.access_sql import (
-    read_access_exists_clause,
+    live_read_access_exists_clause,
     read_access_params,
 )
 from app.repositories.postgres.id_binding import bind_ids, execute_bound, member_of
@@ -1020,7 +1020,7 @@ def _memory_match_predicates(
     if scope.origin is not None:
         predicates.append("origin=%s")
         params.append(scope.origin)
-    predicates.append(read_access_exists_clause("memory_items"))
+    predicates.append(live_read_access_exists_clause("memory_items"))
     params.extend(read_access_params(scope.viewer_id))
     probes = memory_match_probes(query, phrase_queries)
     groups: list[str] = []

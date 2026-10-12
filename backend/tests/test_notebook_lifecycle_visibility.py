@@ -457,3 +457,30 @@ def test_rejoin_by_an_existing_member_is_refused_once_the_tombstone_lands(
     monkeypatch.setattr(store, "insert_member_if_live", tombstone_then_insert)
     with pytest.raises(KeyError):
         sharing.join_shared(nb, member)
+
+
+# --------------------------------------------------------------------------
+# K3:Memory 读者与本人自助的 ask_jobs/reports 读带笔记本存活谓词。
+# 场景与断言在 `tests/memory_live_cases.py`(两个后端共用),这里只给 SQLite 仓储。
+# --------------------------------------------------------------------------
+from tests import memory_live_cases as live_cases  # noqa: E402
+
+
+@pytest.fixture
+def memory_world(repo):
+    return live_cases.build_world(repo, postgres=False)
+
+
+@pytest.mark.parametrize("state", live_cases.NON_LIVE_STATES)
+def test_memory_readers_hide_non_live_notebooks(memory_world, state):
+    live_cases.assert_readers_follow_lifecycle(memory_world, state)
+
+
+@pytest.mark.parametrize("state", live_cases.NON_LIVE_STATES)
+def test_memory_writes_refused_in_non_live_notebook(memory_world, state):
+    live_cases.assert_writes_refused_then_allowed(memory_world, state)
+
+
+@pytest.mark.parametrize("state", live_cases.NON_LIVE_STATES)
+def test_memory_kg_ingest_recheck_ignores_notebook_lifecycle(memory_world, state):
+    live_cases.assert_ingest_recheck_survives_lifecycle_flip(memory_world, state)

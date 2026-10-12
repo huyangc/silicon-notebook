@@ -1233,7 +1233,7 @@ class QueryStore:
                 if all_question_submissions and not include_inaccessible_questions:
                     ask_notebook_clause = (
                         " AND "
-                        + access_sql.read_access_exists_clause("ask_jobs")
+                        + access_sql.live_read_access_exists_clause("ask_jobs")
                     )
                     ask_params.extend(access_sql.read_access_params(user_id))
                 elif not all_question_submissions:
@@ -1349,7 +1349,7 @@ class QueryStore:
                 if all_report_submissions and not include_inaccessible_questions:
                     report_notebook_clause = (
                         " AND "
-                        + access_sql.read_access_exists_clause("reports")
+                        + access_sql.live_read_access_exists_clause("reports")
                     )
                     report_params.extend(access_sql.read_access_params(user_id))
                 elif not all_report_submissions:
@@ -1818,7 +1818,7 @@ class QueryStore:
                 "FROM reports r LEFT JOIN notebooks nb ON nb.id = r.notebook_id "
                 "WHERE r.status IN ('intent_ready','outline_ready') "
                 "AND r.created_by = %s AND "
-                + access_sql.read_access_exists_clause("r")
+                + access_sql.live_read_access_exists_clause("r")
                 + " ORDER BY r.updated_at DESC",
                 (user_id, *access_sql.read_access_params(user_id)),
             ).fetchall()

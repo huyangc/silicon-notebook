@@ -87,7 +87,10 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
 * `sqlite/ask_state_store.py::guarded_ask_detail` 与
   `sqlite/report_store.py::guarded_report_detail`:在 `BEGIN IMMEDIATE` 删除/撤权
   fence 内用 `NOTEBOOK_READ_SQL` 复核 self-service 详情读权。
-* `sqlite/memory_store.py`:`_read_access_clause`(嵌进 Memory 各处读查询)、
+* `sqlite/query_store.py`:本人自助读的 ask_jobs/reports 经
+  `live_read_access_exists_clause`(见该函数 docstring)。
+* `sqlite/memory_store.py`:`_read_access_clause`(经 `live_read_access_exists_clause`
+  嵌进 Memory 各处读查询)、
   `create_candidate_with_initial_revision`(写前判定)、
   `create_answer_with_initial_revision`(答案存 Memory 的范围校验;同名的
   `_answer_save_scope_locked_on` 是不含 SQL 的空接缝,谓词不在那儿)、
@@ -417,6 +420,35 @@ def read_access_exists_clause(
         f"WHERE {nb_alias}.id={row_alias}.notebook_id "
         f"AND {read_access_clause(nb_alias, member_alias, grant_alias='access_ng', group_alias='access_ngm', group_admin_alias='access_nga')})"
     )
+
+
+def live_read_access_exists_clause(
+    row_alias: str = "m",
+    nb_alias: str = "access_nb",
+    member_alias: str = "access_nm",
+) -> str:
+    """`read_access_exists_clause` 加笔记本存活谓词:copying/deleting/importing 的库
+    里的行读不到。
+
+    消费者:`memory_store._read_access_clause`(Memory 各处读查询,也是 Memory 写
+    语句的读权门)、`postgres/search.py` 的 Memory 候选,以及 `query_store` 里本人
+    自助读的 ask_jobs/reports(活动概览「只看提问/只看报告」两条、铃铛的待确认
+    报告)。删除中/拷贝中/导入中的库「还不算存在」,入口闸(`require_notebook_read`
+    等)之外这些语句也要自己挡住,否则全局列表与直连 `/memories/{id}` 绕过入口。
+
+    存活谓词追加在**同一个** EXISTS 子查询里、已按主键取到的那行 notebooks 上,
+    不新增占位符——参数仍是 `read_access_params(user_id)`,调用点的参数元组不用改;
+    谓词作用在已取到的那一行上,不新增索引访问,计划形状逐读者钉在
+    `tests/postgres/test_memory_live_predicate_explain_pins.py` 与
+    `tests/test_memory_live_predicate_plans.py`。
+
+    通用的 `read_access_exists_clause` 刻意**不动**:它还供管理员统计等别的消费者
+    使用,折进去会把改动面扩大到未经审视的地方(与 `NOTEBOOK_WRITE_SQL` 上方注释
+    同一取舍)。判断「Memory 行还在不在」的读(`memory_for_user(live_only=False)`,
+    抽图作业的复读)也刻意不用它。
+    """
+    base = read_access_exists_clause(row_alias, nb_alias, member_alias)
+    return f"{base[:-1]} AND {nb_alias}.{NOTEBOOK_LIVE_SQL})"
 
 
 # 读权/管理权片段消费几个位置参数——从谓词自己的占位符数**推导**而不是手写常量:
