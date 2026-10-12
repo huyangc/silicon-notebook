@@ -768,20 +768,44 @@ class SourceStore:
             limit=limit,
         )
 
-    # One statement: existence, count, and the elements at the asked-for
-    # positions. ``head`` walks ``idx_source_elements_source_created`` index
-    # only, in source-detail order, as far as the largest position (``span``)
-    # and numbers the rows; only the hits go back to the heap, by primary key.
-    # The per-offset form (``LATERAL ... OFFSET wanted.pos``) walks the index
-    # AND the heap once per position, sum-of-offsets rows in all; measured
-    # against it cell by cell before this form was chosen (PR description).
-    _POSITIONS_SQL = (
+    # A positional read is ONE statement -- existence, count and the elements
+    # -- in one of two shapes, both starting with the same three CTEs:
+    #
+    # * per offset: each position is a ``LATERAL ... OFFSET pos LIMIT 1`` walk
+    #   of ``idx_source_elements_source_created`` and the heap, the plan the
+    #   windowed read gets for one offset; the work is the sum of the offsets.
+    # * head walk: one walk of that index up to the largest position
+    #   (``span``) numbers the rows with ``row_number()``; only the hits go
+    #   back to the heap, by primary key. The work is ``span`` -- index only
+    #   where the visibility map allows; on a never-vacuumed document every
+    #   row is still a heap visit and the walk measured ~1.5x a plain one.
+    #
+    # ``_positions_sql`` takes the head walk only when the offset sum is at
+    # least twice ``span`` (so even the never-vacuumed walk is cheaper) and
+    # large enough for its window and probes to pay off; a single position --
+    # the "last element only" read -- therefore always keeps the per-offset
+    # plan. Both choices were measured cell by cell (PR description).
+    _POSITIONS_PREFIX = (
         "WITH present AS (SELECT id FROM sources WHERE id=%(source_id)s), "
         "counted AS (SELECT COUNT(*) AS c FROM source_elements "
         "WHERE source_id=%(source_id)s), "
         "wanted AS (SELECT pos,ord FROM unnest(%(positions)s::bigint[]) "
-        "WITH ORDINALITY AS w(pos,ord)), "
-        "ranked AS (SELECT id,row_number() OVER "
+        "WITH ORDINALITY AS w(pos,ord)) "
+    )
+    _POSITIONS_PER_OFFSET_SQL = (
+        _POSITIONS_PREFIX
+        + "SELECT counted.c AS total_count, picked.* "
+        "FROM present CROSS JOIN counted LEFT JOIN LATERAL ("
+        "SELECT wanted.ord,element.id,element.source_id,element.element_type,"
+        "element.location_label,element.text,element.metadata "
+        "FROM wanted CROSS JOIN LATERAL (SELECT * FROM source_elements "
+        "WHERE source_id=%(source_id)s "
+        "ORDER BY created_at,id COLLATE \"C\" OFFSET wanted.pos LIMIT 1) AS element"
+        ") AS picked ON true ORDER BY picked.ord"
+    )
+    _POSITIONS_HEAD_WALK_SQL = (
+        _POSITIONS_PREFIX
+        + ", ranked AS (SELECT id,row_number() OVER "
         "(ORDER BY created_at,id COLLATE \"C\")-1 AS pos "
         "FROM (SELECT created_at,id FROM source_elements "
         "WHERE source_id=%(source_id)s ORDER BY created_at,id COLLATE \"C\" "
@@ -794,6 +818,16 @@ class SourceStore:
         "JOIN source_elements AS element ON element.id=ranked.id"
         ") AS picked ON true ORDER BY picked.ord"
     )
+    _HEAD_WALK_MIN_RATIO = 2
+    _HEAD_WALK_MIN_OFFSETS = 2048
+
+    @classmethod
+    def _positions_sql(cls, wanted: Sequence[int]) -> str:
+        span = max(wanted, default=-1) + 1
+        offsets = sum(position + 1 for position in wanted)
+        if offsets >= max(cls._HEAD_WALK_MIN_RATIO * span, cls._HEAD_WALK_MIN_OFFSETS):
+            return cls._POSITIONS_HEAD_WALK_SQL
+        return cls._POSITIONS_PER_OFFSET_SQL
 
     def _elements_at_positions(
         self, source_id: str, positions: Sequence[int]
@@ -803,13 +837,13 @@ class SourceStore:
         Under READ COMMITTED a single statement reads one snapshot, so the
         count and the elements can never disagree -- the property the old
         per-offset reads only approximated by comparing totals call by call.
-        No missing source row means no row at all, which is the ``KeyError``
+        A missing source row means no row at all, raised as the ``KeyError``
         every positional caller already handles.
         """
         wanted = normalize_positions(positions)
         with self.database.connect() as connection:
             rows = connection.execute(
-                self._POSITIONS_SQL,
+                self._positions_sql(wanted),
                 {"source_id": source_id, "positions": wanted,
                  "span": max(wanted, default=-1) + 1},
             ).fetchall()

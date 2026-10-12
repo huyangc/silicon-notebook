@@ -184,3 +184,27 @@ def test_overview_is_byte_identical_and_batched(repo, max_elements, coverage, bu
     assert reads.calls[0] == ("offset", 0)
     assert len(reads.calls) == 1 + math.ceil(later / MAX_POSITIONS_PER_READ)
     assert sum(n for kind, n in reads.calls if kind == "positions") == later
+
+
+@pytest.mark.parametrize("positions,shape", [
+    ([10**5 - 1], "per_offset"),            # the last element only: never the head walk
+    ([5, 5, 5], "per_offset"),
+    (list(range(1, 63)), "per_offset"),     # opening: offsets sum 1953 < 2048
+    (list(range(1, 64)), "head_walk"),      # opening: offsets sum 2079 >= 2048
+    ([i * 99_999 // 63 for i in range(1, 64)], "head_walk"),
+    ([50_000, 99_999], "per_offset"),       # 1.5 walks: under the 2x margin
+    ([33_333, 66_666, 99_999], "head_walk"),
+    (list(range(1, 100)), "head_walk"),
+    ([], "per_offset"),
+])
+def test_postgres_shape_choice(positions, shape):
+    """The head walk only where the per-offset reads would walk at least twice
+    its length and enough rows for its window and probes to pay off."""
+    from app.repositories.postgres.source_store import SourceStore as PgStore
+
+    chosen = PgStore._positions_sql(positions)
+    assert chosen == {
+        "per_offset": PgStore._POSITIONS_PER_OFFSET_SQL,
+        "head_walk": PgStore._POSITIONS_HEAD_WALK_SQL,
+    }[shape]
+
