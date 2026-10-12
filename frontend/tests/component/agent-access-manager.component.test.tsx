@@ -894,7 +894,7 @@ test("删除后刷新失败或迟迟不回:提示到期后该行不会以可操�
   expect(screen.queryByRole("button", { name: "停用" })).toBeNull();
 });
 
-test("删除成功前发出的列表请求晚到:不会把已删除的 Profile 加回来", async () => {
+test("删除后的刷新结果仍带着已删除的 Profile:不会把它加回来", async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   let lateList = false;
   let resolveLate!: (value: unknown) => void;
