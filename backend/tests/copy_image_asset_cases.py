@@ -42,9 +42,11 @@ UNCHANGED = {
     "nested-asset": '{"figure": {"asset_id": "<img1>"}}',
     "non-object": '["asset_id", "<img1>"]',
     "unhashable": '{"asset_id": ["<img1>"]}',
-    "unknown-asset": '{"asset_id": "asset-not-in-this-notebook"}',
-    "substring-only": '{"label": "asset_id"}',
-    "null-asset": '{"asset_id": null}',
+    # 下面三条故意用紧凑分隔符:命中子串、解析了、但没有值可换——SQLite 上必须逐字节不动,
+    # 「解析过就重新序列化」会把它们改成默认分隔符。
+    "unknown-asset": '{"asset_id":"asset-not-in-this-notebook"}',
+    "substring-only": '{"label":"asset_id"}',
+    "null-asset": '{"asset_id":null}',
 }
 TXT_ELEMENT = ("txt-para", '{"page": 1}')
 
