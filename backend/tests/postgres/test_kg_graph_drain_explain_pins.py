@@ -139,6 +139,10 @@ def captured(postgres_database):
                              if t == "kg_conflict_candidates")
         assert KnowledgeStore.graph_drain_backlog(
             rec, "nb", 10**9, conflict_step) is None
+        # merge_review_jobs is only ever probed at threshold 0, by the sweep
+        merge_step = next(i for i, (t, *_r) in enumerate(_GRAPH_DRAIN_STEPS)
+                          if t == "merge_review_jobs")
+        KnowledgeStore.graph_drain_backlog(rec, "nb", 0, merge_step, scope="sweep")
         KnowledgeStore.delete_notebook_graph_rows(rec, "nb", _NOW)
     plans: dict[str, list[tuple[str, str]]] = {}
     with postgres_database.connect() as connection:
@@ -153,16 +157,29 @@ def captured(postgres_database):
 
 
 def test_conflict_and_merge_review_steps_are_index_bounded(captured):
-    """K1:冲突候选的探针与终局 DELETE 走 (notebook_id, status) 前缀索引,两侧
-    引用存在性逐个走对象 / 关系主键;合并预审行走主键。"""
+    """K1:冲突候选的探针与终局 DELETE 走 (notebook_id, status) 前缀索引;两侧
+    引用的存在性检查对对象表、关系表各自是一次以该侧引用为键的主键探测
+    (质量评审 P3-2:逐侧断言 ``Index Cond: (id = …left_ref/right_ref)``,
+    且计划里没有 ``Materialize`` / ``hashed SubPlan``——整索引扫描或整表
+    哈希的形态即使用上主键名也会被拦下)。合并预审行走主键。"""
+    import re
+
     conflict = captured["kg_conflict_candidates"]
     assert len(conflict) == 2, [s for s, _p in conflict]  # probe + final DELETE
     for statement, plan in conflict:
         assert "Seq Scan" not in plan, f"{statement}\n{plan}"
+        assert "Materialize" not in plan and "hashed SubPlan" not in plan, plan
         assert "idx_conflict_candidates_nb_status" in plan, plan
-        assert "pk_knowledge_objects" in plan and "pk_knowledge_relations" in plan, plan
+        for index, table in (("pk_knowledge_objects", "knowledge_objects"),
+                             ("pk_knowledge_relations", "knowledge_relations")):
+            for side in ("left_ref", "right_ref"):
+                assert re.search(
+                    rf"Index (?:Only )?Scan using {index} on {table} \w+\n\s+"
+                    rf"Index Cond: \(id = kg_conflict_candidates\.{side}\)",
+                    plan,
+                ), f"{table} {side} is not a primary-key probe:\n{plan}"
     merge = captured["merge_review_jobs"]
-    assert len(merge) == 2, [s for s, _p in merge]
+    assert len(merge) == 2, [s for s, _p in merge]  # sweep probe + final DELETE
     for statement, plan in merge:
         assert "Seq Scan" not in plan, f"{statement}\n{plan}"
         assert "pk_merge_review_jobs" in plan, plan

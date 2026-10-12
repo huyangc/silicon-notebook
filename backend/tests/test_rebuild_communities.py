@@ -367,9 +367,13 @@ def test_summary_rows_drop_memory_members_of_a_pre_isolation_community(repo):
         finally:
             db.set_trace_callback(None)
     assert got == [{"id": "comm-plain", "member_ids": '["a", "b"]'}]
+    # (K1 / ruling 11: the published-generation subquery reads -1 while the
+    # community layer is in a graph delete's signature; still one state-row
+    # lookup, still no Memory filter.)
     assert [s for s in seen if "FROM communities" in s] == [
         "SELECT id, member_ids FROM communities WHERE notebook_id="
-        f"'{plain.id}' AND level=0 AND generation = COALESCE((SELECT "
-        "community_generation FROM unified_kg_state WHERE notebook_id = "
-        f"'{plain.id}'), 0)"
+        f"'{plain.id}' AND level=0 AND generation = COALESCE((SELECT CASE WHEN "
+        "kg_reset_epoch > 0 AND community_seq = -1 AND COALESCE(last_rebuild_at, "
+        "'') = '' THEN -1 ELSE community_generation END FROM unified_kg_state "
+        f"WHERE notebook_id = '{plain.id}'), 0)"
     ]

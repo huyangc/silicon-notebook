@@ -81,9 +81,29 @@ _PUBLISHED_CLUSTER_GEN = (
     "COALESCE((SELECT cluster_generation FROM unified_kg_state "
     "WHERE notebook_id = ?), 0)"
 )
+# K1 (debt-fix 2026-10-12, ruling 11): a graph delete keeps the five
+# rebuild-derived tables until the next rebuild; their rows must not read back
+# in between. The PostgreSQL twin's comment at the same spot has the full
+# argument (the delete's state-row signature, what else could produce it, why
+# a rebuild reopens the layer). SQLite stores an empty ``last_rebuild_at`` as
+# '' rather than NULL.
+def _derived_layer_live(seq_column: str) -> str:
+    return (
+        "NOT EXISTS (SELECT 1 FROM unified_kg_state dls "
+        "WHERE dls.notebook_id = ? AND dls.kg_reset_epoch > 0 "
+        f"AND dls.{seq_column} = -1 AND COALESCE(dls.last_rebuild_at, '') = '')"
+    )
+
+
+_CANONICAL_LAYER_LIVE = _derived_layer_live("canonical_rel_seq")
+_MENTION_LAYER_LIVE = _derived_layer_live("mention_seq")
+
+# The published community generation; -1 (never a real generation) while the
+# community layer is in the delete signature -- same single state-row lookup.
 _PUBLISHED_COMMUNITY_GEN = (
-    "COALESCE((SELECT community_generation FROM unified_kg_state "
-    "WHERE notebook_id = ?), 0)"
+    "COALESCE((SELECT CASE WHEN kg_reset_epoch > 0 AND community_seq = -1 "
+    "AND COALESCE(last_rebuild_at, '') = '' THEN -1 ELSE community_generation END "
+    "FROM unified_kg_state WHERE notebook_id = ?), 0)"
 )
 
 
@@ -572,7 +592,8 @@ class UnifiedKgStore:
     def mention_rows(db: sqlite3.Connection, notebook_id: str):
         return db.execute(
             "SELECT claim_object_id, concept_canonical_id FROM mention_edges "
-            "WHERE notebook_id=?", (notebook_id,),
+            f"WHERE notebook_id=? AND {_MENTION_LAYER_LIVE}",
+            (notebook_id, notebook_id),
         ).fetchall()
 
     # -------------------------------------------------------- unified state
@@ -1098,7 +1119,8 @@ class UnifiedKgStore:
     def edge_support_rows(db: sqlite3.Connection, notebook_id: str):
         return db.execute(
             "SELECT canonical_src, edge_type, canonical_tgt, support_count, source_count "
-            "FROM canonical_relations WHERE notebook_id=?", (notebook_id,))
+            f"FROM canonical_relations WHERE notebook_id=? "
+            f"AND {_CANONICAL_LAYER_LIVE}", (notebook_id, notebook_id))
 
     @staticmethod
     def relation_support_rows(
@@ -1148,13 +1170,14 @@ class UnifiedKgStore:
         if not rows:
             return []
         placeholders = ",".join("(?,?,?)" for _ in rows)
-        params: List[object] = [notebook_id]
+        params: List[object] = [notebook_id, notebook_id]
         for triple in rows:
             params.extend(triple)
         return db.execute(
             f"SELECT canonical_src, edge_type, canonical_tgt, "
             f"       support_count, source_count "
             f"FROM canonical_relations WHERE notebook_id=? "
+            f"AND {_CANONICAL_LAYER_LIVE} "
             f"AND (canonical_src, edge_type, canonical_tgt) IN ({placeholders}) "
             f"ORDER BY canonical_src, edge_type, canonical_tgt",
             params,
@@ -1213,12 +1236,13 @@ class UnifiedKgStore:
                 f"SELECT canonical_src, edge_type, canonical_tgt, source_count, "
                 f"       sample_relation_ids "
                 f"FROM canonical_relations "
-                f"WHERE notebook_id=? AND canonical_src IN ({placeholders}) "
+                f"WHERE notebook_id=? AND {_CANONICAL_LAYER_LIVE} "
+                f"  AND canonical_src IN ({placeholders}) "
                 f"  AND source_count<=? "
                 f"ORDER BY source_count ASC, canonical_tgt ASC, canonical_src ASC, "
                 f"         edge_type ASC "
                 f"LIMIT ?",
-                [notebook_id, *canonical_ids, source_max, limit],
+                [notebook_id, notebook_id, *canonical_ids, source_max, limit],
             ).fetchall()
         if viewer_id is not None:
             condition, param = foreign_memory_object_excluded("ko"), viewer_id
@@ -1255,13 +1279,15 @@ class UnifiedKgStore:
             f"FROM (SELECT notebook_id, canonical_src, edge_type, canonical_tgt, "
             f"             source_count, sample_relation_ids "
             f"      FROM canonical_relations "
-            f"      WHERE notebook_id=? AND canonical_src IN ({placeholders}) "
+            f"      WHERE notebook_id=? AND {_CANONICAL_LAYER_LIVE} "
+            f"        AND canonical_src IN ({placeholders}) "
             f"        AND source_count<=? "
             f"      ORDER BY source_count ASC, canonical_tgt ASC, canonical_src ASC, "
             f"               edge_type ASC LIMIT -1 OFFSET 0) cr "
             f"WHERE {_weak_target_supported(condition)} "
             f"LIMIT ?",
-            [notebook_id, *canonical_ids, source_max, notebook_id, param, limit],
+            [notebook_id, notebook_id, *canonical_ids, source_max, notebook_id,
+             param, limit],
         ).fetchall()
 
     @staticmethod
@@ -1677,11 +1703,12 @@ class UnifiedKgStore:
                 limit_params = (canonical_id, notebook_id, ceiling.param)
             rows = db.execute(
                 "SELECT canonical_a, canonical_b, bridge_claims FROM concept_comentions cm "
-                "WHERE notebook_id=? AND (canonical_a=? OR canonical_b=?) AND bridge_claims>=? "
+                f"WHERE notebook_id=? AND {_MENTION_LAYER_LIVE} "
+                "AND (canonical_a=? OR canonical_b=?) AND bridge_claims>=? "
                 f"{limit_gate}"
                 "ORDER BY bridge_claims DESC, "
                 "CASE WHEN canonical_a=? THEN canonical_b ELSE canonical_a END ASC LIMIT ?",
-                (notebook_id, canonical_id, canonical_id, min_bridge,
+                (notebook_id, notebook_id, canonical_id, canonical_id, min_bridge,
                  *limit_params, canonical_id, limit)).fetchall()
             ordered = [
                 (str(r["canonical_b"] if r["canonical_a"] == canonical_id

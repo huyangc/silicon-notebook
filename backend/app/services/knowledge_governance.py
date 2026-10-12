@@ -1269,8 +1269,13 @@ class KnowledgeGovernanceService:
                 queued += 1
 
         return {
-            # ``detected`` stays "what was adjudicated" (auto_applied + queued);
-            # ``truncated`` carries what the cap dropped before adjudication.
+            # ``detected`` stays "what was adjudicated" — auto_applied + queued,
+            # except after a graph delete committed mid-pass (K1): the rest of
+            # the adjudicated candidates were then discarded, not written, so
+            # auto_applied + queued < detected and the counts-only event
+            # ``kg_conflict_candidates_discarded_after_reset`` carries the
+            # difference. ``truncated`` carries what the cap dropped before
+            # adjudication.
             "detected": len(candidates),
             "auto_applied": auto_applied,
             "queued": queued,

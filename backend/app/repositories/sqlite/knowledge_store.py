@@ -474,6 +474,29 @@ def _completion_generation_is_current(
 # PostgreSQL twin's comment.
 _GRAPH_DRAIN_SETTLE_EXEMPT = frozenset({"kg_conflict_candidates", "merge_review_jobs"})
 
+
+# K1: merge_review_jobs is keyed by notebook_id (at most one row per
+# notebook), so a backlog probe with a threshold >= 1 can never hit it; the
+# drain and in-transaction probes skip it instead of paying a statement that
+# cannot change the answer. Only the threshold-0 sweep probe reads it.
+_GRAPH_DRAIN_SINGLE_ROW = frozenset({"merge_review_jobs"})
+_GRAPH_DRAIN_SCOPES = ("drain", "settle", "sweep")
+
+
+def _probe_skips(scope: str, table: str, threshold: int) -> bool:
+    """Which registry steps one ``graph_drain_backlog`` call probes: every
+    step for the drain and the final pass's bound check (``"drain"``);
+    everything but the drain-only steps for the threshold-0 survivor check
+    after the commit (``"settle"``); ONLY the drain-only steps for the sweep
+    that follows it (``"sweep"``)."""
+    if scope not in _GRAPH_DRAIN_SCOPES:
+        raise ValueError(f"unknown graph drain probe scope: {scope!r}")
+    if scope == "sweep":
+        return table not in _GRAPH_DRAIN_SETTLE_EXEMPT
+    if scope == "settle" and table in _GRAPH_DRAIN_SETTLE_EXEMPT:
+        return True
+    return int(threshold) > 0 and table in _GRAPH_DRAIN_SINGLE_ROW
+
 _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int, bool], ...] = (
     (
         "knowledge_source_fact_backfills",
@@ -655,7 +678,7 @@ class KnowledgeStore:
     @staticmethod
     def graph_drain_backlog(
         db: sqlite3.Connection, notebook_id: str, threshold: int, start: int = 0,
-        *, post_commit: bool = False,
+        *, scope: str = "drain",
     ) -> "tuple[str, int] | None":
         """batch-3-W1 T-5a: the first ``_GRAPH_DRAIN_STEPS`` table at or
         after index ``start`` whose matching-row count still exceeds
@@ -678,12 +701,16 @@ class KnowledgeStore:
         table are the final transaction's bounded residue, the same bucket
         as the ≤threshold remainder.
 
-        ``post_commit=True`` (K1) is the threshold-0 survivor check after a
-        committed reset: it skips the ``_GRAPH_DRAIN_SETTLE_EXEMPT`` steps,
-        whose writers the delete fence does not hold off."""
+        ``scope`` (K1) picks the steps probed: ``"drain"`` every step (the
+        drain and the final pass's bound check), ``"settle"`` all but the
+        ``_GRAPH_DRAIN_SETTLE_EXEMPT`` steps (the threshold-0 survivor check
+        after a committed reset — their writers the delete fence does not
+        hold off), ``"sweep"`` only those (the post-commit sweep); the
+        single-row merge_review_jobs step is never probed above threshold 0
+        (see ``_probe_skips``)."""
         for index in range(max(0, int(start)), len(_GRAPH_DRAIN_STEPS)):
             table, predicate, params, _mirrored = _GRAPH_DRAIN_STEPS[index]
-            if post_commit and table in _GRAPH_DRAIN_SETTLE_EXEMPT:
+            if _probe_skips(scope, table, threshold):
                 continue
             row = db.execute(
                 f"SELECT 1 FROM {table} WHERE {predicate} LIMIT 1 OFFSET {int(threshold)}",

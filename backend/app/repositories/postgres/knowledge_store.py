@@ -141,6 +141,29 @@ _GRAPH_RESET_TABLES = frozenset({
 # delete into a reported failure).
 _GRAPH_DRAIN_SETTLE_EXEMPT = frozenset({"kg_conflict_candidates", "merge_review_jobs"})
 
+
+# K1: merge_review_jobs is keyed by notebook_id (at most one row per
+# notebook), so a backlog probe with a threshold >= 1 can never hit it; the
+# drain and in-transaction probes skip it instead of paying a statement that
+# cannot change the answer. Only the threshold-0 sweep probe reads it.
+_GRAPH_DRAIN_SINGLE_ROW = frozenset({"merge_review_jobs"})
+_GRAPH_DRAIN_SCOPES = ("drain", "settle", "sweep")
+
+
+def _probe_skips(scope: str, table: str, threshold: int) -> bool:
+    """Which registry steps one ``graph_drain_backlog`` call probes: every
+    step for the drain and the final pass's bound check (``"drain"``);
+    everything but the drain-only steps for the threshold-0 survivor check
+    after the commit (``"settle"``); ONLY the drain-only steps for the sweep
+    that follows it (``"sweep"``)."""
+    if scope not in _GRAPH_DRAIN_SCOPES:
+        raise ValueError(f"unknown graph drain probe scope: {scope!r}")
+    if scope == "sweep":
+        return table not in _GRAPH_DRAIN_SETTLE_EXEMPT
+    if scope == "settle" and table in _GRAPH_DRAIN_SETTLE_EXEMPT:
+        return True
+    return int(threshold) > 0 and table in _GRAPH_DRAIN_SINGLE_ROW
+
 _DELETE_OBJECT_BATCH_SIZE = 500
 
 
@@ -810,7 +833,13 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int, bool], ...] = (
     # gone. Candidates between two surviving hidden (Memory/Knowhow) objects
     # stay. After the object/relation steps, so the set only grows as they
     # drain. Exempt from the post-commit survivor check
-    # (_GRAPH_DRAIN_SETTLE_EXEMPT).
+    # (_GRAPH_DRAIN_SETTLE_EXEMPT) and swept once after it instead.
+    # Registered, not fixed (quality review P3-6): the final transaction's
+    # bound probe runs before that transaction deletes the ≤threshold
+    # remainder of objects/relations, so candidates citing those remainder
+    # rows are not counted by it and the final DELETE may exceed the budget —
+    # the same dependent-predicate pattern as the knowledge_object_sources
+    # orphan step (measured: 20k candidates, final transaction 30 ms).
     (
         "kg_conflict_candidates",
         "notebook_id=%s AND ((NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
@@ -887,18 +916,17 @@ class KnowledgeStore:
     @staticmethod
     def graph_drain_backlog(
         db: Any, notebook_id: str, threshold: int, start: int = 0,
-        *, post_commit: bool = False,
+        *, scope: str = "drain",
     ) -> "tuple[str, int] | None":
         """batch-3-W1 T-5a — SQLite twin's docstring has the full rationale
         (exists-at-offset point probe, read-only, keeps the small-graph
         ``delete_notebook_kg`` path free of extra write transactions; the
         ``start`` cursor rides the registry's strictly-forward convergence,
-        T-5a review F4). ``post_commit=True`` (K1) is the threshold-0 survivor
-        check after a committed reset: it skips the
-        ``_GRAPH_DRAIN_SETTLE_EXEMPT`` steps."""
+        T-5a review F4). ``scope`` (K1) picks the steps probed — see
+        ``_probe_skips``."""
         for index in range(max(0, int(start)), len(_GRAPH_DRAIN_STEPS)):
             table, predicate, params, _mirrored = _GRAPH_DRAIN_STEPS[index]
-            if post_commit and table in _GRAPH_DRAIN_SETTLE_EXEMPT:
+            if _probe_skips(scope, table, threshold):
                 continue
             row = db.execute(
                 f"SELECT 1 FROM {table} WHERE {predicate} "
@@ -1194,8 +1222,12 @@ class KnowledgeStore:
         # source_index_backfilled=1 (this row is being synthesized mid-
         # lifecycle for a notebook that already had content, not born empty).
         # 批 3·W2:两个 published 指针/在飞认领/催收标记随终局一并归零——本
-        # 事务的 blanket DELETE 已清空三张派生表,指针必须跟着回到「代 0」的
-        # 出生态,否则副本语义(无行⇒代 0)与读侧 COALESCE 契约就对不上;
+        # 事务的 blanket DELETE 已清空 concept_clusters,指针必须跟着回到「代 0」
+        # 的出生态,否则副本语义(无行⇒代 0)与读侧 COALESCE 契约就对不上。
+        # communities/community_members 的行按裁决 11 保留到下次重建(K1);
+        # 指针归 0 后,迁移前遗留的代 0 行由读侧闸挡住——community_seq=-1、
+        # last_rebuild_at 为空、纪元 > 0 时,unified_kg_store.py 的已发布社区代
+        # 表达式读出 -1。
         # building/claimed 清零使任何并发在飞 rebuild 的翻转双 CAS 当场作废
         # (standalone delete → flip aborts,响亮失败不发布)。
         # ``derived_generation_counter`` 刻意 NOT 重置(UPDATE 分支不出现):
