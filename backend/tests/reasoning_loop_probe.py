@@ -2,34 +2,34 @@
 
 Everything here is a recorder, never a behaviour change: a real SQLite
 repository, real retrieval / experience-library / profile ports, and a
-scripted chat model. What the rig adds is visibility of what the loop can
-affect from the outside:
+scripted chat model. What the rig records is what the loop exchanges with the
+outside world, at the level the loop itself works at:
 
 * the trace (and whether ``on_step`` streamed exactly those step objects);
 * every model call: workload, roles, the ``messages`` bytes (SHA-256 + size),
-  the schema hint (SHA-256) and the call kwargs;
+  the schema hint (SHA-256) and the call kwargs — the model-visible input;
 * the ``candidates_summary`` each reflect turn was given, verbatim — the text
   the loop itself assembles, so a reviewer can read a diff of it;
-* every port call on the retrieval port, the experience library (this is
-  where ``note_adopted`` shows up) and the profile store, plus the plugin
-  host's calls (recorded by the fake host itself);
-* every SQL statement the application sends (``is_application_statement``),
-  keyed by ``threading.get_ident()``.
+* the semantic identity of every port call (port, method, normalised
+  arguments) on the retrieval port, the experience library (this is where
+  ``note_adopted`` shows up) and the profile store, plus the plugin host's
+  calls (recorded by the fake host itself).
 
-Port calls and SQL are split by thread (see ``Probe.split``): the run's own
-thread — where the reflect loop and the close execute — as an exact ordered
-sequence; the first round's pool workers as a multiset, except the memo-fill
-reads they race on.
+SQL is deliberately NOT recorded: the loop reaches storage only through those
+ports, so how a port spells or orders its statements is the store's business,
+and pinning it would make every legitimate store change re-record this file.
+
+Port calls are split by thread (see ``Probe.split``): the run's own thread —
+where the reflect loop and the close execute — as an exact ordered sequence;
+the first round's pool workers as a multiset.
 
 Determinism across runs and platforms: row ids come from a counter instead of
-``uuid4`` while a scenario seeds and runs; bound timestamps are masked and
-``IN (...)`` literal lists are sorted in recorded SQL; statements SQLite runs
-inside FTS5 are not recorded; vector scores are projected out (``SCORE_KEYS``);
-the process-wide caches the run reads (``_EXPERIENCE_CACHE`` and every
-``knowledge_counts_cache`` memo) are cleared and every scenario gets a fresh
-repository. No wall clock feeds a recorded value: ``duration_ms`` is not
-projected, and the only clock-dependent branches (chunk rerank deadline,
-plugin timeout) are not exercised by any scenario.
+``uuid4`` while a scenario seeds and runs; vector scores are projected out
+(``SCORE_KEYS``); the process-wide caches the run reads
+(``_EXPERIENCE_CACHE`` and every ``knowledge_counts_cache`` memo) are cleared
+and every scenario gets a fresh repository. No wall clock feeds a recorded
+value: ``duration_ms`` is not projected, and the only clock-dependent branches
+(chunk rerank deadline, plugin timeout) are not exercised by any scenario.
 """
 from __future__ import annotations
 
@@ -38,55 +38,11 @@ import contextlib
 import dataclasses
 import hashlib
 import json
-import re
 import sys
 import threading
 import uuid
 from enum import Enum
 from typing import Any, Dict, List, Optional
-
-_TS_PATTERN = re.compile(
-    r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:?\d{2}|Z)?"
-)
-
-
-#: ``IN ('a','b')`` literal lists. Several stores build them from a ``set``,
-#: whose iteration order follows the per-process string hash seed: the same
-#: statement, a different spelling. Sorting the literals keeps the statement
-#: identity and drops only that hash-seed noise.
-_IN_LIST_PATTERN = re.compile(r"IN \(('(?:[^']|'')*'(?:,\s*'(?:[^']|'')*')*)\)")
-_IN_ITEM_PATTERN = re.compile(r"'(?:[^']|'')*'")
-
-
-def _sorted_in_list(match: "re.Match[str]") -> str:
-    items = sorted(_IN_ITEM_PATTERN.findall(match.group(1)))
-    return "IN (" + ",".join(items) + ")"
-
-
-#: Reads behind check-then-fill memos that the first round's workers race on
-#: (``version_signal`` and friends on ``unified_kg_state``).
-_RACY_MEMO_READS = (
-    "SELECT kg_mutation_seq",
-    "SELECT COALESCE(kg_mutation_seq",
-)
-
-
-def is_application_statement(statement: str) -> bool:
-    """Only what the application itself sends. SQLite's trace callback also
-    reports statements run *inside* a virtual table (FTS5 reads its shadow
-    tables and ``PRAGMA 'main'.data_version`` on its own), prefixed ``-- ``
-    or addressed as ``'main'.``; their number and order follow the SQLite
-    release, not the code under test."""
-    head = statement.lstrip()
-    return not (
-        head.startswith("--")
-        or head.upper().startswith("PRAGMA")
-        or "'main'." in head
-    )
-
-
-def mask_volatile(text: str) -> str:
-    return _IN_LIST_PATTERN.sub(_sorted_in_list, _TS_PATTERN.sub("<ts>", text))
 
 
 class Probe:
@@ -95,17 +51,11 @@ class Probe:
     def __init__(self) -> None:
         self.active = False
         self.main_ident = threading.get_ident()
-        self.sql: List[tuple] = []
         self.ports: List[tuple] = []
         self.model_calls: List[dict] = []
         self.reflect_inputs: List[dict] = []
         self.embeddings: collections.Counter = collections.Counter()
         self._lock = threading.Lock()
-
-    def note_sql(self, statement: str) -> None:
-        if self.active and is_application_statement(statement):
-            with self._lock:
-                self.sql.append((threading.get_ident(), mask_volatile(statement)))
 
     def note_port(self, label: str) -> None:
         if self.active:
@@ -114,22 +64,10 @@ class Probe:
 
     def split(self, rows: List[tuple]) -> Dict[str, Any]:
         """The run's own thread as an ordered sequence; the first round's pool
-        workers as a multiset (sorted list) — except the memo-fill reads.
-
-        The reflect loop and the close run on the caller's thread, so that
-        sequence is exact. The first round fans out into pools; their order is
-        scheduling, their multiset is not — with one exception: workers race
-        to fill version-keyed memos (``_RACY_MEMO_READS``), and how many of them
-        miss before one fills it was measured to vary between identical runs.
-        Those reads are recorded once each (presence, not count).
-        """
+        workers as a multiset (sorted list) — their order is scheduling."""
         main = [value for ident, value in rows if ident == self.main_ident]
-        workers = [value for ident, value in rows if ident != self.main_ident]
-        racy = sorted({value for value in workers if value.startswith(_RACY_MEMO_READS)})
-        counted = sorted(value for value in workers
-                         if not value.startswith(_RACY_MEMO_READS))
-        return {"main_thread": main, "worker_threads": counted,
-                "worker_memo_reads": racy}
+        workers = sorted(value for ident, value in rows if ident != self.main_ident)
+        return {"main_thread": main, "worker_threads": workers}
 
 
 _CURRENT: List[Optional[Probe]] = [None]
@@ -146,26 +84,6 @@ def probing(probe: Probe):
         yield probe
     finally:
         _CURRENT[0] = None
-
-
-def install_sql_trace(monkeypatch) -> None:
-    """Every SQLite connection the repository opens reports to the probe."""
-    from app.repositories.sqlite.database import SqliteDatabase
-
-    original = SqliteDatabase._new_connection
-
-    def traced(self, *args, **kwargs):
-        conn = original(self, *args, **kwargs)
-
-        def callback(statement):
-            probe = current_probe()
-            if probe is not None:
-                probe.note_sql(statement)
-
-        conn.set_trace_callback(callback)
-        return conn
-
-    monkeypatch.setattr(SqliteDatabase, "_new_connection", traced)
 
 
 @contextlib.contextmanager
@@ -281,6 +199,18 @@ class PortProbe:
 
     def __setattr__(self, name, value):
         setattr(object.__getattribute__(self, "_inner"), name, value)
+
+
+def recorded_callable(target, label: str):
+    """A port that is a bare callable (``source_generation``)."""
+
+    def call(*args, **kwargs):
+        probe = current_probe()
+        if probe is not None:
+            probe.note_port(port_label(label, "__call__", args, kwargs))
+        return target(*args, **kwargs)
+
+    return call
 
 
 def sha256(value: Any) -> str:
