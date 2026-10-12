@@ -23,7 +23,7 @@ class W3AuthSettings(BaseModel):
     provider_id: str = "w3"
     provider_namespace: str
     configuration_generation: str
-    public_label: str = "统一登录"
+    public_label: str = "W3账号"
     pkce_supported: bool = False
     userinfo_auth_mode: Literal["query", "bearer"] = "query"
     subject_field: str = "uid"
