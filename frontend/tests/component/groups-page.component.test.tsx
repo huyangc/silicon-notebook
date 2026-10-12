@@ -488,6 +488,70 @@ test("批准被拒且申请已不在队列(被别人处理过):那一行随重�
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
+async function switchGroupWhileApprovalRefreshIsPending(approveOutcome: "refused" | "approved") {
+  const user = userEvent.setup();
+  const second: GroupDetail = { ...OWNER_DETAIL, id: "g2", name: "另一个群组" };
+  const stalled = pendingRequest("sr-stalled", "正在删除的库");
+  const secondRequest = { ...pendingRequest("sr-second", "第二组的库"), group_id: "g2", group_name: "另一个群组" };
+  let releaseRefresh: (rows: (typeof stalled)[]) => void = () => {};
+  let g1Calls = 0;
+  vi.mocked(listGroups).mockResolvedValue([OWNER_DETAIL, second]);
+  vi.mocked(getGroup).mockImplementation(async (id: string) => (id === "g2" ? second : OWNER_DETAIL));
+  vi.mocked(listGroupShareRequests).mockImplementation((id: string) => {
+    if (id === "g2") return Promise.resolve([secondRequest]);
+    g1Calls += 1;
+    if (g1Calls === 1) return Promise.resolve([stalled]);
+    return new Promise((resolve) => { releaseRefresh = resolve; });
+  });
+  if (approveOutcome === "refused") {
+    vi.mocked(approveShareRequest).mockRejectedValueOnce(
+      humanizedError("这本笔记本正在删除,无法批准这条申请", 409),
+    );
+  } else {
+    vi.mocked(approveShareRequest).mockResolvedValueOnce({ ...stalled, status: "approved" });
+  }
+  // 不传 initialGroupId:onNavigate 是桩,传了的话切组后 effect 会按旧 initialGroupId 把 g1
+  // 重新载回来(同「切换到另一个群组时成员分页回到第一页」)。
+  render(
+    <GroupsPage
+      currentUserId="u1"
+      isSystemAdmin={false}
+      notebooks={NOTEBOOKS}
+      onBack={vi.fn()}
+      onChanged={vi.fn()}
+      openingNotebookId={null}
+      onOpenNotebook={vi.fn()}
+      onNavigate={vi.fn()}
+    />,
+  );
+
+  await screen.findByRole("heading", { name: "先进封装项目" });
+  await user.click(screen.getByRole("button", { name: /共享申请/ }));
+  const row = (await screen.findByText("正在删除的库")).closest(".group-request-row") as HTMLElement;
+  await user.click(within(row).getByRole("button", { name: "批准" }));
+  await waitFor(() => expect(g1Calls).toBe(2)); // 重拉已发出、还挂着
+
+  await user.click(screen.getByRole("button", { name: /另一个群组/ }));
+  await screen.findByRole("heading", { name: "另一个群组" });
+  await user.click(screen.getByRole("button", { name: /共享申请/ }));
+  expect(await screen.findByText("第二组的库")).toBeInTheDocument();
+
+  await act(async () => { releaseRefresh([stalled]); });
+
+  expect(screen.getByText("第二组的库")).toBeInTheDocument();
+  expect(screen.queryByText("正在删除的库")).not.toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.queryByText("这本笔记本正在删除,无法批准这条申请")).not.toBeInTheDocument();
+}
+
+test("批准失败后的重拉还没回来就切到别的组:旧组的队列与行内提示被丢弃,不盖住新组", async () => {
+  await switchGroupWhileApprovalRefreshIsPending("refused");
+});
+
+test("批准成功后的重拉还没回来就切到别的组:旧组的队列不盖住新组", async () => {
+  await switchGroupWhileApprovalRefreshIsPending("approved");
+});
+
 test("普通成员仍可查看群组知识库，但不加载审批队列且设置中只能退出", async () => {
   const user = userEvent.setup();
   const memberDetail: GroupDetail = { ...OWNER_DETAIL, owner_id: "u2", my_role: "member" };

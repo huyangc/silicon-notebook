@@ -271,19 +271,28 @@ export function GroupsPage({
   // 批准失败后重拉队列:申请还在(笔记本正在删除时后端回 409、申请保留)就把原因标在那一
   // 行旁边——只在顶部报错而行原样不动,看起来像没点上;申请已经不在(被别人处理过)时那一
   // 行随重拉消失,原因只能走顶部状态条。
+  // busy 期间组导航仍可用:等待中切到别的组,旧组的重拉结果与失败提示都要丢掉(与
+  // loadGroup 同一把 loadEpoch),否则旧队列会盖住新组的列表,后续批准把旧申请 id 配上
+  // 新组 id → 错误的 404。
   async function approveRequest(groupId: string, requestId: string) {
     setRequestFailure(null);
+    const epoch = loadEpoch.current;
+    const switchedAway = () => epoch !== loadEpoch.current;
     await run(`approve:${requestId}`, async () => {
       try {
         await approveShareRequest(groupId, requestId);
       } catch (err) {
         const refreshed = await listGroupShareRequests(groupId).catch(() => null);
+        if (switchedAway()) return;
         if (refreshed) setRequests(refreshed);
         if (!refreshed?.some((item) => item.id === requestId)) throw err;
         setRequestFailure({ id: requestId, text: toUserMessage(err, "批准申请失败") });
         return;
       }
-      setRequests(await listGroupShareRequests(groupId)); setShared(await listGroupSharedNotebooks(groupId)); onChanged();
+      const queue = await listGroupShareRequests(groupId);
+      const inventory = await listGroupSharedNotebooks(groupId);
+      if (!switchedAway()) { setRequests(queue); setShared(inventory); }
+      onChanged();
     }, "批准申请失败");
   }
 
