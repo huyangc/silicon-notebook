@@ -733,13 +733,17 @@ class AskStateStore:
                     (*by_run.keys(), step_limit),
                 ).fetchall()
             # Global reasoning runs: the GLOBAL partition only (SQLite twin).
+            # Both payload shapes, in ``global_answer_trace`` order: the
+            # engine answer's ``reasoning_trace``, else the top-level ``trace``
+            # a legacy row carries (a finished engine row has it cleared).
             global_rows = []
             if notebook_id is None:
                 global_rows = db.execute(
                     (
                         "WITH candidates AS ("
                         "SELECT id, mode, created_at, "
-                        "COALESCE(payload_json::jsonb->'answer'->'reasoning_trace', '[]'::jsonb) AS trace "
+                        "COALESCE(payload_json::jsonb->'answer'->'reasoning_trace', "
+                        "payload_json::jsonb->'trace', '[]'::jsonb) AS trace "
                         "FROM global_ask_jobs WHERE status = 'done' AND mode = 'reasoning' "
                         "ORDER BY created_at DESC, id DESC LIMIT %s), "
                         "budgeted AS ({budget}) "

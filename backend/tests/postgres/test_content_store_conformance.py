@@ -3478,6 +3478,95 @@ def test_the_three_samplers_also_see_global_asks(content_harness):
     assert [s["summary"] for s in only[0]["steps"]] == ["g"]
 
 
+def _shaped_global_payload(job_id, user_id, created_at, *, shape, steps):
+    """PostgreSQL twin of ``_shaped_payload`` in ``tests/test_ask_sample_global_arms.py``:
+    a done reasoning job as the engine writes it (``answer``, ``trace`` cleared)
+    or as a row from before the engine switch (legacy ``response`` plus, when it
+    streamed one, a top-level ``trace``; ``steps=None`` omits the key)."""
+    from app.models.ask import TraceStep
+    from app.models.global_ask import GlobalAskAnswer, GlobalAskJob, GlobalNotebookScope
+
+    scope = GlobalNotebookScope(mode="include", notebook_ids=["nb-content"])
+    trace = [TraceStep(**step) for step in steps or ()]
+    common = dict(
+        job_id=job_id, conversation_id=f"conv-{user_id}", status="done", question="q",
+        created_at=created_at, notebook_scope=scope, resolved_notebook_ids=["nb-content"],
+        searched_notebook_ids=["nb-content"], mode="reasoning",
+    )
+    if shape == "new":
+        return GlobalAskJob(**common, trace=[], answer=AskResponse(
+            conclusion="c", answer="a", reasoning_trace=trace)).model_dump(mode="json")
+    payload = GlobalAskJob(**common, trace=trace, response=GlobalAskAnswer(
+        answer_id=f"ans-{job_id}", question="q", answer="legacy", created_at=created_at,
+        notebook_scope=scope, resolved_notebook_ids=["nb-content"],
+        searched_notebook_ids=["nb-content"], cited_notebook_ids=[],
+    )).model_dump(mode="json")
+    payload.pop("answer")
+    if steps is None:
+        payload.pop("trace")
+    return payload
+
+
+def test_global_experience_sample_reads_both_answer_shapes_like_the_python_projection(
+    content_harness,
+):
+    """PostgreSQL twin of the SQLite test of the same name: the global reasoning
+    sampler reads ``answer.reasoning_trace``, else a legacy row's top-level
+    ``trace`` -- ``global_answer_trace`` order -- and the legacy row's steps
+    spend the one newest-first budget like any other row's."""
+    from app.models.global_ask import GlobalAskJob, global_answer_trace
+
+    def step(kind):
+        return {"step_type": kind, "summary": kind, "detail": {"count": 1}, "duration_ms": 5}
+
+    rows = [
+        ("gask-new", "2026-08-01T14:00:00+00:00", "new", [step("retrieve"), step("expand")]),
+        ("gask-legacy", "2026-08-01T13:00:00+00:00", "legacy",
+         [step("expand"), step("retrieve"), step("retrieve")]),
+        ("gask-legacy-untraced", "2026-08-01T12:00:00+00:00", "legacy", None),
+        ("gask-new-empty", "2026-08-01T11:00:00+00:00", "new", []),
+    ]
+    payloads = {}
+    with content_harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO global_ask_conversations(id,user_id,title,scope_json,submitted_via,"
+            "created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            ("conv-user-content", "user-content", "", "{}", "web", rows[0][1], rows[0][1]),
+        )
+        for job_id, created_at, shape, steps in rows:
+            payloads[job_id] = _shaped_global_payload(
+                job_id, "user-content", created_at, shape=shape, steps=steps)
+            connection.execute(
+                "INSERT INTO global_ask_jobs(id,conversation_id,user_id,client_request_id,"
+                "request_json,status,payload_json,created_at,submitted_via,asked_at,updated_at,"
+                f"error_detail,mode) VALUES ({','.join(['%s'] * 13)})",
+                (job_id, "conv-user-content", "user-content", None, "{}", "done",
+                 json.dumps(payloads[job_id]), created_at, "web", "", created_at, "",
+                 "reasoning"),
+            )
+
+    def sample(step_limit):
+        runs = content_harness.ask.recent_completed_ask_runs(job_limit=40, step_limit=step_limit)
+        return [(run["run_id"], [s["step_type"] for s in run["steps"]])
+                for run in runs if run["run_id"].startswith("gask-")]
+
+    got = sample(600)
+    assert got == [
+        ("gask-new", ["retrieve", "expand"]),
+        ("gask-legacy", ["expand", "retrieve", "retrieve"]),
+        ("gask-legacy-untraced", []),
+        ("gask-new-empty", []),
+    ]
+    assert got == [
+        (job_id, [s.step_type for s in
+                  global_answer_trace(GlobalAskJob.model_validate(payloads[job_id]))])
+        for job_id, *_rest in rows
+    ]
+    assert [(run_id, len(steps)) for run_id, steps in sample(3)] == [
+        ("gask-new", 2), ("gask-legacy", 1), ("gask-legacy-untraced", 0), ("gask-new-empty", 0),
+    ]
+
+
 def test_a_retrieval_only_ask_has_no_conversation_and_is_in_no_learning_sample(
     content_harness,
 ):

@@ -1,10 +1,10 @@
 """D1-1: history-read compatibility for the ``response``→``answer`` shape
 migration on ``GlobalAskJob``.
 
-``_run`` still only ever writes ``response`` today (see the docstring on
-``GlobalAskJob.response``); ``mode``/``trace``/``answer`` are groundwork for a
-later task that routes the global engine through ``AskService.ask``. These
-tests pin two things ahead of that switch:
+``_run`` writes ``answer`` (the shared ``AskService.ask`` engine's
+``AskResponse``); ``response`` appears only on rows persisted before the
+engine switch (see the comment on ``GlobalAskJob.response``). These tests pin
+that both shapes keep reading back:
 
   * a genuinely pre-migration payload (no ``mode``/``trace``/``answer`` keys
     at all -- what every row persisted before this task looks like) still
@@ -12,7 +12,7 @@ tests pin two things ahead of that switch:
     ``GlobalAskStore.completed_history``'s SQL projection;
   * a new-shape payload (``answer`` populated, ``response`` absent) reads
     back through the same paths;
-  * the three ``global_answer_*`` projection helpers in
+  * the ``global_answer_*`` projection helpers in
     ``app.models.global_ask`` prefer ``answer`` over the legacy ``response``
     and fall back correctly when either/both are absent.
 """
@@ -29,6 +29,7 @@ from app.models.global_ask import (
     GlobalAskJob,
     GlobalNotebookScope,
     global_answer_citations,
+    global_answer_payload,
     global_answer_text,
     global_answer_trace,
 )
@@ -272,3 +273,36 @@ def test_projection_helpers_prefer_answer_over_legacy():
         answer=AskResponse(conclusion="done", answer="new-answer"),
     )
     assert global_answer_trace(sparse_trace_job) == [trace_step]
+
+
+def test_answer_payload_projection_hands_either_shape_through_with_its_instant():
+    """``global_answer_payload`` (the administrator's activity detail) is the
+    branch ``admin_routes._global_ask_detail`` used to spell inline, moved
+    verbatim: the engine answer with its ``answered_at``, else the legacy
+    ``response`` with its ``created_at``, else ``(None, "")``."""
+    scope = GlobalNotebookScope(mode="all", notebook_ids=[])
+    base_kwargs = dict(
+        job_id="j", conversation_id="c", status="done", question="q",
+        created_at="t", notebook_scope=scope, resolved_notebook_ids=[],
+    )
+    legacy = GlobalAskAnswer(
+        answer_id="a1", question="q", answer="legacy-answer", created_at="legacy-at",
+        notebook_scope=scope, resolved_notebook_ids=[], searched_notebook_ids=[],
+        cited_notebook_ids=[],
+    )
+    new = AskResponse(conclusion="done", answer="new-answer", answered_at="new-at")
+
+    assert global_answer_payload(GlobalAskJob(**base_kwargs)) == (None, "")
+    assert global_answer_payload(GlobalAskJob(**base_kwargs, response=legacy)) == (
+        legacy.model_dump(mode="json"), "legacy-at")
+    assert global_answer_payload(GlobalAskJob(**base_kwargs, answer=new)) == (
+        new.model_dump(mode="json"), "new-at")
+    # Both present: the engine answer wins, with ITS instant.
+    assert global_answer_payload(
+        GlobalAskJob(**base_kwargs, response=legacy, answer=new)
+    ) == (new.model_dump(mode="json"), "new-at")
+    # An engine answer with no stamp reads "" -- it never borrows the legacy one.
+    unstamped = AskResponse(conclusion="done", answer="new-answer")
+    assert global_answer_payload(
+        GlobalAskJob(**base_kwargs, response=legacy, answer=unstamped)
+    ) == (unstamped.model_dump(mode="json"), "")

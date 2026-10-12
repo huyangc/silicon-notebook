@@ -66,7 +66,7 @@ from app.models.admin import (
     ADMIN_QUESTIONS_QUERY_MAX_CHARS,
 )
 from app.models.ask import SubmittedVia
-from app.models.global_ask import global_answer_trace
+from app.models.global_ask import global_answer_payload, global_answer_trace
 from app.models.identity import UserProfile
 from app.models.model_services import ModelServiceStatusItem, ModelServicesStatus
 from app.models.sources import PaginatedSources
@@ -764,20 +764,14 @@ def _global_ask_detail(record: dict, *, viewer: UserProfile) -> AskDetail:
     falls back to its owner-facing sentence so the administrator still sees the
     recorded failure rather than nothing. The answer is the shared engine's
     ``AskResponse`` payload; a job written before the engine switch carries the
-    legacy ``response`` shape, handed through under the same field so the
-    detail pane's degradation branches cover it as the public page's do.
+    legacy ``response`` shape, handed through under the same field
+    (``global_answer_payload``) so the detail pane's degradation branches cover
+    it as the public page's do.
     """
     job = record["job"]
     notebook_ids = list(job.resolved_notebook_ids)
     names = record["notebook_names"]
-    if job.answer is not None:
-        answer = job.answer.model_dump(mode="json")
-        answered_at = job.answer.answered_at or ""
-    elif job.response is not None:
-        answer = job.response.model_dump(mode="json")
-        answered_at = job.response.created_at or ""
-    else:
-        answer, answered_at = None, ""
+    answer, answered_at = global_answer_payload(job)
     failure = record["error_detail"] or (job.error or "" if job.status == "failed" else "")
     return AskDetail(
         job_id=job.job_id,

@@ -34,10 +34,10 @@ class GlobalAskRequest(BaseModel):
     notebook_scope: GlobalNotebookScope | None = None
     conversation_id: str | None = Field(default=None, max_length=GLOBAL_ASK_ID_MAX_CHARS)
     client_request_id: str | None = Field(default=None, max_length=GLOBAL_ASK_ID_MAX_CHARS)
-    # D1-1: data-model-only groundwork for routing a global (cross-library) ask
-    # through the same single-library ``AskService.ask`` engine used by
-    # ``AskRequest``. Not consumed by ``_run`` yet -- see ``mode``/``trace``/
-    # ``answer`` on ``GlobalAskJob`` for the matching read-side note.
+    # The engine a global (cross-library) ask runs on is the single-library
+    # ``AskService.ask`` engine ``AskRequest`` uses: ``mode`` is resolved at
+    # admission (``GlobalAskService.start``) and frozen onto the job, and a
+    # confirmed ``intent`` is handed to the worker as run input.
     mode: str = "chunk"
     intent: AskIntentConfirmation | None = None
     retrieval_effort: RetrievalEffort = DEFAULT_RETRIEVAL_EFFORT
@@ -134,13 +134,14 @@ class GlobalAskJob(BaseModel):
     degraded_notebook_ids: list[str] = Field(default_factory=list)
     # Explicitly displayable Chinese guidance; the service never stores raw exceptions here.
     error: str | None = None
-    # Legacy answer shape: the global-only synthesis response ``_run`` has
-    # always written. Kept so already-persisted rows keep reading back
-    # unchanged; new code should read ``answer`` (or the
-    # ``global_answer_*`` projection helpers below) instead of this field
-    # directly. Do not write new rows through this field once the engine
-    # moves onto ``AskService.ask`` (a later task) -- it stays only to
-    # replay history.
+    # Legacy answer shape: the global-only synthesis response ``_run`` wrote
+    # before the job moved onto the shared ``AskService.ask`` engine. Nothing
+    # writes it any more (a finished job carries ``answer``; a cancelled or
+    # failed one clears both); it stays only so rows persisted before the
+    # switch keep reading back unchanged. Read a job's answer through the
+    # ``global_answer_*`` projections below, never through this field or
+    # ``answer`` directly -- ``test_global_answer_shape_guard.py`` holds every
+    # reader to that.
     response: GlobalAskAnswer | None = None
     # The engine that answers this turn and the resource level it runs at, both
     # frozen when the job is created and read back by the detached worker, so
@@ -187,13 +188,16 @@ class GlobalAskJob(BaseModel):
     feedback_at: str = ""
 
 
-# D1-1 read-side projections: prefer the new ``answer``/``trace`` shape and
-# fall back to the legacy ``response`` shape a job written before the engine
-# switch (a later task) so every existing persisted row keeps reading back
-# with no migration. ``_run`` does not populate ``answer``/``trace`` yet, so
-# today these always resolve through the legacy branch -- they exist ahead of
-# that switch so the read side and the write side change on separate,
-# independently reviewable commits.
+# Read-side projections over the two persisted answer shapes. ``answer`` (the
+# shared engine's ``AskResponse``) is the shape ``_run`` writes today;
+# ``response`` (``GlobalAskAnswer``) appears only on rows written before the
+# engine switch, which are read back as they are, with no migration. Every
+# projection prefers ``answer`` and falls back to ``response``. A finished
+# run clears the streamed ``trace`` (``answer.reasoning_trace`` is then the
+# authority), so ``global_answer_trace`` reads ``trace`` only for a running
+# job or a legacy row. The SQL readers of ``payload_json`` that need the same
+# fields use the same order (``COALESCE(answer..., response.../trace)``);
+# ``test_global_answer_shape_guard.py`` holds both kinds of reader to it.
 def global_answer_text(job: "GlobalAskJob") -> str:
     if job.answer is not None:
         return job.answer.answer
@@ -238,6 +242,26 @@ def global_answer_trace(job: "GlobalAskJob") -> list[TraceStep]:
     if job.answer is not None and job.answer.reasoning_trace:
         return job.answer.reasoning_trace
     return job.trace
+
+
+def global_answer_payload(job: "GlobalAskJob") -> tuple[dict | None, str]:
+    """The stored answer of one job as a JSON dict, with its answered instant.
+
+    The shared engine's ``AskResponse`` and its ``answered_at``; a row written
+    before the engine switch hands its legacy ``response`` through under the
+    same slot with that shape's ``created_at``, so a reader's degradation
+    branches cover it (the administrator's activity detail). ``(None, "")``
+    when the job has no answer.
+    """
+    if job.answer is not None:
+        answer = job.answer.model_dump(mode="json")
+        answered_at = job.answer.answered_at or ""
+    elif job.response is not None:
+        answer = job.response.model_dump(mode="json")
+        answered_at = job.response.created_at or ""
+    else:
+        answer, answered_at = None, ""
+    return answer, answered_at
 
 
 class GlobalConversationSummary(BaseModel):

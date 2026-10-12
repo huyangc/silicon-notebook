@@ -865,12 +865,16 @@ class AskStateStore:
             # Global (cross-library) reasoning runs belong to the GLOBAL
             # partition only: sampled here when no partition is named, never
             # for a library's own chain. Same projection, no actor column read.
+            # Both payload shapes, in ``global_answer_trace`` order: the
+            # engine answer's ``reasoning_trace``, else the top-level ``trace``
+            # a legacy row carries (a finished engine row has it cleared).
             global_rows = []
             if notebook_id is None:
                 global_rows = db.execute(
                     "WITH candidates AS ("
                     "SELECT id, mode, created_at, "
-                    "COALESCE(json_extract(payload_json,'$.answer.reasoning_trace'), '[]') AS trace "
+                    "COALESCE(json_extract(payload_json,'$.answer.reasoning_trace'), "
+                    "json_extract(payload_json,'$.trace'), '[]') AS trace "
                     "FROM global_ask_jobs WHERE status = 'done' AND mode = 'reasoning' "
                     "ORDER BY created_at DESC, id DESC LIMIT ?), "
                     f"budgeted AS ({_RUN_BUDGET_SQLITE}) "
