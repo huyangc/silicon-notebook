@@ -610,6 +610,29 @@ class QueryStore:
             (viewer_id, notebook_id),
         ).fetchall()
 
+    def notebook_list_summary_facts(
+        self, db: sqlite3.Connection, notebook_ids, statuses: tuple[str, ...],
+        *, viewer_id: "str | None", viewers,
+    ) -> "dict[str, dict]":
+        """The notebook list's per-notebook summary facts (F2; the PostgreSQL
+        twin batches them).  Here every notebook calls the per-notebook
+        primitives in the summary's own order -- the same statements and the
+        same count-cache traffic as one ``from_row`` per notebook, so the
+        SQLite list is unchanged by construction.  ``viewers`` and
+        ``viewer_id`` as in the PostgreSQL twin."""
+        out: "dict[str, dict]" = {}
+        for nb in dict.fromkeys(str(nb) for nb in notebook_ids if nb):
+            viewer = viewers.get(nb, {})
+            out[nb] = {
+                "sources": self.visible_source_count(db, nb),
+                "type_rows": self.knowledge_type_count_rows(
+                    db, nb, statuses, **viewer),
+                "mounts": self.mounted_bases_row(db, nb, viewer_id=viewer_id),
+                "has_kg": self.notebook_has_kg(db, nb, **viewer),
+                "pending": self.visible_pending_kg_source_count(db, nb),
+            }
+        return out
+
     @staticmethod
     def summary_notebook_row(db: sqlite3.Connection, notebook_id: str):
         """单库详情的行。

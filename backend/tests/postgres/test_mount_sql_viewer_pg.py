@@ -18,6 +18,7 @@ import re
 import psycopg
 import pytest
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 from app.repositories.postgres import mount_sql as pg_mount_sql
 from app.repositories.postgres._store_utils import normalize_timestamp
@@ -486,3 +487,67 @@ def test_call_site_statements_are_the_published_viewer_fragments(pg_realistic_mo
                 assert not _SEQ_SCAN.search(capability), (
                     f"{site} / {label}(enable_seqscan=off):\n{capability}"
                 )
+
+
+# ------------------------------------- F2:笔记本列表一条语句读全部挂载
+#
+# 列表把每本库的挂载并进一条语句(`query_store._list_facts_sql`):挂载片段经
+# `mount_viewer_join_on("n.id")` 与被列出的那本库相关联,于是每本库仍是一次
+# `pk_notebook_bases` 前缀探针,查看者支照旧只引用 b、v。评审担心的是改成
+# `e.notebook_id = ANY(...)` 后 b 翻成 hash / 顺序扫描;相关子查询让计划与列表
+# 长度无关(列表绑成 jsonb,估算行数恒定,缓存的 generic plan 就是每个长度下的计划)。
+
+
+def facts_plan(connection, ids, viewer, *, generic: bool, seqscan: bool = True) -> str:
+    """`_list_facts_sql` 的 EXPLAIN:custom(带参数)或 generic(PREPARE +
+    `force_generic_plan`,参数类型 `(text, jsonb)`)。"""
+    from app.repositories.postgres.query_store import _list_facts_sql
+
+    query = _list_facts_sql()
+    if not seqscan:
+        connection.execute("SET LOCAL enable_seqscan = off")
+    if not generic:
+        rows = connection.execute(
+            f"EXPLAIN (COSTS OFF) {query}", (viewer, Jsonb(ids))).fetchall()
+    else:
+        connection.execute("SET LOCAL plan_cache_mode = force_generic_plan")
+        counter = iter(range(1, 3))
+        dollar = re.sub(r"%s", lambda _m: f"${next(counter)}", query)
+        connection.execute(f"PREPARE facts_pin(text, jsonb) AS {dollar}")
+        rows = connection.execute(
+            "EXPLAIN (COSTS OFF) EXECUTE facts_pin("
+            + sql.Literal(viewer).as_string(None) + ", "
+            + sql.Literal(Jsonb(ids)).as_string(None) + ")").fetchall()
+        connection.execute("DEALLOCATE facts_pin")
+        connection.execute("RESET plan_cache_mode")
+    if not seqscan:
+        connection.execute("RESET enable_seqscan")
+    return "\n".join(str(row["QUERY PLAN"]) for row in rows)
+
+
+_PER_NOTEBOOK_MOUNT_PROBE = re.compile(
+    r"Index Only Scan using pk_notebook_bases on notebook_bases e\s+"
+    r"Index Cond: \(notebook_id = n\.id\)")
+
+
+@pytest.mark.parametrize("pg_realistic_mounts", sorted(PIN_SCALES), indirect=True)
+def test_the_notebook_list_mounts_keep_the_index_path_at_realistic_scale(
+    pg_realistic_mounts,
+):
+    """列表那条语句的挂载半:每档规模、每类查看者(含空查看者)、custom 与 generic、
+    只列探针库与探针库加 499 本两种长度,计划里都没有 `Seq Scan on <访问控制表>`,
+    挂载是逐本 `pk_notebook_bases` 探针;`enable_seqscan=off` 能力判据同上。"""
+    database, notebooks = pg_realistic_mounts
+    with database.connect() as connection:
+        for ids in ([_PROBE], [_PROBE] + [f"nb{g}" for g in range(1, 500)]):
+            for label, viewer in _PIN_VIEWERS:
+                for generic in (False, True):
+                    plan = facts_plan(connection, ids, viewer, generic=generic)
+                    where = f"{notebooks} 本 / {len(ids)} / {label} / {generic}:\n{plan}"
+                    assert not _SEQ_SCAN.search(plan), where
+                    assert _PER_NOTEBOOK_MOUNT_PROBE.search(plan), where
+                capability = facts_plan(connection, ids, viewer, generic=False,
+                                        seqscan=False)
+                assert not _SEQ_SCAN.search(capability), (
+                    f"{notebooks} 本 / {len(ids)} / {label}(enable_seqscan=off):\n"
+                    f"{capability}")

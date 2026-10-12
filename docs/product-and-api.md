@@ -1398,15 +1398,18 @@ Report creation follows **read** access, and reports are isolated **per creator*
   the existing pending row idempotently**, not a 409: a requester refreshing the page
   and re-submitting is a common action. This is a **product-behavior contract, not a
   quota**, recorded here because it bounds the request lists' size.
-- **The 群组 partition amplifies a known N+1**, kept as registered debt.
-  `granted_notebook_rows` is a single query, but every row then goes through
-  `NotebookSummaryQuery.from_row`, which issues several count/mount queries per
-  library — roughly 7 statements per library, so on the order of 3,500 statements
-  for 500 granted libraries. The "own libraries" and "joined libraries" sections
-  have the same existing shape, so this is not a defect introduced by group
-  sharing, but the group partition raises the plausible row count by an order of
-  magnitude. Batch count pre-fetching is the optimization direction, scheduled
-  separately.
+- **The list's per-library facts are read in one batch, so the 群组 partition no
+  longer multiplies statements.** `granted_notebook_rows` is a single query, and the
+  whole list — own, joined and granted libraries — is hydrated by one batched read
+  (`QueryStore.notebook_list_summary_facts`) instead of `NotebookSummaryQuery.from_row`'s
+  per-library reads (roughly 7 statements per library, ~3,500 for 500 libraries). On
+  PostgreSQL one statement carries every listed library's visible source count, mounts
+  (for this viewer), `kg_ready` and count-cache key; the cached type and pending counts
+  are then served per library from the process cache, so a warm list costs the same
+  statements at 5 or 500 libraries. A count-cache miss is still computed per library
+  with the same statement as before, and a library holding Memory still adds the
+  viewer's own live Memory read. The response is byte-identical to the per-library
+  path; SQLite keeps the per-library reads.
 - **No decision cache.** A single decision is a handful of indexed `EXISTS`
   probes (grants by `notebook_id` or `(principal_type, principal_id)`,
   `group_members` by primary key or `user_id`), which is the same order as the

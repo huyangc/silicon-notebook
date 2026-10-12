@@ -255,13 +255,17 @@ class NotebookSummaryQuery:
         per-type COUNT(*) calls. Same USABLE_STATUSES filter and same
         zero-default for absent types as the old per-type COUNT(*) calls.
         ``viewer``: ``viewer_count_kwargs``."""
-        rows = self.queries.knowledge_type_count_rows(
+        return self._type_counts_from_rows(self.queries.knowledge_type_count_rows(
             db, notebook_id, USABLE_STATUSES, **viewer
-        )
+        ))
+
+    @classmethod
+    def _type_counts_from_rows(cls, rows: Any) -> Dict[str, int]:
+        """The counts-dict projection of ``knowledge_type_count_rows`` rows."""
         by_type = {r["object_type"]: int(r["c"]) for r in rows}
         return {
             key: by_type.get(otype, 0)
-            for otype, key in self._NOTEBOOK_COUNT_TYPES.items()
+            for otype, key in cls._NOTEBOOK_COUNT_TYPES.items()
         }
 
     def has_kg(self, db: object, notebook_id: str, **viewer: str) -> bool:
@@ -319,6 +323,11 @@ class NotebookSummaryQuery:
                 rows = self.queries.mounted_bases_row(
                     conn, notebook_id, viewer_id=viewer_id
                 )
+        return self._mounts_from_rows(rows)
+
+    @staticmethod
+    def _mounts_from_rows(rows: Any) -> "tuple[list[NotebookRef], list[str]]":
+        """``mounted_bases``' projection of ``mounted_bases_row`` rows."""
         refs = [
             NotebookRef(id=r["id"], name=r["name"], tier=r["tier"] or "personal")
             for r in rows
@@ -340,9 +349,13 @@ class NotebookSummaryQuery:
         indexing_options: Mapping[str, IndexingPipelineOption] | None = None,
         user_id: "str | None" = None,
         memory_holders: "set[str] | None" = None,
+        prefetched: "Mapping[str, Any] | None" = None,
     ) -> NotebookSummary:
         # ``memory_holders`` (E4-7): the list page's batched answer to "which of
         # these notebooks hold Memory" (``memory_holders``); None = ask per row.
+        # ``prefetched`` (F2): this notebook's entry of the list page's
+        # ``notebook_list_summary_facts``; None = the per-notebook reads
+        # (``_row_facts``), the path every single-notebook summary takes.
         # 注意:kg_building/paper_meta_backfilling 仅经 get(kg_building=...,
         # paper_meta_backfilling=...) 回填为真值;list_for_user 等走 from_row 的
         # 路径恒为 False（当前无消费方读列表里的该字段）。
@@ -352,14 +365,14 @@ class NotebookSummaryQuery:
         # this count, is skipped with it (that channel returns nothing).
         if not memory_channel_allowed():
             memory_count = 0
-        own_memory = self.viewer_count_kwargs(
-            connection, row["id"], user_id,
-            holds_memory=None if memory_holders is None else row["id"] in memory_holders,
+        facts = (
+            self._row_facts(connection, row["id"], user_id, memory_holders)
+            if prefetched is None else prefetched
         )
         counts = {
-            "sources": self.visible_source_count(connection, row["id"]),
+            "sources": facts["sources"],
             "memories": memory_count,
-            **self.knowledge_type_counts(connection, row["id"], **own_memory),
+            **self._type_counts_from_rows(facts["type_rows"]),
         }
         keys = row.keys()
 
@@ -374,9 +387,7 @@ class NotebookSummaryQuery:
 
         # 一次读取,两种投影:布尔 base_kg_available 与它的分解 base_kg_notebook_ids。
         # 自洽(非空 ⟺ 为真)因此是构造性的 —— 不存在两个独立求值的机会。
-        base_refs, base_kg_ids = self.mounted_bases(
-            row["id"], connection, viewer_id=user_id
-        )
+        base_refs, base_kg_ids = self._mounts_from_rows(facts["mounts"])
         options = indexing_options or self._indexing_option_map()
         desired_id = str(row["indexing_pipeline"] or "") if "indexing_pipeline" in keys else ""
         desired_version = (
@@ -427,13 +438,11 @@ class NotebookSummaryQuery:
             # `SELECT notebooks.*`,所以列表与详情两条路径同时拿到它,零新增查询;
             # `in keys` 的兜底与相邻字段同款,喂的是快照/旧行投影那类不带全列的行。
             sync_origin=str(row["sync_origin"] or "") if "sync_origin" in keys else "",
-            kg_ready=self.has_kg(connection, row["id"], **own_memory),
+            kg_ready=facts["has_kg"],
             base_kg_available=bool(base_kg_ids),
             base_kg_notebook_ids=base_kg_ids,
             base_notebooks=base_refs,
-            kg_pending_sources=self.visible_pending_kg_sources(
-                connection, row["id"]
-            ),
+            kg_pending_sources=facts["pending"],
             # 「已分享」徽标的口径是**这本库不只我一个人能看**,所以它是两件事的并集:
             # 只读共享(`notebooks.is_shared` 这一列)**或**存在指向某个群组的授权边
             # (`_shared_to_groups`,由 summary/owned 两条行查询顺带带回,零新增往返)。
@@ -456,6 +465,58 @@ class NotebookSummaryQuery:
             indexing_pipeline_missing=bool(desired_id and selected is None),
             indexing_pipeline_pending=bool(job_id) or stale,
             indexing_pipeline_stale=stale,
+        )
+
+    def _row_facts(
+        self,
+        connection: object,
+        notebook_id: str,
+        user_id: "str | None",
+        memory_holders: "set[str] | None",
+    ) -> Dict[str, Any]:
+        """One notebook's summary facts read one primitive at a time -- the
+        shape of a ``notebook_list_summary_facts`` entry, in the order the
+        summary has always read them (the viewer keyword, sources, counts,
+        mounts, ``kg_ready``, pending)."""
+        own_memory = self.viewer_count_kwargs(
+            connection, notebook_id, user_id,
+            holds_memory=None if memory_holders is None else notebook_id in memory_holders,
+        )
+        sources = self.visible_source_count(connection, notebook_id)
+        type_rows = self.queries.knowledge_type_count_rows(
+            connection, notebook_id, USABLE_STATUSES, **own_memory
+        )
+        mounts = self.queries.mounted_bases_row(
+            connection, notebook_id, viewer_id=user_id
+        )
+        return {
+            "sources": sources,
+            "type_rows": type_rows,
+            "mounts": mounts,
+            "has_kg": self.has_kg(connection, notebook_id, **own_memory),
+            "pending": self.visible_pending_kg_sources(connection, notebook_id),
+        }
+
+    def _list_facts(
+        self, db: object, rows: Sequence[Any], user_id: str,
+        holders: "set[str] | None",
+    ) -> Dict[str, Dict[str, Any]]:
+        """The list page's summary facts for ``rows`` in one batched read
+        (F2, ``notebook_list_summary_facts``).  Each notebook's viewer keyword
+        is decided here, in the request's context, by the same
+        ``viewer_count_kwargs`` a per-notebook summary uses (D5: a token
+        without ``memory:read`` reads every Memory-holding notebook as ``""``);
+        the mounts' viewer is the user, as in ``mounted_bases``."""
+        ids = list(dict.fromkeys(row["id"] for row in rows))
+        viewers = {
+            notebook_id: self.viewer_count_kwargs(
+                db, notebook_id, user_id,
+                holds_memory=None if holders is None else notebook_id in holders,
+            )
+            for notebook_id in ids
+        }
+        return self.queries.notebook_list_summary_facts(
+            db, ids, USABLE_STATUSES, viewer_id=user_id, viewers=viewers,
         )
 
     def _fill_viewer_relation(
@@ -679,6 +740,9 @@ class NotebookSummaryQuery:
             # E4-7: one probe for the whole list (None while the seam is off).
             holders = self.memory_holders(
                 db, [row["id"] for part in (rows, joined, granted) for row in part])
+            # F2: every listed notebook's counts / mounts / kg_ready / pending
+            # in a number of statements that does not grow with the list.
+            facts = self._list_facts(db, [*rows, *joined, *granted], user_id, holders)
             for row in rows:
                 nb = self.from_row(
                     db,
@@ -687,6 +751,7 @@ class NotebookSummaryQuery:
                     indexing_options=indexing_options,
                     user_id=user_id,
                     memory_holders=holders,
+                    prefetched=facts.get(row["id"]),
                 )
                 nb.access = "owner"
                 nb.can_manage_content = True
@@ -700,6 +765,7 @@ class NotebookSummaryQuery:
                     indexing_options=indexing_options,
                     user_id=user_id,
                     memory_holders=holders,
+                    prefetched=facts.get(row["id"]),
                 )
                 nb.access = "reader"
                 nb.shared_from = row["_owner_username"] or ""
@@ -731,6 +797,7 @@ class NotebookSummaryQuery:
                     indexing_options=indexing_options,
                     user_id=user_id,
                     memory_holders=holders,
+                    prefetched=facts.get(notebook_id),
                 )
                 nb.access = "reader"
                 nb.shared_from = row["_owner_username"] or ""
