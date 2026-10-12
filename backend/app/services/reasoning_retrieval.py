@@ -3226,27 +3226,13 @@ class _ReasoningRunState:
     能从 `run` 里搬成独立、可单测的阶段:那些阶段之间靠十几个可变容器与计数器
     交接,不给它们一个显式载体就只能继续挤在同一个函数里。
 
-    ⚠ **它主要是首轮与 reflect 循环之间的一次性交接,不是全程的状态权威。**`run`
-    在首轮结束后把绝大多数字段解包成局部名,此后循环与收尾只读写那些局部名——
-    被解包的标量(`steps`/`stale`/`outline_updates` …)在 `state` 上因此是陈旧
-    值,**别再从 `state` 读它们**。可变容器(dict/list/set)是同一个对象,两侧看到
-    的一直是同一份数据。
-
-    这条纪律有一组**明确的例外**,它们刻意不解包、全程以 `state` 为权威,读写
-    都必须走 `state.`:
-
-    * `enum_rows_used` / `enum_pages_used` / `enum_payload_used` —— 三个枚举预算池
-      的扣减发生在 `_run_enumeration` 里(不在循环本体),解包成局部名就会读到
-      扣减之前的旧数;
-    * `enumeration_active` / `kg_in_scope` —— run 级不变量,`_new_run_state` 算一次,
-      循环直读;
-    * `document_reads_done` / `document_read_elements_used` /
-      `document_read_chars_used` / `document_reads` / `document_reads_by_id` ——
-      PR-A 的按篇取样账目。整组的读写都在 `_action_read_document` 里(`run` 是零
-      松弛长度天花板的热函数,执行体不记在它头上),与 `ppr_searches` /
-      `chunk_searches` 同款只走 `state.`,不解包。
-
-    这样安排是为了让 reflect 循环本体一个字都不用改(本次结构项刻意不动它)。
+    ⚠ **它是全程唯一的状态权威。**首轮各阶段、reflect 循环、它的三个嵌套 def、
+    各 `_action_*` 方法与收尾都直接读写 `state.<字段>`,`run` 不把任何字段拷贝成
+    局部名。标量(`steps`/`stale`/`outline_updates` …)与会被重新绑定的值
+    (`outline`/`outline_overflow`/`consult_rows_accum`/`chains`)尤其**不得**起局部
+    别名:写进别名的值 `state` 看不见,下一轮读到的就是旧数——那是一类不报错的
+    静默错误。只有从不重新绑定的可变容器与方法对象(如 `record`)可以起别名;
+    `test_reasoning_run_state_authority` 按这条纪律守着 `run`。
 
     每个字段的注释说明它**由谁写、被谁读**。
     """
@@ -3302,8 +3288,8 @@ class _ReasoningRunState:
     neighbor_truncated: Dict[str, str]
 
     # —— 类型化集合枚举:地图由首轮建;预算池与续跑账目由 reflect 循环的枚举
-    # 动作经 `_run_enumeration` 落账。因此这三个计数器是上面那组「不解包」的
-    # 例外之一:循环里一律直读 `state.enum_rows_used` 等,不拷贝成局部名。
+    # 动作经 `_run_enumeration` 落账。循环里一律直读 `state.enum_rows_used` 等
+    # (与其余字段同一条纪律,见类 docstring)。
     enum_rows_used: int
     enum_pages_used: int
     enum_payload_used: int
@@ -3403,15 +3389,12 @@ class _ReasoningRunState:
     stale: int = 0
 
     # reflect 循环的动作配额计数器,构造时归零后只由循环自己推进。
-    # ⚠ 下面两个**不被 `run` 解包**:`ppr_retrieve`/`search_chunks` 的执行体整体
-    # 住在 `_action_ppr_retrieve`/`_action_search_chunks` 里(`run` 是有零松弛长度
-    # 天花板的热函数),那两个方法就地读写这里,所以没有「解包之后别再回看
-    # state 标量」那条纪律的问题。两条 seed pass 都不经过它们,所以这两个计数只
-    # 数 agent 动作。
+    # 下面两个由 `_action_ppr_retrieve`/`_action_search_chunks` 就地读写(`run` 是
+    # 有零松弛长度天花板的热函数,执行体不记在它头上)。两条 seed pass 都不经过
+    # 它们,所以这两个计数只数 agent 动作。
     ppr_searches: int = 0
     chunk_searches: int = 0
-    # —— PR-A 的按篇原文取样账目。同样**不被 `run` 解包**(执行体整体住在
-    # `_action_read_document` 里)。三个计数器是 run 级的两个预算池 + 次数上限:
+    # —— PR-A 的按篇原文取样账目,由 `_action_read_document` 就地读写。三个计数器是 run 级的两个预算池 + 次数上限:
     # 元素池 `settings.document_overview_max_elements`、字符池
     # `limits.chunk_context_chars // 4`,每次读的份额 = 剩余 // 还能读几次
     # (与 `document_catalog_overview.supplement_missing_summaries` 同形)。
@@ -3422,13 +3405,12 @@ class _ReasoningRunState:
     document_read_chars_used: int = 0
     document_reads: List["DocumentReadOutcome"] = field(default_factory=list)
     document_reads_by_id: set = field(default_factory=set)
-    # 这两个仍由 `run` 解包成局部标量(它们的分支还在 elif 链里)。
+    # 这两个由 `run` 的 elif 链读写(`state.` 直读直写)。
     follow_chain_searches: int = 0
     exact_lookups: int = 0
 
-    # —— 插件 reflect 动作(`ask.reflect_action`)。整组**不被 `run` 解包**:
-    # 执行体整体住在 `_action_plugin` 里(`run` 是零松弛天花板的热函数),那个
-    # 方法就地读写 `state.`,所以没有「解包之后别再回看 state 标量」的问题。——
+    # —— 插件 reflect 动作(`ask.reflect_action`)。执行体整体住在 `_action_plugin`
+    # 里(`run` 是零松弛天花板的热函数),那个方法就地读写 `state.`。——
     #
     # `_new_run_state` 写一次、此后只读:本 run 宿主判定为可用的动作规格,以及
     # 它们的名字集合(`run` 的 elif 链只用它判分派可达性,不判本轮开没开)。
@@ -6175,9 +6157,9 @@ class ReasoningRetriever:
         """reflect 的 `ppr_retrieve` 动作分支(逐字搬自 `run` 的 elif 链)。
 
         与 `_action_search_chunks` 同形:`run` 是有零松弛长度天花板的热函数,
-        动作执行体不记在它头上。计数器 `state.ppr_searches` 因此**不再**被
-        `run` 解包成局部标量,由本方法就地读写——容器(`chunks`/`seen_chunks`/
-        `zero_hit_by_action`)本来就是同一个对象,行为逐位不变。
+        动作执行体不记在它头上。计数器 `state.ppr_searches` 与容器(`chunks`/
+        `seen_chunks`/`zero_hit_by_action`)都由本方法就地读写 `state.`(状态权威
+        的纪律见 `_ReasoningRunState`)。
         """
         record = state.record
         action_policy = state.action_policy
@@ -6231,8 +6213,8 @@ class ReasoningRetriever:
 
         整体住在这里而不是 `run` 的 elif 链里:`run` 是有零松弛长度天花板的热
         函数,新通道的执行体按 `_first_round_*` 的先例不记在它头上。计数器就地
-        读写 `state.chunk_searches`(它是本方法独占的 run 级账目,`run` 不解包
-        它,所以没有「解包之后别再读 state 标量」那条纪律的问题)。
+        读写 `state.chunk_searches`(它是本方法独占的 run 级账目,纪律见
+        `_ReasoningRunState`)。
 
         **可选的关键词半(`chunks_keywords`)。** chunk 模式总有一条按语料语言
         双语化的关键词全文检索臂;reasoning 的确定性关键词只在首轮播种、且只在
@@ -6320,7 +6302,7 @@ class ReasoningRetriever:
 
         整体住在这里而不是 `run` 的 elif 链里:`run` 是有零松弛长度天花板的热函数,
         新通道的执行体按 `_action_ppr_retrieve`/`_action_search_chunks` 的先例不记
-        在它头上。五个 run 级账目就地读写 `state.`(本方法独占,`run` 不解包它们)。
+        在它头上。五个 run 级账目就地读写 `state.`(本方法独占)。
 
         **来源解析零额外 I/O**:只在 `state.enumerations` 里 `collection=="sources"`
         的那批 `SourceItem` 上按 `_normalized_title` 精确匹配。范围合法性已经由
@@ -6698,8 +6680,8 @@ class ReasoningRetriever:
 
         整体住在这里而不是 `run` 的 elif 链里:`run` 是有零松弛长度天花板的热
         函数(与 `_action_search_chunks`/`_action_expand_community` 同形)。所有
-        run 级账目就地读写 `state.`;`last_turn` 由 `run` 算好传进来,因为 `steps`
-        是被解包成局部标量的那一类,`state.steps` 在循环里是陈旧值。
+        run 级账目就地读写 `state.`;`last_turn` 由 `run` 算好传进来(本轮是不是
+        最后一轮是循环的判断,不由动作自己读 `state.steps` 去重算)。
 
         每一道判据都记一条 skip 步并**返回**,理由码逐字进 `detail.reason`,前端
         按同一份取值集渲染。措辞一律写成教学式(「该给什么」),不是「你给错了」
@@ -7484,9 +7466,9 @@ class ReasoningRetriever:
             intent_detail=None):
         """一次逐步推理检索:首轮 → reflect 循环 → 收尾。
 
-        首轮已整体搬进 `_run_first_round`(阶段为 `_first_round_*`,run 级状态
-        走 `_ReasoningRunState`);reflect 循环本体、它的三个嵌套 def 与收尾的
-        证据预算/配额重排/采用回写仍在本函数里,是登记在案的下一件结构工作。
+        首轮已整体搬进 `_run_first_round`(阶段为 `_first_round_*`);run 级状态全程
+        以 `state`(`_ReasoningRunState`)为唯一权威,循环、三个嵌套 def 与收尾直接
+        读写 `state.`。循环本体与收尾仍在本函数里,是登记在案的下一件结构工作。
         """
         raise_if_cancelled(self.cancel_event)
         self._per_query_scored.clear()
