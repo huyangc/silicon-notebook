@@ -38,7 +38,7 @@ import {
   whitelistHasOwnedNotebook,
   type AgentTokenDraft,
 } from "./agent-token-model";
-import { requestJson } from "./api-client.ts";
+import { requestJson, requestVoid } from "./api-client.ts";
 import { copyTextSafely } from "./copy-text";
 import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors.ts";
 import { subscribeMemorySessionAbort } from "./memory-model";
@@ -65,6 +65,11 @@ type RowCopyState =
 
 async function agentApi<T>(path: string, options: RequestInit = {}): Promise<T> {
   return requestJson(path, { ...options, tag: "memory", unauthorized: "clear-and-reload" });
+}
+
+/** 成功响应是 204 无响应体(如删除 Profile):不能走 requestJson 的 JSON 解析。 */
+async function agentVoid(path: string, options: RequestInit = {}): Promise<void> {
+  return requestVoid(path, { ...options, tag: "memory", unauthorized: "clear-and-reload" });
 }
 
 function defaultExpiry(): string {
@@ -229,6 +234,10 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
   const [enabledProfileId, setEnabledProfileId] = useState<string | null>(null);
   // 停用/启用失败落在该 Profile 行上:页顶横幅可能在视口外,行又回到原状,看起来像什么都没发生。
   const [profileError, setProfileError] = useState<{ id: string; text: string } | null>(null);
+  // 删除同样要行内再确认一次;与「启用」确认互斥,同一行同一时刻只处于一种确认态。
+  const [confirmDeleteProfileId, setConfirmDeleteProfileId] = useState<string | null>(null);
+  // 刚删除的 Profile 留一份快照,在原位显示「已删除」几秒;刷新回来的列表已不含它。
+  const [deletedProfile, setDeletedProfile] = useState<{ profile: AgentProfile; index: number } | null>(null);
   const [hideInactive, setHideInactive] = useState(true);
   // 刚撤销的那一行留在列表里显示「已撤销」,免得「隐藏已撤销」把操作结果一并藏掉。
   const [justRevokedId, setJustRevokedId] = useState<string | null>(null);
@@ -293,6 +302,12 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
     const timer = window.setTimeout(() => setEnabledProfileId(null), TOKEN_SAVED_NOTICE_MS);
     return () => window.clearTimeout(timer);
   }, [enabledProfileId]);
+
+  useEffect(() => {
+    if (!deletedProfile) return;
+    const timer = window.setTimeout(() => setDeletedProfile(null), TOKEN_SAVED_NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, [deletedProfile]);
 
   useEffect(() => {
     if (!savedTokenId) return;
@@ -550,6 +565,36 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
     setRefresh((value) => value + 1);
   }
 
+  async function deleteProfile(profileId: string) {
+    if (sessionSignal.aborted) return;
+    const index = profiles.findIndex((item) => item.id === profileId);
+    const snapshot = index >= 0 ? profiles[index] : null;
+    const controller = new AbortController();
+    mutationControllersRef.current.add(controller);
+    setLoading(true);
+    setError("");
+    setProfileError(null);
+    try {
+      await agentVoid(`/agent-profiles/${encodeURIComponent(profileId)}`, {
+        method: "DELETE",
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted || !mountedRef.current) return;
+      setConfirmDeleteProfileId(null);
+      if (snapshot) setDeletedProfile({ profile: snapshot, index });
+      if (selectedProfileRef.current === profileId) setSelectedProfile("");
+      setRefresh((value) => value + 1);
+    } catch (cause) {
+      // 失败时保留行内确认,用户可以就地再点一次「确认删除」。
+      if (!controller.signal.aborted && mountedRef.current) {
+        setProfileError({ id: profileId, text: toUserMessage(cause, "删除失败，请稍后重试") });
+      }
+    } finally {
+      mutationControllersRef.current.delete(controller);
+      if (mountedRef.current) setLoading(false);
+    }
+  }
+
   async function issueToken(event: FormEvent) {
     event.preventDefault();
     if (!canIssueAgentToken(selectedProfile, draft, ownedIds)) return;
@@ -698,6 +743,14 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
   const visibleTokens = hideInactive
     ? tokens.filter((token) => token.id === justRevokedId || agentTokenStatus(token) === "active")
     : tokens;
+  // 刚删除的 Profile 刷新后已不在列表里:按原位置把快照补回去,让「已删除」提示在原地停几秒。
+  const profileRows = deletedProfile && !profiles.some((item) => item.id === deletedProfile.profile.id)
+    ? [
+      ...profiles.slice(0, deletedProfile.index),
+      deletedProfile.profile,
+      ...profiles.slice(deletedProfile.index),
+    ]
+    : profiles;
   const disabledProfileIds = new Set(
     profiles.filter((profile) => profile.status !== "active").map((profile) => profile.id),
   );
@@ -742,32 +795,53 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
         <div className="agent-access-grid">
           <form className="agent-config-block" onSubmit={createProfile}>
             <h3>Agent Profile</h3>
-            <p>稳定身份用于记忆来源和审计；停用后它的全部 token 立即失效，重新启用后未撤销、未过期的 token 恢复可用。</p>
+            <p>稳定身份用于记忆来源和审计；停用后它的全部 token 立即失效，重新启用后未撤销、未过期的 token 恢复可用；删除后不可恢复。</p>
             <label>名称<input value={profileName} maxLength={80} onChange={(event) => setProfileName(event.target.value)} placeholder="例如 Claude Code" /></label>
             <label>说明<input value={profileDescription} maxLength={500} onChange={(event) => setProfileDescription(event.target.value)} placeholder="用途或运行环境" /></label>
             <button type="submit" disabled={loading || !profileName.trim()}><Plus size={14} /> 新建 Profile</button>
             <div className="agent-profile-list">
-              {profiles.map((profile) => (
+              {profileRows.map((profile) => (
                 <div key={profile.id}>
                   <span><strong>{profile.name}</strong><small>{profile.description || "无说明"} · {profile.status === "active" ? "启用" : "已停用"}</small></span>
-                  {profile.status === "active" ? (
+                  {deletedProfile?.profile.id === profile.id ? (
                     <span className="agent-profile-actions">
-                      {enabledProfileId === profile.id && (
-                        <small className="agent-token-saved" role="status"><Check size={13} /> 已启用</small>
-                      )}
-                      {profileError?.id === profile.id && <small className="agent-token-confirm" role="alert">{profileError.text}</small>}
-                      <button type="button" disabled={loading} onClick={() => disableProfile(profile.id)}>停用</button>
-                    </span>
-                  ) : confirmEnableProfileId === profile.id ? (
-                    <span className="agent-profile-actions">
-                      {profileError?.id === profile.id
-                        ? <small className="agent-token-confirm" role="alert">{profileError.text}</small>
-                        : <small className="agent-token-confirm">启用后，它未撤销、未过期的 token 立即恢复可用</small>}
-                      <button type="button" disabled={loading} onClick={() => enableProfile(profile.id)}>确认启用</button>
-                      <button type="button" disabled={loading} onClick={() => { setConfirmEnableProfileId(null); setProfileError(null); }}>不启用</button>
+                      <small className="agent-token-saved" role="status"><Check size={13} /> 已删除</small>
                     </span>
                   ) : (
-                    <button type="button" disabled={loading} onClick={() => { setConfirmEnableProfileId(profile.id); setProfileError(null); }}>启用</button>
+                    <span className="agent-profile-actions">
+                      {confirmDeleteProfileId === profile.id ? (
+                        <>
+                          {profileError?.id === profile.id
+                            ? <small className="agent-token-confirm" role="alert">{profileError.text}</small>
+                            : <small className="agent-token-confirm">删除后它的全部 token 永久撤销，且不能恢复；它留下的记忆和来源仍保留它的名字</small>}
+                          <button type="button" className="danger" disabled={loading} onClick={() => deleteProfile(profile.id)}>确认删除</button>
+                          <button type="button" disabled={loading} onClick={() => { setConfirmDeleteProfileId(null); setProfileError(null); }}>不删除</button>
+                        </>
+                      ) : (
+                        <>
+                          {profile.status === "active" ? (
+                            <>
+                              {enabledProfileId === profile.id && (
+                                <small className="agent-token-saved" role="status"><Check size={13} /> 已启用</small>
+                              )}
+                              {profileError?.id === profile.id && <small className="agent-token-confirm" role="alert">{profileError.text}</small>}
+                              <button type="button" disabled={loading} onClick={() => disableProfile(profile.id)}>停用</button>
+                            </>
+                          ) : confirmEnableProfileId === profile.id ? (
+                            <>
+                              {profileError?.id === profile.id
+                                ? <small className="agent-token-confirm" role="alert">{profileError.text}</small>
+                                : <small className="agent-token-confirm">启用后，它未撤销、未过期的 token 立即恢复可用</small>}
+                              <button type="button" disabled={loading} onClick={() => enableProfile(profile.id)}>确认启用</button>
+                              <button type="button" disabled={loading} onClick={() => { setConfirmEnableProfileId(null); setProfileError(null); }}>不启用</button>
+                            </>
+                          ) : (
+                            <button type="button" disabled={loading} onClick={() => { setConfirmEnableProfileId(profile.id); setConfirmDeleteProfileId(null); setProfileError(null); }}>启用</button>
+                          )}
+                          <button type="button" className="danger" disabled={loading} onClick={() => { setConfirmDeleteProfileId(profile.id); setConfirmEnableProfileId(null); setProfileError(null); }}>删除</button>
+                        </>
+                      )}
+                    </span>
                   )}
                 </div>
               ))}

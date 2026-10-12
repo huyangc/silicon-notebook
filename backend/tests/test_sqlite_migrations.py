@@ -258,7 +258,7 @@ def test_v92_drops_the_staged_auth_schema_and_keeps_credentials(tmp_path):
         )
         db.execute("PRAGMA user_version = 91")
 
-    assert SqliteMigrator(database, settings).migrate() == [92]
+    assert SqliteMigrator(database, settings).migrate() == [92, 93]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -309,4 +309,32 @@ def test_v92_refuses_usernames_that_differ_only_by_case(tmp_path):
         assert db.execute(
             "SELECT count(*) FROM sqlite_master WHERE name='auth_policy'"
         ).fetchone()[0] == 1
+    database.close_local()
+
+
+def test_v93_adds_the_nullable_profile_deleted_at_without_touching_rows(tmp_path):
+    """Agent Profile soft delete is a new nullable column: an existing Profile
+    comes through listed (``deleted_at`` NULL) and a second run is a no-op."""
+    from tests.sqlite_migration_testkit import rollback_v93
+
+    database, settings = _fresh_migrated_database(tmp_path)
+    with database.write() as db:
+        db.execute(
+            "INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at) "
+            "VALUES ('user-p','p@x','P','user','active','p12345678','t','t')"
+        )
+        db.execute(
+            "INSERT INTO agent_profiles (id,owner_id,name,created_at,updated_at) "
+            "VALUES ('agent-p','user-p','Kept','t','t')"
+        )
+        rollback_v93(db)
+        db.execute("PRAGMA user_version = 92")
+
+    assert SqliteMigrator(database, settings).migrate() == [93]
+    assert SqliteMigrator(database, settings).migrate() == []
+    with database.connect() as db:
+        columns = {row[1]: row for row in db.execute("PRAGMA table_info(agent_profiles)")}
+        row = db.execute("SELECT name,status,deleted_at FROM agent_profiles").fetchone()
+    assert columns["deleted_at"][2] == "TEXT" and columns["deleted_at"][3] == 0
+    assert (row["name"], row["status"], row["deleted_at"]) == ("Kept", "active", None)
     database.close_local()

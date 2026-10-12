@@ -533,6 +533,9 @@ class MemoryService:
             raise ValueError("invalid profile status")
         return self.store.update_agent_profile(profile_id, owner_id, values)
 
+    def delete_agent_profile(self, profile_id: str, owner_id: str) -> None:
+        self.store.delete_agent_profile(profile_id, owner_id)
+
     def _validate_agent_access(
         self,
         owner_id: str,

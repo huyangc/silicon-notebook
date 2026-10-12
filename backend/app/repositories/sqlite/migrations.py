@@ -293,7 +293,10 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # auth_identity_audit.grant_reference, and empties auth_transactions; it adds
 # users.sso_linked_at (nullable TEXT, no backfill) and the unique
 # idx_users_username_lower over lower(username). See ``_migration_92``.
-SCHEMA_VERSION = 92
+# v93 (paired with PostgreSQL 0073_agent_profile_deleted_at.sql) adds
+# agent_profiles.deleted_at (nullable TEXT, no backfill): the soft-delete
+# marker of an Agent Profile. See ``_migration_93``.
+SCHEMA_VERSION = 93
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
 # when v87 was written (a migration must not change meaning when the live
@@ -5763,6 +5766,20 @@ class SqliteMigrator:
                 "ON users(lower(username)) WHERE username<>''"
             )
             db.execute("PRAGMA user_version = 92")
+
+    def _migration_93(self) -> None:
+        """Agent Profile soft delete, parity with PostgreSQL
+        ``0073_agent_profile_deleted_at.sql``.
+
+        ``agent_profiles.deleted_at`` is a nullable TEXT with no backfill: NULL
+        means the Profile is listed; a timestamp means its owner deleted it
+        (status is set to 'revoked' in the same write and its tokens are
+        revoked). A new column rather than a new status value keeps
+        ``ck_agent_profiles_status`` untouched, which SQLite could only change
+        by rebuilding the table.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(db, "agent_profiles", "deleted_at", "TEXT")
 
     def migrate(self) -> list[int]:
         with self._connect() as db:

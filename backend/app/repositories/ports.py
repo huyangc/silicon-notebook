@@ -665,6 +665,7 @@ class MemoryRepository(Protocol):
     def update_agent_profile(
         self, profile_id: str, owner_id: str, patch: Mapping[str, Any] | Any
     ) -> AgentProfile: ...
+    def delete_agent_profile(self, profile_id: str, owner_id: str) -> None: ...
     def issue_agent_token(
         self, owner_id: str, agent_profile_id: str, scopes: Sequence[str],
         default_notebook_id: str, notebook_ids: Sequence[str],
@@ -4030,6 +4031,7 @@ class MemoryStorePort(Protocol):
     def update_agent_profile(
         self, profile_id: str, owner_id: str, fields: Mapping[str, Any]
     ) -> AgentProfile: ...
+    def delete_agent_profile(self, profile_id: str, owner_id: str) -> None: ...
     def create_agent_token(
         self, token_id: str, owner_id: str, agent_profile_id: str,
         token_hash: str, scopes: Sequence[str], default_notebook_id: str,

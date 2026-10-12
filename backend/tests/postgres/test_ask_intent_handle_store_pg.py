@@ -14,7 +14,7 @@ def database(request):
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 72
+    assert PostgresMigrator(database).migrate() == 73
     return database
 
 

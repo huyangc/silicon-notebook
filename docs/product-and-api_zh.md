@@ -1168,7 +1168,10 @@ owner 拥有的笔记本生效）。代码内部仍按细粒度能力（`knowled
 owner 自己拥有的笔记本，返回 422「管理和删除权限只对你拥有的笔记本生效，所选笔记本里没有你拥有的」
 （用户可见文案）。可即时撤销。Profile 可停用（`PATCH /api/agent-profiles/{id}` `status: "revoked"`，
 其全部 token 立即失效），也可在同一页行内二次确认后重新启用（`status: "active"`）：名下未撤销、未过期的
-token 随即恢复可用，停用期间被撤销的 token 不恢复。
+token 随即恢复可用，停用期间被撤销的 token 不恢复。Profile 还可以删除（`DELETE /api/agent-profiles/{id}`，
+成功 204，同一页行内二次确认）：这是软删除——同一事务里置 `status: "revoked"` 与 `deleted_at`，并撤销名下
+全部仍有效的 token；之后它不再出现在 Profile 列表，对它的修改、重新启用与再次删除都按不存在处理（404），
+它的 token 鉴权报 `token_revoked`。行本身保留，因此它提交过的 Memory、添加的来源与观察记录里的出处不变。
 
 Token 签发后可以再次复制：服务端在签发时保存明文（`agent_access_tokens.token_plain`），鉴权仍只按
 哈希比对。`GET /api/agent-tokens` 的每行带 `copyable`（明文在且未撤销）但从不带明文；
