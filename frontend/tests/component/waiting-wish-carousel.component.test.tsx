@@ -237,17 +237,17 @@ test("全部愿望都已完成或不采纳时显示空态，不起计时器也�
   render(<WaitingWishCarousel />);
   await act(async () => {});
 
-  expect(screen.getByText("暂无处理中的愿望，欢迎去许愿墙分享想法。")).toBeInTheDocument();
+  expect(screen.getByText("暂无待处理或处理中的愿望，欢迎去许愿墙分享想法。")).toBeInTheDocument();
   expect(screen.queryByRole("article")).not.toBeInTheDocument();
   expect(screen.queryByRole("navigation", { name: "切换愿望" })).not.toBeInTheDocument();
   expect(vi.getTimerCount()).toBe(0);
   act(() => { vi.advanceTimersByTime(WAITING_WISH_ROTATION_MS * 3); });
-  expect(screen.getByText("暂无处理中的愿望，欢迎去许愿墙分享想法。")).toBeInTheDocument();
+  expect(screen.getByText("暂无待处理或处理中的愿望，欢迎去许愿墙分享想法。")).toBeInTheDocument();
   expect(mocks.listWishes).toHaveBeenCalledTimes(2);
   expect(fetchSpy).not.toHaveBeenCalled();
 });
 
-test("重新加载后过滤结果变短时从第一条开始且不越界", async () => {
+test("重试加载后过滤只剩一条时直接展示且不出现切换", async () => {
   mocks.listWishes.mockRejectedValueOnce(new Error("offline"));
   const user = userEvent.setup();
   render(<WaitingWishCarousel />);
