@@ -305,6 +305,20 @@ function ReportDetailPane({
           ) : "这份报告没有成功生成。"}
         </div>
       ) : null}
+      {/* 各节失败原文:不看 status——done 报告也可能有失败章节,正文里只剩中性
+          说明。只有管理员拿得到(后端与 error 同一披露判定),空列表不渲染。 */}
+      {!loading && !error && detail?.section_errors?.length ? (
+        <div className="detail-error" data-testid="report-section-errors">
+          <strong>章节失败原因：</strong>
+          <ul>
+            {detail.section_errors.map((row) => (
+              <li key={row.index}>
+                {row.title || `第 ${row.index + 1} 节`}：{row.error}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
       {!loading && !error && detail?.content_md ? (
         <div className="activity-report-body">
           {/* 只读排障视图:不传 notebookId/onPreviewImage——管理员不在对方笔记本的

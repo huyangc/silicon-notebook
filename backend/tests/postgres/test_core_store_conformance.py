@@ -37,6 +37,10 @@ from app.services.notebook_catalog import NotebookSummaryQuery
 from app.services.notebook_sharing import NotebookCopyService
 from app.services.repository_runtime import RepositoryCompatibilitySeams
 from app.services import repository_facade
+from tests.activity_parity_cases import (
+    REPORT_SECTION_FAILURE_EXPECTED,
+    REPORT_SECTION_FAILURE_SECTIONS,
+)
 from tests.kg_extracted_parity_cases import (
     KG_EXTRACTED_CASES,
     kg_case_run_id,
@@ -4149,6 +4153,46 @@ def test_concurrent_share_issuance_converges_under_read_committed(
     assert resolved["created_by"] == owner.id
     # 未 done 与未知 token 仍不可区分。
     assert reports.public_report_by_token("rshr-never-issued") is None
+
+
+def test_public_report_read_carries_failed_sections_only_for_a_failure_note_postgres(
+    core_stores: CoreStores,
+):
+    """K5: the token read selects the failed sections' raw errors in SQL, and
+    only when the body carries a failure note, for the route to rewrite stored
+    notes exactly. Same contract as the SQLite lane (``test_report_api``)."""
+    from app.repositories.postgres.report_store import ReportStore
+
+    owner = core_stores.identity.create_user("r00556677", "password-12")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Failed sections"), owner.id
+    )
+    reports = ReportStore(
+        core_stores.database,
+        new_id=_new_id_factory(),
+        now=lambda: NOW,
+        current_user_id=lambda: owner.id,
+    )
+    sections = list(REPORT_SECTION_FAILURE_SECTIONS)
+    with_note = reports.create_report(notebook_id, "q", 2)
+    reports.update_report(
+        notebook_id, with_note, status="done", sections=sections,
+        content_md="## A\n\n（本节生成失败:OperationalError: 10.9.8.7）\n",
+    )
+    without_note = reports.create_report(notebook_id, "q", 2)
+    reports.update_report(
+        notebook_id, without_note, status="done", sections=sections,
+        content_md="## A\n\n正文\n",
+    )
+
+    resolved = reports.public_report_by_token(
+        reports.share_report(notebook_id, with_note)
+    )
+    assert resolved["failed_sections"] == REPORT_SECTION_FAILURE_EXPECTED
+    plain = reports.public_report_by_token(
+        reports.share_report(notebook_id, without_note)
+    )
+    assert plain["failed_sections"] == []
 
 
 def test_terminal_understanding_write_keeps_the_generation_stamp_on_postgres(

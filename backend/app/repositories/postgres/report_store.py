@@ -36,6 +36,33 @@ def _keep_planning_memory(column: str) -> str:
     )
 
 
+# The failed sections of the ``reports`` row in scope, as one jsonb array of
+# ``{index, title, error}`` (``index`` = position in ``sections_json``), only
+# for sections whose ``failed`` is JSON ``true`` -- the only value the engine
+# writes.  Selected in SQL so a read that needs the raw failure text never
+# ships the whole sections document (claims, audits, bodies) to Python.  The
+# SQLite adapter selects the same rows with ``json_each``.
+_FAILED_SECTIONS_SQL = (
+    "(SELECT COALESCE(jsonb_agg(jsonb_build_object("
+    "'index', s.ordinality - 1, "
+    "'title', COALESCE(s.value->>'title', ''), "
+    "'error', COALESCE(s.value->>'error', '')) ORDER BY s.ordinality), "
+    "'[]'::jsonb) "
+    "FROM jsonb_array_elements(CASE WHEN jsonb_typeof(reports.sections_json)"
+    "='array' THEN reports.sections_json ELSE '[]'::jsonb END) "
+    "WITH ORDINALITY AS s(value, ordinality) "
+    "WHERE jsonb_typeof(s.value)='object' "
+    "AND s.value->'failed' = 'true'::jsonb)"
+)
+# The public read needs that list only to rewrite a stored failure note, and a
+# body has such a note exactly when it carries the prefix: gating on it keeps
+# ``sections_json`` untouched (not even detoasted) for every other report.
+_PUBLIC_FAILED_SECTIONS_SQL = (
+    "CASE WHEN strpos(reports.content_md, '（本节生成失败:') > 0 "
+    f"THEN {_FAILED_SECTIONS_SQL} END"
+)
+
+
 class ReportStore:
     # Bound memory and parameter use for large export selections.
     IN_CHUNK = 900
@@ -302,7 +329,8 @@ class ReportStore:
                     row = db.execute(
                         "SELECT id,notebook_id,question,depth,status,error,"
                         "content_md,references_json,understanding_json,"
-                        "created_at,updated_at FROM reports "
+                        f"created_at,updated_at,{_FAILED_SECTIONS_SQL} "
+                        "AS section_errors FROM reports "
                         "WHERE id=%s AND notebook_id=%s AND created_by=%s FOR SHARE",
                         (report_id, notebook_id, actor_id),
                     ).fetchone()
@@ -323,6 +351,9 @@ class ReportStore:
                         "error": row["error"] or "",
                         "content_md": row["content_md"] or "",
                         "references": json_value(row["references_json"], []),
+                        # Raw failure text: the route discloses it to
+                        # administrators only (``_activity_failure_text``).
+                        "section_errors": json_value(row["section_errors"], []),
                         "notebook_name": root["name"] or "",
                         "notebook_deleted_at": "",
                         "retained_until": "",
@@ -354,6 +385,7 @@ class ReportStore:
                 "error": "",
                 "content_md": "",
                 "references": [],
+                "section_errors": [],
                 "notebook_name": retained["notebook_name"],
                 "notebook_deleted_at": iso_timestamp(retained["deleted_at"]),
                 "retained_until": iso_timestamp(retained["expires_at"]),
@@ -477,7 +509,9 @@ class ReportStore:
         so the caller cannot distinguish "never existed" from "unshared".
 
         Also returns ``GATE_FIELDS`` for the caller's live authorization check;
-        they are not part of the disclosure surface.
+        they are not part of the disclosure surface.  So is ``failed_sections``
+        (the failed sections' raw errors, read only when the body carries a
+        failure note): the caller pops it to rewrite such notes neutrally.
         """
         clean = str(token or "").strip()
         if not clean:
@@ -485,7 +519,8 @@ class ReportStore:
         columns = ", ".join(self.PUBLIC_FIELDS + self.GATE_FIELDS)
         with self.database.connect() as db:
             row = db.execute(
-                f"SELECT {columns} FROM reports "
+                f"SELECT {columns}, {_PUBLIC_FAILED_SECTIONS_SQL} AS "
+                "failed_sections FROM reports "
                 "WHERE share_token = %s AND status = 'done'",
                 (clean,),
             ).fetchone()
@@ -495,6 +530,7 @@ class ReportStore:
         # Same shape as the SQLite adapter: the caller never sees the dialect.
         out["references"] = json_value(out.pop("references_json", None), [])
         out.pop("understanding_json", None)
+        out["failed_sections"] = json_value(out.get("failed_sections"), [])
         return out
 
     def _in_batches(self, ids) -> Iterator[list]:

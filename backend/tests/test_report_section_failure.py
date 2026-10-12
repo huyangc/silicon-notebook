@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from app.services.reports.section_failure import (
     SECTION_FAILURE_COPY,
+    failed_section_errors,
     neutralize_failure_notes,
     section_failure_note,
     section_failure_paragraph,
@@ -78,3 +79,29 @@ def test_text_outside_the_fixed_paragraph_shape_is_untouched():
     ]
     for body in bodies:
         assert neutralize_failure_notes(body) == body
+
+
+def test_stored_errors_are_replaced_exactly_longest_first():
+    """With the failed sections' stored errors in hand, each note is replaced
+    as the literal the generator wrote -- also when the error closes a bracket
+    before a blank line, and when one error is a prefix of another."""
+    short, long = "boom", "boom）\n\nsecret tail"
+    body = _section("A", long) + "\n" + _section("B", short)
+    assert neutralize_failure_notes(body, [short, long]) == (
+        _section("A", _INTERNAL) + "\n" + _section("B", _INTERNAL)
+    )
+    # Without them, the paragraph pattern stops at the first bracket that
+    # ends a paragraph: this is the residue the exact pass exists for.
+    assert "secret tail" in neutralize_failure_notes(body)
+
+
+def test_failed_section_rows_normalise_both_dialects():
+    rows = [{"index": 2, "title": "A", "error": "x"}, {"index": "bad"}, "junk",
+            {"index": 0, "title": None, "error": 5}]
+    expected = [{"index": 2, "title": "A", "error": "x"},
+                {"index": 0, "title": "", "error": ""}]
+    assert failed_section_errors(rows) == expected
+    import json
+    assert failed_section_errors(json.dumps(rows)) == expected
+    assert failed_section_errors(None) == []
+    assert failed_section_errors("not json") == []

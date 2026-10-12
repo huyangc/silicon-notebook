@@ -518,6 +518,45 @@ def test_a_stored_raw_failure_note_is_neutral_on_the_public_page_only(
                     "get", "", None).status_code == 404
 
 
+@pytest.mark.parametrize("title, raw", [
+    # The stored error itself closes a bracket before a blank line: the
+    # paragraph pattern alone would stop there and leave the tail public.
+    ("B", "ValueError: bad value（x）\n\nsecret tail 10.9.8.7"),
+    # A title with a line break (the outline PATCH only strips its ends): the
+    # paragraph pattern alone would not recognise the note at all.
+    ("B\n第二行", "OperationalError: secret 10.9.8.7"),
+])
+def test_a_stored_note_is_rewritten_exactly_from_the_failed_sections_error(
+    client, stub_report_launch, title, raw,
+):
+    owner, _ = _new_user(client)
+    notebook_id = _notebook(client, owner)
+    report_id = _create_report(client, owner, notebook_id)
+    body = (
+        "# 深度报告:为什么?\n\n## A\n\n正文 A\n\n"
+        f"## {title}\n\n（本节生成失败:{raw}）\n\n## C\n\n正文 C\n"
+    )
+    from app.api.deps import repository
+    repository().update_report(
+        notebook_id, report_id, status="done", progress="完成", content_md=body,
+        sections=[
+            {"title": "A", "markdown": "正文 A"},
+            {"title": title, "markdown": "", "failed": True, "error": raw},
+            {"title": "C", "markdown": "正文 C"},
+        ],
+    )
+    token = _operate(client, owner, notebook_id, report_id,
+                     "post", "/share", {}).json()["share_token"]
+    public = client.get(f"/api/public/reports/{token}")
+    assert public.status_code == 200
+    assert "10.9.8.7" not in public.text and "secret" not in public.text
+    assert public.json()["content_md"] == body.replace(
+        f"（本节生成失败:{raw}）", "（本节生成失败:本节处理过程出错）"
+    )
+    # The raw list the store read for the rewrite never reaches the page.
+    assert "failed_sections" not in public.json()
+
+
 def test_a_public_report_without_failed_sections_is_served_byte_for_byte(
     client, stub_report_launch
 ):

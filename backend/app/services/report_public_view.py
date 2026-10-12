@@ -166,8 +166,14 @@ def public_report_payload(
     row: dict[str, Any],
     references: Sequence[Any],
     memory_sources: Mapping[str, str] | None = None,
+    *,
+    failed_errors: Sequence[str] = (),
 ) -> dict[str, Any]:
-    """Assemble the anonymous view from a token-resolved report row."""
+    """Assemble the anonymous view from a token-resolved report row.
+
+    ``failed_errors`` are the stored raw errors of the failed sections, used
+    only to rewrite their notes in a body stored before notes went neutral.
+    """
     visible = [
         public_reference(reference, memory_sources)
         for reference in list(references)[:MAX_REFERENCES]
@@ -179,7 +185,9 @@ def public_report_payload(
         "question_truncated": question_truncated,
         # A body stored before failure notes went neutral may still carry a
         # section's raw error text; only the author may read that.
-        "content_md": neutralize_failure_notes(str(row.get("content_md") or "")),
+        "content_md": neutralize_failure_notes(
+            str(row.get("content_md") or ""), failed_errors
+        ),
         "created_at": _text(row.get("created_at"), 64),
         "updated_at": _text(row.get("updated_at"), 64),
         "references": [item for item in visible if item["title"] or item["snippet"]],

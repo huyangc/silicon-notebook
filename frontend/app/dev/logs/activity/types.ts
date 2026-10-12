@@ -128,6 +128,8 @@ export type AskDetail = {
   notebook_names?: Record<string, string>;
 };
 
+export type ReportSectionFailure = { index: number; title: string; error: string };
+
 // 右栏「选中报告」详情。字段与后端 ReportActivityDetail（backend/app/models/admin.py，
 // 紧挨 AskDetail 的镜像模型）逐字对应。正文渲染复用 report-view.tsx 的
 // ReportMarkdown,这里刻意不重新声明 references 的形状。
@@ -141,6 +143,9 @@ export type ReportDetail = {
   updated_at: string;
   generation_started_at: string;
   error: string;
+  // 各节失败原文(后端 ReportSectionFailure),只给管理员;本人自助读取与删除后
+  // 留存摘要为空列表。报告正文里失败章节只写中性说明,原文只在这里。
+  section_errors?: ReportSectionFailure[];
   content_md: string;
   references: ReportDetailT["references"];
   notebook_name?: string;
