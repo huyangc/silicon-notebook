@@ -3513,7 +3513,7 @@ def test_approve_share_request_never_deadlocks_with_notebook_delete(
     import psycopg
     from psycopg.rows import dict_row
 
-    assert PostgresMigrator(postgres_database).migrate() == 72
+    assert PostgresMigrator(postgres_database).migrate() == 73
     notebook_id, group_id, request_id = _seed_share_request_race(
         postgres_database, _group_store(postgres_database, _K4_NOW), "k4del"
     )
@@ -3580,7 +3580,7 @@ def test_approve_first_then_notebook_delete_serializes(
     import psycopg
     from psycopg.rows import dict_row
 
-    assert PostgresMigrator(postgres_database).migrate() == 72
+    assert PostgresMigrator(postgres_database).migrate() == 73
     store = _group_store(postgres_database, _K4_NOW)
     notebook_id, group_id, request_id = _seed_share_request_race(
         postgres_database, store, "k4apr"
@@ -3670,7 +3670,7 @@ def test_approving_into_a_notebook_that_is_not_live_is_refused_postgres(postgres
     """
     from app.repositories.ports import ShareRequestNotebookNotLiveError
 
-    assert PostgresMigrator(postgres_database).migrate() == 72
+    assert PostgresMigrator(postgres_database).migrate() == 73
     store = _group_store(postgres_database, _K4_NOW)
     notebook_id, group_id, request_id = _seed_share_request_race(
         postgres_database, store, "k4live"
@@ -3731,7 +3731,7 @@ def test_approving_a_decided_request_does_not_queue_on_the_notebook_lock(
     import psycopg
     from psycopg.rows import dict_row
 
-    assert PostgresMigrator(postgres_database).migrate() == 72
+    assert PostgresMigrator(postgres_database).migrate() == 73
     store = _group_store(postgres_database, _K4_NOW)
     notebook_id, group_id, request_id = _seed_share_request_race(
         postgres_database, store, "k4dup"
