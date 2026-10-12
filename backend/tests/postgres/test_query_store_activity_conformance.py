@@ -10,7 +10,7 @@ postgres_integration`` (see backend/tests/postgres/conftest.py).
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -1498,8 +1498,12 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry_postgres(
 ):
     from app.repositories.postgres.notebook_store import NotebookStore
 
-    old_deletion = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
-    actual_deletion = datetime(2026, 8, 31, 12, tzinfo=timezone.utc)
+    # Deletion clocks stay relative to the real one: readers filter
+    # ``expires_at > CURRENT_TIMESTAMP`` (no seam), so a literal older snapshot
+    # silently stops testing the live-aggregate hiding once it expires.
+    real_now = datetime.now(timezone.utc).replace(microsecond=0)
+    old_deletion = real_now - timedelta(days=30)
+    actual_deletion = real_now - timedelta(hours=1)
     with postgres_database.write() as connection:
         _insert_user(connection, "u-refresh")
         _insert_notebook(connection, "n-refresh", "u-refresh")
@@ -1543,6 +1547,22 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry_postgres(
         connection.execute(
             "UPDATE reports SET question='new report' WHERE id='rep-refresh'"
         )
+
+    # Precondition: the older retained snapshot is still unexpired, so the
+    # hiding asserted below is done by the live-aggregate rule and not by the
+    # expiry filter (which would make every assertion pass vacuously).
+    with postgres_database.connect() as connection:
+        unexpired_old = {
+            row["record_id"]
+            for row in connection.execute(
+                "SELECT record_id FROM retained_user_activity "
+                "WHERE notebook_id='n-refresh' "
+                "AND expires_at>CURRENT_TIMESTAMP"
+            ).fetchall()
+        }
+    assert unexpired_old == {
+        "ask-refresh", "ask-removed", "src-refresh", "rep-refresh",
+    }
 
     live_activity = store.list_user_activity(
         "u-refresh", include_inaccessible_questions=True, limit=50,

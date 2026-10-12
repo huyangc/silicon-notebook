@@ -455,18 +455,9 @@ def test_finish_rebuild_state_insert_branch_follows_the_same_rule(repo):
     assert finish_on_a_missing_row(None) == 1
 
 
-def _marker_column_present(repo) -> bool:
-    with repo._connect() as db:
-        return any(r["name"] == "memory_isolation_version"
-                   for r in db.execute("PRAGMA table_info(unified_kg_state)"))
-
-
 def test_a_manual_rebuild_sets_the_memory_isolation_marker(repo):
     """E4-5 hand-over: the rebuild end-write sets memory_isolation_version=1 in
     the same guarded upsert (any rebuild after the isolation is isolated)."""
-    if not _marker_column_present(repo):
-        pytest.skip("unified_kg_state.memory_isolation_version arrives with "
-                    "SQLite v87 (E4-5); flips on at PR-E4 assembly")
     from tests import memory_kg_seed_world as world
 
     nb_id = world.seed(repo)

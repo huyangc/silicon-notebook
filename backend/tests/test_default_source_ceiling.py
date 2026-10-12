@@ -409,44 +409,23 @@ def test_a_submitted_exclude_form_library_dimension_does_not_readmit_a_mid_run_m
 
 
 # ---------------------------------------------------------------------------
-# Rebase pin for claude/scope-ceiling-remediation (review P2-4)
+# source_ceiling_binds under ceilings_total (review P2-4)
 # ---------------------------------------------------------------------------
 
-_BINDS_AVAILABLE = hasattr(ActiveSourceScope, "source_ceiling_binds")
-_VERDICT_AVAILABLE = hasattr(source_scope_module, "ceiling_binds")
-
-
 def test_source_ceiling_binds_honours_ceilings_total():
-    """FEATURE-DETECTED; live since the rebase onto #806.
+    """``source_ceiling_binds`` answers True for a library ``covers_notebook``
+    refuses: a library mounted mid-run under ``ceilings_total`` is bound by an
+    empty ceiling, so ``scoped_node_context_row`` drops its row instead of
+    handing it back.
 
-    ``ActiveSourceScope.source_ceiling_binds`` and
-    ``source_scope.scoped_node_context_row`` arrive with branch
-    claude/scope-ceiling-remediation, which merges before this branch.  Until
-    this branch is rebased onto it the symbols do not exist and this test
-    SKIPS; after the rebase it runs and fails unless ``source_ceiling_binds``
-    answers True for a library ``covers_notebook`` refuses -- a library mounted
-    mid-run under ``ceilings_total`` is bound by an empty ceiling, so
-    ``scoped_node_context_row`` drops its row instead of handing it back.
-
-    Second probed assertion (spec re-review F-1): with the Memory channel
-    closed and the asker's own Memory withheld from the freeze, the
-    ``node_context`` verdict ``source_scope.ceiling_binds`` must answer "binds".
-    With no drift reported and no FOREIGN hidden source, without an explicit
+    Second assertion (spec re-review F-1): with the Memory channel closed and
+    the asker's own Memory withheld from the freeze, the ``node_context``
+    verdict ``source_scope.ceiling_binds`` must answer "binds".  With no drift
+    reported and no FOREIGN hidden source, without an explicit
     ``withheld_hidden_source_ids`` arm the verdict would let the store read the
     library unbounded and hand Bob's own Memory back into a run that may not
     read it.
-
-    It cannot stay skipped once the symbol exists:
-    ``test_rebase_pin_runs_once_its_symbol_exists`` below calls this body
-    directly whenever ``source_ceiling_binds`` is present.
     """
-    if not (_BINDS_AVAILABLE or _VERDICT_AVAILABLE):
-        pytest.skip(
-            "source_ceiling_binds arrives with claude/scope-ceiling-remediation"
-        )
-    assert _BINDS_AVAILABLE and _VERDICT_AVAILABLE, (
-        "source_ceiling_binds and ceiling_binds ship together"
-    )
     store = _two_mount_store()
     with default_ceiling_context(NB, "bob", store.readers()):
         store.mounts.append("nb-late")
@@ -481,20 +460,6 @@ def test_source_ceiling_binds_honours_ceilings_total():
         assert source_scope_module.ceiling_binds(
             scope, NB, drifted=lambda: False, foreign_hidden=lambda: False,
         ) is True, "own Memory withheld -> the ceiling must bind the re-read"
-
-
-def test_rebase_pin_runs_once_its_symbol_exists():
-    """Fails if ``source_ceiling_binds`` exists and the pin above did not run:
-    here its body is executed directly (so neither a skip nor a deselection of
-    the pin can hide it), and while the symbol is absent the pin's only exit is
-    its explicit skip."""
-    assert _BINDS_AVAILABLE == hasattr(ActiveSourceScope, "source_ceiling_binds")
-    assert _VERDICT_AVAILABLE == hasattr(source_scope_module, "ceiling_binds")
-    if _BINDS_AVAILABLE or _VERDICT_AVAILABLE:
-        test_source_ceiling_binds_honours_ceilings_total()
-    else:
-        with pytest.raises(pytest.skip.Exception):
-            test_source_ceiling_binds_honours_ceilings_total()
 
 
 # ---------------------------------------------------------------------------

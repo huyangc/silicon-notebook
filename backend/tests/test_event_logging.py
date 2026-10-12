@@ -1,12 +1,32 @@
 import json
-from datetime import datetime
+from datetime import datetime as _real_datetime
 
+import pytest
+
+import app.core.event_logging as event_logging_module
 from app.core.config import Settings
 from app.core.event_logging import (
     EventLogger, set_log_owner, reset_log_owner, get_log_owner, owner_dir,
 )
 
-_TODAY = datetime.now().strftime("%Y-%m-%d")
+# The logger picks its per-day file from ``event_logging.datetime.now()`` at
+# every emit.  A module-level ``datetime.now()`` here was captured at import, so
+# a full-suite run that crossed midnight looked for yesterday's file (seven red
+# cases, green alone).  Freeze the module clock instead: one fixed day for both
+# the writer and the assertions, deliberately far from the real date so a
+# writer that stopped using this clock goes red.
+_TODAY = "2026-01-15"
+
+
+class _FrozenDatetime(_real_datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return _real_datetime(2026, 1, 15, 12, 0, 0, tzinfo=tz)
+
+
+@pytest.fixture(autouse=True)
+def _frozen_log_clock(monkeypatch):
+    monkeypatch.setattr(event_logging_module, "datetime", _FrozenDatetime)
 
 
 def _read(path):

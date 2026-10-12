@@ -159,9 +159,8 @@ def test_a_manual_rebuild_sets_the_memory_isolation_marker_pg(repo):
         "SELECT count(*) AS n FROM information_schema.columns WHERE "
         "table_schema = current_schema() AND table_name = 'unified_kg_state' "
         "AND column_name = 'memory_isolation_version'", ())[0]["n"]
-    if not present:
-        pytest.skip("unified_kg_state.memory_isolation_version arrives with "
-                    "PostgreSQL 0067 (E4-5); flips on at PR-E4 assembly")
+    # Migration 0067 (E4-5) adds the column; losing it is a migration regression.
+    assert present == 1
     nb_id = world.seed(repo)
     repo.rebuild_unified_kg(nb_id, force=True)
     with repo._write() as db:

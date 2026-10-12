@@ -8,8 +8,8 @@ duplicated here (see ``tests/postgres/test_knowledge_store_conformance.py``'s
 chunk-FTS-timeout coverage)."""
 from __future__ import annotations
 
+import gzip
 import json
-from datetime import datetime
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -46,13 +46,20 @@ def _notebook(client: TestClient, headers: dict[str, str], name: str) -> str:
 
 
 def _request_events(log_dir: Path) -> list[dict]:
-    today = datetime.now().strftime("%Y-%m-%d")
-    path = log_dir / f"requests-{today}.jsonl"
-    if not path.exists():
-        return []
+    # Every per-day file, not just "today's": a request logged just before
+    # midnight is read just after it, and a later write that crosses the day
+    # boundary gzips the previous day's file.
+    texts = [
+        gzip.decompress(path.read_bytes()).decode("utf-8")
+        for path in sorted(log_dir.glob("requests-*.jsonl.gz"))
+    ] + [
+        path.read_text(encoding="utf-8")
+        for path in sorted(log_dir.glob("requests-*.jsonl"))
+    ]
     return [
         json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
+        for text in texts
+        for line in text.splitlines()
         if line.strip()
     ]
 
