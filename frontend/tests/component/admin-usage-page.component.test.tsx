@@ -471,6 +471,36 @@ test("改用户名在途时本行管理入口也停用,点它不会收起忙态�
   expect(within(dialog).getByLabelText("a00123456 的新用户名")).toHaveValue("e12345678");
 });
 
+test("文档上限保存在途时管理入口停用,账号请求在途时编辑入口停用(互不收起对方的忙态层)", async () => {
+  primeCommonMocks();
+  mocks.updateAdminUserUploadLimit.mockReturnValue(new Promise(() => undefined));
+  mocks.updateAdminUsername.mockReturnValue(new Promise(() => undefined));
+  const user = userEvent.setup();
+  render(<AdminUsagePage />);
+  const target = await targetRow();
+
+  await user.click(target.getByRole("button", { name: "编辑" }));
+  const limitInput = target.getByLabelText("a00123456 的文档上限");
+  await user.clear(limitInput);
+  await user.type(limitInput, "50");
+  await user.click(target.getByRole("button", { name: "保存" }));
+  const trigger = target.getByRole("button", { name: "管理 a00123456" });
+  await waitFor(() => expect(trigger).toBeDisabled());
+  await user.click(trigger);
+  expect(target.getByRole("dialog", { name: "设置 a00123456 的文档上限" })).toBeInTheDocument();
+  expect(target.getByLabelText("a00123456 的文档上限")).toHaveValue(50);
+});
+
+test("账号请求在途时文档上限编辑入口停用", async () => {
+  primeCommonMocks();
+  mocks.updateAdminUsername.mockReturnValue(new Promise(() => undefined));
+  const user = userEvent.setup();
+  render(<AdminUsagePage />);
+  await submitRename(user, "e12345678");
+  const target = await targetRow();
+  await waitFor(() => expect(target.getByRole("button", { name: "编辑" })).toBeDisabled());
+});
+
 test("改用户名冲突时错误显示在弹出层内,输入保留可修改后重试", async () => {
   primeCommonMocks();
   mocks.updateAdminUsername.mockRejectedValueOnce(humanizedError("用户名已被占用", 409));
