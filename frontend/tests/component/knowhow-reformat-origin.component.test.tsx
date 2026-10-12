@@ -11,7 +11,7 @@
 // 真实的「规整整表 → 开始规整 → 确认保存」UI 流程，断言最终落到批量端点的请求体
 // 带 origin==="llm_reformat"。
 //
-// 变异验证目标：把 knowhow-panel.tsx runBatch 里 onSaveCell(...) 末尾的
+// 变异验证目标：把 knowhow-reformat-batch-modal.tsx runBatch 里 onSaveCell(...) 末尾的
 // "llm_reformat" 删掉（退回 6 参），本测试必须转红（origin 变 undefined）。
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

@@ -109,6 +109,7 @@ import {
 } from "../../test-support/semantic-source.mjs";
 
 const panelModule = await parseModule("knowhow-panel.tsx");
+const reformatModalModule = await parseModule("knowhow-reformat-batch-modal.tsx");
 
 // ===========================================================================
 // 1. 单格「优化表达」对照状态机
@@ -1910,7 +1911,7 @@ test("端到端（保存循环，F1）：非共享列——每格各调一次 on
 // **新值**当非展示兄弟的 expected_before 基线——带守卫的写据此判 fresh，用旧文算出的候选
 // 覆盖掉那次更新（正是守卫要挡的一类）。下面这条纯逻辑测试锚定「基线完全由传入 rows
 // 决定」这一事实——由此推出 runSave **必须**传建批次快照而非实时 props（接线由
-// knowhow-panel.tsx 的 snapshotRef 源码 pin 守卫，见下方「接线（F1，不可变快照）」）。
+// knowhow-reformat-batch-modal.tsx 的 snapshotRef 源码 pin 守卫，见下方「接线（F1，不可变快照）」）。
 test("planReformatSaves（F1 快照动机）：合并共享格 writeTargets 的 expected_before 基线取自**传入的 rows**——传实时(刷新后)行会把他人新值当基线", () => {
   const changed = [
     { rowId: "r1", columnId: "c-shared", columnName: "共享说明", originalMd: "旧共享说明", status: "changed", candidateMd: "新共享说明", source: "llm" },
@@ -2286,7 +2287,7 @@ test("reformatBatchRunNeedsRefresh: 无 run 阶段 stale 跳过（count===0）�
 
 test("接线（F）：runSave 声明保存阶段 stale 计数（不从 summary 反推，避免掺入 run 阶段来源）", () => {
   const runSave = findFunctionIn(
-    panelModule,
+    reformatModalModule,
     "KnowhowReformatBatchModal",
     "runSave",
   );
@@ -2300,7 +2301,7 @@ test("接线（F）：runSave 声明保存阶段 stale 计数（不从 summary �
 
 test("接线（F）：只有 preflight/409 stale 分支标记跳过，普通保存失败走 error 分支", () => {
   const runSave = findFunctionIn(
-    panelModule,
+    reformatModalModule,
     "KnowhowReformatBatchModal",
     "runSave",
   );
@@ -2384,7 +2385,7 @@ test("接线（F）：只有 preflight/409 stale 分支标记跳过，普通保�
 
 test("接线（F）：save 阶段收尾在 mounted 块内按谓词经 requestStaleReload 刷父表（恰一次，无跳过则不调）", () => {
   const runSave = findFunctionIn(
-    panelModule,
+    reformatModalModule,
     "KnowhowReformatBatchModal",
     "runSave",
   );
@@ -2408,7 +2409,7 @@ test("接线（F）：save 阶段收尾在 mounted 块内按谓词经 requestSta
 
 test("接线（F1）：runBatch 由有界 pool 返回 staleCount，不从 summary 混算", () => {
   const runBatch = findFunctionIn(
-    panelModule,
+    reformatModalModule,
     "KnowhowReformatBatchModal",
     "runBatch",
   );
@@ -2419,7 +2420,7 @@ test("接线（F1）：runBatch 由有界 pool 返回 staleCount，不从 summar
 
 test("接线（F1）：runBatch 收尾按 poolResult.staleCount 经延迟 reload 闸登记", () => {
   const runBatch = findFunctionIn(
-    panelModule,
+    reformatModalModule,
     "KnowhowReformatBatchModal",
     "runBatch",
   );
@@ -2433,7 +2434,7 @@ test("接线（F1）：runBatch 收尾按 poolResult.staleCount 经延迟 reload
 
 test("接线（F1）：onStale 观察到陈旧时立即登记 reload，不依赖 abort 后不可达的 pool 收尾", () => {
   const runBatch = findFunctionIn(
-    panelModule,
+    reformatModalModule,
     "KnowhowReformatBatchModal",
     "runBatch",
   );
@@ -2448,9 +2449,9 @@ test("接线（F1）：onStale 观察到陈旧时立即登记 reload，不依赖
 });
 
 test("接线（F1）：stale 只登记待刷新，真正刷新发生在卸载 cleanup", () => {
-  const modal = findFunction(panelModule, "KnowhowReformatBatchModal");
+  const modal = findFunction(reformatModalModule, "KnowhowReformatBatchModal");
   const request = findFunctionIn(
-    panelModule,
+    reformatModalModule,
     "KnowhowReformatBatchModal",
     "requestStaleReload",
   );
@@ -2505,9 +2506,9 @@ test("接线：打开已保存格失败由父面板消费并写入可见 actionE
 });
 
 test("接线（F1/P1）：runSave 的规划、写目标和锚点守卫同源于冻结快照", () => {
-  const modal = findFunction(panelModule, "KnowhowReformatBatchModal");
+  const modal = findFunction(reformatModalModule, "KnowhowReformatBatchModal");
   const runSave = findFunctionIn(
-    panelModule,
+    reformatModalModule,
     "KnowhowReformatBatchModal",
     "runSave",
   );

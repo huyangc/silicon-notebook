@@ -9,7 +9,7 @@
 //      接受(填入编辑框)/放弃）——knowhow-cell-editor.tsx 消费。
 //   2. 行详情抽屉「优化整行」批量入口的逐格顺序队列（规格③ + 任务简报：
 //      非空格子排队、每格进度可见、接受经 patchKnowhowCell 落库后推进、
-//      中止随时可用）——knowhow-panel.tsx 消费。
+//      中止随时可用）——knowhow-row-optimize-modal.tsx 消费。
 //   3. 追加导入（Excel 模板往返，规格②路B）预览的展示映射：重名标黄 +
 //      未匹配列提示 + 模板下载文件名——knowhow-import.tsx / knowhow-panel.tsx
 //      消费。
@@ -331,7 +331,7 @@ export function templateDownloadFilename(tableTitle: string): string {
 //     无需人对**这一格**单独表态，只需要对**整批**表态一次）。
 //   - 没有 cursor："优化整行"的 cursor 兼有"当前正在处理哪一格"与"处理到
 //     第几格"双重含义，且天然要求严格串行推进（同一时刻只有一格在
-//     等待人工决定）；本状态机的驱动方（knowhow-panel.tsx 里的
+//     等待人工决定）；本状态机的驱动方（knowhow-reformat-batch-modal.tsx 里的
 //     KnowhowReformatBatchModal）用一个前端 for 循环顺序遍历静态 items
 //     数组来驱动请求发起顺序，状态机本身只需要按 (rowId, columnId) 这个
 //     天然唯一键定位/改写某一项，不需要额外维护"当前在第几个"这份冗余
@@ -391,7 +391,7 @@ export type ReformatBatchItem = {
   candidateMd?: string;
   /** 后端原始枚举（"llm" | "rule/llm-failed" | "rule/no-llm"）——原样透传，
    * 不在状态机里做任何映射/校验。任务简报硬要求②「绝不直出给用户」由
-   * knowhow-panel.tsx 渲染这一字段时统一经 reformatSourceLabel（Task 8，
+   * knowhow-reformat-batch-modal.tsx 渲染这一字段时统一经 reformatSourceLabel（Task 8，
    * knowhow-cell-editor-logic.ts）转换，状态机本身只负责搬运数据。 */
   source?: string;
   errorMessage?: string;
@@ -807,7 +807,7 @@ export function applyReformatSaveError(
 //     永远卡在「保存中」且不计入 stale_skipped；放行 saving 后能正确结算。
 // 无论从哪个态进入，都走向「主动跳过」这一个用户可见终态（不是 save_error），这一格
 // 不会被 onSaveCell 写入。已达终态（saved/save_error/stale_skipped）不得被重开。友好文案
-// 进 errorMessage，与规整/保存失败共用同一处逐格明细展示（见 knowhow-panel.tsx
+// 进 errorMessage，与规整/保存失败共用同一处逐格明细展示（见 knowhow-reformat-batch-modal.tsx
 // errorMessage 列表）。message 由调用方传 BATCH_REFORMAT_STALE_SKIP_TEXT。
 export function markReformatItemStaleSkipped(
   state: ReformatBatchState,
@@ -835,7 +835,7 @@ export function finishReformatBatchSave(state: ReformatBatchState): ReformatBatc
 // 格子在服务端是别人刚写的新内容）。若不刷新一次父表，关掉批量弹窗重开会用**同一份
 // 陈旧基线**（detail.rows -> originalMd 快照）复跑，那些格子每次都命中 stale、永远跳过，
 // 尽管文案说「请重新运行规整」。判定纯化成谓词：runSave 收尾用它决定是否回调 onStaleReload
-// （见 knowhow-panel.tsx）。参数是保存阶段实际发生的 stale 跳过计数（run 阶段 P1-a 的
+// （见 knowhow-reformat-batch-modal.tsx）。参数是保存阶段实际发生的 stale 跳过计数（run 阶段 P1-a 的
 // stale 不算——那批从没进保存集；用循环内局部计数、不从 summary.stale_skipped 反推，后者
 // 混入了 run 阶段来源）。>0 即需刷新（无论跳过几格，父表都只需刷一次）。
 export function reformatBatchSaveNeedsRefresh(saveStaleSkipCount: number): boolean {
@@ -847,7 +847,7 @@ export function reformatBatchSaveNeedsRefresh(saveStaleSkipCount: number): boole
 // 父表快照永不刷新，关掉重开用同一陈旧基线复跑、永远跳过。判定与保存侧同款纯谓词
 // （count>0），供 runBatch 收尾据它决定是否请父级刷新。与 reformatBatchSaveNeedsRefresh
 // 刻意分成两个谓词（两个阶段各自的计数源），但组件侧经同一个「恰一次」闸
-// （requestStaleReload）汇流——两阶段都跳过时父表也只刷一次，见 knowhow-panel.tsx。
+// （requestStaleReload）汇流——两阶段都跳过时父表也只刷一次，见 knowhow-reformat-batch-modal.tsx。
 export function reformatBatchRunNeedsRefresh(runStaleSkipCount: number): boolean {
   return runStaleSkipCount > 0;
 }
