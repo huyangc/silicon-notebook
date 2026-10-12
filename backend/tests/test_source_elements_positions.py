@@ -1,0 +1,186 @@
+"""SQLite ``source_elements_page(positions=)`` (debt fix F3).
+
+* The adapter answers exactly what ``app.domain.source_positions
+  .page_at_positions`` answers over the adapter's own ``source_elements`` --
+  the contract the in-memory test doubles reuse.
+* One positional read is ONE statement (one WAL snapshot for the count and
+  the elements), and every position is answered by a term whose plan is the
+  windowed read's own ``LIMIT 1 OFFSET`` plan.
+* End to end over a real store, ``prepare_source_overview`` is byte-identical
+  to the frozen pre-batching function and issues 1 + ceil(k / 100) reads.
+The PostgreSQL twin is ``tests/postgres/test_source_elements_positions_pg.py``.
+"""
+from __future__ import annotations
+
+import json
+import math
+
+import pytest
+
+from app.core.config import Settings
+from app.domain.source_positions import MAX_POSITIONS_PER_READ, page_at_positions
+from app.models.schemas import NotebookCreate
+from app.services.collection_enumeration import SourceItem
+from app.services.document_source_overview import prepare_source_overview
+from app.services.sqlite_repository import SQLiteRepository
+from tests.document_overview_legacy_oracle import legacy_prepare_source_overview
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'positions.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    return SQLiteRepository(Settings())
+
+
+def _seed(repo, source_id: str, count: int) -> str:
+    notebook = repo.create_notebook(NotebookCreate(name=f"nb-{source_id}"))
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+            "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (source_id, notebook.id, source_id, "markdown", "parsed", "parsed",
+             "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+        )
+        # Two created_at values and ids whose text order is not insertion
+        # order, so "position" really is (created_at, id) order.
+        db.executemany(
+            "INSERT INTO source_elements (id,source_id,element_type,"
+            "location_label,text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+            [
+                (f"el-{source_id}-{(index * 37) % count:05d}-{index}", source_id,
+                 "paragraph", f"第{index + 1}页", f"原文 {index} " * (1 + index % 9),
+                 json.dumps({"section_path": f"章{index // 10}"}) if index % 2 else "{}",
+                 "2026-01-01T00:00:00" if index < count // 3 else "2026-01-02T00:00:00")
+                for index in range(count)
+            ],
+        )
+    return notebook.id
+
+
+POSITION_CASES = [
+    [], [0], [149], [150], [151, 0], [5, 5, 5], [149, 0, 75, 3],
+    list(range(0, 150, 3)) + [149], list(range(100)),
+    [10**9], [-4, 2],
+]
+
+
+@pytest.mark.parametrize("positions", POSITION_CASES)
+def test_positions_answer_exactly_what_the_reference_answers(repo, positions):
+    _seed(repo, "src-a", 150)
+    _seed(repo, "src-b", 40)  # a neighbour the reads must never reach
+    store = repo._runtime.source_store
+    expected = page_at_positions(store.source_elements("src-a"), positions)
+    assert store.source_elements_page("src-a", positions=positions) == expected
+
+
+def test_refusals_and_missing_source(repo):
+    _seed(repo, "src-a", 10)
+    store = repo._runtime.source_store
+    with pytest.raises(ValueError):
+        store.source_elements_page("src-a", positions=[0] * (MAX_POSITIONS_PER_READ + 1))
+    with pytest.raises(ValueError):
+        store.source_elements_page("src-a", anchor_element_id="x", positions=[0])
+    with pytest.raises(KeyError):
+        store.source_elements_page("src-missing", positions=[0, 1])
+    with pytest.raises(KeyError):
+        store.source_elements_page("src-missing", positions=[])
+    empty = store.source_elements_page("src-a", positions=[])
+    assert empty.items == [] and empty.total_count == 10
+
+
+def test_facade_forwards_positions(repo):
+    _seed(repo, "src-a", 30)
+    expected = repo._runtime.source_store.source_elements_page("src-a", positions=[29, 0])
+    assert repo.source_elements_page("src-a", positions=[29, 0]) == expected
+
+
+def test_one_positional_read_is_one_statement(repo):
+    _seed(repo, "src-a", 150)
+    store = repo._runtime.source_store
+    statements: list[str] = []
+    db = store.database.connect()
+    db.set_trace_callback(statements.append)
+    try:
+        store.source_elements_page("src-a", positions=list(range(0, 150, 2)))
+    finally:
+        db.set_trace_callback(None)
+    assert len(statements) == 1, statements
+
+
+def _plan(db, sql, params):
+    return [row[3] for row in db.execute("EXPLAIN QUERY PLAN " + sql, params).fetchall()]
+
+
+def test_every_position_keeps_the_windowed_reads_plan(repo):
+    _seed(repo, "src-a", 150)
+    store = repo._runtime.source_store
+    statements: list[str] = []
+    db = store.database.connect()
+    windowed = _plan(
+        db,
+        "SELECT * FROM source_elements WHERE source_id=? "
+        "ORDER BY created_at ASC,id ASC LIMIT ? OFFSET ?",
+        ("src-a", 1, 70),
+    )
+    assert any("idx_source_elements_source_created" in line for line in windowed), windowed
+    db.set_trace_callback(statements.append)
+    try:
+        store.source_elements_page("src-a", positions=[3, 70, 149])
+    finally:
+        db.set_trace_callback(None)
+    (sql,) = statements
+    plan = db.execute("EXPLAIN QUERY PLAN " + sql).fetchall()
+    scans = [row[3] for row in plan if "source_elements" in row[3]]
+    # one term per position plus the header's COUNT; each term's scan line is
+    # the windowed read's scan line
+    term_scans = [line for line in scans if "idx_source_elements_source_created" in line]
+    assert len(term_scans) == 3, plan
+    assert windowed == [term_scans[0]] and len(set(term_scans)) == 1, (term_scans, windowed)
+    assert not any(line.startswith("SCAN source_elements") for line in scans), plan
+
+
+class _CountingReads:
+    def __init__(self, store):
+        self.store = store
+        self.calls: list[tuple] = []
+
+    def source_elements_page(self, source_id, offset=0, limit=1, *, positions=None):
+        if positions is None:
+            self.calls.append(("offset", offset))
+            return self.store.source_elements_page(source_id, offset=offset, limit=limit)
+        self.calls.append(("positions", len(positions)))
+        return self.store.source_elements_page(source_id, positions=positions)
+
+
+def _fields(result) -> str:
+    return json.dumps([
+        result.context_block, json.dumps(result.id_map, ensure_ascii=False),
+        [citation.model_dump_json() for citation in result.citations],
+        result.coverage_note,
+    ], ensure_ascii=False)
+
+
+@pytest.mark.parametrize("max_elements", [1, 2, 5, 22, 64, 150, 230])
+@pytest.mark.parametrize("coverage", ["spread", "opening"])
+@pytest.mark.parametrize("budget", [120, 30_000])
+def test_overview_is_byte_identical_and_batched(repo, max_elements, coverage, budget):
+    notebook_id = _seed(repo, "src-a", 260)
+    store = repo._runtime.source_store
+    item = SourceItem("src-a", "文档", "文档", "", notebook_id, "personal")
+    reads = _CountingReads(store)
+    current = prepare_source_overview(
+        reads, item, budget, max_elements, active_notebook_id=notebook_id,
+        generation_reader=lambda _: "v1", coverage=coverage,
+    )
+    legacy = legacy_prepare_source_overview(
+        store, item, budget, max_elements, active_notebook_id=notebook_id,
+        generation_reader=lambda _: "v1", coverage=coverage,
+    )
+    assert _fields(current) == _fields(legacy)
+    later = max_elements - 1 if max_elements > 1 or coverage == "opening" else 1
+    assert reads.calls[0] == ("offset", 0)
+    assert len(reads.calls) == 1 + math.ceil(later / MAX_POSITIONS_PER_READ)
+    assert sum(n for kind, n in reads.calls if kind == "positions") == later

@@ -20,6 +20,7 @@ from __future__ import annotations
 import pytest
 
 from app.core.config import Settings
+from app.domain.source_positions import page_at_positions
 from app.models.sources import PaginatedSourceElements, SourceElement
 from app.services.collection_enumeration import SourceItem
 from app.services.document_source_overview import prepare_source_overview
@@ -303,7 +304,9 @@ class _SourcePages:
             metadata={"section_path": "章节 0"},
         )]
 
-    def source_elements_page(self, source_id, offset=0, limit=1):
+    def source_elements_page(self, source_id, offset=0, limit=1, *, positions=None):
+        if positions is not None:
+            return page_at_positions(self.elements, positions)
         return PaginatedSourceElements(
             items=self.elements[offset:offset + limit],
             total_count=len(self.elements), offset=offset, limit=limit,

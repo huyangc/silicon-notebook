@@ -7,6 +7,7 @@ import re
 from typing import Callable
 
 from app.domain.citation_origin import foreign_notebook_id
+from app.domain.source_positions import MAX_POSITIONS_PER_READ
 from app.models.ask import Citation
 from app.repositories.ports import SourceStorePort
 from app.services.cancellation import CancelEvent, raise_if_cancelled
@@ -42,6 +43,49 @@ def _attest_cited(elements: list, citations: list[Citation]) -> None:
         element.id: (element.source_id, element.text)
         for element in elements if element.id in cited
     })
+
+
+def _position_batches(positions: list[int]) -> list[list[int]]:
+    """Split the positions into reads of at most ``MAX_POSITIONS_PER_READ``.
+
+    ``document_overview_max_elements`` has no upper bound, so a long list is
+    split rather than truncated. Splitting by offset sum as well would buy
+    nothing on PostgreSQL: one read walks the index as far as its LARGEST
+    position, however few positions it carries, so the read that holds the
+    last position walks the whole document -- exactly what the single-offset
+    read of that position did -- and every extra read only re-walks a prefix.
+    """
+    return [
+        positions[start:start + MAX_POSITIONS_PER_READ]
+        for start in range(0, len(positions), MAX_POSITIONS_PER_READ)
+    ]
+
+
+def _read_positions(
+    sources: SourceStorePort,
+    source_id: str,
+    positions: list[int],
+    total: int,
+    cancel_event: CancelEvent,
+) -> tuple[dict[int, list], bool]:
+    """``{position: [element]}`` for every position read, and whether every
+    read saw the first page's ``total``.
+
+    Each batch is one adapter call whose count and elements share a snapshot;
+    the total is compared batch by batch, so a change between the first page
+    and any batch -- or between two batches -- still voids the overview the way
+    a change between two single-offset reads did. A source deleted in between
+    raises ``KeyError`` from the adapter, as before.
+    """
+    read_at: dict[int, list] = {}
+    stable_count = True
+    for batch in _position_batches(positions):
+        raise_if_cancelled(cancel_event)
+        page = sources.source_elements_page(source_id, positions=batch)
+        stable_count = stable_count and page.total_count == total
+        answered = [position for position in batch if position < page.total_count]
+        read_at.update((position, [element]) for position, element in zip(answered, page.items))
+    return read_at, stable_count
 
 
 def supplemental_excerpt_header(key: str, title: str) -> str:
@@ -131,15 +175,13 @@ def prepare_source_overview(
     else:
         offsets = []
     elements = []
-    stable_count = True
     seen = set()
+    read_at, stable_count = _read_positions(
+        sources, source_id, [offset for offset in offsets if offset], total, cancel_event,
+    )
+    read_at[0] = first.items
     for offset in offsets:
-        raise_if_cancelled(cancel_event)
-        page = first if offset == 0 else sources.source_elements_page(
-            source_id, offset=offset, limit=1,
-        )
-        stable_count = stable_count and page.total_count == total
-        for element in page.items:
+        for element in read_at.get(offset, ()):
             if element.source_id == source_id and element.id not in seen:
                 elements.append(element)
                 seen.add(element.id)

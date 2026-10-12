@@ -23,6 +23,7 @@ from app.models.sources import (
 )
 from app.domain.evidence_fingerprint import element_text_sha
 from app.domain.source_display import summary_display_title
+from app.domain.source_positions import normalize_positions, positions_page
 from app.models.question_suggestions import QUESTION_SUGGESTION_REVISION_PAGE_SIZE
 from app.repositories.sqlite.memory_sql import memory_source_type_predicate
 from app.domain.promotion_source import PROMOTION_SOURCE_TYPE
@@ -639,13 +640,22 @@ class SourceStore:
         offset: int = 0,
         limit: int = 40,
         anchor_element_id: str = "",
+        *,
+        positions: Sequence[int] | None = None,
     ) -> PaginatedSourceElements:
         """Read one stable source-element window instead of hydrating a book.
 
         The existing full-list method remains for ingestion and internal
         callers.  Source detail uses this bounded reader; an optional anchor
         resolves to the page containing a citation target.
+
+        ``positions`` (keyword only) switches to the batched positional read
+        whose contract lives in ``app.domain.source_positions``.
         """
+        if positions is not None:
+            if anchor_element_id:
+                raise ValueError("positions and anchor_element_id are exclusive")
+            return self._elements_at_positions(source_id, positions)
         offset = max(0, int(offset))
         limit = max(1, min(int(limit), 100))
         with self.database.connect() as db:
@@ -691,6 +701,58 @@ class SourceStore:
             total_count=total,
             offset=offset,
             limit=limit,
+        )
+
+    def _elements_at_positions(
+        self, source_id: str, positions: Sequence[int]
+    ) -> PaginatedSourceElements:
+        """Existence, count and every asked-for element in ONE statement.
+
+        Each position is answered by a ``UNION ALL`` term that is, verbatim,
+        the ``LIMIT 1 OFFSET`` read the windowed path sends, so every position
+        keeps today's plan. One statement is one WAL read snapshot, so the
+        count and the elements cannot disagree -- the same guarantee the
+        PostgreSQL twin gets from its single CTE, without a manual ``BEGIN`` on
+        the shared thread-local read connection. No header row means no
+        source row, raised as ``KeyError`` like the windowed read.
+        """
+        wanted = normalize_positions(positions)
+        terms = [
+            "SELECT -1 AS ord,(SELECT COUNT(*) FROM source_elements "
+            "WHERE source_id=?) AS total_count,NULL AS id,NULL AS source_id,"
+            "NULL AS element_type,NULL AS location_label,NULL AS text,"
+            "NULL AS metadata FROM sources WHERE id=?"
+        ]
+        params: List[object] = [source_id, source_id]
+        for ordinal, position in enumerate(wanted):
+            terms.append(
+                "SELECT * FROM (SELECT ? AS ord,NULL AS total_count,id,source_id,"
+                "element_type,location_label,text,metadata FROM source_elements "
+                "WHERE source_id=? ORDER BY created_at ASC,id ASC LIMIT ? OFFSET ?)"
+            )
+            params.extend([ordinal, source_id, 1, position])
+        with self.database.connect() as db:
+            rows = db.execute(" UNION ALL ".join(terms), params).fetchall()
+        header = [row for row in rows if row["ord"] == -1]
+        if not header:
+            raise KeyError(source_id)
+        return positions_page(
+            [
+                SourceElement(
+                    id=row["id"],
+                    source_id=row["source_id"],
+                    element_type=row["element_type"],
+                    location_label=row["location_label"],
+                    text=row["text"],
+                    metadata=json.loads(row["metadata"] or "{}"),
+                )
+                for row in sorted(
+                    (row for row in rows if row["ord"] != -1),
+                    key=lambda row: row["ord"],
+                )
+            ],
+            header[0]["total_count"],
+            wanted,
         )
 
     # ------------------------------------------- typed-collection catalog
