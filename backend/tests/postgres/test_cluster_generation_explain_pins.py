@@ -13,9 +13,12 @@
   路径,目标索引覆盖查询读到的全部列时这条路径就是 IOS,与可见性图无关;去掉
   ``INCLUDE (generation)`` 则只能是 Index Scan,红。
 * **竞争选择**:不删索引的全竞争 EXPLAIN,目标索引必须胜出(0051 担心的裸前缀窄索引
-  劫持会红)。member_rows 的选择不随可见性图翻转(ORDER BY 省掉排序),两态都断言;
+  劫持会红)。member_rows 的选择在现有索引集合下不随可见性图翻转(ORDER BY 让同序
+  覆盖索引省掉排序,裸前缀索引赢不了),两态都断言——重新加回 0043 那条不带 INCLUDE
+  的同序键索引时,持有态下它会劫持成 Index Scan + Filter,正由持有态这一跑拦下;
   version_facts 与 count 的选择随可见性图翻转,只在无旁路事务态、VACUUM 到可见性图
-  全满(``vacuum_until_all_visible``,有界重试,满不了就红并列出挡水位线的会话)后断言。
+  全满(``vacuum_until_all_visible``,有界重试,满不了就红并列出挡水位线的会话)后断言
+  (裸前缀 ``(notebook_id)`` 索引在这一态就会劫持它们)。
 
 生产信号:旁路事务持有、可见性图没设上时,version_facts 与 count 的全竞争计划实测被
 ``idx_clusters_nb_canonical_name_lower`` 劫持成 Index Scan + heap Filter(PG16)——生产上
