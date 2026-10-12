@@ -4,6 +4,14 @@
 内评实测背书(50 万行复制品):谓词不配 INCLUDE 索引时 `cluster_member_rows`
 稳态就退化(buffers 8.8×);`INCLUDE (generation)` 恢复 IOS ≈1×。本文件把
 「整改后形态」钉死——回退索引或把谓词写成相关子查询(逐行求值)都会红。
+
+IOS 契约钉与可见性图无关(C6):EXPLAIN 前在同一事务里把 concept_clusters 上除目标
+索引以外的索引全部 DROP、EXPLAIN 后 ROLLBACK(``explain_with_sole_index``)。规划器
+对每个索引只建一条路径,目标索引覆盖查询读到的全部列时这条路径就是 IOS——可见性图
+未设置(旁路长事务挡住 VACUUM)时也一样;去掉 ``INCLUDE (generation)`` 则只能是
+Index Scan,照样红。每条钉在「无旁路事务」与「旁路 REPEATABLE READ 事务一直持有」
+两种状态下各跑一次(``bystander_snapshot``)。代价:不再钉「多索引竞争时规划器选中
+目标索引」——那是成本选择,本身随可见性图翻转,测试台上不可稳定复现。
 """
 from __future__ import annotations
 
@@ -11,6 +19,7 @@ import pytest
 
 from app.repositories.postgres._store_utils import normalize_timestamp
 from app.repositories.postgres.migrator import PostgresMigrator
+from tests.postgres.conftest import explain_with_sole_index
 
 pytestmark = [
     pytest.mark.postgres_integration,
@@ -68,20 +77,29 @@ _PUBLISHED = (
 )
 
 
+def _sole_index_plan(
+    postgres_database, bystander_snapshot, index: str, sql: str, params: tuple
+) -> str:
+    with postgres_database.connect() as connection:
+        bystander_snapshot.assert_visibility_map_blocked(connection, "concept_clusters")
+        return explain_with_sole_index(
+            connection, sql, params, table="concept_clusters", index=index
+        )
+
+
 def test_cluster_member_rows_keeps_index_only_scan_with_the_predicate(
-    postgres_database,
+    postgres_database, bystander_snapshot,
 ):
     assert PostgresMigrator(postgres_database).migrate() == 73
     _seed(postgres_database, "nb-ios", 5000)
-    with postgres_database.connect() as connection:
-        plan = _plan(
-            connection,
-            "SELECT canonical_id, member_object_id FROM concept_clusters "
-            "WHERE notebook_id = %s "
-            f"AND generation = {_PUBLISHED} "
-            'ORDER BY canonical_id COLLATE "C", member_object_id COLLATE "C"',
-            ("nb-ios", "nb-ios"),
-        )
+    plan = _sole_index_plan(
+        postgres_database, bystander_snapshot, "idx_clusters_nb_canonical_member_gen",
+        "SELECT canonical_id, member_object_id FROM concept_clusters "
+        "WHERE notebook_id = %s "
+        f"AND generation = {_PUBLISHED} "
+        'ORDER BY canonical_id COLLATE "C", member_object_id COLLATE "C"',
+        ("nb-ios", "nb-ios"),
+    )
     assert "Index Only Scan" in plan and "idx_clusters_nb_canonical_member_gen" in plan, plan
     assert "Seq Scan on concept_clusters" not in plan, plan
     # 绑定参数子查询 = uncorrelated InitPlan(一次求值);相关写法是 SubPlan
@@ -89,18 +107,17 @@ def test_cluster_member_rows_keeps_index_only_scan_with_the_predicate(
 
 
 def test_version_facts_cluster_component_scans_the_created_gen_index(
-    postgres_database,
+    postgres_database, bystander_snapshot,
 ):
     assert PostgresMigrator(postgres_database).migrate() == 73
     _seed(postgres_database, "nb-vf", 5000)
-    with postgres_database.connect() as connection:
-        plan = _plan(
-            connection,
-            "SELECT COUNT(*) AS c, MAX(created_at) AS ts FROM concept_clusters "
-            "WHERE notebook_id=%s "
-            f"AND generation = {_PUBLISHED}",
-            ("nb-vf", "nb-vf"),
-        )
+    plan = _sole_index_plan(
+        postgres_database, bystander_snapshot, "idx_clusters_nb_created_gen",
+        "SELECT COUNT(*) AS c, MAX(created_at) AS ts FROM concept_clusters "
+        "WHERE notebook_id=%s "
+        f"AND generation = {_PUBLISHED}",
+        ("nb-vf", "nb-vf"),
+    )
     assert "Index Only Scan" in plan and "idx_clusters_nb_created_gen" in plan, plan
     assert "Seq Scan on concept_clusters" not in plan, plan
     assert "InitPlan" in plan, plan
@@ -267,17 +284,20 @@ def test_node_context_defines_query_walks_the_target_index_in_id_order(postgres_
         assert "pk_knowledge_objects" in shape, shape
 
 
-def test_concept_clusters_count_skip_gate_leg_stays_index_only(postgres_database):
+def test_concept_clusters_count_skip_gate_leg_stays_index_only(
+    postgres_database, bystander_snapshot,
+):
+    # 0051: idx_clusters_nb_created_gen serves the rebuild skip-gate's second
+    # leg (unified_kg_store.concept_clusters_count).
     assert PostgresMigrator(postgres_database).migrate() == 73
     _seed(postgres_database, "nb-cnt", 5000)
-    with postgres_database.connect() as connection:
-        plan = _plan(
-            connection,
-            "SELECT COUNT(*) AS c FROM concept_clusters WHERE notebook_id=%s "
-            f"AND generation = {_PUBLISHED}",
-            ("nb-cnt", "nb-cnt"),
-        )
-    assert "Index Only Scan" in plan, plan
+    plan = _sole_index_plan(
+        postgres_database, bystander_snapshot, "idx_clusters_nb_created_gen",
+        "SELECT COUNT(*) AS c FROM concept_clusters WHERE notebook_id=%s "
+        f"AND generation = {_PUBLISHED}",
+        ("nb-cnt", "nb-cnt"),
+    )
+    assert "Index Only Scan" in plan and "idx_clusters_nb_created_gen" in plan, plan
     assert "Seq Scan on concept_clusters" not in plan, plan
 
 

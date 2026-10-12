@@ -344,6 +344,115 @@ def postgres_database(postgres_settings: Settings):
         database.close()
 
 
+@dataclass(frozen=True)
+class BystanderSnapshot:
+    """Which of the two horizon states a plan pin runs under.
+
+    ``held`` means another connection to the SAME database holds an open
+    REPEATABLE READ transaction with an assigned xid from before the test
+    migrated and seeded, so every row the test writes is newer than the
+    oldest snapshot and VACUUM cannot mark a single page all-visible. That is
+    the condition the planner flips Index Only Scan plans under (parallel
+    lanes sharing one server, a long transaction in production).
+    """
+
+    held: bool
+
+    def assert_visibility_map_blocked(self, connection, *tables: str) -> None:
+        """In the held state, prove the bystander really did its job: after
+        the test's VACUUM no page of ``tables`` is all-visible. A no-op when
+        nothing is held (other sessions on the server make "all pages
+        visible" too weak a claim to pin)."""
+        if not self.held:
+            return
+        for table in tables:
+            row = connection.execute(
+                "SELECT relpages, relallvisible FROM pg_class "
+                "WHERE oid = to_regclass(%s)",
+                (table,),
+            ).fetchone()
+            assert row is not None, table
+            assert row["relpages"] > 0 and row["relallvisible"] == 0, (table, row)
+
+
+@pytest.fixture(params=["no_bystander", "bystander_rr_snapshot"])
+def bystander_snapshot(request, postgres_settings: Settings):
+    """Run a plan pin twice: with no other transaction, and with a bystander
+    REPEATABLE READ transaction (``SELECT txid_current()``) held on the same
+    database from before the test body until after its EXPLAINs. A pin that
+    depends on the visibility map goes red in the second state."""
+    if request.param == "no_bystander":
+        yield BystanderSnapshot(held=False)
+        return
+    import psycopg
+
+    with psycopg.connect(postgres_settings.database_url, autocommit=True) as holder:
+        holder.execute("BEGIN ISOLATION LEVEL REPEATABLE READ")
+        holder.execute("SELECT txid_current()").fetchone()
+        try:
+            yield BystanderSnapshot(held=True)
+        finally:
+            holder.execute("ROLLBACK")
+
+
+def explain_with_sole_index(
+    connection, statement: str, params: tuple, *, table: str, index: str
+) -> str:
+    """``EXPLAIN (COSTS OFF) statement`` with ``index`` the ONLY index left on
+    ``table`` (seqscan/bitmapscan off), then ROLLBACK -- the other indexes,
+    constraint-backed ones included, are dropped inside this transaction and
+    come back with it.
+
+    The planner builds ONE path per index, and it is an Index Only Scan
+    exactly when the index covers every column the query reads from
+    ``table`` (``check_index_only``) -- whatever the visibility map says. So
+    "Index Only Scan using <index>" in the result pins the covering
+    capability of ``index`` deterministically, in both bystander states: an
+    index that loses a covered column (e.g. its ``INCLUDE``) makes it an
+    Index Scan. What this cannot pin is the planner's cost choice among
+    competing indexes; that choice depends on the visibility map and is not
+    stable on a test bed.
+    """
+    from psycopg import sql as pg_sql
+
+    # Dropping an index takes ACCESS EXCLUSIVE on ``table``; an autovacuum
+    # worker on it yields only after deadlock_timeout, so outwait it.
+    connection.execute("SET LOCAL lock_timeout = '30s'")
+    connection.execute("SET LOCAL enable_seqscan=off")
+    connection.execute("SET LOCAL enable_bitmapscan=off")
+    indexes = connection.execute(
+        "SELECT ic.relname AS index_name, con.conname AS constraint_name "
+        "FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid "
+        "LEFT JOIN pg_constraint con ON con.conindid = i.indexrelid "
+        "AND con.conrelid = i.indrelid AND con.contype IN ('p', 'u', 'x') "
+        "WHERE i.indrelid = to_regclass(%s)",
+        (table,),
+    ).fetchall()
+    names = sorted(row["index_name"] for row in indexes)
+    assert index in names, (table, index, names)
+    try:
+        for row in indexes:
+            if row["index_name"] == index:
+                continue
+            if row["constraint_name"]:
+                connection.execute(
+                    pg_sql.SQL("ALTER TABLE {} DROP CONSTRAINT {} CASCADE").format(
+                        pg_sql.Identifier(table),
+                        pg_sql.Identifier(row["constraint_name"]),
+                    )
+                )
+            else:
+                connection.execute(
+                    pg_sql.SQL("DROP INDEX {}").format(
+                        pg_sql.Identifier(row["index_name"])
+                    )
+                )
+        rows = connection.execute(f"EXPLAIN (COSTS OFF) {statement}", params).fetchall()
+    finally:
+        connection.rollback()
+    return "\n".join(str(row["QUERY PLAN"]) for row in rows)
+
+
 def _database_for_scope(scope: ScopedPostgres):
     from app.repositories.postgres.database import PostgresDatabase
 

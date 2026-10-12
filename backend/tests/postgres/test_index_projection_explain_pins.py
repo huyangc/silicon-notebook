@@ -18,6 +18,13 @@ the only SubPlan allowed is the *hashed* one of the row reads' Memory exclusion
 Judged with seqscan/bitmapscan off, as the sibling pins are: the test bed has
 thousands of rows and no production-scale cost separation, but a statement
 rewritten into a shape with no index path shows up as a Seq Scan.
+
+The cluster page's Index Only Scan is a covering-capability contract, pinned
+with every other ``concept_clusters`` index dropped inside the EXPLAIN's
+transaction and rolled back (``explain_with_sole_index``): one path per index,
+an IOS exactly when the index covers the read, so the pin holds whether or not
+VACUUM could set the visibility map -- checked with and without a bystander
+REPEATABLE READ transaction held on the same database (``bystander_snapshot``).
 """
 from __future__ import annotations
 
@@ -28,6 +35,7 @@ from itertools import islice
 import pytest
 
 from app.repositories.postgres.migrator import PostgresMigrator
+from tests.postgres.conftest import explain_with_sole_index
 
 pytestmark = [
     pytest.mark.postgres_integration,
@@ -176,7 +184,14 @@ def _plan(connection, statement: str, params: tuple, capabilities_off: bool = Tr
     return "\n".join(str(row["QUERY PLAN"]) for row in rows)
 
 
-def _captured_plans(postgres_database, capabilities_off: bool = True) -> dict[str, list[str]]:
+# Statements whose pin is an Index Only Scan: planned with their covering
+# index as the only one on the table (see ``explain_with_sole_index``).
+_SOLE_INDEX = {"graph_clusters": ("concept_clusters", "idx_clusters_nb_canonical_member_gen")}
+
+
+def _captured_plans(
+    postgres_database, capabilities_off: bool = True, bystander_snapshot=None,
+) -> dict[str, list[str]]:
     from app.core.config import Settings
     from app.repositories.postgres.index_projection_store import IndexProjectionStore
 
@@ -249,17 +264,28 @@ def _captured_plans(postgres_database, capabilities_off: bool = True) -> dict[st
     }
     plans: dict[str, list[str]] = {name: [] for name in roles}
     with postgres_database.connect() as connection:
+        if bystander_snapshot is not None:
+            bystander_snapshot.assert_visibility_map_blocked(
+                connection, "sources", "knowledge_objects", "knowledge_relations",
+                "concept_clusters")
         for statement, params in log:
             for name, matches in roles.items():
-                if matches(statement):
-                    plans[name].append(
-                        _plan(connection, statement, params, capabilities_off)
-                    )
+                if not matches(statement):
+                    continue
+                if capabilities_off and name in _SOLE_INDEX:
+                    table, index = _SOLE_INDEX[name]
+                    plan = explain_with_sole_index(
+                        connection, statement, params, table=table, index=index)
+                else:
+                    plan = _plan(connection, statement, params, capabilities_off)
+                plans[name].append(plan)
     return plans
 
 
-def test_memory_exclusion_statements_keep_their_index_paths(postgres_database):
-    plans = _captured_plans(postgres_database)
+def test_memory_exclusion_statements_keep_their_index_paths(
+    postgres_database, bystander_snapshot,
+):
+    plans = _captured_plans(postgres_database, bystander_snapshot=bystander_snapshot)
     if os.environ.get("E46_PRINT_PLANS"):
         for name, captured in plans.items():
             print("\n=====", name)
