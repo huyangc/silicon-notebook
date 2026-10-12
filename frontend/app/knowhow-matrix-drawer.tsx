@@ -11,8 +11,8 @@
  * 的 knowhow-grouping-logic.ts 交付 + 单测覆盖；本文件只做渲染，不新增可测
  * 纯函数、不另立 *-logic.ts。
  *
- * 样式（`.kh-matrix*` 一整套）登记在 knowhow-panel.tsx 顶层的
- * `<style jsx global>`，不在本文件另开 `<style jsx>`——同 knowhow-cell-
+ * 样式（`.kh-matrix*` 一整套）登记在 knowhow-panel-styles.tsx 的
+ * `<style jsx global>`（由 KnowhowPanel 顶层挂载），不在本文件另开 `<style jsx>`——同 knowhow-cell-
  * editor.tsx / knowhow-code.tsx 的既有约定：styled-jsx 的 global 样式注入
  * 绑定「声明该 <style jsx global> 的组件是否渲染过」，KnowhowPanel 是本特性
  * 唯一保证任何时候都已挂载的样式容器，本组件不能自己声明一份（谁先渲染谁

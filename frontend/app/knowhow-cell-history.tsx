@@ -15,7 +15,7 @@
  * 约定，见 KnowhowCellPreview 头部注释）。
  *
  * 样式（含新增的 .kh-mode-tag--history / .kh-modal-card--history 两条）登记在
- * knowhow-panel.tsx 顶层的 `<style jsx global>`，不在本文件另开 `<style
+ * knowhow-panel-styles.tsx 的 `<style jsx global>`（由 KnowhowPanel 顶层挂载），不在本文件另开 `<style
  * jsx>`——同 KnowhowMatrixDrawer/KnowhowHistoryDrawer 的既有约定：styled-jsx
  * 的 global 样式注入绑定「声明该标签的组件是否渲染过」，KnowhowPanel 是本特性
  * 唯一保证任何时候都已挂载的样式容器。本组件绝大多数视觉都直接复用既有类名

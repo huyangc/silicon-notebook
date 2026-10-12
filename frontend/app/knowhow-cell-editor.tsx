@@ -19,7 +19,7 @@
  * knowhow-panel.tsx 移到本文件——它是「阅读」路径的核心，与「录入/修改」同源
  * 同款渲染管线，放在一起更贴近规格⑤的设计意图。样式（含 KnowhowMarkdown 用到
  * 的 .knowhow-image* 与本文件新增的 .kh-* 一整套）仍统一登记在
- * knowhow-panel.tsx 的顶层 `<style jsx global>`——那是本特性唯一能保证「无论
+ * knowhow-panel-styles.tsx 的 `<style jsx global>`（由 KnowhowPanel 顶层挂载）——那是本特性唯一能保证「无论
  * 预览态还是编辑态谁先渲染都已经挂载」的容器；styled-jsx 的 global 样式注入
  * 绑定「声明该 <style jsx global> 的组件是否渲染过」，若把样式分别放在
  * KnowhowCellPreview/KnowhowCellEditor 任一方，只用过另一方的会话就会看到
