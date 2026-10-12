@@ -740,6 +740,9 @@ def test_展示字段里的黑话会被抓到(tmp_path, code):
         'self.kg_build_jobs.finish(job_id, "failed", **{"error_message": "抽取失败"})',
         # 别的表的 SQL 字面量、占位符写法都不是作业表的展示文案
         '_write("UPDATE sources SET error_message=\'抽取失败\' WHERE id=?")',
+        # 语句里提到作业表,但被更新的是别的表
+        '_write("UPDATE sources SET error_message=\'抽取失败\' "\n'
+        '       "WHERE id IN (SELECT source_id FROM kg_build_jobs)")',
         '_write("UPDATE kg_build_jobs SET error_message=? WHERE id=?", ("抽取失败", 1))',
     ],
 )
