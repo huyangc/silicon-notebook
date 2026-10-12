@@ -23,6 +23,11 @@ const suite = useKnowhowPanelSuite();
 
 const R1_TITLE = "供电异常 · 检查电源 · 万用表";
 
+const LIST = { method: "GET", path: "/notebooks/nb-1/knowhow" };
+const REC = { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" };
+const ANC = { method: "GET", path: "/notebooks/nb-1/knowhow/t-anc" };
+const rowCode = (rowId: string) => ({ method: "GET", path: `/agent/knowhow/rows/${rowId}` });
+
 function toolbarButtonLabels(): string[] {
   const toolbar = screen.getByRole("button", { name: "返回" }).closest(".knowhow-grid-toolbar") as HTMLElement;
   return within(toolbar).getAllByRole("button").map((button) => button.textContent?.trim() ?? "");
@@ -63,6 +68,8 @@ test("read-only grid: toolbar keeps only back, copy/move and history; empty cell
   expect(screen.queryByRole("button", { name: /概念/ })).not.toBeInTheDocument();
   // Column names are plain text for readers (no double-click rename affordance).
   expect(screen.getByText("处理方法")).not.toHaveAttribute("title", "处理方法（双击改名）");
+  await settle();
+  expect(server.log).toEqual([LIST, REC]);
 });
 
 test("read-only row drawer and cell preview offer no write entry", async () => {
@@ -108,6 +115,8 @@ test("read-only concept matrix has no delete, add-branch or completion entry", a
   expect(within(matrix).queryByTitle("删除该分支")).not.toBeInTheDocument();
   expect(within(matrix).queryByRole("button", { name: /分支$/ })).not.toBeInTheDocument();
   expect(within(matrix).queryByRole("button", { name: /智能补全/ })).not.toBeInTheDocument();
+  await settle();
+  expect(server.log).toEqual([LIST, ANC]);
 });
 
 // ---------------------------------------------------------------------------
@@ -202,11 +211,12 @@ test("a failed save keeps the editor open with the error inside it", async () =>
   expect(within(editor).getByRole("textbox")).toHaveValue("示波器");
   expect(within(editor).getByRole("button", { name: /^保存$/ })).toBeEnabled();
   expect(screen.queryByRole("button", { name: "示波器" })).not.toBeInTheDocument();
-  expect(server.log.at(-1)).toEqual({
-    method: "PATCH",
-    path: "/notebooks/nb-1/knowhow/t-rec/rows/r2/cells/c-tool",
-    body: { content_md: "示波器" },
-  });
+  await settle();
+  expect(server.log).toEqual([
+    LIST,
+    REC,
+    { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r2/cells/c-tool", body: { content_md: "示波器" } },
+  ]);
 });
 
 test("switching to a sibling cell keeps the current mode (preview stays preview, edit stays edit)", async () => {
@@ -228,6 +238,8 @@ test("switching to a sibling cell keeps the current mode (preview stays preview,
   await user.click(siblingCell(toolEditor, "问题"));
   const titleEditor = await screen.findByRole("dialog", { name: `${R1_TITLE} › 问题` });
   expect(within(titleEditor).getByRole("textbox")).toHaveValue("供电异常");
+  await settle();
+  expect(server.log).toEqual([LIST, REC]);
 });
 
 // ---------------------------------------------------------------------------
@@ -260,7 +272,10 @@ test("a failed completion accept shows role=alert inside that suggestion and re-
   expect(await within(item).findByRole("alert")).toBeInTheDocument();
   await waitFor(() => expect(accept).toBeEnabled());
   await settle();
-  expect(server.log.slice(3)).toEqual([
+  expect(server.log).toEqual([
+    LIST,
+    REC,
+    rowCode("r2"),
     {
       method: "POST",
       path: "/notebooks/nb-1/knowhow/t-rec/rows/r2/complete/stream",
@@ -295,9 +310,7 @@ test("the drawer fetches its row's code once and renders a chip per column", asy
   expect(await within(drawer).findByRole("button", { name: /已实现/ })).toBeInTheDocument();
   expect(within(drawer).getAllByRole("button", { name: /添加代码/ })).toHaveLength(2);
   await settle();
-  expect(server.log.filter((entry) => entry.path.startsWith("/agent/"))).toEqual([
-    { method: "GET", path: "/agent/knowhow/rows/r1" },
-  ]);
+  expect(server.log).toEqual([LIST, REC, rowCode("r1")]);
 });
 
 test("a failed code-status load shows an inline retry that refetches", async () => {
@@ -313,10 +326,8 @@ test("a failed code-status load shows an inline retry that refetches", async () 
   await user.click(within(drawer).getByRole("button", { name: "重试" }));
   expect(await within(drawer).findAllByRole("button", { name: /添加代码/ })).toHaveLength(3);
   expect(within(drawer).queryByText("代码状态加载失败")).not.toBeInTheDocument();
-  expect(server.log.filter((entry) => entry.path.startsWith("/agent/"))).toEqual([
-    { method: "GET", path: "/agent/knowhow/rows/r1" },
-    { method: "GET", path: "/agent/knowhow/rows/r1" },
-  ]);
+  await settle();
+  expect(server.log).toEqual([LIST, REC, rowCode("r1"), rowCode("r1")]);
 });
 
 test("saving a cell of the open row refetches that row's code status", async () => {
@@ -364,27 +375,98 @@ test("a late code-status response for a row the user already left is discarded",
   await settle();
   expect(within(second).queryByRole("button", { name: /已实现/ })).not.toBeInTheDocument();
   expect(within(second).getByRole("button", { name: /知识已更新/ })).toBeInTheDocument();
+  expect(server.log).toEqual([LIST, REC, rowCode("r1"), rowCode("r2")]);
 });
 
 // ---------------------------------------------------------------------------
 // 11. Escape layering and DOM stacking order
 // ---------------------------------------------------------------------------
 
-test("with the drawer and a cell editor open, one Escape closes only the editor", async () => {
-  const server = suite.server();
-  routeTable(server, "nb-1", recordDetail());
-  const user = userEvent.setup();
-  renderPanel({ initialTableId: "t-rec", initialRowId: "r1" });
+const follows = (earlier: Element, later: Element) =>
+  Boolean(earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING);
 
-  const drawer = await screen.findByRole("dialog", { name: R1_TITLE });
-  await user.click(within(drawer).getAllByRole("button", { name: "编辑" })[0]);
-  expect(await screen.findByRole("dialog", { name: `${R1_TITLE} › 问题` })).toBeInTheDocument();
-  await user.keyboard("{Escape}");
-  await waitFor(() => expect(screen.queryByRole("dialog", { name: `${R1_TITLE} › 问题` })).not.toBeInTheDocument());
-  expect(screen.getByRole("dialog", { name: R1_TITLE })).toBeInTheDocument();
-  await user.keyboard("{Escape}");
-  await waitFor(() => expect(screen.queryByRole("dialog", { name: R1_TITLE })).not.toBeInTheDocument());
-});
+// Every overlay the row drawer's `cellModalOpen` flag accounts for: with the
+// overlay on top of the drawer, the first Escape closes only the overlay and the
+// second one the drawer. The flag is a five-way disjunction that S4-d moves into
+// the row-detail slice, so each term gets its own case.
+type EscOverlay = {
+  name: string;
+  rowId: "r1" | "r2";
+  open: (user: ReturnType<typeof userEvent.setup>, drawer: HTMLElement) => Promise<void>;
+  overlay: string;
+  extraRequests: Array<{ method: string; path: string; body?: unknown }>;
+};
+
+const R2_TITLE = "时钟漂移";
+
+const ESC_OVERLAYS: EscOverlay[] = [
+  {
+    name: "cell editor",
+    rowId: "r1",
+    open: async (user, drawer) => user.click(within(drawer).getAllByRole("button", { name: "编辑" })[0]),
+    overlay: `${R1_TITLE} › 问题`,
+    extraRequests: [],
+  },
+  {
+    name: "code modal",
+    rowId: "r1",
+    open: async (user, drawer) => user.click((await within(drawer).findAllByRole("button", { name: /添加代码/ }))[0]),
+    overlay: `${R1_TITLE} › 问题 › 代码`,
+    extraRequests: [],
+  },
+  {
+    name: "row optimisation",
+    rowId: "r1",
+    open: async (user, drawer) => user.click(within(drawer).getByRole("button", { name: /优化整行/ })),
+    overlay: `优化整行 · ${R1_TITLE}`,
+    extraRequests: [{ method: "POST", path: "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-title/optimize/stream" }],
+  },
+  {
+    name: "row completion",
+    rowId: "r2",
+    open: async (user, drawer) => user.click(within(drawer).getByRole("button", { name: "智能补全空列" })),
+    overlay: `智能补全空列 · ${R2_TITLE}`,
+    extraRequests: [{
+      method: "POST",
+      path: "/notebooks/nb-1/knowhow/t-rec/rows/r2/complete/stream",
+      body: { target_column_ids: ["c-fix", "c-tool"] },
+    }],
+  },
+  {
+    name: "row reformat",
+    rowId: "r1",
+    open: async (user, drawer) => user.click(within(drawer).getByRole("button", { name: /一键规整整行/ })),
+    overlay: `一键规整整行 · ${R1_TITLE}`,
+    extraRequests: [],
+  },
+];
+
+for (const overlay of ESC_OVERLAYS) {
+  test(`with the drawer and the ${overlay.name} open, the first Escape closes only the ${overlay.name}`, async () => {
+    const server = suite.server();
+    routeTable(server, "nb-1", recordDetail());
+    server.on("POST", "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-title/optimize/stream", {
+      stream: { suggestion_md: "供电电压异常" },
+    });
+    server.on("POST", "/notebooks/nb-1/knowhow/t-rec/rows/r2/complete/stream", { stream: { ...COMPLETION, suggestions: [] } });
+    const user = userEvent.setup();
+    renderPanel({ initialTableId: "t-rec", initialRowId: overlay.rowId });
+    const drawerName = overlay.rowId === "r1" ? R1_TITLE : R2_TITLE;
+
+    const drawer = await screen.findByRole("dialog", { name: drawerName });
+    await overlay.open(user, drawer);
+    expect(await screen.findByRole("dialog", { name: overlay.overlay })).toBeInTheDocument();
+    await settle();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: overlay.overlay })).not.toBeInTheDocument());
+    await settle();
+    expect(screen.getByRole("dialog", { name: drawerName })).toBe(drawer);
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: drawerName })).not.toBeInTheDocument());
+    await settle();
+    expect(server.log).toEqual([LIST, REC, rowCode(overlay.rowId), ...overlay.extraRequests]);
+  });
+}
 
 test("stacked kh-modals render in DOM order matrix → completion → cell modal", async () => {
   const server = suite.server();
@@ -402,9 +484,30 @@ test("stacked kh-modals render in DOM order matrix → completion → cell modal
   fireEvent.click(within(matrix).getByRole("button", { name: "主板" }));
   const cell = await screen.findByRole("dialog", { name: "时钟 › 分支备注" });
 
-  const follows = (earlier: Element, later: Element) =>
-    Boolean(earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING);
   expect(follows(matrix, completion)).toBe(true);
   expect(follows(completion, cell)).toBe(true);
   expect(follows(matrix, cell)).toBe(true);
+  await settle();
+  expect(server.log).toEqual([
+    LIST,
+    ANC,
+    { method: "POST", path: "/notebooks/nb-1/knowhow/t-anc/rows/a2/complete/stream", body: { target_column_ids: ["c-own"] } },
+  ]);
+});
+
+test("the history drawer renders before the cell modal, so a cell modal opened over it stacks on top", async () => {
+  const server = suite.server();
+  routeTable(server, "nb-1", recordDetail());
+  server.on("GET", "/notebooks/nb-1/knowhow/t-rec/history?limit=100", { json: { head_seq: 0, changes: [], milestones: [] } });
+  const user = userEvent.setup();
+  renderPanel({ initialTableId: "t-rec" });
+
+  await user.click(await screen.findByRole("button", { name: "历史" }));
+  const history = await screen.findByRole("dialog", { name: "历史：排障记录" });
+  // Same reason as above: the grid cell sits under the history overlay.
+  fireEvent.click(screen.getByRole("button", { name: "检查电源" }));
+  const cell = await screen.findByRole("dialog", { name: `${R1_TITLE} › 处理方法` });
+  expect(follows(history, cell)).toBe(true);
+  await settle();
+  expect(server.log).toEqual([LIST, REC, { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec/history?limit=100" }]);
 });

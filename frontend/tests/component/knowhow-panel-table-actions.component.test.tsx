@@ -69,6 +69,8 @@ test("delete table failure shows the banner and resets the confirmation", async 
   expect(screen.getByRole("button", { name: "添加行" })).toBeEnabled();
   await user.click(within(actionBanner()!).getByRole("button", { name: "关闭" }));
   expect(actionBanner()).toBeNull();
+  await settle();
+  expect(server.log).toEqual([LIST, DETAIL, { method: "DELETE", path: "/notebooks/nb-1/knowhow/t-rec" }]);
 });
 
 test("re-sync shows 重建中… while in flight, then reloads the detail; failure shows its copy", async () => {
@@ -266,6 +268,15 @@ test("quirk: the notebook-reset effect keeps the copy notice across a notebook s
   panel.update({ ...BASE_PROPS, notebookId: "nb-2", initialTableId: "t-rec" });
   expect(await screen.findByText("还没有 knowhow 表")).toBeInTheDocument();
   expect(screen.getByText("已复制到目标笔记本")).toBeInTheDocument();
+  await settle();
+  expect(server.log).toEqual([
+    LIST,
+    DETAIL,
+    { method: "GET", path: "/notebooks" },
+    { method: "POST", path: "/notebooks/nb-1/knowhow/t-rec/transfer", body: { target_notebook_id: "nb-2", mode: "copy" } },
+    { method: "GET", path: "/notebooks/nb-2/knowhow" },
+    { method: "GET", path: "/notebooks/nb-2/knowhow/t-rec" },
+  ]);
 });
 
 // ---------------------------------------------------------------------------
@@ -432,7 +443,10 @@ test("row optimisation: accept saves and advances; error → retry; skip; abort;
   await waitFor(() => expect(within(modal).queryByRole("button", { name: "中止" })).not.toBeInTheDocument());
   for (const close of within(modal).getAllByRole("button", { name: "关闭" })) expect(close).toBeEnabled();
   await settle();
-  expect(server.log.slice(3)).toEqual([
+  expect(server.log).toEqual([
+    LIST,
+    DETAIL,
+    { method: "GET", path: "/agent/knowhow/rows/r1" },
     { method: "POST", path: optimizePath("c-title") },
     { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-title", body: { content_md: "供电电压异常" } },
     { method: "GET", path: "/agent/knowhow/rows/r1" },

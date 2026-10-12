@@ -12,16 +12,21 @@
 //  * Asymmetric reset sets. backToList() does not clear completeRowId,
 //    reformatRowId or reformatTableOpen (nor importOpen/createOpen); openTable()
 //    does not clear reformatRowId/reformatTableOpen; the notebook-reset effect
-//    (E6) does not clear deleting, transferNotice or jumpNotice. The tests named
-//    "quirk:" observe the visible consequences: the reformat flags survive both
-//    back-and-reopen and a re-targeted jump, the jump notice survives a notebook
-//    switch here, and the transfer notice in knowhow-panel-table-actions. The
-//    completeRowId leftover is masked (every way back into a table goes through
-//    openTable, which clears it), and `deleting` is S5's bug, left unasserted.
+//    (E6) does not clear deleting, importOpen, transferNotice or jumpNotice. The
+//    tests named "quirk:" below observe the visible consequences with their full
+//    request sequences: reformatTableOpen survives back-and-reopen and a
+//    re-targeted jump, reformatRowId survives back-and-reopen, and the jump
+//    notice survives a notebook switch (the transfer notice in
+//    knowhow-panel-table-actions). knowhow-panel-resets holds the full
+//    state × reset-path table. The completeRowId leftover is masked (every way
+//    back into a table goes through openTable, which clears it), and `deleting`
+//    is S5's bug, left unasserted.
 //  * The row drawer re-registers its Escape listener on every panel render
 //    (pinned in knowhow-panel-golden).
-//  * The row-code effect (E5) commits an extra render when no row is open
-//    (pinned in knowhow-panel-golden).
+//  * The row-code effect (E5) resets its state from an effect whenever no row is
+//    open: on mount those writes coalesce with the list effect's (E3) loading
+//    render; after closing the drawer they cost one extra commit (pinned in
+//    knowhow-panel-golden).
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test } from "vitest";
@@ -83,6 +88,37 @@ test("empty list copy distinguishes editors, read-only members and an empty filt
   expect(await screen.findByText("当前筛选下没有表")).toBeInTheDocument();
   expect(screen.queryByText("可从 Excel/CSV/Markdown 导入，或新建空表现场定表头")).not.toBeInTheDocument();
   expect(screen.queryByText("当前为只读访问")).not.toBeInTheDocument();
+  await settle();
+  // One list request per mount.
+  expect(server.log).toEqual([
+    { method: "GET", path: "/notebooks/nb-1/knowhow" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow" },
+  ]);
+});
+
+test("the health filter follows initialHealthFilter changes without refetching the list", async () => {
+  const server = suite.server();
+  server.on("GET", "/notebooks/nb-1/knowhow", {
+    json: [
+      wireSummary({ id: "t-pending", title: "待同步表", projectionPending: 2 }),
+      wireSummary({ id: "t-ok", title: "健康表" }),
+    ],
+  });
+  const panel = renderPanel({ initialHealthFilter: "all" });
+  expect(await screen.findByRole("button", { name: "打开表格：健康表" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "打开表格：待同步表" })).toBeInTheDocument();
+
+  panel.update({ ...BASE_PROPS, initialHealthFilter: "projection_pending" });
+  await waitFor(() => expect(screen.queryByRole("button", { name: "打开表格：健康表" })).not.toBeInTheDocument());
+  expect(screen.getByRole("button", { name: "打开表格：待同步表" })).toBeInTheDocument();
+  expect(screen.getByRole("combobox")).toHaveValue("projection_pending");
+
+  panel.update({ ...BASE_PROPS, initialHealthFilter: undefined });
+  expect(await screen.findByRole("button", { name: "打开表格：健康表" })).toBeInTheDocument();
+  expect(screen.getByRole("combobox")).toHaveValue("all");
+  await settle();
+  expect(server.log).toEqual([{ method: "GET", path: "/notebooks/nb-1/knowhow" }]);
 });
 
 test("opening a table loads its detail once; going back shows the cached list without a reload", async () => {
@@ -325,6 +361,33 @@ test("quirk: backToList keeps reformatTableOpen, so reopening the table reopens 
   ]);
 });
 
+test("quirk: backToList keeps reformatRowId, so reopening the table reopens the row batch modal", async () => {
+  const server = suite.server();
+  routeTable(server, "nb-1", recordDetail());
+  const user = userEvent.setup();
+  renderPanel({ initialTableId: "t-rec" });
+
+  await user.click(await screen.findByRole("button", { name: "供电异常" }));
+  const drawer = await screen.findByRole("dialog", { name: "供电异常 · 检查电源 · 万用表" });
+  await user.click(within(drawer).getByRole("button", { name: /一键规整整行/ }));
+  const name = "一键规整整行 · 供电异常 · 检查电源 · 万用表";
+  expect(await screen.findByRole("dialog", { name })).toBeInTheDocument();
+  // As above: the overlay covers the toolbar for a pointer, not for the DOM.
+  fireEvent.click(screen.getByRole("button", { name: "返回" }));
+  await user.click(await screen.findByRole("button", { name: "打开表格：排障记录" }));
+  expect(await screen.findByRole("dialog", { name })).toBeInTheDocument();
+  await settle();
+  // The row drawer itself is gone (both resets clear openRowId); only the batch
+  // modal came back.
+  expect(screen.queryByRole("dialog", { name: "供电异常 · 检查电源 · 万用表" })).not.toBeInTheDocument();
+  expect(server.log).toEqual([
+    { method: "GET", path: "/notebooks/nb-1/knowhow" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
+    { method: "GET", path: "/agent/knowhow/rows/r1" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
+  ]);
+});
+
 test("quirk: openTable keeps reformatTableOpen, so a new jump target inherits the batch modal", async () => {
   const server = suite.server();
   const record = recordDetail();
@@ -339,6 +402,12 @@ test("quirk: openTable keeps reformatTableOpen, so a new jump target inherits th
   expect(await screen.findByRole("dialog", { name: "一键规整整表 · 排障记录" })).toBeInTheDocument();
   panel.update({ ...BASE_PROPS, initialTableId: "t-two" });
   expect(await screen.findByRole("dialog", { name: "一键规整整表 · 第二张表" })).toBeInTheDocument();
+  await settle();
+  expect(server.log).toEqual([
+    { method: "GET", path: "/notebooks/nb-1/knowhow" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-two" },
+  ]);
 });
 
 test("quirk: the notebook-reset effect keeps the jump notice across a notebook switch", async () => {
@@ -354,4 +423,12 @@ test("quirk: the notebook-reset effect keeps the jump notice across a notebook s
   panel.update({ ...BASE_PROPS, notebookId: "nb-2", initialTableId: "t-rec", initialRowId: "r-gone" });
   expect(await screen.findByText("还没有 knowhow 表")).toBeInTheDocument();
   expect(screen.getByText(notice)).toBeInTheDocument();
+  await settle();
+  expect(server.log).toEqual([
+    { method: "GET", path: "/notebooks/nb-1/knowhow" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
+    { method: "GET", path: "/agent/knowhow/rows/r-gone" },
+    { method: "GET", path: "/notebooks/nb-2/knowhow" },
+    { method: "GET", path: "/notebooks/nb-2/knowhow/t-rec" },
+  ]);
 });
