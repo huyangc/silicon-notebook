@@ -597,6 +597,10 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
           ? { ...token, revoked_at: revokedAt, copyable: false }
           : token
       )));
+      // 删除之前保存过的回执不许在之后的列表里把这些 token 盖回「有效」。
+      savedTokensRef.current.forEach((entry, tokenId) => {
+        if (entry.token.agent_profile_id === profileId) savedTokensRef.current.delete(tokenId);
+      });
       setEdit((current) => (current?.original.agent_profile_id === profileId ? null : current));
       setIssued((current) => (current?.agent_profile_id === profileId ? null : current));
       setConfirmRevokeId(null);
@@ -787,6 +791,12 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
         signal: controller.signal,
       });
       if (controller.signal.aborted || !mountedRef.current) return;
+      // 保存在删除之前已提交、回执却晚到:Profile 删除时服务端已把这枚 token 撤销,
+      // 本地也已按已撤销呈现——晚到的「有效」回执是旧状态,丢弃,不发布、不留作较新回执。
+      if (deletedProfileIdsRef.current.has(saved.agent_profile_id)) {
+        setEdit(null);
+        return;
+      }
       saveSeqRef.current += 1;
       savedTokensRef.current.set(saved.id, { seq: saveSeqRef.current, token: saved });
       setTokens((current) => current.map((item) => (item.id === saved.id ? saved : item)));
