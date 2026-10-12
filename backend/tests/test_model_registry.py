@@ -15,6 +15,7 @@ from app.services.model_registry import (
     ModelBindingGapError,
     SystemModelServiceRegistry,
     describe_binding_gap,
+    ignorable_retired_hint,
     loggable_binding_gap,
 )
 
@@ -760,6 +761,10 @@ def test_the_deployment_docs_quote_the_refusal_message_verbatim():
             "ask_anwser": {"[bindings]"},
         },
     )
+    # 社区摘要退役后的可忽略提示行同样逐字引用(它进的是同一份日志)。
+    hint = ignorable_retired_hint(
+        {"kg_community_summary": {"[bindings]", "[thinking]"}}
+    )
     root = Path(__file__).resolve().parents[2] / "docs"
     for name in (
         "deployment-and-configuration_zh.md",
@@ -770,7 +775,7 @@ def test_the_deployment_docs_quote_the_refusal_message_verbatim():
             for line in (root / name).read_text(encoding="utf-8").splitlines()
             if line.startswith(BINDING_GAP_PREFIX)
         ]
-        assert quoted == [produced], name
+        assert quoted == [produced, hint], name
 
 
 def test_the_log_rendering_drops_the_path_and_any_key_it_cannot_vouch_for():
