@@ -459,6 +459,10 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
         "SELECT c.* FROM knowhow_cell_code c JOIN knowhow_rows r ON r.id=c.row_id "
         "JOIN knowhow_tables t ON t.id=r.table_id WHERE t.notebook_id=%s",
     ),
+    # Unfiltered by source on purpose: a Memory source never owns an asset (it is
+    # parsed without an image persister and is not addressable by reparse or
+    # backfill-images); a row whose source is deleted mid-copy keeps its old
+    # source_id in the copy, as every copied asset row did before the remap.
     ("notebook_assets", "SELECT * FROM notebook_assets WHERE notebook_id=%s"),
 )
 _COPY_VALIDATED_TABLES = (

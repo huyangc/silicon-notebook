@@ -137,9 +137,13 @@ def _legacy_asset_row(data, new_id, source_map):
     data["notebook_id"] = new_id
 
 
-def test_remap_adds_no_statement_to_the_copy(world, monkeypatch):
-    """重映射是纯内存改写:同一本笔记本,修复前(两个 helper 换回旧语义)与修复后的拷贝
-    执行的语句条数相同、语句原文的多重集相同。"""
+def test_remap_helpers_add_no_statement_to_the_copy(world, monkeypatch):
+    """两个重映射 helper 是纯内存改写:同一本笔记本,把它们换回旧语义与用新语义各拷一次,
+    执行的语句条数相同、语句原文的多重集相同。
+
+    覆盖范围只到这两个 helper 内部——加在 ``_copy_source_elements`` 循环里、helper 之外的
+    语句两次都会带上,本用例拦不住。整个 ``copy_notebook`` 前后语句等量的证据是合并基线与
+    分支的实测对比(PR 描述里),不是本用例。"""
     cases.copy(world)  # 预热:首拷触发的一次性懒初始化不进比较
     executed = _count_statements(monkeypatch)
     with monkeypatch.context() as legacy:
@@ -158,3 +162,42 @@ def test_remap_adds_no_statement_to_the_copy(world, monkeypatch):
     legacy_img = cases.decoded(_elements(world, legacy_copy)["img-1"]["metadata"])["asset_id"]
     fixed_img = cases.decoded(_elements(world, fixed_copy)["img-1"]["metadata"])["asset_id"]
     assert legacy_img == world.assets["img1"] and fixed_img in _assets(world, fixed_copy)
+
+
+def test_metadata_without_the_asset_id_key_is_never_parsed(monkeypatch):
+    """子串快速路径:不含 ``"asset_id"`` 子串的 metadata 原样返回,一次都不解析——每个元素
+    都 ``json.loads`` 一遍会让 20 万行的拷贝多出约 0.2 s。含子串的那条是见证:它确实会被解析。"""
+    parsed: list[str] = []
+    real_loads = notebook_sharing.json.loads
+
+    def counting_loads(text, *args, **kwargs):
+        parsed.append(text)
+        return real_loads(text, *args, **kwargs)
+
+    monkeypatch.setattr(notebook_sharing.json, "loads", counting_loads)
+    asset_map = {"asset-old": "asset-new"}
+    skipped = ['{"page": 1}', "{}", '{"assetid": "asset-old"}', '{"caption": "asset-old"}', ""]
+    for raw in skipped:
+        assert notebook_sharing._remap_element_asset_id(raw, asset_map) is raw
+    assert parsed == []
+    witness = '{"asset_id": "asset-old"}'
+    assert notebook_sharing._remap_element_asset_id(witness, asset_map) == '{"asset_id": "asset-new"}'
+    assert parsed == [witness]
+
+
+def test_memory_source_ingest_never_mints_an_asset(world):
+    """深拷贝的资产快照不按来源过滤,依据之一是 Memory 来源从不拥有资产:它按 markdown 解析、
+    不带图片落盘器(图片元素只有 ``src``,没有 ``asset_id``)。这条用例钉住这个前提。"""
+    before = _assets(world, world.nb)
+    source_id = world.repo._runtime.source_ingestion.ingest_memory_source(
+        world.nb, "mem-k2-image", "带图的记忆", "# 记忆\n\n![示意图](images/abc.jpg)\n\n正文"
+    )
+    assert source_id
+    with world.repo._runtime.database.connect() as db:
+        rows = db.execute(
+            "SELECT element_type, metadata FROM source_elements WHERE source_id = ?",
+            (source_id,),
+        ).fetchall()
+    images = [cases.decoded(r["metadata"]) for r in rows if r["element_type"] == "image"]
+    assert images and all("asset_id" not in meta for meta in images), images
+    assert _assets(world, world.nb) == before

@@ -138,7 +138,8 @@ def _legacy_asset_row(data, new_id, source_map):
     data["notebook_id"] = new_id
 
 
-def test_remap_adds_no_statement_to_the_copy(world, monkeypatch):
+def test_remap_helpers_add_no_statement_to_the_copy(world, monkeypatch):
+    """SQLite 同名用例的孪生;覆盖范围同样只到两个重映射 helper 内部(见那边的 docstring)。"""
     cases.copy(world)  # 预热
     executed = _count_statements(monkeypatch)
     with monkeypatch.context() as legacy:
