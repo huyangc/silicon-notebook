@@ -21,6 +21,7 @@ from app.models.sources import (
     paper_meta_status,
 )
 from app.domain.source_display import summary_display_title
+from app.domain.source_positions import normalize_positions, positions_page
 from app.models.question_suggestions import QUESTION_SUGGESTION_REVISION_PAGE_SIZE
 from app.repositories.postgres.memory_sql import memory_source_type_predicate
 from app.domain.promotion_source import PROMOTION_SOURCE_TYPE
@@ -708,8 +709,18 @@ class SourceStore:
         offset: int = 0,
         limit: int = 40,
         anchor_element_id: str = "",
+        *,
+        positions: Sequence[int] | None = None,
     ) -> PaginatedSourceElements:
-        """PostgreSQL twin of the bounded source-detail element reader."""
+        """PostgreSQL twin of the bounded source-detail element reader.
+
+        ``positions`` (keyword only) switches to the batched positional read
+        whose contract lives in ``app.domain.source_positions``; see
+        ``_elements_at_positions``."""
+        if positions is not None:
+            if anchor_element_id:
+                raise ValueError("positions and anchor_element_id are exclusive")
+            return self._elements_at_positions(source_id, positions)
         offset = max(0, int(offset))
         limit = max(1, min(int(limit), 100))
         with self.database.connect() as connection:
@@ -755,6 +766,70 @@ class SourceStore:
             total_count=total,
             offset=offset,
             limit=limit,
+        )
+
+    # One statement: existence, count, and the elements at the asked-for
+    # positions. ``head`` walks ``idx_source_elements_source_created`` index
+    # only, in source-detail order, as far as the largest position (``span``)
+    # and numbers the rows; only the hits go back to the heap, by primary key.
+    # The per-offset form (``LATERAL ... OFFSET wanted.pos``) walks the index
+    # AND the heap once per position, sum-of-offsets rows in all; measured
+    # against it cell by cell before this form was chosen (PR description).
+    _POSITIONS_SQL = (
+        "WITH present AS (SELECT id FROM sources WHERE id=%(source_id)s), "
+        "counted AS (SELECT COUNT(*) AS c FROM source_elements "
+        "WHERE source_id=%(source_id)s), "
+        "wanted AS (SELECT pos,ord FROM unnest(%(positions)s::bigint[]) "
+        "WITH ORDINALITY AS w(pos,ord)), "
+        "ranked AS (SELECT id,row_number() OVER "
+        "(ORDER BY created_at,id COLLATE \"C\")-1 AS pos "
+        "FROM (SELECT created_at,id FROM source_elements "
+        "WHERE source_id=%(source_id)s ORDER BY created_at,id COLLATE \"C\" "
+        "LIMIT %(span)s) AS head) "
+        "SELECT counted.c AS total_count, picked.* "
+        "FROM present CROSS JOIN counted LEFT JOIN LATERAL ("
+        "SELECT wanted.ord,element.id,element.source_id,element.element_type,"
+        "element.location_label,element.text,element.metadata "
+        "FROM wanted JOIN ranked ON ranked.pos=wanted.pos "
+        "JOIN source_elements AS element ON element.id=ranked.id"
+        ") AS picked ON true ORDER BY picked.ord"
+    )
+
+    def _elements_at_positions(
+        self, source_id: str, positions: Sequence[int]
+    ) -> PaginatedSourceElements:
+        """Existence, count and every asked-for element in ONE statement.
+
+        Under READ COMMITTED a single statement reads one snapshot, so the
+        count and the elements can never disagree -- the property the old
+        per-offset reads only approximated by comparing totals call by call.
+        No missing source row means no row at all, which is the ``KeyError``
+        every positional caller already handles.
+        """
+        wanted = normalize_positions(positions)
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                self._POSITIONS_SQL,
+                {"source_id": source_id, "positions": wanted,
+                 "span": max(wanted, default=-1) + 1},
+            ).fetchall()
+        if not rows:
+            raise KeyError(source_id)
+        return positions_page(
+            [
+                SourceElement(
+                    id=row["id"],
+                    source_id=row["source_id"],
+                    element_type=row["element_type"],
+                    location_label=row["location_label"],
+                    text=row["text"],
+                    metadata=json_value(row["metadata"], {}),
+                )
+                for row in rows
+                if row["ord"] is not None
+            ],
+            int(rows[0]["total_count"]),
+            wanted,
         )
 
     # ------------------------------------------- typed-collection catalog

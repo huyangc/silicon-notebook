@@ -865,7 +865,10 @@ def test_sampling_depth_is_derived_from_the_character_share_not_the_element_pool
     original_page = store.source_elements_page
     pages: list[int] = []
 
-    def _counting_page(source_id, *, offset, limit):
+    def _counting_page(source_id, *, offset=0, limit=1, positions=None):
+        if positions is not None:  # one batched read answers several positions
+            pages.extend(positions)
+            return original_page(source_id, positions=positions)
         pages.append(offset)
         return original_page(source_id, offset=offset, limit=limit)
 

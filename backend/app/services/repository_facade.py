@@ -2034,9 +2034,11 @@ class RepositoryFacade:
         offset: int = 0,
         limit: int = 40,
         anchor_element_id: str = "",
+        *,
+        positions: Optional[Sequence[int]] = None,
     ):
         return self._runtime.source_store.source_elements_page(
-            source_id, offset, limit, anchor_element_id
+            source_id, offset, limit, anchor_element_id, positions=positions
         )
 
     def source_id_by_hash(self, notebook_id: str, digest: str) -> Optional[str]:

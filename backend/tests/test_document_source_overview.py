@@ -2,6 +2,7 @@ from threading import Event
 
 import pytest
 
+from app.domain.source_positions import page_at_positions
 from app.models.sources import PaginatedSourceElements, SourceElement
 from app.services.cancellation import AskCancelled
 from app.services.collection_enumeration import SourceItem
@@ -19,9 +20,16 @@ class SourcePages:
             metadata={"section_path": f"章节 {index}"},
         ) for index, text in enumerate(texts)]
         self.offsets = []
+        self.batches = []
 
-    def source_elements_page(self, source_id, offset=0, limit=1):
+    def source_elements_page(self, source_id, offset=0, limit=1, *, positions=None):
         assert source_id == "source"
+        if positions is not None:
+            # The adapters' own contract (app.domain.source_positions), not a
+            # second implementation of it.
+            self.offsets.extend(positions)
+            self.batches.append(list(positions))
+            return page_at_positions(self.elements, positions)
         assert limit == 1
         self.offsets.append(offset)
         return PaginatedSourceElements(

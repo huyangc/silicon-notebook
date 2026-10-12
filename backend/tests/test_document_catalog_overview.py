@@ -105,18 +105,26 @@ def test_cancellation_prevents_directory_access():
 
 
 def test_missing_summaries_share_context_and_element_budget_without_changing_cards():
+    from app.domain.source_positions import page_at_positions
     from app.models.sources import PaginatedSourceElements, SourceElement
 
     class Pages:
         def __init__(self):
             self.calls = []
 
-        def source_elements_page(self, source_id, offset=0, limit=1):
-            self.calls.append((source_id, offset))
-            return PaginatedSourceElements(items=[SourceElement(
-                id=f"{source_id}-{offset}", source_id=source_id,
+        def source_elements_page(self, source_id, offset=0, limit=1, *, positions=None):
+            elements = [SourceElement(
+                id=f"{source_id}-{index}", source_id=source_id,
                 element_type="paragraph", location_label="正文", text="真实内容" * 100,
-            )], total_count=10, offset=offset, limit=limit)
+            ) for index in range(10)]
+            if positions is not None:
+                self.calls.extend((source_id, position) for position in positions)
+                return page_at_positions(elements, positions)
+            self.calls.append((source_id, offset))
+            return PaginatedSourceElements(
+                items=elements[offset:offset + limit], total_count=10,
+                offset=offset, limit=limit,
+            )
 
     directory = Directory()
     directory.items = tuple(replace(item, summary="") for item in directory.items)

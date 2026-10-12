@@ -40,11 +40,17 @@ import pytest
 REPOSITORIES = Path(__file__).resolve().parents[1] / "app" / "repositories"
 BINDING_MODULES = {"postgres/id_binding.py", "sqlite/id_binding.py"}
 
-_PG_ARRAY = re.compile(r"\b(ANY|ALL)\s*\(\s*%s|\b(unnest)\s*\(\s*%s", re.IGNORECASE)
+# ``%s`` or a named ``%(name)s`` placeholder: naming the parameter must not
+# take a bound list out of the scan.
+_PG_PARAM = r"%(?:\(\w+\))?s"
+_PG_ARRAY = re.compile(
+    rf"\b(ANY|ALL)\s*\(\s*{_PG_PARAM}|\b(unnest)\s*\(\s*{_PG_PARAM}", re.IGNORECASE
+)
 # A list smuggled in as one scalar and unpacked by the server: a JSON array or
 # a joined string.  ``bind_ids`` owns the joined-string form.
 _PG_UNPACK = re.compile(
-    r"\b(jsonb?_array_elements(?:_text)?|string_to_array)\s*\(\s*%s", re.IGNORECASE
+    rf"\b(jsonb?_array_elements(?:_text)?|string_to_array)\s*\(\s*{_PG_PARAM}",
+    re.IGNORECASE,
 )
 _SQLITE_JSON = re.compile(r"json_each\s*\(\s*\?\s*\)", re.IGNORECASE)
 _MARK = {"postgres": "%s", "sqlite": "?"}
@@ -393,6 +399,9 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(ANY, BOUNDED, "a global run's notebooks (<= global_ask_max_notebooks, 8)"),),
     ("postgres/sharing_store.py", "SharingStore.valid_copied_mount_base_ids"): (
         s(PG_EXP, BATCHED, "base notebook ids, 400 per statement"),),
+    ("postgres/source_store.py", "SourceStore"): (
+        s("unnest(%s)", NOT_IDS,
+          "_POSITIONS_SQL: element positions, <= 100 (MAX_POSITIONS_PER_READ)"),),
     ("postgres/source_store.py", "SourceStore.visible_source_ids_by_notebook"): (
         s(ANY, BOUNDED, "a global run's participant notebooks (<= 8)"),),
     ("postgres/source_store.py", "SourceStore.visible_source_scope_snapshot"): (
@@ -989,6 +998,10 @@ def test_postgres_statements_that_bind_through_the_module_run_unprepared():
         ("postgres", 'def f(db, ids):\n    db.execute("SELECT 1 WHERE x <> all( %s )", (ids,))\n',
          ["ALL(%s)"]),
         ("postgres", 'def f(db, ids):\n    db.execute("SELECT * FROM unnest(%s::text[])", (ids,))\n',
+         ["unnest(%s)"]),
+        ("postgres", 'def f(db, ids):\n    db.execute("SELECT 1 WHERE x = ANY(%(ids)s)", {"ids": ids})\n',
+         ["ANY(%s)"]),
+        ("postgres", 'def f(db, p):\n    db.execute("SELECT * FROM unnest(%(p)s::bigint[])", {"p": p})\n',
          ["unnest(%s)"]),
         ("postgres", 'def f(db, p):\n    db.execute("SELECT value FROM jsonb_array_elements_text(%s::jsonb)", (p,))\n',
          [JSONB]),
