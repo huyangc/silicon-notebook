@@ -52,6 +52,9 @@ def test_reader_projection_is_sanitized_and_builtin_is_selected(client):
     assert body["available"] is True
     assert body["missing"] is False
     assert body["options"][0]["label"] == "内建管线"
+    # description 经前端索引管线设置原样上屏,按 docs/ui-vocabulary.md 写(不含
+    # notebook、「抽取」)。
+    assert body["options"][0]["description"] == "使用内建的分块与知识分析策略。"
     serialized = response.text.lower()
     for forbidden in ("reason", "exception", "endpoint", "credential", "path"):
         assert forbidden not in serialized

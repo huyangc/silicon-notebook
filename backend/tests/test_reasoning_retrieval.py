@@ -2557,7 +2557,7 @@ def test_run_expand_community_source_sticky_prefers_comention(rrepo, monkeypatch
     """peer_source 展示口径:一旦某个挂载库以共提(comention,高精度)命中,不应被
     后续遍历到的库的社区(community)回退结果覆盖。改前是「最后一个贡献了非空
     结果的库」口径——若 comention 命中的库先被遍历、community 命中的库后被
-    遍历,会把前者的高精度贡献在展示文案上错误降级成「同社区实体」。改后
+    遍历,会把前者的高精度贡献在展示文案上错误降级成社区回退文案(「同主题板块实体」)。改后
     sticky-prefer comention:一旦命中过 comention 就不再被后写的 community 覆盖。"""
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_nodes(rrepo)
@@ -2584,7 +2584,37 @@ def test_run_expand_community_source_sticky_prefers_comention(rrepo, monkeypatch
     res = retriever.run(nb.id, "DeepSeek-V4 相比其他", "")
     step = next(t for t in res.trace if t.step_type == "expand_community")
     assert step.detail["source"] == "comention"
-    assert "共提" in step.summary and "同社区实体" not in step.summary
+    # 共提分支的文案不带社区回退分支的「主题板块」;反向的正例见下一条用例。
+    assert "共提" in step.summary and "主题板块" not in step.summary
+
+
+def test_run_expand_community_community_fallback_summary_uses_ui_vocabulary(
+    rrepo, monkeypatch,
+):
+    """社区回退分支的轨迹摘要是用户逐字可见文案:按 docs/ui-vocabulary.md
+    (community → 主题板块)写「同主题板块实体」,不写「社区」。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "DeepSeek-V4"}]},
+        reflects=[
+            {"next_action": "expand_community", "community_focal": "DeepSeek-V4",
+             "reason": "需要同类"},
+            {"next_action": "answer", "sufficient": True}]))
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    monkeypatch.setattr(
+        retriever.communities, "mounted_base_ids", lambda *a: ["base-community-only"],
+    )
+    monkeypatch.setattr(
+        retriever.communities,
+        "resolve_comparison_peers",
+        lambda *a, **k: (["RTL综合", "布线"], "community"),
+    )
+    res = retriever.run(nb.id, "DeepSeek-V4 相比其他", "")
+    step = next(t for t in res.trace if t.step_type == "expand_community")
+    assert step.detail["source"] == "community"
+    assert "同主题板块实体" in step.summary
+    assert "社区" not in step.summary and "共提" not in step.summary
 
 
 def test_run_expand_community_caps_merged_peers_across_bases(rrepo, monkeypatch):

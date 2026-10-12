@@ -15,7 +15,7 @@ from app.domain.indexing_pipeline import (
 _BUILTIN = IndexingPipelineOption(
     pipeline_id="",
     label="内建管线",
-    description="使用 silicon-notebook 内建分块与知识抽取策略。",
+    description="使用内建的分块与知识分析策略。",
     version=BUILTIN_INDEXING_PIPELINE_VERSION,
     overrides_chunking=False,
     overrides_kg_extraction=False,

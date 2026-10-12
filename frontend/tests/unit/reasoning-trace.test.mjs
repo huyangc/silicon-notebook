@@ -41,7 +41,7 @@ test("plugin trace uses the generic label and discloses bounded truncation", () 
 test("expand_community/ppr 有短标签(不回退长英文串→徽章不溢出压摘要)", () => {
   assert.equal(
     getReasoningTraceSummary(
-      [{ step_type: "expand_community", summary: "横向对比:纳入 8 个同社区实体,新增候选 48" }],
+      [{ step_type: "expand_community", summary: "横向对比:纳入 8 个同主题板块实体,新增候选 48" }],
       true,
     ).latestLabel,
     "对比",   // 映射存在;若缺失会回退 "expand_community" 撑爆 48px 徽章列

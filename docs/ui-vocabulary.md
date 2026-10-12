@@ -84,6 +84,13 @@
 前端原样呈现。裸 `HTTPException(detail=str(exc))` 刻意不在扫描面内；它是内部诊断 / MCP
 合同，不会直接上屏。
 
+后端 `user_error()` 消息与推理轨迹摘要（`TRACE_SUMMARY_MODULES` 登记模块里的
+`TraceStep(summary=…)`）两条通道不要求调用点写字面量：先赋给变量（同函数赋值、再模块常量）、
+条件表达式（两个分支各算一条）、`+` 拼接、`%` / `.format`、`X.get(k, 默认)` 与本模块 helper
+的 `return` 都会被解析后检查；`str(exc)`、异常属性、跨模块导入的常量等静态解析不了的仍跳过。
+这两条通道在匹配前剥掉全大写下划线的环境变量名（如 `SILICON_NOTEBOOK_AUTH_OPTIONAL`），裸
+`notebook`、裸 `KG` 照报。
+
 守卫是词黑名单，不是完整语义检查；它会剥离注释、标识符和插值，新增界面文案仍须人工
 对照本表。`frontend/tests/guards/raw-enum-fallback.test.mjs` 另行禁止把未知枚举原值直接
 展示给用户；`backend/tests/test_ui_vocabulary_guard.py` 保证表中每个词条都被规则覆盖或有

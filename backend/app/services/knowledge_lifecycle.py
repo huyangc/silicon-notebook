@@ -4181,7 +4181,7 @@ class KnowledgeLifecycleService:
                 job_id,
                 "failed",
                 error_code="indexing_pipeline_kg_failed",
-                error_message="索引管线知识抽取未通过校验，旧知识仍保留。",
+                error_message="索引管线知识分析未通过校验，旧知识仍保留。",
             )
             self._emit_kg_build_event(
                 "kg_build_failed",

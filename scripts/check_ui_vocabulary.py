@@ -15,8 +15,14 @@ a user's screen, and all three are scanned:
   3. backend **reasoning-trace summaries** — the server writes them, the front end
      renders them **verbatim** (`answer-panel.tsx` prints `step.summary` with no
      mapping of its own), so they are user copy that never passes through
-     `frontend/app`. `TraceStep(..., summary=<literal>)` calls in
+     `frontend/app`. `TraceStep(..., summary=...)` calls in
      `TRACE_SUMMARY_MODULES` are scanned as user-facing copy.
+
+  For channels 2 and 3 the copy does not have to be a literal at the call site:
+  `_IndirectCopy` follows variables, conditionals, concatenation, `%`/`.format`,
+  `X.get(k, default)`, module constants and module-helper returns. Both channels
+  also strip ALL_CAPS_UNDERSCORE environment-variable names before matching
+  (`BACKEND_ENV_VAR`) — a config key named in an error message is not jargon.
 
   Bare `HTTPException(detail=str(exc))` is deliberately **not** scanned: it is never
   displayed (the front end falls back to a generic message by status code) and its
@@ -100,10 +106,11 @@ USER_ERROR = "user_error"
 MIN_USER_ERROR_SITES = 15
 
 # —— 第三条通道:服务端写、前端逐字渲染的推理轨迹摘要 ——————————————————
-# 扫描面是**具名模块**而不是整个 backend/app:轨迹摘要有一个明确的产出方(推理
-# 检索器与它的两个纯数据模块),把 `TraceStep(summary=…)` 这个形状泛化到全仓会把
-# 一堆同名 kwarg 的非 UI 调用拖进来,而收益是零。新增一个会写轨迹步的模块时,
-# 把它加进这张表——这是有意的显式登记,不是靠 glob 猜。
+# 扫描面是**具名模块**而不是整个 backend/app:轨迹摘要的产出方是有限的几个服务
+# 模块(推理检索器,以及会自己写轨迹步的提问、全局问答、插件问答、表格分析、结构化
+# 检索),把 `TraceStep(summary=…)` 这个形状泛化到全仓会把一堆同名 kwarg 的非 UI
+# 调用拖进来,而收益是零。新增一个会写轨迹步的模块时,把它加进这张表——这是有意的
+# 显式登记,不是靠 glob 猜。
 #
 # 路径按 `ROOT` 直接写死,**刻意不经过 `BACKEND_APP`**:那个常量是可被重定向的
 # (`--extra-root` 的仓库外插件自检、以及把它指向 tmp 目录的几条自检用例),而这条
@@ -111,6 +118,11 @@ MIN_USER_ERROR_SITES = 15
 # 重定向的根走,只会让"把后端根指到别处"的那几种调用顺带把这条通道也一起关掉。
 TRACE_SUMMARY_MODULES = (
     ROOT / "backend" / "app" / "services" / "reasoning_retrieval.py",
+    ROOT / "backend" / "app" / "services" / "ask_service.py",
+    ROOT / "backend" / "app" / "services" / "global_ask.py",
+    ROOT / "backend" / "app" / "services" / "plugin_ask_engine.py",
+    ROOT / "backend" / "app" / "services" / "spreadsheet_analysis.py",
+    ROOT / "backend" / "app" / "services" / "structured_retrieval.py",
 )
 TRACE_STEP = "TraceStep"
 # Non-vacuity floor: keep the existing guard while removing retired modules.
@@ -387,9 +399,8 @@ def _message_literal(node: ast.expr | None) -> str | None:
 
     f-string interpolations are dropped and the literal spans joined — the same rule
     the frontend pass applies to `${…}`, so `f"{n} 个来源待抽取"` still trips 抽取.
-    A message built from a variable or a call is *not* statically checkable and is
-    skipped on purpose; `tests/test_user_error.py` covers those sites at runtime and
-    `auth_routes.py` carries an inline note saying so.
+    This is the *leaf* rule; `_IndirectCopy` builds the indirect forms (variable,
+    conditional, concatenation, helper return…) on top of it.
     """
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
@@ -402,14 +413,216 @@ def _message_literal(node: ast.expr | None) -> str | None:
     return None
 
 
+# 后端两条通道(user_error、轨迹摘要)专用:匹配前剥掉全大写下划线环境变量名。
+# 「请设置 SILICON_NOTEBOOK_AUTH_OPTIONAL」里的 NOTEBOOK 是配置键,不是界面黑话;
+# 裸 notebook / 裸 KG 不含下划线,照抓。刻意**不**放进 terms_in():前端渲染文本与
+# 更新说明里没有这种写法,放宽它们的扫描面只会少报。
+BACKEND_ENV_VAR = re.compile(r"(?<![A-Za-z0-9_])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?![A-Za-z0-9_])")
+
+
+def _backend_terms_in(unit: str) -> list[str]:
+    return terms_in(BACKEND_ENV_VAR.sub(" ", unit))
+
+
+_FUNCTION_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
+_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+# 间接写法的解析深度上限:变量 → 条件 → 拼接 → helper return 这类链条实际不超过
+# 三四层;上限只是防环(`x = x + "…"`)与防组合爆炸,不是覆盖面的取舍。
+MAX_INDIRECTION_DEPTH = 5
+# `+` 两侧各自有多个单元时做笛卡儿积;超过这个数就截断,只防病态组合。
+MAX_UNITS_PER_EXPR = 64
+
+
+def _dedupe(units: list[str]) -> list[str]:
+    return list(dict.fromkeys(units))
+
+
+def _bindings(scope: ast.AST) -> tuple[set[str], dict[str, list[ast.expr]]]:
+    """Names bound directly in ``scope`` (a module or a function), and the values of
+    the simple ``name = value`` / ``name: T = value`` / ``(name := value)`` ones.
+
+    Nested functions, classes and lambdas are their own scope and are not entered.
+    Parameters, loop targets, ``with … as``, tuple unpacking and ``+=`` mark a name as
+    local without giving it a value — a local without a statically known value
+    shadows the module constant of the same name, exactly like Python scoping.
+    """
+    local: set[str] = set()
+    values: dict[str, list[ast.expr]] = {}
+    if isinstance(scope, _FUNCTION_NODES):
+        args = scope.args
+        for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs,
+                    *(a for a in (args.vararg, args.kwarg) if a is not None)]:
+            local.add(arg.arg)
+
+    def mark_targets(target: ast.expr) -> None:
+        for sub in ast.walk(target):
+            if isinstance(sub, ast.Name):
+                local.add(sub.id)
+
+    stack = list(ast.iter_child_nodes(scope))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, _SCOPE_NODES):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                local.add(node.name)
+            continue
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    local.add(target.id)
+                    values.setdefault(target.id, []).append(node.value)
+                else:
+                    mark_targets(target)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            local.add(node.target.id)
+            if node.value is not None:
+                values.setdefault(node.target.id, []).append(node.value)
+        elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
+            local.add(node.target.id)
+            values.setdefault(node.target.id, []).append(node.value)
+        elif isinstance(node, (ast.AugAssign, ast.For, ast.AsyncFor)):
+            mark_targets(node.target)
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            mark_targets(node.optional_vars)
+        stack.extend(ast.iter_child_nodes(node))
+    return local, values
+
+
+class _IndirectCopy:
+    """Resolve a user-visible copy expression into the text *units* it can display.
+
+    The two backend channels (``user_error`` messages and trace summaries) used to
+    accept only a literal at the call site, so copy written one step away — assigned
+    to a variable first, picked by a conditional, concatenated, or returned by a
+    module helper — was skipped silently (「横向对比:纳入 … 个同社区实体」shipped that
+    way). Supported forms, each bounded by ``MAX_INDIRECTION_DEPTH``:
+
+      * str constant / f-string — ``_message_literal`` (interpolations dropped);
+      * ``a if c else b`` — each branch is its **own** unit, so text from the two
+        branches is never glued into a phantom hit;
+      * ``a + b`` — the two sides joined into one unit (an unresolvable side counts as
+        an interpolation: a blank);
+      * ``"…" % args`` — the left side; ``"…".format(...)`` — the receiver;
+      * ``X.get(k, default)`` — every value of the dict ``X`` resolves to, plus the
+        default;
+      * a name — the assignments in the enclosing function(s) first, then the module
+        level, following Python scoping (a parameter shadows the module constant and
+        stays unresolvable);
+      * a call to a function defined at this module's top level — every ``return``.
+
+    Anything else (``str(exc)``, ``exc.user_message``, imported constants, ``X[k]``…)
+    resolves to no unit and stays deliberately unchecked, as before.
+    """
+
+    def __init__(self, tree: ast.Module) -> None:
+        self._parents: dict[ast.AST, ast.AST] = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                self._parents[child] = node
+        self._module = tree
+        self._scopes: dict[ast.AST, tuple[set[str], dict[str, list[ast.expr]]]] = {}
+        self._functions = {
+            node.name: node for node in tree.body if isinstance(node, _FUNCTION_NODES)
+        }
+
+    def _scope(self, node: ast.AST) -> tuple[set[str], dict[str, list[ast.expr]]]:
+        if node not in self._scopes:
+            self._scopes[node] = _bindings(node)
+        return self._scopes[node]
+
+    def _enclosing_functions(self, node: ast.AST) -> list[ast.AST]:
+        chain: list[ast.AST] = []
+        cur = self._parents.get(node)
+        while cur is not None:
+            if isinstance(cur, _FUNCTION_NODES):
+                chain.append(cur)
+            cur = self._parents.get(cur)
+        return chain
+
+    def _name_values(self, node: ast.Name) -> list[ast.expr]:
+        for function in self._enclosing_functions(node):
+            local, values = self._scope(function)
+            if node.id in local:
+                return values.get(node.id, [])
+        return self._scope(self._module)[1].get(node.id, [])
+
+    def _dicts(self, node: ast.expr, depth: int) -> list[ast.Dict]:
+        if depth < 0:
+            return []
+        if isinstance(node, ast.Dict):
+            return [node]
+        if isinstance(node, ast.Name):
+            return [d for v in self._name_values(node) for d in self._dicts(v, depth - 1)]
+        return []
+
+    def units(self, node: ast.expr | None, depth: int = MAX_INDIRECTION_DEPTH) -> list[str]:
+        if node is None or depth < 0:
+            return []
+        literal = _message_literal(node)
+        if literal is not None:
+            return [literal]
+        nxt = depth - 1
+        if isinstance(node, ast.IfExp):
+            return _dedupe(self.units(node.body, nxt) + self.units(node.orelse, nxt))
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = self.units(node.left, nxt), self.units(node.right, nxt)
+            if not left and not right:
+                return []
+            joined = [l + r for l in (left or [" "]) for r in (right or [" "])]
+            return _dedupe(joined)[:MAX_UNITS_PER_EXPR]
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+            return self.units(node.left, nxt)
+        if isinstance(node, ast.Name):
+            return _dedupe([u for v in self._name_values(node) for u in self.units(v, nxt)])
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr == "format":
+                return self.units(func.value, nxt)
+            if isinstance(func, ast.Attribute) and func.attr == "get":
+                found = [
+                    u for d in self._dicts(func.value, nxt)
+                    for v in d.values for u in self.units(v, nxt)
+                ]
+                if len(node.args) > 1:
+                    found += self.units(node.args[1], nxt)
+                return _dedupe(found)
+            if isinstance(func, ast.Name) and func.id in self._functions:
+                helper = self._functions[func.id]
+                if any(f is helper for f in self._enclosing_functions(node)):
+                    return []  # helper 递归调用自己:没有新信息
+                return _dedupe([
+                    u for ret in self._returns(helper) for u in self.units(ret, nxt)
+                ])
+        return []
+
+    @staticmethod
+    def _returns(function: ast.AST) -> list[ast.expr]:
+        found: list[ast.expr] = []
+        stack = list(ast.iter_child_nodes(function))
+        while stack:
+            node = stack.pop()
+            if isinstance(node, _SCOPE_NODES):
+                continue
+            if isinstance(node, ast.Return) and node.value is not None:
+                found.append(node.value)
+            stack.extend(ast.iter_child_nodes(node))
+        return found
+
+
 def scan_user_error(path: Path) -> tuple[int, list[tuple[int, str, str]]]:
     """Blacklisted jargon in this file's `user_error()` messages.
+
+    Messages written indirectly (variable, conditional, concatenation, module
+    constant, module helper return — see ``_IndirectCopy``) are resolved; what
+    still cannot be resolved statically is skipped on purpose and covered at
+    runtime by `tests/test_user_error.py`.
 
     Returns (number of user_error call sites seen, hits) — the count feeds the
     non-vacuity floor, so a rename that silently empties the scan is caught.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    sites, hits = 0, []
+    resolver = _IndirectCopy(tree)
+    sites, hits = 0, set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -420,47 +633,41 @@ def scan_user_error(path: Path) -> tuple[int, list[tuple[int, str, str]]]:
         sites += 1
         kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
         message = kwargs.get("message", node.args[1] if len(node.args) > 1 else None)
-        text = _message_literal(message)
-        if text is None:
-            continue
-        for term in terms_in(text):
-            hits.append((node.lineno, term, text))
+        for text in resolver.units(message):
+            for term in _backend_terms_in(text):
+                hits.add((node.lineno, term, text))
     return sites, sorted(hits)
 
 
 def scan_trace_summaries(path: Path) -> tuple[int, list[tuple[int, str, str]]]:
     """Blacklisted jargon in this module's server-written trace summaries.
 
-    Scan literal ``TraceStep(..., summary=...)`` values rendered by the front end.
-
-    Summaries built from a variable or a helper call are *not* statically
-    checkable and are skipped, exactly as ``_message_literal`` skips a computed
-    ``user_error`` message. Returns (sites seen, hits) — the count feeds the
+    Scan ``TraceStep(..., summary=...)`` values rendered by the front end, literal
+    or written indirectly (see ``_IndirectCopy``). Summaries that still cannot be
+    resolved statically are skipped, exactly like an unresolvable ``user_error``
+    message. Returns (resolvable sites seen, hits) — the count feeds the
     non-vacuity floor.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    sites, hits = 0, []
-
-    def check(lineno: int, text: str) -> None:
-        nonlocal sites
-        sites += 1
-        if text in GRANDFATHERED_TRACE_SUMMARIES:
-            return
-        for term in terms_in(text):
-            hits.append((lineno, term, text))
-
+    resolver = _IndirectCopy(tree)
+    sites, hits = 0, set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-            if name != TRACE_STEP:
-                continue
-            for keyword in node.keywords:
-                if keyword.arg != "summary":
-                    continue
-                text = _message_literal(keyword.value)
-                if text is not None:
-                    check(node.lineno, text)
+        if not isinstance(node, ast.Call):
             continue
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if name != TRACE_STEP:
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "summary":
+                continue
+            units = resolver.units(keyword.value)
+            if units:
+                sites += 1
+            for text in units:
+                if text in GRANDFATHERED_TRACE_SUMMARIES:
+                    continue
+                for term in _backend_terms_in(text):
+                    hits.add((node.lineno, term, text))
     return sites, sorted(hits)
 
 
