@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Guard: user-facing Chinese UI copy must not leak internal jargon.
 
-Scope follows the **trust boundary, not the directory**. Three sources of copy reach
-a user's screen, and all three are scanned:
+Scope follows the **trust boundary, not the directory**. These sources of copy reach
+a user's screen, and all of them are scanned:
 
   1. frontend/app and frontend/features *.ts/*.tsx *rendered text* — string
      literals plus JSX text nodes.
@@ -18,11 +18,17 @@ a user's screen, and all three are scanned:
      `frontend/app`. `TraceStep(..., summary=...)` calls in
      `TRACE_SUMMARY_MODULES` are scanned as user-facing copy.
 
-  For channels 2 and 3 the copy does not have to be a literal at the call site:
-  `_IndirectCopy` follows variables, conditionals, concatenation, `%`/`.format`,
-  `X.get(k, default)`, module constants and module-helper returns. Both channels
-  also strip ALL_CAPS_UNDERSCORE environment-variable names before matching
-  (`BACKEND_ENV_VAR`) — a config key named in an error message is not jargon.
+  5. backend **display fields** — registered call shapes whose fields the front end
+     renders verbatim: `IndexingPipelineOption(label=…, description=…)` and the KG
+     build job failure text (`….kg_build_jobs.finish/set_stage(…, error_message=…)`,
+     shown through `KgBuildJobStatus.user_message`). See `DISPLAY_FIELD_CALLS`.
+
+  For the backend channels (2, 3, 5) the copy does not have to be a literal at the
+  call site: `_IndirectCopy` follows variables, conditionals, concatenation,
+  `%`/`.format`, `X.get(k, default)`, module constants and module-helper returns.
+  They also strip the deployment's registered environment-variable names (derived
+  from `backend/app/core/config.py`) before matching (`BACKEND_ENV_VAR`) — a config
+  key named in an error message is not jargon; other ALL_CAPS codes are still checked.
 
   Bare `HTTPException(detail=str(exc))` is deliberately **not** scanned: it is never
   displayed (the front end falls back to a generic message by status code) and its
@@ -102,7 +108,7 @@ USER_ERROR = "user_error"
 
 # 非空性下限:守卫按函数名做 AST 匹配,一旦 helper 改名 / 换成装饰器 / 调用写法变了,
 # 匹配数会掉到 0 而退出码仍是 0 —— 正是本次要根治的那种假绿。这不是精确台账
-# (新增站点不该让构建红),只是「扫描面塌了」的哨兵。当前实际 21 处。
+# (新增站点不该让构建红),只是「扫描面塌了」的哨兵。2026-10 约 260 处。
 MIN_USER_ERROR_SITES = 15
 
 # —— 第三条通道:服务端写、前端逐字渲染的推理轨迹摘要 ——————————————————
@@ -138,6 +144,47 @@ MIN_TRACE_SUMMARY_SITES = 50
 GRANDFATHERED_TRACE_SUMMARIES = frozenset({
     "本笔记本尚未构建知识图谱,本轮只用原文检索与集合清单",
 })
+
+# —— 第五条通道:服务端写、前端逐字渲染的**展示字段** ——————————————————————
+# 与轨迹摘要同构:这些字段由后端写进接口,前端原样上屏,不经 frontend/app。按**显式
+# 登记的调用形状**匹配,不按 kwarg 名泛扫——`error_message=` 在删除作业、来源表等处
+# 是不上屏的诊断原文,泛扫只会误报。新增一条会原样上屏的后端字段时,把它的形状登记
+# 进这张表。
+#
+#   * `IndexingPipelineOption(label=…, description=…)`:索引管线选项,前端索引管线
+#     设置原样渲染 label 与 description(page.tsx `{option.description}`)。
+#   * `<…>.kg_build_jobs.finish/set_stage(…, error_message=…)`:知识图谱分析作业的
+#     失败文案,经 `KgBuildJobStatus.user_message` 由前端终态提示原样弹出。
+#   * `self.finish(…, error_message=…)`:同一张表在作业存储内部的写入
+#     (`fail_submission`),只在 KG_BUILD_JOB_STORE_MODULES 里认。
+#
+# 扫描面是本仓库 backend/app 全部(按 ROOT 写死,理由同 TRACE_SUMMARY_MODULES);
+# DISPLAY_FIELD_ANCHOR_MODULES 是这几种形状现有出处的存在性哨兵,搬家/改名时一起改。
+DISPLAY_FIELD_ROOT = ROOT / "backend" / "app"
+DISPLAY_FIELD_CALLS = {
+    # 调用名 → 上屏的 kwarg
+    "IndexingPipelineOption": ("label", "description"),
+}
+DISPLAY_FIELD_METHODS = {
+    # 接收者属性链的末段 → (方法名 → 上屏的 kwarg)
+    "kg_build_jobs": {"finish": ("error_message",), "set_stage": ("error_message",)},
+}
+KG_BUILD_JOB_STORE_MODULES = (
+    ROOT / "backend" / "app" / "repositories" / "sqlite" / "kg_build_job_store.py",
+    ROOT / "backend" / "app" / "repositories" / "postgres" / "kg_build_job_store.py",
+)
+_DISPLAY_FIELD_TOKENS = (*DISPLAY_FIELD_CALLS, *DISPLAY_FIELD_METHODS)
+_STORE_MODULES_RELATIVE = frozenset(
+    p.relative_to(DISPLAY_FIELD_ROOT) for p in KG_BUILD_JOB_STORE_MODULES
+)
+DISPLAY_FIELD_ANCHOR_MODULES = (
+    ROOT / "backend" / "app" / "services" / "indexing_pipeline.py",
+    ROOT / "backend" / "app" / "services" / "notebook_catalog.py",
+    ROOT / "backend" / "app" / "services" / "knowledge_lifecycle.py",
+    *KG_BUILD_JOB_STORE_MODULES,
+)
+# 非空性下限(可解析站点)。2026-10 实测见 test_ui_vocabulary_guard 的真实扫描用例。
+MIN_DISPLAY_FIELD_SITES = 10
 
 # ASCII acronyms/words: matched only when not glued to another ASCII letter, so
 # identifiers (currentNotebook, MemoryPanel, schemaBusy, PKG) cannot trip them.
@@ -413,23 +460,68 @@ def _message_literal(node: ast.expr | None) -> str | None:
     return None
 
 
-# 后端两条通道(user_error、轨迹摘要)专用:匹配前剥掉全大写下划线环境变量名。
-# 「请设置 SILICON_NOTEBOOK_AUTH_OPTIONAL」里的 NOTEBOOK 是配置键,不是界面黑话;
-# 裸 notebook / 裸 KG 不含下划线,照抓。刻意**不**放进 terms_in():前端渲染文本与
-# 更新说明里没有这种写法,放宽它们的扫描面只会少报。
+# 后端可展示文案通道(user_error、轨迹摘要、展示字段)专用:匹配前剥掉**已登记**的
+# 部署配置键名。「请先关闭 SILICON_NOTEBOOK_AUTH_OPTIONAL」里的 NOTEBOOK 是在告诉
+# 运维改哪个配置,不是界面黑话。白名单从 `backend/app/core/config.py` 的
+# `validation_alias="…"` 与 `os.environ.get("…")` 推出,不按形状放行——形状放行会
+# 把「失败:KG_NOT_READY」这类内部码当配置键一起剥掉(KG 照样是黑话)。裸 notebook /
+# 裸 KG 不受影响。刻意**不**放进 terms_in():前端渲染文本与更新说明里没有这种写法,
+# 放宽它们的扫描面只会少报。
 BACKEND_ENV_VAR = re.compile(r"(?<![A-Za-z0-9_])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?![A-Za-z0-9_])")
+SETTINGS_MODULE = ROOT / "backend" / "app" / "core" / "config.py"
+_ENV_READERS = frozenset({"get", "getenv"})
+
+
+def _registered_env_vars() -> frozenset[str]:
+    """Environment-variable names the deployment actually reads (see BACKEND_ENV_VAR)."""
+    global _ENV_VAR_CACHE
+    if _ENV_VAR_CACHE is None:
+        names: set[str] = set()
+        if SETTINGS_MODULE.is_file():
+            tree = ast.parse(SETTINGS_MODULE.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                for kw in node.keywords:
+                    if kw.arg == "validation_alias":
+                        names.update(
+                            c.value for c in ast.walk(kw.value)
+                            if isinstance(c, ast.Constant) and isinstance(c.value, str)
+                        )
+                if (isinstance(node.func, ast.Attribute) and node.func.attr in _ENV_READERS
+                        and node.args and isinstance(node.args[0], ast.Constant)
+                        and isinstance(node.args[0].value, str)):
+                    names.add(node.args[0].value)
+        _ENV_VAR_CACHE = frozenset(n for n in names if BACKEND_ENV_VAR.fullmatch(n))
+    return _ENV_VAR_CACHE
+
+
+_ENV_VAR_CACHE: frozenset[str] | None = None
 
 
 def _backend_terms_in(unit: str) -> list[str]:
-    return terms_in(BACKEND_ENV_VAR.sub(" ", unit))
+    registered = _registered_env_vars()
+    return terms_in(BACKEND_ENV_VAR.sub(
+        lambda m: " " if m.group(0) in registered else m.group(0), unit
+    ))
 
 
 _FUNCTION_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
+_COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+# 名字查找时依次经过的作用域:函数、lambda、推导式(Python 3 的推导式有自己的作用域)。
+# 类体不在里面——方法看不见类体里的名字,与 Python 一致。
+_LOOKUP_SCOPES = (*_FUNCTION_NODES, ast.Lambda, *_COMPREHENSION_NODES)
+# 收集一个函数的绑定时不进入的子树:它们各自是独立作用域。推导式**要**进入——其中的
+# `:=` 绑定到外层函数;推导式自己的循环变量在 `_bindings` 里本来就不会被当成外层绑定。
 _SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
-# 间接写法的解析深度上限:变量 → 条件 → 拼接 → helper return 这类链条实际不超过
-# 三四层;上限只是防环(`x = x + "…"`)与防组合爆炸,不是覆盖面的取舍。
+# 名字跳转与 helper 调用的跳数上限。只有这两种「换一处定义」的步骤扣深度;`+`、
+# 条件表达式、`%`、`.format` 是同一棵表达式树里的结构节点,AST 本身有限,不扣——
+# 否则 `"前缀" + a + "," + b + …` 这种长拼接链最左边的文案会被静默丢掉。上限只用来
+# 防环(`x = x + "…"`);配合 `(节点, 剩余深度)` 级 memo,自引用的代价是线性的。
 MAX_INDIRECTION_DEPTH = 5
-# `+` 两侧各自有多个单元时做笛卡儿积;超过这个数就截断,只防病态组合。
+# `+` 两侧单元做笛卡儿积的上限。超过时**不截断**:退化为左右两侧各自的单元分别检查
+# ——每一侧都是会原样上屏的子串,单侧黑话一条不漏,只放弃跨边界拼出的组合。积的大小
+# 先算后生成,超限时根本不生成组合。
 MAX_UNITS_PER_EXPR = 64
 
 
@@ -438,26 +530,41 @@ def _dedupe(units: list[str]) -> list[str]:
 
 
 def _bindings(scope: ast.AST) -> tuple[set[str], dict[str, list[ast.expr]]]:
-    """Names bound directly in ``scope`` (a module or a function), and the values of
-    the simple ``name = value`` / ``name: T = value`` / ``(name := value)`` ones.
+    """Names bound directly in ``scope`` (module, function, lambda or comprehension),
+    and the candidate values of the ones with a statically known value.
 
-    Nested functions, classes and lambdas are their own scope and are not entered.
-    Parameters, loop targets, ``with … as``, tuple unpacking and ``+=`` mark a name as
-    local without giving it a value — a local without a statically known value
-    shadows the module constant of the same name, exactly like Python scoping.
+    Values come from ``name = value``, ``name: T = value``, ``(name := value)`` and
+    ``name += value`` (the appended text is a candidate of its own, so jargon added
+    that way is still checked). Parameters, loop targets, ``with … as``,
+    ``except … as``, imports and tuple unpacking mark a name as local without giving
+    it a value — a local without a statically known value shadows the module
+    constant of the same name, exactly like Python scoping.
+
+    Known limits (they err towards a false positive, never a silent skip): bindings
+    are flow-insensitive within one scope (every value a name ever gets in that
+    scope is a candidate, so a later ``except … as`` / loop rebinding of the *same*
+    scope's name does not remove an earlier constant); ``global`` / ``nonlocal``
+    declarations, ``match`` captures and ``del`` are not modelled.
     """
     local: set[str] = set()
     values: dict[str, list[ast.expr]] = {}
-    if isinstance(scope, _FUNCTION_NODES):
-        args = scope.args
-        for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs,
-                    *(a for a in (args.vararg, args.kwarg) if a is not None)]:
-            local.add(arg.arg)
 
     def mark_targets(target: ast.expr) -> None:
         for sub in ast.walk(target):
             if isinstance(sub, ast.Name):
                 local.add(sub.id)
+
+    if isinstance(scope, _COMPREHENSION_NODES):
+        for generator in scope.generators:
+            mark_targets(generator.target)
+        return local, values
+    if isinstance(scope, (*_FUNCTION_NODES, ast.Lambda)):
+        args = scope.args
+        for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs,
+                    *(a for a in (args.vararg, args.kwarg) if a is not None)]:
+            local.add(arg.arg)
+        if isinstance(scope, ast.Lambda):
+            return local, values
 
     stack = list(ast.iter_child_nodes(scope))
     while stack:
@@ -480,10 +587,19 @@ def _bindings(scope: ast.AST) -> tuple[set[str], dict[str, list[ast.expr]]]:
         elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
             local.add(node.target.id)
             values.setdefault(node.target.id, []).append(node.value)
-        elif isinstance(node, (ast.AugAssign, ast.For, ast.AsyncFor)):
+        elif isinstance(node, ast.AugAssign):
+            mark_targets(node.target)
+            if isinstance(node.target, ast.Name) and isinstance(node.op, ast.Add):
+                values.setdefault(node.target.id, []).append(node.value)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
             mark_targets(node.target)
         elif isinstance(node, ast.withitem) and node.optional_vars is not None:
             mark_targets(node.optional_vars)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            local.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                local.add((alias.asname or alias.name).split(".")[0])
         stack.extend(ast.iter_child_nodes(node))
     return local, values
 
@@ -491,36 +607,39 @@ def _bindings(scope: ast.AST) -> tuple[set[str], dict[str, list[ast.expr]]]:
 class _IndirectCopy:
     """Resolve a user-visible copy expression into the text *units* it can display.
 
-    The two backend channels (``user_error`` messages and trace summaries) used to
-    accept only a literal at the call site, so copy written one step away — assigned
-    to a variable first, picked by a conditional, concatenated, or returned by a
-    module helper — was skipped silently (「横向对比:纳入 … 个同社区实体」shipped that
-    way). Supported forms, each bounded by ``MAX_INDIRECTION_DEPTH``:
+    The backend channels (``user_error`` messages, trace summaries, display fields)
+    used to accept only a literal at the call site, so copy written one step away —
+    assigned to a variable first, picked by a conditional, concatenated, or returned
+    by a module helper — was skipped silently (「横向对比:纳入 … 个同社区实体」shipped
+    that way). Supported forms:
 
       * str constant / f-string — ``_message_literal`` (interpolations dropped);
       * ``a if c else b`` — each branch is its **own** unit, so text from the two
         branches is never glued into a phantom hit;
       * ``a + b`` — the two sides joined into one unit (an unresolvable side counts as
-        an interpolation: a blank);
+        an interpolation: a blank, so ``"社" + x + "区"`` never reads as 社区); past
+        ``MAX_UNITS_PER_EXPR`` combinations each side is checked on its own instead;
       * ``"…" % args`` — the left side; ``"…".format(...)`` — the receiver;
       * ``X.get(k, default)`` — every value of the dict ``X`` resolves to, plus the
         default;
-      * a name — the assignments in the enclosing function(s) first, then the module
-        level, following Python scoping (a parameter shadows the module constant and
-        stays unresolvable);
+      * a name — the bindings of the innermost enclosing scope that binds it
+        (function, lambda, comprehension), then the module level, following Python
+        scoping (a parameter / loop variable / ``except … as`` shadows the module
+        constant and stays unresolvable); see ``_bindings`` for the modelled forms;
       * a call to a function defined at this module's top level — every ``return``.
 
-    Anything else (``str(exc)``, ``exc.user_message``, imported constants, ``X[k]``…)
-    resolves to no unit and stays deliberately unchecked, as before.
+    Only name jumps and helper calls spend ``MAX_INDIRECTION_DEPTH``; results are
+    memoised per ``(node, remaining depth)``. Anything else (``str(exc)``,
+    ``exc.user_message``, imported constants, ``X[k]``…) resolves to no unit and stays
+    deliberately unchecked, as before.
     """
 
     def __init__(self, tree: ast.Module) -> None:
-        self._parents: dict[ast.AST, ast.AST] = {}
-        for node in ast.walk(tree):
-            for child in ast.iter_child_nodes(node):
-                self._parents[child] = node
+        # 父节点表要遍历整棵树;只有遇到名字才需要作用域链,所以按需建。
+        self._parents: dict[ast.AST, ast.AST] | None = None
         self._module = tree
         self._scopes: dict[ast.AST, tuple[set[str], dict[str, list[ast.expr]]]] = {}
+        self._memo: dict[tuple[ast.AST, int], tuple[str, ...]] = {}
         self._functions = {
             node.name: node for node in tree.body if isinstance(node, _FUNCTION_NODES)
         }
@@ -530,18 +649,23 @@ class _IndirectCopy:
             self._scopes[node] = _bindings(node)
         return self._scopes[node]
 
-    def _enclosing_functions(self, node: ast.AST) -> list[ast.AST]:
+    def _enclosing_scopes(self, node: ast.AST) -> list[ast.AST]:
+        if self._parents is None:
+            self._parents = {
+                child: parent for parent in ast.walk(self._module)
+                for child in ast.iter_child_nodes(parent)
+            }
         chain: list[ast.AST] = []
         cur = self._parents.get(node)
         while cur is not None:
-            if isinstance(cur, _FUNCTION_NODES):
+            if isinstance(cur, _LOOKUP_SCOPES):
                 chain.append(cur)
             cur = self._parents.get(cur)
         return chain
 
     def _name_values(self, node: ast.Name) -> list[ast.expr]:
-        for function in self._enclosing_functions(node):
-            local, values = self._scope(function)
+        for scope in self._enclosing_scopes(node):
+            local, values = self._scope(scope)
             if node.id in local:
                 return values.get(node.id, [])
         return self._scope(self._module)[1].get(node.id, [])
@@ -558,40 +682,49 @@ class _IndirectCopy:
     def units(self, node: ast.expr | None, depth: int = MAX_INDIRECTION_DEPTH) -> list[str]:
         if node is None or depth < 0:
             return []
+        key = (node, depth)
+        if key not in self._memo:
+            self._memo[key] = ()  # 计算中:同一 (节点, 深度) 的再入当作解析不了
+            self._memo[key] = tuple(self._compute(node, depth))
+        return list(self._memo[key])
+
+    def _compute(self, node: ast.expr, depth: int) -> list[str]:
         literal = _message_literal(node)
         if literal is not None:
             return [literal]
-        nxt = depth - 1
         if isinstance(node, ast.IfExp):
-            return _dedupe(self.units(node.body, nxt) + self.units(node.orelse, nxt))
+            return _dedupe(self.units(node.body, depth) + self.units(node.orelse, depth))
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            left, right = self.units(node.left, nxt), self.units(node.right, nxt)
+            left, right = self.units(node.left, depth), self.units(node.right, depth)
             if not left and not right:
                 return []
-            joined = [l + r for l in (left or [" "]) for r in (right or [" "])]
-            return _dedupe(joined)[:MAX_UNITS_PER_EXPR]
+            lhs, rhs = left or [" "], right or [" "]
+            if len(lhs) * len(rhs) > MAX_UNITS_PER_EXPR:
+                return _dedupe(left + right)
+            return _dedupe([l + r for l in lhs for r in rhs])
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
-            return self.units(node.left, nxt)
+            return self.units(node.left, depth)
         if isinstance(node, ast.Name):
-            return _dedupe([u for v in self._name_values(node) for u in self.units(v, nxt)])
+            return _dedupe([
+                u for v in self._name_values(node) for u in self.units(v, depth - 1)
+            ])
         if isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Attribute) and func.attr == "format":
-                return self.units(func.value, nxt)
+                return self.units(func.value, depth)
             if isinstance(func, ast.Attribute) and func.attr == "get":
                 found = [
-                    u for d in self._dicts(func.value, nxt)
-                    for v in d.values for u in self.units(v, nxt)
+                    u for d in self._dicts(func.value, depth)
+                    for v in d.values for u in self.units(v, depth - 1)
                 ]
                 if len(node.args) > 1:
-                    found += self.units(node.args[1], nxt)
+                    found += self.units(node.args[1], depth)
                 return _dedupe(found)
             if isinstance(func, ast.Name) and func.id in self._functions:
-                helper = self._functions[func.id]
-                if any(f is helper for f in self._enclosing_functions(node)):
-                    return []  # helper 递归调用自己:没有新信息
+                # 递归 helper 不单独设防:每次调用扣一级深度,加上 memo,天然有界。
                 return _dedupe([
-                    u for ret in self._returns(helper) for u in self.units(ret, nxt)
+                    u for ret in self._returns(self._functions[func.id])
+                    for u in self.units(ret, depth - 1)
                 ])
         return []
 
@@ -609,7 +742,49 @@ class _IndirectCopy:
         return found
 
 
-def scan_user_error(path: Path) -> tuple[int, list[tuple[int, str, str]]]:
+Hits = list[tuple[int, str, str]]
+
+
+def _scan_backend_tree(
+    tree: ast.Module, *, display: bool, store_module: bool = False,
+) -> tuple[int, Hits, int, Hits]:
+    """One AST walk for both whole-tree backend channels: ``user_error()`` messages
+    and (when ``display``) the registered display fields. Returns
+    (user_error sites, user_error hits, resolvable display-field sites, display hits).
+    """
+    # 绝大多数后端文件两种站点都没有:解析器(要建整棵树的父节点表)按需才建。
+    resolver: _IndirectCopy | None = None
+    ue_sites, ue_hits, field_sites, field_hits = 0, set(), 0, set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        # `user_error(...)` 与 `deps.user_error(...)` 都要认。
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if name == USER_ERROR:
+            ue_sites += 1
+            resolver = resolver or _IndirectCopy(tree)
+            kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+            message = kwargs.get("message", node.args[1] if len(node.args) > 1 else None)
+            for text in resolver.units(message):
+                for term in _backend_terms_in(text):
+                    ue_hits.add((node.lineno, term, text))
+        fields = _display_field_kwargs(node, store_module) if display else ()
+        if not fields:
+            continue
+        resolver = resolver or _IndirectCopy(tree)
+        for keyword in node.keywords:
+            if keyword.arg not in fields:
+                continue
+            units = resolver.units(keyword.value)
+            if units:
+                field_sites += 1
+            for text in units:
+                for term in _backend_terms_in(text):
+                    field_hits.add((node.lineno, term, text))
+    return ue_sites, sorted(ue_hits), field_sites, sorted(field_hits)
+
+
+def scan_user_error(path: Path) -> tuple[int, Hits]:
     """Blacklisted jargon in this file's `user_error()` messages.
 
     Messages written indirectly (variable, conditional, concatenation, module
@@ -621,36 +796,23 @@ def scan_user_error(path: Path) -> tuple[int, list[tuple[int, str, str]]]:
     non-vacuity floor, so a rename that silently empties the scan is caught.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    # 绝大多数后端文件没有 user_error 站点:解析器(要建整棵树的父节点表)按需才建。
-    resolver: _IndirectCopy | None = None
-    sites, hits = 0, set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        # `user_error(...)` 与 `deps.user_error(...)` 都要认。
-        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-        if name != USER_ERROR:
-            continue
-        sites += 1
-        resolver = resolver or _IndirectCopy(tree)
-        kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
-        message = kwargs.get("message", node.args[1] if len(node.args) > 1 else None)
-        for text in resolver.units(message):
-            for term in _backend_terms_in(text):
-                hits.add((node.lineno, term, text))
-    return sites, sorted(hits)
+    sites, hits, _, _ = _scan_backend_tree(tree, display=False)
+    return sites, hits
 
 
-def scan_trace_summaries(path: Path) -> tuple[int, list[tuple[int, str, str]]]:
+def scan_trace_summaries(
+    path: Path, tree: ast.Module | None = None,
+) -> tuple[int, list[tuple[int, str, str]]]:
     """Blacklisted jargon in this module's server-written trace summaries.
 
     Scan ``TraceStep(..., summary=...)`` values rendered by the front end, literal
     or written indirectly (see ``_IndirectCopy``). Summaries that still cannot be
     resolved statically are skipped, exactly like an unresolvable ``user_error``
     message. Returns (resolvable sites seen, hits) — the count feeds the
-    non-vacuity floor.
+    non-vacuity floor. ``tree`` lets ``main`` reuse the parse of the backend pass.
     """
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    if tree is None:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     resolver = _IndirectCopy(tree)
     sites, hits = 0, set()
     for node in ast.walk(tree):
@@ -671,6 +833,38 @@ def scan_trace_summaries(path: Path) -> tuple[int, list[tuple[int, str, str]]]:
                 for term in _backend_terms_in(text):
                     hits.add((node.lineno, term, text))
     return sites, sorted(hits)
+
+
+def _receiver_tail(node: ast.expr) -> str | None:
+    """Last segment of a call receiver: `self.kg_build_jobs` → 'kg_build_jobs'."""
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.Name):
+        return node.id
+    return None
+
+
+def _display_field_kwargs(node: ast.Call, store_module: bool) -> tuple[str, ...]:
+    func = node.func
+    if isinstance(func, ast.Name):
+        return DISPLAY_FIELD_CALLS.get(func.id, ())
+    if not isinstance(func, ast.Attribute):
+        return ()
+    tail = _receiver_tail(func.value)
+    if store_module and tail == "self":
+        tail = "kg_build_jobs"
+    return DISPLAY_FIELD_METHODS.get(tail or "", {}).get(func.attr, ())
+
+
+def scan_display_fields(path: Path, *, store_module: bool = False) -> tuple[int, Hits]:
+    """Blacklisted jargon in the registered display fields (see DISPLAY_FIELD_CALLS).
+
+    ``store_module`` marks a KG build job store module, where ``self.finish(…)``
+    writes the same displayed column. Returns (resolvable field sites, hits).
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    _, _, sites, hits = _scan_backend_tree(tree, display=True, store_module=store_module)
+    return sites, hits
 
 
 def scan_release_note(path: Path) -> list[tuple[int, str, str]]:
@@ -751,11 +945,41 @@ def main(argv: list[str] | None = None) -> int:
     if not py_files:
         print("check_ui_vocabulary: no backend/app sources found", file=sys.stderr)
         return 1
-    marked_sites = 0
+    # 第五条通道(展示字段)的扫描面按 ROOT 写死;默认情况下它与 BACKEND_APP 是同一棵
+    # 树,就在同一次 AST 遍历里一起扫,不重复解析。BACKEND_APP 被重定向时(自检用例)
+    # 再单独扫一遍真实仓库。
+    shared_display = BACKEND_APP.resolve() == DISPLAY_FIELD_ROOT.resolve()
+    marked_sites = display_sites = 0
+    # 轨迹模块也在 backend/app 里:后端遍历时顺手留下它们的语法树,第三条通道不再重复解析。
+    trace_trees: dict[Path, ast.Module] = {}
+    display_violations: list[str] = []
+
+    def record_display(path: Path, hits: Hits) -> None:
+        rel = _rel(path)
+        for line, term, snippet in hits:
+            snippet = snippet if len(snippet) <= 80 else snippet[:77] + "…"
+            display_violations.append(f"  {rel}:{line}: 「{term}」in display field: {snippet!r}")
+
     for path in py_files:
         rel = _rel(path)
-        sites, hits = scan_user_error(path)
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text, filename=str(path))
+        if path in TRACE_SUMMARY_MODULES:
+            trace_trees[path] = tree
+        store_module = shared_display and (
+            path.relative_to(BACKEND_APP) in _STORE_MODULES_RELATIVE
+        )
+        sites, hits, field_sites, field_hits = _scan_backend_tree(
+            tree,
+            # 文本预筛:不含任何登记名字的文件不可能有展示字段站点,省掉逐个调用的判定。
+            display=shared_display and (
+                store_module or any(token in text for token in _DISPLAY_FIELD_TOKENS)
+            ),
+            store_module=store_module,
+        )
         marked_sites += sites
+        display_sites += field_sites
+        record_display(path, field_hits)
         for line, term, snippet in hits:
             snippet = snippet if len(snippet) <= 80 else snippet[:77] + "…"
             violations.append(f"  {rel}:{line}: 「{term}」in user_error message: {snippet!r}")
@@ -801,7 +1025,7 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        sites, hits = scan_trace_summaries(path)
+        sites, hits = scan_trace_summaries(path, trace_trees.get(path))
         trace_sites += sites
         rel = _rel(path)
         for line, term, snippet in hits:
@@ -809,6 +1033,25 @@ def main(argv: list[str] | None = None) -> int:
             violations.append(
                 f"  {rel}:{line}: 「{term}」in trace summary: {snippet!r}"
             )
+
+    # 第五条通道:登记的后端展示字段(见 DISPLAY_FIELD_CALLS)。按 ROOT 写死,不跟
+    # BACKEND_APP 走;同样排在前两条哨兵之后,理由同上。
+    for path in DISPLAY_FIELD_ANCHOR_MODULES:
+        if not path.exists():
+            print(
+                f"check_ui_vocabulary: display-field module missing: {_rel(path)} "
+                f"(update DISPLAY_FIELD_ANCHOR_MODULES)",
+                file=sys.stderr,
+            )
+            return 1
+    if not shared_display:
+        for path in sorted(DISPLAY_FIELD_ROOT.rglob("*.py")):
+            sites, hits = scan_display_fields(
+                path, store_module=path in KG_BUILD_JOB_STORE_MODULES
+            )
+            display_sites += sites
+            record_display(path, hits)
+    violations.extend(display_violations)
 
     note_files = _release_note_files()
     for path in note_files:
@@ -819,10 +1062,21 @@ def main(argv: list[str] | None = None) -> int:
 
     if trace_sites < MIN_TRACE_SUMMARY_SITES:
         print(
-            f"check_ui_vocabulary: only {trace_sites} literal trace summaries found "
+            f"check_ui_vocabulary: only {trace_sites} resolvable trace summaries found "
             f"across {len(TRACE_SUMMARY_MODULES)} module(s) (expected ≥ "
             f"{MIN_TRACE_SUMMARY_SITES}). 这条通道失去了扫描面——{TRACE_STEP} 是不是"
-            f"改名 / 摘要改成了变量拼装?别调低下限来「修」它。",
+            f"改名 / 摘要改成了静态解析不了的写法(跨模块常量、str(exc)…)?"
+            f"别调低下限来「修」它。",
+            file=sys.stderr,
+        )
+        return 1
+
+    if display_sites < MIN_DISPLAY_FIELD_SITES:
+        print(
+            f"check_ui_vocabulary: only {display_sites} resolvable display fields found "
+            f"in backend/app (expected ≥ {MIN_DISPLAY_FIELD_SITES}). 这条通道失去了扫描面"
+            f"——登记的调用形状是不是改名 / 换了写法?同步 DISPLAY_FIELD_CALLS / "
+            f"DISPLAY_FIELD_METHODS,别调低下限来「修」它。",
             file=sys.stderr,
         )
         return 1
@@ -839,7 +1093,8 @@ def main(argv: list[str] | None = None) -> int:
     ok_message = (
         f"UI vocabulary contract OK: scanned {len(files)} frontend production files + "
         f"{marked_sites} backend {USER_ERROR}() messages + "
-        f"{trace_sites} trace summaries "
+        f"{trace_sites} trace summaries + "
+        f"{display_sites} display fields "
         f"({len(CJK_TERMS) + len(ASCII_TERMS)} blacklisted terms)"
     )
     if extra_roots:

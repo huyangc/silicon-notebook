@@ -24,8 +24,8 @@ def register(payload: AuthRequest) -> AuthResult:
         if str(exc) == "local_auth_disabled":
             raise user_error(403, "已启用统一认证，请使用统一认证登录") from None
         # 两个分支都是写给用户的中文文案（异常原文只用来分类，不外泄），
-        # 所以同样带出处标记。AST 扫描只认字面量 detail，这处是变量间接
-        # 引用，需要手工登记。
+        # 所以同样带出处标记。词表守卫会顺着变量解析到条件表达式的两个分支，
+        # 两句都在扫描面内。
         detail = "用户名已被占用" if "exists" in str(exc) else "用户名不合法"
         raise user_error(400, detail)
     return AuthResult(token=token, user=user)

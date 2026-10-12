@@ -6936,7 +6936,7 @@ class ReasoningRetriever:
         # 不再是「拿全局唯一 base 的一个 id」。source 一旦被某个库以
         # comention(共提,高精度路径)命中就不再被后续库的 community
         # (社区回退)覆盖——sticky-prefer comention,避免把已发生的高精度
-        # 贡献在展示文案上错误降级成「同社区实体」。单库场景(循环只跑
+        # 贡献在展示文案上错误降级成「同主题板块实体」。单库场景(循环只跑
         # 一轮)与改前逐字等价。
         peers, peer_source = [], "community"
         try:

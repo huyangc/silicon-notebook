@@ -72,24 +72,33 @@
 内容的一部分，不是本文件登记的界面文案（JSX 文本、`label`、`title`、`placeholder`、
 `aria-label`、toast、错误、表头）；它们各自的界面呈现名是「推断」与「通识」。前端渲染层只把
 这几种句首/段首前缀包成不可点的行内标签样式，不改写、不新增文本内容，复制结果不变。
-`scripts/check_ui_vocabulary.py` 的黑名单扫描面是渲染进前端源码的固定文案与后端
-`user_error()` 消息字面量，不覆盖模型生成的答案正文，因此这两个标记不登记进「界面词汇表」，
-也不需要 `NOT_LINTABLE` 豁免理由。
+`scripts/check_ui_vocabulary.py` 的黑名单扫描面是渲染进前端源码的固定文案，以及后端写、
+前端原样展示的文案（`user_error()` 消息、推理轨迹摘要、登记的展示字段），不覆盖模型生成的
+答案正文，因此这两个标记不登记进「界面词汇表」，也不需要 `NOT_LINTABLE` 豁免理由。
 
 ## 自动守卫边界
 
 `scripts/check_ui_vocabulary.py` 由 `scripts/check.sh` 执行。守卫作用域跟着信任边界走，
 不跟着目录树走：它既扫描 `frontend/app` 与 `frontend/features` 的渲染文本，也扫描后端
-`user_error(status, "…")` 的消息字面量，因为这类 4xx `detail` 会被明确标为可展示并由
-前端原样呈现。裸 `HTTPException(detail=str(exc))` 刻意不在扫描面内；它是内部诊断 / MCP
+`user_error(status, "…")` 的消息，因为这类 4xx `detail` 会被明确标为可展示并由
+前端原样呈现；推理轨迹摘要同理。裸 `HTTPException(detail=str(exc))` 刻意不在扫描面内；它是内部诊断 / MCP
 合同，不会直接上屏。
 
-后端 `user_error()` 消息与推理轨迹摘要（`TRACE_SUMMARY_MODULES` 登记模块里的
-`TraceStep(summary=…)`）两条通道不要求调用点写字面量：先赋给变量（同函数赋值、再模块常量）、
+后端写、前端原样展示的另一类文案是**登记的展示字段**：索引管线选项的
+`IndexingPipelineOption(label=…, description=…)`，以及知识图谱分析作业的失败文案
+（`….kg_build_jobs.finish/set_stage(…, error_message=…)`，经 `KgBuildJobStatus.user_message`
+弹出）。它们按调用形状显式登记（`DISPLAY_FIELD_CALLS` / `DISPLAY_FIELD_METHODS`），不按 kwarg
+名泛扫——别处的 `error_message=` 多是不上屏的诊断原文。新增一种会原样上屏的后端字段时，把它
+的形状登记进去。
+
+后端 `user_error()` 消息、推理轨迹摘要（`TRACE_SUMMARY_MODULES` 登记模块里的
+`TraceStep(summary=…)`）与展示字段三条通道不要求调用点写字面量：先赋给变量（按作用域查所在
+函数及外层函数的赋值，再查模块常量）、
 条件表达式（两个分支各算一条）、`+` 拼接、`%` / `.format`、`X.get(k, 默认)` 与本模块 helper
 的 `return` 都会被解析后检查；`str(exc)`、异常属性、跨模块导入的常量等静态解析不了的仍跳过。
-这两条通道在匹配前剥掉全大写下划线的环境变量名（如 `SILICON_NOTEBOOK_AUTH_OPTIONAL`），裸
-`notebook`、裸 `KG` 照报。
+这三条通道在匹配前剥掉部署实际读取的环境变量名（从 `backend/app/core/config.py` 推出，如
+`SILICON_NOTEBOOK_AUTH_OPTIONAL`）；裸 `notebook`、裸 `KG`，以及 `KG_NOT_READY` 这类不是部署
+配置键的全大写内部码照报。
 
 守卫是词黑名单，不是完整语义检查；它会剥离注释、标识符和插值，新增界面文案仍须人工
 对照本表。`frontend/tests/guards/raw-enum-fallback.test.mjs` 另行禁止把未知枚举原值直接
