@@ -710,6 +710,12 @@ def scan_fields(tmp_path: pathlib.Path, code: str, *, store_module: bool = False
         'kg_build_jobs.finish(job_id, "failed", error_message=f"{n} 个来源抽取失败")',
         # set_stage 写的是同一列
         'self._runtime.kg_build_jobs.set_stage(job_id, "stopping", error_message="建图中断")',
+        # 接收者经一跳别名
+        'def f(r):\n    jobs = r.kg_build_jobs\n'
+        '    jobs.finish(job_id, "failed", error_message="知识抽取失败")',
+        # 启动兜底的 SQL 字面量(相邻字符串在解析期就并成一个)
+        '_write("UPDATE kg_build_jobs SET status=\'failed\', "\n'
+        '       "error_message=\'服务重启导致本次抽取中断\', updated_at=? WHERE status=\'running\'")',
     ],
 )
 def test_展示字段里的黑话会被抓到(tmp_path, code):
@@ -727,10 +733,34 @@ def test_展示字段里的黑话会被抓到(tmp_path, code):
         # 登记形状之外的 kwarg
         'self.kg_build_jobs.finish(job_id, "failed", error_code="抽取失败")',
         'IndexingPipelineOption(pipeline_id="抽取")',
+        # 别名指向的不是 kg_build_jobs
+        'def f(r):\n    jobs = r.notebook_delete_jobs\n'
+        '    jobs.finish(job_id, "failed", error_message="抽取失败")',
+        # 已知边界:**kwargs 展开静态解析不了,刻意跳过
+        'self.kg_build_jobs.finish(job_id, "failed", **{"error_message": "抽取失败"})',
+        # 别的表的 SQL 字面量、占位符写法都不是作业表的展示文案
+        '_write("UPDATE sources SET error_message=\'抽取失败\' WHERE id=?")',
+        '_write("UPDATE kg_build_jobs SET error_message=? WHERE id=?", ("抽取失败", 1))',
     ],
 )
 def test_不在展示字段登记表上的写入不误报(tmp_path, code):
     assert scan_fields(tmp_path, code) == [], f"误报:{code}"
+
+
+def fields_sites(tmp_path: pathlib.Path, code: str) -> int:
+    path = tmp_path / "fields_sites.py"
+    path.write_text(code, encoding="utf-8")
+    return guard.scan_display_fields(path)[0]
+
+
+def test_展示字段只计可解析站点(tmp_path):
+    """同轨迹通道:非空性下限的分子只计能解析出文案的站点。"""
+    assert fields_sites(
+        tmp_path, 'self.kg_build_jobs.finish(j, "failed", error_message="分析已中断")'
+    ) == 1
+    assert fields_sites(
+        tmp_path, 'self.kg_build_jobs.finish(j, "failed", error_message=str(exc))'
+    ) == 0
 
 
 def test_作业存储模块内的_self_finish_也算展示字段(tmp_path):

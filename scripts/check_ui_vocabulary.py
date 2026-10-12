@@ -92,6 +92,7 @@ import argparse
 import ast
 import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -157,6 +158,14 @@ GRANDFATHERED_TRACE_SUMMARIES = frozenset({
 #     失败文案,经 `KgBuildJobStatus.user_message` 由前端终态提示原样弹出。
 #   * `self.finish(…, error_message=…)`:同一张表在作业存储内部的写入
 #     (`fail_submission`),只在 KG_BUILD_JOB_STORE_MODULES 里认。
+#   * 接收者是名字时再看一跳别名:`jobs = r.kg_build_jobs; jobs.finish(…)` 同样认。
+#   * SQL 字面量 `UPDATE kg_build_jobs SET … error_message='…'`:启动兜底把残留的
+#     running 作业落成 failed(sqlite/migrations.py、postgres/maintenance.py),这句
+#     同样经 user_message 上屏(`KG_BUILD_JOB_SQL_MESSAGE`)。
+#
+# 已知边界:`finish` / `set_stage` 的 error_message 是**仅限关键字**参数(两端存储
+# 签名里在 `*` 之后),位置参数传不进来,所以不按位置定位;`**kwargs` 展开、多于一跳
+# 的别名与跨模块传入的接收者静态解析不了,刻意跳过(与其它通道「解析不了就不查」一致)。
 #
 # 扫描面是本仓库 backend/app 全部(按 ROOT 写死,理由同 TRACE_SUMMARY_MODULES);
 # DISPLAY_FIELD_ANCHOR_MODULES 是这几种形状现有出处的存在性哨兵,搬家/改名时一起改。
@@ -182,6 +191,14 @@ DISPLAY_FIELD_ANCHOR_MODULES = (
     ROOT / "backend" / "app" / "services" / "notebook_catalog.py",
     ROOT / "backend" / "app" / "services" / "knowledge_lifecycle.py",
     *KG_BUILD_JOB_STORE_MODULES,
+    ROOT / "backend" / "app" / "repositories" / "sqlite" / "migrations.py",
+    ROOT / "backend" / "app" / "repositories" / "postgres" / "maintenance.py",
+)
+# SQL 字面量里写进作业表的展示文案。只认 `error_message='…'` 这种直接写死的值;
+# 占位符(`error_message=?` / `%s`)的值来自调用方,由上面的调用形状覆盖。
+KG_BUILD_JOB_SQL_MESSAGE = re.compile(
+    r"UPDATE\s+kg_build_jobs\s+SET\b[^;]*?\berror_message\s*=\s*'((?:[^']|'')*)'",
+    re.IGNORECASE,
 )
 # 非空性下限(可解析站点)。2026-10 实测见 test_ui_vocabulary_guard 的真实扫描用例。
 MIN_DISPLAY_FIELD_SITES = 10
@@ -755,7 +772,20 @@ def _scan_backend_tree(
     # 绝大多数后端文件两种站点都没有:解析器(要建整棵树的父节点表)按需才建。
     resolver: _IndirectCopy | None = None
     ue_sites, ue_hits, field_sites, field_hits = 0, set(), 0, set()
+    def get_resolver() -> _IndirectCopy:
+        nonlocal resolver
+        resolver = resolver or _IndirectCopy(tree)
+        return resolver
+
     for node in ast.walk(tree):
+        if (display and isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and "kg_build_jobs" in node.value):
+            for match in KG_BUILD_JOB_SQL_MESSAGE.finditer(node.value):
+                field_sites += 1
+                text = match.group(1).replace("''", "'")
+                for term in _backend_terms_in(text):
+                    field_hits.add((node.lineno, term, text))
+            continue
         if not isinstance(node, ast.Call):
             continue
         # `user_error(...)` 与 `deps.user_error(...)` 都要认。
@@ -768,7 +798,7 @@ def _scan_backend_tree(
             for text in resolver.units(message):
                 for term in _backend_terms_in(text):
                     ue_hits.add((node.lineno, term, text))
-        fields = _display_field_kwargs(node, store_module) if display else ()
+        fields = _display_field_kwargs(node, store_module, get_resolver) if display else ()
         if not fields:
             continue
         resolver = resolver or _IndirectCopy(tree)
@@ -844,15 +874,26 @@ def _receiver_tail(node: ast.expr) -> str | None:
     return None
 
 
-def _display_field_kwargs(node: ast.Call, store_module: bool) -> tuple[str, ...]:
+_DISPLAY_METHOD_NAMES = frozenset(
+    name for methods in DISPLAY_FIELD_METHODS.values() for name in methods
+)
+
+
+def _display_field_kwargs(
+    node: ast.Call, store_module: bool, resolver: Callable[[], _IndirectCopy],
+) -> tuple[str, ...]:
     func = node.func
     if isinstance(func, ast.Name):
         return DISPLAY_FIELD_CALLS.get(func.id, ())
-    if not isinstance(func, ast.Attribute):
+    if not isinstance(func, ast.Attribute) or func.attr not in _DISPLAY_METHOD_NAMES:
         return ()
     tail = _receiver_tail(func.value)
     if store_module and tail == "self":
         tail = "kg_build_jobs"
+    if tail not in DISPLAY_FIELD_METHODS and isinstance(func.value, ast.Name):
+        # 一跳别名:`jobs = self.kg_build_jobs; jobs.finish(…)`。
+        aliased = {_receiver_tail(v) for v in resolver()._name_values(func.value)}
+        tail = next((t for t in aliased if t in DISPLAY_FIELD_METHODS), tail)
     return DISPLAY_FIELD_METHODS.get(tail or "", {}).get(func.attr, ())
 
 
