@@ -173,7 +173,7 @@ def public_report_payload(
 
     ``failed_errors`` are the stored raw errors of the failed sections, used
     only to rewrite their notes in a body stored before notes went neutral.
-    ``None`` is the token read's finding that the body carries no failure note
+    ``None`` is the token read's finding that the body carries no raw failure note
     (``public_report_by_token``), so the body is served without a second scan.
     """
     visible = [

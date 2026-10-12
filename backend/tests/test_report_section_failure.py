@@ -108,14 +108,32 @@ def test_failed_section_rows_normalise_both_dialects():
 
 
 def test_both_store_gates_look_for_the_note_this_module_writes():
-    """The token read decides whether a body carries a failure note (and the
-    projection then trusts it); a store gate drifting from the generator's
-    prefix would serve a stored raw note unrewritten."""
+    """The token read decides whether a body still carries a raw failure note
+    (and the projection then trusts a ``None``). Both stores gate on the one
+    predicate, and it reads a body exactly as the generator writes it: every
+    neutral sentence -- what every report since K5 carries -- passes for
+    free; a raw note, alone or mixed with neutral ones, is read."""
+    from app.domain import report_failure_note
     from app.repositories.postgres import report_store as postgres_store
     from app.repositories.sqlite import report_store as sqlite_store
-    from app.services.reports import section_failure
 
-    paragraph = section_failure_paragraph("x")
     for store in (postgres_store, sqlite_store):
-        assert store._FAILURE_NOTE_PREFIX == section_failure._NOTE_PREFIX
-        assert paragraph.startswith(store._FAILURE_NOTE_PREFIX)
+        assert store.carries_raw_failure_note is (
+            report_failure_note.carries_raw_failure_note
+        )
+    gate = report_failure_note.carries_raw_failure_note
+
+    neutral_body = "# 报告\n\n" + "\n".join(
+        _section(f"S{i}", copy) for i, copy in enumerate(SECTION_FAILURE_COPY.values())
+    ) + "\n## Z\n\n正文\n"
+    assert not gate("# 报告\n\n## A\n\n正文\n")
+    assert not gate(neutral_body)
+    # The generator's own paragraph, also as the very end of a body.
+    assert not gate(f"## A\n\n{section_failure_paragraph('x')}")
+    assert gate(neutral_body + _section("R", "OperationalError: 10.9.8.7"))
+    assert gate(_section("R", "boom") + "\n" + neutral_body)
+    # A raw error that merely starts with a neutral sentence is still raw.
+    assert gate(_section("R", f"{_INTERNAL}）secret"))
+    assert gate(_section("R", ""))
+    # The projection takes the same view: neutral bodies pass untouched.
+    assert neutralize_failure_notes(neutral_body, ["x"]) is neutral_body

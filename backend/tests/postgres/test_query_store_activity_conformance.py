@@ -740,6 +740,37 @@ def test_report_overview_follows_submitter_like_question_overview(
         } == retained, label
 
 
+def test_guarded_report_detail_runs_the_failed_sections_select_for_admins_only_postgres(
+    postgres_database, store, monkeypatch,
+):
+    """Mirror of the SQLite case: the subquery is spliced in only on the
+    administrator's read; a self-service read selects a constant."""
+    from app.repositories.postgres import report_store
+    from app.repositories.postgres.report_store import ReportStore
+
+    with postgres_database.write() as connection:
+        _seed_report_scope_rows(connection)
+    sentinel = [{"index": 9, "title": "sentinel", "error": "subquery ran"}]
+    monkeypatch.setattr(
+        report_store, "_FAILED_SECTIONS_SQL",
+        "'" + json.dumps(sentinel, ensure_ascii=False) + "'::jsonb",
+    )
+    reports = ReportStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: NOW.isoformat(),
+        current_user_id=lambda: "u1",
+    )
+    with reports.guarded_report_detail(
+        "rep-shared", actor_id="u1", reader_id="u1"
+    ) as snapshot:
+        assert snapshot["section_errors"] == []
+    with reports.guarded_report_detail(
+        "rep-shared", actor_id="u1", reader_id=None
+    ) as snapshot:
+        assert snapshot["section_errors"] == sentinel
+
+
 def test_guarded_report_detail_live_revoked_and_retained_states_postgres(
     postgres_database, store
 ):
@@ -785,7 +816,9 @@ def test_guarded_report_detail_live_revoked_and_retained_states_postgres(
         "error": "",
         "content_md": "# 共享库报告正文",
         "references": references,
-        "section_errors": REPORT_SECTION_FAILURE_EXPECTED,
+        # A self-service read never parses the sections; the administrator's
+        # read below gets them.
+        "section_errors": [],
         "notebook_name": "NB-n2",
         "notebook_deleted_at": "",
         "retained_until": "",
@@ -810,6 +843,7 @@ def test_guarded_report_detail_live_revoked_and_retained_states_postgres(
         "rep-shared", actor_id="u1", reader_id=None
     ) as snapshot:
         assert snapshot["content_md"] == "# 共享库报告正文"
+        assert snapshot["section_errors"] == REPORT_SECTION_FAILURE_EXPECTED
 
     _delete_notebook_now(postgres_database, "n2")
     with pytest.raises(KeyError):

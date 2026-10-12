@@ -23,25 +23,16 @@ from __future__ import annotations
 
 import json
 import re
-from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
+from app.domain.report_failure_note import (
+    NOTE_PREFIX as _NOTE_PREFIX,
+    NOTE_SUFFIX as _NOTE_SUFFIX,
+    SECTION_FAILURE_COPY,
+    carries_raw_failure_note,
+)
 
-#: Per failure class, what the section note says. Only the empty class keeps
-#: its historical budget hint; the others state what happened, and the reason
-#: code goes to an event, not the copy. ``internal`` covers every failure that
-#: is not a model reply -- retrieval or drafting raising -- whose raw text is
-#: kept for the author in ``sections[].error`` only.
-SECTION_FAILURE_COPY = MappingProxyType({
-    "empty": "答案合成未产出内容(模型可能把输出预算耗在思维链上),已重试",
-    "malformed": "模型返回的本节内容无法解析,已重试",
-    "error": "本节模型调用失败,已重试",
-    "internal": "本节处理过程出错",
-})
 _NEUTRAL_NOTES = frozenset(SECTION_FAILURE_COPY.values())
-
-_NOTE_PREFIX = "（本节生成失败:"
-_NOTE_SUFFIX = "）"
 # ``_assemble`` writes a failed section as the three lines
 # ``## <title>`` / blank / ``（本节生成失败:<error>）`` followed by a blank line
 # (or the end of the body), with ``<error>`` cut to 300 characters by the
@@ -77,9 +68,10 @@ def neutralize_failure_notes(
     Longest first, so an error that is a prefix of another cannot cut the
     longer note short. The paragraph pattern then runs as the fallback for a
     body whose sections carry no usable error; on an already-neutral note it
-    is a no-op.
+    is a no-op, so a body whose notes are all neutral is returned untouched
+    without either pass (``carries_raw_failure_note``, the stores' gate too).
     """
-    if _NOTE_PREFIX not in content_md:
+    if not carries_raw_failure_note(content_md):
         return content_md
     for error in sorted(set(failed_errors or ()), key=len, reverse=True):
         content_md = content_md.replace(
@@ -124,6 +116,7 @@ def failed_section_errors(value: object) -> list[dict[str, Any]]:
 
 __all__ = [
     "SECTION_FAILURE_COPY",
+    "carries_raw_failure_note",
     "failed_section_errors",
     "neutralize_failure_notes",
     "section_failure_note",
