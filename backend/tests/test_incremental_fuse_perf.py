@@ -220,7 +220,7 @@ def test_cluster_map_refreshes_after_append_clusters(repo):
                     "src-A", _now(), _now()))
     before = repo.cluster_map(nb.id)   # warm the cache on the empty state
     assert before == {}
-    repo.append_clusters(nb.id, [{"canonical_id": "K-x", "member_object_id": "ko-1",
+    repo._runtime.knowledge_lifecycle.append_clusters(nb.id, [{"canonical_id": "K-x", "member_object_id": "ko-1",
                                    "canonical_name": "X"}], object_type="concept")
     after = repo.cluster_map(nb.id)    # append_clusters must have invalidated itself
     assert after == {"ko-1": "K-x"} == _oracle_cluster_map(repo, nb.id)
@@ -229,11 +229,11 @@ def test_cluster_map_refreshes_after_append_clusters(repo):
 def test_cluster_map_refreshes_after_write_clusters(repo):
     """write_clusters self-invalidates too (same-second DELETE+INSERT hazard)."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo.write_clusters(nb.id, [{"canonical_id": "K-a", "member_object_id": "o1",
+    repo._runtime.knowledge_lifecycle.write_clusters(nb.id, [{"canonical_id": "K-a", "member_object_id": "o1",
                                   "canonical_name": "A"}])
     before = repo.cluster_map(nb.id)   # warm the cache
     assert before == {"o1": "K-a"}
-    repo.write_clusters(nb.id, [{"canonical_id": "K-b", "member_object_id": "o2",
+    repo._runtime.knowledge_lifecycle.write_clusters(nb.id, [{"canonical_id": "K-b", "member_object_id": "o2",
                                   "canonical_name": "B"}])
     after = repo.cluster_map(nb.id)    # write_clusters must have invalidated itself
     assert after == {"o2": "K-b"} == _oracle_cluster_map(repo, nb.id)
@@ -377,7 +377,7 @@ def test_incremental_fuse_source_loads_cluster_map_once_in_the_bruteforce_branch
                     "approved", "", json.dumps({"name": "New procedure", "steps": []}), "[]",
                     "src-B", now, now))
     calls = _loader_spy(repo, monkeypatch)
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
     assert calls["n"] == 1   # exactly the brute-force branch's single range read
 
 
@@ -402,7 +402,7 @@ def test_incremental_fuse_source_result_matches_oracle(repo):
                    "payload,evidence,source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                    ("ko-B", nb.id, "concept", "approved", "",
                     json.dumps({"name": "Mixture-of-Experts (MoE)"}), "[]", "src-B", now, now))
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
     got = repo.cluster_map(nb.id)
     want = _oracle_cluster_map(repo, nb.id)
     assert got == want

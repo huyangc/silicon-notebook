@@ -583,9 +583,8 @@ class RepositoryFacade:
                 repository_ref
             ).cluster_map(notebook_id),
             incremental_fuse_source=lambda notebook_id, source_id: (
-                _repository_from_weakref(repository_ref).incremental_fuse_source(
-                    notebook_id, source_id
-                )
+                _repository_from_weakref(repository_ref)._runtime
+                .knowledge_lifecycle.incremental_fuse_source(notebook_id, source_id)
             ),
             invalidate_scale_cache=lambda notebook_id: scale_idx_cache.pop(
                 notebook_id, None
@@ -2510,28 +2509,6 @@ class RepositoryFacade:
 
     # --- Concept-cluster / merge-candidate CRUD (Task 5) -------------------
 
-    def write_clusters(self, notebook_id: str, rows: List[dict],
-                       object_type: str = "concept") -> None:
-        """concept_clusters 全量重写 — KnowledgeLifecycleService owns the
-        orchestration (Task 15; replace + cluster-seq bump stay ONE commit)."""
-        return self._runtime.knowledge_lifecycle.write_clusters(
-            notebook_id, rows, object_type
-        )
-
-    def append_clusters(self, notebook_id: str, rows: list, object_type: str = "concept") -> int:
-        """追加写 concept_clusters — KnowledgeLifecycleService owns the
-        orchestration (Task 15; append + bump one commit, invalidate 仅在新增)。"""
-        return self._runtime.knowledge_lifecycle.append_clusters(
-            notebook_id, rows, object_type
-        )
-
-    def incremental_fuse_source(self, notebook_id: str, source_id: str) -> None:
-        """上传后增量融合该源 concept 进 concept_clusters — KnowledgeLifecycleService
-        owns the orchestration (Task 15; Tier1 名种子 append + Tier2 向量桥不变)。"""
-        return self._runtime.knowledge_lifecycle.incremental_fuse_source(
-            notebook_id, source_id
-        )
-
     def _tier2_bridge_candidates_ann(self, notebook_id: str, idx, ann,
                                      new_objs: list,
                                      frozen_canonical: Dict[str, str]) -> list:
@@ -2933,30 +2910,6 @@ class RepositoryFacade:
         return self._runtime.knowledge_lifecycle.fail_kg_delete_submission(
             notebook_id, job_id
         )
-
-    def rebuild_canonical_relations(self, notebook_id: str, force: bool = False) -> int:
-        """canonical_relations 全量重写(seq 闸) — KnowledgeLifecycleService owns
-        the orchestration (Task 15); frozen-signature delegate."""
-        return self._runtime.knowledge_lifecycle.rebuild_canonical_relations(
-            notebook_id, force
-        )
-
-    def rebuild_mention_bridge(self, notebook_id: str, force: bool = False) -> int:
-        """mention_edges/concept_comentions 全量重写(seq 闸) —
-        KnowledgeLifecycleService owns the orchestration (Task 15)."""
-        return self._runtime.knowledge_lifecycle.rebuild_mention_bridge(
-            notebook_id, force
-        )
-
-    def rebuild_communities(self, notebook_id: str, level: int = 0, force: bool = False) -> int:
-        """canonical 图 Louvain 社区检测(版本闸) — KnowledgeLifecycleService owns
-        the orchestration (Task 15); frozen-signature delegate."""
-        return self._runtime.knowledge_lifecycle.rebuild_communities(
-            notebook_id, level, force
-        )
-    def list_communities(self, notebook_id: str, level: int = 0) -> List[List[str]]:
-        """Member-id lists of each detected community — lifecycle-owned (Task 15)."""
-        return self._runtime.knowledge_lifecycle.list_communities(notebook_id, level)
 
     def concept_detail(
         self,

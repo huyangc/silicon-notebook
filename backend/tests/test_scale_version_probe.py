@@ -35,7 +35,7 @@ def _cseq(repo, nb):
 def test_write_clusters_bumps_cseq(repo_factory):
     repo, nb = repo_factory()
     before = _cseq(repo, nb)
-    repo.write_clusters(nb, [{"canonical_id": "c1", "member_object_id": "o1",
+    repo._runtime.knowledge_lifecycle.write_clusters(nb, [{"canonical_id": "c1", "member_object_id": "o1",
                               "canonical_name": "N"}])
     assert _cseq(repo, nb) > before
 
@@ -43,7 +43,7 @@ def test_write_clusters_bumps_cseq(repo_factory):
 def test_append_clusters_bumps_cseq(repo_factory):
     repo, nb = repo_factory()
     before = _cseq(repo, nb)
-    repo.append_clusters(nb, [{"canonical_id": "c2", "member_object_id": "o2",
+    repo._runtime.knowledge_lifecycle.append_clusters(nb, [{"canonical_id": "c2", "member_object_id": "o2",
                                "canonical_name": "M"}])
     assert _cseq(repo, nb) > before
 
@@ -52,7 +52,7 @@ def test_version_changes_after_cluster_write(repo_factory):
     """写 clusters 后 version key 必须变化(memo 失效→冷路径重算 COUNT/MAX)。"""
     repo, nb = repo_factory()
     v1 = repo._scale_index_version(nb)
-    repo.write_clusters(nb, [{"canonical_id": "c1", "member_object_id": "o1",
+    repo._runtime.knowledge_lifecycle.write_clusters(nb, [{"canonical_id": "c1", "member_object_id": "o1",
                               "canonical_name": "N"}])
     v2 = repo._scale_index_version(nb)
     assert v1 != v2

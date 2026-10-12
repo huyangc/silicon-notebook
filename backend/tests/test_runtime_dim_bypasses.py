@@ -121,7 +121,7 @@ def test_tier2_bruteforce_bridges_in_runtime_space(repo, monkeypatch):
     # 异维残留(旧 embedder,8 维)必须被存储维门挡在截断之前
     _insert_ko(repo, nb.id, "alien", "Alien Residue", source_id="s_old")
     _insert_kvec(repo, nb.id, "alien", [0.5] * 8)
-    repo.append_clusters(nb.id, [{"canonical_id": "K-bandgapvoltagereference",
+    repo._runtime.knowledge_lifecycle.append_clusters(nb.id, [{"canonical_id": "K-bandgapvoltagereference",
                                   "member_object_id": "eo1",
                                   "canonical_name": "Bandgap Voltage Reference"}])
 
@@ -135,7 +135,7 @@ def test_tier2_bruteforce_bridges_in_runtime_space(repo, monkeypatch):
         return orig(new_items, new_vectors, existing_items, existing_vectors, *a, **kw)
 
     monkeypatch.setattr(kg_merge, "detect_bridge_candidates", spy)
-    repo.incremental_fuse_source(nb.id, "s_new")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "s_new")
 
     assert captured, "Tier2 暴力分支未被执行(前置条件被破坏)"
     assert captured["new_dims"] == {"no1": 16}

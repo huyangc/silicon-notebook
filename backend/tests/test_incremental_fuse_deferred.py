@@ -41,7 +41,7 @@ def test_deferred_pair_not_reproposed_on_new_source(repo):
                        (oid, nb.id, vec, now))
 
     # 首次融合:桥接候选正常入队为 pending。
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
     with repo._connect() as db:
         rows = db.execute(
             "SELECT id, canonical_a, canonical_b, status FROM concept_merge_candidates WHERE notebook_id=?",
@@ -56,7 +56,7 @@ def test_deferred_pair_not_reproposed_on_new_source(repo):
         db.execute("UPDATE concept_merge_candidates SET status='deferred' WHERE id=?", (cand["id"],))
 
     # 新源上传再次触发增量融合(模拟又一篇引用同名概念的新文档)。
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
 
     with repo._connect() as db:
         all_rows = db.execute(

@@ -400,7 +400,7 @@ def test_write_clusters_bumps_cluster_seq_in_the_replace_transaction(
     _spy_coordinator(repo, monkeypatch, events)
     _spy_cluster_seq(repo, monkeypatch, events)
 
-    repo.write_clusters(notebook_id, [{
+    repo._runtime.knowledge_lifecycle.write_clusters(notebook_id, [{
         "canonical_id": "K-1",
         "member_object_id": object_ids[0],
         "canonical_name": "claim a",
@@ -423,11 +423,11 @@ def test_append_clusters_only_invalidates_when_rows_were_added(repo, monkeypatch
     _spy_coordinator(repo, monkeypatch, events)
     _spy_cluster_seq(repo, monkeypatch, events)
 
-    assert repo.append_clusters(notebook_id, rows) == 1
+    assert repo._runtime.knowledge_lifecycle.append_clusters(notebook_id, rows) == 1
     assert events == ["write.begin", "cluster_seq", "write.commit", "invalidate"]
 
     events.clear()
-    assert repo.append_clusters(notebook_id, rows) == 0  # idempotent no-op
+    assert repo._runtime.knowledge_lifecycle.append_clusters(notebook_id, rows) == 0  # idempotent no-op
     assert events == ["write.begin", "write.commit"]  # no bump, no invalidate
 
 
@@ -1045,7 +1045,7 @@ def test_canonical_relation_stream_and_rewrite_delegate_without_materializing(re
         monkeypatch, runtime.unified_kg, "replace_canonical_relations", events
     )
 
-    count = getattr(repo, "rebuild_canonical_relations")(notebook_id, force=True)
+    count = repo._runtime.knowledge_lifecycle.rebuild_canonical_relations(notebook_id, force=True)
 
     assert [event[0] for event in events] == [
         "canonical_relation_seed_rows", "write.begin",

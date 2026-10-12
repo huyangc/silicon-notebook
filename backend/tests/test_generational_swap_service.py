@@ -249,7 +249,7 @@ def test_a_preempted_community_writer_aborts_before_writing(repo, monkeypatch):
             "SELECT COUNT(*) AS c FROM communities WHERE notebook_id=?",
             (nb.id,)).fetchone()["c"]
     with pytest.raises(KgDerivedGenerationPreempted):
-        repo.rebuild_communities(nb.id, force=True)
+        repo._runtime.knowledge_lifecycle.rebuild_communities(nb.id, force=True)
     stages = [e["stage"] for e in events
               if e.get("kind") == "kg_generation_preempted"]
     assert stages == ["community_write"], stages

@@ -76,15 +76,15 @@ def test_df_cap_drops_generic_alias(repo):
     nb = _seed_bridge_nb(repo)
     repo.settings.mention_alias_df_floor = 0      # 关掉绝对下限,让比例门生效
     repo.settings.mention_alias_df_cap = 0.0001   # 人为压到全部超限
-    assert repo.rebuild_mention_bridge(nb.id, force=True) == 0
+    assert repo._runtime.knowledge_lifecycle.rebuild_mention_bridge(nb.id, force=True) == 0
 
 
 def test_seq_gate_and_flag(repo):
     nb = _seed_bridge_nb(repo)
-    n1 = repo.rebuild_mention_bridge(nb.id)       # 未变 → 跳过,返回现有行数
+    n1 = repo._runtime.knowledge_lifecycle.rebuild_mention_bridge(nb.id)       # 未变 → 跳过,返回现有行数
     assert n1 >= 5
     repo.settings.mention_bridge_enabled = False
-    assert repo.rebuild_mention_bridge(nb.id, force=True) == 0   # flag 关 → 清空/不建
+    assert repo._runtime.knowledge_lifecycle.rebuild_mention_bridge(nb.id, force=True) == 0   # flag 关 → 清空/不建
 
 
 # --------------------------------------------------------------------------- #
@@ -194,7 +194,7 @@ def test_mention_temp_fts_delegates_on_one_private_connection(repo, monkeypatch)
 
     monkeypatch.setattr(store, "mention_alias_candidate_batches", traced_batches)
 
-    count = getattr(repo, "rebuild_mention_bridge")(nb.id, force=True)
+    count = repo._runtime.knowledge_lifecycle.rebuild_mention_bridge(nb.id, force=True)
 
     assert count >= 5
     names = [name for name, _db, _args in events]
@@ -358,7 +358,7 @@ def test_comention_claim_skip_is_reported_as_a_countonly_event(repo):
     try:
         runtime.knowledge_lifecycle.event_log.emit = (
             lambda payload: events.append(dict(payload)) or original(payload))
-        repo.rebuild_mention_bridge(nb.id, force=True)
+        repo._runtime.knowledge_lifecycle.rebuild_mention_bridge(nb.id, force=True)
     finally:
         runtime.knowledge_lifecycle.event_log.emit = original
     skipped = [e for e in events if e["kind"] == "mention_comention_claim_skipped"]

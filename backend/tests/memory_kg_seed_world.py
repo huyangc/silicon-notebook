@@ -292,9 +292,9 @@ def assert_legacy_memory_endpoints_stay_out(repo) -> None:
                           "created_at) VALUES (?, ?, 's2', ?, ?, 'depends_on', '[]', ?)"),
                 (rel_id, nb_id, source, target, NOW),
             )
-    repo.rebuild_canonical_relations(nb_id, force=True)
+    repo._runtime.knowledge_lifecycle.rebuild_canonical_relations(nb_id, force=True)
     assert _canonical_rows(repo, nb_id) == before
-    repo.rebuild_communities(nb_id, force=True)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(nb_id, force=True)
     ids = memory_object_ids(repo, nb_id)
     members = rows(repo, "SELECT canonical_id, canonical_name FROM community_members "
                          "WHERE notebook_id=?", (nb_id,))
@@ -331,7 +331,7 @@ def assert_memory_builds_no_mention_bridge(repo) -> None:
                         memory["Multi-Query Attention (MQA)"],
                         "Multi-Query Attention (MQA)",
                         _published_cluster_generation(repo, nb_id))
-    repo.rebuild_mention_bridge(nb_id, force=True)
+    repo._runtime.knowledge_lifecycle.rebuild_mention_bridge(nb_id, force=True)
     assert _bridge(repo, nb_id) == expected
     with repo._connect() as db:
         clusters, claims = repo._runtime.unified_kg.mention_seed_rows(db, nb_id)
@@ -368,7 +368,7 @@ def assert_analysis_readers_skip_legacy_memory_rows(repo) -> None:
     all_relations = rows(repo, "SELECT COUNT(*) AS n FROM knowledge_relations "
                                "WHERE notebook_id=?", (nb_id,))[0]["n"]
     assert int(all_relations) == 4
-    repo.rebuild_communities(nb_id, force=True)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(nb_id, force=True)
     blob = json.dumps([_text(r["payload"]) for r in derived_layers(repo, nb_id)["artifacts"]]
                       ).lower()
     assert "cluster_size_histogram" in json.dumps(

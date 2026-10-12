@@ -76,7 +76,7 @@ def test_rejected_edges_excluded(repo):
     with repo._write() as db:
         db.execute("UPDATE knowledge_relations SET review_status='rejected' "
                    "WHERE notebook_id=? AND source_id='s2'", (nb.id,))
-    repo.rebuild_canonical_relations(nb.id, force=True)
+    repo._runtime.knowledge_lifecycle.rebuild_canonical_relations(nb.id, force=True)
     r = _canon_rows(repo, nb.id)[0]
     assert r["support_count"] == 1 and r["source_count"] == 1
 
@@ -103,8 +103,8 @@ def test_seq_gate_skips_then_force_recomputes(repo):
         seq0 = db.execute("SELECT canonical_rel_seq FROM unified_kg_state WHERE notebook_id=?",
                           (nb.id,)).fetchone()["canonical_rel_seq"]
     assert seq0 >= 0                           # rebuild 后闸已写
-    assert repo.rebuild_canonical_relations(nb.id) >= 0   # 未变 → 跳过不炸
-    assert repo.rebuild_canonical_relations(nb.id, force=True) == 1
+    assert repo._runtime.knowledge_lifecycle.rebuild_canonical_relations(nb.id) >= 0   # 未变 → 跳过不炸
+    assert repo._runtime.knowledge_lifecycle.rebuild_canonical_relations(nb.id, force=True) == 1
 
 
 def test_unified_graph_edges_carry_support(repo):
@@ -422,7 +422,7 @@ def _mk_nb_with_three_source_edge(repo):
                 "VALUES (?,?,?,?,?,'kind_of','[]','2026-01-01T00:00:00Z','pending')",
                 (f"kr-extra-{n}", nb.id, sid, a_id, b_id))
     repo.rebuild_unified_kg(nb.id)
-    repo.rebuild_canonical_relations(nb.id, force=True)
+    repo._runtime.knowledge_lifecycle.rebuild_canonical_relations(nb.id, force=True)
     return nb, a_id, b_id
 
 

@@ -210,7 +210,7 @@ def test_incremental_fuse_cjk_joins_existing_cluster(repo):
     repo.rebuild_unified_kg(nb.id)
     repo.store_kg(nb.id, "s2", [{"local_id": "Y", "object_type": "concept",
         "payload": {"name": "铸币平价", "section_path": "2"}, "evidence": []}], [])
-    repo.incremental_fuse_source(nb.id, "s2")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "s2")
     cm = repo.cluster_map(nb.id)
     vals = {cm.get(i) for i in _all_concept_ids(repo, nb.id)}
     assert vals == {"K-铸币平价"}

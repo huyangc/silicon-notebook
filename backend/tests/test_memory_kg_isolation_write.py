@@ -173,7 +173,7 @@ def test_confirmed_memory_does_not_enter_a_shared_cluster(world):
 
     assert_isolated()
     # The scale fold calls the very same method per delta source.
-    repo.incremental_fuse_source(nb, memory_source)
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb, memory_source)
     assert_isolated()
 
 

@@ -403,7 +403,7 @@ def _seed_weak(repo, nb, *, b_memory=True):
             _concept("A", "版图设计", "src-mb"), _concept("X", "SECRETPROJECT", "src-mb"),
         ], [_edge("A", "X", "src-mb")])
     repo.rebuild_unified_kg(nb)
-    repo.rebuild_canonical_relations(nb, force=True)
+    repo._runtime.knowledge_lifecycle.rebuild_canonical_relations(nb, force=True)
     if b_memory:
         _pre_isolation_memory_canonical_row(repo, nb)
     with repo._connect() as db:
@@ -582,7 +582,7 @@ def test_weak_support_binds_the_list_when_the_library_drifted(repo, monkeypatch)
         _concept("A", "版图设计", "src-late"), _concept("L", "LATEUPLOAD", "src-late"),
     ], [_edge("A", "L", "src-late")])
     repo.rebuild_unified_kg(nb)
-    repo.rebuild_canonical_relations(nb, force=True)
+    repo._runtime.knowledge_lifecycle.rebuild_canonical_relations(nb, force=True)
     spy = _Spy(repo.retrieval.candidates.unified_kg)
     monkeypatch.setattr(repo.retrieval.candidates, "unified_kg", spy)
     with _all_selected(nb, a):

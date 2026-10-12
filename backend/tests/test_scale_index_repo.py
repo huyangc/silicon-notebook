@@ -823,7 +823,7 @@ def test_scale_index_status_state_machine(repo, monkeypatch):
 
 
 @pytest.mark.parametrize("legacy_sidecar", [False, True])
-def test_fold_scale_index_delta(repo, legacy_sidecar):
+def test_fold_scale_index_delta(repo, legacy_sidecar, monkeypatch):
     """端到端 fold:水位后新增 source 经 O(delta) fold 收进现有索引 —— delta 归零、
     index 版本新鲜、ann/chunk_ann 含新 id、n_nodes 增长、新 chunk 经 ANN 可召回。"""
     import json
@@ -888,8 +888,14 @@ def test_fold_scale_index_delta(repo, legacy_sidecar):
             ("o3", nb.id, json.dumps(v), now))
     assert repo._index_delta(nb.id)["delta_chunks"] == 1
 
-    # fold —— O(delta) 增量收进索引
+    # fold —— O(delta) 增量收进索引。fold 把融合失败吞成 incremental_fuse_failed
+    # 事件后照常发布,所以「融合真的跑了」要看事件流,不能只看 fold 有没有抛。
+    fold_events = []
+    monkeypatch.setattr(repo._runtime.event_log, "emit", fold_events.append)
     repo.fold_scale_index_delta(nb.id)
+    assert not [
+        e for e in fold_events if e.get("kind") == "incremental_fuse_failed"
+    ], "fold 的融合接缝失败了(被吞成事件)"
 
     # 水位前移 → delta 清零
     d = repo._index_delta(nb.id)
@@ -947,6 +953,46 @@ def test_fold_scale_index_delta(repo, legacy_sidecar):
     assert out is not None
     scored = out[0]
     assert scored and "c2" in {c.chunk_id for c in scored}
+
+
+def test_scale_builder_fuse_seam_reaches_the_lifecycle_service(repo, monkeypatch):
+    """S2 批 C:fold 的 ``incremental_fuse_source`` 接缝(``RepositoryFacade.__init__``
+    交给 scale builder 的弱引用 lambda)直达 ``_runtime.knowledge_lifecycle``,
+    不再经过已退役的 facade 方法。fold 会把接缝抛的异常吞成
+    ``incremental_fuse_failed`` 事件,所以这里直接调用 builder 持有的回调:接缝断了
+    就在这里抛错,而不是静默跳过大库增量融合。"""
+    nb = repo.create_notebook(NotebookCreate(name="seam"))
+    with repo._write() as db:
+        now = "2026-07-01T00:00:00"
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)", ("s1", nb.id, "t", "md", "ready", now, now))
+        db.execute(
+            "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,"
+            "evidence,source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("o1", nb.id, "concept", "approved", "", json.dumps({"name": "current mirror"}),
+             "[]", "s1", now, now))
+    lifecycle = repo._runtime.knowledge_lifecycle
+    original = lifecycle.incremental_fuse_source
+    calls = []
+
+    def spy(notebook_id, source_id):
+        calls.append((notebook_id, source_id))
+        return original(notebook_id, source_id)
+
+    monkeypatch.setattr(lifecycle, "incremental_fuse_source", spy)
+    events = []
+    monkeypatch.setattr(repo._runtime.event_log, "emit", events.append)
+
+    repo._runtime.scale_builder.incremental_fuse_source(nb.id, "s1")
+
+    assert calls == [(nb.id, "s1")], "接缝必须在调用时解析到 runtime 的生命周期服务"
+    assert not [e for e in events if e.get("kind") == "incremental_fuse_failed"]
+    with repo._connect() as db:
+        members = {r["member_object_id"] for r in db.execute(
+            "SELECT member_object_id FROM concept_clusters WHERE notebook_id=?",
+            (nb.id,)).fetchall()}
+    assert "o1" in members, "真实融合应把新源的概念写进 concept_clusters"
 
 
 def test_trigger_when_and_mode(repo, monkeypatch):
