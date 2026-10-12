@@ -179,7 +179,10 @@ async def _run(args: argparse.Namespace) -> None:
             streamable_http_client(
                 args.url,
                 http_client=http,
-                terminate_on_close=False,
+                # A real network client ends its session with the protocol
+                # DELETE; skipping it leaves the server-side transport alive
+                # until the backend restarts (SOP §8).
+                terminate_on_close=True,
             )
         )
         session = await stack.enter_async_context(ClientSession(read, write))
