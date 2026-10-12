@@ -1434,3 +1434,26 @@ def test_derived_layer_gate_reopens_after_a_rebuild(repo):
         assert rt.unified_kg.relation_support_rows(
             db, nb.id, [("K-post000", "supports", "K-postt000")])
         assert rt.unified_kg.mention_rows(db, nb.id)
+
+
+def test_derived_layer_gate_leaves_a_memory_isolation_requeue_readable(repo):
+    """K1 读侧闸只认删除留下的签名。Memory 隔离的重排队(迁移与
+    ``queue_for_rebuild``)同样把各层 seq 置 -1,但保留 ``last_rebuild_at``——
+    那些库的派生行今天照常可读,闸不得改变它(哪怕这本库很久以前删过一次图、
+    纪元 > 0)。变异钉:闸的签名去掉 ``last_rebuild_at`` → 这类库的派生读
+    变空,报红。"""
+    rt = repo._runtime
+    nb = repo.create_notebook(NotebookCreate(name="requeued"))
+    _seed_graph(repo, nb.id, doc_objects=2, clusters=True)
+    _seed_derived(repo, nb.id, 3, generation=0, prefix="")
+    before = _derived_reads(repo, nb.id)
+    assert before["relation_support"] and before["mention"], "前置:派生行可读"
+    with rt.database.write() as db:
+        cur = db.execute(
+            "UPDATE unified_kg_state SET kg_reset_epoch = 2, "
+            "last_rebuild_at = '2026-10-01T00:00:00+00:00', community_seq = -1, "
+            "canonical_rel_seq = -1, mention_seq = -1 WHERE notebook_id = ?",
+            (nb.id,),
+        )
+        assert cur.rowcount == 1
+    assert _derived_reads(repo, nb.id) == before
