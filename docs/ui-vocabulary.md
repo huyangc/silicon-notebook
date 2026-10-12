@@ -89,7 +89,10 @@
 （`….kg_build_jobs.finish/set_stage(…, error_message=…)`，经 `KgBuildJobStatus.user_message`
 弹出）。它们按调用形状显式登记（`DISPLAY_FIELD_CALLS` / `DISPLAY_FIELD_METHODS`），不按 kwarg
 名泛扫——别处的 `error_message=` 多是不上屏的诊断原文。新增一种会原样上屏的后端字段时，把它
-的形状登记进去。
+的形状登记进去。作业接收者认一跳别名（`jobs = r.kg_build_jobs; jobs.finish(…)`）；启动兜底用
+SQL 字面量 `UPDATE kg_build_jobs SET … error_message='…'` 写入的文案（SQLite 迁移与 PG 维护
+路径）同样在扫描面内。`error_message` 在两端存储里是仅限关键字参数，不存在位置传参；`**kwargs`
+展开、多于一跳的别名与跨模块传入的接收者静态解析不了，刻意跳过。
 
 后端 `user_error()` 消息、推理轨迹摘要（`TRACE_SUMMARY_MODULES` 登记模块里的
 `TraceStep(summary=…)`）与展示字段三条通道不要求调用点写字面量：先赋给变量（按作用域查所在
