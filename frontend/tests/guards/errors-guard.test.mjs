@@ -155,13 +155,23 @@ const APPROVED_DIAGNOSTIC_READS = Object.freeze({
       + "model-call logs by user. Same rule as ReportDetailPane below",
   },
   "dev/logs/activity/ActivityDetail.tsx|<module>.ReportDetailPane|diagnostic|error": {
-    count: 1,
+    count: 2,
     reason: "same rule as AskDetailPane above — administrator-only diagnostic: the persisted "
       + "server-side failure string report_execution/report_engine wrote into the report row "
       + "(backend ReportActivityDetail.error, a caught exception's str(), not thrown again "
-      + "here). The API returns it only when the caller is an administrator "
-      + "(admin_routes._activity_failure_text); a self-service read receives an empty string "
-      + "and this pane shows fixed copy instead",
+      + "here), and each failed section's stored error (ReportActivityDetail.section_errors[]"
+      + ".error, K5: the report body carries only a neutral note). The API returns both only "
+      + "when the caller is an administrator (admin_routes._discloses_failure_text); a "
+      + "self-service read receives an empty string / empty list and this pane shows fixed "
+      + "copy or nothing instead",
+  },
+  "report-view.tsx|<module>.ReportSectionFailures|diagnostic|error": {
+    count: 2,
+    reason: "author-only diagnostic (K5 ruling: raw failure text for the report's author and "
+      + "administrators): a failed section's stored error from the notebook report detail's "
+      + "sections[], which the API serves to the report's creator alone (report_routes."
+      + "_own_report_or_404; the public page never reads sections). One read filters, one "
+      + "renders it collapsed beside the neutral note the body carries",
   },
   // 来源解析诊断原文**不再**经过活动视图：那串异常可能带服务端绝对路径，而管理员
   // 看的是别人的活动流（与 ScopedSourceDetail 同一条披露边界）。契约改成
