@@ -13523,6 +13523,7 @@ select.group-input {
 .group-request-row .sort-button,
 .group-request-row .new-pill { min-height: 30px; padding: 0 12px; font-size: 13px; }
 .group-request-row > div { display: flex; gap: 7px; }
+.group-request-failure { flex-basis: 100%; margin: 0; color: var(--danger); font-size: 12px; }
 
 .group-request-mark {
   display: grid;

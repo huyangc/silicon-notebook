@@ -8,6 +8,7 @@ vi.mock("../../app/group-api.ts", async (importOriginal) => {
     ...actual,
     listGroups: vi.fn(),
     getGroup: vi.fn(),
+    approveShareRequest: vi.fn(),
     getGroupInvite: vi.fn(),
     createGroupInvite: vi.fn(),
     listGroupSharedNotebooks: vi.fn(),
@@ -21,6 +22,7 @@ vi.mock("../../app/group-api.ts", async (importOriginal) => {
 });
 
 import {
+  approveShareRequest,
   createGroupInvite,
   getGroup,
   getGroupInvite,
@@ -36,6 +38,7 @@ import {
 } from "../../app/group-api.ts";
 import { GroupsPage } from "../../app/groups-page.tsx";
 import { COPY_RESULT_HOLD_MS } from "../../app/copy-result";
+import { humanizedError } from "../../app/errors.ts";
 import type { NotebookSummary } from "../../app/workspace-model.ts";
 
 const OWNER_DETAIL: GroupDetail = {
@@ -418,6 +421,71 @@ test("待审批申请与我发起的申请分页", async () => {
   await user.click(within(screen.getByRole("navigation", { name: "我发起的申请分页" })).getByRole("button", { name: "下一页" }));
   expect(screen.getByText("我申请库24")).toBeInTheDocument();
   expect(screen.queryByText("我申请库01")).not.toBeInTheDocument();
+});
+
+function pendingRequest(id: string, name: string) {
+  return {
+    id, notebook_id: `nb-${id}`, notebook_name: name, group_id: "g1", group_name: "先进封装项目",
+    requested_by: "u2", requested_by_username: "bob", status: "pending",
+    decided_by: null, decided_at: null, created_at: "",
+  };
+}
+
+function renderRequestsTab() {
+  render(
+    <GroupsPage
+      currentUserId="u1"
+      isSystemAdmin={false}
+      notebooks={NOTEBOOKS}
+      initialGroupId="g1"
+      initialTab="requests"
+      onBack={vi.fn()}
+      onChanged={vi.fn()}
+      openingNotebookId={null}
+      onOpenNotebook={vi.fn()}
+      onNavigate={vi.fn()}
+    />,
+  );
+}
+
+test("批准被拒而申请仍在队列(笔记本正在删除):重拉队列,原因标在那一行旁边,不只报在顶部", async () => {
+  const user = userEvent.setup();
+  const stalled = pendingRequest("sr-stalled", "正在删除的库");
+  const other = pendingRequest("sr-other", "另一本库");
+  vi.mocked(listGroupShareRequests).mockResolvedValue([stalled, other]);
+  vi.mocked(approveShareRequest).mockRejectedValueOnce(
+    humanizedError("这本笔记本正在删除,无法批准这条申请", 409),
+  );
+  renderRequestsTab();
+
+  const row = (await screen.findByText("正在删除的库")).closest(".group-request-row") as HTMLElement;
+  const callsBefore = vi.mocked(listGroupShareRequests).mock.calls.length;
+  await user.click(within(row).getByRole("button", { name: "批准" }));
+
+  expect(await within(row).findByRole("alert")).toHaveTextContent("这本笔记本正在删除,无法批准这条申请");
+  expect(vi.mocked(listGroupShareRequests).mock.calls.length).toBe(callsBefore + 1);
+  // 另一行不受牵连,顶部状态条也不重复报同一句。
+  const otherRow = screen.getByText("另一本库").closest(".group-request-row") as HTMLElement;
+  expect(within(otherRow).queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getAllByText("这本笔记本正在删除,无法批准这条申请")).toHaveLength(1);
+  // 按钮松手还原,可以再点。
+  expect(within(row).getByRole("button", { name: "批准" })).toBeEnabled();
+});
+
+test("批准被拒且申请已不在队列(被别人处理过):那一行随重拉消失,原因走顶部状态条", async () => {
+  const user = userEvent.setup();
+  const gone = pendingRequest("sr-gone", "已被处理的库");
+  vi.mocked(listGroupShareRequests).mockResolvedValueOnce([gone]).mockResolvedValue([]);
+  vi.mocked(approveShareRequest).mockRejectedValueOnce(
+    humanizedError("这条待审批的共享申请不存在或已被处理", 404),
+  );
+  renderRequestsTab();
+
+  await user.click(await screen.findByRole("button", { name: "批准" }));
+
+  expect(await screen.findByText("这条待审批的共享申请不存在或已被处理")).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByText("已被处理的库")).not.toBeInTheDocument());
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
 test("普通成员仍可查看群组知识库，但不加载审批队列且设置中只能退出", async () => {

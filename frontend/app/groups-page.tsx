@@ -152,6 +152,8 @@ export function GroupsPage({
   const [grantManage, setGrantManage] = useState(false);
   const [transferTarget, setTransferTarget] = useState("");
   const [confirming, setConfirming] = useState("");
+  // 批准失败而申请仍在队列里(例如那本笔记本正在删除)时,原因落在那一行旁边。
+  const [requestFailure, setRequestFailure] = useState<{ id: string; text: string } | null>(null);
   // 复制结果必须落在按钮自身:唯一的反馈曾经是页面顶部那条 notice 横幅,它在长页面上
   // 会滚出视口,于是「复制」看起来像没点上。置位与回 idle 由共享的 useCopyResult 负责。
   const inviteCopy = useCopyResult();
@@ -264,6 +266,25 @@ export function GroupsPage({
     } finally {
       setBusy("");
     }
+  }
+
+  // 批准失败后重拉队列:申请还在(笔记本正在删除时后端回 409、申请保留)就把原因标在那一
+  // 行旁边——只在顶部报错而行原样不动,看起来像没点上;申请已经不在(被别人处理过)时那一
+  // 行随重拉消失,原因只能走顶部状态条。
+  async function approveRequest(groupId: string, requestId: string) {
+    setRequestFailure(null);
+    await run(`approve:${requestId}`, async () => {
+      try {
+        await approveShareRequest(groupId, requestId);
+      } catch (err) {
+        const refreshed = await listGroupShareRequests(groupId).catch(() => null);
+        if (refreshed) setRequests(refreshed);
+        if (!refreshed?.some((item) => item.id === requestId)) throw err;
+        setRequestFailure({ id: requestId, text: toUserMessage(err, "批准申请失败") });
+        return;
+      }
+      setRequests(await listGroupShareRequests(groupId)); setShared(await listGroupSharedNotebooks(groupId)); onChanged();
+    }, "批准申请失败");
   }
 
   function chooseGroup(groupId: string) {
@@ -645,11 +666,10 @@ export function GroupsPage({
                     : <><div className="group-request-list">{requestPage.pageItems.map((request) => <div className="group-request-row" key={request.id}>
                       <span className="group-request-mark"><BookOpen size={17} /></span>
                       <span className="group-request-copy"><strong>{request.notebook_name || "知识库"}</strong><small>申请人 {request.requested_by_username}</small></span>
-                      <div><button className="new-pill" disabled={Boolean(busy)} onClick={() => { void run(`approve:${request.id}`, async () => {
-                        await approveShareRequest(detail.id, request.id); setRequests(await listGroupShareRequests(detail.id)); setShared(await listGroupSharedNotebooks(detail.id)); onChanged();
-                      }, "批准申请失败"); }}>批准</button><button className="sort-button" disabled={Boolean(busy)} onClick={() => { void run(`reject:${request.id}`, async () => {
+                      <div><button className="new-pill" disabled={Boolean(busy)} onClick={() => { void approveRequest(detail.id, request.id); }}>批准</button><button className="sort-button" disabled={Boolean(busy)} onClick={() => { setRequestFailure(null); void run(`reject:${request.id}`, async () => {
                         await rejectShareRequest(detail.id, request.id); setRequests(await listGroupShareRequests(detail.id));
                       }, "驳回申请失败"); }}>驳回</button></div>
+                      {requestFailure?.id === request.id && <p className="group-request-failure" role="alert">{requestFailure.text}</p>}
                     </div>)}</div>
                     <Pagination page={requestPage.page} pageSize={GROUP_PAGE_SIZE} total={requestPage.total} onPage={requestPage.setPage} label="待审批申请分页" /></>}
                 {myGroupRequests.length > 0 && <section className="group-my-requests"><h3>我发起的申请</h3>{myRequestPage.pageItems.map((request) => <div className="group-request-row" key={request.id}>
