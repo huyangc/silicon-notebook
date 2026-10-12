@@ -1056,9 +1056,12 @@ token 时 `share_token` 为空串，并且**不计算** copy-stats：那是一�
   查询，整张列表（自有、加入、群组授权三段）由一次批量读取
   （`QueryStore.notebook_list_summary_facts`）补齐，不再逐库走 `NotebookSummaryQuery.from_row`
   的逐库查询（约 7 条语句/库，500 本即约 3500 条）。PostgreSQL 上一条语句带回每本库的可见来源数、
-  （按当前查看者的）挂载、`kg_ready` 与计数缓存版本键；类型计数与待处理计数随后逐库走进程内缓存，
-  所以热缓存下列 5 本与列 500 本是同样几条语句。缓存未命中时仍按原来同一条语句逐库冷算；持有
-  Memory 的库仍多一次查看者本人 Memory 的现读。响应与逐库路径逐字节相同；SQLite 保持逐库读取。
+  （按当前查看者的）挂载、无查看者口径的 `kg_ready` 与计数缓存版本键；类型计数、待处理计数以及
+  持有 Memory 的库的 `kg_ready` 随后逐库走进程内缓存，所以热缓存下列 5 本与列 500 本是同样几条
+  语句。缓存未命中时仍按原来同一条语句逐库冷算；持有 Memory 的库仍多一次查看者本人 Memory 的
+  现读。不足 5 本的列表保持逐库读取（`LIST_PREFETCH_MIN_NOTEBOOKS`）：批量语句每次列表只执行
+  一次、常处于未 prepare 状态，在这么短的列表上得不偿失。响应与逐库路径逐字节相同；SQLite 保持
+  逐库读取。
 - **不做判定缓存。** 单次判定是若干带索引的 `EXISTS` 探测（grants 按 `notebook_id` 或
   `(principal_type, principal_id)`，`group_members` 按主键或 `user_id`），与现状同量级；
   热路径不新增全表扫描。

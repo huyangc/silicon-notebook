@@ -17,6 +17,8 @@ PG 侧独有的事实只有一条:查看者行写成 `(SELECT NULLIF(CAST(%s AS 
 由 `tests/test_mount_viewer_guard.py` 钉住)。
 """
 
+import re
+
 from app.repositories.postgres.access_sql import (
     NOTEBOOK_LIVE_SQL,
     everyone_grant_expr,
@@ -91,24 +93,29 @@ _MOUNT_VIEWER_FROM = (
     "CROSS JOIN (SELECT NULLIF(CAST(%s AS text), '') AS uid) v "
 )
 
-MOUNT_VIEWER_JOIN = (
-    _MOUNT_VIEWER_FROM + "WHERE e.notebook_id = %s AND b.id != e.notebook_id"
-)
+#: ``mount_viewer_join_on``'s mounter: a bound parameter or a column reference
+#: of the enclosing query -- never a value spliced into the SQL text.
+_MOUNTER_REF = re.compile(r"%s|[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)?")
 
 
 def mount_viewer_join_on(mounter: str) -> str:
-    """``MOUNT_VIEWER_JOIN`` with the mounting notebook given as a column of
-    an enclosing query instead of a parameter (the notebook list's batched
-    summary read correlates it with each listed notebook): it takes ONE
-    positional parameter, the viewer.  Everything else is the
-    single-notebook fragment's text, so each listed notebook's mounts are
-    read by the same per-notebook probe of ``pk_notebook_bases`` and the
-    viewer arm still references only ``b`` and ``v``.  EXPLAIN pin:
-    ``tests/postgres/test_mount_sql_viewer_pg.py``."""
+    """``MOUNT_VIEWER_JOIN`` with the mounting notebook given as ``mounter``:
+    ``"%s"`` (a parameter -- ``MOUNT_VIEWER_JOIN`` itself) or a column of an
+    enclosing query (the notebook list's batched summary read correlates it
+    with each listed notebook, ``"n.id"``; then the fragment takes ONE
+    positional parameter, the viewer).  One spelling of the WHERE for both,
+    so each listed notebook's mounts are read by the same per-notebook probe
+    of ``pk_notebook_bases`` and the viewer arm still references only ``b``
+    and ``v``.  EXPLAIN pin: ``tests/postgres/test_mount_sql_viewer_pg.py``."""
+    if not _MOUNTER_REF.fullmatch(mounter):
+        raise ValueError(f"mounter must be %s or a column reference: {mounter!r}")
     return (
         _MOUNT_VIEWER_FROM
         + "WHERE e.notebook_id = " + mounter + " AND b.id != e.notebook_id"
     )
+
+
+MOUNT_VIEWER_JOIN = mount_viewer_join_on("%s")
 
 _VIEWER_REACHES_MOUNT_EXPR = (
     "(b.tier = 'base' OR "

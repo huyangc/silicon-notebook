@@ -48,7 +48,7 @@ def pg_q(statement: str) -> str:
 
 def test_pg_list_matches_the_per_notebook_path(repo, monkeypatch):  # noqa: F811
     w = build_list_world(repo, pg_q)
-    assert_list_matches_the_per_notebook_path(repo, w, pg_counts_cache, monkeypatch)
+    assert_list_matches_the_per_notebook_path(repo, w, pg_counts_cache, pg_q, monkeypatch)
 
 
 class _Counting:
@@ -82,23 +82,34 @@ def _listed_statements(repo, user, monkeypatch):  # noqa: F811
 
 
 def test_pg_warm_list_statement_count_does_not_grow_with_the_list(repo, monkeypatch):  # noqa: F811
-    """Warm, a list of 2 and a list of 12 notebooks cost the same statements:
-    the four list reads, the Memory-holders probe and ONE facts statement.
-    (Before F2 every notebook added five: source count, three count-cache
-    keys, mounts.)"""
+    """Warm, a list of 5 (the small-list gate's first batched length) and a
+    list of 12 notebooks cost the same statements: the four list reads, the
+    Memory-holders probe and ONE facts statement.  (Before F2 every notebook
+    added five: source count, three count-cache keys, mounts.)  Every
+    notebook has its own non-zero ``(kg_reset_epoch, kg_mutation_seq)`` and
+    one in each list has no ``unified_kg_state`` row at all (a legacy import
+    or copy): the prefetched key must still be the key the cache stores."""
     runtime = repo._runtime
     small = runtime.identity.create_user("s00000021", "pw123456")
     large = runtime.identity.create_user("l00000022", "pw123456")
-    for user, n in ((small, 2), (large, 12)):
-        for i in range(n):
-            as_user(user, runtime.catalog.create_notebook, NotebookCreate(name=f"n{i}"))
+    for user, n in ((small, 5), (large, 12)):
+        ids = [
+            as_user(user, runtime.catalog.create_notebook, NotebookCreate(name=f"n{i}")).id
+            for i in range(n)
+        ]
+        with runtime.database.write() as db:
+            for i, nb in enumerate(ids[1:], start=1):
+                db.execute(
+                    "UPDATE unified_kg_state SET kg_reset_epoch=%s, kg_mutation_seq=%s "
+                    "WHERE notebook_id=%s", (i, 100 + 7 * i, nb))
+            db.execute("DELETE FROM unified_kg_state WHERE notebook_id=%s", (ids[0],))
     shapes = {}
     for user in (small, large):
         _listed_statements(repo, user, monkeypatch)            # warm the memos
         listed, statements = _listed_statements(repo, user, monkeypatch)
         shapes[user.username] = (len(listed), statements)
     (n_small, small_sql), (n_large, large_sql) = shapes.values()
-    assert (n_small, n_large) == (2, 12)
+    assert (n_small, n_large) == (5, 12)
     assert small_sql == large_sql
     assert len(large_sql) == 6, large_sql
     assert sum("jsonb_array_elements_text" in s for s in large_sql) == 1
@@ -144,6 +155,17 @@ def test_a_prefetched_key_only_decides_a_hit(repo):  # noqa: F811
                                      version=(0, 5))
     assert hit == value and computed == ["nb-k1", "nb-k2"]
     assert list(memo) == ["nb-k2", "nb-k1"]                     # LRU recency kept
+
+    # The memo holds an OLDER key than the one the list prefetched (the
+    # notebook changed since the memo was filled): a miss, re-read, written
+    # back under the new key.
+    with database.write() as db:
+        db.execute("UPDATE unified_kg_state SET kg_mutation_seq=9 WHERE notebook_id='nb-k1'")
+    with database.connect() as db:
+        fresh = pg_counts_cache._seq_gated(memo, db, "nb-k1", compute("nb-k1"),
+                                           version=(0, 9))
+    assert computed == ["nb-k1", "nb-k2", "nb-k1"] and fresh != value
+    assert memo["nb-k1"] == ((0, 9), fresh)
 
 
 # ---------------------------------------------------------------- EXPLAIN pin
