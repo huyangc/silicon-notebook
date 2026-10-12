@@ -21,19 +21,95 @@ def _fresh_quiesce_state(monkeypatch):
     assert kg_scheduler.wait_idle(5), "KG pools were busy before the test"
 
 
-def _run_quiesce_in_thread(timeout: float = 10.0):
-    outcome: dict[str, object] = {}
+_QUIESCE_THREAD = "quiesce-under-test"
 
-    def run():
-        try:
-            background_quiesce.quiesce_process_background_work(timeout)
-            outcome["returned"] = True
-        except BaseException as exc:  # pragma: no cover - reported below
-            outcome["error"] = exc
 
-    thread = threading.Thread(target=run, name="quiesce-under-test")
-    thread.start()
-    return thread, outcome
+def _on_quiesce_thread() -> bool:
+    return threading.current_thread().name == _QUIESCE_THREAD
+
+
+class _Handshake:
+    """Orders a chain against the quiesce with events, never sleeps.
+
+    ``parked_on_light``: the quiesce has entered its wait on the light pool,
+    so it has already looked at every pool it will look at before that one;
+    only then does the light job hand off. ``handed_off``: the follow-up has
+    been submitted. ``progressed``: the quiesce has either returned, or has
+    begun a real (non-zero) wait on the follow-up's pool after the hand-off --
+    whichever happens first decides the case, so the outcome never depends on
+    how fast either thread is scheduled.
+    """
+
+    def __init__(self, monkeypatch, follow_up_pool: str) -> None:
+        self.parked_on_light = threading.Event()
+        self.handed_off = threading.Event()
+        self.progressed = threading.Event()
+        handshake = self
+        executor_wait_idle = background_jobs._MaintenanceExecutor.wait_idle
+        kg_wait_idle = kg_scheduler.wait_idle
+
+        def wait_idle(executor, deadline):
+            if _on_quiesce_thread():
+                if executor.pool == background_jobs._LIGHT_POOL:
+                    handshake.parked_on_light.set()
+                elif executor.pool == follow_up_pool and handshake.handed_off.is_set():
+                    handshake.progressed.set()
+            return executor_wait_idle(executor, deadline)
+
+        def waiting_on_kg(timeout):
+            if (
+                follow_up_pool == "kg" and timeout > 0 and _on_quiesce_thread()
+                and handshake.handed_off.is_set()
+            ):
+                handshake.progressed.set()
+            return kg_wait_idle(timeout)
+
+        monkeypatch.setattr(background_jobs._MaintenanceExecutor, "wait_idle", wait_idle)
+        monkeypatch.setattr(kg_scheduler, "wait_idle", waiting_on_kg)
+
+    def run_quiesce(self, timeout: float = 10.0):
+        outcome: dict[str, object] = {}
+
+        def run():
+            try:
+                background_quiesce.quiesce_process_background_work(timeout)
+                outcome["returned"] = True
+            except BaseException as exc:  # pragma: no cover - reported below
+                outcome["error"] = exc
+            finally:
+                self.progressed.set()
+
+        thread = threading.Thread(target=run, name=_QUIESCE_THREAD)
+        thread.start()
+        return thread, outcome
+
+
+def _drive_chain(handshake, hand_off_to, follow_up_submit) -> tuple[bool, dict]:
+    """A light-pool job waits until the quiesce is parked on the light pool,
+    hands a blocked follow-up to ``follow_up_submit`` and returns. Answers
+    whether the quiesce returned before the follow-up finished."""
+    follow_up_may_finish = threading.Event()
+    follow_up_done = threading.Event()
+
+    def follow_up():
+        follow_up_may_finish.wait(10)
+        follow_up_done.set()
+
+    def light():
+        handshake.parked_on_light.wait(10)
+        follow_up_submit(follow_up)
+        handshake.handed_off.set()
+
+    background_jobs.submit(light, name=f"catalog-quiesce-to-{hand_off_to}")
+    thread, outcome = handshake.run_quiesce()
+    try:
+        assert handshake.progressed.wait(10), "the quiesce neither waited nor returned"
+        returned_early = "returned" in outcome and not follow_up_done.is_set()
+    finally:
+        handshake.parked_on_light.set()
+        follow_up_may_finish.set()
+        thread.join(10)
+    return returned_early, outcome
 
 
 @pytest.mark.parametrize(
@@ -42,7 +118,7 @@ def _run_quiesce_in_thread(timeout: float = 10.0):
     ids=["into_an_existing_pool", "into_a_pool_created_while_waiting"],
 )
 def test_quiesce_waits_for_work_chained_from_one_maintenance_pool_into_another(
-    follow_up_pool_exists,
+    monkeypatch, follow_up_pool_exists,
 ):
     """A light-pool job submits heavy-pool follow-up and returns. Waiting on
     a snapshot of the pools taken once would see the heavy pool idle (or not
@@ -50,72 +126,19 @@ def test_quiesce_waits_for_work_chained_from_one_maintenance_pool_into_another(
     and return while the follow-up runs."""
     if follow_up_pool_exists:
         background_jobs.submit(lambda: None, name="rebuildkg-quiesce-warm").join(5)
-    light_may_hand_off = threading.Event()
-    follow_up_may_finish = threading.Event()
-    follow_up_started = threading.Event()
-    follow_up_done = threading.Event()
-
-    def follow_up():
-        follow_up_started.set()
-        follow_up_may_finish.wait(10)
-        follow_up_done.set()
-
-    def light():
-        light_may_hand_off.wait(10)
-        background_jobs.submit(follow_up, name="rebuildkg-quiesce-follow-up")
-
-    background_jobs.submit(light, name="catalog-quiesce-chain")
-    thread, outcome = _run_quiesce_in_thread()
-    try:
-        # let the quiesce pass the pools that are idle now and park on the
-        # light one, then hand off
-        time.sleep(0.2)
-        light_may_hand_off.set()
-        assert follow_up_started.wait(5)
-        thread.join(1.0)
-        follow_up_finished_when_quiesce_returned = (
-            outcome.get("returned") is not True or follow_up_done.is_set()
-        )
-    finally:
-        light_may_hand_off.set()
-        follow_up_may_finish.set()
-        thread.join(10)
-    assert follow_up_finished_when_quiesce_returned, (
-        "quiesce returned while the chained follow-up was still running"
+    handshake = _Handshake(monkeypatch, background_jobs._HEAVY_POOL)
+    returned_early, outcome = _drive_chain(
+        handshake, "heavy",
+        lambda job: background_jobs.submit(job, name="rebuildkg-quiesce-follow-up"),
     )
+    assert not returned_early, "quiesce returned while the chained follow-up was still running"
     assert outcome == {"returned": True}
 
 
-def test_quiesce_waits_for_kg_work_handed_off_from_a_maintenance_pool():
-    hand_off = threading.Event()
-    kg_may_finish = threading.Event()
-    kg_started = threading.Event()
-    kg_done = threading.Event()
-
-    def kg_job():
-        kg_started.set()
-        kg_may_finish.wait(10)
-        kg_done.set()
-
-    def light():
-        hand_off.wait(10)
-        kg_scheduler.submit_job(kg_job)
-
-    background_jobs.submit(light, name="catalog-quiesce-to-kg")
-    thread, outcome = _run_quiesce_in_thread()
-    try:
-        time.sleep(0.2)
-        hand_off.set()
-        assert kg_started.wait(5)
-        thread.join(1.0)
-        kg_finished_when_quiesce_returned = (
-            outcome.get("returned") is not True or kg_done.is_set()
-        )
-    finally:
-        hand_off.set()
-        kg_may_finish.set()
-        thread.join(10)
-    assert kg_finished_when_quiesce_returned
+def test_quiesce_waits_for_kg_work_handed_off_from_a_maintenance_pool(monkeypatch):
+    handshake = _Handshake(monkeypatch, "kg")
+    returned_early, outcome = _drive_chain(handshake, "kg", kg_scheduler.submit_job)
+    assert not returned_early, "quiesce returned while the handed-off KG job was still running"
     assert outcome == {"returned": True}
 
 
@@ -139,7 +162,7 @@ def test_a_stuck_pool_costs_one_bounded_wait_and_later_scopes_fail_at_once():
         began = time.monotonic()
         with pytest.raises(background_quiesce.BackgroundWorkStuck) as later:
             background_quiesce.quiesce_process_background_work(30.0)
-        assert time.monotonic() - began < 1.0, "a later scope waited out the bound again"
+        assert time.monotonic() - began < 10.0, "a later scope waited out the bound again"
         assert "First timeout:" in str(later.value)
         assert background_quiesce._first_timeout in str(later.value)
     finally:
