@@ -175,9 +175,9 @@ def test_granted_notebook_rows(postgres_repository, lifecycle):
 
 def test_notebook_exists_for_owner(postgres_repository, lifecycle):
     repo = postgres_repository
-    assert repo.notebook_exists_for_owner(lifecycle["active_id"], lifecycle["owner_id"]) is True
-    assert repo.notebook_exists_for_owner(lifecycle["copying_id"], lifecycle["owner_id"]) is False
-    assert repo.notebook_exists_for_owner(lifecycle["deleting_id"], lifecycle["owner_id"]) is False
+    assert repo._runtime.queries.notebook_exists_for_owner(lifecycle["active_id"], lifecycle["owner_id"]) is True
+    assert repo._runtime.queries.notebook_exists_for_owner(lifecycle["copying_id"], lifecycle["owner_id"]) is False
+    assert repo._runtime.queries.notebook_exists_for_owner(lifecycle["deleting_id"], lifecycle["owner_id"]) is False
 
 
 def test_notebook_analytics(postgres_repository, lifecycle):
@@ -191,17 +191,17 @@ def test_notebook_analytics(postgres_repository, lifecycle):
 
 def test_list_user_activity_scoped(postgres_repository, lifecycle):
     repo = postgres_repository
-    active = repo.list_user_activity(
+    active = repo._runtime.queries.list_user_activity(
         lifecycle["owner_id"], notebook_id=lifecycle["active_id"], activity_type="ask"
     )
     assert [item["id"] for item in active["items"]] == ["ask-pg-0"]
 
-    copying = repo.list_user_activity(
+    copying = repo._runtime.queries.list_user_activity(
         lifecycle["owner_id"], notebook_id=lifecycle["copying_id"], activity_type="ask"
     )
     assert copying == {"items": [], "has_more": False, "next_cursor": None}
 
-    deleting = repo.list_user_activity(
+    deleting = repo._runtime.queries.list_user_activity(
         lifecycle["owner_id"], notebook_id=lifecycle["deleting_id"], activity_type="ask"
     )
     assert deleting == {"items": [], "has_more": False, "next_cursor": None}

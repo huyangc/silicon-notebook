@@ -725,7 +725,7 @@ def test_ask_mix_keeps_the_whole_command_section_past_truncation(repo, monkeypat
     monkeypatch.setattr(repo.settings, "max_total_tokens", _BUDGET_TOKENS)
     captured = _spy_selection(monkeypatch)
 
-    repo.ask_chunk(notebook.id, AskRequest(question="set_db 命令是怎样的"))
+    repo._runtime.ask_component.ask_chunk_current(notebook.id, AskRequest(question="set_db 命令是怎样的"))
 
     ranked = captured["ranked"]
     assert SET_DB_CHUNKS <= set(ranked), "exact hits must reach the candidate pool"
@@ -743,7 +743,7 @@ def test_ask_mix_reserve_is_bounded_and_never_grows_the_budget(repo, monkeypatch
     monkeypatch.setattr(repo.settings, "max_total_tokens", _BUDGET_TOKENS)
     captured = _spy_selection(monkeypatch)
 
-    repo.ask_chunk(notebook.id, AskRequest(question="set_db 命令是怎样的"))
+    repo._runtime.ask_component.ask_chunk_current(notebook.id, AskRequest(question="set_db 命令是怎样的"))
 
     by_id = {}
     for chunk in [_filler(i) for i in range(8)]:
@@ -780,7 +780,7 @@ def test_ask_without_an_identifier_is_bit_for_bit_neutral(repo, monkeypatch):
             patch.setattr(
                 repo.retrieval.candidates.knowledge, "chunk_exact_search", _counting)
             captured = _spy_selection(patch)
-            repo.ask_chunk(notebook.id, AskRequest(question=question))
+            repo._runtime.ask_component.ask_chunk_current(notebook.id, AskRequest(question=question))
             return captured, probes["n"]
 
     neutral_on, probes_on = _run("这个工具的背景是什么", enabled=True)

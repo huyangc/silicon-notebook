@@ -57,7 +57,7 @@ from app.models.memory import (
     PaginatedMemories,
 )
 from app.models.admin import PromoteRequest, PromotionCandidate
-from app.repositories.ports import AskStateStorePort, MemoryRepository
+from app.repositories.ports import AnswerMemorySourceRepository, MemoryRepository
 from app.services.prompts import MEMORY_PREVIEW_SCHEMA_HINT, memory_preview_prompt
 from app.services.knowledge_governance import PromotionTargetError
 from app.services.memory_service import NothingToExport
@@ -496,7 +496,7 @@ async def promote_memory(
 async def preview_answer_memory(
     answer_id: str,
     user: UserProfile = Depends(get_current_user),
-    ask_state: AskStateStorePort = Depends(ask_state_repository),
+    ask_state: AnswerMemorySourceRepository = Depends(ask_state_repository),
     llm_client=Depends(memory_preview_client),
     service: MemoryRepository = Depends(memory_service),
 ) -> MemoryPreview:
@@ -580,7 +580,7 @@ async def preview_answer_memory_stream(
     answer_id: str,
     request: Request,
     user: UserProfile = Depends(get_current_user),
-    ask_state: AskStateStorePort = Depends(ask_state_repository),
+    ask_state: AnswerMemorySourceRepository = Depends(ask_state_repository),
     llm_client=Depends(memory_preview_client),
     service: MemoryRepository = Depends(memory_service),
 ) -> StreamingResponse:

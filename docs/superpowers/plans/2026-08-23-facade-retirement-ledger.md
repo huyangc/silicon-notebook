@@ -2,11 +2,13 @@
 
 **状态**：`retire-now` 4 个已于早前 PR（B5 第二阶段）退役。随后修复了普查脚本的一处盲区——`RepositoryFacade.__init__` 把若干自己的公开方法用迟绑定 lambda 布线进 `RepositoryRuntime`（`self.notebook_copy_stats(...)` 这类），此前脚本整个跳过 facade 文件自身、看不到这批引用；修复后这类引用计入独立的「facade内部」列并折入生产计数，6 个方法（`notebook_copy_stats`、`decided_seed_pairs`、`relations_for_notebook`、`set_conflict_status`、`concept_whitelist_terms`、`maybe_auto_index`）从 `test-only` 改判 `keep`。之后社区报告死功能退役删掉了 `get_community_reports`、`summarize_communities` 两个 `test-only` 方法。
 
-**S2 批 A（2026-10 技术债修复）**：18 个 `test-only` 方法退役（`memory_revisions` 同时从 `MemoryRepository` 协议删除，`ports_protocol_method_count` 975 → 974），测试改为直调 `repo._runtime.<组件>.<方法>`（检索类改为 `repo.retrieval.graph.scale_ppr` / `repo.retrieval.candidates.federated_retrieve(_relations)`）：`kg_cluster_size_histogram`、`kg_largest_clusters`、`kg_community_overview`、`kg_relation_provenance_counts`、`knowhow_history_head_seq`、`list_knowhow_changes`、`list_knowhow_milestones`、`source_asset_ids`、`memory_revisions`、`backfill_kg_fts`、`backfill_chunk_fts`、`build_viz_index`、`get_paper_meta`、`paper_meta_backfilling`、`paper_meta_backfill_progress`、`federated_retrieve_relations`、`scale_ppr`、`federated_retrieve`。同批把 `facade_public_surface` 改为零松弛，并新增运行时按名字取用的引用检查（见「退役时必须同步的守卫/baseline」第 1 条）。当前快照：`test-only` 49 个、`ambiguous` 12 个，按 S2 余下批次（D → B → C → E → F）继续。
+**S2 批 A（2026-10 技术债修复）**：18 个 `test-only` 方法退役（`memory_revisions` 同时从 `MemoryRepository` 协议删除，`ports_protocol_method_count` 975 → 974），测试改为直调 `repo._runtime.<组件>.<方法>`（检索类改为 `repo.retrieval.graph.scale_ppr` / `repo.retrieval.candidates.federated_retrieve(_relations)`）：`kg_cluster_size_histogram`、`kg_largest_clusters`、`kg_community_overview`、`kg_relation_provenance_counts`、`knowhow_history_head_seq`、`list_knowhow_changes`、`list_knowhow_milestones`、`source_asset_ids`、`memory_revisions`、`backfill_kg_fts`、`backfill_chunk_fts`、`build_viz_index`、`get_paper_meta`、`paper_meta_backfilling`、`paper_meta_backfill_progress`、`federated_retrieve_relations`、`scale_ppr`、`federated_retrieve`。同批把 `facade_public_surface` 改为零松弛，并新增运行时按名字取用的引用检查（见「退役时必须同步的守卫/baseline」第 1 条）。按 S2 余下批次（D → B → C → E → F）继续。
+
+**S2 批 D（2026-10 技术债修复）**：Ask 与查询类 8 个 `test-only` 方法退役——`ask_chunk`、`ask_reasoning`、`ask_job_status`、`list_user_activity`、`list_user_notebooks`、`list_user_usage`、`notebook_exists_for_owner`、`pending_actions_projection_rows`；测试改为直调 `repo._runtime.ask_component.ask_chunk_current` / `ask_reasoning_current`、`repo._runtime.ask_state.ask_job_status`、`repo._runtime.queries.<同名>`（175 处，参数逐字不变）。生产里的同名调用都不经 facade：`ASK_MODES` 的 handler 在 `AskService.ask` 上用 `getattr(self, spec.handler)` 解析，管理端查询走 `admin_query_repository()`（即 `_runtime.queries`），`PendingActionsService` 持有的是 `QueryStore`。协议同步：`AskExecutionPort` 删 `ask_chunk`/`ask_reasoning`，`AskStateRepository` 删 `ask_job_status`，`NotebookRepository` 不再继承 `AdminQueryRepository`（那组方法由 `admin_query_repository()` 交出的 `QueryStore` 实现，facade 从来不是它的实现者）；`ask_state_repository()` 改为把 facade 交成只含 `answer_memory_source` 的 `AnswerMemorySourceRepository`（两条 Memory 预览路由只调这一个方法），不再冒充整个 `AskStateStorePort`。`ports_protocol_method_count` 974 → 972，`facade_protocol_binding_gaps` 44 → 23。同批先单独提交了一次 `--rebaseline-surface` 纯重基线，物化此前各特性 PR 累积的 `facade_surface.json` 漂移。当前快照：`test-only` 41 个、`ambiguous` 12 个。
 
 **范围（本文件产出时，B5 第一阶段）**：只读普查，产出账本；该阶段不改动、不退役任何方法——实际退役动作记在上面的「状态」一行，属于随后的 B5 第二阶段。
 
-**目标文件**：`backend/app/services/repository_facade.py::RepositoryFacade`，当前 304 个公开成员（`@property` 与 setter 同名合并计 1 行；已退役方法不再出现在快照里，见上方「状态」）。
+**目标文件**：`backend/app/services/repository_facade.py::RepositoryFacade`，当前 296 个公开成员（`@property` 与 setter 同名合并计 1 行；已退役方法不再出现在快照里，见上方「状态」）。
 
 ## 重新生成
 
@@ -24,10 +26,10 @@ PYTHONPATH=backend python3 scripts/audit_facade_callers.py \
 | 分类 | 数量 | 含义 | 下一步 |
 |---|---|---|---|
 | `retire-now` | 0 | 生产/脚本/测试/facade内部四桶均零调用，且撞名未解析计数也为零（`classify()` 判据：所有已解析计数与撞名计数皆为零；早前一批 4 个已随本 PR 退役，见上方「状态」） | 可直接进入退役 PR，逐条附证据见下 |
-| `test-only` | 49 | 生产/脚本/facade内部三桶零调用，仅测试文件调用 | 退役需连同其测试一起处理（删除或改为直打 runtime 组件），见下 |
+| `test-only` | 41 | 生产/脚本/facade内部三桶零调用，仅测试文件调用 | 退役需连同其测试一起处理（删除或改为直打 runtime 组件），见下 |
 | `ambiguous` | 12 | 四桶解析调用为零，但存在同名的 `<expr>.<method>(` 调用其接收者无法确认/排除——人工复核 | 不得直接退役；需人工确认接收者身份 |
 | `keep` | 243 | 至少一处生产、脚本或 facade内部桶解析调用 | 保留 |
-| **合计** | **304** | | |
+| **合计** | **296** | | |
 
 `facade内部`列（`facade_internal_calls`，JSON 同名字段）不是第五个独立分类桶——它在 `classify()` 里折入上面「生产调用数」参与判据，只是在完整表格里单独成列以便追溯「这条 keep 判定是不是靠 facade 自己的迟绑定布线撑起来的」。方法论见下一节第 6 点，脚本 docstring 权威。
 
@@ -79,7 +81,7 @@ PYTHONPATH=backend python3 scripts/audit_facade_callers.py \
 ## 退役时必须同步的守卫/baseline
 
 1. **`scripts/architecture_boundary_baseline.json::facade_public_surface.RepositoryFacade.allowed_names`**——被 `scripts/check_architecture_boundaries.py` 的 `facade_violations` 消费。S2 批 A 起**双向零松弛**：多出一个公开名字（新增）或残留一个已不存在的名字（陈旧）都会报错，所以退役方法必须在同一改动里从 `allowed_names` 删掉对应名字。同一脚本的 `dynamic_facade_reference_violations` 另管两类普查看不到的引用：`repository_facade.py` 里 `_repository_from_weakref(...).<名字>` 接缝（名字须仍在 `RepositoryFacade` 上），以及 `backend/app`、`scripts` 中对 facade 形状接收者的字面量 `getattr`/`hasattr` 探测（名字须仍在某个 repository 类上，例外登记在 `DYNAMIC_FACADE_REFERENCE_EXEMPTIONS`，同样零松弛）。这两类调用方在名字消失后会静默降级而不是报错。普查脚本只统计字面量 `getattr`，而且只在名字还在 facade 上时才算；`hasattr` 探测和 weakref 接缝它从来看不到（例如 `incremental_fuse_source` 在普查里显示为 test-only，但生产经 weakref 接缝调用它），所以这两类只能靠这道检查。检查同样看不到别名、`operator.attrgetter`、运行时拼出的名字和白名单外的接收者名，退役前仍要对名字做一次不限语法的 `grep`。
-1a. **被当作协议交出去的 facade**：`backend/app` 里 `cast(P, repository())`，以及标注 `-> P` 并直接 `return repository()` 的访问器（今天是 `deps.py` 的 `memory_service`、`mcp_memory_repository`、`ask_state_repository`、`source_repository`、`ask_stream_repository` 和 `repository` 本身），承诺 facade 实现了 `P` 的每个方法。仓库不跑类型检查，退役一个仍被 `P` 声明的方法，调用方写出的 `service.<名字>(...)` 会在运行时 AttributeError。`check_architecture_boundaries.py` 的 `facade_protocol_binding_violations` 对这些协议（含其协议基类）逐个比对 facade：退役时要么同时从协议里删掉该方法（并零松弛下调 `ports_protocol_method_count`），要么不退役。守卫上线前就存在的缺口按协议登记在基线 `facade_protocol_binding_gaps`（`AskStateStorePort` 20 个、`McpMemoryRepository` 4 个、`NotebookRepository` 20 个），同样零松弛：新增缺口报错，缺口补上后必须从名单删除。
+1a. **被当作协议交出去的 facade**：`backend/app` 里 `cast(P, repository())`，以及标注 `-> P` 并直接 `return repository()` 的访问器（今天是 `deps.py` 的 `memory_service`、`mcp_memory_repository`、`ask_state_repository`（S2 批 D 起交成只含 `answer_memory_source` 的 `AnswerMemorySourceRepository`）、`source_repository`、`ask_stream_repository` 和 `repository` 本身），承诺 facade 实现了 `P` 的每个方法。仓库不跑类型检查，退役一个仍被 `P` 声明的方法，调用方写出的 `service.<名字>(...)` 会在运行时 AttributeError。`check_architecture_boundaries.py` 的 `facade_protocol_binding_violations` 对这些协议（含其协议基类）逐个比对 facade：退役时要么同时从协议里删掉该方法（并零松弛下调 `ports_protocol_method_count`），要么不退役。守卫上线前就存在的缺口按协议登记在基线 `facade_protocol_binding_gaps`（S2 批 A 登记时 `AskStateStorePort` 20 个、`McpMemoryRepository` 4 个、`NotebookRepository` 20 个；S2 批 D 后只剩 `McpMemoryRepository` 4 个、`NotebookRepository` 19 个），同样零松弛：新增缺口报错，缺口补上后必须从名单删除。
 2. **`function_length_ceiling`**（同一 baseline 文件）里登记了 `RepositoryFacade.__init__`（468 行）与 `RepositoryRuntime.__init__`（443 行）的行数上限——只在**削减** `__init__` 本身逻辑时才相关（例如若退役导致某个 host 参数/组件不再需要在 `__init__` 里接线），退役单个委托方法本身不触碰 `__init__`，通常无需改动，但若退役连带清理了 runtime 组件的构造代码，须核实是否需要相应下调（只许降、降了必须同步 baseline，见 AGENTS.md「Architecture Baseline」)。
 3. **`backend/tests/test_repository_api_contract.py`**——对比 `facade_surface.json`/`api_contract.json` 等固化的响应快照（`FIXTURE` 常量指向 `backend/tests/fixtures/repository_contract/*.json`），退役面向 API 的方法（尤其是有路由直接调用的）需要重跑 `scripts/generate_repository_contract_fixtures.py`（默认模式，非 `--rebaseline*`）刷新快照；纯内部/无路由消费的方法退役通常不影响这份契约。
 4. **`backend/tests/test_repository_dependency_contract.py`**——消费 `repository_callers.py` 的 `private_repository_sites()`/`production_source_index()`，并维护一份手工的 `LIFECYCLE_STORE_CALLS` 允许清单（哪些内部服务允许绕过 facade 直调 store 方法）。退役 facade 方法本身**不会**触发这份契约变红（它检查的是私有属性访问边界，不是 facade 公开方法存在与否），但若退役后某个内部服务需要改为直调 runtime 组件（例如把测试从 `repo.foo()` 改成 `repo._runtime.<component>.foo()`），可能需要在 `LIFECYCLE_STORE_CALLS` 里登记新的允许项。
@@ -112,310 +114,302 @@ PYTHONPATH=backend python3 scripts/audit_facade_callers.py \
 
 **第三批（`ambiguous`，15 个，需人工确认接收者身份后才能归类，不建议在本阶段之后立即退役）**：`answer_owner`、`bump_knowhow_mutation_seq`、`leave_notebook`、`list_notebook_templates`、`load_notebook_scale_facts`、`pending_actions_projection_rows`、`report_source_identity_rows`、`report_source_rows`、`set_knowhow_hidden_source`、`share_state`、`source_notebook_id`、`source_owner`、`validate_reasoning_submission`、`visible_source_count`、`visible_source_ids`。这批的"撞名未解析"调用点集中在两类：(a) 各 Service 类内部对自己私有存储引用的同名方法（如 `NotebookSharingService` 内 `self._store.source_owner(...)`，与 facade 无关，核实后可下沉为 `test-only` 甚至 `retire-now`）；(b) 脚本白名单尚未覆盖的接收者命名模式。**建议下一阶段先对这 15 个逐一跑精确 `grep` 定位接收者，而不是批量假设。**
 
-## 完整表格（304 行，按方法名字母序；数据来自 S2 批 A 退役后的一次运行，参见文首重新生成命令）
+## 完整表格（296 行，按方法名字母序；数据来自 S2 批 D 退役后的一次运行，参见文首重新生成命令）
 | 方法 | 行号 | 委托目标 | 分类(kind) | 生产调用数 | facade内部 | 脚本调用数 | 测试调用数 | 撞名未解析 | wrapper镜像 | 档 |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `add_knowhow_column` | 4483 | `_runtime.knowhow_store.add_knowhow_column` | delegate | 1 | 0 | 0 | 1 | 1 | - | **keep** |
-| `add_knowhow_row` | 4362 | `_runtime.knowhow_store.add_knowhow_row` | delegate | 1 | 0 | 0 | 33 | 82 | - | **keep** |
-| `add_member` | 1566 | `_runtime.sharing.add_member` | delegate | 0 | 0 | 0 | 97 | 41 | - | **test-only** |
-| `add_relations` | 2363 | `<complex>` | adapter | 0 | 0 | 0 | 9 | 2 | - | **test-only** |
-| `add_url_sources` | 1870 | `_runtime.source_ingestion.add_url_sources_compat` | adapter | 2 | 0 | 0 | 20 | 1 | - | **keep** |
-| `agent_memory_hits` | 1405 | `_runtime.memory_retriever.agent_memory_hits` | delegate | 1 | 0 | 0 | 0 | 8 | - | **keep** |
-| `agent_observations` (property) | 1164 | `_runtime.agent_observations` | delegate | 0 | 0 | 0 | 0 | 0 | - | **keep** |
-| `agent_profile` (property) | 1090 | `_runtime.agent_profile` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
-| `agent_profile_jobs` (property) | 1132 | `_runtime.agent_profile_jobs` | delegate | 0 | 0 | 0 | 0 | 1 | - | **keep** |
-| `agent_token_secret` | 1384 | `_runtime.memory_service.agent_token_secret` | delegate | 1 | 0 | 0 | 0 | 11 | - | **keep** |
-| `all_visible_source_ids` | 1676 | `_runtime.source_store.all_visible_source_ids` | delegate | 2 | 0 | 0 | 1 | 34 | - | **keep** |
-| `answer_memory_links` | 1491 | `_runtime.memory_service.answer_memory_links` | delegate | 1 | 0 | 0 | 0 | 4 | - | **keep** |
-| `answer_memory_source` | 1417 | `_runtime.ask_state.answer_memory_source` | delegate | 2 | 0 | 0 | 0 | 3 | - | **keep** |
-| `answer_owner` | 1601 | `_runtime.sharing.answer_owner` | delegate | 0 | 0 | 0 | 0 | 3 | - | **ambiguous** |
-| `append_ask_trace` | 4000 | `_runtime.ask_component.append_trace_fail_open` | delegate | 0 | 0 | 1 | 9 | 0 | - | **keep** |
-| `append_clusters` | 2556 | `_runtime.knowledge_lifecycle.append_clusters` | delegate | 0 | 0 | 0 | 7 | 4 | - | **test-only** |
-| `append_knowhow_rows` | 4370 | `_runtime.knowhow_store.append_knowhow_rows` | delegate | 1 | 0 | 0 | 2 | 5 | - | **keep** |
-| `apply_conflict_resolution` | 2685 | `_runtime.knowledge_governance.apply_conflict_resolution` | delegate | 0 | 0 | 0 | 22 | 2 | - | **test-only** |
-| `approve_promotion` | 3086 | `_runtime.knowledge_governance.approve_promotion` | delegate | 0 | 0 | 0 | 45 | 3 | - | **test-only** |
-| `approve_promotion_as_reviewer` | 3093 | `_runtime.knowledge_governance.approve_promotion` | delegate | 1 | 0 | 0 | 1 | 0 | - | **keep** |
-| `ask` | 3699 | `_runtime.ask_component.ask_current` | delegate | 2 | 0 | 6 | 62 | 86 | - | **keep** |
-| `ask_answer_detail` | 4026 | `_runtime.ask_state.ask_answer_detail` | delegate | 1 | 0 | 0 | 1 | 6 | - | **keep** |
-| `ask_chunk` | 3688 | `_runtime.ask_component.ask_chunk_current` | delegate | 0 | 0 | 0 | 49 | 5 | - | **test-only** |
-| `ask_job_detail` | 4022 | `_runtime.ask_state.ask_job_detail` | delegate | 4 | 0 | 2 | 10 | 10 | - | **keep** |
-| `ask_job_origin` | 4016 | `_runtime.ask_state.ask_job_origin` | delegate | 2 | 0 | 0 | 2 | 9 | - | **keep** |
-| `ask_job_status` | 3997 | `_runtime.ask_state.ask_job_status` | delegate | 0 | 0 | 0 | 6 | 17 | - | **test-only** |
-| `ask_reasoning` | 3913 | `_runtime.ask_component.ask_reasoning_current` | delegate | 0 | 0 | 0 | 5 | 38 | - | **test-only** |
-| `ask_with_job` | 3720 | `_runtime.ask_component.ask_current_with_job` | delegate | 2 | 0 | 0 | 1 | 0 | - | **keep** |
+| `add_knowhow_column` | 4420 | `_runtime.knowhow_store.add_knowhow_column` | delegate | 1 | 0 | 0 | 1 | 1 | - | **keep** |
+| `add_knowhow_row` | 4299 | `_runtime.knowhow_store.add_knowhow_row` | delegate | 1 | 0 | 0 | 33 | 82 | - | **keep** |
+| `add_member` | 1529 | `_runtime.sharing.add_member` | delegate | 0 | 0 | 0 | 97 | 41 | - | **test-only** |
+| `add_relations` | 2326 | `<complex>` | adapter | 0 | 0 | 0 | 9 | 2 | - | **test-only** |
+| `add_url_sources` | 1833 | `_runtime.source_ingestion.add_url_sources_compat` | adapter | 2 | 0 | 0 | 20 | 1 | - | **keep** |
+| `agent_memory_hits` | 1368 | `_runtime.memory_retriever.agent_memory_hits` | delegate | 1 | 0 | 0 | 0 | 8 | - | **keep** |
+| `agent_observations` (property) | 1127 | `_runtime.agent_observations` | delegate | 0 | 0 | 0 | 0 | 0 | - | **keep** |
+| `agent_profile` (property) | 1053 | `_runtime.agent_profile` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
+| `agent_profile_jobs` (property) | 1095 | `_runtime.agent_profile_jobs` | delegate | 0 | 0 | 0 | 0 | 1 | - | **keep** |
+| `agent_token_secret` | 1347 | `_runtime.memory_service.agent_token_secret` | delegate | 1 | 0 | 0 | 0 | 11 | - | **keep** |
+| `all_visible_source_ids` | 1639 | `_runtime.source_store.all_visible_source_ids` | delegate | 2 | 0 | 0 | 1 | 34 | - | **keep** |
+| `answer_memory_links` | 1454 | `_runtime.memory_service.answer_memory_links` | delegate | 1 | 0 | 0 | 0 | 4 | - | **keep** |
+| `answer_memory_source` | 1380 | `_runtime.ask_state.answer_memory_source` | delegate | 2 | 0 | 0 | 0 | 3 | - | **keep** |
+| `answer_owner` | 1564 | `_runtime.sharing.answer_owner` | delegate | 0 | 0 | 0 | 0 | 3 | - | **ambiguous** |
+| `append_ask_trace` | 3937 | `_runtime.ask_component.append_trace_fail_open` | delegate | 0 | 0 | 1 | 9 | 0 | - | **keep** |
+| `append_clusters` | 2519 | `_runtime.knowledge_lifecycle.append_clusters` | delegate | 0 | 0 | 0 | 7 | 4 | - | **test-only** |
+| `append_knowhow_rows` | 4307 | `_runtime.knowhow_store.append_knowhow_rows` | delegate | 1 | 0 | 0 | 2 | 5 | - | **keep** |
+| `apply_conflict_resolution` | 2648 | `_runtime.knowledge_governance.apply_conflict_resolution` | delegate | 0 | 0 | 0 | 22 | 2 | - | **test-only** |
+| `approve_promotion` | 3049 | `_runtime.knowledge_governance.approve_promotion` | delegate | 0 | 0 | 0 | 45 | 3 | - | **test-only** |
+| `approve_promotion_as_reviewer` | 3056 | `_runtime.knowledge_governance.approve_promotion` | delegate | 1 | 0 | 0 | 1 | 0 | - | **keep** |
+| `ask` | 3651 | `_runtime.ask_component.ask_current` | delegate | 2 | 0 | 6 | 62 | 86 | - | **keep** |
+| `ask_answer_detail` | 3963 | `_runtime.ask_state.ask_answer_detail` | delegate | 1 | 0 | 0 | 1 | 6 | - | **keep** |
+| `ask_job_detail` | 3959 | `_runtime.ask_state.ask_job_detail` | delegate | 4 | 0 | 2 | 10 | 10 | - | **keep** |
+| `ask_job_origin` | 3953 | `_runtime.ask_state.ask_job_origin` | delegate | 2 | 0 | 0 | 2 | 9 | - | **keep** |
+| `ask_with_job` | 3672 | `_runtime.ask_component.ask_current_with_job` | delegate | 2 | 0 | 0 | 1 | 0 | - | **keep** |
 | `audit_labels_for_user_ids` | 840 | `_runtime.identity.audit_labels_for_user_ids` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
 | `authenticate_user` | 828 | `_runtime.identity.authenticate_user` | delegate | 0 | 0 | 0 | 5 | 19 | - | **test-only** |
-| `backfill_paper_metadata` | 4456 | `_runtime.source_ingestion.backfill_paper_metadata` | delegate | 1 | 0 | 0 | 4 | 9 | - | **keep** |
-| `begin_ask_job` | 3961 | `_runtime.ask_component.begin_job_current` | delegate | 0 | 0 | 1 | 16 | 0 | - | **keep** |
-| `build_notebook_kg` | 1924 | `_runtime.knowledge_lifecycle.build_notebook_kg` | adapter | 2 | 0 | 0 | 22 | 2 | - | **keep** |
-| `build_scale_index` | 3352 | `_runtime.scale_artifacts.build` | adapter | 4 | 0 | 2 | 156 | 3 | - | **keep** |
-| `bulk_delete_conversations` | 4065 | `_runtime.ask_component.bulk_delete_conversations_current` | delegate | 1 | 0 | 0 | 3 | 5 | - | **keep** |
-| `bulk_delete_memories` | 1471 | `_runtime.memory_service.bulk_delete` | delegate | 1 | 0 | 0 | 3 | 4 | - | **keep** |
-| `bump_knowhow_mutation_seq` | 4426 | `_runtime.knowhow_store.bump_knowhow_mutation_seq` | delegate | 0 | 0 | 0 | 0 | 1 | - | **ambiguous** |
-| `cancel_ask_job` | 3980 | `_runtime.ask_component.cancel_job` | delegate | 1 | 0 | 0 | 3 | 0 | - | **keep** |
-| `cancel_scale_index` | 3439 | `_runtime.scale_artifacts.cancel` | delegate | 1 | 0 | 0 | 4 | 0 | - | **keep** |
-| `chat` | 898 | `_runtime.models.chat` | delegate | 1 | 0 | 2 | 0 | 130 | - | **keep** |
-| `claim_report_generation` | 4165 | `_runtime.report_store.claim_report_generation` | adapter | 1 | 0 | 0 | 16 | 9 | - | **keep** |
-| `claim_report_intent` | 4158 | `_runtime.report_store.claim_report_intent` | delegate | 1 | 0 | 1 | 7 | 1 | - | **keep** |
-| `close` | 1054 | `_runtime.close` | delegate | 6 | 0 | 9 | 222 | 473 | postgres:override | **keep** |
-| `cluster_map` | 2583 | `retrieval.candidates.cluster_map` | delegate | 1 | 1 | 0 | 81 | 8 | - | **keep** |
-| `collection_catalog` (property) | 3545 | `_runtime.collection_catalog` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
-| `collection_enumeration` (property) | 3555 | `_runtime.collection_enumeration` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
-| `command_catalog` (property) | 1122 | `_runtime.command_catalog` | delegate | 0 | 0 | 0 | 0 | 0 | - | **keep** |
-| `concept_detail` | 2996 | `_runtime.knowledge_query.concept_detail` | delegate | 1 | 0 | 0 | 62 | 0 | - | **keep** |
-| `concept_whitelist_add` | 2778 | `_runtime.knowledge_governance.concept_whitelist_add` | delegate | 1 | 0 | 0 | 2 | 0 | - | **keep** |
-| `concept_whitelist_list` | 2775 | `_runtime.knowledge_governance.concept_whitelist_list` | delegate | 1 | 0 | 0 | 2 | 0 | - | **keep** |
-| `concept_whitelist_remove` | 2781 | `_runtime.knowledge_governance.concept_whitelist_remove` | delegate | 1 | 0 | 0 | 2 | 0 | - | **keep** |
-| `concept_whitelist_terms` | 2772 | `_runtime.knowledge_governance.concept_whitelist_terms` | delegate | 0 | 1 | 0 | 4 | 4 | - | **keep** |
-| `configured` | 901 | `_runtime.models.configured` | delegate | 13 | 0 | 2 | 6 | 82 | - | **keep** |
-| `confirm_conflict` | 2710 | `_runtime.knowledge_governance.confirm_conflict` | delegate | 1 | 0 | 0 | 4 | 0 | - | **keep** |
-| `confirm_memory` | 1454 | `_runtime.memory_service.confirm` | delegate | 1 | 0 | 0 | 18 | 4 | - | **keep** |
-| `confirm_merge` | 2619 | `_runtime.knowledge_governance.confirm_merge` | delegate | 1 | 0 | 0 | 3 | 0 | - | **keep** |
-| `conflict_resolution_admitted` | 2425 | `_runtime.knowledge_lifecycle.conflict_resolution_admitted` | delegate | 1 | 0 | 0 | 4 | 2 | - | **keep** |
-| `conversation_creator` | 4083 | `_runtime.ask_state.conversation_creator` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
-| `conversation_owner` | 1598 | `_runtime.sharing.conversation_owner` | delegate | 0 | 0 | 0 | 1 | 6 | - | **test-only** |
-| `conversation_share_state` | 4108 | `_runtime.ask_state.conversation_share_state` | delegate | 2 | 0 | 0 | 3 | 27 | - | **keep** |
-| `copy_notebook` | 1538 | `_runtime.sharing.copy_notebook` | delegate | 0 | 0 | 0 | 66 | 7 | - | **test-only** |
-| `create_agent_profile` | 1311 | `_runtime.memory_service.create_agent_profile` | delegate | 1 | 0 | 2 | 10 | 42 | - | **keep** |
-| `create_knowhow_milestone` | 4582 | `_runtime.knowhow_history_store.create_milestone` | delegate | 1 | 0 | 0 | 1 | 0 | - | **keep** |
-| `create_knowhow_table` | 4331 | `_runtime.knowhow_store.create_knowhow_table` | delegate | 1 | 0 | 0 | 40 | 29 | - | **keep** |
-| `create_knowhow_table_with_rows` | 4340 | `_runtime.knowhow_store.create_knowhow_table_with_rows` | delegate | 1 | 0 | 0 | 0 | 5 | - | **keep** |
-| `create_memory_candidate` | 1420 | `_runtime.memory_service.create_candidate` | delegate | 1 | 0 | 0 | 33 | 5 | - | **keep** |
-| `create_memory_from_answer` | 1438 | `_runtime.memory_service.create_from_answer` | delegate | 1 | 0 | 0 | 3 | 0 | - | **keep** |
-| `create_notebook` | 1274 | `_runtime.catalog.create_notebook` | delegate | 2 | 0 | 9 | 1918 | 72 | - | **keep** |
-| `create_notebook_object_schema` | 2297 | `_runtime.schema_registry.create_notebook_object_schema` | delegate | 1 | 0 | 0 | 3 | 0 | - | **keep** |
-| `create_object_schema` | 2323 | `_runtime.schema_registry.create_object_schema` | delegate | 1 | 0 | 1 | 5 | 0 | - | **keep** |
-| `create_report` | 4136 | `_runtime.report_application.create_report` | delegate | 1 | 0 | 2 | 70 | 29 | - | **keep** |
+| `backfill_paper_metadata` | 4393 | `_runtime.source_ingestion.backfill_paper_metadata` | delegate | 1 | 0 | 0 | 4 | 9 | - | **keep** |
+| `begin_ask_job` | 3901 | `_runtime.ask_component.begin_job_current` | delegate | 0 | 0 | 1 | 16 | 0 | - | **keep** |
+| `build_notebook_kg` | 1887 | `_runtime.knowledge_lifecycle.build_notebook_kg` | adapter | 2 | 0 | 0 | 22 | 2 | - | **keep** |
+| `build_scale_index` | 3315 | `_runtime.scale_artifacts.build` | adapter | 4 | 0 | 2 | 156 | 3 | - | **keep** |
+| `bulk_delete_conversations` | 4002 | `_runtime.ask_component.bulk_delete_conversations_current` | delegate | 1 | 0 | 0 | 3 | 5 | - | **keep** |
+| `bulk_delete_memories` | 1434 | `_runtime.memory_service.bulk_delete` | delegate | 1 | 0 | 0 | 3 | 4 | - | **keep** |
+| `bump_knowhow_mutation_seq` | 4363 | `_runtime.knowhow_store.bump_knowhow_mutation_seq` | delegate | 0 | 0 | 0 | 0 | 1 | - | **ambiguous** |
+| `cancel_ask_job` | 3920 | `_runtime.ask_component.cancel_job` | delegate | 1 | 0 | 0 | 3 | 0 | - | **keep** |
+| `cancel_scale_index` | 3402 | `_runtime.scale_artifacts.cancel` | delegate | 1 | 0 | 0 | 4 | 0 | - | **keep** |
+| `chat` | 861 | `_runtime.models.chat` | delegate | 1 | 0 | 2 | 0 | 130 | - | **keep** |
+| `claim_report_generation` | 4102 | `_runtime.report_store.claim_report_generation` | adapter | 1 | 0 | 0 | 16 | 9 | - | **keep** |
+| `claim_report_intent` | 4095 | `_runtime.report_store.claim_report_intent` | delegate | 1 | 0 | 1 | 7 | 1 | - | **keep** |
+| `close` | 1017 | `_runtime.close` | delegate | 6 | 0 | 9 | 222 | 473 | postgres:override | **keep** |
+| `cluster_map` | 2546 | `retrieval.candidates.cluster_map` | delegate | 1 | 1 | 0 | 81 | 8 | - | **keep** |
+| `collection_catalog` (property) | 3508 | `_runtime.collection_catalog` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
+| `collection_enumeration` (property) | 3518 | `_runtime.collection_enumeration` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
+| `command_catalog` (property) | 1085 | `_runtime.command_catalog` | delegate | 0 | 0 | 0 | 0 | 0 | - | **keep** |
+| `concept_detail` | 2959 | `_runtime.knowledge_query.concept_detail` | delegate | 1 | 0 | 0 | 62 | 0 | - | **keep** |
+| `concept_whitelist_add` | 2741 | `_runtime.knowledge_governance.concept_whitelist_add` | delegate | 1 | 0 | 0 | 2 | 0 | - | **keep** |
+| `concept_whitelist_list` | 2738 | `_runtime.knowledge_governance.concept_whitelist_list` | delegate | 1 | 0 | 0 | 2 | 0 | - | **keep** |
+| `concept_whitelist_remove` | 2744 | `_runtime.knowledge_governance.concept_whitelist_remove` | delegate | 1 | 0 | 0 | 2 | 0 | - | **keep** |
+| `concept_whitelist_terms` | 2735 | `_runtime.knowledge_governance.concept_whitelist_terms` | delegate | 0 | 1 | 0 | 4 | 4 | - | **keep** |
+| `configured` | 864 | `_runtime.models.configured` | delegate | 13 | 0 | 2 | 6 | 82 | - | **keep** |
+| `confirm_conflict` | 2673 | `_runtime.knowledge_governance.confirm_conflict` | delegate | 1 | 0 | 0 | 4 | 0 | - | **keep** |
+| `confirm_memory` | 1417 | `_runtime.memory_service.confirm` | delegate | 1 | 0 | 0 | 18 | 4 | - | **keep** |
+| `confirm_merge` | 2582 | `_runtime.knowledge_governance.confirm_merge` | delegate | 1 | 0 | 0 | 3 | 0 | - | **keep** |
+| `conflict_resolution_admitted` | 2388 | `_runtime.knowledge_lifecycle.conflict_resolution_admitted` | delegate | 1 | 0 | 0 | 4 | 2 | - | **keep** |
+| `conversation_creator` | 4020 | `_runtime.ask_state.conversation_creator` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
+| `conversation_owner` | 1561 | `_runtime.sharing.conversation_owner` | delegate | 0 | 0 | 0 | 1 | 6 | - | **test-only** |
+| `conversation_share_state` | 4045 | `_runtime.ask_state.conversation_share_state` | delegate | 2 | 0 | 0 | 3 | 27 | - | **keep** |
+| `copy_notebook` | 1501 | `_runtime.sharing.copy_notebook` | delegate | 0 | 0 | 0 | 66 | 7 | - | **test-only** |
+| `create_agent_profile` | 1274 | `_runtime.memory_service.create_agent_profile` | delegate | 1 | 0 | 2 | 10 | 42 | - | **keep** |
+| `create_knowhow_milestone` | 4519 | `_runtime.knowhow_history_store.create_milestone` | delegate | 1 | 0 | 0 | 1 | 0 | - | **keep** |
+| `create_knowhow_table` | 4268 | `_runtime.knowhow_store.create_knowhow_table` | delegate | 1 | 0 | 0 | 40 | 29 | - | **keep** |
+| `create_knowhow_table_with_rows` | 4277 | `_runtime.knowhow_store.create_knowhow_table_with_rows` | delegate | 1 | 0 | 0 | 0 | 5 | - | **keep** |
+| `create_memory_candidate` | 1383 | `_runtime.memory_service.create_candidate` | delegate | 1 | 0 | 0 | 33 | 5 | - | **keep** |
+| `create_memory_from_answer` | 1401 | `_runtime.memory_service.create_from_answer` | delegate | 1 | 0 | 0 | 3 | 0 | - | **keep** |
+| `create_notebook` | 1237 | `_runtime.catalog.create_notebook` | delegate | 2 | 0 | 9 | 1918 | 72 | - | **keep** |
+| `create_notebook_object_schema` | 2260 | `_runtime.schema_registry.create_notebook_object_schema` | delegate | 1 | 0 | 0 | 3 | 0 | - | **keep** |
+| `create_object_schema` | 2286 | `_runtime.schema_registry.create_object_schema` | delegate | 1 | 0 | 1 | 5 | 0 | - | **keep** |
+| `create_report` | 4073 | `_runtime.report_application.create_report` | delegate | 1 | 0 | 2 | 70 | 29 | - | **keep** |
 | `create_session` | 831 | `_runtime.identity.create_session` | delegate | 0 | 0 | 0 | 7 | 16 | - | **test-only** |
 | `create_user` | 825 | `_runtime.identity.create_user` | delegate | 0 | 0 | 0 | 130 | 151 | - | **test-only** |
 | `current_user` | 819 | `_runtime.identity.current_user` | delegate | 19 | 1 | 1 | 90 | 20 | - | **keep** |
-| `decided_pairs` | 2760 | `_runtime.knowledge_governance.decided_pairs` | delegate | 0 | 0 | 0 | 3 | 1 | - | **test-only** |
-| `decided_seed_pairs` | 2763 | `_runtime.knowledge_governance.decided_seed_pairs` | delegate | 0 | 1 | 0 | 3 | 2 | - | **keep** |
-| `delete_agent_profile` | 1333 | `_runtime.memory_service.delete_agent_profile` | delegate | 1 | 0 | 0 | 0 | 9 | - | **keep** |
-| `delete_conversation` | 4062 | `_runtime.ask_state.delete_conversation` | delegate | 1 | 0 | 1 | 1 | 7 | - | **keep** |
-| `delete_knowhow_cell_code` | 4535 | `_runtime.knowhow_store.delete_knowhow_cell_code` | delegate | 1 | 0 | 0 | 0 | 1 | - | **keep** |
-| `delete_knowhow_column` | 4505 | `_runtime.knowhow_store.delete_knowhow_column` | delegate | 1 | 0 | 0 | 5 | 1 | - | **keep** |
-| `delete_knowhow_milestone` | 4589 | `_runtime.knowhow_history_store.delete_milestone` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
-| `delete_knowhow_row` | 4512 | `_runtime.knowhow_store.delete_knowhow_row` | delegate | 1 | 0 | 0 | 2 | 0 | - | **keep** |
-| `delete_knowhow_table` | 4418 | `_runtime.knowhow_store.delete_knowhow_table` | delegate | 1 | 0 | 0 | 1 | 9 | - | **keep** |
-| `delete_memory` | 1468 | `_runtime.memory_service.delete` | delegate | 1 | 0 | 0 | 8 | 4 | - | **keep** |
-| `delete_notebook` | 1305 | `_runtime.catalog.delete_notebook` | delegate | 1 | 0 | 1 | 9 | 4 | - | **keep** |
-| `delete_notebook_kg` | 1609 | `_runtime.knowledge_lifecycle.delete_notebook_kg` | delegate | 0 | 0 | 1 | 40 | 9 | - | **keep** |
-| `delete_notebook_object_schema` | 2316 | `_runtime.schema_registry.delete_notebook_object_schema` | delegate | 1 | 0 | 0 | 4 | 0 | - | **keep** |
-| `delete_object_schema` | 2331 | `_runtime.schema_registry.delete_object_schema` | delegate | 1 | 0 | 2 | 3 | 0 | - | **keep** |
-| `delete_report` | 4198 | `_runtime.report_store.delete_report` | delegate | 1 | 0 | 0 | 2 | 3 | - | **keep** |
+| `decided_pairs` | 2723 | `_runtime.knowledge_governance.decided_pairs` | delegate | 0 | 0 | 0 | 3 | 1 | - | **test-only** |
+| `decided_seed_pairs` | 2726 | `_runtime.knowledge_governance.decided_seed_pairs` | delegate | 0 | 1 | 0 | 3 | 2 | - | **keep** |
+| `delete_agent_profile` | 1296 | `_runtime.memory_service.delete_agent_profile` | delegate | 1 | 0 | 0 | 0 | 9 | - | **keep** |
+| `delete_conversation` | 3999 | `_runtime.ask_state.delete_conversation` | delegate | 1 | 0 | 1 | 1 | 7 | - | **keep** |
+| `delete_knowhow_cell_code` | 4472 | `_runtime.knowhow_store.delete_knowhow_cell_code` | delegate | 1 | 0 | 0 | 0 | 1 | - | **keep** |
+| `delete_knowhow_column` | 4442 | `_runtime.knowhow_store.delete_knowhow_column` | delegate | 1 | 0 | 0 | 5 | 1 | - | **keep** |
+| `delete_knowhow_milestone` | 4526 | `_runtime.knowhow_history_store.delete_milestone` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
+| `delete_knowhow_row` | 4449 | `_runtime.knowhow_store.delete_knowhow_row` | delegate | 1 | 0 | 0 | 2 | 0 | - | **keep** |
+| `delete_knowhow_table` | 4355 | `_runtime.knowhow_store.delete_knowhow_table` | delegate | 1 | 0 | 0 | 1 | 9 | - | **keep** |
+| `delete_memory` | 1431 | `_runtime.memory_service.delete` | delegate | 1 | 0 | 0 | 8 | 4 | - | **keep** |
+| `delete_notebook` | 1268 | `_runtime.catalog.delete_notebook` | delegate | 1 | 0 | 1 | 9 | 4 | - | **keep** |
+| `delete_notebook_kg` | 1572 | `_runtime.knowledge_lifecycle.delete_notebook_kg` | delegate | 0 | 0 | 1 | 40 | 9 | - | **keep** |
+| `delete_notebook_object_schema` | 2279 | `_runtime.schema_registry.delete_notebook_object_schema` | delegate | 1 | 0 | 0 | 4 | 0 | - | **keep** |
+| `delete_object_schema` | 2294 | `_runtime.schema_registry.delete_object_schema` | delegate | 1 | 0 | 2 | 3 | 0 | - | **keep** |
+| `delete_report` | 4135 | `_runtime.report_store.delete_report` | delegate | 1 | 0 | 0 | 2 | 3 | - | **keep** |
 | `delete_session` | 837 | `_runtime.identity.delete_session` | delegate | 0 | 0 | 0 | 2 | 4 | - | **test-only** |
-| `delete_source` | 2084 | `_runtime.source_ingestion.delete_source_compat` | delegate | 2 | 0 | 1 | 21 | 1 | - | **keep** |
-| `delete_source_asset_rows` | 4445 | `_runtime.knowhow_store.delete_source_asset_rows` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
-| `deprecate_memory` | 1465 | `_runtime.memory_service.deprecate` | delegate | 1 | 0 | 0 | 3 | 0 | - | **keep** |
+| `delete_source` | 2047 | `_runtime.source_ingestion.delete_source_compat` | delegate | 2 | 0 | 1 | 21 | 1 | - | **keep** |
+| `delete_source_asset_rows` | 4382 | `_runtime.knowhow_store.delete_source_asset_rows` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
+| `deprecate_memory` | 1428 | `_runtime.memory_service.deprecate` | delegate | 1 | 0 | 0 | 3 | 0 | - | **keep** |
 | `effective_document_limit` | 852 | `_runtime.identity.effective_document_limit` | delegate | 1 | 0 | 0 | 4 | 1 | - | **keep** |
-| `effective_schemas` | 2282 | `_runtime.schema_registry.effective_schemas` | delegate | 0 | 0 | 3 | 13 | 3 | - | **keep** |
-| `evidence_elements` | 2071 | `_runtime.source_store.evidence_elements` | delegate | 1 | 0 | 0 | 0 | 9 | - | **keep** |
-| `execute_indexing_pipeline_rebuild` | 1731 | `<complex>` | adapter | 0 | 1 | 0 | 0 | 0 | - | **keep** |
-| `execute_notebook_kg_job` | 4632 | `_runtime.knowledge_lifecycle.execute_notebook_kg_job` | delegate | 3 | 0 | 0 | 36 | 1 | - | **keep** |
-| `export_reports` | 4201 | `_runtime.report_store.export_reports` | delegate | 1 | 0 | 0 | 2 | 1 | - | **keep** |
-| `extract_source` | 2087 | `_runtime.source_ingestion.run_extraction` | adapter | 3 | 0 | 0 | 3 | 2 | - | **keep** |
-| `fail_conflict_resolution_submission` | 2449 | `_runtime.knowledge_lifecycle.fail_conflict_resolution_submission` | delegate | 1 | 0 | 0 | 0 | 1 | - | **keep** |
-| `fail_kg_delete_submission` | 2966 | `_runtime.knowledge_lifecycle.fail_kg_delete_submission` | delegate | 1 | 0 | 0 | 1 | 1 | - | **keep** |
-| `fail_notebook_kg_job_submission` | 4627 | `_runtime.knowledge_lifecycle.fail_notebook_kg_job_submission` | delegate | 3 | 0 | 0 | 0 | 0 | - | **keep** |
-| `fail_notebook_relink_submission` | 2417 | `_runtime.knowledge_lifecycle.fail_notebook_relink_submission` | delegate | 1 | 0 | 0 | 3 | 1 | - | **keep** |
-| `fail_unified_kg_rebuild_submission` | 2942 | `_runtime.knowledge_lifecycle.fail_unified_kg_rebuild_submission` | delegate | 1 | 0 | 0 | 6 | 1 | - | **keep** |
-| `find_duplicates` | 3170 | `_runtime.knowledge_governance.find_duplicates` | delegate | 1 | 0 | 1 | 7 | 0 | - | **keep** |
-| `find_notebook_by_share_token` | 1520 | `_runtime.sharing.find_notebook_by_share_token` | delegate | 0 | 0 | 0 | 4 | 5 | - | **test-only** |
-| `finish_ask_job` | 3972 | `_runtime.ask_component.finish_job` | delegate | 0 | 0 | 1 | 9 | 0 | - | **keep** |
-| `fold_scale_index_delta` | 3363 | `_runtime.scale_artifacts.fold` | adapter | 1 | 0 | 0 | 24 | 0 | - | **keep** |
-| `get_conflict_candidate` | 2679 | `_runtime.knowledge_governance.get_conflict_candidate` | delegate | 0 | 0 | 0 | 9 | 3 | - | **test-only** |
-| `get_conversation` | 4049 | `_runtime.ask_state.get_conversation` | delegate | 4 | 0 | 5 | 27 | 19 | - | **keep** |
-| `get_knowhow_cell_code` | 4532 | `_runtime.knowhow_store.get_knowhow_cell_code` | delegate | 2 | 0 | 0 | 0 | 2 | - | **keep** |
-| `get_knowhow_change` | 4557 | `_runtime.knowhow_history_store.get_change` | delegate | 2 | 0 | 0 | 2 | 0 | - | **keep** |
-| `get_knowhow_row_location` | 4547 | `_runtime.knowhow_store.get_knowhow_row_location` | delegate | 6 | 0 | 0 | 0 | 0 | - | **keep** |
-| `get_knowhow_table` | 4359 | `_runtime.knowhow_store.get_knowhow_table` | delegate | 15 | 0 | 1 | 159 | 60 | - | **keep** |
-| `get_memory` | 1474 | `_runtime.memory_service.get` | delegate | 3 | 0 | 0 | 12 | 0 | - | **keep** |
-| `get_notebook` | 1277 | `_runtime.catalog.get_notebook` | delegate | 28 | 1 | 11 | 121 | 63 | - | **keep** |
-| `get_notebook_asset` | 4442 | `_runtime.knowhow_store.get_notebook_asset` | delegate | 5 | 0 | 0 | 42 | 12 | - | **keep** |
-| `get_report` | 4182 | `_runtime.report_store.get_report` | delegate | 2 | 0 | 5 | 90 | 27 | - | **keep** |
-| `get_source` | 1840 | `_runtime.source_store.get_source` | delegate | 5 | 0 | 4 | 110 | 49 | - | **keep** |
+| `effective_schemas` | 2245 | `_runtime.schema_registry.effective_schemas` | delegate | 0 | 0 | 3 | 13 | 3 | - | **keep** |
+| `evidence_elements` | 2034 | `_runtime.source_store.evidence_elements` | delegate | 1 | 0 | 0 | 0 | 9 | - | **keep** |
+| `execute_indexing_pipeline_rebuild` | 1694 | `<complex>` | adapter | 0 | 1 | 0 | 0 | 0 | - | **keep** |
+| `execute_notebook_kg_job` | 4569 | `_runtime.knowledge_lifecycle.execute_notebook_kg_job` | delegate | 3 | 0 | 0 | 36 | 1 | - | **keep** |
+| `export_reports` | 4138 | `_runtime.report_store.export_reports` | delegate | 1 | 0 | 0 | 2 | 1 | - | **keep** |
+| `extract_source` | 2050 | `_runtime.source_ingestion.run_extraction` | adapter | 3 | 0 | 0 | 3 | 2 | - | **keep** |
+| `fail_conflict_resolution_submission` | 2412 | `_runtime.knowledge_lifecycle.fail_conflict_resolution_submission` | delegate | 1 | 0 | 0 | 0 | 1 | - | **keep** |
+| `fail_kg_delete_submission` | 2929 | `_runtime.knowledge_lifecycle.fail_kg_delete_submission` | delegate | 1 | 0 | 0 | 1 | 1 | - | **keep** |
+| `fail_notebook_kg_job_submission` | 4564 | `_runtime.knowledge_lifecycle.fail_notebook_kg_job_submission` | delegate | 3 | 0 | 0 | 0 | 0 | - | **keep** |
+| `fail_notebook_relink_submission` | 2380 | `_runtime.knowledge_lifecycle.fail_notebook_relink_submission` | delegate | 1 | 0 | 0 | 3 | 1 | - | **keep** |
+| `fail_unified_kg_rebuild_submission` | 2905 | `_runtime.knowledge_lifecycle.fail_unified_kg_rebuild_submission` | delegate | 1 | 0 | 0 | 6 | 1 | - | **keep** |
+| `find_duplicates` | 3133 | `_runtime.knowledge_governance.find_duplicates` | delegate | 1 | 0 | 1 | 7 | 0 | - | **keep** |
+| `find_notebook_by_share_token` | 1483 | `_runtime.sharing.find_notebook_by_share_token` | delegate | 0 | 0 | 0 | 4 | 5 | - | **test-only** |
+| `finish_ask_job` | 3912 | `_runtime.ask_component.finish_job` | delegate | 0 | 0 | 1 | 9 | 0 | - | **keep** |
+| `fold_scale_index_delta` | 3326 | `_runtime.scale_artifacts.fold` | adapter | 1 | 0 | 0 | 24 | 0 | - | **keep** |
+| `get_conflict_candidate` | 2642 | `_runtime.knowledge_governance.get_conflict_candidate` | delegate | 0 | 0 | 0 | 9 | 3 | - | **test-only** |
+| `get_conversation` | 3986 | `_runtime.ask_state.get_conversation` | delegate | 4 | 0 | 5 | 27 | 19 | - | **keep** |
+| `get_knowhow_cell_code` | 4469 | `_runtime.knowhow_store.get_knowhow_cell_code` | delegate | 2 | 0 | 0 | 0 | 2 | - | **keep** |
+| `get_knowhow_change` | 4494 | `_runtime.knowhow_history_store.get_change` | delegate | 2 | 0 | 0 | 2 | 0 | - | **keep** |
+| `get_knowhow_row_location` | 4484 | `_runtime.knowhow_store.get_knowhow_row_location` | delegate | 6 | 0 | 0 | 0 | 0 | - | **keep** |
+| `get_knowhow_table` | 4296 | `_runtime.knowhow_store.get_knowhow_table` | delegate | 15 | 0 | 1 | 159 | 60 | - | **keep** |
+| `get_memory` | 1437 | `_runtime.memory_service.get` | delegate | 3 | 0 | 0 | 12 | 0 | - | **keep** |
+| `get_notebook` | 1240 | `_runtime.catalog.get_notebook` | delegate | 28 | 1 | 11 | 121 | 63 | - | **keep** |
+| `get_notebook_asset` | 4379 | `_runtime.knowhow_store.get_notebook_asset` | delegate | 5 | 0 | 0 | 42 | 12 | - | **keep** |
+| `get_report` | 4119 | `_runtime.report_store.get_report` | delegate | 2 | 0 | 5 | 90 | 27 | - | **keep** |
+| `get_source` | 1803 | `_runtime.source_store.get_source` | delegate | 5 | 0 | 4 | 110 | 49 | - | **keep** |
 | `global_document_limit_default` | 846 | `_runtime.identity.global_document_limit_default` | delegate | 0 | 0 | 0 | 3 | 6 | - | **test-only** |
-| `guarded_ask_detail` | 4031 | `_runtime.ask_state.guarded_ask_detail` | delegate | 1 | 0 | 0 | 8 | 8 | - | **keep** |
-| `guarded_report_detail` | 4185 | `_runtime.report_store.guarded_report_detail` | delegate | 1 | 0 | 0 | 13 | 18 | - | **keep** |
-| `hidden_source_ids` | 1823 | `_runtime.source_store.hidden_source_ids` | delegate | 1 | 0 | 0 | 6 | 27 | - | **keep** |
-| `import_sources` | 1866 | `_runtime.source_ingestion.import_sources_compat` | adapter | 1 | 0 | 0 | 4 | 1 | - | **keep** |
-| `incremental_fuse_source` | 2563 | `_runtime.knowledge_lifecycle.incremental_fuse_source` | delegate | 0 | 0 | 0 | 56 | 10 | - | **test-only** |
-| `index_status` | 3388 | `_runtime.scale_artifacts.index_status` | delegate | 1 | 0 | 0 | 5 | 0 | - | **keep** |
-| `indexing_pipeline_options` | 1680 | `_runtime.indexing_pipeline.projection` | delegate | 1 | 0 | 0 | 2 | 0 | - | **keep** |
-| `insert_notebook_asset` | 4429 | `_runtime.knowhow_store.insert_notebook_asset` | delegate | 2 | 0 | 0 | 2 | 5 | - | **keep** |
-| `is_member` | 1554 | `_runtime.sharing.is_member` | delegate | 0 | 0 | 0 | 35 | 12 | - | **test-only** |
-| `issue_agent_token` | 1336 | `_runtime.memory_service.issue_agent_token` | delegate | 1 | 0 | 3 | 18 | 14 | - | **keep** |
-| `join_shared` | 1578 | `_runtime.sharing.join_shared` | delegate | 0 | 0 | 0 | 1 | 10 | - | **test-only** |
-| `kg_analysis` (property) | 1108 | `_runtime.kg_analysis` | delegate | 0 | 0 | 0 | 0 | 0 | - | **keep** |
-| `kg_delete_status` | 2956 | `_runtime.knowledge_lifecycle.kg_delete_status` | delegate | 1 | 0 | 0 | 13 | 1 | - | **keep** |
-| `kg_neighbors` | 2867 | `_runtime.knowledge_lifecycle.kg_neighbors` | delegate | 1 | 0 | 0 | 49 | 17 | - | **keep** |
-| `kg_search` | 1648 | `_runtime.knowledge_query.search` | delegate | 1 | 0 | 0 | 19 | 1 | - | **keep** |
-| `kick_all_members` | 1572 | `_runtime.sharing.kick_all_members` | delegate | 0 | 0 | 0 | 3 | 1 | - | **test-only** |
-| `knowhow_cell_history` | 4567 | `_runtime.knowhow_history_store.cell_history` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
-| `knowhow_changes_between` | 4560 | `_runtime.knowhow_history_store.changes_between` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
-| `knowhow_history_page` | 4550 | `_runtime.knowhow_history_store.history_page` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
-| `knowledge_graph` | 2341 | `_runtime.knowledge_query.graph` | delegate | 1 | 0 | 3 | 8 | 0 | - | **keep** |
-| `knowledge_types` | 2243 | `_runtime.knowledge_query.knowledge_types` | delegate | 1 | 0 | 4 | 2 | 0 | - | **keep** |
-| `leave_notebook` | 1581 | `_runtime.sharing.leave_notebook` | delegate | 0 | 0 | 0 | 1 | 3 | - | **test-only** |
-| `list_agent_profiles` | 1318 | `_runtime.memory_service.list_agent_profiles` | delegate | 3 | 0 | 0 | 0 | 6 | - | **keep** |
-| `list_agent_tokens` | 1354 | `_runtime.memory_service.list_agent_tokens` | delegate | 1 | 0 | 0 | 0 | 18 | - | **keep** |
-| `list_communities` | 2992 | `_runtime.knowledge_lifecycle.list_communities` | delegate | 0 | 0 | 0 | 4 | 0 | - | **test-only** |
-| `list_conversations` | 4054 | `_runtime.ask_component.list_conversations_current` | delegate | 1 | 0 | 3 | 12 | 16 | - | **keep** |
-| `list_knowhow_cell_code` | 4543 | `_runtime.knowhow_store.list_knowhow_cell_code` | delegate | 4 | 0 | 0 | 0 | 0 | - | **keep** |
-| `list_knowhow_tables` | 4356 | `_runtime.knowhow_store.list_knowhow_tables` | delegate | 1 | 0 | 1 | 37 | 7 | - | **keep** |
-| `list_knowledge` | 2257 | `_runtime.knowledge_query.list_knowledge` | delegate | 1 | 0 | 14 | 18 | 0 | - | **keep** |
-| `list_members` | 1575 | `_runtime.sharing.list_members` | delegate | 0 | 0 | 0 | 4 | 14 | - | **test-only** |
-| `list_memories` | 1477 | `_runtime.memory_service.list_memories` | delegate | 2 | 0 | 0 | 2 | 16 | - | **keep** |
-| `list_notebook_bases` | 1289 | `_runtime.notebook_store.list_mount_edges_for_notebook` | delegate | 3 | 0 | 0 | 12 | 0 | - | **keep** |
-| `list_notebook_object_schemas` | 2290 | `_runtime.schema_registry.list_notebook_object_schemas` | delegate | 1 | 0 | 0 | 2 | 3 | - | **keep** |
-| `list_notebooks` | 1271 | `_runtime.catalog.list_notebooks` | delegate | 0 | 0 | 1 | 16 | 1 | - | **keep** |
-| `list_object_schemas` | 2287 | `_runtime.schema_registry.list_object_schemas` | delegate | 1 | 0 | 3 | 1 | 0 | - | **keep** |
-| `list_promotion_queue` | 3079 | `_runtime.knowledge_governance.list_promotion_queue` | delegate | 1 | 0 | 0 | 15 | 0 | - | **keep** |
-| `list_reports` | 4193 | `_runtime.report_store.list_reports` | delegate | 1 | 0 | 1 | 5 | 0 | - | **keep** |
-| `list_sources` | 1661 | `_runtime.source_ingestion.list_sources` | delegate | 0 | 0 | 3 | 47 | 8 | - | **keep** |
-| `list_sources_page` | 1664 | `_runtime.source_ingestion.list_sources_page` | delegate | 3 | 0 | 0 | 14 | 8 | - | **keep** |
-| `list_user_activity` | 867 | `_runtime.queries.list_user_activity` | delegate | 0 | 0 | 0 | 68 | 54 | - | **test-only** |
-| `list_user_notebooks` | 861 | `_runtime.queries.list_user_notebooks` | delegate | 0 | 0 | 0 | 7 | 4 | - | **test-only** |
-| `list_user_usage` | 858 | `_runtime.queries.list_user_usage` | delegate | 0 | 0 | 0 | 29 | 33 | - | **test-only** |
-| `load_notebook_scale_facts` | 892 | `_runtime.queries.load_notebook_scale_facts` | delegate | 0 | 0 | 0 | 0 | 2 | - | **ambiguous** |
-| `mark_notebook_base` | 1283 | `_runtime.catalog.mark_notebook_base` | delegate | 0 | 0 | 1 | 173 | 2 | - | **keep** |
-| `maybe_auto_index` | 3447 | `_runtime.scale_artifacts.maybe_auto_index` | delegate | 0 | 1 | 0 | 13 | 8 | - | **keep** |
-| `memory_kg_eligible` | 1446 | `_runtime.source_ingestion.memory_kg_eligible` | delegate | 3 | 0 | 0 | 2 | 6 | - | **keep** |
-| `merge_knowledge` | 3179 | `_runtime.knowledge_governance.merge_knowledge` | delegate | 1 | 0 | 1 | 11 | 0 | - | **keep** |
-| `merge_review_job_status` | 2749 | `_runtime.knowledge_governance.merge_review_job_status` | delegate | 2 | 0 | 0 | 4 | 0 | - | **keep** |
-| `mountable_notebooks` | 1292 | `_runtime.notebook_store.mountable_for_notebook` | delegate | 2 | 0 | 0 | 7 | 2 | - | **keep** |
-| `mounted_by_count` | 1295 | `_runtime.notebook_store.mounted_by_count_for_notebook` | delegate | 1 | 0 | 0 | 6 | 2 | - | **keep** |
-| `node_context` | 3029 | `_runtime.knowledge_query.node_context` | delegate | 1 | 0 | 1 | 63 | 43 | - | **keep** |
-| `notebook_analytics` | 4250 | `_runtime.catalog.notebook_analytics` | delegate | 0 | 0 | 1 | 13 | 4 | - | **keep** |
-| `notebook_copy_stats` | 1523 | `_runtime.scale_artifacts.notebook_copy_stats` | delegate | 0 | 2 | 0 | 15 | 26 | - | **keep** |
-| `notebook_exists_for_owner` | 864 | `_runtime.queries.notebook_exists_for_owner` | delegate | 0 | 0 | 0 | 10 | 1 | - | **test-only** |
+| `guarded_ask_detail` | 3968 | `_runtime.ask_state.guarded_ask_detail` | delegate | 1 | 0 | 0 | 8 | 8 | - | **keep** |
+| `guarded_report_detail` | 4122 | `_runtime.report_store.guarded_report_detail` | delegate | 1 | 0 | 0 | 13 | 18 | - | **keep** |
+| `hidden_source_ids` | 1786 | `_runtime.source_store.hidden_source_ids` | delegate | 1 | 0 | 0 | 6 | 27 | - | **keep** |
+| `import_sources` | 1829 | `_runtime.source_ingestion.import_sources_compat` | adapter | 1 | 0 | 0 | 4 | 1 | - | **keep** |
+| `incremental_fuse_source` | 2526 | `_runtime.knowledge_lifecycle.incremental_fuse_source` | delegate | 0 | 0 | 0 | 56 | 10 | - | **test-only** |
+| `index_status` | 3351 | `_runtime.scale_artifacts.index_status` | delegate | 1 | 0 | 0 | 5 | 0 | - | **keep** |
+| `indexing_pipeline_options` | 1643 | `_runtime.indexing_pipeline.projection` | delegate | 1 | 0 | 0 | 2 | 0 | - | **keep** |
+| `insert_notebook_asset` | 4366 | `_runtime.knowhow_store.insert_notebook_asset` | delegate | 2 | 0 | 0 | 2 | 5 | - | **keep** |
+| `is_member` | 1517 | `_runtime.sharing.is_member` | delegate | 0 | 0 | 0 | 35 | 12 | - | **test-only** |
+| `issue_agent_token` | 1299 | `_runtime.memory_service.issue_agent_token` | delegate | 1 | 0 | 3 | 18 | 14 | - | **keep** |
+| `join_shared` | 1541 | `_runtime.sharing.join_shared` | delegate | 0 | 0 | 0 | 1 | 10 | - | **test-only** |
+| `kg_analysis` (property) | 1071 | `_runtime.kg_analysis` | delegate | 0 | 0 | 0 | 0 | 0 | - | **keep** |
+| `kg_delete_status` | 2919 | `_runtime.knowledge_lifecycle.kg_delete_status` | delegate | 1 | 0 | 0 | 13 | 1 | - | **keep** |
+| `kg_neighbors` | 2830 | `_runtime.knowledge_lifecycle.kg_neighbors` | delegate | 1 | 0 | 0 | 49 | 17 | - | **keep** |
+| `kg_search` | 1611 | `_runtime.knowledge_query.search` | delegate | 1 | 0 | 0 | 19 | 1 | - | **keep** |
+| `kick_all_members` | 1535 | `_runtime.sharing.kick_all_members` | delegate | 0 | 0 | 0 | 3 | 1 | - | **test-only** |
+| `knowhow_cell_history` | 4504 | `_runtime.knowhow_history_store.cell_history` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
+| `knowhow_changes_between` | 4497 | `_runtime.knowhow_history_store.changes_between` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
+| `knowhow_history_page` | 4487 | `_runtime.knowhow_history_store.history_page` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
+| `knowledge_graph` | 2304 | `_runtime.knowledge_query.graph` | delegate | 1 | 0 | 3 | 8 | 0 | - | **keep** |
+| `knowledge_types` | 2206 | `_runtime.knowledge_query.knowledge_types` | delegate | 1 | 0 | 4 | 2 | 0 | - | **keep** |
+| `leave_notebook` | 1544 | `_runtime.sharing.leave_notebook` | delegate | 0 | 0 | 0 | 1 | 3 | - | **test-only** |
+| `list_agent_profiles` | 1281 | `_runtime.memory_service.list_agent_profiles` | delegate | 3 | 0 | 0 | 0 | 6 | - | **keep** |
+| `list_agent_tokens` | 1317 | `_runtime.memory_service.list_agent_tokens` | delegate | 1 | 0 | 0 | 0 | 18 | - | **keep** |
+| `list_communities` | 2955 | `_runtime.knowledge_lifecycle.list_communities` | delegate | 0 | 0 | 0 | 4 | 0 | - | **test-only** |
+| `list_conversations` | 3991 | `_runtime.ask_component.list_conversations_current` | delegate | 1 | 0 | 3 | 12 | 16 | - | **keep** |
+| `list_knowhow_cell_code` | 4480 | `_runtime.knowhow_store.list_knowhow_cell_code` | delegate | 4 | 0 | 0 | 0 | 0 | - | **keep** |
+| `list_knowhow_tables` | 4293 | `_runtime.knowhow_store.list_knowhow_tables` | delegate | 1 | 0 | 1 | 37 | 7 | - | **keep** |
+| `list_knowledge` | 2220 | `_runtime.knowledge_query.list_knowledge` | delegate | 1 | 0 | 14 | 18 | 0 | - | **keep** |
+| `list_members` | 1538 | `_runtime.sharing.list_members` | delegate | 0 | 0 | 0 | 4 | 14 | - | **test-only** |
+| `list_memories` | 1440 | `_runtime.memory_service.list_memories` | delegate | 2 | 0 | 0 | 2 | 16 | - | **keep** |
+| `list_notebook_bases` | 1252 | `_runtime.notebook_store.list_mount_edges_for_notebook` | delegate | 3 | 0 | 0 | 12 | 0 | - | **keep** |
+| `list_notebook_object_schemas` | 2253 | `_runtime.schema_registry.list_notebook_object_schemas` | delegate | 1 | 0 | 0 | 2 | 3 | - | **keep** |
+| `list_notebooks` | 1234 | `_runtime.catalog.list_notebooks` | delegate | 0 | 0 | 1 | 16 | 1 | - | **keep** |
+| `list_object_schemas` | 2250 | `_runtime.schema_registry.list_object_schemas` | delegate | 1 | 0 | 3 | 1 | 0 | - | **keep** |
+| `list_promotion_queue` | 3042 | `_runtime.knowledge_governance.list_promotion_queue` | delegate | 1 | 0 | 0 | 15 | 0 | - | **keep** |
+| `list_reports` | 4130 | `_runtime.report_store.list_reports` | delegate | 1 | 0 | 1 | 5 | 0 | - | **keep** |
+| `list_sources` | 1624 | `_runtime.source_ingestion.list_sources` | delegate | 0 | 0 | 3 | 47 | 8 | - | **keep** |
+| `list_sources_page` | 1627 | `_runtime.source_ingestion.list_sources_page` | delegate | 3 | 0 | 0 | 14 | 8 | - | **keep** |
+| `load_notebook_scale_facts` | 858 | `_runtime.queries.load_notebook_scale_facts` | delegate | 0 | 0 | 0 | 0 | 2 | - | **ambiguous** |
+| `mark_notebook_base` | 1246 | `_runtime.catalog.mark_notebook_base` | delegate | 0 | 0 | 1 | 173 | 2 | - | **keep** |
+| `maybe_auto_index` | 3410 | `_runtime.scale_artifacts.maybe_auto_index` | delegate | 0 | 1 | 0 | 13 | 8 | - | **keep** |
+| `memory_kg_eligible` | 1409 | `_runtime.source_ingestion.memory_kg_eligible` | delegate | 3 | 0 | 0 | 2 | 6 | - | **keep** |
+| `merge_knowledge` | 3142 | `_runtime.knowledge_governance.merge_knowledge` | delegate | 1 | 0 | 1 | 11 | 0 | - | **keep** |
+| `merge_review_job_status` | 2712 | `_runtime.knowledge_governance.merge_review_job_status` | delegate | 2 | 0 | 0 | 4 | 0 | - | **keep** |
+| `mountable_notebooks` | 1255 | `_runtime.notebook_store.mountable_for_notebook` | delegate | 2 | 0 | 0 | 7 | 2 | - | **keep** |
+| `mounted_by_count` | 1258 | `_runtime.notebook_store.mounted_by_count_for_notebook` | delegate | 1 | 0 | 0 | 6 | 2 | - | **keep** |
+| `node_context` | 2992 | `_runtime.knowledge_query.node_context` | delegate | 1 | 0 | 1 | 63 | 43 | - | **keep** |
+| `notebook_analytics` | 4187 | `_runtime.catalog.notebook_analytics` | delegate | 0 | 0 | 1 | 13 | 4 | - | **keep** |
+| `notebook_copy_stats` | 1486 | `_runtime.scale_artifacts.notebook_copy_stats` | delegate | 0 | 2 | 0 | 15 | 26 | - | **keep** |
 | `notebook_owner` | 855 | `_runtime.identity.notebook_owner` | delegate | 1 | 0 | 0 | 2 | 2 | - | **keep** |
-| `notebook_relink_status` | 2406 | `_runtime.knowledge_lifecycle.notebook_relink_status` | delegate | 1 | 0 | 0 | 13 | 2 | - | **keep** |
-| `parallelism` | 904 | `_runtime.models.parallelism` | delegate | 1 | 0 | 0 | 0 | 18 | - | **keep** |
-| `parse_source` | 1998 | `_runtime.source_ingestion.parse_source_compat` | adapter | 2 | 0 | 2 | 1 | 1 | - | **keep** |
-| `participant_notebook_ids` | 3841 | `_runtime.notebook_store.participant_notebook_ids` | delegate | 4 | 0 | 0 | 18 | 20 | - | **keep** |
-| `pending_actions` | 4230 | `_runtime.pending_actions_service.list_for_user` | delegate | 3 | 0 | 0 | 27 | 0 | - | **keep** |
-| `pending_actions_projection_rows` | 895 | `_runtime.queries.pending_actions_projection_rows` | delegate | 0 | 0 | 0 | 1 | 12 | - | **test-only** |
-| `pending_conflicts` | 2665 | `_runtime.knowledge_governance.pending_conflicts` | delegate | 1 | 0 | 0 | 15 | 1 | - | **keep** |
-| `pending_merges` | 2597 | `_runtime.knowledge_governance.pending_merges` | delegate | 1 | 0 | 0 | 16 | 2 | - | **keep** |
-| `prepare_notebook_kg_job` | 4611 | `_runtime.knowledge_lifecycle.prepare_notebook_kg_job` | adapter | 3 | 0 | 0 | 53 | 9 | - | **keep** |
-| `preview_reasoning_intent` | 3735 | `_runtime.ask_component.preview_reasoning_intent` | delegate | 3 | 0 | 0 | 0 | 1 | - | **keep** |
-| `process_source` | 1964 | `_runtime.source_ingestion.process_source_compat` | adapter | 9 | 0 | 2 | 56 | 6 | - | **keep** |
-| `propose_memory_promotion` | 1498 | `_runtime.memory_service.propose_promotion` | delegate | 1 | 0 | 0 | 29 | 2 | - | **keep** |
-| `propose_promotion` | 3062 | `_runtime.knowledge_governance.propose_promotion` | delegate | 1 | 0 | 0 | 52 | 2 | - | **keep** |
-| `propose_schemas` | 2334 | `_runtime.schema_registry.propose_schemas` | delegate | 1 | 0 | 1 | 10 | 0 | - | **keep** |
-| `prune_knowhow_history` | 4594 | `_runtime.knowhow_history_store.prune` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
-| `public_conversation_by_token` | 4123 | `_runtime.ask_state.public_conversation_by_token` | delegate | 2 | 0 | 0 | 0 | 35 | - | **keep** |
-| `public_report_by_token` | 4220 | `_runtime.report_store.public_report_by_token` | delegate | 1 | 0 | 0 | 0 | 15 | - | **keep** |
-| `rebuild_canonical_relations` | 2972 | `_runtime.knowledge_lifecycle.rebuild_canonical_relations` | delegate | 0 | 0 | 0 | 9 | 2 | - | **test-only** |
-| `rebuild_communities` | 2986 | `_runtime.knowledge_lifecycle.rebuild_communities` | delegate | 0 | 0 | 0 | 96 | 2 | - | **test-only** |
-| `rebuild_mention_bridge` | 2979 | `_runtime.knowledge_lifecycle.rebuild_mention_bridge` | delegate | 0 | 0 | 0 | 7 | 2 | - | **test-only** |
-| `rebuild_notebook_kg` | 1951 | `_runtime.knowledge_lifecycle.rebuild_notebook_kg` | adapter | 0 | 0 | 0 | 5 | 1 | - | **test-only** |
-| `rebuild_unified_kg` | 2914 | `_runtime.knowledge_lifecycle.rebuild_unified_kg` | adapter | 4 | 0 | 2 | 276 | 3 | - | **keep** |
-| `refresh_agent_principal` | 1395 | `_runtime.memory_service.refresh_agent_principal` | delegate | 3 | 0 | 0 | 0 | 5 | - | **keep** |
-| `reject_conflict` | 2720 | `_runtime.knowledge_governance.reject_conflict` | delegate | 1 | 0 | 0 | 1 | 0 | - | **keep** |
-| `reject_memory` | 1462 | `_runtime.memory_service.reject` | delegate | 1 | 0 | 0 | 3 | 0 | - | **keep** |
-| `reject_merge` | 2627 | `_runtime.knowledge_governance.reject_merge` | delegate | 1 | 0 | 0 | 5 | 0 | - | **keep** |
-| `reject_promotion` | 3118 | `_runtime.knowledge_governance.reject_promotion` | delegate | 0 | 0 | 0 | 12 | 0 | - | **test-only** |
-| `reject_promotion_as_reviewer` | 3125 | `_runtime.knowledge_governance.reject_promotion` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
-| `relations_for_notebook` | 2458 | `_runtime.knowledge_query.relations_for_notebook` | delegate | 0 | 1 | 0 | 20 | 14 | - | **keep** |
-| `relink_notebook_kg` | 2395 | `_runtime.knowledge_lifecycle.relink_notebook_kg` | adapter | 0 | 0 | 0 | 20 | 3 | - | **test-only** |
-| `remove_member` | 1569 | `_runtime.sharing.remove_member` | delegate | 0 | 0 | 0 | 25 | 27 | - | **test-only** |
-| `rename_conversation` | 4059 | `_runtime.ask_state.rename_conversation` | delegate | 1 | 0 | 1 | 1 | 1 | - | **keep** |
-| `rename_knowhow_column` | 4491 | `_runtime.knowhow_store.rename_knowhow_column` | delegate | 1 | 0 | 0 | 0 | 2 | - | **keep** |
-| `replace_notebook_bases` | 1298 | `_runtime.notebook_store.replace_mounts` | delegate | 1 | 0 | 0 | 144 | 4 | - | **keep** |
-| `report_execution` (property) | 4224 | `_runtime.report_execution` | delegate | 0 | 0 | 0 | 0 | 0 | - | **keep** |
-| `report_share_token` | 4217 | `_runtime.report_store.report_share_token` | delegate | 1 | 0 | 0 | 6 | 1 | - | **keep** |
-| `report_source_identity_rows` | 1853 | `_runtime.source_store.report_source_identity_rows` | delegate | 0 | 0 | 0 | 0 | 4 | - | **ambiguous** |
-| `report_source_rows` | 1843 | `_runtime.source_store.report_source_rows` | delegate | 0 | 0 | 0 | 0 | 12 | - | **ambiguous** |
-| `require_agent_access` | 1398 | `_runtime.memory_service.require_agent_access` | delegate | 6 | 0 | 0 | 0 | 18 | - | **keep** |
-| `require_indexing_pipeline_write` | 1819 | `_runtime.indexing_pipeline.require_write_admission` | delegate | 5 | 22 | 0 | 2 | 0 | - | **keep** |
-| `resolve_agent_token` | 1387 | `_runtime.memory_service.resolve_agent_token` | delegate | 1 | 0 | 0 | 1 | 23 | - | **keep** |
-| `resolve_agent_token_status` | 1390 | `_runtime.memory_service.resolve_agent_token_status` | delegate | 0 | 0 | 0 | 0 | 21 | - | **ambiguous** |
-| `resolve_notebook_conflicts` | 2728 | `_runtime.knowledge_governance.resolve_notebook_conflicts` | delegate | 0 | 0 | 0 | 24 | 4 | - | **test-only** |
-| `resolve_reasoning_followup` | 3756 | `_runtime.ask_component.resolve_reasoning_followup` | delegate | 1 | 0 | 0 | 0 | 1 | - | **keep** |
+| `notebook_relink_status` | 2369 | `_runtime.knowledge_lifecycle.notebook_relink_status` | delegate | 1 | 0 | 0 | 13 | 2 | - | **keep** |
+| `parallelism` | 867 | `_runtime.models.parallelism` | delegate | 1 | 0 | 0 | 0 | 18 | - | **keep** |
+| `parse_source` | 1961 | `_runtime.source_ingestion.parse_source_compat` | adapter | 2 | 0 | 2 | 1 | 1 | - | **keep** |
+| `participant_notebook_ids` | 3793 | `_runtime.notebook_store.participant_notebook_ids` | delegate | 4 | 0 | 0 | 18 | 20 | - | **keep** |
+| `pending_actions` | 4167 | `_runtime.pending_actions_service.list_for_user` | delegate | 3 | 0 | 0 | 27 | 0 | - | **keep** |
+| `pending_conflicts` | 2628 | `_runtime.knowledge_governance.pending_conflicts` | delegate | 1 | 0 | 0 | 15 | 1 | - | **keep** |
+| `pending_merges` | 2560 | `_runtime.knowledge_governance.pending_merges` | delegate | 1 | 0 | 0 | 16 | 2 | - | **keep** |
+| `prepare_notebook_kg_job` | 4548 | `_runtime.knowledge_lifecycle.prepare_notebook_kg_job` | adapter | 3 | 0 | 0 | 53 | 9 | - | **keep** |
+| `preview_reasoning_intent` | 3687 | `_runtime.ask_component.preview_reasoning_intent` | delegate | 3 | 0 | 0 | 0 | 1 | - | **keep** |
+| `process_source` | 1927 | `_runtime.source_ingestion.process_source_compat` | adapter | 9 | 0 | 2 | 56 | 6 | - | **keep** |
+| `propose_memory_promotion` | 1461 | `_runtime.memory_service.propose_promotion` | delegate | 1 | 0 | 0 | 29 | 2 | - | **keep** |
+| `propose_promotion` | 3025 | `_runtime.knowledge_governance.propose_promotion` | delegate | 1 | 0 | 0 | 52 | 2 | - | **keep** |
+| `propose_schemas` | 2297 | `_runtime.schema_registry.propose_schemas` | delegate | 1 | 0 | 1 | 10 | 0 | - | **keep** |
+| `prune_knowhow_history` | 4531 | `_runtime.knowhow_history_store.prune` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
+| `public_conversation_by_token` | 4060 | `_runtime.ask_state.public_conversation_by_token` | delegate | 2 | 0 | 0 | 0 | 35 | - | **keep** |
+| `public_report_by_token` | 4157 | `_runtime.report_store.public_report_by_token` | delegate | 1 | 0 | 0 | 0 | 15 | - | **keep** |
+| `rebuild_canonical_relations` | 2935 | `_runtime.knowledge_lifecycle.rebuild_canonical_relations` | delegate | 0 | 0 | 0 | 9 | 2 | - | **test-only** |
+| `rebuild_communities` | 2949 | `_runtime.knowledge_lifecycle.rebuild_communities` | delegate | 0 | 0 | 0 | 96 | 2 | - | **test-only** |
+| `rebuild_mention_bridge` | 2942 | `_runtime.knowledge_lifecycle.rebuild_mention_bridge` | delegate | 0 | 0 | 0 | 7 | 2 | - | **test-only** |
+| `rebuild_notebook_kg` | 1914 | `_runtime.knowledge_lifecycle.rebuild_notebook_kg` | adapter | 0 | 0 | 0 | 5 | 1 | - | **test-only** |
+| `rebuild_unified_kg` | 2877 | `_runtime.knowledge_lifecycle.rebuild_unified_kg` | adapter | 4 | 0 | 2 | 276 | 3 | - | **keep** |
+| `refresh_agent_principal` | 1358 | `_runtime.memory_service.refresh_agent_principal` | delegate | 3 | 0 | 0 | 0 | 5 | - | **keep** |
+| `reject_conflict` | 2683 | `_runtime.knowledge_governance.reject_conflict` | delegate | 1 | 0 | 0 | 1 | 0 | - | **keep** |
+| `reject_memory` | 1425 | `_runtime.memory_service.reject` | delegate | 1 | 0 | 0 | 3 | 0 | - | **keep** |
+| `reject_merge` | 2590 | `_runtime.knowledge_governance.reject_merge` | delegate | 1 | 0 | 0 | 5 | 0 | - | **keep** |
+| `reject_promotion` | 3081 | `_runtime.knowledge_governance.reject_promotion` | delegate | 0 | 0 | 0 | 12 | 0 | - | **test-only** |
+| `reject_promotion_as_reviewer` | 3088 | `_runtime.knowledge_governance.reject_promotion` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
+| `relations_for_notebook` | 2421 | `_runtime.knowledge_query.relations_for_notebook` | delegate | 0 | 1 | 0 | 20 | 14 | - | **keep** |
+| `relink_notebook_kg` | 2358 | `_runtime.knowledge_lifecycle.relink_notebook_kg` | adapter | 0 | 0 | 0 | 20 | 3 | - | **test-only** |
+| `remove_member` | 1532 | `_runtime.sharing.remove_member` | delegate | 0 | 0 | 0 | 25 | 27 | - | **test-only** |
+| `rename_conversation` | 3996 | `_runtime.ask_state.rename_conversation` | delegate | 1 | 0 | 1 | 1 | 1 | - | **keep** |
+| `rename_knowhow_column` | 4428 | `_runtime.knowhow_store.rename_knowhow_column` | delegate | 1 | 0 | 0 | 0 | 2 | - | **keep** |
+| `replace_notebook_bases` | 1261 | `_runtime.notebook_store.replace_mounts` | delegate | 1 | 0 | 0 | 144 | 4 | - | **keep** |
+| `report_execution` (property) | 4161 | `_runtime.report_execution` | delegate | 0 | 0 | 0 | 0 | 0 | - | **keep** |
+| `report_share_token` | 4154 | `_runtime.report_store.report_share_token` | delegate | 1 | 0 | 0 | 6 | 1 | - | **keep** |
+| `report_source_identity_rows` | 1816 | `_runtime.source_store.report_source_identity_rows` | delegate | 0 | 0 | 0 | 0 | 4 | - | **ambiguous** |
+| `report_source_rows` | 1806 | `_runtime.source_store.report_source_rows` | delegate | 0 | 0 | 0 | 0 | 12 | - | **ambiguous** |
+| `require_agent_access` | 1361 | `_runtime.memory_service.require_agent_access` | delegate | 6 | 0 | 0 | 0 | 18 | - | **keep** |
+| `require_indexing_pipeline_write` | 1782 | `_runtime.indexing_pipeline.require_write_admission` | delegate | 5 | 22 | 0 | 2 | 0 | - | **keep** |
+| `resolve_agent_token` | 1350 | `_runtime.memory_service.resolve_agent_token` | delegate | 1 | 0 | 0 | 1 | 23 | - | **keep** |
+| `resolve_agent_token_status` | 1353 | `_runtime.memory_service.resolve_agent_token_status` | delegate | 0 | 0 | 0 | 0 | 21 | - | **ambiguous** |
+| `resolve_notebook_conflicts` | 2691 | `_runtime.knowledge_governance.resolve_notebook_conflicts` | delegate | 0 | 0 | 0 | 24 | 4 | - | **test-only** |
+| `resolve_reasoning_followup` | 3708 | `_runtime.ask_component.resolve_reasoning_followup` | delegate | 1 | 0 | 0 | 0 | 1 | - | **keep** |
 | `resolve_session` | 834 | `_runtime.identity.resolve_session` | delegate | 2 | 0 | 0 | 8 | 54 | - | **keep** |
-| `retrieval` (property) | 3540 | `_runtime.retrieval_component` | delegate | 0 | 55 | 0 | 0 | 6 | - | **keep** |
-| `retrieval_experiences` (property) | 1144 | `_runtime.retrieval_experiences` | delegate | 0 | 0 | 0 | 0 | 0 | - | **keep** |
-| `revert_knowhow_table` | 4574 | `_runtime.knowhow_history_store.revert_to` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
-| `review_pending_merges` | 2734 | `_runtime.knowledge_governance.review_pending_merges` | delegate | 1 | 0 | 0 | 10 | 1 | - | **keep** |
-| `review_queue` | 2513 | `_runtime.knowledge_governance.review_queue` | delegate | 0 | 0 | 0 | 60 | 2 | - | **test-only** |
-| `review_queue_page` | 2519 | `_runtime.knowledge_governance.review_queue_page` | delegate | 1 | 0 | 0 | 22 | 0 | - | **keep** |
-| `revoke_agent_token` | 1359 | `_runtime.memory_service.revoke_agent_token` | delegate | 1 | 0 | 0 | 5 | 16 | - | **keep** |
-| `run_conflict_resolution_job` | 2442 | `_runtime.knowledge_lifecycle.run_conflict_resolution_job` | adapter | 1 | 0 | 0 | 4 | 2 | - | **keep** |
-| `run_kg_delete_job` | 2960 | `_runtime.knowledge_lifecycle.run_kg_delete_job` | delegate | 1 | 0 | 0 | 6 | 1 | - | **keep** |
-| `run_merge_review_job` | 2752 | `_runtime.knowledge_governance.run_merge_review_job` | delegate | 1 | 0 | 0 | 4 | 0 | - | **keep** |
-| `run_notebook_relink_job` | 2410 | `_runtime.knowledge_lifecycle.run_notebook_relink_job` | adapter | 1 | 0 | 0 | 6 | 2 | - | **keep** |
-| `run_unified_kg_rebuild_job` | 2935 | `_runtime.knowledge_lifecycle.run_unified_kg_rebuild_job` | adapter | 2 | 0 | 0 | 5 | 1 | - | **keep** |
-| `scale_index_status` | 3384 | `_runtime.scale_artifacts.status` | delegate | 4 | 0 | 0 | 35 | 0 | - | **keep** |
-| `search_notebook` | 3191 | `_runtime.catalog.search_notebook` | delegate | 1 | 0 | 3 | 15 | 7 | - | **keep** |
-| `set_conflict_status` | 2669 | `_runtime.knowledge_governance.set_conflict_status` | delegate | 0 | 1 | 0 | 7 | 1 | - | **keep** |
-| `set_edge_review` | 2530 | `_runtime.knowledge_governance.set_edge_review` | delegate | 1 | 0 | 0 | 32 | 2 | - | **keep** |
-| `set_indexing_pipeline` | 1684 | `<complex>` | adapter | 1 | 0 | 0 | 5 | 0 | - | **keep** |
-| `set_knowhow_anchor_column` | 4475 | `_runtime.knowhow_store.set_knowhow_anchor_column` | delegate | 1 | 0 | 0 | 3 | 3 | - | **keep** |
-| `set_knowhow_column_kind` | 4498 | `_runtime.knowhow_store.set_knowhow_column_kind` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
-| `set_knowhow_hidden_source` | 4421 | `_runtime.knowhow_store.set_knowhow_hidden_source` | delegate | 0 | 0 | 0 | 0 | 2 | - | **ambiguous** |
-| `set_merge_decision` | 2614 | `_runtime.knowledge_governance.set_merge_decision` | delegate | 0 | 0 | 0 | 4 | 2 | - | **test-only** |
-| `set_notebook_personal` | 1286 | `_runtime.catalog.set_notebook_personal` | delegate | 0 | 0 | 2 | 12 | 1 | - | **keep** |
-| `share_conversation` | 4094 | `_runtime.ask_state.share_conversation` | delegate | 1 | 0 | 0 | 0 | 65 | - | **keep** |
-| `share_notebook` | 1511 | `_runtime.sharing.share_notebook` | delegate | 0 | 0 | 0 | 8 | 1 | - | **test-only** |
-| `share_report` | 4207 | `_runtime.report_store.share_report` | delegate | 1 | 0 | 0 | 6 | 14 | - | **keep** |
-| `share_state` | 1514 | `_runtime.sharing.share_state` | delegate | 0 | 0 | 0 | 0 | 1 | - | **ambiguous** |
-| `shared_by_me` | 1529 | `_runtime.sharing.shared_by_me` | delegate | 0 | 0 | 1 | 1 | 2 | - | **keep** |
-| `shared_preview` | 1526 | `_runtime.sharing.shared_preview` | delegate | 0 | 0 | 1 | 4 | 1 | - | **keep** |
-| `source_elements` | 2028 | `_runtime.source_store.source_elements` | delegate | 2 | 1 | 10 | 23 | 10 | - | **keep** |
-| `source_elements_page` | 2031 | `_runtime.source_store.source_elements_page` | delegate | 2 | 0 | 0 | 0 | 2 | - | **keep** |
-| `source_id_by_hash` | 2042 | `_runtime.source_store.source_id_by_hash` | delegate | 1 | 0 | 0 | 0 | 14 | - | **keep** |
-| `source_metadata` | 2056 | `_runtime.source_store.source_metadata` | delegate | 3 | 0 | 0 | 0 | 9 | - | **keep** |
-| `source_notebook_id` | 1587 | `_runtime.sharing.source_notebook_id` | delegate | 1 | 0 | 0 | 0 | 14 | - | **keep** |
-| `source_owner` | 1584 | `_runtime.sharing.source_owner` | delegate | 0 | 0 | 0 | 0 | 1 | - | **ambiguous** |
-| `source_parse_busy` | 1969 | `<complex>` | adapter | 1 | 0 | 0 | 0 | 0 | - | **keep** |
-| `sources_missing_paper_meta` | 4449 | `_runtime.source_store.sources_missing_paper_meta` | delegate | 1 | 0 | 0 | 0 | 1 | - | **keep** |
-| `start_ask_stream` | 4312 | `_runtime.ask_execution.start` | adapter | 2 | 0 | 0 | 1 | 0 | - | **keep** |
-| `start_conflict_resolution` | 2431 | `_runtime.knowledge_lifecycle.start_conflict_resolution` | adapter | 1 | 0 | 0 | 14 | 2 | - | **keep** |
-| `start_kg_delete` | 2952 | `_runtime.knowledge_lifecycle.start_kg_delete` | delegate | 1 | 0 | 0 | 11 | 1 | - | **keep** |
-| `start_notebook_relink` | 2401 | `_runtime.knowledge_lifecycle.start_notebook_relink` | adapter | 1 | 0 | 0 | 23 | 5 | - | **keep** |
-| `start_unified_kg_rebuild` | 2926 | `_runtime.knowledge_lifecycle.start_unified_kg_rebuild` | adapter | 2 | 0 | 0 | 22 | 1 | - | **keep** |
-| `storage_dir` (property+setter) | 4294 | `_runtime.storage_dir` | delegate | 0 | 2 | 0 | 0 | 0 | - | **keep** |
-| `store_kg` | 2386 | `_runtime.knowledge_lifecycle.store_kg` | delegate | 0 | 0 | 6 | 440 | 22 | - | **keep** |
-| `submit_feedback` | 4247 | `_runtime.ask_state.submit_feedback` | delegate | 1 | 0 | 2 | 0 | 8 | - | **keep** |
-| `transfer_memories` | 4598 | `_runtime.memory_service.transfer` | delegate | 1 | 0 | 0 | 28 | 0 | - | **keep** |
-| `trigger_scale_index_rebuild` | 3420 | `_runtime.scale_artifacts.trigger` | adapter | 2 | 0 | 0 | 6 | 0 | - | **keep** |
-| `unified_graph` | 2842 | `_runtime.knowledge_lifecycle.unified_graph` | delegate | 1 | 0 | 0 | 72 | 2 | - | **keep** |
-| `unified_kg_rebuild_status` | 2931 | `_runtime.knowledge_lifecycle.unified_kg_rebuild_status` | delegate | 1 | 0 | 0 | 11 | 1 | - | **keep** |
-| `unified_kg_status` | 2823 | `_runtime.knowledge_lifecycle.unified_kg_status` | delegate | 2 | 0 | 1 | 11 | 2 | - | **keep** |
-| `unshare_conversation` | 4117 | `_runtime.ask_state.unshare_conversation` | delegate | 1 | 0 | 0 | 0 | 7 | - | **keep** |
-| `unshare_notebook` | 1517 | `_runtime.sharing.unshare_notebook` | delegate | 0 | 0 | 0 | 4 | 1 | - | **test-only** |
-| `unshare_report` | 4214 | `_runtime.report_store.unshare_report` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
-| `update_agent_profile` | 1326 | `_runtime.memory_service.update_agent_profile` | delegate | 1 | 0 | 0 | 1 | 12 | - | **keep** |
-| `update_agent_token_access` | 1364 | `_runtime.memory_service.update_agent_token_access` | delegate | 1 | 0 | 0 | 1 | 26 | - | **keep** |
-| `update_knowhow_cell` | 4377 | `_runtime.knowhow_store.update_knowhow_cell` | delegate | 1 | 0 | 0 | 14 | 34 | - | **keep** |
-| `update_knowhow_cells` | 4386 | `_runtime.knowhow_store.update_knowhow_cells` | delegate | 1 | 0 | 0 | 1 | 3 | - | **keep** |
-| `update_knowhow_cells_bulk_guarded` | 4395 | `_runtime.knowhow_store.update_knowhow_cells_bulk_guarded` | delegate | 0 | 0 | 1 | 0 | 3 | - | **keep** |
-| `update_knowhow_cells_guarded_atomic` | 4403 | `_runtime.knowhow_store.update_knowhow_cells_guarded_atomic` | delegate | 2 | 0 | 0 | 0 | 4 | - | **keep** |
-| `update_knowhow_table_meta` | 4466 | `_runtime.knowhow_store.update_knowhow_table_meta` | delegate | 1 | 0 | 0 | 4 | 1 | - | **keep** |
-| `update_knowledge` | 3133 | `_runtime.knowledge_governance.update_knowledge` | delegate | 1 | 0 | 5 | 11 | 2 | - | **keep** |
-| `update_memory` | 1449 | `_runtime.memory_service.update` | delegate | 1 | 0 | 0 | 2 | 0 | - | **keep** |
-| `update_notebook` | 1280 | `_runtime.catalog.update_notebook` | delegate | 0 | 0 | 1 | 3 | 1 | - | **keep** |
-| `update_notebook_object_schema` | 2304 | `_runtime.schema_registry.update_notebook_object_schema` | delegate | 1 | 0 | 0 | 2 | 0 | - | **keep** |
-| `update_object_schema` | 2326 | `_runtime.schema_registry.update_object_schema` | delegate | 1 | 0 | 2 | 5 | 0 | - | **keep** |
-| `update_report` | 4148 | `_runtime.report_store.update_report` | delegate | 3 | 0 | 1 | 67 | 64 | - | **keep** |
-| `upload_sources` | 1885 | `_runtime.source_ingestion.upload_sources_compat` | adapter | 5 | 0 | 7 | 46 | 5 | - | **keep** |
-| `upsert_knowhow_cell_code` | 4522 | `_runtime.knowhow_store.upsert_knowhow_cell_code` | delegate | 1 | 0 | 0 | 5 | 5 | - | **keep** |
-| `user_can_access_notebook` | 1551 | `_runtime.sharing.user_can_access_notebook` | delegate | 1 | 0 | 0 | 15 | 9 | - | **keep** |
-| `user_can_admin_notebook` | 1557 | `_runtime.sharing.user_can_admin_notebook` | delegate | 0 | 0 | 0 | 23 | 8 | - | **test-only** |
-| `user_can_read_answer` | 1604 | `_runtime.sharing.user_can_read_answer` | delegate | 0 | 0 | 0 | 3 | 0 | - | **test-only** |
-| `user_can_read_notebook` | 1560 | `_runtime.sharing.user_can_read_notebook` | delegate | 5 | 0 | 0 | 39 | 21 | - | **keep** |
-| `user_can_read_source` | 1563 | `_runtime.sharing.user_can_read_source` | delegate | 0 | 0 | 0 | 3 | 4 | - | **test-only** |
+| `retrieval` (property) | 3503 | `_runtime.retrieval_component` | delegate | 0 | 55 | 0 | 0 | 6 | - | **keep** |
+| `retrieval_experiences` (property) | 1107 | `_runtime.retrieval_experiences` | delegate | 0 | 0 | 0 | 0 | 0 | - | **keep** |
+| `revert_knowhow_table` | 4511 | `_runtime.knowhow_history_store.revert_to` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
+| `review_pending_merges` | 2697 | `_runtime.knowledge_governance.review_pending_merges` | delegate | 1 | 0 | 0 | 10 | 1 | - | **keep** |
+| `review_queue` | 2476 | `_runtime.knowledge_governance.review_queue` | delegate | 0 | 0 | 0 | 60 | 2 | - | **test-only** |
+| `review_queue_page` | 2482 | `_runtime.knowledge_governance.review_queue_page` | delegate | 1 | 0 | 0 | 22 | 0 | - | **keep** |
+| `revoke_agent_token` | 1322 | `_runtime.memory_service.revoke_agent_token` | delegate | 1 | 0 | 0 | 5 | 16 | - | **keep** |
+| `run_conflict_resolution_job` | 2405 | `_runtime.knowledge_lifecycle.run_conflict_resolution_job` | adapter | 1 | 0 | 0 | 4 | 2 | - | **keep** |
+| `run_kg_delete_job` | 2923 | `_runtime.knowledge_lifecycle.run_kg_delete_job` | delegate | 1 | 0 | 0 | 6 | 1 | - | **keep** |
+| `run_merge_review_job` | 2715 | `_runtime.knowledge_governance.run_merge_review_job` | delegate | 1 | 0 | 0 | 4 | 0 | - | **keep** |
+| `run_notebook_relink_job` | 2373 | `_runtime.knowledge_lifecycle.run_notebook_relink_job` | adapter | 1 | 0 | 0 | 6 | 2 | - | **keep** |
+| `run_unified_kg_rebuild_job` | 2898 | `_runtime.knowledge_lifecycle.run_unified_kg_rebuild_job` | adapter | 2 | 0 | 0 | 5 | 1 | - | **keep** |
+| `scale_index_status` | 3347 | `_runtime.scale_artifacts.status` | delegate | 4 | 0 | 0 | 35 | 0 | - | **keep** |
+| `search_notebook` | 3154 | `_runtime.catalog.search_notebook` | delegate | 1 | 0 | 3 | 15 | 7 | - | **keep** |
+| `set_conflict_status` | 2632 | `_runtime.knowledge_governance.set_conflict_status` | delegate | 0 | 1 | 0 | 7 | 1 | - | **keep** |
+| `set_edge_review` | 2493 | `_runtime.knowledge_governance.set_edge_review` | delegate | 1 | 0 | 0 | 32 | 2 | - | **keep** |
+| `set_indexing_pipeline` | 1647 | `<complex>` | adapter | 1 | 0 | 0 | 5 | 0 | - | **keep** |
+| `set_knowhow_anchor_column` | 4412 | `_runtime.knowhow_store.set_knowhow_anchor_column` | delegate | 1 | 0 | 0 | 3 | 3 | - | **keep** |
+| `set_knowhow_column_kind` | 4435 | `_runtime.knowhow_store.set_knowhow_column_kind` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
+| `set_knowhow_hidden_source` | 4358 | `_runtime.knowhow_store.set_knowhow_hidden_source` | delegate | 0 | 0 | 0 | 0 | 2 | - | **ambiguous** |
+| `set_merge_decision` | 2577 | `_runtime.knowledge_governance.set_merge_decision` | delegate | 0 | 0 | 0 | 4 | 2 | - | **test-only** |
+| `set_notebook_personal` | 1249 | `_runtime.catalog.set_notebook_personal` | delegate | 0 | 0 | 2 | 12 | 1 | - | **keep** |
+| `share_conversation` | 4031 | `_runtime.ask_state.share_conversation` | delegate | 1 | 0 | 0 | 0 | 65 | - | **keep** |
+| `share_notebook` | 1474 | `_runtime.sharing.share_notebook` | delegate | 0 | 0 | 0 | 8 | 1 | - | **test-only** |
+| `share_report` | 4144 | `_runtime.report_store.share_report` | delegate | 1 | 0 | 0 | 6 | 14 | - | **keep** |
+| `share_state` | 1477 | `_runtime.sharing.share_state` | delegate | 0 | 0 | 0 | 0 | 1 | - | **ambiguous** |
+| `shared_by_me` | 1492 | `_runtime.sharing.shared_by_me` | delegate | 0 | 0 | 1 | 1 | 2 | - | **keep** |
+| `shared_preview` | 1489 | `_runtime.sharing.shared_preview` | delegate | 0 | 0 | 1 | 4 | 1 | - | **keep** |
+| `source_elements` | 1991 | `_runtime.source_store.source_elements` | delegate | 2 | 1 | 10 | 23 | 10 | - | **keep** |
+| `source_elements_page` | 1994 | `_runtime.source_store.source_elements_page` | delegate | 2 | 0 | 0 | 0 | 2 | - | **keep** |
+| `source_id_by_hash` | 2005 | `_runtime.source_store.source_id_by_hash` | delegate | 1 | 0 | 0 | 0 | 14 | - | **keep** |
+| `source_metadata` | 2019 | `_runtime.source_store.source_metadata` | delegate | 3 | 0 | 0 | 0 | 9 | - | **keep** |
+| `source_notebook_id` | 1550 | `_runtime.sharing.source_notebook_id` | delegate | 1 | 0 | 0 | 0 | 14 | - | **keep** |
+| `source_owner` | 1547 | `_runtime.sharing.source_owner` | delegate | 0 | 0 | 0 | 0 | 1 | - | **ambiguous** |
+| `source_parse_busy` | 1932 | `<complex>` | adapter | 1 | 0 | 0 | 0 | 0 | - | **keep** |
+| `sources_missing_paper_meta` | 4386 | `_runtime.source_store.sources_missing_paper_meta` | delegate | 1 | 0 | 0 | 0 | 1 | - | **keep** |
+| `start_ask_stream` | 4249 | `_runtime.ask_execution.start` | adapter | 2 | 0 | 0 | 1 | 0 | - | **keep** |
+| `start_conflict_resolution` | 2394 | `_runtime.knowledge_lifecycle.start_conflict_resolution` | adapter | 1 | 0 | 0 | 14 | 2 | - | **keep** |
+| `start_kg_delete` | 2915 | `_runtime.knowledge_lifecycle.start_kg_delete` | delegate | 1 | 0 | 0 | 11 | 1 | - | **keep** |
+| `start_notebook_relink` | 2364 | `_runtime.knowledge_lifecycle.start_notebook_relink` | adapter | 1 | 0 | 0 | 23 | 5 | - | **keep** |
+| `start_unified_kg_rebuild` | 2889 | `_runtime.knowledge_lifecycle.start_unified_kg_rebuild` | adapter | 2 | 0 | 0 | 22 | 1 | - | **keep** |
+| `storage_dir` (property+setter) | 4231 | `_runtime.storage_dir` | delegate | 0 | 2 | 0 | 0 | 0 | - | **keep** |
+| `store_kg` | 2349 | `_runtime.knowledge_lifecycle.store_kg` | delegate | 0 | 0 | 6 | 440 | 22 | - | **keep** |
+| `submit_feedback` | 4184 | `_runtime.ask_state.submit_feedback` | delegate | 1 | 0 | 2 | 0 | 8 | - | **keep** |
+| `transfer_memories` | 4535 | `_runtime.memory_service.transfer` | delegate | 1 | 0 | 0 | 28 | 0 | - | **keep** |
+| `trigger_scale_index_rebuild` | 3383 | `_runtime.scale_artifacts.trigger` | adapter | 2 | 0 | 0 | 6 | 0 | - | **keep** |
+| `unified_graph` | 2805 | `_runtime.knowledge_lifecycle.unified_graph` | delegate | 1 | 0 | 0 | 72 | 2 | - | **keep** |
+| `unified_kg_rebuild_status` | 2894 | `_runtime.knowledge_lifecycle.unified_kg_rebuild_status` | delegate | 1 | 0 | 0 | 11 | 1 | - | **keep** |
+| `unified_kg_status` | 2786 | `_runtime.knowledge_lifecycle.unified_kg_status` | delegate | 2 | 0 | 1 | 11 | 2 | - | **keep** |
+| `unshare_conversation` | 4054 | `_runtime.ask_state.unshare_conversation` | delegate | 1 | 0 | 0 | 0 | 7 | - | **keep** |
+| `unshare_notebook` | 1480 | `_runtime.sharing.unshare_notebook` | delegate | 0 | 0 | 0 | 4 | 1 | - | **test-only** |
+| `unshare_report` | 4151 | `_runtime.report_store.unshare_report` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
+| `update_agent_profile` | 1289 | `_runtime.memory_service.update_agent_profile` | delegate | 1 | 0 | 0 | 1 | 12 | - | **keep** |
+| `update_agent_token_access` | 1327 | `_runtime.memory_service.update_agent_token_access` | delegate | 1 | 0 | 0 | 1 | 26 | - | **keep** |
+| `update_knowhow_cell` | 4314 | `_runtime.knowhow_store.update_knowhow_cell` | delegate | 1 | 0 | 0 | 14 | 34 | - | **keep** |
+| `update_knowhow_cells` | 4323 | `_runtime.knowhow_store.update_knowhow_cells` | delegate | 1 | 0 | 0 | 1 | 3 | - | **keep** |
+| `update_knowhow_cells_bulk_guarded` | 4332 | `_runtime.knowhow_store.update_knowhow_cells_bulk_guarded` | delegate | 0 | 0 | 1 | 0 | 3 | - | **keep** |
+| `update_knowhow_cells_guarded_atomic` | 4340 | `_runtime.knowhow_store.update_knowhow_cells_guarded_atomic` | delegate | 2 | 0 | 0 | 0 | 4 | - | **keep** |
+| `update_knowhow_table_meta` | 4403 | `_runtime.knowhow_store.update_knowhow_table_meta` | delegate | 1 | 0 | 0 | 4 | 1 | - | **keep** |
+| `update_knowledge` | 3096 | `_runtime.knowledge_governance.update_knowledge` | delegate | 1 | 0 | 5 | 11 | 2 | - | **keep** |
+| `update_memory` | 1412 | `_runtime.memory_service.update` | delegate | 1 | 0 | 0 | 2 | 0 | - | **keep** |
+| `update_notebook` | 1243 | `_runtime.catalog.update_notebook` | delegate | 0 | 0 | 1 | 3 | 1 | - | **keep** |
+| `update_notebook_object_schema` | 2267 | `_runtime.schema_registry.update_notebook_object_schema` | delegate | 1 | 0 | 0 | 2 | 0 | - | **keep** |
+| `update_object_schema` | 2289 | `_runtime.schema_registry.update_object_schema` | delegate | 1 | 0 | 2 | 5 | 0 | - | **keep** |
+| `update_report` | 4085 | `_runtime.report_store.update_report` | delegate | 3 | 0 | 1 | 67 | 64 | - | **keep** |
+| `upload_sources` | 1848 | `_runtime.source_ingestion.upload_sources_compat` | adapter | 5 | 0 | 7 | 46 | 5 | - | **keep** |
+| `upsert_knowhow_cell_code` | 4459 | `_runtime.knowhow_store.upsert_knowhow_cell_code` | delegate | 1 | 0 | 0 | 5 | 5 | - | **keep** |
+| `user_can_access_notebook` | 1514 | `_runtime.sharing.user_can_access_notebook` | delegate | 1 | 0 | 0 | 15 | 9 | - | **keep** |
+| `user_can_admin_notebook` | 1520 | `_runtime.sharing.user_can_admin_notebook` | delegate | 0 | 0 | 0 | 23 | 8 | - | **test-only** |
+| `user_can_read_answer` | 1567 | `_runtime.sharing.user_can_read_answer` | delegate | 0 | 0 | 0 | 3 | 0 | - | **test-only** |
+| `user_can_read_notebook` | 1523 | `_runtime.sharing.user_can_read_notebook` | delegate | 5 | 0 | 0 | 39 | 21 | - | **keep** |
+| `user_can_read_source` | 1526 | `_runtime.sharing.user_can_read_source` | delegate | 0 | 0 | 0 | 3 | 4 | - | **test-only** |
 | `user_document_limit_override` | 849 | `_runtime.identity.user_document_limit_override` | delegate | 0 | 0 | 0 | 2 | 5 | - | **test-only** |
-| `validate_cell_target` | 4519 | `_runtime.knowhow_store.validate_cell_target` | delegate | 6 | 0 | 0 | 0 | 0 | - | **keep** |
-| `validate_reasoning_submission` | 3748 | `_runtime.ask_component.validate_reasoning_submission` | delegate | 0 | 0 | 0 | 0 | 5 | - | **ambiguous** |
+| `validate_cell_target` | 4456 | `_runtime.knowhow_store.validate_cell_target` | delegate | 6 | 0 | 0 | 0 | 0 | - | **keep** |
+| `validate_reasoning_submission` | 3700 | `_runtime.ask_component.validate_reasoning_submission` | delegate | 0 | 0 | 0 | 0 | 5 | - | **ambiguous** |
 | `visible_document_count` | 843 | `_runtime.source_store.visible_document_count` | delegate | 1 | 0 | 0 | 9 | 3 | - | **keep** |
-| `visible_source_count` | 1829 | `_runtime.source_store.visible_document_count` | delegate | 0 | 0 | 0 | 0 | 2 | - | **ambiguous** |
-| `visible_source_ids` | 1672 | `_runtime.index_projections.visible_source_ids` | delegate | 0 | 0 | 0 | 0 | 3 | - | **ambiguous** |
-| `visible_source_scope_snapshot` | 1832 | `_runtime.source_store.visible_source_scope_snapshot` | delegate | 1 | 0 | 0 | 0 | 6 | - | **keep** |
-| `warm_open_path_caches` | 4253 | `_runtime.catalog.warm_open_path_caches` | delegate | 1 | 0 | 0 | 1 | 1 | - | **keep** |
-| `write_clusters` | 2548 | `_runtime.knowledge_lifecycle.write_clusters` | delegate | 0 | 0 | 0 | 12 | 0 | - | **test-only** |
-| `write_conflict_candidate` | 2644 | `_runtime.knowledge_governance.write_conflict_candidate` | delegate | 0 | 0 | 0 | 16 | 2 | - | **test-only** |
-| `write_merge_candidate` | 2590 | `_runtime.knowledge_governance.write_merge_candidate` | delegate | 0 | 0 | 0 | 13 | 1 | - | **test-only** |
+| `visible_source_count` | 1792 | `_runtime.source_store.visible_document_count` | delegate | 0 | 0 | 0 | 0 | 2 | - | **ambiguous** |
+| `visible_source_ids` | 1635 | `_runtime.index_projections.visible_source_ids` | delegate | 0 | 0 | 0 | 0 | 3 | - | **ambiguous** |
+| `visible_source_scope_snapshot` | 1795 | `_runtime.source_store.visible_source_scope_snapshot` | delegate | 1 | 0 | 0 | 0 | 6 | - | **keep** |
+| `warm_open_path_caches` | 4190 | `_runtime.catalog.warm_open_path_caches` | delegate | 1 | 0 | 0 | 1 | 1 | - | **keep** |
+| `write_clusters` | 2511 | `_runtime.knowledge_lifecycle.write_clusters` | delegate | 0 | 0 | 0 | 12 | 0 | - | **test-only** |
+| `write_conflict_candidate` | 2607 | `_runtime.knowledge_governance.write_conflict_candidate` | delegate | 0 | 0 | 0 | 16 | 2 | - | **test-only** |
+| `write_merge_candidate` | 2553 | `_runtime.knowledge_governance.write_merge_candidate` | delegate | 0 | 0 | 0 | 13 | 1 | - | **test-only** |

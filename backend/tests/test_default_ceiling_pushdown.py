@@ -312,7 +312,7 @@ def test_a_lexical_failure_on_the_pushed_down_ann_lane_raises_no_banner(repo, mo
     monkeypatch.setattr("app.services.source_scope.unbound_ceiling", spy_unbound)
 
     # ``ask_chunk`` installs the default ceiling itself (``_retrieval_ceiling``).
-    resp = instance.ask_chunk(nb, AskRequest(question=query, mode="chunk"))
+    resp = instance._runtime.ask_component.ask_chunk_current(nb, AskRequest(question=query, mode="chunk"))
 
     assert any(pushed_down), "the run really pushed the list down"
     roles = {e["recall_role"] for e in events if e.get("site") == "chunk_ann_union"}

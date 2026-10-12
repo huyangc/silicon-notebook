@@ -483,7 +483,7 @@ def test_last_seen_touch_follows_session_throttle(tmp_path):
         ).fetchone()[0]
     assert after_logout == touched
 
-    usage = {row["id"]: row for row in repo.list_user_usage()}
+    usage = {row["id"]: row for row in repo._runtime.queries.list_user_usage()}
     assert usage["user-local"]["last_seen"] == after_logout
 
     # 单调性(不回退):把 users.last_seen_at 人为设到未来,再制造一次"节流

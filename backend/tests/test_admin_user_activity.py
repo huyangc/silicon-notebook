@@ -184,7 +184,7 @@ def test_self_service_global_feed_filters_unreadable_participants_before_limit(r
 
     seen, cursor = [], None
     for _ in range(5):
-        page = repo.list_user_activity(
+        page = repo._runtime.queries.list_user_activity(
             "u1", activity_type="ask", limit=1,
             before_ts=cursor["ts"] if cursor else None,
             before_id=cursor["id"] if cursor else None,
@@ -195,7 +195,7 @@ def test_self_service_global_feed_filters_unreadable_participants_before_limit(r
         cursor = page["next_cursor"]
     assert seen == ["g-new", "g-old"]
 
-    audit = repo.list_user_activity(
+    audit = repo._runtime.queries.list_user_activity(
         "u1", activity_type="ask", include_inaccessible_questions=True, limit=50,
     )
     assert [item["id"] for item in audit["items"]] == ["g-new", "g-mid", "g-old"]
@@ -215,7 +215,7 @@ def test_global_ask_job_appears_in_mixed_and_ask_feed(repo):
             question="跨库对比噪声", status="done", submitted_via="mcp",
         )
 
-    mixed = repo.list_user_activity("u1", limit=50)
+    mixed = repo._runtime.queries.list_user_activity("u1", limit=50)
     assert [item["id"] for item in mixed["items"]] == ["gask-1", "ask-1"]
     global_item = mixed["items"][0]
     assert global_item["type"] == "ask"
@@ -226,7 +226,7 @@ def test_global_ask_job_appears_in_mixed_and_ask_feed(repo):
     assert global_item["submitted_via"] == "mcp"
     assert global_item["error"] == ""
 
-    ask_only = repo.list_user_activity("u1", activity_type="ask", limit=50)
+    ask_only = repo._runtime.queries.list_user_activity("u1", activity_type="ask", limit=50)
     assert [item["id"] for item in ask_only["items"]] == ["gask-1", "ask-1"]
 
 
@@ -241,7 +241,7 @@ def test_global_ask_job_failed_carries_error_detail_and_no_answer_id(repo):
             status="failed", error_detail="RuntimeError: boom",
         )
 
-    result = repo.list_user_activity("u1", activity_type="ask", limit=50)
+    result = repo._runtime.queries.list_user_activity("u1", activity_type="ask", limit=50)
     [item] = result["items"]
     assert item["status"] == "failed"
     assert item["answer_id"] == ""
@@ -257,7 +257,7 @@ def test_global_ask_job_excluded_when_notebook_id_filter_given(repo):
         _insert_global_conversation(db, "gc-3", "u1", "2026-08-01T10:00:00")
         _insert_global_ask(db, "gask-3", "gc-3", "u1", "2026-08-01T10:00:00")
 
-    scoped = repo.list_user_activity("u1", notebook_id="n1", limit=50)
+    scoped = repo._runtime.queries.list_user_activity("u1", notebook_id="n1", limit=50)
     assert [item["id"] for item in scoped["items"]] == ["ask-1"]
 
 
@@ -280,7 +280,7 @@ def test_global_ask_job_merges_with_notebook_asks_and_paginates(repo):
     while True:
         pages += 1
         assert pages <= 10, "pagination did not terminate"
-        page = repo.list_user_activity(
+        page = repo._runtime.queries.list_user_activity(
             "u1", activity_type="ask",
             before_ts=cursor_ts, before_id=cursor_id, limit=1,
         )
@@ -305,7 +305,7 @@ def test_merges_three_types_in_time_descending_order(repo):
         _insert_report(db, "rep-1", "n1", "u1", "2026-08-01T12:00:00")
         _insert_ask(db, "ask-2", "n1", "u1", "2026-08-01T09:00:00")
 
-    result = repo.list_user_activity("u1", limit=50)
+    result = repo._runtime.queries.list_user_activity("u1", limit=50)
     assert [item["id"] for item in result["items"]] == [
         "rep-1", "src-1", "ask-1", "ask-2",
     ]
@@ -335,12 +335,12 @@ def test_activity_type_filter_applies_before_limit_and_paginates_all_questions(r
             question="第一个关注点",
         )
 
-    first = repo.list_user_activity("u1", activity_type="ask", limit=1)
+    first = repo._runtime.queries.list_user_activity("u1", activity_type="ask", limit=1)
     assert [item["id"] for item in first["items"]] == ["ask-2"]
     assert first["has_more"] is True
     assert first["next_cursor"] is not None
 
-    second = repo.list_user_activity(
+    second = repo._runtime.queries.list_user_activity(
         "u1",
         activity_type="ask",
         before_ts=first["next_cursor"]["ts"],
@@ -360,10 +360,10 @@ def test_question_overview_enforces_live_read_access_unless_admin_audit(repo):
         _insert_ask(db, "ask-mine", "n1", "u1", "2026-08-01T11:00:00")
         _insert_ask(db, "ask-revoked", "n2", "u1", "2026-08-01T10:00:00")
 
-    self_view = repo.list_user_activity("u1", activity_type="ask")
+    self_view = repo._runtime.queries.list_user_activity("u1", activity_type="ask")
     assert [item["id"] for item in self_view["items"]] == ["ask-mine"]
 
-    admin_view = repo.list_user_activity(
+    admin_view = repo._runtime.queries.list_user_activity(
         "u1", activity_type="ask", include_inaccessible_questions=True
     )
     assert [item["id"] for item in admin_view["items"]] == [
@@ -372,7 +372,7 @@ def test_question_overview_enforces_live_read_access_unless_admin_audit(repo):
 
     with repo._write() as db:
         _insert_member(db, "n2", "u1")
-    shared_view = repo.list_user_activity("u1", activity_type="ask")
+    shared_view = repo._runtime.queries.list_user_activity("u1", activity_type="ask")
     assert [item["id"] for item in shared_view["items"]] == [
         "ask-mine", "ask-revoked",
     ]
@@ -382,7 +382,7 @@ def test_question_overview_enforces_live_read_access_unless_admin_audit(repo):
             "DELETE FROM notebook_members WHERE notebook_id=? AND user_id=?",
             ("n2", "u1"),
         )
-    revoked_view = repo.list_user_activity("u1", activity_type="ask")
+    revoked_view = repo._runtime.queries.list_user_activity("u1", activity_type="ask")
     assert [item["id"] for item in revoked_view["items"]] == ["ask-mine"]
 
 
@@ -401,7 +401,7 @@ def test_report_overview_follows_submitter_like_question_overview(repo):
     """只看报告与用户总览的 reports 合计同口径(PostgreSQL 侧跑同一张场景表)。"""
     _seed_report_scope_rows(repo)
     for label, kwargs, expected, _revoked in REPORT_SCOPE_CASES:
-        result = repo.list_user_activity("u1", limit=50, **kwargs)
+        result = repo._runtime.queries.list_user_activity("u1", limit=50, **kwargs)
         assert [item["id"] for item in result["items"]] == expected, label
 
     with repo._write() as db:
@@ -410,12 +410,12 @@ def test_report_overview_follows_submitter_like_question_overview(repo):
             ("n2", "u1"),
         )
     for label, kwargs, _member, expected in REPORT_SCOPE_CASES:
-        result = repo.list_user_activity("u1", limit=50, **kwargs)
+        result = repo._runtime.queries.list_user_activity("u1", limit=50, **kwargs)
         assert [item["id"] for item in result["items"]] == expected, label
 
     repo._runtime.notebook_store.delete_row_and_orphan_embeddings("n2")
     for label, kwargs, expected, retained in REPORT_SCOPE_AFTER_SHARED_DELETE_CASES:
-        result = repo.list_user_activity("u1", limit=50, **kwargs)
+        result = repo._runtime.queries.list_user_activity("u1", limit=50, **kwargs)
         assert [item["id"] for item in result["items"]] == expected, label
         assert {
             item["id"] for item in result["items"] if item.get("notebook_deleted_at")
@@ -427,10 +427,10 @@ def test_report_overview_paginates_shared_library_reports(repo):
     _seed_report_scope_rows(repo)
     with repo._write() as db:
         _insert_source(db, "src-newest", "n1", "2026-08-01T13:00:00+00:00")
-    first = repo.list_user_activity("u1", activity_type="report", limit=1)
+    first = repo._runtime.queries.list_user_activity("u1", activity_type="report", limit=1)
     assert [item["id"] for item in first["items"]] == ["rep-own"]
     assert first["has_more"] is True
-    second = repo.list_user_activity(
+    second = repo._runtime.queries.list_user_activity(
         "u1",
         activity_type="report",
         before_ts=first["next_cursor"]["ts"],
@@ -476,7 +476,7 @@ def test_ask_field_shape_and_ordering_uses_created_at_not_asked_at(repo):
             asked_at="", answer_id="ans-2", error="boom", submitted_via="mcp",
         )
 
-    result = repo.list_user_activity("u1", limit=50)
+    result = repo._runtime.queries.list_user_activity("u1", limit=50)
     items = result["items"]
     assert [item["id"] for item in items] == ["ask-2", "ask-1"]
     first = items[0]
@@ -509,7 +509,7 @@ def test_source_hides_memory_and_knowhow_and_carries_paper_meta(repo):
         _insert_source(db, "src-knowhow", "n1", "2026-08-01T13:00:00",
                         title="Knowhow projection", source_type="knowhow")
 
-    result = repo.list_user_activity("u1", limit=50)
+    result = repo._runtime.queries.list_user_activity("u1", limit=50)
     ids = [item["id"] for item in result["items"]]
     assert "src-memory" not in ids
     assert "src-knowhow" not in ids
@@ -539,7 +539,7 @@ def test_sources_scoped_to_owned_notebooks_only(repo):
         _insert_source(db, "src-mine", "n1", "2026-08-01T10:00:00")
         _insert_source(db, "src-other", "n2", "2026-08-01T11:00:00")
 
-    result = repo.list_user_activity("u1", limit=50)
+    result = repo._runtime.queries.list_user_activity("u1", limit=50)
     ids = [item["id"] for item in result["items"]]
     assert ids == ["src-mine"]
 
@@ -565,13 +565,13 @@ def test_ask_and_reports_are_owner_only_like_sources(repo):
         _insert_ask(db, "ask-mine", "n1", "u1", "2026-08-01T10:30:00")
         _insert_report(db, "rep-mine", "n1", "u1", "2026-08-01T11:30:00")
 
-    result = repo.list_user_activity("u1", limit=50)
+    result = repo._runtime.queries.list_user_activity("u1", limit=50)
     ids = {item["id"] for item in result["items"]}
     assert ids == {"ask-mine", "rep-mine"}
 
     # Narrowing to a notebook the caller does not own stays empty — same answer
     # as the unscoped call now gives for those rows, not a second opinion.
-    scoped = repo.list_user_activity("u1", notebook_id="n2", limit=50)
+    scoped = repo._runtime.queries.list_user_activity("u1", notebook_id="n2", limit=50)
     assert scoped == {"items": [], "has_more": False, "next_cursor": None}
 
 
@@ -588,7 +588,7 @@ def test_other_users_notebooks_asks_and_reports_are_excluded(repo):
         _insert_source(db, "src-u1", "n1", "2026-08-01T12:00:00")
         _insert_source(db, "src-u2", "n2", "2026-08-01T12:00:00")
 
-    result = repo.list_user_activity("u1", limit=50)
+    result = repo._runtime.queries.list_user_activity("u1", limit=50)
     ids = {item["id"] for item in result["items"]}
     assert ids == {"ask-u1", "rep-u1", "src-u1"}
 
@@ -601,10 +601,10 @@ def test_explicit_notebook_id_not_owned_returns_empty_without_error(repo):
         _insert_notebook(db, "n2", "u2")
         _insert_ask(db, "ask-u2", "n2", "u2", "2026-08-01T10:00:00")
 
-    result = repo.list_user_activity("u1", notebook_id="n2", limit=50)
+    result = repo._runtime.queries.list_user_activity("u1", notebook_id="n2", limit=50)
     assert result == {"items": [], "has_more": False, "next_cursor": None}
 
-    result_missing = repo.list_user_activity("u1", notebook_id="does-not-exist", limit=50)
+    result_missing = repo._runtime.queries.list_user_activity("u1", notebook_id="does-not-exist", limit=50)
     assert result_missing == {"items": [], "has_more": False, "next_cursor": None}
 
 
@@ -633,7 +633,7 @@ def test_composite_cursor_ties_across_types_no_skip_or_duplicate(repo):
     while True:
         pages += 1
         assert pages <= 10, "pagination did not terminate"
-        page = repo.list_user_activity(
+        page = repo._runtime.queries.list_user_activity(
             "u1", before_ts=cursor_ts, before_id=cursor_id, limit=2,
         )
         seen.extend(item["id"] for item in page["items"])
@@ -655,12 +655,12 @@ def test_has_more_and_next_cursor_single_page(repo):
         _insert_ask(db, "ask-1", "n1", "u1", "2026-08-01T10:00:00")
         _insert_ask(db, "ask-2", "n1", "u1", "2026-08-01T09:00:00")
 
-    result = repo.list_user_activity("u1", limit=2)
+    result = repo._runtime.queries.list_user_activity("u1", limit=2)
     assert result["has_more"] is False
     assert result["next_cursor"] is None
     assert len(result["items"]) == 2
 
-    result_small = repo.list_user_activity("u1", limit=1)
+    result_small = repo._runtime.queries.list_user_activity("u1", limit=1)
     assert result_small["has_more"] is True
     assert result_small["next_cursor"] == {"ts": "2026-08-01T10:00:00", "id": "ask-1"}
     assert len(result_small["items"]) == 1
@@ -674,12 +674,12 @@ def test_limit_clamped_to_bounds(repo):
             _insert_ask(db, f"ask-{i}", "n1", "u1", f"2026-08-01T1{i}:00:00")
 
     # limit below 1 clamps to 1.
-    tiny = repo.list_user_activity("u1", limit=0)
+    tiny = repo._runtime.queries.list_user_activity("u1", limit=0)
     assert len(tiny["items"]) == 1
 
     # limit above 200 with fewer rows than the cap: no error, no truncation
     # below the actual row count.
-    big = repo.list_user_activity("u1", limit=10_000)
+    big = repo._runtime.queries.list_user_activity("u1", limit=10_000)
     assert len(big["items"]) == 3
     assert big["has_more"] is False
 
@@ -699,7 +699,7 @@ def test_limit_upper_bound_actually_caps_the_page(repo):
                 f"2026-08-01T{i // 60:02d}:{i % 60:02d}:00",
             )
 
-    capped = repo.list_user_activity("u1", limit=10_000)
+    capped = repo._runtime.queries.list_user_activity("u1", limit=10_000)
     assert len(capped["items"]) == 200
     assert capped["has_more"] is True
     assert capped["next_cursor"] is not None
@@ -711,7 +711,7 @@ def test_empty_scope_for_unknown_user(repo):
         _insert_notebook(db, "n1", "u1")
         _insert_ask(db, "ask-1", "n1", "u1", "2026-08-01T10:00:00")
 
-    assert repo.list_user_activity("nobody", limit=50) == {
+    assert repo._runtime.queries.list_user_activity("nobody", limit=50) == {
         "items": [], "has_more": False, "next_cursor": None,
     }
 
@@ -733,7 +733,7 @@ def test_source_extraction_and_parse_quality_warnings(repo):
         _insert_source(db, "src-fallback", "n1", "2026-08-01T07:00:00",
                         error_message="[pdf-python-fallback] mineru retries exhausted")
 
-    result = repo.list_user_activity("u1", limit=50)
+    result = repo._runtime.queries.list_user_activity("u1", limit=50)
     by_id = {item["id"]: item for item in result["items"]}
 
     degraded = by_id["src-degraded"]
@@ -771,7 +771,7 @@ def test_source_paper_meta_status_four_states(repo):
         _insert_source(db, "src-not-applicable", "n1", "2026-08-01T07:00:00",
                         parse_status="queued")
 
-    result = repo.list_user_activity("u1", limit=50)
+    result = repo._runtime.queries.list_user_activity("u1", limit=50)
     by_id = {item["id"]: item for item in result["items"]}
     assert by_id["src-has-meta"]["paper_meta_status"] == "has_meta"
     assert by_id["src-not-paper"]["paper_meta_status"] == "not_paper"
@@ -788,7 +788,7 @@ def test_report_generation_started_at_present_and_missing(repo):
                         submitted_via="web")
         _insert_report(db, "rep-without-start", "n1", "u1", "2026-08-01T09:00:00")
 
-    result = repo.list_user_activity("u1", limit=50)
+    result = repo._runtime.queries.list_user_activity("u1", limit=50)
     by_id = {item["id"]: item for item in result["items"]}
     assert by_id["rep-with-start"]["generation_started_at"] == "2026-08-01T10:05:00"
     # Old report missing the timestamp must return an empty string — never a
@@ -810,14 +810,14 @@ def test_since_and_until_half_open_interval(repo):
         _insert_ask(db, "ask-after", "n1", "u1", "2026-08-02T00:00:01")
 
     # since alone.
-    since_only = repo.list_user_activity(
+    since_only = repo._runtime.queries.list_user_activity(
         "u1", since="2026-08-01T10:00:00", limit=50,
     )
     ids = {item["id"] for item in since_only["items"]}
     assert ids == {"ask-at-since", "ask-inside", "ask-at-until", "ask-after"}
 
     # until alone.
-    until_only = repo.list_user_activity(
+    until_only = repo._runtime.queries.list_user_activity(
         "u1", until="2026-08-02T00:00:00", limit=50,
     )
     ids = {item["id"] for item in until_only["items"]}
@@ -826,7 +826,7 @@ def test_since_and_until_half_open_interval(repo):
     # since + until together — half-open [since, until): the "since" boundary
     # row is INCLUDED, the "until" boundary row is EXCLUDED. This is the
     # easiest edge to get backwards.
-    day = repo.list_user_activity(
+    day = repo._runtime.queries.list_user_activity(
         "u1", since="2026-08-01T10:00:00", until="2026-08-02T00:00:00", limit=50,
     )
     ids = {item["id"] for item in day["items"]}
@@ -856,7 +856,7 @@ def test_since_until_combined_with_cursor_pagination(repo):
     while True:
         pages += 1
         assert pages <= 10
-        page = repo.list_user_activity(
+        page = repo._runtime.queries.list_user_activity(
             "u1", since=since, until=until,
             before_ts=cursor_ts, before_id=cursor_id, limit=2,
         )
@@ -896,7 +896,7 @@ def test_mixed_utc_offsets_sort_by_absolute_instant_not_text(repo):
         for ask_id, created_at in _MIXED_OFFSET_ROWS:
             _insert_ask(db, ask_id, "n1", "u1", created_at)
 
-    result = repo.list_user_activity("u1", limit=50)
+    result = repo._runtime.queries.list_user_activity("u1", limit=50)
     assert [item["id"] for item in result["items"]] == _MIXED_OFFSET_ORDER
     # 纯文本降序会给出 plus8 / naive / utc —— 断言必须真的把它排除掉。
     assert [item["id"] for item in result["items"]] != [
@@ -922,7 +922,7 @@ def test_mixed_utc_offsets_paginate_without_skipping(repo):
     while True:
         pages += 1
         assert pages <= 10, "pagination did not terminate"
-        page = repo.list_user_activity(
+        page = repo._runtime.queries.list_user_activity(
             "u1", before_ts=cursor_ts, before_id=cursor_id, limit=1,
         )
         seen.extend(item["id"] for item in page["items"])
@@ -944,7 +944,7 @@ def test_since_until_compare_absolute_instants_across_offsets(repo):
             _insert_ask(db, ask_id, "n1", "u1", created_at)
 
     # [03:00Z, 04:00Z) 只框住 03:30Z 那一行 —— 文本比较会框成别的集合。
-    window = repo.list_user_activity(
+    window = repo._runtime.queries.list_user_activity(
         "u1", since="2026-08-04T03:00:00+00:00",
         until="2026-08-04T04:00:00+00:00", limit=50,
     )
@@ -965,7 +965,7 @@ def _seed_parity_rows(repo) -> None:
 def test_bound_spellings_select_the_same_rows(repo, since, until, expected):
     """同一时刻的不同写法必须选出同一批行(PostgreSQL 侧跑同一张表)。"""
     _seed_parity_rows(repo)
-    result = repo.list_user_activity("u1", since=since, until=until, limit=50)
+    result = repo._runtime.queries.list_user_activity("u1", since=since, until=until, limit=50)
     assert {item["id"] for item in result["items"]} == expected
 
 
@@ -982,7 +982,7 @@ def test_browser_local_day_window_selects_that_local_day(repo):
         for ask_id, created_at in LOCAL_DAY_ROWS:
             _insert_ask(db, ask_id, "n1", "u1", created_at)
 
-    result = repo.list_user_activity(
+    result = repo._runtime.queries.list_user_activity(
         "u1", since=LOCAL_DAY_SINCE, until=LOCAL_DAY_UNTIL, limit=50,
     )
     assert {item["id"] for item in result["items"]} == LOCAL_DAY_EXPECTED
@@ -994,7 +994,7 @@ def test_malformed_range_bound_raises_value_error(repo, bad, field):
     """畸形边界抛 ValueError,不静默忽略——静默会返回比请求更宽的窗口。"""
     _seed_parity_rows(repo)
     with pytest.raises(ValueError):
-        repo.list_user_activity("u1", **{field: bad}, limit=50)
+        repo._runtime.queries.list_user_activity("u1", **{field: bad}, limit=50)
 
 
 def test_cursor_round_trips_for_unparseable_created_at(repo):
@@ -1017,7 +1017,7 @@ def test_cursor_round_trips_for_unparseable_created_at(repo):
     cursor_ts: str | None = None
     cursor_id: str | None = None
     for _ in range(5):  # 有界:三行 + limit=2 最多两页,多出来的轮次证明它真的会停
-        page = repo.list_user_activity(
+        page = repo._runtime.queries.list_user_activity(
             "u1", before_ts=cursor_ts, before_id=cursor_id, limit=2,
         )
         seen.extend(item["id"] for item in page["items"])
@@ -1039,7 +1039,7 @@ def test_malformed_cursor_raises_value_error(repo, bad):
     """畸形游标同样抛错:静默忽略会让翻页永远停在第一页(客户端死循环)。"""
     _seed_parity_rows(repo)
     with pytest.raises(ValueError):
-        repo.list_user_activity("u1", before_ts=bad, before_id="ask-a", limit=2)
+        repo._runtime.queries.list_user_activity("u1", before_ts=bad, before_id="ask-a", limit=2)
 
 
 # ------------------------------------------------------- 披露面 / 排序键守卫
@@ -1059,7 +1059,7 @@ def test_source_never_exposes_the_raw_error_message(repo):
                         error_message=leaky)
         _insert_source(db, "src-ok", "n1", "2026-08-01T09:00:00")
 
-    result = repo.list_user_activity("u1", limit=50)
+    result = repo._runtime.queries.list_user_activity("u1", limit=50)
     by_id = {item["id"]: item for item in result["items"]}
 
     failed = by_id["src-failed"]
@@ -1089,13 +1089,13 @@ def test_ask_page_boundary_follows_created_at_not_asked_at(repo):
                 asked_at=f"2026-08-01T2{4 - index}:00:00",
             )
 
-    page = repo.list_user_activity("u1", limit=2)
+    page = repo._runtime.queries.list_user_activity("u1", limit=2)
     assert [item["id"] for item in page["items"]] == ["a-5", "a-4"]
     assert page["has_more"] is True
     # ORDER BY asked_at 会让 SQL 取回 a-1/a-2/a-3,Python 重排后得到 ["a-3","a-2"]。
     assert [item["id"] for item in page["items"]] != ["a-3", "a-2"]
 
-    second = repo.list_user_activity(
+    second = repo._runtime.queries.list_user_activity(
         "u1", before_ts=page["next_cursor"]["ts"],
         before_id=page["next_cursor"]["id"], limit=2,
     )
@@ -1199,7 +1199,7 @@ def test_deleted_notebook_keeps_only_expiring_activity_metadata(repo):
         expires_at = parse_activity_instant(retained[0]["expires_at"], field="expires_at")
         assert (expires_at - deleted_at).days == 180
 
-    activity = repo.list_user_activity(
+    activity = repo._runtime.queries.list_user_activity(
         "u1", include_inaccessible_questions=True, limit=50,
     )
     assert {item["id"] for item in activity["items"]} == {
@@ -1219,7 +1219,7 @@ def test_deleted_notebook_keeps_only_expiring_activity_metadata(repo):
     assert detail["error"] == ""
     assert detail["notebook_name"] == "NB-n1"
 
-    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    usage = next(row for row in repo._runtime.queries.list_user_usage() if row["id"] == "u1")
     assert usage["notebooks"] == 0
     # Phase A 来源口径修正(admin-usage-overview-usage-signals-design_zh §3):
     # retained 分支按 COALESCE(actor_id, notebook_owner_id) 归因。这条来源的
@@ -1242,10 +1242,10 @@ def test_deleted_notebook_keeps_only_expiring_activity_metadata(repo):
         db.execute(
             "UPDATE retained_user_activity SET expires_at='2000-01-01T00:00:00+00:00'"
         )
-    assert repo.list_user_activity(
+    assert repo._runtime.queries.list_user_activity(
         "u1", include_inaccessible_questions=True, limit=50,
     )["items"] == []
-    expired_usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    expired_usage = next(row for row in repo._runtime.queries.list_user_usage() if row["id"] == "u1")
     assert expired_usage["sources"] == 0
     # codex #659 R6 P2: the conversation row is genuinely gone (deleted along
     # with the notebook, see above) — nothing left for this retention window
@@ -1408,7 +1408,7 @@ def test_deleted_shared_upload_keeps_actor_and_owner_accounting_separate(repo):
         "bob", "alice",
     )
 
-    usage = {row["id"]: row for row in repo.list_user_usage()}
+    usage = {row["id"]: row for row in repo._runtime.queries.list_user_usage()}
     # Phase A 来源口径修正:总数现在按实际上传者归因(与 last_active 同一
     # 谓词),不再是笔记本 owner——这正是这个测试名字里 "actor and owner
     # accounting separate" 要覆盖的场景:bob 上传到 alice 的共享库,来源数
@@ -1418,11 +1418,11 @@ def test_deleted_shared_upload_keeps_actor_and_owner_accounting_separate(repo):
     assert usage["bob"]["sources"] == 1
     assert usage["bob"]["last_active"] == created_at
 
-    alice_activity = repo.list_user_activity(
+    alice_activity = repo._runtime.queries.list_user_activity(
         "alice", activity_type="source",
         include_inaccessible_questions=True, limit=50,
     )
-    bob_activity = repo.list_user_activity(
+    bob_activity = repo._runtime.queries.list_user_activity(
         "bob", activity_type="source",
         include_inaccessible_questions=True, limit=50,
     )
@@ -1430,10 +1430,10 @@ def test_deleted_shared_upload_keeps_actor_and_owner_accounting_separate(repo):
     assert bob_activity["items"] == []
     # The mixed retained stream remains owner-only, matching the live mixed
     # stream; the explicit Ask filter keeps its established creator-wide view.
-    assert repo.list_user_activity(
+    assert repo._runtime.queries.list_user_activity(
         "bob", include_inaccessible_questions=True, limit=50,
     )["items"] == []
-    bob_asks = repo.list_user_activity(
+    bob_asks = repo._runtime.queries.list_user_activity(
         "bob", activity_type="ask",
         include_inaccessible_questions=True, limit=50,
     )
@@ -1599,7 +1599,7 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry(repo):
 
     # While a merged live aggregate exists, its older retained lifecycle is
     # entirely hidden: no duplicate identity/count, and no stale direct detail.
-    live_activity = repo.list_user_activity(
+    live_activity = repo._runtime.queries.list_user_activity(
         "u-refresh", include_inaccessible_questions=True, limit=50,
     )
     assert len(live_activity["items"]) == 3
@@ -1607,7 +1607,7 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry(repo):
         "ask-refresh", "src-refresh", "rep-refresh",
     }
     live_usage = next(
-        row for row in repo.list_user_usage() if row["id"] == "u-refresh"
+        row for row in repo._runtime.queries.list_user_usage() if row["id"] == "u-refresh"
     )
     assert live_usage["sources"] == 1
     assert live_usage["questions"] == 1
@@ -1676,7 +1676,7 @@ def test_activity_delete_race_prefers_retained_lifecycle(repo):
 
         connection.set_trace_callback(delete_before_retained_select)
         try:
-            activity = repo.list_user_activity(
+            activity = repo._runtime.queries.list_user_activity(
                 "u-race", include_inaccessible_questions=True, limit=50,
             )
         finally:

@@ -70,7 +70,7 @@ def _seed(repo):
 
 def test_list_user_usage_counts(repo):
     _seed(repo)
-    rows = {r["username"]: r for r in repo.list_user_usage()}
+    rows = {r["username"]: r for r in repo._runtime.queries.list_user_usage()}
     # Should include u1, u2 and the auto-created admin user; check only the two we seeded
     assert "a00000001" in rows and "b00000002" in rows
     a = rows["a00000001"]
@@ -150,7 +150,7 @@ def test_list_user_usage_sources_matches_last_active_predicate(repo):
             "VALUES (?,?,?,?,?,?,?)",
             ("s-copying", "n-copy", "s-copying", "pdf", now, now, "u1"),
         )
-    usage = {row["id"]: row for row in repo.list_user_usage()}
+    usage = {row["id"]: row for row in repo._runtime.queries.list_user_usage()}
     # u1: s-self + s-null(NULL 归 owner)+ s-blank(空串归 owner)= 3;
     # s-shared 归 u2;s-copying、s-memory、s-knowhow 都不计入任何人。
     assert usage["u1"]["sources"] == 3
@@ -163,7 +163,7 @@ def test_last_active_tracks_user_actions_not_conversation_updates(repo):
     def last_active(user_id="u1"):
         return next(
             row["last_active"]
-            for row in repo.list_user_usage()
+            for row in repo._runtime.queries.list_user_usage()
             if row["id"] == user_id
         )
 
@@ -214,7 +214,7 @@ def test_last_active_attributes_shared_upload_to_the_actual_uploader(repo):
                 "2026-07-09T00:00:00+00:00", "2026-07-09T00:00:00+00:00", "u2",
             ),
         )
-    rows = {row["id"]: row for row in repo.list_user_usage()}
+    rows = {row["id"]: row for row in repo._runtime.queries.list_user_usage()}
     assert rows["u2"]["last_active"] == "2026-07-09T00:00:00+00:00"
     assert rows["u1"]["last_active"] == "2026-07-07T00:00:00"
 
@@ -231,7 +231,7 @@ def test_last_active_source_group_uses_absolute_time_not_text_order(repo):
             "UPDATE sources SET created_at=? WHERE id='s2'",
             ("2026-07-08T10:30:00+09:00",),
         )
-    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    usage = next(row for row in repo._runtime.queries.list_user_usage() if row["id"] == "u1")
     assert usage["last_active"] == "2026-07-08T02:00:00+00:00"
 
 
@@ -260,7 +260,7 @@ def test_last_active_does_not_expose_unresolved_time_sentinel(repo):
                 "legacy-ask", "legacy-nb", "legacy", "chunk", "q", "done", "", "",
             ),
         )
-    usage = next(row for row in repo.list_user_usage() if row["id"] == "legacy")
+    usage = next(row for row in repo._runtime.queries.list_user_usage() if row["id"] == "legacy")
     assert usage["last_active"] is None
 
 
@@ -320,7 +320,7 @@ def test_list_user_usage_last_seen_reads_users_column(repo):
             "VALUES (?,?,?,?,?,?,?,?,?)",
             ("u2", "u2@x", "U2", "user", "active", "b00000002", now, now, None),
         )
-    usage = {row["id"]: row for row in repo.list_user_usage()}
+    usage = {row["id"]: row for row in repo._runtime.queries.list_user_usage()}
     assert usage["u1"]["last_seen"] == "2026-07-08T00:00:00"
     assert usage["u2"]["last_seen"] is None
 
@@ -354,7 +354,7 @@ def test_list_user_usage_storage_bytes_matches_sources_attribution(repo):
                 "VALUES (?,?,?,?,?,?,?,?)",
                 (sid, notebook_id, sid, source_type, now, now, uploaded_by, file_size),
             )
-    usage = {row["id"]: row for row in repo.list_user_usage()}
+    usage = {row["id"]: row for row in repo._runtime.queries.list_user_usage()}
     assert usage["u1"]["storage_bytes"] == 1300  # s-self + s-null
     assert usage["u2"]["storage_bytes"] == 2000
 
@@ -382,7 +382,7 @@ def test_list_user_usage_storage_bytes_excludes_retained_branch(repo):
             ("s-retained", "n1", "s-retained", "pdf", now, now, "u1", 777),
         )
     repo._runtime.notebook_store.delete_row_and_orphan_embeddings("n1")
-    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    usage = next(row for row in repo._runtime.queries.list_user_usage() if row["id"] == "u1")
     assert usage["sources"] == 1
     assert usage["storage_bytes"] == 0
 
@@ -442,7 +442,7 @@ def test_list_user_usage_questions_30d_window(repo):
                 "VALUES (?,?,?,?,?,?,?,?)",
                 (jid, "n1", "u1", "chunk", "q?", "completed", created_at, created_at),
             )
-    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    usage = next(row for row in repo._runtime.queries.list_user_usage() if row["id"] == "u1")
     # 3 = in-bare + in-offset + near-boundary;out-window 与 offset-trap 都
     # 应被排除(后者证明比较走的是绝对时刻,不是裸文本)。
     assert usage["questions_30d"] == 3
@@ -478,7 +478,7 @@ def test_list_user_usage_questions_30d_retained_branch_same_window(repo):
             ("j-old", "n1", "u1", "chunk", "q2", "completed", old, old),
         )
     repo._runtime.notebook_store.delete_row_and_orphan_embeddings("n1")
-    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    usage = next(row for row in repo._runtime.queries.list_user_usage() if row["id"] == "u1")
     assert usage["questions_30d"] == 1
 
 
@@ -512,7 +512,7 @@ def test_list_user_usage_questions_failed_and_reports_failed(repo):
                 "VALUES (?,?,?,?,?,?,?)",
                 (rid, "n1", "q?", status, "u1", now, now),
             )
-    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    usage = next(row for row in repo._runtime.queries.list_user_usage() if row["id"] == "u1")
     assert usage["questions_failed"] == 1
     assert usage["reports_failed"] == 1
 
@@ -546,7 +546,7 @@ def test_list_user_usage_failed_counts_retained_branch(repo):
                 (rid, "n1", "q?", status, "u1", now, now),
             )
     repo._runtime.notebook_store.delete_row_and_orphan_embeddings("n1")
-    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    usage = next(row for row in repo._runtime.queries.list_user_usage() if row["id"] == "u1")
     assert usage["questions_failed"] == 1
     assert usage["reports_failed"] == 1
 
@@ -598,7 +598,7 @@ def test_list_user_usage_counts_global_ask_conversations_and_questions(repo):
         _insert_global_ask(db, "g-old", "gc-1", "u1", old, status="completed")
         _insert_global_ask(db, "g-failed", "gc-1", "u1", created_now, status="failed")
 
-    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    usage = next(row for row in repo._runtime.queries.list_user_usage() if row["id"] == "u1")
     assert usage["conversations"] == 1
     assert usage["questions"] == 3
     # recent + created_now(g-failed) 在 30 天窗口内;old(40 天前)在窗外。
@@ -627,13 +627,13 @@ def test_list_user_usage_last_active_moves_to_newer_global_job(repo):
             "VALUES (?,?,?,?,?,?,?,?)",
             ("j1", "n1", "u1", "chunk", "q?", "completed", now, now),
         )
-    assert next(row for row in repo.list_user_usage() if row["id"] == "u1")["last_active"] == now
+    assert next(row for row in repo._runtime.queries.list_user_usage() if row["id"] == "u1")["last_active"] == now
 
     with repo._write() as db:
         _insert_global_conversation(db, "gc-2", "u1", later)
         _insert_global_ask(db, "g-newer", "gc-2", "u1", later)
 
-    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    usage = next(row for row in repo._runtime.queries.list_user_usage() if row["id"] == "u1")
     assert usage["last_active"] == later
 
 
@@ -662,7 +662,7 @@ def test_list_user_usage_kg_builds_counts_all_statuses_excludes_empty_creator(re
                 "VALUES (?,?,?,?,?,?,?)",
                 (kid, "n1", created_by, "full", status, now, now),
             )
-    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    usage = next(row for row in repo._runtime.queries.list_user_usage() if row["id"] == "u1")
     assert usage["kg_builds"] == 2
 
 
@@ -698,7 +698,7 @@ def test_list_user_usage_memory_count_excludes_rejected(repo):
                 "VALUES (?,?,?,?,?,?,?,?,?)",
                 (mid, notebook_id, "u1", "ask_answer", status, "T", "C", now, now),
             )
-    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    usage = next(row for row in repo._runtime.queries.list_user_usage() if row["id"] == "u1")
     assert usage["memory_count"] == 2
 
 
@@ -730,7 +730,7 @@ def test_list_user_usage_knowhow_tables_excludes_empty_creator(repo):
                 "VALUES (?,?,?,?,?,?)",
                 (kid, notebook_id, kid, created_by, now, now),
             )
-    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    usage = next(row for row in repo._runtime.queries.list_user_usage() if row["id"] == "u1")
     assert usage["knowhow_tables"] == 1
 
 
@@ -772,7 +772,7 @@ def test_list_user_usage_joined_notebooks_and_groups(repo):
             "INSERT INTO group_members (group_id,user_id,role,added_at) "
             "VALUES (?,?,?,?)", ("g1", "u2", "member", now),
         )
-    usage = {row["id"]: row for row in repo.list_user_usage()}
+    usage = {row["id"]: row for row in repo._runtime.queries.list_user_usage()}
     assert usage["u2"]["joined_notebooks"] == 1
     assert usage["u2"]["groups"] == 1
     assert usage["u1"]["joined_notebooks"] == 0

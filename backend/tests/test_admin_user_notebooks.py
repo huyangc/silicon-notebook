@@ -66,7 +66,7 @@ def test_source_count_excludes_hidden_projection_sources(repo):
             db.execute("INSERT INTO sources (id,notebook_id,title,source_type,created_at,updated_at)"
                        " VALUES (?,?,?,?,?,?)", (sid, "n1", sid, source_type, now, now))
 
-    rows = repo.list_user_notebooks("u1")
+    rows = repo._runtime.queries.list_user_notebooks("u1")
     assert rows[0]["sources"] == 1
     # 与左栏展开用的那条路径逐字对齐(它是这个数字的「展开形态」)。
     assert repo.list_sources_page("n1", 0, 50).total_count == 1
@@ -76,17 +76,17 @@ def test_notebook_exists_for_owner_matches_the_activity_owned_predicate(repo):
     """归属判定是**一行**的问题(F8);谓词必须与 list_user_activity 的 owned 分支
     逐字相同——包括 ``NOTEBOOK_LIVE_SQL`` 那一半(深拷贝中的库不算)。"""
     _seed(repo)
-    assert repo.notebook_exists_for_owner("n1", "u1") is True
-    assert repo.notebook_exists_for_owner("n3", "u1") is False   # copying
-    assert repo.notebook_exists_for_owner("n1", "u2") is False   # 别人的
-    assert repo.notebook_exists_for_owner("nope", "u1") is False  # 不存在
+    assert repo._runtime.queries.notebook_exists_for_owner("n1", "u1") is True
+    assert repo._runtime.queries.notebook_exists_for_owner("n3", "u1") is False   # copying
+    assert repo._runtime.queries.notebook_exists_for_owner("n1", "u2") is False   # 别人的
+    assert repo._runtime.queries.notebook_exists_for_owner("nope", "u1") is False  # 不存在
     # 与 list_user_notebooks 的口径一致(那份清单同样排除 copying)。
-    assert {r["id"] for r in repo.list_user_notebooks("u1")} == {"n1", "n2"}
+    assert {r["id"] for r in repo._runtime.queries.list_user_notebooks("u1")} == {"n1", "n2"}
 
 
 def test_list_user_notebooks_counts_and_excludes_copying(repo):
     _seed(repo)
-    rows = repo.list_user_notebooks("u1")
+    rows = repo._runtime.queries.list_user_notebooks("u1")
     by_id = {r["id"]: r for r in rows}
     assert set(by_id) == {"n1", "n2"}                 # copying n3 排除
     assert by_id["n1"]["name"] == "NB-n1"
@@ -98,8 +98,8 @@ def test_list_user_notebooks_counts_and_excludes_copying(repo):
     assert by_id["n2"]["sources"] == 0
     # 明细是 owner-only 库清单，不是用户总提问的完整分解；u2 在共享库 n1 的
     # 提问计入用户总览，但这里刻意不把 n1 伪装成 u2 拥有的笔记本。
-    assert repo.list_user_notebooks("u2") == []
-    assert repo.list_user_notebooks("nobody") == []
+    assert repo._runtime.queries.list_user_notebooks("u2") == []
+    assert repo._runtime.queries.list_user_notebooks("nobody") == []
 
 
 def test_reports_count_matches_activity_stream_entries(repo):
@@ -108,10 +108,10 @@ def test_reports_count_matches_activity_stream_entries(repo):
     没有这条谓词(``questions`` 那条本来就有),于是共享笔记本里别的可写成员建的
     报告被计进了 owner 的表头,点进去却在活动流里看不到对应条目。"""
     _seed(repo)
-    rows = repo.list_user_notebooks("u1")
+    rows = repo._runtime.queries.list_user_notebooks("u1")
     reports_count = {r["id"]: r["reports"] for r in rows}["n1"]
 
-    activity = repo.list_user_activity("u1", notebook_id="n1", limit=50)
+    activity = repo._runtime.queries.list_user_activity("u1", notebook_id="n1", limit=50)
     report_ids = {item["id"] for item in activity["items"] if item["type"] == "report"}
     assert report_ids == {"r1"}  # r2(u2 建的)不在这位用户自己的活动流里
     assert len(report_ids) == reports_count

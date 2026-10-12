@@ -125,7 +125,7 @@ def test_chunk_empty_retries_and_recovers(repo):
     stub = _EmptyThenReal()
     bind_chat_client(repo, "ask_answer", stub)
     nb = _seed_chunks(repo)
-    resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
+    resp = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="cascode", mode="chunk"))
     assert stub.calls == 2                                     # 空 content 触发重试
     assert not resp.conclusion.startswith("Retrieved ")       # 不落误导占位
     assert "cascode raises rout" in resp.conclusion
@@ -135,7 +135,7 @@ def test_chunk_empty_degrades_honestly(repo):
     _chunk_only(repo)
     bind_chat_client(repo, "ask_answer", _AlwaysEmpty())
     nb = _seed_chunks(repo)
-    resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
+    resp = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="cascode", mode="chunk"))
     assert not resp.conclusion.startswith("Retrieved ")       # 不冒充成功占位
     assert resp.llm_mode == "synthesis_failed"
     assert any(e.stage == "answer" for e in resp.model_errors)  # 可观测
@@ -342,7 +342,7 @@ def test_chunk_non_string_answer_degrades_honestly(repo):
     _chunk_only(repo)
     bind_chat_client(repo, "ask_answer", _ListAnswer())
     nb = _seed_chunks(repo)
-    resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
+    resp = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="cascode", mode="chunk"))
     assert "[" not in resp.conclusion and "raises rout" not in resp.conclusion
     assert resp.llm_mode == "synthesis_failed"
     assert any(e.stage == "answer" for e in resp.model_errors)

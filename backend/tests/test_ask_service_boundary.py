@@ -66,7 +66,7 @@ def test_non_streaming_ask_uses_hidden_terminal_job(repo):
     assert repo.get_conversation(response.conversation_id).active_job is None
 
 
-def test_runtime_owns_one_ask_service_and_facade_adapts_identity(repo, monkeypatch):
+def test_runtime_owns_one_ask_service_and_current_user_entry_adapts_identity(repo, monkeypatch):
     service = repo._runtime.ask_service()
     assert isinstance(service, AskService)
     assert service is repo._runtime.ask_service()   # one owner, identity-stable
@@ -81,7 +81,7 @@ def test_runtime_owns_one_ask_service_and_facade_adapts_identity(repo, monkeypat
         return AskResponse(conclusion="stubbed")
 
     monkeypatch.setattr(service, "ask_chunk", fake_chunk, raising=False)
-    out = repo.ask_chunk(nb.id, AskRequest(question="q", mode="chunk"))
+    out = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="q", mode="chunk"))
 
     assert out.conclusion == "stubbed"
     assert seen["args"] == (nb.id, repo.current_user().id, "", None)

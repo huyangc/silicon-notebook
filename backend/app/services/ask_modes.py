@@ -1,7 +1,7 @@
 """Canonical registry of ask() retrieval modes — the single source of truth for
 which modes exist, where each dispatches, and how the API/UI must treat them.
 
-SQLiteRepository.ask() (dispatch) and the API layer (validation + /ask-modes)
+AskService.ask() (dispatch) and the API layer (validation + /ask-modes)
 both read this module, so a mode is added/renamed in exactly one place; the
 cross-stack check scripts/check_ask_modes_contract.py keeps the frontend mode
 list (frontend/app/ask-modes.ts) in lock-step.
