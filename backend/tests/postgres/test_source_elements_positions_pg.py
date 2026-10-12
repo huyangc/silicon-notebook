@@ -10,10 +10,11 @@ The twin of ``tests/test_source_elements_positions.py``:
   ``SET TRANSACTION`` design);
 * ``prepare_source_overview`` is byte-identical to the frozen pre-batching
   function, statically and when the document changes after the first page;
-* the plan, custom and generic: the head walk is an index scan of
-  ``idx_source_elements_source_created`` (only or not -- the visibility map is
-  not this pin's business), hits go back by ``pk_source_elements``, and
-  nothing scans or sorts ``source_elements``.
+* both statement shapes, custom and generic plan: the per-offset shape is the
+  windowed read's ``Limit`` over ``idx_source_elements_source_created`` for
+  every position; the head walk is one index scan of that index (only or not
+  -- the visibility map is not this pin's business) with hits back by
+  ``pk_source_elements``; nothing scans or sorts ``source_elements``.
 """
 from __future__ import annotations
 
@@ -178,10 +179,24 @@ def _explain(connection, options: str, sql: str, params) -> str:
     return "\n".join(next(iter(row.values())) for row in rows)
 
 
-def test_plan_walks_the_order_index_and_probes_hits_by_primary_key(store, database):
+@pytest.mark.parametrize("shape,positions", [
+    ("per_offset", [3, 120, DOC - 1]),
+    ("per_offset", [DOC - 1]),
+    ("head_walk", list(range(0, DOC, 3)) + [DOC - 1]),
+    ("head_walk", list(range(1, 100))),
+])
+def test_both_shapes_walk_the_order_index_and_never_scan_or_sort_elements(
+    store, database, shape, positions,
+):
+    expected_sql = {
+        "per_offset": SourceStore._POSITIONS_PER_OFFSET_SQL,
+        "head_walk": SourceStore._POSITIONS_HEAD_WALK_SQL,
+    }[shape]
     with _statements(database) as seen:
-        store.source_elements_page("src-a", positions=[3, 120, DOC - 1])
+        page = store.source_elements_page("src-a", positions=positions)
     [(sql, params)] = seen
+    assert sql == expected_sql
+    assert page == page_at_positions(store.source_elements("src-a"), positions)
     generic_sql = (sql.replace("%(source_id)s", "$1").replace("%(positions)s", "$2")
                    .replace("%(span)s", "$3"))
     assert "%(" not in generic_sql
@@ -189,15 +204,25 @@ def test_plan_walks_the_order_index_and_probes_hits_by_primary_key(store, databa
         custom = _explain(connection, "COSTS OFF", sql, params)
         generic = _explain(connection, "GENERIC_PLAN, COSTS OFF", generic_sql, ())
     for name, plan in (("custom", custom), ("generic", generic)):
-        assert re.search(
-            r"Index (Only )?Scan using idx_source_elements_source_created on source_elements",
-            plan,
-        ), (name, plan)
-        assert "Index Scan using pk_source_elements on source_elements" in plan, (name, plan)
         assert "Seq Scan on source_elements" not in plan, (name, plan)
         assert "Bitmap Heap Scan on source_elements" not in plan, (name, plan)
         # the only sort is the final one, by the caller's ordinal
         assert re.findall(r"Sort Key: (.*)", plan) == ["w.ord"], (name, plan)
+        if shape == "per_offset":
+            # each position: the windowed read's own Limit over the order index
+            assert re.search(
+                r"Limit\n\s+->  Index Scan using idx_source_elements_source_created "
+                r"on source_elements", plan,
+            ), (name, plan)
+            assert "WindowAgg" not in plan, (name, plan)
+        else:
+            assert re.search(
+                r"Index (Only )?Scan using idx_source_elements_source_created "
+                r"on source_elements", plan,
+            ), (name, plan)
+            assert "WindowAgg" in plan, (name, plan)
+            assert "Index Scan using pk_source_elements on source_elements" in plan, (
+                name, plan)
 
 
 def _fields(result) -> str:
