@@ -209,9 +209,7 @@ def _recorded(repo, monkeypatch):
 
 
 def _old(sql: str) -> str:
-    if LIVE_TAIL in sql:
-        return sql.replace(LIVE_TAIL, ")")
-    return sql.replace(LIVE_PROJECTION, "")
+    return sql.replace(LIVE_TAIL, ")").replace(LIVE_PROJECTION, "")
 
 
 def _plan(db, sql: str, params) -> list[tuple[int, str]]:
