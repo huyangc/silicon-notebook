@@ -354,7 +354,9 @@ function AccountManageCell({
         <button
           type="button"
           className={`usage-role-button${open ? " usage-role-button-open" : ""}`}
-          disabled={lockedByOther}
+          // 本行请求在途时入口也不可点:否则这一下会绕过点外部 / Esc 的 pending 保护,
+          // 卸掉忙态表单并清空输入,请求失败时管理员要重输(codex R1 P2)。
+          disabled={lockedByOther || pending}
           aria-haspopup="dialog"
           aria-expanded={open}
           aria-label={`管理 ${user.username}`}
