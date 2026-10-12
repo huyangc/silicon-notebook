@@ -1009,20 +1009,33 @@ def test_deleting_the_group_cascades_share_requests(tmp_path, monkeypatch):
     ).json() == []
 
 
-@pytest.mark.parametrize("status", ["deleting", "copying", "importing"])
-def test_approving_into_a_notebook_that_is_not_live_is_a_404_and_writes_no_grant(
-    tmp_path, monkeypatch, status
+@pytest.mark.parametrize(
+    ("status", "detail"),
+    [
+        ("deleting", "这本笔记本正在删除,无法批准这条申请"),
+        ("copying", "这本笔记本暂时不可用,请稍后再批准"),
+        ("importing", "这本笔记本暂时不可用,请稍后再批准"),
+    ],
+)
+def test_approving_into_a_notebook_that_is_not_live_is_a_409_and_writes_no_grant(
+    tmp_path, monkeypatch, status, detail
 ):
-    """库在删除/复制/导入中(`NOTEBOOK_LIVE_SQL` 之外)时,批准 → 404,零授权边。
+    """申请仍 pending、而库不存活(`NOTEBOOK_LIVE_SQL` 之外)时,批准 → 409 + 描述库此刻状态的
+    文案,零授权边,申请留在队列里。
 
-    那时库对任何读者都不可见:批出去的边要么被删库级联清掉,要么指向一个半成品。申请行
-    **保留**为 pending——库回到可用状态后同一条申请照常能批(反向护栏:存活复核不是一道
-    恒关的闸)。PG 孪生在 `postgres/test_concurrency.py`。
+    现存申请实际只会遇到删除中(拷贝不复制申请表、同步不导入申请表),所以 deleting 有专门
+    文案,其余状态给不点名的兜底。不回 404「不存在或已被处理」:那条申请就在组管理员眼前的
+    队列里。最后把库改回 ready 再批成功——只证明存活复核不是一道恒关的闸;产品里删除完成时
+    申请随库消失,「恢复后再批」只对理论上的删除回退成立。
+
+    申请人另有一本 **ready** 的库:join 写错(例如 `ON … OR 1=1`)时存活判据会变成「库里有
+    任意一本存活的笔记本」,只有一本库的场景测不出来。PG 孪生在 `postgres/test_concurrency.py`。
     """
     from app.api import deps
 
     client = _client(tmp_path, monkeypatch)
     boss, librarian, _lid, group_id, notebook_id = _make_member_owned_notebook(client)
+    _make_notebook(client, librarian, name="另一本可用的库")
     request_id = _submit(client, librarian, notebook_id, group_id).json()["id"]
 
     def set_status(value: str) -> None:
@@ -1031,16 +1044,20 @@ def test_approving_into_a_notebook_that_is_not_live_is_a_404_and_writes_no_grant
 
     def grant_rows() -> list:
         with deps.repository()._write() as db:
-            return db.execute(
-                "SELECT principal_type, role FROM notebook_grants WHERE notebook_id=?",
-                (notebook_id,),
-            ).fetchall()
+            return [
+                tuple(row)
+                for row in db.execute(
+                    "SELECT notebook_id, principal_type, role FROM notebook_grants"
+                ).fetchall()
+            ]
 
     set_status(status)
     refused = client.post(
         f"/api/groups/{group_id}/share-requests/{request_id}/approve", headers=boss
     )
-    assert refused.status_code == 404, refused.text
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"] == detail
+    assert refused.headers.get("X-User-Message") == "1"
     assert grant_rows() == []
     assert [r["id"] for r in _pending_for(client, boss, group_id).json()] == [request_id]
 
@@ -1050,7 +1067,27 @@ def test_approving_into_a_notebook_that_is_not_live_is_a_404_and_writes_no_grant
     )
     assert approved.status_code == 200, approved.text
     assert approved.json()["status"] == "approved"
-    assert [tuple(row) for row in grant_rows()] == [("group", "viewer")]
+    assert grant_rows() == [(notebook_id, "group", "viewer")]
+
+
+def test_approving_a_decided_request_on_a_deleting_notebook_is_still_a_404(
+    tmp_path, monkeypatch
+):
+    """409 只给「申请还在、库不存活」:已决定的申请即使库正在删除,仍是 404「已被处理」。"""
+    from app.api import deps
+
+    client = _client(tmp_path, monkeypatch)
+    boss, librarian, _lid, group_id, notebook_id = _make_member_owned_notebook(client)
+    request_id = _submit(client, librarian, notebook_id, group_id).json()["id"]
+    assert client.post(
+        f"/api/groups/{group_id}/share-requests/{request_id}/reject", headers=boss
+    ).status_code == 200
+    with deps.repository()._write() as db:
+        db.execute("UPDATE notebooks SET status='deleting' WHERE id=?", (notebook_id,))
+    again = client.post(
+        f"/api/groups/{group_id}/share-requests/{request_id}/approve", headers=boss
+    )
+    assert again.status_code == 404, again.text
 
 
 # --------------------------------------------------------------------- store 层

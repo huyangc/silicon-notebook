@@ -4402,6 +4402,27 @@ class ShareRequestNotPendingError(RuntimeError):
     """
 
 
+class ShareRequestNotebookNotLiveError(RuntimeError):
+    """批准时申请仍 pending,但它那本笔记本不存活(`NOTEBOOK_LIVE_SQL` 之外)。
+
+    实际只会遇到 `deleting`:库主刚发起删库,删除作业还没把这条申请级联掉,审核队列里它
+    仍然在列。`copying` / `importing` 的库都是新建的,拷贝不复制申请表、同步不导入申请
+    表,所以那两种状态上不会有现存申请——判据仍按 `NOTEBOOK_LIVE_SQL` 写,不单挑 deleting。
+
+    不写授权边:那本库对任何读者都已不可见,批出去的边只会被删库级联清掉。申请行保留,
+    删除完成时它随库一起消失(理论上删除若被回退、库回到可用状态,同一条申请照常能批)。
+
+    路由映射成 **409** 而不是 404:申请**确实存在**、此刻就显示在组管理员的审核队列里,
+    回「不存在或已被处理」与他眼前看到的相矛盾;「申请在、但当前状态不允许兑现」正是
+    本文件 `ShareRequesterUnauthorizedError` 那一类 409 的形状。``status`` 用来挑文案。
+    """
+
+    def __init__(self, notebook_id: str, status: str) -> None:
+        super().__init__(notebook_id)
+        self.notebook_id = notebook_id
+        self.status = status
+
+
 @runtime_checkable
 class GroupStorePort(Protocol):
     """群组 / 组成员 / 笔记本授权边的行持久化面。
@@ -4581,9 +4602,10 @@ class GroupStorePort(Protocol):
     ) -> "dict | None":
         """批准:**同一写事务**内复核申请仍 pending + 组在 + `decided_by` 仍有审批资格
         + **`requested_by` 仍对该库有管理权** + 写 `(group, viewer)` 授权边(已共享则幂等
-        复用)+ 状态置 approved、写 `decided_by`/`decided_at`。申请不存在或已被决定、或
-        那本库不存活(`NOTEBOOK_LIVE_SQL` 之外:删除/复制/导入中)返回 `None`(路由 → 404,
-        不写边、申请保持 pending);`decided_by` 已不是该组组管理员抛 `GroupAdminRequiredError`
+        复用)+ 状态置 approved、写 `decided_by`/`decided_at`。申请不存在或已被决定返回
+        `None`(路由 → 404);申请仍 pending 但那本库不存活(`NOTEBOOK_LIVE_SQL` 之外,实际
+        只有删除中)抛 `ShareRequestNotebookNotLiveError`(路由 → 409,不写边、申请保留);
+        `decided_by` 已不是该组组管理员抛 `GroupAdminRequiredError`
         (路由 → 403);`requested_by` 已失去管理权抛 `ShareRequesterUnauthorizedError`
         (路由 → 409,申请行保留)。
 

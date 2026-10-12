@@ -87,6 +87,7 @@ from app.repositories.ports import (
     NotebookNotFoundError,
     ShareRequestAlreadyPendingError,
     ShareRequestNotPendingError,
+    ShareRequestNotebookNotLiveError,
     ShareRequesterUnauthorizedError,
 )
 
@@ -892,7 +893,9 @@ def approve_share_request_route(
 
     已共享(同库同组已有边)时幂等——不因「已经共享过」让批准失败,那会留下一条永远批
     不掉的申请。申请不存在或已被其他管理员决定 → 404(`approve_share_request` 返回
-    `None`,并发双审由 store 的行锁 + 精确状态匹配挡住)。
+    `None`,并发双审由 store 的行锁 + 精确状态匹配挡住)。申请还在、但那本笔记本正在删除
+    (或别的不可用状态)→ **409**,不写授权边、申请保留,删除完成时随库消失
+    (`ShareRequestNotebookNotLiveError`)。
 
     ⚠ 下面这道守卫**不是**最终判定:它与写事务之间有一个窗口,足够让这个人被降级或移出
     组,而批准会把**整组**的读权放出去(codex #519 R2 P1)。store 因此在同一写事务里再
@@ -922,6 +925,12 @@ def approve_share_request_route(
         raise user_error(
             409, "申请人已不再拥有这本笔记本的管理权,无法批准这条申请"
         )
+    except ShareRequestNotebookNotLiveError as exc:
+        # 描述库**此刻**的状态,不说「不存在或已被处理」——那条申请就在组管理员眼前的队列
+        # 里。现存申请实际只会遇到删除中,其余状态给不点名的兜底。
+        if exc.status == "deleting":
+            raise user_error(409, "这本笔记本正在删除,无法批准这条申请")
+        raise user_error(409, "这本笔记本暂时不可用,请稍后再批准")
     if decided is None:
         raise user_error(404, "这条待审批的共享申请不存在或已被处理")
     # 队列里少了一条 —— 对**全组**管理员都成立,不只是动手的这一个。

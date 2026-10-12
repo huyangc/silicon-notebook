@@ -49,6 +49,7 @@ from app.repositories.ports import (
     NotebookManageRequiredError,
     NotebookNotFoundError,
     ShareRequestNotPendingError,
+    ShareRequestNotebookNotLiveError,
     ShareRequesterUnauthorizedError,
 )
 from app.repositories.sqlite.access_sql import (
@@ -1004,8 +1005,8 @@ class GroupStore:
         里的 `create_grant` 在本方法之前先跑 `_require_notebook_on`,让答案变成 404
         「笔记本不存在」,与 PG 侧对齐(codex #519 R7 存疑项收口);另一个调用方
         `approve_share_request` 不需要——它先按 `id + group_id + status='pending'` 取申请行
-        (join 存活的 `notebooks`),库被删时那行已被外键级联带走、库不存活时 join 不中,
-        都查不到就返回 `None`(路由 404),压根到不了这里。
+        (join 存活的 `notebooks`):库被删时那行已被外键级联带走,返回 `None`(路由 404);
+        库不存活时抛 `ShareRequestNotebookNotLiveError`(路由 409)。两条都到不了这里。
         """
         if (
             db.execute(
@@ -1048,9 +1049,10 @@ class GroupStore:
         `delete_group` / `create_share_request` 的同款后端分叉一致。PG 侧审批「先锁笔记本行
         再碰申请行」的锁序修复在这里同样不需要(进程写锁,删库插不进来)。
 
-        **存活复核两侧对等**:取申请行时 join `notebooks` 并带 `NOTEBOOK_LIVE_SQL`——库在
-        deleting / copying / importing 时返回 `None`(路由 404)、不写授权边;申请行保留,库
-        回到可用状态后可以再批。PG 侧同一判据在 `_lock_request_notebook_on` 里。
+        **存活复核两侧对等**:取申请行时 join `notebooks` 并带 `NOTEBOOK_LIVE_SQL`;落空时
+        再用一条探测区分「申请没了 / 已决定」(返回 `None`,路由 404)与「申请还在、库不存活」
+        (抛 `ShareRequestNotebookNotLiveError`,路由 409,实际只有删除中)。后者不写授权边、
+        申请行保留,删除完成时随库消失。PG 侧同一判据在 `_lock_request_notebook_on` 里。
         """
         stamp = self.now()
         with self.database.write() as db:
@@ -1062,6 +1064,15 @@ class GroupStore:
                 (request_id, group_id),
             ).fetchone()
             if row is None:
+                stalled = db.execute(
+                    "SELECT n.id, n.status FROM notebook_share_requests sr "
+                    "JOIN notebooks n ON n.id=sr.notebook_id "
+                    "WHERE sr.id=? AND sr.group_id=? AND sr.status='pending' "
+                    f"AND NOT (n.{NOTEBOOK_LIVE_SQL})",
+                    (request_id, group_id),
+                ).fetchone()
+                if stalled is not None:
+                    raise ShareRequestNotebookNotLiveError(stalled["id"], stalled["status"])
                 return None
             self._require_share_decider_on(
                 db, group_id, decided_by, decided_by_is_system_admin

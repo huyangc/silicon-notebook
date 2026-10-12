@@ -3572,6 +3572,10 @@ def test_approve_first_then_notebook_delete_serializes(
     `FOR UPDATE`),deleter 的 `FOR UPDATE` 必须卡在它身上。修复前审批这时还没碰
     `notebooks`,deleter 的根锁当场拿到、转而卡在级联删申请行上(下一步审批插边的外键检查
     再去等它 → 死锁),「deleter 卡在根锁上」那条等待断言红。
+
+    同一停顿里顺带钉**锁模式**:审批持有的必须是 `FOR KEY SHARE`,不能更宽。第三条连接
+    此刻对同一行 `FOR NO KEY UPDATE NOWAIT`(改名、改状态、建源容量闸取的就是它)必须当场
+    成功;改成 `FOR SHARE` 会与它冲突 → `LockNotAvailable`,把审批拖进一整类不需要的阻塞。
     """
     import psycopg
     from psycopg.rows import dict_row
@@ -3621,6 +3625,20 @@ def test_approve_first_then_notebook_delete_serializes(
         approval = executor.submit(approve)
         try:
             assert parked.wait(timeout=10)
+            with psycopg.connect(
+                postgres_database._database_url, row_factory=dict_row
+            ) as prober:
+                try:
+                    assert prober.execute(
+                        "SELECT id FROM notebooks WHERE id=%s FOR NO KEY UPDATE NOWAIT",
+                        (notebook_id,),
+                    ).fetchone() is not None
+                except psycopg.errors.LockNotAvailable as exc:
+                    raise AssertionError(
+                        "审批对笔记本行持有的锁比 FOR KEY SHARE 宽,与普通 UPDATE 互相阻塞"
+                    ) from exc
+                finally:
+                    prober.rollback()
             deletion = executor.submit(delete_notebook)
             _wait_for_lock_wait(
                 postgres_database, "FROM notebooks WHERE id=$1 FOR UPDATE", deletion
@@ -3641,18 +3659,29 @@ def test_approve_first_then_notebook_delete_serializes(
 
 
 @pytest.mark.postgres_integration
-@pytest.mark.parametrize("status", ["deleting", "copying", "importing"])
-def test_approving_into_a_notebook_that_is_not_live_returns_none_postgres(
-    postgres_database, status
-):
-    """PG 孪生:库不存活(`NOTEBOOK_LIVE_SQL` 之外)时审批返回 `None`(路由 404)、零授权边,
-    申请行保持 pending;库回到 ready 后同一条申请照常能批。SQLite 一侧在
-    `test_share_requests.py`。"""
+def test_approving_into_a_notebook_that_is_not_live_is_refused_postgres(postgres_database):
+    """PG 孪生:申请仍 pending 而库不存活(`NOTEBOOK_LIVE_SQL` 之外)时抛
+    `ShareRequestNotebookNotLiveError`(路由 409)并带上库的状态,零授权边,申请保持 pending;
+    最后改回 ready 同一条申请照常能批(只证明存活复核不是恒关的闸——产品里删除完成时申请
+    随库消失)。三种状态在同一个用例里轮换,省两次迁移。
+
+    申请人另有一本 **ready** 的库:join 写错(`ON … OR 1=1`)时存活判据会被那本库满足,只有
+    一本库的场景测不出来。SQLite 一侧在 `test_share_requests.py`。
+    """
+    from app.repositories.ports import ShareRequestNotebookNotLiveError
+
     assert PostgresMigrator(postgres_database).migrate() == 72
     store = _group_store(postgres_database, _K4_NOW)
     notebook_id, group_id, request_id = _seed_share_request_race(
         postgres_database, store, "k4live"
     )
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+            "created_at,updated_at,tier) "
+            "VALUES ('k4live-other','K4 other','','','ready','k4live-owner',%s,%s,'personal')",
+            (_K4_NOW, _K4_NOW),
+        )
 
     def set_status(value: str) -> None:
         with postgres_database.write() as connection:
@@ -3660,15 +3689,24 @@ def test_approving_into_a_notebook_that_is_not_live_returns_none_postgres(
                 "UPDATE notebooks SET status=%s WHERE id=%s", (value, notebook_id)
             )
 
-    set_status(status)
-    assert store.approve_share_request(
-        group_id, request_id, decided_by="k4live-admin"
-    ) is None
-    assert _grant_count(postgres_database, notebook_id) == 0
-    with postgres_database.connect() as connection:
-        assert connection.execute(
-            "SELECT status FROM notebook_share_requests WHERE id=%s", (request_id,)
-        ).fetchone()["status"] == "pending"
+    def all_grants() -> int:
+        with postgres_database.connect() as connection:
+            return int(
+                connection.execute(
+                    "SELECT COUNT(*) AS c FROM notebook_grants"
+                ).fetchone()["c"]
+            )
+
+    for status in ("deleting", "copying", "importing"):
+        set_status(status)
+        with pytest.raises(ShareRequestNotebookNotLiveError) as refused:
+            store.approve_share_request(group_id, request_id, decided_by="k4live-admin")
+        assert (refused.value.notebook_id, refused.value.status) == (notebook_id, status)
+        assert all_grants() == 0, status
+        with postgres_database.connect() as connection:
+            assert connection.execute(
+                "SELECT status FROM notebook_share_requests WHERE id=%s", (request_id,)
+            ).fetchone()["status"] == "pending", status
 
     set_status("ready")
     approved = store.approve_share_request(
@@ -3676,3 +3714,42 @@ def test_approving_into_a_notebook_that_is_not_live_returns_none_postgres(
     )
     assert approved["status"] == "approved"
     assert _grant_count(postgres_database, notebook_id) == 1
+    assert all_grants() == 1
+
+
+@pytest.mark.postgres_integration
+def test_approving_a_decided_request_does_not_queue_on_the_notebook_lock(
+    postgres_database,
+):
+    """已决定的申请再点批准:不去排笔记本行的锁,立即 `None`(路由 404)。
+
+    deleter 持有笔记本行的 `FOR UPDATE`(删库第 5 阶段、`set_share_token`、晋升写入都是这把)
+    期间重复批准一条已批准的申请。`sr.status='pending'` 写在加锁那句里时,这行在扫描阶段就被
+    滤掉、不取 `FOR KEY SHARE`;去掉它,审批会卡在 deleter 身上,直到共享池 1 秒的
+    `lock_timeout` 抛 `LockNotAvailable`——本用例因此红。
+    """
+    import psycopg
+    from psycopg.rows import dict_row
+
+    assert PostgresMigrator(postgres_database).migrate() == 72
+    store = _group_store(postgres_database, _K4_NOW)
+    notebook_id, group_id, request_id = _seed_share_request_race(
+        postgres_database, store, "k4dup"
+    )
+    assert store.approve_share_request(
+        group_id, request_id, decided_by="k4dup-admin"
+    )["status"] == "approved"
+
+    with psycopg.connect(postgres_database._database_url, row_factory=dict_row) as holder:
+        assert holder.execute(
+            "SELECT id FROM notebooks WHERE id=%s FOR UPDATE", (notebook_id,)
+        ).fetchone() is not None
+        try:
+            # 卡在锁上不会无限等:共享池的 lock_timeout(1 秒)会抛 LockNotAvailable。不另设
+            # 墙钟阈值,免得并行门禁下把慢机器误判成回归。
+            again = store.approve_share_request(
+                group_id, request_id, decided_by="k4dup-admin"
+            )
+        finally:
+            holder.rollback()
+    assert again is None
