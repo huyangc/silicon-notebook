@@ -2044,18 +2044,26 @@ class QueryStore:
             # 失去该库的读权(撤授权边/被移出组/共享撤销)——此时每个报告端点都
             # 对他 404,铃铛却还挂着一条永远点不开的待确认项。按「授权即时生效」
             # 的同一口径,失权的报告不进铃铛;恢复读权后自动回来(条目从未删除)。
+            # 另叠加笔记本存活(K3):删除中/拷贝中/导入中的库里的待确认报告不进
+            # 铃铛,库回到正常后自动回来。存活谓词放在**投影**里、由下面的循环丢行,
+            # 而不进 WHERE:这条语句没有 LIMIT,两种写法结果逐行相同;放进 EXISTS
+            # 会让 generic 计划在小库上从「Hash Join」翻成「Nested Loop + pk」
+            # (实测,计划钉 test_memory_live_predicate_explain_pins.py),投影不改计划。
             reports = db.execute(
                 "SELECT r.id AS id, r.question AS question, "
                 "r.notebook_id AS notebook_id, r.created_at AS created_at, "
-                "nb.name AS notebook_name "
+                "nb.name AS notebook_name, "
+                f"(nb.{access_sql.NOTEBOOK_LIVE_SQL}) AS notebook_live "
                 "FROM reports r LEFT JOIN notebooks nb ON nb.id = r.notebook_id "
                 "WHERE r.status IN ('intent_ready','outline_ready') "
                 "AND r.created_by = ? AND "
-                + access_sql.live_read_access_exists_clause("r")
+                + access_sql.read_access_exists_clause("r")
                 + " ORDER BY r.updated_at DESC",
                 (user_id, *access_sql.read_access_params(user_id)),
             ).fetchall()
             for row in reports:
+                if not row["notebook_live"]:
+                    continue
                 items.append(
                     {
                         "type": "report_outline",
