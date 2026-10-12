@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { toUserMessage } from "./errors.ts";
 import { listWishes, toggleWishVote } from "./wish-wall-api.ts";
-import { WISH_KIND_LABELS, type WishItem } from "./wish-wall-model.ts";
+import { WISH_KIND_LABELS, type WishItem, type WishStatus } from "./wish-wall-model.ts";
 
 export const WAITING_WISH_ROTATION_MS = 8000;
 export const WAITING_WISH_KIND_LIMIT = 5;
@@ -19,6 +19,9 @@ type VotableWishItem = WishItem & { kind: "bug" | "feature" };
 
 const WISH_ICONS = { bug: Bug, feature: Lightbulb } as const;
 
+// 只轮播仍在处理的诉求：已完成、不采纳的条目留在许愿墙里，不在等待区占位。
+const WAITING_WISH_STATUSES: ReadonlySet<WishStatus> = new Set(["open", "in_progress"]);
+
 function compareWaitingWishes(left: WishItem, right: WishItem): number {
   if (left.vote_count !== right.vote_count) return right.vote_count - left.vote_count;
   const timeDelta = Date.parse(right.created_at) - Date.parse(left.created_at);
@@ -28,6 +31,10 @@ function compareWaitingWishes(left: WishItem, right: WishItem): number {
 
 function isVotableWish(item: WishItem): item is VotableWishItem {
   return item.kind === "bug" || item.kind === "feature";
+}
+
+function isPendingWish(item: WishItem): boolean {
+  return WAITING_WISH_STATUSES.has(item.status);
 }
 
 export function WaitingWishCarousel() {
@@ -48,7 +55,8 @@ export function WaitingWishCarousel() {
     setIndex(0);
     try {
       // 更新计划没有投票动作；分类型读取可避免计划占满综合列表的第一页，
-      // 让等待卡始终只轮播用户确实可以赞同/取消赞同的条目。
+      // 让等待卡始终只轮播用户确实可以赞同/取消赞同的条目。服务端 priority 排序把
+      // 已关闭条目沉在未关闭之后，所以在客户端剔除已关闭条目不需要多取或多发请求。
       const [bugs, features] = await Promise.all([
         listWishes({ kind: "bug", sort: "priority", limit: WAITING_WISH_KIND_LIMIT }),
         listWishes({ kind: "feature", sort: "priority", limit: WAITING_WISH_KIND_LIMIT }),
@@ -58,6 +66,7 @@ export function WaitingWishCarousel() {
         kind: "ready",
         items: [...bugs.items, ...features.items]
           .filter(isVotableWish)
+          .filter(isPendingWish)
           .sort(compareWaitingWishes),
       });
     } catch (error) {
@@ -175,7 +184,7 @@ export function WaitingWishCarousel() {
         </div>
       )}
       {state.kind === "ready" && items.length === 0 && (
-        <p className="waiting-wish-state">还没有可赞同的愿望，欢迎去许愿墙分享想法。</p>
+        <p className="waiting-wish-state">暂无处理中的愿望，欢迎去许愿墙分享想法。</p>
       )}
       {item && (() => {
         const Icon = WISH_ICONS[item.kind];
