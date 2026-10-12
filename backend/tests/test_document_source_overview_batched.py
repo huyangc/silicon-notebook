@@ -1,26 +1,32 @@
 """The batched positional read behind ``prepare_source_overview`` (debt fix F3).
 
-Three claims, each against the frozen pre-batching function
-(``tests/document_overview_legacy_oracle.py``) over the same store:
+What a reader of the overview can observe, asserted as behaviour:
 
-* every ``SourceOverview`` field is byte-identical -- static documents of every
-  shape, a document that shrinks or grows after the first page (positions out
-  of range / total changed), a re-parse (generation changed), a deleted source;
-* the reads are batched: the first page, then one read per <=100 positions,
-  and a list longer than 100 is split, never truncated;
-* ``stable_count`` detects at least what the per-offset loop detected. The
-  model store below charges the windowed read as two accesses (count, then
-  row -- two statements in both adapters) and a positional read as one (one
-  statement), and a change is injected after every access in turn.
+* which elements are cited -- spread is evenly spaced and ends on the last
+  element, opening is the first ``max_elements`` -- one citation per sampled
+  position when the budget allows, in document order;
+* the reads: the first page, then one positional read per <=100 positions; a
+  longer list is split, never truncated;
+* every visible branch when the document moves under the read: positions out
+  of range or a changed total (the "changed" note, also for a change that
+  is undone before the last read), a re-parse (the generation note), a deleted
+  source (``KeyError``), cancellation;
+* ``stable_count`` never hands back a silently mixed document: a model store
+  charges the windowed read as two accesses (count, then row -- two
+  statements in both adapters) and a positional read as one, and a change is
+  injected after every access in turn.
 
-The in-memory stores answer ``positions=`` through
-``app.domain.source_positions.page_at_positions`` -- the contract the real
-adapters are tested against in ``test_source_elements_positions.py`` and its
-PostgreSQL twin -- so they are not a second implementation of it.
+The byte-for-byte comparison with the pre-batching function was run once as
+PR evidence, not kept as a frozen copy here. The in-memory stores answer
+``positions=`` through ``app.domain.source_positions.page_at_positions`` --
+the contract the real adapters are tested against in
+``test_source_elements_positions.py`` and its PostgreSQL twin -- so they are
+not a second implementation of it.
 """
 from __future__ import annotations
 
 import json
+import math
 from threading import Event
 
 import pytest
@@ -30,7 +36,6 @@ from app.models.sources import PaginatedSourceElements, SourceElement
 from app.services.cancellation import AskCancelled
 from app.services.collection_enumeration import SourceItem
 from app.services.document_source_overview import prepare_source_overview
-from tests.document_overview_legacy_oracle import legacy_prepare_source_overview
 
 
 ITEM = SourceItem("source", "文档", "文档", "", "nb", "personal")
@@ -90,35 +95,57 @@ def _fields(result) -> str:
     ], ensure_ascii=False)
 
 
-def _both(make_store, budget, max_elements, coverage="spread", generations=None):
-    """Run the current and the frozen function over twin stores."""
-    out = []
-    for fn in (prepare_source_overview, legacy_prepare_source_overview):
-        reader = None
-        if generations is not None:
-            sequence = iter(generations)
-            reader = lambda _source_id, sequence=sequence: next(sequence)  # noqa: E731
-        try:
-            out.append(_fields(fn(
-                make_store(), ITEM, budget, max_elements, active_notebook_id="nb",
-                generation_reader=reader, coverage=coverage, key_offset=3,
-            )))
-        except KeyError as exc:
-            out.append(f"KeyError:{exc}")
-    return out
+def _run(store, budget, max_elements, coverage="spread", generations=None):
+    reader = None
+    if generations is not None:
+        sequence = iter(generations)
+        reader = lambda _source_id: next(sequence)  # noqa: E731
+    return prepare_source_overview(
+        store, ITEM, budget, max_elements, active_notebook_id="nb",
+        generation_reader=reader, coverage=coverage, key_offset=3,
+    )
+
+
+def _evenly_spaced(indexes: list[int]) -> bool:
+    gaps = [b - a for a, b in zip(indexes, indexes[1:])]
+    return not gaps or max(gaps) - min(gaps) <= 1
 
 
 @pytest.mark.parametrize("count", [0, 1, 2, 3, 7, 64, 101, 250])
 @pytest.mark.parametrize("max_elements", [1, 2, 5, 22, 64, 100, 101, 230])
 @pytest.mark.parametrize("coverage", ["spread", "opening"])
-@pytest.mark.parametrize("budget", [90, 30_000])
 @pytest.mark.parametrize("witnessed", [False, True])
-def test_static_documents_are_byte_identical(count, max_elements, coverage, budget, witnessed):
-    current, legacy = _both(
-        lambda: Store(count), budget, max_elements, coverage,
-        generations=["v1", "v1"] if witnessed else None,
-    )
-    assert current == legacy
+def test_the_sampled_elements_are_the_promised_positions(count, max_elements, coverage, witnessed):
+    store = Store(count)
+    result = _run(store, 10_000_000, max_elements, coverage,
+                  generations=["v1", "v1"] if witnessed else None)
+    cited = [int(citation.element_id[1:]) for citation in result.citations]
+    sampled = min(count, max_elements)
+    assert len(cited) == sampled
+    assert cited == sorted(set(cited))
+    if coverage == "opening":
+        assert cited == list(range(sampled))
+    elif sampled:
+        assert cited[-1] == count - 1                 # spread ends on the last element
+        assert sampled == 1 or cited[0] == 0
+        assert _evenly_spaced(cited)
+    assert list(result.id_map) == [f"k{3 + index + 1}" for index in range(len(cited))]
+    later = len([index for index in cited if index])
+    assert len(store.calls) == 1 + math.ceil(later / 100)
+    if not count:
+        assert "没有可读取的原文" in result.coverage_note
+    elif witnessed and count <= max_elements:
+        assert f"已读取全部 {count} 个原文元素" in result.coverage_note
+    else:
+        assert f"{sampled}/{count}" in result.coverage_note
+
+
+@pytest.mark.parametrize("count,max_elements", [(7, 5), (250, 64), (300, 230)])
+def test_a_tight_budget_never_overflows_and_keeps_document_order(count, max_elements):
+    result = _run(Store(count), 400, max_elements)
+    assert len(result.context_block) <= 400
+    cited = [int(citation.element_id[1:]) for citation in result.citations]
+    assert cited == sorted(set(cited))
 
 
 def _shrink(store, call):
@@ -141,27 +168,38 @@ def _delete(store, call):
         store.deleted = True
 
 
-@pytest.mark.parametrize("hook", [_shrink, _grow, _swap_same_count, _delete])
+REPARSED = "读取期间文档重新解析，无法确认原文一致性，请重试。"
+
+
+def _empty(result) -> bool:
+    return not result.context_block and not result.id_map and not result.citations
+
+
+@pytest.mark.parametrize("hook", [_shrink, _grow])
 @pytest.mark.parametrize("count,max_elements", [(2, 2), (40, 5), (250, 64), (300, 230)])
 @pytest.mark.parametrize("coverage", ["spread", "opening"])
-@pytest.mark.parametrize("generations", [None, ["v1", "v1"], ["v1", "v2"]])
-def test_changes_after_the_first_page_are_byte_identical(
-    hook, count, max_elements, coverage, generations,
-):
-    current, legacy = _both(
-        lambda: Store(count, hook), 30_000, max_elements, coverage, generations,
-    )
-    assert current == legacy
+def test_a_changed_total_after_the_first_page_voids_the_overview(hook, count, max_elements, coverage):
+    result = _run(Store(count, hook), 30_000, max_elements, coverage)
+    assert result.coverage_note == CHANGED and _empty(result)
+    # a re-parse witness that also moved wins: it is checked first
+    result = _run(Store(count, hook), 30_000, max_elements, coverage, ["v1", "v2"])
+    assert result.coverage_note == REPARSED and _empty(result)
 
 
-def test_shrink_and_grow_hit_the_total_changed_branch_and_delete_raises():
-    for hook in (_shrink, _grow):
-        current, legacy = _both(lambda hook=hook: Store(40, hook), 30_000, 5)
-        assert current == legacy and CHANGED in current
-    current, legacy = _both(lambda: Store(40, _delete), 30_000, 5)
-    assert current == legacy == "KeyError:'source'"
-    current, legacy = _both(lambda: Store(40), 30_000, 5, generations=["v1", "v2"])
-    assert current == legacy and "重新解析" in current
+@pytest.mark.parametrize("count,max_elements", [(2, 2), (40, 5), (300, 230)])
+def test_a_deleted_source_raises_key_error(count, max_elements):
+    with pytest.raises(KeyError):
+        _run(Store(count, _delete), 30_000, max_elements)
+
+
+@pytest.mark.parametrize("count,max_elements", [(40, 5), (300, 230)])
+def test_a_same_count_rewrite_is_caught_by_the_generation_witness(count, max_elements):
+    result = _run(Store(count, _swap_same_count), 30_000, max_elements, "spread", ["v1", "v2"])
+    assert result.coverage_note == REPARSED and _empty(result)
+    # without a witness the count cannot see it, and the note never claims a
+    # complete reading
+    result = _run(Store(count, _swap_same_count), 30_000, max_elements)
+    assert "已读取全部" not in result.coverage_note
 
 
 def test_positions_after_the_first_page_go_in_one_read():
@@ -199,6 +237,28 @@ def test_a_change_between_two_batches_voids_the_overview():
     )
     assert len([call for call in store.calls if call[0] == "positions"]) == 3
     assert result.coverage_note == CHANGED and not result.citations
+
+
+def test_a_change_undone_before_the_last_batch_still_voids_the_overview():
+    """ABA: the total moves after the first positional read and is restored
+    after the second, so the LAST read sees the first page's total again. The
+    middle read saw another one -- every batch must be compared, not only the
+    last."""
+    extra = _element(9999, "短暂出现的段落", tag="x")
+
+    def aba(store, call):
+        if call == 2:
+            store.elements.append(extra)
+        elif call == 3:
+            store.elements.remove(extra)
+
+    store = Store(300, aba)
+    result = prepare_source_overview(
+        store, ITEM, 10_000_000, 250, active_notebook_id="nb", coverage="opening",
+    )
+    reads = [call for call in store.calls if call[0] == "positions"]
+    assert len(reads) == 3 and len(store.elements) == 300
+    assert result.coverage_note == CHANGED and _empty(result)
 
 
 def test_cancellation_is_checked_before_every_read():
@@ -269,19 +329,17 @@ def _undetected_mix(fn, count, max_elements, change_after) -> bool:
     return CHANGED not in result and result not in (before, after)
 
 
-@pytest.mark.parametrize("count,max_elements", [(12, 4), (60, 6), (300, 120)])
-def test_stable_count_detects_at_least_what_the_per_offset_loop_did(count, max_elements):
-    legacy_accesses = 2 * (1 + (max_elements - 1))
-    current_misses = [
-        after for after in range(1, legacy_accesses + 1)
+@pytest.mark.parametrize("count,max_elements", [(12, 4), (60, 6), (300, 120), (300, 230)])
+def test_a_change_at_any_access_never_yields_a_silently_mixed_overview(count, max_elements):
+    """Every access the read makes -- the first page's count and row, then
+    each positional read -- is followed in turn by one count-changing write.
+    The result is a whole reading of the document before the change, a whole
+    reading after it, or the "changed" note; never a mixture without the note.
+    (The per-offset loop this replaced did hand back such a mixture: a change
+    between its last count and its last row passed every total comparison --
+    see the PR evidence.)"""
+    accesses = 2 + math.ceil((max_elements - 1) / 100)
+    assert [
+        after for after in range(1, accesses + 2)
         if _undetected_mix(prepare_source_overview, count, max_elements, after)
-    ]
-    legacy_misses = [
-        after for after in range(1, legacy_accesses + 1)
-        if _undetected_mix(legacy_prepare_source_overview, count, max_elements, after)
-    ]
-    # The batched read never hands back a silently mixed document ...
-    assert current_misses == []
-    # ... while the per-offset loop did: a change between the last read's
-    # count and its row passed every total comparison.
-    assert legacy_misses
+    ] == []

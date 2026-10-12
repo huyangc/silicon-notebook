@@ -6,8 +6,9 @@
 * One positional read is ONE statement (one WAL snapshot for the count and
   the elements), and every position is answered by a term whose plan is the
   windowed read's own ``LIMIT 1 OFFSET`` plan.
-* End to end over a real store, ``prepare_source_overview`` is byte-identical
-  to the frozen pre-batching function and issues 1 + ceil(k / 100) reads.
+* End to end over a real store, ``prepare_source_overview`` cites the promised
+  positions of the stored order (spread: evenly spaced, ending on the last
+  element; opening: the first ones) and issues 1 + ceil(k / 100) reads.
 The PostgreSQL twin is ``tests/postgres/test_source_elements_positions_pg.py``.
 """
 from __future__ import annotations
@@ -23,7 +24,6 @@ from app.models.schemas import NotebookCreate
 from app.services.collection_enumeration import SourceItem
 from app.services.document_source_overview import prepare_source_overview
 from app.services.sqlite_repository import SQLiteRepository
-from tests.document_overview_legacy_oracle import legacy_prepare_source_overview
 
 
 @pytest.fixture
@@ -155,35 +155,49 @@ class _CountingReads:
         return self.store.source_elements_page(source_id, positions=positions)
 
 
-def _fields(result) -> str:
-    return json.dumps([
-        result.context_block, json.dumps(result.id_map, ensure_ascii=False),
-        [citation.model_dump_json() for citation in result.citations],
-        result.coverage_note,
-    ], ensure_ascii=False)
+def assert_promised_positions(result, ordered, max_elements, coverage, calls):
+    """The overview's citations, located in the store's own element order."""
+    where = {element.id: index for index, element in enumerate(ordered)}
+    cited = [where[citation.element_id] for citation in result.citations]
+    sampled = min(len(ordered), max_elements)
+    assert cited == sorted(set(cited))
+    # A tight budget drops samples whose share cannot hold their breadcrumb, so
+    # the citations are a subsequence of the sampled positions; with room for
+    # all of them they are exactly those positions.
+    if coverage == "opening":
+        assert all(index < sampled for index in cited)
+        assert len(cited) < sampled or cited == list(range(sampled))
+    if len(cited) == sampled and coverage == "spread" and sampled:
+        assert cited[-1] == len(ordered) - 1
+    if len(cited) == sampled and coverage == "spread" and sampled > 1:
+        gaps = [b - a for a, b in zip(cited, cited[1:])]
+        assert cited[0] == 0 and max(gaps) - min(gaps) <= 1
+    later = max_elements - 1 if max_elements > 1 or coverage == "opening" else 1
+    assert calls[0] == ("offset", 0)
+    assert len(calls) == 1 + math.ceil(later / MAX_POSITIONS_PER_READ)
+    assert sum(n for kind, n in calls if kind == "positions") == later
 
 
 @pytest.mark.parametrize("max_elements", [1, 2, 5, 22, 64, 150, 230])
 @pytest.mark.parametrize("coverage", ["spread", "opening"])
-@pytest.mark.parametrize("budget", [120, 30_000])
-def test_overview_is_byte_identical_and_batched(repo, max_elements, coverage, budget):
+@pytest.mark.parametrize("budget", [120, 10_000_000])
+def test_overview_cites_the_promised_positions_in_batched_reads(
+    repo, max_elements, coverage, budget,
+):
     notebook_id = _seed(repo, "src-a", 260)
     store = repo._runtime.source_store
     item = SourceItem("src-a", "文档", "文档", "", notebook_id, "personal")
     reads = _CountingReads(store)
-    current = prepare_source_overview(
+    result = prepare_source_overview(
         reads, item, budget, max_elements, active_notebook_id=notebook_id,
         generation_reader=lambda _: "v1", coverage=coverage,
     )
-    legacy = legacy_prepare_source_overview(
-        store, item, budget, max_elements, active_notebook_id=notebook_id,
-        generation_reader=lambda _: "v1", coverage=coverage,
+    assert len(result.context_block) <= budget
+    if budget > 120:
+        assert len(result.citations) == min(260, max_elements)
+    assert_promised_positions(
+        result, store.source_elements("src-a"), max_elements, coverage, reads.calls,
     )
-    assert _fields(current) == _fields(legacy)
-    later = max_elements - 1 if max_elements > 1 or coverage == "opening" else 1
-    assert reads.calls[0] == ("offset", 0)
-    assert len(reads.calls) == 1 + math.ceil(later / MAX_POSITIONS_PER_READ)
-    assert sum(n for kind, n in reads.calls if kind == "positions") == later
 
 
 @pytest.mark.parametrize("positions,shape", [

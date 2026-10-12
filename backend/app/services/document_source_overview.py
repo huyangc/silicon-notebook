@@ -50,12 +50,13 @@ def _position_batches(positions: list[int]) -> list[list[int]]:
 
     ``document_overview_max_elements`` has no upper bound, so a long list is
     split rather than truncated. The offset sum needs no split of its own:
-    the PostgreSQL adapter answers a read whose offsets sum to twice its
-    largest position or more with ONE walk up to that position, and a cheaper
-    read with per-offset walks, so no read walks more than twice its largest
-    position -- and the read that holds the last position walks the document
-    however the list is cut, as the single-offset read of it did. More reads
-    would only re-walk prefixes.
+    the PostgreSQL adapter answers a read with ONE walk up to its largest
+    position (``span``) when the offsets (``sum(p + 1)``) reach
+    ``max(2 * span, 2048)``, and with per-offset walks when they stay below
+    it -- so a read walks at most ``max(2 * span, 2048)`` index rows. The
+    read that holds the last position walks the document however the list
+    is cut, as the single-offset read of it did; more reads would only
+    re-walk prefixes.
     """
     return [
         positions[start:start + MAX_POSITIONS_PER_READ]
