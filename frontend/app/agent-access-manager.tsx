@@ -589,6 +589,17 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
       setProfiles((current) => current.filter((item) => item.id !== profileId));
       if (snapshot) setDeletedProfile({ profile: snapshot, index });
       if (selectedProfileRef.current === profileId) setSelectedProfile("");
+      // 服务端已在同一事务里撤销它名下的全部 token。不等刷新(刷新可能失败):已加载的行立刻按已撤销
+      // 呈现——不再可复制、明文收起(上面的 rowCopy 清理 effect 随之触发)、编辑态与签发回执一并关闭。
+      const revokedAt = new Date().toISOString();
+      setTokens((current) => current.map((token) => (
+        token.agent_profile_id === profileId && !token.revoked_at
+          ? { ...token, revoked_at: revokedAt, copyable: false }
+          : token
+      )));
+      setEdit((current) => (current?.original.agent_profile_id === profileId ? null : current));
+      setIssued((current) => (current?.agent_profile_id === profileId ? null : current));
+      setConfirmRevokeId(null);
       setRefresh((value) => value + 1);
     } catch (cause) {
       // 失败时保留行内确认,用户可以就地再点一次「确认删除」。
