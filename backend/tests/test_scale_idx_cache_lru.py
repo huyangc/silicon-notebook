@@ -93,7 +93,7 @@ def test_evicted_viz_index_reloads_correctly(repo, monkeypatch):
          "payload": {"name": "Alpha Concept", "section_path": ""}, "evidence": []},
     ], [])
     repo.rebuild_unified_kg(nb_a.id)
-    manifest_a = repo.build_viz_index(nb_a.id)
+    manifest_a = repo._runtime.scale_artifacts.build_viz(nb_a.id)
     assert manifest_a is not None
     assert nb_a.id in repo._viz_idx_cache
 
@@ -103,7 +103,7 @@ def test_evicted_viz_index_reloads_correctly(repo, monkeypatch):
          "payload": {"name": "Beta Concept", "section_path": ""}, "evidence": []},
     ], [])
     repo.rebuild_unified_kg(nb_b.id)
-    repo.build_viz_index(nb_b.id)
+    repo._runtime.scale_artifacts.build_viz(nb_b.id)
     assert nb_a.id not in repo._viz_idx_cache  # evicted, cap=1
     assert nb_b.id in repo._viz_idx_cache
 

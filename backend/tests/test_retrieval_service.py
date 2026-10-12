@@ -42,7 +42,7 @@ def test_neighbors_elements_node_context_delegate(tmp_path):
 def test_federated_and_ppr_delegate(tmp_path):
     repo, nb = _repo_with_kg(tmp_path)
     assert ([h.object_id for h in repo.retrieval.federated_retrieve(nb, "运算放大器")]
-            == [h.object_id for h in repo.federated_retrieve(nb, "运算放大器")])
+            == [h.object_id for h in repo.retrieval.candidates.federated_retrieve(nb, "运算放大器")])
     assert ([c for c in repo.retrieval.ppr_retrieve(nb, "运算放大器")]
             == [c for c in repo._ppr_retrieve(nb, "运算放大器")])
 

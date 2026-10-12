@@ -631,7 +631,7 @@ def test_retrieve_chunks_large_library_copyable_degrades(repo, monkeypatch):
     这是「large = not copyable」这条大库守卫臂(10502),另一条(n_chunks>threshold)已被
     test_chunk_bruteforce_guard 覆盖。"""
     nb, _ = _seed_chunks(repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)])
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     # 阈值保持默认(20000,不动),仅令 copyable=False 触发 large 臂
     monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda nb_id: {"copyable": False, "size": {}})
@@ -706,7 +706,7 @@ def test_retrieve_chunks_all_selected_frozen_scope_restores_the_language_gate(
     nb, sid = _seed_chunks(
         repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)]
     )
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda nb_id: {"copyable": False, "size": {}})
     # 未建 scale 索引 → ANN 分支不可用,自然落到大库/降级路径(同 test 6)。
@@ -823,7 +823,7 @@ def test_retrieve_elements_all_selected_frozen_scope_keeps_the_language_gate_ope
     nb, sid = _seed_chunks(
         repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)]
     )
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda nb_id: {"copyable": False, "size": {}})
 
@@ -894,7 +894,7 @@ def test_retrieve_elements_producer_supplied_narrow_list_enters_the_restricted_l
     nb, sid = _seed_chunks(
         repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)]
     )
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda nb_id: {"copyable": False, "size": {}})
 
@@ -939,7 +939,7 @@ def test_federated_retrieve_elements_plugin_enumeration_stays_out_of_the_restric
     nb, sid = _seed_chunks(
         repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)]
     )
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda nb_id: {"copyable": False, "size": {}})
 
@@ -996,7 +996,7 @@ def test_universe_drift_after_all_selected_freeze_reopens_all_three_lexical_arms
     nb, sid = _seed_chunks(
         repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)]
     )
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda nb_id: {"copyable": False, "size": {}})
     repo.store_kg(nb.id, None, [{
@@ -1040,7 +1040,7 @@ def test_universe_drift_after_all_selected_freeze_reopens_all_three_lexical_arms
     # ── 制造漂移:冻结快照之外插入一个新来源(带 chunk + KG 对象),让可见宇宙
     #    不再等于冻结快照——同一份 frozen_scope 仍然只列 sid(narrowed=False)。
     sid2 = _add_chunk_source(repo, nb.id, ["drifted source body content " * 5])
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     repo.store_kg(nb.id, None, [{
         "local_id": "drifted", "object_type": "concept",
         "payload": {"name": "bandgap reference"},
@@ -1080,7 +1080,7 @@ def test_universe_drift_probe_runs_at_most_once_per_retrieval_arm_entry(
     nb, sid = _seed_chunks(
         repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)]
     )
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda nb_id: {"copyable": False, "size": {}})
 
@@ -1226,11 +1226,11 @@ def test_lexical_gate_ignores_active_notebook_narrowing_for_a_different_notebook
     main_nb, main_sid = _seed_chunks(
         repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)]
     )
-    repo.backfill_chunk_fts(main_nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(main_nb.id)
     mounted_nb, mounted_sid = _seed_chunks(
         repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)]
     )
-    repo.backfill_chunk_fts(mounted_nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(mounted_nb.id)
     monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda nb_id: {"copyable": False, "size": {}})
 
@@ -1321,7 +1321,7 @@ def test_chunk_multi_and_keyword_arms_survive_a_failing_drift_probe(repo, monkey
     nb, sid = _seed_chunks(
         repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)]
     )
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda nb_id: {"copyable": False, "size": {}})
 
@@ -1714,7 +1714,7 @@ def _small_scoped_library(repo):
     小库」,大库守卫在这里必须不触发。
     """
     nb, sid = _seed_chunks(repo, list(_ENGLISH_CORPUS))
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     assert repo.retrieval.candidates.notebook_copy_stats(nb.id)["copyable"], (
         "前提:这条 fixture 必须是小库(copyable=True),否则测的是大库降级臂"
     )
@@ -1853,7 +1853,7 @@ def test_scoped_partial_freeze_still_ceils_hits_to_allowed_sources(repo):
         "Recursive depth language models were also evaluated on long-context "
         "retrieval benchmarks in a separate follow-up study.",
     ])
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     allowed_chunk_ids = _chunk_ids_of_source(repo, allowed_sid)
     other_chunk_ids = _chunk_ids_of_source(repo, other_sid)
     assert allowed_chunk_ids and other_chunk_ids, "前提:两个来源都真的有 chunk"
@@ -1970,7 +1970,7 @@ def test_scoped_large_library_still_degrades_to_fts_with_a_real_count(
     from app.services.source_scope import source_scope_context
 
     nb, sid = _seed_chunks(repo, list(_ENGLISH_CORPUS))
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda nb_id: {"copyable": False, "size": {}})
 

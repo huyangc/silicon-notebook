@@ -93,7 +93,7 @@ def test_viz_artifact_has_no_memory_object_name_or_memory_only_edge(repo):
     seeded = seed_shared_notebook_with_memory(repo)
     nb_id, canon = seeded["notebook_id"], seeded["canonical"]
 
-    manifest = repo.build_viz_index(nb_id)
+    manifest = repo._runtime.scale_artifacts.build_viz(nb_id)
     idx = repo._viz_index(nb_id)
 
     assert not set(SECRET_NAMES) & set(idx.viz_names)
@@ -173,7 +173,7 @@ def test_every_notebook_carries_the_isolation_marker_in_its_version(repo):
 def test_a_viz_built_before_the_isolation_is_stale_after_it(repo):
     seeded = seed_shared_notebook_with_memory(repo)
     nb_id = seeded["notebook_id"]
-    repo.build_viz_index(nb_id)
+    repo._runtime.scale_artifacts.build_viz(nb_id)
     assert repo._viz_index_probe(nb_id)["viz_stale"] is False
     make_it_look_pre_isolation(repo._viz_index_dir(nb_id))
     repo._viz_idx_cache.pop(nb_id, None)
@@ -283,7 +283,7 @@ def _build_the_way_the_previous_release_did(repo, seeded):
     nb_id = seeded["notebook_id"]
     with repo._write() as db:
         db.execute("UPDATE sources SET source_type='md' WHERE id='src-memory'")
-    repo.build_viz_index(nb_id)
+    repo._runtime.scale_artifacts.build_viz(nb_id)
     make_it_look_pre_isolation(repo._viz_index_dir(nb_id))
     with repo._write() as db:
         db.execute("UPDATE sources SET source_type='memory' WHERE id='src-memory'")
@@ -322,7 +322,7 @@ def test_viz_does_not_fold_a_shared_object_into_a_cluster_that_holds_memory(repo
     seeded = seed_shared_notebook_with_memory(repo)
     nb_id, ids = seeded["notebook_id"], seeded["objects"]
     mix_a_shared_object_into_a_memory_cluster(repo, seeded)
-    repo.build_viz_index(nb_id)
+    repo._runtime.scale_artifacts.build_viz(nb_id)
     idx = repo._viz_index(nb_id)
     assert not any("secret" in str(v).lower()
                    for v in list(idx.viz_ids) + list(idx.viz_names))

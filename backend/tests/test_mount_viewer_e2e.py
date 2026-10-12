@@ -215,7 +215,7 @@ def add_public_library(env: dict, ph: str, tag: str) -> str:
     repo = repository()
     with repo._write() as db:
         db.execute(f"UPDATE notebooks SET tier='base' WHERE id={ph}", (library,))
-    repo.backfill_chunk_fts(library)
+    repo._runtime.knowledge_query.backfill_chunk_fts(library)
     repo.rebuild_unified_kg(library)
     _mount(ph, env["notebook"].id, library, env["alice"].id)
     return library
@@ -258,7 +258,7 @@ def _seed(env: dict, ph: str) -> None:
                  }]), NOW),
             )
     for notebook_id in (a, b):
-        repo.backfill_chunk_fts(notebook_id)
+        repo._runtime.knowledge_query.backfill_chunk_fts(notebook_id)
         repo.rebuild_unified_kg(notebook_id)
     from app.services.knowhow.assets import AssetService
 

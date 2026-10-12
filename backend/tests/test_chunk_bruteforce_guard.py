@@ -46,7 +46,7 @@ def _seed_chunks(repo, n):
             v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts([txt])[0]
             db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
                        (f"c{i}", nb.id, json.dumps(v), now))
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     return nb
 
 

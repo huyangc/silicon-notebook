@@ -808,14 +808,14 @@ def test_unit_tables_cover_the_real_query_payloads(repo):
     (T1 给载荷加了字段而这里忘了补单位)也钉住。
     """
     payloads = {
-        ARTIFACT_CLUSTER_HISTOGRAM: repo.kg_cluster_size_histogram(NB),
-        ARTIFACT_LARGEST_CLUSTERS: repo.kg_largest_clusters(NB),
-        ARTIFACT_RELATION_PROVENANCE: repo.kg_relation_provenance_counts(NB),
+        ARTIFACT_CLUSTER_HISTOGRAM: repo._runtime.unified_kg.cluster_size_histogram(NB),
+        ARTIFACT_LARGEST_CLUSTERS: repo._runtime.unified_kg.largest_clusters(NB),
+        ARTIFACT_RELATION_PROVENANCE: repo._runtime.unified_kg.relation_provenance_counts(NB),
     }
     for kind, payload in payloads.items():
         missing = _numeric_leaf_names(payload, set()) - set(ARTIFACT_UNITS[kind])
         assert missing == set(), f"{kind} 的这些数值字段没有单位:{sorted(missing)}"
-    boards = repo.kg_community_overview(NB)
+    boards = repo._runtime.unified_kg.community_overview(NB)
     assert _numeric_leaf_names(boards, set()) <= set(BOARD_UNITS)
 
 

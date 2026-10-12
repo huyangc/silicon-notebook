@@ -541,7 +541,7 @@ def test_ann_union_lexical_failure_banners_when_fts_is_sole_recall(
     delta_source = _add_chunked_source(
         repo, nb.id, ["DELTA9000 fresh union evidence " * 20]
     )
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     idx = repo._scale_index(nb.id, allow_stale=True)
     assert delta_source not in idx.chunk_ann_source_names
     assert not repo.settings.scale_search_include_delta
@@ -1700,7 +1700,7 @@ def test_report_mixed_indexed_and_delta_scope_restores_bounded_fts(
     excluded_source = _add_chunked_source(
         repo, nb.id, ["DELTA9000 excluded report evidence " * 20]
     )
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     idx = repo._scale_index(nb.id, allow_stale=True)
     assert old_source in idx.chunk_ann_source_names
     assert delta_source not in idx.chunk_ann_source_names
@@ -1751,7 +1751,7 @@ def test_report_unscoped_sidecar_missing_source_restores_bounded_fts(
     delta_source = _add_chunked_source(
         repo, nb.id, ["MOUNTDELTA9000 fresh mounted evidence " * 20]
     )
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     idx = repo._scale_index(nb.id, allow_stale=True)
 
     real_hits = repo.retrieval.candidates._chunk_fts_hits
@@ -1926,7 +1926,7 @@ def test_sqlite_chunk_fts_source_scope_uses_one_json_bind(repo):
         source_ids.append(_add_chunked_source(
             repo, nb.id, ["JSONSCOPE9000 evidence " * 20]
         ))
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
 
     with repo._connect() as db:
         previous = db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 4)
@@ -2013,7 +2013,7 @@ def test_chunk_ann_unions_lexical(repo, monkeypatch):
                        (cid, nb.id, _json.dumps(v), now))
     repo.rebuild_unified_kg(nb.id)
     repo.build_scale_index(nb.id)
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
 
     monkeypatch.setattr(repo.settings, "chunk_ann_enabled", True)
     idx = repo._scale_index(nb.id, allow_stale=True)
@@ -2122,7 +2122,7 @@ def test_chunk_fts_backfill_and_search(repo):
                 "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
                 "VALUES (?,?,?,?,?,?,?)",
                 (cid, nb.id, "s1", txt, "", "[]", now))
-    n = repo.backfill_chunk_fts(nb.id)
+    n = repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     assert n == 2
     # Task 13: the chunk FTS SQL moved to KnowledgeStore (kg/search keeps
     # only pure hit merging); the primitive stays connection-taking.

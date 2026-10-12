@@ -141,7 +141,7 @@ def test_markdown_zip_upload_persists_relative_images_in_background_pipeline(rep
 
     source = repo.get_source(created[0].id)
     assert source.parse_status == "extracted"
-    asset_ids = repo.source_asset_ids(source.id)
+    asset_ids = repo._runtime.knowhow_store.source_asset_ids(source.id)
     assert len(asset_ids) == 1
     images = [
         element for element in repo.source_elements(source.id)
@@ -510,7 +510,7 @@ def test_baseexception_after_parser_materialize_cleans_uncommitted_assets(
     with pytest.raises(_HardAbort, match="element transaction interrupted"):
         repo.process_source(sid)
 
-    assert repo.source_asset_ids(sid) == []
+    assert repo._runtime.knowhow_store.source_asset_ids(sid) == []
 
 
 def test_concurrent_same_source_reparse_serializes_asset_generations(
@@ -566,7 +566,7 @@ def test_concurrent_same_source_reparse_serializes_asset_generations(
     assert not second.is_alive()
     assert errors == []
     assert len(calls) == 2
-    assert len(repo.source_asset_ids(sid)) == 1
+    assert len(repo._runtime.knowhow_store.source_asset_ids(sid)) == 1
 
 
 def test_active_lease_released_on_propagating_baseexception(
@@ -1227,7 +1227,7 @@ def test_process_source_persists_mineru_local_image_to_source_assets(tmp_path, m
 
     detail = repo.get_source(sid)
     assert detail.parse_status == "extracted"
-    asset_ids = repo.source_asset_ids(sid)
+    asset_ids = repo._runtime.knowhow_store.source_asset_ids(sid)
     assert len(asset_ids) == 1
     asset = repo.get_notebook_asset(asset_ids[0])
     assert asset["notebook_id"] == nb.id
@@ -1338,7 +1338,7 @@ def test_process_source_reparse_clears_stale_source_images(tmp_path, monkeypatch
     repo, sid = _seed_source_with_mineru_image(tmp_path, monkeypatch)
 
     repo.process_source(sid)
-    first_ids = repo.source_asset_ids(sid)
+    first_ids = repo._runtime.knowhow_store.source_asset_ids(sid)
     assert len(first_ids) == 1
 
     from app.services.knowhow.assets import AssetService
@@ -1351,7 +1351,7 @@ def test_process_source_reparse_clears_stale_source_images(tmp_path, monkeypatch
     # Task 9 cascade-delete this would append a second row/file and double
     # the count.
     repo.process_source(sid)
-    second_ids = repo.source_asset_ids(sid)
+    second_ids = repo._runtime.knowhow_store.source_asset_ids(sid)
     assert len(second_ids) == 1
     assert second_ids != first_ids  # old row replaced, not appended to
 
@@ -1366,7 +1366,7 @@ def test_delete_source_cleans_images(tmp_path, monkeypatch):
     asset rows and files behind forever."""
     repo, sid = _seed_source_with_mineru_image(tmp_path, monkeypatch)
     repo.process_source(sid)
-    asset_ids = repo.source_asset_ids(sid)
+    asset_ids = repo._runtime.knowhow_store.source_asset_ids(sid)
     assert len(asset_ids) == 1
 
     from app.services.knowhow.assets import AssetService
@@ -1376,7 +1376,7 @@ def test_delete_source_cleans_images(tmp_path, monkeypatch):
 
     repo.delete_source(sid)
 
-    assert repo.source_asset_ids(sid) == []
+    assert repo._runtime.knowhow_store.source_asset_ids(sid) == []
     assert repo.get_notebook_asset(asset_ids[0]) is None
     assert not on_disk.is_file()
 
@@ -1420,7 +1420,7 @@ def test_upload_file_uses_cloud_when_only_cloud_configured(tmp_path, monkeypatch
     repo.process_source(sid)
 
     assert repo.get_source(sid).parse_status == "extracted"
-    asset_ids = repo.source_asset_ids(sid)
+    asset_ids = repo._runtime.knowhow_store.source_asset_ids(sid)
     assert len(asset_ids) == 1
     elements = repo.source_elements(sid)
     assert any(e.element_type == "image" for e in elements)
@@ -1455,7 +1455,7 @@ def test_upload_file_cloud_error_falls_back_to_local_python(tmp_path, monkeypatc
     assert detail.parse_quality_warning is True
     assert detail.error_message.startswith("[pdf-python-fallback]")
     assert "No extractable text" in detail.error_message
-    assert repo.source_asset_ids(sid) == []   # 空白页无图片资产
+    assert repo._runtime.knowhow_store.source_asset_ids(sid) == []   # 空白页无图片资产
 
 
 # -- 降级质量警告泛化到全部 MinerU 可解析后缀 --------------------------------
@@ -1693,7 +1693,7 @@ def test_cloud_workbook_output_must_clear_the_coverage_reconciliation(tmp_path, 
     elements = repo.source_elements(sid)
     assert all(e.metadata.get("parser") == "xlsx" for e in elements)  # 回落 openpyxl
     assert len(elements) == 10                                        # 全保真：一行不少
-    assert repo.source_asset_ids(sid) == []                           # 零孤儿资产
+    assert repo._runtime.knowhow_store.source_asset_ids(sid) == []                           # 零孤儿资产
 
 
 def test_cloud_workbook_output_that_covers_the_workbook_is_kept(tmp_path, monkeypatch):
@@ -1721,7 +1721,7 @@ def test_cloud_workbook_output_that_covers_the_workbook_is_kept(tmp_path, monkey
     assert repo.get_source(sid).parse_status == "extracted"
     elements = repo.source_elements(sid)
     assert all(e.metadata.get("parser") == "mineru" for e in elements)
-    asset_ids = repo.source_asset_ids(sid)
+    asset_ids = repo._runtime.knowhow_store.source_asset_ids(sid)
     assert len(asset_ids) == 1
     image_el = next(e for e in elements if e.element_type == "image")
     assert image_el.metadata.get("asset_id") == asset_ids[0]
@@ -1921,7 +1921,7 @@ def test_enricher_receives_this_sources_image_asset_ids(tmp_path, monkeypatch):
 
     _, created = _upload_markdown_with_image(repo)
 
-    [asset_id] = repo.source_asset_ids(created.id)
+    [asset_id] = repo._runtime.knowhow_store.source_asset_ids(created.id)
     [call] = host.calls
     assert set(call.asset_locations) == {asset_id}
     location = call.asset_locations[asset_id]

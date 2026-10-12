@@ -81,14 +81,14 @@ class TestTask2:
 
     def test_federated_retrieve_returns_hits_from_both_notebooks(self, repo):
         base_nb, personal_nb = self._seed_two_notebooks(repo)
-        hits = repo.federated_retrieve(personal_nb.id, "capacitance")
+        hits = repo.retrieval.candidates.federated_retrieve(personal_nb.id, "capacitance")
         nb_ids = {h.notebook_id for h in hits}
         assert base_nb.id in nb_ids
         assert personal_nb.id in nb_ids
 
     def test_federated_retrieve_tags_tier(self, repo):
         base_nb, personal_nb = self._seed_two_notebooks(repo)
-        hits = repo.federated_retrieve(personal_nb.id, "capacitance")
+        hits = repo.retrieval.candidates.federated_retrieve(personal_nb.id, "capacitance")
         base_hits = [h for h in hits if h.notebook_id == base_nb.id]
         personal_hits = [h for h in hits if h.notebook_id == personal_nb.id]
         assert all(h.tier == "base" for h in base_hits)
@@ -97,7 +97,7 @@ class TestTask2:
     def test_federated_retrieve_preserves_relevance_range(self, repo):
         """All relevance values must stay [0,1]; no [k] inflation from federation."""
         base_nb, personal_nb = self._seed_two_notebooks(repo)
-        hits = repo.federated_retrieve(personal_nb.id, "capacitance")
+        hits = repo.retrieval.candidates.federated_retrieve(personal_nb.id, "capacitance")
         for h in hits:
             assert 0.0 <= h.relevance <= 1.0, f"relevance {h.relevance!r} out of [0,1]"
 
@@ -137,7 +137,7 @@ class TestTask3:
             return []
 
         repo.retrieval.candidates._retrieve_scored = fake_retrieve_scored
-        hits = repo.federated_retrieve(personal_nb.id, "capacitance")
+        hits = repo.retrieval.candidates.federated_retrieve(personal_nb.id, "capacitance")
         tied = [h for h in hits if h.score == 0.20]
         assert [h.tier for h in tied][:2] == ["base", "personal"], \
             f"平局时应 base 先于 personal,实得 {[h.tier for h in tied]!r}"
@@ -194,7 +194,7 @@ class TestTask5:
 
     def test_single_notebook_federated_retrieve_returns_only_its_hits(self, repo):
         nb = self._seed_single(repo)
-        hits = repo.federated_retrieve(nb.id, "oxide breakdown")
+        hits = repo.retrieval.candidates.federated_retrieve(nb.id, "oxide breakdown")
         nb_ids = {h.notebook_id for h in hits}
         assert nb_ids == {nb.id}
 

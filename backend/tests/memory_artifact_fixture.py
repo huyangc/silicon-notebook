@@ -593,7 +593,7 @@ def assert_a_memory_confirmed_mid_viz_build_never_publishes(repo, monkeypatch) -
             repo, monkeypatch, notebook_id, window="object_read", times=1,
             vanish=vanish,
         )
-        manifest = repo.build_viz_index(notebook_id)
+        manifest = repo._runtime.scale_artifacts.build_viz(notebook_id)
         assert manifest is not None and len(raced["confirmed"]) == 1
         published = repo._runtime.scale_artifacts.artifacts.load_viz(notebook_id)
         assert raced["confirmed"][0]["name"] not in set(published.viz_names)
@@ -1148,7 +1148,7 @@ def _pre_isolation_notebook(repo, tier: str) -> str:
                    (tier, notebook_id))
     store = repo._runtime.scale_artifacts.artifacts
     repo.build_scale_index(notebook_id)
-    repo.build_viz_index(notebook_id)
+    repo._runtime.scale_artifacts.build_viz(notebook_id)
     make_it_look_pre_isolation(store.scale_dir(notebook_id))
     make_it_look_pre_isolation(repo._viz_index_dir(notebook_id))
     repo._scale_idx_cache.pop(notebook_id, None)

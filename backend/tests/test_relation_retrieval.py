@@ -87,7 +87,7 @@ def test_federated_retrieve_relations_spans_base(repo):
         [{"source_local_id": "a", "target_local_id": "b", "edge_type": "depends_on", "evidence": []}])
     personal = repo.create_notebook(NotebookCreate(name="my notes"))
     repo.replace_notebook_bases(personal.id, [base.id], "user-local")
-    hits = repo.federated_retrieve_relations(personal.id, "bandgap reference ptat")
+    hits = repo.retrieval.candidates.federated_retrieve_relations(personal.id, "bandgap reference ptat")
     assert hits, "个人本应能联邦检索到 base 库的关系"
     assert hits[0].tier == "base"
     assert hits[0].notebook_id == base.id
@@ -300,7 +300,7 @@ def test_mix_retrieve_overlay_equivalent_with_relations(repo):
     federated_retrieve_relations 的候选界定结果与 oracle 全量结果一致。"""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed_many_relations(repo, nb.id, n_pairs=4)
-    got = repo.federated_retrieve_relations(nb.id, "cascode mirror concept")
+    got = repo.retrieval.candidates.federated_retrieve_relations(nb.id, "cascode mirror concept")
     want = _oracle_retrieve_relations_scored(repo, nb.id, "cascode mirror concept")
     got_ids = sorted(h.relation_id for h in got)
     want_ids = sorted(h.relation_id for h in want)

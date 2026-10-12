@@ -97,7 +97,7 @@ def _add_source(repo, nb, texts) -> str:
                  "{}", now),
             )
     repo._chunk_and_embed_source(sid)
-    repo.backfill_chunk_fts(nb)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb)
     return sid
 
 

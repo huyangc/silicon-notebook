@@ -137,7 +137,7 @@ def test_ensure_stores_verified_meta(repo, notebook_id, service):
     assert status == "stored"
     assert fake.calls == 1
     assert ("chat", "paper_metadata") in repo.recording_model_provider.calls
-    meta = repo.get_paper_meta("src-1")
+    meta = repo._runtime.source_store.get_paper_meta("src-1")
     assert meta is not None
     assert meta["is_paper"] is True
     assert meta["paper_title"] == "Gate Sizing Under Variability"
@@ -182,7 +182,7 @@ def test_not_paper_marker_prevents_retry(repo, notebook_id, service):
     status = service.ensure_paper_metadata(source)
 
     assert status == "not_paper"
-    meta = repo.get_paper_meta("src-1")
+    meta = repo._runtime.source_store.get_paper_meta("src-1")
     assert meta is not None
     assert meta["is_paper"] is False
 
@@ -206,7 +206,7 @@ def test_no_llm_returns_no_llm_without_row(repo, notebook_id, service):
     status = service.ensure_paper_metadata(source)
 
     assert status == "no_llm"
-    assert repo.get_paper_meta("src-1") is None
+    assert repo._runtime.source_store.get_paper_meta("src-1") is None
     assert fake.calls == 0
 
 
@@ -219,7 +219,7 @@ def test_memory_source_gated(repo, notebook_id, service):
 
     assert status == "skipped"
     assert fake.calls == 0
-    assert repo.get_paper_meta("src-1") is None
+    assert repo._runtime.source_store.get_paper_meta("src-1") is None
 
 
 def test_knowhow_source_gated(repo, notebook_id, service):
@@ -233,7 +233,7 @@ def test_knowhow_source_gated(repo, notebook_id, service):
 
     assert status == "skipped"
     assert fake.calls == 0
-    assert repo.get_paper_meta("src-1") is None
+    assert repo._runtime.source_store.get_paper_meta("src-1") is None
 
 
 def test_textbook_doc_type_gated(repo, notebook_id, service):
@@ -271,7 +271,7 @@ def test_llm_exception_is_swallowed(repo, notebook_id, service):
     status = service.ensure_paper_metadata(source)
 
     assert status == "failed"
-    assert repo.get_paper_meta("src-1") is None
+    assert repo._runtime.source_store.get_paper_meta("src-1") is None
 
 
 def test_setup_phase_exception_is_swallowed(repo, notebook_id, service, monkeypatch):
@@ -314,7 +314,7 @@ def test_ensure_non_object_json_fails_without_row(repo, notebook_id, service):
     status = service.ensure_paper_metadata(source)
 
     assert status == "failed"
-    assert repo.get_paper_meta("src-1") is None
+    assert repo._runtime.source_store.get_paper_meta("src-1") is None
     assert fake.calls == 1
 
 
@@ -328,7 +328,7 @@ def test_ensure_single_element_array_json_is_unwrapped(repo, notebook_id, servic
     status = service.ensure_paper_metadata(source)
 
     assert status == "stored"
-    meta = repo.get_paper_meta("src-1")
+    meta = repo._runtime.source_store.get_paper_meta("src-1")
     assert meta is not None
     assert meta["paper_title"] == "Gate Sizing Under Variability"
 
@@ -348,7 +348,7 @@ def test_run_extraction_catch_up(repo, notebook_id, monkeypatch):
     bind_chat_client(repo, "paper_metadata", fake)
     source_id = "src-1"
     _insert_source(repo, notebook_id, source_id)
-    assert repo.get_paper_meta(source_id) is None
+    assert repo._runtime.source_store.get_paper_meta(source_id) is None
 
     monkeypatch.setattr(
         kg_ingest, "extract_graph",
@@ -362,7 +362,7 @@ def test_run_extraction_catch_up(repo, notebook_id, monkeypatch):
 
     repo._run_extraction(source_id)
 
-    meta = repo.get_paper_meta(source_id)
+    meta = repo._runtime.source_store.get_paper_meta(source_id)
     assert meta is not None
     assert meta["is_paper"] is True
     # 唯一一次 chat_json 调用来自 paper-meta;KG 抽取路径被 stub 绕开,没有
@@ -476,8 +476,8 @@ def test_backfill_runtime_registers_and_pops_progress(repo, notebook_id, service
         # 第一次调用时读一次进度快照
         if captured["during"] is None:
             captured["during"] = (
-                repo.paper_meta_backfilling(notebook_id),
-                repo.paper_meta_backfill_progress(notebook_id),
+                repo._runtime.source_ingestion.paper_meta_backfilling(notebook_id),
+                repo._runtime.source_ingestion.paper_meta_backfill_progress(notebook_id),
             )
         return original(source, **kw)
 
@@ -490,8 +490,8 @@ def test_backfill_runtime_registers_and_pops_progress(repo, notebook_id, service
     assert during_prog["total"] == 2
     assert 0 <= during_prog["done"] <= 2
     # 结束后 pop
-    assert repo.paper_meta_backfilling(notebook_id) is False
-    assert repo.paper_meta_backfill_progress(notebook_id) is None
+    assert repo._runtime.source_ingestion.paper_meta_backfilling(notebook_id) is False
+    assert repo._runtime.source_ingestion.paper_meta_backfill_progress(notebook_id) is None
 
 
 def test_backfill_runtime_pops_on_exception(repo, notebook_id, service, monkeypatch):
@@ -508,16 +508,16 @@ def test_backfill_runtime_pops_on_exception(repo, notebook_id, service, monkeypa
     counts = service.backfill_paper_metadata(notebook_id)
     assert counts["total"] == 1
     assert counts.get("failed", 0) == 1
-    assert repo.paper_meta_backfilling(notebook_id) is False
-    assert repo.paper_meta_backfill_progress(notebook_id) is None
+    assert repo._runtime.source_ingestion.paper_meta_backfilling(notebook_id) is False
+    assert repo._runtime.source_ingestion.paper_meta_backfill_progress(notebook_id) is None
 
 
 def test_backfill_empty_no_registration(repo, notebook_id):
     """queued=0 不 register。"""
     counts = repo.backfill_paper_metadata(notebook_id)
     assert counts == {"total": 0}
-    assert repo.paper_meta_backfilling(notebook_id) is False
-    assert repo.paper_meta_backfill_progress(notebook_id) is None
+    assert repo._runtime.source_ingestion.paper_meta_backfilling(notebook_id) is False
+    assert repo._runtime.source_ingestion.paper_meta_backfill_progress(notebook_id) is None
 
 
 def test_backfill_generation_guard_protects_foreign_entry(
@@ -550,8 +550,8 @@ def test_backfill_generation_guard_protects_foreign_entry(
 
     # 关键断言：A 的 finally 校验 entry._gen != my_gen（999 vs A's real
     # gen），跳过 pop——外来 entry 仍在 dict 里
-    assert repo.paper_meta_backfilling(notebook_id) is True
-    prog = repo.paper_meta_backfill_progress(notebook_id)
+    assert repo._runtime.source_ingestion.paper_meta_backfilling(notebook_id) is True
+    prog = repo._runtime.source_ingestion.paper_meta_backfill_progress(notebook_id)
     assert prog == {"total": 42, "done": 7}
     assert "_gen" not in prog
 
@@ -578,7 +578,7 @@ def test_backfill_emits_paper_meta_done_on_success(repo, notebook_id, service, m
     from app.services import pending_bus as pb_module
 
     def _emit(uid, evt):
-        progress_at_emit.append(repo.paper_meta_backfill_progress(notebook_id))
+        progress_at_emit.append(repo._runtime.source_ingestion.paper_meta_backfill_progress(notebook_id))
         events.append((uid, evt))
 
     monkeypatch.setattr(pb_module.pending_bus, "emit", _emit)
@@ -655,7 +655,7 @@ def test_backfill_superseded_generation_does_not_emit_done(
     assert not any(e.get("event") == "paper_meta_done" for _, e in events), \
         "旧世代被覆盖后不该报完成"
     # B 的 live entry 未被误弹
-    assert repo.paper_meta_backfill_progress(notebook_id) == {"total": 42, "done": 7}
+    assert repo._runtime.source_ingestion.paper_meta_backfill_progress(notebook_id) == {"total": 42, "done": 7}
 
     with service._paper_meta_backfilling_lock:
         service._paper_meta_backfilling.pop(notebook_id, None)
@@ -679,7 +679,7 @@ def test_backfill_publishes_pending_snapshot_after_registering(
     monkeypatch.setattr(pb_module.pending_bus, "emit", lambda uid, evt: None)
     monkeypatch.setattr(
         pb_module.pending_bus, "mark_dirty",
-        lambda uid: seen_building.append(repo.paper_meta_backfilling(notebook_id)),
+        lambda uid: seen_building.append(repo._runtime.source_ingestion.paper_meta_backfilling(notebook_id)),
     )
     monkeypatch.setattr(pb_module.pending_bus, "mark_dirty_throttled",
                         lambda uid, *a, **kw: False)

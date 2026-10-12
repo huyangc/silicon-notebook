@@ -542,7 +542,7 @@ class TestBaseReviewGateEdgeCases:
         _store_claim(repo, personal.id, "personal note on capacitance")
         # All base claims are 'reviewed' (the gate); confirm before asking.
         assert all(r["status"] == "reviewed" for r in _objects_in(repo, base.id, "claim"))
-        hits = repo.federated_retrieve(personal.id, "capacitance")
+        hits = repo.retrieval.candidates.federated_retrieve(personal.id, "capacitance")
         all_ids = {h.object_id for h in hits}
         base_ids = {r["id"] for r in _objects_in(repo, base.id, "claim")}
         assert all_ids & base_ids, "reviewed base object did not reach the answer"
@@ -592,7 +592,7 @@ class TestBaseReviewGateEdgeCases:
         p_oid = _objects_in(repo, personal.id, "claim")[0]["id"]
         cand = repo.propose_promotion(personal.id, p_oid)
         result = repo.approve_promotion(cand["id"])
-        hits = repo.federated_retrieve(personal.id, "thermal noise")
+        hits = repo.retrieval.candidates.federated_retrieve(personal.id, "thermal noise")
         hit_ids = {h.object_id for h in hits}
         assert result["base_object_id"] in hit_ids
 
@@ -628,5 +628,5 @@ class TestBaseReviewGateEdgeCases:
         result = repo.approve_promotion(cand["id"])
         service = repo._runtime.ask_service()
         with service._retrieval_ceiling(personal.id, repo.current_user().id):
-            hits = repo.federated_retrieve(personal.id, "thermal noise")
+            hits = repo.retrieval.candidates.federated_retrieve(personal.id, "thermal noise")
         assert result["base_object_id"] in {h.object_id for h in hits}

@@ -3300,8 +3300,8 @@ def test_metadata_phase_backfills(repo, monkeypatch, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "[meta done]" in out
-    assert repo.get_paper_meta("src-1") is not None
-    assert repo.get_paper_meta("src-2") is not None
+    assert repo._runtime.source_store.get_paper_meta("src-1") is not None
+    assert repo._runtime.source_store.get_paper_meta("src-2") is not None
 
     rc2 = bi.main(["metadata", "--notebook-id", nb_id])
 

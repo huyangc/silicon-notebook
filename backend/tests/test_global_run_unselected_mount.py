@@ -23,7 +23,7 @@ TERM = "低温增益"
 
 def _chunk(repo, source_id, notebook_id):
     repo._chunk_and_embed_source(source_id)
-    repo.backfill_chunk_fts(notebook_id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(notebook_id)
 
 
 def _library(repo, name, source_id, marker=""):

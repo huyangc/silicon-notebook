@@ -1,7 +1,8 @@
 """KG 质量分析只读聚合查询层(T1)。
 
 承 `docs/superpowers/specs/2026-07-25-kg-analysis-view-design.md`「T1 只读聚合查询层」。
-测的是 UnifiedKgStore 的四个只读聚合(经 facade 的一跳委托进去),重点钉五件事:
+测的是 UnifiedKgStore 的四个只读聚合(直调 `repo._runtime.unified_kg`;facade 上原有的
+四个一跳委托只被测试调用,已退役),重点钉五件事:
 
 1. **口径**与产品一致 —— 对象只算 USABLE_STATUSES;边只算 review_status != 'rejected'
    且**两端都是本 notebook 的可用对象**;被排除的量单独报,不凭空消失。
@@ -127,7 +128,7 @@ def test_cluster_size_histogram_buckets_are_fixed_length_and_ordered(repo):
             _object(db, f"o-pair-{i}")
             _cluster(db, "K-pair", f"o-pair-{i}")
 
-    payload = repo.kg_cluster_size_histogram(NB)
+    payload = repo._runtime.unified_kg.cluster_size_histogram(NB)
 
     assert [b["bucket"] for b in payload["buckets"]] == list(CLUSTER_SIZE_BUCKETS)
     assert _bucket(payload, "1") == {"bucket": "1", "clusters": 3, "members": 3}
@@ -153,7 +154,7 @@ def test_cluster_size_histogram_bucket_edges(repo, size, bucket):
             _object(db, f"o-{i}")
             _cluster(db, "K", f"o-{i}")
 
-    payload = repo.kg_cluster_size_histogram(NB)
+    payload = repo._runtime.unified_kg.cluster_size_histogram(NB)
 
     assert _bucket(payload, bucket)["clusters"] == 1
     assert _bucket(payload, bucket)["members"] == size
@@ -176,7 +177,7 @@ def test_cluster_size_histogram_counts_only_usable_objects(repo):
         _object(db, "o-foreign", notebook=OTHER_NB)
         _cluster(db, "K", "o-foreign")
 
-    payload = repo.kg_cluster_size_histogram(NB)
+    payload = repo._runtime.unified_kg.cluster_size_histogram(NB)
 
     assert _bucket(payload, "2")["clusters"] == 1
     assert payload["member_rows"] == 2
@@ -194,7 +195,7 @@ def test_cluster_size_histogram_reports_fully_excluded_clusters_separately(repo)
         _object(db, "o-live")
         _cluster(db, "K-live", "o-live")
 
-    payload = repo.kg_cluster_size_histogram(NB)
+    payload = repo._runtime.unified_kg.cluster_size_histogram(NB)
 
     assert payload["empty_clusters"] == 1
     assert payload["empty_cluster_member_rows"] == 2
@@ -210,7 +211,7 @@ def test_cluster_size_histogram_conflict_status_is_usable(repo):
         _object(db, "o-conflict", status="conflict")
         _cluster(db, "K", "o-conflict")
 
-    assert repo.kg_cluster_size_histogram(NB)["member_rows"] == 1
+    assert repo._runtime.unified_kg.cluster_size_histogram(NB)["member_rows"] == 1
 
 
 def test_cluster_size_histogram_is_scoped_to_the_notebook(repo):
@@ -218,9 +219,9 @@ def test_cluster_size_histogram_is_scoped_to_the_notebook(repo):
         _object(db, "o-1")
         _cluster(db, "K", "o-1")
 
-    assert repo.kg_cluster_size_histogram(OTHER_NB)["member_rows"] == 0
-    assert repo.kg_cluster_size_histogram(OTHER_NB)["clusters"] == 0
-    assert [b["bucket"] for b in repo.kg_cluster_size_histogram(OTHER_NB)["buckets"]] == \
+    assert repo._runtime.unified_kg.cluster_size_histogram(OTHER_NB)["member_rows"] == 0
+    assert repo._runtime.unified_kg.cluster_size_histogram(OTHER_NB)["clusters"] == 0
+    assert [b["bucket"] for b in repo._runtime.unified_kg.cluster_size_histogram(OTHER_NB)["buckets"]] == \
         list(CLUSTER_SIZE_BUCKETS)
 
 
@@ -228,7 +229,7 @@ def test_cluster_size_histogram_is_scoped_to_the_notebook(repo):
 
 def test_cluster_size_histogram_groups_are_fixed_length_and_ordered(repo):
     """空库也给出全部 5 个分组、按契约顺序,每组自带定长的 7 档直方图。"""
-    payload = repo.kg_cluster_size_histogram(NB)
+    payload = repo._runtime.unified_kg.cluster_size_histogram(NB)
 
     assert [g["object_type"] for g in payload["by_object_type"]] == \
         list(CLUSTER_OBJECT_TYPE_GROUPS)
@@ -257,7 +258,7 @@ def test_cluster_size_histogram_reports_each_object_type_separately(repo):
         _object(db, "o-p", object_type="procedure")
         _cluster(db, "KP-1", "o-p", object_type="procedure")
 
-    payload = repo.kg_cluster_size_histogram(NB)
+    payload = repo._runtime.unified_kg.cluster_size_histogram(NB)
 
     concept = _group(payload, "concept")
     assert concept["member_rows"] == 3
@@ -291,7 +292,7 @@ def test_cluster_size_histogram_folds_unknown_object_types_without_leaking_names
             _object(db, f"o-x-{i}", object_type=custom)
             _cluster(db, f"KX-{i}", f"o-x-{i}", object_type=custom)
 
-    payload = repo.kg_cluster_size_histogram(NB)
+    payload = repo._runtime.unified_kg.cluster_size_histogram(NB)
 
     other = _group(payload, OTHER_OBJECT_TYPE_GROUP)
     assert other["clusters"] == 2
@@ -315,7 +316,7 @@ def test_cluster_size_histogram_excluded_rows_are_attributed_to_their_type(repo)
         _cluster(db, "KL-1", "o-l", object_type="claim")
         _cluster(db, "KL-1", "o-l-dead", object_type="claim")
 
-    payload = repo.kg_cluster_size_histogram(NB)
+    payload = repo._runtime.unified_kg.cluster_size_histogram(NB)
 
     assert _group(payload, "concept")["excluded_member_rows"] == 1
     assert _group(payload, "concept")["empty_clusters"] == 1
@@ -338,7 +339,7 @@ def test_cluster_size_histogram_splits_a_canonical_id_shared_across_types(repo):
         _cluster(db, "SHARED", "o-c", object_type="concept")
         _cluster(db, "SHARED", "o-l", object_type="claim")
 
-    payload = repo.kg_cluster_size_histogram(NB)
+    payload = repo._runtime.unified_kg.cluster_size_histogram(NB)
 
     # 两个类型各自一个单元素簇,而不是一个合并的双成员簇。
     assert _group(payload, "concept")["clusters"] == 1
@@ -372,7 +373,7 @@ def test_largest_clusters_orders_by_members_and_flags_truncation(repo):
                 _object(db, f"o-{cid}-{i}")
                 _cluster(db, cid, f"o-{cid}-{i}", name=f"name of {cid}")
 
-    full = repo.kg_largest_clusters(NB, limit=10)
+    full = repo._runtime.unified_kg.largest_clusters(NB, limit=10)
     assert [c["canonical_id"] for c in full["clusters"]] == ["K-big", "K-mid", "K-small"]
     assert full["clusters"][0] == {
         "canonical_id": "K-big", "canonical_name": "name of K-big", "members": 3,
@@ -380,7 +381,7 @@ def test_largest_clusters_orders_by_members_and_flags_truncation(repo):
     assert full["truncated"] is False
     assert full["object_type"] == "concept"
 
-    capped = repo.kg_largest_clusters(NB, limit=2)
+    capped = repo._runtime.unified_kg.largest_clusters(NB, limit=2)
     assert [c["canonical_id"] for c in capped["clusters"]] == ["K-big", "K-mid"]
     assert capped["truncated"] is True
     assert capped["limit"] == 2
@@ -395,7 +396,7 @@ def test_largest_clusters_exactly_at_the_limit_is_not_truncated(repo):
             _object(db, f"o-{i}")
             _cluster(db, f"K-{i}", f"o-{i}")
 
-    exact = repo.kg_largest_clusters(NB, limit=3)
+    exact = repo._runtime.unified_kg.largest_clusters(NB, limit=3)
     assert len(exact["clusters"]) == 3
     assert exact["truncated"] is False
 
@@ -403,15 +404,15 @@ def test_largest_clusters_exactly_at_the_limit_is_not_truncated(repo):
     with repo._write() as db:
         _object(db, "o-extra")
         _cluster(db, "K-extra", "o-extra")
-    assert repo.kg_largest_clusters(NB, limit=3)["truncated"] is True
+    assert repo._runtime.unified_kg.largest_clusters(NB, limit=3)["truncated"] is True
 
 
 def test_largest_clusters_clamps_the_caller_limit(repo):
     """无界返回在 200 万簇的库上就是把整张表搬进内存 —— limit 必须被 clamp,
     而且 clamp 后的有效值要回给调用方。"""
-    assert repo.kg_largest_clusters(NB, limit=10**9)["limit"] == LARGEST_CLUSTERS_MAX
-    assert repo.kg_largest_clusters(NB, limit=0)["limit"] == 1
-    assert repo.kg_largest_clusters(NB, limit=-5)["limit"] == 1
+    assert repo._runtime.unified_kg.largest_clusters(NB, limit=10**9)["limit"] == LARGEST_CLUSTERS_MAX
+    assert repo._runtime.unified_kg.largest_clusters(NB, limit=0)["limit"] == 1
+    assert repo._runtime.unified_kg.largest_clusters(NB, limit=-5)["limit"] == 1
 
 
 def test_largest_clusters_excludes_unusable_members(repo):
@@ -421,7 +422,7 @@ def test_largest_clusters_excludes_unusable_members(repo):
         _cluster(db, "K", "o-live")
         _cluster(db, "K", "o-dead")
 
-    clusters = repo.kg_largest_clusters(NB, limit=10)["clusters"]
+    clusters = repo._runtime.unified_kg.largest_clusters(NB, limit=10)["clusters"]
     assert clusters == [
         {"canonical_id": "K", "canonical_name": "K", "members": 1}
     ]
@@ -440,7 +441,7 @@ def test_largest_clusters_excludes_members_owned_by_another_notebook(repo):
         _cluster(db, "K", "o-mine")
         _cluster(db, "K", "o-theirs")
 
-    assert repo.kg_largest_clusters(NB, limit=10)["clusters"] == [
+    assert repo._runtime.unified_kg.largest_clusters(NB, limit=10)["clusters"] == [
         {"canonical_id": "K", "canonical_name": "K", "members": 1}
     ]
 
@@ -450,7 +451,7 @@ def test_largest_clusters_drops_clusters_with_no_usable_member(repo):
         _object(db, "o-dead", status="deprecated")
         _cluster(db, "K-dead", "o-dead")
 
-    assert repo.kg_largest_clusters(NB, limit=10)["clusters"] == []
+    assert repo._runtime.unified_kg.largest_clusters(NB, limit=10)["clusters"] == []
 
 
 def test_largest_clusters_prefers_a_non_empty_canonical_name(repo):
@@ -465,7 +466,7 @@ def test_largest_clusters_prefers_a_non_empty_canonical_name(repo):
         _cluster(db, "K", "o-2", name="Zzz late name")
         db.execute("UPDATE concept_clusters SET canonical_name='' WHERE id='cc-K-o-0'")
 
-    clusters = repo.kg_largest_clusters(NB, limit=10)["clusters"]
+    clusters = repo._runtime.unified_kg.largest_clusters(NB, limit=10)["clusters"]
     assert clusters == [
         {"canonical_id": "K", "canonical_name": "Zzz late name", "members": 3}
     ]
@@ -478,7 +479,7 @@ def test_largest_clusters_falls_back_to_empty_when_every_name_is_blank(repo):
         _cluster(db, "K", "o-0")
         db.execute("UPDATE concept_clusters SET canonical_name=''")
 
-    assert repo.kg_largest_clusters(NB, limit=10)["clusters"] == [
+    assert repo._runtime.unified_kg.largest_clusters(NB, limit=10)["clusters"] == [
         {"canonical_id": "K", "canonical_name": "", "members": 1}
     ]
 
@@ -494,12 +495,12 @@ def test_largest_clusters_only_ranks_concept_clusters(repo):
         _object(db, "o-c")
         _cluster(db, "K-c", "o-c", name="热阻")
 
-    payload = repo.kg_largest_clusters(NB, limit=10)
+    payload = repo._runtime.unified_kg.largest_clusters(NB, limit=10)
 
     assert payload["object_type"] == "concept"
     assert [c["canonical_id"] for c in payload["clusters"]] == ["K-c"]
     # 但它们没有消失:直方图那边如实报出。
-    assert _group(repo.kg_cluster_size_histogram(NB), "claim")["member_rows"] == 5
+    assert _group(repo._runtime.unified_kg.cluster_size_histogram(NB), "claim")["member_rows"] == 5
 
 
 # -------------------------------------------------------------- 主题板块列表
@@ -524,7 +525,7 @@ def test_community_overview_ranks_boards_by_size_and_members_by_centrality(repo)
         _community(db, "cm-small", [("a", 0.9), ("b", 0.1)])
         _community(db, "cm-big", [("x", 0.1), ("y", 0.9), ("z", 0.5)])
 
-    payload = repo.kg_community_overview(NB, limit=10, top_k=2)
+    payload = repo._runtime.unified_kg.community_overview(NB, limit=10, top_k=2)
 
     assert payload["level"] == 0
     assert payload["total"] == 2
@@ -546,7 +547,7 @@ def test_community_overview_flags_board_truncation_and_reports_the_total(repo):
         for i in range(5):
             _community(db, f"cm-{i}", [(f"n-{i}", 1.0)] * 1)
 
-    payload = repo.kg_community_overview(NB, limit=2, top_k=3)
+    payload = repo._runtime.unified_kg.community_overview(NB, limit=2, top_k=3)
 
     assert payload["total"] == 5
     assert payload["returned"] == 2
@@ -556,11 +557,11 @@ def test_community_overview_flags_board_truncation_and_reports_the_total(repo):
 
 
 def test_community_overview_clamps_both_limits(repo):
-    payload = repo.kg_community_overview(NB, limit=10**9, top_k=10**9)
+    payload = repo._runtime.unified_kg.community_overview(NB, limit=10**9, top_k=10**9)
     assert payload["limit"] == COMMUNITY_OVERVIEW_MAX
     assert payload["top_members_limit"] == COMMUNITY_TOP_MEMBERS_MAX
 
-    payload = repo.kg_community_overview(NB, limit=0, top_k=0)
+    payload = repo._runtime.unified_kg.community_overview(NB, limit=0, top_k=0)
     assert payload["limit"] == 1
     assert payload["top_members_limit"] == 1
 
@@ -570,8 +571,8 @@ def test_community_overview_is_scoped_to_the_requested_level(repo):
         _community(db, "cm-l0", [("a", 1.0)], level=0)
         _community(db, "cm-l1", [("b", 1.0)], level=1)
 
-    level0 = repo.kg_community_overview(NB, level=0)
-    level1 = repo.kg_community_overview(NB, level=1)
+    level0 = repo._runtime.unified_kg.community_overview(NB, level=0)
+    level1 = repo._runtime.unified_kg.community_overview(NB, level=1)
 
     assert [c["id"] for c in level0["communities"]] == ["cm-l0"]
     assert [c["id"] for c in level1["communities"]] == ["cm-l1"]
@@ -587,7 +588,7 @@ def test_community_overview_keeps_a_board_with_no_member_rows(repo):
             "INSERT INTO communities (id,notebook_id,level,member_ids,size,created_at) "
             "VALUES ('cm-orphan',?,0,'[\"x\",\"y\"]',2,'2026-01-01T00:00:00')", (NB,))
 
-    payload = repo.kg_community_overview(NB, limit=10, top_k=3)
+    payload = repo._runtime.unified_kg.community_overview(NB, limit=10, top_k=3)
 
     assert [c["id"] for c in payload["communities"]] == ["cm-orphan", "cm-ok"]
     orphan = payload["communities"][0]
@@ -597,7 +598,7 @@ def test_community_overview_keeps_a_board_with_no_member_rows(repo):
 
 
 def test_community_overview_on_a_notebook_without_communities(repo):
-    payload = repo.kg_community_overview(OTHER_NB)
+    payload = repo._runtime.unified_kg.community_overview(OTHER_NB)
     assert payload == {
         "level": 0, "total": 0, "returned": 0, "truncated": False,
         "limit": 50, "top_members_limit": 5, "communities": [],
@@ -646,7 +647,7 @@ def test_community_overview_reads_one_consistent_snapshot(repo, tmp_path):
 
     connection.execute = spying_execute
     try:
-        payload = repo.kg_community_overview(NB, limit=10, top_k=5)
+        payload = repo._runtime.unified_kg.community_overview(NB, limit=10, top_k=5)
     finally:
         del connection.execute
 
@@ -675,7 +676,7 @@ def test_relation_provenance_splits_relink_from_untagged(repo):
         # knowhow 投影写的 about 边:evidence='[]',与 LLM 抽取的边不可区分 → untagged。
         _relation(db, "r3", "a", "c")
 
-    payload = repo.kg_relation_provenance_counts(NB)
+    payload = repo._runtime.unified_kg.relation_provenance_counts(NB)
 
     assert list(payload["buckets"]) == list(RELATION_PROVENANCE_BUCKETS)
     assert payload["buckets"]["relink:shared-element"] == 1
@@ -695,7 +696,7 @@ def test_relation_provenance_buckets_unknown_and_other_relink_bases(repo):
         _relation(db, "r1", "a", "b", evidence=_relink("relink:future-rule"))
         _relation(db, "r2", "b", "a", evidence=_relink("delegation"))
 
-    payload = repo.kg_relation_provenance_counts(NB)
+    payload = repo._runtime.unified_kg.relation_provenance_counts(NB)
 
     assert payload["buckets"]["relink:other"] == 1
     assert payload["buckets"]["tagged:other"] == 1
@@ -710,7 +711,7 @@ def test_relation_provenance_treats_unreadable_evidence_as_untagged(repo, eviden
             _object(db, oid)
         _relation(db, "r1", "a", "b", evidence=evidence)
 
-    payload = repo.kg_relation_provenance_counts(NB)
+    payload = repo._runtime.unified_kg.relation_provenance_counts(NB)
     assert payload["buckets"]["untagged"] == 1
     assert payload["counted"] == 1
 
@@ -723,7 +724,7 @@ def test_relation_provenance_excludes_rejected_edges(repo):
                   review_status="rejected")
         _relation(db, "r2", "b", "a", evidence=_relink("relink:name-match"))
 
-    payload = repo.kg_relation_provenance_counts(NB)
+    payload = repo._runtime.unified_kg.relation_provenance_counts(NB)
 
     assert payload["buckets"]["relink:name-match"] == 1
     assert payload["excluded"]["rejected"] == 1
@@ -750,7 +751,7 @@ def test_relation_provenance_excludes_edges_whose_endpoint_is_not_usable(repo):
                   evidence=_relink("relink:name-match"))
         _relation(db, "r-reverse", "dead", "live", evidence=_relink("relink:name-match"))
 
-    payload = repo.kg_relation_provenance_counts(NB)
+    payload = repo._runtime.unified_kg.relation_provenance_counts(NB)
 
     assert payload["counted"] == 0
     assert payload["excluded"]["endpoint_unusable"] == 5
@@ -764,7 +765,7 @@ def test_relation_provenance_counts_a_rejected_bad_edge_only_once(repo):
         _object(db, "live")
         _relation(db, "r", "live", "ghost", review_status="rejected")
 
-    payload = repo.kg_relation_provenance_counts(NB)
+    payload = repo._runtime.unified_kg.relation_provenance_counts(NB)
 
     assert payload["excluded"] == {"rejected": 1, "endpoint_unusable": 0}
     assert payload["total_rows"] == 1
@@ -776,12 +777,12 @@ def test_relation_provenance_is_scoped_to_the_notebook(repo):
         _object(db, "b")
         _relation(db, "r1", "a", "b", evidence=_relink("relink:name-match"))
 
-    assert repo.kg_relation_provenance_counts(OTHER_NB)["total_rows"] == 0
-    assert repo.kg_relation_provenance_counts(OTHER_NB)["counted"] == 0
+    assert repo._runtime.unified_kg.relation_provenance_counts(OTHER_NB)["total_rows"] == 0
+    assert repo._runtime.unified_kg.relation_provenance_counts(OTHER_NB)["counted"] == 0
 
 
 def test_relation_provenance_on_an_empty_notebook_still_returns_all_buckets(repo):
-    payload = repo.kg_relation_provenance_counts(NB)
+    payload = repo._runtime.unified_kg.relation_provenance_counts(NB)
 
     assert payload["buckets"] == {name: 0 for name in RELATION_PROVENANCE_BUCKETS}
     assert payload["excluded"] == {name: 0 for name in RELATION_EXCLUSION_BUCKETS}
@@ -906,10 +907,10 @@ def test_analysis_queries_never_write(repo):
     seen: list[str] = []
     connection.set_trace_callback(seen.append)
     try:
-        repo.kg_cluster_size_histogram(NB)
-        repo.kg_largest_clusters(NB)
-        repo.kg_community_overview(NB)
-        repo.kg_relation_provenance_counts(NB)
+        repo._runtime.unified_kg.cluster_size_histogram(NB)
+        repo._runtime.unified_kg.largest_clusters(NB)
+        repo._runtime.unified_kg.community_overview(NB)
+        repo._runtime.unified_kg.relation_provenance_counts(NB)
     finally:
         connection.set_trace_callback(None)
 
@@ -922,52 +923,6 @@ def test_analysis_queries_never_write(repo):
 
     after = _table_fingerprints(connection)
     assert after == before, "相关表的行数/内容在只读查询前后发生了变化"
-
-
-def _dotted(node) -> str:
-    """`self._runtime.unified_kg.foo` → 'self._runtime.unified_kg.foo'。
-    只比末段(`.attr == 'unified_kg'`)钉不住深度——`self._runtime.x.unified_kg.foo`
-    的末段同样是 unified_kg,两跳会溜过去。必须比整条链。"""
-    import ast
-
-    parts: list[str] = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-    if isinstance(node, ast.Name):
-        parts.append(node.id)
-    return ".".join(reversed(parts))
-
-
-def test_facade_delegates_reach_the_unified_store_in_one_hop():
-    """架构红线:facade 只做**一跳**委托,不许多绕一层。
-
-    强度如实说明:本守卫比对的是「方法体里恰好一次属性调用,且调用链恰好是
-    `self._runtime.unified_kg.<member>`」。它**不**覆盖非 Call 的后处理(对返回值取
-    下标、做算术等不产生 ast.Call 节点,不被这里计数)—— 也就是说「聚合逻辑爬回
-    facade」只被挡住了「再调一个函数」那一半。要连另一半也挡住,得改成「方法体只有
-    一条 return 语句」的形状断言;现在没做,是因为四个委托本来就都是单条 return,
-    而更严的形状断言会把将来合理的参数规整(如 clamp)一并禁掉。
-    """
-    import ast
-    import inspect
-
-    from app.services.repository_facade import RepositoryFacade
-
-    for name, member in (
-        ("kg_cluster_size_histogram", "cluster_size_histogram"),
-        ("kg_largest_clusters", "largest_clusters"),
-        ("kg_community_overview", "community_overview"),
-        ("kg_relation_provenance_counts", "relation_provenance_counts"),
-    ):
-        source = inspect.getsource(getattr(RepositoryFacade, name))
-        tree = ast.parse(source.lstrip())
-        calls = [
-            node for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        ]
-        assert len(calls) == 1, name
-        assert _dotted(calls[0].func) == f"self._runtime.unified_kg.{member}", name
 
 
 def test_both_backend_stores_declare_the_same_analysis_surface():
