@@ -375,7 +375,10 @@ class BystanderSnapshot:
             assert row["relpages"] > 0 and row["relallvisible"] == 0, (table, row)
 
 
-@pytest.fixture(params=["no_bystander", "bystander_rr_snapshot"])
+BYSTANDER_STATES = ("no_bystander", "bystander_rr_snapshot")
+
+
+@pytest.fixture(params=BYSTANDER_STATES)
 def bystander_snapshot(request, postgres_settings: Settings):
     """Run a plan pin twice: with no other transaction, and with a bystander
     REPEATABLE READ transaction (``SELECT txid_current()``) held on the same
@@ -395,6 +398,51 @@ def bystander_snapshot(request, postgres_settings: Settings):
             holder.execute("ROLLBACK")
 
 
+def vacuum_until_all_visible(database_url: str, table: str, timeout: float = 10.0) -> None:
+    """VACUUM ``table`` until every page is all-visible (``relallvisible ==
+    relpages``), for at most ``timeout`` seconds, then fail with what held
+    the horizon back.
+
+    For the pins whose competing-index choice is a cost decision that moves
+    with the visibility map: they assert it only in the ``no_bystander``
+    state and only against a full map. A short-lived snapshot on the same
+    database (an autoanalyze, a pooled connection between statements) is
+    outwaited; one that stays open past the bound is a real stray
+    transaction, reported rather than tolerated.
+    """
+    import time
+
+    import psycopg
+    from psycopg import sql as pg_sql
+    from psycopg.rows import dict_row
+
+    deadline = time.monotonic() + timeout
+    with psycopg.connect(database_url, autocommit=True, row_factory=dict_row) as raw:
+        while True:
+            raw.execute(pg_sql.SQL("VACUUM {}").format(pg_sql.Identifier(table)))
+            row = raw.execute(
+                "SELECT relpages, relallvisible FROM pg_class WHERE oid = to_regclass(%s)",
+                (table,),
+            ).fetchone()
+            assert row is not None, table
+            if row["relpages"] > 0 and row["relallvisible"] == row["relpages"]:
+                return
+            if time.monotonic() >= deadline:
+                holders = raw.execute(
+                    "SELECT pid, state, backend_xid::text AS xid, "
+                    "backend_xmin::text AS xmin, application_name, "
+                    "left(query, 120) AS query FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND pid <> pg_backend_pid() "
+                    "AND (backend_xid IS NOT NULL OR backend_xmin IS NOT NULL)"
+                ).fetchall()
+                raise AssertionError(
+                    f"visibility map of {table} still incomplete after {timeout}s of "
+                    f"VACUUM ({row['relallvisible']}/{row['relpages']} pages); "
+                    f"sessions holding the horizon: {holders}"
+                )
+            time.sleep(0.2)
+
+
 def explain_with_sole_index(
     connection, statement: str, params: tuple, *, table: str, index: str
 ) -> str:
@@ -409,34 +457,52 @@ def explain_with_sole_index(
     "Index Only Scan using <index>" in the result pins the covering
     capability of ``index`` deterministically, in both bystander states: an
     index that loses a covered column (e.g. its ``INCLUDE``) makes it an
-    Index Scan. What this cannot pin is the planner's cost choice among
-    competing indexes; that choice depends on the visibility map and is not
-    stable on a test bed.
+    Index Scan. It does NOT pin the planner's choice among competing
+    indexes; pair it with a full-competition EXPLAIN for that.
+
+    Only for tables no foreign key references: dropping a referenced
+    primary / unique key would take other tables' foreign keys (and their
+    locks) with it and remove the uniqueness the planner reasons with, so it
+    is refused before anything is dropped.
     """
     from psycopg import sql as pg_sql
 
-    # Dropping an index takes ACCESS EXCLUSIVE on ``table``; an autovacuum
-    # worker on it yields only after deadlock_timeout, so outwait it.
+    # Dropping an index takes ACCESS EXCLUSIVE on ``table``. The pool's 2s
+    # statement_timeout would also bound the lock wait, so raise both: an
+    # autovacuum worker on the table yields after deadlock_timeout.
+    connection.execute("SET LOCAL statement_timeout = '30s'")
     connection.execute("SET LOCAL lock_timeout = '30s'")
     connection.execute("SET LOCAL enable_seqscan=off")
     connection.execute("SET LOCAL enable_bitmapscan=off")
-    indexes = connection.execute(
-        "SELECT ic.relname AS index_name, con.conname AS constraint_name "
-        "FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid "
-        "LEFT JOIN pg_constraint con ON con.conindid = i.indexrelid "
-        "AND con.conrelid = i.indrelid AND con.contype IN ('p', 'u', 'x') "
-        "WHERE i.indrelid = to_regclass(%s)",
-        (table,),
-    ).fetchall()
-    names = sorted(row["index_name"] for row in indexes)
-    assert index in names, (table, index, names)
     try:
+        indexes = connection.execute(
+            "SELECT ic.relname AS index_name, con.conname AS constraint_name, "
+            "ARRAY(SELECT fk.conname::text FROM pg_constraint fk "
+            "WHERE fk.contype = 'f' AND fk.conindid = i.indexrelid "
+            "ORDER BY 1) AS referencing_keys "
+            "FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid "
+            "LEFT JOIN pg_constraint con ON con.conindid = i.indexrelid "
+            "AND con.conrelid = i.indrelid AND con.contype IN ('p', 'u', 'x') "
+            "WHERE i.indrelid = to_regclass(%s)",
+            (table,),
+        ).fetchall()
+        names = sorted(row["index_name"] for row in indexes)
+        assert index in names, (table, index, names)
+        referenced = {
+            row["index_name"]: row["referencing_keys"]
+            for row in indexes
+            if row["index_name"] != index and row["referencing_keys"]
+        }
+        assert not referenced, (
+            f"explain_with_sole_index refuses {table}: foreign keys depend on "
+            f"indexes it would drop: {referenced}"
+        )
         for row in indexes:
             if row["index_name"] == index:
                 continue
             if row["constraint_name"]:
                 connection.execute(
-                    pg_sql.SQL("ALTER TABLE {} DROP CONSTRAINT {} CASCADE").format(
+                    pg_sql.SQL("ALTER TABLE {} DROP CONSTRAINT {}").format(
                         pg_sql.Identifier(table),
                         pg_sql.Identifier(row["constraint_name"]),
                     )

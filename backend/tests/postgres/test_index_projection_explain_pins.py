@@ -19,12 +19,13 @@ Judged with seqscan/bitmapscan off, as the sibling pins are: the test bed has
 thousands of rows and no production-scale cost separation, but a statement
 rewritten into a shape with no index path shows up as a Seq Scan.
 
-The cluster page's Index Only Scan is a covering-capability contract, pinned
+The cluster page's Index Only Scan is pinned twice, with and without a
+bystander REPEATABLE READ transaction held on the same database
+(``bystander_snapshot``): among all of the table's indexes (the planner picks
+the covering one -- a choice that does not move with the visibility map), and
 with every other ``concept_clusters`` index dropped inside the EXPLAIN's
-transaction and rolled back (``explain_with_sole_index``): one path per index,
-an IOS exactly when the index covers the read, so the pin holds whether or not
-VACUUM could set the visibility map -- checked with and without a bystander
-REPEATABLE READ transaction held on the same database (``bystander_snapshot``).
+transaction and rolled back (``explain_with_sole_index``: one path per index,
+an IOS exactly when the index covers the read).
 """
 from __future__ import annotations
 
@@ -184,8 +185,9 @@ def _plan(connection, statement: str, params: tuple, capabilities_off: bool = Tr
     return "\n".join(str(row["QUERY PLAN"]) for row in rows)
 
 
-# Statements whose pin is an Index Only Scan: planned with their covering
-# index as the only one on the table (see ``explain_with_sole_index``).
+# Statements whose pin is an Index Only Scan: also planned with their covering
+# index as the only one on the table (see ``explain_with_sole_index``), under
+# ``<name>@sole_index``.
 _SOLE_INDEX = {"graph_clusters": ("concept_clusters", "idx_clusters_nb_canonical_member_gen")}
 
 
@@ -272,13 +274,12 @@ def _captured_plans(
             for name, matches in roles.items():
                 if not matches(statement):
                     continue
+                plans[name].append(_plan(connection, statement, params, capabilities_off))
                 if capabilities_off and name in _SOLE_INDEX:
                     table, index = _SOLE_INDEX[name]
-                    plan = explain_with_sole_index(
-                        connection, statement, params, table=table, index=index)
-                else:
-                    plan = _plan(connection, statement, params, capabilities_off)
-                plans[name].append(plan)
+                    plans.setdefault(f"{name}@sole_index", []).append(
+                        explain_with_sole_index(
+                            connection, statement, params, table=table, index=index))
     return plans
 
 
@@ -327,9 +328,9 @@ def test_memory_exclusion_statements_keep_their_index_paths(
     # one); it stays the index-only scan of the published generation. The
     # clusters holding a Memory member are read once, driven from the Memory
     # source set through the object and member indexes.
-    cluster = plans["graph_clusters"][0]
-    assert "memory" not in cluster and "Anti Join" not in cluster, cluster
-    assert "Index Only Scan using idx_clusters_nb_canonical_member_gen" in cluster, cluster
+    for cluster in (plans["graph_clusters"][0], plans["graph_clusters@sole_index"][0]):
+        assert "memory" not in cluster and "Anti Join" not in cluster, cluster
+        assert "Index Only Scan using idx_clusters_nb_canonical_member_gen" in cluster, cluster
     canonicals = plans["cluster_canonicals"][0]
     # driven from the Memory source set, then the object-by-source index (the
     # planner alternates between the covering and the plain one as statistics

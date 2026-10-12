@@ -25,6 +25,10 @@ Hash Join(关掉 seqscan 后全表扫描就长这样,生产上是扫遍全部对
 成本上与按来源点查拉开(片段内层的 mo 没有笔记本谓词,全扫会读到它们)。整条用例在
 「无旁路事务」与「旁路 REPEATABLE READ 事务一直持有」两种状态下各跑一次
 (``bystander_snapshot``)。
+
+不用 cluster 钉那种「只留目标索引」的 EXPLAIN(``explain_with_sole_index``):要钉的恰是
+「按来源点查胜过 pk 全扫」这个竞争选择,删掉 pk 就没有可比的灾难计划了(pk 还被外键
+引用,helper 会拒绝)。
 """
 from __future__ import annotations
 
@@ -41,7 +45,7 @@ pytestmark = [
 ]
 
 _NOW = "2026-01-01T00:00:00+00:00"
-_OTHER_NOTEBOOK_OBJECTS = 40_000
+_OTHER_NOTEBOOK_OBJECTS = 20_000
 _TABLES = (
     "sources",
     "memory_items",
@@ -103,9 +107,11 @@ def _seed(postgres_database) -> None:
         # Another notebook's objects (no Memory there, two per source): the
         # cluster fragment's inner ``mo`` has no notebook predicate, so a full
         # scan of knowledge_objects reads these too and costs well apart from
-        # the source-driven probes of this notebook's Memory objects (measured
-        # on PG16 with the visibility map blocked: 2471 vs 5560 for the forced
-        # pk plan at 40k; without them the pk plan wins outright). Their ids
+        # the source-driven probes of this notebook's Memory objects (PG16,
+        # chosen vs forced-pk plan cost: 2344 vs 3556 with the visibility map
+        # blocked, 1394 vs 3556 without; with no such objects the pk plan wins
+        # outright when the map is blocked). 28k objects in all stay under
+        # ANALYZE's 30k-row sample, so the statistics are exact. Their ids
         # interleave with this notebook's in pk order, as random production ids
         # do, so a merge join along the pk cannot stop after this notebook's
         # range.

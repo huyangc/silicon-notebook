@@ -5,13 +5,21 @@
 稳态就退化(buffers 8.8×);`INCLUDE (generation)` 恢复 IOS ≈1×。本文件把
 「整改后形态」钉死——回退索引或把谓词写成相关子查询(逐行求值)都会红。
 
-IOS 契约钉与可见性图无关(C6):EXPLAIN 前在同一事务里把 concept_clusters 上除目标
-索引以外的索引全部 DROP、EXPLAIN 后 ROLLBACK(``explain_with_sole_index``)。规划器
-对每个索引只建一条路径,目标索引覆盖查询读到的全部列时这条路径就是 IOS——可见性图
-未设置(旁路长事务挡住 VACUUM)时也一样;去掉 ``INCLUDE (generation)`` 则只能是
-Index Scan,照样红。每条钉在「无旁路事务」与「旁路 REPEATABLE READ 事务一直持有」
-两种状态下各跑一次(``bystander_snapshot``)。代价:不再钉「多索引竞争时规划器选中
-目标索引」——那是成本选择,本身随可见性图翻转,测试台上不可稳定复现。
+每条 IOS 钉断言两层(C6),都在「无旁路事务」与「旁路 REPEATABLE READ 事务一直持有」
+两种状态下跑(``bystander_snapshot``):
+
+* **覆盖能力**:EXPLAIN 前在同一事务里把 concept_clusters 上除目标索引以外的索引全部
+  DROP、EXPLAIN 后 ROLLBACK(``explain_with_sole_index``)。规划器对每个索引只建一条
+  路径,目标索引覆盖查询读到的全部列时这条路径就是 IOS,与可见性图无关;去掉
+  ``INCLUDE (generation)`` 则只能是 Index Scan,红。
+* **竞争选择**:不删索引的全竞争 EXPLAIN,目标索引必须胜出(0051 担心的裸前缀窄索引
+  劫持会红)。member_rows 的选择不随可见性图翻转(ORDER BY 省掉排序),两态都断言;
+  version_facts 与 count 的选择随可见性图翻转,只在无旁路事务态、VACUUM 到可见性图
+  全满(``vacuum_until_all_visible``,有界重试,满不了就红并列出挡水位线的会话)后断言。
+
+生产信号:旁路事务持有、可见性图没设上时,version_facts 与 count 的全竞争计划实测被
+``idx_clusters_nb_canonical_name_lower`` 劫持成 Index Scan + heap Filter(PG16)——生产上
+长事务挡住 VACUUM 时这两个读者同样会这样退化。不在 C6 范围内,待登记。
 """
 from __future__ import annotations
 
@@ -19,7 +27,7 @@ import pytest
 
 from app.repositories.postgres._store_utils import normalize_timestamp
 from app.repositories.postgres.migrator import PostgresMigrator
-from tests.postgres.conftest import explain_with_sole_index
+from tests.postgres.conftest import explain_with_sole_index, vacuum_until_all_visible
 
 pytestmark = [
     pytest.mark.postgres_integration,
@@ -77,14 +85,25 @@ _PUBLISHED = (
 )
 
 
-def _sole_index_plan(
-    postgres_database, bystander_snapshot, index: str, sql: str, params: tuple
-) -> str:
+def _pinned_plans(
+    postgres_database, bystander_snapshot, index: str, sql: str, params: tuple,
+    *, choice_moves_with_visibility_map: bool,
+) -> dict[str, str]:
+    """The plans one IOS pin asserts: ``sole_index`` (covering capability) in
+    both states; ``competing`` (the planner picks ``index`` among all of the
+    table's indexes) in both states when that choice is stable, otherwise only
+    with no bystander and a full visibility map."""
     with postgres_database.connect() as connection:
         bystander_snapshot.assert_visibility_map_blocked(connection, "concept_clusters")
-        return explain_with_sole_index(
-            connection, sql, params, table="concept_clusters", index=index
-        )
+        plans = {"sole_index": explain_with_sole_index(
+            connection, sql, params, table="concept_clusters", index=index)}
+    if choice_moves_with_visibility_map:
+        if bystander_snapshot.held:
+            return plans
+        vacuum_until_all_visible(postgres_database.settings.database_url, "concept_clusters")
+    with postgres_database.connect() as connection:
+        plans["competing"] = _plan(connection, sql, params)
+    return plans
 
 
 def test_cluster_member_rows_keeps_index_only_scan_with_the_predicate(
@@ -92,18 +111,23 @@ def test_cluster_member_rows_keeps_index_only_scan_with_the_predicate(
 ):
     assert PostgresMigrator(postgres_database).migrate() == 73
     _seed(postgres_database, "nb-ios", 5000)
-    plan = _sole_index_plan(
+    plans = _pinned_plans(
         postgres_database, bystander_snapshot, "idx_clusters_nb_canonical_member_gen",
         "SELECT canonical_id, member_object_id FROM concept_clusters "
         "WHERE notebook_id = %s "
         f"AND generation = {_PUBLISHED} "
         'ORDER BY canonical_id COLLATE "C", member_object_id COLLATE "C"',
         ("nb-ios", "nb-ios"),
+        choice_moves_with_visibility_map=False,
     )
-    assert "Index Only Scan" in plan and "idx_clusters_nb_canonical_member_gen" in plan, plan
-    assert "Seq Scan on concept_clusters" not in plan, plan
-    # 绑定参数子查询 = uncorrelated InitPlan(一次求值);相关写法是 SubPlan
-    assert "InitPlan" in plan and "SubPlan" not in plan.replace("InitPlan", ""), plan
+    assert set(plans) == {"sole_index", "competing"}, plans
+    for label, plan in plans.items():
+        assert ("Index Only Scan using idx_clusters_nb_canonical_member_gen" in plan), (
+            label, plan)
+        assert "Seq Scan on concept_clusters" not in plan, (label, plan)
+        # 绑定参数子查询 = uncorrelated InitPlan(一次求值);相关写法是 SubPlan
+        assert "InitPlan" in plan and "SubPlan" not in plan.replace("InitPlan", ""), (
+            label, plan)
 
 
 def test_version_facts_cluster_component_scans_the_created_gen_index(
@@ -111,16 +135,20 @@ def test_version_facts_cluster_component_scans_the_created_gen_index(
 ):
     assert PostgresMigrator(postgres_database).migrate() == 73
     _seed(postgres_database, "nb-vf", 5000)
-    plan = _sole_index_plan(
+    plans = _pinned_plans(
         postgres_database, bystander_snapshot, "idx_clusters_nb_created_gen",
         "SELECT COUNT(*) AS c, MAX(created_at) AS ts FROM concept_clusters "
         "WHERE notebook_id=%s "
         f"AND generation = {_PUBLISHED}",
         ("nb-vf", "nb-vf"),
+        choice_moves_with_visibility_map=True,
     )
-    assert "Index Only Scan" in plan and "idx_clusters_nb_created_gen" in plan, plan
-    assert "Seq Scan on concept_clusters" not in plan, plan
-    assert "InitPlan" in plan, plan
+    expected = {"sole_index"} if bystander_snapshot.held else {"sole_index", "competing"}
+    assert set(plans) == expected, plans
+    for label, plan in plans.items():
+        assert "Index Only Scan using idx_clusters_nb_created_gen" in plan, (label, plan)
+        assert "Seq Scan on concept_clusters" not in plan, (label, plan)
+        assert "InitPlan" in plan, (label, plan)
 
 
 # PR-A·A1:``node_context`` 在来源天花板下的语句都不绑天花板(成员关系在 Python
@@ -291,14 +319,85 @@ def test_concept_clusters_count_skip_gate_leg_stays_index_only(
     # leg (unified_kg_store.concept_clusters_count).
     assert PostgresMigrator(postgres_database).migrate() == 73
     _seed(postgres_database, "nb-cnt", 5000)
-    plan = _sole_index_plan(
+    plans = _pinned_plans(
         postgres_database, bystander_snapshot, "idx_clusters_nb_created_gen",
         "SELECT COUNT(*) AS c FROM concept_clusters WHERE notebook_id=%s "
         f"AND generation = {_PUBLISHED}",
         ("nb-cnt", "nb-cnt"),
+        choice_moves_with_visibility_map=True,
     )
-    assert "Index Only Scan" in plan and "idx_clusters_nb_created_gen" in plan, plan
-    assert "Seq Scan on concept_clusters" not in plan, plan
+    expected = {"sole_index"} if bystander_snapshot.held else {"sole_index", "competing"}
+    assert set(plans) == expected, plans
+    for label, plan in plans.items():
+        assert "Index Only Scan using idx_clusters_nb_created_gen" in plan, (label, plan)
+        assert "Seq Scan on concept_clusters" not in plan, (label, plan)
+
+
+def test_sole_index_helper_refuses_a_table_foreign_keys_reference(postgres_database):
+    """``explain_with_sole_index`` would drop a referenced primary key with the
+    other tables' foreign keys hanging off it: it refuses before dropping
+    anything (``notebooks.pk_notebooks`` is referenced by concept_clusters
+    and many more)."""
+    assert PostgresMigrator(postgres_database).migrate() == 72
+    with postgres_database.connect() as connection:
+        before = connection.execute(
+            "SELECT count(*) AS n FROM pg_constraint WHERE contype = 'f'").fetchone()["n"]
+        with pytest.raises(AssertionError, match="foreign keys depend on"):
+            explain_with_sole_index(
+                connection, "SELECT id FROM notebooks WHERE id = %s", ("nb",),
+                table="notebooks", index=_a_non_key_index(connection, "notebooks"))
+        after = connection.execute(
+            "SELECT count(*) AS n FROM pg_constraint WHERE contype = 'f'").fetchone()["n"]
+    assert before == after and before > 0, (before, after)
+
+
+def _a_non_key_index(connection, table: str) -> str:
+    row = connection.execute(
+        "SELECT ic.relname AS name FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid "
+        "WHERE i.indrelid = to_regclass(%s) AND NOT i.indisprimary ORDER BY 1 LIMIT 1",
+        (table,),
+    ).fetchone()
+    assert row is not None, table
+    return row["name"]
+
+
+def test_every_visibility_sensitive_pin_runs_in_both_bystander_states():
+    """The five pins that flip with the visibility map take ``bystander_snapshot``,
+    and the fixture is parametrized over exactly the two states."""
+    import ast
+    import inspect
+
+    from tests.postgres import conftest
+    from tests.postgres import test_index_projection_explain_pins as projection
+    from tests.postgres import test_memory_sql_explain_pins as memory
+
+    pins = (
+        test_cluster_member_rows_keeps_index_only_scan_with_the_predicate,
+        test_version_facts_cluster_component_scans_the_created_gen_index,
+        test_concept_clusters_count_skip_gate_leg_stays_index_only,
+        projection.test_memory_exclusion_statements_keep_their_index_paths,
+        memory.test_memory_sql_fragments_keep_their_index_paths,
+    )
+    for pin in pins:
+        assert "bystander_snapshot" in inspect.signature(pin).parameters, pin.__name__
+    tree = ast.parse(inspect.getsource(conftest))
+    constants = {
+        target.id: node.value
+        for node in tree.body if isinstance(node, ast.Assign)
+        for target in node.targets if isinstance(target, ast.Name)
+    }
+    fixture, = (node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "bystander_snapshot")
+    params = [
+        keyword.value
+        for decorator in fixture.decorator_list if isinstance(decorator, ast.Call)
+        for keyword in decorator.keywords if keyword.arg == "params"
+    ]
+    assert len(params) == 1, ast.dump(fixture)
+    value = params[0]
+    if isinstance(value, ast.Name):
+        value = constants[value.id]
+    assert tuple(ast.literal_eval(value)) == ("no_bystander", "bystander_rr_snapshot")
 
 
 def test_viewer_scope_owned_and_citing_read_seeks_the_source_indexes(postgres_database):
