@@ -6,7 +6,6 @@ docs/superpowers/specs/2026-08-04-user-activity-log-view-design_zh.md §4.1。
 """
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
 import json
 import sqlite3
 import threading
@@ -30,21 +29,7 @@ from tests.activity_parity_cases import (
     REPORT_SECTION_FAILURE_EXPECTED,
     REPORT_SECTION_FAILURE_SECTIONS,
 )
-
-
-def _recent_instant(*, days: int = 0, hours: int = 0) -> str:
-    """A deletion instant whose retained rows are still unexpired today.
-
-    Retained activity expires ``user_activity_retention_days`` (default 180)
-    after the deletion instant and every reader filters ``expires_at`` against
-    the REAL clock (``julianday('now')``), which has no seam.  A literal
-    deletion date is therefore a time bomb: ``2026-08-31T12:00Z`` would turn
-    the race tests red from 2027-02-27T12:00Z on, and a literal older snapshot
-    silently stops testing anything once it expires.  Keep every deletion
-    clock relative to the real one.
-    """
-    instant = datetime.now(timezone.utc).replace(microsecond=0)
-    return (instant - timedelta(days=days, hours=hours)).isoformat()
+from tests.clock_testkit import recent_instant
 
 
 @pytest.fixture
@@ -1586,7 +1571,7 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry(repo):
 
     # Model the supported merge state: an older retained snapshot and the
     # still-live aggregate carry the same activity primary keys.
-    old_snapshot_at = _recent_instant(days=30)
+    old_snapshot_at = recent_instant(days=30)
     notebook_store.now = lambda: old_snapshot_at
     with repo._write() as db:
         notebook_store._retain_user_activity_before_delete(db, "n-refresh")
@@ -1637,7 +1622,7 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry(repo):
             "UPDATE reports SET understanding_json='{broken' WHERE id='rep-refresh'"
         )
 
-    deleted_at = _recent_instant(hours=1)
+    deleted_at = recent_instant(hours=1)
     notebook_store.now = lambda: deleted_at
     notebook_store.delete_row_and_orphan_embeddings("n-refresh")
 
@@ -1669,11 +1654,11 @@ def test_activity_delete_race_prefers_retained_lifecycle(repo):
         _insert_notebook(db, "n-race", "u-race")
         _insert_ask(
             db, "ask-race", "n-race", "u-race",
-            _recent_instant(hours=3), question="race question",
+            recent_instant(hours=3), question="race question",
         )
 
     notebook_store = repo._runtime.notebook_store
-    deleted_at = _recent_instant(hours=1)
+    deleted_at = recent_instant(hours=1)
     notebook_store.now = lambda: deleted_at
     connection = repo._connect()
     triggered = False
@@ -1710,19 +1695,19 @@ def test_live_ask_detail_delete_race_fails_closed(repo):
         _insert_notebook(db, "n-detail-race", "u-detail-race")
         _insert_ask(
             db, "ask-detail-race", "n-detail-race", "u-detail-race",
-            _recent_instant(hours=3), question="detail race",
+            recent_instant(hours=3), question="detail race",
         )
         db.execute(
             "INSERT INTO ask_trace_steps(job_id,seq,step_json,created_at) "
             "VALUES (?,?,?,?)",
             (
                 "ask-detail-race", 0, json.dumps({"kind": "retrieval"}),
-                _recent_instant(hours=2),
+                recent_instant(hours=2),
             ),
         )
 
     notebook_store = repo._runtime.notebook_store
-    deleted_at = _recent_instant(hours=1)
+    deleted_at = recent_instant(hours=1)
     notebook_store.now = lambda: deleted_at
     connection = repo._connect()
     triggered = False

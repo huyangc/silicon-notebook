@@ -1,15 +1,7 @@
 import gzip, json
 from pathlib import Path
 from app.core import event_logging as el
-
-
-class _FrozenDatetime(el.datetime):
-    """Pins the module clock to one day so a test cannot straddle midnight
-    between computing "today" and the code under test reading its own now."""
-
-    @classmethod
-    def now(cls, tz=None):
-        return el.datetime(2026, 1, 15, 12, 0, 0, tzinfo=tz)
+from tests.clock_testkit import FROZEN_DAY, FrozenDatetime
 
 
 def _write(p: Path, lines):
@@ -40,8 +32,10 @@ def test_gzip_missing_or_already_gz_is_noop(tmp_path):
 
 
 def test_archive_stale_days_skips_today_and_legacy(tmp_path, monkeypatch):
-    monkeypatch.setattr(el, "datetime", _FrozenDatetime)
-    today = "2026-01-15"
+    # Pinned: computing "today" here and the code under test reading its own
+    # now() must not straddle midnight.
+    monkeypatch.setattr(el, "datetime", FrozenDatetime)
+    today = FROZEN_DAY
     # 旧天(应压)、今天(不压)、legacy 无日期(不碰)、per-user 子目录旧天(应压)
     _write(tmp_path / "llm-2026-01-01.jsonl", [{"a": 1}])
     _write(tmp_path / f"llm-{today}.jsonl", [{"a": 2}])
@@ -72,8 +66,10 @@ def _logger(tmp_path, monkeypatch, channel="llm", per_user=False):
 
 
 def test_emit_writes_dated_file(tmp_path, monkeypatch):
-    monkeypatch.setattr(el, "datetime", _FrozenDatetime)
-    today = "2026-01-15"
+    # Pinned: computing "today" here and the code under test reading its own
+    # now() must not straddle midnight.
+    monkeypatch.setattr(el, "datetime", FrozenDatetime)
+    today = FROZEN_DAY
     lg = _logger(tmp_path, monkeypatch)
     lg.emit({"id": "x1", "kind": "chat"})
     dated = tmp_path / f"llm-{today}.jsonl"
