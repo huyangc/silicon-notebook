@@ -25,6 +25,7 @@ const feature = {
   content: "完整说明",
   author_id: "user-1",
   author_name: "小林",
+  status: "open" as const,
   vote_count: 7,
   voted_by_me: false,
   created_at: "2026-08-31T10:00:00+08:00",
@@ -168,6 +169,97 @@ test("投票改变优先级后重新排序并保持当前愿望可见", async ()
   expect(screen.getByText("1 / 2")).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "下一个愿望" }));
   expect(screen.getByText(feature.title)).toBeInTheDocument();
+});
+
+function mockWishLists(bugs: unknown[], features: unknown[]) {
+  mocks.listWishes.mockImplementation(({ kind }: { kind: string }) => {
+    const items = kind === "bug" ? bugs : features;
+    return Promise.resolve({ items, total: items.length, offset: 0, limit: WAITING_WISH_KIND_LIMIT });
+  });
+}
+
+const closedBug = {
+  ...bug,
+  id: "wish-bug-done",
+  title: "已修好的导出问题",
+  status: "done" as const,
+  vote_count: 40,
+};
+
+const inProgressFeature = {
+  ...feature,
+  id: "wish-feature-progress",
+  title: "正在做的目录导航",
+  status: "in_progress" as const,
+  vote_count: 5,
+};
+
+const declinedFeature = {
+  ...feature,
+  id: "wish-feature-declined",
+  title: "不采纳的皮肤切换",
+  status: "declined" as const,
+  vote_count: 30,
+};
+
+test("轮播只出现待处理与进行中的愿望，已完成和不采纳即使票数更高也不出现且不多发请求", async () => {
+  vi.useFakeTimers();
+  const fetchSpy = vi.fn();
+  vi.stubGlobal("fetch", fetchSpy);
+  mockWishLists([closedBug, bug], [declinedFeature, feature, inProgressFeature]);
+  render(<WaitingWishCarousel />);
+  await act(async () => {});
+
+  const seen: string[] = [];
+  for (let step = 0; step < 7; step += 1) {
+    const title = screen.getByRole("article").querySelector("strong[title]")?.getAttribute("title");
+    seen.push(title ?? "");
+    expect(screen.getByText(`${(step % 3) + 1} / 3`)).toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(WAITING_WISH_ROTATION_MS); });
+  }
+
+  expect(seen).toEqual([
+    feature.title, inProgressFeature.title, bug.title,
+    feature.title, inProgressFeature.title, bug.title,
+    feature.title,
+  ]);
+  expect(screen.queryByText(closedBug.title)).not.toBeInTheDocument();
+  expect(screen.queryByText(declinedFeature.title)).not.toBeInTheDocument();
+  expect(mocks.listWishes).toHaveBeenCalledTimes(2);
+  expect(fetchSpy).not.toHaveBeenCalled();
+});
+
+test("全部愿望都已完成或不采纳时显示空态，不起计时器也不多发请求", async () => {
+  vi.useFakeTimers();
+  const fetchSpy = vi.fn();
+  vi.stubGlobal("fetch", fetchSpy);
+  mockWishLists([closedBug], [declinedFeature]);
+  render(<WaitingWishCarousel />);
+  await act(async () => {});
+
+  expect(screen.getByText("暂无处理中的愿望，欢迎去许愿墙分享想法。")).toBeInTheDocument();
+  expect(screen.queryByRole("article")).not.toBeInTheDocument();
+  expect(screen.queryByRole("navigation", { name: "切换愿望" })).not.toBeInTheDocument();
+  expect(vi.getTimerCount()).toBe(0);
+  act(() => { vi.advanceTimersByTime(WAITING_WISH_ROTATION_MS * 3); });
+  expect(screen.getByText("暂无处理中的愿望，欢迎去许愿墙分享想法。")).toBeInTheDocument();
+  expect(mocks.listWishes).toHaveBeenCalledTimes(2);
+  expect(fetchSpy).not.toHaveBeenCalled();
+});
+
+test("重新加载后过滤结果变短时从第一条开始且不越界", async () => {
+  mocks.listWishes.mockRejectedValueOnce(new Error("offline"));
+  const user = userEvent.setup();
+  render(<WaitingWishCarousel />);
+  expect(await screen.findByText("许愿墙暂时加载失败")).toBeInTheDocument();
+
+  mockWishLists([closedBug, bug], [declinedFeature]);
+  await user.click(screen.getByRole("button", { name: "重试" }));
+
+  expect(await screen.findByText(bug.title)).toBeInTheDocument();
+  expect(screen.queryByRole("navigation", { name: "切换愿望" })).not.toBeInTheDocument();
+  expect(screen.queryByText(closedBug.title)).not.toBeInTheDocument();
+  expect(screen.queryByText(declinedFeature.title)).not.toBeInTheDocument();
 });
 
 test("轮播加载失败可就地重试且不冒充生成任务失败", async () => {
