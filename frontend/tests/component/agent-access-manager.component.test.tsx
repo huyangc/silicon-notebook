@@ -923,6 +923,40 @@ test("删除成功但刷新失败:它名下已加载的 token 立刻按已撤销
   expect(within(issuedRow).queryByRole("button", { name: "撤销" })).not.toBeInTheDocument();
 });
 
+test("删除前已提交的权限保存回执晚到:不会把已删除 Profile 的 token 恢复成有效", async () => {
+  let resolveSave!: (value: unknown) => void;
+  let deleted = false;
+  routeRequests(baseRoutes({
+    "GET /agent-profiles": () => (deleted ? [] : [profileOne]),
+    "GET /agent-tokens": () => [deleted ? { ...activeToken, revoked_at: "2026-09-04T00:00:00Z", copyable: false } : activeToken],
+    "PUT /agent-tokens/token-1/access": () => new Promise((resolve) => { resolveSave = resolve; }),
+    "DELETE /agent-profiles/agent-1": () => { deleted = true; return undefined; },
+  }));
+  const user = userEvent.setup();
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findAllByText("Claude Code");
+  await user.click(screen.getByRole("checkbox", { name: "隐藏已撤销和已过期" }));
+
+  const issuedRow = () => screen.getAllByText("Claude Code")
+    .map((node) => node.closest("article"))
+    .find((node): node is HTMLElement => node !== null) as HTMLElement;
+  await user.click(within(issuedRow()).getByRole("button", { name: /修改权限/ }));
+  const editor = screen.getByRole("form", { name: "修改 Claude Code 的 token 权限" });
+  await user.click(within(editor).getByRole("checkbox", { name: "问答" }));
+  await user.click(within(editor).getByRole("button", { name: "保存" }));
+
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "删除" }));
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "确认删除" }));
+  expect(await within(profileListRow("Claude Code")).findByRole("status")).toHaveTextContent("已删除");
+
+  // 保存在删除之前就已提交,回执却现在才到,带着删除前的「有效、可复制」状态。
+  await act(async () => { resolveSave({ ...activeToken, scopes: ["read", "ask"] }); });
+  await waitFor(() => expect(within(issuedRow()).getByText("已撤销")).toBeInTheDocument());
+  expect(within(issuedRow()).queryByRole("button", { name: /修改权限/ })).not.toBeInTheDocument();
+  expect(within(issuedRow()).queryByRole("button", { name: /复制 token/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("form", { name: "修改 Claude Code 的 token 权限" })).not.toBeInTheDocument();
+});
+
 test("删除后的刷新结果仍带着已删除的 Profile:不会把它加回来", async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   let lateList = false;
