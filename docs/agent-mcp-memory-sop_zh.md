@@ -47,7 +47,7 @@ curl -s http://127.0.0.1:8000/api/ready
 
 ## 3. 在界面创建 Agent Profile 与 Token
 
-1. 在右上角打开账户菜单，选择 **Agent 接入**。它是一级入口，打开独立的 `/agents` 页；总 Memory 页里也有指向它的链接。
+1. 在右上角打开账户菜单，选择 **Agent 接入**。它是一级入口，打开独立的 `/agents` 页（账户菜单是它唯一的入口）。
 2. 页面上依次是 **Agent Profile**、**签发 Token** 与 **已签发 Token** 三块。
 3. 在 **Agent Profile** 区域填写：
    - 名称：例如 `Codex local`；

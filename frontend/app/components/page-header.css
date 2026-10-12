@@ -1,28 +1,15 @@
+/* 外观全部来自 globals.css 的 .topbar / .brand / .back-home-button(与主界面同一份);
+   这里只补独立页需要的差异:主界面靠 .app 网格行给顶栏 56px 高,独立页没有那层网格。 */
 .page-header {
-  height: 48px;
-  padding: 0 20px;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  border-bottom: 1px solid var(--line, #d8dee6);
-  background: var(--panel, #ffffff);
-  color: var(--ink, #17202a);
+  min-height: 56px;
+  gap: 12px;
 }
 
-.page-header-back {
-  color: var(--blue, #1f5eff);
+.page-header-mark {
   text-decoration: none;
-  font-size: 13px;
-  font-weight: 600;
-  white-space: nowrap;
 }
 
-.page-header-back:hover {
-  text-decoration: underline;
-}
-
-.page-header-title {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--muted, #657080);
+.page-header .back-home-button {
+  height: 36px;
+  text-decoration: none;
 }

@@ -2,7 +2,7 @@
 
 import {
   Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState,
-  type RefObject,
+  type ReactNode, type RefObject,
 } from "react";
 import { fetchMe } from "../../auth.ts";
 import { clampPopoverLeft } from "../../effort-picker-logic";
@@ -27,6 +27,7 @@ import {
 } from "./api.ts";
 import {
   formatBytes,
+  formatDate,
   formatLastActive,
   logsDrillHref,
   parseUploadLimit,
@@ -132,7 +133,7 @@ type AnchoredPopoverOptions = {
 /**
  * 锚定弹出层的定位与关闭:定位到锚点下方并夹回视口(放不下时翻到上方),
  * scroll / resize / 布局位移时重算;点外部或 Esc 关闭(镜像 EffortPicker)。
- * 文档上限与密码重置两个单元格共用。返回 null 表示尚未量出位置(首帧绘制前由
+ * 文档上限与「管理」两个单元格共用。返回 null 表示尚未量出位置(首帧绘制前由
  * layout effect 填上;jsdom 量不出宽度时保持 CSS 默认位)。
  */
 function useAnchoredPopover({ open, pending, anchorRef, popoverRef, onCancel }: AnchoredPopoverOptions) {
@@ -315,160 +316,66 @@ function UploadLimitCell({
   );
 }
 
-type ResetPasswordCellProps = {
+type AccountManageCellProps = {
   user: AdminUserUsage;
-  editing: boolean;
-  lockedByOther: boolean;
+  /** 本行的管理弹出层打开中。 */
+  open: boolean;
+  /** 弹出层当前视图:动作清单,或改用户名 / 重置密码的输入表单。 */
+  view: "menu" | "rename" | "password";
+  /** 本行的账号类请求(状态 / 改名 / 重置密码 / 权限)进行中:点外部 / Esc 不关。 */
   pending: boolean;
-  anyPending: boolean;
+  /** 其他行的账号类请求进行中:入口暂不可点(全局互斥,镜像旧的逐列行为)。 */
+  lockedByOther: boolean;
+  /** 弹出层打开时显示在层内;收起后显示在入口按钮下方。 */
   notice: Notice | null;
-  input: string;
-  onInput: (value: string) => void;
   onOpen: () => void;
-  onCancel: () => void;
-  onSubmit: () => void;
+  onClose: () => void;
+  children: ReactNode;
 };
 
-/** 密码重置单元格:与文档上限同形——入口按钮常驻,输入框与确认放进锚定弹出层。 */
-function ResetPasswordCell({
-  user, editing, lockedByOther, pending, anyPending, notice,
-  input, onInput, onOpen, onCancel, onSubmit,
-}: ResetPasswordCellProps) {
+/**
+ * 「管理」单元格:账号状态、改用户名、重置密码、管理员权限四个动作收进同一个锚定弹出层。
+ * 此前它们各占一列(账号 / 密码 / 权限管理,合计约 410px),加上其余十一列把主表顶到
+ * 1400px 以上,常规笔记本屏幕上必出横向滚动条;收成一枚入口按钮后整表回到视口宽度内。
+ */
+function AccountManageCell({
+  user, open, view, pending, lockedByOther, notice, onOpen, onClose, children,
+}: AccountManageCellProps) {
   const anchorRef = useRef<HTMLDivElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
-  const pos = useAnchoredPopover({ open: editing, pending, anchorRef, popoverRef, onCancel });
+  const pos = useAnchoredPopover({ open, pending, anchorRef, popoverRef, onCancel: onClose });
+  const label = view === "rename"
+    ? `修改 ${user.username} 的用户名`
+    : view === "password" ? `重置 ${user.username} 的密码` : `管理 ${user.username}`;
 
   return (
     <div className="usage-cell-stack">
       <div className="usage-limit-view" ref={anchorRef}>
         <button
           type="button"
-          className={`usage-role-button${editing ? " usage-role-button-open" : ""}`}
-          disabled={anyPending || lockedByOther}
+          className={`usage-role-button${open ? " usage-role-button-open" : ""}`}
+          disabled={lockedByOther}
           aria-haspopup="dialog"
-          aria-expanded={editing}
-          onClick={() => (editing ? onCancel() : onOpen())}
-        >重置密码</button>
-        {editing && (
+          aria-expanded={open}
+          aria-label={`管理 ${user.username}`}
+          onClick={() => (open ? onClose() : onOpen())}
+        >
+          管理 <span className="usage-manage-caret" aria-hidden="true">▾</span>
+        </button>
+        {open && (
           <div
-            className="usage-limit-popover"
+            className="usage-limit-popover usage-manage-popover"
             role="dialog"
-            aria-label={`重置 ${user.username} 的密码`}
+            aria-label={label}
             ref={popoverRef}
             style={pos === null ? undefined : { left: pos.left, top: pos.top }}
           >
-            <div className="usage-limit-popover-title">重置密码 · {user.username}</div>
-            <div className="usage-limit-popover-row">
-              <input
-                className="usage-limit-input usage-limit-input-password"
-                type="password"
-                autoComplete="new-password"
-                value={input}
-                disabled={pending}
-                autoFocus
-                aria-label={`${user.username} 的新密码`}
-                onChange={(event) => onInput(event.target.value)}
-                onKeyDown={(event) => { if (event.key === "Enter") onSubmit(); }}
-              />
-              <button
-                type="button"
-                className="usage-role-button usage-role-button-confirm"
-                disabled={pending}
-                onClick={onSubmit}
-              >
-                {pending ? "重置中…" : "确认重置"}
-              </button>
-              <button
-                type="button"
-                className="usage-role-button"
-                disabled={pending}
-                onClick={onCancel}
-              >取消</button>
-            </div>
-            <span className="usage-settings-hint">重置后该用户的所有浏览器会话将被登出。</span>
+            {children}
             {notice && <CellFeedback notice={notice} />}
           </div>
         )}
       </div>
-      {!editing && notice && <CellFeedback notice={notice} />}
-    </div>
-  );
-}
-
-type RenameUserButtonProps = {
-  user: AdminUserUsage;
-  editing: boolean;
-  lockedByOther: boolean;
-  pending: boolean;
-  anyPending: boolean;
-  /** 弹出层打开时,本单元格的用户名反馈显示在弹出层里(就近);收起后由外层显示。 */
-  notice: Notice | null;
-  input: string;
-  onInput: (value: string) => void;
-  onOpen: () => void;
-  onCancel: () => void;
-  onSubmit: () => void;
-};
-
-/** 改用户名:与重置密码同形——入口按钮常驻,输入框与确认放进锚定弹出层。 */
-function RenameUserButton({
-  user, editing, lockedByOther, pending, anyPending, notice,
-  input, onInput, onOpen, onCancel, onSubmit,
-}: RenameUserButtonProps) {
-  const anchorRef = useRef<HTMLDivElement | null>(null);
-  const popoverRef = useRef<HTMLDivElement | null>(null);
-  const pos = useAnchoredPopover({ open: editing, pending, anchorRef, popoverRef, onCancel });
-
-  return (
-    <div className="usage-limit-view" ref={anchorRef}>
-      <button
-        type="button"
-        className={`usage-role-button${editing ? " usage-role-button-open" : ""}`}
-        disabled={anyPending || lockedByOther}
-        aria-haspopup="dialog"
-        aria-expanded={editing}
-        onClick={() => (editing ? onCancel() : onOpen())}
-      >改用户名</button>
-      {editing && (
-        <div
-          className="usage-limit-popover"
-          role="dialog"
-          aria-label={`修改 ${user.username} 的用户名`}
-          ref={popoverRef}
-          style={pos === null ? undefined : { left: pos.left, top: pos.top }}
-        >
-          <div className="usage-limit-popover-title">改用户名 · {user.username}</div>
-          <div className="usage-limit-popover-row">
-            <input
-              className="usage-limit-input usage-limit-input-password"
-              type="text"
-              autoComplete="off"
-              value={input}
-              disabled={pending}
-              autoFocus
-              aria-label={`${user.username} 的新用户名`}
-              onChange={(event) => onInput(event.target.value)}
-              onKeyDown={(event) => { if (event.key === "Enter") onSubmit(); }}
-            />
-            <button
-              type="button"
-              className="usage-role-button usage-role-button-confirm"
-              disabled={pending}
-              onClick={onSubmit}
-            >
-              {pending ? "保存中…" : "保存"}
-            </button>
-            <button
-              type="button"
-              className="usage-role-button"
-              disabled={pending}
-              onClick={onCancel}
-            >取消</button>
-          </div>
-          <span className="usage-settings-hint">改名后该用户的所有浏览器会话将被登出。统一认证登录按用户名与工号对应。</span>
-          {notice && <CellFeedback notice={notice} />}
-        </div>
-      )}
+      {!open && notice && <CellFeedback notice={notice} />}
     </div>
   );
 }
@@ -524,6 +431,8 @@ export default function AdminUsagePage() {
   const [currentUserId, setCurrentUserId] = useState("");
   const [confirmingStatus, setConfirmingStatus] = useState<{ userId: string; status: AdminUserStatus } | null>(null);
   const [statusPendingId, setStatusPendingId] = useState("");
+  // 「管理」弹出层当前开在哪一行;改用户名 / 重置密码是层内的二级视图(renamingId / resettingId)。
+  const [managingId, setManagingId] = useState("");
   const [renamingId, setRenamingId] = useState("");
   const [renameInput, setRenameInput] = useState("");
   const [renamePendingId, setRenamePendingId] = useState("");
@@ -835,7 +744,29 @@ export default function AdminUsagePage() {
     setRenameInput("");
   }
 
+  function openManage(target: AdminUserUsage) {
+    setConfirmingStatus(null);
+    setConfirmingRole(null);
+    cancelRename();
+    cancelResetPassword();
+    setEditingLimitId("");
+    setRowNotice(null);
+    setManagingId(target.id);
+  }
+
+  function closeManage() {
+    setManagingId("");
+    setConfirmingStatus(null);
+    setConfirmingRole(null);
+    cancelRename();
+    cancelResetPassword();
+    // 层内的结果已经在弹出层里显示过;收起后不再挂到入口按钮下方——那条反馈有最小宽度,
+    // 会把「管理」列临时撑宽、重新顶出横向滚动条。
+    setRowNotice((previous) => previous && previous.cell !== "limit" ? null : previous);
+  }
+
   function resetRowInteractions() {
+    setManagingId("");
     setExpanded(null);
     setConfirmingRole(null);
     setConfirmingStatus(null);
@@ -856,6 +787,8 @@ export default function AdminUsagePage() {
     resetRowInteractions();
   }
 
+  // 账号类请求(状态 / 改名 / 重置密码 / 权限)同一时刻只允许一行在途。
+  const manageBusyId = statusPendingId || renamePendingId || resetPendingId || rolePendingId;
   const readyRows = state.kind === "ready" ? state.rows : [];
   const sortedRows = useMemo(
     () => sortAdminUsers(readyRows, sortKey, sortDirection),
@@ -872,12 +805,14 @@ export default function AdminUsagePage() {
 
   if (state.kind !== "ready") {
     return (
+      <>
+      <PageHeader title="用户使用总览" />
       <main className="usage-page">
-        <PageHeader title="用户使用总览" />
         {state.kind === "loading" && <div className="usage-state">加载中…</div>}
         {state.kind === "forbidden" && <div className="usage-state">无权限:仅管理员可查看用户使用总览。</div>}
         {state.kind === "error" && <div className="usage-state usage-state-error">加载失败:{state.message}</div>}
       </main>
+      </>
     );
   }
 
@@ -905,8 +840,10 @@ export default function AdminUsagePage() {
   }
 
   return (
+    <>
+    <PageHeader title="用户使用总览" />
     <main className="usage-page">
-      <PageHeader title="用户使用总览" />
+      <h1 className="usage-heading">用户使用总览</h1>
       <p className="usage-description">查看用户用量、提问记录与系统自动归档的解析问题。</p>
       <nav className="usage-sheet-tabs" aria-label="用户总览页签">
         <button type="button" aria-current={sheet === "users" ? "page" : undefined} onClick={() => changeSheet("users")}>用户列表</button>
@@ -958,7 +895,6 @@ export default function AdminUsagePage() {
             <tr>
               <th className="usage-expand-col"></th>
               <SortableHeader label="用户名" sortKey="username" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
-              <SortableHeader label="角色" sortKey="role" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
               <SortableHeader label="注册时间" sortKey="created_at" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
               <SortableHeader label="笔记本" sortKey="notebooks" activeKey={sortKey} direction={sortDirection} onSort={changeSort} align="num" />
               <SortableHeader label="来源" sortKey="sources" activeKey={sortKey} direction={sortDirection} onSort={changeSort} align="num" />
@@ -967,9 +903,7 @@ export default function AdminUsagePage() {
               <SortableHeader label="最近活跃" sortKey="last_active" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
               <th>用户分析</th>
               <SortableHeader label="文档上限" sortKey="upload_limit" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
-              <th>账号</th>
-              <th>密码</th>
-              <th>权限管理</th>
+              <th>管理</th>
             </tr>
           </thead>
           <tbody>
@@ -977,9 +911,17 @@ export default function AdminUsagePage() {
             const isOpen = expanded === u.id;
             const entry = nbCache[u.id];
             const isOnline = onlineIds.has(u.id);
-            const roleNotice = noticeFor(u.id, "role");
-            const statusNotice = noticeFor(u.id, "status");
-            const usernameNotice = noticeFor(u.id, "username");
+            // 「管理」弹出层里四个动作的结果共用一个落点(层内,或收起后入口按钮下方)。
+            const manageNotice = rowNotice && rowNotice.userId === u.id && rowNotice.cell !== "limit"
+              ? rowNotice
+              : null;
+            const rowBusy = manageBusyId === u.id;
+            const accountLock = u.id === "user-local"
+              ? { text: "受保护", title: "内置管理员账号由部署配置决定" }
+              : u.id === currentUserId ? { text: "本人", title: "不能停用或改名当前登录的账号" } : null;
+            const passwordLock = u.id === "user-local"
+              ? { text: "受保护", title: "内置管理员密码由部署配置决定" }
+              : u.id === currentUserId ? { text: "本人", title: "请在主界面头像菜单中修改自己的密码" } : null;
             return (
               <Fragment key={u.id}>
                 <tr className={isOpen ? "usage-row-expanded" : undefined}>
@@ -994,7 +936,7 @@ export default function AdminUsagePage() {
                       {isOpen ? "▾" : "▸"}
                     </button>
                   </td>
-                  <td>
+                  <td className="usage-user-cell">
                     <span
                       className={`usage-dot ${isOnline ? "usage-dot-online" : "usage-dot-offline"}`}
                       role="img"
@@ -1002,21 +944,18 @@ export default function AdminUsagePage() {
                       title={isOnline ? "在线" : "离线"}
                     />
                     <span className="usage-username">{u.username}</span>
+                    {/* 角色不再单占一列(省出 ~80px 主表宽度):管理员在用户名后挂标签,普通用户不挂。 */}
+                    {u.role === "admin" && <span className="usage-tag usage-tag-admin">管理员</span>}
                     {u.status === "disabled" && <span className="usage-tag usage-tag-disabled">已停用</span>}
                   </td>
-                  <td>
-                    {u.role === "admin"
-                      ? <span className="usage-tag usage-tag-admin">管理员</span>
-                      : <span className="usage-tag">用户</span>}
-                  </td>
-                  <td className="usage-col-time">{formatLastActive(u.created_at)}</td>
+                  <td className="usage-col-time" title={formatLastActive(u.created_at)}>{formatDate(u.created_at)}</td>
                   <td className="usage-col-num">{u.notebooks}</td>
                   <td className="usage-col-num">{u.sources}</td>
                   <td className="usage-col-num">{u.questions}</td>
                   <td className="usage-col-num">{u.reports}</td>
                   <td className="usage-col-time">{formatLastActive(u.last_active)}</td>
                   <td>
-                    <span className="usage-analysis-links">
+                    <span className="usage-analysis-links usage-analysis-links-stacked">
                       <a href={questionsDrillHref(u.id)}>查看提问</a>
                       <a href={logsDrillHref(u.id)}>LLM 日志</a>
                     </span>
@@ -1042,133 +981,212 @@ export default function AdminUsagePage() {
                       />
                     )}
                   </td>
-                  <td className="usage-limit-cell">
-                    {u.id === "user-local" ? (
-                      <span className="usage-role-locked" title="内置管理员账号由部署配置决定">受保护</span>
-                    ) : u.id === currentUserId ? (
-                      <span className="usage-role-locked" title="不能停用或改名当前登录的账号">本人</span>
-                    ) : (
-                      <div className="usage-cell-stack">
-                        <span className="usage-account-actions">
-                          <span className={`usage-tag${u.status === "disabled" ? " usage-tag-disabled" : ""}`}>
-                            {u.status === "disabled" ? "已停用" : "正常"}
-                          </span>
-                          {confirmingStatus?.userId === u.id ? (
-                            <span className="usage-role-confirm">
-                              <button
-                                type="button"
-                                className="usage-role-button usage-role-button-confirm"
-                                disabled={Boolean(statusPendingId)}
-                                aria-busy={statusPendingId === u.id}
-                                onClick={() => void submitStatusChange(u, confirmingStatus.status)}
-                              >
-                                {statusPendingId === u.id
-                                  ? "更新中…"
-                                  : confirmingStatus.status === "disabled" ? "确认停用" : "确认启用"}
-                              </button>
-                              <button
-                                type="button"
-                                className="usage-role-button"
-                                disabled={Boolean(statusPendingId)}
-                                onClick={() => setConfirmingStatus(null)}
-                              >取消</button>
-                            </span>
-                          ) : (
+                  <td>
+                    <AccountManageCell
+                      user={u}
+                      open={managingId === u.id}
+                      view={renamingId === u.id ? "rename" : resettingId === u.id ? "password" : "menu"}
+                      pending={manageBusyId === u.id}
+                      lockedByOther={Boolean(manageBusyId) && manageBusyId !== u.id}
+                      notice={manageNotice}
+                      onOpen={() => openManage(u)}
+                      onClose={closeManage}
+                    >
+                      {renamingId === u.id ? (
+                        <>
+                          <div className="usage-limit-popover-title">改用户名 · {u.username}</div>
+                          <div className="usage-limit-popover-row">
+                            <input
+                              className="usage-limit-input usage-limit-input-password"
+                              type="text"
+                              autoComplete="off"
+                              value={renameInput}
+                              disabled={renamePendingId === u.id}
+                              autoFocus
+                              aria-label={`${u.username} 的新用户名`}
+                              onChange={(event) => setRenameInput(event.target.value)}
+                              onKeyDown={(event) => { if (event.key === "Enter") void submitRename(u); }}
+                            />
+                            <button
+                              type="button"
+                              className="usage-role-button usage-role-button-confirm"
+                              disabled={renamePendingId === u.id}
+                              onClick={() => void submitRename(u)}
+                            >
+                              {renamePendingId === u.id ? "保存中…" : "保存"}
+                            </button>
                             <button
                               type="button"
                               className="usage-role-button"
-                              disabled={Boolean(statusPendingId)}
-                              onClick={() => { setRowNotice(null); setConfirmingStatus({
-                                userId: u.id,
-                                status: u.status === "disabled" ? "active" : "disabled",
-                              }); }}
+                              disabled={renamePendingId === u.id}
+                              onClick={cancelRename}
+                            >取消</button>
+                          </div>
+                          <span className="usage-settings-hint">改名后该用户的所有浏览器会话将被登出。统一认证登录按用户名与工号对应。</span>
+                        </>
+                      ) : resettingId === u.id ? (
+                        <>
+                          <div className="usage-limit-popover-title">重置密码 · {u.username}</div>
+                          <div className="usage-limit-popover-row">
+                            <input
+                              className="usage-limit-input usage-limit-input-password"
+                              type="password"
+                              autoComplete="new-password"
+                              value={resetInput}
+                              disabled={resetPendingId === u.id}
+                              autoFocus
+                              aria-label={`${u.username} 的新密码`}
+                              onChange={(event) => setResetInput(event.target.value)}
+                              onKeyDown={(event) => { if (event.key === "Enter") void submitResetPassword(u); }}
+                            />
+                            <button
+                              type="button"
+                              className="usage-role-button usage-role-button-confirm"
+                              disabled={resetPendingId === u.id}
+                              onClick={() => void submitResetPassword(u)}
                             >
-                              {u.status === "disabled" ? "启用" : "停用"}
+                              {resetPendingId === u.id ? "重置中…" : "确认重置"}
                             </button>
-                          )}
-                          <RenameUserButton
-                            user={u}
-                            editing={renamingId === u.id}
-                            lockedByOther={Boolean(renamingId) && renamingId !== u.id}
-                            pending={renamePendingId === u.id}
-                            anyPending={Boolean(renamePendingId)}
-                            notice={renamingId === u.id ? usernameNotice : null}
-                            input={renameInput}
-                            onInput={setRenameInput}
-                            onOpen={() => { setRenamingId(u.id); setRenameInput(u.username); setRowNotice(null); }}
-                            onCancel={cancelRename}
-                            onSubmit={() => void submitRename(u)}
-                          />
-                        </span>
-                        {statusNotice && <CellFeedback notice={statusNotice} />}
-                        {renamingId !== u.id && usernameNotice && <CellFeedback notice={usernameNotice} />}
-                      </div>
-                    )}
-                  </td>
-                  <td className="usage-limit-cell">
-                    {u.id === "user-local" ? (
-                      <span className="usage-role-locked" title="内置管理员密码由部署配置决定">受保护</span>
-                    ) : u.id === currentUserId ? (
-                      <span className="usage-role-locked" title="请在主界面头像菜单中修改自己的密码">本人</span>
-                    ) : (
-                      <ResetPasswordCell
-                        user={u}
-                        editing={resettingId === u.id}
-                        lockedByOther={Boolean(resettingId) && resettingId !== u.id}
-                        pending={resetPendingId === u.id}
-                        anyPending={Boolean(resetPendingId)}
-                        notice={noticeFor(u.id, "password")}
-                        input={resetInput}
-                        onInput={setResetInput}
-                        onOpen={() => { setResettingId(u.id); setResetInput(""); setRowNotice(null); }}
-                        onCancel={cancelResetPassword}
-                        onSubmit={() => void submitResetPassword(u)}
-                      />
-                    )}
-                  </td>
-                  <td>
-                    <div className="usage-cell-stack">
-                      {!u.role_mutable ? (
-                        <span className="usage-role-locked">
-                          {u.id === currentUserId ? "当前账户" : "受保护"}
-                        </span>
-                      ) : confirmingRole?.userId === u.id ? (
-                        <span className="usage-role-confirm">
-                          <button
-                            type="button"
-                            className="usage-role-button usage-role-button-confirm"
-                            disabled={rolePendingId === u.id}
-                            onClick={() => void submitRoleChange(u, confirmingRole.role)}
-                          >
-                            {rolePendingId === u.id ? "更新中…" : "确认"}
-                          </button>
-                          <button
-                            type="button"
-                            className="usage-role-button"
-                            disabled={rolePendingId === u.id}
-                            onClick={() => setConfirmingRole(null)}
-                          >取消</button>
-                        </span>
+                            <button
+                              type="button"
+                              className="usage-role-button"
+                              disabled={resetPendingId === u.id}
+                              onClick={cancelResetPassword}
+                            >取消</button>
+                          </div>
+                          <span className="usage-settings-hint">重置后该用户的所有浏览器会话将被登出。</span>
+                        </>
                       ) : (
-                        <button
-                          type="button"
-                          className="usage-role-button"
-                          disabled={Boolean(rolePendingId)}
-                          onClick={() => { setRowNotice(null); setConfirmingRole({
-                            userId: u.id,
-                            role: u.role === "admin" ? "user" : "admin",
-                          }); }}
-                        >
-                          {u.role === "admin" ? "撤销管理员" : "设为管理员"}
-                        </button>
+                        <>
+                          <div className="usage-limit-popover-title">管理 · {u.username}</div>
+                          <dl className="usage-manage-list">
+                            <div className="usage-manage-item">
+                              <dt>账号</dt>
+                              <dd>
+                                <span className={`usage-tag${u.status === "disabled" ? " usage-tag-disabled" : ""}`}>
+                                  {u.status === "disabled" ? "已停用" : "正常"}
+                                </span>
+                                {accountLock ? (
+                                  <span className="usage-role-locked" title={accountLock.title}>{accountLock.text}</span>
+                                ) : confirmingStatus?.userId === u.id ? (
+                                  <span className="usage-role-confirm">
+                                    <button
+                                      type="button"
+                                      className="usage-role-button usage-role-button-confirm"
+                                      disabled={statusPendingId === u.id}
+                                      aria-busy={statusPendingId === u.id}
+                                      onClick={() => void submitStatusChange(u, confirmingStatus.status)}
+                                    >
+                                      {statusPendingId === u.id
+                                        ? "更新中…"
+                                        : confirmingStatus.status === "disabled" ? "确认停用" : "确认启用"}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="usage-role-button"
+                                      disabled={statusPendingId === u.id}
+                                      onClick={() => setConfirmingStatus(null)}
+                                    >取消</button>
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="usage-role-button"
+                                    disabled={rowBusy}
+                                    onClick={() => { setRowNotice(null); setConfirmingRole(null); setConfirmingStatus({
+                                      userId: u.id,
+                                      status: u.status === "disabled" ? "active" : "disabled",
+                                    }); }}
+                                  >
+                                    {u.status === "disabled" ? "启用" : "停用"}
+                                  </button>
+                                )}
+                              </dd>
+                            </div>
+                            <div className="usage-manage-item">
+                              <dt>用户名</dt>
+                              <dd>
+                                {accountLock ? (
+                                  <span className="usage-role-locked" title={accountLock.title}>{accountLock.text}</span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="usage-role-button"
+                                    disabled={rowBusy}
+                                    onClick={() => {
+                                      setConfirmingStatus(null); setConfirmingRole(null); setRowNotice(null);
+                                      setRenamingId(u.id); setRenameInput(u.username);
+                                    }}
+                                  >改用户名</button>
+                                )}
+                              </dd>
+                            </div>
+                            <div className="usage-manage-item">
+                              <dt>密码</dt>
+                              <dd>
+                                {passwordLock ? (
+                                  <span className="usage-role-locked" title={passwordLock.title}>{passwordLock.text}</span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="usage-role-button"
+                                    disabled={rowBusy}
+                                    onClick={() => {
+                                      setConfirmingStatus(null); setConfirmingRole(null); setRowNotice(null);
+                                      setResettingId(u.id); setResetInput("");
+                                    }}
+                                  >重置密码</button>
+                                )}
+                              </dd>
+                            </div>
+                            <div className="usage-manage-item">
+                              <dt>权限</dt>
+                              <dd>
+                                {!u.role_mutable ? (
+                                  <span className="usage-role-locked">
+                                    {u.id === currentUserId ? "当前账户" : "受保护"}
+                                  </span>
+                                ) : confirmingRole?.userId === u.id ? (
+                                  <span className="usage-role-confirm">
+                                    <button
+                                      type="button"
+                                      className="usage-role-button usage-role-button-confirm"
+                                      disabled={rolePendingId === u.id}
+                                      onClick={() => void submitRoleChange(u, confirmingRole.role)}
+                                    >
+                                      {rolePendingId === u.id ? "更新中…" : "确认"}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="usage-role-button"
+                                      disabled={rolePendingId === u.id}
+                                      onClick={() => setConfirmingRole(null)}
+                                    >取消</button>
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="usage-role-button"
+                                    disabled={rowBusy}
+                                    onClick={() => { setRowNotice(null); setConfirmingStatus(null); setConfirmingRole({
+                                      userId: u.id,
+                                      role: u.role === "admin" ? "user" : "admin",
+                                    }); }}
+                                  >
+                                    {u.role === "admin" ? "撤销管理员" : "设为管理员"}
+                                  </button>
+                                )}
+                              </dd>
+                            </div>
+                          </dl>
+                        </>
                       )}
-                      {roleNotice && <CellFeedback notice={roleNotice} />}
-                    </div>
+                    </AccountManageCell>
                   </td>
                 </tr>
                 {isOpen && (
                   <tr className="usage-subrow">
-                    <td colSpan={14}>
+                    <td colSpan={11}>
                       {/* 用户摘要:仅依赖行数据 u,与笔记本明细的加载状态无关,故不受
                           entry 是否就绪影响,始终无条件渲染(规格 §3 B6/Phase C)。 */}
                       <div className="usage-summary" role="group" aria-label="用户摘要">
@@ -1277,5 +1295,6 @@ export default function AdminUsagePage() {
       </div>
       </>)}
     </main>
+    </>
   );
 }

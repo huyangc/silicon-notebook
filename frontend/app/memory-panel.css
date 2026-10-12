@@ -604,40 +604,10 @@
   font-size: 13px;
 }
 
-.agent-access-link {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  border: 1px solid #d8dcee;
-  border-radius: 16px;
-  padding: 15px 17px;
-  background: #f5f7fc;
-  color: var(--ink);
-  text-decoration: none;
-}
-
-.agent-access-link:hover { border-color: #b9c6ea; }
-
-.agent-access-link > span {
-  display: grid;
-  grid-template-columns: auto auto;
-  align-items: center;
-  justify-content: start;
-  gap: 3px 7px;
-}
-
 /* 记忆审核、保存预览与 transfer-picker 的「同时整理进知识图谱」勾选框。类名沿用自
-   它最初所在的 Agent 接入区块;Agent 接入页自己用 .agent-access-check。 */
+   它最初所在的 Agent 接入区块(该区块已移除,入口只在账户菜单);Agent 接入页自己用 .agent-access-check。 */
 .agent-check { display: flex; align-items: center; gap: 7px; color: #3e4858; font-size: 12px; }
 .agent-check input { accent-color: var(--blue); }
-
-.agent-access-link small {
-  grid-column: 2;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 400;
-}
 
 .memory-save-modal { z-index: 84; }
 
