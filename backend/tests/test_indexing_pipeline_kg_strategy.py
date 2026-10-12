@@ -504,6 +504,9 @@ def test_plugin_kg_failure_keeps_old_graph_and_identity_and_fails_job(
         "failed",
         "indexing_pipeline_kg_failed",
     )
+    # error_message 经 KgBuildJobStatus.user_message 由前端终态提示原样上屏,
+    # 按 docs/ui-vocabulary.md 写(抽取 → 分析)。
+    assert job["error_message"] == "索引管线知识分析未通过校验，旧知识仍保留。"
     state = repo._runtime.notebook_store.indexing_pipeline_state(notebook.id)
     assert (state["published_pipeline_id"], state["published_pipeline_version"]) == (
         "",

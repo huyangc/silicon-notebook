@@ -6988,11 +6988,11 @@ class ReasoningRetriever:
             if pname not in used_queries:
                 used_queries.append(pname)
             names.append(pname)
-        # 文案随来源切:共提命中 →「横向对比(共提)…个同类实体」,社区回退 → 原文案。
+        # 文案随来源切:共提命中 →「横向对比(共提)…个同类实体」,社区回退 →「…个同主题板块实体」。
         # step_type 不变(前端「对比」标签零改动);detail 增 source 供观测。
         step_summary = (f"横向对比(共提):纳入 {len(names)} 个同类实体,新增候选 {added}"
                         if peer_source == "comention"
-                        else f"横向对比:纳入 {len(names)} 个同社区实体,新增候选 {added}")
+                        else f"横向对比:纳入 {len(names)} 个同主题板块实体,新增候选 {added}")
         record(TraceStep(step_type="expand_community", summary=step_summary,
                          detail={"focal": focal_name, "peers": names,
                                  "new": added, "source": peer_source}))

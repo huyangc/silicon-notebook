@@ -376,10 +376,16 @@ def test_图谱Schema放行对后端user_error也生效(tmp_path):
         # 裸 HTTPException 不在扫描面内:它永远不上屏(前端按状态码给通用文案),
         # detail 是给日志 / MCP 的诊断契约。这条反例钉住这个**刻意的**边界。
         'raise HTTPException(status_code=400, detail="从基准库抽取 chunk 失败")',
-        # 变量 / 调用做 message:静态查不了,放行而非瞎猜(auth_routes.py 那处),
-        # 由 tests/test_user_error.py 的运行时用例覆盖。
-        'detail = "基准库不可用"\nraise user_error(400, detail)',
+        # 静态查不了的 message 放行而非瞎猜,由 tests/test_user_error.py 的运行时
+        # 用例覆盖:未在本模块定义的 helper、异常属性、str(exc)、跨模块导入的常量。
         'raise user_error(400, _msg("基准库"))',
+        'raise user_error(400, exc.user_message)',
+        'raise user_error(400, str(exc))',
+        'from app.messages import BASE_MSG\nraise user_error(400, BASE_MSG)',
+        # 形参遮蔽同名模块常量(Python 作用域):形参的值静态未知,不拿模块常量顶替。
+        'MSG = "基准库不可用"\ndef f(MSG):\n    raise user_error(400, MSG)',
+        # 条件表达式两个分支各算一个单元,不跨分支拼出「社区」。
+        'raise user_error(400, "社" if c else "区")',
         # 位置不对的字符串(status_code 位)不是 message
         'raise user_error("基准库", 400)',
         # 同名但不是标记函数的调用
@@ -388,6 +394,68 @@ def test_图谱Schema放行对后端user_error也生效(tmp_path):
 )
 def test_不在信任边界上的后端字符串不误报(tmp_path, code):
     assert scan_py(tmp_path, code) == [], f"误报:{code}"
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        # 变量:先查同函数内的赋值
+        'def f(c):\n    msg = "仅管理员可设置基准库"\n    raise user_error(403, msg)',
+        # 变量:再查模块级常量
+        'MSG = "仅管理员可设置基准库"\ndef f():\n    raise user_error(403, MSG)',
+        # 条件表达式:任一分支违规都报
+        'raise user_error(400, "保存失败" if c else f"{n} 个来源待抽取")',
+        # `+` 拼接:两侧并成一个单元
+        'raise user_error(400, "本次从" + f"基准库{x}读取失败")',
+        # 拼接的一侧静态未知:当作插值(空白),另一侧照查
+        'raise user_error(400, str(exc) + "(基准库)")',
+        # `%` 与 `.format`
+        'raise user_error(400, "共 %d 个 chunk" % n)',
+        'raise user_error(400, "共 {} 个 chunk".format(n))',
+        # `X.get(k, 默认)`:字典值与默认值都查
+        '_MSGS = {"a": "基准库不可用"}\nraise user_error(400, _MSGS.get(k, "稍后再试"))',
+        '_MSGS = {"a": "稍后再试"}\nraise user_error(400, _MSGS.get(k, "基准库不可用"))',
+        # 本模块 helper 的每一个 return
+        'def _msg(n):\n    if n:\n        return "稍后再试"\n    return f"{n} 个 chunk"\n'
+        'raise user_error(400, _msg(n))',
+        # helper 里再经一层模块常量
+        'BASE = "基准库"\ndef _msg():\n    return BASE + "不可用"\nraise user_error(400, _msg())',
+    ],
+)
+def test_后端可展示文案的间接写法也会被抓到(tmp_path, code):
+    """「先赋给变量 / 条件表达式 / 拼接 / 模块常量 / 模块 helper 返回」这几种间接写法
+    曾经整条被跳过——「横向对比:纳入 … 个同社区实体」就是这样上屏的。"""
+    assert scan_py(tmp_path, code), f"没抓到间接写法里的黑话:{code}"
+
+
+def test_间接写法解析有深度上限且不因自引用卡死(tmp_path):
+    code = 'MSG = MSG + "基准库"\nraise user_error(400, MSG)'
+    assert "基准库" in scan_py(tmp_path, code)
+    deep = "\n".join(
+        ['A0 = "基准库"', *(f"A{i} = A{i - 1}" for i in range(1, 12))]
+    ) + "\nraise user_error(400, A11)"
+    assert scan_py(tmp_path, deep) == [], "超过深度上限的链条应放弃解析而不是无限追"
+
+
+def test_环境变量名在后端通道里不当黑话但裸词照抓(tmp_path):
+    """`SILICON_NOTEBOOK_AUTH_OPTIONAL` 是配置键名(admin_routes 统一登录开关的拒绝文案),
+    不是界面黑话;剥离只吃全大写下划线的完整标识符,裸 notebook / KG 照抓。"""
+    assert scan_py(
+        tmp_path, 'raise user_error(409, "请先关闭 SILICON_NOTEBOOK_AUTH_OPTIONAL 再启用")'
+    ) == []
+    assert scan_trace(
+        tmp_path, 'TraceStep(step_type="skip", summary="已按 SILICON_NOTEBOOK_KG_MODE 跳过")'
+    ) == []
+    assert "notebook" in scan_py(tmp_path, 'raise user_error(409, "请先打开 notebook")')
+    assert "notebook" in scan_py(
+        tmp_path, 'raise user_error(409, "请检查 Silicon_Notebook_Auth 设置")'
+    )
+    assert "KG" in scan_trace(tmp_path, 'TraceStep(step_type="skip", summary="KG 未就绪")')
+
+
+def test_环境变量名剥离只作用于后端两条通道(tmp_path):
+    """剥离刻意不放进 terms_in():前端渲染文本没有这种写法,放宽只会少报。"""
+    assert "notebook" in scan_src(tmp_path, 'const t = "请设置 SILICON_NOTEBOOK_AUTH";')
 
 
 def test_扫描面塌了要红而不是静默放行(tmp_path, monkeypatch, capsys):
@@ -449,6 +517,18 @@ def trace_sites(tmp_path: pathlib.Path, code: str) -> int:
         'record(TraceStep(step_type="skip", summary="跳过必答方面复核"))',
         # f-string:字面量部分照查,插值剥掉(同 user_error 规则)。
         'TraceStep(step_type="skip", summary=f"跳过 {n} 个必答方面")',
+        # 真实回归样本(reasoning_retrieval 横向对比):条件表达式先赋给变量再传入。
+        'def f(src, n):\n'
+        '    x = (f"横向对比(共提):纳入 {n} 个同类实体" if src == "comention"\n'
+        '         else f"横向对比:纳入 {n} 个同社区实体")\n'
+        '    record(TraceStep(step_type="expand_community", summary=x))',
+        # 模块级常量
+        'SKIP = "跳过必答方面复核"\nTraceStep(step_type="skip", summary=SKIP)',
+        # `+` 拼接
+        'TraceStep(step_type="skip", summary="前缀" + f"{n} 个社区")',
+        # 本模块 helper 的 return
+        'def _summary(n):\n    return f"跳过 {n} 个必答方面"\n'
+        'TraceStep(step_type="skip", summary=_summary(n))',
     ],
 )
 def test_轨迹摘要里的黑话会被抓到(tmp_path, code):
@@ -458,9 +538,11 @@ def test_轨迹摘要里的黑话会被抓到(tmp_path, code):
 @pytest.mark.parametrize(
     "code",
     [
-        # 变量拼装的摘要静态查不了,放行而非瞎猜(同 user_error 的同类边界)。
-        'text = "必答方面"\nTraceStep(step_type="skip", summary=text)',
+        # 静态查不了的摘要放行而非瞎猜(同 user_error 的同类边界):未在本模块定义
+        # 的 helper、下标取值、形参。
         'TraceStep(step_type="skip", summary=_summary("必答方面"))',
+        '_T = {"a": "必答方面"}\nTraceStep(step_type="skip", summary=_T[k])',
+        'def f(text):\n    TraceStep(step_type="skip", summary=text)',
         # summary 之外的 kwarg 不是上屏文案(detail 是诊断契约,不上屏)。
         'TraceStep(step_type="skip", detail={"reason": "必答方面"})',
         # 同名 kwarg 但不是 TraceStep 的调用
@@ -485,6 +567,34 @@ def test_轨迹摘要的例外按逐字全串匹配(tmp_path):
     assert scan_trace(
         tmp_path, f'TraceStep(step_type="skip", summary="{frozen}!")'), (
         "例外不是全串匹配 —— 改一个字就该重新违规")
+
+
+def test_间接写法的轨迹摘要计入站点数(tmp_path):
+    """站点计数只增不减:能解析的间接写法同样计入非空性下限的分子。"""
+    assert trace_sites(
+        tmp_path, 'X = "已完成"\nTraceStep(step_type="skip", summary=X)'
+    ) == 1
+    assert trace_sites(
+        tmp_path, 'def f(x):\n    TraceStep(step_type="skip", summary=x)'
+    ) == 0
+
+
+def test_真实轨迹文案确实曾经违规过(tmp_path):
+    """变异验证:把 reasoning_retrieval 横向对比的社区回退文案改回「同社区实体」,
+    守卫必须红——这条文案是条件表达式赋给变量再传 summary=,没有间接写法解析时
+    它整条被跳过。"""
+    module = next(
+        p for p in guard.TRACE_SUMMARY_MODULES if p.name == "reasoning_retrieval.py"
+    )
+    src = module.read_text(encoding="utf-8")
+    assert "个同主题板块实体,新增候选" in src, "文案又漂了,本变异样本需同步"
+    assert guard.scan_trace_summaries(module)[1] == []
+    mutated = tmp_path / "reasoning_retrieval_mutated.py"
+    mutated.write_text(
+        src.replace("个同主题板块实体,新增候选", "个同社区实体,新增候选"), encoding="utf-8"
+    )
+    hits = [term for _line, term, _text in guard.scan_trace_summaries(mutated)[1]]
+    assert hits == ["社区"], f"改回「同社区实体」后守卫应只报这一条:{hits}"
 
 
 @pytest.mark.architecture_contract
