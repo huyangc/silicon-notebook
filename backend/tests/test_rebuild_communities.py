@@ -373,7 +373,8 @@ def test_summary_rows_drop_memory_members_of_a_pre_isolation_community(repo):
     assert [s for s in seen if "FROM communities" in s] == [
         "SELECT id, member_ids FROM communities WHERE notebook_id="
         f"'{plain.id}' AND level=0 AND generation = COALESCE((SELECT CASE WHEN "
-        "kg_reset_epoch > 0 AND community_seq = -1 AND COALESCE(last_rebuild_at, "
-        "'') = '' THEN -1 ELSE community_generation END FROM unified_kg_state "
+        "community_generation <> 0 THEN community_generation WHEN community_seq = -1 "
+        "AND kg_reset_epoch > 0 AND last_rebuild_at = '' THEN -1 ELSE "
+        "community_generation END FROM unified_kg_state "
         f"WHERE notebook_id = '{plain.id}'), 0)"
     ]

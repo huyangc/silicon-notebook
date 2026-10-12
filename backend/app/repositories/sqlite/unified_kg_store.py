@@ -86,23 +86,32 @@ _PUBLISHED_CLUSTER_GEN = (
 # in between. The PostgreSQL twin's comment at the same spot has the full
 # argument (the delete's state-row signature, what else could produce it, why
 # a rebuild reopens the layer). SQLite stores an empty ``last_rebuild_at`` as
-# '' rather than NULL.
-def _derived_layer_live(seq_column: str) -> str:
+# ''. Shape differs from the twin on purpose: SQLite re-checks a WHERE term
+# per scanned row even when it is a cached uncorrelated subquery (measured
+# +5% on a 75k-row co-mention scan), so here the gate is folded into the
+# notebook key itself -- ``notebook_id = (SELECT ? WHERE NOT EXISTS ...)``
+# is evaluated once, used as the index key, and is NULL (no row matches) in
+# the delete's state. Two parameters, both the notebook id. The seq test
+# comes first so a rebuilt notebook stops at it.
+def _derived_layer_notebook_key(seq_column: str) -> str:
     return (
-        "NOT EXISTS (SELECT 1 FROM unified_kg_state dls "
-        "WHERE dls.notebook_id = ? AND dls.kg_reset_epoch > 0 "
-        f"AND dls.{seq_column} = -1 AND COALESCE(dls.last_rebuild_at, '') = '')"
+        "(SELECT ? WHERE NOT EXISTS (SELECT 1 FROM unified_kg_state dls "
+        f"WHERE dls.notebook_id = ? AND dls.{seq_column} = -1 "
+        "AND dls.kg_reset_epoch > 0 AND dls.last_rebuild_at = ''))"
     )
 
 
-_CANONICAL_LAYER_LIVE = _derived_layer_live("canonical_rel_seq")
-_MENTION_LAYER_LIVE = _derived_layer_live("mention_seq")
+_CANONICAL_LAYER_NB = _derived_layer_notebook_key("canonical_rel_seq")
+_MENTION_LAYER_NB = _derived_layer_notebook_key("mention_seq")
 
 # The published community generation; -1 (never a real generation) while the
 # community layer is in the delete signature -- same single state-row lookup.
+# A published generation above 0 (every notebook rebuilt since generations
+# exist) answers at the first branch, reading no more than before.
 _PUBLISHED_COMMUNITY_GEN = (
-    "COALESCE((SELECT CASE WHEN kg_reset_epoch > 0 AND community_seq = -1 "
-    "AND COALESCE(last_rebuild_at, '') = '' THEN -1 ELSE community_generation END "
+    "COALESCE((SELECT CASE WHEN community_generation <> 0 THEN community_generation "
+    "WHEN community_seq = -1 AND kg_reset_epoch > 0 AND last_rebuild_at = '' "
+    "THEN -1 ELSE community_generation END "
     "FROM unified_kg_state WHERE notebook_id = ?), 0)"
 )
 
@@ -592,7 +601,7 @@ class UnifiedKgStore:
     def mention_rows(db: sqlite3.Connection, notebook_id: str):
         return db.execute(
             "SELECT claim_object_id, concept_canonical_id FROM mention_edges "
-            f"WHERE notebook_id=? AND {_MENTION_LAYER_LIVE}",
+            f"WHERE notebook_id = {_MENTION_LAYER_NB}",
             (notebook_id, notebook_id),
         ).fetchall()
 
@@ -1119,8 +1128,8 @@ class UnifiedKgStore:
     def edge_support_rows(db: sqlite3.Connection, notebook_id: str):
         return db.execute(
             "SELECT canonical_src, edge_type, canonical_tgt, support_count, source_count "
-            f"FROM canonical_relations WHERE notebook_id=? "
-            f"AND {_CANONICAL_LAYER_LIVE}", (notebook_id, notebook_id))
+            f"FROM canonical_relations WHERE notebook_id = {_CANONICAL_LAYER_NB}",
+            (notebook_id, notebook_id))
 
     @staticmethod
     def relation_support_rows(
@@ -1176,8 +1185,7 @@ class UnifiedKgStore:
         return db.execute(
             f"SELECT canonical_src, edge_type, canonical_tgt, "
             f"       support_count, source_count "
-            f"FROM canonical_relations WHERE notebook_id=? "
-            f"AND {_CANONICAL_LAYER_LIVE} "
+            f"FROM canonical_relations WHERE notebook_id = {_CANONICAL_LAYER_NB} "
             f"AND (canonical_src, edge_type, canonical_tgt) IN ({placeholders}) "
             f"ORDER BY canonical_src, edge_type, canonical_tgt",
             params,
@@ -1236,7 +1244,7 @@ class UnifiedKgStore:
                 f"SELECT canonical_src, edge_type, canonical_tgt, source_count, "
                 f"       sample_relation_ids "
                 f"FROM canonical_relations "
-                f"WHERE notebook_id=? AND {_CANONICAL_LAYER_LIVE} "
+                f"WHERE notebook_id = {_CANONICAL_LAYER_NB} "
                 f"  AND canonical_src IN ({placeholders}) "
                 f"  AND source_count<=? "
                 f"ORDER BY source_count ASC, canonical_tgt ASC, canonical_src ASC, "
@@ -1279,7 +1287,7 @@ class UnifiedKgStore:
             f"FROM (SELECT notebook_id, canonical_src, edge_type, canonical_tgt, "
             f"             source_count, sample_relation_ids "
             f"      FROM canonical_relations "
-            f"      WHERE notebook_id=? AND {_CANONICAL_LAYER_LIVE} "
+            f"      WHERE notebook_id = {_CANONICAL_LAYER_NB} "
             f"        AND canonical_src IN ({placeholders}) "
             f"        AND source_count<=? "
             f"      ORDER BY source_count ASC, canonical_tgt ASC, canonical_src ASC, "
@@ -1703,7 +1711,7 @@ class UnifiedKgStore:
                 limit_params = (canonical_id, notebook_id, ceiling.param)
             rows = db.execute(
                 "SELECT canonical_a, canonical_b, bridge_claims FROM concept_comentions cm "
-                f"WHERE notebook_id=? AND {_MENTION_LAYER_LIVE} "
+                f"WHERE notebook_id = {_MENTION_LAYER_NB} "
                 "AND (canonical_a=? OR canonical_b=?) AND bridge_claims>=? "
                 f"{limit_gate}"
                 "ORDER BY bridge_claims DESC, "
