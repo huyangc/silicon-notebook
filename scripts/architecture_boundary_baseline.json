@@ -364,7 +364,7 @@
     "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.rebuild_communities": 413,
     "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.rebuild_unified_kg": 482,
     "backend/app/services/memory_service.py::MemoryService.transfer": 389,
-    "backend/app/services/notebook_sharing.py::NotebookCopyService.copy_notebook": 640,
+    "backend/app/services/notebook_sharing.py::NotebookCopyService.copy_notebook": 621,
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever._new_run_state": 208,
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever._run_enumeration": 259,
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever.run": 1282,
