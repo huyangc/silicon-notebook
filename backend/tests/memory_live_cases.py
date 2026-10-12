@@ -160,8 +160,10 @@ def reader_results(world: World, user: Any) -> dict[str, bool]:
         user.id, notebook_id=None, status=None, origin=None, query="zebra",
         offset=0, limit=50,
     )
+    # "walrus" is only in the candidate, which is never embedded: only the
+    # lexical arm can return it, so the vector arm cannot mask this cell.
     lexical = store.memory_retrieval_rows(
-        user.id, nb, ("candidate", "confirmed"), "zebra",
+        user.id, nb, ("candidate", "confirmed"), "walrus",
         lexical_limit=10, vector_limit=1,
     )
     vector_only = store.memory_retrieval_rows(
@@ -194,7 +196,7 @@ def reader_results(world: World, user: Any) -> dict[str, bool]:
         "list_memories.search.items": [item.id for item in searched.items]
         == [confirmed_id],
         "list_memories.search.count": searched.total_count == 1,
-        "memory_retrieval_rows.lexical": confirmed_id
+        "memory_retrieval_rows.lexical": candidate_id
         in {row["record"].id for row in lexical},
         # Only confirmed Memory is embedded, so the vector arm returns it alone.
         "memory_retrieval_rows.vector": {row["record"].id for row in vector_only}
@@ -353,3 +355,97 @@ def assert_ingest_recheck_survives_lifecycle_flip(world: World, state: str) -> N
     service.set_memory_kg_service(kg)
     service._kg_ingest_job((confirmed_id, user.id))
     assert kg.calls == [("ingest", confirmed_id), ("remove", confirmed_id)]
+
+
+# ------------------------------------------- the read after a landed write
+def assert_post_write_read_survives_lifecycle_flip(world: World, state: str) -> None:
+    """A revision write checks the notebook is live under its lock and then
+    commits; a delete (or copy/import) flip committing after that must not
+    turn the landed write into a 404 and skip what follows it: the derived
+    source removal on deprecate, the KG ingest and embedding on confirm.
+
+    The flip is committed in the write's own transaction, right after the
+    lifecycle check, which is exactly what the read after the commit sees
+    when a delete's status CAS lands between the two."""
+    service = world.repo._runtime.memory_service
+    store = world.repo._runtime.memory_store
+    user = world.owner
+    candidate_id, confirmed_id = world.memories[user.id]
+    removed: list[str] = []
+    ingests: list[Any] = []
+    embeds: list[Any] = []
+
+    class _Kg:
+        def memory_source_id(self, memory_id):
+            return None
+
+        def memory_kg_eligible(self, notebook_id):
+            return True
+
+        def remove_memory_source(self, memory_id):
+            removed.append(memory_id)
+
+    service.set_memory_kg_service(_Kg())
+    service.kg_ingest_scheduler = lambda fn, item: ingests.append(item)
+    service.embedding_scheduler = lambda fn, job: embeds.append(job)
+    original = store._append_revision_on
+
+    def append_then_flip(db, memory_id, *args, **kwargs):
+        result = original(db, memory_id, *args, **kwargs)
+        db.execute(
+            world.sql("UPDATE notebooks SET status=? WHERE id=?"),
+            (state, world.notebook_id),
+        )
+        return result
+
+    store._append_revision_on = append_then_flip
+    try:
+        deprecated = service.deprecate(confirmed_id, user.id)
+        assert deprecated.status == "deprecated"
+        assert removed == [confirmed_id]
+        world.set_status("ready")
+        confirmed = service.confirm(candidate_id, user.id)
+        assert confirmed.status == "confirmed"
+        assert [item[0] for item in ingests] == [candidate_id]
+        assert embeds, "confirm must still queue the embedding"
+    finally:
+        del store._append_revision_on
+    world.set_status("ready")
+
+
+# ------------------------------------------------ the curator's approval
+def assert_promotion_approval_refused_in_non_live(world: World, state: str) -> None:
+    """Approving a Memory promotion copies it into a base library: a notebook
+    being deleted/copied/imported refuses it (KeyError -> the route's 404)
+    without writing anything; back to ready, the same proposal approves."""
+    repo = world.repo
+    runtime = repo._runtime
+    user = world.owner
+    _candidate_id, confirmed_id = world.memories[user.id]
+    base = _as_user(
+        user, lambda: repo.create_notebook(NotebookCreate(name="K3 base"))
+    ).id
+    runtime.catalog.mark_notebook_base(base)
+    runtime.notebook_store.replace_mounts(world.notebook_id, [base], user.id)
+    proposal = runtime.memory_service.propose_promotion(confirmed_id, user.id)["id"]
+
+    def base_objects() -> int:
+        return int(world.one(
+            "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=?", (base,)
+        )["c"])
+
+    def candidate_status() -> str:
+        return str(world.one(
+            "SELECT status FROM promotion_candidates WHERE id=?", (proposal,)
+        )["status"])
+
+    before = (base_objects(), candidate_status(), _memory_row(world, confirmed_id))
+    world.set_status(state)
+    with pytest.raises(KeyError):
+        runtime.knowledge_governance.approve_promotion(proposal, reviewer_id=user.id)
+    assert (base_objects(), candidate_status(), _memory_row(world, confirmed_id)) == before
+    assert before[0] == 0
+    world.set_status("ready")
+    runtime.knowledge_governance.approve_promotion(proposal, reviewer_id=user.id)
+    assert candidate_status() == "approved"
+    assert base_objects() >= 1

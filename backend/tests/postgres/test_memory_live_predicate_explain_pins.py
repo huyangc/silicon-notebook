@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -54,9 +55,22 @@ LIVE_TAIL = f" AND access_nb.{NOTEBOOK_LIVE_SQL})"
 LIVE_PROJECTION = f", (nb.{NOTEBOOK_LIVE_SQL}) AS notebook_live"
 
 
+# The curator's approval: the notebook row lock (``_lock_memory_aggregate_on``
+# with require_live) and the in-transaction access recheck.
+LOCK_TAIL = f"WHERE id=%s AND {NOTEBOOK_LIVE_SQL} FOR SHARE"
+APPROVAL_TAIL = f" AND n.{NOTEBOOK_LIVE_SQL}) AS has_access"
+MARKERS = (LIVE_TAIL, LIVE_PROJECTION, LOCK_TAIL, APPROVAL_TAIL)
+
+
 def old_statement(sql: str) -> str:
     """The statement as it was before K3, recovered from the captured one."""
-    return sql.replace(LIVE_TAIL, ")").replace(LIVE_PROJECTION, "")
+    return (
+        sql.replace(LIVE_TAIL, ")")
+        .replace(LIVE_PROJECTION, "")
+        .replace(LOCK_TAIL, "WHERE id=%s FOR SHARE")
+        .replace(APPROVAL_TAIL, " AS has_access")
+        .replace("SELECT m.notebook_id,(", "SELECT m.notebook_id,")
+    )
 HEAVY = "k3-heavy"
 
 SCALES = {
@@ -267,6 +281,10 @@ def _recorded(repo, monkeypatch):
         yield statements
 
 
+class _RolledBack(Exception):
+    pass
+
+
 def _swallow(fn, *expected):
     try:
         fn()
@@ -285,6 +303,15 @@ def capture_readers(repo, monkeypatch, seeded: Seeded) -> dict[str, list[tuple[s
     def promote():
         with repo._runtime.database.write() as db:
             store.propose_promotion_on(db, mid, HEAVY, "p-k3", [], [], stale, _NOW)
+
+    def lock_for_approval():
+        with repo._runtime.database.write() as db:
+            store.lock_promotion_memory_on(db, mid, nb, require_live=True)
+            raise _RolledBack()  # take the locks, write nothing
+
+    def validate_approval():
+        with repo._runtime.database.connect() as db:
+            store.validate_promotion_approval_access_on(db, mid, nb)
 
     def list_page(**kwargs):
         args = dict(notebook_id=None, status=None, origin=None, query="",
@@ -320,6 +347,8 @@ def capture_readers(repo, monkeypatch, seeded: Seeded) -> dict[str, list[tuple[s
             HEAVY, activity_type="report"
         ),
         "bell.report_outlines": lambda: queries.pending_actions_projection_rows(HEAVY),
+        "promotion.lock": lambda: _swallow(lock_for_approval, _RolledBack),
+        "promotion.validate": validate_approval,
     }
     captured: dict[str, list[tuple[str, Any]]] = {}
     for label, call in readers.items():
@@ -327,7 +356,7 @@ def capture_readers(repo, monkeypatch, seeded: Seeded) -> dict[str, list[tuple[s
             call()
         live = [
             (sql, params) for sql, params in statements
-            if LIVE_TAIL in sql or LIVE_PROJECTION in sql
+            if any(marker in sql for marker in MARKERS)
         ]
         assert live, f"{label}: no statement carries the lifecycle predicate"
         captured[label] = live
@@ -397,12 +426,12 @@ def compare_plans(repo, captured) -> dict[str, list[dict[str, Any]]]:
             for index, (sql, params) in enumerate(statements):
                 old_sql = old_statement(sql)
                 assert old_sql != sql, label
-                assert LIVE_TAIL not in old_sql and LIVE_PROJECTION not in old_sql
+                assert not any(marker in old_sql for marker in MARKERS), label
                 entry: dict[str, Any] = {"statement": index, "sql": sql[:160]}
                 for mode in ("custom", "generic"):
                     old = _plan(connection, old_sql, params, generic=mode == "generic")
                     new = _plan(connection, sql, params, generic=mode == "generic")
-                    if LIVE_TAIL in sql:  # a projection is not in a plan
+                    if LIVE_TAIL in sql or LOCK_TAIL in sql:  # not projections
                         assert "deleting" in json.dumps(new), (label, mode)
                     entry[mode] = {
                         "same_shape": shape(old) == shape(new),
@@ -431,7 +460,8 @@ _EXPECTED_INDEXES: dict[str, dict[int, tuple[set[str], set[str]]]] = {
     "memory_for_user": {0: (_PK, _PK)},
     "answer_memory_links": {0: ({"idx_memory_answer_once"}, _OWNER_NB)},
     "propose_promotion_on": {0: (_PK, _PK)},
-    "update_fields": {0: (_PK, _PK), 1: (_PK, _PK)},
+    # The read after the write is the live_only=False existence read now.
+    "update_fields": {0: (_PK, _PK)},
     "transition": {0: (_PK, _PK), 1: (_PK, _PK)},
     "export": {0: (_OWNER_NB, _OWNER_NB), 1: (_OWNER_NB, _OWNER_NB)},
     # Owner-wide aggregate / options / count / page.
@@ -451,6 +481,9 @@ _EXPECTED_INDEXES: dict[str, dict[int, tuple[set[str], set[str]]]] = {
     },
     "activity.report_only": {0: ({"pk_notebooks"}, {"pk_notebooks"})},
     "bell.report_outlines": {0: ({"pk_notebooks"}, {"pk_notebooks"})},
+    # The curator's approval: one primary-key row each.
+    "promotion.lock": {0: ({"pk_notebooks"}, {"pk_notebooks"})},
+    "promotion.validate": {0: (_PK | {"pk_notebooks"}, _PK | {"pk_notebooks"})},
 }
 
 
@@ -465,6 +498,32 @@ def _row_counts(repo) -> dict[str, int]:
             "SELECT COUNT(*) AS c FROM memory_items WHERE created_by=%s", (HEAVY,)
         ).fetchone()["c"])
     return counts
+
+
+_PINNED_TABLES = (
+    "memory_items", "memory_provenance", "memory_embeddings", "notebooks",
+    "notebook_members", "notebook_grants", "group_members", "ask_jobs", "reports",
+)
+
+
+def not_all_visible(repo) -> dict[str, tuple[int, int]]:
+    """Tables whose visibility map VACUUM could not fill (``relallvisible <
+    relpages``): an older snapshot still open on this database — another
+    test lane, a long REPEATABLE READ — keeps the new rows from being marked
+    all-visible, and the planner then prices Index Only Scans differently.
+    That moves WHICH index a reader picks, never the old-vs-new comparison
+    (both are planned against the same statistics at the same moment)."""
+    with repo._runtime.database.connect() as db:
+        rows = db.execute(
+            "SELECT relname, relpages, relallvisible FROM pg_class "
+            "WHERE relkind='r' AND relname = ANY(%s)",
+            (list(_PINNED_TABLES),),
+        ).fetchall()
+    return {
+        row["relname"]: (int(row["relallvisible"]), int(row["relpages"]))
+        for row in rows
+        if int(row["relallvisible"]) < int(row["relpages"])
+    }
 
 
 @pytest.mark.skipif(_scale_name() != "ci", reason="large scale runs the report test")
@@ -483,6 +542,19 @@ def test_live_predicate_keeps_every_reader_plan_shape(repo, monkeypatch):
         if not entry[mode]["same_shape"]
     }
     assert differing == {}, differing
+    assert set(_EXPECTED_INDEXES) == set(report), set(report) ^ set(_EXPECTED_INDEXES)
+    for label, per_statement in _EXPECTED_INDEXES.items():
+        assert sorted(per_statement) == list(range(len(report[label]))), label
+    # The shape equality above is the regression guard and does not depend
+    # on the visibility map. The index pins below do: skip them (loudly)
+    # rather than turn a concurrent snapshot into a red test.
+    partial = not_all_visible(repo)
+    if partial:
+        warnings.warn(
+            f"visibility map incomplete after VACUUM, index pins skipped: {partial}",
+            stacklevel=1,
+        )
+        return
     for label, per_statement in _EXPECTED_INDEXES.items():
         for index, (custom_indexes, generic_indexes) in per_statement.items():
             entry = report[label][index]

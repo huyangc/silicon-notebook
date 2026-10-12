@@ -1733,7 +1733,8 @@ class KnowledgeGovernanceService:
             locked_memory = None
             if identity["object_type"] == "memory":
                 locked_memory = self.memory_store.lock_promotion_memory_on(
-                    db, identity["object_id"], identity["notebook_id"]
+                    db, identity["object_id"], identity["notebook_id"],
+                    require_live=True,
                 )
             cand = self.governance_store.promotion_candidate_row(db, candidate_id)
             if cand is None:

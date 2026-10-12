@@ -26,6 +26,9 @@ _NOW = "2026-10-01T00:00:00"
 HEAVY = "k3-heavy"
 LIVE_TAIL = f" AND access_nb.{NOTEBOOK_LIVE_SQL})"
 LIVE_PROJECTION = f", (nb.{NOTEBOOK_LIVE_SQL}) AS notebook_live"
+LOCK_TAIL = f"WHERE id=? AND {NOTEBOOK_LIVE_SQL}"
+APPROVAL_TAIL = f" AND n.{NOTEBOOK_LIVE_SQL}) AS has_access"
+MARKERS = (LIVE_TAIL, LIVE_PROJECTION, LOCK_TAIL, APPROVAL_TAIL)
 N_NOTEBOOKS, N_LIGHT, N_MEMORIES, N_HEAVY = 300, 40, 12000, 4800
 
 
@@ -209,7 +212,13 @@ def _recorded(repo, monkeypatch):
 
 
 def _old(sql: str) -> str:
-    return sql.replace(LIVE_TAIL, ")").replace(LIVE_PROJECTION, "")
+    return (
+        sql.replace(LIVE_TAIL, ")")
+        .replace(LIVE_PROJECTION, "")
+        .replace(LOCK_TAIL, "WHERE id=?")
+        .replace(APPROVAL_TAIL, " AS has_access")
+        .replace("SELECT m.notebook_id,(", "SELECT m.notebook_id,")
+    )
 
 
 def _plan(db, sql: str, params) -> list[tuple[int, str]]:
@@ -241,6 +250,21 @@ def test_live_predicate_keeps_every_sqlite_reader_plan(repo, monkeypatch):
         except ValueError:
             pass
 
+    class RolledBack(Exception):
+        pass
+
+    def lock_for_approval():
+        try:
+            with repo._runtime.database.write() as db:
+                store.lock_promotion_memory_on(db, mid, target, require_live=True)
+                raise RolledBack()
+        except RolledBack:
+            pass
+
+    def validate_approval():
+        with repo._runtime.database.connect() as db:
+            store.validate_promotion_approval_access_on(db, mid, target)
+
     def page(**kwargs):
         args = dict(notebook_id=None, status=None, origin=None, query="",
                     offset=0, limit=50)
@@ -268,6 +292,8 @@ def test_live_predicate_keeps_every_sqlite_reader_plan(repo, monkeypatch):
             HEAVY, activity_type="report"
         ),
         "bell.report_outlines": lambda: queries.pending_actions_projection_rows(HEAVY),
+        "promotion.lock": lock_for_approval,
+        "promotion.validate": validate_approval,
     }
     differing = {}
     compared = 0
@@ -276,7 +302,7 @@ def test_live_predicate_keeps_every_sqlite_reader_plan(repo, monkeypatch):
             call()
         live = [
             (sql, params) for sql, params in statements
-            if LIVE_TAIL in sql or LIVE_PROJECTION in sql
+            if any(marker in sql for marker in MARKERS)
         ]
         assert live, f"{label}: no statement carries the lifecycle predicate"
         with repo._runtime.database.connect() as db:

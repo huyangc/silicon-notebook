@@ -4133,6 +4133,8 @@ class MemoryStorePort(Protocol):
         db: object,
         memory_id: str,
         candidate_notebook_id: str,
+        *,
+        require_live: bool = False,
     ) -> MemoryRecord: ...
 
 
