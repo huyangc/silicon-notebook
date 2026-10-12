@@ -228,7 +228,6 @@ SERVICE_LABEL_DICTS = (
     (ROOT / "scripts" / "migrate_legacy_model_env.py", "ROLE_LABELS"),
 )
 SERVICE_LABEL_TEMPLATE = ROOT / "model-services.example.toml"
-_TOML_DISPLAY_NAME = re.compile(r'^display_name\s*=\s*"([^"]*)"\s*$', re.M)
 # 2026-10:ROLE_LABELS 6 条 + 模板 4 条。
 MIN_SERVICE_LABELS = 8
 
@@ -951,14 +950,73 @@ def scan_display_fields(path: Path, *, store_module: bool = False) -> tuple[int,
     return sites, hits
 
 
+# 显示名解析不了时报的「词」:第六条通道不许静默跳过——一个看不出内容的显示名
+# 恰恰是黑话能溜过去的那种写法。
+UNRESOLVED_LABEL = "无法静态解析的显示名"
+
+
+def _strict_label_units(
+    node: ast.expr, resolver: _IndirectCopy, depth: int = MAX_INDIRECTION_DEPTH
+) -> list[str] | None:
+    """Every text a display-label expression can produce, or ``None``.
+
+    Stricter than ``_IndirectCopy.units`` on purpose: there an unresolvable side
+    of ``+`` becomes a blank so a partly-known message is still checked; a
+    display label is a closed in-code value, so ANY unresolvable part (an
+    imported name, a call, an f-string interpolation) makes the whole label
+    unresolvable and the caller reports it instead of skipping it. Names are
+    looked up with ``_IndirectCopy``'s scoping (module constants, shadowing).
+    """
+    if depth < 0:
+        return None
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _strict_label_units(node.left, resolver, depth)
+        right = _strict_label_units(node.right, resolver, depth)
+        if left is None or right is None:
+            return None
+        return _dedupe([a + b for a in left for b in right])
+    if isinstance(node, ast.IfExp):
+        body = _strict_label_units(node.body, resolver, depth)
+        orelse = _strict_label_units(node.orelse, resolver, depth)
+        return None if body is None or orelse is None else _dedupe(body + orelse)
+    if isinstance(node, ast.Name):
+        values = resolver._name_values(node)
+        if not values:
+            return None
+        found: list[str] = []
+        for value in values:
+            units = _strict_label_units(value, resolver, depth - 1)
+            if units is None:
+                return None
+            found += units
+        return _dedupe(found)
+    return None
+
+
+def _label_hits(line: int, units: list[str] | None, source: str) -> Hits:
+    if units is None:
+        return [(line, UNRESOLVED_LABEL, source)]
+    return [
+        (line, term, text)
+        for text in units if CJK.search(text)
+        for term in terms_in(text)
+    ]
+
+
 def scan_workload_labels(path: Path, name: str | None = None) -> tuple[int, Hits]:
     """Blacklisted jargon in the model workload display labels (sixth channel).
 
-    Returns (string-literal labels found, hits). Only the module-level
-    ``WORKLOAD_LABEL_NAME`` assignment is read; its value may be a dict literal
-    or a single-argument call wrapping one (``MappingProxyType({...})``).
+    Returns (labels found, hits). Only the module-level ``name`` (default
+    ``WORKLOAD_LABEL_NAME``) assignment is read; its value may be a dict literal
+    or a single-argument call wrapping one (``MappingProxyType({...})``). Every
+    value counts as a site; a value is resolved through concatenation and module
+    constants (``_strict_label_units``), and one that cannot be resolved is
+    reported as ``UNRESOLVED_LABEL`` rather than skipped.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    resolver = _IndirectCopy(tree)
     sites = 0
     hits: Hits = []
     for node in tree.body:
@@ -975,29 +1033,38 @@ def scan_workload_labels(path: Path, name: str | None = None) -> tuple[int, Hits
             value = value.args[0]
         if not isinstance(value, ast.Dict):
             continue
-        for label in value.values:
-            if not (isinstance(label, ast.Constant) and isinstance(label.value, str)):
-                continue
+        for key, label in zip(value.keys, value.values):
             sites += 1
-            if not CJK.search(label.value):
-                continue
-            for term in terms_in(label.value):
-                hits.append((label.lineno, term, label.value))
+            # ``**other`` 展开(key 为 None)同样看不出内容,按解析不了报。
+            units = None if key is None else _strict_label_units(label, resolver)
+            hits += _label_hits(label.lineno, units, ast.unparse(label))
     return sites, hits
 
 
 def scan_service_label_template(path: Path) -> tuple[int, Hits]:
-    """Blacklisted jargon in the shipped template's ``display_name = "…"`` lines."""
+    """Blacklisted jargon in the shipped template's ``services.*.display_name``.
+
+    Parsed with ``tomllib`` (trailing comments, quoting and table layout are the
+    TOML grammar's business, not a regex's), so the site count equals the number
+    of ``[services.*]`` tables; a service whose ``display_name`` is missing or not
+    a string is reported as ``UNRESOLVED_LABEL``. Lines point at the table header.
+    """
+    import tomllib
+
     text = path.read_text(encoding="utf-8")
+    services = tomllib.loads(text).get("services", {})
+    lines = text.splitlines()
     sites = 0
     hits: Hits = []
-    for match in _TOML_DISPLAY_NAME.finditer(text):
+    for service_id, definition in services.items() if isinstance(services, dict) else ():
         sites += 1
-        label = match.group(1)
-        if not CJK.search(label):
-            continue
-        for term in terms_in(label):
-            hits.append((text.count("\n", 0, match.start()) + 1, term, label))
+        header = f"[services.{service_id}]"
+        line = next(
+            (i for i, row in enumerate(lines, 1) if row.strip() == header), 1
+        )
+        label = definition.get("display_name") if isinstance(definition, dict) else None
+        units = [label] if isinstance(label, str) else None
+        hits += _label_hits(line, units, f"{service_id}.display_name")
     return sites, hits
 
 

@@ -955,8 +955,9 @@ def test_other_unknown_ids_still_refuse_next_to_the_ignorable_one(tmp_path):
     assert "kg_community_summary（" not in message
 
 
-def test_non_strict_load_does_not_list_the_ignorable_id_as_unknown(tmp_path):
-    """放行档的启动告警(「未知或已退役的 id」)也不再点它:它已经有自己的提示。"""
+def test_non_strict_load_does_not_list_the_ignorable_id_as_unknown(tmp_path, caplog):
+    """放行档的启动告警(「未知或已退役的 id」)也不再点它:它有自己的提示,
+    而且放行档同样要打这一行(裁决 8 要求有提示,不分档)。"""
     path = _write_config(
         tmp_path / "models.toml",
         _all_services()
@@ -966,9 +967,32 @@ def test_non_strict_load_does_not_list_the_ignorable_id_as_unknown(tmp_path):
         ),
     )
 
-    registry = SystemModelServiceRegistry.load(_settings(path), _ALL_KEYS)
+    with caplog.at_level(logging.WARNING, logger=_REGISTRY_LOGGER):
+        registry = SystemModelServiceRegistry.load(_settings(path), _ALL_KEYS)
 
     assert registry.unknown_bindings() == ("ask_anwser",)
+    hints = [r.getMessage() for r in caplog.records if r.name == _REGISTRY_LOGGER]
+    assert len(hints) == 1 and "kg_community_summary（[bindings]）" in hints[0]
+
+
+def test_a_refusal_does_not_also_claim_the_leftover_line_is_harmless(
+    tmp_path, caplog
+):
+    """要拒启时不打「已忽略，不影响启动」:那句话会和紧随其后的拒启信息自相矛盾。"""
+    path = _write_config(
+        tmp_path / "models.toml",
+        _all_services()
+        + "\n"
+        + _bindings(
+            extra='\nkg_community_summary = "general"\nask_anwser = "general"\n'
+        ),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=_REGISTRY_LOGGER):
+        with pytest.raises(ModelBindingGapError):
+            SystemModelServiceRegistry.load(_settings(path, strict=True), _ALL_KEYS)
+
+    assert [r for r in caplog.records if r.name == _REGISTRY_LOGGER] == []
 
 
 def test_the_ignorable_hint_never_carries_the_path_or_the_file_s_text(

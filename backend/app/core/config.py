@@ -562,13 +562,13 @@ class Settings(BaseSettings):
     # Deterministic citation audit for numeric/complexity/absolute/ranking
     # assertions.  The audit is always disclosed; automatic evidence-level
     # downgrade stays opt-in until production distributions are calibrated.
-    # report_high_risk_downgrade_enabled: 实验开关(默认值刻意不动):评估后转正或删除,出口登记在 fangan_todo.md「实验开关评估出口」。
     report_high_risk_unsupported_ratio: float = Field(
         0.25,
         ge=0.0,
         le=1.0,
         validation_alias="REPORT_HIGH_RISK_UNSUPPORTED_RATIO",
     )
+    # 实验开关(默认值刻意不动):评估后转正或删除,出口登记在 fangan_todo.md「实验开关评估出口」。
     report_high_risk_downgrade_enabled: bool = Field(
         False,
         validation_alias="REPORT_HIGH_RISK_DOWNGRADE_ENABLED",

@@ -7359,6 +7359,6 @@ class KnowledgeLifecycleService:
         )
 
     def list_communities(self, notebook_id: str, level: int = 0) -> List[List[str]]:
-        """Member-id lists of each detected community (for summaries / global search)."""
+        """Member-id lists of each published community at ``level``."""
         with self._connect() as db:
             return self.unified_kg.community_member_ids(db, notebook_id, level)
