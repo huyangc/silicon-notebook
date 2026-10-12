@@ -23,6 +23,9 @@
 //    is S5's bug, left unasserted.
 //  * The row drawer re-registers its Escape listener on every panel render
 //    (pinned in knowhow-panel-golden).
+// Found while characterising (also recorded as-is, see the tests): a stray detail
+// request on a notebook switch; a re-targeted jump routing against the stale
+// detail; a same-table re-targeted jump leaving the grid blank.
 //  * The row-code effect (E5) resets its state from an effect whenever no row is
 //    open: on mount those writes coalesce with the list effect's (E3) loading
 //    render; after closing the drawer they cost one extra commit (pinned in
@@ -339,6 +342,33 @@ test("quirk: re-targeting a jump while a record table is loaded routes the new r
 // ---------------------------------------------------------------------------
 // Recorded quirks: asymmetric reset sets (do not fix during the split)
 // ---------------------------------------------------------------------------
+
+test("quirk: re-targeting a jump to another row of the same table blanks the grid without reloading it", async () => {
+  // Recorded as-is (found while characterising, not in the plan's list): a new
+  // initialRowId with the same initialTableId runs E7 → openTable(sameId), which
+  // sets detail to null; selectedTableId does not change, so the detail effect
+  // (E4) does not run again and the grid stays empty until the user goes back.
+  // The routing effect (E8) still sees the old detail and points openRowId at the
+  // cited row, so that row's code is fetched although no drawer can render.
+  const server = suite.server();
+  routeTable(server, "nb-1", recordDetail());
+  const panel = renderPanel({ initialTableId: "t-rec" });
+  expect(await screen.findByRole("button", { name: "供电异常" })).toBeInTheDocument();
+
+  panel.update({ ...BASE_PROPS, initialTableId: "t-rec", initialRowId: "r2" });
+  await waitFor(() => expect(screen.queryByRole("button", { name: "供电异常" })).not.toBeInTheDocument());
+  await settle();
+  expect(screen.queryByRole("heading", { name: "排障记录" })).not.toBeInTheDocument();
+  expect(screen.queryByPlaceholderText("按行标题/全文过滤行…")).not.toBeInTheDocument();
+  expect(screen.queryByText("加载中…")).not.toBeInTheDocument();
+  expect(screen.queryByRole("dialog", { name: "时钟漂移" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "返回" })).toBeInTheDocument();
+  expect(server.log).toEqual([
+    { method: "GET", path: "/notebooks/nb-1/knowhow" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
+    { method: "GET", path: "/agent/knowhow/rows/r2" },
+  ]);
+});
 
 test("quirk: backToList keeps reformatTableOpen, so reopening the table reopens the batch modal", async () => {
   const server = suite.server();
