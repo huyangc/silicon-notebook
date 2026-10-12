@@ -175,7 +175,7 @@ test("「×」报 button、点背景报 backdrop、点卡片内部不关", async
     />,
   );
 
-  await user.click(screen.getByTitle("Close"));
+  await user.click(screen.getByTitle("关闭"));
   expect(onRequestClose).toHaveBeenLastCalledWith("button");
 
   await user.click(screen.getByRole("heading", { name: "梯度下降" }));

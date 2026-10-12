@@ -381,7 +381,7 @@ export function KgAnalysisView({
                 <button type="button" className="sort-button" onClick={refresh} title="重新读取报告">
                   <RefreshCw size={15} /> 刷新
                 </button>
-                <button className="icon-button" onClick={onClose} title="Close">×</button>
+                <button className="icon-button" onClick={onClose} title="关闭">×</button>
               </div>
             </div>
 

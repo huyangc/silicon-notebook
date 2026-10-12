@@ -185,7 +185,7 @@ export function SearchProfileModal({ currentUser, onSaved, onClose, interactive 
             <h2>我的回答偏好</h2>
             <p>这些偏好只影响回答的组织方式与用词，不会改变检索范围，也不会改变依据。</p>
           </div>
-          <button className="icon-button" disabled={busy} onClick={onClose} title="Close">×</button>
+          <button className="icon-button" disabled={busy} onClick={onClose} title="关闭">×</button>
         </div>
         <form id="search-profile-form" className="edit-form" onSubmit={(event) => { void submit(event); }}>
           <div className="search-profile-toolbar">

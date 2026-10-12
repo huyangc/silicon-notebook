@@ -59,7 +59,7 @@ export function PasswordChangeModal({ onClose, interactive = true, zIndex }: Pas
             <h2>修改密码</h2>
             <p>修改成功后，本设备保持登录，其他设备将需要重新登录。</p>
           </div>
-          <button className="icon-button" disabled={busy} onClick={onClose} title="Close">×</button>
+          <button className="icon-button" disabled={busy} onClick={onClose} title="关闭">×</button>
         </div>
         {done ? (
           <>

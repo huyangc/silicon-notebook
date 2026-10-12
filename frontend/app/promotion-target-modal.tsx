@@ -52,7 +52,7 @@ export function PromotionTargetModal({
             <h2>{title}</h2>
             <p>{description}</p>
           </div>
-          <button className="icon-button" onClick={onClose} title="Close">×</button>
+          <button className="icon-button" onClick={onClose} title="关闭">×</button>
         </div>
         <div className="promotion-target-list">
           {options.length === 0 ? (

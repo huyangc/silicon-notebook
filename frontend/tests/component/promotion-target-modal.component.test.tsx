@@ -115,6 +115,6 @@ test(">1 个候选：渲染完整列表(每个候选各一个按钮)，点击后
   expect(onPick).toHaveBeenCalledWith("b2");
   expect(onPick).not.toHaveBeenCalledWith("b1");
 
-  await user.click(screen.getByTitle("Close"));
+  await user.click(screen.getByTitle("关闭"));
   expect(onClose).toHaveBeenCalledTimes(1);
 });
