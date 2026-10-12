@@ -1670,6 +1670,19 @@ def test_public_report_read_carries_failed_sections_only_for_a_failure_note(
     assert store.public_report_by_token(
         store.share_report(nb["id"], mixed)
     )["failed_sections"] == REPORT_SECTION_FAILURE_EXPECTED
+    # codex #849 R1: a raw error that starts with a neutral sentence and goes
+    # on after a single line break is read, not mistaken for a neutral note.
+    lookalike = _mk_report(client, monkeypatch, nb["id"], "q5")
+    store.update_report(
+        nb["id"], lookalike, status="done", sections=sections,
+        content_md=(
+            "## A\n\n（本节生成失败:本节处理过程出错）\nsecret gateway 10.9.8.7）"
+            "\n\n## B\n\n正文\n"
+        ),
+    )
+    assert store.public_report_by_token(
+        store.share_report(nb["id"], lookalike)
+    )["failed_sections"] == REPORT_SECTION_FAILURE_EXPECTED
 
 
 def test_public_report_route_is_not_behind_the_router_level_session_guard():

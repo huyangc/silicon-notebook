@@ -56,27 +56,39 @@ def section_failure_paragraph(error: object) -> str:
 
 
 def neutralize_failure_notes(
-    content_md: str, failed_errors: Sequence[str] | None = None,
+    content_md: str, failed_errors: Sequence[str] | None,
 ) -> str:
     """Rewrite stored failure notes that still carry raw error text.
 
     ``failed_errors`` are the stored ``error`` values of the report's failed
-    sections. Each one names its paragraph exactly -- ``_assemble`` wrote the
-    literal ``（本节生成失败:<error>）`` -- so it is replaced as a literal first,
-    whatever the error contains (a closing bracket before a blank line) and
-    whatever the heading above it looks like (a title with a line break).
-    Longest first, so an error that is a prefix of another cannot cut the
-    longer note short. The paragraph pattern then runs as the fallback for a
-    body whose sections carry no usable error; on an already-neutral note it
-    is a no-op, so a body whose notes are all neutral is returned untouched
-    without either pass (``carries_raw_failure_note``, the stores' gate too).
+    sections, and its three states mean three different things:
+
+    * ``None`` -- the sections were not read: the token read found no raw
+      failure note in the body (``carries_raw_failure_note``), so there is
+      nothing to rewrite and the body is returned as is;
+    * ``[]`` -- read, and the report has no failed section: any
+      ``（本节生成失败:…）`` text in it is the author's own content (a quoted
+      example, say), never a note the generator wrote, so it is returned as is;
+    * a list -- each entry names its paragraph exactly (``_assemble`` wrote the
+      literal ``（本节生成失败:<error>）``), so it is replaced as a literal,
+      whatever the error contains (a closing bracket before a blank line) and
+      whatever the heading above it looks like (a title with a line break).
+      Longest first, so an error that is a prefix of another cannot cut the
+      longer note short.
+
+    The paragraph pattern runs only as the fallback for a failed section whose
+    stored error is missing or not text (``""`` here: a legacy row whose body
+    holds ``None`` or another spelling the literal cannot name).
     """
-    if not carries_raw_failure_note(content_md):
+    if failed_errors is None or not carries_raw_failure_note(content_md):
         return content_md
-    for error in sorted(set(failed_errors or ()), key=len, reverse=True):
+    errors = list(failed_errors)
+    for error in sorted(set(errors), key=len, reverse=True):
         content_md = content_md.replace(
             f"{_NOTE_PREFIX}{error}{_NOTE_SUFFIX}", section_failure_paragraph(error)
         )
+    if "" not in errors:
+        return content_md
     return _STORED_NOTE_RE.sub(
         lambda match: match.group(1) + section_failure_paragraph(match.group(2)),
         content_md,

@@ -525,6 +525,9 @@ def test_a_stored_raw_failure_note_is_neutral_on_the_public_page_only(
     # A title with a line break (the outline PATCH only strips its ends): the
     # paragraph pattern alone would not recognise the note at all.
     ("B\n第二行", "OperationalError: secret 10.9.8.7"),
+    # codex #849 R1: starts with a neutral sentence, then ONE line break and a
+    # diagnostic tail -- not the generator's paragraph boundary.
+    ("B", "本节处理过程出错）\nsecret gateway 10.9.8.7"),
 ])
 def test_a_stored_note_is_rewritten_exactly_from_the_failed_sections_error(
     client, stub_report_launch, title, raw,
@@ -567,6 +570,10 @@ def test_a_public_report_without_failed_sections_is_served_byte_for_byte(
     report_id = _create_report(client, owner, notebook_id)
     body = (
         "# 深度报告:q\n\n## A\n\n正文提到（本节生成失败:并非本系统写的）这句。\n\n"
+        # codex #849 R1: the exact paragraph shape the generator writes, as a
+        # quoted example in a report with no failed section -- the author's
+        # own text, served byte for byte.
+        "## 示例\n\n（本节生成失败:这是一条示例）\n\n"
         "## B\n\n> 引用 [k1]\n"
     )
     _finish(notebook_id, report_id, body)
