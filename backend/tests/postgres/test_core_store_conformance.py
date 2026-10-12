@@ -4192,7 +4192,8 @@ def test_public_report_read_carries_failed_sections_only_for_a_failure_note_post
     plain = reports.public_report_by_token(
         reports.share_report(notebook_id, without_note)
     )
-    assert plain["failed_sections"] == []
+    # No failure note in the body: the failed sections are never read.
+    assert plain["failed_sections"] is None
 
 
 def test_terminal_understanding_write_keeps_the_generation_stamp_on_postgres(

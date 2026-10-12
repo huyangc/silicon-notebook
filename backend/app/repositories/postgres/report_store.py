@@ -55,12 +55,11 @@ _FAILED_SECTIONS_SQL = (
     "AND s.value->'failed' = 'true'::jsonb)"
 )
 # The public read needs that list only to rewrite a stored failure note, and a
-# body has such a note exactly when it carries the prefix: gating on it keeps
-# ``sections_json`` untouched (not even detoasted) for every other report.
-_PUBLIC_FAILED_SECTIONS_SQL = (
-    "CASE WHEN strpos(reports.content_md, '（本节生成失败:') > 0 "
-    f"THEN {_FAILED_SECTIONS_SQL} END"
-)
+# body has such a note exactly when it carries this prefix.  The check runs in
+# Python on the body already fetched (measured cheaper than ``strpos`` in the
+# statement), so every other report reads exactly the statement it always did
+# and ``sections_json`` is never touched for it.
+_FAILURE_NOTE_PREFIX = "（本节生成失败:"
 
 
 class ReportStore:
@@ -519,18 +518,31 @@ class ReportStore:
         columns = ", ".join(self.PUBLIC_FIELDS + self.GATE_FIELDS)
         with self.database.connect() as db:
             row = db.execute(
-                f"SELECT {columns}, {_PUBLIC_FAILED_SECTIONS_SQL} AS "
-                "failed_sections FROM reports "
+                f"SELECT {columns} FROM reports "
                 "WHERE share_token = %s AND status = 'done'",
                 (clean,),
             ).fetchone()
+            failed = (
+                db.execute(
+                    f"SELECT {_FAILED_SECTIONS_SQL} AS failed_sections "
+                    "FROM reports WHERE id = %s",
+                    (row["id"],),
+                ).fetchone()
+                if row is not None
+                and _FAILURE_NOTE_PREFIX in str(row["content_md"] or "")
+                else None
+            )
         if row is None:
             return None
         out = dict(row)
         # Same shape as the SQLite adapter: the caller never sees the dialect.
         out["references"] = json_value(out.pop("references_json", None), [])
         out.pop("understanding_json", None)
-        out["failed_sections"] = json_value(out.get("failed_sections"), [])
+        # ``None``: the body carries no failure note, so there is nothing to
+        # rewrite and the caller can skip scanning it again.
+        out["failed_sections"] = (
+            json_value(failed["failed_sections"], []) if failed is not None else None
+        )
         return out
 
     def _in_batches(self, ids) -> Iterator[list]:

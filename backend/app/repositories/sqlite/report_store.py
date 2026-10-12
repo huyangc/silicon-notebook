@@ -59,10 +59,9 @@ _FAILED_SECTIONS_SQL = (
     "WHERE s.type='object' AND json_type(s.value, '$.failed')='true' "
     "ORDER BY s.key) AS f)"
 )
-_PUBLIC_FAILED_SECTIONS_SQL = (
-    "CASE WHEN instr(reports.content_md, '（本节生成失败:') > 0 "
-    f"THEN {_FAILED_SECTIONS_SQL} END"
-)
+# Same gate as the PostgreSQL adapter: only a body carrying a failure note
+# makes the public read select the failed sections, checked in Python.
+_FAILURE_NOTE_PREFIX = "（本节生成失败:"
 
 
 class ReportStore:
@@ -505,11 +504,20 @@ class ReportStore:
         columns = ", ".join(self.PUBLIC_FIELDS + self.GATE_FIELDS)
         with self.database.connect() as db:
             row = db.execute(
-                f"SELECT {columns}, {_PUBLIC_FAILED_SECTIONS_SQL} AS "
-                "failed_sections FROM reports "
+                f"SELECT {columns} FROM reports "
                 "WHERE share_token = ? AND status = 'done'",
                 (clean,),
             ).fetchone()
+            failed = (
+                db.execute(
+                    f"SELECT {_FAILED_SECTIONS_SQL} AS failed_sections "
+                    "FROM reports WHERE id = ?",
+                    (row["id"],),
+                ).fetchone()
+                if row is not None
+                and _FAILURE_NOTE_PREFIX in str(row["content_md"] or "")
+                else None
+            )
         if row is None:
             return None
         out = dict(row)
@@ -517,7 +525,11 @@ class ReportStore:
         # returns jsonb as a list already, SQLite stores TEXT.
         out["references"] = json.loads(out.pop("references_json", None) or "[]")
         out.pop("understanding_json", None)
-        out["failed_sections"] = json.loads(out.get("failed_sections") or "[]")
+        # ``None``: the body carries no failure note, so there is nothing to
+        # rewrite and the caller can skip scanning it again.
+        out["failed_sections"] = (
+            json.loads(failed["failed_sections"] or "[]") if failed is not None else None
+        )
         return out
 
     def _in_batches(self, ids) -> Iterator[list]:
