@@ -9,6 +9,7 @@ vi.mock("../../app/group-api.ts", async (importOriginal) => {
     listGroups: vi.fn(),
     getGroup: vi.fn(),
     approveShareRequest: vi.fn(),
+    rejectShareRequest: vi.fn(),
     getGroupInvite: vi.fn(),
     createGroupInvite: vi.fn(),
     listGroupSharedNotebooks: vi.fn(),
@@ -31,6 +32,7 @@ import {
   listGroups,
   listMyPendingShareRequests,
   leaveGroup,
+  rejectShareRequest,
   removeGroupMember,
   shareNotebookToGroup,
   transferGroupOwner,
@@ -432,6 +434,7 @@ function pendingRequest(id: string, name: string) {
 }
 
 function renderRequestsTab() {
+  const onChanged = vi.fn();
   render(
     <GroupsPage
       currentUserId="u1"
@@ -440,12 +443,13 @@ function renderRequestsTab() {
       initialGroupId="g1"
       initialTab="requests"
       onBack={vi.fn()}
-      onChanged={vi.fn()}
+      onChanged={onChanged}
       openingNotebookId={null}
       onOpenNotebook={vi.fn()}
       onNavigate={vi.fn()}
     />,
   );
+  return { onChanged };
 }
 
 test("批准被拒而申请仍在队列(笔记本正在删除):重拉队列,原因标在那一行旁边,不只报在顶部", async () => {
@@ -486,6 +490,77 @@ test("批准被拒且申请已不在队列(被别人处理过):那一行随重�
   expect(await screen.findByText("这条待审批的共享申请不存在或已被处理")).toBeInTheDocument();
   await waitFor(() => expect(screen.queryByText("已被处理的库")).not.toBeInTheDocument());
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+const APPROVED_REFRESH_NOTICE = "已批准，但列表没能刷新，重新打开这个群组可看到最新状态。";
+
+test("批准成功、队列重拉成功、共享库列表拉取失败:已批准的申请照样离开队列,不报「批准失败」,审批列表上方如实说明", async () => {
+  const user = userEvent.setup();
+  const target = pendingRequest("sr-ok", "要批准的库");
+  vi.mocked(listGroupShareRequests).mockResolvedValueOnce([target]).mockResolvedValue([]);
+  vi.mocked(approveShareRequest).mockResolvedValueOnce({ ...target, status: "approved" });
+  const { onChanged } = renderRequestsTab();
+  const row = (await screen.findByText("要批准的库")).closest(".group-request-row") as HTMLElement;
+  vi.mocked(listGroupSharedNotebooks).mockRejectedValueOnce(new Error("network down"));
+
+  await user.click(within(row).getByRole("button", { name: "批准" }));
+
+  expect(await screen.findByRole("status")).toHaveTextContent(APPROVED_REFRESH_NOTICE);
+  expect(screen.queryByText("要批准的库")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "批准" })).not.toBeInTheDocument();
+  expect(screen.queryByText("批准申请失败")).not.toBeInTheDocument();
+  expect(onChanged).toHaveBeenCalled();
+});
+
+test("批准成功但队列重拉失败:这条已批准的申请从本地列表拿掉,不再挂着可点的按钮", async () => {
+  const user = userEvent.setup();
+  const target = pendingRequest("sr-ok", "要批准的库");
+  const other = pendingRequest("sr-other", "另一本库");
+  vi.mocked(listGroupShareRequests).mockResolvedValueOnce([target, other]);
+  vi.mocked(approveShareRequest).mockResolvedValueOnce({ ...target, status: "approved" });
+  renderRequestsTab();
+  const row = (await screen.findByText("要批准的库")).closest(".group-request-row") as HTMLElement;
+  vi.mocked(listGroupShareRequests).mockRejectedValueOnce(new Error("network down"));
+
+  await user.click(within(row).getByRole("button", { name: "批准" }));
+
+  expect(await screen.findByRole("status")).toHaveTextContent(APPROVED_REFRESH_NOTICE);
+  expect(screen.queryByText("要批准的库")).not.toBeInTheDocument();
+  expect(screen.getByText("另一本库")).toBeInTheDocument();
+  expect(screen.queryByText("批准申请失败")).not.toBeInTheDocument();
+});
+
+test("驳回成功但队列重拉失败:这条申请同样从本地列表拿掉,不报「驳回失败」", async () => {
+  const user = userEvent.setup();
+  const target = pendingRequest("sr-no", "要驳回的库");
+  vi.mocked(listGroupShareRequests).mockResolvedValueOnce([target]);
+  vi.mocked(rejectShareRequest).mockResolvedValueOnce({ ...target, status: "rejected" });
+  renderRequestsTab();
+  const row = (await screen.findByText("要驳回的库")).closest(".group-request-row") as HTMLElement;
+  vi.mocked(listGroupShareRequests).mockRejectedValueOnce(new Error("network down"));
+
+  await user.click(within(row).getByRole("button", { name: "驳回" }));
+
+  expect(await screen.findByRole("status")).toHaveTextContent("已驳回，但列表没能刷新，重新打开这个群组可看到最新状态。");
+  expect(screen.queryByText("要驳回的库")).not.toBeInTheDocument();
+  expect(screen.queryByText("驳回申请失败")).not.toBeInTheDocument();
+});
+
+test("批准被拒且队列重拉也失败:那一行还在屏上,原因标在它旁边", async () => {
+  const user = userEvent.setup();
+  const stalled = pendingRequest("sr-stalled", "正在删除的库");
+  vi.mocked(listGroupShareRequests).mockResolvedValueOnce([stalled]);
+  vi.mocked(approveShareRequest).mockRejectedValueOnce(
+    humanizedError("这本笔记本正在删除,无法批准这条申请", 409),
+  );
+  renderRequestsTab();
+  const row = (await screen.findByText("正在删除的库")).closest(".group-request-row") as HTMLElement;
+  vi.mocked(listGroupShareRequests).mockRejectedValueOnce(new Error("network down"));
+
+  await user.click(within(row).getByRole("button", { name: "批准" }));
+
+  expect(await within(row).findByRole("alert")).toHaveTextContent("这本笔记本正在删除,无法批准这条申请");
+  expect(screen.getAllByText("这本笔记本正在删除,无法批准这条申请")).toHaveLength(1);
 });
 
 async function switchGroupWhileApprovalRefreshIsPending(approveOutcome: "refused" | "approved") {

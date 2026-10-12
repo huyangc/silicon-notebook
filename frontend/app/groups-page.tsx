@@ -154,6 +154,8 @@ export function GroupsPage({
   const [confirming, setConfirming] = useState("");
   // 批准失败而申请仍在队列里(例如那本笔记本正在删除)时,原因落在那一行旁边。
   const [requestFailure, setRequestFailure] = useState<{ id: string; text: string } | null>(null);
+  // 决定已提交、但随后的列表刷新失败时,在审批列表上方如实说明(不是顶部横幅)。
+  const [requestsNotice, setRequestsNotice] = useState("");
   // 复制结果必须落在按钮自身:唯一的反馈曾经是页面顶部那条 notice 横幅,它在长页面上
   // 会滚出视口,于是「复制」看起来像没点上。置位与回 idle 由共享的 useCopyResult 负责。
   const inviteCopy = useCopyResult();
@@ -180,6 +182,8 @@ export function GroupsPage({
     setInvite(null);
     setPickedNotebooks(new Set());
     setConfirming("");
+    setRequestFailure(null);
+    setRequestsNotice("");
     try {
       const group = await getGroup(groupId);
       if (epoch !== loadEpoch.current) return;
@@ -269,31 +273,61 @@ export function GroupsPage({
   }
 
   // 批准失败后重拉队列:申请还在(笔记本正在删除时后端回 409、申请保留)就把原因标在那一
-  // 行旁边——只在顶部报错而行原样不动,看起来像没点上;申请已经不在(被别人处理过)时那一
-  // 行随重拉消失,原因只能走顶部状态条。
+  // 行旁边——只在顶部报错而行原样不动,看起来像没点上;重拉成功且申请已经不在(被别人处理
+  // 过)时那一行随重拉消失,原因只能走顶部状态条;重拉本身失败时行还在屏上,同样标在行旁。
   // busy 期间组导航仍可用:等待中切到别的组,旧组的重拉结果与失败提示都要丢掉(与
   // loadGroup 同一把 loadEpoch),否则旧队列会盖住新组的列表,后续批准把旧申请 id 配上
   // 新组 id → 错误的 404。
   async function approveRequest(groupId: string, requestId: string) {
     setRequestFailure(null);
+    setRequestsNotice("");
     const epoch = loadEpoch.current;
-    const switchedAway = () => epoch !== loadEpoch.current;
     await run(`approve:${requestId}`, async () => {
       try {
         await approveShareRequest(groupId, requestId);
       } catch (err) {
         const refreshed = await listGroupShareRequests(groupId).catch(() => null);
-        if (switchedAway()) return;
+        if (epoch !== loadEpoch.current) return;
         if (refreshed) setRequests(refreshed);
-        if (!refreshed?.some((item) => item.id === requestId)) throw err;
+        if (refreshed && !refreshed.some((item) => item.id === requestId)) throw err;
         setRequestFailure({ id: requestId, text: toUserMessage(err, "批准申请失败") });
         return;
       }
-      const queue = await listGroupShareRequests(groupId);
-      const inventory = await listGroupSharedNotebooks(groupId);
-      if (!switchedAway()) { setRequests(queue); setShared(inventory); }
+      await refreshAfterDecision(groupId, requestId, epoch, "批准");
       onChanged();
     }, "批准申请失败");
+  }
+
+  async function rejectRequest(groupId: string, requestId: string) {
+    setRequestFailure(null);
+    setRequestsNotice("");
+    const epoch = loadEpoch.current;
+    await run(`reject:${requestId}`, async () => {
+      try {
+        await rejectShareRequest(groupId, requestId);
+      } catch (err) {
+        if (epoch !== loadEpoch.current) return;
+        throw err;
+      }
+      await refreshAfterDecision(groupId, requestId, epoch, "驳回");
+    }, "驳回申请失败");
+  }
+
+  // 决定(批准/驳回)已经提交之后的刷新:每一路各自落地,一路失败不丢掉另一路的结果,也
+  // 不让 run 把一个已成功的决定报成「失败」。队列没拉成时先把这条已决定的申请从本地列表
+  // 拿掉——它不再是待审批,不能还挂着可点的按钮。有刷新失败就在审批列表上方如实说一句。
+  async function refreshAfterDecision(groupId: string, requestId: string, epoch: number, verb: "批准" | "驳回") {
+    const [queue, inventory] = await Promise.allSettled([
+      listGroupShareRequests(groupId),
+      verb === "批准" ? listGroupSharedNotebooks(groupId) : Promise.resolve(null),
+    ]);
+    if (epoch !== loadEpoch.current) return;
+    if (queue.status === "fulfilled") setRequests(queue.value);
+    else setRequests((items) => items?.filter((item) => item.id !== requestId) ?? items);
+    if (inventory.status === "fulfilled" && inventory.value) setShared(inventory.value);
+    if (queue.status === "rejected" || inventory.status === "rejected") {
+      setRequestsNotice(`已${verb}，但列表没能刷新，重新打开这个群组可看到最新状态。`);
+    }
   }
 
   function chooseGroup(groupId: string) {
@@ -670,14 +704,13 @@ export function GroupsPage({
                   </div>
                   {pendingCount > 0 && <span className="group-count-chip">{pendingCount}</span>}
                 </div>
+                {requestsNotice && <p className="group-request-notice" role="status">{requestsNotice}</p>}
                 {!canManage ? <EmptyState icon={<Inbox size={22} />} title="没有审批权限">只有 owner 和组管理员可以处理贡献申请。</EmptyState>
                   : requests === null ? <p className="tool-hint">加载中…</p> : requests.length === 0 ? <EmptyState icon={<Inbox size={22} />} title="没有待审批申请">新的成员贡献申请会出现在这里。</EmptyState>
                     : <><div className="group-request-list">{requestPage.pageItems.map((request) => <div className="group-request-row" key={request.id}>
                       <span className="group-request-mark"><BookOpen size={17} /></span>
                       <span className="group-request-copy"><strong>{request.notebook_name || "知识库"}</strong><small>申请人 {request.requested_by_username}</small></span>
-                      <div><button className="new-pill" disabled={Boolean(busy)} onClick={() => { void approveRequest(detail.id, request.id); }}>批准</button><button className="sort-button" disabled={Boolean(busy)} onClick={() => { setRequestFailure(null); void run(`reject:${request.id}`, async () => {
-                        await rejectShareRequest(detail.id, request.id); setRequests(await listGroupShareRequests(detail.id));
-                      }, "驳回申请失败"); }}>驳回</button></div>
+                      <div><button className="new-pill" disabled={Boolean(busy)} onClick={() => { void approveRequest(detail.id, request.id); }}>批准</button><button className="sort-button" disabled={Boolean(busy)} onClick={() => { void rejectRequest(detail.id, request.id); }}>驳回</button></div>
                       {requestFailure?.id === request.id && <p className="group-request-failure" role="alert">{requestFailure.text}</p>}
                     </div>)}</div>
                     <Pagination page={requestPage.page} pageSize={GROUP_PAGE_SIZE} total={requestPage.total} onPage={requestPage.setPage} label="待审批申请分页" /></>}
