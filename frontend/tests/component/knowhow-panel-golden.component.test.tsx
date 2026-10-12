@@ -20,8 +20,10 @@
 //    panel), the window keydown re-registration count, and the SHA-256 of the
 //    panel's global stylesheet text. They exist because "zero behaviour change"
 //    for a refactor of this size needs a sensitive tripwire: a reordered effect,
-//    a state reset moved into an effect, or a dropped/added/unbatched state
-//    update moves these numbers before it shows up anywhere a user could see.
+//    or a dropped, added or unbatched state update, moves these numbers before it
+//    shows up anywhere a user could see. (Moving openTable's query reset into an
+//    effect does not: it coalesces with the detail effect's loading writes while
+//    the grid has no filter input — an equivalent change, see the S4-a report.)
 //    They are refactor-only goldens in the sense of AGENTS.md "Tests", so they
 //    do not stay: the last S4 PR removes them, or converts each into the
 //    behaviour it guards (e.g. the E6-before-E7 order is already pinned
@@ -245,8 +247,7 @@ for (const mode of MODES) {
     expect(screen.getByRole("button", { name: "供电异常" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "检查电源并复位" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "时钟漂移" })).not.toBeInTheDocument();
-    // Switch tables with the filter still set: openTable clears the query in the
-    // same batch as the selection (a reset moved into an effect costs a commit).
+    // Switch tables with the filter still set: the new table opens unfiltered.
     await step(panel, commits, "jumpWithFilter", async () => {
       panel.update({ ...BASE_PROPS, initialTableId: "t-two" });
       await screen.findByRole("heading", { name: "第二张表" });
