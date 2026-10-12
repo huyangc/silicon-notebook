@@ -57,6 +57,10 @@ test("add row: shows 添加中…, appends optimistically, opens the first colum
   renderPanel({ initialTableId: "t-rec" });
 
   const addButton = await screen.findByRole("button", { name: "添加行" });
+  await settle();
+  // Hold the post-add reload: the editor must appear from the optimistic append
+  // alone, before the server's copy of the new row arrives.
+  const releaseReload = server.hold("GET", "/notebooks/nb-1/knowhow/t-rec");
   await user.click(addButton);
   expect(addButton).toHaveTextContent("添加中…");
   expect(addButton).toBeDisabled();
@@ -65,6 +69,11 @@ test("add row: shows 添加中…, appends optimistically, opens the first colum
 
   const editor = await screen.findByRole("dialog", { name: "行 3 › 问题" });
   expect(within(editor).getByRole("textbox")).toHaveValue("");
+  // The background reload is still in flight (the grid shows its loading state);
+  // the editor found the new row in the optimistically appended detail.
+  expect(screen.getByText("加载中…")).toBeInTheDocument();
+  expect(server.lines().at(-2)).toBe("GET /notebooks/nb-1/knowhow/t-rec");
+  releaseReload({ json: wireDetail(state.current) });
   await settle();
   expect(addButton).toHaveTextContent("添加行");
   expect(screen.getByRole("dialog", { name: "行 3 › 问题" })).toBe(editor);
@@ -95,6 +104,12 @@ test("add row failure shows the grid banner and restores the button", async () =
   expect(addButton).toBeEnabled();
   await user.click(within(banner).getByRole("button", { name: "关闭" }));
   expect(document.querySelector(".knowhow-action-error")).toBeNull();
+  await settle();
+  expect(server.log).toEqual([
+    ...TABLE_READS,
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
+    { method: "POST", path: "/notebooks/nb-1/knowhow/t-rec/rows", body: { cells: {} } },
+  ]);
 });
 
 test("+概念 adds an empty row and opens the editor on the anchor column", async () => {
@@ -109,9 +124,16 @@ test("+概念 adds an empty row and opens the editor on the anchor column", asyn
   const user = userEvent.setup();
   renderPanel({ initialTableId: "t-anc" });
 
-  await user.click(await screen.findByRole("button", { name: "概念" }));
+  const conceptButton = await screen.findByRole("button", { name: "概念" });
+  await settle();
+  // Hold the post-add reload, as for 添加行: the optimistic append alone must
+  // bring up the anchor-column editor.
+  const releaseReload = server.hold("GET", "/notebooks/nb-1/knowhow/t-anc");
+  await user.click(conceptButton);
   const editor = await screen.findByRole("dialog", { name: "行 4 › 概念" });
   expect(within(editor).getByRole("textbox")).toHaveValue("");
+  expect(server.lines().at(-2)).toBe("GET /notebooks/nb-1/knowhow/t-anc");
+  releaseReload({ json: wireDetail(state.current) });
   await settle();
   expect(server.log).toEqual([
     ...TABLE_READS,
@@ -171,6 +193,12 @@ test("+分支 failure shows the error inside the drawer, and the grid banner aft
   await user.click(within(matrix).getByRole("button", { name: "关闭" }));
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "概念 时钟" })).not.toBeInTheDocument());
   expect(document.querySelector(".knowhow-action-error")?.textContent?.trim()).toBe(message);
+  await settle();
+  expect(server.log).toEqual([
+    ...TABLE_READS,
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-anc" },
+    { method: "POST", path: "/notebooks/nb-1/knowhow/t-anc/rows", body: { cells: { "c-anchor": "时钟" } } },
+  ]);
 });
 
 // ---------------------------------------------------------------------------
@@ -226,7 +254,9 @@ test("deleting one of several branches keeps the drawer open on the smaller matr
   expect(await within(matrix).findByText("1 个分支")).toBeInTheDocument();
   expect(screen.getByRole("dialog", { name: "概念 时钟" })).toBe(matrix);
   await settle();
-  expect(server.log.slice(2)).toEqual([
+  expect(server.log).toEqual([
+    ...TABLE_READS,
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-anc" },
     { method: "DELETE", path: "/notebooks/nb-1/knowhow/t-anc/rows/a2" },
     { method: "GET", path: "/notebooks/nb-1/knowhow/t-anc" },
     { method: "GET", path: "/notebooks/nb-1/knowhow" },
@@ -252,7 +282,9 @@ test("deleting a concept deletes every branch row in parallel and closes the dra
   await user.click(within(matrix).getByRole("button", { name: "确认删除" }));
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "概念 时钟" })).not.toBeInTheDocument());
   await settle();
-  expect(server.log.slice(2)).toEqual([
+  expect(server.log).toEqual([
+    ...TABLE_READS,
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-anc" },
     { method: "DELETE", path: "/notebooks/nb-1/knowhow/t-anc/rows/a1" },
     { method: "DELETE", path: "/notebooks/nb-1/knowhow/t-anc/rows/a2" },
     { method: "GET", path: "/notebooks/nb-1/knowhow/t-anc" },
@@ -276,7 +308,9 @@ test("a failed concept delete keeps the drawer open, shows the error inside and 
   expect(within(matrix).getByTitle("删除整个概念")).toBeInTheDocument();
   expect(within(matrix).queryByRole("button", { name: "确认删除" })).not.toBeInTheDocument();
   await settle();
-  expect(server.log.slice(2)).toEqual([
+  expect(server.log).toEqual([
+    ...TABLE_READS,
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-anc" },
     { method: "DELETE", path: "/notebooks/nb-1/knowhow/t-anc/rows/a1" },
     { method: "DELETE", path: "/notebooks/nb-1/knowhow/t-anc/rows/a2" },
   ]);
@@ -303,4 +337,6 @@ test("switching or closing the concept drawer resets a pending delete confirmati
   matrix = await screen.findByRole("dialog", { name: "概念 时钟" });
   expect(within(matrix).queryByRole("button", { name: "确认删除" })).not.toBeInTheDocument();
   expect(within(matrix).getByTitle("删除整个概念")).toBeInTheDocument();
+  await settle();
+  expect(server.log).toEqual([...TABLE_READS, { method: "GET", path: "/notebooks/nb-1/knowhow/t-anc" }]);
 });

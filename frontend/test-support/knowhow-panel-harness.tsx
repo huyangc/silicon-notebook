@@ -20,10 +20,13 @@
 // no wall-clock timer, socket or stream pump decides how React batches updates.
 // Unrouted requests are recorded and fail the test in `afterEach` instead of
 // silently turning into a component-level error branch.
+import { createHash } from "node:crypto";
+
 import { cleanup, getConfig, render } from "@testing-library/react";
 import { Profiler, StrictMode, type ReactElement } from "react";
 import { afterEach, beforeEach, expect, vi } from "vitest";
 
+import { API_BASE } from "../app/api-config.ts";
 import { KnowhowPanel, type KnowhowPanelProps } from "../app/knowhow-panel.tsx";
 import type { KnowhowRow, KnowhowTableDetail, KnowhowTableSummary } from "../app/knowhow-model.ts";
 
@@ -124,7 +127,9 @@ type Deferred = {
   resolve: (reply: FakeReply) => void;
 };
 
-const API_PREFIX = "http://127.0.0.1:8000/api";
+// The same base the API client resolves against (NEXT_PUBLIC_API_BASE_URL or its
+// default), so a developer shell that exports it does not unroute every request.
+const API_PREFIX = API_BASE.replace(/\/+$/, "");
 
 function relativePath(url: string): string {
   return url.startsWith(API_PREFIX) ? url.slice(API_PREFIX.length) : url;
@@ -377,9 +382,17 @@ export function renderPanel(props: Partial<PanelProps> = {}, options: { strict?:
 }
 
 /**
- * Let every queued microtask, effect and scheduler task run to completion.
+ * Yield to the event loop a fixed number of macrotask turns (8 by default) so
+ * queued microtasks, passive effects and React scheduler tasks get to run.
  * Runs inside Testing Library's async wrapper (the same one `waitFor` uses), so
  * React schedules work exactly as it does between real user events.
+ *
+ * It does not detect quiescence; it relies on every scripted step finishing
+ * within a few turns, which holds because fake responses resolve on microtasks
+ * and no scripted flow sets state from a wall-clock timer. The margin was
+ * measured (S4-a quality review): the suites pass unchanged with 1, 2, 4, 8 or
+ * 40 turns and with an extra 120 ms sleep, so which step a commit is attributed
+ * to does not depend on timing.
  */
 export async function settle(turns = 8): Promise<void> {
   await getConfig().asyncWrapper(async () => {
@@ -402,7 +415,6 @@ export function panelStyleElement(container: HTMLElement): HTMLStyleElement {
   return styles[0] as HTMLStyleElement;
 }
 
-export async function sha256Hex(text: string): Promise<string> {
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+export function sha256Hex(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
 }

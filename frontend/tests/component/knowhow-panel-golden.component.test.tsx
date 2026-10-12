@@ -20,13 +20,33 @@
 //    panel), the window keydown re-registration count, and the SHA-256 of the
 //    panel's global stylesheet text. They exist because "zero behaviour change"
 //    for a refactor of this size needs a sensitive tripwire: a reordered effect,
-//    a callback that loses or gains identity, or a dropped/added state update all
-//    move these numbers before they show up anywhere a user could see. They are
-//    refactor-only goldens in the sense of AGENTS.md "Tests", so they do not stay:
-//    the last S4 PR removes them, or converts each into the behaviour it guards
-//    (e.g. the E6-before-E7 order is already pinned behaviourally in the
-//    lifecycle suite). Until then a change to any of them must be explained in
-//    the PR, never just re-recorded.
+//    a state reset moved into an effect, or a dropped/added/unbatched state
+//    update moves these numbers before it shows up anywhere a user could see.
+//    They are refactor-only goldens in the sense of AGENTS.md "Tests", so they
+//    do not stay: the last S4 PR removes them, or converts each into the
+//    behaviour it guards (e.g. the E6-before-E7 order is already pinned
+//    behaviourally in the lifecycle suite). Until then a change to any of them
+//    must be explained in the PR, never just re-recorded.
+//
+//    The stylesheet hash proves the CSS literal is byte-identical, comments and
+//    indentation included, so S4-b must move the template literal untouched. It
+//    cannot tell `<style jsx global>` from `<style jsx>` (vitest applies no
+//    styled-jsx transform); S4-b's hard gate for that is the `next build`
+//    artefact: the `_JSXStyle` id `ef36e44ab474f044` and the SHA-256 of its
+//    compiled CSS literal recorded in S4-a must be unchanged.
+//
+// What these baselines do NOT guard: callback identity in general. A Profiler
+// counts commits, so a callback that gains or loses identity is only visible
+// where that identity feeds an effect dependency (e.g. the row drawer's inline
+// `onClose`, pinned by the keydown count). Elsewhere it is unobservable by
+// design — e.g. dropping useCallback from `reloadTableDetail` only re-runs the
+// cell editor's ref-sync effect, and wrapping `handleCodeSaved` in useCallback
+// changes nothing a test can see. Those rules are enforced by review: every S4
+// PR's checklist includes `git diff -M --color-moved=zebra
+// --color-moved-ws=allow-indentation-change` showing the moved code as moved,
+// plus plan line 184 — the C3/C5 hooks must NOT add useCallback to
+// `handleCodeSaved` / `handleCodeDeleted`, and no other callback changes its
+// useCallback status or dependency array either.
 //
 // The numbers are deterministic and platform-independent: every fake response
 // resolves on microtasks (test-support/knowhow-panel-harness.tsx), each step ends
@@ -49,12 +69,13 @@
 //    coalesce into the list effect's loading render, so they add no separate
 //    commit there; the split must still keep the branch where it is.
 //  * Asymmetric reset sets of openTable / backToList / E6 — see the lifecycle
-//    suite.
+//    suite and the state × reset-path table in knowhow-panel-resets.
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
 import {
+  BASE_PROPS,
   anchorDetail,
   panelStyleElement,
   recordDetail,
@@ -63,6 +84,7 @@ import {
   settle,
   sha256Hex,
   useKnowhowPanelSuite,
+  wireDetail,
   wirePatchResult,
   type RecordedRequest,
   type RenderedPanel,
@@ -148,6 +170,7 @@ const EDIT_FLOW_REQUESTS: Record<Mode, RecordedRequest[]> = {
     { method: "GET", path: "/agent/knowhow/rows/r1" },
     { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-fix", body: { content_md: "检查电源并复位" } },
     { method: "GET", path: "/agent/knowhow/rows/r1" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-two" },
   ],
   StrictMode: [
     LIST,
@@ -156,22 +179,24 @@ const EDIT_FLOW_REQUESTS: Record<Mode, RecordedRequest[]> = {
     { method: "GET", path: "/agent/knowhow/rows/r1" },
     { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-fix", body: { content_md: "检查电源并复位" } },
     { method: "GET", path: "/agent/knowhow/rows/r1" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-two" },
   ],
 };
 
 const EDIT_FLOW_COMMITS: Record<Mode, StepCommits> = {
   "plain render": {
-    render: 2, list: 1, openTable: 3, openRow: 3, openEditor: 1, type: 9, save: 2, closeDrawer: 2, filter: 3,
+    render: 2, list: 1, openTable: 3, openRow: 3, openEditor: 1, type: 9, save: 2, closeDrawer: 2, filter: 2, jumpWithFilter: 4,
   },
   StrictMode: {
-    render: 2, list: 1, openTable: 3, openRow: 3, openEditor: 2, type: 8, save: 2, closeDrawer: 2, filter: 3,
+    render: 2, list: 1, openTable: 3, openRow: 3, openEditor: 2, type: 8, save: 2, closeDrawer: 2, filter: 2, jumpWithFilter: 4,
   },
 };
 
 for (const mode of MODES) {
-  test(`golden [${mode.name}]: open a row, edit a cell from the drawer, save, close, filter`, async () => {
+  test(`golden [${mode.name}]: open a row, edit a cell from the drawer, save, close, filter, switch table`, async () => {
     const server = suite.server();
     routeTable(server, "nb-1", recordDetail());
+    server.on("GET", "/notebooks/nb-1/knowhow/t-two", { json: wireDetail(recordDetail({ id: "t-two", title: "第二张表" })) });
     server.on("PATCH", "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-fix", {
       json: wirePatchResult("r1", "c-fix", "检查电源并复位"),
     });
@@ -215,10 +240,21 @@ for (const mode of MODES) {
       const input = screen.getByPlaceholderText("按行标题/全文过滤行…");
       fireEvent.change(input, { target: { value: "供" } });
       fireEvent.change(input, { target: { value: "供电" } });
-      fireEvent.change(input, { target: { value: "" } });
     });
-
+    // The filter really filters (rows are permanent behaviour, not a count).
+    expect(screen.getByRole("button", { name: "供电异常" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "检查电源并复位" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "时钟漂移" })).not.toBeInTheDocument();
+    // Switch tables with the filter still set: openTable clears the query in the
+    // same batch as the selection (a reset moved into an effect costs a commit).
+    await step(panel, commits, "jumpWithFilter", async () => {
+      panel.update({ ...BASE_PROPS, initialTableId: "t-two" });
+      await screen.findByRole("heading", { name: "第二张表" });
+      await screen.findByRole("button", { name: "时钟漂移" });
+    });
+    expect(screen.getByPlaceholderText("按行标题/全文过滤行…")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "供电异常" })).toBeInTheDocument();
+
     expect(server.log).toEqual(EDIT_FLOW_REQUESTS[mode.name]);
     expect(commits).toEqual(EDIT_FLOW_COMMITS[mode.name]);
   });
@@ -312,6 +348,8 @@ for (const mode of MODES) {
     const panel = renderPanel({ initialTableId: "t-anc" }, { strict: mode.strict });
     await screen.findByRole("button", { name: "一键规整整表" });
     await settle();
+    // The mount + jump prefix is pinned by G2's shape; this golden starts at the
+    // batch modal so its sequence is the same in both render modes.
     server.clearLog();
     const commits: StepCommits = {};
 
@@ -383,7 +421,7 @@ test("split baseline: the panel's global stylesheet is its last child and its te
   const style = panelStyleElement(panel.container);
   const section = panel.container.querySelector("section.knowhow-view")!;
   expect(section.lastElementChild).toBe(style);
-  expect(await sha256Hex(style.textContent ?? "")).toBe(PANEL_STYLESHEET_SHA256);
+  expect(sha256Hex(style.textContent ?? "")).toBe(PANEL_STYLESHEET_SHA256);
 });
 
 test("computed styles: panel shell, layers and grid read the panel stylesheet", async () => {
