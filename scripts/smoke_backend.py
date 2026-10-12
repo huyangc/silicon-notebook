@@ -60,13 +60,13 @@ def _drain_background_work(timeout: float = _SCRATCH_DRAIN_SECONDS) -> None:
         )
         kg_idle = kg_scheduler.wait_idle(max(0.0, deadline - time.monotonic()))
         assert kg_idle, (
-            f"the KG scheduler did not go idle within {timeout:.0f}s: "
+            f"the KG scheduler did not go idle within {timeout:g}s: "
             f"{kg_scheduler.stats()}"
         )
         if _maintenance_pools_idle_now() and kg_scheduler.wait_idle(0):
             return
         assert time.monotonic() < deadline, (
-            f"background work kept arriving for {timeout:.0f}s"
+            f"background work kept arriving for {timeout:g}s"
         )
 
 
