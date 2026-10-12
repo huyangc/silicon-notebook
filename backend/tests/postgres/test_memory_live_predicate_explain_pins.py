@@ -56,9 +56,7 @@ LIVE_PROJECTION = f", (nb.{NOTEBOOK_LIVE_SQL}) AS notebook_live"
 
 def old_statement(sql: str) -> str:
     """The statement as it was before K3, recovered from the captured one."""
-    if LIVE_TAIL in sql:
-        return sql.replace(LIVE_TAIL, ")")
-    return sql.replace(LIVE_PROJECTION, "")
+    return sql.replace(LIVE_TAIL, ")").replace(LIVE_PROJECTION, "")
 HEAVY = "k3-heavy"
 
 SCALES = {
