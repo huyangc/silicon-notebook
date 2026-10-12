@@ -567,9 +567,16 @@ def _bindings(scope: ast.AST) -> tuple[set[str], dict[str, list[ast.expr]]]:
     values: dict[str, list[ast.expr]] = {}
 
     def mark_targets(target: ast.expr) -> None:
-        for sub in ast.walk(target):
-            if isinstance(sub, ast.Name):
-                local.add(sub.id)
+        # 只有真正的绑定目标才算局部:名字,以及元组/列表/星号解包里的名字。
+        # `MESSAGES["ok"] = …`、`obj.attr = …` 是**读取** MESSAGES / obj 再改它,
+        # 不绑定接收者——把它记成局部会遮蔽同名模块常量,让本该检查的文案漏掉。
+        if isinstance(target, ast.Name):
+            local.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                mark_targets(element)
+        elif isinstance(target, ast.Starred):
+            mark_targets(target.value)
 
     if isinstance(scope, _COMPREHENSION_NODES):
         for generator in scope.generators:
@@ -687,6 +694,10 @@ class _IndirectCopy:
                 return values.get(node.id, [])
         return self._scope(self._module)[1].get(node.id, [])
 
+    def _locally_bound(self, node: ast.Name) -> bool:
+        """True when ``node`` names a binding of an enclosing (non-module) scope."""
+        return any(node.id in self._scope(scope)[0] for scope in self._enclosing_scopes(node))
+
     def _dicts(self, node: ast.expr, depth: int) -> list[ast.Dict]:
         if depth < 0:
             return []
@@ -737,7 +748,10 @@ class _IndirectCopy:
                 if len(node.args) > 1:
                     found += self.units(node.args[1], depth)
                 return _dedupe(found)
-            if isinstance(func, ast.Name) and func.id in self._functions:
+            if (isinstance(func, ast.Name) and func.id in self._functions
+                    and not self._locally_bound(func)):
+                # 与变量同一套作用域规则:被参数 / 局部遮蔽的名字不是模块 helper,
+                # 它的值静态未知,按不可解析处理。
                 # 递归 helper 不单独设防:每次调用扣一级深度,加上 memo,天然有界。
                 return _dedupe([
                     u for ret in self._returns(self._functions[func.id])
