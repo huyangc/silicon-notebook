@@ -423,17 +423,40 @@ class Observed:
         return self.data["outcome"].get("raised")
 
 
+def _settings_env_names() -> frozenset:
+    """Every environment name a ``Settings`` field can be read from (its alias
+    and its field name; the lookup is case-insensitive)."""
+    names = set()
+    for name, info in Settings.model_fields.items():
+        names.add(name.lower())
+        if isinstance(info.validation_alias, str):
+            names.add(info.validation_alias.lower())
+    return frozenset(names)
+
+
+#: The only process-level configuration a scenario runs with; everything else
+#: is the shipped default plus the scenario's own ``settings`` overrides.
+_SCENARIO_ENV = {
+    "SILICON_NOTEBOOK_ENV_FILE": "",
+    "MODEL_SERVICES_CONFIG": "",
+    "EXTENSIONS_CONFIG": "",
+    "LLM_LOG_ENABLED": "false",
+    "LLM_CACHE_ENABLED": "false",
+    "EMBED_DIM": "16",
+}
+
+
 def _make_repo(tmp_path, monkeypatch):
+    # No local .env, and no deployment variable exported by the developer's
+    # shell or the test process, may reach a recording.
+    names = _settings_env_names()
+    for key in list(os.environ):
+        if key.lower() in names:
+            monkeypatch.delenv(key)
+    for key, value in _SCENARIO_ENV.items():
+        monkeypatch.setenv(key, value)
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'loop.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
-    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_DIM", "16")
-    # no local .env, model-service or plugin config may leak into a recording
-    for key in ("SILICON_NOTEBOOK_ENV_FILE", "MODEL_SERVICES_CONFIG",
-                "EXTENSIONS_CONFIG", "OPENAI_COMPAT_API_KEY",
-                "OPENAI_COMPAT_BASE_URL", "REASONING_LLM_API_KEY",
-                "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
-        monkeypatch.setenv(key, "")
     repo = SQLiteRepository(Settings(_env_file=None))
     bind_all_embedding_clients(repo, rig.CountingEmbedder(dim=16))
     return repo
@@ -1356,6 +1379,31 @@ def test_reflect_loop_scenario(case, tmp_path, monkeypatch):
         path.write_text(_serialise(observed), encoding="utf-8")
     expected = json.loads(path.read_text(encoding="utf-8"))
     assert observed == expected
+
+
+#: Deployment variables a developer may have exported (one of them in lower
+#: case: the settings lookup is case-insensitive).
+_LEAKY_EXPORTS = {
+    "REASONING_STALE_LIMIT": "1",
+    "RELATION_RETRIEVAL_ENABLED": "true",
+    "REASONING_MAX_STEPS": "3",
+    "GRAPH_PPR_ENABLED": "false",
+    "reasoning_max_exact_lookups": "1",
+}
+
+
+def test_exported_deployment_variables_do_not_reach_a_recording(
+    tmp_path, monkeypatch,
+):
+    for key, value in _LEAKY_EXPORTS.items():
+        monkeypatch.setenv(key, value)
+    for case in SCENARIOS:
+        scenario_dir = tmp_path / case.name
+        scenario_dir.mkdir()
+        with pytest.MonkeyPatch.context() as scoped:
+            observed = observe(case, scenario_dir, scoped)
+        expected = json.loads(_snapshot_path(case.name).read_text(encoding="utf-8"))
+        assert observed == expected, case.name
 
 
 def test_split_oracle_reaches_every_loop_branch():
