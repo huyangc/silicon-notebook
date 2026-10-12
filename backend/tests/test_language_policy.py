@@ -338,12 +338,6 @@ def test_concept_description_prompt_preserves_source_language():
     assert "original language" in p or "language of the source" in p
 
 
-def test_community_report_prompt_preserves_source_language():
-    from app.services.prompts import community_report_prompt
-    p = community_report_prompt("members", "rels").lower()
-    assert "original language" in p or "language of the source" in p
-
-
 def test_evidence_refine_prompt_preserves_source_language():
     from app.services.prompts import evidence_refine_prompt
     p = evidence_refine_prompt("q", "ev").lower()

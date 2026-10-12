@@ -5,7 +5,7 @@ deletion / full-notebook build / rebuild (with the ``kg_building`` in-flight
 flag), store/relink of extracted graphs, cluster writes, incremental source
 fusion, the unified-KG reads (status / graph / neighbors) and the streamed
 unified rebuild plus its derived layers (canonical relations, mention
-bridge, communities and community reports).
+bridge and communities).
 
 Composition rules (Gate 5): no facade import. Persistence goes through the
 injected Task-13 stores; transactions ride the injected ``write``/``connect``
@@ -7362,66 +7362,3 @@ class KnowledgeLifecycleService:
         """Member-id lists of each detected community (for summaries / global search)."""
         with self._connect() as db:
             return self.unified_kg.community_member_ids(db, notebook_id, level)
-
-    @notebook_model_artifact_scope
-    def summarize_communities(self, notebook_id: str, level: int = 0) -> int:
-        """For each detected community, generate an LLM report (title/summary/
-        findings) from its members + internal relations; persist on the community
-        row. No-op (returns 0) when disabled or LLM unconfigured. Returns the
-        number of communities summarized."""
-        self.get_notebook(notebook_id)
-        if (
-            not self.settings.kg_community_summary_enabled
-            or not self.model_clients.configured("kg_community_summary")
-        ):
-            return 0
-        from app.services.prompts import community_report_prompt, COMMUNITY_REPORT_SCHEMA_HINT
-        with self._connect() as db:
-            crows = self.unified_kg.community_rows_for_summary(
-                db, notebook_id, level)
-        done = 0
-        for cr in crows:
-            members = json.loads(cr["member_ids"] or "[]")
-            if not members:
-                continue
-            with self._connect() as db:
-                orows, rrows = self.knowledge.community_context_rows(
-                    db, notebook_id, members
-                )
-            name_by_id = {}
-            mlines = []
-            for o in orows:
-                nm = json.loads(o["payload"] or "{}").get("name", "")
-                name_by_id[o["id"]] = nm
-                mlines.append(f"- [{o['object_type']}] {nm}")
-            rlines = [f"{name_by_id.get(r['source_object_id'],'?')} -[{r['edge_type']}]-> {name_by_id.get(r['target_object_id'],'?')}"
-                      for r in rrows]
-            members_block = "\n".join(mlines)
-            relations_block = "\n".join(rlines) if rlines else "(none)"
-            try:
-                raw = self.model_clients.chat("kg_community_summary").chat_json(
-                    [{"role": "user", "content": community_report_prompt(members_block, relations_block)}],
-                    COMMUNITY_REPORT_SCHEMA_HINT)
-                data = json.loads(raw)
-            except Exception:
-                continue
-            raw_title, raw_summary = data.get("title"), data.get("summary")
-            title = raw_title.strip() if isinstance(raw_title, str) else ""
-            summary = raw_summary.strip() if isinstance(raw_summary, str) else ""
-            raw_findings = data.get("findings")
-            findings = (
-                [f for f in raw_findings if isinstance(f, str)]
-                if isinstance(raw_findings, list) else []
-            )
-            if not summary:
-                continue
-            with self._write() as db:
-                self.unified_kg.set_community_summary(
-                    db, cr["id"], title, summary, json.dumps(findings))
-            done += 1
-        return done
-
-    def get_community_reports(self, notebook_id: str, level: int = 0) -> List[dict]:
-        """Persisted community reports (only those summarized). For global search."""
-        with self._connect() as db:
-            return self.unified_kg.community_reports(db, notebook_id, level)

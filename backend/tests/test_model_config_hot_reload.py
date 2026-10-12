@@ -361,3 +361,45 @@ def test_strict_reload_is_rejected_and_keeps_the_previous_registry(
         )
     finally:
         provider.close()
+
+
+def test_strict_reload_accepts_a_leftover_ignorable_retired_binding(
+    monkeypatch, tmp_path
+):
+    """社区摘要退役(裁决 8):热重载与启动走同一个 ``load``,残留的
+    kg_community_summary 两行同样只提示、不拒——新文件照常发布。"""
+    monkeypatch.setenv("HOT_RELOAD_KEY", "secret")
+    monkeypatch.setattr(
+        provider_module, "_MODEL_CONFIG_RELOAD_INTERVAL_SECONDS", 60.0
+    )
+    path = tmp_path / "model-services.toml"
+    path.write_text(_complete_config(model="model-one"), encoding="utf-8")
+    events = _EventLog()
+    provider = RuntimeModelProvider(
+        Settings(
+            _env_file=None,
+            model_services_config=str(path),
+            model_bindings_strict=True,
+            event_log_enabled=False,
+            llm_log_enabled=False,
+        ),
+        events,
+        chat_factory=lambda service: _ChatDelegate(service, []),
+    )
+    try:
+        path.write_text(
+            _complete_config(model="model-two")
+            + 'kg_community_summary = "chat"\n'
+            + '[thinking]\nkg_community_summary = "disabled"\n',
+            encoding="utf-8",
+        )
+        assert provider.reload_if_changed(force=True) is True
+        assert provider.chat("ask_answer").model == "model-two"
+        assert provider.registry.unknown_bindings() == ()
+        assert not any(
+            event.get("kind") == "model_config_reload"
+            and event.get("status") == "error"
+            for event in events.events
+        )
+    finally:
+        provider.close()

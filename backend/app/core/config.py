@@ -562,6 +562,7 @@ class Settings(BaseSettings):
     # Deterministic citation audit for numeric/complexity/absolute/ranking
     # assertions.  The audit is always disclosed; automatic evidence-level
     # downgrade stays opt-in until production distributions are calibrated.
+    # report_high_risk_downgrade_enabled: 实验开关(默认值刻意不动):评估后转正或删除,出口登记在 fangan_todo.md「实验开关评估出口」。
     report_high_risk_unsupported_ratio: float = Field(
         0.25,
         ge=0.0,
@@ -659,8 +660,6 @@ class Settings(BaseSettings):
     kg_gleaning_rounds: int = Field(1, validation_alias="KG_GLEANING_ROUNDS")
     # 概念簇描述融合: 默认开启(2026-06-18); 对 ≥2 成员的概念簇用 LLM 融合证据成一段描述。仅 rebuild_unified 时生效。
     kg_concept_desc_enabled: bool = Field(True, validation_alias="KG_CONCEPT_DESC_ENABLED")
-    # 社区摘要: 默认关闭; 开启后对每个社区用 LLM 生成 title/summary/findings 报告。
-    kg_community_summary_enabled: bool = Field(False, validation_alias="KG_COMMUNITY_SUMMARY_ENABLED")
     # 增量融合: 默认开启; 每次文档抽取后立即将新子图与全局 KG 增量融合（无需手动 rebuild）。
     kg_incremental_fusion_enabled: bool = Field(True, validation_alias="KG_INCREMENTAL_FUSION_ENABLED")
     # Tier2 桥接检测成本护栏:已有 concept 数超此值则跳过 Tier2(Tier1 名种子 append 照跑)。
@@ -684,6 +683,7 @@ class Settings(BaseSettings):
     kg_relink_enabled: bool = Field(True, validation_alias="KG_RELINK_ENABLED")
     # Bounded post-extraction relation completion.  Default is a strict no-op;
     # shadow/write additionally require notebook allowlist/hash rollout gating.
+    # 实验开关(默认值刻意不动):评估后转正或删除,出口登记在 fangan_todo.md「实验开关评估出口」。
     kg_relation_completion_mode: str = Field(
         "off", validation_alias="KG_RELATION_COMPLETION_MODE"
     )
@@ -763,6 +763,7 @@ class Settings(BaseSettings):
         12, ge=1, validation_alias="ASK_RELATED_KNOWLEDGE_LIMIT"
     )
     # 检索排序: 默认用关键词+语义加权融合; 开启后改用 BM25 与语义的 RRF 融合排序。
+    # 实验开关(默认值刻意不动):评估后转正或删除,出口登记在 fangan_todo.md「实验开关评估出口」。
     retrieval_rrf_enabled: bool = Field(False, validation_alias="RETRIEVAL_RRF_ENABLED")
     retrieval_rrf_k: int = Field(60, validation_alias="RETRIEVAL_RRF_K")
     chunk_ann_enabled: bool = Field(True, validation_alias="CHUNK_ANN_ENABLED")  # 有索引的库 chunk 检索走 ANN 核⊕delta(默认开:大库全量暴力不可扩展;小库无 scale 索引→_scale_index 返 None→自然回退暴力,零影响)
@@ -846,10 +847,13 @@ class Settings(BaseSettings):
     # 折叠视图本就是 object 级有界核心图,防止「不传 limit」的旧前端/裸调用绕过大库守卫
     # 落到 _unified_graph_full(全量拉取+多 GB 缓存,49 万对象库会打满 64GB 内存)。
     viz_default_limit: int = Field(300, validation_alias="VIZ_DEFAULT_LIMIT")
-    # qwen3-rerank (DashScope text-rerank) 配置
+    # 单次重排最多送出的候选数。重排服务的接口风格(dashscope / openai)由
+    # model-services.toml 里该服务的 protocol 决定,不再是本文件的设置。
     rerank_max_docs: int = Field(500, validation_alias="RERANK_MAX_DOCS")
-    # rerank 接口风格:dashscope=DashScope 原生 text-rerank(嵌套 input/output);
-    # openai=OpenAI 兼容(vLLM/Cohere 等)的 {base}/rerank(扁平 body、顶层 results)。
+    # 关系检索补种子:开启后先用 query_rewrite 的高层关键词查关系索引,把命中关系的
+    # 两端对象并入种子,低层关键词再查一次节点并入;只增不减(原种子保序在前),
+    # 每次查询多一次 query_rewrite 模型调用(retrieval_candidates 的关系补种子入口)。
+    # 实验开关(默认值刻意不动):评估后转正或删除,出口登记在 fangan_todo.md「实验开关评估出口」。
     relation_retrieval_enabled: bool = Field(False, validation_alias="RELATION_RETRIEVAL_ENABLED")
     relation_seed_top_n: int = Field(8, validation_alias="RELATION_SEED_TOP_N")
     # P0-1/2: 关系候选池上限(有关系向量时,先按向量 sim 取 top-N 候选再 hydrate 文本
@@ -875,6 +879,7 @@ class Settings(BaseSettings):
     # is the invisible safe default because it cannot alter returned evidence.
     # Active modes require a content-free attestation plus exact corpus/model
     # pins; rollout state never belongs in a public response.
+    # 实验开关(默认值刻意不动):评估后转正或删除,出口登记在 fangan_todo.md「实验开关评估出口」。
     selected_source_graph_rollout_mode: Literal[
         "off", "shadow", "allowlist", "rollout", "on"
     ] = Field("shadow", validation_alias="SELECTED_SOURCE_GRAPH_ROLLOUT_MODE")
@@ -906,13 +911,20 @@ class Settings(BaseSettings):
     ppr_top_chunks: int = Field(20, validation_alias="PPR_TOP_CHUNKS")            # 最终喂答案的 chunk 数
     ppr_kg_seed_top_n: int = Field(20, validation_alias="PPR_KG_SEED_TOP_N")      # reset 向量里的 KG 种子数
     ppr_chunk_seed_top_n: int = Field(30, validation_alias="PPR_CHUNK_SEED_TOP_N")  # reset 向量里的 chunk 种子数
-    ppr_fact_rerank_enabled: bool = Field(False, validation_alias="PPR_FACT_RERANK_ENABLED")  # LLM 过滤候选种子(每查一次 LLM)
+    # PPR 种子的模型过滤:开启后 KG 种子先经 evidence_refine 模型筛一遍再进 PPR,
+    # 每次查询多一次模型调用;模型未配、报错、返回非法或筛空时原样保留(fail-open)。
+    # 实验开关(默认值刻意不动):评估后转正或删除,出口登记在 fangan_todo.md「实验开关评估出口」。
+    ppr_fact_rerank_enabled: bool = Field(False, validation_alias="PPR_FACT_RERANK_ENABLED")
     ppr_variant_edge_weight: float = Field(0.5, validation_alias="PPR_VARIANT_EDGE_WEIGHT")
     ppr_emb_synonym_enabled: bool = Field(True, validation_alias="PPR_EMB_SYNONYM_ENABLED")
     ppr_emb_synonym_threshold: float = Field(0.83, validation_alias="PPR_EMB_SYNONYM_THRESHOLD")
     ppr_emb_synonym_topk: int = Field(20, validation_alias="PPR_EMB_SYNONYM_TOPK")
     ppr_emb_synonym_max_entities: int = Field(50000, validation_alias="PPR_EMB_SYNONYM_MAX_ENTITIES")  # cost guard
+    # KG 候选按 canonical 簇去重:同簇只保留得分最高的一条(retrieval.fold_by_canonical)。
+    # 实验开关(默认值刻意不动):评估后转正或删除,出口登记在 fangan_todo.md「实验开关评估出口」。
     kg_canonical_fold_enabled: bool = Field(False, validation_alias="KG_CANONICAL_FOLD_ENABLED")
+    # 关系打分乘以边类型权重,about 类边降权(retrieval.edge_type_rank_weight)。
+    # 实验开关(默认值刻意不动):评估后转正或删除,出口登记在 fangan_todo.md「实验开关评估出口」。
     kg_about_downweight_enabled: bool = Field(False, validation_alias="KG_ABOUT_DOWNWEIGHT_ENABLED")
     # knowhow 格子级 KO 进入 reasoning 的 KG-node 检索路径(object_type=列名)。
     # 默认开启，让结构化格子既参与 chunk 召回，也可作为 KG 节点参与图检索；仍保留

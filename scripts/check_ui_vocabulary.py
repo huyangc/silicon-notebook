@@ -23,6 +23,11 @@ a user's screen, and all of them are scanned:
      build job failure text (`….kg_build_jobs.finish/set_stage(…, error_message=…)`,
      shown through `KgBuildJobStatus.user_message`). See `DISPLAY_FIELD_CALLS`.
 
+  6. backend **model workload labels** — the values of `_WORKLOAD_LABELS` in
+     `backend/app/services/model_registry.py` travel as `workload_label` to the
+     model-failure banner (`frontend/app/model-services.ts`) and the admin usage
+     pages, which print them verbatim. See `WORKLOAD_LABEL_MODULE`.
+
   For the backend channels (2, 3, 5) the copy does not have to be a literal at the
   call site: `_IndirectCopy` follows variables, conditionals, concatenation,
   `%`/`.format`, `X.get(k, default)`, module constants and module-helper returns.
@@ -202,6 +207,15 @@ KG_BUILD_JOB_SQL_MESSAGE = re.compile(
 )
 # 非空性下限(可解析站点)。2026-10 实测见 test_ui_vocabulary_guard 的真实扫描用例。
 MIN_DISPLAY_FIELD_SITES = 10
+
+# —— 第六条通道:模型工作负载显示名 ——————————————————————————————————
+# `_WORKLOAD_LABELS` 的值作为 `workload_label` 原样上屏(模型失败横幅、管理员用量
+# 页、解析问题档案)。只认模块顶层 `_WORKLOAD_LABELS = {…}` / `MappingProxyType({…})`
+# 里的字符串字面量值;写法变了扫不到时由下面的非空性下限把它变成硬失败。
+WORKLOAD_LABEL_MODULE = ROOT / "backend" / "app" / "services" / "model_registry.py"
+WORKLOAD_LABEL_NAME = "_WORKLOAD_LABELS"
+# 2026-10 实测 36 条;下限只防「扫描面塌了」,不是精确台账。
+MIN_WORKLOAD_LABELS = 30
 
 # ASCII acronyms/words: matched only when not glued to another ASCII letter, so
 # identifiers (currentNotebook, MemoryPanel, schemaBusy, PKG) cannot trip them.
@@ -922,6 +936,41 @@ def scan_display_fields(path: Path, *, store_module: bool = False) -> tuple[int,
     return sites, hits
 
 
+def scan_workload_labels(path: Path) -> tuple[int, Hits]:
+    """Blacklisted jargon in the model workload display labels (sixth channel).
+
+    Returns (string-literal labels found, hits). Only the module-level
+    ``WORKLOAD_LABEL_NAME`` assignment is read; its value may be a dict literal
+    or a single-argument call wrapping one (``MappingProxyType({...})``).
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    sites = 0
+    hits: Hits = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names = [node.target.id]
+        else:
+            continue
+        if WORKLOAD_LABEL_NAME not in names or node.value is None:
+            continue
+        value = node.value
+        if isinstance(value, ast.Call) and len(value.args) == 1 and not value.keywords:
+            value = value.args[0]
+        if not isinstance(value, ast.Dict):
+            continue
+        for label in value.values:
+            if not (isinstance(label, ast.Constant) and isinstance(label.value, str)):
+                continue
+            sites += 1
+            if not CJK.search(label.value):
+                continue
+            for term in terms_in(label.value):
+                hits.append((label.lineno, term, label.value))
+    return sites, hits
+
+
 def scan_release_note(path: Path) -> list[tuple[int, str, str]]:
     """Blacklisted jargon in one release note (markdown shown to users verbatim).
 
@@ -1108,6 +1157,20 @@ def main(argv: list[str] | None = None) -> int:
             record_display(path, hits)
     violations.extend(display_violations)
 
+    # 第六条通道:模型工作负载显示名。按 ROOT 写死,理由同第五条。
+    if not WORKLOAD_LABEL_MODULE.exists():
+        print(
+            f"check_ui_vocabulary: workload-label module missing: "
+            f"{_rel(WORKLOAD_LABEL_MODULE)} (update WORKLOAD_LABEL_MODULE)",
+            file=sys.stderr,
+        )
+        return 1
+    label_sites, label_hits = scan_workload_labels(WORKLOAD_LABEL_MODULE)
+    for line, term, snippet in label_hits:
+        violations.append(
+            f"  {_rel(WORKLOAD_LABEL_MODULE)}:{line}: 「{term}」in workload label: {snippet!r}"
+        )
+
     note_files = _release_note_files()
     for path in note_files:
         rel = _rel(path)
@@ -1136,6 +1199,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    if label_sites < MIN_WORKLOAD_LABELS:
+        print(
+            f"check_ui_vocabulary: only {label_sites} workload labels found in "
+            f"{_rel(WORKLOAD_LABEL_MODULE)} (expected ≥ {MIN_WORKLOAD_LABELS}). "
+            f"{WORKLOAD_LABEL_NAME} 是不是改名 / 换了写法?同步 WORKLOAD_LABEL_NAME,"
+            f"别调低下限来「修」它。",
+            file=sys.stderr,
+        )
+        return 1
+
     if violations:
         print("UI vocabulary contract MISMATCH — internal jargon in user-visible copy:", file=sys.stderr)
         print("\n".join(violations), file=sys.stderr)
@@ -1149,7 +1222,8 @@ def main(argv: list[str] | None = None) -> int:
         f"UI vocabulary contract OK: scanned {len(files)} frontend production files + "
         f"{marked_sites} backend {USER_ERROR}() messages + "
         f"{trace_sites} trace summaries + "
-        f"{display_sites} display fields "
+        f"{display_sites} display fields + "
+        f"{label_sites} workload labels "
         f"({len(CJK_TERMS) + len(ASCII_TERMS)} blacklisted terms)"
     )
     if extra_roots:

@@ -3049,14 +3049,6 @@ class RepositoryFacade:
         """Member-id lists of each detected community — lifecycle-owned (Task 15)."""
         return self._runtime.knowledge_lifecycle.list_communities(notebook_id, level)
 
-    def summarize_communities(self, notebook_id: str, level: int = 0) -> int:
-        """Per-community LLM reports — KnowledgeLifecycleService owns the
-        orchestration (Task 15; unconfigured no-op + per-community fail-open)."""
-        return self._runtime.knowledge_lifecycle.summarize_communities(notebook_id, level)
-
-    def get_community_reports(self, notebook_id: str, level: int = 0) -> List[dict]:
-        """Persisted community reports — lifecycle-owned (Task 15)."""
-        return self._runtime.knowledge_lifecycle.get_community_reports(notebook_id, level)
     def concept_detail(
         self,
         notebook_id: str,

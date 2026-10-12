@@ -57,7 +57,7 @@ COMMANDS = {
     ("eval", "selected-source"): Command("eval_selected_source_graph.py", "评测所选来源图检索"),
     ("eval", "trace-export"): Command("export_reasoning_traces.py", "从显式指定数据库导出推理轨迹", False),
     ("eval", "trace-analyze"): Command("analyze_reasoning_trace.py", "分析推理轨迹文件", False),
-    ("eval", "shadow"): Command("reflect_shadow_rig.py", "运行反思影子评测", False),
+    ("eval", "shadow"): Command("reflect_shadow_rig.py", "运行 Legacy 检索诊断", False),
     ("kg", "build"): Command("app.scripts.build_kg", "离线构建笔记本知识图谱", True, NOTEBOOK_USAGE, True),
     ("kg", "recluster"): Command("app.scripts.recluster_kg", "重建知识对象规范簇", True, NOTEBOOK_USAGE, True),
     ("kg", "reembed"): Command("app.scripts.reembed_kg", "清空并重建知识与关系向量", True, NOTEBOOK_USAGE, True),

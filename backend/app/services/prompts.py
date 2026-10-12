@@ -1541,24 +1541,6 @@ def reflect_prompt(
     )
 
 
-COMMUNITY_REPORT_SCHEMA_HINT = '{"title":"","summary":"","findings":[""]}'
-
-
-def community_report_prompt(members_block: str, relations_block: str) -> str:
-    return (
-        "You are summarizing a community of related items from a semiconductor/IC "
-        "design knowledge graph into a short report. Given the member items and "
-        "their internal relationships, produce: a short title (the community's "
-        "theme), a 2-4 sentence summary, and 3-6 key findings (each a concise "
-        "sentence). Stay factual to the members. Preserve entity/concept names, "
-        "formula expressions and canonical labels EXACTLY as they appear, in their "
-        "original language — do NOT translate them; write the title/summary/findings "
-        "in the language of the source material. Return JSON only with "
-        "'title','summary','findings'.\n\n"
-        f"Members:\n{members_block}\n\nInternal relationships:\n{relations_block}"
-    )
-
-
 EVIDENCE_REFINE_SCHEMA_HINT = '{"relevant":[""]}'
 
 

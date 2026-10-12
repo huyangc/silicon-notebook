@@ -2664,8 +2664,8 @@ class RepositoryRuntime:
         NotebookScaleProfile PER ``_needs_index`` call (its copy-stats memo is
         process-owned by ``notebook_scale`` since R2-2, so the profile itself
         holds no cache state and re-reads the CURRENT settings/version each
-        call), the catalog's notebook guard, the schema registry, the
-        lifecycle-owned community reports and the source-title projection."""
+        call), the catalog's notebook guard, the schema registry and the
+        source-title projection."""
         if self.ask is not None:
             return self.ask
         with self._ask_wire_lock:

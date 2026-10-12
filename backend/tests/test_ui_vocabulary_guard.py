@@ -847,6 +847,72 @@ def test_展示字段扫描面塌了要红(tmp_path, monkeypatch, capsys):
 
 
 # --------------------------------------------------------------------------
+# 第六条通道:模型工作负载显示名(model_registry._WORKLOAD_LABELS)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        '_WORKLOAD_LABELS = MappingProxyType({\n    "a": "问答回答",\n    "b": "知识抽取",\n})\n',
+        '_WORKLOAD_LABELS = {\n    "a": "问答回答",\n    "b": "知识抽取",\n}\n',
+        '_WORKLOAD_LABELS: dict = {\n    "a": "问答回答",\n    "b": "知识抽取",\n}\n',
+    ],
+)
+def test_工作负载显示名里的黑话会被抓到(tmp_path, code):
+    module = tmp_path / "model_registry.py"
+    module.write_text(code, encoding="utf-8")
+    sites, hits = guard.scan_workload_labels(module)
+    assert sites == 2
+    assert [(line, term) for line, term, _ in hits] == [(3, "抽取")]
+
+
+def test_工作负载显示名之外的同文件字符串不扫(tmp_path):
+    module = tmp_path / "model_registry.py"
+    module.write_text(
+        'OTHER = {"a": "知识抽取"}\n_WORKLOAD_LABELS = {"a": "问答回答"}\n',
+        encoding="utf-8",
+    )
+    assert guard.scan_workload_labels(module) == (1, [])
+
+
+def test_真实工作负载显示名确实曾经违规过(tmp_path):
+    """变异验证:把「知识分析」「知识补充分析」改回旧名,守卫必须各报一条。"""
+    src = guard.WORKLOAD_LABEL_MODULE.read_text(encoding="utf-8")
+    assert '"kg_extract": "知识分析"' in src and '"kg_glean": "知识补充分析"' in src, (
+        "显示名又漂了,本变异样本需同步"
+    )
+    sites, hits = guard.scan_workload_labels(guard.WORKLOAD_LABEL_MODULE)
+    assert hits == [] and sites >= guard.MIN_WORKLOAD_LABELS
+    mutated = tmp_path / "model_registry_mutated.py"
+    mutated.write_text(
+        src.replace('"kg_extract": "知识分析"', '"kg_extract": "知识抽取"').replace(
+            '"kg_glean": "知识补充分析"', '"kg_glean": "知识补充抽取"'
+        ),
+        encoding="utf-8",
+    )
+    assert [term for _l, term, _t in guard.scan_workload_labels(mutated)[1]] == [
+        "抽取",
+        "抽取",
+    ]
+
+
+def test_工作负载显示名违规让守卫红(tmp_path, monkeypatch, capsys):
+    module = tmp_path / "model_registry.py"
+    module.write_text('_WORKLOAD_LABELS = {"a": "知识社区摘要"}\n', encoding="utf-8")
+    monkeypatch.setattr(guard, "WORKLOAD_LABEL_MODULE", module)
+    monkeypatch.setattr(guard, "MIN_WORKLOAD_LABELS", 1)
+    assert guard.main() == 1
+    assert "model_registry.py:1: 「社区」in workload label" in capsys.readouterr().err
+
+
+def test_工作负载显示名扫描面塌了要红(monkeypatch, capsys):
+    monkeypatch.setattr(guard, "WORKLOAD_LABEL_NAME", "_RENAMED_LABELS")
+    assert guard.main() == 1
+    assert "workload labels found" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
 # 6. 端到端归属:真实源码扫描只在 contracts lane 执行一次
 # --------------------------------------------------------------------------
 

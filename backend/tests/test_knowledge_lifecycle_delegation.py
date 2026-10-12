@@ -74,8 +74,6 @@ def test_facade_lifecycle_methods_delegate_to_the_runtime_instance(repo, monkeyp
         ("rebuild_mention_bridge", lambda: repo.rebuild_mention_bridge("nb")),
         ("rebuild_communities", lambda: repo.rebuild_communities("nb")),
         ("list_communities", lambda: repo.list_communities("nb")),
-        ("summarize_communities", lambda: repo.summarize_communities("nb")),
-        ("get_community_reports", lambda: repo.get_community_reports("nb")),
     ):
         monkeypatch.setattr(lifecycle, name, lambda *a, **k: sentinel)
         assert call() is sentinel, name

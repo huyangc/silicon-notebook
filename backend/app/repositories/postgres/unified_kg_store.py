@@ -1707,39 +1707,6 @@ class UnifiedKgStore:
             f"AND c.generation = {_PUBLISHED_COMMUNITY_GEN}",
             (notebook_id, level, notebook_id)).fetchall()
 
-    @staticmethod
-    def set_community_summary(
-        db: Any,
-        community_id: str,
-        title: str,
-        summary: str,
-        findings_json: str,
-    ) -> None:
-        db.execute(
-            "UPDATE communities SET title=%s,summary=%s,findings=%s WHERE id=%s",
-            (
-                title,
-                summary,
-                jsonb(_json_document(
-                    findings_json, expected=list, field="community findings"
-                )),
-                community_id,
-            ),
-        )
-
-    @staticmethod
-    def community_reports(
-        db: Any, notebook_id: str, level: int
-    ) -> List[dict]:
-        rows = db.execute(
-            f"SELECT member_ids, title, summary, findings FROM communities "
-            f"WHERE notebook_id=%s AND level=%s AND summary!='' "
-            f"AND generation = {_PUBLISHED_COMMUNITY_GEN} "
-            f"ORDER BY size DESC, id ASC",
-            (notebook_id, level, notebook_id)).fetchall()
-        return [{"member_ids": json_value(r["member_ids"], []), "title": r["title"],
-                 "summary": r["summary"], "findings": json_value(r["findings"], [])} for r in rows]
-
     # -------------------------------------------- community-peer primitives
     # communities.py(对比检索原语)的读接口 —— 自己开只读连接(原实现即用
     # 独立 repo._connect() 短查询;WAL 并发读)。
