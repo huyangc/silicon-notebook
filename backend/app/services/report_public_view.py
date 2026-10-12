@@ -7,6 +7,9 @@ adds to the stored report stays private until it is named here.
 What a public reader gets, and why:
 
 * the question, the body, and the timing — that is the artifact being shared;
+  a failed section's note in the body is the neutral sentence only (a body
+  stored before that rule is normalised on read, ``neutralize_failure_notes``)
+  — its raw error text is for the author alone;
 * per citation: label, display title, location, and the stored excerpt, so the
   ``[k]`` markers in the body can actually be checked against something;
 * on a citation of the author's own personal memory, the boolean ``is_memory``
@@ -44,6 +47,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 from app.models.reports import REPORT_QUESTION_MAX_CHARS
+from app.services.reports.section_failure import neutralize_failure_notes
 # M4: which citation is the author's personal memory, and how its title reads
 # in public -- one definition shared with the conversation projection.
 from app.services.share_disclosure import (
@@ -173,7 +177,9 @@ def public_report_payload(
         "question": question,
         # Only ever True for a report created before the create rail existed.
         "question_truncated": question_truncated,
-        "content_md": str(row.get("content_md") or ""),
+        # A body stored before failure notes went neutral may still carry a
+        # section's raw error text; only the author may read that.
+        "content_md": neutralize_failure_notes(str(row.get("content_md") or "")),
         "created_at": _text(row.get("created_at"), 64),
         "updated_at": _text(row.get("updated_at"), 64),
         "references": [item for item in visible if item["title"] or item["snippet"]],

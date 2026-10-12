@@ -103,6 +103,10 @@ from app.services.reports.observability import (
     observe_stage,
 )
 from app.services.reports.policy import report_sufficiency_policy
+from app.services.reports.section_failure import (
+    SECTION_FAILURE_COPY,
+    section_failure_paragraph,
+)
 from app.services.retrieval_run import (
     current_retrieval_run,
     retrieval_fanout_slot,
@@ -195,14 +199,10 @@ def _section_reply(raw: Any, schema_hint: str, *, allow_repair: bool) -> dict:
 #: or an object carrying none of the section fields (``{}`` included).
 _EMPTY_SECTION_REASONS = frozenset({"empty", "missing_expected_key"})
 
-#: Per failure class, what the section note says. Only the empty class keeps
-#: its historical budget hint; the others state what happened, and the
+#: Per failure class, what the section note says (``reports.section_failure``
+#: owns the table so the public projection reads the same sentences). The
 #: reason code goes to the ``report_section_attempt`` event, not the copy.
-_SECTION_FAILURE_COPY = MappingProxyType({
-    "empty": "答案合成未产出内容(模型可能把输出预算耗在思维链上),已重试",
-    "malformed": "模型返回的本节内容无法解析,已重试",
-    "error": "本节模型调用失败,已重试",
-})
+_SECTION_FAILURE_COPY = SECTION_FAILURE_COPY
 
 
 def _section_attempt_failure(exc: BaseException) -> tuple[str, str]:
@@ -4067,7 +4067,7 @@ class ReportEngine:
         )
         for si, s in enumerate(sections):
             if s.get("failed"):
-                parts += [f"## {s['title']}", "", f"（本节生成失败:{s.get('error','')}）", ""]
+                parts += [f"## {s['title']}", "", section_failure_paragraph(s.get("error")), ""]
             elif remapped.get(si):
                 parts += [remapped[si], ""]
         if references:

@@ -459,6 +459,83 @@ def test_the_creators_share_token_still_serves_the_anonymous_page(
     assert client.get(f"/api/public/reports/{token}").status_code == 404
 
 
+_RAW_FAILURE = "OperationalError: connection to 10.9.8.7:5432 refused (dsn=secret)"
+# The body a report generated before K5 stored: a section's raw exception
+# text inside the fixed failure-note paragraph, between two good sections.
+_LEGACY_BODY = (
+    "# 深度报告:为什么?\n\n## 执行摘要\n\n总\n\n## A\n\n正文 A\n\n"
+    f"## B\n\n（本节生成失败:{_RAW_FAILURE}）\n\n## C\n\n正文 C\n"
+)
+
+
+def test_a_stored_raw_failure_note_is_neutral_on_the_public_page_only(
+    client, stub_report_launch
+):
+    """K5: the raw failure text is for the author (and the admin activity
+    view) alone. A ``done`` report stored with it in the body is shareable;
+    the anonymous page shows the neutral note in its place, while the author's
+    own detail keeps everything it had -- body and ``sections[].error``. Nobody
+    else gains a read: another member, the notebook owner and the admin still
+    get 404 on the author's report detail."""
+    owner, _ = _new_user(client)
+    notebook_id = _notebook(client, owner)
+    member, _, _ = _group_granted_reader(client, owner, notebook_id)
+    report_id = _create_report(client, member, notebook_id)
+    from app.api.deps import repository
+    repository().update_report(
+        notebook_id, report_id, status="done", progress="完成",
+        content_md=_LEGACY_BODY,
+        sections=[
+            {"title": "A", "markdown": "正文 A"},
+            {"title": "B", "markdown": "", "failed": True, "error": _RAW_FAILURE},
+            {"title": "C", "markdown": "正文 C"},
+        ],
+    )
+
+    token = _operate(client, member, notebook_id, report_id,
+                     "post", "/share", {}).json()["share_token"]
+    public = client.get(f"/api/public/reports/{token}")
+    assert public.status_code == 200
+    assert _RAW_FAILURE not in public.text
+    assert "10.9.8.7" not in public.text
+    assert public.json()["content_md"] == _LEGACY_BODY.replace(
+        f"（本节生成失败:{_RAW_FAILURE}）", "（本节生成失败:本节处理过程出错）"
+    )
+
+    author = _operate(client, member, notebook_id, report_id, "get", "", None)
+    assert author.status_code == 200
+    assert author.json()["content_md"] == _LEGACY_BODY
+    assert author.json()["sections"][1]["error"] == _RAW_FAILURE
+
+    assert _operate(client, owner, notebook_id, report_id,
+                    "get", "", None).status_code == 404
+    other, _, _ = _group_granted_reader(client, owner, notebook_id)
+    assert _operate(client, other, notebook_id, report_id,
+                    "get", "", None).status_code == 404
+    admin = {}  # no session: the seeded administrator
+    assert client.get("/api/me", headers=admin).json()["role"] == "admin"
+    assert _operate(client, admin, notebook_id, report_id,
+                    "get", "", None).status_code == 404
+
+
+def test_a_public_report_without_failed_sections_is_served_byte_for_byte(
+    client, stub_report_launch
+):
+    """Failure-note normalisation touches nothing else -- including text that
+    merely resembles the note outside the fixed paragraph shape."""
+    owner, _ = _new_user(client)
+    notebook_id = _notebook(client, owner)
+    report_id = _create_report(client, owner, notebook_id)
+    body = (
+        "# 深度报告:q\n\n## A\n\n正文提到（本节生成失败:并非本系统写的）这句。\n\n"
+        "## B\n\n> 引用 [k1]\n"
+    )
+    _finish(notebook_id, report_id, body)
+    token = _operate(client, owner, notebook_id, report_id,
+                     "post", "/share", {}).json()["share_token"]
+    assert client.get(f"/api/public/reports/{token}").json()["content_md"] == body
+
+
 def test_public_link_dies_the_moment_the_creator_loses_read_access(
     client, stub_report_launch
 ):

@@ -2282,6 +2282,110 @@ def test_generate_marks_all_empty_sections_failed_instead_of_done(repo, monkeypa
     assert detail["status"] == "failed"
     assert "所有章节均未产出有效正文" in detail["error"]
     assert "本节生成失败" in detail["content_md"]
+    # The body never carries the raw error; the author's section keeps it.
+    assert "pool timeout" not in detail["content_md"]
+    assert "（本节生成失败:本节处理过程出错）" in detail["content_md"]
+    assert detail["sections"][0]["error"] == "pool timeout"
+
+
+_RAW_SECTION_ERROR = "OperationalError: connection to 10.9.8.7:5432 refused (dsn=secret)"
+
+
+def _generate_with_one_failed_section(repo, monkeypatch, *, failing_stage):
+    """Generate a two-section report whose section A raises at ``failing_stage``
+    (``"retrieve"`` or ``"draft"``) with an internal error text, while B drafts."""
+    from app.services.report_engine import ReportEngine
+    from app.services.reasoning_retrieval import ReasoningResult
+
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "q")
+    repo.update_report(nb.id, rid, status="outline_ready", outline=[
+        {"title": "A", "scope": "s", "sub_queries": ["qa"]},
+        {"title": "B", "scope": "s", "sub_queries": ["qb"]},
+    ])
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    events = []
+    monkeypatch.setattr(
+        eng.dependencies.event_log, "emit", lambda event: events.append(event)
+    )
+
+    def deep_dive(_nb, section, *_args, **_kwargs):
+        if failing_stage == "retrieve" and section["title"] == "A":
+            raise RuntimeError(_RAW_SECTION_ERROR)
+        return ReasoningResult()
+
+    monkeypatch.setattr(eng, "_deep_dive", deep_dive)
+    real_draft = eng._draft_section
+
+    def draft(notebook_id, section, *args, **kwargs):
+        if failing_stage == "draft" and section["title"] == "A":
+            raise RuntimeError(_RAW_SECTION_ERROR)
+        return real_draft(notebook_id, section, *args, **kwargs)
+
+    monkeypatch.setattr(eng, "_draft_section", draft)
+
+    class _S:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "ONLY this section" in messages[-1]["content"]:
+                return json.dumps({"markdown": "B 的正文", "grounded": False})
+            return json.dumps({"summary": "总"})
+
+    _bind_report_llm(repo, _S())
+    eng.generate(nb.id, rid, "q", depth=2)
+    return nb, rid, events
+
+
+@pytest.mark.parametrize("failing_stage", ["retrieve", "draft"])
+def test_failed_section_body_is_neutral_and_raw_error_stays_author_only(
+    repo, monkeypatch, failing_stage,
+):
+    """K5: a section that raised in retrieval or drafting is written into the
+    body (which the public share page serves) as the neutral note only; the
+    raw exception text stays in the author's ``sections[].error``, and the
+    failed stage is on the content-free stage event."""
+    nb, rid, events = _generate_with_one_failed_section(
+        repo, monkeypatch, failing_stage=failing_stage
+    )
+    detail = repo.get_report(nb.id, rid)
+    assert detail["status"] == "done"
+    assert _RAW_SECTION_ERROR not in detail["content_md"]
+    assert "10.9.8.7" not in detail["content_md"]
+    assert "## A\n\n（本节生成失败:本节处理过程出错）\n" in detail["content_md"]
+    assert "B 的正文" in detail["content_md"]
+    failed = [s for s in detail["sections"] if s.get("failed")]
+    assert [s["title"] for s in failed] == ["A"]
+    assert failed[0]["error"] == _RAW_SECTION_ERROR
+    assert any(
+        event.get("kind") == "report_stage_timing"
+        and event.get("stage") == failing_stage
+        and event.get("section_index") == 0
+        and event.get("failed") is True
+        for event in events
+    )
+    # The reason code travels as an event; no event carries the raw text.
+    assert all(_RAW_SECTION_ERROR not in json.dumps(e, default=str) for e in events)
+
+
+def test_model_failure_note_in_body_is_unchanged(repo, monkeypatch):
+    """The model-failure classes already wrote neutral copy; it is kept as is."""
+    from app.services.report_engine import ReportEngine
+
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "q")
+    repo.update_report(nb.id, rid, status="outline_ready", outline=[
+        {"title": "A", "scope": "s", "sub_queries": ["q"]},
+    ])
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    monkeypatch.setattr(eng, "_run_sections", lambda *args, **kwargs: [{
+        "title": "A", "scope": "s", "markdown": "", "grounded": False,
+        "failed": True, "error": "本节模型调用失败,已重试", "id_map": {},
+        "claims": [], "claim_ledger_status": "missing",
+    }])
+    eng.generate(nb.id, rid, "q", depth=2)
+    detail = repo.get_report(nb.id, rid)
+    assert "## A\n\n（本节生成失败:本节模型调用失败,已重试）\n" in detail["content_md"]
 
 
 def test_generate_keeps_clarifications_out_of_visible_report_title(repo, monkeypatch):

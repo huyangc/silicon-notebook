@@ -246,6 +246,37 @@ def test_anonymous_reader_gets_the_whitelisted_projection(client):
         assert token_str not in raw, f"{token_str} leaked into the public response"
 
 
+def test_a_trace_steps_raw_error_reaches_the_author_but_never_the_public_page(client):
+    """K5 (same ruling as report failure text): a skipped retrieval step keeps
+    the raw exception in ``detail.error`` for the asker's own view and the
+    admin activity view; the anonymous page carries no reasoning trace at all,
+    so that text can never reach it."""
+    raw_error = "OperationalError: could not connect to 10.9.8.7:5432 (dsn=secret)"
+    owner, owner_id = _new_user(client)
+    nb = _notebook(client, owner)
+    payload = _reasoning_payload()
+    payload["reasoning_trace"] = [{
+        "step_type": "skip", "summary": "跳过弱支撑关系提示",
+        "detail": {"reason": "kg_gap_unavailable", "error": raw_error},
+    }]
+    cid = _seed_shared_conversation(nb, owner_id, payload)
+    token = _share(client, owner, nb, cid)
+
+    public = client.get(f"/api/public/conversations/{token}")
+    assert public.status_code == 200, public.text
+    assert raw_error not in public.text
+    assert "10.9.8.7" not in public.text
+    assert "kg_gap_unavailable" not in public.text
+
+    mine = client.get(f"/api/conversations/{cid}", headers=owner)
+    assert mine.status_code == 200, mine.text
+    assert raw_error in mine.text
+    stranger, _ = _new_user(client)
+    assert client.get(
+        f"/api/conversations/{cid}", headers=stranger
+    ).status_code == 404
+
+
 def test_unknown_and_revoked_tokens_are_both_404(client):
     """An unknown token and a revoked one are indistinguishable 404s."""
     owner, owner_id = _new_user(client)
