@@ -731,6 +731,10 @@ def test_delete_notebook_kg_matches_a_freshly_created_birth_row_byte_for_byte(re
         "derived_generation_counter",
         # 时钟列。
         "updated_at",
+        # K1(裁决 11):删除保留社区行到下次重建,社区指针写哨兵 -1(没有任何
+        # 行在 -1 代),让迁移前遗留的代 0 社区读不到;出生行仍是 0(没有社区
+        # 行)。kg_analysis 的「从未计算」判据不读这一列。
+        "community_generation",
     }
     assert set(reset_row) == set(born_row)
     for column in sorted(set(born_row) - excluded):
@@ -744,6 +748,8 @@ def test_delete_notebook_kg_matches_a_freshly_created_birth_row_byte_for_byte(re
     assert int(reset_row["derived_generation_counter"]) >= int(
         born_row["derived_generation_counter"]
     )
+    assert int(born_row["community_generation"]) == 0
+    assert int(reset_row["community_generation"]) == -1
 
 
 def test_delete_notebook_kg_resets_generation_pointers_but_never_the_counter(repo):
@@ -781,7 +787,8 @@ def test_delete_notebook_kg_resets_generation_pointers_but_never_the_counter(rep
             "FROM unified_kg_state WHERE notebook_id=?", (nb.id,)
         ).fetchone())
     assert row["cluster_generation"] == 0
-    assert row["community_generation"] == 0
+    # K1:社区指针写哨兵 -1(保留的社区行一律不可读,直到重建翻转)。
+    assert row["community_generation"] == -1
     assert row["derived_building_generation"] == 0
     assert row["derived_building_claimed_at"] is None
     assert row["derived_catchup_from"] is None

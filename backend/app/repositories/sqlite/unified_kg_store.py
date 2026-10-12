@@ -104,15 +104,24 @@ def _derived_layer_notebook_key(seq_column: str) -> str:
 _CANONICAL_LAYER_NB = _derived_layer_notebook_key("canonical_rel_seq")
 _MENTION_LAYER_NB = _derived_layer_notebook_key("mention_seq")
 
-# The published community generation; -1 (never a real generation) while the
-# community layer is in the delete signature -- same single state-row lookup.
-# A published generation above 0 (every notebook rebuilt since generations
-# exist) answers at the first branch, reading no more than before.
+# The weak-support reader seeks the primary key once per seed (``canonical_src
+# IN (...)``), and SQLite re-reads a subquery-valued key on each of those
+# seeks (measured +8.5% at 96 seeds). There the gate rides the LIMIT instead:
+# ``LIMIT (CASE WHEN <delete signature> THEN 0 ELSE ? END)`` is evaluated once
+# before the scan. Parameters: the notebook id, then the limit.
+_CANONICAL_LAYER_LIMIT = (
+    "(CASE WHEN EXISTS (SELECT 1 FROM unified_kg_state dls "
+    "WHERE dls.notebook_id = ? AND dls.canonical_rel_seq = -1 "
+    "AND dls.kg_reset_epoch > 0 AND dls.last_rebuild_at = '') THEN 0 ELSE ? END)"
+)
+
+# Communities need no read gate: the delete writes the published community
+# generation as -1 (knowledge_store.delete_notebook_graph_rows), which no row
+# carries, so these readers find nothing until a rebuild flips it -- the
+# statements are byte-for-byte the pre-K1 ones.
 _PUBLISHED_COMMUNITY_GEN = (
-    "COALESCE((SELECT CASE WHEN community_generation <> 0 THEN community_generation "
-    "WHEN community_seq = -1 AND kg_reset_epoch > 0 AND last_rebuild_at = '' "
-    "THEN -1 ELSE community_generation END "
-    "FROM unified_kg_state WHERE notebook_id = ?), 0)"
+    "COALESCE((SELECT community_generation FROM unified_kg_state "
+    "WHERE notebook_id = ?), 0)"
 )
 
 
@@ -1244,13 +1253,13 @@ class UnifiedKgStore:
                 f"SELECT canonical_src, edge_type, canonical_tgt, source_count, "
                 f"       sample_relation_ids "
                 f"FROM canonical_relations "
-                f"WHERE notebook_id = {_CANONICAL_LAYER_NB} "
+                f"WHERE notebook_id=? "
                 f"  AND canonical_src IN ({placeholders}) "
                 f"  AND source_count<=? "
                 f"ORDER BY source_count ASC, canonical_tgt ASC, canonical_src ASC, "
                 f"         edge_type ASC "
-                f"LIMIT ?",
-                [notebook_id, notebook_id, *canonical_ids, source_max, limit],
+                f"LIMIT {_CANONICAL_LAYER_LIMIT}",
+                [notebook_id, *canonical_ids, source_max, notebook_id, limit],
             ).fetchall()
         if viewer_id is not None:
             condition, param = foreign_memory_object_excluded("ko"), viewer_id
@@ -1287,15 +1296,15 @@ class UnifiedKgStore:
             f"FROM (SELECT notebook_id, canonical_src, edge_type, canonical_tgt, "
             f"             source_count, sample_relation_ids "
             f"      FROM canonical_relations "
-            f"      WHERE notebook_id = {_CANONICAL_LAYER_NB} "
+            f"      WHERE notebook_id=? "
             f"        AND canonical_src IN ({placeholders}) "
             f"        AND source_count<=? "
             f"      ORDER BY source_count ASC, canonical_tgt ASC, canonical_src ASC, "
             f"               edge_type ASC LIMIT -1 OFFSET 0) cr "
             f"WHERE {_weak_target_supported(condition)} "
-            f"LIMIT ?",
-            [notebook_id, notebook_id, *canonical_ids, source_max, notebook_id,
-             param, limit],
+            f"LIMIT {_CANONICAL_LAYER_LIMIT}",
+            [notebook_id, *canonical_ids, source_max, notebook_id,
+             param, notebook_id, limit],
         ).fetchall()
 
     @staticmethod
