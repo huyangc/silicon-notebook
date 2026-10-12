@@ -13,19 +13,23 @@ affect from the outside:
 * every port call on the retrieval port, the experience library (this is
   where ``note_adopted`` shows up) and the profile store, plus the plugin
   host's calls (recorded by the fake host itself);
-* every SQLite statement, keyed by ``threading.get_ident()``.
+* every SQL statement the application sends (``is_application_statement``),
+  keyed by ``threading.get_ident()``.
 
 Port calls and SQL are split by thread (see ``Probe.split``): the run's own
 thread — where the reflect loop and the close execute — as an exact ordered
-sequence; the first round's pool workers as a set.
+sequence; the first round's pool workers as a multiset, except the memo-fill
+reads they race on.
 
-Determinism: row ids come from a counter instead of ``uuid4`` while a scenario
-seeds and runs; bound timestamps are masked and ``IN (...)`` literal lists are
-sorted in recorded SQL; the process-wide caches the run reads
-(``_EXPERIENCE_CACHE`` and every ``knowledge_counts_cache`` memo) are cleared
-and every scenario gets a fresh repository. No wall clock feeds a recorded
-value: ``duration_ms`` is not projected, and the only clock-dependent branches
-(chunk rerank deadline, plugin timeout) are not exercised by any scenario.
+Determinism across runs and platforms: row ids come from a counter instead of
+``uuid4`` while a scenario seeds and runs; bound timestamps are masked and
+``IN (...)`` literal lists are sorted in recorded SQL; statements SQLite runs
+inside FTS5 are not recorded; vector scores are projected out (``SCORE_KEYS``);
+the process-wide caches the run reads (``_EXPERIENCE_CACHE`` and every
+``knowledge_counts_cache`` memo) are cleared and every scenario gets a fresh
+repository. No wall clock feeds a recorded value: ``duration_ms`` is not
+projected, and the only clock-dependent branches (chunk rerank deadline,
+plugin timeout) are not exercised by any scenario.
 """
 from __future__ import annotations
 
@@ -59,6 +63,28 @@ def _sorted_in_list(match: "re.Match[str]") -> str:
     return "IN (" + ",".join(items) + ")"
 
 
+#: Reads behind check-then-fill memos that the first round's workers race on
+#: (``version_signal`` and friends on ``unified_kg_state``).
+_RACY_MEMO_READS = (
+    "SELECT kg_mutation_seq",
+    "SELECT COALESCE(kg_mutation_seq",
+)
+
+
+def is_application_statement(statement: str) -> bool:
+    """Only what the application itself sends. SQLite's trace callback also
+    reports statements run *inside* a virtual table (FTS5 reads its shadow
+    tables and ``PRAGMA 'main'.data_version`` on its own), prefixed ``-- ``
+    or addressed as ``'main'.``; their number and order follow the SQLite
+    release, not the code under test."""
+    head = statement.lstrip()
+    return not (
+        head.startswith("--")
+        or head.upper().startswith("PRAGMA")
+        or "'main'." in head
+    )
+
+
 def mask_volatile(text: str) -> str:
     return _IN_LIST_PATTERN.sub(_sorted_in_list, _TS_PATTERN.sub("<ts>", text))
 
@@ -77,7 +103,7 @@ class Probe:
         self._lock = threading.Lock()
 
     def note_sql(self, statement: str) -> None:
-        if self.active:
+        if self.active and is_application_statement(statement):
             with self._lock:
                 self.sql.append((threading.get_ident(), mask_volatile(statement)))
 
@@ -87,20 +113,23 @@ class Probe:
                 self.ports.append((threading.get_ident(), label))
 
     def split(self, rows: List[tuple]) -> Dict[str, Any]:
-        """The run's own thread as an ordered sequence; everything else as a
-        set.
+        """The run's own thread as an ordered sequence; the first round's pool
+        workers as a multiset (sorted list) — except the memo-fill reads.
 
         The reflect loop and the close run on the caller's thread, so that
-        sequence is exact. The first round fans out into pools whose workers
-        race to fill version-keyed memos (``version_signal`` reads): which
-        worker issues a statement, and how many workers miss the memo before
-        one fills it, is scheduling, measured to vary between identical runs.
-        What does not vary is *which* statements the pools issue, so that is
-        what is recorded for them.
+        sequence is exact. The first round fans out into pools; their order is
+        scheduling, their multiset is not — with one exception: workers race
+        to fill version-keyed memos (``_RACY_MEMO_READS``), and how many of them
+        miss before one fills it was measured to vary between identical runs.
+        Those reads are recorded once each (presence, not count).
         """
         main = [value for ident, value in rows if ident == self.main_ident]
-        workers = sorted({value for ident, value in rows if ident != self.main_ident})
-        return {"main_thread": main, "worker_threads": workers}
+        workers = [value for ident, value in rows if ident != self.main_ident]
+        racy = sorted({value for value in workers if value.startswith(_RACY_MEMO_READS)})
+        counted = sorted(value for value in workers
+                         if not value.startswith(_RACY_MEMO_READS))
+        return {"main_thread": main, "worker_threads": counted,
+                "worker_memo_reads": racy}
 
 
 _CURRENT: List[Optional[Probe]] = [None]
@@ -164,13 +193,22 @@ def deterministic_ids():
         yield
     finally:
         uuid.uuid4 = real
-        for module in patched:
-            module.uuid4 = real
+        # every binding, including modules first imported inside the block
+        for module in patched + list(sys.modules.values()):
+            if module is not None and getattr(module, "uuid4", None) is fake_uuid4:
+                module.uuid4 = real
+
+
+#: Vector-derived scores. Their last bits follow the BLAS kernel (float32
+#: ``matrix @ q``), so they are projected out; the ORDER they produce is kept
+#: (every list keeps its order) and the fixture has no mathematical ties, so
+#: that order is the same on every BLAS.
+SCORE_KEYS = frozenset({"score", "relevance", "query_relevance"})
 
 
 def canon(value: Any, *, depth: int = 0) -> Any:
-    """A JSON projection that is stable across runs (sets sorted, objects
-    flattened field by field)."""
+    """A JSON projection that is stable across runs and platforms (sets
+    sorted, objects flattened field by field, vector scores dropped)."""
     if depth > 12:
         return f"<{type(value).__name__}>"
     if value is None or isinstance(value, (bool, int, str)):
@@ -180,7 +218,8 @@ def canon(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, dict):
-        return {str(k): canon(v, depth=depth + 1) for k, v in value.items()}
+        return {str(k): canon(v, depth=depth + 1) for k, v in value.items()
+                if str(k) not in SCORE_KEYS}
     if isinstance(value, (list, tuple)):
         return [canon(v, depth=depth + 1) for v in value]
     if isinstance(value, (set, frozenset)):
@@ -191,6 +230,7 @@ def canon(value: Any, *, depth: int = 0) -> Any:
         return {
             field.name: canon(getattr(value, field.name), depth=depth + 1)
             for field in dataclasses.fields(value)
+            if field.name not in SCORE_KEYS
         }
     dump = getattr(value, "model_dump", None)
     if callable(dump):

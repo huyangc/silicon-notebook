@@ -4,27 +4,35 @@ Each scenario drives one real run (real SQLite repository and ports, a scripted
 model whose reflect payloads pass the production shape gate) through a
 deliberate path of the loop. Two layers of assertions sit on every scenario:
 
-1. **Behaviour assertions** (``Scenario.expect``) — the user/model-visible facts
-   the scenario exists for: which skip reason a branch reports, which budget it
-   spends, what the next reflect turn is told, what the run returns or raises.
-   These are ordinary behaviour tests and stay after the loop's restructuring.
+1. **Behaviour assertions** (``Scenario.expect``) — the user/model-visible
+   facts the scenario exists for: which skip reason a branch reports, which
+   budget it spends, what the next reflect turn is told, what the run returns
+   or raises. These are ordinary behaviour tests and stay.
 
-2. **Split oracle** (``test_reflect_loop_observation_is_unchanged``) — the full
-   observation of the run as recorded by ``tests.reasoning_loop_probe``: trace
-   (with complete ``detail``), every model call's message bytes (hash + size) and
-   each reflect turn's ``candidates_summary`` verbatim, every port call and
-   every SQLite statement (ordered on the run's own thread, as a set for the
-   first round's pool workers — see ``reasoning_loop_probe.Probe.split``), the
-   returned ``ReasoningResult`` (or the exception), and the ``on_step`` stream. It is the byte-identity proof the ``run`` split (debt plan
-   S1, three PRs) is checked against step by step, and it is retired together
-   with the snapshots once that split lands — the behaviour layer above is what
-   remains, so no refactor-only snapshot outlives the refactor it served.
+2. **Split oracle** (the snapshot comparison in ``test_reflect_loop_scenario``
+   and ``test_split_oracle_reaches_every_loop_branch``) — the full observation
+   recorded by ``tests.reasoning_loop_probe``: the trace with complete
+   ``detail``, every model call's message bytes (hash + size), each reflect
+   turn's ``candidates_summary`` verbatim, every port call and every
+   application SQL statement (ordered on the run's own thread; see
+   ``Probe.split`` for the first round's pool workers), the returned
+   ``ReasoningResult`` (or the exception), and the ``on_step`` stream.
+   Vector scores are projected out (their last bits follow the BLAS kernel);
+   the order they produce is kept, and the fixture has no exact score ties.
+   It is the byte-identity proof the ``run`` split (debt plan S1) is checked
+   against step by step, and it is retired, snapshots included, when the last
+   split PR (S1-c) lands; the behaviour layer is what remains.
 
 The snapshots live in ``fixtures/reasoning_loop_characterization/<name>.json``.
-Re-record only on the revision you intend as the baseline::
+Re-record only on the revision you intend as the baseline, with no local
+configuration in play (refused when ``CI`` is set)::
 
-    REGEN_REASONING_LOOP_CHARACTERIZATION=1 PYTHONPATH=backend \\
+    SILICON_NOTEBOOK_ENV_FILE="" MODEL_SERVICES_CONFIG="" EXTENSIONS_CONFIG="" \
+    REGEN_REASONING_LOOP_CHARACTERIZATION=1 PYTHONPATH=backend \
         python -m pytest backend/tests/test_reasoning_loop_characterization.py -n0
+
+``REASONING_LOOP_DUMP_DIR=<dir>`` writes every observation there (before any
+assertion) for diffing against the snapshots.
 
 Wall clock: no recorded value depends on it (``duration_ms`` is not
 projected). The loop's only clock-driven branches — the chunk-rerank deadline
@@ -207,14 +215,25 @@ _PASSAGES = (
     ("read_lef", "read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。"),
     ("overview", "版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。"),
 )
+_PROCESS_NOTES = (
+    "工艺说明开头:先进工艺下的版图约束。",
+    "工艺说明中段:工艺角与寄生提取的关系。",
+    "工艺说明结论:签核前必须复核工艺角。",
+)
 HUB_RULES = tuple(f"规则{index:02d}" for index in range(1, 31))
 
 
 def _seed_graph(repo) -> tuple:
-    """One notebook, three sources: a small concept graph (one weakly and one
-    strongly supported edge), a two-hop ``derived_from`` chain, a 30-spoke hub
-    (neighbor truncation, >6 weak edges), and five identifier-named passages
-    (exact lookup) with their elements."""
+    """One notebook, three sources: a small concept graph, a two-hop
+    ``derived_from`` chain, a 30-spoke hub (neighbor truncation, >6 weak
+    edges), five identifier-named passages (exact lookup) with their elements,
+    and a second document's elements (two document reads).
+
+    Every KG name is unique. Two objects with the same name both take the
+    exact-name score of 1.0, and the order of an exact tie is decided by
+    floating-point noise upstream (it was measured to flip between BLAS
+    builds); everything else in this fixture is separated by far more than
+    that noise."""
     lifecycle = repo._runtime.knowledge_lifecycle
     notebook = repo._runtime.catalog.create_notebook(NotebookCreate(name="版图"))
     nb = notebook.id
@@ -238,6 +257,13 @@ def _seed_graph(repo) -> tuple:
                 "location_label,text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
                 (element_id, "src-1", "paragraph", section, text,
                  json.dumps({"section_path": section}), NOW))
+        for index, text in enumerate(_PROCESS_NOTES):
+            label = f"第{index + 1}节"
+            db.execute(
+                "INSERT INTO source_elements (id,source_id,element_type,"
+                "location_label,text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+                (f"el-p{index}", "src-2", "paragraph", label, text,
+                 json.dumps({"section_path": label}), NOW))
     nodes = [
         _node("A", "版图设计"), _node("B", "寄生电容"), _node("C", "工艺角"),
         _node("P", "前提甲", "claim"), _node("Q", "桥接乙", "claim"),
@@ -250,9 +276,6 @@ def _seed_graph(repo) -> tuple:
         _edge("A", "H", "depends_on"),
     ] + [_edge("H", f"H{index}", "part_of") for index in range(len(HUB_RULES))]
     lifecycle.store_kg(nb, "src-1", nodes, edges)
-    for source_id in ("src-2", "src-3"):
-        lifecycle.store_kg(nb, source_id, [_node("A", "版图设计"), _node("C", "工艺角")],
-                           [_edge("A", "C", "part_of")])
     lifecycle.rebuild_unified_kg(nb)
     repo.collection_catalog.invalidate()
     ids: Dict[str, str] = {}
@@ -403,11 +426,13 @@ def _make_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("EMBED_DIM", "16")
-    for key in ("OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
-                "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL",
-                "REASONING_LLM_MODEL"):
+    # no local .env, model-service or plugin config may leak into a recording
+    for key in ("SILICON_NOTEBOOK_ENV_FILE", "MODEL_SERVICES_CONFIG",
+                "EXTENSIONS_CONFIG", "OPENAI_COMPAT_API_KEY",
+                "OPENAI_COMPAT_BASE_URL", "REASONING_LLM_API_KEY",
+                "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
         monkeypatch.setenv(key, "")
-    repo = SQLiteRepository(Settings())
+    repo = SQLiteRepository(Settings(_env_file=None))
     bind_all_embedding_clients(repo, rig.CountingEmbedder(dim=16))
     return repo
 
@@ -579,8 +604,10 @@ def observe(scenario: Scenario, tmp_path, monkeypatch) -> dict:
                 if scenario.experience_overrides else {})
         if retriever.agent_profile is not None:
             retriever.agent_profile = rig.PortProbe(retriever.agent_profile, "profile")
-        rig.install_reflect_recorder(retriever, probe)
+        # raw decisions inside, recorder outside: every turn's summary is
+        # recorded, including the turns that never reach the model
         _install_raw_decisions(retriever, script)
+        rig.install_reflect_recorder(retriever, probe)
         outcome: Dict[str, Any] = {}
         result = None
         with rig.probing(probe):
@@ -651,6 +678,7 @@ def _expect_report_depth(obs):
     reflects=[
         act("enumerate_elements", enumerate={"collection": "sources"}),
         act("read_document", read_document={"source": "版图手册"}),
+        act("read_document", read_document={"source": "工艺说明"}),
         act("search_chunks", chunks_query="版图 寄生电容"),
         act("search_papers", search_papers={"query": "版图寄生提取"}),
         act("ppr_retrieve", ppr_query="版图设计"),
@@ -660,16 +688,18 @@ def _expect_report_depth(obs):
 )
 def _expect_ask_stage(obs):
     assert [s["detail"]["next_action"] for s in obs.steps("reflect")] == [
-        "enumerate_elements", "read_document", "search_chunks", "search_papers",
-        "ppr_retrieve", "expand_community"]
+        "enumerate_elements", "read_document", "read_document", "search_chunks",
+        "search_papers", "ppr_retrieve", "expand_community"]
     details = obs.reflect_details()
     # the plugin turn brought only external material: stale held, not bumped
-    assert details[4]["stale"] == details[3]["stale"] > 0
+    assert details[5]["stale"] == details[4]["stale"] > 0
     assert obs.reasons()[-1] == "stale_circuit_breaker"
     assert obs.steps("plugin_action")
     assert obs.port_count("plugin.invoke") == 1
     assert obs.result["external_evidence"]
-    assert obs.result["document_reads"]
+    # both reads reach the result, in the order they were made
+    assert [read["source_id"] for read in obs.result["document_reads"]] == [
+        "src-1", "src-2"]
 
 
 # --- Knowhow completion entry: limits=None, fail_closed, top_n=12 -----------
@@ -744,7 +774,8 @@ def _raise(exc):
         act("expand_graph", expand={"object_id": "@id:版图规则"}),
         act("expand_graph", expand={"object_id": "@id:版图规则"}),
         act("expand_graph", expand={"object_id": ""}),
-        act("expand_graph", expand={"object_id": "@id:版图设计"}),
+        # one expanded node only: the "already expanded" ledger line joins a
+        # set, so with two nodes its order would follow the string hash seed
         RawDecision("teleport"),
         ANSWER,
     ],
@@ -973,6 +1004,8 @@ def _fail_chain_for(ctx, name):
     settings={"reasoning_max_outline_updates": 3, "reasoning_stale_limit": 50},
     reflects=[
         act("search_elements", elements_query="版图"),
+        act("search_elements", elements_query="签核"),
+        act("search_elements", elements_query="命令"),
         lambda ctx, prompt: outline({"id": "s1", "title": "规则清单",
                                      "evidence": [ctx["ids"]["版图规则"]]}),
         act("search_elements", elements_query="工艺"),
@@ -989,7 +1022,8 @@ def _fail_chain_for(ctx, name):
 )
 def _expect_outline(obs):
     details = obs.reflect_details()
-    assert details[0].get("outline_nudged") is True
+    # at most two nudging rounds while the outline is still empty
+    assert [d.get("outline_nudged") for d in details[:3]] == [True, True, None]
     assert "outline_nudged" not in details[-1]
     gap = [s for s in obs.steps("outline") if "kg_gap_candidates" in s["detail"]]
     # the second apply adds fresh weak edges on top of a still-pending batch
@@ -1089,6 +1123,39 @@ def _expect_cap_repair(obs):
     assert "outline_budget" in obs.reasons()
 
 
+@scenario(
+    name="outline_cap_repair_spent_on_rejected_structure",
+    effort="exhaustive", plan_queries=("版图设计", "版图规则"),
+    settings={"reasoning_max_outline_updates": 2, "reasoning_stale_limit": 50},
+    reflects=_overflow_pair(False) + [
+        outline({"id": "s1", "title": "改过的标题"}),
+        lambda ctx, prompt: outline(
+            section_with_shown("s1", "版图要点", 8, 9,
+                               remove_evidence=shown_ids(prompt)[:1])(ctx, prompt),
+            {"id": "s2", "title": "规则", "evidence": []}),
+        ANSWER,
+    ],
+)
+def _expect_cap_repair_spent(obs):
+    # the one cap-repair chance is spent by the rejected submission: the
+    # same-structure retry is an ordinary over-budget update, not a repair
+    assert obs.reasons() == [
+        "outline_repair_structure", "outline_budget",
+        "outline_evidence_overflow_unresolved"]
+
+
+@scenario(
+    name="outline_overflow_on_the_last_step",
+    effort="exhaustive", max_steps=2, plan_queries=("版图设计", "版图规则"),
+    reflects=_overflow_pair(True) + [ANSWER],
+)
+def _expect_overflow_last_step(obs):
+    # no step left for a repair round: the overflow is disclosed instead
+    assert len(obs.steps("reflect")) == 2
+    assert obs.steps("outline")[-1]["detail"]["overflow_evidence"]
+    assert obs.reasons()[-1] == "outline_evidence_overflow_unresolved"
+
+
 # --- consult_memory, zero-hit nudges, adoption -------------------------------
 
 
@@ -1180,6 +1247,31 @@ def _fault_switch(ctx, name):
     return ("wrap", factory)
 
 
+_CROWDING_BLOCK = "工艺关键词" * 90
+
+
+@scenario(
+    name="consult_memory_overlay_once",
+    effort="deep", memory=True, intent_detail=INTENT_DETAIL,
+    settings={"retrieval_experience_inject_enabled": True,
+              "reasoning_stale_limit": 50},
+    profile=(
+        ("", "corpus_shape", _CROWDING_BLOCK),
+        ("", "key_entities", _CROWDING_BLOCK),
+        ("", "corpus_gaps", _CROWDING_BLOCK),
+        (OWNER, "retrieval_notes", "这位成员常问时序收敛细节"),
+    ),
+    reflects=[act("consult_memory"), act("consult_memory"), ANSWER],
+)
+def _expect_overlay_once(obs):
+    # the owner's note was crowded out of the profile block, so the first
+    # consult delivers it; the second has nothing new to say
+    consults = obs.steps("consult_memory")
+    assert len(consults) == 1 and consults[0]["detail"]["entries"] == 0
+    assert "时序收敛" in obs.summaries()[1]
+    assert obs.reasons() == ["consult_memory_nothing_new"]
+
+
 @scenario(
     name="consult_memory_disabled_by_caller",
     effort="deep", memory=True, intent_detail=INTENT_DETAIL,
@@ -1251,6 +1343,7 @@ def test_reflect_loop_scenario(case, tmp_path, monkeypatch):
     case.expect(Observed(observed))
     path = _snapshot_path(case.name)
     if os.environ.get(REGEN_ENV) == "1":
+        assert "CI" not in os.environ, f"{REGEN_ENV} records a baseline; never in CI"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(_serialise(observed), encoding="utf-8")
     expected = json.loads(path.read_text(encoding="utf-8"))

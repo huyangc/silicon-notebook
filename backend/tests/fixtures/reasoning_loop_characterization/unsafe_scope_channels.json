@@ -96,6 +96,7 @@
    "retrieval.keyword_arm_available {\"args\": [], \"kwargs\": {}}",
    "retrieval.retrieve_scored {\"args\": [\"nb-00000000000000000000000000000001\", \"版图设计要点有哪些\"], \"kwargs\": {}}"
   ],
+  "worker_memo_reads": [],
   "worker_threads": [
    "retrieval.federated_retrieve {\"args\": [\"nb-00000000000000000000000000000001\", \"前提甲 结论丙\"], \"kwargs\": {\"types\": [], \"w_keyword\": 0.4, \"w_semantic\": 0.6}}",
    "retrieval.retrieve_chunk_candidates {\"args\": [\"nb-00000000000000000000000000000001\", \"前提甲 结论丙\"], \"kwargs\": {}}",
@@ -259,8 +260,6 @@
      "content_hash": "88fb3cc35981ac00246208db0166296b7b917eaa8e2f223bd0c30e18ed7fc6ee",
      "item_id": "el-4",
      "kind": "element",
-     "relevance": 0.0,
-     "score": 0.571428571,
      "token_count": 8
     },
     {
@@ -270,8 +269,6 @@
      "content_hash": "c2d5fbb0a472b4eb034faed074c92bbf5ac7a66773b7a0ae7bc1149f80f9bcce",
      "item_id": "el-1",
      "kind": "element",
-     "relevance": 0.0,
-     "score": 0.428571429,
      "token_count": 10
     },
     {
@@ -281,8 +278,6 @@
      "content_hash": "c9b25665c2da9d456553be41409c5ac84f9b153fd7e1af0cc813e22488c29e28",
      "item_id": "el-3",
      "kind": "element",
-     "relevance": 0.0,
-     "score": 0.428571429,
      "token_count": 10
     },
     {
@@ -292,8 +287,6 @@
      "content_hash": "6fc63453f0879abc00c22bf376fd317c28948faa27caaaab62e665afbba3d9c7",
      "item_id": "el-0",
      "kind": "element",
-     "relevance": 0.0,
-     "score": 0.142857143,
      "token_count": 10
     },
     {
@@ -303,8 +296,6 @@
      "content_hash": "081f2a6e14c4177df2bd88fd932c82ada211220f80ae126d2f527a5bb4387468",
      "item_id": "el-2",
      "kind": "element",
-     "relevance": 0.0,
-     "score": 0.142857143,
      "token_count": 6
     }
    ],
@@ -331,7 +322,6 @@
     "element_id": "el-4",
     "element_type": "paragraph",
     "location_label": "命令 > overview",
-    "score": 0.571428571,
     "source_id": "src-1",
     "source_title": "版图手册",
     "text": "版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。"
@@ -340,7 +330,6 @@
     "element_id": "el-1",
     "element_type": "paragraph",
     "location_label": "命令 > report_timing",
-    "score": 0.428571429,
     "source_id": "src-1",
     "source_title": "版图手册",
     "text": "report_timing 输出关键路径的时序报告,用于版图设计签核。"
@@ -349,7 +338,6 @@
     "element_id": "el-3",
     "element_type": "paragraph",
     "location_label": "命令 > read_lef",
-    "score": 0.428571429,
     "source_id": "src-1",
     "source_title": "版图手册",
     "text": "read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。"
@@ -358,7 +346,6 @@
     "element_id": "el-0",
     "element_type": "paragraph",
     "location_label": "命令 > set_db",
-    "score": 0.142857143,
     "source_id": "src-1",
     "source_title": "版图手册",
     "text": "set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。"
@@ -367,7 +354,6 @@
     "element_id": "el-2",
     "element_type": "paragraph",
     "location_label": "命令 > get_db",
-    "score": 0.142857143,
     "source_id": "src-1",
     "source_title": "版图手册",
     "text": "get_db 读取版图数据库对象的属性值。"
@@ -411,63 +397,25 @@
    "SELECT s.id, s.notebook_id, s.title, s.file_name, s.summary, s.doc_type, s.source_type, m.is_paper, m.paper_title FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id WHERE s.id IN ('src-1')",
    "SELECT COALESCE(kg_mutation_seq,0) AS ks, COALESCE(cluster_mutation_seq,0) AS cs, COALESCE(mention_seq,-1) AS ms, COALESCE(kg_reset_epoch,0) AS ep FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
    "SELECT source_index_backfilled FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
-   "SELECT k, v FROM 'main'.'kg_objects_fts_config'",
-   "SELECT object_id,name,bm25(kg_objects_fts) AS rank FROM kg_objects_fts WHERE notebook_id='nb-00000000000000000000000000000001' AND kg_objects_fts MATCH '\"版图设计要点有哪些\" OR \"版图设\" OR \"图设计\" OR \"设计要\" OR \"计要点\" OR \"要点有\" OR \"点有哪\" OR \"有哪些\"' AND EXISTS (SELECT 1 FROM knowledge_object_sources kos WHERE kos.notebook_id='nb-00000000000000000000000000000001' AND kos.object_id=kg_objects_fts.object_id AND +kos.source_id IN (SELECT value FROM json_each('[\"src-1\"]'))) ORDER BY rank LIMIT 200",
-   "-- PRAGMA 'main'.data_version",
-   "-- PRAGMA 'main'.data_version",
-   "-- SELECT k, v FROM 'main'.'kg_objects_fts_config'",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT T.'rowid', T.c0, T.c1, T.c2 FROM 'main'.'kg_objects_fts_content' T WHERE T.'rowid'=?",
-   "-- SELECT T.'rowid', T.c0, T.c1, T.c2 FROM 'main'.'kg_objects_fts_content' T WHERE T.'rowid'=?",
-   "-- SELECT T.'rowid', T.c0, T.c1, T.c2 FROM 'main'.'kg_objects_fts_content' T WHERE T.'rowid'=?"
+   "SELECT object_id,name,bm25(kg_objects_fts) AS rank FROM kg_objects_fts WHERE notebook_id='nb-00000000000000000000000000000001' AND kg_objects_fts MATCH '\"版图设计要点有哪些\" OR \"版图设\" OR \"图设计\" OR \"设计要\" OR \"计要点\" OR \"要点有\" OR \"点有哪\" OR \"有哪些\"' AND EXISTS (SELECT 1 FROM knowledge_object_sources kos WHERE kos.notebook_id='nb-00000000000000000000000000000001' AND kos.object_id=kg_objects_fts.object_id AND +kos.source_id IN (SELECT value FROM json_each('[\"src-1\"]'))) ORDER BY rank LIMIT 200"
+  ],
+  "worker_memo_reads": [
+   "SELECT COALESCE(kg_mutation_seq,0) AS ks, COALESCE(cluster_mutation_seq,0) AS cs, COALESCE(mention_seq,-1) AS ms, COALESCE(kg_reset_epoch,0) AS ep FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'"
   ],
   "worker_threads": [
-   "-- PRAGMA 'main'.data_version",
-   "-- SELECT T.'rowid', T.c0, T.c1, T.c2 FROM 'main'.'kg_objects_fts_content' T WHERE T.'rowid'=?",
-   "-- SELECT k, v FROM 'main'.'kg_objects_fts_config'",
-   "-- SELECT pgno FROM 'main'.'kg_objects_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "SELECT COALESCE(kg_mutation_seq,0) AS ks, COALESCE(cluster_mutation_seq,0) AS cs, COALESCE(mention_seq,-1) AS ms, COALESCE(kg_reset_epoch,0) AS ep FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
    "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM chunk_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
    "SELECT COUNT(*) c FROM chunks WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
    "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
    "SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, s.title AS source_title FROM chunks c JOIN sources s ON s.id=c.source_id WHERE c.id IN ('chunk-0','chunk-1','chunk-2','chunk-3','chunk-4')",
    "SELECT chunk_id AS vid, vector FROM chunk_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
    "SELECT id FROM chunks WHERE +notebook_id='nb-00000000000000000000000000000001' AND source_id IN (SELECT value FROM json_each('[\"src-1\"]'))",
-   "SELECT k, v FROM 'main'.'kg_objects_fts_config'",
-   "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
-   "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
    "SELECT ko.object_type, COUNT(*) AS c FROM knowhow_tables kt JOIN knowledge_objects ko ON ko.source_id=kt.hidden_source_id WHERE kt.notebook_id='nb-00000000000000000000000000000001' AND ko.notebook_id='nb-00000000000000000000000000000001' AND ko.status IN ('approved','conflict','project_specific','reviewed') GROUP BY ko.object_type ORDER BY ko.object_type",
    "SELECT object_id,name,bm25(kg_objects_fts) AS rank FROM kg_objects_fts WHERE notebook_id='nb-00000000000000000000000000000001' AND kg_objects_fts MATCH '\"前提甲 结论丙\" OR \"前提甲\" OR \"结论丙\"' AND EXISTS (SELECT 1 FROM knowledge_object_sources kos WHERE kos.notebook_id='nb-00000000000000000000000000000001' AND kos.object_id=kg_objects_fts.object_id AND +kos.source_id IN (SELECT value FROM json_each('[\"src-1\"]'))) ORDER BY rank LIMIT 200",
    "SELECT source_index_backfilled FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
    "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'"
   ]
  },
