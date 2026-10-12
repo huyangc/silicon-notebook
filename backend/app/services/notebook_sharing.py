@@ -51,6 +51,119 @@ def _rewrite_asset_refs(text: str, asset_map: dict) -> str:
     )
 
 
+def _remap_element_asset_id(raw, asset_map: dict):
+    """Point a copied element's top-level ``metadata.asset_id`` at the copy's
+    own ``notebook_assets`` row (old id -> new id via ``asset_map``).
+
+    Writers only ever put ``asset_id`` at the top level of an element's
+    metadata (the parser image elements and ``backfill-images``), so only that
+    key is rewritten; a nested ``asset_id`` is somebody else's data. Every
+    other shape is returned AS-IS, byte for byte: no ``"asset_id"`` substring
+    (the common case, never parsed), text that is not JSON, JSON that is not an
+    object, an id that is unhashable or has no entry in ``asset_map`` (same
+    "unknown id -> unchanged" rule as ``_rewrite_asset_refs``). Raising here
+    would compensate a copy that succeeds today, so nothing in this function
+    raises on bad metadata. Only a value that actually changes is re-serialized,
+    with the same ``ensure_ascii=False`` as the knowhow-element branch; on
+    SQLite that rewritten text may differ from the original in separators or
+    escapes (JSON-equal apart from the id), PostgreSQL stores jsonb either way.
+    """
+    if not isinstance(raw, str) or '"asset_id"' not in raw:
+        return raw
+    try:
+        metadata = json.loads(raw)
+    except (ValueError, RecursionError):
+        return raw
+    if not isinstance(metadata, dict):
+        return raw
+    old_asset_id = metadata.get("asset_id")
+    try:
+        new_asset_id = asset_map.get(old_asset_id)
+    except TypeError:  # unhashable value (a list/object) — not an asset id
+        return raw
+    if new_asset_id is None or new_asset_id == old_asset_id:
+        return raw
+    metadata["asset_id"] = new_asset_id
+    return json.dumps(metadata, ensure_ascii=False)
+
+
+def _copy_source_elements(
+    rows: list[dict],
+    *,
+    knowhow_source_ids_old: set,
+    khtbl_map: dict,
+    khrow_map: dict,
+    khcol_map: dict,
+    source_map: dict,
+    asset_map: dict,
+    element_map: dict,
+    element_row_new: dict,
+    remapped_id: Callable[[str], str],
+) -> list[dict]:
+    """Remap the snapshot's ``source_elements`` rows for a deep copy, in place.
+
+    Pure in-memory rewrite — no statement is issued here; ``copy_notebook``
+    inserts the returned rows exactly as before, inside its compensating try.
+    Fills ``element_map`` (old -> new element id) and ``element_row_new``
+    (old knowhow element id -> NEW knowhow row id) for the chunk loop."""
+    elements_out = []
+    for data in rows:
+        old_element_id = data["id"]
+        if data["source_id"] in knowhow_source_ids_old:
+            # A knowhow cell's element: recompute its id via the
+            # SAME stable formula project_table itself uses
+            # (app.services.knowhow.projection.element_id), keyed on
+            # the ALREADY-remapped row/column ids, instead of an
+            # arbitrary fresh id — this is what lets the post-copy
+            # reprojection find this exact row already in place.
+            metadata = json.loads(data.get("metadata") or "{}")
+            kh_meta = dict(metadata.get("knowhow") or {})
+            new_row_id = khrow_map[kh_meta["row_id"]]
+            new_column_id = khcol_map[kh_meta["column_id"]]
+            new_element_id = element_id(new_row_id, new_column_id)
+            element_map[old_element_id] = new_element_id
+            element_row_new[old_element_id] = new_row_id
+            kh_meta["table_id"] = khtbl_map.get(
+                kh_meta.get("table_id"), kh_meta.get("table_id")
+            )
+            kh_meta["row_id"] = new_row_id
+            kh_meta["column_id"] = new_column_id
+            metadata["knowhow"] = kh_meta
+            data["metadata"] = json.dumps(metadata, ensure_ascii=False)
+            data["id"] = new_element_id
+        else:
+            data["id"] = element_map.setdefault(
+                old_element_id, remapped_id(old_element_id)
+            )
+            # An image element names its picture by notebook_assets id; the
+            # copy minted new asset ids above, so without this the copy's
+            # images point into the ORIGINAL notebook (404 through the asset
+            # proxy, gone once the original deletes the source).
+            if "metadata" in data:
+                data["metadata"] = _remap_element_asset_id(data["metadata"], asset_map)
+        data["source_id"] = source_map[data["source_id"]]
+        elements_out.append(data)
+    return elements_out
+
+
+def _remap_copied_asset_row(data: dict, new_id: str, source_map: dict) -> None:
+    """Move a copied ``notebook_assets`` row into the copy: its notebook, and
+    its ``source_id`` onto the copy's own source.
+
+    ``delete_source_asset_rows`` deletes by ``source_id`` alone (not scoped to a
+    notebook), so a copied row left pointing at the ORIGINAL's source was
+    deleted — file and all — when the original deleted or re-parsed that source,
+    while deleting the copy's own source left it behind. A source id with no
+    entry in ``source_map`` (a source already gone, or a copy-of-a-copy whose
+    row still names the first original's source) keeps its value exactly as
+    today: never NULL, because ``sweep_orphan_assets`` reaps NULL-source rows and
+    their files right after the post-copy projection."""
+    data["notebook_id"] = new_id
+    old_source_id = data.get("source_id")
+    if old_source_id is not None:
+        data["source_id"] = source_map.get(old_source_id, old_source_id)
+
+
 def _reset_copied_notebook_row(
     notebook_row: dict,
     *,
@@ -479,7 +592,7 @@ class NotebookCopyService:
                 old_asset_id = data["id"]
                 new_asset_id = asset_map.setdefault(old_asset_id, remapped_id(old_asset_id))
                 data["id"] = new_asset_id
-                data["notebook_id"] = new_id
+                _remap_copied_asset_row(data, new_id, source_map)
                 asset_files.append((old_asset_id, new_asset_id, data["mime"]))
                 assets_out.append(data)
             self._store.insert_copy_rows("notebook_assets", assets_out, chunk_size=chunk_size)
@@ -527,37 +640,18 @@ class NotebookCopyService:
             )
             # --- end knowhow business tables -------------------------------
 
-            elements_out = []
-            for data in snapshot["source_elements"]:
-                old_element_id = data["id"]
-                if data["source_id"] in knowhow_source_ids_old:
-                    # A knowhow cell's element: recompute its id via the
-                    # SAME stable formula project_table itself uses
-                    # (app.services.knowhow.projection.element_id), keyed on
-                    # the ALREADY-remapped row/column ids, instead of an
-                    # arbitrary fresh id — this is what lets the post-copy
-                    # reprojection find this exact row already in place.
-                    metadata = json.loads(data.get("metadata") or "{}")
-                    kh_meta = dict(metadata.get("knowhow") or {})
-                    new_row_id = khrow_map[kh_meta["row_id"]]
-                    new_column_id = khcol_map[kh_meta["column_id"]]
-                    new_element_id = element_id(new_row_id, new_column_id)
-                    element_map[old_element_id] = new_element_id
-                    element_row_new[old_element_id] = new_row_id
-                    kh_meta["table_id"] = khtbl_map.get(
-                        kh_meta.get("table_id"), kh_meta.get("table_id")
-                    )
-                    kh_meta["row_id"] = new_row_id
-                    kh_meta["column_id"] = new_column_id
-                    metadata["knowhow"] = kh_meta
-                    data["metadata"] = json.dumps(metadata, ensure_ascii=False)
-                    data["id"] = new_element_id
-                else:
-                    data["id"] = element_map.setdefault(
-                        old_element_id, remapped_id(old_element_id)
-                    )
-                data["source_id"] = source_map[data["source_id"]]
-                elements_out.append(data)
+            elements_out = _copy_source_elements(
+                snapshot["source_elements"],
+                knowhow_source_ids_old=knowhow_source_ids_old,
+                khtbl_map=khtbl_map,
+                khrow_map=khrow_map,
+                khcol_map=khcol_map,
+                source_map=source_map,
+                asset_map=asset_map,
+                element_map=element_map,
+                element_row_new=element_row_new,
+                remapped_id=remapped_id,
+            )
             self._store.insert_copy_rows(
                 "source_elements", elements_out, chunk_size=chunk_size
             )

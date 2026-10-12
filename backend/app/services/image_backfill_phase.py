@@ -386,9 +386,9 @@ def apply_plan(
     **刻意不用任何形式的差集判据**（"这一趟新出现的资产行"、"该来源全部无人引用的
     资产行"）：SQLite 侧本命令可与活服务并存，而在线解析是先落资产、之后才换元素，
     所以执行期间冒出来的行可能是并发重解析建的合法数据；文件名也区分不开（在线
-    MinerU 路径同样落 ``<sha>.jpg``）。另外深拷贝会为 `notebook_assets` 铸新 id 却
-    不重映射 `source_elements.metadata.asset_id`，一本副本里每条来源图片资产行都
-    "无人引用"。历史 kill-9 残留（本命令自己更早那些趟留下的）仍按 docs 的判据人工
+    MinerU 路径同样落 ``<sha>.jpg``）。另外修复之前做出的深拷贝副本（那时为
+    `notebook_assets` 铸新 id 却不重映射 `source_elements.metadata.asset_id`）里，
+    每条来源图片资产行都"无人引用"。历史 kill-9 残留（本命令自己更早那些趟留下的）仍按 docs 的判据人工
     清理。
     """
     assets = AssetService(repo)
