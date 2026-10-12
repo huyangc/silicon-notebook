@@ -388,6 +388,62 @@ test("已停用的 Profile 可以在行内确认后重新启用，结果落在�
   expect(within(issuedRow()).getByRole("button", { name: /修改权限/ })).toBeInTheDocument();
 });
 
+function profileListRow(name: string): HTMLElement {
+  const row = screen.getAllByText(name)
+    .map((node) => node.closest(".agent-profile-list > div"))
+    .find((node): node is HTMLElement => node !== null);
+  expect(row).toBeDefined();
+  return row as HTMLElement;
+}
+
+test("启用失败时原因落在该 Profile 行，确认留着可以就地重试", async () => {
+  let attempts = 0;
+  let status = "revoked";
+  const profile = () => ({
+    id: "agent-1", owner_id: "user-1", name: "Claude Code", description: "", status,
+    created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-02T00:00:00Z",
+  });
+  routeRequests(baseRoutes({
+    "GET /agent-profiles": () => [profile()],
+    "GET /agent-tokens": () => [activeToken],
+    "PATCH /agent-profiles/agent-1": () => {
+      attempts += 1;
+      if (attempts === 1) throw humanizedError("服务暂时不可用，请稍后重试", 503);
+      status = "active";
+      return profile();
+    },
+  }));
+  const user = userEvent.setup();
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findAllByText("Claude Code");
+
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "启用" }));
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "确认启用" }));
+  expect(await within(profileListRow("Claude Code")).findByRole("alert")).toHaveTextContent("服务暂时不可用");
+  expect(document.querySelector(".agent-access-body > .agent-access-error")).toBeNull();
+
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "确认启用" }));
+  expect(await within(profileListRow("Claude Code")).findByRole("status")).toHaveTextContent("已启用");
+  expect(within(profileListRow("Claude Code")).queryByRole("alert")).not.toBeInTheDocument();
+});
+
+test("停用失败时原因落在该 Profile 行", async () => {
+  routeRequests(baseRoutes({
+    "GET /agent-profiles": () => [{
+      id: "agent-1", owner_id: "user-1", name: "Claude Code", description: "", status: "active",
+      created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-02T00:00:00Z",
+    }],
+    "PATCH /agent-profiles/agent-1": () => { throw humanizedError("服务暂时不可用，请稍后重试", 503); },
+  }));
+  const user = userEvent.setup();
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findAllByText("Claude Code");
+
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "停用" }));
+  expect(await within(profileListRow("Claude Code")).findByRole("alert")).toHaveTextContent("服务暂时不可用");
+  expect(within(profileListRow("Claude Code")).getByRole("button", { name: "停用" })).toBeEnabled();
+});
+
 const profileOne = {
   id: "agent-1", owner_id: "user-1", name: "Claude Code", description: "", status: "active",
   created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-02T00:00:00Z",
