@@ -45,7 +45,7 @@ def test_incremental_fuse_appends_same_name_cross_doc(repo):
         db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
                    ("ko-B", nb.id, "concept", "approved", "", json.dumps({"name":"Mixture-of-Experts (MoE)"}), "[]", "src-B", now, now))
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
     cmap = repo.cluster_map(nb.id)
     assert cmap.get("ko-B") == cmap.get("ko-A")   # 新 concept 进同一跨文档簇
 
@@ -58,7 +58,7 @@ def test_incremental_fuse_flag_off(repo, monkeypatch):
         db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
                    ("ko-B", nb.id, "concept", "approved", "", json.dumps({"name":"X"}), "[]", "src-B", now, now))
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
     assert repo.cluster_map(nb.id).get("ko-B") is None   # flag 关→不融合
 
 
@@ -77,7 +77,7 @@ def test_incremental_fuse_claim_by_name(repo):
         db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
                    ("kl-B", nb.id, "claim", "approved", "", json.dumps({"name":"MoE raises capacity"}), "[]", "src-B", now, now))
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
     cmap = repo.cluster_map(nb.id)
     assert cmap.get("kl-B") == cmap.get("kl-A")   # 新 claim 进同一名种子簇
 
@@ -100,7 +100,7 @@ def test_tier2_bridge_enqueues_candidate_not_merge(repo):
         for oid, vec in [("ko-old", v_old), ("ko-new", v_new)]:
             db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
                        (oid, nb.id, vec, now))
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
     with repo._connect() as db:
         n = db.execute("SELECT count(*) c FROM concept_merge_candidates WHERE notebook_id=?", (nb.id,)).fetchone()["c"]
     cmap = repo.cluster_map(nb.id)
@@ -115,8 +115,8 @@ def test_incremental_fuse_idempotent(repo):
         db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
                    ("ko-B", nb.id, "concept", "approved", "", json.dumps({"name":"X"}), "[]", "src-B", now, now))
-    repo.incremental_fuse_source(nb.id, "src-B")
-    repo.incremental_fuse_source(nb.id, "src-B")   # 二次
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")   # 二次
     with repo._connect() as db:
         n = db.execute("SELECT count(*) c FROM concept_clusters WHERE notebook_id=? AND member_object_id='ko-B'", (nb.id,)).fetchone()["c"]
     assert n == 1                                   # 幂等,不重复成员
@@ -144,7 +144,7 @@ def test_incremental_procedure_seed_matches_rebuild(repo):
         db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
                    ("kp-B", nb.id, "procedure", "approved", "", json.dumps(payload), "[]", "src-B", now, now))
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
     inc_cid = repo.cluster_map(nb.id).get("kp-B")
     repo.rebuild_unified_kg(nb.id)
     reb_cid = repo.cluster_map(nb.id).get("kp-B")
@@ -169,8 +169,8 @@ def test_tier2_no_duplicate_candidates_on_refuse(repo):
         for oid, vec in [("ko-old", v_old), ("ko-new", v_new)]:
             db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
                        (oid, nb.id, vec, now))
-    repo.incremental_fuse_source(nb.id, "src-B")
-    repo.incremental_fuse_source(nb.id, "src-B")   # 二次:同一对不再入队
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")   # 二次:同一对不再入队
     with repo._connect() as db:
         n = db.execute("SELECT count(*) c FROM concept_merge_candidates WHERE notebook_id=?", (nb.id,)).fetchone()["c"]
     assert n == 1
@@ -196,7 +196,7 @@ def test_incremental_fuse_cleans_orphan_cluster_rows(repo):
         db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
                    ("ko-new", nb.id, "concept", "approved", "", json.dumps({"name":"New"}), "[]", "src-B", now, now))
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
     with repo._connect() as db:
         members = {r["member_object_id"] for r in db.execute(
             "SELECT member_object_id FROM concept_clusters WHERE notebook_id=?", (nb.id,)).fetchall()}
@@ -318,7 +318,7 @@ def test_tier2_ann_path_matches_oracle_when_over_threshold(repo, monkeypatch):
 
     monkeypatch.setattr(knowledge, "incremental_object_rows", _rows_spy)
     monkeypatch.setattr(repo.settings, "kg_incremental_tier2_max_entities", 0)
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
 
     with repo._connect() as db:
         rows = db.execute(
@@ -367,7 +367,7 @@ def test_tier2_ann_path_type_filter_excludes_non_concept(repo, monkeypatch):
 
     _seed_concept(repo, nb.id, "ko-new", "MoE Gating", "src-B", _mk_vec(dim, 0, 0.99, 1, 0.04), now)
     monkeypatch.setattr(repo.settings, "kg_incremental_tier2_max_entities", 0)
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
 
     with repo._connect() as db:
         rows = db.execute(
@@ -400,7 +400,7 @@ def test_tier2_no_index_small_library_byte_identical_to_oracle(repo, monkeypatch
         _seed_concept(repo, nb.id, oid, name, "src-B", vec, now)
 
     # max_entities default (50000) >= len(existing) -> legacy brute-force branch.
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
     with repo._connect() as db:
         rows = db.execute(
             "SELECT canonical_a, canonical_b FROM concept_merge_candidates WHERE notebook_id=?",
@@ -433,7 +433,7 @@ def test_tier2_no_index_over_threshold_skips_with_event(repo, monkeypatch):
     orig_emit = repo.event_log.emit
     monkeypatch.setattr(repo.event_log, "emit", lambda e, **kw: (events.append(e), orig_emit(e, **kw))[0] is None)
 
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
 
     with repo._connect() as db:
         n = db.execute("SELECT count(*) c FROM concept_merge_candidates WHERE notebook_id=?",
@@ -474,7 +474,7 @@ def test_tier2_ann_bridge_survives_stale_index(repo, monkeypatch):
     assert stale is not None
 
     monkeypatch.setattr(repo.settings, "kg_incremental_tier2_max_entities", 0)
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
     with repo._connect() as db:
         n = db.execute("SELECT count(*) c FROM concept_merge_candidates WHERE notebook_id=?",
                        (nb.id,)).fetchone()["c"]
@@ -532,7 +532,7 @@ def test_tier2_ann_claim_dense_overfetch_matches_concept_only_oracle(repo, monke
     for oid, name, vec in new_items:
         _seed_concept(repo, nb.id, oid, name, "src-B", vec, now)
     monkeypatch.setattr(repo.settings, "kg_incremental_tier2_max_entities", 0)
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
 
     with repo._connect() as db:
         rows = db.execute(
@@ -665,7 +665,7 @@ def test_tier2_ann_skips_deprecated_concepts(repo, monkeypatch):
 
     _seed_concept(repo, nb.id, "ko-new", "MoE Gating", "src-B", _unit(dim, 0), now)
     monkeypatch.setattr(repo.settings, "kg_incremental_tier2_max_entities", 0)
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
 
     with repo._connect() as db:
         rows = db.execute(
@@ -733,7 +733,7 @@ def test_incremental_merge_pair_reads_delegate_on_caller_connections(repo, monke
 
     monkeypatch.setattr(store, "merge_candidate_pairs", reject_full_scan)
 
-    getattr(repo, "incremental_fuse_source")(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
 
     assert [statuses for _nb, statuses, _db, _ids in calls] == [
         ("pending",), ("confirmed", "rejected", "deferred"),
@@ -804,7 +804,7 @@ def test_tier2_never_bridges_to_a_memory_derived_concept(repo, monkeypatch, bran
     _seed_concept(repo, nb.id, "ko-new", "MoE Gating", "src-B",
                   _mk_vec(dim, 0, 0.99, 1, 0.04), now)
 
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
 
     pair =tuple(sorted(("K-" + _norm("MoE Gating"), "K-" + _norm("Expert Routing"))))
     if source_type == "markdown":
@@ -831,7 +831,7 @@ def test_tier2_memory_concepts_do_not_take_top_k_slots(repo):
     _build_small_base(repo, nb.id, shared, now)
     _seed_concept(repo, nb.id, "ko-new", "MoE Gating", "src-B", _unit(dim, 0), now)
 
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
 
     assert _candidate_pairs(repo, nb.id) == {
         tuple(sorted(("K-" + _norm("MoE Gating"), "K-" + _norm("Expert Routing"))))
@@ -867,7 +867,7 @@ def test_notebook_without_memory_reads_no_memory_objects(repo, monkeypatch):
                          exclude_memory_derived=exclude_memory_derived)
 
     monkeypatch.setattr(lifecycle.knowledge, "incremental_object_rows", rows_spy)
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
     assert probes == [nb.id]
     # Exactly the reads this method made before E4-3: the new-object read per
     # type and the brute-force pool read (now carrying the Memory exclusion in
@@ -971,11 +971,11 @@ def test_fusion_statements_do_not_grow_with_memory_sources(tmp_path, monkeypatch
             r.build_scale_index(nb.id)
             monkeypatch.setattr(r.settings, "kg_incremental_tier2_max_entities", 0)
         _seed_concept(r, nb.id, "ko-new", "MoE Gating", "src-B", _unit(16, 0), now)
-        r.incremental_fuse_source(nb.id, "src-B")  # warm-up (orphan sweep, append)
+        r._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")  # warm-up (orphan sweep, append)
         with r._write() as db:
             db.execute("DELETE FROM concept_merge_candidates WHERE notebook_id=?", (nb.id,))
         counter = _count_statements(monkeypatch)
-        r.incremental_fuse_source(nb.id, "src-B")
+        r._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
         counts[n] = counter["n"]
         monkeypatch.undo()
         assert _candidate_pairs(r, nb.id) == {
@@ -1029,7 +1029,7 @@ def test_ann_widening_failure_keeps_the_pairs_found_in_earlier_rounds(repo, monk
     errors: list = []
     monkeypatch.setattr(lifecycle, "_note_model_error", lambda *a, **k: errors.append(a[0]))
 
-    repo.incremental_fuse_source(nb.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb.id, "src-B")
 
     assert len(calls) == 2 and calls[1] > calls[0]  # it did widen, and that round failed
     assert errors == ["tier2_bridge_ann_query"]

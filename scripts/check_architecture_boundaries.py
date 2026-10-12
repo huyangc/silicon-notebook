@@ -698,11 +698,127 @@ def _weakref_seam_attributes(tree: ast.AST) -> list[str]:
     ]
 
 
+RUNTIME_CLASS_FILE = "backend/app/services/repository_runtime.py"
+
+
+def _weakref_runtime_chains(tree: ast.AST) -> list[tuple[str, str]]:
+    """``(component, member)`` for every
+    ``_repository_from_weakref(...)._runtime.<component>.<member>`` -- a seam
+    that skips the facade and resolves a runtime component's method at call
+    time. Retiring or renaming that method raises inside the same swallowing
+    runtime callers as a facade seam does."""
+
+    chains: list[tuple[str, str]] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Attribute)
+            and isinstance(node.value.value, ast.Attribute)
+            and node.value.value.attr == "_runtime"
+        ):
+            continue
+        call = node.value.value.value
+        if (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "_repository_from_weakref"
+        ):
+            chains.append((node.value.attr, node.attr))
+    return chains
+
+
+def _runtime_component_class(
+    root: Path, component: str
+) -> tuple[Path, ast.ClassDef] | None:
+    """The class ``RepositoryRuntime.<component>`` holds: a class- or
+    ``self``-level annotation, a property's return annotation, or the class
+    constructed by a ``self.<component> = <Class>(...)`` assignment. The first
+    name that resolves to a class wins (``X | None`` resolves ``X``)."""
+
+    path = root / RUNTIME_CLASS_FILE
+    if not path.is_file():
+        return None
+    resolved = _resolve_class(root, path, "RepositoryRuntime")
+    if resolved is None:
+        return None
+
+    def is_component(target: ast.AST) -> bool:
+        return (isinstance(target, ast.Name) and target.id == component) or (
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+            and target.attr == component
+        )
+
+    candidates: list[ast.AST] = []
+    for node in ast.walk(resolved[1]):
+        if isinstance(node, ast.AnnAssign) and is_component(node.target):
+            candidates.append(node.annotation)
+        elif (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == component
+            and node.returns is not None
+        ):
+            candidates.append(node.returns)
+        elif (
+            isinstance(node, ast.Assign)
+            and any(is_component(target) for target in node.targets)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+        ):
+            candidates.append(node.value.func)
+    for annotation in candidates:
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            annotation = ast.parse(annotation.value, mode="eval").body
+        for name in (n.id for n in ast.walk(annotation) if isinstance(n, ast.Name)):
+            found = _resolve_class(root, resolved[0], name)
+            if found is not None:
+                return found
+    return None
+
+
+def _class_members_with_bases(
+    root: Path, path: Path, class_node: ast.ClassDef,
+    seen: frozenset[tuple[Path, str]] = frozenset(),
+) -> set[str]:
+    if (path, class_node.name) in seen:
+        return set()
+    names = _class_attribute_names(path, class_node.name)
+    for base in class_node.bases:
+        if isinstance(base, ast.Name):
+            found = _resolve_class(root, path, base.id)
+            if found is not None:
+                names |= _class_members_with_bases(
+                    root, found[0], found[1], seen | {(path, class_node.name)}
+                )
+    return names
+
+
+def _weakref_runtime_chain_violations(root: Path, tree: ast.AST) -> list[str]:
+    violations: list[str] = []
+    for component, member in sorted(set(_weakref_runtime_chains(tree))):
+        resolved = _runtime_component_class(root, component)
+        if resolved is None:
+            violations.append(
+                "facade weak-reference seam reads a runtime component whose "
+                f"class cannot be resolved: _runtime.{component}"
+            )
+            continue
+        if member not in _class_members_with_bases(root, *resolved):
+            violations.append(
+                "facade weak-reference seam reads a missing "
+                f"{resolved[1].name} attribute: _runtime.{component}.{member}"
+            )
+    return violations
+
+
 def dynamic_facade_reference_violations(root: Path) -> list[str]:
     """Every facade attribute named only at run time must still exist: the
     weak-reference seams in ``repository_facade.py`` must resolve on
     ``RepositoryFacade`` itself (they serve both backends, so a name only one
-    wrapper defines does not count), and a literal ``getattr``/``hasattr``
+    wrapper defines does not count; a seam that goes through
+    ``._runtime.<component>.<member>`` must name a member of the component's
+    class), and a literal ``getattr``/``hasattr``
     probe on a facade-shaped receiver in ``backend/app`` or ``scripts`` must
     resolve on some repository class (inside ``RepositoryFacade``, on the
     facade itself)."""
@@ -722,6 +838,9 @@ def dynamic_facade_reference_violations(root: Path) -> list[str]:
             - facade_names
         )
     ]
+    violations.extend(
+        _weakref_runtime_chain_violations(root, _parse_file(facade_path))
+    )
     class_files = set(FACADE_CLASS_FILES.values())
     used_exemptions: set[tuple[str, str, str]] = set()
     for base in (root / "backend" / "app", root / "scripts"):

@@ -172,8 +172,9 @@ discussion):
     ``getattr(<receiver>, "<name>")`` -- and only while ``<name>`` is still
     on the facade. It never sees ``hasattr`` probes, the
     ``_repository_from_weakref(...).<name>`` seams ``RepositoryFacade.__init__``
-    hands the runtime (``incremental_fuse_source`` is one: it reads as
-    test-only here although production calls it through such a seam), or a
+    hands the runtime (``incremental_fuse_source`` was one: it read as
+    test-only here although production called it through such a seam, until
+    S2 batch C pointed the seam at ``._runtime.knowledge_lifecycle``), or a
     protocol the facade is handed out as (``cast(P, repository())``). Those
     are covered by ``dynamic_facade_reference_violations`` and
     ``facade_protocol_binding_violations`` in

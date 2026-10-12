@@ -153,7 +153,7 @@ def test_write_clusters_insert_failure_rolls_back_the_whole_replace(
 ):
     notebook = repo.create_notebook(NotebookCreate(name="cluster rollback"))
     object_id = repo._test_insert_object(notebook.id, "concept", {"name": "seed"})
-    repo.write_clusters(notebook.id, [{
+    repo._runtime.knowledge_lifecycle.write_clusters(notebook.id, [{
         "canonical_id": "K-old",
         "member_object_id": object_id,
         "canonical_name": "seed",
@@ -172,7 +172,7 @@ def test_write_clusters_insert_failure_rolls_back_the_whole_replace(
     )
 
     with pytest.raises(RuntimeError, match="cluster insert failed"):
-        repo.write_clusters(notebook.id, [{
+        repo._runtime.knowledge_lifecycle.write_clusters(notebook.id, [{
             "canonical_id": "K-new",
             "member_object_id": object_id,
             "canonical_name": "seed",

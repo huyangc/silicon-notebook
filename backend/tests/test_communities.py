@@ -39,26 +39,26 @@ def test_rebuild_communities_detects_two_groups(repo):
         [_claim("A", "a"), _claim("B", "b"), _claim("C", "c"),
          _claim("D", "d"), _claim("E", "e")],
         [_rel("A", "B"), _rel("B", "C"), _rel("A", "C"), _rel("D", "E")])
-    n = repo.rebuild_communities(nb.id)
+    n = repo._runtime.knowledge_lifecycle.rebuild_communities(nb.id)
     assert n == 2
-    comms = repo.list_communities(nb.id)            # List[List[str]] member-id lists
+    comms = repo._runtime.knowledge_lifecycle.list_communities(nb.id)            # List[List[str]] member-id lists
     sizes = sorted(len(c) for c in comms)
     assert sizes == [2, 3]
 
 
 def test_rebuild_communities_empty_graph(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    assert repo.rebuild_communities(nb.id) == 0
-    assert repo.list_communities(nb.id) == []
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(nb.id) == 0
+    assert repo._runtime.knowledge_lifecycle.list_communities(nb.id) == []
 
 
 def test_rebuild_communities_is_idempotent(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo.settings.community_min_size = 2            # size-2 {A,B} must survive here
     repo.store_kg(nb.id, None, [_claim("A", "a"), _claim("B", "b")], [_rel("A", "B")])
-    repo.rebuild_communities(nb.id)
-    repo.rebuild_communities(nb.id)                 # rerun must not duplicate
-    assert len(repo.list_communities(nb.id)) == 1   # one community {A,B}, not two
+    repo._runtime.knowledge_lifecycle.rebuild_communities(nb.id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(nb.id)                 # rerun must not duplicate
+    assert len(repo._runtime.knowledge_lifecycle.list_communities(nb.id)) == 1   # one community {A,B}, not two
 
 
 def test_community_query_service_uses_explicit_sibling_threshold():

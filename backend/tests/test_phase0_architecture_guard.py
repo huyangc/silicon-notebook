@@ -372,6 +372,67 @@ def test_weakref_seam_must_name_a_live_facade_attribute(tmp_path, monkeypatch):
         ]
 
 
+def test_weakref_seam_through_the_runtime_must_name_a_live_component_member(
+    tmp_path, monkeypatch
+):
+    """A seam may skip the facade (``_repository_from_weakref(ref)._runtime
+    .<component>.<member>``, as ``incremental_fuse_source`` does since S2
+    batch C); the member must still exist on the component's class, found
+    from a ``self.<component> = <Class>(...)`` assignment or a property's
+    return annotation, bases included."""
+    monkeypatch.setattr(_GUARD, "DYNAMIC_FACADE_REFERENCE_EXEMPTIONS", {})
+    seam = (
+        "    def __init__(self, ref):\n"
+        "        self._runtime = None\n"
+        "        self._seam = lambda nb: _repository_from_weakref(ref)"
+        "._runtime.{component}.{member}(nb)\n"
+        + _LIVE_BODY
+    )
+    runtime = {
+        "backend/app/services/repository_runtime.py": (
+            "from app.services.lifecycle import Lifecycle\n"
+            "from app.services.asker import Asker\n"
+            "class RepositoryRuntime:\n"
+            "    def wire(self):\n"
+            "        self.lifecycle = Lifecycle()\n"
+            "    @property\n"
+            "    def asker(self) -> Asker:\n"
+            "        return Asker()\n"
+        ),
+        "backend/app/services/lifecycle.py": (
+            "class Base:\n    def inherited(self, nb): pass\n"
+            "class Lifecycle(Base):\n    def fuse(self, nb): pass\n"
+        ),
+        "backend/app/services/asker.py": "class Asker:\n    def ask(self, nb): pass\n",
+    }
+    for component, member in (
+        ("lifecycle", "fuse"), ("lifecycle", "inherited"), ("asker", "ask"),
+    ):
+        root = _facade_root(
+            tmp_path,
+            facade_body=seam.format(component=component, member=member),
+            allowed=_LIVE_ALLOWED, app_files=runtime,
+        )
+        assert _GUARD.dynamic_facade_reference_violations(root) == []
+
+    root = _facade_root(
+        tmp_path, facade_body=seam.format(component="lifecycle", member="gone"),
+        allowed=_LIVE_ALLOWED, app_files=runtime,
+    )
+    assert _GUARD.dynamic_facade_reference_violations(root) == [
+        "facade weak-reference seam reads a missing Lifecycle attribute: "
+        "_runtime.lifecycle.gone"
+    ]
+    root = _facade_root(
+        tmp_path, facade_body=seam.format(component="nowhere", member="fuse"),
+        allowed=_LIVE_ALLOWED, app_files=runtime,
+    )
+    assert _GUARD.dynamic_facade_reference_violations(root) == [
+        "facade weak-reference seam reads a runtime component whose class "
+        "cannot be resolved: _runtime.nowhere"
+    ]
+
+
 def test_literal_getattr_probe_must_name_a_live_repository_attribute(
     tmp_path, monkeypatch
 ):

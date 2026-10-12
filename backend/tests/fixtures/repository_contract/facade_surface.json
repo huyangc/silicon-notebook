@@ -2853,12 +2853,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.append_clusters",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.append_knowhow_rows",
         "target": "_runtime"
       },
@@ -3489,12 +3483,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.incremental_fuse_source",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.index_status",
         "target": "_runtime"
       },
@@ -3604,12 +3592,6 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.list_agent_tokens",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.list_communities",
         "target": "_runtime"
       },
       {
@@ -3862,24 +3844,6 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.public_report_by_token",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.rebuild_canonical_relations",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.rebuild_communities",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.rebuild_mention_bridge",
         "target": "_runtime"
       },
       {
@@ -4510,12 +4474,6 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.warm_open_path_caches",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.write_clusters",
         "target": "_runtime"
       },
       {

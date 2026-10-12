@@ -37,7 +37,7 @@ def test_store_kg_batch_embeds_nodes(repo):
 
 def test_cluster_and_candidate_crud(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo.write_clusters(nb.id, [
+    repo._runtime.knowledge_lifecycle.write_clusters(nb.id, [
         {"canonical_id": "K1", "member_object_id": "o1", "canonical_name": "MOSFET"},
         {"canonical_id": "K1", "member_object_id": "o2", "canonical_name": "MOSFET"},
     ])
@@ -755,14 +755,14 @@ def test_review_defaults_drain_keep_separate_that_old_single_threshold_left_pend
 
 def test_write_clusters_is_per_type_isolated(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo.write_clusters(nb.id, [{"canonical_id": "K-a", "member_object_id": "o1",
+    repo._runtime.knowledge_lifecycle.write_clusters(nb.id, [{"canonical_id": "K-a", "member_object_id": "o1",
                                  "canonical_name": "A"}], object_type="concept")
-    repo.write_clusters(nb.id, [{"canonical_id": "KL-b", "member_object_id": "o2",
+    repo._runtime.knowledge_lifecycle.write_clusters(nb.id, [{"canonical_id": "KL-b", "member_object_id": "o2",
                                  "canonical_name": "B"}], object_type="claim")
     cm = repo.cluster_map(nb.id)
     assert cm.get("o1") == "K-a" and cm.get("o2") == "KL-b"   # both persist
     # rewriting concept clusters must NOT delete claim clusters
-    repo.write_clusters(nb.id, [{"canonical_id": "K-a2", "member_object_id": "o1b",
+    repo._runtime.knowledge_lifecycle.write_clusters(nb.id, [{"canonical_id": "K-a2", "member_object_id": "o1b",
                                  "canonical_name": "A2"}], object_type="concept")
     cm2 = repo.cluster_map(nb.id)
     assert "o2" in cm2 and cm2.get("o1") is None and cm2.get("o1b") == "K-a2"

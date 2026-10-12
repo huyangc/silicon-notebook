@@ -904,7 +904,7 @@ def assert_a_re_stamp_never_hides_an_online_re_extraction(repo) -> None:
         [_object("a", "MOSFET"), _object("b", "gain"), _object("c", "NEWCOMER")],
         [],
     )
-    repo.incremental_fuse_source(notebook_id, SHARED_SOURCE)
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook_id, SHARED_SOURCE)
     assert runtime.status(notebook_id)["state"] == "stale"
     events = _capture_events(repo)
     confirm_a_memory(repo, notebook_id, next(_LATE_COUNTER))

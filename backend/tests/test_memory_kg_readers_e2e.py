@@ -277,7 +277,7 @@ def _run_producers(world: World) -> None:
         # B's nearest neighbour of the new concept: without the Tier-2
         # exclusion it would be the candidate (a pre-isolation cluster holds it).
         _put_vector(world, ids.route_b, [1.0, 0.04] + _PAD)
-    repo.incremental_fuse_source(nb, "src-s4")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb, "src-s4")
     bind_chat_client(repo, "kg_conflict_review", EchoReviewer())
     repo.resolve_notebook_conflicts(nb)
 
@@ -292,7 +292,7 @@ def build_world(client, repo, q, *, postgres: bool, kind: str) -> World:
     # what the rebuild's end-state snapshot must count: the shared rows
     world.ids.shared_counts = _shared_counts(world)
     _run_producers(world)
-    repo.rebuild_communities(world.nb, force=True)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(world.nb, force=True)
     ids = world.ids
     if kind == "legacy":
         # A cluster id minted from B's Memory name, and the marker the upgrade

@@ -64,16 +64,9 @@ def test_facade_lifecycle_methods_delegate_to_the_runtime_instance(repo, monkeyp
         ("rebuild_notebook_kg", lambda: repo.rebuild_notebook_kg("nb")),
         ("store_kg", lambda: repo.store_kg("nb", None, [], [])),
         ("relink_notebook_kg", lambda: repo.relink_notebook_kg("nb")),
-        ("incremental_fuse_source", lambda: repo.incremental_fuse_source("nb", "s")),
-        ("write_clusters", lambda: repo.write_clusters("nb", [])),
-        ("append_clusters", lambda: repo.append_clusters("nb", [])),
         ("unified_graph", lambda: repo.unified_graph("nb")),
         ("kg_neighbors", lambda: repo.kg_neighbors("nb", "K-x")),
         ("rebuild_unified_kg", lambda: repo.rebuild_unified_kg("nb")),
-        ("rebuild_canonical_relations", lambda: repo.rebuild_canonical_relations("nb")),
-        ("rebuild_mention_bridge", lambda: repo.rebuild_mention_bridge("nb")),
-        ("rebuild_communities", lambda: repo.rebuild_communities("nb")),
-        ("list_communities", lambda: repo.list_communities("nb")),
     ):
         monkeypatch.setattr(lifecycle, name, lambda *a, **k: sentinel)
         assert call() is sentinel, name

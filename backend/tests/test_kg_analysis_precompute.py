@@ -807,7 +807,7 @@ def _boards(repo, notebook_id: str) -> dict:
 
 def test_rebuild_writes_every_artifact_kind_under_one_version_stamp(repo):
     notebook_id = _seed(repo)
-    assert repo.rebuild_communities(notebook_id) == 2
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2
 
     artifacts = _artifacts(repo, notebook_id)
     assert set(artifacts) == set(ARTIFACT_KINDS)
@@ -882,7 +882,7 @@ def test_the_real_rebuild_holds_no_second_copy_of_the_edge_graph(repo, monkeypat
 
     monkeypatch.setattr(igraph, "Graph", recording_graph)
     monkeypatch.setattr(lifecycle_module, "fold_cross_community_edges", _probe)
-    assert repo.rebuild_communities(notebook_id) == 2
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2
 
     assert len(observed) == 1
     assert graph_ref, "仪器没装上:Louvain 那张图一次都没被建"
@@ -919,7 +919,7 @@ def test_the_precompute_leaves_the_edge_graph_released(repo, monkeypatch):
     monkeypatch.setattr(
         repo._runtime.knowledge_lifecycle, "_compute_kg_analysis", _spy
     )
-    assert repo.rebuild_communities(notebook_id) == 2
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2
 
     assert len(captured) == 1
     assert len(captured[0]) == 0
@@ -930,7 +930,7 @@ def test_the_precompute_leaves_the_edge_graph_released(repo, monkeypatch):
 
 def test_cross_board_edges_fold_the_one_bridge(repo):
     notebook_id = _seed(repo)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
 
     boards = _boards(repo, notebook_id)
     assert sorted(boards.values()) == [3, 4]
@@ -952,7 +952,7 @@ def test_cross_board_edges_fold_the_one_bridge(repo):
 
 def test_source_profiles_apply_the_documented_field_semantics(repo):
     notebook_id = _seed(repo)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
 
     boards = _boards(repo, notebook_id)
     big = next(cid for cid, size in boards.items() if size == 4)
@@ -1021,7 +1021,7 @@ def test_source_profiles_drop_hidden_sources_but_keep_orphan_references(repo):
                 ("ko-orphan", notebook_id, '{"name":"ORPH"}', "src-deleted"),
             ],
         )
-    repo.rebuild_communities(notebook_id, force=True)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id, force=True)
 
     profiles = _profiles(repo, notebook_id)
     assert "src-knowhow" not in profiles, (
@@ -1100,7 +1100,7 @@ def test_a_board_member_that_left_the_graph_still_places_its_objects(repo):
 
 def test_statistic_snapshots_round_trip_the_query_layer_payloads(repo):
     notebook_id = _seed(repo)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     artifacts = _artifacts(repo, notebook_id)
     store = repo._runtime.unified_kg
 
@@ -1137,7 +1137,7 @@ def test_a_single_board_still_gets_an_edge_ledger_row(repo):
         notebook.id, "src-a", [_claim(n) for n in ("A", "B", "C")],
         [_rel("A", "B"), _rel("B", "C"), _rel("A", "C")],
     )
-    assert repo.rebuild_communities(notebook.id) == 1
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook.id) == 1
     assert _edges(repo, notebook.id) == []
     ledger = _artifacts(repo, notebook.id)
     assert ledger[ARTIFACT_COMMUNITY_EDGES]["payload"]["edges"] == 0
@@ -1195,7 +1195,7 @@ def test_precompute_takes_every_snapshot_outside_any_write_transaction(repo, mon
 
     for name in (*ANALYSIS_SNAPSHOTS, "source_canonical_rows"):
         instrument(name)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
 
     assert set(depths) == {*ANALYSIS_SNAPSHOTS, "source_canonical_rows"}, (
         f"仪器没装上或有查询没被调用:{sorted(depths)}"
@@ -1241,7 +1241,7 @@ def test_the_membership_is_released_before_the_three_statistic_snapshots(
 
         monkeypatch.setattr(store, name, wrapper)
 
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
 
     assert handed, "仪器没装上:_compute_kg_analysis 一次都没被调用"
     assert set(live_at) == {*ANALYSIS_SNAPSHOTS, "source_canonical_rows"}, (
@@ -1292,7 +1292,7 @@ def test_the_detection_leftovers_are_released_before_the_precompute(repo, monkey
         return original_compute(*args, **kwargs)
 
     monkeypatch.setattr(lifecycle, "_compute_kg_analysis", spying_compute)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
 
     assert seen, "仪器没装上:_compute_kg_analysis 一次都没被调用"
     assert seen[-1]["idx2can"] == 0, (
@@ -1353,7 +1353,7 @@ def test_the_fold_is_released_before_the_full_table_scans_that_follow(repo, monk
 
         monkeypatch.setattr(store, name, wrapper)
 
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
 
     assert fold_ref, "仪器没装上:折叠一次都没被调用"
     assert set(alive_at) == set(_SCANS_AFTER_THE_FOLD), (
@@ -1447,7 +1447,7 @@ def test_boards_and_all_three_product_tables_publish_in_one_transaction(
     """
     notebook_id = _seed(repo)
     per_transaction = _trace_product_table_transactions(repo, monkeypatch)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
 
     products = set(PRODUCT_TABLES)
     touching = [touched for touched in per_transaction if touched & products]
@@ -1482,11 +1482,11 @@ def test_the_backfill_transaction_publishes_products_without_touching_the_boards
     那笔钱**的路径上。
     """
     notebook_id = _seed(repo)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     _wipe_ledger(repo, notebook_id)          # 图新鲜、账本缺失 → 只补账本
 
     per_transaction = _trace_product_table_transactions(repo, monkeypatch)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
 
     products = set(PRODUCT_TABLES)
     touching = [touched for touched in per_transaction if touched & products]
@@ -1512,7 +1512,7 @@ def test_no_reader_ever_sees_new_boards_with_the_previous_ledger(repo, monkeypat
     仍是上一轮那一套,整份报告内部自洽。
     """
     notebook_id = _seed(repo)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     before = (_boards(repo, notebook_id), _artifacts(repo, notebook_id))
     # KG 变动 → 下一次调用真的重建图并重铸板块 id。
     repo.store_kg(notebook_id, "src-d", [_claim("Q")], [])
@@ -1526,7 +1526,7 @@ def test_no_reader_ever_sees_new_boards_with_the_previous_ledger(repo, monkeypat
         return original(*args, **kwargs)
 
     monkeypatch.setattr(store, "cluster_size_histogram", spying_histogram)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     monkeypatch.undo()
 
     assert len(observed) == 1, "仪器没装上:预计算期间一次都没读到"
@@ -1561,7 +1561,7 @@ def test_reminting_boards_discards_the_board_dependent_products_in_the_same_tran
     整段失败 —— 把作废删掉、或者挪到 `if analysis is not None:` 里面去,它都会报红。
     """
     notebook_id = _seed(repo)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     # KG 变动 → 下一次调用真的重建图(而不是走「只补账本」)。
     repo.store_kg(notebook_id, "src-d", [_claim("Q")], [])
 
@@ -1572,7 +1572,7 @@ def test_reminting_boards_discards_the_board_dependent_products_in_the_same_tran
         store, "cluster_size_histogram",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
     )
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
 
     # 批 3·W2:重铸的**发布**是指针翻转事务(新代行早已写在不可见处),
     # 作废必须骑在同一个翻转事务上——判据从「碰 communities 的事务」换成
@@ -1608,7 +1608,7 @@ def test_a_failed_publish_leaves_the_library_exactly_as_it_was(repo, monkeypatch
     `replace_communities` 的失败一向冒泡,这里与它同一档。
     """
     notebook_id = _seed(repo)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     first_artifacts = _artifacts(repo, notebook_id)
     first_edges = _edges(repo, notebook_id)
     first_profiles = _profiles(repo, notebook_id)
@@ -1627,7 +1627,7 @@ def test_a_failed_publish_leaves_the_library_exactly_as_it_was(repo, monkeypatch
 
     monkeypatch.setattr(store, "replace_kg_analysis_artifacts", explode)
     with pytest.raises(RuntimeError, match="injected artifact write failure"):
-        repo.rebuild_communities(notebook_id, force=True)
+        repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id, force=True)
     monkeypatch.undo()
 
     # 发布整段回滚 —— 板块、产物、账本一个字节都没动。
@@ -1655,7 +1655,7 @@ def test_a_failed_precompute_after_a_force_rebuild_stops_serving_the_old_boards(
     from app.services.kg_analysis import KgAnalysisService
 
     notebook_id = _seed(repo)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     service = KgAnalysisService(
         database=repo._runtime.database,
         unified_kg=repo._runtime.unified_kg,
@@ -1670,7 +1670,7 @@ def test_a_failed_precompute_after_a_force_rebuild_stops_serving_the_old_boards(
         repo._runtime.unified_kg, "source_canonical_rows",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
     )
-    repo.rebuild_communities(notebook_id, force=True)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id, force=True)
     monkeypatch.undo()
 
     live = sorted(_boards(repo, notebook_id))
@@ -1692,7 +1692,7 @@ def test_precompute_failure_is_reported_and_does_not_break_the_rebuild(repo, mon
     monkeypatch.setattr(repo._runtime.event_log, "emit", emitted.append)
 
     # 核心路径不受影响:社区照建、返回值照常。
-    assert repo.rebuild_communities(notebook_id) == 2
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2
     kinds = [event["kind"] for event in emitted]
     assert "kg_analysis_precompute_failed" in kinds
     assert "communities_rebuilt" in kinds
@@ -1717,13 +1717,13 @@ def test_precompute_does_not_swallow_a_user_abort(repo, monkeypatch):
 
     monkeypatch.setattr(store, "source_canonical_rows", abort)
     with pytest.raises(KgBuildAborted):
-        repo.rebuild_communities(notebook_id)
+        repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
 
 
 def test_disabled_community_layer_writes_no_artifacts(repo):
     notebook_id = _seed(repo)
     repo.settings.community_layer_enabled = False
-    assert repo.rebuild_communities(notebook_id) == 0
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 0
     assert _artifacts(repo, notebook_id) == {}
     assert _edges(repo, notebook_id) == []
     assert _profiles(repo, notebook_id) == {}
@@ -1741,7 +1741,7 @@ def test_refused_large_graph_build_writes_no_artifacts(repo, monkeypatch):
     )
     events = []
     monkeypatch.setattr(repo.event_log, "emit", events.append)
-    assert repo.rebuild_communities(notebook_id) == 0
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 0
     assert any(e.get("kind") == "community_build_refused" for e in events)
     assert _artifacts(repo, notebook_id) == {}
     assert _edges(repo, notebook_id) == []
@@ -1750,7 +1750,7 @@ def test_refused_large_graph_build_writes_no_artifacts(repo, monkeypatch):
 
 def test_version_gate_does_not_recompute_when_the_kg_is_unchanged(repo, monkeypatch):
     notebook_id = _seed(repo)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     created_at = {
         kind: entry["created_at"]
         for kind, entry in _artifacts(repo, notebook_id).items()
@@ -1762,7 +1762,7 @@ def test_version_gate_does_not_recompute_when_the_kg_is_unchanged(repo, monkeypa
         store, "source_canonical_rows",
         lambda *args, **kwargs: (calls.append(args), original(*args, **kwargs))[1],
     )
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     assert calls == []
     assert {
         kind: entry["created_at"]
@@ -1773,7 +1773,7 @@ def test_version_gate_does_not_recompute_when_the_kg_is_unchanged(repo, monkeypa
 def _merge_only_write(repo, notebook_id: str) -> int:
     """一次**只动合并结果**的写入 —— `kg_mutation_seq` 刻意不动(生产语义)。
 
-    走的是真的写路径 `append_clusters`(facade 的公开入口,`incremental_fuse_source`
+    走的是真的写路径 `append_clusters`(生命周期服务的入口,`incremental_fuse_source`
     也用它),不是手工 UPDATE 计数器:被测的正是「簇写路径不抬 KG 世代」这条真实行为。
     返回写入的簇成员行数。
     """
@@ -1785,7 +1785,7 @@ def _merge_only_write(repo, notebook_id: str) -> int:
                 (notebook_id,),
             )
         ]
-    return repo.append_clusters(
+    return repo._runtime.knowledge_lifecycle.append_clusters(
         notebook_id,
         [{"canonical_id": "K-merged", "canonical_name": "merged",
           "member_object_id": object_id} for object_id in object_ids[:3]],
@@ -1808,7 +1808,7 @@ def test_a_merge_only_write_does_not_move_the_kg_generation(repo):
     `kg_mutation_seq`,下面那几条守卫会全部变成恒真的空守卫而没人发现。
     """
     notebook_id = _seed(repo)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     kg_before, cluster_before = _seqs(repo, notebook_id)
     assert _merge_only_write(repo, notebook_id) == 3
     kg_after, cluster_after = _seqs(repo, notebook_id)
@@ -1825,11 +1825,11 @@ def test_a_merge_only_write_makes_the_ledger_stale_and_a_plain_rebuild_heals_it(
     戳改了一下。
     """
     notebook_id = _seed(repo)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     before = _artifacts(repo, notebook_id)
     _merge_only_write(repo, notebook_id)
 
-    assert repo.rebuild_communities(notebook_id) == 2      # 刻意不带 force
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2      # 刻意不带 force
 
     after = _artifacts(repo, notebook_id)
     kg_seq, cluster_seq = _seqs(repo, notebook_id)
@@ -1847,7 +1847,7 @@ def test_a_merge_only_write_makes_the_ledger_stale_and_a_plain_rebuild_heals_it(
 
     # 补完之后闸重新短路:再调一次不写任何东西(否则每次打开视图都在重算)。
     settled = {kind: entry["created_at"] for kind, entry in after.items()}
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     assert {
         kind: entry["created_at"]
         for kind, entry in _artifacts(repo, notebook_id).items()
@@ -1866,7 +1866,7 @@ def test_a_backfilled_board_product_never_claims_the_current_merge_generation(re
     地方记(设计 §3.3 的已知缺口)。
     """
     notebook_id = _seed(repo)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     fresh = _artifacts(repo, notebook_id)
     _, cluster_seq_before = _seqs(repo, notebook_id)
     # 全量重建那一轮:板块刚跑出来,四份都名副其实地盖着当前簇世代。
@@ -1874,7 +1874,7 @@ def test_a_backfilled_board_product_never_claims_the_current_merge_generation(re
         assert fresh[kind]["payload"][CLUSTER_SEQ_PAYLOAD_KEY] == cluster_seq_before
 
     _merge_only_write(repo, notebook_id)
-    assert repo.rebuild_communities(notebook_id) == 2       # 刻意不带 force
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2       # 刻意不带 force
     after = _artifacts(repo, notebook_id)
     _, cluster_seq = _seqs(repo, notebook_id)
     assert cluster_seq == cluster_seq_before + 1
@@ -1893,14 +1893,14 @@ def test_a_backfilled_board_product_never_claims_the_current_merge_generation(re
 
     # 而且不会因此永远重跑:闸把「无从判断」当作补不出来的那一档,再调一次不写任何东西。
     settled = {kind: entry["created_at"] for kind, entry in after.items()}
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     assert {
         kind: entry["created_at"]
         for kind, entry in _artifacts(repo, notebook_id).items()
     } == settled
 
     # 反向:板块真的被重建的那一轮(force),戳必须回到名副其实的整数。
-    repo.rebuild_communities(notebook_id, force=True)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id, force=True)
     rebuilt = _artifacts(repo, notebook_id)
     for kind in sorted(BOARD_DEPENDENT_ARTIFACT_KINDS):
         assert rebuilt[kind]["payload"][CLUSTER_SEQ_PAYLOAD_KEY] == cluster_seq, kind
@@ -1914,10 +1914,10 @@ def test_an_empty_ledger_backfill_also_refuses_to_claim_a_merge_generation(repo)
     那条路治不了这一档,而「不知道就说不知道」两档都治得了。
     """
     notebook_id = _seed(repo)
-    assert repo.rebuild_communities(notebook_id) == 2
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2
     _wipe_ledger(repo, notebook_id)
 
-    assert repo.rebuild_communities(notebook_id) == 2       # 刻意不带 force
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2       # 刻意不带 force
 
     artifacts = _artifacts(repo, notebook_id)
     assert set(artifacts) == set(ARTIFACT_KINDS)            # B1 照样补得出账本
@@ -1941,7 +1941,7 @@ def test_a_merge_only_backfill_does_not_rescan_the_relation_table(repo, monkeypa
     在它上面省这趟等于宣布旧载荷永远换不掉。
     """
     notebook_id = _seed(repo)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     baseline = _artifacts(repo, notebook_id)[ARTIFACT_RELATION_PROVENANCE]["payload"]
 
     store = repo._runtime.unified_kg
@@ -1953,13 +1953,13 @@ def test_a_merge_only_backfill_does_not_rescan_the_relation_table(repo, monkeypa
     )
 
     _merge_only_write(repo, notebook_id)
-    assert repo.rebuild_communities(notebook_id) == 2
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2
     assert calls == [], "纯合并写入的补账本不该重扫 knowledge_relations"
     # 复用的必须是**逐字相同**的载荷,不是一个空壳。
     assert (_artifacts(repo, notebook_id)[ARTIFACT_RELATION_PROVENANCE]["payload"]
             == baseline)
 
-    repo.rebuild_communities(notebook_id, force=True)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id, force=True)
     assert len(calls) == 1, "force 是人工恢复手段,必须真的重扫"
 
 
@@ -2003,14 +2003,14 @@ def test_aligned_communities_with_an_empty_ledger_still_get_backfilled(repo):
     force 全量重建(836 万边 join + Louvain + 重写 171 万成员行)。
     """
     notebook_id = _seed(repo)
-    assert repo.rebuild_communities(notebook_id) == 2
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2
     expected_edges = _edges(repo, notebook_id)
     expected_profiles = _profiles(repo, notebook_id)
     boards_before = _boards(repo, notebook_id)
     _wipe_ledger(repo, notebook_id)
     assert _artifacts(repo, notebook_id) == {}
 
-    assert repo.rebuild_communities(notebook_id) == 2       # 刻意不带 force
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2       # 刻意不带 force
 
     artifacts = _artifacts(repo, notebook_id)
     assert set(artifacts) == set(ARTIFACT_KINDS)
@@ -2035,7 +2035,7 @@ def test_backfill_does_not_rerun_louvain_or_rewrite_the_membership_tables(repo, 
     可以被实现成「闸没过就整个重来」,那和 force=True 一样贵。
     """
     notebook_id = _seed(repo)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     _wipe_ledger(repo, notebook_id)
 
     store = repo._runtime.unified_kg
@@ -2048,7 +2048,7 @@ def test_backfill_does_not_rerun_louvain_or_rewrite_the_membership_tables(repo, 
     events: list[dict] = []
     monkeypatch.setattr(repo._runtime.event_log, "emit", events.append)
 
-    assert repo.rebuild_communities(notebook_id) == 2
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2
     assert calls == [], f"补账本却重写了社区表:{calls}"
     kinds = [event["kind"] for event in events]
     # 事件必须如实说「只补了账本」,不能伪装成一次图重建。
@@ -2075,7 +2075,7 @@ def test_a_failed_backfill_does_not_emit_the_success_event(repo, monkeypatch):
     钉着(它断言正常补账本**必须**发这条事件),所以「干脆永远不发」也过不去。
     """
     notebook_id = _seed(repo)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     boards_before = _boards(repo, notebook_id)
     _wipe_ledger(repo, notebook_id)        # 图新鲜、账本空 → 下一次走「只补账本」
 
@@ -2087,7 +2087,7 @@ def test_a_failed_backfill_does_not_emit_the_success_event(repo, monkeypatch):
     events: list[dict] = []
     monkeypatch.setattr(repo._runtime.event_log, "emit", events.append)
 
-    assert repo.rebuild_communities(notebook_id) == 2   # 不冒泡,返回真实板块数
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2   # 不冒泡,返回真实板块数
 
     kinds = [event["kind"] for event in events]
     assert "kg_analysis_backfilled" not in kinds, (
@@ -2161,7 +2161,7 @@ def _backfill_with_a_writer_racing_the_precompute(
     )
     events: list[dict] = []
     monkeypatch.setattr(repo._runtime.event_log, "emit", events.append)
-    kept = repo.rebuild_communities(notebook_id)      # 刻意不带 force
+    kept = repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)      # 刻意不带 force
     assert fired, "仪器没装上:补账本路径上 _compute_kg_analysis 一次都没被调用"
     return kept, events
 
@@ -2189,7 +2189,7 @@ def test_a_backfill_discards_its_products_when_the_boards_were_replaced_under_it
     钉着(同一套仪器、只换 writer),所以「干脆永远不发布」也过不去。
     """
     notebook_id = _seed(repo)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     stale_board_ids = set(_boards(repo, notebook_id))
     _wipe_ledger(repo, notebook_id)        # 图新鲜、账本空 → 下一次走「只补账本」
 
@@ -2241,7 +2241,7 @@ def test_a_backfill_publishes_normally_when_nobody_touches_the_boards(
     生产上永远补不出账本(B1 原地复发)。
     """
     notebook_id = _seed(repo)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     board_ids = set(_boards(repo, notebook_id))
     _wipe_ledger(repo, notebook_id)
 
@@ -2273,11 +2273,11 @@ def test_a_failed_precompute_heals_on_the_next_plain_rebuild(repo, monkeypatch):
         store, "source_canonical_rows",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
     )
-    assert repo.rebuild_communities(notebook_id) == 2
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2
     assert _artifacts(repo, notebook_id) == {}
 
     monkeypatch.undo()
-    assert repo.rebuild_communities(notebook_id) == 2       # 刻意不带 force
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2       # 刻意不带 force
     assert set(_artifacts(repo, notebook_id)) == set(ARTIFACT_KINDS)
 
 
@@ -2292,7 +2292,7 @@ def test_a_library_without_boards_writes_no_source_profile_product(repo):
     _add_sources(repo, notebook.id, "src-a")
     repo.store_kg(notebook.id, "src-a", [_claim(n) for n in ("A", "B", "C")], [])
 
-    assert repo.rebuild_communities(notebook.id) == 0
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook.id) == 0
     artifacts = _artifacts(repo, notebook.id)
     assert set(artifacts) == set(ARTIFACT_KINDS) - {ARTIFACT_SOURCE_PROFILES}
     assert _profiles(repo, notebook.id) == {}
@@ -2353,12 +2353,12 @@ def test_a_zero_board_library_short_circuits_instead_of_recomputing_forever(
     宣布这类库的账本永远不完整 —— 同一个空转,换一个入口。
     """
     notebook_id = _no_board_notebook(repo)
-    assert repo.rebuild_communities(notebook_id) == 0
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 0
     before = _artifacts(repo, notebook_id)
     assert set(before) == set(ARTIFACT_KINDS) - {ARTIFACT_SOURCE_PROFILES}
 
     calls = _spy_heavy_work(repo, monkeypatch)
-    assert repo.rebuild_communities(notebook_id) == 0        # 刻意不带 force
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 0        # 刻意不带 force
     assert calls == [], f"零板块库又跑了一遍重活:{calls}"
     # 账本一行都没被重写(created_at 会变)。
     assert _artifacts(repo, notebook_id) == before
@@ -2371,11 +2371,11 @@ def test_a_stale_ledger_with_boards_still_backfills(repo, monkeypatch):
     kg_mutation_seq`)。方向一的修法**不得**让它复发,所以两条并排放。
     """
     notebook_id = _seed(repo)
-    assert repo.rebuild_communities(notebook_id) == 2
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2
     _wipe_ledger(repo, notebook_id)
 
     calls = _spy_heavy_work(repo, monkeypatch)
-    assert repo.rebuild_communities(notebook_id) == 2        # 刻意不带 force
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2        # 刻意不带 force
     assert sorted(set(calls)) == sorted(_HEAVY_WORK), f"账本陈旧却没补:{calls}"
     assert set(_artifacts(repo, notebook_id)) == set(ARTIFACT_KINDS)
 
@@ -2388,7 +2388,7 @@ def test_boards_with_a_missing_source_profile_row_still_backfill(repo, monkeypat
     自我合理化的实现。这条把判据的来源钉死在库里的板块数上。
     """
     notebook_id = _seed(repo)
-    assert repo.rebuild_communities(notebook_id) == 2
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2
     with repo._write() as db:
         db.execute(
             "DELETE FROM kg_analysis_artifacts WHERE notebook_id=? AND kind=?",
@@ -2399,7 +2399,7 @@ def test_boards_with_a_missing_source_profile_row_still_backfill(repo, monkeypat
         )
 
     calls = _spy_heavy_work(repo, monkeypatch)
-    assert repo.rebuild_communities(notebook_id) == 2        # 刻意不带 force
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2        # 刻意不带 force
     assert calls, "有板块却把来源画像的缺席判成合法 —— 它永远补不回来了"
     assert set(_artifacts(repo, notebook_id)) == set(ARTIFACT_KINDS)
     assert _profiles(repo, notebook_id)
@@ -2420,7 +2420,7 @@ def test_a_never_built_library_really_builds(repo, monkeypatch):
     assert int(state["kg_mutation_seq"]) >= 0
 
     calls = _spy_heavy_work(repo, monkeypatch)
-    assert repo.rebuild_communities(notebook_id) == 2
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2
     assert sorted(set(calls)) == sorted(_HEAVY_WORK), f"从没建过却短路了:{calls}"
     assert _boards(repo, notebook_id)
     assert set(_artifacts(repo, notebook_id)) == set(ARTIFACT_KINDS)
@@ -2455,7 +2455,7 @@ def test_a_never_built_level_really_builds_even_when_the_default_level_is_aligne
     的按层证据 `communities_count(level) > 0`。产物表**不**加回 level 维度。
     """
     notebook_id = _seed(repo)
-    assert repo.rebuild_communities(notebook_id) == 2            # 默认层建好
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2            # 默认层建好
     with repo._connect() as db:
         state = db.execute(
             "SELECT community_seq, kg_mutation_seq FROM unified_kg_state "
@@ -2466,7 +2466,7 @@ def test_a_never_built_level_really_builds_even_when_the_default_level_is_aligne
     assert _boards_at(repo, notebook_id, 1) == {}, "前提不成立:level 1 已经有行了"
 
     calls = _spy_heavy_work(repo, monkeypatch)
-    assert repo.rebuild_communities(notebook_id, level=1) == 2   # 刻意不带 force
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id, level=1) == 2   # 刻意不带 force
     # 短路的表现是「一件重活都没跑、返回 0」。这里不要求跑满 `_HEAVY_WORK`:KG 世代
     # 一动没动,`relation_provenance` 的载荷按设计被复用而不重扫关系表(那条成本主张
     # 由 `test_a_merge_only_backfill_does_not_rescan_the_relation_table` 单独钉)。
@@ -2491,12 +2491,10 @@ def test_the_gate_reads_the_same_default_level_the_callers_do():
         DEFAULT_COMMUNITY_LEVEL,
         KnowledgeLifecycleService,
     )
-    from app.services.repository_facade import RepositoryFacade
 
-    for target in (KnowledgeLifecycleService.rebuild_communities,
-                   RepositoryFacade.rebuild_communities):
-        default = inspect.signature(target).parameters["level"].default
-        assert default == DEFAULT_COMMUNITY_LEVEL, target.__qualname__
+    target = KnowledgeLifecycleService.rebuild_communities
+    default = inspect.signature(target).parameters["level"].default
+    assert default == DEFAULT_COMMUNITY_LEVEL, target.__qualname__
 
 
 def _community_seq(repo, notebook_id: str) -> int:
@@ -2532,7 +2530,7 @@ def test_building_another_level_does_not_mark_the_default_level_built(repo, monk
     而不是一句但愿如此的假设。
     """
     notebook_id = _seed(repo)
-    assert repo.rebuild_communities(notebook_id, level=1) == 2
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id, level=1) == 2
     assert _boards_at(repo, notebook_id, 1), "前提不成立:level 1 没建出来"
     assert _boards_at(repo, notebook_id, 0) == {}, "前提不成立:level 0 不该有行"
     assert _community_seq(repo, notebook_id) == -1, (
@@ -2542,7 +2540,7 @@ def test_building_another_level_does_not_mark_the_default_level_built(repo, monk
     )
 
     calls = _spy_heavy_work(repo, monkeypatch)
-    assert repo.rebuild_communities(notebook_id) == 2         # 默认层,刻意不带 force
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2         # 默认层,刻意不带 force
     assert sorted(set(calls)) == sorted(_HEAVY_WORK), (
         f"默认层一行板块都没有,却被别的层写下的账目判成「建过」:{calls}"
     )
@@ -2559,7 +2557,7 @@ def test_building_another_level_copy_forwards_boards_and_discards_dangling_produ
     `community_seq`、不写回产物——「seq 对齐 ⟹ 默认层建过」的蕴含关系原样
     保住,三条与板块无关的统计快照也原样留着(它们没悬空)。"""
     notebook_id = _seed(repo)
-    assert repo.rebuild_communities(notebook_id) == 2
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2
     before_boards = _boards_at(repo, notebook_id, 0)
     before_seq = None
     with repo._connect() as db:
@@ -2570,7 +2568,7 @@ def test_building_another_level_copy_forwards_boards_and_discards_dangling_produ
     assert set(_artifacts(repo, notebook_id)) == set(ARTIFACT_KINDS)
     assert _edges(repo, notebook_id) and before_boards
 
-    assert repo.rebuild_communities(notebook_id, level=1) == 2
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id, level=1) == 2
 
     # 悬空产物已作废(而不是留着指向旧 id):跨板块边/来源画像清空,账本
     # 只剩三条与板块无关的统计快照 → 读侧判「缺失」,下一次补账本自愈。
@@ -2619,9 +2617,9 @@ def test_another_level_never_short_circuits_on_the_default_levels_seq(repo, monk
     的不变式 —— 那份不分 level 的账目只描述默认层,别的层一个字都不占。
     """
     notebook_id = _seed(repo)
-    assert repo.rebuild_communities(notebook_id, level=1) == 2   # 建于旧世代
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id, level=1) == 2   # 建于旧世代
     _grow_kg(repo, notebook_id)                                  # KG 变了
-    assert repo.rebuild_communities(notebook_id) == 3            # 默认层跟上 → seq 对齐
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 3            # 默认层跟上 → seq 对齐
     with repo._connect() as db:
         state = db.execute(
             "SELECT community_seq, kg_mutation_seq FROM unified_kg_state "
@@ -2630,7 +2628,7 @@ def test_another_level_never_short_circuits_on_the_default_levels_seq(repo, monk
     assert len(_boards_at(repo, notebook_id, 1)) == 2, "前提不成立:level 1 还是旧划分"
 
     calls = _spy_heavy_work(repo, monkeypatch)
-    assert repo.rebuild_communities(notebook_id, level=1) == 3   # 刻意不带 force
+    assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id, level=1) == 3   # 刻意不带 force
     assert "community_graph_rows" in calls, (
         f"非默认层拿默认层的 seq + 「这层有行」冒充了新鲜:{calls}"
     )
@@ -2639,7 +2637,7 @@ def test_another_level_never_short_circuits_on_the_default_levels_seq(repo, monk
 
 def test_deleting_the_notebook_takes_the_artifacts_with_it(repo):
     notebook_id = _seed(repo)
-    repo.rebuild_communities(notebook_id)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
     assert _artifacts(repo, notebook_id)
     repo.delete_notebook(notebook_id)
     assert _artifacts(repo, notebook_id) == {}

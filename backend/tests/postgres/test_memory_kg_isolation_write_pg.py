@@ -284,7 +284,7 @@ def test_pg_tier2_never_bridges_to_a_memory_concept(pg_repository, existing_sour
     from app.services.kg_merge import _norm
 
     _fusion_seed(pg_repository, existing_source_type)
-    pg_repository.incremental_fuse_source("nbf", "src-new")
+    pg_repository._runtime.knowledge_lifecycle.incremental_fuse_source("nbf", "src-new")
     members, pairs = _clusters_and_candidates(pg_repository)
     assert "ko-new" in members
     pair = tuple(sorted(("K-" + _norm("MoE Gating"), "K-" + _norm("Expert Routing"))))
@@ -295,7 +295,7 @@ def test_pg_memory_source_fusion_returns_at_entry(pg_repository):
     _fusion_seed(pg_repository, "memory")
     with pg_repository._runtime.database.write() as db:
         db.execute("DELETE FROM concept_clusters WHERE notebook_id='nbf'")
-    pg_repository.incremental_fuse_source("nbf", "src-e")
+    pg_repository._runtime.knowledge_lifecycle.incremental_fuse_source("nbf", "src-e")
     members, pairs = _clusters_and_candidates(pg_repository)
     assert members == set() and pairs == set()
 
@@ -792,11 +792,11 @@ def test_pg_fusion_statements_do_not_grow_with_memory_sources(pg_repository, mon
             pg_repository.build_scale_index(notebook_id)
             monkeypatch.setattr(pg_repository.settings, "kg_incremental_tier2_max_entities", 0)
         new_source = f"{notebook_id}-src-B"
-        pg_repository.incremental_fuse_source(notebook_id, new_source)  # warm-up
+        pg_repository._runtime.knowledge_lifecycle.incremental_fuse_source(notebook_id, new_source)  # warm-up
         with pg_repository._runtime.database.write() as db:
             db.execute("DELETE FROM concept_merge_candidates WHERE notebook_id=%s", (notebook_id,))
         counter = _count_pg_statements(monkeypatch)
-        pg_repository.incremental_fuse_source(notebook_id, new_source)
+        pg_repository._runtime.knowledge_lifecycle.incremental_fuse_source(notebook_id, new_source)
         counts[label] = counter["n"]
         monkeypatch.undo()
         with pg_repository._runtime.database.connect() as db:

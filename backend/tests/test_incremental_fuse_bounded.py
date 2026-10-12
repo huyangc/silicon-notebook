@@ -240,7 +240,7 @@ def _run_differential(make_repo, monkeypatch, objects, clusters, candidates=(), 
                                if k != "notebook_id"}))
             if legacy:
                 _legacy_seams(repository, patch)
-            repository.incremental_fuse_source(notebook.id, fuse_source)
+            repository._runtime.knowledge_lifecycle.incremental_fuse_source(notebook.id, fuse_source)
         outputs.append({**_fusion_output(repository, notebook.id), "events": events})
     bounded, legacy_out = outputs
     return legacy_out, bounded
@@ -418,7 +418,7 @@ def test_differential_reruns_are_idempotent(make_repo, monkeypatch):
     from app.services.kg_merge import _norm
 
     def fuse_once(repository, notebook_id):
-        repository.incremental_fuse_source(notebook_id, "src-B")
+        repository._runtime.knowledge_lifecycle.incremental_fuse_source(notebook_id, "src-B")
 
     legacy, bounded = _run_differential(
         make_repo, monkeypatch,
@@ -463,7 +463,7 @@ def test_same_source_new_concepts_never_bridge_against_each_other(repo):
                    ("ko-n2", "concept", "Level Shifter", "src-B", None, v2)],
           clusters=[("K-" + _norm("Unrelated Thing"), "ko-a", "Unrelated Thing", "concept")])
     repo.build_scale_index(notebook)
-    repo.incremental_fuse_source(notebook, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook, "src-B")
 
     assert _fusion_output(repo, notebook)["candidates"] == []
     # 反向:两个新对象**确实**都进了 ANN 的可命中集合且彼此够近,否则这条钉是空的。
@@ -493,10 +493,10 @@ def test_refuse_keeps_the_canonical_frozen_at_the_pre_append_moment(repo):
                    ("ko-n2", "concept", "Level Shifter", "src-B", None, v2)],
           clusters=[("K-" + _norm("Unrelated Thing"), "ko-a", "Unrelated Thing", "concept")])
     repo.build_scale_index(notebook)
-    repo.incremental_fuse_source(notebook, "src-B")     # 第一次:簇行落库,零候选
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook, "src-B")     # 第一次:簇行落库,零候选
     assert _fusion_output(repo, notebook)["candidates"] == []
 
-    repo.incremental_fuse_source(notebook, "src-B")     # 第二次:快照里已有簇行
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook, "src-B")     # 第二次:快照里已有簇行
     pairs = {(a, b) for a, b, _score, _status in _fusion_output(repo, notebook)["candidates"]}
     assert pairs == {tuple(sorted(("K-" + _norm("Gate Driver"),
                                    "K-" + _norm("Level Shifter"))))}
@@ -704,7 +704,7 @@ def test_ann_fusion_issues_no_unbounded_cluster_reads(repo, monkeypatch):
     _seed_busy_notebook(repo, notebook.id, vectors=True)
     repo.build_scale_index(notebook.id)
     log = _sql_log(repo, monkeypatch)
-    repo.incremental_fuse_source(notebook.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook.id, "src-B")
 
     assert _unbounded_reads(log) == [], _unbounded_reads(log)
     _assert_bounded_reads_actually_ran(log)
@@ -723,7 +723,7 @@ def test_bruteforce_fusion_reads_the_cluster_map_range_exactly_once(repo, monkey
     notebook = repo.create_notebook(NotebookCreate(name="guard-brute"))
     _seed_busy_notebook(repo, notebook.id)
     log = _sql_log(repo, monkeypatch)
-    repo.incremental_fuse_source(notebook.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook.id, "src-B")
 
     range_reads = [sql for sql in log if _CLUSTER_MAP_SQL in sql]
     assert len(range_reads) == 1, range_reads
@@ -744,7 +744,7 @@ def test_incremental_cluster_rows_skipped_for_types_with_no_new_objects(repo, mo
         return original(db, notebook_id, object_type)
 
     monkeypatch.setattr(store, "incremental_cluster_rows", spy)
-    repo.incremental_fuse_source(notebook.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook.id, "src-B")
     # 该来源只有 concept + claim 两类新对象 → formula/procedure 一次都不读。
     assert seen == ["concept", "claim"]
 
@@ -763,7 +763,7 @@ def test_insert_clusters_reads_no_more_rows_than_it_inserts(repo, monkeypatch):
         return found
 
     monkeypatch.setattr(store, "_existing_cluster_members", spy)
-    repo.incremental_fuse_source(notebook.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook.id, "src-B")
 
     assert observed                                     # 真的走到了 append
     for requested, found in observed:
@@ -809,7 +809,7 @@ def test_ann_fold_requests_only_hits_that_can_still_win_a_slot(repo, monkeypatch
         return original(db, notebook_id, ids)
 
     monkeypatch.setattr(service, "_fold_canonical_ids", spy)
-    repo.incremental_fuse_source(notebook.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook.id, "src-B")
 
     # 第一条是 append **之前**的冻结(本批新对象自己,见 P1-1 的登记),它必须存在
     # 且只含 new_objs;剩下的才是 ANN 命中折叠。
@@ -1036,7 +1036,7 @@ def test_upload_hot_path_never_reopens_the_orphan_sweep(
             {"local_id": f"c{round_index}", "object_type": "concept",
              "payload": {"name": f"Uploaded Concept {round_index}"},
              "evidence": []}], [])
-        repo.incremental_fuse_source(notebook.id, f"src-up{round_index}")
+        repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook.id, f"src-up{round_index}")
 
     assert _sweeps(log) == 1
 
@@ -1052,15 +1052,15 @@ def test_orphan_sweep_is_once_per_process_per_notebook(
     _seed_busy_notebook(repo, first.id)
     log = _sql_log(repo, monkeypatch)
 
-    repo.incremental_fuse_source(first.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(first.id, "src-B")
     assert _sweeps(log) == 1
-    repo.incremental_fuse_source(first.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(first.id, "src-B")
     assert _sweeps(log) == 1                 # 同库第二次:跳过
-    repo.incremental_fuse_source(second.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(second.id, "src-B")
     assert _sweeps(log) == 2                 # 闸是**按库**的,不是全局一次
 
     fresh_process.clear()                    # 进程重启
-    repo.incremental_fuse_source(first.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(first.id, "src-B")
     assert _sweeps(log) == 3                 # 兜底不失效
 
 
@@ -1079,7 +1079,7 @@ def test_orphan_sweep_is_not_suppressed_across_workers(
     store = repo._runtime.knowledge_lifecycle.knowledge
 
     # worker B:先融合一次,记账落下 → 它此后不会再扫这本库。
-    repo.incremental_fuse_source(notebook.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook.id, "src-B")
     worker_b_state = set(lifecycle_module._ORPHAN_SWEEP_DONE)
     assert notebook.id in worker_b_state
 
@@ -1095,7 +1095,7 @@ def test_orphan_sweep_is_not_suppressed_across_workers(
 
     # worker B 再融合:它照样跳过 sweep —— 而库里已经没有悬空行,压制无害。
     log = _sql_log(repo, monkeypatch)
-    repo.incremental_fuse_source(notebook.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook.id, "src-B")
     assert _sweeps(log) == 0
     assert lifecycle_module._ORPHAN_SWEEP_DONE == worker_b_state
 
@@ -1131,7 +1131,7 @@ def test_orphan_sweep_mark_is_recorded_even_when_the_sweep_raises(
 
     monkeypatch.setattr(store, "sweep_orphan_clusters_page", original)
     log = _sql_log(repo, monkeypatch)
-    repo.incremental_fuse_source(notebook.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook.id, "src-B")
     assert _sweeps(log) == 0                 # 已记过账 → 这次不再重扫
 
 
@@ -1143,7 +1143,7 @@ def test_orphan_sweep_gate_takes_no_write_lock_when_it_skips(
     同一形状。"""
     notebook = repo.create_notebook(NotebookCreate(name="sweep-nolock"))
     _seed_busy_notebook(repo, notebook.id)
-    repo.incremental_fuse_source(notebook.id, "src-B")   # 先让冷进程那次扫完
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook.id, "src-B")   # 先让冷进程那次扫完
 
     writes = []
     database = repo._runtime.database
@@ -1157,7 +1157,7 @@ def test_orphan_sweep_gate_takes_no_write_lock_when_it_skips(
             yield connection
 
     monkeypatch.setattr(database, "write", counting_write)
-    repo.incremental_fuse_source(notebook.id, "src-C-empty")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook.id, "src-C-empty")
     # 本源没有任何新对象 → 除被跳过的 sweep 外,融合路径本身不写任何东西。
     assert writes == []
 
@@ -1186,7 +1186,7 @@ def test_legacy_orphan_residue_is_swept_by_a_fresh_process(repo, fresh_process):
     orphan = _insert_orphan_cluster_row(repo, notebook.id)
     assert orphan in _cluster_members(repo, notebook.id)
 
-    repo.incremental_fuse_source(notebook.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook.id, "src-B")
     assert orphan not in _cluster_members(repo, notebook.id)
 
 
@@ -1677,7 +1677,7 @@ def test_bruteforce_bridge_reads_only_concept_vectors(repo, monkeypatch):
         return rows
 
     monkeypatch.setattr(store, "concept_embedding_rows", spy)
-    repo.incremental_fuse_source(notebook.id, "src-B")
+    repo._runtime.knowledge_lifecycle.incremental_fuse_source(notebook.id, "src-B")
 
     assert seen                                  # 真的走到了暴力分支
     # 谓词与 `incremental_object_rows(..., 'concept')` 逐字相同:非 concept 与
