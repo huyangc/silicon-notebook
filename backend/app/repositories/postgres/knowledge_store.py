@@ -117,16 +117,17 @@ _GRAPH_RESET_TABLES = frozenset({
 
 # K1 (debt-fix 2026-10-12, ruling 11): the rebuild-derived tables —
 # canonical_relations, communities, community_members, concept_comentions,
-# mention_edges — are DELIBERATELY not cleared by a graph delete. Their rows
-# are unreachable once concept_clusters is gone (resolve_focal, the only way
-# into community / co-mention peers, reads concept_clusters alone; communities
-# are read at the published generation, which the reset returns to 0), the
-# next rebuild replaces them wholesale (replace_* / generation reap) and a
-# notebook delete cascades them. Draining them here was measured on a
+# mention_edges — are DELIBERATELY not cleared by a graph delete. They are
+# not READ either: re-extraction mints the same canonical ids, so every
+# derived-layer reader in unified_kg_store.py is gated on the delete's
+# state-row signature (``_derived_layer_live`` / the published community
+# generation reading -1) until a rebuild — which replaces them wholesale
+# (replace_* / generation reap) — reopens the layer; a notebook delete
+# cascades them. Draining them here was measured on a
 # production-shaped fixture (2M canonical_relations + 2M mention_edges):
 # delete job 0.87 s -> 33 s, post-commit survivor probe 26 ms -> 309 ms over
 # the dead tuples, ~5M extra sync-capture log rows for a delete with no
-# rebuild — a performance regression for no reader-visible change.
+# rebuild — a performance regression the read gate makes unnecessary.
 # Also kept: kg_rebuild_checkpoint (only the rebuild reads it, version-GC'd
 # before every read), concept_whitelist (user configuration) and the two
 # per-run scratch tables (a concurrent run would read an empty input).
