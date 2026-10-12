@@ -1,4 +1,4 @@
-"""build_viz_index:lite 折叠等价 _unified_graph_full('object') + 落盘 + 空图 None。"""
+"""scale_artifacts.build_viz:lite 折叠等价 _unified_graph_full('object') + 落盘 + 空图 None。"""
 import pytest
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository

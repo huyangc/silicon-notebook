@@ -209,9 +209,34 @@ def test_facade_surface_additions_report_only_new_seats(tmp_path):
     assert facade_surface_additions(path, "RepositoryFacade", allowed) == []
 
 
-def _facade_root(tmp_path, *, facade_body, allowed, app_files=None):
-    """A minimal checkout: the three repository classes, the surface
-    baseline, and any ``backend/app`` modules a case needs."""
+_PORTS_SOURCE = (
+    "from typing import Protocol\n"
+    "\n"
+    "class BaseMemory(Protocol):\n"
+    "    def kept(self): ...\n"
+    "\n"
+    "class MemoryRepository(BaseMemory, Protocol):\n"
+    "    def other(self): ...\n"
+)
+_DEPS_SOURCE = (
+    "from typing import cast\n"
+    "from app.repositories.ports import MemoryRepository\n"
+    "\n"
+    "def repository():\n"
+    "    return object()\n"
+    "\n"
+    "def memory_service() -> MemoryRepository:\n"
+    "    return cast(MemoryRepository, repository())\n"
+)
+
+
+def _facade_root(
+    tmp_path, *, facade_body, allowed, app_files=None, ports=_PORTS_SOURCE,
+    deps=_DEPS_SOURCE,
+):
+    """A minimal checkout: the three repository classes, a ports module, a
+    deps module binding the facade to a protocol, the baseline sections the
+    facade checks read, and any extra modules a case needs."""
     _write(
         tmp_path / "backend/app/services/repository_facade.py",
         "def _repository_from_weakref(ref):\n"
@@ -229,6 +254,8 @@ def _facade_root(tmp_path, *, facade_body, allowed, app_files=None):
         "class PostgresRepository(RepositoryFacade):\n"
         "    def close(self): pass\n",
     )
+    _write(tmp_path / "backend/app/repositories/ports.py", ports)
+    _write(tmp_path / "backend/app/api/deps.py", deps)
     _write(
         tmp_path / "scripts/architecture_boundary_baseline.json",
         json.dumps(
@@ -238,7 +265,14 @@ def _facade_root(tmp_path, *, facade_body, allowed, app_files=None):
                     "SQLiteRepository": {
                         "allowed_names": ["<base:RepositoryFacade>", "close_local"]
                     },
-                }
+                },
+                "repository_service_import_ceiling": {
+                    "sqlite": 0, "postgres": 0, "other": 0,
+                },
+                "core_models_service_imports": {"allowed": []},
+                "facade_protocol_binding_gaps": {},
+                "ports_protocol_method_count": 2,
+                "function_length_ceiling": {},
             }
         ),
     )
@@ -247,14 +281,22 @@ def _facade_root(tmp_path, *, facade_body, allowed, app_files=None):
     return tmp_path
 
 
+_LIVE_BODY = (
+    "    def kept(self): pass\n"
+    "    def other(self): pass\n"
+)
+_LIVE_ALLOWED = {"kept", "other"}
+
+
 def test_facade_surface_allowlist_has_zero_slack(tmp_path):
-    body = "    def kept(self): pass\n"
-    root = _facade_root(tmp_path, facade_body=body, allowed={"kept"})
+    root = _facade_root(tmp_path, facade_body=_LIVE_BODY, allowed=_LIVE_ALLOWED)
     assert _GUARD.facade_violations(root) == []
 
     # A retired method whose name stays on the allowlist is a violation:
     # the allowlist must equal the live surface, not merely contain it.
-    root = _facade_root(tmp_path, facade_body=body, allowed={"kept", "retired"})
+    root = _facade_root(
+        tmp_path, facade_body=_LIVE_BODY, allowed=_LIVE_ALLOWED | {"retired"}
+    )
     assert _GUARD.facade_violations(root) == [
         "RepositoryFacade facade surface allowlist is stale, remove: retired "
         "(update scripts/architecture_boundary_baseline.json :: "
@@ -262,10 +304,45 @@ def test_facade_surface_allowlist_has_zero_slack(tmp_path):
     ]
 
     root = _facade_root(
-        tmp_path, facade_body=body + "    def added(self): pass\n", allowed={"kept"}
+        tmp_path, facade_body=_LIVE_BODY + "    def added(self): pass\n",
+        allowed=_LIVE_ALLOWED,
     )
     assert _GUARD.facade_violations(root) == [
         "RepositoryFacade gained public facade seats: added"
+    ]
+
+
+def test_check_runs_every_facade_guard(tmp_path, monkeypatch):
+    """``check()`` -- what the script and the contracts lane run -- reports
+    the surface, dynamic-reference and protocol-binding violations, so none
+    of them can be unhooked while today's tree happens to be clean."""
+    monkeypatch.setattr(_GUARD, "DYNAMIC_FACADE_REFERENCE_EXEMPTIONS", {})
+    root = _facade_root(tmp_path, facade_body=_LIVE_BODY, allowed=_LIVE_ALLOWED)
+    assert _GUARD.check(root) == []
+
+    root = _facade_root(
+        tmp_path,
+        facade_body=(
+            "    def __init__(self, ref):\n"
+            "        self._seam = lambda: _repository_from_weakref(ref).gone_seam()\n"
+            "    def kept(self): pass\n"
+        ),
+        allowed={"kept", "other"},
+        app_files={
+            "backend/app/services/consumer.py":
+                "def probe(repo):\n    return getattr(repo, 'gone_probe', None)\n",
+        },
+    )
+    assert _GUARD.check(root) == [
+        "RepositoryFacade facade surface allowlist is stale, remove: other "
+        "(update scripts/architecture_boundary_baseline.json :: "
+        "facade_public_surface.RepositoryFacade.allowed_names)",
+        "facade weak-reference seam reads a missing RepositoryFacade attribute: "
+        "gone_seam",
+        "literal getattr/hasattr on a facade receiver names a missing repository "
+        "attribute: backend/app/services/consumer.py :: probe :: gone_probe",
+        "protocol MemoryRepository is bound to the facade but declares methods "
+        "RepositoryFacade lacks: other",
     ]
 
 
@@ -274,41 +351,44 @@ def test_weakref_seam_must_name_a_live_facade_attribute(tmp_path, monkeypatch):
     seam = (
         "    def __init__(self, ref):\n"
         "        self._seam = lambda nb: _repository_from_weakref(ref).{name}(nb)\n"
-        "    def fuse(self, nb): pass\n"
-        "    def _private(self, nb): pass\n"
+        + _LIVE_BODY
+        + "    def _private(self, nb): pass\n"
     )
-    for live in ("fuse", "_private"):
+    for live in ("kept", "_private"):
         root = _facade_root(
-            tmp_path, facade_body=seam.format(name=live), allowed={"fuse"}
+            tmp_path, facade_body=seam.format(name=live), allowed=_LIVE_ALLOWED
         )
         assert _GUARD.dynamic_facade_reference_violations(root) == []
 
-    root = _facade_root(tmp_path, facade_body=seam.format(name="retired"), allowed={"fuse"})
-    assert _GUARD.dynamic_facade_reference_violations(root) == [
-        "facade weak-reference seam reads a missing RepositoryFacade attribute: retired"
-    ]
+    # A retired name, and a name only one wrapper defines: the seam is wired
+    # in RepositoryFacade.__init__ and serves both backends.
+    for missing in ("retired", "close_local", "close"):
+        root = _facade_root(
+            tmp_path, facade_body=seam.format(name=missing), allowed=_LIVE_ALLOWED
+        )
+        assert _GUARD.dynamic_facade_reference_violations(root) == [
+            "facade weak-reference seam reads a missing RepositoryFacade "
+            f"attribute: {missing}"
+        ]
 
 
 def test_literal_getattr_probe_must_name_a_live_repository_attribute(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(_GUARD, "DYNAMIC_FACADE_REFERENCE_EXEMPTIONS", {})
-    body = (
-        "    def __init__(self):\n"
-        "        self.settings = None\n"
-        "    def kept(self): pass\n"
-    )
+    body = "    def __init__(self):\n        self.settings = None\n" + _LIVE_BODY
     probes = (
-        "def probe(repo, repository, other, holder):\n"
+        "def probe(repo, repository, other, holder, _repo):\n"
         "    getattr(repo, 'kept', None)\n"
         "    getattr(repository, 'settings', None)\n"
         "    hasattr(holder.repository, 'close')\n"
         "    getattr(repo, 'close_local', None)\n"
+        "    getattr(_repo, 'other', None)\n"
         "    getattr(other, 'retired', None)\n"
     )
     rel = "backend/app/services/consumer.py"
     root = _facade_root(
-        tmp_path, facade_body=body, allowed={"kept", "settings"},
+        tmp_path, facade_body=body, allowed=_LIVE_ALLOWED | {"settings"},
         app_files={rel: probes},
     )
     # live on the facade, on its self-assigned attributes, or on a wrapper;
@@ -316,41 +396,155 @@ def test_literal_getattr_probe_must_name_a_live_repository_attribute(
     assert _GUARD.dynamic_facade_reference_violations(root) == []
 
     root = _facade_root(
-        tmp_path, facade_body=body, allowed={"kept", "settings"},
+        tmp_path, facade_body=body, allowed=_LIVE_ALLOWED | {"settings"},
         app_files={
             rel: probes + "    getattr(repo, 'retired', None)\n",
-            "scripts/tool.py": "def run(self):\n    hasattr(self._repo, 'gone')\n",
+            "scripts/tool.py": "class Tool:\n    def run(self):\n"
+                               "        hasattr(self._repo, 'gone')\n",
+            # spellings a call-shape text filter would miss: a comment and a
+            # line break before the receiver, a parenthesized receiver, and a
+            # bare ``_repo`` local name
+            "backend/app/services/spelled.py": (
+                "def a(repo):\n"
+                "    return getattr(  # why\n"
+                "        repo, 'gone_a', None)\n"
+                "def b(repo):\n"
+                "    return getattr((repo), 'gone_b', None)\n"
+                "def c(_repo):\n"
+                "    return getattr(_repo, 'gone_c', None)\n"
+            ),
         },
     )
     assert _GUARD.dynamic_facade_reference_violations(root) == [
         "literal getattr/hasattr on a facade receiver names a missing "
-        f"repository attribute: {rel} :: retired",
+        f"repository attribute: {rel} :: probe :: retired",
         "literal getattr/hasattr on a facade receiver names a missing "
-        "repository attribute: scripts/tool.py :: gone",
+        "repository attribute: backend/app/services/spelled.py :: a :: gone_a",
+        "literal getattr/hasattr on a facade receiver names a missing "
+        "repository attribute: backend/app/services/spelled.py :: b :: gone_b",
+        "literal getattr/hasattr on a facade receiver names a missing "
+        "repository attribute: backend/app/services/spelled.py :: c :: gone_c",
+        "literal getattr/hasattr on a facade receiver names a missing "
+        "repository attribute: scripts/tool.py :: Tool.run :: gone",
     ]
 
 
-def test_dynamic_reference_exemptions_have_zero_slack(tmp_path, monkeypatch):
+def test_facade_internal_getattr_on_self_must_name_a_facade_attribute(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(_GUARD, "DYNAMIC_FACADE_REFERENCE_EXEMPTIONS", {})
+    body = _LIVE_BODY + "    def probe(self):\n        return getattr(self, '{name}', None)\n"
+    root = _facade_root(
+        tmp_path, facade_body=body.format(name="kept"),
+        allowed=_LIVE_ALLOWED | {"probe"},
+    )
+    assert _GUARD.dynamic_facade_reference_violations(root) == []
+
+    # inside RepositoryFacade only facade names count: ``close`` lives on
+    # the PostgreSQL wrapper alone
+    for missing in ("retired", "close"):
+        root = _facade_root(
+            tmp_path, facade_body=body.format(name=missing),
+            allowed=_LIVE_ALLOWED | {"probe"},
+        )
+        assert _GUARD.dynamic_facade_reference_violations(root) == [
+            "literal getattr/hasattr on a facade receiver names a missing "
+            "repository attribute: backend/app/services/repository_facade.py :: "
+            f"RepositoryFacade.probe :: {missing}"
+        ]
+
+
+def test_dynamic_reference_exemptions_are_scoped_and_have_zero_slack(
+    tmp_path, monkeypatch
+):
     rel = "backend/app/services/startup_warmup.py"
     monkeypatch.setattr(
         _GUARD,
         "DYNAMIC_FACADE_REFERENCE_EXEMPTIONS",
-        {(rel, "cache_clear"): "receiver is the cached factory"},
+        {(rel, "clear", "cache_clear"): "receiver is the cached factory"},
     )
-    body = "    def kept(self): pass\n"
+    probe = "def {fn}(repository):\n    getattr(repository, 'cache_clear', None)\n"
     root = _facade_root(
-        tmp_path, facade_body=body, allowed={"kept"},
-        app_files={rel: "def clear(repository):\n    getattr(repository, 'cache_clear', None)\n"},
+        tmp_path, facade_body=_LIVE_BODY, allowed=_LIVE_ALLOWED,
+        app_files={rel: probe.format(fn="clear")},
     )
     assert _GUARD.dynamic_facade_reference_violations(root) == []
 
+    # the same name in another function of the same file, or in another
+    # file, is not covered by the exemption
     root = _facade_root(
-        tmp_path, facade_body=body, allowed={"kept"},
-        app_files={rel: "def clear(repository):\n    pass\n"},
+        tmp_path, facade_body=_LIVE_BODY, allowed=_LIVE_ALLOWED,
+        app_files={
+            rel: probe.format(fn="clear") + probe.format(fn="other_use"),
+            "backend/app/services/elsewhere.py": probe.format(fn="clear"),
+        },
+    )
+    assert _GUARD.dynamic_facade_reference_violations(root) == [
+        "literal getattr/hasattr on a facade receiver names a missing repository "
+        "attribute: backend/app/services/elsewhere.py :: clear :: cache_clear",
+        "literal getattr/hasattr on a facade receiver names a missing repository "
+        f"attribute: {rel} :: other_use :: cache_clear",
+    ]
+
+    root = _facade_root(
+        tmp_path, facade_body=_LIVE_BODY, allowed=_LIVE_ALLOWED,
+        app_files={
+            rel: "def clear(repository):\n    pass\n",
+            "backend/app/services/elsewhere.py": "",
+        },
     )
     assert _GUARD.dynamic_facade_reference_violations(root) == [
         "dynamic facade reference exemption is stale, remove: "
-        f"{rel} :: cache_clear"
+        f"{rel} :: clear :: cache_clear"
+    ]
+
+
+def test_protocols_bound_to_the_facade_must_match_it(tmp_path):
+    root = _facade_root(tmp_path, facade_body=_LIVE_BODY, allowed=_LIVE_ALLOWED)
+    assert _GUARD.facade_protocol_bindings(root) == [
+        ("backend/app/api/deps.py", "memory_service", "MemoryRepository"),
+    ]
+    assert _GUARD.facade_protocol_binding_violations(root, {}) == []
+
+    # retiring a facade method a bound protocol (here through a protocol
+    # base) still declares
+    root = _facade_root(
+        tmp_path, facade_body="    def other(self): pass\n", allowed={"other"}
+    )
+    assert _GUARD.facade_protocol_binding_violations(root, {}) == [
+        "protocol MemoryRepository is bound to the facade but declares methods "
+        "RepositoryFacade lacks: kept"
+    ]
+    # a registered gap is accepted, and must be removed once it closes
+    assert _GUARD.facade_protocol_binding_violations(
+        root, {"MemoryRepository": ["kept"]}
+    ) == []
+    root = _facade_root(tmp_path, facade_body=_LIVE_BODY, allowed=_LIVE_ALLOWED)
+    assert _GUARD.facade_protocol_binding_violations(
+        root, {"MemoryRepository": ["kept"], "Unbound": ["x"]}
+    ) == [
+        "facade protocol gap list for MemoryRepository is stale, remove: kept "
+        "(update scripts/architecture_boundary_baseline.json :: "
+        "facade_protocol_binding_gaps)",
+        "facade protocol gap list names an unbound protocol, remove: Unbound "
+        "(update scripts/architecture_boundary_baseline.json :: "
+        "facade_protocol_binding_gaps)",
+    ]
+
+    # the ``-> P: return repository()`` form binds too
+    root = _facade_root(
+        tmp_path, facade_body="    def other(self): pass\n", allowed={"other"},
+        deps=(
+            "from app.repositories.ports import MemoryRepository\n"
+            "def repository():\n"
+            "    return object()\n"
+            "def source_repository() -> MemoryRepository:\n"
+            "    return repository()\n"
+        ),
+    )
+    assert _GUARD.facade_protocol_binding_violations(root, {}) == [
+        "protocol MemoryRepository is bound to the facade but declares methods "
+        "RepositoryFacade lacks: kept"
     ]
 
 

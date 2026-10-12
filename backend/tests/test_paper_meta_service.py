@@ -455,7 +455,7 @@ def test_backfill_counts_and_progress(repo, notebook_id, monkeypatch):
 
 
 def test_backfill_runtime_registers_and_pops_progress(repo, notebook_id, service, monkeypatch):
-    """job 期间 facade paper_meta_backfilling(nb)=True + progress dict 反映 done/total；
+    """job 期间 source_ingestion.paper_meta_backfilling(nb)=True + progress dict 反映 done/total；
     结束后（正常/异常）自动 pop 为 False/None。"""
     # 同 test_backfill_counts_and_progress:本例 stored>0 会真 emit 到进程级共享
     # 单例 pending_bus,滞留事件会让同进程后跑的 SSE 首帧断言拿到 event 而非

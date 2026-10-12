@@ -63,7 +63,10 @@ contributor constraints, not a second implementation history.
   named only at run time no longer exists: a `_repository_from_weakref(...)` seam in
   `repository_facade.py`, or a literal `getattr`/`hasattr` probe on a facade-shaped
   receiver in `backend/app` or `scripts`. Those callers degrade silently instead of
-  raising, so the audit cannot see them. Retire facade members against the
+  raising, so the audit cannot see them. It also fails when a protocol the facade is
+  handed out as (`cast(P, repository())`, or `-> P` returning `repository()`)
+  declares a method the facade lacks; gaps that predate the check are listed in
+  `facade_protocol_binding_gaps` with zero slack. Retire facade members against the
   [caller ledger](./superpowers/plans/2026-08-23-facade-retirement-ledger.md), reproduced
   by `scripts/audit_facade_callers.py`; update the ownership/surface fixtures with
   `scripts/generate_repository_contract_fixtures.py --rebaseline-surface`.

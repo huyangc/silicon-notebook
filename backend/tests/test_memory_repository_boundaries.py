@@ -48,7 +48,6 @@ def test_memory_ports_expose_store_and_lifecycle_contracts():
         "get_memory",
         "list_memories",
         "answer_memory_links",
-        "memory_revisions",
         "transfer_memories",
     }
     assert store_methods <= set(ports.MemoryStorePort.__dict__)
