@@ -765,7 +765,7 @@ Notebook；仅有 `group_admins` 边的库不向普通成员披露。owner 与�
 | `GET /me/share-requests` | 已登录 | **P2** **我**发起的、仍**待审批**的全部申请，跨笔记本。它是撤回端点的另一半：同一条授权轴（`requested_by`）、不挂任何笔记本能力，所以**已失去管理权**的申请人仍找得到、撤得掉自己的提议。刻意**不**挂在 `/notebooks/{id}/…` 下——那个维度已经有一份 manage 门的清单，一个维度只能有一套口径。只回 pending：已决定的申请撤不回来，列出来只会白扩披露面 |
 | `DELETE /notebooks/{id}/share-requests/{rid}` | 已登录，**且这条申请是你提的** | **P2** 撤回**待审批**申请（整行删，不是第三个状态）；已决定 409、不存在 404。⚠ **刻意没有 notebook 能力依赖**：授权轴是**申请归属**而不是当前的库权限。批准会拒绝已失去管理权的申请人，撤回若也要求管理权，这类申请就**既批不了也撤不掉**，永远卡在审核队列里 |
 | `GET /groups/{id}/share-requests` | 组管理员 | **P2** 审核队列：共享给本组的待审批申请清单 |
-| `POST /groups/{id}/share-requests/{rid}/approve` | 组管理员 | **P2** 同一写事务写 `(group, viewer)` 边并标 approved；已共享幂等；不存在/已决定 404 |
+| `POST /groups/{id}/share-requests/{rid}/approve` | 组管理员 | **P2** 同一写事务写 `(group, viewer)` 边并标 approved；已共享幂等；不存在/已决定 404，库正在删除、复制或导入时同样 404（不写边，申请保持待审批） |
 | `POST /groups/{id}/share-requests/{rid}/reject` | 组管理员 | **P2** 标 rejected、不写边；申请者可对同库同组重新发起 |
 | `GET /notebooks/{id}/share` | `notebook:configure` | 只读；见下。⚠ **恒 owner，不是 `notebook:grant`**——链接分享是库主对本库对外处置的配置，不随内容管理权转移 |
 

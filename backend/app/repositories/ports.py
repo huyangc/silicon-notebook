@@ -4581,8 +4581,9 @@ class GroupStorePort(Protocol):
     ) -> "dict | None":
         """批准:**同一写事务**内复核申请仍 pending + 组在 + `decided_by` 仍有审批资格
         + **`requested_by` 仍对该库有管理权** + 写 `(group, viewer)` 授权边(已共享则幂等
-        复用)+ 状态置 approved、写 `decided_by`/`decided_at`。申请不存在或已被决定返回
-        `None`(路由 → 404);`decided_by` 已不是该组组管理员抛 `GroupAdminRequiredError`
+        复用)+ 状态置 approved、写 `decided_by`/`decided_at`。申请不存在或已被决定、或
+        那本库不存活(`NOTEBOOK_LIVE_SQL` 之外:删除/复制/导入中)返回 `None`(路由 → 404,
+        不写边、申请保持 pending);`decided_by` 已不是该组组管理员抛 `GroupAdminRequiredError`
         (路由 → 403);`requested_by` 已失去管理权抛 `ShareRequesterUnauthorizedError`
         (路由 → 409,申请行保留)。
 
