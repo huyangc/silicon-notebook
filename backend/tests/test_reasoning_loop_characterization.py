@@ -10,18 +10,20 @@ deliberate path of the loop. Two layers of assertions sit on every scenario:
    or raises. These are ordinary behaviour tests and stay.
 
 2. **Split oracle** (the snapshot comparison in ``test_reflect_loop_scenario``
-   and ``test_split_oracle_reaches_every_loop_branch``) — the full observation
-   recorded by ``tests.reasoning_loop_probe``: the trace with complete
-   ``detail``, every model call's message bytes (hash + size), each reflect
-   turn's ``candidates_summary`` verbatim, every port call and every
-   application SQL statement (ordered on the run's own thread; see
-   ``Probe.split`` for the first round's pool workers), the returned
-   ``ReasoningResult`` (or the exception), and the ``on_step`` stream.
-   Vector scores are projected out (their last bits follow the BLAS kernel);
-   the order they produce is kept, and the fixture has no exact score ties.
-   It is the byte-identity proof the ``run`` split (debt plan S1) is checked
-   against step by step, and it is retired, snapshots included, when the last
-   split PR (S1-c) lands; the behaviour layer is what remains.
+   and ``test_split_oracle_reaches_every_loop_branch``) — a temporary oracle
+   for the ``run`` split (debt plan S1), retired with its snapshots when the
+   last split PR (S1-c) lands; the behaviour layer is what remains. It
+   compares what the loop exchanges with the outside, not how storage spells
+   it: the trace with complete ``detail``, the model-visible input (every
+   model call's message bytes as hash + size, each reflect turn's
+   ``candidates_summary`` verbatim), the semantic identity of every port call
+   (port, method, normalised arguments; ordered on the run's own thread, a
+   multiset for the first round's pool workers), ``note_adopted``, the
+   returned ``ReasoningResult`` (or the exception) and the ``on_step`` stream.
+   SQL text is not compared: the split only moves code inside ``run``, whose
+   every storage access goes through those ports. Vector scores are projected
+   out (their last bits follow the BLAS kernel); the order they produce is
+   kept, and the fixture has no exact score ties.
 
 The snapshots live in ``fixtures/reasoning_loop_characterization/<name>.json``.
 Re-record only on the revision you intend as the baseline, with no local
@@ -569,7 +571,6 @@ def _invoke_stage(scenario, repo, retriever, nb, on_step, cancel_event, limits):
 def observe(scenario: Scenario, tmp_path, monkeypatch) -> dict:
     from app.services.source_scope import source_scope_context
 
-    rig.install_sql_trace(monkeypatch)
     _clear_process_caches()
     with rig.deterministic_ids():
         repo = _make_repo(tmp_path, monkeypatch)
@@ -604,6 +605,14 @@ def observe(scenario: Scenario, tmp_path, monkeypatch) -> dict:
                 if scenario.experience_overrides else {})
         if retriever.agent_profile is not None:
             retriever.agent_profile = rig.PortProbe(retriever.agent_profile, "profile")
+        # the remaining seats the loop reads storage through
+        for seat in ("collection_catalog", "collection_enumeration", "sources",
+                     "communities"):
+            if getattr(retriever, seat) is not None:
+                setattr(retriever, seat, rig.PortProbe(getattr(retriever, seat), seat))
+        if retriever.source_generation is not None:
+            retriever.source_generation = rig.recorded_callable(
+                retriever.source_generation, "source_generation")
         # raw decisions inside, recorder outside: every turn's summary is
         # recorded, including the turns that never reach the model
         _install_raw_decisions(retriever, script)
@@ -639,7 +648,6 @@ def observe(scenario: Scenario, tmp_path, monkeypatch) -> dict:
             "model_calls": probe.model_calls,
             "ports": probe.split(probe.ports),
             "embeddings": dict(sorted(probe.embeddings.items())),
-            "sql": probe.split(probe.sql),
             "result": rig.result_projection(result) if result is not None else None,
         }
     return json.loads(json.dumps(observation, ensure_ascii=False))
