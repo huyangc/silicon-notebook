@@ -105,3 +105,17 @@ def test_failed_section_rows_normalise_both_dialects():
     assert failed_section_errors(json.dumps(rows)) == expected
     assert failed_section_errors(None) == []
     assert failed_section_errors("not json") == []
+
+
+def test_both_store_gates_look_for_the_note_this_module_writes():
+    """The token read decides whether a body carries a failure note (and the
+    projection then trusts it); a store gate drifting from the generator's
+    prefix would serve a stored raw note unrewritten."""
+    from app.repositories.postgres import report_store as postgres_store
+    from app.repositories.sqlite import report_store as sqlite_store
+    from app.services.reports import section_failure
+
+    paragraph = section_failure_paragraph("x")
+    for store in (postgres_store, sqlite_store):
+        assert store._FAILURE_NOTE_PREFIX == section_failure._NOTE_PREFIX
+        assert paragraph.startswith(store._FAILURE_NOTE_PREFIX)

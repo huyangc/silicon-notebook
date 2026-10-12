@@ -1647,7 +1647,8 @@ def test_public_report_read_carries_failed_sections_only_for_a_failure_note(
     resolved = store.public_report_by_token(store.share_report(nb["id"], with_note))
     assert resolved["failed_sections"] == REPORT_SECTION_FAILURE_EXPECTED
     plain = store.public_report_by_token(store.share_report(nb["id"], without_note))
-    assert plain["failed_sections"] == []
+    # No failure note in the body: the failed sections are never read.
+    assert plain["failed_sections"] is None
 
 
 def test_public_report_route_is_not_behind_the_router_level_session_guard():

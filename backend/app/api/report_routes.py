@@ -789,9 +789,10 @@ def public_report_route(token: str, response: Response) -> PublicReport:
         raise HTTPException(status_code=404, detail="shared report not found")
     # Raw failure text, read only to rewrite a stored failure note neutrally:
     # out of the row before anything else sees it, never into the payload.
-    failed_errors = [
-        item["error"]
-        for item in failed_section_errors(row.pop("failed_sections", None))
+    # ``None`` means the store found no failure note in the body at all.
+    failed_sections = row.pop("failed_sections", None)
+    failed_errors = None if failed_sections is None else [
+        item["error"] for item in failed_section_errors(failed_sections)
     ]
     # Live re-authorization of the CREATOR (P1-T3b ruling).  A member may
     # publish a report built from a shared notebook's corpus, but that is a
