@@ -165,6 +165,12 @@
       },
       {
         "kind": "import",
+        "path": "scripts/measure_sync_capture_cost.py",
+        "scope": "<module>._measure_sqlite",
+        "target": "app.services.sqlite_repository:SQLiteRepository"
+      },
+      {
+        "kind": "import",
         "path": "scripts/replay_retrieval.py",
         "scope": "<module>.record_run",
         "target": "app.services.sqlite_repository:SQLiteRepository"
@@ -1520,6 +1526,12 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._memory_store",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/deps.py",
         "scope": "<module>.admin_query_repository",
         "target": "_runtime"
@@ -1533,6 +1545,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
+        "scope": "<module>.ask_intent_handle_repository",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
         "scope": "<module>.content_overview_service",
         "target": "_runtime"
       },
@@ -1540,6 +1558,12 @@
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
         "scope": "<module>.extension_toggle_repository",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
+        "scope": "<module>.global_ask_repository",
         "target": "_runtime"
       },
       {
@@ -1558,6 +1582,12 @@
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
         "scope": "<module>.identity_repository",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
+        "scope": "<module>.memory_membership_service",
         "target": "_runtime"
       },
       {
@@ -1689,6 +1719,18 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
+        "scope": "<module>._report_mounts_still_effective",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>._share_disclosure",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>.export_reports_endpoint",
         "target": "_runtime"
       },
@@ -1696,6 +1738,12 @@
         "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>.generate_report",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.public_report_route",
         "target": "_runtime"
       },
       {
@@ -1756,6 +1804,18 @@
         "kind": "attribute",
         "path": "backend/app/services/knowhow/transfer.py",
         "scope": "<module>.move_table",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/memory_isolation_rebuild.py",
+        "scope": "<module>.MemoryIsolationRebuild.for_repository",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/memory_orphan_sweep.py",
+        "scope": "<module>.MemoryOrphanSweep.for_repository",
         "target": "_runtime"
       },
       {
@@ -2847,6 +2907,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.ask_job_origin",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.ask_job_status",
         "target": "_runtime"
       },
@@ -2854,6 +2920,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.ask_reasoning",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.ask_with_job",
         "target": "_runtime"
       },
       {
@@ -3136,6 +3208,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.decided_seed_pairs",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.delete_agent_profile",
         "target": "_runtime"
       },
       {
@@ -4562,6 +4640,12 @@
       },
       {
         "kind": "attribute",
+        "path": "scripts/reflect_shadow_rig.py",
+        "scope": "<module>.run_search_once",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
         "path": "scripts/verify_repository_snapshot.py",
         "scope": "<module>.verify_snapshot",
         "target": "_runtime"
@@ -4666,6 +4750,18 @@
         "kind": "attribute",
         "path": "scripts/bench_scale_build_paging.py",
         "scope": "<module>._seed_notebook",
+        "target": "_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/measure_sync_capture_cost.py",
+        "scope": "<module>._measure_sqlite",
+        "target": "_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/measure_sync_capture_cost.py",
+        "scope": "<module>._measure_sqlite.run_once",
         "target": "_write"
       }
     ],
@@ -4898,7 +4994,7 @@
     "owner": "AskService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', payload: 'AskRequest', *, submitted_via: 'StoredSubmittedVia' = '') -> 'AskResponse'"
+    "signature": "(self, notebook_id: 'str', payload: 'AskRequest', *, submitted_via: 'StoredSubmittedVia' = '', output: 'AskOutput' = 'answer') -> 'AskResponse | AskEvidence'"
   },
   "ask_answer_detail": {
     "consumers": [
@@ -4976,6 +5072,12 @@
         "path": "backend/app/api/mcp_tools/ask.py",
         "scope": "<module>._read_notebook_job",
         "target": "ask_job_origin"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/ask.py",
+        "scope": "<module>._recheck_notebook_delivery",
+        "target": "ask_job_origin"
       }
     ],
     "kind": "method",
@@ -5012,7 +5114,7 @@
     "owner": "AskService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', payload: 'AskRequest', *, submitted_via: 'StoredSubmittedVia' = '', attach_only: 'bool' = False) -> \"'tuple[AskResponse | None, str] | None'\""
+    "signature": "(self, notebook_id: 'str', payload: 'AskRequest', *, submitted_via: 'StoredSubmittedVia' = '', attach_only: 'bool' = False, stop: 'Any' = None, output: 'AskOutput' = 'answer') -> \"'tuple[AskResponse | AskEvidence | None, str] | None'\""
   },
   "audit_labels_for_user_ids": {
     "consumers": [
@@ -5205,6 +5307,24 @@
         "target": "build_scale_index"
       },
       {
+        "kind": "patch",
+        "path": "backend/tests/test_viz_index_build.py",
+        "scope": "<module>.test_batch_indexing_reports_a_discarded_build_as_discarded",
+        "target": "build_scale_index"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_viz_index_build.py",
+        "scope": "<module>.test_the_batch_kg_phase_reports_what_its_scale_build_did",
+        "target": "build_scale_index"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_viz_index_build.py",
+        "scope": "<module>.test_the_offline_cli_fails_a_discarded_build_with_its_reason",
+        "target": "build_scale_index"
+      },
+      {
         "kind": "attribute",
         "path": "scripts/bench_scale_build_paging.py",
         "scope": "<module>.cmd_build",
@@ -5220,6 +5340,30 @@
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_index_prints_stage_timings",
+        "target": "build_scale_index"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_viz_index_build.py",
+        "scope": "<module>.test_batch_indexing_reports_a_discarded_build_as_discarded",
+        "target": "build_scale_index"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_viz_index_build.py",
+        "scope": "<module>.test_the_batch_kg_phase_reports_what_its_scale_build_did",
+        "target": "build_scale_index"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_viz_index_build.py",
+        "scope": "<module>.test_the_offline_cli_fails_a_discarded_build_with_its_reason",
         "target": "build_scale_index"
       }
     ],
@@ -5397,6 +5541,12 @@
         "kind": "attribute",
         "path": "scripts/bench_scale_build_paging.py",
         "scope": "<module>.cmd_seed",
+        "target": "close"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/measure_sync_capture_cost.py",
+        "scope": "<module>._measure_sqlite",
         "target": "close"
       }
     ],
@@ -5810,6 +5960,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._conversation_share_count",
+        "target": "conversation_share_state"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.get_conversation_share_route",
         "target": "conversation_share_state"
       }
@@ -6078,6 +6234,12 @@
         "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>.list_reports",
+        "target": "current_user"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.share_report_route",
         "target": "current_user"
       },
       {
@@ -6620,6 +6782,12 @@
   },
   "get_conversation": {
     "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._conversation_share_count",
+        "target": "get_conversation"
+      },
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
@@ -7542,7 +7710,7 @@
     "owner": "MemoryService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, owner_id: 'str', offset: 'int' = 0, limit: 'int' = 100) -> 'list[AgentProfile]'"
+    "signature": "(self, owner_id: 'str', offset: 'int' = 0, limit: 'int' = 100, *, include_deleted: 'bool' = False) -> 'list[AgentProfile]'"
   },
   "list_conversations": {
     "consumers": [
@@ -7909,6 +8077,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>._report_scale_index_not_updated",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>._require_notebook_owner",
         "target": "maintenance"
       },
@@ -8202,7 +8376,7 @@
     "owner": "KnowledgeGovernanceService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', source_id: 'str', payload: 'MergeRequest') -> 'RuleCard'"
+    "signature": "(self, notebook_id: 'str', source_id: 'str', payload: 'MergeRequest', *, actor_id: 'Optional[str]' = None) -> 'RuleCard'"
   },
   "merge_review_job_status": {
     "consumers": [
@@ -8316,7 +8490,7 @@
     "owner": "KnowledgeQueryService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id, object_id, *, source_notebook_id: 'str' = '')"
+    "signature": "(self, notebook_id, object_id, *, source_notebook_id: 'str' = '', allowed_source_ids: 'Optional[Sequence[str]]' = None)"
   },
   "notebook_analytics": {
     "consumers": [
@@ -8467,16 +8641,49 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._conversation_share_count",
+        "target": "participant_notebook_ids"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._public_conversation_or_404",
+        "target": "participant_notebook_ids"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/mcp_tools/citations.py",
         "scope": "<module>._read_element.<lambda>",
+        "target": "participant_notebook_ids"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>._report_mounts_still_effective",
+        "target": "participant_notebook_ids"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/public_page_mount_recheck_cases.py",
+        "scope": "<module>.case_report_of_local_citations_reads_no_ownership",
         "target": "participant_notebook_ids"
       }
     ],
     "kind": "method",
     "owner": "NotebookStore",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "world.repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/public_page_mount_recheck_cases.py",
+        "scope": "<module>.case_report_of_local_citations_reads_no_ownership",
+        "target": "participant_notebook_ids"
+      }
+    ],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str') -> 'List[str]'"
+    "signature": "(self, notebook_id: 'str', *, viewer_id: 'str | None') -> 'List[str]'"
   },
   "pending_actions": {
     "consumers": [
@@ -8632,7 +8839,7 @@
       }
     ],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', question: 'str', history: 'str' = '', cancel_event: 'CancelEvent' = None) -> 'QueryIntentContract'"
+    "signature": "(self, notebook_id: 'str', question: 'str', history: 'str' = '', cancel_event: 'CancelEvent' = None, *, source_scope: 'Any' = None, base_scope: 'Any' = None, user_id: 'str | None' = None) -> 'QueryIntentContract'"
   },
   "process_source": {
     "consumers": [
@@ -8691,6 +8898,30 @@
         "target": "process_source"
       },
       {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_all_isolates_unreadable_file_instead_of_aborting",
+        "target": "process_source"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_all_workers_see_offline_batch_without_kg_deferral",
+        "target": "process_source"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_reparse_notes_existing_scale_index_not_updated",
+        "target": "process_source"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_reparse_workers_see_offline_batch",
+        "target": "process_source"
+      },
+      {
         "kind": "attribute",
         "path": "scripts/smoke_backend.py",
         "scope": "<module>.main",
@@ -8699,7 +8930,40 @@
     ],
     "kind": "method",
     "owner": "SourceIngestionService",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_all_isolates_unreadable_file_instead_of_aborting",
+        "target": "process_source"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_all_workers_see_offline_batch_without_kg_deferral",
+        "target": "process_source"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_reparse_notes_existing_scale_index_not_updated",
+        "target": "process_source"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_reparse_workers_see_offline_batch",
+        "target": "process_source"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, source_id: 'str') -> 'SourceSummary'"
   },
@@ -8716,7 +8980,7 @@
     "owner": "KnowledgeGovernanceService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', object_id: 'str', *, target_base_id: 'str' = '') -> 'dict'"
+    "signature": "(self, notebook_id: 'str', object_id: 'str', *, target_base_id: 'str' = '', actor_id: 'Optional[str]' = None) -> 'dict'"
   },
   "propose_schemas": {
     "consumers": [
@@ -8756,6 +9020,12 @@
   },
   "public_conversation_by_token": {
     "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._conversation_share_count",
+        "target": "public_conversation_by_token"
+      },
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
@@ -8813,6 +9083,18 @@
       {
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>._stub_all_tail",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_batch_source_processing_skips_notebook_metadata",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_kg_fresh_alone_forces_rebuild",
         "target": "rebuild_unified_kg"
       },
@@ -8867,6 +9149,12 @@
       {
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_kg_extraction_workers_see_offline_batch",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_kg_finalizer_failure_marks_durable_job_failed",
         "target": "rebuild_unified_kg"
       },
@@ -8902,8 +9190,20 @@
       },
       {
         "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_reparse_workers_see_offline_batch",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "kind": "patch",
         "path": "backend/tests/test_scale_index_repo.py",
         "scope": "<module>.test_run_kg_no_rebuild_skips_clustering",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_viz_index_build.py",
+        "scope": "<module>.test_the_batch_kg_phase_reports_what_its_scale_build_did",
         "target": "rebuild_unified_kg"
       },
       {
@@ -8927,6 +9227,22 @@
         "compatibility": "test-only",
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>._stub_all_tail",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_batch_source_processing_skips_notebook_metadata",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_kg_fresh_alone_forces_rebuild",
         "target": "rebuild_unified_kg"
       },
@@ -8999,6 +9315,14 @@
         "compatibility": "test-only",
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_kg_extraction_workers_see_offline_batch",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_kg_finalizer_failure_marks_durable_job_failed",
         "target": "rebuild_unified_kg"
       },
@@ -9046,8 +9370,24 @@
         "base": "repo",
         "compatibility": "test-only",
         "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_reparse_workers_see_offline_batch",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
         "path": "backend/tests/test_scale_index_repo.py",
         "scope": "<module>.test_run_kg_no_rebuild_skips_clustering",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_viz_index_build.py",
+        "scope": "<module>.test_the_batch_kg_phase_reports_what_its_scale_build_did",
         "target": "rebuild_unified_kg"
       }
     ],
@@ -9060,6 +9400,12 @@
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/_shared.py",
         "scope": "<module>._live_principal",
+        "target": "refresh_agent_principal"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/ask.py",
+        "scope": "<module>._refreshed_principal",
         "target": "refresh_agent_principal"
       },
       {
@@ -9239,7 +9585,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/ask.py",
-        "scope": "<module>._read_notebook_job",
+        "scope": "<module>._notebook_delivery_gate",
         "target": "require_agent_access"
       },
       {
@@ -9259,11 +9605,26 @@
         "path": "backend/app/api/mcp_tools/memory_context.py",
         "scope": "<module>._memory_rows",
         "target": "require_agent_access"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_memory_mcp.py",
+        "scope": "<module>.test_candidate_read_refused_by_the_later_scope_leaves_no_ledger_row",
+        "target": "require_agent_access"
       }
     ],
     "kind": "method",
     "owner": "MemoryService",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_memory_mcp.py",
+        "scope": "<module>.test_candidate_read_refused_by_the_later_scope_leaves_no_ledger_row",
+        "target": "require_agent_access"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, principal: 'AgentPrincipal', scope: 'str', notebook_id: 'str') -> 'None'"
   },
@@ -9996,6 +10357,12 @@
         "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.rebuild_unified_kg",
         "target": "run_unified_kg_rebuild_job"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/memory_isolation_rebuild.py",
+        "scope": "<module>.MemoryIsolationRebuild.for_repository",
+        "target": "run_unified_kg_rebuild_job"
       }
     ],
     "kind": "method",
@@ -10095,7 +10462,7 @@
     "owner": "KnowledgeGovernanceService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', rel_id: 'str', status: 'str') -> 'None'"
+    "signature": "(self, notebook_id: 'str', rel_id: 'str', status: 'str', *, actor_id: 'Optional[str]' = None) -> 'None'"
   },
   "set_indexing_pipeline": {
     "consumers": [
@@ -10245,6 +10612,12 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/services/memory_isolation_rebuild.py",
+        "scope": "<module>.MemoryIsolationRebuild.for_repository",
+        "target": "settings"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.__init__",
         "target": "settings"
@@ -10296,13 +10669,42 @@
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>.share_report_route",
         "target": "share_report"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/report_share_disclosure_cases.py",
+        "scope": "<module>.case_memory_confirmed_between_the_count_and_the_flip",
+        "target": "share_report"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/report_share_disclosure_cases.py",
+        "scope": "<module>.case_memory_removed_between_the_count_and_the_flip",
+        "target": "share_report"
       }
     ],
     "kind": "method",
     "owner": "ReportStore",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "world.repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/report_share_disclosure_cases.py",
+        "scope": "<module>.case_memory_confirmed_between_the_count_and_the_flip",
+        "target": "share_report"
+      },
+      {
+        "base": "world.repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/report_share_disclosure_cases.py",
+        "scope": "<module>.case_memory_removed_between_the_count_and_the_flip",
+        "target": "share_report"
+      }
+    ],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', report_id: 'str') -> 'str'"
+    "signature": "(self, notebook_id: 'str', report_id: 'str', *, memory_guard=None) -> 'str'"
   },
   "source_elements": {
     "consumers": [
@@ -10358,6 +10760,12 @@
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/citations.py",
         "scope": "<module>._read_element",
+        "target": "source_metadata"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>.parse_source",
         "target": "source_metadata"
       }
     ],
@@ -10484,6 +10892,12 @@
         "kind": "attribute",
         "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.rebuild_unified_kg",
+        "target": "start_unified_kg_rebuild"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/memory_isolation_rebuild.py",
+        "scope": "<module>.MemoryIsolationRebuild.for_repository",
         "target": "start_unified_kg_rebuild"
       }
     ],
@@ -10806,7 +11220,7 @@
     "owner": "KnowledgeGovernanceService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', knowledge_id: 'str', payload: 'KnowledgeUpdate') -> 'RuleCard'"
+    "signature": "(self, notebook_id: 'str', knowledge_id: 'str', payload: 'KnowledgeUpdate', *, actor_id: 'Optional[str]' = None) -> 'RuleCard'"
   },
   "update_notebook": {
     "consumers": [
@@ -10921,7 +11335,19 @@
       {
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_all_streams_file_bytes_into_upload_sources",
+        "target": "upload_sources"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_ingest_repeated_interrupt_cannot_escape_worker_drain",
+        "target": "upload_sources"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_ingest_workers_see_offline_batch_with_kg_deferred",
         "target": "upload_sources"
       },
       {
@@ -10951,7 +11377,23 @@
         "compatibility": "test-only",
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_all_streams_file_bytes_into_upload_sources",
+        "target": "upload_sources"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_ingest_repeated_interrupt_cannot_escape_worker_drain",
+        "target": "upload_sources"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_ingest_workers_see_offline_batch_with_kg_deferred",
         "target": "upload_sources"
       }
     ],
