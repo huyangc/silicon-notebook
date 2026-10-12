@@ -213,11 +213,6 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
     ),
     ("postgres/knowledge_store.py", "KnowledgeStore.object_meta_rows_for_notebook"): (
         s(PG_EXP, BOUNDED, "representatives of one neighbourhood / a single id"),),
-    ("postgres/knowledge_store.py", "KnowledgeStore.community_context_rows"): (
-        s(ANY, DRIVEN, "one community's members, primary-key probes"),
-        s(ANY, DRIVEN, "one community's members, endpoint key probes"),
-        s(ANY, DRIVEN, "one community's members, endpoint key probes"),
-    ),
     ("postgres/knowledge_store.py", "KnowledgeStore.relation_context_rows"): (
         s(PG_EXP, BATCHED, "relation ids, batch_size per statement"),),
     ("postgres/knowledge_store.py", "KnowledgeStore.usable_object_rows_on"): (

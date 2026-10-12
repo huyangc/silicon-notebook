@@ -912,6 +912,59 @@ def test_工作负载显示名扫描面塌了要红(monkeypatch, capsys):
     assert "workload labels found" in capsys.readouterr().err
 
 
+def test_出厂模型服务显示名里的黑话会被抓到(tmp_path):
+    script = tmp_path / "migrate.py"
+    script.write_text(
+        'ROLE_LABELS = {\n    "general": "通用模型",\n    "kg": "知识抽取模型",\n}\n',
+        encoding="utf-8",
+    )
+    assert guard.scan_workload_labels(script, "ROLE_LABELS")[0] == 2
+    assert [t for _l, t, _x in guard.scan_workload_labels(script, "ROLE_LABELS")[1]] == ["抽取"]
+    template = tmp_path / "model-services.example.toml"
+    template.write_text(
+        '[services.general]\ndisplay_name = "通用模型"\n\n'
+        '[services.kg]\ndisplay_name = "知识抽取模型"\nkind = "chat"\n',
+        encoding="utf-8",
+    )
+    sites, hits = guard.scan_service_label_template(template)
+    assert sites == 2
+    assert [(line, term) for line, term, _ in hits] == [(5, "抽取")]
+
+
+def test_真实出厂模型服务显示名确实曾经违规过(tmp_path):
+    """变异验证:迁移脚本的 kg 角色名改回「知识抽取模型」,守卫必须报。"""
+    (script, name), = guard.SERVICE_LABEL_DICTS
+    src = script.read_text(encoding="utf-8")
+    assert '"kg": "知识分析模型"' in src, "显示名又漂了,本变异样本需同步"
+    assert guard.scan_workload_labels(script, name)[1] == []
+    assert guard.scan_service_label_template(guard.SERVICE_LABEL_TEMPLATE)[1] == []
+    mutated = tmp_path / "migrate_mutated.py"
+    mutated.write_text(
+        src.replace('"kg": "知识分析模型"', '"kg": "知识抽取模型"'), encoding="utf-8"
+    )
+    assert [t for _l, t, _x in guard.scan_workload_labels(mutated, name)[1]] == ["抽取"]
+
+
+def test_出厂模型服务显示名违规让守卫红(tmp_path, monkeypatch, capsys):
+    template = tmp_path / "model-services.example.toml"
+    template.write_text('display_name = "知识社区模型"\n', encoding="utf-8")
+    monkeypatch.setattr(guard, "SERVICE_LABEL_TEMPLATE", template)
+    monkeypatch.setattr(guard, "MIN_SERVICE_LABELS", 1)
+    assert guard.main() == 1
+    assert "model-services.example.toml:1: 「社区」in model service label" in (
+        capsys.readouterr().err
+    )
+
+
+def test_出厂模型服务显示名扫描面塌了要红(monkeypatch, capsys):
+    monkeypatch.setattr(guard, "SERVICE_LABEL_DICTS", ())
+    monkeypatch.setattr(
+        guard, "_TOML_DISPLAY_NAME", guard.re.compile(r"^never_matches$", guard.re.M)
+    )
+    assert guard.main() == 1
+    assert "shipped model-service labels" in capsys.readouterr().err
+
+
 # --------------------------------------------------------------------------
 # 6. 端到端归属:真实源码扫描只在 contracts lane 执行一次
 # --------------------------------------------------------------------------

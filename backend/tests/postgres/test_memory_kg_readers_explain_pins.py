@@ -151,7 +151,6 @@ def _captured(postgres_database, notebook_id: str, viewer: str) -> list[tuple]:
         store.object_meta_rows_for_notebook(db, notebook_id, ids[:20], viewer_id=viewer)
         store.object_meta_rows(db, ids[:20], notebook_id=notebook_id, viewer_id=viewer)
         store.fts_search(db, notebook_id, "kgname 42", 30, viewer_id=viewer)
-        store.community_context_rows(db, notebook_id, ids)
         store.duplicate_member_rows(db, notebook_id, ids)
         notebook_knowledge_rows(db, notebook_id, "kgname 4", 30, viewer_id=viewer)
         QueryStore.notebook_has_kg(db, notebook_id, viewer_id=viewer)

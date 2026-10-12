@@ -1502,39 +1502,6 @@ class KnowledgeStore:
             (notebook_id, *ids, *memory_params),
         ).fetchall()
 
-    @staticmethod
-    def community_context_rows(db: sqlite3.Connection, notebook_id: str, members):
-        """Shared tooling (E4-4, M1): Memory-derived objects and relations are
-        left out of every community summary's input, unconditionally — see
-        the PostgreSQL twin.  The object read stays driven by primary key (no
-        outer ``notebook_id`` predicate: the SQLite planner would scan the
-        notebook instead); the classifier's ``ds.notebook_id`` correlation is
-        a per-row primary-key probe on ``sources``."""
-        ids = list(members)
-        if not ids:
-            return [], []
-        # A community's member list grows with the notebook: one JSON
-        # parameter.  Objects are read by primary key (``drive_by``); relations
-        # are driven by their source endpoint and filtered by the target.
-        bound = bind_ids(ids)
-        targets = bind_ids(ids, sort=True)
-        objects = db.execute(
-            "SELECT id, object_type, payload FROM knowledge_objects "
-            f"WHERE {drive_by('id', bound)} "
-            f"AND NOT {memory_derived_in_notebook('knowledge_objects')}",
-            (bound.param,),
-        ).fetchall()
-        relations = db.execute(
-            f"SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
-            f"WHERE notebook_id=? AND review_status!='rejected' "
-            f"AND {drive_by('source_object_id', bound)} "
-            f"AND {member_of('target_object_id', targets)} "
-            f"AND NOT {memory_derived_in_notebook('knowledge_relations')} "
-            f"ORDER BY id",
-            [notebook_id, bound.param, targets.param],
-        ).fetchall()
-        return objects, relations
-
     def get_notebook(self, notebook_id: str) -> None:
         with self.database.connect() as db:
             if db.execute("SELECT 1 FROM notebooks WHERE id=?", (notebook_id,)).fetchone() is None:

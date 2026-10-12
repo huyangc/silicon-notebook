@@ -1662,36 +1662,6 @@ class KnowledgeStore:
             (notebook_id, *ids, *memory_params),
         ).fetchall(), payload=True)
 
-    @staticmethod
-    def community_context_rows(db: Any, notebook_id: str, members):
-        """Members and internal relations fed to the community-summary model.
-
-        Shared tooling (E4-4, M1): a summary is one text every member reads,
-        so Memory-derived objects and relations are left out for everyone,
-        unconditionally (``memory_derived_in_notebook``; bound to the
-        notebook, so the Memory side is the notebook's own Memory sources)."""
-        ids = list(members)
-        if not ids:
-            return [], []
-        # A community's member list grows with the notebook: one array
-        # parameter, the keys the statements exist to read (id_binding
-        # class 3).
-        objects = db.execute(
-            "SELECT id, object_type, payload FROM knowledge_objects "
-            "WHERE notebook_id=%s AND id=ANY(%s) "
-            f"AND NOT {memory_derived_in_notebook('knowledge_objects')}",
-            (notebook_id, ids),
-        ).fetchall()
-        relations = db.execute(
-            "SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
-            "WHERE notebook_id=%s AND review_status!='rejected' "
-            "AND source_object_id=ANY(%s) AND target_object_id=ANY(%s) "
-            f"AND NOT {memory_derived_in_notebook('knowledge_relations')} "
-            "ORDER BY id COLLATE \"C\"",
-            (notebook_id, ids, ids),
-        ).fetchall()
-        return _compat_rows(objects, payload=True), relations
-
     def get_notebook(self, notebook_id: str) -> None:
         with self.database.connect() as db:
             if db.execute("SELECT 1 FROM notebooks WHERE id=%s", (notebook_id,)).fetchone() is None:
