@@ -43,12 +43,17 @@ _DROP_WATCH_SECONDS = 2.0
 def _drop_is_waiting_on(base_url: str, schema: str) -> bool:
     import psycopg
 
+    # pg_locks is server-wide: without the database filter, a waiting lock in
+    # another database on the same server whose relation OID happens to equal
+    # one of this schema's tables would join to it and read as our drop.
     with psycopg.connect(base_url, autocommit=True) as conn:
         row = conn.execute(
             "SELECT 1 FROM pg_locks l "
             "JOIN pg_class c ON c.oid = l.relation "
             "JOIN pg_namespace n ON n.oid = c.relnamespace "
-            "WHERE n.nspname = %s AND NOT l.granted "
+            "WHERE l.database = (SELECT oid FROM pg_database "
+            "WHERE datname = current_database()) "
+            "AND n.nspname = %s AND NOT l.granted "
             "AND l.mode = 'AccessExclusiveLock' LIMIT 1",
             (schema,),
         ).fetchone()
