@@ -506,11 +506,15 @@ class SystemModelServiceRegistry:
                 )
             thinking_modes[workload_id] = raw_mode  # type: ignore[assignment]
 
-        if ignored_ids:
-            logger.warning("%s", ignorable_retired_hint(ignored_ids))
         missing, unknown = binding_gap(bindings, unknown_ids)
         if (missing or unknown) and settings.model_bindings_strict:
             raise ModelBindingGapError(missing, unknown_ids, path)
+        # Only once the load will succeed: next to a refusal, "已忽略，不影响启动"
+        # would contradict the line that stops the process.  One line per load
+        # (startup preflight and provider construction each load once; a hot
+        # reload logs again when it publishes), in strict and non-strict mode.
+        if ignored_ids:
+            logger.warning("%s", ignorable_retired_hint(ignored_ids))
         return cls(services, bindings, thinking_modes, unknown)
 
     def service(self, service_id: str) -> ModelServiceDefinition:

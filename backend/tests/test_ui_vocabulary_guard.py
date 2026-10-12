@@ -928,7 +928,7 @@ def test_出厂模型服务显示名里的黑话会被抓到(tmp_path):
     )
     sites, hits = guard.scan_service_label_template(template)
     assert sites == 2
-    assert [(line, term) for line, term, _ in hits] == [(5, "抽取")]
+    assert [(line, term) for line, term, _ in hits] == [(4, "抽取")]  # 表头所在行
 
 
 def test_真实出厂模型服务显示名确实曾经违规过(tmp_path):
@@ -947,7 +947,7 @@ def test_真实出厂模型服务显示名确实曾经违规过(tmp_path):
 
 def test_出厂模型服务显示名违规让守卫红(tmp_path, monkeypatch, capsys):
     template = tmp_path / "model-services.example.toml"
-    template.write_text('display_name = "知识社区模型"\n', encoding="utf-8")
+    template.write_text('[services.kg]\ndisplay_name = "知识社区模型"\n', encoding="utf-8")
     monkeypatch.setattr(guard, "SERVICE_LABEL_TEMPLATE", template)
     monkeypatch.setattr(guard, "MIN_SERVICE_LABELS", 1)
     assert guard.main() == 1
@@ -956,13 +956,95 @@ def test_出厂模型服务显示名违规让守卫红(tmp_path, monkeypatch, ca
     )
 
 
-def test_出厂模型服务显示名扫描面塌了要红(monkeypatch, capsys):
+def test_出厂模型服务显示名扫描面塌了要红(tmp_path, monkeypatch, capsys):
+    template = tmp_path / "model-services.example.toml"
+    template.write_text("[bindings]\n", encoding="utf-8")
     monkeypatch.setattr(guard, "SERVICE_LABEL_DICTS", ())
-    monkeypatch.setattr(
-        guard, "_TOML_DISPLAY_NAME", guard.re.compile(r"^never_matches$", guard.re.M)
-    )
+    monkeypatch.setattr(guard, "SERVICE_LABEL_TEMPLATE", template)
     assert guard.main() == 1
     assert "shipped model-service labels" in capsys.readouterr().err
+
+
+# 评审 P2-2 的三种漏报(V2 拼接、V3 模块常量、V4 行尾注释)与「解析不了就报」。
+
+
+def test_显示名拼接写法也会被抓到_V2(tmp_path):
+    module = tmp_path / "model_registry.py"
+    module.write_text(
+        '_WORKLOAD_LABELS = MappingProxyType({\n'
+        '    "a": "问答回答",\n'
+        '    "kg_extract": "知识" + "抽取",\n'
+        '})\n',
+        encoding="utf-8",
+    )
+    sites, hits = guard.scan_workload_labels(module)
+    assert sites == 2
+    assert [(line, term) for line, term, _ in hits] == [(3, "抽取")]
+
+
+def test_显示名经模块常量引用也会被抓到_V3(tmp_path):
+    module = tmp_path / "model_registry.py"
+    module.write_text(
+        '_KG_EXTRACT_LABEL = "知识抽取"\n'
+        '_PREFIX = "知识"\n'
+        '_WORKLOAD_LABELS = {\n'
+        '    "kg_extract": _KG_EXTRACT_LABEL,\n'
+        '    "kg_glean": _PREFIX + "补充抽取",\n'
+        '}\n',
+        encoding="utf-8",
+    )
+    sites, hits = guard.scan_workload_labels(module)
+    assert sites == 2
+    assert [(line, term) for line, term, _ in hits] == [(4, "抽取"), (5, "抽取")]
+
+
+def test_显示名解析不了就报而不是静默跳过(tmp_path):
+    module = tmp_path / "model_registry.py"
+    module.write_text(
+        'from elsewhere import LABEL\n'
+        '_WORKLOAD_LABELS = {\n'
+        '    "a": LABEL,\n'
+        '    "b": "知识" + LABEL,\n'
+        '    "c": f"知识{LABEL}",\n'
+        '    "d": label_for("d"),\n'
+        '    **OTHER,\n'
+        '    "e": "问答回答",\n'
+        '}\n',
+        encoding="utf-8",
+    )
+    sites, hits = guard.scan_workload_labels(module)
+    assert sites == 6
+    assert [(line, term) for line, term, _ in hits] == [
+        (3, guard.UNRESOLVED_LABEL),
+        (4, guard.UNRESOLVED_LABEL),
+        (5, guard.UNRESOLVED_LABEL),
+        (6, guard.UNRESOLVED_LABEL),
+        (7, guard.UNRESOLVED_LABEL),
+    ]
+
+
+def test_模板显示名带行尾注释也会被抓到_V4(tmp_path):
+    template = tmp_path / "model-services.example.toml"
+    template.write_text(
+        '[services.general]\ndisplay_name = "通用模型"\n\n'
+        '[services.kg]\ndisplay_name = "知识抽取模型"  # kg\nkind = "chat"\n\n'
+        '[services.rerank]\nkind = "rerank"\n',
+        encoding="utf-8",
+    )
+    sites, hits = guard.scan_service_label_template(template)
+    assert sites == 3  # 站点数 = 服务个数
+    assert [(line, term) for line, term, _ in hits] == [
+        (4, "抽取"),
+        (8, guard.UNRESOLVED_LABEL),  # 缺 display_name 的服务也报
+    ]
+
+
+def test_真实模板站点数等于服务个数():
+    import tomllib
+
+    template = guard.SERVICE_LABEL_TEMPLATE
+    services = tomllib.loads(template.read_text(encoding="utf-8"))["services"]
+    assert guard.scan_service_label_template(template) == (len(services), [])
 
 
 # --------------------------------------------------------------------------

@@ -614,22 +614,28 @@ found in — an id that exists only in `[thinking]` is not findable in
 secret or an endpoint.
 
 One retired id is the exception: `kg_community_summary` (the community-report
-summarizer, retired as dead code — it was never called at runtime). Every
-`model-services.toml` generated before its retirement binds it in both tables,
-so a leftover `kg_community_summary` line in `[bindings]` or `[thinking]` does
-**not** refuse startup; it is ignored and the backend log carries one hint line
-(no path, no file text):
+summarizer, retired as dead code — it was never called at runtime). A
+`model-services.toml` generated from the template before its retirement binds it
+in both tables; one produced by migrating the legacy environment variables has
+only the `[bindings]` line. A leftover `kg_community_summary` line in
+`[bindings]` or `[thinking]` does **not** refuse startup: it is ignored, and
+every load of the configuration that goes on to succeed logs this hint line (no
+path, no file text) — at startup the preflight and the model-service
+construction each load the file once, so the startup log normally shows it
+twice, and a hot reload logs it again when it publishes the edited file. When
+the same file is refused for another reason, the hint is left out so the log
+does not say "does not affect startup" next to the refusal:
 
 ```text
 model-bindings: MODEL_SERVICES_CONFIG 指向的文件的 [bindings]/[thinking] 里有已退役、可忽略的工作负载：kg_community_summary（[bindings]/[thinking]）。已忽略，不影响启动；可以删除这些行。
 ```
 
-Deleting the two lines on upgrade is optional. Hot reload treats them the same
+Deleting the lines on upgrade is optional. Hot reload treats them the same
 way. Any other unknown or retired id still refuses startup as described above.
 This allowance is scheduled for removal two releases after the retirement;
 after that a leftover line refuses like any other retired id.
 
-**That line never prints the configuration file's path** — it says
+**The refusal line never prints the configuration file's path** — it says
 "MODEL_SERVICES_CONFIG 指向的文件", so look the TOML up through that environment
 variable. The backend runs as `uvicorn … >>"$BACKEND_LOG" 2>&1`, which makes
 stderr the log file, so a failed startup prints this one line instead of raising
