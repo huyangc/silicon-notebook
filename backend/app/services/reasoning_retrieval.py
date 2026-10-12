@@ -7497,89 +7497,16 @@ class ReasoningRetriever:
         )
         self._run_first_round(state)
 
-        # --- 首轮 → reflect 循环的交接 ---------------------------------------
-        # 一次性把 run 级状态解包成局部名。可变容器是**同一个对象**(下面的
-        # reflect 循环就地写入,`state` 上看到的是同一份数据);标量是拷贝,所以
-        # 解包之后就**不再回看** `state` —— 循环与收尾只认这些局部名。
-        #
-        # 这样安排是为了让 reflect 循环本体与它的三个嵌套 def 一个字都不用改
-        # (本次结构项刻意只拆首轮),代价就是这段解包块。
-        action_policy = state.action_policy
-        max_outline_updates = state.max_outline_updates
-        max_steps = state.max_steps
-        per_query_take = state.per_query_take
-        trace = state.trace
-        collected = state.collected
-        elements = state.elements
-        elements_searches = state.elements_searches
-        chunks = state.chunks
-        chains = state.chains
-        seen_chunks = state.seen_chunks
-        visited = state.visited
-        exact_lookup_log = state.exact_lookup_log
-        exact_terms_done = state.exact_terms_done
-        neighbor_truncated = state.neighbor_truncated
-        neighbor_expand_limit = state.neighbor_expand_limit
-        enum_limits = state.enum_limits
-        # 三个枚举预算池刻意**不**解包成局部名:执行体已经搬进 `_run_enumeration`,
-        # 扣减发生在 `state` 上,这里再拷一份标量就会读到扣减之前的旧数。
-        # 下面四处消费一律直读 `state.enum_rows_used`。
-        enum_chains = state.enum_chains
-        enumerations = state.enumerations
-        collection_map_text = state.collection_map_text
-        outline_active = state.outline_active
-        consult_memory_flag = state.consult_memory_flag
-        consult_delivered_this_turn = state.consult_delivered_this_turn
-        outline = state.outline
-        outline_updates = state.outline_updates
-        outline_nudges = state.outline_nudges
-        outline_overflow = state.outline_overflow
-        ever_shown_outline_keys = state.ever_shown_outline_keys
-        outline_terminal_repair_used = state.outline_terminal_repair_used
-        outline_cap_repair_used = state.outline_cap_repair_used
-        kg_gap_active = state.kg_gap_active
-        kg_gap_seen = state.kg_gap_seen
-        kg_gap_probed_seeds = state.kg_gap_probed_seeds
-        kg_gap_pending = state.kg_gap_pending
-        consult_used = state.consult_used
-        consult_delivered_ids = state.consult_delivered_ids
-        consult_rows_accum = state.consult_rows_accum
-        consult_overlay_note = state.consult_overlay_note
-        consult_block_text = state.consult_block_text
-        zero_hit_by_action = state.zero_hit_by_action
-        nudged_actions = state.nudged_actions
-        nudges_used = state.nudges_used
-        record = state.record
-        profile_block = state.profile_block
-        profile_raw_blocks = state.profile_raw_blocks
-        experience_block = state.experience_block
-        experience_entries = state.experience_entries
-        adopted_actions = state.adopted_actions
-        reviewed_all = state.reviewed_all
-        label_of = state.label_of
-        direction_of = state.direction_of
-        failed_search_queries = state.failed_search_queries
-        attempted = state.attempted
-        used_queries = state.used_queries
-        # `community_focals_done` 不解包:唯一读写点在 `_action_expand_community`。
-        follow_chain_done = state.follow_chain_done
-        steps = state.steps
-        uncovered_intent_queries = state.uncovered_intent_queries
-        no_progress = state.no_progress
-        stale = state.stale
-        follow_chain_searches = state.follow_chain_searches
-        exact_lookups = state.exact_lookups
-
         def feed_exact_lookup_skip(key: str, terms: List[str], note: str) -> None:
             """把一次被跳过的按名称查找计入账本(带教学措辞)并回喂 reflect——
             TraceStep 只对 UI 可见,不进 `exact_lookup_log` 这份回喂账本的话,
             模型看不到"为什么"、只能在同一非法输入上反复请求。同一 `key` 的
             重复跳过只递增 tries、不重复记账,回喂块因此保持有界。"""
-            for attempt in exact_lookup_log:
+            for attempt in state.exact_lookup_log:
                 if attempt.note and attempt.dedup_key == key:
                     attempt.tries += 1
                     return
-            exact_lookup_log.append(_ExactLookupAttempt(
+            state.exact_lookup_log.append(_ExactLookupAttempt(
                 terms=terms, new=0, tries=1, note=note, dedup_key=key))
 
         def collect_kg_gap(sections) -> int:
@@ -7605,15 +7532,15 @@ class ReasoningRetriever:
             for section in sections:
                 for key in section.evidence_keys:
                     if (
-                        key in collected
+                        key in state.collected
                         and key not in picked
-                        and key not in kg_gap_probed_seeds
+                        and key not in state.kg_gap_probed_seeds
                     ):
                         picked.add(key)
                         object_ids.append(key)
             if not object_ids:
                 return 0
-            kg_gap_probed_seeds.update(object_ids)
+            state.kg_gap_probed_seeds.update(object_ids)
             try:
                 with retrieval_fanout_slot():
                     probed = self.retrieval.weak_support_relations(
@@ -7622,7 +7549,7 @@ class ReasoningRetriever:
             except AskCancelled:
                 raise
             except Exception as exc:  # noqa: BLE001 — 见上:提示不是必需品
-                record(TraceStep(
+                state.record(TraceStep(
                     step_type="skip",
                     summary="跳过弱支撑关系提示(暂时读不到图谱的支撑情况)",
                     detail={"reason": "kg_gap_unavailable",
@@ -7631,17 +7558,17 @@ class ReasoningRetriever:
             fresh = []
             for row in probed:
                 key = (row.canonical_src, row.edge_type, row.canonical_tgt)
-                if key in kg_gap_seen:
+                if key in state.kg_gap_seen:
                     continue
-                kg_gap_seen.add(key)
+                state.kg_gap_seen.add(key)
                 fresh.append(row)
             if fresh:
-                kg_gap_pending.extend(fresh)
+                state.kg_gap_pending.extend(fresh)
                 # 跨批次重排成全局展示序:队列可能攒了好几轮的候选(每轮只展示
                 # 前 6 条),只按批次先后展示会让「支撑最薄弱的先说」这条合同
                 # 只在单批内成立 —— 上一轮剩下的一条 2 源边会排在这一轮刚发现的
                 # 单源边前面。
-                kg_gap_pending.sort(key=lambda row: (
+                state.kg_gap_pending.sort(key=lambda row: (
                     row.source_count, row.canonical_src, row.canonical_tgt
                 ))
             return len(fresh)
@@ -7659,53 +7586,51 @@ class ReasoningRetriever:
             「校验/预算/trace 语义完全一致」就成了一句要靠人复核的话——而这正是
             本仓库反复吃过亏的形态(两个各自正确的一半拼出一个错误的整体)。
             """
-            nonlocal outline, outline_updates, outline_overflow
-            nonlocal outline_cap_repair_used
-            consume_regular_update = outline_updates < max_outline_updates
+            consume_regular_update = state.outline_updates < state.max_outline_updates
             same_structure = tuple(
                 (s.id, s.title, s.parent) for s in decision.outline_sections
-            ) == tuple((s.id, s.title, s.parent) for s in outline)
+            ) == tuple((s.id, s.title, s.parent) for s in state.outline)
             if overflow_repair:
-                if outline_updates >= max_outline_updates:
-                    if outline_cap_repair_used:
-                        record(TraceStep(
+                if state.outline_updates >= state.max_outline_updates:
+                    if state.outline_cap_repair_used:
+                        state.record(TraceStep(
                             step_type="skip",
                             summary=(
                                 f"跳过整理大纲(已达本轮整理次数上限 "
-                                f"{max_outline_updates};溢出纠错机会也已用完)"
+                                f"{state.max_outline_updates};溢出纠错机会也已用完)"
                             ),
                             detail={"reason": "outline_budget",
-                                    "updates": outline_updates,
-                                    "sections": len(outline)}))
+                                    "updates": state.outline_updates,
+                                    "sections": len(state.outline)}))
                         return
                     # 一次性资格按「收到纠错提交」消费,不是按成功写入消费。否则
                     # 结构违规后仍可反复试,所谓最多一次只约束了成功次数。
-                    outline_cap_repair_used = True
+                    state.outline_cap_repair_used = True
                 if not same_structure:
-                    record(TraceStep(
+                    state.record(TraceStep(
                         step_type="skip",
                         summary=(
                             "跳过大纲溢出修复(纠错提交只能保持章节 "
                             "id/标题/parent 不变)"
                         ),
                         detail={"reason": "outline_repair_structure",
-                                "updates": outline_updates,
-                                "sections": len(outline)}))
+                                "updates": state.outline_updates,
+                                "sections": len(state.outline)}))
                     return
-            elif outline_updates >= max_outline_updates:
+            elif state.outline_updates >= state.max_outline_updates:
                 # 措辞按「该给什么」写:普通额度与专用纠错资格是两本账。
-                record(TraceStep(
+                state.record(TraceStep(
                     step_type="skip",
                     summary=(
                         f"跳过整理大纲(已达本轮整理次数上限 "
-                        f"{max_outline_updates};大纲就按现在这份定稿,"
+                        f"{state.max_outline_updates};大纲就按现在这份定稿,"
                         "请改用检索动作补齐空节,或直接作答)"),
                     detail={"reason": "outline_budget",
-                            "updates": outline_updates,
-                            "sections": len(outline)}))
+                            "updates": state.outline_updates,
+                            "sections": len(state.outline)}))
                 return
             if not decision.outline_sections:
-                record(TraceStep(
+                state.record(TraceStep(
                     step_type="skip",
                     summary=(
                         "跳过整理大纲(这次提交里没有可用的章节;"
@@ -7713,33 +7638,33 @@ class ReasoningRetriever:
                     detail={"reason": "outline_empty"}))
                 return
             if consume_regular_update:
-                outline_updates += 1
+                state.outline_updates += 1
             retained_keys = {
-                key for section in outline for key in section.evidence_keys
+                key for section in state.outline for key in section.evidence_keys
             }
             bound, dropped, overflow, removed = merge_outline_evidence(
-                outline,
+                state.outline,
                 decision.outline_sections,
                 outline_binding_keys(
-                    collected, elements, chunks,
-                    ever_shown_outline_keys, retained_keys,
+                    state.collected, state.elements, state.chunks,
+                    state.ever_shown_outline_keys, retained_keys,
                 ),
             )
             overflow = carry_outline_overflow(
-                outline_overflow, decision.outline_sections, bound, overflow,
-                max_pending_evidence=action_policy.max_pending_outline_evidence,
+                state.outline_overflow, decision.outline_sections, bound, overflow,
+                max_pending_evidence=state.action_policy.max_pending_outline_evidence,
             )
             # 只作为轨迹上的观测量:大纲变化**不**参与 stale 账目(见上面状态
             # 初始化处的理由),所以这里既不加分也不清零。
-            changed = outline_signature(bound) != outline_signature(outline)
-            replaced = len(outline)
-            outline = bound
-            outline_overflow = overflow
+            changed = outline_signature(bound) != outline_signature(state.outline)
+            replaced = len(state.outline)
+            state.outline = bound
+            state.outline_overflow = overflow
             empty = [s.title for s in bound if not s.evidence_keys]
             # 探测排在 trace 之前:它的结果是这一步的账目之一。关闭态零调用。
             kg_gap_new = (
                 collect_kg_gap(bound)
-                if kg_gap_active and not self._unsafe_scope_restricted()
+                if state.kg_gap_active and not self._unsafe_scope_restricted()
                 else 0
             )
             outline_detail = {
@@ -7773,7 +7698,7 @@ class ReasoningRetriever:
                 # 那批无处展示、如实丢弃)。无候选与关闭态**不加这个键** —— 常年
                 # 挂一个 0 会让「这个 run 到底有没有开这条回喂」在轨迹上分不出来。
                 outline_detail["kg_gap_candidates"] = kg_gap_new
-            record(TraceStep(
+            state.record(TraceStep(
                 step_type="outline",
                 summary=(f"更新大纲: {len(bound)} 节"
                          f"({len(empty)} 节待补证据)"),
@@ -7781,17 +7706,17 @@ class ReasoningRetriever:
 
         forced_overflow_repair = False
         first_reflect = True
-        while steps < max_steps:
+        while state.steps < state.max_steps:
             raise_if_cancelled(self.cancel_event)
             terminal_overflow_repair = forced_overflow_repair
             if terminal_overflow_repair:
-                outline_terminal_repair_used = True
+                state.outline_terminal_repair_used = True
                 forced_overflow_repair = False
-            steps += 1
+            state.steps += 1
             summary = self._reflection_summary(
-                collected, elements, chunks, chains, outline_active,
-                ever_shown_outline_keys, limits, outline)
-            if no_progress:
+                state.collected, state.elements, state.chunks, state.chains, state.outline_active,
+                state.ever_shown_outline_keys, limits, state.outline)
+            if state.no_progress:
                 # 首轮空手与「查了好几轮都没新增」是两件不同的事,提示也必须不同
                 # (见 first_round_empty_note):前者要的是换通道,后者才是收尾。
                 # 判据用「本 run 的第一次 reflect」而不是 `steps == 0`——已确认方向
@@ -7805,8 +7730,8 @@ class ReasoningRetriever:
                 )
             first_reflect = False
             summary += legacy_action_ledger_note(
-                visited, collected, neighbor_truncated,
-                neighbor_expand_limit, attempted, exact_lookup_log,
+                state.visited, state.collected, state.neighbor_truncated,
+                state.neighbor_expand_limit, state.attempted, state.exact_lookup_log,
                 state.document_reads)
             # 未执行的已确认方向回喂 reflect(镜像上面几份账目):模型据此知道哪些
             # 用户确认过的方向还没跑过,可以优先用 add_subquery 把它们补上,而不是
@@ -7820,12 +7745,12 @@ class ReasoningRetriever:
             # 复合串(confirmed_intent_queries 产出,截到 8000 字符)。直接按原文
             # 比较永远不相等,"已覆盖"当场摘不掉,下一轮 prompt 会同时说"没执行
             # 过"又"别重复提交"——自相矛盾,模型只能重复空转。
-            if uncovered_intent_queries:
+            if state.uncovered_intent_queries:
                 still = _still_uncovered_directions(
-                    uncovered_intent_queries, attempted, label_of)
+                    state.uncovered_intent_queries, state.attempted, state.label_of)
                 if still:
                     pending_text = "、".join(
-                        f"「{label_of[q]}」"
+                        f"「{state.label_of[q]}」"
                         for q in still[:_INTENT_PENDING_DISCLOSE])
                     summary = (
                         f"{summary}\n\n（以下已确认的检索方向因步骤预算不足尚未执行: "
@@ -7848,8 +7773,8 @@ class ReasoningRetriever:
             if (
                 experience_wiring_active(
                     self.settings, self.retrieval_experiences)
-                and nudges_used < _ZERO_HIT_NUDGE_MAX_PER_RUN
-                and _zero_hit_nudge_ready(zero_hit_by_action, nudged_actions)
+                and state.nudges_used < _ZERO_HIT_NUDGE_MAX_PER_RUN
+                and _zero_hit_nudge_ready(state.zero_hit_by_action, state.nudged_actions)
             ):
                 try:
                     nudge_situation = current_situation(
@@ -7858,7 +7783,7 @@ class ReasoningRetriever:
                             limits.effort if limits is not None else ""))
                     picked_nudge = _zero_hit_nudge_for(
                         self.retrieval_experiences, notebook_id,
-                        zero_hit_by_action, nudged_actions,
+                        state.zero_hit_by_action, state.nudged_actions,
                         nudge_situation)
                 except AskCancelled:
                     raise
@@ -7866,11 +7791,11 @@ class ReasoningRetriever:
                     picked_nudge = None
                 if picked_nudge:
                     nudge_action, nudge_note_text = picked_nudge
-                    nudged_actions.add(nudge_action)
-                    nudges_used += 1
+                    state.nudged_actions.add(nudge_action)
+                    state.nudges_used += 1
                     summary = f"{summary}\n\n{nudge_note_text}"
             # 已枚举清单的账目回喂(镜像上面几处),再接本 run 唯一那份集合地图。
-            enum_note = _enumeration_note(enum_chains)
+            enum_note = _enumeration_note(state.enum_chains)
             if enum_note:
                 summary = f"{summary}\n\n{enum_note}"
             # 大纲便签接在几份账目之后、地图之前:它同样是「本轮已经做了什么」,
@@ -7883,11 +7808,11 @@ class ReasoningRetriever:
             # `kg_gap_note_segment` 一处返回(理由见那里)。`_outline_note` 里另有
             # 一道同判据的渲染闸,那是给「调用方仍然递了一段进来」兜底的。
             kg_gap_segment, kg_gap_shown = kg_gap_note_segment(
-                kg_gap_pending, repair_only=terminal_overflow_repair)
+                state.kg_gap_pending, repair_only=terminal_overflow_repair)
             outline_note = _outline_note(
-                outline, max_outline_updates - outline_updates,
-                outline_overflow,
-                overflow_repair_available=not outline_cap_repair_used,
+                state.outline, state.max_outline_updates - state.outline_updates,
+                state.outline_overflow,
+                overflow_repair_available=not state.outline_cap_repair_used,
                 repair_only=terminal_overflow_repair,
                 kg_gap_segment=kg_gap_segment,
             )
@@ -7901,7 +7826,7 @@ class ReasoningRetriever:
                 # 而不是直接消费,是防御性的:哪天 `_outline_note` 多出一条提前
                 # 返回空串的路径(或候选获得第二个产地),这里不至于静默丢掉一批
                 # 从没上过屏的提示。
-                del kg_gap_pending[:kg_gap_shown]
+                del state.kg_gap_pending[:kg_gap_shown]
             # 大纲采用引导(设计文档 §3.1.1):便签自己不在场、而手上的事实说明「该开
             # 大纲」时,补一行引导。与上面那段**互斥而非嵌套**——互斥由
             # `_outline_nudge_note` 自己的「sections 非空即返回空串」判据保证,写在
@@ -7912,35 +7837,35 @@ class ReasoningRetriever:
             # run() 手上现成的结构,不再解析契约、不新增任何查询(intent_queries
             # 为空的 planner 路径下它恒为 0,条件 (b) 天然不成立)。
             nudge_note = _outline_nudge_note(
-                outline, enum_chains, max(0, len(reviewed_all) - 1),
-                active=outline_active, nudges_used=outline_nudges,
+                state.outline, state.enum_chains, max(0, len(state.reviewed_all) - 1),
+                active=state.outline_active, nudges_used=state.outline_nudges,
             )
             if nudge_note:
                 summary = f"{summary}\n\n{nudge_note}"
-                outline_nudges += 1
+                state.outline_nudges += 1
             # 理解块排在集合地图**之前**:地图后面紧跟着一个按剩余额度算出来的
             # 后缀(``_allowance_suffix``),两者是一句话;把理解块插进它们中间会
             # 把那个额度句从它解释的计数上拆开。reflect 的 prompt 签名零改动——
             # 与地图同款,拼在 summary 尾部就够,不必给 reflect 再开一个形参。
-            if profile_block:
-                summary = f"{summary}\n\n{profile_block}"
+            if state.profile_block:
+                summary = f"{summary}\n\n{state.profile_block}"
             # 打法块跟在理解块之后、集合地图之前——同上一条注释的理由:地图与它
             # 后面那个额度句是一句话,不能被别的块插开。
-            if experience_block:
-                summary = f"{summary}\n\n{experience_block}"
+            if state.experience_block:
+                summary = f"{summary}\n\n{state.experience_block}"
             # Agentic Memory P4 (T5): consult_memory 的累计结果,同样排在集合
             # 地图之前——地图与它后面那个额度句是一句话,不能被别的块插开
             # (同上两条注释的理由)。``consult_block_text`` 每次成功调用后整体
             # 重渲染(见 render_consult_block 的 docstring),所以这里只是原样
             # 拼接,不需要再判断是不是第一次出现。
-            if consult_block_text:
-                summary = f"{summary}\n\n{consult_block_text}"
+            if state.consult_block_text:
+                summary = f"{summary}\n\n{state.consult_block_text}"
             summary += state.external_block_text  # §3.5;见 _external_block_text
-            if collection_map_text:
+            if state.collection_map_text:
                 summary = (
-                    f"{summary}\n\n{collection_map_text}"
+                    f"{summary}\n\n{state.collection_map_text}"
                     + _allowance_suffix(
-                        enum_limits.enum_rows_per_run - state.enum_rows_used
+                        state.enum_limits.enum_rows_per_run - state.enum_rows_used
                     )
                 )
             # 可选参数按「有才传」(同 plan() 的 max_subqueries/collection_map):
@@ -7949,24 +7874,24 @@ class ReasoningRetriever:
             # 级不变量(前者 `_new_run_state`、后者 `_first_round_plan` 写),直读
             # state。`limits` 例外恒传:`document_read_active` 的首读份额判据要看
             # 本 run 的 `chunk_context_chars`,兜底成默认档会让它与执行体分叉。
-            reflect_kwargs = dict(state.corpus_langs_kwarg, limits=enum_limits, **(
+            reflect_kwargs = dict(state.corpus_langs_kwarg, limits=state.enum_limits, **(
                 {} if state.kg_in_scope else {"kg_actions": False}))
-            if outline_active:
+            if state.outline_active:
                 reflect_kwargs["outline"] = True
-            if consult_memory_flag:
+            if state.consult_memory_flag:
                 reflect_kwargs["consult_memory"] = True
             summary = self._add_plugin_reflect_context(
-                state, summary, reflect_kwargs, no_progress, stale, steps < max_steps)
+                state, summary, reflect_kwargs, state.no_progress, state.stale, state.steps < state.max_steps)
             decision = self.reflect(question, summary, **reflect_kwargs)
             raise_if_cancelled(self.cancel_event)
             # 这一轮的大纲提交算不算「溢出纠错」:提前算与原地算等价(四个输入只由
             # `apply_outline_update` 改),而折叠一份收尾载荷前要先用它应用大纲。
             overflow_repair_submission = terminal_overflow_repair or (
-                bool(outline_overflow) and not outline_cap_repair_used
-                and outline_updates >= max_outline_updates)
+                bool(state.outline_overflow) and not state.outline_cap_repair_used
+                and state.outline_updates >= state.max_outline_updates)
             reflect_detail = {"next_action": decision.next_action,
                               "sufficient": decision.sufficient,
-                              "no_progress": no_progress, "stale": stale}
+                              "no_progress": state.no_progress, "stale": state.stale}
             if nudge_note:
                 # 只在**真的发出**引导的那一轮加键(评估用)。无条件写 False 会让
                 # 关闭态/低档位的 reflect detail 多出一个键——冻结基线的口径是
@@ -7977,21 +7902,21 @@ class ReasoningRetriever:
                 # fail-open 兜底。没有它,一次 `invalid_enum` 与一次真正的「够了」
                 # 在轨迹上完全同形。机器码只进 detail,上屏那行说人话。
                 reflect_detail["fallback_reason"] = decision.fallback_reason
-            record(TraceStep(step_type="reflect", detail=reflect_detail,
+            state.record(TraceStep(step_type="reflect", detail=reflect_detail,
                              summary=_reflect_step_summary(decision)))
             # 采用账目:模型**主动选**了哪些动作。记在这里(而不是收尾按 trace 的
             # step_type 反推)是刻意的——初检索、PPR/精查 seed pass 都是确定性发生
             # 的,按 step_type 数会把「注入过」当成「被采用」,而 ``adopted`` 是淘汰
             # 排序的第一个键。见 ADOPTION_ACTIONS 的说明。
-            if experience_entries:
-                adopted_actions.add(decision.next_action)
+            if state.experience_entries:
+                state.adopted_actions.add(decision.next_action)
             if terminal_overflow_repair:
                 # 这次是 sufficient / stale 收尾前、且仍在 max_steps 内的专用纠错
                 # 轮,绝不能借机再发一次检索。模型不按便签换键就如实保留未解决状态。
                 if decision.next_action == OUTLINE_ACTION:
                     apply_outline_update(decision, overflow_repair=True)
                 else:
-                    record(TraceStep(
+                    state.record(TraceStep(
                         step_type="skip",
                         summary="大纲溢出纠错轮未提交 update_outline,按当前绑定收尾",
                         detail={"reason": "outline_overflow_repair_declined"},
@@ -8014,19 +7939,19 @@ class ReasoningRetriever:
                         decision, overflow_repair=overflow_repair_submission
                     )
                     if (
-                        outline_overflow
-                        and steps < max_steps
-                        and not outline_terminal_repair_used
-                        and not outline_cap_repair_used
+                        state.outline_overflow
+                        and state.steps < state.max_steps
+                        and not state.outline_terminal_repair_used
+                        and not state.outline_cap_repair_used
                     ):
                         # sufficient 不能吞掉刚产生的 overflow。下一轮是专用纠错:
                         # 只许同结构换键,不能借「已经够了」再发一条检索请求。
-                        outline_terminal_repair_used = True
+                        state.outline_terminal_repair_used = True
                         forced_overflow_repair = True
                         continue
                 break
             before = (
-                len(collected) + len(elements) + len(chunks) + len(chains)
+                len(state.collected) + len(state.elements) + len(state.chunks) + len(state.chains)
                 + state.enum_rows_used + state.document_read_elements_used
             )
             if (
@@ -8038,7 +7963,7 @@ class ReasoningRetriever:
                 # Defense in depth: a run without the enumeration gate does not
                 # offer these actions, but a malformed model response or a test
                 # double must still be unable to turn one into collection I/O.
-                record(TraceStep(
+                state.record(TraceStep(
                     step_type="skip",
                     summary="跳过枚举(本次检索未提供清单工具)",
                     detail={"reason": "enumeration_disabled"},
@@ -8046,17 +7971,17 @@ class ReasoningRetriever:
             elif decision.next_action == "expand_graph":
                 oid = decision.expand_object_id
                 if self._unsafe_scope_restricted():
-                    record(TraceStep(
+                    state.record(TraceStep(
                         step_type="skip",
                         summary="跳过关系扩展（指定来源范围下不可用）",
                         detail={"reason": "source_scope_unsafe_channel"},
                     ))
-                elif not oid or oid in visited:
-                    record(TraceStep(step_type="skip",
+                elif not oid or oid in state.visited:
+                    state.record(TraceStep(step_type="skip",
                                      summary="跳过 expand_graph(空或已访问节点)",
                                      detail={"object_id": oid, "reason": "empty_or_visited"}))
                 else:
-                    visited.add(oid)
+                    state.visited.add(oid)
                     # NB: expand/neighbors use the ACTIVE notebook_id only. A base-tier hit's
                     # neighbors live in the base notebook, so this action deliberately skips
                     # deep cross-tier graph walks (P4 spec §F); only `follow_chain` does that.
@@ -8072,14 +7997,14 @@ class ReasoningRetriever:
                     # 蒸馏会把功劳记给一次什么都没贡献的 expand 调用。
                     newly_added_neighbors = []
                     for h in neigh:
-                        if h.object_id not in collected:
-                            collected[h.object_id] = h
+                        if h.object_id not in state.collected:
+                            state.collected[h.object_id] = h
                             newly_added_neighbors.append(h)
                     # 展示用人读节点名(优先 collected 命中, 再查 node_context, 兜底裸 id),
                     # 避免 trace 里出现 "顺关系深挖 ko-8375b40126" 这种用户看不懂的内部 id。
                     node_name = ""
-                    if oid in collected:
-                        node_name = str(collected[oid].payload.get("name", "")).strip()
+                    if oid in state.collected:
+                        node_name = str(state.collected[oid].payload.get("name", "")).strip()
                     if not node_name:
                         ctx = self.get(notebook_id, oid)
                         node_name = str(ctx.get("name", "")).strip() if ctx else ""
@@ -8089,10 +8014,10 @@ class ReasoningRetriever:
                     # 不清零,提示措辞里的"已连续 N 次"其实是"历史累计 N 次",
                     # 中间哪怕命中过也不影响这个数继续往上走。
                     if not newly_added_neighbors:
-                        zero_hit_by_action["expand"] = (
-                            zero_hit_by_action.get("expand", 0) + 1)
+                        state.zero_hit_by_action["expand"] = (
+                            state.zero_hit_by_action.get("expand", 0) + 1)
                     else:
-                        zero_hit_by_action["expand"] = 0
+                        state.zero_hit_by_action["expand"] = 0
                     _result_ids, _result_ids_truncated = _capped_result_ids(
                         [h.object_id for h in newly_added_neighbors])
                     expand_detail = {"object_id": oid, "name": node_name,
@@ -8111,9 +8036,9 @@ class ReasoningRetriever:
                         # 变形)。同时进账目回喂 reflect——轨迹只给人看,模型看
                         # 不到就会以为这个节点的邻居已经看全了。
                         expand_detail["neighbor_truncated"] = True
-                        expand_detail["neighbor_limit"] = neighbor_expand_limit
-                        neighbor_truncated.setdefault(oid, node_name)
-                    record(TraceStep(step_type="expand",
+                        expand_detail["neighbor_limit"] = state.neighbor_expand_limit
+                        state.neighbor_truncated.setdefault(oid, node_name)
+                    state.record(TraceStep(step_type="expand",
                                      summary=(
                                          f"顺关系深挖「{node_name}」,得到 {len(neigh)} 个邻居"
                                          + ("(该节点邻居过多,只展开了一部分)"
@@ -8122,7 +8047,7 @@ class ReasoningRetriever:
                                      detail=expand_detail))
             elif decision.next_action == "add_subquery":
                 if not decision.new_sub_query:
-                    record(TraceStep(step_type="skip",
+                    state.record(TraceStep(step_type="skip",
                                      summary="跳过 add_subquery(缺少 new_sub_query)",
                                      detail={"reason": "missing_new_sub_query"}))
                 else:
@@ -8135,30 +8060,30 @@ class ReasoningRetriever:
                     # 这种情况(简称的归一化键与它所指方向的 compound 归一化键
                     # 不是同一个字符串)。matched_direction 把简称解回它所指的
                     # 方向原文,后面两段分支都按这个方向身份而非提交串本身判断。
-                    matched_direction = direction_of.get(key)
-                    if key in attempted:
+                    matched_direction = state.direction_of.get(key)
+                    if key in state.attempted:
                         # 提交串本身就命中某条已执行记录(逐字重复,或提交的
                         # 就是方向原文且原文已执行)——原有语义不变。
-                        attempted[key].tries += 1
-                        record(TraceStep(step_type="skip",
+                        state.attempted[key].tries += 1
+                        state.record(TraceStep(step_type="skip",
                                          summary=f"跳过重复子查询: {sq.query}",
                                          detail={"query": sq.query,
                                                  "reason": "duplicate_subquery",
-                                                 "tries": attempted[key].tries}))
+                                                 "tries": state.attempted[key].tries}))
                     elif (matched_direction is not None
-                          and _norm_query(matched_direction) in attempted):
+                          and _norm_query(matched_direction) in state.attempted):
                         # 简称命中的方向已经被(补种或此前某轮 add_subquery)
                         # 执行过,只是账目记在方向原文的身份上、提交串是简称
                         # ——按方向身份识别为重复,不重跑检索(治「模型换用
                         # prompt 里看到的简称就能绕过 duplicate_subquery,白烧
                         # 一轮检索预算」,PR#400 codex R1 P2-2)。
                         dkey = _norm_query(matched_direction)
-                        attempted[dkey].tries += 1
-                        record(TraceStep(step_type="skip",
+                        state.attempted[dkey].tries += 1
+                        state.record(TraceStep(step_type="skip",
                                          summary=f"跳过重复子查询: {sq.query}",
                                          detail={"query": sq.query,
                                                  "reason": "duplicate_subquery",
-                                                 "tries": attempted[dkey].tries}))
+                                                 "tries": state.attempted[dkey].tries}))
                     else:
                         # 简称命中一个尚未执行的已确认方向:执行用方向本身的
                         # 完整原文(方向+已确认问题契约的复合串),不是模型提交
@@ -8167,17 +8092,17 @@ class ReasoningRetriever:
                         # 任何已确认方向(matched_direction 为 None)时走原有
                         # 非 intent 路径,原文直接执行,label 留空——中性硬约束。
                         exec_query, exec_key, display, exec_label = _resolve_subquery_identity(
-                            sq.query, matched_direction, label_of)
+                            sq.query, matched_direction, state.label_of)
                         added = 0
                         # P4 (T1): also collect the newly-added ids alongside
                         # the existing `added` count — this loop used to only
                         # count, and result_ids needs the identities.
                         new_ids: list = []
                         for h in self.search(notebook_id, exec_query,
-                                             sq.types, sq.prefer)[:per_query_take]:
+                                             sq.types, sq.prefer)[:state.per_query_take]:
                             raise_if_cancelled(self.cancel_event)
-                            if h.object_id not in collected:
-                                collected[h.object_id] = h
+                            if h.object_id not in state.collected:
+                                state.collected[h.object_id] = h
                                 added += 1
                                 new_ids.append(h.object_id)
                         _result_ids, _result_ids_truncated = _capped_result_ids(new_ids)
@@ -8194,25 +8119,25 @@ class ReasoningRetriever:
                         # 的简称——这样它同时从未覆盖清单(_still_uncovered_
                         # directions 按 a.query in label_of 识别)摘除,且后续
                         # 再用简称重提会被上面的 matched_direction 分支拦住。
-                        attempted[exec_key] = _QueryAttempt(
+                        state.attempted[exec_key] = _QueryAttempt(
                             query=exec_query, new=added, tries=1, label=exec_label)
-                        if exec_query not in used_queries:
-                            used_queries.append(exec_query)
-                        record(TraceStep(step_type="retrieve",
+                        if exec_query not in state.used_queries:
+                            state.used_queries.append(exec_query)
+                        state.record(TraceStep(step_type="retrieve",
                                          summary=f"补充子查询: {display}",
                                          detail=_subquery_detail))
             elif decision.next_action == "search_elements":
-                skip = self._element_search_skip(elements_searches)
+                skip = self._element_search_skip(state.elements_searches)
                 if skip:
-                    record(TraceStep(step_type="skip", summary=skip[0],
+                    state.record(TraceStep(step_type="skip", summary=skip[0],
                                      detail={"reason": skip[1]}))
                 else:
-                    elements_searches += 1
+                    state.elements_searches += 1
                     eq = decision.elements_query or question
                     found = self.search_elements(notebook_id, eq)
                     raise_if_cancelled(self.cancel_event)
-                    els = merge_element_hits(elements, found)
-                    record(TraceStep(step_type="fallback",
+                    els = merge_element_hits(state.elements, found)
+                    state.record(TraceStep(step_type="fallback",
                                      summary=f"降级查原文: {eq},新增 {len(els)} 段",
                                      detail={"query": eq, "found": len(els)}))
             elif decision.next_action in (
@@ -8235,29 +8160,29 @@ class ReasoningRetriever:
                 # (关闭时这个动作根本不会出现在模型的选项里),这里再判一次是
                 # 与 exact_lookup/ppr 同款的纵深防御——测试替身或畸形响应仍可能
                 # 吐出这个 next_action。
-                if not consult_memory_flag or not self.allow_consult_memory:
-                    record(TraceStep(
+                if not state.consult_memory_flag or not self.allow_consult_memory:
+                    state.record(TraceStep(
                         step_type="skip",
                         summary="跳过回想以往打法(当前场景未提供该能力)",
                         detail={"reason": "consult_memory_disabled"}))
-                elif consult_used >= action_policy.max_consult_memory:
-                    record(TraceStep(
+                elif state.consult_used >= state.action_policy.max_consult_memory:
+                    state.record(TraceStep(
                         step_type="skip",
                         summary=("跳过回想以往打法(已达次数上限 "
-                                 f"{action_policy.max_consult_memory})"),
+                                 f"{state.action_policy.max_consult_memory})"),
                         detail={"reason": "consult_memory_cap"}))
-                elif steps >= max_steps:
+                elif state.steps >= state.max_steps:
                     # codex #538 R4 P2:这是最后一个允许的循环轮——回想的产出
                     # 只进**下一轮** reflect 的上下文,而下一轮不存在了:执行
                     # 只会花掉末轮预算渲染一段没有任何模型调用会读到的文本,
                     # 还顶掉一次本可以真正取证的收尾检索。直接拒绝,不扣
                     # consult 预算(这轮本来就没送达任何东西)。
-                    record(TraceStep(
+                    state.record(TraceStep(
                         step_type="skip",
                         summary="跳过回想以往打法(已是最后一轮,建议无人消费)",
                         detail={"reason": "consult_memory_last_turn"}))
                 else:
-                    consult_used += 1
+                    state.consult_used += 1
                     # codex #538 R1 P2:整个执行体 fail-open——注入开着时一次
                     # 瞬态/畸形的经验库读取(_cached_experiences 会发 version_signal
                     # 聚合查询)不得把整次 Ask/报告 run 打挂;这是可选的建议面,
@@ -8274,41 +8199,41 @@ class ReasoningRetriever:
                         # 刚成功的动作当「哑火」排前,挤掉真失败的。
                         delivered_passive_ids = {
                             str(e.get("id") or "")
-                            for e in experience_entries[
-                                : rendered_experience_count(experience_block)]
-                        } if experience_block else set()
+                            for e in state.experience_entries[
+                                : rendered_experience_count(state.experience_block)]
+                        } if state.experience_block else set()
                         new_consult_rows = _consultable_rows(
                             self.retrieval_experiences, notebook_id,
                             consult_situation,
                             exclude_ids=(
-                                consult_delivered_ids | delivered_passive_ids
+                                state.consult_delivered_ids | delivered_passive_ids
                             ),
                             zero_hit_actions={
-                                a for a, c in zero_hit_by_action.items() if c > 0
+                                a for a, c in state.zero_hit_by_action.items() if c > 0
                             },
                             top_k=CONSULT_MEMORY_TOP_K,
                         )
                         overlay_note = _undelivered_retrieval_note(
-                            profile_raw_blocks, profile_block,
+                            state.profile_raw_blocks, state.profile_block,
                             self.profile_owner_id)
                         is_new_overlay = bool(overlay_note) and (
-                            overlay_note != consult_overlay_note)
+                            overlay_note != state.consult_overlay_note)
                         if not new_consult_rows and not is_new_overlay:
-                            record(TraceStep(
+                            state.record(TraceStep(
                                 step_type="skip",
                                 summary="回想以往打法:未找到与当前场景匹配的新记录",
                                 detail={"reason": "consult_memory_nothing_new"}))
                         else:
-                            consult_rows_accum.extend(new_consult_rows)
+                            state.consult_rows_accum.extend(new_consult_rows)
                             # 修复轮 spec④/Q-P1-3:先渲染,再按渲染结果(而不是按
                             # 选中集)更新账目——被 600 字符硬顶挤掉的行/心得没有
                             # 出现在模型看到的文本里,不该被标成"已经发过了",否则
                             # 下一次调用会把它排除在候选之外,永远没有机会重新出现。
                             pending_overlay = (
                                 overlay_note if is_new_overlay
-                                else consult_overlay_note)
+                                else state.consult_overlay_note)
                             rendered = render_consult_block(
-                                consult_rows_accum,
+                                state.consult_rows_accum,
                                 extra_lines=(
                                     [pending_overlay] if pending_overlay else ()
                                 ),
@@ -8318,22 +8243,22 @@ class ReasoningRetriever:
                                 r for r in new_consult_rows
                                 if str(r.get("id") or "") in delivered_ids
                             ]
-                            consult_delivered_ids.update(delivered_ids)
+                            state.consult_delivered_ids.update(delivered_ids)
                             # codex #538 R5 P2:accum 收敛为**已送达**行——未送达
                             # 行滞留会在下次调用被再选(不在 delivered 集)、再
                             # append 成重复,且渲染器先撞上滞留的原始未送达行就
                             # 停,把它身后的所有候选永久堵死。收敛后未送达行
                             # 干净地退回候选池,下次照常可选可渲染。
-                            consult_rows_accum = [
-                                r for r in consult_rows_accum
-                                if str(r.get("id") or "") in consult_delivered_ids
+                            state.consult_rows_accum = [
+                                r for r in state.consult_rows_accum
+                                if str(r.get("id") or "") in state.consult_delivered_ids
                             ]
                             overlay_newly_delivered = (
                                 is_new_overlay and rendered.overlay_rendered)
                             if rendered.overlay_rendered:
-                                consult_overlay_note = pending_overlay
-                            consult_block_text = rendered.rendered_text
-                            consult_delivered_this_turn = bool(
+                                state.consult_overlay_note = pending_overlay
+                            state.consult_block_text = rendered.rendered_text
+                            state.consult_delivered_this_turn = bool(
                                 newly_delivered or overlay_newly_delivered)
                             if not newly_delivered and not overlay_newly_delivered:
                                 # 本次调用真的选中了新东西(否则已经在上面短路成
@@ -8341,12 +8266,12 @@ class ReasoningRetriever:
                                 # 花掉(``consult_used`` 已 += 1),模型这一轮却什么
                                 # 新内容都没看到。独立 reason 与"候选池本身没有
                                 # 匹配"区分开,方便回看轨迹时分辨是哪一种。
-                                record(TraceStep(
+                                state.record(TraceStep(
                                     step_type="skip",
                                     summary="回想以往打法:本轮候选未能装入打法块(预算已用)",
                                     detail={"reason": "consult_memory_block_full"}))
                             else:
-                                record(TraceStep(
+                                state.record(TraceStep(
                                     step_type="consult_memory",
                                     summary=(
                                         "回想以往检索打法"
@@ -8354,11 +8279,11 @@ class ReasoningRetriever:
                                            if newly_delivered else "")
                                     ),
                                     detail={"entries": len(newly_delivered),
-                                            "chars": len(consult_block_text)}))
+                                            "chars": len(state.consult_block_text)}))
                     except AskCancelled:
                         raise
                     except Exception:  # noqa: BLE001 — 建议面绝不挂 run
-                        record(TraceStep(
+                        state.record(TraceStep(
                             step_type="skip",
                             summary="回想以往打法:读取记录失败,本轮跳过",
                             detail={"reason": "consult_memory_unavailable"}))
@@ -8381,20 +8306,20 @@ class ReasoningRetriever:
                 # 就绕开了这把按实测定标的低选择度子串闸。
                 probed = (self._exact_lookup_terms(term, honor_quotes=False)
                           if term else [])
-                fresh = [t for t in probed if _norm_query(t) not in exact_terms_done]
+                fresh = [t for t in probed if _norm_query(t) not in state.exact_terms_done]
                 if not self.settings.exact_lookup_enabled or not self.allow_exact_lookup:
                     # 复用既有 exact_lookup_disabled 分支语义(镜像 allow_ppr):策略位
                     # 关闭与部署 flag 关闭在动作侧是同一条路径,不再区分理由。
                     feed_exact_lookup_skip(
                         "exact_lookup_disabled", [],
                         "按名称精确查找当前不可用(本次检索场景未开启该能力)")
-                    record(TraceStep(step_type="skip",
+                    state.record(TraceStep(step_type="skip",
                                      summary="跳过按名称精确查找(未启用)",
                                      detail={"reason": "exact_lookup_disabled"}))
                 elif not term:
                     feed_exact_lookup_skip(
                         "missing_exact_term", [], "未提供可精确查找的名称")
-                    record(TraceStep(step_type="skip",
+                    state.record(TraceStep(step_type="skip",
                                      summary="跳过按名称精确查找(缺少名称)",
                                      detail={"reason": "missing_exact_term"}))
                 elif not probed:
@@ -8404,7 +8329,7 @@ class ReasoningRetriever:
                     # 光说「不合法」它只会换一个同样不合法的词再试一次。
                     feed_exact_lookup_skip(
                         _norm_query(term), [term], _NOT_A_NAME_NOTE.format(term=term))
-                    record(TraceStep(step_type="skip",
+                    state.record(TraceStep(step_type="skip",
                                      summary=f"跳过按名称精确查找:{_NOT_A_NAME_NOTE.format(term=term)}",
                                      detail={"reason": "exact_term_not_identifier",
                                              "term": term}))
@@ -8412,41 +8337,41 @@ class ReasoningRetriever:
                     # 账目按调用记,重复请求要落到当初真正查过它的那一条上——
                     # 只有账目变了 prompt 才变,模型才不会在同一个不动点上空转。
                     probed_keys = {_norm_query(t) for t in probed}
-                    for attempt in exact_lookup_log:
+                    for attempt in state.exact_lookup_log:
                         if probed_keys & {_norm_query(t) for t in attempt.terms}:
                             attempt.tries += 1
                             break
-                    record(TraceStep(step_type="skip",
+                    state.record(TraceStep(step_type="skip",
                                      summary=f"跳过重复的按名称精确查找:{term}",
                                      detail={"reason": "duplicate_exact_lookup",
                                              "term": term, "terms": probed}))
-                elif exact_lookups >= action_policy.max_exact_lookups:
+                elif state.exact_lookups >= state.action_policy.max_exact_lookups:
                     feed_exact_lookup_skip(
                         _norm_query(term), [term],
                         f"「{term}」已达按名称精确查找次数上限（"
-                        f"{action_policy.max_exact_lookups}）")
-                    record(TraceStep(
+                        f"{state.action_policy.max_exact_lookups}）")
+                    state.record(TraceStep(
                         step_type="skip",
                         summary=("跳过按名称精确查找(已达次数上限 "
-                                 f"{action_policy.max_exact_lookups})"),
+                                 f"{state.action_policy.max_exact_lookups})"),
                         detail={"reason": "exact_lookup_cap", "term": term}))
                 else:
-                    exact_lookups += 1
+                    state.exact_lookups += 1
                     new = take_distinct_chunk_hits(
                         self.exact_lookup(notebook_id, exact_probe_query(fresh)),
-                        seen_chunks, chunks,
+                        state.seen_chunks, state.chunks,
                     )
-                    chunks.extend(new)
-                    exact_terms_done.update(_norm_query(t) for t in fresh)
-                    exact_lookup_log.append(
+                    state.chunks.extend(new)
+                    state.exact_terms_done.update(_norm_query(t) for t in fresh)
+                    state.exact_lookup_log.append(
                         _ExactLookupAttempt(terms=list(fresh), new=len(new)))
                     # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零(见 ppr
                     # 分支同款注释)。
                     if not new:
-                        zero_hit_by_action["exact_lookup"] = (
-                            zero_hit_by_action.get("exact_lookup", 0) + 1)
+                        state.zero_hit_by_action["exact_lookup"] = (
+                            state.zero_hit_by_action.get("exact_lookup", 0) + 1)
                     else:
-                        zero_hit_by_action["exact_lookup"] = 0
+                        state.zero_hit_by_action["exact_lookup"] = 0
                     _result_ids, _result_ids_truncated = _capped_result_ids(
                         [c.chunk_id for c in new])
                     _exact_reflect_detail = {"term": term, "terms": list(fresh),
@@ -8454,7 +8379,7 @@ class ReasoningRetriever:
                                              "result_ids": _result_ids}
                     if _result_ids_truncated:
                         _exact_reflect_detail["result_ids_truncated"] = True
-                    record(TraceStep(
+                    state.record(TraceStep(
                         step_type="exact_lookup",
                         summary=f"按名称精确查找「{term}」:新增 {len(new)} 段原文",
                         detail=_exact_reflect_detail))
@@ -8466,41 +8391,41 @@ class ReasoningRetriever:
                     decision.chain_direction,
                 )
                 if self._unsafe_scope_restricted():
-                    record(TraceStep(
+                    state.record(TraceStep(
                         step_type="skip",
                         summary="跳过两跳推导（指定来源范围下不可用）",
                         detail={"reason": "source_scope_unsafe_channel"},
                     ))
                 elif not decision.chain_start_object_id:
-                    record(TraceStep(
+                    state.record(TraceStep(
                         step_type="skip", summary="跳过 follow_chain(缺少起点)",
                         detail={"reason": "missing_chain_start"}))
-                elif decision.chain_start_object_id not in collected:
+                elif decision.chain_start_object_id not in state.collected:
                     # The reflect model may only authorize deterministic graph
                     # traversal from evidence already retrieved in this run.  Do
                     # not let a guessed/arbitrary object id become a side channel
                     # into another active/base graph.
-                    record(TraceStep(
+                    state.record(TraceStep(
                         step_type="skip", summary="跳过 follow_chain(起点不在当前候选中)",
                         detail={"reason": "chain_start_not_candidate",
                                 "start_object_id": decision.chain_start_object_id}))
-                elif action_key in follow_chain_done:
-                    record(TraceStep(
+                elif action_key in state.follow_chain_done:
+                    state.record(TraceStep(
                         step_type="skip", summary="跳过重复 follow_chain",
                         detail={"reason": "duplicate_follow_chain",
                                 "start_object_id": decision.chain_start_object_id}))
-                elif follow_chain_searches >= action_policy.max_follow_chain_actions:
-                    record(TraceStep(
+                elif state.follow_chain_searches >= state.action_policy.max_follow_chain_actions:
+                    state.record(TraceStep(
                         step_type="skip",
                         summary=("跳过 follow_chain(已达次数上限 "
-                                 f"{action_policy.max_follow_chain_actions})"),
+                                 f"{state.action_policy.max_follow_chain_actions})"),
                         detail={"reason": "follow_chain_cap"}))
                 else:
-                    follow_chain_done.add(action_key)
-                    follow_chain_searches += 1
+                    state.follow_chain_done.add(action_key)
+                    state.follow_chain_searches += 1
                     try:
                         candidate_relevance = float(
-                            collected[decision.chain_start_object_id].relevance)
+                            state.collected[decision.chain_start_object_id].relevance)
                     except (TypeError, ValueError):
                         candidate_relevance = 0.0
                     if not math.isfinite(candidate_relevance):
@@ -8520,7 +8445,7 @@ class ReasoningRetriever:
                     new_chains = []
                     if chain_result is not None:
                         seen_paths = {
-                            tuple(h.relation_id for h in c.hops): c for c in chains
+                            tuple(h.relation_id for h in c.hops): c for c in state.chains
                         }
                         for chain in chain_result.inferences:
                             path_key = tuple(h.relation_id for h in chain.hops)
@@ -8528,7 +8453,7 @@ class ReasoningRetriever:
                             if existing is None:
                                 chain.query_relevance = candidate_relevance
                                 seen_paths[path_key] = chain
-                                chains.append(chain)
+                                state.chains.append(chain)
                                 new_chains.append(chain)
                             else:
                                 existing.query_relevance = max(
@@ -8536,7 +8461,7 @@ class ReasoningRetriever:
                                     candidate_relevance,
                                 )
                         for node in chain_result.nodes:
-                            collected.setdefault(node.object_id, node)
+                            state.collected.setdefault(node.object_id, node)
                     if new_chains:
                         first = new_chains[0]
                         h1, h2 = first.hops
@@ -8551,11 +8476,11 @@ class ReasoningRetriever:
                     # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零(见 ppr
                     # 分支同款注释)。
                     if not new_chains:
-                        zero_hit_by_action["follow_chain"] = (
-                            zero_hit_by_action.get("follow_chain", 0) + 1)
+                        state.zero_hit_by_action["follow_chain"] = (
+                            state.zero_hit_by_action.get("follow_chain", 0) + 1)
                     else:
-                        zero_hit_by_action["follow_chain"] = 0
-                    record(TraceStep(
+                        state.zero_hit_by_action["follow_chain"] = 0
+                    state.record(TraceStep(
                         step_type="follow_chain", summary=summary_text,
                         detail={"hops": 2, "count": len(new_chains),
                                 "chain_trust": round(best_trust, 4),
@@ -8577,7 +8502,7 @@ class ReasoningRetriever:
                 # skip 同一份 no_progress/stale 记账**(设计稿 §8)。此前写在链前并
                 # `break`——选一次被禁动作整个循环就终止,其余通道全被放弃;也不能
                 # 裸 `continue`,那会绕过链尾记账,反复请求被禁动作就规避了熔断。
-                record(TraceStep(
+                state.record(TraceStep(
                     step_type="skip",
                     summary="跳过跨库同类实体扩展（当前检索范围不允许）",
                     detail={
@@ -8593,54 +8518,54 @@ class ReasoningRetriever:
                 # 同形):`run` 是有零松弛长度天花板的热函数。
                 self._action_expand_community(state, decision)
             elif decision.next_action in state.plugin_action_names:
-                self._action_plugin(state, decision, steps >= max_steps)
+                self._action_plugin(state, decision, state.steps >= state.max_steps)
             else:
                 break
             # 本轮动作后是否有新增(候选节点或原文段)。无新增 → 下一轮提示模型 + 累加 stale。
             # 按篇取样不进候选池却确实带来新材料,故 `document_read_elements_used`
             # 并进这把尺(见证失败时它不动,那一轮仍如实算作无进展)。
-            no_progress = (
-                len(collected) + len(elements) + len(chunks) + len(chains)
+            state.no_progress = (
+                len(state.collected) + len(state.elements) + len(state.chunks) + len(state.chains)
                 + state.enum_rows_used + state.document_read_elements_used
             ) == before
-            if no_progress and (consult_delivered_this_turn
+            if state.no_progress and (state.consult_delivered_this_turn
                                 or state.external_delivered_this_turn):
                 # consult 送达了新建议、或插件送达了新的外部材料,两者都不带库内新
                 # 证据:stale 持平——不清零也不递增。各态 skip 照常递增。
                 pass
             else:
-                stale = stale + 1 if no_progress else 0
-            consult_delivered_this_turn = False
+                state.stale = state.stale + 1 if state.no_progress else 0
+            state.consult_delivered_this_turn = False
             state.external_delivered_this_turn = False
             # 连续 stale_limit 轮无有效进展 → 硬熔断, 强制走到末尾 answer(不再交模型自觉)。
-            if stale >= self.settings.reasoning_stale_limit:
-                record(TraceStep(step_type="skip",
-                                 summary=f"连续 {stale} 轮无新进展,熔断收尾(避免空转)",
-                                 detail={"reason": "stale_circuit_breaker", "stale": stale}))
+            if state.stale >= self.settings.reasoning_stale_limit:
+                state.record(TraceStep(step_type="skip",
+                                 summary=f"连续 {state.stale} 轮无新进展,熔断收尾(避免空转)",
+                                 detail={"reason": "stale_circuit_breaker", "stale": state.stale}))
                 if (
-                    outline_overflow
-                    and steps < max_steps
-                    and not outline_terminal_repair_used
-                    and not outline_cap_repair_used
+                    state.outline_overflow
+                    and state.steps < state.max_steps
+                    and not state.outline_terminal_repair_used
+                    and not state.outline_cap_repair_used
                 ):
                     # 熔断是已经发生的事实,所以先落轨迹。若步骤预算仍有余量,再保留
                     # 一次只许换键的专用轮;outline 修订仍不算检索进展、不重置 stale。
-                    outline_terminal_repair_used = True
+                    state.outline_terminal_repair_used = True
                     forced_overflow_repair = True
                     continue
                 break
 
-        if outline_overflow:
+        if state.outline_overflow:
             # 即使模型拒绝纠错、再次溢出或给了结构变更,终态也必须明确披露未接纳
             # 的 key;不能只留下早先的一条 outline 诊断,更不能继续声称总有下一轮。
-            record(TraceStep(
+            state.record(TraceStep(
                 step_type="skip",
                 summary="大纲仍有未接纳的新证据,最终答案仅使用已绑定证据",
                 detail={
                     "reason": "outline_evidence_overflow_unresolved",
                     "overflow_evidence": {
                         section_id: list(keys)
-                        for section_id, keys in outline_overflow.items()
+                        for section_id, keys in state.outline_overflow.items()
                     },
                 },
             ))
@@ -8654,15 +8579,15 @@ class ReasoningRetriever:
         # 共用)重算一次"run 结束时到底还有哪些没跑过",只披露这份终态——
         # 全部被补上时不落 skip 步,不能让轨迹永久停留在预算刚耗尽那一刻的旧账
         # (PR#400 codex R1 P2-1)。仍在检索循环的墙钟范围内、位于下面的 answer 步之前。
-        if uncovered_intent_queries:
+        if state.uncovered_intent_queries:
             still = _still_uncovered_directions(
-                uncovered_intent_queries, attempted, label_of)
+                state.uncovered_intent_queries, state.attempted, state.label_of)
             if still:
                 # 预算耗尽必须显式披露:嘴上说"已按确认后的问题理解检索"、实际悄悄
                 # 漏掉几个方向,比少检索本身更糟。
-                shown = [label_of[q] for q in still[:_INTENT_PENDING_DISCLOSE]]
+                shown = [state.label_of[q] for q in still[:_INTENT_PENDING_DISCLOSE]]
                 more = len(still) - len(shown)
-                record(TraceStep(
+                state.record(TraceStep(
                     step_type="skip",
                     summary=("检索预算不足,以下已确认方向未能执行:"
                              + "、".join(shown)
@@ -8674,21 +8599,21 @@ class ReasoningRetriever:
         # 证据预算在此(而非入口)解析:used_queries 到这里才定型(含 add_subquery /
         # expand_community 兄弟),预算随"问题的方面数"走。
         top_n = effective_top_n(
-            self.settings, top_n, len(used_queries), limits=limits
+            self.settings, top_n, len(state.used_queries), limits=limits
         )
-        answer_detail = {"elements": len(elements), "top_n": top_n,
-                         "chains": len(chains),
+        answer_detail = {"elements": len(state.elements), "top_n": top_n,
+                         "chains": len(state.chains),
                          # 清单是独立证据通道:条目数不进 top_n 预算(那是相关性
                          # 席位),这里只报「列了几个集合、共多少条」供排查。
-                         "enumerations": len(enumerations),
+                         "enumerations": len(state.enumerations),
                          "enumerated_items": state.enum_rows_used}
         raise_if_cancelled(self.cancel_event)
         # 收尾重排保持配额分支和单查询全局重排两支，耗时归入合成候选步骤。
         top_hits, outline_evidence = self._closing_rerank(
-            notebook_id, question, collected, used_queries, top_n, outline,
+            notebook_id, question, state.collected, state.used_queries, top_n, state.outline,
             answer_detail)
         if self._unsafe_scope_restricted():
-            chains = []
+            state.chains = []
         raise_if_cancelled(self.cancel_event)
         answer_detail["kg"] = len(top_hits)
         # 这里统计的是候选池(截断前),不是最终进入合成 prompt 的数量——那由
@@ -8698,7 +8623,7 @@ class ReasoningRetriever:
         # detail(kg/elements)承载,前端 reasoning-trace.ts 会把 detail 渲染成
         # "N 个知识对象 / M 段原文"紧邻显示,summary 再带一遍会逐字重复;这也
         # 避开在 summary 里出现"KG"这类界面词汇表禁用的内部黑话。
-        record(TraceStep(step_type="answer",
+        state.record(TraceStep(step_type="answer",
                          summary="合成候选",
                          detail=answer_detail))
         # 采用回写:注入过的条目里,哪几条的动作被模型真的选了。
@@ -8716,11 +8641,11 @@ class ReasoningRetriever:
         # 都没采纳的 run,都是零写入。fail-open:``adopted`` 只是淘汰排序的一个键,
         # 一次记账失败不该让一次已经检索完的 run 报错。取消是控制流不是失败,照常
         # 上抛(与本文件其他 fail-open 分支同口径)。
-        if experience_block:
-            delivered_experience_entries = experience_entries[
-                : rendered_experience_count(experience_block)]
+        if state.experience_block:
+            delivered_experience_entries = state.experience_entries[
+                : rendered_experience_count(state.experience_block)]
             adopted_ids = adopted_entry_ids(
-                delivered_experience_entries, sorted(adopted_actions))
+                delivered_experience_entries, sorted(state.adopted_actions))
             if adopted_ids:
                 try:
                     self.retrieval_experiences.note_adopted(adopted_ids)
@@ -8736,19 +8661,19 @@ class ReasoningRetriever:
             query=question,
             mode="reasoning",
             settings=self.settings,
-            candidate_knowledge=list(collected.values()),
-            candidate_chunks=chunks,
-            candidate_elements=elements,
+            candidate_knowledge=list(state.collected.values()),
+            candidate_chunks=state.chunks,
+            candidate_elements=state.elements,
             # The retriever owns B_candidates only.  B_final is captured by
             # Ask/report after their context assembler has applied every
             # character budget, refinement, and citation-map admission rule.
-            baseline_step_usage=len(trace),
+            baseline_step_usage=len(state.trace),
         )
         return ReasoningResult(
-            top_hits=top_hits, elements=elements, trace=trace, chunks=chunks,
-            chains=chains, enumerations=enumerations,
+            top_hits=top_hits, elements=state.elements, trace=state.trace, chunks=state.chunks,
+            chains=state.chains, enumerations=state.enumerations,
             document_reads=list(state.document_reads),
-            collection_map_text=collection_map_text, outline=outline,
+            collection_map_text=state.collection_map_text, outline=state.outline,
             outline_evidence=outline_evidence,
             external_evidence=list(state.external_evidence),
             baseline_manifest=baseline_manifest,
@@ -8758,8 +8683,8 @@ class ReasoningRetriever:
             # 「检索过」区分开,前者照常兜底重试。
             attempted=[{"query": a.query, "new": a.new, "tries": a.tries,
                         **({"failed": True}
-                           if a.query in failed_search_queries else {})}
-                       for a in attempted.values()])
+                           if a.query in state.failed_search_queries else {})}
+                       for a in state.attempted.values()])
 
 
 def _construct_reasoning_retriever(
