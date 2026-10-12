@@ -120,6 +120,20 @@
 .agent-token-row > span small { color: #747d8c; font-size: 11px; overflow-wrap: anywhere; }
 .agent-profile-list button,
 .agent-token-row button { min-height: 30px; flex: 0 0 auto; font-size: 11px; }
+/* 行内确认的说明较长：放不下时整组操作换到第二行，不去挤压 Profile 名称。 */
+.agent-profile-list > div { flex-wrap: wrap; }
+.agent-profile-list > div > span:first-child { flex: 1 1 10em; }
+.agent-profile-list .agent-profile-actions {
+  display: flex;
+  flex: 0 1 auto;
+  margin-left: auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.agent-profile-list .agent-token-saved { color: var(--green); font-size: 12px; }
+.agent-profile-list .agent-token-confirm { color: #a52d2d; font-size: 12px; }
 .agent-profile-list .agent-load-more,
 .agent-token-list .agent-load-more { width: 100%; border-style: dashed; color: var(--blue); }
 .agent-token-list button.danger { border-color: #efc6c6; color: #a52d2d; }

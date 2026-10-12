@@ -1024,6 +1024,26 @@ def test_secret_is_owner_only_cleared_on_revoke_and_absent_for_legacy(token_cont
         ).fetchone()[0] is None
 
 
+def test_reenabling_a_profile_restores_its_live_tokens_only(token_context):
+    """The Agent access page's 启用 button promises that re-enabling brings back
+    the Profile's tokens that are neither revoked nor expired -- and nothing
+    else: a token revoked while the Profile was disabled stays revoked."""
+    service, alice, _bob, notebook, _other = token_context
+    profile = service.create_agent_profile(alice.id, "Re-enable", "")
+    live = _issue(service, alice, profile, notebook)
+    revoked = _issue(service, alice, profile, notebook)
+
+    service.update_agent_profile(profile.id, alice.id, {"status": "revoked"})
+    assert service.resolve_agent_token_status(live.token) == (None, "profile_disabled")
+    service.revoke_agent_token(alice.id, revoked.id)
+
+    enabled = service.update_agent_profile(profile.id, alice.id, {"status": "active"})
+    assert enabled.status == "active"
+    principal, reason = service.resolve_agent_token_status(live.token)
+    assert principal is not None and reason == ""
+    assert service.resolve_agent_token_status(revoked.token) == (None, "token_revoked")
+
+
 def test_resolve_status_names_why_a_matching_token_fails(token_context, repo):
     service, alice, _bob, notebook, _other = token_context
     profile = service.create_agent_profile(alice.id, "Statuses", "")

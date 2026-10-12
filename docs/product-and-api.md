@@ -1543,7 +1543,11 @@ notebooks the owner owns). Code still asks for fine-grained capabilities (`knowl
 tier. Issuing with a legacy capability string or any unknown value is a 422
 `unsupported agent scopes`. Selecting `manage` or `delete` while the allowlist names no notebook
 the owner owns is a 422 「管理和删除权限只对你拥有的笔记本生效，所选笔记本里没有你拥有的」
-(user-facing copy) on both issue and edit. A token can be revoked immediately.
+(user-facing copy) on both issue and edit. A token can be revoked immediately. A Profile can be
+disabled (`PATCH /api/agent-profiles/{id}` with `status: "revoked"`; all its tokens stop working at
+once) and re-enabled from the same page after an inline confirmation (`status: "active"`): its tokens
+that are neither revoked nor expired work again immediately, and a token revoked while it was
+disabled stays revoked.
 
 Tokens can be copied again after issue: the server stores the plaintext at issue time
 (`agent_access_tokens.token_plain`); authentication still compares the hash only. Each
