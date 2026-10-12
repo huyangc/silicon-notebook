@@ -171,6 +171,8 @@ export type ReportDetailT = ReportSummaryT & {
     grounded: boolean;
     evidence_level?: string;
     failed?: boolean;
+    // 失败章节的原文,只有报告作者的详情里有;正文里失败章节只写中性说明。
+    error?: string;
     citation_audit?: ReportCitationAuditT;
   }[];
   section_status?: { title: string; phase: string; step: number }[];

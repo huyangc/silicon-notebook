@@ -106,6 +106,7 @@ function reportDetail(overrides: Partial<ReportDetail> = {}): ReportDetail {
     updated_at: "2026-08-04T10:40:00",
     generation_started_at: "2026-08-04T10:31:00",
     error: "",
+    section_errors: [],
     content_md: "",
     references: [],
     ...overrides,
@@ -919,6 +920,50 @@ test("报告失败但没有失败原文时显示固定文案", async () => {
   expect(await screen.findByText("这份报告没有成功生成。")).toBeInTheDocument();
   expect(screen.queryByText("失败原因：")).not.toBeInTheDocument();
   expect(screen.queryByText("这份报告还没有生成正文")).not.toBeInTheDocument();
+});
+
+
+// 各节失败原文(仅管理员,后端与 error 同一披露判定):不看 status——done 报告的
+// 正文里失败章节只剩中性说明,原文只在这里。
+test("done 报告带各节失败原文时逐条显示章节失败原因", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([report("r1", "这次报告问了什么")]));
+  mocks.fetchUserReportDetail.mockResolvedValue(reportDetail({
+    status: "done",
+    content_md: "## A\n\n（本节生成失败:本节处理过程出错）\n\n## B\n\n正文 B",
+    section_errors: [
+      { index: 0, title: "A", error: "OperationalError: 10.9.8.7 refused" },
+      { index: 2, title: "", error: "本节模型调用失败,已重试" },
+    ],
+  }));
+  view();
+
+  await user.click(await screen.findByText("这次报告问了什么"));
+
+  const block = await screen.findByTestId("report-section-errors");
+  expect(block).toHaveTextContent("章节失败原因：");
+  expect(block).toHaveTextContent("A：OperationalError: 10.9.8.7 refused");
+  expect(block).toHaveTextContent("第 3 节：本节模型调用失败,已重试");
+  // 报告级失败区块与 done 无关,仍不出现。
+  expect(screen.queryByText("失败原因：")).not.toBeInTheDocument();
+});
+
+
+test("没有各节失败原文时不渲染章节失败原因", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([report("r1", "这次报告问了什么")]));
+  mocks.fetchUserReportDetail.mockResolvedValue(reportDetail({
+    status: "done", content_md: "## B\n\n正文 B", section_errors: [],
+  }));
+  view();
+
+  await user.click(await screen.findByText("这次报告问了什么"));
+
+  expect(await screen.findByText("正文 B")).toBeInTheDocument();
+  expect(screen.queryByTestId("report-section-errors")).not.toBeInTheDocument();
+  expect(screen.queryByText("章节失败原因：")).not.toBeInTheDocument();
 });
 
 

@@ -199,12 +199,6 @@ def _section_reply(raw: Any, schema_hint: str, *, allow_repair: bool) -> dict:
 #: or an object carrying none of the section fields (``{}`` included).
 _EMPTY_SECTION_REASONS = frozenset({"empty", "missing_expected_key"})
 
-#: Per failure class, what the section note says (``reports.section_failure``
-#: owns the table so the public projection reads the same sentences). The
-#: reason code goes to the ``report_section_attempt`` event, not the copy.
-_SECTION_FAILURE_COPY = SECTION_FAILURE_COPY
-
-
 def _section_attempt_failure(exc: BaseException) -> tuple[str, str]:
     """Classify one failed section attempt as (status, reason code)."""
     if isinstance(exc, ModelJsonRepairError) or getattr(
@@ -2720,7 +2714,7 @@ class ReportEngine:
             # the model request has already degraded to an empty section.
             pass
         base["failed"] = True
-        base["error"] = _SECTION_FAILURE_COPY.get(status, _SECTION_FAILURE_COPY["error"])
+        base["error"] = SECTION_FAILURE_COPY.get(status, SECTION_FAILURE_COPY["error"])
 
     def _synthesize_report_blueprint(self, outline: Sequence[dict], results: Sequence[Any],
                                      question: str, report_frame: Optional[dict]) -> tuple[

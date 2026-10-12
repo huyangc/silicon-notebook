@@ -55,6 +55,7 @@ from app.models.admin import (
     PromotionCandidate,
     PromotionRejectRequest,
     ReportActivityDetail,
+    ReportSectionFailure,
     UploadLimitDefaultResult,
     UploadLimitDefaultUpdate,
     UploadLimitUpdate,
@@ -77,6 +78,7 @@ from app.services.extension_toggles import (
 )
 from app.services.model_status import ModelStatusService
 from app.services.auth_flow import check_unified_auth_settings
+from app.services.reports.section_failure import failed_section_errors
 from app.services.source_display import source_display_title
 from app.repositories.identity_errors import (
     AuthStoreError,
@@ -499,17 +501,32 @@ def _activity_source_item(row: dict) -> ActivitySource:
     )
 
 
-def _activity_failure_text(viewer: UserProfile, raw: object) -> str:
+def _discloses_failure_text(viewer: UserProfile) -> bool:
     """提问/报告失败原文的唯一披露判定:只给管理员。
 
     ``ask_jobs.error`` / ``reports.error`` 是执行路径捕获异常后原样落库的串
     (``f"{type(exc).__name__}: {exc}"`` 或 ``str(exc)[:500]``),可能带内部模型
-    网关地址或服务端路径。管理员把它当排障诊断读(本就能按用户看模型调用日志
-    原文);本人自助读取一律拿空串,前端对失败状态给固定文案——与来源条目把
+    网关地址或服务端路径;报告各节的失败原文(``sections_json`` 里失败节的
+    ``error``)同理。管理员把它当排障诊断读(本就能按用户看模型调用日志
+    原文);本人自助读取一律拿空,前端对失败状态给固定文案——与来源条目把
     ``error_message`` 收成 ``parse_failed`` 布尔、普通报告页只用固定文案同一方向。
-    活动流的提问条目与两个详情端点共用这一处,不各写一份。
+    活动流的提问条目与两个详情端点(含报告的 ``section_errors``)共用这一处,
+    不各写一份。
     """
-    return str(raw or "") if viewer.role == "admin" else ""
+    return viewer.role == "admin"
+
+
+def _activity_failure_text(viewer: UserProfile, raw: object) -> str:
+    return str(raw or "") if _discloses_failure_text(viewer) else ""
+
+
+def _activity_section_failures(
+    viewer: UserProfile, raw: object
+) -> list[ReportSectionFailure]:
+    """报告各节失败原文(K5 后不再出现在正文里),与上面同一判定。"""
+    if not _discloses_failure_text(viewer):
+        return []
+    return [ReportSectionFailure(**row) for row in failed_section_errors(raw)]
 
 
 def _activity_item_from_row(row: dict, viewer: UserProfile):
@@ -838,6 +855,9 @@ def get_admin_user_report_detail(
                 updated_at=snapshot.get("updated_at") or "",
                 generation_started_at=snapshot.get("generation_started_at") or "",
                 error=_activity_failure_text(user, snapshot.get("error")),
+                section_errors=_activity_section_failures(
+                    user, snapshot.get("section_errors")
+                ),
                 content_md=snapshot.get("content_md") or "",
                 # The engine's per-citation Memory record (M4) is an internal
                 # handle; audit access sees the author and the excerpt already.

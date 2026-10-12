@@ -1618,6 +1618,38 @@ def test_public_report_share_link_is_anonymous_and_bounded(client, monkeypatch):
     ).status_code == 404
 
 
+def test_public_report_read_carries_failed_sections_only_for_a_failure_note(
+    client, monkeypatch,
+):
+    """K5: the token read selects the failed sections' raw errors in SQL, and
+    only when the body carries a failure note. Same contract as the PostgreSQL
+    lane (``test_core_store_conformance``)."""
+    from app.api.deps import repository
+    from tests.activity_parity_cases import (
+        REPORT_SECTION_FAILURE_EXPECTED,
+        REPORT_SECTION_FAILURE_SECTIONS,
+    )
+
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    store = repository()._runtime.report_store
+    sections = list(REPORT_SECTION_FAILURE_SECTIONS)
+    with_note = _mk_report(client, monkeypatch, nb["id"], "q1")
+    store.update_report(
+        nb["id"], with_note, status="done", sections=sections,
+        content_md="## A\n\n（本节生成失败:OperationalError: 10.9.8.7）\n",
+    )
+    without_note = _mk_report(client, monkeypatch, nb["id"], "q2")
+    store.update_report(
+        nb["id"], without_note, status="done", sections=sections,
+        content_md="## A\n\n正文\n",
+    )
+
+    resolved = store.public_report_by_token(store.share_report(nb["id"], with_note))
+    assert resolved["failed_sections"] == REPORT_SECTION_FAILURE_EXPECTED
+    plain = store.public_report_by_token(store.share_report(nb["id"], without_note))
+    assert plain["failed_sections"] == []
+
+
 def test_public_report_route_is_not_behind_the_router_level_session_guard():
     """The public read must not sit under the blanket `get_current_user` router.
 

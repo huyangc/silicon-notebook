@@ -44,6 +44,27 @@ def _keep_planning_memory(column: str, value: str) -> str:
     )
 
 
+# Mirror of the PostgreSQL adapter's ``_FAILED_SECTIONS_SQL``: the failed
+# sections of the ``reports`` row in scope as a JSON array of
+# ``{index, title, error}``, only where ``failed`` is JSON ``true``.  ``json()``
+# re-marks each object as JSON so the aggregate embeds objects, not strings.
+_FAILED_SECTIONS_SQL = (
+    "(SELECT COALESCE(json_group_array(json(f.obj)), '[]') FROM ("
+    "SELECT json_object('index', s.key, "
+    "'title', COALESCE(json_extract(s.value, '$.title'), ''), "
+    "'error', COALESCE(json_extract(s.value, '$.error'), '')) AS obj "
+    "FROM json_each(CASE WHEN json_valid(reports.sections_json) "
+    "AND json_type(reports.sections_json)='array' "
+    "THEN reports.sections_json ELSE '[]' END) AS s "
+    "WHERE s.type='object' AND json_type(s.value, '$.failed')='true' "
+    "ORDER BY s.key) AS f)"
+)
+_PUBLIC_FAILED_SECTIONS_SQL = (
+    "CASE WHEN instr(reports.content_md, '（本节生成失败:') > 0 "
+    f"THEN {_FAILED_SECTIONS_SQL} END"
+)
+
+
 class ReportStore:
     # IN(...) batching bound for export lookups — mirrors the facade's
     # `_IN_CHUNK` (well under SQLite's default variable limit).
@@ -278,7 +299,8 @@ class ReportStore:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT id,notebook_id,question,depth,status,error,content_md,"
-                "references_json,understanding_json,created_at,updated_at "
+                "references_json,understanding_json,created_at,updated_at,"
+                f"{_FAILED_SECTIONS_SQL} AS section_errors "
                 "FROM reports WHERE id=? AND created_by=?",
                 (report_id, actor_id),
             ).fetchone()
@@ -310,6 +332,9 @@ class ReportStore:
                     "error": row["error"] or "",
                     "content_md": row["content_md"] or "",
                     "references": json.loads(row["references_json"] or "[]"),
+                    # Raw failure text: the route discloses it to
+                    # administrators only (``_activity_failure_text``).
+                    "section_errors": json.loads(row["section_errors"] or "[]"),
                     "notebook_name": notebook["name"] or "",
                     "notebook_deleted_at": "",
                     "retained_until": "",
@@ -341,6 +366,7 @@ class ReportStore:
                 "error": "",
                 "content_md": "",
                 "references": [],
+                "section_errors": [],
                 "notebook_name": retained["notebook_name"],
                 "notebook_deleted_at": retained["deleted_at"],
                 "retained_until": retained["expires_at"],
@@ -468,7 +494,10 @@ class ReportStore:
 
         Also returns ``GATE_FIELDS`` (``notebook_id`` / ``created_by``) for the
         caller's live authorization check.  They are NOT part of the disclosure
-        surface — ``public_report_payload`` names neither.
+        surface — ``public_report_payload`` names neither.  Nor is
+        ``failed_sections``: the failed sections' raw errors, selected only
+        when the body carries a failure note, which the caller pops to rewrite
+        such notes neutrally.
         """
         clean = str(token or "").strip()
         if not clean:
@@ -476,7 +505,8 @@ class ReportStore:
         columns = ", ".join(self.PUBLIC_FIELDS + self.GATE_FIELDS)
         with self.database.connect() as db:
             row = db.execute(
-                f"SELECT {columns} FROM reports "
+                f"SELECT {columns}, {_PUBLIC_FAILED_SECTIONS_SQL} AS "
+                "failed_sections FROM reports "
                 "WHERE share_token = ? AND status = 'done'",
                 (clean,),
             ).fetchone()
@@ -487,6 +517,7 @@ class ReportStore:
         # returns jsonb as a list already, SQLite stores TEXT.
         out["references"] = json.loads(out.pop("references_json", None) or "[]")
         out.pop("understanding_json", None)
+        out["failed_sections"] = json.loads(out.get("failed_sections") or "[]")
         return out
 
     def _in_batches(self, ids) -> Iterator[list]:

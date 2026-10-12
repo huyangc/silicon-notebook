@@ -164,3 +164,19 @@ test("只认结构化布尔：位置标签恰好叫 Memory 的普通文档引用
   expect(container.querySelector("#ref-k1 .public-report-locus")!.textContent).toBe("Memory");
   expect(screen.queryByText("作者的个人记忆")).toBeNull();
 });
+
+
+test("分享页只显示失败章节的中性说明，不显示失败原因", async () => {
+  // 公开接口本就不返回 sections;即便响应里混进了带原文的字段,页面也不读它。
+  mocks.fetchPublicReport.mockResolvedValueOnce({
+    ...REPORT,
+    content_md: "## A\n\n（本节生成失败:本节处理过程出错）\n\n## B\n\n正文 B",
+    sections: [{ title: "A", failed: true, error: "OperationalError: 10.9.8.7" }],
+  });
+  render(<PublicReportPage />);
+
+  expect(await screen.findByText(/本节处理过程出错/)).toBeInTheDocument();
+  expect(screen.queryByText(/10\.9\.8\.7/)).toBeNull();
+  expect(screen.queryByText(/失败原因/)).toBeNull();
+});
+

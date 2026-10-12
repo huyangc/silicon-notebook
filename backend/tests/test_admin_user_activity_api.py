@@ -132,7 +132,8 @@ def _insert_conversation(db, conversation_id, notebook_id, created_by, updated_a
 
 def _insert_report(db, report_id, notebook_id, created_by, created_at, *,
                     question="report?", depth=2, status="done", content_md="",
-                    references=None, error="", generation_started_at=None) -> None:
+                    references=None, error="", generation_started_at=None,
+                    sections=None) -> None:
     understanding = (
         {"_generation_started_at": generation_started_at}
         if generation_started_at is not None else {}
@@ -140,11 +141,13 @@ def _insert_report(db, report_id, notebook_id, created_by, created_at, *,
     db.execute(
         "INSERT INTO reports "
         "(id,notebook_id,question,depth,status,created_by,content_md,"
-        "references_json,understanding_json,error,created_at,updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        "references_json,understanding_json,error,created_at,updated_at,"
+        "sections_json) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (report_id, notebook_id, question, depth, status, created_by, content_md,
          json.dumps(references or [], ensure_ascii=False),
-         json.dumps(understanding), error, created_at, created_at),
+         json.dumps(understanding), error, created_at, created_at,
+         json.dumps(sections or [], ensure_ascii=False)),
     )
 
 
@@ -1714,6 +1717,7 @@ def test_report_detail_allowed_for_self_and_admin_with_body(client):
             "updated_at": "2026-08-01T10:00:00+00:00",
             "generation_started_at": "2026-08-01T10:00:05+00:00",
             "error": "",
+            "section_errors": [],
             "content_md": "# 结论\n\n稳定[1]",
             "references": _REPORT_REFERENCES,
             "notebook_name": "NB-report-body",
@@ -1738,6 +1742,53 @@ def test_report_detail_allowed_for_self_and_admin_with_body(client):
         headers=_auth_admin(client),
     ).json()
     assert admin_legacy["error"] == "模型服务调用失败"
+
+
+_SECTION_RAW = "OperationalError: connection to 10.9.8.7:5432 refused"
+
+
+def test_report_detail_lists_section_failures_for_admin_only(client):
+    """K5 / ruling 10: a report's body carries only neutral failure notes, so
+    the administrator reads each failed section's raw text here -- on a
+    ``done`` report too (one failed section among good ones). Model-failure
+    sections list their neutral sentence like any other. The author's own
+    self-service call gets an empty list, the same rule as ``error``."""
+    owner = _auth(client, 79)
+    owner_id = _me(client, owner)
+    notebook_id = _create_notebook(client, owner, "NB-section-errors")
+    with _repo()._write() as db:
+        _insert_report(
+            db, "rep-sections", notebook_id, owner_id,
+            "2026-08-01T10:00:00+00:00", status="done",
+            content_md="# 报告\n\n## A\n\n（本节生成失败:本节处理过程出错）\n",
+            sections=[
+                {"title": "A", "markdown": "", "failed": True,
+                 "error": _SECTION_RAW},
+                {"title": "B", "markdown": "正文 B"},
+                {"title": "C", "markdown": "", "failed": False, "error": "旧值"},
+                {"title": "D", "markdown": "", "failed": True,
+                 "error": "本节模型调用失败,已重试"},
+            ],
+        )
+
+    admin = client.get(
+        f"/api/admin/users/{owner_id}/reports/rep-sections",
+        headers=_auth_admin(client),
+    )
+    assert admin.status_code == 200
+    assert admin.json()["status"] == "done"
+    assert admin.json()["error"] == ""
+    assert admin.json()["section_errors"] == [
+        {"index": 0, "title": "A", "error": _SECTION_RAW},
+        {"index": 3, "title": "D", "error": "本节模型调用失败,已重试"},
+    ]
+
+    mine = client.get(
+        f"/api/admin/users/{owner_id}/reports/rep-sections", headers=owner
+    )
+    assert mine.status_code == 200
+    assert mine.json()["section_errors"] == []
+    assert _SECTION_RAW not in mine.text
 
 
 def test_report_detail_not_owned_by_target_user_404(client):
@@ -1839,7 +1890,15 @@ def test_admin_report_detail_survives_notebook_delete_as_summary(client):
             question="留存报告提示", depth=4, content_md="不能保留的报告正文",
             references=_REPORT_REFERENCES, error="不能保留的错误诊断",
             status="failed", generation_started_at="2026-08-01T12:58:02+00:00",
+            sections=[{"title": "A", "failed": True, "error": "不能保留的章节原文"}],
         )
+    # Sanity: while the notebook lives, the administrator does read it.
+    assert client.get(
+        f"/api/admin/users/{owner_id}/reports/rep-retained",
+        headers=_auth_admin(client),
+    ).json()["section_errors"] == [
+        {"index": 0, "title": "A", "error": "不能保留的章节原文"}
+    ]
 
     assert client.delete(
         f"/api/notebooks/{notebook_id}", headers=owner
@@ -1873,9 +1932,11 @@ def test_admin_report_detail_survives_notebook_delete_as_summary(client):
     assert body["content_md"] == ""
     assert body["references"] == []
     assert body["error"] == ""
+    assert body["section_errors"] == []
     serialized = json.dumps(body, ensure_ascii=False)
     assert "不能保留的报告正文" not in serialized
     assert "不能保留的错误诊断" not in serialized
+    assert "不能保留的章节原文" not in serialized
 
 
 def test_admin_report_detail_delete_before_guard_returns_retained(

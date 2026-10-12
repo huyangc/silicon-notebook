@@ -801,6 +801,25 @@ export function ReportCredibilitySummary({ report }: { report: ReportDetailT }) 
   );
 }
 
+/** 失败章节的原文。正文(也是分享页)里失败章节只写一句中性说明;作者本人在
+ * 自己的报告里仍能展开看到原文——报告详情只对创建者开放,分享页不读 sections。 */
+export function ReportSectionFailures({ report }: { report: ReportDetailT }) {
+  const failures = report.sections
+    .map((section, index) => ({ section, index }))
+    .filter(({ section }) => section.failed && section.error);
+  if (failures.length === 0) return null;
+  return (
+    <div className="report-section-failures" aria-label="章节失败原因">
+      {failures.map(({ section, index }) => (
+        <details key={`${section.title}-${index}`}>
+          <summary>{section.title || `第 ${index + 1} 节`} · 失败原因</summary>
+          <p>{section.error}</p>
+        </details>
+      ))}
+    </div>
+  );
+}
+
 /** 资料集中度与个人/公共来源口径共用 Ask 的显示引用统计。 */
 export function ReportCitationDistribution({ report }: { report: ReportDetailT }) {
   const summary = citationSummary(report);
@@ -1721,6 +1740,7 @@ export function ReportsPanel({
             })}
           </div>
         )}
+        <ReportSectionFailures report={active} />
         {active.content_md ? (
           // key=active.id:ReportsPanel 本身不因切换报告而重挂载(workspace.active
           // 只是换了个对象),selectedRefKey 是 ReportMarkdown 内部 state,不会跟着

@@ -141,3 +141,23 @@ MALFORMED_BOUNDS = (
     "2026/08/01",
     "yesterday",
 )
+
+
+# K5 / ruling 10: ``guarded_report_detail`` selects the failed sections in SQL
+# (``jsonb_array_elements`` on PostgreSQL, ``json_each`` on SQLite). Both must
+# list exactly the elements whose ``failed`` is JSON ``true``, by position,
+# with a missing title or error read as an empty string.
+REPORT_SECTION_FAILURE_SECTIONS = (
+    {"title": "A", "markdown": "", "failed": True, "error": "OperationalError: 10.9.8.7"},
+    {"title": "B", "markdown": "正文"},
+    "not-an-object",
+    {"title": "C", "failed": 1, "error": "failed is not JSON true"},
+    {"title": "E", "failed": "true", "error": "a string is not JSON true"},
+    {"title": "D", "failed": True},
+    {"failed": True, "error": "本节模型调用失败,已重试"},
+)
+REPORT_SECTION_FAILURE_EXPECTED = [
+    {"index": 0, "title": "A", "error": "OperationalError: 10.9.8.7"},
+    {"index": 5, "title": "D", "error": ""},
+    {"index": 6, "title": "", "error": "本节模型调用失败,已重试"},
+]

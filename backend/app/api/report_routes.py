@@ -35,6 +35,7 @@ from app.services.report_public_view import (
     public_report_payload,
     report_memory_lookup_source_ids,
 )
+from app.services.reports.section_failure import failed_section_errors
 from app.services.share_disclosure import (
     ForeignMemoryShareRefused,
     NonAuthorShareRefused,
@@ -786,6 +787,12 @@ def public_report_route(token: str, response: Response) -> PublicReport:
     row = repo.public_report_by_token(token)
     if row is None:
         raise HTTPException(status_code=404, detail="shared report not found")
+    # Raw failure text, read only to rewrite a stored failure note neutrally:
+    # out of the row before anything else sees it, never into the payload.
+    failed_errors = [
+        item["error"]
+        for item in failed_section_errors(row.pop("failed_sections", None))
+    ]
     # Live re-authorization of the CREATOR (P1-T3b ruling).  A member may
     # publish a report built from a shared notebook's corpus, but that is a
     # grant that lasts exactly as long as their read access does: revoke the
@@ -834,7 +841,9 @@ def public_report_route(token: str, response: Response) -> PublicReport:
     # Every open is re-authorized above; no browser or proxy may keep a copy
     # that outlives a revocation (as the public conversation routes do).
     response.headers["Cache-Control"] = "no-store"
-    return PublicReport(**public_report_payload(row, references, memory_sources))
+    return PublicReport(**public_report_payload(
+        row, references, memory_sources, failed_errors=failed_errors
+    ))
 
 
 def _report_mounts_still_effective(repo, row: dict, references: list) -> bool:

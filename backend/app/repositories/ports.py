@@ -1024,7 +1024,10 @@ class ReportRepository(Protocol):
     # Same fence contract as `guarded_ask_detail`: `actor_id` pins the report's
     # creator, `reader_id` is None for administrators and the caller's id for
     # self-service (live read authority re-checked inside the fence); the
-    # snapshot's locks are held until the caller leaves the context.
+    # snapshot's locks are held until the caller leaves the context.  The
+    # snapshot carries `section_errors`: `[{index, title, error}]` for the
+    # sections whose `failed` is true, raw text the route discloses to
+    # administrators only; `[]` on the retained-summary fallback.
     def guarded_report_detail(
         self, report_id: str, *, actor_id: str, reader_id: str | None
     ) -> ContextManager[dict]: ...
@@ -1040,7 +1043,10 @@ class ReportRepository(Protocol):
     # `public_report_by_token` is the ONLY report read reachable without a
     # session, so it takes no notebook/owner argument: the token is the whole
     # authorization. It must never consult the current-user ContextVar, which
-    # falls back to the seeded admin when unset.
+    # falls back to the seeded admin when unset. Its row also carries
+    # `failed_sections` (the failed sections' raw `{index, title, error}`, read
+    # only when the body carries a failure note) for the caller to pop and use
+    # in rewriting stored failure notes neutrally; never part of the payload.
     # `memory_guard` (M4): re-count the author's Memory on the page inside the
     # transaction that sets the token; a changed count raises
     # `ShareDisclosureRequired` and writes nothing.

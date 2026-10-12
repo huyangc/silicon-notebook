@@ -3620,6 +3620,30 @@ button.chat-session-card {
   margin: 0 0 10px;
 }
 
+.report-section-failures {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.report-section-failures summary {
+  cursor: pointer;
+}
+
+.report-section-failures p {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  border: 1px solid var(--danger-border);
+  border-radius: 6px;
+  background: var(--danger-bg);
+  color: var(--danger);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .report-citation-audit {
   display: inline-flex;
   max-width: 100%;

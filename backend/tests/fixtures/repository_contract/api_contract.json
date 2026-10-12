@@ -10630,6 +10630,13 @@
               "title": "Retained Until",
               "type": "string"
             },
+            "section_errors": {
+              "items": {
+                "$ref": "#/components/schemas/ReportSectionFailure"
+              },
+              "title": "Section Errors",
+              "type": "array"
+            },
             "status": {
               "title": "Status",
               "type": "string"
@@ -10916,6 +10923,30 @@
             }
           },
           "title": "ReportOutlineUpdate",
+          "type": "object"
+        },
+        "ReportSectionFailure": {
+          "description": "一节生成失败的原文(``sections_json`` 里该节的 ``error``),仅管理员。\n\n``index`` 是该节在报告章节里的位置(从 0 起),``title`` 是章节标题。K5 起\n报告正文只写中性说明,原文不再出现在 ``content_md`` 里,管理员经这里读。",
+          "properties": {
+            "error": {
+              "default": "",
+              "title": "Error",
+              "type": "string"
+            },
+            "index": {
+              "title": "Index",
+              "type": "integer"
+            },
+            "title": {
+              "default": "",
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "index"
+          ],
+          "title": "ReportSectionFailure",
           "type": "object"
         },
         "ReportShareDisclosure": {

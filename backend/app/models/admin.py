@@ -448,6 +448,18 @@ class AskDetail(BaseModel):
         return sanitize_answer_payload(value)
 
 
+class ReportSectionFailure(BaseModel):
+    """一节生成失败的原文(``sections_json`` 里该节的 ``error``),仅管理员。
+
+    ``index`` 是该节在报告章节里的位置(从 0 起),``title`` 是章节标题。K5 起
+    报告正文只写中性说明,原文不再出现在 ``content_md`` 里,管理员经这里读。
+    """
+
+    index: int
+    title: str = ""
+    error: str = ""
+
+
 class ReportActivityDetail(BaseModel):
     """右栏「选中报告」只读详情:GET /admin/users/{user_id}/reports/{report_id}
     的响应,与 frontend/app/dev/logs/activity/types.ts 的 ``ReportDetail`` 逐字对应。
@@ -469,6 +481,9 @@ class ReportActivityDetail(BaseModel):
     generation_started_at: str = ""
     # 失败原文只给管理员;本人自助读取恒为空串(admin_routes._activity_failure_text)。
     error: str = ""
+    # 各节失败原文,与 ``error`` 同一披露判定:只给管理员,本人自助读取与删除后
+    # 留存摘要恒为空列表。不依赖 ``status``——``done`` 报告也可能有失败节。
+    section_errors: List[ReportSectionFailure] = Field(default_factory=list)
     content_md: str = ""
     references: List[dict] = Field(default_factory=list)
     notebook_name: str = ""

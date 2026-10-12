@@ -29,6 +29,8 @@ from tests.activity_parity_cases import (
     REPORT_SCOPE_AFTER_SHARED_DELETE_CASES,
     REPORT_SCOPE_CASES,
     REPORT_SCOPE_REPORTS,
+    REPORT_SECTION_FAILURE_EXPECTED,
+    REPORT_SECTION_FAILURE_SECTIONS,
 )
 
 
@@ -750,11 +752,13 @@ def test_guarded_report_detail_live_revoked_and_retained_states_postgres(
         _seed_report_scope_rows(connection)
         connection.execute(
             "UPDATE reports SET content_md=%s, references_json=%s, "
-            "understanding_json=%s, depth=4 WHERE id='rep-shared'",
+            "understanding_json=%s, depth=4, sections_json=%s "
+            "WHERE id='rep-shared'",
             (
                 "# 共享库报告正文",
                 jsonb(references),
                 jsonb({"_generation_started_at": "2026-08-01T11:00:05+00:00"}),
+                jsonb(list(REPORT_SECTION_FAILURE_SECTIONS)),
             ),
         )
     reports = ReportStore(
@@ -781,6 +785,7 @@ def test_guarded_report_detail_live_revoked_and_retained_states_postgres(
         "error": "",
         "content_md": "# 共享库报告正文",
         "references": references,
+        "section_errors": REPORT_SECTION_FAILURE_EXPECTED,
         "notebook_name": "NB-n2",
         "notebook_deleted_at": "",
         "retained_until": "",
@@ -825,6 +830,7 @@ def test_guarded_report_detail_live_revoked_and_retained_states_postgres(
     assert retained["content_md"] == ""
     assert retained["references"] == []
     assert retained["error"] == ""
+    assert retained["section_errors"] == []
 
     with postgres_database.write() as connection:
         connection.execute(

@@ -26,6 +26,8 @@ from tests.activity_parity_cases import (
     REPORT_SCOPE_AFTER_SHARED_DELETE_CASES,
     REPORT_SCOPE_CASES,
     REPORT_SCOPE_REPORTS,
+    REPORT_SECTION_FAILURE_EXPECTED,
+    REPORT_SECTION_FAILURE_SECTIONS,
 )
 
 
@@ -1269,12 +1271,14 @@ def test_guarded_report_detail_live_revoked_and_retained_states(repo):
     with repo._write() as db:
         db.execute(
             "UPDATE reports SET content_md=?, references_json=?, "
-            "understanding_json=?, error=?, depth=4 WHERE id='rep-shared'",
+            "understanding_json=?, error=?, depth=4, sections_json=? "
+            "WHERE id='rep-shared'",
             (
                 "# 共享库报告正文",
                 json.dumps(references, ensure_ascii=False),
                 json.dumps({"_generation_started_at": "2026-08-01T11:00:05+00:00"}),
                 "",
+                json.dumps(list(REPORT_SECTION_FAILURE_SECTIONS), ensure_ascii=False),
             ),
         )
 
@@ -1293,6 +1297,8 @@ def test_guarded_report_detail_live_revoked_and_retained_states(repo):
             "error": "",
             "content_md": "# 共享库报告正文",
             "references": references,
+            # Raw text; the route discloses it to administrators only.
+            "section_errors": REPORT_SECTION_FAILURE_EXPECTED,
             "notebook_name": "NB-n2",
             "notebook_deleted_at": "",
             "retained_until": "",
@@ -1335,6 +1341,7 @@ def test_guarded_report_detail_live_revoked_and_retained_states(repo):
     assert retained["content_md"] == ""
     assert retained["references"] == []
     assert retained["error"] == ""
+    assert retained["section_errors"] == []
     assert "共享库报告正文" not in json.dumps(retained, ensure_ascii=False)
 
     with repo._write() as db:
