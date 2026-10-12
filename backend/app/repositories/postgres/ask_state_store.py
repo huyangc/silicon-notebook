@@ -735,7 +735,13 @@ class AskStateStore:
             # Global reasoning runs: the GLOBAL partition only (SQLite twin).
             # Both payload shapes, in ``global_answer_trace`` order: the
             # engine answer's ``reasoning_trace``, else the top-level ``trace``
-            # a legacy row carries (a finished engine row has it cleared).
+            # a legacy row carries. Equal to the Python projection on every
+            # row written, not on every conceivable payload: it relies on the
+            # writer clearing ``trace`` when it stores ``answer`` (65911c56),
+            # so a done engine row reads ``[]`` either way (see the note above
+            # ``global_answer_text`` in app/models/global_ask.py). Legacy rows
+            # carry mode ''/'chunk', so ``mode = 'reasoning'`` keeps them out
+            # today; this keeps the two readings from drifting all the same.
             global_rows = []
             if notebook_id is None:
                 global_rows = db.execute(

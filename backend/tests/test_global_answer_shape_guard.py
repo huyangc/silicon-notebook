@@ -10,8 +10,8 @@ rows written before the engine switch, with any streamed steps in the top-level
 ``_trace`` / ``_payload`` / ``global_citation_flagged``): engine answer first,
 legacy shape as the fallback. A reader that picks one shape on its own reads
 history differently from every other surface, and nothing raises -- the global
-reasoning sampler did exactly that (legacy rows contributed empty runs) until
-this guard registered it.
+reasoning sampler's SQL read the engine shape only until this guard registered
+it (no real legacy row is a reasoning run, so it had no visible effect yet).
 
 Two channels, both by AST (a comment or docstring never counts), both closed
 inventories keyed by NAME (``module path relative to backend/app`` ->
@@ -21,7 +21,10 @@ longer reads fails as stale, so each list stays exact.
 * SQL: every string literal under ``backend/app`` (plain, implicitly
   concatenated, or an f-string's literal parts) that names ``payload_json``
   and an answer path (``'$.answer…'`` / ``'$.response…'``,
-  ``->'answer'`` / ``->>'response'`` …). Each such site is registered as
+  ``->'answer'`` / ``->>'response'`` …) -- and, in a module that names the
+  ``global_ask_jobs`` table, every literal with an answer path at all, so a
+  column spliced in through a placeholder (``json_extract({col},'$.answer…')``)
+  fails as unparsed instead of passing unseen. Each site is registered as
 
   - ``BOTH``: checked per literal -- every engine path ``answer.<f>`` is
     followed, in the same literal, by its legacy counterpart (``response.<f>``;
@@ -32,34 +35,53 @@ longer reads fails as stale, so each list stays exact.
     reason written down.
 
   The unit is one literal, so a statement must keep ``payload_json`` and its
-  path together (every reader today does); a path behind an alias of the
-  column is outside what this channel sees.
+  path together (every reader today does). Outside a ``global_ask_jobs``
+  module, a path behind an alias or a spliced column name is not seen.
 
 * Python: in every module that works with global jobs (``_FIXED_SCOPE`` plus
-  every module importing one of ``_GLOBAL_MODULES``), every READ (``Load``
-  context only -- ``job.answer = …`` and the ``job.status, job.response,
-  job.answer = …`` clears in the service are writes) of ``.response``,
-  ``<…job>.answer``, ``getattr(x, "response"|"answer")``,
-  ``x.get("response"|"answer")`` or ``x["response"|"answer"]``. Outside
-  ``models/global_ask.py`` (the projections themselves) each reading function
-  is registered as ``BOTH`` (reads the engine shape and the legacy one --
-  checked), ``NEW_ONLY`` (engine shape only, no legacy read -- checked, reason
-  required), ``PROJECTED`` (reads a value a registered reader already resolved
-  from both shapes: an SQL projection's ``answer`` column, or the answer object
-  ``_public_turn_row`` chose; reason required) or ``NOT_GLOBAL`` (the object
-  read is not a global job: a notebook turn, a notebook answer payload; reason
-  required).
+  every module importing one of ``_GLOBAL_MODULES``, relative imports
+  resolved), every READ (``Load`` context only -- ``job.answer = …`` and the
+  ``job.status, job.response, job.answer = …`` clears in the service are
+  writes) of ``.response``, ``X.answer`` on a job receiver (a name ending in
+  ``job``, or a ``[…"job"]`` subscript), ``X.answer.<attr>`` for any ``attr``
+  a ``str`` does not have (``AskResponse.answer`` is text, so such an ``X`` is
+  a job), ``getattr(x, "response"|"answer")``, ``x.get("response"|"answer")``
+  or ``x["response"|"answer"]``. Outside ``models/global_ask.py`` (the
+  projections themselves) each reading function is registered with its exact
+  READ SIGNATURE -- the sorted ``shape: source`` of every read in it -- so a
+  read added to an already-registered function fails until the registration
+  is updated, and as
+
+  - ``BOTH``: reads the engine shape and the legacy one (checked);
+  - ``NEW_ONLY``: engine shape only, no legacy read (checked, reason required);
+  - ``PROJECTED``: reads a value a registered reader already resolved from both
+    shapes (an SQL projection's ``answer`` column, or the answer object
+    ``_public_turn_row`` chose; reason required);
+  - ``NOT_GLOBAL``: the object read is not a global job (a notebook turn or
+    answer payload; reason required).
+
+  A ``PROJECTED`` or ``NOT_GLOBAL`` site may not hold a job-shaped read (an
+  ``.answer``/``.response`` on a job receiver, a chained ``X.answer.<attr>``,
+  or a ``getattr`` on a job receiver): those are a global job by
+  construction, so the two reason-only kinds cannot be used to file one away.
+
+  Not covered: a ``getattr`` whose attribute name is computed, and a module
+  that handles global jobs without importing any global-ask module or naming
+  it in ``_FIXED_SCOPE``.
 
 A new reader therefore either goes through a projection or is registered
-here with its reason. The probes at the bottom pin each detector on synthetic
-code, positive and negative, and the floors keep a broken scanner from
-passing by finding nothing.
+here with its reason and read signature. The probes at the bottom pin each
+detector on synthetic code, positive and negative. The site floors stay
+although a broken scanner would already turn every registration stale: they
+also catch the registries themselves being emptied, at the price of being
+lowered when a reader is legitimately removed.
 """
 from __future__ import annotations
 
 import ast
 import functools
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -92,6 +114,7 @@ _SQL_READ = re.compile(
     r"(?:\s*->>?\s*'(?P<p_field>\w+)')?",
 )
 _LEGACY_COUNTERPART = {"reasoning_trace": ("trace", None)}
+_GLOBAL_TABLE = "global_ask_jobs"
 
 # Registered SQL readers: {module: {site: (kind, reason)}}.
 _SQL_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
@@ -143,57 +166,80 @@ _GLOBAL_MODULES = frozenset({
 _SCOPE_NEEDLES = ("global_ask", "global_citation_check")
 assert all(any(n in name for n in _SCOPE_NEEDLES) for name in _GLOBAL_MODULES)
 
-# Registered Python readers: {module: {site: (kind, reason)}}.
-_PY_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
+# Registered Python readers: {module: {site: (kind, reason, read signature)}}.
+# The signature is ``sorted(f"{shape}: {ast.unparse(read)}")`` over the site's
+# reads; the failure message prints the current one to paste after review.
+_PY_REGISTRY: dict[str, dict[str, tuple[str, str, tuple[str, ...]]]] = {
     "services/global_ask.py": {
         "_payload_notebook_ids": (
             BOTH, "stored payload dict: top-level list, else nested in answer, else "
-                  "in the legacy response"),
+                  "in the legacy response",
+            ("legacy: row.get('response')", "new: row.get('answer')")),
         "_turn_evidence_notebook_ids": (
-            BOTH, "share re-authorization: anchors and citations of either shape"),
+            BOTH, "share re-authorization: anchors and citations of either shape",
+            ("legacy: row.get('response')", "new: row.get('answer')")),
         "_public_turn_row": (
-            BOTH, "public share turn: the stored answer dict, else the legacy one"),
+            BOTH, "public share turn: the stored answer dict, else the legacy one",
+            ("legacy: payload.get('response')", "new: payload.get('answer')")),
         "GlobalAskService._history": (
             PROJECTED, "conversation history turns from ``completed_history`` (the SQL "
-                       "projection's ``answer`` column)"),
+                       "projection's ``answer`` column)",
+            ("new: turn['answer']",)),
     },
     "api/mcp_tools/global_ask.py": {
         "global_view": (
             BOTH, "fields the projections do not carry (answer_id/grounded/"
                   "completeness_notice) from either shape; ``answer_object`` is the "
-                  "engine object only, a legacy turn has none to hand over"),
+                  "engine object only, a legacy turn has none to hand over",
+            ("legacy: data.get('response')", "new: data.get('answer')",
+             "new: getattr(job, 'answer', None)")),
     },
     "services/global_citation_check.py": {
         "global_answer_check": (
             NEW_ONLY, "the terminal citation check only ever ran on engine answers; a "
-                      "legacy response row was never checked and keeps its stored text"),
+                      "legacy response row was never checked and keeps its stored text",
+            ("new: getattr(job, 'answer', None)", "new: payload.get('answer')")),
     },
     "repositories/global_ask_store.py": {
         "GlobalAskStore.completed_history": (
             PROJECTED, "the ``answer`` column of ``_history_projection`` (registered SQL, "
-                       "both shapes)"),
+                       "both shapes)",
+            ("new: row['answer']", "new: row['answer']")),
     },
     "services/conversation_public_view.py": {
         "_turn_body_and_references": (
             PROJECTED, "the text field of the answer object ``_public_turn_row`` already "
-                       "chose from either shape (both shapes carry ``answer``)"),
+                       "chose from either shape (both shapes carry ``answer``)",
+            ("new: row.get('answer')",)),
+    },
+    "api/mcp_tools/ask_pages.py": {
+        "answer_page": (
+            PROJECTED, "pages the normalised view ``global_view``/``notebook_view`` built, "
+                       "whose ``answer`` is already the projected text, and its own "
+                       "budgeted copy of that page",
+            ("new: packed.get('answer')", "new: view.get('answer')")),
     },
     "api/mcp_tools/ask.py": {
         "notebook_view": (
             NOT_GLOBAL, "a notebook ask's ``AskResponse`` text; global jobs go through "
-                        "``mcp_tools/global_ask.global_view``"),
+                        "``mcp_tools/global_ask.global_view``",
+            ("new: getattr(response, 'answer', '')",)),
     },
     "repositories/postgres/ask_state_store.py": {
         "AskStateStore.answer_memory_source": (
-            NOT_GLOBAL, "a notebook ``answers`` row payload"),
+            NOT_GLOBAL, "a notebook ``answers`` row payload",
+            ("new: payload.get('answer')",)),
         "AskStateStore.get_conversation": (
-            NOT_GLOBAL, "a notebook conversation turn (``AskTurn.response``)"),
+            NOT_GLOBAL, "a notebook conversation turn (``AskTurn.response``)",
+            ("legacy: turns[-1].response",)),
     },
     "repositories/sqlite/ask_state_store.py": {
         "AskStateStore.answer_memory_source": (
-            NOT_GLOBAL, "a notebook ``answers`` row payload"),
+            NOT_GLOBAL, "a notebook ``answers`` row payload",
+            ("new: payload.get('answer')",)),
         "AskStateStore.get_conversation": (
-            NOT_GLOBAL, "a notebook conversation turn (``AskTurn.response``)"),
+            NOT_GLOBAL, "a notebook conversation turn (``AskTurn.response``)",
+            ("legacy: turns[-1].response",)),
     },
 }
 _PY_SITE_FLOOR = 5
@@ -213,38 +259,40 @@ def _docstring_ids(tree: ast.AST) -> set[int]:
 
 
 def _with_sites(tree: ast.AST):
-    """Yield ``(site, node)`` for every node, ``site`` being the dotted chain of
-    enclosing classes/functions (``"<module>"`` at module level)."""
-    stack = [(child, "") for child in ast.iter_child_nodes(tree)]
+    """Yield ``(site, node, parent)`` for every node, ``site`` being the dotted
+    chain of enclosing classes/functions (``"<module>"`` at module level)."""
+    stack = [(child, "", tree) for child in ast.iter_child_nodes(tree)]
     while stack:
-        node, chain = stack.pop()
+        node, chain, parent = stack.pop()
         if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             chain = f"{chain}.{node.name}" if chain else node.name
-        yield chain or "<module>", node
-        stack.extend((child, chain) for child in ast.iter_child_nodes(node))
+        yield chain or "<module>", node, parent
+        stack.extend((child, chain, node) for child in ast.iter_child_nodes(node))
 
 
 def _string_literals(tree: ast.AST):
-    """``(site, text, line)`` for each string literal; an f-string is one literal
+    """``(site, text, node)`` for each string literal; an f-string is one literal
     with ``{}`` where its placeholders were."""
     skip = _docstring_ids(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.JoinedStr):
             skip.update(id(part) for part in node.values)
-    for site, node in _with_sites(tree):
+    for site, node, _parent in _with_sites(tree):
         if id(node) in skip:
             continue
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            yield site, node.value, node.lineno
+            yield site, node.value, node
         elif isinstance(node, ast.JoinedStr):
             text = "".join(
                 part.value if isinstance(part, ast.Constant) else "{}" for part in node.values
             )
-            yield site, text, node.lineno
+            yield site, text, node
 
 
-def is_answer_sql(text: str) -> bool:
-    return "payload_json" in text and bool(_ANSWER_PATH.search(text))
+def is_answer_sql(text: str, *, global_table_module: bool = False) -> bool:
+    if not _ANSWER_PATH.search(text):
+        return False
+    return global_table_module or "payload_json" in text
 
 
 def sql_reads(text: str) -> list[tuple[int, str, str | None]]:
@@ -293,12 +341,23 @@ def sql_problems(text: str, kind: str) -> list[str]:
     return problems
 
 
-def _imports_global_module(tree: ast.AST) -> bool:
+def _module_package(rel: str) -> list[str]:
+    parts = ["app", *rel[:-len(".py")].split("/")]
+    return parts[:-1]  # a module's package; ``pkg/__init__`` -> ``pkg``
+
+
+def _imports_global_module(tree: ast.AST, rel: str) -> bool:
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            if node.module in _GLOBAL_MODULES:
+        if isinstance(node, ast.ImportFrom):
+            if node.level:
+                package = _module_package(rel)
+                base = package[:len(package) - (node.level - 1)]
+                module = ".".join([*base, *([node.module] if node.module else [])])
+            else:
+                module = node.module or ""
+            if module in _GLOBAL_MODULES:
                 return True
-            if any(f"{node.module}.{alias.name}" in _GLOBAL_MODULES for alias in node.names):
+            if any(f"{module}.{alias.name}" in _GLOBAL_MODULES for alias in node.names):
                 return True
         elif isinstance(node, ast.Import):
             if any(alias.name in _GLOBAL_MODULES for alias in node.names):
@@ -306,46 +365,78 @@ def _imports_global_module(tree: ast.AST) -> bool:
     return False
 
 
-def _receiver_name(node: ast.AST) -> str:
+_STR_ATTRIBUTES = frozenset(dir(str))
+
+
+def _is_job_receiver(node: ast.AST) -> bool:
     if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        return node.attr
-    return ""
+        name = node.id
+    elif isinstance(node, ast.Attribute):
+        name = node.attr
+    elif isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) \
+            and isinstance(node.slice.value, str):
+        name = node.slice.value
+    else:
+        return False
+    return name.lower().endswith("job")
 
 
-def _shape_of_read(node: ast.AST) -> str | None:
-    """``"new"`` / ``"legacy"`` when ``node`` READS one answer shape, else ``None``."""
+@dataclass(frozen=True)
+class Read:
+    shape: str        # "new" | "legacy"
+    job_shaped: bool  # unambiguously a read on a global job
+    node: ast.AST
+
+    @property
+    def signature(self) -> str:
+        return f"{self.shape}: {ast.unparse(self.node)}"
+
+
+def _read_of(node: ast.AST, parent: ast.AST) -> Read | None:
+    """The answer-shape READ ``node`` is, or ``None``."""
     shapes = {"answer": "new", "response": "legacy"}
     if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
         if node.attr == "response":
-            return "legacy"
-        if node.attr == "answer" and _receiver_name(node.value).lower().endswith("job"):
-            return "new"
+            return Read("legacy", _is_job_receiver(node.value), node)
+        if node.attr == "answer":
+            if _is_job_receiver(node.value):
+                return Read("new", True, node)
+            chained = isinstance(parent, ast.Attribute) and parent.value is node
+            if chained and parent.attr not in _STR_ATTRIBUTES:
+                return Read("new", True, node)
     elif isinstance(node, ast.Call):
         func, args = node.func, node.args
-        key = args[1] if isinstance(func, ast.Name) and func.id == "getattr" and len(args) >= 2 \
-            else args[0] if isinstance(func, ast.Attribute) and func.attr == "get" and args \
-            else None
+        if isinstance(func, ast.Name) and func.id == "getattr" and len(args) >= 2:
+            key, job_shaped = args[1], _is_job_receiver(args[0])
+        elif isinstance(func, ast.Attribute) and func.attr == "get" and args:
+            key, job_shaped = args[0], False
+        else:
+            return None
         if isinstance(key, ast.Constant) and key.value in shapes:
-            return shapes[key.value]
+            return Read(shapes[key.value], job_shaped, node)
     elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
         if isinstance(node.slice, ast.Constant) and node.slice.value in shapes:
-            return shapes[node.slice.value]
+            return Read(shapes[node.slice.value], False, node)
     return None
 
 
-def python_reads(tree: ast.AST) -> dict[str, dict[str, list[int]]]:
-    """``{site: {"new"|"legacy": [lines]}}`` for every answer-shape read."""
-    found: dict[str, dict[str, list[int]]] = {}
-    for site, node in _with_sites(tree):
-        shape = _shape_of_read(node)
-        if shape:
-            found.setdefault(site, {}).setdefault(shape, []).append(node.lineno)
+def python_reads(tree: ast.AST) -> dict[str, list[Read]]:
+    """``{site: [Read, …]}`` for every answer-shape read."""
+    found: dict[str, list[Read]] = {}
+    for site, node, parent in _with_sites(tree):
+        read = _read_of(node, parent)
+        if read is not None:
+            found.setdefault(site, []).append(read)
     return found
 
 
-def python_problems(shapes: set[str], kind: str, reason: str) -> list[str]:
+def read_signature(reads: list[Read]) -> tuple[str, ...]:
+    return tuple(sorted(read.signature for read in reads))
+
+
+def python_problems(reads: list[Read], kind: str, reason: str,
+                    signature: tuple[str, ...]) -> list[str]:
+    shapes = {read.shape for read in reads}
     problems = [] if reason.strip() else ["registered without a reason"]
     if kind == BOTH:
         problems += [f"registered both but never reads the {name} shape"
@@ -356,8 +447,15 @@ def python_problems(shapes: set[str], kind: str, reason: str) -> list[str]:
         if "legacy" in shapes:
             problems.append("registered new-only but also reads the legacy shape: "
                             "register it as both")
-    elif kind not in (NOT_GLOBAL, PROJECTED):
+    elif kind in (NOT_GLOBAL, PROJECTED):
+        problems += [f"a {kind} site reads a global job directly: {read.signature}"
+                     for read in reads if read.job_shaped]
+    else:
         problems.append(f"unknown Python kind {kind!r}")
+    actual = read_signature(reads)
+    if actual != tuple(sorted(signature)):
+        problems.append(
+            f"its reads changed -- review each and re-register; now: {actual!r}")
     return problems
 
 
@@ -370,29 +468,31 @@ def _sources() -> tuple[tuple[str, str], ...]:
 
 
 @functools.cache
-def _modules(*needles: str, always: frozenset = frozenset()) -> tuple[tuple[str, ast.AST], ...]:
-    """Parsed modules whose source mentions one of ``needles`` (a module that
-    does not even spell the word cannot match the channel), plus ``always``;
-    the guard parses a few dozen files instead of all of ``backend/app``."""
+def _modules(*needles: str, always: frozenset = frozenset()) -> tuple[tuple[str, str, ast.AST], ...]:
+    """``(rel, source, tree)`` of the modules whose source mentions one of
+    ``needles`` (a module that does not even spell the word cannot match the
+    channel), plus ``always``; the guard parses a few dozen files, not all."""
     return tuple(
-        (rel, ast.parse(text)) for rel, text in _sources()
+        (rel, text, ast.parse(text)) for rel, text in _sources()
         if rel in always or any(needle in text for needle in needles)
     )
 
 
 def _sql_inventory():
-    sites: dict[tuple[str, str], list[tuple[str, int]]] = {}
-    for rel, tree in _modules("payload_json"):
-        for site, text, line in _string_literals(tree):
-            if is_answer_sql(text):
-                sites.setdefault((rel, site), []).append((text, line))
+    sites: dict[tuple[str, str], list[tuple[str, ast.AST]]] = {}
+    for rel, source, tree in _modules("payload_json", _GLOBAL_TABLE):
+        strict = _GLOBAL_TABLE in source
+        for site, text, node in _string_literals(tree):
+            if is_answer_sql(text, global_table_module=strict):
+                sites.setdefault((rel, site), []).append((text, node))
     return sites
 
 
 def _python_scope() -> dict[str, ast.AST]:
     return {
-        rel: tree for rel, tree in _modules(*_SCOPE_NEEDLES, always=_FIXED_SCOPE)
-        if rel != PROJECTION_MODULE and (rel in _FIXED_SCOPE or _imports_global_module(tree))
+        rel: tree for rel, _source, tree in _modules(*_SCOPE_NEEDLES, always=_FIXED_SCOPE)
+        if rel != PROJECTION_MODULE
+        and (rel in _FIXED_SCOPE or _imports_global_module(tree, rel))
     }
 
 
@@ -401,23 +501,24 @@ def _python_scope() -> dict[str, ast.AST]:
 def test_every_sql_reader_of_a_global_answer_path_is_registered_and_reads_as_registered():
     found = _sql_inventory()
     registered = {(rel, site) for rel, sites in _SQL_REGISTRY.items() for site in sites}
-    failures = []
+    violations = []
     for (rel, site), literals in sorted(found.items()):
         if (rel, site) not in registered:
-            failures.append(
-                f"{rel}:{literals[0][1]} {site}: reads a global answer path out of "
+            violations.append(
+                f"{rel}:{literals[0][1].lineno} {site}: reads a global answer path out of "
                 "payload_json -- read both shapes (engine path, then its legacy "
                 "fallback) and register it here, or register it new-only with a reason")
             continue
         kind, reason = _SQL_REGISTRY[rel][site]
         if not reason.strip():
-            failures.append(f"{rel} {site}: registered without a reason")
-        for text, line in literals:
-            failures += [f"{rel}:{line} {site}: {problem}" for problem in sql_problems(text, kind)]
-    failures += [f"{rel} {site}: registered but no longer reads an answer path (stale)"
-                 for rel, site in sorted(registered - set(found))]
-    assert not failures, "\n".join(failures)
-    # Floor: a scanner that silently stopped matching would pass with nothing.
+            violations.append(f"{rel} {site}: registered without a reason")
+        for text, node in literals:
+            violations.extend(f"{rel}:{node.lineno} {site}: {problem}"
+                              for problem in sql_problems(text, kind))
+    violations.extend(f"{rel} {site}: registered but no longer reads an answer path (stale)"
+                      for rel, site in sorted(registered - set(found)))
+    assert not violations, "\n".join(violations)
+    # Floor: an emptied registry plus a scanner that matches nothing would pass.
     assert len(found) >= _SQL_SITE_FLOOR
 
 
@@ -428,21 +529,20 @@ def test_every_python_reader_of_a_global_answer_shape_goes_through_the_projectio
     found = {(rel, site): reads for rel, tree in scope.items()
              for site, reads in python_reads(tree).items()}
     registered = {(rel, site) for rel, sites in _PY_REGISTRY.items() for site in sites}
-    failures = []
+    violations = []
     for (rel, site), reads in sorted(found.items()):
-        lines = sorted(line for per_shape in reads.values() for line in per_shape)
         if (rel, site) not in registered:
-            failures.append(
-                f"{rel}:{lines[0]} {site}: reads a global job's answer/response directly -- "
-                "use a global_answer_* projection (app/models/global_ask.py) or register "
-                "it here with its reason")
+            violations.append(
+                f"{rel}:{reads[0].node.lineno} {site}: reads a global job's answer/response "
+                "directly -- use a global_answer_* projection (app/models/global_ask.py) or "
+                f"register it here with its reason; reads: {read_signature(reads)!r}")
             continue
-        kind, reason = _PY_REGISTRY[rel][site]
-        failures += [f"{rel}:{lines[0]} {site}: {problem}"
-                     for problem in python_problems(set(reads), kind, reason)]
-    failures += [f"{rel} {site}: registered but no longer reads an answer shape (stale)"
-                 for rel, site in sorted(registered - set(found))]
-    assert not failures, "\n".join(failures)
+        kind, reason, signature = _PY_REGISTRY[rel][site]
+        violations.extend(f"{rel}:{reads[0].node.lineno} {site}: {problem}"
+                          for problem in python_problems(reads, kind, reason, signature))
+    violations.extend(f"{rel} {site}: registered but no longer reads an answer shape (stale)"
+                      for rel, site in sorted(registered - set(found)))
+    assert not violations, "\n".join(violations)
     assert len(found) >= _PY_SITE_FLOOR
     assert len(scope) >= len(_FIXED_SCOPE)
 
@@ -455,13 +555,25 @@ def test_the_projection_module_is_seen_reading_both_shapes():
     reads = python_reads(tree)
     for projection in ("global_answer_text", "global_answer_citations", "global_answer_payload",
                        "global_citation_flagged"):
-        assert set(reads.get(projection, {})) == {"new", "legacy"}, projection
+        assert {read.shape for read in reads.get(projection, [])} == {"new", "legacy"}, projection
+
+
+def test_relative_importers_of_global_modules_are_in_scope():
+    """Real-code probe for the relative-import resolution: these two MCP modules
+    reach the global tools only through ``from .global_ask import …``."""
+    scope = _python_scope()
+    assert {"api/mcp_tools/ask_pages.py", "api/mcp_tools/citations.py"} <= set(scope)
 
 
 # -- probes --------------------------------------------------------------------
 
 def _py(source: str) -> dict[str, set[str]]:
-    return {site: set(reads) for site, reads in python_reads(ast.parse(source)).items()}
+    return {site: {read.shape for read in reads}
+            for site, reads in python_reads(ast.parse(source)).items()}
+
+
+def _site_reads(source: str, site: str = "f") -> list[Read]:
+    return python_reads(ast.parse(source))[site]
 
 
 def test_python_probe_writes_are_not_reads():
@@ -487,20 +599,91 @@ def test_python_probe_each_read_form_is_seen():
         "f.g": {"legacy"}}
 
 
-def test_python_probe_non_reads_stay_quiet():
-    # ``.answer`` on something that is not a job (an AskResponse's own text).
+def test_python_probe_job_receivers_beyond_the_name():
+    """V3/V5: the receiver is a ``["job"]`` subscript, or any receiver whose
+    ``.answer`` is used as an object (``AskResponse.answer`` is text)."""
+    reads = _site_reads("def f(record):\n    return record['job'].answer.answered_at\n")
+    assert [(read.shape, read.job_shaped) for read in reads] == [("new", True)]
+    reads = _site_reads("def f(record):\n    entry = record['job']\n"
+                        "    return entry.answer.model_dump()\n")
+    assert [(read.shape, read.job_shaped) for read in reads] == [("new", True)]
+    # a string method on the answer TEXT is not a job read
+    assert _py("def f(response):\n    return response.answer.strip()\n") == {}
     assert _py("def f(answer):\n    return answer.answer\n") == {}
+
+
+def test_python_probe_non_reads_stay_quiet():
     assert _py("def f(p):\n    return p.get('question'), p['citations']\n") == {}
     assert _py("def f(p):\n    p['answer'] = 1\n") == {}
 
 
 def test_python_probe_registration_kinds_are_checked():
-    assert python_problems({"new", "legacy"}, BOTH, "r") == []
-    assert python_problems({"new"}, BOTH, "r") == ["registered both but never reads the legacy shape"]
-    assert python_problems({"new"}, NEW_ONLY, "r") == []
-    assert python_problems({"new", "legacy"}, NEW_ONLY, "r")
-    assert python_problems({"legacy"}, NOT_GLOBAL, "r") == []
-    assert python_problems({"legacy"}, NOT_GLOBAL, " ") == ["registered without a reason"]
+    both = _site_reads("def f(p):\n    return p.get('answer') or p.get('response')\n")
+    both_sig = read_signature(both)
+    assert python_problems(both, BOTH, "r", both_sig) == []
+    new = _site_reads("def f(p):\n    return p.get('answer')\n")
+    new_sig = read_signature(new)
+    assert python_problems(new, BOTH, "r", new_sig) == [
+        "registered both but never reads the legacy shape"]
+    assert python_problems(new, NEW_ONLY, "r", new_sig) == []
+    assert python_problems(both, NEW_ONLY, "r", both_sig)
+    legacy = _site_reads("def f(turn):\n    return turn.response\n")
+    assert python_problems(legacy, NOT_GLOBAL, "r", read_signature(legacy)) == []
+    assert python_problems(legacy, NOT_GLOBAL, " ", read_signature(legacy)) == [
+        "registered without a reason"]
+
+
+def test_python_probe_reason_only_kinds_refuse_a_job_read():
+    reads = _site_reads("def f(turns, job):\n    return turns[0]['answer'], job.answer\n")
+    for kind in (PROJECTED, NOT_GLOBAL):
+        problems = python_problems(reads, kind, "r", read_signature(reads))
+        assert problems == [f"a {kind} site reads a global job directly: new: job.answer"]
+    reads = _site_reads("def f(job):\n    return getattr(job, 'response', None)\n")
+    assert python_problems(reads, NOT_GLOBAL, "r", read_signature(reads))
+    # ``getattr`` on a notebook response is not job-shaped
+    reads = _site_reads("def f(response):\n    return getattr(response, 'answer', '')\n")
+    assert python_problems(reads, NOT_GLOBAL, "r", read_signature(reads)) == []
+
+
+def test_python_probe_a_read_added_to_a_registered_site_fails():
+    """V1/V2: moving a one-shape read into an already-registered function no
+    longer hides it -- the registered read signature no longer matches."""
+    registered = read_signature(_site_reads(
+        "def f(row):\n    return row.get('answer'), row.get('response')\n"))
+    grown = _site_reads(
+        "def f(row):\n    trace = (row.get('answer') or {}).get('reasoning_trace')\n"
+        "    return row.get('answer'), row.get('response'), trace\n")
+    problems = python_problems(grown, BOTH, "r", registered)
+    assert len(problems) == 1 and problems[0].startswith("its reads changed")
+    history = read_signature(_site_reads("def f(turn):\n    return turn['answer']\n"))
+    grown = _site_reads("def f(turn, last_job):\n"
+                        "    return turn['answer'], last_job.answer.answer\n")
+    problems = python_problems(grown, PROJECTED, "r", history)
+    assert problems == [
+        "a projected site reads a global job directly: new: last_job.answer",
+        "its reads changed -- review each and re-register; now: "
+        + repr(("new: last_job.answer", "new: turn['answer']")),
+    ]
+
+
+def test_python_probe_relative_imports_are_resolved():
+    """V11: ``from .global_ask import x`` / ``from . import global_ask`` /
+    ``from ...services import global_ask`` reach a global module."""
+    def imports(source, rel="api/mcp_tools/citations.py"):
+        return _imports_global_module(ast.parse(source), rel)
+
+    assert imports("from .global_ask import global_view\n")
+    assert imports("from . import global_ask\n")
+    assert imports("from ...services import global_ask\n")
+    assert imports("from ...models.global_ask import GlobalAskJob\n")
+    assert not imports("from ._shared import RESULT_LIMIT\n")
+    assert not imports("from ...services import ask_service\n")
+    # ``..`` from api/mcp_tools is app.api: app.api.services is not a global module
+    assert not imports("from ..services import global_ask\n")
+    # a package's ``__init__`` resolves against the package itself
+    assert imports("from .global_ask import x\n", rel="api/mcp_tools/__init__.py")
+    assert not imports("from .global_ask import x\n", rel="api/__init__.py")
+    assert imports("from .mcp_tools.global_ask import x\n", rel="api/__init__.py")
 
 
 def test_sql_probe_detection():
@@ -509,8 +692,13 @@ def test_sql_probe_detection():
     assert is_answer_sql("SELECT payload_json::jsonb #>> '{answer,answer}' FROM t")
     assert not is_answer_sql("SELECT json_extract(payload_json,'$.question') FROM t")
     assert not is_answer_sql("SELECT payload_json::jsonb->'trace' FROM t")
-    # an answer path on another column is not this guard's business
+    # an answer path on another column is not this guard's business ...
     assert not is_answer_sql("SELECT json_extract(sections_json,'$.answer') FROM t")
+    # ... unless the module queries global_ask_jobs: a spliced column (V8) is
+    # then seen, and fails as unparsed.
+    spliced = "SELECT json_extract({},'$.answer.answer') FROM global_ask_jobs"
+    assert is_answer_sql(spliced, global_table_module=True)
+    assert sql_problems(spliced, BOTH) and sql_problems(spliced, NEW_ONLY)
 
 
 def test_sql_probe_both_requires_the_legacy_fallback_after_the_engine_path():
@@ -556,5 +744,5 @@ def test_sql_probe_literals_are_collected_from_code_not_docstrings():
         '    return db.execute(f"SELECT json_extract(payload_json,\'$.answer.answer\') '
         'FROM {db}")\n'
     )
-    literals = [(site, text) for site, text, _line in _string_literals(tree) if is_answer_sql(text)]
+    literals = [(site, text) for site, text, _node in _string_literals(tree) if is_answer_sql(text)]
     assert literals == [("f", "SELECT json_extract(payload_json,'$.answer.answer') FROM {}")]
