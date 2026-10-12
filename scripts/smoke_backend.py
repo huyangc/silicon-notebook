@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
+import sys
 import tempfile
+import threading
 import time
 import zipfile
 from contextlib import contextmanager
@@ -72,12 +75,63 @@ def _drain_background_work(timeout: float = _SCRATCH_DRAIN_SECONDS) -> None:
 
 @contextmanager
 def _scratch_dir(prefix: str) -> Iterator[str]:
-    """A temporary directory that is removed only after background work drains."""
+    """A temporary directory that is removed only after background work drains.
+
+    When the check itself failed, its exception is the one that propagates: a
+    drain failure on that path is only reported, never allowed to replace it.
+    """
     with tempfile.TemporaryDirectory(prefix=prefix) as path:
         try:
             yield path
-        finally:
-            _drain_background_work()
+        except Exception:
+            try:
+                _drain_background_work()
+            except Exception as drain_error:  # noqa: BLE001 — the check's failure wins
+                print(
+                    f"[smoke] background drain after a failed check also failed: "
+                    f"{drain_error!r}",
+                    file=sys.stderr,
+                )
+            raise
+        _drain_background_work()
+
+
+@contextmanager
+def _background_errors_forbidden() -> Iterator[None]:
+    """Fail the smoke when work off the main thread logs an error.
+
+    Background jobs catch and log their own exceptions, so a job still running
+    after its check's scratch directory was removed only shows up as an
+    ``ERROR`` record (``sqlite3.OperationalError: unable to open database
+    file``) and the smoke would otherwise exit 0.  This is what makes losing
+    the drain in ``_scratch_dir`` visible.  Every check is single-threaded, so
+    an error record from any other thread is background work going wrong.
+    The record factory only observes; handlers and output are unchanged.
+    """
+    previous_factory = logging.getLogRecordFactory()
+    errors: list[str] = []
+    errors_lock = threading.Lock()
+
+    def observing_factory(*args, **kwargs):
+        record = previous_factory(*args, **kwargs)
+        thread = threading.current_thread()
+        if record.levelno >= logging.ERROR and thread is not threading.main_thread():
+            try:
+                message = record.getMessage()
+            except Exception:  # noqa: BLE001 — observation must not raise
+                message = str(record.msg)
+            with errors_lock:
+                errors.append(f"[{thread.name}] {record.name}: {message}")
+        return record
+
+    logging.setLogRecordFactory(observing_factory)
+    try:
+        yield
+    finally:
+        logging.setLogRecordFactory(previous_factory)
+    assert not errors, (
+        f"background work logged {len(errors)} error(s) during the smoke: {errors}"
+    )
 
 
 def _offline_settings(root: Path, *, event_log_dir: Path | None = None) -> Settings:
@@ -1310,4 +1364,5 @@ def _pdf_bytes() -> bytes:
 
 
 if __name__ == "__main__":
-    main()
+    with _background_errors_forbidden():
+        main()
