@@ -1649,6 +1649,27 @@ def test_public_report_read_carries_failed_sections_only_for_a_failure_note(
     plain = store.public_report_by_token(store.share_report(nb["id"], without_note))
     # No failure note in the body: the failed sections are never read.
     assert plain["failed_sections"] is None
+    # Only neutral notes -- every report generated since K5: not read either.
+    neutral_only = _mk_report(client, monkeypatch, nb["id"], "q3")
+    store.update_report(
+        nb["id"], neutral_only, status="done", sections=sections,
+        content_md="## A\n\n（本节生成失败:本节处理过程出错）\n\n## B\n\n正文\n",
+    )
+    assert store.public_report_by_token(
+        store.share_report(nb["id"], neutral_only)
+    )["failed_sections"] is None
+    # A raw note next to a neutral one: read.
+    mixed = _mk_report(client, monkeypatch, nb["id"], "q4")
+    store.update_report(
+        nb["id"], mixed, status="done", sections=sections,
+        content_md=(
+            "## A\n\n（本节生成失败:本节处理过程出错）\n\n"
+            "## B\n\n（本节生成失败:OperationalError: 10.9.8.7）\n"
+        ),
+    )
+    assert store.public_report_by_token(
+        store.share_report(nb["id"], mixed)
+    )["failed_sections"] == REPORT_SECTION_FAILURE_EXPECTED
 
 
 def test_public_report_route_is_not_behind_the_router_level_session_guard():

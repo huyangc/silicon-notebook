@@ -19,6 +19,7 @@ from typing import Callable, Iterator
 
 from app.core.capability_tokens import new_capability_token
 from app.domain.report_export import ReportExportSource
+from app.domain.report_failure_note import carries_raw_failure_note
 from app.domain.share_disclosure import (
     REPORT_MEMORY_USED_FIELD,
     REPORT_PLANNING_MEMORY_KEY,
@@ -59,9 +60,8 @@ _FAILED_SECTIONS_SQL = (
     "WHERE s.type='object' AND json_type(s.value, '$.failed')='true' "
     "ORDER BY s.key) AS f)"
 )
-# Same gate as the PostgreSQL adapter: only a body carrying a failure note
-# makes the public read select the failed sections, checked in Python.
-_FAILURE_NOTE_PREFIX = "（本节生成失败:"
+# Same gate as the PostgreSQL adapter: only a body carrying a raw (not
+# neutral) failure note makes the public read select the failed sections.
 
 
 class ReportStore:
@@ -294,12 +294,16 @@ class ReportStore:
         fence; a deleted notebook falls back to the content-minimal retained
         summary, which only an administrator (``reader_id is None``) may read.
         """
+        section_errors_sql = _FAILED_SECTIONS_SQL if reader_id is None else "'[]'"
         with self.database.write(operation="admin.report_detail") as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT id,notebook_id,question,depth,status,error,content_md,"
                 "references_json,understanding_json,created_at,updated_at,"
-                f"{_FAILED_SECTIONS_SQL} AS section_errors "
+                # Only an administrator's read discloses these
+                # (``admin_routes._discloses_failure_text`` decides); a
+                # self-service read skips parsing the sections inside the fence.
+                f"{section_errors_sql} AS section_errors "
                 "FROM reports WHERE id=? AND created_by=?",
                 (report_id, actor_id),
             ).fetchone()
@@ -495,7 +499,8 @@ class ReportStore:
         caller's live authorization check.  They are NOT part of the disclosure
         surface — ``public_report_payload`` names neither.  Nor is
         ``failed_sections``: the failed sections' raw errors, selected only
-        when the body carries a failure note, which the caller pops to rewrite
+        when the body carries a raw (not neutral) failure note, which the
+        caller pops to rewrite
         such notes neutrally.
         """
         clean = str(token or "").strip()
@@ -515,7 +520,7 @@ class ReportStore:
                     (row["id"],),
                 ).fetchone()
                 if row is not None
-                and _FAILURE_NOTE_PREFIX in str(row["content_md"] or "")
+                and carries_raw_failure_note(str(row["content_md"] or ""))
                 else None
             )
         if row is None:
@@ -525,8 +530,8 @@ class ReportStore:
         # returns jsonb as a list already, SQLite stores TEXT.
         out["references"] = json.loads(out.pop("references_json", None) or "[]")
         out.pop("understanding_json", None)
-        # ``None``: the body carries no failure note, so there is nothing to
-        # rewrite and the caller can skip scanning it again.
+        # ``None``: the body carries no raw failure note, so there is nothing
+        # to rewrite and the caller can skip scanning it again.
         out["failed_sections"] = (
             json.loads(failed["failed_sections"] or "[]") if failed is not None else None
         )

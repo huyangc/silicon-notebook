@@ -1043,8 +1043,9 @@ class ReportRepository(Protocol):
     # authorization. It must never consult the current-user ContextVar, which
     # falls back to the seeded admin when unset. Its row also carries
     # `failed_sections` (the failed sections' raw `{index, title, error}`, read
-    # only when the body carries a failure note) for the caller to pop and use
-    # in rewriting stored failure notes neutrally; never part of the payload.
+    # only when the body carries a raw, not neutral, failure note; else None)
+    # for the caller to pop and use in rewriting stored failure notes
+    # neutrally; never part of the payload.
     # `memory_guard` (M4): re-count the author's Memory on the page inside the
     # transaction that sets the token; a changed count raises
     # `ShareDisclosureRequired` and writes nothing.

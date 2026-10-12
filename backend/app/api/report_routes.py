@@ -789,7 +789,7 @@ def public_report_route(token: str, response: Response) -> PublicReport:
         raise HTTPException(status_code=404, detail="shared report not found")
     # Raw failure text, read only to rewrite a stored failure note neutrally:
     # out of the row before anything else sees it, never into the payload.
-    # ``None`` means the store found no failure note in the body at all.
+    # ``None`` means the store found no raw failure note in the body.
     failed_sections = row.pop("failed_sections", None)
     failed_errors = None if failed_sections is None else [
         item["error"] for item in failed_section_errors(failed_sections)

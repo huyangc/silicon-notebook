@@ -1264,6 +1264,31 @@ def test_deleted_notebook_keeps_only_expiring_activity_metadata(repo):
         assert db.execute("SELECT COUNT(*) FROM retained_user_activity").fetchone()[0] == 0
 
 
+def test_guarded_report_detail_runs_the_failed_sections_select_for_admins_only(
+    repo, monkeypatch,
+):
+    """The failed-sections subquery is spliced into the statement only on the
+    administrator's read (``reader_id is None``); a self-service read selects
+    a constant instead. The route still decides disclosure -- this only saves
+    parsing ``sections_json`` inside the write fence."""
+    from app.repositories.sqlite import report_store
+
+    _seed_report_scope_rows(repo)
+    sentinel = [{"index": 9, "title": "sentinel", "error": "subquery ran"}]
+    monkeypatch.setattr(
+        report_store, "_FAILED_SECTIONS_SQL",
+        "'" + json.dumps(sentinel, ensure_ascii=False) + "'",
+    )
+    with repo.guarded_report_detail(
+        "rep-shared", actor_id="u1", reader_id="u1"
+    ) as snapshot:
+        assert snapshot["section_errors"] == []
+    with repo.guarded_report_detail(
+        "rep-shared", actor_id="u1", reader_id=None
+    ) as snapshot:
+        assert snapshot["section_errors"] == sentinel
+
+
 def test_guarded_report_detail_live_revoked_and_retained_states(repo):
     """报告只读详情的三态:存活投影正文、自助失权 fail closed、删除后仅管理员读留存。"""
     references = [{"index": 1, "source_id": "src-x", "title": "引用一"}]
@@ -1297,8 +1322,9 @@ def test_guarded_report_detail_live_revoked_and_retained_states(repo):
             "error": "",
             "content_md": "# 共享库报告正文",
             "references": references,
-            # Raw text; the route discloses it to administrators only.
-            "section_errors": REPORT_SECTION_FAILURE_EXPECTED,
+            # A self-service read never parses the sections (the route would
+            # discard them); the administrator's read below gets them.
+            "section_errors": [],
             "notebook_name": "NB-n2",
             "notebook_deleted_at": "",
             "retained_until": "",
@@ -1322,6 +1348,8 @@ def test_guarded_report_detail_live_revoked_and_retained_states(repo):
         "rep-shared", actor_id="u1", reader_id=None
     ) as snapshot:
         assert snapshot["content_md"] == "# 共享库报告正文"
+        # Raw text; the route discloses it to administrators only.
+        assert snapshot["section_errors"] == REPORT_SECTION_FAILURE_EXPECTED
 
     repo._runtime.notebook_store.delete_row_and_orphan_embeddings("n2")
     with pytest.raises(KeyError):

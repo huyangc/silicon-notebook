@@ -12,6 +12,7 @@ from app.repositories.postgres._store_utils import (
 )
 from app.core.capability_tokens import new_capability_token
 from app.domain.report_export import ReportExportSource
+from app.domain.report_failure_note import carries_raw_failure_note
 from app.domain.share_disclosure import (
     REPORT_MEMORY_USED_FIELD,
     REPORT_PLANNING_MEMORY_KEY,
@@ -54,12 +55,11 @@ _FAILED_SECTIONS_SQL = (
     "WHERE jsonb_typeof(s.value)='object' "
     "AND s.value->'failed' = 'true'::jsonb)"
 )
-# The public read needs that list only to rewrite a stored failure note, and a
-# body has such a note exactly when it carries this prefix.  The check runs in
-# Python on the body already fetched (measured cheaper than ``strpos`` in the
-# statement), so every other report reads exactly the statement it always did
-# and ``sections_json`` is never touched for it.
-_FAILURE_NOTE_PREFIX = "（本节生成失败:"
+# The public read needs that list only to rewrite a stored failure note that
+# still carries raw text (``carries_raw_failure_note``, checked in Python on
+# the body already fetched).  A body without a failure note, or with only the
+# neutral notes the generator writes today, reads exactly the statement it
+# always did and ``sections_json`` is never touched for it.
 
 
 class ReportStore:
@@ -306,6 +306,9 @@ class ReportStore:
         content-minimal retained summary, which only an administrator
         (``reader_id is None``) may read.
         """
+        section_errors_sql = (
+            _FAILED_SECTIONS_SQL if reader_id is None else "'[]'::jsonb"
+        )
         with self.database.write() as db:
             row = db.execute(
                 "SELECT notebook_id FROM reports WHERE id=%s AND created_by=%s",
@@ -328,7 +331,10 @@ class ReportStore:
                     row = db.execute(
                         "SELECT id,notebook_id,question,depth,status,error,"
                         "content_md,references_json,understanding_json,"
-                        f"created_at,updated_at,{_FAILED_SECTIONS_SQL} "
+                        # Only an administrator's read discloses these
+                        # (``admin_routes._discloses_failure_text`` decides);
+                        # a self-service read skips parsing the sections.
+                        f"created_at,updated_at,{section_errors_sql} "
                         "AS section_errors FROM reports "
                         "WHERE id=%s AND notebook_id=%s AND created_by=%s FOR SHARE",
                         (report_id, notebook_id, actor_id),
@@ -510,7 +516,7 @@ class ReportStore:
         Also returns ``GATE_FIELDS`` for the caller's live authorization check;
         they are not part of the disclosure surface.  So is ``failed_sections``
         (the failed sections' raw errors, read only when the body carries a
-        failure note): the caller pops it to rewrite such notes neutrally.
+        raw, not neutral, failure note): the caller pops it to rewrite such notes neutrally.
         """
         clean = str(token or "").strip()
         if not clean:
@@ -529,7 +535,7 @@ class ReportStore:
                     (row["id"],),
                 ).fetchone()
                 if row is not None
-                and _FAILURE_NOTE_PREFIX in str(row["content_md"] or "")
+                and carries_raw_failure_note(str(row["content_md"] or ""))
                 else None
             )
         if row is None:
@@ -538,8 +544,8 @@ class ReportStore:
         # Same shape as the SQLite adapter: the caller never sees the dialect.
         out["references"] = json_value(out.pop("references_json", None), [])
         out.pop("understanding_json", None)
-        # ``None``: the body carries no failure note, so there is nothing to
-        # rewrite and the caller can skip scanning it again.
+        # ``None``: the body carries no raw failure note, so there is nothing
+        # to rewrite and the caller can skip scanning it again.
         out["failed_sections"] = (
             json_value(failed["failed_sections"], []) if failed is not None else None
         )
