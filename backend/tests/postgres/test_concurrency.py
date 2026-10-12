@@ -5,7 +5,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,6 +24,7 @@ from app.repositories.postgres.notebook_store import NotebookStore
 from app.repositories.postgres.query_store import QueryStore
 from app.repositories.postgres.source_store import SourceStore
 from app.services.repository_runtime import RepositoryCompatibilitySeams
+from tests.clock_testkit import recent_instant
 
 
 def _wait_for_lock_wait(postgres_database, needle: str, future) -> None:
@@ -54,17 +54,6 @@ def _wait_for_lock_wait(postgres_database, needle: str, future) -> None:
                 return
             time.sleep(0.01)
     raise AssertionError(f"operation never waited for {needle!r}")
-
-
-def _recent_instant() -> str:
-    """A deletion clock whose retained rows are still unexpired today.
-
-    Retained activity expires 180 days after the injected deletion instant and
-    the readers filter ``expires_at > CURRENT_TIMESTAMP`` (no seam).  A literal
-    ``2026-08-31T12:00Z`` would empty those reads from 2027-02-27T12:00Z on.
-    """
-    instant = datetime.now(timezone.utc).replace(microsecond=0)
-    return (instant - timedelta(hours=1)).isoformat()
 
 
 @pytest.mark.postgres_integration
@@ -150,7 +139,7 @@ def test_activity_delete_race_prefers_retained_lifecycle_postgres(
     postgres_database, postgres_settings, monkeypatch
 ):
     assert PostgresMigrator(postgres_database).migrate() == 73
-    now = _recent_instant()
+    now = recent_instant(hours=1)  # deletion clock: see tests.clock_testkit
     with postgres_database.write() as connection:
         connection.execute(
             "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
@@ -230,7 +219,7 @@ def test_live_ask_detail_delete_race_fails_closed_postgres(
     postgres_database, monkeypatch
 ):
     assert PostgresMigrator(postgres_database).migrate() == 73
-    now = _recent_instant()
+    now = recent_instant(hours=1)  # deletion clock: see tests.clock_testkit
     with postgres_database.write() as connection:
         connection.execute(
             "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
@@ -319,7 +308,7 @@ def test_guarded_ask_detail_holds_root_lease_through_projection_postgres(
     postgres_database,
 ):
     assert PostgresMigrator(postgres_database).migrate() == 73
-    now = _recent_instant()
+    now = recent_instant(hours=1)  # deletion clock: see tests.clock_testkit
     with postgres_database.write() as connection:
         connection.execute(
             "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
@@ -491,7 +480,7 @@ def _guard_report_fixture(postgres_database, *, prefix: str, reader: bool):
     whose ``current_user_id`` is the report creator."""
     from app.repositories.postgres.report_store import ReportStore
 
-    now = _recent_instant()
+    now = recent_instant(hours=1)  # deletion clock: see tests.clock_testkit
     owner = f"{prefix}-owner"
     creator = f"{prefix}-reader" if reader else owner
     with postgres_database.write() as connection:
@@ -891,7 +880,7 @@ def test_final_answer_and_notebook_delete_share_root_first_lock_order(
     postgres_database, monkeypatch
 ):
     assert PostgresMigrator(postgres_database).migrate() == 73
-    now = _recent_instant()
+    now = recent_instant(hours=1)  # deletion clock: see tests.clock_testkit
     with postgres_database.write() as connection:
         connection.execute(
             "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "

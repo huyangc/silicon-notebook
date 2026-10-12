@@ -10,7 +10,7 @@ postgres_integration`` (see backend/tests/postgres/conftest.py).
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 
@@ -32,6 +32,7 @@ from tests.activity_parity_cases import (
     REPORT_SECTION_FAILURE_EXPECTED,
     REPORT_SECTION_FAILURE_SECTIONS,
 )
+from tests.clock_testkit import recent_datetime
 
 
 pytestmark = pytest.mark.postgres_integration
@@ -1501,9 +1502,8 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry_postgres(
     # Deletion clocks stay relative to the real one: readers filter
     # ``expires_at > CURRENT_TIMESTAMP`` (no seam), so a literal older snapshot
     # silently stops testing the live-aggregate hiding once it expires.
-    real_now = datetime.now(timezone.utc).replace(microsecond=0)
-    old_deletion = real_now - timedelta(days=30)
-    actual_deletion = real_now - timedelta(hours=1)
+    old_deletion = recent_datetime(days=30)
+    actual_deletion = recent_datetime(hours=1)
     with postgres_database.write() as connection:
         _insert_user(connection, "u-refresh")
         _insert_notebook(connection, "n-refresh", "u-refresh")

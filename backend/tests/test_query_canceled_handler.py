@@ -8,12 +8,13 @@ duplicated here (see ``tests/postgres/test_knowledge_store_conformance.py``'s
 chunk-FTS-timeout coverage)."""
 from __future__ import annotations
 
-import gzip
 import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 from psycopg.errors import QueryCanceled
+
+from tests.clock_testkit import FROZEN_DAY, FrozenDatetime
 
 
 def _client(tmp_path: Path, monkeypatch, *, log_dir: Path) -> TestClient:
@@ -23,6 +24,11 @@ def _client(tmp_path: Path, monkeypatch, *, log_dir: Path) -> TestClient:
     monkeypatch.setenv("EVENT_LOG_ENABLED", "true")
     monkeypatch.setenv("EVENT_LOG_DIR", str(log_dir))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    # The request log is a per-day file named from event_logging's own clock;
+    # pin it so the read below cannot land on the other side of midnight.
+    import app.core.event_logging as event_logging_module
+
+    monkeypatch.setattr(event_logging_module, "datetime", FrozenDatetime)
 
     from app.api import deps
     from app.core.config import get_settings
@@ -46,20 +52,12 @@ def _notebook(client: TestClient, headers: dict[str, str], name: str) -> str:
 
 
 def _request_events(log_dir: Path) -> list[dict]:
-    # Every per-day file, not just "today's": a request logged just before
-    # midnight is read just after it, and a later write that crosses the day
-    # boundary gzips the previous day's file.
-    texts = [
-        gzip.decompress(path.read_bytes()).decode("utf-8")
-        for path in sorted(log_dir.glob("requests-*.jsonl.gz"))
-    ] + [
-        path.read_text(encoding="utf-8")
-        for path in sorted(log_dir.glob("requests-*.jsonl"))
-    ]
+    path = log_dir / f"requests-{FROZEN_DAY}.jsonl"
+    if not path.exists():
+        return []
     return [
         json.loads(line)
-        for text in texts
-        for line in text.splitlines()
+        for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
 

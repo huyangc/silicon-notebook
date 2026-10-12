@@ -246,9 +246,12 @@ def test_promotion_rejection_reason_equals_the_write_side_constant():
     proposals with the same reason."""
     from app.domain.memory_kg_isolation import MEMORY_PROMOTION_REJECTED_REASON
 
-    constant = MEMORY_PROMOTION_REJECTED_REASON
-    assert sqlite_migrations._V87_PROMOTION_REJECTED_REASON == constant
-    assert f"reason = '{constant}'" in PG_MIGRATION.read_text(encoding="utf-8")
+    assert sqlite_migrations._V87_PROMOTION_REJECTED_REASON == (
+        MEMORY_PROMOTION_REJECTED_REASON
+    )
+    assert f"reason = '{MEMORY_PROMOTION_REJECTED_REASON}'" in PG_MIGRATION.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_open_promotion_statuses_are_the_curator_queue_statuses():

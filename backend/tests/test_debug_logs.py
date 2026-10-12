@@ -1,21 +1,16 @@
 import json
-from datetime import datetime as _real_datetime
 
 import pytest
 from fastapi.testclient import TestClient
+
+from tests.clock_testkit import FROZEN_DAY, FrozenDatetime
 
 # 端点按天分文件、且 date 缺省=今天（``app.api.debug_logs`` 每次请求读
 # ``datetime.now()``）。测试种子日志写「今天」的日期分文件、靠端点默认参数读到。
 # 模块级 ``datetime.now()`` 在导入时就定了日期，全量套件跨午夜时种子写昨天、端点
 # 读今天，必红；所以把端点与日志模块的时钟一起冻结在同一天（与
 # test_event_logging.py 同口径），故意远离真实日期。
-_TODAY = "2026-01-15"
-
-
-class _FrozenDatetime(_real_datetime):
-    @classmethod
-    def now(cls, tz=None):
-        return _real_datetime(2026, 1, 15, 12, 0, 0, tzinfo=tz)
+_TODAY = FROZEN_DAY
 
 
 @pytest.fixture(autouse=True)
@@ -23,8 +18,8 @@ def _frozen_log_clock(monkeypatch):
     import app.api.debug_logs as debug_logs_module
     import app.core.event_logging as event_logging_module
 
-    monkeypatch.setattr(debug_logs_module, "datetime", _FrozenDatetime)
-    monkeypatch.setattr(event_logging_module, "datetime", _FrozenDatetime)
+    monkeypatch.setattr(debug_logs_module, "datetime", FrozenDatetime)
+    monkeypatch.setattr(event_logging_module, "datetime", FrozenDatetime)
 
 
 def _make_client(tmp_path, monkeypatch, *, enabled=True, lines=None, channel="llm", owner="user-local"):
