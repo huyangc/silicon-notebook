@@ -139,3 +139,204 @@ def test_delete_notebook_kg_drains_then_resets_on_postgres(
         state = runtime.unified_kg.state_row(db, notebook_id)
     assert state["kg_mutation_seq"] == 0
     assert state["kg_reset_epoch"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# K1 (debt-fix 2026-10-12): conflict candidates, merge-review row, derived
+# tables kept (ruling 11)
+# ---------------------------------------------------------------------------
+
+_DERIVED = (
+    "canonical_relations", "communities", "community_members",
+    "concept_comentions", "mention_edges",
+)
+
+
+def _seed_derived(postgres_repository, notebook_id, n, *, tag):
+    runtime = postgres_repository._runtime
+    now = normalize_timestamp(runtime.seams.now())
+    with runtime.database.write() as db:
+        for i in range(n):
+            db.execute(
+                "INSERT INTO canonical_relations (notebook_id,canonical_src,edge_type,"
+                "canonical_tgt,updated_at) VALUES (%s,%s,'supports',%s,%s)",
+                (notebook_id, f"K-{tag}{i:03d}", f"K-{tag}t{i:03d}", now),
+            )
+            db.execute(
+                "INSERT INTO mention_edges (notebook_id,claim_object_id,"
+                "concept_canonical_id) VALUES (%s,%s,%s)",
+                (notebook_id, f"ko-{tag}c{i:03d}", f"K-{tag}{i:03d}"),
+            )
+            db.execute(
+                "INSERT INTO concept_comentions (notebook_id,canonical_a,canonical_b) "
+                "VALUES (%s,%s,%s)",
+                (notebook_id, f"K-{tag}{i:03d}", f"K-{tag}z{i:03d}"),
+            )
+            db.execute(
+                "INSERT INTO communities (id,notebook_id,level,member_ids,size,"
+                "created_at,generation) VALUES (%s,%s,%s,%s,3,%s,1)",
+                (f"cm-{tag}{i:03d}", notebook_id, i % 2, jsonb([]), now),
+            )
+            db.execute(
+                "INSERT INTO community_members (canonical_id,notebook_id,level,"
+                "community_id,generation) VALUES (%s,%s,0,%s,1)",
+                (f"K-{tag}{i:03d}", notebook_id, f"cm-{tag}{i // 3:03d}"),
+            )
+
+
+def _derived_counts(runtime, notebook_id):
+    with runtime.database.connect() as db:
+        return {
+            t: db.execute(f"SELECT COUNT(*) AS c FROM {t} WHERE notebook_id=%s",
+                          (notebook_id,)).fetchone()["c"]
+            for t in _DERIVED
+        }
+
+
+@pytest.mark.postgres_integration
+def test_delete_notebook_kg_conflicts_review_and_kept_tables_on_postgres(
+    postgres_repository, monkeypatch,
+):
+    """K1 PG 孪生:超阈值的图走排水后,失效冲突候选与非运行的预审行清掉,
+    两侧仍在的候选、运行中的预审行、重建检查点保留;五张派生表(裁决 11)
+    一行不动,排水页里也不出现。"""
+    runtime = postgres_repository._runtime
+    service = runtime.knowledge_lifecycle
+    monkeypatch.setattr(service, "_graph_drain_budget_rows", 3)
+    a = postgres_repository.create_notebook(NotebookCreate(name="k1-a")).id
+    b = postgres_repository.create_notebook(NotebookCreate(name="k1-b")).id
+    _seed_graph(postgres_repository, a, doc_objects=8, memory_objects=2)
+    _seed_derived(postgres_repository, a, 10, tag="a")
+    now = normalize_timestamp(runtime.seams.now())
+    with runtime.database.write() as db:
+        for i in range(6):  # dead refs, over budget: drained in pages
+            db.execute(
+                "INSERT INTO kg_conflict_candidates (id,notebook_id,kind,left_ref,"
+                "right_ref,status,created_at,updated_at) "
+                "VALUES (%s,%s,'node',%s,%s,%s,%s,%s)",
+                (f"kcc-dead-{i}", a, f"ko-doc-{i}", f"ko-doc-{i + 1}",
+                 ("applied", "rejected", "pending")[i % 3], now, now),
+            )
+        db.execute(
+            "INSERT INTO kg_conflict_candidates (id,notebook_id,kind,left_ref,"
+            "right_ref,status,created_at,updated_at) "
+            "VALUES ('kcc-keep',%s,'node','ko-mem-0','ko-mem-1','pending',%s,%s)",
+            (a, now, now),
+        )
+        db.execute(
+            "INSERT INTO merge_review_jobs (notebook_id,status,total,done,updated_at,"
+            "error) VALUES (%s,'failed',5,1,%s,'x'),(%s,'running',5,1,%s,'')",
+            (a, now, b, now),
+        )
+        db.execute(
+            "INSERT INTO kg_rebuild_checkpoint (notebook_id,input_version,stage,"
+            "item_key,payload,created_at) VALUES (%s,'v1','merge_review','k',%s,%s)",
+            (a, jsonb({}), now),
+        )
+
+    pages = []
+    store = runtime.knowledge
+    original = store.drain_notebook_graph_rows_page
+
+    def _spy(db, nb, step, limit):
+        deleted = original(db, nb, step, limit)
+        pages.append(dict(deleted))
+        return deleted
+
+    monkeypatch.setattr(store, "drain_notebook_graph_rows_page", _spy)
+    counts = postgres_repository.delete_notebook_kg(a)
+
+    assert any("kg_conflict_candidates" in d for d in pages), "失效候选超阈值须走排水"
+    assert all(d.get("kg_conflict_candidates", 0) <= 3 for d in pages)
+    assert counts["kg_conflict_candidates"] == 6
+    assert not any(t in d for d in pages for t in _DERIVED)
+    assert _derived_counts(runtime, a) == dict.fromkeys(_DERIVED, 10)
+    with runtime.database.connect() as db:
+        conflicts = {r["id"] for r in db.execute(
+            "SELECT id FROM kg_conflict_candidates WHERE notebook_id=%s", (a,)
+        ).fetchall()}
+        assert conflicts == {"kcc-keep"}
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM kg_rebuild_checkpoint WHERE notebook_id=%s",
+            (a,)).fetchone()["c"] == 1
+    governance = runtime.knowledge_governance
+    assert governance.merge_review_job_status(a)["status"] == "idle"
+    postgres_repository.delete_notebook_kg(b)
+    assert governance.merge_review_job_status(b) == {
+        "status": "running", "total": 5, "done": 1, "error": "",
+    }, "运行中的预审行必须挺过删除"
+
+
+@pytest.mark.postgres_integration
+def test_conflict_write_epoch_gate_on_postgres(postgres_repository):
+    """K1:PG 上 ``write_conflict_candidate(reset_epoch=…)`` 的条件插入(含 FOR
+    SHARE 子查询)真能执行:纪元一致落行、不一致返回 None 不写;删除后纪元
+    前进,按删除前纪元写入被拒。"""
+    runtime = postgres_repository._runtime
+    governance = runtime.knowledge_governance
+    nb = postgres_repository.create_notebook(NotebookCreate(name="epoch-pg")).id
+    with runtime.database.connect() as db:
+        epoch = runtime.unified_kg.graph_seq_row(db, nb)[3]
+    assert governance.write_conflict_candidate(
+        nb, "node", "a", "b", reset_epoch=epoch) is not None
+    postgres_repository.delete_notebook_kg(nb)
+    assert governance.write_conflict_candidate(
+        nb, "node", "a", "b", reset_epoch=epoch) is None
+    with runtime.database.connect() as db:
+        fresh = runtime.unified_kg.graph_seq_row(db, nb)[3]
+        assert fresh == epoch + 1
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM kg_conflict_candidates WHERE notebook_id=%s",
+            (nb,)).fetchone()["c"] == 0
+    assert governance.write_conflict_candidate(
+        nb, "node", "a", "b", reset_epoch=fresh) is not None
+
+
+@pytest.mark.postgres_integration
+def test_drain_only_steps_stay_out_of_the_post_commit_check_on_postgres(
+    postgres_repository, monkeypatch,
+):
+    """K1 PG 孪生(「新步骤参与复查」变异钉):终局提交与阈值 0 复查之间落地
+    的失效冲突候选 / 已结束的预审行不得多烧一轮重置(终局恰一轮,行留到下次
+    删除)。"""
+    runtime = postgres_repository._runtime
+    store = runtime.knowledge
+    original_backlog = store.graph_drain_backlog
+    original_final = store.delete_notebook_graph_rows
+
+    def _run(name, inject):
+        nb = postgres_repository.create_notebook(NotebookCreate(name=name)).id
+        injected, finals = {"done": False}, []
+
+        def _backlog(db, notebook_id, threshold, start=0, **kw):
+            if threshold == 0 and not injected["done"]:
+                injected["done"] = True
+                now = normalize_timestamp(runtime.seams.now())
+                with runtime.database.write() as w:
+                    inject(w, notebook_id, now)
+            return original_backlog(db, notebook_id, threshold, start, **kw)
+
+        def _final(db, notebook_id, now):
+            finals.append(notebook_id)
+            return original_final(db, notebook_id, now)
+
+        monkeypatch.setattr(store, "graph_drain_backlog", _backlog)
+        monkeypatch.setattr(store, "delete_notebook_graph_rows", _final)
+        postgres_repository.delete_notebook_kg(nb)
+        assert injected["done"]
+        return nb, finals
+
+    def _late_conflict(w, nb, now):
+        w.execute(
+            "INSERT INTO kg_conflict_candidates (id,notebook_id,kind,left_ref,"
+            "right_ref,status,created_at,updated_at) "
+            "VALUES ('kcc-late-pg',%s,'node','ko-gone-a','ko-gone-b','pending',%s,%s)",
+            (nb, now, now),
+        )
+        w.execute(
+            "INSERT INTO merge_review_jobs (notebook_id,status,total,done,updated_at,"
+            "error) VALUES (%s,'done',3,3,%s,'')", (nb, now),
+        )
+
+    nb, finals = _run("settle-exempt-pg", _late_conflict)
+    assert len(finals) == 1, f"冲突候选/预审行不得参与提交后复查:{len(finals)}"
