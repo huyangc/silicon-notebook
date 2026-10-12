@@ -341,7 +341,7 @@ def test_sole_index_helper_refuses_a_table_foreign_keys_reference(postgres_datab
     other tables' foreign keys hanging off it: it refuses before dropping
     anything (``notebooks.pk_notebooks`` is referenced by concept_clusters
     and many more)."""
-    assert PostgresMigrator(postgres_database).migrate() == 72
+    assert PostgresMigrator(postgres_database).migrate() == 73
     with postgres_database.connect() as connection:
         before = connection.execute(
             "SELECT count(*) AS n FROM pg_constraint WHERE contype = 'f'").fetchone()["n"]
