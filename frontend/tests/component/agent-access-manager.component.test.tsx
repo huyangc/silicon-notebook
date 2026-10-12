@@ -894,6 +894,35 @@ test("删除后刷新失败或迟迟不回:提示到期后该行不会以可操�
   expect(screen.queryByRole("button", { name: "停用" })).toBeNull();
 });
 
+test("删除成功但刷新失败:它名下已加载的 token 立刻按已撤销呈现，不能再复制或修改", async () => {
+  let deleted = false;
+  routeRequests(baseRoutes({
+    // 已停用的 Profile:删除前它的 token 行显示「Profile 已停用」、没有修改入口。
+    "GET /agent-profiles": () => {
+      if (!deleted) return [{ ...profileOne, status: "revoked" }];
+      throw humanizedError("服务暂时不可用，请稍后重试", 503);
+    },
+    "GET /agent-tokens": () => [activeToken],
+    "DELETE /agent-profiles/agent-1": () => { deleted = true; return undefined; },
+  }));
+  const user = userEvent.setup();
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findAllByText("Claude Code");
+  await user.click(screen.getByRole("checkbox", { name: "隐藏已撤销和已过期" }));
+
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "删除" }));
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "确认删除" }));
+  expect(await within(profileListRow("Claude Code")).findByRole("status")).toHaveTextContent("已删除");
+
+  const issuedRow = screen.getAllByText("Claude Code")
+    .map((node) => node.closest("article"))
+    .find((node): node is HTMLElement => node !== null) as HTMLElement;
+  expect(within(issuedRow).getByText("已撤销")).toBeInTheDocument();
+  expect(within(issuedRow).queryByRole("button", { name: /修改权限/ })).not.toBeInTheDocument();
+  expect(within(issuedRow).queryByRole("button", { name: /复制 token/ })).not.toBeInTheDocument();
+  expect(within(issuedRow).queryByRole("button", { name: "撤销" })).not.toBeInTheDocument();
+});
+
 test("删除后的刷新结果仍带着已删除的 Profile:不会把它加回来", async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   let lateList = false;
