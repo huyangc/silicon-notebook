@@ -123,6 +123,8 @@ def _seq_gated(
     db: Any,
     notebook_id: str,
     compute: "Callable[[], Any]",
+    *,
+    version: "Optional[Tuple[int, int]]" = None,
 ) -> Any:
     """四个 memo(``_MEMO`` / ``_CHUNKS`` / ``_PENDING`` / ``_VISIBLE_PENDING``)
     共享的 version-gated 读写骨架:命中同 ``(kg_reset_epoch, kg_mutation_seq)``
@@ -131,7 +133,19 @@ def _seq_gated(
     混淆,那是完全不同的另一个 best-effort 安全阀);miss 时锁外跑 ``compute()``,
     写回前重新核对 ``(全局 epoch, 该 notebook 的 epoch)`` 二元组没有在计算期间
     变化——只有这个 notebook 自己被 invalidate,或全局被清空,才会拒绝写回;
-    别的 notebook 的 invalidate 不影响。"""
+    别的 notebook 的 invalidate 不影响。
+
+    ``version``(笔记本列表的批量预取,``QueryStore.notebook_list_summary_facts``
+    同一条语句里读到的本库键):只用来判命中——命中
+    与上面同一个 ``move_to_end``,LRU 次序不变;未命中时**就地重读本库版本键**、
+    走与不带它时逐字相同的路径(读键、算、按这次读到的键写回),所以冷路径与
+    今天同一条语句,也不会把值存进预取时读到的旧键。"""
+    if version is not None:
+        with _LOCK:
+            hit = memo.get(notebook_id)
+            if hit is not None and hit[0] == version:
+                memo.move_to_end(notebook_id)
+                return hit[1]
     version = _version_key(db, notebook_id)
     with _LOCK:
         hit = memo.get(notebook_id)
@@ -175,9 +189,12 @@ _TYPE_STATUS_HALVES_SQL = (
 _Counts = Dict[Tuple[str, str], int]
 
 
-def _type_status_halves(db: Any, notebook_id: str) -> "Tuple[_Counts, _Counts, _Counts]":
+def _type_status_halves(
+    db: Any, notebook_id: str, *, version: "Optional[Tuple[int, int]]" = None,
+) -> "Tuple[_Counts, _Counts, _Counts]":
     """``(shared, every member's Memory, total)``, memoized together on
-    ``(kg_reset_epoch, kg_mutation_seq)``; shared read-only dicts."""
+    ``(kg_reset_epoch, kg_mutation_seq)``; shared read-only dicts.  ``version``:
+    a prefetched key for the hit check (``_seq_gated``)."""
 
     def compute() -> "Tuple[_Counts, _Counts, _Counts]":
         rows = db.execute(
@@ -190,13 +207,16 @@ def _type_status_halves(db: Any, notebook_id: str) -> "Tuple[_Counts, _Counts, _
         }
         return shared, memory, total
 
-    return _seq_gated(_MEMO, db, notebook_id, compute)
+    return _seq_gated(_MEMO, db, notebook_id, compute, version=version)
 
 
-def shared_type_status_counts(db: Any, notebook_id: str) -> "_Counts":
+def shared_type_status_counts(
+    db: Any, notebook_id: str, *, version: "Optional[Tuple[int, int]]" = None,
+) -> "_Counts":
     """``{(object_type, status): count}`` of the notebook's objects NOT derived
-    from any Memory (the cached shared half). Read-only。"""
-    return _type_status_halves(db, notebook_id)[0]
+    from any Memory (the cached shared half). Read-only。``version`` as in
+    ``_type_status_halves``."""
+    return _type_status_halves(db, notebook_id, version=version)[0]
 
 
 def memory_type_status_counts(db: Any, notebook_id: str, viewer_id: str) -> "_Counts":
@@ -222,12 +242,14 @@ def memory_type_status_counts(db: Any, notebook_id: str, viewer_id: str) -> "_Co
 
 def type_status_counts(
     db: Any, notebook_id: str, *, viewer_id: "Optional[str]" = None,
+    version: "Optional[Tuple[int, int]]" = None,
 ) -> "_Counts":
     """``{(object_type, status): count}`` for the notebook as ``viewer_id`` may
     see it. ``None``: every object (both cached halves — today's result, zero
     live reads); ``""``: the cached shared half; a user id: the shared half plus
-    that user's own Memory objects (one live read). Read-only result。"""
-    shared, _memory, total = _type_status_halves(db, notebook_id)
+    that user's own Memory objects (one live read). Read-only result。
+    ``version`` as in ``_type_status_halves``."""
+    shared, _memory, total = _type_status_halves(db, notebook_id, version=version)
     if viewer_id is None:
         return total
     own = memory_type_status_counts(db, notebook_id, viewer_id)
@@ -245,11 +267,12 @@ def type_counts(
     statuses: "Optional[Tuple[str, ...]]" = None,
     *,
     viewer_id: "Optional[str]" = None,
+    version: "Optional[Tuple[int, int]]" = None,
 ) -> "Dict[str, int]":
     """``{object_type: count}`` filtered to ``statuses`` (a whitelist), or to
     all-but-``deprecated`` when ``statuses is None``; ``viewer_id`` as in
-    ``type_status_counts``。"""
-    raw = type_status_counts(db, notebook_id, viewer_id=viewer_id)
+    ``type_status_counts``(``version`` likewise)。"""
+    raw = type_status_counts(db, notebook_id, viewer_id=viewer_id, version=version)
     allow = set(statuses) if statuses is not None else None
     out: Dict[str, int] = {}
     for (object_type, status), c in raw.items():
@@ -421,10 +444,14 @@ def _pending_query(db: Any, notebook_id: str, *, visible_only: bool) -> int:
     return int(row["c"])
 
 
-def _cached(memo, db: Any, notebook_id: str, *, visible_only: bool) -> int:
+def _cached(
+    memo, db: Any, notebook_id: str, *, visible_only: bool,
+    version: "Optional[Tuple[int, int]]" = None,
+) -> int:
     return _seq_gated(
         memo, db, notebook_id,
         lambda: _pending_query(db, notebook_id, visible_only=visible_only),
+        version=version,
     )
 
 
@@ -433,10 +460,13 @@ def pending_source_count(db: Any, notebook_id: str) -> int:
     return _cached(_PENDING, db, notebook_id, visible_only=False)
 
 
-def visible_pending_source_count(db: Any, notebook_id: str) -> int:
+def visible_pending_source_count(
+    db: Any, notebook_id: str, *, version: "Optional[Tuple[int, int]]" = None,
+) -> int:
     """用户可见的「已解析、无完整 KG」源数(排除 memory/knowhow 合成源),checkup H6 用。
-    memoized on ``(notebook_id, kg_mutation_seq)``。"""
-    return _cached(_VISIBLE_PENDING, db, notebook_id, visible_only=True)
+    memoized on ``(notebook_id, kg_mutation_seq)``;``version`` 同 ``_seq_gated``。"""
+    return _cached(
+        _VISIBLE_PENDING, db, notebook_id, visible_only=True, version=version)
 
 
 def invalidate(notebook_id: Optional[str] = None) -> None:

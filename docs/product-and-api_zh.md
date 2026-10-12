@@ -1052,11 +1052,13 @@ token 时 `share_token` 为空串，并且**不计算** copy-stats：那是一�
 - **防重复 pending 一条**——`uq_share_requests_one_pending` 保证同一 (库, 组) 至多一条在飞申请。
   创建端点撞它时**幂等返回既有 pending 行**，不是 409：申请者刷新页面重复点提交是常见操作。这是**产品
   行为契约而非配额**，写在此处是因为它决定了申请清单的量级上限。
-- **「群组」分区把一个已知的 N+1 放大了**，作为已登记的债务保留。`granted_notebook_rows`
-  只是一条查询，但每行都要过 `NotebookSummaryQuery.from_row`，而它逐库发若干次计数/挂载
-  查询——约 7 条语句/库，500 本组授权库量级即约 3500 条。「自有库」与「加入的库」两段是
-  同一个既有形态，所以这不是本特性引入的新问题，但群组分区把可能的行数放大了一个量级。
-  优化方向（批量预取计数）另行排期。
+- **列表逐库摘要改为批量读取，「群组」分区不再放大语句数。** `granted_notebook_rows` 是一条
+  查询，整张列表（自有、加入、群组授权三段）由一次批量读取
+  （`QueryStore.notebook_list_summary_facts`）补齐，不再逐库走 `NotebookSummaryQuery.from_row`
+  的逐库查询（约 7 条语句/库，500 本即约 3500 条）。PostgreSQL 上一条语句带回每本库的可见来源数、
+  （按当前查看者的）挂载、`kg_ready` 与计数缓存版本键；类型计数与待处理计数随后逐库走进程内缓存，
+  所以热缓存下列 5 本与列 500 本是同样几条语句。缓存未命中时仍按原来同一条语句逐库冷算；持有
+  Memory 的库仍多一次查看者本人 Memory 的现读。响应与逐库路径逐字节相同；SQLite 保持逐库读取。
 - **不做判定缓存。** 单次判定是若干带索引的 `EXISTS` 探测（grants 按 `notebook_id` 或
   `(principal_type, principal_id)`，`group_members` 按主键或 `user_id`），与现状同量级；
   热路径不新增全表扫描。

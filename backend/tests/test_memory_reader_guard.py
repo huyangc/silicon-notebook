@@ -234,6 +234,8 @@ _REGISTRY: dict[str, dict[str, str]] = {
     },
     "*/query_store.py": {
         "QueryStore.notebook_has_kg": VIEWER_READER,
+        # its viewer branch (also the list's batched read, F2)
+        "QueryStore._viewer_has_kg": VIEWER_READER,
         "QueryStore.search_notebook": VIEWER_READER,
         "QueryStore.top_concept_names": SHARED_TOOLING,
         "QueryStore.knowledge_type_count_rows_excluding_memory": SHARED_TOOLING,
@@ -241,6 +243,11 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "QueryStore.knowhow_knowledge_type_rows": KEY_BOUNDED,
         "QueryStore.load_notebook_scale_facts": STATE_PROBE,
         "QueryStore.mounted_bases_row": STATE_PROBE,
+        # F2: ``mounted_bases_row``'s columns, and the list's one statement
+        # (``kg_ready`` without a viewer and the mounts' ``has_kg``, per
+        # listed notebook): existence probes
+        "_MOUNTED_BASE_COLUMNS": STATE_PROBE,
+        "_list_facts_sql": STATE_PROBE,
         "QueryStore.notebook_has_usable_kg": STATE_PROBE,
         "QueryStore.notebook_has_usable_base_kg": STATE_PROBE,
     },

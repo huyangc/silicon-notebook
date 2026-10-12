@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 from app.core.activity_time import (
     UNRESOLVED_INSTANT,
@@ -50,6 +51,7 @@ from app.repositories.postgres.mount_sql import (
     MOUNT_EFFECTIVE_FOR_VIEWER,
     MOUNT_ORDER,
     MOUNT_VIEWER_JOIN,
+    mount_viewer_join_on,
 )
 from app.repositories.postgres.search import (
     notebook_element_rows,
@@ -119,6 +121,42 @@ _NOT_MEMORY_OWNED_SQL = "NOT " + memory_derived_object("o")
 #: 按整簇排除(约定外层别名 ``c``)。判据本体在 ``memory_sql.no_memory_member_cluster``
 #: (``source_type`` 不加限定词的理由、批 3·W2 §1.4 的同代相关对齐都写在那里)。
 _NO_MEMORY_MEMBER_CLUSTER_SQL = no_memory_member_cluster("c")
+
+
+_MOUNTED_BASE_COLUMNS = (
+    "SELECT b.id AS id, b.name AS name, b.tier AS tier, "
+    "EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id) AS has_kg "
+)
+
+
+def _list_facts_sql() -> str:
+    """``QueryStore.notebook_list_summary_facts``' one statement: a row per
+    listed notebook (driven by ``pk_notebooks``) carrying, as correlated
+    subqueries on that row, exactly the per-notebook reads it replaces --
+    the count cache's version key (``_version_key``'s row), the visible
+    source count (``visible_source_count``), ``kg_ready`` without a viewer
+    (``notebook_has_kg``) and the mounts (``mounted_bases_row``: the same
+    columns, viewer fragments and ``MOUNT_ORDER``, aggregated in that order).
+    Each subquery is planned per notebook as its own statement is, so the
+    list only decides how many notebooks are probed.  Parameters
+    ``(viewer_id, notebook_ids)``."""
+    return (
+        "SELECT n.id AS id, k.kg_mutation_seq AS kg_mutation_seq, "
+        "k.kg_reset_epoch AS kg_reset_epoch, "
+        "(SELECT COUNT(*) FROM sources s WHERE s.notebook_id = n.id "
+        "AND s.source_type NOT IN ('memory', 'knowhow')) AS sources, "
+        "EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = n.id) AS has_kg, "
+        "(SELECT json_agg(json_build_array(b.id, b.name, b.tier, "
+        "EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id))"
+        + MOUNT_ORDER + ") " + mount_viewer_join_on("n.id")
+        + MOUNT_EFFECTIVE_FOR_VIEWER + ") AS mounts "
+        "FROM jsonb_array_elements_text(%s) AS x(id) "
+        "JOIN notebooks n ON n.id = x.id "
+        # LIMIT 1 (the key is the primary key) keeps the key read a
+        # per-notebook probe: a plain join is free to hash the whole table.
+        "LEFT JOIN LATERAL (SELECT kg_mutation_seq, kg_reset_epoch "
+        "FROM unified_kg_state WHERE notebook_id = n.id LIMIT 1) k ON TRUE"
+    )
 
 
 def _snippet(text: str, needle: str) -> str:
@@ -308,8 +346,18 @@ class QueryStore:
                 (notebook_id,),
             ).fetchone()
             return bool(row["exists"])
+        return QueryStore._viewer_has_kg(db, notebook_id, viewer_id)
+
+    @staticmethod
+    def _viewer_has_kg(
+        db: Any, notebook_id: str, viewer_id: str,
+        *, version: "tuple[int, int] | None" = None,
+    ) -> bool:
+        """``notebook_has_kg`` for a viewer (``viewer_id`` not None);
+        ``version``: the list's prefetched count-cache key (hit check only)."""
         from app.repositories.postgres import knowledge_counts_cache
-        shared = knowledge_counts_cache.shared_type_status_counts(db, notebook_id)
+        shared = knowledge_counts_cache.shared_type_status_counts(
+            db, notebook_id, version=version)
         if shared or not viewer_id:
             return bool(shared)
         # The own half as an EXISTS driven by the viewer's Memory sources
@@ -478,11 +526,68 @@ class QueryStore:
         ``viewer_id`` 是必填关键字(M3:挂载只对挂载人或自己能读被挂库的人生效);
         ``None``/空串 = 无查看者,只剩公共库与 ``everyone``。"""
         return db.execute(
-            "SELECT b.id AS id, b.name AS name, b.tier AS tier, "
-            "EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id) AS has_kg "
+            _MOUNTED_BASE_COLUMNS
             + MOUNT_VIEWER_JOIN + MOUNT_EFFECTIVE_FOR_VIEWER + MOUNT_ORDER,
             (viewer_id, notebook_id),
         ).fetchall()
+
+    def notebook_list_summary_facts(
+        self, db: Any, notebook_ids, statuses: tuple[str, ...],
+        *, viewer_id: "str | None", viewers,
+    ) -> "dict[str, dict]":
+        """The notebook list's per-notebook summary facts in a number of
+        statements that does not grow with the list (F2): ``{notebook_id:
+        {"sources", "type_rows", "has_kg", "mounts", "pending"}}``, each value
+        what ``visible_source_count`` / ``knowledge_type_count_rows`` /
+        ``notebook_has_kg`` / ``mounted_bases_row`` /
+        ``visible_pending_kg_source_count`` answer for that notebook.
+
+        ``viewers`` maps a notebook id to its ``viewer_count_kwargs`` (``{}``
+        or ``{"viewer_id": ...}``, decided by the caller in the request's
+        context); ``viewer_id`` is the mounts' viewer (M3).  ONE statement
+        (``_list_facts_sql``) reads every notebook's count-cache key, visible
+        source count, viewer-less ``kg_ready`` and mounts; then, per notebook
+        and in the summary's order, the cached counts, the viewer's
+        ``kg_ready`` and the pending count go through the count cache's own
+        hit/write-back skeleton with that key as the hit check only (a miss
+        re-reads the notebook's key and computes with today's statement), and
+        a viewer's own Memory half stays one live read per notebook holding
+        Memory, as in ``knowledge_type_count_rows``.  A notebook the statement
+        no longer finds is left out (its summary reads per notebook).  Not a
+        port method: the summary primitives it batches are not either."""
+        from app.repositories.postgres import knowledge_counts_cache as cache
+
+        ids = list(dict.fromkeys(str(nb) for nb in notebook_ids if nb))
+        if not ids:
+            return {}
+        facts = {
+            row["id"]: row
+            for row in db.execute(
+                _list_facts_sql(), (viewer_id, Jsonb(ids))).fetchall()
+        }
+        out: "dict[str, dict]" = {}
+        for nb in ids:
+            row = facts.get(nb)
+            if row is None:
+                continue
+            viewer = viewers.get(nb, {})
+            version = (
+                int(row["kg_reset_epoch"] or 0), int(row["kg_mutation_seq"] or 0))
+            counts = cache.type_counts(db, nb, statuses, version=version, **viewer)
+            out[nb] = {
+                "sources": int(row["sources"]),
+                "type_rows": [{"object_type": ot, "c": c} for ot, c in counts.items()],
+                "has_kg": (
+                    self._viewer_has_kg(db, nb, viewer["viewer_id"], version=version)
+                    if "viewer_id" in viewer else bool(row["has_kg"])
+                ),
+                "mounts": [
+                    {"id": base, "name": name, "tier": tier, "has_kg": has_kg}
+                    for base, name, tier, has_kg in (row["mounts"] or ())
+                ],
+                "pending": cache.visible_pending_source_count(db, nb, version=version),
+            }
+        return out
 
     @staticmethod
     def summary_notebook_row(db: Any, notebook_id: str):

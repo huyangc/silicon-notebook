@@ -373,6 +373,10 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(ANY, NOT_IDS, "USABLE_STATUSES"),),
     ("postgres/query_store.py", "QueryStore.notebook_has_usable_base_kg"): (
         s(ANY, NOT_IDS, "USABLE_STATUSES"),),
+    ("postgres/query_store.py", "_list_facts_sql"): (
+        # jsonb, not an array: the row estimate never depends on the list, so
+        # the (cached, generic) plan is the plan at every list length.
+        s(JSONB, DRIVEN, "the notebook list's notebooks (F2), one pk_notebooks probe each"),),
     ("postgres/query_store.py", "QueryStore.notebook_source_ids_among"): (
         s(ANY, BOUNDED, "sources in flight in this process (ingest leases)"),),
     ("postgres/query_store.py", "QueryStore.list_user_notebooks"): (

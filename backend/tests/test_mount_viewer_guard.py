@@ -60,6 +60,7 @@ _VIEWER_METHODS = frozenset({
     "any_mounted_has_kg_compat",
     "follow_start_row",
     "mounted_bases",
+    "notebook_list_summary_facts",
 })
 
 _CURRENT_VIEWER = "current_viewer_id"
@@ -131,9 +132,13 @@ _SITES = {
     ("app/services/notebook_catalog.py", "NotebookSummaryQuery.mounted_bases",
      "mounted_bases_row"):
         (_EXPLICIT, 2, "the summary's user (N-6); one call per connection branch"),
-    ("app/services/notebook_catalog.py", "NotebookSummaryQuery.from_row",
-     "mounted_bases"):
+    ("app/services/notebook_catalog.py", "NotebookSummaryQuery._row_facts",
+     "mounted_bases_row"):
         (_EXPLICIT, 1, "the summary's user (N-6)"),
+    ("app/services/notebook_catalog.py", "NotebookSummaryQuery._list_facts",
+     "notebook_list_summary_facts"):
+        (_EXPLICIT, 1, "the list's user (N-6), the mounts of every listed "
+                       "notebook in one read (F2)"),
     ("app/services/notebook_catalog.py", "NotebookSummaryQuery.get",
      "notebook_has_usable_base_kg"):
         (_EXPLICIT, 1, "the summary's user (N-6)"),

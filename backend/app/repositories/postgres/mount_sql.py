@@ -84,13 +84,31 @@ MOUNTED_BASE_IDS_SUBQUERY = "SELECT b.id " + MOUNT_JOIN + MOUNT_VALID
 # (viewer_id, notebook_id)。查看者支只许引用 b 与 v(不引用挂载方 a),这样它作为
 # b 上的限制条件下推,计划器才稳定按主键取被挂库——那份 docstring 有实测与 pin。
 
-MOUNT_VIEWER_JOIN = (
+_MOUNT_VIEWER_FROM = (
     "FROM notebook_bases e "
     "JOIN notebooks b ON b.id = e.base_notebook_id "
     "JOIN notebooks a ON a.id = e.notebook_id "
     "CROSS JOIN (SELECT NULLIF(CAST(%s AS text), '') AS uid) v "
-    "WHERE e.notebook_id = %s AND b.id != e.notebook_id"
 )
+
+MOUNT_VIEWER_JOIN = (
+    _MOUNT_VIEWER_FROM + "WHERE e.notebook_id = %s AND b.id != e.notebook_id"
+)
+
+
+def mount_viewer_join_on(mounter: str) -> str:
+    """``MOUNT_VIEWER_JOIN`` with the mounting notebook given as a column of
+    an enclosing query instead of a parameter (the notebook list's batched
+    summary read correlates it with each listed notebook): it takes ONE
+    positional parameter, the viewer.  Everything else is the
+    single-notebook fragment's text, so each listed notebook's mounts are
+    read by the same per-notebook probe of ``pk_notebook_bases`` and the
+    viewer arm still references only ``b`` and ``v``.  EXPLAIN pin:
+    ``tests/postgres/test_mount_sql_viewer_pg.py``."""
+    return (
+        _MOUNT_VIEWER_FROM
+        + "WHERE e.notebook_id = " + mounter + " AND b.id != e.notebook_id"
+    )
 
 _VIEWER_REACHES_MOUNT_EXPR = (
     "(b.tier = 'base' OR "
