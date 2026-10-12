@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import itertools
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import json
 import os
 
@@ -917,6 +918,19 @@ def assert_a_re_stamp_never_hides_an_online_re_extraction(repo) -> None:
     assert runtime.status(notebook_id)["state"] == "indexed"
 
 
+def _after_every_existing_row() -> str:
+    """A ``created_at`` later than any row the seed or the build wrote.
+
+    The shared-content digest reads ``MAX(created_at)`` per table, so a
+    rewritten row is only visible to it while its stamp is the newest.  The
+    build stamps rows with the real clock; a literal "future" date stops being
+    the newest once the real clock passes it (``2026-12-31T00:00:00`` would
+    have hidden the vector rewrite from that day on).  One day past the real
+    clock is always the newest and always a different value.
+    """
+    return (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+
+
 def _change_only_shared_vectors(repo, notebook_id: str) -> None:
     """A shared object's vector rewritten (as a node-embedding backfill does);
     objects, relations, chunks and clusters untouched."""
@@ -928,7 +942,7 @@ def _change_only_shared_vectors(repo, notebook_id: str) -> None:
         db.execute(
             sql(repo, "INSERT INTO knowledge_embeddings (object_id,notebook_id,"
                       "vector,created_at) VALUES (?,?,?,?)"),
-            (object_id, notebook_id, vector, "2026-12-31T00:00:00"),
+            (object_id, notebook_id, vector, _after_every_existing_row()),
         )
 
 
@@ -953,7 +967,7 @@ def _change_only_shared_clusters(repo, notebook_id: str) -> None:
         db.execute(
             sql(repo, "UPDATE concept_clusters SET created_at=? "
                       "WHERE notebook_id=? AND generation=?"),
-            ("2026-12-31T00:00:00", notebook_id, generation),
+            (_after_every_existing_row(), notebook_id, generation),
         )
     repo._vector_cache.invalidate(f"{notebook_id}:clustermap")
 
@@ -973,7 +987,7 @@ def _change_only_shared_relation_vectors(repo, notebook_id: str) -> None:
         db.execute(
             sql(repo, "INSERT INTO relation_embeddings (relation_id,notebook_id,"
                       "vector,created_at) VALUES (?,?,?,?)"),
-            (relation_id, notebook_id, vector, "2026-12-31T00:00:00"),
+            (relation_id, notebook_id, vector, _after_every_existing_row()),
         )
 
 
