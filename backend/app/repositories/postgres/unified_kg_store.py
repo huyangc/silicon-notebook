@@ -135,15 +135,13 @@ def _derived_layer_live(seq_column: str) -> str:
 _CANONICAL_LAYER_LIVE = _derived_layer_live("canonical_rel_seq")
 _MENTION_LAYER_LIVE = _derived_layer_live("mention_seq")
 
-# The published community generation; -1 (never a real generation) while the
-# community layer is in the delete signature above. Same single state-row
-# lookup as before; a published generation above 0 answers at the first
-# branch.
+# Communities need no read gate: the delete writes the published community
+# generation as -1 (knowledge_store.delete_notebook_graph_rows), which no row
+# carries, so every reader below -- statements byte-for-byte the pre-K1 ones --
+# finds nothing until a rebuild flips the pointer to a real generation.
 _PUBLISHED_COMMUNITY_GEN = (
-    "COALESCE((SELECT CASE WHEN community_generation <> 0 THEN community_generation "
-    "WHEN community_seq = -1 AND kg_reset_epoch > 0 AND last_rebuild_at IS NULL "
-    "THEN -1 ELSE community_generation END "
-    "FROM unified_kg_state WHERE notebook_id = %s), 0)"
+    "COALESCE((SELECT community_generation FROM unified_kg_state "
+    "WHERE notebook_id = %s), 0)"
 )
 
 

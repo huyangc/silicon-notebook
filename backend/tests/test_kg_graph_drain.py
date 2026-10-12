@@ -1457,3 +1457,56 @@ def test_derived_layer_gate_leaves_a_memory_isolation_requeue_readable(repo):
         )
         assert cur.rowcount == 1
     assert _derived_reads(repo, nb.id) == before
+
+
+def test_community_pointer_sentinel_hides_kept_communities_until_a_rebuild(repo):
+    """K1(裁决 11,社区读者零读开销):删除把已发布社区代写成哨兵 -1。保留的
+    社区行(这里是迁移前遗留的代 0 行)对字节不变的读者语句一行都不可见;
+    复制出去的副本不带哨兵也不带社区行;重建按既有路径翻转回真实的代,新代
+    行可读。变异钉:删除改回写 0 → 遗留代 0 社区重新可读,报红;重建不翻转
+    指针 → 重建后仍不可读,报红。"""
+    rt = repo._runtime
+    uk = rt.unified_kg
+    nb = repo.create_notebook(NotebookCreate(name="communities"))
+    _seed_graph(repo, nb.id, doc_objects=2, clusters=True)
+    _seed_derived(repo, nb.id, 3, generation=0, prefix="")
+    with rt.database.connect() as db:
+        assert uk.communities_count(db, nb.id, 0)[0] == 3, "前置:代 0 社区可读"
+
+    repo.delete_notebook_kg(nb.id)
+
+    with rt.database.connect() as db:
+        state = uk.state_row(db, nb.id)
+        assert state["community_generation"] == -1
+        assert uk.communities_count(db, nb.id, 0)[0] == 0
+        assert uk.community_member_ids(db, nb.id, 0) == []
+    assert uk.top_community_for(nb.id, "K-000") is None
+    assert uk.community_member_peers(nb.id, "cm-000", "", 10) == []
+    assert _derived_counts(repo, nb.id)["communities"] == 3, "行按裁决 11 保留"
+
+    now = _now()
+    with rt.database.write() as db:
+        db.execute(
+            "INSERT OR IGNORE INTO users (id,email,display_name,role,created_at,"
+            "updated_at) VALUES ('user-copier','c@t','c','user',?,?)", (now, now),
+        )
+    copied = repo.copy_notebook(nb.id, new_owner_id="user-copier")
+    with rt.database.connect() as db:
+        copy_state = uk.state_row(db, copied.id)
+        assert copy_state is None or copy_state["community_generation"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) FROM communities WHERE notebook_id=?", (copied.id,)
+        ).fetchone()[0] == 0
+
+    rt.knowledge_lifecycle.rebuild_unified_kg(nb.id, force=True)
+    with rt.database.connect() as db:
+        published = uk.state_row(db, nb.id)["community_generation"]
+    assert published >= 1, "重建须把社区指针翻回真实的代"
+    with rt.database.write() as db:
+        db.execute(
+            "INSERT INTO communities (id,notebook_id,level,member_ids,size,"
+            "created_at,generation) VALUES ('cm-post',?,0,'[]',3,?,?)",
+            (nb.id, now, published),
+        )
+    with rt.database.connect() as db:
+        assert uk.communities_count(db, nb.id, 0)[0] == 1

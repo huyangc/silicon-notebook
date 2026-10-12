@@ -1222,13 +1222,15 @@ class KnowledgeStore:
         # maintenance gets, deliberately NOT create_notebook's own
         # source_index_backfilled=1 (this row is being synthesized mid-
         # lifecycle for a notebook that already had content, not born empty).
-        # 批 3·W2:两个 published 指针/在飞认领/催收标记随终局一并归零——本
-        # 事务的 blanket DELETE 已清空 concept_clusters,指针必须跟着回到「代 0」
+        # 批 3·W2:published 指针/在飞认领/催收标记随终局一并重置——本事务的
+        # blanket DELETE 已清空 concept_clusters,cluster 指针必须跟着回到「代 0」
         # 的出生态,否则副本语义(无行⇒代 0)与读侧 COALESCE 契约就对不上。
-        # communities/community_members 的行按裁决 11 保留到下次重建(K1);
-        # 指针归 0 后,迁移前遗留的代 0 行由读侧闸挡住——community_seq=-1、
-        # last_rebuild_at 为空、纪元 > 0 时,unified_kg_store.py 的已发布社区代
-        # 表达式读出 -1。
+        # K1(裁决 11):communities/community_members 的行保留到下次重建,所以
+        # community 指针写哨兵 -1(没有任何行在 -1 代)而不是 0——否则迁移前遗留的
+        # 代 0 社区会在删除后重新可读。读者语句不变(``generation = 指针``),
+        # 读不到任何行;重建按既有路径取号、copy-forward(从 -1 代复制空集)、
+        # 预回收(keep 不含旧代,旧行被回收)、翻转双 CAS(期望值 -1)写回正常代。
+        # INSERT 分支同写 -1(merge_dbs 留下的无 state 行库可能带着社区行)。
         # building/claimed 清零使任何并发在飞 rebuild 的翻转双 CAS 当场作废
         # (standalone delete → flip aborts,响亮失败不发布)。
         # ``derived_generation_counter`` 刻意 NOT 重置(UPDATE 分支不出现):
@@ -1239,15 +1241,15 @@ class KnowledgeStore:
             "notebook_id, dirty, kg_mutation_seq, cluster_mutation_seq, "
             "cluster_input_version, last_rebuild_at, object_count, "
             "relation_count, cluster_count, community_seq, canonical_rel_seq, "
-            "mention_seq, kg_reset_epoch, updated_at"
-            ") VALUES (%s, 0, 0, 0, '', NULL, 0, 0, 0, -1, -1, -1, 1, %s) "
+            "mention_seq, kg_reset_epoch, community_generation, updated_at"
+            ") VALUES (%s, 0, 0, 0, '', NULL, 0, 0, 0, -1, -1, -1, 1, -1, %s) "
             "ON CONFLICT (notebook_id) DO UPDATE SET "
             "dirty=0, kg_mutation_seq=0, cluster_mutation_seq=0, "
             "cluster_input_version='', last_rebuild_at=NULL, "
             "object_count=0, relation_count=0, cluster_count=0, "
             "community_seq=-1, canonical_rel_seq=-1, mention_seq=-1, "
             "kg_reset_epoch=unified_kg_state.kg_reset_epoch+1, "
-            "cluster_generation=0, community_generation=0, "
+            "cluster_generation=0, community_generation=-1, "
             "derived_building_generation=0, derived_building_claimed_at=NULL, "
             "derived_catchup_from=NULL, "
             "updated_at=excluded.updated_at",
