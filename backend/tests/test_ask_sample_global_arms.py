@@ -290,11 +290,16 @@ def test_a_retrieval_only_ask_is_in_no_learning_sample(repo):
 
 
 def _shaped_payload(job_id, user_id, created_at, *, shape, steps):
-    """A done reasoning job exactly as each writer persisted it: the shared
-    engine's ``answer`` with the streamed ``trace`` cleared (``shape="new"``),
-    or a row from before the engine switch carrying the legacy ``response``
-    and, when it streamed one, a top-level ``trace`` (``shape="legacy"``;
-    ``steps=None`` leaves the ``trace`` key out entirely)."""
+    """A done reasoning job in either answer shape: the shared engine's
+    ``answer`` with the streamed ``trace`` cleared (``shape="new"``, as the
+    writer stores it), or the legacy ``response`` plus, when given, a top-level
+    ``trace`` (``shape="legacy"``; ``steps=None`` leaves the ``trace`` key out).
+
+    The legacy row's ``mode='reasoning'`` is set by hand: a real legacy row
+    carries mode ''/'chunk' (the pre-switch writer never set it, 0062/v82
+    backfilled from the payload), so the sampler's ``mode = 'reasoning'``
+    filter keeps every real one out. These rows only exercise the SQL's
+    two-shape reading against the Python projection."""
     from app.models.ask import AskResponse, TraceStep
     from app.models.global_ask import GlobalAskAnswer, GlobalAskJob, GlobalNotebookScope
 
@@ -325,8 +330,9 @@ def test_global_experience_sample_reads_both_answer_shapes_like_the_python_proje
     """The global reasoning sampler reads a job's trace through BOTH payload
     shapes, in ``global_answer_trace`` order: the engine answer's
     ``reasoning_trace``, else the top-level ``trace`` a legacy ``response`` row
-    carries. A legacy row used to contribute an empty run here while every
-    Python reader of the same row saw its steps."""
+    carries. Read through ``answer`` alone, a legacy row would contribute an
+    empty run here while every Python reader of the same row sees its steps
+    (no real legacy row is a reasoning run today; see ``_shaped_payload``)."""
     from app.models.global_ask import GlobalAskJob, global_answer_trace
 
     rows = [

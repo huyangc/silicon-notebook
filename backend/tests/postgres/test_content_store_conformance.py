@@ -3481,8 +3481,11 @@ def test_the_three_samplers_also_see_global_asks(content_harness):
 def _shaped_global_payload(job_id, user_id, created_at, *, shape, steps):
     """PostgreSQL twin of ``_shaped_payload`` in ``tests/test_ask_sample_global_arms.py``:
     a done reasoning job as the engine writes it (``answer``, ``trace`` cleared)
-    or as a row from before the engine switch (legacy ``response`` plus, when it
-    streamed one, a top-level ``trace``; ``steps=None`` omits the key)."""
+    or in the legacy shape (``response`` plus, when given, a top-level
+    ``trace``; ``steps=None`` omits the key). The legacy row's
+    ``mode='reasoning'`` is artificial -- real legacy rows carry ''/'chunk' and
+    the sampler's mode filter keeps them out -- so this only exercises the SQL's
+    two-shape reading against the Python projection."""
     from app.models.ask import TraceStep
     from app.models.global_ask import GlobalAskAnswer, GlobalAskJob, GlobalNotebookScope
 

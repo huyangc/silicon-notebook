@@ -23,8 +23,10 @@ from app.repositories.ports import (
 
 
 def _trace_steps(raw: Any) -> list:
-    """The persisted ``answer.reasoning_trace`` of a global job, as a list of
-    step dicts -- JSON text on SQLite, an already-decoded list on PostgreSQL."""
+    """A global job's trace as the samplers' SQL read it -- the engine answer's
+    ``reasoning_trace``, else the top-level ``trace`` (a running job's streamed
+    steps or a legacy row's) -- as a list of step dicts: JSON text on SQLite,
+    an already-decoded list on PostgreSQL."""
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)

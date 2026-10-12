@@ -198,6 +198,13 @@ class GlobalAskJob(BaseModel):
 # job or a legacy row. The SQL readers of ``payload_json`` that need the same
 # fields use the same order (``COALESCE(answer..., response.../trace)``);
 # ``test_global_answer_shape_guard.py`` holds both kinds of reader to it.
+# The trace COALESCE is NOT the same function as ``global_answer_trace`` on
+# every payload: an empty ``answer.reasoning_trace`` stays ``[]`` in SQL where
+# the projection falls back to ``trace``, and PostgreSQL keeps a JSON ``null``
+# where SQLite falls back. The two agree on every row actually written because
+# the writer that stores ``answer`` clears ``trace`` in the same step (both
+# landed together in 65911c56, ``GlobalAskService._execute``): a done
+# engine row's ``trace`` is always ``[]``, so either branch reads ``[]``.
 def global_answer_text(job: "GlobalAskJob") -> str:
     if job.answer is not None:
         return job.answer.answer
