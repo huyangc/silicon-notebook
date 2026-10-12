@@ -360,7 +360,12 @@ def test_fact_rerank_fail_open_when_no_llm(repo, monkeypatch):
 
 def test_precision_changes_do_not_touch_chunk_or_reasoning(repo):
     """fact-rerank 默认值正确,且 chunk(通用问答)与 reasoning
-    模式不引用 PPR 路径 —— 隔离回归护栏。"""
+    模式不引用 PPR 路径 —— 隔离回归护栏。
+
+    源码检查只看两个方法的**直接方法体**,不做传递扫描:``ask_chunk`` 是
+    chunk 引擎本体;``ask_reasoning`` 是兼容入口,推理引擎在
+    ``_prepare_reasoning_ask`` / ``_run_reasoning_stage``,这里看不到。PPR 隔离
+    实际由默认关闭的 ``ppr_fact_rerank_enabled`` 保证(第一条断言)。"""
     s = repo.settings
     assert s.ppr_fact_rerank_enabled is False
     import inspect
