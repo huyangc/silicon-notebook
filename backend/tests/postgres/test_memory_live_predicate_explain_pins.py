@@ -23,10 +23,12 @@ new one by dropping that tail — the pin compares the two on the same data.
   sequential scan + hash join under the custom plan on real data and an index
   path under the generic plan).
 
-``MEMORY_LIVE_PLAN_SCALE=large`` (not run in CI) reseeds at production shape
-— 3000 notebooks, 500k Memory rows, one heavy user owning 200k — and writes
-the per-statement old/new comparison to ``MEMORY_LIVE_PLAN_REPORT`` (default
-``memory_live_plan_report.json`` in the test's tmp dir), for the PR.
+The same single test, run by hand with ``MEMORY_LIVE_PLAN_SCALE=large``,
+reseeds at production shape — 3000 notebooks, 500k Memory rows, one heavy
+user owning 200k — asserts the same shape equality and writes the
+per-statement old/new comparison to ``MEMORY_LIVE_PLAN_REPORT`` (default
+``memory_live_plan_report.json`` in the test's tmp dir), for the PR. No lane
+sets it, so every lane runs the CI-sized world.
 """
 from __future__ import annotations
 
@@ -526,61 +528,55 @@ def not_all_visible(repo) -> dict[str, tuple[int, int]]:
     }
 
 
-@pytest.mark.skipif(_scale_name() != "ci", reason="large scale runs the report test")
-def test_live_predicate_keeps_every_reader_plan_shape(repo, monkeypatch):
-    seeded = seed(repo, SCALES["ci"])
+def test_live_predicate_keeps_every_reader_plan_shape(repo, monkeypatch, tmp_path):
+    """One runnable test; the world's size comes from the environment.
+
+    ``ci`` (the default, what every lane runs): the ~10^4-row world, shape
+    equality plus each reader's index pins. ``MEMORY_LIVE_PLAN_SCALE=large``
+    (run by hand for the PR evidence): the production-shaped world, shape
+    equality only — the index pins were measured on the CI world — and the
+    report is always written."""
+    scale = _scale_name()
+    assert scale in SCALES, f"MEMORY_LIVE_PLAN_SCALE must be one of {sorted(SCALES)}"
+    seeded = seed(repo, SCALES[scale])
     captured = capture_readers(repo, monkeypatch, seeded)
-    report = compare_plans(repo, captured)
-    if os.environ.get("MEMORY_LIVE_PLAN_REPORT"):
-        with open(os.environ["MEMORY_LIVE_PLAN_REPORT"], "w", encoding="utf-8") as fh:
-            json.dump(report, fh, ensure_ascii=False, indent=2)
+    report: dict[str, Any] = {"_scale": _row_counts(repo)}
+    report.update(compare_plans(repo, captured))
+    out = os.environ.get("MEMORY_LIVE_PLAN_REPORT") or (
+        str(tmp_path / "memory_live_plan_report.json") if scale == "large" else ""
+    )
+    if out:
+        with open(out, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, ensure_ascii=False, indent=2)
+    plans = {label: entries for label, entries in report.items() if not label.startswith("_")}
     differing = {
         (label, entry["statement"], mode): (entry[mode]["old"], entry[mode]["new"])
-        for label, entries in report.items()
+        for label, entries in plans.items()
         for entry in entries
         for mode in ("custom", "generic")
         if not entry[mode]["same_shape"]
     }
-    assert differing == {}, differing
-    assert set(_EXPECTED_INDEXES) == set(report), set(report) ^ set(_EXPECTED_INDEXES)
+    assert differing == {}, (out, differing)
+    assert set(_EXPECTED_INDEXES) == set(plans), set(plans) ^ set(_EXPECTED_INDEXES)
     for label, per_statement in _EXPECTED_INDEXES.items():
-        assert sorted(per_statement) == list(range(len(report[label]))), label
+        assert sorted(per_statement) == list(range(len(plans[label]))), label
+    if scale != "ci":
+        return  # the index pins below are the CI world's measured forms
     # The shape equality above is the regression guard and does not depend
-    # on the visibility map. The index pins below do: skip them (loudly)
-    # rather than turn a concurrent snapshot into a red test.
+    # on the visibility map. The index pins below do: when VACUUM could not
+    # fill it they are not asserted (with a warning) rather than turning a
+    # concurrent snapshot into a red test.
     partial = not_all_visible(repo)
     if partial:
         warnings.warn(
-            f"visibility map incomplete after VACUUM, index pins skipped: {partial}",
+            f"visibility map incomplete after VACUUM, index pins not asserted: {partial}",
             stacklevel=1,
         )
         return
     for label, per_statement in _EXPECTED_INDEXES.items():
         for index, (custom_indexes, generic_indexes) in per_statement.items():
-            entry = report[label][index]
+            entry = plans[label][index]
             for mode, expected in (("custom", custom_indexes), ("generic", generic_indexes)):
                 used = " ".join(entry[mode]["new"])
                 missing = {name for name in expected if f"using {name}" not in used}
                 assert not missing, (label, index, mode, missing, entry[mode]["new"])
-
-
-@pytest.mark.skipif(_scale_name() != "large", reason="opt-in production-scale report")
-def test_live_predicate_plan_report_at_production_scale(repo, monkeypatch, tmp_path):
-    seeded = seed(repo, SCALES["large"])
-    captured = capture_readers(repo, monkeypatch, seeded)
-    report: dict[str, Any] = {"_scale": _row_counts(repo)}
-    report.update(compare_plans(repo, captured))
-    out = os.environ.get("MEMORY_LIVE_PLAN_REPORT") or str(
-        tmp_path / "memory_live_plan_report.json"
-    )
-    with open(out, "w", encoding="utf-8") as handle:
-        json.dump(report, handle, ensure_ascii=False, indent=2)
-    differing = [
-        (label, entry["statement"], mode)
-        for label, entries in report.items()
-        if not label.startswith("_")
-        for entry in entries
-        for mode in ("custom", "generic")
-        if not entry[mode]["same_shape"]
-    ]
-    assert differing == [], (out, differing)
