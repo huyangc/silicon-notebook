@@ -32,7 +32,8 @@ from app.core.config import Settings
 from app.core.request_context import reset_request_user, set_request_user
 from app.models.schemas import NotebookCreate
 from app.repositories.sqlite import knowledge_counts_cache as sqlite_counts_cache
-from app.services import kg_viewer_scope
+from app.repositories.postgres import mount_sql as pg_mount_sql
+from app.services import kg_viewer_scope, notebook_catalog
 from app.services.source_scope import memory_access_context
 from app.services.sqlite_repository import SQLiteRepository
 
@@ -205,9 +206,14 @@ def dumps(listed) -> list[str]:
     return [nb.model_dump_json() for nb in listed]
 
 
-def assert_list_matches_the_per_notebook_path(repo, w, cache, monkeypatch) -> None:
+def assert_list_matches_the_per_notebook_path(repo, w, cache, q, monkeypatch) -> None:
     """Every viewer, cold and warm caches, channel open/closed, seam on/off:
-    the batched list and the per-notebook list are byte-identical."""
+    the batched list and the per-notebook list are byte-identical.  The
+    small-list gate is opened (every list batched) so each viewer's list
+    exercises the batch; ``test_*_small_list_gate`` pins the gate itself.
+    Last, the world changes between two warm lists (objects added and
+    removed, ``kg_mutation_seq`` advanced): the batched list must show it."""
+    monkeypatch.setattr(notebook_catalog, "LIST_PREFETCH_MIN_NOTEBOOKS", 0)
     summaries = repo._runtime.notebook_summaries
 
     def both(user_id, *, cold):
@@ -256,6 +262,31 @@ def assert_list_matches_the_per_notebook_path(repo, w, cache, monkeypatch) -> No
         w.c_base, w.b_private]
     assert open_a[w.c_cross]["access"] == "reader"
     assert open_a[w.c_granted]["granted_via"] and not open_a[w.c_cross]["granted_via"]
+    assert_a_warm_list_follows_a_change(repo, w, q, monkeypatch)
+
+
+def assert_a_warm_list_follows_a_change(repo, w, q, monkeypatch) -> None:
+    """Warm memos hold the old key; the world changes and the notebooks'
+    ``kg_mutation_seq`` advances: the batched list (read FIRST, before the
+    per-notebook path could refresh any memo) shows the new counts."""
+    summaries = repo._runtime.notebook_summaries
+    for _ in range(2):
+        before = {nb.id: nb for nb in summaries.list_for_user(w.a.id)}
+    with repo._runtime.database.write() as db:
+        for i in range(3):
+            db.execute(q(
+                "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,"
+                "payload,evidence,source_id,created_at,updated_at) "
+                "VALUES (?,?,'rule','approved','{}','[]','src-ap-3',?,?)"),
+                (f"src-ap-3-new{i}", w.a_plain, _now(), _now()))
+        db.execute(q("DELETE FROM knowledge_objects WHERE id=?"), ("src-am-0-o0",))
+        db.execute(q(
+            "UPDATE unified_kg_state SET kg_mutation_seq = kg_mutation_seq + 1 "
+            "WHERE notebook_id IN (?,?)"), (w.a_plain, w.a_memory))
+    after = {nb.id: nb for nb in summaries.list_for_user(w.a.id)}
+    assert after[w.a_plain].counts["rules"] == before[w.a_plain].counts["rules"] + 3
+    assert after[w.a_memory].counts["rules"] == before[w.a_memory].counts["rules"] - 1
+    assert dumps(after.values()) == dumps(old_list(summaries, w.a.id, monkeypatch))
 
 
 _COUNT_KEYS = ("rules", "cases", "checklist_items", "methods", "risks", "glossary")
@@ -269,7 +300,51 @@ def _load(text: str) -> dict:
 
 def test_sqlite_list_matches_the_per_notebook_path(repo, monkeypatch):
     w = build_list_world(repo, sqlite_q)
-    assert_list_matches_the_per_notebook_path(repo, w, sqlite_counts_cache, monkeypatch)
+    assert_list_matches_the_per_notebook_path(
+        repo, w, sqlite_counts_cache, sqlite_q, monkeypatch)
+
+
+def test_sqlite_small_list_gate(repo, monkeypatch):
+    """A list shorter than ``LIST_PREFETCH_MIN_NOTEBOOKS`` never calls the
+    batched read (its statement may be unprepared; see the constant); a
+    list of exactly that many does, once."""
+    runtime = repo._runtime
+    queries = runtime.queries
+    calls: list[int] = []
+    real = queries.notebook_list_summary_facts
+
+    def spy(db, ids, *args, **kwargs):
+        calls.append(len(ids))
+        return real(db, ids, *args, **kwargs)
+
+    monkeypatch.setattr(queries, "notebook_list_summary_facts", spy)
+    user = runtime.identity.create_user("g00000031", "pw123456")
+    gate = notebook_catalog.LIST_PREFETCH_MIN_NOTEBOOKS
+    assert gate == 5
+    for i in range(gate - 1):
+        as_user(user, runtime.catalog.create_notebook, NotebookCreate(name=f"g{i}"))
+    assert len(runtime.notebook_summaries.list_for_user(user.id)) == gate - 1
+    assert calls == []
+    as_user(user, runtime.catalog.create_notebook, NotebookCreate(name="last"))
+    assert len(runtime.notebook_summaries.list_for_user(user.id)) == gate
+    assert calls == [gate]
+
+
+def test_the_mount_where_has_one_spelling():
+    """``MOUNT_VIEWER_JOIN`` IS ``mount_viewer_join_on("%s")`` (bytes
+    unchanged), and the mounter can only be ``%s`` or a column reference."""
+    assert pg_mount_sql.MOUNT_VIEWER_JOIN == (
+        "FROM notebook_bases e "
+        "JOIN notebooks b ON b.id = e.base_notebook_id "
+        "JOIN notebooks a ON a.id = e.notebook_id "
+        "CROSS JOIN (SELECT NULLIF(CAST(%s AS text), '') AS uid) v "
+        "WHERE e.notebook_id = %s AND b.id != e.notebook_id"
+    )
+    assert pg_mount_sql.mount_viewer_join_on("n.id").endswith(
+        "WHERE e.notebook_id = n.id AND b.id != e.notebook_id")
+    for bad in ("'nb1'", "n.id OR TRUE", "n.id; DROP TABLE x", "", "1"):
+        with pytest.raises(ValueError):
+            pg_mount_sql.mount_viewer_join_on(bad)
 
 
 def test_sqlite_list_issues_the_per_notebook_statements_in_order(repo, monkeypatch):

@@ -1404,12 +1404,16 @@ Report creation follows **read** access, and reports are isolated **per creator*
   (`QueryStore.notebook_list_summary_facts`) instead of `NotebookSummaryQuery.from_row`'s
   per-library reads (roughly 7 statements per library, ~3,500 for 500 libraries). On
   PostgreSQL one statement carries every listed library's visible source count, mounts
-  (for this viewer), `kg_ready` and count-cache key; the cached type and pending counts
-  are then served per library from the process cache, so a warm list costs the same
+  (for this viewer), `kg_ready` as read without a viewer, and count-cache key; the
+  cached type and pending counts — and `kg_ready` of a library holding Memory — are
+  then served per library from the process cache, so a warm list costs the same
   statements at 5 or 500 libraries. A count-cache miss is still computed per library
   with the same statement as before, and a library holding Memory still adds the
-  viewer's own live Memory read. The response is byte-identical to the per-library
-  path; SQLite keeps the per-library reads.
+  viewer's own live Memory read. A list of fewer than 5 libraries keeps the
+  per-library reads (`LIST_PREFETCH_MIN_NOTEBOOKS`): the batched statement runs once
+  per list and is often not yet prepared, which costs more than it saves there. The
+  response is byte-identical to the per-library path; SQLite keeps the per-library
+  reads.
 - **No decision cache.** A single decision is a handful of indexed `EXISTS`
   probes (grants by `notebook_id` or `(principal_type, principal_id)`,
   `group_members` by primary key or `user_id`), which is the same order as the

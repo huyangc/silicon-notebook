@@ -63,6 +63,21 @@ _MEMORY_SEARCH_HIT_CAP = 8
 _SEARCH_HIT_EXCERPT_CHARS = 400
 _log = logging.getLogger("silicon_notebook.notebook_catalog")
 
+#: F2 small-list gate: a list of fewer notebooks than this reads each
+#: notebook's summary facts one primitive at a time (``_row_facts``, the
+#: per-notebook path, i.e. the list before F2) instead of the batched
+#: ``notebook_list_summary_facts``.  The batched statement runs once per list,
+#: so in production it is often NOT prepared (psycopg prepares on a
+#: connection's 5th execution, keeps 100 per connection and drops them all on
+#: a rollback) and then pays ~0.5 ms of planning, while the per-notebook
+#: statements are hot, prepared ones.  Measured with the batched statement
+#: forced unprepared, batched/per-notebook p50, alternating, PG 16, load 26-39
+#: (2026-10-13, warm / cold count cache):
+#:   N=1 1.36 / 1.31-1.38;  N=2 1.17 / 1.17;  N=3 0.78-1.01 / 0.97-0.99;
+#:   N=4 0.69-0.88 / 0.95-1.07;  N=5 0.64-0.85 / 0.93;  N=8 0.53 / 0.93.
+#: N=4 cold crossed the 1.05 bar in one of two runs, so batching starts at 5.
+LIST_PREFETCH_MIN_NOTEBOOKS = 5
+
 
 def _created_label(value: str) -> str:
     try:
@@ -508,6 +523,8 @@ class NotebookSummaryQuery:
         without ``memory:read`` reads every Memory-holding notebook as ``""``);
         the mounts' viewer is the user, as in ``mounted_bases``."""
         ids = list(dict.fromkeys(row["id"] for row in rows))
+        if len(ids) < LIST_PREFETCH_MIN_NOTEBOOKS:
+            return {}
         viewers = {
             notebook_id: self.viewer_count_kwargs(
                 db, notebook_id, user_id,
