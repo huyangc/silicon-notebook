@@ -224,6 +224,9 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
   const [editError, setEditError] = useState("");
   const [savedTokenId, setSavedTokenId] = useState<string | null>(null);
   const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
+  // 重新启用会让这个 Profile 下未撤销、未过期的 token 立刻恢复可用,所以和撤销一样要在行内再确认一次。
+  const [confirmEnableProfileId, setConfirmEnableProfileId] = useState<string | null>(null);
+  const [enabledProfileId, setEnabledProfileId] = useState<string | null>(null);
   const [hideInactive, setHideInactive] = useState(true);
   // 刚撤销的那一行留在列表里显示「已撤销」,免得「隐藏已撤销」把操作结果一并藏掉。
   const [justRevokedId, setJustRevokedId] = useState<string | null>(null);
@@ -282,6 +285,12 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
     if (!stale.length) return;
     stale.forEach(([id]) => setRowCopyState(id, null));
   }, [tokens, rowCopy]);
+
+  useEffect(() => {
+    if (!enabledProfileId) return;
+    const timer = window.setTimeout(() => setEnabledProfileId(null), TOKEN_SAVED_NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, [enabledProfileId]);
 
   useEffect(() => {
     if (!savedTokenId) return;
@@ -504,6 +513,19 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
     setRefresh((value) => value + 1);
   }
 
+  async function enableProfile(profileId: string) {
+    const profile = await mutate<AgentProfile>(`/agent-profiles/${encodeURIComponent(profileId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "active" }),
+    });
+    setConfirmEnableProfileId(null);
+    if (!profile) return;
+    // 先在本行落定状态,再整体刷新(token 行的「Profile 已停用」随之消失)。
+    setProfiles((current) => current.map((item) => (item.id === profile.id ? profile : item)));
+    setEnabledProfileId(profile.id);
+    setRefresh((value) => value + 1);
+  }
+
   async function issueToken(event: FormEvent) {
     event.preventDefault();
     if (!canIssueAgentToken(selectedProfile, draft, ownedIds)) return;
@@ -696,7 +718,7 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
         <div className="agent-access-grid">
           <form className="agent-config-block" onSubmit={createProfile}>
             <h3>Agent Profile</h3>
-            <p>稳定身份用于记忆来源和审计；停用后它的全部 token 立即失效。</p>
+            <p>稳定身份用于记忆来源和审计；停用后它的全部 token 立即失效，重新启用后未撤销、未过期的 token 恢复可用。</p>
             <label>名称<input value={profileName} maxLength={80} onChange={(event) => setProfileName(event.target.value)} placeholder="例如 Claude Code" /></label>
             <label>说明<input value={profileDescription} maxLength={500} onChange={(event) => setProfileDescription(event.target.value)} placeholder="用途或运行环境" /></label>
             <button type="submit" disabled={loading || !profileName.trim()}><Plus size={14} /> 新建 Profile</button>
@@ -704,7 +726,22 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
               {profiles.map((profile) => (
                 <div key={profile.id}>
                   <span><strong>{profile.name}</strong><small>{profile.description || "无说明"} · {profile.status === "active" ? "启用" : "已停用"}</small></span>
-                  {profile.status === "active" && <button type="button" disabled={loading} onClick={() => disableProfile(profile.id)}>停用</button>}
+                  {profile.status === "active" ? (
+                    <span className="agent-profile-actions">
+                      {enabledProfileId === profile.id && (
+                        <small className="agent-token-saved" role="status"><Check size={13} /> 已启用</small>
+                      )}
+                      <button type="button" disabled={loading} onClick={() => disableProfile(profile.id)}>停用</button>
+                    </span>
+                  ) : confirmEnableProfileId === profile.id ? (
+                    <span className="agent-profile-actions">
+                      <small className="agent-token-confirm">启用后，它未撤销、未过期的 token 立即恢复可用</small>
+                      <button type="button" disabled={loading} onClick={() => enableProfile(profile.id)}>确认启用</button>
+                      <button type="button" disabled={loading} onClick={() => setConfirmEnableProfileId(null)}>不启用</button>
+                    </span>
+                  ) : (
+                    <button type="button" disabled={loading} onClick={() => setConfirmEnableProfileId(profile.id)}>启用</button>
+                  )}
                 </div>
               ))}
               {profileHasMore && (

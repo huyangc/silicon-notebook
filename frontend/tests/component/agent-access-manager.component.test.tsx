@@ -339,6 +339,55 @@ test("Profile 已停用的 token 不提供修改入口", async () => {
   expect(within(row as HTMLElement).queryByRole("button", { name: /修改权限/ })).not.toBeInTheDocument();
 });
 
+test("已停用的 Profile 可以在行内确认后重新启用，结果落在该行", async () => {
+  let status = "revoked";
+  const profile = () => ({
+    id: "agent-1", owner_id: "user-1", name: "Claude Code", description: "", status,
+    created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-02T00:00:00Z",
+  });
+  routeRequests(baseRoutes({
+    "GET /agent-profiles": () => [profile()],
+    "GET /agent-tokens": () => [activeToken],
+    "PATCH /agent-profiles/agent-1": () => {
+      status = "active";
+      return profile();
+    },
+  }));
+  const user = userEvent.setup();
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+
+  const profileRow = () => {
+    const row = screen.getAllByText("Claude Code")
+      .map((node) => node.closest(".agent-profile-list > div"))
+      .find((node): node is HTMLElement => node !== null);
+    expect(row).toBeDefined();
+    return row as HTMLElement;
+  };
+  const issuedRow = () => {
+    const row = screen.getAllByText("Claude Code")
+      .map((node) => node.closest("article"))
+      .find((node): node is HTMLElement => node !== null);
+    expect(row).toBeDefined();
+    return row as HTMLElement;
+  };
+  await screen.findAllByText("Claude Code");
+  expect(within(issuedRow()).getByText("Profile 已停用")).toBeInTheDocument();
+
+  await user.click(within(profileRow()).getByRole("button", { name: "启用" }));
+  expect(profileRow()).toHaveTextContent("未撤销、未过期的 token 立即恢复可用");
+  await user.click(within(profileRow()).getByRole("button", { name: "不启用" }));
+  expect(requestsTo("PATCH /agent-profiles/agent-1")).toHaveLength(0);
+
+  await user.click(within(profileRow()).getByRole("button", { name: "启用" }));
+  await user.click(within(profileRow()).getByRole("button", { name: "确认启用" }));
+  expect(await within(profileRow()).findByRole("status")).toHaveTextContent("已启用");
+  expect(within(profileRow()).getByRole("button", { name: "停用" })).toBeInTheDocument();
+  const [patch] = requestsTo("PATCH /agent-profiles/agent-1");
+  expect(JSON.parse(String(patch.body))).toEqual({ status: "active" });
+  await waitFor(() => expect(within(issuedRow()).queryByText("Profile 已停用")).not.toBeInTheDocument());
+  expect(within(issuedRow()).getByRole("button", { name: /修改权限/ })).toBeInTheDocument();
+});
+
 const profileOne = {
   id: "agent-1", owner_id: "user-1", name: "Claude Code", description: "", status: "active",
   created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-02T00:00:00Z",

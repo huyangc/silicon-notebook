@@ -1166,7 +1166,9 @@ owner 拥有的笔记本生效）。代码内部仍按细粒度能力（`knowled
 权限、调用记录仍记能力名，一张映射表把能力归到档位；请求旧能力串或未知值签发一律 422
 `unsupported agent scopes`。签发与修改时勾了 `manage` 或 `delete`、而 allowlist 里没有一个
 owner 自己拥有的笔记本，返回 422「管理和删除权限只对你拥有的笔记本生效，所选笔记本里没有你拥有的」
-（用户可见文案）。可即时撤销。
+（用户可见文案）。可即时撤销。Profile 可停用（`PATCH /api/agent-profiles/{id}` `status: "revoked"`，
+其全部 token 立即失效），也可在同一页行内二次确认后重新启用（`status: "active"`）：名下未撤销、未过期的
+token 随即恢复可用，停用期间被撤销的 token 不恢复。
 
 Token 签发后可以再次复制：服务端在签发时保存明文（`agent_access_tokens.token_plain`），鉴权仍只按
 哈希比对。`GET /api/agent-tokens` 的每行带 `copyable`（明文在且未撤销）但从不带明文；

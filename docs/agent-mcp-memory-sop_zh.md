@@ -487,7 +487,7 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 | 症状 | 检查与处理 |
 | --- | --- |
 | `401`，`code` 为 `token_invalid`（`invalid or expired Agent token`） | token 是否复制完整；环境变量是否在启动 Agent 的同一进程环境中。格式错误、不存在与不匹配一律是这一个答复，不泄露 token 是否存在。 |
-| `401`，`code` 为 `token_revoked` / `token_expired` / `profile_disabled` / `owner_ineligible` | 只有 token 完整且匹配时才会给出具体原因：分别是已撤销（重新签发）、已过期（**修改权限**里调整有效期或重新签发）、所属 Profile 已停用（目前界面只能停用、不能重新启用：换一个启用中的 Profile 签发新 token）、主人账号当前不具备 Agent 接入资格（联系管理员）。`detail` 是可直接展示的中文说明。 |
+| `401`，`code` 为 `token_revoked` / `token_expired` / `profile_disabled` / `owner_ineligible` | 只有 token 完整且匹配时才会给出具体原因：分别是已撤销（重新签发）、已过期（**修改权限**里调整有效期或重新签发）、所属 Profile 已停用（在 **Agent Profile** 区域对它点 **启用** → **确认启用**）、主人账号当前不具备 Agent 接入资格（联系管理员）。`detail` 是可直接展示的中文说明。 |
 | `[scope_missing] …` / `[notebook_not_allowed] …` / `[owner_only] …` | 先看方括号里的错误码；下方「错误码」表列出了全部取值。 |
 | `[notebook_not_allowed]`「这个笔记本不在此凭证的笔记本白名单里…」 | 在 **Agent 接入 → 已签发 Token** 对该 token 点 **修改权限**，把该 notebook 加进白名单（下一次工具调用起生效）；或为它签发新 token。只加真正需要的 notebook。 |
 | 「此凭证缺少「…」权限」 | 报错写明了缺的是哪一档。对照上方权限表，用 **修改权限** 只补上那一档，或重新签发最小权限 token。档位不可在客户端侧提升。 |
@@ -529,7 +529,7 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 
 | 错误码 | 含义 | 处理 |
 | --- | --- | --- |
-| `token_inactive` | token 已撤销、已过期，所属 Profile 已停用，或主人账号当前不具备 Agent 接入资格 | 重新签发 token（Profile 已停用时换用启用中的 Profile）；主人资格问题联系管理员 |
+| `token_inactive` | token 已撤销、已过期，所属 Profile 已停用，或主人账号当前不具备 Agent 接入资格 | 重新签发 token，或重新启用 Profile；主人资格问题联系管理员 |
 | `scope_missing` | token 缺少该工具需要的权限档位（说明里写出档位） | 用 **修改权限** 补上那一档 |
 | `notebook_not_allowed` | 笔记本不在 token 的白名单内 | 把它加入白名单 |
 | `notebook_unreadable` | token 主人已无权读取该笔记本 | 检查主人的成员身份 |
@@ -544,7 +544,7 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 
 ## 10. 撤销与轮换
 
-在 **Agent 接入 → 已签发 Token** 点击 **撤销**，再在同一行点 **确认撤销**，服务端会在后续每次数据工具调用时重新检查实时 token 状态。在 **Agent Profile** 区域点 **停用** 会让它的全部 token 立即失效（不需要二次确认）；界面目前没有重新启用的入口。
+在 **Agent 接入 → 已签发 Token** 点击 **撤销**，再在同一行点 **确认撤销**，服务端会在后续每次数据工具调用时重新检查实时 token 状态。在 **Agent Profile** 区域点 **停用** 会让它的全部 token 立即失效（不需要二次确认）。对已停用的 Profile 点 **启用**，再在同一行点 **确认启用**，它名下未撤销、未过期的 token 立即恢复可用；停用期间被撤销的 token 不会恢复。
 
 只想调整已有 token 能做什么时，点它的 **修改权限**：权限档位、默认笔记本、白名单与过期时间一起保存，Agent 的下一次工具调用即按新配置执行，无需重签或重新配置客户端。已撤销的 token、以及所属 Profile 已停用的 token 都不能修改。忘了复制的 token 可以在列表里点 **复制 token** 取回（本版本之前签发的除外）；token **泄露**时不要再复制它，应签发新 token 并撤销旧的。
 

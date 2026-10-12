@@ -506,7 +506,7 @@ A `401` at step 1 is a token problem. `400 Missing session ID` at step 3 means t
 | Symptom | Check |
 | --- | --- |
 | `401` with `code` `token_invalid` (`invalid or expired Agent token`) | Token completeness, and whether the environment variable existed before the Agent process started. A malformed, unknown or mismatched token always gets this one answer, so it never reveals whether a token exists. |
-| `401` with `code` `token_revoked` / `token_expired` / `profile_disabled` / `owner_ineligible` | Reported only for a complete, matching token: it was revoked (issue a new one), expired (adjust the expiry in **修改权限** or issue a new one), its Profile is disabled (the UI can disable a Profile but not re-enable it today: issue a new token under an active Profile), or the owner's account may not use Agent access right now (ask an administrator). `detail` is readable Chinese copy. |
+| `401` with `code` `token_revoked` / `token_expired` / `profile_disabled` / `owner_ineligible` | Reported only for a complete, matching token: it was revoked (issue a new one), expired (adjust the expiry in **修改权限** or issue a new one), its Profile is disabled (choose **启用** (enable) then **确认启用** (confirm) on it under **Agent Profile**), or the owner's account may not use Agent access right now (ask an administrator). `detail` is readable Chinese copy. |
 | `[scope_missing] …` / `[notebook_not_allowed] …` / `[owner_only] …` | The error code in square brackets is the first thing to read; the table below lists every code. |
 | `[notebook_not_allowed]` 「这个笔记本不在此凭证的笔记本白名单里…」 (notebook outside the allowlist) | In **Agent 接入 → 已签发 Token**, choose **修改权限** on that token and add the notebook to its allowlist (applies from the next tool call), or issue a new token for it. Add only the notebooks it truly needs. |
 | 「此凭证缺少「…」权限」 (a missing tier) | The error names the missing tier. Add only that tier with **修改权限** on the issued token, or issue a new least-privilege token; a client cannot elevate it. |
@@ -548,7 +548,7 @@ Every tool error reads `[<code>] <Chinese message>` (a client may prefix `Error 
 
 | Code | Meaning | What to do |
 | --- | --- | --- |
-| `token_inactive` | The token is revoked or expired, its Profile is disabled, or the owner's account may not use Agent access right now | Issue a new token (under an active Profile if the Profile was disabled); ask an administrator about the owner's eligibility |
+| `token_inactive` | The token is revoked or expired, its Profile is disabled, or the owner's account may not use Agent access right now | Issue a new token, or re-enable the Profile; ask an administrator about the owner's eligibility |
 | `scope_missing` | The token lacks the permission tier the tool needs (named in the message) | Add that tier with **修改权限** |
 | `notebook_not_allowed` | The notebook is outside the token's allowlist | Add it to the allowlist |
 | `notebook_unreadable` | The token's owner can no longer read the notebook | Check the owner's membership |
@@ -563,7 +563,7 @@ Every tool error reads `[<code>] <Chinese message>` (a client may prefix `Error 
 
 ## 10. Revoke and rotate
 
-Use **Agent access → issued tokens → 撤销 (revoke)**, then **确认撤销** (confirm) on the same row. Every data tool rechecks live token state. Choosing **停用** (disable) under **Agent Profile** invalidates all its tokens immediately, with no confirmation step; the UI currently offers no way to re-enable it.
+Use **Agent access → issued tokens → 撤销 (revoke)**, then **确认撤销** (confirm) on the same row. Every data tool rechecks live token state. Choosing **停用** (disable) under **Agent Profile** invalidates all its tokens immediately, with no confirmation step. On a disabled Profile, choose **启用** (enable) and then **确认启用** (confirm) on the same row: its tokens that are neither revoked nor expired work again at once, while a token revoked during the disabled period stays revoked.
 
 To change what an existing token may do, choose **修改权限** (edit access) on it instead: tiers, default notebook, allowlist, and expiry are saved together and the Agent's next tool call sees them, with no reissue or client reconfiguration. Revoked tokens, and tokens whose Profile is disabled, cannot be edited. A token you forgot to copy can be copied again from the list with **复制 token** (except tokens issued before this version); if a token was **exposed**, do not copy it again — issue a new one and revoke the old one.
 
