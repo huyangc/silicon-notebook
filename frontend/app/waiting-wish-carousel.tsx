@@ -184,7 +184,7 @@ export function WaitingWishCarousel() {
         </div>
       )}
       {state.kind === "ready" && items.length === 0 && (
-        <p className="waiting-wish-state">暂无处理中的愿望，欢迎去许愿墙分享想法。</p>
+        <p className="waiting-wish-state">暂无待处理或处理中的愿望，欢迎去许愿墙分享想法。</p>
       )}
       {item && (() => {
         const Icon = WISH_ICONS[item.kind];
