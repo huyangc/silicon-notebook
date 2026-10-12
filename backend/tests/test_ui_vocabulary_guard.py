@@ -386,6 +386,16 @@ def test_图谱Schema放行对后端user_error也生效(tmp_path):
         'MSG = "基准库不可用"\ndef f(MSG):\n    raise user_error(400, MSG)',
         # 条件表达式两个分支各算一个单元,不跨分支拼出「社区」。
         'raise user_error(400, "社" if c else "区")',
+        # 拼接中解析不了的一段当插值(空白),两侧字面量不会被拼成「社区」。
+        'raise user_error(400, "社" + x + "区")',
+        # 作用域遮蔽:for 循环变量、lambda 形参、except … as、推导式变量、函数内 import
+        # 都是局部名,值静态未知,不拿同名模块常量顶替。
+        'MSG = "基准库不可用"\ndef f(xs):\n    for MSG in xs:\n        raise user_error(400, MSG)',
+        'def f():\n    msg = "基准库"\n    g = lambda msg: user_error(400, msg)',
+        'exc = "基准库"\ndef f():\n    try:\n        pass\n    except Exception as exc:\n'
+        '        raise user_error(400, exc)',
+        'MSG = "基准库"\nerrs = [user_error(400, MSG) for MSG in xs]',
+        'MSG = "基准库"\ndef f():\n    from app.messages import MSG\n    raise user_error(400, MSG)',
         # 位置不对的字符串(status_code 位)不是 message
         'raise user_error("基准库", 400)',
         # 同名但不是标记函数的调用
@@ -420,6 +430,19 @@ def test_不在信任边界上的后端字符串不误报(tmp_path, code):
         'raise user_error(400, _msg(n))',
         # helper 里再经一层模块常量
         'BASE = "基准库"\ndef _msg():\n    return BASE + "不可用"\nraise user_error(400, _msg())',
+        # 长拼接链:最左边的前缀不因链长被丢掉(结构节点不扣深度)
+        'raise user_error(400, "基准库 " + a + "，" + b + "，" + c + "。")',
+        'raise user_error(400, "基准库 " + a + "，" + b + "，" + c + "，" + a + "，" + b + "。")',
+        # 长拼接链 + 变量中转
+        'def f(a, b):\n    m = "基准库：" + a + "，" + b + "，" + a + "。"\n'
+        '    raise user_error(400, m)',
+        # 长拼接链 + helper 中转 + 变量中转
+        'def _h(a, b):\n    return "基准库 " + a + " / " + b + " / " + a + "。"\n'
+        'def f():\n    m = _h(1, 2)\n    raise user_error(400, m)',
+        # `+=` 追加的文案同样是候选
+        'def f():\n    msg = "保存"\n    msg += "基准库"\n    raise user_error(400, msg)',
+        # 小组合跨 `+` 两侧拼出的黑话照报(积未超上限时两侧确实拼接)
+        'raise user_error(400, ("基" if c else "x") + ("准库" if d else "y"))',
     ],
 )
 def test_后端可展示文案的间接写法也会被抓到(tmp_path, code):
@@ -437,20 +460,69 @@ def test_间接写法解析有深度上限且不因自引用卡死(tmp_path):
     assert scan_py(tmp_path, deep) == [], "超过深度上限的链条应放弃解析而不是无限追"
 
 
+def test_拼接组合超上限时退化为两侧各自检查而不是截断(tmp_path):
+    """状态标签字典 + 后缀是现实形态:组合数超 MAX_UNITS_PER_EXPR 时不能静默丢掉后面
+    的单元——退化为左右两侧各自检查,单侧黑话一条不漏。"""
+    n = guard.MAX_UNITS_PER_EXPR + 6
+    entries = ", ".join(f'"k{i}": "状态{i}"' for i in range(n - 1))
+    code = (
+        f'_L = {{{entries}, "last": "基准库"}}\n'
+        'raise user_error(400, _L.get(k, "未知") + "失败")'
+    )
+    assert "基准库" in scan_py(tmp_path, code)
+    # 后缀一侧的黑话同样不丢
+    code_rhs = (
+        f'_L = {{{entries}, "last": "正常"}}\n'
+        'raise user_error(400, _L.get(k, "未知") + "（基准库）")'
+    )
+    assert "基准库" in scan_py(tmp_path, code_rhs)
+
+
+def test_自引用链的解析代价是线性的(tmp_path, monkeypatch):
+    """只有名字跳转扣深度以后,`x = x + "…"` 这种自引用若没有 (节点, 深度) 级 memo,
+    调用次数按 赋值数^深度 增长。这里数 _compute 的调用次数钉住 memo。"""
+    calls = 0
+    real = guard._IndirectCopy._compute
+
+    def counting(self, node, depth):
+        nonlocal calls
+        calls += 1
+        return real(self, node, depth)
+
+    monkeypatch.setattr(guard._IndirectCopy, "_compute", counting)
+    code = 'MSG = "基准库"\n' + 'MSG = MSG + "。"\n' * 12 + "raise user_error(400, MSG)"
+    assert "基准库" in scan_py(tmp_path, code)
+    assert calls < 2000, f"自引用解析调用了 {calls} 次——memo 失效了"
+
+
 def test_环境变量名在后端通道里不当黑话但裸词照抓(tmp_path):
     """`SILICON_NOTEBOOK_AUTH_OPTIONAL` 是配置键名(admin_routes 统一登录开关的拒绝文案),
-    不是界面黑话;剥离只吃全大写下划线的完整标识符,裸 notebook / KG 照抓。"""
+    不是界面黑话;剥离只吃**已登记**的部署配置键(从 config.py 推出),裸 notebook / KG、
+    以及长得像环境变量的内部码照抓。"""
     assert scan_py(
         tmp_path, 'raise user_error(409, "请先关闭 SILICON_NOTEBOOK_AUTH_OPTIONAL 再启用")'
     ) == []
     assert scan_trace(
-        tmp_path, 'TraceStep(step_type="skip", summary="已按 SILICON_NOTEBOOK_KG_MODE 跳过")'
+        tmp_path,
+        'TraceStep(step_type="skip", summary="已按 NOTEBOOK_QUESTION_SOURCE_LIMIT 截断")',
     ) == []
+    # 形状像环境变量、但部署并不读的内部码:不放行。
+    assert "KG" in scan_py(tmp_path, 'raise user_error(409, "失败:KG_NOT_READY")')
+    assert "Memory" in scan_trace(
+        tmp_path, 'TraceStep(step_type="skip", summary="超过 MEMORY_LIMIT")'
+    )
     assert "notebook" in scan_py(tmp_path, 'raise user_error(409, "请先打开 notebook")')
     assert "notebook" in scan_py(
         tmp_path, 'raise user_error(409, "请检查 Silicon_Notebook_Auth 设置")'
     )
     assert "KG" in scan_trace(tmp_path, 'TraceStep(step_type="skip", summary="KG 未就绪")')
+
+
+def test_环境变量白名单从部署配置推出():
+    registered = guard._registered_env_vars()
+    assert "SILICON_NOTEBOOK_AUTH_OPTIONAL" in registered
+    assert "AUTH_PUBLIC_BASE_URL" in registered
+    assert "KG_NOT_READY" not in registered and "MEMORY_LIMIT" not in registered
 
 
 def test_环境变量名剥离只作用于后端两条通道(tmp_path):
@@ -609,6 +681,123 @@ def test_真实轨迹摘要扫描面非空且登记的模块都在(tmp_path):
     )
 
 
+
+
+# --------------------------------------------------------------------------
+# 5c. 第五条通道:登记的后端展示字段(索引管线选项、知识图谱分析作业的失败文案)
+# --------------------------------------------------------------------------
+
+
+def scan_fields(tmp_path: pathlib.Path, code: str, *, store_module: bool = False) -> list[str]:
+    path = tmp_path / "fields_sample.py"
+    path.write_text(code, encoding="utf-8")
+    return [
+        term for _line, term, _text in
+        guard.scan_display_fields(path, store_module=store_module)[1]
+    ]
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        # 索引管线选项:label 与 description 都上屏
+        'IndexingPipelineOption(pipeline_id="", label="内建", description="知识抽取策略")',
+        'IndexingPipelineOption(label=f"{name} notebook 管线", description="")',
+        # 作业失败文案:模块常量
+        'MSG = "知识抽取未通过校验"\n'
+        'self.kg_build_jobs.finish(job_id, "failed", error_code="x", error_message=MSG)',
+        # f-string;接收者是裸名字也认
+        'kg_build_jobs.finish(job_id, "failed", error_message=f"{n} 个来源抽取失败")',
+        # set_stage 写的是同一列
+        'self._runtime.kg_build_jobs.set_stage(job_id, "stopping", error_message="建图中断")',
+    ],
+)
+def test_展示字段里的黑话会被抓到(tmp_path, code):
+    assert scan_fields(tmp_path, code), f"没抓到展示字段里的黑话:{code}"
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        # 同名 kwarg 但接收者不是 kg_build_jobs:删库作业、来源表的 error_message 是不上屏的诊断原文
+        'self.notebook_delete_jobs.finish(job_id, "failed", error_message="抽取失败")',
+        'jobs.finish(job_id, "failed", error_message="抽取失败")',
+        # 作业存储之外的 self.finish 不认
+        'self.finish(job_id, "failed", error_message="抽取失败")',
+        # 登记形状之外的 kwarg
+        'self.kg_build_jobs.finish(job_id, "failed", error_code="抽取失败")',
+        'IndexingPipelineOption(pipeline_id="抽取")',
+    ],
+)
+def test_不在展示字段登记表上的写入不误报(tmp_path, code):
+    assert scan_fields(tmp_path, code) == [], f"误报:{code}"
+
+
+def test_作业存储模块内的_self_finish_也算展示字段(tmp_path):
+    code = 'self.finish(job_id, "failed", error_message="分析任务抽取失败")'
+    assert scan_fields(tmp_path, code) == []
+    assert scan_fields(tmp_path, code, store_module=True) == ["抽取"]
+
+
+def test_真实展示字段确实曾经违规过(tmp_path):
+    """变异验证:把 knowledge_lifecycle 的作业失败文案改回「知识抽取」,守卫必须红。"""
+    module = next(
+        p for p in guard.DISPLAY_FIELD_ANCHOR_MODULES if p.name == "knowledge_lifecycle.py"
+    )
+    src = module.read_text(encoding="utf-8")
+    assert "索引管线知识分析未通过校验" in src, "文案又漂了,本变异样本需同步"
+    assert guard.scan_display_fields(module)[1] == []
+    mutated = tmp_path / "knowledge_lifecycle_mutated.py"
+    mutated.write_text(
+        src.replace("索引管线知识分析未通过校验", "索引管线知识抽取未通过校验"),
+        encoding="utf-8",
+    )
+    hits = [term for _line, term, _text in guard.scan_display_fields(mutated)[1]]
+    assert hits == ["抽取"], f"改回「知识抽取」后守卫应只报这一条:{hits}"
+
+
+@pytest.mark.architecture_contract
+def test_真实展示字段扫描面非空且登记的模块都在():
+    total = 0
+    for path in guard.DISPLAY_FIELD_ANCHOR_MODULES:
+        assert path.exists(), f"DISPLAY_FIELD_ANCHOR_MODULES 指向了不存在的模块:{path}"
+    for path in guard.DISPLAY_FIELD_ROOT.rglob("*.py"):
+        total += guard.scan_display_fields(
+            path, store_module=path in guard.KG_BUILD_JOB_STORE_MODULES
+        )[0]
+    assert total >= guard.MIN_DISPLAY_FIELD_SITES, f"只找到 {total} 个展示字段站点"
+
+
+@pytest.mark.parametrize("shared", [True, False])
+def test_展示字段违规让守卫红_两种扫描路径(tmp_path, monkeypatch, capsys, shared):
+    """默认 BACKEND_APP 与展示字段扫描面是同一棵树,在同一次遍历里扫;BACKEND_APP
+    被重定向时单独扫。两条路径都必须把违规报出来。"""
+    fields_root = tmp_path / "app"
+    fields_root.mkdir()
+    sample = fields_root / "pipeline.py"
+    sample.write_text(
+        'IndexingPipelineOption(label="内建", description="知识抽取策略")\n', encoding="utf-8"
+    )
+    page = tmp_path / "page.tsx"
+    page.write_text("export default function Page() { return <p>公共知识库</p> }\n", encoding="utf-8")
+    monkeypatch.setattr(guard, "FRONTEND_PRODUCTION_DIRS", (tmp_path,))
+    monkeypatch.setattr(guard, "DISPLAY_FIELD_ROOT", fields_root)
+    monkeypatch.setattr(guard, "DISPLAY_FIELD_ANCHOR_MODULES", (sample,))
+    monkeypatch.setattr(guard, "MIN_DISPLAY_FIELD_SITES", 1)
+    if shared:
+        monkeypatch.setattr(guard, "BACKEND_APP", fields_root)
+        monkeypatch.setattr(guard, "MIN_USER_ERROR_SITES", 0)
+    assert guard.main() == 1
+    err = capsys.readouterr().err
+    assert "pipeline.py:1: 「抽取」in display field" in err
+
+
+def test_展示字段扫描面塌了要红(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(guard, "DISPLAY_FIELD_CALLS", {})
+    monkeypatch.setattr(guard, "DISPLAY_FIELD_METHODS", {})
+    monkeypatch.setattr(guard, "_DISPLAY_FIELD_TOKENS", ())
+    assert guard.main() == 1
+    assert "display fields found" in capsys.readouterr().err
 
 
 # --------------------------------------------------------------------------
