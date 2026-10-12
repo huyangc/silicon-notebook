@@ -56,10 +56,14 @@ contributor constraints, not a second implementation history.
   `done`; `report.completed_observer` also cannot start retrieval/model work. Keep Ask's
   existing observer order, failure isolation and cost when changing its completion path.
 - `scripts/check_architecture_boundaries.py` enforces the G1 ratchets in
-  `scripts/architecture_boundary_baseline.json`: repository-to-service debt and facade
-  surface cannot grow; core/model-to-service imports, listed hot-function lengths, and
-  repository Protocol-method counts have zero slack. Lower the baseline in the same
-  change whenever one shrinks. Retire facade members against the
+  `scripts/architecture_boundary_baseline.json`: repository-to-service debt cannot grow;
+  the facade public surface, core/model-to-service imports, listed hot-function lengths,
+  and repository Protocol-method counts have zero slack. Lower the baseline in the same
+  change whenever one shrinks. The same script fails when a facade attribute that is
+  named only at run time no longer exists: a `_repository_from_weakref(...)` seam in
+  `repository_facade.py`, or a literal `getattr`/`hasattr` probe on a facade-shaped
+  receiver in `backend/app` or `scripts`. Those callers degrade silently instead of
+  raising, so the audit cannot see them. Retire facade members against the
   [caller ledger](./superpowers/plans/2026-08-23-facade-retirement-ledger.md), reproduced
   by `scripts/audit_facade_callers.py`; update the ownership/surface fixtures with
   `scripts/generate_repository_contract_fixtures.py --rebaseline-surface`.

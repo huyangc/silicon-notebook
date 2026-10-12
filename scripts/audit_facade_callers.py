@@ -38,20 +38,19 @@ Methodology (read before trusting a "retire-now" row)
    consumed, by ``scripts/generate_repository_contract_fixtures.py`` to
    derive ``facade_surface.json``'s owner column). So today it is *dormant*
    validation logic, not a live gate; the currently-live surface gate is
-   ``facade_surface_additions`` (``test_phase0_architecture_guard.py``),
-   which only diffs the public *name set* against
-   ``scripts/architecture_boundary_baseline.json``'s frozen
-   ``facade_public_surface`` allowlist and does not care whether a method's
-   body is a clean delegate. A method is a "delegate" here when its body is
+   ``facade_violations`` in ``scripts/check_architecture_boundaries.py``
+   (``facade_surface_additions`` + ``facade_surface_stale``), which diffs
+   the public *name set* against
+   ``scripts/architecture_boundary_baseline.json``'s
+   ``facade_public_surface`` allowlist with zero slack in both directions
+   and does not care whether a method's body is a clean delegate. A method is a "delegate" here when its body is
    a clean single-hop forward to ``self._runtime.<component>.<name>`` (or
    the small set of other known one-hop targets: ``self.retrieval``,
    ``self.maintenance``, ``self.report_execution``, ``self.event_log``,
    ``self._migrator``); anything else (loops, multi-statement logic, calls
-   to other facade members, branching) is an "adapter". 3 of the public
-   rows are adapters today (run this script for the current total row
-   count): ``source_parse_busy``, ``federated_retrieve``,
-   ``claim_report_generation`` (plus 3 private helpers outside this
-   audit's public-only scope).
+   to other facade members, branching) is an "adapter" (run this script
+   for the current adapter rows; e.g. ``source_parse_busy`` and
+   ``claim_report_generation``).
 
 2. **Caller resolution is receiver-whitelisted, not name-only.** A plain
    ``grep -rw <method_name>`` overcounts wildly: dozens of facade method
@@ -170,6 +169,12 @@ discussion):
   - Dynamic dispatch through fully computed strings (``getattr(x, some_var)``
     where ``some_var`` is not a literal), reflection, or serialization-driven
     dispatch cannot be seen by this script at all.
+  - A literal ``getattr``/``hasattr`` probe, or a
+    ``_repository_from_weakref(...).<name>`` seam, is only counted while
+    ``<name>`` is still on the facade; once a name is retired this script
+    stops seeing it. ``dynamic_facade_reference_violations`` in
+    ``scripts/check_architecture_boundaries.py`` covers that side: it fails
+    when such a reference names an attribute no repository class defines.
   - The scan only walks ``backend/app/``, ``scripts/`` and
     ``backend/tests/`` (plus ``repository_facade.py`` itself, scanned
     separately for the ``facade_internal`` bucket in point 6 above).
