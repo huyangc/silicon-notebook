@@ -39,12 +39,13 @@
   margin: 20px 0 8px;
 }
 
-/* 目录锚点跳转时,标题不要顶到视口最上沿贴着浏览器边。 */
+/* 目录锚点跳转时,标题落在吸顶的 PageHeader(.topbar,min-height 56px)下方再留 16px,
+   不被顶栏盖住(codex R3 P2)。守卫:tests/guards/page-header-anchor-offset.test.mjs。 */
 .manual-body h1,
 .manual-body h2,
 .manual-body h3,
 .manual-body h4 {
-  scroll-margin-top: 16px;
+  scroll-margin-top: 72px;
 }
 
 .manual-body p,
