@@ -457,6 +457,20 @@ test("改用户名提交后保存键进入忙态", async () => {
   await waitFor(() => expect(within(screen.getByRole("dialog")).getByRole("button", { name: "保存中…" })).toBeDisabled());
 });
 
+test("改用户名在途时本行管理入口也停用,点它不会收起忙态表单、丢掉输入", async () => {
+  primeCommonMocks();
+  mocks.updateAdminUsername.mockReturnValue(new Promise(() => undefined));
+  const user = userEvent.setup();
+  render(<AdminUsagePage />);
+  await submitRename(user, "e12345678");
+  const target = await targetRow();
+  const trigger = target.getByRole("button", { name: "管理 a00123456" });
+  await waitFor(() => expect(trigger).toBeDisabled());
+  await user.click(trigger);
+  const dialog = screen.getByRole("dialog", { name: "修改 a00123456 的用户名" });
+  expect(within(dialog).getByLabelText("a00123456 的新用户名")).toHaveValue("e12345678");
+});
+
 test("改用户名冲突时错误显示在弹出层内,输入保留可修改后重试", async () => {
   primeCommonMocks();
   mocks.updateAdminUsername.mockRejectedValueOnce(humanizedError("用户名已被占用", 409));
