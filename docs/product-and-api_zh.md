@@ -502,7 +502,7 @@ MCP `ask` 在 `notebooks` 传 2–8 个笔记本（或 `conversation_id` 以 `gc
 
 **范围冻结绝不关掉 chunk 向量检索。** 冻结的来源清单是**过滤**，不是**通道选择**。库有没有建 chunk ANN（scale 索引）是这个**库**的属性，与这次请求勾了几个来源无关，所以 chunk 通道的降级判据对带范围与不带范围的请求是同一把守卫：只有大库（`copyable=false`）或整库 chunk 数超过 `CHUNK_BRUTEFORCE_MAX_CHUNKS` 才退到有界 FTS 词法候选。没有 ANN 索引的**小库**，带范围的请求照常走**按允许来源有界**的暴力向量路径：chunk 文本行只读选中来源，向量则取与无范围请求**同一份**版本键控的整库矩阵缓存，再在**打分之前掩码**到允许 chunk 上。带范围的请求因此不比无范围多物化任何东西，「别为小库全表物化」这条顾虑在这条路径上不成立；而掩码正是它仍然只是**过滤**的原因——候选列表与返回的相似度/多样性矩阵行都严格是允许 chunk 的子集，被排除的内容既不参与 Top-K，也不作为 MMR 的多样性对照。已接受的代价是每次请求一次子集拷贝（全选冻结即拷贝整库那么大）。运维事件 `chunk_bruteforce_skipped(large_library_no_ann)` 因此只在大库/超阈值库出现，它携带的 `n_chunks` 恒为整库真实计数，且与开库路径共用同一份 seq-gated 计数 memo（不是允许来源内的计数，也不是候选数，更不会是占位值）。联邦 chunk 腿「只借用常驻索引」的那一条腿在同一个事件上用**另一个原因** `peek_no_warm_ann`：一个索引建好且健康的大参考库，只要索引此刻不常驻，就照样降级为有界 FTS；那里的 `n_chunks` 只是诊断值，因为决定降级的是 lane 而不是这个计数。用「清单非 `None`」直接判定「这是有界查询、可以只走词法」曾是一处生产缺陷：界面发出的每一次问答都携带冻结清单（全选冻结也带清单），于是所有未建索引的库在 UI 路径上完全失去 chunk 语义召回，中文问句检索英文语料首轮恒空。与之相对，**路由**语义——词法语料语言闸读到的 `source_restricted`——仍然只由真实收窄/冻结后漂移决定，从不由「清单非 `None`」推断。
 
-这个检索范围有**两个互相独立的维度**，都由问答意图预检/执行和新建深度报告共用、都默认全选：当前 notebook 每个可见导入来源一个复选框（`source_scope`），每个已挂载参考库**整库**一个复选框（`base_scope`，不展开到库内来源）。`AskIntentPreviewRequest`、`AskRequest` 和 `ReportCreate` 在 `source_scope` 之外接受可选的顶层 `base_scope`：`{ "mode": "include" | "exclude", "notebook_ids": string[] }`。`include` 只放行列出的挂载库；`exclude` 放行除列出库以外的全部挂载库；省略该字段时每个挂载库都参与，但**只经它的可见来源**——挂载库的 Knowhow 与个人记忆投影属于那个库自己的成员，所以在单库提问里不再参与（在该库内提问仍可用）。这些逐库上限在提问开始时冻结，且是完整的：之后才挂载的库不参与。提问开始时，如果某个挂载参考库的来源清单没能及时读出（每个库 5 秒，全部挂载库合计 10 秒），该库不参与本次回答——它不会在没有限制的情况下被检索——回答里会注明哪个参考库没有参与（`AskResponse.skipped_libraries`：`[{notebook_id, name, included: false}]`，库名是当时的快照，没有时整键缺席；MCP `ask` 把它放在 `coverage.skipped`）。再问一次通常就会包含。`notebook_ids` 只能指向当前已挂载到该 notebook 的参考库（否则 422）；与 `source_scope` 完全一样，API 入口把每一次提交——包括 `exclude` 加空列表——冻结成显式 include 快照，并在服务端重算 `narrowed`、忽略客户端提交的同名值。冻结对报告最要紧：解析后的范围持久化在问题理解合同里，并在意图确认与生成前原样重新应用，所以报告创建之后新挂载的参考库不会静默参与它。
+这个检索范围有**两个互相独立的维度**，都由问答意图预检/执行和新建深度报告共用、都默认全选：当前 notebook 每个可见导入来源一个复选框（`source_scope`），每个已挂载参考库**整库**一个复选框（`base_scope`，不展开到库内来源）。`AskIntentPreviewRequest`、`AskRequest` 和 `ReportCreate` 在 `source_scope` 之外接受可选的顶层 `base_scope`：`{ "mode": "include" | "exclude", "notebook_ids": string[] }`。`include` 只放行列出的挂载库；`exclude` 放行除列出库以外的全部挂载库；省略该字段时每个挂载库都参与，但**只经它的可见来源**——挂载库的 Knowhow 与个人记忆投影属于那个库自己的成员，所以在单库提问里不再参与（在该库内提问仍可用）。这些逐库上限在提问开始时冻结，且是完整的：之后才挂载的库不参与。提问开始时，如果某个挂载参考库的来源清单没能及时读出（每个库 5 秒，全部挂载库合计 10 秒），该库不参与本次回答——它不会在没有限制的情况下被检索——回答里会注明哪个参考库没有参与（`AskResponse.skipped_libraries`：`[{notebook_id, name, included: false}]`，库名是当时的快照，没有时整键缺席；MCP `ask` 在 `coverage.skipped` 里计数、在 `coverage.skipped_notebooks` 里列出）。再问一次通常就会包含。`notebook_ids` 只能指向当前已挂载到该 notebook 的参考库（否则 422）；与 `source_scope` 完全一样，API 入口把每一次提交——包括 `exclude` 加空列表——冻结成显式 include 快照，并在服务端重算 `narrowed`、忽略客户端提交的同名值。冻结对报告最要紧：解析后的范围持久化在问题理解合同里，并在意图确认与生成前原样重新应用，所以报告创建之后新挂载的参考库不会静默参与它。
 
 两个维度**正交**。`source_scope` 的收窄关的是**当前库自己**的通道（PPR、私有 Memory、社区报告、弱支撑关系、报告整库画像）；取消一个参考库的勾选绝不能顺带关掉其中任何一个，否则用户「少借一个库」就要为此付出当前库检索质量下降的代价。按名称精确查找不因收窄而关闭（chunk 与 reasoning 模式都一样）：本次运行的来源天花板下推进探针，只有天花板内的小节能占探针窗口与节名额。跨库通道各自认库维度：集合枚举与集合地图、联邦候选检索、社区扩展、图漫游、`follow_chain`、证据装配，以及 **KG 可用性闸**。最后这一个是**判据**而非结果过滤——本库无图、唯一带图的库被取消勾选时必须判「无图」，否则 `kg_required` 不翻真、graph 路径会跑在一份这次不许读的图上；它经与候选检索同一个 `resolve_participants` 收口解析参与库，判据是**冻结的选择**（提交过即认），不看是否收窄。会话历史是唯一同时认两个维度的闸：上一轮答案可能引用了用户刚取消勾选的那个库的内容。
 
@@ -1155,7 +1155,7 @@ reason 1,000 字符、task context 序列化 UTF-8 8,192 bytes、evidence 最多
 MCP 提案严格使用这些 Core 上限，不再叠加更窄的重复限制。
 tag 原始列表会先按 20 条限额校验，再 trim/去重；空白 tag 直接拒绝。
 
-“Agent 接入”页（`/agents`，账户菜单一级入口；总 Memory 页也有链接指向它）可创建稳定
+“Agent 接入”页（`/agents`，账户菜单一级入口，也是它唯一的入口）可创建稳定
 Agent profile 并签发 token。
 Token 有过期时间、默认 notebook、notebook allowlist，并只授予所需的权限档位——存储与对外 API
 只有五档：`read`（读取：来源/知识/Knowhow、主人本人的 confirmed 与 candidate 个人记忆、库理解、
@@ -1185,7 +1185,7 @@ token 的过期时间改到将来会让它重新可用；签发与修改时 `exp
 已撤销的 token、或所属 Profile 已停用的 token 返回 409；allowlist 中含 owner 已无权读取的 notebook
 返回 422。浏览器在每个 token 行内编辑，忙碌、失败与「已保存」状态都落在该行；已撤销或所属 Profile
 已停用的 token 不提供修改入口，撤销需要在行内再确认一次。后端 requirements 已包含官方 `mcp>=1.26.0` client/server
-SDK。启动后，Streamable HTTP 服务位于 `/mcp/`（写 `/mcp` 会经 307 到达）。本机可用
+SDK。启动后，Streamable HTTP 服务位于 `/mcp/`（写 `/mcp` 会经 307 到达）。
 签发回执还会给出匿名 `GET /api/agent-mcp/onboarding`：这是一份机器可读的 Markdown 交接说明，
 把 `MCP_PUBLIC_URL` 逐字印成要配置的地址（绝不改写——代理可能只公布这一条精确路由），同时写明
 打到后端的 `POST /mcp` 是 307 指向 `/mcp/`，好让客户端无法在重定向中保留方法、请求体与
@@ -1195,7 +1195,7 @@ Authorization 的 Agent 知道解法；工具清单从部署实例的冻结目�
 带任意 query string 或 Authorization header 的请求会被拒绝。启动也会拒绝非绝对
 `http(s)`、path 不精确等于 `/mcp`，或含 userinfo、query/fragment、空白/控制符/反引号的
 `MCP_PUBLIC_URL`。
-loopback HTTP；默认允许远程明文 HTTP 并放宽 Host/Origin（DNS-rebinding）校验，供可信内网使用，
+本机可用 loopback HTTP；默认允许远程明文 HTTP 并放宽 Host/Origin（DNS-rebinding）校验，供可信内网使用，
 启动会打印明文告警（Agent token 明文过网）。公网部署请设 `MCP_REQUIRE_HTTPS=1` 强制 HTTPS
 （并恢复 Host/Origin 校验），并把 `MCP_PUBLIC_URL` 设为公开的 HTTPS `/mcp` URL。
 
@@ -1351,9 +1351,9 @@ client_request_id?)` 取代原先的单库与全局问答工具，只需要 `ask
 凭证得到 `get_ask` 同样的拒绝、拿不到回答；回答照常保存，调用只在成功交付时记入 Agent 调用账本。页里的 `trace` 中，每步的
 `summary` 与 `detail` 各截到 400 字并以 `summary_truncated` / `detail_truncated` 标明，引用了长问题的步骤
 不会让回答取不回来。
-两类任务返回同一页形状：`status`（`answered`/`failed`/`cancelled`，或 `needs_clarification`）、`job_id`、
+两类任务返回同一页形状：`status`（`answered`/`failed`/`cancelled`，或 `needs_clarification`；`get_ask` 读到仍在运行的任务时为 `running`）、`job_id`、
 `conversation_id`、`answer_id`、`answer` 与 `next_answer_offset`、`citations`（每条带 `ref`）与
-`next_citation_offset`、`coverage`（全局：上述回执；单库：被跳过的参考库记在 `coverage.skipped`）
+`next_citation_offset`、`coverage`（全局：上述回执；单库：`coverage.skipped` 是被跳过参考库的数量，`coverage.skipped_notebooks` 列出它们）
 与 `next_coverage_offset`、`trace`（分页，`trace.next_offset`）、`reasoning` 档的 `intent` 摘要，
 以及单库路径的 `anchors`。`get_ask(job_id, answer_offset?, citation_offset?, coverage_offset?,
 trace_offset?)` 按任务 id（`askjob-` 或 `gask-`）重读任意一页；每次调用都重新检查 token、白名单与读权限。
@@ -1445,7 +1445,9 @@ reflect）和铃铛。该任务行的 `conversation_id` 为空，删除会话不
 `label`、`source_title`、`location_label`、`source_id`、`element_id`、`tier`、`relevance`、`provenance`，适用时
 还有 `knowhow` / `memory_id` / `url`，由同一个锚点解析器产出），以及回答引用会带的 `ref`（来源元素是 `el` ref，
 Memory 条目是 `mem` ref），所以 `read_reference` 解析它的方式与解析回答引用完全一致（`knowhow` 对交给
-`get_knowhow_row`）。条目按上下文装配时记录下来的边界切分，从不在拼好的文本里重新查找：原文里一行看起来像另一个键
+`get_knowhow_row`）。`key` 只是这一次合成上下文里的标号，每次调用重新编号、离开该响应即无意义；Agent 对外引用
+一条证据时应使用它的出处字段（`source_title`、`location_label`）与 `ref`，而不是 `kN`（工具说明与
+[Agent MCP 记忆 SOP](./agent-mcp-memory-sop_zh.md) 都这样要求）。条目按上下文装配时记录下来的边界切分，从不在拼好的文本里重新查找：原文里一行看起来像另一个键
 （`k2: …`）或以方括号行结尾，都仍属于它自己的条目；只省略装配器自己插入的分隔符与分节标题；无法归属到某个键的
 文本作为 `kind="context"` 的条目原样返回，其中的键计入 `omitted`。`counts` 为
 `{recalled, selected, delivered, omitted, by_kind}`：各总数**不含 Memory**（Memory 只出现在 `by_kind` 里，其条数
