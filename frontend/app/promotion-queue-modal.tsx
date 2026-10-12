@@ -75,7 +75,7 @@ export function PromotionQueueModal({
             <h2>内容审核</h2>
             <p>个人知识库中的内容与记忆候选申请收录到公共知识库。批准后会合并重复并加入所选的目标公共知识库。</p>
           </div>
-          <button className="icon-button" onClick={() => onRequestClose("button")} title="Close">×</button>
+          <button className="icon-button" onClick={() => onRequestClose("button")} title="关闭">×</button>
         </div>
         <div className="source-detail-body">
           {candidates.length === 0 ? (

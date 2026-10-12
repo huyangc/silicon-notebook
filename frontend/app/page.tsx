@@ -6128,7 +6128,7 @@ export default function Home() {
                   ? "两种方式：发一条链接给具体的人，或者共享给一个群组（随成员进出自动生效与失效）。"
                   : "共享给一个群组（随成员进出自动生效与失效）。链接分享由库主管理。"}</p>
               </div>
-              <button className="icon-button" onClick={() => rootModals.requestClose("notebook-share", "button")} title="Close">×</button>
+              <button className="icon-button" onClick={() => rootModals.requestClose("notebook-share", "button")} title="关闭">×</button>
             </div>
             <div className="source-detail-body">
               {/* 链接分享区只对 owner 渲染(notebook:configure,恒 owner,P2-T2 评审 P0):
@@ -6202,7 +6202,7 @@ export default function Home() {
                 <h2>{sharedPreview.name}</h2>
                 <p>由 {sharedPreview.owner_display} 分享 · {sharedPreview.source_count} 来源 · {sharedPreview.node_count} 节点 · {sharedPreview.edge_count} 边</p>
               </div>
-              <button className="icon-button" onClick={() => rootModals.requestClose("shared-preview", "button")} title="Close">×</button>
+              <button className="icon-button" onClick={() => rootModals.requestClose("shared-preview", "button")} title="关闭">×</button>
             </div>
             <div className="source-detail-body">
               {sharedPreview.source_titles.length > 0 && (
@@ -6261,7 +6261,7 @@ export default function Home() {
                 <h2>已分享</h2>
                 <p>你分享出去的笔记本，以及每一本此刻正通过哪种方式对外可见。链接分享可以在这里复制与撤销；共享给群组的部分在别处管理。</p>
               </div>
-              <button className="icon-button" onClick={() => rootModals.requestClose("shared-by-me", "button")} title="Close">×</button>
+              <button className="icon-button" onClick={() => rootModals.requestClose("shared-by-me", "button")} title="关闭">×</button>
             </div>
             <div className="source-detail-body">
               {sharedByMeList === null ? (
@@ -6378,7 +6378,7 @@ export default function Home() {
                 <h2>添加来源</h2>
                 <p>上传文件或添加链接；文件可为每个指定文档类型（默认自动检测），类型决定要分析出哪些字段。</p>
               </div>
-              <button className="icon-button" onClick={() => closeSourceModal("button")} title="Close">×</button>
+              <button className="icon-button" onClick={() => closeSourceModal("button")} title="关闭">×</button>
             </div>
             {docCapacity.show && (
               <div className={`source-doc-capacity${docCapacity.atCapacity ? " is-full" : ""}`}>
@@ -6589,7 +6589,7 @@ export default function Home() {
                   就把用户锁死在弹窗里,只能刷新页面。按下 = 显式取消(closeEditor 的既有
                   语义:后续写入步骤停在下一个检查点),并由它自己发一条说明已提交部分
                   不会撤销的提示。 */}
-              <button className="icon-button" onClick={() => rootModals.requestClose("notebook-editor", "button")} title="Close">×</button>
+              <button className="icon-button" onClick={() => rootModals.requestClose("notebook-editor", "button")} title="关闭">×</button>
             </div>
             <form className="edit-form notebook-settings-form" onSubmit={submitNotebookEditor}>
               <section className="settings-section">
@@ -6796,7 +6796,7 @@ export default function Home() {
               {/* 同 notebook-editor:这个 slot 也不接 Escape/遮罩点击,关闭入口不能被
                   busy 禁用,否则一个挂死的 DELETE 就没有出口。已在飞的 DELETE 不因关框
                   而撤销——它的成功/失败两路都绑在 actor 上,关框后照样落地并出提示。 */}
-              <button className="icon-button" onClick={() => rootModals.requestClose("notebook-delete", "button")} title="Close">×</button>
+              <button className="icon-button" onClick={() => rootModals.requestClose("notebook-delete", "button")} title="关闭">×</button>
             </div>
             <div className="modal-actions padded">
               <button className="sort-button" onClick={() => rootModals.requestClose("notebook-delete", "button")}>{notebookCollection.deletion?.busy ? "关闭" : "取消"}</button>
@@ -6845,7 +6845,7 @@ export default function Home() {
                 <h2>{infoModal.title}</h2>
                 <p>{infoModal.message}</p>
               </div>
-              <button className="icon-button" onClick={closeInfoModal} title="Close">×</button>
+              <button className="icon-button" onClick={closeInfoModal} title="关闭">×</button>
             </div>
             <div className="info-body">
               {infoModal.sections && (
@@ -7161,7 +7161,7 @@ export default function Home() {
                 <h2>知识分析看板</h2>
                 <p>回答质量、审核进度、知识覆盖、来源状态与索引构建状态的本机统计。</p>
               </div>
-              <button className="icon-button" onClick={() => closeAnalytics("button")} title="Close">×</button>
+              <button className="icon-button" onClick={() => closeAnalytics("button")} title="关闭">×</button>
             </div>
             <div className="source-detail-body">
               <p className="section-title">回答质量</p>
@@ -7584,7 +7584,7 @@ export default function Home() {
                 <h2>图谱 Schema</h2>
                 <p>左边是这个范围里现有的类型，右边是选中类型的定义；改动要按下保存才生效。</p>
               </div>
-              <button className="icon-button" onClick={() => closeKgSchemas("button")} title="Close">×</button>
+              <button className="icon-button" onClick={() => closeKgSchemas("button")} title="关闭">×</button>
             </div>
             <div className="schema-modal-body">
               <SchemaManager
@@ -7621,7 +7621,7 @@ export default function Home() {
                     笼统的「下面几档都会带上、都能改」会给出错误的隐私预期。 */}
                 <p>前两档会在提问时一并带上，可以随时改；最后的 Agent 记录只留痕，不会进入回答。</p>
               </div>
-              <button className="icon-button" onClick={() => rootModals.requestClose("understanding", "button")} title="Close">×</button>
+              <button className="icon-button" onClick={() => rootModals.requestClose("understanding", "button")} title="关闭">×</button>
             </div>
             <div className="source-detail-body">
               {/* key=当前笔记本:切库那一刻整个面板重挂而不是靠 prop 变化自己刷新——

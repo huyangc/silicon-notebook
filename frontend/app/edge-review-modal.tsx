@@ -10,6 +10,7 @@
 
 import { formatEdgeReviewQueueTitle, type EdgeReviewItem } from "./edge-review-queue";
 import { FloatingModalCard } from "./floating-modal-card";
+import { edgeReviewStatusLabel, relationLabel } from "./relation-labels.ts";
 
 export function EdgeReviewModal({
   edges,
@@ -44,9 +45,9 @@ export function EdgeReviewModal({
         <div className="source-modal-header" {...floating.dragHandleProps}>
           <div>
             <h2>关系审核队列{formatEdgeReviewQueueTitle(total, edges.length)}</h2>
-            <p>按「高中心性 × 低可信」排序的关系。确认可信的关联，或拒绝错误的关联（被拒的关联将从所有图推理遍历中排除）。</p>
+            <p>按「高核心度 × 低可信」排序的关系。确认可信的关联，或拒绝错误的关联（被拒的关联将从所有图推理遍历中排除）。</p>
           </div>
-          <button className="icon-button" onClick={() => onRequestClose("button")} title="Close">×</button>
+          <button className="icon-button" onClick={() => onRequestClose("button")} title="关闭">×</button>
         </div>
         <div className="source-detail-body">
           {edges.length === 0 ? (
@@ -56,8 +57,8 @@ export function EdgeReviewModal({
               {edges.map((edge) => (
                 <article className="item" key={edge.rel_id}>
                   <div className="tag-row">
-                    <span className="tag">{edge.edge_type}</span>
-                    <span className="tag">{edge.review_status}</span>
+                    <span className="tag">{relationLabel(edge.edge_type)}</span>
+                    <span className="tag">{edgeReviewStatusLabel(edge.review_status)}</span>
                     <span className="tag">可信 {edge.trust_score.toFixed(2)}</span>
                     <span className="tag">优先级 {edge.review_priority.toFixed(2)}</span>
                   </div>

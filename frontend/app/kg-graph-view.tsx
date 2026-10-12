@@ -11,6 +11,7 @@ import { KG_TYPE_STYLE, KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import { KG_RANGE_STEPS } from "./kg-workspace-model.ts";
 import { Pagination } from "./Pagination";
 import { formatRelativeTime } from "./relative-time.ts";
+import { relationLabel } from "./relation-labels.ts";
 import { useClientPagination } from "./use-client-pagination.ts";
 import {
   describeScaleIndex,
@@ -20,7 +21,6 @@ import {
   type ScaleIndexStatus,
 } from "./scale-index.ts";
 import type { KgWorkspace } from "./use-kg-workspace";
-import { label } from "./vocabulary";
 import type {
   FgLink,
   FgNode,
@@ -32,41 +32,6 @@ import type {
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
-
-// 图谱边类型 → 中文。取值真源:prompts.py 列出的 edge_type 词表(supports /
-// depends_on / contrasts_with / about / defines / used_in / composed_of / mixed,
-// 外加可传递的 derived_from / kind_of / prerequisite_of / precedes / part_of)。
-// 此前有 8 个值只是把英文 id 抄了一遍(about: "about"),另有 5 个值压根没进表、
-// 靠 `?? edge_type` 直接把英文渲染给用户——两条路都是英文外泄,一并补齐。
-const RELATION_LABELS: Record<string, string> = {
-  related_concepts: "关联概念",
-  related_claims: "关联论断",
-  related_formulas: "关联公式",
-  related_procedures: "关联过程",
-  about: "关于",
-  defines: "定义",
-  supports: "支持",
-  depends_on: "依赖",
-  composed_of: "包含",
-  part_of: "属于",
-  precedes: "先于",
-  contrasts_with: "对比",
-  used_in: "用于",
-  derived_from: "推导自",
-  kind_of: "是一种",
-  prerequisite_of: "前置于",
-  mixed: "多种关联"
-};
-
-/**
- * 边类型的界面名。未映射时退到中性的「关联」,**绝不回落成 edge_type 原值**——
- * 后端每加一个边类型,`RELATION_LABELS[t] ?? t` 那种写法都会把英文 id 直接画到
- * 图上(used_in / mixed 等 5 个值就是这么泄出去的)。label() 强制传兜底词,并在
- * 开发期把未映射的值 console.error 出来,让新值被发现而不是被静默渲染。
- */
-function relationLabel(edgeType: string): string {
-  return label(RELATION_LABELS, edgeType, "关联");
-}
 
 // 待确认合并与相邻关系都整份在内存里(相邻关系此前被硬截到前 24 条,超出部分无从查看),
 // 界面每页显示的条数。
@@ -354,7 +319,7 @@ export function KgGraphView({
         >
           <Database size={16} /> 图谱 Schema
         </button>
-        <button className="icon-button" onClick={() => closeKgView()} title="Close">×</button>
+        <button className="icon-button" onClick={() => closeKgView()} title="关闭">×</button>
       </div>
     </div>
     <div className="kg-view-body">

@@ -77,6 +77,49 @@ test("逐条渲染并把 relId + 判定交回调用方；已拒绝的关系不�
   expect(onDecide).toHaveBeenLastCalledWith("rel-1", "rejected");
 });
 
+// 技术债 C2：类型与审核状态此前把后端 id（supports / pending）原样画成标签。
+test("关系类型与审核状态显示中文，认不出的值退到中性词而不是原值", () => {
+  // 未映射值走 label() 的兜底，开发期会 console.error 一次；这里收住并核对它确实走了那条路。
+  const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const { container } = render(
+    <EdgeReviewModal
+      edges={[
+        edge(),
+        edge({ rel_id: "rel-2", edge_type: "depends_on", review_status: "verified" }),
+        edge({ rel_id: "rel-3", edge_type: "contrasts_with", review_status: "rejected" }),
+        edge({
+          rel_id: "rel-4",
+          edge_type: "some_future_edge",
+          review_status: "escalated" as EdgeReviewItem["review_status"],
+        }),
+      ]}
+      total={4}
+      busy={false}
+      onRequestClose={noop}
+      onDecide={noop}
+    />,
+  );
+
+  const tagRows = Array.from(container.querySelectorAll(".tag-row")).map((row) =>
+    Array.from(row.querySelectorAll(".tag")).slice(0, 2).map((tag) => tag.textContent),
+  );
+  expect(tagRows).toEqual([
+    ["支持", "待审核"],
+    ["依赖", "已确认"],
+    ["对比", "已拒绝"],
+    // 未知状态不能说成「待审核」：那等于谎称这条关系还没人看过。
+    ["关联", "未知状态"],
+  ]);
+  for (const raw of ["supports", "pending", "verified", "rejected", "some_future_edge", "escalated"]) {
+    expect(container.textContent).not.toContain(raw);
+  }
+  expect(screen.getByText(/按「高核心度 × 低可信」排序的关系/)).toBeInTheDocument();
+  const unmapped = errors.mock.calls.map((call) => String(call[0]));
+  expect(unmapped.some((line) => line.includes("some_future_edge"))).toBe(true);
+  expect(unmapped.some((line) => line.includes("escalated"))).toBe(true);
+  errors.mockRestore();
+});
+
 test("busy 时确认与拒绝都禁用（防重复提交）", () => {
   render(
     <EdgeReviewModal edges={[edge()]} total={1} busy onRequestClose={noop} onDecide={noop} />,
@@ -101,7 +144,7 @@ test("「×」报 button、点背景报 backdrop；被盖住时整体退出交�
     />,
   );
 
-  await user.click(screen.getByTitle("Close"));
+  await user.click(screen.getByTitle("关闭"));
   expect(onRequestClose).toHaveBeenLastCalledWith("button");
 
   const dialog = container.querySelector("section.utility-modal")!;
