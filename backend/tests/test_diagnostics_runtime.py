@@ -793,8 +793,13 @@ def test_state_change_bursts_are_coalesced_to_minimum_interval(tmp_path, monkeyp
     monkeypatch.setattr(diagnostics.os, "replace", record_replace)
     runtime.start()
     try:
-        _wait_for_json(tmp_path / "runtime.json")
+        # The burst starts the moment the first publication is recorded, not
+        # after a file poll notices it: a writer that ignores ``next_write``
+        # then publishes again within one write's duration of the first, far
+        # below the bound, instead of ~one poll period later (which sat only
+        # 1-2ms under it and let the mutation survive on a slow machine).
         with replaced:
+            assert replaced.wait_for(lambda: len(replacements) >= 1, timeout=10.0)
             before_burst = len(replacements)
         with diagnostics.install_runtime(runtime):
             for index in range(100):

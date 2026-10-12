@@ -686,19 +686,50 @@ def test_hung_plugin_is_abandoned_within_the_deadline():
     assert events[-1]["reason_code"] == "gap_consult_timeout"
 
 
-class _JoinRecordingThreadingProxy:
-    """``threading`` as seen by the gap_consult module only, with every
-    ``Thread.join(timeout)`` recorded.  Everything else forwards to the real
-    module, so locks, events and thread behaviour are unchanged."""
+class _JoinDrivenClock:
+    """Fake monotonic clock that only moves when the host's join returns.
+
+    Each join advances it by the timeout the host asked for plus one tick,
+    i.e. "the full wait elapsed and then some".  The host's admission check
+    and its first join therefore read exactly ``base`` no matter how late the
+    test thread is scheduled, and the first join that waits out the budget
+    leaves the clock strictly past the deadline.  ``base`` and the budget are
+    binary-exact so ``deadline - now`` is the budget to the last bit.
+    """
+
+    base = 1024.0
+    tick = 2.0 ** -10
 
     def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._now = self.base
+
+    def __call__(self) -> float:
+        with self._lock:
+            return self._now
+
+    def joined(self, timeout: float | None) -> None:
+        with self._lock:
+            self._now += (timeout or 0.0) + self.tick
+
+
+class _JoinRecordingThreadingProxy:
+    """``threading`` as seen by the gap_consult module only, with every
+    ``Thread.join(timeout)`` recorded and reported to ``clock``.  Everything
+    else forwards to the real module, so locks, events and thread behaviour
+    are unchanged."""
+
+    def __init__(self, clock: _JoinDrivenClock) -> None:
         self.join_timeouts: list[float | None] = []
         recorded = self.join_timeouts
 
         class _RecordingThread(threading.Thread):
             def join(self, timeout=None):
                 recorded.append(timeout)
-                return super().join(timeout)
+                try:
+                    return super().join(timeout)
+                finally:
+                    clock.joined(timeout)
 
         self.Thread = _RecordingThread
 
@@ -712,13 +743,16 @@ def test_a_sub_slice_deadline_is_honored_for_a_hung_plugin(monkeypatch):
     # real latency becomes a multiple of the configured budget (codex #584 R2).
     #
     # The property is asserted on the join timeouts the host actually asks
-    # for, not on wall-clock latency: the budget is built as
-    # ``monotonic() + 0.01`` before the host reads its own clock, so every
-    # bounded join is <= 0.01, while a fixed-width join asks for the full
-    # slice.  Scheduler jitter cannot move either number.
+    # for, not on wall-clock latency, and the host reads an injected clock
+    # that only the joins move: a bounded join asks for exactly the remaining
+    # budget, a fixed-width join asks for the full 0.05s slice.  Neither the
+    # scheduler nor a slow machine can change either number, nor push the
+    # admission check onto the budget-exhausted path.
     from app.extensions import gap_consult as gap_consult_module
 
-    proxy = _JoinRecordingThreadingProxy()
+    budget = 2.0 ** -7  # ~7.8ms: below one 0.05s join slice, binary-exact
+    clock = _JoinDrivenClock()
+    proxy = _JoinRecordingThreadingProxy(clock)
     monkeypatch.setattr(gap_consult_module, "threading", proxy)
     release = threading.Event()
 
@@ -729,10 +763,11 @@ def test_a_sub_slice_deadline_is_honored_for_a_hung_plugin(monkeypatch):
 
     events: list[dict[str, object]] = []
     host = _host(_bundle("corp.hung", Hung()), event_sink=events.append)
+    host._clock = clock
 
     started = time.monotonic()
     try:
-        result = host.consult(_call(deadline=time.monotonic() + 0.01))
+        result = host.consult(_call(deadline=clock.base + budget))
         elapsed = time.monotonic() - started
     finally:
         release.set()
@@ -740,9 +775,9 @@ def test_a_sub_slice_deadline_is_honored_for_a_hung_plugin(monkeypatch):
     assert result == ()
     timeouts = proxy.join_timeouts
     assert timeouts, "the host never joined its worker"
+    assert timeouts[0] == budget, timeouts
     assert all(timeout is not None for timeout in timeouts), timeouts
-    assert max(timeouts) <= 0.01, timeouts
-    assert min(timeouts) >= 0, timeouts
+    assert max(timeouts) <= budget, timeouts
     # Sanity only (same bound as the hung-plugin test above); the property
     # under test is the join timeouts.
     assert elapsed < 1.0, elapsed
