@@ -24,7 +24,11 @@
   `live_read_access_exists_clause`,带笔记本存活谓词)、`_answer_save_scope_exists`、
   `validate_promotion_approval_access_on`(用列引用形式)。
 * `postgres/query_store.py`:本人自助读的 ask_jobs/reports(活动概览「只看提问/只看
-  报告」、铃铛待确认报告)经 `live_read_access_exists_clause`。
+  报告」)经 `live_read_access_exists_clause`。⚠ 铃铛的待确认报告**例外**:它用
+  `read_access_exists_clause` + 投影列 `(nb.<NOTEBOOK_LIVE_SQL>) AS notebook_live`、
+  在 Python 里丢行——那条语句没有 LIMIT,结果逐行相同;谓词放进 EXISTS 会让它的
+  generic 计划翻转(实测,计划钉 `test_memory_live_predicate_explain_pins.py`)。
+  别把它"统一"回来。
 * `postgres/mount_sql.py::MOUNT_VALID_EXPR` —— 「读权 ⇒ 可挂载」,用列引用形式嵌入,
   不消费任何参数。
 * `postgres/search.py::_memory_match_predicates` —— Memory 词法检索的读权过滤
@@ -471,8 +475,8 @@ def live_read_access_exists_clause(
     member_alias: str = "access_nm",
 ) -> str:
     """`read_access_exists_clause` 加笔记本存活谓词:copying/deleting/importing 的库
-    里的行读不到。理由与 SQLite 那一份同款(Memory 读查询、自助活动/铃铛里的
-    ask_jobs/reports 读)。
+    里的行读不到。理由与 SQLite 那一份同款(Memory 读查询、自助活动里的
+    ask_jobs/reports 读;铃铛的待确认报告不经这里,见模块 docstring)。
 
     存活谓词追加在**同一个** EXISTS 里、已按主键取到的那行 notebooks 上,不新增
     占位符——参数仍是 `read_access_params(user_id)`,调用点的参数元组不用改。

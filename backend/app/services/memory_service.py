@@ -1196,6 +1196,9 @@ class MemoryService:
         # The store reads the same owned subset its delete will remove
         # (creator only, not read access), so no derived row survives a
         # deleted Memory and no other user's projection is ever touched.
+        # Deliberately no notebook-lifecycle gate (unlike the single delete,
+        # which reads through get()): a notebook stuck in `importing` must
+        # still let its author clear their own Memory.
         refs = self.store.owned_memory_refs(user_id, memory_ids)
         failure: BaseException | None = None
         try:

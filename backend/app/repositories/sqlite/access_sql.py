@@ -432,9 +432,15 @@ def live_read_access_exists_clause(
 
     消费者:`memory_store._read_access_clause`(Memory 各处读查询,也是 Memory 写
     语句的读权门)、`postgres/search.py` 的 Memory 候选,以及 `query_store` 里本人
-    自助读的 ask_jobs/reports(活动概览「只看提问/只看报告」两条、铃铛的待确认
-    报告)。删除中/拷贝中/导入中的库「还不算存在」,入口闸(`require_notebook_read`
-    等)之外这些语句也要自己挡住,否则全局列表与直连 `/memories/{id}` 绕过入口。
+    自助读的 ask_jobs/reports(活动概览「只看提问/只看报告」两条)。删除中/拷贝中/
+    导入中的库「还不算存在」,入口闸(`require_notebook_read` 等)之外这些语句也要
+    自己挡住,否则全局列表与直连 `/memories/{id}` 绕过入口。
+
+    ⚠ 铃铛的待确认报告**不经这里**:它用 `read_access_exists_clause` + 投影列
+    `(nb.<NOTEBOOK_LIVE_SQL>) AS notebook_live`、由 Python 丢行。那条语句没有
+    LIMIT,两种写法结果逐行相同;而谓词放进 EXISTS 会让 PG 的 generic 计划在小库上
+    从 Hash Join 翻成 Nested Loop + pk(实测,计划钉
+    `tests/postgres/test_memory_live_predicate_explain_pins.py`)。别"统一"回来。
 
     存活谓词追加在**同一个** EXISTS 子查询里、已按主键取到的那行 notebooks 上,
     不新增占位符——参数仍是 `read_access_params(user_id)`,调用点的参数元组不用改;
@@ -445,7 +451,7 @@ def live_read_access_exists_clause(
     通用的 `read_access_exists_clause` 刻意**不动**:它还供管理员统计等别的消费者
     使用,折进去会把改动面扩大到未经审视的地方(与 `NOTEBOOK_WRITE_SQL` 上方注释
     同一取舍)。判断「Memory 行还在不在」的读(`memory_for_user(live_only=False)`,
-    抽图作业的复读)也刻意不用它。
+    抽图作业的复读、修订写入提交后的收尾读——锁内已校验过存活)也刻意不用它。
     """
     base = read_access_exists_clause(row_alias, nb_alias, member_alias)
     return f"{base[:-1]} AND {nb_alias}.{NOTEBOOK_LIVE_SQL})"

@@ -1110,7 +1110,9 @@ class MemoryStore:
                 changed_by,
                 reason,
             )
-        return self.memory_for_user(memory_id, user_id)
+        # The write above already checked the notebook is live under its lock;
+        # a delete committing since must not turn a landed write into a 404.
+        return self.memory_for_user(memory_id, user_id, live_only=False)
 
     def _lock_memory_aggregate_on(
         self,
@@ -1202,13 +1204,23 @@ class MemoryStore:
         ).fetchone()
 
     def lock_promotion_memory_on(
-        self, db: object, memory_id: str, candidate_notebook_id: str
+        self,
+        db: object,
+        memory_id: str,
+        candidate_notebook_id: str,
+        *,
+        require_live: bool = False,
     ) -> MemoryRecord:
+        # require_live: approving a promotion materializes this Memory into a
+        # base library, so a notebook being deleted/copied/imported refuses it
+        # (KeyError -> 404). The FOR SHARE lock on that notebook row holds to
+        # commit, so a delete cannot land between this check and the copy.
         row = self._lock_memory_aggregate_on(
             db,
             memory_id,
             expected_notebook=candidate_notebook_id,
             permission_error=True,
+            require_live=require_live,
         )
         return self._record(row)
 
@@ -1514,9 +1526,10 @@ class MemoryStore:
         (见那一份的 docstring)。
         """
         row = db.execute(
-            "SELECT m.notebook_id,"
+            "SELECT m.notebook_id,("
             + read_access_clause("n", user_ref="m.created_by")
-            + " AS has_access FROM memory_items m "
+            # K3: no approval out of a notebook being deleted/copied/imported.
+            + f" AND n.{NOTEBOOK_LIVE_SQL}) AS has_access FROM memory_items m "
             "JOIN notebooks n ON n.id=m.notebook_id WHERE m.id=%s",
             (memory_id,),
         ).fetchone()
@@ -1620,7 +1633,9 @@ class MemoryStore:
             )
             if cursor.rowcount != 1:
                 raise KeyError(memory_id)
-        return self.memory_for_user(memory_id, user_id)
+        # The write above already checked the notebook is live under its lock;
+        # a delete committing since must not turn a landed write into a 404.
+        return self.memory_for_user(memory_id, user_id, live_only=False)
 
     def transition(
         self,
@@ -1658,7 +1673,9 @@ class MemoryStore:
                 if exists is None:
                     raise KeyError(memory_id)
                 raise ValueError(f"invalid memory transition: {exists['status']} -> {target}")
-        return self.memory_for_user(memory_id, user_id)
+        # The write above already checked the notebook is live under its lock;
+        # a delete committing since must not turn a landed write into a 404.
+        return self.memory_for_user(memory_id, user_id, live_only=False)
 
     def delete_memory(self, memory_id: str, user_id: str) -> None:
         with self.database.write() as db:

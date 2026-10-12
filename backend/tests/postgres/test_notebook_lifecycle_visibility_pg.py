@@ -288,3 +288,13 @@ def test_memory_writes_refused_in_non_live_notebook(memory_world, state):
 @pytest.mark.parametrize("state", live_cases.NON_LIVE_STATES)
 def test_memory_kg_ingest_recheck_ignores_notebook_lifecycle(memory_world, state):
     live_cases.assert_ingest_recheck_survives_lifecycle_flip(memory_world, state)
+
+
+@pytest.mark.parametrize("state", live_cases.NON_LIVE_STATES)
+def test_memory_post_write_read_ignores_a_later_lifecycle_flip(memory_world, state):
+    live_cases.assert_post_write_read_survives_lifecycle_flip(memory_world, state)
+
+
+@pytest.mark.parametrize("state", live_cases.NON_LIVE_STATES)
+def test_memory_promotion_approval_refused_in_non_live_notebook(memory_world, state):
+    live_cases.assert_promotion_approval_refused_in_non_live(memory_world, state)
