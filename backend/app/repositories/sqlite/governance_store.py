@@ -850,21 +850,41 @@ class GovernanceStore:
         confidence: Optional[float],
         rationale: Optional[str],
         now: str,
-    ) -> str:
+        *,
+        reset_epoch: Optional[int] = None,
+    ) -> Optional[str]:
         cid = self.seams.new_id("kcc")
-        connection.execute(
+        values = (cid, notebook_id, kind, left_ref, right_ref,
+                  conflict_type, resolution, winner_ref, resolved_payload,
+                  confidence, rationale, now, now)
+        if reset_epoch is None:
+            connection.execute(
+                """
+                INSERT INTO kg_conflict_candidates
+                  (id, notebook_id, kind, left_ref, right_ref,
+                   conflict_type, resolution, winner_ref, resolved_payload,
+                   confidence, rationale, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                values,
+            )
+            return cid
+        # K1: insert only while kg_reset_epoch is still the caller's (missing
+        # state row = epoch 0) — PostgreSQL twin's comment. The write lock
+        # serializes this against the delete's final reset.
+        cur = connection.execute(
             """
             INSERT INTO kg_conflict_candidates
               (id, notebook_id, kind, left_ref, right_ref,
                conflict_type, resolution, winner_ref, resolved_payload,
                confidence, rationale, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?
+            WHERE COALESCE((SELECT kg_reset_epoch FROM unified_kg_state
+                            WHERE notebook_id=?), 0) = ?
             """,
-            (cid, notebook_id, kind, left_ref, right_ref,
-             conflict_type, resolution, winner_ref, resolved_payload,
-             confidence, rationale, now, now),
+            (*values, notebook_id, int(reset_epoch)),
         )
-        return cid
+        return cid if cur.rowcount else None
 
     @staticmethod
     def pending_conflicts(

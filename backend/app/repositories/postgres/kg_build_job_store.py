@@ -424,10 +424,14 @@ class KgBuildJobStore:
             "WHERE notebook_id=%s AND source_id=%s", (notebook_id, source_id),
         )
         connection.execute("DELETE FROM extraction_runs WHERE source_id=%s", (source_id,))
-        # PostgreSQL's legacy relation_embeddings table intentionally has no
-        # FK to knowledge_relations.  Delete vectors before either relation
-        # deletion shape; otherwise a successful publish can leave an orphan
-        # vector or collide with a staged relation that reuses the stable id.
+        # relation_embeddings.relation_id DOES reference knowledge_relations
+        # ON DELETE CASCADE (0001_initial.sql, pinned against the live catalog
+        # by the migration-shadow drift guard), so the relation DELETEs below
+        # would take these rows with them anyway. The explicit vector DELETE
+        # first is belt-and-braces, not a correctness requirement: it keeps
+        # the cascade empty and states the dependency where the relation
+        # deletion shapes are, so a staged relation that reuses the stable id
+        # can never meet a leftover vector.
         connection.execute(
             "DELETE FROM relation_embeddings WHERE relation_id IN "
             "(SELECT id FROM knowledge_relations WHERE source_id=%s)",

@@ -115,6 +115,32 @@ _GRAPH_RESET_TABLES = frozenset({
     # blanket-deleted by the loop below — see that UPDATE's comment for why.
 })
 
+# K1 (debt-fix 2026-10-12, ruling 11): the rebuild-derived tables —
+# canonical_relations, communities, community_members, concept_comentions,
+# mention_edges — are DELIBERATELY not cleared by a graph delete. Their rows
+# are unreachable once concept_clusters is gone (resolve_focal, the only way
+# into community / co-mention peers, reads concept_clusters alone; communities
+# are read at the published generation, which the reset returns to 0), the
+# next rebuild replaces them wholesale (replace_* / generation reap) and a
+# notebook delete cascades them. Draining them here was measured on a
+# production-shaped fixture (2M canonical_relations + 2M mention_edges):
+# delete job 0.87 s -> 33 s, post-commit survivor probe 26 ms -> 309 ms over
+# the dead tuples, ~5M extra sync-capture log rows for a delete with no
+# rebuild — a performance regression for no reader-visible change.
+# Also kept: kg_rebuild_checkpoint (only the rebuild reads it, version-GC'd
+# before every read), concept_whitelist (user configuration) and the two
+# per-run scratch tables (a concurrent run would read an empty input).
+
+# K1: drain steps that take part in the drain and in the final pass's
+# in-transaction bound probe, but NOT in the threshold-0 post-commit survivor
+# check. Their rows have writers the delete fence does not hold off — the
+# conflict-detection job (its own slot), a merge-review job finishing
+# (running→done), the Knowhow projector deleting an object a candidate cites —
+# so a row landing between commit and re-check is not a doc-graph survivor and
+# must not spend a reset attempt (three such rounds would turn a successful
+# delete into a reported failure).
+_GRAPH_DRAIN_SETTLE_EXEMPT = frozenset({"kg_conflict_candidates", "merge_review_jobs"})
+
 _DELETE_OBJECT_BATCH_SIZE = 500
 
 
@@ -777,6 +803,31 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int, bool], ...] = (
         2,
         True,
     ),
+    # K1: a conflict candidate goes once EITHER side's ref (an object id for
+    # kind=node, a relation id for kind=edge — both id spaces are probed, ids
+    # are globally unique) no longer exists, whatever its status: an applied
+    # or rejected row pointing at dead ids is history of a graph that is
+    # gone. Candidates between two surviving hidden (Memory/Knowhow) objects
+    # stay. After the object/relation steps, so the set only grows as they
+    # drain. Exempt from the post-commit survivor check
+    # (_GRAPH_DRAIN_SETTLE_EXEMPT).
+    (
+        "kg_conflict_candidates",
+        "notebook_id=%s AND ((NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
+        "WHERE ko.id=kg_conflict_candidates.left_ref) AND NOT EXISTS "
+        "(SELECT 1 FROM knowledge_relations kr "
+        "WHERE kr.id=kg_conflict_candidates.left_ref)) OR (NOT EXISTS "
+        "(SELECT 1 FROM knowledge_objects ko "
+        "WHERE ko.id=kg_conflict_candidates.right_ref) AND NOT EXISTS "
+        "(SELECT 1 FROM knowledge_relations kr "
+        "WHERE kr.id=kg_conflict_candidates.right_ref)))",
+        1,
+        True,
+    ),
+    # K1: the notebook's merge-review progress row, except a RUNNING one (the
+    # job keeps its single-flight row and finishes on an empty queue). Same
+    # post-commit exemption: running→done can land between commit and check.
+    ("merge_review_jobs", "notebook_id=%s AND status<>'running'", 1, True),
     ("concept_clusters", "notebook_id = %s", 1, True),
     ("concept_merge_candidates", "notebook_id = %s", 1, True),
     ("kg_analysis_artifacts", "notebook_id = %s", 1, True),
@@ -835,15 +886,20 @@ class KnowledgeStore:
 
     @staticmethod
     def graph_drain_backlog(
-        db: Any, notebook_id: str, threshold: int, start: int = 0
+        db: Any, notebook_id: str, threshold: int, start: int = 0,
+        *, post_commit: bool = False,
     ) -> "tuple[str, int] | None":
         """batch-3-W1 T-5a — SQLite twin's docstring has the full rationale
         (exists-at-offset point probe, read-only, keeps the small-graph
         ``delete_notebook_kg`` path free of extra write transactions; the
         ``start`` cursor rides the registry's strictly-forward convergence,
-        T-5a review F4)."""
+        T-5a review F4). ``post_commit=True`` (K1) is the threshold-0 survivor
+        check after a committed reset: it skips the
+        ``_GRAPH_DRAIN_SETTLE_EXEMPT`` steps."""
         for index in range(max(0, int(start)), len(_GRAPH_DRAIN_STEPS)):
             table, predicate, params, _mirrored = _GRAPH_DRAIN_STEPS[index]
+            if post_commit and table in _GRAPH_DRAIN_SETTLE_EXEMPT:
+                continue
             row = db.execute(
                 f"SELECT 1 FROM {table} WHERE {predicate} "
                 f"LIMIT 1 OFFSET {int(threshold)}",
@@ -1040,6 +1096,28 @@ class KnowledgeStore:
             (notebook_id, notebook_id),
         )
         counts["knowledge_object_sources"] = cur.rowcount
+        # K1: conflict candidates citing a dead object/relation (any status),
+        # and the merge-review progress row unless it is running — registry
+        # comments carry the rationale.
+        cur = db.execute(
+            "DELETE FROM kg_conflict_candidates WHERE notebook_id=%s AND "
+            "((NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
+            "WHERE ko.id=kg_conflict_candidates.left_ref) AND NOT EXISTS "
+            "(SELECT 1 FROM knowledge_relations kr "
+            "WHERE kr.id=kg_conflict_candidates.left_ref)) OR (NOT EXISTS "
+            "(SELECT 1 FROM knowledge_objects ko "
+            "WHERE ko.id=kg_conflict_candidates.right_ref) AND NOT EXISTS "
+            "(SELECT 1 FROM knowledge_relations kr "
+            "WHERE kr.id=kg_conflict_candidates.right_ref)))",
+            (notebook_id,),
+        )
+        counts["kg_conflict_candidates"] = cur.rowcount
+        cur = db.execute(
+            "DELETE FROM merge_review_jobs WHERE notebook_id=%s "
+            "AND status<>'running'",
+            (notebook_id,),
+        )
+        counts["merge_review_jobs"] = cur.rowcount
         for table in sorted(
             _GRAPH_RESET_TABLES - {"knowledge_embeddings", "extraction_runs"}
         ):

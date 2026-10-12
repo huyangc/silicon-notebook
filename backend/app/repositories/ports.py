@@ -2280,13 +2280,17 @@ class KnowledgeStorePort(Protocol):
         ...
     @staticmethod
     def graph_drain_backlog(
-        db: object, notebook_id: str, threshold: int, start: int = 0
+        db: object, notebook_id: str, threshold: int, start: int = 0,
+        *, post_commit: bool = False,
     ) -> "tuple[str, int] | None":
         """batch-3-W1 T-5a：``delete_notebook_kg`` 预排水的探针——从登记表
         下标 ``start`` 起,返回第一张匹配行数仍超过 ``threshold`` 的
         ``(表名, 下标)``,余下全部 ≤threshold 时返回 ``None``(= 终局单事务
         已经有界,可以停止排水)。只读点探(LIMIT 1 OFFSET threshold),小图
-        路径零写事务;``start`` 游标依托登记表严格向前的收敛性(评审 F4)。"""
+        路径零写事务;``start`` 游标依托登记表严格向前的收敛性(评审 F4)。
+        ``post_commit=True``(K1)= 终局提交后的阈值 0 幸存者复验:跳过
+        冲突候选与合并预审进度两步(它们有删除围栏挡不住的写者,只参与
+        排水与终局)。"""
         ...
     @staticmethod
     def drain_notebook_graph_rows_page(
