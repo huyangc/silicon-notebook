@@ -855,45 +855,8 @@ class RepositoryFacade:
     def notebook_owner(self, notebook_id: str) -> "tuple[str | None, str | None]":
         return self._runtime.identity.notebook_owner(notebook_id)
 
-    def list_user_usage(self) -> List[Dict[str, Any]]:
-        return self._runtime.queries.list_user_usage()
-
-    def list_user_notebooks(self, user_id: str) -> List[Dict[str, Any]]:
-        return self._runtime.queries.list_user_notebooks(user_id)
-
-    def notebook_exists_for_owner(self, notebook_id: str, user_id: str) -> bool:
-        return self._runtime.queries.notebook_exists_for_owner(notebook_id, user_id)
-
-    def list_user_activity(
-        self,
-        user_id: str,
-        *,
-        activity_type: Optional[str] = None,
-        include_inaccessible_questions: bool = False,
-        notebook_id: Optional[str] = None,
-        since: Optional[str] = None,
-        until: Optional[str] = None,
-        before_ts: Optional[str] = None,
-        before_id: Optional[str] = None,
-        limit: int = 50,
-    ) -> Dict[str, Any]:
-        return self._runtime.queries.list_user_activity(
-            user_id,
-            activity_type=activity_type,
-            include_inaccessible_questions=include_inaccessible_questions,
-            notebook_id=notebook_id,
-            since=since,
-            until=until,
-            before_ts=before_ts,
-            before_id=before_id,
-            limit=limit,
-        )
-
     def load_notebook_scale_facts(self, notebook_id: str):
         return self._runtime.queries.load_notebook_scale_facts(notebook_id)
-
-    def pending_actions_projection_rows(self, user_id: str) -> dict:
-        return self._runtime.queries.pending_actions_projection_rows(user_id)
 
     def chat(self, workload_id: str):
         return self._runtime.models.chat(workload_id)
@@ -3687,17 +3650,6 @@ class RepositoryFacade:
     def _build_chunk_retrieval_plan(self, notebook_id: str, sub_queries: list) -> ChunkRetrievalPlan:
         return self.retrieval.candidates._build_chunk_retrieval_plan(notebook_id, sub_queries)
 
-    def ask_chunk(
-        self,
-        notebook_id: str,
-        payload: AskRequest,
-        cancel_event: CancelEvent = None,
-    ) -> AskResponse:
-        """chunk-native 通用问答 — 冻结签名 delegate:engine body 在
-        AskService.ask_chunk (Task 24),身份适配 current_user().id。"""
-        return self._runtime.ask_component.ask_chunk_current(
-            notebook_id, payload, cancel_event)
-
     def ask(
         self,
         notebook_id: str,
@@ -3912,18 +3864,6 @@ class RepositoryFacade:
         return self._runtime.ask_component.unconfigured_model_response_current(
             notebook_id, question, conversation_id, mode)
 
-    def ask_reasoning(
-        self,
-        notebook_id: str,
-        payload: AskRequest,
-        on_trace=None,
-        cancel_event: CancelEvent = None,
-    ) -> AskResponse:
-        """Reasoning-mode ask — 冻结签名 delegate:engine body 在
-        AskService.ask_reasoning (Task 24),身份适配 current_user().id。"""
-        return self._runtime.ask_component.ask_reasoning_current(
-            notebook_id, payload, on_trace, cancel_event)
-
     def _parse_answer_anchors(self, answer: str, id_map: dict) -> list:
         """Resolve the `[k_i]` markers present in `answer` into AnswerAnchor
         objects (deduped, in first-seen order). Markers not in `id_map` and
@@ -3995,9 +3935,6 @@ class RepositoryFacade:
     def _ask_cancel_lock(self) -> threading.Lock:
         """WS2a 兼容座:注册表守卫锁(真身随注册表在 runtime,一个所有者)。"""
         return self._runtime.ask_cancellations.lock
-
-    def ask_job_status(self, job_id: str) -> dict:
-        return self._runtime.ask_state.ask_job_status(job_id)
 
     def append_ask_trace(self, job_id: str, step: dict) -> None:
         """把一个 trace step 追加进 ask_trace_steps 子表(append-only,O(1) 单行

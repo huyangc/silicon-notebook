@@ -243,29 +243,29 @@ def test_granted_notebook_rows(repo, lifecycle):
 
 
 def test_list_user_notebooks(repo, lifecycle):
-    rows = repo.list_user_notebooks(lifecycle["owner_id"])
+    rows = repo._runtime.queries.list_user_notebooks(lifecycle["owner_id"])
     assert {r["id"] for r in rows} == {lifecycle["active_id"], lifecycle["viewer_id"]}
 
 
 def test_list_user_usage(repo, lifecycle):
-    rows = repo.list_user_usage()
+    rows = repo._runtime.queries.list_user_usage()
     mine = next(r for r in rows if r["id"] == lifecycle["owner_id"])
     # active + viewer 两本可见笔记本;copying/deleting 不计入。
     assert mine["notebooks"] == 2
 
 
 def test_list_user_activity_scoped(repo, lifecycle):
-    active = repo.list_user_activity(
+    active = repo._runtime.queries.list_user_activity(
         lifecycle["owner_id"], notebook_id=lifecycle["active_id"], activity_type="ask"
     )
     assert [item["id"] for item in active["items"]] == ["ask-0"]
 
-    copying = repo.list_user_activity(
+    copying = repo._runtime.queries.list_user_activity(
         lifecycle["owner_id"], notebook_id=lifecycle["copying_id"], activity_type="ask"
     )
     assert copying == {"items": [], "has_more": False, "next_cursor": None}
 
-    deleting = repo.list_user_activity(
+    deleting = repo._runtime.queries.list_user_activity(
         lifecycle["owner_id"], notebook_id=lifecycle["deleting_id"], activity_type="ask"
     )
     assert deleting == {"items": [], "has_more": False, "next_cursor": None}
@@ -275,15 +275,15 @@ def test_list_user_activity_unscoped(repo, lifecycle):
     """无界形态(不传 notebook_id):走 owned_notebook_ids 聚合那条腿,非 ask 类型
     以避开「无界 ask-only 总览」那条刻意不同的口径(见 list_user_activity
     docstring)。"""
-    result = repo.list_user_activity(lifecycle["owner_id"], activity_type="source")
+    result = repo._runtime.queries.list_user_activity(lifecycle["owner_id"], activity_type="source")
     ids = {item["id"] for item in result["items"]}
     assert ids == {"src-0"}, ids
 
 
 def test_notebook_exists_for_owner(repo, lifecycle):
-    assert repo.notebook_exists_for_owner(lifecycle["active_id"], lifecycle["owner_id"]) is True
-    assert repo.notebook_exists_for_owner(lifecycle["copying_id"], lifecycle["owner_id"]) is False
-    assert repo.notebook_exists_for_owner(lifecycle["deleting_id"], lifecycle["owner_id"]) is False
+    assert repo._runtime.queries.notebook_exists_for_owner(lifecycle["active_id"], lifecycle["owner_id"]) is True
+    assert repo._runtime.queries.notebook_exists_for_owner(lifecycle["copying_id"], lifecycle["owner_id"]) is False
+    assert repo._runtime.queries.notebook_exists_for_owner(lifecycle["deleting_id"], lifecycle["owner_id"]) is False
 
 
 def test_notebook_analytics(repo, lifecycle):
@@ -295,7 +295,7 @@ def test_notebook_analytics(repo, lifecycle):
 
 
 def test_pending_actions_projection_rows(repo, lifecycle):
-    result = repo.pending_actions_projection_rows(lifecycle["owner_id"])
+    result = repo._runtime.queries.pending_actions_projection_rows(lifecycle["owner_id"])
     assert set(result["notebook_ids"]) == {lifecycle["active_id"], lifecycle["viewer_id"]}
 
 

@@ -2895,12 +2895,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.ask_chunk",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.ask_job_detail",
         "target": "_runtime"
       },
@@ -2908,18 +2902,6 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.ask_job_origin",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.ask_job_status",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.ask_reasoning",
         "target": "_runtime"
       },
       {
@@ -3717,24 +3699,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.list_user_activity",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.list_user_notebooks",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.list_user_usage",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.load_notebook_scale_facts",
         "target": "_runtime"
       },
@@ -3801,12 +3765,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.notebook_exists_for_owner",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.notebook_owner",
         "target": "_runtime"
       },
@@ -3838,12 +3796,6 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.pending_actions",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.pending_actions_projection_rows",
         "target": "_runtime"
       },
       {
@@ -5011,21 +4963,6 @@
     "scope": "facade",
     "signature": "(self, answer_id: 'str') -> \"'dict | None'\""
   },
-  "ask_chunk": {
-    "consumers": [
-      {
-        "kind": "registry",
-        "path": "backend/app/services/ask_modes.py",
-        "scope": "<module>.ASK_MODES",
-        "target": "ask_chunk"
-      }
-    ],
-    "kind": "method",
-    "owner": "AskService",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self, notebook_id: 'str', payload: 'AskRequest', cancel_event: 'CancelEvent' = None) -> 'AskResponse'"
-  },
   "ask_job_detail": {
     "consumers": [
       {
@@ -5085,21 +5022,6 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, job_id: 'str') -> \"'dict | None'\""
-  },
-  "ask_reasoning": {
-    "consumers": [
-      {
-        "kind": "registry",
-        "path": "backend/app/services/ask_modes.py",
-        "scope": "<module>.ASK_MODES",
-        "target": "ask_reasoning"
-      }
-    ],
-    "kind": "method",
-    "owner": "AskService",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self, notebook_id: 'str', payload: 'AskRequest', on_trace=None, cancel_event: 'CancelEvent' = None) -> 'AskResponse'"
   },
   "ask_with_job": {
     "consumers": [

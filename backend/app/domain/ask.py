@@ -7,7 +7,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class AskMode:
     id: str
-    handler: str  # method name on SQLiteRepository
+    handler: str  # method name on AskService, resolved by AskService.ask
     group: str  # "general" | "strict" | "extension"
     streaming: bool  # handler accepts on_trace and emits stream progress
     requires_kg: bool

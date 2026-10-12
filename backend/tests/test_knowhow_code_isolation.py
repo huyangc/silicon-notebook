@@ -323,7 +323,7 @@ def test_marker_absent_from_fts_and_chunk_retrieval_and_ask_context(client, seed
     scored, _ids, _mat = repo._retrieve_chunks(nb, MARKER)
     assert not any(MARKER in c.text for c in scored)
 
-    resp = repo.ask_chunk(nb, AskRequest(question=MARKER))
+    resp = repo._runtime.ask_component.ask_chunk_current(nb, AskRequest(question=MARKER))
     assert not any(MARKER in c.quoted_span for c in resp.citations)
     assert MARKER not in (resp.answer or "")
 

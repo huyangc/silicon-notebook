@@ -175,7 +175,7 @@ def test_complete_postgres_repository_smoke_from_empty_schema(
         ) == 1
         assert warm_progress == [(1, 1)]
 
-        answer = repository.ask_chunk(
+        answer = repository._runtime.ask_component.ask_chunk_current(
             notebook.id,
             AskRequest(question="What evidence is available?", mode="chunk"),
         )

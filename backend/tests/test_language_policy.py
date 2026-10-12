@@ -305,7 +305,7 @@ def test_ask_chunk_unions_bilingual_keyword_hit_once(repo, monkeypatch):
         return orig_quota(collected, per_query, top_n, relevance)
     monkeypatch.setattr(_ret, "quota_fuse", _cap_quota)
 
-    repo.ask_chunk(nb.id, AskRequest(question="what about the LNA?"))
+    repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="what about the LNA?"))
     assert calls["n"] == 1            # ONE keyword-union FTS call per query
     assert captured.get("collected_ids")
     # the Chinese chunk (only reachable via the bilingual keyword) is in candidates

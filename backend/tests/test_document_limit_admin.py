@@ -132,12 +132,12 @@ def test_list_user_usage_carries_limit_fields(tmp_path):
     repo = _repo(tmp_path, limit=20)
     ident = _identity(repo)
     u = repo.create_user("a00000001", "pw")
-    rows = {r["id"]: r for r in repo.list_user_usage()}
+    rows = {r["id"]: r for r in repo._runtime.queries.list_user_usage()}
     assert rows[u.id]["upload_limit"] == 20              # 无覆盖 → config 默认
     assert rows[u.id]["upload_limit_overridden"] is False
     # 设覆盖 3 → 只该用户变,其余仍全局默认
     ident.set_user_document_limit_override("user-local", u.id, 3)
-    rows = {r["id"]: r for r in repo.list_user_usage()}
+    rows = {r["id"]: r for r in repo._runtime.queries.list_user_usage()}
     assert rows[u.id]["upload_limit"] == 3
     assert rows[u.id]["upload_limit_overridden"] is True
     assert rows["user-local"]["upload_limit"] == 20
@@ -149,7 +149,7 @@ def test_list_user_usage_reflects_global_default_for_non_overridden(tmp_path):
     ident = _identity(repo)
     repo.create_user("a00000001", "pw")
     ident.set_global_document_limit_default("user-local", 9)   # app_setting 覆盖
-    rows = {r["username"]: r for r in repo.list_user_usage()}
+    rows = {r["username"]: r for r in repo._runtime.queries.list_user_usage()}
     assert rows["a00000001"]["upload_limit"] == 9
     assert rows["a00000001"]["upload_limit_overridden"] is False
 

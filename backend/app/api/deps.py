@@ -12,7 +12,7 @@ from app.services.model_work import model_artifact_scope
 from app.models.identity import UserProfile
 from app.bootstrap import application_extension_runtime, create_application_repository
 from app.domain.report_export import ReportExporterHostPort
-from app.repositories.ports import AdminQueryRepository, ExtensionToggleStorePort, GroupStorePort, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, NotebookStorePort, RetrievalExperienceStorePort, SourceRepository, AskStreamPort, AskStateStorePort, McpMemoryRepository, MemoryRepository, WishStorePort
+from app.repositories.ports import AdminQueryRepository, AnswerMemorySourceRepository, ExtensionToggleStorePort, GroupStorePort, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, NotebookStorePort, RetrievalExperienceStorePort, SourceRepository, AskStreamPort, McpMemoryRepository, MemoryRepository, WishStorePort
 
 
 @lru_cache
@@ -667,8 +667,8 @@ def memory_service() -> MemoryRepository:
     return cast(MemoryRepository, repository())
 
 
-def ask_state_repository() -> AskStateStorePort:
-    return cast(AskStateStorePort, repository())
+def ask_state_repository() -> AnswerMemorySourceRepository:
+    return cast(AnswerMemorySourceRepository, repository())
 
 
 def memory_preview_client():

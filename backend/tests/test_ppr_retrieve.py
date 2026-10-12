@@ -364,10 +364,10 @@ def test_precision_changes_do_not_touch_chunk_or_reasoning(repo):
     s = repo.settings
     assert s.ppr_fact_rerank_enabled is False
     import inspect
-    from app.services.sqlite_repository import SQLiteRepository
-    csrc = inspect.getsource(SQLiteRepository.ask_chunk)
+    from app.services.ask_service import AskService
+    csrc = inspect.getsource(AskService.ask_chunk)
     assert "_ppr_retrieve" not in csrc and "_ppr_reset_vector" not in csrc
-    rsrc = inspect.getsource(SQLiteRepository.ask_reasoning)
+    rsrc = inspect.getsource(AskService.ask_reasoning)
     assert "_ppr_retrieve" not in rsrc and "_ppr_reset_vector" not in rsrc
 
 
