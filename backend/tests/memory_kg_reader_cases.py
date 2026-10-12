@@ -381,19 +381,13 @@ def check_neighbour_relations(world) -> None:
 
 
 def check_shared_tooling(world) -> None:
-    """Community summary context and duplicate hydration leave every Memory
-    row out, whoever asks (shared tooling, no viewer)."""
+    """Duplicate hydration leaves every Memory row out, whoever asks (shared
+    tooling, no viewer).  The community-summary context reader that used to be
+    checked here was retired with the community-report summarizer."""
     ids = list(world.names)
     with connect(world) as db:
-        objects, relations = store(world).community_context_rows(db, world.nb, ids)
         members = store(world).duplicate_member_rows(db, world.nb, ids)
-    assert _name_set(world, [o["id"] for o in objects]) == SHARED_NAMES
     assert _name_set(world, [m["id"] for m in members]) == SHARED_NAMES
-    shared_ids = {world.ids_by_name[n] for n in SHARED_NAMES}
-    assert relations and all(
-        str(r["source_object_id"]) in shared_ids and str(r["target_object_id"]) in shared_ids
-        for r in relations
-    )
 
 
 def check_none_statements_unchanged(world, expected: dict[str, list[str]]) -> None:

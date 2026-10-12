@@ -597,11 +597,6 @@ def test_community_graph_excludes_rejected_bridges_on_postgres(
         names, graph_rows = unified.community_graph_rows(connection, "nb-personal")
         graph_rows = list(graph_rows)
         edges = {(row["s"], row["t"]) for row in graph_rows}
-        _objects, community_relations = (
-            knowledge_harness.knowledge.community_context_rows(
-                connection, "nb-personal", object_ids
-            )
-        )
 
     assert set(names) == {
         "canonical-a",
@@ -617,13 +612,6 @@ def test_community_graph_excludes_rejected_bridges_on_postgres(
         ("canonical-a", "canonical-b"),
         ("canonical-c", "canonical-d"),
     ]
-    assert {
-        (row["source_object_id"], row["target_object_id"])
-        for row in community_relations
-    } == {
-        ("ko-community-a", "ko-community-b"),
-        ("ko-community-c", "ko-community-d"),
-    }
 
     service = CandidateRetrievalService.__new__(CandidateRetrievalService)
     service._connect = knowledge_harness.database.connect

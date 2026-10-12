@@ -44,7 +44,7 @@ ROLE_LABELS = {
     "general": "通用模型",
     "reasoning": "推理模型",
     "rewrite": "查询改写模型",
-    "kg": "知识抽取模型",
+    "kg": "知识分析模型",
     "embedding": "向量模型",
     "rerank": "重排模型",
 }

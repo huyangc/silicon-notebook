@@ -93,7 +93,7 @@
     `= ANY(ARRAY(子查询))` 的 InitPlan 绑定来源 id；在 SQLite 上用 `CROSS JOIN` 固定连接顺序
     或用不相关的 `IN` / `NOT IN` 列表，并写出 `hidden_type_index_term`。
   - `memory_sql` 的五个片段及其消费者（未注明的两个后端都有）：`memory_derived_in_notebook`
-    （无绑定参数）——共享工具 `community_context_rows`、`duplicate_member_rows`、
+    （无绑定参数）——共享工具 `duplicate_member_rows`、
     `edge_centrality_source_rows`，`memory_viewer_filter` 的 `""` 支，以及建图读者；
     `foreign_memory_in_notebook_excluded`（一个参数）——只经 `memory_viewer_filter` 使用；
     `memory_viewer_filter`（三值）——两个 `knowledge_store` 的行读者、PostgreSQL `search.py` 的

@@ -162,7 +162,6 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "KnowledgeStore.fts_search": VIEWER_READER,
         "_fts_viewer_filter": VIEWER_READER,
         # shared tooling (E4-4, E4-3)
-        "KnowledgeStore.community_context_rows": SHARED_TOOLING,
         "KnowledgeStore.duplicate_seed_rows": SHARED_TOOLING,
         "KnowledgeStore.duplicate_member_rows": SHARED_TOOLING,
         "KnowledgeStore.edge_centrality_source_rows": SHARED_TOOLING,

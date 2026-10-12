@@ -140,7 +140,6 @@ def test_viewer_statements_are_index_driven_without_analyze(world, viewer_kind):
         store.object_meta_rows_for_notebook(recorder, world.nb, ids, viewer_id=viewer)
         store.object_meta_rows(recorder, ids, notebook_id=world.nb, viewer_id=viewer)
         store.fts_search(recorder, world.nb, "kgtoken", 5, viewer_id=viewer)
-        store.community_context_rows(recorder, world.nb, ids)
         store.duplicate_member_rows(recorder, world.nb, ids)
         cases.queries(world).notebook_has_kg(recorder, world.nb2, viewer_id=viewer)
         if viewer:
@@ -178,7 +177,9 @@ def test_viewer_statements_are_index_driven_without_analyze(world, viewer_kind):
                 ), (sql, plan)
                 driven += 1
             checked += 1
-    assert checked >= 12
+    # 11 since the community-summary context reader (two statements) was
+    # retired with the community-report summarizer.
+    assert checked >= 11
     # member: the cold two-half count of nb and of nb2 (kg_ready's shared half
     # comes from the count cache), the own-Memory count half (list total),
     # kg_ready's own-Memory probe on the Memory-only nb2, the two overlay reads

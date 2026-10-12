@@ -73,7 +73,7 @@
 `aria-label`、toast、错误、表头）；它们各自的界面呈现名是「推断」与「通识」。前端渲染层只把
 这几种句首/段首前缀包成不可点的行内标签样式，不改写、不新增文本内容，复制结果不变。
 `scripts/check_ui_vocabulary.py` 的黑名单扫描面是渲染进前端源码的固定文案，以及后端写、
-前端原样展示的文案（`user_error()` 消息、推理轨迹摘要、登记的展示字段），不覆盖模型生成的
+前端原样展示的文案（`user_error()` 消息、推理轨迹摘要、登记的展示字段、模型显示名），不覆盖模型生成的
 答案正文，因此这两个标记不登记进「界面词汇表」，也不需要 `NOT_LINTABLE` 豁免理由。
 
 ## 自动守卫边界
@@ -93,6 +93,13 @@
 SQL 字面量 `UPDATE kg_build_jobs SET … error_message='…'` 写入的文案（SQLite 迁移与 PG 维护
 路径）同样在扫描面内。`error_message` 在两端存储里是仅限关键字参数，不存在位置传参；`**kwargs`
 展开、多于一跳的别名与跨模块传入的接收者静态解析不了，刻意跳过。
+
+**模型显示名**也原样上屏：`backend/app/services/model_registry.py` 里 `_WORKLOAD_LABELS` 的值
+作为 `workload_label` 出现在模型失败横幅、管理员用量页和解析问题档案里；仓库出厂的模型服务
+显示名（`scripts/migrate_legacy_model_env.py` 的 `ROLE_LABELS`、`model-services.example.toml`
+的 `display_name` 行）会写进部署的配置，再出现在模型服务状态卡片上。守卫只读这几处的字符串
+字面量，各有非空下限。运维自己在部署配置里写的服务名是部署数据，不在扫描面内；解析问题档案里
+已经保存下来的旧显示名也不会被改写。
 
 后端 `user_error()` 消息、推理轨迹摘要（`TRACE_SUMMARY_MODULES` 登记模块里的
 `TraceStep(summary=…)`）与展示字段三条通道不要求调用点写字面量：先赋给变量（按作用域查所在

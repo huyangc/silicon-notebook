@@ -119,7 +119,7 @@ contributor constraints, not a second implementation history.
     `hidden_type_index_term`.
   - The five `memory_sql` fragments and their consumers (both backends unless named):
     `memory_derived_in_notebook` (no bound parameter) — the shared tooling
-    `community_context_rows`, `duplicate_member_rows`, `edge_centrality_source_rows`, the `""`
+    `duplicate_member_rows`, `edge_centrality_source_rows`, the `""`
     branch of `memory_viewer_filter` and the graph-build readers;
     `foreign_memory_in_notebook_excluded` (one parameter) — only through
     `memory_viewer_filter`; `memory_viewer_filter` (three-valued) — the row readers of both

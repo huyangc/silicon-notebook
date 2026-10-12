@@ -26,7 +26,12 @@ a user's screen, and all of them are scanned:
   6. backend **model workload labels** — the values of `_WORKLOAD_LABELS` in
      `backend/app/services/model_registry.py` travel as `workload_label` to the
      model-failure banner (`frontend/app/model-services.ts`) and the admin usage
-     pages, which print them verbatim. See `WORKLOAD_LABEL_MODULE`.
+     pages, which print them verbatim. See `WORKLOAD_LABEL_MODULE`. The same
+     channel covers the model-service display names this repository ships as
+     defaults — `ROLE_LABELS` in `scripts/migrate_legacy_model_env.py` and the
+     `display_name` lines of `model-services.example.toml` — which become the
+     `display_name` the model-service status card prints verbatim. Names an
+     operator types into their own TOML are deployment data and out of reach.
 
   For the backend channels (2, 3, 5) the copy does not have to be a literal at the
   call site: `_IndirectCopy` follows variables, conditionals, concatenation,
@@ -216,6 +221,16 @@ WORKLOAD_LABEL_MODULE = ROOT / "backend" / "app" / "services" / "model_registry.
 WORKLOAD_LABEL_NAME = "_WORKLOAD_LABELS"
 # 2026-10 实测 36 条;下限只防「扫描面塌了」,不是精确台账。
 MIN_WORKLOAD_LABELS = 30
+# 同一通道的第二部分:仓库**出厂**的模型服务显示名。它们会被写进部署的
+# model-services.toml(迁移脚本生成、或照模板拷贝),再经 display_name 原样上屏
+# (模型服务状态卡片)。运维自己在 TOML 里写的名字是部署数据,守卫够不着,也不该管。
+SERVICE_LABEL_DICTS = (
+    (ROOT / "scripts" / "migrate_legacy_model_env.py", "ROLE_LABELS"),
+)
+SERVICE_LABEL_TEMPLATE = ROOT / "model-services.example.toml"
+_TOML_DISPLAY_NAME = re.compile(r'^display_name\s*=\s*"([^"]*)"\s*$', re.M)
+# 2026-10:ROLE_LABELS 6 条 + 模板 4 条。
+MIN_SERVICE_LABELS = 8
 
 # ASCII acronyms/words: matched only when not glued to another ASCII letter, so
 # identifiers (currentNotebook, MemoryPanel, schemaBusy, PKG) cannot trip them.
@@ -936,7 +951,7 @@ def scan_display_fields(path: Path, *, store_module: bool = False) -> tuple[int,
     return sites, hits
 
 
-def scan_workload_labels(path: Path) -> tuple[int, Hits]:
+def scan_workload_labels(path: Path, name: str | None = None) -> tuple[int, Hits]:
     """Blacklisted jargon in the model workload display labels (sixth channel).
 
     Returns (string-literal labels found, hits). Only the module-level
@@ -953,7 +968,7 @@ def scan_workload_labels(path: Path) -> tuple[int, Hits]:
             names = [node.target.id]
         else:
             continue
-        if WORKLOAD_LABEL_NAME not in names or node.value is None:
+        if (name or WORKLOAD_LABEL_NAME) not in names or node.value is None:
             continue
         value = node.value
         if isinstance(value, ast.Call) and len(value.args) == 1 and not value.keywords:
@@ -968,6 +983,21 @@ def scan_workload_labels(path: Path) -> tuple[int, Hits]:
                 continue
             for term in terms_in(label.value):
                 hits.append((label.lineno, term, label.value))
+    return sites, hits
+
+
+def scan_service_label_template(path: Path) -> tuple[int, Hits]:
+    """Blacklisted jargon in the shipped template's ``display_name = "…"`` lines."""
+    text = path.read_text(encoding="utf-8")
+    sites = 0
+    hits: Hits = []
+    for match in _TOML_DISPLAY_NAME.finditer(text):
+        sites += 1
+        label = match.group(1)
+        if not CJK.search(label):
+            continue
+        for term in terms_in(label):
+            hits.append((text.count("\n", 0, match.start()) + 1, term, label))
     return sites, hits
 
 
@@ -1170,6 +1200,25 @@ def main(argv: list[str] | None = None) -> int:
         violations.append(
             f"  {_rel(WORKLOAD_LABEL_MODULE)}:{line}: 「{term}」in workload label: {snippet!r}"
         )
+    service_sites = 0
+    service_sources = [
+        (path, lambda p, n=dict_name: scan_workload_labels(p, n))
+        for path, dict_name in SERVICE_LABEL_DICTS
+    ] + [(SERVICE_LABEL_TEMPLATE, scan_service_label_template)]
+    for path, scanner in service_sources:
+        if not path.exists():
+            print(
+                f"check_ui_vocabulary: service-label source missing: {_rel(path)} "
+                f"(update SERVICE_LABEL_DICTS / SERVICE_LABEL_TEMPLATE)",
+                file=sys.stderr,
+            )
+            return 1
+        sites, hits = scanner(path)
+        service_sites += sites
+        for line, term, snippet in hits:
+            violations.append(
+                f"  {_rel(path)}:{line}: 「{term}」in model service label: {snippet!r}"
+            )
 
     note_files = _release_note_files()
     for path in note_files:
@@ -1209,6 +1258,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    if service_sites < MIN_SERVICE_LABELS:
+        print(
+            f"check_ui_vocabulary: only {service_sites} shipped model-service labels "
+            f"found (expected ≥ {MIN_SERVICE_LABELS}). ROLE_LABELS / 模板的 display_name "
+            f"是不是改名 / 换了写法?同步 SERVICE_LABEL_DICTS / SERVICE_LABEL_TEMPLATE,"
+            f"别调低下限来「修」它。",
+            file=sys.stderr,
+        )
+        return 1
+
     if violations:
         print("UI vocabulary contract MISMATCH — internal jargon in user-visible copy:", file=sys.stderr)
         print("\n".join(violations), file=sys.stderr)
@@ -1223,7 +1282,8 @@ def main(argv: list[str] | None = None) -> int:
         f"{marked_sites} backend {USER_ERROR}() messages + "
         f"{trace_sites} trace summaries + "
         f"{display_sites} display fields + "
-        f"{label_sites} workload labels "
+        f"{label_sites} workload labels + "
+        f"{service_sites} model service labels "
         f"({len(CJK_TERMS) + len(ASCII_TERMS)} blacklisted terms)"
     )
     if extra_roots:
