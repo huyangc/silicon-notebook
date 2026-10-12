@@ -137,6 +137,7 @@ class MemoryStore:
         with self.database.connect() as db:
             rows = db.execute(
                 "SELECT * FROM agent_profiles WHERE owner_id=? "
+                "AND deleted_at IS NULL "
                 "ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?",
                 (owner_id, limit, offset),
             ).fetchall()
@@ -152,7 +153,7 @@ class MemoryStore:
         with self.database.write() as db:
             cursor = db.execute(
                 f"UPDATE agent_profiles SET {','.join(assignments)} "
-                "WHERE id=? AND owner_id=?",
+                "WHERE id=? AND owner_id=? AND deleted_at IS NULL",
                 (*values, profile_id, owner_id),
             )
             if cursor.rowcount != 1:
@@ -162,6 +163,24 @@ class MemoryStore:
                 (profile_id, owner_id),
             ).fetchone()
         return self._profile(row)
+
+    def delete_agent_profile(self, profile_id: str, owner_id: str) -> None:
+        """Soft-delete one of ``owner_id``'s Profiles and revoke its live
+        tokens in one write; ``KeyError`` when absent, foreign or deleted."""
+        now = self.now()
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE agent_profiles SET status='revoked',deleted_at=?,"
+                "updated_at=? WHERE id=? AND owner_id=? AND deleted_at IS NULL",
+                (now, now, profile_id, owner_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(profile_id)
+            db.execute(
+                "UPDATE agent_access_tokens SET revoked_at=?,token_plain=NULL "
+                "WHERE agent_profile_id=? AND revoked_at IS NULL",
+                (now, profile_id),
+            )
 
     @staticmethod
     def _token_notebooks_on(db: sqlite3.Connection, token_id: str) -> list[str]:

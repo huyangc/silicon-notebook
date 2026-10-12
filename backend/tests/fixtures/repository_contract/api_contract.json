@@ -15388,6 +15388,36 @@
         }
       },
       "/api/agent-profiles/{profile_id}": {
+        "delete": {
+          "operationId": "delete_agent_profile_api_agent_profiles__profile_id__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "profile_id",
+              "required": true,
+              "schema": {
+                "title": "Profile Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Delete Agent Profile"
+        },
         "patch": {
           "operationId": "update_agent_profile_api_agent_profiles__profile_id__patch",
           "parameters": [

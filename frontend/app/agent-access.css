@@ -136,6 +136,7 @@
 .agent-profile-list .agent-token-confirm { color: #a52d2d; font-size: 12px; }
 .agent-profile-list .agent-load-more,
 .agent-token-list .agent-load-more { width: 100%; border-style: dashed; color: var(--blue); }
+.agent-profile-list button.danger,
 .agent-token-list button.danger { border-color: #efc6c6; color: #a52d2d; }
 .agent-token-list em { color: #8a93a1; font-size: 12px; font-style: normal; }
 

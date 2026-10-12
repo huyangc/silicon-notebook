@@ -44,6 +44,12 @@ V78_AUTH_TABLES = {
 }
 
 
+def rollback_v93(db: sqlite3.Connection) -> None:
+    """Remove ``agent_profiles.deleted_at``, the column SQLite migration 93
+    added. Callers lower ``user_version`` themselves."""
+    db.execute("ALTER TABLE agent_profiles DROP COLUMN deleted_at")
+
+
 def rollback_v92(db: sqlite3.Connection) -> None:
     """Restore the v91 authentication schema that SQLite migration 92 dropped.
 
@@ -52,8 +58,10 @@ def rollback_v92(db: sqlite3.Connection) -> None:
     comes back with v78's backfill (the username) and its unique index; and
     ``auth_identity_audit`` is rebuilt with its ``grant_reference`` column.
     v92's additions -- ``users.sso_linked_at`` and ``idx_users_username_lower``
-    -- are removed. Callers lower ``user_version`` themselves.
+    -- are removed. v93 is undone first (newest-first). Callers lower
+    ``user_version`` themselves.
     """
+    rollback_v93(db)
     db.execute("DROP INDEX idx_users_username_lower")
     db.execute("ALTER TABLE users DROP COLUMN sso_linked_at")
     for name in ("auth_policy", "external_identities", "auth_policy_audit"):

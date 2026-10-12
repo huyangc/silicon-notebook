@@ -146,6 +146,21 @@ async def update_agent_profile(
         raise HTTPException(status_code=422, detail=str(exc))
 
 
+@memory_router.delete(
+    "/agent-profiles/{profile_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+async def delete_agent_profile(
+    profile_id: str,
+    user: UserProfile = Depends(get_current_user),
+    service: MemoryRepository = Depends(memory_service),
+) -> Response:
+    try:
+        await run_in_threadpool(service.delete_agent_profile, profile_id, user.id)
+    except KeyError:
+        raise _not_found("Agent profile not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @memory_router.post(
     "/agent-profiles/{profile_id}/tokens",
     response_model=AgentTokenIssued,

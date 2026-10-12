@@ -89,7 +89,7 @@ def test_v92_drop_outside_the_allowlist_still_fails(tmp_path):
     with sqlite3.connect(database) as rollback:
         rollback_v92(rollback)
         rollback.execute("PRAGMA user_version = 91")
-    manifest = module.MIGRATION_MANIFEST[(91, 92)]
+    manifest = module.MIGRATION_MANIFEST[(91, 93)]
     assert manifest["dropped_tables"] == frozenset(
         {"auth_policy", "auth_policy_audit", "external_identities"}
     )
@@ -99,12 +99,12 @@ def test_v92_drop_outside_the_allowlist_still_fails(tmp_path):
     }
     original = dict(manifest)
     try:
-        module.MIGRATION_MANIFEST[(91, 92)] = {
+        module.MIGRATION_MANIFEST[(91, 93)] = {
             **manifest, "dropped_tables": frozenset({"auth_policy"}),
         }
         result = module.verify_snapshot(database, storage)
     finally:
-        module.MIGRATION_MANIFEST[(91, 92)] = original
+        module.MIGRATION_MANIFEST[(91, 93)] = original
     assert not result.ok
     assert "external_identities" in result.changed_tables
 

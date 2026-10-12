@@ -81,6 +81,7 @@
         "current_user",
         "decided_pairs",
         "decided_seed_pairs",
+        "delete_agent_profile",
         "delete_conversation",
         "delete_knowhow_cell_code",
         "delete_knowhow_column",
@@ -351,7 +352,7 @@
   "core_models_service_imports": {
     "allowed": []
   },
-  "ports_protocol_method_count": 976,
+  "ports_protocol_method_count": 978,
   "function_length_ceiling": {
     "backend/app/extensions/ask.py::AskCompletedObserverHost.observe_application": 154,
     "backend/app/extensions/parser_chain.py::ParserProviderChainHost._run": 307,

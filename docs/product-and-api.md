@@ -1547,7 +1547,12 @@ the owner owns is a 422 「管理和删除权限只对你拥有的笔记本生�
 disabled (`PATCH /api/agent-profiles/{id}` with `status: "revoked"`; all its tokens stop working at
 once) and re-enabled from the same page after an inline confirmation (`status: "active"`): its tokens
 that are neither revoked nor expired work again immediately, and a token revoked while it was
-disabled stays revoked.
+disabled stays revoked. A Profile can also be deleted (`DELETE /api/agent-profiles/{id}`, 204 on
+success, after an inline confirmation on the same page). The delete is soft: one transaction sets
+`status: "revoked"` and `deleted_at` and revokes every token of it still live; afterwards it no longer
+appears in the Profile list, editing, re-enabling or deleting it again answers as missing (404), and
+its tokens authenticate as `token_revoked`. The row itself stays, so the provenance on the Memory it
+proposed, the sources it added and its observations is unchanged.
 
 Tokens can be copied again after issue: the server stores the plaintext at issue time
 (`agent_access_tokens.token_plain`); authentication still compares the hash only. Each

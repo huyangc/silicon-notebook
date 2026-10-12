@@ -1983,7 +1983,7 @@
       },
       {
         "name": "agent_profiles",
-        "sql_sha256": "bd343e9937e743e441fc0be7136034698a87f3d4137b44c646bfd9a035d2a00e",
+        "sql_sha256": "872da239db7abbea379d534ad41b491125cc8f969c6c3ed161d70a355a53444c",
         "type": "table"
       },
       {
@@ -3267,6 +3267,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 92
+    "user_version": 93
   }
 }

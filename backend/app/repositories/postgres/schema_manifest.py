@@ -449,7 +449,9 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # users.local_login_name (with idx_users_local_login_name) and
 # auth_identity_audit.grant_reference, and add users.sso_linked_at (nullable,
 # no backfill) plus the unique idx_users_username_lower over lower(username).
+# SQLite v93 / PostgreSQL 0073 add agent_profiles.deleted_at (nullable, no
+# backfill, no index): the soft-delete marker of an Agent Profile.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=92,
-    postgres_version=72,
+    sqlite_version=93,
+    postgres_version=73,
 )

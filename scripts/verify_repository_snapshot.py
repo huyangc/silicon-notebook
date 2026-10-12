@@ -5533,5 +5533,55 @@ MIGRATION_MANIFEST[(91, 92)] = {
     "dropped_columns": AUTH_SIMPLIFY_DROPPED_COLUMNS,
 }
 
+# v93 (parity with PostgreSQL 0073_agent_profile_deleted_at.sql): the nullable
+# agent_profiles.deleted_at (no backfill, no index) -- the soft-delete marker of
+# an Agent Profile. SQLite's ALTER TABLE ADD COLUMN splices the definition in
+# before the closing parenthesis of the stored CREATE TABLE text.
+AGENT_PROFILE_DELETED_AT_COLUMNS = {
+    "agent_profiles": {
+        "deleted_at": ("deleted_at", "TEXT", 0, None, 0),
+    },
+}
+AGENT_PROFILES_DELETED_AT_FROM = "updated_at TEXT NOT NULL\n                )"
+AGENT_PROFILES_DELETED_AT_TO = (
+    "updated_at TEXT NOT NULL\n                , deleted_at TEXT)"
+)
+MIGRATION_MANIFEST = {
+    (key[0], 93, *key[2:]): {
+        **manifest,
+        "tables": {
+            **manifest["tables"],
+            **(
+                {
+                    "agent_profiles": manifest["tables"]["agent_profiles"].replace(
+                        AGENT_PROFILES_DELETED_AT_FROM,
+                        AGENT_PROFILES_DELETED_AT_TO,
+                    )
+                }
+                if "agent_profiles" in manifest["tables"]
+                else {}
+            ),
+        },
+        "columns": {
+            **manifest["columns"],
+            **{
+                table: {
+                    **manifest["columns"].get(table, {}),
+                    **columns,
+                }
+                for table, columns in AGENT_PROFILE_DELETED_AT_COLUMNS.items()
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(92, 93)] = {
+    "tables": {},
+    "columns": AGENT_PROFILE_DELETED_AT_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

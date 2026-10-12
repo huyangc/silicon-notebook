@@ -1365,6 +1365,9 @@ class RepositoryFacade:
             profile_id, owner_id, patch
         )
 
+    def delete_agent_profile(self, profile_id: str, owner_id: str) -> None:
+        self._runtime.memory_service.delete_agent_profile(profile_id, owner_id)
+
     def issue_agent_token(
         self,
         owner_id: str,

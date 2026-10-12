@@ -620,6 +620,54 @@ def test_profile_and_token_endpoints_are_owner_private(tmp_path, monkeypatch):
     assert raw not in listed.text
 
 
+def test_delete_agent_profile_endpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'profile-delete.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.main import create_app
+
+    client = TestClient(create_app())
+    alice_headers, _ = _register(client, "j00119010")
+    bob_headers, _ = _register(client, "k00119011")
+    notebook_id = client.post(
+        "/api/notebooks", headers=alice_headers, json={"name": "Delete API"}
+    ).json()["id"]
+    profile_id = client.post(
+        "/api/agent-profiles", headers=alice_headers, json={"name": "Doomed"}
+    ).json()["id"]
+    issued = client.post(
+        f"/api/agent-profiles/{profile_id}/tokens",
+        headers=alice_headers,
+        json={
+            "agent_profile_id": profile_id,
+            "scopes": ["read"],
+            "default_notebook_id": notebook_id,
+            "notebook_ids": [notebook_id],
+        },
+    ).json()
+
+    url = f"/api/agent-profiles/{profile_id}"
+    assert client.delete(url, headers=bob_headers).status_code == 404
+    assert client.delete("/api/agent-profiles/agent-nope", headers=alice_headers).status_code == 404
+
+    deleted = client.delete(url, headers=alice_headers)
+    assert deleted.status_code == 204
+    assert deleted.content == b""
+    assert client.get("/api/agent-profiles", headers=alice_headers).json() == []
+    assert client.delete(url, headers=alice_headers).status_code == 404
+    assert client.patch(
+        url, headers=alice_headers, json={"status": "active"}
+    ).status_code == 404
+    token_row = next(
+        row for row in client.get("/api/agent-tokens", headers=alice_headers).json()
+        if row["id"] == issued["id"]
+    )
+    assert token_row["revoked_at"] is not None
+    assert token_row["profile_name"] == "Doomed"
+
+
 def test_token_api_rejects_unknown_scope_and_default_outside_allowlist(
     tmp_path, monkeypatch
 ):
@@ -1042,6 +1090,46 @@ def test_reenabling_a_profile_restores_its_live_tokens_only(token_context):
     principal, reason = service.resolve_agent_token_status(live.token)
     assert principal is not None and reason == ""
     assert service.resolve_agent_token_status(revoked.token) == (None, "token_revoked")
+
+
+def test_deleting_a_profile_hides_it_and_revokes_its_live_tokens(token_context):
+    """Soft delete: the Profile leaves the list, its live tokens become
+    ``token_revoked`` (an already revoked one keeps its revoke time), and the
+    Profile can neither be re-enabled, deleted again, nor issued new tokens."""
+    service, alice, bob, notebook, _other = token_context
+    profile = service.create_agent_profile(alice.id, "To delete", "")
+    keep = service.create_agent_profile(alice.id, "To keep", "")
+    live = _issue(service, alice, profile, notebook)
+    earlier = _issue(service, alice, profile, notebook)
+    earlier_revoked_at = service.revoke_agent_token(alice.id, earlier.id).revoked_at
+    kept_token = _issue(service, alice, keep, notebook)
+
+    with pytest.raises(KeyError):
+        service.delete_agent_profile(profile.id, bob.id)
+    assert profile.id in {p.id for p in service.list_agent_profiles(alice.id)}
+
+    assert service.delete_agent_profile(profile.id, alice.id) is None
+
+    assert [p.id for p in service.list_agent_profiles(alice.id)] == [keep.id]
+    assert service.resolve_agent_token_status(live.token) == (None, "token_revoked")
+    assert service.resolve_agent_token_status(earlier.token) == (None, "token_revoked")
+    principal, reason = service.resolve_agent_token_status(kept_token.token)
+    assert principal is not None and reason == ""
+
+    tokens = {t.id: t for t in service.list_agent_tokens(alice.id)}
+    assert tokens[live.id].revoked_at is not None
+    assert tokens[live.id].profile_name == "To delete"
+    assert tokens[earlier.id].revoked_at == earlier_revoked_at
+    assert tokens[kept_token.id].revoked_at is None
+
+    with pytest.raises(KeyError):
+        service.update_agent_profile(profile.id, alice.id, {"status": "active"})
+    with pytest.raises(KeyError):
+        service.update_agent_profile(profile.id, alice.id, {"name": "Renamed"})
+    with pytest.raises(KeyError):
+        service.delete_agent_profile(profile.id, alice.id)
+    with pytest.raises(KeyError):
+        _issue(service, alice, profile, notebook)
 
 
 def test_resolve_status_names_why_a_matching_token_fails(token_context, repo):

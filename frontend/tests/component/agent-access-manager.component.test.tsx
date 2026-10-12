@@ -4,7 +4,11 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ requestJson: vi.fn() }));
 
-vi.mock("../../app/api-client.ts", () => ({ requestJson: mocks.requestJson }));
+vi.mock("../../app/api-client.ts", () => ({
+  requestJson: mocks.requestJson,
+  // 204 无响应体的调用走 requestVoid;与 requestJson 共用同一路由表,requestsTo 照常能数到。
+  requestVoid: async (path: string, options?: RequestInit) => { await mocks.requestJson(path, options); },
+}));
 
 import { AgentAccessManager } from "../../app/agent-access-manager";
 import { humanizedError } from "../../app/errors";
@@ -821,4 +825,80 @@ test("刷新后不丢掉第二页里已选中的 Profile", async () => {
   await screen.findByLabelText("新签发的明文 token");
   await waitFor(() => expect(requestsTo("GET /agent-profiles").length).toBeGreaterThan(1 + 1));
   expect(within(issueForm()).getByRole("combobox", { name: "Profile" })).toHaveValue("p2-0");
+});
+
+test("删除 Profile:行内确认后请求,原位显示已删除,随后移出列表并刷新 token", async () => {
+  let deleted = false;
+  routeRequests(baseRoutes({
+    "GET /agent-profiles": () => (deleted ? [] : [profileOne]),
+    "GET /agent-tokens": () => [deleted ? { ...activeToken, revoked_at: "2026-09-03T00:00:00Z" } : activeToken],
+    "DELETE /agent-profiles/agent-1": () => { deleted = true; return undefined; },
+  }));
+  const user = userEvent.setup();
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findAllByText("Claude Code");
+
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "删除" }));
+  expect(profileListRow("Claude Code")).toHaveTextContent("永久撤销，且不能恢复");
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "不删除" }));
+  expect(requestsTo("DELETE /agent-profiles/agent-1")).toHaveLength(0);
+
+  const tokenFetchesBefore = requestsTo("GET /agent-tokens").length;
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "删除" }));
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "确认删除" }));
+  expect(await within(profileListRow("Claude Code")).findByRole("status")).toHaveTextContent("已删除");
+  expect(within(profileListRow("Claude Code")).queryByRole("button")).toBeNull();
+  expect(requestsTo("DELETE /agent-profiles/agent-1")).toHaveLength(1);
+  await waitFor(() => expect(requestsTo("GET /agent-tokens").length).toBeGreaterThan(tokenFetchesBefore));
+  // 刷新回来的列表已不含它,提示期间这一行仍在原位。
+  expect(within(profileListRow("Claude Code")).getByRole("status")).toHaveTextContent("已删除");
+
+  await waitFor(() => {
+    expect(document.querySelector(".agent-profile-list > div")).toBeNull();
+  }, { timeout: 5000 });
+});
+
+test("删除失败时原因落在该 Profile 行,确认留着可以就地重试", async () => {
+  let attempts = 0;
+  routeRequests(baseRoutes({
+    "GET /agent-profiles": () => (attempts >= 2 ? [] : [profileOne]),
+    "DELETE /agent-profiles/agent-1": () => {
+      attempts += 1;
+      if (attempts === 1) throw humanizedError("服务暂时不可用，请稍后重试", 503);
+      return undefined;
+    },
+  }));
+  const user = userEvent.setup();
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findAllByText("Claude Code");
+
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "删除" }));
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "确认删除" }));
+  expect(await within(profileListRow("Claude Code")).findByRole("alert")).toHaveTextContent("服务暂时不可用");
+  expect(document.querySelector(".agent-access-body > .agent-access-error")).toBeNull();
+  expect(within(profileListRow("Claude Code")).getByRole("button", { name: "确认删除" })).toBeEnabled();
+
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "确认删除" }));
+  expect(await within(profileListRow("Claude Code")).findByRole("status")).toHaveTextContent("已删除");
+  expect(within(profileListRow("Claude Code")).queryByRole("alert")).not.toBeInTheDocument();
+});
+
+test("启用确认与删除确认互斥,同一行一次只开一个", async () => {
+  routeRequests(baseRoutes({
+    "GET /agent-profiles": () => [{ ...profileOne, status: "revoked" }],
+  }));
+  const user = userEvent.setup();
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findAllByText("Claude Code");
+
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "启用" }));
+  expect(within(profileListRow("Claude Code")).getByRole("button", { name: "确认启用" })).toBeInTheDocument();
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "删除" }));
+  expect(within(profileListRow("Claude Code")).getByRole("button", { name: "确认删除" })).toBeInTheDocument();
+  expect(within(profileListRow("Claude Code")).queryByRole("button", { name: "确认启用" })).toBeNull();
+
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "不删除" }));
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "启用" }));
+  expect(within(profileListRow("Claude Code")).getByRole("button", { name: "确认启用" })).toBeInTheDocument();
+  expect(within(profileListRow("Claude Code")).queryByRole("button", { name: "确认删除" })).toBeNull();
 });
