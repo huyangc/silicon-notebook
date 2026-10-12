@@ -167,14 +167,15 @@ def public_report_payload(
     references: Sequence[Any],
     memory_sources: Mapping[str, str] | None = None,
     *,
-    failed_errors: Sequence[str] | None = (),
+    failed_errors: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble the anonymous view from a token-resolved report row.
 
     ``failed_errors`` are the stored raw errors of the failed sections, used
     only to rewrite their notes in a body stored before notes went neutral.
-    ``None`` is the token read's finding that the body carries no raw failure note
-    (``public_report_by_token``), so the body is served without a second scan.
+    ``None`` is the token read's finding that the body carries no raw failure
+    note (``public_report_by_token``), so the body is served without a scan;
+    ``[]`` means the report has no failed section, so it is served as is too.
     """
     visible = [
         public_reference(reference, memory_sources)
@@ -187,11 +188,8 @@ def public_report_payload(
         "question_truncated": question_truncated,
         # A body stored before failure notes went neutral may still carry a
         # section's raw error text; only the author may read that.
-        "content_md": (
-            str(row.get("content_md") or "") if failed_errors is None
-            else neutralize_failure_notes(
-                str(row.get("content_md") or ""), failed_errors
-            )
+        "content_md": neutralize_failure_notes(
+            str(row.get("content_md") or ""), failed_errors
         ),
         "created_at": _text(row.get("created_at"), 64),
         "updated_at": _text(row.get("updated_at"), 64),

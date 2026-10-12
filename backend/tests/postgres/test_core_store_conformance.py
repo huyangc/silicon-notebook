@@ -4215,6 +4215,19 @@ def test_public_report_read_carries_failed_sections_only_for_a_failure_note_post
     assert reports.public_report_by_token(
         reports.share_report(notebook_id, mixed)
     )["failed_sections"] == REPORT_SECTION_FAILURE_EXPECTED
+    # codex #849 R1: a raw error that starts with a neutral sentence and goes
+    # on after a single line break is read, not mistaken for a neutral note.
+    lookalike = reports.create_report(notebook_id, "q", 2)
+    reports.update_report(
+        notebook_id, lookalike, status="done", sections=sections,
+        content_md=(
+            "## A\n\n（本节生成失败:本节处理过程出错）\nsecret gateway 10.9.8.7）"
+            "\n\n## B\n\n正文\n"
+        ),
+    )
+    assert reports.public_report_by_token(
+        reports.share_report(notebook_id, lookalike)
+    )["failed_sections"] == REPORT_SECTION_FAILURE_EXPECTED
 
 
 def test_terminal_understanding_write_keeps_the_generation_stamp_on_postgres(
