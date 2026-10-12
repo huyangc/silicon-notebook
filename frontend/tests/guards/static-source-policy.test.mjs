@@ -113,6 +113,10 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // 迁出记忆页时 `.agent-check` 被一并搬走,首页三处勾选框静默丢了样式。样式表没有可
   // 消费的 AST,jsdom 不做级联;className 采集仍走 semantic-source 的语义解析。
   "tests/guards/agent-check-style-guard.test.mjs",
+  // 同上,只读 page-header.css 与 manual.css:断言手册标题的 scroll-margin-top 不小于吸顶
+  // PageHeader 的高度,否则目录跳转后标题落在顶栏背后(codex R3 P2)。样式表没有可消费的
+  // AST,jsdom 不做滚动布局;PageHeader 挂 .topbar 的结构断言走 semantic-source。
+  "tests/guards/page-header-anchor-offset.test.mjs",
   // 构建期装载仓库外 UI 插件的同步脚本：在临时目录里造插件包夹具、跑真同步、
   // 再读回自己刚生成的产物。读的全是测试自己写出来的临时文件，加上后端契约
   // 生成器里那一行排序键声明——没有一处是对生产源码的位置/顺序查询。
