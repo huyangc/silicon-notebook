@@ -396,6 +396,15 @@ def test_图谱Schema放行对后端user_error也生效(tmp_path):
         '        raise user_error(400, exc)',
         'MSG = "基准库"\nerrs = [user_error(400, MSG) for MSG in xs]',
         'MSG = "基准库"\ndef f():\n    from app.messages import MSG\n    raise user_error(400, MSG)',
+        # 参数遮蔽同名模块 helper:调用的是传入的可调用对象,不跟进模块 helper 的 return
+        'def message():\n    return "基准库"\n'
+        'def route(message):\n    raise user_error(400, message())',
+        # 嵌套 / 星号解包里的名字仍是绑定,遮蔽同名模块常量
+        'MSG = "基准库"\ndef f(x):\n    (a, [MSG, b]), *c = x\n    raise user_error(400, MSG)',
+        'MSG = "基准库"\ndef f(x):\n    a, *MSG = x\n    raise user_error(400, MSG)',
+        # 局部可调用对象同理
+        'def message():\n    return "基准库"\n'
+        'def route(factory):\n    message = factory\n    raise user_error(400, message())',
         # 位置不对的字符串(status_code 位)不是 message
         'raise user_error("基准库", 400)',
         # 同名但不是标记函数的调用
@@ -430,6 +439,10 @@ def test_不在信任边界上的后端字符串不误报(tmp_path, code):
         'raise user_error(400, _msg(n))',
         # helper 里再经一层模块常量
         'BASE = "基准库"\ndef _msg():\n    return BASE + "不可用"\nraise user_error(400, _msg())',
+        # 下标 / 属性赋值读取接收者而不绑定它:模块常量在函数里仍可解析
+        'MESSAGES = {"bad": "基准库不可用"}\ndef f():\n    MESSAGES["ok"] = "完成"\n'
+        '    raise user_error(400, MESSAGES.get("bad", "失败"))',
+        'MSG = "基准库不可用"\ndef f(obj):\n    MSG.attr = 1\n    raise user_error(400, MSG)',
         # 长拼接链:最左边的前缀不因链长被丢掉(结构节点不扣深度)
         'raise user_error(400, "基准库 " + a + "，" + b + "，" + c + "。")',
         'raise user_error(400, "基准库 " + a + "，" + b + "，" + c + "，" + a + "，" + b + "。")',
