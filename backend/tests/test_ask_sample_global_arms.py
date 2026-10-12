@@ -287,3 +287,87 @@ def test_a_retrieval_only_ask_is_in_no_learning_sample(repo):
         assert [run["run_id"] for run in runs] == ["ask-answer"]
         assert len(runs[0]["steps"]) == 1
     assert ask_state.recent_user_ask_languages(USER, limit=30) == [{"language": "zh"}]
+
+
+def _shaped_payload(job_id, user_id, created_at, *, shape, steps):
+    """A done reasoning job exactly as each writer persisted it: the shared
+    engine's ``answer`` with the streamed ``trace`` cleared (``shape="new"``),
+    or a row from before the engine switch carrying the legacy ``response``
+    and, when it streamed one, a top-level ``trace`` (``shape="legacy"``;
+    ``steps=None`` leaves the ``trace`` key out entirely)."""
+    from app.models.ask import AskResponse, TraceStep
+    from app.models.global_ask import GlobalAskAnswer, GlobalAskJob, GlobalNotebookScope
+
+    scope = GlobalNotebookScope(mode="include", notebook_ids=["nb-a"])
+    trace = [TraceStep(**step) for step in steps or ()]
+    common = dict(
+        job_id=job_id, conversation_id=f"conv-{user_id}", status="done", question="q",
+        created_at=created_at, notebook_scope=scope, resolved_notebook_ids=["nb-a"],
+        searched_notebook_ids=["nb-a"], mode="reasoning",
+    )
+    if shape == "new":
+        job = GlobalAskJob(**common, trace=[], answer=AskResponse(
+            conclusion="c", answer="a", reasoning_trace=trace))
+        return job.model_dump(mode="json")
+    job = GlobalAskJob(**common, trace=trace, response=GlobalAskAnswer(
+        answer_id=f"ans-{job_id}", question="q", answer="legacy", created_at=created_at,
+        notebook_scope=scope, resolved_notebook_ids=["nb-a"],
+        searched_notebook_ids=["nb-a"], cited_notebook_ids=[]))
+    payload = job.model_dump(mode="json")
+    # A row persisted before ``trace``/``answer`` existed has neither key.
+    payload.pop("answer")
+    if steps is None:
+        payload.pop("trace")
+    return payload
+
+
+def test_global_experience_sample_reads_both_answer_shapes_like_the_python_projection(repo):
+    """The global reasoning sampler reads a job's trace through BOTH payload
+    shapes, in ``global_answer_trace`` order: the engine answer's
+    ``reasoning_trace``, else the top-level ``trace`` a legacy ``response`` row
+    carries. A legacy row used to contribute an empty run here while every
+    Python reader of the same row saw its steps."""
+    from app.models.global_ask import GlobalAskJob, global_answer_trace
+
+    rows = [
+        ("gask-new", "2026-08-01T14:00:00+00:00", "new",
+         [_step("n1", "retrieve"), _step("n2", "expand")]),
+        ("gask-legacy", "2026-08-01T13:00:00+00:00", "legacy",
+         [_step("l1", "expand"), _step("l2", "retrieve"), _step("l3", "retrieve")]),
+        ("gask-legacy-untraced", "2026-08-01T12:00:00+00:00", "legacy", None),
+        ("gask-new-empty", "2026-08-01T11:00:00+00:00", "new", []),
+    ]
+    payloads = {}
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO global_ask_conversations(id,user_id,title,scope_json,submitted_via,"
+            "created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+            (f"conv-{USER}", USER, "", "{}", "web", rows[0][1], rows[0][1]))
+        for job_id, created_at, shape, steps in rows:
+            payloads[job_id] = _shaped_payload(job_id, USER, created_at, shape=shape, steps=steps)
+            db.execute(
+                "INSERT INTO global_ask_jobs(id,conversation_id,user_id,client_request_id,"
+                "request_json,status,payload_json,created_at,submitted_via,asked_at,updated_at,"
+                "error_detail,mode) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (job_id, f"conv-{USER}", USER, None, "{}", "done",
+                 json.dumps(payloads[job_id]), created_at, "web", "", created_at, "",
+                 "reasoning"))
+    runs = repo._runtime.ask_state.recent_completed_ask_runs(job_limit=40, step_limit=600)
+    got = [(run["run_id"], [step["step_type"] for step in run["steps"]]) for run in runs]
+    assert got == [
+        ("gask-new", ["retrieve", "expand"]),
+        ("gask-legacy", ["expand", "retrieve", "retrieve"]),
+        ("gask-legacy-untraced", []),
+        ("gask-new-empty", []),
+    ]
+    # Same reading as the Python projection, row by row.
+    assert got == [
+        (job_id, [step.step_type for step in
+                  global_answer_trace(GlobalAskJob.model_validate(payloads[job_id]))])
+        for job_id, *_rest in rows
+    ]
+    # The legacy row's steps spend the one newest-first budget like any other.
+    capped = repo._runtime.ask_state.recent_completed_ask_runs(job_limit=40, step_limit=3)
+    assert [(run["run_id"], len(run["steps"])) for run in capped] == [
+        ("gask-new", 2), ("gask-legacy", 1), ("gask-legacy-untraced", 0), ("gask-new-empty", 0),
+    ]
