@@ -340,8 +340,9 @@ export default function AdminExtensionsPage() {
   }
 
   return (
+    <>
+    <PageHeader title="已加载的扩展" />
     <main className="ext-page">
-      <PageHeader title="已加载的扩展" />
       <p className="ext-description">
         扩展的装载在服务启动时一次性完成并固定：未在部署配置里点名、或点名但被设为不装载的扩展，都不会出现在这里，需要修改部署配置并重启服务才会生效。
         信任档位为「部署装入」的扩展可以在下面直接启停——点击即时写入，对当前服务进程立即生效，其它服务进程通常数秒内一并收敛；内置扩展始终启用，不支持在此关闭。
@@ -432,5 +433,6 @@ export default function AdminExtensionsPage() {
         </div>
       )}
     </main>
+    </>
   );
 }

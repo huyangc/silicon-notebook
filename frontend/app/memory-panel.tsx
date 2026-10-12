@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { ArrowUpCircle, Bookmark, Bot, Check, CheckSquare, ChevronDown, ChevronRight, Copy, Edit3, KeyRound, LayoutGrid, List, Search, Sparkles, Trash2, X } from "lucide-react";
+import { ArrowUpCircle, Bookmark, Bot, Check, CheckSquare, ChevronDown, Copy, Edit3, LayoutGrid, List, Search, Sparkles, Trash2, X } from "lucide-react";
 
 import { AnswerMarkdown } from "./answer-markdown";
 import { requestJson } from "./api-client.ts";
@@ -629,13 +629,6 @@ export function MemoryPanel({
           {scope === "global" ? `${ownerTotal} 条 · ${ownerPending} 条待确认` : `${total} 条`}
         </span>
       </header>
-
-      {scope === "global" && (
-        <a className="agent-access-link" href="/agents">
-          <span><KeyRound size={17} /><strong>Agent 接入</strong><small>管理 Claude Code、Codex 等客户端的 token 与权限；也可从账户菜单直接进入</small></span>
-          <ChevronRight size={16} />
-        </a>
-      )}
 
       <div className="memory-filterbar">
         <form className="memory-search" onSubmit={submitSearch}>

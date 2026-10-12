@@ -7,7 +7,8 @@
    11px 圆角),分页做卡片页脚。 */
 
 .usage-page { max-width: 1440px; margin: 0 auto; padding: 24px 24px 48px; }
-.usage-description { margin: 4px 0 16px; color: var(--muted); font-size: 14px; line-height: 1.55; }
+.usage-heading { margin: 0; font-size: 24px; }
+.usage-description { margin: 7px 0 16px; color: var(--muted); font-size: 14px; line-height: 1.55; }
 
 /* 加载 / 无权限 / 加载失败:与 questions-state 同形的居中虚线框,不再是左上角一行裸文字。 */
 .usage-state {
@@ -47,6 +48,8 @@
 .usage-analysis-note { margin: 0 0 12px; }
 .usage-analysis-sheet { min-width: 0; }
 .usage-analysis-links { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
+/* 主表里两条链接上下叠放:横排要 ~145px,是把整表顶出视口的列之一。 */
+.usage-analysis-links-stacked { flex-direction: column; align-items: flex-start; gap: 2px; font-size: 12.5px; line-height: 1.35; }
 .usage-analysis-empty { padding: 28px !important; text-align: center !important; color: var(--muted); }
 
 .usage-issues-table td { white-space: normal; vertical-align: top; line-height: 1.45; }
@@ -69,7 +72,7 @@
 .usage-table-wrap { overflow-x: auto; }
 .usage-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .usage-table th, .usage-table td {
-  text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line);
+  text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line);
   white-space: nowrap; vertical-align: middle;
 }
 .usage-table th { color: var(--muted); font-size: 12.5px; font-weight: 600; background: var(--soft); }
@@ -102,7 +105,7 @@
 .usage-expand-btn:hover { background: var(--line); color: var(--ink); }
 .usage-expand-btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
 
-.usage-username { font-weight: 600; color: var(--ink); }
+.usage-username { font-weight: 600; color: var(--ink); white-space: nowrap; }
 .usage-dot {
   display: inline-block; width: 8px; height: 8px; border-radius: 50%;
   margin-right: 8px; vertical-align: middle; box-sizing: border-box;
@@ -117,9 +120,10 @@
 }
 .usage-tag-admin, .usage-limit-tag-custom { border-color: var(--blue); background: var(--panel); color: var(--blue); }
 .usage-tag-disabled { border-color: var(--danger); background: var(--panel); color: var(--danger); }
-.usage-username + .usage-tag-disabled { margin-left: 6px; }
-/* 「账号」列:状态药丸 + 停用/启用 + 改用户名同一行,反馈落在下方(usage-cell-stack)。 */
-.usage-account-actions { display: inline-flex; align-items: center; gap: 6px; flex-wrap: nowrap; }
+.usage-username ~ .usage-tag { margin-left: 6px; }
+/* 用户名格允许折行:视口紧时「管理员 / 已停用」标签折到名字下方,主表借此收窄,
+   而不是整表顶出横向滚动条。其余列仍 nowrap。 */
+.usage-table td.usage-user-cell { white-space: normal; min-width: 120px; line-height: 1.6; }
 
 /* ——— 展开区 ——— */
 .usage-subrow td { padding: 4px 14px 14px 40px; background: var(--soft); white-space: normal; }
@@ -206,6 +210,15 @@
 .usage-limit-popover-input { flex: 1 1 84px; min-width: 84px; }
 .usage-limit-popover .usage-limit-input-password { flex: 1 1 120px; }
 .usage-limit-popover .usage-cell-feedback { max-width: 260px; }
+
+/* 「管理」弹出层:账号 / 用户名 / 密码 / 权限四行,标签列对齐,动作靠右。 */
+.usage-manage-caret { margin-left: 2px; color: var(--muted); font-size: 10px; }
+.usage-manage-popover { min-width: 260px; }
+.usage-manage-list { display: grid; grid-template-columns: auto 1fr; gap: 8px 14px; margin: 0; align-items: center; }
+.usage-manage-item { display: contents; }
+.usage-manage-item dt { margin: 0; color: var(--muted); font-size: 12.5px; }
+.usage-manage-item dd { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; margin: 0; }
+.usage-manage-item dd .usage-tag { margin-right: auto; }
 
 /* ——— 分页:面板页脚 ——— */
 .usage-pagination {

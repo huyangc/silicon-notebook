@@ -45,7 +45,7 @@ Use a notebook the account can read. To test formal context retrieval, that note
 
 ## 3. Issue a Profile and token in the UI
 
-1. Open the account menu and choose **Agent 接入** (Agent access). It is a first-level entry that opens the `/agents` page; the global Memory page also links there.
+1. Open the account menu and choose **Agent 接入** (Agent access). It is a first-level entry that opens the `/agents` page (the account menu is its only entry point).
 2. The page shows **Agent Profile**, **签发 Token** (issue token), and **已签发 Token** (issued tokens).
 3. Under **Agent Profile**, enter a stable name and a description of the client/environment, then choose **新建 Profile**.
 4. Under **签发 Token**, select that Profile and a default notebook. The UI also adds the default to the notebook allowlist; add only other notebooks the Agent truly needs.

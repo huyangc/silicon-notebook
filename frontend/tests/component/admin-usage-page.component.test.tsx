@@ -117,6 +117,12 @@ async function targetRow() {
   return within(row as HTMLTableRowElement);
 }
 
+// 账号状态 / 改用户名 / 重置密码 / 权限四个动作收在「管理」弹出层里,先点开该行的入口。
+// 弹出层是该行单元格的 DOM 子节点(position: fixed 只改绘制位置),within(row) 仍能取到。
+async function openManage(user: ReturnType<typeof userEvent.setup>, row: ReturnType<typeof within>, username = "a00123456") {
+  await user.click(row.getByRole("button", { name: `管理 ${username}` }));
+}
+
 // 「用户摘要」按 dt/dd 配对断言,而不是分别断言标签存在、数值存在——后者即便
 // 标签与数值互换(变异)也不会报红。取 dt 命中的 .usage-summary-item,读取其内的
 // dd 文本,把标签与相邻的值绑在一起判定。
@@ -145,6 +151,7 @@ test("管理员可在用户总览中二次确认并授予管理员权限", async
   expect(screen.queryByRole("columnheader", { name: "Excel 分析次数" })).not.toBeInTheDocument();
   expect(screen.queryByRole("columnheader", { name: "未解决解析问题数量" })).not.toBeInTheDocument();
 
+  await openManage(user, target);
   await user.click(target.getByRole("button", { name: "设为管理员" }));
   expect(mocks.updateAdminUserRole).not.toHaveBeenCalled();
   await user.click(target.getByRole("button", { name: "确认" }));
@@ -152,8 +159,11 @@ test("管理员可在用户总览中二次确认并授予管理员权限", async
   expect(await screen.findByText("已授予 a00123456 管理员权限")).toBeInTheDocument();
   expect(mocks.updateAdminUserRole).toHaveBeenCalledWith("user-target", "admin");
   expect(target.getByRole("button", { name: "撤销管理员" })).toBeInTheDocument();
-  const builtinRow = screen.getByText("admin").closest("tr");
-  expect(within(builtinRow as HTMLTableRowElement).getByText("当前账户")).toBeInTheDocument();
+  // 角色不再单占一列:管理员在用户名后挂标签。
+  expect(target.getByText("管理员")).toBeInTheDocument();
+  const builtin = within(screen.getByText("admin").closest("tr") as HTMLTableRowElement);
+  await openManage(user, builtin, "admin");
+  expect(builtin.getByText("当前账户")).toBeInTheDocument();
 });
 
 test("用户总览用两个新页签承载只读分析，不给用户列表增加列", async () => {
@@ -327,13 +337,15 @@ test("管理员行的文档上限显示不限且不可编辑", async () => {
 
 test("重置密码不依赖认证方式:统一认证启用时也保留(用于关联老账号前的找回)", async () => {
   primeCommonMocks();
+  const user = userEvent.setup();
   render(<AdminUsagePage />);
   const target = await targetRow();
+  await openManage(user, target);
   expect(target.getByRole("button", { name: "重置密码" })).toBeInTheDocument();
-  expect(screen.getByRole("columnheader", { name: "密码" })).toBeInTheDocument();
+  expect(screen.getByRole("columnheader", { name: "管理" })).toBeInTheDocument();
 });
 
-test("账号列显示状态;停用需二次确认,按下后按钮进入忙态,结果落在该单元格", async () => {
+test("管理弹出层显示账号状态;停用需二次确认,按下后按钮进入忙态,结果落在弹出层内", async () => {
   primeCommonMocks();
   let resolveStatus: (value: "disabled") => void = () => undefined;
   mocks.updateAdminUserStatus.mockReturnValue(new Promise((resolve) => { resolveStatus = resolve; }));
@@ -341,7 +353,9 @@ test("账号列显示状态;停用需二次确认,按下后按钮进入忙态,�
 
   render(<AdminUsagePage />);
   const target = await targetRow();
-  expect(target.getByText("正常")).toBeInTheDocument();
+  await openManage(user, target);
+  const dialog = within(screen.getByRole("dialog", { name: "管理 a00123456" }));
+  expect(dialog.getByText("正常")).toBeInTheDocument();
 
   await user.click(target.getByRole("button", { name: "停用" }));
   expect(mocks.updateAdminUserStatus).not.toHaveBeenCalled();
@@ -350,12 +364,12 @@ test("账号列显示状态;停用需二次确认,按下后按钮进入忙态,�
   expect(target.getByRole("button", { name: "更新中…" })).toBeDisabled();
 
   resolveStatus("disabled");
-  expect(await target.findByRole("status")).toHaveTextContent("已停用 a00123456，其登录已全部失效");
+  expect(await dialog.findByRole("status")).toHaveTextContent("已停用 a00123456，其登录已全部失效");
   expect(target.getAllByText("已停用").length).toBeGreaterThan(0);
   expect(target.getByRole("button", { name: "启用" })).toBeEnabled();
 });
 
-test("A 行状态更新在途时，其他行的停用按钮与 A 行的确认/取消都停用（全局互斥）", async () => {
+test("A 行状态更新在途时，其他行的管理入口与 A 行的确认/取消都停用（全局互斥）", async () => {
   primeCommonMocks();
   mocks.fetchAdminUsers.mockResolvedValue([rows[0], rows[1], { ...rows[1], id: "user-other", username: "a00999999" }]);
   mocks.updateAdminUserStatus.mockReturnValue(new Promise(() => undefined));
@@ -364,15 +378,19 @@ test("A 行状态更新在途时，其他行的停用按钮与 A 行的确认/�
   render(<AdminUsagePage />);
   const target = await targetRow();
   const other = within((await screen.findByText("a00999999")).closest("tr") as HTMLTableRowElement);
+  await openManage(user, target);
   await user.click(target.getByRole("button", { name: "停用" }));
   await user.click(target.getByRole("button", { name: "确认停用" }));
 
   expect(target.getByRole("button", { name: "更新中…" })).toBeDisabled();
   expect(target.getByRole("button", { name: "取消" })).toBeDisabled();
-  expect(other.getByRole("button", { name: "停用" })).toBeDisabled();
+  expect(other.getByRole("button", { name: "管理 a00999999" })).toBeDisabled();
+  // 在途时点外部不关层,忙态反馈不会被收走。
+  await user.click(document.body);
+  expect(screen.getByRole("dialog", { name: "管理 a00123456" })).toBeInTheDocument();
 });
 
-test("已停用账号可启用;失败时错误落在账号单元格并可重试", async () => {
+test("已停用账号可启用;失败时错误落在管理弹出层内并可重试", async () => {
   primeCommonMocks();
   mocks.fetchAdminUsers.mockResolvedValue([rows[0], { ...rows[1], status: "disabled" }]);
   mocks.updateAdminUserStatus.mockRejectedValueOnce(humanizedError("操作有冲突，请刷新后重试", 409));
@@ -381,6 +399,8 @@ test("已停用账号可启用;失败时错误落在账号单元格并可重试"
 
   render(<AdminUsagePage />);
   const target = await targetRow();
+  expect(target.getByText("已停用")).toBeInTheDocument();
+  await openManage(user, target);
   await user.click(target.getByRole("button", { name: "启用" }));
   await user.click(target.getByRole("button", { name: "确认启用" }));
   expect(await target.findByRole("alert")).toHaveTextContent("操作有冲突，请刷新后重试");
@@ -388,15 +408,17 @@ test("已停用账号可启用;失败时错误落在账号单元格并可重试"
   await user.click(target.getByRole("button", { name: "确认启用" }));
   expect(await target.findByRole("status")).toHaveTextContent("已启用 a00123456");
   expect(target.getByText("正常")).toBeInTheDocument();
+  expect(target.queryByText("已停用")).toBeNull();
 });
 
-test("改用户名在弹出层里提交,成功后行内用户名更新并就近提示", async () => {
+test("改用户名在管理弹出层里提交,成功后回到动作清单,行内用户名更新并就近提示", async () => {
   primeCommonMocks();
   mocks.updateAdminUsername.mockResolvedValue("e12345678");
   const user = userEvent.setup();
 
   render(<AdminUsagePage />);
   const target = await targetRow();
+  await openManage(user, target);
   await user.click(target.getByRole("button", { name: "改用户名" }));
   const dialog = await screen.findByRole("dialog", { name: "修改 a00123456 的用户名" });
   const input = within(dialog).getByLabelText("a00123456 的新用户名");
@@ -406,14 +428,19 @@ test("改用户名在弹出层里提交,成功后行内用户名更新并就近�
   await user.click(within(dialog).getByRole("button", { name: "保存" }));
 
   expect(mocks.updateAdminUsername).toHaveBeenCalledWith("user-target", "e12345678");
-  expect(await screen.findByText("已将 a00123456 改名为 e12345678，该用户需重新登录")).toBeInTheDocument();
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  const menu = await screen.findByRole("dialog", { name: "管理 e12345678" });
+  expect(within(menu).getByRole("status")).toHaveTextContent("已将 a00123456 改名为 e12345678，该用户需重新登录");
   expect(screen.getByText("e12345678")).toBeInTheDocument();
-  expect(screen.queryByText("a00123456")).toBeNull();
+
+  // 收起后反馈随层一起收走,不挂到入口按钮下把「管理」列撑宽。
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.queryByRole("status")).toBeNull();
 });
 
 async function submitRename(user: ReturnType<typeof userEvent.setup>, next: string) {
   const target = await targetRow();
+  await openManage(user, target);
   await user.click(target.getByRole("button", { name: "改用户名" }));
   const field = within(await screen.findByRole("dialog", { name: "修改 a00123456 的用户名" })).getByLabelText("a00123456 的新用户名");
   await user.clear(field);
@@ -448,11 +475,15 @@ test("内置管理员与本人行不提供停用与改名", async () => {
   mocks.fetchOnlineIds.mockResolvedValue([]);
   mocks.fetchUploadLimitDefault.mockResolvedValue(20);
 
+  const user = userEvent.setup();
   render(<AdminUsagePage />);
   const selfRow = within((await screen.findByText("b00123456")).closest("tr") as HTMLTableRowElement);
+  await openManage(user, selfRow, "b00123456");
+  expect(selfRow.getByRole("dialog", { name: "管理 b00123456" })).toBeInTheDocument();
   expect(selfRow.queryByRole("button", { name: "停用" })).toBeNull();
   expect(selfRow.queryByRole("button", { name: "改用户名" })).toBeNull();
   const builtin = within(screen.getByText("admin").closest("tr") as HTMLTableRowElement);
+  await openManage(user, builtin, "admin");
   expect(builtin.queryByRole("button", { name: "停用" })).toBeNull();
   expect(builtin.queryByRole("button", { name: "改用户名" })).toBeNull();
 });
@@ -465,6 +496,7 @@ test("管理员可为普通用户重置密码;内置管理员与本人行受保�
   render(<AdminUsagePage />);
   const target = await targetRow();
 
+  await openManage(user, target);
   await user.click(target.getByRole("button", { name: "重置密码" }));
   const input = target.getByLabelText("a00123456 的新密码");
   await user.type(input, "new-secret-1");
@@ -475,9 +507,11 @@ test("管理员可为普通用户重置密码;内置管理员与本人行受保�
 
   // 内置管理员(user-local)也是这份 fixture 里当前登录的用户,取先判定的
   // "受保护"分支,而不是"本人"。
-  const builtinRow = screen.getByText("admin").closest("tr");
-  // 账号列与密码列各有一处「受保护」。
-  expect(within(builtinRow as HTMLTableRowElement).getAllByText("受保护")).toHaveLength(2);
+  const builtin = within(screen.getByText("admin").closest("tr") as HTMLTableRowElement);
+  await openManage(user, builtin, "admin");
+  // 账号、用户名、密码三行各有一处「受保护」;权限行是「当前账户」。
+  expect(builtin.getAllByText("受保护")).toHaveLength(3);
+  expect(builtin.queryByRole("button", { name: "重置密码" })).toBeNull();
 });
 
 test("非内置管理员看自己那行显示「本人」而非重置按钮", async () => {
@@ -497,13 +531,16 @@ test("非内置管理员看自己那行显示「本人」而非重置按钮", as
   mocks.fetchOnlineIds.mockResolvedValue([]);
   mocks.fetchUploadLimitDefault.mockResolvedValue(20);
 
+  const user = userEvent.setup();
   render(<AdminUsagePage />);
   const selfRow = within((await screen.findByText("b00123456")).closest("tr") as HTMLTableRowElement);
-  // 账号列与密码列各有一处「本人」。
-  expect(selfRow.getAllByText("本人")).toHaveLength(2);
+  await openManage(user, selfRow, "b00123456");
+  // 账号、用户名、密码三行各有一处「本人」。
+  expect(selfRow.getAllByText("本人")).toHaveLength(3);
   expect(selfRow.queryByRole("button", { name: "重置密码" })).toBeNull();
   // 别的普通用户行仍有重置入口
   const target = await targetRow();
+  await openManage(user, target);
   expect(target.getByRole("button", { name: "重置密码" })).toBeInTheDocument();
 });
 
@@ -713,8 +750,8 @@ test("展开区新增用户摘要不改变主表列头数量与文案", async ()
     return (th.textContent ?? "").replace(indicatorText, "");
   });
   expect(headers).toEqual([
-    "", "用户名", "角色", "注册时间", "笔记本", "来源", "提问", "报告",
-    "最近活跃", "用户分析", "文档上限", "账号", "密码", "权限管理",
+    "", "用户名", "注册时间", "笔记本", "来源", "提问", "报告",
+    "最近活跃", "用户分析", "文档上限", "管理",
   ]);
 });
 

@@ -177,7 +177,9 @@ test("the Agent access page owns one semantic Agent-access surface", async () =>
   );
 });
 
-test("global Memory keeps only a link to the Agent access page", async () => {
+test("Agent access has one entry point: the account menu, not the Memory page", async () => {
+  // 私有记忆页曾另挂一张「Agent 接入」卡片,与账户菜单里紧挨着「私有记忆」的同名入口重复;
+  // 入口只留账户菜单一处。
   const panel = await parseModule("memory-panel.tsx");
   const declarationNames = new Set(declarations(panel).map((finding) => finding.name));
 
@@ -185,6 +187,13 @@ test("global Memory keeps only a link to the Agent access page", async () => {
   assert.deepEqual(importsFrom(panel, "./agent-token-model"), []);
   assert.equal(
     jsxElements(panel, "a").some((element) => element.attributes.href === "/agents"),
+    false,
+    "memory-panel.tsx 又挂回了指向 /agents 的链接 —— 入口只留账户菜单",
+  );
+
+  const menu = await parseModule("account-menu.tsx");
+  assert.equal(
+    jsxElements(menu, "a").some((element) => element.attributes.href === "/agents"),
     true,
   );
 });

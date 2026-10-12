@@ -9,6 +9,12 @@ export function formatLastActive(iso: string | null | undefined): string {
   return iso.replace("T", " ").slice(0, 16);
 }
 
+// 只取日期部分(YYYY-MM-DD):主表「注册时间」列用它省出约 50px 列宽,完整时刻放进 title。
+export function formatDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  return iso.slice(0, 10);
+}
+
 // 存储占用格式化:1024 进制,单位 B/KB/MB/GB/TB,保留一位小数;小于 1 KB 按整数字节
 // 显示(不出现「0.0 B」这类假精度)。仅供展开区「用户摘要」使用,不作为排序键
 // (规格 §3 B6:主表排序键不新增)。
@@ -63,7 +69,6 @@ export function parseUploadLimit(raw: string): number | null {
 
 export type AdminUserSortKey =
   | "username"
-  | "role"
   | "created_at"
   | "notebooks"
   | "sources"
@@ -96,10 +101,6 @@ function compareAdminUserValue(
   key: AdminUserSortKey,
 ): number {
   if (key === "username") return compareText(left.username, right.username);
-  if (key === "role") {
-    const roleRank = (role: string) => role === "admin" ? 0 : 1;
-    return roleRank(left.role) - roleRank(right.role);
-  }
   if (key === "created_at") return compareTimestamp(left.created_at, right.created_at);
   if (key === "last_active") {
     // 未活跃用户无可比较时间，无论升降序都固定放到末尾。
