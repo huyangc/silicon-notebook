@@ -516,6 +516,10 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
         "JOIN knowhow_rows kr ON kr.id = kcc.row_id "
         "JOIN knowhow_tables kt ON kt.id = kr.table_id WHERE kt.notebook_id = ?",
     ),
+    # Unfiltered by source on purpose: a Memory source never owns an asset (it is
+    # parsed without an image persister and is not addressable by reparse or
+    # backfill-images); a row whose source is deleted mid-copy keeps its old
+    # source_id in the copy, as every copied asset row did before the remap.
     ("notebook_assets", "SELECT * FROM notebook_assets WHERE notebook_id = ?"),
 )
 
