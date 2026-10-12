@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -254,6 +255,49 @@ def postgres_scope() -> ScopedPostgres:
         yield scoped
 
 
+# Bound for the pre-drop drain below. Background work in this lane runs on fake
+# models, so a pool that is still busy after this long is stuck, not slow.
+_BACKGROUND_QUIESCE_SECONDS = 30.0
+
+
+def _quiesce_process_background_work(timeout: float) -> None:
+    """Wait, bounded, until the process pools that run fire-and-forget work
+    (the KG job/window pools and the maintenance pools) are idle.
+
+    ``DROP SCHEMA ... CASCADE`` takes ACCESS EXCLUSIVE on the schema's tables
+    one at a time. Work a test queued -- e.g. the Memory KG ingest that
+    ``create_memory_from_answer`` submits to the KG job pool -- can still be
+    inside a transaction then; once it holds a row lock on a table the drop has
+    not reached and writes one the drop already holds, PostgreSQL aborts the
+    drop with ``DeadlockDetected`` in the teardown (``test_promotion_provenance_pg``,
+    CI on PR #844 and #846). Closing the repository does not prevent it: the
+    pool close leaves a checked-out connection's transaction running. The
+    root conftest's maintenance drain runs too late for this -- autouse
+    fixtures are torn down after this scope. A job that queues follow-up work
+    on the other pool is caught by re-checking until both are idle in one pass.
+
+    On timeout the schema is left in place (the dedicated test database is
+    disposable) and the teardown fails naming the busy pool, rather than
+    issuing a drop that would block on, or deadlock with, the stuck job.
+    """
+    from app.services import background_jobs
+    from app.services.kg import scheduler as kg_scheduler
+
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = max(0.0, deadline - time.monotonic())
+        if not kg_scheduler.wait_idle(remaining):
+            raise RuntimeError(
+                "KG scheduler work was still running at PostgreSQL scope teardown: "
+                f"{kg_scheduler.stats()}"
+            )
+        background_jobs._drain_maintenance_executors_for_tests(
+            timeout=max(0.0, deadline - time.monotonic())
+        )
+        if kg_scheduler.wait_idle(0):
+            return
+
+
 @contextmanager
 def _isolated_postgres_scope(base_url: str):
     _require_dedicated_test_database(base_url)
@@ -289,6 +333,7 @@ def _isolated_postgres_scope(base_url: str):
     finally:
         if not _TEST_SCHEMA.fullmatch(schema):
             raise RuntimeError("refusing to drop an unvalidated PostgreSQL test schema")
+        _quiesce_process_background_work(_BACKGROUND_QUIESCE_SECONDS)
         with psycopg.connect(base_url, autocommit=True) as conn:
             actual = conn.execute("SELECT current_database()").fetchone()[0]
             _require_dedicated_test_database(base_url, actual)
