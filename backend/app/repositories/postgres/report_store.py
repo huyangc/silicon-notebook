@@ -528,17 +528,26 @@ class ReportStore:
                 "WHERE share_token = %s AND status = 'done'",
                 (clean,),
             ).fetchone()
+            needs_sections = row is not None and carries_raw_failure_note(
+                str(row["content_md"] or "")
+            )
             failed = (
                 db.execute(
                     f"SELECT {_FAILED_SECTIONS_SQL} AS failed_sections "
-                    "FROM reports WHERE id = %s",
-                    (row["id"],),
+                    "FROM reports WHERE id = %s AND share_token = %s "
+                    "AND status = 'done'",
+                    (row["id"], clean),
                 ).fetchone()
-                if row is not None
-                and carries_raw_failure_note(str(row["content_md"] or ""))
+                if needs_sections
                 else None
             )
         if row is None:
+            return None
+        if needs_sections and failed is None:
+            # The body still carries raw failure text and the row went away
+            # (deleted, unshared, regenerating) between the two statements:
+            # without its failed sections nothing can rewrite that text, so
+            # this read fails closed exactly like an unknown token.
             return None
         out = dict(row)
         # Same shape as the SQLite adapter: the caller never sees the dialect.

@@ -4230,6 +4230,49 @@ def test_public_report_read_carries_failed_sections_only_for_a_failure_note_post
     )["failed_sections"] == REPORT_SECTION_FAILURE_EXPECTED
 
 
+def test_public_report_read_fails_closed_when_the_report_goes_between_reads_postgres(
+    core_stores: CoreStores, monkeypatch,
+):
+    """codex #849 R2, PostgreSQL lane: a report deleted between the token
+    statement and the failed-sections statement reads as ``None`` (the
+    route's 404), never as a body whose raw failure text went unrewritten."""
+    from app.repositories.postgres import report_store as report_store_module
+    from app.repositories.postgres.report_store import ReportStore
+
+    owner = core_stores.identity.create_user("r00667788", "password-12")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Racing delete"), owner.id
+    )
+    reports = ReportStore(
+        core_stores.database,
+        new_id=_new_id_factory(),
+        now=lambda: NOW,
+        current_user_id=lambda: owner.id,
+    )
+    report_id = reports.create_report(notebook_id, "q", 2)
+    raw = "OperationalError: secret 10.9.8.7"
+    reports.update_report(
+        notebook_id, report_id, status="done",
+        sections=[{"title": "A", "markdown": "", "failed": True, "error": raw}],
+        content_md=f"## A\n\n（本节生成失败:{raw}）\n",
+    )
+    token = reports.share_report(notebook_id, report_id)
+    real_gate = report_store_module.carries_raw_failure_note
+    deleted = []
+
+    def gate_then_delete(content_md):
+        if not deleted:
+            reports.delete_report(notebook_id, report_id)
+            deleted.append(report_id)
+        return real_gate(content_md)
+
+    monkeypatch.setattr(
+        report_store_module, "carries_raw_failure_note", gate_then_delete
+    )
+    assert reports.public_report_by_token(token) is None
+    assert deleted == [report_id]
+
+
 def test_terminal_understanding_write_keeps_the_generation_stamp_on_postgres(
     core_stores: CoreStores,
 ):

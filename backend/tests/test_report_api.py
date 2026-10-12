@@ -1685,6 +1685,67 @@ def test_public_report_read_carries_failed_sections_only_for_a_failure_note(
     )["failed_sections"] == REPORT_SECTION_FAILURE_EXPECTED
 
 
+def test_public_report_read_fails_closed_when_the_report_goes_between_reads(
+    client, monkeypatch,
+):
+    """codex #849 R2: the failed sections are read by a second statement. If
+    the report is deleted between the two, the body already fetched still
+    carries raw text that nothing can rewrite: the read must fail closed
+    (``None`` -> the same 404 as an unknown token), never serve that body."""
+    import app.repositories.sqlite.report_store as report_store_module
+    from app.api.deps import repository
+
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    store = repository()._runtime.report_store
+    rid = _mk_report(client, monkeypatch, nb["id"], "q")
+    raw = "OperationalError: secret 10.9.8.7"
+    store.update_report(
+        nb["id"], rid, status="done",
+        sections=[{"title": "A", "markdown": "", "failed": True, "error": raw}],
+        content_md=f"## A\n\n（本节生成失败:{raw}）\n",
+    )
+    token = store.share_report(nb["id"], rid)
+    real_gate = report_store_module.carries_raw_failure_note
+    deleted = []
+
+    def gate_then_delete(content_md):
+        # Runs between the token statement and the failed-sections statement.
+        if not deleted:
+            store.delete_report(nb["id"], rid)
+            deleted.append(rid)
+        return real_gate(content_md)
+
+    monkeypatch.setattr(
+        report_store_module, "carries_raw_failure_note", gate_then_delete
+    )
+    assert store.public_report_by_token(token) is None
+    assert deleted == [rid]
+
+    # Same race through the anonymous route: 404, the raw text never served.
+    rid2 = _mk_report(client, monkeypatch, nb["id"], "q2")
+    store.update_report(
+        nb["id"], rid2, status="done",
+        sections=[{"title": "A", "markdown": "", "failed": True, "error": raw}],
+        content_md=f"## A\n\n（本节生成失败:{raw}）\n",
+    )
+    token2 = store.share_report(nb["id"], rid2)
+    deleted.clear()
+
+    def gate_then_delete_second(content_md):
+        if not deleted:
+            store.delete_report(nb["id"], rid2)
+            deleted.append(rid2)
+        return real_gate(content_md)
+
+    monkeypatch.setattr(
+        report_store_module, "carries_raw_failure_note", gate_then_delete_second
+    )
+    response = client.get(f"/api/public/reports/{token2}")
+    assert response.status_code == 404
+    assert "10.9.8.7" not in response.text
+    assert deleted == [rid2]
+
+
 def test_public_report_route_is_not_behind_the_router_level_session_guard():
     """The public read must not sit under the blanket `get_current_user` router.
 
