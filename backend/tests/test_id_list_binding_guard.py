@@ -401,7 +401,7 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(PG_EXP, BATCHED, "base notebook ids, 400 per statement"),),
     ("postgres/source_store.py", "SourceStore"): (
         s("unnest(%s)", NOT_IDS,
-          "_POSITIONS_SQL: element positions, <= 100 (MAX_POSITIONS_PER_READ)"),),
+          "_POSITIONS_PREFIX: element positions, <= 100 (MAX_POSITIONS_PER_READ)"),),
     ("postgres/source_store.py", "SourceStore.visible_source_ids_by_notebook"): (
         s(ANY, BOUNDED, "a global run's participant notebooks (<= 8)"),),
     ("postgres/source_store.py", "SourceStore.visible_source_scope_snapshot"): (

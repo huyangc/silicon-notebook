@@ -8,8 +8,9 @@ The twin of ``tests/test_source_elements_positions.py``:
   single READ COMMITTED snapshot -- and it runs inside a read budget (whose
   wrapper sends a ``set_config`` first, the reason the plan dropped a
   ``SET TRANSACTION`` design);
-* ``prepare_source_overview`` is byte-identical to the frozen pre-batching
-  function, statically and when the document changes after the first page;
+* ``prepare_source_overview`` cites the promised positions of the stored
+  order in batched reads, and shows the visible branch when the document
+  shrinks, grows, is deleted or re-parsed after the first page;
 * both statement shapes, custom and generic plan: the per-offset shape is the
   windowed read's ``Limit`` over ``idx_source_elements_source_created`` for
   every position; the head walk is one index scan of that index (only or not
@@ -20,7 +21,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import math
 import re
 import time
 from pathlib import Path
@@ -32,10 +32,11 @@ from app.domain.source_positions import MAX_POSITIONS_PER_READ, page_at_position
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.source_store import SourceStore
+from app.core.config import Settings
 from app.repositories.read_budget import read_budget
 from app.services.collection_enumeration import SourceItem
 from app.services.document_source_overview import prepare_source_overview
-from tests.document_overview_legacy_oracle import legacy_prepare_source_overview
+from tests.test_source_elements_positions import assert_promised_positions
 
 pytestmark = [
     pytest.mark.postgres_integration,
@@ -47,21 +48,49 @@ LATER = "2026-01-02T00:00:00+00:00"
 DOC = 260
 
 
-@pytest.fixture
-def database(postgres_settings):
-    settings = postgres_settings.model_copy(update={
-        "postgres_pool_min_size": 1,
-        "postgres_pool_max_size": 1,
-        "postgres_pool_acquire_timeout_seconds": 10,
-        "postgres_statement_timeout_seconds": 20,
-    })
-    database = PostgresDatabase(settings, Path(__file__).resolve().parents[3])
-    try:
-        PostgresMigrator(database).migrate()
-        _seed(database)
-        yield database
-    finally:
-        database.close()
+CHANGES = {
+    "shrink": lambda sid: ("DELETE FROM source_elements WHERE source_id=%s AND created_at=%s",
+                           (sid, LATER)),
+    "grow": lambda sid: ("INSERT INTO source_elements(id,source_id,element_type,location_label,"
+                         "text,created_at) VALUES (%s,%s,'paragraph','p','late',%s)",
+                         (f"el-{sid}-late", sid, LATER)),
+    "delete": lambda sid: ("DELETE FROM sources WHERE id=%s", (sid,)),
+}
+CHANGE_CASES = [(change, max_elements) for change in sorted(CHANGES) for max_elements in (5, 230)]
+
+
+def _change_source(change: str, max_elements: int) -> str:
+    return f"src-chg-{change}-{max_elements}"
+
+
+@pytest.fixture(scope="module")
+def database():
+    """One seeded world for the whole module (development.md: an immutable
+    matrix is not rebuilt per row). Read-only tests use ``src-a``/``src-b``/
+    ``src-empty``; each change test writes only to its own ``src-chg-*``."""
+    import os
+
+    from tests.postgres.conftest import _isolated_postgres_scope
+
+    base = os.environ.get("TEST_POSTGRES_URL")
+    if not base:
+        pytest.skip("TEST_POSTGRES_URL is not configured")
+    with _isolated_postgres_scope(base) as scope:
+        database = PostgresDatabase(Settings(
+            database_url=scope.url,
+            postgres_pool_min_size=1,
+            postgres_pool_max_size=1,
+            postgres_pool_acquire_timeout_seconds=10,
+            postgres_statement_timeout_seconds=20,
+            postgres_chunk_fts_timeout_seconds=1.0,
+            postgres_lock_timeout_seconds=1,
+        ), Path(__file__).resolve().parents[3])
+        try:
+            PostgresMigrator(database).migrate()
+            _seed(database)
+            yield database
+        finally:
+            database.close()
 
 
 def _seed(database) -> None:
@@ -70,7 +99,10 @@ def _seed(database) -> None:
             "INSERT INTO notebooks(id,name,created_at,updated_at) VALUES ('nb','nb',%s,%s)",
             (NOW, NOW),
         )
-        for source_id, count in (("src-a", DOC), ("src-b", 40), ("src-empty", 0)):
+        documents = [("src-a", DOC), ("src-b", 40), ("src-empty", 0)] + [
+            (_change_source(*case), DOC) for case in CHANGE_CASES
+        ]
+        for source_id, count in documents:
             db.execute(
                 "INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,"
                 "created_at,updated_at) VALUES (%s,'nb',%s,'file','ready','ready',%s,%s)",
@@ -225,14 +257,6 @@ def test_both_shapes_walk_the_order_index_and_never_scan_or_sort_elements(
                 name, plan)
 
 
-def _fields(result) -> str:
-    return json.dumps([
-        result.context_block, json.dumps(result.id_map, ensure_ascii=False),
-        [citation.model_dump_json() for citation in result.citations],
-        result.coverage_note,
-    ], ensure_ascii=False)
-
-
 class _Reads:
     """Count the adapter calls; ``after_first`` runs once the first page is read."""
 
@@ -256,20 +280,21 @@ ITEM = SourceItem("src-a", "文档", "文档", "", "nb", "personal")
 
 @pytest.mark.parametrize("max_elements", [1, 2, 5, 64, 230])
 @pytest.mark.parametrize("coverage", ["spread", "opening"])
-@pytest.mark.parametrize("budget", [120, 30_000])
-def test_overview_is_byte_identical_and_batched(store, max_elements, coverage, budget):
+@pytest.mark.parametrize("budget", [120, 10_000_000])
+def test_overview_cites_the_promised_positions_in_batched_reads(
+    store, max_elements, coverage, budget,
+):
     reads = _Reads(store)
-    current = prepare_source_overview(
+    result = prepare_source_overview(
         reads, ITEM, budget, max_elements, active_notebook_id="nb",
         generation_reader=lambda _: "v1", coverage=coverage,
     )
-    legacy = legacy_prepare_source_overview(
-        store, ITEM, budget, max_elements, active_notebook_id="nb",
-        generation_reader=lambda _: "v1", coverage=coverage,
+    assert len(result.context_block) <= budget
+    if budget > 120:
+        assert len(result.citations) == min(DOC, max_elements)
+    assert_promised_positions(
+        result, store.source_elements("src-a"), max_elements, coverage, reads.calls,
     )
-    assert _fields(current) == _fields(legacy)
-    later = max_elements - 1 if max_elements > 1 or coverage == "opening" else 1
-    assert len(reads.calls) == 1 + math.ceil(later / MAX_POSITIONS_PER_READ)
 
 
 def _write(database, sql, params=()):
@@ -277,51 +302,33 @@ def _write(database, sql, params=()):
         db.execute(sql, params)
 
 
-CHANGES = {
-    "shrink": ("DELETE FROM source_elements WHERE source_id='src-a' AND created_at=%s",
-               (LATER,)),
-    "grow": ("INSERT INTO source_elements(id,source_id,element_type,location_label,text,"
-             "created_at) VALUES ('el-src-a-late','src-a','paragraph','p','late',%s)",
-             (LATER,)),
-    "delete": ("DELETE FROM sources WHERE id='src-a'", ()),
-}
-
-
-@pytest.mark.parametrize("change", sorted(CHANGES))
-@pytest.mark.parametrize("max_elements", [5, 230])
-def test_a_change_after_the_first_page_is_byte_identical(
+@pytest.mark.parametrize("change,max_elements", CHANGE_CASES)
+def test_a_change_after_the_first_page_shows_its_branch(
     database, store, change, max_elements,
 ):
-    def run(fn):
-        def apply():
-            _write(database, *CHANGES[change])
-        try:
-            return _fields(fn(
-                _Reads(store, apply), ITEM, 30_000, max_elements,
-                active_notebook_id="nb", generation_reader=lambda _: "v1",
-            ))
-        except KeyError as exc:
-            return f"KeyError:{exc}"
+    source_id = _change_source(change, max_elements)
 
-    current = run(prepare_source_overview)
-    _restore(database)
-    legacy = run(legacy_prepare_source_overview)
-    assert current == legacy
-    expected = "KeyError:'src-a'" if change == "delete" else "读取期间文档内容发生变化"
-    assert expected in current
+    def apply():
+        _write(database, *CHANGES[change](source_id))
 
-
-def _restore(database) -> None:
-    """Back to the seeded state, so the frozen function reads what the
-    current one read before the same change."""
-    with database.write() as db:
-        db.execute("TRUNCATE source_elements, sources, notebooks CASCADE")
-    _seed(database)
+    item = SourceItem(source_id, "文档", "文档", "", "nb", "personal")
+    reads = _Reads(store, apply)
+    if change == "delete":
+        with pytest.raises(KeyError):
+            prepare_source_overview(reads, item, 30_000, max_elements,
+                                    active_notebook_id="nb", generation_reader=lambda _: "v1")
+        return
+    result = prepare_source_overview(reads, item, 30_000, max_elements,
+                                     active_notebook_id="nb", generation_reader=lambda _: "v1")
+    assert result.coverage_note == "读取期间文档内容发生变化，请重试。"
+    assert not result.context_block and not result.id_map and not result.citations
 
 
-def test_a_reparse_between_reads_is_byte_identical(store):
-    for fn in (prepare_source_overview, legacy_prepare_source_overview):
-        generations = iter(["v1", "v2"])
-        result = fn(_Reads(store), ITEM, 30_000, 5, active_notebook_id="nb",
-                    generation_reader=lambda _: next(generations))
-        assert result.coverage_note == "读取期间文档重新解析，无法确认原文一致性，请重试。"
+def test_a_reparse_between_reads_discards_the_evidence(store):
+    generations = iter(["v1", "v2"])
+    result = prepare_source_overview(
+        _Reads(store), ITEM, 30_000, 5, active_notebook_id="nb",
+        generation_reader=lambda _: next(generations),
+    )
+    assert result.coverage_note == "读取期间文档重新解析，无法确认原文一致性，请重试。"
+    assert not result.context_block and not result.citations
