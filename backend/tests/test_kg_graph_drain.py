@@ -1136,7 +1136,7 @@ def test_drain_only_steps_stay_out_of_the_post_commit_survivor_check(
     """K1 变异钉(「新步骤参与复查」):冲突候选 / 合并预审两步若参与终局提交后
     的阈值 0 复查 → 提交与复查之间落地的这类行(冲突作业写回、预审作业
     running→done、Knowhow 投影器删对象)每次都多烧一轮重置,报红(终局轮数
-    变 2)。这些行留到下一次删除;复查对文档图本身照旧(见
+    变 2)。它们改由复查之后的一次清扫带走;复查对文档图本身照旧(见
     ``test_post_reset_validation_catches_snapshot_invisible_commits``)。"""
     service = repo._runtime.knowledge_lifecycle
     monkeypatch.setattr(service, "_graph_drain_budget_rows", 3)
@@ -1189,8 +1189,12 @@ def test_drain_only_steps_stay_out_of_the_post_commit_survivor_check(
     assert len(finals) == 1, (
         f"冲突候选/预审行不得参与提交后复查(多烧了重置轮):{len(finals)}"
     )
+    # 质量评审 P3-1:这类行由提交后的一次清扫带走(不计重试轮)。变异钉:拿掉
+    # 清扫 → 失效候选与 done 行留到下一次删除,报红。
     assert _count(repo, "SELECT COUNT(*) FROM kg_conflict_candidates "
-                  "WHERE notebook_id=?", (nb_id,)) == 1
+                  "WHERE notebook_id=?", (nb_id,)) == 0
+    assert repo._runtime.knowledge_governance.merge_review_job_status(nb_id)[
+        "status"] == "idle"
 
 
 def test_derived_reads_after_delete_match_a_graph_that_never_had_them(repo):
@@ -1321,3 +1325,112 @@ def test_drain_registry_keeps_derived_tables_and_exempts_two_steps():
         for kept in (*_DERIVED, "kg_rebuild_checkpoint", "concept_whitelist",
                      "kg_cluster_scratch", "kg_canonical_scratch"):
             assert kept not in registry, f"{kept} 不得进入删除清单"
+
+
+def _reextract(repo, notebook_id, canonical_id, name, member, source_id):
+    """What re-extraction + incremental fusion write after a delete: a new
+    object and a generation-0 cluster row under the SAME deterministic
+    canonical id (``"K-" + _norm(name)``) the deleted graph used."""
+    now = _now()
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,"
+            "payload,evidence,source_id,created_at,updated_at) "
+            "VALUES (?,?,'concept','approved','','{}','[]',?,?,?)",
+            (member, notebook_id, source_id, now, now),
+        )
+        db.execute(
+            "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,"
+            "canonical_name,object_type,created_at) VALUES (?,?,?,?,?,'concept',?)",
+            (f"cc-{member}", notebook_id, canonical_id, member, name, now),
+        )
+
+
+def _derived_reads(repo, notebook_id):
+    from app.services.communities import CommunityQueryService
+
+    rt = repo._runtime
+    uk = rt.unified_kg
+    service = CommunityQueryService(
+        notebooks=rt.notebook_store, unified_kg=uk, event_log=rt.event_log,
+        sibling_min_bridge=1,
+    )
+    with rt.database.connect() as db:
+        direct = {
+            "weak_support": [dict(r) for r in uk.weak_support_relation_rows(
+                db, notebook_id, ["K-g1000", "K-000"], 10, 10)],
+            "relation_support": [dict(r) for r in uk.relation_support_rows(
+                db, notebook_id, [("K-g1000", "supports", "K-g1t000"),
+                                  ("K-000", "supports", "K-t000")])],
+            "edge_support": [tuple(r) for r in uk.edge_support_rows(db, notebook_id)],
+            "mention": [tuple(r) for r in uk.mention_rows(db, notebook_id)],
+            "communities": uk.communities_count(db, notebook_id, 0),
+            "community_members": uk.community_member_ids(db, notebook_id, 0),
+        }
+    return {
+        **direct,
+        "sibling_peers": [service.sibling_peers(notebook_id, k)
+                          for k in ("foo", "legacy")],
+        "community_peers": [
+            service.community_peers(notebook_id, k, "q", top_k=5, candidates=10)
+            for k in ("foo", "legacy")],
+        "top_community": [uk.top_community_for(notebook_id, c)
+                          for c in ("K-g1000", "K-000")],
+        "member_peers": [
+            [dict(r) for r in uk.community_member_peers(notebook_id, c, "", 10)]
+            for c in ("cm-g1000", "cm-000")],
+        "comention_peers": [uk.comention_peers(notebook_id, c, 1, 10)
+                            for c in ("K-g1000", "K-000")],
+    }
+
+
+def test_derived_layers_stay_unread_after_delete_and_reextraction(repo):
+    """K1 读侧闸(规格评审 P2-1 / P3-1)。删除留下派生表(裁决 11),而重抽同名
+    概念会铸出同一个规范 id 并以代 0 入簇——于是共提同伴、关系支撑、提及边、
+    以及迁移前遗留的代 0 社区,都会重新挂到新图上。闸:删除签名(纪元 > 0、
+    该层 seq = -1、``last_rebuild_at`` 空)下,每个派生层读者都视为没有派生
+    数据。断言:删除 → 重抽同名 → 每个读者的结果与「从没建过派生表」的库逐值
+    相同。变异钉:拿掉任一读者的闸 / 把社区代改回原表达式 → 报红。"""
+    had = repo.create_notebook(NotebookCreate(name="had-derived"))
+    never = repo.create_notebook(NotebookCreate(name="never-derived"))
+    _seed_graph(repo, had.id, doc_objects=2, clusters=True)
+    _seed_graph(repo, never.id, doc_objects=2, clusters=True, tag="-c")
+    _seed_derived(repo, had.id, 3, generation=1, prefix="g1")
+    _seed_derived(repo, had.id, 3, generation=0, prefix="")  # 迁移前遗留代 0
+    repo.delete_notebook_kg(had.id)
+    repo.delete_notebook_kg(never.id)
+    for nb, src, tag in ((had.id, "src-doc", "h"), (never.id, "src-doc-c", "n")):
+        _reextract(repo, nb, "K-g1000", "foo", f"ko-re-{tag}-1", src)
+        _reextract(repo, nb, "K-g1z000", "bar", f"ko-re-{tag}-2", src)
+        _reextract(repo, nb, "K-000", "legacy", f"ko-re-{tag}-3", src)
+        _reextract(repo, nb, "K-z000", "legacy-peer", f"ko-re-{tag}-4", src)
+
+    assert _derived_counts(repo, had.id) == dict.fromkeys(_DERIVED, 6), (
+        "前置:派生行按裁决 11 保留"
+    )
+    assert _derived_reads(repo, had.id) == _derived_reads(repo, never.id)
+
+
+def test_derived_layer_gate_reopens_after_a_rebuild(repo):
+    """K1 读侧闸只管「删除之后、重建之前」:重建写下 ``last_rebuild_at`` 与各层
+    seq 后,派生层恢复可读。用重建之后再落一行派生数据来钉住(闸关着时这一行
+    读不到,重建后读得到)。变异钉:闸的签名不含 ``last_rebuild_at`` / seq →
+    重建后仍读不到,报红。"""
+    rt = repo._runtime
+    nb = repo.create_notebook(NotebookCreate(name="rebuilt"))
+    _seed_graph(repo, nb.id, doc_objects=2, clusters=True)
+    repo.delete_notebook_kg(nb.id)
+    _seed_derived(repo, nb.id, 1, generation=0, prefix="late")
+    triple = ("K-late000", "supports", "K-latet000")
+    with rt.database.connect() as db:
+        assert rt.unified_kg.relation_support_rows(db, nb.id, [triple]) == []
+        assert rt.unified_kg.mention_rows(db, nb.id) == []
+    rt.knowledge_lifecycle.rebuild_unified_kg(nb.id, force=True)
+    with rt.database.connect() as db:
+        state = rt.unified_kg.state_row(db, nb.id)
+    assert state["last_rebuild_at"], "前置:重建写下 last_rebuild_at"
+    _seed_derived(repo, nb.id, 1, generation=0, prefix="post")
+    with rt.database.connect() as db:
+        assert rt.unified_kg.relation_support_rows(
+            db, nb.id, [("K-post000", "supports", "K-postt000")])
+        assert rt.unified_kg.mention_rows(db, nb.id)

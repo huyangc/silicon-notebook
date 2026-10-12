@@ -975,6 +975,12 @@ class GovernanceStore:
         # graph_seq_row's convention). FOR SHARE: a delete whose reset UPSERT
         # is in flight makes this wait for its commit and then compare
         # against the advanced epoch, instead of slipping in underneath it.
+        # It cannot cover an insert that commits while the final reset runs
+        # but BEFORE its UPSERT (no row lock to wait on yet, and the reset's
+        # REPEATABLE READ snapshot cannot see the row): that window — about
+        # the length of the final transaction — is closed by the delete's
+        # post-commit sweep of the drain-only steps
+        # (KnowledgeLifecycleService._sweep_drain_only_residue).
         cur = connection.execute(
             """
             INSERT INTO kg_conflict_candidates

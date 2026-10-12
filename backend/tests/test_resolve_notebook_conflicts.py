@@ -1229,3 +1229,43 @@ def test_conflict_write_lands_only_while_the_reset_epoch_holds(repo):
             "SELECT id FROM kg_conflict_candidates WHERE notebook_id=?", (nb.id,)
         ).fetchall()}
     assert landed in ids and len(ids) == 2
+
+
+def test_epoch_is_read_before_the_graph_so_a_delete_during_the_read_writes_nothing(
+    repo, monkeypatch,
+):
+    """K1 变异钉(质量评审 P3-3,「先读纪元再读图」):删除落在读图之后、裁决
+    之前时,这一轮的候选全部来自旧图。纪元在读图之前读,所以它是删除前的
+    值,写入全部被拒;若把读纪元挪到读图之后(或裁决之前),读到的是删除后
+    的新纪元,旧图候选照样写回,报红。"""
+    nb_id, _oid_a, _oid_b, rel_a, rel_b = _seed_notebook_with_contradicting_claims(repo)
+    left_ref = rel_a if rel_a < rel_b else rel_b
+    bind_chat_client(repo, "kg_conflict_review", FakeLLM([{
+        "conflict_type": "temporal", "resolution": "discard",
+        "winner_ref": left_ref, "resolved_payload": None,
+        "confidence": 0.99, "rationale": "r",
+    }]))
+    governance = repo._runtime.knowledge_governance
+    store = governance.governance_store
+    original = store.conflict_resolution_rows
+    deleted = {"done": False}
+
+    def _read_then_delete(db, notebook_id):
+        rows = original(db, notebook_id)
+        if not deleted["done"]:
+            deleted["done"] = True
+            repo._runtime.knowledge_lifecycle.delete_notebook_kg(notebook_id)
+        return rows
+
+    monkeypatch.setattr(store, "conflict_resolution_rows", _read_then_delete)
+
+    result = governance.resolve_notebook_conflicts(nb_id)
+
+    assert deleted["done"], "前置不成立:读图期间没有发生删除"
+    assert result["detected"] >= 1, "前置不成立:旧图里没有检测出候选"
+    assert result["auto_applied"] == 0 and result["queued"] == 0
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) FROM kg_conflict_candidates WHERE notebook_id=?",
+            (nb_id,),
+        ).fetchone()[0] == 0

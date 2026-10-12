@@ -850,12 +850,13 @@ class KnowledgeLifecycleService:
                 # every later commit) and, when doc-graph rows survived,
                 # spend a remaining attempt on another drain+reset round.
                 with self._connect() as db:
-                    # K1: post_commit skips the drain-only steps (conflict
-                    # candidates, merge-review row) whose writers the fence
-                    # does not hold off — see the adapters'
-                    # _GRAPH_DRAIN_SETTLE_EXEMPT.
+                    # K1: the settle scope skips the drain-only steps
+                    # (conflict candidates, merge-review row) whose writers
+                    # the fence does not hold off — see the adapters'
+                    # _GRAPH_DRAIN_SETTLE_EXEMPT; _sweep_drain_only_residue
+                    # handles them once, below, without spending an attempt.
                     survivors = self.knowledge.graph_drain_backlog(
-                        db, notebook_id, 0, 0, post_commit=True
+                        db, notebook_id, 0, 0, scope="settle"
                     )
                 if survivors is None:
                     break
@@ -893,6 +894,7 @@ class KnowledgeLifecycleService:
                 "writer is refilling the graph faster than the drain "
                 "empties it"
             )
+        self._sweep_drain_only_residue(notebook_id, totals)
         # P0-1 (post-review): invalidate_kg is the PRIMARY, immediate,
         # same-process eviction path for unified_cache — codex #772 R16 P2's
         # graph_seq_row version leg (see _unified_graph_full /
@@ -907,6 +909,40 @@ class KnowledgeLifecycleService:
         for table, deleted in drained.items():
             totals[table] = totals.get(table, 0) + deleted
         return totals
+
+    def _sweep_drain_only_residue(
+        self, notebook_id: str, totals: dict[str, int]
+    ) -> None:
+        """K1: one post-commit sweep of the two drain-only steps (conflict
+        candidates citing a dead ref, the non-running merge-review row).
+
+        On PostgreSQL the final reset runs on a REPEATABLE READ snapshot, so a
+        conflict candidate committed while it ran — after the snapshot, before
+        the epoch-advancing UPSERT could make the epoch-gated insert wait — is
+        invisible to its DELETE; a merge-review job can likewise turn
+        running→done in that window. Neither may spend a reset attempt (they
+        are exempt from the survivor check), so this sweeps them once, on a
+        fresh connection that sees every commit: a read-only probe of just
+        those steps, and a write only when it found something (the happy path
+        adds two probe statements and no transaction). No seq bump: these are
+        not graph rows. Rows committed after this sweep are new writes
+        against the advanced epoch, which the conflict write gate refuses."""
+        start = 0
+        while True:
+            with self._connect() as db:
+                residue = self.knowledge.graph_drain_backlog(
+                    db, notebook_id, 0, start, scope="sweep"
+                )
+            if residue is None:
+                return
+            _table, step = residue
+            with self._write() as db:
+                swept = self.knowledge.drain_notebook_graph_rows_page(
+                    db, notebook_id, step, self._graph_drain_budget_rows
+                )
+            for name, n in swept.items():
+                totals[name] = totals.get(name, 0) + n
+            start = step + 1
 
     def _drain_graph_rows_before_reset(self, notebook_id: str) -> dict[str, int]:
         """batch-3-W1 T-5a: bound ``delete_notebook_kg``'s final single

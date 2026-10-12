@@ -110,9 +110,38 @@ _PUBLISHED_CLUSTER_GEN = (
     "COALESCE((SELECT cluster_generation FROM unified_kg_state "
     "WHERE notebook_id = %s), 0)"
 )
+# K1 (debt-fix 2026-10-12, ruling 11): a graph delete keeps the five
+# rebuild-derived tables until the next rebuild. Their rows must not read back
+# in between: re-extracting a concept after the delete mints the SAME
+# canonical id (``"K-" + _norm(name)``), so co-mention peers, relation support
+# and mention edges keyed on it would come back from the deleted graph. The
+# delete leaves one exact signature on the state row -- ``kg_reset_epoch > 0``
+# (a reset happened), the layer's seq at -1 (the layer was not rebuilt since)
+# and ``last_rebuild_at`` empty (no unified rebuild since). Every reader of a
+# derived layer treats that state as "no derived data". Nothing else produces
+# it: a birth / copy row has epoch 0; the Memory-isolation re-queue resets the
+# seqs but keeps ``last_rebuild_at``; the indexing-pipeline publish resets the
+# seqs after clearing the tables itself. A rebuild sets ``last_rebuild_at``
+# and each layer's seq, which reopens the layer. One primary-key probe of
+# ``unified_kg_state`` per statement, uncorrelated (evaluated once).
+def _derived_layer_live(seq_column: str) -> str:
+    return (
+        "NOT EXISTS (SELECT 1 FROM unified_kg_state dls "
+        "WHERE dls.notebook_id = %s AND dls.kg_reset_epoch > 0 "
+        f"AND dls.{seq_column} = -1 AND dls.last_rebuild_at IS NULL)"
+    )
+
+
+_CANONICAL_LAYER_LIVE = _derived_layer_live("canonical_rel_seq")
+_MENTION_LAYER_LIVE = _derived_layer_live("mention_seq")
+
+# The published community generation; -1 (never a real generation) while the
+# community layer is in the delete signature above. Same single state-row
+# lookup as before -- the gate costs nothing extra.
 _PUBLISHED_COMMUNITY_GEN = (
-    "COALESCE((SELECT community_generation FROM unified_kg_state "
-    "WHERE notebook_id = %s), 0)"
+    "COALESCE((SELECT CASE WHEN kg_reset_epoch > 0 AND community_seq = -1 "
+    "AND last_rebuild_at IS NULL THEN -1 ELSE community_generation END "
+    "FROM unified_kg_state WHERE notebook_id = %s), 0)"
 )
 
 
@@ -614,7 +643,8 @@ class UnifiedKgStore:
     def mention_rows(db: Any, notebook_id: str):
         return db.execute(
             "SELECT claim_object_id, concept_canonical_id FROM mention_edges "
-            "WHERE notebook_id=%s", (notebook_id,),
+            f"WHERE notebook_id=%s AND {_MENTION_LAYER_LIVE}",
+            (notebook_id, notebook_id),
         ).fetchall()
 
     # -------------------------------------------------------- unified state
@@ -1264,7 +1294,8 @@ class UnifiedKgStore:
     def edge_support_rows(db: Any, notebook_id: str):
         return db.execute(
             "SELECT canonical_src, edge_type, canonical_tgt, support_count, source_count "
-            "FROM canonical_relations WHERE notebook_id=%s", (notebook_id,))
+            f"FROM canonical_relations WHERE notebook_id=%s "
+            f"AND {_CANONICAL_LAYER_LIVE}", (notebook_id, notebook_id))
 
     @staticmethod
     def relation_support_rows(
@@ -1283,13 +1314,14 @@ class UnifiedKgStore:
         if not rows:
             return []
         placeholders = ",".join("(%s,%s,%s)" for _ in rows)
-        params: List[object] = [notebook_id]
+        params: List[object] = [notebook_id, notebook_id]
         for triple in rows:
             params.extend(triple)
         return db.execute(
             f"SELECT canonical_src, edge_type, canonical_tgt, "
             f"       support_count, source_count "
             f"FROM canonical_relations WHERE notebook_id=%s "
+            f"AND {_CANONICAL_LAYER_LIVE} "
             f"AND (canonical_src, edge_type, canonical_tgt) IN ({placeholders})",
             params,
         ).fetchall()
@@ -1343,12 +1375,13 @@ class UnifiedKgStore:
                 f"SELECT canonical_src, edge_type, canonical_tgt, source_count, "
                 f"       sample_relation_ids::text AS sample_relation_ids "
                 f"FROM canonical_relations "
-                f"WHERE notebook_id=%s AND canonical_src IN ({placeholders}) "
+                f"WHERE notebook_id=%s AND {_CANONICAL_LAYER_LIVE} "
+                f"  AND canonical_src IN ({placeholders}) "
                 f"  AND source_count<=%s "
                 f"ORDER BY source_count ASC, canonical_tgt ASC, canonical_src ASC, "
                 f"         edge_type ASC "
                 f"LIMIT %s",
-                [notebook_id, *canonical_ids, source_max, limit],
+                [notebook_id, notebook_id, *canonical_ids, source_max, limit],
             ).fetchall()
         if viewer_id is not None:
             condition, param = foreign_memory_object_excluded("ko"), viewer_id
@@ -1368,7 +1401,8 @@ class UnifiedKgStore:
             f"FROM (SELECT notebook_id, canonical_src, edge_type, canonical_tgt, "
             f"             source_count, sample_relation_ids::text AS sample_relation_ids "
             f"      FROM canonical_relations "
-            f"      WHERE notebook_id=%s AND canonical_src IN ({placeholders}) "
+            f"      WHERE notebook_id=%s AND {_CANONICAL_LAYER_LIVE} "
+            f"        AND canonical_src IN ({placeholders}) "
             f"        AND source_count<=%s "
             f"      ORDER BY source_count ASC, canonical_tgt ASC, canonical_src ASC, "
             f"               edge_type ASC OFFSET 0) cr "
@@ -1377,7 +1411,8 @@ class UnifiedKgStore:
             f"         cr.edge_type ASC "
             f"LIMIT %s"
         )
-        params = [notebook_id, *canonical_ids, source_max, notebook_id, param, limit]
+        params = [notebook_id, notebook_id, *canonical_ids, source_max, notebook_id,
+                  param, limit]
         if viewer_id is not None:
             return db.execute(sql, params).fetchall()
         return execute_with_ceiling(db, sql, params).fetchall()
@@ -1823,12 +1858,13 @@ class UnifiedKgStore:
             rows = execute_bound(
                 db,
                 "SELECT canonical_a, canonical_b, bridge_claims FROM concept_comentions cm "
-                "WHERE notebook_id=%s AND (canonical_a=%s OR canonical_b=%s) AND bridge_claims>=%s "
+                f"WHERE notebook_id=%s AND {_MENTION_LAYER_LIVE} "
+                "AND (canonical_a=%s OR canonical_b=%s) AND bridge_claims>=%s "
                 f"{limit_gate}"
                 "ORDER BY bridge_claims DESC, "
                 "CASE WHEN canonical_a=%s THEN canonical_b ELSE canonical_a END "
                 "COLLATE \"C\" ASC LIMIT %s",
-                (notebook_id, canonical_id, canonical_id, min_bridge,
+                (notebook_id, notebook_id, canonical_id, canonical_id, min_bridge,
                  *limit_params, canonical_id, limit), ceiling).fetchall()
             ordered = [
                 (str(r["canonical_b"] if r["canonical_a"] == canonical_id
