@@ -45,7 +45,7 @@ def test_lite_graph_equals_full(repo):
 
 def test_build_viz_index_persists_and_manifest(repo):
     nb = _star(repo)
-    manifest = repo.build_viz_index(nb.id)
+    manifest = repo._runtime.scale_artifacts.build_viz(nb.id)
     assert manifest is not None
     assert manifest["n_viz_nodes"] == 3
     assert manifest["n_viz_edges"] == 2
@@ -58,7 +58,7 @@ def test_build_viz_index_persists_and_manifest(repo):
 
 def test_build_viz_index_empty_notebook_returns_none(repo):
     nb = repo.create_notebook(NotebookCreate(name="empty"))
-    assert repo.build_viz_index(nb.id) is None
+    assert repo._runtime.scale_artifacts.build_viz(nb.id) is None
 
 
 # ───────────────────────── M1: a member's Memory never enters a shared viz ────
@@ -117,7 +117,7 @@ def test_viz_artifact_has_no_memory_object_name_or_memory_only_edge(repo):
     nb_id = seeded["notebook_id"]
     ids = seeded["objects"]
 
-    manifest = repo.build_viz_index(nb_id)
+    manifest = repo._runtime.scale_artifacts.build_viz(nb_id)
     idx = repo._viz_index(nb_id)
 
     # no Memory object, no Memory-derived name -- in the arrays AND in the files
@@ -202,7 +202,7 @@ def test_every_notebook_carries_the_isolation_marker_in_its_version(repo):
 def test_a_viz_built_before_the_isolation_is_stale_after_it(repo):
     seeded = seed_shared_notebook_with_memory(repo)
     nb_id = seeded["notebook_id"]
-    repo.build_viz_index(nb_id)
+    repo._runtime.scale_artifacts.build_viz(nb_id)
     assert repo._viz_index_probe(nb_id)["viz_stale"] is False
 
     # what an artifact built by the previous release looks like
@@ -426,7 +426,7 @@ def _build_the_way_the_previous_release_did(repo, seeded):
     nb_id = seeded["notebook_id"]
     with repo._write() as db:
         db.execute("UPDATE sources SET source_type='md' WHERE id=?", ("src-memory",))
-    repo.build_viz_index(nb_id)
+    repo._runtime.scale_artifacts.build_viz(nb_id)
     make_it_look_pre_isolation(repo._viz_index_dir(nb_id))
     with repo._write() as db:
         db.execute("UPDATE sources SET source_type='memory' WHERE id=?", ("src-memory",))
@@ -506,7 +506,7 @@ def test_the_standalone_viz_roots_are_listed_for_the_pre_isolation_scan(repo):
     notebook whose only artifact is a pre-isolation viz."""
     store = repo._runtime.scale_artifacts.artifacts
     nb = _star(repo)
-    repo.build_viz_index(nb.id)
+    repo._runtime.scale_artifacts.build_viz(nb.id)
     scratch = store.viz_dir("nb-scratch.tmp")
     os.makedirs(scratch)
     with open(os.path.join(str(scratch), "manifest.json"), "w") as handle:
@@ -536,7 +536,7 @@ def test_viz_does_not_fold_a_shared_object_into_a_cluster_that_holds_memory(repo
     nb_id, ids = seeded["notebook_id"], seeded["objects"]
     mix_a_shared_object_into_a_memory_cluster(repo, seeded)  # + the shared, cached map
 
-    repo.build_viz_index(nb_id)
+    repo._runtime.scale_artifacts.build_viz(nb_id)
     idx = repo._viz_index(nb_id)
     assert not any("secret" in str(v).lower() for v in list(idx.viz_ids) + list(idx.viz_names))
     assert ids["left"] in idx.viz_ids  # the shared object stays, unfolded, under its own id
@@ -712,7 +712,7 @@ def test_no_file_of_any_artifact_root_mentions_a_memory_object_relation_or_name(
     nb_id = seeded["notebook_id"]
     make_the_shared_source_partitionable(repo, seeded)
     repo.build_scale_index(nb_id)
-    repo.build_viz_index(nb_id)
+    repo._runtime.scale_artifacts.build_viz(nb_id)
     store = repo._runtime.scale_artifacts.artifacts
     roots = [str(store.scale_dir(nb_id)), repo._viz_index_dir(nb_id)]
     partition = str(store.source_partition_dir(nb_id))

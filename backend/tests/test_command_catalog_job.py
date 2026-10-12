@@ -4302,7 +4302,7 @@ def test_apply_creates_the_table_and_records_a_change_entry(repo):
 
     # Every knowhow write path appends a change entry in its own transaction;
     # going through the service layer is what buys that for free.
-    kinds = [entry["kind"] for entry in repo.list_knowhow_changes(result["table_id"])]
+    kinds = [entry["kind"] for entry in repo._runtime.knowhow_history_store.list_changes(result["table_id"])]
     assert "table_create" in kinds
     assert "import_append" in kinds
 
@@ -4844,7 +4844,7 @@ def test_append_knowhow_rows_skipping_existing_anchors_store_semantics(repo):
     store = repo.command_catalog.knowhow
 
     store.add_knowhow_row(table_id, {anchor: "set_thing_0"}, actor="tester")
-    before_changes = len(repo.list_knowhow_changes(table_id))
+    before_changes = len(repo._runtime.knowhow_history_store.list_changes(table_id))
 
     result = store.append_knowhow_rows_skipping_existing_anchors(
         table_id,
@@ -4870,7 +4870,7 @@ def test_append_knowhow_rows_skipping_existing_anchors_store_semantics(repo):
     assert names == [" set_thing_2 ", "set_thing_0", "set_thing_1"]
 
     # One new change entry for the two rows that landed — not four.
-    changes = repo.list_knowhow_changes(table_id)
+    changes = repo._runtime.knowhow_history_store.list_changes(table_id)
     assert len(changes) == before_changes + 1
     latest = changes[0]
     assert latest["kind"] == "import_append"
@@ -4879,12 +4879,12 @@ def test_append_knowhow_rows_skipping_existing_anchors_store_semantics(repo):
     # A batch that skips EVERY row (all already present/duplicated) is a
     # silent no-op: no new row, no new change entry — mirrors
     # `append_knowhow_rows`'s own empty-batch convention.
-    before_changes = len(repo.list_knowhow_changes(table_id))
+    before_changes = len(repo._runtime.knowhow_history_store.list_changes(table_id))
     noop = store.append_knowhow_rows_skipping_existing_anchors(
         table_id, anchor, [{anchor: "set_thing_0"}], actor="tester", origin="import"
     )
     assert noop == {"row_ids": {}, "skipped_anchor_values": {"set_thing_0"}}
-    assert len(repo.list_knowhow_changes(table_id)) == before_changes
+    assert len(repo._runtime.knowhow_history_store.list_changes(table_id)) == before_changes
     assert len(repo.get_knowhow_table(table_id)["rows"]) == 3
 
     # A blank anchor value has nothing to collide with — always inserted.
@@ -4896,12 +4896,12 @@ def test_append_knowhow_rows_skipping_existing_anchors_store_semantics(repo):
     assert len(repo.get_knowhow_table(table_id)["rows"]) == 4
 
     # Empty batch: no transaction, no history.
-    before_changes = len(repo.list_knowhow_changes(table_id))
+    before_changes = len(repo._runtime.knowhow_history_store.list_changes(table_id))
     empty = store.append_knowhow_rows_skipping_existing_anchors(
         table_id, anchor, [], actor="tester", origin="import"
     )
     assert empty == {"row_ids": {}, "skipped_anchor_values": set()}
-    assert len(repo.list_knowhow_changes(table_id)) == before_changes
+    assert len(repo._runtime.knowhow_history_store.list_changes(table_id)) == before_changes
 
 
 def test_append_knowhow_rows_skipping_existing_anchors_requires_the_live_anchor_column(

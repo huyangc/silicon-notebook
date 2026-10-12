@@ -301,7 +301,7 @@ def test_specificity_divides_hub_entity_by_chunk_count(repo):
     nb = _seed_hub_vs_rare(repo)
     G, key_to_idx, _ = repo._ppr_graph(nb.id)
     q = "Attention"
-    rel = {h.object_id: h.relevance for h in repo.federated_retrieve(nb.id, q)}
+    rel = {h.object_id: h.relevance for h in repo.retrieval.candidates.federated_retrieve(nb.id, q)}
     reset = repo._ppr_reset_vector(nb.id, q, key_to_idx)
     iH, i1 = key_to_idx["eH"], key_to_idx["e1"]
     assert reset[iH] == rel["eH"] / 3      # eH 在 3 chunk → 降权
@@ -454,10 +454,10 @@ def test_scale_ppr_caches_combined_graph(repo, monkeypatch):
         return real_splice(*a, **k)
     monkeypatch.setattr(si, "splice_active", counting_splice)
 
-    r1 = repo.scale_ppr(active.id, "Mixture of Experts")
+    r1 = repo.retrieval.graph.scale_ppr(active.id, "Mixture of Experts")
     n_after_first = calls["n"]
     assert n_after_first > 0                     # 首查确有 splice(未命中缓存)
-    r2 = repo.scale_ppr(active.id, "Mixture of Experts")
+    r2 = repo.retrieval.graph.scale_ppr(active.id, "Mixture of Experts")
     assert calls["n"] == n_after_first          # 第二次命中缓存、不再 splice
     assert isinstance(r1, list) and isinstance(r2, list)
 
@@ -685,7 +685,7 @@ def test_scale_ppr_uses_self_index(repo, monkeypatch):
     monkeypatch.setattr(
         ppr_mod, "build_ppr_graph",
         lambda *a, **k: (called.__setitem__("n", called["n"] + 1), real(*a, **k))[1])
-    ranked = repo.scale_ppr(base.id, "Mixture of Experts")
+    ranked = repo.retrieval.graph.scale_ppr(base.id, "Mixture of Experts")
     assert ranked != []                         # self index 生效,非空
     # scale_ppr 自身不应触发 rustworkx build_ppr_graph(那是 _ppr_retrieve 的回退)
     assert called["n"] == 0
@@ -721,5 +721,5 @@ def test_scale_ppr_self_index_reaches_new_upload(repo, monkeypatch):
         db.execute("INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,"
                    "canonical_name,object_type,created_at) VALUES (?,?,?,?,?,?,?)",
                    ("cl-new", base.id, "K-moe", "o-new", "Mixture-of-Experts (MoE)", "concept", now))
-    ranked = repo.scale_ppr(base.id, "Mixture of Experts")
+    ranked = repo.retrieval.graph.scale_ppr(base.id, "Mixture of Experts")
     assert "c-new" in {cid for cid, _ in ranked}   # 新上传 chunk 经 self-delta 可达

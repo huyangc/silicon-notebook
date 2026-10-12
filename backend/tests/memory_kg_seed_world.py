@@ -347,9 +347,9 @@ def assert_analysis_readers_skip_legacy_memory_rows(repo) -> None:
     source's are not even "endpoint unusable". The persisted artifacts agree."""
     nb_id = seed(repo)
     repo.rebuild_unified_kg(nb_id, force=True)
-    histogram = repo.kg_cluster_size_histogram(nb_id)
-    largest = repo.kg_largest_clusters(nb_id)
-    provenance = repo.kg_relation_provenance_counts(nb_id)
+    histogram = repo._runtime.unified_kg.cluster_size_histogram(nb_id)
+    largest = repo._runtime.unified_kg.largest_clusters(nb_id)
+    provenance = repo._runtime.unified_kg.relation_provenance_counts(nb_id)
     memory = object_ids_by_name(repo, nb_id, MEMORY_SOURCE)
     generation = _published_cluster_generation(repo, nb_id)
     _insert_cluster_row(repo, nb_id, "cc-legacy", "K-grouped query attention",
@@ -357,8 +357,8 @@ def assert_analysis_readers_skip_legacy_memory_rows(repo) -> None:
                         generation)
     _insert_cluster_row(repo, nb_id, "cc-legacy-2", "K-secret beta budget",
                         memory["Secret Beta budget"], "Secret Beta budget", generation)
-    assert repo.kg_cluster_size_histogram(nb_id) == histogram
-    assert repo.kg_largest_clusters(nb_id) == largest
+    assert repo._runtime.unified_kg.cluster_size_histogram(nb_id) == histogram
+    assert repo._runtime.unified_kg.largest_clusters(nb_id) == largest
     head = {c["canonical_id"]: c["members"] for c in largest["clusters"]}
     assert head["K-grouped query attention"] == 2
     assert SECRET not in json.dumps(largest).lower()

@@ -227,9 +227,9 @@ def test_revert_table_schedules_reprojection_after_a_successful_revert(repo, not
     anchor_id, plain_id = columns[0]["id"], columns[1]["id"]
     row_id = repo.add_knowhow_row(table_id, {anchor_id: "A"})
     repo.update_knowhow_cell(row_id, plain_id, "第一版")
-    good_seq = repo.knowhow_history_head_seq(table_id)
+    good_seq = repo._runtime.knowhow_history_store.head_seq(table_id)
     repo.update_knowhow_cell(row_id, plain_id, "第二版")
-    head_seq = repo.knowhow_history_head_seq(table_id)
+    head_seq = repo._runtime.knowhow_history_store.head_seq(table_id)
 
     fake_scheduler = MagicMock()
     with patch(
@@ -255,7 +255,7 @@ def test_revert_table_does_not_schedule_when_the_store_call_raises(repo, noteboo
         notebook_id, "表", "", [{"name": "概念", "role": "anchor"}],
     )
     row_id = repo.add_knowhow_row(table_id, {})
-    good_seq = repo.knowhow_history_head_seq(table_id)
+    good_seq = repo._runtime.knowhow_history_store.head_seq(table_id)
     repo.update_knowhow_cell(
         row_id, repo.get_knowhow_table(table_id)["columns"][0]["id"], "别人刚改的",
     )

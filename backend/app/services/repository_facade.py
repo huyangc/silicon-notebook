@@ -1086,42 +1086,6 @@ class RepositoryFacade:
             notebook_id, input_version, stage, rows
         )
 
-    # KG 质量分析的只读聚合(T1) — UnifiedKgStore owns the reads; one-hop delegates.
-    # 口径与产品一致(对象 USABLE_STATUSES;边 review_status != 'rejected' 且两端都是
-    # 本 notebook 的可用对象),被排除的量随载荷单独返回。
-    #
-    # ⚠ **下面三条全是全表级的重活,而且是同一量级**(第四条 kg_community_overview 是
-    # 有界读,便宜)。别只给最后一条打警告,也别因为 largest_clusters 带 LIMIT 就当它便宜
-    # ——它在同形状的全扫分组之后还多一次排序,LIMIT 只截断输出。按后端分列的实测数字
-    # (SQLite / PostgreSQL 各自的量级与计划形状)在 repositories/ports.py 该段头,那是真源。
-    # 调用方(T3 的 KgAnalysisService)必须把它们放进按 kg_mutation_seq 记忆化的预计算
-    # 路径,不得挂在在线请求上;并且**不得持有外层写事务**(store 自开连接,PG 侧会从
-    # 池里另取一条,在 write() 里调用会安静地读到提交前的旧数据)。
-    def kg_cluster_size_histogram(self, notebook_id: str) -> Dict[str, object]:
-        """合并簇的大小分桶直方图,按 object_type 分组 + 全类型合计(收敛率分布面)。
-        分组分桶在 SQL 里完成。⚠ **重活**:全扫 + 每行一次对象匹配 + 分组聚合。"""
-        return self._runtime.unified_kg.cluster_size_histogram(notebook_id)
-
-    def kg_largest_clusters(self, notebook_id: str, limit: int = 20) -> Dict[str, object]:
-        """成员最多的 N 个 concept 簇;limit 有硬上限,返回带 truncated。
-        ⚠ **重活,与直方图同量级**:同形状的全扫分组之后还多一次排序,LIMIT 只截断
-        输出、不减少扫描与排序的输入。"""
-        return self._runtime.unified_kg.largest_clusters(notebook_id, limit)
-
-    def kg_community_overview(self, notebook_id: str, *, level: int = 0,
-                              limit: int = 50, top_k: int = 5) -> Dict[str, object]:
-        """主题板块列表 + 每个板块按 centrality 降序的前 K 个代表概念;
-        板块数与 K 都有硬上限,返回带 total/returned/truncated,绝不静默截断。
-        整块跑在一次显式只读快照事务里(并发 rebuild 不会劈出自相矛盾的数字)。"""
-        return self._runtime.unified_kg.community_overview(
-            notebook_id, level=level, limit=limit, top_k=top_k
-        )
-
-    def kg_relation_provenance_counts(self, notebook_id: str) -> Dict[str, object]:
-        """边的出处构成(relink 补出来的 vs 未标注)。⚠ **重活:全表扫**——生产库
-        800 万+ 边,每行还要匹配两个端点,不适合挂在线请求上。"""
-        return self._runtime.unified_kg.relation_provenance_counts(notebook_id)
-
     @property
     def agent_profile(self):
         """Agentic Memory P1's per-notebook "understanding" store (T2).
@@ -1531,9 +1495,6 @@ class RepositoryFacade:
             notebook_id, user_id, answer_ids
         )
 
-    def memory_revisions(self, memory_id: str, user_id: str) -> list:
-        return self._runtime.memory_service.revisions(memory_id, user_id)
-
     def propose_memory_promotion(
         self, memory_id: str, user_id: str, *, target_base_id: str = ""
     ) -> dict:
@@ -1653,23 +1614,6 @@ class RepositoryFacade:
     # ------------------------------------------------------------------
     # KG search: FTS5 (lexical) + ANN (semantic) + hydration
     # ------------------------------------------------------------------
-
-    def backfill_kg_fts(self, notebook_id: str) -> int:
-        """Re-populate kg_objects_fts from knowledge_objects for this notebook.
-
-        Idempotent: deletes existing FTS rows first, then re-inserts from
-        knowledge_objects (non-deprecated, non-empty name).  Returns the
-        number of rows inserted.
-        """
-        return self._runtime.knowledge_query.backfill_kg_fts(notebook_id)
-
-    def backfill_chunk_fts(self, notebook_id: str) -> int:
-        """从 chunks 重建 chunks_fts(DELETE+re-INSERT)。返回写入行数。
-
-        幂等,best-effort 派生索引:先删本 notebook 的 FTS 行,再从 chunks 全量重插。
-        供 copy_notebook / 刷新图谱等重建派生索引的路径调用。
-        """
-        return self._runtime.knowledge_query.backfill_chunk_fts(notebook_id)
 
     def _semantic_search(self, notebook_id: str, q: str, k: int) -> list:
         """ANN semantic search over the notebook's scale index.
@@ -3515,10 +3459,6 @@ class RepositoryFacade:
     def _viz_index_dir(self, notebook_id: str) -> str:
         return str(self._runtime.scale_artifact_store.viz_dir(notebook_id))
 
-    def build_viz_index(self, notebook_id: str) -> Optional[dict]:
-        """Compatibility delegate to the runtime-owned viz builder."""
-        return self._runtime.scale_artifacts.build_viz(notebook_id)
-
     def _active_kg_delta(self, notebook_id: str):
         return self.retrieval.graph._active_kg_delta(notebook_id)
 
@@ -3532,9 +3472,6 @@ class RepositoryFacade:
 
     def _scale_combined_graph(self, notebook_id: str, base_indexes):
         return self.retrieval.graph._scale_combined_graph(notebook_id, base_indexes)
-
-    def scale_ppr(self, notebook_id: str, question: str) -> List[Tuple[str, float]]:
-        return self.retrieval.graph.scale_ppr(notebook_id, question)
 
     def _ppr_retrieve(self, notebook_id: str, question: str) -> List["RetrievedChunk"]:
         return self.retrieval.graph.ppr_retrieve(notebook_id, question)
@@ -3637,29 +3574,6 @@ class RepositoryFacade:
             notebook_id, query, types, w_keyword, w_semantic,
             allowed_source_ids=allowed_source_ids,
         )
-
-    def federated_retrieve(
-        self,
-        active_notebook_id: str,
-        query: str,
-        types: Optional[Iterable[str]] = None,
-        w_keyword: float = W_KEYWORD,
-        w_semantic: float = W_SEMANTIC,
-        *,
-        allowed_source_keys=None,
-    ) -> List[RetrievedKnowledge]:
-        if allowed_source_keys is None:
-            return self.retrieval.candidates.federated_retrieve(
-                active_notebook_id, query, types, w_keyword, w_semantic
-            )
-        return self.retrieval.candidates.federated_retrieve(
-            active_notebook_id, query, types, w_keyword, w_semantic,
-            allowed_source_keys=allowed_source_keys,
-        )
-
-    def federated_retrieve_relations(self, active_notebook_id: str,
-                                     query: str) -> List["RetrievedRelation"]:
-        return self.retrieval.candidates.federated_retrieve_relations(active_notebook_id, query)
 
     def _retrieve_neighbors(self, notebook_id: str, object_id: str,
                             edge_type: Optional[str] = None,
@@ -4528,16 +4442,10 @@ class RepositoryFacade:
     def get_notebook_asset(self, asset_id: str) -> Optional[dict]:
         return self._runtime.knowhow_store.get_notebook_asset(asset_id)
 
-    def source_asset_ids(self, source_id: str) -> List[str]:
-        return self._runtime.knowhow_store.source_asset_ids(source_id)
-
     def delete_source_asset_rows(self, source_id: str) -> List[dict]:
         return self._runtime.knowhow_store.delete_source_asset_rows(source_id)
 
     # ---------------------------------------------------- paper metadata
-    def get_paper_meta(self, source_id: str) -> Optional[dict]:
-        return self._runtime.source_store.get_paper_meta(source_id)
-
     def sources_missing_paper_meta(
         self, notebook_id: str, include_existing: bool = False
     ) -> List[str]:
@@ -4639,16 +4547,6 @@ class RepositoryFacade:
     def get_knowhow_row_location(self, row_id: str) -> Optional[dict]:
         return self._runtime.knowhow_store.get_knowhow_row_location(row_id)
 
-    def knowhow_history_head_seq(self, table_id: str) -> int:
-        return self._runtime.knowhow_history_store.head_seq(table_id)
-
-    def list_knowhow_changes(
-        self, table_id: str, limit: int = 50, before_seq: "int | None" = None
-    ) -> list:
-        return self._runtime.knowhow_history_store.list_changes(
-            table_id, limit, before_seq
-        )
-
     def knowhow_history_page(
         self, table_id: str, limit: int = 50, before_seq: "int | None" = None
     ) -> dict:
@@ -4693,20 +4591,9 @@ class RepositoryFacade:
             table_id, milestone_id
         )
 
-    def list_knowhow_milestones(self, table_id: str) -> list:
-        return self._runtime.knowhow_history_store.list_milestones(table_id)
-
     def prune_knowhow_history(self, table_id: str, before_iso: str) -> dict:
         return self._runtime.knowhow_history_store.prune(table_id, before_iso)
 
-    # --- paper-meta status: backfill progress one-hop delegates ----------
-    def paper_meta_backfilling(self, notebook_id: str) -> bool:
-        """O(1) 内存 membership；重启后天然为 False（未在跑）。"""
-        return self._runtime.source_ingestion.paper_meta_backfilling(notebook_id)
-
-    def paper_meta_backfill_progress(self, notebook_id: str) -> Optional[dict]:
-        """返回 {"total","done"} 的浅拷贝或 None（未在跑）。锁内取快照。"""
-        return self._runtime.source_ingestion.paper_meta_backfill_progress(notebook_id)
     # --- memory cross-notebook copy/move Task B2: one-hop delegate --------
     def transfer_memories(
         self,

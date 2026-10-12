@@ -246,7 +246,7 @@ def _chunked_source(ids, source_id, text):
             [ChunkWrite(f"chunk-{source_id}", text, "1", (f"el-{source_id}",))],
             created_at=NOW,
         )
-    repo.backfill_chunk_fts(ids["nb"])
+    repo._runtime.knowledge_query.backfill_chunk_fts(ids["nb"])
 
 
 @pytest.fixture

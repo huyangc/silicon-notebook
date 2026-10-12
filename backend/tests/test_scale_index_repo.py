@@ -325,7 +325,7 @@ def test_scale_ppr_uses_base_index_from_active(repo):
     base = _seed_base_with_chunk(repo)
     active = repo.create_notebook(NotebookCreate(name="active"))  # personal, no KG
     repo.replace_notebook_bases(active.id, [base.id], "user-local")
-    out = repo.scale_ppr(active.id, "MOSFET voltage gain")
+    out = repo.retrieval.graph.scale_ppr(active.id, "MOSFET voltage gain")
     assert isinstance(out, list) and out, "scale path should surface base chunks"
     ids = [cid for cid, _ in out]
     assert "cB" in ids
@@ -337,7 +337,7 @@ def test_scale_ppr_uses_self_index_when_only_base(repo):
     scale index as a participant instead of returning [] (which forced a rustworkx
     fallback). self CSR = substrate, self ANN = seed source."""
     base = _seed_base_with_chunk(repo)
-    out = repo.scale_ppr(base.id, "MOSFET")
+    out = repo.retrieval.graph.scale_ppr(base.id, "MOSFET")
     assert isinstance(out, list) and out, "self-base direct query should use self index"
     assert "cB" in [cid for cid, _ in out]
     assert all(isinstance(cid, str) and 0.0 <= score <= 1.0 for cid, score in out)
@@ -355,7 +355,7 @@ def test_scale_ppr_empty_when_only_base_and_no_index(repo):
         db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
                    "VALUES (?,?,?,?,?,?,?)", ("cN", base.id, "sN", "MOSFET gain", "", "[]", now))
     # never built a scale index -> no self index -> conservative fallback
-    assert repo.scale_ppr(base.id, "MOSFET") == []
+    assert repo.retrieval.graph.scale_ppr(base.id, "MOSFET") == []
 
 
 def test_run_index_builds_for_notebook(repo):

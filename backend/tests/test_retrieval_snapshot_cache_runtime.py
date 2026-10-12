@@ -78,7 +78,7 @@ def test_knowledge_query_invalidates_replaced_notebook_language_map(repo):
     replacement = {notebook_id: ["new"]}
 
     repo._notebook_langs_cache = replacement
-    repo.backfill_chunk_fts(notebook_id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(notebook_id)
 
     assert old_map[notebook_id] == ["old"]
     assert notebook_id not in replacement

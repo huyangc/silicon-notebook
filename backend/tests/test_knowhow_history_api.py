@@ -511,5 +511,5 @@ def test_milestone_creation_rechecks_target_seq_inside_the_write_transaction(
         repo.create_knowhow_milestone(table_id, 9999, "不存在的目标", "", "user-x")
 
     # 库里不能留下这个里程碑。
-    milestones = repo.list_knowhow_milestones(table_id)
+    milestones = repo._runtime.knowhow_history_store.list_milestones(table_id)
     assert all(m["seq"] != 9999 for m in milestones)

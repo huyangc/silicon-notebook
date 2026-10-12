@@ -206,7 +206,7 @@ def test_notebook_langs_invalidated_on_new_language_chunk(repo):
     _seed_chunk_texts(repo, nb.id, ["Low noise amplifier design"])
     assert repo._notebook_langs(nb.id) == ["en"]        # warms the cache
     _seed_chunk_texts(repo, nb.id, ["低噪声放大器设计"])   # add zh content
-    repo.backfill_chunk_fts(nb.id)                       # settle point -> invalidates hint
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)                       # settle point -> invalidates hint
     assert "zh" in repo._notebook_langs(nb.id)
 
 
@@ -243,7 +243,7 @@ def test_keyword_chunk_candidates_matches_second_language(repo):
     # English notebook; ONE chunk carries only the Chinese term (no English overlap).
     _seed_chunk_texts(repo, nb.id, ["cascode output resistance analysis",
                                     "低噪声放大器 的设计要点"])
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     # bilingual keyword string carries the Chinese 2nd-language term
     hits = repo.retrieval.candidates._keyword_chunk_candidates(nb.id, "低噪声放大器", recall=50)
     assert hits, "keyword union must surface the 2nd-language chunk"
@@ -256,7 +256,7 @@ def test_keyword_chunk_candidates_empty_keywords_no_hits(repo):
     from app.models.schemas import NotebookCreate
     nb = repo.create_notebook(NotebookCreate(name="nb-kw2"))
     _seed_chunk_texts(repo, nb.id, ["anything"])
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     assert repo.retrieval.candidates._keyword_chunk_candidates(nb.id, "", recall=50) == []
     assert repo.retrieval.candidates._keyword_chunk_candidates(nb.id, "   ", recall=50) == []
 
@@ -272,7 +272,7 @@ def test_ask_chunk_unions_bilingual_keyword_hit_once(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="nb-e2e"))
     _seed_chunk_texts(repo, nb.id, ["cascode output resistance",
                                     "低噪声放大器 LNA 设计"])
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
 
     # English-only sub_queries (won't lexically match the Chinese chunk); the
     # bilingual keyword carries the Chinese term into the FTS union.

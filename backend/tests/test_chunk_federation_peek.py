@@ -71,7 +71,7 @@ def _seed(repo, n=3):
                 "created_at) VALUES (?,?,?,?)",
                 (f"c{i}", nb.id, json.dumps(embedder.embed_texts([text])[0]), now),
             )
-    repo.backfill_chunk_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)
     return nb
 
 

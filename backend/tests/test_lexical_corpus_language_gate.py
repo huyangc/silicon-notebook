@@ -327,7 +327,7 @@ def test_retrieval_passes_the_probed_langs_to_the_chunk_adapter(repo, monkeypatc
 
     notebook = repo.create_notebook(NotebookCreate(name="nb-gate"))
     _seed_english_chunks(repo, notebook.id)
-    repo.backfill_chunk_fts(notebook.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(notebook.id)
 
     seen: list[object] = []
     candidates = repo.retrieval.candidates
@@ -399,7 +399,7 @@ def test_scoped_chinese_source_still_retrieves_in_a_misjudged_notebook(repo):
             "element_ids,created_at) VALUES (?,?,?,?,?,?,?)",
             ("c-zh-0", notebook.id, "src-zh",
              "时序收敛需要布局优化与时钟树综合之间的反复迭代。", "", "[]", now))
-    repo.backfill_chunk_fts(notebook.id)
+    repo._runtime.knowledge_query.backfill_chunk_fts(notebook.id)
 
     candidates = repo.retrieval.candidates
     # The scoped probe is unfiltered, so the CJK terms survive and hit.

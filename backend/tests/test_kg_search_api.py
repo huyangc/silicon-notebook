@@ -118,7 +118,7 @@ def test_backfill_kg_fts(repo):
     hits_before = repo.kg_search(nb.id, "op-amp", k=5)
     assert hits_before == []   # FTS wiped, no semantic index either
 
-    repo.backfill_kg_fts(nb.id)
+    repo._runtime.knowledge_query.backfill_kg_fts(nb.id)
     hits_after = repo.kg_search(nb.id, "op-amp", k=5)
     assert any(h["name"] == "op-amp" for h in hits_after)
 

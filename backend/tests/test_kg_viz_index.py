@@ -224,7 +224,7 @@ def test_unified_graph_unavailable_until_the_index_build_publishes(repo, monkeyp
     again = repo.unified_graph(nb.id, level="object", limit=10)
     assert again["viz_unavailable"] is True      # 再打开一次仍然什么都不会发生
     assert nb.id not in repo._viz_building
-    repo.build_viz_index(nb.id)                  # 指定生产者发布产物
+    repo._runtime.scale_artifacts.build_viz(nb.id)                  # 指定生产者发布产物
     ready = repo.unified_graph(nb.id, level="object", limit=10)
     assert not ready.get("viz_building")
     assert not ready.get("viz_unavailable")
@@ -395,7 +395,7 @@ def test_the_stale_viz_slot_is_replaced_when_the_index_build_publishes(repo, mon
     assert stale is not None
     assert scale.viz_probe(nb.id)["viz_stale"] is True
 
-    repo.build_viz_index(nb.id)              # 指定生产者发布新一代
+    repo._runtime.scale_artifacts.build_viz(nb.id)              # 指定生产者发布新一代
     fresh = scale.viz_index(nb.id)
 
     assert fresh is not stale
@@ -682,7 +682,7 @@ def test_build_viz_stamps_pre_derive_cluster_seq(repo, monkeypatch):
 
     monkeypatch.setattr(repo._runtime.scale_builder, "_derive_object_graph_lite", derive_and_bump)
     _clear_viz(repo, nb.id)
-    manifest = repo.build_viz_index(nb.id)
+    manifest = repo._runtime.scale_artifacts.build_viz(nb.id)
     assert manifest["cluster_seq"] == pre_cseq         # stamped with the PRE-derive cseq
     assert sa.viz_probe(nb.id)["viz_stale"] is True    # cseq has since advanced → stale
 
