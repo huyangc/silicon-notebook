@@ -11,7 +11,7 @@
     "timeout": 90
    },
    "messages_bytes": 4096,
-   "messages_sha256": "041cc77761620d51bfc321a18c525d734ccb9336a77a0e2058f9be79cca6a73d",
+   "messages_sha256": "2e4bfaf76223bbd1aedab0c9bf147cfb62f866416b8894f97a55231f06e2ccbb",
    "roles": [
     "user"
    ],
@@ -25,8 +25,8 @@
     "max_tokens": 16384,
     "timeout": 90
    },
-   "messages_bytes": 12488,
-   "messages_sha256": "e689c802ead15dec118f23cfd6ed9ccef2c3804abf9d115832884df73fc59047",
+   "messages_bytes": 12480,
+   "messages_sha256": "47b7575893626f6abb407d88d51671801628d539d89d3eeb49edd4fbc91de18b",
    "roles": [
     "user"
    ],
@@ -40,8 +40,8 @@
     "max_tokens": 16384,
     "timeout": 90
    },
-   "messages_bytes": 13761,
-   "messages_sha256": "abd1f2058119cde18e86dec62e68a15184197ac35594f1d2c2e7688a8a7351aa",
+   "messages_bytes": 13753,
+   "messages_sha256": "6f3b6e91df8089aed6db6f6df16b06de2eb277ac11f4e5bb177c772861fab948",
    "roles": [
     "user"
    ],
@@ -55,8 +55,8 @@
     "max_tokens": 16384,
     "timeout": 90
    },
-   "messages_bytes": 14015,
-   "messages_sha256": "6fbfd7df2af5034e2d13e8ceec01a29ad1ab8ec0a37349657fd7735ecb4d4c21",
+   "messages_bytes": 14007,
+   "messages_sha256": "b185c183bb8a4d4a3766f19b67029914131e7a876373c917427cb0b84b86e4fd",
    "roles": [
     "user"
    ],
@@ -70,8 +70,8 @@
     "max_tokens": 16384,
     "timeout": 90
    },
-   "messages_bytes": 14577,
-   "messages_sha256": "04471c44028e9583f6ef2e0f1a014a456a923ba843bd06ce66c9b1169a80b9bb",
+   "messages_bytes": 14569,
+   "messages_sha256": "3fad25cf0815f2c3b02913c2aeebd2b36f132653e3109b1e0fc0035e49934ba7",
    "roles": [
     "user"
    ],
@@ -85,8 +85,8 @@
     "max_tokens": 16384,
     "timeout": 90
    },
-   "messages_bytes": 14043,
-   "messages_sha256": "d343cd5da0dee2ebb20f629d65481db0346dc5a7ee5b95477f14760cda078419",
+   "messages_bytes": 14035,
+   "messages_sha256": "89cb2ef9df8164180859dc1f232bfd3ced03f43b2b113032ef27077fd0fb1a40",
    "roles": [
     "user"
    ],
@@ -100,8 +100,8 @@
     "max_tokens": 16384,
     "timeout": 90
    },
-   "messages_bytes": 14043,
-   "messages_sha256": "d343cd5da0dee2ebb20f629d65481db0346dc5a7ee5b95477f14760cda078419",
+   "messages_bytes": 14035,
+   "messages_sha256": "89cb2ef9df8164180859dc1f232bfd3ced03f43b2b113032ef27077fd0fb1a40",
    "roles": [
     "user"
    ],
@@ -115,8 +115,8 @@
     "max_tokens": 16384,
     "timeout": 90
    },
-   "messages_bytes": 14565,
-   "messages_sha256": "89567ed4a312c699dd724802c7f6e2557f72ff7eb9a347f29419b5c99b5f6535",
+   "messages_bytes": 14557,
+   "messages_sha256": "d7a152cb9f40c2f64d0c17f3ee4666955550fe1007056a7e60474fb9f27986be",
    "roles": [
     "user"
    ],
@@ -130,8 +130,8 @@
     "max_tokens": 16384,
     "timeout": 90
    },
-   "messages_bytes": 14043,
-   "messages_sha256": "d343cd5da0dee2ebb20f629d65481db0346dc5a7ee5b95477f14760cda078419",
+   "messages_bytes": 14035,
+   "messages_sha256": "89cb2ef9df8164180859dc1f232bfd3ced03f43b2b113032ef27077fd0fb1a40",
    "roles": [
     "user"
    ],
@@ -145,8 +145,8 @@
     "max_tokens": 16384,
     "timeout": 90
    },
-   "messages_bytes": 14043,
-   "messages_sha256": "d343cd5da0dee2ebb20f629d65481db0346dc5a7ee5b95477f14760cda078419",
+   "messages_bytes": 14035,
+   "messages_sha256": "89cb2ef9df8164180859dc1f232bfd3ced03f43b2b113032ef27077fd0fb1a40",
    "roles": [
     "user"
    ],
@@ -160,8 +160,8 @@
     "max_tokens": 16384,
     "timeout": 90
    },
-   "messages_bytes": 14115,
-   "messages_sha256": "5058121ef9142c25f897fb9d3186f95cc6722a032c7f4af926d9b0f74b8fe5ba",
+   "messages_bytes": 14107,
+   "messages_sha256": "c92344b3e8677a48996bcafb3862d77aa1ce67a5bcfb6f2013584c6c54cccdf8",
    "roles": [
     "user"
    ],
@@ -175,8 +175,8 @@
     "max_tokens": 16384,
     "timeout": 90
    },
-   "messages_bytes": 14115,
-   "messages_sha256": "5058121ef9142c25f897fb9d3186f95cc6722a032c7f4af926d9b0f74b8fe5ba",
+   "messages_bytes": 14107,
+   "messages_sha256": "c92344b3e8677a48996bcafb3862d77aa1ce67a5bcfb6f2013584c6c54cccdf8",
    "roles": [
     "user"
    ],
@@ -190,8 +190,8 @@
     "max_tokens": 16384,
     "timeout": 90
    },
-   "messages_bytes": 14060,
-   "messages_sha256": "815efc0ed3aa7471fdad5409e3e9c1b202e8dbc791cab0d1dc094c6edfe8ff80",
+   "messages_bytes": 14052,
+   "messages_sha256": "596f14f6f05d8b60a6a4d1590acdd4a45dacadca4190cba886ba20ec15c51265",
    "roles": [
     "user"
    ],
@@ -243,6 +243,7 @@
    "retrieval.keyword_arm_available {\"args\": [], \"kwargs\": {}}",
    "experiences.note_adopted {\"args\": [[\"rx_04825480509601da93ce9af60df265c2\"]], \"kwargs\": {}}"
   ],
+  "worker_memo_reads": [],
   "worker_threads": [
    "retrieval.federated_retrieve {\"args\": [\"nb-00000000000000000000000000000001\", \"前提甲\"], \"kwargs\": {\"types\": [], \"w_keyword\": 0.4, \"w_semantic\": 0.6}}",
    "retrieval.federated_retrieve {\"args\": [\"nb-00000000000000000000000000000001\", \"版图设计\"], \"kwargs\": {\"types\": [], \"w_keyword\": 0.4, \"w_semantic\": 0.6}}",
@@ -250,13 +251,13 @@
    "retrieval.retrieve_chunk_candidates {\"args\": [\"nb-00000000000000000000000000000001\", \"前提甲\"], \"kwargs\": {}}",
    "retrieval.retrieve_chunk_candidates {\"args\": [\"nb-00000000000000000000000000000001\", \"版图设计\"], \"kwargs\": {}}",
    "retrieval.select_chunk_candidates {\"args\": [[], [], \"<ndarray>\", 8, 0.5], \"kwargs\": {\"active_notebook_id\": \"nb-00000000000000000000000000000001\"}}",
-   "retrieval.select_chunk_candidates {\"args\": [[{\"chunk_id\": \"chunk-1\", \"element_ids\": [\"el-1\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"relevance\": 1.0, \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"score\": 1.0, \"support_id\": \"chunk-1\", \"support_kind\": \"chunk\"}], \"score\": 1.0, \"section_path\": \"命令 > report_timing\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"report_timing 输出关键路径的时序报告,用于版图设计签核。\"}, {\"chunk_id\": \"chunk-3\", \"element_ids\": [\"el-3\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"relevance\": 1.0, \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"score\": 1.0, \"support_id\": \"chunk-3\", \"support_kind\": \"chunk\"}], \"score\": 1.0, \"section_path\": \"命令 > read_lef\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\"}, {\"chunk_id\": \"chunk-4\", \"element_ids\": [\"el-4\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"relevance\": 1.0, \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"score\": 1.0, \"support_id\": \"chunk-4\", \"support_kind\": \"chunk\"}], \"score\": 1.0, \"section_path\": \"命令 > overview\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\"}, {\"chunk_id\": \"chunk-0\", \"element_ids\": [\"el-0\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"relevance\": 0.333333333, \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"score\": 0.333333333, \"support_id\": \"chunk-0\", \"support_kind\": \"chunk\"}], \"score\": 0.333333333, \"section_path\": \"命令 > set_db\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\"}, {\"chunk_id\": \"chunk-2\", \"element_ids\": [\"el-2\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"relevance\": 0.333333333, \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"score\": 0.333333333, \"support_id\": \"chunk-2\", \"support_kind\": \"chunk\"}], \"score\": 0.333333333, \"section_path\": \"命令 > get_db\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"get_db 读取版图数据库对象的属性值。\"}], [], \"<ndarray>\", 8, 0.5], \"kwargs\": {\"active_notebook_id\": \"nb-00000000000000000000000000000001\"}}"
+   "retrieval.select_chunk_candidates {\"args\": [[{\"chunk_id\": \"chunk-1\", \"element_ids\": [\"el-1\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"support_id\": \"chunk-1\", \"support_kind\": \"chunk\"}], \"section_path\": \"命令 > report_timing\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"report_timing 输出关键路径的时序报告,用于版图设计签核。\"}, {\"chunk_id\": \"chunk-3\", \"element_ids\": [\"el-3\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"support_id\": \"chunk-3\", \"support_kind\": \"chunk\"}], \"section_path\": \"命令 > read_lef\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\"}, {\"chunk_id\": \"chunk-4\", \"element_ids\": [\"el-4\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"support_id\": \"chunk-4\", \"support_kind\": \"chunk\"}], \"section_path\": \"命令 > overview\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\"}, {\"chunk_id\": \"chunk-0\", \"element_ids\": [\"el-0\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"support_id\": \"chunk-0\", \"support_kind\": \"chunk\"}], \"section_path\": \"命令 > set_db\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\"}, {\"chunk_id\": \"chunk-2\", \"element_ids\": [\"el-2\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"support_id\": \"chunk-2\", \"support_kind\": \"chunk\"}], \"section_path\": \"命令 > get_db\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"get_db 读取版图数据库对象的属性值。\"}], [], \"<ndarray>\", 8, 0.5], \"kwargs\": {\"active_notebook_id\": \"nb-00000000000000000000000000000001\"}}"
   ]
  },
  "reflect_inputs": [
   {
    "args": [],
-   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004a)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004d)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 38, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 34, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
    "kwargs": {
     "consult_memory": true,
     "corpus_langs": [
@@ -291,7 +292,7 @@
   },
   {
    "args": [],
-   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004a)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004d)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 38, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 34, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
    "kwargs": {
     "consult_memory": true,
     "corpus_langs": [
@@ -326,7 +327,7 @@
   },
   {
    "args": [],
-   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004a)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004d)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 38, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 34, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
    "kwargs": {
     "consult_memory": true,
     "corpus_langs": [
@@ -361,7 +362,7 @@
   },
   {
    "args": [],
-   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004a)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004d)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)、「baz_qux」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n（提示:「exact_lookup」这类动作在当前场景已连续 2 次未拿到新证据;以往打法经验:「这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;」。可考虑改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 38, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)、「baz_qux」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n（提示:「exact_lookup」这类动作在当前场景已连续 2 次未拿到新证据;以往打法经验:「这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;」。可考虑改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 34, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
    "kwargs": {
     "consult_memory": true,
     "corpus_langs": [
@@ -396,7 +397,7 @@
   },
   {
    "args": [],
-   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004a)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004d)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)、「baz_qux」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 38, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)、「baz_qux」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 34, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
    "kwargs": {
     "consult_memory": true,
     "corpus_langs": [
@@ -431,7 +432,7 @@
   },
   {
    "args": [],
-   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004a)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004d)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)、「baz_qux」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 38, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)、「baz_qux」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 34, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
    "kwargs": {
     "consult_memory": true,
     "corpus_langs": [
@@ -466,7 +467,7 @@
   },
   {
    "args": [],
-   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004a)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004d)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)、「baz_qux」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n（提示:「follow_chain」这类动作在当前场景已连续 2 次未拿到新证据;以往打法经验:「这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;」。可考虑改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 38, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)、「baz_qux」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n（提示:「follow_chain」这类动作在当前场景已连续 2 次未拿到新证据;以往打法经验:「这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;」。可考虑改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 34, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
    "kwargs": {
     "consult_memory": true,
     "corpus_langs": [
@@ -501,7 +502,7 @@
   },
   {
    "args": [],
-   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004a)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004d)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)、「baz_qux」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 38, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)、「baz_qux」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 34, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
    "kwargs": {
     "consult_memory": true,
     "corpus_langs": [
@@ -536,7 +537,7 @@
   },
   {
    "args": [],
-   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004a)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004d)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)、「baz_qux」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 38, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)、「baz_qux」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 34, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
    "kwargs": {
     "consult_memory": true,
     "corpus_langs": [
@@ -571,7 +572,7 @@
   },
   {
    "args": [],
-   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004a)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004d)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)、「baz_qux」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n- search_chunks — rarely pays off: 原文检索在这里常空手。\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 38, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)、「baz_qux」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n- search_chunks — rarely pays off: 原文检索在这里常空手。\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 34, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
    "kwargs": {
     "consult_memory": true,
     "corpus_langs": [
@@ -606,7 +607,7 @@
   },
   {
    "args": [],
-   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004a)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004d)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)、「baz_qux」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n- search_chunks — rarely pays off: 原文检索在这里常空手。\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 38, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)、「baz_qux」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n- search_chunks — rarely pays off: 原文检索在这里常空手。\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 34, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
    "kwargs": {
     "consult_memory": true,
     "corpus_langs": [
@@ -641,7 +642,7 @@
   },
   {
    "args": [],
-   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004a)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004d)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [concept] 寄生电容 (id=ko-00000000000000000000000000000003)\n- [concept] 工艺角 (id=ko-00000000000000000000000000000004)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（已展开过的节点，勿重复 expand_graph 请求它们: 版图设计）\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)、「baz_qux」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n- search_chunks — rarely pays off: 原文检索在这里常空手。\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 38, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [concept] 规则23 (id=ko-0000000000000000000000000000001f)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [concept] 寄生电容 (id=ko-00000000000000000000000000000003)\n- [concept] 工艺角 (id=ko-00000000000000000000000000000004)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（已展开过的节点，勿重复 expand_graph 请求它们: 版图设计）\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)、「前提甲」(新增7条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 「foo_bar」(新增0段)、「baz_qux」(新增0段)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 这个库主要是版图与签核的中文手册。\n\n[Search tactics learned from earlier runs]\nHints on HOW to search, aggregated from earlier runs. NOT evidence: never cite it, never state it as a finding, and never let it change WHICH sources a run may read.\n- expand_graph — worth reaching for: expand 在这类库上通常能找到相邻概念。\n- add_subquery — worth reaching for: retrieve 先用整题检索打底。\n- expand_community — worth reaching for: expand_community 适合找同类实体。\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- exact_lookup — rarely pays off: 这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;这类库上按名称查找通常拿不到新证据,建议先换用其他通道再回头确认;\n- follow_chain — rarely pays off: 这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;这类库上两跳推导通常拿不到新证据,建议先换用其他通道再回头确认;\n- search_chunks — rarely pays off: 原文检索在这里常空手。\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 34, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
    "kwargs": {
     "consult_memory": true,
     "corpus_langs": [
@@ -698,24 +699,20 @@
     ],
     "exact_lookup": false,
     "notebook_id": "nb-00000000000000000000000000000001",
-    "relevance": 1.0,
     "retrieval_supports": [
      {
       "origin": "ppr",
       "review_status_snapshot": "",
-      "score": 1.0,
       "support_id": "",
       "support_kind": "ppr"
      },
      {
       "origin": "lexical",
       "review_status_snapshot": "",
-      "score": 1.0,
       "support_id": "chunk-4",
       "support_kind": "chunk"
      }
     ],
-    "score": 0.0,
     "section_path": "命令 > overview",
     "source_id": "src-1",
     "source_title": "版图手册",
@@ -728,24 +725,20 @@
     ],
     "exact_lookup": false,
     "notebook_id": "",
-    "relevance": 1.0,
     "retrieval_supports": [
      {
       "origin": "ppr",
       "review_status_snapshot": "",
-      "score": 0.666666667,
       "support_id": "",
       "support_kind": "ppr"
      },
      {
       "origin": "lexical",
       "review_status_snapshot": "",
-      "score": 1.0,
       "support_id": "chunk-1",
       "support_kind": "chunk"
      }
     ],
-    "score": 1.0,
     "section_path": "命令 > report_timing",
     "source_id": "src-1",
     "source_title": "版图手册",
@@ -758,24 +751,20 @@
     ],
     "exact_lookup": false,
     "notebook_id": "",
-    "relevance": 1.0,
     "retrieval_supports": [
      {
       "origin": "ppr",
       "review_status_snapshot": "",
-      "score": 0.666666667,
       "support_id": "",
       "support_kind": "ppr"
      },
      {
       "origin": "lexical",
       "review_status_snapshot": "",
-      "score": 1.0,
       "support_id": "chunk-3",
       "support_kind": "chunk"
      }
     ],
-    "score": 1.0,
     "section_path": "命令 > read_lef",
     "source_id": "src-1",
     "source_title": "版图手册",
@@ -788,24 +777,20 @@
     ],
     "exact_lookup": false,
     "notebook_id": "",
-    "relevance": 0.333333333,
     "retrieval_supports": [
      {
       "origin": "ppr",
       "review_status_snapshot": "",
-      "score": 0.0,
       "support_id": "",
       "support_kind": "ppr"
      },
      {
       "origin": "lexical",
       "review_status_snapshot": "",
-      "score": 0.333333333,
       "support_id": "chunk-0",
       "support_kind": "chunk"
      }
     ],
-    "score": 0.333333333,
     "section_path": "命令 > set_db",
     "source_id": "src-1",
     "source_title": "版图手册",
@@ -818,31 +803,27 @@
     ],
     "exact_lookup": false,
     "notebook_id": "",
-    "relevance": 0.333333333,
     "retrieval_supports": [
      {
       "origin": "ppr",
       "review_status_snapshot": "",
-      "score": 0.0,
       "support_id": "",
       "support_kind": "ppr"
      },
      {
       "origin": "lexical",
       "review_status_snapshot": "",
-      "score": 0.333333333,
       "support_id": "chunk-2",
       "support_kind": "chunk"
      }
     ],
-    "score": 0.333333333,
     "section_path": "命令 > get_db",
     "source_id": "src-1",
     "source_title": "版图手册",
     "text": "get_db 读取版图数据库对象的属性值。"
    }
   ],
-  "collection_map_text": "[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 38, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3)",
+  "collection_map_text": "[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 34, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3)",
   "document_reads": [],
   "elements": [],
   "enumerations": [],
@@ -861,8 +842,6 @@
      "name": "版图设计",
      "section_path": "1"
     },
-    "relevance": 1.000000072,
-    "score": 1.000000072,
     "status": "approved",
     "tier": "personal",
     "weight": 0.5
@@ -878,8 +857,6 @@
      "name": "前提甲",
      "section_path": "1"
     },
-    "relevance": 0.999999964,
-    "score": 0.999999964,
     "status": "approved",
     "tier": "personal",
     "weight": 1.0
@@ -888,15 +865,13 @@
     "evidence": [],
     "last_reviewed": "",
     "notebook_id": "nb-00000000000000000000000000000001",
-    "object_id": "ko-0000000000000000000000000000004a",
+    "object_id": "ko-00000000000000000000000000000024",
     "object_type": "concept",
     "owner": "",
     "payload": {
-     "name": "版图设计",
+     "name": "规则28",
      "section_path": "1"
     },
-    "relevance": 1.000000072,
-    "score": 1.000000072,
     "status": "approved",
     "tier": "personal",
     "weight": 0.5
@@ -912,76 +887,6 @@
      "name": "规则23",
      "section_path": "1"
     },
-    "relevance": 0.507053912,
-    "score": 0.507053912,
-    "status": "approved",
-    "tier": "personal",
-    "weight": 0.5
-   },
-   {
-    "evidence": [],
-    "last_reviewed": "",
-    "notebook_id": "nb-00000000000000000000000000000001",
-    "object_id": "ko-0000000000000000000000000000004d",
-    "object_type": "concept",
-    "owner": "",
-    "payload": {
-     "name": "版图设计",
-     "section_path": "1"
-    },
-    "relevance": 1.000000072,
-    "score": 1.000000072,
-    "status": "approved",
-    "tier": "personal",
-    "weight": 0.5
-   },
-   {
-    "evidence": [],
-    "last_reviewed": "",
-    "notebook_id": "nb-00000000000000000000000000000001",
-    "object_id": "ko-00000000000000000000000000000016",
-    "object_type": "concept",
-    "owner": "",
-    "payload": {
-     "name": "规则14",
-     "section_path": "1"
-    },
-    "relevance": 0.506445265,
-    "score": 0.506445265,
-    "status": "approved",
-    "tier": "personal",
-    "weight": 0.5
-   },
-   {
-    "evidence": [],
-    "last_reviewed": "",
-    "notebook_id": "nb-00000000000000000000000000000001",
-    "object_id": "ko-00000000000000000000000000000024",
-    "object_type": "concept",
-    "owner": "",
-    "payload": {
-     "name": "规则28",
-     "section_path": "1"
-    },
-    "relevance": 0.51415379,
-    "score": 0.51415379,
-    "status": "approved",
-    "tier": "personal",
-    "weight": 0.5
-   },
-   {
-    "evidence": [],
-    "last_reviewed": "",
-    "notebook_id": "nb-00000000000000000000000000000001",
-    "object_id": "ko-00000000000000000000000000000014",
-    "object_type": "concept",
-    "owner": "",
-    "payload": {
-     "name": "规则12",
-     "section_path": "1"
-    },
-    "relevance": 0.503076196,
-    "score": 0.503076196,
     "status": "approved",
     "tier": "personal",
     "weight": 0.5
@@ -997,8 +902,6 @@
      "name": "版图规则",
      "section_path": "1"
     },
-    "relevance": 0.484757288,
-    "score": 0.484757288,
     "status": "approved",
     "tier": "personal",
     "weight": 0.5
@@ -1007,15 +910,13 @@
     "evidence": [],
     "last_reviewed": "",
     "notebook_id": "nb-00000000000000000000000000000001",
-    "object_id": "ko-00000000000000000000000000000015",
+    "object_id": "ko-00000000000000000000000000000016",
     "object_type": "concept",
     "owner": "",
     "payload": {
-     "name": "规则13",
+     "name": "规则14",
      "section_path": "1"
     },
-    "relevance": 0.503066325,
-    "score": 0.503066325,
     "status": "approved",
     "tier": "personal",
     "weight": 0.5
@@ -1031,8 +932,66 @@
      "name": "规则11",
      "section_path": "1"
     },
-    "relevance": 0.475645137,
-    "score": 0.475645137,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000014",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则12",
+     "section_path": "1"
+    },
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000019",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则17",
+     "section_path": "1"
+    },
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000015",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则13",
+     "section_path": "1"
+    },
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000018",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则16",
+     "section_path": "1"
+    },
     "status": "approved",
     "tier": "personal",
     "weight": 0.5
@@ -1048,28 +1007,9 @@
      "name": "结论丙",
      "section_path": "1"
     },
-    "relevance": 0.501408291,
-    "score": 0.501408291,
     "status": "approved",
     "tier": "personal",
     "weight": 1.0
-   },
-   {
-    "evidence": [],
-    "last_reviewed": "",
-    "notebook_id": "nb-00000000000000000000000000000001",
-    "object_id": "ko-00000000000000000000000000000019",
-    "object_type": "concept",
-    "owner": "",
-    "payload": {
-     "name": "规则17",
-     "section_path": "1"
-    },
-    "relevance": 0.465494907,
-    "score": 0.465494907,
-    "status": "approved",
-    "tier": "personal",
-    "weight": 0.5
    },
    {
     "evidence": [],
@@ -1082,8 +1022,6 @@
      "name": "规则27",
      "section_path": "1"
     },
-    "relevance": 0.500113964,
-    "score": 0.500113964,
     "status": "approved",
     "tier": "personal",
     "weight": 0.5
@@ -1099,8 +1037,6 @@
      "name": "规则20",
      "section_path": "1"
     },
-    "relevance": 0.48436482,
-    "score": 0.48436482,
     "status": "approved",
     "tier": "personal",
     "weight": 0.5
@@ -1116,11 +1052,24 @@
      "name": "工艺角",
      "section_path": "1"
     },
-    "relevance": 0.476442397,
-    "score": 0.476442397,
     "status": "approved",
     "tier": "personal",
     "weight": 0.0
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000022",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则26",
+     "section_path": "1"
+    },
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
    },
    {
     "evidence": [],
@@ -1133,8 +1082,6 @@
      "name": "寄生电容",
      "section_path": "1"
     },
-    "relevance": 0.419933295,
-    "score": 0.419933295,
     "status": "approved",
     "tier": "personal",
     "weight": 0.0
@@ -1162,23 +1109,8 @@
    "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
    "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
    "SELECT notebook_id, COUNT(*) AS n, COALESCE(MAX(updated_at), '') AS m FROM retrieval_experiences WHERE notebook_id IN ('','nb-00000000000000000000000000000001') GROUP BY notebook_id",
-   "SELECT k, v FROM 'main'.'chunks_fts_config'",
    "SELECT chunks_fts.chunk_id AS chunk_id, c.source_id AS source_id, c.section_path AS section_path, bm25(chunks_fts) AS rank FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.chunk_id WHERE chunks_fts.notebook_id='nb-00000000000000000000000000000001' AND chunks_fts MATCH '\"foo_bar\"' ORDER BY rank LIMIT 50",
-   "-- PRAGMA 'main'.data_version",
-   "-- PRAGMA 'main'.data_version",
-   "-- SELECT k, v FROM 'main'.'chunks_fts_config'",
-   "-- SELECT pgno FROM 'main'.'chunks_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'chunks_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'chunks_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'chunks_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'chunks_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
    "SELECT chunks_fts.chunk_id AS chunk_id, c.source_id AS source_id, c.section_path AS section_path, bm25(chunks_fts) AS rank FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.chunk_id WHERE chunks_fts.notebook_id='nb-00000000000000000000000000000001' AND chunks_fts MATCH '\"baz_qux\"' ORDER BY rank LIMIT 50",
-   "-- PRAGMA 'main'.data_version",
-   "-- SELECT pgno FROM 'main'.'chunks_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'chunks_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'chunks_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'chunks_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
-   "-- SELECT pgno FROM 'main'.'chunks_fts_idx' WHERE segid=? AND term<=? ORDER BY term DESC LIMIT 1",
    "SELECT notebook_id, COUNT(*) AS n, COALESCE(MAX(updated_at), '') AS m FROM retrieval_experiences WHERE notebook_id IN ('','nb-00000000000000000000000000000001') GROUP BY notebook_id",
    "SELECT notebook_id, COUNT(*) AS n, COALESCE(MAX(updated_at), '') AS m FROM retrieval_experiences WHERE notebook_id IN ('','nb-00000000000000000000000000000001') GROUP BY notebook_id",
    "SELECT ko.*, n.tier AS notebook_tier FROM knowledge_objects ko JOIN notebooks n ON n.id=ko.notebook_id WHERE ko.id='ko-00000000000000000000000000000002' AND ko.status IN ('approved','conflict','project_specific','reviewed') AND (ko.notebook_id='nb-00000000000000000000000000000001' OR ko.notebook_id IN (SELECT b.id FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone')))))))",
@@ -1216,19 +1148,51 @@
    "UPDATE retrieval_experiences SET adopted=adopted+1 WHERE id IN ('rx_04825480509601da93ce9af60df265c2')",
    "COMMIT"
   ],
+  "worker_memo_reads": [
+   "SELECT COALESCE(kg_mutation_seq,0) AS ks, COALESCE(cluster_mutation_seq,0) AS cs, COALESCE(mention_seq,-1) AS ms, COALESCE(kg_reset_epoch,0) AS ep FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'"
+  ],
   "worker_threads": [
    "\n            SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids,\n                   s.title AS source_title\n            FROM chunks c JOIN sources s ON s.id = c.source_id\n            WHERE c.notebook_id = 'nb-00000000000000000000000000000001'\n            ",
+   "\n            SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids,\n                   s.title AS source_title\n            FROM chunks c JOIN sources s ON s.id = c.source_id\n            WHERE c.notebook_id = 'nb-00000000000000000000000000000001'\n            ",
+   "\n            SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids,\n                   s.title AS source_title\n            FROM chunks c JOIN sources s ON s.id = c.source_id\n            WHERE c.notebook_id = 'nb-00000000000000000000000000000001'\n            ",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='claim' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='claim' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
    "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='claim' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
    "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='concept' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='concept' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='concept' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='formula' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='formula' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
    "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='formula' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
    "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='procedure' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
-   "SELECT COALESCE(kg_mutation_seq,0) AS ks, COALESCE(cluster_mutation_seq,0) AS cs, COALESCE(mention_seq,-1) AS ms, COALESCE(kg_reset_epoch,0) AS ep FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='procedure' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='procedure' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM chunk_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM chunk_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
    "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM chunk_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
    "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM element_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM element_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM element_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
    "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM knowledge_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM knowledge_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM knowledge_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM knowledge_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts FROM knowledge_objects WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts FROM knowledge_objects WHERE notebook_id = 'nb-00000000000000000000000000000001'",
    "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts FROM knowledge_objects WHERE notebook_id = 'nb-00000000000000000000000000000001'",
    "SELECT COUNT(*) c FROM chunks WHERE notebook_id='nb-00000000000000000000000000000001'",
    "SELECT b.id AS id, b.name AS name, b.tier AS tier, (b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AS ok, (b.status NOT IN ('copying','deleting','importing') AND (EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND NOT (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))) AS gate_closed, (b.created_by = a.created_by) AS same_owner FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT b.id AS id, b.name AS name, b.tier AS tier, (b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AS ok, (b.status NOT IN ('copying','deleting','importing') AND (EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND NOT (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))) AS gate_closed, (b.created_by = a.created_by) AS same_owner FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT b.id AS id, b.name AS name, b.tier AS tier, (b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AS ok, (b.status NOT IN ('copying','deleting','importing') AND (EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND NOT (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))) AS gate_closed, (b.created_by = a.created_by) AS same_owner FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
    "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
    "SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, c.notebook_id AS chunk_notebook_id, s.title AS source_title FROM chunks c JOIN sources s ON s.id=c.source_id WHERE c.id IN ('chunk-0','chunk-1','chunk-2','chunk-3','chunk-4')",
    "SELECT canonical_id, member_object_id FROM concept_clusters WHERE notebook_id = 'nb-00000000000000000000000000000001' AND generation = COALESCE((SELECT cluster_generation FROM unified_kg_state WHERE notebook_id = 'nb-00000000000000000000000000000001'), 0) ORDER BY canonical_id, member_object_id",
@@ -1241,12 +1205,18 @@
    "SELECT id, evidence FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001'",
    "SELECT id, object_type, payload FROM knowledge_objects WHERE notebook_id = 'nb-00000000000000000000000000000001' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY rowid, id",
    "SELECT id, tier, created_by FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
-   "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
-   "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT id, tier, created_by FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
+   "SELECT id, tier, created_by FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
    "SELECT ko.object_type, COUNT(*) AS c FROM knowhow_tables kt JOIN knowledge_objects ko ON ko.source_id=kt.hidden_source_id WHERE kt.notebook_id='nb-00000000000000000000000000000001' AND ko.notebook_id='nb-00000000000000000000000000000001' AND ko.status IN ('approved','conflict','project_specific','reviewed') GROUP BY ko.object_type ORDER BY ko.object_type",
    "SELECT object_id AS vid, vector FROM knowledge_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
    "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id = 'nb-00000000000000000000000000000001'",
    "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id = 'nb-00000000000000000000000000000001' AND review_status != 'rejected' ORDER BY id",
+   "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
+   "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
+   "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
+   "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
    "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'"
   ]
  },
@@ -1294,13 +1264,13 @@
     "count": 15,
     "result_ids": [
      "ko-00000000000000000000000000000002",
-     "ko-0000000000000000000000000000004a",
-     "ko-0000000000000000000000000000004d",
      "ko-00000000000000000000000000000024",
      "ko-00000000000000000000000000000008",
      "ko-00000000000000000000000000000013",
      "ko-00000000000000000000000000000019",
      "ko-0000000000000000000000000000001c",
+     "ko-00000000000000000000000000000022",
+     "ko-00000000000000000000000000000018",
      "ko-00000000000000000000000000000005",
      "ko-0000000000000000000000000000001f",
      "ko-00000000000000000000000000000016",
@@ -1577,8 +1547,8 @@
     "enumerations": 0,
     "kg": 17,
     "quota": [
-     7,
-     10
+     6,
+     11
     ],
     "top_n": 24
    },

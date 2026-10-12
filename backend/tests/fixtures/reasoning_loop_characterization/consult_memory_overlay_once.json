@@ -1,0 +1,692 @@
+{
+ "embeddings": {
+  "embed_query": 5
+ },
+ "model_calls": [
+  {
+   "kwargs": {
+    "cancel_event": "<event>",
+    "max_retries": 1,
+    "max_tokens": 16384,
+    "timeout": 90
+   },
+   "messages_bytes": 6458,
+   "messages_sha256": "15320ddb7e2cff37f4bb1484914debeef6a910957e23705dc8cbac7596953ac1",
+   "roles": [
+    "user"
+   ],
+   "schema_sha256": "e00e830959884edf14160d89ef4399f3efb307ff08c623aeadbe86c291e6e929",
+   "workload": "reasoning_agent"
+  },
+  {
+   "kwargs": {
+    "cancel_event": "<event>",
+    "max_retries": 1,
+    "max_tokens": 16384,
+    "timeout": 90
+   },
+   "messages_bytes": 14373,
+   "messages_sha256": "c714ddf6f472f1b010aa47b7332659506f889fad86385150374fa20aef840a06",
+   "roles": [
+    "user"
+   ],
+   "schema_sha256": "ff8ff4fbebc828815323c0008f2293160c9ed8e1018c70baedbff2518fe7469f",
+   "workload": "reasoning_agent"
+  },
+  {
+   "kwargs": {
+    "cancel_event": "<event>",
+    "max_retries": 1,
+    "max_tokens": 16384,
+    "timeout": 90
+   },
+   "messages_bytes": 14862,
+   "messages_sha256": "0628818a54af1598975ffe94997796dac61e4f161ca4c480bd47ecfc42cdd779",
+   "roles": [
+    "user"
+   ],
+   "schema_sha256": "ff8ff4fbebc828815323c0008f2293160c9ed8e1018c70baedbff2518fe7469f",
+   "workload": "reasoning_agent"
+  },
+  {
+   "kwargs": {
+    "cancel_event": "<event>",
+    "max_retries": 1,
+    "max_tokens": 16384,
+    "timeout": 90
+   },
+   "messages_bytes": 14862,
+   "messages_sha256": "0628818a54af1598975ffe94997796dac61e4f161ca4c480bd47ecfc42cdd779",
+   "roles": [
+    "user"
+   ],
+   "schema_sha256": "ff8ff4fbebc828815323c0008f2293160c9ed8e1018c70baedbff2518fe7469f",
+   "workload": "reasoning_agent"
+  }
+ ],
+ "on_step_is_trace": true,
+ "outcome": {
+  "returned": true
+ },
+ "ports": {
+  "main_thread": [
+   "retrieval.has_kg {\"args\": [\"nb-00000000000000000000000000000001\"], \"kwargs\": {}}",
+   "profile.read_blocks {\"args\": [\"nb-00000000000000000000000000000001\", \"u-owner\"], \"kwargs\": {}}",
+   "experiences.version_signal {\"args\": [\"nb-00000000000000000000000000000001\"], \"kwargs\": {}}",
+   "experiences.read_partition {\"args\": [\"\", 300], \"kwargs\": {}}",
+   "experiences.read_partition {\"args\": [\"nb-00000000000000000000000000000001\", 100], \"kwargs\": {}}",
+   "retrieval.keyword_arm_available {\"args\": [], \"kwargs\": {}}",
+   "retrieval.keyword_corpus_languages {\"args\": [\"nb-00000000000000000000000000000001\"], \"kwargs\": {}}",
+   "retrieval.chunk_participant_count {\"args\": [\"nb-00000000000000000000000000000001\"], \"kwargs\": {}}",
+   "retrieval.keyword_arm_available {\"args\": [], \"kwargs\": {}}",
+   "experiences.version_signal {\"args\": [\"nb-00000000000000000000000000000001\"], \"kwargs\": {}}",
+   "retrieval.keyword_arm_available {\"args\": [], \"kwargs\": {}}",
+   "experiences.version_signal {\"args\": [\"nb-00000000000000000000000000000001\"], \"kwargs\": {}}",
+   "retrieval.keyword_arm_available {\"args\": [], \"kwargs\": {}}",
+   "retrieval.retrieve_scored {\"args\": [\"nb-00000000000000000000000000000001\", \"版图设计要点有哪些\"], \"kwargs\": {}}"
+  ],
+  "worker_memo_reads": [],
+  "worker_threads": [
+   "retrieval.federated_retrieve {\"args\": [\"nb-00000000000000000000000000000001\", \"版图设计\"], \"kwargs\": {\"types\": [], \"w_keyword\": 0.4, \"w_semantic\": 0.6}}",
+   "retrieval.ppr_retrieve {\"args\": [\"nb-00000000000000000000000000000001\", \"版图设计要点有哪些\"], \"kwargs\": {}}",
+   "retrieval.retrieve_chunk_candidates {\"args\": [\"nb-00000000000000000000000000000001\", \"版图设计\"], \"kwargs\": {}}",
+   "retrieval.select_chunk_candidates {\"args\": [[{\"chunk_id\": \"chunk-1\", \"element_ids\": [\"el-1\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"support_id\": \"chunk-1\", \"support_kind\": \"chunk\"}], \"section_path\": \"命令 > report_timing\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"report_timing 输出关键路径的时序报告,用于版图设计签核。\"}, {\"chunk_id\": \"chunk-3\", \"element_ids\": [\"el-3\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"support_id\": \"chunk-3\", \"support_kind\": \"chunk\"}], \"section_path\": \"命令 > read_lef\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\"}, {\"chunk_id\": \"chunk-4\", \"element_ids\": [\"el-4\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"support_id\": \"chunk-4\", \"support_kind\": \"chunk\"}], \"section_path\": \"命令 > overview\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\"}, {\"chunk_id\": \"chunk-0\", \"element_ids\": [\"el-0\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"support_id\": \"chunk-0\", \"support_kind\": \"chunk\"}], \"section_path\": \"命令 > set_db\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\"}, {\"chunk_id\": \"chunk-2\", \"element_ids\": [\"el-2\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"support_id\": \"chunk-2\", \"support_kind\": \"chunk\"}], \"section_path\": \"命令 > get_db\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"get_db 读取版图数据库对象的属性值。\"}], [], \"<ndarray>\", 8, 0.5], \"kwargs\": {\"active_notebook_id\": \"nb-00000000000000000000000000000001\"}}"
+  ]
+ },
+ "reflect_inputs": [
+  {
+   "args": [],
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键…\n- key entities (shared): 工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键…\n- corpus gaps (shared): 工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺…\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 34, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
+   "kwargs": {
+    "consult_memory": true,
+    "corpus_langs": [
+     "zh",
+     "en"
+    ],
+    "limits": {
+     "answer_element_items": 8,
+     "cell_excerpt_chars": 1000,
+     "chunk_context_chars": 50000,
+     "effort": "deep",
+     "enum_page_size": 50,
+     "enum_pages_per_run": 6,
+     "enum_rows_per_run": 300,
+     "inline_answer_rows": 100,
+     "kg_context_chars": 8000,
+     "max_initial_subqueries": 6,
+     "max_reasoning_steps": 16,
+     "overflow_semantics": "explicit_partial",
+     "ranked_final_cap": 48,
+     "ranked_final_floor": 24,
+     "ranked_per_aspect": 4,
+     "ranked_per_query_take": 8,
+     "structured_max_columns": 8,
+     "structured_max_pages": 50,
+     "structured_max_rows": 1250,
+     "structured_max_tables": 8,
+     "structured_page_size": 25,
+     "structured_payload_chars": 256000
+    }
+   }
+  },
+  {
+   "args": [],
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键…\n- key entities (shared): 工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键…\n- corpus gaps (shared): 工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺…\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- 这位成员常问时序收敛细节\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 34, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
+   "kwargs": {
+    "consult_memory": true,
+    "corpus_langs": [
+     "zh",
+     "en"
+    ],
+    "limits": {
+     "answer_element_items": 8,
+     "cell_excerpt_chars": 1000,
+     "chunk_context_chars": 50000,
+     "effort": "deep",
+     "enum_page_size": 50,
+     "enum_pages_per_run": 6,
+     "enum_rows_per_run": 300,
+     "inline_answer_rows": 100,
+     "kg_context_chars": 8000,
+     "max_initial_subqueries": 6,
+     "max_reasoning_steps": 16,
+     "overflow_semantics": "explicit_partial",
+     "ranked_final_cap": 48,
+     "ranked_final_floor": 24,
+     "ranked_per_aspect": 4,
+     "ranked_per_query_take": 8,
+     "structured_max_columns": 8,
+     "structured_max_pages": 50,
+     "structured_max_rows": 1250,
+     "structured_max_tables": 8,
+     "structured_page_size": 25,
+     "structured_payload_chars": 256000
+    }
+   }
+  },
+  {
+   "args": [],
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增8条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n[What the agent knows about this library]\nBackground from earlier work in this library — use it to aim retrieval. It is NOT evidence: never cite it and never state it as a finding.\n- corpus shape (shared): 工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键…\n- key entities (shared): 工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键…\n- corpus gaps (shared): 工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺关键词工艺…\n\n[Recalled search tactics]\nTactics you asked to recall. Same rule as the auto-injected hints above: NOT evidence, never cite it, and it never says which sources a run may read.\n- 这位成员常问时序收敛细节\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 34, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 300 rows",
+   "kwargs": {
+    "consult_memory": true,
+    "corpus_langs": [
+     "zh",
+     "en"
+    ],
+    "limits": {
+     "answer_element_items": 8,
+     "cell_excerpt_chars": 1000,
+     "chunk_context_chars": 50000,
+     "effort": "deep",
+     "enum_page_size": 50,
+     "enum_pages_per_run": 6,
+     "enum_rows_per_run": 300,
+     "inline_answer_rows": 100,
+     "kg_context_chars": 8000,
+     "max_initial_subqueries": 6,
+     "max_reasoning_steps": 16,
+     "overflow_semantics": "explicit_partial",
+     "ranked_final_cap": 48,
+     "ranked_final_floor": 24,
+     "ranked_per_aspect": 4,
+     "ranked_per_query_take": 8,
+     "structured_max_columns": 8,
+     "structured_max_pages": 50,
+     "structured_max_rows": 1250,
+     "structured_max_tables": 8,
+     "structured_page_size": 25,
+     "structured_payload_chars": 256000
+    }
+   }
+  }
+ ],
+ "result": {
+  "attempted": [
+   {
+    "new": 8,
+    "query": "版图设计",
+    "tries": 1
+   }
+  ],
+  "baseline_manifest": null,
+  "chains": [],
+  "chunks": [
+   {
+    "chunk_id": "chunk-4",
+    "element_ids": [
+     "el-4"
+    ],
+    "exact_lookup": false,
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "retrieval_supports": [
+     {
+      "origin": "ppr",
+      "review_status_snapshot": "",
+      "support_id": "",
+      "support_kind": "ppr"
+     },
+     {
+      "origin": "lexical",
+      "review_status_snapshot": "",
+      "support_id": "chunk-4",
+      "support_kind": "chunk"
+     }
+    ],
+    "section_path": "命令 > overview",
+    "source_id": "src-1",
+    "source_title": "版图手册",
+    "text": "版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。"
+   },
+   {
+    "chunk_id": "chunk-1",
+    "element_ids": [
+     "el-1"
+    ],
+    "exact_lookup": false,
+    "notebook_id": "",
+    "retrieval_supports": [
+     {
+      "origin": "ppr",
+      "review_status_snapshot": "",
+      "support_id": "",
+      "support_kind": "ppr"
+     },
+     {
+      "origin": "lexical",
+      "review_status_snapshot": "",
+      "support_id": "chunk-1",
+      "support_kind": "chunk"
+     }
+    ],
+    "section_path": "命令 > report_timing",
+    "source_id": "src-1",
+    "source_title": "版图手册",
+    "text": "report_timing 输出关键路径的时序报告,用于版图设计签核。"
+   },
+   {
+    "chunk_id": "chunk-3",
+    "element_ids": [
+     "el-3"
+    ],
+    "exact_lookup": false,
+    "notebook_id": "",
+    "retrieval_supports": [
+     {
+      "origin": "ppr",
+      "review_status_snapshot": "",
+      "support_id": "",
+      "support_kind": "ppr"
+     },
+     {
+      "origin": "lexical",
+      "review_status_snapshot": "",
+      "support_id": "chunk-3",
+      "support_kind": "chunk"
+     }
+    ],
+    "section_path": "命令 > read_lef",
+    "source_id": "src-1",
+    "source_title": "版图手册",
+    "text": "read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。"
+   },
+   {
+    "chunk_id": "chunk-0",
+    "element_ids": [
+     "el-0"
+    ],
+    "exact_lookup": false,
+    "notebook_id": "",
+    "retrieval_supports": [
+     {
+      "origin": "ppr",
+      "review_status_snapshot": "",
+      "support_id": "",
+      "support_kind": "ppr"
+     },
+     {
+      "origin": "lexical",
+      "review_status_snapshot": "",
+      "support_id": "chunk-0",
+      "support_kind": "chunk"
+     }
+    ],
+    "section_path": "命令 > set_db",
+    "source_id": "src-1",
+    "source_title": "版图手册",
+    "text": "set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。"
+   },
+   {
+    "chunk_id": "chunk-2",
+    "element_ids": [
+     "el-2"
+    ],
+    "exact_lookup": false,
+    "notebook_id": "",
+    "retrieval_supports": [
+     {
+      "origin": "ppr",
+      "review_status_snapshot": "",
+      "support_id": "",
+      "support_kind": "ppr"
+     },
+     {
+      "origin": "lexical",
+      "review_status_snapshot": "",
+      "support_id": "chunk-2",
+      "support_kind": "chunk"
+     }
+    ],
+    "section_path": "命令 > get_db",
+    "source_id": "src-1",
+    "source_title": "版图手册",
+    "text": "get_db 读取版图数据库对象的属性值。"
+   }
+  ],
+  "collection_map_text": "[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 34, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3)",
+  "document_reads": [],
+  "elements": [],
+  "enumerations": [],
+  "external_evidence": [],
+  "outline": [],
+  "outline_evidence": [],
+  "top_hits": [
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000002",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "版图设计",
+     "section_path": "1"
+    },
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000013",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则11",
+     "section_path": "1"
+    },
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000008",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "版图规则",
+     "section_path": "1"
+    },
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000022",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则26",
+     "section_path": "1"
+    },
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000024",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则28",
+     "section_path": "1"
+    },
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000019",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则17",
+     "section_path": "1"
+    },
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-0000000000000000000000000000001c",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则20",
+     "section_path": "1"
+    },
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000018",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则16",
+     "section_path": "1"
+    },
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   }
+  ]
+ },
+ "sql": {
+  "main_thread": [
+   "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001')",
+   "SELECT * FROM agent_notebook_profile WHERE notebook_id='nb-00000000000000000000000000000001' AND owner_id IN ('','u-owner') ORDER BY owner_id, label",
+   "SELECT notebook_id, COUNT(*) AS n, COALESCE(MAX(updated_at), '') AS m FROM retrieval_experiences WHERE notebook_id IN ('','nb-00000000000000000000000000000001') GROUP BY notebook_id",
+   "SELECT * FROM retrieval_experiences WHERE notebook_id='' ORDER BY id LIMIT 300",
+   "SELECT * FROM retrieval_experiences WHERE notebook_id='nb-00000000000000000000000000000001' ORDER BY id LIMIT 100",
+   "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT id, updated_at, parse_status, chunked_at, created_at, (source_type NOT IN ('knowhow','memory')) AS user_visible FROM sources WHERE notebook_id = 'nb-00000000000000000000000000000001' AND source_type <> 'memory'",
+   "SELECT source_id, element_type, COUNT(*) AS c FROM source_elements WHERE source_id IN ('src-1','src-2','src-3') AND element_type IN ('code_block','formula','image') GROUP BY source_id, element_type",
+   "SELECT source_id, COUNT(*) AS c FROM source_elements WHERE source_id IN ('src-1','src-2','src-3') AND element_type = 'table' AND NOT (rtrim(location_label,'0123456789') GLOB '* part ' AND substr(location_label,length(rtrim(location_label,'0123456789'))+1) NOT IN ('','1') AND substr(location_label,length(rtrim(location_label,'0123456789'))+1) NOT GLOB '0*') GROUP BY source_id",
+   "SELECT COALESCE(kg_mutation_seq,0) AS ks, COALESCE(cluster_mutation_seq,0) AS cs, COALESCE(mention_seq,-1) AS ms, COALESCE(kg_reset_epoch,0) AS ep FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "WITH total AS (SELECT object_type, status, COUNT(*) AS c FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' GROUP BY object_type, status), memory AS (SELECT mo.object_type, mo.status, COUNT(*) AS c FROM knowledge_objects mo WHERE mo.source_id IN (SELECT s.id FROM sources s WHERE s.notebook_id='nb-00000000000000000000000000000001' AND s.source_type IN ('knowhow','memory') AND s.source_type = 'memory') AND +mo.notebook_id='nb-00000000000000000000000000000001' GROUP BY mo.object_type, mo.status) SELECT t.object_type, t.status, t.c - COALESCE(m.c, 0) AS c, COALESCE(m.c, 0) AS m FROM total t LEFT JOIN memory m ON m.object_type = t.object_type AND m.status = t.status",
+   "SELECT id FROM sources WHERE notebook_id = 'nb-00000000000000000000000000000001' AND source_type = 'memory'",
+   "SELECT COUNT(*) AS count FROM knowhow_tables WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT text FROM (  SELECT rowid AS rid, text FROM chunks WHERE notebook_id='nb-00000000000000000000000000000001'   ORDER BY rowid LIMIT 30) UNION SELECT text FROM (  SELECT rowid AS rid, text FROM chunks WHERE notebook_id='nb-00000000000000000000000000000001'   ORDER BY rowid DESC LIMIT 30)",
+   "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT notebook_id, COUNT(*) AS n, COALESCE(MAX(updated_at), '') AS m FROM retrieval_experiences WHERE notebook_id IN ('','nb-00000000000000000000000000000001') GROUP BY notebook_id",
+   "SELECT notebook_id, COUNT(*) AS n, COALESCE(MAX(updated_at), '') AS m FROM retrieval_experiences WHERE notebook_id IN ('','nb-00000000000000000000000000000001') GROUP BY notebook_id",
+   "SELECT COALESCE(kg_mutation_seq,0) AS ks, COALESCE(cluster_mutation_seq,0) AS cs, COALESCE(mention_seq,-1) AS ms, COALESCE(kg_reset_epoch,0) AS ep FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='claim' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='formula' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='procedure' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='concept' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts FROM knowledge_objects WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM element_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COALESCE(kg_mutation_seq,0) AS ks, COALESCE(cluster_mutation_seq,0) AS cs, COALESCE(mention_seq,-1) AS ms, COALESCE(kg_reset_epoch,0) AS ep FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM knowledge_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COALESCE(kg_mutation_seq,0) AS ks, COALESCE(cluster_mutation_seq,0) AS cs, COALESCE(mention_seq,-1) AS ms, COALESCE(kg_reset_epoch,0) AS ep FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'"
+  ],
+  "worker_memo_reads": [
+   "SELECT COALESCE(kg_mutation_seq,0) AS ks, COALESCE(cluster_mutation_seq,0) AS cs, COALESCE(mention_seq,-1) AS ms, COALESCE(kg_reset_epoch,0) AS ep FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'"
+  ],
+  "worker_threads": [
+   "\n            SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids,\n                   s.title AS source_title\n            FROM chunks c JOIN sources s ON s.id = c.source_id\n            WHERE c.notebook_id = 'nb-00000000000000000000000000000001'\n            ",
+   "\n            SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids,\n                   s.title AS source_title\n            FROM chunks c JOIN sources s ON s.id = c.source_id\n            WHERE c.notebook_id = 'nb-00000000000000000000000000000001'\n            ",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='claim' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='claim' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='concept' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='concept' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='formula' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='formula' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='procedure' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='procedure' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM chunk_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM chunk_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM element_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM element_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM knowledge_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM knowledge_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM knowledge_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts FROM knowledge_objects WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts FROM knowledge_objects WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) c FROM chunks WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT b.id AS id, b.name AS name, b.tier AS tier, (b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AS ok, (b.status NOT IN ('copying','deleting','importing') AND (EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND NOT (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))) AS gate_closed, (b.created_by = a.created_by) AS same_owner FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT b.id AS id, b.name AS name, b.tier AS tier, (b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AS ok, (b.status NOT IN ('copying','deleting','importing') AND (EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND NOT (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))) AS gate_closed, (b.created_by = a.created_by) AS same_owner FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT b.id AS id, b.name AS name, b.tier AS tier, (b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AS ok, (b.status NOT IN ('copying','deleting','importing') AND (EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND NOT (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))) AS gate_closed, (b.created_by = a.created_by) AS same_owner FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, c.notebook_id AS chunk_notebook_id, s.title AS source_title FROM chunks c JOIN sources s ON s.id=c.source_id WHERE c.id IN ('chunk-0','chunk-1','chunk-2','chunk-3','chunk-4')",
+   "SELECT canonical_id, member_object_id FROM concept_clusters WHERE notebook_id = 'nb-00000000000000000000000000000001' AND generation = COALESCE((SELECT cluster_generation FROM unified_kg_state WHERE notebook_id = 'nb-00000000000000000000000000000001'), 0) ORDER BY canonical_id, member_object_id",
+   "SELECT chunk_id AS vid, vector FROM chunk_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT claim_object_id, concept_canonical_id FROM mention_edges WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT element_id AS vid, vector FROM element_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT id FROM chunks WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT id FROM sources WHERE notebook_id = 'nb-00000000000000000000000000000001' AND source_type = 'memory'",
+   "SELECT id, element_ids FROM chunks WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT id, evidence FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT id, object_type, payload FROM knowledge_objects WHERE notebook_id = 'nb-00000000000000000000000000000001' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY rowid, id",
+   "SELECT id, tier, created_by FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
+   "SELECT id, tier, created_by FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
+   "SELECT id, tier, created_by FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
+   "SELECT ko.object_type, COUNT(*) AS c FROM knowhow_tables kt JOIN knowledge_objects ko ON ko.source_id=kt.hidden_source_id WHERE kt.notebook_id='nb-00000000000000000000000000000001' AND ko.notebook_id='nb-00000000000000000000000000000001' AND ko.status IN ('approved','conflict','project_specific','reviewed') GROUP BY ko.object_type ORDER BY ko.object_type",
+   "SELECT object_id AS vid, vector FROM knowledge_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id = 'nb-00000000000000000000000000000001' AND review_status != 'rejected' ORDER BY id",
+   "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
+   "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
+   "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'"
+  ]
+ },
+ "trace": [
+  {
+   "detail": {
+    "blocks": 3,
+    "chars": 1200
+   },
+   "step_type": "profile",
+   "summary": "带上对这个库的已有理解"
+  },
+  {
+   "detail": {
+    "source": "planner",
+    "sub_queries": [
+     {
+      "prefer": "balanced",
+      "query": "版图设计",
+      "reason": "",
+      "types": []
+     }
+    ]
+   },
+   "step_type": "plan",
+   "summary": "规划了 1 个子查询"
+  },
+  {
+   "detail": {
+    "count": 8,
+    "result_ids": [
+     "ko-00000000000000000000000000000002",
+     "ko-00000000000000000000000000000024",
+     "ko-00000000000000000000000000000008",
+     "ko-00000000000000000000000000000013",
+     "ko-00000000000000000000000000000019",
+     "ko-0000000000000000000000000000001c",
+     "ko-00000000000000000000000000000022",
+     "ko-00000000000000000000000000000018"
+    ]
+   },
+   "step_type": "retrieve",
+   "summary": "初检索得到 8 个候选节点"
+  },
+  {
+   "detail": {
+    "found": 5,
+    "phase": "seed",
+    "result_ids": [
+     "chunk-4",
+     "chunk-1",
+     "chunk-3",
+     "chunk-0",
+     "chunk-2"
+    ]
+   },
+   "step_type": "ppr",
+   "summary": "概念漫游:跨文档检索,得到 5 段原文"
+  },
+  {
+   "detail": {
+    "found": 0,
+    "phase": "seed",
+    "result_ids": []
+   },
+   "step_type": "search_chunks",
+   "summary": "检索原文段落:首轮按子查询召回,新增 0 段"
+  },
+  {
+   "detail": {
+    "next_action": "consult_memory",
+    "no_progress": false,
+    "stale": 0,
+    "sufficient": false
+   },
+   "step_type": "reflect",
+   "summary": "选 consult_memory"
+  },
+  {
+   "detail": {
+    "chars": 190,
+    "entries": 0
+   },
+   "step_type": "consult_memory",
+   "summary": "回想以往检索打法"
+  },
+  {
+   "detail": {
+    "next_action": "consult_memory",
+    "no_progress": true,
+    "stale": 0,
+    "sufficient": false
+   },
+   "step_type": "reflect",
+   "summary": "选 consult_memory"
+  },
+  {
+   "detail": {
+    "reason": "consult_memory_nothing_new"
+   },
+   "step_type": "skip",
+   "summary": "回想以往打法:未找到与当前场景匹配的新记录"
+  },
+  {
+   "detail": {
+    "next_action": "answer",
+    "no_progress": true,
+    "stale": 1,
+    "sufficient": true
+   },
+   "step_type": "reflect",
+   "summary": "证据够了"
+  },
+  {
+   "detail": {
+    "chains": 0,
+    "elements": 0,
+    "enumerated_items": 0,
+    "enumerations": 0,
+    "kg": 8,
+    "top_n": 24
+   },
+   "step_type": "answer",
+   "summary": "合成候选"
+  }
+ ]
+}
