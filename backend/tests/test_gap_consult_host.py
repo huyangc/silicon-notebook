@@ -686,10 +686,40 @@ def test_hung_plugin_is_abandoned_within_the_deadline():
     assert events[-1]["reason_code"] == "gap_consult_timeout"
 
 
-def test_a_sub_slice_deadline_is_honored_for_a_hung_plugin():
+class _JoinRecordingThreadingProxy:
+    """``threading`` as seen by the gap_consult module only, with every
+    ``Thread.join(timeout)`` recorded.  Everything else forwards to the real
+    module, so locks, events and thread behaviour are unchanged."""
+
+    def __init__(self) -> None:
+        self.join_timeouts: list[float | None] = []
+        recorded = self.join_timeouts
+
+        class _RecordingThread(threading.Thread):
+            def join(self, timeout=None):
+                recorded.append(timeout)
+                return super().join(timeout)
+
+        self.Thread = _RecordingThread
+
+    def __getattr__(self, name):
+        return getattr(threading, name)
+
+
+def test_a_sub_slice_deadline_is_honored_for_a_hung_plugin(monkeypatch):
     # Deployments may configure the timeout below one join slice; each join
     # must be bounded by the remaining budget, not the fixed slice width, or
     # real latency becomes a multiple of the configured budget (codex #584 R2).
+    #
+    # The property is asserted on the join timeouts the host actually asks
+    # for, not on wall-clock latency: the budget is built as
+    # ``monotonic() + 0.01`` before the host reads its own clock, so every
+    # bounded join is <= 0.01, while a fixed-width join asks for the full
+    # slice.  Scheduler jitter cannot move either number.
+    from app.extensions import gap_consult as gap_consult_module
+
+    proxy = _JoinRecordingThreadingProxy()
+    monkeypatch.setattr(gap_consult_module, "threading", proxy)
     release = threading.Event()
 
     class Hung:
@@ -708,11 +738,14 @@ def test_a_sub_slice_deadline_is_honored_for_a_hung_plugin():
         release.set()
 
     assert result == ()
-    # A fixed-width join spends at least the full 0.05s slice before it can
-    # notice the spent deadline; the bounded join returns in roughly the
-    # configured 10ms.  The threshold sits below one slice on purpose — the
-    # headroom above 10ms is scheduler jitter, not the property under test.
-    assert elapsed < 0.045, elapsed
+    timeouts = proxy.join_timeouts
+    assert timeouts, "the host never joined its worker"
+    assert all(timeout is not None for timeout in timeouts), timeouts
+    assert max(timeouts) <= 0.01, timeouts
+    assert min(timeouts) >= 0, timeouts
+    # Sanity only (same bound as the hung-plugin test above); the property
+    # under test is the join timeouts.
+    assert elapsed < 1.0, elapsed
     assert events[-1]["reason_code"] == "gap_consult_timeout"
 
 

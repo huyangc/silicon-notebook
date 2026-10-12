@@ -14,10 +14,10 @@
 import concurrent.futures
 import heapq
 import threading
-import time
 
 import pytest
 
+from app.services import review_queue_memo as review_queue_memo_module
 from app.services.review_queue_memo import (
     REVIEW_QUEUE_MEMO_ITEMS,
     ReviewQueueMemo,
@@ -318,11 +318,55 @@ def test_concurrent_cold_misses_run_one_compute():
     assert len({id(result[0]) for result in out}) == 4
 
 
-def test_a_failed_cold_compute_propagates_to_the_waiter_without_a_serial_retry():
+class _WaiterCount:
+    """「已开始等待」握手:数一数有多少 follower 已经进了 ``pending.ready.wait()``。
+
+    只有 follower 会 wait(leader 只 set),所以计数就是在等 leader 结果的线程数。
+    用例据此在 ``release.set()`` 之前确认 follower 已经挂在 single-flight 上——
+    否则 follower 可能在 leader 失败、摘掉 ``_pending`` 之后才到,自己当上新
+    leader 再算一次,那是调度造成的 ``calls == 2``,不是被测性质。"""
+
+    def __init__(self) -> None:
+        self.condition = threading.Condition()
+        self.waiters = 0
+
+    def wait_for(self, count: int, timeout: float = 10.0) -> bool:
+        with self.condition:
+            return self.condition.wait_for(lambda: self.waiters >= count, timeout)
+
+
+def _install_waiter_handshake(monkeypatch) -> _WaiterCount:
+    counter = _WaiterCount()
+
+    class _CountingEvent(threading.Event):
+        def wait(self, timeout=None):
+            with counter.condition:
+                counter.waiters += 1
+                counter.condition.notify_all()
+            return super().wait(timeout)
+
+    class _HandshakePendingRanking(review_queue_memo_module._PendingRanking):
+        __slots__ = ()
+
+        def __init__(self, epoch) -> None:
+            super().__init__(epoch)
+            self.ready = _CountingEvent()
+
+    # ``top()`` 按模块全局名构造 ``_PendingRanking(...)``,替换只影响本用例。
+    monkeypatch.setattr(
+        review_queue_memo_module, "_PendingRanking", _HandshakePendingRanking
+    )
+    return counter
+
+
+def test_a_failed_cold_compute_propagates_to_the_waiter_without_a_serial_retry(
+    monkeypatch,
+):
     """P2-4(codex 复审):single-flight 的 follower 必须直接继承 leader 的异常,
     不再各自转正、串行重跑同一次注定会失败的冷算(旧契约是 follower ``continue``
     重试,下面这条精确取代那份旧断言)。失败之后 memo 里什么都不缓存,包括
     ``cached_seq``。"""
+    waiting = _install_waiter_handshake(monkeypatch)
     memo = ReviewQueueMemo()
     state = {"calls": 0}
     entered = threading.Event()
@@ -341,6 +385,7 @@ def test_a_failed_cold_compute_propagates_to_the_waiter_without_a_serial_retry()
         leader_future = pool.submit(call)
         assert entered.wait(10)
         waiter_future = pool.submit(call)
+        assert waiting.wait_for(1), "the follower never joined the single-flight"
         release.set()
         with pytest.raises(RuntimeError, match="cold ranking failed"):
             leader_future.result(timeout=10)
@@ -351,21 +396,23 @@ def test_a_failed_cold_compute_propagates_to_the_waiter_without_a_serial_retry()
     assert memo.cached_seq("nb") is None
 
 
-def test_all_concurrent_followers_inherit_the_leaders_error_without_serial_recompute():
-    """P2-4 加用例:N 个并发 follower 全部要快速拿到同一型异常。变异锚点——把
+def test_all_concurrent_followers_inherit_the_leaders_error_without_serial_recompute(
+    monkeypatch,
+):
+    """P2-4 加用例:N 个并发 follower 全部要拿到同一型异常。变异锚点——把
     follower 分支从「继承异常」改回旧的「continue 重试」——会让 ``calls`` 从 1
-    涨回 N,墙钟也跟着从 1 倍冷算耗时涨到 N 倍(串行重跑同一次必败的冷算)。"""
+    涨回 N(串行重跑同一次必败的冷算)。5 个 follower 都确认已在等之后才放行
+    leader,所以 ``calls == 1`` 就足以抓住这个变异,不再靠墙钟比较。"""
+    waiting = _install_waiter_handshake(monkeypatch)
     memo = ReviewQueueMemo()
     calls = {"n": 0}
     entered = threading.Event()
     release = threading.Event()
-    compute_seconds = 0.05
 
     def compute() -> tuple:
         calls["n"] += 1
         entered.set()
         assert release.wait(10)
-        time.sleep(compute_seconds)
         raise RuntimeError("cold ranking failed")
 
     def call() -> tuple:
@@ -375,17 +422,13 @@ def test_all_concurrent_followers_inherit_the_leaders_error_without_serial_recom
         leader_future = pool.submit(call)
         assert entered.wait(10)
         follower_futures = [pool.submit(call) for _ in range(5)]
+        assert waiting.wait_for(5), "not every follower joined the single-flight"
         release.set()
-        started = time.monotonic()
         for future in [leader_future, *follower_futures]:
             with pytest.raises(RuntimeError, match="cold ranking failed"):
                 future.result(timeout=10)
-        elapsed = time.monotonic() - started
 
     assert calls["n"] == 1, "only the leader may run the cold ranking"
-    assert elapsed < compute_seconds * 5, (
-        "followers must not serially re-run the failing cold path"
-    )
 
     # 失败后新请求仍从头当 leader(不做负缓存):同一个 seq,一个全新的、
     # 会成功的 compute 必须真的被调用并生效,不被上一次的失败钉死。

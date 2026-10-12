@@ -771,27 +771,52 @@ def test_state_change_bursts_are_coalesced_to_minimum_interval(tmp_path, monkeyp
     runtime = _runtime(tmp_path, interval_seconds=0.02)
     original_replace = diagnostics.os.replace
     replacements: list[float] = []
+    replaced = threading.Condition()
 
     def record_replace(source, destination, *args, **kwargs):
-        replacements.append(time.monotonic())
-        return original_replace(source, destination, *args, **kwargs)
+        # ``os.replace`` is patched process-wide; other modules (event
+        # logging, analysis artifacts) call it too.  Only this runtime's own
+        # snapshot publication — on its writer thread, into its directory
+        # fd — is a sample of the property under test.
+        own_write = (
+            threading.current_thread() is runtime._thread
+            and destination == "runtime.json"
+            and kwargs.get("dst_dir_fd") == runtime._directory_fd
+        )
+        result = original_replace(source, destination, *args, **kwargs)
+        if own_write:
+            with replaced:
+                replacements.append(time.monotonic())
+                replaced.notify_all()
+        return result
 
     monkeypatch.setattr(diagnostics.os, "replace", record_replace)
     runtime.start()
     try:
         _wait_for_json(tmp_path / "runtime.json")
+        with replaced:
+            before_burst = len(replacements)
         with diagnostics.install_runtime(runtime):
             for index in range(100):
                 with diagnostics.request_scope(
                     f"req-{index}", "GET", "/api/health"
                 ):
                     pass
-        deadline = time.monotonic() + 0.2
-        while len(replacements) < 3 and time.monotonic() < deadline:
-            time.sleep(0.01)
-        gaps = [later - earlier for earlier, later in zip(replacements, replacements[1:])]
+        # Wait on the count itself; the timeout is only a failure backstop,
+        # not part of the property (a slow machine just waits longer).
+        with replaced:
+            assert replaced.wait_for(
+                lambda: len(replacements) >= before_burst + 3, timeout=10.0
+            ), replacements
+            samples = list(replacements)
+        # Every gap is kept, the one from the last write before the burst to
+        # the first write after it included: the writer only re-arms
+        # ``next_write`` after a write completes, so consecutive publications
+        # are always at least one interval (0.02s) apart.  A writer that
+        # writes on every wake shows a gap far below that bound.
+        gaps = [later - earlier for earlier, later in zip(samples, samples[1:])]
         assert gaps
-        assert min(gaps) >= 0.015
+        assert min(gaps) >= 0.015, gaps
     finally:
         runtime.stop()
 
