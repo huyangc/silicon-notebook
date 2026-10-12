@@ -1,0 +1,1280 @@
+"""``ReasoningRetriever.run``: the reflect loop and its close, scenario by scenario.
+
+Each scenario drives one real run (real SQLite repository and ports, a scripted
+model whose reflect payloads pass the production shape gate) through a
+deliberate path of the loop. Two layers of assertions sit on every scenario:
+
+1. **Behaviour assertions** (``Scenario.expect``) — the user/model-visible facts
+   the scenario exists for: which skip reason a branch reports, which budget it
+   spends, what the next reflect turn is told, what the run returns or raises.
+   These are ordinary behaviour tests and stay after the loop's restructuring.
+
+2. **Split oracle** (``test_reflect_loop_observation_is_unchanged``) — the full
+   observation of the run as recorded by ``tests.reasoning_loop_probe``: trace
+   (with complete ``detail``), every model call's message bytes (hash + size) and
+   each reflect turn's ``candidates_summary`` verbatim, every port call and
+   every SQLite statement (ordered on the run's own thread, as a set for the
+   first round's pool workers — see ``reasoning_loop_probe.Probe.split``), the
+   returned ``ReasoningResult`` (or the exception), and the ``on_step`` stream. It is the byte-identity proof the ``run`` split (debt plan
+   S1, three PRs) is checked against step by step, and it is retired together
+   with the snapshots once that split lands — the behaviour layer above is what
+   remains, so no refactor-only snapshot outlives the refactor it served.
+
+The snapshots live in ``fixtures/reasoning_loop_characterization/<name>.json``.
+Re-record only on the revision you intend as the baseline::
+
+    REGEN_REASONING_LOOP_CHARACTERIZATION=1 PYTHONPATH=backend \\
+        python -m pytest backend/tests/test_reasoning_loop_characterization.py -n0
+
+Wall clock: no recorded value depends on it (``duration_ms`` is not
+projected). The loop's only clock-driven branches — the chunk-rerank deadline
+and the plugin action timeout — are not covered here.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import threading
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
+import pytest
+
+from app.core.ask_retrieval_policy import ask_retrieval_limits
+from app.core.config import Settings
+from app.domain.retrieval_control import RetrievalControlError
+from app.domain.reflect_action import (
+    ReflectActionDescriptor,
+    ReflectActionItem,
+    ReflectActionOutcome,
+    ReflectActionParameter,
+    ReflectActionSpec,
+)
+from app.models.schemas import NotebookCreate
+from app.services.model_registry import WORKLOADS
+from app.services.reasoning_retrieval import ReasoningRetriever, ReflectDecision
+from app.services.retrieval_experience_projection import (
+    current_situation,
+    experience_id,
+)
+from app.services.sqlite_repository import SQLiteRepository
+from tests import reasoning_loop_probe as rig
+from tests.model_testkit import bind_all_embedding_clients, bind_chat_client
+
+SNAPSHOT_DIR = (
+    Path(__file__).resolve().parent / "fixtures" / "reasoning_loop_characterization"
+)
+REGEN_ENV = "REGEN_REASONING_LOOP_CHARACTERIZATION"
+NOW = "2026-10-12T00:00:00+08:00"
+OWNER = "u-owner"
+QUESTION = "版图设计要点有哪些"
+
+INTENT_DETAIL = {
+    "resolved_question": QUESTION,
+    "result_scope": "ranked",
+    "completeness_required": False,
+    "retrieval_effort": "deep",
+    "entities": ["版图"],
+    "constraints": ["先进工艺"],
+    "excluded_topics": ["封装"],
+    "assumptions": [],
+    "expected_output": "要点清单",
+    "mandatory_topics": ["版图设计要点"],
+}
+
+ANSWER = {"next_action": "answer", "sufficient": True, "reason": "证据够了"}
+
+
+# --------------------------------------------------------------- scripting
+
+
+def act(action: str, **fields) -> dict:
+    payload = {"next_action": action, "reason": f"选 {action}"}
+    payload.update(fields)
+    return payload
+
+
+def sub(query: str, **fields) -> dict:
+    request = {"query": query, "types": [], "prefer": "balanced", "reason": "补查"}
+    request.update(fields)
+    return act("add_subquery", new_sub_query=request)
+
+
+def chain(start: str, edge_type: str = "derived_from", direction: str = "out"):
+    return act("follow_chain", follow_chain={
+        "start_object_id": start, "edge_type": edge_type,
+        "direction": direction})
+
+
+def outline(*sections, sufficient: bool = False, action: str = "update_outline"):
+    payload = act(action, outline={"sections": list(sections)})
+    if sufficient:
+        payload["sufficient"] = True
+    return payload
+
+
+@dataclass
+class RawDecision:
+    """A decision the parser could never produce (unknown or gated-off
+    action): handed to the loop directly, without a model call."""
+
+    next_action: str
+
+
+@dataclass
+class Effect:
+    """Run ``apply(context)`` when the model is asked, then answer ``then``."""
+
+    apply: Callable[[dict], None]
+    then: Any
+
+
+def _resolve(item, context, prompt):
+    if isinstance(item, Effect):
+        item.apply(context)
+        return _resolve(item.then, context, prompt)
+    if callable(item):
+        return _resolve(item(context, prompt), context, prompt)
+    if isinstance(item, str) and item.startswith("@id:"):
+        return context["ids"][item[4:]]
+    if isinstance(item, dict):
+        return {key: _resolve(value, context, prompt) for key, value in item.items()}
+    if isinstance(item, list):
+        return [_resolve(value, context, prompt) for value in item]
+    return item
+
+
+_SHOWN_ID = re.compile(r"\(id=(ko-[0-9a-f]+|chunk-\d+|el-\d+)\)")
+
+
+def shown_ids(prompt: str) -> List[str]:
+    """Candidate ids in the order this reflect prompt shows them."""
+    seen: List[str] = []
+    for key in _SHOWN_ID.findall(prompt):
+        if key not in seen:
+            seen.append(key)
+    return seen
+
+
+def section_with_shown(section_id, title, start, stop, **extra):
+    """An outline section bound to the ``start:stop`` slice of shown ids."""
+
+    def build(context, prompt):
+        section = {"id": section_id, "title": title,
+                   "evidence": shown_ids(prompt)[start:stop]}
+        section.update(extra)
+        return section
+
+    return build
+
+
+class _Script(rig.ChatScript):
+    def answer(self, workload, messages, schema_hint):
+        if "next_action" in schema_hint and self.reflects:
+            prompt = messages[-1]["content"]
+            self.reflects[0] = _resolve(self.reflects[0], self.context, prompt)
+        return super().answer(workload, messages, schema_hint)
+
+
+# ----------------------------------------------------------- the notebook
+
+
+def _source(db, notebook_id, source_id, title):
+    db.execute(
+        "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+        "parse_status,summary,created_at,updated_at) "
+        "VALUES (?,?,?,'markdown','extracted','extracted','',?,?)",
+        (source_id, notebook_id, title, NOW, NOW))
+
+
+def _node(local_id, name, object_type="concept"):
+    return {"local_id": local_id, "object_type": object_type,
+            "payload": {"name": name, "section_path": "1"}, "evidence": []}
+
+
+def _edge(src, tgt, edge_type, quote=None):
+    return {"source_local_id": src, "target_local_id": tgt,
+            "edge_type": edge_type,
+            "evidence": [{"quote": quote}] if quote else []}
+
+
+_PASSAGES = (
+    ("set_db", "set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。"),
+    ("report_timing", "report_timing 输出关键路径的时序报告,用于版图设计签核。"),
+    ("get_db", "get_db 读取版图数据库对象的属性值。"),
+    ("read_lef", "read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。"),
+    ("overview", "版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。"),
+)
+HUB_RULES = tuple(f"规则{index:02d}" for index in range(1, 31))
+
+
+def _seed_graph(repo) -> tuple:
+    """One notebook, three sources: a small concept graph (one weakly and one
+    strongly supported edge), a two-hop ``derived_from`` chain, a 30-spoke hub
+    (neighbor truncation, >6 weak edges), and five identifier-named passages
+    (exact lookup) with their elements."""
+    lifecycle = repo._runtime.knowledge_lifecycle
+    notebook = repo._runtime.catalog.create_notebook(NotebookCreate(name="版图"))
+    nb = notebook.id
+    with repo._write() as db:
+        _source(db, nb, "src-1", "版图手册")
+        _source(db, nb, "src-2", "工艺说明")
+        _source(db, nb, "src-3", "签核指南")
+        for index, (name, text) in enumerate(_PASSAGES):
+            chunk_id, element_id = f"chunk-{index}", f"el-{index}"
+            section = f"命令 > {name}"
+            db.execute(
+                "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,"
+                "element_ids,created_at) VALUES (?,?,?,?,?,?,?)",
+                (chunk_id, nb, "src-1", text, section,
+                 json.dumps([element_id]), NOW))
+            db.execute(
+                "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
+                (chunk_id, nb, text))
+            db.execute(
+                "INSERT INTO source_elements (id,source_id,element_type,"
+                "location_label,text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+                (element_id, "src-1", "paragraph", section, text,
+                 json.dumps({"section_path": section}), NOW))
+    nodes = [
+        _node("A", "版图设计"), _node("B", "寄生电容"), _node("C", "工艺角"),
+        _node("P", "前提甲", "claim"), _node("Q", "桥接乙", "claim"),
+        _node("R", "结论丙", "claim"), _node("H", "版图规则"),
+    ] + [_node(f"H{index}", name) for index, name in enumerate(HUB_RULES)]
+    edges = [
+        _edge("A", "B", "kind_of"), _edge("A", "C", "part_of"),
+        _edge("P", "Q", "derived_from", "前提甲直接推出桥接乙"),
+        _edge("Q", "R", "derived_from", "桥接乙直接推出结论丙"),
+        _edge("A", "H", "depends_on"),
+    ] + [_edge("H", f"H{index}", "part_of") for index in range(len(HUB_RULES))]
+    lifecycle.store_kg(nb, "src-1", nodes, edges)
+    for source_id in ("src-2", "src-3"):
+        lifecycle.store_kg(nb, source_id, [_node("A", "版图设计"), _node("C", "工艺角")],
+                           [_edge("A", "C", "part_of")])
+    lifecycle.rebuild_unified_kg(nb)
+    repo.collection_catalog.invalidate()
+    ids: Dict[str, str] = {}
+    with repo._connect() as db:
+        for row in db.execute(
+            "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? "
+            "AND source_id='src-1' ORDER BY id", (nb,)
+        ):
+            ids.setdefault(json.loads(row["payload"]).get("name"), row["id"])
+    return nb, ids
+
+
+def _seed_empty(repo) -> tuple:
+    notebook = repo._runtime.catalog.create_notebook(NotebookCreate(name="空库"))
+    return notebook.id, {}
+
+
+def _situation(effort: str) -> dict:
+    return current_situation(INTENT_DETAIL, mode="reasoning", retrieval_effort=effort)
+
+
+def _seed_experiences(repo, effort: str, entries) -> None:
+    store = repo._runtime.retrieval_experiences
+    situation = _situation(effort)
+    for action, polarity, rationale, support in entries:
+        store.upsert_experience(
+            experience_id(situation, action, ""),
+            situation=situation, action=action, polarity=polarity,
+            rationale=rationale,
+            provenance=[f"run-{action}-{index}" for index in range(support)],
+            provenance_max=60, replace_conclusion=True, notebook_id="")
+
+
+def _seed_profile(repo, notebook_id, blocks) -> None:
+    for owner, label, value in blocks:
+        repo._runtime.agent_profile.write_block(
+            notebook_id, owner, label, value=value, evidence=[],
+            expected_revision=0, origin="job", actor="")
+
+
+# ------------------------------------------------------------ the plugin
+
+PLUGIN_SPEC = ReflectActionSpec("acme.search", "acme_index", ReflectActionDescriptor(
+    name="search_papers",
+    description="Search an external paper index and return matching abstracts.",
+    source_label="外部论文库",
+    parameters=(
+        ReflectActionParameter(name="query", description="what to look for",
+                               kind="text", required=True),
+    ),
+    max_calls_per_run=2,
+))
+
+
+class _PluginHost:
+    """Fixed topology, one scripted outcome; reports the deterministic half
+    of every call (the deadline is wall-clock and left out)."""
+
+    def __init__(self):
+        self.outcomes = [ReflectActionOutcome((
+            ReflectActionItem("外部论文 1", "外部摘录:先进工艺版图寄生提取",
+                              "https://example.org/p1", "§1"),
+        ), "", "", False)]
+
+    def specs(self, deadline_monotonic, *, cancellation=None, event_sink=None):
+        probe = rig.current_probe()
+        if probe is not None:
+            probe.note_port("plugin.specs")
+        return (PLUGIN_SPEC,)
+
+    def invoke(self, spec, call):
+        probe = rig.current_probe()
+        if probe is not None:
+            probe.note_port("plugin.invoke " + json.dumps(
+                {"action": spec.descriptor.name, "question": call.question,
+                 "arguments": dict(call.arguments)}, ensure_ascii=False, sort_keys=True))
+        return self.outcomes.pop(0) if self.outcomes else ReflectActionOutcome()
+
+
+# -------------------------------------------------------------- scenarios
+
+
+@dataclass
+class Scenario:
+    name: str
+    reflects: List[Any]
+    expect: Callable[["Observed"], None]
+    question: str = QUESTION
+    entry: str = "run"                   # run | report | ask | knowhow
+    effort: Optional[str] = "standard"
+    max_steps: Optional[int] = None
+    top_n: Optional[int] = None
+    intent_queries: tuple = ()
+    intent_detail: Optional[dict] = None
+    plan_queries: tuple = ("版图设计",)
+    settings: dict = field(default_factory=dict)
+    retrieval_overrides: Optional[Callable[[dict], dict]] = None
+    experience_overrides: Optional[Callable[[dict], dict]] = None
+    notebook: str = "graph"
+    memory: bool = False                 # wire experiences + profile (run entry)
+    experiences: tuple = ()
+    profile: tuple = ()
+    scope_sources: Optional[tuple] = None
+    allow: dict = field(default_factory=dict)
+
+
+class Observed:
+    """The recorded run plus helpers the behaviour assertions read."""
+
+    def __init__(self, data: dict):
+        self.data = data
+        self.trace = data["trace"]
+        self.reflect_inputs = data["reflect_inputs"]
+
+    def steps(self, step_type=None):
+        return [s for s in self.trace if step_type is None or s["step_type"] == step_type]
+
+    def reasons(self):
+        return [s["detail"].get("reason") for s in self.trace if s["step_type"] == "skip"]
+
+    def reflect_details(self):
+        return [s["detail"] for s in self.steps("reflect")]
+
+    def summaries(self):
+        return [entry["candidates_summary"] for entry in self.reflect_inputs]
+
+    def port_calls(self, prefix):
+        ports = self.data["ports"]
+        return [label for label in ports["main_thread"] + ports["worker_threads"]
+                if label.startswith(prefix)]
+
+    def port_count(self, prefix):
+        """Calls on the run's own thread (the loop never fans out)."""
+        return sum(1 for label in self.data["ports"]["main_thread"]
+                   if label.startswith(prefix))
+
+    @property
+    def result(self):
+        return self.data["result"]
+
+    @property
+    def raised(self):
+        return self.data["outcome"].get("raised")
+
+
+def _make_repo(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'loop.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("EMBED_DIM", "16")
+    for key in ("OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
+                "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL",
+                "REASONING_LLM_MODEL"):
+        monkeypatch.setenv(key, "")
+    repo = SQLiteRepository(Settings())
+    bind_all_embedding_clients(repo, rig.CountingEmbedder(dim=16))
+    return repo
+
+
+def _clear_process_caches():
+    from app.repositories.sqlite import knowledge_counts_cache
+    from app.services import reasoning_retrieval
+
+    with reasoning_retrieval._EXPERIENCE_CACHE_LOCK:
+        reasoning_retrieval._EXPERIENCE_CACHE.clear()
+    # every memo in the module (``_MEMO`` and its three siblings): scenarios
+    # share one deterministic notebook id, so a warm entry from the previous
+    # scenario would otherwise decide whether this one issues the query.
+    knowledge_counts_cache.invalidate()
+
+
+def _bind_models(repo, script):
+    for workload_id, workload in WORKLOADS.items():
+        if workload.kind == "chat":
+            bind_chat_client(repo, workload_id, rig.ScriptedChat(workload_id, script))
+
+
+def _install_raw_decisions(retriever, script):
+    inner = retriever.reflect
+
+    def reflect(question, candidates_summary, *args, **kwargs):
+        if script.reflects and isinstance(script.reflects[0], RawDecision):
+            raw = script.reflects.pop(0)
+            return ReflectDecision(next_action=raw.next_action, reason="raw")
+        return inner(question, candidates_summary, *args, **kwargs)
+
+    retriever.reflect = reflect
+
+
+def _build_retriever(scenario, repo, cancel_event):
+    if scenario.entry == "ask":
+        retriever = repo._runtime.ask_component._build_reasoning_retriever(
+            cancel_event=cancel_event, user_id=OWNER,
+            egress_question=scenario.question)
+        retriever.reflect_action_host = _PluginHost()
+        return retriever
+    if scenario.entry == "report":
+        retrieval = repo.retrieval
+        return ReasoningRetriever(
+            retrieval=retrieval, model_clients=repo,
+            communities=retrieval.community_queries(),
+            settings=repo.settings, cancel_event=cancel_event,
+            agent_profile=repo._runtime.agent_profile, profile_owner_id=OWNER,
+            retrieval_experiences=repo._runtime.retrieval_experiences)
+    if scenario.entry == "knowhow":
+        retriever = ReasoningRetriever.from_repository(
+            repo, repo.settings, cancel_event, fail_closed=True)
+        retriever.allow_community_expansion = False
+        retriever.allow_ppr = False
+        retriever.allow_exact_lookup = False
+        retriever.allow_enumeration = False
+        retriever.allow_consult_memory = False
+        retriever.allow_search_chunks = False
+        retriever.allow_document_read = False
+        retriever.untrusted_evidence = True
+        return retriever
+    retriever = ReasoningRetriever.from_repository(repo, repo.settings, cancel_event)
+    if scenario.memory:
+        retriever.retrieval_experiences = repo._runtime.retrieval_experiences
+        retriever.agent_profile = repo._runtime.agent_profile
+        retriever.profile_owner_id = OWNER
+    return retriever
+
+
+def _invoke(scenario, repo, retriever, nb, on_step, cancel_event):
+    limits = ask_retrieval_limits(scenario.effort) if scenario.effort else None
+    if scenario.entry == "ask":
+        return _invoke_stage(scenario, repo, retriever, nb, on_step, cancel_event, limits)
+    if scenario.entry == "knowhow":
+        return retriever.run(nb, scenario.question, top_n=12, max_steps=6)
+    if scenario.entry == "report":
+        return retriever.run(
+            nb, scenario.question, on_step=on_step, max_steps=scenario.max_steps,
+            limits=limits,
+            intent_queries=([scenario.question, *scenario.intent_queries]
+                            if scenario.intent_queries else None),
+            intent_detail=scenario.intent_detail)
+    return retriever.run(
+        nb, scenario.question, "", on_step=on_step, top_n=scenario.top_n,
+        max_steps=scenario.max_steps,
+        intent_queries=list(scenario.intent_queries) or None,
+        limits=limits, intent_detail=scenario.intent_detail)
+
+
+def _invoke_stage(scenario, repo, retriever, nb, on_step, cancel_event, limits):
+    from app.application.ask_reasoning import (
+        ReasoningIntentProjection,
+        ReasoningRetrievalRuntime,
+        ReasoningRunInput,
+    )
+    from app.services.retrieval_run import retrieval_run
+
+    detail = scenario.intent_detail
+    stage = ReasoningRunInput(
+        notebook_id=nb, question=scenario.question, history="",
+        top_n=None, max_steps=None,
+        intent_queries=tuple(scenario.intent_queries), limits=limits,
+        intent=ReasoningIntentProjection(
+            resolved_question=detail["resolved_question"],
+            result_scope=detail["result_scope"],
+            completeness_required=detail["completeness_required"],
+            retrieval_effort=scenario.effort,
+            entities=tuple(detail["entities"]),
+            constraints=tuple(detail["constraints"]),
+            excluded_topics=tuple(detail["excluded_topics"]),
+            assumptions=tuple(detail["assumptions"]),
+            expected_output=detail["expected_output"],
+            mandatory_topics=tuple(detail["mandatory_topics"]),
+        ),
+    )
+    captured = {}
+    inner_run = retriever.run
+
+    def run(*args, **kwargs):
+        captured["result"] = inner_run(*args, **kwargs)
+        return captured["result"]
+
+    retriever.run = run
+    with retrieval_run(run_kind="ask_reasoning", actor_id=OWNER,
+                       cancel_event=cancel_event) as active:
+        runtime = ReasoningRetrievalRuntime(
+            scope=None, retrieval_run=active, cancellation=cancel_event,
+            # the same connection-hold probe Ask hands the stage
+            trace_sink=on_step, connection_probe=repo._runtime.database)
+        retriever.run_stage(stage, runtime)
+    return captured["result"]
+
+
+def observe(scenario: Scenario, tmp_path, monkeypatch) -> dict:
+    from app.services.source_scope import source_scope_context
+
+    rig.install_sql_trace(monkeypatch)
+    _clear_process_caches()
+    with rig.deterministic_ids():
+        repo = _make_repo(tmp_path, monkeypatch)
+        for key, value in scenario.settings.items():
+            setattr(repo.settings, key, value)
+        seed = _seed_empty if scenario.notebook == "empty" else _seed_graph
+        nb, ids = seed(repo)
+        if scenario.experiences:
+            _seed_experiences(repo, scenario.effort, scenario.experiences)
+        if scenario.profile:
+            _seed_profile(repo, nb, scenario.profile)
+        _clear_process_caches()
+        cancel_event = threading.Event()
+        context = {"ids": ids, "notebook_id": nb, "cancel": cancel_event,
+                   "fault": False}
+        script = _Script(
+            plan={"sub_queries": [{"query": q} for q in scenario.plan_queries]},
+            reflects=list(scenario.reflects), context=context)
+        _bind_models(repo, script)
+        probe = rig.Probe()
+        streamed: List[Any] = []
+        retriever = _build_retriever(scenario, repo, cancel_event)
+        for name, value in scenario.allow.items():
+            setattr(retriever, name, value)
+        overrides = (scenario.retrieval_overrides(context)
+                     if scenario.retrieval_overrides else {})
+        retriever.retrieval = rig.PortProbe(retriever.retrieval, "retrieval", overrides)
+        if retriever.retrieval_experiences is not None:
+            retriever.retrieval_experiences = rig.PortProbe(
+                retriever.retrieval_experiences, "experiences",
+                scenario.experience_overrides(context)
+                if scenario.experience_overrides else {})
+        if retriever.agent_profile is not None:
+            retriever.agent_profile = rig.PortProbe(retriever.agent_profile, "profile")
+        rig.install_reflect_recorder(retriever, probe)
+        _install_raw_decisions(retriever, script)
+        outcome: Dict[str, Any] = {}
+        result = None
+        with rig.probing(probe):
+            probe.active = True
+            try:
+                if scenario.scope_sources:
+                    with source_scope_context(nb, {
+                        "mode": "include",
+                        "source_ids": list(scenario.scope_sources),
+                    }):
+                        result = _invoke(scenario, repo, retriever, nb,
+                                         streamed.append, cancel_event)
+                else:
+                    result = _invoke(scenario, repo, retriever, nb,
+                                     streamed.append, cancel_event)
+                outcome["returned"] = True
+            except Exception as exc:  # noqa: BLE001 — recorded as behaviour
+                outcome["raised"] = f"{type(exc).__name__}: {exc}"
+            finally:
+                probe.active = False
+        trace = result.trace if result is not None else streamed
+        observation = {
+            "outcome": outcome,
+            "trace": rig.trace_projection(trace),
+            "on_step_is_trace": (
+                scenario.entry == "knowhow"
+                or [id(s) for s in streamed] == [id(s) for s in trace]),
+            "reflect_inputs": probe.reflect_inputs,
+            "model_calls": probe.model_calls,
+            "ports": probe.split(probe.ports),
+            "embeddings": dict(sorted(probe.embeddings.items())),
+            "sql": probe.split(probe.sql),
+            "result": rig.result_projection(result) if result is not None else None,
+        }
+    return json.loads(json.dumps(observation, ensure_ascii=False))
+
+
+SCENARIOS: List[Scenario] = []
+
+
+def scenario(**kwargs):
+    def register(expect):
+        SCENARIOS.append(Scenario(expect=expect, **kwargs))
+        return expect
+    return register
+
+
+# --- Report path: depth above the tier's step cap ---------------------------
+
+@scenario(
+    name="report_depth_above_tier_cap",
+    entry="report", effort="overview", max_steps=8,
+    reflects=[sub(f"版图补充问题 {index}") for index in range(1, 9)],
+)
+def _expect_report_depth(obs):
+    # overview caps the loop at 4 steps even though the section asked for 8.
+    assert len(obs.steps("reflect")) == 4
+    assert obs.data["outcome"] == {"returned": True}
+    assert obs.data["on_step_is_trace"]
+
+
+# --- Ask path: run_stage with the production wiring -------------------------
+
+@scenario(
+    name="ask_stage_channels",
+    entry="ask", effort="deep", intent_detail=INTENT_DETAIL,
+    intent_queries=(QUESTION,),
+    reflects=[
+        act("enumerate_elements", enumerate={"collection": "sources"}),
+        act("read_document", read_document={"source": "版图手册"}),
+        act("search_chunks", chunks_query="版图 寄生电容"),
+        act("search_papers", search_papers={"query": "版图寄生提取"}),
+        act("ppr_retrieve", ppr_query="版图设计"),
+        act("expand_community", community_focal="@id:版图设计"),
+        ANSWER,
+    ],
+)
+def _expect_ask_stage(obs):
+    assert [s["detail"]["next_action"] for s in obs.steps("reflect")] == [
+        "enumerate_elements", "read_document", "search_chunks", "search_papers",
+        "ppr_retrieve", "expand_community"]
+    details = obs.reflect_details()
+    # the plugin turn brought only external material: stale held, not bumped
+    assert details[4]["stale"] == details[3]["stale"] > 0
+    assert obs.reasons()[-1] == "stale_circuit_breaker"
+    assert obs.steps("plugin_action")
+    assert obs.port_count("plugin.invoke") == 1
+    assert obs.result["external_evidence"]
+    assert obs.result["document_reads"]
+
+
+# --- Knowhow completion entry: limits=None, fail_closed, top_n=12 -----------
+
+@scenario(
+    name="knowhow_completion_entry",
+    entry="knowhow", effort=None,
+    plan_queries=("前提甲 结论丙",),
+    settings={"reasoning_per_query_limit": 30},
+    # a narrow first round, so the later sub-query has >20 new ids to report
+    retrieval_overrides=lambda ctx: {
+        "federated_retrieve": _narrow_for(ctx, "前提甲 结论丙", 3)},
+    reflects=[
+        chain("@id:前提甲"),
+        sub("规则"),
+        RawDecision("enumerate_elements"),
+        act("exact_lookup", exact_term="set_db"),
+        act("expand_community", community_focal="@id:版图设计"),
+        ANSWER,
+    ],
+)
+def _expect_knowhow_entry(obs):
+    assert obs.data["outcome"] == {"returned": True}
+    reasons = obs.reasons()
+    assert "exact_lookup_disabled" in reasons
+    assert "community_expansion_disabled" in reasons
+    assert "enumeration_disabled" in reasons
+    assert obs.steps("follow_chain")[0]["detail"]["count"] == 1
+    assert obs.steps("answer")[-1]["detail"]["top_n"] == 12
+    added = [s for s in obs.steps("retrieve") if s["summary"].startswith("补充子查询")]
+    assert added[0]["detail"]["result_ids_truncated"] is True
+    assert all(c["roles"][0] == "system" for c in obs.data["model_calls"]
+               if c["workload"] == "reasoning_agent")
+
+
+@scenario(
+    name="knowhow_follow_chain_raises",
+    entry="knowhow", effort=None, plan_queries=("前提甲 结论丙",),
+    retrieval_overrides=lambda ctx: {"follow_chain": _raise(RuntimeError("图读取失败"))},
+    reflects=[chain("@id:前提甲"), ANSWER],
+)
+def _expect_knowhow_raise(obs):
+    # fail_closed: the follow_chain failure escapes instead of failing open
+    assert obs.raised == "RuntimeError: 图读取失败"
+    assert obs.result is None
+    assert len(obs.reflect_inputs) == 1
+    assert obs.port_count("retrieval.follow_chain") == 1
+
+
+def _narrow_for(ctx, query, keep):
+    def factory(inner):
+        def federated(notebook_id, text, *args, **kwargs):
+            hits = inner(notebook_id, text, *args, **kwargs)
+            return hits[:keep] if text == query else hits
+        return federated
+    return ("wrap", factory)
+
+
+def _raise(exc):
+    def fail(*_args, **_kwargs):
+        raise exc
+    return fail
+
+
+# --- expand_graph -----------------------------------------------------------
+
+@scenario(
+    name="expand_graph_branches",
+    plan_queries=("版图规则",),
+    settings={"reasoning_neighbor_expand_limit": 25},
+    reflects=[
+        act("expand_graph", expand={"object_id": "@id:版图规则"}),
+        act("expand_graph", expand={"object_id": "@id:版图规则"}),
+        act("expand_graph", expand={"object_id": ""}),
+        act("expand_graph", expand={"object_id": "@id:版图设计"}),
+        RawDecision("teleport"),
+        ANSWER,
+    ],
+)
+def _expect_expand_graph(obs):
+    expands = obs.steps("expand")
+    assert expands[0]["detail"]["neighbor_truncated"] is True
+    assert expands[0]["detail"]["neighbor_limit"] == 25
+    assert expands[0]["detail"]["result_ids_truncated"] is True
+    assert len(expands[0]["detail"]["result_ids"]) == 20
+    assert obs.reasons().count("empty_or_visited") == 2
+    # the unknown action ends the loop: the scripted ANSWER is never asked for
+    assert obs.steps("reflect")[-1]["detail"]["next_action"] == "teleport"
+    assert "只展开了其中一部分邻居" in obs.summaries()[1]
+
+
+@scenario(
+    name="unsafe_scope_channels",
+    scope_sources=("src-1",),
+    settings={"reasoning_stale_limit": 50},
+    plan_queries=("前提甲 结论丙",),
+    reflects=[
+        act("expand_graph", expand={"object_id": "@id:版图设计"}),
+        chain("@id:前提甲"),
+        act("expand_community", community_focal="@id:版图设计"),
+        dict(act("search_elements", elements_query="版图"), sufficient=True),
+        ANSWER,
+    ],
+)
+def _expect_unsafe(obs):
+    assert obs.reasons().count("source_scope_unsafe_channel") == 3
+    # "sufficient" ends the loop without running the retrieval it named
+    assert obs.steps("reflect")[-1]["detail"]["sufficient"] is True
+    assert not [s for s in obs.steps("fallback") if s["summary"].startswith("降级查原文")]
+    assert obs.result["chains"] == []
+    assert not obs.port_calls("retrieval.retrieve_neighbors")
+    assert not obs.port_calls("retrieval.follow_chain")
+
+
+# --- add_subquery and confirmed directions ---------------------------------
+
+DIRECTIONS = ("寄生电容", "工艺角", "版图规则", "签核流程", "数据库命令", "层定义")
+
+
+@scenario(
+    name="add_subquery_directions",
+    effort="overview",
+    intent_queries=(QUESTION, *DIRECTIONS),
+    retrieval_overrides=lambda ctx: {
+        "federated_retrieve": _fail_for(ctx, "工艺角")},
+    reflects=[
+        lambda ctx, prompt: sub(_pending_label(prompt, 0)),
+        lambda ctx, prompt: sub(_pending_label(prompt, 0)),
+    ],
+)
+def _expect_directions(obs):
+    assert "因步骤预算不足尚未执行" in obs.summaries()[0]
+    disclosure = [s for s in obs.steps("skip")
+                  if s["detail"].get("reason") == "intent_coverage_incomplete"]
+    assert len(disclosure) == 1
+    assert any(row.get("failed") for row in obs.result["attempted"])
+
+
+def _pending_label(prompt, index):
+    match = re.search(r"尚未执行: (.+?)(?: 等|。)", prompt)
+    labels = re.findall(r"「([^」]+)」", match.group(1)) if match else []
+    return labels[index] if len(labels) > index else "未覆盖方向"
+
+
+def _fail_for(ctx, needle):
+    def factory(inner):
+        def federated(notebook_id, query, *args, **kwargs):
+            if needle in query:
+                raise RuntimeError("检索暂时失败")
+            return inner(notebook_id, query, *args, **kwargs)
+        return federated
+    return ("wrap", factory)
+
+
+@scenario(
+    name="add_subquery_skips",
+    settings={"reasoning_stale_limit": 50},
+    intent_queries=(QUESTION, "寄生电容\n(已确认问题:版图设计要点有哪些)"),
+    reflects=[
+        act("add_subquery"),
+        sub(QUESTION),
+        sub("寄生电容"),
+        sub("工艺角 与 版图"),
+        ANSWER,
+    ],
+)
+def _expect_subquery_skips(obs):
+    reasons = obs.reasons()
+    assert reasons.count("missing_new_sub_query") == 1
+    assert reasons.count("duplicate_subquery") == 2
+    assert [s for s in obs.steps("retrieve") if s["summary"].startswith("补充子查询")]
+
+
+# --- search_elements, first-round handoff, stale breaker --------------------
+
+@scenario(
+    name="empty_notebook_first_round",
+    notebook="empty",
+    settings={"reasoning_max_element_searches": 2, "reasoning_stale_limit": 4},
+    reflects=[
+        act("search_elements", elements_query="版图"),
+        act("search_elements", elements_query="版图"),
+        act("exact_lookup", exact_term="set_db"),
+        ANSWER,
+    ],
+)
+def _expect_empty(obs):
+    summaries = obs.summaries()
+    assert "首轮检索未命中任何证据" in summaries[0]
+    assert "上一步检索未带来新证据" in summaries[1]
+    # elements_searches inherited from the first-round fallback: 1 + 1 = cap
+    assert len(obs.steps("fallback")) == 2
+    assert obs.reasons()[:2] == ["kg_unavailable", "element_search_cap"]
+    assert obs.reflect_inputs[0]["kwargs"].get("kg_actions") is False
+    assert obs.reasons()[-1] == "stale_circuit_breaker"
+    assert len(obs.reflect_inputs) == 3
+
+
+@scenario(
+    name="search_elements_until_cap",
+    settings={"reasoning_max_element_searches": 2},
+    reflects=[
+        act("search_elements", elements_query="寄生电容"),
+        act("search_elements", elements_query="工艺角"),
+        act("search_elements", elements_query="版图"),
+        "[1]",
+        ANSWER,
+    ],
+)
+def _expect_elements(obs):
+    assert len(obs.steps("fallback")) == 2
+    assert obs.reasons().count("element_search_cap") == 1
+    # an unparseable turn falls back to answering, and says why
+    assert "fallback_reason" in obs.reflect_details()[-1]
+    assert len(obs.reflect_inputs) == 4
+
+
+# --- exact_lookup -----------------------------------------------------------
+
+@scenario(
+    name="exact_lookup_branches",
+    effort="deep",
+    settings={"graph_ppr_enabled": False, "reasoning_stale_limit": 50},
+    question="set_db 在版图设计里怎么用",
+    reflects=[
+        act("exact_lookup", exact_term="set_db"),
+        act("exact_lookup", exact_term="第 2.1 节"),
+        act("exact_lookup", exact_term=""),
+        act("exact_lookup", exact_term="report_timing"),
+        act("exact_lookup", exact_term="get_db"),
+        act("exact_lookup", exact_term="read_lef"),
+        act("exact_lookup", exact_term="foo_bar"),
+        act("exact_lookup", exact_term="第 2.1 节"),
+        act("answer"),
+        ANSWER,
+    ],
+)
+def _expect_exact(obs):
+    reasons = obs.reasons()
+    assert reasons.count("duplicate_exact_lookup") == 1
+    assert reasons.count("exact_term_not_identifier") == 2
+    assert reasons.count("missing_exact_term") == 1
+    assert reasons.count("exact_lookup_cap") == 1
+    agent = [s for s in obs.steps("exact_lookup") if s["detail"].get("phase") == "reflect"]
+    assert len(agent) == 3
+    # repeated invalid input bumps the ledger's tries instead of a new entry
+    assert "2.1" in obs.summaries()[-1]
+    assert obs.steps("reflect")[-1]["detail"]["sufficient"] is False
+    assert len(obs.reflect_inputs) == 9
+
+
+# --- follow_chain -----------------------------------------------------------
+
+@scenario(
+    name="follow_chain_branches",
+    effort="deep",
+    settings={"reasoning_stale_limit": 50},
+    plan_queries=("前提甲 结论丙", "桥接乙"),
+    retrieval_overrides=lambda ctx: {
+        "follow_chain": _fail_chain_for(ctx, "桥接乙")},
+    reflects=[
+        chain(""),
+        chain("ko-not-a-candidate"),
+        chain("@id:前提甲"),
+        chain("@id:前提甲"),
+        chain("@id:桥接乙"),
+        chain("@id:前提甲", direction="both"),
+        chain("@id:结论丙", direction="in"),
+        ANSWER,
+    ],
+)
+def _expect_follow_chain(obs):
+    reasons = obs.reasons()
+    for reason in ("missing_chain_start", "chain_start_not_candidate",
+                   "duplicate_follow_chain", "follow_chain_cap"):
+        assert reasons.count(reason) == 1, reason
+    chains = obs.steps("follow_chain")
+    assert chains[0]["detail"]["count"] == 1
+    # the raising call fails open: recorded as an empty two-hop step
+    assert chains[1]["detail"]["count"] == 0
+    assert len(obs.result["chains"]) == 1
+
+
+def _fail_chain_for(ctx, name):
+    def factory(inner):
+        def follow(notebook_id, start_object_id, *args, **kwargs):
+            if start_object_id == ctx["ids"][name]:
+                raise RuntimeError("图读取失败")
+            return inner(notebook_id, start_object_id, *args, **kwargs)
+        return follow
+    return ("wrap", factory)
+
+
+# --- outline ------------------------------------------------------------------
+
+@scenario(
+    name="outline_bind_kg_gap_and_nudge",
+    effort="exhaustive",
+    intent_queries=(QUESTION, "寄生电容", "工艺角"),
+    plan_queries=("版图设计", "版图规则"),
+    settings={"reasoning_max_outline_updates": 3, "reasoning_stale_limit": 50},
+    reflects=[
+        act("search_elements", elements_query="版图"),
+        lambda ctx, prompt: outline({"id": "s1", "title": "规则清单",
+                                     "evidence": [ctx["ids"]["版图规则"]]}),
+        act("search_elements", elements_query="工艺"),
+        lambda ctx, prompt: outline(
+            {"id": "s1", "title": "规则清单", "evidence": []},
+            {"id": "s2", "title": "版图要点",
+             "evidence": [ctx["ids"]["版图设计"]]}),
+        outline(),
+        outline({"id": "s1", "title": "规则清单"}, {"id": "s2", "title": "版图要点"}),
+        outline({"id": "s1", "title": "规则清单"}),
+        outline({"id": "s1", "title": "规则清单"}, sufficient=True),
+        ANSWER,
+    ],
+)
+def _expect_outline(obs):
+    details = obs.reflect_details()
+    assert details[0].get("outline_nudged") is True
+    assert "outline_nudged" not in details[-1]
+    gap = [s for s in obs.steps("outline") if "kg_gap_candidates" in s["detail"]]
+    # the second apply adds fresh weak edges on top of a still-pending batch
+    assert len(gap) == 2 and gap[0]["detail"]["kg_gap_candidates"] > 6
+    shown = [summary for summary in obs.summaries() if "库内支撑薄弱" in summary]
+    assert len(shown) >= 2 and shown[0] != shown[1]
+    assert "outline_empty" in obs.reasons()
+    assert obs.reasons().count("outline_budget") == 2
+    # a sufficient update_outline is applied first, then the loop ends
+    assert obs.steps("reflect")[-1]["detail"]["sufficient"] is True
+
+
+def _overflow_pair(sufficient_second: bool):
+    return [
+        lambda ctx, prompt: outline(section_with_shown("s1", "版图要点", 0, 8)(ctx, prompt)),
+        lambda ctx, prompt: outline(
+            section_with_shown("s1", "版图要点", 8, 9)(ctx, prompt),
+            {"id": "s2", "title": "规则", "evidence": [ctx["ids"]["版图规则"]]},
+            sufficient=sufficient_second),
+    ]
+
+
+@scenario(
+    name="outline_overflow_repair_accepted",
+    effort="exhaustive", plan_queries=("版图设计", "版图规则"),
+    reflects=_overflow_pair(True) + [
+        lambda ctx, prompt: outline(
+            section_with_shown("s1", "版图要点", 8, 9,
+                               remove_evidence=shown_ids(prompt)[:1])(ctx, prompt),
+            {"id": "s2", "title": "规则", "evidence": []}),
+        ANSWER,
+    ],
+)
+def _expect_repair_accepted(obs):
+    outlines = obs.steps("outline")
+    assert outlines[1]["detail"]["overflow_evidence"]
+    assert outlines[-1]["detail"]["overflow_repair"] is True
+    assert outlines[-1]["detail"]["overflow_evidence"] == {}
+    assert "outline_evidence_overflow_unresolved" not in obs.reasons()
+    # the repair round neither shows nor consumes the weak-support hints
+    assert "库内支撑薄弱" not in obs.summaries()[-1]
+
+
+@scenario(
+    name="outline_overflow_repair_declined_after_stale",
+    effort="exhaustive", plan_queries=("版图设计", "版图规则"),
+    reflects=_overflow_pair(False) + [
+        act("expand_graph", expand={"object_id": ""}),
+        act("expand_graph", expand={"object_id": ""}),
+        act("expand_graph", expand={"object_id": ""}),
+        act("search_elements", elements_query="版图"),
+        ANSWER,
+    ],
+)
+def _expect_repair_declined(obs):
+    reasons = obs.reasons()
+    assert "stale_circuit_breaker" in reasons
+    assert "outline_overflow_repair_declined" in reasons
+    assert reasons[-1] == "outline_evidence_overflow_unresolved"
+
+
+@scenario(
+    name="outline_overflow_repair_structure_change",
+    effort="exhaustive", plan_queries=("版图设计", "版图规则"),
+    retrieval_overrides=lambda ctx: {
+        "weak_support_relations": _raise(RetrievalControlError("参与集座位不可用"))},
+    reflects=_overflow_pair(True) + [
+        outline({"id": "s1", "title": "改过的标题"}),
+        ANSWER,
+    ],
+)
+def _expect_repair_structure(obs):
+    reasons = obs.reasons()
+    # the RetrievalControlError from the weak-support probe is swallowed
+    assert "kg_gap_unavailable" in reasons
+    assert obs.data["outcome"] == {"returned": True}
+    assert "outline_repair_structure" in reasons
+    assert reasons[-1] == "outline_evidence_overflow_unresolved"
+
+
+@scenario(
+    name="outline_cap_repair",
+    effort="exhaustive", plan_queries=("版图设计", "版图规则"),
+    settings={"reasoning_max_outline_updates": 2, "reasoning_stale_limit": 50},
+    reflects=_overflow_pair(False) + [
+        lambda ctx, prompt: outline(
+            section_with_shown("s1", "版图要点", 8, 9,
+                               remove_evidence=shown_ids(prompt)[:1])(ctx, prompt),
+            {"id": "s2", "title": "规则", "evidence": []}),
+        outline({"id": "s1", "title": "版图要点"}),
+        ANSWER,
+    ],
+)
+def _expect_cap_repair(obs):
+    outlines = obs.steps("outline")
+    assert outlines[-1]["detail"]["overflow_repair"] is True
+    assert "outline_budget" in obs.reasons()
+
+
+# --- consult_memory, zero-hit nudges, adoption -------------------------------
+
+
+
+def _long_rationale(channel: str) -> str:
+    """~150 characters: two such rows fill the consult block, a third cannot."""
+    return (f"这类库上{channel}通常拿不到新证据,建议先换用其他通道再回头确认;" * 4)[:150]
+
+
+@scenario(
+    name="consult_memory_flow",
+    effort="deep", memory=True, intent_detail=INTENT_DETAIL,
+    plan_queries=("版图设计", "前提甲"),
+    settings={"retrieval_experience_inject_enabled": True,
+              "reasoning_max_consult_memory": 3, "reasoning_stale_limit": 50},
+    experiences=(
+        ("expand", "good", "expand 在这类库上通常能找到相邻概念。", 20),
+        ("retrieve", "good", "retrieve 先用整题检索打底。", 19),
+        ("expand_community", "good", "expand_community 适合找同类实体。", 18),
+        ("exact_lookup", "bad", _long_rationale("按名称查找"), 6),
+        ("follow_chain", "bad", _long_rationale("两跳推导"), 5),
+        ("ppr", "bad", _long_rationale("概念漫游"), 4),
+        ("search_chunks", "bad", "原文检索在这里常空手。", 3),
+    ),
+    profile=(("", "corpus_shape", "这个库主要是版图与签核的中文手册。"),),
+    reflects=[
+        act("consult_memory"),
+        act("exact_lookup", exact_term="foo_bar"),
+        act("exact_lookup", exact_term="baz_qux"),
+        act("consult_memory"),
+        chain("@id:版图设计", edge_type="kind_of"),
+        chain("@id:版图设计", edge_type="part_of"),
+        act("search_chunks", chunks_query="不存在的词甲"),
+        act("search_chunks", chunks_query="不存在的词乙"),
+        act("consult_memory"),
+        act("consult_memory"),
+        act("expand_graph", expand={"object_id": "@id:版图设计"}),
+        ANSWER,
+    ],
+)
+def _expect_consult(obs):
+    reasons = obs.reasons()
+    consults = obs.steps("consult_memory")
+    assert [step["detail"]["entries"] for step in consults] == [2, 1]
+    assert reasons.count("consult_memory_block_full") == 1
+    assert reasons.count("consult_memory_cap") == 1
+    details = obs.reflect_details()
+    # a delivering consult turn leaves stale where it was; the next dry turn bumps it
+    assert details[1]["stale"] == details[0]["stale"]
+    assert details[2]["stale"] == details[1]["stale"] + 1
+    assert "[Recalled search tactics]" in obs.summaries()[1]
+    nudged = [s for s in obs.summaries() if "以往打法经验" in s]
+    assert len({s.split("以往打法经验")[0][-40:] for s in nudged}) >= 2
+    assert obs.port_calls("experiences.note_adopted")
+
+
+@scenario(
+    name="consult_memory_report_edges",
+    entry="report", effort="deep", max_steps=4, intent_detail=INTENT_DETAIL,
+    settings={"retrieval_experience_inject_enabled": True,
+              "reasoning_max_consult_memory": 5, "reasoning_stale_limit": 50},
+    experiences=(
+        ("expand", "good", "expand 在这类库上通常能找到相邻概念。", 20),
+        ("retrieve", "good", "retrieve 先用整题检索打底。", 19),
+    ),
+    experience_overrides=lambda ctx: {
+        "version_signal": _fault_switch(ctx, "version_signal")},
+    reflects=[
+        act("consult_memory"),
+        Effect(lambda ctx: ctx.update(fault=True), act("consult_memory")),
+        Effect(lambda ctx: ctx.update(fault=False),
+               act("search_elements", elements_query="版图")),
+        act("consult_memory"),
+    ],
+)
+def _expect_consult_edges(obs):
+    reasons = obs.reasons()
+    assert reasons[:2] == ["consult_memory_nothing_new", "consult_memory_unavailable"]
+    assert "consult_memory_last_turn" in reasons
+
+
+def _fault_switch(ctx, name):
+    def factory(inner):
+        def call(*args, **kwargs):
+            if ctx["fault"]:
+                raise RuntimeError("经验库读取失败")
+            return inner(*args, **kwargs)
+        return call
+    return ("wrap", factory)
+
+
+@scenario(
+    name="consult_memory_disabled_by_caller",
+    effort="deep", memory=True, intent_detail=INTENT_DETAIL,
+    settings={"retrieval_experience_inject_enabled": True},
+    experiences=(("ppr", "bad", "ppr 在这类库上很少有收获。", 3),),
+    allow={"allow_consult_memory": False},
+    reflects=[act("consult_memory"), ANSWER],
+)
+def _expect_consult_disabled(obs):
+    assert obs.reasons() == ["consult_memory_disabled"]
+
+
+# --- cancellation -----------------------------------------------------------
+
+@scenario(
+    name="cancelled_mid_loop",
+    reflects=[
+        sub("寄生电容"),
+        Effect(lambda ctx: ctx["cancel"].set(), sub("工艺角")),
+        ANSWER,
+    ],
+)
+def _expect_cancel(obs):
+    assert obs.raised.startswith("AskCancelled")
+    assert obs.result is None
+    assert obs.steps()[-1]["step_type"] == "retrieve"
+    assert len(obs.data["reflect_inputs"]) == 2
+
+
+SCENARIO_IDS = [item.name for item in SCENARIOS]
+
+#: Every skip reason the reflect loop itself can record, minus the ones only a
+#: wall clock or a peer-mode run reaches. The scenarios must reach all of them —
+#: a branch no scenario takes is a branch the split oracle cannot vouch for.
+LOOP_SKIP_REASONS = frozenset({
+    "source_scope_unsafe_channel", "empty_or_visited", "missing_new_sub_query",
+    "duplicate_subquery", "element_search_cap", "enumeration_disabled",
+    "consult_memory_disabled", "consult_memory_cap", "consult_memory_last_turn",
+    "consult_memory_nothing_new", "consult_memory_block_full",
+    "consult_memory_unavailable", "exact_lookup_disabled", "missing_exact_term",
+    "exact_term_not_identifier", "duplicate_exact_lookup", "exact_lookup_cap",
+    "missing_chain_start", "chain_start_not_candidate", "duplicate_follow_chain",
+    "follow_chain_cap", "community_expansion_disabled", "stale_circuit_breaker",
+    "outline_overflow_repair_declined", "outline_repair_structure",
+    "outline_budget", "outline_empty", "kg_gap_unavailable",
+    "outline_evidence_overflow_unresolved", "intent_coverage_incomplete",
+})
+
+
+# ------------------------------------------------------------------- tests
+
+
+def _snapshot_path(name: str) -> Path:
+    return SNAPSHOT_DIR / f"{name}.json"
+
+
+def _serialise(observed: dict) -> str:
+    return json.dumps(observed, ensure_ascii=False, indent=1, sort_keys=True) + "\n"
+
+
+@pytest.mark.parametrize("case", SCENARIOS, ids=SCENARIO_IDS)
+def test_reflect_loop_scenario(case, tmp_path, monkeypatch):
+    observed = observe(case, tmp_path, monkeypatch)
+    dump = os.environ.get("REASONING_LOOP_DUMP_DIR")
+    if dump:
+        Path(dump).mkdir(parents=True, exist_ok=True)
+        (Path(dump) / f"{case.name}.json").write_text(
+            _serialise(observed), encoding="utf-8")
+    case.expect(Observed(observed))
+    path = _snapshot_path(case.name)
+    if os.environ.get(REGEN_ENV) == "1":
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_serialise(observed), encoding="utf-8")
+    expected = json.loads(path.read_text(encoding="utf-8"))
+    assert observed == expected
+
+
+def test_split_oracle_reaches_every_loop_branch():
+    """The recorded scenarios are not vacuous: together they take every skip
+    branch of the loop, all four entry shapes, and the five step kinds that
+    only the loop's dispatch produces — and no snapshot is left without a
+    scenario (or the other way round)."""
+    on_disk = {path.stem for path in SNAPSHOT_DIR.glob("*.json")}
+    assert on_disk == set(SCENARIO_IDS)
+    reasons, kinds, raised = set(), set(), set()
+    for name in SCENARIO_IDS:
+        recorded = json.loads(_snapshot_path(name).read_text(encoding="utf-8"))
+        for step in recorded["trace"]:
+            kinds.add(step["step_type"])
+            if step["step_type"] == "skip":
+                reasons.add(step["detail"].get("reason"))
+        raised.add(recorded["outcome"].get("raised", "").split(":")[0])
+    assert LOOP_SKIP_REASONS <= reasons, sorted(LOOP_SKIP_REASONS - reasons)
+    assert {"expand", "follow_chain", "outline", "consult_memory",
+            "plugin_action", "enumerate", "read_document", "exact_lookup",
+            "expand_community"} <= kinds
+    assert {"AskCancelled", "RuntimeError"} <= raised
+    assert {case.entry for case in SCENARIOS} == {"run", "report", "ask", "knowhow"}

@@ -1,0 +1,1224 @@
+{
+ "embeddings": {
+  "embed_query": 6
+ },
+ "model_calls": [
+  {
+   "kwargs": {
+    "cancel_event": "<event>",
+    "max_retries": 1,
+    "max_tokens": 16384,
+    "timeout": 90
+   },
+   "messages_bytes": 3363,
+   "messages_sha256": "23118371c40a505d1ad0b35df5f392ab180154faa4af0fb72d6c66209dd81495",
+   "roles": [
+    "user"
+   ],
+   "schema_sha256": "e00e830959884edf14160d89ef4399f3efb307ff08c623aeadbe86c291e6e929",
+   "workload": "reasoning_agent"
+  },
+  {
+   "kwargs": {
+    "cancel_event": "<event>",
+    "max_retries": 1,
+    "max_tokens": 16384,
+    "timeout": 90
+   },
+   "messages_bytes": 13744,
+   "messages_sha256": "16719f4ad442b2b852458efe101c2c9ccc6edcfdc7244ee0fc9c932f24cede04",
+   "roles": [
+    "user"
+   ],
+   "schema_sha256": "347ef01c5d667a4688f1b745f27198e290483055a41e31d1a2cbcdeeba71fd33",
+   "workload": "reasoning_agent"
+  },
+  {
+   "kwargs": {
+    "cancel_event": "<event>",
+    "max_retries": 1,
+    "max_tokens": 16384,
+    "timeout": 90
+   },
+   "messages_bytes": 15054,
+   "messages_sha256": "c2b03180aa01f76627f18a0faa4b061b86b2be81a65cada6d55f85471b910c14",
+   "roles": [
+    "user"
+   ],
+   "schema_sha256": "347ef01c5d667a4688f1b745f27198e290483055a41e31d1a2cbcdeeba71fd33",
+   "workload": "reasoning_agent"
+  },
+  {
+   "kwargs": {
+    "cancel_event": "<event>",
+    "max_retries": 1,
+    "max_tokens": 16384,
+    "timeout": 90
+   },
+   "messages_bytes": 15481,
+   "messages_sha256": "21d7b3ddcbf17a717fc4acb45cbc9619cb00f3391243ab501ebeadd79442122e",
+   "roles": [
+    "user"
+   ],
+   "schema_sha256": "347ef01c5d667a4688f1b745f27198e290483055a41e31d1a2cbcdeeba71fd33",
+   "workload": "reasoning_agent"
+  },
+  {
+   "kwargs": {
+    "cancel_event": "<event>",
+    "max_retries": 1,
+    "max_tokens": 16384,
+    "timeout": 90
+   },
+   "messages_bytes": 14926,
+   "messages_sha256": "53b6a8c8b0a88dbb80e9a8a0a8887fe2b05b0c0ed9510e1cc23e57ae73140dd1",
+   "roles": [
+    "user"
+   ],
+   "schema_sha256": "347ef01c5d667a4688f1b745f27198e290483055a41e31d1a2cbcdeeba71fd33",
+   "workload": "reasoning_agent"
+  }
+ ],
+ "on_step_is_trace": true,
+ "outcome": {
+  "returned": true
+ },
+ "ports": {
+  "main_thread": [
+   "retrieval.has_kg {\"args\": [\"nb-00000000000000000000000000000001\"], \"kwargs\": {}}",
+   "retrieval.keyword_arm_available {\"args\": [], \"kwargs\": {}}",
+   "retrieval.keyword_corpus_languages {\"args\": [\"nb-00000000000000000000000000000001\"], \"kwargs\": {}}",
+   "retrieval.chunk_participant_count {\"args\": [\"nb-00000000000000000000000000000001\"], \"kwargs\": {}}",
+   "retrieval.keyword_arm_available {\"args\": [], \"kwargs\": {}}",
+   "retrieval.weak_support_relations {\"args\": [\"nb-00000000000000000000000000000001\", [\"ko-00000000000000000000000000000002\", \"ko-0000000000000000000000000000004a\", \"ko-0000000000000000000000000000004d\", \"ko-00000000000000000000000000000024\", \"ko-00000000000000000000000000000008\", \"ko-00000000000000000000000000000013\", \"ko-00000000000000000000000000000019\", \"ko-0000000000000000000000000000001c\"]], \"kwargs\": {}}",
+   "retrieval.keyword_arm_available {\"args\": [], \"kwargs\": {}}",
+   "retrieval.keyword_arm_available {\"args\": [], \"kwargs\": {}}",
+   "retrieval.keyword_arm_available {\"args\": [], \"kwargs\": {}}"
+  ],
+  "worker_threads": [
+   "retrieval.federated_retrieve {\"args\": [\"nb-00000000000000000000000000000001\", \"版图规则\"], \"kwargs\": {\"types\": [], \"w_keyword\": 0.4, \"w_semantic\": 0.6}}",
+   "retrieval.federated_retrieve {\"args\": [\"nb-00000000000000000000000000000001\", \"版图设计\"], \"kwargs\": {\"types\": [], \"w_keyword\": 0.4, \"w_semantic\": 0.6}}",
+   "retrieval.ppr_retrieve {\"args\": [\"nb-00000000000000000000000000000001\", \"版图设计要点有哪些\"], \"kwargs\": {}}",
+   "retrieval.retrieve_chunk_candidates {\"args\": [\"nb-00000000000000000000000000000001\", \"版图规则\"], \"kwargs\": {}}",
+   "retrieval.retrieve_chunk_candidates {\"args\": [\"nb-00000000000000000000000000000001\", \"版图设计\"], \"kwargs\": {}}",
+   "retrieval.select_chunk_candidates {\"args\": [[{\"chunk_id\": \"chunk-0\", \"element_ids\": [\"el-0\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"relevance\": 0.333333333, \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"score\": 0.333333333, \"support_id\": \"chunk-0\", \"support_kind\": \"chunk\"}], \"score\": 0.333333333, \"section_path\": \"命令 > set_db\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\"}, {\"chunk_id\": \"chunk-1\", \"element_ids\": [\"el-1\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"relevance\": 0.333333333, \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"score\": 0.333333333, \"support_id\": \"chunk-1\", \"support_kind\": \"chunk\"}], \"score\": 0.333333333, \"section_path\": \"命令 > report_timing\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"report_timing 输出关键路径的时序报告,用于版图设计签核。\"}, {\"chunk_id\": \"chunk-2\", \"element_ids\": [\"el-2\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"relevance\": 0.333333333, \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"score\": 0.333333333, \"support_id\": \"chunk-2\", \"support_kind\": \"chunk\"}], \"score\": 0.333333333, \"section_path\": \"命令 > get_db\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"get_db 读取版图数据库对象的属性值。\"}, {\"chunk_id\": \"chunk-3\", \"element_ids\": [\"el-3\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"relevance\": 0.333333333, \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"score\": 0.333333333, \"support_id\": \"chunk-3\", \"support_kind\": \"chunk\"}], \"score\": 0.333333333, \"section_path\": \"命令 > read_lef\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\"}, {\"chunk_id\": \"chunk-4\", \"element_ids\": [\"el-4\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"relevance\": 0.333333333, \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"score\": 0.333333333, \"support_id\": \"chunk-4\", \"support_kind\": \"chunk\"}], \"score\": 0.333333333, \"section_path\": \"命令 > overview\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\"}], [], \"<ndarray>\", 16, 0.5], \"kwargs\": {\"active_notebook_id\": \"nb-00000000000000000000000000000001\"}}",
+   "retrieval.select_chunk_candidates {\"args\": [[{\"chunk_id\": \"chunk-1\", \"element_ids\": [\"el-1\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"relevance\": 1.0, \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"score\": 1.0, \"support_id\": \"chunk-1\", \"support_kind\": \"chunk\"}], \"score\": 1.0, \"section_path\": \"命令 > report_timing\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"report_timing 输出关键路径的时序报告,用于版图设计签核。\"}, {\"chunk_id\": \"chunk-3\", \"element_ids\": [\"el-3\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"relevance\": 1.0, \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"score\": 1.0, \"support_id\": \"chunk-3\", \"support_kind\": \"chunk\"}], \"score\": 1.0, \"section_path\": \"命令 > read_lef\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。\"}, {\"chunk_id\": \"chunk-4\", \"element_ids\": [\"el-4\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"relevance\": 1.0, \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"score\": 1.0, \"support_id\": \"chunk-4\", \"support_kind\": \"chunk\"}], \"score\": 1.0, \"section_path\": \"命令 > overview\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。\"}, {\"chunk_id\": \"chunk-0\", \"element_ids\": [\"el-0\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"relevance\": 0.333333333, \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"score\": 0.333333333, \"support_id\": \"chunk-0\", \"support_kind\": \"chunk\"}], \"score\": 0.333333333, \"section_path\": \"命令 > set_db\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。\"}, {\"chunk_id\": \"chunk-2\", \"element_ids\": [\"el-2\"], \"exact_lookup\": false, \"notebook_id\": \"\", \"relevance\": 0.333333333, \"retrieval_supports\": [{\"origin\": \"lexical\", \"review_status_snapshot\": \"\", \"score\": 0.333333333, \"support_id\": \"chunk-2\", \"support_kind\": \"chunk\"}], \"score\": 0.333333333, \"section_path\": \"命令 > get_db\", \"source_id\": \"src-1\", \"source_title\": \"版图手册\", \"text\": \"get_db 读取版图数据库对象的属性值。\"}], [], \"<ndarray>\", 16, 0.5], \"kwargs\": {\"active_notebook_id\": \"nb-00000000000000000000000000000001\"}}"
+  ]
+ },
+ "reflect_inputs": [
+  {
+   "args": [],
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004a)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004d)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [concept] 规则09 (id=ko-00000000000000000000000000000011)\n- [concept] 规则08 (id=ko-00000000000000000000000000000010)\n- [concept] 规则01 (id=ko-00000000000000000000000000000009)\n- [concept] 规则03 (id=ko-0000000000000000000000000000000b)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [claim] 桥接乙 (id=ko-00000000000000000000000000000006)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则29 (id=ko-00000000000000000000000000000025)\n- [concept] 规则30 (id=ko-00000000000000000000000000000026)\n- [concept] 规则04 (id=ko-0000000000000000000000000000000c)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则10 (id=ko-00000000000000000000000000000012)\n- [concept] 规则24 (id=ko-00000000000000000000000000000020)\n- [concept] 规则02 (id=ko-0000000000000000000000000000000a)\n- [concept] 规则06 (id=ko-0000000000000000000000000000000e)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [concept] 规则07 (id=ko-0000000000000000000000000000000f)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。 (id=chunk-4)\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。 (id=chunk-1)\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。 (id=chunk-3)\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。 (id=chunk-0)\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。 (id=chunk-2)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增16条)、「版图规则」(新增12条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 38, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 600 rows",
+   "kwargs": {
+    "corpus_langs": [
+     "zh",
+     "en"
+    ],
+    "limits": {
+     "answer_element_items": 16,
+     "cell_excerpt_chars": 1000,
+     "chunk_context_chars": 120000,
+     "effort": "exhaustive",
+     "enum_page_size": 50,
+     "enum_pages_per_run": 12,
+     "enum_rows_per_run": 600,
+     "inline_answer_rows": 100,
+     "kg_context_chars": 16000,
+     "max_initial_subqueries": 10,
+     "max_reasoning_steps": 50,
+     "overflow_semantics": "explicit_partial",
+     "ranked_final_cap": 96,
+     "ranked_final_floor": 40,
+     "ranked_per_aspect": 6,
+     "ranked_per_query_take": 16,
+     "structured_max_columns": 8,
+     "structured_max_pages": 50,
+     "structured_max_rows": 1250,
+     "structured_max_tables": 8,
+     "structured_page_size": 25,
+     "structured_payload_chars": 256000
+    },
+    "outline": true
+   }
+  },
+  {
+   "args": [],
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004a)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004d)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [concept] 规则09 (id=ko-00000000000000000000000000000011)\n- [concept] 规则08 (id=ko-00000000000000000000000000000010)\n- [concept] 规则01 (id=ko-00000000000000000000000000000009)\n- [concept] 规则03 (id=ko-0000000000000000000000000000000b)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [claim] 桥接乙 (id=ko-00000000000000000000000000000006)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则29 (id=ko-00000000000000000000000000000025)\n- [concept] 规则30 (id=ko-00000000000000000000000000000026)\n- [concept] 规则04 (id=ko-0000000000000000000000000000000c)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则10 (id=ko-00000000000000000000000000000012)\n- [concept] 规则24 (id=ko-00000000000000000000000000000020)\n- [concept] 规则02 (id=ko-0000000000000000000000000000000a)\n- [concept] 规则06 (id=ko-0000000000000000000000000000000e)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [concept] 规则07 (id=ko-0000000000000000000000000000000f)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。 (id=chunk-4)\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。 (id=chunk-1)\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。 (id=chunk-3)\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。 (id=chunk-0)\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。 (id=chunk-2)\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增16条)、「版图规则」(新增12条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（本轮大纲便签。update_outline 会整体替换章节结构,再次提交时必须带上仍要保留的每一节;相同 id 节的 evidence 与旧绑定取并集,遗漏不会删除旧证据,要删除请在该节 remove_evidence 中点名;还可以再整理 5 次:\n- s1「版图要点」 证据: ko-00000000000000000000000000000002、ko-0000000000000000000000000000004a、ko-0000000000000000000000000000004d、ko-00000000000000000000000000000024、ko-00000000000000000000000000000008、ko-00000000000000000000000000000013、ko-00000000000000000000000000000019、ko-0000000000000000000000000000001c\n库内支撑薄弱的相关关系(每条仅 1-2 源支撑,与某节相关时可用 add_subquery/follow_chain 定向补证,不相关可忽略):\n- 版图规则 —part_of→ 规则01(支撑1)\n- 版图规则 —part_of→ 规则02(支撑1)\n- 版图规则 —part_of→ 规则03(支撑1)\n- 版图规则 —part_of→ 规则04(支撑1)\n- 版图规则 —part_of→ 规则05(支撑1)\n- 版图规则 —part_of→ 规则06(支撑1)）\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 38, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 600 rows",
+   "kwargs": {
+    "corpus_langs": [
+     "zh",
+     "en"
+    ],
+    "limits": {
+     "answer_element_items": 16,
+     "cell_excerpt_chars": 1000,
+     "chunk_context_chars": 120000,
+     "effort": "exhaustive",
+     "enum_page_size": 50,
+     "enum_pages_per_run": 12,
+     "enum_rows_per_run": 600,
+     "inline_answer_rows": 100,
+     "kg_context_chars": 16000,
+     "max_initial_subqueries": 10,
+     "max_reasoning_steps": 50,
+     "overflow_semantics": "explicit_partial",
+     "ranked_final_cap": 96,
+     "ranked_final_floor": 40,
+     "ranked_per_aspect": 6,
+     "ranked_per_query_take": 16,
+     "structured_max_columns": 8,
+     "structured_max_pages": 50,
+     "structured_max_rows": 1250,
+     "structured_max_tables": 8,
+     "structured_page_size": 25,
+     "structured_payload_chars": 256000
+    },
+    "outline": true
+   }
+  },
+  {
+   "args": [],
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004a)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004d)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [concept] 规则09 (id=ko-00000000000000000000000000000011)\n- [concept] 规则08 (id=ko-00000000000000000000000000000010)\n- [concept] 规则01 (id=ko-00000000000000000000000000000009)\n- [concept] 规则03 (id=ko-0000000000000000000000000000000b)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [claim] 桥接乙 (id=ko-00000000000000000000000000000006)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则29 (id=ko-00000000000000000000000000000025)\n- [concept] 规则30 (id=ko-00000000000000000000000000000026)\n- [concept] 规则04 (id=ko-0000000000000000000000000000000c)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则10 (id=ko-00000000000000000000000000000012)\n- [concept] 规则24 (id=ko-00000000000000000000000000000020)\n- [concept] 规则02 (id=ko-0000000000000000000000000000000a)\n- [concept] 规则06 (id=ko-0000000000000000000000000000000e)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [concept] 规则07 (id=ko-0000000000000000000000000000000f)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。 (id=chunk-4)\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。 (id=chunk-1)\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。 (id=chunk-3)\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。 (id=chunk-0)\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。 (id=chunk-2)\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增16条)、「版图规则」(新增12条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（本轮大纲便签。update_outline 会整体替换章节结构,再次提交时必须带上仍要保留的每一节;相同 id 节的 evidence 与旧绑定取并集,遗漏不会删除旧证据,要删除请在该节 remove_evidence 中点名;还可以再整理 4 次:\n- s1「版图要点」 证据: ko-00000000000000000000000000000002、ko-0000000000000000000000000000004a、ko-0000000000000000000000000000004d、ko-00000000000000000000000000000024、ko-00000000000000000000000000000008、ko-00000000000000000000000000000013、ko-00000000000000000000000000000019、ko-0000000000000000000000000000001c\n- s2「规则」 证据: ko-00000000000000000000000000000008\n当前因每节最多 8 条而未接纳的新证据(旧绑定已优先保留):\n- s1「版图要点」未接纳新证据: ko-00000000000000000000000000000022\n如要换入它们,下一次在该节 remove_evidence 中点名要移除的旧 key,并继续把要加入的 key 放在 evidence;如要明确放弃某个未接纳 key,也在 remove_evidence 中点名它。\n库内支撑薄弱的相关关系(每条仅 1-2 源支撑,与某节相关时可用 add_subquery/follow_chain 定向补证,不相关可忽略):\n- 版图规则 —part_of→ 规则07(支撑1)\n- 版图规则 —part_of→ 规则08(支撑1)\n- 版图规则 —part_of→ 规则09(支撑1)\n- 版图规则 —part_of→ 规则10(支撑1)\n- 版图规则 —part_of→ 规则11(支撑1)\n- 版图规则 —part_of→ 规则12(支撑1)）\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 38, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 600 rows",
+   "kwargs": {
+    "corpus_langs": [
+     "zh",
+     "en"
+    ],
+    "limits": {
+     "answer_element_items": 16,
+     "cell_excerpt_chars": 1000,
+     "chunk_context_chars": 120000,
+     "effort": "exhaustive",
+     "enum_page_size": 50,
+     "enum_pages_per_run": 12,
+     "enum_rows_per_run": 600,
+     "inline_answer_rows": 100,
+     "kg_context_chars": 16000,
+     "max_initial_subqueries": 10,
+     "max_reasoning_steps": 50,
+     "overflow_semantics": "explicit_partial",
+     "ranked_final_cap": 96,
+     "ranked_final_floor": 40,
+     "ranked_per_aspect": 6,
+     "ranked_per_query_take": 16,
+     "structured_max_columns": 8,
+     "structured_max_pages": 50,
+     "structured_max_rows": 1250,
+     "structured_max_tables": 8,
+     "structured_page_size": 25,
+     "structured_payload_chars": 256000
+    },
+    "outline": true
+   }
+  },
+  {
+   "args": [],
+   "candidates_summary": "- [concept] 版图设计 (id=ko-00000000000000000000000000000002)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004a)\n- [concept] 版图设计 (id=ko-0000000000000000000000000000004d)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [concept] 规则09 (id=ko-00000000000000000000000000000011)\n- [concept] 规则08 (id=ko-00000000000000000000000000000010)\n- [concept] 规则01 (id=ko-00000000000000000000000000000009)\n- [concept] 规则03 (id=ko-0000000000000000000000000000000b)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [claim] 桥接乙 (id=ko-00000000000000000000000000000006)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则29 (id=ko-00000000000000000000000000000025)\n- [concept] 规则30 (id=ko-00000000000000000000000000000026)\n- [concept] 规则04 (id=ko-0000000000000000000000000000000c)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则10 (id=ko-00000000000000000000000000000012)\n- [concept] 规则24 (id=ko-00000000000000000000000000000020)\n- [concept] 规则02 (id=ko-0000000000000000000000000000000a)\n- [concept] 规则06 (id=ko-0000000000000000000000000000000e)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [concept] 规则07 (id=ko-0000000000000000000000000000000f)\n- [chunk] 版图手册 · 命令 > overview: 版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。 (id=chunk-4)\n- [chunk] 版图手册 · 命令 > report_timing: report_timing 输出关键路径的时序报告,用于版图设计签核。 (id=chunk-1)\n- [chunk] 版图手册 · 命令 > read_lef: read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。 (id=chunk-3)\n- [chunk] 版图手册 · 命令 > set_db: set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。 (id=chunk-0)\n- [chunk] 版图手册 · 命令 > get_db: get_db 读取版图数据库对象的属性值。 (id=chunk-2)\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「版图设计」(新增16条)、「版图规则」(新增12条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（本轮大纲便签(这是终态溢出纠错轮,仅可提交一次章节 id/标题/parent 完全不变的 update_outline,不得改结构或执行检索):\n- s1「版图要点」 证据: ko-00000000000000000000000000000002、ko-0000000000000000000000000000004a、ko-0000000000000000000000000000004d、ko-00000000000000000000000000000024、ko-00000000000000000000000000000008、ko-00000000000000000000000000000013、ko-00000000000000000000000000000019、ko-0000000000000000000000000000001c\n- s2「规则」 证据: ko-00000000000000000000000000000008\n当前因每节最多 8 条而未接纳的新证据(旧绑定已优先保留):\n- s1「版图要点」未接纳新证据: ko-00000000000000000000000000000022\n本次纠错只能在该节 remove_evidence 中点名要移除的旧 key,并继续把要加入的 key 放在 evidence;如要明确放弃某个未接纳 key,也在 remove_evidence 中点名它。）\n\n[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 38, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3) | listing allowance left: 600 rows",
+   "kwargs": {
+    "corpus_langs": [
+     "zh",
+     "en"
+    ],
+    "limits": {
+     "answer_element_items": 16,
+     "cell_excerpt_chars": 1000,
+     "chunk_context_chars": 120000,
+     "effort": "exhaustive",
+     "enum_page_size": 50,
+     "enum_pages_per_run": 12,
+     "enum_rows_per_run": 600,
+     "inline_answer_rows": 100,
+     "kg_context_chars": 16000,
+     "max_initial_subqueries": 10,
+     "max_reasoning_steps": 50,
+     "overflow_semantics": "explicit_partial",
+     "ranked_final_cap": 96,
+     "ranked_final_floor": 40,
+     "ranked_per_aspect": 6,
+     "ranked_per_query_take": 16,
+     "structured_max_columns": 8,
+     "structured_max_pages": 50,
+     "structured_max_rows": 1250,
+     "structured_max_tables": 8,
+     "structured_page_size": 25,
+     "structured_payload_chars": 256000
+    },
+    "outline": true
+   }
+  }
+ ],
+ "result": {
+  "attempted": [
+   {
+    "new": 16,
+    "query": "版图设计",
+    "tries": 1
+   },
+   {
+    "new": 12,
+    "query": "版图规则",
+    "tries": 1
+   }
+  ],
+  "baseline_manifest": null,
+  "chains": [],
+  "chunks": [
+   {
+    "chunk_id": "chunk-4",
+    "element_ids": [
+     "el-4"
+    ],
+    "exact_lookup": false,
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "relevance": 1.0,
+    "retrieval_supports": [
+     {
+      "origin": "ppr",
+      "review_status_snapshot": "",
+      "score": 1.0,
+      "support_id": "",
+      "support_kind": "ppr"
+     },
+     {
+      "origin": "lexical",
+      "review_status_snapshot": "",
+      "score": 1.0,
+      "support_id": "chunk-4",
+      "support_kind": "chunk"
+     }
+    ],
+    "score": 0.0,
+    "section_path": "命令 > overview",
+    "source_id": "src-1",
+    "source_title": "版图手册",
+    "text": "版图设计要兼顾寄生电容与工艺角,常见做法是分层布线。"
+   },
+   {
+    "chunk_id": "chunk-1",
+    "element_ids": [
+     "el-1"
+    ],
+    "exact_lookup": false,
+    "notebook_id": "",
+    "relevance": 1.0,
+    "retrieval_supports": [
+     {
+      "origin": "ppr",
+      "review_status_snapshot": "",
+      "score": 0.666666667,
+      "support_id": "",
+      "support_kind": "ppr"
+     },
+     {
+      "origin": "lexical",
+      "review_status_snapshot": "",
+      "score": 1.0,
+      "support_id": "chunk-1",
+      "support_kind": "chunk"
+     }
+    ],
+    "score": 1.0,
+    "section_path": "命令 > report_timing",
+    "source_id": "src-1",
+    "source_title": "版图手册",
+    "text": "report_timing 输出关键路径的时序报告,用于版图设计签核。"
+   },
+   {
+    "chunk_id": "chunk-3",
+    "element_ids": [
+     "el-3"
+    ],
+    "exact_lookup": false,
+    "notebook_id": "",
+    "relevance": 1.0,
+    "retrieval_supports": [
+     {
+      "origin": "ppr",
+      "review_status_snapshot": "",
+      "score": 0.666666667,
+      "support_id": "",
+      "support_kind": "ppr"
+     },
+     {
+      "origin": "lexical",
+      "review_status_snapshot": "",
+      "score": 1.0,
+      "support_id": "chunk-3",
+      "support_kind": "chunk"
+     }
+    ],
+    "score": 1.0,
+    "section_path": "命令 > read_lef",
+    "source_id": "src-1",
+    "source_title": "版图手册",
+    "text": "read_lef 读入工艺 LEF 文件,定义版图设计用到的层与单元。"
+   },
+   {
+    "chunk_id": "chunk-0",
+    "element_ids": [
+     "el-0"
+    ],
+    "exact_lookup": false,
+    "notebook_id": "",
+    "relevance": 0.333333333,
+    "retrieval_supports": [
+     {
+      "origin": "ppr",
+      "review_status_snapshot": "",
+      "score": 0.0,
+      "support_id": "",
+      "support_kind": "ppr"
+     },
+     {
+      "origin": "lexical",
+      "review_status_snapshot": "",
+      "score": 0.333333333,
+      "support_id": "chunk-0",
+      "support_kind": "chunk"
+     }
+    ],
+    "score": 0.333333333,
+    "section_path": "命令 > set_db",
+    "source_id": "src-1",
+    "source_title": "版图手册",
+    "text": "set_db 命令用于设置版图数据库的属性,是时序分析前的必要步骤。"
+   },
+   {
+    "chunk_id": "chunk-2",
+    "element_ids": [
+     "el-2"
+    ],
+    "exact_lookup": false,
+    "notebook_id": "",
+    "relevance": 0.333333333,
+    "retrieval_supports": [
+     {
+      "origin": "ppr",
+      "review_status_snapshot": "",
+      "score": 0.0,
+      "support_id": "",
+      "support_kind": "ppr"
+     },
+     {
+      "origin": "lexical",
+      "review_status_snapshot": "",
+      "score": 0.333333333,
+      "support_id": "chunk-2",
+      "support_kind": "chunk"
+     }
+    ],
+    "score": 0.333333333,
+    "section_path": "命令 > get_db",
+    "source_id": "src-1",
+    "source_title": "版图手册",
+    "text": "get_db 读取版图数据库对象的属性值。"
+   }
+  ],
+  "collection_map_text": "[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | KG objects: concept 38, claim 3, formula 0, procedure 0 | knowhow tables: 0 | sources: 3 (current notebook: 3)",
+  "document_reads": [],
+  "elements": [],
+  "enumerations": [],
+  "external_evidence": [],
+  "outline": [
+   {
+    "evidence_keys": [
+     "ko-00000000000000000000000000000002",
+     "ko-0000000000000000000000000000004a",
+     "ko-0000000000000000000000000000004d",
+     "ko-00000000000000000000000000000024",
+     "ko-00000000000000000000000000000008",
+     "ko-00000000000000000000000000000013",
+     "ko-00000000000000000000000000000019",
+     "ko-0000000000000000000000000000001c"
+    ],
+    "id": "s1",
+    "parent": "",
+    "remove_evidence_keys": [],
+    "title": "版图要点"
+   },
+   {
+    "evidence_keys": [
+     "ko-00000000000000000000000000000008"
+    ],
+    "id": "s2",
+    "parent": "",
+    "remove_evidence_keys": [],
+    "title": "规则"
+   }
+  ],
+  "outline_evidence": [],
+  "top_hits": [
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000002",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "版图设计",
+     "section_path": "1"
+    },
+    "relevance": 1.000000072,
+    "score": 1.000000072,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000008",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "版图规则",
+     "section_path": "1"
+    },
+    "relevance": 1.0,
+    "score": 1.0,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-0000000000000000000000000000004a",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "版图设计",
+     "section_path": "1"
+    },
+    "relevance": 1.000000072,
+    "score": 1.000000072,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000014",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则12",
+     "section_path": "1"
+    },
+    "relevance": 0.654707738,
+    "score": 0.654707738,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-0000000000000000000000000000004d",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "版图设计",
+     "section_path": "1"
+    },
+    "relevance": 1.000000072,
+    "score": 1.000000072,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000025",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则29",
+     "section_path": "1"
+    },
+    "relevance": 0.647905906,
+    "score": 0.647905906,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000007",
+    "object_type": "claim",
+    "owner": "",
+    "payload": {
+     "name": "结论丙",
+     "section_path": "1"
+    },
+    "relevance": 0.441660726,
+    "score": 0.441660726,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 1.0
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000019",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则17",
+     "section_path": "1"
+    },
+    "relevance": 0.631218739,
+    "score": 0.631218739,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000006",
+    "object_type": "claim",
+    "owner": "",
+    "payload": {
+     "name": "桥接乙",
+     "section_path": "1"
+    },
+    "relevance": 0.440883708,
+    "score": 0.440883708,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 1.0
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000026",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则30",
+     "section_path": "1"
+    },
+    "relevance": 0.630681368,
+    "score": 0.630681368,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-0000000000000000000000000000000c",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则04",
+     "section_path": "1"
+    },
+    "relevance": 0.616064795,
+    "score": 0.616064795,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000016",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则14",
+     "section_path": "1"
+    },
+    "relevance": 0.613774546,
+    "score": 0.613774546,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000012",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则10",
+     "section_path": "1"
+    },
+    "relevance": 0.612846645,
+    "score": 0.612846645,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000020",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则24",
+     "section_path": "1"
+    },
+    "relevance": 0.594181975,
+    "score": 0.594181975,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-0000000000000000000000000000000a",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则02",
+     "section_path": "1"
+    },
+    "relevance": 0.592599686,
+    "score": 0.592599686,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000022",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则26",
+     "section_path": "1"
+    },
+    "relevance": 0.592365368,
+    "score": 0.592365368,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-0000000000000000000000000000000e",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则06",
+     "section_path": "1"
+    },
+    "relevance": 0.59014289,
+    "score": 0.59014289,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000015",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则13",
+     "section_path": "1"
+    },
+    "relevance": 0.586185344,
+    "score": 0.586185344,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000018",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则16",
+     "section_path": "1"
+    },
+    "relevance": 0.584619792,
+    "score": 0.584619792,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000023",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则27",
+     "section_path": "1"
+    },
+    "relevance": 0.582119258,
+    "score": 0.582119258,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-0000000000000000000000000000000f",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则07",
+     "section_path": "1"
+    },
+    "relevance": 0.576614364,
+    "score": 0.576614364,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000013",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则11",
+     "section_path": "1"
+    },
+    "relevance": 0.555216702,
+    "score": 0.555216702,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000009",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则01",
+     "section_path": "1"
+    },
+    "relevance": 0.545801719,
+    "score": 0.545801719,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-0000000000000000000000000000001c",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则20",
+     "section_path": "1"
+    },
+    "relevance": 0.545013042,
+    "score": 0.545013042,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000011",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则09",
+     "section_path": "1"
+    },
+    "relevance": 0.538179525,
+    "score": 0.538179525,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000024",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则28",
+     "section_path": "1"
+    },
+    "relevance": 0.523194488,
+    "score": 0.523194488,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-0000000000000000000000000000000b",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则03",
+     "section_path": "1"
+    },
+    "relevance": 0.479415222,
+    "score": 0.479415222,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000010",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则08",
+     "section_path": "1"
+    },
+    "relevance": 0.474627944,
+    "score": 0.474627944,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   }
+  ]
+ },
+ "sql": {
+  "main_thread": [
+   "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001')",
+   "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT id, updated_at, parse_status, chunked_at, created_at, (source_type NOT IN ('knowhow','memory')) AS user_visible FROM sources WHERE notebook_id = 'nb-00000000000000000000000000000001' AND source_type <> 'memory'",
+   "SELECT source_id, element_type, COUNT(*) AS c FROM source_elements WHERE source_id IN ('src-1','src-2','src-3') AND element_type IN ('code_block','formula','image') GROUP BY source_id, element_type",
+   "SELECT source_id, COUNT(*) AS c FROM source_elements WHERE source_id IN ('src-1','src-2','src-3') AND element_type = 'table' AND NOT (rtrim(location_label,'0123456789') GLOB '* part ' AND substr(location_label,length(rtrim(location_label,'0123456789'))+1) NOT IN ('','1') AND substr(location_label,length(rtrim(location_label,'0123456789'))+1) NOT GLOB '0*') GROUP BY source_id",
+   "SELECT COALESCE(kg_mutation_seq,0) AS ks, COALESCE(cluster_mutation_seq,0) AS cs, COALESCE(mention_seq,-1) AS ms, COALESCE(kg_reset_epoch,0) AS ep FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "WITH total AS (SELECT object_type, status, COUNT(*) AS c FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' GROUP BY object_type, status), memory AS (SELECT mo.object_type, mo.status, COUNT(*) AS c FROM knowledge_objects mo WHERE mo.source_id IN (SELECT s.id FROM sources s WHERE s.notebook_id='nb-00000000000000000000000000000001' AND s.source_type IN ('knowhow','memory') AND s.source_type = 'memory') AND +mo.notebook_id='nb-00000000000000000000000000000001' GROUP BY mo.object_type, mo.status) SELECT t.object_type, t.status, t.c - COALESCE(m.c, 0) AS c, COALESCE(m.c, 0) AS m FROM total t LEFT JOIN memory m ON m.object_type = t.object_type AND m.status = t.status",
+   "SELECT id FROM sources WHERE notebook_id = 'nb-00000000000000000000000000000001' AND source_type = 'memory'",
+   "SELECT COUNT(*) AS count FROM knowhow_tables WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT text FROM (  SELECT rowid AS rid, text FROM chunks WHERE notebook_id='nb-00000000000000000000000000000001'   ORDER BY rowid LIMIT 30) UNION SELECT text FROM (  SELECT rowid AS rid, text FROM chunks WHERE notebook_id='nb-00000000000000000000000000000001'   ORDER BY rowid DESC LIMIT 30)",
+   "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT member_object_id, canonical_id, canonical_name FROM concept_clusters WHERE notebook_id='nb-00000000000000000000000000000001' AND member_object_id IN ('ko-00000000000000000000000000000002','ko-00000000000000000000000000000008','ko-00000000000000000000000000000013','ko-00000000000000000000000000000019','ko-0000000000000000000000000000001c','ko-00000000000000000000000000000024','ko-0000000000000000000000000000004a','ko-0000000000000000000000000000004d') AND generation = COALESCE((SELECT cluster_generation FROM unified_kg_state WHERE notebook_id = 'nb-00000000000000000000000000000001'), 0)",
+   "SELECT canonical_src, edge_type, canonical_tgt, source_count,        sample_relation_ids FROM canonical_relations WHERE notebook_id='nb-00000000000000000000000000000001' AND canonical_src IN ('K-版图规则','K-版图设计','K-规则11','K-规则17','K-规则20','K-规则28')   AND source_count<=2 ORDER BY source_count ASC, canonical_tgt ASC, canonical_src ASC,          edge_type ASC LIMIT 24",
+   "SELECT kr.id AS rid,        COALESCE(NULLIF(cs.canonical_name,''),                 json_extract(so.payload,'$.name'), '') AS src_name,        COALESCE(NULLIF(ct.canonical_name,''),                 json_extract(tp.payload,'$.name'), '') AS tgt_name FROM knowledge_relations kr JOIN knowledge_objects so ON so.id=kr.source_object_id JOIN knowledge_objects tp ON tp.id=kr.target_object_id LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id   AND cs.member_object_id=kr.source_object_id AND cs.generation = COALESCE((SELECT cluster_generation FROM unified_kg_state WHERE notebook_id = 'nb-00000000000000000000000000000001'), 0) LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id   AND ct.member_object_id=kr.target_object_id AND ct.generation = COALESCE((SELECT cluster_generation FROM unified_kg_state WHERE notebook_id = 'nb-00000000000000000000000000000001'), 0) WHERE kr.notebook_id='nb-00000000000000000000000000000001' AND kr.id IN ('rel-00000000000000000000000000000027','rel-0000000000000000000000000000002b','rel-0000000000000000000000000000002c','rel-0000000000000000000000000000002d','rel-0000000000000000000000000000002e','rel-0000000000000000000000000000002f','rel-00000000000000000000000000000030','rel-00000000000000000000000000000031','rel-00000000000000000000000000000032','rel-00000000000000000000000000000033','rel-00000000000000000000000000000034','rel-00000000000000000000000000000035','rel-00000000000000000000000000000036','rel-00000000000000000000000000000037','rel-00000000000000000000000000000038','rel-00000000000000000000000000000039','rel-0000000000000000000000000000003a','rel-0000000000000000000000000000003b','rel-0000000000000000000000000000003c','rel-0000000000000000000000000000003d','rel-0000000000000000000000000000003e','rel-0000000000000000000000000000003f','rel-00000000000000000000000000000040','rel-00000000000000000000000000000041')"
+  ],
+  "worker_threads": [
+   "\n            SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids,\n                   s.title AS source_title\n            FROM chunks c JOIN sources s ON s.id = c.source_id\n            WHERE c.notebook_id = 'nb-00000000000000000000000000000001'\n            ",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='claim' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='concept' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='formula' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='procedure' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT COALESCE(kg_mutation_seq,0) AS ks, COALESCE(cluster_mutation_seq,0) AS cs, COALESCE(mention_seq,-1) AS ms, COALESCE(kg_reset_epoch,0) AS ep FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM chunk_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM element_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM knowledge_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts FROM knowledge_objects WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) c FROM chunks WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT b.id AS id, b.name AS name, b.tier AS tier, (b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AS ok, (b.status NOT IN ('copying','deleting','importing') AND (EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND NOT (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))) AS gate_closed, (b.created_by = a.created_by) AS same_owner FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, c.notebook_id AS chunk_notebook_id, s.title AS source_title FROM chunks c JOIN sources s ON s.id=c.source_id WHERE c.id IN ('chunk-0','chunk-1','chunk-2','chunk-3','chunk-4')",
+   "SELECT canonical_id, member_object_id FROM concept_clusters WHERE notebook_id = 'nb-00000000000000000000000000000001' AND generation = COALESCE((SELECT cluster_generation FROM unified_kg_state WHERE notebook_id = 'nb-00000000000000000000000000000001'), 0) ORDER BY canonical_id, member_object_id",
+   "SELECT chunk_id AS vid, vector FROM chunk_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT claim_object_id, concept_canonical_id FROM mention_edges WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT element_id AS vid, vector FROM element_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT id FROM chunks WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT id FROM sources WHERE notebook_id = 'nb-00000000000000000000000000000001' AND source_type = 'memory'",
+   "SELECT id, element_ids FROM chunks WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT id, evidence FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT id, object_type, payload FROM knowledge_objects WHERE notebook_id = 'nb-00000000000000000000000000000001' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY rowid, id",
+   "SELECT id, tier, created_by FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
+   "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT ko.object_type, COUNT(*) AS c FROM knowhow_tables kt JOIN knowledge_objects ko ON ko.source_id=kt.hidden_source_id WHERE kt.notebook_id='nb-00000000000000000000000000000001' AND ko.notebook_id='nb-00000000000000000000000000000001' AND ko.status IN ('approved','conflict','project_specific','reviewed') GROUP BY ko.object_type ORDER BY ko.object_type",
+   "SELECT object_id AS vid, vector FROM knowledge_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id = 'nb-00000000000000000000000000000001' AND review_status != 'rejected' ORDER BY id",
+   "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'"
+  ]
+ },
+ "trace": [
+  {
+   "detail": {
+    "source": "planner",
+    "sub_queries": [
+     {
+      "prefer": "balanced",
+      "query": "版图设计",
+      "reason": "",
+      "types": []
+     },
+     {
+      "prefer": "balanced",
+      "query": "版图规则",
+      "reason": "",
+      "types": []
+     }
+    ]
+   },
+   "step_type": "plan",
+   "summary": "规划了 2 个子查询"
+  },
+  {
+   "detail": {
+    "count": 28,
+    "result_ids": [
+     "ko-00000000000000000000000000000002",
+     "ko-0000000000000000000000000000004a",
+     "ko-0000000000000000000000000000004d",
+     "ko-00000000000000000000000000000024",
+     "ko-00000000000000000000000000000008",
+     "ko-00000000000000000000000000000013",
+     "ko-00000000000000000000000000000019",
+     "ko-0000000000000000000000000000001c",
+     "ko-00000000000000000000000000000022",
+     "ko-00000000000000000000000000000018",
+     "ko-00000000000000000000000000000011",
+     "ko-00000000000000000000000000000010",
+     "ko-00000000000000000000000000000009",
+     "ko-0000000000000000000000000000000b",
+     "ko-00000000000000000000000000000007",
+     "ko-00000000000000000000000000000006",
+     "ko-00000000000000000000000000000014",
+     "ko-00000000000000000000000000000025",
+     "ko-00000000000000000000000000000026",
+     "ko-0000000000000000000000000000000c"
+    ],
+    "result_ids_truncated": true
+   },
+   "step_type": "retrieve",
+   "summary": "初检索得到 28 个候选节点"
+  },
+  {
+   "detail": {
+    "found": 5,
+    "phase": "seed",
+    "result_ids": [
+     "chunk-4",
+     "chunk-1",
+     "chunk-3",
+     "chunk-0",
+     "chunk-2"
+    ]
+   },
+   "step_type": "ppr",
+   "summary": "概念漫游:跨文档检索,得到 5 段原文"
+  },
+  {
+   "detail": {
+    "found": 0,
+    "phase": "seed",
+    "result_ids": []
+   },
+   "step_type": "search_chunks",
+   "summary": "检索原文段落:首轮按子查询召回,新增 0 段"
+  },
+  {
+   "detail": {
+    "next_action": "update_outline",
+    "no_progress": false,
+    "stale": 0,
+    "sufficient": false
+   },
+   "step_type": "reflect",
+   "summary": "选 update_outline"
+  },
+  {
+   "detail": {
+    "changed": true,
+    "dropped_evidence": 0,
+    "empty_sections": [],
+    "kg_gap_candidates": 24,
+    "overflow_evidence": {},
+    "overflow_repair": false,
+    "removed_evidence": 0,
+    "replaced": 0,
+    "sections": [
+     {
+      "evidence": [
+       "ko-00000000000000000000000000000002",
+       "ko-0000000000000000000000000000004a",
+       "ko-0000000000000000000000000000004d",
+       "ko-00000000000000000000000000000024",
+       "ko-00000000000000000000000000000008",
+       "ko-00000000000000000000000000000013",
+       "ko-00000000000000000000000000000019",
+       "ko-0000000000000000000000000000001c"
+      ],
+      "id": "s1",
+      "parent": "",
+      "title": "版图要点"
+     }
+    ]
+   },
+   "step_type": "outline",
+   "summary": "更新大纲: 1 节(0 节待补证据)"
+  },
+  {
+   "detail": {
+    "next_action": "update_outline",
+    "no_progress": true,
+    "stale": 1,
+    "sufficient": false
+   },
+   "step_type": "reflect",
+   "summary": "选 update_outline"
+  },
+  {
+   "detail": {
+    "changed": true,
+    "dropped_evidence": 0,
+    "empty_sections": [],
+    "overflow_evidence": {
+     "s1": [
+      "ko-00000000000000000000000000000022"
+     ]
+    },
+    "overflow_repair": false,
+    "removed_evidence": 0,
+    "replaced": 1,
+    "sections": [
+     {
+      "evidence": [
+       "ko-00000000000000000000000000000002",
+       "ko-0000000000000000000000000000004a",
+       "ko-0000000000000000000000000000004d",
+       "ko-00000000000000000000000000000024",
+       "ko-00000000000000000000000000000008",
+       "ko-00000000000000000000000000000013",
+       "ko-00000000000000000000000000000019",
+       "ko-0000000000000000000000000000001c"
+      ],
+      "id": "s1",
+      "parent": "",
+      "title": "版图要点"
+     },
+     {
+      "evidence": [
+       "ko-00000000000000000000000000000008"
+      ],
+      "id": "s2",
+      "parent": "",
+      "title": "规则"
+     }
+    ]
+   },
+   "step_type": "outline",
+   "summary": "更新大纲: 2 节(0 节待补证据)"
+  },
+  {
+   "detail": {
+    "next_action": "expand_graph",
+    "no_progress": true,
+    "stale": 2,
+    "sufficient": false
+   },
+   "step_type": "reflect",
+   "summary": "选 expand_graph"
+  },
+  {
+   "detail": {
+    "object_id": "",
+    "reason": "empty_or_visited"
+   },
+   "step_type": "skip",
+   "summary": "跳过 expand_graph(空或已访问节点)"
+  },
+  {
+   "detail": {
+    "reason": "stale_circuit_breaker",
+    "stale": 3
+   },
+   "step_type": "skip",
+   "summary": "连续 3 轮无新进展,熔断收尾(避免空转)"
+  },
+  {
+   "detail": {
+    "next_action": "expand_graph",
+    "no_progress": true,
+    "stale": 3,
+    "sufficient": false
+   },
+   "step_type": "reflect",
+   "summary": "选 expand_graph"
+  },
+  {
+   "detail": {
+    "reason": "outline_overflow_repair_declined"
+   },
+   "step_type": "skip",
+   "summary": "大纲溢出纠错轮未提交 update_outline,按当前绑定收尾"
+  },
+  {
+   "detail": {
+    "overflow_evidence": {
+     "s1": [
+      "ko-00000000000000000000000000000022"
+     ]
+    },
+    "reason": "outline_evidence_overflow_unresolved"
+   },
+   "step_type": "skip",
+   "summary": "大纲仍有未接纳的新证据,最终答案仅使用已绑定证据"
+  },
+  {
+   "detail": {
+    "chains": 0,
+    "elements": 0,
+    "enumerated_items": 0,
+    "enumerations": 0,
+    "kg": 28,
+    "quota": [
+     5,
+     23
+    ],
+    "top_n": 40
+   },
+   "step_type": "answer",
+   "summary": "合成候选"
+  }
+ ]
+}

@@ -1,0 +1,727 @@
+{
+ "embeddings": {
+  "embed_query": 2
+ },
+ "model_calls": [
+  {
+   "kwargs": {
+    "cancel_event": "<event>",
+    "max_retries": 1,
+    "max_tokens": 16384,
+    "timeout": 90
+   },
+   "messages_bytes": 3438,
+   "messages_sha256": "1840f12e9421b59278c51e6bada2e27a7fb2f96b640cffe7f2875217785254b2",
+   "roles": [
+    "system",
+    "user"
+   ],
+   "schema_sha256": "e00e830959884edf14160d89ef4399f3efb307ff08c623aeadbe86c291e6e929",
+   "workload": "reasoning_agent"
+  },
+  {
+   "kwargs": {
+    "cancel_event": "<event>",
+    "max_retries": 1,
+    "max_tokens": 16384,
+    "timeout": 90
+   },
+   "messages_bytes": 4854,
+   "messages_sha256": "40f74eab596101084f82f3de077fd5e066ea404a81fa5f58305128601ff9014d",
+   "roles": [
+    "system",
+    "user"
+   ],
+   "schema_sha256": "cfb01d74fb5c3422bcf7c00ab184cc45d5127b0b96b89d19f0d2c21b70fc2f66",
+   "workload": "reasoning_agent"
+  },
+  {
+   "kwargs": {
+    "cancel_event": "<event>",
+    "max_retries": 1,
+    "max_tokens": 16384,
+    "timeout": 90
+   },
+   "messages_bytes": 5013,
+   "messages_sha256": "1c1b04afd890fd17555da345d9ac139c49fd5c157f2a3c950df0d00ce24fae84",
+   "roles": [
+    "system",
+    "user"
+   ],
+   "schema_sha256": "cfb01d74fb5c3422bcf7c00ab184cc45d5127b0b96b89d19f0d2c21b70fc2f66",
+   "workload": "reasoning_agent"
+  },
+  {
+   "kwargs": {
+    "cancel_event": "<event>",
+    "max_retries": 1,
+    "max_tokens": 16384,
+    "timeout": 90
+   },
+   "messages_bytes": 7013,
+   "messages_sha256": "3408926032de0dd1d4048f82617458f2c7439c5fe0a6f917d1c8008a74fa92b1",
+   "roles": [
+    "system",
+    "user"
+   ],
+   "schema_sha256": "cfb01d74fb5c3422bcf7c00ab184cc45d5127b0b96b89d19f0d2c21b70fc2f66",
+   "workload": "reasoning_agent"
+  },
+  {
+   "kwargs": {
+    "cancel_event": "<event>",
+    "max_retries": 1,
+    "max_tokens": 16384,
+    "timeout": 90
+   },
+   "messages_bytes": 7316,
+   "messages_sha256": "79707ccd161c5bb326998d5d22eae8d7e6333fb57cc55077aa1a91e74bb54620",
+   "roles": [
+    "system",
+    "user"
+   ],
+   "schema_sha256": "cfb01d74fb5c3422bcf7c00ab184cc45d5127b0b96b89d19f0d2c21b70fc2f66",
+   "workload": "reasoning_agent"
+  }
+ ],
+ "on_step_is_trace": true,
+ "outcome": {
+  "returned": true
+ },
+ "ports": {
+  "main_thread": [
+   "retrieval.has_kg {\"args\": [\"nb-00000000000000000000000000000001\"], \"kwargs\": {}}",
+   "retrieval.follow_chain {\"args\": [\"nb-00000000000000000000000000000001\", \"ko-00000000000000000000000000000005\"], \"kwargs\": {\"direction\": \"out\", \"edge_type\": \"derived_from\", \"target_object_id\": \"\"}}",
+   "retrieval.federated_retrieve {\"args\": [\"nb-00000000000000000000000000000001\", \"规则\"], \"kwargs\": {\"types\": [], \"w_keyword\": 0.4, \"w_semantic\": 0.6}}"
+  ],
+  "worker_threads": [
+   "retrieval.federated_retrieve {\"args\": [\"nb-00000000000000000000000000000001\", \"前提甲 结论丙\"], \"kwargs\": {\"types\": [], \"w_keyword\": 0.4, \"w_semantic\": 0.6}}"
+  ]
+ },
+ "reflect_inputs": [
+  {
+   "args": [],
+   "candidates_summary": "- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则01 (id=ko-00000000000000000000000000000009)\n\n（已执行过的子查询及各自新增证据数: 「前提甲 结论丙」(新增3条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）",
+   "kwargs": {
+    "limits": {
+     "answer_element_items": 6,
+     "cell_excerpt_chars": 1000,
+     "chunk_context_chars": 30000,
+     "effort": "standard",
+     "enum_page_size": 50,
+     "enum_pages_per_run": 4,
+     "enum_rows_per_run": 200,
+     "inline_answer_rows": 100,
+     "kg_context_chars": 6000,
+     "max_initial_subqueries": 5,
+     "max_reasoning_steps": 8,
+     "overflow_semantics": "explicit_partial",
+     "ranked_final_cap": 36,
+     "ranked_final_floor": 20,
+     "ranked_per_aspect": 3,
+     "ranked_per_query_take": 8,
+     "structured_max_columns": 8,
+     "structured_max_pages": 50,
+     "structured_max_rows": 1250,
+     "structured_max_tables": 8,
+     "structured_page_size": 25,
+     "structured_payload_chars": 256000
+    }
+   }
+  },
+  {
+   "args": [],
+   "candidates_summary": "- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则01 (id=ko-00000000000000000000000000000009)\n- [claim] 桥接乙 (id=ko-00000000000000000000000000000006)\n- [inference] 前提甲 --derived_from--> 结论丙 via 桥接乙 (trust=0.69, query-time only)\n\n（已执行过的子查询及各自新增证据数: 「前提甲 结论丙」(新增3条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）",
+   "kwargs": {
+    "limits": {
+     "answer_element_items": 6,
+     "cell_excerpt_chars": 1000,
+     "chunk_context_chars": 30000,
+     "effort": "standard",
+     "enum_page_size": 50,
+     "enum_pages_per_run": 4,
+     "enum_rows_per_run": 200,
+     "inline_answer_rows": 100,
+     "kg_context_chars": 6000,
+     "max_initial_subqueries": 5,
+     "max_reasoning_steps": 8,
+     "overflow_semantics": "explicit_partial",
+     "ranked_final_cap": 36,
+     "ranked_final_floor": 20,
+     "ranked_per_aspect": 3,
+     "ranked_per_query_take": 8,
+     "structured_max_columns": 8,
+     "structured_max_pages": 50,
+     "structured_max_rows": 1250,
+     "structured_max_tables": 8,
+     "structured_page_size": 25,
+     "structured_payload_chars": 256000
+    }
+   }
+  },
+  {
+   "args": [],
+   "candidates_summary": "- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则01 (id=ko-00000000000000000000000000000009)\n- [claim] 桥接乙 (id=ko-00000000000000000000000000000006)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 规则21 (id=ko-0000000000000000000000000000001d)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则02 (id=ko-0000000000000000000000000000000a)\n- [concept] 规则05 (id=ko-0000000000000000000000000000000d)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则15 (id=ko-00000000000000000000000000000017)\n- [concept] 规则07 (id=ko-0000000000000000000000000000000f)\n- [concept] 规则19 (id=ko-0000000000000000000000000000001b)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则03 (id=ko-0000000000000000000000000000000b)\n- [concept] 规则10 (id=ko-00000000000000000000000000000012)\n- [concept] 规则08 (id=ko-00000000000000000000000000000010)\n- [concept] 规则30 (id=ko-00000000000000000000000000000026)\n- [concept] 规则09 (id=ko-00000000000000000000000000000011)\n-（省略中间 3 条较早候选,以下为最近加入）\n- [concept] 规则29 (id=ko-00000000000000000000000000000025)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则06 (id=ko-0000000000000000000000000000000e)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [concept] 规则04 (id=ko-0000000000000000000000000000000c)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [concept] 规则18 (id=ko-0000000000000000000000000000001a)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [inference] 前提甲 --derived_from--> 结论丙 via 桥接乙 (trust=0.69, query-time only)\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「前提甲 结论丙」(新增3条)、「规则」(新增29条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）",
+   "kwargs": {
+    "limits": {
+     "answer_element_items": 6,
+     "cell_excerpt_chars": 1000,
+     "chunk_context_chars": 30000,
+     "effort": "standard",
+     "enum_page_size": 50,
+     "enum_pages_per_run": 4,
+     "enum_rows_per_run": 200,
+     "inline_answer_rows": 100,
+     "kg_context_chars": 6000,
+     "max_initial_subqueries": 5,
+     "max_reasoning_steps": 8,
+     "overflow_semantics": "explicit_partial",
+     "ranked_final_cap": 36,
+     "ranked_final_floor": 20,
+     "ranked_per_aspect": 3,
+     "ranked_per_query_take": 8,
+     "structured_max_columns": 8,
+     "structured_max_pages": 50,
+     "structured_max_rows": 1250,
+     "structured_max_tables": 8,
+     "structured_page_size": 25,
+     "structured_payload_chars": 256000
+    }
+   }
+  },
+  {
+   "args": [],
+   "candidates_summary": "- [claim] 前提甲 (id=ko-00000000000000000000000000000005)\n- [claim] 结论丙 (id=ko-00000000000000000000000000000007)\n- [concept] 规则01 (id=ko-00000000000000000000000000000009)\n- [claim] 桥接乙 (id=ko-00000000000000000000000000000006)\n- [concept] 规则11 (id=ko-00000000000000000000000000000013)\n- [concept] 规则28 (id=ko-00000000000000000000000000000024)\n- [concept] 规则21 (id=ko-0000000000000000000000000000001d)\n- [concept] 规则17 (id=ko-00000000000000000000000000000019)\n- [concept] 规则02 (id=ko-0000000000000000000000000000000a)\n- [concept] 规则05 (id=ko-0000000000000000000000000000000d)\n- [concept] 规则20 (id=ko-0000000000000000000000000000001c)\n- [concept] 规则15 (id=ko-00000000000000000000000000000017)\n- [concept] 规则07 (id=ko-0000000000000000000000000000000f)\n- [concept] 规则19 (id=ko-0000000000000000000000000000001b)\n- [concept] 规则26 (id=ko-00000000000000000000000000000022)\n- [concept] 规则03 (id=ko-0000000000000000000000000000000b)\n- [concept] 规则10 (id=ko-00000000000000000000000000000012)\n- [concept] 规则08 (id=ko-00000000000000000000000000000010)\n- [concept] 规则30 (id=ko-00000000000000000000000000000026)\n- [concept] 规则09 (id=ko-00000000000000000000000000000011)\n-（省略中间 3 条较早候选,以下为最近加入）\n- [concept] 规则29 (id=ko-00000000000000000000000000000025)\n- [concept] 规则12 (id=ko-00000000000000000000000000000014)\n- [concept] 规则14 (id=ko-00000000000000000000000000000016)\n- [concept] 规则06 (id=ko-0000000000000000000000000000000e)\n- [concept] 规则27 (id=ko-00000000000000000000000000000023)\n- [concept] 规则04 (id=ko-0000000000000000000000000000000c)\n- [concept] 版图规则 (id=ko-00000000000000000000000000000008)\n- [concept] 规则13 (id=ko-00000000000000000000000000000015)\n- [concept] 规则18 (id=ko-0000000000000000000000000000001a)\n- [concept] 规则16 (id=ko-00000000000000000000000000000018)\n- [inference] 前提甲 --derived_from--> 结论丙 via 桥接乙 (trust=0.69, query-time only)\n\n（系统提示:上一步检索未带来新证据。若现有候选不足以支撑作答,且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)\n\n（已执行过的子查询及各自新增证据数: 「前提甲 结论丙」(新增3条)、「规则」(新增29条)。勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,或改用其他动作。）\n\n（已按名称精确查找过及各自结果: 按名称精确查找当前不可用(本次检索场景未开启该能力)。勿重复请求相同名称;新增为 0 说明本笔记本内未定位到该名称对应的完整章节(挂载的参考库不在精确查找范围),请改用其他动作。）",
+   "kwargs": {
+    "limits": {
+     "answer_element_items": 6,
+     "cell_excerpt_chars": 1000,
+     "chunk_context_chars": 30000,
+     "effort": "standard",
+     "enum_page_size": 50,
+     "enum_pages_per_run": 4,
+     "enum_rows_per_run": 200,
+     "inline_answer_rows": 100,
+     "kg_context_chars": 6000,
+     "max_initial_subqueries": 5,
+     "max_reasoning_steps": 8,
+     "overflow_semantics": "explicit_partial",
+     "ranked_final_cap": 36,
+     "ranked_final_floor": 20,
+     "ranked_per_aspect": 3,
+     "ranked_per_query_take": 8,
+     "structured_max_columns": 8,
+     "structured_max_pages": 50,
+     "structured_max_rows": 1250,
+     "structured_max_tables": 8,
+     "structured_page_size": 25,
+     "structured_payload_chars": 256000
+    }
+   }
+  }
+ ],
+ "result": {
+  "attempted": [
+   {
+    "new": 3,
+    "query": "前提甲 结论丙",
+    "tries": 1
+   },
+   {
+    "new": 29,
+    "query": "规则",
+    "tries": 1
+   }
+  ],
+  "baseline_manifest": null,
+  "chains": [
+   {
+    "chain_trust": 0.6885,
+    "hops": [
+     {
+      "edge_type": "derived_from",
+      "evidence": [
+       {
+        "quote": "前提甲直接推出桥接乙"
+       }
+      ],
+      "notebook_id": "nb-00000000000000000000000000000001",
+      "relation_id": "rel-00000000000000000000000000000029",
+      "review_status": "pending",
+      "source_name": "前提甲",
+      "source_object_id": "ko-00000000000000000000000000000005",
+      "source_title": "版图手册",
+      "target_name": "桥接乙",
+      "target_object_id": "ko-00000000000000000000000000000006",
+      "tier": "personal",
+      "trust": 0.765
+     },
+     {
+      "edge_type": "derived_from",
+      "evidence": [
+       {
+        "quote": "桥接乙直接推出结论丙"
+       }
+      ],
+      "notebook_id": "nb-00000000000000000000000000000001",
+      "relation_id": "rel-0000000000000000000000000000002a",
+      "review_status": "pending",
+      "source_name": "桥接乙",
+      "source_object_id": "ko-00000000000000000000000000000006",
+      "source_title": "版图手册",
+      "target_name": "结论丙",
+      "target_object_id": "ko-00000000000000000000000000000007",
+      "tier": "personal",
+      "trust": 0.765
+     }
+    ],
+    "inferred_edge_type": "derived_from",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "query_relevance": 0.685538769,
+    "search_direction": "out",
+    "source_name": "前提甲",
+    "source_object_id": "ko-00000000000000000000000000000005",
+    "target_name": "结论丙",
+    "target_object_id": "ko-00000000000000000000000000000007",
+    "tier": "personal",
+    "validity_scope": {},
+    "via_name": "桥接乙",
+    "via_object_id": "ko-00000000000000000000000000000006"
+   }
+  ],
+  "chunks": [],
+  "collection_map_text": "",
+  "document_reads": [],
+  "elements": [],
+  "enumerations": [],
+  "external_evidence": [],
+  "outline": [],
+  "outline_evidence": [],
+  "top_hits": [
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000005",
+    "object_type": "claim",
+    "owner": "",
+    "payload": {
+     "name": "前提甲",
+     "section_path": "1"
+    },
+    "relevance": 0.685538769,
+    "score": 0.685538769,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 1.0
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000013",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则11",
+     "section_path": "1"
+    },
+    "relevance": 0.938133097,
+    "score": 0.938133097,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000007",
+    "object_type": "claim",
+    "owner": "",
+    "payload": {
+     "name": "结论丙",
+     "section_path": "1"
+    },
+    "relevance": 0.59304812,
+    "score": 0.59304812,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 1.0
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000024",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则28",
+     "section_path": "1"
+    },
+    "relevance": 0.936320996,
+    "score": 0.936320996,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-0000000000000000000000000000001d",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则21",
+     "section_path": "1"
+    },
+    "relevance": 0.9216187,
+    "score": 0.9216187,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000009",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则01",
+     "section_path": "1"
+    },
+    "relevance": 0.90765065,
+    "score": 0.90765065,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000019",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则17",
+     "section_path": "1"
+    },
+    "relevance": 0.902973521,
+    "score": 0.902973521,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-0000000000000000000000000000000a",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则02",
+     "section_path": "1"
+    },
+    "relevance": 0.90105288,
+    "score": 0.90105288,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-0000000000000000000000000000000d",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则05",
+     "section_path": "1"
+    },
+    "relevance": 0.893016195,
+    "score": 0.893016195,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-0000000000000000000000000000001c",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则20",
+     "section_path": "1"
+    },
+    "relevance": 0.89155947,
+    "score": 0.89155947,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-00000000000000000000000000000017",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则15",
+     "section_path": "1"
+    },
+    "relevance": 0.887323225,
+    "score": 0.887323225,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   },
+   {
+    "evidence": [],
+    "last_reviewed": "",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "object_id": "ko-0000000000000000000000000000000f",
+    "object_type": "concept",
+    "owner": "",
+    "payload": {
+     "name": "规则07",
+     "section_path": "1"
+    },
+    "relevance": 0.886474609,
+    "score": 0.886474609,
+    "status": "approved",
+    "tier": "personal",
+    "weight": 0.5
+   }
+  ]
+ },
+ "sql": {
+  "main_thread": [
+   "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001')",
+   "SELECT ko.*, n.tier AS notebook_tier FROM knowledge_objects ko JOIN notebooks n ON n.id=ko.notebook_id WHERE ko.id='ko-00000000000000000000000000000005' AND ko.status IN ('approved','conflict','project_specific','reviewed') AND (ko.notebook_id='nb-00000000000000000000000000000001' OR ko.notebook_id IN (SELECT b.id FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone')))))))",
+   "SELECT r.id, r.notebook_id, r.source_id, r.source_object_id, r.target_object_id, r.edge_type, r.review_status FROM knowledge_relations AS r INDEXED BY idx_knowledge_relations_nb_source WHERE r.notebook_id='nb-00000000000000000000000000000001' AND r.source_object_id='ko-00000000000000000000000000000005' LIMIT 65",
+   "SELECT r.id, r.evidence, s.title AS source_title FROM knowledge_relations r LEFT JOIN sources s ON s.id=r.source_id AND s.notebook_id=r.notebook_id WHERE r.id IN ('rel-00000000000000000000000000000029') AND r.notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT r.id, r.notebook_id, r.source_id, r.source_object_id, r.target_object_id, r.edge_type, r.review_status FROM knowledge_relations AS r INDEXED BY idx_knowledge_relations_nb_source WHERE r.notebook_id='nb-00000000000000000000000000000001' AND r.source_object_id='ko-00000000000000000000000000000006' LIMIT 65",
+   "SELECT r.id, r.evidence, s.title AS source_title FROM knowledge_relations r LEFT JOIN sources s ON s.id=r.source_id AND s.notebook_id=r.notebook_id WHERE r.id IN ('rel-0000000000000000000000000000002a') AND r.notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND id IN ('ko-00000000000000000000000000000005','ko-00000000000000000000000000000006','ko-00000000000000000000000000000007') AND status IN ('approved','conflict','project_specific','reviewed')",
+   "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT COALESCE(kg_mutation_seq,0) AS ks, COALESCE(cluster_mutation_seq,0) AS cs, COALESCE(mention_seq,-1) AS ms, COALESCE(kg_reset_epoch,0) AS ep FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='claim' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='formula' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='procedure' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='concept' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts FROM knowledge_objects WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM element_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COALESCE(kg_mutation_seq,0) AS ks, COALESCE(cluster_mutation_seq,0) AS cs, COALESCE(mention_seq,-1) AS ms, COALESCE(kg_reset_epoch,0) AS ep FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM knowledge_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COALESCE(kg_mutation_seq,0) AS ks, COALESCE(cluster_mutation_seq,0) AS cs, COALESCE(mention_seq,-1) AS ms, COALESCE(kg_reset_epoch,0) AS ep FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'"
+  ],
+  "worker_threads": [
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='claim' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='concept' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='formula' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT * FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' AND object_type='procedure' AND status IN ('approved','conflict','project_specific','reviewed') ORDER BY created_at ASC, id ASC",
+   "SELECT COALESCE(kg_mutation_seq,0) AS ks, COALESCE(cluster_mutation_seq,0) AS cs, COALESCE(mention_seq,-1) AS ms, COALESCE(kg_reset_epoch,0) AS ep FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM element_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts FROM knowledge_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts FROM knowledge_objects WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id",
+   "SELECT element_id AS vid, vector FROM element_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT id FROM sources WHERE notebook_id = 'nb-00000000000000000000000000000001' AND source_type = 'memory'",
+   "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'",
+   "SELECT ko.object_type, COUNT(*) AS c FROM knowhow_tables kt JOIN knowledge_objects ko ON ko.source_id=kt.hidden_source_id WHERE kt.notebook_id='nb-00000000000000000000000000000001' AND ko.notebook_id='nb-00000000000000000000000000000001' AND ko.status IN ('approved','conflict','project_specific','reviewed') GROUP BY ko.object_type ORDER BY ko.object_type",
+   "SELECT object_id AS vid, vector FROM knowledge_embeddings WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id = 'nb-00000000000000000000000000000001'",
+   "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'"
+  ]
+ },
+ "trace": [
+  {
+   "detail": {
+    "source": "planner",
+    "sub_queries": [
+     {
+      "prefer": "balanced",
+      "query": "前提甲 结论丙",
+      "reason": "",
+      "types": []
+     }
+    ]
+   },
+   "step_type": "plan",
+   "summary": "规划了 1 个子查询"
+  },
+  {
+   "detail": {
+    "count": 3,
+    "result_ids": [
+     "ko-00000000000000000000000000000005",
+     "ko-00000000000000000000000000000007",
+     "ko-00000000000000000000000000000009"
+    ]
+   },
+   "step_type": "retrieve",
+   "summary": "初检索得到 3 个候选节点"
+  },
+  {
+   "detail": {
+    "next_action": "follow_chain",
+    "no_progress": false,
+    "stale": 0,
+    "sufficient": false
+   },
+   "step_type": "reflect",
+   "summary": "选 follow_chain"
+  },
+  {
+   "detail": {
+    "chain_trust": 0.6885,
+    "count": 1,
+    "direction": "out",
+    "edge_type": "derived_from",
+    "hops": 2,
+    "paths": [
+     {
+      "edge_type": "derived_from",
+      "source": "前提甲",
+      "target": "结论丙",
+      "trust": 0.6885,
+      "validity_scope": {},
+      "via": "桥接乙"
+     }
+    ]
+   },
+   "step_type": "follow_chain",
+   "summary": "两跳推导:前提甲 --derived_from--> 结论丙（经 桥接乙）,新增 1 条"
+  },
+  {
+   "detail": {
+    "next_action": "add_subquery",
+    "no_progress": false,
+    "stale": 0,
+    "sufficient": false
+   },
+   "step_type": "reflect",
+   "summary": "选 add_subquery"
+  },
+  {
+   "detail": {
+    "new": 29,
+    "query": "规则",
+    "result_ids": [
+     "ko-00000000000000000000000000000013",
+     "ko-00000000000000000000000000000024",
+     "ko-0000000000000000000000000000001d",
+     "ko-00000000000000000000000000000019",
+     "ko-0000000000000000000000000000000a",
+     "ko-0000000000000000000000000000000d",
+     "ko-0000000000000000000000000000001c",
+     "ko-00000000000000000000000000000017",
+     "ko-0000000000000000000000000000000f",
+     "ko-0000000000000000000000000000001b",
+     "ko-00000000000000000000000000000022",
+     "ko-0000000000000000000000000000000b",
+     "ko-00000000000000000000000000000012",
+     "ko-00000000000000000000000000000010",
+     "ko-00000000000000000000000000000026",
+     "ko-00000000000000000000000000000011",
+     "ko-00000000000000000000000000000020",
+     "ko-00000000000000000000000000000021",
+     "ko-0000000000000000000000000000001e",
+     "ko-00000000000000000000000000000025"
+    ],
+    "result_ids_truncated": true
+   },
+   "step_type": "retrieve",
+   "summary": "补充子查询: 规则"
+  },
+  {
+   "detail": {
+    "next_action": "enumerate_elements",
+    "no_progress": false,
+    "stale": 0,
+    "sufficient": false
+   },
+   "step_type": "reflect",
+   "summary": "raw"
+  },
+  {
+   "detail": {
+    "reason": "enumeration_disabled"
+   },
+   "step_type": "skip",
+   "summary": "跳过枚举(本次检索未提供清单工具)"
+  },
+  {
+   "detail": {
+    "next_action": "exact_lookup",
+    "no_progress": true,
+    "stale": 1,
+    "sufficient": false
+   },
+   "step_type": "reflect",
+   "summary": "选 exact_lookup"
+  },
+  {
+   "detail": {
+    "reason": "exact_lookup_disabled"
+   },
+   "step_type": "skip",
+   "summary": "跳过按名称精确查找(未启用)"
+  },
+  {
+   "detail": {
+    "next_action": "expand_community",
+    "no_progress": true,
+    "stale": 2,
+    "sufficient": false
+   },
+   "step_type": "reflect",
+   "summary": "选 expand_community"
+  },
+  {
+   "detail": {
+    "reason": "community_expansion_disabled"
+   },
+   "step_type": "skip",
+   "summary": "跳过跨库同类实体扩展（当前检索范围不允许）"
+  },
+  {
+   "detail": {
+    "reason": "stale_circuit_breaker",
+    "stale": 3
+   },
+   "step_type": "skip",
+   "summary": "连续 3 轮无新进展,熔断收尾(避免空转)"
+  },
+  {
+   "detail": {
+    "chains": 1,
+    "elements": 0,
+    "enumerated_items": 0,
+    "enumerations": 0,
+    "kg": 12,
+    "quota": [
+     2,
+     10
+    ],
+    "top_n": 12
+   },
+   "step_type": "answer",
+   "summary": "合成候选"
+  }
+ ]
+}
