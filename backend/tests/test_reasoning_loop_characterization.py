@@ -455,8 +455,13 @@ def _make_repo(tmp_path, monkeypatch):
             monkeypatch.delenv(key)
     for key, value in _SCENARIO_ENV.items():
         monkeypatch.setenv(key, value)
+    # Clearing also removed the shared isolation fixture's four paths (it sets
+    # exactly these); point every one of them back under this test's tmp_path
+    # so no worker writes into the checkout or a sibling worker's files.
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'loop.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("EVENT_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("LLM_LOG_PATH", str(tmp_path / "logs" / "llm.jsonl"))
     repo = SQLiteRepository(Settings(_env_file=None))
     bind_all_embedding_clients(repo, rig.CountingEmbedder(dim=16))
     return repo
@@ -1363,9 +1368,27 @@ def _serialise(observed: dict) -> str:
     return json.dumps(observed, ensure_ascii=False, indent=1, sort_keys=True) + "\n"
 
 
+CHECKOUT_LOGS = Path(__file__).resolve().parents[2] / ".local" / "logs"
+
+
+def _checkout_log_files() -> dict:
+    """Every file under the checkout's log root with its size and mtime: an
+    append to an existing day file must show up, not only a new file."""
+    if not CHECKOUT_LOGS.exists():
+        return {}
+    return {
+        path: (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in CHECKOUT_LOGS.rglob("*") if path.is_file()
+    }
+
+
 @pytest.mark.parametrize("case", SCENARIOS, ids=SCENARIO_IDS)
 def test_reflect_loop_scenario(case, tmp_path, monkeypatch):
+    before = _checkout_log_files()
     observed = observe(case, tmp_path, monkeypatch)
+    # every log the run writes stays under this test's tmp_path
+    assert _checkout_log_files() == before
+    assert any((tmp_path / "logs").rglob("*.jsonl"))
     dump = os.environ.get("REASONING_LOOP_DUMP_DIR")
     if dump:
         Path(dump).mkdir(parents=True, exist_ok=True)
