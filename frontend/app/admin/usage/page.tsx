@@ -972,7 +972,8 @@ export default function AdminUsagePage() {
                         editing={editingLimitId === u.id}
                         lockedByOther={Boolean(editingLimitId) && editingLimitId !== u.id}
                         pending={limitPendingId === u.id}
-                        anyPending={Boolean(limitPendingId)}
+                        // 账号类请求在途时也禁点:否则会在「管理」忙态弹出层之外再叠一个编辑层。
+                        anyPending={Boolean(limitPendingId) || Boolean(manageBusyId)}
                         notice={noticeFor(u.id, "limit")}
                         input={limitInput}
                         onInput={setLimitInput}
@@ -989,7 +990,9 @@ export default function AdminUsagePage() {
                       open={managingId === u.id}
                       view={renamingId === u.id ? "rename" : resettingId === u.id ? "password" : "menu"}
                       pending={manageBusyId === u.id}
-                      lockedByOther={Boolean(manageBusyId) && manageBusyId !== u.id}
+                      // 文档上限保存在途时同样禁点:openManage 会收起那个忙态编辑层、丢掉待保存的值
+                      // (codex R2 P2)。
+                      lockedByOther={(Boolean(manageBusyId) && manageBusyId !== u.id) || Boolean(limitPendingId)}
                       notice={manageNotice}
                       onOpen={() => openManage(u)}
                       onClose={closeManage}
