@@ -15,10 +15,11 @@
  * 约定，见 KnowhowCellPreview 头部注释）。
  *
  * 样式（含新增的 .kh-mode-tag--history / .kh-modal-card--history 两条）登记在
- * knowhow-panel-styles.tsx 的 `<style jsx global>`（由 KnowhowPanel 顶层挂载），不在本文件另开 `<style
- * jsx>`——同 KnowhowMatrixDrawer/KnowhowHistoryDrawer 的既有约定：styled-jsx
- * 的 global 样式注入绑定「声明该标签的组件是否渲染过」，KnowhowPanel 是本特性
- * 唯一保证任何时候都已挂载的样式容器。本组件绝大多数视觉都直接复用既有类名
+ * knowhow-panel-styles.tsx 的 `<style jsx global>`（由 KnowhowPanel 顶层
+ * 挂载），不在本文件另开 `<style jsx>`——同 KnowhowMatrixDrawer/
+ * KnowhowHistoryDrawer 的既有约定：styled-jsx 的 global 样式注入绑定「声明
+ * 该标签的组件是否渲染过」，KnowhowPanel 是本特性唯一保证任何时候都已挂载的
+ * 样式容器。本组件绝大多数视觉都直接复用既有类名
  * （.kh-history-list/.kh-history-item/.knowhow-status-badge/.knowhow-confirm/
  * .knowhow-drawer-edit-button/.knowhow-action-error 等——同 knowhow-history-
  * drawer.tsx 用的那一整套），新增的只有「模式徽标第三色」与「卡片左边条第三

@@ -20,9 +20,10 @@
  * editor.tsx）简单得多：没有图片粘贴/草稿自动保存/实时预览分栏，只有一块纯
  * 文本 textarea。
  *
- * 复用 knowhow-panel-styles.tsx `<style jsx global>`（由 KnowhowPanel 顶层挂载）里登记的既有 kh-modal-,
- * kh-footer-actions, kh-close-guard- 一整套视觉语言（同 knowhow-cell-
- * editor.tsx 的既有约定——那是本特性唯一保证任何时候都已挂载的样式容器）；
+ * 复用 knowhow-panel-styles.tsx `<style jsx global>`（由 KnowhowPanel 顶层
+ * 挂载）里登记的既有 kh-modal-, kh-footer-actions, kh-close-guard- 一整套
+ * 视觉语言（同 knowhow-cell-editor.tsx 的既有约定——KnowhowPanel 是本特性
+ * 唯一保证任何时候都已挂载的样式容器）；
  * 本文件新增的 chip/代码块专属样式（.kh-code-chip* / .kh-code-block 等）与
  * 新增的 .knowhow-status-badge--warning 色调同样登记在那里，不在本文件内
  * 另开 <style jsx>。

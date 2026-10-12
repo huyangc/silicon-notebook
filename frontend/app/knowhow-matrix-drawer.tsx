@@ -12,10 +12,11 @@
  * 纯函数、不另立 *-logic.ts。
  *
  * 样式（`.kh-matrix*` 一整套）登记在 knowhow-panel-styles.tsx 的
- * `<style jsx global>`（由 KnowhowPanel 顶层挂载），不在本文件另开 `<style jsx>`——同 knowhow-cell-
- * editor.tsx / knowhow-code.tsx 的既有约定：styled-jsx 的 global 样式注入
- * 绑定「声明该 <style jsx global> 的组件是否渲染过」，KnowhowPanel 是本特性
- * 唯一保证任何时候都已挂载的样式容器，本组件不能自己声明一份（谁先渲染谁
+ * `<style jsx global>`（由 KnowhowPanel 顶层挂载），不在本文件另开
+ * `<style jsx>`——同 knowhow-cell-editor.tsx / knowhow-code.tsx 的既有
+ * 约定：styled-jsx 的 global 样式注入绑定「声明该 <style jsx global> 的组件
+ * 是否渲染过」，KnowhowPanel 是本特性唯一保证任何时候都已挂载的样式容器，
+ * 本组件不能自己声明一份（谁先渲染谁
  * 才有样式，会导致偶发裸 DOM）。外壳（overlay/card/header/breadcrumb/
  * icon-button）复用既有 kh-modal-*，与格子浮窗/代码浮层同一套视觉语言。
  *
