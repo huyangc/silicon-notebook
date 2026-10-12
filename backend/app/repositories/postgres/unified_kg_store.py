@@ -127,8 +127,8 @@ _PUBLISHED_CLUSTER_GEN = (
 def _derived_layer_live(seq_column: str) -> str:
     return (
         "NOT EXISTS (SELECT 1 FROM unified_kg_state dls "
-        "WHERE dls.notebook_id = %s AND dls.kg_reset_epoch > 0 "
-        f"AND dls.{seq_column} = -1 AND dls.last_rebuild_at IS NULL)"
+        f"WHERE dls.notebook_id = %s AND dls.{seq_column} = -1 "
+        "AND dls.kg_reset_epoch > 0 AND dls.last_rebuild_at IS NULL)"
     )
 
 
@@ -137,10 +137,12 @@ _MENTION_LAYER_LIVE = _derived_layer_live("mention_seq")
 
 # The published community generation; -1 (never a real generation) while the
 # community layer is in the delete signature above. Same single state-row
-# lookup as before -- the gate costs nothing extra.
+# lookup as before; a published generation above 0 answers at the first
+# branch.
 _PUBLISHED_COMMUNITY_GEN = (
-    "COALESCE((SELECT CASE WHEN kg_reset_epoch > 0 AND community_seq = -1 "
-    "AND last_rebuild_at IS NULL THEN -1 ELSE community_generation END "
+    "COALESCE((SELECT CASE WHEN community_generation <> 0 THEN community_generation "
+    "WHEN community_seq = -1 AND kg_reset_epoch > 0 AND last_rebuild_at IS NULL "
+    "THEN -1 ELSE community_generation END "
     "FROM unified_kg_state WHERE notebook_id = %s), 0)"
 )
 
