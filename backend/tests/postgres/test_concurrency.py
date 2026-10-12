@@ -5,6 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -53,6 +54,17 @@ def _wait_for_lock_wait(postgres_database, needle: str, future) -> None:
                 return
             time.sleep(0.01)
     raise AssertionError(f"operation never waited for {needle!r}")
+
+
+def _recent_instant() -> str:
+    """A deletion clock whose retained rows are still unexpired today.
+
+    Retained activity expires 180 days after the injected deletion instant and
+    the readers filter ``expires_at > CURRENT_TIMESTAMP`` (no seam).  A literal
+    ``2026-08-31T12:00Z`` would empty those reads from 2027-02-27T12:00Z on.
+    """
+    instant = datetime.now(timezone.utc).replace(microsecond=0)
+    return (instant - timedelta(hours=1)).isoformat()
 
 
 @pytest.mark.postgres_integration
@@ -138,7 +150,7 @@ def test_activity_delete_race_prefers_retained_lifecycle_postgres(
     postgres_database, postgres_settings, monkeypatch
 ):
     assert PostgresMigrator(postgres_database).migrate() == 73
-    now = "2026-08-31T12:00:00+00:00"
+    now = _recent_instant()
     with postgres_database.write() as connection:
         connection.execute(
             "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
@@ -218,7 +230,7 @@ def test_live_ask_detail_delete_race_fails_closed_postgres(
     postgres_database, monkeypatch
 ):
     assert PostgresMigrator(postgres_database).migrate() == 73
-    now = "2026-08-31T12:00:00+00:00"
+    now = _recent_instant()
     with postgres_database.write() as connection:
         connection.execute(
             "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
@@ -307,7 +319,7 @@ def test_guarded_ask_detail_holds_root_lease_through_projection_postgres(
     postgres_database,
 ):
     assert PostgresMigrator(postgres_database).migrate() == 73
-    now = "2026-08-31T12:00:00+00:00"
+    now = _recent_instant()
     with postgres_database.write() as connection:
         connection.execute(
             "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
@@ -479,7 +491,7 @@ def _guard_report_fixture(postgres_database, *, prefix: str, reader: bool):
     whose ``current_user_id`` is the report creator."""
     from app.repositories.postgres.report_store import ReportStore
 
-    now = "2026-08-31T12:00:00+00:00"
+    now = _recent_instant()
     owner = f"{prefix}-owner"
     creator = f"{prefix}-reader" if reader else owner
     with postgres_database.write() as connection:
@@ -879,7 +891,7 @@ def test_final_answer_and_notebook_delete_share_root_first_lock_order(
     postgres_database, monkeypatch
 ):
     assert PostgresMigrator(postgres_database).migrate() == 73
-    now = "2026-08-31T12:00:00+00:00"
+    now = _recent_instant()
     with postgres_database.write() as connection:
         connection.execute(
             "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "

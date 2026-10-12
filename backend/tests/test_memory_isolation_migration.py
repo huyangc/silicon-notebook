@@ -243,16 +243,10 @@ def test_promotion_rejection_writes_one_reason_literal_on_both_backends():
 def test_promotion_rejection_reason_equals_the_write_side_constant():
     """The approval-time refusal (E4-3) writes
     ``MEMORY_PROMOTION_REJECTED_REASON``; the migration closes the same
-    proposals with the same reason. Skipped ONLY while that module is not in
-    the tree (it lands with the write-side branch); once it exists, any
-    import error or a different value is a failure."""
-    import importlib
-    import importlib.util
+    proposals with the same reason."""
+    from app.domain.memory_kg_isolation import MEMORY_PROMOTION_REJECTED_REASON
 
-    name = "app.domain.memory_kg_isolation"
-    if importlib.util.find_spec(name) is None:
-        pytest.skip(f"{name} is not in this tree yet (write-side branch)")
-    constant = importlib.import_module(name).MEMORY_PROMOTION_REJECTED_REASON
+    constant = MEMORY_PROMOTION_REJECTED_REASON
     assert sqlite_migrations._V87_PROMOTION_REJECTED_REASON == constant
     assert f"reason = '{constant}'" in PG_MIGRATION.read_text(encoding="utf-8")
 
