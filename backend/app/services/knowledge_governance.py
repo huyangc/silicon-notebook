@@ -662,19 +662,28 @@ class KnowledgeGovernanceService:
         resolved_payload: Optional[str] = None,
         confidence: Optional[float] = None,
         rationale: Optional[str] = None,
-    ) -> str:
+        *,
+        reset_epoch: Optional[int] = None,
+    ) -> Optional[str]:
         """Insert one conflict candidate into the queue and return its id.
 
         resolution, winner_ref, resolved_payload, confidence, and rationale
         are normally NULL at detection time and only populated after
         adjudication (set_conflict_status in T1, write-back in apply_conflict_resolution T4).
+
+        ``reset_epoch`` (K1): the notebook's ``kg_reset_epoch`` read before
+        the candidates were detected. When given, the insert lands only if
+        the epoch is still that value — a 「删除知识图谱」 that committed
+        meanwhile makes it return ``None`` and write nothing, so a detection
+        pass never writes candidates of a graph that is gone back into the
+        queue the delete just cleared.
         """
         now = self._now()
         with self._write() as db:
             return self.governance_store.write_conflict_candidate(
                 db, notebook_id, kind, left_ref, right_ref,
                 conflict_type, resolution, winner_ref, resolved_payload,
-                confidence, rationale, now,
+                confidence, rationale, now, reset_epoch=reset_epoch,
             )
 
     def pending_conflicts(self, notebook_id: str) -> List[dict]:
@@ -906,6 +915,12 @@ class KnowledgeGovernanceService:
                 "truncated_node": 0,
                 "skipped_llm": True,
             }
+
+        # K1: the graph identity the candidates below are computed from, read
+        # BEFORE the graph itself — a delete committing between the two then
+        # errs toward writing nothing, never toward stamping old-graph
+        # candidates with the new epoch. Step 7 writes only while it holds.
+        reset_epoch = self._kg_version_fn(notebook_id)[0]
 
         # 2. Load objects + relations
         # Both reads are detection-shaped: no evidence bodies (they are fetched
@@ -1210,7 +1225,18 @@ class KnowledgeGovernanceService:
                 ),
                 confidence=confidence,
                 rationale=rationale,
+                reset_epoch=reset_epoch,
             )
+            if candidate_id is None:
+                # K1: the graph was deleted while the model adjudicated —
+                # every remaining candidate (and any auto-apply) belongs to a
+                # graph that no longer exists.
+                self.event_log.emit({
+                    "kind": "kg_conflict_candidates_discarded_after_reset",
+                    "notebook_id": notebook_id,
+                    "discarded": len(candidates) - auto_applied - queued,
+                })
+                break
 
             # Auto-apply?  Only for genuine conflicts with a non-trivial resolution.
             should_apply = (

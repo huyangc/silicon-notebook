@@ -465,6 +465,15 @@ def _completion_generation_is_current(
 # ``test_kg_graph_drain.py`` pins registry↔final-statement agreement by
 # tracing the final function's SQL, so a predicate edited on one side without
 # the other fails loudly instead of drifting.
+# K1 (debt-fix 2026-10-12, ruling 11): the rebuild-derived tables are
+# deliberately NOT cleared by a graph delete — PostgreSQL twin's comment above
+# its _GRAPH_DRAIN_SETTLE_EXEMPT has the measurements and the reasons, and
+# the list of the other tables kept.
+
+# K1: drain steps excluded from the threshold-0 post-commit survivor check —
+# PostgreSQL twin's comment.
+_GRAPH_DRAIN_SETTLE_EXEMPT = frozenset({"kg_conflict_candidates", "merge_review_jobs"})
+
 _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int, bool], ...] = (
     (
         "knowledge_source_fact_backfills",
@@ -550,6 +559,24 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int, bool], ...] = (
         2,
         True,
     ),
+    # K1: conflict candidates citing a dead object/relation (any status) and
+    # the non-running merge-review progress row — the PostgreSQL twin's
+    # registry comments carry the rationale, and both are in
+    # _GRAPH_DRAIN_SETTLE_EXEMPT.
+    (
+        "kg_conflict_candidates",
+        "notebook_id=? AND ((NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
+        "WHERE ko.id=kg_conflict_candidates.left_ref) AND NOT EXISTS "
+        "(SELECT 1 FROM knowledge_relations kr "
+        "WHERE kr.id=kg_conflict_candidates.left_ref)) OR (NOT EXISTS "
+        "(SELECT 1 FROM knowledge_objects ko "
+        "WHERE ko.id=kg_conflict_candidates.right_ref) AND NOT EXISTS "
+        "(SELECT 1 FROM knowledge_relations kr "
+        "WHERE kr.id=kg_conflict_candidates.right_ref)))",
+        1,
+        True,
+    ),
+    ("merge_review_jobs", "notebook_id=? AND status<>'running'", 1, True),
     ("concept_clusters", "notebook_id = ?", 1, True),
     ("concept_merge_candidates", "notebook_id = ?", 1, True),
     ("kg_relation_completion_state", "notebook_id = ?", 1, True),
@@ -627,7 +654,8 @@ class KnowledgeStore:
 
     @staticmethod
     def graph_drain_backlog(
-        db: sqlite3.Connection, notebook_id: str, threshold: int, start: int = 0
+        db: sqlite3.Connection, notebook_id: str, threshold: int, start: int = 0,
+        *, post_commit: bool = False,
     ) -> "tuple[str, int] | None":
         """batch-3-W1 T-5a: the first ``_GRAPH_DRAIN_STEPS`` table at or
         after index ``start`` whose matching-row count still exceeds
@@ -648,9 +676,15 @@ class KnowledgeStore:
         sit after it in the registry), so a table probed clean never needs
         re-probing; rows a concurrent ingestion lands in an already-passed
         table are the final transaction's bounded residue, the same bucket
-        as the ≤threshold remainder."""
+        as the ≤threshold remainder.
+
+        ``post_commit=True`` (K1) is the threshold-0 survivor check after a
+        committed reset: it skips the ``_GRAPH_DRAIN_SETTLE_EXEMPT`` steps,
+        whose writers the delete fence does not hold off."""
         for index in range(max(0, int(start)), len(_GRAPH_DRAIN_STEPS)):
             table, predicate, params, _mirrored = _GRAPH_DRAIN_STEPS[index]
+            if post_commit and table in _GRAPH_DRAIN_SETTLE_EXEMPT:
+                continue
             row = db.execute(
                 f"SELECT 1 FROM {table} WHERE {predicate} LIMIT 1 OFFSET {int(threshold)}",
                 (notebook_id,) * params,
@@ -882,6 +916,27 @@ class KnowledgeStore:
             (notebook_id, notebook_id),
         )
         counts["knowledge_object_sources"] = cur.rowcount
+        # K1: dead-ref conflict candidates + non-running merge-review row —
+        # PostgreSQL twin's registry comments carry the rationale.
+        cur = db.execute(
+            "DELETE FROM kg_conflict_candidates WHERE notebook_id=? AND "
+            "((NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
+            "WHERE ko.id=kg_conflict_candidates.left_ref) AND NOT EXISTS "
+            "(SELECT 1 FROM knowledge_relations kr "
+            "WHERE kr.id=kg_conflict_candidates.left_ref)) OR (NOT EXISTS "
+            "(SELECT 1 FROM knowledge_objects ko "
+            "WHERE ko.id=kg_conflict_candidates.right_ref) AND NOT EXISTS "
+            "(SELECT 1 FROM knowledge_relations kr "
+            "WHERE kr.id=kg_conflict_candidates.right_ref)))",
+            (notebook_id,),
+        )
+        counts["kg_conflict_candidates"] = cur.rowcount
+        cur = db.execute(
+            "DELETE FROM merge_review_jobs WHERE notebook_id=? "
+            "AND status<>'running'",
+            (notebook_id,),
+        )
+        counts["merge_review_jobs"] = cur.rowcount
         for table in (
             "concept_clusters", "concept_merge_candidates",
             "kg_relation_completion_state",

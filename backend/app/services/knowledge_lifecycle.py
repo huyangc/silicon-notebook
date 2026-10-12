@@ -850,8 +850,12 @@ class KnowledgeLifecycleService:
                 # every later commit) and, when doc-graph rows survived,
                 # spend a remaining attempt on another drain+reset round.
                 with self._connect() as db:
+                    # K1: post_commit skips the drain-only steps (conflict
+                    # candidates, merge-review row) whose writers the fence
+                    # does not hold off — see the adapters'
+                    # _GRAPH_DRAIN_SETTLE_EXEMPT.
                     survivors = self.knowledge.graph_drain_backlog(
-                        db, notebook_id, 0, 0
+                        db, notebook_id, 0, 0, post_commit=True
                     )
                 if survivors is None:
                     break
@@ -908,7 +912,7 @@ class KnowledgeLifecycleService:
         """batch-3-W1 T-5a: bound ``delete_notebook_kg``'s final single
         transaction by PRE-draining the bulk of the graph in small
         per-transaction pages, without touching the P0-1 invariant the final
-        pass carries ("all 13 DELETEs + the unified_kg_state reset commit in
+        pass carries ("every DELETE + the unified_kg_state reset commit in
         ONE ``write()``, cache invalidation strictly after that commit" —
         pinned by ``test_kg_mutation_phase_matrix.py::test_delete_delegates_
         in_write_then_commits_before_cache_invalidation``). The invariant

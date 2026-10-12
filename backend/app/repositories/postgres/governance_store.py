@@ -943,7 +943,9 @@ class GovernanceStore:
         confidence: Optional[float],
         rationale: Optional[str],
         now: str,
-    ) -> str:
+        *,
+        reset_epoch: Optional[int] = None,
+    ) -> Optional[str]:
         cid = self.seams.new_id("kcc")
         resolved_json = (
             None
@@ -952,19 +954,40 @@ class GovernanceStore:
                 resolved_payload, expected=dict, field="resolved conflict payload"
             ))
         )
-        connection.execute(
+        values = (cid, notebook_id, kind, left_ref, right_ref,
+                  conflict_type, resolution, winner_ref, resolved_json,
+                  confidence, rationale, normalize_timestamp(now),
+                  normalize_timestamp(now))
+        if reset_epoch is None:
+            connection.execute(
+                """
+                INSERT INTO kg_conflict_candidates
+                  (id, notebook_id, kind, left_ref, right_ref,
+                   conflict_type, resolution, winner_ref, resolved_payload,
+                   confidence, rationale, status, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s)
+                """,
+                values,
+            )
+            return cid
+        # K1: insert only while the graph is still the one the caller read
+        # (kg_reset_epoch unchanged; a missing state row reads as epoch 0,
+        # graph_seq_row's convention). FOR SHARE: a delete whose reset UPSERT
+        # is in flight makes this wait for its commit and then compare
+        # against the advanced epoch, instead of slipping in underneath it.
+        cur = connection.execute(
             """
             INSERT INTO kg_conflict_candidates
               (id, notebook_id, kind, left_ref, right_ref,
                conflict_type, resolution, winner_ref, resolved_payload,
                confidence, rationale, status, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s)
+            SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s
+            WHERE COALESCE((SELECT kg_reset_epoch FROM unified_kg_state
+                            WHERE notebook_id=%s FOR SHARE), 0) = %s
             """,
-            (cid, notebook_id, kind, left_ref, right_ref,
-             conflict_type, resolution, winner_ref, resolved_json,
-             confidence, rationale, normalize_timestamp(now), normalize_timestamp(now)),
+            (*values, notebook_id, int(reset_epoch)),
         )
-        return cid
+        return cid if cur.rowcount else None
 
     @staticmethod
     def pending_conflicts(
