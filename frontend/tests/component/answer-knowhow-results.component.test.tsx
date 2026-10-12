@@ -203,6 +203,18 @@ test("未知 truncated_reason 兜底显示「部分结果」,不吐英文内部�
 });
 
 
+// 技术债 C2:「部分结果」标注的悬停提示此前是 overflow_semantics 的原值 explicit_partial。
+test("部分结果标注的悬停提示是中文，不吐 overflow_semantics 代号", () => {
+  const answer = answerWithRows(100, false);
+  const result = answer.result_sets![0] as KnowhowResultSet;
+  result.coverage.truncated_reason = "row_limit";
+
+  renderAnswer(answer);
+  const reason = screen.getByText("已明确标注为部分结果（已达本轮可读取的行数上限）");
+  expect(reason).toHaveAttribute("title", "结果未全部列出");
+});
+
+
 test("batch coverage distinguishes omitted tables from complete selected tables", () => {
   const answer = answerWithRows(10, true);
   answer.result_coverage = {

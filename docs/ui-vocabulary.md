@@ -105,5 +105,7 @@ SQL 字面量 `UPDATE kg_build_jobs SET … error_message='…'` 写入的文案
 
 守卫是词黑名单，不是完整语义检查；它会剥离注释、标识符和插值，新增界面文案仍须人工
 对照本表。`frontend/tests/guards/raw-enum-fallback.test.mjs` 另行禁止把未知枚举原值直接
-展示给用户；`backend/tests/test_ui_vocabulary_guard.py` 保证表中每个词条都被规则覆盖或有
-显式豁免理由。
+展示给用户；`frontend/tests/guards/english-control-copy-guard.test.mjs` 禁止 JSX `title` /
+`aria-label` 的字面结果值是纯英文（含英文字母且不含中文；符号、空串、数字不算），它看不见
+先算好再传的变量、对象取值、展开属性、自定义 prop 转手与 `setAttribute`，这些仍靠人工；
+`backend/tests/test_ui_vocabulary_guard.py` 保证表中每个词条都被规则覆盖或有显式豁免理由。

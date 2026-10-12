@@ -5111,10 +5111,10 @@ export default function Home() {
             </div>
             <div className="library-actions">
               <div className={`collection-search ${notebookCollection.searchQuery ? "search-open" : ""}`}>
-                <button className="icon-button" title="Search">⌕</button>
+                <button className="icon-button" title="搜索">⌕</button>
                 <input value={notebookCollection.searchQuery} onChange={(event) => notebookCollection.updateSearchQuery(event.target.value)} type="search" placeholder="搜索笔记本、来源、元素" />
               </div>
-              <div className="segmented" aria-label="View mode">
+              <div className="segmented" aria-label="显示方式">
                 {[
                   { id: "grid", icon: <LayoutGrid size={16} />, title: "卡片视图" },
                   { id: "list", icon: <ListIcon size={16} />, title: "列表视图" },

@@ -105,6 +105,17 @@ function truncatedReasonLabel(reason: string): string {
   return label(TRUNCATED_REASON_LABELS, reason, "部分结果");
 }
 
+// 覆盖率的 overflow_semantics → 「部分结果」标注的悬停提示。取值真源是后端
+// ask_retrieval_policy.py 的 EXPLICIT_PARTIAL_OVERFLOW(目前唯一的值 explicit_partial,
+// 空串按它处理)。此前直接把这个 id 当 title,用户悬停看到的是英文代号。
+const OVERFLOW_SEMANTICS_LABELS: Record<string, string> = {
+  explicit_partial: "结果未全部列出",
+};
+
+function overflowSemanticsLabel(semantics: string | undefined): string {
+  return label(OVERFLOW_SEMANTICS_LABELS, semantics || "explicit_partial", "部分结果");
+}
+
 
 function KnowhowResultSetCard({
   resultSet,
@@ -132,7 +143,7 @@ function KnowhowResultSetCard({
         </span>
         <strong><Table2 size={14} aria-hidden="true" /> {resultSet.title}</strong>
         {!coverage.complete && coverage.truncated_reason && (
-          <span className="answer-knowhow-partial-reason" title={coverage.overflow_semantics || "explicit_partial"}>
+          <span className="answer-knowhow-partial-reason" title={overflowSemanticsLabel(coverage.overflow_semantics)}>
             已明确标注为部分结果（{truncatedReasonLabel(coverage.truncated_reason)}）
             {coverage.scanned_rows !== coverage.returned_rows
               ? `；已扫描 ${coverage.scanned_rows} 行`
@@ -650,7 +661,7 @@ function CollectionResultCard({
           {!coverage.complete && coverage.truncated_reason && coverage.truncated_reason !== "concurrent_change" && (
             <span
               className="answer-collection-partial-reason"
-              title={coverage.overflow_semantics || "explicit_partial"}
+              title={overflowSemanticsLabel(coverage.overflow_semantics)}
             >
               已明确标注为部分结果（{truncatedReasonLabel(coverage.truncated_reason)}）
             </span>
