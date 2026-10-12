@@ -4,8 +4,11 @@ import io
 import json
 import os
 import tempfile
+import time
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from app.core.config import Settings
 from app.models.schemas import (
@@ -22,6 +25,59 @@ from app.services.parsers import mineru_content_list_to_elements
 from app.services.repository import UploadedSourceFile
 from app.services.retrieval import score_knowledge
 from app.services.sqlite_repository import SQLiteRepository
+
+
+_SCRATCH_DRAIN_SECONDS = 60.0
+
+
+def _maintenance_pools_idle_now() -> bool:
+    """Non-blocking read: is every live maintenance pool idle at this instant?"""
+    from app.services import background_jobs
+
+    with background_jobs._executor_lock:
+        executors = tuple(background_jobs._executors.values())
+    now = time.monotonic()
+    return all(executor.wait_idle(now) for executor in executors)
+
+
+def _drain_background_work(timeout: float = _SCRATCH_DRAIN_SECONDS) -> None:
+    """Block until the maintenance pools and the KG scheduler are idle together.
+
+    Background work a check started (KG builds, maintenance jobs) may still be
+    writing into the check's database when the check returns; removing the
+    directory under it makes cleanup fail with an unrelated-looking error.
+    Each side can hand work to the other, so this loops until one pass finds
+    both idle at once.  Running out of time is a real failure, not something
+    to paper over with ``ignore_cleanup_errors``.
+    """
+    from app.services import background_jobs
+    from app.services.kg import scheduler as kg_scheduler
+
+    deadline = time.monotonic() + timeout
+    while True:
+        background_jobs._drain_maintenance_executors_for_tests(
+            timeout=max(0.0, deadline - time.monotonic())
+        )
+        kg_idle = kg_scheduler.wait_idle(max(0.0, deadline - time.monotonic()))
+        assert kg_idle, (
+            f"the KG scheduler did not go idle within {timeout:.0f}s: "
+            f"{kg_scheduler.stats()}"
+        )
+        if _maintenance_pools_idle_now() and kg_scheduler.wait_idle(0):
+            return
+        assert time.monotonic() < deadline, (
+            f"background work kept arriving for {timeout:.0f}s"
+        )
+
+
+@contextmanager
+def _scratch_dir(prefix: str) -> Iterator[str]:
+    """A temporary directory that is removed only after background work drains."""
+    with tempfile.TemporaryDirectory(prefix=prefix) as path:
+        try:
+            yield path
+        finally:
+            _drain_background_work()
 
 
 def _offline_settings(root: Path, *, event_log_dir: Path | None = None) -> Settings:
@@ -161,7 +217,7 @@ def check_object_schemas() -> None:
     """Editable schema registry now seeds the four KG object types."""
     from app.models.schemas import ObjectSchemaCreate, ObjectSchemaUpdate
 
-    with tempfile.TemporaryDirectory(prefix="sn-schema-") as tmp:
+    with _scratch_dir("sn-schema-") as tmp:
         root = Path(tmp)
         repo = SQLiteRepository(_offline_settings(root))
         seeded = {schema.object_type for schema in repo.list_object_schemas()}
@@ -384,7 +440,7 @@ def check_kg_windowing() -> None:
 
 def check_kg_store_ask_and_conversations() -> None:
     """KG storage, graph browse, Ask retrieval, citations, and conversations."""
-    with tempfile.TemporaryDirectory(prefix="sn-kg-") as tmp:
+    with _scratch_dir("sn-kg-") as tmp:
         root = Path(tmp)
         repo = SQLiteRepository(_offline_settings(root))
         nb = repo.create_notebook(NotebookCreate(name="KG", purpose="p"))
@@ -506,7 +562,7 @@ def check_api_layer() -> None:
     """Boot the FastAPI app and exercise route groups against a throwaway DB."""
     from fastapi.testclient import TestClient
 
-    with tempfile.TemporaryDirectory(prefix="sn-api-") as tmp:
+    with _scratch_dir("sn-api-") as tmp:
         os.environ.update(
             {
                 "MODEL_SERVICES_CONFIG": "",
@@ -887,7 +943,7 @@ def check_pipeline_event_logging() -> None:
     """process_source emits stage events and stores real failure error_message."""
     from app.core.event_logging import get_log_owner, owner_dir
 
-    with tempfile.TemporaryDirectory(prefix="silicon-notebook-pipe-") as temp_dir:
+    with _scratch_dir("silicon-notebook-pipe-") as temp_dir:
         root = Path(temp_dir)
         log_dir = root / "logs"
         repo = SQLiteRepository(_offline_settings(root, event_log_dir=log_dir))
@@ -952,7 +1008,7 @@ def main() -> None:
     check_payload_embedding_retrieval()
     check_api_layer()
 
-    with tempfile.TemporaryDirectory(prefix="silicon-notebook-smoke-") as temp_dir:
+    with _scratch_dir("silicon-notebook-smoke-") as temp_dir:
         root = Path(temp_dir)
         repository = SQLiteRepository(_offline_settings(root))
 
