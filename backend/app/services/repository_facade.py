@@ -1352,10 +1352,11 @@ class RepositoryFacade:
         )
 
     def list_agent_profiles(
-        self, owner_id: str, offset: int = 0, limit: int = 100
+        self, owner_id: str, offset: int = 0, limit: int = 100,
+        *, include_deleted: bool = False,
     ) -> list[AgentProfile]:
         return self._runtime.memory_service.list_agent_profiles(
-            owner_id, offset, limit
+            owner_id, offset, limit, include_deleted=include_deleted
         )
 
     def update_agent_profile(

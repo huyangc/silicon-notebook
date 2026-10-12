@@ -170,12 +170,16 @@ class MemoryStore:
         return self._profile(row)
 
     def list_agent_profiles(
-        self, owner_id: str, offset: int = 0, limit: int = 100
+        self, owner_id: str, offset: int = 0, limit: int = 100,
+        *, include_deleted: bool = False,
     ) -> list[AgentProfile]:
+        # ``include_deleted`` is for id→name resolution only (a deleted
+        # Agent's memories/records keep its name); listings leave it False.
+        live_only = "" if include_deleted else "AND deleted_at IS NULL "
         with self.database.connect() as db:
             rows = db.execute(
                 "SELECT * FROM agent_profiles WHERE owner_id=%s "
-                "AND deleted_at IS NULL "
+                + live_only +
                 "ORDER BY updated_at DESC,id COLLATE \"C\" DESC LIMIT %s OFFSET %s",
                 (owner_id, limit, offset),
             ).fetchall()
@@ -248,8 +252,11 @@ class MemoryStore:
         now = self.now()
         with self.database.write() as db:
             profile = db.execute(
+                # FOR SHARE: a concurrent delete_agent_profile's UPDATE queues
+                # behind this issue (and then revokes the new token), or this
+                # waits for the delete and re-checks status -> KeyError.
                 "SELECT name FROM agent_profiles "
-                "WHERE id=%s AND owner_id=%s AND status='active'",
+                "WHERE id=%s AND owner_id=%s AND status='active' FOR SHARE",
                 (agent_profile_id, owner_id),
             ).fetchone()
             if profile is None:
@@ -686,7 +693,7 @@ class MemoryStore:
             if write.agent_profile_id:
                 profile = db.execute(
                     "SELECT id,name FROM agent_profiles "
-                    "WHERE id=%s AND owner_id=%s AND status='active'",
+                    "WHERE id=%s AND owner_id=%s AND status='active' FOR SHARE",
                     (write.agent_profile_id, write.created_by),
                 ).fetchone()
                 if profile is None:

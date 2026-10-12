@@ -827,16 +827,27 @@ test("刷新后不丢掉第二页里已选中的 Profile", async () => {
   expect(within(issueForm()).getByRole("combobox", { name: "Profile" })).toHaveValue("p2-0");
 });
 
-test("删除 Profile:行内确认后请求,原位显示已删除,随后移出列表并刷新 token", async () => {
+function profileRowNames(): string[] {
+  return Array.from(document.querySelectorAll(".agent-profile-list > div strong")).map((node) => node.textContent || "");
+}
+
+test("删除 Profile:行内确认后请求,中间那行原位显示已删除,到期后只剩其余行且顺序不变", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const profiles = [
+    { ...profileOne, id: "agent-0", name: "甲档案" },
+    profileOne,
+    { ...profileOne, id: "agent-2", name: "丙档案" },
+  ];
   let deleted = false;
   routeRequests(baseRoutes({
-    "GET /agent-profiles": () => (deleted ? [] : [profileOne]),
+    "GET /agent-profiles": () => (deleted ? [profiles[0], profiles[2]] : profiles),
     "GET /agent-tokens": () => [deleted ? { ...activeToken, revoked_at: "2026-09-03T00:00:00Z" } : activeToken],
     "DELETE /agent-profiles/agent-1": () => { deleted = true; return undefined; },
   }));
-  const user = userEvent.setup();
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
   render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
   await screen.findAllByText("Claude Code");
+  expect(profileRowNames()).toEqual(["甲档案", "Claude Code", "丙档案"]);
 
   await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "删除" }));
   expect(profileListRow("Claude Code")).toHaveTextContent("永久撤销，且不能恢复");
@@ -848,14 +859,65 @@ test("删除 Profile:行内确认后请求,原位显示已删除,随后移出列
   await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "确认删除" }));
   expect(await within(profileListRow("Claude Code")).findByRole("status")).toHaveTextContent("已删除");
   expect(within(profileListRow("Claude Code")).queryByRole("button")).toBeNull();
+  // 快照是删除前的样子,不能再写「启用/已停用」与「已删除」自相矛盾。
+  expect(profileListRow("Claude Code")).not.toHaveTextContent("启用");
+  expect(profileListRow("Claude Code")).not.toHaveTextContent("已停用");
   expect(requestsTo("DELETE /agent-profiles/agent-1")).toHaveLength(1);
   await waitFor(() => expect(requestsTo("GET /agent-tokens").length).toBeGreaterThan(tokenFetchesBefore));
-  // 刷新回来的列表已不含它,提示期间这一行仍在原位。
-  expect(within(profileListRow("Claude Code")).getByRole("status")).toHaveTextContent("已删除");
+  // 刷新回来的列表已不含它,提示期间这一行仍在原位(中间)。
+  expect(profileRowNames()).toEqual(["甲档案", "Claude Code", "丙档案"]);
 
-  await waitFor(() => {
-    expect(document.querySelector(".agent-profile-list > div")).toBeNull();
-  }, { timeout: 5000 });
+  await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+  expect(profileRowNames()).toEqual(["甲档案", "丙档案"]);
+});
+
+test("删除后刷新失败或迟迟不回:提示到期后该行不会以可操作形态回来", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  let deleted = false;
+  routeRequests(baseRoutes({
+    "GET /agent-profiles": () => {
+      if (!deleted) return [profileOne];
+      throw humanizedError("服务暂时不可用，请稍后重试", 503);
+    },
+    "DELETE /agent-profiles/agent-1": () => { deleted = true; return undefined; },
+  }));
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findAllByText("Claude Code");
+
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "删除" }));
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "确认删除" }));
+  expect(await within(profileListRow("Claude Code")).findByRole("status")).toHaveTextContent("已删除");
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+  expect(profileRowNames()).toEqual([]);
+  expect(screen.queryByRole("button", { name: "停用" })).toBeNull();
+});
+
+test("删除成功前发出的列表请求晚到:不会把已删除的 Profile 加回来", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  let lateList = false;
+  let resolveLate!: (value: unknown) => void;
+  let listCalls = 0;
+  routeRequests(baseRoutes({
+    "GET /agent-profiles": () => {
+      listCalls += 1;
+      if (listCalls === 2) { lateList = true; return new Promise((resolve) => { resolveLate = resolve; }); }
+      return listCalls === 1 ? [profileOne] : [];
+    },
+    "DELETE /agent-profiles/agent-1": () => undefined,
+  }));
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findAllByText("Claude Code");
+
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "删除" }));
+  await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "确认删除" }));
+  expect(await within(profileListRow("Claude Code")).findByRole("status")).toHaveTextContent("已删除");
+  await waitFor(() => expect(lateList).toBe(true));
+  await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+  await act(async () => { resolveLate([profileOne]); });
+  expect(profileRowNames()).toEqual([]);
 });
 
 test("删除失败时原因落在该 Profile 行,确认留着可以就地重试", async () => {

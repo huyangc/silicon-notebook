@@ -130,12 +130,16 @@ class MemoryStore:
         return self._profile(row)
 
     def list_agent_profiles(
-        self, owner_id: str, offset: int = 0, limit: int = 100
+        self, owner_id: str, offset: int = 0, limit: int = 100,
+        *, include_deleted: bool = False,
     ) -> list[AgentProfile]:
+        # ``include_deleted`` is for id→name resolution only (a deleted
+        # Agent's memories/records keep its name); listings leave it False.
+        live_only = "" if include_deleted else "AND deleted_at IS NULL "
         with self.database.connect() as db:
             rows = db.execute(
                 "SELECT * FROM agent_profiles WHERE owner_id=? "
-                "AND deleted_at IS NULL "
+                + live_only +
                 "ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?",
                 (owner_id, limit, offset),
             ).fetchall()

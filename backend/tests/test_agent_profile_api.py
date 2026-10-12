@@ -125,6 +125,26 @@ def _seed_observation_for_profile(
 # --------------------------------------------------------------------- read
 
 
+def test_deleted_agent_keeps_its_name_on_its_observations(tmp_path, monkeypatch):
+    """Deleting a Profile drops it from GET /api/agent-profiles but the
+    Agent records it left still show its original name."""
+    client = _client(tmp_path, monkeypatch)
+    owner, owner_id = _new_user(client)
+    notebook_id = _notebook(client, owner)
+    profile_id, _ = _seed_observation(
+        notebook_id, owner_id, agent_name="将被删的助手", text="删前留下的记录"
+    )
+    deleted = client.delete(f"/api/agent-profiles/{profile_id}", headers=owner)
+    assert deleted.status_code == 204, deleted.text
+    listed = client.get("/api/agent-profiles", headers=owner)
+    assert profile_id not in {p["id"] for p in listed.json()}
+    got = client.get(f"/api/notebooks/{notebook_id}/agent-observations", headers=owner)
+    assert got.status_code == 200, got.text
+    assert [i["agent_name"] for i in got.json()["items"]] == ["将被删的助手"]
+
+
+
+
 def test_isolation_reader_never_sees_owner_observations_in_shared_notebook(
     tmp_path, monkeypatch
 ):
@@ -306,7 +326,8 @@ def test_agent_names_resolve_past_the_first_roster_page():
     roster = [_P(i) for i in range(2 * AGENT_PROFILE_NAME_PAGE + 50)]
     calls = []
 
-    def list_profiles(owner_id, offset, limit):
+    def list_profiles(owner_id, offset, limit, *, include_deleted=False):
+        assert include_deleted is True
         calls.append((offset, limit))
         return roster[offset:offset + limit]
 

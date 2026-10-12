@@ -3753,3 +3753,109 @@ def test_approving_a_decided_request_does_not_queue_on_the_notebook_lock(
         finally:
             holder.rollback()
     assert again is None
+
+
+def _hold_profile_deleted(editor, profile_id: str) -> None:
+    """The profile half of ``delete_agent_profile``, left uncommitted."""
+    editor.execute(
+        "UPDATE agent_profiles SET status='revoked',deleted_at=%s,updated_at=%s "
+        "WHERE id=%s",
+        ("2026-07-23T00:00:01+00:00", "2026-07-23T00:00:01+00:00", profile_id),
+    )
+
+
+@pytest.mark.postgres_integration
+def test_token_issue_cannot_slip_past_an_uncommitted_profile_delete(postgres_database):
+    """Without ``FOR SHARE`` on the profile read the issue would see ``active``,
+    insert after the delete's token sweep, and leave a live token on a deleted
+    Profile. With it the issue queues behind the delete and fails ``KeyError``."""
+    assert PostgresMigrator(postgres_database).migrate() == 73
+    _seed_memory_race(postgres_database)
+    store = _memory_store(postgres_database)
+    profile = store.create_agent_profile("owner-race", "Doomed", "")
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with postgres_database.write() as editor:
+            _hold_profile_deleted(editor, profile.id)
+            issue_future = executor.submit(
+                store.create_agent_token, "agent-token-race", "owner-race",
+                profile.id, "sha256-race", ["read"], "nb-memory-race",
+                ["nb-memory-race"], None, token_plain="snm_race.secret",
+            )
+            _wait_for_lock_wait(postgres_database, "agent_profiles", issue_future)
+        with pytest.raises(KeyError):
+            issue_future.result(timeout=5)
+
+    assert store.list_agent_tokens("owner-race") == []
+
+
+@pytest.mark.postgres_integration
+def test_token_issue_blocks_delete_until_it_commits_and_delete_revokes_it(
+    postgres_database,
+):
+    """The other order: a delete arriving while an issue holds the profile
+    share lock waits, then its token sweep sees the committed token."""
+    assert PostgresMigrator(postgres_database).migrate() == 73
+    _seed_memory_race(postgres_database)
+    store = _memory_store(postgres_database)
+    profile = store.create_agent_profile("owner-race", "Doomed", "")
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with postgres_database.write() as issuer:
+            assert issuer.execute(
+                "SELECT name FROM agent_profiles WHERE id=%s AND owner_id=%s "
+                "AND status='active' FOR SHARE",
+                (profile.id, "owner-race"),
+            ).fetchone() is not None
+            delete_future = executor.submit(
+                store.delete_agent_profile, profile.id, "owner-race"
+            )
+            _wait_for_lock_wait(postgres_database, "agent_profiles", delete_future)
+            issuer.execute(
+                "INSERT INTO agent_access_tokens(id,agent_profile_id,token_hash,"
+                "scopes_json,default_notebook_id,created_at,token_plain) "
+                "VALUES ('agent-token-race-2',%s,'sha256-race-2',%s,"
+                "'nb-memory-race',%s,'snm_race.secret')",
+                (profile.id, Jsonb(["read"]), "2026-07-23T00:00:00+00:00"),
+            )
+        assert delete_future.result(timeout=5) is None
+
+    with postgres_database.connect() as db:
+        live = db.execute(
+            "SELECT count(*) AS n FROM agent_access_tokens "
+            "WHERE agent_profile_id=%s AND revoked_at IS NULL",
+            (profile.id,),
+        ).fetchone()
+    assert live["n"] == 0
+
+
+@pytest.mark.postgres_integration
+def test_memory_write_cannot_slip_past_an_uncommitted_profile_delete(postgres_database):
+    assert PostgresMigrator(postgres_database).migrate() == 73
+    _seed_memory_race(postgres_database)
+    store = _memory_store(postgres_database)
+    profile = store.create_agent_profile("owner-race", "Doomed", "")
+    write = MemoryWrite(
+        id="memory-profile-race",
+        notebook_id="nb-memory-race",
+        created_by="owner-race",
+        origin="external_agent",
+        status="candidate",
+        title="Race memory",
+        content_md="body",
+        tags=[],
+        created_at="2026-07-23T00:00:00+00:00",
+        updated_at="2026-07-23T00:00:00+00:00",
+        agent_profile_id=profile.id,
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with postgres_database.write() as editor:
+            _hold_profile_deleted(editor, profile.id)
+            write_future = executor.submit(
+                store.create_candidate_with_initial_revision,
+                write, "owner-race", "created",
+            )
+            _wait_for_lock_wait(postgres_database, "agent_profiles", write_future)
+        with pytest.raises(PermissionError):
+            write_future.result(timeout=5)

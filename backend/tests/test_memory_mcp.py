@@ -492,6 +492,47 @@ async def test_candidate_is_agent_recallable_across_owner_profiles_but_not_noteb
 
 
 @pytest.mark.anyio
+async def test_deleted_agent_keeps_its_name_on_memories_it_left(mcp_env):
+    """Soft-deleting a Profile hides it from the roster but its memories keep
+    the name: read_reference and search(include="memory") both resolve
+    ``created_by_agent`` through ids of deleted Profiles too."""
+    notebook_id = mcp_env["notebook"].id
+    app = mcp_env["app"]
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(
+            app, mcp_env["token_a"].token, manage_lifespan=False
+        ) as creator:
+            created = _payload(await creator.call("propose_memory", {
+                "title": "Orphan guard ring",
+                "content_md": "Use the distinctive zeta guard-ring procedure.",
+                "tags": ["layout"],
+                "reason": "Worked in the previous task",
+                "task_context": {"task": "extraction"},
+                "evidence_refs": [],
+                "client_request_id": "request-deleted-agent",
+            }))
+        memory_id = created["memory_id"]
+        mcp_env["service"].delete_agent_profile(
+            mcp_env["profile_a"].id, mcp_env["alice"].id
+        )
+        assert mcp_env["profile_a"].id not in {
+            p.id for p in mcp_env["service"].list_agent_profiles(mcp_env["alice"].id)
+        }
+        async with OfficialMcpClient(
+            app, mcp_env["token_b"].token, manage_lifespan=False
+        ) as peer:
+            detail = _payload(await peer.call(
+                "read_reference", {"ref": _mem_ref(notebook_id, memory_id)}
+            ))
+            assert detail["created_by_agent"] == "Claude Code"
+            recalled = _payload(await peer.call(
+                "search", {"include": "memory", "query": "zeta guard-ring"}
+            ))
+            hit = next(i for i in recalled["items"] if i["memory_id"] == memory_id)
+            assert hit["created_by_agent"] == "Claude Code"
+
+
+@pytest.mark.anyio
 async def test_access_is_rechecked_after_revoke_and_membership_loss(mcp_env):
     notebook_id = mcp_env["notebook"].id
     app = mcp_env["app"]
