@@ -44,9 +44,13 @@
   逆转 `done`；`report.completed_observer` 另不得启动检索/模型工作。修改 Ask 完成
   路径时保留其既有 observer 顺序、失败隔离与成本。
 - G1 的 `scripts/check_architecture_boundaries.py` 守住
-  `scripts/architecture_boundary_baseline.json`：repositories→services 债务与 facade
-  表面只减不增，core/models→services import、列出的热点函数长度、repository
-  Protocol 方法数均无预留空间；缩小时同批下调 baseline。退役 facade 成员按
+  `scripts/architecture_boundary_baseline.json`：repositories→services 债务只减不增，
+  facade 公开面、core/models→services import、列出的热点函数长度、repository
+  Protocol 方法数均无预留空间；缩小时同批下调 baseline。只在运行时按名字取用的 facade
+  属性不存在时，同一脚本也会报错：包括 `repository_facade.py` 里的
+  `_repository_from_weakref(...)` 接缝，以及 `backend/app`、`scripts` 中对 facade 形状
+  接收者用字面量做的 `getattr`/`hasattr` 探测。这类调用方不会报错而是静默降级，普查脚本
+  也看不到它们。退役 facade 成员按
   [调用方台账](./superpowers/plans/2026-08-23-facade-retirement-ledger.md) 逐批进行，
   用 `scripts/audit_facade_callers.py` 复现，并同步 ownership/surface fixture：
   `scripts/generate_repository_contract_fixtures.py --rebaseline-surface`。

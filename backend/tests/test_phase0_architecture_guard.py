@@ -172,7 +172,9 @@ def test_application_stage_guard_rejects_unaliased_submodule_root_binding(
     ]
 
 
-def test_facade_freeze_rejects_addition_but_allows_surface_reduction(tmp_path):
+def test_facade_surface_additions_report_only_new_seats(tmp_path):
+    """The additions half of the surface freeze; the stale half (a retired
+    name left on the allowlist) is ``facade_surface_stale``, pinned below."""
     path = tmp_path / "facade.py"
     _write(
         path,
@@ -205,6 +207,151 @@ def test_facade_freeze_rejects_addition_but_allows_surface_reduction(tmp_path):
 
     _write(path, "class RepositoryFacade:\n    def existing(self): pass\n")
     assert facade_surface_additions(path, "RepositoryFacade", allowed) == []
+
+
+def _facade_root(tmp_path, *, facade_body, allowed, app_files=None):
+    """A minimal checkout: the three repository classes, the surface
+    baseline, and any ``backend/app`` modules a case needs."""
+    _write(
+        tmp_path / "backend/app/services/repository_facade.py",
+        "def _repository_from_weakref(ref):\n"
+        "    return ref()\n"
+        "\n"
+        f"class RepositoryFacade:\n{facade_body}",
+    )
+    _write(
+        tmp_path / "backend/app/services/sqlite_repository.py",
+        "class SQLiteRepository(RepositoryFacade):\n"
+        "    def close_local(self): pass\n",
+    )
+    _write(
+        tmp_path / "backend/app/repositories/postgres/repository.py",
+        "class PostgresRepository(RepositoryFacade):\n"
+        "    def close(self): pass\n",
+    )
+    _write(
+        tmp_path / "scripts/architecture_boundary_baseline.json",
+        json.dumps(
+            {
+                "facade_public_surface": {
+                    "RepositoryFacade": {"allowed_names": sorted(allowed)},
+                    "SQLiteRepository": {
+                        "allowed_names": ["<base:RepositoryFacade>", "close_local"]
+                    },
+                }
+            }
+        ),
+    )
+    for rel, source in (app_files or {}).items():
+        _write(tmp_path / rel, source)
+    return tmp_path
+
+
+def test_facade_surface_allowlist_has_zero_slack(tmp_path):
+    body = "    def kept(self): pass\n"
+    root = _facade_root(tmp_path, facade_body=body, allowed={"kept"})
+    assert _GUARD.facade_violations(root) == []
+
+    # A retired method whose name stays on the allowlist is a violation:
+    # the allowlist must equal the live surface, not merely contain it.
+    root = _facade_root(tmp_path, facade_body=body, allowed={"kept", "retired"})
+    assert _GUARD.facade_violations(root) == [
+        "RepositoryFacade facade surface allowlist is stale, remove: retired "
+        "(update scripts/architecture_boundary_baseline.json :: "
+        "facade_public_surface.RepositoryFacade.allowed_names)"
+    ]
+
+    root = _facade_root(
+        tmp_path, facade_body=body + "    def added(self): pass\n", allowed={"kept"}
+    )
+    assert _GUARD.facade_violations(root) == [
+        "RepositoryFacade gained public facade seats: added"
+    ]
+
+
+def test_weakref_seam_must_name_a_live_facade_attribute(tmp_path, monkeypatch):
+    monkeypatch.setattr(_GUARD, "DYNAMIC_FACADE_REFERENCE_EXEMPTIONS", {})
+    seam = (
+        "    def __init__(self, ref):\n"
+        "        self._seam = lambda nb: _repository_from_weakref(ref).{name}(nb)\n"
+        "    def fuse(self, nb): pass\n"
+        "    def _private(self, nb): pass\n"
+    )
+    for live in ("fuse", "_private"):
+        root = _facade_root(
+            tmp_path, facade_body=seam.format(name=live), allowed={"fuse"}
+        )
+        assert _GUARD.dynamic_facade_reference_violations(root) == []
+
+    root = _facade_root(tmp_path, facade_body=seam.format(name="retired"), allowed={"fuse"})
+    assert _GUARD.dynamic_facade_reference_violations(root) == [
+        "facade weak-reference seam reads a missing RepositoryFacade attribute: retired"
+    ]
+
+
+def test_literal_getattr_probe_must_name_a_live_repository_attribute(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(_GUARD, "DYNAMIC_FACADE_REFERENCE_EXEMPTIONS", {})
+    body = (
+        "    def __init__(self):\n"
+        "        self.settings = None\n"
+        "    def kept(self): pass\n"
+    )
+    probes = (
+        "def probe(repo, repository, other, holder):\n"
+        "    getattr(repo, 'kept', None)\n"
+        "    getattr(repository, 'settings', None)\n"
+        "    hasattr(holder.repository, 'close')\n"
+        "    getattr(repo, 'close_local', None)\n"
+        "    getattr(other, 'retired', None)\n"
+    )
+    rel = "backend/app/services/consumer.py"
+    root = _facade_root(
+        tmp_path, facade_body=body, allowed={"kept", "settings"},
+        app_files={rel: probes},
+    )
+    # live on the facade, on its self-assigned attributes, or on a wrapper;
+    # a non-facade receiver (``other``) is out of scope.
+    assert _GUARD.dynamic_facade_reference_violations(root) == []
+
+    root = _facade_root(
+        tmp_path, facade_body=body, allowed={"kept", "settings"},
+        app_files={
+            rel: probes + "    getattr(repo, 'retired', None)\n",
+            "scripts/tool.py": "def run(self):\n    hasattr(self._repo, 'gone')\n",
+        },
+    )
+    assert _GUARD.dynamic_facade_reference_violations(root) == [
+        "literal getattr/hasattr on a facade receiver names a missing "
+        f"repository attribute: {rel} :: retired",
+        "literal getattr/hasattr on a facade receiver names a missing "
+        "repository attribute: scripts/tool.py :: gone",
+    ]
+
+
+def test_dynamic_reference_exemptions_have_zero_slack(tmp_path, monkeypatch):
+    rel = "backend/app/services/startup_warmup.py"
+    monkeypatch.setattr(
+        _GUARD,
+        "DYNAMIC_FACADE_REFERENCE_EXEMPTIONS",
+        {(rel, "cache_clear"): "receiver is the cached factory"},
+    )
+    body = "    def kept(self): pass\n"
+    root = _facade_root(
+        tmp_path, facade_body=body, allowed={"kept"},
+        app_files={rel: "def clear(repository):\n    getattr(repository, 'cache_clear', None)\n"},
+    )
+    assert _GUARD.dynamic_facade_reference_violations(root) == []
+
+    root = _facade_root(
+        tmp_path, facade_body=body, allowed={"kept"},
+        app_files={rel: "def clear(repository):\n    pass\n"},
+    )
+    assert _GUARD.dynamic_facade_reference_violations(root) == [
+        "dynamic facade reference exemption is stale, remove: "
+        f"{rel} :: cache_clear"
+    ]
 
 
 def test_repository_service_reverse_import_ceiling_only_allows_reduction(tmp_path):
