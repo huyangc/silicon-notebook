@@ -32,9 +32,11 @@ from app.repositories.postgres._store_utils import (
 from app.repositories.postgres.access_sql import (
     GRANT_PROBE_FOR_SHARE_SQL,
     MEMBER_PROBE_FOR_SHARE_SQL,
+    NOTEBOOK_LIVE_SQL,
     grant_access_expr,
     grant_probe_params,
     read_access_clause,
+    live_read_access_exists_clause,
     read_access_exists_clause,
     read_access_params,
 )
@@ -464,8 +466,9 @@ class MemoryStore:
 
     @staticmethod
     def _read_access_clause(alias: str = "m") -> str:
-        """读权谓词。定义点在 `access_sql`,这里只是保留既有调用形状的薄封装。"""
-        return read_access_exists_clause(alias)
+        """读权谓词 + 笔记本存活谓词(删除中/拷贝中/导入中的库里的 Memory 读不到,
+        经这里的写语句同样落空 → 404)。定义点在 `access_sql`,这里是薄封装。"""
+        return live_read_access_exists_clause(alias)
 
     def insert_memory(self, write: MemoryWrite) -> MemoryRecord:
         with self.database.write() as db:
@@ -891,12 +894,19 @@ class MemoryStore:
             ).fetchone()
         return row is not None
 
-    def memory_for_user(self, memory_id: str, user_id: str) -> MemoryRecord:
+    def memory_for_user(
+        self, memory_id: str, user_id: str, *, live_only: bool = True
+    ) -> MemoryRecord:
+        # live_only=False 只给「这行 Memory 还在不在」的存在性复读用(抽图作业
+        # 收尾);读权照旧,只是不看笔记本存活——删库期间不能把它误判成已删。
+        access = (
+            self._read_access_clause() if live_only else read_access_exists_clause("m")
+        )
         with self.database.connect() as db:
             row = db.execute(
                 f"SELECT {self._select_columns()} FROM memory_items m "
                 "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
-                f"WHERE m.id=%s AND m.created_by=%s AND {self._read_access_clause()}",
+                f"WHERE m.id=%s AND m.created_by=%s AND {access}",
                 (memory_id, user_id, *read_access_params(user_id)),
             ).fetchone()
         if row is None:
@@ -1018,7 +1028,7 @@ class MemoryStore:
         values = {key: value for key, value in fields.items() if key in allowed}
         with self.database.write() as db:
             row = self._lock_memory_aggregate_on(
-                db, memory_id, expected_creator=user_id
+                db, memory_id, expected_creator=user_id, require_live=True
             )
             if row["status"] not in expected:
                 destination = target or row["status"]
@@ -1110,6 +1120,7 @@ class MemoryStore:
         expected_creator: str | None = None,
         expected_notebook: str | None = None,
         permission_error: bool = False,
+        require_live: bool = False,
     ):
         """Canonical PG lock order: notebook -> member -> Memory -> proposal.
 
@@ -1133,8 +1144,13 @@ class MemoryStore:
         # 单独区分「notebook 不存在」(恒 KeyError)与「无读权」(按调用方选
         # PermissionError/KeyError)。成员与授权边两半复用唯一定义点的探测常量;读权
         # 谓词扩展时这里必须手改(已登记在 access_sql 的消费者清单)。
+        # require_live: the owner's edit/confirm/reject/deprecate refuses a
+        # Memory whose notebook is being deleted/copied/imported BEFORE writing
+        # (KeyError -> 404), the same lifecycle rule as NOTEBOOK_WRITE_SQL and
+        # the live read gate ``_read_access_clause`` that answers afterwards.
+        live = f" AND {NOTEBOOK_LIVE_SQL}" if require_live else ""
         notebook = db.execute(
-            "SELECT created_by FROM notebooks WHERE id=%s FOR SHARE",
+            f"SELECT created_by FROM notebooks WHERE id=%s{live} FOR SHARE",
             (notebook_id,),
         ).fetchone()
         if notebook is None:

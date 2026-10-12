@@ -762,6 +762,9 @@ _CALLABLE_PROBES = {
     "read_access_clause": lambda mod: mod.read_access_clause(),
     "admin_access_clause": lambda mod: mod.admin_access_clause(),
     "read_access_exists_clause": lambda mod: mod.read_access_exists_clause("m"),
+    "live_read_access_exists_clause": lambda mod: mod.live_read_access_exists_clause(
+        "m"
+    ),
     "read_access_params": lambda mod: repr(mod.read_access_params("U")),
     "admin_access_params": lambda mod: repr(mod.admin_access_params("U")),
     "grant_probe_params": lambda mod: repr(mod.grant_probe_params("N", "U")),
@@ -978,7 +981,11 @@ def test_two_step_locked_sites_stay_pinned():
             encoding="utf-8"
         )
     )
-    assert pg_store.count("SELECTcreated_byFROMnotebooksWHEREid=%sFORSHARE") == 3, (
+    # `{live}` 是 `_lock_memory_aggregate_on(require_live=True)` 追加的存活谓词
+    # (K3:Memory 的修订写在非存活库里写前拒绝),站点数不变。
+    assert len(re.findall(
+        r"SELECTcreated_byFROMnotebooksWHEREid=%s(?:\{live\})?FORSHARE", pg_store
+    )) == 3, (
         "postgres/memory_store.py 的分段式带锁站点数量变了——"
         "同步更新本 allowlist 与两份 access_sql 的 docstring 清单"
     )
@@ -995,7 +1002,9 @@ def test_two_step_locked_sites_stay_pinned():
             encoding="utf-8"
         )
     )
-    assert sqlite_store.count("SELECTcreated_byFROMnotebooksWHEREid=?") == 1, (
+    assert len(re.findall(
+        r"SELECTcreated_byFROMnotebooksWHEREid=\?(?:\{live\})?", sqlite_store
+    )) == 1, (
         "sqlite/memory_store.py 的分段式三态站点数量变了——"
         "同步更新本 allowlist 与两份 access_sql 的 docstring 清单"
     )
