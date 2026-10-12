@@ -430,7 +430,9 @@ class GroupStore:
         一整类它不需要的阻塞关系。而防住并发删库只需要与 `FOR UPDATE`
         (`DELETE FROM notebooks` 取的正是它)冲突,`FOR KEY SHARE` 已经做到。
 
-        **锁序论证**(为什么在 `create_share_request` 里排在 `_lock_group_on` 之后是安全的):
+        **锁序论证**(为什么在 `create_grant` / `create_share_request` 里排在 `_lock_group_on`
+        之后是安全的;`approve_share_request` 走同一顺序,只是换成按申请行定位笔记本的
+        `_lock_request_notebook_on`):
 
         1. 全仓**只有本文件**会锁 `groups` 行(`FOR UPDATE`/`FOR SHARE` 的全量枚举),而
            这里的七个调用点(`delete_group` / `upsert_member` / `remove_member` /
@@ -447,6 +449,11 @@ class GroupStore:
            行,删子行从不需要父行(`groups`)的锁;`memory_store` 的三段式是
            `notebooks FOR SHARE → notebook_members/notebook_grants FOR SHARE`,同样不碰
            `groups`。
+        4. `groups` 之后的统一顺序是 **notebooks → 子行**(`notebook_share_requests` /
+           `notebook_grants`),与删库 `notebooks FOR UPDATE → 级联删子行` 同向。三个写授权
+           或写申请的方法都先拿 `notebooks` 的 `FOR KEY SHARE`,再碰任何子行——这一条只要
+           有一个方法反过来(先锁子行、再让外键检查去等 `notebooks`),就会与删库互等成环
+           (`approve_share_request` 修复前正是这个形状,见 `_lock_request_notebook_on`)。
         """
         if (
             connection.execute(
@@ -455,6 +462,50 @@ class GroupStore:
             is None
         ):
             raise NotebookNotFoundError(notebook_id)
+
+    @staticmethod
+    def _lock_request_notebook_on(
+        connection: Any, request_id: str, group_id: str
+    ) -> "str | None":
+        """按申请行定位它的笔记本,**在碰申请行之前**先拿笔记本行的 `FOR KEY SHARE`,
+        并复核那本库仍存活;申请不存在 / 库已删 / 库不存活时返回 `None`。
+
+        `_lock_notebook_on` 的审批版:审批手里只有申请 id,笔记本 id 要从申请行读。
+
+        ⚠ **为什么锁序必须是 notebooks → 申请行**:删库第 5 阶段
+        (`notebook_store.delete_row_and_orphan_embeddings`)先 `notebooks FOR UPDATE`,再
+        `DELETE FROM notebooks` 级联删申请行与授权边。审批若先 `FOR UPDATE` 申请行、到
+        `INSERT notebook_grants` 的外键检查才去等 `notebooks` 的 `FOR KEY SHARE`,两边各持
+        一把、各等对方 → PG 40P01 死锁,被中止的一方是审批(500)或删库作业(失败重试)。
+        先在这里拿到同一把 `FOR KEY SHARE`,审批要么排在删库之后(删库提交后 join 不中 →
+        `None` → 路由 404),要么让删库的 `FOR UPDATE` 排在审批提交之后(级联带走刚写的边)。
+
+        ⚠ **必须是一条语句**:拆成「先无锁读申请行的 notebook_id、再 `_lock_notebook_on`」,
+        那条预读会在锁之前提到 `notebook_share_requests`,锁序守卫
+        (`test_group_store_transaction_guard.py`)判它失败。申请行的 `notebook_id` 建后
+        不变,所以 join 里顺带读它是安全的;`FOR KEY SHARE OF n` 只锁笔记本行,申请行
+        仍由调用方随后那条 `FOR UPDATE … status='pending'` 去锁。
+
+        锁模式与 `_lock_notebook_on` 相同,理由也相同:`FOR KEY SHARE` 就是外键检查本来
+        要取的那把锁,不新增冲突边,只与 `FOR UPDATE` / `DELETE` 冲突。代价是已决定(非
+        pending)的申请现在也要先拿这把锁:会排在 `set_share_token`、晋升写入、删库第 5
+        阶段这些 `FOR UPDATE` 持有者之后多等一会儿,结果不变。
+
+        **存活谓词**(`NOTEBOOK_LIVE_SQL`):库在 deleting / copying / importing 时审批返回
+        `None`(路由 404)、不写授权边——那时库对任何读者都不可见,批出去的边要么被删库
+        级联清掉,要么指向半成品。申请行保留,库回到可用状态后可以再批。它读的是本语句
+        快照里的 `status`:`FOR KEY SHARE` 与改状态的 `FOR NO KEY UPDATE` 不冲突,所以与
+        并发打删除标记的 CAS 不互等;CAS 提交在本语句之后时边照常写入,由删库第 5 阶段的
+        级联带走(与修复前相同)。
+        """
+        row = connection.execute(
+            "SELECT n.id FROM notebook_share_requests sr "
+            "JOIN notebooks n ON n.id=sr.notebook_id "
+            f"WHERE sr.id=%s AND sr.group_id=%s AND n.{NOTEBOOK_LIVE_SQL} "
+            "FOR KEY SHARE OF n",
+            (request_id, group_id),
+        ).fetchone()
+        return None if row is None else row["id"]
 
     @staticmethod
     def _admin_count_on(connection: Any, group_id: str) -> int:
@@ -942,8 +993,11 @@ class GroupStore:
            `DELETE FROM notebooks` 让整行消失,与「谁是 owner」毫无关系,所以上面那个前提
            再成立也盖不住它。行还在这件事由**两个调用方各自**负责,手段不同(codex #519
            R7 存疑项收口):`create_grant` 在本方法之前显式 `_lock_notebook_on`;
-           `approve_share_request` 靠它对申请行的 `FOR UPDATE` ——删库要 CASCADE 掉那一行,
-           必须先拿到同一把锁,于是删不进来。少了那一层,
+           `approve_share_request` 在本方法之前显式 `_lock_request_notebook_on`——同样是
+           笔记本行的 `FOR KEY SHARE`,与删库的 `FOR UPDATE` 互斥。(早先它靠的是对申请行
+           的 `FOR UPDATE`:删库要 CASCADE 掉那一行就得先拿同一把锁,存在性确实守住了,
+           但锁序是「申请行 → notebooks」,与删库的「notebooks → 申请行」相反,两者交错
+           时互等死锁,所以改成先锁 notebooks。)少了那一层,
            owner 分支这条无锁 SELECT 与随后的 INSERT 之间可以插进一次**已提交**的删库,
            `notebook_grants.notebook_id` 外键当场违例 → 未处理异常 → 500。
         2. **授权边半**:顶层查 `notebook_grants` 并锁住命中的边行。锁住之后,并发的
@@ -1015,14 +1069,22 @@ class GroupStore:
         本事务在这里 `GroupNotFoundError` → 落 `None`(路由 404),而不是让 500 冒出去。
         锁序 group→request,与 `delete_group` 的 group→cascade 一致,无死锁。
 
-        SQLite 侧**刻意没有对等改动**:`SqliteDatabase.write()` 是进程级写锁,approve 与
-        delete_group 不可能交错(理由同 `create_share_request` / `delete_group`)。
+        ⚠ 锁完组之后、碰申请行之前,**先锁笔记本行**(`_lock_request_notebook_on`):完整
+        锁序是 groups → notebooks → 申请行 → 授权边,与删库「notebooks FOR UPDATE → 级联删
+        子行」同向。反过来会与删库互等死锁(理由见该 helper)。它同时复核库仍存活:
+        deleting / copying / importing 的库上审批返回 `None`(路由 404)、不写授权边。
+
+        SQLite 侧**刻意没有对等的锁**:`SqliteDatabase.write()` 是进程级写锁,approve 与
+        delete_group / 删库不可能交错(理由同 `create_share_request` / `delete_group`);存活
+        复核两侧都有。
         """
         stamp = self.now()
         with self.database.write() as connection:
             try:
                 self._lock_group_on(connection, group_id, mode="SHARE")
             except GroupNotFoundError:
+                return None
+            if self._lock_request_notebook_on(connection, request_id, group_id) is None:
                 return None
             row = connection.execute(
                 "SELECT notebook_id, requested_by FROM notebook_share_requests "

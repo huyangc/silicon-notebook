@@ -99,10 +99,20 @@ REQUIRED_IN_WRITE_TRANSACTION: dict[str, frozenset[str]] = {
 #: 排到 INSERT 后面」:那时外键检查已经先撞上去了,锁再拿也来不及(codex #519 R7 存疑项)。
 #: SQLite 侧同样**不登记**(理由同 `delete_group`:进程写锁,顺序不承重;它那一条补的是
 #: 响应对等而不是 500,由行为用例钉住)。
+#: `approve_share_request`(PostgreSQL):`_lock_request_notebook_on`(笔记本行 `FOR KEY
+#: SHARE`)必须排在第一次碰 `notebook_share_requests` 之前。反过来就是修复前的形状——先
+#: `FOR UPDATE` 申请行、到插授权边的外键检查才去等笔记本行,与删库「notebooks FOR UPDATE →
+#: 级联删申请行」互等死锁。只登记在 PG 下:符号缺失时这里已经报红,而
+#: `REQUIRED_IN_WRITE_TRANSACTION` 不分后端,登记进去 SQLite 那一格会红(它没有、也不需要
+#: 这把锁)。真并发行为由 `postgres/test_concurrency.py` 的两连接用例承担。
 REQUIRED_ORDER_IN_WRITE_TRANSACTION: dict[str, dict[str, tuple[str, str]]] = {
     "postgres": {
         "delete_group": ("_lock_group_on", "notebook_grants"),
         "create_grant": ("_lock_notebook_on", "notebook_grants"),
+        "approve_share_request": (
+            "_lock_request_notebook_on",
+            "notebook_share_requests",
+        ),
     },
 }
 

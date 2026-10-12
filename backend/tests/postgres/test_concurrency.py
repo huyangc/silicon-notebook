@@ -3420,3 +3420,259 @@ def test_manage_recheck_locks_the_group_membership_behind_the_edge(
         "移出组在发边事务持锁期间就完成了 —— 生效链的成员资格那一环没被锁住,"
         "一个管理权刚被撤销的人照样把访问权散了出去(codex #519 R8 P1)"
     )
+
+
+# --------------------------------------------------------------------------
+# 审批分享申请 × 删库:锁序必须是 notebooks → 申请行(与删库第 5 阶段同向)。
+#
+# 删库第 5 阶段先 `notebooks FOR UPDATE`、再 `DELETE FROM notebooks` 级联删申请行与授权边。
+# 修复前审批先 `FOR UPDATE` 申请行、到插授权边的外键检查才去等 `notebooks` 的
+# `FOR KEY SHARE`——两边交错时各持一把、各等对方,PG 报 40P01。下面两条用例分别钉两种
+# 先后:删库先拿到根锁、审批先拿到根锁。去掉 `_lock_request_notebook_on` 两条都会红。
+
+_K4_NOW = "2026-07-23T00:00:00+00:00"
+
+
+def _seed_share_request_race(postgres_database, store, prefix: str) -> tuple[str, str, str]:
+    """一本 owner 持有的库、一个 admin 建的组(owner 是普通成员)、一条 pending 申请。
+
+    返回 ``(notebook_id, group_id, request_id)``;审批人是 ``f"{prefix}-admin"``。
+    """
+    owner, admin, notebook_id = f"{prefix}-owner", f"{prefix}-admin", f"{prefix}-nb"
+    with postgres_database.write() as connection:
+        for index, user_id in enumerate((owner, admin)):
+            connection.execute(
+                "INSERT INTO users(id,email,display_name,role,status,created_at,"
+                "updated_at,username,password_hash,password_salt,password_iterations) "
+                "VALUES (%s,%s,%s,'user','active',%s,%s,%s,'','',0)",
+                (user_id, f"{user_id}@example.test", user_id, _K4_NOW, _K4_NOW,
+                 f"{prefix[:3]}{index:06d}"),
+            )
+        connection.execute(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+            "created_at,updated_at,tier) "
+            "VALUES (%s,'K4','','','ready',%s,%s,%s,'personal')",
+            (notebook_id, owner, _K4_NOW, _K4_NOW),
+        )
+    group = store.create_group(
+        name=f"{prefix} 组", kind="project", description="", created_by=admin
+    )
+    store.upsert_member(group["id"], owner, role="member", added_by=admin)
+    request = store.create_share_request(
+        notebook_id, group_id=group["id"], requested_by=owner
+    )
+    assert request["status"] == "pending"
+    return notebook_id, group["id"], request["id"]
+
+
+def _wait_until_blocked_by(inspector, blocker_pid: int, future) -> str:
+    """等到某个后端正卡在 ``blocker_pid`` 持有的锁上,返回它卡住的那条语句。"""
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if future.done():
+            raise AssertionError(
+                f"operation finished without waiting on the blocker: {future.result()!r}"
+            )
+        waiter = inspector.execute(
+            "SELECT query FROM pg_stat_activity "
+            "WHERE wait_event_type='Lock' AND state='active' "
+            "AND datname=current_database() "
+            "AND %s = ANY(pg_blocking_pids(pid))",
+            (blocker_pid,),
+        ).fetchone()
+        if waiter is not None:
+            return waiter["query"]
+        time.sleep(0.01)
+    raise AssertionError("operation never waited on the blocker")
+
+
+def _grant_count(postgres_database, notebook_id: str) -> int:
+    with postgres_database.connect() as connection:
+        return int(
+            connection.execute(
+                "SELECT COUNT(*) AS c FROM notebook_grants WHERE notebook_id=%s",
+                (notebook_id,),
+            ).fetchone()["c"]
+        )
+
+
+@pytest.mark.postgres_integration
+def test_approve_share_request_never_deadlocks_with_notebook_delete(
+    postgres_database, postgres_settings
+):
+    """删库先拿到根锁:审批排在它后面,删库提交后审批返回 `None`(路由 404),零授权边。
+
+    编排照删库第 5 阶段:deleter 先 `SELECT … FROM notebooks … FOR UPDATE`,等审批确实
+    卡在它身上之后再 `DELETE FROM notebooks`(级联删申请行)并提交。
+
+    修复前审批不碰 `notebooks` 就先 `FOR UPDATE` 了申请行,卡在插授权边的外键检查上;
+    deleter 的级联删又要等那一行 → 死锁检测(`deadlock_timeout` 默认 1 秒)中止其中一方,
+    下面「两边都没有 DeadlockDetected」的断言红。审批用耐心池(`lock_timeout` 15 秒),
+    免得共享池 1 秒的 `lock_timeout` 抢在死锁检测之前把变异伪装成别的错误。
+    """
+    import psycopg
+    from psycopg.rows import dict_row
+
+    assert PostgresMigrator(postgres_database).migrate() == 72
+    notebook_id, group_id, request_id = _seed_share_request_race(
+        postgres_database, _group_store(postgres_database, _K4_NOW), "k4del"
+    )
+    patient = _patient_postgres_database(postgres_settings)
+    try:
+        store = _group_store(patient, _K4_NOW)
+
+        def approve():
+            try:
+                return store.approve_share_request(
+                    group_id, request_id, decided_by="k4del-admin"
+                )
+            except psycopg.errors.DeadlockDetected:
+                return "deadlock"
+
+        url = postgres_database._database_url
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with psycopg.connect(url, row_factory=dict_row) as deleter, psycopg.connect(
+                url, autocommit=True, row_factory=dict_row
+            ) as inspector:
+                assert deleter.execute(
+                    "SELECT id FROM notebooks WHERE id=%s FOR UPDATE", (notebook_id,)
+                ).fetchone() is not None
+                approval = executor.submit(approve)
+                # 卡不住就直接抛;退出 `with` 时 deleter 回滚放锁,审批随之跑完。
+                _wait_until_blocked_by(inspector, deleter.info.backend_pid, approval)
+                try:
+                    deleter.execute("DELETE FROM notebooks WHERE id=%s", (notebook_id,))
+                    deleter.commit()
+                    deleted = "deleted"
+                except psycopg.errors.DeadlockDetected:
+                    deleter.rollback()
+                    deleted = "deadlock"
+            approved = approval.result(timeout=15)
+    finally:
+        patient.close()
+
+    assert (deleted, approved) == ("deleted", None), (
+        "审批与删库互等死锁了(或审批没在删库提交后落 404)——审批必须先拿 notebooks 的 "
+        f"FOR KEY SHARE 再碰申请行:deleter={deleted!r} approval={approved!r}"
+    )
+    assert _grant_count(postgres_database, notebook_id) == 0
+    with postgres_database.connect() as connection:
+        assert connection.execute(
+            "SELECT 1 FROM notebook_share_requests WHERE id=%s", (request_id,)
+        ).fetchone() is None
+
+
+@pytest.mark.postgres_integration
+def test_approve_first_then_notebook_delete_serializes(
+    postgres_database, monkeypatch
+):
+    """审批先拿到根锁:删库的 `FOR UPDATE` 排在审批提交之后,随后级联带走刚写的授权边。
+
+    审批停在申请人复检之后(此时它已持有 notebooks 的 `FOR KEY SHARE` 与申请行的
+    `FOR UPDATE`),deleter 的 `FOR UPDATE` 必须卡在它身上。修复前审批这时还没碰
+    `notebooks`,deleter 的根锁当场拿到、转而卡在级联删申请行上(下一步审批插边的外键检查
+    再去等它 → 死锁),「deleter 卡在根锁上」那条等待断言红。
+    """
+    import psycopg
+    from psycopg.rows import dict_row
+
+    assert PostgresMigrator(postgres_database).migrate() == 72
+    store = _group_store(postgres_database, _K4_NOW)
+    notebook_id, group_id, request_id = _seed_share_request_race(
+        postgres_database, store, "k4apr"
+    )
+
+    parked = threading.Event()
+    release = threading.Event()
+    original_recheck = store._require_notebook_manage_on
+
+    def hooked_recheck(connection, notebook, user_id):
+        result = original_recheck(connection, notebook, user_id)
+        parked.set()
+        assert release.wait(timeout=10)
+        return result
+
+    monkeypatch.setattr(store, "_require_notebook_manage_on", hooked_recheck)
+
+    def approve():
+        try:
+            return store.approve_share_request(
+                group_id, request_id, decided_by="k4apr-admin"
+            )
+        except psycopg.errors.DeadlockDetected:
+            return "deadlock"
+
+    def delete_notebook():
+        with psycopg.connect(
+            postgres_database._database_url, row_factory=dict_row
+        ) as deleter:
+            try:
+                deleter.execute(
+                    "SELECT id FROM notebooks WHERE id=%s FOR UPDATE", (notebook_id,)
+                ).fetchone()
+                deleter.execute("DELETE FROM notebooks WHERE id=%s", (notebook_id,))
+                deleter.commit()
+            except psycopg.errors.DeadlockDetected:
+                deleter.rollback()
+                return "deadlock"
+        return "deleted"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        approval = executor.submit(approve)
+        try:
+            assert parked.wait(timeout=10)
+            deletion = executor.submit(delete_notebook)
+            _wait_for_lock_wait(
+                postgres_database, "FROM notebooks WHERE id=$1 FOR UPDATE", deletion
+            )
+        finally:
+            release.set()
+        approved = approval.result(timeout=15)
+        deleted = deletion.result(timeout=15)
+
+    assert approved != "deadlock" and approved["status"] == "approved", approved
+    assert deleted == "deleted"
+    # 删库排在审批之后:审批写下的边被级联带走,没有指向已删库的孤儿边。
+    assert _grant_count(postgres_database, notebook_id) == 0
+    with postgres_database.connect() as connection:
+        assert connection.execute(
+            "SELECT 1 FROM notebooks WHERE id=%s", (notebook_id,)
+        ).fetchone() is None
+
+
+@pytest.mark.postgres_integration
+@pytest.mark.parametrize("status", ["deleting", "copying", "importing"])
+def test_approving_into_a_notebook_that_is_not_live_returns_none_postgres(
+    postgres_database, status
+):
+    """PG 孪生:库不存活(`NOTEBOOK_LIVE_SQL` 之外)时审批返回 `None`(路由 404)、零授权边,
+    申请行保持 pending;库回到 ready 后同一条申请照常能批。SQLite 一侧在
+    `test_share_requests.py`。"""
+    assert PostgresMigrator(postgres_database).migrate() == 72
+    store = _group_store(postgres_database, _K4_NOW)
+    notebook_id, group_id, request_id = _seed_share_request_race(
+        postgres_database, store, "k4live"
+    )
+
+    def set_status(value: str) -> None:
+        with postgres_database.write() as connection:
+            connection.execute(
+                "UPDATE notebooks SET status=%s WHERE id=%s", (value, notebook_id)
+            )
+
+    set_status(status)
+    assert store.approve_share_request(
+        group_id, request_id, decided_by="k4live-admin"
+    ) is None
+    assert _grant_count(postgres_database, notebook_id) == 0
+    with postgres_database.connect() as connection:
+        assert connection.execute(
+            "SELECT status FROM notebook_share_requests WHERE id=%s", (request_id,)
+        ).fetchone()["status"] == "pending"
+
+    set_status("ready")
+    approved = store.approve_share_request(
+        group_id, request_id, decided_by="k4live-admin"
+    )
+    assert approved["status"] == "approved"
+    assert _grant_count(postgres_database, notebook_id) == 1
