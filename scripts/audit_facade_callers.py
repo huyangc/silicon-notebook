@@ -5,8 +5,7 @@ This is **step 1 of the B5 structural-item plan**: it does not retire, patch
 or even suggest editing any facade method — it only produces a reproducible
 census of who calls each public member of
 ``backend/app/services/repository_facade.py::RepositoryFacade`` (run this
-script for the current count — 308 as of this writing; it drifts as methods
-are retired), split into production / script / test buckets, plus a fourth
+script for the current count; it drifts as methods are retired), split into production / script / test buckets, plus a fourth
 "ambiguous" bucket for names we cannot confidently resolve. The output feeds
 ``docs/superpowers/plans/2026-08-23-facade-retirement-ledger.md``.
 
@@ -169,12 +168,23 @@ discussion):
   - Dynamic dispatch through fully computed strings (``getattr(x, some_var)``
     where ``some_var`` is not a literal), reflection, or serialization-driven
     dispatch cannot be seen by this script at all.
-  - A literal ``getattr``/``hasattr`` probe, or a
-    ``_repository_from_weakref(...).<name>`` seam, is only counted while
-    ``<name>`` is still on the facade; once a name is retired this script
-    stops seeing it. ``dynamic_facade_reference_violations`` in
-    ``scripts/check_architecture_boundaries.py`` covers that side: it fails
-    when such a reference names an attribute no repository class defines.
+  - Of the run-time name references, this script counts only literal
+    ``getattr(<receiver>, "<name>")`` -- and only while ``<name>`` is still
+    on the facade. It never sees ``hasattr`` probes, the
+    ``_repository_from_weakref(...).<name>`` seams ``RepositoryFacade.__init__``
+    hands the runtime (``incremental_fuse_source`` is one: it reads as
+    test-only here although production calls it through such a seam), or a
+    protocol the facade is handed out as (``cast(P, repository())``). Those
+    are covered by ``dynamic_facade_reference_violations`` and
+    ``facade_protocol_binding_violations`` in
+    ``scripts/check_architecture_boundaries.py``, which fail when such a
+    reference names something the facade no longer has.
+  - Receiver blind spots shared with that guard: an alias
+    (``r = repo; r.method()``), ``operator.attrgetter``, a name built at run
+    time (concatenation, a module constant, a variable), a receiver named
+    outside the whitelisted shapes (``owner``, ``service``), and a call on
+    ``self`` inside the facade (counted only by the ``facade_internal``
+    bucket, which ignores ``getattr(self, ...)``).
   - The scan only walks ``backend/app/``, ``scripts/`` and
     ``backend/tests/`` (plus ``repository_facade.py`` itself, scanned
     separately for the ``facade_internal`` bucket in point 6 above).

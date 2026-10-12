@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import functools
 from collections.abc import Callable
 import json
 from pathlib import Path
@@ -554,30 +555,67 @@ FACADE_CLASS_FILES = {
     "SQLiteRepository": "backend/app/services/sqlite_repository.py",
     "PostgresRepository": "backend/app/repositories/postgres/repository.py",
 }
-# Receiver shapes that hold the facade instance itself -- the same notion
+# Receiver shapes that hold the facade instance itself: the notion
 # scripts/audit_facade_callers.py (REPO_NAME_RE / RECEIVER_ATTR_NAMES) and
-# backend/tests/architecture/repository_callers.py use.
-FACADE_RECEIVER_NAME_RE = re.compile(r"^(?:repo\d*|repository|facade|[A-Za-z_]\w*_repo)$")
+# backend/tests/architecture/repository_callers.py use, widened to the bare
+# local names ``_repo`` / ``_repository``. Inside the three repository classes
+# ``self`` is a receiver too.
+#
+# Known blind spots (no live code uses them today; the caller audit shares
+# them): an alias (``r = repo; getattr(r, ...)``), ``operator.attrgetter``,
+# a name built at run time (concatenation, a module constant, a variable), a
+# receiver named outside the shapes above (``owner``, ``service``), and an
+# aliased ``getattr``.
+FACADE_RECEIVER_NAME_RE = re.compile(
+    r"^(?:_?repo\d*|_?repository|facade|[A-Za-z_]\w*_repo)$"
+)
 FACADE_RECEIVER_ATTRS = frozenset(
     {"repository", "repo", "_repo", "_repository", "repository_facade"}
 )
-# Text prefilter, a superset of every receiver shape above, so only files that
-# can hold a probe are parsed (the full tree parse would cost ~3s per run).
-_PROBE_PREFILTER_RE = re.compile(
-    r"\b(?:get|has)attr\(\s*[\w.]*(?:repo|repository|facade)"
-)
-# (path, attribute) -> why a literal probe on a facade-shaped receiver may
-# name an attribute no repository class defines.
+# Every receiver shape above contains one of these substrings, and every probe
+# call names ``getattr``/``hasattr``, so a file lacking either set cannot hold
+# a probe and is not parsed. Plain substrings, not a pattern over the call
+# shape: comments, line breaks and parentheses inside the call do not matter.
+_PROBE_CALL_WORDS = ("getattr", "hasattr")
+_PROBE_RECEIVER_WORDS = ("repo", "facade")
+# (path, enclosing function qualname, attribute) -> why a literal probe on a
+# facade-shaped receiver may name an attribute no repository class defines.
 DYNAMIC_FACADE_REFERENCE_EXEMPTIONS = {
-    ("backend/app/services/startup_warmup.py", "cache_clear"): (
+    (
+        "backend/app/services/startup_warmup.py",
+        "_clear_repository_cache",
+        "cache_clear",
+    ): (
         "the receiver is the lru_cache-wrapped repository factory, not a "
         "facade instance"
     ),
 }
+# Call names that return the facade instance itself; a protocol a function
+# returns them as (``-> P`` or ``cast(P, ...)``) is a promise about the facade.
+FACADE_FACTORY_CALLS = frozenset({"repository", "create_application_repository"})
+# Every spelling of a call to one of those names: the name, then any mix of
+# whitespace, line continuations, closing grouping parens and comments, then
+# ``(``. Files without a match cannot hold a binding and are not parsed.
+_FACADE_FACTORY_CALL_RE = re.compile(
+    r"\b(?:repository|create_application_repository)\b"
+    r"(?:[\s)\\]|#[^\n]*)*\("
+)
+
+
+@functools.lru_cache(maxsize=256)
+def _parse_source(source: str, filename: str) -> ast.Module:
+    """Parse once per distinct source text (keyed by content, so a file
+    rewritten in place is reparsed). Callers must not mutate the tree."""
+
+    return ast.parse(source, filename=filename)
+
+
+def _parse_file(path: Path) -> ast.Module:
+    return _parse_source(path.read_text(encoding="utf-8"), str(path))
 
 
 def _class_attribute_names(path: Path, class_name: str) -> set[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    tree = _parse_file(path)
     class_node = next(
         node
         for node in tree.body
@@ -603,38 +641,52 @@ def _class_attribute_names(path: Path, class_name: str) -> set[str]:
     return names
 
 
-def _is_facade_receiver(node: ast.AST) -> bool:
+def _is_facade_receiver(node: ast.AST, self_is_facade: bool) -> bool:
     if isinstance(node, ast.Name):
-        return bool(FACADE_RECEIVER_NAME_RE.match(node.id))
+        return bool(FACADE_RECEIVER_NAME_RE.match(node.id)) or (
+            self_is_facade and node.id == "self"
+        )
     return isinstance(node, ast.Attribute) and node.attr in FACADE_RECEIVER_ATTRS
 
 
-def _literal_attribute_probes(tree: ast.AST) -> list[str]:
-    """``getattr(<facade receiver>, "<name>"[, default])`` and
-    ``hasattr(<facade receiver>, "<name>")`` -- the probes that degrade
-    silently (``None`` / ``False``) instead of raising once ``<name>`` is
-    retired."""
+def _literal_attribute_probes(
+    tree: ast.AST, self_is_facade: bool = False
+) -> list[tuple[str, str]]:
+    """``(enclosing qualname, name)`` for every ``getattr(<facade receiver>,
+    "<name>"[, default])`` and ``hasattr(<facade receiver>, "<name>")`` --
+    the probes that degrade silently (``None`` / ``False``) instead of
+    raising once ``<name>`` is retired. Module-level probes get qualname
+    ``<module>``."""
 
-    names: list[str] = []
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id in {"getattr", "hasattr"}
-            and len(node.args) >= 2
-            and _is_facade_receiver(node.args[0])
-            and isinstance(node.args[1], ast.Constant)
-            and isinstance(node.args[1].value, str)
-        ):
-            names.append(node.args[1].value)
-    return names
+    probes: list[tuple[str, str]] = []
+
+    def visit(node: ast.AST, scope: tuple[str, ...]) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                visit(child, (*scope, child.name))
+                continue
+            if (
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id in _PROBE_CALL_WORDS
+                and len(child.args) >= 2
+                and _is_facade_receiver(child.args[0], self_is_facade)
+                and isinstance(child.args[1], ast.Constant)
+                and isinstance(child.args[1].value, str)
+            ):
+                probes.append((".".join(scope) or "<module>", child.args[1].value))
+            visit(child, scope)
+
+    visit(tree, ())
+    return probes
 
 
 def _weakref_seam_attributes(tree: ast.AST) -> list[str]:
     """Attributes read off ``_repository_from_weakref(...)`` -- the late-bound
-    seams ``RepositoryFacade.__init__`` hands the runtime. The audit cannot
-    attribute these to a facade method (the receiver is a call result), and
-    the runtime callers swallow the AttributeError a retired name raises."""
+    seams ``RepositoryFacade.__init__`` hands the runtime. The caller audit
+    never attributes these to a facade method (the receiver is a call
+    result), and the runtime callers swallow the AttributeError a retired
+    name raises."""
 
     return [
         node.attr
@@ -649,9 +701,11 @@ def _weakref_seam_attributes(tree: ast.AST) -> list[str]:
 def dynamic_facade_reference_violations(root: Path) -> list[str]:
     """Every facade attribute named only at run time must still exist: the
     weak-reference seams in ``repository_facade.py`` must resolve on
-    ``RepositoryFacade`` itself (they serve both backends), and a literal
-    ``getattr``/``hasattr`` probe on a facade-shaped receiver in
-    ``backend/app`` or ``scripts`` must resolve on some repository class."""
+    ``RepositoryFacade`` itself (they serve both backends, so a name only one
+    wrapper defines does not count), and a literal ``getattr``/``hasattr``
+    probe on a facade-shaped receiver in ``backend/app`` or ``scripts`` must
+    resolve on some repository class (inside ``RepositoryFacade``, on the
+    facade itself)."""
 
     facade_names = _class_attribute_names(
         root / FACADE_CLASS_FILES["RepositoryFacade"], "RepositoryFacade"
@@ -664,33 +718,203 @@ def dynamic_facade_reference_violations(root: Path) -> list[str]:
         "facade weak-reference seam reads a missing RepositoryFacade "
         f"attribute: {name}"
         for name in sorted(
-            set(_weakref_seam_attributes(ast.parse(facade_path.read_text(encoding="utf-8"))))
+            set(_weakref_seam_attributes(_parse_file(facade_path)))
             - facade_names
         )
     ]
-    used_exemptions: set[tuple[str, str]] = set()
+    class_files = set(FACADE_CLASS_FILES.values())
+    used_exemptions: set[tuple[str, str, str]] = set()
     for base in (root / "backend" / "app", root / "scripts"):
         for path in sorted(base.rglob("*.py")):
             if "__pycache__" in path.parts:
                 continue
-            source = path.read_text(encoding="utf-8")
-            if not _PROBE_PREFILTER_RE.search(source):
-                continue
             rel = path.relative_to(root).as_posix()
-            tree = ast.parse(source, filename=str(path))
-            for name in sorted(set(_literal_attribute_probes(tree))):
-                if name in repository_names:
+            source = path.read_text(encoding="utf-8")
+            in_class_file = rel in class_files
+            if not in_class_file and not (
+                any(word in source for word in _PROBE_CALL_WORDS)
+                and any(word in source for word in _PROBE_RECEIVER_WORDS)
+            ):
+                continue
+            known = (
+                facade_names
+                if rel == FACADE_CLASS_FILES["RepositoryFacade"]
+                else repository_names
+            )
+            tree = _parse_source(source, str(path))
+            for qualname, name in sorted(
+                set(_literal_attribute_probes(tree, self_is_facade=in_class_file))
+            ):
+                if name in known:
                     continue
-                if (rel, name) in DYNAMIC_FACADE_REFERENCE_EXEMPTIONS:
-                    used_exemptions.add((rel, name))
+                if (rel, qualname, name) in DYNAMIC_FACADE_REFERENCE_EXEMPTIONS:
+                    used_exemptions.add((rel, qualname, name))
                     continue
                 violations.append(
                     "literal getattr/hasattr on a facade receiver names a "
-                    f"missing repository attribute: {rel} :: {name}"
+                    f"missing repository attribute: {rel} :: {qualname} :: {name}"
                 )
     violations.extend(
-        f"dynamic facade reference exemption is stale, remove: {rel} :: {name}"
-        for rel, name in sorted(set(DYNAMIC_FACADE_REFERENCE_EXEMPTIONS) - used_exemptions)
+        "dynamic facade reference exemption is stale, remove: "
+        f"{rel} :: {qualname} :: {name}"
+        for rel, qualname, name in sorted(
+            set(DYNAMIC_FACADE_REFERENCE_EXEMPTIONS) - used_exemptions
+        )
+    )
+    return violations
+
+
+def _module_file(root: Path, module: str) -> Path | None:
+    base = root / "backend" / Path(*module.split("."))
+    for candidate in (base.with_suffix(".py"), base / "__init__.py"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _resolve_class(
+    root: Path, path: Path, name: str, seen: frozenset[tuple[Path, str]] = frozenset()
+) -> tuple[Path, ast.ClassDef] | None:
+    """Find ``class <name>`` in ``path`` or follow ``from <module> import
+    <name>`` (absolute ``app.*`` imports) to the module defining it."""
+
+    if (path, name) in seen:
+        return None
+    tree = _parse_file(path)
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            return path, node
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            for alias in node.names:
+                if (alias.asname or alias.name) == name:
+                    target = _module_file(root, node.module)
+                    if target is not None:
+                        return _resolve_class(
+                            root, target, alias.name, seen | {(path, name)}
+                        )
+    return None
+
+
+def _protocol_members(root: Path, path: Path, name: str) -> set[str] | None:
+    """Non-dunder members a protocol class and its protocol bases declare."""
+
+    resolved = _resolve_class(root, path, name)
+    if resolved is None:
+        return None
+    class_path, class_node = resolved
+    members: set[str] = set()
+    for node in class_node.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not (
+            node.name.startswith("__") and node.name.endswith("__")
+        ):
+            members.add(node.name)
+    for base in class_node.bases:
+        base_name = base.id if isinstance(base, ast.Name) else None
+        if base_name in {None, "Protocol", "Generic"}:
+            continue
+        inherited = _protocol_members(root, class_path, base_name)
+        if inherited is not None:
+            members |= inherited
+    return members
+
+
+def _facade_call(node: ast.AST | None) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and (
+            (isinstance(node.func, ast.Name) and node.func.id in FACADE_FACTORY_CALLS)
+            or (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr in FACADE_FACTORY_CALLS
+            )
+        )
+    )
+
+
+def facade_protocol_bindings(root: Path) -> list[tuple[str, str, str]]:
+    """``(path, function, protocol)`` for every place ``backend/app`` hands the
+    facade out typed as a protocol: ``cast(P, repository())`` anywhere, and
+    a function annotated ``-> P`` that returns ``repository()`` /
+    ``create_application_repository(...)`` itself."""
+
+    bindings: set[tuple[str, str, str]] = set()
+    for path in sorted((root / "backend" / "app").rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        source = path.read_text(encoding="utf-8")
+        if not _FACADE_FACTORY_CALL_RE.search(source):
+            continue
+        rel = path.relative_to(root).as_posix()
+        tree = _parse_source(source, str(path))
+        for function in ast.walk(tree):
+            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(function):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "cast"
+                    and len(node.args) == 2
+                    and isinstance(node.args[0], ast.Name)
+                    and _facade_call(node.args[1])
+                ):
+                    bindings.add((rel, function.name, node.args[0].id))
+                elif (
+                    isinstance(node, ast.Return)
+                    and _facade_call(node.value)
+                    and isinstance(function.returns, ast.Name)
+                ):
+                    bindings.add((rel, function.name, function.returns.id))
+    return sorted(bindings)
+
+
+def facade_protocol_binding_violations(
+    root: Path, known_gaps: dict[str, list[str]]
+) -> list[str]:
+    """A protocol the facade is handed out as must not declare a method the
+    facade lacks -- retiring a facade method that a ``memory_service()`` /
+    ``ask_state_repository()``-style accessor still promises turns a typed
+    call into an AttributeError at run time (nothing type-checks the cast).
+    Gaps that predate this guard are listed per protocol in the baseline
+    (``facade_protocol_binding_gaps``) with zero slack: a new gap fails, and a
+    listed gap that closed must be removed."""
+
+    facade_names = _class_attribute_names(
+        root / FACADE_CLASS_FILES["RepositoryFacade"], "RepositoryFacade"
+    )
+    violations: list[str] = []
+    protocols: dict[str, set[str]] = {}
+    for rel, function, protocol in facade_protocol_bindings(root):
+        members = _protocol_members(root, root / rel, protocol)
+        if members is None:
+            violations.append(
+                f"cannot resolve protocol {protocol} bound to the facade at "
+                f"{rel} :: {function}"
+            )
+            continue
+        protocols[protocol] = members - facade_names
+    for protocol, missing in sorted(protocols.items()):
+        allowed = set(known_gaps.get(protocol, ()))
+        added = sorted(missing - allowed)
+        if added:
+            violations.append(
+                f"protocol {protocol} is bound to the facade but declares "
+                f"methods RepositoryFacade lacks: {', '.join(added)}"
+            )
+        stale = sorted(allowed - missing)
+        if stale:
+            violations.append(
+                f"facade protocol gap list for {protocol} is stale, remove: "
+                f"{', '.join(stale)} (update "
+                "scripts/architecture_boundary_baseline.json :: "
+                "facade_protocol_binding_gaps)"
+            )
+    violations.extend(
+        f"facade protocol gap list names an unbound protocol, remove: {protocol} "
+        "(update scripts/architecture_boundary_baseline.json :: "
+        "facade_protocol_binding_gaps)"
+        for protocol in sorted(set(known_gaps) - set(protocols))
     )
     return violations
 
@@ -912,6 +1136,11 @@ def check(root: Path) -> list[str]:
     violations.extend(facade_violations(root))
     violations.extend(dynamic_facade_reference_violations(root))
     violations.extend(
+        facade_protocol_binding_violations(
+            root, baseline["facade_protocol_binding_gaps"]
+        )
+    )
+    violations.extend(
         function_length_violations(root, baseline["function_length_ceiling"])
     )
     violations.extend(
@@ -936,7 +1165,8 @@ def main() -> int:
         "(0 SCCs; boundaries frozen; reverse imports capped; "
         "core/models service imports allowlisted; "
         "facade surface equals its allowlist; "
-        "dynamic facade references resolve; hot functions may only shrink; "
+        "dynamic facade references resolve; facade-bound protocols "
+        "match the facade; hot functions may only shrink; "
         "ports surface may only shrink)"
     )
     return 0
