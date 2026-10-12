@@ -108,12 +108,21 @@ def test_copy_leaves_the_original_notebook_untouched(world):
     assert (_elements(world, world.nb), _assets(world, world.nb)) == before
 
 
+def _pool_housekeeping(query: str) -> bool:
+    """连接池自己的借出探测与归还复位(``PostgresDatabase._restore_session_defaults``)。
+    它们由池在借还时机(可能在池的后台线程)执行,条数随连接复用情况浮动,与拷贝无关。"""
+    return query in ("", "RESET ALL") or query.startswith(
+        "SELECT set_config('statement_timeout'"
+    )
+
+
 def _count_statements(monkeypatch):
     executed: list[str] = []
     real_execute, real_executemany = Cursor.execute, Cursor.executemany
 
     def execute(self, query, *args, **kwargs):
-        executed.append(str(query))
+        if not _pool_housekeeping(str(query)):
+            executed.append(str(query))
         return real_execute(self, query, *args, **kwargs)
 
     def executemany(self, query, *args, **kwargs):
