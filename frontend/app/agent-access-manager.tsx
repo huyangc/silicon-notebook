@@ -228,7 +228,7 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
   const [confirmEnableProfileId, setConfirmEnableProfileId] = useState<string | null>(null);
   const [enabledProfileId, setEnabledProfileId] = useState<string | null>(null);
   // 停用/启用失败落在该 Profile 行上:页顶横幅可能在视口外,行又回到原状,看起来像什么都没发生。
-  const [profileError, setProfileError] = useState<{ id: string; message: string } | null>(null);
+  const [profileError, setProfileError] = useState<{ id: string; text: string } | null>(null);
   const [hideInactive, setHideInactive] = useState(true);
   // 刚撤销的那一行留在列表里显示「已撤销」,免得「隐藏已撤销」把操作结果一并藏掉。
   const [justRevokedId, setJustRevokedId] = useState<string | null>(null);
@@ -523,7 +523,7 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
       return controller.signal.aborted || !mountedRef.current ? null : profile;
     } catch (cause) {
       if (!controller.signal.aborted && mountedRef.current) {
-        setProfileError({ id: profileId, message: toUserMessage(cause, fallback) });
+        setProfileError({ id: profileId, text: toUserMessage(cause, fallback) });
       }
       return null;
     } finally {
@@ -755,13 +755,13 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
                       {enabledProfileId === profile.id && (
                         <small className="agent-token-saved" role="status"><Check size={13} /> 已启用</small>
                       )}
-                      {profileError?.id === profile.id && <small className="agent-token-confirm" role="alert">{profileError.message}</small>}
+                      {profileError?.id === profile.id && <small className="agent-token-confirm" role="alert">{profileError.text}</small>}
                       <button type="button" disabled={loading} onClick={() => disableProfile(profile.id)}>停用</button>
                     </span>
                   ) : confirmEnableProfileId === profile.id ? (
                     <span className="agent-profile-actions">
                       {profileError?.id === profile.id
-                        ? <small className="agent-token-confirm" role="alert">{profileError.message}</small>
+                        ? <small className="agent-token-confirm" role="alert">{profileError.text}</small>
                         : <small className="agent-token-confirm">启用后，它未撤销、未过期的 token 立即恢复可用</small>}
                       <button type="button" disabled={loading} onClick={() => enableProfile(profile.id)}>确认启用</button>
                       <button type="button" disabled={loading} onClick={() => { setConfirmEnableProfileId(null); setProfileError(null); }}>不启用</button>
