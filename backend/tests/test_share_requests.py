@@ -1009,6 +1009,50 @@ def test_deleting_the_group_cascades_share_requests(tmp_path, monkeypatch):
     ).json() == []
 
 
+@pytest.mark.parametrize("status", ["deleting", "copying", "importing"])
+def test_approving_into_a_notebook_that_is_not_live_is_a_404_and_writes_no_grant(
+    tmp_path, monkeypatch, status
+):
+    """库在删除/复制/导入中(`NOTEBOOK_LIVE_SQL` 之外)时,批准 → 404,零授权边。
+
+    那时库对任何读者都不可见:批出去的边要么被删库级联清掉,要么指向一个半成品。申请行
+    **保留**为 pending——库回到可用状态后同一条申请照常能批(反向护栏:存活复核不是一道
+    恒关的闸)。PG 孪生在 `postgres/test_concurrency.py`。
+    """
+    from app.api import deps
+
+    client = _client(tmp_path, monkeypatch)
+    boss, librarian, _lid, group_id, notebook_id = _make_member_owned_notebook(client)
+    request_id = _submit(client, librarian, notebook_id, group_id).json()["id"]
+
+    def set_status(value: str) -> None:
+        with deps.repository()._write() as db:
+            db.execute("UPDATE notebooks SET status=? WHERE id=?", (value, notebook_id))
+
+    def grant_rows() -> list:
+        with deps.repository()._write() as db:
+            return db.execute(
+                "SELECT principal_type, role FROM notebook_grants WHERE notebook_id=?",
+                (notebook_id,),
+            ).fetchall()
+
+    set_status(status)
+    refused = client.post(
+        f"/api/groups/{group_id}/share-requests/{request_id}/approve", headers=boss
+    )
+    assert refused.status_code == 404, refused.text
+    assert grant_rows() == []
+    assert [r["id"] for r in _pending_for(client, boss, group_id).json()] == [request_id]
+
+    set_status("ready")
+    approved = client.post(
+        f"/api/groups/{group_id}/share-requests/{request_id}/approve", headers=boss
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["status"] == "approved"
+    assert [tuple(row) for row in grant_rows()] == [("group", "viewer")]
+
+
 # --------------------------------------------------------------------- store 层
 
 

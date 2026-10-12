@@ -1003,8 +1003,9 @@ class GroupStore:
         进程写锁保证删库不会插在本事务中间),但那句话在库已经不存在时是误导。所以两个调用方
         里的 `create_grant` 在本方法之前先跑 `_require_notebook_on`,让答案变成 404
         「笔记本不存在」,与 PG 侧对齐(codex #519 R7 存疑项收口);另一个调用方
-        `approve_share_request` 不需要——它先按 `id + group_id + status='pending'` 取申请行,
-        库被删时那行已被外键级联带走,查不到就返回 `None`(路由 404),压根到不了这里。
+        `approve_share_request` 不需要——它先按 `id + group_id + status='pending'` 取申请行
+        (join 存活的 `notebooks`),库被删时那行已被外键级联带走、库不存活时 join 不中,
+        都查不到就返回 `None`(路由 404),压根到不了这里。
         """
         if (
             db.execute(
@@ -1044,13 +1045,20 @@ class GroupStore:
         是进程级写锁,approve 与并发的 `delete_group` 不可能交错,所以插入 `notebook_grants`
         边与删组之间插不进第三个事务、造不出孤儿边(PG 没有那把锁,必须显式 `FOR SHARE`,
         理由完整写在 `postgres/group_store.py::approve_share_request`)。与
-        `delete_group` / `create_share_request` 的同款后端分叉一致。
+        `delete_group` / `create_share_request` 的同款后端分叉一致。PG 侧审批「先锁笔记本行
+        再碰申请行」的锁序修复在这里同样不需要(进程写锁,删库插不进来)。
+
+        **存活复核两侧对等**:取申请行时 join `notebooks` 并带 `NOTEBOOK_LIVE_SQL`——库在
+        deleting / copying / importing 时返回 `None`(路由 404)、不写授权边;申请行保留,库
+        回到可用状态后可以再批。PG 侧同一判据在 `_lock_request_notebook_on` 里。
         """
         stamp = self.now()
         with self.database.write() as db:
             row = db.execute(
-                "SELECT notebook_id, requested_by FROM notebook_share_requests "
-                "WHERE id=? AND group_id=? AND status='pending'",
+                "SELECT sr.notebook_id, sr.requested_by FROM notebook_share_requests sr "
+                "JOIN notebooks n ON n.id=sr.notebook_id "
+                "WHERE sr.id=? AND sr.group_id=? AND sr.status='pending' "
+                f"AND n.{NOTEBOOK_LIVE_SQL}",
                 (request_id, group_id),
             ).fetchone()
             if row is None:
