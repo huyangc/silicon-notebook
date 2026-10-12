@@ -509,9 +509,12 @@ class MemoryService:
         )
 
     def list_agent_profiles(
-        self, owner_id: str, offset: int = 0, limit: int = 100
+        self, owner_id: str, offset: int = 0, limit: int = 100,
+        *, include_deleted: bool = False,
     ) -> list[AgentProfile]:
-        return self.store.list_agent_profiles(owner_id, offset, limit)
+        return self.store.list_agent_profiles(
+            owner_id, offset, limit, include_deleted=include_deleted
+        )
 
     def update_agent_profile(
         self,

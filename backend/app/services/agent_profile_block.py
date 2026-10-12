@@ -105,7 +105,11 @@ def resolve_agent_profile_names(list_profiles, owner_id: str) -> dict:
     names: dict = {}
     offset = 0
     while True:
-        page = list(list_profiles(owner_id, offset, AGENT_PROFILE_NAME_PAGE))
+        page = list(
+            list_profiles(
+                owner_id, offset, AGENT_PROFILE_NAME_PAGE, include_deleted=True
+            )
+        )
         for profile in page:
             names[profile.id] = profile.name
         if len(page) < AGENT_PROFILE_NAME_PAGE:

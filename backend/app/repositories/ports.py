@@ -660,7 +660,8 @@ class MemoryRepository(Protocol):
         self, owner_id: str, name: str, description: str = ""
     ) -> AgentProfile: ...
     def list_agent_profiles(
-        self, owner_id: str, offset: int = 0, limit: int = 100
+        self, owner_id: str, offset: int = 0, limit: int = 100,
+        *, include_deleted: bool = False,
     ) -> list[AgentProfile]: ...
     def update_agent_profile(
         self, profile_id: str, owner_id: str, patch: Mapping[str, Any] | Any
@@ -4026,7 +4027,8 @@ class MemoryStorePort(Protocol):
         self, owner_id: str, name: str, description: str
     ) -> AgentProfile: ...
     def list_agent_profiles(
-        self, owner_id: str, offset: int = 0, limit: int = 100
+        self, owner_id: str, offset: int = 0, limit: int = 100,
+        *, include_deleted: bool = False,
     ) -> list[AgentProfile]: ...
     def update_agent_profile(
         self, profile_id: str, owner_id: str, fields: Mapping[str, Any]

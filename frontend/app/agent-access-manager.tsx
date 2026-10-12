@@ -251,6 +251,8 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
   // 行内保存的回执按序号记下。保存之前就已发出的列表/翻页请求晚到时,不许把这些行
   // 覆盖回旧配置;保存之后发出的请求本来就读到新值,不受影响。
   const saveSeqRef = useRef(0);
+  // 已删除成功的 Profile id:成功前发出的列表/翻页响应晚到时,不能把它们加回来。
+  const deletedProfileIdsRef = useRef<Set<string>>(new Set());
   const savedTokensRef = useRef(new Map<string, { seq: number; token: AgentTokenSummary }>());
   const profileOffsetRef = useRef(0);
   const tokenOffsetRef = useRef(0);
@@ -331,10 +333,11 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
       agentApi<AgentProfile[]>(agentPagePath("/agent-profiles", 0), { signal: controller.signal }),
       agentApi<AgentTokenSummary[]>(agentPagePath("/agent-tokens", 0), { signal: controller.signal }),
       agentApi<NotebookSummary[]>("/notebooks", { signal: controller.signal }),
-    ]).then(([nextProfiles, nextTokens, nextNotebooks]) => {
+    ]).then(([listedProfiles, nextTokens, nextNotebooks]) => {
       if (controller.signal.aborted || epoch !== requestEpochRef.current) return;
       // 选中的 Profile 若在后面的页里(刷新回到第一页后不在 nextProfiles 里),不能丢掉它。
       const keptId = selectedProfileRef.current;
+      const nextProfiles = listedProfiles.filter((profile) => !deletedProfileIdsRef.current.has(profile.id));
       setProfiles((currentProfiles) => {
         const kept = keptId && !nextProfiles.some((profile) => profile.id === keptId)
           ? currentProfiles.find((profile) => profile.id === keptId)
@@ -342,9 +345,9 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
         return kept ? [...nextProfiles, kept] : nextProfiles;
       });
       setTokens(withNewerSaves(nextTokens, saveSeq));
-      profileOffsetRef.current = nextProfiles.length;
+      profileOffsetRef.current = listedProfiles.length;
       tokenOffsetRef.current = nextTokens.length;
-      setProfileHasMore(agentPageHasMore(nextProfiles));
+      setProfileHasMore(agentPageHasMore(listedProfiles));
       setTokenHasMore(agentPageHasMore(nextTokens));
       setNotebooks(nextNotebooks);
       const activeProfiles = nextProfiles.filter((profile) => profile.status === "active");
@@ -352,7 +355,7 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
       setSelectedProfile((current) => {
         if (activeProfiles.some((profile) => profile.id === current)) return current;
         // 当前选择在后面的页里:只要第一页没有它的停用记录,就保留(服务端签发时仍会复核)。
-        if (current && agentPageHasMore(nextProfiles) && !nextProfiles.some((profile) => profile.id === current)) return current;
+        if (current && agentPageHasMore(listedProfiles) && !nextProfiles.some((profile) => profile.id === current)) return current;
         return activeProfiles.length === 1 ? activeProfiles[0].id : "";
       });
       setDraft((current) => {
@@ -396,7 +399,7 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
         { signal: controller.signal },
       );
       if (controller.signal.aborted || epoch !== requestEpochRef.current || !mountedRef.current) return;
-      setProfiles((current) => mergeAgentPage(current, page));
+      setProfiles((current) => mergeAgentPage(current, page.filter((item) => !deletedProfileIdsRef.current.has(item.id))));
       profileOffsetRef.current += page.length;
       setProfileHasMore(agentPageHasMore(page));
     } catch (cause) {
@@ -581,6 +584,8 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
       });
       if (controller.signal.aborted || !mountedRef.current) return;
       setConfirmDeleteProfileId(null);
+      deletedProfileIdsRef.current.add(profileId);
+      setProfiles((current) => current.filter((item) => item.id !== profileId));
       if (snapshot) setDeletedProfile({ profile: snapshot, index });
       if (selectedProfileRef.current === profileId) setSelectedProfile("");
       setRefresh((value) => value + 1);
@@ -802,7 +807,7 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
             <div className="agent-profile-list">
               {profileRows.map((profile) => (
                 <div key={profile.id}>
-                  <span><strong>{profile.name}</strong><small>{profile.description || "无说明"} · {profile.status === "active" ? "启用" : "已停用"}</small></span>
+                  <span><strong>{profile.name}</strong><small>{profile.description || "无说明"}{deletedProfile?.profile.id === profile.id ? "" : ` · ${profile.status === "active" ? "启用" : "已停用"}`}</small></span>
                   {deletedProfile?.profile.id === profile.id ? (
                     <span className="agent-profile-actions">
                       <small className="agent-token-saved" role="status"><Check size={13} /> 已删除</small>
