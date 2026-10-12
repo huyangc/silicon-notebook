@@ -251,7 +251,8 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
   // 行内保存的回执按序号记下。保存之前就已发出的列表/翻页请求晚到时,不许把这些行
   // 覆盖回旧配置;保存之后发出的请求本来就读到新值,不受影响。
   const saveSeqRef = useRef(0);
-  // 已删除成功的 Profile id:成功前发出的列表/翻页响应晚到时,不能把它们加回来。
+  // 已删除成功的 Profile id:删除之后的刷新/翻页结果若仍带着它(例如读到删除前的快照),不能把它加回来。
+  // 删除之前发出的请求已由 requestEpochRef 丢弃,这里挡的是之后的那一次。
   const deletedProfileIdsRef = useRef<Set<string>>(new Set());
   const savedTokensRef = useRef(new Map<string, { seq: number; token: AgentTokenSummary }>());
   const profileOffsetRef = useRef(0);
