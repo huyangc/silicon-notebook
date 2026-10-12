@@ -1149,3 +1149,83 @@ def test_conflict_row_readers_exclude_memory_rows(repo):
     # set returns exactly the shared relations (filtering after the LIMIT would
     # have spent part of it on the Memory relations).
     assert {r["id"] for r in bounded} == shared_relations
+
+
+# ---------------------------------------------------------------------------
+# K1 (debt-fix 2026-10-12): no write-back after a 「删除知识图谱」
+# ---------------------------------------------------------------------------
+
+class _DeletingLLM(FakeLLM):
+    """Deletes the notebook's graph from inside the first adjudication call —
+    the window a real pass spends waiting on the model."""
+
+    def __init__(self, repo, notebook_id, verdicts):
+        super().__init__(verdicts)
+        self._repo, self._notebook_id, self.deleted = repo, notebook_id, False
+
+    def chat_json(self, messages, schema_hint=None, **kwargs):
+        if not self.deleted:
+            self.deleted = True
+            self._repo._runtime.knowledge_lifecycle.delete_notebook_kg(
+                self._notebook_id
+            )
+        return super().chat_json(messages, schema_hint, **kwargs)
+
+
+def test_candidates_are_not_written_back_after_the_graph_was_deleted(
+    repo, monkeypatch,
+):
+    """K1 变异钉:把写入前的 ``kg_reset_epoch`` 比对拿掉(``reset_epoch`` 不传)→
+    删除提交之后,这一轮按旧图算出的候选照样写回队列(指向已删对象),
+    高置信裁决还会去改已删的边,报红。比对生效时:一条不写、不自动应用,
+    发一条只带计数的事件。"""
+    nb_id, _oid_a, _oid_b, rel_a, rel_b = _seed_notebook_with_contradicting_claims(repo)
+    left_ref, right_ref = (rel_a, rel_b) if rel_a < rel_b else (rel_b, rel_a)
+    llm = _DeletingLLM(repo, nb_id, [{
+        "conflict_type": "temporal", "resolution": "discard",
+        "winner_ref": left_ref, "resolved_payload": None,
+        "confidence": 0.99, "rationale": "r",
+    }])
+    bind_chat_client(repo, "kg_conflict_review", llm)
+    events = []
+    governance = repo._runtime.knowledge_governance
+    monkeypatch.setattr(governance.event_log, "emit", events.append)
+
+    result = governance.resolve_notebook_conflicts(nb_id)
+
+    assert llm.deleted, "前置不成立:裁决期间没有发生删除"
+    assert result["auto_applied"] == 0 and result["queued"] == 0
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) FROM kg_conflict_candidates WHERE notebook_id=?",
+            (nb_id,),
+        ).fetchone()[0] == 0
+    discarded = [e for e in events
+                 if e.get("kind") == "kg_conflict_candidates_discarded_after_reset"]
+    assert discarded == [{
+        "kind": "kg_conflict_candidates_discarded_after_reset",
+        "notebook_id": nb_id,
+        "discarded": result["detected"],
+    }]
+    assert right_ref  # the pair existed before the delete
+
+
+def test_conflict_write_lands_only_while_the_reset_epoch_holds(repo):
+    """``write_conflict_candidate(reset_epoch=…)``:纪元一致才落行,不一致返回
+    None 且不写;不传纪元的老调用方照旧无条件写入。"""
+    governance = repo._runtime.knowledge_governance
+    nb = repo.create_notebook(NotebookCreate(name="epoch"))
+    with repo._connect() as db:
+        epoch = repo._runtime.unified_kg.graph_seq_row(db, nb.id)[3]
+
+    assert governance.write_conflict_candidate(
+        nb.id, "node", "a", "b", reset_epoch=epoch + 1) is None
+    landed = governance.write_conflict_candidate(
+        nb.id, "node", "a", "b", reset_epoch=epoch)
+    assert landed is not None
+    assert governance.write_conflict_candidate(nb.id, "node", "c", "d") is not None
+    with repo._connect() as db:
+        ids = {row[0] for row in db.execute(
+            "SELECT id FROM kg_conflict_candidates WHERE notebook_id=?", (nb.id,)
+        ).fetchall()}
+    assert landed in ids and len(ids) == 2

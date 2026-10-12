@@ -1,7 +1,7 @@
 """batch-3-W1 T-5a: ``delete_notebook_kg`` 的预排水(pre-reset drain)行为钉。
 
 T-5a 的取舍(勘误 2 的裁决,选「范围重界定」而非推翻 P0-1):终局仍是
-「13 条 DELETE + unified_kg_state 重置在一个 ``write()`` 里提交,提交后才做
+「全部 DELETE + unified_kg_state 重置在一个 ``write()`` 里提交,提交后才做
 缓存失效」——P0-1 单事务不变量原样保留(``test_kg_mutation_phase_matrix.py::
 test_delete_delegates_in_write_then_commits_before_cache_invalidation`` 继续
 钉着它);有界化来自终局之前的分页预排水:每批一个独立写事务、同事务经
@@ -33,46 +33,48 @@ def repo(tmp_path, monkeypatch):
 
 def _seed_graph(
     repo, notebook_id, *, doc_objects: int, memory_objects: int = 0,
-    clusters: bool = False,
+    clusters: bool = False, tag: str = "",
 ):
     """直接落行:一个用户文档来源 + 可选一个 memory 来源,以及各自名下的
     knowledge_objects;``clusters=True`` 时每个文档对象再挂一条簇成员行。
-    绕过抽取管线,行数可控。"""
+    绕过抽取管线,行数可控。``tag`` 给第二本库的行加后缀(缺省时 id 不变)。"""
     now = _now()
     with repo._runtime.database.write() as db:
         db.execute(
             "INSERT INTO sources (id,notebook_id,title,file_path,source_type,"
             "status,parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-            ("src-doc", notebook_id, "doc", "", "pdf", "ready", "parsed", now, now),
+            (f"src-doc{tag}", notebook_id, "doc", "", "pdf", "ready", "parsed",
+             now, now),
         )
         if memory_objects:
             db.execute(
                 "INSERT INTO sources (id,notebook_id,title,file_path,source_type,"
                 "status,parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                ("src-mem", notebook_id, "mem", "", "memory", "ready", "parsed",
-                 now, now),
+                (f"src-mem{tag}", notebook_id, "mem", "", "memory", "ready",
+                 "parsed", now, now),
             )
         for i in range(doc_objects):
             db.execute(
                 "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,"
                 "owner,payload,evidence,source_id,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (f"ko-doc-{i}", notebook_id, "concept", "approved", "", "{}",
-                 "[]", "src-doc", now, now),
+                (f"ko-doc{tag}-{i}", notebook_id, "concept", "approved", "", "{}",
+                 "[]", f"src-doc{tag}", now, now),
             )
             if clusters:
                 db.execute(
                     "INSERT INTO concept_clusters (id,notebook_id,canonical_id,"
                     "member_object_id,canonical_name,created_at) VALUES (?,?,?,?,?,?)",
-                    (f"cl-{i}", notebook_id, "canon-1", f"ko-doc-{i}", "Canon", now),
+                    (f"cl{tag}-{i}", notebook_id, "canon-1", f"ko-doc{tag}-{i}",
+                     "Canon", now),
                 )
         for i in range(memory_objects):
             db.execute(
                 "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,"
                 "owner,payload,evidence,source_id,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (f"ko-mem-{i}", notebook_id, "concept", "approved", "", "{}",
-                 "[]", "src-mem", now, now),
+                (f"ko-mem{tag}-{i}", notebook_id, "concept", "approved", "", "{}",
+                 "[]", f"src-mem{tag}", now, now),
             )
 
 
@@ -125,9 +127,9 @@ def test_drain_bounds_the_final_pass_and_counts_stay_total(repo, monkeypatch):
         pages.append((step, deleted))
         return deleted
 
-    def _backlog_spy(db, nb, threshold, start=0):
+    def _backlog_spy(db, nb, threshold, start=0, **kw):
         probes.append(start)
-        return original_backlog(db, nb, threshold, start)
+        return original_backlog(db, nb, threshold, start, **kw)
 
     monkeypatch.setattr(store, "drain_notebook_graph_rows_page", _spy)
     monkeypatch.setattr(store, "graph_drain_backlog", _backlog_spy)
@@ -366,8 +368,8 @@ def test_final_reset_revalidates_the_bound_inside_its_own_transaction(
     original_backlog = store.graph_drain_backlog
     injected = {"done": False}
 
-    def _stale_none_backlog(db, nb, threshold, start=0):
-        result = original_backlog(db, nb, threshold, start)
+    def _stale_none_backlog(db, nb, threshold, start=0, **kw):
+        result = original_backlog(db, nb, threshold, start, **kw)
         if result is None and start == 0 and not injected["done"]:
             injected["done"] = True
             now = _now()
@@ -480,8 +482,8 @@ def test_small_path_still_validates_inside_the_final_transaction(
     original_backlog = store.graph_drain_backlog
     injected = {"done": False}
 
-    def _stale_none_backlog(db, nb, threshold, start=0):
-        result = original_backlog(db, nb, threshold, start)
+    def _stale_none_backlog(db, nb, threshold, start=0, **kw):
+        result = original_backlog(db, nb, threshold, start, **kw)
         if result is None and start == 0 and not injected["done"]:
             injected["done"] = True
             now = _now()
@@ -718,9 +720,9 @@ def test_final_reset_pins_isolation_as_the_first_statement(repo, monkeypatch):
         order.append("isolation")
         return original_iso(db)
 
-    def _backlog_spy(db, nb, threshold, start=0):
+    def _backlog_spy(db, nb, threshold, start=0, **kw):
         order.append(("probe", start))
-        return original_backlog(db, nb, threshold, start)
+        return original_backlog(db, nb, threshold, start, **kw)
 
     monkeypatch.setattr(store, "begin_graph_reset_isolation", _iso_spy)
     monkeypatch.setattr(store, "graph_drain_backlog", _backlog_spy)
@@ -836,7 +838,7 @@ def test_post_reset_validation_catches_snapshot_invisible_commits(
     original_backlog = store.graph_drain_backlog
     injected = {"done": False}
 
-    def _inject_before_survivor_probe(db, nb, threshold, start=0):
+    def _inject_before_survivor_probe(db, nb, threshold, start=0, **kw):
         # threshold==0 只出现在终局提交后的幸存者复验——首调之前注入 4 行,
         # 模拟「终局快照之后落地、DELETE 看不见」的并发提交(此刻终局已提交,
         # 独立连接不会撞写锁)。
@@ -854,7 +856,7 @@ def test_post_reset_validation_catches_snapshot_invisible_commits(
                         (f"ko-surv-{i}", nb, "concept", "approved", "", "{}",
                          "[]", "src-doc", now2, now2),
                     )
-        return original_backlog(db, nb, threshold, start)
+        return original_backlog(db, nb, threshold, start, **kw)
 
     monkeypatch.setattr(store, "graph_drain_backlog", _inject_before_survivor_probe)
 
@@ -984,3 +986,338 @@ def test_drain_registry_mirrors_the_final_statements_postgres():
         "排水登记表漏掉了 _GRAPH_RESET_TABLES 的成员:"
         f"{sorted(_GRAPH_RESET_TABLES - registry_tables)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# K1 (debt-fix 2026-10-12): dead-ref conflict candidates, the merge-review
+# row, and the rebuild-derived tables a delete deliberately keeps (ruling 11)
+# ---------------------------------------------------------------------------
+
+_DERIVED = (
+    "canonical_relations", "communities", "community_members",
+    "concept_comentions", "mention_edges",
+)
+
+
+def _seed_derived(repo, notebook_id, n, *, generation=1, prefix="d"):
+    """``n`` rows in each of the five rebuild-derived tables (direct inserts,
+    keys sortable, communities/members in ``generation``)."""
+    now = _now()
+    with repo._runtime.database.write() as db:
+        for i in range(n):
+            db.execute(
+                "INSERT INTO canonical_relations (notebook_id,canonical_src,"
+                "edge_type,canonical_tgt,updated_at) VALUES (?,?,?,?,?)",
+                (notebook_id, f"K-{prefix}{i:03d}", "supports",
+                 f"K-{prefix}t{i:03d}", now),
+            )
+            db.execute(
+                "INSERT INTO mention_edges (notebook_id,claim_object_id,"
+                "concept_canonical_id) VALUES (?,?,?)",
+                (notebook_id, f"ko-{prefix}c{i:03d}", f"K-{prefix}{i:03d}"),
+            )
+            db.execute(
+                "INSERT INTO concept_comentions (notebook_id,canonical_a,"
+                "canonical_b,bridge_claims) VALUES (?,?,?,3)",
+                (notebook_id, f"K-{prefix}{i:03d}", f"K-{prefix}z{i:03d}"),
+            )
+            db.execute(
+                "INSERT INTO communities (id,notebook_id,level,member_ids,size,"
+                "created_at,generation) VALUES (?,?,0,'[]',3,?,?)",
+                (f"cm-{prefix}{i:03d}", notebook_id, now, generation),
+            )
+            db.execute(
+                "INSERT INTO community_members (canonical_id,notebook_id,level,"
+                "community_id,canonical_name,centrality,generation) "
+                "VALUES (?,?,0,?,?,0.5,?)",
+                (f"K-{prefix}{i:03d}", notebook_id, f"cm-{prefix}{i:03d}",
+                 f"name{i}", generation),
+            )
+
+
+def _conflict(repo, notebook_id, cid, left, right, status="pending", kind="node"):
+    now = _now()
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO kg_conflict_candidates (id,notebook_id,kind,left_ref,"
+            "right_ref,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (cid, notebook_id, kind, left, right, status, now, now),
+        )
+
+
+def _merge_job(repo, notebook_id, status):
+    now = _now()
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO merge_review_jobs (notebook_id,status,total,done,"
+            "started_at,updated_at,error) VALUES (?,?,10,4,?,?,?)",
+            (notebook_id, status, now, now,
+             "LLM 预审连续无进展,已中止" if status == "failed" else ""),
+        )
+
+
+def _derived_counts(repo, notebook_id):
+    return {
+        t: _count(repo, f"SELECT COUNT(*) FROM {t} WHERE notebook_id=?",
+                  (notebook_id,))
+        for t in _DERIVED
+    }
+
+
+def test_conflict_candidates_dropped_only_when_a_ref_died(repo, monkeypatch):
+    """K1 变异钉两问:① 谓词改成 ``status='pending'`` → applied/rejected 的
+    失效候选留下,报红;② 改成整表删除 → 两个 Memory 对象(或 Memory 关系)
+    之间的候选被误删,报红。任一侧引用已不存在即删,不分状态。"""
+    monkeypatch.setattr(
+        repo._runtime.knowledge_lifecycle, "_graph_drain_budget_rows", 3
+    )
+    notebook = repo.create_notebook(NotebookCreate(name="conflicts"))
+    _seed_graph(repo, notebook.id, doc_objects=8, memory_objects=2)
+    now = _now()
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO knowledge_relations (id,notebook_id,source_id,"
+            "source_object_id,target_object_id,edge_type,evidence,created_at) "
+            "VALUES ('rel-mem-0',?,'src-mem','ko-mem-0','ko-mem-1','supports','[]',?),"
+            "('rel-mem-1',?,'src-mem','ko-mem-1','ko-mem-0','contradicts','[]',?)",
+            (notebook.id, now, notebook.id, now),
+        )
+    # 失效:6 条文档对象之间的候选,三种状态都有(超预算,走排水页)。
+    for i, status in enumerate(("applied", "rejected", "pending") * 2):
+        _conflict(repo, notebook.id, f"kcc-dead-{i}", f"ko-doc-{i}",
+                  f"ko-doc-{i + 1}", status)
+    # 失效:一侧是已删文档对象、另一侧是保留的 Memory 对象。
+    _conflict(repo, notebook.id, "kcc-half", "ko-mem-0", "ko-doc-7", "applied")
+    # 保留:两侧都还在(Memory 对象 / Memory 关系)。
+    _conflict(repo, notebook.id, "kcc-keep-node", "ko-mem-0", "ko-mem-1", "applied")
+    _conflict(repo, notebook.id, "kcc-keep-edge", "rel-mem-0", "rel-mem-1",
+              "pending", kind="edge")
+
+    counts = repo.delete_notebook_kg(notebook.id)
+
+    with repo._runtime.database.connect() as db:
+        left = {
+            row["id"] for row in db.execute(
+                "SELECT id FROM kg_conflict_candidates WHERE notebook_id=?",
+                (notebook.id,),
+            ).fetchall()
+        }
+    assert left == {"kcc-keep-node", "kcc-keep-edge"}, left
+    assert counts["kg_conflict_candidates"] == 7
+
+
+def test_running_merge_review_job_row_survives_kg_delete(repo):
+    """K1 变异钉:去掉 ``status<>'running'`` → 运行中的预审作业行被删,单飞
+    不变量失守,报红。非运行行(failed/done)随删除清掉,状态回到 idle——
+    旧图谱的失败提示不再出现(有意的可见变化)。"""
+    running = repo.create_notebook(NotebookCreate(name="mr-running"))
+    failed = repo.create_notebook(NotebookCreate(name="mr-failed"))
+    _seed_graph(repo, running.id, doc_objects=2)
+    _seed_graph(repo, failed.id, doc_objects=2, tag="-f")
+    _merge_job(repo, running.id, "running")
+    _merge_job(repo, failed.id, "failed")
+    governance = repo._runtime.knowledge_governance
+    assert governance.merge_review_job_status(failed.id)["status"] == "failed"
+
+    repo.delete_notebook_kg(running.id)
+    repo.delete_notebook_kg(failed.id)
+
+    assert governance.merge_review_job_status(running.id) == {
+        "status": "running", "total": 10, "done": 4, "error": "",
+    }
+    assert governance.merge_review_job_status(failed.id) == {
+        "status": "idle", "total": 0, "done": 0, "error": "",
+    }
+
+
+def test_drain_only_steps_stay_out_of_the_post_commit_survivor_check(
+    repo, monkeypatch,
+):
+    """K1 变异钉(「新步骤参与复查」):冲突候选 / 合并预审两步若参与终局提交后
+    的阈值 0 复查 → 提交与复查之间落地的这类行(冲突作业写回、预审作业
+    running→done、Knowhow 投影器删对象)每次都多烧一轮重置,报红(终局轮数
+    变 2)。这些行留到下一次删除;复查对文档图本身照旧(见
+    ``test_post_reset_validation_catches_snapshot_invisible_commits``)。"""
+    service = repo._runtime.knowledge_lifecycle
+    monkeypatch.setattr(service, "_graph_drain_budget_rows", 3)
+    from app.repositories.sqlite.database import SqliteDatabase
+
+    primary = repo._runtime.database
+    independent = SqliteDatabase(primary.settings, primary.root_dir)
+    store = repo._runtime.knowledge
+    original_backlog = store.graph_drain_backlog
+    original_final = store.delete_notebook_graph_rows
+
+    def _run(name, inject):
+        notebook = repo.create_notebook(NotebookCreate(name=name))
+        _seed_graph(repo, notebook.id, doc_objects=2, tag=f"-{name}")
+        injected = {"done": False}
+        finals = []
+
+        def _backlog(db, nb, threshold, start=0, **kw):
+            if threshold == 0 and not injected["done"]:
+                injected["done"] = True
+                now = _now()
+                with independent.write() as w:
+                    inject(w, nb, now)
+            return original_backlog(db, nb, threshold, start, **kw)
+
+        def _final(db, nb, now):
+            finals.append(nb)
+            return original_final(db, nb, now)
+
+        monkeypatch.setattr(store, "graph_drain_backlog", _backlog)
+        monkeypatch.setattr(store, "delete_notebook_graph_rows", _final)
+        repo.delete_notebook_kg(notebook.id)
+        assert injected["done"], "前置不成立:没有触发注入"
+        return notebook.id, finals
+
+    def _late_conflict_and_finished_review(w, nb, now):
+        w.execute(
+            "INSERT INTO kg_conflict_candidates (id,notebook_id,kind,left_ref,"
+            "right_ref,status,created_at,updated_at) "
+            "VALUES ('kcc-late',?,'node','ko-gone-a','ko-gone-b','pending',?,?)",
+            (nb, now, now),
+        )
+        w.execute(
+            "INSERT INTO merge_review_jobs (notebook_id,status,total,done,"
+            "started_at,updated_at,error) VALUES (?,'done',3,3,?,?,'')",
+            (nb, now, now),
+        )
+
+    nb_id, finals = _run("settle-exempt", _late_conflict_and_finished_review)
+    assert len(finals) == 1, (
+        f"冲突候选/预审行不得参与提交后复查(多烧了重置轮):{len(finals)}"
+    )
+    assert _count(repo, "SELECT COUNT(*) FROM kg_conflict_candidates "
+                  "WHERE notebook_id=?", (nb_id,)) == 1
+
+
+def test_derived_reads_after_delete_match_a_graph_that_never_had_them(repo):
+    """K1(裁决 11):删除作业刻意**不清**派生表,这里证明留下的派生行无害——
+    删除后,读者入口(``resolve_focal`` → 社区同伴 / 共提同伴)与按已发布代
+    直读,在「有派生残留」的库和「从没建过派生表」的库上逐值相同:
+    concept_clusters 已清,focal 解析不出;社区读按已发布代,而重置把指针拨回
+    代 0。变异钉:若删除不再清 concept_clusters 或不再重置代指针,残留的
+    社区 / 共提同伴重新可达,报红。"""
+    from app.services.communities import CommunityQueryService
+
+    rt = repo._runtime
+    deleted = repo.create_notebook(NotebookCreate(name="had-derived"))
+    clean = repo.create_notebook(NotebookCreate(name="never-derived"))
+    _seed_graph(repo, deleted.id, doc_objects=3, memory_objects=1, clusters=True)
+    _seed_graph(repo, clean.id, doc_objects=3, memory_objects=1, clusters=True,
+                tag="-c")
+    with rt.database.write() as db:
+        db.execute(
+            "UPDATE concept_clusters SET canonical_id='K-g1000' WHERE notebook_id=?",
+            (deleted.id,),
+        )
+    _seed_derived(repo, deleted.id, 4, generation=1, prefix="g1")
+    with rt.database.write() as db:
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id,community_generation,"
+            "updated_at) VALUES (?,1,?) ON CONFLICT(notebook_id) DO UPDATE SET "
+            "community_generation=1", (deleted.id, _now()),
+        )
+
+    service = CommunityQueryService(
+        notebooks=rt.notebook_store, unified_kg=rt.unified_kg,
+        event_log=rt.event_log, sibling_min_bridge=1,
+    )
+
+    def _reads(nb):
+        uk = rt.unified_kg
+        return {
+            "focal": [uk.resolve_focal(nb, k) for k in ("canon", "name0", "name1")],
+            "community_peers": [
+                service.community_peers(nb, k, "q", top_k=5, candidates=10)
+                for k in ("Canon", "name0")
+            ],
+            "sibling_peers": [service.sibling_peers(nb, k) for k in ("Canon", "name0")],
+            "top_community": [
+                uk.top_community_for(nb, f"K-g1{i:03d}") for i in range(4)
+            ],
+            "member_peers": [
+                [dict(r) for r in uk.community_member_peers(nb, f"cm-g1{i:03d}", "", 10)]
+                for i in range(4)
+            ],
+            "comention_peers": [
+                uk.comention_peers(nb, f"K-g1{i:03d}", 1, 10) for i in range(4)
+            ],
+        }
+
+    # 前置:删除之前,派生行真的可达(否则下面的相等毫无意义)。
+    before = _reads(deleted.id)
+    assert before["focal"][0] == "K-g1000"
+    assert before["top_community"][0] == "cm-g1000"
+    assert before["member_peers"][0], before
+
+    repo.delete_notebook_kg(deleted.id)
+    repo.delete_notebook_kg(clean.id)
+    assert _derived_counts(repo, deleted.id) == dict.fromkeys(_DERIVED, 4), (
+        "前置:派生行按裁决 11 保留"
+    )
+    assert _reads(deleted.id) == _reads(clean.id)
+
+
+def test_kg_delete_leaves_derived_tables_until_the_next_rebuild(repo, monkeypatch):
+    """K1(裁决 11)变异钉:删除作业不触碰五张派生表(任何一张出现在登记表或
+    终局里 → 行数 / 内容变化,报红,同时镜像钉也会红);下一次重建把它们整体
+    替换掉。超阈值的图也一样(排水页里没有派生表)。"""
+    monkeypatch.setattr(
+        repo._runtime.knowledge_lifecycle, "_graph_drain_budget_rows", 3
+    )
+    notebook = repo.create_notebook(NotebookCreate(name="derived-kept"))
+    _seed_graph(repo, notebook.id, doc_objects=10, clusters=True)
+    _seed_derived(repo, notebook.id, 10)
+
+    def _snapshot():
+        with repo._runtime.database.connect() as db:
+            return {
+                t: [tuple(r) for r in db.execute(
+                    f"SELECT * FROM {t} WHERE notebook_id=? ORDER BY 1, 2, 3, 4",
+                    (notebook.id,),
+                ).fetchall()]
+                for t in _DERIVED
+            }
+
+    before = _snapshot()
+    pages = []
+    store = repo._runtime.knowledge
+    original = store.drain_notebook_graph_rows_page
+
+    def _spy(db, nb, step, limit):
+        deleted = original(db, nb, step, limit)
+        pages.append(dict(deleted))
+        return deleted
+
+    monkeypatch.setattr(store, "drain_notebook_graph_rows_page", _spy)
+    counts = repo.delete_notebook_kg(notebook.id)
+
+    assert pages, "前置不成立:超阈值的图必须走排水"
+    assert not any(t in d for d in pages for t in _DERIVED)
+    assert not any(t in counts for t in _DERIVED)
+    assert _snapshot() == before, "删除作业不得触碰派生表"
+
+    repo._runtime.knowledge_lifecycle.rebuild_unified_kg(notebook.id, force=True)
+    assert _derived_counts(repo, notebook.id) == dict.fromkeys(_DERIVED, 0), (
+        "重建必须整体替换删除留下的派生行"
+    )
+
+
+def test_drain_registry_keeps_derived_tables_and_exempts_two_steps():
+    """K1:两端登记表——复查豁免恰好是冲突候选与合并预审两步且都在登记表里;
+    派生表(裁决 11)与重建检查点、白名单、两张 scratch 表都不在。"""
+    from app.repositories.postgres import knowledge_store as pg
+    from app.repositories.sqlite import knowledge_store as sq
+
+    for module in (pg, sq):
+        registry = [t for t, _p, _n, m in module._GRAPH_DRAIN_STEPS if m]
+        assert module._GRAPH_DRAIN_SETTLE_EXEMPT == {
+            "kg_conflict_candidates", "merge_review_jobs",
+        }
+        assert module._GRAPH_DRAIN_SETTLE_EXEMPT <= set(registry)
+        for kept in (*_DERIVED, "kg_rebuild_checkpoint", "concept_whitelist",
+                     "kg_cluster_scratch", "kg_canonical_scratch"):
+            assert kept not in registry, f"{kept} 不得进入删除清单"

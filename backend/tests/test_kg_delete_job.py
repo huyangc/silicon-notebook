@@ -196,6 +196,134 @@ def test_delete_removes_document_graph_keeps_sources_and_clears_build_summary(ap
     assert repo.get_notebook(nb).kg_build.job_id == new_job["id"]
 
 
+_DERIVED_TABLES = (
+    "canonical_relations", "communities", "community_members",
+    "concept_comentions", "mention_edges",
+)
+
+
+def _seed_derived_and_kept(repo, notebook_id: str, tag: str) -> None:
+    """Rebuild-derived rows (two of each), conflict candidates (one citing a
+    deleted document object, one between the two surviving Memory rows), a
+    failed merge-review row, and the rows a delete must KEEP: rebuild
+    checkpoints, the per-run scratch tables, a whitelist term."""
+    now = _now()
+    with repo._write() as db:
+        for i in range(2):
+            db.execute(
+                "INSERT INTO canonical_relations (notebook_id,canonical_src,"
+                "edge_type,canonical_tgt,updated_at) VALUES (?,?,'supports',?,?)",
+                (notebook_id, f"K-{tag}{i}", f"K-{tag}t{i}", now),
+            )
+            db.execute(
+                "INSERT INTO mention_edges (notebook_id,claim_object_id,"
+                "concept_canonical_id) VALUES (?,?,?)",
+                (notebook_id, f"ko-claim-{tag}{i}", f"K-{tag}{i}"),
+            )
+            db.execute(
+                "INSERT INTO concept_comentions (notebook_id,canonical_a,"
+                "canonical_b) VALUES (?,?,?)",
+                (notebook_id, f"K-{tag}{i}", f"K-{tag}z{i}"),
+            )
+            db.execute(
+                "INSERT INTO communities (id,notebook_id,level,member_ids,size,"
+                "created_at,generation) VALUES (?,?,0,'[]',3,?,?)",
+                (f"cm-{tag}{i}", notebook_id, now, i),
+            )
+            db.execute(
+                "INSERT INTO community_members (canonical_id,notebook_id,level,"
+                "community_id,generation) VALUES (?,?,0,?,?)",
+                (f"K-{tag}{i}", notebook_id, f"cm-{tag}{i}", i),
+            )
+            db.execute(
+                "INSERT INTO kg_rebuild_checkpoint (notebook_id,input_version,"
+                "stage,item_key,payload,created_at) VALUES (?,'v1','merge_review',?,'{}',?)",
+                (notebook_id, f"item-{i}", now),
+            )
+            db.execute(
+                "INSERT INTO kg_cluster_scratch (notebook_id,run_id,object_id,seed) "
+                "VALUES (?,'run-live',?,'seed')",
+                (notebook_id, f"ko-{tag}{i}"),
+            )
+            db.execute(
+                "INSERT INTO kg_canonical_scratch (notebook_id,run_id,seed,"
+                "canonical_id) VALUES (?,'run-live',?,'K-x')",
+                (notebook_id, f"seed-{i}"),
+            )
+        for cid, left, right in (
+            (f"kcc-dead-{tag}", "ko-src-doc", "ko-src-doc-2"),
+            (f"kcc-keep-{tag}", "ko-src-mem", "rel-src-mem"),
+        ):
+            db.execute(
+                "INSERT INTO kg_conflict_candidates (id,notebook_id,kind,left_ref,"
+                "right_ref,status,created_at,updated_at) "
+                "VALUES (?,?,'node',?,?,'applied',?,?)",
+                (cid, notebook_id, left, right, now, now),
+            )
+        db.execute(
+            "INSERT INTO merge_review_jobs (notebook_id,status,total,done,"
+            "started_at,updated_at,error) VALUES (?,'failed',9,2,?,?,'x')",
+            (notebook_id, now, now),
+        )
+
+
+def test_delete_clears_dead_conflicts_and_idle_review_but_keeps_rebuild_inputs(api):
+    """K1 端到端(「删除知识图谱」作业):引用已失效的冲突候选清掉、两侧都在的
+    Memory 候选保留(变异钉:冲突谓词改整表删 → 报红);非运行的合并预审行
+    清掉、状态回到 idle。保留项:五张重建派生表(裁决 11,留到下次重建)、
+    来源、Memory 投影、重建检查点、两张按运行隔离的 scratch 表、白名单、
+    对象 Schema,以及另一本库的一切。"""
+    client, repo, submitted = api
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    other = client.post("/api/notebooks", json={"name": "other"}).json()["id"]
+    _seed_graph(repo, nb)
+    _seed_derived_and_kept(repo, nb, "a")
+    _seed_derived_and_kept(repo, other, "b")
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO concept_whitelist (term,note,created_at) VALUES ('NMOS','',?)",
+            (_now(),),
+        )
+    schemas_before = _count(repo, "SELECT COUNT(*) FROM object_schemas", ())
+    whitelist_before = _count(repo, "SELECT COUNT(*) FROM concept_whitelist", ())
+    bind_chat_client(repo, "kg_extract", MagicMock(configured=False))
+
+    assert client.post(f"/api/notebooks/{nb}/kg/delete").status_code == 200
+    fn, args, _kwargs = submitted[0]
+    fn(*args)
+    assert client.get(
+        f"/api/notebooks/{nb}/kg/delete/status"
+    ).json()["status"] == "succeeded"
+
+    for table in _DERIVED_TABLES:
+        for notebook in (nb, other):
+            assert _count(repo, f"SELECT COUNT(*) FROM {table} WHERE notebook_id=?",
+                          (notebook,)) == 2, table
+    with repo._connect() as db:
+        conflicts = {
+            row["id"] for row in db.execute(
+                "SELECT id FROM kg_conflict_candidates WHERE notebook_id=?", (nb,)
+            ).fetchall()
+        }
+    assert conflicts == {"kcc-keep-a"}
+    assert repo._runtime.knowledge_governance.merge_review_job_status(nb)[
+        "status"] == "idle"
+    assert repo._runtime.knowledge_governance.merge_review_job_status(other)[
+        "status"] == "failed"
+    for table in ("kg_rebuild_checkpoint", "kg_cluster_scratch",
+                  "kg_canonical_scratch"):
+        assert _count(repo, f"SELECT COUNT(*) FROM {table} WHERE notebook_id=?",
+                      (nb,)) == 2, table
+    assert _count(repo, "SELECT COUNT(*) FROM concept_whitelist", ()) == (
+        whitelist_before
+    )
+    assert _count(repo, "SELECT COUNT(*) FROM object_schemas", ()) == schemas_before
+    assert _count(repo, "SELECT COUNT(*) FROM knowledge_objects WHERE id=?",
+                  ("ko-src-mem",)) == 1
+    assert _count(repo, "SELECT COUNT(*) FROM sources WHERE notebook_id=?",
+                  (nb,)) == 2
+
+
 def test_delete_endpoints_404_for_unknown_notebook(api):
     client, _repo, submitted = api
     assert client.post("/api/notebooks/nb-missing/kg/delete").status_code == 404
