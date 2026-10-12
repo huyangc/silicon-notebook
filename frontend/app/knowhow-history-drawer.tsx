@@ -13,8 +13,8 @@
  * 不复用矩阵抽屉的 knowhow.conceptDrawer.fullscreen，两个弹窗的全屏选择互不
  * 影响。
  *
- * 样式（`.kh-history-*` 一整套）登记在 knowhow-panel.tsx 顶层的
- * `<style jsx global>`，不在本文件另开 `<style jsx>`——同 knowhow-matrix-
+ * 样式（`.kh-history-*` 一整套）登记在 knowhow-panel-styles.tsx 的
+ * `<style jsx global>`（由 KnowhowPanel 顶层挂载），不在本文件另开 `<style jsx>`——同 knowhow-matrix-
  * drawer.tsx / knowhow-code.tsx 的既有约定：styled-jsx 的 global 样式注入绑定
  * 「声明该标签的组件是否渲染过」，KnowhowPanel 是本特性唯一保证任何时候都已
  * 挂载的样式容器。
