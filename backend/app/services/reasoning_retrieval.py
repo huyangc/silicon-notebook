@@ -3226,14 +3226,14 @@ class _ReasoningRunState:
     能从 `run` 里搬成独立、可单测的阶段:那些阶段之间靠十几个可变容器与计数器
     交接,不给它们一个显式载体就只能继续挤在同一个函数里。
 
-    ⚠ **它是全程唯一的状态权威。**首轮各阶段、reflect 循环、它的三个嵌套 def、
-    各 `_action_*` 方法与收尾都直接读写 `state.<字段>`,`run` 不把任何字段拷贝成
-    局部名。标量(`steps`/`stale`/`outline_updates` …)与会被重新绑定的值
+    ⚠ **它是全程唯一的状态权威。**首轮各阶段、reflect 循环(`_run_reflect_loop`
+    与它调用的摘要拼装、分派、各 `_action_*` 方法)与收尾都直接读写
+    `state.<字段>`,不把任何字段拷贝成局部名。标量(`steps`/`stale`/`outline_updates` …)与会被重新绑定的值
     (`outline`/`outline_overflow`/`consult_rows_accum`/`chains`)尤其**不得**起局部
     别名:写进别名的值 `state` 看不见,下一轮读到的就是旧数——那是一类不报错的
     静默错误。只有从不重新绑定的可变容器与记账器 `record` 可以起别名,而且
     要同名(`record = state.record`、`collected = state.collected`);
-    `test_reasoning_run_state_authority` 按这条纪律守着循环所在的方法。
+    `test_reasoning_run_state_authority` 按这条纪律守着 `run` 与循环、收尾的各方法。
 
     每个字段的注释说明它**由谁写、被谁读**。
     """
@@ -3366,7 +3366,7 @@ class _ReasoningRunState:
     # `_first_round_search`(初检索与补种共用)写:检索本身抛异常(非「成功但零
     # 命中」)的查询原文集合。并发 add/discard 都是同 GIL 原子操作,且每个 worker
     # 只碰自己那条查询的键,无竞态。终态账目据它给 attempted 行打稀疏 `failed`
-    # 标(见 run 收尾)。
+    # 标(见 `_finish_run`)。
     failed_search_queries: set = field(default_factory=set)
     # 子查询执行账目(初始 plan 与 add_subquery 后补都记):归一化键 → 账目。
     # 每轮回喂 reflect(模型能看到试过什么、哪条是干的),add_subquery 对重复键
@@ -3382,7 +3382,8 @@ class _ReasoningRunState:
 
     # 步数账目:补种阶段与 reflect 循环**共用同一份**(补种最多用掉一半预算)。
     steps: int = 0
-    # 补种阶段预算耗尽时攒下的已确认方向;真正的披露在 run 收尾按终态重算。
+    # 补种阶段预算耗尽时攒下的已确认方向;真正的披露在循环结束后按终态重算
+    # (`_disclose_unresolved_after_loop`)。
     uncovered_intent_queries: List[str] = field(default_factory=list)
 
     # 首轮结束时的进展快照,直接作为 reflect 循环的入口值。
@@ -3406,7 +3407,7 @@ class _ReasoningRunState:
     document_read_chars_used: int = 0
     document_reads: List["DocumentReadOutcome"] = field(default_factory=list)
     document_reads_by_id: set = field(default_factory=set)
-    # 这两个由 `run` 的 elif 链读写(`state.` 直读直写)。
+    # 这两个由 `_action_follow_chain`/`_action_exact_lookup` 读写(`state.` 直读直写)。
     follow_chain_searches: int = 0
     exact_lookups: int = 0
 
@@ -3414,12 +3415,12 @@ class _ReasoningRunState:
     # 里(`run` 是零松弛天花板的热函数),那个方法就地读写 `state.`。——
     #
     # `_new_run_state` 写一次、此后只读:本 run 宿主判定为可用的动作规格,以及
-    # 它们的名字集合(`run` 的 elif 链只用它判分派可达性,不判本轮开没开)。
+    # 它们的名字集合(`_dispatch_reflect_action` 只用它判分派可达性,不判本轮开没开)。
     # 无宿主 / 无插件 / 全部不可用 ⇒ 空,三处投影逐字节回到接入前。
     plugin_specs: Tuple["ReflectActionSpec", ...] = ()
     plugin_action_names: frozenset = frozenset()
     # **本轮**真提供给模型的那批(按轮事实闸的结果,见 `_plugin_action_kwargs`)。
-    # 每轮由 `run` 经那个方法重写、只由 `_action_plugin` 的第一道判据读:名字在
+    # 每轮由循环经那个方法重写、只由 `_action_plugin` 的第一道判据读:名字在
     # `plugin_action_names` 里但不在这里,就是「模型选了一个本轮没提供的动作」,
     # 记 `plugin_action_disabled`(纵深防御——畸形响应或测试替身仍可能直达)。
     plugin_actions_offered: Tuple["ReflectActionSpec", ...] = ()
@@ -3431,19 +3432,20 @@ class _ReasoningRunState:
     # 检索重复发出去只会烧预算、且把同一批材料再送一遍给模型。
     plugin_seen_arguments: set = field(default_factory=set)
     # 本 run 接纳的外部证据(核心铸键,见 `_action_plugin`)。`_action_plugin`
-    # 写;`run` 收尾原样带进 `ReasoningResult.external_evidence` 供合成消费。
+    # 写;`_finish_run` 原样带进 `ReasoningResult.external_evidence` 供合成消费。
     external_evidence: List["ExternalEvidence"] = field(default_factory=list)
     # 已接纳的 URL(run 内、跨动作去重)。只有 `_action_plugin` 读写。
     external_seen_urls: set = field(default_factory=set)
-    # 候选摘要尾部那段外部证据块,**自带前导空行**(空时为空串)——所以 `run`
-    # 里只是 `summary += state.external_block_text` 一句,关闭态逐字节不变。
+    # 候选摘要尾部那段外部证据块,**自带前导空行**(空时为空串)——所以
+    # `_reflect_round_context_blocks` 里只是 `summary += state.external_block_text`
+    # 一句,关闭态逐字节不变。
     # 每次成功调用后由 `_action_plugin` 整体重建(与 `consult_block_text` 同款:
     # 两次调用的合计仍受同一个 `EXTERNAL_EVIDENCE_REFLECT_BLOCK_CHARS` 约束)。
     external_block_text: str = ""
     # 插件给模型看的那句观察(`ReflectActionResult.note`),最近一次非空的那条。
     # `_action_plugin` 写、同一个方法在重建块时读。
     plugin_note_text: str = ""
-    # 本轮是否真送达了新的外部材料。`_action_plugin` 置位、`run` 链尾读一次并
+    # 本轮是否真送达了新的外部材料。`_action_plugin` 置位、循环链尾读一次并
     # 立刻清零 —— 与 `consult_delivered_this_turn` 逐字同形,含义也一样:这一轮
     # 的 `stale` 持平(不清零、不递增)。
     external_delivered_this_turn: bool = False
@@ -6861,7 +6863,7 @@ class ReasoningRetriever:
         # 插件写的、同样进候选摘要,同样需要「这是数据不是指令」的框定(codex #714 R3)。
         if state.external_block_text:
             self.untrusted_evidence = True
-        # 与 `consult_delivered_this_turn` 同形(见 run() 链尾的记账):真送达了
+        # 与 `consult_delivered_this_turn` 同形(见 `_run_reflect_loop` 链尾的记账):真送达了
         # 新材料的那一轮,`stale` **持平** —— 不清零也不递增。不清零是因为外部
         # 材料不是库内进展,不该让熔断从头数起;不递增是因为这一轮确实给模型送到
         # 了它下一轮读得到的新东西,把它算成「空转」会让两次成功调用就吃掉三轮
@@ -7121,7 +7123,7 @@ class ReasoningRetriever:
             # 方向身份识别)。若在这里立即 record 一条 skip,轨迹会永久停留在
             # "预算刚耗尽那一刻"的旧账,即便模型后来真的补齐了也不会更正
             # (PR#400 codex R1 P2-1)。uncovered_intent_queries 仍在这里累积,只是
-            # 消费点挪到 run 收尾的终态披露(见 while 循环结束之后)。
+            # 消费点挪到循环结束后的终态披露(`_disclose_unresolved_after_loop`)。
         state.steps = steps
 
     def _run_first_round(self, state: "_ReasoningRunState") -> None:
@@ -8595,28 +8597,8 @@ class ReasoningRetriever:
                      f"({len(empty)} 节待补证据)"),
             detail=outline_detail))
 
-    def run(self, notebook_id, question, history="", on_step=None, top_n=None,
-            max_steps=None, intent_queries=None,
-            limits: Optional[AskRetrievalLimits] = None,
-            intent_detail=None):
-        """一次逐步推理检索:首轮 → reflect 循环 → 收尾。
-
-        首轮已整体搬进 `_run_first_round`(阶段为 `_first_round_*`);run 级状态全程
-        以 `state`(`_ReasoningRunState`)为唯一权威,循环与收尾(及循环调用的
-        `_apply_outline_update` 等方法)直接读写 `state.`。循环本体与收尾仍在本函数
-        里,是登记在案的下一件结构工作。
-        """
-        raise_if_cancelled(self.cancel_event)
-        self._per_query_scored.clear()
-        state = self._new_run_state(
-            notebook_id, question, history, on_step,
-            max_steps=max_steps, intent_queries=intent_queries,
-            limits=limits, intent_detail=intent_detail,
-        )
-        self._run_first_round(state)
-
-        self._run_reflect_loop(state)
-
+    def _disclose_unresolved_after_loop(self, state: "_ReasoningRunState") -> None:
+        """循环结束后的两条终态披露:仍未接纳的大纲溢出证据,仍未执行的已确认方向。"""
         if state.outline_overflow:
             # 即使模型拒绝纠错、再次溢出或给了结构变更,终态也必须明确披露未接纳
             # 的 key;不能只留下早先的一条 outline 诊断,更不能继续声称总有下一轮。
@@ -8632,15 +8614,16 @@ class ReasoningRetriever:
                 },
             ))
 
-        # --- 已确认意图种子:终态披露(挪自补种阶段,见上方 coverage pass 的
-        # 说明)---------------------------------------------------------------
-        # 必须等 reflect 循环跑完才落笔:上面补种阶段只知道"预算耗尽那一刻"
+        # --- 已确认意图种子:终态披露(挪自补种阶段,见 `_first_round_coverage_pass`
+        # 的说明)---------------------------------------------------------------
+        # 必须等 reflect 循环跑完才落笔:补种阶段只知道"预算耗尽那一刻"
         # 还剩哪些方向没跑,但 reflect 循环随后可能已经用 add_subquery(直接
-        # 提交简称也算,见上方 matched_direction 分支)把其中一些补上了。这里
+        # 提交简称也算,见 `_action_add_subquery` 的 matched_direction 分支)把其中
+        # 一些补上了。这里
         # 按同一份注册表口径(_still_uncovered_directions,与 reflect 每轮回喂
         # 共用)重算一次"run 结束时到底还有哪些没跑过",只披露这份终态——
         # 全部被补上时不落 skip 步,不能让轨迹永久停留在预算刚耗尽那一刻的旧账
-        # (PR#400 codex R1 P2-1)。仍在检索循环的墙钟范围内、位于下面的 answer 步之前。
+        # (PR#400 codex R1 P2-1)。仍在检索循环的墙钟范围内、位于 `_finish_run` 的 answer 步之前。
         if state.uncovered_intent_queries:
             still = _still_uncovered_directions(
                 state.uncovered_intent_queries, state.attempted, state.label_of)
@@ -8658,10 +8641,13 @@ class ReasoningRetriever:
                             "pending": len(still),
                             "directions": shown}))
 
+    def _finish_run(self, state: "_ReasoningRunState", top_n) -> ReasoningResult:
+        """收尾:按终态解析证据预算,收尾重排,answer 步,采用回写,baseline manifest,
+        组装 `ReasoningResult`。`top_n` 是 `run` 收到的原值(None 时在这里自适应解析)。"""
         # 证据预算在此(而非入口)解析:used_queries 到这里才定型(含 add_subquery /
         # expand_community 兄弟),预算随"问题的方面数"走。
         top_n = effective_top_n(
-            self.settings, top_n, len(state.used_queries), limits=limits
+            self.settings, top_n, len(state.used_queries), limits=state.limits
         )
         answer_detail = {"elements": len(state.elements), "top_n": top_n,
                          "chains": len(state.chains),
@@ -8672,8 +8658,8 @@ class ReasoningRetriever:
         raise_if_cancelled(self.cancel_event)
         # 收尾重排保持配额分支和单查询全局重排两支，耗时归入合成候选步骤。
         top_hits, outline_evidence = self._closing_rerank(
-            notebook_id, question, state.collected, state.used_queries, top_n, state.outline,
-            answer_detail)
+            state.notebook_id, state.question, state.collected, state.used_queries,
+            top_n, state.outline, answer_detail)
         if self._unsafe_scope_restricted():
             state.chains = []
         raise_if_cancelled(self.cancel_event)
@@ -8719,8 +8705,8 @@ class ReasoningRetriever:
             build_retrieval_baseline_manifest,
         )
         baseline_manifest = build_retrieval_baseline_manifest(
-            notebook_id=notebook_id,
-            query=question,
+            notebook_id=state.notebook_id,
+            query=state.question,
             mode="reasoning",
             settings=self.settings,
             candidate_knowledge=list(state.collected.values()),
@@ -8747,6 +8733,30 @@ class ReasoningRetriever:
                         **({"failed": True}
                            if a.query in state.failed_search_queries else {})}
                        for a in state.attempted.values()])
+
+    def run(self, notebook_id, question, history="", on_step=None, top_n=None,
+            max_steps=None, intent_queries=None,
+            limits: Optional[AskRetrievalLimits] = None,
+            intent_detail=None):
+        """一次逐步推理检索:首轮 → reflect 循环 → 收尾。
+
+        四段各是一个方法:`_run_first_round`(阶段为 `_first_round_*`)、
+        `_run_reflect_loop`(每轮的摘要拼装、kwargs、分派与各 `_action_*` 另成方法)、
+        `_disclose_unresolved_after_loop`、`_finish_run`。run 级状态全程以 `state`
+        (`_ReasoningRunState`)为唯一权威,各方法直接读写 `state.`。`run` 的名字与
+        签名是 Report、Ask(`run_stage`)、knowhow 共用的兼容接缝,保持不变。
+        """
+        raise_if_cancelled(self.cancel_event)
+        self._per_query_scored.clear()
+        state = self._new_run_state(
+            notebook_id, question, history, on_step,
+            max_steps=max_steps, intent_queries=intent_queries,
+            limits=limits, intent_detail=intent_detail,
+        )
+        self._run_first_round(state)
+        self._run_reflect_loop(state)
+        self._disclose_unresolved_after_loop(state)
+        return self._finish_run(state, top_n)
 
 
 def _construct_reasoning_retriever(

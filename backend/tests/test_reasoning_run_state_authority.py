@@ -2,14 +2,16 @@
 
 ``ReasoningRetriever.run`` used to unpack the state into ~60 local names once,
 after which the locals were the authority and the state's scalars went stale.
-Now every read and write goes through ``state.``. The failure this guards
+Now every read and write goes through ``state.``, and the loop and close that
+lived in ``run`` are methods of their own (``_run_reflect_loop`` and what it
+calls, ``_disclose_unresolved_after_loop``, ``_finish_run``). The failure this guards
 against is silent: a forgotten prefix on a WRITE creates a local the next round
 never reads, and a forgotten prefix on a READ of ``max_steps`` reads the
 uncapped ``run`` parameter instead of the tier-capped ``state.max_steps`` —
 neither raises, and pyflakes sees a defined, used name.
 
-Two rules, checked on the source of every guarded method (``run`` today; the
-methods the next split step extracts from it join ``GUARDED``):
+Two rules, checked on the source of every guarded method (``run`` and the
+loop/close methods split out of it, listed in ``GUARDED``):
 
 1. **No bare state field.** A bare name that is also a ``_ReasoningRunState``
    field is a violation. Exceptions: in ``run`` only, a load of one of its
@@ -61,6 +63,7 @@ GUARDED = (
     "_action_expand_graph", "_action_add_subquery", "_action_search_elements",
     "_action_consult_memory", "_action_exact_lookup", "_action_follow_chain",
     "_feed_exact_lookup_skip", "_collect_kg_gap", "_apply_outline_update",
+    "_disclose_unresolved_after_loop", "_finish_run",
 )
 #: ``run`` parameters that are frozen inputs (state keeps an identical copy);
 #: exempt in ``run`` only
