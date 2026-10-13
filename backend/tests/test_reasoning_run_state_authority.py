@@ -54,7 +54,9 @@ SOURCE = (
 STATE_CLASS = "_ReasoningRunState"
 OWNER_CLASS = "ReasoningRetriever"
 #: methods holding the reflect loop and its close
-GUARDED = ("run",)
+GUARDED = (
+    "run", "_feed_exact_lookup_skip", "_collect_kg_gap", "_apply_outline_update",
+)
 #: ``run`` parameters that are frozen inputs (state keeps an identical copy);
 #: exempt in ``run`` only
 FROZEN_PARAMETERS = frozenset({
@@ -268,12 +270,12 @@ def test_every_guarded_method_exists(source):
         ("while state.steps < state.max_steps:",
          "while state.steps < max_steps:",
          ("run", "max_steps", "bare-state-field")),
-        # the closure's overflow write that lost its prefix
-        ("            state.outline_overflow = overflow\n",
-         "            outline_overflow = overflow\n",
-         ("run", "outline_overflow", "bare-state-field")),
+        # the outline method's overflow write that lost its prefix
+        ("        state.outline_overflow = overflow\n",
+         "        outline_overflow = overflow\n",
+         ("_apply_outline_update", "outline_overflow", "bare-state-field")),
     ],
-    ids=["write", "reset", "max-steps-parameter", "closure-write"],
+    ids=["write", "reset", "max-steps-parameter", "outline-method-write"],
 )
 def test_a_dropped_prefix_is_reported(source, before, after, expected):
     assert source.count(before) == 1, before

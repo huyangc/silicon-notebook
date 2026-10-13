@@ -7461,6 +7461,218 @@ class ReasoningRetriever:
                         **_enumeration_scope_detail(local_only, chain_state.outcome.source_scoped),
                     }))
 
+    def _feed_exact_lookup_skip(
+        self, state: "_ReasoningRunState", key: str, terms: List[str], note: str,
+    ) -> None:
+        """把一次被跳过的按名称查找计入账本(带教学措辞)并回喂 reflect——
+        TraceStep 只对 UI 可见,不进 `exact_lookup_log` 这份回喂账本的话,
+        模型看不到"为什么"、只能在同一非法输入上反复请求。同一 `key` 的
+        重复跳过只递增 tries、不重复记账,回喂块因此保持有界。"""
+        for attempt in state.exact_lookup_log:
+            if attempt.note and attempt.dedup_key == key:
+                attempt.tries += 1
+                return
+        state.exact_lookup_log.append(_ExactLookupAttempt(
+            terms=terms, new=0, tries=1, note=note, dedup_key=key))
+
+    def _collect_kg_gap(self, state: "_ReasoningRunState", sections) -> int:
+        """按刚接受的这份大纲探一次弱支撑边,返回**新增**候选行数(§3.3)。
+
+        只在**被接受**的 update_outline 之后调用一次:被拒/空提交没有产生新
+        绑定,也就没有新邻域可探 —— 每 run 因此天然 ≤ 6+1 次探测。
+
+        入参是绑定键里的 **KG 对象 id**;element/chunk 键剔除,因为「支撑薄弱」
+        定义在 KG 图上。判别方式是确定性的:`collected` 的键就是 object_id
+        (`outline_binding_keys` 建合法集时用的也是同一份口径),所以「在不在
+        collected 里」是精确判据 —— 不猜 id 前缀,前缀是会变的实现细节。
+
+        只送**本轮新出现**的 seed(见 `kg_gap_probed_seeds`),所以一次纯改标题
+        或纯换键的 apply 一条查询都不发。
+
+        探测失败 fail-open(镜像首轮 `collection_map_unavailable` 的处理):
+        这是一段可有可无的提示,让它把整个 run 打掉是本末倒置;记一条 skip 步
+        留痕即可,静默吞掉才是不可接受的那一种。
+        """
+        object_ids: List[str] = []
+        picked: set = set()
+        for section in sections:
+            for key in section.evidence_keys:
+                if (
+                    key in state.collected
+                    and key not in picked
+                    and key not in state.kg_gap_probed_seeds
+                ):
+                    picked.add(key)
+                    object_ids.append(key)
+        if not object_ids:
+            return 0
+        state.kg_gap_probed_seeds.update(object_ids)
+        try:
+            with retrieval_fanout_slot():
+                probed = self.retrieval.weak_support_relations(
+                    state.notebook_id, object_ids
+                )
+        except AskCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 — 见上:提示不是必需品
+            state.record(TraceStep(
+                step_type="skip",
+                summary="跳过弱支撑关系提示(暂时读不到图谱的支撑情况)",
+                detail={"reason": "kg_gap_unavailable",
+                        "error": str(exc)[:120]}))
+            return 0
+        fresh = []
+        for row in probed:
+            key = (row.canonical_src, row.edge_type, row.canonical_tgt)
+            if key in state.kg_gap_seen:
+                continue
+            state.kg_gap_seen.add(key)
+            fresh.append(row)
+        if fresh:
+            state.kg_gap_pending.extend(fresh)
+            # 跨批次重排成全局展示序:队列可能攒了好几轮的候选(每轮只展示
+            # 前 6 条),只按批次先后展示会让「支撑最薄弱的先说」这条合同
+            # 只在单批内成立 —— 上一轮剩下的一条 2 源边会排在这一轮刚发现的
+            # 单源边前面。
+            state.kg_gap_pending.sort(key=lambda row: (
+                row.source_count, row.canonical_src, row.canonical_tgt
+            ))
+        return len(fresh)
+
+    def _apply_outline_update(
+        self, state: "_ReasoningRunState", decision, *,
+        overflow_repair: bool = False,
+    ) -> None:
+        """应用一次 update_outline 载荷:预算 → 校验 → 留存 → trace。
+
+        零检索、零模型调用,只把模型交上来的结构按服务端事实夹一遍并留存。
+        只有 outline_active 时才可能被调到——关闭态下这个动作不在
+        allowed_actions 里,reflect() 会按既有未知动作合同把它退成 answer
+        (fail_closed 下抛错),与枚举分支同形。
+
+        **抽成函数是因为它有两个调用点**:动作分发链里的那一条,以及
+        `sufficient` 短路之前的那一次(见调用处的理由)。两处各写一份的话,
+        「校验/预算/trace 语义完全一致」就成了一句要靠人复核的话——而这正是
+        本仓库反复吃过亏的形态(两个各自正确的一半拼出一个错误的整体)。
+        """
+        consume_regular_update = state.outline_updates < state.max_outline_updates
+        same_structure = tuple(
+            (s.id, s.title, s.parent) for s in decision.outline_sections
+        ) == tuple((s.id, s.title, s.parent) for s in state.outline)
+        if overflow_repair:
+            if state.outline_updates >= state.max_outline_updates:
+                if state.outline_cap_repair_used:
+                    state.record(TraceStep(
+                        step_type="skip",
+                        summary=(
+                            f"跳过整理大纲(已达本轮整理次数上限 "
+                            f"{state.max_outline_updates};溢出纠错机会也已用完)"
+                        ),
+                        detail={"reason": "outline_budget",
+                                "updates": state.outline_updates,
+                                "sections": len(state.outline)}))
+                    return
+                # 一次性资格按「收到纠错提交」消费,不是按成功写入消费。否则
+                # 结构违规后仍可反复试,所谓最多一次只约束了成功次数。
+                state.outline_cap_repair_used = True
+            if not same_structure:
+                state.record(TraceStep(
+                    step_type="skip",
+                    summary=(
+                        "跳过大纲溢出修复(纠错提交只能保持章节 "
+                        "id/标题/parent 不变)"
+                    ),
+                    detail={"reason": "outline_repair_structure",
+                            "updates": state.outline_updates,
+                            "sections": len(state.outline)}))
+                return
+        elif state.outline_updates >= state.max_outline_updates:
+            # 措辞按「该给什么」写:普通额度与专用纠错资格是两本账。
+            state.record(TraceStep(
+                step_type="skip",
+                summary=(
+                    f"跳过整理大纲(已达本轮整理次数上限 "
+                    f"{state.max_outline_updates};大纲就按现在这份定稿,"
+                    "请改用检索动作补齐空节,或直接作答)"),
+                detail={"reason": "outline_budget",
+                        "updates": state.outline_updates,
+                        "sections": len(state.outline)}))
+            return
+        if not decision.outline_sections:
+            state.record(TraceStep(
+                step_type="skip",
+                summary=(
+                    "跳过整理大纲(这次提交里没有可用的章节;"
+                    "每次都要交上整份大纲,每一节至少要有标题)"),
+                detail={"reason": "outline_empty"}))
+            return
+        if consume_regular_update:
+            state.outline_updates += 1
+        retained_keys = {
+            key for section in state.outline for key in section.evidence_keys
+        }
+        bound, dropped, overflow, removed = merge_outline_evidence(
+            state.outline,
+            decision.outline_sections,
+            outline_binding_keys(
+                state.collected, state.elements, state.chunks,
+                state.ever_shown_outline_keys, retained_keys,
+            ),
+        )
+        overflow = carry_outline_overflow(
+            state.outline_overflow, decision.outline_sections, bound, overflow,
+            max_pending_evidence=state.action_policy.max_pending_outline_evidence,
+        )
+        # 只作为轨迹上的观测量:大纲变化**不**参与 stale 账目(见上面状态
+        # 初始化处的理由),所以这里既不加分也不清零。
+        changed = outline_signature(bound) != outline_signature(state.outline)
+        replaced = len(state.outline)
+        state.outline = bound
+        state.outline_overflow = overflow
+        empty = [s.title for s in bound if not s.evidence_keys]
+        # 探测排在 trace 之前:它的结果是这一步的账目之一。关闭态零调用。
+        kg_gap_new = (
+            self._collect_kg_gap(state, bound)
+            if state.kg_gap_active and not self._unsafe_scope_restricted()
+            else 0
+        )
+        outline_detail = {
+            "sections": [
+                {"id": s.id, "title": s.title, "parent": s.parent,
+                 "evidence": list(s.evidence_keys)}
+                for s in bound
+            ],
+            # 空节点名:它们就是下一步该定向检索的方向,轨迹里单独列
+            # 出来,排查时不用去数哪一节的 evidence 是空的。
+            "empty_sections": empty,
+            # 这次替换掉的上一份大纲有几节(全量替换语义的账目)。
+            "replaced": replaced,
+            # 被丢掉的非法键数。对模型是静默的(它只该引用服务端发出去
+            # 的标识),但轨迹必须留痕,否则「模型一直在编 id」这种情况
+            # 没有任何地方看得出来。
+            "dropped_evidence": dropped,
+            # 同 id 节证据取并集;旧键优先占满 8 键硬顶时,未接纳的新键
+            # 必须可见并在下一轮账目点名,否则只是把「静默丢旧键」换成
+            # 「静默丢新键」。
+            "overflow_evidence": {
+                section_id: list(keys)
+                for section_id, keys in overflow.items()
+            },
+            "removed_evidence": removed,
+            "overflow_repair": overflow_repair,
+            "changed": changed,
+        }
+        if kg_gap_new:
+            # 本次新增的弱支撑边候选数(会在下一轮便签里展示;终态轮算出来的
+            # 那批无处展示、如实丢弃)。无候选与关闭态**不加这个键** —— 常年
+            # 挂一个 0 会让「这个 run 到底有没有开这条回喂」在轨迹上分不出来。
+            outline_detail["kg_gap_candidates"] = kg_gap_new
+        state.record(TraceStep(
+            step_type="outline",
+            summary=(f"更新大纲: {len(bound)} 节"
+                     f"({len(empty)} 节待补证据)"),
+            detail=outline_detail))
+
     def run(self, notebook_id, question, history="", on_step=None, top_n=None,
             max_steps=None, intent_queries=None,
             limits: Optional[AskRetrievalLimits] = None,
@@ -7468,8 +7680,9 @@ class ReasoningRetriever:
         """一次逐步推理检索:首轮 → reflect 循环 → 收尾。
 
         首轮已整体搬进 `_run_first_round`(阶段为 `_first_round_*`);run 级状态全程
-        以 `state`(`_ReasoningRunState`)为唯一权威,循环、三个嵌套 def 与收尾直接
-        读写 `state.`。循环本体与收尾仍在本函数里,是登记在案的下一件结构工作。
+        以 `state`(`_ReasoningRunState`)为唯一权威,循环与收尾(及循环调用的
+        `_apply_outline_update` 等方法)直接读写 `state.`。循环本体与收尾仍在本函数
+        里,是登记在案的下一件结构工作。
         """
         raise_if_cancelled(self.cancel_event)
         self._per_query_scored.clear()
@@ -7479,213 +7692,6 @@ class ReasoningRetriever:
             limits=limits, intent_detail=intent_detail,
         )
         self._run_first_round(state)
-
-        def feed_exact_lookup_skip(key: str, terms: List[str], note: str) -> None:
-            """把一次被跳过的按名称查找计入账本(带教学措辞)并回喂 reflect——
-            TraceStep 只对 UI 可见,不进 `exact_lookup_log` 这份回喂账本的话,
-            模型看不到"为什么"、只能在同一非法输入上反复请求。同一 `key` 的
-            重复跳过只递增 tries、不重复记账,回喂块因此保持有界。"""
-            for attempt in state.exact_lookup_log:
-                if attempt.note and attempt.dedup_key == key:
-                    attempt.tries += 1
-                    return
-            state.exact_lookup_log.append(_ExactLookupAttempt(
-                terms=terms, new=0, tries=1, note=note, dedup_key=key))
-
-        def collect_kg_gap(sections) -> int:
-            """按刚接受的这份大纲探一次弱支撑边,返回**新增**候选行数(§3.3)。
-
-            只在**被接受**的 update_outline 之后调用一次:被拒/空提交没有产生新
-            绑定,也就没有新邻域可探 —— 每 run 因此天然 ≤ 6+1 次探测。
-
-            入参是绑定键里的 **KG 对象 id**;element/chunk 键剔除,因为「支撑薄弱」
-            定义在 KG 图上。判别方式是确定性的:`collected` 的键就是 object_id
-            (`outline_binding_keys` 建合法集时用的也是同一份口径),所以「在不在
-            collected 里」是精确判据 —— 不猜 id 前缀,前缀是会变的实现细节。
-
-            只送**本轮新出现**的 seed(见 `kg_gap_probed_seeds`),所以一次纯改标题
-            或纯换键的 apply 一条查询都不发。
-
-            探测失败 fail-open(镜像同一函数里 `collection_map_unavailable` 的处理):
-            这是一段可有可无的提示,让它把整个 run 打掉是本末倒置;记一条 skip 步
-            留痕即可,静默吞掉才是不可接受的那一种。
-            """
-            object_ids: List[str] = []
-            picked: set = set()
-            for section in sections:
-                for key in section.evidence_keys:
-                    if (
-                        key in state.collected
-                        and key not in picked
-                        and key not in state.kg_gap_probed_seeds
-                    ):
-                        picked.add(key)
-                        object_ids.append(key)
-            if not object_ids:
-                return 0
-            state.kg_gap_probed_seeds.update(object_ids)
-            try:
-                with retrieval_fanout_slot():
-                    probed = self.retrieval.weak_support_relations(
-                        notebook_id, object_ids
-                    )
-            except AskCancelled:
-                raise
-            except Exception as exc:  # noqa: BLE001 — 见上:提示不是必需品
-                state.record(TraceStep(
-                    step_type="skip",
-                    summary="跳过弱支撑关系提示(暂时读不到图谱的支撑情况)",
-                    detail={"reason": "kg_gap_unavailable",
-                            "error": str(exc)[:120]}))
-                return 0
-            fresh = []
-            for row in probed:
-                key = (row.canonical_src, row.edge_type, row.canonical_tgt)
-                if key in state.kg_gap_seen:
-                    continue
-                state.kg_gap_seen.add(key)
-                fresh.append(row)
-            if fresh:
-                state.kg_gap_pending.extend(fresh)
-                # 跨批次重排成全局展示序:队列可能攒了好几轮的候选(每轮只展示
-                # 前 6 条),只按批次先后展示会让「支撑最薄弱的先说」这条合同
-                # 只在单批内成立 —— 上一轮剩下的一条 2 源边会排在这一轮刚发现的
-                # 单源边前面。
-                state.kg_gap_pending.sort(key=lambda row: (
-                    row.source_count, row.canonical_src, row.canonical_tgt
-                ))
-            return len(fresh)
-
-        def apply_outline_update(decision, *, overflow_repair: bool = False) -> None:
-            """应用一次 update_outline 载荷:预算 → 校验 → 留存 → trace。
-
-            零检索、零模型调用,只把模型交上来的结构按服务端事实夹一遍并留存。
-            只有 outline_active 时才可能被调到——关闭态下这个动作不在
-            allowed_actions 里,reflect() 会按既有未知动作合同把它退成 answer
-            (fail_closed 下抛错),与枚举分支同形。
-
-            **抽成函数是因为它有两个调用点**:动作分发链里的那一条,以及
-            `sufficient` 短路之前的那一次(见调用处的理由)。两处各写一份的话,
-            「校验/预算/trace 语义完全一致」就成了一句要靠人复核的话——而这正是
-            本仓库反复吃过亏的形态(两个各自正确的一半拼出一个错误的整体)。
-            """
-            consume_regular_update = state.outline_updates < state.max_outline_updates
-            same_structure = tuple(
-                (s.id, s.title, s.parent) for s in decision.outline_sections
-            ) == tuple((s.id, s.title, s.parent) for s in state.outline)
-            if overflow_repair:
-                if state.outline_updates >= state.max_outline_updates:
-                    if state.outline_cap_repair_used:
-                        state.record(TraceStep(
-                            step_type="skip",
-                            summary=(
-                                f"跳过整理大纲(已达本轮整理次数上限 "
-                                f"{state.max_outline_updates};溢出纠错机会也已用完)"
-                            ),
-                            detail={"reason": "outline_budget",
-                                    "updates": state.outline_updates,
-                                    "sections": len(state.outline)}))
-                        return
-                    # 一次性资格按「收到纠错提交」消费,不是按成功写入消费。否则
-                    # 结构违规后仍可反复试,所谓最多一次只约束了成功次数。
-                    state.outline_cap_repair_used = True
-                if not same_structure:
-                    state.record(TraceStep(
-                        step_type="skip",
-                        summary=(
-                            "跳过大纲溢出修复(纠错提交只能保持章节 "
-                            "id/标题/parent 不变)"
-                        ),
-                        detail={"reason": "outline_repair_structure",
-                                "updates": state.outline_updates,
-                                "sections": len(state.outline)}))
-                    return
-            elif state.outline_updates >= state.max_outline_updates:
-                # 措辞按「该给什么」写:普通额度与专用纠错资格是两本账。
-                state.record(TraceStep(
-                    step_type="skip",
-                    summary=(
-                        f"跳过整理大纲(已达本轮整理次数上限 "
-                        f"{state.max_outline_updates};大纲就按现在这份定稿,"
-                        "请改用检索动作补齐空节,或直接作答)"),
-                    detail={"reason": "outline_budget",
-                            "updates": state.outline_updates,
-                            "sections": len(state.outline)}))
-                return
-            if not decision.outline_sections:
-                state.record(TraceStep(
-                    step_type="skip",
-                    summary=(
-                        "跳过整理大纲(这次提交里没有可用的章节;"
-                        "每次都要交上整份大纲,每一节至少要有标题)"),
-                    detail={"reason": "outline_empty"}))
-                return
-            if consume_regular_update:
-                state.outline_updates += 1
-            retained_keys = {
-                key for section in state.outline for key in section.evidence_keys
-            }
-            bound, dropped, overflow, removed = merge_outline_evidence(
-                state.outline,
-                decision.outline_sections,
-                outline_binding_keys(
-                    state.collected, state.elements, state.chunks,
-                    state.ever_shown_outline_keys, retained_keys,
-                ),
-            )
-            overflow = carry_outline_overflow(
-                state.outline_overflow, decision.outline_sections, bound, overflow,
-                max_pending_evidence=state.action_policy.max_pending_outline_evidence,
-            )
-            # 只作为轨迹上的观测量:大纲变化**不**参与 stale 账目(见上面状态
-            # 初始化处的理由),所以这里既不加分也不清零。
-            changed = outline_signature(bound) != outline_signature(state.outline)
-            replaced = len(state.outline)
-            state.outline = bound
-            state.outline_overflow = overflow
-            empty = [s.title for s in bound if not s.evidence_keys]
-            # 探测排在 trace 之前:它的结果是这一步的账目之一。关闭态零调用。
-            kg_gap_new = (
-                collect_kg_gap(bound)
-                if state.kg_gap_active and not self._unsafe_scope_restricted()
-                else 0
-            )
-            outline_detail = {
-                "sections": [
-                    {"id": s.id, "title": s.title, "parent": s.parent,
-                     "evidence": list(s.evidence_keys)}
-                    for s in bound
-                ],
-                # 空节点名:它们就是下一步该定向检索的方向,轨迹里单独列
-                # 出来,排查时不用去数哪一节的 evidence 是空的。
-                "empty_sections": empty,
-                # 这次替换掉的上一份大纲有几节(全量替换语义的账目)。
-                "replaced": replaced,
-                # 被丢掉的非法键数。对模型是静默的(它只该引用服务端发出去
-                # 的标识),但轨迹必须留痕,否则「模型一直在编 id」这种情况
-                # 没有任何地方看得出来。
-                "dropped_evidence": dropped,
-                # 同 id 节证据取并集;旧键优先占满 8 键硬顶时,未接纳的新键
-                # 必须可见并在下一轮账目点名,否则只是把「静默丢旧键」换成
-                # 「静默丢新键」。
-                "overflow_evidence": {
-                    section_id: list(keys)
-                    for section_id, keys in overflow.items()
-                },
-                "removed_evidence": removed,
-                "overflow_repair": overflow_repair,
-                "changed": changed,
-            }
-            if kg_gap_new:
-                # 本次新增的弱支撑边候选数(会在下一轮便签里展示;终态轮算出来的
-                # 那批无处展示、如实丢弃)。无候选与关闭态**不加这个键** —— 常年
-                # 挂一个 0 会让「这个 run 到底有没有开这条回喂」在轨迹上分不出来。
-                outline_detail["kg_gap_candidates"] = kg_gap_new
-            state.record(TraceStep(
-                step_type="outline",
-                summary=(f"更新大纲: {len(bound)} 节"
-                         f"({len(empty)} 节待补证据)"),
-                detail=outline_detail))
 
         forced_overflow_repair = False
         first_reflect = True
@@ -7868,7 +7874,7 @@ class ReasoningRetriever:
             decision = self.reflect(question, summary, **reflect_kwargs)
             raise_if_cancelled(self.cancel_event)
             # 这一轮的大纲提交算不算「溢出纠错」:提前算与原地算等价(四个输入只由
-            # `apply_outline_update` 改),而折叠一份收尾载荷前要先用它应用大纲。
+            # `_apply_outline_update` 改),而折叠一份收尾载荷前要先用它应用大纲。
             overflow_repair_submission = terminal_overflow_repair or (
                 bool(state.outline_overflow) and not state.outline_cap_repair_used
                 and state.outline_updates >= state.max_outline_updates)
@@ -7897,7 +7903,7 @@ class ReasoningRetriever:
                 # 这次是 sufficient / stale 收尾前、且仍在 max_steps 内的专用纠错
                 # 轮,绝不能借机再发一次检索。模型不按便签换键就如实保留未解决状态。
                 if decision.next_action == OUTLINE_ACTION:
-                    apply_outline_update(decision, overflow_repair=True)
+                    self._apply_outline_update(state, decision, overflow_repair=True)
                 else:
                     state.record(TraceStep(
                         step_type="skip",
@@ -7918,8 +7924,8 @@ class ReasoningRetriever:
                 # 成本。`next_action == "answer"` 那条路不碰大纲(模型没提交任何
                 # 载荷,也没说要改结构)。
                 if decision.next_action == OUTLINE_ACTION:
-                    apply_outline_update(
-                        decision, overflow_repair=overflow_repair_submission
+                    self._apply_outline_update(
+                        state, decision, overflow_repair=overflow_repair_submission
                     )
                     if (
                         state.outline_overflow
@@ -8131,11 +8137,11 @@ class ReasoningRetriever:
                 # 两种语义」留一条只能靠人复核的缝。
                 self._run_enumeration(state, decision)
             elif decision.next_action == OUTLINE_ACTION:
-                # 与 sufficient 短路之前那次应用共用同一个函数(见 apply_outline_
-                # update 的说明):两处各写一份就等于给「语义一致」留一条只能靠人
+                # 与 sufficient 短路之前那次应用共用同一个函数(见 `_apply_outline_
+                # update` 的说明):两处各写一份就等于给「语义一致」留一条只能靠人
                 # 复核的缝。
-                apply_outline_update(
-                    decision, overflow_repair=overflow_repair_submission
+                self._apply_outline_update(
+                    state, decision, overflow_repair=overflow_repair_submission
                 )
             elif decision.next_action == CONSULT_MEMORY_ACTION:
                 # Agentic Memory P4 (T5)。防御性双查:`consult_memory_flag`/
@@ -8293,15 +8299,15 @@ class ReasoningRetriever:
                 if not self.settings.exact_lookup_enabled or not self.allow_exact_lookup:
                     # 复用既有 exact_lookup_disabled 分支语义(镜像 allow_ppr):策略位
                     # 关闭与部署 flag 关闭在动作侧是同一条路径,不再区分理由。
-                    feed_exact_lookup_skip(
-                        "exact_lookup_disabled", [],
+                    self._feed_exact_lookup_skip(
+                        state, "exact_lookup_disabled", [],
                         "按名称精确查找当前不可用(本次检索场景未开启该能力)")
                     state.record(TraceStep(step_type="skip",
                                      summary="跳过按名称精确查找(未启用)",
                                      detail={"reason": "exact_lookup_disabled"}))
                 elif not term:
-                    feed_exact_lookup_skip(
-                        "missing_exact_term", [], "未提供可精确查找的名称")
+                    self._feed_exact_lookup_skip(
+                        state, "missing_exact_term", [], "未提供可精确查找的名称")
                     state.record(TraceStep(step_type="skip",
                                      summary="跳过按名称精确查找(缺少名称)",
                                      detail={"reason": "missing_exact_term"}))
@@ -8310,8 +8316,8 @@ class ReasoningRetriever:
                     # 的短串(如「第 2.1 节」)或一个普通英文词组(如「state-of-the-art」)
                     # 把精确通道变成全库子串扫描。措辞要教会模型下一轮该给什么,
                     # 光说「不合法」它只会换一个同样不合法的词再试一次。
-                    feed_exact_lookup_skip(
-                        _norm_query(term), [term], _NOT_A_NAME_NOTE.format(term=term))
+                    self._feed_exact_lookup_skip(
+                        state, _norm_query(term), [term], _NOT_A_NAME_NOTE.format(term=term))
                     state.record(TraceStep(step_type="skip",
                                      summary=f"跳过按名称精确查找:{_NOT_A_NAME_NOTE.format(term=term)}",
                                      detail={"reason": "exact_term_not_identifier",
@@ -8329,8 +8335,8 @@ class ReasoningRetriever:
                                      detail={"reason": "duplicate_exact_lookup",
                                              "term": term, "terms": probed}))
                 elif state.exact_lookups >= state.action_policy.max_exact_lookups:
-                    feed_exact_lookup_skip(
-                        _norm_query(term), [term],
+                    self._feed_exact_lookup_skip(
+                        state, _norm_query(term), [term],
                         f"「{term}」已达按名称精确查找次数上限（"
                         f"{state.action_policy.max_exact_lookups}）")
                     state.record(TraceStep(
