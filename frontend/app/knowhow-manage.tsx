@@ -940,7 +940,7 @@ function ManageStyles() {
         position: relative;
       }
 
-      /* 浮窗 resize 手柄——与 knowhow-panel.tsx 顶层 <style jsx global> 里
+      /* 浮窗 resize 手柄——与 knowhow-panel-styles.tsx 的 <style jsx global> 里
          .kh-modal-resize-handle 那份定义逐字同款（同一个 class 名，沿用
          kh-modal-* 命名），但必须在本文件自己的样式块里重复登记一份：本
          文件的既有约定是「自成一体，不依赖面板的 style 标签是否同时挂载」
@@ -955,7 +955,7 @@ function ManageStyles() {
         height: 22px;
         cursor: nwse-resize;
         touch-action: none;
-        /* 右下角斜纹拖拽角——与 knowhow-panel.tsx 的 .kh-modal-resize-handle
+        /* 右下角斜纹拖拽角——与 knowhow-panel-styles.tsx 的 .kh-modal-resize-handle
            逐字同款（放大 + 斜纹，见那份注释）。 */
         clip-path: polygon(100% 0%, 100% 100%, 0% 100%);
         background-image: repeating-linear-gradient(
