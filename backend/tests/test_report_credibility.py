@@ -279,9 +279,12 @@ def test_high_risk_audit_detects_unit_numbers_joined_to_chinese_prose():
     assert audit["unsupported_samples"] == ["吞吐降低了30%。", "资料共收录128篇。"]
 
 
-def test_high_risk_audit_accepts_chinese_bracket_citations():
+@pytest.mark.parametrize("opening,closing,separator", [
+    ("【", "】", "，"), ("(", ")", "、"), ("（", "）", "、"),
+])
+def test_high_risk_audit_accepts_localized_citations(opening, closing, separator):
     audit = audit_high_risk_assertions(
-        "吞吐提升 25%【k1】。容量增加 8GB【k2，k1】。",
+        f"吞吐提升 25%{opening}k1{closing}。容量增加 8GB{opening}k2{separator}k1{closing}。",
         {"k1": {"object_id": "x"}, "k2": {"object_id": "y"}},
         max_unsupported_ratio=0.25,
     )

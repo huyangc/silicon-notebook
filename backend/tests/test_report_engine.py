@@ -616,13 +616,14 @@ def test_assemble_multikey_citation_renumbered(repo):
     assert "SrcA" in md and "SrcB" in md
 
 
-def test_assemble_chinese_bracket_citations_are_bound_and_renumbered(repo):
+@pytest.mark.parametrize("marker", ["【k1，k3】", "[k1、k3]", "(k1、k3)", "（k1、k3）"])
+def test_assemble_localized_citations_are_bound_and_renumbered(repo, marker):
     nb = _mk_nb(repo)
     eng = _mk_engine(repo, _OutlineLLM())
     outline = [{"title": "A", "scope": "sa", "sub_queries": ["qa"]}]
     sections = [{
         "title": "A", "scope": "sa",
-        "markdown": "## A\n中文括号引用【k1，k3】。", "grounded": True,
+        "markdown": "## A\n引用" + marker + "。", "grounded": True,
         "id_map": {
             "k1": {"object_id": "c1", "object_type": "chunk", "name": "N1",
                    "source_title": "SrcA", "location_label": "§1"},

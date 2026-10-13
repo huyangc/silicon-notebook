@@ -108,6 +108,8 @@ def test_end_to_end_single_notebook_reasoning_drops_a_dead_locator(tmp_path, mon
     ("k1", "甲[k1]。", "甲。"),
     ("k2", "甲 [k1, k2] 乙", "甲 [k1] 乙"),
     ("k2", "甲 【k2，k3】 乙", "甲 [k3] 乙"),
+    ("k9", "甲 (k5、k9、k7) 乙", "甲 [k5, k7] 乙"),
+    ("k9", "甲 （k9） 乙", "甲 乙"),
     ("k9", "甲 [k1]  乙", "甲 [k1]  乙"),
 ])
 def test_marker_stripping_touches_only_the_dropped_keys(marker, text, expected):

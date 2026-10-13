@@ -17,6 +17,8 @@ anchors vs citations 的选择镜像 `frontend/app/answer-formatting.ts` 的
 """
 from __future__ import annotations
 
+import pytest
+
 import json
 from typing import Any
 
@@ -158,18 +160,30 @@ def test_anchor_markers_win_and_carry_their_own_key():
     assert all("引用" not in ref["title"] for ref in turn["references"])
 
 
-def test_a_grouped_marker_binds_all_or_nothing():
+@pytest.mark.parametrize("marker", ["[k1，k2]", "(k1、k2)", "（k1、k2）"])
+def test_a_grouped_marker_binds_all_or_nothing(marker):
     """`[k1, k2]` where only k1 resolves leaves the WHOLE group unbound — same
     all-or-nothing rule as buildAnswerReferences (a grouped marker is one
     claim)."""
     payload = {
-        "answer": "复合 [k1，k2] 与单独 [k3]。",
+        "answer": "复合 " + marker + " 与单独 [k3]。",
         "anchors": [_anchor("k1"), _anchor("k3")],  # k2 absent
         "citations": [],
     }
     turn = public_turn(_turn("q", payload))
     # k1 dropped (its group had an unknown k2); only the resolvable k3 survives.
     assert [ref["key"] for ref in turn["references"]] == ["k3"]
+
+
+@pytest.mark.parametrize("marker", ["(k5、k9、k7)", "（k5、k9、k7）"])
+def test_parenthesized_markers_keep_public_references_in_body_order(marker):
+    payload = {
+        "answer": "依据" + marker + "。",
+        "anchors": [_anchor("k7"), _anchor("k5"), _anchor("k9")],
+        "citations": [],
+    }
+    turn = public_turn(_turn("q", payload))
+    assert [ref["key"] for ref in turn["references"]] == ["k5", "k9", "k7"]
 
 
 def test_citations_are_the_fallback_when_no_anchor_marker_resolves():

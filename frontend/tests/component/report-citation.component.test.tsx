@@ -5,11 +5,11 @@ import { expect, test } from "vitest";
 import { ReportMarkdown } from "../../app/report-view";
 
 
-test("报告引用在论文标题之外显示原始上传文件名", async () => {
+test.each(["[k1]", "(k1)", "（k1）"])("报告引用 %s 在论文标题之外显示原始上传文件名", async (marker) => {
   const user = userEvent.setup();
   render(
     <ReportMarkdown
-      markdown="结论 [k1]。"
+      markdown={`结论 ${marker}。`}
       references={[{
         key: "k1",
         label: "Reliable Analog Design Methods",

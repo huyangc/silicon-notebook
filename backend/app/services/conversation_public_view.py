@@ -65,12 +65,15 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import re
 from typing import Any, Iterator, Mapping, Sequence
 
 # Sunk to app.domain.conversation_public_view in B3 (app.repositories'
 # ask_state_store imports it directly there); re-exported here unchanged.
 from app.domain.conversation_public_view import MAX_TURNS
+from app.services.citation_markers import (
+    MARKER_RE as _ANCHOR_MARKER_GROUP_RE,
+    marker_keys as _marker_keys,
+)
 # The one coercion every reader of a stored citation-check summary applies.
 from app.services.global_citation_check import coerce_check_summary
 # M4: which reference is the author's personal memory, and how its title reads
@@ -235,16 +238,6 @@ def resolve_conversation_asset_alias(
             return asset_id
     return None
 
-# Ported verbatim from ``frontend/app/answer-formatting.ts``
-# (``ANCHOR_MARKER_GROUP_RE``). The selection below mirrors that file's
-# ``buildAnswerReferences`` so the public page shows the SAME references the
-# authenticated reader sees; the two implementations are pinned together by
-# ``test_conversation_public_view.py``. Keep them in lockstep.
-_ANCHOR_MARKER_GROUP_RE = re.compile(
-    r"(?:\[(?:k\d+\s*[,，]\s*)*k\d+\]|【(?:k\d+\s*[,，]\s*)*k\d+】)"
-)
-_MARKER_KEY_SPLIT_RE = re.compile(r"[,，]")
-
 
 def _text(value: Any, limit: int) -> str:
     return str(value or "").strip()[:limit]
@@ -318,14 +311,6 @@ def _as_list(value: Any) -> list:
     (empty list) rather than 500 (codex T3 review, P1). Same ``isinstance``
     discipline this module already uses for ``payload``/``turns``."""
     return value if isinstance(value, list) else []
-
-
-def _marker_keys(marker: str) -> list[str]:
-    """The anchor keys inside one ``[k1, k2]`` / ``【k1】`` marker group.
-
-    Mirrors ``anchorKeysFromMarker``: strip the single-char brackets, split on
-    either comma, trim, drop empties."""
-    return [part.strip() for part in _MARKER_KEY_SPLIT_RE.split(marker[1:-1]) if part.strip()]
 
 
 def _select_references(

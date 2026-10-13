@@ -22,8 +22,10 @@ _REFERENCE = re.compile(r"k\d+\Z")
 # The frontend also accepts display-number aliases. Their identities depend on
 # final citation ordering, so model slots must not resolve them as evidence keys.
 _DISPLAY_MARKERS = re.compile(
-    r"(?:\[\s*k?\d+(?:\s*[,，]\s*k?\d+)*\s*\]|"
-    r"【\s*k?\d+(?:\s*[,，]\s*k?\d+)*\s*】)"
+    r"(?:\[\s*k?\d+(?:\s*[,，、]\s*k?\d+)*\s*\]|"
+    r"【\s*k?\d+(?:\s*[,，、]\s*k?\d+)*\s*】|"
+    r"\(\s*k\d+(?:\s*[,，、]\s*k\d+)*\s*\)|"
+    r"（\s*k\d+(?:\s*[,，、]\s*k\d+)*\s*）)"
 )
 _FIELDS = (("purpose", "研究问题"), ("method", "核心方法"), ("contribution", "主要贡献或结论"))
 

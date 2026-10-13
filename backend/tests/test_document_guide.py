@@ -137,7 +137,7 @@ def test_malformed_reference_identity_cannot_create_a_link_or_synthesis_slot():
     assert "未进入合成预览 1 篇" in answer
 
 
-@pytest.mark.parametrize("marker", ["【k5002】", "【 k5001，k5002 】", "[2]", "【2】", "[k5001, 2]"])
+@pytest.mark.parametrize("marker", ["【k5002】", "【 k5001，k5002 】", "[2]", "【2】", "[k5001, 2]", "(k5002)", "（k5001、k5002）"])
 def test_foreign_localized_markers_and_display_aliases_cannot_reassign_content(marker):
     answer = render_document_guide({"documents": [{"reference": "k5001", "purpose": "错误归属 " + marker}]}, catalog())
     assert "错误归属" not in answer
@@ -150,7 +150,7 @@ def test_own_localized_markers_bind_only_to_the_rendered_source():
     assert "【k5001】" not in answer
 
 
-@pytest.mark.parametrize("marker", ["[k5002]", "【k5002】", "[2]", "【2】", "[k5001，2]", "&#91;k5002&#93;", "&#x3010;k5002&#x3011;"])
+@pytest.mark.parametrize("marker", ["[k5002]", "【k5002】", "[2]", "【2】", "[k5001，2]", "&#91;k5002&#93;", "&#x3010;k5002&#x3011;", "(k5002)", "（k5001、k5002）", "&#40;k5002&#41;"])
 def test_authored_marker_text_stays_literal_after_markdown_entity_decode(marker):
     from app.services.document_guide import _DISPLAY_MARKERS, _plain
 

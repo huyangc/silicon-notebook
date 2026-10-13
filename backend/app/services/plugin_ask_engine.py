@@ -145,7 +145,8 @@ class _TraceState:
 # 「引用样」残留探测:括号组里出现 k\d 即嫌疑,是否真的摘除由 `_marker_like`
 # 二次判定(见 admit_plugin_engine_result 的注释;codex #602 R6 P1)。
 _SUSPECT_MARKER_RE = re.compile(
-    r"\[[^\[\]\n]*\bk\d+[^\[\]\n]*\]|【[^【】\n]*\bk\d+[^【】\n]*】"
+    r"\[[^\[\]\n]*\bk\d+[^\[\]\n]*\]|【[^【】\n]*\bk\d+[^【】\n]*】|"
+    r"\([^()\n]*\bk\d+[^()\n]*\)|（[^（）\n]*\bk\d+[^（）\n]*）"
 )
 
 # Private-use sentinels: verified markers are swapped for these while residual
