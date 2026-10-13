@@ -35,6 +35,11 @@ or one annotated ``_ReasoningRunState``) is either guarded, a first-round
 stage, or on the explicit ``EXEMPT_STATE_METHODS`` list of pre-existing
 action/helper methods — a new loop method has to be placed deliberately.
 
+``PINNED_READS`` pins where the guarded methods read ``state.limits`` versus
+``state.enum_limits`` and ``state.enumeration_active`` versus
+``self.enumeration_active()``: pairs that look interchangeable, and that the
+split had to keep apart verbatim.
+
 Known blind spots (not checked; none occurs today): ``state.f = ...``
 rebinding done by a module-level helper or another class, through
 ``setattr``, or under a parameter not named ``state`` is not seen by the
@@ -370,3 +375,61 @@ def test_a_new_unplaced_loop_method_is_reported(source, signature):
     mutated = _with_method(
         source, f"    def _reflect_turn{signature}:\n        return None\n\n")
     assert unplaced_state_methods(mutated) == ["_reflect_turn"]
+
+
+#: Reads that look interchangeable but are not, pinned where the split left
+#: them. ``state.limits`` is the caller's raw value (None for knowhow and
+#: plain runs) and ``state.enum_limits`` its tier fallback: swapping one for the
+#: other changes the element view, the experience situation and the evidence
+#: budget of a limits-less run. ``state.enumeration_active`` is the run's
+#: snapshot (it shapes the prompt) and ``self.enumeration_active()`` the live
+#: gate the dispatch re-checks as defence in depth.
+PINNED_READS = {
+    ("_reflect_round_ledger_notes", "state.limits"): 3,
+    ("_reflect_round_ledger_notes", "state.enumeration_active"): 1,
+    ("_reflect_round_context_blocks", "state.enum_limits"): 1,
+    ("_reflect_round_kwargs", "state.enum_limits"): 1,
+    ("_dispatch_reflect_action", "self.enumeration_active()"): 1,
+    ("_action_consult_memory", "state.limits"): 2,
+    ("_finish_run", "state.limits"): 1,
+}
+
+
+def pinned_reads(source: str) -> dict:
+    """``(method, read) -> count`` over the guarded methods."""
+    owner = _class(ast.parse(source), OWNER_CLASS)
+    found: dict = {}
+    for method in owner.body:
+        if not isinstance(method, ast.FunctionDef) or method.name not in GUARDED:
+            continue
+        for node in ast.walk(method):
+            read = None
+            if _is_state_attribute(node) and node.attr in (
+                    "limits", "enum_limits", "enumeration_active"):
+                read = f"state.{node.attr}"
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                  and isinstance(node.func.value, ast.Name)
+                  and node.func.value.id == "self"
+                  and node.func.attr == "enumeration_active"):
+                read = "self.enumeration_active()"
+            if read:
+                found[(method.name, read)] = found.get((method.name, read), 0) + 1
+    return found
+
+
+def test_raw_limits_and_both_enumeration_gates_stay_where_they_were(source):
+    assert pinned_reads(source) == PINNED_READS
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("and not self.enumeration_active()\n", "and not state.enumeration_active\n"),
+        ("len(state.used_queries), limits=state.limits\n",
+         "len(state.used_queries), limits=state.enum_limits\n"),
+    ],
+    ids=["live-gate-to-snapshot", "raw-limits-to-fallback"],
+)
+def test_a_normalised_read_is_reported(source, before, after):
+    assert source.count(before) == 1, before
+    assert pinned_reads(source.replace(before, after)) != PINNED_READS
