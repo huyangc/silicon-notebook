@@ -97,15 +97,16 @@ import {
 // （knowhow-md-normalize Task 9，复用 knowhow-optimize-logic.ts 第 5 节的
 // ReformatBatchState；行/表两个入口共用同一个组件，只是 scope/rows 不同）。
 //
-// 与上面 KnowhowRowOptimizeModal 的关键差异（对应状态机差异，见该 logic
-// 文件第 5 节头注释）：这里没有逐格「接受/跳过」——reformat_cell 对全部非空
-// 格子自动跑完（idle -> running），跑完后停在 reviewing 展示汇总 + 逐格
-// before/after，用户看过之后**一次性**点「确认保存」才会进入 saving 逐格
-// 落库（任务硬要求①"Never auto-persist"：状态机里根本没有 running 直通
-// saving 的路径，唯一入口是这里 runSave 里调用的 beginReformatBatchSave，
-// 而它只会被「确认保存」按钮的 onClick 触发）。开始规整前先展示将处理的
-// 格子数（任务硬要求③），单格失败（无论是规整调用还是保存调用）不阻断
-// 其余格子、只标记该格并计入 summary（任务硬要求④）。
+// 与 knowhow-row-optimize-modal.tsx 的 KnowhowRowOptimizeModal 的关键差异
+// （对应状态机差异，见 knowhow-optimize-logic.ts 第 5 节头注释）：这里没有
+// 逐格「接受/跳过」——reformat_cell 对全部非空格子自动跑完（idle ->
+// running），跑完后停在 reviewing 展示汇总 + 逐格 before/after，用户看过
+// 之后**一次性**点「确认保存」才会进入 saving 逐格落库（任务硬要求①
+// "Never auto-persist"：状态机里根本没有 running 直通 saving 的路径，唯一
+// 入口是这里 runSave 里调用的 beginReformatBatchSave，而它只会被「确认
+// 保存」按钮的 onClick 触发）。开始规整前先展示将处理的格子数（任务硬
+// 要求③），单格失败（无论是规整调用还是保存调用）不阻断其余格子、只标记
+// 该格并计入 summary（任务硬要求④）。
 // ---------------------------------------------------------------------------
 
 interface KnowhowReformatBatchModalProps {
