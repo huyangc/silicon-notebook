@@ -204,6 +204,8 @@ import {
   type ModelTestActivity,
 } from "./model-service-orchestration.ts";
 import { AuthGate } from "./AuthGate";
+import { LoginEntrance } from "./auth-book";
+import { consumeLoginEntrance } from "./login-entrance";
 import { AccountMenu } from "./account-menu";
 import { GroupsPage } from "./groups-page";
 import { NotebookGroupShare, BORROWED_BASE_SHARE_WARNING } from "./notebook-group-share";
@@ -628,6 +630,8 @@ export default function Home() {
   const [readySnapshot, setReadySnapshot] = useState<ReadySnapshot | null>(null);
   const [readyRetry, setReadyRetry] = useState(0);
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [loginOpening, setLoginOpening] = useState(false);
+  const finishLoginOpening = useCallback(() => setLoginOpening(false), []);
   const workspaceActorIdRef = useRef<string | null>(currentUser?.id ?? null);
   workspaceActorIdRef.current = currentUser?.id ?? null;
   // 自动/高级界面模式的唯一判据——所有隐藏/显示分支与请求侧 scope 强制都读这
@@ -1623,6 +1627,7 @@ export default function Home() {
       setAuthCapabilities(capabilities);
       const restoreToken = getToken();
       if (!restoreToken) {
+        consumeLoginEntrance();
         if (!capabilities) setAuthRestoreError("认证状态暂时无法确认，请稍后重试。");
         setAuthChecked(true);
         return;
@@ -1631,6 +1636,7 @@ export default function Home() {
         const u = await fetchMe();
         activateWorkspaceOwners(u.id);
         setCurrentUser(u);
+        if (consumeLoginEntrance(u.id)) setLoginOpening(true);
         await loadNotebookCollection();
         const groupTarget = parseGroupsHash(window.location.hash);
         const target = parseMemoryHash(window.location.hash);
@@ -1670,6 +1676,7 @@ export default function Home() {
         // A rejected session (expired, or a local session after unified
         // authentication was switched on) returns to the login page.
         if (httpErrorStatus(error) === 401) {
+          consumeLoginEntrance();
           clearRejectedToken(restoreToken);
         } else if (!cancelled) {
           setAuthRestoreError("认证状态暂时无法确认，请稍后重试。");
@@ -5009,6 +5016,7 @@ export default function Home() {
     return <AuthGate capabilities={authCapabilities!} onAuthenticated={(u) => {
       activateWorkspaceOwners(u.id);
       setCurrentUser(u);
+      setLoginOpening(true);
       setStatusText("");
       loadNotebookCollection().catch(reportError);
     }} />;
@@ -5018,7 +5026,9 @@ export default function Home() {
   const accountBadge = accountInitials(accountName);
 
   return (
-    <div className={`app ${isWorkspace ? "workspace-mode" : ""}`}>
+    <>
+    {loginOpening && <LoginEntrance onComplete={finishLoginOpening} />}
+    <div className={`app ${isWorkspace ? "workspace-mode" : ""}`} inert={loginOpening || undefined}>
       <header className="topbar">
         <div className="brand">
           <button className="brand-mark" onClick={showCollection} title="笔记本列表">SN</button>
@@ -7791,6 +7801,7 @@ export default function Home() {
         />
       )}
     </div>
+    </>
   );
 }
 

@@ -11,6 +11,7 @@ import {
   type SsoChoice,
 } from "./auth";
 import { consumeSsoReturnLocation } from "./auth-return-location";
+import { rememberLoginEntrance } from "./login-entrance";
 import { httpErrorStatus, toUserMessage } from "./errors";
 
 type ChoiceDeps = {
@@ -46,6 +47,7 @@ export function SsoAccountChoice({
 
   function signIn(result: { token: string; user: AuthUser }) {
     setToken(result.token);
+    rememberLoginEntrance(result.user.id);
     setDone(true);
     navigate(consumeSsoReturnLocation());
   }

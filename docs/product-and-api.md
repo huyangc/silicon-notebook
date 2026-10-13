@@ -124,6 +124,10 @@ The description creates one image element, without a duplicate paragraph element
 
 ## Accounts and usage
 
+The login screen shares the application's background, panel, text, accent, border and shadow tokens, system font and SN brand mark.
+
+The login screen presents a notebook cover with the deployment-selected sign-in controls. Successful local login/registration and SSO completion (including account linking/creation) open the cover and turn its pages to reveal the application. This transition plays once for that sign-in, does not replay on an ordinary session refresh, and is bypassed when the system requests reduced motion. The application loads underneath the transition; its controls remain inert until the short animation ends, with a timeout fallback so animation events cannot block entry.
+
 Local authentication supports registration with one letter followed by eight digits (for example `a12345678`, stored lowercase), password login and opaque Bearer sessions. These controls are available only while [external authentication](#external-authentication) is off. Users see owned notebooks and large shared notebooks they explicitly joined. The built-in `admin` is seeded on first boot and owns legacy notebooks; its password comes from `SILICON_NOTEBOOK_ADMIN_PASSWORD` (local default `admin`, which must change for production/non-loopback startup). `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` is for local/no-auth testing.
 
 | Account operation | Contract |

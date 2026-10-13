@@ -5,6 +5,7 @@ import { completeSsoLogin, setToken, type SsoChoice } from "../../../auth";
 import { toUserMessage } from "../../../errors";
 import { consumeSsoReturnLocation } from "../../../auth-return-location";
 import { SsoAccountChoice } from "../../../sso-account-choice";
+import { rememberLoginEntrance } from "../../../login-entrance";
 
 type CallbackState =
   | { kind: "working" }
@@ -37,6 +38,7 @@ export default function SsoCallbackPage() {
       .then((result) => {
         if (result.status === "authenticated") {
           setToken(result.token);
+          rememberLoginEntrance(result.user.id);
           window.location.replace(consumeSsoReturnLocation());
           return;
         }
