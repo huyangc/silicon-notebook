@@ -124,7 +124,7 @@ The description creates one image element, without a duplicate paragraph element
 
 ## Accounts and usage
 
-The login screen shares the application's background, panel, text, accent, border and shadow tokens, system font and SN brand mark.
+The login screen centers a single notebook cover, sharing the application's background, panel, text, accent, border and shadow tokens and system font. The cover keeps only the Silicon Notebook name, SN mark, book icon and deployment-selected sign-in controls; surrounding slogans and footer copy are absent. Under unified authentication the resting screen has one sign-in button. Required local-credential controls and actionable failure messages remain available; the successful-entry announcement is screen-reader-only.
 
 The login screen presents a notebook cover with the deployment-selected sign-in controls. Successful local login/registration and SSO completion (including account linking/creation) open the cover and turn its pages to reveal the application. This transition plays once for that sign-in, does not replay on an ordinary session refresh, and is bypassed when the system requests reduced motion. The application loads underneath the transition; its controls remain inert until the short animation ends, with a timeout fallback so animation events cannot block entry.
 

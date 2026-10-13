@@ -11662,20 +11662,13 @@ button.tag:hover {
   position: relative;
   display: grid;
   place-items: center;
-  padding: 64px 40px 76px;
+  padding: 32px;
   color: var(--ink);
   background: var(--bg);
   overflow: hidden;
 }
-.auth-book-layout { width: min(100%, 1056px); display: grid; grid-template-columns: 1fr 420px; align-items: center; gap: 100px; }
-.auth-book-wordmark { display: flex; align-items: center; gap: 10px; font-size: 16px; font-weight: 650; letter-spacing: -.4px; }
-.auth-book-eyebrow { margin: 48px 0 20px; color: var(--muted); font-size: 13px; letter-spacing: 2px; }
-.auth-book-intro h1 { margin: 0; font-size: clamp(30px, 3.1vw, 44px); font-weight: 700; line-height: 1.5; letter-spacing: -.5px; }
-.auth-book-intro h1 span { display: block; color: var(--blue); }
-.auth-book-description { margin: 26px 0 48px; color: var(--muted); font-size: 14px; line-height: 2; }
-.auth-book-caption { display: flex; gap: 12px; align-items: center; font-size: 12px; color: var(--muted); }
-.auth-book-caption > span { width: 32px; height: 1px; background: var(--line); }
-.auth-book-stage { position: relative; width: 100%; min-height: 620px; perspective: 1600px; }
+.auth-book-layout { width: min(100%, 360px); }
+.auth-book-stage { position: relative; width: 100%; min-height: 480px; perspective: 1600px; }
 .auth-book-pages, .auth-book-leaf, .auth-book-cover { position: absolute; inset: 0; border-radius: 4px 16px 16px 4px; transform-origin: left center; }
 .auth-book-pages { inset: 8px -9px 2px 8px; background: var(--panel); box-shadow: var(--shadow); overflow: hidden; }
 .auth-book-pages::after { content: ""; position: absolute; inset: 0 0 0 auto; width: 10px; background: repeating-linear-gradient(to right, var(--line) 0 1px, var(--panel) 1px 3px); }
@@ -11695,15 +11688,12 @@ button.tag:hover {
   backface-visibility: hidden;
 }
 .auth-book-cover::before { content: ""; position: absolute; inset: 16px 16px 16px 24px; border: 1px solid var(--soft); border-radius: 2px 8px 8px 2px; pointer-events: none; }
-.auth-book-cover-heading { display: flex; flex-direction: column; align-items: center; text-align: center; }
-.auth-book-edition { font-size: 12px; letter-spacing: 2px; color: var(--muted); margin-bottom: 26px; }
+.auth-book-monogram { position: absolute; top: 32px; left: 42px; }
+.auth-book-cover-heading { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; padding: 56px 0; text-align: center; }
 .auth-book-cover-heading svg { color: var(--blue); }
-.auth-book-cover h2 { margin: 18px 0; font-size: 36px; font-weight: 650; line-height: 1.5; letter-spacing: 4px; padding-left: 4px; }
-.auth-book-cover-rule { width: 30px; height: 2px; background: var(--blue); }
-.auth-book-controls { margin-top: auto; padding-top: 24px; }
+.auth-book-cover h1 { margin: 0; font-size: 24px; font-weight: 650; line-height: 1.3; letter-spacing: -.6px; }
+.auth-book-controls { padding-top: 24px; }
 .auth-book-form { display: flex; flex-direction: column; gap: 10px; }
-.auth-book-cover-footer { display: flex; justify-content: space-between; margin-top: 28px; font-size: 10px; color: var(--muted); }
-.auth-book-footer { position: absolute; bottom: 26px; font-size: 12px; color: var(--muted); }
 .auth-book-cover .auth-sso-submit, .auth-book-cover .auth-submit { min-height: 46px; border: 1px solid var(--blue); background: var(--blue); color: #fff; border-radius: 10px; font-size: 14px; font-weight: 600; transition: background .2s; }
 .auth-book-cover .auth-sso-submit:hover:not(:disabled), .auth-book-cover .auth-submit:hover:not(:disabled) { background: #174ee0; }
 .auth-book-cover .auth-label { color: var(--muted); font-size: 13px; gap: 6px; }
@@ -11715,36 +11705,26 @@ button.tag:hover {
 .auth-book-cover .auth-tabs button.active { background: var(--soft); color: var(--blue); }
 .auth-book-cover .auth-error { margin: 12px 0 0; color: var(--red); line-height: 1.6; }
 .auth-book-cover .auth-hint { color: var(--amber); }
-.auth-book-success { text-align: center; color: var(--blue); font-size: 14px; padding: 12px 0; margin: 0; }
+.auth-book-success { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 .auth-book-entrance { position: fixed; inset: 0; z-index: 10000; overflow: hidden; animation: auth-book-reveal 1.4s ease-in-out both; }
 .auth-book-entrance .auth-book-scene { height: 100%; }
 .is-opening .auth-book-cover { animation: auth-book-open 1.1s cubic-bezier(.3,.05,.25,1) both; }
 .is-opening .auth-book-leaf-front { animation: auth-book-leaf-turn 1.15s .1s cubic-bezier(.3,.05,.25,1) both; }
 .is-opening .auth-book-leaf-back { animation: auth-book-leaf-turn 1.15s .2s cubic-bezier(.3,.05,.25,1) both; }
-.is-opening .auth-book-intro, .is-opening .auth-book-footer { animation: auth-book-copy-away .6s ease both; }
 @keyframes auth-book-open { from { transform: rotateY(0); } to { transform: rotateY(-155deg); } }
 @keyframes auth-book-leaf-turn { from { transform: rotateY(0); } to { transform: rotateY(-145deg); } }
-@keyframes auth-book-copy-away { to { opacity: 0; transform: translateY(-8px); } }
 @keyframes auth-book-reveal { 0%, 48% { opacity: 1; } 100% { opacity: 0; visibility: hidden; } }
-@media (max-width: 900px) {
-  .auth-book-layout { gap: 48px; grid-template-columns: 1fr 360px; }
-  .auth-book-cover { padding-right: 30px; padding-left: 38px; }
-  .auth-book-intro h1 { font-size: 30px; }
-}
 @media (max-width: 700px) {
-  .auth-book-scene { padding: 32px 28px 64px; }
-  .auth-book-layout { max-width: 360px; grid-template-columns: minmax(0, 1fr); gap: 24px; }
-  .auth-book-intro > :not(.auth-book-wordmark) { display: none; }
-  .auth-book-wordmark { justify-content: center; font-size: 14px; }
-  .auth-book-stage { min-height: 600px; }
+  .auth-book-scene { padding: 28px; }
+  .auth-book-stage { min-height: 460px; }
   .auth-book-cover { padding: 32px 30px 26px 38px; }
-  .auth-book-cover h2 { font-size: 34px; }
+  .auth-book-monogram { top: 28px; left: 36px; }
   .auth-book-entrance { overflow-y: auto; }
   .auth-book-entrance .auth-book-scene { height: auto; }
 }
 @media (prefers-reduced-motion: reduce) {
   .auth-book-entrance { animation: none; visibility: hidden; }
-  .is-opening :is(.auth-book-cover, .auth-book-leaf, .auth-book-intro, .auth-book-footer) { animation: none; }
+  .is-opening :is(.auth-book-cover, .auth-book-leaf) { animation: none; }
   .auth-book-cover :is(.auth-sso-submit, .auth-submit) { transition: none; }
 }
 /* 统一认证选择页：两个选项各一张小卡，按下后的忙态由 disabled 透明度体现。 */
