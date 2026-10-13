@@ -55,7 +55,9 @@ STATE_CLASS = "_ReasoningRunState"
 OWNER_CLASS = "ReasoningRetriever"
 #: methods holding the reflect loop and its close
 GUARDED = (
-    "run",
+    "run", "_run_reflect_loop", "_reflect_round_ledger_notes",
+    "_reflect_round_context_blocks", "_reflect_round_kwargs",
+    "_dispatch_reflect_action",
     "_action_expand_graph", "_action_add_subquery", "_action_search_elements",
     "_action_consult_memory", "_action_exact_lookup", "_action_follow_chain",
     "_feed_exact_lookup_skip", "_collect_kg_gap", "_apply_outline_update",
@@ -268,11 +270,11 @@ def test_every_guarded_method_exists(source):
         # a reset that lost its prefix
         ("            state.consult_delivered_this_turn = False\n",
          "            consult_delivered_this_turn = False\n",
-         ("run", "consult_delivered_this_turn", "bare-state-field")),
+         ("_run_reflect_loop", "consult_delivered_this_turn", "bare-state-field")),
         # the loop bound read from the uncapped parameter
         ("while state.steps < state.max_steps:",
          "while state.steps < max_steps:",
-         ("run", "max_steps", "bare-state-field")),
+         ("_run_reflect_loop", "max_steps", "bare-state-field")),
         # the outline method's overflow write that lost its prefix
         ("        state.outline_overflow = overflow\n",
          "        outline_overflow = overflow\n",

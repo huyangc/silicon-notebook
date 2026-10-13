@@ -7461,6 +7461,410 @@ class ReasoningRetriever:
                         **_enumeration_scope_detail(local_only, chain_state.outcome.source_scoped),
                     }))
 
+    def _run_reflect_loop(self, state: "_ReasoningRunState") -> None:
+        """reflect 循环:每轮拼候选摘要 → reflect → 分派动作 → 进展结算。
+
+        循环的全部 break/continue 都在这一个函数里:终态纠错轮、answer/sufficient、
+        未知动作、stale 熔断;sufficient 与 stale 熔断收尾前可能先保留一次只许换键的
+        大纲溢出纠错轮。
+        """
+        forced_overflow_repair = False
+        first_reflect = True
+        while state.steps < state.max_steps:
+            raise_if_cancelled(self.cancel_event)
+            terminal_overflow_repair = forced_overflow_repair
+            if terminal_overflow_repair:
+                state.outline_terminal_repair_used = True
+                forced_overflow_repair = False
+            state.steps += 1
+            summary = self._reflect_round_ledger_notes(
+                state, first_reflect=first_reflect)
+            first_reflect = False
+            summary, nudge_note = self._reflect_round_context_blocks(
+                state, summary, terminal_overflow_repair=terminal_overflow_repair)
+            reflect_kwargs = self._reflect_round_kwargs(state)
+            summary = self._add_plugin_reflect_context(
+                state, summary, reflect_kwargs, state.no_progress, state.stale, state.steps < state.max_steps)
+            decision = self.reflect(state.question, summary, **reflect_kwargs)
+            raise_if_cancelled(self.cancel_event)
+            # 这一轮的大纲提交算不算「溢出纠错」:提前算与原地算等价(四个输入只由
+            # `_apply_outline_update` 改),而折叠一份收尾载荷前要先用它应用大纲。
+            overflow_repair_submission = terminal_overflow_repair or (
+                bool(state.outline_overflow) and not state.outline_cap_repair_used
+                and state.outline_updates >= state.max_outline_updates)
+            reflect_detail = {"next_action": decision.next_action,
+                              "sufficient": decision.sufficient,
+                              "no_progress": state.no_progress, "stale": state.stale}
+            if nudge_note:
+                # 只在**真的发出**引导的那一轮加键(评估用)。无条件写 False 会让
+                # 关闭态/低档位的 reflect detail 多出一个键——冻结基线的口径是
+                # 「逐键不变」,而不是「值不变」。
+                reflect_detail["outline_nudged"] = True
+            if decision.fallback:
+                # 同款稀疏键:这一轮的决定不是模型判的,而是校验/调用失败后的
+                # fail-open 兜底。没有它,一次 `invalid_enum` 与一次真正的「够了」
+                # 在轨迹上完全同形。机器码只进 detail,上屏那行说人话。
+                reflect_detail["fallback_reason"] = decision.fallback_reason
+            state.record(TraceStep(step_type="reflect", detail=reflect_detail,
+                             summary=_reflect_step_summary(decision)))
+            # 采用账目:模型**主动选**了哪些动作。记在这里(而不是收尾按 trace 的
+            # step_type 反推)是刻意的——初检索、PPR/精查 seed pass 都是确定性发生
+            # 的,按 step_type 数会把「注入过」当成「被采用」,而 ``adopted`` 是淘汰
+            # 排序的第一个键。见 ADOPTION_ACTIONS 的说明。
+            if state.experience_entries:
+                state.adopted_actions.add(decision.next_action)
+            if terminal_overflow_repair:
+                # 这次是 sufficient / stale 收尾前、且仍在 max_steps 内的专用纠错
+                # 轮,绝不能借机再发一次检索。模型不按便签换键就如实保留未解决状态。
+                if decision.next_action == OUTLINE_ACTION:
+                    self._apply_outline_update(state, decision, overflow_repair=True)
+                else:
+                    state.record(TraceStep(
+                        step_type="skip",
+                        summary="大纲溢出纠错轮未提交 update_outline,按当前绑定收尾",
+                        detail={"reason": "outline_overflow_repair_declined"},
+                    ))
+                break
+            if decision.next_action == "answer" or decision.sufficient:
+                # 「交最终版大纲」与「宣布证据够了」是**同一轮**的事:prompt 教模型
+                # 「每个方面都有证据了才置 sufficient」,而那正是它把最后一批绑定补
+                # 上、交出定稿大纲的时刻。直接 break 会把这份载荷静默丢掉,按节合成
+                # 于是用上一轮的旧大纲——那一节的绑定明明检索到了,答案里却看不到。
+                # 应用走与分发链**同一个函数**(预算/校验/trace 语义因此不可能分叉:
+                # 额度耗尽同样记 outline_budget 并不改大纲),应用完再收尾。
+                #
+                # 只对 update_outline 这么做,不是「让所有动作都跑完再 break」:
+                # 其余动作都是检索,而模型既然说了证据已经够,再花一次检索就是纯
+                # 成本。`next_action == "answer"` 那条路不碰大纲(模型没提交任何
+                # 载荷,也没说要改结构)。
+                if decision.next_action == OUTLINE_ACTION:
+                    self._apply_outline_update(
+                        state, decision, overflow_repair=overflow_repair_submission
+                    )
+                    if (
+                        state.outline_overflow
+                        and state.steps < state.max_steps
+                        and not state.outline_terminal_repair_used
+                        and not state.outline_cap_repair_used
+                    ):
+                        # sufficient 不能吞掉刚产生的 overflow。下一轮是专用纠错:
+                        # 只许同结构换键,不能借「已经够了」再发一条检索请求。
+                        state.outline_terminal_repair_used = True
+                        forced_overflow_repair = True
+                        continue
+                break
+            before = (
+                len(state.collected) + len(state.elements) + len(state.chunks) + len(state.chains)
+                + state.enum_rows_used + state.document_read_elements_used
+            )
+            if not self._dispatch_reflect_action(
+                state, decision,
+                overflow_repair_submission=overflow_repair_submission,
+            ):
+                break
+            # 本轮动作后是否有新增(候选节点或原文段)。无新增 → 下一轮提示模型 + 累加 stale。
+            # 按篇取样不进候选池却确实带来新材料,故 `document_read_elements_used`
+            # 并进这把尺(见证失败时它不动,那一轮仍如实算作无进展)。
+            state.no_progress = (
+                len(state.collected) + len(state.elements) + len(state.chunks) + len(state.chains)
+                + state.enum_rows_used + state.document_read_elements_used
+            ) == before
+            if state.no_progress and (state.consult_delivered_this_turn
+                                or state.external_delivered_this_turn):
+                # consult 送达了新建议、或插件送达了新的外部材料,两者都不带库内新
+                # 证据:stale 持平——不清零也不递增。各态 skip 照常递增。
+                pass
+            else:
+                state.stale = state.stale + 1 if state.no_progress else 0
+            state.consult_delivered_this_turn = False
+            state.external_delivered_this_turn = False
+            # 连续 stale_limit 轮无有效进展 → 硬熔断, 强制走到末尾 answer(不再交模型自觉)。
+            if state.stale >= self.settings.reasoning_stale_limit:
+                state.record(TraceStep(step_type="skip",
+                                 summary=f"连续 {state.stale} 轮无新进展,熔断收尾(避免空转)",
+                                 detail={"reason": "stale_circuit_breaker", "stale": state.stale}))
+                if (
+                    state.outline_overflow
+                    and state.steps < state.max_steps
+                    and not state.outline_terminal_repair_used
+                    and not state.outline_cap_repair_used
+                ):
+                    # 熔断是已经发生的事实,所以先落轨迹。若步骤预算仍有余量,再保留
+                    # 一次只许换键的专用轮;outline 修订仍不算检索进展、不重置 stale。
+                    state.outline_terminal_repair_used = True
+                    forced_overflow_repair = True
+                    continue
+                break
+
+    def _reflect_round_ledger_notes(
+        self, state: "_ReasoningRunState", *, first_reflect: bool,
+    ) -> str:
+        """本轮 reflect 候选摘要的前半:证据摘要,首轮空手/无新进展提示,账目回喂,
+        未执行的已确认方向,步级零命中提示。`first_reflect` 只决定空手提示的措辞。"""
+        summary = self._reflection_summary(
+            state.collected, state.elements, state.chunks, state.chains, state.outline_active,
+            state.ever_shown_outline_keys, state.limits, state.outline)
+        if state.no_progress:
+            # 首轮空手与「查了好几轮都没新增」是两件不同的事,提示也必须不同
+            # (见 first_round_empty_note):前者要的是换通道,后者才是收尾。
+            # 判据用「本 run 的第一次 reflect」而不是 `steps == 0`——已确认方向
+            # 补种(`_first_round_coverage_pass`)也记在同一个 steps 上,那个数
+            # 进循环时并不恒为 0。建议句按本 run 真开着的两把闸拼装,与下面
+            # 传给 `reflect()` 的白名单同源。
+            summary = f"{summary}\n\n" + (
+                first_round_empty_note(
+                    self.chunk_search_active(), state.enumeration_active)
+                if first_reflect else NO_NEW_EVIDENCE_NOTE
+            )
+        summary += legacy_action_ledger_note(
+            state.visited, state.collected, state.neighbor_truncated,
+            state.neighbor_expand_limit, state.attempted, state.exact_lookup_log,
+            state.document_reads)
+        # 未执行的已确认方向回喂 reflect(镜像上面几份账目):模型据此知道哪些
+        # 用户确认过的方向还没跑过,可以优先用 add_subquery 把它们补上,而不是
+        # 另起炉灶猜一个新角度。每轮按 attempted 现算 —— 模型真把某条补上了,
+        # 下一轮它就自动从清单里消失,账目不会撒谎。
+        #
+        # 匹配统一走 _still_uncovered_directions(方向身份注册表口径),不能
+        # 直接比较原文:模型只见过注册表算出的唯一简称(prompt 里就是这么
+        # 展示的),据此用 add_subquery 提交的也是这个简称,而
+        # uncovered_intent_queries 里的仍是「方向+完整已确认问题契约」的
+        # 复合串(confirmed_intent_queries 产出,截到 8000 字符)。直接按原文
+        # 比较永远不相等,"已覆盖"当场摘不掉,下一轮 prompt 会同时说"没执行
+        # 过"又"别重复提交"——自相矛盾,模型只能重复空转。
+        if state.uncovered_intent_queries:
+            still = _still_uncovered_directions(
+                state.uncovered_intent_queries, state.attempted, state.label_of)
+            if still:
+                pending_text = "、".join(
+                    f"「{state.label_of[q]}」"
+                    for q in still[:_INTENT_PENDING_DISCLOSE])
+                summary = (
+                    f"{summary}\n\n（以下已确认的检索方向因步骤预算不足尚未执行: "
+                    f"{pending_text}"
+                    + (f" 等 {len(still)} 个"
+                       if len(still) > _INTENT_PENDING_DISCLOSE else "")
+                    + "。若仍需覆盖,请优先用 add_subquery 提交对应方向。）")
+        # Agentic Memory P4 (T6): 步级零命中提示。服务端**确定性推送**(不花
+        # 步预算),与上面的 consult_memory(模型主动拉、要花一轮反思)是同一份
+        # 经验库的两条不同消费路径,共用 zero_hit_by_action / worst_experience_
+        # for / clip_rationale。闸只看 experience_wiring_active——**没有**
+        # consult_memory_active 的档位限制,因为它不产生额外模型调用,只是把
+        # summary 多几个字;fail-open,读库炸不记 skip(与理解块/打法块同口径:
+        # 一次读失败不该在轨迹里留下噪声)。
+        #
+        # 修复轮 spec⑤/Q-P2-1:``_zero_hit_nudge_ready`` 是纯内存判断,排在
+        # ``experience_wiring_active``(部署开关)与 ``nudges_used`` 配额
+        # 检查之后、``_cached_experiences`` 读库之前——大多数轮次没有任何
+        # 动作够格,此时压根不该付一次经验库快照的读取成本。
+        if (
+            experience_wiring_active(
+                self.settings, self.retrieval_experiences)
+            and state.nudges_used < _ZERO_HIT_NUDGE_MAX_PER_RUN
+            and _zero_hit_nudge_ready(state.zero_hit_by_action, state.nudged_actions)
+        ):
+            try:
+                nudge_situation = current_situation(
+                    state.intent_detail, mode=_EXPERIENCE_RUN_MODE,
+                    retrieval_effort=(
+                        state.limits.effort if state.limits is not None else ""))
+                picked_nudge = _zero_hit_nudge_for(
+                    self.retrieval_experiences, state.notebook_id,
+                    state.zero_hit_by_action, state.nudged_actions,
+                    nudge_situation)
+            except AskCancelled:
+                raise
+            except Exception:  # noqa: BLE001 — 提示是背景,不是必需品
+                picked_nudge = None
+            if picked_nudge:
+                nudge_action, nudge_note_text = picked_nudge
+                state.nudged_actions.add(nudge_action)
+                state.nudges_used += 1
+                summary = f"{summary}\n\n{nudge_note_text}"
+        return summary
+
+    def _reflect_round_context_blocks(
+        self, state: "_ReasoningRunState", summary: str, *,
+        terminal_overflow_repair: bool,
+    ) -> Tuple[str, str]:
+        """本轮候选摘要的后半:枚举账目、大纲便签(含弱支撑边提示)、大纲引导、
+        理解块、打法块、consult 块、外部证据块、集合地图。返回拼好的摘要与本轮
+        大纲引导文本(非空即这一轮发出了引导,reflect 步据它加 `outline_nudged`)。
+        `terminal_overflow_repair` 是终态纠错轮标记:这一轮弱支撑边既不展示也不消费。"""
+        # 已枚举清单的账目回喂(镜像上面几处),再接本 run 唯一那份集合地图。
+        enum_note = _enumeration_note(state.enum_chains)
+        if enum_note:
+            summary = f"{summary}\n\n{enum_note}"
+        # 大纲便签接在几份账目之后、地图之前:它同样是「本轮已经做了什么」,
+        # 而地图讲的是「库里有什么」。这一份还额外承担着大纲的记忆——reflect
+        # 没有对话历史,模型要全量重提就只能从这里抄(见 _outline_note)。
+        # 弱支撑边提示挂在大纲便签末尾:它讲的正是「已绑定的这些证据周边还有
+        # 什么没查」,离开大纲上下文就只是一串无处安放的关系。
+        #
+        # 终态纠错轮既不渲染它也**不消费**它 —— 两件事同一个判据、由
+        # `kg_gap_note_segment` 一处返回(理由见那里)。`_outline_note` 里另有
+        # 一道同判据的渲染闸,那是给「调用方仍然递了一段进来」兜底的。
+        kg_gap_segment, kg_gap_shown = kg_gap_note_segment(
+            state.kg_gap_pending, repair_only=terminal_overflow_repair)
+        outline_note = _outline_note(
+            state.outline, state.max_outline_updates - state.outline_updates,
+            state.outline_overflow,
+            overflow_repair_available=not state.outline_cap_repair_used,
+            repair_only=terminal_overflow_repair,
+            kg_gap_segment=kg_gap_segment,
+        )
+        if outline_note:
+            summary = f"{summary}\n\n{outline_note}"
+            # 只有真的上屏了才算展示过——否则「每条边只展示一次」会退化成
+            # 「每条边最多被算作展示一次」,而模型一行都没看见。
+            #
+            # ⚠ 这个分支**当前恒真**:候选只可能由一次成功的 apply 产生,而
+            # 成功的 apply 必然留下非空大纲,非空大纲的便签也就非空。写成条件
+            # 而不是直接消费,是防御性的:哪天 `_outline_note` 多出一条提前
+            # 返回空串的路径(或候选获得第二个产地),这里不至于静默丢掉一批
+            # 从没上过屏的提示。
+            del state.kg_gap_pending[:kg_gap_shown]
+        # 大纲采用引导(设计文档 §3.1.1):便签自己不在场、而手上的事实说明「该开
+        # 大纲」时,补一行引导。与上面那段**互斥而非嵌套**——互斥由
+        # `_outline_nudge_note` 自己的「sections 非空即返回空串」判据保证,写在
+        # 那里而不是这里的 else 上,是为了让「删掉那道判据」这类改动真的报红。
+        #
+        # 方向数取已确认方向清单的长度减一:`confirmed_intent_queries` 的第一
+        # 条恒为完整的已确认问题本身,其余才是必答主题派生的检索方向。这是
+        # run() 手上现成的结构,不再解析契约、不新增任何查询(intent_queries
+        # 为空的 planner 路径下它恒为 0,条件 (b) 天然不成立)。
+        nudge_note = _outline_nudge_note(
+            state.outline, state.enum_chains, max(0, len(state.reviewed_all) - 1),
+            active=state.outline_active, nudges_used=state.outline_nudges,
+        )
+        if nudge_note:
+            summary = f"{summary}\n\n{nudge_note}"
+            state.outline_nudges += 1
+        # 理解块排在集合地图**之前**:地图后面紧跟着一个按剩余额度算出来的
+        # 后缀(``_allowance_suffix``),两者是一句话;把理解块插进它们中间会
+        # 把那个额度句从它解释的计数上拆开。reflect 的 prompt 签名零改动——
+        # 与地图同款,拼在 summary 尾部就够,不必给 reflect 再开一个形参。
+        if state.profile_block:
+            summary = f"{summary}\n\n{state.profile_block}"
+        # 打法块跟在理解块之后、集合地图之前——同上一条注释的理由:地图与它
+        # 后面那个额度句是一句话,不能被别的块插开。
+        if state.experience_block:
+            summary = f"{summary}\n\n{state.experience_block}"
+        # Agentic Memory P4 (T5): consult_memory 的累计结果,同样排在集合
+        # 地图之前——地图与它后面那个额度句是一句话,不能被别的块插开
+        # (同上两条注释的理由)。``consult_block_text`` 每次成功调用后整体
+        # 重渲染(见 render_consult_block 的 docstring),所以这里只是原样
+        # 拼接,不需要再判断是不是第一次出现。
+        if state.consult_block_text:
+            summary = f"{summary}\n\n{state.consult_block_text}"
+        summary += state.external_block_text  # §3.5;见 _external_block_text
+        if state.collection_map_text:
+            summary = (
+                f"{summary}\n\n{state.collection_map_text}"
+                + _allowance_suffix(
+                    state.enum_limits.enum_rows_per_run - state.enum_rows_used
+                )
+            )
+        return summary, nudge_note
+
+    def _reflect_round_kwargs(self, state: "_ReasoningRunState") -> Dict[str, Any]:
+        """本轮 `reflect()` 的可选参数(插件动作由 `_add_plugin_reflect_context` 另加)。"""
+        # 可选参数按「有才传」(同 plan() 的 max_subqueries/collection_map):
+        # 关闭态、低档位、**有图**与未探测到语料语言的 run 下调用形状与接入前
+        # 逐字一致,既有替身不必改签名。`kg_in_scope`/`corpus_langs` 都是 run
+        # 级不变量(前者 `_new_run_state`、后者 `_first_round_plan` 写),直读
+        # state。`limits` 例外恒传:`document_read_active` 的首读份额判据要看
+        # 本 run 的 `chunk_context_chars`,兜底成默认档会让它与执行体分叉。
+        reflect_kwargs = dict(state.corpus_langs_kwarg, limits=state.enum_limits, **(
+            {} if state.kg_in_scope else {"kg_actions": False}))
+        if state.outline_active:
+            reflect_kwargs["outline"] = True
+        if state.consult_memory_flag:
+            reflect_kwargs["consult_memory"] = True
+        return reflect_kwargs
+
+    def _dispatch_reflect_action(
+        self, state: "_ReasoningRunState", decision, *,
+        overflow_repair_submission: bool,
+    ) -> bool:
+        """执行本轮 reflect 选中的动作。返回 False 表示动作未知,循环据此直接收尾
+        (不走进展结算);两条被闸住的动作(枚举、跨库同类实体扩展)在这里零 I/O
+        记 skip,照常落到循环的进展结算。"""
+        if (
+            decision.next_action in (
+                ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION
+            )
+            and not self.enumeration_active()
+        ):
+            # Defense in depth: a run without the enumeration gate does not
+            # offer these actions, but a malformed model response or a test
+            # double must still be unable to turn one into collection I/O.
+            state.record(TraceStep(
+                step_type="skip",
+                summary="跳过枚举(本次检索未提供清单工具)",
+                detail={"reason": "enumeration_disabled"},
+            ))
+        elif decision.next_action == "expand_graph":
+            self._action_expand_graph(state, decision)
+        elif decision.next_action == "add_subquery":
+            self._action_add_subquery(state, decision)
+        elif decision.next_action == "search_elements":
+            self._action_search_elements(state, decision)
+        elif decision.next_action in (
+            ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION
+        ):
+            # 两个动作走同一个执行体(见 `_run_enumeration`):预算池、续跑
+            # 账目与 trace 形状是一整套合同,两处各写一份就等于给「同一个动作
+            # 两种语义」留一条只能靠人复核的缝。
+            self._run_enumeration(state, decision)
+        elif decision.next_action == OUTLINE_ACTION:
+            # 与 sufficient 短路之前那次应用共用同一个函数(见 `_apply_outline_
+            # update` 的说明):两处各写一份就等于给「语义一致」留一条只能靠人
+            # 复核的缝。
+            self._apply_outline_update(
+                state, decision, overflow_repair=overflow_repair_submission
+            )
+        elif decision.next_action == CONSULT_MEMORY_ACTION:
+            self._action_consult_memory(state)
+        elif decision.next_action == READ_DOCUMENT_ACTION:
+            self._action_read_document(state, decision)
+        elif decision.next_action == "search_chunks":
+            self._action_search_chunks(state, decision)
+        elif decision.next_action == "ppr_retrieve":
+            self._action_ppr_retrieve(state, decision)
+        elif decision.next_action == "exact_lookup":
+            self._action_exact_lookup(state, decision)
+        elif decision.next_action == "follow_chain":
+            self._action_follow_chain(state, decision)
+        elif decision.next_action == "expand_community" and (
+            not self.allow_community_expansion
+            or self._unsafe_scope_restricted()
+        ):
+            # 通道被调用方策略或来源上限禁用:零 I/O 记 skip,**落到链尾与其它
+            # skip 同一份 no_progress/stale 记账**(设计稿 §8)。此前写在链前并
+            # `break`——选一次被禁动作整个循环就终止,其余通道全被放弃;也不能
+            # 裸 `continue`,那会绕过链尾记账,反复请求被禁动作就规避了熔断。
+            state.record(TraceStep(
+                step_type="skip",
+                summary="跳过跨库同类实体扩展（当前检索范围不允许）",
+                detail={
+                    "reason": (
+                        "source_scope_unsafe_channel"
+                        if self._unsafe_scope_restricted()
+                        else "community_expansion_disabled"
+                    )
+                },
+            ))
+        elif decision.next_action == "expand_community":
+            # 执行体整体住在 `_action_expand_community`(与 ppr/search_chunks
+            # 同形):分派链只做分派。
+            self._action_expand_community(state, decision)
+        elif decision.next_action in state.plugin_action_names:
+            self._action_plugin(state, decision, state.steps >= state.max_steps)
+        else:
+            return False
+        return True
+
     def _action_expand_graph(self, state: "_ReasoningRunState", decision) -> None:
         """reflect 的 expand_graph:展开一个尚未访问的节点的邻居,账目回喂 reflect。"""
         oid = decision.expand_object_id
@@ -8211,362 +8615,7 @@ class ReasoningRetriever:
         )
         self._run_first_round(state)
 
-        forced_overflow_repair = False
-        first_reflect = True
-        while state.steps < state.max_steps:
-            raise_if_cancelled(self.cancel_event)
-            terminal_overflow_repair = forced_overflow_repair
-            if terminal_overflow_repair:
-                state.outline_terminal_repair_used = True
-                forced_overflow_repair = False
-            state.steps += 1
-            summary = self._reflection_summary(
-                state.collected, state.elements, state.chunks, state.chains, state.outline_active,
-                state.ever_shown_outline_keys, limits, state.outline)
-            if state.no_progress:
-                # 首轮空手与「查了好几轮都没新增」是两件不同的事,提示也必须不同
-                # (见 first_round_empty_note):前者要的是换通道,后者才是收尾。
-                # 判据用「本 run 的第一次 reflect」而不是 `steps == 0`——已确认方向
-                # 补种(`_first_round_coverage_pass`)也记在同一个 steps 上,那个数
-                # 进循环时并不恒为 0。建议句按本 run 真开着的两把闸拼装,与下面
-                # 传给 `reflect()` 的白名单同源。
-                summary = f"{summary}\n\n" + (
-                    first_round_empty_note(
-                        self.chunk_search_active(), state.enumeration_active)
-                    if first_reflect else NO_NEW_EVIDENCE_NOTE
-                )
-            first_reflect = False
-            summary += legacy_action_ledger_note(
-                state.visited, state.collected, state.neighbor_truncated,
-                state.neighbor_expand_limit, state.attempted, state.exact_lookup_log,
-                state.document_reads)
-            # 未执行的已确认方向回喂 reflect(镜像上面几份账目):模型据此知道哪些
-            # 用户确认过的方向还没跑过,可以优先用 add_subquery 把它们补上,而不是
-            # 另起炉灶猜一个新角度。每轮按 attempted 现算 —— 模型真把某条补上了,
-            # 下一轮它就自动从清单里消失,账目不会撒谎。
-            #
-            # 匹配统一走 _still_uncovered_directions(方向身份注册表口径),不能
-            # 直接比较原文:模型只见过注册表算出的唯一简称(prompt 里就是这么
-            # 展示的),据此用 add_subquery 提交的也是这个简称,而
-            # uncovered_intent_queries 里的仍是「方向+完整已确认问题契约」的
-            # 复合串(confirmed_intent_queries 产出,截到 8000 字符)。直接按原文
-            # 比较永远不相等,"已覆盖"当场摘不掉,下一轮 prompt 会同时说"没执行
-            # 过"又"别重复提交"——自相矛盾,模型只能重复空转。
-            if state.uncovered_intent_queries:
-                still = _still_uncovered_directions(
-                    state.uncovered_intent_queries, state.attempted, state.label_of)
-                if still:
-                    pending_text = "、".join(
-                        f"「{state.label_of[q]}」"
-                        for q in still[:_INTENT_PENDING_DISCLOSE])
-                    summary = (
-                        f"{summary}\n\n（以下已确认的检索方向因步骤预算不足尚未执行: "
-                        f"{pending_text}"
-                        + (f" 等 {len(still)} 个"
-                           if len(still) > _INTENT_PENDING_DISCLOSE else "")
-                        + "。若仍需覆盖,请优先用 add_subquery 提交对应方向。）")
-            # Agentic Memory P4 (T6): 步级零命中提示。服务端**确定性推送**(不花
-            # 步预算),与上面的 consult_memory(模型主动拉、要花一轮反思)是同一份
-            # 经验库的两条不同消费路径,共用 zero_hit_by_action / worst_experience_
-            # for / clip_rationale。闸只看 experience_wiring_active——**没有**
-            # consult_memory_active 的档位限制,因为它不产生额外模型调用,只是把
-            # summary 多几个字;fail-open,读库炸不记 skip(与理解块/打法块同口径:
-            # 一次读失败不该在轨迹里留下噪声)。
-            #
-            # 修复轮 spec⑤/Q-P2-1:``_zero_hit_nudge_ready`` 是纯内存判断,排在
-            # ``experience_wiring_active``(部署开关)与 ``nudges_used`` 配额
-            # 检查之后、``_cached_experiences`` 读库之前——大多数轮次没有任何
-            # 动作够格,此时压根不该付一次经验库快照的读取成本。
-            if (
-                experience_wiring_active(
-                    self.settings, self.retrieval_experiences)
-                and state.nudges_used < _ZERO_HIT_NUDGE_MAX_PER_RUN
-                and _zero_hit_nudge_ready(state.zero_hit_by_action, state.nudged_actions)
-            ):
-                try:
-                    nudge_situation = current_situation(
-                        intent_detail, mode=_EXPERIENCE_RUN_MODE,
-                        retrieval_effort=(
-                            limits.effort if limits is not None else ""))
-                    picked_nudge = _zero_hit_nudge_for(
-                        self.retrieval_experiences, notebook_id,
-                        state.zero_hit_by_action, state.nudged_actions,
-                        nudge_situation)
-                except AskCancelled:
-                    raise
-                except Exception:  # noqa: BLE001 — 提示是背景,不是必需品
-                    picked_nudge = None
-                if picked_nudge:
-                    nudge_action, nudge_note_text = picked_nudge
-                    state.nudged_actions.add(nudge_action)
-                    state.nudges_used += 1
-                    summary = f"{summary}\n\n{nudge_note_text}"
-            # 已枚举清单的账目回喂(镜像上面几处),再接本 run 唯一那份集合地图。
-            enum_note = _enumeration_note(state.enum_chains)
-            if enum_note:
-                summary = f"{summary}\n\n{enum_note}"
-            # 大纲便签接在几份账目之后、地图之前:它同样是「本轮已经做了什么」,
-            # 而地图讲的是「库里有什么」。这一份还额外承担着大纲的记忆——reflect
-            # 没有对话历史,模型要全量重提就只能从这里抄(见 _outline_note)。
-            # 弱支撑边提示挂在大纲便签末尾:它讲的正是「已绑定的这些证据周边还有
-            # 什么没查」,离开大纲上下文就只是一串无处安放的关系。
-            #
-            # 终态纠错轮既不渲染它也**不消费**它 —— 两件事同一个判据、由
-            # `kg_gap_note_segment` 一处返回(理由见那里)。`_outline_note` 里另有
-            # 一道同判据的渲染闸,那是给「调用方仍然递了一段进来」兜底的。
-            kg_gap_segment, kg_gap_shown = kg_gap_note_segment(
-                state.kg_gap_pending, repair_only=terminal_overflow_repair)
-            outline_note = _outline_note(
-                state.outline, state.max_outline_updates - state.outline_updates,
-                state.outline_overflow,
-                overflow_repair_available=not state.outline_cap_repair_used,
-                repair_only=terminal_overflow_repair,
-                kg_gap_segment=kg_gap_segment,
-            )
-            if outline_note:
-                summary = f"{summary}\n\n{outline_note}"
-                # 只有真的上屏了才算展示过——否则「每条边只展示一次」会退化成
-                # 「每条边最多被算作展示一次」,而模型一行都没看见。
-                #
-                # ⚠ 这个分支**当前恒真**:候选只可能由一次成功的 apply 产生,而
-                # 成功的 apply 必然留下非空大纲,非空大纲的便签也就非空。写成条件
-                # 而不是直接消费,是防御性的:哪天 `_outline_note` 多出一条提前
-                # 返回空串的路径(或候选获得第二个产地),这里不至于静默丢掉一批
-                # 从没上过屏的提示。
-                del state.kg_gap_pending[:kg_gap_shown]
-            # 大纲采用引导(设计文档 §3.1.1):便签自己不在场、而手上的事实说明「该开
-            # 大纲」时,补一行引导。与上面那段**互斥而非嵌套**——互斥由
-            # `_outline_nudge_note` 自己的「sections 非空即返回空串」判据保证,写在
-            # 那里而不是这里的 else 上,是为了让「删掉那道判据」这类改动真的报红。
-            #
-            # 方向数取已确认方向清单的长度减一:`confirmed_intent_queries` 的第一
-            # 条恒为完整的已确认问题本身,其余才是必答主题派生的检索方向。这是
-            # run() 手上现成的结构,不再解析契约、不新增任何查询(intent_queries
-            # 为空的 planner 路径下它恒为 0,条件 (b) 天然不成立)。
-            nudge_note = _outline_nudge_note(
-                state.outline, state.enum_chains, max(0, len(state.reviewed_all) - 1),
-                active=state.outline_active, nudges_used=state.outline_nudges,
-            )
-            if nudge_note:
-                summary = f"{summary}\n\n{nudge_note}"
-                state.outline_nudges += 1
-            # 理解块排在集合地图**之前**:地图后面紧跟着一个按剩余额度算出来的
-            # 后缀(``_allowance_suffix``),两者是一句话;把理解块插进它们中间会
-            # 把那个额度句从它解释的计数上拆开。reflect 的 prompt 签名零改动——
-            # 与地图同款,拼在 summary 尾部就够,不必给 reflect 再开一个形参。
-            if state.profile_block:
-                summary = f"{summary}\n\n{state.profile_block}"
-            # 打法块跟在理解块之后、集合地图之前——同上一条注释的理由:地图与它
-            # 后面那个额度句是一句话,不能被别的块插开。
-            if state.experience_block:
-                summary = f"{summary}\n\n{state.experience_block}"
-            # Agentic Memory P4 (T5): consult_memory 的累计结果,同样排在集合
-            # 地图之前——地图与它后面那个额度句是一句话,不能被别的块插开
-            # (同上两条注释的理由)。``consult_block_text`` 每次成功调用后整体
-            # 重渲染(见 render_consult_block 的 docstring),所以这里只是原样
-            # 拼接,不需要再判断是不是第一次出现。
-            if state.consult_block_text:
-                summary = f"{summary}\n\n{state.consult_block_text}"
-            summary += state.external_block_text  # §3.5;见 _external_block_text
-            if state.collection_map_text:
-                summary = (
-                    f"{summary}\n\n{state.collection_map_text}"
-                    + _allowance_suffix(
-                        state.enum_limits.enum_rows_per_run - state.enum_rows_used
-                    )
-                )
-            # 可选参数按「有才传」(同 plan() 的 max_subqueries/collection_map):
-            # 关闭态、低档位、**有图**与未探测到语料语言的 run 下调用形状与接入前
-            # 逐字一致,既有替身不必改签名。`kg_in_scope`/`corpus_langs` 都是 run
-            # 级不变量(前者 `_new_run_state`、后者 `_first_round_plan` 写),直读
-            # state。`limits` 例外恒传:`document_read_active` 的首读份额判据要看
-            # 本 run 的 `chunk_context_chars`,兜底成默认档会让它与执行体分叉。
-            reflect_kwargs = dict(state.corpus_langs_kwarg, limits=state.enum_limits, **(
-                {} if state.kg_in_scope else {"kg_actions": False}))
-            if state.outline_active:
-                reflect_kwargs["outline"] = True
-            if state.consult_memory_flag:
-                reflect_kwargs["consult_memory"] = True
-            summary = self._add_plugin_reflect_context(
-                state, summary, reflect_kwargs, state.no_progress, state.stale, state.steps < state.max_steps)
-            decision = self.reflect(question, summary, **reflect_kwargs)
-            raise_if_cancelled(self.cancel_event)
-            # 这一轮的大纲提交算不算「溢出纠错」:提前算与原地算等价(四个输入只由
-            # `_apply_outline_update` 改),而折叠一份收尾载荷前要先用它应用大纲。
-            overflow_repair_submission = terminal_overflow_repair or (
-                bool(state.outline_overflow) and not state.outline_cap_repair_used
-                and state.outline_updates >= state.max_outline_updates)
-            reflect_detail = {"next_action": decision.next_action,
-                              "sufficient": decision.sufficient,
-                              "no_progress": state.no_progress, "stale": state.stale}
-            if nudge_note:
-                # 只在**真的发出**引导的那一轮加键(评估用)。无条件写 False 会让
-                # 关闭态/低档位的 reflect detail 多出一个键——冻结基线的口径是
-                # 「逐键不变」,而不是「值不变」。
-                reflect_detail["outline_nudged"] = True
-            if decision.fallback:
-                # 同款稀疏键:这一轮的决定不是模型判的,而是校验/调用失败后的
-                # fail-open 兜底。没有它,一次 `invalid_enum` 与一次真正的「够了」
-                # 在轨迹上完全同形。机器码只进 detail,上屏那行说人话。
-                reflect_detail["fallback_reason"] = decision.fallback_reason
-            state.record(TraceStep(step_type="reflect", detail=reflect_detail,
-                             summary=_reflect_step_summary(decision)))
-            # 采用账目:模型**主动选**了哪些动作。记在这里(而不是收尾按 trace 的
-            # step_type 反推)是刻意的——初检索、PPR/精查 seed pass 都是确定性发生
-            # 的,按 step_type 数会把「注入过」当成「被采用」,而 ``adopted`` 是淘汰
-            # 排序的第一个键。见 ADOPTION_ACTIONS 的说明。
-            if state.experience_entries:
-                state.adopted_actions.add(decision.next_action)
-            if terminal_overflow_repair:
-                # 这次是 sufficient / stale 收尾前、且仍在 max_steps 内的专用纠错
-                # 轮,绝不能借机再发一次检索。模型不按便签换键就如实保留未解决状态。
-                if decision.next_action == OUTLINE_ACTION:
-                    self._apply_outline_update(state, decision, overflow_repair=True)
-                else:
-                    state.record(TraceStep(
-                        step_type="skip",
-                        summary="大纲溢出纠错轮未提交 update_outline,按当前绑定收尾",
-                        detail={"reason": "outline_overflow_repair_declined"},
-                    ))
-                break
-            if decision.next_action == "answer" or decision.sufficient:
-                # 「交最终版大纲」与「宣布证据够了」是**同一轮**的事:prompt 教模型
-                # 「每个方面都有证据了才置 sufficient」,而那正是它把最后一批绑定补
-                # 上、交出定稿大纲的时刻。直接 break 会把这份载荷静默丢掉,按节合成
-                # 于是用上一轮的旧大纲——那一节的绑定明明检索到了,答案里却看不到。
-                # 应用走与分发链**同一个函数**(预算/校验/trace 语义因此不可能分叉:
-                # 额度耗尽同样记 outline_budget 并不改大纲),应用完再收尾。
-                #
-                # 只对 update_outline 这么做,不是「让所有动作都跑完再 break」:
-                # 其余动作都是检索,而模型既然说了证据已经够,再花一次检索就是纯
-                # 成本。`next_action == "answer"` 那条路不碰大纲(模型没提交任何
-                # 载荷,也没说要改结构)。
-                if decision.next_action == OUTLINE_ACTION:
-                    self._apply_outline_update(
-                        state, decision, overflow_repair=overflow_repair_submission
-                    )
-                    if (
-                        state.outline_overflow
-                        and state.steps < state.max_steps
-                        and not state.outline_terminal_repair_used
-                        and not state.outline_cap_repair_used
-                    ):
-                        # sufficient 不能吞掉刚产生的 overflow。下一轮是专用纠错:
-                        # 只许同结构换键,不能借「已经够了」再发一条检索请求。
-                        state.outline_terminal_repair_used = True
-                        forced_overflow_repair = True
-                        continue
-                break
-            before = (
-                len(state.collected) + len(state.elements) + len(state.chunks) + len(state.chains)
-                + state.enum_rows_used + state.document_read_elements_used
-            )
-            if (
-                decision.next_action in (
-                    ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION
-                )
-                and not self.enumeration_active()
-            ):
-                # Defense in depth: a run without the enumeration gate does not
-                # offer these actions, but a malformed model response or a test
-                # double must still be unable to turn one into collection I/O.
-                state.record(TraceStep(
-                    step_type="skip",
-                    summary="跳过枚举(本次检索未提供清单工具)",
-                    detail={"reason": "enumeration_disabled"},
-                ))
-            elif decision.next_action == "expand_graph":
-                self._action_expand_graph(state, decision)
-            elif decision.next_action == "add_subquery":
-                self._action_add_subquery(state, decision)
-            elif decision.next_action == "search_elements":
-                self._action_search_elements(state, decision)
-            elif decision.next_action in (
-                ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION
-            ):
-                # 两个动作走同一个执行体(见 `_run_enumeration`):预算池、续跑
-                # 账目与 trace 形状是一整套合同,两处各写一份就等于给「同一个动作
-                # 两种语义」留一条只能靠人复核的缝。
-                self._run_enumeration(state, decision)
-            elif decision.next_action == OUTLINE_ACTION:
-                # 与 sufficient 短路之前那次应用共用同一个函数(见 `_apply_outline_
-                # update` 的说明):两处各写一份就等于给「语义一致」留一条只能靠人
-                # 复核的缝。
-                self._apply_outline_update(
-                    state, decision, overflow_repair=overflow_repair_submission
-                )
-            elif decision.next_action == CONSULT_MEMORY_ACTION:
-                self._action_consult_memory(state)
-            elif decision.next_action == READ_DOCUMENT_ACTION:
-                self._action_read_document(state, decision)
-            elif decision.next_action == "search_chunks":
-                self._action_search_chunks(state, decision)
-            elif decision.next_action == "ppr_retrieve":
-                self._action_ppr_retrieve(state, decision)
-            elif decision.next_action == "exact_lookup":
-                self._action_exact_lookup(state, decision)
-            elif decision.next_action == "follow_chain":
-                self._action_follow_chain(state, decision)
-            elif decision.next_action == "expand_community" and (
-                not self.allow_community_expansion
-                or self._unsafe_scope_restricted()
-            ):
-                # 通道被调用方策略或来源上限禁用:零 I/O 记 skip,**落到链尾与其它
-                # skip 同一份 no_progress/stale 记账**(设计稿 §8)。此前写在链前并
-                # `break`——选一次被禁动作整个循环就终止,其余通道全被放弃;也不能
-                # 裸 `continue`,那会绕过链尾记账,反复请求被禁动作就规避了熔断。
-                state.record(TraceStep(
-                    step_type="skip",
-                    summary="跳过跨库同类实体扩展（当前检索范围不允许）",
-                    detail={
-                        "reason": (
-                            "source_scope_unsafe_channel"
-                            if self._unsafe_scope_restricted()
-                            else "community_expansion_disabled"
-                        )
-                    },
-                ))
-            elif decision.next_action == "expand_community":
-                # 执行体整体住在 `_action_expand_community`(与 ppr/search_chunks
-                # 同形):`run` 是有零松弛长度天花板的热函数。
-                self._action_expand_community(state, decision)
-            elif decision.next_action in state.plugin_action_names:
-                self._action_plugin(state, decision, state.steps >= state.max_steps)
-            else:
-                break
-            # 本轮动作后是否有新增(候选节点或原文段)。无新增 → 下一轮提示模型 + 累加 stale。
-            # 按篇取样不进候选池却确实带来新材料,故 `document_read_elements_used`
-            # 并进这把尺(见证失败时它不动,那一轮仍如实算作无进展)。
-            state.no_progress = (
-                len(state.collected) + len(state.elements) + len(state.chunks) + len(state.chains)
-                + state.enum_rows_used + state.document_read_elements_used
-            ) == before
-            if state.no_progress and (state.consult_delivered_this_turn
-                                or state.external_delivered_this_turn):
-                # consult 送达了新建议、或插件送达了新的外部材料,两者都不带库内新
-                # 证据:stale 持平——不清零也不递增。各态 skip 照常递增。
-                pass
-            else:
-                state.stale = state.stale + 1 if state.no_progress else 0
-            state.consult_delivered_this_turn = False
-            state.external_delivered_this_turn = False
-            # 连续 stale_limit 轮无有效进展 → 硬熔断, 强制走到末尾 answer(不再交模型自觉)。
-            if state.stale >= self.settings.reasoning_stale_limit:
-                state.record(TraceStep(step_type="skip",
-                                 summary=f"连续 {state.stale} 轮无新进展,熔断收尾(避免空转)",
-                                 detail={"reason": "stale_circuit_breaker", "stale": state.stale}))
-                if (
-                    state.outline_overflow
-                    and state.steps < state.max_steps
-                    and not state.outline_terminal_repair_used
-                    and not state.outline_cap_repair_used
-                ):
-                    # 熔断是已经发生的事实,所以先落轨迹。若步骤预算仍有余量,再保留
-                    # 一次只许换键的专用轮;outline 修订仍不算检索进展、不重置 stale。
-                    state.outline_terminal_repair_used = True
-                    forced_overflow_repair = True
-                    continue
-                break
+        self._run_reflect_loop(state)
 
         if state.outline_overflow:
             # 即使模型拒绝纠错、再次溢出或给了结构变更,终态也必须明确披露未接纳
