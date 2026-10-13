@@ -53,9 +53,6 @@ import {
   useState,
 } from "react";
 import {
-  Edit3,
-  ListChecks,
-  Sparkles,
   X,
 } from "lucide-react";
 import { requestBlob } from "./api-client.ts";
@@ -69,19 +66,11 @@ import {
   patchKnowhowCell,
   batchPatchKnowhowCells,
   knowhowTemplateUrl,
-  fetchKnowhowRowCodeByColumn,
   patchKnowhowColumn,
   type KnowhowHealthFilter,
   type KnowhowTableDetail,
-  type KnowhowRow,
-  type KnowhowColumn,
-  type KnowhowCellCode,
 } from "./knowhow-model.ts";
 import {
-  completableKnowhowColumns,
-} from "./knowhow-complete-logic.ts";
-import {
-  sortColumnsByPosition,
   orderColumnsForGrid,
   resolveRowTitleText,
   appendRowOptimistically,
@@ -95,12 +84,12 @@ import { extractErrorMessage } from "./knowhow-import-logic.ts";
 import { rowFallbackTitle } from "./knowhow-cell-editor-logic.ts";
 import { KnowhowImportWizard, KnowhowAppendWizard } from "./knowhow-import.tsx";
 import { KnowhowCreateWizard, KnowhowManageModal } from "./knowhow-manage.tsx";
-import { KnowhowMarkdown, KnowhowCellPreview, KnowhowCellEditor } from "./knowhow-cell-editor.tsx";
+import { KnowhowCellPreview, KnowhowCellEditor } from "./knowhow-cell-editor.tsx";
 // knowhow 表版本管理 Task 16：格子浮窗第三态（历史）——与 KnowhowCellPreview/
 // KnowhowCellEditor 同一套 cellModal 顶层状态机驱动，见下方 cellModal 类型与
 // 渲染处的三选一分支。
 import { KnowhowCellHistory } from "./knowhow-cell-history.tsx";
-import { KnowhowCodeChip, KnowhowCodeModal } from "./knowhow-code.tsx";
+import { KnowhowCodeModal } from "./knowhow-code.tsx";
 import { KnowhowMatrixDrawer } from "./knowhow-matrix-drawer.tsx";
 // knowhow 表版本管理 Task 15：历史抽屉（时间线 + 单次改动 diff + 两版对比 +
 // 回退 + 里程碑）。与 KnowhowMatrixDrawer 同一挂载模式——面板自持
@@ -117,13 +106,12 @@ import { KnowhowReformatBatchModal } from "./knowhow-reformat-batch-modal.tsx";
 import { KnowhowTableList } from "./knowhow-table-list.tsx";
 import { useKnowhowTableList } from "./use-knowhow-table-list.ts";
 import { KnowhowTableGrid } from "./knowhow-table-grid.tsx";
-import { RoleBadge } from "./knowhow-badges.tsx";
+import { KnowhowRowDrawer } from "./knowhow-row-drawer.tsx";
+import { useKnowhowRowCode } from "./use-knowhow-row-code.ts";
 import { transferKnowhowTable, KnowhowSourceCleanupError } from "./knowhow-transfer.ts";
-import { resolveCellCodeView, CODE_STATUS_LOAD_ERROR } from "./knowhow-code-logic.ts";
+import { resolveCellCodeView } from "./knowhow-code-logic.ts";
 import {
-  ROW_OPTIMIZE_BUTTON_LABEL,
   templateDownloadFilename,
-  BATCH_REFORMAT_ROW_BUTTON_LABEL,
   openSavedReformatCellAfterReload,
   REFORMAT_OPEN_CELL_ERROR,
   type ReformatBatchScope,
@@ -285,16 +273,6 @@ export function KnowhowPanel({
   // Task 11（代码附件）：当前打开的代码查看/编辑浮层——与 cellModal/
   // optimizeRowId 平级的另一个顶层 modal 状态，堆叠在行详情抽屉之上。
   const [codeModal, setCodeModal] = useState<{ rowId: string; columnId: string } | null>(null);
-  // 当前展开行的「按列索引代码状态」map——抽屉打开时一次性拉取（见
-  // knowhow-model.ts 的 fetchKnowhowRowCodeByColumn 头注释：GET 一次行详情
-  // 换全行代码状态，不随网格/抽屉渲染逐格 GET）。rowCodeLoaded 只在成功加载
-  // 后才置 true；加载失败时保持 false 且不合成任何 map——宁可"暂时不显示
-  // chip"也不能在数据不确定时显示可能误导的"添加代码"（明明有代码却因为这
-  // 次请求失败而提示"添加"）。
-  const [rowCodeByColumn, setRowCodeByColumn] = useState<Record<string, KnowhowCellCode>>({});
-  const [rowCodeLoaded, setRowCodeLoaded] = useState(false);
-  const [rowCodeError, setRowCodeError] = useState<string | null>(null);
-
   // stale-response guard（收尾修复）：loadDetail / loadRowCode 都可能被快速
   // 连续触发（连点两张表卡片、连开两行抽屉、操作后的手动刷新），旧请求的
   // 响应后到会覆盖新目标的状态。修法=单调递增请求号：发起时领号，落地前
@@ -342,36 +320,7 @@ export function KnowhowPanel({
     return loadDetail(selectedTableId);
   }, [selectedTableId, loadDetail]);
 
-  // Task 11：行详情抽屉展开的这一行的代码状态——独立于 loadDetail（整表结构/
-  // 内容），只在抽屉真正打开时才发起，避免网格视图本身多背一次网络请求。
-  const rowCodeRequestRef = useRef(0);
-  const loadRowCode = useCallback((rowId: string) => {
-    const requestId = ++rowCodeRequestRef.current;
-    setRowCodeError(null);
-    fetchKnowhowRowCodeByColumn(rowId)
-      .then((map) => {
-        if (rowCodeRequestRef.current !== requestId) return; // 已切行/关抽屉：丢弃旧行响应
-        setRowCodeByColumn(map);
-        setRowCodeLoaded(true);
-      })
-      .catch(() => {
-        if (rowCodeRequestRef.current === requestId) setRowCodeError(CODE_STATUS_LOAD_ERROR);
-      });
-  }, []);
-
-  useEffect(() => {
-    if (!openRowId) {
-      setRowCodeByColumn({});
-      setRowCodeLoaded(false);
-      setRowCodeError(null);
-      return;
-    }
-    setRowCodeLoaded(false);
-    loadRowCode(openRowId);
-    return () => {
-      rowCodeRequestRef.current += 1; // 切行/关抽屉：作废 in-flight 的旧行代码状态
-    };
-  }, [openRowId, loadRowCode]);
+  const knowhowRowCode = useKnowhowRowCode(openRowId);
 
   // Task 11（引用命中→跳概念矩阵抽屉+高亮，规格 §4.5）：记住「当前这个跳转
   // 目标（initialRowId）是否已经落地过一次路由」——detail 是整表状态，后面
@@ -1018,7 +967,7 @@ export function KnowhowPanel({
     // 行级代码状态，让 stale chip 无需重开抽屉即浮现（优化整行的
     // onAcceptCell 也走本函数，同样受益）。loadRowCode 自带请求号 guard，与
     // 快速切行/连续保存并存时旧响应不会倒灌。
-    if (openRowId && targets.includes(openRowId)) loadRowCode(openRowId);
+    if (openRowId && targets.includes(openRowId)) knowhowRowCode.loadRowCode(openRowId);
   }
 
   // Task 11：打开代码浮层（抽屉 chip 的 onOpen，及"添加代码"安静入口共用同
@@ -1026,22 +975,6 @@ export function KnowhowPanel({
   // 否为 none 决定初始 mode 是 view 还是 edit，本函数不需要关心这一点）。
   function openCodeModal(rowId: string, columnId: string) {
     setCodeModal({ rowId, columnId });
-  }
-
-  // 代码保存成功：把最新代码视图合并进行级 map——不必整行重拉（putCellCode
-  // 本身已返回更新后的值，见 knowhow-model.ts）。
-  function handleCodeSaved(columnId: string, entry: KnowhowCellCode) {
-    setRowCodeByColumn((prev) => ({ ...prev, [columnId]: entry }));
-  }
-
-  // 代码删除成功：从行级 map 里摘除这一列——摘除后 resolveCellCodeView 会
-  // 合成 none 占位，chip 自然回落到「添加代码」（或 canEdit=false 时不显示）。
-  function handleCodeDeleted(columnId: string) {
-    setRowCodeByColumn((prev) => {
-      const next = { ...prev };
-      delete next[columnId];
-      return next;
-    });
   }
 
   const openRow = detail?.rows.find((row) => row.id === openRowId) ?? null;
@@ -1232,10 +1165,10 @@ export function KnowhowPanel({
           anchorColumnId={detail.anchorColumnId}
           onCompleteRow={(trigger) => openRowCompletion(openRow.id, trigger)}
           onReformatRow={() => setReformatRowId(openRow.id)}
-          codeByColumn={rowCodeByColumn}
-          codeLoaded={rowCodeLoaded}
-          codeError={rowCodeError}
-          onRetryCode={() => loadRowCode(openRow.id)}
+          codeByColumn={knowhowRowCode.view.rowCodeByColumn}
+          codeLoaded={knowhowRowCode.view.rowCodeLoaded}
+          codeError={knowhowRowCode.view.rowCodeError}
+          onRetryCode={() => knowhowRowCode.loadRowCode(openRow.id)}
           onOpenCode={openCodeModal}
         />
       )}
@@ -1573,10 +1506,10 @@ export function KnowhowPanel({
           columnId={codeModal.columnId}
           rowTitle={codeModalRowTitle}
           columnName={codeModalColumn.name}
-          code={resolveCellCodeView(rowCodeByColumn, codeModal.columnId)}
+          code={resolveCellCodeView(knowhowRowCode.view.rowCodeByColumn, codeModal.columnId)}
           canEdit={canEdit}
-          onSaved={handleCodeSaved}
-          onDeleted={handleCodeDeleted}
+          onSaved={knowhowRowCode.handleCodeSaved}
+          onDeleted={knowhowRowCode.handleCodeDeleted}
           onClose={() => setCodeModal(null)}
         />
       )}
@@ -1585,163 +1518,3 @@ export function KnowhowPanel({
     </section>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Layer 3 — 行详情抽屉
-// ---------------------------------------------------------------------------
-
-function KnowhowRowDrawer({
-  row,
-  columns,
-  notebookId,
-  apiBase,
-  canEdit,
-  onEditCell,
-  onClose,
-  onOptimizeRow,
-  anchorColumnId,
-  onCompleteRow,
-  onReformatRow,
-  cellModalOpen,
-  codeByColumn,
-  codeLoaded,
-  codeError,
-  onRetryCode,
-  onOpenCode,
-}: {
-  row: KnowhowRow;
-  columns: KnowhowColumn[];
-  notebookId: string;
-  apiBase: string;
-  /** 只读成员不出现分节「编辑」按钮（规格⑦「只读成员可看」）。 */
-  canEdit: boolean;
-  /** 分节「编辑」按钮（规格⑤「每节「编辑」按钮打开同一个格子浮窗」）：打开
-   * 该列对应格子的编辑态，不经预览态中转——用户已经明确点了「编辑」。 */
-  onEditCell: (rowId: string, columnId: string) => void;
-  onClose: () => void;
-  /** 「优化整行」入口（Task 9，规格③）：打开批量优化弹窗，堆叠在本抽屉之上。 */
-  onOptimizeRow: () => void;
-  /** 智能补全只面向空的非行标题列；只读成员无入口。 */
-  anchorColumnId: string | null;
-  onCompleteRow: (trigger: HTMLButtonElement) => void;
-  /** 「一键规整整行」入口（knowhow-md-normalize Task 9）：打开批量规整弹窗，
-   * 同样堆叠在本抽屉之上——与「优化整行」并列但语义不同（规整=只改格式，
-   * 优化=改措辞，见 knowhow-cell-editor-logic.ts TOOLBAR_REFORMAT_LABEL
-   * 头注释同一区分）。 */
-  onReformatRow: () => void;
-  /** 任何堆叠在本抽屉之上的顶层弹窗（格子浮窗编辑态/预览态，Task 9 的
-   * KnowhowRowOptimizeModal，或 Task 11 的 KnowhowCodeModal）当前是否打开
-   * （T7 复审 Important 修复）：为 true 时本抽屉的 Esc 监听器短路、不关闭
-   * 抽屉——各自独立的 window keydown 监听器按注册顺序（抽屉先挂载，先注册）
-   * 依次响应同一次按键，若不在这里短路，一次 Esc 会先无条件关闭本抽屉（它
-   * 自己没有"未保存内容"的概念），顶层弹窗随后可能因为有未保存内容/进行中
-   * 的操作改为弹出确认层而不真正关闭——结果抽屉已经消失、弹窗却还留着，
-   * 用户之后关掉弹窗时会发现连"返回这一行"的抽屉上下文都丢了。真正想关的
-   * 是最顶层的弹窗，Esc 应该只作用于它，抽屉留到弹窗自己关闭之后再响应下
-   * 一次 Esc。 */
-  cellModalOpen: boolean;
-  /** Task 11：本行按列索引的代码状态 map（父组件在抽屉打开时一次性拉取，见
-   * knowhow-panel.tsx 顶层的 loadRowCode）。 */
-  codeByColumn: Record<string, KnowhowCellCode>;
-  /** 是否已成功加载过 codeByColumn——false 时（含加载失败）任何分节都不渲染
-   * chip，宁可暂时不显示也不能显示可能误导的"添加代码"。 */
-  codeLoaded: boolean;
-  /** 非 null 时在抽屉正文顶部渲染一条轻量内联提示 + 「重试」。 */
-  codeError: string | null;
-  onRetryCode: () => void;
-  /** 打开某一格的代码查看/编辑浮层（chip 本身，及 canEdit 时的"添加代码"
-   * 安静入口共用同一个回调）。 */
-  onOpenCode: (rowId: string, columnId: string) => void;
-}) {
-  useEffect(() => {
-    function handleKeyDown(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape" && !cellModalOpen) onClose();
-    }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose, cellModalOpen]);
-
-  const orderedColumns = useMemo(() => sortColumnsByPosition(columns), [columns]);
-  const titleText = cellSummary(resolveRowTitleText(row, columns), 200) || "行详情";
-  const hasCompletableColumns = completableKnowhowColumns(row, columns, anchorColumnId).length > 0;
-
-  return (
-    <>
-      <button type="button" className="knowhow-drawer-backdrop" aria-label="关闭行详情" onClick={onClose} />
-      <section className="knowhow-drawer" role="dialog" aria-modal="true" aria-label={titleText}>
-        <div className="knowhow-drawer-header">
-          <h2>{titleText}</h2>
-          <div className="knowhow-drawer-header-actions">
-            {/* 「优化整行」批量入口（Task 9，规格③）——只读成员看不到（规格⑦）。 */}
-            {canEdit && (
-              <button type="button" className="knowhow-drawer-edit-button" onClick={onOptimizeRow}>
-                <Sparkles size={13} /> {ROW_OPTIMIZE_BUTTON_LABEL}
-              </button>
-            )}
-            {canEdit && hasCompletableColumns && (
-              <button
-                type="button"
-                className="knowhow-drawer-edit-button"
-                onClick={(event) => onCompleteRow(event.currentTarget)}
-              >
-                <Sparkles size={13} /> 智能补全空列
-              </button>
-            )}
-            {/* 「一键规整整行」批量入口（knowhow-md-normalize Task 9）——挨着
-                「优化整行」，同一只读门控。 */}
-            {canEdit && (
-              <button type="button" className="knowhow-drawer-edit-button" onClick={onReformatRow}>
-                <ListChecks size={13} /> {BATCH_REFORMAT_ROW_BUTTON_LABEL}
-              </button>
-            )}
-            <button className="icon-button" onClick={onClose} title="关闭">
-              <X size={20} />
-            </button>
-          </div>
-        </div>
-        <div className="knowhow-drawer-body">
-          {/* Task 11：本行代码状态加载失败的轻量提示——不阻塞其余分节的正常
-              渲染，只影响代码 chip 这一小块辅助信息。 */}
-          {codeError && (
-            <p className="kh-code-status-error">
-              <span>{codeError}</span>
-              <button type="button" onClick={onRetryCode}>
-                重试
-              </button>
-            </p>
-          )}
-          {orderedColumns.map((column) => (
-            <section key={column.id}>
-              <div className="knowhow-drawer-section-head">
-                <h4>{column.name}</h4>
-                <RoleBadge role={column.role} />
-                {codeLoaded && (
-                  <KnowhowCodeChip
-                    code={resolveCellCodeView(codeByColumn, column.id)}
-                    canEdit={canEdit}
-                    onOpen={() => onOpenCode(row.id, column.id)}
-                  />
-                )}
-                {canEdit && (
-                  <button
-                    type="button"
-                    className="knowhow-drawer-edit-button"
-                    onClick={() => onEditCell(row.id, column.id)}
-                  >
-                    <Edit3 size={13} /> 编辑
-                  </button>
-                )}
-              </div>
-              <KnowhowMarkdown md={row.cells[column.id] ?? ""} notebookId={notebookId} apiBase={apiBase} />
-            </section>
-          ))}
-        </div>
-      </section>
-    </>
-  );
-}
-
-// KnowhowMarkdown（复用 answer-markdown.tsx 的 GFM+KaTeX 渲染管线，供本文件
-// 的行详情抽屉 与 knowhow-cell-editor.tsx 的格子浮窗预览/编辑分栏共用）随格子
-// 浮窗一起挪到了 knowhow-cell-editor.tsx——见该文件头注释；本文件已在顶部
-// import 使用，不再在此重复定义。
