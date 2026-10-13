@@ -82,7 +82,7 @@ def test_set_request_user_syncs_log_owner(tmp_path):
         SQLiteRepository, set_request_user, reset_request_user,
     )
     repo = SQLiteRepository(Settings(database_url=f"sqlite:///{tmp_path}/t.db"))
-    user = repo.create_user("a00123456", "pw")
+    user = repo._runtime.identity.create_user("a00123456", "pw")
     assert get_log_owner() is None
     tok = set_request_user(user)
     try:
@@ -133,7 +133,7 @@ def test_repo_event_log_is_per_user(tmp_path):
         database_url=f"sqlite:///{tmp_path}/t.db",
         event_log_dir=str(tmp_path / "logs"),
     ))
-    user = repo.create_user("a00123456", "pw")
+    user = repo._runtime.identity.create_user("a00123456", "pw")
     tok = set_request_user(user)
     try:
         repo.event_log.emit({"kind": "k", "status": "ok"})

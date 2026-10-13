@@ -1260,7 +1260,7 @@ def test_build_notebook_kg_isolates_source_failure(repo, monkeypatch):
 
 
 def test_ensure_notebook_explicit_owner(repo):
-    u = repo.create_user("a00123456", "pw123456")
+    u = repo._runtime.identity.create_user("a00123456", "pw123456")
     assert u.id != "user-local"
     assert bi._resolve_owner_profile(repo, "A00123456").id == u.id
     token = set_request_user(u)
@@ -1277,7 +1277,7 @@ def test_ensure_notebook_explicit_owner(repo):
 
 @pytest.mark.parametrize("owner", ["CorpUID", "corpuid", " CORPuid "])
 def test_owner_resolution_follows_the_current_username_after_rename(repo, owner):
-    user = repo.create_user("a00123456", "pw123456")
+    user = repo._runtime.identity.create_user("a00123456", "pw123456")
     with repo._connect() as db:
         db.execute("UPDATE users SET username='CorpUID' WHERE id=?", (user.id,))
     resolved = bi._resolve_owner_profile(repo, owner)
@@ -1286,7 +1286,7 @@ def test_owner_resolution_follows_the_current_username_after_rename(repo, owner)
 
 
 def test_owner_resolution_forgets_the_name_before_a_rename(repo):
-    user = repo.create_user("a00123456", "pw123456")
+    user = repo._runtime.identity.create_user("a00123456", "pw123456")
     with repo._connect() as db:
         db.execute("UPDATE users SET username='CorpUID' WHERE id=?", (user.id,))
     assert repo.maintenance.resolve_owner_profile("a00123456") is None
@@ -1298,8 +1298,8 @@ def test_owner_resolution_cannot_meet_case_variant_names(repo):
     is a defensive branch the schema no longer lets data reach."""
     import sqlite3
 
-    first = repo.create_user("a00123456", "pw123456")
-    second = repo.create_user("a00123457", "pw123456")
+    first = repo._runtime.identity.create_user("a00123456", "pw123456")
+    second = repo._runtime.identity.create_user("a00123457", "pw123456")
     with repo._connect() as db:
         db.execute("UPDATE users SET username='CorpUID' WHERE id=?", (first.id,))
     with pytest.raises(sqlite3.IntegrityError, match="idx_users_username_lower"):
@@ -1309,7 +1309,7 @@ def test_owner_resolution_cannot_meet_case_variant_names(repo):
 
 
 def test_owner_resolution_keeps_default_admin_and_rejects_non_names(repo):
-    user = repo.create_user("a00123456", "pw123456")
+    user = repo._runtime.identity.create_user("a00123456", "pw123456")
     assert repo.maintenance.resolve_owner_profile(None).id == "user-local"
     for value in (user.id,user.email,"", "   "):
         assert repo.maintenance.resolve_owner_profile(value) is None
@@ -1325,7 +1325,7 @@ def test_main_new_notebook_owner_context_reaches_scheduler_worker(
 ):
     from app.services.kg.scheduler import submit_job
 
-    owner = repo.create_user("b00123456", "pw123456")
+    owner = repo._runtime.identity.create_user("b00123456", "pw123456")
     docs = tmp_path / "owner-new-docs"
     docs.mkdir()
     seen = {}
@@ -1368,7 +1368,7 @@ def test_main_new_notebook_owner_context_reaches_scheduler_worker(
 def test_main_existing_notebook_owner_context_resets_on_failure(
     repo, monkeypatch
 ):
-    owner = repo.create_user("c00123456", "pw123456")
+    owner = repo._runtime.identity.create_user("c00123456", "pw123456")
     token = set_request_user(owner)
     try:
         notebook_id = bi.ensure_notebook(
@@ -1405,8 +1405,8 @@ def test_main_existing_notebook_owner_context_resets_on_failure(
 
 
 def test_main_rejects_explicit_wrong_notebook_owner(repo, capsys):
-    owner = repo.create_user("f00123456", "pw123456")
-    wrong = repo.create_user("g00123456", "pw123456")
+    owner = repo._runtime.identity.create_user("f00123456", "pw123456")
+    wrong = repo._runtime.identity.create_user("g00123456", "pw123456")
     token = set_request_user(owner)
     try:
         notebook_id = bi.ensure_notebook(repo, None, "Owned by F")
@@ -1430,7 +1430,7 @@ def test_main_rejects_explicit_wrong_notebook_owner(repo, capsys):
 def test_main_omitted_owner_preserves_active_user_context(
     repo, monkeypatch
 ):
-    owner = repo.create_user("e00123456", "pw123456")
+    owner = repo._runtime.identity.create_user("e00123456", "pw123456")
     token = set_request_user(owner)
     try:
         notebook_id = bi.ensure_notebook(

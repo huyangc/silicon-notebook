@@ -408,7 +408,7 @@ def test_federated_large_guard_includes_base_notebooks(tmp_path, monkeypatch):
 
 def test_session_resolution_does_not_write_on_every_request(tmp_path):
     repo = SQLiteRepository(_settings(tmp_path))
-    token = repo.create_session("user-local")
+    token = repo._runtime.identity.create_session("user-local")
     with repo._connect() as db:
         before = db.execute(
             "SELECT last_seen_at, expires_at FROM auth_sessions WHERE token=?", (token,)
@@ -429,7 +429,7 @@ def test_last_seen_touch_follows_session_throttle(tmp_path):
     窗口外的下一次请求推进它;登出后该列仍保留(不像 auth_sessions 行被
     删除);list_user_usage()["last_seen"] 与该列一致。"""
     repo = SQLiteRepository(_settings(tmp_path))
-    token = repo.create_session("user-local")
+    token = repo._runtime.identity.create_session("user-local")
 
     with repo._connect() as db:
         after_login = db.execute(
@@ -476,7 +476,7 @@ def test_last_seen_touch_follows_session_throttle(tmp_path):
 
     # 登出删除 auth_sessions 行,但 users.last_seen_at 不受影响(与
     # auth_sessions 聚合口径的关键区别,规格 §7 决策 1)。
-    repo.delete_session(token)
+    repo._runtime.identity.delete_session(token)
     with repo._connect() as db:
         after_logout = db.execute(
             "SELECT last_seen_at FROM users WHERE id=?", ("user-local",)
@@ -492,7 +492,7 @@ def test_last_seen_touch_follows_session_throttle(tmp_path):
     # touch,而不是用 now 覆盖回去。这是对 identity_store 里
     # `WHERE id=? AND (last_seen_at IS NULL OR last_seen_at<?)` 那一条守卫
     # 的变异验证锚点:把守卫去掉(或把 AND 条件删掉)会让下面的断言失败。
-    token2 = repo.create_session("user-local")
+    token2 = repo._runtime.identity.create_session("user-local")
     future = "2999-01-01T00:00:00"
     with repo._connect() as db:
         db.execute("UPDATE users SET last_seen_at=? WHERE id=?", (future, "user-local"))

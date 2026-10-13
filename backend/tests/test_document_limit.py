@@ -72,8 +72,8 @@ def test_visible_document_count_excludes_memory_and_knowhow(tmp_path):
 def test_effective_limit_resolution_three_states(tmp_path):
     repo = _repo(tmp_path, limit=20)
     # 1) 无覆盖、无全局默认 → 回退 config(20)
-    assert repo.global_document_limit_default() == 20
-    assert repo.user_document_limit_override("user-local") is None
+    assert repo._runtime.identity.global_document_limit_default() == 20
+    assert repo._runtime.identity.user_document_limit_override("user-local") is None
     assert repo.effective_document_limit("user-local") == 20
     # 2) 全局默认覆盖(app_settings) → 应用到无覆盖用户
     with repo._write() as db:
@@ -81,14 +81,14 @@ def test_effective_limit_resolution_three_states(tmp_path):
             "INSERT INTO app_settings(key, value, updated_at) "
             "VALUES('upload_document_limit_default', '7', 't')"
         )
-    assert repo.global_document_limit_default() == 7
+    assert repo._runtime.identity.global_document_limit_default() == 7
     assert repo.effective_document_limit("user-local") == 7
     # 3) 用户覆盖优先于全局默认
     with repo._write() as db:
         db.execute(
             "UPDATE user_profiles SET upload_document_limit = 3 WHERE user_id = 'user-local'"
         )
-    assert repo.user_document_limit_override("user-local") == 3
+    assert repo._runtime.identity.user_document_limit_override("user-local") == 3
     assert repo.effective_document_limit("user-local") == 3
 
 
@@ -100,7 +100,7 @@ def test_global_default_bad_value_falls_back_to_config(tmp_path):
             "VALUES('upload_document_limit_default', 'not-an-int', 't')"
         )
     # 坏配置不卡死上传:回退 config 默认。
-    assert repo.global_document_limit_default() == 11
+    assert repo._runtime.identity.global_document_limit_default() == 11
 
 
 def test_effective_limit_none_owner_uses_global_default(tmp_path):
@@ -136,7 +136,7 @@ def _enforce_probe(repo, monkeypatch, notebook_id, adding):
 
 def test_enforce_allows_under_and_at_limit_blocks_over(tmp_path, monkeypatch):
     repo = _repo(tmp_path, limit=2)
-    u = repo.create_user("a00000001", "pw")
+    u = repo._runtime.identity.create_user("a00000001", "pw")
     set_request_user(u)
     nb = repo.create_notebook(NotebookCreate(name="n"))
     _insert(repo, nb.id, "s1")
@@ -159,7 +159,7 @@ def test_document_capacity_limit_resolves_without_counting(tmp_path, monkeypatch
     from app.api import source_routes
 
     repo = _repo(tmp_path, limit=5)
-    u = repo.create_user("b00000002", "pw")
+    u = repo._runtime.identity.create_user("b00000002", "pw")
     set_request_user(u)
     nb = repo.create_notebook(NotebookCreate(name="n"))
 

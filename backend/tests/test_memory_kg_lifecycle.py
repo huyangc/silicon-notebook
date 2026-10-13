@@ -73,7 +73,7 @@ def repo(tmp_path, monkeypatch):
 
 @pytest.fixture
 def owner(repo):
-    return repo.create_user("a00123456", "pw")
+    return repo._runtime.identity.create_user("a00123456", "pw")
 
 
 @pytest.fixture

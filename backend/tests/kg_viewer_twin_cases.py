@@ -51,8 +51,8 @@ def seed_twin_world(repo, *, source, memory, ph: str, cast: str, now) -> dict:
     from app.core.request_context import reset_request_user, set_request_user
     from app.models.notebooks import NotebookCreate
 
-    a = repo.create_user("a00000011", "pw123456")
-    b = repo.create_user("b00000012", "pw123456")
+    a = repo._runtime.identity.create_user("a00000011", "pw123456")
+    b = repo._runtime.identity.create_user("b00000012", "pw123456")
     token = set_request_user(a)
     try:
         nb = repo.create_notebook(NotebookCreate(name="twins")).id

@@ -99,7 +99,7 @@ class TestResolve:
         a = repo.create_notebook(NotebookCreate(name="a"))
         theirs = repo.create_notebook(NotebookCreate(name="别人的"))
         _mount(repo, a.id, [theirs.id])
-        other = repo.create_user("a00900001", "pw")  # created_by 有 FK REFERENCES users(id)
+        other = repo._runtime.identity.create_user("a00900001", "pw")  # created_by 有 FK REFERENCES users(id)
         with repo._write() as db:  # 模拟易主
             db.execute(
                 "UPDATE notebooks SET created_by=? WHERE id=?", (other.id, theirs.id)
@@ -113,7 +113,7 @@ class TestResolve:
         base = repo.create_notebook(NotebookCreate(name="base"))
         repo.mark_notebook_base(base.id)
         _mount(repo, a.id, [base.id])
-        other = repo.create_user("a00900002", "pw")  # created_by 有 FK REFERENCES users(id)
+        other = repo._runtime.identity.create_user("a00900002", "pw")  # created_by 有 FK REFERENCES users(id)
         with repo._write() as db:  # 公共库不是我的，且被降级
             db.execute(
                 "UPDATE notebooks SET created_by=? WHERE id=?", (other.id, base.id)
@@ -130,7 +130,7 @@ class TestResolve:
         base = repo.create_notebook(NotebookCreate(name="base"))
         repo.mark_notebook_base(base.id)
         _mount(repo, a.id, [base.id])
-        other = repo.create_user("a00900003", "pw")  # created_by 有 FK REFERENCES users(id)
+        other = repo._runtime.identity.create_user("a00900003", "pw")  # created_by 有 FK REFERENCES users(id)
         with repo._write() as db:
             db.execute(
                 "UPDATE notebooks SET created_by=? WHERE id=?", (other.id, base.id)
@@ -156,7 +156,7 @@ class TestResolve:
         base = repo.create_notebook(NotebookCreate(name="base"))
         theirs = repo.create_notebook(NotebookCreate(name="theirs"))
         repo.mark_notebook_base(base.id)
-        other = repo.create_user("a00900004", "pw")  # created_by 有 FK REFERENCES users(id)
+        other = repo._runtime.identity.create_user("a00900004", "pw")  # created_by 有 FK REFERENCES users(id)
         with repo._write() as db:
             db.execute(
                 "UPDATE notebooks SET created_by=? WHERE id=?", (other.id, theirs.id)
@@ -172,8 +172,8 @@ class TestResolve:
         tier='base' 分支。甲是 A 与被挂个人库的 owner(挂载人),乙是 A 的只读成员:
         甲解析出带 lib 的参与集,乙读不了 lib 就解析不出;乙拿到 lib 的读权后生效,
         收回即失效。参与集不再「与谁在提问无关」(那条旧契约已作废)。"""
-        jia = repo.create_user("a00900005", "pw")  # 甲:A 与被挂个人库的 owner
-        yi = repo.create_user("a00900006", "pw")   # 乙:A 的只读成员,读不了 lib
+        jia = repo._runtime.identity.create_user("a00900005", "pw")  # 甲:A 与被挂个人库的 owner
+        yi = repo._runtime.identity.create_user("a00900006", "pw")   # 乙:A 的只读成员,读不了 lib
         from app.core.request_context import reset_request_user, set_request_user
 
         tok = set_request_user(jia)
@@ -1257,7 +1257,7 @@ class TestMountEdgeNamePrivacy:
         为 personal 并改名——不涉及易主,base.created_by 全程不变,证明单是
         「降级」(不需要额外的易主)就足以让新名字被遮蔽。"""
         from app.core.request_context import reset_request_user, set_request_user
-        owner = repo.create_user("a00900008", "pw")  # 库主,与 a 的 owner 不同
+        owner = repo._runtime.identity.create_user("a00900008", "pw")  # 库主,与 a 的 owner 不同
         tok = set_request_user(owner)
         try:
             base = repo.create_notebook(NotebookCreate(name="旧名字"))
@@ -1347,7 +1347,7 @@ class TestPromotionQueueTargetBaseName:
         (auth_optional 下的种子 admin)仍必须拿到真名,而不是退化成截断 id。"""
         from app.core.request_context import reset_request_user, set_request_user
         client = self._client(monkeypatch)
-        owner = repo.create_user("a00900011", "pw")  # 与晋升队列查看者(种子 admin)不同
+        owner = repo._runtime.identity.create_user("a00900011", "pw")  # 与晋升队列查看者(种子 admin)不同
         tok = set_request_user(owner)
         try:
             base = repo.create_notebook(NotebookCreate(name="第三方公共库"))
@@ -1439,7 +1439,7 @@ class TestPutBasesKeepsInactiveEdge:
         from app.core.request_context import reset_request_user, set_request_user
         client = self._client(monkeypatch)
 
-        owner = repo.create_user("a00900021", "pw")  # 库主,与 a 的 owner(隐式 user-local)不同
+        owner = repo._runtime.identity.create_user("a00900021", "pw")  # 库主,与 a 的 owner(隐式 user-local)不同
         tok = set_request_user(owner)
         try:
             base = repo.create_notebook(NotebookCreate(name="base"))
@@ -1479,7 +1479,7 @@ class TestPutBasesKeepsInactiveEdge:
         from app.core.request_context import reset_request_user, set_request_user
         client = self._client(monkeypatch)
 
-        owner = repo.create_user("a00900022", "pw")
+        owner = repo._runtime.identity.create_user("a00900022", "pw")
         tok = set_request_user(owner)
         try:
             base = repo.create_notebook(NotebookCreate(name="base"))
@@ -1491,7 +1491,7 @@ class TestPutBasesKeepsInactiveEdge:
         repo.replace_notebook_bases(a.id, [base.id], "user-local")
         repo.set_notebook_personal(base.id)  # a 现在有一条失效边
 
-        stranger = repo.create_user("a00900023", "pw")
+        stranger = repo._runtime.identity.create_user("a00900023", "pw")
         tok2 = set_request_user(stranger)
         try:
             theirs = repo.create_notebook(NotebookCreate(name="别人的私有库"))
@@ -1549,7 +1549,7 @@ class TestMountedByCount:
         MOUNT_VALID_EXPR 的 same_owner 分支,降级也不会失效——见
         TestMountEdgeNamePrivacy 的同款前置条件)。"""
         from app.core.request_context import reset_request_user, set_request_user
-        owner = repo.create_user("a00900033", "pw")
+        owner = repo._runtime.identity.create_user("a00900033", "pw")
         tok = set_request_user(owner)
         try:
             base = repo.create_notebook(NotebookCreate(name="base"))

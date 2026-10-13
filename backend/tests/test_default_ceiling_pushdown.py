@@ -65,8 +65,8 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("EMBED_DIM", "16")
     instance = SQLiteRepository(Settings(_env_file=None))
     bind_all_embedding_clients(instance, FakeEmbedder(dim=16))
-    bob = instance.create_user("b00654321", "password-12")
-    alice = instance.create_user("a00123456", "password-12")
+    bob = instance._runtime.identity.create_user("b00654321", "password-12")
+    alice = instance._runtime.identity.create_user("a00123456", "password-12")
     token = set_request_user(bob)
     try:
         yield instance, bob.id, alice.id

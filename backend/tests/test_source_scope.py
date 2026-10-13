@@ -1404,8 +1404,8 @@ def _shared_notebook_with_two_members(tmp_path, monkeypatch):
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     repo = SQLiteRepository(Settings())
-    alice = repo.create_user("a00123456", "password-12")
-    bob = repo.create_user("b00123456", "password-12")
+    alice = repo._runtime.identity.create_user("a00123456", "password-12")
+    bob = repo._runtime.identity.create_user("b00123456", "password-12")
     token = set_request_user(alice)
     try:
         notebook_id = repo.create_notebook(NotebookCreate(name="共享库")).id

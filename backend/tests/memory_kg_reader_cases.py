@@ -102,8 +102,8 @@ def _objects(sid, concept_names, claim_name):
 
 def build_world(repo, *, postgres: bool) -> SimpleNamespace:
     dialect = Dialect(postgres)
-    a = repo.create_user("a00000001", "pw123456")
-    b = repo.create_user("b00000002", "pw123456")
+    a = repo._runtime.identity.create_user("a00000001", "pw123456")
+    b = repo._runtime.identity.create_user("b00000002", "pw123456")
     token = set_request_user(a)
     try:
         nb = repo.create_notebook(NotebookCreate(name="shared")).id

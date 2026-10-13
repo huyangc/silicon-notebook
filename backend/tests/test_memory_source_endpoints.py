@@ -85,7 +85,7 @@ def seeded(mcp_env):  # noqa: F811 - pytest fixture injection
                 (_element_id(source_id), source_id, text, _NOW),
             )
     headers = {
-        name: {"Authorization": f"Bearer {repo.create_session(user.id)}"}
+        name: {"Authorization": f"Bearer {repo._runtime.identity.create_session(user.id)}"}
         for name, user in users.items()
     }
     return {**mcp_env, "notebook_id": notebook_id, "headers": headers}

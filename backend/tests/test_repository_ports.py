@@ -5,9 +5,9 @@ from app.repositories import ports
 
 def test_required_protocol_catalogue_has_declared_operations():
     required = {
+        "IdentityReadRepository": {"current_user", "resolve_session", "audit_labels_for_user_ids"},
         "IdentityRepository": {
-            "current_user", "create_user",
-            "authenticate_user", "create_session", "resolve_session", "delete_session",
+            "create_user", "authenticate_user", "create_session", "delete_session",
         },
         "ModelStatusStorePort": {"get_all", "record"},
         "NotebookSharingRepository": {"share_notebook", "unshare_notebook", "copy_notebook", "add_member", "remove_member", "join_shared", "leave_notebook"},

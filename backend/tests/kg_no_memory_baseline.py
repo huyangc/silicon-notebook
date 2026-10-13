@@ -37,7 +37,7 @@ _TIMESTAMP = re.compile(
 def build_plain_world(repo, *, as_user: Callable[..., Any]) -> Dict[str, Any]:
     """One notebook, one plain source, a concept and a claim about it, a
     rebuilt unified KG and a published viz artifact -- no Memory at all."""
-    user = repo.create_user("a00000021", "pw123456")
+    user = repo._runtime.identity.create_user("a00000021", "pw123456")
     nb = as_user(user, repo.create_notebook, NotebookCreate(name="plain")).id
     now = "2026-09-01T00:00:00"
     with repo._write() as db:

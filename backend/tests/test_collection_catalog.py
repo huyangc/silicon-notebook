@@ -456,7 +456,7 @@ def test_downgraded_cross_owner_base_falls_out_of_scope(repo):
     作用域走的就是 Ask 联邦那套参与集解析,所以 notebook_ids 必须逐字等于它。"""
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     base = repo.create_notebook(NotebookCreate(name="base"))
-    other = repo.create_user("a00900101", "pw")   # created_by 有 FK REFERENCES users(id)
+    other = repo._runtime.identity.create_user("a00900101", "pw")   # created_by 有 FK REFERENCES users(id)
     with repo._write() as db:
         db.execute(
             "UPDATE notebooks SET created_by=? WHERE id=?", (other.id, base.id)

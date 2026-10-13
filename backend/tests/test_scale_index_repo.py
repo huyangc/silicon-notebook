@@ -1308,12 +1308,12 @@ def test_resolve_index_owner_prefers_request_user(repo):
     (created_by 有 FK REFERENCES users(id)),故用 create_user 造第二个用户。"""
     from app.services import sqlite_repository as sr
 
-    creator = repo.create_user("a00111111", "pw")
+    creator = repo._runtime.identity.create_user("a00111111", "pw")
     nb = repo.create_notebook(NotebookCreate(name="owner-test"))
     with repo._write() as db:
         db.execute("UPDATE notebooks SET created_by=? WHERE id=?", (creator.id, nb.id))
 
-    requester = repo.create_user("a00222222", "pw")
+    requester = repo._runtime.identity.create_user("a00222222", "pw")
     token = sr._REQUEST_USER.set(requester)
     try:
         assert repo._resolve_index_owner(nb.id) == requester.id
@@ -1327,7 +1327,7 @@ def test_resolve_index_owner_falls_back_to_created_by(repo):
     `notebooks.created_by`。"""
     from app.services import sqlite_repository as sr
 
-    creator = repo.create_user("a00333333", "pw")
+    creator = repo._runtime.identity.create_user("a00333333", "pw")
     nb = repo.create_notebook(NotebookCreate(name="owner-test2"))
     with repo._write() as db:
         db.execute("UPDATE notebooks SET created_by=? WHERE id=?", (creator.id, nb.id))

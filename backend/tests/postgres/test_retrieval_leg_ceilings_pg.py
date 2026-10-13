@@ -388,8 +388,8 @@ def _pg_seam(postgres_settings, tmp_path, *, own_memory: bool):
     bind_all_embedding_clients(repository, FakeEmbedder(dim=16))
     repository.settings.graph_ppr_enabled = False
     try:
-        a = repository.create_user("a00000001", "pw123456")
-        b = repository.create_user("b00000002", "pw123456")
+        a = repository._runtime.identity.create_user("a00000001", "pw123456")
+        b = repository._runtime.identity.create_user("b00000002", "pw123456")
         token = set_request_user(a)
         try:
             nb = repository.create_notebook(NotebookCreate(name="seam")).id

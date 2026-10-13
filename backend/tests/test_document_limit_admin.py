@@ -65,7 +65,7 @@ def test_set_global_default_accepts_boundary(tmp_path, ok):
 
 def test_set_global_default_requires_admin_actor(tmp_path):
     repo = _repo(tmp_path)
-    u = repo.create_user("a00000001", "pw")  # role=user
+    u = repo._runtime.identity.create_user("a00000001", "pw")  # role=user
     with pytest.raises(PermissionError):
         _identity(repo).set_global_document_limit_default(u.id, 30)
 
@@ -73,7 +73,7 @@ def test_set_global_default_requires_admin_actor(tmp_path):
 def test_set_user_override_then_clear_resolves_effective(tmp_path):
     repo = _repo(tmp_path, limit=20)
     ident = _identity(repo)
-    u = repo.create_user("a00000001", "pw")
+    u = repo._runtime.identity.create_user("a00000001", "pw")
     res = ident.set_user_document_limit_override("user-local", u.id, 5)
     assert res == {
         "id": u.id, "username": "a00000001",
@@ -90,7 +90,7 @@ def test_set_user_override_clear_falls_back_to_global_app_setting(tmp_path):
     """清覆盖后的生效值优先取 app_settings 的全局默认(而非 config 回退)。"""
     repo = _repo(tmp_path, limit=20)
     ident = _identity(repo)
-    u = repo.create_user("a00000001", "pw")
+    u = repo._runtime.identity.create_user("a00000001", "pw")
     ident.set_global_document_limit_default("user-local", 8)
     res = ident.set_user_document_limit_override("user-local", u.id, None)
     assert res["upload_limit"] == 8 and res["upload_limit_overridden"] is False
@@ -99,7 +99,7 @@ def test_set_user_override_clear_falls_back_to_global_app_setting(tmp_path):
 @pytest.mark.parametrize("bad", [0, -3, 100001])
 def test_set_user_override_rejects_out_of_range(tmp_path, bad):
     repo = _repo(tmp_path)
-    u = repo.create_user("a00000001", "pw")
+    u = repo._runtime.identity.create_user("a00000001", "pw")
     with pytest.raises(ValueError):
         _identity(repo).set_user_document_limit_override("user-local", u.id, bad)
 
@@ -108,7 +108,7 @@ def test_set_user_override_rejects_out_of_range(tmp_path, bad):
 def test_set_user_override_accepts_boundary(tmp_path, ok):
     # 接受边界:恰好 1 与 100000 应通过(钉住 <=)。
     repo = _repo(tmp_path)
-    u = repo.create_user("a00000001", "pw")
+    u = repo._runtime.identity.create_user("a00000001", "pw")
     res = _identity(repo).set_user_document_limit_override("user-local", u.id, ok)
     assert res["upload_limit"] == ok and res["upload_limit_overridden"] is True
 
@@ -122,8 +122,8 @@ def test_set_user_override_missing_user_raises_keyerror(tmp_path):
 
 def test_set_user_override_requires_admin_actor(tmp_path):
     repo = _repo(tmp_path)
-    actor = repo.create_user("a00000001", "pw")   # non-admin
-    target = repo.create_user("b00000002", "pw")
+    actor = repo._runtime.identity.create_user("a00000001", "pw")   # non-admin
+    target = repo._runtime.identity.create_user("b00000002", "pw")
     with pytest.raises(PermissionError):
         _identity(repo).set_user_document_limit_override(actor.id, target.id, 5)
 
@@ -131,7 +131,7 @@ def test_set_user_override_requires_admin_actor(tmp_path):
 def test_list_user_usage_carries_limit_fields(tmp_path):
     repo = _repo(tmp_path, limit=20)
     ident = _identity(repo)
-    u = repo.create_user("a00000001", "pw")
+    u = repo._runtime.identity.create_user("a00000001", "pw")
     rows = {r["id"]: r for r in repo._runtime.queries.list_user_usage()}
     assert rows[u.id]["upload_limit"] == 20              # 无覆盖 → config 默认
     assert rows[u.id]["upload_limit_overridden"] is False
@@ -147,7 +147,7 @@ def test_list_user_usage_carries_limit_fields(tmp_path):
 def test_list_user_usage_reflects_global_default_for_non_overridden(tmp_path):
     repo = _repo(tmp_path, limit=20)
     ident = _identity(repo)
-    repo.create_user("a00000001", "pw")
+    repo._runtime.identity.create_user("a00000001", "pw")
     ident.set_global_document_limit_default("user-local", 9)   # app_setting 覆盖
     rows = {r["username"]: r for r in repo._runtime.queries.list_user_usage()}
     assert rows["a00000001"]["upload_limit"] == 9

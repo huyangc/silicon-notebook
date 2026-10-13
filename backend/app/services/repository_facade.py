@@ -821,32 +821,14 @@ class RepositoryFacade:
     def _user_profile(self, user, profile) -> UserProfile:
         return self._runtime.identity._user_profile(user, profile)
 
-    def create_user(self, username: str, password: str) -> UserProfile:
-        return self._runtime.identity.create_user(username, password)
-
-    def authenticate_user(self, username: str, password: str) -> "UserProfile | None":
-        return self._runtime.identity.authenticate_user(username, password)
-
-    def create_session(self, user_id: str) -> str:
-        return self._runtime.identity.create_session(user_id)
-
     def resolve_session(self, token: str) -> "UserProfile | None":
         return self._runtime.identity.resolve_session(token)
-
-    def delete_session(self, token: str) -> None:
-        return self._runtime.identity.delete_session(token)
 
     def audit_labels_for_user_ids(self, user_ids: List[str]) -> dict[str, str]:
         return self._runtime.identity.audit_labels_for_user_ids(user_ids)
 
     def visible_document_count(self, notebook_id: str) -> int:
         return self._runtime.source_store.visible_document_count(notebook_id)
-
-    def global_document_limit_default(self) -> int:
-        return self._runtime.identity.global_document_limit_default()
-
-    def user_document_limit_override(self, user_id: str) -> "int | None":
-        return self._runtime.identity.user_document_limit_override(user_id)
 
     def effective_document_limit(self, user_id: "str | None") -> int:
         return self._runtime.identity.effective_document_limit(user_id)

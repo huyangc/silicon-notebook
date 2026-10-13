@@ -18,11 +18,11 @@ def repo(tmp_path, monkeypatch):
 
 @pytest.fixture
 def alice(repo):
-    return repo.create_user("a00123456", "pw")
+    return repo._runtime.identity.create_user("a00123456", "pw")
 
 @pytest.fixture
 def bob(repo):
-    return repo.create_user("b00654321", "pw")
+    return repo._runtime.identity.create_user("b00654321", "pw")
 
 def _nb(repo, user, name):
     tok = set_request_user(user)

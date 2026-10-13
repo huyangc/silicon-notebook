@@ -79,8 +79,8 @@ def _object_id(db, nb, name, source_id):
 
 
 def build_scenario(repo, *, b_memory: bool):
-    a = repo.create_user("a00000001", "pw123456")
-    b = repo.create_user("b00000002", "pw123456")
+    a = repo._runtime.identity.create_user("a00000001", "pw123456")
+    b = repo._runtime.identity.create_user("b00000002", "pw123456")
     token = set_request_user(a)
     try:
         nb = repo.create_notebook(NotebookCreate(name="shared")).id
@@ -378,7 +378,7 @@ def test_neighbour_hydration_omits_hidden_nodes(repo, neighbour_path):
 
 def test_no_memory_notebook_builds_no_scope(repo, monkeypatch):
     """No Memory at all: the probe stops after one read."""
-    a = repo.create_user("a00000009", "pw123456")
+    a = repo._runtime.identity.create_user("a00000009", "pw123456")
     token = set_request_user(a)
     try:
         nb = repo.create_notebook(NotebookCreate(name="plain")).id

@@ -36,8 +36,8 @@ def repo(tmp_path, monkeypatch):
 
 @pytest.fixture
 def token_context(repo):
-    alice = repo.create_user("a00119001", "pw")
-    bob = repo.create_user("b00119002", "pw")
+    alice = repo._runtime.identity.create_user("a00119001", "pw")
+    bob = repo._runtime.identity.create_user("b00119002", "pw")
     marker = set_request_user(alice)
     try:
         notebook = repo.create_notebook(NotebookCreate(name="Agent notebook"))

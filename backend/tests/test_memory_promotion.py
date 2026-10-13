@@ -33,8 +33,8 @@ def repo(tmp_path, monkeypatch):
 
 @pytest.fixture
 def promotion_setup(repo):
-    owner = repo.create_user("m00108001", "pw")
-    other = repo.create_user("n00108002", "pw")
+    owner = repo._runtime.identity.create_user("m00108001", "pw")
+    other = repo._runtime.identity.create_user("n00108002", "pw")
     token = set_request_user(owner)
     try:
         notebook = repo.create_notebook(NotebookCreate(name="Private memory"))
@@ -316,7 +316,7 @@ def test_approve_memory_promotion_writes_into_mounted_target_not_earliest_create
     `approve_promotion_in_transaction` 是两处独立实现)。b1 比 b2 先创建但不
     挂载,笔记本只挂 b2——晋升审批后对象必须落在 b2(候选行的 target_base_id),
     b1 的对象数必须是 0,证明读的不是全局最早创建的 base。"""
-    owner = repo.create_user("y00108009", "pw")
+    owner = repo._runtime.identity.create_user("y00108009", "pw")
     token = set_request_user(owner)
     try:
         notebook = repo.create_notebook(NotebookCreate(name="Target order memory"))
@@ -481,8 +481,8 @@ def _shared_member_proposal(repo, *, via_grant: bool):
     ``via_grant`` gives the member read access through a direct user grant
     instead of a membership row, so the access can be REVOKED without the
     member leaving (a revocation keeps the Memory; an exit deletes it)."""
-    notebook_owner = repo.create_user("s00108004", "pw")
-    memory_owner = repo.create_user("t00108005", "pw")
+    notebook_owner = repo._runtime.identity.create_user("s00108004", "pw")
+    memory_owner = repo._runtime.identity.create_user("t00108005", "pw")
     token = set_request_user(notebook_owner)
     try:
         notebook = repo.create_notebook(NotebookCreate(name="Shared promotion"))

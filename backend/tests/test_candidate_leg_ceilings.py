@@ -67,8 +67,8 @@ def store(tmp_path, monkeypatch):
     repo = SQLiteRepository(Settings(_env_file=None))
     bind_all_embedding_clients(repo, FakeEmbedder(dim=16))
     repo.settings.graph_ppr_enabled = False
-    bob = repo.create_user("b00654321", "password-12")
-    alice = repo.create_user("a00123456", "password-12")
+    bob = repo._runtime.identity.create_user("b00654321", "password-12")
+    alice = repo._runtime.identity.create_user("a00123456", "password-12")
     token = set_request_user(bob)
     try:
         yield repo, bob.id, alice.id

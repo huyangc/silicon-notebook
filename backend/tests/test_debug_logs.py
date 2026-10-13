@@ -44,8 +44,8 @@ def _login(username="a00123456"):
     """在 client 的同一 tmp DB 单例里造用户并发 session token。返回 (user, token)。"""
     from app.api import deps
     repo = deps.repository()
-    user = repo.create_user(username, "pw")
-    return user, repo.create_session(user.id)
+    user = repo._runtime.identity.create_user(username, "pw")
+    return user, repo._runtime.identity.create_session(user.id)
 
 
 CHAT = json.dumps({

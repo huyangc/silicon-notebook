@@ -56,8 +56,8 @@ def build_probe_fixture(repo, placeholder: str) -> dict[str, Any]:
     from app.models.schemas import NotebookCreate
     from app.services.sqlite_repository import reset_request_user, set_request_user
 
-    alice = repo.create_user("a00130101", "password-12")
-    bob = repo.create_user("b00130102", "password-12")
+    alice = repo._runtime.identity.create_user("a00130101", "password-12")
+    bob = repo._runtime.identity.create_user("b00130102", "password-12")
     token = set_request_user(alice)
     try:
         nb = repo.create_notebook(NotebookCreate(name="探针库")).id

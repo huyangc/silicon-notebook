@@ -376,9 +376,9 @@ def build_world(repo: Any, *, postgres: bool) -> World:
     service = repo._runtime.memory_service
     service.kg_ingest_scheduler = lambda fn, item: fn(item)
     service.embedding_scheduler = lambda fn, job: fn(job)
-    owner = repo.create_user("o00100001", "pw123456")
-    alice = repo.create_user("a00100002", "pw123456")
-    bob = repo.create_user("b00100003", "pw123456")
+    owner = repo._runtime.identity.create_user("o00100001", "pw123456")
+    alice = repo._runtime.identity.create_user("a00100002", "pw123456")
+    bob = repo._runtime.identity.create_user("b00100003", "pw123456")
     shared = _as_user(
         owner, lambda: repo.create_notebook(NotebookCreate(name="Shared"))
     ).id
@@ -820,7 +820,7 @@ def case_self_exit_purges_and_rejoin_starts_empty(world: World) -> None:
 
 
 def case_self_exit_with_nothing_to_delete_needs_no_acknowledgement(world: World) -> None:
-    dave = world.repo.create_user("d00100004", "pw123456")
+    dave = world.repo._runtime.identity.create_user("d00100004", "pw123456")
     world.repo.add_member(world.shared, dave.id)
     assert disclosure(world, dave, world.shared) == 0
     self_exit(world, dave, world.shared)
@@ -1370,7 +1370,7 @@ def case_mixed_statuses_are_counted_exported_and_deleted_together(world: World) 
 
 
 def case_export_needs_read_access_and_is_lazy(world: World) -> None:
-    stranger = world.repo.create_user("s00100005", "pw123456")
+    stranger = world.repo._runtime.identity.create_user("s00100005", "pw123456")
     try:
         service(world).export_markdown(world.shared, stranger.id, "Shared")
     except PermissionError:
@@ -1792,7 +1792,7 @@ def case_statements_per_page_do_not_grow_with_sourceless_memories(
     """Memories without a derived source add no statements to an exit page."""
     counts = []
     for index, size in enumerate((3, 40)):
-        user = world.repo.create_user(f"p0010010{index}", "pw123456")
+        user = world.repo._runtime.identity.create_user(f"p0010010{index}", "pw123456")
         world.repo.add_member(world.shared, user.id)
         for number in range(size):
             plain_memory(world, world.shared, user, f"{index}-{number}", "confirmed")

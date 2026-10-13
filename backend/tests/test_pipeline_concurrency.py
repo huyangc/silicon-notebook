@@ -107,7 +107,7 @@ def test_background_embed_thread_inherits_request_context(repo, tmp_path, monkey
 
     md = tmp_path / "ctx.md"
     md.write_text("# Doc\n\nContext propagation body.\n", encoding="utf-8")
-    user = repo.create_user("a00123456", "pw123456")
+    user = repo._runtime.identity.create_user("a00123456", "pw123456")
     nb = repo.create_notebook(NotebookCreate(name="ctx"))
     sid = f"src-{uuid4().hex[:10]}"
     now = _now()

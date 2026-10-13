@@ -47,8 +47,8 @@ def repo(postgres_settings):
 
 @pytest.fixture
 def people(repo):
-    bob = repo.create_user("b00654321", "pw123456")
-    alice = repo.create_user("a00123456", "pw123456")
+    bob = repo._runtime.identity.create_user("b00654321", "pw123456")
+    alice = repo._runtime.identity.create_user("a00123456", "pw123456")
     token = set_request_user(bob)
     try:
         yield bob.id, alice.id
