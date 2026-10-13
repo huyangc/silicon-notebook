@@ -2,43 +2,20 @@
 
 Each scenario drives one real run (real SQLite repository and ports, a scripted
 model whose reflect payloads pass the production shape gate) through a
-deliberate path of the loop. Two layers of assertions sit on every scenario:
+deliberate path of the loop, and asserts the user/model-visible facts it exists
+for (``Scenario.expect``): which skip reason a branch reports, which budget it
+spends, what the next reflect turn is told, what the run returns or raises.
+Together the scenarios reach every skip branch of the loop and all four entry
+shapes (plain ``run``, Report, Ask's ``run_stage``, knowhow completion);
+``test_scenarios_reach_every_loop_branch_whatever_the_shell_exports`` keeps
+that true.
 
-1. **Behaviour assertions** (``Scenario.expect``) — the user/model-visible
-   facts the scenario exists for: which skip reason a branch reports, which
-   budget it spends, what the next reflect turn is told, what the run returns
-   or raises. These are ordinary behaviour tests and stay.
+The byte-level snapshots that served as the oracle while ``run`` was split
+into methods (debt plan S1) were retired with the last split PR; what the
+scenarios assert is the long-term contract, not how the loop spells it.
 
-2. **Split oracle** (the snapshot comparison in ``test_reflect_loop_scenario``
-   and ``test_split_oracle_reaches_every_loop_branch``) — a temporary oracle
-   for the ``run`` split (debt plan S1), retired with its snapshots when the
-   last split PR (S1-c) lands; the behaviour layer is what remains. It
-   compares what the loop exchanges with the outside, not how storage spells
-   it: the trace with complete ``detail``, the model-visible input (every
-   model call's message bytes as hash + size, each reflect turn's
-   ``candidates_summary`` verbatim), the semantic identity of every port call
-   (port, method, normalised arguments; ordered on the run's own thread, a
-   multiset for the first round's pool workers), ``note_adopted``, the
-   returned ``ReasoningResult`` (or the exception) and the ``on_step`` stream.
-   SQL text is not compared: the split only moves code inside ``run``, whose
-   every storage access goes through those ports. Vector scores are projected
-   out (their last bits follow the BLAS kernel); the order they produce is
-   kept, and the fixture has no exact score ties.
-
-The snapshots live in ``fixtures/reasoning_loop_characterization/<name>.json``.
-Re-record only on the revision you intend as the baseline, with no local
-configuration in play (refused when ``CI`` is set)::
-
-    SILICON_NOTEBOOK_ENV_FILE="" MODEL_SERVICES_CONFIG="" EXTENSIONS_CONFIG="" \
-    REGEN_REASONING_LOOP_CHARACTERIZATION=1 PYTHONPATH=backend \
-        python -m pytest backend/tests/test_reasoning_loop_characterization.py -n0
-
-``REASONING_LOOP_DUMP_DIR=<dir>`` writes every observation there (before any
-assertion) for diffing against the snapshots.
-
-Wall clock: no recorded value depends on it (``duration_ms`` is not
-projected). The loop's only clock-driven branches — the chunk-rerank deadline
-and the plugin action timeout — are not covered here.
+Wall clock: no assertion depends on it. The loop's only clock-driven branches
+— the chunk-rerank deadline and the plugin action timeout — are not covered.
 """
 from __future__ import annotations
 
@@ -73,10 +50,6 @@ from app.services.sqlite_repository import SQLiteRepository
 from tests import reasoning_loop_probe as rig
 from tests.model_testkit import bind_all_embedding_clients, bind_chat_client
 
-SNAPSHOT_DIR = (
-    Path(__file__).resolve().parent / "fixtures" / "reasoning_loop_characterization"
-)
-REGEN_ENV = "REGEN_REASONING_LOOP_CHARACTERIZATION"
 NOW = "2026-10-12T00:00:00+08:00"
 OWNER = "u-owner"
 QUESTION = "版图设计要点有哪些"
@@ -1337,18 +1310,6 @@ def _expect_consult_disabled(obs):
 
 # --- limits=None: the raw limits, not the tier fallback ---------------------
 
-#: Scenarios whose behaviour assertions were added after the split oracle's
-#: snapshots were recorded; they have no snapshot and run behaviour-only.
-BEHAVIOUR_SCENARIOS: List[Scenario] = []
-
-
-def behaviour_scenario(**kwargs):
-    def register(expect):
-        BEHAVIOUR_SCENARIOS.append(Scenario(expect=expect, **kwargs))
-        return expect
-    return register
-
-
 def _ascending_elements(count):
     """``retrieve_elements`` answering with ``count`` elements whose scores rise
     in arrival order, so a score ranking would reverse them."""
@@ -1366,7 +1327,7 @@ def _ascending_elements(count):
     return retrieve
 
 
-@behaviour_scenario(
+@scenario(
     name="limits_none_reads_the_raw_limits",
     effort=None, memory=True, intent_detail=INTENT_DETAIL,
     settings={"retrieval_experience_inject_enabled": True,
@@ -1422,7 +1383,7 @@ SCENARIO_IDS = [item.name for item in SCENARIOS]
 
 #: Every skip reason the reflect loop itself can record, minus the ones only a
 #: wall clock or a peer-mode run reaches. The scenarios must reach all of them —
-#: a branch no scenario takes is a branch the split oracle cannot vouch for.
+#: a branch no scenario takes is a branch no assertion here vouches for.
 LOOP_SKIP_REASONS = frozenset({
     "source_scope_unsafe_channel", "empty_or_visited", "missing_new_sub_query",
     "duplicate_subquery", "element_search_cap", "enumeration_disabled",
@@ -1439,14 +1400,6 @@ LOOP_SKIP_REASONS = frozenset({
 
 
 # ------------------------------------------------------------------- tests
-
-
-def _snapshot_path(name: str) -> Path:
-    return SNAPSHOT_DIR / f"{name}.json"
-
-
-def _serialise(observed: dict) -> str:
-    return json.dumps(observed, ensure_ascii=False, indent=1, sort_keys=True) + "\n"
 
 
 CHECKOUT_LOGS = Path(__file__).resolve().parents[2] / ".local" / "logs"
@@ -1470,19 +1423,7 @@ def test_reflect_loop_scenario(case, tmp_path, monkeypatch):
     # every log the run writes stays under this test's tmp_path
     assert _checkout_log_files() == before
     assert any((tmp_path / "logs").rglob("*.jsonl"))
-    dump = os.environ.get("REASONING_LOOP_DUMP_DIR")
-    if dump:
-        Path(dump).mkdir(parents=True, exist_ok=True)
-        (Path(dump) / f"{case.name}.json").write_text(
-            _serialise(observed), encoding="utf-8")
     case.expect(Observed(observed))
-    path = _snapshot_path(case.name)
-    if os.environ.get(REGEN_ENV) == "1":
-        assert "CI" not in os.environ, f"{REGEN_ENV} records a baseline; never in CI"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_serialise(observed), encoding="utf-8")
-    expected = json.loads(path.read_text(encoding="utf-8"))
-    assert observed == expected
 
 
 #: Deployment variables a developer may have exported (one of them in lower
@@ -1496,41 +1437,28 @@ _LEAKY_EXPORTS = {
 }
 
 
-@pytest.mark.parametrize(
-    "case", BEHAVIOUR_SCENARIOS, ids=[item.name for item in BEHAVIOUR_SCENARIOS])
-def test_reflect_loop_behaviour_scenario(case, tmp_path, monkeypatch):
-    case.expect(Observed(observe(case, tmp_path, monkeypatch)))
-
-
-def test_exported_deployment_variables_do_not_reach_a_recording(
+def test_scenarios_reach_every_loop_branch_whatever_the_shell_exports(
     tmp_path, monkeypatch,
 ):
+    """Every scenario keeps its behaviour with deployment variables exported in
+    the shell (each run builds its settings from a scrubbed environment), and
+    the scenarios are not vacuous: together they take every skip branch of the
+    loop, all four entry shapes, the step kinds only the loop's dispatch
+    produces, and both ways a run can raise."""
     for key, value in _LEAKY_EXPORTS.items():
         monkeypatch.setenv(key, value)
+    reasons, kinds, raised = set(), set(), set()
     for case in SCENARIOS:
         scenario_dir = tmp_path / case.name
         scenario_dir.mkdir()
         with pytest.MonkeyPatch.context() as scoped:
             observed = observe(case, scenario_dir, scoped)
-        expected = json.loads(_snapshot_path(case.name).read_text(encoding="utf-8"))
-        assert observed == expected, case.name
-
-
-def test_split_oracle_reaches_every_loop_branch():
-    """The recorded scenarios are not vacuous: together they take every skip
-    branch of the loop, all four entry shapes, and the five step kinds that
-    only the loop's dispatch produces — and no snapshot is left without a
-    scenario (or the other way round)."""
-    on_disk = {path.stem for path in SNAPSHOT_DIR.glob("*.json")}
-    assert on_disk == set(SCENARIO_IDS)
-    reasons, kinds, raised = set(), set(), set()
-    for name in SCENARIO_IDS:
-        recorded = json.loads(_snapshot_path(name).read_text(encoding="utf-8"))
-        for step in recorded["trace"]:
+        case.expect(Observed(observed))
+        for step in observed["trace"]:
             kinds.add(step["step_type"])
             if step["step_type"] == "skip":
                 reasons.add(step["detail"].get("reason"))
-        raised.add(recorded["outcome"].get("raised", "").split(":")[0])
+        raised.add(observed["outcome"].get("raised", "").split(":")[0])
     assert LOOP_SKIP_REASONS <= reasons, sorted(LOOP_SKIP_REASONS - reasons)
     assert {"expand", "follow_chain", "outline", "consult_memory",
             "plugin_action", "enumerate", "read_document", "exact_lookup",
