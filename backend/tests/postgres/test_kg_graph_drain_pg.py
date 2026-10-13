@@ -466,7 +466,12 @@ def _reextract_pg(runtime, notebook_id, canonical_id, name, member, source_id):
             "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,payload,"
             "evidence,source_id,created_at,updated_at) VALUES (%s,%s,'concept',"
             "'approved',%s,%s,%s,%s,%s)",
-            (member, notebook_id, jsonb({}), jsonb([]), source_id, now, now),
+            (member, notebook_id, jsonb({}),
+             jsonb([{"source_id": source_id, "quoted_span": "x"}]), source_id, now, now),
+        )
+        db.execute(
+            "INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id) "
+            "VALUES (%s,%s,%s)", (member, source_id, notebook_id),
         )
         db.execute(
             "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,"
@@ -485,9 +490,17 @@ def _derived_reads_pg(postgres_repository, notebook_id):
         event_log=runtime.event_log, sibling_min_bridge=1,
     )
     with runtime.database.connect() as db:
+        sources = [r["id"] for r in db.execute(
+            "SELECT id FROM sources WHERE notebook_id=%s ORDER BY id", (notebook_id,))]
         direct = {
             "weak_support": [dict(r) for r in uk.weak_support_relation_rows(
                 db, notebook_id, ["K-a000", "K-a001"], 10, 10)],
+            # 质量评审 r4 P3-3:限定来源与按查看者两种语句形状也要过闸。
+            "weak_support_ceiling": [dict(r) for r in uk.weak_support_relation_rows(
+                db, notebook_id, ["K-a000", "K-a001"], 10, 10,
+                allowed_source_ids=sources)],
+            "weak_support_viewer": [dict(r) for r in uk.weak_support_relation_rows(
+                db, notebook_id, ["K-a000", "K-a001"], 10, 10, viewer_id="viewer-x")],
             "relation_support": [dict(r) for r in uk.relation_support_rows(
                 db, notebook_id, [("K-a000", "supports", "K-at000")])],
             "edge_support": [tuple(r.values()) for r in uk.edge_support_rows(
@@ -534,6 +547,7 @@ def test_derived_layers_stay_unread_after_delete_and_reextraction_on_postgres(
     for nb, src, tag in ((had, "src-doc", "h"), (never, "src-never", "n")):
         _reextract_pg(runtime, nb, "K-a000", "foo", f"ko-re-{tag}-1", src)
         _reextract_pg(runtime, nb, "K-az000", "bar", f"ko-re-{tag}-2", src)
+        _reextract_pg(runtime, nb, "K-at000", "baz", f"ko-re-{tag}-3", src)
 
     assert _derived_counts(runtime, had) == dict.fromkeys(_DERIVED, 3)
     assert _derived_reads_pg(postgres_repository, had) == _derived_reads_pg(
@@ -545,3 +559,125 @@ def test_derived_layers_stay_unread_after_delete_and_reextraction_on_postgres(
         assert runtime.unified_kg.relation_support_rows(
             db, had, [("K-post000", "supports", "K-postt000")]), "重建后派生层须恢复可读"
         assert runtime.unified_kg.mention_rows(db, had)
+
+
+def _layer_reads_pg(runtime, notebook_id):
+    """The canonical-relation, mention and co-mention reads of the kept
+    ``tag="a"`` derived rows, by the old ids."""
+    uk = runtime.unified_kg
+    with runtime.database.connect() as db:  # one pooled connection at a time
+        reads = {
+            "relation_support": [dict(r) for r in uk.relation_support_rows(
+                db, notebook_id, [("K-a000", "supports", "K-at000")])],
+            "edge_support": [tuple(r.values()) for r in uk.edge_support_rows(
+                db, notebook_id).fetchall()],
+            "mention": [dict(r) for r in uk.mention_rows(db, notebook_id)],
+        }
+    reads["comention"] = uk.comention_peers(notebook_id, "K-a000", 1, 10)
+    return reads
+
+
+_EMPTY_LAYERS = {"relation_support": [], "edge_support": [], "mention": [],
+                 "comention": []}
+
+
+@pytest.mark.postgres_integration
+def test_derived_layers_stay_closed_mid_rebuild_and_after_a_failed_layer_recompute_on_postgres(
+    postgres_repository, monkeypatch,
+):
+    """K1 裁决 13 PG 孪生:① 重建已发布聚类、写下 last_rebuild_at,本层未替换
+    ——读不到;② 本层重算失败(fail-open)——之后仍读不到;③ 下一次成功重建
+    替换本层后可读。"""
+    runtime = postgres_repository._runtime
+    service = runtime.knowledge_lifecycle
+    nb = postgres_repository.create_notebook(NotebookCreate(name="mid-rebuild")).id
+    _seed_graph(postgres_repository, nb, doc_objects=2)
+    _seed_derived(postgres_repository, nb, 3, tag="a")
+    postgres_repository.delete_notebook_kg(nb)
+    for canonical_id, name, member in (("K-a000", "foo", "ko-re-1"),
+                                       ("K-az000", "bar", "ko-re-2"),
+                                       ("K-at000", "baz", "ko-re-3")):
+        _reextract_pg(runtime, nb, canonical_id, name, member, "src-doc")
+
+    seen = {}
+
+    def _failing(layer):
+        def _rebuild(notebook_id, force=False):
+            with runtime.database.connect() as db:
+                last_rebuild_at = runtime.unified_kg.state_row(
+                    db, notebook_id)["last_rebuild_at"]
+            seen[layer] = (last_rebuild_at, _layer_reads_pg(runtime, notebook_id))
+            raise RuntimeError(f"{layer} recompute failed")
+        return _rebuild
+
+    monkeypatch.setattr(service, "rebuild_canonical_relations", _failing("canonical"))
+    monkeypatch.setattr(service, "rebuild_mention_bridge", _failing("mention"))
+    service.rebuild_unified_kg(nb, force=True)
+
+    for layer in ("canonical", "mention"):
+        last_rebuild_at, reads = seen[layer]
+        assert last_rebuild_at, f"前置:{layer} 重算时聚类已发布、last_rebuild_at 已写"
+        assert reads == _EMPTY_LAYERS, f"重建中途 {layer} 层读到了旧图:{reads}"
+    assert _layer_reads_pg(runtime, nb) == _EMPTY_LAYERS, "本层重算失败后仍须读不到"
+    assert _derived_counts(runtime, nb)["canonical_relations"] == 3, "前置:旧行仍在"
+
+    monkeypatch.undo()
+    service.rebuild_unified_kg(nb, force=True)
+    with runtime.database.connect() as db:
+        state = runtime.unified_kg.state_row(db, nb)
+    assert state["canonical_rel_seq"] != -2 and state["mention_seq"] != -2
+    _seed_derived(postgres_repository, nb, 1, tag="post")
+    with runtime.database.connect() as db:
+        assert runtime.unified_kg.relation_support_rows(
+            db, nb, [("K-post000", "supports", "K-postt000")])
+        assert {"claim_object_id": "ko-postc000",
+                "concept_canonical_id": "K-post000"} in [
+            dict(r) for r in runtime.unified_kg.mention_rows(db, nb)]
+
+
+@pytest.mark.postgres_integration
+def test_delete_without_a_state_row_writes_the_sentinels_on_postgres(
+    postgres_repository,
+):
+    """K1(质量评审 r4 P3-2)PG 孪生:无状态行时删除走 UPSERT 的 INSERT 分支,
+    同样写下社区指针 -1 与两层 seq -2。"""
+    runtime = postgres_repository._runtime
+    uk = runtime.unified_kg
+    nb = postgres_repository.create_notebook(NotebookCreate(name="no-state-row")).id
+    _seed_graph(postgres_repository, nb, doc_objects=2)
+    _seed_derived(postgres_repository, nb, 3, tag="a")
+    with runtime.database.write() as db:
+        db.execute("DELETE FROM unified_kg_state WHERE notebook_id=%s", (nb,))
+    postgres_repository.delete_notebook_kg(nb)
+    with runtime.database.connect() as db:
+        state = uk.state_row(db, nb)
+        assert (state["community_generation"], state["canonical_rel_seq"],
+                state["mention_seq"]) == (-1, -2, -2)
+        assert uk.communities_count(db, nb, 0)["c"] == 0
+    assert uk.top_community_for(nb, "K-a000") is None
+    assert _layer_reads_pg(runtime, nb) == _EMPTY_LAYERS
+
+
+@pytest.mark.postgres_integration
+def test_memory_isolation_requeue_keeps_a_deleted_layer_closed_on_postgres(
+    postgres_repository,
+):
+    """K1 裁决 13 PG 孪生:Memory 隔离重排队不得把删除写下的 -2 覆盖成 -1。"""
+    from app.repositories.postgres.memory_isolation_store import MemoryIsolationStore
+
+    runtime = postgres_repository._runtime
+    nb = postgres_repository.create_notebook(NotebookCreate(name="requeue")).id
+    _seed_graph(postgres_repository, nb, doc_objects=2)
+    _seed_derived(postgres_repository, nb, 3, tag="a")
+    postgres_repository.delete_notebook_kg(nb)
+    with runtime.database.write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET memory_isolation_version = 2, "
+            "mention_seq = 7 WHERE notebook_id = %s", (nb,))
+        assert MemoryIsolationStore.queue_for_rebuild(db, nb)
+    with runtime.database.connect() as db:
+        state = runtime.unified_kg.state_row(db, nb)
+        assert state["canonical_rel_seq"] == -2, "删除留下的 -2 必须保留"
+        assert state["mention_seq"] == -1, "未删的层照旧置 -1"
+        assert runtime.unified_kg.relation_support_rows(
+            db, nb, [("K-a000", "supports", "K-at000")]) == []

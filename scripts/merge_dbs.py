@@ -679,6 +679,27 @@ def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
                     f"UPDATE main.{t} SET generation = 0 "
                     f"WHERE notebook_id IN ({ph}) AND generation != 0",
                     tuple(sec_nb))
+            # K1(裁决 13):副库里删过知识图谱、该层还没重建的笔记本,状态行把
+            # canonical_rel_seq / mention_seq 记成 -2,读者凭它挡住保留的旧派生
+            # 行。上面清掉了导入库的状态行,哨兵随之消失——旧行在合并库里会
+            # 重新可读。所以按副库自己的 seq 把这些层的行直接丢掉(与社区按
+            # 副库指针丢残代同一做法;下一次重建本来就整层重写)。
+            sec_state_cols = {
+                r[1] for r in conn.execute(
+                    "PRAGMA sec.table_info(unified_kg_state)").fetchall()
+            }
+            for t, seq_col in (("canonical_relations", "canonical_rel_seq"),
+                               ("mention_edges", "mention_seq"),
+                               ("concept_comentions", "mention_seq")):
+                if not (_table_exists(conn, t, "main")
+                        and seq_col in sec_state_cols):
+                    continue
+                conn.execute(
+                    f"DELETE FROM main.{t} WHERE notebook_id IN ({ph}) "
+                    f"AND EXISTS (SELECT 1 FROM sec.unified_kg_state u "
+                    f"WHERE u.notebook_id = main.{t}.notebook_id "
+                    f"AND u.{seq_col} = -2)",
+                    tuple(sec_nb))
 
         # 孤儿群组授权边清扫。必须在 GLOBAL_UNION 合并**之后**(那一步才决定
         # `groups` 的最终并集)、`foreign_key_check` **之前**(它看不见这类行 ——

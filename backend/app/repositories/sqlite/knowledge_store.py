@@ -1021,19 +1021,20 @@ class KnowledgeStore:
         # source_index_backfilled=1).
         # 批 3·W2:指针/在飞/催收随终局重置、counter 刻意不重置——理由逐条
         # 见 PG 孪生同位置的注释(standalone delete → flip aborts;单调代号
-        # 防混叠);community 指针写哨兵 -1(K1,同见 PG 孪生)。
+        # 防混叠);community 指针写哨兵 -1、canonical_rel_seq / mention_seq 写
+        # 哨兵 -2(K1,同见 PG 孪生)。
         cur = db.execute(
             "INSERT INTO unified_kg_state ("
             "notebook_id, dirty, kg_mutation_seq, cluster_mutation_seq, "
             "cluster_input_version, last_rebuild_at, object_count, "
             "relation_count, cluster_count, community_seq, canonical_rel_seq, "
             "mention_seq, kg_reset_epoch, community_generation, updated_at"
-            ") VALUES (?, 0, 0, 0, '', '', 0, 0, 0, -1, -1, -1, 1, -1, ?) "
+            ") VALUES (?, 0, 0, 0, '', '', 0, 0, 0, -1, -2, -2, 1, -1, ?) "
             "ON CONFLICT(notebook_id) DO UPDATE SET "
             "dirty=0, kg_mutation_seq=0, cluster_mutation_seq=0, "
             "cluster_input_version='', last_rebuild_at='', "
             "object_count=0, relation_count=0, cluster_count=0, "
-            "community_seq=-1, canonical_rel_seq=-1, mention_seq=-1, "
+            "community_seq=-1, canonical_rel_seq=-2, mention_seq=-2, "
             "kg_reset_epoch=kg_reset_epoch+1, "
             "cluster_generation=0, community_generation=-1, "
             "derived_building_generation=0, derived_building_claimed_at=NULL, "

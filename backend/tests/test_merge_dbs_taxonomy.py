@@ -471,3 +471,65 @@ def test_merge_normalizes_cluster_generation_for_imported_notebooks(tmp_path):
         assert visible == 1
     finally:
         conn.close()
+
+
+def test_merge_drops_derived_layers_of_a_deleted_graph(tmp_path):
+    """K1(裁决 13,规格评审 r4 P3-1):副库里删过知识图谱、还没重建的笔记本,
+    状态行把 canonical_rel_seq / mention_seq 记成 -2,读者凭它挡住保留的旧
+    派生行。合库清掉导入库的状态行(哨兵随之消失),所以这三张派生表的行
+    必须按副库的 seq 直接丢掉;-2 以外的笔记本照常拷入。变异钉:去掉这段
+    处理 → 旧行在合并库里可读,报红。社区行由既有的指针筛选处理(-1 代
+    没有行,整层丢掉)。"""
+    now = "2026-01-01T00:00:00"
+
+    def _mk(path, notebooks):
+        merge_dbs.migrate_to_current(path)
+        conn = sqlite3.connect(str(path))
+        with conn:
+            conn.execute(
+                "INSERT INTO users (id,email,display_name,role,created_at,"
+                "updated_at) VALUES ('u','u@x','u','member',?,?)", (now, now))
+            for nb, seq, community_generation in notebooks:
+                conn.execute(
+                    "INSERT INTO notebooks (id,name,purpose,primary_domain,status,"
+                    "created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (nb, nb, "", "Semiconductor", "active", "u", now, now))
+                conn.execute(
+                    "INSERT INTO unified_kg_state (notebook_id, canonical_rel_seq, "
+                    "mention_seq, community_generation, kg_reset_epoch, updated_at) "
+                    "VALUES (?,?,?,?,1,?)", (nb, seq, seq, community_generation, now))
+                conn.execute(
+                    "INSERT INTO canonical_relations (notebook_id,canonical_src,"
+                    "edge_type,canonical_tgt,updated_at) VALUES (?,'K-a','supports','K-b',?)",
+                    (nb, now))
+                conn.execute(
+                    "INSERT INTO mention_edges (notebook_id,claim_object_id,"
+                    "concept_canonical_id) VALUES (?,'ko-c','K-a')", (nb,))
+                conn.execute(
+                    "INSERT INTO concept_comentions (notebook_id,canonical_a,"
+                    "canonical_b) VALUES (?,'K-a','K-b')", (nb,))
+                conn.execute(
+                    "INSERT INTO communities (id,notebook_id,member_ids,size,"
+                    "created_at,generation) VALUES (?,?,'[\"K-a\"]',1,?,0)",
+                    (f"cm-{nb}", nb, now))
+        conn.close()
+
+    primary, secondary, out = tmp_path / "a.db", tmp_path / "b.db", tmp_path / "out.db"
+    _mk(primary, [("nb-main", 3, 0)])
+    _mk(secondary, [("nb-deleted", -2, -1), ("nb-live", 4, 0)])
+    merge_dbs.merge_core(out, primary, secondary, shared_base="nb-none")
+
+    conn = sqlite3.connect(str(out))
+    try:
+        def _count(table, nb):
+            return conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE notebook_id=?", (nb,)
+            ).fetchone()[0]
+
+        for table in ("canonical_relations", "mention_edges",
+                      "concept_comentions", "communities"):
+            assert _count(table, "nb-deleted") == 0, table
+            assert _count(table, "nb-live") == 1, table
+            assert _count(table, "nb-main") == 1, table
+    finally:
+        conn.close()

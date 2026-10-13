@@ -1350,8 +1350,11 @@ def _compare_memory_isolation_queue(
             and post.get("cluster_mutation_seq")
             == (pre.get("cluster_mutation_seq") or 0) + 1
             and post.get("community_seq") == -1
-            and post.get("canonical_rel_seq") == -1
-            and post.get("mention_seq") == -1
+            # K1 (ruling 13): a layer a graph delete left at -2 keeps it.
+            and post.get("canonical_rel_seq") == (
+                -2 if pre.get("canonical_rel_seq") == -2 else -1)
+            and post.get("mention_seq") == (
+                -2 if pre.get("mention_seq") == -2 else -1)
         )
         if not (unchanged and reset):
             problems.append("migration-v87-queue-reset-mismatch")

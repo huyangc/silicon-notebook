@@ -115,7 +115,7 @@ def _main(argv=None) -> int:
         if st:
             kg_seq = int(diag_common.finite_number(st["ks"]) or 0)
             cluster_seq = int(diag_common.finite_number(st["cs"]) or 0)
-            mention_seq = int(diag_common.finite_number(st["ms"], minimum=-1) or 0)
+            mention_seq = int(diag_common.finite_number(st["ms"], minimum=-2) or 0)
             dirty = st["dirty"] in {1, True, "1", "true"}
             print(f"  unified_kg_state: kg_seq={kg_seq} cluster_seq={cluster_seq} "
                   f"mention_seq={mention_seq} dirty={int(dirty)}"

@@ -894,7 +894,6 @@ class KnowledgeLifecycleService:
                 "writer is refilling the graph faster than the drain "
                 "empties it"
             )
-        self._sweep_drain_only_residue(notebook_id, totals)
         # P0-1 (post-review): invalidate_kg is the PRIMARY, immediate,
         # same-process eviction path for unified_cache — codex #772 R16 P2's
         # graph_seq_row version leg (see _unified_graph_full /
@@ -902,6 +901,16 @@ class KnowledgeLifecycleService:
         # for out-of-process writers this call cannot reach, so it does not
         # make this call redundant. See this method's own docstring.
         self._invalidate_unified_cache(notebook_id)
+        # K1: after the eviction, and fail-open -- the reset is committed and
+        # the cache evicted whatever this sweep does (quality review r4 P3-1).
+        try:
+            self._sweep_drain_only_residue(notebook_id, totals)
+        except Exception as exc:  # noqa: BLE001 - auxiliary sweep is fail-open
+            self.event_log.emit({
+                "kind": "kg_delete_residue_sweep_failed",
+                "notebook_id": notebook_id,
+                "error_type": type(exc).__name__,
+            })
         # T-5a: rows removed by the pre-reset drain belong to this call's
         # deletion just as much as the final pass's (R16 P2: `totals` may
         # aggregate more than one final round) — merge them so callers
