@@ -55,7 +55,10 @@ STATE_CLASS = "_ReasoningRunState"
 OWNER_CLASS = "ReasoningRetriever"
 #: methods holding the reflect loop and its close
 GUARDED = (
-    "run", "_feed_exact_lookup_skip", "_collect_kg_gap", "_apply_outline_update",
+    "run",
+    "_action_expand_graph", "_action_add_subquery", "_action_search_elements",
+    "_action_consult_memory", "_action_exact_lookup", "_action_follow_chain",
+    "_feed_exact_lookup_skip", "_collect_kg_gap", "_apply_outline_update",
 )
 #: ``run`` parameters that are frozen inputs (state keeps an identical copy);
 #: exempt in ``run`` only
@@ -261,7 +264,7 @@ def test_every_guarded_method_exists(source):
         # a write that lost its prefix: the next round never sees it
         ("state.consult_block_text = rendered.rendered_text",
          "consult_block_text = rendered.rendered_text",
-         ("run", "consult_block_text", "bare-state-field")),
+         ("_action_consult_memory", "consult_block_text", "bare-state-field")),
         # a reset that lost its prefix
         ("            state.consult_delivered_this_turn = False\n",
          "            consult_delivered_this_turn = False\n",
