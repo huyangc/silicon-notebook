@@ -71,7 +71,9 @@
 //    `knowhowRowCode.loadRowCode(...)`)。裸引用一律违规——放进依赖数组(返回对象
 //    每次渲染都是新的,effect/memo 会每帧重跑)、整体作为 JSX prop 或展开、塞进
 //    对象字面量、再绑给别的名字,都会在这里被抓住。这一条覆盖嵌套函数体,因为在
-//    回调里把整个返回对象传出去与在顶层传出去同样会泄漏「每帧新对象」。
+//    回调里把整个返回对象传出去与在顶层传出去同样会泄漏「每帧新对象」。`view`
+//    子对象也是每帧新建的,所以 `knowhowX.view` 只能作为继续取字段的中间环节
+//    (`knowhowX.view.tables`);以它为链终点(进依赖数组、作为 prop、整体传出)同罪。
 // 面板的结构性约束(搬走的组件不回流、样式挂载点、hook 调用顺序、回调身份)在
 // `knowhow-panel-boundary-guard.test.mjs`。
 import test from "node:test";
@@ -361,21 +363,40 @@ function enclosingHookCall(node) {
   return null;
 }
 
+function wholeReferencePlace(target) {
+  const parent = target.parent;
+  const depsOf = enclosingHookCall(target);
+  if (depsOf) return `放进 ${depsOf} 的依赖数组`;
+  if (ts.isJsxExpression(parent) || ts.isJsxSpreadAttribute(parent)) return "整体作为 JSX prop 下传";
+  if (ts.isShorthandPropertyAssignment(parent) || ts.isSpreadAssignment(parent)) return "整体塞进对象字面量";
+  return "整体引用";
+}
+
+// `<root>.view` 之后是否还在继续往下取字段(`.view.x`、`.view["x"]`、`.view!.x`)。
+function continuesAccess(viewAccess) {
+  let current = viewAccess;
+  while (ts.isNonNullExpression(current.parent) || ts.isParenthesizedExpression(current.parent)) {
+    current = current.parent;
+  }
+  const next = current.parent;
+  return (ts.isPropertyAccessExpression(next) || ts.isElementAccessExpression(next)) && next.expression === current;
+}
+
 // 绑定标识符的每一处引用都必须是属性访问的根。覆盖整个 owner(含嵌套函数体)。
+// `view` 子对象同样每次渲染新建,所以 `<root>.view` 也只能作为继续取字段的中间环节;
+// 以它为链终点(进依赖数组、作为 prop、整体传出)与裸引用 hook 对象同罪。
 function bareOwnerReferences(sourceFile, owner, roots) {
   const violations = [];
+  const flat = (node) => node.getText(sourceFile).replace(/\s+/g, " ").trim();
   function visit(node) {
     if (ts.isIdentifier(node) && roots.has(node.text)) {
       const parent = node.parent;
       const isDeclarationName = ts.isVariableDeclaration(parent) && parent.name === node;
       const isAccessRoot = ts.isPropertyAccessExpression(parent) && parent.expression === node;
       if (!isDeclarationName && !isAccessRoot) {
-        const depsOf = enclosingHookCall(node);
-        let where = "整体引用";
-        if (depsOf) where = `放进 ${depsOf} 的依赖数组`;
-        else if (ts.isJsxExpression(parent) || ts.isJsxSpreadAttribute(parent)) where = "整体作为 JSX prop 下传";
-        else if (ts.isShorthandPropertyAssignment(parent) || ts.isSpreadAssignment(parent)) where = "整体塞进对象字面量";
-        violations.push(`${node.text}:${where}(${parent.getText(sourceFile).replace(/\s+/g, " ").trim()})`);
+        violations.push(`${node.text}:${wholeReferencePlace(node)}(${flat(parent)})`);
+      } else if (isAccessRoot && parent.name.text === "view" && !continuesAccess(parent)) {
+        violations.push(`${node.text}.view:${wholeReferencePlace(parent)}(${flat(parent.parent)})`);
       }
     }
     ts.forEachChild(node, visit);
@@ -515,6 +536,24 @@ const KNOWHOW_MUTANTS = [
     from: 'knowhowRowCode.handleCodeSaved("c", {});',
     to: 'report({ knowhowRowCode });',
     expect: /knowhowRowCode:整体塞进对象字面量/,
+  },
+  {
+    label: "view 子对象放进 useCallback 的依赖数组",
+    from: "  function onSaved()",
+    to: "  const reload = useCallback(() => {}, [notebookId, knowhowTableList.view]);\n  function onSaved()",
+    expect: /knowhowTableList\.view:放进 useCallback 的依赖数组/,
+  },
+  {
+    label: "view 子对象整体作为 JSX prop 下传",
+    from: "onSaved={onSaved}",
+    to: "onSaved={onSaved}\n      rowCodeView={knowhowRowCode.view}",
+    expect: /knowhowRowCode\.view:整体作为 JSX prop 下传/,
+  },
+  {
+    label: "view 子对象整体塞进对象字面量",
+    from: 'knowhowRowCode.handleCodeSaved("c", {});',
+    to: 'report({ view: knowhowRowCode.view });',
+    expect: /knowhowRowCode\.view:整体引用/,
   },
   {
     label: "在嵌套函数里调用 hook",

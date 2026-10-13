@@ -280,8 +280,8 @@ contributor constraints, not a second implementation history.
   their own modules, and the stylesheet is `knowhow-panel-styles.tsx`, rendered
   once as the section's last child. Call each owner hook once into one binding and
   use it only through property access: do not destructure or flatten it, put it in
-  a dependency array, or pass it whole. The hook result is a new object on every
-  render. Call positions are effect order, which is behaviour. The table-list hook
+  a dependency array, or pass it whole, and the same applies to its `view`. The
+  hook result and its `view` are new objects on every render. Call positions are effect order, which is behaviour. The table-list hook
   comes first, the row-code hook sits between the detail-load and notebook-reset
   effects, and the concept-matrix hook is the last hook call. The notebook reset
   must run before the citation jump. Moving code must not change any callback's

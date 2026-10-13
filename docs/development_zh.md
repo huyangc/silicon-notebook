@@ -216,7 +216,7 @@
   `use-knowhow-concept-matrix.ts`。列表、网格、行抽屉、徽章是呈现模块，自带状态机的
   弹窗各有模块，样式在 `knowhow-panel-styles.tsx`，作为 section 的最后一个子元素渲染
   一次。每个 owner hook 调用一次、绑定到一个标识符，只经属性访问使用：不解构、不摊平、
-  不放进依赖数组、不整体下传，因为返回对象每次渲染都是新的。调用位置就是 effect 顺序，
+  不放进依赖数组、不整体下传，其 `view` 同理，因为返回对象和 `view` 每次渲染都是新的。调用位置就是 effect 顺序，
   属于行为：表列表 hook 最先，行代码 hook 在拉表详情与 notebook 复位两个 effect 之间，
   概念矩阵 hook 是最后一个 hook 调用；notebook 复位必须先于引用跳转。搬动代码不得改变
   任何回调的 `useCallback` 状态或依赖数组，例如 `handleCodeSaved` 保持每次渲染新建的
