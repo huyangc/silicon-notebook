@@ -201,7 +201,7 @@ def test_downgraded_cross_owner_base_falls_out_of_scope(repo):
     立刻不再列出它的元素——与地图同一套参与集解析。"""
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     base = repo.create_notebook(NotebookCreate(name="base"))
-    other = repo.create_user("a00900101", "pw")
+    other = repo._runtime.identity.create_user("a00900101", "pw")
     with repo._write() as db:
         db.execute("UPDATE notebooks SET created_by=? WHERE id=?", (other.id, base.id))
     repo.mark_notebook_base(base.id)
@@ -1140,8 +1140,8 @@ def test_the_board_count_shows_a_viewer_no_other_members_memory(repo):
     全库数——枚举地图读它,再自己减去 Memory。
     """
     notebook = _shared_notebook_with_private_memory(repo)
-    owner = repo.create_user("a00000011", "pw123456").id
-    member = repo.create_user("b00000012", "pw123456").id
+    owner = repo._runtime.identity.create_user("a00000011", "pw123456").id
+    member = repo._runtime.identity.create_user("b00000012", "pw123456").id
     with repo._write() as db:
         db.execute(
             "INSERT INTO memory_items (id,notebook_id,created_by,origin,status,title,"

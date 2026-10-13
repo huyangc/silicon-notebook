@@ -94,7 +94,7 @@ def test_derived_memory_sources_uses_the_partial_index_on_analysed_data(
     import psycopg.sql
 
     database = repo._runtime.database
-    owner = repo.create_user("p00100001", "pw123456")
+    owner = repo._runtime.identity.create_user("p00100001", "pw123456")
     with database.write() as db:
         db.execute("SET LOCAL statement_timeout = '0'")
         db.execute(

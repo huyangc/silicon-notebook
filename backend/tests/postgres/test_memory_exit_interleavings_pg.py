@@ -334,8 +334,8 @@ def test_two_leavers_merged_into_the_same_shared_objects_do_not_deadlock(
     shared_y = _fused_doc_object(world, "Shared y notes")
     shared_x, shared_y = sorted([shared_x, shared_y])
     users = {
-        "carol": world.repo.create_user("c00100005", "pw123456"),
-        "dave": world.repo.create_user("d00100006", "pw123456"),
+        "carol": world.repo._runtime.identity.create_user("c00100005", "pw123456"),
+        "dave": world.repo._runtime.identity.create_user("d00100006", "pw123456"),
     }
     for user in users.values():
         world.repo.add_member(world.shared, user.id)

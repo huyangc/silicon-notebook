@@ -591,8 +591,8 @@ def scoped_sql_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     repo = SQLiteRepository(Settings(_env_file=None))
-    alice = repo.create_user("a00123456", "password-12")
-    bob = repo.create_user("b00123456", "password-12")
+    alice = repo._runtime.identity.create_user("a00123456", "password-12")
+    bob = repo._runtime.identity.create_user("b00123456", "password-12")
     token = set_request_user(alice)
     try:
         active = repo.create_notebook(NotebookCreate(name="shared active"))

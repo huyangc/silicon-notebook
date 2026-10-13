@@ -2913,12 +2913,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.authenticate_user",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.backfill_paper_metadata",
         "target": "_runtime"
       },
@@ -3159,18 +3153,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.create_session",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.create_user",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.current_user",
         "target": "_runtime"
       },
@@ -3262,12 +3244,6 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.delete_report",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.delete_session",
         "target": "_runtime"
       },
       {
@@ -3448,12 +3424,6 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.get_source",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.global_document_limit_default",
         "target": "_runtime"
       },
       {
@@ -4426,12 +4396,6 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.user_can_read_source",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.user_document_limit_override",
         "target": "_runtime"
       },
       {

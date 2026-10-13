@@ -27,8 +27,8 @@ def repo(tmp_path, monkeypatch):
 @pytest.fixture
 def users(repo):
     return SimpleNamespace(
-        alice=repo.create_user("a00123456", "pw"),
-        bob=repo.create_user("b00654321", "pw"),
+        alice=repo._runtime.identity.create_user("a00123456", "pw"),
+        bob=repo._runtime.identity.create_user("b00654321", "pw"),
     )
 
 

@@ -617,8 +617,8 @@ def test_retrieval_contribution_authority_filters_private_memory_without_scope(
     repo,
 ):
     notebook = _seed_original_chunk(repo)
-    alice = repo.create_user("a00123456", "password-12")
-    bob = repo.create_user("b00123456", "password-12")
+    alice = repo._runtime.identity.create_user("a00123456", "password-12")
+    bob = repo._runtime.identity.create_user("b00123456", "password-12")
     now = _now()
     with repo._write() as db:
         db.executemany(
@@ -769,7 +769,7 @@ def test_untrusted_question_row_cannot_bypass_actor_chunk_authority(
     repo, monkeypatch
 ):
     notebook = _seed_original_chunk(repo)
-    bob = repo.create_user("b00987654", "password-12")
+    bob = repo._runtime.identity.create_user("b00987654", "password-12")
     now = _now()
     with repo._write() as db:
         db.execute(

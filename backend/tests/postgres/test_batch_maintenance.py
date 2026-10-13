@@ -89,7 +89,7 @@ def test_postgres_adapter_implements_every_batch_maintenance_method():
 @pytest.mark.postgres_integration
 @pytest.mark.parametrize("owner", ["CorpUID", "corpuid", " CORPuid "])
 def test_owner_resolution_follows_the_current_username_after_rename(postgres_repository, owner):
-    user = postgres_repository.create_user("a00123456", "pw123456")
+    user = postgres_repository._runtime.identity.create_user("a00123456", "pw123456")
     with postgres_repository._runtime.database.write() as db:
         db.execute("UPDATE users SET username='CorpUID' WHERE id=%s", (user.id,))
     resolved = postgres_repository.maintenance.resolve_owner_profile(owner)
@@ -103,8 +103,8 @@ def test_owner_resolution_cannot_meet_case_variant_names(postgres_repository):
     account; the resolver's ambiguity refusal is now a defensive branch."""
     import psycopg
 
-    first = postgres_repository.create_user("a00123456", "pw123456")
-    second = postgres_repository.create_user("a00123457", "pw123456")
+    first = postgres_repository._runtime.identity.create_user("a00123456", "pw123456")
+    second = postgres_repository._runtime.identity.create_user("a00123457", "pw123456")
     with postgres_repository._runtime.database.write() as db:
         db.execute("UPDATE users SET username='CorpUID' WHERE id=%s", (first.id,))
     with pytest.raises(psycopg.errors.UniqueViolation, match="idx_users_username_lower"):
@@ -115,7 +115,7 @@ def test_owner_resolution_cannot_meet_case_variant_names(postgres_repository):
 
 @pytest.mark.postgres_integration
 def test_owner_resolution_keeps_default_admin_and_rejects_non_names(postgres_repository):
-    user = postgres_repository.create_user("a00123456", "pw123456")
+    user = postgres_repository._runtime.identity.create_user("a00123456", "pw123456")
     maintenance = postgres_repository.maintenance
     assert maintenance.resolve_owner_profile(None).id == "user-local"
     for value in (user.id,user.email,"", "   "):

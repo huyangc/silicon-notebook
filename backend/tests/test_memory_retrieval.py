@@ -26,8 +26,8 @@ def memory_data(tmp_path, monkeypatch):
         Settings(_env_file=None, model_services_config=""),
         model_provider=provider,
     )
-    alice = repo.create_user("a00123456", "pw")
-    bob = repo.create_user("b00654321", "pw")
+    alice = repo._runtime.identity.create_user("a00123456", "pw")
+    bob = repo._runtime.identity.create_user("b00654321", "pw")
 
     token = set_request_user(alice)
     try:

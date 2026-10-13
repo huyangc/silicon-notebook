@@ -892,7 +892,7 @@ def _drift_lane(tmp_path, monkeypatch):
     repo, notebook_id, add_source, add_object = _drift_lane_notebook(
         tmp_path, monkeypatch
     )
-    owner = repo.create_user("a00123456", "password-12").id
+    owner = repo._runtime.identity.create_user("a00123456", "password-12").id
     return repo, notebook_id, owner, add_source, add_object
 
 

@@ -99,7 +99,7 @@ def test_confirmed_postgres_cli_runs_portable_phases_without_sqlite(
         notebook_id = next(
             notebook.id for notebook in probe.list_notebooks() if notebook.name == "PG CLI"
         )
-        wrong_owner = probe.create_user("z00123456", "pw123456")
+        wrong_owner = probe._runtime.identity.create_user("z00123456", "pw123456")
     finally:
         probe.close()
 

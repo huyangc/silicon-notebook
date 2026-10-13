@@ -22,7 +22,7 @@ def backend(postgres_settings):
 
     repo = PostgresRepository(postgres_settings)
     bind_all_embedding_clients(repo, FakeEmbedder(dim=16))
-    bob = repo.create_user("b00654321", "password-12")
+    bob = repo._runtime.identity.create_user("b00654321", "password-12")
     token = set_request_user(bob)
     try:
         nb = repo.create_notebook(NotebookCreate(name="manual")).id

@@ -97,8 +97,8 @@ def _insert_source(repo, nb, sid, text, *, memory_id=None) -> None:
 
 @pytest.fixture
 def library(repo, monkeypatch):
-    bob = repo.create_user("b00654321", "pw123456")
-    alice = repo.create_user("a00123456", "pw123456")
+    bob = repo._runtime.identity.create_user("b00654321", "pw123456")
+    alice = repo._runtime.identity.create_user("a00123456", "pw123456")
     token = set_request_user(bob)
     nb = repo.create_notebook(NotebookCreate(name="kb")).id
     _insert_source(repo, nb, "src-doc", "bandgap reference detail")

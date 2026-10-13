@@ -144,10 +144,10 @@ def test_complete_postgres_repository_smoke_from_empty_schema(
     postgres_settings.kg_auto_extract = False
     postgres_settings.notebook_copy_max_rows = 0
     repository = PostgresRepository(postgres_settings)
-    owner = repository.create_user("a00123456", "pw123456")
-    reader = repository.create_user("b00654321", "pw123456")
-    assert repository.authenticate_user("A00123456", "pw123456").id == owner.id
-    session = repository.create_session(owner.id)
+    owner = repository._runtime.identity.create_user("a00123456", "pw123456")
+    reader = repository._runtime.identity.create_user("b00654321", "pw123456")
+    assert repository._runtime.identity.authenticate_user("A00123456", "pw123456").id == owner.id
+    session = repository._runtime.identity.create_session(owner.id)
     assert repository.resolve_session(session).id == owner.id
 
     owner_token = set_request_user(owner)
@@ -352,7 +352,7 @@ def test_postgres_knowhow_node_retrieval_uses_source_scoped_type_query(
 
     postgres_settings.knowhow_kg_node_retrieval_enabled = True
     repository = PostgresRepository(postgres_settings)
-    owner = repository.create_user("c00123456", "pw123456")
+    owner = repository._runtime.identity.create_user("c00123456", "pw123456")
     token = set_request_user(owner)
     try:
         notebook = repository.create_notebook(NotebookCreate(name="PG dynamic KG"))
@@ -377,7 +377,7 @@ def test_postgres_restart_recovers_every_interrupted_job_and_preserves_terminal_
     from app.repositories.postgres.repository import PostgresRepository
 
     repository = PostgresRepository(postgres_settings)
-    owner = repository.create_user("d00123456", "pw123456")
+    owner = repository._runtime.identity.create_user("d00123456", "pw123456")
     token = set_request_user(owner)
     try:
         notebook = repository.create_notebook(NotebookCreate(name="restart recovery"))
@@ -692,7 +692,7 @@ def test_postgres_last_knowhow_table_delete_sweeps_asset_row_and_file(
 
     postgres_settings.storage_dir = str(tmp_path / "pg-assets")
     repository = PostgresRepository(postgres_settings)
-    owner = repository.create_user("e00123456", "pw123456")
+    owner = repository._runtime.identity.create_user("e00123456", "pw123456")
     token = set_request_user(owner)
     try:
         notebook = repository.create_notebook(NotebookCreate(name="asset GC"))
@@ -759,7 +759,7 @@ def test_delete_source_does_not_wait_on_notebook_capacity_lock(
     postgres_settings.llm_log_enabled = False
     postgres_settings.kg_auto_extract = False
     repository = PostgresRepository(postgres_settings)
-    owner = repository.create_user("f00123456", "pw123456")
+    owner = repository._runtime.identity.create_user("f00123456", "pw123456")
     token = set_request_user(owner)
     try:
         notebook = repository.create_notebook(NotebookCreate(name="Lock race"))

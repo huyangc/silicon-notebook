@@ -106,7 +106,7 @@ def backend(tmp_path, monkeypatch):
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     repo = SQLiteRepository(Settings(_env_file=None))
     bind_all_embedding_clients(repo, FakeEmbedder(dim=16))
-    bob = repo.create_user("b00654321", "password-12")
+    bob = repo._runtime.identity.create_user("b00654321", "password-12")
     token = set_request_user(bob)
     try:
         nb = repo.create_notebook(NotebookCreate(name="manual")).id

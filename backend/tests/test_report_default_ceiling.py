@@ -62,8 +62,8 @@ def build_report_fixture(repo, placeholder: str) -> dict[str, Any]:
     from app.core.request_context import reset_request_user, set_request_user
 
     ph = placeholder
-    alice = repo.create_user("a00129101", "password-12")
-    bob = repo.create_user("b00129102", "password-12")
+    alice = repo._runtime.identity.create_user("a00129101", "password-12")
+    bob = repo._runtime.identity.create_user("b00129102", "password-12")
     token = set_request_user(alice)
     try:
         nb = repo.create_notebook(NotebookCreate(name="共享报告库")).id

@@ -56,7 +56,7 @@ def seeded(tmp_path, monkeypatch):
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     repo = SQLiteRepository(Settings(_env_file=None))
     bind_all_embedding_clients(repo, FakeEmbedder(dim=16))
-    bob = repo.create_user("b00654321", "password-12")
+    bob = repo._runtime.identity.create_user("b00654321", "password-12")
     # Reset in teardown: the request user is a context variable, and leaking
     # it makes every later test in this worker write rows as a user its own
     # database does not have (FOREIGN KEY failures far away from here).

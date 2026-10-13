@@ -74,8 +74,8 @@ def build_world(repo: Any, *, postgres: bool) -> World:
     # (the ingest job has its own case below).
     service.kg_ingest_scheduler = lambda fn, item: None
     service.embedding_scheduler = lambda fn, job: fn(job)
-    owner = repo.create_user("o00300001", "pw123456")
-    member = repo.create_user("m00300002", "pw123456")
+    owner = repo._runtime.identity.create_user("o00300001", "pw123456")
+    member = repo._runtime.identity.create_user("m00300002", "pw123456")
     notebook_id = _as_user(
         owner, lambda: repo.create_notebook(NotebookCreate(name="K3 live"))
     ).id

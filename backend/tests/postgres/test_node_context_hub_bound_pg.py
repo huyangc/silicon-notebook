@@ -134,7 +134,7 @@ def test_pg_name_only_returns_name_and_occurrences_only(repo):
 def test_pg_all_ticked_undrifted_run_gets_no_ceiling_and_keeps_the_hub_description(
     repo, monkeypatch,
 ):
-    owner = repo.create_user("a00000001", "pw123456")
+    owner = repo._runtime.identity.create_user("a00000001", "pw123456")
     nb, hub, src = _seed_hub(repo, BOUND + 1, owner=owner)
     runtime = repo._runtime
     service = runtime.evidence_context_component

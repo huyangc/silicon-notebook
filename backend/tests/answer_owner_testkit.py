@@ -89,9 +89,9 @@ def seed_ownership_matrix(repo):
     from app.core.request_context import reset_request_user, set_request_user
     from app.models.notebooks import NotebookCreate
 
-    alice = repo.create_user("a00777001", "pw123456")
-    bob = repo.create_user("b00777002", "pw123456")
-    carol = repo.create_user("c00777003", "pw123456")
+    alice = repo._runtime.identity.create_user("a00777001", "pw123456")
+    bob = repo._runtime.identity.create_user("b00777002", "pw123456")
+    carol = repo._runtime.identity.create_user("c00777003", "pw123456")
     token = set_request_user(alice)
     try:
         notebook = repo.create_notebook(NotebookCreate(name="Ownership"))

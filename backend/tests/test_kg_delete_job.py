@@ -586,8 +586,8 @@ def _own_the_memory_source(repo, notebook_id: str):
     return ``(owner, other member)``."""
     from app.core.request_context import reset_request_user, set_request_user
 
-    owner = repo.create_user("m00000001", "pw123456")
-    other = repo.create_user("m00000002", "pw123456")
+    owner = repo._runtime.identity.create_user("m00000001", "pw123456")
+    other = repo._runtime.identity.create_user("m00000002", "pw123456")
     repo.add_member(notebook_id, owner.id)
     repo.add_member(notebook_id, other.id)
     now = _now()

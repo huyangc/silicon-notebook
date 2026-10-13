@@ -2028,8 +2028,8 @@ def build_real_fixture(repo, placeholder: str) -> dict[str, Any]:
     from app.services.sqlite_repository import reset_request_user, set_request_user
 
     ph = placeholder
-    alice = repo.create_user("a00123456", "password-12")
-    bob = repo.create_user("b00123456", "password-12")
+    alice = repo._runtime.identity.create_user("a00123456", "password-12")
+    bob = repo._runtime.identity.create_user("b00123456", "password-12")
     token = set_request_user(alice)
     try:
         nb = repo.create_notebook(NotebookCreate(name="共享库")).id
