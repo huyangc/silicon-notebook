@@ -300,9 +300,11 @@ def _situation(effort: str) -> dict:
 
 
 def _seed_experiences(repo, effort: str, entries) -> None:
+    """``(action, polarity, rationale, support[, effort])``: an entry may name
+    the effort of the situation it was learned in (default: the scenario's)."""
     store = repo._runtime.retrieval_experiences
-    situation = _situation(effort)
-    for action, polarity, rationale, support in entries:
+    for action, polarity, rationale, support, *learned_in in entries:
+        situation = _situation(learned_in[0] if learned_in else effort)
         store.upsert_experience(
             experience_id(situation, action, ""),
             situation=situation, action=action, polarity=polarity,
@@ -823,8 +825,12 @@ def _expect_expand_graph(obs):
     assert expands[0]["detail"]["result_ids_truncated"] is True
     assert len(expands[0]["detail"]["result_ids"]) == 20
     assert obs.reasons().count("empty_or_visited") == 2
-    # the unknown action ends the loop: the scripted ANSWER is never asked for
+    # the unknown action ends the loop: the scripted ANSWER is never asked for,
+    # and the loop leaves before the turn's progress accounting (no stale bump,
+    # no breaker) -- the close follows the unknown turn directly
     assert obs.steps("reflect")[-1]["detail"]["next_action"] == "teleport"
+    assert [s["step_type"] for s in obs.steps()[-2:]] == ["reflect", "answer"]
+    assert "stale_circuit_breaker" not in obs.reasons()
     assert "只展开了其中一部分邻居" in obs.summaries()[1]
 
 
@@ -1243,6 +1249,15 @@ def _expect_consult(obs):
     assert details[1]["stale"] == details[0]["stale"]
     assert details[2]["stale"] == details[1]["stale"] + 1
     assert "[Recalled search tactics]" in obs.summaries()[1]
+    # the round's context blocks keep their order: profile, injected tactics,
+    # recalled tactics, then the collection map with its allowance sentence
+    second = obs.summaries()[1]
+    marks = [second.index(head) for head in (
+        "[What the agent knows about this library]",
+        "[Search tactics learned from earlier runs]",
+        "[Recalled search tactics]",
+        "[Collections in scope]")]
+    assert marks == sorted(marks)
     nudged = [s for s in obs.summaries() if "以往打法经验" in s]
     assert len({s.split("以往打法经验")[0][-40:] for s in nudged}) >= 2
     assert obs.port_calls("experiences.note_adopted")
@@ -1318,6 +1333,72 @@ def _expect_overlay_once(obs):
 )
 def _expect_consult_disabled(obs):
     assert obs.reasons() == ["consult_memory_disabled"]
+
+
+# --- limits=None: the raw limits, not the tier fallback ---------------------
+
+#: Scenarios whose behaviour assertions were added after the split oracle's
+#: snapshots were recorded; they have no snapshot and run behaviour-only.
+BEHAVIOUR_SCENARIOS: List[Scenario] = []
+
+
+def behaviour_scenario(**kwargs):
+    def register(expect):
+        BEHAVIOUR_SCENARIOS.append(Scenario(expect=expect, **kwargs))
+        return expect
+    return register
+
+
+def _ascending_elements(count):
+    """``retrieve_elements`` answering with ``count`` elements whose scores rise
+    in arrival order, so a score ranking would reverse them."""
+    from app.domain.retrieval import RetrievedElement
+
+    def retrieve(notebook_id, query, *args, **kwargs):
+        return [
+            RetrievedElement(
+                element_id=f"el-asc-{index}", source_id="src-1",
+                source_title="版图手册", location_label=f"第 {index} 页",
+                element_type="table", text=f"递增要素{index} 的表格内容",
+                score=0.1 * (index + 1))
+            for index in range(count)
+        ]
+    return retrieve
+
+
+@behaviour_scenario(
+    name="limits_none_reads_the_raw_limits",
+    effort=None, memory=True, intent_detail=INTENT_DETAIL,
+    settings={"retrieval_experience_inject_enabled": True,
+              "reasoning_stale_limit": 50, "retrieval_top_n": 8},
+    # the same action learned in two situations: the run's own (no tier, so the
+    # contract's effort) and the default tier's
+    experiences=(
+        ("exact_lookup", "bad", "按名称查找在这类库上常常空手。", 5),
+        ("exact_lookup", "bad", "标准档里按名称查找没有收获。", 5, "standard"),
+    ),
+    retrieval_overrides=lambda ctx: {"retrieve_elements": _ascending_elements(8)},
+    reflects=[
+        act("exact_lookup", exact_term="foo_bar"),
+        act("exact_lookup", exact_term="baz_qux"),
+        act("search_elements", elements_query="版图"),
+        ANSWER,
+    ],
+)
+def _expect_limits_none(obs):
+    # a run without limits (knowhow's shape) keeps every raw-limits reading:
+    # the summary shows all elements in arrival order, not the default tier's
+    # ranked six ...
+    after_search = obs.summaries()[3]
+    shown = re.findall(r"递增要素(\d)", after_search)
+    assert shown == [str(index) for index in range(8)]
+    # ... the zero-hit nudge matches the experience recorded for this run's own
+    # situation (no tier effort, so the contract's) ...
+    nudged = [text for text in obs.summaries() if "以往打法经验" in text]
+    assert nudged and "按名称查找在这类库上常常空手" in nudged[0]
+    assert not any("标准档里按名称查找没有收获" in text for text in obs.summaries())
+    # ... and the evidence budget is the deployment's, not the default tier's
+    assert obs.steps("answer")[-1]["detail"]["top_n"] == 8
 
 
 # --- cancellation -----------------------------------------------------------
@@ -1413,6 +1494,12 @@ _LEAKY_EXPORTS = {
     "GRAPH_PPR_ENABLED": "false",
     "reasoning_max_exact_lookups": "1",
 }
+
+
+@pytest.mark.parametrize(
+    "case", BEHAVIOUR_SCENARIOS, ids=[item.name for item in BEHAVIOUR_SCENARIOS])
+def test_reflect_loop_behaviour_scenario(case, tmp_path, monkeypatch):
+    case.expect(Observed(observe(case, tmp_path, monkeypatch)))
 
 
 def test_exported_deployment_variables_do_not_reach_a_recording(
