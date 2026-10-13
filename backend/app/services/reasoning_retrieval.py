@@ -7461,6 +7461,524 @@ class ReasoningRetriever:
                         **_enumeration_scope_detail(local_only, chain_state.outcome.source_scoped),
                     }))
 
+    def _action_expand_graph(self, state: "_ReasoningRunState", decision) -> None:
+        """reflect 的 expand_graph:展开一个尚未访问的节点的邻居,账目回喂 reflect。"""
+        oid = decision.expand_object_id
+        if self._unsafe_scope_restricted():
+            state.record(TraceStep(
+                step_type="skip",
+                summary="跳过关系扩展（指定来源范围下不可用）",
+                detail={"reason": "source_scope_unsafe_channel"},
+            ))
+        elif not oid or oid in state.visited:
+            state.record(TraceStep(step_type="skip",
+                             summary="跳过 expand_graph(空或已访问节点)",
+                             detail={"object_id": oid, "reason": "empty_or_visited"}))
+        else:
+            state.visited.add(oid)
+            # NB: expand/neighbors use the ACTIVE notebook_id only. A base-tier hit's
+            # neighbors live in the base notebook, so this action deliberately skips
+            # deep cross-tier graph walks (P4 spec §F); only `follow_chain` does that.
+            expansion = self.neighbors(
+                state.notebook_id, oid,
+                decision.expand_edge_type, decision.expand_direction)
+            neigh = expansion.hits
+            raise_if_cancelled(self.cancel_event)
+            # codex #538 R3 P2:零命中判定与归因 id 都只看**新插入**的
+            # 邻居——两个展开节点共享的邻居早已在 collected 里,本次
+            # setdefault 什么都没加:拿原始 neigh 判会把空手轮当命中
+            # 清零计数,把既有对象计入 result_ids 后又被答案引用时,
+            # 蒸馏会把功劳记给一次什么都没贡献的 expand 调用。
+            newly_added_neighbors = []
+            for h in neigh:
+                if h.object_id not in state.collected:
+                    state.collected[h.object_id] = h
+                    newly_added_neighbors.append(h)
+            # 展示用人读节点名(优先 collected 命中, 再查 node_context, 兜底裸 id),
+            # 避免 trace 里出现 "顺关系深挖 ko-8375b40126" 这种用户看不懂的内部 id。
+            node_name = ""
+            if oid in state.collected:
+                node_name = str(state.collected[oid].payload.get("name", "")).strip()
+            if not node_name:
+                ctx = self.get(state.notebook_id, oid)
+                node_name = str(ctx.get("name", "")).strip() if ctx else ""
+            node_name = node_name or oid
+            # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零,计数
+            # 才是真正的"连续"零命中(见 ppr 分支同款注释)——旧版只累加
+            # 不清零,提示措辞里的"已连续 N 次"其实是"历史累计 N 次",
+            # 中间哪怕命中过也不影响这个数继续往上走。
+            if not newly_added_neighbors:
+                state.zero_hit_by_action["expand"] = (
+                    state.zero_hit_by_action.get("expand", 0) + 1)
+            else:
+                state.zero_hit_by_action["expand"] = 0
+            _result_ids, _result_ids_truncated = _capped_result_ids(
+                [h.object_id for h in newly_added_neighbors])
+            expand_detail = {"object_id": oid, "name": node_name,
+                             "edge_type": decision.expand_edge_type,
+                             "found": len(neigh),
+                             "result_ids": _result_ids}
+            if _result_ids_truncated:
+                # 与 neighbor_truncated 是两个独立信号:后者说的是
+                # self.neighbors() 自己截断了邻居查询,这个说的是这份
+                # detail 自己的 result_ids 列表被这个函数的截断上限
+                # 切了尾巴——两者可能只有一个成立。
+                expand_detail["result_ids_truncated"] = True
+            if expansion.truncated:
+                # 只在真截断的步上加这两个键(detail 逐键不变的冻结基线
+                # 口径:无条件写 False 会让每一条 expand 步的 detail 都
+                # 变形)。同时进账目回喂 reflect——轨迹只给人看,模型看
+                # 不到就会以为这个节点的邻居已经看全了。
+                expand_detail["neighbor_truncated"] = True
+                expand_detail["neighbor_limit"] = state.neighbor_expand_limit
+                state.neighbor_truncated.setdefault(oid, node_name)
+            state.record(TraceStep(step_type="expand",
+                             summary=(
+                                 f"顺关系深挖「{node_name}」,得到 {len(neigh)} 个邻居"
+                                 + ("(该节点邻居过多,只展开了一部分)"
+                                    if expansion.truncated else "")
+                             ),
+                             detail=expand_detail))
+
+    def _action_add_subquery(self, state: "_ReasoningRunState", decision) -> None:
+        """reflect 的 add_subquery:补一条子查询(按方向身份去重),同时补检索该方向的原文。"""
+        if not decision.new_sub_query:
+            state.record(TraceStep(step_type="skip",
+                             summary="跳过 add_subquery(缺少 new_sub_query)",
+                             detail={"reason": "missing_new_sub_query"}))
+        else:
+            sq = decision.new_sub_query
+            key = _norm_query(sq.query)
+            # 模型在 prompt 里只见过注册表算出的唯一简称(展示/回喂
+            # 都不给它看完整 compound),所以它用 add_subquery 重提或
+            # 补交某个已确认方向时,提交的文本大概率是简称而非原文
+            # ——直接按 sq.query 的字面归一化键去比对 attempted 抓不住
+            # 这种情况(简称的归一化键与它所指方向的 compound 归一化键
+            # 不是同一个字符串)。matched_direction 把简称解回它所指的
+            # 方向原文,后面两段分支都按这个方向身份而非提交串本身判断。
+            matched_direction = state.direction_of.get(key)
+            if key in state.attempted:
+                # 提交串本身就命中某条已执行记录(逐字重复,或提交的
+                # 就是方向原文且原文已执行)——原有语义不变。
+                state.attempted[key].tries += 1
+                state.record(TraceStep(step_type="skip",
+                                 summary=f"跳过重复子查询: {sq.query}",
+                                 detail={"query": sq.query,
+                                         "reason": "duplicate_subquery",
+                                         "tries": state.attempted[key].tries}))
+            elif (matched_direction is not None
+                  and _norm_query(matched_direction) in state.attempted):
+                # 简称命中的方向已经被(补种或此前某轮 add_subquery)
+                # 执行过,只是账目记在方向原文的身份上、提交串是简称
+                # ——按方向身份识别为重复,不重跑检索(治「模型换用
+                # prompt 里看到的简称就能绕过 duplicate_subquery,白烧
+                # 一轮检索预算」,PR#400 codex R1 P2-2)。
+                dkey = _norm_query(matched_direction)
+                state.attempted[dkey].tries += 1
+                state.record(TraceStep(step_type="skip",
+                                 summary=f"跳过重复子查询: {sq.query}",
+                                 detail={"query": sq.query,
+                                         "reason": "duplicate_subquery",
+                                         "tries": state.attempted[dkey].tries}))
+            else:
+                # 简称命中一个尚未执行的已确认方向:执行用方向本身的
+                # 完整原文(方向+已确认问题契约的复合串),不是模型提交
+                # 的简称——契约是检索用的附加约束,只给简称会丢掉它,
+                # 检索质量与补种(coverage pass)、首轮切片同型。未命中
+                # 任何已确认方向(matched_direction 为 None)时走原有
+                # 非 intent 路径,原文直接执行,label 留空——中性硬约束。
+                exec_query, exec_key, display, exec_label = _resolve_subquery_identity(
+                    sq.query, matched_direction, state.label_of)
+                added = 0
+                # P4 (T1): also collect the newly-added ids alongside
+                # the existing `added` count — this loop used to only
+                # count, and result_ids needs the identities.
+                new_ids: list = []
+                for h in self.search(state.notebook_id, exec_query,
+                                     sq.types, sq.prefer)[:state.per_query_take]:
+                    raise_if_cancelled(self.cancel_event)
+                    if h.object_id not in state.collected:
+                        state.collected[h.object_id] = h
+                        added += 1
+                        new_ids.append(h.object_id)
+                _result_ids, _result_ids_truncated = _capped_result_ids(new_ids)
+                _subquery_detail = {"query": display, "new": added,
+                                    "result_ids": _result_ids}
+                if _result_ids_truncated:
+                    _subquery_detail["result_ids_truncated"] = True
+                # 方向的原文半(codex #690 R1 P2;与知识图谱无关):detail
+                # 的 "new"/result_ids 已定稿(仍只说 KG 候选),原文另记
+                # `chunks_found`,attempted 记证据**总数**。
+                added += self._search_passages_for_direction(
+                    state, exec_query, _subquery_detail)
+                # 账目记在 exec_query(方向原文)的身份上,而非模型提交
+                # 的简称——这样它同时从未覆盖清单(_still_uncovered_
+                # directions 按 a.query in label_of 识别)摘除,且后续
+                # 再用简称重提会被上面的 matched_direction 分支拦住。
+                state.attempted[exec_key] = _QueryAttempt(
+                    query=exec_query, new=added, tries=1, label=exec_label)
+                if exec_query not in state.used_queries:
+                    state.used_queries.append(exec_query)
+                state.record(TraceStep(step_type="retrieve",
+                                 summary=f"补充子查询: {display}",
+                                 detail=_subquery_detail))
+
+    def _action_search_elements(self, state: "_ReasoningRunState", decision) -> None:
+        """reflect 的 search_elements:降级查原文元素(次数受 `_element_search_skip` 约束)。"""
+        skip = self._element_search_skip(state.elements_searches)
+        if skip:
+            state.record(TraceStep(step_type="skip", summary=skip[0],
+                             detail={"reason": skip[1]}))
+        else:
+            state.elements_searches += 1
+            eq = decision.elements_query or state.question
+            found = self.search_elements(state.notebook_id, eq)
+            raise_if_cancelled(self.cancel_event)
+            els = merge_element_hits(state.elements, found)
+            state.record(TraceStep(step_type="fallback",
+                             summary=f"降级查原文: {eq},新增 {len(els)} 段",
+                             detail={"query": eq, "found": len(els)}))
+
+    def _action_consult_memory(self, state: "_ReasoningRunState") -> None:
+        """reflect 的 consult_memory:回想以往检索打法,累计渲染成下一轮的打法块。"""
+        # Agentic Memory P4 (T5)。防御性双查:`consult_memory_flag`/
+        # `self.allow_consult_memory` 都已经在 reflect() 的白名单里生效
+        # (关闭时这个动作根本不会出现在模型的选项里),这里再判一次是
+        # 与 exact_lookup/ppr 同款的纵深防御——测试替身或畸形响应仍可能
+        # 吐出这个 next_action。
+        if not state.consult_memory_flag or not self.allow_consult_memory:
+            state.record(TraceStep(
+                step_type="skip",
+                summary="跳过回想以往打法(当前场景未提供该能力)",
+                detail={"reason": "consult_memory_disabled"}))
+        elif state.consult_used >= state.action_policy.max_consult_memory:
+            state.record(TraceStep(
+                step_type="skip",
+                summary=("跳过回想以往打法(已达次数上限 "
+                         f"{state.action_policy.max_consult_memory})"),
+                detail={"reason": "consult_memory_cap"}))
+        elif state.steps >= state.max_steps:
+            # codex #538 R4 P2:这是最后一个允许的循环轮——回想的产出
+            # 只进**下一轮** reflect 的上下文,而下一轮不存在了:执行
+            # 只会花掉末轮预算渲染一段没有任何模型调用会读到的文本,
+            # 还顶掉一次本可以真正取证的收尾检索。直接拒绝,不扣
+            # consult 预算(这轮本来就没送达任何东西)。
+            state.record(TraceStep(
+                step_type="skip",
+                summary="跳过回想以往打法(已是最后一轮,建议无人消费)",
+                detail={"reason": "consult_memory_last_turn"}))
+        else:
+            state.consult_used += 1
+            # codex #538 R1 P2:整个执行体 fail-open——注入开着时一次
+            # 瞬态/畸形的经验库读取(_cached_experiences 会发 version_signal
+            # 聚合查询)不得把整次 Ask/报告 run 打挂;这是可选的建议面,
+            # 与被动块的既有 fail-open 同口径。取消照常上抛。
+            try:
+                consult_situation = current_situation(
+                    state.intent_detail, mode=_EXPERIENCE_RUN_MODE,
+                    retrieval_effort=(
+                        state.limits.effort if state.limits is not None else ""))
+                # codex #538 R1 P2 两条:①排除集只含**真送达**的被动块前缀
+                # ——选中未送达的行(600 字符块常装不下 top-3)模型从没见过,
+                # 排除它等于让 consult 永远还不出这些打法;②零命中优先集只取
+                # 当前计数>0 的动作——命中清零后键还留在字典里,按键集判会把
+                # 刚成功的动作当「哑火」排前,挤掉真失败的。
+                delivered_passive_ids = {
+                    str(e.get("id") or "")
+                    for e in state.experience_entries[
+                        : rendered_experience_count(state.experience_block)]
+                } if state.experience_block else set()
+                new_consult_rows = _consultable_rows(
+                    self.retrieval_experiences, state.notebook_id,
+                    consult_situation,
+                    exclude_ids=(
+                        state.consult_delivered_ids | delivered_passive_ids
+                    ),
+                    zero_hit_actions={
+                        a for a, c in state.zero_hit_by_action.items() if c > 0
+                    },
+                    top_k=CONSULT_MEMORY_TOP_K,
+                )
+                overlay_note = _undelivered_retrieval_note(
+                    state.profile_raw_blocks, state.profile_block,
+                    self.profile_owner_id)
+                is_new_overlay = bool(overlay_note) and (
+                    overlay_note != state.consult_overlay_note)
+                if not new_consult_rows and not is_new_overlay:
+                    state.record(TraceStep(
+                        step_type="skip",
+                        summary="回想以往打法:未找到与当前场景匹配的新记录",
+                        detail={"reason": "consult_memory_nothing_new"}))
+                else:
+                    state.consult_rows_accum.extend(new_consult_rows)
+                    # 修复轮 spec④/Q-P1-3:先渲染,再按渲染结果(而不是按
+                    # 选中集)更新账目——被 600 字符硬顶挤掉的行/心得没有
+                    # 出现在模型看到的文本里,不该被标成"已经发过了",否则
+                    # 下一次调用会把它排除在候选之外,永远没有机会重新出现。
+                    pending_overlay = (
+                        overlay_note if is_new_overlay
+                        else state.consult_overlay_note)
+                    rendered = render_consult_block(
+                        state.consult_rows_accum,
+                        extra_lines=(
+                            [pending_overlay] if pending_overlay else ()
+                        ),
+                    )
+                    delivered_ids = set(rendered.delivered_ids)
+                    newly_delivered = [
+                        r for r in new_consult_rows
+                        if str(r.get("id") or "") in delivered_ids
+                    ]
+                    state.consult_delivered_ids.update(delivered_ids)
+                    # codex #538 R5 P2:accum 收敛为**已送达**行——未送达
+                    # 行滞留会在下次调用被再选(不在 delivered 集)、再
+                    # append 成重复,且渲染器先撞上滞留的原始未送达行就
+                    # 停,把它身后的所有候选永久堵死。收敛后未送达行
+                    # 干净地退回候选池,下次照常可选可渲染。
+                    state.consult_rows_accum = [
+                        r for r in state.consult_rows_accum
+                        if str(r.get("id") or "") in state.consult_delivered_ids
+                    ]
+                    overlay_newly_delivered = (
+                        is_new_overlay and rendered.overlay_rendered)
+                    if rendered.overlay_rendered:
+                        state.consult_overlay_note = pending_overlay
+                    state.consult_block_text = rendered.rendered_text
+                    state.consult_delivered_this_turn = bool(
+                        newly_delivered or overlay_newly_delivered)
+                    if not newly_delivered and not overlay_newly_delivered:
+                        # 本次调用真的选中了新东西(否则已经在上面短路成
+                        # "nothing_new"),但全部被硬顶挤在块外——预算已经
+                        # 花掉(``consult_used`` 已 += 1),模型这一轮却什么
+                        # 新内容都没看到。独立 reason 与"候选池本身没有
+                        # 匹配"区分开,方便回看轨迹时分辨是哪一种。
+                        state.record(TraceStep(
+                            step_type="skip",
+                            summary="回想以往打法:本轮候选未能装入打法块(预算已用)",
+                            detail={"reason": "consult_memory_block_full"}))
+                    else:
+                        state.record(TraceStep(
+                            step_type="consult_memory",
+                            summary=(
+                                "回想以往检索打法"
+                                + (f",新增 {len(newly_delivered)} 条"
+                                   if newly_delivered else "")
+                            ),
+                            detail={"entries": len(newly_delivered),
+                                    "chars": len(state.consult_block_text)}))
+            except AskCancelled:
+                raise
+            except Exception:  # noqa: BLE001 — 建议面绝不挂 run
+                state.record(TraceStep(
+                    step_type="skip",
+                    summary="回想以往打法:读取记录失败,本轮跳过",
+                    detail={"reason": "consult_memory_unavailable"}))
+
+    def _action_exact_lookup(self, state: "_ReasoningRunState", decision) -> None:
+        """reflect 的 exact_lookup:按名称精确查找原文,跳过原因进回喂账本。"""
+        # 名称已在 reflect() 里清洗过(去包裹标点,不截长——见 clean_exact_term)。
+        # fail_closed 的硬闸(:485 一带)先对超长 exact_term 生效;这里才截到
+        # 词法层的精确短语上界,供探测与展示使用(item 6)。
+        term = decision.exact_term[:MAX_EXACT_PHRASE_CHARS]
+        # 防重按**名称**而非按请求串:seed 用问题原文、agent 可能给
+        # 「set_db 的参数」,两者抽出的名称相同就是同一次查找。真正执行时只
+        # 探测本轮新出现的名称,已查过的不再重复付 I/O。
+        # honor_quotes=False:这条路径上的名称来自模型,不是用户。用户的
+        # 引号已由 seed 通道兑现,而模型若能用 `x "的方法" y` 夹带引号,
+        # 就绕开了这把按实测定标的低选择度子串闸。
+        probed = (self._exact_lookup_terms(term, honor_quotes=False)
+                  if term else [])
+        fresh = [t for t in probed if _norm_query(t) not in state.exact_terms_done]
+        if not self.settings.exact_lookup_enabled or not self.allow_exact_lookup:
+            # 复用既有 exact_lookup_disabled 分支语义(镜像 allow_ppr):策略位
+            # 关闭与部署 flag 关闭在动作侧是同一条路径,不再区分理由。
+            self._feed_exact_lookup_skip(
+                state, "exact_lookup_disabled", [],
+                "按名称精确查找当前不可用(本次检索场景未开启该能力)")
+            state.record(TraceStep(step_type="skip",
+                             summary="跳过按名称精确查找(未启用)",
+                             detail={"reason": "exact_lookup_disabled"}))
+        elif not term:
+            self._feed_exact_lookup_skip(
+                state, "missing_exact_term", [], "未提供可精确查找的名称")
+            state.record(TraceStep(step_type="skip",
+                             summary="跳过按名称精确查找(缺少名称)",
+                             detail={"reason": "missing_exact_term"}))
+        elif not probed:
+            # 与 seed 通道共用 exact_probe_terms 这把闸:模型不能用一个低选择度
+            # 的短串(如「第 2.1 节」)或一个普通英文词组(如「state-of-the-art」)
+            # 把精确通道变成全库子串扫描。措辞要教会模型下一轮该给什么,
+            # 光说「不合法」它只会换一个同样不合法的词再试一次。
+            self._feed_exact_lookup_skip(
+                state, _norm_query(term), [term], _NOT_A_NAME_NOTE.format(term=term))
+            state.record(TraceStep(step_type="skip",
+                             summary=f"跳过按名称精确查找:{_NOT_A_NAME_NOTE.format(term=term)}",
+                             detail={"reason": "exact_term_not_identifier",
+                                     "term": term}))
+        elif not fresh:
+            # 账目按调用记,重复请求要落到当初真正查过它的那一条上——
+            # 只有账目变了 prompt 才变,模型才不会在同一个不动点上空转。
+            probed_keys = {_norm_query(t) for t in probed}
+            for attempt in state.exact_lookup_log:
+                if probed_keys & {_norm_query(t) for t in attempt.terms}:
+                    attempt.tries += 1
+                    break
+            state.record(TraceStep(step_type="skip",
+                             summary=f"跳过重复的按名称精确查找:{term}",
+                             detail={"reason": "duplicate_exact_lookup",
+                                     "term": term, "terms": probed}))
+        elif state.exact_lookups >= state.action_policy.max_exact_lookups:
+            self._feed_exact_lookup_skip(
+                state, _norm_query(term), [term],
+                f"「{term}」已达按名称精确查找次数上限（"
+                f"{state.action_policy.max_exact_lookups}）")
+            state.record(TraceStep(
+                step_type="skip",
+                summary=("跳过按名称精确查找(已达次数上限 "
+                         f"{state.action_policy.max_exact_lookups})"),
+                detail={"reason": "exact_lookup_cap", "term": term}))
+        else:
+            state.exact_lookups += 1
+            new = take_distinct_chunk_hits(
+                self.exact_lookup(state.notebook_id, exact_probe_query(fresh)),
+                state.seen_chunks, state.chunks,
+            )
+            state.chunks.extend(new)
+            state.exact_terms_done.update(_norm_query(t) for t in fresh)
+            state.exact_lookup_log.append(
+                _ExactLookupAttempt(terms=list(fresh), new=len(new)))
+            # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零(见 ppr
+            # 分支同款注释)。
+            if not new:
+                state.zero_hit_by_action["exact_lookup"] = (
+                    state.zero_hit_by_action.get("exact_lookup", 0) + 1)
+            else:
+                state.zero_hit_by_action["exact_lookup"] = 0
+            _result_ids, _result_ids_truncated = _capped_result_ids(
+                [c.chunk_id for c in new])
+            _exact_reflect_detail = {"term": term, "terms": list(fresh),
+                                     "found": len(new), "phase": "reflect",
+                                     "result_ids": _result_ids}
+            if _result_ids_truncated:
+                _exact_reflect_detail["result_ids_truncated"] = True
+            state.record(TraceStep(
+                step_type="exact_lookup",
+                summary=f"按名称精确查找「{term}」:新增 {len(new)} 段原文",
+                detail=_exact_reflect_detail))
+
+    def _action_follow_chain(self, state: "_ReasoningRunState", decision) -> None:
+        """reflect 的 follow_chain:从本 run 已检索的对象出发做确定性两跳推导。"""
+        action_key = (
+            decision.chain_start_object_id,
+            decision.chain_target_object_id,
+            decision.chain_edge_type or "",
+            decision.chain_direction,
+        )
+        if self._unsafe_scope_restricted():
+            state.record(TraceStep(
+                step_type="skip",
+                summary="跳过两跳推导（指定来源范围下不可用）",
+                detail={"reason": "source_scope_unsafe_channel"},
+            ))
+        elif not decision.chain_start_object_id:
+            state.record(TraceStep(
+                step_type="skip", summary="跳过 follow_chain(缺少起点)",
+                detail={"reason": "missing_chain_start"}))
+        elif decision.chain_start_object_id not in state.collected:
+            # The reflect model may only authorize deterministic graph
+            # traversal from evidence already retrieved in this run.  Do
+            # not let a guessed/arbitrary object id become a side channel
+            # into another active/base graph.
+            state.record(TraceStep(
+                step_type="skip", summary="跳过 follow_chain(起点不在当前候选中)",
+                detail={"reason": "chain_start_not_candidate",
+                        "start_object_id": decision.chain_start_object_id}))
+        elif action_key in state.follow_chain_done:
+            state.record(TraceStep(
+                step_type="skip", summary="跳过重复 follow_chain",
+                detail={"reason": "duplicate_follow_chain",
+                        "start_object_id": decision.chain_start_object_id}))
+        elif state.follow_chain_searches >= state.action_policy.max_follow_chain_actions:
+            state.record(TraceStep(
+                step_type="skip",
+                summary=("跳过 follow_chain(已达次数上限 "
+                         f"{state.action_policy.max_follow_chain_actions})"),
+                detail={"reason": "follow_chain_cap"}))
+        else:
+            state.follow_chain_done.add(action_key)
+            state.follow_chain_searches += 1
+            try:
+                candidate_relevance = float(
+                    state.collected[decision.chain_start_object_id].relevance)
+            except (TypeError, ValueError):
+                candidate_relevance = 0.0
+            if not math.isfinite(candidate_relevance):
+                candidate_relevance = 0.0
+            candidate_relevance = max(0.0, min(1.0, candidate_relevance))
+            try:
+                chain_result = self.follow_chain(
+                    state.notebook_id, decision.chain_start_object_id,
+                    edge_type=decision.chain_edge_type,
+                    target_object_id=decision.chain_target_object_id,
+                    direction=decision.chain_direction)
+            except Exception as exc:  # 见 _chunk_seed_search 的登记注释
+                if self.fail_closed or isinstance(exc, (RetrievalControlError, AskCancelled)):
+                    raise
+                chain_result = None
+            raise_if_cancelled(self.cancel_event)
+            new_chains = []
+            if chain_result is not None:
+                seen_paths = {
+                    tuple(h.relation_id for h in c.hops): c for c in state.chains
+                }
+                for chain in chain_result.inferences:
+                    path_key = tuple(h.relation_id for h in chain.hops)
+                    existing = seen_paths.get(path_key)
+                    if existing is None:
+                        chain.query_relevance = candidate_relevance
+                        seen_paths[path_key] = chain
+                        state.chains.append(chain)
+                        new_chains.append(chain)
+                    else:
+                        existing.query_relevance = max(
+                            float(existing.query_relevance or 0.0),
+                            candidate_relevance,
+                        )
+                for node in chain_result.nodes:
+                    state.collected.setdefault(node.object_id, node)
+            if new_chains:
+                first = new_chains[0]
+                h1, h2 = first.hops
+                summary_text = (
+                    f"两跳推导:{h1.source_name} --{first.inferred_edge_type}--> "
+                    f"{h2.target_name}（经 {h1.target_name}）,新增 {len(new_chains)} 条"
+                )
+                best_trust = max(c.chain_trust for c in new_chains)
+            else:
+                summary_text = "两跳推导未找到满足证据/类型/适用条件的路径"
+                best_trust = 0.0
+            # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零(见 ppr
+            # 分支同款注释)。
+            if not new_chains:
+                state.zero_hit_by_action["follow_chain"] = (
+                    state.zero_hit_by_action.get("follow_chain", 0) + 1)
+            else:
+                state.zero_hit_by_action["follow_chain"] = 0
+            state.record(TraceStep(
+                step_type="follow_chain", summary=summary_text,
+                detail={"hops": 2, "count": len(new_chains),
+                        "chain_trust": round(best_trust, 4),
+                        "edge_type": decision.chain_edge_type,
+                        "direction": decision.chain_direction,
+                        "paths": [{
+                            "source": chain.source_name,
+                            "via": chain.via_name,
+                            "target": chain.target_name,
+                            "edge_type": chain.inferred_edge_type,
+                            "trust": round(chain.chain_trust, 4),
+                            "validity_scope": chain.validity_scope,
+                        } for chain in new_chains[:4]]}))
+
     def _feed_exact_lookup_skip(
         self, state: "_ReasoningRunState", key: str, terms: List[str], note: str,
     ) -> None:
@@ -7958,177 +8476,11 @@ class ReasoningRetriever:
                     detail={"reason": "enumeration_disabled"},
                 ))
             elif decision.next_action == "expand_graph":
-                oid = decision.expand_object_id
-                if self._unsafe_scope_restricted():
-                    state.record(TraceStep(
-                        step_type="skip",
-                        summary="跳过关系扩展（指定来源范围下不可用）",
-                        detail={"reason": "source_scope_unsafe_channel"},
-                    ))
-                elif not oid or oid in state.visited:
-                    state.record(TraceStep(step_type="skip",
-                                     summary="跳过 expand_graph(空或已访问节点)",
-                                     detail={"object_id": oid, "reason": "empty_or_visited"}))
-                else:
-                    state.visited.add(oid)
-                    # NB: expand/neighbors use the ACTIVE notebook_id only. A base-tier hit's
-                    # neighbors live in the base notebook, so this action deliberately skips
-                    # deep cross-tier graph walks (P4 spec §F); only `follow_chain` does that.
-                    expansion = self.neighbors(
-                        notebook_id, oid,
-                        decision.expand_edge_type, decision.expand_direction)
-                    neigh = expansion.hits
-                    raise_if_cancelled(self.cancel_event)
-                    # codex #538 R3 P2:零命中判定与归因 id 都只看**新插入**的
-                    # 邻居——两个展开节点共享的邻居早已在 collected 里,本次
-                    # setdefault 什么都没加:拿原始 neigh 判会把空手轮当命中
-                    # 清零计数,把既有对象计入 result_ids 后又被答案引用时,
-                    # 蒸馏会把功劳记给一次什么都没贡献的 expand 调用。
-                    newly_added_neighbors = []
-                    for h in neigh:
-                        if h.object_id not in state.collected:
-                            state.collected[h.object_id] = h
-                            newly_added_neighbors.append(h)
-                    # 展示用人读节点名(优先 collected 命中, 再查 node_context, 兜底裸 id),
-                    # 避免 trace 里出现 "顺关系深挖 ko-8375b40126" 这种用户看不懂的内部 id。
-                    node_name = ""
-                    if oid in state.collected:
-                        node_name = str(state.collected[oid].payload.get("name", "")).strip()
-                    if not node_name:
-                        ctx = self.get(notebook_id, oid)
-                        node_name = str(ctx.get("name", "")).strip() if ctx else ""
-                    node_name = node_name or oid
-                    # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零,计数
-                    # 才是真正的"连续"零命中(见 ppr 分支同款注释)——旧版只累加
-                    # 不清零,提示措辞里的"已连续 N 次"其实是"历史累计 N 次",
-                    # 中间哪怕命中过也不影响这个数继续往上走。
-                    if not newly_added_neighbors:
-                        state.zero_hit_by_action["expand"] = (
-                            state.zero_hit_by_action.get("expand", 0) + 1)
-                    else:
-                        state.zero_hit_by_action["expand"] = 0
-                    _result_ids, _result_ids_truncated = _capped_result_ids(
-                        [h.object_id for h in newly_added_neighbors])
-                    expand_detail = {"object_id": oid, "name": node_name,
-                                     "edge_type": decision.expand_edge_type,
-                                     "found": len(neigh),
-                                     "result_ids": _result_ids}
-                    if _result_ids_truncated:
-                        # 与 neighbor_truncated 是两个独立信号:后者说的是
-                        # self.neighbors() 自己截断了邻居查询,这个说的是这份
-                        # detail 自己的 result_ids 列表被这个函数的截断上限
-                        # 切了尾巴——两者可能只有一个成立。
-                        expand_detail["result_ids_truncated"] = True
-                    if expansion.truncated:
-                        # 只在真截断的步上加这两个键(detail 逐键不变的冻结基线
-                        # 口径:无条件写 False 会让每一条 expand 步的 detail 都
-                        # 变形)。同时进账目回喂 reflect——轨迹只给人看,模型看
-                        # 不到就会以为这个节点的邻居已经看全了。
-                        expand_detail["neighbor_truncated"] = True
-                        expand_detail["neighbor_limit"] = state.neighbor_expand_limit
-                        state.neighbor_truncated.setdefault(oid, node_name)
-                    state.record(TraceStep(step_type="expand",
-                                     summary=(
-                                         f"顺关系深挖「{node_name}」,得到 {len(neigh)} 个邻居"
-                                         + ("(该节点邻居过多,只展开了一部分)"
-                                            if expansion.truncated else "")
-                                     ),
-                                     detail=expand_detail))
+                self._action_expand_graph(state, decision)
             elif decision.next_action == "add_subquery":
-                if not decision.new_sub_query:
-                    state.record(TraceStep(step_type="skip",
-                                     summary="跳过 add_subquery(缺少 new_sub_query)",
-                                     detail={"reason": "missing_new_sub_query"}))
-                else:
-                    sq = decision.new_sub_query
-                    key = _norm_query(sq.query)
-                    # 模型在 prompt 里只见过注册表算出的唯一简称(展示/回喂
-                    # 都不给它看完整 compound),所以它用 add_subquery 重提或
-                    # 补交某个已确认方向时,提交的文本大概率是简称而非原文
-                    # ——直接按 sq.query 的字面归一化键去比对 attempted 抓不住
-                    # 这种情况(简称的归一化键与它所指方向的 compound 归一化键
-                    # 不是同一个字符串)。matched_direction 把简称解回它所指的
-                    # 方向原文,后面两段分支都按这个方向身份而非提交串本身判断。
-                    matched_direction = state.direction_of.get(key)
-                    if key in state.attempted:
-                        # 提交串本身就命中某条已执行记录(逐字重复,或提交的
-                        # 就是方向原文且原文已执行)——原有语义不变。
-                        state.attempted[key].tries += 1
-                        state.record(TraceStep(step_type="skip",
-                                         summary=f"跳过重复子查询: {sq.query}",
-                                         detail={"query": sq.query,
-                                                 "reason": "duplicate_subquery",
-                                                 "tries": state.attempted[key].tries}))
-                    elif (matched_direction is not None
-                          and _norm_query(matched_direction) in state.attempted):
-                        # 简称命中的方向已经被(补种或此前某轮 add_subquery)
-                        # 执行过,只是账目记在方向原文的身份上、提交串是简称
-                        # ——按方向身份识别为重复,不重跑检索(治「模型换用
-                        # prompt 里看到的简称就能绕过 duplicate_subquery,白烧
-                        # 一轮检索预算」,PR#400 codex R1 P2-2)。
-                        dkey = _norm_query(matched_direction)
-                        state.attempted[dkey].tries += 1
-                        state.record(TraceStep(step_type="skip",
-                                         summary=f"跳过重复子查询: {sq.query}",
-                                         detail={"query": sq.query,
-                                                 "reason": "duplicate_subquery",
-                                                 "tries": state.attempted[dkey].tries}))
-                    else:
-                        # 简称命中一个尚未执行的已确认方向:执行用方向本身的
-                        # 完整原文(方向+已确认问题契约的复合串),不是模型提交
-                        # 的简称——契约是检索用的附加约束,只给简称会丢掉它,
-                        # 检索质量与补种(coverage pass)、首轮切片同型。未命中
-                        # 任何已确认方向(matched_direction 为 None)时走原有
-                        # 非 intent 路径,原文直接执行,label 留空——中性硬约束。
-                        exec_query, exec_key, display, exec_label = _resolve_subquery_identity(
-                            sq.query, matched_direction, state.label_of)
-                        added = 0
-                        # P4 (T1): also collect the newly-added ids alongside
-                        # the existing `added` count — this loop used to only
-                        # count, and result_ids needs the identities.
-                        new_ids: list = []
-                        for h in self.search(notebook_id, exec_query,
-                                             sq.types, sq.prefer)[:state.per_query_take]:
-                            raise_if_cancelled(self.cancel_event)
-                            if h.object_id not in state.collected:
-                                state.collected[h.object_id] = h
-                                added += 1
-                                new_ids.append(h.object_id)
-                        _result_ids, _result_ids_truncated = _capped_result_ids(new_ids)
-                        _subquery_detail = {"query": display, "new": added,
-                                            "result_ids": _result_ids}
-                        if _result_ids_truncated:
-                            _subquery_detail["result_ids_truncated"] = True
-                        # 方向的原文半(codex #690 R1 P2;与知识图谱无关):detail
-                        # 的 "new"/result_ids 已定稿(仍只说 KG 候选),原文另记
-                        # `chunks_found`,attempted 记证据**总数**。
-                        added += self._search_passages_for_direction(
-                            state, exec_query, _subquery_detail)
-                        # 账目记在 exec_query(方向原文)的身份上,而非模型提交
-                        # 的简称——这样它同时从未覆盖清单(_still_uncovered_
-                        # directions 按 a.query in label_of 识别)摘除,且后续
-                        # 再用简称重提会被上面的 matched_direction 分支拦住。
-                        state.attempted[exec_key] = _QueryAttempt(
-                            query=exec_query, new=added, tries=1, label=exec_label)
-                        if exec_query not in state.used_queries:
-                            state.used_queries.append(exec_query)
-                        state.record(TraceStep(step_type="retrieve",
-                                         summary=f"补充子查询: {display}",
-                                         detail=_subquery_detail))
+                self._action_add_subquery(state, decision)
             elif decision.next_action == "search_elements":
-                skip = self._element_search_skip(state.elements_searches)
-                if skip:
-                    state.record(TraceStep(step_type="skip", summary=skip[0],
-                                     detail={"reason": skip[1]}))
-                else:
-                    state.elements_searches += 1
-                    eq = decision.elements_query or question
-                    found = self.search_elements(notebook_id, eq)
-                    raise_if_cancelled(self.cancel_event)
-                    els = merge_element_hits(state.elements, found)
-                    state.record(TraceStep(step_type="fallback",
-                                     summary=f"降级查原文: {eq},新增 {len(els)} 段",
-                                     detail={"query": eq, "found": len(els)}))
+                self._action_search_elements(state, decision)
             elif decision.next_action in (
                 ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION
             ):
@@ -8144,138 +8496,7 @@ class ReasoningRetriever:
                     state, decision, overflow_repair=overflow_repair_submission
                 )
             elif decision.next_action == CONSULT_MEMORY_ACTION:
-                # Agentic Memory P4 (T5)。防御性双查:`consult_memory_flag`/
-                # `self.allow_consult_memory` 都已经在 reflect() 的白名单里生效
-                # (关闭时这个动作根本不会出现在模型的选项里),这里再判一次是
-                # 与 exact_lookup/ppr 同款的纵深防御——测试替身或畸形响应仍可能
-                # 吐出这个 next_action。
-                if not state.consult_memory_flag or not self.allow_consult_memory:
-                    state.record(TraceStep(
-                        step_type="skip",
-                        summary="跳过回想以往打法(当前场景未提供该能力)",
-                        detail={"reason": "consult_memory_disabled"}))
-                elif state.consult_used >= state.action_policy.max_consult_memory:
-                    state.record(TraceStep(
-                        step_type="skip",
-                        summary=("跳过回想以往打法(已达次数上限 "
-                                 f"{state.action_policy.max_consult_memory})"),
-                        detail={"reason": "consult_memory_cap"}))
-                elif state.steps >= state.max_steps:
-                    # codex #538 R4 P2:这是最后一个允许的循环轮——回想的产出
-                    # 只进**下一轮** reflect 的上下文,而下一轮不存在了:执行
-                    # 只会花掉末轮预算渲染一段没有任何模型调用会读到的文本,
-                    # 还顶掉一次本可以真正取证的收尾检索。直接拒绝,不扣
-                    # consult 预算(这轮本来就没送达任何东西)。
-                    state.record(TraceStep(
-                        step_type="skip",
-                        summary="跳过回想以往打法(已是最后一轮,建议无人消费)",
-                        detail={"reason": "consult_memory_last_turn"}))
-                else:
-                    state.consult_used += 1
-                    # codex #538 R1 P2:整个执行体 fail-open——注入开着时一次
-                    # 瞬态/畸形的经验库读取(_cached_experiences 会发 version_signal
-                    # 聚合查询)不得把整次 Ask/报告 run 打挂;这是可选的建议面,
-                    # 与被动块的既有 fail-open 同口径。取消照常上抛。
-                    try:
-                        consult_situation = current_situation(
-                            intent_detail, mode=_EXPERIENCE_RUN_MODE,
-                            retrieval_effort=(
-                                limits.effort if limits is not None else ""))
-                        # codex #538 R1 P2 两条:①排除集只含**真送达**的被动块前缀
-                        # ——选中未送达的行(600 字符块常装不下 top-3)模型从没见过,
-                        # 排除它等于让 consult 永远还不出这些打法;②零命中优先集只取
-                        # 当前计数>0 的动作——命中清零后键还留在字典里,按键集判会把
-                        # 刚成功的动作当「哑火」排前,挤掉真失败的。
-                        delivered_passive_ids = {
-                            str(e.get("id") or "")
-                            for e in state.experience_entries[
-                                : rendered_experience_count(state.experience_block)]
-                        } if state.experience_block else set()
-                        new_consult_rows = _consultable_rows(
-                            self.retrieval_experiences, notebook_id,
-                            consult_situation,
-                            exclude_ids=(
-                                state.consult_delivered_ids | delivered_passive_ids
-                            ),
-                            zero_hit_actions={
-                                a for a, c in state.zero_hit_by_action.items() if c > 0
-                            },
-                            top_k=CONSULT_MEMORY_TOP_K,
-                        )
-                        overlay_note = _undelivered_retrieval_note(
-                            state.profile_raw_blocks, state.profile_block,
-                            self.profile_owner_id)
-                        is_new_overlay = bool(overlay_note) and (
-                            overlay_note != state.consult_overlay_note)
-                        if not new_consult_rows and not is_new_overlay:
-                            state.record(TraceStep(
-                                step_type="skip",
-                                summary="回想以往打法:未找到与当前场景匹配的新记录",
-                                detail={"reason": "consult_memory_nothing_new"}))
-                        else:
-                            state.consult_rows_accum.extend(new_consult_rows)
-                            # 修复轮 spec④/Q-P1-3:先渲染,再按渲染结果(而不是按
-                            # 选中集)更新账目——被 600 字符硬顶挤掉的行/心得没有
-                            # 出现在模型看到的文本里,不该被标成"已经发过了",否则
-                            # 下一次调用会把它排除在候选之外,永远没有机会重新出现。
-                            pending_overlay = (
-                                overlay_note if is_new_overlay
-                                else state.consult_overlay_note)
-                            rendered = render_consult_block(
-                                state.consult_rows_accum,
-                                extra_lines=(
-                                    [pending_overlay] if pending_overlay else ()
-                                ),
-                            )
-                            delivered_ids = set(rendered.delivered_ids)
-                            newly_delivered = [
-                                r for r in new_consult_rows
-                                if str(r.get("id") or "") in delivered_ids
-                            ]
-                            state.consult_delivered_ids.update(delivered_ids)
-                            # codex #538 R5 P2:accum 收敛为**已送达**行——未送达
-                            # 行滞留会在下次调用被再选(不在 delivered 集)、再
-                            # append 成重复,且渲染器先撞上滞留的原始未送达行就
-                            # 停,把它身后的所有候选永久堵死。收敛后未送达行
-                            # 干净地退回候选池,下次照常可选可渲染。
-                            state.consult_rows_accum = [
-                                r for r in state.consult_rows_accum
-                                if str(r.get("id") or "") in state.consult_delivered_ids
-                            ]
-                            overlay_newly_delivered = (
-                                is_new_overlay and rendered.overlay_rendered)
-                            if rendered.overlay_rendered:
-                                state.consult_overlay_note = pending_overlay
-                            state.consult_block_text = rendered.rendered_text
-                            state.consult_delivered_this_turn = bool(
-                                newly_delivered or overlay_newly_delivered)
-                            if not newly_delivered and not overlay_newly_delivered:
-                                # 本次调用真的选中了新东西(否则已经在上面短路成
-                                # "nothing_new"),但全部被硬顶挤在块外——预算已经
-                                # 花掉(``consult_used`` 已 += 1),模型这一轮却什么
-                                # 新内容都没看到。独立 reason 与"候选池本身没有
-                                # 匹配"区分开,方便回看轨迹时分辨是哪一种。
-                                state.record(TraceStep(
-                                    step_type="skip",
-                                    summary="回想以往打法:本轮候选未能装入打法块(预算已用)",
-                                    detail={"reason": "consult_memory_block_full"}))
-                            else:
-                                state.record(TraceStep(
-                                    step_type="consult_memory",
-                                    summary=(
-                                        "回想以往检索打法"
-                                        + (f",新增 {len(newly_delivered)} 条"
-                                           if newly_delivered else "")
-                                    ),
-                                    detail={"entries": len(newly_delivered),
-                                            "chars": len(state.consult_block_text)}))
-                    except AskCancelled:
-                        raise
-                    except Exception:  # noqa: BLE001 — 建议面绝不挂 run
-                        state.record(TraceStep(
-                            step_type="skip",
-                            summary="回想以往打法:读取记录失败,本轮跳过",
-                            detail={"reason": "consult_memory_unavailable"}))
+                self._action_consult_memory(state)
             elif decision.next_action == READ_DOCUMENT_ACTION:
                 self._action_read_document(state, decision)
             elif decision.next_action == "search_chunks":
@@ -8283,206 +8504,9 @@ class ReasoningRetriever:
             elif decision.next_action == "ppr_retrieve":
                 self._action_ppr_retrieve(state, decision)
             elif decision.next_action == "exact_lookup":
-                # 名称已在 reflect() 里清洗过(去包裹标点,不截长——见 clean_exact_term)。
-                # fail_closed 的硬闸(:485 一带)先对超长 exact_term 生效;这里才截到
-                # 词法层的精确短语上界,供探测与展示使用(item 6)。
-                term = decision.exact_term[:MAX_EXACT_PHRASE_CHARS]
-                # 防重按**名称**而非按请求串:seed 用问题原文、agent 可能给
-                # 「set_db 的参数」,两者抽出的名称相同就是同一次查找。真正执行时只
-                # 探测本轮新出现的名称,已查过的不再重复付 I/O。
-                # honor_quotes=False:这条路径上的名称来自模型,不是用户。用户的
-                # 引号已由 seed 通道兑现,而模型若能用 `x "的方法" y` 夹带引号,
-                # 就绕开了这把按实测定标的低选择度子串闸。
-                probed = (self._exact_lookup_terms(term, honor_quotes=False)
-                          if term else [])
-                fresh = [t for t in probed if _norm_query(t) not in state.exact_terms_done]
-                if not self.settings.exact_lookup_enabled or not self.allow_exact_lookup:
-                    # 复用既有 exact_lookup_disabled 分支语义(镜像 allow_ppr):策略位
-                    # 关闭与部署 flag 关闭在动作侧是同一条路径,不再区分理由。
-                    self._feed_exact_lookup_skip(
-                        state, "exact_lookup_disabled", [],
-                        "按名称精确查找当前不可用(本次检索场景未开启该能力)")
-                    state.record(TraceStep(step_type="skip",
-                                     summary="跳过按名称精确查找(未启用)",
-                                     detail={"reason": "exact_lookup_disabled"}))
-                elif not term:
-                    self._feed_exact_lookup_skip(
-                        state, "missing_exact_term", [], "未提供可精确查找的名称")
-                    state.record(TraceStep(step_type="skip",
-                                     summary="跳过按名称精确查找(缺少名称)",
-                                     detail={"reason": "missing_exact_term"}))
-                elif not probed:
-                    # 与 seed 通道共用 exact_probe_terms 这把闸:模型不能用一个低选择度
-                    # 的短串(如「第 2.1 节」)或一个普通英文词组(如「state-of-the-art」)
-                    # 把精确通道变成全库子串扫描。措辞要教会模型下一轮该给什么,
-                    # 光说「不合法」它只会换一个同样不合法的词再试一次。
-                    self._feed_exact_lookup_skip(
-                        state, _norm_query(term), [term], _NOT_A_NAME_NOTE.format(term=term))
-                    state.record(TraceStep(step_type="skip",
-                                     summary=f"跳过按名称精确查找:{_NOT_A_NAME_NOTE.format(term=term)}",
-                                     detail={"reason": "exact_term_not_identifier",
-                                             "term": term}))
-                elif not fresh:
-                    # 账目按调用记,重复请求要落到当初真正查过它的那一条上——
-                    # 只有账目变了 prompt 才变,模型才不会在同一个不动点上空转。
-                    probed_keys = {_norm_query(t) for t in probed}
-                    for attempt in state.exact_lookup_log:
-                        if probed_keys & {_norm_query(t) for t in attempt.terms}:
-                            attempt.tries += 1
-                            break
-                    state.record(TraceStep(step_type="skip",
-                                     summary=f"跳过重复的按名称精确查找:{term}",
-                                     detail={"reason": "duplicate_exact_lookup",
-                                             "term": term, "terms": probed}))
-                elif state.exact_lookups >= state.action_policy.max_exact_lookups:
-                    self._feed_exact_lookup_skip(
-                        state, _norm_query(term), [term],
-                        f"「{term}」已达按名称精确查找次数上限（"
-                        f"{state.action_policy.max_exact_lookups}）")
-                    state.record(TraceStep(
-                        step_type="skip",
-                        summary=("跳过按名称精确查找(已达次数上限 "
-                                 f"{state.action_policy.max_exact_lookups})"),
-                        detail={"reason": "exact_lookup_cap", "term": term}))
-                else:
-                    state.exact_lookups += 1
-                    new = take_distinct_chunk_hits(
-                        self.exact_lookup(notebook_id, exact_probe_query(fresh)),
-                        state.seen_chunks, state.chunks,
-                    )
-                    state.chunks.extend(new)
-                    state.exact_terms_done.update(_norm_query(t) for t in fresh)
-                    state.exact_lookup_log.append(
-                        _ExactLookupAttempt(terms=list(fresh), new=len(new)))
-                    # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零(见 ppr
-                    # 分支同款注释)。
-                    if not new:
-                        state.zero_hit_by_action["exact_lookup"] = (
-                            state.zero_hit_by_action.get("exact_lookup", 0) + 1)
-                    else:
-                        state.zero_hit_by_action["exact_lookup"] = 0
-                    _result_ids, _result_ids_truncated = _capped_result_ids(
-                        [c.chunk_id for c in new])
-                    _exact_reflect_detail = {"term": term, "terms": list(fresh),
-                                             "found": len(new), "phase": "reflect",
-                                             "result_ids": _result_ids}
-                    if _result_ids_truncated:
-                        _exact_reflect_detail["result_ids_truncated"] = True
-                    state.record(TraceStep(
-                        step_type="exact_lookup",
-                        summary=f"按名称精确查找「{term}」:新增 {len(new)} 段原文",
-                        detail=_exact_reflect_detail))
+                self._action_exact_lookup(state, decision)
             elif decision.next_action == "follow_chain":
-                action_key = (
-                    decision.chain_start_object_id,
-                    decision.chain_target_object_id,
-                    decision.chain_edge_type or "",
-                    decision.chain_direction,
-                )
-                if self._unsafe_scope_restricted():
-                    state.record(TraceStep(
-                        step_type="skip",
-                        summary="跳过两跳推导（指定来源范围下不可用）",
-                        detail={"reason": "source_scope_unsafe_channel"},
-                    ))
-                elif not decision.chain_start_object_id:
-                    state.record(TraceStep(
-                        step_type="skip", summary="跳过 follow_chain(缺少起点)",
-                        detail={"reason": "missing_chain_start"}))
-                elif decision.chain_start_object_id not in state.collected:
-                    # The reflect model may only authorize deterministic graph
-                    # traversal from evidence already retrieved in this run.  Do
-                    # not let a guessed/arbitrary object id become a side channel
-                    # into another active/base graph.
-                    state.record(TraceStep(
-                        step_type="skip", summary="跳过 follow_chain(起点不在当前候选中)",
-                        detail={"reason": "chain_start_not_candidate",
-                                "start_object_id": decision.chain_start_object_id}))
-                elif action_key in state.follow_chain_done:
-                    state.record(TraceStep(
-                        step_type="skip", summary="跳过重复 follow_chain",
-                        detail={"reason": "duplicate_follow_chain",
-                                "start_object_id": decision.chain_start_object_id}))
-                elif state.follow_chain_searches >= state.action_policy.max_follow_chain_actions:
-                    state.record(TraceStep(
-                        step_type="skip",
-                        summary=("跳过 follow_chain(已达次数上限 "
-                                 f"{state.action_policy.max_follow_chain_actions})"),
-                        detail={"reason": "follow_chain_cap"}))
-                else:
-                    state.follow_chain_done.add(action_key)
-                    state.follow_chain_searches += 1
-                    try:
-                        candidate_relevance = float(
-                            state.collected[decision.chain_start_object_id].relevance)
-                    except (TypeError, ValueError):
-                        candidate_relevance = 0.0
-                    if not math.isfinite(candidate_relevance):
-                        candidate_relevance = 0.0
-                    candidate_relevance = max(0.0, min(1.0, candidate_relevance))
-                    try:
-                        chain_result = self.follow_chain(
-                            notebook_id, decision.chain_start_object_id,
-                            edge_type=decision.chain_edge_type,
-                            target_object_id=decision.chain_target_object_id,
-                            direction=decision.chain_direction)
-                    except Exception as exc:  # 见 _chunk_seed_search 的登记注释
-                        if self.fail_closed or isinstance(exc, (RetrievalControlError, AskCancelled)):
-                            raise
-                        chain_result = None
-                    raise_if_cancelled(self.cancel_event)
-                    new_chains = []
-                    if chain_result is not None:
-                        seen_paths = {
-                            tuple(h.relation_id for h in c.hops): c for c in state.chains
-                        }
-                        for chain in chain_result.inferences:
-                            path_key = tuple(h.relation_id for h in chain.hops)
-                            existing = seen_paths.get(path_key)
-                            if existing is None:
-                                chain.query_relevance = candidate_relevance
-                                seen_paths[path_key] = chain
-                                state.chains.append(chain)
-                                new_chains.append(chain)
-                            else:
-                                existing.query_relevance = max(
-                                    float(existing.query_relevance or 0.0),
-                                    candidate_relevance,
-                                )
-                        for node in chain_result.nodes:
-                            state.collected.setdefault(node.object_id, node)
-                    if new_chains:
-                        first = new_chains[0]
-                        h1, h2 = first.hops
-                        summary_text = (
-                            f"两跳推导:{h1.source_name} --{first.inferred_edge_type}--> "
-                            f"{h2.target_name}（经 {h1.target_name}）,新增 {len(new_chains)} 条"
-                        )
-                        best_trust = max(c.chain_trust for c in new_chains)
-                    else:
-                        summary_text = "两跳推导未找到满足证据/类型/适用条件的路径"
-                        best_trust = 0.0
-                    # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零(见 ppr
-                    # 分支同款注释)。
-                    if not new_chains:
-                        state.zero_hit_by_action["follow_chain"] = (
-                            state.zero_hit_by_action.get("follow_chain", 0) + 1)
-                    else:
-                        state.zero_hit_by_action["follow_chain"] = 0
-                    state.record(TraceStep(
-                        step_type="follow_chain", summary=summary_text,
-                        detail={"hops": 2, "count": len(new_chains),
-                                "chain_trust": round(best_trust, 4),
-                                "edge_type": decision.chain_edge_type,
-                                "direction": decision.chain_direction,
-                                "paths": [{
-                                    "source": chain.source_name,
-                                    "via": chain.via_name,
-                                    "target": chain.target_name,
-                                    "edge_type": chain.inferred_edge_type,
-                                    "trust": round(chain.chain_trust, 4),
-                                    "validity_scope": chain.validity_scope,
-                                } for chain in new_chains[:4]]}))
+                self._action_follow_chain(state, decision)
             elif decision.next_action == "expand_community" and (
                 not self.allow_community_expansion
                 or self._unsafe_scope_restricted()

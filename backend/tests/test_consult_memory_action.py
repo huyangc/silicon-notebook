@@ -647,8 +647,8 @@ def test_the_zero_hit_priority_set_filters_to_positive_counts():
     import inspect
     import app.services.reasoning_retrieval as rr
 
-    source = inspect.getsource(rr.ReasoningRetriever.run)
-    # 2026-09-22 起 run() 调的是取数外壳 ``_consultable_rows``(一次签名装两层
+    source = inspect.getsource(rr.ReasoningRetriever._action_consult_memory)
+    # 2026-09-22 起 consult 动作调的是取数外壳 ``_consultable_rows``(一次签名装两层
     # 再交给 ``select_consultable``);要钉的表达式仍然逐字在这个调用点上。
     call_start = source.index("_consultable_rows(")
     call_src = source[call_start:call_start + 600]

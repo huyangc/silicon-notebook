@@ -915,7 +915,7 @@ _SEAT_FAILSOFT_SITES = (
     ("app/services/reasoning_retrieval.py",
      "ReasoningRetriever._run_enumeration", "enumerate_sources"),
     ("app/services/reasoning_retrieval.py",
-     "ReasoningRetriever.run", "follow_chain"),
+     "ReasoningRetriever._action_follow_chain", "follow_chain"),
     ("app/services/report_engine.py",
      "ReportEngine._load_probe_query_results._safe", "loader"),
     ("app/services/report_engine.py",
