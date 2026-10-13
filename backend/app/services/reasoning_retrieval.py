@@ -3231,8 +3231,9 @@ class _ReasoningRunState:
     局部名。标量(`steps`/`stale`/`outline_updates` …)与会被重新绑定的值
     (`outline`/`outline_overflow`/`consult_rows_accum`/`chains`)尤其**不得**起局部
     别名:写进别名的值 `state` 看不见,下一轮读到的就是旧数——那是一类不报错的
-    静默错误。只有从不重新绑定的可变容器与方法对象(如 `record`)可以起别名;
-    `test_reasoning_run_state_authority` 按这条纪律守着 `run`。
+    静默错误。只有从不重新绑定的可变容器与记账器 `record` 可以起别名,而且
+    要同名(`record = state.record`、`collected = state.collected`);
+    `test_reasoning_run_state_authority` 按这条纪律守着循环所在的方法。
 
     每个字段的注释说明它**由谁写、被谁读**。
     """
