@@ -1,5 +1,6 @@
-// knowhow-optimize-logic.ts 的纯逻辑单测（Task 9：模板+优化 UI）。The three
+// knowhow-optimize-logic.ts 的纯逻辑单测（Task 9：模板+优化 UI）。The
 // consumer .tsx files (knowhow-cell-editor.tsx / knowhow-panel.tsx /
+// knowhow-row-optimize-modal.tsx / knowhow-reformat-batch-modal.tsx /
 // knowhow-import.tsx) all contain JSX, so — mirroring every other
 // knowhow-*-logic.ts split in this codebase — the testable state machines and
 // display-mapping helpers live in knowhow-optimize-logic.ts and are imported

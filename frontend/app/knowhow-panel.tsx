@@ -4,8 +4,9 @@
  * 「Knowhow 表」总览：表列表 → 表格网格 → 行详情抽屉 三层，外加导入向导 /
  * 建表向导 / 表管理三个 modal 的挂载点。page.tsx 只负责接线（导航按钮 +
  * `<KnowhowPanel notebookId apiBase canEdit onClose />` 一处挂载，外加 Task 12
- * 引用跳转用的可选 `initialTableId`/`initialRowId`），面板自身的状态机与渲染
- * 都集中在这里。
+ * 引用跳转用的可选 `initialTableId`/`initialRowId`），面板的顶层状态机（选中
+ * 哪张表、哪一行、哪个弹窗打开）与各挂载点在这里；自带状态机的弹窗与样式在
+ * 各自的文件里（见下方「编辑入口的分工」）。
  *
  * 引用跳转（Task 12，跳转目标 Task 11 改）：ask 回答里命中 knowhow 格子的
  * 引用点「在表格中查看」时，page.tsx 打开本面板并传入
@@ -35,8 +36,12 @@
  * KnowhowCellEditor）在 knowhow-cell-editor.tsx（Task 7），本文件只持有
  * 「当前打开的是哪一格 + 预览还是编辑」这一顶层状态机（cellModal）与三个click
  * 路由入口：网格非行标题列格子点击、行详情抽屉分节「编辑」按钮、「添加行」
- * 建空行后自动打开首格编辑态。本文件对这些 modal 只做「打开/关闭 + 完成后
- * 刷新」的接线，不重复实现格子编辑器内部的任何逻辑。
+ * 建空行后自动打开首格编辑态。行详情抽屉上的三个批量弹窗各自持有状态机：
+ * 「智能补全空列」在 knowhow-row-completion-modal.tsx，「优化整行」在
+ * knowhow-row-optimize-modal.tsx，「一键规整整行/整表」在
+ * knowhow-reformat-batch-modal.tsx；整套样式在 knowhow-panel-styles.tsx。
+ * 本文件对这些 modal 只做「打开/关闭 + 完成后刷新」的接线（保存统一经
+ * handleCellSave），不重复实现它们内部的任何逻辑。
  */
 "use client";
 
