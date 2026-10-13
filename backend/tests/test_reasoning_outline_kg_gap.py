@@ -1083,7 +1083,7 @@ def test_the_terminal_repair_round_prompt_carries_no_gap_hint(repo, monkeypatch)
 
 
 def test_the_run_loop_passes_the_repair_flag_to_the_segment_builder():
-    """接线守卫:`run()` 那次 `kg_gap_note_segment` 调用必须带 `repair_only=`。
+    """接线守卫:reflect 循环拼摘要时那次 `kg_gap_note_segment` 调用必须带 `repair_only=`。
 
     为什么要一条读源码的守卫 —— 这条接线**当前没有行为签名**:纠错轮之后循环立刻
     `break`,所以「被误当成展示过而消费掉」的那批候选本来也不会再有机会上屏,而
@@ -1094,7 +1094,7 @@ def test_the_run_loop_passes_the_repair_flag_to_the_segment_builder():
     """
     import inspect
 
-    source = inspect.getsource(ReasoningRetriever.run)
+    source = inspect.getsource(ReasoningRetriever._reflect_round_context_blocks)
     calls = [
         line for line in source.splitlines()
         if "kg_gap_note_segment(" in line
@@ -1106,6 +1106,12 @@ def test_the_run_loop_passes_the_repair_flag_to_the_segment_builder():
     # 「disabled={false} 同样报红」的教训),所以钉到实参就是那只终态轮变量。
     start = source.index("kg_gap_note_segment(")
     assert "repair_only=terminal_overflow_repair" in source[start:start + 200]
+    # 那只变量是这个方法的形参,所以循环那一侧同样钉到实参:传进来的必须是本轮
+    # 的终态轮标记,而不是一个恒假值。
+    loop = inspect.getsource(ReasoningRetriever._run_reflect_loop)
+    start = loop.index("_reflect_round_context_blocks(")
+    assert "terminal_overflow_repair=terminal_overflow_repair" in (
+        loop[start:start + 200])
 
 
 def test_a_later_batch_can_outrank_what_is_still_queued(repo, monkeypatch):
