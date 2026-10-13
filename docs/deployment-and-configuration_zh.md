@@ -224,6 +224,20 @@ MCP transport metadata，以及新签发 token 旁所链接的匿名机器说明
 bearer token。由于该值会进入 Agent 指令正文，启动会拒绝 userinfo、query、fragment、非精确
 `/mcp` path，以及空白/控制符/反引号。
 
+同机 Nginx → Next.js → FastAPI 部署时，Next.js 还会把公开的 `/mcp` 直接转发到
+`${BACKEND_PROXY_TARGET}/mcp/`。在根 `.env` 设置
+`MCP_PUBLIC_URL=https://notebook.example.com/mcp`（不带末尾斜杠）和
+`MCP_REQUIRE_HTTPS=1`，保留 `BACKEND_HOST=127.0.0.1`、`PORT=8000`，并设置
+`NEXT_PUBLIC_API_BASE_URL=/api`、`BACKEND_PROXY_TARGET=http://127.0.0.1:8000`、
+`FRONTEND_PORT=3000`。Nginx 将所有路径转发到 `http://127.0.0.1:3000`，保留
+`Host`、`Authorization`、`X-Forwarded-Proto`，并关闭流式响应的缓冲和缓存。
+公网只需开放 Nginx 的 80/443，关闭 3000/8000 的公网入站。Next.js 代理空闲超时为
+300 秒，Nginx 的读取超时应至少同样宽裕；这是空闲超时，不是工具调用的总时限。
+修改转发目标或公开 API 基址后需重新构建前端。客户端使用公布的精确 `/mcp` 地址，
+转发时才补后端需要的末尾斜杠，不需要客户端重定向。仅可信内网的纯 HTTP 部署可改用
+`MCP_PUBLIC_URL=http://notebook.example.com/mcp`、`MCP_REQUIRE_HTTPS=0`；这会放宽
+Host/Origin 校验，并明文传输 token。
+
 生产诊断支持的目标形态是 Ubuntu 24.04 上按上述 `npm run start` 启动、只含一个
 Uvicorn worker 的普通部署。若部署疑似卡住，请保持服务运行，并在**卡顿正在发生时**
 采集事故；见[生产事故即时采集](./operations_zh.md#生产事故即时采集)。先重启会丢掉命令需要关联的

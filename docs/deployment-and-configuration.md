@@ -269,6 +269,22 @@ must also set `MCP_REQUIRE_HTTPS=1`; the onboarding link never carries the beare
 Startup rejects userinfo, query strings, fragments, paths other than exactly `/mcp`, and
 whitespace/control/backtick characters because this value is rendered into Agent instructions.
 
+For a co-located Nginx → Next.js → FastAPI deployment, Next.js also rewrites the public
+`/mcp` endpoint directly to `${BACKEND_PROXY_TARGET}/mcp/`. Set
+`MCP_PUBLIC_URL=https://notebook.example.com/mcp` (no trailing slash) and
+`MCP_REQUIRE_HTTPS=1`, keep `BACKEND_HOST=127.0.0.1` and `PORT=8000`, and use
+`NEXT_PUBLIC_API_BASE_URL=/api`, `BACKEND_PROXY_TARGET=http://127.0.0.1:8000`, and
+`FRONTEND_PORT=3000` in the root `.env`. Nginx forwards all paths to
+`http://127.0.0.1:3000` with `Host`, `Authorization`, and `X-Forwarded-Proto` preserved;
+disable response buffering and caching for streamed responses. Only Nginx's 80/443 ports
+need public ingress; block public ingress to 3000/8000. Next.js's proxy idle timeout is
+300 seconds, and the Nginx read timeout should be at least as generous. This is an idle
+timeout, not a total tool-call deadline. Rebuild the frontend after changing the rewrite
+target or public API base. Clients use the exact published `/mcp` URL; the rewrite adds
+the backend-only trailing slash without a client redirect. A trusted-intranet HTTP-only
+deployment can instead use `MCP_PUBLIC_URL=http://notebook.example.com/mcp` and
+`MCP_REQUIRE_HTTPS=0`; this relaxes Host/Origin checks and transmits tokens in cleartext.
+
 The supported production diagnostics target is Ubuntu 24.04 running this normal
 `npm run start` flow with its single Uvicorn worker. If that deployment appears hung,
 leave it running and capture the incident **while the hang is still present**; see
