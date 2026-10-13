@@ -87,7 +87,7 @@ export function KnowhowRowDrawer({
    * 一次 Esc。 */
   cellModalOpen: boolean;
   /** Task 11：本行按列索引的代码状态 map（父组件在抽屉打开时一次性拉取，见
-   * knowhow-panel.tsx 顶层的 loadRowCode）。 */
+   * use-knowhow-row-code.ts 的 loadRowCode）。 */
   codeByColumn: Record<string, KnowhowCellCode>;
   /** 是否已成功加载过 codeByColumn——false 时（含加载失败）任何分节都不渲染
    * chip，宁可暂时不显示也不能显示可能误导的"添加代码"。 */

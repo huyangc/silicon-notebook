@@ -113,8 +113,8 @@ export interface KnowhowCodeModalProps {
    * 再判断"有没有代码"这件事本身。 */
   code: KnowhowCellCode;
   canEdit: boolean;
-  /** 保存成功：把最新代码视图报给上层——上层（knowhow-panel.tsx）合并进它
-   * 自己按列索引的行级 map，不必整行重拉。 */
+  /** 保存成功：把最新代码视图报给上层——上层（use-knowhow-row-code.ts 的
+   * handleCodeSaved）合并进按列索引的行级 map，不必整行重拉。 */
   onSaved: (columnId: string, entry: KnowhowCellCode) => void;
   /** 删除成功：通知上层把这一列从行级 map 里摘除。 */
   onDeleted: (columnId: string) => void;

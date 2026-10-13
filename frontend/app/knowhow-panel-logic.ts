@@ -2,7 +2,8 @@
 // knowhow-panel.tsx 含 JSX，Node 原生 TS 类型剥离不支持 .tsx（仅 .ts/.mts/.cts
 // 可被 node --test 直接 import），故本文件把行过滤 / 列序 / 投影状态徽标文案
 // 与可重试判定 / 抽屉标题解析 / 图片鉴权判定 这些可测纯逻辑单独抽出。
-// knowhow-panel.tsx 只调用本文件导出的函数，不重复实现判断逻辑。
+// knowhow-panel.tsx 及从它拆出的网格、行抽屉、徽章模块只调用本文件导出的
+// 函数，不重复实现判断逻辑。
 
 import { composeRowTitle, type KnowhowColumn, type KnowhowRow, type ProjectionStatus } from "./knowhow-model.ts";
 

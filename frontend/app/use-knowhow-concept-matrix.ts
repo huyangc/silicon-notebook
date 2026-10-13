@@ -50,7 +50,7 @@ export function useKnowhowConceptMatrix({
   effects: KnowhowConceptMatrixEffects;
 }) {
   // Task 8（点概念打开矩阵抽屉，规格 §4.3）：当前打开的概念值——null=未打开；
-  // 非空时对应 anchor 列某个分组的 anchorValue，驱动下方渲染
+  // 非空时对应 anchor 列某个分组的 anchorValue，驱动面板渲染
   // KnowhowMatrixDrawer（与 cellModal/codeModal 平级的另一个顶层 modal 状态，
   // 堆叠在网格之上）。
   const [openConceptValue, setOpenConceptValue] = useState<string | null>(null);
@@ -60,7 +60,7 @@ export function useKnowhowConceptMatrix({
   // highlightRowId prop，抽屉据此高亮该分支列（表头 + 该行全部格子）。只在
   // 「有 anchor 的表被引用跳转命中」时非空，其余打开方式（点概念格/加分支/
   // 加概念）不设置，恒为 null——与 openConceptValue 同生命周期但不完全同步：
-  // openConceptValue 变化时不逐一清空这个值（那样会清掉刚设好的高亮，见下方
+  // openConceptValue 变化时不逐一清空这个值（那样会清掉刚设好的高亮，见 knowhow-panel.tsx
   // 引用跳转 effect 的注释），只在关闭抽屉/切表/返回列表等「离开当前概念」
   // 的位置与 openConceptValue 并列清零。
   const [highlightRowId, setHighlightRowId] = useState<string | null>(null);
@@ -68,7 +68,7 @@ export function useKnowhowConceptMatrix({
   // Task 10（删概念）：矩阵抽屉「删除整个概念」二次确认态——镜像表级
   // confirmDelete/deleting 那一对状态（KnowhowTableGrid 消费的同名 prop），
   // 只是作用对象从"这张表"换成"当前打开的概念组"。openConceptValue 变化
-  // （切概念/关抽屉）时下面紧跟的 effect 统一重置，不必在每个改
+  // （切概念/关抽屉）时本 hook 末尾的 effect 统一重置，不必在每个改
   // openConceptValue 的地方各自补一行重置代码。
   const [confirmDeleteConcept, setConfirmDeleteConcept] = useState(false);
   const [deletingConcept, setDeletingConcept] = useState(false);
@@ -180,7 +180,7 @@ export function useKnowhowConceptMatrix({
   // Task 8：openConceptValue 对应的 anchor 分组——按 detail.rows 全量分组
   // （不受网格搜索 query 过滤影响，抽屉展示该概念完整的分支集合，不因为
   // 搜索命中了其中一支就漏显示其余分支）；表已刷新/该概念值不再存在时
-  // 找不到、为 null，抽屉不渲染（见下方 KnowhowMatrixDrawer 挂载条件）。
+  // 找不到、为 null，抽屉不渲染（见 knowhow-panel.tsx 里 KnowhowMatrixDrawer 的挂载条件）。
   const openConceptGroup = useMemo(() => {
     if (!detail?.anchorColumnId || openConceptValue === null) return null;
     const groups = groupRowsByAnchor(detail.rows, detail.anchorColumnId);

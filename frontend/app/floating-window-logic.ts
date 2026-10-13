@@ -5,7 +5,7 @@
 //
 // 设计前提——「偏移量」而非「绝对坐标」：本特性铺给的 7 个弹窗现在都是
 // `.kh-modal-overlay { display:grid; place-items:center }` 或等价的 flex 居中
-// 布局（见 knowhow-panel.tsx .kh-modal-overlay / knowhow-import.tsx
+// 布局（见 knowhow-panel-styles.tsx .kh-modal-overlay / knowhow-import.tsx
 // .knowhow-import-backdrop），卡片本身从不设置 top/left。WindowRect.x/y 表示在
 // 这个「CSS 居中位置」之上再叠加的偏移（配合 hook 侧的 `transform: translate`
 // 实现），而不是视口绝对坐标——这样卡片在不同弹窗、不同默认宽度下都能共用同一套

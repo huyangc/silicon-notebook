@@ -22,8 +22,8 @@
  * 权限（design doc §8.2 末尾）：`canEdit=false` 的只读成员看得到时间线和 diff，
  * 但看不到「设为里程碑」/「回到这里」/删除里程碑这几个写入口——门控在本文件
  * 内部（不是整个抽屉挂 canEdit，抽屉打开与否只取决于是否点了「历史」，与
- * knowhow-panel.tsx 工具栏「历史」按钮本身不整体挂 canEdit 一致，见该文件
- * 头注释）。
+ * knowhow-table-grid.tsx 工具栏「历史」按钮本身不整体挂 canEdit 一致，见该
+ * 按钮处注释）。
  *
  * 两个「diff」不要接错（knowhow-model.ts fetchKnowhowHistoryDiff 头注释同一条
  * 警告）：单条变更展开（renderChangeDetail）直接读该条 payload 自身携带的
@@ -140,8 +140,8 @@ function formatClock(iso: string): string {
 }
 
 // --- 单条变更 / 两版对比 共用的 diff 渲染块（PascalCase：返回 JSX 的辅助按
-// 本文件既有约定实现为组件，而非小写工具函数，见 knowhow-panel.tsx
-// RoleBadge/ColumnNameCell 的既有写法） -------------------------------------
+// 本文件既有约定实现为组件，而非小写工具函数，见 knowhow-badges.tsx
+// RoleBadge、knowhow-table-grid.tsx ColumnNameCell 的既有写法） -------------------------------------
 
 type DiffCellEntry = { rowId: string; columnId: string; before: string | null; after: string | null };
 type DiffRowEntry = { rowId: string; cells: Record<string, string>; code?: { columnId: string }[] };
@@ -509,7 +509,7 @@ export function KnowhowHistoryDrawer({
   useEffect(reload, [reload]);
 
   // Esc 关闭：与 KnowhowRowDrawer 的既有模式一致，但本抽屉没有任何东西能堆叠
-  // 在它之上（不像该组件需要 cellModalOpen 短路——见 knowhow-panel.tsx 里
+  // 在它之上（不像该组件需要 cellModalOpen 短路——见 knowhow-row-drawer.tsx 里
   // KnowhowRowDrawer 的同名 prop 注释；本抽屉不提供"编辑格子"之类的二级弹层
   // 入口，Task 15 范围内没有嵌套浮窗需要与本监听器竞争同一次按键），无条件
   // 关闭即可，同 KnowhowRowOptimizeModal/KnowhowReformatBatchModal 的既有写法。
