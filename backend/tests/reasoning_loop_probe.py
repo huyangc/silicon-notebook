@@ -9,7 +9,7 @@ outside world, at the level the loop itself works at:
 * every model call: workload, roles, the ``messages`` bytes (SHA-256 + size),
   the schema hint (SHA-256) and the call kwargs — the model-visible input;
 * the ``candidates_summary`` each reflect turn was given, verbatim — the text
-  the loop itself assembles, so a reviewer can read a diff of it;
+  the loop itself assembles, which the scenarios assert on;
 * the semantic identity of every port call (port, method, normalised
   arguments) on the retrieval port, the experience library (this is where
   ``note_adopted`` shows up) and the profile store, plus the plugin host's
@@ -17,7 +17,7 @@ outside world, at the level the loop itself works at:
 
 SQL is deliberately NOT recorded: the loop reaches storage only through those
 ports, so how a port spells or orders its statements is the store's business,
-and pinning it would make every legitimate store change re-record this file.
+and asserting on it would tie the loop's scenarios to the store's spelling.
 
 Port calls are split by thread (see ``Probe.split``): the run's own thread —
 where the reflect loop and the close execute — as an exact ordered sequence;
