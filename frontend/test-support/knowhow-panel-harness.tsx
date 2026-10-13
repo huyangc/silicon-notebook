@@ -2,28 +2,27 @@
 //
 // The panel is about to be split into several modules (styles, three modals,
 // list / grid / row-detail / concept-matrix slices) with **zero** behaviour
-// change. This harness gives the C0 characterization suites three observation
-// points that do not depend on how the code is organised:
+// change. This harness gives the characterization suites two observation points
+// that do not depend on how the code is organised:
 //
 //  1. The network contract, observed at the one place every request crosses:
 //     `globalThis.fetch`. Each request is recorded as `{ method, path, body }` in
 //     issue order, so a suite can pin the exact request sequence (URL, method,
 //     body, order) of a scripted scenario. This golden is permanent: it is what
 //     the backend sees, and no refactor is allowed to change it.
-//  2. React commit counts, from a `<Profiler>` wrapped around the panel. This is
-//     a split-period baseline only (see `knowhow-panel-golden.component.test.tsx`).
-//  3. The stylesheet text of the panel's single global style block, read from
-//     the DOM (never from the source file). Split-period baseline as well.
+//  2. The panel's single global style block, read from the DOM (never from the
+//     source file).
+// During the split it also counted React commits with a <Profiler> and hashed
+// the stylesheet text; S4-d retired both (see
+// `knowhow-panel-golden.component.test.tsx`).
 //
 // The fake server answers every request with an in-memory response whose body
 // methods resolve on microtasks only, so a scripted scenario is deterministic:
 // no wall-clock timer, socket or stream pump decides how React batches updates.
 // Unrouted requests are recorded and fail the test in `afterEach` instead of
 // silently turning into a component-level error branch.
-import { createHash } from "node:crypto";
-
 import { cleanup, getConfig, render } from "@testing-library/react";
-import { Profiler, StrictMode, type ReactElement } from "react";
+import { StrictMode, type ReactElement } from "react";
 import { afterEach, beforeEach, expect, vi } from "vitest";
 
 import { API_BASE } from "../app/api-config.ts";
@@ -341,7 +340,7 @@ export function useKnowhowPanelSuite(): { server: () => FakeKnowhowServer } {
 }
 
 // ---------------------------------------------------------------------------
-// Rendering with a commit counter
+// Rendering
 // ---------------------------------------------------------------------------
 
 export type PanelProps = KnowhowPanelProps;
@@ -354,29 +353,18 @@ export const BASE_PROPS: PanelProps = {
 };
 
 export type RenderedPanel = ReturnType<typeof render> & {
-  /** Number of React commits of the panel subtree so far. */
-  commits: () => number;
-  /** Re-render with new props (same tree shape, same Profiler). */
+  /** Re-render with new props (same tree shape). */
   update: (props: PanelProps) => void;
 };
 
 export function renderPanel(props: Partial<PanelProps> = {}, options: { strict?: boolean } = {}): RenderedPanel {
-  let commitCount = 0;
-  const onRender = () => {
-    commitCount += 1;
-  };
   const tree = (current: PanelProps): ReactElement => {
-    const profiled = (
-      <Profiler id="knowhow-panel" onRender={onRender}>
-        <KnowhowPanel {...current} />
-      </Profiler>
-    );
-    return options.strict ? <StrictMode>{profiled}</StrictMode> : profiled;
+    const panel = <KnowhowPanel {...current} />;
+    return options.strict ? <StrictMode>{panel}</StrictMode> : panel;
   };
   const result = render(tree({ ...BASE_PROPS, ...props }));
   return {
     ...result,
-    commits: () => commitCount,
     update: (next) => result.rerender(tree(next)),
   };
 }
@@ -403,7 +391,7 @@ export async function settle(turns = 8): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Stylesheet fingerprint
+// Stylesheet
 // ---------------------------------------------------------------------------
 
 /** The panel's single global style block, read from the rendered DOM. */
@@ -413,8 +401,4 @@ export function panelStyleElement(container: HTMLElement): HTMLStyleElement {
   const styles = section!.querySelectorAll(":scope > style");
   expect(styles).toHaveLength(1);
   return styles[0] as HTMLStyleElement;
-}
-
-export function sha256Hex(text: string): string {
-  return createHash("sha256").update(text, "utf8").digest("hex");
 }
