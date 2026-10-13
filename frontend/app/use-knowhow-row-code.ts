@@ -17,9 +17,13 @@
  * `handleCodeDeleted` 仍是每次渲染新建的普通函数，**不要**给它们加 useCallback
  * （计划第 184 行，knowhow-panel-boundary 守卫钉住）。
  *
- * 已登记、本轮不修的既有行为：没有展开行时 effect 会把 map 复位成新的 `{}`，关抽屉
- * 那一步因此多一次提交（挂载时与表清单的 loading 渲染合并，不单独计数）。修它会改
- * 渲染次数，留待拆分之后单独处理。
+ * 没有展开行时 effect 把 map 复位成新的 `{}`、loaded/error 复位：这一支负责清掉上一行
+ * 的代码状态。换一行重开抽屉时，新行的拉取要到 effect 里才发起，抽屉第一帧拿到的是
+ * 本 hook 当时持有的状态；没有这次复位，第一帧会带着上一行的 `rowCodeLoaded=true`
+ * 与代码 map，按上一行的代码状态画出 chip（knowhow-panel-row-code-reset 组件用例
+ * 钉住）。已登记的代价：关抽屉那一步因此多一次提交（挂载时与表清单的 loading 渲染
+ * 合并，不单独计数）。将来若要省掉这次提交，必须换一种同样能清掉上一行状态的写法，
+ * 不能直接删掉这一支。
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";

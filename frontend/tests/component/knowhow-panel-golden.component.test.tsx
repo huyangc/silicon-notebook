@@ -37,7 +37,10 @@
 //    render (its effect depends on the inline `onClose` arrow); the test below
 //    checks the drawer still closes on Escape after several re-renders.
 //  * The row-code hook resets its state from an effect whenever no row is open,
-//    which costs one extra commit when the drawer closes.
+//    which costs one extra commit when the drawer closes. The reset is also what
+//    clears the previous row's code state, so a drawer reopened on another row
+//    never renders the old `codeLoaded=true` and code map; that behaviour is
+//    pinned by knowhow-panel-row-code-reset.component.test.tsx.
 //  * Asymmetric reset sets of openTable / backToList / E6 — see the lifecycle
 //    suite and the state × reset-path table in knowhow-panel-resets.
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
