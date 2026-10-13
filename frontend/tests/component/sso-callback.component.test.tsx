@@ -21,6 +21,7 @@ import SsoCallbackPage from "../../app/auth/sso/callback/page";
 import { startSsoLogin } from "../../app/auth";
 import { consumeSsoReturnLocation } from "../../app/auth-return-location";
 import { humanizedError } from "../../app/errors";
+import { consumeLoginEntrance } from "../../app/login-entrance";
 
 beforeEach(() => {
   for (const mock of Object.values(mocks)) mock.mockReset();
@@ -77,6 +78,7 @@ test("authenticated: installs the session and returns to the initiating invite a
   render(<SsoCallbackPage />);
   await waitFor(() => expect(replace).toHaveBeenCalledWith(RETURN));
   expect(mocks.setToken).toHaveBeenCalledWith("sso-token");
+  expect(consumeLoginEntrance("u1")).toBe(true);
   expect(consumeSsoReturnLocation()).toBe("/");
 });
 
@@ -145,6 +147,7 @@ test("link: a rejected password is shown inside the form and the same choice can
   await waitFor(() => expect(replace).toHaveBeenCalledWith(RETURN));
   expect(mocks.linkSsoAccount).toHaveBeenLastCalledWith("p1", "a12345678", "right");
   expect(mocks.setToken).toHaveBeenCalledWith("sso-token");
+  expect(consumeLoginEntrance("u1")).toBe(true);
 });
 
 test("link: the button shows progress and every action is locked while it runs", async () => {
@@ -183,6 +186,7 @@ test("create: a new account is created only on the explicit button and then sign
   await waitFor(() => expect(replace).toHaveBeenCalledWith(RETURN));
   expect(mocks.createSsoAccount).toHaveBeenCalledWith("p1");
   expect(mocks.setToken).toHaveBeenCalledWith("sso-token");
+  expect(consumeLoginEntrance("u1")).toBe(true);
   expect(mocks.linkSsoAccount).not.toHaveBeenCalled();
 });
 
@@ -210,6 +214,7 @@ test("cancel: returning to login discards the pending choice", async () => {
   await waitFor(() => expect(replace).toHaveBeenCalledWith("/"));
   expect(mocks.cancelSsoChoice).toHaveBeenCalledWith("p1");
   expect(mocks.setToken).not.toHaveBeenCalled();
+  expect(consumeLoginEntrance("u1")).toBe(false);
 });
 
 test("cancel: a failed discard still returns to login (the choice expires on its own)", async () => {

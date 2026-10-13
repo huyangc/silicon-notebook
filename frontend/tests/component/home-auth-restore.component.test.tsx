@@ -1,14 +1,16 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 
 import Home from "../../app/page";
 import { getToken, setToken } from "../../app/auth";
+import { rememberLoginEntrance, consumeLoginEntrance } from "../../app/login-entrance";
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   window.localStorage.clear();
+  window.sessionStorage.clear();
   window.history.replaceState(null, "", "/");
 });
 
@@ -42,6 +44,7 @@ function authenticationServer(options: ServerOptions = {}) {
       ? Response.json({ detail: "session rejected" }, { status: 401 })
       : Response.json({ id: "user-1", username: "alice", role: options.role ?? "user", ui_mode: "auto", search_profile: null });
     if (path === "/api/health") return Response.json({ status: "ok", llm_configured: false });
+    if (path === "/api/auth/login") return Response.json({ token: "new-local-session", user: { id: "user-1", username: "alice", role: "user", ui_mode: "auto", search_profile: null } });
     if (path === "/api/notebooks") return Response.json([]);
     if (path === "/api/me/pending-actions") return Response.json({ count: 0, items: [] });
     if (path === "/api/me/pending-actions/stream") {
@@ -71,6 +74,33 @@ test("a restored SSO session receives pending actions", async () => {
   await waitFor(() => expect(requests).toContain("/api/me/pending-actions/stream"));
   expect(requests).toContain("/api/me/pending-actions");
   expect(getToken()).toBe("sso-token");
+  expect(screen.queryByText("登录成功，正在翻开笔记本…")).not.toBeInTheDocument();
+});
+
+test("a successful local login opens the book over the app and releases its controls", async () => {
+  authenticationServer({ ssoLogin: false });
+  render(<Home />);
+  const actor = userEvent.setup();
+  await actor.type(await screen.findByLabelText("用户名"), "alice");
+  await actor.type(screen.getByLabelText("密码"), "pw");
+  await actor.click(screen.getByRole("button", { name: "本地登录" }));
+  const status = await screen.findByText("登录成功，正在翻开笔记本…");
+  const app = screen.getByRole("button", { name: "账户菜单" }).closest(".app")!;
+  expect(app).toHaveAttribute("inert");
+  const end = new Event("animationend", { bubbles: true });
+  Object.defineProperty(end, "animationName", { value: "auth-book-reveal" });
+  fireEvent(status.closest(".auth-book-entrance")!, end);
+  expect(app).not.toHaveAttribute("inert");
+  expect(screen.queryByText("登录成功，正在翻开笔记本…")).not.toBeInTheDocument();
+});
+
+test("SSO return opens the book once after the session is confirmed", async () => {
+  authenticationServer();
+  setToken("sso-token");
+  rememberLoginEntrance("user-1");
+  render(<Home />);
+  expect(await screen.findByText("登录成功，正在翻开笔记本…")).toBeInTheDocument();
+  expect(consumeLoginEntrance("user-1")).toBe(false);
 });
 
 test.each([503, "network"] as const)("capabilities failure %s keeps login closed until a retry succeeds", async (failure) => {

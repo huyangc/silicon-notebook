@@ -11,6 +11,7 @@ import {
   type AuthUser,
 } from "./auth";
 import { toUserMessage } from "./errors.ts";
+import { AuthBook } from "./auth-book";
 
 type AuthGateProps = { capabilities: AuthCapabilities; onAuthenticated: (user: AuthUser) => void };
 
@@ -44,15 +45,12 @@ function SsoLoginGate({ providerLabel }: { providerLabel: string }) {
   }
 
   return (
-    <div className="auth-gate">
-      <div className="auth-card">
-        <div className="auth-brand">silicon-notebook</div>
-        <button className="auth-sso-submit" type="button" disabled={busy} aria-busy={busy} onClick={() => { void redirectToSso(); }}>
-          {busy ? "正在跳转…" : ssoLoginLabel(providerLabel)}
-        </button>
-        {error && <div className="auth-error" role="alert">{error}</div>}
-      </div>
-    </div>
+    <AuthBook>
+      <button className="auth-sso-submit" type="button" disabled={busy} aria-busy={busy} onClick={() => { void redirectToSso(); }}>
+        {busy ? "正在跳转…" : ssoLoginLabel(providerLabel)}
+      </button>
+      {error && <div className="auth-error" role="alert">{error}</div>}
+    </AuthBook>
   );
 }
 
@@ -90,9 +88,8 @@ function LocalLoginGate({ capabilities, onAuthenticated }: AuthGateProps) {
   }
 
   return (
-    <div className="auth-gate">
-      <form className="auth-card" onSubmit={(event) => { void submitLocal(event); }}>
-        <div className="auth-brand">silicon-notebook</div>
+    <AuthBook>
+      <form className="auth-book-form" onSubmit={(event) => { void submitLocal(event); }}>
         {canUseLocal && <>
           {canRegister && <div className="auth-tabs">
             <button type="button" className={mode === "login" ? "active" : ""} disabled={busy} onClick={() => { setMode("login"); setError(""); }}>登录</button>
@@ -110,6 +107,6 @@ function LocalLoginGate({ capabilities, onAuthenticated }: AuthGateProps) {
         {!canUseLocal && <p className="auth-error" role="alert">当前登录方式不可用，请联系管理员。</p>}
         {error && <div className="auth-error" role="alert">{error}</div>}
       </form>
-    </div>
+    </AuthBook>
   );
 }
