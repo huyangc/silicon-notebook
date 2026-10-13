@@ -71,12 +71,9 @@ import {
   X,
 } from "lucide-react";
 import { requestBlob } from "./api-client.ts";
-import { Pagination } from "./Pagination";
-import { useClientPagination } from "./use-client-pagination.ts";
 import {
   ROLE_LABELS,
   cellSummary,
-  fetchKnowhowTables,
   fetchKnowhowTable,
   deleteKnowhowTable,
   reprojectKnowhowTable,
@@ -86,9 +83,7 @@ import {
   batchPatchKnowhowCells,
   knowhowTemplateUrl,
   fetchKnowhowRowCodeByColumn,
-  filterKnowhowTables,
   patchKnowhowColumn,
-  type KnowhowTableSummary,
   type KnowhowHealthFilter,
   type KnowhowTableDetail,
   type KnowhowRow,
@@ -139,6 +134,8 @@ import { KnowhowPanelStyles } from "./knowhow-panel-styles.tsx";
 import { KnowhowRowCompletionModal } from "./knowhow-row-completion-modal.tsx";
 import { KnowhowRowOptimizeModal } from "./knowhow-row-optimize-modal.tsx";
 import { KnowhowReformatBatchModal } from "./knowhow-reformat-batch-modal.tsx";
+import { KnowhowTableList } from "./knowhow-table-list.tsx";
+import { useKnowhowTableList } from "./use-knowhow-table-list.ts";
 import { transferKnowhowTable, KnowhowSourceCleanupError } from "./knowhow-transfer.ts";
 import { resolveCellCodeView, CODE_STATUS_LOAD_ERROR } from "./knowhow-code-logic.ts";
 import {
@@ -181,18 +178,7 @@ export interface KnowhowPanelProps {
 export function KnowhowPanel({
   notebookId, apiBase, canEdit, onClose, initialTableId, initialRowId, initialHealthFilter,
 }: KnowhowPanelProps) {
-  const [tables, setTables] = useState<KnowhowTableSummary[] | null>(null);
-  const [tablesLoading, setTablesLoading] = useState(false);
-  const [tablesError, setTablesError] = useState<string | null>(null);
-  const [healthFilter, setHealthFilter] = useState<KnowhowHealthFilter>(initialHealthFilter ?? "all");
-  const visibleTables = useMemo(
-    () => filterKnowhowTables(tables ?? [], healthFilter),
-    [tables, healthFilter],
-  );
-
-  useEffect(() => {
-    setHealthFilter(initialHealthFilter ?? "all");
-  }, [initialHealthFilter]);
+  const knowhowTableList = useKnowhowTableList({ notebookId, initialHealthFilter });
 
   // modal 的显隐：面板自持状态，不经 page.tsx 转发——page.tsx 挂载
   // <KnowhowPanel> 时只传 notebookId/apiBase/canEdit/onClose 四个 prop，
@@ -332,19 +318,6 @@ export function KnowhowPanel({
   const [rowCodeByColumn, setRowCodeByColumn] = useState<Record<string, KnowhowCellCode>>({});
   const [rowCodeLoaded, setRowCodeLoaded] = useState(false);
   const [rowCodeError, setRowCodeError] = useState<string | null>(null);
-
-  const loadTables = useCallback(() => {
-    setTablesLoading(true);
-    setTablesError(null);
-    fetchKnowhowTables(notebookId)
-      .then((list) => setTables(list))
-      .catch(() => setTablesError("加载 knowhow 表失败，请重试"))
-      .finally(() => setTablesLoading(false));
-  }, [notebookId]);
-
-  useEffect(() => {
-    loadTables();
-  }, [loadTables]);
 
   // stale-response guard（收尾修复）：loadDetail / loadRowCode 都可能被快速
   // 连续触发（连点两张表卡片、连开两行抽屉、操作后的手动刷新），旧请求的
@@ -580,7 +553,7 @@ export function KnowhowPanel({
     try {
       await deleteKnowhowTable(notebookId, selectedTableId);
       backToList();
-      loadTables();
+      knowhowTableList.loadTables();
     } catch {
       setActionError("删除失败，请重试");
       setConfirmDelete(false);
@@ -622,7 +595,7 @@ export function KnowhowPanel({
       // 真实状态的后台校准，不再是编辑器出现的前提条件。
       setDetail((prev) => (prev ? { ...prev, rows: appendRowOptimistically(prev.rows, newRow) } : prev));
       loadDetail(selectedTableId);
-      loadTables();
+      knowhowTableList.loadTables();
       const firstColumnId = detail ? orderColumnsForGrid(detail.columns)[0]?.id : undefined;
       if (firstColumnId) openCellEdit(newRow.id, firstColumnId);
     } catch (err) {
@@ -650,7 +623,7 @@ export function KnowhowPanel({
       });
       setDetail((prev) => (prev ? { ...prev, rows: appendRowOptimistically(prev.rows, newRow) } : prev));
       loadDetail(selectedTableId);
-      loadTables();
+      knowhowTableList.loadTables();
     } catch (err) {
       // 复审修复：同一条错误文案双写——actionError 保留既有渠道（关闭抽屉后
       // 主网格横幅可见），conceptDrawerError 供抽屉在打开期间就地显示（见
@@ -677,7 +650,7 @@ export function KnowhowPanel({
       const newRow = await addKnowhowRow(notebookId, selectedTableId, { cells: {} });
       setDetail((prev) => (prev ? { ...prev, rows: appendRowOptimistically(prev.rows, newRow) } : prev));
       loadDetail(selectedTableId);
-      loadTables();
+      knowhowTableList.loadTables();
       openCellEdit(newRow.id, detail.anchorColumnId);
     } catch (err) {
       setActionError(extractErrorMessage(err, "添加概念失败，请重试"));
@@ -705,7 +678,7 @@ export function KnowhowPanel({
       setOpenConceptValue(null);
       setHighlightRowId(null); // Task 11：概念连同其全部分支已删除，没有可高亮的行了
       loadDetail(selectedTableId);
-      loadTables();
+      knowhowTableList.loadTables();
     } catch {
       // 复审修复：抽屉删除失败时抽屉仍开着（不像成功路径会关闭），必须让
       // 错误在抽屉内可见——conceptDrawerError 与 actionError 同文案双写，
@@ -760,7 +733,7 @@ export function KnowhowPanel({
         setHighlightRowId(null); // 同 deleteConcept：没有可高亮的行了
       }
       loadDetail(selectedTableId);
-      loadTables();
+      knowhowTableList.loadTables();
     } catch {
       setActionError("删除失败，请重试");
       setConceptDrawerError("删除失败，请重试");
@@ -773,7 +746,7 @@ export function KnowhowPanel({
   // 刷新）+ 表列表（标题/行数在列表卡片上要跟着变）。
   function handleManageChanged() {
     if (selectedTableId) loadDetail(selectedTableId);
-    loadTables();
+    knowhowTableList.loadTables();
   }
 
   // knowhow 表版本管理 Task 15：历史抽屉「回到这里」回退成功后的回调——重拉
@@ -782,7 +755,7 @@ export function KnowhowPanel({
   // 只重拉历史时间线，不知道也不需要知道 detail 的形状。
   function handleReverted() {
     if (selectedTableId) loadDetail(selectedTableId);
-    loadTables();
+    knowhowTableList.loadTables();
   }
 
   // 网格表头列名 inline 改名：双击列名进入编辑框（见 KnowhowTableGrid），
@@ -801,7 +774,7 @@ export function KnowhowPanel({
           ? { ...prev, columns: prev.columns.map((c) => (c.id === columnId ? { ...c, name: updated.name } : c)) }
           : prev,
       );
-      loadTables();
+      knowhowTableList.loadTables();
     } catch (err) {
       setActionError(extractErrorMessage(err, "改名失败，请重试"));
     }
@@ -1213,14 +1186,14 @@ export function KnowhowPanel({
       <div className="knowhow-view-body">
         {selectedTableId === null ? (
           <KnowhowTableList
-            tables={visibleTables}
-            hasUnfilteredTables={(tables?.length ?? 0) > 0}
-            loading={tablesLoading}
-            error={tablesError}
+            tables={knowhowTableList.view.visibleTables}
+            hasUnfilteredTables={(knowhowTableList.view.tables?.length ?? 0) > 0}
+            loading={knowhowTableList.view.tablesLoading}
+            error={knowhowTableList.view.tablesError}
             canEdit={canEdit}
-            healthFilter={healthFilter}
-            onHealthFilterChange={setHealthFilter}
-            onRetry={loadTables}
+            healthFilter={knowhowTableList.view.healthFilter}
+            onHealthFilterChange={knowhowTableList.setHealthFilter}
+            onRetry={knowhowTableList.loadTables}
             onOpen={openTable}
             onImportClick={() => setImportOpen(true)}
             onCreateClick={() => setCreateOpen(true)}
@@ -1443,7 +1416,7 @@ export function KnowhowPanel({
           onClose={() => setImportOpen(false)}
           onDone={() => {
             setImportOpen(false);
-            loadTables();
+            knowhowTableList.loadTables();
           }}
         />
       )}
@@ -1454,7 +1427,7 @@ export function KnowhowPanel({
           onClose={() => setCreateOpen(false)}
           onCreated={(created) => {
             setCreateOpen(false);
-            loadTables();
+            knowhowTableList.loadTables();
             // 建表向导承诺的下一步（规格②）：创建后直接打开网格，用「添加行」
             // 开始填值。
             openTable(created.id);
@@ -1514,7 +1487,7 @@ export function KnowhowPanel({
                 setTransferOpen(false);
                 setActionError(err.message);
                 loadDetail(detail.id);
-                loadTables();
+                knowhowTableList.loadTables();
                 return;
               }
               throw err; // 其它错误：什么都没发生，交回 picker 自己的错误态+可重试
@@ -1533,7 +1506,7 @@ export function KnowhowPanel({
               // openRowId/cellModal 等一整套顶层弹层态（不止 selectedTableId
               // 一项），避免遗留指向已删表的行抽屉/格子浮窗。
               backToList();
-              loadTables();
+              knowhowTableList.loadTables();
             } else {
               // 复审 Minor：copy 成功没有任何自然可见的反馈——源表原样不动，
               // 目标笔记本又不在当前视野里，用户点了「确认」之后除了 modal
@@ -1554,7 +1527,7 @@ export function KnowhowPanel({
           onDone={() => {
             setAppendOpen(false);
             loadDetail(selectedTableId);
-            loadTables();
+            knowhowTableList.loadTables();
           }}
         />
       )}
@@ -1634,115 +1607,6 @@ export function KnowhowPanel({
 
       <KnowhowPanelStyles />
     </section>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Layer 1 — 表列表
-// ---------------------------------------------------------------------------
-
-/** Knowhow 表卡片清单每页条数。接口一次性返回整份清单(GET /notebooks/{id}/knowhow
- * 不分页),分页只发生在界面。 */
-const KNOWHOW_TABLE_PAGE_SIZE = 24;
-
-function KnowhowTableList({
-  tables,
-  hasUnfilteredTables,
-  loading,
-  error,
-  canEdit,
-  healthFilter,
-  onHealthFilterChange,
-  onRetry,
-  onOpen,
-  onImportClick,
-  onCreateClick,
-}: {
-  tables: KnowhowTableSummary[];
-  hasUnfilteredTables: boolean;
-  loading: boolean;
-  error: string | null;
-  canEdit: boolean;
-  healthFilter: KnowhowHealthFilter;
-  onHealthFilterChange: (filter: KnowhowHealthFilter) => void;
-  onRetry: () => void;
-  onOpen: (tableId: string) => void;
-  onImportClick: () => void;
-  onCreateClick: () => void;
-}) {
-  const tablePage = useClientPagination(tables, KNOWHOW_TABLE_PAGE_SIZE, healthFilter);
-  return (
-    <>
-      <div className="knowhow-toolbar">
-        <span className="panel-count">{tables.length > 0 ? `${tables.length} 张表` : ""}</span>
-        <label className="knowhow-health-filter">
-          <span>状态</span>
-          <select
-            value={healthFilter}
-            onChange={(event) => onHealthFilterChange(event.target.value as KnowhowHealthFilter)}
-          >
-            <option value="all">全部表</option>
-            <option value="projection_pending">待同步</option>
-            <option value="projection_failed">同步失败</option>
-            <option value="stale_code">代码已过期</option>
-          </select>
-        </label>
-        {canEdit && (
-          <div className="knowhow-toolbar-actions">
-            <button type="button" className="sort-button knowhow-import-button" onClick={onCreateClick}>
-              <Plus size={16} /> 新建表
-            </button>
-            <button type="button" className="sort-button knowhow-import-button" onClick={onImportClick}>
-              <Upload size={16} /> 导入表格
-            </button>
-          </div>
-        )}
-      </div>
-
-      {loading ? (
-        <p className="knowhow-loading">加载中…</p>
-      ) : error ? (
-        <p className="knowhow-inline-error">
-          {error}
-          <button type="button" className="sort-button" onClick={onRetry}>
-            重试
-          </button>
-        </p>
-      ) : tables.length === 0 ? (
-        <div className="knowhow-empty">
-          <div className="knowhow-empty-icon">▦</div>
-          <strong>{hasUnfilteredTables ? "当前筛选下没有表" : "还没有 knowhow 表"}</strong>
-          {!hasUnfilteredTables && (
-            <p>{canEdit ? "可从 Excel/CSV/Markdown 导入，或新建空表现场定表头" : "当前为只读访问"}</p>
-          )}
-        </div>
-      ) : (
-        <>
-          <div className="knowhow-table-cards">
-            {tablePage.pageItems.map((table) => (
-              <button
-                type="button"
-                key={table.id}
-                className="knowhow-table-card"
-                aria-label={`打开表格：${table.title}`}
-                onClick={() => onOpen(table.id)}
-              >
-                <strong title={table.title}>{table.title}</strong>
-                {table.description && <p>{table.description}</p>}
-                <span className="knowhow-table-card-meta">{table.rowCount} 行</span>
-              </button>
-            ))}
-          </div>
-          <Pagination
-            page={tablePage.page}
-            pageSize={KNOWHOW_TABLE_PAGE_SIZE}
-            total={tablePage.total}
-            onPage={tablePage.setPage}
-            label="Knowhow 表分页"
-          />
-        </>
-      )}
-    </>
   );
 }
 
