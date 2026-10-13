@@ -960,7 +960,10 @@ def test_answer_reasoning_renders_citable_hops_and_uncited_inference(rrepo):
     assert [a.snippet for a in anchors] == ["A directly yields B", "B directly yields C"]
 
 
-def test_grouped_answer_markers_fail_closed_when_any_key_is_unknown(rrepo):
+@pytest.mark.parametrize("opening,closing,separator", [
+    ("[", "]", ", "), ("【", "】", "、"), ("(", ")", "、"), ("（", "）", "，"),
+])
+def test_grouped_answer_markers_fail_closed_when_any_key_is_unknown(rrepo, opening, closing, separator):
     id_map = {
         "k2001": {
             "object_id": "rel-ab", "object_type": "relation",
@@ -971,9 +974,9 @@ def test_grouped_answer_markers_fail_closed_when_any_key_is_unknown(rrepo):
             "name": "B --derived_from--> C",
         },
     }
-    anchors = rrepo._parse_answer_anchors("premises [k2001, k2002]", id_map)
+    anchors = rrepo._parse_answer_anchors("premises " + opening + "k2001" + separator + "k2002" + closing, id_map)
     assert [a.key for a in anchors] == ["k2001", "k2002"]
-    assert rrepo._parse_answer_anchors("mixed [k2001, k9999]", id_map) == []
+    assert rrepo._parse_answer_anchors("mixed " + opening + "k2001" + separator + "k9999" + closing, id_map) == []
 
 
 def test_run_dedups_expand_and_respects_step_cap(rrepo):

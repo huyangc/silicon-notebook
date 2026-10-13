@@ -94,6 +94,26 @@ test("k 前缀复合引用有未命中时保持原文", () => {
   assert.doesNotMatch(html, /href="cite:k6"/);
 });
 
+test("圆括号及顿号引用按正文顺序显示，普通数字圆括号保持文本", () => {
+  const refs = Object.fromEntries([5, 9, 7].map((n, index) => [
+    `k${n}`, { id: `r${n}`, displayLabel: `[${index + 1}]` },
+  ]));
+  for (const [opening, closing] of [["[", "]"], ["【", "】"], ["(", ")"], ["（", "）"]]) {
+    for (const separator of [",", "，", "、"]) {
+      const html = render(`结论${opening}k5${separator}k9${separator}k7${closing}。`, refs);
+      assert.deepEqual([...html.matchAll(/href="cite:(k\d+)"/g)].map((m) => m[1]), ["k5", "k9", "k7"]);
+      assert.match(html, />\[1\]</);
+    }
+  }
+  for (const text of ["(k5、k99)", "（k5、k99）", "(k5、k9】", "（k5、k9)", "(1)", "（1、2）"]) {
+    const html = render(text, { ...refs, 1: refs.k5, 2: refs.k9 });
+    assert.ok(html.includes(text));
+    assert.doesNotMatch(html, /href="cite:/);
+  }
+  const code = render("`(k5、k9、k7)`\n\n```text\n（k5）\n```", refs);
+  assert.doesNotMatch(code, /href="cite:/);
+});
+
 test("数字复合引用中有未命中编号时保持原文", () => {
   const refs = { 1: { id: "r1", displayLabel: "[1]" } };
   const html = render("普通数组或缺失引用 [1, 99] 不应半转换。", refs);

@@ -1,4 +1,5 @@
 import type { CitationVerification } from "./citation-verification.ts";
+import { ANCHOR_MARKER_GROUP_RE, markerKeys as anchorKeysFromMarker } from "./citation-markers.ts";
 
 /**
  * 一张「本段附图」的镜像形状（同 workspace-model.ts CitationImage，真源
@@ -95,12 +96,6 @@ export type MarkdownBlock =
   | { type: "table"; headers: string[]; rows: string[][] }
   | { type: "unordered-list"; items: string[] }
   | { type: "ordered-list"; items: string[] };
-
-const ANCHOR_MARKER_GROUP_RE = /(?:\[(?:k\d+\s*[,，]\s*)*k\d+\]|【(?:k\d+\s*[,，]\s*)*k\d+】)/g;
-
-function anchorKeysFromMarker(marker: string): string[] {
-  return marker.slice(1, -1).split(/[,，]/).map((part) => part.trim()).filter(Boolean);
-}
 
 export function buildAnswerReferences(
   answerText: string,

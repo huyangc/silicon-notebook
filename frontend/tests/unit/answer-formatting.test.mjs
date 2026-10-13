@@ -77,6 +77,21 @@ test("binds Chinese bracket markers and Chinese-comma groups", () => {
   assert.equal(renderTextWithReferenceNumbers(text, references), "先看[1]，再看[2, 1]。");
 });
 
+test("reopened parenthesized citations use stored anchors in appearance order", () => {
+  const storedAnchors = [7, 5, 9].map((n) => ({
+    key: `k${n}`, object_id: `obj-${n}`, object_type: "chunk", label: `来源${n}`,
+  }));
+  for (const text of ["依据(k5、k9、k7)。", "依据（k5、k9、k7）。"]) {
+    const references = buildAnswerReferences(text, storedAnchors, []);
+    assert.deepEqual(references.map((ref) => ref.anchor.key), ["k5", "k9", "k7"]);
+    assert.equal(renderTextWithReferenceNumbers(text, references), "依据[1, 2, 3]。");
+  }
+  const mixed = "依据(k5、k99)，已知（k7）。";
+  const references = buildAnswerReferences(mixed, storedAnchors, []);
+  assert.deepEqual(references.map((ref) => ref.anchor.key), ["k7"]);
+  assert.equal(renderTextWithReferenceNumbers(mixed, references), "依据(k5、k99)，已知[1]。");
+});
+
 test("fails a mixed known and unknown grouped k marker closed without partial binding", () => {
   const text = "已知 [k2001]，不可部分绑定 [k2001, k2999]。";
   const references = buildAnswerReferences(text, [

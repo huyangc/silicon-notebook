@@ -502,6 +502,13 @@ def test_citation_admission_strips_forged_and_cross_run_handles_and_discloses():
     assert records[0].element_id == "element-2"
     assert notes == ()
 
+    answer, records, notes = admit_plugin_engine_result(
+        second, "兼容标记(k1、k1)与（k1）", (second_key,)
+    )
+    assert answer == "兼容标记[k1, k1]与[k1]"
+    assert records[0].element_id == "element-2"
+    assert notes == ()
+
 
 def test_citation_admission_strips_unmarked_records_and_discloses():
     hits = iter((
@@ -1663,6 +1670,9 @@ def test_admitted_markers_always_name_a_surviving_record():
         "[k1,\n[k9]k2]",
         "前 [k1,\n\t[k9]k9] 后",
         "[k1 k2] 与 [k1,\nk9]",
+        "依据 (k1、k9) 与（k2）",
+        "结论 (k1(k9、nope)2) 完毕",
+        "结论 （k1、\n[k9]k2） 说明",
     )
     for source in hostile:
         access, keys = _two_record_access()

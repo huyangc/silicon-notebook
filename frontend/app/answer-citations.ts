@@ -12,6 +12,7 @@
 import { visit, SKIP } from "unist-util-visit";
 import type { Root, Text, Link, PhrasingContent } from "mdast";
 import type { AnswerReference } from "./answer-formatting";
+import { CITATION_MARKER_RE, markerKeys } from "./citation-markers.ts";
 
 /**
  * 创建 remark 插件（attacher）：将 text 节点中的 [k\d+] / [1, 2] 标记替换为 `link` 节点，
@@ -24,8 +25,8 @@ export function remarkCitations(refsByKey: Record<string, AnswerReference>) {
   return (tree: Root) => {
     visit(tree, "text", (node: Text, index, parent) => {
       if (!parent || index === undefined) return;
-      // 半角/中文括号和逗号采用同一绑定口径；未命中的整组仍原样保留。
-      const pattern = /(?:\[(?:k?\d+\s*[,，]\s*)*k?\d+\]|【(?:k?\d+\s*[,，]\s*)*k?\d+】)/g;
+      // 各种括号和分隔符采用同一绑定口径；未命中的整组仍原样保留。
+      const pattern = new RegExp(CITATION_MARKER_RE);
       const text = node.value;
       if (!pattern.test(text)) return;
 
@@ -37,9 +38,7 @@ export function remarkCitations(refsByKey: Record<string, AnswerReference>) {
       let match: RegExpExecArray | null;
 
       while ((match = pattern.exec(text)) !== null) {
-        const token = match[0].slice(1, -1);
-        // 逗号分隔的复合引用(k 前缀或纯数字皆可)统一按逗号拆;单 key 拆出单元素。
-        const keys = token.split(/[,，]/).map((part) => part.trim()).filter(Boolean);
+        const keys = markerKeys(match[0]);
         const refs = keys.map((key) => refsByKey[key]);
 
         // 前面的纯文本
