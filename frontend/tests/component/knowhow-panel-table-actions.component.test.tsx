@@ -455,3 +455,46 @@ test("row optimisation: accept saves and advances; error → retry; skip; abort;
     { method: "POST", path: optimizePath("c-tool") },
   ]);
 });
+
+test("Escape cannot close the row-optimisation modal while an accepted suggestion is saving", async () => {
+  // The modal's window keydown listener is re-registered whenever acceptBusy
+  // changes, so the Escape handler sees the in-flight save. A listener frozen at
+  // mount would unmount the modal mid-save (found by an S4-c mutation).
+  const server = suite.server();
+  routeTable(server, "nb-1", recordDetail());
+  const optimizePath = (column: string) => `/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/${column}/optimize/stream`;
+  server.on("POST", optimizePath("c-title"), { stream: { suggestion_md: "供电电压异常" } });
+  server.hold("POST", optimizePath("c-fix"));
+  const releaseSave = server.hold("PATCH", "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-title");
+  const user = userEvent.setup();
+  renderPanel({ initialTableId: "t-rec", initialRowId: "r1" });
+
+  const drawer = await screen.findByRole("dialog", { name: "供电异常 · 检查电源 · 万用表" });
+  await user.click(within(drawer).getByRole("button", { name: /优化整行/ }));
+  const modalName = "优化整行 · 供电异常 · 检查电源 · 万用表";
+  const modal = await screen.findByRole("dialog", { name: modalName });
+  expect(await within(modal).findByText("供电电压异常")).toBeInTheDocument();
+  await user.click(within(modal).getByRole("button", { name: /接受/ }));
+  await user.keyboard("{Escape}");
+  expect(screen.getByRole("dialog", { name: modalName })).toBeInTheDocument();
+  expect(screen.getByRole("dialog", { name: "供电异常 · 检查电源 · 万用表" })).toBeInTheDocument();
+
+  releaseSave({ json: wirePatchResult("r1", "c-title", "供电电压异常") });
+  await waitFor(() => {
+    for (const close of within(modal).getAllByRole("button", { name: "关闭" })) expect(close).toBeEnabled();
+  });
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: modalName })).not.toBeInTheDocument());
+  // The drawer stays; its title now reads the accepted title-column text.
+  expect(screen.getByRole("dialog", { name: "供电电压异常 · 检查电源 · 万用表" })).toBeInTheDocument();
+  await settle();
+  expect(server.log).toEqual([
+    LIST,
+    DETAIL,
+    { method: "GET", path: "/agent/knowhow/rows/r1" },
+    { method: "POST", path: optimizePath("c-title") },
+    { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-title", body: { content_md: "供电电压异常" } },
+    { method: "GET", path: "/agent/knowhow/rows/r1" },
+    { method: "POST", path: optimizePath("c-fix") },
+  ]);
+});

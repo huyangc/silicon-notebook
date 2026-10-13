@@ -289,6 +289,58 @@ test("a failed completion accept shows role=alert inside that suggestion and re-
   ]);
 });
 
+test("Escape cannot close the completion modal while an accepted suggestion is saving", async () => {
+  // The modal's window keydown listener is re-registered whenever savingColumnId
+  // changes, so the Escape handler sees the in-flight save. A listener frozen at
+  // mount would unmount the modal mid-save (found by an S4-c mutation).
+  const server = suite.server();
+  routeTable(server, "nb-1", recordDetail());
+  server.on("POST", "/notebooks/nb-1/knowhow/t-rec/rows/r2/complete/stream", {
+    stream: {
+      ...COMPLETION,
+      suggestions: [{
+        column_id: "c-fix", suggestion_md: "校准晶振", confidence: "high",
+        based_on_row_ids: [], evidence_keys: [], basis: "", abstain_reason: "",
+      }],
+    },
+  });
+  const releaseSave = server.hold("PATCH", "/notebooks/nb-1/knowhow/t-rec/rows/r2/cells/c-fix");
+  const user = userEvent.setup();
+  renderPanel({ initialTableId: "t-rec", initialRowId: "r2" });
+
+  const drawer = await screen.findByRole("dialog", { name: "时钟漂移" });
+  await user.click(within(drawer).getByRole("button", { name: "智能补全空列" }));
+  const dialog = await screen.findByRole("dialog", { name: "智能补全空列 · 时钟漂移" });
+  await user.click(await within(dialog).findByRole("button", { name: "接受 处理方法 建议" }));
+  await user.keyboard("{Escape}");
+  expect(screen.getByRole("dialog", { name: "智能补全空列 · 时钟漂移" })).toBeInTheDocument();
+  expect(screen.getByRole("dialog", { name: "时钟漂移" })).toBeInTheDocument();
+
+  releaseSave({ json: wirePatchResult("r2", "c-fix", "校准晶振") });
+  expect(await within(dialog).findByText("已填入")).toBeInTheDocument();
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "智能补全空列 · 时钟漂移" })).not.toBeInTheDocument());
+  // The drawer stays; its title now includes the accepted 处理方法 text.
+  expect(screen.getByRole("dialog", { name: /^时钟漂移/ })).toBeInTheDocument();
+  await settle();
+  expect(server.log).toEqual([
+    LIST,
+    REC,
+    rowCode("r2"),
+    {
+      method: "POST",
+      path: "/notebooks/nb-1/knowhow/t-rec/rows/r2/complete/stream",
+      body: { target_column_ids: ["c-fix", "c-tool"] },
+    },
+    {
+      method: "PATCH",
+      path: "/notebooks/nb-1/knowhow/t-rec/rows/r2/cells/c-fix",
+      body: { content_md: "校准晶振", expected_before: "", origin: "llm_complete" },
+    },
+    rowCode("r2"),
+  ]);
+});
+
 // ---------------------------------------------------------------------------
 // 10. Row code status
 // ---------------------------------------------------------------------------
