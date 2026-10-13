@@ -28,7 +28,7 @@
  * 已注明 deprecated，等 Task 3 wire 落地后统一清理。
  *
  * 样式：namespaced `knowhow-import-*` class + `<style jsx global>`，消费
- * knowhow-panel.tsx 已经在用的同一套 CSS 变量（--panel/--ink/--line/
+ * knowhow-panel-styles.tsx 已经在用的同一套 CSS 变量（--panel/--ink/--line/
  * --blue/--muted/--soft/--red/--shadow），视觉上与面板本体保持一致，但不
  * 依赖面板的 style 标签是否同时挂载在 DOM 里（自成一体，谁引用谁都能独立
  * 工作）。

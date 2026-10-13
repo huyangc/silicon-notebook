@@ -6,7 +6,12 @@
  * `<KnowhowPanel notebookId apiBase canEdit onClose />` 一处挂载，外加 Task 12
  * 引用跳转用的可选 `initialTableId`/`initialRowId`），面板的顶层状态机（选中
  * 哪张表、哪一行、哪个弹窗打开）与各挂载点在这里；自带状态机的弹窗与样式在
- * 各自的文件里（见下方「编辑入口的分工」）。
+ * 各自的文件里（见下方「编辑入口的分工」）。三层视图与三块领域状态也各有
+ * 文件：表列表 knowhow-table-list.tsx + use-knowhow-table-list.ts，表格网格
+ * knowhow-table-grid.tsx（徽章在 knowhow-badges.tsx），行详情抽屉
+ * knowhow-row-drawer.tsx + use-knowhow-row-code.ts，概念矩阵的状态与删除命令
+ * use-knowhow-concept-matrix.ts（矩阵抽屉本身在 knowhow-matrix-drawer.tsx）。
+ * 表详情、引用跳转、表级写命令与 handleCellSave 留在本文件。
  *
  * 引用跳转（Task 12，跳转目标 Task 11 改）：ask 回答里命中 knowhow 格子的
  * 引用点「在表格中查看」时，page.tsx 打开本面板并传入
@@ -141,6 +146,12 @@ export interface KnowhowPanelProps {
 export function KnowhowPanel({
   notebookId, apiBase, canEdit, onClose, initialTableId, initialRowId, initialHealthFilter,
 }: KnowhowPanelProps) {
+  // 三个 owner hook（表列表 / 行代码 / 概念矩阵）各调用一次，用单一标识符持有，
+  // 在使用点直接读 `.view.*` 或调命令：不解构、不逐字段摊平，也不把返回对象放进
+  // 依赖数组或整体下传（每次渲染都是新对象）。调用位置决定 effect 顺序，是承重
+  // 的：表列表在最前，行代码在拉表详情的 effect 之后、notebook 复位 effect 之前，
+  // 概念矩阵在 return 之前最后。owner-view-no-reflatten 与 knowhow-panel-boundary
+  // 两个守卫钉住这些约定。
   const knowhowTableList = useKnowhowTableList({ notebookId, initialHealthFilter });
 
   // modal 的显隐：面板自持状态，不经 page.tsx 转发——page.tsx 挂载
@@ -216,8 +227,8 @@ export function KnowhowPanel({
   // 标题列格子（网格首列）仅在「已填」时不走这里——那时仍走既有的 onOpenRow
   // 打开整行抽屉，与规格⑤「点行首/概念列打开」行详情抽屉的既有约定一致；该格
   // 为空时和其余空格子一样直接进本状态机的编辑态（规格②路A「空格子直接进
-  // 编辑态」），见下方 KnowhowTableGrid 的 `opensRowDrawer = index === 0 &&
-  // filled` 判定。三态共用同一份 useFloatingWindow storageKey / useFullscreen
+  // 编辑态」），见 knowhow-table-grid.tsx 里 KnowhowTableGrid 的
+  // `opensRowDrawer = index === 0 && filled` 判定。三态共用同一份 useFloatingWindow storageKey / useFullscreen
   // Toggle 键（见 knowhow-cell-editor.tsx FULLSCREEN_STORAGE_KEY 头注释），切
   // 页签时浮窗位置/尺寸不跳动。
   const [cellModal, setCellModal] = useState<
@@ -227,7 +238,9 @@ export function KnowhowPanel({
   // Task 11（代码附件）：当前打开的代码查看/编辑浮层——与 cellModal/
   // optimizeRowId 平级的另一个顶层 modal 状态，堆叠在行详情抽屉之上。
   const [codeModal, setCodeModal] = useState<{ rowId: string; columnId: string } | null>(null);
-  // stale-response guard（收尾修复）：loadDetail / loadRowCode 都可能被快速
+
+  // stale-response guard（收尾修复）：loadDetail 与 loadRowCode（在
+  // use-knowhow-row-code.ts，同一套写法）都可能被快速
   // 连续触发（连点两张表卡片、连开两行抽屉、操作后的手动刷新），旧请求的
   // 响应后到会覆盖新目标的状态。修法=单调递增请求号：发起时领号，落地前
   // 校验「自己仍是最新一次请求」，否则整批丢弃；目标变化/组件卸载时（effect
@@ -274,6 +287,8 @@ export function KnowhowPanel({
     return loadDetail(selectedTableId);
   }, [selectedTableId, loadDetail]);
 
+  // 行代码 owner：调用位置就是原「按 openRowId 拉行代码」effect 的位置（拉表详情
+  // 的 effect 之后、下方 notebook 复位 effect 之前），见文件内三个 hook 的总说明。
   const knowhowRowCode = useKnowhowRowCode(openRowId);
 
   // Task 11（引用命中→跳概念矩阵抽屉+高亮，规格 §4.5）：记住「当前这个跳转
@@ -388,7 +403,8 @@ export function KnowhowPanel({
     setOpenRowId(null);
     setCellModal(null);
     // Task 8：openConceptValue 是纯按字符串匹配 detail 里的 anchor 分组
-    // （见 openConceptGroup 的 useMemo），不像 cellModal/codeModal 那样带
+    // （见 use-knowhow-concept-matrix.ts 里 openConceptGroup 的 useMemo），
+    // 不像 cellModal/codeModal 那样带
     // rowId 归属校验——不清掉的话，切到另一张表后一旦该表也凑巧有同名概念，
     // 矩阵抽屉会在用户没点任何东西的情况下自己弹出来（openConceptGroup 只是
     // 普通 useMemo，detail 一变就重算，不经用户交互）。与其余顶层 modal 状态
@@ -554,7 +570,7 @@ export function KnowhowPanel({
     knowhowTableList.loadTables();
   }
 
-  // 网格表头列名 inline 改名：双击列名进入编辑框（见 KnowhowTableGrid），
+  // 网格表头列名 inline 改名：双击列名进入编辑框（见 knowhow-table-grid.tsx），
   // 回车/失焦时把新名字丢给这里。走既有 patchKnowhowColumn 端点——同一个
   // 管理 modal 里那个改名走的也是它，语义完全等价，只是入口 UX 更近。改名
   // 成功后本地就地合并到 detail（避免闪一下的重拉），后台再拉一次 detail
@@ -614,8 +630,8 @@ export function KnowhowPanel({
 
   // 网格里点某一格（非行标题列）：按该格是否已有内容自动决定预览还是编辑态
   // （规格②路A「空格子直接进编辑态；已填格子先进渲染预览态」）。canEdit=false
-  // 且格子为空时什么也不做——只读成员看不到可点的空格（见 KnowhowTableGrid
-  // 的 clickable 判定），这里的 !canEdit 分支只是防御性兜底。
+  // 且格子为空时什么也不做——只读成员看不到可点的空格（见 knowhow-table-grid.tsx
+  // 里 KnowhowTableGrid 的 clickable 判定），这里的 !canEdit 分支只是防御性兜底。
   function openCellAuto(rowId: string, columnId: string) {
     const row = detail?.rows.find((item) => item.id === rowId);
     const content = row?.cells[columnId] ?? "";
@@ -836,7 +852,8 @@ export function KnowhowPanel({
     // 一直停留在「已实现」直到重开抽屉。保存命中的行里若包含当前展开行
     // （单格写时就是它自己；批量写整组时组内任一分支都可能是它），立即重取
     // 行级代码状态，让 stale chip 无需重开抽屉即浮现（优化整行的
-    // onAcceptCell 也走本函数，同样受益）。loadRowCode 自带请求号 guard，与
+    // onAcceptCell 也走本函数，同样受益）。loadRowCode（use-knowhow-row-code.ts）
+    // 自带请求号 guard，与
     // 快速切行/连续保存并存时旧响应不会倒灌。
     if (openRowId && targets.includes(openRowId)) knowhowRowCode.loadRowCode(openRowId);
   }
@@ -910,6 +927,11 @@ export function KnowhowPanel({
     ? cellSummary(resolveRowTitleText(codeModalRow, detail.columns), 60) || rowFallbackTitle(codeModalRow.position)
     : "";
 
+  // 概念矩阵 owner：必须是 return 之前最后一个 hook 调用，让「切概念/关抽屉时复位
+  // 删除确认态」的 effect 仍在面板所有 effect 之后执行（搬家前它就在这个位置）。
+  // 上方 openTable / backToList / notebook 复位 / 引用跳转 / addBranch 对
+  // `knowhowConceptMatrix` 的引用都在回调或 effect 体里，渲染之后才执行，不会撞上
+  // 暂时性死区。
   const knowhowConceptMatrix = useKnowhowConceptMatrix({
     notebookId,
     selectedTableId,
@@ -1056,6 +1078,8 @@ export function KnowhowPanel({
           onCompleteRow={openRowCompletion}
           onClose={() => { knowhowConceptMatrix.setOpenConceptValue(null); knowhowConceptMatrix.setHighlightRowId(null); }}
           error={knowhowConceptMatrix.view.conceptDrawerError}
+          // 挂载条件已保证 openConceptGroup 非空；`!` 只是告诉 TS（属性访问的收窄
+          // 进不了闭包），运行时读的仍是本次渲染的同一个分组对象。
           onAddBranch={() => addBranch(knowhowConceptMatrix.view.openConceptGroup!.anchorValue)}
           addingBranch={addingRow}
           confirmDeleteConcept={knowhowConceptMatrix.view.confirmDeleteConcept}

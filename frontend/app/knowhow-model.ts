@@ -42,7 +42,7 @@ export const KIND_LABELS: Record<ColumnKind, string> = {
 // tool/plain）已被上面的四值 CellKind 词表替换（规格 2026-07-15 修订——五
 // 角色只是时序修复域的实例，被用户纠正为域中立行为类型）。此处保留
 // Role/ROLE_LABELS 别名，只是为了不让仍按「每列一个角色徽章/下拉」心智工作
-// 的旧消费方（knowhow-panel.tsx 的 RoleBadge、knowhow-import.tsx/
+// 的旧消费方（knowhow-badges.tsx 的 RoleBadge、knowhow-import.tsx/
 // knowhow-import-logic.ts 的角色下拉）编译/运行失败；Task 5 迁移这些消费方
 // 到 CellKind/KIND_LABELS + 表级 anchorColumnId 之后，本别名可删除。
 export type Role = CellKind;

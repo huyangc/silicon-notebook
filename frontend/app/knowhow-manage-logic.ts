@@ -217,7 +217,7 @@ export function assembleImportColumnKinds(
 // --- 管理面板：payload 与确认文案 ------------------------------------------------
 
 // 破坏性操作确认层文案（管理面板删列/删行共用；表级删除文案在
-// knowhow-panel.tsx 既有确认层里，不迁移）。
+// knowhow-table-grid.tsx 既有确认层里，不迁移）。
 export const COLUMN_DELETE_CONFIRM = "删除该列？列下所有格子与代码附件将一并删除";
 export const ROW_DELETE_CONFIRM = "删除该行？行内所有格子与代码附件将一并删除";
 

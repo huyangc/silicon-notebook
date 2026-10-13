@@ -26,7 +26,7 @@
  * 已知遗留（有意不在本 task 做，留给接线抽屉打开态的后续 task）：本抽屉
  * 目前没有 Esc 关闭监听器——不是遗漏，是刻意等接线阶段一起做。同类
  * kh-modal-* 抽屉（KnowhowRowDrawer 等）都有 Esc 监听器，但那些监听器都
- * 带一个 cellModalOpen 短路条件（见 knowhow-panel.tsx KnowhowRowDrawer 的
+ * 带一个 cellModalOpen 短路条件（见 knowhow-row-drawer.tsx KnowhowRowDrawer 的
  * cellModalOpen 参数注释）：本抽屉打开时点格子会在其上层再堆一个格子浮窗
  * （Task 8 起 onEditCell 接 openCellAuto），若现在就无条件加 Esc 监听器，
  * 按一次 Esc 会同时关掉格子浮窗和本抽屉（两个独立 window keydown 监听器
@@ -143,8 +143,8 @@ export function KnowhowMatrixDrawer({
   // 敞开的确认态，符合"点另一个分支的删除应切换确认目标，不叠加"）。抽屉整
   // 体关闭（KnowhowPanel 卸载本组件）时随组件一并清空，不需要额外 effect；
   // 但抽屉保持挂载、只是 group 换到另一个概念（ask 引用跳转 A→B 直接换
-  // openConceptValue，不经过"关闭再打开"，见 knowhow-panel.tsx highlightRowId
-  // 声明处注释）这一种情况下组件不会重新挂载，必须靠下面这个 effect 显式
+  // openConceptValue，不经过"关闭再打开"，见 use-knowhow-concept-matrix.ts
+  // highlightRowId 声明处注释）这一种情况下组件不会重新挂载，必须靠下面这个 effect 显式
   // 收起——否则上一个概念里点了「删除该分支」还没确认的按钮会带进下一个
   // 概念，显示成"确认删除"扣在一个此刻完全不相关的分支列表头上（复审 Important
   // 修复）。
@@ -154,7 +154,7 @@ export function KnowhowMatrixDrawer({
     setConfirmDeleteBranchRowId(null);
   }, [group.anchorValue]);
 
-  // 格子是否可点：镜像 knowhow-panel.tsx 主网格 G2 的既有判据
+  // 格子是否可点：镜像 knowhow-table-grid.tsx 主网格 G2 的既有判据
   // `clickable = filled || canEdit`（Task 6）——填了内容的格子任何人都能点开
   // 看全（spec §4.3「点开看全」不分身份），canEdit 只额外解锁"点空格子去
   // 填写"。Task 8 计划把 onEditCell 接到 openCellAuto，其内部同样只在
@@ -166,7 +166,7 @@ export function KnowhowMatrixDrawer({
 
   // 可点格子的可聚焦/键盘属性。格子内容是 KnowhowMarkdown（可能渲染
   // <a>/<img>/<p> 等块级或交互元素），不能像 G2 网格
-  // （knowhow-panel.tsx 的 .knowhow-cell-open）那样用 <button> 包一层——
+  // （knowhow-table-grid.tsx 的 .knowhow-cell-open）那样用 <button> 包一层——
   // button 内嵌块级/交互元素是非法 HTML。这里改为把可点的 <td> 本身做成
   // role="button" 的可聚焦控件：Enter/Space 触发与鼠标 onClick 相同的
   // onEditCell(rowId, columnId)，两处共用同一个 activate 闭包，不用各写一遍
@@ -201,7 +201,7 @@ export function KnowhowMatrixDrawer({
   // 分支时，用户在这段窗口期确认了那一个分支的删除，两次删除都读到同一份
   // stale openConceptGroup.rows.length，都判定"不是最后一支"，最终两行都被
   // 删掉、组里 0 行剩却没有一次调用清空 openConceptValue（见
-  // knowhow-panel.tsx deleteBranch 的 Important 修复注释）。现在不再主动收起
+  // use-knowhow-concept-matrix.ts deleteBranch 的 Important 修复注释）。现在不再主动收起
   // confirmDeleteBranchRowId：KnowhowPanel 新增的 deletingBranchRowId prop
   // （=== rowId 时）会让下面这个确认按钮转 disabled + "删除中…"，继续挂着这份
   // "确认中"视觉直到请求真正落地——删除成功后这一列随 matrix.branchRowIds
