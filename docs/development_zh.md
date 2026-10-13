@@ -210,6 +210,19 @@
   内建 registry 的 import 闭包保持 `.ts` 以兼容 Node 测试。本地 UI 包遵守
   [扩展 SOP](./deployment-extensions-sop_zh.md) 及独立部署验收门，不放宽基础仓库
   的零插件 registry 断言。
+- `KnowhowPanel`（`knowhow-panel.tsx`）持有面板的顶层状态机（选中的表与行、哪个弹窗
+  打开、表详情、引用跳转、表级写命令、`handleCellSave`）和全部挂载点。不共享的领域
+  状态在三个 owner hook 里：`use-knowhow-table-list.ts`、`use-knowhow-row-code.ts`、
+  `use-knowhow-concept-matrix.ts`。列表、网格、行抽屉、徽章是呈现模块，自带状态机的
+  弹窗各有模块，样式在 `knowhow-panel-styles.tsx`，作为 section 的最后一个子元素渲染
+  一次。每个 owner hook 调用一次、绑定到一个标识符，只经属性访问使用：不解构、不摊平、
+  不放进依赖数组、不整体下传，因为返回对象每次渲染都是新的。调用位置就是 effect 顺序，
+  属于行为：表列表 hook 最先，行代码 hook 在拉表详情与 notebook 复位两个 effect 之间，
+  概念矩阵 hook 是最后一个 hook 调用；notebook 复位必须先于引用跳转。搬动代码不得改变
+  任何回调的 `useCallback` 状态或依赖数组，例如 `handleCodeSaved` 保持每次渲染新建的
+  普通函数。`owner-view-no-reflatten-guard` 与 `knowhow-panel-boundary-guard` 钉住这些
+  约定。`knowhow-panel-golden` 里的请求序列金标永久保留；提交次数与样式哈希只在拆分期
+  使用。
 - 修改群组/Schema 面板时保留既有样式与行为守卫，不复制 CSS 或使用未定义类名。
   Schema 选择/草稿身份是 `(object_type, proposal-status)`，写入回调只向发起时的
   pane 提交可见结果，`SchemaWriteOutcome` 的 `confirmed`、`unconfirmed` 与

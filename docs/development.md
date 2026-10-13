@@ -271,6 +271,25 @@ contributor constraints, not a second implementation history.
   Keep the built-in registry's import closure `.ts` for Node tests. Local UI packages
   follow the [extension SOP](./deployment-extensions-sop.md), including its separate
   deployment acceptance gate; do not weaken the base zero-plugin registry assertion.
+- `KnowhowPanel` (`knowhow-panel.tsx`) keeps the panel's top-level state machine
+  (selected table and row, which modal is open, table detail, citation jumps,
+  table-level writes, `handleCellSave`) and every mount point. Domain state that
+  is not shared lives in three owner hooks: `use-knowhow-table-list.ts`,
+  `use-knowhow-row-code.ts` and `use-knowhow-concept-matrix.ts`. The list, grid,
+  row drawer and badges are presentation modules, the self-contained modals have
+  their own modules, and the stylesheet is `knowhow-panel-styles.tsx`, rendered
+  once as the section's last child. Call each owner hook once into one binding and
+  use it only through property access: do not destructure or flatten it, put it in
+  a dependency array, or pass it whole. The hook result is a new object on every
+  render. Call positions are effect order, which is behaviour. The table-list hook
+  comes first, the row-code hook sits between the detail-load and notebook-reset
+  effects, and the concept-matrix hook is the last hook call. The notebook reset
+  must run before the citation jump. Moving code must not change any callback's
+  `useCallback` status or dependency array; for example, `handleCodeSaved` stays a
+  plain per-render function. `owner-view-no-reflatten-guard` and
+  `knowhow-panel-boundary-guard` enforce these rules. Request-sequence goldens in
+  `knowhow-panel-golden` are permanent; commit counts and stylesheet hashes were
+  split-period only.
 - Changes to group or schema panels must preserve their style and behavior guards,
   rather than duplicating CSS or using undeclared classes. Schema selection/drafts
   use `(object_type, proposal-status)` identity, writes commit visible results only
