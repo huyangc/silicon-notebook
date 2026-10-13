@@ -329,7 +329,11 @@ class MemoryIsolationStore:
         version, so the rebuild re-clusters)."""
         cursor = db.execute(
             "UPDATE unified_kg_state SET memory_isolation_version = 0, "
-            "community_seq = -1, canonical_rel_seq = -1, mention_seq = -1, "
+            "community_seq = -1, "
+            # K1 (ruling 13): a deleted layer keeps its -2 sentinel -- its kept
+            # rows must stay unread until that layer is rebuilt.
+            "canonical_rel_seq = CASE WHEN canonical_rel_seq = -2 THEN -2 ELSE -1 END, "
+            "mention_seq = CASE WHEN mention_seq = -2 THEN -2 ELSE -1 END, "
             "dirty = 1, kg_mutation_seq = kg_mutation_seq + 1, "
             "cluster_mutation_seq = cluster_mutation_seq + 1, updated_at = now() "
             "WHERE notebook_id = %s AND memory_isolation_version = 2",

@@ -674,8 +674,10 @@ def test_delete_notebook_kg_resets_unified_kg_state_in_place_and_advances_epoch(
     assert int(after["kg_mutation_seq"]) == 0
     assert int(after["cluster_mutation_seq"]) == 0
     assert int(after["community_seq"]) == -1
-    assert int(after["canonical_rel_seq"]) == -1
-    assert int(after["mention_seq"]) == -1
+    # K1 (ruling 13): the kept derived layers are closed with the -2 sentinel
+    # until that layer's own replace_* writes a real seq.
+    assert int(after["canonical_rel_seq"]) == -2
+    assert int(after["mention_seq"]) == -2
     assert after["cluster_input_version"] == ""
     assert after["last_rebuild_at"] is None
     assert int(after["object_count"]) == 0

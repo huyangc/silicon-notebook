@@ -110,25 +110,31 @@ _PUBLISHED_CLUSTER_GEN = (
     "COALESCE((SELECT cluster_generation FROM unified_kg_state "
     "WHERE notebook_id = %s), 0)"
 )
-# K1 (debt-fix 2026-10-12, ruling 11): a graph delete keeps the five
+# K1 (debt-fix 2026-10-12, rulings 11 + 13): a graph delete keeps the five
 # rebuild-derived tables until the next rebuild. Their rows must not read back
 # in between: re-extracting a concept after the delete mints the SAME
 # canonical id (``"K-" + _norm(name)``), so co-mention peers, relation support
 # and mention edges keyed on it would come back from the deleted graph. The
-# delete leaves one exact signature on the state row -- ``kg_reset_epoch > 0``
-# (a reset happened), the layer's seq at -1 (the layer was not rebuilt since)
-# and ``last_rebuild_at`` empty (no unified rebuild since). Every reader of a
-# derived layer treats that state as "no derived data". Nothing else produces
-# it: a birth / copy row has epoch 0; the Memory-isolation re-queue resets the
-# seqs but keeps ``last_rebuild_at``; the indexing-pipeline publish resets the
-# seqs after clearing the tables itself. A rebuild sets ``last_rebuild_at``
-# and each layer's seq, which reopens the layer. One primary-key probe of
-# ``unified_kg_state`` per statement, uncorrelated (evaluated once).
+# delete writes each layer's seq as the dedicated sentinel -2
+# (``DELETED_LAYER_SEQ``; canonical_rel_seq for canonical_relations,
+# mention_seq for mention_edges + concept_comentions, which one
+# replace_mention_bridge rewrites together), and every reader of that layer
+# treats -2 as "no derived data". Only that layer's own rewrite writes a real
+# seq (``replace_canonical_relations`` / ``replace_mention_bridge`` /
+# ``clear_mention_bridge``), so the layer stays closed through a unified
+# rebuild's clustering phase and after a failed layer recompute -- unlike
+# ``last_rebuild_at``, which the rebuild writes before the layers (ruling 13).
+# Nothing else writes -2: births and copies read -1, the Memory-isolation
+# re-queue keeps -2 where it finds it, the indexing-pipeline publish clears
+# the tables before writing -1. One primary-key probe of ``unified_kg_state``
+# per statement, uncorrelated (evaluated once: InitPlan + One-Time Filter).
+DELETED_LAYER_SEQ = -2
+
+
 def _derived_layer_live(seq_column: str) -> str:
     return (
         "NOT EXISTS (SELECT 1 FROM unified_kg_state dls "
-        f"WHERE dls.notebook_id = %s AND dls.{seq_column} = -1 "
-        "AND dls.kg_reset_epoch > 0 AND dls.last_rebuild_at IS NULL)"
+        f"WHERE dls.notebook_id = %s AND dls.{seq_column} = {DELETED_LAYER_SEQ})"
     )
 
 

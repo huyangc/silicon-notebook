@@ -674,8 +674,10 @@ def test_delete_notebook_kg_resets_unified_kg_state_in_place_and_advances_epoch(
     assert int(after["kg_mutation_seq"]) == 0
     assert int(after["cluster_mutation_seq"]) == 0
     assert int(after["community_seq"]) == -1
-    assert int(after["canonical_rel_seq"]) == -1
-    assert int(after["mention_seq"]) == -1
+    # K1 (ruling 13): the kept derived layers are closed with the -2 sentinel
+    # until that layer's own replace_* writes a real seq.
+    assert int(after["canonical_rel_seq"]) == -2
+    assert int(after["mention_seq"]) == -2
     assert after["cluster_input_version"] == ""
     assert (after["last_rebuild_at"] or "") == ""
     assert int(after["object_count"]) == 0
@@ -736,6 +738,11 @@ def test_delete_notebook_kg_matches_a_freshly_created_birth_row_byte_for_byte(re
         # 行在 -1 代),让迁移前遗留的代 0 社区读不到;出生行仍是 0(没有社区
         # 行)。kg_analysis 的「从未计算」判据不读这一列。
         "community_generation",
+        # K1(裁决 13):canonical 关系层与提及桥接层同样保留到重建,两层 seq
+        # 写哨兵 -2(出生行 -1),只有该层自己的 replace_* 写入真实 seq 才重新
+        # 可读;kg_analysis 的报告把 -2 读作 -1。
+        "canonical_rel_seq",
+        "mention_seq",
     }
     assert set(reset_row) == set(born_row)
     for column in sorted(set(born_row) - excluded):
@@ -751,6 +758,8 @@ def test_delete_notebook_kg_matches_a_freshly_created_birth_row_byte_for_byte(re
     )
     assert int(born_row["community_generation"]) == 0
     assert int(reset_row["community_generation"]) == -1
+    assert int(born_row["canonical_rel_seq"]) == int(born_row["mention_seq"]) == -1
+    assert int(reset_row["canonical_rel_seq"]) == int(reset_row["mention_seq"]) == -2
 
 
 def test_delete_notebook_kg_resets_generation_pointers_but_never_the_counter(repo):

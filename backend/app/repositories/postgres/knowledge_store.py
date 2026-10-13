@@ -1231,6 +1231,10 @@ class KnowledgeStore:
         # 读不到任何行;重建按既有路径取号、copy-forward(从 -1 代复制空集)、
         # 预回收(keep 不含旧代,旧行被回收)、翻转双 CAS(期望值 -1)写回正常代。
         # INSERT 分支同写 -1(merge_dbs 留下的无 state 行库可能带着社区行)。
+        # K1(裁决 13):canonical_rel_seq / mention_seq 写专用哨兵 -2(两个分支
+        # 都写):这两层的行同样保留到重建,读者见 -2 即视为没有派生数据,只有
+        # 该层自己的 replace_* 写入真实 seq 才重新打开(unified_kg_store.py 的
+        # DELETED_LAYER_SEQ)。重建跳过判据 ``seq == kg_mutation_seq`` 永不等于 -2。
         # building/claimed 清零使任何并发在飞 rebuild 的翻转双 CAS 当场作废
         # (standalone delete → flip aborts,响亮失败不发布)。
         # ``derived_generation_counter`` 刻意 NOT 重置(UPDATE 分支不出现):
@@ -1242,12 +1246,12 @@ class KnowledgeStore:
             "cluster_input_version, last_rebuild_at, object_count, "
             "relation_count, cluster_count, community_seq, canonical_rel_seq, "
             "mention_seq, kg_reset_epoch, community_generation, updated_at"
-            ") VALUES (%s, 0, 0, 0, '', NULL, 0, 0, 0, -1, -1, -1, 1, -1, %s) "
+            ") VALUES (%s, 0, 0, 0, '', NULL, 0, 0, 0, -1, -2, -2, 1, -1, %s) "
             "ON CONFLICT (notebook_id) DO UPDATE SET "
             "dirty=0, kg_mutation_seq=0, cluster_mutation_seq=0, "
             "cluster_input_version='', last_rebuild_at=NULL, "
             "object_count=0, relation_count=0, cluster_count=0, "
-            "community_seq=-1, canonical_rel_seq=-1, mention_seq=-1, "
+            "community_seq=-1, canonical_rel_seq=-2, mention_seq=-2, "
             "kg_reset_epoch=unified_kg_state.kg_reset_epoch+1, "
             "cluster_generation=0, community_generation=-1, "
             "derived_building_generation=0, derived_building_claimed_at=NULL, "

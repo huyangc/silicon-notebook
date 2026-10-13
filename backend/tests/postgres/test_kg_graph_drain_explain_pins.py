@@ -183,3 +183,44 @@ def test_conflict_and_merge_review_steps_are_index_bounded(captured):
     for statement, plan in merge:
         assert "Seq Scan" not in plan, f"{statement}\n{plan}"
         assert "pk_merge_review_jobs" in plan, plan
+
+
+def test_derived_layer_gate_is_a_one_time_filter(postgres_database):
+    """K1 裁决 13(质量评审 r4 P3-4):canonical 层与提及层读者的删除闸是
+    不相关子查询——计划里是一次 ``InitPlan`` 加 ``One-Time Filter``,不是逐行
+    执行的 ``SubPlan``。闸被改写成相关子查询(按行重查状态表)时报红。
+    语句取自真实读者方法。"""
+    from app.repositories.postgres.unified_kg_store import UnifiedKgStore
+
+    assert PostgresMigrator(postgres_database).migrate()
+    _seed(postgres_database)
+    with postgres_database.write() as db:
+        db.execute("SET LOCAL statement_timeout = '0'")
+        for nb in ("nb", "nb-other"):
+            db.execute(
+                "INSERT INTO unified_kg_state (notebook_id, updated_at) VALUES (%s, %s) "
+                "ON CONFLICT (notebook_id) DO NOTHING", (nb, _NOW))
+            db.execute(
+                "INSERT INTO canonical_relations (notebook_id,canonical_src,edge_type,"
+                "canonical_tgt,updated_at) SELECT %s,'K-'||g,'supports','K-t'||g,%s "
+                "FROM generate_series(1,5000) g", (nb, _NOW))
+            db.execute(
+                "INSERT INTO mention_edges (notebook_id,claim_object_id,"
+                "concept_canonical_id) SELECT %s,'ko-c'||g,'K-'||g "
+                "FROM generate_series(1,5000) g", (nb,))
+        for table in ("unified_kg_state", "canonical_relations", "mention_edges"):
+            db.execute(f"ANALYZE {table}")
+    log: list = []
+    with postgres_database.connect() as db:
+        rec = _Recording(db, log)
+        UnifiedKgStore.relation_support_rows(
+            rec, "nb", [("K-1", "supports", "K-t1"), ("K-2", "supports", "K-t2")])
+        UnifiedKgStore.mention_rows(rec, "nb")
+    assert len(log) == 2, log
+    with postgres_database.connect() as connection:
+        for statement, params in log:
+            plan = _plan(connection, statement, params)
+            assert "InitPlan" in plan and "One-Time Filter" in plan, (
+                f"{statement}\n{plan}")
+            assert "SubPlan" not in plan, f"闸门成了逐行子计划:\n{plan}"
+            assert "unified_kg_state" in plan, plan

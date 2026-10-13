@@ -714,7 +714,9 @@ def _state_view(row: Any) -> KgState:
         kg_mutation_seq=int(row["kg_mutation_seq"]),
         community_seq=int(row["community_seq"]),
         cluster_mutation_seq=int(row["cluster_mutation_seq"]),
-        canonical_rel_seq=int(row["canonical_rel_seq"]),
+        # K1: a graph delete writes the -2 "layer deleted" sentinel; for this
+        # report it is the same "never built" -1 as before.
+        canonical_rel_seq=max(-1, int(row["canonical_rel_seq"])),
         dirty=bool(row["dirty"]),
         last_rebuild=LastRebuild(
             basis=BASIS_UNIFIED_REBUILD_SNAPSHOT,

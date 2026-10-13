@@ -1336,8 +1336,14 @@ def _reextract(repo, notebook_id, canonical_id, name, member, source_id):
         db.execute(
             "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,"
             "payload,evidence,source_id,created_at,updated_at) "
-            "VALUES (?,?,'concept','approved','','{}','[]',?,?,?)",
-            (member, notebook_id, source_id, now, now),
+            "VALUES (?,?,'concept','approved','',?,?,?,?,?)",
+            (member, notebook_id, "{}",
+             '[{"source_id": "%s", "quoted_span": "x"}]' % source_id,
+             source_id, now, now),
+        )
+        db.execute(
+            "INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id) "
+            "VALUES (?,?,?)", (member, source_id, notebook_id),
         )
         db.execute(
             "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,"
@@ -1356,9 +1362,17 @@ def _derived_reads(repo, notebook_id):
         sibling_min_bridge=1,
     )
     with rt.database.connect() as db:
+        sources = [r[0] for r in db.execute(
+            "SELECT id FROM sources WHERE notebook_id=? ORDER BY id", (notebook_id,))]
         direct = {
             "weak_support": [dict(r) for r in uk.weak_support_relation_rows(
                 db, notebook_id, ["K-g1000", "K-000"], 10, 10)],
+            # 质量评审 r4 P3-3:限定来源与按查看者两种语句形状也要过闸。
+            "weak_support_ceiling": [dict(r) for r in uk.weak_support_relation_rows(
+                db, notebook_id, ["K-g1000", "K-000"], 10, 10,
+                allowed_source_ids=sources)],
+            "weak_support_viewer": [dict(r) for r in uk.weak_support_relation_rows(
+                db, notebook_id, ["K-g1000", "K-000"], 10, 10, viewer_id="viewer-x")],
             "relation_support": [dict(r) for r in uk.relation_support_rows(
                 db, notebook_id, [("K-g1000", "supports", "K-g1t000"),
                                   ("K-000", "supports", "K-t000")])],
@@ -1404,6 +1418,9 @@ def test_derived_layers_stay_unread_after_delete_and_reextraction(repo):
         _reextract(repo, nb, "K-g1z000", "bar", f"ko-re-{tag}-2", src)
         _reextract(repo, nb, "K-000", "legacy", f"ko-re-{tag}-3", src)
         _reextract(repo, nb, "K-z000", "legacy-peer", f"ko-re-{tag}-4", src)
+        # 关系的目标端也重抽回来,让带天花板 / 按查看者的弱支撑语句有支撑对象。
+        _reextract(repo, nb, "K-t000", "legacy-target", f"ko-re-{tag}-5", src)
+        _reextract(repo, nb, "K-g1t000", "foo-target", f"ko-re-{tag}-6", src)
 
     assert _derived_counts(repo, had.id) == dict.fromkeys(_DERIVED, 6), (
         "前置:派生行按裁决 11 保留"
@@ -1510,3 +1527,150 @@ def test_community_pointer_sentinel_hides_kept_communities_until_a_rebuild(repo)
         )
     with rt.database.connect() as db:
         assert uk.communities_count(db, nb.id, 0)[0] == 1
+
+
+def _layer_reads(repo, notebook_id):
+    """The canonical-relation, mention and co-mention reads of the kept
+    (``prefix=""``) derived rows, by the old ids."""
+    rt = repo._runtime
+    uk = rt.unified_kg
+    with rt.database.connect() as db:
+        return {
+            "relation_support": [tuple(r) for r in uk.relation_support_rows(
+                db, notebook_id, [("K-000", "supports", "K-t000")])],
+            "edge_support": [tuple(r) for r in uk.edge_support_rows(db, notebook_id)],
+            "mention": [tuple(r) for r in uk.mention_rows(db, notebook_id)],
+            "comention": uk.comention_peers(notebook_id, "K-000", 1, 10),
+        }
+
+
+_EMPTY_LAYERS = {"relation_support": [], "edge_support": [], "mention": [],
+                 "comention": []}
+
+
+def test_derived_layers_stay_closed_mid_rebuild_and_after_a_failed_layer_recompute(
+    repo, monkeypatch,
+):
+    """K1 裁决 13(规格 / 质量评审 r4 P2-1):各层只在自己被重建重写之后才重新
+    可读。① 重建已经发布聚类、写下 ``last_rebuild_at``,本层还没替换——读不到;
+    ② 本层重算失败(fail-open 吞掉)——之后仍读不到;③ 下一次成功重建替换了
+    本层——可读(旧行已被替换掉,新写的行读得到)。变异钉:闸门改回依赖
+    ``last_rebuild_at`` → ①② 读到旧行,报红;重建不写本层 seq → ③ 红。"""
+    rt = repo._runtime
+    service = rt.knowledge_lifecycle
+    nb = repo.create_notebook(NotebookCreate(name="mid-rebuild"))
+    _seed_graph(repo, nb.id, doc_objects=2, clusters=True)
+    _seed_derived(repo, nb.id, 3, generation=0, prefix="")
+    repo.delete_notebook_kg(nb.id)
+    for canonical_id, name, member in (("K-000", "legacy", "ko-re-1"),
+                                       ("K-z000", "legacy-peer", "ko-re-2"),
+                                       ("K-t000", "legacy-target", "ko-re-3")):
+        _reextract(repo, nb.id, canonical_id, name, member, "src-doc")
+
+    seen = {}
+
+    def _failing(layer):
+        def _rebuild(notebook_id, force=False):
+            with rt.database.connect() as db:
+                seen[layer] = (rt.unified_kg.state_row(db, notebook_id)["last_rebuild_at"],
+                               _layer_reads(repo, notebook_id))
+            raise RuntimeError(f"{layer} recompute failed")
+        return _rebuild
+
+    monkeypatch.setattr(service, "rebuild_canonical_relations", _failing("canonical"))
+    monkeypatch.setattr(service, "rebuild_mention_bridge", _failing("mention"))
+    service.rebuild_unified_kg(nb.id, force=True)
+
+    for layer in ("canonical", "mention"):
+        last_rebuild_at, reads = seen[layer]
+        assert last_rebuild_at, f"前置:{layer} 重算时聚类已发布、last_rebuild_at 已写"
+        assert reads == _EMPTY_LAYERS, f"重建中途 {layer} 层读到了旧图:{reads}"
+    assert _layer_reads(repo, nb.id) == _EMPTY_LAYERS, "本层重算失败后仍须读不到"
+    assert _derived_counts(repo, nb.id)["canonical_relations"] == 3, "前置:旧行仍在"
+
+    monkeypatch.undo()
+    service.rebuild_unified_kg(nb.id, force=True)
+    with rt.database.connect() as db:
+        state = rt.unified_kg.state_row(db, nb.id)
+    assert state["canonical_rel_seq"] != -2 and state["mention_seq"] != -2
+    _seed_derived(repo, nb.id, 1, generation=0, prefix="post")
+    with rt.database.connect() as db:
+        assert rt.unified_kg.relation_support_rows(
+            db, nb.id, [("K-post000", "supports", "K-postt000")])
+        assert ("ko-postc000", "K-post000") in [
+            tuple(r) for r in rt.unified_kg.mention_rows(db, nb.id)]
+
+
+def test_delete_without_a_state_row_writes_the_sentinels(repo):
+    """K1(质量评审 r4 P3-2):没有状态行的库(merge_dbs 产物)删除时走 UPSERT
+    的 INSERT 分支,同样写下社区指针 -1 与两层 seq -2,保留的派生行一律读不到。
+    变异钉:INSERT 分支写回 -1/0 → 报红。"""
+    rt = repo._runtime
+    uk = rt.unified_kg
+    nb = repo.create_notebook(NotebookCreate(name="no-state-row"))
+    _seed_graph(repo, nb.id, doc_objects=2, clusters=True)
+    _seed_derived(repo, nb.id, 3, generation=0, prefix="")
+    with rt.database.write() as db:
+        db.execute("DELETE FROM unified_kg_state WHERE notebook_id=?", (nb.id,))
+    repo.delete_notebook_kg(nb.id)
+    with rt.database.connect() as db:
+        state = uk.state_row(db, nb.id)
+        assert (state["community_generation"], state["canonical_rel_seq"],
+                state["mention_seq"]) == (-1, -2, -2)
+        assert uk.communities_count(db, nb.id, 0)[0] == 0
+    assert uk.top_community_for(nb.id, "K-000") is None
+    assert _layer_reads(repo, nb.id) == _EMPTY_LAYERS
+
+
+def test_memory_isolation_requeue_keeps_a_deleted_layer_closed(repo):
+    """K1 裁决 13:Memory 隔离重排队把派生层 seq 置 -1,但不得把删除写下的 -2
+    覆盖成 -1——否则保留的旧行重新可读。没删过的层照旧置 -1。"""
+    from app.repositories.sqlite.memory_isolation_store import MemoryIsolationStore
+
+    rt = repo._runtime
+    nb = repo.create_notebook(NotebookCreate(name="requeue-deleted"))
+    _seed_graph(repo, nb.id, doc_objects=2, clusters=True)
+    _seed_derived(repo, nb.id, 3, generation=0, prefix="")
+    repo.delete_notebook_kg(nb.id)
+    with rt.database.write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET memory_isolation_version = 2, "
+            "mention_seq = 7 WHERE notebook_id = ?", (nb.id,))
+        assert MemoryIsolationStore.queue_for_rebuild(db, nb.id)
+    with rt.database.connect() as db:
+        state = rt.unified_kg.state_row(db, nb.id)
+    assert state["canonical_rel_seq"] == -2, "删除留下的 -2 必须保留"
+    assert state["mention_seq"] == -1, "未删的层照旧置 -1"
+    with rt.database.connect() as db:
+        assert rt.unified_kg.relation_support_rows(
+            db, nb.id, [("K-000", "supports", "K-t000")]) == []
+
+
+def test_a_failing_residue_sweep_does_not_fail_the_delete(repo, monkeypatch):
+    """K1(质量评审 r4 P3-1):提交后清扫排在缓存失效之后、且 fail-open——
+    清扫抛错时删除照常成功、缓存已经失效、发一条只带类名的事件。变异钉:
+    清扫挪回失效之前或不包 try → 报红。"""
+    service = repo._runtime.knowledge_lifecycle
+    nb = repo.create_notebook(NotebookCreate(name="sweep-fails"))
+    _seed_graph(repo, nb.id, doc_objects=2)
+    order, events = [], []
+    original_evict = service._invalidate_unified_cache
+
+    def _evict(notebook_id):
+        order.append("evict")
+        return original_evict(notebook_id)
+
+    def _sweep(notebook_id, totals):
+        order.append("sweep")
+        raise ConnectionError("database went away")
+
+    monkeypatch.setattr(service, "_invalidate_unified_cache", _evict)
+    monkeypatch.setattr(service, "_sweep_drain_only_residue", _sweep)
+    monkeypatch.setattr(service.event_log, "emit", events.append)
+
+    counts = repo.delete_notebook_kg(nb.id)
+
+    assert counts["knowledge_objects"] == 2
+    assert order == ["evict", "sweep"]
+    assert {"kind": "kg_delete_residue_sweep_failed", "notebook_id": nb.id,
+            "error_type": "ConnectionError"} in events

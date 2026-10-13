@@ -81,23 +81,24 @@ _PUBLISHED_CLUSTER_GEN = (
     "COALESCE((SELECT cluster_generation FROM unified_kg_state "
     "WHERE notebook_id = ?), 0)"
 )
-# K1 (debt-fix 2026-10-12, ruling 11): a graph delete keeps the five
+# K1 (debt-fix 2026-10-12, rulings 11 + 13): a graph delete keeps the five
 # rebuild-derived tables until the next rebuild; their rows must not read back
-# in between. The PostgreSQL twin's comment at the same spot has the full
-# argument (the delete's state-row signature, what else could produce it, why
-# a rebuild reopens the layer). SQLite stores an empty ``last_rebuild_at`` as
-# ''. Shape differs from the twin on purpose: SQLite re-checks a WHERE term
-# per scanned row even when it is a cached uncorrelated subquery (measured
-# +5% on a 75k-row co-mention scan), so here the gate is folded into the
-# notebook key itself -- ``notebook_id = (SELECT ? WHERE NOT EXISTS ...)``
-# is evaluated once, used as the index key, and is NULL (no row matches) in
-# the delete's state. Two parameters, both the notebook id. The seq test
-# comes first so a rebuilt notebook stops at it.
+# in between. The delete writes each layer's seq as the sentinel -2 and the
+# readers treat -2 as "no derived data" until that layer's own rewrite writes
+# a real seq -- the PostgreSQL twin's comment at the same spot has the full
+# argument. Shape differs from the twin on purpose: SQLite re-checks a WHERE
+# term per scanned row even when it is a cached uncorrelated subquery
+# (measured +5% on a 75k-row co-mention scan), so here the gate is folded into
+# the notebook key itself -- ``notebook_id = (SELECT ? WHERE NOT EXISTS ...)``
+# is evaluated once, used as the index key, and is NULL (no row matches) for
+# a deleted layer. Two parameters, both the notebook id.
+DELETED_LAYER_SEQ = -2
+
+
 def _derived_layer_notebook_key(seq_column: str) -> str:
     return (
         "(SELECT ? WHERE NOT EXISTS (SELECT 1 FROM unified_kg_state dls "
-        f"WHERE dls.notebook_id = ? AND dls.{seq_column} = -1 "
-        "AND dls.kg_reset_epoch > 0 AND dls.last_rebuild_at = ''))"
+        f"WHERE dls.notebook_id = ? AND dls.{seq_column} = {DELETED_LAYER_SEQ}))"
     )
 
 
@@ -107,12 +108,12 @@ _MENTION_LAYER_NB = _derived_layer_notebook_key("mention_seq")
 # The weak-support reader seeks the primary key once per seed (``canonical_src
 # IN (...)``), and SQLite re-reads a subquery-valued key on each of those
 # seeks (measured +8.5% at 96 seeds). There the gate rides the LIMIT instead:
-# ``LIMIT (CASE WHEN <delete signature> THEN 0 ELSE ? END)`` is evaluated once
+# ``LIMIT (CASE WHEN <layer deleted> THEN 0 ELSE ? END)`` is evaluated once
 # before the scan. Parameters: the notebook id, then the limit.
 _CANONICAL_LAYER_LIMIT = (
     "(CASE WHEN EXISTS (SELECT 1 FROM unified_kg_state dls "
-    "WHERE dls.notebook_id = ? AND dls.canonical_rel_seq = -1 "
-    "AND dls.kg_reset_epoch > 0 AND dls.last_rebuild_at = '') THEN 0 ELSE ? END)"
+    "WHERE dls.notebook_id = ? "
+    f"AND dls.canonical_rel_seq = {DELETED_LAYER_SEQ}) THEN 0 ELSE ? END)"
 )
 
 # Communities need no read gate: the delete writes the published community

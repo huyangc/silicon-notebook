@@ -5286,7 +5286,10 @@ class SqliteMigrator:
                 now = _now()
                 db.execute(
                     "UPDATE unified_kg_state SET memory_isolation_version = 0, "
-                    "community_seq = -1, canonical_rel_seq = -1, mention_seq = -1, "
+                    "community_seq = -1, "
+                    # K1 (ruling 13): keep a deleted layer's -2 sentinel.
+                    "canonical_rel_seq = CASE WHEN canonical_rel_seq = -2 THEN -2 ELSE -1 END, "
+                    "mention_seq = CASE WHEN mention_seq = -2 THEN -2 ELSE -1 END, "
                     "dirty = 1, kg_mutation_seq = kg_mutation_seq + 1, "
                     "cluster_mutation_seq = cluster_mutation_seq + 1, updated_at = ? "
                     "WHERE notebook_id IN (SELECT notebook_id FROM mki_f)",
