@@ -433,6 +433,100 @@ def test_weakref_seam_through_the_runtime_must_name_a_live_component_member(
     ]
 
 
+_RUNTIME_SEAM_FILES = {
+    "backend/app/services/repository_runtime.py": (
+        "from app.services.lifecycle import Lifecycle\n"
+        "from app.services.decoy import Decoy\n"
+        "class RepositoryRuntime:\n"
+        "    def helper(self):\n"
+        "        lifecycle = Decoy()\n"
+        "        return lifecycle\n"
+        "    def wire(self):\n"
+        "        self.lifecycle = Lifecycle()\n"
+    ),
+    "backend/app/services/lifecycle.py": "class Lifecycle:\n    def fuse(self, nb): pass\n",
+    "backend/app/services/decoy.py": "class Decoy:\n    def other(self, nb): pass\n",
+}
+
+
+def test_runtime_component_ignores_a_same_named_local_in_a_method(
+    tmp_path, monkeypatch
+):
+    """Inside a method only ``self.<component>`` binds the component: a local
+    ``lifecycle = Decoy()`` in an earlier method must not be taken for it."""
+    monkeypatch.setattr(_GUARD, "DYNAMIC_FACADE_REFERENCE_EXEMPTIONS", {})
+    body = (
+        "    def __init__(self, ref):\n"
+        "        self._runtime = None\n"
+        "        self._seam = lambda nb: _repository_from_weakref(ref)"
+        "._runtime.lifecycle.fuse(nb)\n"
+        + _LIVE_BODY
+    )
+    root = _facade_root(
+        tmp_path, facade_body=body, allowed=_LIVE_ALLOWED,
+        app_files=_RUNTIME_SEAM_FILES,
+    )
+    assert _GUARD.dynamic_facade_reference_violations(root) == []
+
+
+def test_weakref_seam_shapes_the_checks_cannot_read_fail(tmp_path, monkeypatch):
+    """A ``_repository_from_weakref(...)`` result must be read as
+    ``.<facade member>`` or ``._runtime.<component>.<member>``, followed by at
+    most a call; an alias, a walrus, a ``getattr``, a subscript or a deeper
+    chain hides the names the seam checks resolve."""
+    monkeypatch.setattr(_GUARD, "DYNAMIC_FACADE_REFERENCE_EXEMPTIONS", {})
+    live = (
+        "    def __init__(self, ref):\n"
+        "        self._runtime = None\n"
+        "        self._a = lambda nb: _repository_from_weakref(ref).kept(nb)\n"
+        "        self._b = lambda: _repository_from_weakref(ref).other\n"
+        "        self._c = lambda nb: _repository_from_weakref(ref)"
+        "._runtime.lifecycle.fuse(nb)\n"
+        + _LIVE_BODY
+    )
+    root = _facade_root(
+        tmp_path, facade_body=live, allowed=_LIVE_ALLOWED,
+        app_files=_RUNTIME_SEAM_FILES,
+    )
+    assert _GUARD.dynamic_facade_reference_violations(root) == []
+
+    hidden = live + (
+        "    def alias(self, ref):\n"
+        "        r = _repository_from_weakref(ref)\n"
+        "        return r.kept()\n"
+        "    def walrus(self, ref):\n"
+        "        return (r := _repository_from_weakref(ref)).kept()\n"
+        "    def probe(self, ref):\n"
+        "        return getattr(_repository_from_weakref(ref), 'kept')()\n"
+        "    def deeper(self, ref):\n"
+        "        return _repository_from_weakref(ref).kept.inner()\n"
+        "    def deeper_runtime(self, ref):\n"
+        "        return _repository_from_weakref(ref)._runtime.lifecycle.fuse.inner()\n"
+        "    def runtime_only(self, ref):\n"
+        "        return _repository_from_weakref(ref)._runtime\n"
+        "    def indexed(self, ref):\n"
+        "        return _repository_from_weakref(ref).kept[0]\n"
+    )
+    root = _facade_root(
+        tmp_path, facade_body=hidden, allowed=_LIVE_ALLOWED,
+        app_files=_RUNTIME_SEAM_FILES,
+    )
+    prefix = (
+        "facade weak-reference seam has a shape the seam checks cannot read: "
+        "RepositoryFacade."
+    )
+    assert _GUARD.dynamic_facade_reference_violations(root) == sorted([
+        prefix + "alias :: _repository_from_weakref(ref)",
+        prefix + "deeper :: _repository_from_weakref(ref).kept.inner",
+        prefix + "deeper_runtime :: "
+                 "_repository_from_weakref(ref)._runtime.lifecycle.fuse.inner",
+        prefix + "indexed :: _repository_from_weakref(ref).kept",
+        prefix + "probe :: _repository_from_weakref(ref)",
+        prefix + "runtime_only :: _repository_from_weakref(ref)._runtime",
+        prefix + "walrus :: _repository_from_weakref(ref)",
+    ])
+
+
 def test_literal_getattr_probe_must_name_a_live_repository_attribute(
     tmp_path, monkeypatch
 ):

@@ -981,13 +981,12 @@ def test_scale_builder_fuse_seam_reaches_the_lifecycle_service(repo, monkeypatch
         return original(notebook_id, source_id)
 
     monkeypatch.setattr(lifecycle, "incremental_fuse_source", spy)
-    events = []
-    monkeypatch.setattr(repo._runtime.event_log, "emit", events.append)
 
+    # 直调回调不经 fold 的 try/except:接缝断了就在这一行抛错。「fold 期间没有
+    # incremental_fuse_failed 事件」由 test_fold_scale_index_delta 负责。
     repo._runtime.scale_builder.incremental_fuse_source(nb.id, "s1")
 
     assert calls == [(nb.id, "s1")], "接缝必须在调用时解析到 runtime 的生命周期服务"
-    assert not [e for e in events if e.get("kind") == "incremental_fuse_failed"]
     with repo._connect() as db:
         members = {r["member_object_id"] for r in db.execute(
             "SELECT member_object_id FROM concept_clusters WHERE notebook_id=?",

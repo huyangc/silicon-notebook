@@ -727,13 +727,63 @@ def _weakref_runtime_chains(tree: ast.AST) -> list[tuple[str, str]]:
     return chains
 
 
+def _weakref_seam_shape_violations(tree: ast.AST) -> list[str]:
+    """Every ``_repository_from_weakref(...)`` call must have one of the two
+    shapes the seam checks can resolve: ``.<facade member>`` or
+    ``._runtime.<component>.<member>``, followed by at most a call. Anything
+    else -- the result bound to a name (plain or walrus), handed to
+    ``getattr``, or a deeper attribute chain -- names attributes no check
+    reads, so it fails. Identity is the enclosing qualname plus the
+    expression, never a line number."""
+
+    parents: dict[ast.AST, ast.AST] = {}
+    scopes: dict[ast.AST, str] = {}
+
+    def visit(node: ast.AST, scope: tuple[str, ...]) -> None:
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                visit(child, (*scope, child.name))
+                continue
+            scopes[child] = ".".join(scope) or "<module>"
+            visit(child, scope)
+
+    visit(tree, ())
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_repository_from_weakref"
+        ):
+            continue
+        chain: list[str] = []
+        end: ast.AST = node
+        while isinstance(parents.get(end), ast.Attribute) and parents[end].value is end:
+            end = parents[end]
+            chain.append(end.attr)
+        follower = parents.get(end)
+        recognised = (
+            (len(chain) == 1 and chain[0] != "_runtime")
+            or (len(chain) == 3 and chain[0] == "_runtime")
+        )
+        if recognised and not isinstance(follower, ast.Subscript):
+            continue
+        violations.append(
+            "facade weak-reference seam has a shape the seam checks cannot "
+            f"read: {scopes.get(node, '<module>')} :: {ast.unparse(end)}"
+        )
+    return sorted(violations)
+
+
 def _runtime_component_class(
     root: Path, component: str
 ) -> tuple[Path, ast.ClassDef] | None:
-    """The class ``RepositoryRuntime.<component>`` holds: a class- or
-    ``self``-level annotation, a property's return annotation, or the class
-    constructed by a ``self.<component> = <Class>(...)`` assignment. The first
-    name that resolves to a class wins (``X | None`` resolves ``X``)."""
+    """The class ``RepositoryRuntime.<component>`` holds: a class-body
+    annotation or ``<component> = <Class>(...)``, a property's return
+    annotation, then a ``self.<component>`` annotation or
+    ``self.<component> = <Class>(...)`` inside a method. The first name that
+    resolves to a class wins (``X | None`` resolves ``X``)."""
 
     path = root / RUNTIME_CLASS_FILE
     if not path.is_file():
@@ -742,31 +792,47 @@ def _runtime_component_class(
     if resolved is None:
         return None
 
-    def is_component(target: ast.AST) -> bool:
-        return (isinstance(target, ast.Name) and target.id == component) or (
+    def is_self_component(target: ast.AST) -> bool:
+        return (
             isinstance(target, ast.Attribute)
             and isinstance(target.value, ast.Name)
             and target.value.id == "self"
             and target.attr == component
         )
 
-    candidates: list[ast.AST] = []
-    for node in ast.walk(resolved[1]):
-        if isinstance(node, ast.AnnAssign) and is_component(node.target):
-            candidates.append(node.annotation)
-        elif (
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == component
-            and node.returns is not None
+    def constructed(value: ast.AST) -> list[ast.AST]:
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+            return [value.func]
+        return []
+
+    # Class-body statements may bind the bare name; inside a method only
+    # ``self.<component>`` counts -- a same-named local there is not the
+    # component.
+    class_level: list[ast.AST] = []
+    in_methods: list[ast.AST] = []
+    for statement in resolved[1].body:
+        if (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.target.id == component
         ):
-            candidates.append(node.returns)
-        elif (
-            isinstance(node, ast.Assign)
-            and any(is_component(target) for target in node.targets)
-            and isinstance(node.value, ast.Call)
-            and isinstance(node.value.func, ast.Name)
+            class_level.append(statement.annotation)
+        elif isinstance(statement, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == component
+            for target in statement.targets
         ):
-            candidates.append(node.value.func)
+            class_level.extend(constructed(statement.value))
+        elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if statement.name == component and statement.returns is not None:
+                class_level.append(statement.returns)
+            for node in ast.walk(statement):
+                if isinstance(node, ast.AnnAssign) and is_self_component(node.target):
+                    in_methods.append(node.annotation)
+                elif isinstance(node, ast.Assign) and any(
+                    is_self_component(target) for target in node.targets
+                ):
+                    in_methods.extend(constructed(node.value))
+    candidates = class_level + in_methods
     for annotation in candidates:
         if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
             annotation = ast.parse(annotation.value, mode="eval").body
@@ -841,6 +907,7 @@ def dynamic_facade_reference_violations(root: Path) -> list[str]:
     violations.extend(
         _weakref_runtime_chain_violations(root, _parse_file(facade_path))
     )
+    violations.extend(_weakref_seam_shape_violations(_parse_file(facade_path)))
     class_files = set(FACADE_CLASS_FILES.values())
     used_exemptions: set[tuple[str, str, str]] = set()
     for base in (root / "backend" / "app", root / "scripts"):
