@@ -351,6 +351,8 @@ G1 标准门并发运行 backend、contracts、frontend 三个 lane。`check_bac
 
 界面词汇守卫的 `guard.main()` 自检用例（`backend/tests/test_ui_vocabulary_guard.py`）跑在最小 fixture 树上而不是真实仓库：`_minimal_guard_tree` 把每条通道的全部扫描根与登记模块重定向到一棵每条通道都非空且干净的小树，并把 `MIN_*` 非空性下限降到这棵树的站点数。`test_最小树上守卫全绿` 钉住基线（`main() == 0`），每条变异用例除了断言目标通道自己的报错文案，还要断言没有任何别的通道在报错，避免邻近通道塌了而让用例碰巧变红。真实源码的全仓扫描仍只在 contracts lane（`check_contracts.sh` 调用的 `scripts/check_ui_vocabulary.py`）里跑一次，保留下来的真实树用例（登记的展示字段模块都存在、出厂服务显示名、contracts lane 接线）直接读取仓库。
 
+全仓 Python 源码守卫通过 `backend/tests/architecture/source_trees.py` 的 `app_source_trees()`（单文件用 `read_source_tree()`）读取 `backend/app`，不再各自解析。解析缓存以文件内容为键：无论多少个守卫跑在同一个 pytest worker 里，每个生产文件在该 worker 中只解析一次，文件被改动则一定得到新树；调用方不得修改返回的语法树。扫描整棵树的守卫共用一个 `xdist_group`（引用相关守卫用 `source_scans_citation`，其余整树守卫用 `source_scans_core`），使它们落在同一个 worker 上复用这份缓存，而不是在多个 worker 里重复解析；分组只影响调度，不改任何 marker，也不改变 G1/G2 的选择，已有分组的模块保留原组、不叠加第二个组。每个分组的门内忙时应保持在约 20 秒以内。
+
 测试 fixture 的成本应跟随被测行为。Scale-build 的锁准入与接力测试使用尚未建索引
 的笔记本；真实 build/fold/发布测试继续保留所需的种子数据或索引产物。Scale CLI 的
 未知笔记本拒绝用例使用真实迁移后的数据库，无需导入、知识图谱或向量；非 PostgreSQL
