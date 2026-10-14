@@ -355,6 +355,8 @@ G1 标准门并发运行 backend、contracts、frontend 三个 lane。`check_bac
 
 扫描 `backend/app` 的 Python 源码守卫通过 `backend/tests/architecture/source_trees.py` 的 `app_source_trees()`（单文件用 `read_source_tree()`）读取，同类新守卫也应如此，而不是各自解析整棵树。解析缓存只以文件内容为键（语法树不带文件名）：无论多少个守卫跑在同一个 pytest worker 里，每份不同的源码文本在该 worker 中只解析一次，文件被改动则一定得到新树；调用方不得修改返回的语法树。尚未迁到共享入口的守卫仍在私下解析：`backend/tests/architecture/semantic_source.py` 的 `PythonSourceIndex`（默认天花板与参与集覆盖守卫使用）和 `scripts/check_architecture_boundaries.py`（phase-0 守卫使用）。扫描整棵树并经共享入口解析的守卫共用一个 `xdist_group`（引用相关守卫用 `source_scans_citation`，其余用 `source_scans_core`），使它们落在同一个 worker 上复用这份缓存，而不是在多个 worker 里重复解析。分组只影响调度：不改任何 marker，也不改变 G1/G2 的选择；已有分组的模块保留原组、不叠加第二个组；从共享中得不到好处的模块保持不分组。每个分组的门内忙时应保持在约 20 秒以内。
 
+种子世界模板（`backend/tests/world_templates.py`）让一个模块按 pytest 进程只构建一次昂贵的种子世界，再给每条测试复制一份，每条测试仍只改自己的副本。构建在 `MonkeyPatch.context()` 内从进程基线环境开始，而不是继承触发构建的那条测试的环境；世界依赖的设置全部经 `env=` 显式给出，并计入模板身份，同一个 key 换了设置会直接报错；构建返回的 payload 只能是 JSON 纯数据，不能夹带活对象。构建结束必须关掉自己打开的一切：每个 SQLite 文件执行 `PRAGMA wal_checkpoint(TRUNCATE)` 且 WAL 必须为空，进程里不能再有指向世界目录的文件描述符。世界必须重开稳定（只屏蔽种子管理员每次打开都会重新派生的凭据列），中断作业恢复、种子补插这类打开即规范化在构建期就报红。`relocatable` 世界的任何行、存储文件和 payload 里都不能出现构建根路径；存了绝对路径的世界（上传源）使用 `pinned`，每条测试都从未被触碰的 `pristine` 副本重建固定的 `live` 目录。每次 materialize 都复核 pristine 的文件，并先复位按身份作键的进程级缓存，因为同一 worker 的测试现在共享 notebook 与用户 id；`backend/app` 新增模块级缓存而没有在 helper 的清单里分类时，`test_world_templates.py` 会报红。
+
 测试 fixture 的成本应跟随被测行为。Scale-build 的锁准入与接力测试使用尚未建索引
 的笔记本；真实 build/fold/发布测试继续保留所需的种子数据或索引产物。Scale CLI 的
 未知笔记本拒绝用例使用真实迁移后的数据库，无需导入、知识图谱或向量；非 PostgreSQL
