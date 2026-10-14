@@ -49,7 +49,7 @@ from fastapi.testclient import TestClient
 from app.models.schemas import AskRequest
 from app.services.embedding import FakeEmbedder
 from tests.model_testkit import bind_all_embedding_clients
-from tests.test_knowhow_retrieval import quiesce_knowhow_world
+from tests.knowhow_world_testkit import quiesce_knowhow_world, world_payload
 from tests.world_templates import world_env, world_template
 
 EMBED_DIM = 16
@@ -272,7 +272,7 @@ def _reopen_seeded_world(root):
 @pytest.fixture
 def seeded(client):
     """The seeded world of ``client`` (see ``client``)."""
-    return client._world_payload
+    return world_payload(client, "seeded")
 
 
 # ---------------------------------------------------------------------------

@@ -46,10 +46,9 @@ from tests.test_knowhow_retrieval import (  # noqa: F401  (client/imported are f
     imported,
 )
 
-# One worker runs the whole file, so the imported world (a private copy of the
-# one test_knowhow_retrieval builds) is built once for it instead of once per
-# worker that happens to get one of these tests.
-pytestmark = pytest.mark.xdist_group(name="knowhow_kg_node_retrieval_world")
+# Same group as test_knowhow_retrieval.py: both copy the one imported world
+# (same template key), so one worker builds it once for the gate.
+pytestmark = pytest.mark.xdist_group(name="knowhow_imported_world")
 
 # The column whose 过冲 row cell carries UNIQUE_TERM (DATA_ROWS[0][3]).
 FIX_COLUMN = "修复方法"
