@@ -24,6 +24,7 @@ import json
 import pathlib
 import re
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -543,18 +544,204 @@ def test_环境变量名剥离只作用于后端两条通道(tmp_path):
     assert "notebook" in scan_src(tmp_path, 'const t = "请设置 SILICON_NOTEBOOK_AUTH";')
 
 
+# --------------------------------------------------------------------------
+# 4b. `guard.main()` 的自检用例:跑在一棵最小 fixture 树上,不扫真实仓库
+# --------------------------------------------------------------------------
+#
+# 真实仓库的全通道扫描只在 contracts lane 的 `scripts/check_ui_vocabulary.py` 里
+# 跑一次(`check_contracts.sh`,由 `test_真实源码守卫接在_contracts_lane` 钉住);这里的
+# 变异用例要证明的是「某条通道的违规 / 扫描面塌了会让守卫红」,不需要每条再把
+# 整个 backend/app 与 frontend 解析一遍(每次约 2.5 s)。
+#
+# 最小树把 `main()` 用到的每一个根都重定向到 tmp 目录,每条通道恰好有一个干净、
+# 非空的扫描面,`MIN_*` 下限降到这棵树的实际站点数(下限仍然是「扫描面塌了」的哨兵)。
+# `test_最小树上守卫全绿` 钉住基线;每条变异用例除了目标通道的报错文案,还要断言
+# **只有目标通道**在报错,防止别的通道塌了而「碰巧变红」。
+
+# 每条通道在 stderr 里留下的标记(违规行 + 扫描面塌了/缺文件的哨兵)。
+_CHANNEL_MARKERS = {
+    "frontend": ("in rendered text", "no frontend production sources"),
+    "user_error": ("in user_error message", "call sites found in backend/app", "no backend/app sources"),
+    "trace": ("in trace summary", "trace summaries found", "trace-summary module missing"),
+    "display": ("in display field", "display fields found", "display-field module missing"),
+    "workload": ("in workload label", "workload labels found in", "workload-label module missing"),
+    "service": (
+        "in model service label",
+        "shipped model-service labels",
+        "service-label source missing",
+    ),
+    "release": ("in release note",),
+}
+
+
+def _failed_channels(err: str) -> set[str]:
+    return {
+        channel
+        for channel, markers in _CHANNEL_MARKERS.items()
+        if any(marker in err for marker in markers)
+    }
+
+
+def _assert_only_channel(capsys, channel: str, expected: str) -> str:
+    """守卫已返回非 0:目标通道的文案在,且没有任何别的通道在报错。"""
+    err = capsys.readouterr().err
+    assert expected in err, err
+    assert _failed_channels(err) == {channel}, (
+        f"应当只有 {channel} 通道失败,实际 {sorted(_failed_channels(err))}:\n{err}"
+    )
+    return err
+
+
+def _rewrite(path: pathlib.Path, old: str, new: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    assert old in text, f"最小树的样本变了,变异需同步:{old!r} 不在 {path.name}"
+    path.write_text(text.replace(old, new), encoding="utf-8")
+
+
+def _write(path: pathlib.Path, text: str) -> pathlib.Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+_MIN_HANDLERS = (
+    "from app.api.deps import user_error\n"
+    "\n"
+    "\n"
+    "def pick(notebook):\n"
+    '    if notebook is None:\n'
+    '        raise user_error(400, "请先选择一个笔记本")\n'
+    '    raise user_error(403, "请设置 SILICON_NOTEBOOK_AUTH_MODE 后重试")\n'
+)
+
+
+def _minimal_guard_tree(tmp_path: pathlib.Path, monkeypatch) -> SimpleNamespace:
+    """把 `guard.main()` 的每个扫描根都重定向到一棵每条通道都非空且干净的最小树。
+
+    布局镜像真实仓库(`backend/app/repositories/*/kg_build_job_store.py` 等),所以按
+    相对路径认「作业存储模块」的那条逻辑也走得到。返回各文件路径,供变异用例改写。
+    """
+    frontend = tmp_path / "frontend" / "app"
+    app = tmp_path / "backend" / "app"
+    sqlite_store = app / "repositories" / "sqlite" / "kg_build_job_store.py"
+    postgres_store = app / "repositories" / "postgres" / "kg_build_job_store.py"
+    tree = SimpleNamespace(
+        root=tmp_path,
+        frontend=frontend,
+        app=app,
+        page=_write(
+            frontend / "page.tsx",
+            "export default function Page() { return <p>公共知识库</p> }\n",
+        ),
+        handlers=_write(app / "api" / "handlers.py", _MIN_HANDLERS),
+        config=_write(
+            app / "core" / "config.py",
+            'import os\n\nAUTH_MODE = os.getenv("SILICON_NOTEBOOK_AUTH_MODE")\n',
+        ),
+        trace=_write(
+            app / "services" / "trace.py",
+            'def step():\n    return TraceStep(summary="已检索到相关段落")\n',
+        ),
+        indexing=_write(
+            app / "services" / "indexing_pipeline.py",
+            'IndexingPipelineOption(label="内建", description="按段落切分")\n',
+        ),
+        sqlite_store=_write(
+            sqlite_store,
+            'class Store:\n    def fail(self, job):\n'
+            '        self.finish(job, "failed", error_message="分析失败")\n',
+        ),
+        postgres_store=_write(
+            postgres_store,
+            'class Store:\n    def fail(self, job):\n'
+            '        self.finish(job, "failed", error_message="分析失败")\n',
+        ),
+        registry=_write(
+            app / "services" / "model_registry.py",
+            '_WORKLOAD_LABELS = {"a": "通用问答", "b": "文档整理"}\n',
+        ),
+        migrate=_write(
+            tmp_path / "scripts" / "migrate_legacy_model_env.py",
+            'ROLE_LABELS = {"general": "通用模型", "kg": "知识分析模型"}\n',
+        ),
+        template=_write(
+            tmp_path / "model-services.example.toml",
+            '[services.general]\ndisplay_name = "通用模型"\n\n'
+            '[services.kg]\ndisplay_name = "知识分析模型"\n',
+        ),
+        notes=tmp_path / "release-notes",
+    )
+    # README 允许写黑话(写法约定),它在基线里就是「README 被排除」的证据。
+    _write(tree.notes / "README.md", "写法约定里可以提到 chunk 与 projection。\n")
+    _write(tree.notes / "ok.md", "现在可以把回答分享给同事了。\n")
+
+    stores = (sqlite_store, postgres_store)
+    for name, value in {
+        "FRONTEND_PRODUCTION_DIRS": (frontend,),
+        "BACKEND_APP": app,
+        "DISPLAY_FIELD_ROOT": app,
+        "DISPLAY_FIELD_ANCHOR_MODULES": (tree.indexing, *stores),
+        "KG_BUILD_JOB_STORE_MODULES": stores,
+        "_STORE_MODULES_RELATIVE": frozenset(p.relative_to(app) for p in stores),
+        "TRACE_SUMMARY_MODULES": (tree.trace,),
+        "SETTINGS_MODULE": tree.config,
+        # 环境变量白名单是进程级缓存:清空,让它从最小树的 config 重新读(用例结束还原)。
+        "_ENV_VAR_CACHE": None,
+        "WORKLOAD_LABEL_MODULE": tree.registry,
+        "SERVICE_LABEL_DICTS": ((tree.migrate, "ROLE_LABELS"),),
+        "SERVICE_LABEL_TEMPLATE": tree.template,
+        "RELEASE_NOTES_DIR": tree.notes,
+        # 下限降到这棵树的实际站点数:2 个 user_error、1 条轨迹摘要、4 个展示字段
+        # (索引管线 label+description,两个作业存储各 1 个 error_message)、2 个工作负载
+        # 显示名、4 个出厂模型服务显示名(迁移脚本 2 + 模板 2)。
+        "MIN_USER_ERROR_SITES": 2,
+        "MIN_TRACE_SUMMARY_SITES": 1,
+        "MIN_DISPLAY_FIELD_SITES": 4,
+        "MIN_WORKLOAD_LABELS": 2,
+        "MIN_SERVICE_LABELS": 4,
+    }.items():
+        monkeypatch.setattr(guard, name, value)
+    return tree
+
+
+def test_最小树上守卫全绿(tmp_path, monkeypatch, capsys):
+    """基线:变异用例的「只有目标通道失败」只有在这里全绿时才有意义。"""
+    _minimal_guard_tree(tmp_path, monkeypatch)
+    assert guard.main() == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert (
+        "scanned 1 frontend production files + 2 backend user_error() messages + "
+        "1 trace summaries + 4 display fields + 2 workload labels + "
+        "4 model service labels"
+    ) in captured.out
+
+
+@pytest.mark.parametrize(
+    ("channel", "target", "old", "new", "expected"),
+    [
+        ("frontend", "page", "公共知识库", "基准库", "page.tsx:1: 「基准库」in rendered text"),
+        ("user_error", "handlers", "请先选择一个笔记本", "重建投影失败", "handlers.py:6: 「投影」in user_error message"),
+        ("trace", "trace", "已检索到相关段落", "已抽取 3 个 chunk", "trace.py:2: 「chunk」in trace summary"),
+    ],
+    ids=["frontend", "user_error", "trace"],
+)
+def test_前端_后端文案_轨迹通道的违规只让自己红(
+    tmp_path, monkeypatch, capsys, channel, target, old, new, expected
+):
+    tree = _minimal_guard_tree(tmp_path, monkeypatch)
+    _rewrite(getattr(tree, target), old, new)
+    assert guard.main() == 1
+    _assert_only_channel(capsys, channel, expected)
+
+
 def test_扫描面塌了要红而不是静默放行(tmp_path, monkeypatch, capsys):
     """helper 改名 / 换调用写法 → 匹配数掉到 0,而退出码仍是 0,正是本轮要根治的
     那类假绿。非空性下限把它变成硬失败。"""
-    (tmp_path / "empty.py").write_text("x = 1\n", encoding="utf-8")
-    (tmp_path / "page.tsx").write_text(
-        "export default function Page() { return <p>公共知识库</p> }\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(guard, "FRONTEND_PRODUCTION_DIRS", (tmp_path,))
-    monkeypatch.setattr(guard, "BACKEND_APP", tmp_path)
+    tree = _minimal_guard_tree(tmp_path, monkeypatch)
+    tree.handlers.write_text("x = 1\n", encoding="utf-8")
     assert guard.main() == 1
-    assert "call sites found" in capsys.readouterr().err
+    _assert_only_channel(capsys, "user_error", "call sites found")
 
 
 def test_后端真实文案确实曾经违规过(tmp_path):
@@ -818,32 +1005,34 @@ def test_真实展示字段扫描面非空且登记的模块都在():
 def test_展示字段违规让守卫红_两种扫描路径(tmp_path, monkeypatch, capsys, shared):
     """默认 BACKEND_APP 与展示字段扫描面是同一棵树,在同一次遍历里扫;BACKEND_APP
     被重定向时单独扫。两条路径都必须把违规报出来。"""
-    fields_root = tmp_path / "app"
-    fields_root.mkdir()
-    sample = fields_root / "pipeline.py"
-    sample.write_text(
-        'IndexingPipelineOption(label="内建", description="知识抽取策略")\n', encoding="utf-8"
-    )
-    page = tmp_path / "page.tsx"
-    page.write_text("export default function Page() { return <p>公共知识库</p> }\n", encoding="utf-8")
-    monkeypatch.setattr(guard, "FRONTEND_PRODUCTION_DIRS", (tmp_path,))
-    monkeypatch.setattr(guard, "DISPLAY_FIELD_ROOT", fields_root)
-    monkeypatch.setattr(guard, "DISPLAY_FIELD_ANCHOR_MODULES", (sample,))
-    monkeypatch.setattr(guard, "MIN_DISPLAY_FIELD_SITES", 1)
-    if shared:
-        monkeypatch.setattr(guard, "BACKEND_APP", fields_root)
-        monkeypatch.setattr(guard, "MIN_USER_ERROR_SITES", 0)
+    tree = _minimal_guard_tree(tmp_path, monkeypatch)
+    if not shared:
+        # 后端根指到另一棵干净的树(自带 user_error 站点,保持原下限),展示字段扫描面
+        # 仍是最小树的 app:只有「单独再扫一遍」那条路径看得到下面的违规。
+        other = tmp_path / "other_backend"
+        _write(other / "handlers.py", _MIN_HANDLERS)
+        monkeypatch.setattr(guard, "BACKEND_APP", other)
+    _rewrite(tree.indexing, 'description="按段落切分"', 'description="知识抽取策略"')
     assert guard.main() == 1
-    err = capsys.readouterr().err
-    assert "pipeline.py:1: 「抽取」in display field" in err
+    _assert_only_channel(
+        capsys, "display", "indexing_pipeline.py:1: 「抽取」in display field"
+    )
+
+
+def test_展示字段在作业存储模块里的_self_finish_也被抓到(tmp_path, monkeypatch, capsys):
+    tree = _minimal_guard_tree(tmp_path, monkeypatch)
+    _rewrite(tree.sqlite_store, 'error_message="分析失败"', 'error_message="知识抽取失败"')
+    assert guard.main() == 1
+    _assert_only_channel(capsys, "display", "kg_build_job_store.py:3: 「抽取」in display field")
 
 
 def test_展示字段扫描面塌了要红(tmp_path, monkeypatch, capsys):
+    _minimal_guard_tree(tmp_path, monkeypatch)
     monkeypatch.setattr(guard, "DISPLAY_FIELD_CALLS", {})
     monkeypatch.setattr(guard, "DISPLAY_FIELD_METHODS", {})
     monkeypatch.setattr(guard, "_DISPLAY_FIELD_TOKENS", ())
     assert guard.main() == 1
-    assert "display fields found" in capsys.readouterr().err
+    _assert_only_channel(capsys, "display", "display fields found")
 
 
 # --------------------------------------------------------------------------
@@ -898,18 +1087,17 @@ def test_真实工作负载显示名确实曾经违规过(tmp_path):
 
 
 def test_工作负载显示名违规让守卫红(tmp_path, monkeypatch, capsys):
-    module = tmp_path / "model_registry.py"
-    module.write_text('_WORKLOAD_LABELS = {"a": "知识社区摘要"}\n', encoding="utf-8")
-    monkeypatch.setattr(guard, "WORKLOAD_LABEL_MODULE", module)
-    monkeypatch.setattr(guard, "MIN_WORKLOAD_LABELS", 1)
+    tree = _minimal_guard_tree(tmp_path, monkeypatch)
+    _rewrite(tree.registry, '"通用问答"', '"知识社区摘要"')
     assert guard.main() == 1
-    assert "model_registry.py:1: 「社区」in workload label" in capsys.readouterr().err
+    _assert_only_channel(capsys, "workload", "model_registry.py:1: 「社区」in workload label")
 
 
-def test_工作负载显示名扫描面塌了要红(monkeypatch, capsys):
+def test_工作负载显示名扫描面塌了要红(tmp_path, monkeypatch, capsys):
+    _minimal_guard_tree(tmp_path, monkeypatch)
     monkeypatch.setattr(guard, "WORKLOAD_LABEL_NAME", "_RENAMED_LABELS")
     assert guard.main() == 1
-    assert "workload labels found" in capsys.readouterr().err
+    _assert_only_channel(capsys, "workload", "workload labels found")
 
 
 def test_出厂模型服务显示名里的黑话会被抓到(tmp_path):
@@ -946,23 +1134,29 @@ def test_真实出厂模型服务显示名确实曾经违规过(tmp_path):
 
 
 def test_出厂模型服务显示名违规让守卫红(tmp_path, monkeypatch, capsys):
-    template = tmp_path / "model-services.example.toml"
-    template.write_text('[services.kg]\ndisplay_name = "知识社区模型"\n', encoding="utf-8")
-    monkeypatch.setattr(guard, "SERVICE_LABEL_TEMPLATE", template)
-    monkeypatch.setattr(guard, "MIN_SERVICE_LABELS", 1)
+    tree = _minimal_guard_tree(tmp_path, monkeypatch)
+    _rewrite(tree.template, 'display_name = "通用模型"', 'display_name = "知识社区模型"')
     assert guard.main() == 1
-    assert "model-services.example.toml:1: 「社区」in model service label" in (
-        capsys.readouterr().err
+    _assert_only_channel(
+        capsys, "service", "model-services.example.toml:1: 「社区」in model service label"
+    )
+
+
+def test_出厂模型服务显示名迁移脚本违规让守卫红(tmp_path, monkeypatch, capsys):
+    tree = _minimal_guard_tree(tmp_path, monkeypatch)
+    _rewrite(tree.migrate, '"知识分析模型"', '"知识社区模型"')
+    assert guard.main() == 1
+    _assert_only_channel(
+        capsys, "service", "migrate_legacy_model_env.py:1: 「社区」in model service label"
     )
 
 
 def test_出厂模型服务显示名扫描面塌了要红(tmp_path, monkeypatch, capsys):
-    template = tmp_path / "model-services.example.toml"
-    template.write_text("[bindings]\n", encoding="utf-8")
+    tree = _minimal_guard_tree(tmp_path, monkeypatch)
+    tree.template.write_text("[bindings]\n", encoding="utf-8")
     monkeypatch.setattr(guard, "SERVICE_LABEL_DICTS", ())
-    monkeypatch.setattr(guard, "SERVICE_LABEL_TEMPLATE", template)
     assert guard.main() == 1
-    assert "shipped model-service labels" in capsys.readouterr().err
+    _assert_only_channel(capsys, "service", "shipped model-service labels")
 
 
 # 评审 P2-2 的三种漏报(V2 拼接、V3 模块常量、V4 行尾注释)与「解析不了就报」。
@@ -1070,29 +1264,26 @@ def test_真实源码守卫接在_contracts_lane():
 
 
 def test_更新说明里的黑话会被抓到且README除外(tmp_path, monkeypatch, capsys):
-    notes = tmp_path / "release-notes"
-    notes.mkdir()
-    (notes / "README.md").write_text("写法约定里可以提到 chunk 与 projection。\n", encoding="utf-8")
+    tree = _minimal_guard_tree(tmp_path, monkeypatch)
+    notes = tree.notes
     (notes / "good.md").write_text("现在可以把回答分享给同事了。\n", encoding="utf-8")
     (notes / "bad.md").write_text("第一行正常。\n新增了 3 个 chunk 的重建。\n", encoding="utf-8")
-    monkeypatch.setattr(guard, "RELEASE_NOTES_DIR", notes)
 
-    assert [p.name for p in guard._release_note_files()] == ["bad.md", "good.md"]
+    assert [p.name for p in guard._release_note_files()] == ["bad.md", "good.md", "ok.md"]
     assert [(line, term) for line, term, _ in guard.scan_release_note(notes / "bad.md")] == [(2, "chunk")]
     assert guard.scan_release_note(notes / "good.md") == []
 
     assert guard.main() == 1
-    err = capsys.readouterr().err
-    assert "bad.md:2" in err and "in release note" in err
-    assert "good.md" not in err and "README.md" not in err
+    err = _assert_only_channel(capsys, "release", "bad.md:2")
+    assert "in release note" in err
+    assert "good.md" not in err and "ok.md" not in err and "README.md" not in err
 
 
-def test_更新说明干净时守卫通过(tmp_path, monkeypatch):
-    notes = tmp_path / "release-notes"
-    notes.mkdir()
-    (notes / "ok.md").write_text("现在可以把回答分享给同事了。\n", encoding="utf-8")
-    monkeypatch.setattr(guard, "RELEASE_NOTES_DIR", notes)
+def test_更新说明干净时守卫通过(tmp_path, monkeypatch, capsys):
+    tree = _minimal_guard_tree(tmp_path, monkeypatch)
+    (tree.notes / "extra.md").write_text("现在可以把回答分享给同事了。\n", encoding="utf-8")
     assert guard.main() == 0
+    assert capsys.readouterr().err == ""
 
 
 def test_更新说明文件头的纯英文键值行不触发而中文标题会被扫到(tmp_path, monkeypatch):
