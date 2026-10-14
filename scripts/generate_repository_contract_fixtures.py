@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import gc
 import hashlib
 import inspect
 import io
@@ -1075,18 +1076,24 @@ class _FixtureClock:
     for the calls the replayed run itself makes. ``time.perf_counter`` is a
     process-global, though, and in a pytest-xdist worker other callers share it
     while the oracle test runs: threads an earlier test in the same worker left
-    behind, and any ``gc.callbacks`` hook (a GC triggered mid-Ask runs it on the
-    Ask's own thread). Each of those calls used to advance the shared counter,
-    so the frozen durations depended on what else the worker had run and on
-    when a collection happened to fire, which is why the oracle went red under
-    altered scheduling and green under the default one.
+    behind (and threads those start), and anything a garbage collection runs
+    (``gc.callbacks`` hooks, finalizers of cyclic garbage), which fires on
+    whatever thread triggered it, the Ask's own included. Each of those calls
+    used to advance the shared counter, so the frozen durations depended on
+    what else the worker had run and on when a collection happened to fire,
+    which is why the oracle went red under altered scheduling and green under
+    the default one.
 
-    So a call advances the clock only when (a) its direct caller is application
-    code (an ``app.*`` module, which is where every timing the goldens record is
-    taken) and (b) it runs on the thread that entered the runtime or on a thread
-    started after that (the repository's model-scheduler thread and the
-    per-call retrieval pools are created inside the run). Every other caller
-    gets the real clock and leaves the fixture clock untouched.
+    So, while the clock is entered, a call advances it only when all of these
+    hold, and every other caller gets the real clock and leaves it untouched:
+
+    - its direct caller is application code (an ``app.*`` module, which is
+      where every timing the goldens record is taken);
+    - it runs on the thread that created the clock or on a thread one of those
+      threads started while the clock was entered (the repository's
+      model-scheduler thread and the per-call retrieval pools); a thread
+      started by anyone else, a leftover thread included, is not the run's;
+    - no garbage collection is in progress.
     """
 
     def __init__(self, start: float = 1000.0, step: float = 0.001) -> None:
@@ -1094,18 +1101,39 @@ class _FixtureClock:
         self._value = start
         self._step = step
         self._lock = threading.Lock()
-        owner = threading.current_thread()
         # Thread objects, not idents: an ident can be recycled by a thread
         # started later, a Thread object cannot.
-        self._foreign = {
-            thread for thread in threading.enumerate() if thread is not owner
-        }
+        self._owned = {threading.current_thread()}
+        self._collecting = 0
+        self._thread_start_patch = None
+
+    def _on_gc(self, phase: str, _info: dict) -> None:
+        self._collecting += 1 if phase == "start" else -1
+
+    def __enter__(self) -> "_FixtureClock":
+        real_start = threading.Thread.start
+        owned = self._owned
+
+        def start(thread: threading.Thread, *args, **kwargs):
+            if threading.current_thread() in owned:
+                owned.add(thread)
+            return real_start(thread, *args, **kwargs)
+
+        self._thread_start_patch = mock.patch.object(threading.Thread, "start", start)
+        self._thread_start_patch.start()
+        gc.callbacks.append(self._on_gc)
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        gc.callbacks.remove(self._on_gc)
+        self._thread_start_patch.stop()
 
     def __call__(self) -> float:
         caller = sys._getframe(1).f_globals.get("__name__", "")
         if (
-            not (caller == "app" or caller.startswith("app."))
-            or threading.current_thread() in self._foreign
+            self._collecting
+            or not (caller == "app" or caller.startswith("app."))
+            or threading.current_thread() not in self._owned
         ):
             return self._real()
         with self._lock:
@@ -1166,7 +1194,8 @@ def _deterministic_runtime() -> Iterator[None]:
         )
         stack.enter_context(mock.patch.object(rerank_client, "RerankClient", _FakeRerankAdapter))
         stack.enter_context(mock.patch.object(model_provider, "RerankClient", _FakeRerankAdapter))
-        stack.enter_context(mock.patch.object(time, "perf_counter", _FixtureClock()))
+        clock = stack.enter_context(_FixtureClock())
+        stack.enter_context(mock.patch.object(time, "perf_counter", clock))
         stack.enter_context(
             mock.patch.dict(
                 os.environ,
