@@ -16,9 +16,11 @@ USER_REFERENCE_NAME = re.compile(r"(^|_)(user|users|owner|actor|author|principal
 
 def registry_violations(columns: set[tuple[str, str]], user_foreign_keys: set[tuple[str, str]]) -> list[str]:
     registered = {(ref.table, ref.column): ref for ref in USER_REFERENCE_COLUMNS}
+    # The users table is scanned too (a future users.merged_by must be
+    # classified); only its own key is exempt.
     candidates = {
         (table, column) for table, column in columns
-        if table != "users" and USER_REFERENCE_NAME.search(column)
+        if (table, column) != ("users", "id") and USER_REFERENCE_NAME.search(column)
     } | user_foreign_keys
     problems = [
         f"{table}.{column} is not classified in USER_REFERENCE_COLUMNS or NOT_USER_REFERENCES"

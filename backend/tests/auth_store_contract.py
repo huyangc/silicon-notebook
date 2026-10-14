@@ -14,6 +14,7 @@ import pytest
 from app.domain.auth_provider import AuthProviderDescriptor, ExternalIdentity
 from app.domain.auth_utils import hash_password
 from app.repositories.identity_errors import AccountMergeBlocked, AuthStoreError
+from app.repositories.user_references import USER_REFERENCE_COLUMNS
 
 
 PROOF = "independent-browser-proof"
@@ -560,11 +561,25 @@ class AuthStoreContract:
         mistaken, mistaken_token = identity.auth.create(
             choice(identity, "W0012345", display_name="王五"), PROOF, session_seconds=600,
         )
+        # Every kind of scaffolding the deleted account can own.
+        now = identity.auth._now()
+        execute(
+            identity, "INSERT INTO ask_intent_handles(token,owner_id,scope_key,question_sha256,contract_json,created_at,expires_at) VALUES (?,?,?,?,?,?,?)",
+            ("handle-1", mistaken.id, "scope", "0" * 64, "{}", now, now),
+        )
+        execute(
+            identity, "INSERT INTO model_service_status(user_id,service,config_fingerprint,status,trigger,checked_at) VALUES (?,?,?,?,?,?)",
+            (mistaken.id, "general", "fp", "ok", "manual_test", now),
+        )
+        scaffolding = [ref for ref in USER_REFERENCE_COLUMNS if ref.kind == "scaffolding"]
+        for ref in scaffolding:
+            assert row(identity, f"SELECT count(*) AS n FROM {ref.table} WHERE {ref.column}=?", (mistaken.id,))["n"] > 0, ref
         # The lookup folds ASCII case like every other username lookup.
         result = identity.auth.merge_sso_account(old.id, "w0012345", actor_id="user-local")
         assert result == {"id": old.id, "username": "W0012345", "status": "active", "removed_user_id": mistaken.id}
         assert row(identity, "SELECT 1 FROM users WHERE id=?", (mistaken.id,)) is None
-        assert row(identity, "SELECT 1 FROM user_profiles WHERE user_id=?", (mistaken.id,)) is None
+        for ref in scaffolding:
+            assert row(identity, f"SELECT count(*) AS n FROM {ref.table} WHERE {ref.column}=?", (mistaken.id,))["n"] == 0, ref
         kept = row(identity, "SELECT * FROM users WHERE id=?", (old.id,))
         assert (kept["username"], kept["display_name"], kept["auth_revision"]) == ("W0012345", "王五", before + 1)
         assert kept["sso_linked_at"] is not None

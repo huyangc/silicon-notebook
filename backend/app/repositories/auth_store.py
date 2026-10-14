@@ -464,7 +464,15 @@ class AuthStore:
         kept one takes its exact name and display name and is marked claimed,
         so the next unified login signs it in directly. Allowed only while the
         deleted account owns nothing beyond its own scaffolding (see
-        ``user_references``); otherwise nothing is written."""
+        ``user_references``); otherwise nothing is written.
+
+        Accepted residual risk (PostgreSQL only; SQLite serializes every
+        writer): a blocking column *without* a foreign key (e.g.
+        ``ask_jobs.created_by``) can gain a row from a request of the deleted
+        account already in flight between the data check and commit, leaving
+        that row with a dangling id. Accepted because this is a rare
+        administrator action on a just-created account; closing it would need
+        every business write path to recheck that its account still exists."""
         if not valid_account_username(username):
             raise AuthStoreError("invalid_username")
         with self._write() as db:
@@ -473,6 +481,13 @@ class AuthStore:
                 db,"SELECT id FROM users WHERE lower(username)=? AND username<>''",(ascii_lower(username),),
             ).fetchone()
             others = () if found is None else (found["id"],)
+            # Load-bearing: the FOR UPDATE row lock taken here, before the data
+            # check, blocks concurrent inserts into every column with a foreign
+            # key to users (they take KEY SHARE) until commit, including the ON
+            # DELETE CASCADE ones (memory_items.created_by,
+            # agent_profiles.owner_id). Weakening it to FOR NO KEY UPDATE, or
+            # counting before the lock, would let such a row slip in and be
+            # cascade-deleted silently by the DELETE below.
             keep, *source = self._admin_targets(db, actor_id, keep_user_id, *others)
             if not source:
                 raise AuthStoreError("merge_source_not_found")
