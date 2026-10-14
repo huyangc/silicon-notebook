@@ -6,8 +6,9 @@
  * 各节挂本格的代码 chip。从 knowhow-panel.tsx 原样搬来（S4-d）：组件体与段落
  * 注释一字未改，只把声明改为 export 供面板 import。
  *
- * 抽屉自带 window Esc 监听，依赖 `[onClose, cellModalOpen]`；面板传的 onClose
- * 是内联箭头，所以每次面板渲染都会重新注册一次（已登记的既有行为，本轮不改）。
+ * 抽屉自带 window Esc 监听，依赖 `[onClose, cellModalOpen]`。面板传入身份稳定的
+ * onClose（S6 起；此前是内联箭头，面板每渲染一次都重挂一次），所以监听只在挂载和
+ * cellModalOpen 翻转时重挂；有弹窗叠在上面时监听短路，Esc 只关最上层。
  * 代码状态由 use-knowhow-row-code.ts 持有、经 props 传入。样式仍由
  * knowhow-panel-styles.tsx 的 `<style jsx global>` 提供，本文件不含 styled-jsx。
  */

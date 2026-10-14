@@ -17,8 +17,8 @@
 //    reset-path table. Still deliberate: backToList keeps jumpNotice (a cited
 //    table that fails to load writes it and then goes back), and no reset path
 //    touches `deleting` (S5: only the DELETE's outcome releases it).
-//  * The row drawer re-registers its Escape listener on every panel render
-//    (pinned in knowhow-panel-golden).
+//  * The row drawer re-registered its Escape listener on every panel render:
+//    fixed in S6 (pinned in knowhow-panel-golden).
 // Found while characterising (also recorded as-is, see the tests): a re-targeted
 // jump routing against the stale detail; a same-table re-targeted jump leaving
 // the grid blank. (A stray detail request on a notebook switch was fixed in S6;

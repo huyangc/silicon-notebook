@@ -33,9 +33,10 @@
 // can never rewrite one.
 //
 // Recorded pre-existing quirks (plan §5, fixed only after S4):
-//  * The row drawer re-registers its window Escape listener on every panel
-//    render (its effect depends on the inline `onClose` arrow); the test below
-//    checks the drawer still closes on Escape after several re-renders.
+//  * The row drawer re-registered its window Escape listener on every panel
+//    render (its effect depended on an inline `onClose` arrow). Fixed in S6: the
+//    test below checks re-renders no longer re-register it and Escape still
+//    closes the drawer.
 //  * The row-code hook resets its state from an effect whenever no row is open,
 //    which costs one extra commit when the drawer closes. The reset is also what
 //    clears the previous row's code state, so a drawer reopened on another row
@@ -45,7 +46,7 @@
 //    lifecycle suite and the state × reset-path table in knowhow-panel-resets.
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 
 import {
   BASE_PROPS,
@@ -318,23 +319,32 @@ for (const mode of MODES) {
 }
 
 // ---------------------------------------------------------------------------
-// Quirk: the row drawer re-registers its Escape listener on every panel render
+// The row drawer's Escape listener is registered once, not on every render
 // ---------------------------------------------------------------------------
 
-test("the row drawer still closes on Escape after the panel re-renders with it open", async () => {
+test("panel re-renders with the drawer open do not re-register its Escape listener; Escape still closes it", async () => {
+  // Until S6 the panel passed the drawer an inline onClose arrow, and the drawer's
+  // listener effect depends on it, so every panel render removed and re-added the
+  // window keydown listener (three filter edits: three of each). The callback is
+  // now stable; the listener only moves when an overlay opens or closes over the
+  // drawer (cellModalOpen), which the Escape layering tests in the editing suite
+  // cover.
   const server = suite.server();
   routeTable(server, "nb-1", recordDetail());
   renderPanel({ initialTableId: "t-rec", initialRowId: "r1" });
   await screen.findByRole("dialog", { name: /^供电异常/ });
   await settle();
 
+  const keydown = (calls: unknown[][]) => calls.filter(([type]) => type === "keydown").length;
+  const added = vi.spyOn(window, "addEventListener");
+  const removed = vi.spyOn(window, "removeEventListener");
   const input = screen.getByPlaceholderText("按行标题/全文过滤行…");
   fireEvent.change(input, { target: { value: "供" } });
   fireEvent.change(input, { target: { value: "供电" } });
   fireEvent.change(input, { target: { value: "" } });
   await settle();
-  // Each of those renders re-registered the drawer's listener; the live one
-  // still closes the drawer.
+  expect(keydown(added.mock.calls)).toBe(0);
+  expect(keydown(removed.mock.calls)).toBe(0);
   fireEvent.keyDown(window, { key: "Escape" });
   await waitFor(() => expect(screen.queryByRole("dialog", { name: /^供电异常/ })).not.toBeInTheDocument());
 });
