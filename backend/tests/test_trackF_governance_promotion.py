@@ -133,8 +133,8 @@ class TestPromotionStateMachine:
         c1 = repo.propose_promotion(nb.id, o1)
         c2 = repo.propose_promotion(nb.id, o2)
         c3 = repo.propose_promotion(nb.id, o3)
-        repo.approve_promotion(c2["id"])  # leaves the queue
-        repo.reject_promotion(c3["id"], reason="nope")  # leaves the queue
+        repo._runtime.knowledge_governance.approve_promotion(c2["id"])  # leaves the queue
+        repo._runtime.knowledge_governance.reject_promotion(c3["id"], reason="nope")  # leaves the queue
         queue = repo.list_promotion_queue()
         ids = {c["id"] for c in queue}
         assert c1["id"] in ids
@@ -243,7 +243,7 @@ class TestPromotionStateMachine:
         nb, base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "approved claim copies to base")
         cand = repo.propose_promotion(nb.id, oid)
-        result = repo.approve_promotion(cand["id"])
+        result = repo._runtime.knowledge_governance.approve_promotion(cand["id"])
         assert result["base_object_id"]
         base_rows = _objects_in(repo, base.id, "claim")
         assert len(base_rows) == 1
@@ -253,14 +253,14 @@ class TestPromotionStateMachine:
         nb, base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "status approved on base")
         cand = repo.propose_promotion(nb.id, oid)
-        result = repo.approve_promotion(cand["id"])
+        result = repo._runtime.knowledge_governance.approve_promotion(cand["id"])
         assert _status_of(repo, result["base_object_id"]) == "approved"
 
     def test_approve_promotion_stamps_candidate_approved(self, repo):
         nb, _base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "candidate stamped approved")
         cand = repo.propose_promotion(nb.id, oid)
-        repo.approve_promotion(cand["id"])
+        repo._runtime.knowledge_governance.approve_promotion(cand["id"])
         with repo._connect() as db:
             row = db.execute(
                 "SELECT status, reviewed_by FROM promotion_candidates WHERE id=?",
@@ -273,8 +273,8 @@ class TestPromotionStateMachine:
         nb, base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "idempotent approve")
         cand = repo.propose_promotion(nb.id, oid)
-        first = repo.approve_promotion(cand["id"])
-        second = repo.approve_promotion(cand["id"])
+        first = repo._runtime.knowledge_governance.approve_promotion(cand["id"])
+        second = repo._runtime.knowledge_governance.approve_promotion(cand["id"])
         assert first["base_object_id"] == second["base_object_id"]
         # Exactly one base object was created.
         assert len(_objects_in(repo, base.id, "claim")) == 1
@@ -299,7 +299,7 @@ class TestPromotionStateMachine:
         # Personal object with equivalent text (different casing/punct).
         oid = _insert_claim(repo, nb.id, "cascode raises output resistance")
         cand = repo.propose_promotion(nb.id, oid)
-        result = repo.approve_promotion(cand["id"])
+        result = repo._runtime.knowledge_governance.approve_promotion(cand["id"])
         # No NEW base object: the personal object deduped into the existing one.
         assert len(_objects_in(repo, base.id, "claim")) == 1
         assert result["merged_into"] == existing
@@ -307,21 +307,21 @@ class TestPromotionStateMachine:
 
     def test_approve_promotion_unknown_candidate_raises(self, repo):
         with pytest.raises(KeyError):
-            repo.approve_promotion("promo-nope")
+            repo._runtime.knowledge_governance.approve_promotion("promo-nope")
 
     def test_approve_rejected_candidate_raises(self, repo):
         nb, _base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "rejected then approve")
         cand = repo.propose_promotion(nb.id, oid)
-        repo.reject_promotion(cand["id"], reason="no")
+        repo._runtime.knowledge_governance.reject_promotion(cand["id"], reason="no")
         with pytest.raises(ValueError):
-            repo.approve_promotion(cand["id"])
+            repo._runtime.knowledge_governance.approve_promotion(cand["id"])
 
     def test_reject_promotion_leaves_personal_object_untouched(self, repo):
         nb, _base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "personal untouched after reject")
         cand = repo.propose_promotion(nb.id, oid)
-        repo.reject_promotion(cand["id"], reason="not canonical")
+        repo._runtime.knowledge_governance.reject_promotion(cand["id"], reason="not canonical")
         # Personal object still present and status unchanged.
         assert _status_of(repo, oid) == "approved"
         assert len(_objects_in(repo, nb.id, "claim")) == 1
@@ -330,28 +330,28 @@ class TestPromotionStateMachine:
         nb, _base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "records the reason")
         cand = repo.propose_promotion(nb.id, oid)
-        updated = repo.reject_promotion(cand["id"], reason="duplicate of base node")
+        updated = repo._runtime.knowledge_governance.reject_promotion(cand["id"], reason="duplicate of base node")
         assert updated["status"] == "rejected"
         assert updated["reason"] == "duplicate of base node"
         assert updated["reviewed_by"] == "curator"
 
     def test_reject_unknown_candidate_raises(self, repo):
         with pytest.raises(KeyError):
-            repo.reject_promotion("promo-nope", reason="x")
+            repo._runtime.knowledge_governance.reject_promotion("promo-nope", reason="x")
 
     def test_reject_approved_candidate_raises(self, repo):
         nb, _base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "approved then reject")
         cand = repo.propose_promotion(nb.id, oid)
-        repo.approve_promotion(cand["id"])
+        repo._runtime.knowledge_governance.approve_promotion(cand["id"])
         with pytest.raises(ValueError):
-            repo.reject_promotion(cand["id"], reason="too late")
+            repo._runtime.knowledge_governance.reject_promotion(cand["id"], reason="too late")
 
     def test_rejected_object_does_not_appear_in_base_corpus(self, repo):
         nb, base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "must not leak into base")
         cand = repo.propose_promotion(nb.id, oid)
-        repo.reject_promotion(cand["id"], reason="rejected")
+        repo._runtime.knowledge_governance.reject_promotion(cand["id"], reason="rejected")
         # Base corpus has zero objects — nothing leaked.
         assert _objects_in(repo, base.id, "claim") == []
 
@@ -359,7 +359,7 @@ class TestPromotionStateMachine:
         nb, _base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "re-proposed after reject")
         cand = repo.propose_promotion(nb.id, oid)
-        repo.reject_promotion(cand["id"], reason="first time no")
+        repo._runtime.knowledge_governance.reject_promotion(cand["id"], reason="first time no")
         # The partial UNIQUE index excludes rejected rows, so re-proposal works.
         again = repo.propose_promotion(nb.id, oid)
         assert again["id"] != cand["id"]
@@ -559,7 +559,7 @@ class TestBaseReviewGateEdgeCases:
         _store_claim(repo, personal.id, "miller effect increases input capacitance")
         oid = _objects_in(repo, personal.id, "claim")[0]["id"]
         cand = repo.propose_promotion(personal.id, oid)
-        repo.reject_promotion(cand["id"], reason="not canonical")
+        repo._runtime.knowledge_governance.reject_promotion(cand["id"], reason="not canonical")
         hits = repo._retrieve_scored(personal.id, "miller effect")
         all_ids = {h.object_id for h in hits}
         assert oid in all_ids, "rejected personal object vanished from its own notebook"
@@ -575,7 +575,7 @@ class TestBaseReviewGateEdgeCases:
         _store_claim(repo, personal.id, "personal claim about noise figure")
         p_oid = _objects_in(repo, personal.id, "claim")[0]["id"]
         cand = repo.propose_promotion(personal.id, p_oid)
-        repo.reject_promotion(cand["id"], reason="rejected")
+        repo._runtime.knowledge_governance.reject_promotion(cand["id"], reason="rejected")
         # Ask against the BASE notebook directly (base-only view).
         resp = repo.ask(base.id, AskRequest(question="noise figure"))
         all_ids = {a.object_id for a in resp.anchors}
@@ -591,7 +591,7 @@ class TestBaseReviewGateEdgeCases:
         _store_claim(repo, personal.id, "thermal noise sets the noise floor")
         p_oid = _objects_in(repo, personal.id, "claim")[0]["id"]
         cand = repo.propose_promotion(personal.id, p_oid)
-        result = repo.approve_promotion(cand["id"])
+        result = repo._runtime.knowledge_governance.approve_promotion(cand["id"])
         hits = repo.retrieval.candidates.federated_retrieve(personal.id, "thermal noise")
         hit_ids = {h.object_id for h in hits}
         assert result["base_object_id"] in hit_ids
@@ -625,7 +625,7 @@ class TestBaseReviewGateEdgeCases:
         }], [])
         p_oid = _objects_in(repo, personal.id, "claim")[0]["id"]
         cand = repo.propose_promotion(personal.id, p_oid)
-        result = repo.approve_promotion(cand["id"])
+        result = repo._runtime.knowledge_governance.approve_promotion(cand["id"])
         service = repo._runtime.ask_service()
         with service._retrieval_ceiling(personal.id, repo.current_user().id):
             hits = repo.retrieval.candidates.federated_retrieve(personal.id, "thermal noise")

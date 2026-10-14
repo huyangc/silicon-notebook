@@ -925,9 +925,9 @@ def test_extraction_reset_advances_seq_so_the_review_queue_memo_misses(repo):
     assert len(rels) == 1, f"deterministic relink must reconnect degree-0 nodes: {rels}"
 
     # Warm the memo: it now caches this one relation's rel_id.
-    warmed = repo.review_queue(nb.id)
+    warmed = repo._runtime.knowledge_governance.review_queue(nb.id)
     stale_rel_id = next(i["rel_id"] for i in warmed if i["rel_id"] == rels[0]["id"])
-    assert stale_rel_id in {i["rel_id"] for i in repo.review_queue(nb.id)}
+    assert stale_rel_id in {i["rel_id"] for i in repo._runtime.knowledge_governance.review_queue(nb.id)}
     memo = repo._runtime.review_queue_memo
     seq_before = memo.cached_seq(nb.id)
     assert seq_before is not None
@@ -954,7 +954,7 @@ def test_extraction_reset_advances_seq_so_the_review_queue_memo_misses(repo):
     # explicitly cleared (there is no invalidate call left on this path).
     assert memo.cached_seq(nb.id) == seq_before
 
-    live_rel_ids = {item["rel_id"] for item in repo.review_queue(nb.id)}
+    live_rel_ids = {item["rel_id"] for item in repo._runtime.knowledge_governance.review_queue(nb.id)}
     assert stale_rel_id not in live_rel_ids, (
         "the review queue must not keep serving an edge the extraction reset "
         "already deleted"
@@ -994,7 +994,7 @@ def test_extraction_reset_is_visible_to_a_sibling_runtimes_warm_memo(tmp_path, m
 
     # A (a fully separate runtime/process) warms ITS OWN memo by reading the
     # queue through its own instance.
-    warmed = repo_a.review_queue(nb.id)
+    warmed = repo_a._runtime.knowledge_governance.review_queue(nb.id)
     stale_rel_id = next(i["rel_id"] for i in warmed if i["rel_id"] == rels[0]["id"])
     assert repo_a._runtime.review_queue_memo.cached_seq(nb.id) is not None
 
@@ -1008,7 +1008,7 @@ def test_extraction_reset_is_visible_to_a_sibling_runtimes_warm_memo(tmp_path, m
 
     # A's next read must miss its stale entry and recompute a result
     # consistent with the DB — not keep serving the edge B already deleted.
-    live_rel_ids = {item["rel_id"] for item in repo_a.review_queue(nb.id)}
+    live_rel_ids = {item["rel_id"] for item in repo_a._runtime.knowledge_governance.review_queue(nb.id)}
     assert stale_rel_id not in live_rel_ids, (
         "sibling runtime A's warm memo must not keep serving an edge that "
         "runtime B's extraction reset already deleted from the shared DB"
@@ -1038,7 +1038,7 @@ def test_source_deletion_bumps_the_seq_even_if_the_image_cleanup_raises(
     repo._run_extraction(sid)
     assert len(repo.relations_for_notebook(nb.id)) == 1
 
-    warmed = {item["rel_id"] for item in repo.review_queue(nb.id)}
+    warmed = {item["rel_id"] for item in repo._runtime.knowledge_governance.review_queue(nb.id)}
     assert warmed
     memo = repo._runtime.review_queue_memo
     warm_seq = memo.cached_seq(nb.id)
@@ -1070,7 +1070,7 @@ def test_source_deletion_bumps_the_seq_even_if_the_image_cleanup_raises(
     # Nothing explicitly invalidated the memo (delete_source raised before its
     # own invalidate call); the seq gate alone must catch it.
     assert memo.cached_seq(nb.id) == warm_seq
-    assert {item["rel_id"] for item in repo.review_queue(nb.id)} == set()
+    assert {item["rel_id"] for item in repo._runtime.knowledge_governance.review_queue(nb.id)} == set()
 
 
 def test_source_artifact_redaction_precedes_fallible_file_cleanup(repo, monkeypatch):

@@ -116,7 +116,7 @@ def build(repo, sql, *, approve: bool = True) -> World:
     repo.replace_notebook_bases(mine, [base], user_id)
     object_id = object_id_named(repo, sql, private, CLAIM)
     proposal = repo.propose_promotion(private, object_id)
-    approved = repo.approve_promotion(proposal["id"]) if approve else {}
+    approved = repo._runtime.knowledge_governance.approve_promotion(proposal["id"]) if approve else {}
     return World(repo, sql, user_id, base, private, mine, object_id,
                  proposal["id"], approved)
 
@@ -172,7 +172,7 @@ def a_second_promotion_from_the_same_original_reuses_its_source(world: World) ->
     ], [])
     second = object_id_named(repo, sql, world.private, f"{TERM}第二论断")
     proposal = repo.propose_promotion(world.private, second)
-    (base_object,) = repo.approve_promotion(proposal["id"])["base_object_ids"]
+    (base_object,) = repo._runtime.knowledge_governance.approve_promotion(proposal["id"])["base_object_ids"]
     entries = world.evidence(base_object)
     assert {entry["source_id"] for entry in entries} == {world.promotion_source}
     sources = world.rows(
@@ -207,7 +207,7 @@ def _merge_into_native(world: World):
     ], [])
     incoming = object_id_named(repo, sql, world.private, f"{TERM}合并论断")
     proposal = repo.propose_promotion(world.private, incoming)
-    result = repo.approve_promotion(proposal["id"])
+    result = repo._runtime.knowledge_governance.approve_promotion(proposal["id"])
     assert result["merged_into"] == public_object
     return public_object, native_entry, before
 
@@ -250,7 +250,7 @@ def a_memory_promotion_is_titled_after_the_memory(world: World) -> None:
     # publishes the card the member approved, never the element's live text
     world.write("UPDATE source_elements SET text=? WHERE id='s-priv-000'",
                 ("CHANGED LIVE TEXT",))
-    result = repo.approve_promotion(proposal["id"])
+    result = repo._runtime.knowledge_governance.approve_promotion(proposal["id"])
     expected = promotion_source_id(world.base, memory_origin_key(memory.id))
     (source,) = world.rows("SELECT title,source_type FROM sources WHERE id=?", (expected,))
     assert source == {"title": "晋升自个人记忆：增益记忆",

@@ -30,7 +30,7 @@ def repo(tmp_path, monkeypatch):
 
 def test_write_and_pending_returns_candidate(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    cid = repo.write_conflict_candidate(
+    cid = repo._runtime.knowledge_governance.write_conflict_candidate(
         notebook_id=nb.id,
         kind="node",
         left_ref="obj-aaa",
@@ -51,8 +51,8 @@ def test_write_and_pending_returns_candidate(repo):
 
 def test_pending_conflicts_only_returns_pending(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    cid1 = repo.write_conflict_candidate(nb.id, "node", "A", "B", conflict_type="temporal")
-    cid2 = repo.write_conflict_candidate(nb.id, "edge", "r1", "r2", conflict_type="granularity")
+    cid1 = repo._runtime.knowledge_governance.write_conflict_candidate(nb.id, "node", "A", "B", conflict_type="temporal")
+    cid2 = repo._runtime.knowledge_governance.write_conflict_candidate(nb.id, "edge", "r1", "r2", conflict_type="granularity")
     # apply one
     repo.set_conflict_status(nb.id, cid1, "applied")
     pending = repo.pending_conflicts(nb.id)
@@ -71,25 +71,25 @@ def test_pending_conflicts_empty_when_none(repo):
 
 def test_set_conflict_status_applied(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    cid = repo.write_conflict_candidate(nb.id, "node", "X", "Y")
+    cid = repo._runtime.knowledge_governance.write_conflict_candidate(nb.id, "node", "X", "Y")
     repo.set_conflict_status(nb.id, cid, "applied")
     assert repo.pending_conflicts(nb.id) == []
-    row = repo.get_conflict_candidate(nb.id, cid)
+    row = repo._runtime.knowledge_governance.get_conflict_candidate(nb.id, cid)
     assert row["status"] == "applied"
 
 
 def test_set_conflict_status_rejected(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    cid = repo.write_conflict_candidate(nb.id, "node", "X", "Y")
+    cid = repo._runtime.knowledge_governance.write_conflict_candidate(nb.id, "node", "X", "Y")
     repo.set_conflict_status(nb.id, cid, "rejected")
     assert repo.pending_conflicts(nb.id) == []
-    row = repo.get_conflict_candidate(nb.id, cid)
+    row = repo._runtime.knowledge_governance.get_conflict_candidate(nb.id, cid)
     assert row["status"] == "rejected"
 
 
 def test_set_conflict_status_rejects_bad_value(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    cid = repo.write_conflict_candidate(nb.id, "node", "X", "Y")
+    cid = repo._runtime.knowledge_governance.write_conflict_candidate(nb.id, "node", "X", "Y")
     with pytest.raises(ValueError):
         repo.set_conflict_status(nb.id, cid, "maybe")
 
@@ -97,7 +97,7 @@ def test_set_conflict_status_rejects_bad_value(repo):
 def test_set_conflict_status_rejects_pending(repo):
     """'pending' is the initial state; it is not a valid transition target."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    cid = repo.write_conflict_candidate(nb.id, "node", "X", "Y")
+    cid = repo._runtime.knowledge_governance.write_conflict_candidate(nb.id, "node", "X", "Y")
     with pytest.raises(ValueError):
         repo.set_conflict_status(nb.id, cid, "pending")
 
@@ -109,7 +109,7 @@ def test_set_conflict_status_rejects_pending(repo):
 def test_get_conflict_candidate_full_fields(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     payload = {"merged_relation": "causes", "note": "keep left"}
-    cid = repo.write_conflict_candidate(
+    cid = repo._runtime.knowledge_governance.write_conflict_candidate(
         notebook_id=nb.id,
         kind="edge",
         left_ref="rel-001",
@@ -121,7 +121,7 @@ def test_get_conflict_candidate_full_fields(repo):
         confidence=0.87,
         rationale="left is more specific",
     )
-    row = repo.get_conflict_candidate(nb.id, cid)
+    row = repo._runtime.knowledge_governance.get_conflict_candidate(nb.id, cid)
     assert row["kind"] == "edge"
     assert row["left_ref"] == "rel-001"
     assert row["right_ref"] == "rel-002"
@@ -138,8 +138,8 @@ def test_get_conflict_candidate_full_fields(repo):
 
 def test_get_conflict_candidate_nullable_fields_default_none(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    cid = repo.write_conflict_candidate(nb.id, "node", "A", "B")
-    row = repo.get_conflict_candidate(nb.id, cid)
+    cid = repo._runtime.knowledge_governance.write_conflict_candidate(nb.id, "node", "A", "B")
+    row = repo._runtime.knowledge_governance.get_conflict_candidate(nb.id, cid)
     assert row["conflict_type"] is None
     assert row["resolution"] is None
     assert row["winner_ref"] is None
@@ -150,7 +150,7 @@ def test_get_conflict_candidate_nullable_fields_default_none(repo):
 
 def test_get_conflict_candidate_returns_none_for_unknown_id(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    assert repo.get_conflict_candidate(nb.id, "does-not-exist") is None
+    assert repo._runtime.knowledge_governance.get_conflict_candidate(nb.id, "does-not-exist") is None
 
 
 # ---------------------------------------------------------------------------
@@ -160,8 +160,8 @@ def test_get_conflict_candidate_returns_none_for_unknown_id(repo):
 def test_pending_conflicts_isolated_per_notebook(repo):
     nb1 = repo.create_notebook(NotebookCreate(name="nb1"))
     nb2 = repo.create_notebook(NotebookCreate(name="nb2"))
-    repo.write_conflict_candidate(nb1.id, "node", "A", "B")
-    repo.write_conflict_candidate(nb2.id, "node", "C", "D")
+    repo._runtime.knowledge_governance.write_conflict_candidate(nb1.id, "node", "A", "B")
+    repo._runtime.knowledge_governance.write_conflict_candidate(nb2.id, "node", "C", "D")
     assert len(repo.pending_conflicts(nb1.id)) == 1
     assert len(repo.pending_conflicts(nb2.id)) == 1
     assert repo.pending_conflicts(nb1.id)[0]["left_ref"] == "A"

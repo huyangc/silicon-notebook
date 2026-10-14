@@ -104,7 +104,7 @@ def _get_object_payload(repo, notebook_id: str, object_id: str) -> dict:
 
 def test_keep_returns_keep_and_changes_nothing(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
-    result = repo.apply_conflict_resolution(
+    result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="node", left_ref=oid_a, right_ref=oid_b, resolution="keep"
     )
     assert result == {"action": "keep"}
@@ -114,7 +114,7 @@ def test_keep_returns_keep_and_changes_nothing(seeded):
 
 def test_keep_edge_returns_keep(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
-    result = repo.apply_conflict_resolution(
+    result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="edge", left_ref=rel_a, right_ref=rel_b, resolution="keep"
     )
     assert result == {"action": "keep"}
@@ -128,7 +128,7 @@ def test_keep_edge_returns_keep(seeded):
 
 def test_node_discard_loser_gets_conflict_status(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
-    result = repo.apply_conflict_resolution(
+    result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
         resolution="discard", winner_ref=oid_a,
     )
@@ -139,7 +139,7 @@ def test_node_discard_loser_gets_conflict_status(seeded):
 
 def test_node_discard_winner_right_loser_is_left(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
-    result = repo.apply_conflict_resolution(
+    result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
         resolution="discard", winner_ref=oid_b,
     )
@@ -154,7 +154,7 @@ def test_node_discard_winner_right_loser_is_left(seeded):
 
 def test_edge_discard_loser_rejected(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
-    result = repo.apply_conflict_resolution(
+    result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="edge", left_ref=rel_a, right_ref=rel_b,
         resolution="discard", winner_ref=rel_a,
     )
@@ -165,7 +165,7 @@ def test_edge_discard_loser_rejected(seeded):
 
 def test_edge_discard_winner_right(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
-    result = repo.apply_conflict_resolution(
+    result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="edge", left_ref=rel_a, right_ref=rel_b,
         resolution="discard", winner_ref=rel_b,
     )
@@ -180,7 +180,7 @@ def test_edge_discard_winner_right(seeded):
 
 def test_node_discard_none_winner_ref_skipped(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
-    result = repo.apply_conflict_resolution(
+    result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
         resolution="discard", winner_ref=None,
     )
@@ -192,7 +192,7 @@ def test_node_discard_none_winner_ref_skipped(seeded):
 
 def test_node_discard_bad_winner_ref_skipped(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
-    result = repo.apply_conflict_resolution(
+    result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
         resolution="discard", winner_ref="some-other-id",
     )
@@ -203,7 +203,7 @@ def test_node_discard_bad_winner_ref_skipped(seeded):
 
 def test_edge_discard_none_winner_ref_skipped(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
-    result = repo.apply_conflict_resolution(
+    result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="edge", left_ref=rel_a, right_ref=rel_b,
         resolution="discard", winner_ref=None,
     )
@@ -219,7 +219,7 @@ def test_edge_discard_none_winner_ref_skipped(seeded):
 def test_node_modify_updates_target_payload(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
     new_payload = {"name": "Claim A (merged)", "statement": "A is definitively true"}
-    result = repo.apply_conflict_resolution(
+    result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
         resolution="modify", winner_ref=oid_a, resolved_payload=new_payload,
     )
@@ -236,7 +236,7 @@ def test_node_modify_winner_ref_none_falls_back_to_left(seeded):
     """When winner_ref is None (or not in refs), target falls back to left_ref."""
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
     new_payload = {"name": "Fallback modified"}
-    result = repo.apply_conflict_resolution(
+    result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
         resolution="modify", winner_ref=None, resolved_payload=new_payload,
     )
@@ -248,7 +248,7 @@ def test_node_modify_winner_ref_none_falls_back_to_left(seeded):
 def test_node_modify_winner_ref_unknown_falls_back_to_left(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
     new_payload = {"name": "Unknown winner fallback"}
-    result = repo.apply_conflict_resolution(
+    result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
         resolution="modify", winner_ref="not-a-real-id", resolved_payload=new_payload,
     )
@@ -257,7 +257,7 @@ def test_node_modify_winner_ref_unknown_falls_back_to_left(seeded):
 
 def test_node_modify_without_payload_skipped(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
-    result = repo.apply_conflict_resolution(
+    result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
         resolution="modify", winner_ref=oid_a, resolved_payload=None,
     )
@@ -269,7 +269,7 @@ def test_node_modify_without_payload_skipped(seeded):
 
 def test_node_modify_non_dict_payload_skipped(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
-    result = repo.apply_conflict_resolution(
+    result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
         resolution="modify", winner_ref=oid_a, resolved_payload="not a dict",
     )
@@ -282,7 +282,7 @@ def test_node_modify_non_dict_payload_skipped(seeded):
 
 def test_edge_modify_returns_skipped(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
-    result = repo.apply_conflict_resolution(
+    result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="edge", left_ref=rel_a, right_ref=rel_b,
         resolution="modify", winner_ref=rel_a,
         resolved_payload={"edge_type": "supports"},
@@ -301,7 +301,7 @@ def test_edge_modify_returns_skipped(seeded):
 def test_unknown_resolution_raises_value_error(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
     with pytest.raises(ValueError, match="resolution"):
-        repo.apply_conflict_resolution(
+        repo._runtime.knowledge_governance.apply_conflict_resolution(
             nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
             resolution="foobar",
         )
@@ -310,7 +310,7 @@ def test_unknown_resolution_raises_value_error(seeded):
 def test_unknown_kind_raises_value_error(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
     with pytest.raises(ValueError, match="kind"):
-        repo.apply_conflict_resolution(
+        repo._runtime.knowledge_governance.apply_conflict_resolution(
             nb_id, kind="graph", left_ref=oid_a, right_ref=oid_b,
             resolution="keep",
         )
@@ -352,7 +352,7 @@ def test_node_modify_preserves_pre_existing_payload_fields(seeded):
     # Adjudicator only returns a modified name — section_path is absent
     resolved_payload = {"name": "Claim A (reconciled)"}
 
-    result = repo.apply_conflict_resolution(
+    result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
         resolution="modify", winner_ref=oid_a, resolved_payload=resolved_payload,
     )

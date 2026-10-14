@@ -253,7 +253,7 @@ def test_conflict_embeddings_gated_by_storage_dim_then_truncated(repo, monkeypat
         return []                                            # 空候选 → 不触 LLM 后续
 
     monkeypatch.setattr(cd, "detect_conflict_candidates", spy)
-    summary = repo.resolve_notebook_conflicts(nb.id)
+    summary = repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb.id)
 
     assert summary["detected"] == 0 and not summary["skipped_llm"]
     assert captured["dims"] == {"o1": 16}                    # 截断到运行时维;异维出局

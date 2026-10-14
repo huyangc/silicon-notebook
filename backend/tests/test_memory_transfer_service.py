@@ -982,7 +982,7 @@ def test_move_allows_memory_with_approved_promotion(repo, alice):
     _mount_base(repo, alice, src)
     mem = _confirmed_memory(service, src, alice, title="RC 补偿", content="补偿改善稳定性。")
     proposal = repo.propose_memory_promotion(mem.id, alice.id)
-    repo.approve_promotion(proposal["id"])
+    repo._runtime.knowledge_governance.approve_promotion(proposal["id"])
     approved = service.get(mem.id, alice.id)
     assert approved.promotion_state == "approved", "前置条件：批准确实生效"
 

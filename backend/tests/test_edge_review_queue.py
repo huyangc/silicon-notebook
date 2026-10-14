@@ -58,14 +58,14 @@ def _seed_graph(repo) -> str:
 
 def test_review_queue_returns_list(repo):
     nb_id = _seed_graph(repo)
-    q = repo.review_queue(nb_id)
+    q = repo._runtime.knowledge_governance.review_queue(nb_id)
     assert isinstance(q, list)
     assert len(q) >= 1
 
 
 def test_review_queue_items_have_required_fields(repo):
     nb_id = _seed_graph(repo)
-    q = repo.review_queue(nb_id)
+    q = repo._runtime.knowledge_governance.review_queue(nb_id)
     for item in q:
         assert "rel_id" in item
         assert "trust_score" in item
@@ -81,7 +81,7 @@ def test_review_queue_type_violating_edge_lower_trust(repo):
     """The type-violating edge (Claim→Procedure used_in) should have lower
     trust_score than the correctly-typed, evidenced edge (Claim→Concept defines)."""
     nb_id = _seed_graph(repo)
-    q = repo.review_queue(nb_id)
+    q = repo._runtime.knowledge_governance.review_queue(nb_id)
     # Find the defines edge (valid + evidence) and the invalid used_in edge
     defines_item = next((i for i in q if i["edge_type"] == "defines"), None)
     # Both used_in edges — pick the one from Claim (type-violating)
@@ -95,7 +95,7 @@ def test_review_queue_type_violating_edge_lower_trust(repo):
 def test_review_queue_sorted_by_priority_desc(repo):
     """Items are sorted by review_priority descending (highest-risk first)."""
     nb_id = _seed_graph(repo)
-    q = repo.review_queue(nb_id)
+    q = repo._runtime.knowledge_governance.review_queue(nb_id)
     priorities = [item["review_priority"] for item in q]
     assert priorities == sorted(priorities, reverse=True)
 
@@ -103,11 +103,11 @@ def test_review_queue_sorted_by_priority_desc(repo):
 def test_review_queue_excludes_rejected(repo):
     """After marking an edge rejected, it must not appear in the review queue."""
     nb_id = _seed_graph(repo)
-    q_before = repo.review_queue(nb_id)
+    q_before = repo._runtime.knowledge_governance.review_queue(nb_id)
     assert q_before, "need at least one edge"
     rel_id = q_before[0]["rel_id"]
     repo.set_edge_review(nb_id, rel_id, "rejected")
-    q_after = repo.review_queue(nb_id)
+    q_after = repo._runtime.knowledge_governance.review_queue(nb_id)
     assert all(item["rel_id"] != rel_id for item in q_after)
 
 
@@ -115,7 +115,7 @@ def test_review_queue_excludes_rejected(repo):
 
 def test_set_edge_review_persists_status(repo):
     nb_id = _seed_graph(repo)
-    q = repo.review_queue(nb_id)
+    q = repo._runtime.knowledge_governance.review_queue(nb_id)
     rel_id = q[0]["rel_id"]
     repo.set_edge_review(nb_id, rel_id, "verified")
     with repo._connect() as db:
@@ -127,7 +127,7 @@ def test_set_edge_review_persists_status(repo):
 
 def test_set_edge_review_invalid_status_raises(repo):
     nb_id = _seed_graph(repo)
-    q = repo.review_queue(nb_id)
+    q = repo._runtime.knowledge_governance.review_queue(nb_id)
     rel_id = q[0]["rel_id"]
     with pytest.raises(ValueError, match="review_status"):
         repo.set_edge_review(nb_id, rel_id, "bogus_status")
@@ -139,7 +139,7 @@ def test_governance_store_update_edge_review_returns_prev_status(repo):
     """update_edge_review's return value contract (P1-2): it must hand back the
     PREVIOUS review_status, not None — a fresh relation starts 'pending'."""
     nb_id = _seed_graph(repo)
-    rel_id = repo.review_queue(nb_id)[0]["rel_id"]
+    rel_id = repo._runtime.knowledge_governance.review_queue(nb_id)[0]["rel_id"]
     with repo._write() as db:
         prev = repo._runtime.governance.update_edge_review(db, nb_id, rel_id, "verified")
     assert prev == "pending"
@@ -375,7 +375,7 @@ def test_set_edge_review_unreject_invalidates_the_memo_and_recomputes_total(repo
     never carry — the edge re-enters the (review_status != 'rejected') set,
     so total climbs back up by exactly one."""
     nb_id = _seed_graph(repo)
-    rel_id = repo.review_queue(nb_id)[0]["rel_id"]
+    rel_id = repo._runtime.knowledge_governance.review_queue(nb_id)[0]["rel_id"]
     repo.set_edge_review(nb_id, rel_id, "rejected")
     page_after_reject = repo.review_queue_page(nb_id)  # warm again post-reject
     memo = repo._runtime.review_queue_memo
@@ -419,12 +419,12 @@ def test_review_queue_verified_flip_carries_the_ranking_without_recomputing(
     """T-A2 主判据:一次 pending->verified 的审核判定之后,同进程的下一次取队列
     **不得**再跑一遍冷排名——而且续下来的那份必须与真正重算的结果逐位相同。"""
     nb_id = _seed_graph(repo)
-    before = repo.review_queue(nb_id)                      # 冷算一次,暖起来
+    before = repo._runtime.knowledge_governance.review_queue(nb_id)                      # 冷算一次,暖起来
     rel_id = before[0]["rel_id"]
     calls = _count_cold_rankings(repo._runtime.knowledge_governance, monkeypatch)
 
     repo.set_edge_review(nb_id, rel_id, "verified")
-    carried = repo.review_queue(nb_id)
+    carried = repo._runtime.knowledge_governance.review_queue(nb_id)
 
     assert calls["n"] == 0, "verified<->pending 翻转不得触发冷排名"
     assert [i["rel_id"] for i in carried] == [i["rel_id"] for i in before]
@@ -434,7 +434,7 @@ def test_review_queue_verified_flip_carries_the_ranking_without_recomputing(
     assert {i["rel_id"]: i["review_status"] for i in carried}[rel_id] == "verified"
     # 续来的这份 == 真重算的那份(carry 的正确性,不只是「没重算」)。
     repo._runtime.review_queue_memo.invalidate(nb_id)
-    assert repo.review_queue(nb_id) == carried
+    assert repo._runtime.knowledge_governance.review_queue(nb_id) == carried
     assert calls["n"] == 1
 
 
@@ -442,30 +442,30 @@ def test_review_queue_reject_invalidates_the_ranking(repo):
     """任一侧涉及 'rejected' 的迁移会改变集合与拓扑——排名 memo 必须被丢掉,
     而不是像 verified 翻转那样续标签。"""
     nb_id = _seed_graph(repo)
-    rel_id = repo.review_queue(nb_id)[0]["rel_id"]
+    rel_id = repo._runtime.knowledge_governance.review_queue(nb_id)[0]["rel_id"]
     memo = repo._runtime.review_queue_memo
     assert memo.cached_seq(nb_id) is not None
 
     repo.set_edge_review(nb_id, rel_id, "rejected")
 
     assert memo.cached_seq(nb_id) is None
-    assert rel_id not in {i["rel_id"] for i in repo.review_queue(nb_id)}
+    assert rel_id not in {i["rel_id"] for i in repo._runtime.knowledge_governance.review_queue(nb_id)}
 
 
 def test_review_queue_unreject_invalidates_the_ranking(repo):
     """撤销拒绝(rejected -> pending)把边**加回**集合,与正向一样改变拓扑与
     corroboration 分组;carry 在这里是错的。"""
     nb_id = _seed_graph(repo)
-    rel_id = repo.review_queue(nb_id)[0]["rel_id"]
+    rel_id = repo._runtime.knowledge_governance.review_queue(nb_id)[0]["rel_id"]
     repo.set_edge_review(nb_id, rel_id, "rejected")
-    repo.review_queue(nb_id)                               # 重新暖起来(不含该边)
+    repo._runtime.knowledge_governance.review_queue(nb_id)                               # 重新暖起来(不含该边)
     memo = repo._runtime.review_queue_memo
     assert memo.cached_seq(nb_id) is not None
 
     repo.set_edge_review(nb_id, rel_id, "pending")
 
     assert memo.cached_seq(nb_id) is None
-    assert rel_id in {i["rel_id"] for i in repo.review_queue(nb_id)}
+    assert rel_id in {i["rel_id"] for i in repo._runtime.knowledge_governance.review_queue(nb_id)}
 
 
 def test_two_uncarried_bumps_force_a_recompute(repo, monkeypatch):
@@ -473,7 +473,7 @@ def test_two_uncarried_bumps_force_a_recompute(repo, monkeypatch):
     条目的标签落后两个版本。此后哪怕来一次 verified 翻转,它的 carry 也会因为
     ``expected_seq`` 不符而整条丢弃——绝不把陈旧内容续成新版本。"""
     nb_id = _seed_graph(repo)
-    rel_id = repo.review_queue(nb_id)[0]["rel_id"]
+    rel_id = repo._runtime.knowledge_governance.review_queue(nb_id)[0]["rel_id"]
     memo = repo._runtime.review_queue_memo
     warm_seq = memo.cached_seq(nb_id)
 
@@ -484,7 +484,7 @@ def test_two_uncarried_bumps_force_a_recompute(repo, monkeypatch):
     calls = _count_cold_rankings(repo._runtime.knowledge_governance, monkeypatch)
     repo.set_edge_review(nb_id, rel_id, "verified")
     assert memo.cached_seq(nb_id) is None, "seq 不符必须丢弃,不得续标签"
-    repo.review_queue(nb_id)
+    repo._runtime.knowledge_governance.review_queue(nb_id)
     assert calls["n"] == 1
 
 
@@ -494,41 +494,41 @@ def test_review_queue_bypasses_the_memo_outside_the_cached_depth(repo, monkeypat
     from app.services.review_queue_memo import REVIEW_QUEUE_MEMO_ITEMS
 
     nb_id = _seed_graph(repo)
-    repo.review_queue(nb_id)                               # 暖起来
+    repo._runtime.knowledge_governance.review_queue(nb_id)                               # 暖起来
     calls = _count_cold_rankings(repo._runtime.knowledge_governance, monkeypatch)
 
-    repo.review_queue(nb_id, limit=-1)
-    repo.review_queue(nb_id, limit=REVIEW_QUEUE_MEMO_ITEMS + 1)
+    repo._runtime.knowledge_governance.review_queue(nb_id, limit=-1)
+    repo._runtime.knowledge_governance.review_queue(nb_id, limit=REVIEW_QUEUE_MEMO_ITEMS + 1)
     assert calls["n"] == 2
 
-    repo.review_queue(nb_id, limit=REVIEW_QUEUE_MEMO_ITEMS)
-    repo.review_queue(nb_id, limit=0)
+    repo._runtime.knowledge_governance.review_queue(nb_id, limit=REVIEW_QUEUE_MEMO_ITEMS)
+    repo._runtime.knowledge_governance.review_queue(nb_id, limit=0)
     assert calls["n"] == 2
 
 
 def test_review_queue_result_mutation_does_not_reach_the_memo(repo):
     nb_id = _seed_graph(repo)
-    handed_out = repo.review_queue(nb_id)
+    handed_out = repo._runtime.knowledge_governance.review_queue(nb_id)
     expected = [dict(item) for item in handed_out]
     handed_out[0]["review_status"] = "MUTATED"
     handed_out[0]["review_priority"] = -999.0
     handed_out.pop()
 
-    assert repo.review_queue(nb_id) == expected
+    assert repo._runtime.knowledge_governance.review_queue(nb_id) == expected
 
 
 def test_review_queue_missing_notebook_raises_keyerror(repo):
     """``get_notebook`` 仍在 memo 之前:一个不存在的 notebook 必须照旧抛
     ``KeyError``,不能因为「先查 memo」而变成一次静默的空队列。"""
     with pytest.raises(KeyError):
-        repo.review_queue("does-not-exist")
+        repo._runtime.knowledge_governance.review_queue("does-not-exist")
 
 
 def test_add_relations_testkit_invalidates_the_review_queue_ranking(repo):
     """T-A2 的同一处豁口:``add_relations`` 不 bump ``kg_mutation_seq``,排名 memo
     与计数 memo 一样必须在那里被显式失效。"""
     nb_id = _seed_graph(repo)
-    repo.review_queue(nb_id)
+    repo._runtime.knowledge_governance.review_queue(nb_id)
     memo = repo._runtime.review_queue_memo
     assert memo.cached_seq(nb_id) is not None
 
@@ -554,7 +554,7 @@ def test_delete_notebook_kg_advances_kg_reset_epoch_without_an_explicit_invalida
     epoch bump end to end.
     """
     nb_id = _seed_graph(repo)
-    first_queue = repo.review_queue(nb_id)
+    first_queue = repo._runtime.knowledge_governance.review_queue(nb_id)
     assert first_queue != []
     memo = repo._runtime.review_queue_memo
     warm_version = memo.cached_version(nb_id)
@@ -575,7 +575,7 @@ def test_delete_notebook_kg_advances_kg_reset_epoch_without_an_explicit_invalida
     # The graph is empty post-delete, so the true answer is [] regardless of
     # caching — but the memo's own tag must reflect the NEW epoch (not the
     # stale entry from before delete) once it is asked again.
-    assert repo.review_queue(nb_id) == []
+    assert repo._runtime.knowledge_governance.review_queue(nb_id) == []
     post_delete_version = memo.cached_version(nb_id)
     assert post_delete_version is not None
     assert post_delete_version[0] == 1, (
@@ -623,7 +623,7 @@ def test_store_kg_bump_is_visible_to_the_review_queue_while_it_still_embeds(
     (即恢复 embedding 之后的 post-tx bump),下面两条断言都会红——seq 原地不动,
     队列端出的还是暖那一刻的旧集合。"""
     nb_id = _seed_graph(repo)
-    warm_rel_ids = {item["rel_id"] for item in repo.review_queue(nb_id)}
+    warm_rel_ids = {item["rel_id"] for item in repo._runtime.knowledge_governance.review_queue(nb_id)}
     memo = repo._runtime.review_queue_memo
     warm_seq = memo.cached_seq(nb_id)
     assert warm_seq is not None
@@ -635,7 +635,7 @@ def test_store_kg_bump_is_visible_to_the_review_queue_while_it_still_embeds(
         # The graph rows are committed by now; read the queue exactly as a
         # concurrent request would — through the same warm memo.
         observed["seq"] = _graph_seq(repo, nb_id)
-        observed["rel_ids"] = {i["rel_id"] for i in repo.review_queue(nb_id)}
+        observed["rel_ids"] = {i["rel_id"] for i in repo._runtime.knowledge_governance.review_queue(nb_id)}
 
     monkeypatch.setattr(
         repo._runtime.source_embedding, "embed_objects_batch", _observe_mid_embed
@@ -668,7 +668,7 @@ def test_store_kg_embedding_failure_still_leaves_the_seq_advanced(
     修法后行与 seq 已经一起提交,embedding 失败只影响向量:seq 已前进,memo 的
     标签因此失配,下一次读冷算出与 DB 一致的结果。"""
     nb_id = _seed_graph(repo)
-    warm_rel_ids = {item["rel_id"] for item in repo.review_queue(nb_id)}
+    warm_rel_ids = {item["rel_id"] for item in repo._runtime.knowledge_governance.review_queue(nb_id)}
     memo = repo._runtime.review_queue_memo
     warm_seq = memo.cached_seq(nb_id)
     assert warm_seq is not None
@@ -694,7 +694,7 @@ def test_store_kg_embedding_failure_still_leaves_the_seq_advanced(
     # store_kg raised before its cache-eviction tail, so nothing explicitly
     # cleared the memo — the seq gate alone has to catch this.
     assert memo.cached_seq(nb_id) == warm_seq
-    live_rel_ids = {item["rel_id"] for item in repo.review_queue(nb_id)}
+    live_rel_ids = {item["rel_id"] for item in repo._runtime.knowledge_governance.review_queue(nb_id)}
     assert len(live_rel_ids) == len(warm_rel_ids) + 1
     assert memo.cached_seq(nb_id) == _graph_seq(repo, nb_id)
 
@@ -859,7 +859,7 @@ def test_verify_chain_edges_skips_rejected_federated(repo):
     federated reasoning graph (the live path — see module comment above) where
     a rejected edge has been excluded should not include that edge at all."""
     nb_id = _seed_graph(repo)
-    q = repo.review_queue(nb_id)
+    q = repo._runtime.knowledge_governance.review_queue(nb_id)
     # Reject the first edge
     rel_id = q[0]["rel_id"]
     repo.set_edge_review(nb_id, rel_id, "rejected")
@@ -921,7 +921,7 @@ def test_rejected_personal_edge_excluded_from_federated_graph(repo):
     without the review filter in _federated_rx_graph's loader, the rejected
     edge would keep flowing into ask(mode=graph) reasoning."""
     base_id, pers_id = _seed_federated(repo)
-    pers_rel_id = repo.review_queue(pers_id)[0]["rel_id"]
+    pers_rel_id = repo._runtime.knowledge_governance.review_queue(pers_id)[0]["rel_id"]
 
     # Warm the federated cache with the edge still active.
     G_warm, _, _ = repo._federated_rx_graph(pers_id)
@@ -938,7 +938,7 @@ def test_rejected_base_edge_excluded_from_federated_graph_for_personal_active(re
     """Rejecting a BASE-notebook edge must drop it from the PERSONAL notebook's
     warm federated graph (cross-participant invalidation + loader filter)."""
     base_id, pers_id = _seed_federated(repo)
-    base_rel_id = repo.review_queue(base_id)[0]["rel_id"]
+    base_rel_id = repo._runtime.knowledge_governance.review_queue(base_id)[0]["rel_id"]
 
     G_warm, _, _ = repo._federated_rx_graph(pers_id)
     assert base_rel_id in _rx_edge_rel_ids(G_warm)
@@ -963,7 +963,7 @@ def test_federated_version_key_covers_review_flip_without_eviction(repo, monkeyp
     UPDATE changes neither.
     """
     base_id, pers_id = _seed_federated(repo)
-    pers_rel_id = repo.review_queue(pers_id)[0]["rel_id"]
+    pers_rel_id = repo._runtime.knowledge_governance.review_queue(pers_id)[0]["rel_id"]
     repo.set_edge_review(pers_id, pers_rel_id, "verified")
 
     G_warm, _, _ = repo._federated_rx_graph(pers_id)
@@ -1020,7 +1020,7 @@ def test_api_edge_review_queue_missing_notebook_404(client):
 def test_api_review_relation_round_trip(client, repo):
     nb_id = _seed_graph(repo)
     before = client.get(f"/api/notebooks/{nb_id}/edge-review-queue").json()
-    rel_id = repo.review_queue(nb_id)[0]["rel_id"]
+    rel_id = repo._runtime.knowledge_governance.review_queue(nb_id)[0]["rel_id"]
     resp = client.post(
         f"/api/notebooks/{nb_id}/relations/{rel_id}/review",
         json={"status": "rejected"})
@@ -1035,7 +1035,7 @@ def test_api_review_relation_round_trip(client, repo):
 
 def test_api_review_relation_bad_status_400(client, repo):
     nb_id = _seed_graph(repo)
-    rel_id = repo.review_queue(nb_id)[0]["rel_id"]
+    rel_id = repo._runtime.knowledge_governance.review_queue(nb_id)[0]["rel_id"]
     resp = client.post(
         f"/api/notebooks/{nb_id}/relations/{rel_id}/review",
         json={"status": "nonsense"})

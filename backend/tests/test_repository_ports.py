@@ -11,7 +11,7 @@ def test_required_protocol_catalogue_has_declared_operations():
         },
         "ModelStatusStorePort": {"get_all", "record"},
         "NotebookSharingRepository": {"share_notebook", "unshare_notebook", "copy_notebook", "add_member", "remove_member", "join_shared", "leave_notebook"},
-        "KnowledgeGovernanceRepository": {"update_knowledge", "merge_knowledge", "confirm_conflict", "approve_promotion", "reject_promotion"},
+        "KnowledgeGovernanceRepository": {"update_knowledge", "merge_knowledge", "confirm_conflict", "approve_promotion_as_reviewer", "reject_promotion_as_reviewer"},
         "KnowledgeLifecycleRepository": {"build_notebook_kg", "rebuild_unified_kg", "unified_kg_status"},
         "AskStateRepository": {"begin_ask_job", "finish_ask_job", "append_ask_trace", "get_conversation", "submit_feedback"},
         "ReportRepository": {"create_report", "update_report", "get_report", "list_reports", "delete_report", "export_reports"},

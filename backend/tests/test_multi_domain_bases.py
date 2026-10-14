@@ -358,7 +358,7 @@ class TestPromotionTarget:
         repo.replace_notebook_bases(a.id, [b1.id, b2.id], "user-local")
         oid = self._concept(repo, a.id)
         cand = repo.propose_promotion(a.id, oid, target_base_id=b2.id)
-        repo.approve_promotion(cand["id"])
+        repo._runtime.knowledge_governance.approve_promotion(cand["id"])
         with repo._connect() as db:
             b1_count = db.execute(
                 "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=?",
@@ -405,7 +405,7 @@ class TestPromotionTarget:
                 "SELECT id FROM knowledge_objects WHERE notebook_id=?", (a.id,)
             ).fetchone()["id"]
         cand = repo.propose_promotion(a.id, oid, target_base_id=b2.id)
-        (base_object,) = repo.approve_promotion(cand["id"])["base_object_ids"]
+        (base_object,) = repo._runtime.knowledge_governance.approve_promotion(cand["id"])["base_object_ids"]
         with repo._connect() as db:
             promoted = {
                 row["notebook_id"]: row["id"] for row in db.execute(
@@ -438,7 +438,7 @@ class TestPromotionTarget:
                  "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
             )
         with pytest.raises(ValueError, match="target_base_id"):
-            repo.approve_promotion(cand_id)
+            repo._runtime.knowledge_governance.approve_promotion(cand_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1637,7 +1637,7 @@ class TestApprovePromotionRevalidatesTarget:
         repo.set_notebook_personal(base.id)  # propose 之后、approve 之前,目标被降级
 
         with pytest.raises(ValueError, match="公共知识库"):
-            repo.approve_promotion(cand["id"])
+            repo._runtime.knowledge_governance.approve_promotion(cand["id"])
 
         with repo._connect() as db:
             count = db.execute(
@@ -1663,7 +1663,7 @@ class TestApprovePromotionRevalidatesTarget:
 
         repo.replace_notebook_bases(a.id, [], "user-local")  # 取消挂载,不降级、不删除
 
-        repo.approve_promotion(cand["id"])  # 不该抛——挂载状态不影响已经通过 propose 校验的目标
+        repo._runtime.knowledge_governance.approve_promotion(cand["id"])  # 不该抛——挂载状态不影响已经通过 propose 校验的目标
         with repo._connect() as db:
             count = db.execute(
                 "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=?",
@@ -1695,7 +1695,7 @@ class TestApprovePromotionRevalidatesTarget:
         repo.delete_notebook(base.id)  # propose 之后、approve 之前,目标被整个删除
 
         try:
-            repo.approve_promotion(cand_id)
+            repo._runtime.knowledge_governance.approve_promotion(cand_id)
             raise AssertionError("目标已被删除,approve 必须拒绝,不能悄悄成功")
         except sqlite3.IntegrityError:
             raise AssertionError(
@@ -1740,11 +1740,11 @@ class TestApprovePromotionRetryDespiteTargetLifecycle:
         repo.replace_notebook_bases(a.id, [base.id], "user-local")
         oid = self._concept(repo, a.id)
         cand = repo.propose_promotion(a.id, oid)
-        first = repo.approve_promotion(cand["id"])
+        first = repo._runtime.knowledge_governance.approve_promotion(cand["id"])
 
         repo.set_notebook_personal(base.id)  # approve 之后才降级(与场景 1 不同)
 
-        second = repo.approve_promotion(cand["id"])  # 重试:不该抛
+        second = repo._runtime.knowledge_governance.approve_promotion(cand["id"])  # 重试:不该抛
         assert second["base_object_id"] == first["base_object_id"]
         with repo._connect() as db:
             count = db.execute(
@@ -1790,7 +1790,7 @@ class TestApprovePromotionRetryDespiteTargetLifecycle:
                 ),
             )
 
-        result = repo.approve_promotion(cand_id)  # 重试(建库时就是 approved):不该抛
+        result = repo._runtime.knowledge_governance.approve_promotion(cand_id)  # 重试(建库时就是 approved):不该抛
 
         assert result["base_object_id"] == base_object_id
         with repo._connect() as db:
@@ -1817,11 +1817,11 @@ class TestApprovePromotionRetryDespiteTargetLifecycle:
         )
         oid = self._concept(repo, a.id)  # 与 existing 同名同定义 → 命中去重
         cand = repo.propose_promotion(a.id, oid)
-        first = repo.approve_promotion(cand["id"])
+        first = repo._runtime.knowledge_governance.approve_promotion(cand["id"])
         assert first["base_object_id"] == existing
         assert first["merged_into"] == existing
 
-        second = repo.approve_promotion(cand["id"])  # 重试
+        second = repo._runtime.knowledge_governance.approve_promotion(cand["id"])  # 重试
 
         assert second["base_object_id"] == existing
         with repo._connect() as db:

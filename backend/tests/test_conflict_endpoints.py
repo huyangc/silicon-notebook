@@ -97,7 +97,7 @@ def _seed_pending_conflict(repo: SQLiteRepository) -> tuple[str, str]:
             (nb.id,),
         ).fetchall()
     left_ref, right_ref = rels[0]["id"], rels[1]["id"]
-    cid = repo.write_conflict_candidate(
+    cid = repo._runtime.knowledge_governance.write_conflict_candidate(
         nb.id,
         kind="edge",
         left_ref=left_ref,
@@ -227,7 +227,7 @@ class TestConfirmEndpoint:
         repo = _make_repo(monkeypatch)
         tc = _client(repo, monkeypatch)
         nb_id, cid = _seed_pending_conflict(repo)
-        cand = repo.get_conflict_candidate(nb_id, cid)
+        cand = repo._runtime.knowledge_governance.get_conflict_candidate(nb_id, cid)
         winner_ref = cand["winner_ref"]
         loser_ref = cand["right_ref"] if winner_ref == cand["left_ref"] else cand["left_ref"]
 
@@ -276,7 +276,7 @@ class TestConfirmEndpoint:
         r = tc.post(f"/api/notebooks/{other_nb.id}/kg/conflicts/{cid}/confirm")
 
         assert r.status_code == 404
-        assert repo.get_conflict_candidate(victim_nb, cid)["status"] == "pending"
+        assert repo._runtime.knowledge_governance.get_conflict_candidate(victim_nb, cid)["status"] == "pending"
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +358,7 @@ class TestRejectEndpoint:
         r = tc.post(f"/api/notebooks/{other_nb.id}/kg/conflicts/{cid}/reject")
 
         assert r.status_code == 404
-        assert repo.get_conflict_candidate(victim_nb, cid)["status"] == "pending"
+        assert repo._runtime.knowledge_governance.get_conflict_candidate(victim_nb, cid)["status"] == "pending"
 
 
 # ---------------------------------------------------------------------------

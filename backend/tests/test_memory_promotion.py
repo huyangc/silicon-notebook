@@ -230,7 +230,7 @@ def test_edit_and_approval_race_has_only_a_fully_approved_or_superseded_outcome(
     def approve():
         barrier.wait()
         try:
-            return ("approved", repo.approve_promotion(proposal["id"]))
+            return ("approved", repo._runtime.knowledge_governance.approve_promotion(proposal["id"]))
         except ValueError as exc:
             return ("approval_rejected", str(exc))
 
@@ -277,8 +277,8 @@ def test_admin_approval_is_idempotent_and_keeps_memory_private(repo, promotion_s
     owner, other, notebook, base, memory = promotion_setup
     proposal = repo.propose_memory_promotion(memory.id, owner.id)
 
-    first = repo.approve_promotion(proposal["id"])
-    second = repo.approve_promotion(proposal["id"])
+    first = repo._runtime.knowledge_governance.approve_promotion(proposal["id"])
+    second = repo._runtime.knowledge_governance.approve_promotion(proposal["id"])
     assert first["base_object_ids"] == second["base_object_ids"]
     assert len(first["base_object_ids"]) == 4
     with repo._connect() as db:
@@ -339,7 +339,7 @@ def test_approve_memory_promotion_writes_into_mounted_target_not_earliest_create
     )
     memory = repo.confirm_memory(candidate.id, owner.id)
     proposal = repo.propose_memory_promotion(memory.id, owner.id)
-    repo.approve_promotion(proposal["id"])
+    repo._runtime.knowledge_governance.approve_promotion(proposal["id"])
     with repo._connect() as db:
         b1_count = db.execute(
             "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=?",
@@ -387,7 +387,7 @@ def test_admin_cannot_approve_after_owner_deprecates_proposed_memory(
     )
 
     with pytest.raises(ValueError):
-        repo.approve_promotion(proposal["id"])
+        repo._runtime.knowledge_governance.approve_promotion(proposal["id"])
     with repo._connect() as db:
         count = db.execute(
             "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=?",
@@ -437,7 +437,7 @@ def test_deprecate_transition_and_approval_race_is_atomic(repo, promotion_setup)
     def approve():
         barrier.wait()
         try:
-            return ("approved", repo.approve_promotion(proposal["id"]))
+            return ("approved", repo._runtime.knowledge_governance.approve_promotion(proposal["id"]))
         except ValueError as exc:
             return ("approval_rejected", str(exc))
 
@@ -544,7 +544,7 @@ def test_admin_approval_fails_closed_after_member_loses_notebook_access(
         with repo._write() as db:
             db.execute("DELETE FROM notebook_grants WHERE id='gnt-member'")
     with pytest.raises(PermissionError):
-        repo.approve_promotion(proposal["id"])
+        repo._runtime.knowledge_governance.approve_promotion(proposal["id"])
 
     with repo._connect() as db:
         promotion = db.execute(
@@ -588,7 +588,7 @@ def test_member_exit_withdraws_the_proposal_and_the_memory_never_returns(repo):
 
     repo._runtime.memory_service.leave_notebook(notebook.id, memory_owner.id, 1)
     with pytest.raises(KeyError):  # the Memory it pinned no longer exists
-        repo.approve_promotion(proposal["id"])
+        repo._runtime.knowledge_governance.approve_promotion(proposal["id"])
 
     with repo._connect() as db:
         promotion = dict(db.execute(
@@ -652,7 +652,7 @@ def test_admin_approval_fails_closed_on_candidate_memory_notebook_mismatch(
         ).fetchone()["payload_json"]
 
     with pytest.raises(ValueError, match="notebook"):
-        repo.approve_promotion(proposal["id"])
+        repo._runtime.knowledge_governance.approve_promotion(proposal["id"])
 
     with repo._connect() as db:
         promotion_status = db.execute(
@@ -686,7 +686,7 @@ def test_memory_promotion_dedupes_into_existing_base_object(repo, promotion_setu
         base.id, "concept", {"name": "compensation"}
     )
     proposal = repo.propose_memory_promotion(memory.id, owner.id)
-    result = repo.approve_promotion(proposal["id"])
+    result = repo._runtime.knowledge_governance.approve_promotion(proposal["id"])
     assert existing in result["base_object_ids"]
     with repo._connect() as db:
         count = db.execute(
@@ -748,7 +748,7 @@ def test_approval_binds_only_server_validated_source_element_evidence(
     )
     assert queued["evidence"][0].quoted_span == "Verified source statement."
     assert "forged client quote" not in queued["evidence"][0].quoted_span
-    result = repo.approve_promotion(proposal["id"])
+    result = repo._runtime.knowledge_governance.approve_promotion(proposal["id"])
     with repo._connect() as db:
         row = db.execute(
             "SELECT evidence FROM knowledge_objects WHERE notebook_id=? AND id=?",
@@ -794,7 +794,7 @@ def test_approval_binds_only_server_validated_source_element_evidence(
 def test_admin_rejection_records_state_but_leaves_confirmed_memory(repo, promotion_setup):
     owner, _other, notebook, _base, memory = promotion_setup
     proposal = repo.propose_memory_promotion(memory.id, owner.id)
-    rejected = repo.reject_promotion(proposal["id"], "not canonical")
+    rejected = repo._runtime.knowledge_governance.reject_promotion(proposal["id"], "not canonical")
     assert rejected["status"] == "rejected"
     current = repo.get_memory(memory.id, owner.id)
     assert current.status == "confirmed"
