@@ -77,6 +77,62 @@ def test_participant_limit_rejects_whole_scope_before_source_freeze(setup):
     assert not service.list_conversations(user_id="u")
 
 
+def test_the_too_wide_reason_is_coded_only_for_an_all_scope(setup):
+    from app.services.global_ask import SCOPE_ALL_TOO_WIDE
+
+    service, readable, _, _ = setup
+    service.settings.global_ask_max_notebooks = 2
+    readable.add("c")
+    with pytest.raises(GlobalAskError) as wide:
+        service.start(GlobalAskRequest(question="q"), user_id="u")
+    assert wide.value.reason == SCOPE_ALL_TOO_WIDE and wide.value.limit == 2
+    # The web copy is unchanged by the code.
+    assert "可访问的笔记本超过 2 个" in wide.value.message
+    with pytest.raises(GlobalAskError) as picked:
+        service.start(GlobalAskRequest(
+            question="q", notebook_scope={"mode": "include", "notebook_ids": ["a", "b", "c"]},
+        ), user_id="u")
+    assert picked.value.reason == "" and "本次范围超过 2 个" in picked.value.message
+
+
+def test_an_all_scope_follows_the_live_allowlist_and_readability(setup):
+    service, readable, _, _ = setup
+    scope = {"mode": "all", "notebook_ids": []}
+    both = service.start(GlobalAskRequest(question="q1", notebook_scope=scope), user_id="u",
+                         allowed_notebook_ids=["a", "b"])
+    assert both.resolved_notebook_ids == ["a", "b"]
+    only_a = service.start(GlobalAskRequest(question="q2", notebook_scope=scope), user_id="u",
+                           allowed_notebook_ids=["a"])
+    assert only_a.resolved_notebook_ids == ["a"]
+    readable.discard("a")
+    only_b = service.start(GlobalAskRequest(question="q3", notebook_scope=scope), user_id="u",
+                           allowed_notebook_ids=["a", "b"])
+    assert only_b.resolved_notebook_ids == ["b"]
+    with pytest.raises(GlobalAskError) as none_left:
+        service.start(GlobalAskRequest(question="q4", notebook_scope=scope), user_id="u",
+                      allowed_notebook_ids=["a"])
+    assert none_left.value.status_code == 422
+
+
+def test_one_request_key_is_not_replayed_across_an_all_and_an_explicit_scope(setup):
+    from app.services.global_ask import REQUEST_KEY_REUSED
+
+    service, _, _, _ = setup
+    everything = GlobalAskRequest(
+        question="q", client_request_id="k", notebook_scope={"mode": "all", "notebook_ids": []},
+    )
+    first = service.start(everything, user_id="u")
+    finished(service, first)
+    assert service.start(everything, user_id="u").job_id == first.job_id
+    listed = GlobalAskRequest(
+        question="q", client_request_id="k",
+        notebook_scope={"mode": "include", "notebook_ids": ["a", "b"]},
+    )
+    with pytest.raises(GlobalAskError) as reused:
+        service.start(listed, user_id="u")
+    assert reused.value.reason == REQUEST_KEY_REUSED
+
+
 def test_admission_bounds_new_conversations_and_preserves_idempotent_retry(setup):
     service, _, _, _ = setup
     service.settings.global_ask_max_concurrent = 1

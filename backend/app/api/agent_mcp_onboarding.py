@@ -90,7 +90,7 @@ If the current client uses a different MCP configuration format, create one Stre
 
 ## Asking questions
 
-- A call to `ask` answers in the same call (it can take minutes; configure a generous client read timeout). Omit `notebooks` to ask the token's default notebook, pass one id for that notebook, or 2-8 ids for one answer across them; more than 8 is refused.
+- A call to `ask` answers in the same call (it can take minutes; configure a generous client read timeout). Omit `notebooks` to ask the token's default notebook, pass one id for that notebook, or 2-8 ids for one answer across them; more than 8 is refused. Pass `["*"]` to ask every authorized notebook you can still read (a global answer; refused if more than 8, and not combinable with other ids).
 - Keep the returned `conversation_id` and pass it back to continue the conversation (a `conv-` id continues a notebook conversation, a `gconv-` id a cross-notebook one).
 - `mode` is `reasoning` (default) or `chunk`. In `reasoning`, a clear question is answered directly; an ambiguous one returns `{{"status": "needs_clarification", "intent_token": ...}}` and creates nothing — relay the questions to the user, then call `ask` again with the same `question`, `notebooks`, `conversation_id` and `output` plus `intent={{"intent_token": ..., "answers": [{{"id": ..., "answer": ...}}]}}` (the token lives one hour).
 - Retry a submission with the same `client_request_id` to get the job it already started instead of asking twice. Long results continue with `get_ask(job_id, ...)`: follow `next_answer_offset` / `next_citation_offset` / `next_coverage_offset` and `trace.next_offset` independently until each is null.

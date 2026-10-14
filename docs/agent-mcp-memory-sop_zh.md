@@ -302,7 +302,7 @@ claude mcp list
 {"question":"这些项目的低温测试结论有哪些共同点？","notebooks":["<id-1>","<id-2>"],"client_request_id":"low-temperature-review-1"}
 ```
 
-- **路由。** 省略 `notebooks` 问 token 的默认笔记本；传 1 个 id 问那个笔记本；传 2–8 个 id 得到跨这些笔记本的一份回答（跨笔记本，即「全局」路径）；超过 8 个直接返回 `invalid_argument`（不会静默截断），此时先分页调用 `list_notebooks` 再挑不超过 8 个。只有白名单内且主人可读的笔记本会参与。
+- **路由。** 省略 `notebooks` 问 token 的默认笔记本；传 1 个 id 问那个笔记本；传 2–8 个 id 得到跨这些笔记本的一份回答（跨笔记本，即「全局」路径）；超过 8 个直接返回 `invalid_argument`（不会静默截断），此时先分页调用 `list_notebooks` 再挑不超过 8 个。传 `notebooks=["*"]` 表示全部授权且仍可读的笔记本，一律走全局路径；解析出超过 8 个同样是 `invalid_argument`，`*` 不能与其他 id 混用。只有白名单内且主人可读的笔记本会参与。
 - **会话。** 保存返回的 `conversation_id` 并在下一次传回即可接续：`conv-` 开头接续该笔记本的会话，`gconv-` 开头接续跨笔记本会话（省略 `notebooks` 时沿用会话范围）。会话不属于 token 主人、不在白名单内，或与显式 `notebooks` 冲突，一律 `not_found`——绝不会静默新开一个。可以接续网页端同一用户创建的会话，但历史和结果仍受当前 token 权限约束。
 - **模式。** `mode` 省略即 `reasoning`；`chunk` 跳过理解步骤；部署安装的插件引擎 mode id 只能用于单个笔记本。
 - **输出。** `output` 省略即 `answer`（下文的回答结果）；`evidence` 只检索、不生成回答，见下一小节。其他取值报 `invalid_argument`。

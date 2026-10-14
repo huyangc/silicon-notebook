@@ -31,11 +31,22 @@ _GLOBAL_FALLBACK = "全局问答暂时无法完成，请稍后重试；如仍失
 def global_ask_tool_error(exc: BaseException) -> AgentToolError | None:
     """The Agent error for a ``GlobalAskError``, else ``None``."""
     try:
-        from app.services.global_ask import REQUEST_KEY_REUSED, GlobalAskError
+        from app.services.global_ask import (
+            REQUEST_KEY_REUSED, SCOPE_ALL_TOO_WIDE, GlobalAskError,
+        )
     except ImportError:  # pragma: no cover - discovery before runtime wiring
         return None
     if not isinstance(exc, GlobalAskError):
         return None
+    if getattr(exc, "reason", "") == SCOPE_ALL_TOO_WIDE:
+        # notebooks=["*"] resolved past the ceiling: the web copy says "choose
+        # fewer", which an Agent can only do by naming ids itself.
+        limit = getattr(exc, "limit", None)
+        return AgentToolError(
+            "invalid_argument",
+            f"授权笔记本超过 {limit} 个，请先用 list_notebooks 选出不超过 {limit} 个，"
+            "再把它们的 id 传给 notebooks",
+        )
     if getattr(exc, "reason", "") == REQUEST_KEY_REUSED:
         # A client_request_id reused for another question: the caller's to
         # fix (409 on HTTP, but not "busy" -- retrying never helps).

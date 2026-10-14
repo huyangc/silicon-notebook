@@ -1206,3 +1206,176 @@ async def test_a_global_retry_differing_only_in_whitespace_is_the_same_job(adapt
     )
     assert first["job_id"] == again["job_id"] == "gask-a"
     assert started == ["Q?"], "the retry must replay, not start a second job"
+
+
+ALL = {"mode": "all", "notebook_ids": []}
+
+
+@pytest.mark.anyio
+async def test_star_asks_every_authorized_notebook_through_the_all_scope(adapter):
+    handlers, _, _, service = adapter
+    seen = []
+    service.start = lambda payload, **kwargs: (seen.append(payload), job())[1]
+    # A token with one notebook still goes global: "*" is never a single-notebook ask.
+    result = await handlers["ask"]("问题", None, notebooks=[" * "], mode="chunk")
+    assert result["job_id"] == "gask-a" and result["scope"]["kind"] == "global"
+    assert seen[0].notebook_scope.mode == "all"
+    assert seen[0].notebook_scope.notebook_ids == []
+
+
+@pytest.mark.anyio
+async def test_star_on_a_global_conversation_overrides_its_scope_explicitly(adapter):
+    handlers, _, _, service = adapter
+    seen = []
+    service.start = lambda payload, **kwargs: (seen.append(payload), job())[1]
+    await handlers["ask"]("继续", None, notebooks=["*"], conversation_id="gconv-a", mode="chunk")
+    assert seen[0].notebook_scope is not None and seen[0].notebook_scope.mode == "all"
+    assert seen[0].conversation_id == "gconv-a"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mixed", [["*", "nb-a"], ["nb-a", " * "]])
+async def test_star_mixed_with_ids_is_refused(adapter, mixed):
+    handlers, _, _, service = adapter
+    service.start = lambda *a, **k: pytest.fail("must not start")
+    with pytest.raises(AgentToolError) as refused:
+        await handlers["ask"]("问题", None, notebooks=mixed, mode="chunk")
+    assert refused.value.code == "invalid_argument" and "单独使用" in refused.value.message
+
+
+@pytest.mark.anyio
+async def test_star_resolving_past_the_ceiling_tells_the_agent_to_narrow(adapter):
+    from app.services.global_ask import SCOPE_ALL_TOO_WIDE, GlobalAskError
+
+    handlers, _, _, service = adapter
+
+    def start(payload, **kwargs):
+        raise GlobalAskError(
+            422, "可访问的笔记本超过 8 个，请选择不超过 8 个笔记本后重试。",
+            SCOPE_ALL_TOO_WIDE, 8,
+        )
+
+    service.start = start
+    with pytest.raises(AgentToolError) as refused:
+        await handlers["ask"]("问题", None, notebooks=["*"], mode="chunk")
+    assert refused.value.code == "invalid_argument"
+    assert "授权笔记本超过 8 个" in refused.value.message
+    assert "list_notebooks" in refused.value.message
+    # The same words without the code keep the web copy verbatim.
+    plain = module.global_ask_tool_error(
+        GlobalAskError(422, "可访问的笔记本超过 8 个，请选择不超过 8 个笔记本后重试。")
+    )
+    assert plain.message.startswith("可访问的笔记本超过 8 个")
+
+
+@pytest.mark.anyio
+async def test_star_with_no_readable_notebook_keeps_the_empty_scope_refusal(adapter):
+    from app.services.global_ask import GlobalAskError
+
+    handlers, _, _, service = adapter
+
+    def start(payload, **kwargs):
+        raise GlobalAskError(422, "没有可访问的笔记本，请先创建笔记本并添加资料。")
+
+    service.start = start
+    with pytest.raises(AgentToolError) as refused:
+        await handlers["ask"]("问题", None, notebooks=["*"], mode="chunk")
+    assert refused.value.code == "invalid_argument"
+    assert "没有可访问的笔记本" in refused.value.message
+
+
+@pytest.mark.anyio
+async def test_star_is_refused_for_evidence_and_plugin_engines(adapter, monkeypatch):
+    handlers, _, _, service = adapter
+    service.start = lambda *a, **k: pytest.fail("must not start")
+    with pytest.raises(AgentToolError) as evidence:
+        await handlers["ask"]("问题", None, notebooks=["*"], mode="chunk", output="evidence")
+    assert evidence.value.code == "invalid_argument"
+    assert "单个笔记本" in evidence.value.message
+    monkeypatch.setattr(ask_module, "_plugin_mode", lambda mode: True)
+    with pytest.raises(AgentToolError) as plugin:
+        await handlers["ask"]("问题", None, notebooks=["*"], mode="corp.engine")
+    assert plugin.value.code == "invalid_argument" and "单个笔记本" in plugin.value.message
+
+
+@pytest.mark.anyio
+async def test_star_with_a_notebook_conversation_is_not_found(adapter, monkeypatch):
+    handlers, _, repo, service = adapter
+    monkeypatch.setattr(
+        ask_module, "notebook_access_repository",
+        lambda: SimpleNamespace(conversation_owner=lambda cid: "owner-a"),
+    )
+    repo.get_conversation = lambda cid: SimpleNamespace(notebook_id="nb-a")
+    service.start = lambda *a, **k: pytest.fail("must not start")
+    with pytest.raises(AgentToolError) as refused:
+        await handlers["ask"]("问题", None, notebooks=["*"], conversation_id="conv-1", mode="chunk")
+    assert refused.value.code == "not_found"
+
+
+def test_the_star_scope_key_differs_from_inherit_and_every_id_list():
+    keys = {
+        ask_module._global_scope_key(["*"], "gconv-a"),
+        ask_module._global_scope_key(None, "gconv-a"),
+        ask_module._global_scope_key(BOTH, "gconv-a"),
+        ask_module._global_scope_key(["nb-a"], "gconv-a"),
+    }
+    assert len(keys) == 4
+
+
+@pytest.mark.anyio
+async def test_a_star_clarification_reports_the_all_scope_and_its_handle_is_bound_to_it(adapter):
+    handlers, _, _, service = adapter
+    from app.models.ask import QueryIntentContract, QueryIntentAmbiguity
+
+    service.preview_intent = lambda payload, **kw: QueryIntentContract(
+        objective=payload.question, resolved_question=payload.question,
+        needs_clarification=True,
+        ambiguities=[QueryIntentAmbiguity(id="a1", question="具体指哪一个项目？")],
+    )
+    service.start = lambda *a, **k: pytest.fail("must not start")
+    paused = await handlers["ask"]("它的结论是什么", None, notebooks=["*"])
+    assert paused["scope"] == {"kind": "global", **ALL}
+    reply = {"intent_token": paused["intent_token"], "answers": [{"id": "a1", "answer": "甲"}]}
+    for other in (BOTH, None):
+        with pytest.raises(AgentToolError) as refused:
+            await handlers["ask"]("它的结论是什么", None, notebooks=other, intent=reply,
+                                  conversation_id="gconv-a" if other is None else "")
+        assert refused.value.code == "invalid_argument"
+
+
+@pytest.mark.anyio
+async def test_one_key_is_not_replayed_from_star_to_an_id_list(adapter):
+    from app.services.global_ask import (
+        REQUEST_KEY_REUSED, GlobalAskError, GlobalAskService,
+    )
+
+    handlers, _, _, service = adapter
+    stored: dict = {}
+
+    def start(payload, **kwargs):
+        stored[payload.client_request_id] = payload.model_dump_json()
+        return job()
+
+    def replay(payload, **kwargs):
+        previous = stored.get(payload.client_request_id)
+        if previous is None:
+            return None
+        if not GlobalAskService._same_request(previous, payload.model_dump_json()):
+            raise GlobalAskError(409, "请求标识已用于其他问题，请重新提交。", REQUEST_KEY_REUSED)
+        return job()
+
+    service.start, service.replay = start, replay
+    await handlers["ask"]("Q?", None, notebooks=["*"], mode="chunk", client_request_id="k1")
+    with pytest.raises(AgentToolError) as refused:
+        await handlers["ask"]("Q?", None, notebooks=BOTH, mode="chunk", client_request_id="k1")
+    assert refused.value.code == "invalid_argument" and "另一个问题" in refused.value.message
+
+
+@pytest.mark.anyio
+async def test_a_token_without_a_default_notebook_is_told_the_ask_parameter_name(adapter):
+    handlers, principal, _, _ = adapter
+    principal.default_notebook_id = ""
+    with pytest.raises(AgentToolError) as refused:
+        await handlers["ask"]("问题", None, mode="chunk")
+    assert refused.value.code == "invalid_argument"
+    assert "notebooks" in refused.value.message and "notebook_id" not in refused.value.message
