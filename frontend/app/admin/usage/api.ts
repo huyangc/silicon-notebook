@@ -240,6 +240,62 @@ export async function updateAdminUsername(userId: string, username: string): Pro
   return patchedField(res, "username", username);
 }
 
+export type AdminAccountMerge = {
+  id: string;
+  username: string;
+  status: AdminUserStatus;
+  removed_user_id: string;
+};
+
+export type AccountMergeDataItem = { label: string; unit: string; count: number };
+
+// 409 `merge_source_has_data`:被删账号名下还有数据。类别与条数由服务端给,页面在合并按钮旁
+// 逐条列出——所以不走通用人话层(那只会压成一句「操作有冲突」),转成类型化异常。
+export class AccountMergeBlocked extends Error {
+  readonly items: AccountMergeDataItem[];
+
+  constructor(items: AccountMergeDataItem[]) {
+    super("merge_source_has_data");
+    this.name = "AccountMergeBlocked";
+    this.items = items;
+  }
+}
+
+/** 从 409 正文里认出 `merge_source_has_data`;认不出(或条目形状不对)返回 null。 */
+export function parseAccountMergeBlocked(status: number, body: unknown): AccountMergeDataItem[] | null {
+  if (status !== 409 || typeof body !== "object" || body === null) return null;
+  const detail = (body as Record<string, unknown>).detail;
+  if (typeof detail !== "object" || detail === null) return null;
+  const d = detail as Record<string, unknown>;
+  if (d.code !== "merge_source_has_data" || !Array.isArray(d.items) || d.items.length === 0) return null;
+  const items: AccountMergeDataItem[] = [];
+  for (const raw of d.items) {
+    if (typeof raw !== "object" || raw === null) return null;
+    const { label, unit, count } = raw as Record<string, unknown>;
+    if (typeof label !== "string" || !label || typeof unit !== "string") return null;
+    if (typeof count !== "number" || !Number.isInteger(count) || count <= 0) return null;
+    items.push({ label, unit, count });
+  }
+  return items;
+}
+
+// 把统一认证账号(username,以工号命名)并入 userId 这个老账号:前者被删除,老账号改用它的
+// 用户名。正文只能读一次:探测用克隆读,其余失败仍交给原始 res 走人话层。
+export async function mergeAdminSsoAccount(userId: string, username: string): Promise<AdminAccountMerge> {
+  const res = await performApiRequest(
+    `/admin/users/${encodeURIComponent(userId)}/merge-sso-account`,
+    { tag: "admin", method: "POST", body: JSON.stringify({ username }) },
+  );
+  if (res.status === 403) await throwForbiddenSentinel(res);
+  if (res.status === 409) {
+    const body = await res.clone().json().catch(() => null);
+    const items = parseAccountMergeBlocked(res.status, body);
+    if (items) throw new AccountMergeBlocked(items);
+  }
+  if (!res.ok) await throwHumanizedHttpError(res, "admin");
+  return res.json();
+}
+
 export type AdminPasswordReset = { id: string; username: string };
 
 // 管理员重置目标用户的密码。镜像 updateAdminUserRole 的 403 哨兵分流 + 人话层
