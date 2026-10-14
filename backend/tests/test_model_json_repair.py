@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import inspect
 import json
-import time
+import sys
+import types
+from contextlib import contextmanager
 
 import pytest
 
+from app.core import model_json
 from app.core.model_json import (
     ModelJsonRepairError,
     parse_model_json_object,
@@ -1036,6 +1040,112 @@ def test_an_inner_quote_without_one_reading_stays_malformed(raw, allow_repair):
         parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=allow_repair)
 
 
+# Loop iterations ``parse_model_json_object`` may spend per character of a
+# degenerate reply. The reader makes a fixed number of linear passes (the
+# literal readings, the restart scan and its comparison budget of four
+# passes, the repeat check); the replies below measure at most 7 per
+# character on CPython 3.13 and 3.14. The cap leaves room for another pass
+# or two, while a superlinear scan of a 200k-character run costs on the
+# order of 100k per character.
+_LOOP_STEPS_PER_CHAR = 16
+
+
+class _LoopStepCapExceeded(Exception):
+    pass
+
+
+class _LoopSteps:
+    __slots__ = ("total", "watched")
+
+    def __init__(self) -> None:
+        self.total = 0  # every loop iteration in the module
+        self.watched = 0  # those in the watched function
+
+
+def _module_code_objects(module: types.ModuleType) -> list[types.CodeType]:
+    """Code of every function and method defined in ``module``, nested
+    functions and generator expressions included."""
+    found: list[types.CodeType] = []
+
+    def walk(code: types.CodeType) -> None:
+        found.append(code)
+        for const in code.co_consts:
+            if isinstance(const, types.CodeType):
+                walk(const)
+
+    def visit(value: object) -> None:
+        if isinstance(value, property):
+            for accessor in (value.fget, value.fset, value.fdel):
+                visit(accessor)
+            return
+        value = inspect.unwrap(value) if callable(value) else value
+        if (
+            isinstance(value, types.FunctionType)
+            and value.__module__ == module.__name__
+        ):
+            walk(value.__code__)
+
+    for value in vars(module).values():
+        if isinstance(value, type) and value.__module__ == module.__name__:
+            for member in vars(value).values():
+                visit(member.__func__ if isinstance(
+                    member, (staticmethod, classmethod)) else member)
+        else:
+            visit(value)
+    return found
+
+
+@contextmanager
+def _counted_loop_steps(
+    module: types.ModuleType, cap: int, *, watched: types.FunctionType,
+):
+    """Count loop iterations (backward jumps) executed in ``module``'s code.
+
+    ``sys.monitoring`` reports each jump; only those to an earlier
+    instruction -- the next iteration of a ``for`` or ``while``, or a
+    ``continue`` -- are counted, and those in ``watched`` separately as
+    well. The count depends only on the input and the code, never on
+    machine load. Past ``cap`` every further iteration raises, so a
+    superlinear scan fails at once instead of running on. Work done inside
+    one C call (``str.find``, the JSON decoder, a regex) is not counted;
+    what this guards is the Python-level scanning.
+    """
+    monitoring = sys.monitoring
+    tool = next(
+        (tool for tool in (3, 4, 0, 2, 5, 1) if monitoring.get_tool(tool) is None),
+        None,
+    )
+    if tool is None:
+        pytest.fail("no free sys.monitoring tool id")
+    steps = _LoopSteps()
+    codes = _module_code_objects(module)
+    watched_code = watched.__code__
+    assert watched_code in codes
+
+    def on_jump(code, source, destination):
+        if destination > source:
+            return
+        steps.total += 1
+        if code is watched_code:
+            steps.watched += 1
+        if steps.total > cap:
+            raise _LoopStepCapExceeded(
+                f"more than {cap} loop iterations; last in {code.co_qualname}"
+            )
+
+    monitoring.use_tool_id(tool, "model-json-loop-steps")
+    try:
+        monitoring.register_callback(tool, monitoring.events.JUMP, on_jump)
+        for code in codes:
+            monitoring.set_local_events(tool, code, monitoring.events.JUMP)
+        yield steps
+    finally:
+        for code in codes:
+            monitoring.set_local_events(tool, code, monitoring.events.NO_EVENTS)
+        monitoring.register_callback(tool, monitoring.events.JUMP, None)
+        monitoring.free_tool_id(tool)
+
+
 @pytest.mark.parametrize(
     "raw",
     [
@@ -1051,13 +1161,24 @@ def test_an_inner_quote_without_one_reading_stays_malformed(raw, allow_repair):
         ) + ',{"local_id":"cut',
     ],
 )
-def test_degenerate_replies_are_rejected_in_bounded_time(raw):
+def test_degenerate_replies_are_rejected_in_linear_work(raw):
     # Every non-strict reply that opens with ``{`` reaches the restart scan;
-    # a model looping on one fragment must not hold a request thread.
-    started = time.perf_counter()
-    with pytest.raises(ModelJsonRepairError):
-        parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=False)
-    assert time.perf_counter() - started < 2.0
+    # a model looping on one fragment must not hold a request thread. The
+    # reader's work is counted as loop iterations, not timed: a wall-clock
+    # bound flaked on a loaded CI runner (2.37s against 2.0s for a case that
+    # takes 0.3s alone), while a superlinear scan of these 20k-800k character
+    # replies would run thousands of iterations per character.
+    cap = _LOOP_STEPS_PER_CHAR * len(raw)
+    with _counted_loop_steps(
+        model_json, cap, watched=model_json._restart_points,
+    ) as steps:
+        with pytest.raises(ModelJsonRepairError):
+            parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=False)
+    assert steps.total <= cap
+    # Not vacuous: the count saw the restart scan, and at least one pass
+    # over the reply.
+    assert steps.watched > 0
+    assert steps.total >= len(raw)
 
 
 @pytest.mark.parametrize("allow_repair", [False, True])
