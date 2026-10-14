@@ -34,7 +34,7 @@ manifest 的 `trust` 是三值。`builtin` 随本次构建发布；`deployment` 
 | --- | --- |
 | 公网 checkout | 就是部署将要跑的那个 commit。`EXTENSION_API_VERSION` 在 `backend/app/extension_sdk/contracts.py` 里读取——当前是 `"1"`。 |
 | Python | ≥ 3.13，且插件装进**后端自己那个 `PYTHON_BIN` 环境**，不是另一个解释器或 venv。 |
-| Node.js | ≥ 20 与 npm，与部署构建前端时用的是同一版本。 |
+| Node.js | 26 与 npm（唯一支持的大版本，钉在 `.nvmrc`），与部署构建前端时用的是同一版本。 |
 | 前端 manifest api 版本 | `ui-plugin.json` 的 `api_version` 同样必须是 `"1"`（`frontend/scripts/sync-ui-plugins.mjs` 的 `CONTRACT_API_VERSION`）。 |
 
 一份可用的插件仓库布局：

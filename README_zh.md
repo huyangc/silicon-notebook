@@ -27,7 +27,7 @@
 ### 环境要求
 
 - Python 3.13+
-- Node.js 20+ 与 npm
+- Node.js 26（只支持这一个大版本，钉在 `.nvmrc`，npm 会拒绝其他版本）与 npm
 - git
 - 默认部署需要可访问的 PostgreSQL 16 数据库
 

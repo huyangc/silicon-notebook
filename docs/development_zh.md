@@ -337,7 +337,7 @@ bash scripts/check.sh
 | G2 扩展门 | `scripts/check_extended.sh`：G1 加真实索引/性能测试、冷图/索引契约与全仓语义扫描（重活子集） | 每天 `17 18 * * *` UTC（北京时间次日 02:17）一次，也可手动触发 |
 | G3 PostgreSQL | `scripts/check_postgres.sh`：直接 PostgreSQL adapter 集成 | 独立的 PR/push/手动 CI job |
 
-G1 并行运行三个有界 lane：`check_backend.sh` 以默认 16 个 worker 执行稳定 backend pytest（CI 的 backend 分片固定 4 个）；`check_contracts.sh` 执行语法/依赖预检、hermetic smoke、契约检查与确定性抽取评分 harness；`check_frontend.sh` 执行递归发现的全部 `*.test.mjs`、全部 `*.component.test.tsx`、production build 与包内类型检查。在不少于 8 个 CPU 的主机上，同步一次插件投影之后，node 测试、组件测试与「build 之后类型检查」三组并发运行，各自写独立日志，全部结束后按固定顺序打印并逐步给出退出码；更小的主机（CI runner）保持串行顺序、在第一个失败处停止，`FRONTEND_LANE_PARALLEL=1`/`0` 可覆盖 CPU 判断。Node 原生 test runner 和 Vitest 各限制为 4 workers，为 backend 临界路径保留 CPU；Next build 不得启用 `ignoreBuildErrors`、仍是生产代码类型检查的权威，但 Next 的构建期类型检查会静默丢弃 `*.test.*`/`*.spec.*` 文件与 `__tests__`/`__mocks__` 目录里的全部诊断（`next/dist/lib/typescript/runTypeCheck.js` 的 `ignoreRegex`，Next 15.5 实测），只存在于 `frontend/tests/**` 的类型错误对 build 完全不可见；因此前端 lane 在 build **之后**补跑 `npm run lint`（`tsc --noEmit`）——排在 build 后是让它检查刚重新生成的 `.next/types` 而不是脏树上的陈旧生成物——这是唯一看得见测试文件的检查；`incremental` 使 warm 重查不到 1 秒（冷 ~5 秒），当初「同一程序重复解析两遍」要省的成本已不再成立。G1 backend 排除 `slow` 真实索引/性能用例、`graph_index_contract` 冷图/索引契约、`architecture_contract_heavy`（`_ARCHITECTURE_CONTRACT_HEAVY_TESTS` 中的八条全仓语义扫描）和 PostgreSQL 树，其余轻量 `architecture_contract` 测试随 G1 每次 PR/push 跑；G2 先执行 G1，再执行精确互补的 backend marker 集——`backend/tests/test_test_architecture_policy.py::test_verification_lane_markers_partition_every_architecture_contract_test` 用 `--collect-only` 实测验证这个划分，不只是钉两条 `-m` 字符串。每个 lane 都有独立进程组，因此中断或终止 controller 时，也会终止并回收 pytest、npm 和 Next.js 的后代进程。官方 client MCP smoke 精确锁定已公开的十七个工具：发现与概况两个、搜索与点查两个、问答两个、提交两个、来源四个、构建一个与四个 knowhow 工具。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
+G1 并行运行三个有界 lane：`check_backend.sh` 以默认 16 个 worker 执行稳定 backend pytest（CI 固定 4 个）；`check_contracts.sh` 执行语法/依赖预检、hermetic smoke、契约检查与确定性抽取评分 harness；`check_frontend.sh` 执行递归发现的全部 `*.test.mjs`、全部 `*.component.test.tsx`、production build 与包内类型检查。在不少于 8 个 CPU 的主机上，同步一次插件投影之后，node 测试、组件测试与「build 之后类型检查」三组并发运行，各自写独立日志，全部结束后按固定顺序打印并逐步给出退出码；更小的主机（CI runner）保持串行顺序、在第一个失败处停止，`FRONTEND_LANE_PARALLEL=1`/`0` 可覆盖 CPU 判断。Node 原生 test runner 和 Vitest 各限制为 4 workers，为 backend 临界路径保留 CPU；Next build 不得启用 `ignoreBuildErrors`、仍是生产代码类型检查的权威，但 Next 的构建期类型检查会静默丢弃 `*.test.*`/`*.spec.*` 文件与 `__tests__`/`__mocks__` 目录里的全部诊断（`next/dist/lib/typescript/runTypeCheck.js` 的 `ignoreRegex`，Next 15.5 实测），只存在于 `frontend/tests/**` 的类型错误对 build 完全不可见；因此前端 lane 在 build **之后**补跑 `npm run lint`（`tsc --noEmit`）——排在 build 后是让它检查刚重新生成的 `.next/types` 而不是脏树上的陈旧生成物——这是唯一看得见测试文件的检查；`incremental` 使 warm 重查不到 1 秒（冷 ~5 秒），当初「同一程序重复解析两遍」要省的成本已不再成立。G1 backend 排除 `slow` 真实索引/性能用例、`graph_index_contract` 冷图/索引契约、`architecture_contract_heavy`（`_ARCHITECTURE_CONTRACT_HEAVY_TESTS` 中的八条全仓语义扫描）和 PostgreSQL 树，其余轻量 `architecture_contract` 测试随 G1 每次 PR/push 跑；G2 先执行 G1，再执行精确互补的 backend marker 集——`backend/tests/test_test_architecture_policy.py::test_verification_lane_markers_partition_every_architecture_contract_test` 用 `--collect-only` 实测验证这个划分，不只是钉两条 `-m` 字符串。每个 lane 都有独立进程组，因此中断或终止 controller 时，也会终止并回收 pytest、npm 和 Next.js 的后代进程。官方 client MCP smoke 精确锁定已公开的十七个工具：发现与概况两个、搜索与点查两个、问答两个、提交两个、来源四个、构建一个与四个 knowhow 工具。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
 
 验收时使用项目一直采用的 Homebrew/Miniconda Python：
 
@@ -382,37 +382,51 @@ JSON 读取方可读取已打开、当前用户所有的普通文件快照，即
 
 ### GitHub Actions CI
 
-`.github/workflows/ci.yml` 把 G1 暴露为 `CI / level-1-standard`，在目标为
-`master` 的 PR、`master` push 与手动触发时运行；
-`.github/workflows/daily-extended.yml` 把 G2 暴露为
-`Daily Extended Gate / level-2-extended`，只保留每日一个 cron 和手动触发。同一 workflow 的 `level-2-frontend-parallel` job 以 `FRONTEND_LANE_PARALLEL=1` 运行 `scripts/check_frontend.sh`：CI runner 不足 8 个 CPU，这是 frontend lane 并行路径唯一的 CI 覆盖；PR CI 不变。
-两者固定使用 `ubuntu-24.04`、Python 3.13、Node.js 22，从声明的依赖文件安装，
-并把测试选择委托给对应 wrapper。G3 保持为
-`CI / level-3-postgres-integration`。
+每个 workflow 最多三个 job，因为每个 job 都会作为一个 check 出现在 PR 上。不设只做汇总的
+job：job 名本身说明它把关什么，每个 job 都必须通过，workflow 只有在全部 job 通过时才算通过。
 
-`CI / level-1-frontend-node26` 在 Node.js **当前**大版本上重跑前端泳道与生产构建，
-触发条件与 G1 相同。文档承诺的是「Node.js ≥ 20」而 G1 钉 22，没有这条泳道，承诺的
-上半段就无人验证：Node ≥ 24 自带 Web Storage 全局，不给 `--localstorage-file` 时它们
-的 getter 返回 `undefined`，而 vitest 的 jsdom 环境会让它们盖住 jsdom 自己那份——凡是
-读 `localStorage` 的组件测试都在开发者本机整片红、CI 却全绿。
-`frontend/test-support/setup.ts` 只在内建 storage 取值为 `undefined` 时补回真正的 jsdom
-storage，并连 `Storage` 类一起补（否则 `vi.spyOn(Storage.prototype, …)` 会静默打空），
-Node 22 上行为逐字不变。该泳道同时跑生产构建——那次修复的第一版误引了没有类型声明的
-`jsdom`，正是被构建的类型检查当场抓到的。
+`.github/workflows/ci.yml` 在目标为 `master` 的 PR、`master` push 与手动触发时运行。G1 是
+其中两个 job：`CI / level-1-backend` 在一台 runner 上执行 `scripts/check_backend.sh`（完整
+后端泳道，不分片，4 个 pytest worker）；`CI / level-1-contracts-frontend` 执行
+`bash scripts/check.sh --lane contracts --lane frontend`，其余两条泳道按本地 `check.sh`
+的方式并行运行。第三个 job 是 G3 `CI / level-3-postgres-integration`。不带参数的
+`check.sh` 仍是完整的本地 G1；`--lane <name>`（可重复）只跑指定泳道，存在的目的就是让
+CI 把后端泳道放到单独一台 runner 上。
 
-PR/push G1 在独立 runner 上运行 backend、contracts 和 Node 22 frontend 三条泳道。
-后端把同一个 G1 收集集合分成两片，每片四个 pytest worker；显式执行
-`check_backend.sh --shard-index 0 --shard-count 2`（或 index 1）才启用分片，
-分片环境不会泄漏给嵌套 pytest。插件在正常 marker 筛选后分配，保持每个
-`xdist_group` 完整，普通模块也不拆散；使用
-`backend/tests/fixtures/g1_module_timings.json` 的耗时提示、未知模块回退到收集条数，
-确定性地平衡负载。提示只影响放在哪片，新增模块自动纳入，不影响覆盖集合。
-`check.sh` 仍是本地完整门禁，G2 选择不变。原 `level-1-standard` 汇总三条泳道，
-只有全部成功（含后端矩阵的两片）才成功；失败、取消、跳过或缺失都不能放行。
-G1 墙钟时间从首条泳道开始计到汇总完成，包含安装与 runner 调度，不能只报汇总
-job 自己的几秒钟。这种隔离与分片用更多 runner 分钟换取更短的等待时间。
-backend 与 contracts wrapper 单独执行时仍隔离部署环境，打印慢 pytest 时长，
-并将 JUnit 写入 `backend/.local`；CI 包括失败时也上传，保留七天。
+`.github/workflows/daily-extended.yml`（`Daily Extended Gate`，每日一个 cron 加手动触发）
+用三个 job 跑 G2。`level-2-backend` 与 `level-2-contracts-frontend` 逐条命令对齐
+`ci.yml` 跑 G1，唯一差别是依赖安装仍按下文关闭 pip wheel cache。
+`level-2-contracts-frontend` 随后再以 `FRONTEND_LANE_PARALLEL=1` 运行
+`scripts/check_frontend.sh`，G1 那一步失败也照跑：CI runner 不足 8 个 CPU，这是 frontend
+lane 并行路径唯一的 CI 覆盖，PR CI 从不强制走它。`level-2-complement` 执行
+`check_extended.sh --complement-only`：扩展后端 marker 集合、样板插件 UI lane 与 facade
+退役棘轮，不重跑 G1。`--complement-only` 只供这个 workflow 使用；本地带这个参数跑不算
+G2，不带参数的 `check_extended.sh` 仍是完整的本地 G2（先 G1，再按顺序跑补集）。
+2026-10-07 之前每日 workflow 是单个 job，在一台 4 vCPU runner 上 25 分钟内跑完
+`check_extended.sh`；最后几次绿跑已用 23–25 分钟，其中 G1 后端单独就涨过 20 分钟，
+2026-10-07 起每一次都在超时处被取消，没有产出任何 G2 结果。
+
+两个 workflow 都固定使用 `ubuntu-24.04`、Python 3.13 和唯一的 Node.js 大版本，从声明的
+依赖文件安装，并把测试选择委托给 wrapper 脚本。`test_ci_workflow_contract.py` 钉住
+job 集合与名字、最多三个 job 的规则、G1 的 job 合起来恰好把 `check.sh` 的 `LANES` 每条
+跑一次、每日 G1 半边与 `ci.yml` 对齐，并带与不带参数实际执行 `check.sh` 与
+`check_extended.sh`。
+
+仓库只支持一个 Node.js 大版本 26，钉在 `.nvmrc`。每个 `actions/setup-node` 都读
+`node-version-file: .nvmrc`；`frontend/package.json` 声明
+`"engines": {"node": ">=26 <27"}`，`frontend/.npmrc` 设 `engine-strict=true`，于是
+`npm ci`/`npm install` 拒绝其他大版本；`scripts/check_frontend.sh`、
+`scripts/check_sample_plugin.sh` 与 `scripts/pack.sh` 发现要用的 Node 不是这个大版本时，
+在做任何事之前就退出（`scripts/node_version.sh`）。Node 26 自带 Web Storage 全局，不给
+`--localstorage-file` 时它们的 getter 返回 `undefined`，而 vitest 的 jsdom 环境会让它们
+盖住 jsdom 自己那份；`frontend/test-support/setup.ts` 在内建 storage 取值为 `undefined`
+时补回真正的 jsdom storage，并连 `Storage` 类一起补（否则 `vi.spyOn(Storage.prototype, …)`
+会静默打空）。
+
+backend 与 contracts wrapper 单独执行时仍隔离部署环境，打印慢 pytest 时长，并将 JUnit
+写入 `backend/.local`；CI 包括失败时也上传这些报告以及扩展后端泳道的
+`backend/.local/backend-extended-junit.xml`，保留七天。扩展后端泳道与其他泳道使用同样的
+离线隔离与字节码前缀。
 
 六条生产源码扫描共用一个 worker 和按文件内容校验的 AST 缓存；每次仍重读文件，
 修改不会复用旧树。Agent Profile job base/overlay 测试使用当前 schema 的独立副本，
@@ -430,10 +444,13 @@ OS/架构/Python/requirements/策略 key，不回退到其他缓存；G2 继续�
 `hnswlib` 默认会用
 `-march=native` 编译，把这种本机 wheel 缓存后恢复到 CPU 特性不同的托管
 runner，可能以 `SIGILL` 崩溃。CI 使用可移植构建，以少量 ANN 性能换取确定性；
-生产 wheelhouse 仍可按已声明的部署 CPU 定向构建。每条 G1 执行泳道的 20 分钟 timeout 包含依赖安装，
-与 Apple Silicon 本地 warm gate 的 60 秒内目标刻意分开。初次接入时
-`CI / level-1-standard` 仅用于观察；只有在 PR 与合并后的 `master` 都稳定绿跑后，
-并由用户明确批准分支保护变更，才把它设为 `master` 的 required check。
+生产 wheelhouse 仍可按已声明的部署 CPU 定向构建。job 的 timeout 都包含依赖安装，
+与 Apple Silicon 本地 warm gate 的 60 秒内目标刻意分开。两个后端 job（`level-1-backend`、
+`level-2-backend`）给 30 分钟：2026-10-14 实测不分片的后端泳道在 PR CI 用 8:05、每日
+run 用 11:59（4 个 worker；job 总时长 8:41 与 13:03），单个 job 没有别的 runner 可以分摊，
+这个上限为增长和慢 runner 留出两倍以上余量。其余离线 job 保持 20 分钟（实测 contracts
+与前端在 PR CI 5:00、每日含并行路径 7:30；补集 3:50）；G3 保持 35 分钟。这些 check 都不是
+`master` 的 required status check；要设为 required，须由用户明确批准分支保护变更。
 
 PostgreSQL 覆盖与离线门禁明确分离。`level-3-postgres-integration` job 启动 PostgreSQL 16，
 通过 `bash scripts/check_postgres.sh` 选择 `postgres_integration or postgres_lane_contract`；

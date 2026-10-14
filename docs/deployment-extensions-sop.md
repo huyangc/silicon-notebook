@@ -34,7 +34,7 @@ Trust means "we accept the code" — it does not mean "the code decides who may 
 | --- | --- |
 | Public checkout | The exact commit the deployment will run. Read its `EXTENSION_API_VERSION` from `backend/app/extension_sdk/contracts.py` — currently `"1"`. |
 | Python | ≥ 3.13, and the plugin installs into **the same `PYTHON_BIN` environment as the backend**, not a separate interpreter or venv. |
-| Node.js | ≥ 20 with npm, same version the deployment builds the frontend with. |
+| Node.js | 26 with npm (the one supported major, pinned in `.nvmrc`), the same version the deployment builds the frontend with. |
 | Frontend manifest API version | `ui-plugin.json`'s `api_version` must equal `"1"` as well (`CONTRACT_API_VERSION` in `frontend/scripts/sync-ui-plugins.mjs`). |
 
 A workable plugin repository layout:

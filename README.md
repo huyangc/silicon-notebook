@@ -27,7 +27,7 @@ The interface starts in auto mode for upload-and-ask use. Advanced mode exposes 
 ### Requirements
 
 - Python 3.13+
-- Node.js 20+ and npm
+- Node.js 26 (exactly this major; pinned in `.nvmrc`, npm refuses others) and npm
 - git
 - An accessible PostgreSQL 16 database for the default deployment
 
