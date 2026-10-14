@@ -548,9 +548,13 @@ def _split_app_module_namespace() -> list[tuple[ModuleType, str, ModuleType, obj
     NOT the one ``sys.modules`` holds under that name (or holds nothing)."""
     split = []
     for package_name, package in list(sys.modules.items()):
-        if package is None or not hasattr(package, "__path__"):
-            continue
+        # Name first: it is a string test, while ``hasattr`` on each of the
+        # ~2500 registered modules (some with a lazy module ``__getattr__``)
+        # is what made this per-test check cost milliseconds. Only ``app``
+        # packages can ever be reported, so the order changes nothing else.
         if package_name != "app" and not package_name.startswith("app."):
+            continue
+        if package is None or not hasattr(package, "__path__"):
             continue
         prefix = package_name + "."
         for attribute, value in list(vars(package).items()):

@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -424,6 +425,36 @@ def test_the_collected_heap_is_frozen_out_of_the_cyclic_collector():
 
     assert gc.get_freeze_count() > 0
     assert conftest.pytest_collection_finish.__module__ == conftest.__name__
+
+
+def test_the_module_namespace_check_reports_app_splits_and_never_probes_other_modules(
+    monkeypatch,
+):
+    """conftest's per-test ``sys.modules`` / package-attribute check.
+
+    It must still report an ``app`` submodule whose ``sys.modules`` entry is
+    gone while the parent package keeps the attribute (a bare
+    ``sys.modules.pop``), and it must decide by name before touching a non-app
+    module at all: probing every registered module was its per-test cost.
+    """
+    import types
+
+    import app.services.scale_index_builder as module
+
+    from tests import conftest
+
+    class _Untouchable(types.ModuleType):
+        def __getattribute__(self, name):
+            raise AssertionError(f"probed a non-app module for {name!r}")
+
+    monkeypatch.setitem(sys.modules, "not_app_probe", _Untouchable("not_app_probe"))
+    assert conftest._split_app_module_namespace() == []
+
+    monkeypatch.delitem(sys.modules, module.__name__)
+    package = sys.modules["app.services"]
+    assert conftest._split_app_module_namespace() == [
+        (package, "scale_index_builder", module, None)
+    ]
 
 
 def test_parallel_graph_tests_share_repo_local_matplotlib_cache():
