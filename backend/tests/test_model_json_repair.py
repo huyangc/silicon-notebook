@@ -883,6 +883,8 @@ REPEATED_OBJECT = '{"answer": "完整答案 [k1]", "grounded": true}'
         '{"answer": "完整',  # the repeat cut short by the token budget
         REPEATED_OBJECT + '\n{"answer"',
         '{\n  "answer": "完整答案',  # re-indented while repeating
+        # A re-indented whole copy, then a cut one (codex #875 R2).
+        '{\n  "answer": "完整答案 [k1]",\n  "grounded": true\n}{"answer": "完',
     ],
 )
 def test_a_reply_written_again_after_itself_is_delivered_once(
@@ -1003,6 +1005,11 @@ def test_an_unescaped_quote_inside_a_value_is_read_as_text(
         '{"answer":"列出 "a", "b": "c"}',
         '{"answer":"x","grounded":true,"queries":["a, "b"]}',
         '{"answer":"x","grounded":true,"queries":["电源 "恒流", "恒压"]}',
+        # Lost commas around a JSON literal or number: read as text, three
+        # values would become one string (codex #875 R2).
+        '{"answer":"x","grounded":true,"queries":["first" null "second"]}',
+        '{"answer":"x","grounded":true,"queries":["first" 2 "second"]}',
+        '{"answer":"x","grounded":true,"queries":["a" true "b"]}',
     ],
 )
 def test_an_inner_quote_without_one_reading_stays_malformed(raw, allow_repair):

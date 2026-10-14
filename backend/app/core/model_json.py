@@ -813,7 +813,9 @@ def _closes_value_string(text: str, index: int) -> bool | None:
     ``False`` when text follows (``所谓"恒流"模式``: the quote is a character
     of the answer), ``None`` when what follows is itself ambiguous -- a
     ``:`` or another quote means a key or a missing comma may be starting,
-    and reading the quote either way could swallow or invent a field.
+    and so does a whole JSON literal or number (``["first" null "second"]``
+    lost its commas; read as text, three values become one string). Either
+    reading of such a quote could swallow or invent a value.
     """
     index += 1
     while index < len(text) and text[index] in " \t\r\n":
@@ -822,6 +824,12 @@ def _closes_value_string(text: str, index: int) -> bool | None:
     if not following or following in ",}]":
         return True
     if following in ':"':
+        return None
+    token = _RAW_BARE_TOKEN_RE.match(text, index)
+    if token is not None and (
+        token.group() in {"true", "false", "null"}
+        or _JSON_NUMBER_RE.fullmatch(token.group())
+    ):
         return None
     return False
 
@@ -990,13 +998,43 @@ def _is_repeat_tail(tail: str, obj: str) -> bool:
     if not rest.startswith("{"):
         return False
     index = 0
-    while rest.startswith(obj, index):
-        index += len(obj)
+    while (end := _copy_end(rest, index, obj)) is not None:
+        index = end
         while index < len(rest) and rest[index].isspace():
             index += 1
     if index == len(rest) or _TRAILING_NOISE_RE.fullmatch(rest, index):
         return True
     return _repeats_prefix(rest, index, len(rest), obj, 0)
+
+
+def _copy_end(text: str, index: int, obj: str) -> int | None:
+    """End offset of a whole copy of ``obj`` written at ``text[index:]``.
+
+    Whitespace between tokens may differ (a repeat re-indented), as in
+    ``_repeats_prefix``; inside strings every character must match.
+    Returns ``None`` when ``text`` does not repeat all of ``obj`` there.
+    """
+    other = 0
+    in_string = escaped = False
+    while other < len(obj):
+        char = obj[other]
+        if not in_string and char.isspace():
+            other += 1
+            continue
+        if not in_string:
+            while index < len(text) and text[index].isspace():
+                index += 1
+        if index >= len(text) or text[index] != char:
+            return None
+        if escaped:
+            escaped = False
+        elif char == "\\" and in_string:
+            escaped = True
+        elif char == '"':
+            in_string = not in_string
+        index += 1
+        other += 1
+    return index
 
 
 def _leading_object(
