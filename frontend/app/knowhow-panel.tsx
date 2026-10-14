@@ -112,6 +112,7 @@ import { KnowhowTableGrid } from "./knowhow-table-grid.tsx";
 import { KnowhowRowDrawer } from "./knowhow-row-drawer.tsx";
 import { useKnowhowRowCode } from "./use-knowhow-row-code.ts";
 import { useKnowhowConceptMatrix } from "./use-knowhow-concept-matrix.ts";
+import { useDialogFocus } from "./use-dialog-focus.ts";
 import { transferKnowhowTable, KnowhowSourceCleanupError } from "./knowhow-transfer.ts";
 import { resolveCellCodeView } from "./knowhow-code-logic.ts";
 import {
@@ -153,6 +154,13 @@ export function KnowhowPanel({
   // 概念矩阵在 return 之前最后。owner-view-no-reflatten 与 knowhow-panel-boundary
   // 两个守卫钉住这些约定。
   const knowhowTableList = useKnowhowTableList({ notebookId, initialHealthFilter });
+
+  // 全屏面板的键盘与焦点约定（S7，沿用 use-dialog-focus.ts 那套非根浮层约定）：打开时
+  // 焦点进面板本身，Tab / Shift+Tab 只在面板内循环，关闭（含随笔记本切换卸载）时焦点
+  // 还给打开它的元素。背后的页面由 page.tsx 在面板开着时置 inert。不接 Escape：面板
+  // 本身一直没有 Esc 关闭，Esc 仍只关最上面那一层浮层（各浮层自带监听）。
+  const panelRef = useRef<HTMLElement | null>(null);
+  useDialogFocus({ containerRef: panelRef, active: true, initialFocusRef: panelRef, restoreFocus: true });
 
   // modal 的显隐：面板自持状态，不经 page.tsx 转发——page.tsx 挂载
   // <KnowhowPanel> 时只传 notebookId/apiBase/canEdit/onClose 四个 prop，
@@ -1044,10 +1052,10 @@ export function KnowhowPanel({
   });
 
   return (
-    <section className="knowhow-view" role="dialog" aria-modal="true">
+    <section ref={panelRef} className="knowhow-view" role="dialog" aria-modal="true" aria-labelledby="knowhow-view-title" tabIndex={-1}>
       <div className="knowhow-view-header">
         <div>
-          <h2>Knowhow 表</h2>
+          <h2 id="knowhow-view-title">Knowhow 表</h2>
           <p>
             {canEdit
               ? "结构化经验表：可导入、新建与在线维护，逐行沉淀问题排查知识。"
