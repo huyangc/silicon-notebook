@@ -8,6 +8,16 @@ class AuthStoreError(ValueError):
     the code; routes map it to user-facing Chinese copy)."""
 
 
+class AccountMergeBlocked(AuthStoreError):
+    """``merge_source_has_data``: the account to delete still owns data.
+    ``items`` lists each category with its row count, in display order:
+    ``[{"label", "unit", "count"}]``."""
+
+    def __init__(self, items: list[dict]) -> None:
+        super().__init__("merge_source_has_data")
+        self.items = items
+
+
 class BuiltinAdminDemotionError(ValueError):
     """The seeded recovery administrator must always retain admin access."""
 

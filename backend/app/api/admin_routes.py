@@ -40,6 +40,8 @@ from app.models.admin import (
     AdminPasswordResetResult,
     AdminUserNotebook,
     AdminUserAccountResult,
+    AdminUserMergeRequest,
+    AdminUserMergeResult,
     AdminUserRoleResult,
     AdminUserRoleUpdate,
     AdminUserStatusUpdate,
@@ -81,6 +83,7 @@ from app.services.auth_flow import check_unified_auth_settings
 from app.services.reports.section_failure import failed_section_errors
 from app.services.source_display import source_display_title
 from app.repositories.identity_errors import (
+    AccountMergeBlocked,
     AuthStoreError,
     BuiltinAdminDemotionError,
     BuiltinAdminPasswordError,
@@ -249,6 +252,10 @@ _ACCOUNT_ERRORS = {
     "builtin_account": (409, "内置管理员账号不可修改"),
     "username_conflict": (409, "用户名已被占用"),
     "invalid_username": (400, "用户名不能为空，且不能含首尾空白或控制字符"),
+    "merge_source_not_found": (409, "找不到用户名为该值的账号"),
+    "merge_same_account": (409, "不能把账号合并到它自己"),
+    "merge_source_not_sso": (409, "只能合并已经用统一认证登录过的账号"),
+    "merge_target_inactive": (409, "保留的账号已停用，请先启用"),
 }
 
 
@@ -293,6 +300,39 @@ def update_admin_username(
     except AuthStoreError as exc:
         raise _account_error(exc) from None
     return AdminUserAccountResult(**result)
+
+
+def _merge_blocked(exc: AccountMergeBlocked) -> HTTPException:
+    """Structured 409: the page lists each category beside the merge button."""
+    listed = "、".join(f"{item['label']} {item['count']} {item['unit']}" for item in exc.items)
+    return HTTPException(status_code=409, detail={
+        "code": "merge_source_has_data",
+        "message": f"该账号名下已有数据，不能合并删除：{listed}",
+        "items": exc.items,
+    })
+
+
+@router.post(
+    "/admin/users/{user_id}/merge-sso-account", response_model=AdminUserMergeResult
+)
+def merge_admin_sso_account(
+    user_id: str,
+    payload: AdminUserMergeRequest,
+    user: UserProfile = Depends(get_current_user),
+) -> AdminUserMergeResult:
+    """把以工号命名的统一认证账号并入老账号 user_id：删除前者，老账号改用其用户名。
+    被删账号名下有任何数据即拒绝（结构化 409 列出类别与条数）。吊销老账号全部会话。"""
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可管理用户账号")
+    try:
+        result = identity_repository().auth.merge_sso_account(
+            user_id, payload.username, actor_id=user.id
+        )
+    except AccountMergeBlocked as exc:
+        raise _merge_blocked(exc) from None
+    except AuthStoreError as exc:
+        raise _account_error(exc) from None
+    return AdminUserMergeResult(**result)
 
 
 @router.post(

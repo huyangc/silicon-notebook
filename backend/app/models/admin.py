@@ -136,6 +136,17 @@ class AdminUserAccountResult(BaseModel):
     status: str
 
 
+class AdminUserMergeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # The unified-login account (named after the employee number) to delete.
+    username: str
+
+
+class AdminUserMergeResult(AdminUserAccountResult):
+    removed_user_id: str
+
+
 class AdminPasswordResetRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
