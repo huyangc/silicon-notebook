@@ -324,6 +324,7 @@ export function KnowhowPanel({
     setConfirmDelete(false);
     setManageOpen(false);
     setTransferOpen(false); // C3：与 manageOpen 同级的顶层 modal 状态，一并清空
+    setImportOpen(false); // 导入向导按 notebookId 上传：留着会把上一个笔记本里开始的导入交给新笔记本（S6）
     setCreateOpen(false);
     setAppendOpen(false);
     setOptimizeRowId(null);

@@ -12,7 +12,7 @@
 //  * Asymmetric reset sets. backToList() does not clear completeRowId,
 //    reformatRowId or reformatTableOpen (nor importOpen/createOpen); openTable()
 //    does not clear reformatRowId/reformatTableOpen; the notebook-reset effect
-//    (E6) does not clear deleting, importOpen, transferNotice or jumpNotice. The
+//    (E6) does not clear deleting, transferNotice or jumpNotice (importOpen: S6). The
 //    tests named "quirk:" below observe the visible consequences with their full
 //    request sequences: reformatTableOpen survives back-and-reopen and a
 //    re-targeted jump, reformatRowId survives back-and-reopen, and the jump
@@ -197,6 +197,28 @@ test("switching notebookId resets the open table and reloads the new notebook's 
   expect(server.log).toEqual([
     { method: "GET", path: "/notebooks/nb-1/knowhow" },
     { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
+    { method: "GET", path: "/notebooks/nb-2/knowhow" },
+  ]);
+});
+
+test("switching notebookId closes an open import wizard", async () => {
+  // The wizard uploads into the panel's current notebookId. Until S6 the reset
+  // effect (E6) left importOpen alone, so an import started in nb-1 stayed open
+  // over nb-2's list and would have been submitted to nb-2.
+  const server = suite.server();
+  routeTable(server, "nb-1", recordDetail());
+  server.on("GET", "/notebooks/nb-2/knowhow", { json: [wireSummary({ id: "t-other", title: "别的表" })] });
+  const user = userEvent.setup();
+  const panel = renderPanel();
+  await user.click(await screen.findByRole("button", { name: /导入表格/ }));
+  expect(await screen.findByRole("dialog", { name: "导入 Knowhow 表" })).toBeInTheDocument();
+
+  panel.update({ ...BASE_PROPS, notebookId: "nb-2" });
+  expect(await screen.findByRole("button", { name: "打开表格：别的表" })).toBeInTheDocument();
+  await settle();
+  expect(screen.queryByRole("dialog", { name: "导入 Knowhow 表" })).not.toBeInTheDocument();
+  expect(server.log).toEqual([
+    { method: "GET", path: "/notebooks/nb-1/knowhow" },
     { method: "GET", path: "/notebooks/nb-2/knowhow" },
   ]);
 });
