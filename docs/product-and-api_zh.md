@@ -1338,7 +1338,10 @@ client_request_id?)` 取代原先的单库与全局问答工具，只需要 `ask
 笔记本会话，笔记本取自会话本身；会话不属于 token 主人、不在白名单内，或与显式 `notebooks` 冲突，
 一律 `not_found`（不再静默新开会话）。其余情况 `notebooks` 省略即 `[默认笔记本]`；1 个 id 走单库引擎
 （`askjob-` 任务），2–8 个 id 走全局问答（`gask-` 任务，见[全局问答](#全局问答)），超过 8 个报
-`invalid_argument`。`conversation_id` 至多 200 字符，`client_request_id` 至多 128 字符。
+`invalid_argument`。`notebooks=["*"]` 是显式的「全部授权笔记本」：范围为白名单内、token 主人当前仍可读的
+全部笔记本，一律走全局问答（即使只解析出 1 个），搭配 `gconv-` 时显式覆盖会话原有范围；解析出超过 8 个报
+`invalid_argument`（提示先用 `list_notebooks` 选出不超过 8 个再传 id），`*` 不能与其他 id 混用，也不支持
+`output="evidence"` 与扩展引擎。省略 `notebooks` 的语义不变。`conversation_id` 至多 200 字符，`client_request_id` 至多 128 字符。
 
 `mode` 接受 `"reasoning"`（**默认**；与网页端两种界面同一引擎，先理解问题再检索，见下）、`"chunk"`，或任何已注册且实时可用的部署
 `ask.engine` mode id（详见[部署问答引擎](#部署问答引擎askengine)一节，仅限单库）。传一个未注册的 mode

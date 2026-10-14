@@ -108,11 +108,15 @@ _REPLACE_UNAVAILABLE = "上一条问题已无法替换，请刷新对话后重�
 # ``GlobalAskError.reason`` of a ``client_request_id`` already spent on a
 # different question (409 on HTTP). Callers map by this code, never by copy.
 REQUEST_KEY_REUSED = "request_key_reused"
+# ``GlobalAskError.reason`` of an ``all`` scope that resolved past the
+# participant ceiling; the error then carries that ceiling as ``limit``.
+SCOPE_ALL_TOO_WIDE = "scope_all_too_wide"
 
 
 class GlobalAskError(Exception):
-    def __init__(self, status_code, message, reason=""):
+    def __init__(self, status_code, message, reason="", limit=None):
         super().__init__(message)
+        self.limit = limit
         self.status_code = status_code
         self.message = message
         # Optional machine-readable cause for callers that must tell 409s
@@ -806,7 +810,7 @@ class GlobalAskService:
                 f"可访问的笔记本超过 {ceiling} 个，请选择不超过 {ceiling} 个笔记本后重试。"
                 if scope.mode != "include" else
                 f"本次范围超过 {ceiling} 个笔记本，请选择不超过 {ceiling} 个笔记本后重试。"
-            ))
+            ), SCOPE_ALL_TOO_WIDE if scope.mode != "include" else "", ceiling)
         self._check(ids, user_id, allowed, authority_check)
         # Freeze every source ceiling before starting any retrieval or detached work.
         source_rows = self.sources.visible_source_ids_by_notebook(ids)

@@ -78,6 +78,8 @@ logger = logging.getLogger(__name__)
 # Mirrors AskIntentPreviewRequest.conversation_id.
 CONVERSATION_ID_MAX_LENGTH = 200
 GLOBAL_NOTEBOOKS_MAX = 8
+# ``notebooks=["*"]``: every authorized notebook the owner can still read.
+ALL_NOTEBOOKS = "*"
 INTENT_HANDLE_TTL_SECONDS = 3_600
 
 # The gate and the advertised legal-mode list must never drift apart, so both
@@ -184,6 +186,10 @@ def _validate_inputs(
         clean = list(dict.fromkeys(str(item).strip() for item in notebooks))
         if any(not item for item in clean):
             raise AgentToolError("invalid_argument", "notebooks 里不能有空的笔记本 id")
+        if ALL_NOTEBOOKS in clean and len(clean) > 1:
+            raise AgentToolError(
+                "invalid_argument", 'notebooks 里的 "*" 只能单独使用，不能与其他笔记本 id 混用'
+            )
         if len(clean) > GLOBAL_NOTEBOOKS_MAX:
             raise AgentToolError(
                 "invalid_argument",
@@ -248,7 +254,9 @@ def _validate_output(
         return
     if plugin:
         raise AgentToolError("invalid_argument", EVIDENCE_OUTPUT_MODE_REFUSAL)
-    if (notebooks and len(notebooks) > 1) or conversation_id.startswith("gconv-"):
+    if (notebooks and len(notebooks) > 1) or notebooks == [ALL_NOTEBOOKS] or (
+        conversation_id.startswith("gconv-")
+    ):
         raise AgentToolError("invalid_argument", _EVIDENCE_SINGLE_NOTEBOOK)
     if client_request_id:
         raise AgentToolError("invalid_argument", _EVIDENCE_NO_KEY)
@@ -283,8 +291,13 @@ def _route(
     if conversation_id:
         raise _conversation_not_found()
     if notebooks is None:
+        if not principal.default_notebook_id:
+            raise AgentToolError(
+                "invalid_argument",
+                '此凭证没有默认笔记本，请在 notebooks 里传笔记本 id，或传 ["*"] 询问全部授权笔记本',
+            )
         return "notebook", _resolve_notebook_id(principal, ""), None
-    if len(notebooks) == 1:
+    if len(notebooks) == 1 and notebooks != [ALL_NOTEBOOKS]:
         return "notebook", notebooks[0], None
     return "global", notebooks, None
 
@@ -322,6 +335,14 @@ def _question_sha(question: str) -> str:
 def _global_scope_key(notebooks: list[str] | None, conversation_id: str) -> str:
     ids = ",".join(sorted(notebooks)) if notebooks else "inherit"
     return f"global:{ids}|{conversation_id}"
+
+
+def _global_scope(notebooks: list[str] | None) -> dict[str, Any] | None:
+    """The request's ``notebook_scope``: ``None`` inherits the conversation's,
+    ``["*"]`` is an explicit ``all`` that overrides it."""
+    if notebooks == [ALL_NOTEBOOKS]:
+        return {"mode": "all", "notebook_ids": []}
+    return {"mode": "include", "notebook_ids": notebooks} if notebooks else None
 
 
 def _notebook_scope_key(notebook_id: str, conversation_id: str) -> str:
@@ -940,7 +961,7 @@ def _run_global(
             raise AgentToolError("token_inactive", "Agent 凭证已失效，请重新连接")
         return list(current.notebook_ids)
 
-    scope = {"mode": "include", "notebook_ids": notebooks} if notebooks else None
+    scope = _global_scope(notebooks)
     try:
         payload = GlobalAskRequest(
             question=question, notebook_scope=scope,
@@ -986,7 +1007,10 @@ def _run_global(
                         )
                         return _clarification_payload(
                             token, contract, understanding_ms,
-                            {"kind": "global", "notebook_ids": notebooks or []},
+                            {"kind": "global", **(
+                                scope if notebooks == [ALL_NOTEBOOKS]
+                                else {"notebook_ids": notebooks or []}
+                            )},
                         )
                     payload.intent = _auto_confirm(contract, understanding_ms)
             job = replayed if replayed is not None else global_ask_service().start(
@@ -1091,7 +1115,10 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
             "generous client read timeout -- reasoning and plugin engines can run "
             "for minutes). Routing: notebooks omitted = the token's default "
             "notebook; one id = that notebook; 2-8 ids = a cross-notebook "
-            "(global) answer; more than 8 is refused. conversation_id continues a "
+            "(global) answer; more than 8 is refused; notebooks=[\"*\"] = every "
+            "authorized notebook the owner can still read, always as a global "
+            "answer (more than 8 of them is refused: narrow with list_notebooks "
+            "and pass the ids; \"*\" cannot be mixed with other ids). conversation_id continues a "
             "conversation: a conv- id continues that notebook conversation (it must "
             "be yours and in the allowlist, else not_found), a gconv- id a global "
             "one (its notebook scope is inherited when notebooks is omitted). mode: "

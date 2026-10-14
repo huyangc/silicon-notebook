@@ -1776,7 +1776,13 @@ taken from the conversation itself; a conversation that is not the token owner's
 allowlist, or contradicts an explicit `notebooks` answers `not_found` (it never silently starts a
 new conversation). Otherwise `notebooks` omitted means `[default notebook]`; one id is the
 single-notebook engine (`askjob-` jobs), 2-8 ids are global Ask (`gask-` jobs, see
-[Global Ask](#global-ask)), and more than 8 is `invalid_argument`. `conversation_id` is at most
+[Global Ask](#global-ask)), and more than 8 is `invalid_argument`. `notebooks=["*"]` is the explicit
+"every authorized notebook" form: the allowlisted notebooks the token's owner can still read right
+now, always run as global Ask (even if only one resolves), and with a `gconv-` conversation it
+explicitly overrides the conversation's earlier scope; if more than 8 resolve it is
+`invalid_argument` (narrow with `list_notebooks` and pass the ids), `*` cannot be mixed with other
+ids, and `output="evidence"` and extension engines are refused. Omitting `notebooks` keeps its
+meaning. `conversation_id` is at most
 200 characters, `client_request_id` at most 128.
 
 `mode` admits `"reasoning"` (the **default**; the same engine both web UI modes submit, which
