@@ -46,7 +46,12 @@ from app.migration.sync.package import (
 from app.models.schemas import NotebookCreate
 from app.repositories.ports import UploadedSourceFile
 from app.services.sqlite_repository import SQLiteRepository
+from tests.world_templates import PINNED, world_template
 
+
+#: One worker builds the seeded world once and runs the whole file on its
+#: copies; ungrouped, every worker that drew a test would rebuild it.
+pytestmark = pytest.mark.xdist_group("sync_export_world")
 
 SOURCE_ENV = "dev"
 TARGET_ENV = "prod"
@@ -206,17 +211,46 @@ def repo(settings):
         repository.close()
 
 
+def _build_seeded(root: Path) -> dict:
+    """The seeded world, built once per process (``tests/world_templates.py``,
+    ``pinned``: uploaded sources record absolute ``file_path``s)."""
+    with pytest.MonkeyPatch.context() as patch:
+        repository = SQLiteRepository(_settings(root, patch))
+        try:
+            exported = _seed_notebook(repository, "exported", member="alice")
+            other = _seed_notebook(repository, "other", member="bob")
+        finally:
+            repository.close()
+    return {"exported": exported, "other": other}
+
+
+def _reopen_seeded(root: Path) -> None:
+    with pytest.MonkeyPatch.context() as patch:
+        SQLiteRepository(_settings(root, patch)).close()
+
+
 @pytest.fixture
-def seeded(repo, settings):
-    """Exported notebook + a second one that must not leak into the package."""
-    exported = _seed_notebook(repo, "exported", member="alice")
-    other = _seed_notebook(repo, "other", member="bob")
-    return {
-        "repo": repo,
-        "settings": settings,
-        "exported": exported,
-        "other": other,
-    }
+def seeded(tmp_path_factory, tmp_path, monkeypatch):
+    """Exported notebook + a second one that must not leak into the package.
+
+    The world is built once per process and every test gets its own copy of
+    it (``tests/world_templates.py``)."""
+    template = world_template(
+        tmp_path_factory, "sync-export-seeded", _build_seeded, _reopen_seeded,
+        layout=PINNED,
+    )
+    root, payload = template.materialize(tmp_path)
+    settings = _settings(root, monkeypatch)
+    repository = SQLiteRepository(settings)
+    try:
+        yield {
+            "repo": repository,
+            "settings": settings,
+            "exported": payload["exported"],
+            "other": payload["other"],
+        }
+    finally:
+        repository.close()
 
 
 def _export(settings, out_dir: Path, notebook_ids) -> ExportReport:

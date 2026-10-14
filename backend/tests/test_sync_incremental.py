@@ -34,7 +34,13 @@ from app.migration.sync.package import (
 from app.models.schemas import NotebookCreate
 from app.repositories.ports import UploadedSourceFile
 from app.services.sqlite_repository import SQLiteRepository
+from tests.sync_world_cases import report_data, report_from_data
+from tests.world_templates import PINNED, world_template
 
+
+#: One worker builds the baseline world once and runs the whole file on its
+#: copies; ungrouped, every worker that drew a test would rebuild it.
+pytestmark = pytest.mark.xdist_group("sync_incremental_world")
 
 SOURCE_ENV = "dev"
 TARGET_ENV = "prod"
@@ -44,13 +50,17 @@ MOMENT = "2026-01-01T00:00:00+00:00"
 # ------------------------------------------------------------------- seeds
 
 
-@pytest.fixture
-def settings(tmp_path, monkeypatch) -> Settings:
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'sync.db'}")
-    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+def _settings_at(root: Path, monkeypatch) -> Settings:
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{root / 'sync.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(root / "storage"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     return Settings()
+
+
+@pytest.fixture
+def settings(tmp_path, monkeypatch) -> Settings:
+    return _settings_at(tmp_path, monkeypatch)
 
 
 @pytest.fixture
@@ -185,24 +195,58 @@ def _watermark(repo) -> dict:
     return dict(row) if row is not None else {}
 
 
+def _build_baseline(root: Path) -> dict:
+    """The baseline world, built once per process (``tests/world_templates.py``,
+    ``pinned``: uploaded sources record absolute ``file_path``s)."""
+    with pytest.MonkeyPatch.context() as patch:
+        settings = _settings_at(root, patch)
+        repository = SQLiteRepository(settings)
+        try:
+            first = _seed_notebook(repository, "alpha")
+            second = _seed_notebook(repository, "beta")
+            _enable_capture(repository)
+            report = _export(settings, root / "out")
+            assert report.mode == MODE_FULL
+        finally:
+            repository.close()
+    return {"alpha": first, "beta": second, "baseline": report_data(report)}
+
+
+def _reopen_baseline(root: Path) -> None:
+    with pytest.MonkeyPatch.context() as patch:
+        SQLiteRepository(_settings_at(root, patch)).close()
+
+
 @pytest.fixture
-def baseline(repo, settings, tmp_path):
+def baseline(tmp_path_factory, tmp_path, monkeypatch):
     """Capture on, one full baseline export taken, two notebooks seeded. Every
     incremental test starts here: the watermark this leaves behind is what the
-    next export resumes from."""
-    first = _seed_notebook(repo, "alpha")
-    second = _seed_notebook(repo, "beta")
-    _enable_capture(repo)
-    report = _export(settings, tmp_path / "out")
-    assert report.mode == MODE_FULL
-    return {
-        "repo": repo,
-        "settings": settings,
-        "out": tmp_path / "out",
-        "alpha": first,
-        "beta": second,
-        "baseline": report,
-    }
+    next export resumes from.
+
+    The world is built once per process and every test gets its own copy of
+    it (``tests/world_templates.py``); the export report is rebuilt per test
+    from pure data."""
+    template = world_template(
+        tmp_path_factory,
+        "sync-incremental-baseline",
+        _build_baseline,
+        _reopen_baseline,
+        layout=PINNED,
+    )
+    root, payload = template.materialize(tmp_path)
+    settings = _settings_at(root, monkeypatch)
+    repository = SQLiteRepository(settings)
+    try:
+        yield {
+            "repo": repository,
+            "settings": settings,
+            "out": root / "out",
+            "alpha": payload["alpha"],
+            "beta": payload["beta"],
+            "baseline": report_from_data(payload["baseline"]),
+        }
+    finally:
+        repository.close()
 
 
 # ------------------------------------------------------------ mode decision

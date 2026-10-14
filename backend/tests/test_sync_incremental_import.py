@@ -35,7 +35,13 @@ from app.migration.sync.package import (
 from app.models.schemas import NotebookCreate
 from app.repositories.ports import UploadedSourceFile
 from app.services.sqlite_repository import SQLiteRepository
+from tests.sync_world_cases import report_data, report_from_data
+from tests.world_templates import PINNED, world_template
 
+
+#: One worker builds the baseline world once and runs the whole file on its
+#: copies; ungrouped, every worker that drew a test would rebuild it.
+pytestmark = pytest.mark.xdist_group("sync_incremental_import_world")
 
 SOURCE_ENV = "dev"
 TARGET_ENV = "prod"
@@ -228,29 +234,79 @@ def _reseal(package: Path) -> None:
     _write_manifest(package, document)
 
 
+#: The file's side-channel switches, applied to the world build too: the build
+#: starts from the process baseline environment, not from this file's
+#: autouse fixture.
+_WORLD_ENV = {"EVENT_LOG_ENABLED": "false", "LLM_LOG_ENABLED": "false"}
+
+
+def _build_baseline(root: Path) -> dict:
+    """The baseline world, built once per process (``tests/world_templates.py``):
+    library A under ``root/a``, library B under ``root/b``, the full package
+    under ``root/out``. ``pinned``: uploaded sources record absolute
+    ``file_path``s and the import report names the package directory."""
+    source = _settings(root / "a")
+    target = _settings(root / "b")
+    source_repo = SQLiteRepository(source)
+    target_repo = SQLiteRepository(target)
+    try:
+        alpha = _seed_notebook(source_repo, "alpha")
+        beta = _seed_notebook(source_repo, "beta")
+        _enable_capture(source_repo)
+        full = _export({"settings": source}, root / "out")
+        assert full.mode == MODE_FULL
+        report = _import({"settings": target}, full.package_dir)
+        assert report.error == ""
+        assert report.mode == MODE_FULL
+    finally:
+        target_repo.close()
+        source_repo.close()
+    return {"alpha": alpha, "beta": beta, "full": report_data(full)}
+
+
+def _reopen_baseline(root: Path) -> None:
+    """Open both libraries the way ``baseline`` does, then close them."""
+    for side in ("a", "b"):
+        SQLiteRepository(_settings(root / side)).close()
+
+
 @pytest.fixture
-def baseline(source, target, tmp_path):
+def baseline(tmp_path_factory, tmp_path):
     """Two notebooks at the source, capture on, one full baseline exported AND
     imported into the target. Every test here starts from a target that is a
     real mirror, because that is the only state an incremental window has any
-    meaning against."""
-    alpha = _seed_notebook(source["repo"], "alpha")
-    beta = _seed_notebook(source["repo"], "beta")
-    _enable_capture(source["repo"])
-    out = tmp_path / "out"
-    full = _export(source, out)
-    assert full.mode == MODE_FULL
-    report = _import(target, full.package_dir)
-    assert report.error == ""
-    assert report.mode == MODE_FULL
-    return {
-        "source": source,
-        "target": target,
-        "out": out,
-        "alpha": alpha,
-        "beta": beta,
-        "full": full,
-    }
+    meaning against.
+
+    The world is built once per process and every test gets its own copy of
+    it (``tests/world_templates.py``); the export report is rebuilt per test
+    from pure data."""
+    template = world_template(
+        tmp_path_factory,
+        "sync-incremental-import-baseline",
+        _build_baseline,
+        _reopen_baseline,
+        layout=PINNED,
+        env=_WORLD_ENV,
+    )
+    root, payload = template.materialize(tmp_path)
+    source_settings = _settings(root / "a")
+    target_settings = _settings(root / "b")
+    source_repo = SQLiteRepository(source_settings)
+    try:
+        target_repo = SQLiteRepository(target_settings)
+        try:
+            yield {
+                "source": {"repo": source_repo, "settings": source_settings},
+                "target": {"repo": target_repo, "settings": target_settings},
+                "out": root / "out",
+                "alpha": payload["alpha"],
+                "beta": payload["beta"],
+                "full": report_from_data(payload["full"]),
+            }
+        finally:
+            target_repo.close()
+    finally:
+        source_repo.close()
 
 
 def _window(baseline) -> ExportReport:
