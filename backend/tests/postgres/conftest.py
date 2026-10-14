@@ -401,17 +401,61 @@ def bystander_snapshot(request, postgres_settings: Settings):
             holder.execute("ROLLBACK")
 
 
-def vacuum_until_all_visible(database_url: str, table: str, timeout: float = 10.0) -> None:
-    """VACUUM ``table`` until every page is all-visible (``relallvisible ==
-    relpages``), for at most ``timeout`` seconds, then fail with what held
-    the horizon back.
+# Sessions of this database that hold an xid or a snapshot. ``blocking``: the
+# snapshot is not newer than the table's newest row (``{table}``), so VACUUM
+# cannot mark that row's page all-visible while it lives; a session that
+# started after the seed committed is listed but never decides anything.
+# ``maintenance``: it ends on its own -- an autovacuum worker, or any backend
+# with an ANALYZE or VACUUM in progress. An autovacuum ANALYZE keeps its
+# snapshot for its whole sample (PROC_IN_VACUUM only covers the VACUUM phase),
+# so one that began before a seed committed blocks the seed's pages until it
+# is done: tens of seconds on a big or bloated table of the same database (a
+# lane database's catalogs), longer under load. ``age()`` reads one stable
+# reference xid per transaction, so both ages are comparable.
+_HORIZON_HOLDERS_SQL = (
+    "WITH newest AS (SELECT min(age(xmin)) AS age FROM {table}) "
+    "SELECT a.pid, a.backend_type, a.state, a.backend_xid::text AS xid, "
+    "a.backend_xmin::text AS xmin, a.application_name, "
+    "round(extract(epoch FROM clock_timestamp() - a.xact_start)::numeric, 1)::float "
+    "AS xact_seconds, left(a.query, 120) AS query, "
+    "(greatest(coalesce(age(a.backend_xid), -1), coalesce(age(a.backend_xmin), -1)) "
+    " >= (SELECT age FROM newest)) AS blocking, "
+    "(a.backend_type = 'autovacuum worker' "
+    " OR a.pid IN (SELECT pid FROM pg_stat_progress_analyze "
+    "              UNION SELECT pid FROM pg_stat_progress_vacuum)) AS maintenance "
+    "FROM pg_stat_activity a "
+    "WHERE a.datname = current_database() AND a.pid <> pg_backend_pid() "
+    "AND (a.backend_xid IS NOT NULL OR a.backend_xmin IS NOT NULL)"
+)
+# Horizon holders pg_stat_activity does not show; any of them fails the wait.
+_HIDDEN_HORIZON_SQL = (
+    "SELECT 'prepared' AS kind, gid AS name, transaction::text AS xmin "
+    "FROM pg_prepared_xacts WHERE database = current_database() "
+    "UNION ALL SELECT 'slot', slot_name, coalesce(xmin, catalog_xmin)::text "
+    "FROM pg_replication_slots WHERE xmin IS NOT NULL OR catalog_xmin IS NOT NULL"
+)
 
-    For the pins whose competing-index choice is a cost decision that moves
-    with the visibility map: they assert it only in the ``no_bystander``
-    state and only against a full map. A short-lived snapshot on the same
-    database (an autoanalyze, a pooled connection between statements) is
-    outwaited; one that stays open past the bound is a real stray
-    transaction, reported rather than tolerated.
+
+def vacuum_until_all_visible(
+    database_url: str,
+    table: str,
+    timeout: float = 10.0,
+    maintenance_timeout: float = 180.0,
+) -> None:
+    """VACUUM ``table`` until every page is all-visible (``relallvisible ==
+    relpages``), then return; never return with an incomplete map.
+
+    For the pins whose plan choice moves with the visibility map: they assert
+    it only in the ``no_bystander`` state and only against a full map. A
+    short-lived snapshot on the same database (a pooled connection between
+    statements) is outwaited within ``timeout`` seconds. Past that, the wait
+    goes on -- up to ``maintenance_timeout`` seconds in all -- only while every
+    session whose snapshot predates the table's newest row is maintenance that
+    ends by itself (an autovacuum worker, an ANALYZE or VACUUM in progress): an
+    autoanalyze that began before the seed committed holds its snapshot until
+    its sample is done. A blocking ordinary session or a prepared transaction /
+    replication slot past ``timeout``, or anything past ``maintenance_timeout``,
+    is a real stray holder: the call fails and names the sessions.
     """
     import time
 
@@ -419,7 +463,8 @@ def vacuum_until_all_visible(database_url: str, table: str, timeout: float = 10.
     from psycopg import sql as pg_sql
     from psycopg.rows import dict_row
 
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    holders_sql = pg_sql.SQL(_HORIZON_HOLDERS_SQL).format(table=pg_sql.Identifier(table))
     with psycopg.connect(database_url, autocommit=True, row_factory=dict_row) as raw:
         while True:
             raw.execute(pg_sql.SQL("VACUUM {}").format(pg_sql.Identifier(table)))
@@ -430,19 +475,21 @@ def vacuum_until_all_visible(database_url: str, table: str, timeout: float = 10.
             assert row is not None, table
             if row["relpages"] > 0 and row["relallvisible"] == row["relpages"]:
                 return
-            if time.monotonic() >= deadline:
-                holders = raw.execute(
-                    "SELECT pid, state, backend_xid::text AS xid, "
-                    "backend_xmin::text AS xmin, application_name, "
-                    "left(query, 120) AS query FROM pg_stat_activity "
-                    "WHERE datname = current_database() AND pid <> pg_backend_pid() "
-                    "AND (backend_xid IS NOT NULL OR backend_xmin IS NOT NULL)"
-                ).fetchall()
-                raise AssertionError(
-                    f"visibility map of {table} still incomplete after {timeout}s of "
-                    f"VACUUM ({row['relallvisible']}/{row['relpages']} pages); "
-                    f"sessions holding the horizon: {holders}"
-                )
+            waited = time.monotonic() - started
+            if waited >= timeout:
+                holders = raw.execute(holders_sql).fetchall()
+                hidden = raw.execute(_HIDDEN_HORIZON_SQL).fetchall()
+                stray = hidden or not row["relpages"] or [
+                    h for h in holders if h["blocking"] and not h["maintenance"]
+                ]
+                if stray or waited >= maintenance_timeout:
+                    raise AssertionError(
+                        f"visibility map of {table} still incomplete after {waited:.1f}s "
+                        f"of VACUUM ({row['relallvisible']}/{row['relpages']} pages; "
+                        f"bounds {timeout}s, {maintenance_timeout}s while only "
+                        f"maintenance blocks it); sessions holding the horizon: "
+                        f"{holders}; prepared transactions / slots: {hidden}"
+                    )
             time.sleep(0.2)
 
 
