@@ -113,6 +113,14 @@ else
 fi
 mkdir -p "$STAGE/node"
 tar -xf "$node_tar" -C "$STAGE/node" --strip-components=1
+# NODE_TARBALL (or a stale download) can hold any release whatever NODE_VERSION
+# says, so check the archive itself. Read its header rather than run its
+# binary: a node packaged for another OS/arch need not run on this host.
+node_header="$STAGE/node/include/node/node_version.h"
+[[ -f "$node_header" ]] || die "便携 node 包里没有 include/node/node_version.h,无法确认大版本: $node_tar"
+bundled_major="$(sed -n 's/^#define NODE_MAJOR_VERSION \([0-9][0-9]*\).*/\1/p' "$node_header")"
+require_node_major "${bundled_major%%$'\n'*}" "scripts/pack.sh (the portable node archive $node_tar)" \
+  || die "便携 node 包的大版本不对(node_version.h: ${bundled_major:-无});必须是 .nvmrc 钉的大版本。"
 "$STAGE/node/bin/node" -v >/dev/null 2>&1 || die "便携 node 无法执行(架构不匹配?)。"
 log "便携 node OK: $("$STAGE/node/bin/node" -v)"
 # 瘦身:目标机只用 node 跑 standalone 的 server.js,删掉 npm/npx/corepack/头文件/文档(省 ~150M)

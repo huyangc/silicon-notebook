@@ -258,13 +258,19 @@ def test_backend_diagnostics_failure_does_not_block_saved_service_controls(launc
     assert events(root) == [{"action": action, "receipt": None}]
 
 
-def test_offline_archive_ships_executable_service_runtime_without_a_real_build(launcher):
-    root, env = launcher
-    helpers = (
-        "extension_services.sh", "extension_services.py", "extension_service_runtime.py",
-        "extension_service_worker.py", "check_cli_extensions.py", "python_env.py",
-    )
-    for name in (*helpers, "pack.sh", "node_version.sh", "migrate_legacy_model_env.py"):
+PACK_HELPERS = (
+    "extension_services.sh", "extension_services.py", "extension_service_runtime.py",
+    "extension_service_worker.py", "check_cli_extensions.py", "python_env.py",
+)
+PINNED_NODE_MAJOR = (ROOT / ".nvmrc").read_text(encoding="utf-8").strip()
+
+
+def _pack_fixture(root, env, *, archive_node_major):
+    """A checkout pack.sh can run without a real build, whose portable node
+    archive declares ``archive_node_major`` in include/node/node_version.h (no
+    header at all when it is None) while the build host's node and NODE_VERSION
+    both report the pinned major."""
+    for name in (*PACK_HELPERS, "pack.sh", "node_version.sh", "migrate_legacy_model_env.py"):
         shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
     shutil.copy2(ROOT / ".nvmrc", root / ".nvmrc")
     shutil.copytree(ROOT / "packaging", root / "packaging")
@@ -277,14 +283,51 @@ def test_offline_archive_ships_executable_service_runtime_without_a_real_build(l
         (root / "frontend/.next" / directory).mkdir(parents=True)
     (root / "frontend/.next/standalone/server.js").write_text("// prebuilt fixture\n")
     executable(root / "fake-bin/npm", "#!/bin/sh\nexit 0\n")
-    executable(root / "fake-bin/node", "#!/bin/sh\necho v26.0.0\n")
+    executable(root / "fake-bin/node", f"#!/bin/sh\necho v{PINNED_NODE_MAJOR}.0.0\n")
+    header = root / "node_version.h"
+    header.write_text(
+        "#ifndef SRC_NODE_VERSION_H_\n"
+        f"#define NODE_MAJOR_VERSION {archive_node_major}\n"
+        "#define NODE_MINOR_VERSION 0\n",
+        encoding="utf-8",
+    )
     node_tar = root / "node-fixture.tar"
     with tarfile.open(node_tar, "w") as archive:
         archive.add(root / "fake-bin/node", arcname="node-fixture/bin/node")
-    result = run(root, {
+        if archive_node_major is not None:
+            archive.add(header, arcname="node-fixture/include/node/node_version.h")
+    return run(root, {
         **env, "PACK_PYTHON": sys.executable, "VERSION": "fixture",
-        "NODE_TARBALL": str(node_tar), "NODE_VERSION": "v26.0.0", "SKIP_WHEELHOUSE": "1",
+        "NODE_TARBALL": str(node_tar), "NODE_VERSION": f"v{PINNED_NODE_MAJOR}.0.0",
+        "SKIP_WHEELHOUSE": "1",
     }, "scripts/pack.sh")
+
+
+def test_pack_refuses_a_portable_node_archive_of_another_major(launcher):
+    """NODE_TARBALL can hold any release whatever NODE_VERSION says, so pack.sh
+    checks the archive's own header (the binary may be for another OS/arch)."""
+    root, env = launcher
+    result = _pack_fixture(root, env, archive_node_major=22)
+    assert result.returncode != 0
+    assert (
+        f"the portable node archive {root / 'node-fixture.tar'}) needs Node.js "
+        f"{PINNED_NODE_MAJOR}.x (pinned in .nvmrc); found 22"
+    ) in result.stderr
+    assert not list((root / "dist").glob("silicon_notebook_*.tar.gz"))
+
+
+def test_pack_refuses_a_portable_node_archive_without_a_version_header(launcher):
+    root, env = launcher
+    result = _pack_fixture(root, env, archive_node_major=None)
+    assert result.returncode != 0
+    assert "便携 node 包里没有 include/node/node_version.h" in result.stderr
+    assert not list((root / "dist").glob("silicon_notebook_*.tar.gz"))
+
+
+def test_offline_archive_ships_executable_service_runtime_without_a_real_build(launcher):
+    root, env = launcher
+    helpers = PACK_HELPERS
+    result = _pack_fixture(root, env, archive_node_major=PINNED_NODE_MAJOR)
     assert result.returncode == 0, result.stdout + result.stderr
     [release] = (root / "dist").glob("silicon_notebook_*.tar.gz")
     with tarfile.open(release) as archive:
