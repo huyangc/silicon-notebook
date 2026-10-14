@@ -8,7 +8,7 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     include: ["tests/component/**/*.component.test.tsx"],
-    // G1 already runs 12 backend pytest workers in parallel. Letting Vitest
+    // G1 already runs 16 backend pytest workers in parallel. Letting Vitest
     // also claim every logical CPU inflates the backend critical path; four
     // component workers finish well before that path while preserving headroom.
     maxWorkers: 4,
