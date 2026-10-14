@@ -73,6 +73,45 @@ def _link_or_copy_files(source_dir: str, target_dir: str, *, skip=()) -> None:
 SHARED_CONTENT_DIGEST_FIELD = "shared_content_digest"
 
 
+#: Rows (vectors plus graph nodes) a build must have handled before the
+#: explicit full collections between its heavy stages run. See
+#: ``_StageCollector``.
+STAGE_COLLECT_MIN_ROWS = 10_000
+
+
+class _StageCollector:
+    """A full ``gc`` collection between a build's heavy stages, for large builds.
+
+    The collections were added for the multi-GB builds behind the OOM
+    incidents (a 490k-object library killed a 64 GB host, 355dcd7ad; the
+    stage-by-stage release of d92198c70): once a stage's matrices, edge arrays
+    and hnsw scratch are dropped, anything of theirs caught in a reference
+    cycle is reclaimed before the next stage peaks instead of whenever the
+    automatic collector gets round to it. Each one is a FULL collection, so it
+    costs time in proportion to every object the process holds, not to the
+    build: a long-running server with a large heap pays that six times per
+    build, however small the notebook.
+
+    So a collection runs only once the build has handled
+    ``STAGE_COLLECT_MIN_ROWS`` rows, counted cumulatively over the stages so
+    far (KG vectors, synonym edges, graph nodes, chunk vectors, relation
+    vectors, viz nodes). The count only grows, so a build that crosses the
+    threshold collects at every later stage point exactly as before; a build
+    whose first stage already crosses it (any library with that many KG
+    objects) is unchanged at every point. A point skipped below the threshold
+    can only hold back the cyclic garbage of stages that together handled
+    fewer rows than that, which the automatic collector still reclaims.
+    """
+
+    def __init__(self) -> None:
+        self.rows = 0
+
+    def __call__(self, rows: int = 0) -> None:
+        self.rows += rows
+        if self.rows >= STAGE_COLLECT_MIN_ROWS:
+            gc.collect()
+
+
 def _instant(text: str):
     """An ISO timestamp WITH an offset as an aware datetime, else None."""
     import datetime
@@ -542,6 +581,7 @@ class ScaleIndexBuilder:
         )
         build_started = time.perf_counter()
         timings: dict[str, int] = {}
+        collect_after_stage = _StageCollector()
 
         def record(stage_name: str, latency_ms: int) -> None:
             timings[stage_name] = latency_ms
@@ -586,7 +626,7 @@ class ScaleIndexBuilder:
             int(kg_ann_index.dim) if kg_ann_index is not None
             else (_resolve_dim(self.settings) or self.settings.embed_dim)
         )
-        gc.collect()
+        collect_after_stage(len(ann_labels))
 
         def synonym_edges():
             if kg_ann_index is None or not self.settings.ppr_emb_synonym_enabled:
@@ -618,7 +658,7 @@ class ScaleIndexBuilder:
             )
 
         synonyms = timed("synonym", synonym_edges)
-        gc.collect()
+        collect_after_stage(len(synonyms))
         (
             node_ids,
             (edge_src, edge_tgt, edge_weight),
@@ -657,7 +697,7 @@ class ScaleIndexBuilder:
             ),
         )
         del edge_src, edge_tgt, edge_weight
-        gc.collect()
+        collect_after_stage(len(node_ids))
 
         def _load_build_chunk_ann():
             # Paged feed (batch-3 W4 T-W4-3.3): the chunk matrix (~7GB at 8M
@@ -681,7 +721,7 @@ class ScaleIndexBuilder:
         ) = timed(
             "chunk_matrix", _load_build_chunk_ann
         )
-        gc.collect()
+        collect_after_stage(len(chunk_ann_labels))
 
         def _load_build_relation_ann():
             # Same paged feed as chunk. The relation matrix (~33GB at 8M rows)
@@ -696,7 +736,7 @@ class ScaleIndexBuilder:
             "relation_matrix", _load_build_relation_ann
         )
         memory_seen = self._observe_memory(notebook_id, memory_seen)
-        gc.collect()
+        collect_after_stage(len(relation_ann_labels))
 
         # M1: derived from the Memory-free projection reads, NOT from the
         # facade's ``_unified_graph_full`` (the graph a viewer browses, which
@@ -719,7 +759,7 @@ class ScaleIndexBuilder:
         # is dead weight here and must not ride resident through persist.
         if self.invalidate_unified_cache is not None:
             self.invalidate_unified_cache(notebook_id)
-        gc.collect()
+        collect_after_stage(len(viz_ids))
 
         # M1 bracket (see ``build``): read BEFORE the version, so a Memory row
         # confirmed after this point is counted by the version but not by the
