@@ -441,6 +441,7 @@ def vacuum_until_all_visible(
     table: str,
     timeout: float = 10.0,
     maintenance_timeout: float = 180.0,
+    on_maintenance_wait=None,
 ) -> None:
     """VACUUM ``table`` until every page is all-visible (``relallvisible ==
     relpages``), then return; never return with an incomplete map.
@@ -456,6 +457,11 @@ def vacuum_until_all_visible(
     its sample is done. A blocking ordinary session or a prepared transaction /
     replication slot past ``timeout``, or anything past ``maintenance_timeout``,
     is a real stray holder: the call fails and names the sessions.
+
+    ``on_maintenance_wait(holders)``, when given, is called every time the
+    helper takes the maintenance-wait branch (past ``timeout``, only
+    maintenance blocking), with the sessions it judged -- the seam its own
+    tests synchronize on instead of timing an ANALYZE.
     """
     import time
 
@@ -490,6 +496,8 @@ def vacuum_until_all_visible(
                         f"maintenance blocks it); sessions holding the horizon: "
                         f"{holders}; prepared transactions / slots: {hidden}"
                     )
+                if on_maintenance_wait is not None:
+                    on_maintenance_wait(holders)
             time.sleep(0.2)
 
 

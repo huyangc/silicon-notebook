@@ -6,9 +6,17 @@ whole sample, so one that began before a seed committed keeps the seed's
 pages from going all-visible until it is done. In the lane that is an
 autoanalyze of a big or bloated table of the same database (the catalogs
 grow with every test schema), and it outlasted the old 10 s bound. The
-helper waits such maintenance out for longer, and still fails at once --
-naming the session -- on an ordinary transaction that holds the horizon. In
-both cases it never returns on an incomplete map.
+helper waits such maintenance out for longer, and still fails at the base
+bound -- naming the session -- on an ordinary transaction that holds the
+horizon. In both cases it never returns on an incomplete map.
+
+Nothing here is timed. The maintenance holder is a real ANALYZE held open by
+an advisory lock: the analyzed table has an expression index whose function
+waits for a shared advisory lock the test holds exclusively, so the ANALYZE
+(listed in ``pg_stat_progress_analyze``, its snapshot taken) blocks until the
+test releases the lock. The test releases it from the helper's
+``on_maintenance_wait`` seam -- so it also proves the helper took that
+branch, with the ANALYZE judged blocking maintenance.
 """
 from __future__ import annotations
 
@@ -25,10 +33,8 @@ pytestmark = [
     pytest.mark.xdist_group(name="postgres_visibility_map_settle"),
 ]
 
-# A sample of 300 x 10000 rows over two md5 columns: the ANALYZE takes about
-# 1.5 s locally, far past the 0.3 s base bound the tests use.
-_SLOW_ANALYZE_ROWS = 300_000
-_BASE_BOUND = 0.3
+_GATE_KEY = 7_311_015
+_BASE_BOUND = 0.2
 
 
 def _relation_map(url: str, table: str) -> tuple[int, int]:
@@ -46,72 +52,111 @@ def _seed_target(url: str) -> None:
         )
 
 
+def _wait_until(probe, what: str, deadline: float = 30.0) -> None:
+    """Poll a condition the test is waiting for another session to reach
+    (a lock wait, a progress row); the bound only turns a hang into a red."""
+    end = time.monotonic() + deadline
+    while not probe():
+        assert time.monotonic() < end, f"never observed: {what}"
+        time.sleep(0.01)
+
+
 def test_an_analyze_holding_the_horizon_is_waited_out(postgres_settings):
     url = postgres_settings.database_url
-    with psycopg.connect(url, autocommit=True) as connection:
-        connection.execute(
-            "CREATE TABLE settle_slow_analyze WITH (autovacuum_enabled = off) AS "
-            "SELECT g AS id, md5(g::text) AS a, md5((g * 3)::text) AS b "
-            "FROM generate_series(1, %s) g",
-            (_SLOW_ANALYZE_ROWS,),
+    with psycopg.connect(url, autocommit=True) as setup:
+        setup.execute(
+            "CREATE FUNCTION settle_gate_wait(v int) RETURNS int IMMUTABLE "
+            "LANGUAGE plpgsql AS $$ BEGIN "
+            f"PERFORM pg_advisory_lock_shared({_GATE_KEY}); "
+            f"PERFORM pg_advisory_unlock_shared({_GATE_KEY}); "
+            "RETURN v; END $$"
         )
-        connection.execute(
-            "ALTER TABLE settle_slow_analyze ALTER a SET STATISTICS 10000, "
-            "ALTER b SET STATISTICS 10000"
+        setup.execute(
+            "CREATE TABLE settle_gate WITH (autovacuum_enabled = off) AS "
+            "SELECT g AS id FROM generate_series(1, 100) g"
         )
+        setup.execute("CREATE INDEX settle_gate_expr ON settle_gate (settle_gate_wait(id))")
+
+    gate = psycopg.connect(url, autocommit=True)
+    gate.execute("SELECT pg_advisory_lock(%s)", (_GATE_KEY,))
     analyzer = psycopg.connect(url, autocommit=True)
     analyzer_pid = analyzer.info.backend_pid
     analyzing = threading.Thread(
-        target=analyzer.execute, args=("ANALYZE settle_slow_analyze",), daemon=True
+        target=analyzer.execute, args=("ANALYZE settle_gate",), daemon=True
     )
+    later = psycopg.connect(url, autocommit=True)
+    judged: list[list[dict]] = []
+    released = False
+
+    def on_maintenance_wait(holders):
+        nonlocal released
+        judged.append(holders)
+        mine = [h for h in holders if h["pid"] == analyzer_pid]
+        if not released and mine and mine[0]["blocking"] and mine[0]["maintenance"]:
+            gate.execute("SELECT pg_advisory_unlock(%s)", (_GATE_KEY,))
+            released = True
+
     try:
         analyzing.start()
         with psycopg.connect(url, autocommit=True) as watcher:
-            deadline = time.monotonic() + 10
-            while not watcher.execute(
-                "SELECT 1 FROM pg_stat_progress_analyze WHERE pid = %s", (analyzer_pid,)
-            ).fetchone():
-                assert analyzing.is_alive() and time.monotonic() < deadline, (
-                    "the ANALYZE never showed up in pg_stat_progress_analyze")
-                time.sleep(0.01)
-        # The seed commits while the ANALYZE's snapshot is open: it holds the horizon.
+            # The ANALYZE has its snapshot and is parked on the gate.
+            _wait_until(lambda: watcher.execute(
+                "SELECT 1 FROM pg_locks l JOIN pg_stat_progress_analyze p "
+                "ON p.pid = l.pid WHERE l.pid = %s AND l.locktype = 'advisory' "
+                "AND NOT l.granted", (analyzer_pid,)).fetchone(),
+                "the ANALYZE waiting on the advisory gate")
         _seed_target(url)
-        started = time.monotonic()
+        # An ordinary transaction that took its xid after the seed: listed as
+        # a holder, never blocking. READ COMMITTED, so between statements it
+        # holds no snapshot -- a snapshot's xmin would be the oldest xid running
+        # anywhere on the server, possibly older than the seed.
+        later.execute("BEGIN ISOLATION LEVEL READ COMMITTED")
+        later.execute("SELECT txid_current()")
+        later_pid = later.info.backend_pid
+
         vacuum_until_all_visible(url, "settle_target", timeout=_BASE_BOUND,
-                                 maintenance_timeout=60)
-        waited = time.monotonic() - started
-        # A full map means the ANALYZE's snapshot is gone: it has finished.
-        analyzing.join(5)
+                                 maintenance_timeout=60,
+                                 on_maintenance_wait=on_maintenance_wait)
+
+        analyzing.join(30)
         assert not analyzing.is_alive()
     finally:
-        analyzing.join(60)
+        if not released:
+            gate.execute("SELECT pg_advisory_unlock(%s)", (_GATE_KEY,))
+        analyzing.join(30)
+        later.close()
         analyzer.close()
+        gate.close()
+
+    assert released, f"the helper never judged the ANALYZE blocking maintenance: {judged}"
+    first = judged[0]
+    assert any(h["pid"] == later_pid and not h["blocking"] and not h["maintenance"]
+               for h in first), first
     pages, all_visible = _relation_map(url, "settle_target")
     assert pages > 0 and all_visible == pages, (pages, all_visible)
-    assert waited > _BASE_BOUND, (
-        f"the ANALYZE ended within the base bound ({waited:.2f}s): the test no longer "
-        "makes the helper wait past it; seed a slower ANALYZE")
 
 
 def test_an_ordinary_transaction_holding_the_horizon_fails_at_the_base_bound(
     postgres_settings,
 ):
     url = postgres_settings.database_url
+
+    def on_maintenance_wait(holders):
+        pytest.fail(f"an ordinary holder was given the maintenance wait: {holders}")
+
     with psycopg.connect(url, autocommit=True) as holder:
         holder.execute("BEGIN ISOLATION LEVEL REPEATABLE READ")
         holder.execute("SELECT txid_current()")
         holder_pid = holder.info.backend_pid
         try:
             _seed_target(url)
-            started = time.monotonic()
             with pytest.raises(AssertionError) as failure:
                 vacuum_until_all_visible(url, "settle_target", timeout=_BASE_BOUND,
-                                         maintenance_timeout=60)
-            waited = time.monotonic() - started
+                                         maintenance_timeout=60,
+                                         on_maintenance_wait=on_maintenance_wait)
         finally:
             holder.execute("ROLLBACK")
     message = str(failure.value)
     assert "visibility map of settle_target still incomplete" in message, message
     assert f"'pid': {holder_pid}" in message, message
     assert "'blocking': True" in message and "'maintenance': False" in message, message
-    assert waited < 5, f"an ordinary holder must not get the maintenance budget ({waited:.1f}s)"
