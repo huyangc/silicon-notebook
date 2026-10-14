@@ -1068,6 +1068,51 @@ class _FakeMinerUAdapter:
         pass
 
 
+class _FixtureClock:
+    """The fixture's ``time.perf_counter``: +1 ms per call from the run's own code.
+
+    The goldens freeze ``duration_ms`` values, so this clock must advance only
+    for the calls the replayed run itself makes. ``time.perf_counter`` is a
+    process-global, though, and in a pytest-xdist worker other callers share it
+    while the oracle test runs: threads an earlier test in the same worker left
+    behind, and any ``gc.callbacks`` hook (a GC triggered mid-Ask runs it on the
+    Ask's own thread). Each of those calls used to advance the shared counter,
+    so the frozen durations depended on what else the worker had run and on
+    when a collection happened to fire, which is why the oracle went red under
+    altered scheduling and green under the default one.
+
+    So a call advances the clock only when (a) its direct caller is application
+    code (an ``app.*`` module, which is where every timing the goldens record is
+    taken) and (b) it runs on the thread that entered the runtime or on a thread
+    started after that (the repository's model-scheduler thread and the
+    per-call retrieval pools are created inside the run). Every other caller
+    gets the real clock and leaves the fixture clock untouched.
+    """
+
+    def __init__(self, start: float = 1000.0, step: float = 0.001) -> None:
+        self._real = time.perf_counter
+        self._value = start
+        self._step = step
+        self._lock = threading.Lock()
+        owner = threading.current_thread()
+        # Thread objects, not idents: an ident can be recycled by a thread
+        # started later, a Thread object cannot.
+        self._foreign = {
+            thread for thread in threading.enumerate() if thread is not owner
+        }
+
+    def __call__(self) -> float:
+        caller = sys._getframe(1).f_globals.get("__name__", "")
+        if (
+            not (caller == "app" or caller.startswith("app."))
+            or threading.current_thread() in self._foreign
+        ):
+            return self._real()
+        with self._lock:
+            self._value += self._step
+            return self._value
+
+
 @contextlib.contextmanager
 def _deterministic_runtime() -> Iterator[None]:
     from app.domain import auth_utils  # B3: repositories now lazy-import hash_password from here
@@ -1081,7 +1126,6 @@ def _deterministic_runtime() -> Iterator[None]:
 
     original_hash_password = auth_utils.hash_password
     ids = defaultdict(int)
-    perf = [1000.0]
 
     def next_id(prefix: str) -> str:
         ids[prefix] += 1
@@ -1091,10 +1135,6 @@ def _deterministic_runtime() -> Iterator[None]:
         return original_hash_password(
             password, salt=FIXED_PASSWORD_SALT, iterations=iterations
         )
-
-    def fixed_perf() -> float:
-        perf[0] += 0.001
-        return perf[0]
 
     def no_network(*_args, **_kwargs):
         raise AssertionError("fixture generation attempted network access")
@@ -1126,7 +1166,7 @@ def _deterministic_runtime() -> Iterator[None]:
         )
         stack.enter_context(mock.patch.object(rerank_client, "RerankClient", _FakeRerankAdapter))
         stack.enter_context(mock.patch.object(model_provider, "RerankClient", _FakeRerankAdapter))
-        stack.enter_context(mock.patch.object(time, "perf_counter", fixed_perf))
+        stack.enter_context(mock.patch.object(time, "perf_counter", _FixtureClock()))
         stack.enter_context(
             mock.patch.dict(
                 os.environ,
