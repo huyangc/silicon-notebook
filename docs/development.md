@@ -477,6 +477,17 @@ vocabulary non-vacuity on the real repository belongs to `check_ui_vocabulary.py
 in the contracts lane; unit tests retain the minimal empty-scan failure fixture
 and mutation coverage without a second full-tree count.
 
+Performance pins count work instead of timing it: a wall-clock bound fails on a
+loaded gate (a 35 ms share-copy snapshot measured 3.19 s on CI) and misses a real
+regression alike. The share-copy pins compare the statements, the Memory-member
+key-set reads and SQLite VM instructions at n and 2n (`_snapshot_work`); a
+quadratic walk shows ~3.9x. PostgreSQL plan pins whose choice moves with the
+visibility map (an Index Only Scan is costed as heap visits while a same-database
+snapshot older than the seed blocks VACUUM) run in both `bystander_snapshot`
+states: the exact plan only after `vacuum_until_all_visible` has confirmed a full
+map, the invariants that hold for any access method (no sequential scan, every scan
+keyed on the probed row) in both.
+
 Extension-service lifecycle tests share one `xdist_group` to bound competing
 supervisor startups; each test retains its own real process/thread concurrency.
 State-file regression tests force replacement after open: JSON readers may consume
