@@ -96,7 +96,9 @@ export function useDialogFocus({
       }
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
-      if (!(current instanceof HTMLElement) || !container.contains(current)) {
+      // 焦点在容器本身（initialFocusRef 指向容器、tabIndex=-1）时它两头都是边界：
+      // Shift+Tab 的原生行为会跳出本层（页面或浏览器外框），Tab 交给原生也只是碰巧到首个。
+      if (!(current instanceof HTMLElement) || !container.contains(current) || current === container) {
         event.preventDefault();
         (event.shiftKey ? last : first).focus();
       } else if (event.shiftKey && current === first) {
