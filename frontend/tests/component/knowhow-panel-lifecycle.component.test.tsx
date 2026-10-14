@@ -23,10 +23,9 @@
 // jump routing against the stale detail; a same-table re-targeted jump leaving
 // the grid blank. (A stray detail request on a notebook switch was fixed in S6;
 // see the notebook-switch test.)
-//  * The row-code effect (E5) resets its state from an effect whenever no row is
-//    open: on mount those writes coalesce with the list effect's (E3) loading
-//    render; after closing the drawer they cost one extra commit (pinned in
-//    knowhow-panel-golden).
+//  * The row-code effect (E5) reset its state from an effect whenever no row was
+//    open, costing one extra commit after the drawer closed: fixed in S6 (the
+//    reset now runs at render time; pinned in knowhow-panel-row-code-reset).
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test } from "vitest";
