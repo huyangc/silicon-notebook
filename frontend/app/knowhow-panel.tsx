@@ -412,9 +412,14 @@ export function KnowhowPanel({
   }, [detail, detailError, initialRowId, initialTableId, selectedTableId]);
 
   function openTable(tableId: string) {
+    // 重开的就是当前这张表（引用跳转换到本表的另一行，S6）：拉详情 effect 只跟
+    // selectedTableId 走，id 不变就不会重拉，所以保留现有 detail / detailError，让路由
+    // effect 直接按它定位新目标。此前这里一律清空 detail，网格一直空白到用户点返回。
+    if (tableId !== selectedTableId) {
+      setDetail(null);
+      setDetailError(null);
+    }
     setSelectedTableId(tableId);
-    setDetail(null);
-    setDetailError(null);
     setActionError(null);
     setTransferNotice(null);
     setQuery("");

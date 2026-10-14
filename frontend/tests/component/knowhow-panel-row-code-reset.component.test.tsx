@@ -18,6 +18,7 @@ import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
 import {
+  BASE_PROPS,
   recordDetail,
   renderPanel,
   routeTable,
@@ -128,5 +129,44 @@ test("closing the drawer re-renders the panel once: the code-state reset rides t
     { method: "GET", path: "/notebooks/nb-1/knowhow" },
     { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
     { method: "GET", path: "/agent/knowhow/rows/r1" },
+  ]);
+});
+
+test("a citation re-targeted from the open row to another row never renders the previous row's code state", async () => {
+  // A same-table re-targeted jump switches openRowId straight from r1 to r2 in
+  // one commit (no closed drawer in between). The render-time reset still clears
+  // r1's code state before r2's drawer is first committed.
+  const server = suite.server();
+  routeTable(server, "nb-1", recordDetail());
+  server.on("GET", "/agent/knowhow/rows/r1", {
+    json: {
+      code: [{
+        column_id: "c-fix", language: "python", code_text: "print(1)", status: "implemented",
+        updated_at: "2026-10-01T00:00:00Z", updated_by: "alice",
+      }],
+    },
+  });
+  const releaseR2 = server.hold("GET", "/agent/knowhow/rows/r2");
+  const panel = renderPanel({ initialTableId: "t-rec", initialRowId: "r1" });
+  const first = await screen.findByRole("dialog", { name: R1_TITLE });
+  expect(await within(first).findByRole("button", { name: /已实现/ })).toBeInTheDocument();
+  await settle();
+
+  drawerRenders.length = 0;
+  panel.update({ ...BASE_PROPS, initialTableId: "t-rec", initialRowId: "r2" });
+  const second = await screen.findByRole("dialog", { name: "时钟漂移" });
+  await settle();
+  const r2Renders = drawerRenders.filter((render) => render.rowId === "r2");
+  expect(r2Renders.length).toBeGreaterThan(0);
+  expect(r2Renders.some((render) => render.codeLoaded || render.codeColumns.length > 0)).toBe(false);
+  expect(within(second).queryByRole("button", { name: /已实现/ })).not.toBeInTheDocument();
+
+  releaseR2({ json: { code: [] } });
+  expect(await within(second).findAllByRole("button", { name: /添加代码/ })).toHaveLength(3);
+  expect(server.log).toEqual([
+    { method: "GET", path: "/notebooks/nb-1/knowhow" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
+    { method: "GET", path: "/agent/knowhow/rows/r1" },
+    { method: "GET", path: "/agent/knowhow/rows/r2" },
   ]);
 });
