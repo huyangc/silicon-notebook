@@ -220,6 +220,25 @@ def test_locks_exclude_second_owner(directory):
                 pytest.fail("second owner acquired lock")
 
 
+def test_a_probe_is_not_mistaken_for_an_owner_by_another_probe(directory, monkeypatch):
+    # A ``status`` from another terminal probing at the instant ``start`` checks
+    # for a live session made start refuse with
+    # running_configuration_changed_stop_before_start. Run the second probe
+    # while the first one holds the lease.
+    real_flock = runtime.fcntl.flock
+    nested = []
+
+    def flock(fd, operation):
+        real_flock(fd, operation)
+        if not nested:
+            nested.append(None)
+            nested[0] = runtime.running(directory)
+
+    monkeypatch.setattr(runtime.fcntl, "flock", flock)
+    assert runtime.running(directory) is False
+    assert nested == [False]
+
+
 def test_http_probe_disables_proxy_redirects_and_never_reads_body(monkeypatch, tmp_path):
     observed = []
     class Response:
