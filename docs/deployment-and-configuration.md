@@ -1562,7 +1562,8 @@ parsed by MinerU.
 LLM_LOG_ENABLED / LLM_LOG_PATH / LLM_LOG_MAX_CHARS
 MODEL_JSON_REPAIR_MODE  # off | shadow | on (default on)
 EVENT_LOG_ENABLED / EVENT_LOG_DIR
-DIAGNOSTICS_DIR         # live diagnostics: runtime.json / thread dumps (default .local/diagnostics)
+DIAGNOSTICS_DIR         # live diagnostics: runtime.json / thread dumps (default .local/diagnostics);
+                        # must not exist yet or be a 0700 dir owned by the service user
 SLOW_REQUEST_MS         # requests slower than this (ms) are flagged SLOW (default 3000)
 SILICON_NOTEBOOK_CORS_ORIGINS
 ```

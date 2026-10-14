@@ -603,6 +603,9 @@ def backend_env(args: argparse.Namespace) -> dict[str, str]:
         # `.local/logs/events-*.jsonl` 里灌几百条实验事件。
         "EVENT_LOG_DIR": rig_event_log_dir(args.out_dir),
         "LLM_LOG_PATH": rig_llm_log_path(args.out_dir),
+        # 同理,临时后端的诊断心跳/线程栈也放进 out-dir:否则它和开发者正在跑的
+        # 后端共用 checkout 的 `.local/diagnostics/runtime.json`,互相覆盖。
+        "DIAGNOSTICS_DIR": rig_diagnostics_dir(args.out_dir),
         "PORT": str(args.port),
     }
     if args.env_file:
@@ -1454,6 +1457,11 @@ def _search_call_estimate(
 
 def rig_llm_log_path(out_dir: str) -> str:
     return str((Path(out_dir).expanduser() / "llm" / "llm.jsonl").resolve())
+
+
+def rig_diagnostics_dir(out_dir: str) -> str:
+    """The temporary backend's own live-diagnostics directory."""
+    return str((Path(out_dir).expanduser() / "diagnostics").resolve())
 
 
 def rig_event_log_dir(out_dir: str) -> str:

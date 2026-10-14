@@ -1255,6 +1255,8 @@ def test_rig_never_writes_to_the_machine_wide_log_directory(tmp_path):
     backend = rig.backend_env(args)
     assert backend["EVENT_LOG_DIR"] == str((out / "events").resolve())
     assert backend["LLM_LOG_PATH"] == str((out / "llm" / "llm.jsonl").resolve())
+    # 诊断运行态同理,不能与开发者后端共用 checkout 的 runtime.json。
+    assert backend["DIAGNOSTICS_DIR"] == str((out / "diagnostics").resolve())
 
 
 def _search_item() -> dict:
