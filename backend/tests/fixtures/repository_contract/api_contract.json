@@ -819,6 +819,48 @@
           "title": "AdminUserAccountResult",
           "type": "object"
         },
+        "AdminUserMergeRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "username": {
+              "title": "Username",
+              "type": "string"
+            }
+          },
+          "required": [
+            "username"
+          ],
+          "title": "AdminUserMergeRequest",
+          "type": "object"
+        },
+        "AdminUserMergeResult": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "removed_user_id": {
+              "title": "Removed User Id",
+              "type": "string"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "username": {
+              "title": "Username",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "username",
+            "status",
+            "removed_user_id"
+          ],
+          "title": "AdminUserMergeResult",
+          "type": "object"
+        },
         "AdminUserNotebook": {
           "properties": {
             "conversations": {
@@ -14839,6 +14881,56 @@
             }
           },
           "summary": "Get Admin User Ask Detail"
+        }
+      },
+      "/api/admin/users/{user_id}/merge-sso-account": {
+        "post": {
+          "description": "把以工号命名的统一认证账号并入老账号 user_id：删除前者，老账号改用其用户名。\n被删账号名下有任何数据即拒绝（结构化 409 列出类别与条数）。吊销老账号全部会话。",
+          "operationId": "merge_admin_sso_account_api_admin_users__user_id__merge_sso_account_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminUserMergeRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AdminUserMergeResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Merge Admin Sso Account"
         }
       },
       "/api/admin/users/{user_id}/notebooks": {
