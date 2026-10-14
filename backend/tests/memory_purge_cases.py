@@ -370,12 +370,21 @@ def legacy_merge(world: World, notebook_id: str, object_id: str, into_id: str) -
     )
 
 
-def build_world(repo: Any, *, postgres: bool) -> World:
-    sql = Sql(repo, postgres=postgres)
+def wire_world(repo: Any) -> None:
+    """The runtime wiring a world needs before it is seeded or exercised:
+    fake embedding clients and synchronous KG-ingest / embedding schedulers.
+    Process state of ``repo`` only — nothing is written to the database."""
     bind_all_embedding_clients(repo, FakeEmbedder(dim=EMBED_DIM))
     service = repo._runtime.memory_service
     service.kg_ingest_scheduler = lambda fn, item: fn(item)
     service.embedding_scheduler = lambda fn, job: fn(job)
+
+
+def seed_world(repo: Any, *, postgres: bool) -> dict:
+    """Write the world's rows through the production code and return its
+    identity as pure data (``world_from_ids`` rebuilds the ``World``).
+    ``wire_world(repo)`` must have run first."""
+    sql = Sql(repo, postgres=postgres)
     owner = repo._runtime.identity.create_user("o00100001", "pw123456")
     alice = repo._runtime.identity.create_user("a00100002", "pw123456")
     bob = repo._runtime.identity.create_user("b00100003", "pw123456")
@@ -415,7 +424,67 @@ def build_world(repo: Any, *, postgres: bool) -> World:
         "WHERE notebook_id=? AND source_index_backfilled=1",
         (shared,),
     ) == 1
-    return world
+    return {
+        "owner": owner.id,
+        "alice": alice.id,
+        "bob": bob.id,
+        "shared": shared,
+        "alice_home": alice_home,
+        "elsewhere": elsewhere,
+        "shared_doc_object": doc_object,
+        "shared_doc_source": doc_source,
+        "projections": {
+            key: {
+                "memory_id": item.memory_id,
+                "notebook_id": item.notebook_id,
+                "source_id": item.source_id,
+                "element_ids": list(item.element_ids),
+                "object_ids": list(item.object_ids),
+                "relation_ids": list(item.relation_ids),
+            }
+            for key, item in world.projections.items()
+        },
+    }
+
+
+def _read_user(repo: Any, sql: Sql, user_id: str) -> Any:
+    """The ``UserProfile`` ``create_user`` returned for ``user_id``, re-read
+    through the same constructor (so a world copied from a template hands the
+    cases the same objects a freshly seeded one does)."""
+    with repo._runtime.database.connect() as db:
+        user = db.execute(
+            sql._text("SELECT * FROM users WHERE id = ?"), (user_id,)
+        ).fetchone()
+        profile = db.execute(
+            sql._text("SELECT * FROM user_profiles WHERE user_id = ?"), (user_id,)
+        ).fetchone()
+    assert user is not None, user_id
+    return repo._runtime.identity._user_profile(user, profile)
+
+
+def world_from_ids(repo: Any, ids: dict, *, postgres: bool) -> World:
+    """The ``World`` for a database that ``seed_world`` already populated
+    (``repo`` is open on it and ``wire_world`` has run). Owner, Alice and Bob
+    are re-read by id; nothing is written."""
+    sql = Sql(repo, postgres=postgres)
+    return World(
+        repo,
+        sql,
+        _read_user(repo, sql, ids["owner"]),
+        _read_user(repo, sql, ids["alice"]),
+        _read_user(repo, sql, ids["bob"]),
+        ids["shared"],
+        ids["alice_home"],
+        ids["elsewhere"],
+        ids["shared_doc_object"],
+        ids["shared_doc_source"],
+        {key: Projection(**item) for key, item in ids["projections"].items()},
+    )
+
+
+def build_world(repo: Any, *, postgres: bool) -> World:
+    wire_world(repo)
+    return world_from_ids(repo, seed_world(repo, postgres=postgres), postgres=postgres)
 
 
 def _evidence_sources(world: World, object_id: str) -> set[str]:
