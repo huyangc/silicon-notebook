@@ -312,6 +312,11 @@ export function KnowhowPanel({
   // 这个兜底重置也顺带清空（下方 effect），避免残留上一个 notebook 里一个
   // 几乎不可能撞上、但理论上可能存在的陈旧 rowId。
   const jumpRoutedRef = useRef<string | null>(null);
+  // 同表重开时发现引用的行不在手头的 detail 里、已发起重拉（S6）：记下这份将被替换的
+  // detail。路由 effect 与陈旧引用 effect 和跳转 effect 在同一次 flush 里执行，闭包里
+  // 还是它——按它路由会走错分支、按它判「行未找到」会误报，所以两者都跳过这份对象，
+  // 等重拉回来的新 detail 再判。
+  const supersededDetailRef = useRef<KnowhowTableDetail | null>(null);
 
   // notebook 切换时(理论上面板会被 page.tsx 一并卸载，这里仅作兜底)整体复位，
   // 避免残留上一个 notebook 的表选中态。
@@ -356,7 +361,7 @@ export function KnowhowPanel({
   useEffect(() => {
     if (!initialTableId) return;
     setJumpNotice(null);
-    openTable(initialTableId);
+    openTable(initialTableId, initialRowId);
     jumpRoutedRef.current = null; // 新的跳转目标：允许下面的 effect 再次落地一次
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialTableId, initialRowId]);
@@ -385,6 +390,7 @@ export function KnowhowPanel({
   useEffect(() => {
     if (!initialRowId || !detail) return;
     if (detail.id !== initialTableId) return;
+    if (detail === supersededDetailRef.current) return; // 正在重拉，见声明处注释
     if (jumpRoutedRef.current === initialRowId) return;
     jumpRoutedRef.current = initialRowId;
     if (detail.anchorColumnId) {
@@ -412,12 +418,13 @@ export function KnowhowPanel({
       backToList();
       return;
     }
+    if (detail === supersededDetailRef.current) return; // 正在重拉，见声明处注释（失败仍走上面的回退）
     if (detail && initialRowId && !detail.rows.some((row) => row.id === initialRowId)) {
       setJumpNotice("引用指向的行未找到，可能已被删除或调整，已为你展开整表内容。");
     }
   }, [detail, detailError, initialRowId, initialTableId, selectedTableId]);
 
-  function openTable(tableId: string) {
+  function openTable(tableId: string, citedRowId?: string | null) {
     // 重开的就是当前这张表（引用跳转换到本表的另一行，S6）：拉详情 effect 只跟
     // selectedTableId 走，id 不变就不会重拉，所以保留现有 detail / detailError，让路由
     // effect 直接按它定位新目标。此前这里一律清空 detail，网格一直空白到用户点返回。
@@ -430,6 +437,12 @@ export function KnowhowPanel({
       // 渲染时的选中值恰好就是这个 id（同一批先清空再选回）：两次提交之间 selectedTableId
       // 没变，拉详情 effect 不会重跑，只能在这里拉。正常换表时两者不等，照旧交给 effect。
       if (tableId === selectedTableId) loadDetail(tableId);
+    } else if (citedRowId && detail && !detail.rows.some((row) => row.id === citedRowId)) {
+      // 同表重开、但引用的行不在手头的 detail 里（可能是加载之后才新增的行）：重拉一次再
+      // 判定。行在手头时零开销；detail 还在加载或已失败时也不重拉（在途请求 / 陈旧引用
+      // effect 各自接住）。
+      supersededDetailRef.current = detail;
+      loadDetail(tableId);
     }
     selectedTableIdRef.current = tableId;
     setSelectedTableId(tableId);
