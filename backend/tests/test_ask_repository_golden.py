@@ -219,6 +219,75 @@ def test_reads_made_while_a_collection_runs_do_not_advance_the_clock():
     assert gc.callbacks.count(clock._on_gc) == 0
 
 
+class _HeldCollection:
+    """A collection on another thread, held open by a finalizer that waits.
+
+    The wait releases the GIL inside the collection, which is how a foreign
+    collection (closing a SQLite connection, a file) lets the Ask thread run
+    while it is still in progress.
+    """
+
+    def __init__(self) -> None:
+        self.inside = threading.Event()
+        self.release = threading.Event()
+        self.thread = threading.Thread(target=self._collect, daemon=True)
+
+    def _collect(self) -> None:
+        holder = self
+
+        class Blocking:
+            def __init__(self) -> None:
+                self.me = self
+
+            def __del__(self) -> None:
+                holder.inside.set()
+                holder.release.wait(10)
+
+        Blocking()
+        gc.collect()
+
+    def open(self) -> None:
+        self.thread.start()
+        assert self.inside.wait(10)
+
+    def close(self) -> None:
+        self.release.set()
+        self.thread.join(10)
+        assert not self.thread.is_alive()
+
+
+def test_a_collection_on_another_thread_does_not_hide_the_runs_reads():
+    """Opened after the clock is entered and held while the run reads."""
+    clock = _generator_module()._FixtureClock()
+    read = _app_code_reading(SimpleNamespace(perf_counter=clock))
+    held = _HeldCollection()
+    with clock:
+        held.open()
+        try:
+            assert read() == pytest.approx(1000.001)
+        finally:
+            held.close()
+        assert read() == pytest.approx(1000.002)
+
+
+def test_a_collection_already_open_when_the_clock_is_entered_is_ignored():
+    """Its "stop" arrives without a "start"; that must not leave the clock
+    believing a collection is in progress for the rest of the run."""
+    clock = _generator_module()._FixtureClock()
+    read = _app_code_reading(SimpleNamespace(perf_counter=clock))
+    held = _HeldCollection()
+    held.open()
+    try:
+        with clock:
+            assert read() == pytest.approx(1000.001)
+            held.close()
+            assert read() == pytest.approx(1000.002)
+            gc.collect()
+            assert read() == pytest.approx(1000.003)
+    finally:
+        held.release.set()
+
+
 def test_the_ask_oracle_ignores_clock_reads_from_outside_the_run():
     """The oracle holds while other code in the worker reads the clock.
 
