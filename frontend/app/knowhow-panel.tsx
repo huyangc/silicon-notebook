@@ -1056,7 +1056,7 @@ export function KnowhowPanel({
       )}
 
       {deleteNotice && (
-        <div className="knowhow-jump-notice" role="alert">
+        <div className="knowhow-jump-notice knowhow-jump-notice--error" role="alert">
           <span>{deleteNotice}</span>
           <button type="button" onClick={() => setDeleteNotice(null)} title="关闭">
             <X size={14} />

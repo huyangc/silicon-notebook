@@ -298,6 +298,14 @@ export function KnowhowPanelStyles() {
           cursor: pointer;
         }
 
+        /* 删表失败、用户已离开那张表时的面板顶部提示（S6）：版式同上面的提示条，
+           配色用 .knowhow-action-error 的红——它报的是一次失败，不是信息。 */
+        .knowhow-jump-notice--error {
+          border-color: #f0c0c0;
+          background: #fef2f2;
+          color: #b91c1c;
+        }
+
         .knowhow-filter-row {
           display: flex;
           align-items: center;

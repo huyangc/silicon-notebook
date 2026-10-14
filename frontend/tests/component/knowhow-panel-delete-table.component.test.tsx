@@ -227,6 +227,9 @@ test("a DELETE that fails while the user is on another table reports it at the t
   expect(document.querySelector(".knowhow-action-error")).toBeNull();
   expect(screen.getByRole("heading", { name: "第二张表" })).toBeInTheDocument();
   expectToolbarUnlocked();
+  // A failure, so it wears the action-error colours, not the blue info strip.
+  const colours = getComputedStyle(notice);
+  expect([colours.backgroundColor, colours.color]).toEqual(["rgb(254, 242, 242)", "rgb(185, 28, 28)"]);
   // The notice tells the user to go back and reopen the table, so 返回 keeps it.
   await user.click(screen.getByRole("button", { name: "返回" }));
   await screen.findByRole("button", { name: "打开表格：排障记录" });
