@@ -470,8 +470,12 @@ def test_session_start_drops_only_the_bytecode_cached_for_temporary_modules(tmp_
     interpreter = cached(tmp_path / "python" / "lib")
 
     # Not the repository's own cache, or the checkout under the temp dir: no-op.
-    conftest._prune_temporary_bytecode(tmp_path / "elsewhere", temp, repo)
+    elsewhere = tmp_path / "elsewhere"
+    foreign = elsewhere / temp.resolve().relative_to(temp.resolve().anchor)
+    foreign.mkdir(parents=True)
+    conftest._prune_temporary_bytecode(elsewhere, temp, repo)
     conftest._prune_temporary_bytecode(prefix, repo.parent, repo)
+    assert foreign.exists()
     assert temporary.exists() and own.exists() and interpreter.exists()
 
     conftest._prune_temporary_bytecode(prefix, temp, repo)
