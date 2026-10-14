@@ -9,18 +9,14 @@
 // Recorded pre-existing quirks (plan §5 "仍只登记"; fixing any of them would change
 // the request or commit baselines, so the split must carry them over verbatim and
 // they are revisited only after S4):
-//  * Asymmetric reset sets. backToList() does not clear completeRowId,
-//    reformatRowId or reformatTableOpen (nor importOpen/createOpen); openTable()
-//    does not clear reformatRowId/reformatTableOpen; the notebook-reset effect
-//    (E6) does not clear deleting, transferNotice or jumpNotice (importOpen: S6). The
-//    tests named "quirk:" below observe the visible consequences with their full
-//    request sequences: reformatTableOpen survives back-and-reopen and a
-//    re-targeted jump, reformatRowId survives back-and-reopen, and the jump
-//    notice survives a notebook switch (the transfer notice in
-//    knowhow-panel-table-actions). knowhow-panel-resets holds the full
-//    state × reset-path table. The completeRowId leftover is masked (every way
-//    back into a table goes through openTable, which clears it), and `deleting`
-//    is S5's bug, left unasserted.
+//  * Asymmetric reset sets: fixed in S6. openTable() and backToList() now both
+//    clear completeRowId / reformatRowId / reformatTableOpen; the notebook-reset
+//    effect (E6) also clears importOpen, transferNotice and jumpNotice. The tests
+//    below that used to be named "quirk:" now pin the fixed behaviour with the
+//    same request sequences; knowhow-panel-resets holds the full state ×
+//    reset-path table. Still deliberate: backToList keeps jumpNotice (a cited
+//    table that fails to load writes it and then goes back), and no reset path
+//    touches `deleting` (S5: only the DELETE's outcome releases it).
 //  * The row drawer re-registers its Escape listener on every panel render
 //    (pinned in knowhow-panel-golden).
 // Found while characterising (also recorded as-is, see the tests): a re-targeted
@@ -362,7 +358,7 @@ test("quirk: re-targeting a jump while a record table is loaded routes the new r
 });
 
 // ---------------------------------------------------------------------------
-// Recorded quirks: asymmetric reset sets (do not fix during the split)
+// Reset sets: openTable / backToList / E6 (asymmetries fixed in S6)
 // ---------------------------------------------------------------------------
 
 test("quirk: re-targeting a jump to another row of the same table blanks the grid without reloading it", async () => {
@@ -392,7 +388,9 @@ test("quirk: re-targeting a jump to another row of the same table blanks the gri
   ]);
 });
 
-test("quirk: backToList keeps reformatTableOpen, so reopening the table reopens the batch modal", async () => {
+test("backToList closes the table batch-reformat modal, so reopening the table does not bring it back", async () => {
+  // Until S6 backToList (and openTable) left reformatTableOpen set: reopening the
+  // table reopened the batch modal on a fresh snapshot. Request sequence unchanged.
   const server = suite.server();
   routeTable(server, "nb-1", recordDetail());
   const user = userEvent.setup();
@@ -404,8 +402,9 @@ test("quirk: backToList keeps reformatTableOpen, so reopening the table reopens 
   // is being characterised, so the click goes straight to the DOM node.
   fireEvent.click(screen.getByRole("button", { name: "返回" }));
   await user.click(await screen.findByRole("button", { name: "打开表格：排障记录" }));
-  expect(await screen.findByRole("dialog", { name: "一键规整整表 · 排障记录" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "排障记录" })).toBeInTheDocument();
   await settle();
+  expect(screen.queryByRole("dialog", { name: "一键规整整表 · 排障记录" })).not.toBeInTheDocument();
   expect(server.log).toEqual([
     { method: "GET", path: "/notebooks/nb-1/knowhow" },
     { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
@@ -413,7 +412,9 @@ test("quirk: backToList keeps reformatTableOpen, so reopening the table reopens 
   ]);
 });
 
-test("quirk: backToList keeps reformatRowId, so reopening the table reopens the row batch modal", async () => {
+test("backToList closes the row batch-reformat modal, so reopening the table does not bring it back", async () => {
+  // Until S6 backToList (and openTable) left reformatRowId set and the row batch
+  // modal came back on reopening. Request sequence unchanged.
   const server = suite.server();
   routeTable(server, "nb-1", recordDetail());
   const user = userEvent.setup();
@@ -427,10 +428,9 @@ test("quirk: backToList keeps reformatRowId, so reopening the table reopens the 
   // As above: the overlay covers the toolbar for a pointer, not for the DOM.
   fireEvent.click(screen.getByRole("button", { name: "返回" }));
   await user.click(await screen.findByRole("button", { name: "打开表格：排障记录" }));
-  expect(await screen.findByRole("dialog", { name })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "排障记录" })).toBeInTheDocument();
   await settle();
-  // The row drawer itself is gone (both resets clear openRowId); only the batch
-  // modal came back.
+  expect(screen.queryByRole("dialog", { name })).not.toBeInTheDocument();
   expect(screen.queryByRole("dialog", { name: "供电异常 · 检查电源 · 万用表" })).not.toBeInTheDocument();
   expect(server.log).toEqual([
     { method: "GET", path: "/notebooks/nb-1/knowhow" },
@@ -440,7 +440,9 @@ test("quirk: backToList keeps reformatRowId, so reopening the table reopens the 
   ]);
 });
 
-test("quirk: openTable keeps reformatTableOpen, so a new jump target inherits the batch modal", async () => {
+test("a new jump target does not inherit the previous table's batch-reformat modal", async () => {
+  // Until S6 openTable left reformatTableOpen set, so the batch modal moved over to
+  // the newly cited table. Request sequence unchanged.
   const server = suite.server();
   const record = recordDetail();
   const second = recordDetail({ id: "t-two", title: "第二张表" });
@@ -453,8 +455,9 @@ test("quirk: openTable keeps reformatTableOpen, so a new jump target inherits th
   await user.click(await screen.findByRole("button", { name: "一键规整整表" }));
   expect(await screen.findByRole("dialog", { name: "一键规整整表 · 排障记录" })).toBeInTheDocument();
   panel.update({ ...BASE_PROPS, initialTableId: "t-two" });
-  expect(await screen.findByRole("dialog", { name: "一键规整整表 · 第二张表" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "第二张表" })).toBeInTheDocument();
   await settle();
+  expect(screen.queryByRole("dialog", { name: /^一键规整整表 · / })).not.toBeInTheDocument();
   expect(server.log).toEqual([
     { method: "GET", path: "/notebooks/nb-1/knowhow" },
     { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
@@ -462,7 +465,9 @@ test("quirk: openTable keeps reformatTableOpen, so a new jump target inherits th
   ]);
 });
 
-test("quirk: the notebook-reset effect keeps the jump notice across a notebook switch", async () => {
+test("the notebook-reset effect clears the stale-citation notice", async () => {
+  // Until S6 E6 left jumpNotice set, so the notice about nb-1's table stayed over
+  // nb-2's list. Request sequence unchanged.
   const server = suite.server();
   routeTable(server, "nb-1", recordDetail());
   server.on("GET", "/agent/knowhow/rows/r-gone", { json: { code: [] } });
@@ -473,8 +478,8 @@ test("quirk: the notebook-reset effect keeps the jump notice across a notebook s
 
   panel.update({ ...BASE_PROPS, notebookId: "nb-2", initialTableId: "t-rec", initialRowId: "r-gone" });
   expect(await screen.findByText("还没有 knowhow 表")).toBeInTheDocument();
-  expect(screen.getByText(notice)).toBeInTheDocument();
   await settle();
+  expect(screen.queryByText(notice)).not.toBeInTheDocument();
   expect(server.log).toEqual([
     { method: "GET", path: "/notebooks/nb-1/knowhow" },
     { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },

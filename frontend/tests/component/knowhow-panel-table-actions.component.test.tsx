@@ -251,7 +251,9 @@ test("a source-cleanup failure closes the picker, shows the server's message and
   ]);
 });
 
-test("quirk: the notebook-reset effect keeps the copy notice across a notebook switch", async () => {
+test("the notebook-reset effect clears the copy notice", async () => {
+  // Until S6 E6 left transferNotice set, so 已复制到目标笔记本 stayed over the
+  // next notebook's list. Request sequence unchanged.
   const server = suite.server();
   routeTable(server, "nb-1", recordDetail());
   server.on("GET", "/notebooks", { json: NOTEBOOKS });
@@ -265,8 +267,8 @@ test("quirk: the notebook-reset effect keeps the copy notice across a notebook s
   expect(await screen.findByText("已复制到目标笔记本")).toBeInTheDocument();
   panel.update({ ...BASE_PROPS, notebookId: "nb-2", initialTableId: "t-rec" });
   expect(await screen.findByText("还没有 knowhow 表")).toBeInTheDocument();
-  expect(screen.getByText("已复制到目标笔记本")).toBeInTheDocument();
   await settle();
+  expect(screen.queryByText("已复制到目标笔记本")).not.toBeInTheDocument();
   expect(server.log).toEqual([
     LIST,
     DETAIL,

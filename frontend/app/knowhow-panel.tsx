@@ -333,6 +333,10 @@ export function KnowhowPanel({
     setReformatTableOpen(false);
     setCodeModal(null);
     setHistoryOpen(false); // Task 15：与 manageOpen/transferOpen 同级的顶层 modal 状态，一并清空
+    // 两条提示都说的是上一个笔记本里的表（复制结果 / 陈旧引用），换笔记本后一并清掉（S6）。
+    setTransferNotice(null);
+    setJumpNotice(null);
+    // deleting 刻意不清（openTable/backToList 同样不清）：删表请求落地才解锁，见 confirmDeleteTable。
     jumpRoutedRef.current = null; // Task 11：兜底一并重置，理由见上方声明处注释
   }, [notebookId]);
 
@@ -425,10 +429,16 @@ export function KnowhowPanel({
     setAppendOpen(false);
     setOptimizeRowId(null);
     setCompleteRowId(null);
+    // 规整批量弹窗作用于上一张表的快照（行作用域还按行 id 反查，换表后同 id 的行会
+    // 被错认）：与其余顶层 modal 一起清空（S6，此前切表/重新跳转会把它带到新表上）。
+    setReformatRowId(null);
+    setReformatTableOpen(false);
     setCodeModal(null);
     setHistoryOpen(false); // Task 15：与 manageOpen/transferOpen 同级的顶层 modal 状态，一并清空
   }
 
+  // 与 openTable 清同一组表级状态（S6 起两者对齐）。刻意不清 jumpNotice：引用的表
+  // 加载失败时，陈旧引用 effect 先写提示再调本函数回到列表，提示必须留下。
   function backToList() {
     setSelectedTableId(null);
     setDetail(null);
@@ -445,6 +455,9 @@ export function KnowhowPanel({
     setTransferOpen(false); // C3：与 manageOpen 同级的顶层 modal 状态，一并清空
     setAppendOpen(false);
     setOptimizeRowId(null);
+    setCompleteRowId(null);
+    setReformatRowId(null);
+    setReformatTableOpen(false);
     setCodeModal(null);
     setHistoryOpen(false); // Task 15：与 manageOpen/transferOpen 同级的顶层 modal 状态，一并清空
   }

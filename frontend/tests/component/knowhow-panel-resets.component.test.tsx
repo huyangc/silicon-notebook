@@ -1,13 +1,15 @@
 // KnowhowPanel characterization (debt-fix S4, C0): the three reset sets, state by
 // state.
 //
-// KnowhowPanel resets its cross-cluster state in three places that do NOT clear
-// the same things: openTable(), backToList() and the notebook-reset effect (E6).
-// S4-d moves state into slices (list / grid / row detail / concept matrix) and is
-// the place where someone is most likely to pull these into a shared reset helper
-// and "fix" the asymmetry in passing. That would be a behaviour change, so this
-// table records, for every user-visible state, what each reset path does to it
-// today, by setting the state to a non-default value, running the reset, and
+// KnowhowPanel resets its cross-cluster state in three places: openTable(),
+// backToList() and the notebook-reset effect (E6). S4 recorded them as they were
+// (asymmetric); S6 aligned them where the asymmetry was a bug: openTable and
+// backToList now both close the batch-reformat modals, and E6 also clears the
+// copy and stale-citation notices and the import wizard. What still differs is
+// deliberate and commented in the panel (backToList keeps the citation notice;
+// no reset path touches `deleting`, which only the DELETE's outcome releases).
+// This table records, for every user-visible state, what each reset path does
+// to it, by setting the state to a non-default value, running the reset, and
 // looking at the screen.
 //
 // Reset paths and how they are driven:
@@ -136,7 +138,7 @@ const CASES: StateCase[] = [
     shown: textShown("已复制到目标笔记本"),
     openTable: "cleared",
     backToList: { list: "cleared", reentry: "cleared" },
-    e6: { list: "kept", reentry: "cleared" },
+    e6: { list: "cleared", reentry: "cleared" },
   },
   {
     state: "stale-citation notice (jumpNotice)",
@@ -147,10 +149,12 @@ const CASES: StateCase[] = [
     },
     shown: textShown(JUMP_NOTICE),
     // Cleared by the jump effect E7, not by openTable itself: opening another
-    // table from its card keeps it (backToList re-entry below).
+    // table from its card keeps it (backToList re-entry below). backToList keeps
+    // it on purpose: a cited table that fails to load writes this notice and then
+    // goes back to the list. E6 clears it (S6): it is about the old notebook.
     openTable: "cleared",
     backToList: { list: "kept", reentry: "kept" },
-    e6: { list: "kept", reentry: "kept" },
+    e6: { list: "cleared", reentry: "cleared" },
   },
   {
     state: "row drawer (openRowId)",
@@ -262,8 +266,8 @@ const CASES: StateCase[] = [
       await screen.findByRole("dialog", { name: `一键规整整行 · ${R1_TITLE}` });
     },
     shown: dialogShown(/^一键规整整行 · /),
-    openTable: "kept",
-    backToList: { reentry: "kept" },
+    openTable: "cleared",
+    backToList: { reentry: "cleared" },
     e6: { reentry: "cleared" },
   },
   {
@@ -274,8 +278,8 @@ const CASES: StateCase[] = [
       await screen.findByRole("dialog", { name: "一键规整整表 · 排障记录" });
     },
     shown: dialogShown(/^一键规整整表 · /),
-    openTable: "kept",
-    backToList: { reentry: "kept" },
+    openTable: "cleared",
+    backToList: { reentry: "cleared" },
     e6: { reentry: "cleared" },
   },
   {
