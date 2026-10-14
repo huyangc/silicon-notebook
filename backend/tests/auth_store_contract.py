@@ -627,9 +627,10 @@ class AuthStoreContract:
                 identity, "INSERT INTO wishes(id,kind,title,content,author_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
                 (wish_id, "feature", "标题", "内容", mistaken.id, now, now),
             )
+        # One row naming the account in two registered columns counts once.
         execute(
-            identity, "INSERT INTO retained_user_activity(activity_type,record_id,actor_id,deleted_at,expires_at) VALUES (?,?,?,?,?)",
-            ("ask", "record-1", mistaken.id, now, now),
+            identity, "INSERT INTO retained_user_activity(activity_type,record_id,actor_id,notebook_owner_id,deleted_at,expires_at) VALUES (?,?,?,?,?,?)",
+            ("ask", "record-1", mistaken.id, mistaken.id, now, now),
         )
 
         def snapshot():

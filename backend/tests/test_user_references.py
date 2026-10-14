@@ -31,3 +31,12 @@ def test_every_blocking_category_has_a_display_unit():
     labels = {ref.label for ref in USER_REFERENCE_COLUMNS if ref.kind == "blocking"}
     assert labels == set(REFERENCE_LABEL_UNITS)
     assert all(not ref.label for ref in USER_REFERENCE_COLUMNS if ref.kind != "blocking")
+
+
+def test_each_blocking_table_has_one_category():
+    """The merge refusal counts a table's rows once, under one label."""
+    labels: dict[str, set[str]] = {}
+    for ref in USER_REFERENCE_COLUMNS:
+        if ref.kind == "blocking":
+            labels.setdefault(ref.table, set()).add(ref.label)
+    assert {table: names for table, names in labels.items() if len(names) > 1} == {}

@@ -520,17 +520,25 @@ class AuthStore:
 
     def _owned_data(self, db, user_id):
         """Row counts of every blocking reference to ``user_id``, summed per
-        category in display order; empty when the account owns nothing."""
-        counts: dict[str, int] = {}
+        category in display order; empty when the account owns nothing.
+
+        A row that names the user in several columns of one table (a group's
+        creator and owner) counts once: each table is one query whose
+        predicates are OR-ed. Every table maps to a single label."""
+        by_table: dict[str, tuple[str, list[str]]] = {}
         for ref in USER_REFERENCE_COLUMNS:
             if ref.kind != "blocking":
                 continue
             extra = f" AND {ref.extra_where}" if ref.extra_where else ""
+            by_table.setdefault(ref.table, (ref.label, []))[1].append(f"({ref.column}=?{extra})")
+        counts: dict[str, int] = {}
+        for table, (label, predicates) in by_table.items():
             found = self._execute(
-                db,f"SELECT count(*) AS n FROM {ref.table} WHERE {ref.column}=?{extra}",(user_id,),
+                db,f"SELECT count(*) AS n FROM {table} WHERE "+" OR ".join(predicates),
+                (user_id,)*len(predicates),
             ).fetchone()
             if found["n"]:
-                counts[ref.label] = counts.get(ref.label, 0) + int(found["n"])
+                counts[label] = counts.get(label, 0) + int(found["n"])
         return [
             {"label":label,"unit":unit,"count":counts[label]}
             for label, unit in REFERENCE_LABEL_UNITS.items() if label in counts
