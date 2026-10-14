@@ -371,8 +371,14 @@ export function KnowhowPanel({
   // jumpRoutedRef 短路见上方声明处注释——没有它，用户关掉跳转打开的抽屉后
   // 随手编辑一格（几乎任何写操作都会替换 detail 的对象引用），这个 effect
   // 会对同一个 initialRowId 重新路由一遍，把刚关掉的抽屉又弹回来。
+  //
+  // detail 必须是这次跳转目标表的（S6）：面板已开着一张表时目标换了，本 effect 与上面
+  // 的跳转 effect 在同一次提交里执行，读到的还是旧表的 detail——按它路由会把记录型旧表
+  // 的判定套到新目标上（例如本该开概念矩阵却开了行抽屉），还会把目标标成已路由。不是
+  // 目标表就先不动，等目标表的 detail 到了再路由一次（用户中途手动换到别的表时同理）。
   useEffect(() => {
     if (!initialRowId || !detail) return;
+    if (detail.id !== initialTableId) return;
     if (jumpRoutedRef.current === initialRowId) return;
     jumpRoutedRef.current = initialRowId;
     if (detail.anchorColumnId) {
