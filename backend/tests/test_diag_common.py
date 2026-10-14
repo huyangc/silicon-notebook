@@ -684,3 +684,45 @@ def test_incident_reads_the_configured_diagnostics_dir(tmp_path, monkeypatch):
     assert incident.build_parser().parse_args(
         ["--diagnostics-dir", str(explicit)]
     ).diagnostics_dir == str(explicit)
+
+
+def test_configured_diagnostics_dir_matches_settings_differentially(tmp_path):
+    """Both sides resolve every spelling to the same directory.
+
+    The expected values above are hand-written; this compares the incident
+    resolver against ``Settings.diagnostics_dir`` itself, so a drift on either
+    side turns red.
+    """
+    import os
+    from unittest.mock import patch
+
+    from app.core.config import Settings
+
+    common = load_common()
+    env_file = tmp_path / "service.env"
+    cases = [
+        ({}, ""),
+        ({}, "DIAGNOSTICS_DIR=var/diag # ops\n"),
+        ({}, 'DIAGNOSTICS_DIR="/srv/diag"\n'),
+        ({}, "export DIAGNOSTICS_DIR=exported/diag\n"),
+        ({}, "diagnostics_dir=lower/diag\n"),
+        ({}, "DIAGNOSTICS_DIR=first\nDIAGNOSTICS_DIR=second\n"),
+        ({}, "DIAGNOSTICS_DIR=\n"),
+        ({"DIAGNOSTICS_DIR": "/env/diag"}, "DIAGNOSTICS_DIR=file/diag\n"),
+        ({"DIAGNOSTICS_DIR": "env/relative"}, ""),
+        ({"DIAGNOSTICS_DIR": "  "}, "DIAGNOSTICS_DIR=file/diag\n"),
+        ({"diagnostics_dir": "/lower/env"}, ""),
+    ]
+    for environ, text in cases:
+        env_file.write_text(text, encoding="utf-8")
+        with patch.dict(
+            os.environ,
+            {**environ, "SILICON_NOTEBOOK_ENV_FILE": str(env_file)},
+            clear=True,
+        ):
+            service = Settings(_env_file=str(env_file)).diagnostics_dir
+            configured = common.configured_diagnostics_dir(str(REPO))
+        incident = str(configured) if configured is not None else str(
+            REPO / ".local" / "diagnostics"
+        )
+        assert incident == service, (environ, text)

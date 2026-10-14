@@ -580,10 +580,17 @@ links or truncating the hostile target.
 
 `.local/diagnostics/` is the default of `DIAGNOSTICS_DIR` (a relative value anchors to the
 repository root). When a deployment sets it, the backend keeps `runtime.json`,
-`incident.lock`, and `thread-dumps.log` there, and `incident` resolves the same setting the
-way the service does—process environment first, then the env file (`SILICON_NOTEBOOK_ENV_FILE`
-or `.env`)—unless `--diagnostics-dir <path>` names it explicitly. DB snapshot workspaces stay
-in `diagnostics/db-snapshots/` beside the SQLite file being analyzed
+`incident.lock`, and `thread-dumps.log` there. A configured directory must either not exist
+yet (the backend then creates it as `0700`) or already be a real `0700` directory (not a
+symlink) owned by the service user; anything else, such as a directory pre-created with
+`mkdir -p` at `0755`, makes
+the runtime silently skip `runtime.json`, and `incident` then reports the runtime as
+unavailable. `incident` picks the directory in this order: an explicit
+`--diagnostics-dir <path>`, then the configured `DIAGNOSTICS_DIR` resolved the way the service
+does (process environment first, then the env file: `SILICON_NOTEBOOK_ENV_FILE` or `.env`),
+then `<--local>/diagnostics`. `--local` never redirects where the backend writes, so while
+`DIAGNOSTICS_DIR` is configured it does not move the directory `incident` reads either. DB
+snapshot workspaces stay in `diagnostics/db-snapshots/` beside the SQLite file being analyzed
 (`<local>/silicon_notebook.db`). The backend test process points `DIAGNOSTICS_DIR` at a
 per-process temporary directory, so test runs never write the checkout's copy.
 

@@ -2445,6 +2445,16 @@ def _api_modules_binding_repository() -> list[object]:
     return found
 
 
+def _assert_diagnostics_under(root: Path) -> None:
+    """The lifespan's diagnostics runtime must write beside the disposable DB."""
+    from app.core.diagnostics_runtime import current_runtime
+
+    runtime = current_runtime()
+    target = Path(runtime.diagnostics_dir).resolve() if runtime is not None else None
+    if target is None or not target.is_relative_to(root.resolve()):
+        raise RuntimeError(f"fixture diagnostics escaped the temp root: {target}")
+
+
 def _serialization_contract() -> dict[str, object]:
     """Capture representative payloads from the real repository and routes."""
     from fastapi.testclient import TestClient
@@ -2499,6 +2509,7 @@ def _serialization_contract() -> dict[str, object]:
             api_app = app_main.create_app()
 
             with TestClient(api_app) as client:
+                _assert_diagnostics_under(root)
                 created = client.post(
                     "/api/notebooks",
                     json={

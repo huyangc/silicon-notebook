@@ -51,3 +51,12 @@ def test_app_lifespan_writes_diagnostics_outside_the_checkout():
         while time.monotonic() < deadline and not snapshot.exists():
             time.sleep(0.01)
         assert json.loads(snapshot.read_text(encoding="utf-8"))["pid"] == os.getpid()
+
+
+def test_contract_fixture_generator_keeps_diagnostics_beside_its_database(tmp_path):
+    # Its API pass enters the app lifespan; without this the runtime would
+    # follow the ambient DIAGNOSTICS_DIR (the checkout, outside pytest).
+    from tests.architecture.repository_contract import fixture_generator
+
+    settings = fixture_generator()._offline_settings(tmp_path / "api.db", tmp_path / "storage")
+    assert Path(settings.diagnostics_dir) == tmp_path / "diagnostics"

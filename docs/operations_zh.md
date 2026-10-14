@@ -444,11 +444,16 @@ python3 scripts/diag.py incident --pid <backend-pid>
 诊断降级且不会跟随链接或截断敌对目标。
 
 `.local/diagnostics/` 是 `DIAGNOSTICS_DIR` 的默认值（相对路径锚定仓库根）。部署设置该项后，
-后端把 `runtime.json`、`incident.lock`、`thread-dumps.log` 放在那里；`incident` 按服务同样的
-优先级解析这一项——先进程环境变量，再 env 文件（`SILICON_NOTEBOOK_ENV_FILE` 或 `.env`）——
-也可以用 `--diagnostics-dir <path>` 显式指定。DB 快照 workspace 仍位于被分析的 SQLite 文件
-（`<local>/silicon_notebook.db`）旁边的 `diagnostics/db-snapshots/`。后端测试进程会把
-`DIAGNOSTICS_DIR` 指向本进程的临时目录，测试不会写 checkout 里的这份。
+后端把 `runtime.json`、`incident.lock`、`thread-dumps.log` 放在那里。配置的目录要么尚不存在
+（后端会按 `0700` 自建），要么已是服务用户所有的 `0700` 真实目录（不能是符号链接）；其它情况（例如先用 `mkdir -p`
+建成 `0755`）会让运行态静默跳过 `runtime.json`，`incident` 随后只报 runtime 不可用。
+`incident` 按以下顺序确定目录：显式的 `--diagnostics-dir <path>`；其次是已配置的
+`DIAGNOSTICS_DIR`，按服务同样的口径解析（先进程环境变量，再 env 文件：
+`SILICON_NOTEBOOK_ENV_FILE` 或 `.env`）；最后才是 `<--local>/diagnostics`。`--local` 从不改变
+后端写到哪里，所以配置了 `DIAGNOSTICS_DIR` 时它也不会改变 `incident` 读的目录。DB 快照
+workspace 仍位于被分析的 SQLite 文件（`<local>/silicon_notebook.db`）旁边的
+`diagnostics/db-snapshots/`。后端测试进程会把 `DIAGNOSTICS_DIR` 指向本进程的临时目录，测试
+不会写 checkout 里的这份。
 
 按以下顺序解释输出：
 

@@ -96,6 +96,7 @@ async def run() -> None:
         )
         from app.api.mcp_server import PUBLIC_TOOLS, TOOL_TIERS
         from app.core.config import get_settings
+        from app.core.diagnostics_runtime import current_runtime
         from app.core.request_context import reset_request_user, set_request_user
         from app.main import create_app
         from app.models.schemas import NotebookCreate
@@ -143,6 +144,13 @@ async def run() -> None:
 
         async with app.router.lifespan_context(app):
             await wait_for_ready(app)
+            # The lifespan started the diagnostics runtime; it must write under
+            # this smoke's temp root, never the checkout's .local/diagnostics.
+            runtime = current_runtime()
+            assert runtime is not None
+            assert Path(runtime.diagnostics_dir).resolve().is_relative_to(root.resolve()), (
+                runtime.diagnostics_dir
+            )
             async with Client(app, everything.token) as full:
                 listed = await full.session.list_tools()
                 assert [item.name for item in listed.tools] == list(PUBLIC_TOOLS)
