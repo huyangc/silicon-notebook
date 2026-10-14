@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from pathlib import Path
@@ -19,7 +20,8 @@ REQUIRED_LAYERS = {
         "fangan/testcases/harness/tests",
     ),
     "scripts/check_frontend.sh": (
-        "npm run test",
+        "npm run test:node",
+        "npm run test:component",
         "npm run build",
         "npm run lint",
     ),
@@ -171,14 +173,31 @@ def test_frontend_lane_recovers_the_test_file_diagnostics_next_drops():
         if not line.lstrip().startswith("#")
     ]
     sync_command = "npm run sync:ui-plugins"
-    test_command = "npm_config_ignore_scripts=true npm run test"
-    build_command = "npm_config_ignore_scripts=true npm run build"
-    lint_command = "npm_config_ignore_scripts=true npm run lint"
+    build_command = (
+        "run_step build env npm_config_ignore_scripts=true npm run build \\"
+    )
+    lint_command = (
+        "&& run_step typecheck env npm_config_ignore_scripts=true npm run lint"
+    )
     assert commands.count(sync_command) == 1
-    assert test_command in commands
-    assert build_command in commands
-    assert lint_command in commands
-    assert commands.index(lint_command) > commands.index(build_command)
+    # The typecheck is chained on the build's success, in the one function both
+    # the sequential and the parallel path call.
+    assert commands.index(lint_command) == commands.index(build_command) + 1
+    assert commands.count(build_command) == 1
+    assert commands.count("build_then_typecheck") == 1
+    assert commands.count("build_then_typecheck &") == 1
+
+    # The lane runs `npm run test` as its two halves, once per path; that is
+    # only complete while the package's test script is exactly those halves.
+    package = json.loads(
+        (ROOT / "frontend" / "package.json").read_text(encoding="utf-8")
+    )
+    assert package["scripts"]["test"] == (
+        "npm run test:node && npm run test:component"
+    )
+    for half in ("node-tests npm run test:node", "component-tests npm run test:component"):
+        assert commands.count(f"run_step {half}") == 1
+        assert commands.count(f"run_step {half} &") == 1
 
 
 def test_openapi_framework_versions_are_exactly_pinned():
