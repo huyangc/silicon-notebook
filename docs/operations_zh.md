@@ -443,6 +443,13 @@ python3 scripts/diag.py incident --pid <backend-pid>
 单硬链接、普通文件类型的 `0600` heartbeat/dump 文件；已有路径不安全或目录路径被替换时，
 诊断降级且不会跟随链接或截断敌对目标。
 
+`.local/diagnostics/` 是 `DIAGNOSTICS_DIR` 的默认值（相对路径锚定仓库根）。部署设置该项后，
+后端把 `runtime.json`、`incident.lock`、`thread-dumps.log` 放在那里；`incident` 按服务同样的
+优先级解析这一项——先进程环境变量，再 env 文件（`SILICON_NOTEBOOK_ENV_FILE` 或 `.env`）——
+也可以用 `--diagnostics-dir <path>` 显式指定。DB 快照 workspace 仍位于被分析的 SQLite 文件
+（`<local>/silicon_notebook.db`）旁边的 `diagnostics/db-snapshots/`。后端测试进程会把
+`DIAGNOSTICS_DIR` 指向本进程的临时目录，测试不会写 checkout 里的这份。
+
 按以下顺序解释输出：
 
 - `Confidence-ranked diagnoses` 最多列三个确定性规则生成的假设。`high` / `medium` / `low`
@@ -462,8 +469,8 @@ python3 scripts/diag.py incident --pid <backend-pid>
 
 `incident` 不需要 root 或第三方 Python 包，不 import `app`，也不会重启或终止进程。七个诊断
 命令对应用数据都只读：不执行 delete/其它业务写入，不做 SQLite checkpoint/vacuum/analyze/reindex，
-不跑 migration，也不自动修复。`incident` 仅可按上述约束维护有界的
-`.local/diagnostics/` 工件。
+不跑 migration，也不自动修复。`incident` 仅可按上述约束维护诊断目录（默认
+`.local/diagnostics/`）下的有界工件。
 
 ### 七命令诊断速查
 

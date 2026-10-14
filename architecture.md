@@ -392,7 +392,8 @@ Uvicorn worker。`npm run start` 只拉起脱离 terminal 的前后端进程就�
 job、SQLite 操作、写锁 holder/waiter，以及 KG/LLM/embedding concurrency/readiness。所有 helper 在
 runtime 未安装时为 no-op，安装后也必须 exception-safe；观测失败不传播到业务调用，不获取 SQLite
 写锁，不改变 transaction 语义，也不按每条 SQL 持久化事件。SQL 只归一化为 verb/table/fingerprint，
-永不持久化参数。运行态每两秒原子更新 `.local/diagnostics/runtime.json`，六秒以上的心跳按 stale
+永不持久化参数。运行态每两秒原子更新 `.local/diagnostics/runtime.json`（诊断目录由
+`DIAGNOSTICS_DIR` 配置，默认即 `.local/diagnostics`，下同），六秒以上的心跳按 stale
 处理，不能参与高置信推断。machine-local snapshot 可保留精确 opaque notebook id 以关联只读 DB
 证据；copyable report 必须把 notebook/request/job id 稳定映射为本报告内假名，并省略其它原始
 opaque id。

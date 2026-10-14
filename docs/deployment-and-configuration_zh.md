@@ -1258,6 +1258,7 @@ URL 来源会先下载已经过安全校验的公开 PDF。降级成功的来源
 LLM_LOG_ENABLED / LLM_LOG_PATH / LLM_LOG_MAX_CHARS
 MODEL_JSON_REPAIR_MODE  # off | shadow | on（默认 on）
 EVENT_LOG_ENABLED / EVENT_LOG_DIR
+DIAGNOSTICS_DIR         # 线上诊断 runtime.json / 线程栈目录（默认 .local/diagnostics）
 SLOW_REQUEST_MS         # 超过该毫秒数的请求标记 SLOW（默认 3000）
 SILICON_NOTEBOOK_CORS_ORIGINS
 ```

@@ -68,6 +68,19 @@ _MPLCONFIGDIR.mkdir(parents=True, exist_ok=True)
 if "PYTEST_XDIST_WORKER" not in os.environ:
     import matplotlib.font_manager as _matplotlib_font_manager  # noqa: F401
 
+# 进入 app lifespan 的用例（`with TestClient(app)` 等）会启动诊断运行态，按
+# DIAGNOSTICS_DIR 写 runtime.json / thread-dumps.log；不覆盖就落进 checkout 的
+# `.local/diagnostics`，且所有 xdist worker 抢同一份心跳文件。与日志目录同理在任何
+# 测试模块导入前强制指向本进程的临时目录（子目录留给运行态按 0700 自建）；开发者
+# shell 或 .env 里的值同样不该接收测试写入。
+# tests/test_diagnostics_dir_isolation.py 守住这条。
+import atexit as _atexit
+import tempfile as _tempfile
+
+_PROCESS_DIAGNOSTICS_ROOT = Path(_tempfile.mkdtemp(prefix="silicon-notebook-test-diagnostics-"))
+_atexit.register(shutil.rmtree, _PROCESS_DIAGNOSTICS_ROOT, ignore_errors=True)
+os.environ["DIAGNOSTICS_DIR"] = str(_PROCESS_DIAGNOSTICS_ROOT / "diagnostics")
+
 
 import pytest
 

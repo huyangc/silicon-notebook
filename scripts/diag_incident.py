@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from diag_common import normalize_http_path, read_channel
+from diag_common import configured_diagnostics_dir, normalize_http_path, read_channel
 from diag_db import collect_db_evidence
 from diag_process import (
     capture_thread_dump,
@@ -287,10 +287,27 @@ def _regular_file_size(path: Path) -> int | None:
     return max(0, int(metadata.st_size))
 
 
+def _diagnostics_dir(repo: Path, local_dir: Path, explicit: Path | str) -> Path:
+    """Where the backend keeps runtime.json / thread-dumps.log / incident.lock.
+
+    An explicit ``--diagnostics-dir`` wins, then the service's configured
+    ``DIAGNOSTICS_DIR``; otherwise the ``.local`` layout, whose child is the
+    service default. DB snapshot workspaces stay beside the database file.
+    """
+    if str(explicit):
+        return Path(explicit).resolve(strict=False)
+    try:
+        configured = configured_diagnostics_dir(str(repo))
+    except Exception:
+        configured = None
+    return configured if configured is not None else local_dir / "diagnostics"
+
+
 def collect_incident(
     *,
     root: Path | str = ".",
     local: Path | str = "",
+    diagnostics: Path | str = "",
     pid: int | None = None,
     notebook: str = "",
     since: float = 2.0,
@@ -306,7 +323,7 @@ def collect_incident(
     deadline = started + requested
     repo = Path(root).resolve(strict=False)
     local_dir = Path(local).resolve(strict=False) if str(local) else repo / ".local"
-    diagnostics_dir = local_dir / "diagnostics"
+    diagnostics_dir = _diagnostics_dir(repo, local_dir, diagnostics)
     evidence: dict[str, Any] = {
         "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "runtime": {},
@@ -510,6 +527,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--root", default=".")
     parser.add_argument("--local", default="")
+    parser.add_argument("--diagnostics-dir", default="")
     parser.add_argument("--pid", type=int)
     parser.add_argument("--notebook", default="")
     parser.add_argument("--since", type=float, default=2.0)
@@ -523,6 +541,7 @@ def _main(argv=None) -> int:
     report = collect_incident(
         root=args.root,
         local=args.local,
+        diagnostics=args.diagnostics_dir,
         pid=args.pid,
         notebook=args.notebook,
         since=args.since,

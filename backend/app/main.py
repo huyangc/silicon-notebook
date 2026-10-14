@@ -280,9 +280,8 @@ def create_app() -> FastAPI:
         # with the repository migration/cache warm-up readiness lifecycle.
         inner = mcp_server.streamable_http_app()
         async with inner.router.lifespan_context(inner):
-            root_dir = Path(__file__).resolve().parents[2]
             with diagnostics.activate_runtime(
-                root_dir / ".local" / "diagnostics",
+                Path(settings.diagnostics_dir),
                 readiness_provider=readiness.snapshot,
                 concurrency_provider=_diagnostic_concurrency_snapshot,
             ):
