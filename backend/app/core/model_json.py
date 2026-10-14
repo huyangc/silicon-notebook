@@ -819,19 +819,20 @@ def _closes_value_string(
     and so does the start of any JSON value -- a literal, a number, ``[]``,
     ``{"`` (``["first" null "second"]`` lost its commas; read as text, three
     values become one string). Either reading of such a quote could swallow
-    or invent a value. Inside an array, whitespace after the quote is
-    ambiguous too: ``["first" second "third"]`` may be three items that lost
-    their commas, while in an object value unkeyed items are not JSON at
-    all, so ``"the "foo" mode"`` there has one reading.
+    or invent a value. Inside an array every quote that does not close the
+    string is ambiguous: ``["first"second"third"]`` or ``["a" b "c"]`` may
+    be items that lost their commas around a bare one, whatever the
+    spacing. Only in an object value, where unkeyed items are not JSON at
+    all, does ``"the "foo" mode"`` have one reading.
     """
     index += 1
-    if in_array and text[index:index + 1] in {" ", "\t", "\r", "\n"}:
-        return None
     while index < len(text) and text[index] in " \t\r\n":
         index += 1
     following = text[index:index + 1]
     if not following or following in ",}]":
         return True
+    if in_array:
+        return None
     if following in ':"\'' or _starts_json_value(text, index):
         return None
     return False

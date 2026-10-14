@@ -1027,6 +1027,8 @@ def test_an_unescaped_quote_inside_a_value_is_read_as_text(
         # lost their commas around a bare one.
         '{"answer":"x","grounded":true,"queries":["first" second "third"]}',
         '{"answer":"x","grounded":true,"queries":["the "foo" mode"]}',
+        '{"answer":"x","grounded":true,"queries":["first"second"third"]}',
+        '{"answer":"x","grounded":true,"queries":["所谓"恒流"模式"]}',
     ],
 )
 def test_an_inner_quote_without_one_reading_stays_malformed(raw, allow_repair):
@@ -1086,6 +1088,18 @@ def test_a_container_after_an_inner_quote_is_never_read_as_text(
         return
     assert result.inner_quotes is False
     assert "first" in json.loads(result.content)["queries"]
+
+
+def test_whitespace_before_an_array_delimiter_still_closes_the_string():
+    # codex #875 R5: a normally spaced array beside an inner-quote answer
+    # must not abort the reading.
+    result = parse_model_json_object(
+        '{"answer":"所谓"恒流"模式","grounded":true,"queries":["a" , "b" ]}',
+        ANSWER_SCHEMA, allow_repair=False,
+    )
+
+    assert result.inner_quotes is True
+    assert json.loads(result.content)["queries"] == ["a", "b"]
 
 
 def test_a_nested_value_with_the_same_key_is_not_unwrapped():
