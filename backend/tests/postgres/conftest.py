@@ -522,6 +522,29 @@ def explain_with_sole_index(
     return "\n".join(str(row["QUERY PLAN"]) for row in rows)
 
 
+def scans_with_own_conditions(plan: str, table: str) -> list[tuple[str, list[str]]]:
+    """Each scan node of ``table`` in a ``COSTS OFF`` plan with the condition
+    lines directly under it (indented deeper, before the next node) -- never a
+    neighbouring node's. A ``Bitmap Heap Scan`` node's own lines carry its
+    ``Recheck Cond``; its ``Bitmap Index Scan`` child is a separate node."""
+    import re
+
+    lines = plan.splitlines()
+    scans = []
+    for at, line in enumerate(lines):
+        if not re.search(rf"\bScan\b.* on {table}\b", line):
+            continue
+        depth = len(line) - len(line.lstrip())
+        own = []
+        for below in lines[at + 1:]:
+            stripped = below.lstrip()
+            if len(below) - len(stripped) <= depth or stripped.startswith("->"):
+                break
+            own.append(stripped)
+        scans.append((line.strip(), own))
+    return scans
+
+
 def _database_for_scope(scope: ScopedPostgres):
     from app.repositories.postgres.database import PostgresDatabase
 

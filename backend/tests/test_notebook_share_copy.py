@@ -2111,42 +2111,107 @@ def test_copy_survives_the_source_being_rebuilt_mid_copy(repo, client, monkeypat
     )
 
 
-def test_a_large_cluster_with_a_memory_member_is_dropped_without_a_per_row_probe(repo):
-    """一个 600 成员的簇里有一个 Memory 成员:整簇不带;计数与快照都从「含 Memory 成员的簇」
-    集合做差,SQLite 上不出现按簇行对整簇的相关探测(拷贝在秒级以内完成)。"""
-    import time
+# 拷贝快照路径的「快」用工作量钉,不用墙钟:CI 并行门禁下同一段工作墙钟能慢一个量级
+# (本机 0.2 s 的快照在 CI 量到 3.19 s),墙钟上限既挡不住真回退、又会假红。两条用例
+# 在同一个库里先量一档规模、加倍后再量一档,比较两档的工作量——
+#
+# * 发出的语句:两档逐条相同(条数与对象数无关,没有按对象/按簇行发语句);
+# * 「含 Memory 成员的簇」集合:尺寸复核与快照各读一次;
+# * SQLite 虚拟机执行的指令数(progress handler 每 _VM_TICK 条指令记一次):规模加倍,
+#   指令数增长不到 _LINEAR_GROWTH 倍。线性工作加倍是 2 倍以内(还有不随规模变的固定
+#   部分);按对象把本库全部簇行走一遍、或按簇行把整簇走一遍都是平方级,加倍是近 4 倍。
+#
+# 指令数随 SQLite 版本略有出入(CI 3.45、本机 3.53),所以只比同一次运行里两档的比值。
+_VM_TICK = 1000
+_LINEAR_GROWTH = 2.5
 
-    _seed_memory_world(repo)
-    rows = [
+
+def _snapshot_work(repo, notebook_id):
+    """尺寸复核 + 快照在 SQLite 上的工作量:(虚拟机指令数, 语句列表, 快照,
+    读「含 Memory 成员的簇」集合的次数)。钩在本线程复用的那条连接上——
+    sharing_store 的 ``database.connect()`` 拿到的就是它。"""
+    from app.repositories.sqlite import sharing_store as store_module
+
+    store = repo._runtime.sharing_store
+    connection = store.database.connect()
+    ticks = [0]
+    statements: list[str] = []
+    key_reads = [0]
+    original_keys = store_module._memory_member_keys
+
+    def tick():
+        ticks[0] += 1
+        return 0
+
+    def counted_keys(db, nb):
+        key_reads[0] += 1
+        return original_keys(db, nb)
+
+    connection.set_progress_handler(tick, _VM_TICK)
+    connection.set_trace_callback(statements.append)
+    store_module._memory_member_keys = counted_keys
+    try:
+        assert store.snapshot_copy_within_limits(notebook_id)
+        snapshot = store.snapshot_copy_rows(notebook_id)
+    finally:
+        store_module._memory_member_keys = original_keys
+        connection.set_progress_handler(None, 0)
+        connection.set_trace_callback(None)
+    assert statements and ticks[0] > 0, "the hooks saw the snapshot path's connection"
+    return ticks[0] * _VM_TICK, statements, snapshot, key_reads[0]
+
+
+def _assert_linear_snapshot_work(small, large):
+    small_work, small_statements, _snapshot, small_key_reads = small
+    work, statements, _snapshot, key_reads = large
+    assert statements == small_statements, (small_statements, statements)
+    assert small_key_reads == key_reads == 2, (small_key_reads, key_reads)
+    assert work < _LINEAR_GROWTH * small_work, (small_work, work)
+
+
+def _hub_rows(members: range) -> list:
+    return [
         memory_cases.Row("knowledge_objects", {
             "id": f"ko-hub-{i}", "notebook_id": memory_cases.NOTEBOOK, "object_type": "concept",
             "status": "approved", "source_id": "src-doc", "payload": {"name": f"hub {i}"},
             "evidence": [], "created_at": memory_cases.NOW, "updated_at": memory_cases.NOW,
         })
-        for i in range(600)
+        for i in members
     ] + [
+        memory_cases.Row("concept_clusters", {
+            "id": f"cc-hub-ko-hub-{i}", "notebook_id": memory_cases.NOTEBOOK,
+            "canonical_id": "K-hub", "member_object_id": f"ko-hub-{i}", "canonical_name": "hub",
+            "object_type": "concept", "created_at": memory_cases.NOW, "generation": 0,
+        })
+        for i in members
+    ]
+
+
+def test_a_large_cluster_with_a_memory_member_is_dropped_without_a_per_row_probe(repo):
+    """一个 600 成员的簇里有一个 Memory 成员:整簇不带;计数与快照都从「含 Memory 成员的簇」
+    集合做差,SQLite 上不出现按簇行对整簇的相关探测——簇从 300 成员长到 600 成员,
+    快照路径的工作量线性增长(见 ``_snapshot_work`` 上方的说明)。"""
+    _seed_memory_world(repo)
+    _insert_rows(repo, _hub_rows(range(300)) + [
         memory_cases.Row("knowledge_objects", {
-            "id": "ko-alice-hub", "notebook_id": memory_cases.NOTEBOOK, "object_type": "concept",
+            "id": "ko-~alice-hub", "notebook_id": memory_cases.NOTEBOOK, "object_type": "concept",
             "status": "approved", "source_id": "src-mem-alice",
             "payload": {"name": f"{memory_cases.MARK} hub"}, "evidence": [],
             "created_at": memory_cases.NOW, "updated_at": memory_cases.NOW,
         }, True),
-    ] + [
         memory_cases.Row("concept_clusters", {
-            "id": f"cc-hub-{member}", "notebook_id": memory_cases.NOTEBOOK,
-            "canonical_id": "K-hub", "member_object_id": member, "canonical_name": "hub",
+            "id": "cc-hub-ko-~alice-hub", "notebook_id": memory_cases.NOTEBOOK,
+            "canonical_id": "K-hub", "member_object_id": "ko-~alice-hub", "canonical_name": "hub",
             "object_type": "concept", "created_at": memory_cases.NOW, "generation": 0,
-        })
-        for member in [f"ko-hub-{i}" for i in range(600)] + ["ko-alice-hub"]
-    ]
-    _insert_rows(repo, rows)
-    store = repo._runtime.sharing_store
-    started = time.monotonic()
-    assert store.snapshot_copy_within_limits(memory_cases.NOTEBOOK)
-    snapshot = store.snapshot_copy_rows(memory_cases.NOTEBOOK)
-    elapsed = time.monotonic() - started
-    assert {r["canonical_id"] for r in snapshot["concept_clusters"]} == {"K-shared"}
-    assert elapsed < 5, elapsed
+        }),
+    ])
+    small = _snapshot_work(repo, memory_cases.NOTEBOOK)
+    _insert_rows(repo, _hub_rows(range(300, 600)))
+    large = _snapshot_work(repo, memory_cases.NOTEBOOK)
+    for _work, _statements, snapshot, _reads in (small, large):
+        assert {r["canonical_id"] for r in snapshot["concept_clusters"]} == {"K-shared"}
+    assert sum(r["id"].startswith("ko-hub-") for r in large[2]["knowledge_objects"]) == 600
+    _assert_linear_snapshot_work(small, large)
 
 
 def test_cluster_statements_read_concept_clusters_once_on_sqlite(repo):
@@ -2193,15 +2258,10 @@ def test_member_keys_probe_clusters_by_member_on_a_database_without_statistics(r
     ], plan
 
 
-def test_many_memory_objects_in_small_clusters_copy_quickly(repo):
-    """P1-A 的实际形态:2000 个 Memory 对象,每个和一个共享对象组成两人簇(共 4000 对象,
-    在拷贝上限以内)。尺寸复核与快照都在秒级以内,两人簇整簇不带。"""
-    import time
-
+def _memory_pair_rows(pairs: range) -> list:
     nb = memory_cases.NOTEBOOK
-    _seed_memory_world(repo)
     rows = []
-    for i in range(2000):
+    for i in pairs:
         rows += [
             memory_cases.Row("knowledge_objects", {
                 "id": f"ko-many-mem-{i}", "notebook_id": nb, "object_type": "concept",
@@ -2223,14 +2283,24 @@ def test_many_memory_objects_in_small_clusters_copy_quickly(repo):
             })
             for member in (f"ko-many-mem-{i}", f"ko-many-doc-{i}")
         ]
-    _insert_rows(repo, rows)
-    store = repo._runtime.sharing_store
-    started = time.monotonic()
-    assert store.snapshot_copy_within_limits(nb)
-    snapshot = store.snapshot_copy_rows(nb)
-    elapsed = time.monotonic() - started
-    assert {r["canonical_id"] for r in snapshot["concept_clusters"]} == {"K-shared"}
-    assert elapsed < 3, elapsed
+    return rows
+
+
+def test_many_memory_objects_in_small_clusters_copy_quickly(repo):
+    """P1-A 的实际形态:2000 个 Memory 对象,每个和一个共享对象组成两人簇(共 4000 对象,
+    在拷贝上限以内),两人簇整簇不带。从 1000 对长到 2000 对,尺寸复核与快照的工作量
+    线性增长(见 ``_snapshot_work`` 上方的说明):「含 Memory 成员的簇」集合按
+    ``idx_clusters_member`` 逐个 Memory 对象探测,不会让每个 Memory 对象把本库全部簇行
+    走一遍。"""
+    _seed_memory_world(repo)
+    _insert_rows(repo, _memory_pair_rows(range(1000)))
+    small = _snapshot_work(repo, memory_cases.NOTEBOOK)
+    _insert_rows(repo, _memory_pair_rows(range(1000, 2000)))
+    large = _snapshot_work(repo, memory_cases.NOTEBOOK)
+    for _work, _statements, snapshot, _reads in (small, large):
+        assert {r["canonical_id"] for r in snapshot["concept_clusters"]} == {"K-shared"}
+    assert sum(r["id"].startswith("ko-many-doc-") for r in large[2]["knowledge_objects"]) == 2000
+    _assert_linear_snapshot_work(small, large)
 
 
 def test_validate_and_compensate_both_consume_the_copys_cluster_decision(repo, monkeypatch):
