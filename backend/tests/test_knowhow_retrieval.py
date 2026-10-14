@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import io
 import json
-import threading
 import time
 
 import pytest
@@ -36,13 +35,15 @@ from app.models.schemas import AskRequest
 from app.services.embedding import FakeEmbedder
 from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_chat_client
+from tests.knowhow_world_testkit import quiesce_knowhow_world, world_payload
 from tests.world_templates import world_env, world_template
 
 EMBED_DIM = 16
 
-# One worker runs the whole file, so the imported world is built once for it
-# instead of once per worker that happens to get one of these tests.
-pytestmark = pytest.mark.xdist_group(name="knowhow_retrieval_world")
+# One worker runs this file and test_knowhow_kg_node_retrieval.py (same group,
+# same template key), so the imported world is built once for the gate instead
+# of once per worker that happens to get one of these tests.
+pytestmark = pytest.mark.xdist_group(name="knowhow_imported_world")
 
 # Time-series-fix-up domain column names, verbatim from the task brief
 # ("列名用时序修复域：违例概念/现象识别方法/根因分析动作/修复方法/依赖工具") —
@@ -123,38 +124,6 @@ def _open_app_client() -> TestClient:
     bind_all_embedding_clients(c._repo, FakeEmbedder(dim=EMBED_DIM))
     assert c._repo.configured("knowhow_embedding")
     return c
-
-
-def quiesce_knowhow_world(timeout: float = 10.0) -> None:
-    """Wait until nothing is still projecting. A world is copied as bytes, so
-    a projection run, a debounce timer or the orphan-asset sweep job still in
-    flight would land in the template AFTER it was frozen (or in a closed
-    database). Same condition the autouse teardown in conftest enforces."""
-    from app.services import background_jobs
-    from app.services.knowhow import api as knowhow_api
-
-    deadline = time.monotonic() + timeout
-    while True:
-        busy = False
-        for scheduler in list(knowhow_api._SCHEDULERS.values()):
-            with scheduler._lock:
-                busy = busy or bool(
-                    scheduler._running or scheduler._timers or scheduler._rerun
-                )
-        if not busy:
-            break
-        assert time.monotonic() < deadline, "knowhow projection never went idle"
-        time.sleep(0.01)
-    background_jobs._drain_maintenance_executors_for_tests(timeout=timeout)
-    # SQLite connections are per thread, and ``repository.close()`` only closes
-    # the calling thread's: the pool's worker threads still hold theirs inside
-    # the world. Stop the pools and wait for their threads to exit (the same
-    # reset conftest does after every test) so the world can be proven closed.
-    background_jobs._reset_maintenance_gate_for_tests()
-    deadline = time.monotonic() + timeout
-    while any(t.name.startswith("background-") for t in threading.enumerate()):
-        assert time.monotonic() < deadline, "background workers never exited"
-        time.sleep(0.01)
 
 
 @pytest.fixture
@@ -261,7 +230,7 @@ def _reopen_imported_world(root):
 @pytest.fixture
 def imported(client):
     """The imported-and-projected world of ``client`` (see ``client``)."""
-    return client._world_payload
+    return world_payload(client, "imported")
 
 
 # ---------------------------------------------------------------------------
