@@ -397,6 +397,15 @@ _BYTECODE_PRUNED_ENV = "SN_TESTS_BYTECODE_PRUNED"
 
 
 def pytest_configure(config):
+    # The one pytest_configure in this file (a second definition would silently
+    # replace the first). Install the test-process-only speedups before any
+    # test module imports ``app.main`` (its module-level ``create_app()`` runs
+    # during collection); each one is documented and pinned in
+    # ``tests/speedups/``.
+    from tests import speedups
+
+    speedups.register(config)
+
     # Once per top-level session, in the controller (or the only process),
     # before any worker starts compiling. The marker is inherited by the
     # workers and by the pytest sessions some tests start in a subprocess, so
