@@ -18,6 +18,12 @@
 //     依赖数组文本识别,不用行号。依赖数组文本也是行为:拉表详情 effect 只依赖
 //     selectedTableId(S6),加回 loadDetail 会让它在切笔记本时先于复位执行、对新
 //     笔记本多发一次注定被丢弃的旧表详情请求。
+//  4b. 作废 in-flight 表详情的两次 bump(S6):拉详情 effect 的 cleanup 与 notebook
+//     复位 effect 的函数体里都必须有 `detailRequestRef.current += 1`。后者只防两次
+//     提交之间落地的旧笔记本响应,act() 下的组件用例观察不到那个窗口,只能在这里钉。
+//     另外每处 setSelectedTableId 所在的函数都必须先把同一个值写进
+//     selectedTableIdRef(openTable 判断「重开同一张表」与异步命令判断「用户还在不在
+//     这张表」都读它)。
 //  5. 回调身份:搬家没有改变任何回调的 useCallback 状态。loadTables 仍是
 //     useCallback([notebookId])、loadRowCode 仍是 useCallback([]);
 //     handleCodeSaved/handleCodeDeleted/deleteConcept/deleteBranch 仍是每次渲染
@@ -297,6 +303,77 @@ function panelOrderViolations(sourceFile, ownerName, expected) {
   return violations;
 }
 
+
+// ── 4b. 详情请求作废点与选中表镜像 ────────────────────────────────────────────
+
+const DETAIL_BUMP = "detailRequestRef.current += 1";
+
+function topLevelEffect(owner, sourceFile, depsText) {
+  for (const statement of owner.body.statements) {
+    const call = statementHookCall(statement);
+    if (
+      call && ts.isCallExpression(call) && ts.isIdentifier(call.expression)
+      && call.expression.text === "useEffect" && call.arguments[1]
+      && flatText(call.arguments[1], sourceFile) === depsText
+    ) return call.arguments[0];
+  }
+  return null;
+}
+
+function bodyStatements(fn) {
+  return fn && fn.body && ts.isBlock(fn.body) ? fn.body.statements : [];
+}
+
+function hasBump(statements, sourceFile) {
+  return statements.some((statement) => ts.isExpressionStatement(statement) && flatText(statement.expression, sourceFile) === DETAIL_BUMP);
+}
+
+function detailInvalidationViolations(sourceFile, ownerName) {
+  const owner = findFunction(sourceFile, ownerName);
+  const violations = [];
+  const reset = topLevelEffect(owner, sourceFile, "[notebookId]");
+  if (!reset || !hasBump(bodyStatements(reset), sourceFile)) {
+    violations.push(`notebook 复位 effect 的函数体里必须有 ${DETAIL_BUMP}`);
+  }
+  const load = topLevelEffect(owner, sourceFile, "[selectedTableId]");
+  const cleanup = bodyStatements(load)
+    .filter((statement) => ts.isReturnStatement(statement) && statement.expression)
+    .map((statement) => statement.expression)
+    .find((expression) => ts.isArrowFunction(expression) || ts.isFunctionExpression(expression));
+  if (!cleanup || !hasBump(bodyStatements(cleanup), sourceFile)) {
+    violations.push(`拉表详情 effect 的 cleanup 里必须有 ${DETAIL_BUMP}`);
+  }
+  return violations;
+}
+
+function enclosingFunction(node) {
+  let current = node.parent;
+  while (current && !ts.isFunctionDeclaration(current) && !ts.isArrowFunction(current) && !ts.isFunctionExpression(current)) {
+    current = current.parent;
+  }
+  return current ?? null;
+}
+
+function selectionMirrorViolations(sourceFile, ownerName) {
+  const owner = findFunction(sourceFile, ownerName);
+  const violations = [];
+  function visit(node) {
+    if (
+      ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+      && node.expression.text === "setSelectedTableId" && node.arguments.length === 1
+    ) {
+      const value = flatText(node.arguments[0], sourceFile);
+      const mirrored = bodyStatements(enclosingFunction(node)).some((statement) =>
+        ts.isExpressionStatement(statement)
+        && flatText(statement.expression, sourceFile) === `selectedTableIdRef.current = ${value}`);
+      if (!mirrored) violations.push(`setSelectedTableId(${value}) 所在函数没有同步写 selectedTableIdRef.current = ${value}`);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(owner.body);
+  return violations;
+}
+
 // ── 5. 回调身份 ─────────────────────────────────────────────────────────────
 
 function hookCallbackViolations(sourceFile, spec) {
@@ -397,6 +474,11 @@ test("KnowhowPanel 的 effect 与 owner hook 调用顺序不变,概念矩阵 hoo
   assert.deepEqual(panelOrderViolations(panel, "KnowhowPanel", PANEL_HOOK_ORDER), []);
 });
 
+test("表详情请求的两处作废点都在,选中表镜像与每处 setSelectedTableId 同步", () => {
+  assert.deepEqual(detailInvalidationViolations(panel, "KnowhowPanel"), []);
+  assert.deepEqual(selectionMirrorViolations(panel, "KnowhowPanel"), []);
+});
+
 test("三个 owner hook 的回调身份与搬家前相同", async () => {
   for (const [module, spec] of HOOK_CALLBACKS) {
     assert.deepEqual(hookCallbackViolations(await parseModule(module), spec), [], module);
@@ -420,12 +502,13 @@ import { KnowhowTableList } from "./knowhow-table-list.tsx";
 function Panel({ notebookId }) {
   const knowhowTableList = useKnowhowTableList({ notebookId });
   useEffect(() => { mounted.current = true; }, []);
-  useEffect(() => { load(); }, [selectedTableId]);
+  useEffect(() => { load(); return () => { detailRequestRef.current += 1; }; }, [selectedTableId]);
   const knowhowRowCode = useKnowhowRowCode(openRowId);
-  useEffect(() => { reset(); }, [notebookId]);
+  useEffect(() => { detailRequestRef.current += 1; selectedTableIdRef.current = null; setSelectedTableId(null); }, [notebookId]);
   useEffect(() => { jump(); }, [initialTableId, initialRowId]);
   useEffect(() => { route(); }, [initialRowId, detail]);
   useEffect(() => { stale(); }, [detail, detailError, initialRowId, initialTableId, selectedTableId]);
+  function openTable(tableId) { selectedTableIdRef.current = tableId; setSelectedTableId(tableId); }
   const openRow = rows.find((row) => row.id === openRowId);
   const knowhowConceptMatrix = useKnowhowConceptMatrix({ notebookId });
   return (
@@ -469,6 +552,8 @@ function selfPanelViolations(body) {
     ...reverseImportViolations(sourceFile),
     ...panelOrderViolations(sourceFile, "Panel", PANEL_HOOK_ORDER),
     ...panelBindingViolations(sourceFile),
+    ...detailInvalidationViolations(sourceFile, "Panel"),
+    ...selectionMirrorViolations(sourceFile, "Panel"),
   ];
 }
 
@@ -517,14 +602,14 @@ const PANEL_MUTANTS = [
   },
   {
     label: "行代码 hook 提前到拉表详情 effect 之前",
-    from: "  useEffect(() => { load(); }, [selectedTableId]);\n  const knowhowRowCode = useKnowhowRowCode(openRowId);",
-    to: "  const knowhowRowCode = useKnowhowRowCode(openRowId);\n  useEffect(() => { load(); }, [selectedTableId]);",
+    from: "  useEffect(() => { load(); return () => { detailRequestRef.current += 1; }; }, [selectedTableId]);\n  const knowhowRowCode = useKnowhowRowCode(openRowId);",
+    to: "  const knowhowRowCode = useKnowhowRowCode(openRowId);\n  useEffect(() => { load(); return () => { detailRequestRef.current += 1; }; }, [selectedTableId]);",
     expect: /effect\/owner hook 顺序变了/,
   },
   {
     label: "notebook 复位与引用跳转对调",
-    from: "  useEffect(() => { reset(); }, [notebookId]);\n  useEffect(() => { jump(); }, [initialTableId, initialRowId]);",
-    to: "  useEffect(() => { jump(); }, [initialTableId, initialRowId]);\n  useEffect(() => { reset(); }, [notebookId]);",
+    from: "  useEffect(() => { detailRequestRef.current += 1; selectedTableIdRef.current = null; setSelectedTableId(null); }, [notebookId]);\n  useEffect(() => { jump(); }, [initialTableId, initialRowId]);",
+    to: "  useEffect(() => { jump(); }, [initialTableId, initialRowId]);\n  useEffect(() => { detailRequestRef.current += 1; selectedTableIdRef.current = null; setSelectedTableId(null); }, [notebookId]);",
     expect: /effect\/owner hook 顺序变了/,
   },
   {
@@ -539,6 +624,30 @@ const PANEL_MUTANTS = [
     from: "  const knowhowConceptMatrix = useKnowhowConceptMatrix({ notebookId });\n",
     to: "  const knowhowConceptMatrix = useKnowhowConceptMatrix({ notebookId });\n  const late = useMemo(() => 1, []);\n",
     expect: /useKnowhowConceptMatrix 之后还有 hook 调用/,
+  },
+  {
+    label: "notebook 复位不再作废 in-flight 表详情",
+    from: "  useEffect(() => { detailRequestRef.current += 1; selectedTableIdRef.current = null;",
+    to: "  useEffect(() => { selectedTableIdRef.current = null;",
+    expect: /notebook 复位 effect 的函数体里必须有/,
+  },
+  {
+    label: "拉表详情 effect 的 cleanup 不再作废",
+    from: "load(); return () => { detailRequestRef.current += 1; }; }, [selectedTableId]);",
+    to: "load(); return () => { cancelled = true; }; }, [selectedTableId]);",
+    expect: /拉表详情 effect 的 cleanup 里必须有/,
+  },
+  {
+    label: "openTable 写选中表却不写镜像",
+    from: "function openTable(tableId) { selectedTableIdRef.current = tableId; setSelectedTableId(tableId); }",
+    to: "function openTable(tableId) { setSelectedTableId(tableId); }",
+    expect: /setSelectedTableId\(tableId\) 所在函数没有同步写 selectedTableIdRef\.current = tableId/,
+  },
+  {
+    label: "镜像写的值与选中表不一致",
+    from: "selectedTableIdRef.current = null; setSelectedTableId(null); }, [notebookId]);",
+    to: "selectedTableIdRef.current = undefined; setSelectedTableId(null); }, [notebookId]);",
+    expect: /setSelectedTableId\(null\) 所在函数没有同步写/,
   },
   {
     label: "setter 包一层箭头再传",
