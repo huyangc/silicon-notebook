@@ -907,9 +907,11 @@ class KnowledgeLifecycleService:
         try:
             self._sweep_drain_only_residue(notebook_id, totals)
         except Exception as exc:  # noqa: BLE001 - auxiliary sweep is fail-open
+            # Class name only: exception text and tracebacks may carry
+            # database diagnostics or private paths (AGENTS.md logging rule).
             self.event_log.logger.warning(
-                "kg delete residue sweep failed for %s", notebook_id,
-                exc_info=True)
+                "kg delete residue sweep failed for %s: %s", notebook_id,
+                type(exc).__name__)
             self.event_log.emit({
                 "kind": "kg_delete_residue_sweep_failed",
                 "notebook_id": notebook_id,
@@ -939,7 +941,15 @@ class KnowledgeLifecycleService:
         those steps, and a write only when it found something (the happy path
         adds two probe statements and no transaction). No seq bump: these are
         not graph rows. Rows committed after this sweep are new writes
-        against the advanced epoch, which the conflict write gate refuses."""
+        against the advanced epoch, which the conflict write gate refuses.
+
+        A step is swept page by page until its probe comes back empty: the
+        residue can exceed one page (a page is ``_graph_drain_budget_rows``),
+        and these steps are outside the survivor check, so advancing after
+        one page would leave the rest behind with the delete reported done.
+        It terminates because nothing refills these steps once the epoch has
+        moved; a page that deletes nothing while the probe still names its
+        step (predicate and pager disagreeing) moves on instead of spinning."""
         start = 0
         while True:
             with self._connect() as db:
@@ -955,7 +965,7 @@ class KnowledgeLifecycleService:
                 )
             for name, n in swept.items():
                 totals[name] = totals.get(name, 0) + n
-            start = step + 1
+            start = step if any(swept.values()) else step + 1
 
     def _drain_graph_rows_before_reset(self, notebook_id: str) -> dict[str, int]:
         """batch-3-W1 T-5a: bound ``delete_notebook_kg``'s final single
