@@ -1491,9 +1491,56 @@ def test_expired_failure_state_is_reclaimed_and_bounded(repo, monkeypatch):
     assert second.id not in scale._scale_failure_state
 
 
+def _record_build_workers(scale, monkeypatch) -> list[threading.Thread]:
+    """Run every build worker on a thread this test can join.
+
+    Leaving ``_scale_pending`` is NOT the end of a parked notebook's build:
+    admission pops the entry and adds ``building`` in one step under
+    ``building_lock`` and only then starts the worker that runs the build (and,
+    in its tail, hands the freed slot on). So "pending is empty" says every
+    parked notebook was claimed, not that its build ran; asserting what the
+    builds recorded right after it races the last worker. Join the workers.
+
+    The resident scheduler never exits and starts nothing within a test, so it
+    goes to the real launcher unrecorded.
+    """
+    workers: list[threading.Thread] = []
+    real_start = scale._start_daemon
+
+    def start(name, target):
+        if name == "scaleidx-scheduler":
+            real_start(name, target)
+            return
+        thread = threading.Thread(target=target, name=name, daemon=True)
+        workers.append(thread)
+        thread.start()
+
+    monkeypatch.setattr(scale, "_start_daemon", start)
+    return workers
+
+
+def _join_build_workers(workers: list[threading.Thread], timeout: float = 10) -> None:
+    """Join every recorded worker, including the ones started meanwhile.
+
+    A finishing worker starts the next one (follow-up claim / slot handoff) in
+    its own tail, so that successor is already recorded by the time the
+    finishing worker's join returns; walking the growing list therefore ends
+    exactly when the whole chain has exited.
+    """
+    deadline = time.monotonic() + timeout
+    index = 0
+    while index < len(workers):
+        worker = workers[index]
+        worker.join(timeout=max(0.0, deadline - time.monotonic()))
+        assert not worker.is_alive(), f"{worker.name} still running"
+        index += 1
+
+
 def _occupy_all_slots(scale, monkeypatch, repo, capacity=1):
     """Fill the concurrency ceiling with one blocking build and return the
-    handle that lets it finish (plus that notebook)."""
+    handle that lets it finish (plus that notebook, what the builds recorded
+    and the joinable worker threads)."""
+    workers = _record_build_workers(scale, monkeypatch)
     holder = _seed(repo)
     _base_tier(repo, holder)
     scale._scale_build_semaphore = threading.BoundedSemaphore(capacity)
@@ -1513,7 +1560,7 @@ def _occupy_all_slots(scale, monkeypatch, repo, capacity=1):
     monkeypatch.setattr(scale.builder, "build", build)
     assert scale._run_scale_op(holder.id, "full") is True
     assert inside.wait(timeout=5)
-    return holder, finish, built
+    return holder, finish, built, workers
 
 
 def test_slot_parked_notebook_reports_queued_and_cancels_without_a_thread(
@@ -1522,7 +1569,7 @@ def test_slot_parked_notebook_reports_queued_and_cancels_without_a_thread(
     """P2-3:拿不到 slot 的库报「已排队」而不是「构建中」,而且 cancel 就是
     删一条记录 —— 它背后压根没有线程要唤醒/中断。"""
     scale = repo._runtime.scale_artifacts
-    holder, finish, built = _occupy_all_slots(scale, monkeypatch, repo)
+    holder, finish, built, workers = _occupy_all_slots(scale, monkeypatch, repo)
     notebook = _seed(repo)
     _base_tier(repo, notebook)
 
@@ -1555,12 +1602,15 @@ def test_slot_parked_notebook_reports_queued_and_cancels_without_a_thread(
     # 取消之后重新触发照常受理(仍无 slot → 重新入停车位,依旧零线程)。
     assert scale._run_scale_op(notebook.id, "full") is False
     assert notebook.id in scale._scale_pending
-    assert _live_workers() == 1  # 只有占位的那一条
+    # 只有占位的那一条。按本用例起的线程判,不数全进程同名线程(前序用例收尾
+    # 中的 worker 会把全局计数撑大)。
+    assert [worker.name for worker in workers] == [f"scaleidx-{holder.id}"]
+    assert workers[0].is_alive()
 
     finish.set()
-    deadline = time.monotonic() + 10
-    while notebook.id in scale._scale_pending and time.monotonic() < deadline:
-        time.sleep(0.01)
+    # 出停车位 ≠ 构建跑完(认领在前、起线程在后),所以等的是 worker 退出。
+    _join_build_workers(workers)
+    assert notebook.id not in scale._scale_pending
     assert built == [holder.id, notebook.id]
 
 
@@ -1568,7 +1618,7 @@ def test_completed_build_hands_its_slot_to_the_parked_queue(repo, monkeypatch):
     """P2-3/handoff:admission 不再阻塞线程等票,所以空出来的 slot 必须由收尾的
     worker 主动交棒 —— 否则停车位上的活要等下一次调度器 tick(窗口外则遥遥无期)。"""
     scale = repo._runtime.scale_artifacts
-    holder, finish, built = _occupy_all_slots(scale, monkeypatch, repo)
+    holder, finish, built, workers = _occupy_all_slots(scale, monkeypatch, repo)
     parked = [_seed(repo) for _ in range(2)]
     for notebook in parked:
         _base_tier(repo, notebook)
@@ -1577,16 +1627,17 @@ def test_completed_build_hands_its_slot_to_the_parked_queue(repo, monkeypatch):
 
     # 没有任何 tick / 外部请求:只让占位的那次构建结束。
     finish.set()
-    deadline = time.monotonic() + 10
-    while scale._scale_pending and time.monotonic() < deadline:
-        time.sleep(0.01)
+    # 等整条交棒链的 worker 都退出,而不是等 _scale_pending 变空:后者在最后
+    # 一个库被认领时就成立了,它的构建此时可能还没开始(认领在前、起线程在后)。
+    # 调度器 tick 至少隔 30s,链在超时内跑完只能是收尾交棒做的。
+    _join_build_workers(workers)
 
     assert scale._scale_pending == {}
     assert sorted(built) == sorted([holder.id] + [nb.id for nb in parked])
-    deadline = time.monotonic() + 5
-    while _live_workers() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert _live_workers() == 0
+    # 每个库恰好一条 worker,且全部已退出(_join_build_workers 已断言)。
+    assert sorted(worker.name for worker in workers) == sorted(
+        f"scaleidx-{nb_id}" for nb_id in [holder.id] + [nb.id for nb in parked]
+    )
 
 
 # ---------------------------------------------------------------------------
