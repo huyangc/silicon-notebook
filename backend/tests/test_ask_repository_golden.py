@@ -129,11 +129,12 @@ def test_the_fixture_clock_advances_only_for_the_runs_own_reads():
     holder = SimpleNamespace(perf_counter=clock)
     read = _app_code_reading(holder)
 
-    assert read() == pytest.approx(1000.001)
-    # Not application code (a gc callback, a test plugin, a library): the real
-    # clock, and the fixture clock does not move.
-    assert clock() != pytest.approx(1000.002)
-    assert read() == pytest.approx(1000.002)
+    with clock:
+        assert read() == pytest.approx(1000.001)
+        # Not application code (a gc callback, a test plugin, a library): the
+        # real clock, and the fixture clock does not move.
+        assert clock() != pytest.approx(1000.002)
+        assert read() == pytest.approx(1000.002)
 
     # A thread that already existed when the run started is not the run's,
     # even when it runs application code.
@@ -149,18 +150,73 @@ def test_the_fixture_clock_advances_only_for_the_runs_own_reads():
     early.start()
     clock = _generator_module()._FixtureClock()
     holder.perf_counter = clock
-    go.set()
-    assert done.wait(5)
-    early.join(5)
-    assert seen[0] != pytest.approx(1000.001)
+    with clock:
+        go.set()
+        assert done.wait(5)
+        early.join(5)
+        assert seen[0] != pytest.approx(1000.001)
 
-    # A thread started during the run (the model scheduler, a retrieval pool)
-    # is the run's.
-    worker = threading.Thread(target=lambda: seen.append(read()))
-    worker.start()
-    worker.join(5)
-    assert seen[1] == pytest.approx(1000.001)
-    assert read() == pytest.approx(1000.002)
+        # A thread the run starts (the model scheduler, a retrieval pool) is
+        # the run's, and so is one that thread starts in turn.
+        def nested() -> None:
+            inner = threading.Thread(target=lambda: seen.append(read()))
+            inner.start()
+            inner.join(5)
+
+        worker = threading.Thread(target=lambda: (seen.append(read()), nested()))
+        worker.start()
+        worker.join(5)
+        assert seen[1:] == [pytest.approx(1000.001), pytest.approx(1000.002)]
+        assert read() == pytest.approx(1000.003)
+
+
+def test_a_thread_a_leftover_thread_starts_mid_run_is_not_the_runs():
+    """A leftover that keeps spawning (a re-arming timer, a pool growing on a
+    foreign submit) must not advance the clock through its new threads."""
+    clock = _generator_module()._FixtureClock()
+    holder = SimpleNamespace(perf_counter=clock)
+    read = _app_code_reading(holder)
+    go, done = threading.Event(), threading.Event()
+    seen: list[float] = []
+
+    def leftover() -> None:
+        go.wait(5)
+        child = threading.Thread(target=lambda: seen.append(read()))
+        child.start()
+        child.join(5)
+        done.set()
+
+    threading.Thread(target=leftover, daemon=True).start()
+    with clock:
+        go.set()
+        assert done.wait(5)
+        assert seen[0] != pytest.approx(1000.001)
+        assert read() == pytest.approx(1000.001)
+
+
+def test_reads_made_while_a_collection_runs_do_not_advance_the_clock():
+    """A collection runs on whatever thread triggered it, the Ask's included;
+    a finalizer it runs that reads the clock from application code is not part
+    of the replayed run."""
+    clock = _generator_module()._FixtureClock()
+    holder = SimpleNamespace(perf_counter=clock)
+    read = _app_code_reading(holder)
+    finalized: list[float] = []
+
+    class Cycle:
+        def __init__(self) -> None:
+            self.me = self
+
+        def __del__(self) -> None:
+            finalized.append(read())
+
+    with clock:
+        Cycle()
+        gc.collect()
+        assert len(finalized) == 1
+        assert finalized[0] != pytest.approx(1000.001)
+        assert read() == pytest.approx(1000.001)
+    assert gc.callbacks.count(clock._on_gc) == 0
 
 
 def test_the_ask_oracle_ignores_clock_reads_from_outside_the_run():
