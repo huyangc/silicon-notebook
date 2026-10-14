@@ -735,6 +735,13 @@ def test_前端_后端文案_轨迹通道的违规只让自己红(
     _assert_only_channel(capsys, channel, expected)
 
 
+def test_轨迹摘要扫描面塌了要红(tmp_path, monkeypatch, capsys):
+    _minimal_guard_tree(tmp_path, monkeypatch)
+    monkeypatch.setattr(guard, "TRACE_STEP", "RenamedTraceStep")
+    assert guard.main() == 1
+    _assert_only_channel(capsys, "trace", "trace summaries found")
+
+
 def test_扫描面塌了要红而不是静默放行(tmp_path, monkeypatch, capsys):
     """helper 改名 / 换调用写法 → 匹配数掉到 0,而退出码仍是 0,正是本轮要根治的
     那类假绿。非空性下限把它变成硬失败。"""
