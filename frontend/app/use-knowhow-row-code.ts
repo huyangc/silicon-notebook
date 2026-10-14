@@ -17,13 +17,14 @@
  * `handleCodeDeleted` 仍是每次渲染新建的普通函数，**不要**给它们加 useCallback
  * （计划第 184 行，knowhow-panel-boundary 守卫钉住）。
  *
- * 没有展开行时 effect 把 map 复位成新的 `{}`、loaded/error 复位：这一支负责清掉上一行
- * 的代码状态。换一行重开抽屉时，新行的拉取要到 effect 里才发起，抽屉第一帧拿到的是
- * 本 hook 当时持有的状态；没有这次复位，第一帧会带着上一行的 `rowCodeLoaded=true`
- * 与代码 map，按上一行的代码状态画出 chip（knowhow-panel-row-code-reset 组件用例
- * 钉住）。已登记的代价：关抽屉那一步因此多一次提交（挂载时与表清单的 loading 渲染
- * 合并，不单独计数）。将来若要省掉这次提交，必须换一种同样能清掉上一行状态的写法，
- * 不能直接删掉这一支。
+ * 展开行一变（含关抽屉变成 null、直接换到另一行），渲染期就把 map 复位成新的 `{}`、
+ * loaded/error 复位：这一步负责清掉上一行的代码状态。新行的拉取要到 effect 里才发起，
+ * 抽屉第一帧拿到的是本 hook 当时持有的状态；不复位的话，第一帧会带着上一行的
+ * `rowCodeLoaded=true` 与代码 map，按上一行的代码状态画出 chip
+ * （knowhow-panel-row-code-reset 组件用例钉住）。复位放在渲染期（React 文档「prop 变化
+ * 时调整 state」的写法：比较上一次的 openRowId，不同就同步 setState，React 丢弃这次
+ * 渲染结果、带着新 state 立刻重渲染，不会把中间态提交出去），而不是 effect 里：S6 之前
+ * 在 effect 里复位，关抽屉要多一次提交；现在复位与关抽屉/换行是同一次提交。
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -41,6 +42,14 @@ export function useKnowhowRowCode(openRowId: string | null) {
   const [rowCodeByColumn, setRowCodeByColumn] = useState<Record<string, KnowhowCellCode>>({});
   const [rowCodeLoaded, setRowCodeLoaded] = useState(false);
   const [rowCodeError, setRowCodeError] = useState<string | null>(null);
+  // 上一次渲染时的展开行：与本次 openRowId 不同即在渲染期复位上面三项（见文件头注释）。
+  const [rowCodeOwnerId, setRowCodeOwnerId] = useState<string | null>(openRowId);
+  if (rowCodeOwnerId !== openRowId) {
+    setRowCodeOwnerId(openRowId);
+    setRowCodeByColumn({});
+    setRowCodeLoaded(false);
+    setRowCodeError(null);
+  }
 
   // Task 11：行详情抽屉展开的这一行的代码状态——独立于 loadDetail（整表结构/
   // 内容），只在抽屉真正打开时才发起，避免网格视图本身多背一次网络请求。
@@ -60,13 +69,7 @@ export function useKnowhowRowCode(openRowId: string | null) {
   }, []);
 
   useEffect(() => {
-    if (!openRowId) {
-      setRowCodeByColumn({});
-      setRowCodeLoaded(false);
-      setRowCodeError(null);
-      return;
-    }
-    setRowCodeLoaded(false);
+    if (!openRowId) return; // 关抽屉：状态已在渲染期复位，这里只剩 cleanup 作废旧请求
     loadRowCode(openRowId);
     return () => {
       rowCodeRequestRef.current += 1; // 切行/关抽屉：作废 in-flight 的旧行代码状态
