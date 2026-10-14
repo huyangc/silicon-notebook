@@ -207,6 +207,10 @@ export function KnowhowPanel({
   // 闭包里的 selectedTableId 还是渲染时的旧值，只有它能告诉 openTable「选中已被清过」；
   // 异步命令落地时也靠它判断用户此刻还在不在发起命令的那张表上（S6）。
   const selectedTableIdRef = useRef<string | null>(null);
+  // 面板当前所属的笔记本（notebook 复位 effect 里登记）。异步命令落地时先核对它：命令发起时
+  // 的笔记本已不是当前笔记本，就只释放命令自己持有的锁，不再把结果写到新笔记本的界面上
+  // （迟到响应的归属规则，见 docs/development.md「Frontend implementation guardrails」）。
+  const panelNotebookIdRef = useRef(notebookId);
   const [detail, setDetail] = useState<KnowhowTableDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -327,6 +331,7 @@ export function KnowhowPanel({
   // 避免残留上一个 notebook 的表选中态。
   useEffect(() => {
     detailRequestRef.current += 1; // 作废上一个笔记本 in-flight 的表详情（拉详情 effect 不再因 notebookId 重跑）
+    panelNotebookIdRef.current = notebookId;
     // 同一次 flush 里路由 / 陈旧引用 effect 的闭包还是上一个笔记本的 detail：同 id 的表被
     // 重新选回时（见 openTable）别按它判，等新笔记本的 detail 到了再判。
     supersededDetailRef.current = detail;
@@ -514,6 +519,7 @@ export function KnowhowPanel({
   async function confirmDeleteTable() {
     if (!selectedTableId) return;
     const deletedTableId = selectedTableId;
+    const deleteNotebookId = notebookId;
     // 表详情加载失败或还在加载时也能删表：标题先取 detail，取不到再按 id 去清单里找。
     const deletedTitle = detail?.title
       || knowhowTableList.view.tables?.find((table) => table.id === deletedTableId)?.title
@@ -527,12 +533,16 @@ export function KnowhowPanel({
       // backToList()/openTable：删除进行中「返回」再开表时，按钮必须仍禁用到请求
       // 落地，否则可以对同一张表再发一次删除。
       setDeleting(false);
+      // 面板已换到别的笔记本：锁照放（它挡着新笔记本里的删表），其余一概不碰。
+      if (panelNotebookIdRef.current !== deleteNotebookId) return;
       // 只有用户此刻还在被删的这张表上才回列表（S6）：删除进行中返回、又打开了别的表时，
       // 留在那张表上，只刷新清单。「此刻」读 selectedTableIdRef，闭包里是发起时的值。
       if (selectedTableIdRef.current === deletedTableId) backToList();
       knowhowTableList.loadTables();
     } catch {
       setDeleting(false);
+      // 同上：换了笔记本就不再报这张表的失败——提示里的表在新笔记本里打不开。
+      if (panelNotebookIdRef.current !== deleteNotebookId) return;
       if (selectedTableIdRef.current === deletedTableId) {
         setActionError("删除失败，请重试");
         setConfirmDelete(false);
