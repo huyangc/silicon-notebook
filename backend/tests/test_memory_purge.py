@@ -19,25 +19,65 @@ from tests.memory_purge_cases import (
     EMBED_DIM,
     EXPORT_SNAPSHOT_CASES,
     MONKEYPATCH_CASES,
-    build_world,
     export_text,
     plain_memory,
+    seed_world,
+    wire_world,
+    world_from_ids,
 )
+from tests.world_templates import world_env, world_template
+
+# One worker runs the whole file, so the seeded world is built once for all of
+# its tests instead of once per worker that happens to draw one of them.
+pytestmark = pytest.mark.xdist_group("memory_purge_world")
+
+_WORLD_ENV = {
+    "EVENT_LOG_ENABLED": "false",
+    "LLM_LOG_ENABLED": "false",
+    "EMBED_DIM": str(EMBED_DIM),
+}
 
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'memory-purge.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
-    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
-    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_DIM", str(EMBED_DIM))
+    for name, value in _WORLD_ENV.items():
+        monkeypatch.setenv(name, value)
+    return SQLiteRepository(Settings())
+
+
+def _seed_world_at(root):
+    """Template builder: seed the world through the production code on the
+    root's database (the template has pointed DATABASE_URL / storage at it)."""
+    repo = SQLiteRepository(Settings())
+    try:
+        wire_world(repo)
+        return seed_world(repo, postgres=False)
+    finally:
+        repo.close()
+
+
+def _reopen_world_at(root):
+    """Template reopen check: construct the repository the way a test does."""
     return SQLiteRepository(Settings())
 
 
 @pytest.fixture
-def world(repo):
-    return build_world(repo, postgres=False)
+def world(tmp_path, tmp_path_factory, monkeypatch):
+    """The seeded world of ``seed_world``, built once per worker and copied per
+    test. Every test gets its own copy of the database and storage, its own
+    repository and re-read owner/alice/bob."""
+    template = world_template(
+        tmp_path_factory, "memory-purge", _seed_world_at, _reopen_world_at,
+        env=_WORLD_ENV,
+    )
+    root, ids = template.materialize(tmp_path)
+    for name, value in {**_WORLD_ENV, **world_env(root)}.items():
+        monkeypatch.setenv(name, value)
+    repo = SQLiteRepository(Settings())
+    wire_world(repo)
+    return world_from_ids(repo, ids, postgres=False)
 
 
 @pytest.mark.parametrize("case", sorted(CASES))
