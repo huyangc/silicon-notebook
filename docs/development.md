@@ -486,7 +486,11 @@ visibility map (an Index Only Scan is costed as heap visits while a same-databas
 snapshot older than the seed blocks VACUUM) run in both `bystander_snapshot`
 states: the exact plan only after `vacuum_until_all_visible` has confirmed a full
 map, the invariants that hold for any access method (no sequential scan, every scan
-keyed on the probed row) in both.
+keyed on the probed row) in both. The helper only weighs sessions whose snapshot
+predates the table's newest row: an ordinary one still blocking after 10 s fails the
+call and is named, while maintenance (an autovacuum worker, any ANALYZE or VACUUM
+in progress -- an autoanalyze keeps its snapshot for its whole sample) is waited out
+for up to 180 s. It never returns on an incomplete map.
 
 Extension-service lifecycle tests share one `xdist_group` to bound competing
 supervisor startups; each test retains its own real process/thread concurrency.
