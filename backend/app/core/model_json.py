@@ -834,10 +834,12 @@ def _read_literally(text: str, *, inner_quotes: bool) -> _Reading | None:
     (a newline or tab typed straight into an answer) is written as its JSON
     escape -- both have one reading, the character itself. With
     ``inner_quotes``, a ``"`` inside a VALUE string that is followed by text
-    rather than JSON structure is escaped too (see ``_closes_value_string``);
-    key strings never take that reading, because a key that swallowed a
-    quote is a duplicated opening or a lost delimiter, not a key. Returns
-    ``None`` when an inner quote has no single reading. Text outside strings
+    rather than JSON structure is escaped too (see ``_closes_value_string``),
+    and such a string may only close once its quotes -- the ones already
+    escaped and the ones read as text -- pair up; key strings never take
+    that reading, because a key that swallowed a quote is a duplicated
+    opening or a lost delimiter, not a key. Returns ``None`` when an inner
+    quote has no single reading. Text outside strings
     is untouched.
     """
     out: list[str] = []
@@ -845,12 +847,18 @@ def _read_literally(text: str, *, inner_quotes: bool) -> _Reading | None:
     expect_key = False
     in_string = in_key = False
     stray = control = inner = False
+    # Quotes in the current value string: escaped ones and those read as
+    # text. A string that took the inner-quote reading may only close after
+    # an even number of them (see below).
+    quotes = 0
+    string_inner = False
     index = 0
     while index < len(text):
         char = text[index]
         if not in_string:
             if char == '"':
                 in_string, in_key, expect_key = True, expect_key, False
+                quotes, string_inner = 0, False
             elif char in "{[":
                 stack.append(char)
                 expect_key = char == "{"
@@ -867,6 +875,7 @@ def _read_literally(text: str, *, inner_quotes: bool) -> _Reading | None:
             continue
         if char == "\\":
             if _starts_json_escape(text, index + 1):
+                quotes += text[index + 1] == '"'
                 out.append(text[index:index + 2])
                 index += 2
                 continue
@@ -879,11 +888,18 @@ def _read_literally(text: str, *, inner_quotes: bool) -> _Reading | None:
                 if closes is None:
                     return None
             if closes:
+                if string_inner and quotes % 2:
+                    # ``"这种模式叫"恒流"}`` or ``["a, "b"]``: an odd quote
+                    # count means this quote may as well be the partner of
+                    # the one read as text, and the string either ends here
+                    # or ends after more text; two readings.
+                    return None
                 in_string = False
                 out.append(char)
             else:
                 out.append('\\"')
-                inner = True
+                quotes += 1
+                inner = string_inner = True
         elif char < " ":
             out.append(json.dumps(char)[1:-1])
             control = True
@@ -910,21 +926,45 @@ def _readings(text: str, *, inner_quotes: bool) -> list[_Reading]:
     return readings
 
 
-def _repeats_prefix(text: str, start: int, end: int, target: str, at: int) -> bool:
+def _repeats_prefix(
+    text: str, start: int, end: int, target: str, at: int,
+    budget: list[int] | None = None,
+) -> bool:
     """Whether ``text[start:end]`` repeats the beginning of ``target[at:]``.
 
-    Whitespace is skipped on both sides: a restart written as ``{\n{`` or a
-    repeat with different indentation is still the same characters.
+    Whitespace between tokens is skipped on both sides: a restart written as
+    ``{\n{`` or a repeat with different indentation is still the same
+    characters. Inside a string (tracked on ``target``, which starts outside
+    one) every character must match, whitespace included: ``"a b"`` is not
+    ``"a  b"``. Each compared character spends one unit of ``budget[0]``;
+    an exhausted budget answers ``False``. Whitespace ending the fragment is
+    never compared: it precedes the restart, whatever string state the
+    fragment's stray quotes suggest (``{ " {``).
     """
+    while end > start and text[end - 1].isspace():
+        end -= 1
     index, other = start, at
+    in_string = escaped = False
     while index < end:
-        if text[index].isspace():
+        if not in_string and text[index].isspace():
             index += 1
             continue
-        while other < len(target) and target[other].isspace():
-            other += 1
+        if not in_string:
+            while other < len(target) and target[other].isspace():
+                other += 1
+        if budget is not None:
+            budget[0] -= 1
+            if budget[0] < 0:
+                return False
         if other >= len(target) or target[other] != text[index]:
             return False
+        char = target[other]
+        if escaped:
+            escaped = False
+        elif char == "\\" and in_string:
+            escaped = True
+        elif char == '"':
+            in_string = not in_string
         index += 1
         other += 1
     return True
@@ -971,6 +1011,9 @@ def _leading_object(
     return None
 
 
+_RESTART_POINTS_MAX = 8
+
+
 def _restart_points(text: str) -> list[int]:
     """Offsets where the model restarted the reply it had begun.
 
@@ -981,19 +1024,30 @@ def _restart_points(text: str) -> list[int]:
     restart point when the text since the reply's opening or since an
     earlier restart point is repeated, character for character, by what
     follows it. A nested object never qualifies by accident: the fragment
-    before it (``{"sections":[``) is not how the nested object begins.
+    before it (``{"sections":[``) is not how the nested object begins, and a
+    ``{`` right after ``:``, ``[`` or ``,`` is where a nested value may
+    start (``{"answer":{"answer":…}}``), which is a second reading.
+
+    The scan is bounded: a reply stuck repeating ``{`` or one short fragment
+    would otherwise cost quadratic or cubic time on every non-strict reply.
+    At most ``_RESTART_POINTS_MAX`` points are found, and the character
+    comparisons are capped at a few passes over the reply.
     """
     reachable = [0]
     points: list[int] = []
-    for index in range(1, len(text)):
-        if text[index] != "{":
-            continue
-        if any(
-            _repeats_prefix(text, start, index, text, index)
-            for start in reachable
+    budget = [4 * len(text) + 4096]
+    index = text.find("{", 1)
+    while index != -1 and len(points) < _RESTART_POINTS_MAX and budget[0] > 0:
+        before = index - 1
+        while before > 0 and text[before].isspace():
+            before -= 1
+        if text[before] not in ":[," and any(
+            _repeats_prefix(text, start, index, text, index, budget)
+            for start in {0, reachable[-1]}
         ):
             reachable.append(index)
             points.append(index)
+        index = text.find("{", index + 1)
     return points
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -829,7 +830,6 @@ RESTARTED_ANSWER = (
     [
         '{"answer',  # observed: {"answer{"answer":…
         '{"answer":"',  # observed: {"answer":"{"answer":…
-        '{"answer":',
         '{"answer":"一、先澄',  # restarted mid-sentence
         '{"{"answer',  # two fragments, each repeated by what follows
         '{\n  "answer": "',  # the fragment indented differently
@@ -859,6 +859,9 @@ def test_a_restarted_reply_is_read_as_the_object_written(prefix, allow_repair):
         # A nested object that begins like its parent is not a restart when
         # an array opened in between.
         '{"answer":[{"answer":"x","grounded":true}',
+        # A ``{`` where a value may start is a nested value as much as a
+        # restart: ``answer`` holding an object is a second reading.
+        '{"answer": {"answer":"x","grounded":true}',
     ],
 )
 def test_a_fragment_that_is_not_repeated_is_not_a_restart(raw, allow_repair):
@@ -901,6 +904,8 @@ def test_a_reply_written_again_after_itself_is_delivered_once(
         '{"answer": "完整答案 [k1]", "grounded": false}',
         # A cut copy closed into a complete, different object.
         '{"answer": "完整"}',
+        # Differs only in whitespace inside a string: still different text.
+        '{"answer": "完整答案  [k1]", "grounded": true}',
         # A repeat followed by something that is not.
         REPEATED_OBJECT + " 以上",
     ],
@@ -988,11 +993,54 @@ def test_an_unescaped_quote_inside_a_value_is_read_as_text(
         '{"answer":"他说 "好", 然后","grounded":true}',
         # Truncated inside the quoted text.
         '{"answer":"所谓"恒流',
+        # An odd number of quotes when the string would close: the closing
+        # quote may as well be the partner of the one read as text, so the
+        # string may end here or later -- splitting, truncating or
+        # inventing fields depending on the reading.
+        '{"answer":"这种模式叫"恒流"}',
+        '{"answer":"他说"好"}"}',
+        '{"answer":"列出 "a", "b": "c"}',
+        '{"answer":"x","grounded":true,"queries":["a, "b"]}',
+        '{"answer":"x","grounded":true,"queries":["电源 "恒流", "恒压"]}',
     ],
 )
 def test_an_inner_quote_without_one_reading_stays_malformed(raw, allow_repair):
     with pytest.raises(ModelJsonRepairError):
         parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=allow_repair)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "{" * 20000,
+        "{ " * 20000,
+        '{"answer":"x"}' * 2000 + "junk",
+        '{"answer":"一、' * 4000,
+        '{"nodes":[' + ",".join(
+            '{"local_id":"n%d","name":"x"}' % index for index in range(5000)
+        ) + ',{"local_id":"cut',
+    ],
+)
+def test_degenerate_replies_are_rejected_in_bounded_time(raw):
+    # Every non-strict reply that opens with ``{`` reaches the restart scan;
+    # a model looping on one fragment must not hold a request thread.
+    started = time.perf_counter()
+    with pytest.raises(ModelJsonRepairError):
+        parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=False)
+    assert time.perf_counter() - started < 2.0
+
+
+def test_a_nested_value_with_the_same_key_is_not_unwrapped():
+    # Read as written, ``answer`` holds an object; the shape walk reports
+    # that to the consumer. Unwrapping it as a restart would turn an
+    # off-shape reply into a conforming one.
+    result = parse_model_json_object(
+        '{"answer":{"answer":"所谓"恒流"模式"}}', ANSWER_SCHEMA,
+        allow_repair=False,
+    )
+
+    assert result.duplicated_open is False
+    assert json.loads(result.content) == {"answer": {"answer": '所谓"恒流"模式'}}
 
 
 def test_a_quote_inside_a_key_is_never_read_as_text():
