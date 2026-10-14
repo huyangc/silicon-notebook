@@ -171,6 +171,10 @@ export function KnowhowPanel({
   // 该互相覆盖(比如打开一张有陈旧引用提示的表、随手又复制了一次，两条提示不
   // 该互吃)。
   const [transferNotice, setTransferNotice] = useState<string | null>(null);
+  // 删表失败、而用户此时已经不在那张表上（删除进行中返回或换了表，S6）：失败不能写进
+  // 当前这张表的 actionError 横幅（会被当成这张表的失败），改在面板顶部的提示条里点名
+  // 被删的表。与 transferNotice 同一套复位：换表、回列表、换笔记本都清掉。
+  const [deleteNotice, setDeleteNotice] = useState<string | null>(null);
   // Task 9：追加导入向导显隐 + 模板下载进行中标记（工具栏「下载模板」按钮
   // 自身的 loading 态，不走 actionError/detailError 那一套整表级错误）。
   const [appendOpen, setAppendOpen] = useState(false);
@@ -346,6 +350,7 @@ export function KnowhowPanel({
     setHistoryOpen(false); // Task 15：与 manageOpen/transferOpen 同级的顶层 modal 状态，一并清空
     // 两条提示都说的是上一个笔记本里的表（复制结果 / 陈旧引用），换笔记本后一并清掉（S6）。
     setTransferNotice(null);
+    setDeleteNotice(null);
     setJumpNotice(null);
     // deleting 刻意不清（openTable/backToList 同样不清）：删表请求落地才解锁，见 confirmDeleteTable。
     jumpRoutedRef.current = null; // Task 11：兜底一并重置，理由见上方声明处注释
@@ -448,6 +453,7 @@ export function KnowhowPanel({
     setSelectedTableId(tableId);
     setActionError(null);
     setTransferNotice(null);
+    setDeleteNotice(null);
     setQuery("");
     setOpenRowId(null);
     setCellModal(null);
@@ -483,6 +489,7 @@ export function KnowhowPanel({
     setDetailError(null);
     setActionError(null);
     setTransferNotice(null);
+    setDeleteNotice(null);
     setQuery("");
     setOpenRowId(null);
     setCellModal(null);
@@ -503,6 +510,7 @@ export function KnowhowPanel({
   async function confirmDeleteTable() {
     if (!selectedTableId) return;
     const deletedTableId = selectedTableId;
+    const deletedTitle = detail?.title ?? "";
     setDeleting(true);
     setActionError(null);
     try {
@@ -517,9 +525,13 @@ export function KnowhowPanel({
       if (selectedTableIdRef.current === deletedTableId) backToList();
       knowhowTableList.loadTables();
     } catch {
-      setActionError("删除失败，请重试");
-      setConfirmDelete(false);
       setDeleting(false);
+      if (selectedTableIdRef.current === deletedTableId) {
+        setActionError("删除失败，请重试");
+        setConfirmDelete(false);
+      } else {
+        setDeleteNotice(`「${deletedTitle}」没有删除成功，请重新打开这张表再删一次。`);
+      }
     }
   }
 
@@ -1032,6 +1044,15 @@ export function KnowhowPanel({
         <div className="knowhow-jump-notice">
           <span>{jumpNotice}</span>
           <button type="button" onClick={() => setJumpNotice(null)} title="关闭">
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
+      {deleteNotice && (
+        <div className="knowhow-jump-notice" role="alert">
+          <span>{deleteNotice}</span>
+          <button type="button" onClick={() => setDeleteNotice(null)} title="关闭">
             <X size={14} />
           </button>
         </div>
