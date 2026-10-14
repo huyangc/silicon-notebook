@@ -21,6 +21,7 @@ import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
 import {
+  BASE_PROPS,
   recordDetail,
   renderPanel,
   routeTable,
@@ -155,4 +156,25 @@ test("返回 while the DELETE is in flight and reopening the same table keeps it
   await settle();
   expectToolbarUnlocked();
   await waitFor(() => expect(server.log).toEqual([LIST, DETAIL, DELETE, DETAIL, LIST, TWIN_DETAIL]));
+});
+
+test("a DELETE that lands after a notebook switch does not reload or show the old notebook's list", async () => {
+  // The delete command's closure holds nb-1's loadTables. Before S6 its refresh
+  // fetched nb-1's list after the switch and wrote it over nb-2's list.
+  const server = routeTwoTables();
+  const release = server.hold("DELETE", "/notebooks/nb-1/knowhow/t-rec");
+  server.on("GET", "/notebooks/nb-2/knowhow", { json: [wireSummary({ id: "t-other", title: "别的表" })] });
+  const user = userEvent.setup();
+  const panel = renderPanel({ initialTableId: "t-rec" });
+  await user.click(await screen.findByTitle("删除表"));
+  await user.click(screen.getByRole("button", { name: "确认删除" }));
+  expect(await screen.findByRole("button", { name: "删除中…" })).toBeDisabled();
+
+  panel.update({ ...BASE_PROPS, notebookId: "nb-2", initialTableId: "t-rec" });
+  expect(await screen.findByRole("button", { name: "打开表格：别的表" })).toBeInTheDocument();
+  release({ status: 204 });
+  await settle();
+  expect(screen.getByRole("button", { name: "打开表格：别的表" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "打开表格：第二张表" })).not.toBeInTheDocument();
+  expect(server.log).toEqual([LIST, DETAIL, DELETE, { method: "GET", path: "/notebooks/nb-2/knowhow" }]);
 });
