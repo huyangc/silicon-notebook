@@ -59,12 +59,21 @@ MOMENT = "2026-01-01T00:00:00+00:00"
 VECTOR = bytes(range(32))
 
 
-def _settings(tmp_path, monkeypatch) -> Settings:
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'sync.db'}")
-    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
-    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
-    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+#: The side-channel switches every test runs with; the world build receives
+#: them through ``world_template(env=...)`` (part of the template identity).
+_QUIET_ENV = {"EVENT_LOG_ENABLED": "false", "LLM_LOG_ENABLED": "false"}
+
+
+def _point_settings_at(root: Path, monkeypatch) -> Settings:
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{root / 'sync.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(root / "storage"))
     return Settings()
+
+
+def _settings(tmp_path, monkeypatch) -> Settings:
+    for name, value in _QUIET_ENV.items():
+        monkeypatch.setenv(name, value)
+    return _point_settings_at(tmp_path, monkeypatch)
 
 
 # ------------------------------------------------------------------- seeds
@@ -215,7 +224,7 @@ def _build_seeded(root: Path) -> dict:
     """The seeded world, built once per process (``tests/world_templates.py``,
     ``pinned``: uploaded sources record absolute ``file_path``s)."""
     with pytest.MonkeyPatch.context() as patch:
-        repository = SQLiteRepository(_settings(root, patch))
+        repository = SQLiteRepository(_point_settings_at(root, patch))
         try:
             exported = _seed_notebook(repository, "exported", member="alice")
             other = _seed_notebook(repository, "other", member="bob")
@@ -226,7 +235,7 @@ def _build_seeded(root: Path) -> dict:
 
 def _reopen_seeded(root: Path) -> None:
     with pytest.MonkeyPatch.context() as patch:
-        SQLiteRepository(_settings(root, patch)).close()
+        SQLiteRepository(_point_settings_at(root, patch)).close()
 
 
 @pytest.fixture
@@ -237,7 +246,7 @@ def seeded(tmp_path_factory, tmp_path, monkeypatch):
     it (``tests/world_templates.py``)."""
     template = world_template(
         tmp_path_factory, "sync-export-seeded", _build_seeded, _reopen_seeded,
-        layout=PINNED,
+        layout=PINNED, env=_QUIET_ENV,
     )
     root, payload = template.materialize(tmp_path)
     settings = _settings(root, monkeypatch)

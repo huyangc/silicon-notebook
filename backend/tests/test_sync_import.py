@@ -10,11 +10,13 @@ docs/incremental-sync-design.md §8 的导入相位与 §4 的身份映射。
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import hashlib
 import inspect
 import json
 import shutil
+import textwrap
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -942,6 +944,11 @@ def test_a_mount_edge_onto_an_unexported_notebook_is_skipped(
 
     assert _count(target["repo"], "SELECT COUNT(*) FROM notebook_bases") == 0
     assert report.tables["notebook_bases"].skipped == 1
+    # The drop is reported with its reason, not only counted.
+    reasons = [row.reason for row in report.skipped_rows if row.table == "notebook_bases"]
+    assert reasons == [
+        f"base_notebook_id={source['base']!r} is not present in notebooks"
+    ]
     assert _count(
         target["repo"], "SELECT COUNT(*) FROM notebooks WHERE id=?", (source["base"],)
     ) == 0
@@ -4144,6 +4151,81 @@ def test_a_crash_right_after_reservation_still_blocks_a_narrower_same_source_pac
         assert row["status"] != "importing"
 
 
+# ------------------------------------------------ first_import guard
+
+
+#: What a ``first_import`` test may not do. Its import already ran at world
+#: build time, unpatched and unobserved, so a patch or observer the test sets
+#: up would silently watch nothing, and a second import would no longer be
+#: "the default import, then read-only assertions" (docs/development.md).
+_FIRST_IMPORT_FORBIDDEN_NAMES = frozenset({"monkeypatch", "MonkeyPatch", "setattr"})
+_FIRST_IMPORT_FORBIDDEN_CALLS = frozenset({"_import", "import_package"})
+
+
+def _first_import_misuse(function) -> list[str]:
+    """Why ``function`` may not read the after-import world (empty: it may)."""
+    problems: list[str] = []
+    if "monkeypatch" in inspect.signature(function).parameters:
+        problems.append("requests the monkeypatch fixture")
+    tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+    for node in ast.walk(tree):
+        name = None
+        if isinstance(node, ast.Name):
+            name = node.id
+        elif isinstance(node, ast.Attribute):
+            name = node.attr
+        if name in _FIRST_IMPORT_FORBIDDEN_NAMES:
+            problems.append(f"uses {name} (patches or observes the import)")
+        if isinstance(node, ast.Call):
+            callee = node.func
+            called = callee.id if isinstance(callee, ast.Name) else getattr(
+                callee, "attr", None
+            )
+            if called in _FIRST_IMPORT_FORBIDDEN_CALLS:
+                problems.append(f"calls {called}() again after the default import")
+    return sorted(set(problems))
+
+
+def _assert_first_import_is_read_only(name: str, function) -> None:
+    problems = _first_import_misuse(function)
+    if problems:
+        raise TypeError(
+            f"{name} requests first_import, whose default import already ran "
+            f"at world build time, but it {'; '.join(problems)}. Run the import "
+            "in the test body instead (see docs/development.md, sync worlds)."
+        )
+
+
+def test_first_import_guard_rejects_patching_observing_and_reimporting():
+    def read_only(source, target, package, first_import):
+        report = first_import
+        assert report.error == ""
+
+    def with_fixture(source, target, package, first_import, monkeypatch):
+        assert first_import.error == ""
+
+    def with_inline_patch(source, target, package, first_import):
+        patch = pytest.MonkeyPatch()
+        patch.undo()
+
+    def with_setattr(source, target, package, first_import):
+        from app.migration.sync import import_ as module
+
+        setattr(module, "_publish_notebooks", None)
+
+    def reimporting(source, target, package, first_import):
+        _import(target, package)
+
+    assert _first_import_misuse(read_only) == []
+    for misuse in (with_fixture, with_inline_patch, with_setattr, reimporting):
+        with pytest.raises(TypeError, match="requests first_import"):
+            _assert_first_import_is_read_only(misuse.__name__, misuse)
+    assert _first_import_misuse(with_fixture)[0] == "requests the monkeypatch fixture"
+    assert _first_import_misuse(reimporting) == [
+        "calls _import() again after the default import"
+    ]
+
+
 # --------------------------------------------------------- xdist scheduling
 
 
@@ -4172,6 +4254,8 @@ def _group_world_tests() -> None:
         if "first_import" not in inspect.signature(namespace[name]).parameters
     ]
     for name in world_tests:
+        if name not in plain:
+            _assert_first_import_is_read_only(name, namespace[name])
         group = plain.index(name) % _WORLD_GROUPS if name in plain else 0
         namespace[name] = pytest.mark.xdist_group(f"sync_import_world_{group}")(
             namespace[name]
