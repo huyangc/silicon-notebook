@@ -277,24 +277,3 @@ def _privacy_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     database = local / "silicon_notebook.db"
     database.write_bytes(b"")
     return root, local, logs / "events.jsonl"
-
-
-def _command_matrix(root: Path, local: Path, events: Path):
-    missing_db = local / "silicon_notebook.db"
-    unified = {
-        "unified-incident": [_DIAG, "incident", "--root", root, "--local", local, "--pid", "2147483647"],
-        "unified-slow": [_DIAG, "slow", "--root", root, "--local", local],
-        "unified-latency": [_DIAG, "latency", "--log", events],
-        "unified-locks": [_DIAG, "locks", "--log", events],
-        "unified-open": [_DIAG, "open", "--root", root, "--local", local, "--notebook", "nb-SENSITIVE-PRIVATE-ID"],
-        "unified-db": [_DIAG, "db", "--db", missing_db, "--notebook-id", "nb-SENSITIVE-PRIVATE-ID"],
-        "unified-base-recall": [_DIAG, "base-recall", "--db", missing_db, "--notebook-id", "nb-SENSITIVE-PRIVATE-ID"],
-    }
-    direct = {
-        "direct-incident": [_SCRIPTS / "diag_incident.py", "--root", root, "--local", local, "--pid", "2147483647"],
-        "direct-slow": [_SCRIPTS / "diag_slow.py", "--root", root, "--local", local],
-        "direct-open": [_SCRIPTS / "diag_open_latency.py", "--root", root, "--local", local, "--notebook", "nb-SENSITIVE-PRIVATE-ID"],
-        "direct-db": [_SCRIPTS / "diag_db.py", "--db", missing_db, "--notebook-id", "nb-SENSITIVE-PRIVATE-ID"],
-        "direct-base-recall": [_SCRIPTS / "diag_base_report.py", "--db", missing_db, "--notebook-id", "nb-SENSITIVE-PRIVATE-ID"],
-    }
-    return {**unified, **direct}
