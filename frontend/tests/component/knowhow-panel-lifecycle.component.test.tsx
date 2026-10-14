@@ -417,6 +417,56 @@ test("re-targeting a jump to another row of the same record table keeps the grid
   ]);
 });
 
+test("a jump to a row added after the open table loaded refetches that table once and opens the row", async () => {
+  // The kept detail is from before r3 existed. openTable reloads the table once,
+  // only because the cited row is missing (a cited row that is present costs
+  // nothing, see the previous test), and the routing and stale-citation effects
+  // ignore the superseded detail, so there is no false "row not found" notice.
+  const server = suite.server();
+  const before = recordDetail();
+  const after = recordDetail({
+    rows: [...before.rows, { id: "r3", position: 2, projectionStatus: "synced", cells: { "c-title": "新增的行", "c-fix": "", "c-tool": "" } }],
+  });
+  routeTable(server, "nb-1", after);
+  server.once("GET", "/notebooks/nb-1/knowhow/t-rec", { json: wireDetail(before) });
+  const panel = renderPanel({ initialTableId: "t-rec" });
+  expect(await screen.findByRole("button", { name: "供电异常" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "新增的行" })).not.toBeInTheDocument();
+
+  panel.update({ ...BASE_PROPS, initialTableId: "t-rec", initialRowId: "r3" });
+  expect(await screen.findByRole("dialog", { name: "新增的行" })).toBeInTheDocument();
+  await settle();
+  expect(screen.getByRole("button", { name: "新增的行" })).toBeInTheDocument();
+  expect(screen.queryByText("引用指向的行未找到，可能已被删除或调整，已为你展开整表内容。")).not.toBeInTheDocument();
+  expect(server.log).toEqual([
+    { method: "GET", path: "/notebooks/nb-1/knowhow" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
+    { method: "GET", path: "/agent/knowhow/rows/r3" },
+  ]);
+});
+
+test("a jump to a row of the open table that is really gone refetches once, then shows the notice", async () => {
+  const server = suite.server();
+  routeTable(server, "nb-1", recordDetail());
+  server.on("GET", "/agent/knowhow/rows/r-gone", { json: { code: [] } });
+  const panel = renderPanel({ initialTableId: "t-rec" });
+  expect(await screen.findByRole("button", { name: "供电异常" })).toBeInTheDocument();
+
+  panel.update({ ...BASE_PROPS, initialTableId: "t-rec", initialRowId: "r-gone" });
+  expect(await screen.findByText("引用指向的行未找到，可能已被删除或调整，已为你展开整表内容。")).toBeInTheDocument();
+  await settle();
+  expect(screen.getByRole("button", { name: "供电异常" })).toBeInTheDocument();
+  // As for a stale row cited from the list: the routing effect still points
+  // openRowId at it (no drawer renders), hence the row-code request.
+  expect(server.log).toEqual([
+    { method: "GET", path: "/notebooks/nb-1/knowhow" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
+    { method: "GET", path: "/agent/knowhow/rows/r-gone" },
+  ]);
+});
+
 test("a jump to the table already open but failed to load falls back to the list with a notice", async () => {
   // Keeping the reopened table's detail (S6) must not turn a failed load into a
   // dead end: the stale-citation effect sees the failure in the same commit and
