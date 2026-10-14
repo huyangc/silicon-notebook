@@ -38,10 +38,10 @@ def global_ask_tool_error(exc: BaseException) -> AgentToolError | None:
         return None
     if not isinstance(exc, GlobalAskError):
         return None
-    if getattr(exc, "reason", "") == SCOPE_ALL_TOO_WIDE:
+    if getattr(exc, "reason", "") == SCOPE_ALL_TOO_WIDE and getattr(exc, "limit", None):
         # notebooks=["*"] resolved past the ceiling: the web copy says "choose
         # fewer", which an Agent can only do by naming ids itself.
-        limit = getattr(exc, "limit", None)
+        limit = exc.limit
         return AgentToolError(
             "invalid_argument",
             f"授权笔记本超过 {limit} 个，请先用 list_notebooks 选出不超过 {limit} 个，"
