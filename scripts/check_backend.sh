@@ -57,6 +57,9 @@ export SILICON_NOTEBOOK_ENV_FILE="" MODEL_SERVICES_CONFIG="" EXTENSIONS_CONFIG="
 export MINERU_MODE="off" MINERU_API_TOKEN=""
 mkdir -p "$ROOT_DIR/.local/pycache" "$ROOT_DIR/backend/.local"
 export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
+# Bytecode goes to the gitignored prefix above, so write and reuse it even
+# when the calling shell exports PYTHONDONTWRITEBYTECODE=1 (see check.sh).
+unset PYTHONDONTWRITEBYTECODE
 
 # architecture_contract itself is not excluded: structural item B7 measured
 # per-test cost (`pytest -m architecture_contract --durations=0 -n0`) and
