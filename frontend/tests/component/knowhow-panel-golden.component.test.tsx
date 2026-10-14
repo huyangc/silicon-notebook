@@ -41,8 +41,8 @@
 //    clears the previous row's code state, so a drawer reopened on another row
 //    never renders the old `codeLoaded=true` and code map; that behaviour is
 //    pinned by knowhow-panel-row-code-reset.component.test.tsx.
-//  * Asymmetric reset sets of openTable / backToList / E6 — see the lifecycle
-//    suite and the state × reset-path table in knowhow-panel-resets.
+//  * Asymmetric reset sets of openTable / backToList / E6 — fixed in S6; see the
+//    lifecycle suite and the state × reset-path table in knowhow-panel-resets.
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test } from "vitest";
