@@ -11,16 +11,19 @@ import { toUserMessage } from "../../errors.ts";
 import { Pagination } from "../../Pagination";
 import { useClientPagination } from "../../use-client-pagination.ts";
 import {
+  AccountMergeBlocked,
   fetchAdminUsers,
   fetchOnlineIds,
   fetchUploadLimitDefault,
   FORBIDDEN_SENTINEL,
+  mergeAdminSsoAccount,
   resetAdminUserPassword,
   updateAdminUsername,
   updateAdminUserRole,
   updateAdminUserStatus,
   updateAdminUserUploadLimit,
   updateUploadLimitDefault,
+  type AccountMergeDataItem,
   type AdminUserRole,
   type AdminUserStatus,
   type AdminUserUsage,
@@ -65,7 +68,7 @@ function initialSheet(): UsageSheet {
 const FEEDBACK_TTL_MS = 6000;
 
 type Notice = { kind: "ok" | "error"; text: string };
-type RowNoticeCell = "role" | "limit" | "password" | "status" | "username";
+type RowNoticeCell = "role" | "limit" | "password" | "status" | "username" | "merge";
 type RowNotice = Notice & { userId: string; cell: RowNoticeCell };
 
 function CellFeedback({ notice }: { notice: Notice }) {
@@ -320,8 +323,8 @@ type AccountManageCellProps = {
   user: AdminUserUsage;
   /** 本行的管理弹出层打开中。 */
   open: boolean;
-  /** 弹出层当前视图:动作清单,或改用户名 / 重置密码的输入表单。 */
-  view: "menu" | "rename" | "password";
+  /** 弹出层当前视图:动作清单,或改用户名 / 重置密码 / 合并统一认证账号的输入表单。 */
+  view: "menu" | "rename" | "password" | "merge";
   /** 本行的账号类请求(状态 / 改名 / 重置密码 / 权限)进行中:点外部 / Esc 不关。 */
   pending: boolean;
   /** 其他行的账号类请求进行中:入口暂不可点(全局互斥,镜像旧的逐列行为)。 */
@@ -346,7 +349,8 @@ function AccountManageCell({
   const pos = useAnchoredPopover({ open, pending, anchorRef, popoverRef, onCancel: onClose });
   const label = view === "rename"
     ? `修改 ${user.username} 的用户名`
-    : view === "password" ? `重置 ${user.username} 的密码` : `管理 ${user.username}`;
+    : view === "password" ? `重置 ${user.username} 的密码`
+    : view === "merge" ? `把统一认证账号合并到 ${user.username}` : `管理 ${user.username}`;
 
   return (
     <div className="usage-cell-stack">
@@ -379,6 +383,93 @@ function AccountManageCell({
       </div>
       {!open && notice && <CellFeedback notice={notice} />}
     </div>
+  );
+}
+
+type AccountMergeFormProps = {
+  user: AdminUserUsage;
+  input: string;
+  /** 「合并」已按下一次,等待「确认合并」。 */
+  confirming: boolean;
+  pending: boolean;
+  /** 后端拒绝时被删账号名下的数据:逐条列在按钮旁。 */
+  blocked: AccountMergeDataItem[] | null;
+  onInput: (value: string) => void;
+  onRequestConfirm: () => void;
+  onConfirm: () => void;
+  onUnconfirm: () => void;
+  onCancel: () => void;
+};
+
+/**
+ * 「管理」弹出层里的二级视图:把以工号命名的统一认证账号并入本行这个老账号。删除是不可逆的,
+ * 所以要二次点击(「合并」→「确认合并」,与停用同风格);被删账号名下有数据时后端拒绝,
+ * 这里把类别与条数逐条列出,并给出「停用 + 改用户名」的手动退路。
+ */
+function AccountMergeForm({
+  user, input, confirming, pending, blocked,
+  onInput, onRequestConfirm, onConfirm, onUnconfirm, onCancel,
+}: AccountMergeFormProps) {
+  return (
+    <>
+      <div className="usage-limit-popover-title">合并统一认证账号 · {user.username}</div>
+      <label className="usage-settings-hint" htmlFor={`merge-${user.id}`}>统一认证账号的用户名（工号）</label>
+      <div className="usage-limit-popover-row">
+        <input
+          id={`merge-${user.id}`}
+          className="usage-limit-input usage-limit-input-password"
+          type="text"
+          autoComplete="off"
+          value={input}
+          disabled={pending}
+          autoFocus
+          onChange={(event) => onInput(event.target.value)}
+          onKeyDown={(event) => { if (event.key === "Enter" && !confirming) onRequestConfirm(); }}
+        />
+      </div>
+      <div className="usage-limit-popover-row">
+        {confirming ? (
+          <>
+            <button
+              type="button"
+              className="usage-role-button usage-role-button-confirm"
+              disabled={pending}
+              aria-busy={pending}
+              onClick={onConfirm}
+            >
+              {pending ? "合并中…" : "确认合并"}
+            </button>
+            <button type="button" className="usage-role-button" disabled={pending} onClick={onUnconfirm}>
+              取消
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              className="usage-role-button usage-role-button-confirm"
+              disabled={pending}
+              onClick={onRequestConfirm}
+            >合并</button>
+            <button type="button" className="usage-role-button" disabled={pending} onClick={onCancel}>
+              返回
+            </button>
+          </>
+        )}
+      </div>
+      {blocked && (
+        <div className="usage-cell-feedback usage-cell-feedback-error" role="alert">
+          该账号名下已有数据，不能合并删除：
+          <ul className="usage-merge-blocked-list">
+            {blocked.map((item) => <li key={item.label}>{item.label} {item.count} {item.unit}</li>)}
+          </ul>
+          如需保留该账号，可改用手动办法：先停用它并改个用户名，再把 {user.username} 改名为该工号。
+        </div>
+      )}
+      <span className="usage-settings-hint">
+        该账号会被删除，{user.username} 改名为它并改由统一认证登录，原有数据都保留。被删除的账号名下有数据时不能合并。
+      </span>
+    </>
   );
 }
 
@@ -450,6 +541,12 @@ export default function AdminUsagePage() {
   const [resettingId, setResettingId] = useState("");
   const [resetInput, setResetInput] = useState("");
   const [resetPendingId, setResetPendingId] = useState("");
+  // 合并统一认证账号:层内二级视图(mergingId),「合并」→「确认合并」的二次确认,后端以数据为由拒绝时的类别清单。
+  const [mergingId, setMergingId] = useState("");
+  const [mergeInput, setMergeInput] = useState("");
+  const [mergeConfirming, setMergeConfirming] = useState(false);
+  const [mergePendingId, setMergePendingId] = useState("");
+  const [mergeBlocked, setMergeBlocked] = useState<AccountMergeDataItem[] | null>(null);
   // 行级动作(权限 / 文档上限 / 密码)的结果,同一时刻只保留最近一条,落在对应行对应列。
   const [rowNotice, setRowNotice] = useState<RowNotice | null>(null);
   const [sortKey, setSortKey] = useState<AdminUserSortKey>("created_at");
@@ -746,11 +843,71 @@ export default function AdminUsagePage() {
     setRenameInput("");
   }
 
+  // 第一次点击只校验并进入「确认合并」;真正的删除在第二次点击。
+  function requestMergeConfirm(target: AdminUserUsage) {
+    const name = mergeInput.trim();
+    if (!name) {
+      setRowNotice({ userId: target.id, cell: "merge", kind: "error", text: "请输入统一认证账号的用户名（工号）" });
+      return;
+    }
+    // 与后端用户名比较同口径:只折叠 A-Z。
+    const fold = (value: string) => value.replace(/[A-Z]/g, (c) => c.toLowerCase());
+    if (fold(name) === fold(target.username)) {
+      setRowNotice({ userId: target.id, cell: "merge", kind: "error", text: "不能把账号合并到它自己" });
+      return;
+    }
+    setRowNotice(null);
+    setMergeBlocked(null);
+    setMergeConfirming(true);
+  }
+
+  async function submitMerge(target: AdminUserUsage) {
+    setMergePendingId(target.id);
+    setRowNotice(null);
+    setMergeBlocked(null);
+    try {
+      const merged = await mergeAdminSsoAccount(target.id, mergeInput.trim());
+      setState((previous) => previous.kind === "ready"
+        ? {
+            kind: "ready",
+            rows: previous.rows
+              .filter((row) => row.id !== merged.removed_user_id)
+              .map((row) => row.id === target.id ? { ...row, username: merged.username } : row),
+          }
+        : previous);
+      setExpanded((previous) => previous === merged.removed_user_id ? null : previous);
+      cancelMerge();
+      setRowNotice({
+        userId: target.id,
+        cell: "merge",
+        kind: "ok",
+        text: `已合并：${target.username} 现在是 ${merged.username}，已删除原 ${merged.username} 账号，该用户需重新登录`,
+      });
+    } catch (error) {
+      setMergeConfirming(false);
+      if (error instanceof AccountMergeBlocked) {
+        setMergeBlocked(error.items);
+        return;
+      }
+      failRowAction(target, "merge", error, "合并失败，请稍后重试");
+    } finally {
+      setMergePendingId("");
+    }
+  }
+
+  function cancelMerge() {
+    setMergingId("");
+    setMergeInput("");
+    setMergeConfirming(false);
+    setMergeBlocked(null);
+  }
+
   function openManage(target: AdminUserUsage) {
     setConfirmingStatus(null);
     setConfirmingRole(null);
     cancelRename();
     cancelResetPassword();
+    cancelMerge();
     setEditingLimitId("");
     setRowNotice(null);
     setManagingId(target.id);
@@ -762,6 +919,7 @@ export default function AdminUsagePage() {
     setConfirmingRole(null);
     cancelRename();
     cancelResetPassword();
+    cancelMerge();
     // 层内的结果已经在弹出层里显示过;收起后不再挂到入口按钮下方——那条反馈有最小宽度,
     // 会把「管理」列临时撑宽、重新顶出横向滚动条。
     setRowNotice((previous) => previous && previous.cell !== "limit" ? null : previous);
@@ -775,6 +933,7 @@ export default function AdminUsagePage() {
     setEditingLimitId("");
     cancelResetPassword();
     cancelRename();
+    cancelMerge();
     setRowNotice(null);
   }
 
@@ -789,8 +948,8 @@ export default function AdminUsagePage() {
     resetRowInteractions();
   }
 
-  // 账号类请求(状态 / 改名 / 重置密码 / 权限)同一时刻只允许一行在途。
-  const manageBusyId = statusPendingId || renamePendingId || resetPendingId || rolePendingId;
+  // 账号类请求(状态 / 改名 / 重置密码 / 权限 / 合并)同一时刻只允许一行在途。
+  const manageBusyId = statusPendingId || renamePendingId || resetPendingId || rolePendingId || mergePendingId;
   const readyRows = state.kind === "ready" ? state.rows : [];
   const sortedRows = useMemo(
     () => sortAdminUsers(readyRows, sortKey, sortDirection),
@@ -988,7 +1147,9 @@ export default function AdminUsagePage() {
                     <AccountManageCell
                       user={u}
                       open={managingId === u.id}
-                      view={renamingId === u.id ? "rename" : resettingId === u.id ? "password" : "menu"}
+                      view={renamingId === u.id ? "rename"
+                        : resettingId === u.id ? "password"
+                        : mergingId === u.id ? "merge" : "menu"}
                       pending={manageBusyId === u.id}
                       // 文档上限保存在途时同样禁点:openManage 会收起那个忙态编辑层、丢掉待保存的值
                       // (codex R2 P2)。
@@ -1061,6 +1222,19 @@ export default function AdminUsagePage() {
                           </div>
                           <span className="usage-settings-hint">重置后该用户的所有浏览器会话将被登出。</span>
                         </>
+                      ) : mergingId === u.id ? (
+                        <AccountMergeForm
+                          user={u}
+                          input={mergeInput}
+                          confirming={mergeConfirming}
+                          pending={mergePendingId === u.id}
+                          blocked={mergeBlocked}
+                          onInput={(value) => { setMergeInput(value); setMergeConfirming(false); setMergeBlocked(null); }}
+                          onRequestConfirm={() => requestMergeConfirm(u)}
+                          onConfirm={() => void submitMerge(u)}
+                          onUnconfirm={() => setMergeConfirming(false)}
+                          onCancel={cancelMerge}
+                        />
                       ) : (
                         <>
                           <div className="usage-limit-popover-title">管理 · {u.username}</div>
@@ -1123,6 +1297,25 @@ export default function AdminUsagePage() {
                                       setRenamingId(u.id); setRenameInput(u.username);
                                     }}
                                   >改用户名</button>
+                                )}
+                              </dd>
+                            </div>
+                            <div className="usage-manage-item">
+                              <dt>统一认证</dt>
+                              <dd>
+                                {accountLock ? (
+                                  <span className="usage-role-locked" title={accountLock.title}>{accountLock.text}</span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="usage-role-button"
+                                    disabled={rowBusy}
+                                    onClick={() => {
+                                      setConfirmingStatus(null); setConfirmingRole(null); setRowNotice(null);
+                                      setMergeConfirming(false); setMergeBlocked(null);
+                                      setMergingId(u.id); setMergeInput("");
+                                    }}
+                                  >合并统一认证账号</button>
                                 )}
                               </dd>
                             </div>

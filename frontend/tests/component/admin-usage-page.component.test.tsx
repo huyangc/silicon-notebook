@@ -13,8 +13,18 @@ const mocks = vi.hoisted(() => ({
   fetchUploadLimitDefault: vi.fn(),
   updateUploadLimitDefault: vi.fn(),
   resetAdminUserPassword: vi.fn(),
+  mergeAdminSsoAccount: vi.fn(),
   fetchUserNotebooks: vi.fn(),
   fetchAnalysisIssues: vi.fn(),
+  // 页面按 instanceof 认 `merge_source_has_data`,mock 模块里要有同一个类。
+  AccountMergeBlocked: class AccountMergeBlocked extends Error {
+    readonly items: { label: string; unit: string; count: number }[];
+
+    constructor(items: { label: string; unit: string; count: number }[]) {
+      super("merge_source_has_data");
+      this.items = items;
+    }
+  },
 }));
 
 vi.mock("../../app/auth.ts", () => ({ fetchMe: mocks.fetchMe }));
@@ -29,6 +39,8 @@ vi.mock("../../app/admin/usage/api.ts", () => ({
   fetchUploadLimitDefault: mocks.fetchUploadLimitDefault,
   updateUploadLimitDefault: mocks.updateUploadLimitDefault,
   resetAdminUserPassword: mocks.resetAdminUserPassword,
+  mergeAdminSsoAccount: mocks.mergeAdminSsoAccount,
+  AccountMergeBlocked: mocks.AccountMergeBlocked,
   fetchAnalysisIssues: mocks.fetchAnalysisIssues,
 }));
 vi.mock("../../app/admin/usage/notebooks.ts", () => ({
@@ -530,6 +542,114 @@ test("内置管理员与本人行不提供停用与改名", async () => {
   await openManage(user, builtin, "admin");
   expect(builtin.queryByRole("button", { name: "停用" })).toBeNull();
   expect(builtin.queryByRole("button", { name: "改用户名" })).toBeNull();
+  expect(builtin.queryByRole("button", { name: "合并统一认证账号" })).toBeNull();
+  await openManage(user, selfRow, "b00123456");
+  expect(selfRow.queryByRole("button", { name: "合并统一认证账号" })).toBeNull();
+});
+
+// 一行以工号命名、由统一认证新建的账号:合并后它被删除,老账号 a00123456 接过它的用户名。
+const ssoRow = { ...rows[1], id: "user-sso", username: "W0012345", created_at: "2026-07-03T00:00:00" };
+
+async function openMerge(user: ReturnType<typeof userEvent.setup>, name: string) {
+  const target = await targetRow();
+  await openManage(user, target);
+  await user.click(target.getByRole("button", { name: "合并统一认证账号" }));
+  const dialog = await screen.findByRole("dialog", { name: "把统一认证账号合并到 a00123456" });
+  await user.type(within(dialog).getByLabelText("统一认证账号的用户名（工号）"), name);
+  return dialog;
+}
+
+test("合并统一认证账号需二次确认;成功后移除被删账号那一行、老账号改名,结果落在弹出层内", async () => {
+  primeCommonMocks();
+  mocks.fetchAdminUsers.mockResolvedValue([...rows, ssoRow]);
+  mocks.mergeAdminSsoAccount.mockResolvedValue({
+    id: "user-target", username: "W0012345", status: "active", removed_user_id: "user-sso",
+  });
+  const user = userEvent.setup();
+  render(<AdminUsagePage />);
+  const dialog = await openMerge(user, "W0012345");
+  expect(within(dialog).getByText(/该账号会被删除，a00123456 改名为它并改由统一认证登录/)).toBeInTheDocument();
+
+  await user.click(within(dialog).getByRole("button", { name: "合并" }));
+  expect(mocks.mergeAdminSsoAccount).not.toHaveBeenCalled();
+  await user.click(within(dialog).getByRole("button", { name: "确认合并" }));
+
+  expect(mocks.mergeAdminSsoAccount).toHaveBeenCalledWith("user-target", "W0012345");
+  const menu = await screen.findByRole("dialog", { name: "管理 W0012345" });
+  expect(within(menu).getByRole("status")).toHaveTextContent(
+    "已合并：a00123456 现在是 W0012345，已删除原 W0012345 账号，该用户需重新登录",
+  );
+  const names = screen.getAllByText("W0012345", { selector: ".usage-username" });
+  expect(names).toHaveLength(1);
+  expect(names[0].closest("tr")).toContainElement(screen.getByRole("button", { name: "管理 W0012345" }));
+  expect(screen.queryByText("a00123456", { selector: ".usage-username" })).toBeNull();
+});
+
+test("被删账号名下有数据时在按钮旁逐条列出类别与条数,并给出停用+改用户名的退路", async () => {
+  primeCommonMocks();
+  mocks.fetchAdminUsers.mockResolvedValue([...rows, ssoRow]);
+  mocks.mergeAdminSsoAccount.mockRejectedValueOnce(new mocks.AccountMergeBlocked([
+    { label: "笔记本", unit: "个", count: 2 },
+    { label: "提问记录", unit: "条", count: 3 },
+  ]));
+  const user = userEvent.setup();
+  render(<AdminUsagePage />);
+  const dialog = await openMerge(user, "W0012345");
+  await user.click(within(dialog).getByRole("button", { name: "合并" }));
+  await user.click(within(dialog).getByRole("button", { name: "确认合并" }));
+
+  const alert = await within(dialog).findByRole("alert");
+  const items = within(alert).getAllByRole("listitem").map((item) => item.textContent);
+  expect(items).toEqual(["笔记本 2 个", "提问记录 3 条"]);
+  expect(alert).toHaveTextContent("先停用它并改个用户名");
+  // 回到「合并」初态,两行都还在。
+  expect(within(dialog).getByRole("button", { name: "合并" })).toBeEnabled();
+  expect(screen.getByText("a00123456", { selector: ".usage-username" })).toBeInTheDocument();
+  expect(screen.getByText("W0012345", { selector: ".usage-username" })).toBeInTheDocument();
+});
+
+test("合并在途时确认键忙态禁用、不能重复提交,弹出层不因 Esc 关闭", async () => {
+  primeCommonMocks();
+  mocks.fetchAdminUsers.mockResolvedValue([...rows, ssoRow]);
+  mocks.mergeAdminSsoAccount.mockReturnValue(new Promise(() => undefined));
+  const user = userEvent.setup();
+  render(<AdminUsagePage />);
+  const dialog = await openMerge(user, "W0012345");
+  await user.click(within(dialog).getByRole("button", { name: "合并" }));
+  await user.click(within(dialog).getByRole("button", { name: "确认合并" }));
+
+  const busy = await within(dialog).findByRole("button", { name: "合并中…" });
+  expect(busy).toBeDisabled();
+  await user.click(busy);
+  expect(mocks.mergeAdminSsoAccount).toHaveBeenCalledTimes(1);
+  await user.keyboard("{Escape}");
+  expect(screen.getByRole("dialog", { name: "把统一认证账号合并到 a00123456" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "管理 W0012345" })).toBeDisabled();
+});
+
+test("合并的其它失败显示后端中文原文;空输入与合并到自己在本地拦截", async () => {
+  primeCommonMocks();
+  mocks.mergeAdminSsoAccount.mockRejectedValueOnce(humanizedError("只能合并已经用统一认证登录过的账号", 409));
+  const user = userEvent.setup();
+  render(<AdminUsagePage />);
+  const target = await targetRow();
+  await openManage(user, target);
+  await user.click(target.getByRole("button", { name: "合并统一认证账号" }));
+  const dialog = await screen.findByRole("dialog", { name: "把统一认证账号合并到 a00123456" });
+  await user.click(within(dialog).getByRole("button", { name: "合并" }));
+  expect(within(dialog).getByRole("alert")).toHaveTextContent("请输入统一认证账号的用户名（工号）");
+  await user.type(within(dialog).getByLabelText("统一认证账号的用户名（工号）"), "A00123456");
+  await user.click(within(dialog).getByRole("button", { name: "合并" }));
+  expect(within(dialog).getByRole("alert")).toHaveTextContent("不能把账号合并到它自己");
+
+  const field = within(dialog).getByLabelText("统一认证账号的用户名（工号）");
+  await user.clear(field);
+  await user.type(field, "b00123456");
+  await user.click(within(dialog).getByRole("button", { name: "合并" }));
+  await user.click(within(dialog).getByRole("button", { name: "确认合并" }));
+  await waitFor(() => expect(within(dialog).getByRole("alert")).toHaveTextContent("只能合并已经用统一认证登录过的账号"));
+  expect(field).toHaveValue("b00123456");
+  expect(mocks.mergeAdminSsoAccount).toHaveBeenCalledWith("user-target", "b00123456");
 });
 
 test("管理员可为普通用户重置密码;内置管理员与本人行受保护", async () => {
@@ -553,8 +673,8 @@ test("管理员可为普通用户重置密码;内置管理员与本人行受保�
   // "受保护"分支,而不是"本人"。
   const builtin = within(screen.getByText("admin").closest("tr") as HTMLTableRowElement);
   await openManage(user, builtin, "admin");
-  // 账号、用户名、密码三行各有一处「受保护」;权限行是「当前账户」。
-  expect(builtin.getAllByText("受保护")).toHaveLength(3);
+  // 账号、用户名、统一认证、密码四行各有一处「受保护」;权限行是「当前账户」。
+  expect(builtin.getAllByText("受保护")).toHaveLength(4);
   expect(builtin.queryByRole("button", { name: "重置密码" })).toBeNull();
 });
 
@@ -579,8 +699,8 @@ test("非内置管理员看自己那行显示「本人」而非重置按钮", as
   render(<AdminUsagePage />);
   const selfRow = within((await screen.findByText("b00123456")).closest("tr") as HTMLTableRowElement);
   await openManage(user, selfRow, "b00123456");
-  // 账号、用户名、密码三行各有一处「本人」。
-  expect(selfRow.getAllByText("本人")).toHaveLength(3);
+  // 账号、用户名、统一认证、密码四行各有一处「本人」。
+  expect(selfRow.getAllByText("本人")).toHaveLength(4);
   expect(selfRow.queryByRole("button", { name: "重置密码" })).toBeNull();
   // 别的普通用户行仍有重置入口
   const target = await targetRow();

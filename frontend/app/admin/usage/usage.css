@@ -219,6 +219,8 @@
 .usage-manage-item dt { margin: 0; color: var(--muted); font-size: 12.5px; }
 .usage-manage-item dd { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; margin: 0; }
 .usage-manage-item dd .usage-tag { margin-right: auto; }
+/* 合并被拒时紧挨按钮列出被删账号名下的数据类别与条数。 */
+.usage-merge-blocked-list { margin: 4px 0; padding-left: 18px; }
 
 /* ——— 分页:面板页脚 ——— */
 .usage-pagination {
