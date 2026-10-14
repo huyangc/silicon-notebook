@@ -371,7 +371,7 @@ def test_daily_extended_gate_runs_once_per_day_and_is_manually_dispatchable() ->
 
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
-    assert set(jobs) == {"extended-gate"}
+    assert set(jobs) == {"extended-gate", "frontend-parallel"}
     job = jobs["extended-gate"]
     assert isinstance(job, dict)
     assert job["name"] == "level-2-extended"
@@ -412,3 +412,43 @@ def test_daily_extended_gate_runs_once_per_day_and_is_manually_dispatchable() ->
         "PYTHON_BIN": "python",
         "BACKEND_PYTEST_WORKERS": "4",
     }
+
+
+def test_daily_frontend_parallel_job_forces_the_parallel_lane_path() -> None:
+    """CI runners have fewer than eight CPUs, so PR CI's frontend lane is always
+    sequential. The daily workflow forces the parallel path through the same
+    wrapper, in a job of its own (not part of level-2-extended's time budget)."""
+    workflow = _load_workflow_path(DAILY_EXTENDED_WORKFLOW_PATH)
+    job = workflow["jobs"]["frontend-parallel"]
+    assert isinstance(job, dict)
+    assert job["name"] == "level-2-frontend-parallel"
+    assert job["runs-on"] == "ubuntu-24.04"
+    assert "needs" not in job
+
+    checkout = _uses_step(
+        job,
+        "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    )
+    assert checkout["with"] == {"persist-credentials": "false"}
+    node = _uses_step(
+        job,
+        "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+    )
+    assert node["with"]["node-version"] == "22"
+    run_steps = [
+        step
+        for step in job["steps"]
+        if isinstance(step, dict) and isinstance(step.get("run"), str)
+    ]
+    assert [step["run"] for step in run_steps] == [
+        "npm ci --prefix frontend",
+        "bash scripts/check_frontend.sh",
+    ]
+    assert run_steps[-1]["env"] == {"FRONTEND_LANE_PARALLEL": "1"}
+
+    # PR CI keeps its timing: no PR workflow job forces the parallel path.
+    ci = _load_workflow()
+    for name, ci_job in ci["jobs"].items():
+        for step in ci_job.get("steps", []):
+            if isinstance(step, dict):
+                assert "FRONTEND_LANE_PARALLEL" not in (step.get("env") or {}), name
