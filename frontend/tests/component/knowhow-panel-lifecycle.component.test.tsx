@@ -23,9 +23,10 @@
 //    is S5's bug, left unasserted.
 //  * The row drawer re-registers its Escape listener on every panel render
 //    (pinned in knowhow-panel-golden).
-// Found while characterising (also recorded as-is, see the tests): a stray detail
-// request on a notebook switch; a re-targeted jump routing against the stale
-// detail; a same-table re-targeted jump leaving the grid blank.
+// Found while characterising (also recorded as-is, see the tests): a re-targeted
+// jump routing against the stale detail; a same-table re-targeted jump leaving
+// the grid blank. (A stray detail request on a notebook switch was fixed in S6;
+// see the notebook-switch test.)
 //  * The row-code effect (E5) resets its state from an effect whenever no row is
 //    open: on mount those writes coalesce with the list effect's (E3) loading
 //    render; after closing the drawer they cost one extra commit (pinned in
@@ -177,15 +178,15 @@ test("a late detail response for a table the user already left is discarded", as
 });
 
 test("switching notebookId resets the open table and reloads the new notebook's list", async () => {
-  // Recorded as-is: the detail effect (E4) depends on loadDetail, whose identity
-  // changes with notebookId, and runs (after the list effect E3) before the reset
-  // effect (E6) in the same commit, so it still sees the old selectedTableId and
-  // issues one stray detail request against the new notebook. Reordering E4/E6
-  // during the split would drop this request; the sequence below catches that.
+  // Only the new notebook's list is requested. Until S6 the detail effect (E4)
+  // also depended on loadDetail, whose identity changes with notebookId, and ran
+  // before the reset effect (E6) in the same commit with the old selectedTableId:
+  // one stray `GET /notebooks/nb-2/knowhow/t-rec` whose response was discarded.
+  // E4 now follows selectedTableId only. nb-2/t-rec is deliberately unrouted, so
+  // a regression also fails the suite's no-unrouted-request check.
   const server = suite.server();
   routeTable(server, "nb-1", recordDetail());
   server.on("GET", "/notebooks/nb-2/knowhow", { json: [wireSummary({ id: "t-other", title: "别的表" })] });
-  server.on("GET", "/notebooks/nb-2/knowhow/t-rec", { json: wireDetail(recordDetail()) });
   const panel = renderPanel({ initialTableId: "t-rec" });
   expect(await screen.findByRole("heading", { name: "排障记录" })).toBeInTheDocument();
 
@@ -197,7 +198,6 @@ test("switching notebookId resets the open table and reloads the new notebook's 
     { method: "GET", path: "/notebooks/nb-1/knowhow" },
     { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
     { method: "GET", path: "/notebooks/nb-2/knowhow" },
-    { method: "GET", path: "/notebooks/nb-2/knowhow/t-rec" },
   ]);
 });
 
@@ -445,7 +445,6 @@ test("quirk: the notebook-reset effect keeps the jump notice across a notebook s
   routeTable(server, "nb-1", recordDetail());
   server.on("GET", "/agent/knowhow/rows/r-gone", { json: { code: [] } });
   server.on("GET", "/notebooks/nb-2/knowhow", { json: [] });
-  server.on("GET", "/notebooks/nb-2/knowhow/t-rec", { json: wireDetail(recordDetail()) });
   const panel = renderPanel({ initialTableId: "t-rec", initialRowId: "r-gone" });
   const notice = "引用指向的行未找到，可能已被删除或调整，已为你展开整表内容。";
   expect(await screen.findByText(notice)).toBeInTheDocument();
@@ -459,6 +458,5 @@ test("quirk: the notebook-reset effect keeps the jump notice across a notebook s
     { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
     { method: "GET", path: "/agent/knowhow/rows/r-gone" },
     { method: "GET", path: "/notebooks/nb-2/knowhow" },
-    { method: "GET", path: "/notebooks/nb-2/knowhow/t-rec" },
   ]);
 });

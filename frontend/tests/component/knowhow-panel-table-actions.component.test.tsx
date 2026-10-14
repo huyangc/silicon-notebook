@@ -16,7 +16,6 @@ import {
   routeTable,
   settle,
   useKnowhowPanelSuite,
-  wireDetail,
   wirePatchResult,
 } from "../../test-support/knowhow-panel-harness.tsx";
 import type { KnowhowTableDetail } from "../../app/knowhow-model.ts";
@@ -258,7 +257,6 @@ test("quirk: the notebook-reset effect keeps the copy notice across a notebook s
   server.on("GET", "/notebooks", { json: NOTEBOOKS });
   server.on("POST", "/notebooks/nb-1/knowhow/t-rec/transfer", { json: { new_table_id: "t-copy" } });
   server.on("GET", "/notebooks/nb-2/knowhow", { json: [] });
-  server.on("GET", "/notebooks/nb-2/knowhow/t-rec", { json: wireDetail(recordDetail()) });
   const user = userEvent.setup();
   const panel = renderPanel({ initialTableId: "t-rec" });
 
@@ -275,7 +273,6 @@ test("quirk: the notebook-reset effect keeps the copy notice across a notebook s
     { method: "GET", path: "/notebooks" },
     { method: "POST", path: "/notebooks/nb-1/knowhow/t-rec/transfer", body: { target_notebook_id: "nb-2", mode: "copy" } },
     { method: "GET", path: "/notebooks/nb-2/knowhow" },
-    { method: "GET", path: "/notebooks/nb-2/knowhow/t-rec" },
   ]);
 });
 

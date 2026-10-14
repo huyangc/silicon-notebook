@@ -268,12 +268,18 @@ export function KnowhowPanel({
     [notebookId],
   );
 
+  // 只跟 selectedTableId 走，不跟 loadDetail 的身份走：loadDetail 只随 notebookId
+  // 变，而 notebookId 一变，下方 notebook 复位 effect 必然把 selectedTableId 清空——
+  // 若这里也依赖 loadDetail，它在复位之前执行、看到的还是旧表 id，会对新笔记本多发
+  // 一次注定被丢弃的旧表详情请求。切笔记本时作废 in-flight 旧详情的那一次 bump
+  // 由复位 effect 自己做（同一次提交，时机与改动前相同）。
   useEffect(() => {
     if (selectedTableId) loadDetail(selectedTableId);
     return () => {
       detailRequestRef.current += 1; // 切表/回列表/卸载：作废 in-flight 的旧表详情
     };
-  }, [selectedTableId, loadDetail]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTableId]);
 
   // F（review，单格 F2 + 批量 F3 共用）：规整发现「服务器原文已被他人改动」后，请求刷新
   // 当前表 detail——复用带 stale-guard 的 loadDetail（见 detailRequestRef 注释），把陈旧的
@@ -305,6 +311,7 @@ export function KnowhowPanel({
   // notebook 切换时(理论上面板会被 page.tsx 一并卸载，这里仅作兜底)整体复位，
   // 避免残留上一个 notebook 的表选中态。
   useEffect(() => {
+    detailRequestRef.current += 1; // 作废上一个笔记本 in-flight 的表详情（拉详情 effect 不再因 notebookId 重跑）
     setSelectedTableId(null);
     setDetail(null);
     setDetailError(null);
