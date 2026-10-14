@@ -954,3 +954,29 @@ test("被改的行按新值重排跳到别页时,动作反馈退回表格上方�
   // resolve 与 rows 更新在同一次微任务批里,顺序反过来会在更新前就断言)。
   expect(screen.queryByText("user-00")).toBeNull();
 });
+
+test("合并后老账号按新用户名排到别页时,列表跟到那一页,弹出层与成功提示仍可见", async () => {
+  primeCommonMocks();
+  const fillers = Array.from({ length: 20 }, (_, index) => ({
+    ...rows[1], id: `user-m${index}`, username: `m${String(index).padStart(8, "0")}`,
+  }));
+  const sso = { ...ssoRow, username: "z0012345" };
+  mocks.fetchAdminUsers.mockResolvedValue([...rows, ...fillers, sso]);
+  mocks.mergeAdminSsoAccount.mockResolvedValue({
+    id: "user-target", username: "z0012345", status: "active", removed_user_id: "user-sso",
+  });
+  const user = userEvent.setup();
+  render(<AdminUsagePage />);
+  await user.click(await screen.findByRole("button", { name: /^用户名/ }));
+  expect(await screen.findByText("第 1 / 2 页，共 23 位用户")).toBeInTheDocument();
+
+  const dialog = await openMerge(user, "z0012345");
+  await user.click(within(dialog).getByRole("button", { name: "合并" }));
+  await user.click(within(dialog).getByRole("button", { name: "确认合并" }));
+
+  // 按用户名升序,z0012345 排在最后:第 2 页。
+  expect(await screen.findByText("第 2 / 2 页，共 22 位用户")).toBeInTheDocument();
+  const menu = await screen.findByRole("dialog", { name: "管理 z0012345" });
+  expect(within(menu).getByRole("status")).toHaveTextContent("已合并：a00123456 现在是 z0012345");
+  expect(screen.getByText("z0012345", { selector: ".usage-username" }).closest("tr")).toContainElement(menu);
+});
