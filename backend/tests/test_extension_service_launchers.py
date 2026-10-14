@@ -64,13 +64,16 @@ with open(os.environ["SERVICE_EVENTS"], "a") as stream:
     stream.write(json.dumps(record) + "\\n")
 if action == "start" and os.environ.get("WAIT_SERVICE") == "1":
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(130))
-    pathlib.Path(os.environ["FAKE_ROOT"], "controller.pid").write_text(str(os.getpid()))
+    staged = pathlib.Path(os.environ["FAKE_ROOT"], "controller.pid.tmp")
+    staged.write_text(str(os.getpid()))
+    os.replace(staged, staged.with_suffix(""))
     while True:
         time.sleep(1)
 sys.exit(7 if action == "start" and os.environ.get("FAIL_SERVICE") == "1" else 0)
 ''')
     executable(root / "fake_child.sh", '''#!/bin/bash
-echo "$$" > "$FAKE_ROOT/$1.pid"
+# Publish the pid file by rename so a reader never sees it created but still empty.
+echo "$$" > "$FAKE_ROOT/$1.pid.tmp" && mv "$FAKE_ROOT/$1.pid.tmp" "$FAKE_ROOT/$1.pid"
 [[ "${FAIL_MAIN:-}" == "$1" ]] && exit 8
 exec sleep 60
 ''')
