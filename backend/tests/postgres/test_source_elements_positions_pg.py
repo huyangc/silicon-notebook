@@ -100,6 +100,12 @@ def database():
 
 def _seed(database, *, held: bool = False) -> None:
     with database.write() as db:
+        # The held-bystander case seeds through the function-scoped
+        # ``postgres_database`` (2 s statement timeout, not the module
+        # world's 20 s): the 20 000-row bulk insert below fires a per-row sync
+        # capture trigger and takes ~0.3 s locally, past 2 s on a busy 4-vCPU
+        # CI runner. Every other plan pin's seed lifts the limit the same way.
+        db.execute("SET LOCAL statement_timeout = '0'")
         db.execute(
             "INSERT INTO notebooks(id,name,created_at,updated_at) VALUES ('nb','nb',%s,%s)",
             (NOW, NOW),
