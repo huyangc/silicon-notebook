@@ -2376,12 +2376,6 @@ class RepositoryFacade:
         """
         return self._runtime.knowledge_query.edge_centrality_map(notebook_id)
 
-    def review_queue(self, notebook_id: str, limit: int = 200) -> List[dict]:
-        """Edge trust review queue — KnowledgeGovernanceService owns the
-        orchestration (Task 16; centrality stays version-cached through the
-        facade's _edge_centrality_map port). Frozen-signature delegate."""
-        return self._runtime.knowledge_governance.review_queue(notebook_id, limit)
-
     def review_queue_page(self, notebook_id: str, limit: int = 100) -> Dict[str, Any]:
         """``{"items": [...], "total": n}`` in ONE call (R3 T-A3 v4, codex
         #638 R1) — both halves come from the SAME seq-gated ranking-memo entry
@@ -2431,13 +2425,6 @@ class RepositoryFacade:
         属双所有权漂移地雷（review 抓出），降为委托后 loader 只此一家。"""
         return self.retrieval.candidates.cluster_map(notebook_id)
 
-    def write_merge_candidate(self, notebook_id: str, a: str, b: str, score: float) -> None:
-        """Merge-candidate insert — KnowledgeGovernanceService owns the body
-        (Task 16); frozen-signature delegate."""
-        return self._runtime.knowledge_governance.write_merge_candidate(
-            notebook_id, a, b, score
-        )
-
     def pending_merges(self, notebook_id: str) -> List[dict]:
         return self._runtime.knowledge_governance.pending_merges(notebook_id)
 
@@ -2454,11 +2441,6 @@ class RepositoryFacade:
         KnowledgeGovernanceService owns the body (Task 16); frozen-signature
         delegate."""
         return self._runtime.knowledge_governance._has_pending_merges(notebook_id)
-
-    def set_merge_decision(self, notebook_id: str, candidate_id: str, status: str) -> None:
-        return self._runtime.knowledge_governance.set_merge_decision(
-            notebook_id, candidate_id, status
-        )
 
     def confirm_merge(self, notebook_id: str, candidate_id: str) -> None:
         """Confirm a merge candidate — KnowledgeGovernanceService owns the
@@ -2485,27 +2467,6 @@ class RepositoryFacade:
     # wrapper (the frozen phase contracts patch it).
     # ------------------------------------------------------------------
 
-    def write_conflict_candidate(
-        self,
-        notebook_id: str,
-        kind: str,
-        left_ref: str,
-        right_ref: str,
-        conflict_type: Optional[str] = None,
-        resolution: Optional[str] = None,
-        winner_ref: Optional[str] = None,
-        resolved_payload: Optional[str] = None,
-        confidence: Optional[float] = None,
-        rationale: Optional[str] = None,
-    ) -> str:
-        """Insert one conflict candidate — KnowledgeGovernanceService owns the
-        body (Task 16); frozen-signature delegate."""
-        return self._runtime.knowledge_governance.write_conflict_candidate(
-            notebook_id, kind, left_ref, right_ref,
-            conflict_type, resolution, winner_ref, resolved_payload,
-            confidence, rationale,
-        )
-
     def pending_conflicts(self, notebook_id: str) -> List[dict]:
         """Return all conflict candidates with status='pending' for a notebook."""
         return self._runtime.knowledge_governance.pending_conflicts(notebook_id)
@@ -2518,37 +2479,6 @@ class RepositoryFacade:
         Frozen-signature delegate."""
         return self._runtime.knowledge_governance.set_conflict_status(
             notebook_id, candidate_id, status
-        )
-
-    def get_conflict_candidate(self, notebook_id: str, candidate_id: str) -> Optional[dict]:
-        """Fetch one conflict candidate inside its notebook authorization scope."""
-        return self._runtime.knowledge_governance.get_conflict_candidate(
-            notebook_id, candidate_id
-        )
-
-    def apply_conflict_resolution(
-        self,
-        notebook_id: str,
-        *,
-        kind: str,
-        left_ref: str,
-        right_ref: str,
-        resolution: str,
-        winner_ref: Optional[str] = None,
-        resolved_payload: Optional[dict] = None,
-    ) -> dict:
-        """Execute ONE adjudicated conflict resolution against the KG —
-        KnowledgeGovernanceService owns the multi-step orchestration (Task 16;
-        the frozen conflict double dirty bumps are unchanged).
-        Frozen-signature delegate."""
-        return self._runtime.knowledge_governance.apply_conflict_resolution(
-            notebook_id,
-            kind=kind,
-            left_ref=left_ref,
-            right_ref=right_ref,
-            resolution=resolution,
-            winner_ref=winner_ref,
-            resolved_payload=resolved_payload,
         )
 
     def confirm_conflict(self, notebook_id: str, candidate_id: str) -> dict:
@@ -2568,12 +2498,6 @@ class RepositoryFacade:
         return self._runtime.knowledge_governance.reject_conflict(
             notebook_id, candidate_id
         )
-
-    def resolve_notebook_conflicts(self, notebook_id: str) -> dict:
-        """Detect → adjudicate → (optionally) auto-apply KG conflicts —
-        KnowledgeGovernanceService owns the orchestration (Task 15 seed,
-        Task 16 full surface). Frozen-signature delegate."""
-        return self._runtime.knowledge_governance.resolve_notebook_conflicts(notebook_id)
 
     def review_pending_merges(
         self,
@@ -2600,9 +2524,6 @@ class RepositoryFacade:
         return self._runtime.knowledge_governance.run_merge_review_job(
             notebook_id, batch=batch
         )
-
-    def decided_pairs(self, notebook_id: str) -> Dict[tuple, str]:
-        return self._runtime.knowledge_governance.decided_pairs(notebook_id)
 
     def decided_seed_pairs(self, notebook_id: str) -> Dict[frozenset, str]:
         """{frozenset({seed_a, seed_b}): status} for confirmed/rejected/deferred.
@@ -2903,13 +2824,6 @@ class RepositoryFacade:
         delegate."""
         return self._runtime.knowledge_governance.list_promotion_queue(status_filter)
 
-    def approve_promotion(self, candidate_id: str) -> dict:
-        """Approve a promotion into the base corpus —
-        KnowledgeGovernanceService owns the orchestration (Task 16; the frozen
-        commit→embed→invalidate→dirty order and idempotent early return are
-        unchanged). Frozen-signature delegate."""
-        return self._runtime.knowledge_governance.approve_promotion(candidate_id)
-
     def approve_promotion_as_reviewer(
         self, candidate_id: str, reviewer_id: str
     ) -> dict:
@@ -2934,13 +2848,6 @@ class RepositoryFacade:
     def _merge_evidence_lists(self, base_ev: list, src_ev: list) -> list:
         """Union two evidence lists, deduping on (source_id, element_id, quoted_span)."""
         return self._runtime.governance.merge_evidence(base_ev, src_ev)
-
-    def reject_promotion(self, candidate_id: str, reason: str = "") -> dict:
-        """Reject a promotion candidate — KnowledgeGovernanceService owns the
-        orchestration (Task 16). Frozen-signature delegate."""
-        return self._runtime.knowledge_governance.reject_promotion(
-            candidate_id, reason
-        )
 
     def reject_promotion_as_reviewer(
         self, candidate_id: str, reason: str, reviewer_id: str

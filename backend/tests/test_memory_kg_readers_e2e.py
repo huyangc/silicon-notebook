@@ -279,7 +279,7 @@ def _run_producers(world: World) -> None:
         _put_vector(world, ids.route_b, [1.0, 0.04] + _PAD)
     repo._runtime.knowledge_lifecycle.incremental_fuse_source(nb, "src-s4")
     bind_chat_client(repo, "kg_conflict_review", EchoReviewer())
-    repo.resolve_notebook_conflicts(nb)
+    repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb)
 
 
 def build_world(client, repo, q, *, postgres: bool, kind: str) -> World:

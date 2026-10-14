@@ -672,7 +672,7 @@ def test_review_queue_output_matches_uncached_oracle(repo):
     the state its own test predates.
     """
     nb_id = _seed_centrality_graph(repo)
-    cached = repo.review_queue(nb_id)
+    cached = repo._runtime.knowledge_governance.review_queue(nb_id)
 
     # Force a fresh, uncached centrality computation and rebuild the queue
     # inline the same way the pre-cache implementation did.
@@ -737,7 +737,7 @@ def test_edge_centrality_map_invalidates_on_review_status_flip(repo):
     eviction 是这里【唯一】的失效机制——不同于 :rxgraph(其版本键内嵌各
     review_status 计数,自身就能捕捉翻转,显式 eviction 才真是 belt-and-braces)。"""
     nb_id = _seed_centrality_graph(repo)
-    q = repo.review_queue(nb_id)
+    q = repo._runtime.knowledge_governance.review_queue(nb_id)
     assert len(q) >= 2
     keep_id, reject_id = q[0]["rel_id"], q[1]["rel_id"]
 
@@ -760,7 +760,7 @@ def test_edge_centrality_bounded_subgraph_no_crash_and_sane_queue(repo, monkeypa
     monkeypatch.setattr(repo.settings, "edge_centrality_max_nodes", 3)
     nb_id = _seed_centrality_graph(repo, n_extra_chain=4)  # 4 base + 4 chain = 8 nodes
 
-    q = repo.review_queue(nb_id)
+    q = repo._runtime.knowledge_governance.review_queue(nb_id)
     assert q  # returns a queue, no crash
 
     ec_map = repo._edge_centrality_map(nb_id)

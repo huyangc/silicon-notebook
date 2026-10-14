@@ -33,49 +33,28 @@ def repo(tmp_path, monkeypatch):
     return SQLiteRepository(Settings(_env_file=None))
 
 
-def test_facade_governance_delegates_without_domain_sql(repo, monkeypatch):
-    expected = [{"rel_id": "rel-1"}]
-    monkeypatch.setattr(
-        repo._runtime.knowledge_governance,
-        "review_queue",
-        lambda notebook_id, limit=200: expected,
-    )
-    assert repo.review_queue("nb", 9) is expected
-
-
 def test_facade_governance_methods_delegate_to_the_runtime_instance(repo, monkeypatch):
     governance = repo._runtime.knowledge_governance
     sentinel = object()
     for name, call in (
-        ("review_queue", lambda: repo.review_queue("nb")),
         ("set_edge_review", lambda: repo.set_edge_review("nb", "rel", "verified")),
-        ("write_merge_candidate", lambda: repo.write_merge_candidate("nb", "a", "b", 0.9)),
         ("pending_merges", lambda: repo.pending_merges("nb")),
         ("_pending_merges_batch", lambda: repo._pending_merges_batch("nb", 5)),
         ("_has_pending_merges", lambda: repo._has_pending_merges("nb")),
-        ("set_merge_decision", lambda: repo.set_merge_decision("nb", "c", "confirmed")),
         ("confirm_merge", lambda: repo.confirm_merge("nb", "c")),
         ("reject_merge", lambda: repo.reject_merge("nb", "c")),
         ("review_pending_merges", lambda: repo.review_pending_merges("nb")),
         ("merge_review_job_status", lambda: repo.merge_review_job_status("nb")),
         ("run_merge_review_job", lambda: repo.run_merge_review_job("nb")),
-        ("write_conflict_candidate", lambda: repo.write_conflict_candidate("nb", "node", "l", "r")),
         ("pending_conflicts", lambda: repo.pending_conflicts("nb")),
         ("set_conflict_status", lambda: repo.set_conflict_status("nb", "c", "applied")),
-        ("get_conflict_candidate", lambda: repo.get_conflict_candidate("nb", "c")),
-        ("apply_conflict_resolution", lambda: repo.apply_conflict_resolution(
-            "nb", kind="node", left_ref="l", right_ref="r", resolution="keep")),
         ("confirm_conflict", lambda: repo.confirm_conflict("nb", "c")),
         ("reject_conflict", lambda: repo.reject_conflict("nb", "c")),
-        ("resolve_notebook_conflicts", lambda: repo.resolve_notebook_conflicts("nb")),
         ("propose_promotion", lambda: repo.propose_promotion("nb", "obj")),
         ("list_promotion_queue", lambda: repo.list_promotion_queue()),
-        ("approve_promotion", lambda: repo.approve_promotion("c")),
-        ("reject_promotion", lambda: repo.reject_promotion("c")),
         ("update_knowledge", lambda: repo.update_knowledge("nb", "k", None)),
         ("find_duplicates", lambda: repo.find_duplicates("nb", "concept")),
         ("merge_knowledge", lambda: repo.merge_knowledge("nb", "s", None)),
-        ("decided_pairs", lambda: repo.decided_pairs("nb")),
         ("decided_seed_pairs", lambda: repo.decided_seed_pairs("nb")),
         ("concept_whitelist_terms", lambda: repo.concept_whitelist_terms()),
         ("concept_whitelist_list", lambda: repo.concept_whitelist_list()),
@@ -113,7 +92,7 @@ def test_compound_conflict_status_rides_the_facade_wrapper(repo, monkeypatch):
     notebook = repo.create_notebook(NotebookCreate(name="port"))
     left = repo._test_insert_object(notebook.id, "claim", {"name": "before"})
     right = repo._test_insert_object(notebook.id, "claim", {"name": "other"})
-    candidate_id = repo.write_conflict_candidate(
+    candidate_id = repo._runtime.knowledge_governance.write_conflict_candidate(
         notebook.id,
         "node",
         left,
@@ -170,7 +149,7 @@ def test_t4deleg_review_queue_rows_delegate(repo, monkeypatch):
         return ([], [])
 
     monkeypatch.setattr(repo._runtime.governance, "review_queue_rows", spy)
-    result = repo.review_queue(notebook.id)
+    result = repo._runtime.knowledge_governance.review_queue(notebook.id)
     assert calls and calls[0] == notebook.id and result == []  # MUT
 
 
@@ -257,7 +236,7 @@ def test_t4deleg_object_payload_row_delegate(repo, monkeypatch):
 
     monkeypatch.setattr(repo._runtime.governance, "object_payload_row", spy)
     with pytest.raises(ValueError, match="target_base_id"):
-        repo.approve_promotion(candidate_id)
+        repo._runtime.knowledge_governance.approve_promotion(candidate_id)
     assert calls and calls[0] == object_id  # MUT
 
 
@@ -280,5 +259,5 @@ def test_t4deleg_conflict_resolution_rows_delegate(repo, monkeypatch):
         return ([], [], None)
 
     monkeypatch.setattr(repo._runtime.governance, "conflict_resolution_rows", spy)
-    result = repo.resolve_notebook_conflicts(notebook.id)
+    result = repo._runtime.knowledge_governance.resolve_notebook_conflicts(notebook.id)
     assert calls and calls[0] == notebook.id and result["skipped_llm"] is False  # MUT

@@ -16,8 +16,6 @@
         "answer_owner",
         "append_ask_trace",
         "append_knowhow_rows",
-        "apply_conflict_resolution",
-        "approve_promotion",
         "approve_promotion_as_reviewer",
         "ask",
         "ask_answer_detail",
@@ -65,7 +63,6 @@
         "create_object_schema",
         "create_report",
         "current_user",
-        "decided_pairs",
         "decided_seed_pairs",
         "delete_agent_profile",
         "delete_conversation",
@@ -99,7 +96,6 @@
         "find_duplicates",
         "finish_ask_job",
         "fold_scale_index_delta",
-        "get_conflict_candidate",
         "get_conversation",
         "get_knowhow_cell_code",
         "get_knowhow_change",
@@ -178,7 +174,6 @@
         "reject_conflict",
         "reject_memory",
         "reject_merge",
-        "reject_promotion",
         "reject_promotion_as_reviewer",
         "relations_for_notebook",
         "relink_notebook_kg",
@@ -193,14 +188,12 @@
         "require_indexing_pipeline_write",
         "resolve_agent_token",
         "resolve_agent_token_status",
-        "resolve_notebook_conflicts",
         "resolve_reasoning_followup",
         "resolve_session",
         "retrieval",
         "retrieval_experiences",
         "revert_knowhow_table",
         "review_pending_merges",
-        "review_queue",
         "review_queue_page",
         "revoke_agent_token",
         "root_dir",
@@ -217,7 +210,6 @@
         "set_knowhow_anchor_column",
         "set_knowhow_column_kind",
         "set_knowhow_hidden_source",
-        "set_merge_decision",
         "set_notebook_personal",
         "settings",
         "share_conversation",
@@ -271,9 +263,7 @@
         "visible_source_count",
         "visible_source_ids",
         "visible_source_scope_snapshot",
-        "warm_open_path_caches",
-        "write_conflict_candidate",
-        "write_merge_candidate"
+        "warm_open_path_caches"
       ]
     },
     "SQLiteRepository": {
@@ -300,7 +290,7 @@
       "rerank"
     ]
   },
-  "ports_protocol_method_count": 970,
+  "ports_protocol_method_count": 967,
   "function_length_ceiling": {
     "backend/app/extensions/ask.py::AskCompletedObserverHost.observe_application": 154,
     "backend/app/extensions/parser_chain.py::ParserProviderChainHost._run": 307,

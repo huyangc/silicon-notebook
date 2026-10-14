@@ -435,7 +435,7 @@ def test_append_clusters_only_invalidates_when_rows_were_added(repo, monkeypatch
 
 
 def _seed_merge_candidate(repo, notebook_id, a="K-a", b="K-b"):
-    repo.write_merge_candidate(notebook_id, a, b, 0.9)
+    repo._runtime.knowledge_governance.write_merge_candidate(notebook_id, a, b, 0.9)
     with repo._connect() as db:
         return db.execute(
             "SELECT id FROM concept_merge_candidates WHERE notebook_id=? "
@@ -551,7 +551,7 @@ def test_approve_promotion_bumps_inside_the_transaction_then_embeds(
     _spy_dirty_in_tx(repo, monkeypatch, events)
     _spy_embed_store(repo, monkeypatch, events)
 
-    repo.approve_promotion(candidate["id"])
+    repo._runtime.knowledge_governance.approve_promotion(candidate["id"])
 
     assert events == [
         "write.begin", "dirty", "write.commit",       # base-object insert
@@ -723,7 +723,7 @@ def test_edge_conflict_discard_adds_a_second_dirty_bump(repo, monkeypatch):
     _spy_coordinator(repo, monkeypatch, events)
     _spy_dirty_in_tx(repo, monkeypatch, events)
 
-    out = repo.apply_conflict_resolution(
+    out = repo._runtime.knowledge_governance.apply_conflict_resolution(
         notebook_id,
         kind="edge",
         left_ref=relation_ids[0],
@@ -755,7 +755,7 @@ def test_node_conflict_discard_and_modify_add_a_second_dirty_bump(
     _spy_dirty_in_tx(repo, monkeypatch, events)
     _spy_embed_store(repo, monkeypatch, events)
 
-    repo.apply_conflict_resolution(
+    repo._runtime.knowledge_governance.apply_conflict_resolution(
         notebook_id,
         kind="node",
         left_ref=object_ids[0],
@@ -770,7 +770,7 @@ def test_node_conflict_discard_and_modify_add_a_second_dirty_bump(
     ]
 
     events.clear()
-    repo.apply_conflict_resolution(
+    repo._runtime.knowledge_governance.apply_conflict_resolution(
         notebook_id,
         kind="node",
         left_ref=object_ids[0],
@@ -792,7 +792,7 @@ def test_confirm_conflict_applies_mutation_before_candidate_status(
     repo, monkeypatch
 ):
     notebook_id, object_ids, _relations = _seed_kg(repo, "confirm conflict phase")
-    candidate_id = repo.write_conflict_candidate(
+    candidate_id = repo._runtime.knowledge_governance.write_conflict_candidate(
         notebook_id,
         "node",
         object_ids[0],

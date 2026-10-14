@@ -184,16 +184,16 @@ def _endpoint_ids(repo, notebook_id) -> set:
 def test_review_queue_matches_pre_narrowing_oracle(repo):
     nb_id, isolated = _seed_graph_with_isolated_objects(repo)
     assert isolated, "fixture must contain objects that are on no relation"
-    assert repo.review_queue(nb_id) == _old_review_queue(repo, nb_id)
+    assert repo._runtime.knowledge_governance.review_queue(nb_id) == _old_review_queue(repo, nb_id)
 
 
 def test_review_queue_matches_oracle_when_an_edge_is_rejected(repo):
     """Rejecting an edge can strand its endpoints — the narrowed object read
     must follow the same non-rejected predicate the relation read uses."""
     nb_id, _ = _seed_graph_with_isolated_objects(repo)
-    victim = repo.review_queue(nb_id)[0]["rel_id"]
+    victim = repo._runtime.knowledge_governance.review_queue(nb_id)[0]["rel_id"]
     repo.set_edge_review(nb_id, victim, "rejected")
-    assert repo.review_queue(nb_id) == _old_review_queue(repo, nb_id)
+    assert repo._runtime.knowledge_governance.review_queue(nb_id) == _old_review_queue(repo, nb_id)
 
 
 # ── 批 A: 有界性护栏(变异 = 恢复全量读 ⇒ 本条报红) ──────────────────────
@@ -336,7 +336,7 @@ def test_review_queue_rows_filters_cross_notebook_endpoints(repo):
     with repo._connect() as db:
         _rel, obj_rows = GovernanceStore.review_queue_rows(db, nb_id)
     assert stranger not in {r["id"] for r in obj_rows}
-    assert repo.review_queue(nb_id) == _old_review_queue(repo, nb_id)
+    assert repo._runtime.knowledge_governance.review_queue(nb_id) == _old_review_queue(repo, nb_id)
 
 
 def test_review_queue_rows_paginates_endpoint_lookup(repo, monkeypatch):
@@ -417,7 +417,7 @@ def test_review_queue_trust_scores_match_oracle_for_every_evidence_shape(
     with repo._write() as db:
         db.execute("UPDATE knowledge_relations SET evidence=? WHERE notebook_id=?",
                    (raw_evidence, nb_id))
-    assert repo.review_queue(nb_id) == _old_review_queue(repo, nb_id)
+    assert repo._runtime.knowledge_governance.review_queue(nb_id) == _old_review_queue(repo, nb_id)
 
 
 @pytest.mark.parametrize("raw_evidence", _ANCHOR_CASES_OLD_PATH_RAISED)
@@ -480,7 +480,7 @@ def test_review_queue_scores_a_non_string_name_that_crashed_the_old_read(repo):
         )
     with pytest.raises(AttributeError):
         _old_review_queue(repo, nb_id)
-    items = repo.review_queue(nb_id)
+    items = repo._runtime.knowledge_governance.review_queue(nb_id)
     assert items
     assert {i["source_name"] for i in items} == {"42"}
     assert {i["target_name"] for i in items} == {"42"}
@@ -491,7 +491,7 @@ def test_review_queue_scores_a_non_string_name_that_crashed_the_old_read(repo):
 @pytest.mark.parametrize("limit", [0, 1, 2, 3, 5, 200, 10_000, -1, -2])
 def test_review_queue_limit_matches_stable_sort_slice(repo, limit):
     nb_id, _ = _seed_graph_with_isolated_objects(repo)
-    assert repo.review_queue(nb_id, limit=limit) == _old_review_queue(
+    assert repo._runtime.knowledge_governance.review_queue(nb_id, limit=limit) == _old_review_queue(
         repo, nb_id, limit=limit
     )
 
@@ -500,7 +500,7 @@ def test_review_queue_limit_slice_exercises_priority_ties(repo):
     """The equivalence above is only meaningful if ties actually occur — a tie
     is where `nlargest` and a stable sort could diverge."""
     nb_id, _ = _seed_graph_with_isolated_objects(repo)
-    priorities = [i["review_priority"] for i in repo.review_queue(nb_id)]
+    priorities = [i["review_priority"] for i in repo._runtime.knowledge_governance.review_queue(nb_id)]
     assert len(priorities) > len(set(priorities)), "fixture must produce ties"
 
 
@@ -552,7 +552,7 @@ def test_promotion_merge_uses_matched_row_evidence(repo):
     _set_evidence(repo, oid, src_evidence)
 
     cand = repo.propose_promotion(nb.id, oid)
-    result = repo.approve_promotion(cand["id"])
+    result = repo._runtime.knowledge_governance.approve_promotion(cand["id"])
 
     assert result["base_object_id"] == existing
     merged = _evidence_of(repo, existing)

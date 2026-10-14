@@ -42,21 +42,21 @@ def test_cluster_and_candidate_crud(repo):
         {"canonical_id": "K1", "member_object_id": "o2", "canonical_name": "MOSFET"},
     ])
     assert repo.cluster_map(nb.id) == {"o1": "K1", "o2": "K1"}
-    repo.write_merge_candidate(nb.id, "K1", "K2", 0.85)
+    repo._runtime.knowledge_governance.write_merge_candidate(nb.id, "K1", "K2", 0.85)
     pend = repo.pending_merges(nb.id)
     assert len(pend) == 1 and pend[0]["status"] == "pending"
-    repo.set_merge_decision(nb.id, pend[0]["id"], "rejected")
+    repo._runtime.knowledge_governance.set_merge_decision(nb.id, pend[0]["id"], "rejected")
     assert repo.pending_merges(nb.id) == []
-    assert repo.decided_pairs(nb.id) == {("K1", "K2"): "rejected"}
-    repo.set_merge_decision(nb.id, pend[0]["id"], "confirmed")
-    assert repo.decided_pairs(nb.id) == {("K1", "K2"): "confirmed"}
+    assert repo._runtime.knowledge_governance.decided_pairs(nb.id) == {("K1", "K2"): "rejected"}
+    repo._runtime.knowledge_governance.set_merge_decision(nb.id, pend[0]["id"], "confirmed")
+    assert repo._runtime.knowledge_governance.decided_pairs(nb.id) == {("K1", "K2"): "confirmed"}
 
 
 def test_merge_decision_settles_legacy_duplicate_canonical_pair_rows(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo.write_merge_candidate(nb.id, "K-left", "K-right", 0.91)
-    repo.write_merge_candidate(nb.id, "K-right", "K-left", 0.89)
-    repo.write_merge_candidate(nb.id, "K-left", "K-other", 0.88)
+    repo._runtime.knowledge_governance.write_merge_candidate(nb.id, "K-left", "K-right", 0.91)
+    repo._runtime.knowledge_governance.write_merge_candidate(nb.id, "K-right", "K-left", 0.89)
+    repo._runtime.knowledge_governance.write_merge_candidate(nb.id, "K-left", "K-other", 0.88)
     target = next(
         row for row in repo.pending_merges(nb.id)
         if frozenset((row["canonical_a"], row["canonical_b"]))
@@ -81,10 +81,10 @@ def test_merge_decision_settles_legacy_duplicate_canonical_pair_rows(repo):
 
 def test_set_merge_decision_rejects_bad_status(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo.write_merge_candidate(nb.id, "K1", "K2", 0.85)
+    repo._runtime.knowledge_governance.write_merge_candidate(nb.id, "K1", "K2", 0.85)
     cid = repo.pending_merges(nb.id)[0]["id"]
     with pytest.raises(ValueError):
-        repo.set_merge_decision(nb.id, cid, "maybe")
+        repo._runtime.knowledge_governance.set_merge_decision(nb.id, cid, "maybe")
 
 def test_rebuild_merges_same_concept_across_sources(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
@@ -597,7 +597,7 @@ def test_confirm_merge_unions_clusters_on_rebuild(repo):
     cmap = repo.cluster_map(nb.id)
     a_cid, b_cid = cmap[list(cmap)[0]], cmap[list(cmap)[1]]
     assert a_cid != b_cid                                # distinct names -> separate clusters
-    repo.write_merge_candidate(nb.id, a_cid, b_cid, 0.84)
+    repo._runtime.knowledge_governance.write_merge_candidate(nb.id, a_cid, b_cid, 0.84)
     cand = repo.pending_merges(nb.id)[0]
     repo.confirm_merge(nb.id, cand["id"])
     repo.rebuild_unified_kg(nb.id)
@@ -700,7 +700,7 @@ def _candidate_status(repo, nb_id, cid):
 
 def test_review_merge_below_confirm_threshold_becomes_deferred(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo.write_merge_candidate(nb.id, "K1", "K2", 0.8)
+    repo._runtime.knowledge_governance.write_merge_candidate(nb.id, "K1", "K2", 0.8)
     cid = repo.pending_merges(nb.id)[0]["id"]
     bind_chat_client(repo, "kg_merge_review", _CannedReviewLLM("merge", 0.88))
     out = repo.review_pending_merges(nb.id, confirm_threshold=0.90, separate_threshold=0.80)
@@ -710,7 +710,7 @@ def test_review_merge_below_confirm_threshold_becomes_deferred(repo):
 
 def test_review_merge_at_confirm_threshold_is_confirmed(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo.write_merge_candidate(nb.id, "K1", "K2", 0.8)
+    repo._runtime.knowledge_governance.write_merge_candidate(nb.id, "K1", "K2", 0.8)
     cid = repo.pending_merges(nb.id)[0]["id"]
     bind_chat_client(repo, "kg_merge_review", _CannedReviewLLM("merge", 0.92))
     out = repo.review_pending_merges(nb.id, confirm_threshold=0.90, separate_threshold=0.80)
@@ -720,7 +720,7 @@ def test_review_merge_at_confirm_threshold_is_confirmed(repo):
 
 def test_review_keep_separate_at_threshold_is_rejected(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo.write_merge_candidate(nb.id, "K1", "K2", 0.8)
+    repo._runtime.knowledge_governance.write_merge_candidate(nb.id, "K1", "K2", 0.8)
     cid = repo.pending_merges(nb.id)[0]["id"]
     bind_chat_client(repo, "kg_merge_review", _CannedReviewLLM("keep_separate", 0.85))
     out = repo.review_pending_merges(nb.id, confirm_threshold=0.90, separate_threshold=0.80)
@@ -730,7 +730,7 @@ def test_review_keep_separate_at_threshold_is_rejected(repo):
 
 def test_review_keep_separate_below_threshold_becomes_deferred(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo.write_merge_candidate(nb.id, "K1", "K2", 0.8)
+    repo._runtime.knowledge_governance.write_merge_candidate(nb.id, "K1", "K2", 0.8)
     cid = repo.pending_merges(nb.id)[0]["id"]
     bind_chat_client(repo, "kg_merge_review", _CannedReviewLLM("keep_separate", 0.70))
     out = repo.review_pending_merges(nb.id, confirm_threshold=0.90, separate_threshold=0.80)
@@ -745,7 +745,7 @@ def test_review_defaults_drain_keep_separate_that_old_single_threshold_left_pend
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     assert repo.settings.kg_merge_confirm_threshold == 0.90
     assert repo.settings.kg_merge_separate_threshold == 0.80
-    repo.write_merge_candidate(nb.id, "K1", "K2", 0.8)
+    repo._runtime.knowledge_governance.write_merge_candidate(nb.id, "K1", "K2", 0.8)
     cid = repo.pending_merges(nb.id)[0]["id"]
     bind_chat_client(repo, "kg_merge_review", _CannedReviewLLM("keep_separate", 0.88))
     out = repo.review_pending_merges(nb.id)  # no thresholds -> settings defaults

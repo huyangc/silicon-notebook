@@ -139,7 +139,7 @@ def test_llm_not_configured_returns_skipped_summary(repo):
     bind_chat_client(repo, "kg_conflict_review", UnconfiguredLLM())
     nb = repo.create_notebook(NotebookCreate(name="nb-no-llm"))
 
-    result = repo.resolve_notebook_conflicts(nb.id)
+    result = repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb.id)
 
     assert result["skipped_llm"] is True
     assert result["detected"] == 0
@@ -187,7 +187,7 @@ def test_candidates_detected_and_queued(repo):
     # FakeLLM with no-conflict verdict so nothing is auto-applied
     bind_chat_client(repo, "kg_conflict_review", FakeLLM([]))  # defaults to "none/keep/0.0" for every call
 
-    result = repo.resolve_notebook_conflicts(nb_id)
+    result = repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb_id)
 
     assert result["skipped_llm"] is False
     assert result["detected"] >= 1
@@ -225,7 +225,7 @@ def test_high_confidence_discard_applies_and_marks_applied(repo):
     # Set threshold below 0.98 so it auto-applies
     repo.settings.kg_conflict_auto_apply_threshold = 0.95
 
-    result = repo.resolve_notebook_conflicts(nb_id)
+    result = repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb_id)
 
     assert result["auto_applied"] >= 1
 
@@ -285,7 +285,7 @@ def test_low_confidence_leaves_db_unchanged_and_pending(repo):
             ).fetchall()
         }
 
-    result = repo.resolve_notebook_conflicts(nb_id)
+    result = repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb_id)
 
     # Should NOT auto-apply
     assert result["auto_applied"] == 0
@@ -389,7 +389,7 @@ def test_conflict_type_none_stays_pending(repo):
     bind_chat_client(repo, "kg_conflict_review", FakeLLM([none_verdict]))
     repo.settings.kg_conflict_auto_apply_threshold = 0.95
 
-    result = repo.resolve_notebook_conflicts(nb_id)
+    result = repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb_id)
 
     # conflict_type="none" means no auto-apply regardless of confidence
     assert result["auto_applied"] == 0
@@ -403,7 +403,7 @@ def test_summary_dict_has_expected_keys(repo):
     nb = repo.create_notebook(NotebookCreate(name="summary-keys"))
     bind_chat_client(repo, "kg_conflict_review", FakeLLM([]))
 
-    result = repo.resolve_notebook_conflicts(nb.id)
+    result = repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb.id)
 
     assert "detected" in result
     assert "auto_applied" in result
@@ -548,7 +548,7 @@ def test_node_discriminative_discard_applies(repo):
     ))
     repo.settings.kg_conflict_auto_apply_threshold = 0.95
 
-    result = repo.resolve_notebook_conflicts(nb_id)
+    result = repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb_id)
 
     assert result["auto_applied"] >= 1, (
         f"Expected auto_applied >= 1 for node discard; got {result}"
@@ -600,7 +600,7 @@ def test_node_discriminative_modify_applies(repo):
     ))
     repo.settings.kg_conflict_auto_apply_threshold = 0.95
 
-    result = repo.resolve_notebook_conflicts(nb_id)
+    result = repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb_id)
 
     assert result["auto_applied"] >= 1, (
         f"Expected auto_applied >= 1 for node modify; got {result}"
@@ -707,7 +707,7 @@ def test_edge_evidence_quote_reaches_llm_prompt(repo):
     bind_chat_client(repo, "kg_conflict_review", llm)
     repo.settings.kg_conflict_auto_apply_threshold = 0.95
 
-    repo.resolve_notebook_conflicts(nb.id)
+    repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb.id)
 
     assert llm.recorded_prompts, (
         "No LLM calls made — edge conflict was not detected or LLM was not reached"
@@ -759,7 +759,7 @@ def test_candidate_cap_bounds_llm_calls_and_reports_truncation(repo):
     bind_chat_client(repo, "kg_conflict_review", llm)
     repo.settings.kg_conflict_max_candidates = 5
 
-    result = repo.resolve_notebook_conflicts(nb_id)
+    result = repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb_id)
 
     assert result["detected"] == 5
     assert result["truncated"] > 0, "fixture must exceed the cap"
@@ -774,12 +774,12 @@ def test_truncation_count_accounts_for_every_detected_candidate(repo):
     bind_chat_client(repo, "kg_conflict_review", CountingLLM())
 
     repo.settings.kg_conflict_max_candidates = 100000
-    uncapped = repo.resolve_notebook_conflicts(nb_id)
+    uncapped = repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb_id)
     assert uncapped["truncated"] == 0
 
     nb_id2 = _seed_many_discriminative_claims(repo, pairs=12)
     repo.settings.kg_conflict_max_candidates = 5
-    capped = repo.resolve_notebook_conflicts(nb_id2)
+    capped = repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb_id2)
 
     assert capped["detected"] + capped["truncated"] == uncapped["detected"]
 
@@ -790,7 +790,7 @@ def test_no_truncation_reports_zero(repo):
     bind_chat_client(repo, "kg_conflict_review", llm)
     repo.settings.kg_conflict_max_candidates = 800
 
-    result = repo.resolve_notebook_conflicts(nb_id)
+    result = repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb_id)
 
     assert result["truncated"] == 0
     assert result["detected"] >= 3
@@ -813,7 +813,7 @@ def test_evidence_is_read_only_for_surviving_candidates(repo, monkeypatch):
         return real(db, ids)
 
     monkeypatch.setattr(governance.knowledge, "object_evidence_rows", _recording)
-    result = repo.resolve_notebook_conflicts(nb_id)
+    result = repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb_id)
 
     assert result["detected"] == 2
     # 20 objects exist; only the 2 surviving candidates' 4 sides may be read.
@@ -835,7 +835,7 @@ def test_node_evidence_still_reaches_the_prompt_after_the_thin_read(repo):
     llm = PromptRecordingLLM()
     bind_chat_client(repo, "kg_conflict_review", llm)
 
-    repo.resolve_notebook_conflicts(nb.id)
+    repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb.id)
 
     prompts = "\n".join(llm.recorded_prompts)
     assert "DISTINCTIVE_NODE_QUOTE_N" in prompts
@@ -891,7 +891,7 @@ def test_cap_reserves_a_share_for_node_candidates(repo):
     bind_chat_client(repo, "kg_conflict_review", CountingLLM())
     repo.settings.kg_conflict_max_candidates = 8
 
-    result = repo.resolve_notebook_conflicts(nb_id)
+    result = repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb_id)
     pending = repo.pending_conflicts(nb_id)
 
     assert result["detected"] == 8
@@ -964,7 +964,7 @@ def test_truncation_event_shape_is_counts_only(repo, monkeypatch):
         lambda event: events.append(event),
     )
 
-    repo.resolve_notebook_conflicts(nb_id)
+    repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb_id)
 
     truncations = [e for e in events if e["kind"] == "kg_conflict_candidates_truncated"]
     assert len(truncations) == 1
@@ -998,7 +998,7 @@ def test_semantic_ann_failure_event_shape_is_counts_only(repo, monkeypatch):
         lambda event: events.append(event),
     )
 
-    repo.resolve_notebook_conflicts(nb_id)
+    repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb_id)
 
     failures = [e for e in events if e["kind"] == "kg_conflict_semantic_ann_failed"]
     assert failures, "the ANN failure must be observable, not just logged"
@@ -1071,7 +1071,7 @@ def test_conflict_candidates_never_include_memory_objects_or_relations(repo, sou
     llm = FakeLLM([])
     bind_chat_client(repo, "kg_conflict_review", llm)
 
-    repo.resolve_notebook_conflicts(nb_id)
+    repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb_id)
 
     refs = {ref for c in repo.pending_conflicts(nb_id) for ref in (c["left_ref"], c["right_ref"])}
     prompts = json.dumps(llm.calls, ensure_ascii=False)

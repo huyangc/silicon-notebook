@@ -1029,7 +1029,7 @@ def case_exit_withdraws_active_promotion(world: World) -> None:
 
 def case_approved_promotion_survives_deletion(world: World) -> None:
     candidate_id = propose(world, "alice_home")
-    world.repo.approve_promotion(candidate_id)
+    world.repo._runtime.knowledge_governance.approve_promotion(candidate_id)
     before = _promotion_row(world, candidate_id)
     base_objects = world.sql.count(
         "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=?",

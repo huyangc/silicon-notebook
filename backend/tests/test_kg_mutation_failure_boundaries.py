@@ -230,7 +230,7 @@ def test_approve_promotion_candidate_failure_rolls_back_base_and_candidate(
     )
 
     with pytest.raises(RuntimeError, match="candidate update failed"):
-        repo.approve_promotion(candidate["id"])
+        repo._runtime.knowledge_governance.approve_promotion(candidate["id"])
 
     with repo._connect() as db:
         candidate_status = db.execute(
@@ -253,7 +253,7 @@ def test_confirm_conflict_status_failure_leaves_mutation_committed(
     notebook = repo.create_notebook(NotebookCreate(name="conflict boundary"))
     left = repo._test_insert_object(notebook.id, "claim", {"name": "before"})
     right = repo._test_insert_object(notebook.id, "claim", {"name": "other"})
-    candidate_id = repo.write_conflict_candidate(
+    candidate_id = repo._runtime.knowledge_governance.write_conflict_candidate(
         notebook.id,
         "node",
         left,

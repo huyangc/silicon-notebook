@@ -72,16 +72,6 @@ def test_facade_lifecycle_methods_delegate_to_the_runtime_instance(repo, monkeyp
         assert call() is sentinel, name
 
 
-def test_resolve_notebook_conflicts_delegates_to_governance_service(repo, monkeypatch):
-    sentinel = {"detected": 0}
-    monkeypatch.setattr(
-        repo._runtime.knowledge_governance,
-        "resolve_notebook_conflicts",
-        lambda notebook_id: sentinel,
-    )
-    assert repo.resolve_notebook_conflicts("nb-x") is sentinel
-
-
 def test_kg_building_set_and_lock_are_lifecycle_owned_shared_objects(repo):
     lifecycle = repo._runtime.knowledge_lifecycle
     # One membership set: catalog reads it (get_notebook backfill), the
