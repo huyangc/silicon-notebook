@@ -51,17 +51,13 @@ FIXTURE_SECRETS = (
 )
 
 
-def test_deployed_v91_database_verifies_auth_simplification(tmp_path):
+def test_deployed_v91_database_verifies_auth_simplification(tmp_path, _upgraded_v9):
     """A deployed v91 database still holds the staged-auth policy (its seeded
     'local' row), the empty identity mapping, users.local_login_name and
     auth_identity_audit.grant_reference. _migration_92 drops exactly those;
     every surviving users row is unchanged apart from the dropped column."""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as rollback:
         rollback_v92(rollback)
         rollback.execute("PRAGMA user_version = 91")
@@ -77,15 +73,11 @@ def test_deployed_v91_database_verifies_auth_simplification(tmp_path):
         assert original.execute("PRAGMA user_version").fetchone()[0] == 91
 
 
-def test_v92_drop_outside_the_allowlist_still_fails(tmp_path):
+def test_v92_drop_outside_the_allowlist_still_fails(tmp_path, _upgraded_v9):
     """The dropped-table/column allowlists name exactly v92's objects: a v91
     database carrying any other table that disappears still fails closed."""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as rollback:
         rollback_v92(rollback)
         rollback.execute("PRAGMA user_version = 91")
@@ -109,14 +101,10 @@ def test_v92_drop_outside_the_allowlist_still_fails(tmp_path):
     assert "external_identities" in result.changed_tables
 
 
-def _v91_with_pending_auth_transaction(module, tmp_path):
+def _v91_with_pending_auth_transaction(module, tmp_path, upgraded_v9):
     """The committed fixture rolled back to v91, holding one pending auth
     transaction as a backup taken mid-sign-in would."""
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, upgraded_v9)
     rollback = sqlite3.connect(database)
     with rollback:
         rollback_v92(rollback)
@@ -130,12 +118,14 @@ def _v91_with_pending_auth_transaction(module, tmp_path):
     return database, storage
 
 
-def test_v92_discarding_pending_auth_transactions_verifies(tmp_path):
+def test_v92_discarding_pending_auth_transactions_verifies(tmp_path, _upgraded_v9):
     """_migration_92 deletes every pending auth transaction on purpose; across
     v92 an emptied auth_transactions is the expected outcome, not a
     row-count change."""
     module = _load_verifier()
-    database, storage = _v91_with_pending_auth_transaction(module, tmp_path)
+    database, storage = _v91_with_pending_auth_transaction(
+        module, tmp_path, _upgraded_v9
+    )
 
     result = module.verify_snapshot(database, storage)
 
@@ -145,14 +135,16 @@ def test_v92_discarding_pending_auth_transactions_verifies(tmp_path):
 
 
 def test_v92_auth_transactions_that_survive_the_upgrade_still_fail(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, _upgraded_v9
 ):
     """The exemption admits only the discard: a row left in auth_transactions
     after crossing v92 fails closed."""
     from app.repositories.sqlite import migrations
 
     module = _load_verifier()
-    database, storage = _v91_with_pending_auth_transaction(module, tmp_path)
+    database, storage = _v91_with_pending_auth_transaction(
+        module, tmp_path, _upgraded_v9
+    )
     original = migrations.SqliteMigrator._migration_92
 
     def keep_a_row(self):
@@ -175,14 +167,10 @@ def test_v92_auth_transactions_that_survive_the_upgrade_still_fail(
     ), result.discrepancies
 
 
-def _v91_with_audit_row(module, tmp_path):
+def _v91_with_audit_row(module, tmp_path, upgraded_v9):
     """The committed fixture rolled back to v91, holding one identity audit
     row (grant_reference filled) as a deployed v91 server would."""
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, upgraded_v9)
     rollback = sqlite3.connect(database)
     with rollback:
         rollback_v92(rollback)
@@ -198,11 +186,13 @@ def _v91_with_audit_row(module, tmp_path):
     return database, storage
 
 
-def test_v92_compares_surviving_columns_of_a_table_that_lost_a_column(tmp_path):
+def test_v92_compares_surviving_columns_of_a_table_that_lost_a_column(
+    tmp_path, _upgraded_v9
+):
     """auth_identity_audit loses grant_reference at v92; every other column of
     its rows must still be compared, not just the row count."""
     module = _load_verifier()
-    database, storage = _v91_with_audit_row(module, tmp_path)
+    database, storage = _v91_with_audit_row(module, tmp_path, _upgraded_v9)
 
     result = module.verify_snapshot(database, storage)
 
@@ -211,12 +201,12 @@ def test_v92_compares_surviving_columns_of_a_table_that_lost_a_column(tmp_path):
 
 
 def test_v92_changed_surviving_column_of_a_trimmed_table_fails(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, _upgraded_v9
 ):
     from app.repositories.sqlite import migrations
 
     module = _load_verifier()
-    database, storage = _v91_with_audit_row(module, tmp_path)
+    database, storage = _v91_with_audit_row(module, tmp_path, _upgraded_v9)
     original = migrations.SqliteMigrator._migration_92
 
     def corrupt_action(self):
@@ -243,15 +233,11 @@ def _rollback_v91(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE ask_jobs DROP COLUMN memory_access")
 
 
-def test_deployed_v90_database_verifies_ask_intent_handles(tmp_path):
+def test_deployed_v90_database_verifies_ask_intent_handles(tmp_path, _upgraded_v9):
     """A deployed v90 database is missing exactly _migration_91's table and
     its ``ask_jobs.memory_access`` column."""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as rollback:
         _rollback_v91(rollback)
         rollback.execute("PRAGMA user_version = 90")
@@ -274,17 +260,13 @@ def _rollback_v90(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE retained_user_activity DROP COLUMN output")
 
 
-def test_deployed_v89_database_verifies_ask_job_output_column(tmp_path):
+def test_deployed_v89_database_verifies_ask_job_output_column(tmp_path, _upgraded_v9):
     """A deployed v89 database is missing exactly _migration_90's schema
     addition: ``output`` TEXT NOT NULL DEFAULT 'answer' on ask_jobs and
     retained_user_activity (and _migration_91's, undone with it). No row
     backfill beyond the default."""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as upgraded_db:
         for table in ("ask_jobs", "retained_user_activity"):
             columns = {
@@ -317,16 +299,12 @@ def _rollback_v89(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE agent_access_tokens DROP COLUMN token_plain")
 
 
-def test_deployed_v88_database_verifies_agent_token_plaintext_column(tmp_path):
+def test_deployed_v88_database_verifies_agent_token_plaintext_column(tmp_path, _upgraded_v9):
     """A deployed v88 database is missing exactly _migration_89's schema
     addition: the nullable ``agent_access_tokens.token_plain`` (no default,
     no backfill). No row changes: the fixture holds no Agent token."""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as upgraded_db:
         columns = {
             row[1]: (row[2], row[3], row[4])
@@ -356,17 +334,13 @@ def _rollback_v87(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE unified_kg_state DROP COLUMN memory_isolation_version")
 
 
-def test_deployed_v86_database_verifies_memory_isolation_marker(tmp_path):
+def test_deployed_v86_database_verifies_memory_isolation_marker(tmp_path, _upgraded_v9):
     """A deployed v86 database is missing exactly _migration_87's schema
     addition: ``unified_kg_state.memory_isolation_version`` NOT NULL DEFAULT 1.
     The fixture has no Memory source, so the cleanup half deletes nothing and
     marks nothing: every existing state row reads 1 and no table changes."""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as upgraded_db:
         columns = {
             row[1]: (row[2], row[3], row[4])
@@ -480,16 +454,12 @@ def test_v87_accepts_only_the_two_documented_inserted_state_rows():
     assert run(queued, memory=())[0] == unexpected
 
 
-def test_deployed_v86_copy_with_clusters_and_no_state_row_verifies(tmp_path):
+def test_deployed_v86_copy_with_clusters_and_no_state_row_verifies(tmp_path, _upgraded_v9):
     """codex #824 r7: a v86 database holding a notebook with clusters but no
     ``unified_kg_state`` row (a copied library) -- v87 legitimately inserts
     the seed-check row (marker 2) and the snapshot verifies."""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as forged:
         _rollback_v87(forged)
         forged.execute("PRAGMA user_version = 86")
@@ -520,17 +490,13 @@ def _rollback_v86(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE users DROP COLUMN seen_release_ordinal")
 
 
-def test_deployed_v85_database_verifies_users_seen_release_ordinal(tmp_path):
+def test_deployed_v85_database_verifies_users_seen_release_ordinal(tmp_path, _upgraded_v9):
     """A deployed v85 database is missing exactly _migration_86's addition:
     the nullable ``users.seen_release_ordinal`` column. No row changes -- NULL
     ("never recorded") is the correct value for every pre-existing user, so
     the migration backfills nothing."""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as upgraded_db:
         columns = {
             row[1]: (row[2], row[3], row[4])
@@ -567,7 +533,7 @@ def _rollback_v85(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE sync_export_state DROP COLUMN captured")
 
 
-def test_deployed_v84_database_verifies_sync_export_snapshot(tmp_path):
+def test_deployed_v84_database_verifies_sync_export_snapshot(tmp_path, _upgraded_v9):
     """A deployed v84 database is missing exactly _migration_85's addition:
     sync_export_state.captured (NOT NULL DEFAULT 0) and
     sync_export_state.exported_snapshot (nullable), idx_sync_change_log_txid
@@ -582,11 +548,7 @@ def test_deployed_v84_database_verifies_sync_export_snapshot(tmp_path):
     ``index_info`` still names both key columns even though no row qualifies.
     """
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as upgraded_db:
         columns = {
             row[1]: (row[2], row[3], row[4])
@@ -657,7 +619,7 @@ def _rollback_v84(db: sqlite3.Connection) -> None:
     db.execute("DROP TABLE sync_capture_control")
 
 
-def test_deployed_v83_database_verifies_sync_capture(tmp_path):
+def test_deployed_v83_database_verifies_sync_capture(tmp_path, _upgraded_v9):
     """A deployed v83 database is missing exactly _migration_84's addition:
     two adapter-internal tables, three indexes and one capture trigger per
     synced business table per operation. The gate table stays empty (the
@@ -665,11 +627,7 @@ def test_deployed_v83_database_verifies_sync_capture(tmp_path):
     fixture's two knowledge_object_sources rows hold no duplicate for the
     de-duplication step to collapse."""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as upgraded_db:
         tables = {
             row[0]
@@ -716,16 +674,12 @@ def _rollback_v83(db: sqlite3.Connection) -> None:
     db.execute("DROP TABLE sync_export_state")
 
 
-def test_deployed_v82_database_verifies_sync_control_tables(tmp_path):
+def test_deployed_v82_database_verifies_sync_control_tables(tmp_path, _upgraded_v9):
     """A deployed v82 database is missing exactly _migration_83's addition:
     the three adapter-internal sync control tables, with no rows to backfill
     (they carry no pre-existing state)."""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as upgraded_db:
         tables = {
             row[0]
@@ -762,16 +716,12 @@ def _rollback_v82(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE global_ask_jobs DROP COLUMN mode")
 
 
-def test_deployed_v81_database_verifies_global_ask_job_sampling(tmp_path):
+def test_deployed_v81_database_verifies_global_ask_job_sampling(tmp_path, _upgraded_v9):
     """A deployed v81 database is missing exactly _migration_82's addition:
     one TEXT NOT NULL DEFAULT '' column and two indexes on global_ask_jobs.
     The fixture holds no global rows, so `changed_tables` stays empty."""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as upgraded_db:
         columns = {
             row[1]: row
@@ -808,17 +758,13 @@ def _rollback_v81(db: sqlite3.Connection) -> None:
         db.execute(f"ALTER TABLE global_ask_jobs DROP COLUMN {column}")
 
 
-def test_deployed_v80_database_verifies_global_ask_job_record_parity(tmp_path):
+def test_deployed_v80_database_verifies_global_ask_job_record_parity(tmp_path, _upgraded_v9):
     """A deployed v80 database is missing exactly _migration_81's addition:
     four TEXT NOT NULL DEFAULT '' columns on global_ask_jobs and nothing else.
     The fixture holds no global rows, so the submitted_via backfill touches no
     row and `changed_tables` must stay empty."""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as upgraded_db:
         columns = {
             row[1]: row
@@ -852,13 +798,9 @@ def _rollback_v80(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE notebooks DROP COLUMN sync_origin")
 
 
-def test_deployed_v79_database_verifies_notebook_sync_origin(tmp_path):
+def test_deployed_v79_database_verifies_notebook_sync_origin(tmp_path, _upgraded_v9):
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as upgraded_db:
         columns = {
             row[1]: row for row in upgraded_db.execute("PRAGMA table_info(notebooks)")
@@ -891,7 +833,7 @@ def _rollback_v79(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE retrieval_experiences DROP COLUMN notebook_id")
 
 
-def test_deployed_v78_database_verifies_retrieval_experience_partition(tmp_path):
+def test_deployed_v78_database_verifies_retrieval_experience_partition(tmp_path, _upgraded_v9):
     """A deployed v78 database is missing exactly _migration_79's addition:
     `retrieval_experiences.notebook_id` plus its non-unique index.
 
@@ -903,11 +845,7 @@ def test_deployed_v78_database_verifies_retrieval_experience_partition(tmp_path)
     arrived together with a data pass nobody declared.
     """
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
     with sqlite3.connect(database) as rollback:
         _rollback_v79(rollback)
@@ -931,11 +869,9 @@ def _rollback_v78(db: sqlite3.Connection) -> None:
         db.execute(f"ALTER TABLE auth_sessions DROP COLUMN {column}")
 
 
-def test_deployed_v77_database_backfills_local_identity_without_changing_owners(tmp_path):
+def test_deployed_v77_database_backfills_local_identity_without_changing_owners(tmp_path, _upgraded_v9):
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(module.offline_settings(database,tmp_path/"upgrade-storage"))
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as rollback:
         _rollback_v78(rollback)
         rollback.execute("PRAGMA user_version=77")
@@ -957,11 +893,9 @@ def _rollback_v75(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE notebooks DROP COLUMN metadata_generation")
 
 
-def test_deployed_v75_database_verifies_global_question_conversations(tmp_path):
+def test_deployed_v75_database_verifies_global_question_conversations(tmp_path, _upgraded_v9):
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(module.offline_settings(database, tmp_path / "upgrade-storage"))
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as rollback:
         _rollback_v76(rollback)
         rollback.execute("PRAGMA user_version = 75")
@@ -1326,6 +1260,83 @@ def _copy_fixture(tmp_path: Path) -> tuple[Path, Path]:
     database = tmp_path / "original.db"
     storage = tmp_path / "original-storage"
     shutil.copyfile(FIXTURE_ROOT / "baseline.db", database)
+    shutil.copytree(FIXTURE_ROOT / "storage", storage)
+    return database, storage
+
+
+def _upgrade_snapshot_fingerprint(
+    database: Path,
+) -> tuple[list[tuple], dict[str, int]]:
+    """The schema DDL and per-table row counts of an upgraded database."""
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    try:
+        ddl = connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            "ORDER BY type, name"
+        ).fetchall()
+        counts = {
+            name: connection.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
+            for (name,) in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            ).fetchall()
+        }
+    finally:
+        connection.close()
+    return ddl, counts
+
+
+@pytest.fixture(scope="session")
+def _upgraded_v9(tmp_path_factory) -> Path:
+    """The committed v9 fixture database upgraded once to the current schema.
+
+    Every deployed-vNN test below begins with the same preparation: copy the
+    v9 fixture, open it with the repository (the real 9 -> current ladder plus
+    the startup normalizations), close it, then forge its own older state by
+    rolling back.  The preparation is identical for all of them, so it runs
+    once per xdist worker here and each test copies the result.  What each
+    test then asks of the verifier -- the vNN -> current ladder replayed on
+    the verifier's own backup copy -- still runs for real per test.
+
+    The template is pinned once per worker: it must be at the current schema
+    version and equal (DDL and per-table row counts) to a second, independent
+    upgrade of the same fixture, so a stale or half-built template cannot
+    silently change what the tests start from.
+    """
+    module = _load_verifier()
+    root = tmp_path_factory.mktemp("verifier-upgraded-v9")
+
+    def upgrade(label: str) -> Path:
+        database = root / f"{label}.db"
+        shutil.copyfile(FIXTURE_ROOT / "baseline.db", database)
+        module.SQLiteRepository(
+            module.offline_settings(database, root / f"{label}-storage")
+        ).close_local()
+        return database
+
+    template = upgrade("template")
+    fresh = upgrade("fresh")
+    # Tests copy the .db file alone, so every committed page must live in it.
+    connection = sqlite3.connect(template)
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (
+            module.SCHEMA_VERSION
+        )
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        connection.close()
+    wal = Path(f"{template}-wal")
+    assert not wal.exists() or wal.stat().st_size == 0, "template holds WAL pages"
+    assert _upgrade_snapshot_fingerprint(template) == (
+        _upgrade_snapshot_fingerprint(fresh)
+    )
+    return template
+
+
+def _copy_upgraded_fixture(tmp_path: Path, upgraded_v9: Path) -> tuple[Path, Path]:
+    """`_copy_fixture`, but the database is already upgraded to current."""
+    database = tmp_path / "original.db"
+    storage = tmp_path / "original-storage"
+    shutil.copyfile(upgraded_v9, database)
     shutil.copytree(FIXTURE_ROOT / "storage", storage)
     return database, storage
 
@@ -1815,14 +1826,10 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_34(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v20_database_verifies_through_migrations_21_to_34(tmp_path):
+def test_deployed_v20_database_verifies_through_migrations_21_to_34(tmp_path, _upgraded_v9):
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
         _rollback_v74(rollback)
@@ -1904,14 +1911,10 @@ def test_offline_settings_use_an_empty_system_model_registry(tmp_path, monkeypat
     assert module.verify_snapshot(database, storage).ok
 
 
-def test_deployed_v21_database_verifies_through_migrations_22_to_34(tmp_path):
+def test_deployed_v21_database_verifies_through_migrations_22_to_34(tmp_path, _upgraded_v9):
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
         _rollback_v74(rollback)
@@ -1976,14 +1979,10 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_34(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v22_database_verifies_through_migrations_23_to_34(tmp_path):
+def test_deployed_v22_database_verifies_through_migrations_23_to_34(tmp_path, _upgraded_v9):
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
         _rollback_v74(rollback)
@@ -2057,19 +2056,15 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_34(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v23_database_verifies_through_migrations_24_to_34(tmp_path):
+def test_deployed_v23_database_verifies_through_migrations_24_to_34(tmp_path, _upgraded_v9):
     """A v23 database (has model_service_status + populated model_settings,
     missing _migration_24's kg_canonical_scratch, _migration_25's system
     model-service scrub, and _migration_26's knowhow-history tables) must
     verify clean through every remaining hop to the current version, and the v25
     scrub must fire on the restored credential/status rows."""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
     with sqlite3.connect(database) as rollback:
         _rollback_v74(rollback)
         _rollback_v73(rollback)
@@ -2142,14 +2137,10 @@ def test_deployed_v23_database_verifies_through_migrations_24_to_34(tmp_path):
     assert result.normalized["scrubbed_model_statuses"] == 1
 
 
-def test_deployed_v32_database_verifies_relation_keyset_indexes(tmp_path):
+def test_deployed_v32_database_verifies_relation_keyset_indexes(tmp_path, _upgraded_v9):
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
     with sqlite3.connect(database) as rollback:
         _rollback_v74(rollback)
         _rollback_v73(rollback)
@@ -2193,13 +2184,9 @@ def test_deployed_v32_database_verifies_relation_keyset_indexes(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v33_database_verifies_relation_completion_state(tmp_path):
+def test_deployed_v33_database_verifies_relation_completion_state(tmp_path, _upgraded_v9):
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as rollback:
         _rollback_v74(rollback)
         _rollback_v73(rollback)
@@ -2241,7 +2228,7 @@ def test_deployed_v33_database_verifies_relation_completion_state(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v36_database_verifies_source_element_type_index(tmp_path):
+def test_deployed_v36_database_verifies_source_element_type_index(tmp_path, _upgraded_v9):
     """A deployed v36 database is missing the v37 and v38 indexes plus
     _migration_39's two tables (both asked_at and the three KG-analysis
     precompute tables already landed at v35 and v36). Rolling back the full
@@ -2249,11 +2236,7 @@ def test_deployed_v36_database_verifies_source_element_type_index(tmp_path):
     has, so this test drops exactly the later additions instead of reusing
     `_rollback_v34`."""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as rollback:
         _rollback_v74(rollback)
         _rollback_v73(rollback)
@@ -2305,7 +2288,7 @@ def test_deployed_v36_database_verifies_source_element_type_index(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v38_database_verifies_command_catalog_tables(tmp_path):
+def test_deployed_v38_database_verifies_command_catalog_tables(tmp_path, _upgraded_v9):
     """A deployed v38 database is missing exactly _migration_39's additions:
     its two tables AND the one index it puts on a pre-existing table.
 
@@ -2324,11 +2307,7 @@ def test_deployed_v38_database_verifies_command_catalog_tables(tmp_path):
     creates it, rather than it only ever existing on freshly built schemas.
     """
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
     # The committed fixture is a real v9 DEPLOYED database, so the upgrade just
     # run is itself the backfill path: a migration that only ever installed
@@ -2388,13 +2367,9 @@ def test_deployed_v38_database_verifies_command_catalog_tables(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v39_database_verifies_source_local_fact_tables(tmp_path):
+def test_deployed_v39_database_verifies_source_local_fact_tables(tmp_path, _upgraded_v9):
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as rollback:
         _rollback_v74(rollback)
         _rollback_v73(rollback)
@@ -2441,13 +2416,9 @@ def test_deployed_v39_database_verifies_source_local_fact_tables(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v40_database_verifies_source_fact_backfill_upgrade(tmp_path):
+def test_deployed_v40_database_verifies_source_fact_backfill_upgrade(tmp_path, _upgraded_v9):
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as rollback:
         rollback.execute("DROP TABLE source_index_backfills")
         rollback.execute("DROP TABLE knowledge_source_fact_backfills")
@@ -2497,13 +2468,9 @@ def test_deployed_v40_database_verifies_source_fact_backfill_upgrade(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v41_database_verifies_source_index_progress_upgrade(tmp_path):
+def test_deployed_v41_database_verifies_source_index_progress_upgrade(tmp_path, _upgraded_v9):
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as rollback:
         _rollback_v74(rollback)
         _rollback_v73(rollback)
@@ -2545,13 +2512,9 @@ def test_deployed_v41_database_verifies_source_index_progress_upgrade(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v45_database_verifies_chunk_element_index_upgrade(tmp_path):
+def test_deployed_v45_database_verifies_chunk_element_index_upgrade(tmp_path, _upgraded_v9):
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as rollback:
         _rollback_v74(rollback)
         _rollback_v73(rollback)
@@ -2590,13 +2553,9 @@ def test_deployed_v45_database_verifies_chunk_element_index_upgrade(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v46_database_verifies_notebook_schema_relocation(tmp_path):
+def test_deployed_v46_database_verifies_notebook_schema_relocation(tmp_path, _upgraded_v9):
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as rollback:
         _rollback_v74(rollback)
         _rollback_v73(rollback)
@@ -2645,7 +2604,7 @@ def test_deployed_v46_database_verifies_notebook_schema_relocation(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v48_database_verifies_group_sharing_tables(tmp_path):
+def test_deployed_v48_database_verifies_group_sharing_tables(tmp_path, _upgraded_v9):
     """A deployed v48 database is missing exactly _migration_49's AND
     _migration_50's additions: the three P1 group-sharing tables (groups,
     group_members, notebook_grants), the P2 notebook_share_requests table,
@@ -2665,11 +2624,7 @@ def test_deployed_v48_database_verifies_group_sharing_tables(tmp_path):
     separately.
     """
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
     with sqlite3.connect(database) as rollback:
         _rollback_v74(rollback)
@@ -2706,7 +2661,7 @@ def test_deployed_v48_database_verifies_group_sharing_tables(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v49_database_verifies_share_request_table(tmp_path):
+def test_deployed_v49_database_verifies_share_request_table(tmp_path, _upgraded_v9):
     """A deployed v49 database is missing exactly _migration_50's addition:
     notebook_share_requests and its two indexes (idx_share_requests_group,
     the plain lookup index, and uq_share_requests_one_pending, the partial
@@ -2722,11 +2677,7 @@ def test_deployed_v49_database_verifies_share_request_table(tmp_path):
     implicitly.
     """
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
     with sqlite3.connect(database) as rollback:
         _rollback_v74(rollback)
@@ -2762,7 +2713,7 @@ def test_deployed_v49_database_verifies_share_request_table(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v50_database_verifies_agent_profile_tables(tmp_path):
+def test_deployed_v50_database_verifies_agent_profile_tables(tmp_path, _upgraded_v9):
     """A deployed v50 database is missing exactly _migration_51's additions:
     the two Agentic Memory P1 tables (agent_notebook_profile,
     agent_profile_jobs).
@@ -2776,11 +2727,7 @@ def test_deployed_v50_database_verifies_agent_profile_tables(tmp_path):
     `_rollback_v51`'s `DROP TABLE` to carry away or to name separately.
     """
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
     with sqlite3.connect(database) as rollback:
         _rollback_v74(rollback)
@@ -2815,13 +2762,9 @@ def test_deployed_v50_database_verifies_agent_profile_tables(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v74_database_verifies_metadata_ownership(tmp_path):
+def test_deployed_v74_database_verifies_metadata_ownership(tmp_path, _upgraded_v9):
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as rollback:
         _rollback_v75(rollback)
         rollback.execute("UPDATE notebooks SET name='未命名笔记本'")
@@ -2832,18 +2775,14 @@ def test_deployed_v74_database_verifies_metadata_ownership(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v73_database_verifies_question_submitted_via(tmp_path):
+def test_deployed_v73_database_verifies_question_submitted_via(tmp_path, _upgraded_v9):
     """A deployed v73 database is missing exactly _migration_74's addition:
     ``submitted_via`` on ask_jobs, reports and retained_user_activity (NOT
     NULL DEFAULT ''). Same rationale as the v72/v71 cases below — only a
     forged deployment at the previous version can see the hop, and this hop
     is the first to see SCHEMA_VERSION 74."""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
     with sqlite3.connect(database) as rollback:
         _rollback_v74(rollback)
@@ -2856,17 +2795,13 @@ def test_deployed_v73_database_verifies_question_submitted_via(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v72_database_verifies_wish_status(tmp_path):
+def test_deployed_v72_database_verifies_wish_status(tmp_path, _upgraded_v9):
     """A deployed v72 database is missing exactly _migration_73's addition:
     the ``wishes.status`` column (NOT NULL DEFAULT 'open'). Same rationale as
     the v71/v70 cases below — only a forged deployment at the previous version
     can see the hop."""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
     with sqlite3.connect(database) as rollback:
         _rollback_v74(rollback)
@@ -2880,17 +2815,13 @@ def test_deployed_v72_database_verifies_wish_status(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v71_database_verifies_users_last_seen(tmp_path):
+def test_deployed_v71_database_verifies_users_last_seen(tmp_path, _upgraded_v9):
     """A deployed v71 database is missing exactly _migration_72's addition:
     the nullable ``users.last_seen_at`` column. Same rationale as the v70/v69
     cases below — only a forged deployment at the previous version can see
     the hop."""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
     with sqlite3.connect(database) as rollback:
         _rollback_v74(rollback)
@@ -2905,18 +2836,14 @@ def test_deployed_v71_database_verifies_users_last_seen(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v70_database_verifies_derived_generation(tmp_path):
+def test_deployed_v70_database_verifies_derived_generation(tmp_path, _upgraded_v9):
     """A deployed v70 database is missing exactly _migration_71's additions
     (the generational cluster/community swap schema half) and still carries
     the three superseded indexes. Same rationale as the v69/v50/v53 cases —
     only a forged deployment at the previous version can see the hop, and
     this hop is the first to exercise the dropped_indexes allowlist."""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
     with sqlite3.connect(database) as rollback:
         _rollback_v74(rollback)
@@ -2932,18 +2859,14 @@ def test_deployed_v70_database_verifies_derived_generation(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v69_database_verifies_ask_client_request_key(tmp_path):
+def test_deployed_v69_database_verifies_ask_client_request_key(tmp_path, _upgraded_v9):
     """A deployed v69 database is missing exactly _migration_70's additions:
     the nullable ``ask_jobs.client_request_id`` column and the partial unique
     index ``idx_ask_jobs_client_request``. Same rationale as the v50/v53 cases
     below — only a forged deployment at the previous version can see the hop.
     """
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
     with sqlite3.connect(database) as rollback:
         _rollback_v74(rollback)
@@ -2960,7 +2883,7 @@ def test_deployed_v69_database_verifies_ask_client_request_key(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v53_database_verifies_retrieval_experience_table(tmp_path):
+def test_deployed_v53_database_verifies_retrieval_experience_table(tmp_path, _upgraded_v9):
     """A deployed v53 database is missing exactly _migration_54's addition:
     the deployment-global `retrieval_experiences` table.
 
@@ -2974,11 +2897,7 @@ def test_deployed_v53_database_verifies_retrieval_experience_table(tmp_path):
     not claim to.
     """
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
     with sqlite3.connect(database) as rollback:
         _rollback_v74(rollback)
@@ -3059,11 +2978,7 @@ _V23_CLUSTER_ROWS = (
 )
 
 
-def _prepare_v28_cluster_duplicates(module, database, tmp_path):
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
+def _prepare_v28_cluster_duplicates(database):
     db = sqlite3.connect(database)
     try:
         _rollback_v74(db)
@@ -3116,11 +3031,11 @@ def _prepare_v28_cluster_duplicates(module, database, tmp_path):
         db.close()
 
 
-def test_v29_verifier_accepts_only_deterministic_cluster_duplicate_cleanup(tmp_path):
+def test_v29_verifier_accepts_only_deterministic_cluster_duplicate_cleanup(tmp_path, _upgraded_v9):
     module = _load_verifier()
     assert "concept_clusters" not in module.SPECIAL_TABLES
-    database, storage = _copy_fixture(tmp_path)
-    _prepare_v28_cluster_duplicates(module, database, tmp_path)
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
+    _prepare_v28_cluster_duplicates(database)
 
     result = module.verify_snapshot(database, storage)
 
@@ -3134,11 +3049,11 @@ def test_v29_verifier_accepts_only_deterministic_cluster_duplicate_cleanup(tmp_p
     ("wrong-survivor", "changed-singleton", "deleted-singleton"),
 )
 def test_v29_verifier_rejects_cluster_cleanup_corruption(
-    tmp_path, monkeypatch, corruption
+    tmp_path, monkeypatch, corruption, _upgraded_v9
 ):
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
-    _prepare_v28_cluster_duplicates(module, database, tmp_path)
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
+    _prepare_v28_cluster_duplicates(database)
     real_repository = module.SQLiteRepository
 
     class CorruptingRepository(real_repository):
@@ -3350,20 +3265,16 @@ def test_row_mutation_or_deletion_after_open_fails_verification(
     assert result.changed_tables
 
 
-def test_startup_delete_job_sweep_is_modelled_not_skipped(tmp_path):
+def test_startup_delete_job_sweep_is_modelled_not_skipped(tmp_path, _upgraded_v9):
     """codex #659 R24 P2 变异钉:把 verify 里的 delete-job sweep 建模删掉 →
     「status='deleting' 却没有作业行」的快照(生产下一次启动会由 sweep 驱动 B
     重造作业并把整本库删完)被报成 ok=True 的「启动什么都不改」假 PASS,报红。
     建模后必须如实报非 ok,且 notebooks 行在启动后快照里已被删除作业清掉。"""
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
     # 升级到最新 schema(带 notebook_delete_jobs 表),再伪造一个「删除中、
     # 作业行丢失」的中断态——正是 §T-4 驱动 B 在启动时要接手的形状。
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
     with sqlite3.connect(database) as db:
         db.execute("UPDATE notebooks SET status='deleting' WHERE id='nb-fixture'")
     db.close()
@@ -3412,14 +3323,10 @@ def test_only_recovery_seed_and_admin_upgrade_fields_are_normalized(tmp_path):
     assert result.normalized["seeded_concept_whitelist"] >= 1
 
 
-def test_v22_kg_crash_recovery_is_normalized_field_by_field(tmp_path):
+def test_v22_kg_crash_recovery_is_normalized_field_by_field(tmp_path, _upgraded_v9):
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
     _insert_running_kg_build(database)
 
     result = module.verify_snapshot(database, storage)
@@ -3432,15 +3339,11 @@ def test_v22_kg_crash_recovery_is_normalized_field_by_field(tmp_path):
 
 
 def test_v22_kg_recovery_never_excuses_other_job_field_changes(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, _upgraded_v9
 ):
     module = _load_verifier()
-    database, storage = _copy_fixture(tmp_path)
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
 
-    upgraded = module.SQLiteRepository(
-        module.offline_settings(database, tmp_path / "upgrade-storage")
-    )
-    upgraded.close_local()
     _insert_running_kg_build(database)
     real_repository = module.SQLiteRepository
 
