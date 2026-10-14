@@ -197,6 +197,11 @@ export function KnowhowPanel({
   const [historyOpen, setHistoryOpen] = useState(false);
 
   const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
+  // 选中表的「最后一次写入值」：与每处 setSelectedTableId 同步写（openTable / backToList /
+  // notebook 复位 effect，三处之外不得再写选中表）。同一批 effect 里先复位再跳转时，
+  // 闭包里的 selectedTableId 还是渲染时的旧值，只有它能告诉 openTable「选中已被清过」；
+  // 异步命令落地时也靠它判断用户此刻还在不在发起命令的那张表上（S6）。
+  const selectedTableIdRef = useRef<string | null>(null);
   const [detail, setDetail] = useState<KnowhowTableDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -312,6 +317,7 @@ export function KnowhowPanel({
   // 避免残留上一个 notebook 的表选中态。
   useEffect(() => {
     detailRequestRef.current += 1; // 作废上一个笔记本 in-flight 的表详情（拉详情 effect 不再因 notebookId 重跑）
+    selectedTableIdRef.current = null;
     setSelectedTableId(null);
     setDetail(null);
     setDetailError(null);
@@ -415,10 +421,17 @@ export function KnowhowPanel({
     // 重开的就是当前这张表（引用跳转换到本表的另一行，S6）：拉详情 effect 只跟
     // selectedTableId 走，id 不变就不会重拉，所以保留现有 detail / detailError，让路由
     // effect 直接按它定位新目标。此前这里一律清空 detail，网格一直空白到用户点返回。
-    if (tableId !== selectedTableId) {
+    // 「当前」以 selectedTableIdRef 为准：同一批里 notebook 复位刚清过选中、跳转又选回
+    // 同一个 id 时，那是另一个笔记本里的表，必须当成换表。
+    const reopening = tableId === selectedTableIdRef.current;
+    if (!reopening) {
       setDetail(null);
       setDetailError(null);
+      // 渲染时的选中值恰好就是这个 id（同一批先清空再选回）：两次提交之间 selectedTableId
+      // 没变，拉详情 effect 不会重跑，只能在这里拉。正常换表时两者不等，照旧交给 effect。
+      if (tableId === selectedTableId) loadDetail(tableId);
     }
+    selectedTableIdRef.current = tableId;
     setSelectedTableId(tableId);
     setActionError(null);
     setTransferNotice(null);
@@ -451,6 +464,7 @@ export function KnowhowPanel({
   // 与 openTable 清同一组表级状态（S6 起两者对齐）。刻意不清 jumpNotice：引用的表
   // 加载失败时，陈旧引用 effect 先写提示再调本函数回到列表，提示必须留下。
   function backToList() {
+    selectedTableIdRef.current = null;
     setSelectedTableId(null);
     setDetail(null);
     setDetailError(null);
