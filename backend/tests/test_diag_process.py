@@ -853,15 +853,19 @@ def test_probe_http_returns_metadata_only():
         def read(self, *_args):
             raise AssertionError("response bodies must never be read")
 
+    # Scripted clock: a real-clock bound here measured the host scheduler, not
+    # the probe; the elapsed arithmetic itself is pinned by the next test.
+    moments = iter((10.0, 10.25))
     result = process.probe_http(
         "backend",
         "http://127.0.0.1:8000/api/ready?token=SECRET",
         opener=lambda _url, timeout: Response(),
+        clock=lambda: next(moments),
     )
     assert result["role"] == "backend"
     assert result["status"] == 200
     assert result["result"] == "ok"
-    assert 0 <= result["elapsed_ms"] <= 750
+    assert result["elapsed_ms"] == 250
     assert "url" not in result
     assert "SECRET" not in repr(result)
     assert "SENSITIVE" not in repr(result)
@@ -1014,6 +1018,46 @@ def test_parse_thread_dump_caps_frames_per_thread(tmp_path):
     assert len(repr(parsed).encode("utf-8")) < 16 * 1024
 
 
+# Every ``capture_thread_dump`` call below runs on a controlled clock. The
+# capture spends one wall-clock budget across file checks, identity probes, the
+# quiescence polls and the post-signal validation reserve; on the real clock a
+# loaded host (CI shard, or ``-n 12`` beside other gates) can burn that budget
+# between two statements and turn the asserted outcome into ``deadline``. The
+# budgets the tests pass are unchanged -- only who advances time changed.
+
+
+class _SteppedClock:
+    """A monotonic clock that advances only through the capture's own ``sleeper``.
+
+    ``capture_thread_dump`` reads time through ``clock()`` and waits through
+    ``sleeper()``; feeding it both from one object makes every wait advance
+    time by exactly the amount the capture asked for, so a budget of 0.5s is
+    spent poll by poll in the test's script rather than by the host scheduler.
+    """
+
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    def sleep(self, seconds: float) -> None:
+        self.value += max(0.0, float(seconds))
+
+
+class _PacedClock(_SteppedClock):
+    """A stepped clock whose waits also really sleep, for a real signalled child.
+
+    The real ``faulthandler`` child writes on its own schedule, so each poll
+    must still give it real time; the budget, though, is charged only for the
+    waits the capture asked for, never for the host stalling the test process.
+    """
+
+    def sleep(self, seconds: float) -> None:
+        time.sleep(max(0.0, float(seconds)))
+        super().sleep(seconds)
+
+
 @pytest.mark.process_contract
 def test_capture_thread_dump_appends_only_keeps_child_alive_and_leaks_no_secrets(tmp_path):
     if not sys.platform.startswith("linux"):
@@ -1052,9 +1096,12 @@ while True:
     try:
         assert child.stdout is not None
         assert child.stdout.readline().strip() == "READY"
+        clock = _PacedClock()
         result = process.capture_thread_dump(
             child.pid,
             tmp_path,
+            clock=clock,
+            sleeper=clock.sleep,
         )
         assert result["status"] == "ok"
         assert result["identity_verified"] is True
@@ -1076,6 +1123,7 @@ def test_capture_refuses_identity_change_before_signalling(tmp_path):
     dump.write_bytes(b"")
     proc = FakeProcAdapter(tmp_path, {88: {"stat": proc_stat(88, start_ticks=9)}})
     sent = []
+    clock = _SteppedClock()
     result = process.capture_thread_dump(
         88,
         tmp_path,
@@ -1084,6 +1132,8 @@ def test_capture_refuses_identity_change_before_signalling(tmp_path):
         pidfd_open_fn=_fake_pidfd_open,
         pidfd_send_fn=lambda *_args: sent.append(True),
         platform="linux",
+        clock=clock,
+        sleeper=clock.sleep,
     )
     assert result["status"] == "identity_changed"
     assert result["identity_verified"] is False
@@ -1098,10 +1148,13 @@ def test_capture_degrades_without_linux_runtime_or_platform_support(tmp_path):
         platform="win32",
     )
     assert unsupported["status"] == "unsupported"
+    clock = _SteppedClock()
     missing_runtime = process.capture_thread_dump(
         os.getpid(),
         tmp_path,
         platform="linux",
+        clock=clock,
+        sleeper=clock.sleep,
     )
     assert missing_runtime["status"] == "dump_unavailable"
 
@@ -1146,13 +1199,27 @@ def test_capture_lock_wait_honors_caller_deadline(tmp_path):
     lock_path = tmp_path / "incident.lock"
     with lock_path.open("a+b") as held:
         module.fcntl.flock(held.fileno(), module.fcntl.LOCK_EX)
-        started = time.monotonic()
+        clock = _SteppedClock()
+        waits = []
+
+        def sleeper(seconds):
+            waits.append(seconds)
+            clock.sleep(seconds)
+
         result = module.capture_thread_dump(
-            os.getpid(), tmp_path, timeout=0.05, platform="linux"
+            os.getpid(),
+            tmp_path,
+            timeout=0.05,
+            platform="linux",
+            clock=clock,
+            sleeper=sleeper,
         )
-        elapsed = time.monotonic() - started
     assert result["status"] == "lock_timeout"
-    assert elapsed < 0.2
+    # The lock wait polls, and its last poll is clipped to the remaining
+    # budget: it gives up exactly when the 0.05s budget is spent, never later.
+    assert len(waits) >= 2
+    assert all(0 < wait <= 0.02 for wait in waits)
+    assert clock.value == pytest.approx(0.05)
 
 
 def test_capture_rejects_dump_symlink_without_signalling(tmp_path):
@@ -1163,12 +1230,15 @@ def test_capture_rejects_dump_symlink_without_signalling(tmp_path):
     diagnostics.mkdir()
     (diagnostics / "thread-dumps.log").symlink_to(outside)
     sent = []
+    clock = _SteppedClock()
     result = process.capture_thread_dump(
         os.getpid(),
         diagnostics,
         pidfd_open_fn=lambda *_args: 123,
         pidfd_send_fn=lambda *_args: sent.append(True),
         platform="linux",
+        clock=clock,
+        sleeper=clock.sleep,
     )
     assert result["status"] == "unsafe_path"
     assert sent == []
@@ -1197,6 +1267,7 @@ def test_capture_detects_pid_reuse_after_dump_and_discards_segment(tmp_path):
         with dump.open("ab") as handle:
             handle.write(b"Thread 0xA (most recent call first):\n")
 
+    clock = _SteppedClock()
     result = process.capture_thread_dump(
         88,
         tmp_path,
@@ -1205,6 +1276,8 @@ def test_capture_detects_pid_reuse_after_dump_and_discards_segment(tmp_path):
         pidfd_open_fn=_fake_pidfd_open,
         pidfd_send_fn=append_dump,
         platform="linux",
+        clock=clock,
+        sleeper=clock.sleep,
     )
     assert result["status"] == "identity_changed"
     assert result["identity_verified"] is False
@@ -1238,6 +1311,7 @@ def test_capture_identity_sandwich_never_signals_reused_numeric_pid(tmp_path, ch
     identities[change_at - 1 :] = [9] * (9 - change_at)
     proc = CaptureProc(identities)
     sent = []
+    clock = _SteppedClock()
     result = process.capture_thread_dump(
         88,
         tmp_path,
@@ -1246,6 +1320,8 @@ def test_capture_identity_sandwich_never_signals_reused_numeric_pid(tmp_path, ch
         pidfd_open_fn=_fake_pidfd_open,
         pidfd_send_fn=lambda *_args: sent.append(True),
         platform="linux",
+        clock=clock,
+        sleeper=clock.sleep,
     )
     assert result["status"] == "identity_changed"
     assert sent == []
@@ -1267,6 +1343,7 @@ def test_capture_uses_pidfd_not_numeric_kill_and_rejects_unavailable_pidfd(tmp_p
         with dump.open("ab") as handle:
             handle.write(b"Thread 0xA (most recent call first):\n")
 
+    clock = _SteppedClock()
     result = process.capture_thread_dump(
         88,
         tmp_path,
@@ -1275,12 +1352,15 @@ def test_capture_uses_pidfd_not_numeric_kill_and_rejects_unavailable_pidfd(tmp_p
         pidfd_open_fn=_fake_pidfd_open,
         pidfd_send_fn=send,
         platform="linux",
+        clock=clock,
+        sleeper=clock.sleep,
     )
     assert result["status"] == "ok"
     assert result["complete"] is True
     assert len(sent) == 1
 
     sent.clear()
+    clock = _SteppedClock()
     result = process.capture_thread_dump(
         88,
         tmp_path,
@@ -1289,6 +1369,8 @@ def test_capture_uses_pidfd_not_numeric_kill_and_rejects_unavailable_pidfd(tmp_p
         pidfd_open_fn=lambda *_args: (_ for _ in ()).throw(PermissionError()),
         pidfd_send_fn=lambda *_args: sent.append(True),
         platform="linux",
+        clock=clock,
+        sleeper=clock.sleep,
     )
     assert result["status"] == "pidfd_unavailable"
     assert sent == []
@@ -1414,8 +1496,16 @@ def test_capture_final_sigcgt_deadline_is_not_identity_verified(tmp_path):
 
 
 def test_capture_no_growth_is_bounded_partial_deadline(tmp_path):
+    """A target that never writes spends the quiescence window, then stops.
+
+    On the real clock this raced a 0.05s budget: under load the pre-signal
+    checks overran it (``'deadline' == 'partial'``) or the post-signal
+    validation overran its 0.0125s reserve (``identity_verified`` False).
+    Budget and assertions are unchanged; time now passes only in ``sleeper``.
+    """
     process = load_process_module()
     (tmp_path / "thread-dumps.log").write_bytes(b"")
+    clock = _SteppedClock()
     result = process.capture_thread_dump(
         88,
         tmp_path,
@@ -1425,31 +1515,17 @@ def test_capture_no_growth_is_bounded_partial_deadline(tmp_path):
         pidfd_send_fn=lambda *_args: None,
         platform="linux",
         timeout=0.05,
+        clock=clock,
+        sleeper=clock.sleep,
     )
     assert result["status"] == "partial"
     assert result["identity_verified"] is True
     assert result["partial_reason"] == "deadline"
     assert result["dump"] == ""
     assert result["bytes"] == 0
-
-
-class _SteppedClock:
-    """A monotonic clock that advances only through the capture's own ``sleeper``.
-
-    ``capture_thread_dump`` reads time through ``clock()`` and waits through
-    ``sleeper()``; feeding it both from one object makes every wait advance
-    time by exactly the amount the capture asked for, so a budget of 0.5s is
-    spent poll by poll in the test's script rather than by the host scheduler.
-    """
-
-    def __init__(self) -> None:
-        self.value = 0.0
-
-    def __call__(self) -> float:
-        return self.value
-
-    def sleep(self, seconds: float) -> None:
-        self.value += max(0.0, float(seconds))
+    # The whole quiescence window (budget minus the 25% validation reserve)
+    # was waited out, and the reserve itself was left for the final checks.
+    assert clock.value == pytest.approx(0.05 * 0.75)
 
 
 class _ScriptedTarget:
@@ -1555,6 +1631,7 @@ def test_capture_byte_cap_partial_keeps_verified_identity(tmp_path):
         with dump.open("ab") as handle:
             handle.write(b"x" * (512 * 1024 + 1))
 
+    clock = _SteppedClock()
     result = process.capture_thread_dump(
         88,
         tmp_path,
@@ -1563,6 +1640,8 @@ def test_capture_byte_cap_partial_keeps_verified_identity(tmp_path):
         pidfd_open_fn=_fake_pidfd_open,
         pidfd_send_fn=append_large_dump,
         platform="linux",
+        clock=clock,
+        sleeper=clock.sleep,
     )
     assert result["status"] == "partial"
     assert result["partial_reason"] == "byte_cap"
@@ -1592,6 +1671,7 @@ def test_capture_rejects_non_regular_or_multiply_linked_files(tmp_path, target, 
     else:
         os.link(victim, path)
     sent = []
+    clock = _SteppedClock()
     result = process.capture_thread_dump(
         88,
         tmp_path,
@@ -1601,6 +1681,8 @@ def test_capture_rejects_non_regular_or_multiply_linked_files(tmp_path, target, 
         pidfd_send_fn=lambda *_args: sent.append(True),
         platform="linux",
         timeout=0.05,
+        clock=clock,
+        sleeper=clock.sleep,
     )
     assert result["status"] == "unsafe_path"
     assert sent == []
@@ -1618,6 +1700,7 @@ def test_capture_rejects_mid_capture_hardlink_and_never_truncates(tmp_path):
         with dump.open("ab") as handle:
             handle.write(b"Thread 0xA (most recent call first):\n")
 
+    clock = _SteppedClock()
     result = process.capture_thread_dump(
         88,
         tmp_path,
@@ -1626,6 +1709,8 @@ def test_capture_rejects_mid_capture_hardlink_and_never_truncates(tmp_path):
         pidfd_open_fn=_fake_pidfd_open,
         pidfd_send_fn=link_then_append,
         platform="linux",
+        clock=clock,
+        sleeper=clock.sleep,
     )
     assert result["status"] == "unsafe_path"
     assert result["identity_verified"] is True
@@ -1642,6 +1727,7 @@ def test_capture_exposes_retention_failure_without_losing_evidence(tmp_path):
         with dump.open("ab") as handle:
             handle.write(b"Thread 0xA (most recent call first):\n")
 
+    clock = _SteppedClock()
     result = process.capture_thread_dump(
         88,
         tmp_path,
@@ -1651,6 +1737,8 @@ def test_capture_exposes_retention_failure_without_losing_evidence(tmp_path):
         pidfd_send_fn=append_dump,
         ftruncate_fn=lambda *_args: (_ for _ in ()).throw(OSError("PRIVATE")),
         platform="linux",
+        clock=clock,
+        sleeper=clock.sleep,
     )
     assert result["status"] == "ok"
     assert result["identity_verified"] is True
@@ -1821,6 +1909,7 @@ def test_capture_rejects_diagnostics_directory_replacement_before_signal(tmp_pat
         (diagnostics / "thread-dumps.log").write_bytes(b"")
         return _fake_pidfd_open(0, 0)
 
+    clock = _SteppedClock()
     result = process.capture_thread_dump(
         88,
         diagnostics,
@@ -1829,6 +1918,8 @@ def test_capture_rejects_diagnostics_directory_replacement_before_signal(tmp_pat
         pidfd_open_fn=replace_directory,
         pidfd_send_fn=lambda *_args: sent.append(True),
         platform="linux",
+        clock=clock,
+        sleeper=clock.sleep,
     )
     assert result["status"] == "unsafe_path"
     assert sent == []
