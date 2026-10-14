@@ -1,6 +1,7 @@
 """测试进程默认开 auth_optional：无 token 的请求回退 seeded admin，
 既有 HTTP 测试无需逐一登录即可继续以 admin 身份跑。"""
 import atexit
+import gc
 import os
 import sys
 import tempfile
@@ -368,6 +369,25 @@ def pytest_collection_modifyitems(config, items):
             # stderr (which does surface) still carries the actionable text.
             sys.stderr.write(f"\n[architecture_contract_heavy] {message}\n")
             raise pytest.UsageError(message)
+
+
+def pytest_collection_finish(session):
+    """Move everything collection left alive out of the cyclic collector's reach.
+
+    By the end of collection a worker holds the imported application, every
+    test module and every collected item, over a million objects that stay
+    alive for the whole session. The automatic collector's oldest generation
+    walks all of them again on every full collection, and a worker runs tens of
+    thousands of those, so their cost scales with that resident heap rather
+    than with what each test allocates. ``gc.freeze()`` moves the survivors of
+    one last collection into the permanent generation, which the collector
+    never scans; objects created afterwards (every fixture, repository and
+    response a test makes) are collected exactly as before. A frozen object
+    that later becomes cyclic garbage stays allocated until the worker exits,
+    which is test-process memory only.
+    """
+    gc.collect()
+    gc.freeze()
 
 
 @pytest.fixture(scope="session")

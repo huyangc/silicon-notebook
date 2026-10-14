@@ -411,6 +411,21 @@ def test_backend_parallelism_is_bounded_and_explicit():
     assert 'BACKEND_PYTEST_WORKERS="${BACKEND_PYTEST_WORKERS:-12}"' in backend_lane
 
 
+def test_the_collected_heap_is_frozen_out_of_the_cyclic_collector():
+    """backend/tests/conftest.py freezes what collection left alive.
+
+    Without it every full collection in a worker re-walks the imported app and
+    every collected test module, which the 2026-10 gate diagnosis measured as a
+    large share of the backend lane's busy time.
+    """
+    import gc
+
+    from tests import conftest
+
+    assert gc.get_freeze_count() > 0
+    assert conftest.pytest_collection_finish.__module__ == conftest.__name__
+
+
 def test_parallel_graph_tests_share_repo_local_matplotlib_cache():
     cache_dir = Path(os.environ["MPLCONFIGDIR"]).resolve()
     assert cache_dir == (ROOT / ".local" / "matplotlib").resolve()
