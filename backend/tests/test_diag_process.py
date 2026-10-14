@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.child_env_testkit import BYTECODE_ENV
+
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "diag_process.py"
@@ -42,7 +44,7 @@ def test_script_is_standalone_stdlib_only_and_help_runs_without_backend_path():
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "--help"],
         cwd=REPO,
-        env={"PATH": os.environ.get("PATH", "")},
+        env={"PATH": os.environ.get("PATH", ""), **BYTECODE_ENV},
         capture_output=True,
         text=True,
         timeout=2,

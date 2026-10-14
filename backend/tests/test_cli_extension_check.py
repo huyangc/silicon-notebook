@@ -8,19 +8,11 @@ import sys
 
 import pytest
 
+from tests.child_env_testkit import BYTECODE_ENV
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "check_cli_extensions.py"
-
-
-# Bytecode only: a scrubbed child environment would otherwise drop the gate's
-# PYTHONPYCACHEPREFIX and write .pyc files next to the backend and script
-# sources. Neither variable changes what the check prints.
-_BYTECODE_ENV = (
-    {"PYTHONPYCACHEPREFIX": os.environ["PYTHONPYCACHEPREFIX"]}
-    if os.environ.get("PYTHONPYCACHEPREFIX")
-    else {"PYTHONDONTWRITEBYTECODE": "1"}
-)
 
 
 def _run(tmp_path: Path, config: str = "", *, extra_env=None, args=()):
@@ -32,7 +24,7 @@ def _run(tmp_path: Path, config: str = "", *, extra_env=None, args=()):
         "MODEL_SERVICES_CONFIG": "",
         "DATABASE_URL": f"sqlite:///{tmp_path / 'must-not-exist.db'}",
         "STORAGE_DIR": str(tmp_path / "must-not-exist-storage"),
-        **_BYTECODE_ENV,
+        **BYTECODE_ENV,
         **(extra_env or {}),
     }
     return subprocess.run(
@@ -100,7 +92,7 @@ count = 3
         "PATH": os.environ.get("PATH", ""), "PYTHON_BIN": sys.executable,
         "PYTHONPATH": "backend", "SILICON_NOTEBOOK_ENV_FILE": str(env_file),
         "DATABASE_URL": f"sqlite:///{tmp_path / 'must-not-exist.db'}",
-        **_BYTECODE_ENV,
+        **BYTECODE_ENV,
     }
     result = subprocess.run(
         ["bash", str(ROOT / "scripts/cli.sh"), "extensions", "check"],

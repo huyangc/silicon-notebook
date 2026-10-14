@@ -371,6 +371,37 @@ def pytest_collection_modifyitems(config, items):
             raise pytest.UsageError(message)
 
 
+def _prune_temporary_bytecode(prefix: Path, temp_dir: Path, repo_root: Path) -> None:
+    """Drop the part of the gate's bytecode cache that mirrors the temp directory.
+
+    The gate points ``PYTHONPYCACHEPREFIX`` at ``<repo>/.local/pycache`` and writes
+    bytecode there (scripts/check.sh). That also caches every module a test
+    writes under ``tmp_path`` or another temporary directory, and the prefix
+    mirrors those absolute paths: each run's ``pytest-NNNN`` tree adds ~1 MB
+    that no later run can reuse. Removing that one subtree when a session
+    starts keeps the cache bounded while the repository's and the
+    interpreter's own modules stay warm. Only the repository's own cache is
+    touched, and nothing when the checkout itself lives under the temp
+    directory.
+    """
+    prefix = prefix.resolve()
+    temp_dir = temp_dir.resolve()
+    if prefix != (repo_root / ".local" / "pycache").resolve():
+        return
+    if temp_dir == Path(temp_dir.anchor) or repo_root.resolve().is_relative_to(temp_dir):
+        return
+    shutil.rmtree(prefix / temp_dir.relative_to(temp_dir.anchor), ignore_errors=True)
+
+
+def pytest_configure(config):
+    # Once per session, in the controller (or the only process), before any
+    # worker starts compiling.
+    if sys.pycache_prefix and not hasattr(config, "workerinput"):
+        _prune_temporary_bytecode(
+            Path(sys.pycache_prefix), Path(tempfile.gettempdir()), _REPO_ROOT
+        )
+
+
 def pytest_collection_finish(session):
     """Move everything collection left alive out of the cyclic collector's reach.
 

@@ -2,12 +2,14 @@
 import pathlib
 import subprocess
 
+from tests.child_env_testkit import BYTECODE_ENV
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]  # backend/tests -> repo root
 SCRIPT = ROOT / "scripts" / "autotune.sh"
 
 
 def _run(env):
-    base = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+    base = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", **BYTECODE_ENV}
     base.update(env)
     return subprocess.run(
         ["bash", "-c", f"source '{SCRIPT}'; echo \"OMP=${{OMP_NUM_THREADS-}}\""],

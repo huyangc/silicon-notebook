@@ -446,6 +446,39 @@ def test_the_collected_heap_is_frozen_out_of_the_cyclic_collector():
     assert conftest.pytest_collection_finish.__module__ == conftest.__name__
 
 
+def test_session_start_drops_only_the_bytecode_cached_for_temporary_modules(tmp_path):
+    """conftest prunes the prefix subtree that mirrors the temp directory.
+
+    The gate's bytecode cache mirrors absolute source paths, so modules tests
+    write under tmp_path pile up there run after run; the repository's and the
+    interpreter's own bytecode must stay.
+    """
+    from tests import conftest
+
+    repo = tmp_path / "repo"
+    temp = tmp_path / "var" / "tmp"
+    prefix = repo / ".local" / "pycache"
+
+    def cached(source_dir: Path) -> Path:
+        directory = prefix / source_dir.resolve().relative_to(source_dir.resolve().anchor)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "m.cpython-314.pyc").write_bytes(b"pyc")
+        return directory
+
+    temporary = cached(temp / "pytest-of-user" / "pytest-1" / "test_x0")
+    own = cached(repo / "backend" / "app")
+    interpreter = cached(tmp_path / "python" / "lib")
+
+    # Not the repository's own cache, or the checkout under the temp dir: no-op.
+    conftest._prune_temporary_bytecode(tmp_path / "elsewhere", temp, repo)
+    conftest._prune_temporary_bytecode(prefix, repo.parent, repo)
+    assert temporary.exists() and own.exists() and interpreter.exists()
+
+    conftest._prune_temporary_bytecode(prefix, temp, repo)
+    assert not (prefix / temp.resolve().relative_to(temp.resolve().anchor)).exists()
+    assert own.exists() and interpreter.exists()
+
+
 def test_the_module_namespace_check_reports_app_splits_and_never_probes_other_modules(
     monkeypatch,
 ):
@@ -474,6 +507,67 @@ def test_the_module_namespace_check_reports_app_splits_and_never_probes_other_mo
     assert conftest._split_app_module_namespace() == [
         (package, "scale_index_builder", module, None)
     ]
+
+
+def test_child_environment_scan_flags_only_hand_built_environments_without_a_policy():
+    from tests.architecture.child_environments import offenders
+
+    source = (
+        "import os, subprocess\n"
+        "from tests.child_env_testkit import BYTECODE_ENV\n"
+        "BASE = {k: v for k, v in os.environ.items()}\n"
+        "def scrubbed():\n"
+        "    return {'PATH': os.defpath}\n"
+        "def scrubbed_call():\n"
+        "    subprocess.run(['python'], env={'PYTHONPATH': 'backend'})\n"
+        "def with_kit():\n"
+        "    subprocess.run(['python'], env={'PATH': os.defpath, **BYTECODE_ENV})\n"
+        "def with_key():\n"
+        "    return {'PATH': '/bin', 'PYTHONDONTWRITEBYTECODE': '1'}\n"
+        "def inherits():\n"
+        "    subprocess.run(['python'], env={**os.environ, 'PATH': '/bin'})\n"
+        "def inherits_by_name():\n"
+        "    return {**BASE, 'PATH': '/bin'}\n"
+        "def extends_a_checked_base(env):\n"
+        "    subprocess.run(['python'], env={**env, 'X': '1'})\n"
+        "def not_a_child(client):\n"
+        "    client(env={'TOKEN': 't'})\n"
+    )
+
+    found, checked = offenders(source, "sample.py")
+
+    assert found == [
+        "sample.py: <module>.scrubbed",
+        "sample.py: <module>.scrubbed_call",
+    ]
+    assert checked == 5
+
+
+def test_hand_built_child_environments_keep_bytecode_out_of_the_source_tree():
+    """Every scrubbed child environment under backend/tests carries BYTECODE_ENV.
+
+    Without it the child drops the gate's PYTHONPYCACHEPREFIX and any Python it
+    runs writes .pyc files next to the repository sources (three such tests
+    wrote ~430 files into backend/app and scripts/ per gate run).
+    """
+    from tests.architecture.child_environments import offenders
+
+    found: list[str] = []
+    checked = 0
+    tests_root = ROOT / "backend" / "tests"
+    for path in sorted(tests_root.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        if "subprocess" not in source and "PATH" not in source:
+            continue
+        file_found, file_checked = offenders(
+            source, path.relative_to(ROOT).as_posix()
+        )
+        found += file_found
+        checked += file_checked
+    assert found == []
+    # Non-vacuity: the known hand-built environments (model-bindings preflight,
+    # the deployment-plugin check, the launcher fixtures, ...) are all seen.
+    assert checked >= 8
 
 
 def test_parallel_graph_tests_share_repo_local_matplotlib_cache():
