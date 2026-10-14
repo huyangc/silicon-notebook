@@ -184,6 +184,23 @@ test("跨标签页会话同步在 page 根部安装一次,变更时整页重载"
 });
 
 
+// S7:Knowhow 面板是盖住整页的模态层(aria-modal + 面板内焦点陷阱,见
+// knowhow-panel-focus 组件用例)。它开着时,背后的顶栏与笔记本视图必须整体 inert:
+// 键盘、指针与读屏都进不去(此前能 Tab 到背后的引用按钮并回车,改写开着的面板)。
+// 面板本身挂在这两个元素之外,所以不会被一起 inert 掉。
+test("the page behind an open Knowhow panel is inert", () => {
+  const expected = { inert: "knowhowNavigation.isOpen || undefined" };
+  const topbars = jsxElements(page, "header").filter((element) => element.attributes.className === "topbar");
+  assert.equal(topbars.length, 1);
+  assert.deepEqual(topbars[0].bindings, expected);
+  const notebookViews = jsxElements(page, "main").filter((element) => element.attributes.className === "notebook-view");
+  assert.equal(notebookViews.length, 1);
+  assert.deepEqual(notebookViews[0].bindings, expected);
+  const panels = jsxElements(page, "KnowhowPanel");
+  assert.equal(panels.length, 1);
+});
+
+
 test("source detail uses the dedicated draggable window shell", () => {
   assert.deepEqual(
     importsFrom(page, "./source-detail-window").map((item) => item.imported),

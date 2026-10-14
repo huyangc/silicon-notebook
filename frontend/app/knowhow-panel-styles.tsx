@@ -29,6 +29,12 @@ export function KnowhowPanelStyles() {
           flex-direction: column;
         }
 
+        /* 面板打开时焦点落在面板本身（S7，tabIndex=-1，让读屏先读出「Knowhow 表」）；
+           它不是可操作控件，不画焦点框。 */
+        .knowhow-view:focus {
+          outline: none;
+        }
+
         .knowhow-view-header {
           display: flex;
           justify-content: space-between;

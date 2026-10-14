@@ -5029,7 +5029,9 @@ export default function Home() {
     <>
     {loginOpening && <LoginEntrance onComplete={finishLoginOpening} />}
     <div className={`app ${isWorkspace ? "workspace-mode" : ""}`} inert={loginOpening || undefined}>
-      <header className="topbar">
+      {/* Knowhow 面板是盖住整页的模态层：开着时顶栏与笔记本视图整体 inert（不可聚焦、
+          不可点、读屏不可见），面板本身挂在它们之外（S7）。 */}
+      <header className="topbar" inert={knowhowNavigation.isOpen || undefined}>
         <div className="brand">
           <button className="brand-mark" onClick={showCollection} title="笔记本列表">SN</button>
           <div>
@@ -5241,7 +5243,7 @@ export default function Home() {
       )}
 
       {isWorkspace && currentNotebook && (
-        <main className="notebook-view">
+        <main className="notebook-view" inert={knowhowNavigation.isOpen || undefined}>
           <section className="workspace-header">
             <div className="workspace-title">
               <button className="back-home-button" onClick={() => showCollection()}>
