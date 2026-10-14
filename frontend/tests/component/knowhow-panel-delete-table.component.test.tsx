@@ -178,3 +178,29 @@ test("a DELETE that lands after a notebook switch does not reload or show the ol
   expect(screen.queryByRole("button", { name: "打开表格：第二张表" })).not.toBeInTheDocument();
   expect(server.log).toEqual([LIST, DETAIL, DELETE, { method: "GET", path: "/notebooks/nb-2/knowhow" }]);
 });
+
+test("a DELETE that lands while the user is on another table leaves them there and refreshes the list", async () => {
+  // Before S6 the success path always went back to the list, so a user who had
+  // gone 返回 and opened another table while the DELETE was in flight was thrown
+  // out of that table. Now only a user still on the deleted table goes back.
+  const server = routeTwoTables();
+  const release = server.hold("DELETE", "/notebooks/nb-1/knowhow/t-rec");
+  const user = userEvent.setup();
+  renderPanel({ initialTableId: "t-rec" });
+  await user.click(await screen.findByTitle("删除表"));
+  await user.click(screen.getByRole("button", { name: "确认删除" }));
+  expect(await screen.findByRole("button", { name: "删除中…" })).toBeDisabled();
+
+  await user.click(screen.getByRole("button", { name: "返回" }));
+  await user.click(await screen.findByRole("button", { name: "打开表格：第二张表" }));
+  await screen.findByRole("heading", { name: "第二张表" });
+  await settle();
+  expectToolbarLocked();
+
+  release({ status: 204 });
+  await waitFor(() => expect(screen.getByRole("button", { name: "添加行" })).toBeEnabled());
+  await settle();
+  expect(screen.getByRole("heading", { name: "第二张表" })).toBeInTheDocument();
+  expectToolbarUnlocked();
+  expect(server.log).toEqual([LIST, DETAIL, DELETE, TWIN_DETAIL, LIST]);
+});

@@ -502,16 +502,19 @@ export function KnowhowPanel({
 
   async function confirmDeleteTable() {
     if (!selectedTableId) return;
+    const deletedTableId = selectedTableId;
     setDeleting(true);
     setActionError(null);
     try {
-      await deleteKnowhowTable(notebookId, selectedTableId);
+      await deleteKnowhowTable(notebookId, deletedTableId);
       // 删除落地才解禁：与 backToList() 写在同一个同步块里，React 自动批处理成一次
       // 提交，网格离场与解禁同时发生，中间不会出现可点的「确认删除」。不放进
       // backToList()/openTable：删除进行中「返回」再开表时，按钮必须仍禁用到请求
       // 落地，否则可以对同一张表再发一次删除。
       setDeleting(false);
-      backToList();
+      // 只有用户此刻还在被删的这张表上才回列表（S6）：删除进行中返回、又打开了别的表时，
+      // 留在那张表上，只刷新清单。「此刻」读 selectedTableIdRef，闭包里是发起时的值。
+      if (selectedTableIdRef.current === deletedTableId) backToList();
       knowhowTableList.loadTables();
     } catch {
       setActionError("删除失败，请重试");
