@@ -29,6 +29,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPTS = _REPO_ROOT / "scripts"
@@ -89,6 +91,7 @@ def test_diag_file_exists():
     assert _DIAG.is_file(), "scripts/diag.py must exist"
 
 
+@pytest.mark.process_contract
 def test_unknown_subcommand_fails_clean():
     r = subprocess.run([sys.executable, str(_DIAG), "no-such-cmd"],
                        capture_output=True, text=True)
@@ -128,6 +131,7 @@ def test_latency_aggregation_preserves_retrieval_leaf_stage_names():
     }
 
 
+@pytest.mark.process_contract
 def test_latency_subcommand_end_to_end(tmp_path):
     log = tmp_path / "events.jsonl"
     recs = [_make_ask_stage("score", v) for v in [10, 20, 30, 40, 100]]
@@ -156,6 +160,7 @@ def test_latency_reads_per_user_subdirs(tmp_path):
     assert latencies == [10, 90], "must aggregate global + per-user subdir logs"
 
 
+@pytest.mark.process_contract
 def test_latency_reads_rotated_gzip_file_once(tmp_path):
     """A daily gzip log is sufficient input for the offline latency command."""
     with gzip.open(tmp_path / "events-2026-07-13.jsonl.gz", "wt", encoding="utf-8") as handle:
@@ -174,6 +179,7 @@ def test_latency_reads_rotated_gzip_file_once(tmp_path):
 # 3. offline purity — no heavy app import
 # ---------------------------------------------------------------------------
 
+@pytest.mark.process_contract
 def test_bare_and_leading_flag_slow_do_not_import_app(tmp_path):
     (tmp_path / ".local" / "logs").mkdir(parents=True)
     for args in ([], ["--root", str(tmp_path)]):
@@ -196,6 +202,7 @@ def test_bare_and_leading_flag_slow_do_not_import_app(tmp_path):
         assert "慢因诊断" in result.stdout
 
 
+@pytest.mark.process_contract
 def test_importing_diag_does_not_import_app():
     """Merely importing the dispatcher must not pull any application module."""
     code = (
@@ -210,6 +217,7 @@ def test_importing_diag_does_not_import_app():
     assert r.returncode == 0, r.stderr or r.stdout
 
 
+@pytest.mark.process_contract
 def test_slow_bare_defaults_to_slow(tmp_path):
     (tmp_path / ".local" / "logs").mkdir(parents=True)
     r = subprocess.run([sys.executable, str(_DIAG), "--root", str(tmp_path)],

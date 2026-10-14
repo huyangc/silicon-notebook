@@ -31,6 +31,8 @@ from app.repositories.sqlite.migrations import SqliteMigrator
 from app.services.sqlite_repository import SQLiteRepository
 from tests import memory_isolation_cases as cases
 
+pytestmark = [pytest.mark.legacy_upgrade_contract, pytest.mark.real_sqlite_migration]
+
 PG_MIGRATION = (
     Path(__file__).resolve().parents[1]
     / "app" / "repositories" / "postgres" / "migrations"

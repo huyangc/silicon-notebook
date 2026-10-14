@@ -301,6 +301,7 @@ def _run_hook(stdin_text: str, project_dir: Path) -> subprocess.CompletedProcess
     )
 
 
+@pytest.mark.process_contract
 def test_process_contract_allow_is_silent_and_zero(scopes):
     """放行 = 退出码 0 且 stdout 为空。"""
     proc = _run_hook(json.dumps(_agent_call(model="haiku")), scopes)
@@ -308,6 +309,7 @@ def test_process_contract_allow_is_silent_and_zero(scopes):
     assert proc.stdout.strip() == ""
 
 
+@pytest.mark.process_contract
 def test_process_contract_deny_shape(scopes):
     """拦截 = 退出码仍为 0，靠 stdout 的 JSON 表达。
 
@@ -322,6 +324,7 @@ def test_process_contract_deny_shape(scopes):
     assert payload["permissionDecisionReason"].strip()
 
 
+@pytest.mark.process_contract
 def test_process_contract_malformed_stdin_fails_open(scopes):
     """守卫是规范守卫不是安全边界：自身读不懂输入时放行，不堵死用户。"""
     proc = _run_hook("not json at all", scopes)
@@ -329,6 +332,7 @@ def test_process_contract_malformed_stdin_fails_open(scopes):
     assert proc.stdout.strip() == ""
 
 
+@pytest.mark.process_contract
 def test_process_contract_reason_is_utf8_not_escaped(scopes):
     """理由是给人看的中文，不能被 JSON 转义成 \\uXXXX。"""
     proc = _run_hook(json.dumps(_agent_call(prompt="x")), scopes)

@@ -85,6 +85,7 @@ def test_neutral_ports_do_not_import_database_backends():
     assert offenders == {module: set() for module in NEUTRAL_MODULES}, offenders
 
 
+@pytest.mark.process_contract
 @pytest.mark.architecture_contract
 def test_clean_neutral_runtime_and_facade_imports_load_no_backend_modules():
     script = """

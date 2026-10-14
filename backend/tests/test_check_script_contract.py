@@ -8,6 +8,10 @@ import subprocess
 import sys
 import time
 
+import pytest
+
+pytestmark = pytest.mark.process_contract
+
 
 ROOT = Path(__file__).resolve().parents[2]
 

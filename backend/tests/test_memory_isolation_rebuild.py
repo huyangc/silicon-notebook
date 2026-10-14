@@ -28,6 +28,8 @@ from app.services.memory_isolation_rebuild import MemoryIsolationRebuild
 from app.services.sqlite_repository import SQLiteRepository
 from tests import memory_isolation_cases as cases
 
+pytestmark = [pytest.mark.legacy_upgrade_contract, pytest.mark.real_sqlite_migration]
+
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):

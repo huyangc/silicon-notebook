@@ -1426,6 +1426,7 @@ def test_upload_file_uses_cloud_when_only_cloud_configured(tmp_path, monkeypatch
     assert any(e.element_type == "image" for e in elements)
 
 
+@pytest.mark.process_contract
 def test_upload_file_cloud_error_falls_back_to_local_python(tmp_path, monkeypatch):
     """云端上传抛错 → 本地 Python 解析；空白页仍保留降级质量警告。"""
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")

@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tomllib
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGING = ROOT / "packaging"
@@ -68,6 +70,7 @@ def test_release_bundle_includes_legacy_model_env_migration_helper():
     assert "chmod +x \"$STAGE/scripts/migrate_legacy_model_env.py\"" in pack_script
 
 
+@pytest.mark.process_contract
 def test_packaged_migration_helper_runs_with_bundled_python_layout(tmp_path):
     bundle = tmp_path / "bundle"
     (bundle / "scripts").mkdir(parents=True)
@@ -129,6 +132,7 @@ KG_ASK_RESERVE=3
     assert backup.stat().st_mode & 0o777 == 0o600
 
 
+@pytest.mark.process_contract
 def test_install_creates_model_service_config_once_and_preserves_it(tmp_path):
     bundle = tmp_path / "bundle"
     bundle.mkdir()

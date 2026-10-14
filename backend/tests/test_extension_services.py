@@ -58,6 +58,7 @@ def eventually(predicate, timeout=5, abort=None):
         time.sleep(0.02)
 
 
+@pytest.mark.process_contract
 def test_start_reuses_only_matching_ready_session_and_receipt_owns_cleanup(directory, tmp_path):
     own = tmp_path / "own.json"
     other = tmp_path / "other.json"
@@ -74,6 +75,7 @@ def test_start_reuses_only_matching_ready_session_and_receipt_owns_cleanup(direc
     assert directory.stat().st_mode & 0o777 == 0o700
 
 
+@pytest.mark.process_contract
 def test_stop_ignores_environment_and_deleted_configuration(directory, tmp_path):
     manager.start(directory, [service(tmp_path)], "same", None)
     result = subprocess.run(
@@ -85,6 +87,7 @@ def test_stop_ignores_environment_and_deleted_configuration(directory, tmp_path)
     assert not runtime.running(directory)
 
 
+@pytest.mark.process_contract
 @pytest.mark.parametrize("kind", ["timeout", "exit"])
 def test_start_failure_cleans_previously_started_services(directory, tmp_path, kind):
     failing = service(tmp_path, key="demo/fail", probe=[sys.executable, "-c", "raise SystemExit(1)"])
@@ -97,6 +100,7 @@ def test_start_failure_cleans_previously_started_services(directory, tmp_path, k
     assert manager.status(directory)["state"] == "failed"
 
 
+@pytest.mark.process_contract
 def test_post_ready_exit_stops_remaining_session(directory, tmp_path):
     exit_now = tmp_path / "exit-now"
     delayed = service(tmp_path, key="demo/delayed", command=[sys.executable, "-c", "import pathlib,sys,time\nwhile not pathlib.Path(sys.argv[1]).exists(): time.sleep(.02)", str(exit_now)])
@@ -106,6 +110,7 @@ def test_post_ready_exit_stops_remaining_session(directory, tmp_path):
     assert manager.status(directory)["reason"] == "demo/delayed:process_exited"
 
 
+@pytest.mark.process_contract
 def test_external_is_checked_but_no_worker_is_spawned(directory, tmp_path):
     manager.start(directory, [service(tmp_path, mode="external")], "external", None)
     assert manager.status(directory)["services"]["demo/main"]["pid"] is None
@@ -119,6 +124,7 @@ def test_empty_plan_no_daemon_or_owned_receipt(directory, tmp_path):
     assert not runtime.running(directory)
 
 
+@pytest.mark.process_contract
 def test_lifecycle_logs_and_state_exclude_configuration_and_process_output(directory, tmp_path):
     secret = "never-display-this-secret"
     command = [sys.executable, "-c", f"import time; print({secret!r}, flush=True); time.sleep(60)"]
@@ -235,6 +241,7 @@ def test_http_probe_disables_proxy_redirects_and_never_reads_body(monkeypatch, t
     assert observed == [(item["healthcheck_url"], 0.2)]
 
 
+@pytest.mark.process_contract
 def test_guard_cleans_descendants_if_supervisor_dies(directory, tmp_path):
     sentinel = tmp_path / "alive"
     code = "import pathlib,sys,time\np=pathlib.Path(sys.argv[1])\nwhile True:\n p.write_text(str(time.monotonic()))\n time.sleep(.02)"
@@ -255,6 +262,7 @@ def test_guard_cleans_descendants_if_supervisor_dies(directory, tmp_path):
     assert sentinel.read_text() == last
 
 
+@pytest.mark.process_contract
 def test_readiness_command_descendants_are_reaped_even_after_success(tmp_path):
     sentinel = tmp_path / "probe-child"
     child = "import pathlib,sys,time\np=pathlib.Path(sys.argv[1])\nwhile True:\n p.write_text(str(time.monotonic()))\n time.sleep(.01)"
@@ -273,6 +281,7 @@ def test_stale_record_never_signals_unrelated_process(directory):
     assert manager.status(directory)["pid"] is None
 
 
+@pytest.mark.process_contract
 def test_receipt_from_older_run_cannot_stop_new_session(directory, tmp_path):
     receipt = tmp_path / "old-receipt"
     manager.start(directory, [service(tmp_path)], "first", receipt)
@@ -282,6 +291,7 @@ def test_receipt_from_older_run_cannot_stop_new_session(directory, tmp_path):
     assert runtime.running(directory)
 
 
+@pytest.mark.process_contract
 def test_status_cli_works_without_importing_dotenv(directory, tmp_path):
     result = subprocess.run(
         [sys.executable, "-S", str(SCRIPTS / "extension_services.py"), "status", "--state-dir", str(directory)],
@@ -292,6 +302,7 @@ def test_status_cli_works_without_importing_dotenv(directory, tmp_path):
     assert json.loads(result.stdout)["state"] == "stopped"
 
 
+@pytest.mark.process_contract
 def test_another_terminal_can_inspect_and_cancel_startup(directory, tmp_path):
     item = service(tmp_path, probe=[sys.executable, "-c", "raise SystemExit(1)"])
     item["startup_timeout_seconds"] = 30
@@ -306,6 +317,7 @@ def test_another_terminal_can_inspect_and_cancel_startup(directory, tmp_path):
             future.result(timeout=3)
 
 
+@pytest.mark.process_contract
 def test_a_momentary_probe_does_not_fail_the_supervisor_claim(directory, tmp_path):
     # ``running`` probes by holding a lease for an instant; a supervisor that
     # met such a probe on its one-shot claim exited before publishing anything,
@@ -320,6 +332,7 @@ def test_a_momentary_probe_does_not_fail_the_supervisor_claim(directory, tmp_pat
         assert future.result(timeout=15) == {"state": "ready", "reused": False}
 
 
+@pytest.mark.process_contract
 def test_a_lease_held_past_the_claim_window_still_fails_the_supervisor(directory, tmp_path):
     with runtime.lock(directory / "supervisor.lock"):
         with pytest.raises(runtime.ServiceError, match="supervisor_start_failed"):
@@ -327,6 +340,7 @@ def test_a_lease_held_past_the_claim_window_still_fails_the_supervisor(directory
     assert not runtime.running(directory)
 
 
+@pytest.mark.process_contract
 def test_guard_retains_lease_after_supervisor_crash_preventing_overlap(directory, tmp_path):
     item = service(tmp_path)
     item["shutdown_timeout_seconds"] = 0.7
@@ -422,6 +436,7 @@ def test_configuration_matches_settings_case_insensitive_selection(
     assert [item["key"] for item in services] == ["demo/main"]
 
 
+@pytest.mark.process_contract
 @pytest.mark.parametrize("interruption", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
 def test_interrupted_launcher_rolls_back_its_unready_session(directory, tmp_path, interruption):
     item = service(tmp_path, probe=[sys.executable, "-c", "raise SystemExit(1)"])
@@ -450,6 +465,7 @@ def test_interrupted_launcher_rolls_back_its_unready_session(directory, tmp_path
             process.wait()
 
 
+@pytest.mark.process_contract
 def test_cancellation_at_spawn_return_still_rolls_back(directory, tmp_path, monkeypatch):
     spawn = manager._spawn
     def interrupted(*args, **kwargs):
@@ -461,6 +477,7 @@ def test_cancellation_at_spawn_return_still_rolls_back(directory, tmp_path, monk
     assert not runtime.running(directory)
 
 
+@pytest.mark.process_contract
 @pytest.mark.parametrize("killed_member", ["guard", "witness"])
 def test_guard_pair_failure_reaps_real_service_tree_before_releasing_lease(directory, tmp_path, killed_member):
     parent_heartbeat = tmp_path / "parent-heartbeat"

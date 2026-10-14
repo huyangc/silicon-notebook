@@ -352,6 +352,7 @@ def test_source_summary_queue_failure_uses_deterministic_fallback(repo):
     assert result.startswith("1 parsed text element(s).")
 
 
+@pytest.mark.process_contract
 def test_url_local_parse_never_falls_back_to_cloud(local_repo, monkeypatch):
     repo = local_repo
     nb = repo.create_notebook(NotebookCreate(name="nb"))

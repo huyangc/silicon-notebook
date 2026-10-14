@@ -24,6 +24,8 @@ from app.repositories.sqlite import migrations as migrations_module
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.migrations import SCHEMA_VERSION, SqliteMigrator
 
+pytestmark = [pytest.mark.legacy_upgrade_contract, pytest.mark.real_sqlite_migration]
+
 
 def _fresh_migrated_database(tmp_path: Path) -> tuple[SqliteDatabase, Settings]:
     db_path = tmp_path / "migrations.db"

@@ -5,8 +5,8 @@
 gate's wall time, each lane's seconds and the slowest backend test files and
 tests from this run's JUnit report, so every gate log shows what got slower.
 Over ``--target`` seconds it prints a prominent warning. It never fails the
-gate: the 60 s target is a local Apple Silicon target and CI timings are
-observational only (docs/development.md), so this always exits 0, also when
+gate: the 80 s target (60 s remains the long-term aim) is a local Apple
+Silicon target and CI timings are observational only (docs/development.md), so this always exits 0, also when
 its inputs are missing or unreadable.
 """
 
@@ -95,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timing-dir", type=Path, required=True)
     parser.add_argument("--junit", type=Path, required=True)
     parser.add_argument("--started-at", type=float, required=True)
-    parser.add_argument("--target", type=int, default=60)
+    parser.add_argument("--target", type=int, default=80)
     try:
         args = parser.parse_args(argv)
         sys.stdout.write(

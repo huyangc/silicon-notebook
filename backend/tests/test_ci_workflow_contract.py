@@ -331,6 +331,7 @@ def test_pr_ci_runs_every_g1_lane_in_two_jobs() -> None:
         assert upload["with"]["retention-days"] == "7"
 
 
+@pytest.mark.process_contract
 @pytest.mark.parametrize(
     ("arguments", "expected"),
     [
@@ -375,6 +376,7 @@ def test_check_sh_runs_all_lanes_or_exactly_the_selected_ones(
     assert printed == [lane for lane in _standard_gate_lanes() if lane in expected]
 
 
+@pytest.mark.process_contract
 @pytest.mark.parametrize("arguments", [("--lane",), ("--lane", "postgres"), ("backend",)])
 def test_check_sh_rejects_unknown_lanes_and_arguments(arguments, tmp_path) -> None:
     completed = subprocess.run(
@@ -428,6 +430,7 @@ def test_node_scripts_refuse_another_node_major(script) -> None:
     assert "require_node_major " in source
 
 
+@pytest.mark.process_contract
 @pytest.mark.parametrize(
     ("version", "accepted"),
     [
@@ -546,6 +549,7 @@ def test_daily_extended_complement_job_runs_only_the_complement_wrapper() -> Non
     assert upload["with"]["retention-days"] == "7"
 
 
+@pytest.mark.process_contract
 @pytest.mark.parametrize("arguments", [(), ("--complement-only",)])
 def test_check_extended_runs_g1_first_unless_the_workflow_runs_it_elsewhere(
     arguments, tmp_path,
@@ -589,6 +593,7 @@ def test_check_extended_runs_g1_first_unless_the_workflow_runs_it_elsewhere(
     assert calls.read_text(encoding="utf-8").splitlines() == expected
 
 
+@pytest.mark.process_contract
 def test_check_extended_rejects_unknown_arguments(tmp_path) -> None:
     completed = subprocess.run(
         ["bash", str(ROOT / "scripts" / "check_extended.sh"), "--shard-index"],

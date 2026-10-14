@@ -1,6 +1,7 @@
 """``validate_sqlite_schema`` guard: one cheap, no-PostgreSQL-needed check
 that pins the SQLite side of the shadow manifest against a real, freshly
-migrated SQLite database.
+migrated SQLite database (an independent copy of the per-worker schema
+template, which the real migration ladder built in this worker).
 
 This closes a coverage gap flagged in P2-T1 code review: every production
 caller of ``validate_sqlite_schema`` (control.py, snapshot.py, bulk_copy.py,
@@ -21,7 +22,8 @@ from pathlib import Path
 import pytest
 
 
-def _fresh_sqlite_database(tmp_path: Path):
+@pytest.fixture
+def fresh_sqlite_database(tmp_path: Path):
     from app.core.config import Settings
     from app.repositories.sqlite.database import SqliteDatabase
     from app.repositories.sqlite.migrations import SqliteMigrator
@@ -33,10 +35,11 @@ def _fresh_sqlite_database(tmp_path: Path):
     # (validate_rows=True by default) only rejects NULL/duplicate replication
     # keys among *existing* rows, which an empty table trivially satisfies.
     SqliteMigrator(database, settings).migrate()
-    return database
+    yield database
+    database.close_local()
 
 
-def test_validate_sqlite_schema_accepts_the_current_manifest(tmp_path):
+def test_validate_sqlite_schema_accepts_the_current_manifest(fresh_sqlite_database):
     """A freshly migrated, empty SQLite database at the current schema
     version must validate cleanly against the real (unmutated) manifest:
     table totality, declared-PK/NULL-guard classification, FK copy-rank
@@ -48,19 +51,15 @@ def test_validate_sqlite_schema_accepts_the_current_manifest(tmp_path):
         validate_sqlite_schema,
     )
 
-    database = _fresh_sqlite_database(tmp_path)
-    try:
-        conn = database.connect()
-        report = validate_sqlite_schema(
-            conn, MANIFEST, expected_pair=RUNNING_SCHEMA_PAIR
-        )
-        assert report is not None
-    finally:
-        database.close_local()
+    conn = fresh_sqlite_database.connect()
+    report = validate_sqlite_schema(
+        conn, MANIFEST, expected_pair=RUNNING_SCHEMA_PAIR
+    )
+    assert report is not None
 
 
 def test_validate_sqlite_schema_rejects_a_foreign_key_copy_rank_inversion(
-    tmp_path,
+    fresh_sqlite_database,
 ):
     """Mutation guard (the C3 shape flagged in P2-T1 code review): swap
     ``copy_rank`` between an FK parent (``groups``) and one of its children
@@ -101,12 +100,8 @@ def test_validate_sqlite_schema_rejects_a_foreign_key_copy_rank_inversion(
         schema_pair=MANIFEST.schema_pair, tables=mutated_tables
     )
 
-    database = _fresh_sqlite_database(tmp_path)
-    try:
-        conn = database.connect()
-        with pytest.raises(ValueError, match="foreign-key copy-rank inversion"):
-            validate_sqlite_schema(
-                conn, mutated_manifest, expected_pair=RUNNING_SCHEMA_PAIR
-            )
-    finally:
-        database.close_local()
+    conn = fresh_sqlite_database.connect()
+    with pytest.raises(ValueError, match="foreign-key copy-rank inversion"):
+        validate_sqlite_schema(
+            conn, mutated_manifest, expected_pair=RUNNING_SCHEMA_PAIR
+        )

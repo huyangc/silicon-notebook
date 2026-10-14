@@ -940,6 +940,7 @@ def test_timed_out_stop_retains_stopping_writer_until_safe_later_cleanup(tmp_pat
     assert runtime._thread is None
 
 
+@pytest.mark.process_contract
 def test_sigusr1_owner_is_process_global_and_second_runtime_cannot_replace_it(tmp_path):
     if os.name != "posix" or not hasattr(signal, "SIGUSR1"):
         return
@@ -983,6 +984,7 @@ print('OK', flush=True)
     assert child.stdout.strip() == "OK"
 
 
+@pytest.mark.process_contract
 def test_sigusr1_appends_all_threads_without_terminating_child(tmp_path):
     if os.name != "posix" or not hasattr(signal, "SIGUSR1"):
         return

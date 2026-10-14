@@ -1346,6 +1346,7 @@ def test_redaction_waits_for_publication_then_removes_the_case(
     assert list(store.root.glob("**/artifact.json")) == []
 
 
+@pytest.mark.process_contract
 def test_lifecycle_generation_rejects_stale_publication_across_processes(
     tmp_path,
 ):

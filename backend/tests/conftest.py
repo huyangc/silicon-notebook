@@ -177,34 +177,49 @@ _REAL_PASSWORD_HASH_MODULES = {
     "test_auth_utils.py",
     "test_repository_snapshot_verifier.py",
 }
-_REAL_SQLITE_MIGRATION_MODULES = {
-    "test_agent_observation_store.py",
-    "test_agent_token_tiers_migration.py",
-    "test_ask_job_output_migration.py",
-    "test_ask_intent_handle_store.py",
-    "test_agent_profile_job_observations.py",
-    "test_agent_profile_store.py",
-    "test_catalog_store.py",
-    "test_extension_toggle_store.py",
-    "test_indexing_pipeline_identity.py",
-    "test_merge_dbs_taxonomy.py",
-    "test_memory_isolation_migration.py",
-    "test_memory_isolation_rebuild.py",
-    "test_promotion_provenance_migration.py",
-    "test_readiness_gate.py",
-    "test_repository_snapshot_verifier.py",
-    "test_retrieval_experience_store.py",
-    "test_search_profile_job.py",
-    "test_shadow_sqlite_schema_validation.py",
-    "test_sqlite_migrations.py",
-    "test_ui_mode.py",
-}
+# A test runs the real SQLite migration ladder from scratch only when it
+# carries this marker, on the test itself or for the whole module through
+# `pytestmark`. Every other test gets a copy of the per-worker template below
+# whenever it migrates a database file that does not exist yet; a database
+# that already exists (an old-version fixture, a rolled-back copy) is always
+# migrated for real. `test_test_architecture_policy.py` requires the marker on
+# every test whose own body drives the migrator in a module that owns one, and
+# `_reuse_current_sqlite_schema` fails a template copy for a test that changed
+# the ladder without it.
+REAL_SQLITE_MIGRATION_MARKER = "real_sqlite_migration"
+
+
+def _sqlite_ladder_identity(migrations_module, migrator=None) -> tuple:
+    """What a from-scratch migration would run: the head version and its steps.
+
+    Compared by identity, so a test that patches ``SCHEMA_VERSION`` or one
+    ``_migration_N`` step (on the class or on one migrator) no longer matches
+    the ladder the template was built from.
+    """
+    version = migrations_module.SCHEMA_VERSION
+    steps = tuple(
+        migrations_module.SqliteMigrator.__dict__.get(f"_migration_{step}")
+        for step in range(1, version + 1)
+    )
+    patched_on_instance = tuple(
+        sorted(name for name in vars(migrator) if name.startswith("_migration_"))
+    ) if migrator is not None else ()
+    return version, steps, patched_on_instance
+
+
+# Ladder identity each worker's template was built from, keyed by template path.
+_SQLITE_TEMPLATE_LADDER: dict[Path, tuple] = {}
 
 
 @pytest.fixture(scope="session")
 def _sqlite_schema_template(tmp_path_factory) -> Path:
-    """Build the immutable current SQLite schema once in each xdist worker."""
+    """Build the immutable current SQLite schema once in each xdist worker.
+
+    This build is itself a real from-scratch run of the whole ladder, in every
+    worker of every gate.
+    """
     from app.core.config import Settings
+    from app.repositories.sqlite import migrations as migrations_module
     from app.repositories.sqlite.database import SqliteDatabase
     from app.repositories.sqlite.migrations import SqliteMigrator
 
@@ -216,6 +231,7 @@ def _sqlite_schema_template(tmp_path_factory) -> Path:
         storage_dir=str(template_root / "storage"),
     )
     database = SqliteDatabase(settings, _REPO_ROOT)
+    _SQLITE_TEMPLATE_LADDER[template_path] = _sqlite_ladder_identity(migrations_module)
     SqliteMigrator(database, settings).migrate()
     database.close_local()
     return template_path
@@ -223,21 +239,34 @@ def _sqlite_schema_template(tmp_path_factory) -> Path:
 
 @pytest.fixture(autouse=True)
 def _reuse_current_sqlite_schema(monkeypatch, request, _sqlite_schema_template):
-    """Copy current empty DDL while migration contract tests run the real ladder."""
-    if request.path.name in _REAL_SQLITE_MIGRATION_MODULES:
+    """Copy current empty DDL unless the test owns a real from-scratch ladder."""
+    if request.node.get_closest_marker(REAL_SQLITE_MIGRATION_MARKER) is not None:
         return
 
-    from app.repositories.sqlite.migrations import SCHEMA_VERSION, SqliteMigrator
+    from app.repositories.sqlite import migrations as migrations_module
 
+    SqliteMigrator = migrations_module.SqliteMigrator
     real_migrate = SqliteMigrator.migrate
+    template_ladder = _SQLITE_TEMPLATE_LADDER[_sqlite_schema_template]
 
     def migrate_from_template(migrator: SqliteMigrator) -> list[int]:
         database_path = migrator.database.db_path
         if database_path.exists():
             return real_migrate(migrator)
+        if _sqlite_ladder_identity(migrations_module, migrator) != template_ladder:
+            # pytest.fail raises a BaseException, so code under test that
+            # catches Exception around initialization cannot swallow it.
+            pytest.fail(
+                f"{request.node.nodeid} changed the SQLite migration ladder "
+                "(SCHEMA_VERSION or a _migration_N step) and then migrated a new "
+                "database, which would get a copy of the unchanged current-schema "
+                f"template. Mark the test @pytest.mark.{REAL_SQLITE_MIGRATION_MARKER} "
+                "so it runs the real ladder.",
+                pytrace=False,
+            )
         database_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(_sqlite_schema_template, database_path)
-        return list(range(1, SCHEMA_VERSION + 1))
+        return list(range(1, template_ladder[0] + 1))
 
     monkeypatch.setattr(SqliteMigrator, "migrate", migrate_from_template)
 

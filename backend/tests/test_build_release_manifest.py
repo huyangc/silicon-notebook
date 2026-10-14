@@ -87,6 +87,7 @@ def build(repo: Path, tmp_path: Path) -> dict:
     return json.loads(out.read_text(encoding="utf-8"))
 
 
+@pytest.mark.process_contract
 def test_linear_history_orders_notes_and_excludes_readme(repo, tmp_path):
     commit(repo, "c1", {"a.txt": "1"})
     c2 = commit(repo, "c2", {"release-notes/zeta.md": note_file("  第二条说明。\n\n", level="fix", audience="admin", title="第二条"),
@@ -109,6 +110,7 @@ def test_linear_history_orders_notes_and_excludes_readme(repo, tmp_path):
     assert "第二条说明。" in raw  # ensure_ascii=False
 
 
+@pytest.mark.process_contract
 def test_same_ordinal_sorts_by_id(repo, tmp_path):
     commit(repo, "c1", {"release-notes/b.md": note_file("B"), "release-notes/a.md": note_file("A")})
     data = build(repo, tmp_path)
@@ -116,6 +118,7 @@ def test_same_ordinal_sorts_by_id(repo, tmp_path):
     assert {n["ordinal"] for n in data["notes"]} == {1}
 
 
+@pytest.mark.process_contract
 def test_later_edit_keeps_original_add_ordinal(repo, tmp_path):
     added = commit(repo, "c1", {"release-notes/n.md": note_file("old")})
     commit(repo, "c2", {"x": "1"})
@@ -124,6 +127,7 @@ def test_later_edit_keeps_original_add_ordinal(repo, tmp_path):
     assert (note["ordinal"], note["sha"], note["body"]) == (1, added, "new")
 
 
+@pytest.mark.process_contract
 def test_delete_then_readd_uses_most_recent_add(repo, tmp_path):
     commit(repo, "c1", {"release-notes/n.md": note_file("v1")})
     commit(repo, "c2", {"release-notes/n.md": None})
@@ -132,6 +136,7 @@ def test_delete_then_readd_uses_most_recent_add(repo, tmp_path):
     assert (note["ordinal"], note["sha"]) == (3, readd)
 
 
+@pytest.mark.process_contract
 def test_note_merged_through_merge_commit_is_attributed_to_the_merge(repo, tmp_path):
     commit(repo, "c1", {"a": "1"})
     git(repo, "checkout", "-q", "-b", "feature")
@@ -148,6 +153,7 @@ def test_note_merged_through_merge_commit_is_attributed_to_the_merge(repo, tmp_p
     assert note["ordinal"] == 3 == data["build"]["ordinal"]
 
 
+@pytest.mark.process_contract
 def test_uncommitted_and_untracked_notes_are_ignored_and_body_comes_from_head(repo, tmp_path):
     commit(repo, "c1", {"release-notes/n.md": note_file("committed")})
     (repo / "release-notes" / "n.md").write_text(note_file("dirty worktree edit"), encoding="utf-8")
@@ -161,11 +167,13 @@ def test_uncommitted_and_untracked_notes_are_ignored_and_body_comes_from_head(re
     assert [(n["id"], n["body"]) for n in notes] == [("n", "committed")]
 
 
+@pytest.mark.process_contract
 def test_no_notes_directory_yields_empty_notes(repo, tmp_path):
     commit(repo, "c1", {"a": "1"})
     assert build(repo, tmp_path)["notes"] == []
 
 
+@pytest.mark.process_contract
 def test_empty_body_is_allowed(repo, tmp_path):
     commit(repo, "c1", {"release-notes/blank.md": note_file(" \n\n")})
     assert build(repo, tmp_path)["notes"][0]["body"] == ""
@@ -188,6 +196,7 @@ _BAD_NOTES = {
 }
 
 
+@pytest.mark.process_contract
 @pytest.mark.parametrize("name", sorted(_BAD_NOTES))
 def test_bad_note_header_fails_naming_the_file_and_writes_nothing(repo, tmp_path, name):
     commit(repo, "c1", {f"release-notes/{name}.md": _BAD_NOTES[name]})
@@ -199,6 +208,7 @@ def test_bad_note_header_fails_naming_the_file_and_writes_nothing(repo, tmp_path
     assert not out.exists()
 
 
+@pytest.mark.process_contract
 def test_header_tolerates_crlf_bom_blank_lines_colons_and_paired_quotes(repo, tmp_path):
     text = (
         "\ufeff---\r\nlevel:  change \r\n\r\naudience: all\r\n"
@@ -213,6 +223,7 @@ def test_header_tolerates_crlf_bom_blank_lines_colons_and_paired_quotes(repo, tm
     assert notes["h"]["body"] == "a\n---\nb"  # 正文里的 --- 不是文件头结束
 
 
+@pytest.mark.process_contract
 @pytest.mark.parametrize("raw,expected", [
     ('"甲"', "甲"), ("'甲'", "甲"), ('"甲" 与 "乙"', '"甲" 与 "乙"'),
     ("'甲' 与 '乙'", "'甲' 与 '乙'"), ('"甲\'', '"甲\''), ('甲"', '甲"'),
@@ -222,6 +233,7 @@ def test_title_quotes_are_stripped_only_when_they_wrap_the_whole_value(repo, tmp
     assert build(repo, tmp_path)["notes"][0]["title"] == expected
 
 
+@pytest.mark.process_contract
 @pytest.mark.parametrize("name", ["has space.md", "-lead.md", "中文.md"])
 def test_unsafe_note_id_fails_naming_the_file(repo, tmp_path, name):
     commit(repo, "c1", {f"release-notes/{name}": note_file("text")})
@@ -230,6 +242,7 @@ def test_unsafe_note_id_fails_naming_the_file(repo, tmp_path, name):
     assert name in proc.stderr
 
 
+@pytest.mark.process_contract
 def test_shallow_clone_fails(repo, tmp_path):
     commit(repo, "c1", {"a": "1"})
     commit(repo, "c2", {"release-notes/n.md": note_file("x")})
@@ -245,6 +258,7 @@ def test_shallow_clone_fails(repo, tmp_path):
     assert not out.exists()
 
 
+@pytest.mark.process_contract
 def test_rename_counts_as_a_new_add_even_with_follow_and_renames_configured(repo, tmp_path):
     commit(repo, "c1", {"release-notes/old.md": note_file("内容足够长的一条说明,便于重命名检测。\n第二行。")})
     commit(repo, "c2", {"x": "1"})
@@ -259,6 +273,7 @@ def test_rename_counts_as_a_new_add_even_with_follow_and_renames_configured(repo
     assert (note["id"], note["ordinal"], note["sha"]) == ("new", 3, renamed)
 
 
+@pytest.mark.process_contract
 def test_output_file_is_world_readable(repo, tmp_path):
     commit(repo, "c1", {"release-notes/n.md": note_file("x")})
     build(repo, tmp_path)
@@ -266,6 +281,7 @@ def test_output_file_is_world_readable(repo, tmp_path):
     assert mode == 0o644
 
 
+@pytest.mark.process_contract
 def test_non_utf8_note_fails_naming_the_file(repo, tmp_path):
     commit(repo, "c1", {"release-notes/bad.md": b"\xff\xfe not utf8"})
     proc = run(repo, tmp_path / "m.json")
@@ -274,11 +290,13 @@ def test_non_utf8_note_fails_naming_the_file(repo, tmp_path):
     assert "Traceback" not in proc.stderr
 
 
+@pytest.mark.process_contract
 def test_utf8_bom_is_stripped(repo, tmp_path):
     commit(repo, "c1", {"release-notes/n.md": b"\xef\xbb\xbf" + note_file("你好\n").encode("utf-8")})
     assert build(repo, tmp_path)["notes"][0]["body"] == "你好"
 
 
+@pytest.mark.process_contract
 def test_inherited_git_dir_is_ignored(repo, tmp_path):
     commit(repo, "c1", {"release-notes/n.md": note_file("x")})
     other = tmp_path / "other"
@@ -293,6 +311,7 @@ def test_inherited_git_dir_is_ignored(repo, tmp_path):
     assert json.loads(out.read_text(encoding="utf-8"))["notes"][0]["id"] == "n"
 
 
+@pytest.mark.process_contract
 def test_repo_that_is_not_the_toplevel_is_refused(repo, tmp_path):
     commit(repo, "c1", {"a": "1"})
     sub = repo / "unpacked"
@@ -302,6 +321,7 @@ def test_repo_that_is_not_the_toplevel_is_refused(repo, tmp_path):
     assert "仓库根目录" in proc.stderr
 
 
+@pytest.mark.process_contract
 def test_not_a_git_repo_fails(tmp_path):
     empty = tmp_path / "plain"
     empty.mkdir()

@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from app.core.config import Settings
 from app.models.notebooks import NotebookCreate
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.migrations import SqliteMigrator
 from app.services.scale_index_builder import ScaleIndexBuilder
 from app.services.sqlite_repository import SQLiteRepository, _now
+
+pytestmark = [pytest.mark.legacy_upgrade_contract, pytest.mark.real_sqlite_migration]
 
 
 def _repo(tmp_path, monkeypatch):

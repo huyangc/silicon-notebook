@@ -2,7 +2,11 @@
 import pathlib
 import subprocess
 
+import pytest
+
 from tests.child_env_testkit import BYTECODE_ENV
+
+pytestmark = pytest.mark.process_contract
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]  # backend/tests -> repo root
 SCRIPT = ROOT / "scripts" / "autotune.sh"

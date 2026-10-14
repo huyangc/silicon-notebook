@@ -461,6 +461,7 @@ def test_observation_parser_rejects_truthy_strings_and_boolean_numbers(path, val
         observation_from_dict(row)
 
 
+@pytest.mark.process_contract
 def test_cli_writes_content_free_verified_attestation(tmp_path: Path):
     cases, baseline, shadow = _paired()
     input_path = tmp_path / "paired.json"
