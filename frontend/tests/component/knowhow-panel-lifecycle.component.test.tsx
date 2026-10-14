@@ -605,3 +605,28 @@ test("the notebook-reset effect clears the stale-citation notice", async () => {
     { method: "GET", path: "/notebooks/nb-2/knowhow" },
   ]);
 });
+
+// ---------------------------------------------------------------------------
+// Table list: stale responses (S6)
+// ---------------------------------------------------------------------------
+
+test("a previous notebook's late table list never replaces the current notebook's list", async () => {
+  // loadTables had no response guard: nb-1's list landing after a switch to nb-2
+  // overwrote nb-2's list. Only the latest request's result is applied now.
+  const server = suite.server();
+  const releaseNb1 = server.hold("GET", "/notebooks/nb-1/knowhow");
+  server.on("GET", "/notebooks/nb-2/knowhow", { json: [wireSummary({ id: "t-other", title: "别的表" })] });
+  const panel = renderPanel();
+  await settle();
+
+  panel.update({ ...BASE_PROPS, notebookId: "nb-2" });
+  expect(await screen.findByRole("button", { name: "打开表格：别的表" })).toBeInTheDocument();
+  releaseNb1({ json: [wireSummary({ id: "t-rec", title: "排障记录" })] });
+  await settle();
+  expect(screen.getByRole("button", { name: "打开表格：别的表" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "打开表格：排障记录" })).not.toBeInTheDocument();
+  expect(server.log).toEqual([
+    { method: "GET", path: "/notebooks/nb-1/knowhow" },
+    { method: "GET", path: "/notebooks/nb-2/knowhow" },
+  ]);
+});
