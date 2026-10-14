@@ -1926,7 +1926,45 @@ def case_a_source_published_just_before_the_row_delete_is_removed_after(
     assert orphans() == 0
 
 
+def case_the_row_delete_itself_is_scoped_to_the_creator(
+    world: World, monkeypatch
+) -> None:
+    """Defence in depth, statement by statement: ``_hard_delete_on`` selects the
+    creator's rows and then deletes them, and the DELETE repeats the creator
+    condition. A caller pre-filtering (``owned_memory_refs``) and the SELECT
+    both leave the DELETE with only creator-owned ids, so nothing but a row
+    whose creator changes between the two statements reaches it — which is
+    exactly what is staged here, inside the same transaction, just before the
+    DELETE (the proposal-withdrawal step runs between them). The row must
+    survive: the DELETE may not trust the ids it was handed."""
+    import sys
+
+    store = service(world).store
+    alice = world.projections["alice"]
+    governance = sys.modules[type(store).__module__].GovernanceStore
+    original = governance.withdraw_memory_promotions_on
+
+    def hand_the_row_to_bob_first(db, notebook_id, ids, *args, **kwargs):
+        for memory_id in ids:
+            db.execute(
+                world.sql._text("UPDATE memory_items SET created_by=? WHERE id=?"),
+                (world.bob.id, memory_id),
+            )
+        return original(db, notebook_id, ids, *args, **kwargs)
+
+    monkeypatch.setattr(
+        governance, "withdraw_memory_promotions_on",
+        staticmethod(hand_the_row_to_bob_first),
+    )
+    store.bulk_delete_memories(world.alice.id, [alice.memory_id])
+    assert world.sql.count(
+        "SELECT COUNT(*) AS c FROM memory_items WHERE id=? AND created_by=?",
+        (alice.memory_id, world.bob.id),
+    ) == 1, "the DELETE removed a row its caller no longer created"
+
+
 MONKEYPATCH_CASES: dict[str, Callable[..., None]] = {
+    "store_delete_rechecks_creator": case_the_row_delete_itself_is_scoped_to_the_creator,
     "late_source_removed": case_a_source_published_just_before_the_row_delete_is_removed_after,
     "gone_source_is_removed": case_a_source_removed_concurrently_counts_as_removed,
     "failed_purge_keeps_membership": case_failed_purge_keeps_the_membership,
