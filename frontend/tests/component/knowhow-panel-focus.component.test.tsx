@@ -94,6 +94,23 @@ test("Tab and Shift+Tab cycle inside the panel and never reach the page behind i
   }
 });
 
+test("right after opening, Shift+Tab wraps to the panel's last control and Tab goes to its first", async () => {
+  // Opening leaves focus on the panel container (tabIndex=-1), which is neither
+  // the first nor the last focusable control: native reverse Tab from there would
+  // leave the panel, so the container counts as a boundary in both directions.
+  routeTable(suite.server(), "nb-1", recordDetail());
+  const user = userEvent.setup();
+  await openFrom("打开 Knowhow");
+  const focusable = focusableIn(panel());
+  expect(document.activeElement).toBe(panel());
+  await user.tab({ shift: true });
+  expect(document.activeElement).toBe(focusable.at(-1));
+
+  panel().focus();
+  await user.tab();
+  expect(document.activeElement).toBe(focusable[0]);
+});
+
 test("when the page unmounts the panel (notebook switch), focus returns to the opener", async () => {
   routeTable(suite.server(), "nb-1", recordDetail());
   const view = await openFrom("背后的引用");
