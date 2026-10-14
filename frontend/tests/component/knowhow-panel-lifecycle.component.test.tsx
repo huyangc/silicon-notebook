@@ -227,6 +227,43 @@ test("a notebook switch that also cites a table with the open table's id loads t
   ]);
 });
 
+test("a notebook switch citing a row of a same-id anchor table routes against the new notebook's table", async () => {
+  // Same collision, now with a cited row. In the flush that resets the notebook,
+  // the routing and stale-citation effects still hold the old notebook's detail
+  // (same table id). In nb-1 a3 is the 电源 concept, in nb-2 it is a 时钟
+  // branch: routing against nb-1's detail would open 电源 (which nb-2 does not
+  // have) and mark the citation as routed. The reset marks the outgoing detail as
+  // superseded, so both effects wait for nb-2's detail.
+  const server = suite.server();
+  routeTable(server, "nb-1", anchorDetail());
+  const nb2 = anchorDetail({
+    rows: [
+      { id: "a1", position: 0, projectionStatus: "synced", cells: { "c-anchor": "时钟", "c-shared": "检查时钟源", "c-own": "主板" } },
+      { id: "a3", position: 1, projectionStatus: "synced", cells: { "c-anchor": "时钟", "c-shared": "检查时钟源", "c-own": "背板" } },
+    ],
+  });
+  server.on("GET", "/notebooks/nb-2/knowhow", { json: [wireSummary({ id: "t-anc", title: nb2.title, rowCount: 2 })] });
+  server.on("GET", "/notebooks/nb-2/knowhow/t-anc", { json: wireDetail(nb2) });
+  const panel = renderPanel({ initialTableId: "t-anc", initialRowId: "a2" });
+  expect(await screen.findByRole("dialog", { name: "概念 时钟" })).toBeInTheDocument();
+  await settle();
+
+  panel.update({ ...BASE_PROPS, notebookId: "nb-2", initialTableId: "t-anc", initialRowId: "a3" });
+  await settle();
+  const matrix = await screen.findByRole("dialog", { name: "概念 时钟" });
+  const highlighted = within(matrix).getAllByRole("columnheader")
+    .filter((header) => header.classList.contains("kh-matrix-branch--hi"));
+  expect(highlighted.map((header) => within(header).getByText(/^分支/).textContent)).toEqual(["分支 2"]);
+  expect(screen.queryByRole("dialog", { name: "概念 电源" })).not.toBeInTheDocument();
+  expect(screen.queryByText("引用指向的行未找到，可能已被删除或调整，已为你展开整表内容。")).not.toBeInTheDocument();
+  expect(server.log).toEqual([
+    { method: "GET", path: "/notebooks/nb-1/knowhow" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-anc" },
+    { method: "GET", path: "/notebooks/nb-2/knowhow" },
+    { method: "GET", path: "/notebooks/nb-2/knowhow/t-anc" },
+  ]);
+});
+
 test("switching notebookId closes an open import wizard", async () => {
   // The wizard uploads into the panel's current notebookId. Until S6 the reset
   // effect (E6) left importOpen alone, so an import started in nb-1 stayed open
