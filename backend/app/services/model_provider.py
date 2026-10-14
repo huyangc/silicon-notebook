@@ -656,6 +656,14 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                 self._emit_json_repair_event(
                     status="escaped", reason="stray_backslash"
                 )
+            if parsed.control_chars:
+                self._emit_json_repair_event(
+                    status="escaped", reason="control_char"
+                )
+            if parsed.inner_quotes:
+                self._emit_json_repair_event(
+                    status="escaped", reason="inner_quote"
+                )
             if parsed.repaired:
                 self._emit_json_repair_event(
                     status=(

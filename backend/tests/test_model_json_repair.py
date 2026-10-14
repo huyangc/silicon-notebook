@@ -751,11 +751,12 @@ def test_a_duplicated_opening_reads_stray_backslashes_after_the_prefix(
             '{"{"title": "x", "body": "y"}]}',
             '{"title":"","sections":[{"title":"","body":""}]}',
         ),
-        # Only one duplicated opening is dropped.
+        # A dropped fragment must repeat how the text after it begins:
+        # ``{"`` is not how ``{ {"answer"`` begins, nor ``{""`` how
+        # ``{"answer"`` does.
         ('{"{ {"answer": "a", "grounded": true}', ANSWER_SCHEMA),
-        # At most one stray quote before the second opening.
         ('{""{"answer": "a", "grounded": true}', ANSWER_SCHEMA),
-        # At most one ``}`` after the inner object: the duplicated opening's.
+        # At most one ``}`` per dropped fragment after the object.
         ('{"{"answer": "a", "grounded": true}}}', ANSWER_SCHEMA),
         # The inner object shares no field with the hint.
         ('{"{"other": "a"}', ANSWER_SCHEMA),
@@ -811,6 +812,209 @@ def test_a_nested_leading_object_is_not_taken_as_the_reply():
     repaired = parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=True)
     assert repaired.duplicated_open is False
     assert json.loads(repaired.content)["answer"] == "a"
+
+
+# DeepSeek-V4-Flash answer syntheses, 2026-10-14 (both synthesis attempts of
+# one question): the reply restarted after a longer fragment than ``{"``.
+# Both carried a complete answer of ~1700 characters that was discarded.
+RESTARTED_ANSWER = (
+    '{"answer":"一、先澄清一个概念：电压反馈的恒流应用 [k1]。'
+    '\\n二、与电流反馈的区别 [k2]。","grounded":true}'
+)
+
+
+@pytest.mark.parametrize("allow_repair", [False, True])
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        '{"answer',  # observed: {"answer{"answer":…
+        '{"answer":"',  # observed: {"answer":"{"answer":…
+        '{"answer":',
+        '{"answer":"一、先澄',  # restarted mid-sentence
+        '{"{"answer',  # two fragments, each repeated by what follows
+        '{\n  "answer": "',  # the fragment indented differently
+    ],
+)
+def test_a_restarted_reply_is_read_as_the_object_written(prefix, allow_repair):
+    result = parse_model_json_object(
+        prefix + RESTARTED_ANSWER, ANSWER_SCHEMA, allow_repair=allow_repair,
+    )
+
+    assert result.duplicated_open is True
+    assert result.repaired is False
+    assert result.content == RESTARTED_ANSWER
+    assert validate_model_json_shape(
+        result.content, ANSWER_SCHEMA
+    ).content == RESTARTED_ANSWER
+
+
+@pytest.mark.parametrize("allow_repair", [False, True])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # The fragment does not repeat the start of what follows: two
+        # different answers, not a restart.
+        '{"answer":"一、先{"answer":"一、后","grounded":true}',
+        '{"answer":"y"{"answer":"x","grounded":true}',
+        # A nested object that begins like its parent is not a restart when
+        # an array opened in between.
+        '{"answer":[{"answer":"x","grounded":true}',
+    ],
+)
+def test_a_fragment_that_is_not_repeated_is_not_a_restart(raw, allow_repair):
+    with pytest.raises(ModelJsonRepairError):
+        parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=allow_repair)
+
+
+REPEATED_OBJECT = '{"answer": "完整答案 [k1]", "grounded": true}'
+
+
+@pytest.mark.parametrize("allow_repair", [False, True])
+@pytest.mark.parametrize(
+    "tail",
+    [
+        REPEATED_OBJECT,
+        "\n" + REPEATED_OBJECT + "\n",
+        REPEATED_OBJECT + REPEATED_OBJECT + '"}',
+        '{"answer": "完整',  # the repeat cut short by the token budget
+        REPEATED_OBJECT + '\n{"answer"',
+        '{\n  "answer": "完整答案',  # re-indented while repeating
+    ],
+)
+def test_a_reply_written_again_after_itself_is_delivered_once(
+    tail, allow_repair
+):
+    result = parse_model_json_object(
+        REPEATED_OBJECT + tail, ANSWER_SCHEMA, allow_repair=allow_repair,
+    )
+
+    assert result.trailing_data is True
+    assert result.repaired is False
+    assert result.content == REPEATED_OBJECT
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        # Differs from the first copy: two readings.
+        '{"answer": "另一个答案", "grounded": true}',
+        '{"answer": "完整答案 [k1]", "grounded": false}',
+        # A cut copy closed into a complete, different object.
+        '{"answer": "完整"}',
+        # A repeat followed by something that is not.
+        REPEATED_OBJECT + " 以上",
+    ],
+)
+def test_a_second_object_that_is_not_a_repeat_stays_malformed(tail):
+    with pytest.raises(ModelJsonRepairError):
+        parse_model_json_object(
+            REPEATED_OBJECT + tail, ANSWER_SCHEMA, allow_repair=False,
+        )
+
+
+@pytest.mark.parametrize("allow_repair", [False, True])
+def test_raw_control_characters_in_strings_are_read_as_written(allow_repair):
+    raw = '{"answer":"第一段\n\n第二段\t[k1]\r","grounded":true}'
+
+    result = parse_model_json_object(
+        raw, ANSWER_SCHEMA, allow_repair=allow_repair,
+    )
+
+    assert result.control_chars is True
+    assert result.repaired is False
+    assert result.content == (
+        '{"answer":"第一段\\n\\n第二段\\t[k1]\\r","grounded":true}'
+    )
+    assert json.loads(result.content)["answer"] == "第一段\n\n第二段\t[k1]\r"
+
+
+def test_control_characters_between_tokens_are_not_flagged():
+    raw = '{\n\t"answer": "a",\r\n"grounded": true}'
+
+    result = parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=False)
+
+    assert result.content == raw
+    assert result.control_chars is False
+
+
+@pytest.mark.parametrize("allow_repair", [False, True])
+@pytest.mark.parametrize(
+    ("raw", "answer"),
+    [
+        (
+            '{"answer":"所谓"恒流"模式 [k1]","grounded":true}',
+            '所谓"恒流"模式 [k1]',
+        ),
+        # Local llm.jsonl, deepseek-flash: one quote escaped, its partner not.
+        (
+            '{"answer":"采用特殊 \\"|DSML|" token [k1]","grounded":true}',
+            '采用特殊 "|DSML|" token [k1]',
+        ),
+        (
+            '{"answer":"in the "Knowledge & Reasoning" category",'
+            '"grounded":true}',
+            'in the "Knowledge & Reasoning" category',
+        ),
+        # Combined with the other literal readings.
+        (
+            '{"answer":"“50\\%” 与 "50\\%"\n第二段","grounded":true}',
+            '“50\\%” 与 "50\\%"\n第二段',
+        ),
+    ],
+)
+def test_an_unescaped_quote_inside_a_value_is_read_as_text(
+    raw, answer, allow_repair
+):
+    result = parse_model_json_object(
+        raw, ANSWER_SCHEMA, allow_repair=allow_repair,
+    )
+
+    assert result.inner_quotes is True
+    assert result.repaired is False
+    assert json.loads(result.content) == {"answer": answer, "grounded": True}
+
+
+@pytest.mark.parametrize("allow_repair", [False, True])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # A quote followed by ``:`` may start a key, one followed by another
+        # quote may be a lost comma: neither has a single reading.
+        '{"answer":"标题 "注意": 内容","grounded":true}',
+        '{"answer":"什么是"恒流"", "grounded":true}',
+        '{"answer":"a" "b","grounded":true}',
+        # A quote followed by ``,`` closes the string; what follows is then
+        # not JSON, so the reply has no reading.
+        '{"answer":"他说 "好", 然后","grounded":true}',
+        # Truncated inside the quoted text.
+        '{"answer":"所谓"恒流',
+    ],
+)
+def test_an_inner_quote_without_one_reading_stays_malformed(raw, allow_repair):
+    with pytest.raises(ModelJsonRepairError):
+        parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=allow_repair)
+
+
+def test_a_quote_inside_a_key_is_never_read_as_text():
+    # ``{"{"answer"`` read with inner quotes would make the key ``{"answer``
+    # and keep ``grounded``: a usable-looking reply with the answer gone.
+    # Keys never take that reading; the restart reading finds the answer.
+    result = parse_model_json_object(
+        '{"{"answer":"a","grounded":true}', ANSWER_SCHEMA, allow_repair=False,
+    )
+
+    assert result.duplicated_open is True
+    assert result.inner_quotes is False
+    assert json.loads(result.content) == {"answer": "a", "grounded": True}
+
+
+def test_strict_json_with_escaped_quotes_is_not_flagged():
+    raw = '{"answer":"所谓\\"恒流\\"","grounded":true}'
+
+    result = parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=False)
+
+    assert result.content == raw
+    assert result.inner_quotes is False
 
 
 OUTLINE_SCHEMA = '{"sections":[{"title":"","scope":"","sub_queries":[""]}]}'

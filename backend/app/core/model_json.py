@@ -5,11 +5,14 @@ request without enforcing it. Keep valid JSON byte-for-byte unchanged and use
 the repair parser only for complete object-shaped replies. Repaired string
 values are accepted only when they remain verbatim in the raw response, so
 syntax recovery cannot silently rewrite an answer, query, or action argument.
-Three deviations with a single reading are not repairs and are absorbed for
-every workload: a backslash that starts no JSON escape (LaTeX ``\\mathrm``,
-``50\\%``) is read as the literal characters written, stray closing
-punctuation after a complete object is dropped, and a duplicated opening
-(``{"{"answer": ...}``) is read as the complete object the model restarted.
+Deviations with a single reading are not repairs and are absorbed for every
+workload: a backslash that starts no JSON escape (LaTeX ``\\mathrm``,
+``50\\%``) or a raw control character inside a string is read as the
+characters written, stray closing punctuation or a repeat of the object after
+a complete object is dropped, a restarted reply (``{"{"answer": ...}``,
+``{"answer{"answer": ...}``) is read as the complete object the model
+restarted, and an unescaped quote inside a value string that text follows
+(``"所谓"恒流"模式"``) is read as a character of the text.
 """
 from __future__ import annotations
 
@@ -34,11 +37,18 @@ class ModelJsonObject:
     #: ``_escape_stray_backslashes``); ``content`` is the reply with each such
     #: backslash doubled, so it decodes to exactly the characters written.
     stray_backslashes: bool = False
-    #: The reply opened twice -- ``{"{``, ``{\n{`` -- and the complete object
-    #: after the duplicated opening was taken (see ``_duplicated_open_object``);
-    #: ``content`` is that object's own text, byte-for-byte apart from
-    #: ``stray_backslashes``.
+    #: The reply restarted -- ``{"{``, ``{"answer{"answer":`` -- and the
+    #: complete object after the fragments was taken (see
+    #: ``_restarted_object``); ``content`` is that object's own text,
+    #: byte-for-byte apart from the escapes the other flags name.
     duplicated_open: bool = False
+    #: A raw control character (a newline or tab typed inside a string) was
+    #: written as its JSON escape (see ``_read_literally``).
+    control_chars: bool = False
+    #: An unescaped ``"`` inside a value string, followed by text rather than
+    #: JSON structure, was read as a character of the text and escaped (see
+    #: ``_closes_value_string``).
+    inner_quotes: bool = False
 
 
 class ModelJsonRepairError(ValueError):
@@ -780,74 +790,281 @@ _DECODER = json.JSONDecoder()
 # What may follow a complete object and still be read as noise: closing
 # delimiters, quotes, backticks and whitespace. A deepseek-flash report section
 # came back as a whole valid object followed by an extra ``"}`` (2026-09-29).
-# Anything else after the object -- a second object, ``, "key": value}``
-# continuing fields the model meant to include, prose -- has more than one
-# reading and stays a malformed response.
+# Anything else after the object -- a different second object, ``, "key":
+# value}`` continuing fields the model meant to include, prose -- has more
+# than one reading and stays a malformed response.
 _TRAILING_NOISE_RE = re.compile(r"[\s}\]\"'`]+\Z")
 
 
-def _leading_object(content: str) -> str | None:
-    """Return a complete leading object followed only by stray closers."""
-    stripped = content.strip()
-    if not stripped.startswith("{"):
-        return None
-    try:
-        value, end = _DECODER.raw_decode(stripped)
-    except ValueError:
-        return None
-    if not isinstance(value, dict):
-        return None
-    if not _TRAILING_NOISE_RE.fullmatch(stripped[end:]):
-        return None
-    return stripped[:end]
+@dataclass(frozen=True)
+class _Reading:
+    """One spelling of the reply and what reading it that way absorbed."""
+
+    text: str
+    stray_backslashes: bool = False
+    control_chars: bool = False
+    inner_quotes: bool = False
 
 
-# A reply that opened twice: an outer ``{``, optionally a stray quote, then
-# the object the model actually wrote. DeepSeek-V4-Flash answer syntheses came
-# back as ``{"{"answer": ...}`` from 2026-10-09; dropping the duplicated
-# opening leaves a complete object. Only what may follow that object differs
-# from ``_TRAILING_NOISE_RE``: at most one ``}`` (the duplicated opening's own
-# closer) and quotes. A ``]`` would mean the lost prefix opened an array --
-# ``{"sections":[{...}]}`` missing ``"sections":[`` -- and the inner object is
-# then a nested item, not the reply.
-_DUPLICATED_OPEN_RE = re.compile(r'\s*\{\s*"?\s*(?=\{)')
-_DUPLICATED_OPEN_TAIL_RE = re.compile(r'[\s"]*(?:\}[\s"]*)?')
+def _closes_value_string(text: str, index: int) -> bool | None:
+    """Whether the ``"`` at ``index`` inside a VALUE string closes it.
 
-
-def _duplicated_open_object(
-    content: str, schema_hint: str,
-) -> tuple[str, bool, bool] | None:
-    """Return ``(object, stray_backslashes, trailing_data)`` for a reply that
-    opened twice, or ``None``.
-
-    The prefix is dropped before stray backslashes are read: the stray quote
-    of ``{"{`` flips every quote after it, so reading backslashes over the
-    whole reply would misplace string boundaries. The inner object must share
-    a top-level field with the hint; without a hint nothing corroborates that
-    it is the reply rather than a nested value, and the reply stays malformed.
+    ``True`` when JSON structure follows (``,`` ``}`` ``]`` or the end),
+    ``False`` when text follows (``所谓"恒流"模式``: the quote is a character
+    of the answer), ``None`` when what follows is itself ambiguous -- a
+    ``:`` or another quote means a key or a missing comma may be starting,
+    and reading the quote either way could swallow or invent a field.
     """
-    match = _DUPLICATED_OPEN_RE.match(content)
-    if match is None:
+    index += 1
+    while index < len(text) and text[index] in " \t\r\n":
+        index += 1
+    following = text[index:index + 1]
+    if not following or following in ",}]":
+        return True
+    if following in ':"':
         return None
-    example = _schema_example(schema_hint)
-    if not example:
-        return None
-    remainder = content[match.end():]
-    unescaped = _escape_stray_backslashes(remainder)
-    readings = [(remainder, False)]
-    if unescaped != remainder:
-        readings.append((unescaped, True))
-    for text, stray in readings:
+    return False
+
+
+def _read_literally(text: str, *, inner_quotes: bool) -> _Reading | None:
+    r"""Spell ``text`` so JSON decodes each string to the characters written.
+
+    Inside a double-quoted string: a backslash that starts no JSON escape is
+    doubled (see ``_escape_stray_backslashes``), and a raw control character
+    (a newline or tab typed straight into an answer) is written as its JSON
+    escape -- both have one reading, the character itself. With
+    ``inner_quotes``, a ``"`` inside a VALUE string that is followed by text
+    rather than JSON structure is escaped too (see ``_closes_value_string``);
+    key strings never take that reading, because a key that swallowed a
+    quote is a duplicated opening or a lost delimiter, not a key. Returns
+    ``None`` when an inner quote has no single reading. Text outside strings
+    is untouched.
+    """
+    out: list[str] = []
+    stack: list[str] = []
+    expect_key = False
+    in_string = in_key = False
+    stray = control = inner = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if not in_string:
+            if char == '"':
+                in_string, in_key, expect_key = True, expect_key, False
+            elif char in "{[":
+                stack.append(char)
+                expect_key = char == "{"
+            elif char in "}]":
+                if stack:
+                    stack.pop()
+                expect_key = False
+            elif char == ",":
+                expect_key = bool(stack) and stack[-1] == "{"
+            elif char == ":":
+                expect_key = False
+            out.append(char)
+            index += 1
+            continue
+        if char == "\\":
+            if _starts_json_escape(text, index + 1):
+                out.append(text[index:index + 2])
+                index += 2
+                continue
+            out.append("\\\\")
+            stray = True
+        elif char == '"':
+            closes = True
+            if inner_quotes and not in_key:
+                closes = _closes_value_string(text, index)
+                if closes is None:
+                    return None
+            if closes:
+                in_string = False
+                out.append(char)
+            else:
+                out.append('\\"')
+                inner = True
+        elif char < " ":
+            out.append(json.dumps(char)[1:-1])
+            control = True
+        else:
+            out.append(char)
+        index += 1
+    return _Reading(
+        "".join(out),
+        stray_backslashes=stray,
+        control_chars=control,
+        inner_quotes=inner,
+    )
+
+
+def _readings(text: str, *, inner_quotes: bool) -> list[_Reading]:
+    """``text`` as written, then each literal spelling that differs from it."""
+    readings = [_Reading(text)]
+    for allow_inner in (False, True) if inner_quotes else (False,):
+        reading = _read_literally(text, inner_quotes=allow_inner)
+        if reading is not None and all(
+            reading.text != seen.text for seen in readings
+        ):
+            readings.append(reading)
+    return readings
+
+
+def _repeats_prefix(text: str, start: int, end: int, target: str, at: int) -> bool:
+    """Whether ``text[start:end]`` repeats the beginning of ``target[at:]``.
+
+    Whitespace is skipped on both sides: a restart written as ``{\n{`` or a
+    repeat with different indentation is still the same characters.
+    """
+    index, other = start, at
+    while index < end:
+        if text[index].isspace():
+            index += 1
+            continue
+        while other < len(target) and target[other].isspace():
+            other += 1
+        if other >= len(target) or target[other] != text[index]:
+            return False
+        index += 1
+        other += 1
+    return True
+
+
+def _is_repeat_tail(tail: str, obj: str) -> bool:
+    """Whether ``tail`` is the object written again (whole or cut short).
+
+    A model stuck in a loop writes the reply, then starts it again:
+    ``{A}{A}`` or ``{A}{"answer":"一、``. Each copy repeats text already
+    delivered, so dropping it loses nothing. A second object that DIFFERS
+    from the first anywhere has two readings and is not a repeat, and a cut
+    copy may not be followed by anything (closers after it would make it a
+    different, complete object).
+    """
+    rest = tail.strip()
+    if not rest.startswith("{"):
+        return False
+    while rest.startswith(obj):
+        rest = rest[len(obj):].lstrip()
+    if not rest or _TRAILING_NOISE_RE.fullmatch(rest):
+        return True
+    return _repeats_prefix(rest, 0, len(rest), obj, 0)
+
+
+def _leading_object(
+    readings: list[_Reading],
+) -> tuple[_Reading, str, bool] | None:
+    """Return ``(reading, object, trailing_data)`` for the first reading that
+    decodes to a complete leading object followed by nothing, by stray
+    closers, or by a repeat of itself."""
+    for reading in readings:
         try:
-            value, end = _DECODER.raw_decode(text)
+            value, end = _DECODER.raw_decode(reading.text)
         except ValueError:
             continue
-        if not isinstance(value, dict) or not set(value).intersection(example):
-            return None
-        if _DUPLICATED_OPEN_TAIL_RE.fullmatch(text, end) is None:
-            return None
-        return text[:end], stray, bool(text[end:].strip())
+        if not isinstance(value, dict):
+            continue
+        obj, tail = reading.text[:end], reading.text[end:]
+        if not tail:
+            return reading, obj, False
+        if _TRAILING_NOISE_RE.fullmatch(tail) or _is_repeat_tail(tail, obj):
+            return reading, obj, True
     return None
+
+
+def _restart_points(text: str) -> list[int]:
+    """Offsets where the model restarted the reply it had begun.
+
+    ``{"{"answer":…``, ``{"answer{"answer":…``, ``{"answer":"{"answer":…``
+    and ``{"answer":"一、先澄{"answer":"一、先澄清…`` (DeepSeek-V4-Flash
+    answer syntheses, 2026-10-09 and 2026-10-14) all open with a fragment
+    that the text after it repeats from its first character. A ``{`` is a
+    restart point when the text since the reply's opening or since an
+    earlier restart point is repeated, character for character, by what
+    follows it. A nested object never qualifies by accident: the fragment
+    before it (``{"sections":[``) is not how the nested object begins.
+    """
+    reachable = [0]
+    points: list[int] = []
+    for index in range(1, len(text)):
+        if text[index] != "{":
+            continue
+        if any(
+            _repeats_prefix(text, start, index, text, index)
+            for start in reachable
+        ):
+            reachable.append(index)
+            points.append(index)
+    return points
+
+
+def _restarted_object(
+    text: str, example: dict[str, Any],
+) -> tuple[_Reading, str, bool] | None:
+    """Return ``(reading, object, trailing_data)`` for a reply that restarted.
+
+    The fragments before the restart are dropped before strings are read:
+    the stray quote of ``{"{`` flips every quote after it, so reading
+    backslashes or inner quotes over the whole reply would misplace string
+    boundaries. The object must share a top-level field with the hint;
+    without a hint nothing corroborates that it is the reply rather than a
+    nested value. After the object only whitespace, quotes and one ``}`` per
+    dropped fragment (the model closing what it opened) may follow: a ``]``
+    would mean the lost fragment opened an array -- ``{"sections":[{...}]}``
+    missing ``"sections":[`` -- and the object is a nested item.
+    """
+    for dropped, point in enumerate(_restart_points(text), start=1):
+        for reading in _readings(text[point:], inner_quotes=True):
+            try:
+                value, end = _DECODER.raw_decode(reading.text)
+            except ValueError:
+                continue
+            if not isinstance(value, dict) or not set(value).intersection(example):
+                break
+            tail = reading.text[end:]
+            if tail.strip(' \t\r\n"}') or tail.count("}") > dropped:
+                break
+            return reading, reading.text[:end], bool(tail.strip())
+    return None
+
+
+def _single_reading_object(
+    content: str, schema_hint: str,
+) -> ModelJsonObject | None:
+    """The reply as the one object it can be read as, or ``None``.
+
+    Tried in order, each only when the previous found nothing: the reply
+    with stray backslashes and raw control characters read literally (and
+    stray closers or a repeat after it dropped); a restarted reply; then
+    unescaped quotes inside value strings read as characters of the text.
+    The inner-quote reading comes last because it is the only one that moves
+    a string boundary the model wrote.
+    """
+    text = content.strip()
+    if not text.startswith("{"):
+        return None
+    found = _leading_object(_readings(text, inner_quotes=False))
+    duplicated = False
+    if found is None:
+        example = _schema_example(schema_hint)
+        if example:
+            found = _restarted_object(text, example)
+            duplicated = found is not None
+    if found is None:
+        found = _leading_object([
+            reading for reading in _readings(text, inner_quotes=True)
+            if reading.inner_quotes
+        ])
+    if found is None:
+        return None
+    reading, obj, trailing = found
+    return ModelJsonObject(
+        content=obj,
+        trailing_data=trailing,
+        stray_backslashes=reading.stray_backslashes,
+        duplicated_open=duplicated,
+        control_chars=reading.control_chars,
+        inner_quotes=reading.inner_quotes,
+    )
 
 
 def parse_model_json_object(
@@ -863,32 +1080,11 @@ def parse_model_json_object(
         _strict_object(content)
     except ModelJsonRepairError as strict_error:
         # Not repairs: what the model wrote is delivered with its one reading
-        # (stray backslashes literal, stray closers after the object dropped,
-        # a duplicated opening before it dropped),
-        # so this applies to every workload regardless of repair mode.
-        unescaped = _escape_stray_backslashes(content)
-        stray = unescaped != content
-        if stray:
-            try:
-                _strict_object(unescaped)
-            except ModelJsonRepairError:
-                pass
-            else:
-                return ModelJsonObject(content=unescaped, stray_backslashes=True)
-        leading = _leading_object(unescaped)
-        if leading is not None:
-            return ModelJsonObject(
-                content=leading, trailing_data=True, stray_backslashes=stray,
-            )
-        duplicated = _duplicated_open_object(content, schema_hint)
-        if duplicated is not None:
-            inner, inner_stray, inner_trailing = duplicated
-            return ModelJsonObject(
-                content=inner,
-                duplicated_open=True,
-                stray_backslashes=inner_stray,
-                trailing_data=inner_trailing,
-            )
+        # (see ``_single_reading_object``), so this applies to every workload
+        # regardless of repair mode.
+        absorbed = _single_reading_object(content, schema_hint)
+        if absorbed is not None:
+            return absorbed
         if not allow_repair or strict_error.reason == "non_object":
             raise
     else:

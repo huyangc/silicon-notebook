@@ -711,6 +711,36 @@ def test_every_workload_reads_a_duplicated_opening_as_the_object_written():
         provider.close()
 
 
+def test_every_workload_reads_a_restarted_reply_with_inner_quotes_and_newlines():
+    # DeepSeek-V4-Flash, 2026-10-14: ``{"answer{"answer":…`` -- a restart
+    # after a longer fragment than ``{"``. Inside the restarted object, a raw
+    # newline and an unescaped quote pair each have one reading; all three
+    # absorptions are reported, none of them with the reply text.
+    events = _EventLog()
+    provider = _provider(
+        chat=_Chat('{"query{"query":"所谓"恒流"模式\n第二行"}'), events=events,
+    )
+    try:
+        raw = provider.chat("query_rewrite").chat_json(
+            [{"role": "user", "content": "q"}], '{"query":""}'
+        )
+
+        assert json.loads(raw) == {"query": '所谓"恒流"模式\n第二行'}
+        repairs = [
+            (event["status"], event["reason"])
+            for event in events.events
+            if event.get("kind") == "model_json_repair"
+        ]
+        assert sorted(repairs) == [
+            ("escaped", "control_char"),
+            ("escaped", "inner_quote"),
+            ("trimmed", "duplicated_open"),
+        ]
+        assert "恒流" not in json.dumps(events.events, ensure_ascii=False)
+    finally:
+        provider.close()
+
+
 @pytest.mark.parametrize(
     ("workload", "raw", "schema", "expected"),
     [
