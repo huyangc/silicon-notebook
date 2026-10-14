@@ -1014,6 +1014,7 @@ def test_parse_thread_dump_caps_frames_per_thread(tmp_path):
     assert len(repr(parsed).encode("utf-8")) < 16 * 1024
 
 
+@pytest.mark.process_contract
 def test_capture_thread_dump_appends_only_keeps_child_alive_and_leaks_no_secrets(tmp_path):
     if not sys.platform.startswith("linux"):
         return
@@ -1833,6 +1834,7 @@ def test_capture_rejects_diagnostics_directory_replacement_before_signal(tmp_pat
     assert sent == []
 
 
+@pytest.mark.process_contract
 def test_real_linux_proc_resolves_lightweight_uvicorn_argv(tmp_path):
     if not sys.platform.startswith("linux"):
         return

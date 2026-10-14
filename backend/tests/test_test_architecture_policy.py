@@ -246,10 +246,10 @@ def test_verification_lanes_do_not_hide_committed_tests():
     ).read_text(encoding="utf-8")
 
 
-# Its own group only so xdist dispatches it in the first wave, with the other
-# groups, instead of near the end of the run where its ~6 s collect-only
-# subprocess would become the gate's tail. It changes no lane selection.
-@pytest.mark.xdist_group("lane_partition_guard")
+# conftest collects this test first (`_DISPATCHED_FIRST`) so xdist dispatches
+# it in the first wave rather than at the end of the run, where its ~6 s
+# collect-only subprocess would become the gate's tail. It changes no lane
+# selection; `test_the_lane_partition_guard_is_collected_first` pins it.
 def test_verification_lane_markers_partition_every_architecture_contract_test():
     """Empirically prove the G1/G2 backend marker split has no gap or overlap.
 
@@ -438,6 +438,153 @@ def test_verification_lane_markers_partition_every_architecture_contract_test():
 
     assert g1_ids | g2_ids == universe
     assert g1_ids & g2_ids == set()
+
+
+def test_the_process_scan_finds_every_way_a_g1_test_starts_a_process():
+    from tests.architecture.process_tests import g1_process_tests
+
+    source = (
+        "import asyncio, os, subprocess, pytest\n"
+        "import multiprocessing as mp\n"
+        "import concurrent.futures\n"
+        "from subprocess import Popen as P\n"
+        "from concurrent.futures import ProcessPoolExecutor\n"
+        "def _helper():\n"
+        "    return subprocess.run(['true'])\n"
+        "@pytest.fixture\n"
+        "def child():\n"
+        "    return P(['true'])\n"
+        "def test_run():\n"
+        "    subprocess.check_output(['true'])\n"
+        "def test_imported_popen():\n"
+        "    P(['true'])\n"
+        "def test_through_a_helper():\n"
+        "    _helper()\n"
+        "def test_through_a_fixture(child):\n"
+        "    child.wait()\n"
+        "def test_multiprocessing():\n"
+        "    mp.get_context('spawn')\n"
+        "def test_pool():\n"
+        "    ProcessPoolExecutor(2)\n"
+        "def test_pool_by_module():\n"
+        "    concurrent.futures.ProcessPoolExecutor(2)\n"
+        "def test_fork():\n"
+        "    os.fork()\n"
+        "async def test_asyncio():\n"
+        "    await asyncio.create_subprocess_exec('true')\n"
+        "def test_a_completed_process_is_not_a_process():\n"
+        "    subprocess.CompletedProcess(['true'], 0)\n"
+        "def test_threads_are_not_processes():\n"
+        "    import threading\n"
+        "    threading.Thread(target=print).start()\n"
+        "@pytest.mark.process_contract\n"
+        "def test_marked():\n"
+        "    subprocess.run(['true'])\n"
+        "@pytest.mark.slow\n"
+        "def test_in_g2_for_another_reason():\n"
+        "    subprocess.run(['true'])\n"
+        "def test_moved_by_conftest():\n"
+        "    subprocess.run(['true'])\n"
+        "@pytest.mark.process_contract\n"
+        "class TestMarked:\n"
+        "    def test_in_a_marked_class(self):\n"
+        "        subprocess.run(['true'])\n"
+        "class TestPlain:\n"
+        "    def test_in_a_class(self):\n"
+        "        _helper()\n"
+    )
+
+    assert g1_process_tests(
+        source, "test_x.py", g2_markers=G2_LANE_MARKERS,
+        g2_tests={"test_moved_by_conftest"},
+    ) == [
+        "test_run", "test_imported_popen", "test_through_a_helper",
+        "test_through_a_fixture", "test_multiprocessing", "test_pool",
+        "test_pool_by_module", "test_fork", "test_asyncio", "TestPlain.test_in_a_class",
+    ]
+    for module_mark in (
+        "pytestmark = pytest.mark.process_contract\n",
+        "pytestmark: list = [pytest.mark.process_contract]\n",
+    ):
+        marked = source.replace("def _helper():\n", module_mark + "def _helper():\n", 1)
+        assert g1_process_tests(marked, "test_x.py", g2_markers=G2_LANE_MARKERS) == []
+
+
+def test_g1_tests_that_start_a_process_carry_process_contract():
+    """docs/development.md: a test that starts a real child process carries
+    `process_contract`, so it runs in G2 only. The lane-partition guard is the
+    one reviewed exception (see its docstring)."""
+    from tests.architecture.process_tests import g1_process_tests
+    from tests.conftest import _ARCHITECTURE_CONTRACT_HEAVY_TESTS, _GRAPH_INDEX_CONTRACT_MODULES
+
+    allowed = {
+        "backend/tests/test_test_architecture_policy.py::"
+        "test_verification_lane_markers_partition_every_architecture_contract_test",
+    }
+    tests_root = ROOT / "backend" / "tests"
+    found: set[str] = set()
+    for path in sorted(tests_root.rglob("test_*.py")):
+        if "postgres" in path.relative_to(tests_root).parts:
+            continue
+        if path.name in _GRAPH_INDEX_CONTRACT_MODULES:
+            continue
+        source = path.read_text(encoding="utf-8")
+        # Every form the scan reports names one of these words; skipping the
+        # other files keeps this from parsing the whole test tree.
+        if not any(word in source for word in (
+            "subprocess", "multiprocessing", "ProcessPoolExecutor", "fork", "spawn",
+            "Popen",
+        )):
+            continue
+        heavy = {name for file, name in _ARCHITECTURE_CONTRACT_HEAVY_TESTS if file == path.name}
+        relative = path.relative_to(ROOT).as_posix()
+        found |= {
+            f"{relative}::{name}"
+            for name in g1_process_tests(
+                source, relative,
+                g2_markers=G2_LANE_MARKERS, g2_tests=heavy,
+            )
+        }
+    assert found == allowed, (
+        "these G1 tests start a real child process; mark them "
+        "@pytest.mark.process_contract (G2 only)"
+    )
+
+
+def test_the_lane_partition_guard_is_collected_first(request):
+    from types import SimpleNamespace
+
+    from tests.conftest import _DISPATCHED_FIRST, _collect_first
+
+    file_name, test_name = _DISPATCHED_FIRST
+    assert file_name == Path(__file__).name
+    assert callable(globals()[test_name])
+    # A group of its own would not help: xdist's stable sort by group size
+    # ties a one-test group with every ungrouped test.
+    assert not [
+        mark for mark in getattr(globals()[test_name], "pytestmark", [])
+        if mark.name == "xdist_group"
+    ]
+
+    def item(file, name):
+        return SimpleNamespace(fspath=f"/tests/{file}", name=name)
+
+    items = [item("test_a.py", "test_one"), item("test_b.py", "test_two"),
+             item(*_DISPATCHED_FIRST), item("test_c.py", "test_three")]
+    _collect_first(items, _DISPATCHED_FIRST)
+    assert [(Path(i.fspath).name, i.name) for i in items] == [
+        _DISPATCHED_FIRST, ("test_a.py", "test_one"), ("test_b.py", "test_two"),
+        ("test_c.py", "test_three"),
+    ]
+    absent = items[1:]
+    _collect_first(absent, _DISPATCHED_FIRST)
+    assert [i.name for i in absent] == ["test_one", "test_two", "test_three"]
+
+    # This session's own collection, whenever it holds the guard (a whole-file
+    # or whole-suite run; a node-id run of this test alone does not).
+    collected = [(Path(str(i.fspath)).name, i.name) for i in request.session.items]
+    if _DISPATCHED_FIRST in collected:
+        assert collected[0] == _DISPATCHED_FIRST
 
 
 def test_backend_parallelism_is_bounded_and_explicit():
@@ -666,62 +813,93 @@ def _marks_real_sqlite_migration(decorators) -> bool:
 def _tests_that_drive_the_sqlite_migrator(source: str, filename: str) -> dict[str, bool]:
     """Map each test whose own body drives ``SqliteMigrator`` to "is it marked".
 
-    A function drives the migrator when its body names ``SqliteMigrator`` or
-    calls, by name, a module-level helper that does (transitively). Fixtures
-    are setup: a fixture that only creates an empty database at the current
-    schema gets the template copy, which the real ladder built. ``pytestmark``
-    and a class-level ``pytestmark`` count as marking every test under them.
+    A function drives the migrator when its body names ``SqliteMigrator`` (as
+    a bare name, through an ``import ... as`` alias, or as an attribute such
+    as ``migrations.SqliteMigrator``) or calls, by name, a module-level helper
+    that does (transitively); test methods of a class follow the same helpers.
+    Fixtures (``@fixture``/``@pytest.fixture``, bare or called) are setup: a
+    fixture that only creates an empty database at the current schema gets
+    the template copy, which the real ladder built. A module ``pytestmark``
+    (plain or annotated assignment), a class ``pytestmark`` and a class
+    decorator count as marking every test under them.
     """
     import ast
 
     tree = ast.parse(source, filename=filename)
+    aliases = {"SqliteMigrator"} | {
+        alias.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        if alias.name == "SqliteMigrator" and alias.asname
+    }
 
     def is_fixture(node) -> bool:
+        def plain(expr) -> bool:
+            return (isinstance(expr, ast.Name) and expr.id == "fixture") or (
+                isinstance(expr, ast.Attribute)
+                and expr.attr == "fixture"
+                and isinstance(expr.value, ast.Name)
+                and expr.value.id == "pytest"
+            )
+
         return any(
-            "fixture" in ast.unparse(decorator) for decorator in node.decorator_list
+            plain(decorator)
+            or (isinstance(decorator, ast.Call) and plain(decorator.func))
+            for decorator in node.decorator_list
         )
 
     def module_marked(body) -> bool:
+        for node in body:
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                targets, value = [node.target], node.value
+            else:
+                continue
+            if any(getattr(target, "id", "") == "pytestmark" for target in targets) and (
+                _marks_real_sqlite_migration([value])
+            ):
+                return True
+        return False
+
+    def names_the_migrator(node) -> bool:
         return any(
-            isinstance(node, ast.Assign)
-            and any(getattr(target, "id", "") == "pytestmark" for target in node.targets)
-            and _marks_real_sqlite_migration([node.value])
-            for node in body
+            (isinstance(sub, ast.Name) and sub.id in aliases)
+            or (isinstance(sub, ast.Attribute) and sub.attr == "SqliteMigrator")
+            for sub in ast.walk(node)
         )
+
+    def calls(node) -> set[str]:
+        return {
+            sub.func.id for sub in ast.walk(node)
+            if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+        }
 
     functions = {
         node.name: node
         for node in tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-    drivers = {
-        name for name, node in functions.items()
-        if any(
-            isinstance(sub, ast.Name) and sub.id == "SqliteMigrator"
-            for sub in ast.walk(node)
-        )
-    }
+    helpers = {name for name, node in functions.items() if not is_fixture(node)}
+    drivers = {name for name in helpers if names_the_migrator(functions[name])}
     changed = True
     while changed:
         changed = False
-        for name, node in functions.items():
-            if name in drivers or is_fixture(node):
-                continue
-            calls = {
-                sub.func.id for sub in ast.walk(node)
-                if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
-            }
-            if calls & {d for d in drivers if not is_fixture(functions[d])}:
+        for name in helpers - drivers:
+            if calls(functions[name]) & drivers:
                 drivers.add(name)
                 changed = True
+
+    def drives(node) -> bool:
+        return names_the_migrator(node) or bool(calls(node) & drivers)
 
     whole_module = module_marked(tree.body)
     result: dict[str, bool] = {}
     for name in sorted(drivers):
-        node = functions[name]
-        if name.startswith("test_") and not is_fixture(node):
+        if name.startswith("test_"):
             result[name] = whole_module or _marks_real_sqlite_migration(
-                node.decorator_list
+                functions[name].decorator_list
             )
     for cls in (node for node in tree.body if isinstance(node, ast.ClassDef)):
         class_marked = whole_module or module_marked(cls.body) or (
@@ -731,10 +909,8 @@ def _tests_that_drive_the_sqlite_migrator(source: str, filename: str) -> dict[st
             if (
                 isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and node.name.startswith("test_")
-                and any(
-                    isinstance(sub, ast.Name) and sub.id == "SqliteMigrator"
-                    for sub in ast.walk(node)
-                )
+                and not is_fixture(node)
+                and drives(node)
             ):
                 result[f"{cls.name}.{node.name}"] = class_marked or (
                     _marks_real_sqlite_migration(node.decorator_list)
@@ -745,7 +921,9 @@ def _tests_that_drive_the_sqlite_migrator(source: str, filename: str) -> dict[st
 def test_the_migrator_driver_scan_follows_helpers_and_exempts_fixtures():
     source = (
         "import pytest\n"
+        "from app.repositories.sqlite import migrations\n"
         "from app.repositories.sqlite.migrations import SqliteMigrator\n"
+        "from app.repositories.sqlite.migrations import SqliteMigrator as Ladder\n"
         "def _ladder(db, settings):\n"
         "    return SqliteMigrator(db, settings).migrate()\n"
         "def _upgraded(db, settings):\n"
@@ -753,29 +931,55 @@ def test_the_migrator_driver_scan_follows_helpers_and_exempts_fixtures():
         "@pytest.fixture\n"
         "def store(tmp_path):\n"
         "    return _ladder(tmp_path, None)\n"
-        "def test_uses_the_fixture(store):\n"
+        "@pytest.fixture(scope='module')\n"
+        "def module_store(tmp_path_factory):\n"
+        "    return SqliteMigrator(tmp_path_factory, None).migrate()\n"
+        "def test_uses_the_fixture(store, module_store):\n"
         "    assert store\n"
         "def test_through_two_helpers(tmp_path):\n"
         "    assert _upgraded(tmp_path, None)\n"
         "@pytest.mark.real_sqlite_migration\n"
         "def test_marked(tmp_path):\n"
         "    assert SqliteMigrator(tmp_path, None).migrate()\n"
+        "@pytest.mark.usefixtures('store')\n"
+        "def test_usefixtures_is_not_a_fixture(tmp_path):\n"
+        "    assert SqliteMigrator(tmp_path, None).migrate()\n"
+        "@pytest.mark.parametrize('fixture_path', ['a'])\n"
+        "def test_a_fixture_named_parameter(fixture_path):\n"
+        "    assert SqliteMigrator(fixture_path, None).migrate()\n"
+        "def test_an_import_alias(tmp_path):\n"
+        "    assert Ladder(tmp_path, None).migrate()\n"
+        "def test_a_module_attribute(tmp_path):\n"
+        "    assert migrations.SqliteMigrator(tmp_path, None).migrate()\n"
         "class TestGroup:\n"
         "    def test_in_a_class(self, tmp_path):\n"
         "        assert SqliteMigrator(tmp_path, None).migrate()\n"
+        "    def test_a_class_method_through_a_helper(self, tmp_path):\n"
+        "        assert _upgraded(tmp_path, None)\n"
+        "    def test_a_class_method_without_the_migrator(self, store):\n"
+        "        assert store\n"
     )
 
     assert _tests_that_drive_the_sqlite_migrator(source, "test_x.py") == {
         "test_through_two_helpers": False,
         "test_marked": True,
+        "test_usefixtures_is_not_a_fixture": False,
+        "test_a_fixture_named_parameter": False,
+        "test_an_import_alias": False,
+        "test_a_module_attribute": False,
         "TestGroup.test_in_a_class": False,
+        "TestGroup.test_a_class_method_through_a_helper": False,
     }
-    whole_module = source.replace(
-        "from app.repositories.sqlite.migrations import SqliteMigrator\n",
-        "from app.repositories.sqlite.migrations import SqliteMigrator\n"
+    for pytestmark in (
         "pytestmark = [pytest.mark.slow, pytest.mark.real_sqlite_migration]\n",
-    )
-    assert set(_tests_that_drive_the_sqlite_migrator(whole_module, "test_x.py").values()) == {True}
+        "pytestmark: list = [pytest.mark.real_sqlite_migration]\n",
+    ):
+        whole_module = source.replace(
+            "def _ladder(db, settings):\n", pytestmark + "def _ladder(db, settings):\n", 1
+        )
+        assert set(
+            _tests_that_drive_the_sqlite_migrator(whole_module, "test_x.py").values()
+        ) == {True}
 
 
 def test_sqlite_migration_contracts_bypass_the_schema_template():
@@ -870,6 +1074,16 @@ def test_the_template_copy_refuses_a_ladder_the_test_changed(tmp_path, monkeypat
         patch.setattr(migrations_module, "SCHEMA_VERSION", 3)
         with pytest.raises(pytest.fail.Exception, match="real_sqlite_migration"):
             migrator("version.db").migrate()
+
+    class SkipsAStep(SqliteMigrator):
+        def _migration_9(self) -> None:
+            return None
+
+    base = migrator("subclass.db")
+    subclassed = SkipsAStep(base.database, base.settings)
+    with pytest.raises(pytest.fail.Exception, match="real_sqlite_migration"):
+        subclassed.migrate()
+    assert not subclassed.database.db_path.exists()
 
 
 @pytest.mark.real_sqlite_migration

@@ -31,8 +31,6 @@ from app.repositories.sqlite.migrations import SqliteMigrator
 from app.services.sqlite_repository import SQLiteRepository
 from tests import memory_isolation_cases as cases
 
-pytestmark = [pytest.mark.legacy_upgrade_contract, pytest.mark.real_sqlite_migration]
-
 PG_MIGRATION = (
     Path(__file__).resolve().parents[1]
     / "app" / "repositories" / "postgres" / "migrations"
@@ -85,11 +83,15 @@ def upgraded(repo):
     return repo, before, _snapshot(database)
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_upgrade_removes_every_pre_isolation_memory_derived_row(upgraded):
     _repo, before, after = upgraded
     cases.assert_isolated(before, after)
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_migration_logs_counts_only(repo, caplog):
     """The one log line is content-free: counts, never ids or text; the
     Memory object that keeps merged shared evidence is counted."""
@@ -116,6 +118,8 @@ def test_migration_logs_counts_only(repo, caplog):
     ]
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_upgrade_marks_only_notebooks_holding_a_memory_source(upgraded):
     repo, _before, _after = upgraded
     database = repo._runtime.database
@@ -130,6 +134,8 @@ def test_upgrade_marks_only_notebooks_holding_a_memory_source(upgraded):
         assert int(db.execute("PRAGMA user_version").fetchone()[0]) == 87
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_rerun_changes_nothing_and_never_requeues_a_finished_notebook(upgraded):
     repo, _before, after = upgraded
     database = repo._runtime.database
@@ -174,6 +180,8 @@ def test_fresh_database_has_the_marker_defaulting_to_isolated(repo):
     assert _marker(database, notebook.id) == 1
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_migration_is_atomic_with_its_version_stamp(repo, monkeypatch):
     """v87 stamps user_version inside its own transaction: a failure half-way
     leaves the database at v86 with every row as it was."""
@@ -334,6 +342,8 @@ def _by_set(result, name):
     return {r["notebook_id"]: r for r in result["notebooks"] if r["set"] == name}
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_the_census_reports_every_signal_and_writes_nothing(repo, capsys, monkeypatch, tmp_path):
     """scripts/memory_isolation_census.py on a PRE-upgrade snapshot (no marker
     column): F (always rebuilt) and G with the first signal the check will

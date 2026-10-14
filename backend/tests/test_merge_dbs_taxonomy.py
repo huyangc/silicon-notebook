@@ -15,8 +15,6 @@ import sys
 
 import pytest
 
-pytestmark = [pytest.mark.legacy_upgrade_contract, pytest.mark.real_sqlite_migration]
-
 _SCRIPT_PATH = (
     pathlib.Path(__file__).resolve().parents[2] / "scripts" / "merge_dbs.py"
 )

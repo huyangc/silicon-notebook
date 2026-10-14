@@ -24,8 +24,6 @@ import pytest
 from app.migration.sync.capture import expected_sqlite_trigger_names
 from tests.sqlite_migration_testkit import rollback_v92
 
-pytestmark = [pytest.mark.legacy_upgrade_contract, pytest.mark.real_sqlite_migration]
-
 
 ROOT = Path(__file__).resolve().parents[2]
 VERIFIER_PATH = ROOT / "scripts" / "verify_repository_snapshot.py"
@@ -53,6 +51,8 @@ FIXTURE_SECRETS = (
 )
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v91_database_verifies_auth_simplification(tmp_path, _upgraded_v9):
     """A deployed v91 database still holds the staged-auth policy (its seeded
     'local' row), the empty identity mapping, users.local_login_name and
@@ -75,6 +75,8 @@ def test_deployed_v91_database_verifies_auth_simplification(tmp_path, _upgraded_
         assert original.execute("PRAGMA user_version").fetchone()[0] == 91
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_v92_drop_outside_the_allowlist_still_fails(tmp_path, _upgraded_v9):
     """The dropped-table/column allowlists name exactly v92's objects: a v91
     database carrying any other table that disappears still fails closed."""
@@ -120,6 +122,8 @@ def _v91_with_pending_auth_transaction(module, tmp_path, upgraded_v9):
     return database, storage
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_v92_discarding_pending_auth_transactions_verifies(tmp_path, _upgraded_v9):
     """_migration_92 deletes every pending auth transaction on purpose; across
     v92 an emptied auth_transactions is the expected outcome, not a
@@ -136,6 +140,8 @@ def test_v92_discarding_pending_auth_transactions_verifies(tmp_path, _upgraded_v
     assert result.changed_tables == []
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_v92_auth_transactions_that_survive_the_upgrade_still_fail(
     tmp_path, monkeypatch, _upgraded_v9
 ):
@@ -188,6 +194,8 @@ def _v91_with_audit_row(module, tmp_path, upgraded_v9):
     return database, storage
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_v92_compares_surviving_columns_of_a_table_that_lost_a_column(
     tmp_path, _upgraded_v9
 ):
@@ -202,6 +210,8 @@ def test_v92_compares_surviving_columns_of_a_table_that_lost_a_column(
     assert result.changed_tables == []
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_v92_changed_surviving_column_of_a_trimmed_table_fails(
     tmp_path, monkeypatch, _upgraded_v9
 ):
@@ -235,6 +245,8 @@ def _rollback_v91(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE ask_jobs DROP COLUMN memory_access")
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v90_database_verifies_ask_intent_handles(tmp_path, _upgraded_v9):
     """A deployed v90 database is missing exactly _migration_91's table and
     its ``ask_jobs.memory_access`` column."""
@@ -262,6 +274,8 @@ def _rollback_v90(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE retained_user_activity DROP COLUMN output")
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v89_database_verifies_ask_job_output_column(tmp_path, _upgraded_v9):
     """A deployed v89 database is missing exactly _migration_90's schema
     addition: ``output`` TEXT NOT NULL DEFAULT 'answer' on ask_jobs and
@@ -301,6 +315,8 @@ def _rollback_v89(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE agent_access_tokens DROP COLUMN token_plain")
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v88_database_verifies_agent_token_plaintext_column(tmp_path, _upgraded_v9):
     """A deployed v88 database is missing exactly _migration_89's schema
     addition: the nullable ``agent_access_tokens.token_plain`` (no default,
@@ -336,6 +352,8 @@ def _rollback_v87(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE unified_kg_state DROP COLUMN memory_isolation_version")
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v86_database_verifies_memory_isolation_marker(tmp_path, _upgraded_v9):
     """A deployed v86 database is missing exactly _migration_87's schema
     addition: ``unified_kg_state.memory_isolation_version`` NOT NULL DEFAULT 1.
@@ -456,6 +474,8 @@ def test_v87_accepts_only_the_two_documented_inserted_state_rows():
     assert run(queued, memory=())[0] == unexpected
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v86_copy_with_clusters_and_no_state_row_verifies(tmp_path, _upgraded_v9):
     """codex #824 r7: a v86 database holding a notebook with clusters but no
     ``unified_kg_state`` row (a copied library) -- v87 legitimately inserts
@@ -492,6 +512,8 @@ def _rollback_v86(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE users DROP COLUMN seen_release_ordinal")
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v85_database_verifies_users_seen_release_ordinal(tmp_path, _upgraded_v9):
     """A deployed v85 database is missing exactly _migration_86's addition:
     the nullable ``users.seen_release_ordinal`` column. No row changes -- NULL
@@ -535,6 +557,8 @@ def _rollback_v85(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE sync_export_state DROP COLUMN captured")
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v84_database_verifies_sync_export_snapshot(tmp_path, _upgraded_v9):
     """A deployed v84 database is missing exactly _migration_85's addition:
     sync_export_state.captured (NOT NULL DEFAULT 0) and
@@ -621,6 +645,8 @@ def _rollback_v84(db: sqlite3.Connection) -> None:
     db.execute("DROP TABLE sync_capture_control")
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v83_database_verifies_sync_capture(tmp_path, _upgraded_v9):
     """A deployed v83 database is missing exactly _migration_84's addition:
     two adapter-internal tables, three indexes and one capture trigger per
@@ -676,6 +702,8 @@ def _rollback_v83(db: sqlite3.Connection) -> None:
     db.execute("DROP TABLE sync_export_state")
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v82_database_verifies_sync_control_tables(tmp_path, _upgraded_v9):
     """A deployed v82 database is missing exactly _migration_83's addition:
     the three adapter-internal sync control tables, with no rows to backfill
@@ -718,6 +746,8 @@ def _rollback_v82(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE global_ask_jobs DROP COLUMN mode")
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v81_database_verifies_global_ask_job_sampling(tmp_path, _upgraded_v9):
     """A deployed v81 database is missing exactly _migration_82's addition:
     one TEXT NOT NULL DEFAULT '' column and two indexes on global_ask_jobs.
@@ -760,6 +790,8 @@ def _rollback_v81(db: sqlite3.Connection) -> None:
         db.execute(f"ALTER TABLE global_ask_jobs DROP COLUMN {column}")
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v80_database_verifies_global_ask_job_record_parity(tmp_path, _upgraded_v9):
     """A deployed v80 database is missing exactly _migration_81's addition:
     four TEXT NOT NULL DEFAULT '' columns on global_ask_jobs and nothing else.
@@ -800,6 +832,8 @@ def _rollback_v80(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE notebooks DROP COLUMN sync_origin")
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v79_database_verifies_notebook_sync_origin(tmp_path, _upgraded_v9):
     module = _load_verifier()
     database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
@@ -835,6 +869,8 @@ def _rollback_v79(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE retrieval_experiences DROP COLUMN notebook_id")
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v78_database_verifies_retrieval_experience_partition(tmp_path, _upgraded_v9):
     """A deployed v78 database is missing exactly _migration_79's addition:
     `retrieval_experiences.notebook_id` plus its non-unique index.
@@ -871,6 +907,8 @@ def _rollback_v78(db: sqlite3.Connection) -> None:
         db.execute(f"ALTER TABLE auth_sessions DROP COLUMN {column}")
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v77_database_backfills_local_identity_without_changing_owners(tmp_path, _upgraded_v9):
     module = _load_verifier()
     database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
@@ -895,6 +933,8 @@ def _rollback_v75(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE notebooks DROP COLUMN metadata_generation")
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v75_database_verifies_global_question_conversations(tmp_path, _upgraded_v9):
     module = _load_verifier()
     database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
@@ -1495,6 +1535,8 @@ def _verify_with_repository_mutation(module, database, storage, mutation, monkey
     return module.verify_snapshot(database, storage)
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_repository_is_never_constructed_with_original_database_path(
     tmp_path, monkeypatch
 ):
@@ -1531,6 +1573,8 @@ def test_repository_is_never_constructed_with_original_database_path(
     assert repo_db.is_absolute()
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_repository_is_never_constructed_with_original_storage_path_or_symlink(
     tmp_path, monkeypatch
 ):
@@ -1560,6 +1604,8 @@ def test_repository_is_never_constructed_with_original_storage_path_or_symlink(
     assert resolved != storage_link.resolve()
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_wal_committed_rows_are_present_in_backup(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
@@ -1620,6 +1666,8 @@ def test_live_wal_shm_mtime_is_an_explicit_metadata_exception(tmp_path):
     assert before[-1] == (f"{database.name}-shm", shm_size, 0)
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_live_wal_shm_size_change_fails_source_metadata_guard(tmp_path, monkeypatch):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
@@ -1655,6 +1703,8 @@ def test_live_wal_shm_size_change_fails_source_metadata_guard(tmp_path, monkeypa
     assert "original-database-metadata-changed" in result.discrepancies
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_schema_tables_counts_pks_and_digests_are_preserved(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
@@ -1687,6 +1737,8 @@ def test_schema_tables_counts_pks_and_digests_are_preserved(tmp_path):
     assert result.reads["reports"] >= 1
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v13_database_verifies_through_migrations_14_to_34(tmp_path):
     """The v13 hop is the one EVERY currently-deployed production database
     takes: v13 was the shipping schema before the memory-kg-extract feature.
@@ -1828,6 +1880,8 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_34(tmp_path):
     assert result.changed_tables == []
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v20_database_verifies_through_migrations_21_to_34(tmp_path, _upgraded_v9):
     module = _load_verifier()
     database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
@@ -1897,6 +1951,8 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_34(tmp_path, _u
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_offline_settings_use_an_empty_system_model_registry(tmp_path, monkeypatch):
     module = _load_verifier()
     monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "must-not-leak")
@@ -1913,6 +1969,8 @@ def test_offline_settings_use_an_empty_system_model_registry(tmp_path, monkeypat
     assert module.verify_snapshot(database, storage).ok
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v21_database_verifies_through_migrations_22_to_34(tmp_path, _upgraded_v9):
     module = _load_verifier()
     database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
@@ -1981,6 +2039,8 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_34(tmp_path, _u
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v22_database_verifies_through_migrations_23_to_34(tmp_path, _upgraded_v9):
     module = _load_verifier()
     database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
@@ -2058,6 +2118,8 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_34(tmp_path, _u
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v23_database_verifies_through_migrations_24_to_34(tmp_path, _upgraded_v9):
     """A v23 database (has model_service_status + populated model_settings,
     missing _migration_24's kg_canonical_scratch, _migration_25's system
@@ -2139,6 +2201,8 @@ def test_deployed_v23_database_verifies_through_migrations_24_to_34(tmp_path, _u
     assert result.normalized["scrubbed_model_statuses"] == 1
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v32_database_verifies_relation_keyset_indexes(tmp_path, _upgraded_v9):
     module = _load_verifier()
     database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
@@ -2186,6 +2250,8 @@ def test_deployed_v32_database_verifies_relation_keyset_indexes(tmp_path, _upgra
     assert result.changed_tables == []
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v33_database_verifies_relation_completion_state(tmp_path, _upgraded_v9):
     module = _load_verifier()
     database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
@@ -2230,6 +2296,8 @@ def test_deployed_v33_database_verifies_relation_completion_state(tmp_path, _upg
     assert result.changed_tables == []
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v36_database_verifies_source_element_type_index(tmp_path, _upgraded_v9):
     """A deployed v36 database is missing the v37 and v38 indexes plus
     _migration_39's two tables (both asked_at and the three KG-analysis
@@ -2290,6 +2358,8 @@ def test_deployed_v36_database_verifies_source_element_type_index(tmp_path, _upg
     assert result.changed_tables == []
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v38_database_verifies_command_catalog_tables(tmp_path, _upgraded_v9):
     """A deployed v38 database is missing exactly _migration_39's additions:
     its two tables AND the one index it puts on a pre-existing table.
@@ -2369,6 +2439,8 @@ def test_deployed_v38_database_verifies_command_catalog_tables(tmp_path, _upgrad
     assert result.changed_tables == []
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v39_database_verifies_source_local_fact_tables(tmp_path, _upgraded_v9):
     module = _load_verifier()
     database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
@@ -2418,6 +2490,8 @@ def test_deployed_v39_database_verifies_source_local_fact_tables(tmp_path, _upgr
     assert result.changed_tables == []
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v40_database_verifies_source_fact_backfill_upgrade(tmp_path, _upgraded_v9):
     module = _load_verifier()
     database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
@@ -2470,6 +2544,8 @@ def test_deployed_v40_database_verifies_source_fact_backfill_upgrade(tmp_path, _
     assert result.changed_tables == []
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v41_database_verifies_source_index_progress_upgrade(tmp_path, _upgraded_v9):
     module = _load_verifier()
     database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
@@ -2514,6 +2590,8 @@ def test_deployed_v41_database_verifies_source_index_progress_upgrade(tmp_path, 
     assert result.changed_tables == []
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v45_database_verifies_chunk_element_index_upgrade(tmp_path, _upgraded_v9):
     module = _load_verifier()
     database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
@@ -2555,6 +2633,8 @@ def test_deployed_v45_database_verifies_chunk_element_index_upgrade(tmp_path, _u
     assert result.changed_tables == []
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v46_database_verifies_notebook_schema_relocation(tmp_path, _upgraded_v9):
     module = _load_verifier()
     database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
@@ -2606,6 +2686,8 @@ def test_deployed_v46_database_verifies_notebook_schema_relocation(tmp_path, _up
     assert result.changed_tables == []
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v48_database_verifies_group_sharing_tables(tmp_path, _upgraded_v9):
     """A deployed v48 database is missing exactly _migration_49's AND
     _migration_50's additions: the three P1 group-sharing tables (groups,
@@ -2663,6 +2745,8 @@ def test_deployed_v48_database_verifies_group_sharing_tables(tmp_path, _upgraded
     assert result.changed_tables == []
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v49_database_verifies_share_request_table(tmp_path, _upgraded_v9):
     """A deployed v49 database is missing exactly _migration_50's addition:
     notebook_share_requests and its two indexes (idx_share_requests_group,
@@ -2715,6 +2799,8 @@ def test_deployed_v49_database_verifies_share_request_table(tmp_path, _upgraded_
     assert result.changed_tables == []
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v50_database_verifies_agent_profile_tables(tmp_path, _upgraded_v9):
     """A deployed v50 database is missing exactly _migration_51's additions:
     the two Agentic Memory P1 tables (agent_notebook_profile,
@@ -2764,6 +2850,8 @@ def test_deployed_v50_database_verifies_agent_profile_tables(tmp_path, _upgraded
     assert result.changed_tables == []
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v74_database_verifies_metadata_ownership(tmp_path, _upgraded_v9):
     module = _load_verifier()
     database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
@@ -2777,6 +2865,8 @@ def test_deployed_v74_database_verifies_metadata_ownership(tmp_path, _upgraded_v
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v73_database_verifies_question_submitted_via(tmp_path, _upgraded_v9):
     """A deployed v73 database is missing exactly _migration_74's addition:
     ``submitted_via`` on ask_jobs, reports and retained_user_activity (NOT
@@ -2797,6 +2887,8 @@ def test_deployed_v73_database_verifies_question_submitted_via(tmp_path, _upgrad
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v72_database_verifies_wish_status(tmp_path, _upgraded_v9):
     """A deployed v72 database is missing exactly _migration_73's addition:
     the ``wishes.status`` column (NOT NULL DEFAULT 'open'). Same rationale as
@@ -2817,6 +2909,8 @@ def test_deployed_v72_database_verifies_wish_status(tmp_path, _upgraded_v9):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v71_database_verifies_users_last_seen(tmp_path, _upgraded_v9):
     """A deployed v71 database is missing exactly _migration_72's addition:
     the nullable ``users.last_seen_at`` column. Same rationale as the v70/v69
@@ -2838,6 +2932,8 @@ def test_deployed_v71_database_verifies_users_last_seen(tmp_path, _upgraded_v9):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v70_database_verifies_derived_generation(tmp_path, _upgraded_v9):
     """A deployed v70 database is missing exactly _migration_71's additions
     (the generational cluster/community swap schema half) and still carries
@@ -2861,6 +2957,8 @@ def test_deployed_v70_database_verifies_derived_generation(tmp_path, _upgraded_v
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v69_database_verifies_ask_client_request_key(tmp_path, _upgraded_v9):
     """A deployed v69 database is missing exactly _migration_70's additions:
     the nullable ``ask_jobs.client_request_id`` column and the partial unique
@@ -2885,6 +2983,8 @@ def test_deployed_v69_database_verifies_ask_client_request_key(tmp_path, _upgrad
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v53_database_verifies_retrieval_experience_table(tmp_path, _upgraded_v9):
     """A deployed v53 database is missing exactly _migration_54's addition:
     the deployment-global `retrieval_experiences` table.
@@ -3033,6 +3133,8 @@ def _prepare_v28_cluster_duplicates(database):
         db.close()
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_v29_verifier_accepts_only_deterministic_cluster_duplicate_cleanup(tmp_path, _upgraded_v9):
     module = _load_verifier()
     assert "concept_clusters" not in module.SPECIAL_TABLES
@@ -3046,6 +3148,8 @@ def test_v29_verifier_accepts_only_deterministic_cluster_duplicate_cleanup(tmp_p
     assert result.changed_tables == []
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 @pytest.mark.parametrize(
     "corruption",
     ("wrong-survivor", "changed-singleton", "deleted-singleton"),
@@ -3094,6 +3198,8 @@ def test_v29_verifier_rejects_cluster_cleanup_corruption(
     )
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 @pytest.mark.parametrize(
     "mutation, expected_fragment",
     [
@@ -3142,6 +3248,8 @@ def test_unmanifested_schema_changes_fail_verification(
     assert expected_fragment in " ".join(result.discrepancies)
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_fake_builtin_seed_row_fails_verification(tmp_path, monkeypatch):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
@@ -3161,6 +3269,8 @@ def test_fake_builtin_seed_row_fails_verification(tmp_path, monkeypatch):
     assert "concept_whitelist" in result.changed_tables
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 @pytest.mark.parametrize("filename", ["snapshot?.db", "snapshot#.db", "snapshot%.db"])
 def test_database_uri_punctuation_is_percent_encoded(tmp_path, filename):
     module = _load_verifier()
@@ -3174,6 +3284,8 @@ def test_database_uri_punctuation_is_percent_encoded(tmp_path, filename):
     assert result.source_user_version == 9
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_cleanup_failure_is_authoritative_and_reports_only_retained_path(
     tmp_path, monkeypatch, capsys
 ):
@@ -3241,6 +3353,8 @@ def test_cleanup_failure_wins_over_primary_failure_without_leaking_errors(
     assert "cleanup private row content" not in str(caught.value)
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -3267,6 +3381,8 @@ def test_row_mutation_or_deletion_after_open_fails_verification(
     assert result.changed_tables
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_startup_delete_job_sweep_is_modelled_not_skipped(tmp_path, _upgraded_v9):
     """codex #659 R24 P2 变异钉:把 verify 里的 delete-job sweep 建模删掉 →
     「status='deleting' 却没有作业行」的快照(生产下一次启动会由 sweep 驱动 B
@@ -3291,6 +3407,8 @@ def test_startup_delete_job_sweep_is_modelled_not_skipped(tmp_path, _upgraded_v9
     )
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_only_recovery_seed_and_admin_upgrade_fields_are_normalized(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
@@ -3325,6 +3443,8 @@ def test_only_recovery_seed_and_admin_upgrade_fields_are_normalized(tmp_path):
     assert result.normalized["seeded_concept_whitelist"] >= 1
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_v22_kg_crash_recovery_is_normalized_field_by_field(tmp_path, _upgraded_v9):
     module = _load_verifier()
     database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
@@ -3340,6 +3460,8 @@ def test_v22_kg_crash_recovery_is_normalized_field_by_field(tmp_path, _upgraded_
     assert result.normalized["kg_build_jobs"] == 1
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_v22_kg_recovery_never_excuses_other_job_field_changes(
     tmp_path, monkeypatch, _upgraded_v9
 ):
@@ -3365,6 +3487,8 @@ def test_v22_kg_recovery_never_excuses_other_job_field_changes(
     assert "kg_build_jobs" in result.changed_tables
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_normalization_never_excuses_other_job_field_changes(tmp_path, monkeypatch):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
@@ -3386,6 +3510,8 @@ def test_normalization_never_excuses_other_job_field_changes(tmp_path, monkeypat
     assert "ask_jobs" in result.changed_tables
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_stdout_never_includes_seeded_secrets(tmp_path, capsys):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
@@ -3402,6 +3528,8 @@ def test_stdout_never_includes_seeded_secrets(tmp_path, capsys):
         assert secret not in combined, f"stdout leaked seeded content: {secret!r}"
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_original_storage_list_size_mtime_remain_unchanged(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
@@ -3427,6 +3555,8 @@ def test_missing_database_or_storage_is_a_hard_failure(tmp_path):
         module.verify_snapshot(database, tmp_path / "absent-storage")
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_hostile_model_environment_creates_no_configured_client_and_no_network(
     tmp_path, monkeypatch, capsys
 ):

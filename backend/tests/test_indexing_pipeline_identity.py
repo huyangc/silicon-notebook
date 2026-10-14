@@ -11,8 +11,6 @@ from app.repositories.sqlite.migrations import SqliteMigrator
 from app.services.scale_index_builder import ScaleIndexBuilder
 from app.services.sqlite_repository import SQLiteRepository, _now
 
-pytestmark = [pytest.mark.legacy_upgrade_contract, pytest.mark.real_sqlite_migration]
-
 
 def _repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'identity.db'}")
@@ -32,6 +30,8 @@ def _migration_database(tmp_path):
     return database, SqliteMigrator(database, settings)
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_sqlite_migration_57_to_58_preserves_notebook_and_adds_identities(
     tmp_path, monkeypatch
 ):
@@ -79,6 +79,8 @@ def test_sqlite_migration_57_to_58_preserves_notebook_and_adds_identities(
     database.close_local()
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_sqlite_migration_58_to_59_adds_durable_stage_tables(
     tmp_path, monkeypatch
 ):

@@ -193,13 +193,21 @@ def _sqlite_ladder_identity(migrations_module, migrator=None) -> tuple:
     """What a from-scratch migration would run: the head version and its steps.
 
     Compared by identity, so a test that patches ``SCHEMA_VERSION`` or one
-    ``_migration_N`` step (on the class or on one migrator) no longer matches
-    the ladder the template was built from.
+    ``_migration_N`` step -- on the class, on a subclass (the lookup follows the
+    migrator's MRO) or on one migrator instance -- no longer matches the ladder
+    the template was built from. It guards exactly those two things: a test
+    that patches a helper the steps call (a frozen SQL constant, a module
+    function) is not detected and must carry the marker itself.
+
+    The refusal is ``pytest.fail``, raised in the thread that migrates; when
+    that is not the test's own thread (a worker thread of the code under test)
+    pytest only reports it as an unhandled-thread-exception warning, so a test
+    that migrates a new database off its own thread gets no hard failure here.
     """
     version = migrations_module.SCHEMA_VERSION
+    owner = migrations_module.SqliteMigrator if migrator is None else type(migrator)
     steps = tuple(
-        migrations_module.SqliteMigrator.__dict__.get(f"_migration_{step}")
-        for step in range(1, version + 1)
+        getattr(owner, f"_migration_{step}", None) for step in range(1, version + 1)
     )
     patched_on_instance = tuple(
         sorted(name for name in vars(migrator) if name.startswith("_migration_"))
@@ -322,13 +330,37 @@ def _fast_default_password_hashing(monkeypatch, request):
         "patching app.services.auth_utils would silently do nothing"
     )
 
+# The lane-partition guard runs a ~6 s collect-only subprocess, and it is the
+# one G1 test that must not move to G2. xdist's loadgroup scheduler orders its
+# work units by group size with a stable sort, so an ungrouped test keeps its
+# collection position among the single-test units; where it is collected (near
+# the end of the alphabet) it used to be the last test of the gate. Moving it to
+# the front of the collection dispatches it in the first wave instead. This
+# changes no marker and no lane selection; `test_test_architecture_policy.py`
+# pins it.
+_DISPATCHED_FIRST = (
+    "test_test_architecture_policy.py",
+    "test_verification_lane_markers_partition_every_architecture_contract_test",
+)
+
+
+def _collect_first(items, key: tuple[str, str]) -> None:
+    """Move the item named ``(file name, test name)`` to the front, if collected."""
+    for index, item in enumerate(items):
+        if (Path(str(item.fspath)).name, item.name) == key:
+            if index:
+                items.insert(0, items.pop(index))
+            return
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
     """Keep repository-wide source scans on one worker.
 
     Their process-local indexes are deliberately shared. Spreading the modules
     across xdist workers reparses the whole repository in every process and
-    increases both CPU cost and complete-gate latency.
+    increases both CPU cost and complete-gate latency. It also collects the
+    lane-partition guard first (see ``_DISPATCHED_FIRST``).
     """
     collected_file_names: set[str] = set()
     hit_heavy_tests: set[tuple[str, str]] = set()
@@ -354,6 +386,7 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(
                 pytest.mark.xdist_group(name="graph_index_contract"),
             )
+    _collect_first(items, _DISPATCHED_FIRST)
 
     # Self-guard for the measured split above: only check allowlist entries
     # whose *file* was actually part of this collection run, so running a
