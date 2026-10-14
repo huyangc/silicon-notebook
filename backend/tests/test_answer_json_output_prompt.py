@@ -41,8 +41,6 @@ def test_answer_prompt_requires_sibling_fields_and_escaped_string_content():
     ("raw", "reason"),
     [
         ('{"answer":"Complete answer."}\n{"grounded":true}', "non_object"),
-        ('{"answer":"Paragraph one.\nParagraph two.\\nParagraph three.",'
-         '"grounded":true}', "string_changed"),
     ],
 )
 def test_observed_answer_format_failures_still_fail_closed(raw, reason):
@@ -50,3 +48,23 @@ def test_observed_answer_format_failures_still_fail_closed(raw, reason):
         parse_model_json_object(raw, ANSWER_SCHEMA_HINT, allow_repair=True)
 
     assert caught.value.reason == reason
+
+
+def test_a_raw_line_break_beside_an_escaped_one_is_read_as_written():
+    # Observed alongside the case above, and once rejected as
+    # ``string_changed`` by the repair library. A raw line break and a ``\n``
+    # escape both mean a line break: the reply has one reading, the text
+    # written, so it is delivered rather than failed. The prompt still asks
+    # for ``\n``.
+    raw = (
+        '{"answer":"Paragraph one.\nParagraph two.\\nParagraph three.",'
+        '"grounded":true}'
+    )
+
+    result = parse_model_json_object(raw, ANSWER_SCHEMA_HINT, allow_repair=True)
+
+    assert result.control_chars is True
+    assert result.repaired is False
+    assert json.loads(result.content)["answer"] == (
+        "Paragraph one.\nParagraph two.\nParagraph three."
+    )
