@@ -204,3 +204,46 @@ test("a DELETE that lands while the user is on another table leaves them there a
   expectToolbarUnlocked();
   expect(server.log).toEqual([LIST, DETAIL, DELETE, TWIN_DETAIL, LIST]);
 });
+
+test("a DELETE that fails while the user is on another table reports it at the top of the panel, not on that table", async () => {
+  // Before S6 the failure went into the current table's action banner, so 删除失败
+  // appeared to be about the table the user had moved on to.
+  const server = routeTwoTables();
+  const release = server.hold("DELETE", "/notebooks/nb-1/knowhow/t-rec");
+  const user = userEvent.setup();
+  renderPanel({ initialTableId: "t-rec" });
+  await user.click(await screen.findByTitle("删除表"));
+  await user.click(screen.getByRole("button", { name: "确认删除" }));
+  expect(await screen.findByRole("button", { name: "删除中…" })).toBeDisabled();
+  await user.click(screen.getByRole("button", { name: "返回" }));
+  await user.click(await screen.findByRole("button", { name: "打开表格：第二张表" }));
+  await screen.findByRole("heading", { name: "第二张表" });
+  await settle();
+
+  release({ status: 500, json: { detail: "boom" } });
+  const notice = await screen.findByRole("alert");
+  expect(notice).toHaveTextContent("「排障记录」没有删除成功，请重新打开这张表再删一次。");
+  await settle();
+  expect(document.querySelector(".knowhow-action-error")).toBeNull();
+  expect(screen.getByRole("heading", { name: "第二张表" })).toBeInTheDocument();
+  expectToolbarUnlocked();
+  await user.click(within(notice).getByRole("button", { name: "关闭" }));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(server.log).toEqual([LIST, DETAIL, DELETE, TWIN_DETAIL]);
+});
+
+test("a DELETE that fails while the user is still on that table keeps the banner beside the toolbar", async () => {
+  const server = routeTwoTables();
+  const release = server.hold("DELETE", "/notebooks/nb-1/knowhow/t-rec");
+  const user = userEvent.setup();
+  renderPanel({ initialTableId: "t-rec" });
+  await user.click(await screen.findByTitle("删除表"));
+  await user.click(screen.getByRole("button", { name: "确认删除" }));
+  release({ status: 500, json: { detail: "boom" } });
+  await waitFor(() => expect(document.querySelector(".knowhow-action-error")).toHaveTextContent("删除失败，请重试"));
+  await settle();
+  expect(document.querySelector(".knowhow-jump-notice")).toBeNull();
+  expect(screen.getByTitle("删除表")).toBeInTheDocument();
+  expectToolbarUnlocked();
+  expect(server.log).toEqual([LIST, DETAIL, DELETE]);
+});
