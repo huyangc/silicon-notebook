@@ -963,6 +963,12 @@ def test_control_characters_between_tokens_are_not_flagged():
             '"grounded":true}',
             'in the "Knowledge & Reasoning" category',
         ),
+        # In an object value, unkeyed items are not JSON: prose spacing
+        # around quotes has one reading.
+        (
+            '{"answer":"the "foo" mode","grounded":true}',
+            'the "foo" mode',
+        ),
         # A citation or LaTeX braces after a quote are text, not a value.
         (
             '{"answer":"所谓"恒流"[k1] 与 "f"{x} 写法","grounded":true}',
@@ -1015,6 +1021,12 @@ def test_an_unescaped_quote_inside_a_value_is_read_as_text(
         '{"answer":"x","grounded":true,"queries":["first" null "second"]}',
         '{"answer":"x","grounded":true,"queries":["first" 2 "second"]}',
         '{"answer":"x","grounded":true,"queries":["a" true "b"]}',
+        # ...or around a single-quoted value (codex #875 R4).
+        '{"answer":"x","grounded":true,"queries":["first" \'mid\' "last"]}',
+        # Inside an array, whitespace after the quote: three items may have
+        # lost their commas around a bare one.
+        '{"answer":"x","grounded":true,"queries":["first" second "third"]}',
+        '{"answer":"x","grounded":true,"queries":["the "foo" mode"]}',
     ],
 )
 def test_an_inner_quote_without_one_reading_stays_malformed(raw, allow_repair):

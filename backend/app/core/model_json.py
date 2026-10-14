@@ -806,25 +806,33 @@ class _Reading:
     inner_quotes: bool = False
 
 
-def _closes_value_string(text: str, index: int) -> bool | None:
+def _closes_value_string(
+    text: str, index: int, *, in_array: bool = False,
+) -> bool | None:
     """Whether the ``"`` at ``index`` inside a VALUE string closes it.
 
     ``True`` when JSON structure follows (``,`` ``}`` ``]`` or the end),
     ``False`` when text follows (``所谓"恒流"模式``: the quote is a character
     of the answer), ``None`` when what follows is itself ambiguous -- a
-    ``:`` or another quote means a key or a missing comma may be starting,
+    ``:`` or another quote (single quotes included: ``["a" 'b' "c"]``)
+    means a key or a missing comma may be starting,
     and so does the start of any JSON value -- a literal, a number, ``[]``,
     ``{"`` (``["first" null "second"]`` lost its commas; read as text, three
     values become one string). Either reading of such a quote could swallow
-    or invent a value.
+    or invent a value. Inside an array, whitespace after the quote is
+    ambiguous too: ``["first" second "third"]`` may be three items that lost
+    their commas, while in an object value unkeyed items are not JSON at
+    all, so ``"the "foo" mode"`` there has one reading.
     """
     index += 1
+    if in_array and text[index:index + 1] in {" ", "\t", "\r", "\n"}:
+        return None
     while index < len(text) and text[index] in " \t\r\n":
         index += 1
     following = text[index:index + 1]
     if not following or following in ",}]":
         return True
-    if following in ':"' or _starts_json_value(text, index):
+    if following in ':"\'' or _starts_json_value(text, index):
         return None
     return False
 
@@ -878,7 +886,7 @@ def _read_literally(text: str, *, inner_quotes: bool) -> _Reading | None:
     # text. A string that took the inner-quote reading may only close after
     # an even number of them (see below).
     quotes = 0
-    string_inner = False
+    string_inner = in_array = False
     index = 0
     while index < len(text):
         char = text[index]
@@ -886,6 +894,7 @@ def _read_literally(text: str, *, inner_quotes: bool) -> _Reading | None:
             if char == '"':
                 in_string, in_key, expect_key = True, expect_key, False
                 quotes, string_inner = 0, False
+                in_array = bool(stack) and stack[-1] == "["
             elif char in "{[":
                 stack.append(char)
                 expect_key = char == "{"
@@ -911,7 +920,7 @@ def _read_literally(text: str, *, inner_quotes: bool) -> _Reading | None:
         elif char == '"':
             closes = True
             if inner_quotes and not in_key:
-                closes = _closes_value_string(text, index)
+                closes = _closes_value_string(text, index, in_array=in_array)
                 if closes is None:
                     return None
             if closes:
