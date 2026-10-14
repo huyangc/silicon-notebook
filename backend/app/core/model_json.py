@@ -946,16 +946,22 @@ def _repeats_prefix(
     index, other = start, at
     in_string = escaped = False
     while index < end:
-        if not in_string and text[index].isspace():
-            index += 1
-            continue
-        if not in_string:
-            while other < len(target) and target[other].isspace():
-                other += 1
+        # Every character examined is charged, skipped whitespace included:
+        # a long run of it ahead of many ``{`` would otherwise be rescanned
+        # for free at each one.
         if budget is not None:
             budget[0] -= 1
             if budget[0] < 0:
                 return False
+        if not in_string and text[index].isspace():
+            index += 1
+            continue
+        if not in_string:
+            skipped = other
+            while other < len(target) and target[other].isspace():
+                other += 1
+            if budget is not None:
+                budget[0] -= other - skipped
         if other >= len(target) or target[other] != text[index]:
             return False
         char = target[other]

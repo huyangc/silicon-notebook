@@ -1018,6 +1018,8 @@ def test_an_inner_quote_without_one_reading_stays_malformed(raw, allow_repair):
         '{"answer":"x"}' * 2000 + "junk",
         '{"answer":"一、' * 4000,
         "{} " * 200000 + "x",
+        # Whitespace skipped while comparing is charged too (codex #875 R1).
+        "{" + " " * 200000 + '"nodes":[' + "{} " * 200000 + "cut",
         '{"nodes":[' + ",".join(
             '{"local_id":"n%d","name":"x"}' % index for index in range(5000)
         ) + ',{"local_id":"cut',
