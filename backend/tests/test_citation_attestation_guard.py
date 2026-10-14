@@ -70,6 +70,10 @@ from pathlib import Path
 
 import pytest
 
+from tests.architecture.source_trees import app_source_trees, read_source_tree
+
+pytestmark = pytest.mark.xdist_group(name="source_scans_citation")
+
 ROOT = Path(__file__).resolve().parents[2]
 APP = ROOT / "backend" / "app"
 
@@ -325,12 +329,16 @@ def parse(source: str):
 
 
 def parse_file(path) -> ast.Module:
-    return parse(Path(path).read_text(encoding="utf-8"))
+    return read_source_tree(Path(path))
 
 
 def scan_source(relative: str, source: str) -> list:
     """Every site in one module as ``(file, qualname, callee)`` (with repeats)."""
-    tree = parse(source)
+    return scan_tree(relative, parse(source))
+
+
+def scan_tree(relative: str, tree: ast.Module) -> list:
+    """Same as ``scan_source`` for an already parsed (shared, read-only) tree."""
     aliases = _aliases(tree)
     sites: list = []
 
@@ -386,16 +394,16 @@ def scan_source(relative: str, source: str) -> list:
 
 
 @functools.lru_cache(maxsize=None)
-def _scan_source_cached(relative: str, source: str) -> tuple:
-    return tuple(scan_source(relative, source))
+def _scan_tree_cached(relative: str, tree: ast.Module) -> tuple:
+    return tuple(scan_tree(relative, tree))
 
 
 def scan() -> Counter:
     """Every site under ``APP``. No text pre-filter: every module is parsed, so
     an alias, a single-quoted key or any spelling the AST normalises is seen."""
     found: Counter = Counter()
-    for path in sorted(APP.rglob("*.py")):
-        found.update(_scan_source_cached(str(path.relative_to(APP)), path.read_text(encoding="utf-8")))
+    for relative, _source, tree in app_source_trees(APP):
+        found.update(_scan_tree_cached(relative, tree))
     return found
 
 

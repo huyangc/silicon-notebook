@@ -84,6 +84,12 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
+from tests.architecture.source_trees import read_source_tree
+
+pytestmark = pytest.mark.xdist_group(name="source_scans_core")
+
 ROOT = Path(__file__).resolve().parents[2]
 APP = ROOT / "backend" / "app"
 
@@ -473,7 +479,7 @@ def _modules(*needles: str, always: frozenset = frozenset()) -> tuple[tuple[str,
     ``needles`` (a module that does not even spell the word cannot match the
     channel), plus ``always``; the guard parses a few dozen files, not all."""
     return tuple(
-        (rel, text, ast.parse(text)) for rel, text in _sources()
+        (rel, text, read_source_tree(APP / rel)) for rel, text in _sources()
         if rel in always or any(needle in text for needle in needles)
     )
 
@@ -551,7 +557,7 @@ def test_the_projection_module_is_seen_reading_both_shapes():
     """Positive probe on real code: the scanner finds the projections' own
     two-shape reads, so an empty inventory elsewhere means "no reader", not "no
     scanner"."""
-    tree = ast.parse((APP / PROJECTION_MODULE).read_text(encoding="utf-8"))
+    tree = read_source_tree(APP / PROJECTION_MODULE)
     reads = python_reads(tree)
     for projection in ("global_answer_text", "global_answer_citations", "global_answer_payload",
                        "global_citation_flagged"):

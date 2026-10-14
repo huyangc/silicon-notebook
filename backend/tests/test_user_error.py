@@ -19,6 +19,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.deps import USER_MESSAGE_HEADER, user_error
+from tests.architecture.source_trees import app_source_trees
+
+pytestmark = pytest.mark.xdist_group(name="source_scans_core")
 
 APP_ROOT = pathlib.Path(__file__).resolve().parents[1] / "app"
 CJK_RE = re.compile(r"[一-鿿]")
@@ -121,8 +124,7 @@ def test_header_is_exposed_through_cors():
 
 def _bare_chinese_4xx_sites() -> list[str]:
     offenders = []
-    for path in sorted(APP_ROOT.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+    for under_app, _source, tree in app_source_trees(APP_ROOT):
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -143,7 +145,7 @@ def _bare_chinese_4xx_sites() -> list[str]:
                 continue
             if CJK_RE.search(detail.value):
                 offenders.append(
-                    f"{path.relative_to(APP_ROOT.parent)}:{node.lineno}  {detail.value!r}"
+                    f"app/{under_app}:{node.lineno}  {detail.value!r}"
                 )
     return offenders
 
@@ -503,11 +505,11 @@ def _user_error_sites() -> tuple[list[str], list[str]]:
                         dynamic_sites.append(f"{rel}::{func}")
             visit(child, rel, func)
 
-    for path in sorted(APP_ROOT.rglob("*.py")):
-        rel = str(path.relative_to(APP_ROOT.parent))
+    for under_app, _source, tree in app_source_trees(APP_ROOT):
+        rel = f"app/{under_app}"
         if rel == "app/api/deps.py":
             continue  # helper 自己的定义（message 是形参，不是文案）
-        visit(ast.parse(path.read_text(encoding="utf-8")), rel, None)
+        visit(tree, rel, None)
     return static_offenders, dynamic_sites
 
 

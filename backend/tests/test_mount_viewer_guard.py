@@ -36,6 +36,11 @@ import ast
 from collections import Counter
 from pathlib import Path
 
+import pytest
+
+from tests.architecture.source_trees import read_source_tree
+
+pytestmark = pytest.mark.xdist_group(name="source_scans_core")
 
 _BACKEND = Path(__file__).resolve().parents[1]
 _APP = _BACKEND / "app"
@@ -180,7 +185,7 @@ def _qualified_calls(path: Path):
     """``(qualname, method, viewer keyword node or None)`` for every call of a
     viewer method in ``path``; ``qualname`` names the enclosing function(s),
     ``<lambda>`` included."""
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    tree = read_source_tree(path)
     found = []
 
     def visit(node, scope):

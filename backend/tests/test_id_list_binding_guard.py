@@ -37,6 +37,10 @@ from pathlib import Path
 
 import pytest
 
+from tests.architecture.source_trees import read_source_tree
+
+pytestmark = pytest.mark.xdist_group(name="source_scans_core")
+
 REPOSITORIES = Path(__file__).resolve().parents[1] / "app" / "repositories"
 BINDING_MODULES = {"postgres/id_binding.py", "sqlite/id_binding.py"}
 
@@ -887,7 +891,10 @@ class _Scanner(ast.NodeVisitor):
 
 
 def _scan(source: str, backend: str) -> _Scanner:
-    tree = ast.parse(source)
+    return _scan_tree(ast.parse(source), backend)
+
+
+def _scan_tree(tree: ast.Module, backend: str) -> _Scanner:
     scanner = _Scanner(backend, _docstrings(tree))
     scanner.visit(tree)
     return scanner
@@ -906,7 +913,7 @@ def _repository_sites() -> tuple[
             relative = f"{backend}/{path.relative_to(REPOSITORIES / backend).as_posix()}"
             if relative in BINDING_MODULES:
                 continue
-            scanner = _scan(path.read_text(encoding="utf-8"), backend)
+            scanner = _scan_tree(read_source_tree(path), backend)
             for scope, kind in scanner.sites:
                 found.setdefault((relative, scope), []).append(kind)
             for (scope, kind), lines in scanner.diagnostic_lines_by_key.items():
@@ -964,7 +971,7 @@ def test_every_exemption_names_a_class_and_a_reason():
 
 
 def _functions_calling(path: Path, name: str):
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = read_source_tree(path)
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             calls = {
