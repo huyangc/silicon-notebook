@@ -35,7 +35,12 @@ import ast
 from functools import lru_cache
 from pathlib import Path
 
+import pytest
+
 from tests.architecture.semantic_source import PythonSourceIndex
+from tests.architecture.source_trees import app_source_trees, read_source_tree
+
+pytestmark = pytest.mark.xdist_group(name="source_scans_core")
 
 _BACKEND = Path(__file__).resolve().parents[1]
 _APP = _BACKEND / "app"
@@ -130,20 +135,18 @@ def test_every_ask_entry_goes_through_the_one_installation():
 
 def test_no_installer_is_imported_under_another_name():
     aliased = []
-    for path in sorted(_APP.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for under_app, _source, tree in app_source_trees(_APP):
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 for alias in node.names:
                     if alias.name in _INSTALLERS and alias.asname:
-                        aliased.append((path.relative_to(_BACKEND).as_posix(), alias.name))
+                        aliased.append((f"app/{under_app}", alias.name))
     assert aliased == []
 
 
 def test_the_routes_and_the_mcp_entry_install_nothing_themselves():
     for relative in ("app/api/ask_routes.py", "app/api/mcp_tools/memory_context.py"):
-        source = (_BACKEND / relative).read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=relative)
+        tree = read_source_tree(_BACKEND / relative)
         imported = {
             alias.name
             for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
@@ -153,8 +156,7 @@ def test_the_routes_and_the_mcp_entry_install_nothing_themselves():
 
 
 def test_the_production_ask_service_is_built_with_ceiling_readers():
-    source = (_APP / "services" / "repository_runtime.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
+    tree = read_source_tree(_APP / "services" / "repository_runtime.py")
     constructions = [
         node for node in ast.walk(tree)
         if isinstance(node, ast.Call)

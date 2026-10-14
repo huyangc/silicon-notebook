@@ -34,6 +34,8 @@ import pytest
 import app.services.retrieval_participants as override_module
 from tests.architecture.semantic_source import PythonSourceIndex
 
+pytestmark = pytest.mark.xdist_group(name="source_scans_core")
+
 
 _BACKEND = Path(__file__).resolve().parents[1]
 _APP = _BACKEND / "app"

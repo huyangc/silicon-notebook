@@ -41,6 +41,9 @@ from collections import Counter
 import pytest
 
 from tests import test_citation_attestation_guard as d9
+from tests.architecture.source_trees import app_source_trees
+
+pytestmark = pytest.mark.xdist_group(name="source_scans_citation")
 
 HIT_CLASSES = {
     "RetrievedKnowledge", "RetrievedChunk", "RetrievedElement", "RetrievedRelation",
@@ -111,7 +114,11 @@ ORIGIN_REGISTRY = {
 def scan_source(relative: str, source: str) -> list:
     """``(file, qualname, class, passes_library)`` for every hit construction,
     under any import alias or ``X = RetrievedChunk`` rebinding."""
-    tree = d9.parse(source)
+    return scan_tree(relative, d9.parse(source))
+
+
+def scan_tree(relative: str, tree: ast.Module) -> list:
+    """Same as ``scan_source`` for an already parsed (shared, read-only) tree."""
     aliases = d9._aliases(tree, tuple(sorted(HIT_CLASSES)))
     sites: list = []
 
@@ -137,19 +144,16 @@ def scan_source(relative: str, source: str) -> list:
 
 
 @functools.lru_cache(maxsize=None)
-def _scan_source_cached(relative: str, source: str) -> tuple:
-    return tuple(scan_source(relative, source))
+def _scan_tree_cached(relative: str, tree: ast.Module) -> tuple:
+    return tuple(scan_tree(relative, tree))
 
 
 def scan() -> Counter:
     """Every unstamped construction under ``d9.APP``. No text pre-filter (the
     D9 lesson): every module is parsed, so an alias cannot hide a site."""
     found: Counter = Counter()
-    for path in sorted(d9.APP.rglob("*.py")):
-        relative = str(path.relative_to(d9.APP))
-        for _rel, qualname, name, passes in _scan_source_cached(
-            relative, path.read_text(encoding="utf-8"),
-        ):
+    for relative, _source, tree in app_source_trees(d9.APP):
+        for _rel, qualname, name, passes in _scan_tree_cached(relative, tree):
             if not passes:
                 found[(relative, qualname, name)] += 1
     return found

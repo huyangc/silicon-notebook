@@ -77,7 +77,9 @@ import pytest
 
 from app.domain.citation_origin import foreign_notebook_id
 from app.services.kg.graph_reason import render_subgraph_context
+from tests.architecture.source_trees import app_source_trees
 
+pytestmark = pytest.mark.xdist_group(name="source_scans_citation")
 
 ROOT = Path(__file__).resolve().parents[2]
 APP = ROOT / "backend" / "app"
@@ -412,11 +414,13 @@ def _collect(
     *,
     registered: Registry | None = None,
     builders: Registry | None = None,
+    tree: ast.Module | None = None,
 ) -> _Scan:
     registered = REGISTERED_SITES if registered is None else registered
     builders = BUILDER_SITES if builders is None else builders
 
-    tree = ast.parse(source, filename=relative)
+    if tree is None:
+        tree = ast.parse(source, filename=relative)
     collector = _SiteCollector(_model_aliases(tree))
     collector.visit(tree)
 
@@ -456,11 +460,8 @@ def _collect(
 
 def _scan_app() -> _Scan:
     scan = _Scan()
-    for path in sorted(APP.rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
-        relative = path.relative_to(ROOT).as_posix()
-        source = path.read_text(encoding="utf-8")
+    for under_app, source, tree in app_source_trees(APP):
+        relative = (APP / under_app).relative_to(ROOT).as_posix()
         # Cheap prefilter only: a module that constructs the model under an
         # alias still names it on its import line, so this cannot hide an
         # aliased construction point the way a ``f"{name}("`` prefilter did.
@@ -473,7 +474,7 @@ def _scan_app() -> _Scan:
         )
         if not interesting:
             continue
-        scan.merge(_collect(source, relative))
+        scan.merge(_collect(source, relative, tree=tree))
     return scan
 
 
@@ -895,14 +896,10 @@ def _scan_external() -> tuple[list[str], list[str]]:
     """(offenders, sites) over the whole app tree."""
     offenders: list[str] = []
     sites: list[str] = []
-    for path in sorted(APP.rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
-        source = path.read_text(encoding="utf-8")
+    for under_app, source, tree in app_source_trees(APP):
         if f'"{EXTERNAL_TIER}"' not in source and f"'{EXTERNAL_TIER}'" not in source:
             continue
-        relative = path.relative_to(ROOT).as_posix()
-        tree = ast.parse(source, filename=relative)
+        relative = (APP / under_app).relative_to(ROOT).as_posix()
         found = (
             _external_constructor_offenders(tree, relative)
             + _external_id_map_offenders(tree, relative)

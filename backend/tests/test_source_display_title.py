@@ -14,6 +14,9 @@ import sqlite3
 import pytest
 
 from app.services.source_display import source_display_title, summary_display_title
+from tests.architecture.source_trees import read_source_tree
+
+pytestmark = pytest.mark.xdist_group(name="source_scans_core")
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -180,14 +183,13 @@ def test_summary_display_title_does_not_reinstate_the_shadowed_file_name():
 
 # ------------------------------------------------- 单一真源(源码级守卫)
 
-def _row_key_reads_by_scope(text: str):
+def _row_key_reads_in_tree(tree: ast.Module):
     """按函数作用域汇总「这段代码从行里读了哪些列名」。
 
     「读一个列名」= 字符串字面量出现在下标位 (`row["is_paper"]`) 或 `.get()`
     的第一个实参 (`row.get("is_paper")`)。用 AST 不用正则:正则分不清注释、
     文档串和 SQL 文本里的同名词,而那三样在存储层里到处都是。
     """
-    tree = ast.parse(text)
     scope_of: dict[int, tuple[ast.AST, str]] = {}
 
     def descend(node, scope, name):
@@ -249,7 +251,7 @@ def test_display_title_rule_has_exactly_one_implementation():
             if not all(column in text for column in RULE_COLUMNS):
                 continue
             relative = path.relative_to(REPO_ROOT).as_posix()
-            for name, lineno, keys in _row_key_reads_by_scope(text):
+            for name, lineno, keys in _row_key_reads_in_tree(read_source_tree(path)):
                 if not RULE_COLUMNS <= keys:
                     continue
                 if (relative, name) in ALLOWED_SITES:
@@ -269,7 +271,7 @@ def test_the_definition_site_still_defines_it():
     ——它只数副本,数不出真源没了。
     """
     path, function = DEFINITION_SITE
-    tree = ast.parse((REPO_ROOT / path).read_text(encoding="utf-8"))
+    tree = read_source_tree(REPO_ROOT / path)
     defined = {
         node.name for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -280,7 +282,7 @@ def test_the_definition_site_still_defines_it():
 @pytest.mark.parametrize("relative", CONSUMERS)
 def test_every_display_path_imports_the_shared_rule(relative):
     """三处显示路径必须 import 同一个函数,而不是各自复刻。"""
-    tree = ast.parse((REPO_ROOT / relative).read_text(encoding="utf-8"))
+    tree = read_source_tree(REPO_ROOT / relative)
     imported = {
         alias.name
         for node in ast.walk(tree)
