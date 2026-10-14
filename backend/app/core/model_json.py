@@ -1109,9 +1109,9 @@ def _restart_points(text: str) -> list[int]:
     fragment is compared only from the latest restart point, so its cost is
     bounded by its own length, and only the ``_RESTART_POINTS_MAX`` latest
     points are kept for decoding (only a late one can decode when the model
-    restarted many times). The comparison budget is a backstop for inputs
-    no test has found a way to make expensive; it is not what keeps the
-    degenerate replies above fast.
+    restarted many times). The comparison budget, which charges skipped
+    whitespace too, is what bounds a reply whose ``{`` are separated by long
+    whitespace runs (codex #875 R1): without it that scan is quadratic.
     """
     start = found = 0
     points: list[tuple[int, int]] = []
