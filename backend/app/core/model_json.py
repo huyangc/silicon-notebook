@@ -813,9 +813,10 @@ def _closes_value_string(text: str, index: int) -> bool | None:
     ``False`` when text follows (``所谓"恒流"模式``: the quote is a character
     of the answer), ``None`` when what follows is itself ambiguous -- a
     ``:`` or another quote means a key or a missing comma may be starting,
-    and so does a whole JSON literal or number (``["first" null "second"]``
-    lost its commas; read as text, three values become one string). Either
-    reading of such a quote could swallow or invent a value.
+    and so does the start of any JSON value -- a literal, a number, ``[]``,
+    ``{"`` (``["first" null "second"]`` lost its commas; read as text, three
+    values become one string). Either reading of such a quote could swallow
+    or invent a value.
     """
     index += 1
     while index < len(text) and text[index] in " \t\r\n":
@@ -823,15 +824,33 @@ def _closes_value_string(text: str, index: int) -> bool | None:
     following = text[index:index + 1]
     if not following or following in ",}]":
         return True
-    if following in ':"':
-        return None
-    token = _RAW_BARE_TOKEN_RE.match(text, index)
-    if token is not None and (
-        token.group() in {"true", "false", "null"}
-        or _JSON_NUMBER_RE.fullmatch(token.group())
-    ):
+    if following in ':"' or _starts_json_value(text, index):
         return None
     return False
+
+
+def _starts_json_value(text: str, index: int) -> bool:
+    """Whether a JSON value -- not just text -- may start at ``index``.
+
+    A whole literal or number, or a container whose first character is how
+    JSON would go on (``[]``, ``["``, ``[1``, ``{}``, ``{"``). A citation
+    ``[k1]`` or LaTeX ``{x}`` after a quote is text: no JSON value starts
+    with ``k`` or ``x``.
+    """
+    char = text[index:index + 1]
+    if char in {"[", "{"}:
+        index += 1
+        while index < len(text) and text[index] in " \t\r\n":
+            index += 1
+        following = text[index:index + 1]
+        if not following or following in '"]}' or (char == "[" and following in "[{"):
+            return True
+        return char == "[" and _starts_json_value(text, index)
+    token = _RAW_BARE_TOKEN_RE.match(text, index)
+    return token is not None and (
+        token.group() in {"true", "false", "null"}
+        or bool(_JSON_NUMBER_RE.fullmatch(token.group()))
+    )
 
 
 def _read_literally(text: str, *, inner_quotes: bool) -> _Reading | None:

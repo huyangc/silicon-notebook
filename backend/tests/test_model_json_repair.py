@@ -963,6 +963,11 @@ def test_control_characters_between_tokens_are_not_flagged():
             '"grounded":true}',
             'in the "Knowledge & Reasoning" category',
         ),
+        # A citation or LaTeX braces after a quote are text, not a value.
+        (
+            '{"answer":"所谓"恒流"[k1] 与 "f"{x} 写法","grounded":true}',
+            '所谓"恒流"[k1] 与 "f"{x} 写法',
+        ),
         # Combined with the other literal readings.
         (
             '{"answer":"“50\\%” 与 "50\\%"\n第二段","grounded":true}',
@@ -1039,6 +1044,36 @@ def test_degenerate_replies_are_rejected_in_bounded_time(raw):
     with pytest.raises(ModelJsonRepairError):
         parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=False)
     assert time.perf_counter() - started < 2.0
+
+
+@pytest.mark.parametrize("allow_repair", [False, True])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # Lost commas around a container (codex #875 R3): read as text, the
+        # values around it would merge into one string.
+        '{"answer":"x","grounded":true,"queries":["first" [] "second"]}',
+        '{"answer":"x","grounded":true,"queries":["first" ["b"] "second"]}',
+        '{"answer":"x","grounded":true,"queries":["first" [1] "second"]}',
+        '{"answer":"x","grounded":true,"queries":["first" {} "second"]}',
+        '{"answer":"x","grounded":true,"queries":["first" {"a":1} "s"]}',
+    ],
+)
+def test_a_container_after_an_inner_quote_is_never_read_as_text(
+    raw, allow_repair
+):
+    # Strict workloads reject; repair workloads judge the reply by the
+    # repair path's own rules (restoring commas), never as one merged string.
+    if not allow_repair:
+        with pytest.raises(ModelJsonRepairError):
+            parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=False)
+        return
+    try:
+        result = parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=True)
+    except ModelJsonRepairError:
+        return
+    assert result.inner_quotes is False
+    assert "first" in json.loads(result.content)["queries"]
 
 
 def test_a_nested_value_with_the_same_key_is_not_unwrapped():
