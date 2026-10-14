@@ -10,7 +10,9 @@ docs/incremental-sync-design.md §8 的导入相位与 §4 的身份映射。
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import inspect
 import json
 import shutil
 import uuid
@@ -31,6 +33,8 @@ from app.migration.sync.package import CHECKSUMS_NAME, MANIFEST_NAME, rows_path
 from app.models.schemas import NotebookCreate
 from app.repositories.ports import UploadedSourceFile
 from app.services.sqlite_repository import SQLiteRepository
+from tests.sync_world_cases import report_data, report_from_data
+from tests.world_templates import PINNED, world_template
 
 
 SOURCE_ENV = "dev"
@@ -129,12 +133,12 @@ def _filled_knowhow_table(repo, notebook_id: str, title: str, actor: str) -> str
     return table_id
 
 
-@pytest.fixture
-def source(tmp_path):
+@contextlib.contextmanager
+def _seeded_source(root: Path):
     """Library A: one notebook carrying every shape the importer has to map --
     a user column, a group grant, a membership row, an attachment, a mount
     edge onto a notebook that is NOT exported, and a blob."""
-    settings = _settings(tmp_path / "a")
+    settings = _settings(root / "a")
     repo = SQLiteRepository(settings)
     try:
         for user_id, username in (
@@ -247,11 +251,11 @@ def source(tmp_path):
         repo.close()
 
 
-@pytest.fixture
-def target(tmp_path):
+@contextlib.contextmanager
+def _seeded_target(root: Path):
     """Library B: a separate database and storage root that already knows
     alice (under her own id) and already has a group by the same name."""
-    settings = _settings(tmp_path / "b")
+    settings = _settings(root / "b")
     repo = SQLiteRepository(settings)
     try:
         _add_user(repo, ALICE[1], ALICE[2])
@@ -292,9 +296,101 @@ def _export_notebooks(source, out_dir: Path, notebook_ids: list) -> Path:
     return report.package_dir
 
 
+#: The file's side-channel switches, applied to the world build too: the build
+#: starts from the process baseline environment, not from this file's
+#: autouse fixture.
+_WORLD_ENV = {"EVENT_LOG_ENABLED": "false", "LLM_LOG_ENABLED": "false"}
+
+
+def _seed_world(root: Path, *, first_import: bool) -> dict:
+    """Library A under ``root/a``, library B under ``root/b`` and the package
+    under ``root/out``, seeded in the order the fixtures always ran (source,
+    target, export) with both libraries open throughout. ``first_import``
+    also runs the default import once, exactly as a test body did."""
+    with _seeded_source(root) as source, _seeded_target(root) as target:
+        package = _export(source, root / "out")
+        payload = {
+            "exported": source["exported"],
+            "base": source["base"],
+            "package": str(package),
+        }
+        if first_import:
+            payload["first_import"] = report_data(_import(target, package))
+    return payload
+
+
+def _build_world(root: Path) -> dict:
+    return _seed_world(root, first_import=False)
+
+
+def _build_imported_world(root: Path) -> dict:
+    return _seed_world(root, first_import=True)
+
+
+def _reopen_world(root: Path) -> None:
+    for side in ("a", "b"):
+        SQLiteRepository(_settings(root / side)).close()
+
+
 @pytest.fixture
-def package(source, tmp_path):
-    return _export(source, tmp_path / "out")
+def _world(request, tmp_path_factory, tmp_path):
+    """This test's copy of the seeded world (``tests/world_templates.py``,
+    built once per process; ``pinned`` because uploaded sources store
+    absolute ``file_path``s). A test that asks for ``first_import`` gets the
+    world AFTER the default ``_import(target, package)`` ran once (T2-2b): the
+    import ran through the real code at build time, so its outcome is in the
+    copy and its report is rebuilt from pure data."""
+    if "first_import" in request.fixturenames:
+        template = world_template(
+            tmp_path_factory, "sync-import-after-first-import",
+            _build_imported_world, _reopen_world, layout=PINNED, env=_WORLD_ENV,
+        )
+    else:
+        template = world_template(
+            tmp_path_factory, "sync-import-world",
+            _build_world, _reopen_world, layout=PINNED, env=_WORLD_ENV,
+        )
+    return template.materialize(tmp_path)
+
+
+@pytest.fixture
+def source(_world):
+    root, payload = _world
+    settings = _settings(root / "a")
+    repo = SQLiteRepository(settings)
+    try:
+        yield {
+            "repo": repo,
+            "settings": settings,
+            "exported": payload["exported"],
+            "base": payload["base"],
+        }
+    finally:
+        repo.close()
+
+
+@pytest.fixture
+def target(_world):
+    root, _payload = _world
+    settings = _settings(root / "b")
+    repo = SQLiteRepository(settings)
+    try:
+        yield {"repo": repo, "settings": settings}
+    finally:
+        repo.close()
+
+
+@pytest.fixture
+def package(_world, source):
+    _root, payload = _world
+    return Path(payload["package"])
+
+
+@pytest.fixture
+def first_import(_world, target, package):
+    """The report of the default import the world was built after."""
+    _root, payload = _world
+    return report_from_data(payload["first_import"])
 
 
 # ---------------------------------------------------------------- helpers
@@ -340,8 +436,10 @@ def test_unmapped_policy_covers_exactly_the_manifest_mapped_columns():
 # ------------------------------------------------------------- round trip
 
 
-def test_every_table_is_accounted_for_row_by_row(source, target, package):
-    report = _import(target, package)
+def test_every_table_is_accounted_for_row_by_row(
+    source, target, package, first_import
+):
+    report = first_import
 
     assert report.error == ""
     assert not report.already_applied
@@ -355,8 +453,10 @@ def test_every_table_is_accounted_for_row_by_row(source, target, package):
         ) >= outcome.inserted, table
 
 
-def test_user_columns_are_rewritten_to_the_target_ids(source, target, package):
-    _import(target, package)
+def test_user_columns_are_rewritten_to_the_target_ids(
+    source, target, package, first_import
+):
+    # The default import already ran (``first_import``).
     repo = target["repo"]
 
     notebook = _one(repo, "SELECT created_by FROM notebooks WHERE id=?",
@@ -387,8 +487,10 @@ def test_user_columns_are_rewritten_to_the_target_ids(source, target, package):
     assert not leaked, leaked
 
 
-def test_the_imported_notebook_is_stamped_as_a_mirror(source, target, package):
-    _import(target, package)
+def test_the_imported_notebook_is_stamped_as_a_mirror(
+    source, target, package, first_import
+):
+    # The default import already ran (``first_import``).
 
     # The same read the API's mirror fence makes (deps.py ->
     # notebook_access_repository().notebook_sync_origin).
@@ -509,7 +611,7 @@ def test_a_publish_failure_reverts_a_new_notebooks_status(
     assert row["status"] == "importing"
 
 
-def test_rowids_are_assigned_by_the_target(source, target, package):
+def test_rowids_are_assigned_by_the_target(source, target, package, first_import):
     """``POSTGRES_ROWID_ORDINAL_TABLES``' ordinal is an environment-local
     paging cursor and never travels (§8). SQLite has no such column at all --
     its rowid is the equivalent -- so what this lane can pin is that the
@@ -518,7 +620,7 @@ def test_rowids_are_assigned_by_the_target(source, target, package):
         for row in _rows(package, table):
             assert "ordinal" not in row, table
 
-    _import(target, package)
+    # The default import already ran (``first_import``).
     with target["repo"]._connect() as db:
         rowids = [
             int(item[0])
@@ -528,9 +630,9 @@ def test_rowids_are_assigned_by_the_target(source, target, package):
 
 
 def test_notebook_files_and_attachments_land_under_the_target_storage(
-    source, target, package
+    source, target, package, first_import
 ):
-    report = _import(target, package)
+    report = first_import
     storage = Path(target["settings"].storage_dir)
 
     for root in ("notebooks", "assets"):
@@ -551,12 +653,12 @@ def test_notebook_files_and_attachments_land_under_the_target_storage(
 
 
 def test_source_file_path_is_re_anchored_on_the_target_storage(
-    source, target, package
+    source, target, package, first_import
 ):
     """The package carries the SOURCE host's absolute path. Left alone, every
     mirrored source would point at a directory that does not exist here --
     the same re-anchoring copy_notebook does inside one environment."""
-    _import(target, package)
+    # The default import already ran (``first_import``).
     storage = Path(target["settings"].storage_dir)
 
     row = _one(
@@ -570,8 +672,8 @@ def test_source_file_path_is_re_anchored_on_the_target_storage(
     assert str(path) != _rows(package, "sources")[0]["file_path"]
 
 
-def test_blob_columns_survive_the_round_trip(source, target, package):
-    _import(target, package)
+def test_blob_columns_survive_the_round_trip(source, target, package, first_import):
+    # The default import already ran (``first_import``).
 
     row = _one(
         target["repo"],
@@ -773,8 +875,10 @@ def test_ascii_lower_folds_only_ascii_letters():
     assert ascii_lower("ÄÖ") == "ÄÖ"
 
 
-def test_an_unmappable_member_row_is_skipped_not_fatal(source, target, package):
-    report = _import(target, package)
+def test_an_unmappable_member_row_is_skipped_not_fatal(
+    source, target, package, first_import
+):
+    report = first_import
 
     assert _count(target["repo"], "SELECT COUNT(*) FROM notebook_members") == 0
     assert report.tables["notebook_members"].skipped == 1
@@ -782,8 +886,10 @@ def test_an_unmappable_member_row_is_skipped_not_fatal(source, target, package):
     assert reasons and BOB[0] in reasons[0].reason
 
 
-def test_a_group_matched_by_name_is_reused_not_duplicated(source, target, package):
-    report = _import(target, package)
+def test_a_group_matched_by_name_is_reused_not_duplicated(
+    source, target, package, first_import
+):
+    report = first_import
     repo = target["repo"]
 
     assert _count(repo, "SELECT COUNT(*) FROM groups") == 1
@@ -825,14 +931,14 @@ def test_a_group_the_target_lacks_is_created(source, target, package):
 
 
 def test_a_mount_edge_onto_an_unexported_notebook_is_skipped(
-    source, target, package
+    source, target, package, first_import
 ):
     """notebook_bases.base_notebook_id is the manifest's only optional_ref:
     exporting the mounting notebook without its base is a legitimate slice,
     and the dangling edge must be dropped rather than fail the import."""
     assert len(_rows(package, "notebook_bases")) == 1
 
-    report = _import(target, package)
+    report = first_import
 
     assert _count(target["repo"], "SELECT COUNT(*) FROM notebook_bases") == 0
     assert report.tables["notebook_bases"].skipped == 1
@@ -1510,8 +1616,8 @@ def _manifest(package: Path) -> dict:
 # ------------------------------------------------------------------ report
 
 
-def test_the_report_lands_beside_the_package(source, target, package):
-    report = _import(target, package)
+def test_the_report_lands_beside_the_package(source, target, package, first_import):
+    report = first_import
 
     written = [
         path for path in package.iterdir() if path.name.startswith("import-report-")
@@ -1525,8 +1631,8 @@ def test_the_report_lands_beside_the_package(source, target, package):
     assert document["user_mapping"]["matched"] >= 1
 
 
-def test_the_import_row_records_the_run(source, target, package):
-    report = _import(target, package)
+def test_the_import_row_records_the_run(source, target, package, first_import):
+    report = first_import
 
     row = _one(
         target["repo"], "SELECT * FROM sync_imports WHERE package_id=?",
@@ -1912,8 +2018,10 @@ def test_a_failed_second_rename_during_the_swap_still_rolls_back(
     )
 
 
-def test_the_file_phase_records_its_own_progress_step(source, target, package):
-    _import(target, package)
+def test_the_file_phase_records_its_own_progress_step(
+    source, target, package, first_import
+):
+    # The default import already ran (``first_import``).
 
     steps = {
         str(row["table_name"])
@@ -1930,8 +2038,8 @@ def test_verify_files_rehashes_the_installed_copy(source, target, package):
     assert report.files_copied == 2
 
 
-def test_a_sqlite_target_is_told_to_quiesce(source, target, package):
-    report = _import(target, package)
+def test_a_sqlite_target_is_told_to_quiesce(source, target, package, first_import):
+    report = first_import
 
     assert any("single writer" in warning for warning in report.warnings)
 
@@ -2401,13 +2509,13 @@ def _fts_chunk_ids(repo, notebook_id: str) -> set[str]:
 
 
 def test_imported_chunks_are_reachable_by_lexical_search(
-    source, target, package
+    source, target, package, first_import
 ):
     """``chunks_fts`` and ``kg_objects_fts`` have no triggers -- every writer
     maintains them by hand. An importer that skips that lands a mirror with
     vector recall but permanently invisible to lexical search, and nothing
     would ever notice (the vector side has a self-heal probe, FTS has none)."""
-    _import(target, package)
+    # The default import already ran (``first_import``).
     repo = target["repo"]
     notebook = source["exported"]
 
@@ -2636,9 +2744,9 @@ def test_the_reconciliation_never_reaches_another_notebook(
 
 
 def test_the_reconciliation_records_a_resumable_step_per_table(
-    source, target, package
+    source, target, package, first_import
 ):
-    _import(target, package)
+    # The default import already ran (``first_import``).
 
     steps = {
         str(row["table_name"])
@@ -3316,12 +3424,12 @@ def test_a_failed_package_still_resumes_while_it_is_the_newest(
 
 
 def test_the_applied_snapshot_is_recorded_on_the_import_row(
-    source, target, package
+    source, target, package, first_import
 ):
     """sync_imports has no column for the package's export time, so it lives
     in report_json -- and every later import of this source environment orders
     itself against it."""
-    report = _import(target, package)
+    report = first_import
 
     row = _sync_import_row(target, report.package_id)
     stored = json.loads(row["report_json"])
@@ -4034,3 +4142,40 @@ def test_a_crash_right_after_reservation_still_blocks_a_narrower_same_source_pac
             target["repo"], "SELECT status FROM notebooks WHERE id=?", (notebook_id,)
         )
         assert row["status"] != "importing"
+
+
+# --------------------------------------------------------- xdist scheduling
+
+
+_WORLD_FIXTURES = frozenset({"source", "target", "package", "first_import"})
+_WORLD_GROUPS = 3
+
+
+def _group_world_tests() -> None:
+    """Scheduling only. Ungrouped, every worker that drew one of these tests
+    would build both worlds (~16 builds each per gate); one file-level group
+    would put ~30 s of import calls on one worker. So the world tests are
+    dealt round-robin into ``_WORLD_GROUPS`` groups, and every
+    ``first_import`` test joins the first group so the after-import world is
+    built once. Tests that touch no world stay free."""
+    namespace = globals()
+    world_tests = [
+        name
+        for name, value in list(namespace.items())
+        if name.startswith("test_")
+        and inspect.isfunction(value)
+        and _WORLD_FIXTURES & set(inspect.signature(value).parameters)
+    ]
+    plain = [
+        name
+        for name in world_tests
+        if "first_import" not in inspect.signature(namespace[name]).parameters
+    ]
+    for name in world_tests:
+        group = plain.index(name) % _WORLD_GROUPS if name in plain else 0
+        namespace[name] = pytest.mark.xdist_group(f"sync_import_world_{group}")(
+            namespace[name]
+        )
+
+
+_group_world_tests()
