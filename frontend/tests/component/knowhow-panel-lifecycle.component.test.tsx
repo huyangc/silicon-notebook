@@ -195,6 +195,38 @@ test("switching notebookId resets the open table and reloads the new notebook's 
   ]);
 });
 
+test("a notebook switch that also cites a table with the open table's id loads the new notebook's table", async () => {
+  // notebookId and initialTableId change in one update, and the cited table's id
+  // equals the one already open. The reset effect (E6) clears the selection and
+  // the jump effect (E7) selects the same id again in the same batch, so
+  // selectedTableId is unchanged across the two commits and the detail effect
+  // (E4, which follows selectedTableId only since S6) does not rerun. openTable
+  // sees the reset through selectedTableIdRef, treats it as a different table and
+  // loads it itself: exactly one detail request, against the new notebook.
+  // (Found in the S6 review: without it the grid stayed blank with no request.)
+  const server = suite.server();
+  routeTable(server, "nb-1", recordDetail());
+  const other = recordDetail({ title: "另一本的表" });
+  server.on("GET", "/notebooks/nb-2/knowhow", { json: [wireSummary({ id: "t-rec", title: other.title, rowCount: other.rows.length })] });
+  server.on("GET", "/notebooks/nb-2/knowhow/t-rec", { json: wireDetail(other) });
+  const user = userEvent.setup();
+  const panel = renderPanel();
+  await user.click(await screen.findByRole("button", { name: "打开表格：排障记录" }));
+  await screen.findByRole("heading", { name: "排障记录" });
+  await settle();
+
+  panel.update({ ...BASE_PROPS, notebookId: "nb-2", initialTableId: "t-rec" });
+  expect(await screen.findByRole("heading", { name: "另一本的表" })).toBeInTheDocument();
+  await settle();
+  expect(screen.getAllByRole("button", { name: "供电异常" })).toHaveLength(1);
+  expect(server.log).toEqual([
+    { method: "GET", path: "/notebooks/nb-1/knowhow" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
+    { method: "GET", path: "/notebooks/nb-2/knowhow" },
+    { method: "GET", path: "/notebooks/nb-2/knowhow/t-rec" },
+  ]);
+});
+
 test("switching notebookId closes an open import wizard", async () => {
   // The wizard uploads into the panel's current notebookId. Until S6 the reset
   // effect (E6) left importOpen alone, so an import started in nb-1 stayed open
