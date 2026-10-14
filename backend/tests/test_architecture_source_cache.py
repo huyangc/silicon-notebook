@@ -56,22 +56,46 @@ def test_global_guard_keeps_synthetic_sources_independent_of_cached_files(tmp_pa
     assert _subjectless_keyword_sites(sources) == {str(path)}
 
 
-def test_whole_app_scans_and_single_file_reads_share_one_tree_per_file():
-    app = citation_guard.APP
-    shared = {entry.relative: entry.tree for entry in app_source_trees()}
-    assert set(shared) == {
-        path.relative_to(app).as_posix() for path in app.rglob("*.py")
-    }
-    relative = "services/evidence_context.py"
+def test_two_different_guards_scan_the_very_same_tree_objects(tmp_path, monkeypatch):
+    app = tmp_path / "app"
+    (app / "services").mkdir(parents=True)
+    # unique text: a tree cached by an earlier test must not hide the scan
+    (app / "services" / "one.py").write_text(f"X = '{tmp_path.name}-one'\n", encoding="utf-8")
+    (app / "two.py").write_text(f"Y = '{tmp_path.name}-two'\n", encoding="utf-8")
+    monkeypatch.setattr(citation_guard, "APP", app)
 
-    # two different guards (and the plain single-file entry) hold the very same
-    # tree object, and a second whole-app lookup hands the same objects back
-    assert citation_guard.parse_file(app / relative) is shared[relative]
-    assert read_source_tree(app / relative) is shared[relative]
-    assert hit_origin_guard.d9.parse_file(app / relative) is shared[relative]
-    assert all(
-        again.tree is shared[again.relative] for again in app_source_trees(app)
-    )
+    seen: dict[str, list[tuple[str, int]]] = {"citation": [], "hit_origin": []}
+
+    def recorder(label, real):
+        def scan_tree(relative, tree):
+            seen[label].append((relative, id(tree)))
+            return real(relative, tree)
+        return scan_tree
+
+    monkeypatch.setattr(citation_guard, "scan_tree",
+                        recorder("citation", citation_guard.scan_tree))
+    monkeypatch.setattr(hit_origin_guard, "scan_tree",
+                        recorder("hit_origin", hit_origin_guard.scan_tree))
+    citation_guard._scan_tree_cached.cache_clear()
+    hit_origin_guard._scan_tree_cached.cache_clear()
+
+    citation_guard.scan()
+    hit_origin_guard.scan()
+
+    assert sorted(seen["citation"]) == sorted(seen["hit_origin"])
+    assert {relative for relative, _ in seen["citation"]} == {"services/one.py", "two.py"}
+    # ... and they are the objects the shared entry hands to anyone else
+    shared = {entry.relative: id(entry.tree) for entry in app_source_trees(app)}
+    assert dict(seen["citation"]) == shared
+    assert id(read_source_tree(app / "two.py")) == shared["two.py"]
+    assert id(citation_guard.parse_file(app / "two.py")) == shared["two.py"]
+
+
+def test_identical_text_in_two_files_is_parsed_once(tmp_path):
+    (tmp_path / "a.py").write_text(f"Z = '{tmp_path.name}'\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text(f"Z = '{tmp_path.name}'\n", encoding="utf-8")
+    first, second = app_source_trees(tmp_path)
+    assert first.tree is second.tree
 
 
 def test_whole_app_scan_sees_edited_text_as_a_new_tree(tmp_path):

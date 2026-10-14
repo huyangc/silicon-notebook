@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.xdist_group(name="source_scans_core")
 
 ROOT = Path(__file__).resolve().parents[2]
 GUARD_PATH = ROOT / "scripts" / "check_architecture_boundaries.py"
