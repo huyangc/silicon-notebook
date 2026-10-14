@@ -867,14 +867,15 @@ export default function AdminUsagePage() {
     setMergeBlocked(null);
     try {
       const merged = await mergeAdminSsoAccount(target.id, mergeInput.trim());
-      setState((previous) => previous.kind === "ready"
-        ? {
-            kind: "ready",
-            rows: previous.rows
-              .filter((row) => row.id !== merged.removed_user_id)
-              .map((row) => row.id === target.id ? { ...row, username: merged.username } : row),
-          }
-        : previous);
+      const applyMerge = (list: AdminUserUsage[]) => list
+        .filter((row) => row.id !== merged.removed_user_id)
+        .map((row) => row.id === target.id ? { ...row, username: merged.username } : row);
+      setState((previous) => previous.kind === "ready" ? { kind: "ready", rows: applyMerge(previous.rows) } : previous);
+      // The new name (and the removed row) can move the kept row to another page under the
+      // current sort: follow it, so the popover and its success notice stay on screen.
+      const keptIndex = sortAdminUsers(applyMerge(readyRows), sortKey, sortDirection)
+        .findIndex((row) => row.id === target.id);
+      if (keptIndex >= 0) setPage(Math.floor(keptIndex / pageSize) + 1);
       setExpanded((previous) => previous === merged.removed_user_id ? null : previous);
       cancelMerge();
       setRowNotice({
