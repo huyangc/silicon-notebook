@@ -1093,7 +1093,11 @@ class _FixtureClock:
       threads started while the clock was entered (the repository's
       model-scheduler thread and the per-call retrieval pools); a thread
       started by anyone else, a leftover thread included, is not the run's;
-    - no garbage collection is in progress.
+    - no garbage collection is in progress on the calling thread (a
+      collection, and every finalizer it runs, stays on the thread that
+      triggered it; a collection on another thread can release the GIL in a
+      finalizer and let the Ask thread run meanwhile, and those reads are the
+      run's own).
     """
 
     def __init__(self, start: float = 1000.0, step: float = 0.001) -> None:
@@ -1104,11 +1108,24 @@ class _FixtureClock:
         # Thread objects, not idents: an ident can be recycled by a thread
         # started later, a Thread object cannot.
         self._owned = {threading.current_thread()}
-        self._collecting = 0
+        # Collecting thread ident -> nesting depth, for collections that
+        # started while the clock was entered.
+        self._collecting: dict[int, int] = {}
         self._thread_start_patch = None
 
     def _on_gc(self, phase: str, _info: dict) -> None:
-        self._collecting += 1 if phase == "start" else -1
+        # Callbacks run on the collecting thread. A "stop" without a "start"
+        # belongs to a collection that was already open when the clock was
+        # entered; it is ignored rather than counted below zero.
+        thread = threading.get_ident()
+        if phase == "start":
+            self._collecting[thread] = self._collecting.get(thread, 0) + 1
+            return
+        depth = self._collecting.get(thread, 0)
+        if depth > 1:
+            self._collecting[thread] = depth - 1
+        elif depth == 1:
+            del self._collecting[thread]
 
     def __enter__(self) -> "_FixtureClock":
         real_start = threading.Thread.start
@@ -1131,7 +1148,7 @@ class _FixtureClock:
     def __call__(self) -> float:
         caller = sys._getframe(1).f_globals.get("__name__", "")
         if (
-            self._collecting
+            threading.get_ident() in self._collecting
             or not (caller == "app" or caller.startswith("app."))
             or threading.current_thread() not in self._owned
         ):
