@@ -587,6 +587,9 @@ class GlobalAskService:
         self.follow_poll_seconds = 0.5
         # ...and how far a follower backs off while nothing moves.
         self.follow_poll_max_seconds = 5.0
+        # How long ``wait`` blocks on its delivery queue before re-checking
+        # ``stop`` and the no-progress window; a test shortens it.
+        self.wait_poll_seconds = 0.5
         # How often a WATCHED local feed checks the row for a terminal that
         # another process wrote (see ``_watch_store``).
         self.feed_watch_seconds = 2.0
@@ -1593,7 +1596,7 @@ class GlobalAskService:
         no-progress clock carried over; a follower that fails a second time
         raises ``AskFollowFailed`` instead of handing back a running row.
         """
-        last_progress = time.monotonic()
+        last_progress = self._clock()
         follow_failures = 0
         while True:
             events = self.attach(
@@ -1628,11 +1631,11 @@ class GlobalAskService:
                 let_go()
                 raise AskWaitAbandoned()
             try:
-                item = events.get(timeout=0.5)
+                item = events.get(timeout=self.wait_poll_seconds)
             except queue.Empty:
                 with self._lock:
                     local = job_id in self._live
-                if not local and time.monotonic() - last_progress > ATTACH_STALL_SECONDS:
+                if not local and self._clock() - last_progress > ATTACH_STALL_SECONDS:
                     let_go()
                     raise AskExecutorGone() from None
                 continue
@@ -1641,7 +1644,7 @@ class GlobalAskService:
             if isinstance(item, dict) and item.get("event") == "error":
                 failed = True
                 continue
-            last_progress = time.monotonic()
+            last_progress = self._clock()
 
     def _follow(self, events, job_id, user_id, allowed_notebook_ids=None):
         """Poll the store on this ONE client's behalf until the job ends.
