@@ -425,6 +425,10 @@ class GraphRetrievalService(_RetrievalState):
         with self._connect() as database:
             state = self.unified_kg.state_row(database, notebook_id)
         sequence = int(state["canonical_rel_seq"]) if state else -1
+        # K1: canonical_rel_seq restarts after a graph delete (re-extraction
+        # and rebuild can land on the same value), so the key also carries
+        # the delete epoch -- never repeats for a notebook.
+        epoch = int(state["kg_reset_epoch"] or 0) if state else 0
         def load():
             with self._connect() as database:
                 return {
@@ -433,7 +437,7 @@ class GraphRetrievalService(_RetrievalState):
                     for row in self.unified_kg.edge_support_rows(database, notebook_id)
                 }
         return self._vector_cache.get(
-            f"{notebook_id}:edge_support", ("edge_support", sequence), load
+            f"{notebook_id}:edge_support", ("edge_support", sequence, epoch), load
         )
     def __init__(
         self,

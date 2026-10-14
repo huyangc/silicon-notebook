@@ -120,15 +120,49 @@ _PUBLISHED_CLUSTER_GEN = (
 # mention_seq for mention_edges + concept_comentions, which one
 # replace_mention_bridge rewrites together), and every reader of that layer
 # treats -2 as "no derived data". Only that layer's own rewrite writes a real
-# seq (``replace_canonical_relations`` / ``replace_mention_bridge`` /
-# ``clear_mention_bridge``), so the layer stays closed through a unified
-# rebuild's clustering phase and after a failed layer recompute -- unlike
+# seq (``replace_canonical_relations`` / ``replace_mention_bridge``;
+# ``clear_mention_bridge`` writes no seq, so a cleared deleted layer stays -2
+# over empty tables), so the layer stays closed through a unified rebuild's
+# clustering phase and after a failed layer recompute -- unlike
 # ``last_rebuild_at``, which the rebuild writes before the layers (ruling 13).
+# That seq write is conditional on the rebuild's entry-time kg_reset_epoch
+# (``_write_layer_seq``), so a recompute that a delete overtook cannot reopen
+# the layer either.
 # Nothing else writes -2: births and copies read -1, the Memory-isolation
 # re-queue keeps -2 where it finds it, the indexing-pipeline publish clears
 # the tables before writing -1. One primary-key probe of ``unified_kg_state``
 # per statement, uncorrelated (evaluated once: InitPlan + One-Time Filter).
 DELETED_LAYER_SEQ = -2
+
+
+def _write_layer_seq(
+    db: Any, notebook_id: str, column: str, seq: int, reset_epoch: "int | None",
+) -> bool:
+    """The one statement that reopens a derived layer: its seq write. With
+    ``reset_epoch`` (the rebuild's entry-time ``kg_reset_epoch``) the write is
+    conditional on the epoch not having moved -- a graph delete committed
+    while the layer was being recomputed (an offline CLI rebuild holds no
+    in-process maintenance slot) must not reopen the layer with the deleted
+    graph's rows. False means the epoch moved: the caller raises and the
+    whole replace transaction rolls back, leaving the layer at -2. The guard
+    is a term on the existing primary-key UPDATE, which keeps the
+    pre-K1 lock order (derived rows first, then the state row) -- the same
+    order as the indexing-pipeline publish; an absent state row stays the
+    old silent no-op."""
+    if reset_epoch is None:
+        db.execute(
+            f"UPDATE unified_kg_state SET {column}=%s WHERE notebook_id=%s",
+            (seq, notebook_id))
+        return True
+    cursor = db.execute(
+        f"UPDATE unified_kg_state SET {column}=%s "
+        f"WHERE notebook_id=%s AND COALESCE(kg_reset_epoch, 0)=%s",
+        (seq, notebook_id, reset_epoch))
+    if int(cursor.rowcount or 0) > 0:
+        return True
+    return reset_epoch == 0 and db.execute(
+        "SELECT 1 FROM unified_kg_state WHERE notebook_id=%s",
+        (notebook_id,)).fetchone() is None
 
 
 def _derived_layer_live(seq_column: str) -> str:
@@ -614,9 +648,10 @@ class UnifiedKgStore:
             stable) advance this instead.
           - mention_seq: the co-mention bridge rebuild.
           - kg_reset_epoch: bumped ONLY by delete_notebook_graph_rows, in the
-            SAME transaction that resets kg_mutation_seq/cluster_mutation_seq/
-            mention_seq back to their birth-row values (design doc batch-3-W1
-            Sec 3.3 option C). Only increases, never decreases.
+            SAME transaction that resets kg_mutation_seq/cluster_mutation_seq
+            back to their birth-row values and writes mention_seq as the K1
+            "layer deleted" sentinel -2 (design doc batch-3-W1 Sec 3.3 option
+            C; K1 ruling 13). Only increases, never decreases.
         A monotonic counter is STRICTLY more sensitive than (COUNT, MAX ts): it
         also catches a same-second in-place edit that a 1s-resolution timestamp
         would miss. Absent row -> (0, 0, -1, 0), matching version_signal's
@@ -1515,8 +1550,9 @@ class UnifiedKgStore:
 
     @staticmethod
     def replace_canonical_relations(
-        db: Any, notebook_id: str, rows: List[tuple], seq: int
-    ) -> None:
+        db: Any, notebook_id: str, rows: List[tuple], seq: int,
+        *, reset_epoch: "int | None" = None,
+    ) -> bool:
         db.execute("DELETE FROM canonical_relations WHERE notebook_id=%s", (notebook_id,))
         for i in range(0, len(rows), 1000):
             execute_many(
@@ -1536,9 +1572,8 @@ class UnifiedKgStore:
                     for row in rows[i:i + 1000]
                 ],
             )
-        db.execute(
-            "UPDATE unified_kg_state SET canonical_rel_seq=%s WHERE notebook_id=%s",
-            (seq, notebook_id))
+        return _write_layer_seq(
+            db, notebook_id, "canonical_rel_seq", seq, reset_epoch)
 
     # ------------------------------------------------------- mention bridge
     @staticmethod
@@ -1559,7 +1594,9 @@ class UnifiedKgStore:
         edges: List[tuple],
         comention_rows: List[tuple],
         seq: int,
-    ) -> None:
+        *,
+        reset_epoch: "int | None" = None,
+    ) -> bool:
         db.execute("DELETE FROM mention_edges WHERE notebook_id=%s", (notebook_id,))
         db.execute("DELETE FROM concept_comentions WHERE notebook_id=%s", (notebook_id,))
         for i in range(0, len(edges), 1000):
@@ -1574,9 +1611,7 @@ class UnifiedKgStore:
                 "INSERT INTO concept_comentions "
                 "(notebook_id, canonical_a, canonical_b, bridge_claims) "
                 "VALUES (%s,%s,%s,%s)", comention_rows[i:i + 1000])
-        db.execute(
-            "UPDATE unified_kg_state SET mention_seq=%s WHERE notebook_id=%s",
-            (seq, notebook_id))
+        return _write_layer_seq(db, notebook_id, "mention_seq", seq, reset_epoch)
 
     # ---------------------------------------------------------- communities
     @staticmethod

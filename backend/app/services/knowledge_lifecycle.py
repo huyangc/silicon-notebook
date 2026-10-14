@@ -60,6 +60,7 @@ from app.repositories.ports import (
     KgBuildAlreadyRunning,
     KgBuildJobStorePort,
     KgDerivedGenerationPreempted,
+    KgDerivedLayerResetRaced,
     KgMaintenanceAlreadyRunning,
     KnowledgeStorePort,
     NotebookDeletingAbortsMaintenanceError,
@@ -906,6 +907,9 @@ class KnowledgeLifecycleService:
         try:
             self._sweep_drain_only_residue(notebook_id, totals)
         except Exception as exc:  # noqa: BLE001 - auxiliary sweep is fail-open
+            self.event_log.logger.warning(
+                "kg delete residue sweep failed for %s", notebook_id,
+                exc_info=True)
             self.event_log.emit({
                 "kind": "kg_delete_residue_sweep_failed",
                 "notebook_id": notebook_id,
@@ -6422,6 +6426,7 @@ class KnowledgeLifecycleService:
         seq = int(st["kg_mutation_seq"]) if st else 0
         if (not force and st is not None and st["canonical_rel_seq"] == seq and cnt > 0):
             return int(cnt)
+        reset_epoch = int(st["kg_reset_epoch"] or 0) if st else 0
         agg: Dict[tuple, dict] = {}
         with self._connect() as db:
             cur = self.unified_kg.canonical_relation_seed_rows(db, notebook_id)
@@ -6445,9 +6450,12 @@ class KnowledgeLifecycleService:
                  json.dumps(ent["samples"]), now)
                 for (s, et, t), ent in agg.items()]
         with self._write() as db:
-            self.unified_kg.replace_canonical_relations(
-                db, notebook_id, rows, seq
-            )
+            # K1: a delete committed since the seed read rolls this back (the
+            # layer stays at -2) -- see ``KgDerivedLayerResetRaced``.
+            if not self.unified_kg.replace_canonical_relations(
+                db, notebook_id, rows, seq, reset_epoch=reset_epoch
+            ):
+                raise KgDerivedLayerResetRaced(notebook_id, "canonical_relations")
         return len(rows)
 
     def rebuild_mention_bridge(self, notebook_id: str, force: bool = False) -> int:
@@ -6478,6 +6486,7 @@ class KnowledgeLifecycleService:
         seq = int(st["kg_mutation_seq"]) if st else 0
         if (not force and st is not None and st["mention_seq"] == seq and cnt > 0):
             return int(cnt)
+        reset_epoch = int(st["kg_reset_epoch"] or 0) if st else 0
 
         import unicodedata as _ud
         from itertools import combinations as _combinations
@@ -6575,9 +6584,11 @@ class KnowledgeLifecycleService:
                                  "max_canonicals": _MENTION_MAX_CANONS_PER_CLAIM})
         cm_rows = [(notebook_id, a, b, n) for (a, b), n in comention.items()]
         with self._write() as db:
-            self.unified_kg.replace_mention_bridge(
-                db, notebook_id, edges, cm_rows, seq
-            )
+            # K1: same epoch condition as rebuild_canonical_relations.
+            if not self.unified_kg.replace_mention_bridge(
+                db, notebook_id, edges, cm_rows, seq, reset_epoch=reset_epoch
+            ):
+                raise KgDerivedLayerResetRaced(notebook_id, "mention_bridge")
         return len(edges)
 
     def _claim_generation_for_communities(
