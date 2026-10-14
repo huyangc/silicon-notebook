@@ -428,7 +428,7 @@ def test_backend_parallelism_is_bounded_and_explicit():
     assert "-n auto" not in config
     assert "worksteal" not in config
     backend_lane = (ROOT / "scripts" / "check_backend.sh").read_text(encoding="utf-8")
-    assert 'BACKEND_PYTEST_WORKERS="${BACKEND_PYTEST_WORKERS:-12}"' in backend_lane
+    assert 'BACKEND_PYTEST_WORKERS="${BACKEND_PYTEST_WORKERS:-16}"' in backend_lane
 
 
 def test_the_collected_heap_is_frozen_out_of_the_cyclic_collector():

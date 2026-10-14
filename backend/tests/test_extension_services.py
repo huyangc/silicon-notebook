@@ -43,7 +43,7 @@ def service(tmp_path, *, key="demo/main", command=None, probe=None, mode="manage
 
 
 # Cold-starting a real supervisor (python + imports) can take well over the
-# default 5s when the suite runs under ``-n 12``; waits that depend on it use this.
+# default 5s when the suite runs under the gate's 16 workers; waits that depend on it use this.
 COLD_START_SECONDS = 30
 
 
