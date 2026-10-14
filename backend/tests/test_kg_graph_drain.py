@@ -1581,7 +1581,7 @@ def test_community_pointer_sentinel_hides_kept_communities_until_a_rebuild(repo)
             "INSERT OR IGNORE INTO users (id,email,display_name,role,created_at,"
             "updated_at) VALUES ('user-copier','c@t','c','user',?,?)", (now, now),
         )
-    copied = repo.copy_notebook(nb.id, new_owner_id="user-copier")
+    copied = repo._runtime.sharing.copy_notebook(nb.id, new_owner_id="user-copier")
     with rt.database.connect() as db:
         copy_state = uk.state_row(db, copied.id)
         assert copy_state is None or copy_state["community_generation"] == 0
