@@ -75,30 +75,70 @@ def _seed_library(repo, notebook_id: str, prefix: str, *, name: str = _MOE) -> s
     return source_id
 
 
-@pytest.fixture
-def federated_corpus(tmp_path, monkeypatch):
-    """(repo, active_id, base_id, local_source_id, base_source_ids)."""
+# A world template is built and reopened under exactly this environment
+# (``world_template(..., env=...)`` is part of the template's identity), and
+# the per-test fixture applies the same values.
+WORLD_ENV = {"EVENT_LOG_ENABLED": "false", "LLM_LOG_ENABLED": "false"}
+
+# One worker runs the whole file, so the corpus is built once for it instead of
+# once per worker that happens to get one of these tests.
+pytestmark = pytest.mark.xdist_group(name="base_scope_federated_world")
+
+
+def _open_repository():
+    """A real ``SQLiteRepository`` on the current ``DATABASE_URL`` with a fake
+    embedder, the way every test of this file uses it."""
     from app.core.config import Settings
-    from app.models.schemas import NotebookCreate
     from app.services.embedding import FakeEmbedder
     from app.services.sqlite_repository import SQLiteRepository
     from tests.model_testkit import bind_all_embedding_clients
 
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
-    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
-    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
-    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     repo = SQLiteRepository(Settings(_env_file=None))
     bind_all_embedding_clients(repo, FakeEmbedder(dim=16))
+    return repo
 
-    base = repo.create_notebook(NotebookCreate(name="reference library"))
-    repo.mark_notebook_base(base.id)
-    active = repo.create_notebook(NotebookCreate(name="my notebook"))
-    # The incident shape: one local document, a mounted library holding more.
-    base_sources = [_seed_library(repo, base.id, f"base{n}") for n in (1, 2, 3)]
-    local_source = _seed_library(repo, active.id, "local")
-    repo.replace_notebook_bases(active.id, [base.id], "user-local")
-    return repo, active.id, base.id, local_source, base_sources
+
+def _build_federated_corpus(root) -> dict:
+    """Two libraries' worth of seeded sources, KG and chunks plus the mount,
+    all written BEFORE any test touches the data."""
+    from app.models.schemas import NotebookCreate
+
+    repo = _open_repository()
+    try:
+        base = repo.create_notebook(NotebookCreate(name="reference library"))
+        repo.mark_notebook_base(base.id)
+        active = repo.create_notebook(NotebookCreate(name="my notebook"))
+        # The incident shape: one local document, a mounted library holding more.
+        base_sources = [_seed_library(repo, base.id, f"base{n}") for n in (1, 2, 3)]
+        local_source = _seed_library(repo, active.id, "local")
+        repo.replace_notebook_bases(active.id, [base.id], "user-local")
+    finally:
+        repo.close()
+    return {
+        "active": active.id, "base": base.id,
+        "local_source": local_source, "base_sources": base_sources,
+    }
+
+
+def _reopen_federated_corpus(root):
+    return _open_repository()
+
+
+@pytest.fixture
+def federated_corpus(tmp_path, tmp_path_factory, monkeypatch):
+    """(repo, active_id, base_id, local_source_id, base_source_ids), over a
+    private copy of the corpus built once per process."""
+    from tests.world_templates import world_env, world_template
+
+    template = world_template(
+        tmp_path_factory, "base-scope-federated",
+        _build_federated_corpus, _reopen_federated_corpus, env=WORLD_ENV,
+    )
+    root, world = template.materialize(tmp_path)
+    for name, value in {**WORLD_ENV, **world_env(root)}.items():
+        monkeypatch.setenv(name, value)
+    repo = _open_repository()
+    return repo, world["active"], world["base"], world["local_source"], world["base_sources"]
 
 
 def _base_excluded(active_id: str):

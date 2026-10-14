@@ -63,12 +63,20 @@ import pytest
 from app.api.deps import identity_repository, notebook_sharing_repository, repository
 from app.api.mcp_tools.refs import element_ref
 from app.core.request_context import reset_request_user, set_request_user
+from app.models.identity import AgentProfile, UserProfile
+from app.models.notebooks import NotebookSummary
 from app.repositories.ports import ChunkWrite, SourceElementWrite
 from tests.model_testkit import bind_chat_client
 from tests.test_default_ceiling_entrypoints import _ReportModel, build_app
 from tests.test_mcp_memory_channel_e2e import FULL_SCOPES, token
 from tests.test_memory_mcp import OfficialMcpClient, _payload
+from tests.world_templates import world_env, world_template
 
+
+# One worker runs the whole file, so the world is seeded once for it instead of
+# once per worker that happens to get one of these tests. (The PostgreSQL twin
+# imports ``build_world`` and the assertions, not this mark.)
+pytestmark = pytest.mark.xdist_group(name="mount_viewer_e2e_world")
 
 NOW = "2026-10-08T00:00:00+00:00"
 TERM = "quasarlink"
@@ -1041,9 +1049,109 @@ def assert_a_join_summary_is_the_joiners(env) -> None:
 # SQLite
 # ---------------------------------------------------------------------------
 
+# The world is seeded once per process (``build_world`` through the real
+# application, exactly as the PostgreSQL twin builds it per test) and every test
+# gets a private copy; only the cheap parts -- the FastAPI app and the model
+# objects the assertions pass around -- are rebuilt per test. Nothing a test
+# does to the world (``grant_bob_the_library``, mounts it removes, ...) is
+# part of the copy.
+
+#: What ``build_app`` / ``build_mcp_app`` put in the environment besides the
+#: database and storage location. A world is built and reopened under this
+#: (``world_template(..., env=...)`` is part of its identity) and each test
+#: applies the same values; the build proves the list is complete and exact.
+WORLD_ENV = {
+    "SILICON_NOTEBOOK_AUTH_OPTIONAL": "false",
+    "EVENT_LOG_ENABLED": "false",
+    "LLM_LOG_ENABLED": "false",
+    "OPENAI_COMPAT_API_KEY": "",
+    "EMBED_PROVIDER": "",
+    "MINERU_MODE": "off",
+    "MINERU_API_URL": "",
+    "MINERU_API_TOKEN": "",
+    "MCP_PUBLIC_URL": "https://memory.example.test/mcp",
+    "MCP_REQUIRE_HTTPS": "1",
+}
+
+#: The ``env`` entries of ``build_world`` that are rows (not live objects), and
+#: the model each one is rebuilt from.
+_WORLD_MODELS = {
+    "alice": UserProfile, "bob": UserProfile, "carol": UserProfile,
+    "notebook": NotebookSummary, "library": NotebookSummary,
+    "empty": NotebookSummary,
+    "alice_profile": AgentProfile, "bob_profile": AgentProfile,
+    "carol_profile": AgentProfile,
+}
+
+
+class _RecordingPatch(pytest.MonkeyPatch):
+    """Remembers every variable ``setenv`` was asked for."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.assigned: dict[str, str] = {}
+
+    def setenv(self, name, value, prepend=None):
+        self.assigned[name] = str(value)
+        super().setenv(name, value, prepend)
+
+
+def _build_sqlite_world(root) -> dict:
+    patch = _RecordingPatch()
+    try:
+        env = build_world(world_env(root)["DATABASE_URL"], root, patch, "?")
+    finally:
+        patch.undo()
+    assert env["ph"] == "?"
+    settings = {
+        name: value for name, value in patch.assigned.items()
+        if name not in world_env(root)
+    }
+    assert settings == WORLD_ENV, (
+        "build_app changed the environment it builds under; update WORLD_ENV"
+    )
+    assert set(_WORLD_MODELS) <= set(env), sorted(env)
+    return {
+        "models": {
+            key: env[key].model_dump(mode="json") for key in _WORLD_MODELS
+        },
+        "asset_id": env["asset_id"],
+    }
+
+
+def _open_sqlite_world(payload: dict | None = None) -> dict:
+    """What ``build_world`` leaves the test with, over an existing database:
+    the application, its repository and the rows as models."""
+    from app.api.deps import mcp_memory_repository
+    from app.core.config import get_settings
+    from app.main import create_app
+
+    get_settings.cache_clear()
+    repository.cache_clear()
+    app = create_app()
+    env: dict = {"app": app, "service": mcp_memory_repository(), "ph": "?"}
+    if payload is not None:
+        env["asset_id"] = payload["asset_id"]
+        for key, model in _WORLD_MODELS.items():
+            env[key] = model.model_validate(payload["models"][key])
+    return env
+
+
+def _reopen_sqlite_world(root):
+    _open_sqlite_world()
+    return repository()
+
+
 @pytest.fixture
-def sqlite_env(tmp_path, monkeypatch):
-    env = build_world(f"sqlite:///{tmp_path / 'mount.db'}", tmp_path, monkeypatch, "?")
+def sqlite_env(tmp_path, tmp_path_factory, monkeypatch):
+    template = world_template(
+        tmp_path_factory, "mount-viewer-e2e-sqlite",
+        _build_sqlite_world, _reopen_sqlite_world, env=WORLD_ENV,
+    )
+    root, payload = template.materialize(tmp_path)
+    for name, value in {**WORLD_ENV, **world_env(root)}.items():
+        monkeypatch.setenv(name, value)
+    env = _open_sqlite_world(payload)
     try:
         yield env
     finally:

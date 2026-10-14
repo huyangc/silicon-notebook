@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 import time
 
 import pytest
@@ -35,8 +36,13 @@ from app.models.schemas import AskRequest
 from app.services.embedding import FakeEmbedder
 from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_chat_client
+from tests.world_templates import world_env, world_template
 
 EMBED_DIM = 16
+
+# One worker runs the whole file, so the imported world is built once for it
+# instead of once per worker that happens to get one of these tests.
+pytestmark = pytest.mark.xdist_group(name="knowhow_retrieval_world")
 
 # Time-series-fix-up domain column names, verbatim from the task brief
 # ("列名用时序修复域：违例概念/现象识别方法/根因分析动作/修复方法/依赖工具") —
@@ -80,8 +86,28 @@ def _xlsx_bytes(header: list[str], rows: list[list[str]]) -> bytes:
     return buf.getvalue()
 
 
-@pytest.fixture
-def client(tmp_path, monkeypatch):
+# The environment the app runs under here. A world template is built and
+# reopened under exactly this (``world_template(..., env=...)`` is part of the
+# template's identity), and the per-test fixture applies the same values.
+# Mirrors test_retrieval_service.py's repo fixture: blank any real LLM keys a
+# developer's shell might export, so ask_chunk's "no LLM configured"
+# deterministic fallback path is dependable in every environment, not just a
+# clean CI box.
+WORLD_ENV = {
+    "EVENT_LOG_ENABLED": "false",
+    "LLM_LOG_ENABLED": "false",
+    "EMBED_DIM": str(EMBED_DIM),
+    **{
+        key: ""
+        for key in (
+            "OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
+            "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL",
+        )
+    },
+}
+
+
+def _open_app_client() -> TestClient:
     """The app's own repository singleton (obtained via
     ``app.api.knowhow_routes.repository()``, an ``lru_cache``d no-arg function —
     calling it constructs-and-caches once per test, and ``TestClient(app)``'s
@@ -89,19 +115,6 @@ def client(tmp_path, monkeypatch):
     fake embedder installed on it so the background projection job actually
     produces vectors — needed to later prove a vector really disappears on
     delete, not merely that one was never created."""
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
-    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
-    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
-    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_DIM", str(EMBED_DIM))
-    # Mirrors test_retrieval_service.py's repo fixture: blank any real LLM
-    # keys a developer's shell might export, so ask_chunk's "no LLM
-    # configured" deterministic fallback path is dependable in every
-    # environment, not just a clean CI box.
-    for _k in ("OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
-               "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
-        monkeypatch.setenv(_k, "")
-
     from app.api.knowhow_routes import repository
     from app.main import app
 
@@ -109,6 +122,63 @@ def client(tmp_path, monkeypatch):
     c._repo = repository()  # type: ignore[attr-defined]
     bind_all_embedding_clients(c._repo, FakeEmbedder(dim=EMBED_DIM))
     assert c._repo.configured("knowhow_embedding")
+    return c
+
+
+def quiesce_knowhow_world(timeout: float = 10.0) -> None:
+    """Wait until nothing is still projecting. A world is copied as bytes, so
+    a projection run, a debounce timer or the orphan-asset sweep job still in
+    flight would land in the template AFTER it was frozen (or in a closed
+    database). Same condition the autouse teardown in conftest enforces."""
+    from app.services import background_jobs
+    from app.services.knowhow import api as knowhow_api
+
+    deadline = time.monotonic() + timeout
+    while True:
+        busy = False
+        for scheduler in list(knowhow_api._SCHEDULERS.values()):
+            with scheduler._lock:
+                busy = busy or bool(
+                    scheduler._running or scheduler._timers or scheduler._rerun
+                )
+        if not busy:
+            break
+        assert time.monotonic() < deadline, "knowhow projection never went idle"
+        time.sleep(0.01)
+    background_jobs._drain_maintenance_executors_for_tests(timeout=timeout)
+    # SQLite connections are per thread, and ``repository.close()`` only closes
+    # the calling thread's: the pool's worker threads still hold theirs inside
+    # the world. Stop the pools and wait for their threads to exit (the same
+    # reset conftest does after every test) so the world can be proven closed.
+    background_jobs._reset_maintenance_gate_for_tests()
+    deadline = time.monotonic() + timeout
+    while any(t.name.startswith("background-") for t in threading.enumerate()):
+        assert time.monotonic() < deadline, "background workers never exited"
+        time.sleep(0.01)
+
+
+@pytest.fixture
+def client(request, tmp_path, tmp_path_factory, monkeypatch):
+    """``_open_app_client()`` on a fresh database — or, for a test that also
+    requests ``imported``, on a private copy of the imported-and-projected
+    world (built once per process, see ``_build_imported_world``). The
+    expensive import + projection happens BEFORE any test touches the data, so
+    handing every test a copy is the same world each used to build itself."""
+    if "imported" not in request.fixturenames:
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+        monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+        for name, value in WORLD_ENV.items():
+            monkeypatch.setenv(name, value)
+        return _open_app_client()
+    template = world_template(
+        tmp_path_factory, "knowhow-retrieval-imported",
+        _build_imported_world, _reopen_imported_world, env=WORLD_ENV,
+    )
+    root, payload = template.materialize(tmp_path)
+    for name, value in {**WORLD_ENV, **world_env(root)}.items():
+        monkeypatch.setenv(name, value)
+    c = _open_app_client()
+    c._world_payload = payload  # type: ignore[attr-defined]
     return c
 
 
@@ -157,10 +227,10 @@ def _poll_all_rows_settled(client, headers, nb, table_id, timeout=5.0):
     return detail
 
 
-@pytest.fixture
-def imported(client):
-    """Import the 3x5 fixture table and wait for it to fully project.
-    Returns everything the four scenarios need to key off of."""
+def _build_imported_world(root) -> dict:
+    """Import the 3x5 fixture table and wait for it to fully project, through
+    the real API. Returns everything the scenarios need to key off of."""
+    client = _open_app_client()
     headers = _login(client, "a00000601")
     nb = _mk_notebook(client, headers)
     table_id = _import_table(client, headers, nb)
@@ -174,6 +244,7 @@ def imported(client):
     row_id = next(
         r["id"] for r in detail["rows"] if r["cells"].get(concept_col) == "过冲问题"
     )
+    quiesce_knowhow_world()
     return {
         "nb": nb,
         "headers": headers,
@@ -181,6 +252,16 @@ def imported(client):
         "hidden_source_id": detail["hidden_source_id"],
         "row_id": row_id,
     }
+
+
+def _reopen_imported_world(root):
+    return _open_app_client()._repo
+
+
+@pytest.fixture
+def imported(client):
+    """The imported-and-projected world of ``client`` (see ``client``)."""
+    return client._world_payload
 
 
 # ---------------------------------------------------------------------------

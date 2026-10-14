@@ -49,8 +49,14 @@ from fastapi.testclient import TestClient
 from app.models.schemas import AskRequest
 from app.services.embedding import FakeEmbedder
 from tests.model_testkit import bind_all_embedding_clients
+from tests.test_knowhow_retrieval import quiesce_knowhow_world
+from tests.world_templates import world_env, world_template
 
 EMBED_DIM = 16
+
+# One worker runs the whole file, so the seeded world is built once for it
+# instead of once per worker that happens to get one of these tests.
+pytestmark = pytest.mark.xdist_group(name="knowhow_code_isolation_world")
 
 # A code-shaped, unmistakably distinctive token — never legitimately present
 # in any cell content_md, table/column name, or retrieval query fixture
@@ -82,20 +88,27 @@ class RecordingEmbedder(FakeEmbedder):
         return super().embed_query(text)
 
 
-@pytest.fixture
-def client(tmp_path, monkeypatch):
+# The environment the app runs under here. A world template is built and
+# reopened under exactly this (``world_template(..., env=...)`` is part of the
+# template's identity), and the per-test fixture applies the same values.
+WORLD_ENV = {
+    "EVENT_LOG_ENABLED": "false",
+    "LLM_LOG_ENABLED": "false",
+    "EMBED_DIM": str(EMBED_DIM),
+    **{
+        key: ""
+        for key in (
+            "OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
+            "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL",
+        )
+    },
+}
+
+
+def _open_app_client() -> TestClient:
     """The app's own repository singleton, with a recording fake embedder
     installed on it (see module docstring for why this must be the
     singleton, not a separately constructed SQLiteRepository)."""
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
-    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
-    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
-    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_DIM", str(EMBED_DIM))
-    for _k in ("OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
-               "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
-        monkeypatch.setenv(_k, "")
-
     from app.api.knowhow_routes import repository
     from app.main import app
 
@@ -104,6 +117,31 @@ def client(tmp_path, monkeypatch):
     c._recorder = RecordingEmbedder(dim=EMBED_DIM)  # type: ignore[attr-defined]
     bind_all_embedding_clients(c._repo, c._recorder)
     assert c._repo.configured("knowhow_embedding")
+    return c
+
+
+@pytest.fixture
+def client(request, tmp_path, tmp_path_factory, monkeypatch):
+    """``_open_app_client()`` on a private copy of the seeded world (built once
+    per process, see ``_build_seeded_world``) for a test that requests
+    ``seeded``; on a fresh database otherwise. The expensive table build,
+    projection and code attach happen BEFORE any test touches the data, so a
+    copy is the same world each test used to build itself."""
+    if "seeded" not in request.fixturenames:
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+        monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+        for name, value in WORLD_ENV.items():
+            monkeypatch.setenv(name, value)
+        return _open_app_client()
+    template = world_template(
+        tmp_path_factory, "knowhow-code-isolation-seeded",
+        _build_seeded_world, _reopen_seeded_world, env=WORLD_ENV,
+    )
+    root, payload = template.materialize(tmp_path)
+    for name, value in {**WORLD_ENV, **world_env(root)}.items():
+        monkeypatch.setenv(name, value)
+    c = _open_app_client()
+    c._world_payload = payload  # type: ignore[attr-defined]
     return c
 
 
@@ -189,13 +227,13 @@ def _all_relation_blobs(repo) -> list[str]:
     return [r["evidence"] for r in rows]
 
 
-@pytest.fixture
-def seeded(client):
+def _build_seeded_world(root) -> dict:
     """A table with an anchor + procedure + entity column, one row with
     real content in every cell, fully projected via the real
     ProjectionScheduler — then a code attachment carrying MARKER on the
     procedure cell (the natural "an external Agent implemented this
     method" case design doc §⑥-4 describes)."""
+    client = _open_app_client()
     headers = _login(client, "a00000701")
     nb = _mk_notebook(client, headers)
     table = _create_table(client, headers, nb)
@@ -218,12 +256,23 @@ def seeded(client):
     assert put_resp.json()["status"] == "implemented"
     assert MARKER in put_resp.json()["code_text"]
 
+    quiesce_knowhow_world()
     return {
         "headers": headers, "nb": nb, "table_id": table["id"],
         "hidden_source_id": detail["hidden_source_id"],
         "row_id": row["id"], "procedure_column_id": procedure_id,
         "code_url": code_url,
     }
+
+
+def _reopen_seeded_world(root):
+    return _open_app_client()._repo
+
+
+@pytest.fixture
+def seeded(client):
+    """The seeded world of ``client`` (see ``client``)."""
+    return client._world_payload
 
 
 # ---------------------------------------------------------------------------
