@@ -320,3 +320,107 @@ test("a failed delete of a table known neither by detail nor by the list uses a 
   await settle();
   expect(server.log).toEqual([LIST, DETAIL, DELETE]);
 });
+
+test("a DELETE that fails after a notebook switch reports nothing in the new notebook and still releases the lock", async () => {
+  // The failed table lives in nb-1 and cannot be reopened from nb-2, so neither
+  // the panel-top notice nor a toolbar banner may appear there; the lock must
+  // still be released, or nb-2's tables could never be deleted.
+  const server = routeTwoTables();
+  const release = server.hold("DELETE", "/notebooks/nb-1/knowhow/t-rec");
+  const other = recordDetail({ id: "t-other", title: "别的表" });
+  server.on("GET", "/notebooks/nb-2/knowhow", { json: [wireSummary({ id: "t-other", title: "别的表", rowCount: 2 })] });
+  server.on("GET", "/notebooks/nb-2/knowhow/t-other", { json: wireDetail(other) });
+  const user = userEvent.setup();
+  const panel = renderPanel({ initialTableId: "t-rec" });
+  await user.click(await screen.findByTitle("删除表"));
+  await user.click(screen.getByRole("button", { name: "确认删除" }));
+  expect(await screen.findByRole("button", { name: "删除中…" })).toBeDisabled();
+
+  panel.update({ ...BASE_PROPS, notebookId: "nb-2" });
+  await user.click(await screen.findByRole("button", { name: "打开表格：别的表" }));
+  await screen.findByRole("heading", { name: "别的表" });
+  await settle();
+  expectToolbarLocked();
+
+  release({ status: 500, json: { detail: "boom" } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "添加行" })).toBeEnabled());
+  await settle();
+  expectToolbarUnlocked();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(document.querySelector(".knowhow-action-error")).toBeNull();
+  expect(screen.getByRole("heading", { name: "别的表" })).toBeInTheDocument();
+  expect(server.log).toEqual([
+    LIST, DETAIL, DELETE,
+    { method: "GET", path: "/notebooks/nb-2/knowhow" },
+    { method: "GET", path: "/notebooks/nb-2/knowhow/t-other" },
+  ]);
+});
+
+test("a DELETE that succeeds after switching away and back keeps the S5 semantics on the reopened table", async () => {
+  // nb-1 → nb-2 → nb-1 while the DELETE is in flight: the command belongs to the
+  // current notebook again, so the S5 rules apply to the reopened table: locked
+  // until the DELETE lands, then back to the list and unlocked.
+  const server = routeTwoTables();
+  const release = server.hold("DELETE", "/notebooks/nb-1/knowhow/t-rec");
+  server.on("GET", "/notebooks/nb-2/knowhow", { json: [] });
+  // Back in nb-1 the table still exists (the DELETE has not landed yet).
+  server.once("GET", "/notebooks/nb-1/knowhow", {
+    json: [wireSummary({ id: "t-rec", title: "排障记录", rowCount: 2 }), wireSummary({ id: "t-two", title: "第二张表", rowCount: 2 })],
+  });
+  const user = userEvent.setup();
+  const panel = renderPanel({ initialTableId: "t-rec" });
+  await user.click(await screen.findByTitle("删除表"));
+  await user.click(screen.getByRole("button", { name: "确认删除" }));
+  expect(await screen.findByRole("button", { name: "删除中…" })).toBeDisabled();
+
+  panel.update({ ...BASE_PROPS, notebookId: "nb-2" });
+  expect(await screen.findByText("还没有 knowhow 表")).toBeInTheDocument();
+  panel.update({ ...BASE_PROPS, notebookId: "nb-1" });
+  await user.click(await screen.findByRole("button", { name: "打开表格：排障记录" }));
+  await screen.findByRole("heading", { name: "排障记录" });
+  await settle();
+  expectToolbarLocked();
+
+  release({ status: 204 });
+  await user.click(await screen.findByRole("button", { name: "打开表格：第二张表" }));
+  await screen.findByRole("heading", { name: "第二张表" });
+  await settle();
+  expectToolbarUnlocked();
+  expect(server.log).toEqual([
+    LIST, DETAIL, DELETE,
+    { method: "GET", path: "/notebooks/nb-2/knowhow" },
+    LIST, DETAIL, LIST, TWIN_DETAIL,
+  ]);
+});
+
+test("a DELETE that succeeds after a notebook switch leaves the new notebook's same-id table open", async () => {
+  // Table ids are unique in practice; the fixture reuses t-rec in nb-2 to show the
+  // success path also checks which notebook the command belongs to, instead of
+  // relying on the selection alone: nb-1's late success must not take the user
+  // out of nb-2's table.
+  const server = routeTwoTables();
+  const release = server.hold("DELETE", "/notebooks/nb-1/knowhow/t-rec");
+  const other = recordDetail({ title: "另一本的表" });
+  server.on("GET", "/notebooks/nb-2/knowhow", { json: [wireSummary({ id: "t-rec", title: "另一本的表", rowCount: 2 })] });
+  server.on("GET", "/notebooks/nb-2/knowhow/t-rec", { json: wireDetail(other) });
+  const user = userEvent.setup();
+  const panel = renderPanel({ initialTableId: "t-rec" });
+  await user.click(await screen.findByTitle("删除表"));
+  await user.click(screen.getByRole("button", { name: "确认删除" }));
+  expect(await screen.findByRole("button", { name: "删除中…" })).toBeDisabled();
+
+  panel.update({ ...BASE_PROPS, notebookId: "nb-2" });
+  await user.click(await screen.findByRole("button", { name: "打开表格：另一本的表" }));
+  await screen.findByRole("heading", { name: "另一本的表" });
+  await settle();
+
+  release({ status: 204 });
+  await waitFor(() => expect(screen.getByRole("button", { name: "添加行" })).toBeEnabled());
+  await settle();
+  expect(screen.getByRole("heading", { name: "另一本的表" })).toBeInTheDocument();
+  expect(server.log).toEqual([
+    LIST, DETAIL, DELETE,
+    { method: "GET", path: "/notebooks/nb-2/knowhow" },
+    { method: "GET", path: "/notebooks/nb-2/knowhow/t-rec" },
+  ]);
+});
