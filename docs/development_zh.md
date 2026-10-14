@@ -379,7 +379,7 @@ JSON 读取方可读取已打开、当前用户所有的普通文件快照，即
 `.github/workflows/ci.yml` 把 G1 暴露为 `CI / level-1-standard`，在目标为
 `master` 的 PR、`master` push 与手动触发时运行；
 `.github/workflows/daily-extended.yml` 把 G2 暴露为
-`Daily Extended Gate / level-2-extended`，只保留每日一个 cron 和手动触发。
+`Daily Extended Gate / level-2-extended`，只保留每日一个 cron 和手动触发。同一 workflow 的 `level-2-frontend-parallel` job 以 `FRONTEND_LANE_PARALLEL=1` 运行 `scripts/check_frontend.sh`：CI runner 不足 8 个 CPU，这是 frontend lane 并行路径唯一的 CI 覆盖；PR CI 不变。
 两者固定使用 `ubuntu-24.04`、Python 3.13、Node.js 22，从声明的依赖文件安装，
 并把测试选择委托给对应 wrapper。G3 保持为
 `CI / level-3-postgres-integration`。

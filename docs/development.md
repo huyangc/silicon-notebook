@@ -483,7 +483,10 @@ while lock/writable handles still require one link and unsafe files remain rejec
 requests targeting `master`, pushes to `master`, and manual dispatches.
 `.github/workflows/daily-extended.yml` exposes G2 as
 `Daily Extended Gate / level-2-extended`, with one daily cron and a manual
-dispatch only. Both use `ubuntu-24.04`, Python 3.13, Node.js 22, install from
+dispatch only. The same workflow's `level-2-frontend-parallel` job runs
+`scripts/check_frontend.sh` with `FRONTEND_LANE_PARALLEL=1`: CI runners have
+fewer than eight CPUs, so this is the only CI run of the frontend lane's
+parallel path; PR CI is unchanged. Both use `ubuntu-24.04`, Python 3.13, Node.js 22, install from
 the declared lock/requirements files, and delegate selection to their matching
 wrapper script. G3 remains `CI / level-3-postgres-integration`.
 
