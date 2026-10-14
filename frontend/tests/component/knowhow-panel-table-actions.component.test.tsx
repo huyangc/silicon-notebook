@@ -35,9 +35,9 @@ function actionBanner(): HTMLElement | null {
 // ---------------------------------------------------------------------------
 
 test("delete table: confirm, DELETE, back to the list and reload it", async () => {
-  // Only the success path's navigation is asserted. The `deleting` flag is not
-  // reset on success (S5's bug, fixed separately after S4), so nothing here looks
-  // at the grid's buttons after a successful delete.
+  // Only the success path's navigation is asserted here. What the `deleting` lock
+  // does to the grid's buttons around a delete (released on success, kept while
+  // the request is in flight) is pinned in knowhow-panel-delete-table.
   const server = suite.server();
   routeTable(server, "nb-1", recordDetail());
   server.on("DELETE", "/notebooks/nb-1/knowhow/t-rec", { status: 204 });
