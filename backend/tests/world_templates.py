@@ -65,7 +65,13 @@ Per test (``materialize``)
 --------------------------
 Identity-keyed process caches are reset before the copy: every test of one
 worker now sees the SAME notebook/user ids, whereas before each test had fresh
-random ids that no stale cache entry could ever hit. ``PROCESS_CACHE_INVENTORY``
+random ids that no stale cache entry could ever hit. The reset then restores
+exactly what the build itself left for the world's own notebook ids (diffed
+around ``build``; see ``_RESTORE_POLICY``): count memos whose version comes
+from the world's own history, the asset-sweep throttle at the same age, the
+orphan-sweep marks. A self-built world started its test with that warm state,
+and tests rely on it (a stale import-time memo is what catches a count gate
+that stops checking versions); entries for any other id are never restored. ``PROCESS_CACHE_INVENTORY``
 classifies every module-level cache container and ``functools`` cache in
 ``backend/app``; ``test_world_templates.py`` rescans the tree and fails when a
 new one appears unclassified. Only the ``IDENTITY_RESET`` category is keyed by
@@ -80,12 +86,14 @@ import copy
 import functools
 import gc
 import hashlib
+import importlib
 import json
 import os
 import re
 import shutil
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
@@ -213,6 +221,155 @@ def reset_identity_keyed_process_caches() -> None:
         module = sys.modules.get(module_name)
         if module is not None:
             reset(module)
+
+
+# How an identity-keyed entry the build left behind is carried onto every
+# copy. Before templates, a test built its world in its own body, so it began
+# with whatever the build warmed (a count memo keyed by the import-time
+# version, an occupied 300 s sweep throttle, ...). ``materialize`` resets these
+# caches and then restores exactly the build's own entries for the world's
+# own notebook ids, so each copy starts where a self-built world started.
+VERSION_GATED = "(version, value) per notebook id; restored when the version is from the world's history"
+MONOTONIC_STAMP = "time.monotonic() stamp per notebook id; restored at the same age"
+MEMBER = "notebook id membership; restored as is"
+RESET_ONLY = "reset only (PostgreSQL state cannot belong to a SQLite template)"
+
+_RESTORE_POLICY: dict[str, str] = {
+    "app.repositories.sqlite.knowledge_counts_cache:_MEMO": VERSION_GATED,
+    "app.repositories.sqlite.knowledge_counts_cache:_PENDING": VERSION_GATED,
+    "app.repositories.sqlite.knowledge_counts_cache:_VISIBLE_PENDING": VERSION_GATED,
+    "app.repositories.sqlite.knowledge_counts_cache:_CHUNKS": VERSION_GATED,
+    "app.repositories.postgres.knowledge_counts_cache:_MEMO": RESET_ONLY,
+    "app.repositories.postgres.knowledge_counts_cache:_PENDING": RESET_ONLY,
+    "app.repositories.postgres.knowledge_counts_cache:_VISIBLE_PENDING": RESET_ONLY,
+    "app.repositories.postgres.knowledge_counts_cache:_CHUNKS": RESET_ONLY,
+    "app.repositories.postgres.knowledge_counts_cache:_EPOCHS": RESET_ONLY,
+    "app.services.knowhow.api:_LAST_ASSET_SWEEP": MONOTONIC_STAMP,
+    "app.services.knowledge_lifecycle:_ORPHAN_SWEEP_DONE": MEMBER,
+}
+
+#: The lock each restorable container is mutated under in production.
+_CONTAINER_LOCKS: dict[str, str] = {
+    "app.repositories.sqlite.knowledge_counts_cache": "_LOCK",
+    "app.services.knowhow.api": "_ASSET_SWEEP_LOCK",
+    "app.services.knowledge_lifecycle": "_ORPHAN_SWEEP_DONE_LOCK",
+}
+
+#: Injectable clock for the stamp rebase (pinned with a fake clock).
+_monotonic = time.monotonic
+
+
+def _restorable_state() -> dict[str, Any]:
+    """A shallow snapshot of every restorable container that is loaded."""
+    state: dict[str, Any] = {}
+    for entry, policy in _RESTORE_POLICY.items():
+        if policy == RESET_ONLY:
+            continue
+        module_name, name = entry.split(":")
+        module = sys.modules.get(module_name)
+        if module is None:
+            state[entry] = set() if policy == MEMBER else {}
+            continue
+        with getattr(module, _CONTAINER_LOCKS[module_name]):
+            container = getattr(module, name)
+            state[entry] = set(container) if policy == MEMBER else dict(container)
+    return state
+
+
+@dataclass(frozen=True)
+class _WarmEntry:
+    entry: str
+    key: str
+    value: Any  # VERSION_GATED: the cached tuple; MONOTONIC_STAMP: age in seconds
+
+
+def _world_notebook_versions(root: Path) -> dict[str, set[tuple[int, int]]]:
+    """Notebook id -> the ``(kg_reset_epoch, kg_mutation_seq)`` keys it has in
+    the world's SQLite files (``(0, 0)`` without a state row, as the memo's
+    ``_version_key`` reads it)."""
+    versions: dict[str, set[tuple[int, int]]] = {}
+    for path in _sqlite_files(root):
+        connection = sqlite3.connect(str(path))
+        try:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if "notebooks" not in tables:
+                continue
+            state: dict[str, tuple[int, int]] = {}
+            if "unified_kg_state" in tables:
+                for notebook_id, seq, epoch in connection.execute(
+                    "SELECT notebook_id, kg_mutation_seq, kg_reset_epoch "
+                    "FROM unified_kg_state"
+                ):
+                    state[notebook_id] = (int(epoch or 0), int(seq or 0))
+            for (notebook_id,) in connection.execute("SELECT id FROM notebooks"):
+                versions.setdefault(notebook_id, set()).add(
+                    state.get(notebook_id, (0, 0))
+                )
+        finally:
+            connection.close()
+    return versions
+
+
+def _from_world_history(
+    version: tuple[int, int], world_versions: set[tuple[int, int]]
+) -> bool:
+    """A memo version this world's own history can have produced.
+
+    ``(kg_reset_epoch, kg_mutation_seq)`` only grows, so a key at or below
+    the pristine database's version was written while the build moved the
+    world to it -- e.g. counts read at import time, before the projection
+    bumped the seq. A self-built world started its tests with exactly that
+    stale-but-present entry (a correct gate treats it as a miss; a gate that
+    ignores the version serves it, which is what tests must keep catching).
+    A key above every version of the id in the world cannot be the world's.
+    """
+    return any(version <= current for current in world_versions)
+
+
+def _warm_entries(
+    before: dict[str, Any], after: dict[str, Any], build_end: float, root: Path
+) -> tuple[_WarmEntry, ...]:
+    """The build's own entries for the world's own ids, in cache order."""
+    versions = _world_notebook_versions(root)
+    warm: list[_WarmEntry] = []
+    for entry, current in after.items():
+        policy = _RESTORE_POLICY[entry]
+        previous = before[entry]
+        if policy == MEMBER:
+            for key in sorted(current - previous):
+                if key in versions:
+                    warm.append(_WarmEntry(entry, key, None))
+            continue
+        for key, value in current.items():
+            if key not in versions or (key in previous and previous[key] is value):
+                continue
+            if policy == VERSION_GATED:
+                if _from_world_history(tuple(value[0]), versions[key]):
+                    warm.append(_WarmEntry(entry, key, copy.deepcopy(value)))
+            else:
+                warm.append(_WarmEntry(entry, key, build_end - value))
+    return tuple(warm)
+
+
+def _restore_warm_entries(warm: tuple[_WarmEntry, ...]) -> None:
+    now = _monotonic()
+    for item in warm:
+        module_name, name = item.entry.split(":")
+        module = importlib.import_module(module_name)
+        policy = _RESTORE_POLICY[item.entry]
+        with getattr(module, _CONTAINER_LOCKS[module_name]):
+            container = getattr(module, name)
+            if policy == MEMBER:
+                container.add(item.key)
+            elif policy == VERSION_GATED:
+                container[item.key] = copy.deepcopy(item.value)
+            else:
+                container[item.key] = now - item.value
 
 
 # Searched by their literal right-hand side first (a ``^``-anchored multiline
@@ -630,6 +787,7 @@ class WorldTemplate:
     payload: Any
     digest: str
     _integrity: tuple[frozenset[str], dict[str, tuple[int, int]]] = field(repr=False)
+    warm: tuple[_WarmEntry, ...] = ()
 
     def verify_pristine(self) -> None:
         directories, files = _file_state(self.pristine)
@@ -648,13 +806,15 @@ class WorldTemplate:
         )
 
     def materialize(self, tmp_path: Path, name: str = "world") -> tuple[Path, Any]:
-        """Reset identity-keyed caches, verify the template, copy it.
+        """Reset identity-keyed caches to what the build left for this world,
+        verify the template, copy it.
 
         ``relocatable`` copies into ``tmp_path / name``; ``pinned`` replaces
         the shared ``live`` directory the stored absolute paths point at.
         Returns ``(root, payload)`` with a private copy of the payload.
         """
         reset_identity_keyed_process_caches()
+        _restore_warm_entries(self.warm)
         self.verify_pristine()
         if self.layout == PINNED:
             assert self.live is not None
@@ -859,6 +1019,7 @@ def _build(
 ) -> WorldTemplate:
     from app.core.config import get_settings
 
+    warm_before = _restorable_state()
     with pytest.MonkeyPatch.context() as patch:
         _apply_build_env(patch, root, logs, env)
         get_settings.cache_clear()
@@ -866,8 +1027,11 @@ def _build(
             payload = build(root)
         finally:
             _close_process_singletons()
+    warm_after = _restorable_state()
+    build_end = _monotonic()
     _check_payload(payload)
     _close_and_flush(root, f"world {key!r} build")
+    warm = _warm_entries(warm_before, warm_after, build_end, root)
     before = _world_digests(root)
 
     with pytest.MonkeyPatch.context() as patch:
@@ -909,4 +1073,5 @@ def _build(
         payload=copy.deepcopy(payload),
         digest=_combined(after),
         _integrity=_file_state(pristine),
+        warm=warm,
     )
