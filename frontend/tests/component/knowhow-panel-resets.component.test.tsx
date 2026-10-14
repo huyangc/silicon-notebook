@@ -297,7 +297,7 @@ const CASES: StateCase[] = [
       await screen.findByRole("dialog", { name: "导入 Knowhow 表" });
     },
     shown: dialogShown("导入 Knowhow 表"),
-    e6: { list: "kept" },
+    e6: { list: "cleared" },
   },
   {
     state: "create wizard (createOpen)",
