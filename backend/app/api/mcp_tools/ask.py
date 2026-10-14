@@ -166,7 +166,8 @@ def _validate_inputs(
       write side bounds it);
     * ``conversation_id`` length; ``reasoning`` needs a non-blank question;
     * ``notebooks``: unique non-empty ids, at most 8 (more is refused, never
-      truncated); an empty list means "omitted";
+      truncated); an empty list means "omitted"; ``"*"`` (every authorized
+      notebook) stands alone;
     * ``intent`` -- only its SHAPE here; resolving the handle needs the
       principal. Only ``reasoning`` accepts it: chunk and plugin modes have
       no understanding step to answer.
@@ -254,9 +255,7 @@ def _validate_output(
         return
     if plugin:
         raise AgentToolError("invalid_argument", EVIDENCE_OUTPUT_MODE_REFUSAL)
-    if (notebooks and len(notebooks) > 1) or notebooks == [ALL_NOTEBOOKS] or (
-        conversation_id.startswith("gconv-")
-    ):
+    if (notebooks and len(notebooks) > 1) or conversation_id.startswith("gconv-"):
         raise AgentToolError("invalid_argument", _EVIDENCE_SINGLE_NOTEBOOK)
     if client_request_id:
         raise AgentToolError("invalid_argument", _EVIDENCE_NO_KEY)
@@ -279,7 +278,7 @@ def _route(
        allowlist, or contradicts an explicit ``notebooks`` is ``not_found``
        (never a silently new conversation).
     3. Otherwise: omitted -> the token's default notebook; one -> that
-       notebook; 2-8 -> global.
+       notebook; 2-8, or ``["*"]`` (every authorized notebook) -> global.
     """
     if conversation_id.startswith("gconv-"):
         return "global", notebooks, None
@@ -291,11 +290,6 @@ def _route(
     if conversation_id:
         raise _conversation_not_found()
     if notebooks is None:
-        if not principal.default_notebook_id:
-            raise AgentToolError(
-                "invalid_argument",
-                '此凭证没有默认笔记本，请在 notebooks 里传笔记本 id，或传 ["*"] 询问全部授权笔记本',
-            )
         return "notebook", _resolve_notebook_id(principal, ""), None
     if len(notebooks) == 1 and notebooks != [ALL_NOTEBOOKS]:
         return "notebook", notebooks[0], None
@@ -941,7 +935,7 @@ def _run_global(
     mode: str, conversation_id: str, reply: _IntentReply | None,
     client_request_id: str, stop: threading.Event,
 ) -> dict[str, Any]:
-    """The 2-8 notebook path: ``GlobalAskService.start`` then ``wait``, the
+    """The 2-8 notebook (or ``["*"]``) path: ``GlobalAskService.start`` then ``wait``, the
     first page of the terminal job. A clear reasoning question is understood
     once and auto-confirmed; an ambiguous one pauses with a stored handle. A
     retry under the same ``client_request_id`` is recognised before the

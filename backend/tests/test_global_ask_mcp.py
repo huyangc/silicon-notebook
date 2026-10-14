@@ -1327,13 +1327,21 @@ async def test_a_star_clarification_reports_the_all_scope_and_its_handle_is_boun
     handlers, _, _, service = adapter
     from app.models.ask import QueryIntentContract, QueryIntentAmbiguity
 
-    service.preview_intent = lambda payload, **kw: QueryIntentContract(
-        objective=payload.question, resolved_question=payload.question,
-        needs_clarification=True,
-        ambiguities=[QueryIntentAmbiguity(id="a1", question="具体指哪一个项目？")],
-    )
+    previewed = []
+
+    def preview_intent(payload, **kw):
+        previewed.append(payload.notebook_scope)
+        return QueryIntentContract(
+            objective=payload.question, resolved_question=payload.question,
+            needs_clarification=True,
+            ambiguities=[QueryIntentAmbiguity(id="a1", question="具体指哪一个项目？")],
+        )
+
+    service.preview_intent = preview_intent
     service.start = lambda *a, **k: pytest.fail("must not start")
     paused = await handlers["ask"]("它的结论是什么", None, notebooks=["*"])
+    # The understanding pass previews the SAME explicit all scope the run gets.
+    assert previewed[0].mode == "all" and previewed[0].notebook_ids == []
     assert paused["scope"] == {"kind": "global", **ALL}
     reply = {"intent_token": paused["intent_token"], "answers": [{"id": "a1", "answer": "甲"}]}
     for other in (BOTH, None):
@@ -1369,13 +1377,3 @@ async def test_one_key_is_not_replayed_from_star_to_an_id_list(adapter):
     with pytest.raises(AgentToolError) as refused:
         await handlers["ask"]("Q?", None, notebooks=BOTH, mode="chunk", client_request_id="k1")
     assert refused.value.code == "invalid_argument" and "另一个问题" in refused.value.message
-
-
-@pytest.mark.anyio
-async def test_a_token_without_a_default_notebook_is_told_the_ask_parameter_name(adapter):
-    handlers, principal, _, _ = adapter
-    principal.default_notebook_id = ""
-    with pytest.raises(AgentToolError) as refused:
-        await handlers["ask"]("问题", None, mode="chunk")
-    assert refused.value.code == "invalid_argument"
-    assert "notebooks" in refused.value.message and "notebook_id" not in refused.value.message
