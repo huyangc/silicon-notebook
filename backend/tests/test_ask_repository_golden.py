@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import gc
 import importlib.util
 import json
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from app.models.schemas import AskResponse
 from app.services import sqlite_repository
@@ -105,3 +110,89 @@ def test_current_repository_runtime_matches_the_frozen_ask_oracle():
     assert generated == _goldens()
 
 
+
+
+def _app_code_reading(clock_owner) -> object:
+    """A function whose module is ``app.*``, calling ``time.perf_counter``.
+
+    ``_FixtureClock`` tells the replayed run's own reads apart from everyone
+    else's by the caller's module, so the probes below need a caller that looks
+    like application code without adding a module to ``app``.
+    """
+    namespace = {"__name__": "app.fixture_clock_probe", "clock_owner": clock_owner}
+    exec("def read():\n    return clock_owner.perf_counter()\n", namespace)
+    return namespace["read"]
+
+
+def test_the_fixture_clock_advances_only_for_the_runs_own_reads():
+    clock = _generator_module()._FixtureClock()
+    holder = SimpleNamespace(perf_counter=clock)
+    read = _app_code_reading(holder)
+
+    assert read() == pytest.approx(1000.001)
+    # Not application code (a gc callback, a test plugin, a library): the real
+    # clock, and the fixture clock does not move.
+    assert clock() != pytest.approx(1000.002)
+    assert read() == pytest.approx(1000.002)
+
+    # A thread that already existed when the run started is not the run's,
+    # even when it runs application code.
+    go, done = threading.Event(), threading.Event()
+    seen: list[float] = []
+
+    def leftover() -> None:
+        go.wait(5)
+        seen.append(read())
+        done.set()
+
+    early = threading.Thread(target=leftover, daemon=True)
+    early.start()
+    clock = _generator_module()._FixtureClock()
+    holder.perf_counter = clock
+    go.set()
+    assert done.wait(5)
+    early.join(5)
+    assert seen[0] != pytest.approx(1000.001)
+
+    # A thread started during the run (the model scheduler, a retrieval pool)
+    # is the run's.
+    worker = threading.Thread(target=lambda: seen.append(read()))
+    worker.start()
+    worker.join(5)
+    assert seen[1] == pytest.approx(1000.001)
+    assert read() == pytest.approx(1000.002)
+
+
+def test_the_ask_oracle_ignores_clock_reads_from_outside_the_run():
+    """The oracle holds while other code in the worker reads the clock.
+
+    Reproduces both ways an xdist worker used to perturb the frozen
+    ``duration_ms`` values: a ``gc.callbacks`` hook reading ``perf_counter``
+    whenever a collection fires mid-Ask (a low threshold makes that happen on
+    every run), and a thread left over from an earlier test reading it from
+    application code.
+    """
+    stop = threading.Event()
+    read = _app_code_reading(time)
+
+    def leftover() -> None:
+        while not stop.is_set():
+            read()
+            time.sleep(0.0005)
+
+    def on_gc(_phase, _info) -> None:
+        time.perf_counter()
+
+    thread = threading.Thread(target=leftover, daemon=True)
+    thresholds = gc.get_threshold()
+    thread.start()
+    gc.callbacks.append(on_gc)
+    gc.set_threshold(100)
+    try:
+        generated = _generator_module().collect_ask_goldens()
+    finally:
+        gc.set_threshold(*thresholds)
+        gc.callbacks.remove(on_gc)
+        stop.set()
+        thread.join(5)
+    assert generated == _goldens()
