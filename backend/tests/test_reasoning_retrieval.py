@@ -5912,6 +5912,62 @@ def test_legacy_action_ledger_note_is_byte_for_byte_what_run_used_to_build():
     assert legacy_action_ledger_note([], {}, {}, 8, {}, []) == ""
 
 
+def test_legacy_action_ledger_lists_visited_nodes_in_visit_order():
+    """已展开节点按首次展开顺序渲染,与 id 的字面顺序、哈希顺序都无关。
+
+    `visited` 是保序的有序集合(dict 只用键),账目逐项读它;换回 `set` 或
+    在渲染处 `set(visited)` / `sorted(visited)` ⇒ 顺序漂移 ⇒ 红。
+    """
+    from app.services.reasoning_retrieval import legacy_action_ledger_note
+
+    class _Node:
+        payload = {"name": "乙节点"}
+
+    visited = {}
+    for oid in ("ko-c", "ko-a", "ko-d", "ko-b"):
+        visited[oid] = None
+    visited["ko-c"] = None            # 重复落账不挪位置
+    note = legacy_action_ledger_note(
+        visited, {"ko-d": _Node()}, {}, 8, {}, [])
+    assert note == (
+        "\n\n（已展开过的节点，勿重复 expand_graph 请求它们: "
+        "ko-c, ko-a, 乙节点, ko-b）")
+
+
+def test_run_feeds_visited_nodes_to_reflect_in_expand_order(rrepo, monkeypatch):
+    """端到端:按 x3、x1、x4、x5、x2 的顺序展开,后一轮 reflect 的 prompt 里账目
+    按同样的顺序列出(不是 id 字面序,也不是哈希序)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_stale_limit = 20
+    seq = {"n": 0}
+    monkeypatch.setattr(ReasoningRetriever, "search",
+                        lambda self, n, q, types=None, prefer="balanced": [])
+
+    def fake_neighbors(self, n, oid, edge_type=None, direction="both"):
+        seq["n"] += 1
+        return NeighborExpansion([_mk_rk(f"nb{seq['n']}", f"nb{seq['n']}")])
+
+    monkeypatch.setattr(ReasoningRetriever, "neighbors", fake_neighbors)
+    reflects = [{"next_action": "expand_graph", "expand": {"object_id": oid}}
+                for oid in ("x3", "x1", "x4", "x5", "x2")]
+    reflects.append({"next_action": "answer", "sufficient": True})
+    prompts = []
+
+    class _RecLLM:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kw):
+            if "sub_queries" in schema_hint:
+                return json.dumps({"sub_queries": [{"query": "q"}]})
+            prompts.append(messages[-1]["content"])
+            return json.dumps(reflects.pop(0))
+
+    bind_chat_client(rrepo, "reasoning_agent", _RecLLM())
+    ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "q", "")
+    assert "勿重复 expand_graph 请求它们: x3, x1, x4, x5, x2）" in prompts[-1]
+
+
 def test_legacy_prose_ledger_reaches_the_reflect_prompt_verbatim(rrepo):
     """关闭态:四段账目仍然逐字拼在候选摘要之后,观察账一个字都不出现。"""
     from app.services.reasoning_retrieval import (
@@ -5942,7 +5998,7 @@ def test_legacy_prose_ledger_reaches_the_reflect_prompt_verbatim(rrepo):
         nb.id, "RTL到GDSII流程", "")
     assert llm.prompts
     expected = legacy_action_ledger_note(
-        {claim.object_id}, {claim.object_id: claim}, {}, 8, {}, [])
+        {claim.object_id: None}, {claim.object_id: claim}, {}, 8, {}, [])
     assert expected in llm.prompts[-1]
 
 
