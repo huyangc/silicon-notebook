@@ -15,7 +15,9 @@
 //     批 state 时后写的赢,所以这个顺序是行为:notebook 复位必须先于引用跳转(否则
 //     挂载即跳转会被复位清掉),概念矩阵 hook 必须是最后一个 hook 调用(它的「切
 //     概念时复位删除确认态」effect 搬家前就是面板最后一个 effect)。按语句顺序与
-//     依赖数组文本识别,不用行号。
+//     依赖数组文本识别,不用行号。依赖数组文本也是行为:拉表详情 effect 只依赖
+//     selectedTableId(S6),加回 loadDetail 会让它在切笔记本时先于复位执行、对新
+//     笔记本多发一次注定被丢弃的旧表详情请求。
 //  5. 回调身份:搬家没有改变任何回调的 useCallback 状态。loadTables 仍是
 //     useCallback([notebookId])、loadRowCode 仍是 useCallback([]);
 //     handleCodeSaved/handleCodeDeleted/deleteConcept/deleteBranch 仍是每次渲染
@@ -68,7 +70,7 @@ const MOVED_INTO_HOOKS = [
 const PANEL_HOOK_ORDER = [
   "useKnowhowTableList",
   "useEffect[]", // panelMountedRef
-  "useEffect[selectedTableId, loadDetail]", // 拉表详情
+  "useEffect[selectedTableId]", // 拉表详情(只跟选中表走,不随 loadDetail 身份重跑,S6)
   "useKnowhowRowCode", // 原「按 openRowId 拉行代码」effect 的位置
   "useEffect[notebookId]", // notebook 复位(必须先于引用跳转)
   "useEffect[initialTableId, initialRowId]", // 引用跳转:openTable
@@ -418,7 +420,7 @@ import { KnowhowTableList } from "./knowhow-table-list.tsx";
 function Panel({ notebookId }) {
   const knowhowTableList = useKnowhowTableList({ notebookId });
   useEffect(() => { mounted.current = true; }, []);
-  useEffect(() => { load(); }, [selectedTableId, loadDetail]);
+  useEffect(() => { load(); }, [selectedTableId]);
   const knowhowRowCode = useKnowhowRowCode(openRowId);
   useEffect(() => { reset(); }, [notebookId]);
   useEffect(() => { jump(); }, [initialTableId, initialRowId]);
@@ -515,8 +517,8 @@ const PANEL_MUTANTS = [
   },
   {
     label: "行代码 hook 提前到拉表详情 effect 之前",
-    from: "  useEffect(() => { load(); }, [selectedTableId, loadDetail]);\n  const knowhowRowCode = useKnowhowRowCode(openRowId);",
-    to: "  const knowhowRowCode = useKnowhowRowCode(openRowId);\n  useEffect(() => { load(); }, [selectedTableId, loadDetail]);",
+    from: "  useEffect(() => { load(); }, [selectedTableId]);\n  const knowhowRowCode = useKnowhowRowCode(openRowId);",
+    to: "  const knowhowRowCode = useKnowhowRowCode(openRowId);\n  useEffect(() => { load(); }, [selectedTableId]);",
     expect: /effect\/owner hook 顺序变了/,
   },
   {
