@@ -3279,7 +3279,10 @@ class _ReasoningRunState:
     chunks: List[RetrievedChunk]
     chains: List[object]
     seen_chunks: set
-    visited: set
+    # 已展开节点:按首次展开顺序保序的「有序集合」(dict 只用键,值恒为 None)。
+    # 它被逐项渲染进 reflect 的账目文案,用 set 会让同一 run 的 prompt 字节随
+    # PYTHONHASHSEED 变;判重用 `in`、落账用 `visited[oid] = None`。
+    visited: Dict[str, None]
 
     # —— 精确查找账目:seed pass 写,reflect 的 exact_lookup 分支继续写 ——
     exact_lookup_log: List["_ExactLookupAttempt"]
@@ -5186,7 +5189,7 @@ class ReasoningRetriever:
         chunks: List[RetrievedChunk] = []
         chains: List[object] = []
         seen_chunks: set = set()
-        visited: set = set()
+        visited: Dict[str, None] = {}
         # 精确查找账目:seed pass 一条、每个真正执行的 agent 动作一条。
         # exact_terms_done 是 seed 与动作共用的防重来源(归一化名称),保证 seed
         # 已经探测过的名称不会被 agent 再花一轮请求一遍。
@@ -7881,7 +7884,7 @@ class ReasoningRetriever:
                              summary="跳过 expand_graph(空或已访问节点)",
                              detail={"object_id": oid, "reason": "empty_or_visited"}))
         else:
-            state.visited.add(oid)
+            state.visited[oid] = None
             # NB: expand/neighbors use the ACTIVE notebook_id only. A base-tier hit's
             # neighbors live in the base notebook, so this action deliberately skips
             # deep cross-tier graph walks (P4 spec §F); only `follow_chain` does that.
