@@ -19,7 +19,7 @@ import urllib.request
 
 POLL_SECONDS = 0.05
 CONTROL_MARGIN_SECONDS = 5.0
-# ``running`` probes a lease by holding it for an instant, so a one-shot
+# ``running`` probes a lease by holding it (shared) for an instant, so a one-shot
 # non-blocking claim can lose to a probe (``status`` from another terminal,
 # the launcher's own handshake) and not only to an owner. A probe lets go
 # within this window; an owner holds the lease for its whole life.
@@ -127,11 +127,18 @@ def claim(path: Path):
 
 
 def running(directory: Path, name: str = "runtime.lock") -> bool:
+    # Owners hold a lease exclusively, so a shared probe still fails against
+    # one. Two probes share it instead of excluding each other: an exclusive
+    # probe from a ``status`` in another terminal made ``start``'s own probe
+    # see a lease nobody owned and refuse to start.
+    fd = safe_open(directory / name, os.O_RDWR | os.O_CREAT)
     try:
-        with lock(directory / name, blocking=False):
-            return False
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
     except BlockingIOError:
         return True
+    finally:
+        os.close(fd)
+    return False
 
 
 def event(directory: Path, run_id: str, state: str, key: str = "") -> None:
