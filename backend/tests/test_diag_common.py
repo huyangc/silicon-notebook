@@ -686,7 +686,7 @@ def test_incident_reads_the_configured_diagnostics_dir(tmp_path, monkeypatch):
     ).diagnostics_dir == str(explicit)
 
 
-def test_configured_diagnostics_dir_matches_settings_differentially(tmp_path):
+def test_configured_diagnostics_dir_matches_settings_differentially(tmp_path, monkeypatch):
     """Both sides resolve every spelling to the same directory.
 
     The expected values above are hand-written; this compares the incident
@@ -699,6 +699,8 @@ def test_configured_diagnostics_dir_matches_settings_differentially(tmp_path):
     from app.core.config import Settings
 
     common = load_common()
+    # Run away from the repo root so a side anchoring to the CWD shows up.
+    monkeypatch.chdir(tmp_path)
     env_file = tmp_path / "service.env"
     cases = [
         ({}, ""),
