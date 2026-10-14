@@ -148,7 +148,7 @@ def _seed(client, repo, q, postgres: bool, kind: str) -> World:
     a, a_id = _register(client, "a00800001")
     b, b_id = _register(client, "b00800002")
     nb = client.post("/api/notebooks", headers=a, json={"name": "Shared"}).json()["id"]
-    repo.add_member(nb, b_id)
+    repo._runtime.sharing.add_member(nb, b_id)
     repo.settings.community_min_size = 2
     repo.settings.embed_dim = 16        # the vectors below are 16-dimensional
     memory_id = ""

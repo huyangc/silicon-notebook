@@ -319,22 +319,22 @@ def test_direct_resource_authorization(repo, lifecycle):
     hidden_ids = (lifecycle["copying_id"], lifecycle["deleting_id"])
 
     assert repo.user_can_access_notebook(active_id, owner_id) is True
-    assert repo.user_can_admin_notebook(active_id, owner_id) is True
+    assert repo._runtime.sharing.user_can_admin_notebook(active_id, owner_id) is True
     assert repo.user_can_read_notebook(active_id, owner_id) is True
     for hidden_id in hidden_ids:
         assert repo.user_can_access_notebook(hidden_id, owner_id) is False
-        assert repo.user_can_admin_notebook(hidden_id, owner_id) is False
+        assert repo._runtime.sharing.user_can_admin_notebook(hidden_id, owner_id) is False
         assert repo.user_can_read_notebook(hidden_id, owner_id) is False
 
     # 只读成员:在 active 上有读权(无写/管理权);在 copying/deleting 上三权皆无。
     member_id = lifecycle["member_id"]
     assert repo.user_can_read_notebook(active_id, member_id) is True
     assert repo.user_can_access_notebook(active_id, member_id) is False
-    assert repo.user_can_admin_notebook(active_id, member_id) is False
+    assert repo._runtime.sharing.user_can_admin_notebook(active_id, member_id) is False
     for hidden_id in hidden_ids:
         assert repo.user_can_read_notebook(hidden_id, member_id) is False
         assert repo.user_can_access_notebook(hidden_id, member_id) is False
-        assert repo.user_can_admin_notebook(hidden_id, member_id) is False
+        assert repo._runtime.sharing.user_can_admin_notebook(hidden_id, member_id) is False
 
 
 def test_list_group_shared_notebooks(repo, lifecycle):

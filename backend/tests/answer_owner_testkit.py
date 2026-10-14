@@ -97,7 +97,7 @@ def seed_ownership_matrix(repo):
         notebook = repo.create_notebook(NotebookCreate(name="Ownership"))
     finally:
         reset_request_user(token)
-    repo.add_member(notebook.id, bob.id)
+    repo._runtime.sharing.add_member(notebook.id, bob.id)
     ns = SimpleNamespace(
         alice=alice, bob=bob, carol=carol, notebook_id=notebook.id
     )

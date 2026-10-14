@@ -43,7 +43,7 @@ def two_users_client(monkeypatch, tmp_path):
     member_id, member = register("a00900302")
     nb = client.post("/api/notebooks", headers=owner, json={"name": "shared"}).json()["id"]
     repo = repository()
-    repo.add_member(nb, member_id)
+    repo._runtime.sharing.add_member(nb, member_id)
     with repo._write() as db:
         _source(db, nb, "src-s", elements=[("el-s-occ", "VISIBLE occ")])
         _memory(db, nb, "mem-m", member_id)
@@ -117,7 +117,7 @@ def test_deployment_admin_gets_no_bypass(two_users_client):
     admin_id, admin = env.register("a00900303")
     with env.repo._write() as db:
         db.execute("UPDATE users SET role='admin' WHERE id=?", (admin_id,))
-    env.repo.add_member(env.nb, admin_id)
+    env.repo._runtime.sharing.add_member(env.nb, admin_id)
     assert env.client.get("/api/me", headers=admin).json()["role"] == "admin"
     _assert_filtered(env, admin)
 
@@ -211,7 +211,7 @@ def test_a_private_mounted_library_counts_only_for_its_readers(two_users_client)
     assert r.status_code == 200 and "LIB visible" in r.text
     r = c.get(url.format(knowhow), headers=env.owner)
     assert r.status_code == 200 and "KNOWHOW row text" in r.text
-    repo.add_member(lib, env.member_id)
+    repo._runtime.sharing.add_member(lib, env.member_id)
     r = c.get(url.format(visible), headers=env.member)
     assert r.status_code == 200 and "LIB visible" in r.text
 

@@ -91,7 +91,7 @@ def test_copy_observes_new_id_patched_after_construction(repo, monkeypatch):
         return f"{prefix}-t9fixed-{counter['n']:04d}"
 
     monkeypatch.setattr(sqlite_repository, "_new_id", fixed_new_id)
-    copied = repo.copy_notebook(src, new_owner_id="user-bob")
+    copied = repo._runtime.sharing.copy_notebook(src, new_owner_id="user-bob")
     assert copied.id.startswith("nb-t9fixed-")
     with repo._runtime.database.connect() as db:
         source_ids = [
@@ -109,7 +109,7 @@ def test_notebook_copy_separates_owner_id_from_knowhow_genesis_actor(repo):
         src, "T", "", [{"name": "C", "role": "attribute"}]
     )
 
-    copied = repo.copy_notebook(
+    copied = repo._runtime.sharing.copy_notebook(
         src, new_owner_id="user-audit-copy", actor_label="a00123456"
     )
 
@@ -129,11 +129,11 @@ def test_copy_observes_copy_chunk_patched_after_construction(repo, monkeypatch):
         return original_write()
 
     monkeypatch.setattr(repo._runtime.database, "write", counting_write)
-    repo.copy_notebook(src, new_owner_id="user-carol")
+    repo._runtime.sharing.copy_notebook(src, new_owner_id="user-carol")
     baseline = transactions["n"]
     monkeypatch.setattr(sqlite_repository, "_COPY_CHUNK", 1)
     transactions["n"] = 0
-    repo.copy_notebook(src, new_owner_id="user-carol")
+    repo._runtime.sharing.copy_notebook(src, new_owner_id="user-carol")
     assert transactions["n"] > baseline, (
         "shrinking sqlite_repository._COPY_CHUNK after construction must force "
         "more (smaller) chunk transactions — the seam is read per operation"
@@ -161,7 +161,7 @@ def test_failure_after_sentinel_compensates_only_destination(repo, monkeypatch):
 
     monkeypatch.setattr(repo, "_insert_row", boom_after_sentinel)
     with pytest.raises(RuntimeError, match="boom after sentinel"):
-        repo.copy_notebook(src, new_owner_id="user-dave")
+        repo._runtime.sharing.copy_notebook(src, new_owner_id="user-dave")
     with repo._runtime.database.connect() as db:
         rows = db.execute(
             "SELECT id FROM notebooks WHERE created_by='user-dave' AND status='copying'"
@@ -192,7 +192,7 @@ def test_failure_after_first_chunk_compensates_rows_and_files(repo, monkeypatch)
 
     monkeypatch.setattr(repo, "_insert_row", boom_mid_chunks)
     with pytest.raises(RuntimeError, match="boom mid chunk"):
-        repo.copy_notebook(src, new_owner_id="user-erin")
+        repo._runtime.sharing.copy_notebook(src, new_owner_id="user-erin")
     with repo._runtime.database.connect() as db:
         assert db.execute(
             "SELECT COUNT(*) FROM notebooks WHERE created_by='user-erin'"
@@ -372,7 +372,7 @@ def test_copy_resets_indexing_pipeline_columns_to_builtin(repo):
             "indexing_pipeline_job_id='job-of-source-nb' WHERE id=?",
             (src,),
         )
-    copied = repo.copy_notebook(src, new_owner_id="user-bob")
+    copied = repo._runtime.sharing.copy_notebook(src, new_owner_id="user-bob")
     with repo._runtime.database.connect() as db:
         copy_row = db.execute(
             "SELECT indexing_pipeline,indexing_pipeline_version,"

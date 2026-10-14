@@ -63,7 +63,7 @@ def test_copy_notebook_service_refuses_non_copyable_defense_in_depth(tmp_path, m
             ("ko-x", nb, "concept", "approved", "", "{}", "[]", "", _now(), _now()))
     assert repo.notebook_copy_stats(nb)["copyable"] is False
     with pytest.raises(ValueError, match="too large to deep-copy"):
-        repo.copy_notebook(nb, new_owner_id="user-local")
+        repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-local")
 
 
 def _seed_nodes(repo, nb, n):
@@ -107,7 +107,7 @@ def test_copy_notebook_atomic_bound_refuses_grown_source(tmp_path, monkeypatch):
     monkeypatch.setattr(repo._runtime.sharing, "notebook_copy_stats",
                         lambda n: {"copyable": True})
     with pytest.raises(ValueError, match="crossed the copy-size limit"):
-        repo.copy_notebook(nb, new_owner_id="user-local")
+        repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-local")
 
 
 def _seed_relations(repo, nb, n):
@@ -272,14 +272,14 @@ def test_notebook_copy_stats_rechecks_snapshot_bound_fresh_not_stale(tmp_path, m
 
 def test_share_sets_token_idempotent_then_unshare_clears(repo):
     nb = _mk_nb(repo, "L")
-    out = repo.share_notebook(nb)
+    out = repo._runtime.sharing.share_notebook(nb)
     assert out["share_token"].startswith("shr-")
-    assert repo.find_notebook_by_share_token(out["share_token"]) == nb
+    assert repo._runtime.sharing.find_notebook_by_share_token(out["share_token"]) == nb
     # 幂等:再分享返回同一个 token
-    assert repo.share_notebook(nb)["share_token"] == out["share_token"]
+    assert repo._runtime.sharing.share_notebook(nb)["share_token"] == out["share_token"]
     # 取消 → token 失效
-    repo.unshare_notebook(nb)
-    assert repo.find_notebook_by_share_token(out["share_token"]) is None
+    repo._runtime.sharing.unshare_notebook(nb)
+    assert repo._runtime.sharing.find_notebook_by_share_token(out["share_token"]) is None
 
 
 def test_remap_json_ids_scalars_and_arrays():
@@ -360,7 +360,7 @@ def test_copy_notebook_deep_copies_and_remaps(repo):
             (src,),
         )
     _mk_user(repo, "user-bob")  # created_by FK→users.id,目标用户须先存在(生产里恒成立)
-    new = repo.copy_notebook(src, new_owner_id="user-bob")
+    new = repo._runtime.sharing.copy_notebook(src, new_owner_id="user-bob")
     assert new.id != src and new.tier == "personal"
     with repo._connect() as db:
         assert db.execute("SELECT created_by FROM notebooks WHERE id=?", (new.id,)).fetchone()[0] == "user-bob"
@@ -434,7 +434,7 @@ def test_copy_notebook_remaps_source_local_facts_and_element_bindings(repo):
              1, 1, 0, "", now, now),
         )
 
-    copied = repo.copy_notebook(src, new_owner_id="user-fact-copy")
+    copied = repo._runtime.sharing.copy_notebook(src, new_owner_id="user-fact-copy")
     with repo._connect() as db:
         fact = db.execute(
             "SELECT * FROM knowledge_source_facts WHERE notebook_id=?", (copied.id,)
@@ -511,7 +511,7 @@ def test_copy_notebook_never_carries_a_memory_source(repo):
             memory_id=memory_id,
         )
     _mk_user(repo, "user-memcopy")
-    new = repo.copy_notebook(nb, new_owner_id="user-memcopy")
+    new = repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-memcopy")
     copied = _rows(repo, "sources", new.id)
     assert [r["title"] for r in copied] == ["plain"]
     assert all(r["source_type"] != "memory" and not r["memory_id"] for r in copied)
@@ -547,8 +547,8 @@ def test_copy_notebook_twice_of_a_memory_notebook_has_no_memory_and_no_collision
             memory_id=memory_id,
         )
     _mk_user(repo, "user-memcopy2")
-    new1 = repo.copy_notebook(nb, new_owner_id="user-memcopy2")
-    new2 = repo.copy_notebook(nb, new_owner_id="user-memcopy2")
+    new1 = repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-memcopy2")
+    new2 = repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-memcopy2")
     assert new1.id != new2.id
     for nid in (new1.id, new2.id):
         rows = _rows(repo, "sources", nid)
@@ -772,7 +772,7 @@ def test_copy_notebook_chunked_transactions_release_lock_between_chunks(repo, mo
 
     t = threading.Thread(target=contender)
     t.start()
-    repo.copy_notebook(src, new_owner_id="user-chunklock")
+    repo._runtime.sharing.copy_notebook(src, new_owner_id="user-chunklock")
     t.join(timeout=5)
     assert acquired.is_set(), "contending thread never acquired _write_lock during copy -> lock held too long"
 
@@ -781,7 +781,7 @@ def test_copy_notebook_fts_contains_only_copied_ids(repo):
     """FTS rows for the copy must be inserted incrementally for the copied ids
     only (not a whole-table backfill that happens to look right)."""
     src = _seed_full_notebook(repo, owner="user-local")
-    new = repo.copy_notebook(src, new_owner_id="user-local")
+    new = repo._runtime.sharing.copy_notebook(src, new_owner_id="user-local")
     with repo._connect() as db:
         src_obj_ids = {r["id"] for r in db.execute(
             "SELECT id FROM knowledge_objects WHERE notebook_id=?", (src,)).fetchall()}
@@ -819,7 +819,7 @@ def test_copy_notebook_crash_midway_leaves_no_visible_notebook_and_self_heals(re
 
     monkeypatch.setattr(repo, "_insert_row", boom_after_a_few)
     with pytest.raises(RuntimeError):
-        repo.copy_notebook(src, new_owner_id="user-crashtest")
+        repo._runtime.sharing.copy_notebook(src, new_owner_id="user-crashtest")
 
     # The half-copied notebook must not be visible via get_notebook/list.
     with repo._connect() as db:
@@ -835,7 +835,7 @@ def test_copy_notebook_crash_midway_leaves_no_visible_notebook_and_self_heals(re
 
     # Self-heal: a fresh copy attempt must succeed and produce a complete,
     # correct copy (proving the sweep did not corrupt state for a retry).
-    new = repo.copy_notebook(src, new_owner_id="user-crashtest")
+    new = repo._runtime.sharing.copy_notebook(src, new_owner_id="user-crashtest")
     assert len(_rows(repo, "knowledge_objects", new.id)) == 3
     with repo._connect() as db:
         # No leftover stuck 'copying' rows after the sweep + successful retry.
@@ -993,7 +993,7 @@ def test_copy_notebook_entrypoint_reaps_stale_disk_too(repo):
         (d / "leftover.bin").write_bytes(b"x")
 
     src = _mk_nb(repo, "copy-src", owner)
-    repo.copy_notebook(src, new_owner_id=owner)
+    repo._runtime.sharing.copy_notebook(src, new_owner_id=owner)
 
     with repo._connect() as db:
         assert db.execute(
@@ -1027,7 +1027,7 @@ def test_copy_normalizes_cluster_generation_and_copy_stays_readable(repo):
                 "VALUES (?,?,?,?,?,?,?,?)",
                 (cid, src_nb, "ko-g1", "ko-g1", "G", "concept", now, gen))
 
-    new = repo.copy_notebook(src_nb, new_owner_id="user-local")
+    new = repo._runtime.sharing.copy_notebook(src_nb, new_owner_id="user-local")
 
     with repo._connect() as db:
         rows = db.execute(
@@ -1057,7 +1057,7 @@ def test_copy_skips_object_schemas_and_backfills_fts(repo):
         db.execute(
             "INSERT INTO object_schemas (object_type,notebook_id,created_at,updated_at) VALUES (?,?,?,?)",
             ("customtype", src, _now(), _now()))
-    new = repo.copy_notebook(src, new_owner_id="user-local")  # user-local 已 seed,满足 created_by FK
+    new = repo._runtime.sharing.copy_notebook(src, new_owner_id="user-local")  # user-local 已 seed,满足 created_by FK
     with repo._connect() as db:
         # object_schemas 不随库拷(全局表;副本名下 0 行,不撞 UNIQUE)
         assert db.execute(
@@ -1085,7 +1085,7 @@ def test_copy_carries_notebook_schema_rows_and_reassigns_creator(repo):
         created_by="user-local",
     )
 
-    copied = repo.copy_notebook(
+    copied = repo._runtime.sharing.copy_notebook(
         source.id, new_owner_id="copy-owner", new_name="copied"
     )
     with repo._connect() as db:
@@ -1124,11 +1124,11 @@ def test_share_returns_transaction_token_if_concurrent_unshare_wins(repo, monkey
 
     monkeypatch.setattr(store, "set_share_token", set_then_unshare)
 
-    out = repo.share_notebook(nb)
+    out = repo._runtime.sharing.share_notebook(nb)
 
     assert isinstance(out["share_token"], str)
     assert out["share_token"].startswith("shr-")
-    assert repo.find_notebook_by_share_token(out["share_token"]) is None
+    assert repo._runtime.sharing.find_notebook_by_share_token(out["share_token"]) is None
 
 
 # NOTE: appended at EOF on purpose — inserting mid-file shifts the by-line
@@ -1228,7 +1228,7 @@ def test_copy_notebook_includes_knowhow_content_with_remap(repo):
         assert db.execute("SELECT COUNT(*) FROM knowhow_tables WHERE notebook_id=?", (src,)).fetchone()[0] == 1
 
     _mk_user(repo, "user-copykh")
-    new = repo.copy_notebook(src, new_owner_id="user-copykh")  # must NOT raise
+    new = repo._runtime.sharing.copy_notebook(src, new_owner_id="user-copykh")  # must NOT raise
 
     with repo._connect() as db:
         # KOs/relations derived from the knowhow source stay excluded (still
@@ -1291,7 +1291,7 @@ def test_copy_notebook_carries_paper_metadata(repo):
     })
 
     _mk_user(repo, "user-papercopy")
-    new = repo.copy_notebook(src, new_owner_id="user-papercopy")
+    new = repo._runtime.sharing.copy_notebook(src, new_owner_id="user-papercopy")
 
     new_source_id = _rows(repo, "sources", new.id)[0]["id"]
     assert new_source_id != orig_source_id
@@ -1357,7 +1357,7 @@ def test_copy_notebook_remaps_generated_questions_to_original_chunk(repo):
     )
 
     _mk_user(repo, "user-question-copy")
-    copied = repo.copy_notebook(src, new_owner_id="user-question-copy")
+    copied = repo._runtime.sharing.copy_notebook(src, new_owner_id="user-question-copy")
 
     copied_question = _rows(repo, "chunk_questions", copied.id)[0]
     copied_chunk = _rows(repo, "chunks", copied.id)[0]
@@ -1510,7 +1510,7 @@ def test_copy_carries_only_the_mounts_still_valid_for_the_recipient(repo):
     全在),两种变异都在这里报红。"""
     source, public, recipient_private, stranger_private = _seed_mount_fixture(repo)
 
-    copied = repo.copy_notebook(
+    copied = repo._runtime.sharing.copy_notebook(
         source, new_owner_id="copy-owner", new_name="copied"
     )
 
@@ -1525,7 +1525,7 @@ def test_copied_mount_edges_belong_to_the_new_owner(repo):
     created_by 改写成接收者,created_at 改写成拷贝时刻。"""
     source, public, _recipient_private, _stranger = _seed_mount_fixture(repo)
 
-    copied = repo.copy_notebook(source, new_owner_id="copy-owner")
+    copied = repo._runtime.sharing.copy_notebook(source, new_owner_id="copy-owner")
 
     with repo._connect() as db:
         row = db.execute(
@@ -1543,7 +1543,7 @@ def test_copy_logs_how_many_mount_edges_it_dropped(repo, caplog):
     source, _public, _recipient_private, _stranger = _seed_mount_fixture(repo)
 
     with caplog.at_level("INFO", logger="silicon_notebook.sharing"):
-        repo.copy_notebook(source, new_owner_id="copy-owner")
+        repo._runtime.sharing.copy_notebook(source, new_owner_id="copy-owner")
 
     dropped_lines = [
         record.getMessage()
@@ -1566,7 +1566,7 @@ def test_self_copy_keeps_every_mount_the_owner_could_already_use(repo, caplog):
     _mount(repo, source, base, created_by="solo")
 
     with caplog.at_level("INFO", logger="silicon_notebook.sharing"):
-        copied = repo.copy_notebook(source, new_owner_id="solo")
+        copied = repo._runtime.sharing.copy_notebook(source, new_owner_id="solo")
 
     assert _mounted(repo, copied.id) == {base}
     assert [r.getMessage() for r in caplog.records if "丢弃" in r.getMessage()] == []
@@ -1599,7 +1599,7 @@ def test_half_copied_mount_edges_cannot_leak_past_compensation(repo, monkeypatch
 
     monkeypatch.setattr(repo, "_insert_row", boom_after_the_mounts)
     with pytest.raises(RuntimeError):
-        repo.copy_notebook(source, new_owner_id="copy-owner")
+        repo._runtime.sharing.copy_notebook(source, new_owner_id="copy-owner")
 
     assert seen["bases"] == 2  # 边确实写过,不是「没写所以没泄漏」
     with repo._connect() as db:
@@ -1647,7 +1647,7 @@ def test_everyone_granted_library_travels_with_every_copy(repo):
     source = _mk_nb(repo, "source", "src-owner")
     _mount(repo, source, open_base, created_by="src-owner")
 
-    copied = repo.copy_notebook(source, new_owner_id="copy-owner")
+    copied = repo._runtime.sharing.copy_notebook(source, new_owner_id="copy-owner")
 
     assert _mounted(repo, copied.id) == {open_base}
 
@@ -1678,7 +1678,7 @@ def test_borrowed_edges_travel_only_on_the_recipients_own_read_access(repo):
     for base in (by_member, by_grant, owners_own_loan):
         _mount(repo, source, base, created_by="src-owner")
 
-    copied = repo.copy_notebook(source, new_owner_id="copy-owner")
+    copied = repo._runtime.sharing.copy_notebook(source, new_owner_id="copy-owner")
 
     assert _mounted(repo, copied.id) == {by_member, by_grant}
 
@@ -1707,7 +1707,7 @@ def test_a_base_deleted_between_the_check_and_the_insert_is_one_more_drop(
         delete_the_public_base_after_judging,
     )
     with caplog.at_level("INFO", logger="silicon_notebook.sharing"):
-        copied = repo.copy_notebook(source, new_owner_id="copy-owner")
+        copied = repo._runtime.sharing.copy_notebook(source, new_owner_id="copy-owner")
 
     assert _mounted(repo, copied.id) == {recipient_private}
     lines = [r.getMessage() for r in caplog.records if "挂载边" in r.getMessage()]
@@ -1769,7 +1769,7 @@ def test_deep_copy_of_a_notebook_with_memories_carries_none_of_them(repo):
         memory_cases.expected_copy_counts()
     ), "the fixture must actually hold Memory rows"
 
-    new = repo.copy_notebook(memory_cases.NOTEBOOK, new_owner_id="user-deep-copy")
+    new = repo._runtime.sharing.copy_notebook(memory_cases.NOTEBOOK, new_owner_id="user-deep-copy")
 
     view = memory_cases.read_copy(fetch, "?", new.id)
     memory_cases.assert_copy_has_no_memory(view)
@@ -1850,7 +1850,7 @@ def test_copy_of_a_clean_notebook_without_memory_runs_the_pre_m2_statements_verb
     assert store_module._COPY_DIRTY_MARK not in snapshot["notebooks"][0]
 
     _mk_user(repo, "user-plain-copy")
-    new = repo.copy_notebook(memory_cases.NOTEBOOK_PLAIN, new_owner_id="user-plain-copy")
+    new = repo._runtime.sharing.copy_notebook(memory_cases.NOTEBOOK_PLAIN, new_owner_id="user-plain-copy")
     assert _kg_state(repo, new.id) is None
     fetch = _fetch(repo)
     assert memory_cases.read_copy(fetch, "?", new.id).counts == (
@@ -1868,7 +1868,7 @@ def test_copy_of_a_dirty_notebook_without_memory_starts_dirty(repo, monkeypatch)
             "VALUES (?, 1, 5, ?)", (memory_cases.NOTEBOOK_PLAIN, memory_cases.NOW),
         )
     _mk_user(repo, "user-dirty-copy")
-    new = repo.copy_notebook(memory_cases.NOTEBOOK_PLAIN, new_owner_id="user-dirty-copy")
+    new = repo._runtime.sharing.copy_notebook(memory_cases.NOTEBOOK_PLAIN, new_owner_id="user-dirty-copy")
     state = _kg_state(repo, new.id)
     assert state is not None and state["dirty"] == 1 and state["kg_mutation_seq"] == 1
     fetch = _fetch(repo)
@@ -1971,7 +1971,7 @@ def test_a_memory_object_merged_into_a_shared_one_leaves_no_memory_text_in_the_c
     assert memory_cases.PROBE_MEMORY_TEXT in merged, "fixture: the merge carried the text"
 
     _mk_user(repo, "user-probe-copy")
-    new = repo.copy_notebook(nb, new_owner_id="user-probe-copy")
+    new = repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-probe-copy")
     view = memory_cases.read_copy(_fetch(repo), "?", new.id)
     memory_cases.assert_copy_objects_carry_no_memory_text(view)
     assert view.counts["knowledge_objects"] == 1
@@ -2004,7 +2004,7 @@ def test_a_cluster_seeded_by_a_since_deleted_memory(repo, canonical):
     assert [r["member_object_id"] for r in left] == ["ko-shared-p"]
 
     _mk_user(repo, "user-stale-copy")
-    new = repo.copy_notebook(nb, new_owner_id="user-stale-copy")
+    new = repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-stale-copy")
     state = _kg_state(repo, new.id)
     assert state is not None and state["dirty"] == 1
     view = memory_cases.read_copy(_fetch(repo), "?", new.id)
@@ -2045,7 +2045,7 @@ def test_child_rows_are_judged_by_their_memory_parent_too(repo):
     _seed_memory_world(repo)
     _insert_rows(repo, memory_cases.ADVERSARIAL_ROWS)
     _mk_user(repo, "user-adv-copy")
-    new = repo.copy_notebook(memory_cases.NOTEBOOK, new_owner_id="user-adv-copy")
+    new = repo._runtime.sharing.copy_notebook(memory_cases.NOTEBOOK, new_owner_id="user-adv-copy")
     view = memory_cases.read_copy(_fetch(repo), "?", new.id)
     memory_cases.assert_copy_has_no_memory(view)
 
@@ -2309,7 +2309,7 @@ def test_validate_and_compensate_both_consume_the_copys_cluster_decision(repo, m
     _seed_memory_world(repo)
     _mk_user(repo, "user-decision")
     store = repo._runtime.sharing_store
-    repo.copy_notebook(memory_cases.NOTEBOOK, new_owner_id="user-decision")
+    repo._runtime.sharing.copy_notebook(memory_cases.NOTEBOOK, new_owner_id="user-decision")
     assert store._clusters_dropped == {}
 
     original = SharingStore.insert_copy_rows
@@ -2322,7 +2322,7 @@ def test_validate_and_compensate_both_consume_the_copys_cluster_decision(repo, m
 
     monkeypatch.setattr(SharingStore, "insert_copy_rows", fail_after_the_root_row)
     with pytest.raises(RuntimeError, match="injected failure"):
-        repo.copy_notebook(memory_cases.NOTEBOOK, new_owner_id="user-decision")
+        repo._runtime.sharing.copy_notebook(memory_cases.NOTEBOOK, new_owner_id="user-decision")
     assert store._clusters_dropped == {}
 
 

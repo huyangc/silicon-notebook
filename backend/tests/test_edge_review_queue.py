@@ -12,6 +12,7 @@ from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
 from tests.model_testkit import bind_all_embedding_clients
+from tests.kg_relation_testkit import add_relations
 
 
 @pytest.fixture
@@ -523,7 +524,7 @@ def test_review_queue_missing_notebook_raises_keyerror(repo):
         repo.review_queue("does-not-exist")
 
 
-def test_add_relations_facade_path_invalidates_the_review_queue_ranking(repo):
+def test_add_relations_testkit_invalidates_the_review_queue_ranking(repo):
     """T-A2 的同一处豁口:``add_relations`` 不 bump ``kg_mutation_seq``,排名 memo
     与计数 memo 一样必须在那里被显式失效。"""
     nb_id = _seed_graph(repo)
@@ -531,7 +532,7 @@ def test_add_relations_facade_path_invalidates_the_review_queue_ranking(repo):
     memo = repo._runtime.review_queue_memo
     assert memo.cached_seq(nb_id) is not None
 
-    repo.add_relations(nb_id, "", [])
+    add_relations(repo, nb_id, "", [])
 
     assert memo.cached_seq(nb_id) is None
 
@@ -698,8 +699,9 @@ def test_store_kg_embedding_failure_still_leaves_the_seq_advanced(
     assert memo.cached_seq(nb_id) == _graph_seq(repo, nb_id)
 
 
-def test_add_relations_facade_path_resets_the_cached_total(repo):
-    """F1 / T-A3 v4: RepositoryFacade.add_relations is a raw-insert path that
+def test_add_relations_testkit_resets_the_cached_total(repo):
+    """F1 / T-A3 v4: the testkit's add_relations (``tests.kg_relation_testkit``,
+    moved off RepositoryFacade in S2 batch F) is a raw-insert path that
     bypasses store_kg's kg_mutation_seq bump. It must explicitly invalidate
     the ranking memo (items AND total, v4 — one entry, not the old separate
     counts_cache memo) itself so a fixture that warms it, then seeds via this
@@ -709,7 +711,7 @@ def test_add_relations_facade_path_resets_the_cached_total(repo):
     memo = repo._runtime.review_queue_memo
     assert memo.cached_seq(nb_id) is not None
 
-    repo.add_relations(nb_id, "", [])  # no-op insert, but still the facade path
+    add_relations(repo, nb_id, "", [])  # no-op insert, but still the raw-insert path
 
     assert memo.cached_seq(nb_id) is None  # explicitly invalidated
 

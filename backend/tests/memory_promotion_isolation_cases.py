@@ -69,7 +69,7 @@ def build(client, repo, q) -> World:
     base = repo.create_notebook(NotebookCreate(name="Public base"))
     repo.mark_notebook_base(base.id)
     repo.replace_notebook_bases(nb, [base.id], a_id)
-    repo.add_member(nb, b_id)
+    repo._runtime.sharing.add_member(nb, b_id)
     memory = repo.create_memory_candidate(
         nb, a_id, None, "req-m1-promotion", "Private title", MEMORY_TEXT,
         [], "", {}, [],

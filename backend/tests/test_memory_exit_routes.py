@@ -51,7 +51,7 @@ def _world(tmp_path, monkeypatch):
     from app.api.deps import repository
 
     repo = repository()
-    repo.add_member(notebook_id, reader_id)
+    repo._runtime.sharing.add_member(notebook_id, reader_id)
     service = repo._runtime.memory_service
     confirmed = service.confirm(
         service.create_candidate(
@@ -129,7 +129,7 @@ def test_exit_without_memory_needs_no_acknowledgement(tmp_path, monkeypatch):
     w = _world(tmp_path, monkeypatch)
     client = w["client"]
     headers, user_id = _register(client, "m00100104")
-    w["repo"].add_member(w["notebook"], user_id)
+    w["repo"]._runtime.sharing.add_member(w["notebook"], user_id)
     response = client.delete(f"/api/notebooks/{w['notebook']}/membership", headers=headers)
     assert response.status_code == 204
     assert response.content == b""
@@ -166,7 +166,7 @@ def test_a_failed_purge_reports_what_it_deleted_and_keeps_the_membership(
     assert response.json() == {
         "detail": {"code": "exit_incomplete", "deleted_memory_count": 1, "memory_count": 1}
     }
-    assert w["repo"].is_member(w["notebook"], w["reader_id"])
+    assert w["repo"]._runtime.sharing.is_member(w["notebook"], w["reader_id"])
     # The retry starts from the disclosure again, which tells the truth.
     assert w["client"].get(
         f"/api/notebooks/{w['notebook']}/membership/exit-disclosure", headers=w["reader"]
@@ -199,7 +199,7 @@ def test_a_cleanup_failure_after_the_delete_still_reports_what_was_deleted(
     assert response.json() == {
         "detail": {"code": "exit_incomplete", "deleted_memory_count": 2, "memory_count": 0}
     }
-    assert w["repo"].is_member(w["notebook"], w["reader_id"])
+    assert w["repo"]._runtime.sharing.is_member(w["notebook"], w["reader_id"])
     # Only the second call failed; the retry runs the real cleanup.
     assert w["client"].get(
         f"/api/notebooks/{w['notebook']}/membership/exit-disclosure", headers=w["reader"]
@@ -208,7 +208,7 @@ def test_a_cleanup_failure_after_the_delete_still_reports_what_was_deleted(
         f"/api/notebooks/{w['notebook']}/membership", headers=w["reader"]
     )
     assert retry.status_code == 204
-    assert not w["repo"].is_member(w["notebook"], w["reader_id"])
+    assert not w["repo"]._runtime.sharing.is_member(w["notebook"], w["reader_id"])
 
 
 def test_a_failed_purge_before_any_delete_says_nothing_was_deleted(
@@ -229,7 +229,7 @@ def test_a_failed_purge_before_any_delete_says_nothing_was_deleted(
     assert response.json() == {
         "detail": {"code": "exit_incomplete", "deleted_memory_count": 0, "memory_count": 2}
     }
-    assert w["repo"].is_member(w["notebook"], w["reader_id"])
+    assert w["repo"]._runtime.sharing.is_member(w["notebook"], w["reader_id"])
 
 
 def test_memory_saved_during_the_exit_is_an_incomplete_exit_with_both_numbers(
@@ -258,7 +258,7 @@ def test_memory_saved_during_the_exit_is_an_incomplete_exit_with_both_numbers(
     assert response.json() == {
         "detail": {"code": "exit_incomplete", "deleted_memory_count": 2, "memory_count": 1}
     }
-    assert w["repo"].is_member(w["notebook"], w["reader_id"])
+    assert w["repo"]._runtime.sharing.is_member(w["notebook"], w["reader_id"])
 
 
 def test_an_acknowledgement_is_refused_when_nothing_would_be_deleted(
@@ -282,11 +282,11 @@ def test_an_acknowledgement_is_refused_when_nothing_would_be_deleted(
     assert refused.json() == {
         "detail": {"code": "exit_disclosure_required", "memory_count": 0}
     }
-    assert w["repo"].is_member(notebook, w["reader_id"])
+    assert w["repo"]._runtime.sharing.is_member(notebook, w["reader_id"])
     # With 0 acknowledged (or none) the exit ends the membership and keeps
     # every Memory: the grant still reads them.
     assert client.delete(url, headers=w["reader"]).status_code == 204
-    assert not w["repo"].is_member(notebook, w["reader_id"])
+    assert not w["repo"]._runtime.sharing.is_member(notebook, w["reader_id"])
     assert client.get(
         f"/api/notebooks/{notebook}/memories", headers=w["reader"]
     ).json()["total_count"] == 2
@@ -443,4 +443,4 @@ def test_a_finished_exit_that_deleted_nothing_still_answers_200_with_zero(
     )
     assert response.status_code == 200
     assert response.json() == {"deleted_memory_count": 0}
-    assert not w["repo"].is_member(w["notebook"], w["reader_id"])
+    assert not w["repo"]._runtime.sharing.is_member(w["notebook"], w["reader_id"])

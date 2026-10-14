@@ -53,3 +53,26 @@ def test_identity_repository_still_declares_the_facade_identity_reads():
     } <= _protocol_members(ports.IdentityRepository)
     assert ports.IdentityReadRepository in ports.NotebookRepository.__mro__
     assert ports.IdentityRepository not in ports.NotebookRepository.__mro__
+
+
+def test_access_and_sharing_protocols_still_declare_the_facade_reads():
+    """S2 批 F split the facade's access and sharing reads into
+    ``NotebookAccessReadRepository`` / ``NotebookShareReadRepository`` (what
+    ``NotebookRepository`` and ``McpMemoryRepository`` inherit).
+    ``notebook_access_repository()`` / ``notebook_sharing_repository()`` still
+    hand out the full protocols, whose callers read through them -- so those
+    must keep the reads by inheriting the split-off bases."""
+    access_reads = {
+        "user_can_access_notebook", "user_can_read_notebook", "source_owner",
+        "source_notebook_id", "answer_owner",
+    }
+    share_reads = {"share_state", "notebook_copy_stats", "shared_preview", "shared_by_me"}
+    assert ports.NotebookAccessReadRepository in ports.NotebookAccessRepository.__mro__
+    assert access_reads <= _protocol_members(ports.NotebookAccessRepository)
+    assert ports.NotebookShareReadRepository in ports.NotebookSharingRepository.__mro__
+    assert share_reads <= _protocol_members(ports.NotebookSharingRepository)
+    for facade_bound in (ports.NotebookRepository, ports.McpMemoryRepository):
+        assert ports.NotebookAccessReadRepository in facade_bound.__mro__
+        assert ports.NotebookAccessRepository not in facade_bound.__mro__
+    assert ports.NotebookShareReadRepository in ports.NotebookRepository.__mro__
+    assert ports.NotebookSharingRepository not in ports.NotebookRepository.__mro__

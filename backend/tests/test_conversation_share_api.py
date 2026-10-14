@@ -178,7 +178,7 @@ def test_another_members_conversation_is_404_on_every_share_operation(client):
     member_a, member_a_id, _ = _group_granted_reader(client, owner, nb)
     member_b, member_b_id = _new_user(client)
     from app.api.deps import repository
-    repository().add_member(nb, member_b_id)
+    repository()._runtime.sharing.add_member(nb, member_b_id)
 
     cid = _seed_conversation(nb, member_a_id)
     # 先让创建者真的分享出去 —— 否则"入侵者拿到 404"可能只是因为它压根没分享。

@@ -227,11 +227,11 @@ def test_direct_resource_authorization(postgres_repository, lifecycle):
     hidden_ids = (lifecycle["copying_id"], lifecycle["deleting_id"])
 
     assert repo.user_can_access_notebook(active_id, owner_id) is True
-    assert repo.user_can_admin_notebook(active_id, owner_id) is True
+    assert repo._runtime.sharing.user_can_admin_notebook(active_id, owner_id) is True
     assert repo.user_can_read_notebook(active_id, owner_id) is True
     for hidden_id in hidden_ids:
         assert repo.user_can_access_notebook(hidden_id, owner_id) is False
-        assert repo.user_can_admin_notebook(hidden_id, owner_id) is False
+        assert repo._runtime.sharing.user_can_admin_notebook(hidden_id, owner_id) is False
         assert repo.user_can_read_notebook(hidden_id, owner_id) is False
 
     member_id = lifecycle["member_id"]

@@ -121,7 +121,7 @@ def test_deep_copy_of_a_notebook_with_memories_carries_none_of_them(pg_app):
     fetch = _fetch(repo)
     assert cases.read_copy(fetch, "%s", cases.NOTEBOOK).counts != cases.expected_copy_counts()
 
-    new = repo.copy_notebook(cases.NOTEBOOK, new_owner_id="user-deep-copy")
+    new = repo._runtime.sharing.copy_notebook(cases.NOTEBOOK, new_owner_id="user-deep-copy")
 
     view = cases.read_copy(fetch, "%s", new.id)
     cases.assert_copy_has_no_memory(view)
@@ -194,7 +194,7 @@ def test_copy_of_a_clean_notebook_without_memory_runs_the_pre_m2_statements_verb
         store.snapshot_copy_rows(cases.NOTEBOOK_PLAIN)["notebooks"][0]
     )
     _mk_user(repo, "user-plain-copy")
-    new = repo.copy_notebook(cases.NOTEBOOK_PLAIN, new_owner_id="user-plain-copy")
+    new = repo._runtime.sharing.copy_notebook(cases.NOTEBOOK_PLAIN, new_owner_id="user-plain-copy")
     assert _kg_state(repo, new.id) is None
     fetch = _fetch(repo)
     assert cases.read_copy(fetch, "%s", new.id).counts == (
@@ -211,7 +211,7 @@ def test_copy_of_a_dirty_notebook_without_memory_starts_dirty(pg_app):
             "VALUES (%s, 1, 5, %s)", (cases.NOTEBOOK_PLAIN, cases.NOW),
         )
     _mk_user(repo, "user-dirty-copy")
-    new = repo.copy_notebook(cases.NOTEBOOK_PLAIN, new_owner_id="user-dirty-copy")
+    new = repo._runtime.sharing.copy_notebook(cases.NOTEBOOK_PLAIN, new_owner_id="user-dirty-copy")
     state = _kg_state(repo, new.id)
     assert state is not None and int(state["dirty"]) == 1 and int(state["kg_mutation_seq"]) == 1
     fetch = _fetch(repo)
@@ -251,7 +251,7 @@ def test_validate_copy_compares_like_with_like_and_still_detects_a_short_copy(pg
     repo, _client = pg_app
     _seed(repo)
     _mk_user(repo, "user-validate")
-    new = repo.copy_notebook(cases.NOTEBOOK, new_owner_id="user-validate")
+    new = repo._runtime.sharing.copy_notebook(cases.NOTEBOOK, new_owner_id="user-validate")
     store = repo._runtime.sharing_store
     store.validate_copy(cases.NOTEBOOK, new.id)
     with repo._runtime.database.write() as db:
@@ -288,7 +288,7 @@ def test_a_memory_object_merged_into_a_shared_one_leaves_no_memory_text_in_the_c
     assert cases.PROBE_MEMORY_TEXT in merged, "fixture: the merge carried the text"
 
     _mk_user(repo, "user-probe-copy")
-    new = repo.copy_notebook(nb, new_owner_id="user-probe-copy")
+    new = repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-probe-copy")
     view = cases.read_copy(_fetch(repo), "%s", new.id)
     cases.assert_copy_objects_carry_no_memory_text(view)
     assert view.counts["knowledge_objects"] == 1
@@ -317,7 +317,7 @@ def test_a_cluster_seeded_by_a_since_deleted_memory(pg_app, canonical):
     assert [r["member_object_id"] for r in left] == ["ko-shared-p"]
 
     _mk_user(repo, "user-stale-copy")
-    new = repo.copy_notebook(nb, new_owner_id="user-stale-copy")
+    new = repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-stale-copy")
     state = _kg_state(repo, new.id)
     assert state is not None and int(state["dirty"]) == 1
     view = cases.read_copy(_fetch(repo), "%s", new.id)
@@ -441,7 +441,7 @@ def test_validate_and_compensate_both_consume_the_copys_cluster_decision(pg_app,
     _seed(repo)
     _mk_user(repo, "user-decision")
     store = repo._runtime.sharing_store
-    repo.copy_notebook(cases.NOTEBOOK, new_owner_id="user-decision")
+    repo._runtime.sharing.copy_notebook(cases.NOTEBOOK, new_owner_id="user-decision")
     assert store._clusters_dropped == {}
 
     original = SharingStore.insert_copy_rows
@@ -454,7 +454,7 @@ def test_validate_and_compensate_both_consume_the_copys_cluster_decision(pg_app,
 
     monkeypatch.setattr(SharingStore, "insert_copy_rows", fail_after_the_root_row)
     with pytest.raises(RuntimeError, match="injected failure"):
-        repo.copy_notebook(cases.NOTEBOOK, new_owner_id="user-decision")
+        repo._runtime.sharing.copy_notebook(cases.NOTEBOOK, new_owner_id="user-decision")
     assert store._clusters_dropped == {}
 
 
@@ -806,7 +806,7 @@ def test_child_rows_are_judged_by_their_memory_parent_too(pg_app):
     _seed(repo)
     _insert_rows(repo, cases.ADVERSARIAL_ROWS)
     _mk_user(repo, "user-adv-copy")
-    new = repo.copy_notebook(cases.NOTEBOOK, new_owner_id="user-adv-copy")
+    new = repo._runtime.sharing.copy_notebook(cases.NOTEBOOK, new_owner_id="user-adv-copy")
     cases.assert_copy_has_no_memory(cases.read_copy(_fetch(repo), "%s", new.id))
 
 

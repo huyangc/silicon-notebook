@@ -445,7 +445,7 @@ def test_copy_notebook_uses_legacy_filter_without_mutating_reverse_index(repo):
     ]
     repo.store_kg(nb.id, s1, objects, [])
 
-    copy = repo.copy_notebook(nb.id, new_owner_id="user-local")
+    copy = repo._runtime.sharing.copy_notebook(nb.id, new_owner_id="user-local")
 
     with repo._connect() as db:
         assert not repo._source_index_backfilled(db, copy.id)

@@ -8,6 +8,7 @@ from app.core.config import Settings
 from app.services.source_ingestion import PartialKgRetryIncomplete
 from uuid import uuid4
 from tests.model_testkit import bind_chat_client
+from tests.kg_relation_testkit import add_relations
 
 
 @pytest.fixture
@@ -81,7 +82,7 @@ def test_add_and_read_relations(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     a = repo._test_insert_object(nb.id, "concept", {"name": "MOSFET"})
     b = repo._test_insert_object(nb.id, "claim", {"name": "MOSFET has threshold voltage"})
-    repo.add_relations(nb.id, None, [
+    add_relations(repo, nb.id, None, [
         {"source_object_id": b, "target_object_id": a, "edge_type": "about",
          "evidence": [{"quote": "threshold voltage of the MOSFET"}]},
     ])
@@ -445,7 +446,7 @@ def test_knowledge_graph_from_kg_tables(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     c = repo._test_insert_object(nb.id, "concept", {"name": "Engram"})
     k = repo._test_insert_object(nb.id, "claim", {"name": "Engram improves perplexity"})
-    repo.add_relations(nb.id, None, [{"source_object_id": k, "target_object_id": c,
+    add_relations(repo, nb.id, None, [{"source_object_id": k, "target_object_id": c,
                                       "edge_type": "about", "evidence": []}])
     g = repo.knowledge_graph(nb.id)
     assert {n.object_type for n in g.nodes} == {"concept", "claim"}
@@ -483,7 +484,7 @@ def test_1hop_relation_is_stored(repo):
         nb.id, "concept", {"name": "XyZzY_unrelated_concept"}
     )
     # Wire them with an 'about' relation: claim -> concept.
-    repo.add_relations(nb.id, None, [
+    add_relations(repo, nb.id, None, [
         {"source_object_id": claim_id, "target_object_id": concept_id,
          "edge_type": "about", "evidence": [{"quote": "Engram improves perplexity"}]},
     ])

@@ -500,7 +500,7 @@ def _shared_member_proposal(repo, *, via_grant: bool):
                 (notebook.id, memory_owner.id, notebook_owner.id),
             )
     else:
-        repo.add_member(notebook.id, memory_owner.id)
+        repo._runtime.sharing.add_member(notebook.id, memory_owner.id)
     memory = repo.create_memory_candidate(
         notebook.id,
         memory_owner.id,
@@ -539,7 +539,7 @@ def test_admin_approval_fails_closed_after_member_loses_notebook_access(
         ).fetchone()["payload_json"]
 
     if access_loss == "owner_removes_member":
-        repo.remove_member(notebook.id, memory_owner.id)
+        repo._runtime.sharing.remove_member(notebook.id, memory_owner.id)
     else:
         with repo._write() as db:
             db.execute("DELETE FROM notebook_grants WHERE id='gnt-member'")
@@ -622,7 +622,7 @@ def test_member_exit_withdraws_the_proposal_and_the_memory_never_returns(repo):
         item["id"] == proposal["id"] for item in repo.list_promotion_queue()
     )
 
-    repo.add_member(notebook.id, memory_owner.id)
+    repo._runtime.sharing.add_member(notebook.id, memory_owner.id)
     assert repo.list_memories(memory_owner.id, notebook_id=notebook.id).items == []
 
 
@@ -978,7 +978,7 @@ def test_memory_promotion_routes_hide_revoked_member_candidates(
     repo_api.mark_notebook_base(base.id)
     repo_api.replace_notebook_bases(notebook_id, [base.id], owner_id)
     if access_loss == "owner_removes_member":
-        repo_api.add_member(notebook_id, member_id)
+        repo_api._runtime.sharing.add_member(notebook_id, member_id)
     else:
         with repo_api._write() as db:
             db.execute(
@@ -1002,7 +1002,7 @@ def test_memory_promotion_routes_hide_revoked_member_candidates(
         memory = repo_api.confirm_memory(memory.id, member_id)
         proposals.append(repo_api.propose_memory_promotion(memory.id, member_id))
     if access_loss == "owner_removes_member":
-        repo_api.remove_member(notebook_id, member_id)
+        repo_api._runtime.sharing.remove_member(notebook_id, member_id)
     else:
         with repo_api._write() as db:
             db.execute("DELETE FROM notebook_grants WHERE id='gnt-revoked'")

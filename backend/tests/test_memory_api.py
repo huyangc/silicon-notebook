@@ -168,7 +168,7 @@ def test_reader_can_save_own_private_memory_and_answer_save_is_idempotent(
     from app.api.deps import repository
 
     repo = repository()
-    repo.add_member(notebook_id, reader_id)
+    repo._runtime.sharing.add_member(notebook_id, reader_id)
     answer_id = _answer(
         repo, notebook_id, "How should it be compensated?", owner_id=reader_id
     )
@@ -229,7 +229,7 @@ def test_answer_memory_links_are_bounded_owner_private_and_notebook_scoped(
     from app.api.deps import repository
 
     repo = repository()
-    repo.add_member(notebook_a, reader_id)
+    repo._runtime.sharing.add_member(notebook_a, reader_id)
     answer_a = _answer(repo, notebook_a, "Owner saved?")
     answer_reader = _answer(repo, notebook_a, "Reader saved?", owner_id=reader_id)
     answer_b = _answer(repo, notebook_b, "Wrong notebook?")
@@ -276,7 +276,7 @@ def test_answer_memory_links_are_bounded_owner_private_and_notebook_scoped(
     )
     assert too_many.status_code == 422
 
-    repo.remove_member(notebook_a, reader_id)
+    repo._runtime.sharing.remove_member(notebook_a, reader_id)
     assert client.post(
         f"/api/notebooks/{notebook_a}/answer-memory-links",
         headers=reader_headers,
@@ -591,7 +591,7 @@ def test_revoked_reader_loses_all_memory_read_and_mutation_access(
     from app.api.deps import repository
 
     repo = repository()
-    repo.add_member(notebook_id, reader_id)
+    repo._runtime.sharing.add_member(notebook_id, reader_id)
     answer_id = _answer(repo, notebook_id, owner_id=reader_id)
     confirmed = client.post(
         f"/api/notebooks/{notebook_id}/memories/from-answer",
@@ -609,7 +609,7 @@ def test_revoked_reader_loses_all_memory_read_and_mutation_access(
     candidate_b = repo.create_memory_candidate(
         notebook_id, reader_id, None, "revoke-b", "B", "Body", [], "review"
     )
-    repo.remove_member(notebook_id, reader_id)
+    repo._runtime.sharing.remove_member(notebook_id, reader_id)
 
     assert client.get("/api/memories", headers=reader_headers).json()["items"] == []
     assert client.get(

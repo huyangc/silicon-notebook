@@ -60,7 +60,7 @@ def test_history_timeline_is_readable_by_a_read_only_member(tmp_path, monkeypatc
     ctx = _setup(tmp_path, monkeypatch)
     bob = _login(ctx["client"], "b00002080")
     bob_id = ctx["client"].get("/api/me", headers=bob).json()["id"]
-    repo.add_member(ctx["nb"], bob_id)
+    repo._runtime.sharing.add_member(ctx["nb"], bob_id)
 
     response = ctx["client"].get(
         f"/api/notebooks/{ctx['nb']}/knowhow/{ctx['table']['id']}/history", headers=bob
@@ -75,7 +75,7 @@ def test_revert_is_refused_for_a_read_only_member(tmp_path, monkeypatch, repo):
     ctx = _setup(tmp_path, monkeypatch)
     bob = _login(ctx["client"], "b00002081")
     bob_id = ctx["client"].get("/api/me", headers=bob).json()["id"]
-    repo.add_member(ctx["nb"], bob_id)
+    repo._runtime.sharing.add_member(ctx["nb"], bob_id)
 
     response = ctx["client"].post(
         f"/api/notebooks/{ctx['nb']}/knowhow/{ctx['table']['id']}/revert",

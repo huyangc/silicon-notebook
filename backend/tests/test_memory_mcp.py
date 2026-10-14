@@ -6496,7 +6496,7 @@ async def test_add_observation_landing_after_member_removal_is_compensated(
     def append_then_remove(*args, **kwargs):
         result = real_append(*args, **kwargs)
         # 模拟移除恰好在 append 与复核之间完成:清行 + 撤成员
-        repo.remove_member(notebook_id, bob.id)
+        repo._runtime.sharing.remove_member(notebook_id, bob.id)
         return result
 
     monkeypatch.setattr(store, "append_observation", append_then_remove)
@@ -6716,7 +6716,7 @@ async def test_call_ledger_row_landing_after_member_removal_is_compensated(
     def append_then_remove(*args, **kwargs):
         result = real_append(*args, **kwargs)
         # 模拟移除恰好落在记账与复核之间
-        repo.remove_member(notebook_id, bob.id)
+        repo._runtime.sharing.remove_member(notebook_id, bob.id)
         return result
 
     monkeypatch.setattr(store, "append_call", append_then_remove)

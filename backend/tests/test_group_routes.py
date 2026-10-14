@@ -869,7 +869,7 @@ def test_a_notebook_reachable_twice_appears_once_with_the_member_row_winning(
         headers=owner,
     )
     _share_to_group(client, owner, notebook_id, group_id)
-    repo.add_member(notebook_id, member_id)
+    repo._runtime.sharing.add_member(notebook_id, member_id)
 
     listed = [n for n in client.get("/api/notebooks", headers=member).json()]
     assert [n["id"] for n in listed] == [notebook_id]
@@ -1729,7 +1729,7 @@ def test_plain_readonly_member_detail_has_no_group_origin(tmp_path, monkeypatch)
     _app_group_store()  # 触发应用实例构造,与本文件其它用例同款
     from app.api import deps
 
-    deps.repository().add_member(notebook_id, member_id)
+    deps.repository()._runtime.sharing.add_member(notebook_id, member_id)
 
     body = client.get(f"/api/notebooks/{notebook_id}", headers=member).json()
     assert body["access"] == "reader"
@@ -1758,7 +1758,7 @@ def test_a_member_who_is_also_in_a_granted_group_keeps_the_member_row(
     _share_to_group(client, owner, notebook_id, group_id)
     from app.api import deps
 
-    deps.repository().add_member(notebook_id, member_id)
+    deps.repository()._runtime.sharing.add_member(notebook_id, member_id)
 
     listed = [
         item for item in client.get("/api/notebooks", headers=member).json()
@@ -1975,7 +1975,7 @@ def test_can_manage_content_survives_the_member_row_dedup(tmp_path, monkeypatch,
         headers=owner,
     )
     _grant(client, owner, notebook_id, group_id, "group_admins", "admin")
-    repo.add_member(notebook_id, deputy_id)  # 同时还经分享链接加入
+    repo._runtime.sharing.add_member(notebook_id, deputy_id)  # 同时还经分享链接加入
 
     listed = [n for n in client.get("/api/notebooks", headers=deputy).json()]
     assert [n["id"] for n in listed] == [notebook_id]
@@ -2021,7 +2021,7 @@ def test_can_manage_content_matches_the_authoritative_predicate(tmp_path, monkey
         for notebook_id in (managed, read_only):
             if notebook_id not in listed:
                 continue
-            assert listed[notebook_id]["can_manage_content"] is repo.user_can_admin_notebook(
+            assert listed[notebook_id]["can_manage_content"] is repo._runtime.sharing.user_can_admin_notebook(
                 notebook_id, user_id
             ), (notebook_id, user_id)
 

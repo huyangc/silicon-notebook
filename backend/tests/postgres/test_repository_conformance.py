@@ -291,9 +291,9 @@ def test_complete_postgres_repository_smoke_from_empty_schema(
             notebook.id, [report_id], created_by=reader.id
         ) == []
 
-        share = repository.share_notebook(notebook.id)
-        assert repository.find_notebook_by_share_token(share["share_token"]) == notebook.id
-        joined = repository.join_shared(notebook.id, reader.id)
+        share = repository._runtime.sharing.share_notebook(notebook.id)
+        assert repository._runtime.sharing.find_notebook_by_share_token(share["share_token"]) == notebook.id
+        joined = repository._runtime.sharing.join_shared(notebook.id, reader.id)
         assert joined.access == "reader"
         assert repository.user_can_read_notebook(notebook.id, reader.id)
 

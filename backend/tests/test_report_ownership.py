@@ -188,7 +188,7 @@ def test_plain_readonly_member_can_also_create_a_report(client, stub_report_laun
     notebook_id = _notebook(client, owner)
     member, member_id = _new_user(client)
     from app.api.deps import repository
-    repository().add_member(notebook_id, member_id)
+    repository()._runtime.sharing.add_member(notebook_id, member_id)
 
     report_id = _create_report(client, member, notebook_id)
     assert repository().get_report(notebook_id, report_id)["created_by"] == member_id
@@ -208,7 +208,7 @@ def test_another_members_report_is_404_on_every_operation(client, stub_report_la
     member_a, _, _ = _group_granted_reader(client, owner, notebook_id)
     member_b, member_b_id = _new_user(client)
     from app.api.deps import repository
-    repository().add_member(notebook_id, member_b_id)
+    repository()._runtime.sharing.add_member(notebook_id, member_b_id)
 
     report_id = _create_report(client, member_a, notebook_id)
     _finish(notebook_id, report_id)          # 让 share/export 的前置条件成立
@@ -241,7 +241,7 @@ def test_intruder_write_attempts_leave_the_report_state_untouched(
     member_a, _, _ = _group_granted_reader(client, owner, notebook_id)
     member_b, member_b_id = _new_user(client)
     from app.api.deps import repository
-    repository().add_member(notebook_id, member_b_id)
+    repository()._runtime.sharing.add_member(notebook_id, member_b_id)
 
     report_id = _create_report(client, member_a, notebook_id)
     repository().update_report(

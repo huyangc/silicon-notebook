@@ -56,7 +56,7 @@ def seed_twin_world(repo, *, source, memory, ph: str, cast: str, now) -> dict:
     token = set_request_user(a)
     try:
         nb = repo.create_notebook(NotebookCreate(name="twins")).id
-        repo.add_member(nb, b.id)
+        repo._runtime.sharing.add_member(nb, b.id)
     finally:
         reset_request_user(token)
     database = repo._runtime.database

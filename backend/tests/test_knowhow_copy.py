@@ -221,7 +221,7 @@ def test_copy_remaps_business_tables_and_asset_reference(repo):
     old_column_ids = set(cols.values())
 
     _mk_user(repo, "user-remap1")
-    new_nb = repo.copy_notebook(nb, new_owner_id="user-remap1")
+    new_nb = repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-remap1")
 
     with repo._connect() as db:
         new_table = db.execute(
@@ -297,7 +297,7 @@ def test_copy_table_never_projected_has_null_hidden_source(repo):
     nb = _notebook(repo)
     repo.create_knowhow_table(nb, "空表", "", COLUMNS)
     _mk_user(repo, "user-neverproj")
-    new_nb = repo.copy_notebook(nb, new_owner_id="user-neverproj")
+    new_nb = repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-neverproj")
     with repo._connect() as db:
         row = db.execute(
             "SELECT hidden_source_id FROM knowhow_tables WHERE notebook_id=?",
@@ -318,7 +318,7 @@ def test_copy_source_elements_metadata_ids_remapped(repo, projector, embedder):
     projector.project_table(table_id)
 
     _mk_user(repo, "user-elemmeta")
-    new_nb = repo.copy_notebook(nb, new_owner_id="user-elemmeta")
+    new_nb = repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-elemmeta")
     new_table_id = _only_table_id(repo, new_nb.id)
 
     with repo._connect() as db:
@@ -373,7 +373,7 @@ def test_copy_chunks_and_vectors_present_before_any_projection(repo, projector, 
     assert src_vec_count == len(src_chunks)
 
     _mk_user(repo, "user-preproj")
-    new_nb = repo.copy_notebook(nb, new_owner_id="user-preproj")
+    new_nb = repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-preproj")
     # No sleep: the scheduler's 0.5s debounce timer cannot have fired yet, so
     # whatever is in place right now came ONLY from copy_notebook's own raw
     # row copy — proving chunks+vectors transplant before any projection run.
@@ -406,7 +406,7 @@ def test_copy_chunks_fts_hit_for_knowhow_content(repo, projector, embedder):
     projector.project_table(table_id)
 
     _mk_user(repo, "user-ftscopy")
-    new_nb = repo.copy_notebook(nb, new_owner_id="user-ftscopy")
+    new_nb = repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-ftscopy")
     with repo._connect() as db:
         hits = db.execute(
             "SELECT chunk_id FROM chunks_fts WHERE notebook_id=? AND chunks_fts MATCH ?",
@@ -425,7 +425,7 @@ def test_copy_zero_embed_calls_and_post_projection_kos_have_dynamic_types(
     assert calls_after_source_projection > 0  # sanity: the source projection really embedded
 
     _mk_user(repo, "user-zeroembed")
-    new_nb = repo.copy_notebook(nb, new_owner_id="user-zeroembed")
+    new_nb = repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-zeroembed")
     # copy_notebook's own row-copy step never touches the embedder at all.
     assert embedder.call_count == calls_after_source_projection
 
@@ -470,7 +470,7 @@ def test_original_notebook_untouched_after_copy_and_projection(repo, projector, 
         ).fetchone()[0]
 
     _mk_user(repo, "user-untouched")
-    new_nb = repo.copy_notebook(nb, new_owner_id="user-untouched")
+    new_nb = repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-untouched")
     new_table_id = _only_table_id(repo, new_nb.id)
     _poll_rows_settled(repo, new_table_id)
 
@@ -525,7 +525,7 @@ def test_copy_failure_compensation_removes_assets_dir(repo, monkeypatch):
     monkeypatch.setattr(repo, "_insert_row", boom_on_cells)
 
     with pytest.raises(RuntimeError):
-        repo.copy_notebook(nb, new_owner_id="user-crashcopy")
+        repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-crashcopy")
 
     assert "id" in captured, "copy must reach _new_id('nb') before the injected failure"
     new_id = captured["id"]
@@ -569,7 +569,7 @@ def test_schedule_failure_after_publish_never_compensates(
 
     monkeypatch.setattr(repo._runtime.notebook_copies, "_schedule_projection", boom)
 
-    new_nb = repo.copy_notebook(nb, new_owner_id="user-schedfail")  # must NOT raise
+    new_nb = repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-schedfail")  # must NOT raise
 
     with repo._connect() as db:
         row = db.execute(
@@ -603,7 +603,7 @@ def test_copied_table_gets_a_genesis_change_and_can_revert_to_the_copied_state(r
     table_id, row_id, cols = _mk_table_with_row(repo, nb)
 
     _mk_user(repo, "user-genesis")
-    new_nb = repo.copy_notebook(nb, new_owner_id="user-genesis")
+    new_nb = repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-genesis")
     new_table_id = _only_table_id(repo, new_nb.id)
 
     hist = repo._runtime.knowhow_history_store

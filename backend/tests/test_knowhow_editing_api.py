@@ -207,7 +207,7 @@ def test_create_table_wizard_reader_cannot_create(tmp_path, monkeypatch, repo):
     nb = _mk_notebook(client, owner_h)
     bob_h = _login(client, "b00001006")
     bob_id = client.get("/api/me", headers=bob_h).json()["id"]
-    repo.add_member(nb, bob_id)
+    repo._runtime.sharing.add_member(nb, bob_id)
 
     assert _create_table(client, bob_h, nb).status_code == 404
 
@@ -341,7 +341,7 @@ def test_patch_table_reader_404(tmp_path, monkeypatch, repo):
     table = _mk_table(client, owner_h, nb)
     bob_h = _login(client, "b00001017")
     bob_id = client.get("/api/me", headers=bob_h).json()["id"]
-    repo.add_member(nb, bob_id)
+    repo._runtime.sharing.add_member(nb, bob_id)
 
     resp = client.patch(
         f"/api/notebooks/{nb}/knowhow/{table['id']}", headers=bob_h, json={"title": "x"},
@@ -821,7 +821,7 @@ def test_readonly_member_gets_404_on_every_mutating_endpoint(tmp_path, monkeypat
 
     bob_h = _login(client, "b00001080")
     bob_id = client.get("/api/me", headers=bob_h).json()["id"]
-    repo.add_member(nb, bob_id)
+    repo._runtime.sharing.add_member(nb, bob_id)
 
     t = table["id"]
     assert client.patch(f"/api/notebooks/{nb}/knowhow/{t}", headers=bob_h, json={"title": "x"}).status_code == 404

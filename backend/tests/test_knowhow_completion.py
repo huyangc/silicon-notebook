@@ -966,7 +966,7 @@ def test_completion_http_permissions_validation_no_write_and_no_schedule(tmp_pat
 
     reader = _login(client, "b00003101")
     reader_id = client.get("/api/me", headers=reader).json()["id"]
-    _app_repo().add_member(notebook_id, reader_id)
+    _app_repo()._runtime.sharing.add_member(notebook_id, reader_id)
     denied = _complete(
         client,
         reader,

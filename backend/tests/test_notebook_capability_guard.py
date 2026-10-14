@@ -382,7 +382,7 @@ def test_sources_write_capability_matches_owner_member_stranger_matrix(
     nb = client.post("/api/notebooks", json={"name": "L"}, headers=owner_h).json()["id"]
     member_h = _login(client, "s00000002")
     member_id = client.get("/api/me", headers=member_h).json()["id"]
-    deps.repository().add_member(nb, member_id)
+    deps.repository()._runtime.sharing.add_member(nb, member_id)
     stranger_h = _login(client, "s00000003")
 
     owner_resp = client.post(f"/api/notebooks/{nb}/backfill-vectors", headers=owner_h)
@@ -411,7 +411,7 @@ def test_notebook_manage_capability_matches_owner_member_stranger_matrix(
     nb = client.post("/api/notebooks", json={"name": "L"}, headers=owner_h).json()["id"]
     member_h = _login(client, "m00000002")
     member_id = client.get("/api/me", headers=member_h).json()["id"]
-    deps.repository().add_member(nb, member_id)
+    deps.repository()._runtime.sharing.add_member(nb, member_id)
     stranger_h = _login(client, "m00000003")
 
     owner_resp = client.patch(
@@ -445,7 +445,7 @@ def test_notebook_configure_capability_matches_owner_member_stranger_matrix(
     nb = client.post("/api/notebooks", json={"name": "L"}, headers=owner_h).json()["id"]
     member_h = _login(client, "c00000002")
     member_id = client.get("/api/me", headers=member_h).json()["id"]
-    deps.repository().add_member(nb, member_id)
+    deps.repository()._runtime.sharing.add_member(nb, member_id)
     stranger_h = _login(client, "c00000003")
 
     owner_resp = client.get(f"/api/notebooks/{nb}/mounted-by-count", headers=owner_h)
@@ -858,7 +858,7 @@ def _mirror_world(client: TestClient, letter: str) -> dict:
     src = _seed_source(nb)
     member_h = _login(client, f"{letter}00000002")
     member_id = client.get("/api/me", headers=member_h).json()["id"]
-    deps.repository().add_member(nb, member_id)
+    deps.repository()._runtime.sharing.add_member(nb, member_id)
     stranger_h = _login(client, f"{letter}00000003")
     origin = _mark_mirror(nb)
     return {

@@ -287,7 +287,7 @@ def test_deep_copy_makes_every_row_user_added(repo, notebook_id):
             ("user-copier", "copier@t", "copier", "user",
              "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
         )
-    copied = repo.copy_notebook(notebook_id, new_owner_id="user-copier")
+    copied = repo._runtime.sharing.copy_notebook(notebook_id, new_owner_id="user-copier")
 
     copied_sources = repo.list_sources(copied.id)
     assert len(copied_sources) == 2

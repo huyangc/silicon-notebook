@@ -152,7 +152,7 @@ def test_all_four_endpoints_share_one_404_body(client, world):
 def test_losing_notebook_access_loses_the_answer(client, world):
     """Own conversation is not enough once the notebook can no longer be read."""
     assert _preview(client, world.headers["bob"], world.bob_answer).status_code == 200
-    world.repo.remove_member(world.notebook_id, world.bob.id)
+    world.repo._runtime.sharing.remove_member(world.notebook_id, world.bob.id)
     for name, call in ENDPOINTS.items():
         response = call(client, world.headers["bob"], world, world.bob_answer)
         assert response.status_code == 404, (name, response.text)
@@ -253,7 +253,7 @@ def test_a_legacy_memory_from_someone_elses_answer_is_returned_to_its_creator_on
 ):
     """A Memory saved before answers were author-checked keeps working for the
     person who made it, is never handed to anyone else, and is countable."""
-    world.repo.add_member(world.notebook_id, world.carol.id)
+    world.repo._runtime.sharing.add_member(world.notebook_id, world.carol.id)
     assert _legacy_count(world.repo) == 0
     # Alice saves her own answer, then the answer's conversation "moves" to Bob:
     # the state a pre-fix save from Bob's answer left behind.

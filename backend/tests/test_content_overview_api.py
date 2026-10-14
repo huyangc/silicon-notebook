@@ -67,7 +67,7 @@ def test_content_overview_isolates_memory_but_shares_notebook_knowhow(
     from app.api.deps import repository
 
     repo = repository()
-    repo.add_member(notebook_id, reader_id)
+    repo._runtime.sharing.add_member(notebook_id, reader_id)
     owner_confirmed = _candidate(repo, notebook_id, owner_id, "owner-confirmed")
     repo.confirm_memory(owner_confirmed.id, owner_id)
     _candidate(repo, notebook_id, owner_id, "owner-candidate")
