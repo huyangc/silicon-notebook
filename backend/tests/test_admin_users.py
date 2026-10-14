@@ -1098,3 +1098,70 @@ def test_registering_a_renamed_accounts_old_name_reads_as_taken(client):
     )
     assert again.status_code == 400
     assert again.json()["detail"] == "用户名已被占用"
+
+
+def _mistaken_sso_account(client):
+    """An old local account plus a unified-login account created by mistake;
+    unified auth is switched back off so local sessions keep working."""
+    from app.api.deps import identity_repository
+    from tests.auth_store_contract import PROOF, Host, choice
+
+    admin = _auth_admin(client)
+    _auth(client, "a12345678")
+    old_id = _user_id(client, admin, "a12345678")
+    identity = identity_repository()
+    host = Host()
+    identity.auth.use_provider(host)
+    mistaken, _ = identity.auth.create(choice(identity, "W0012345"), PROOF, session_seconds=600)
+    host.enabled = False
+    return admin, old_id, mistaken.id, host, identity
+
+
+def test_admin_merges_a_mistaken_sso_account(client):
+    from tests.auth_store_contract import complete
+
+    admin, old_id, mistaken_id, host, identity = _mistaken_sso_account(client)
+    merged = client.post(
+        f"/api/admin/users/{old_id}/merge-sso-account", headers=admin, json={"username": "w0012345"}
+    )
+    assert merged.status_code == 200, merged.text
+    assert merged.json() == {
+        "id": old_id, "username": "W0012345", "status": "active", "removed_user_id": mistaken_id,
+    }
+    rows = {r["id"]: r for r in client.get("/api/admin/users", headers=admin).json()}
+    assert mistaken_id not in rows
+    assert rows[old_id]["username"] == "W0012345"
+    host.enabled = True
+    assert complete(identity, "W0012345")["user"].id == old_id
+
+
+def test_merge_refusals_carry_displayable_details(client):
+    admin, old_id, mistaken_id, _, identity = _mistaken_sso_account(client)
+    regular = _auth(client, "b12345678")
+    route = f"/api/admin/users/{old_id}/merge-sso-account"
+    forbidden = client.post(route, headers=regular, json={"username": "W0012345"})
+    assert forbidden.status_code == 403
+    assert forbidden.json()["detail"] == "仅管理员可管理用户账号"
+    assert client.post(
+        "/api/admin/users/missing/merge-sso-account", headers=admin, json={"username": "W0012345"}
+    ).status_code == 404
+    not_sso = client.post(route, headers=admin, json={"username": "b12345678"})
+    assert (not_sso.status_code, not_sso.json()["detail"]) == (409, "只能合并已经用统一认证登录过的账号")
+    assert not_sso.headers["X-User-Message"] == "1"
+
+    now = identity.auth._now()
+    with identity.auth._write() as db:
+        for wish_id in ("wish-1", "wish-2"):
+            identity.auth._execute(
+                db, "INSERT INTO wishes(id,kind,title,content,author_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                (wish_id, "feature", "标题", "内容", mistaken_id, now, now),
+            )
+    blocked = client.post(route, headers=admin, json={"username": "W0012345"})
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"] == {
+        "code": "merge_source_has_data",
+        "message": "该账号名下已有数据，不能合并删除：许愿墙 2 条",
+        "items": [{"label": "许愿墙", "unit": "条", "count": 2}],
+    }
+    rows = {r["id"]: r for r in client.get("/api/admin/users", headers=admin).json()}
+    assert (rows[old_id]["username"], rows[mistaken_id]["username"]) == ("a12345678", "W0012345")

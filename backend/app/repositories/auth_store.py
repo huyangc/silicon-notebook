@@ -23,7 +23,8 @@ from app.domain.auth_provider import (
     AUTH_PROVIDER_DISPLAY_NAME_MAX_CHARS, AUTH_PROVIDER_NAMESPACE_MAX_CHARS,
     AuthProviderHostPort,
 )
-from app.repositories.identity_errors import AuthStoreError
+from app.repositories.identity_errors import AccountMergeBlocked, AuthStoreError
+from app.repositories.user_references import REFERENCE_LABEL_UNITS, USER_REFERENCE_COLUMNS
 
 AUTH_TOKEN_BYTES = 32
 LOCAL_SESSION_SECONDS = 30 * 24 * 60 * 60
@@ -408,24 +409,28 @@ class AuthStore:
             (secrets.token_hex(AUTH_TOKEN_BYTES),actor_id,user_id,action,namespace,subject,self._now()),
         )
 
-    def _admin_target(self, db, actor_id, user_id):
-        """Lock actor and target in id order; the actor must be an active admin."""
+    def _admin_targets(self, db, actor_id, *user_ids):
+        """Lock actor and targets in one id-ordered statement; the actor must
+        be an active admin, and every target an existing account that is
+        neither the actor nor the built-in one."""
+        ids = (actor_id, *user_ids)
         rows = self._execute(
-            db,"SELECT * FROM users WHERE id IN (?,?) ORDER BY id"+(" FOR UPDATE" if self.postgres else ""),
-            (actor_id,user_id),
+            db,"SELECT * FROM users WHERE id IN ("+",".join("?"*len(ids))+") ORDER BY id"
+            +(" FOR UPDATE" if self.postgres else ""),
+            ids,
         ).fetchall()
         by_id = {row["id"]:row for row in rows}
         actor = by_id.get(actor_id)
         if actor is None or actor["role"] != "admin" or actor["status"] != "active":
             raise AuthStoreError("admin_required")
-        target = by_id.get(user_id)
-        if target is None:
-            raise AuthStoreError("account_not_found")
-        if user_id == actor_id:
-            raise AuthStoreError("self_forbidden")
-        if user_id == _BUILTIN_USER_ID:
-            raise AuthStoreError("builtin_account")
-        return target
+        for user_id in user_ids:
+            if user_id not in by_id:
+                raise AuthStoreError("account_not_found")
+            if user_id == actor_id:
+                raise AuthStoreError("self_forbidden")
+            if user_id == _BUILTIN_USER_ID:
+                raise AuthStoreError("builtin_account")
+        return [by_id[user_id] for user_id in user_ids]
 
     def _revoke(self, db, user_id, column, value):
         self._execute(db,f"UPDATE users SET {column}=?,auth_revision=auth_revision+1,updated_at=? WHERE id=?",(value,self._now(),user_id))
@@ -435,7 +440,7 @@ class AuthStore:
         if status not in ("active","disabled"):
             raise AuthStoreError("invalid_status")
         with self._write() as db:
-            target = self._admin_target(db, actor_id, user_id)
+            (target,) = self._admin_targets(db, actor_id, user_id)
             self._revoke(db, user_id, "status", status)
             self._audit(db,actor_id,user_id,"account_status:"+status)
             return {"id":user_id,"username":target["username"],"status":status}
@@ -444,7 +449,7 @@ class AuthStore:
         if not valid_account_username(username):
             raise AuthStoreError("invalid_username")
         with self._write() as db:
-            target = self._admin_target(db, actor_id, user_id)
+            (target,) = self._admin_targets(db, actor_id, user_id)
             try:
                 self.check_name(db, username, user_id)
             except AuthStoreError:
@@ -452,3 +457,66 @@ class AuthStore:
             self._revoke(db, user_id, "username", username)
             self._audit(db,actor_id,user_id,"username_changed")
             return {"id":user_id,"username":username,"status":target["status"]}
+
+    def merge_sso_account(self, keep_user_id, username, *, actor_id):
+        """Let ``keep_user_id`` take over the unified-login account named
+        ``username`` (ASCII case-insensitive): that account is deleted, and the
+        kept one takes its exact name and display name and is marked claimed,
+        so the next unified login signs it in directly. Allowed only while the
+        deleted account owns nothing beyond its own scaffolding (see
+        ``user_references``); otherwise nothing is written."""
+        if not valid_account_username(username):
+            raise AuthStoreError("invalid_username")
+        with self._write() as db:
+            # Under the auth lock no rename or account deletion can interleave.
+            found = self._execute(
+                db,"SELECT id FROM users WHERE lower(username)=? AND username<>''",(ascii_lower(username),),
+            ).fetchone()
+            others = () if found is None else (found["id"],)
+            keep, *source = self._admin_targets(db, actor_id, keep_user_id, *others)
+            if not source:
+                raise AuthStoreError("merge_source_not_found")
+            remove = source[0]
+            if remove["id"] == keep["id"]:
+                raise AuthStoreError("merge_same_account")
+            if keep["status"] != "active":
+                raise AuthStoreError("merge_target_inactive")
+            if remove["sso_linked_at"] is None:
+                raise AuthStoreError("merge_source_not_sso")
+            items = self._owned_data(db, remove["id"])
+            if items:
+                raise AccountMergeBlocked(items)
+            for ref in USER_REFERENCE_COLUMNS:
+                if ref.kind == "scaffolding":
+                    self._execute(db,f"DELETE FROM {ref.table} WHERE {ref.column}=?",(remove["id"],))
+            # Delete first: the name is free on idx_users_username_lower only then.
+            self._execute(db,"DELETE FROM users WHERE id=?",(remove["id"],))
+            now = self._now()
+            self._execute(
+                db,"UPDATE users SET username=?,display_name=?,sso_linked_at=COALESCE(sso_linked_at,?),"
+                "auth_revision=auth_revision+1,updated_at=? WHERE id=?",
+                (remove["username"],remove["display_name"],now,now,keep["id"]),
+            )
+            self._execute(db,"DELETE FROM auth_sessions WHERE user_id=?",(keep["id"],))
+            self._audit(db,actor_id,keep["id"],"account_merged")
+            self._audit(db,actor_id,remove["id"],"account_removed")
+            return {"id":keep["id"],"username":remove["username"],"status":keep["status"],
+                    "removed_user_id":remove["id"]}
+
+    def _owned_data(self, db, user_id):
+        """Row counts of every blocking reference to ``user_id``, summed per
+        category in display order; empty when the account owns nothing."""
+        counts: dict[str, int] = {}
+        for ref in USER_REFERENCE_COLUMNS:
+            if ref.kind != "blocking":
+                continue
+            extra = f" AND {ref.extra_where}" if ref.extra_where else ""
+            found = self._execute(
+                db,f"SELECT count(*) AS n FROM {ref.table} WHERE {ref.column}=?{extra}",(user_id,),
+            ).fetchone()
+            if found["n"]:
+                counts[ref.label] = counts.get(ref.label, 0) + int(found["n"])
+        return [
+            {"label":label,"unit":unit,"count":counts[label]}
+            for label, unit in REFERENCE_LABEL_UNITS.items() if label in counts
+        ]

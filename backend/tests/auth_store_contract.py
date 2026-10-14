@@ -13,7 +13,7 @@ import pytest
 
 from app.domain.auth_provider import AuthProviderDescriptor, ExternalIdentity
 from app.domain.auth_utils import hash_password
-from app.repositories.identity_errors import AuthStoreError
+from app.repositories.identity_errors import AccountMergeBlocked, AuthStoreError
 
 
 PROOF = "independent-browser-proof"
@@ -548,6 +548,130 @@ class AuthStoreContract:
             mutate(target.id, actor.id)
         identity.auth.set_account_status(actor.id, "active", actor_id="user-local")
         mutate(target.id, actor.id)
+
+    # --- administrator account merge ------------------------------------------
+
+    def test_merge_folds_a_mistaken_unified_account_into_the_old_one(self, identity):
+        host = sso_on(identity)
+        host.enabled = False
+        old, old_local = identity.register_user_with_session("a12345678", "pw")
+        host.enabled = True
+        before = row(identity, "SELECT auth_revision FROM users WHERE id=?", (old.id,))["auth_revision"]
+        mistaken, mistaken_token = identity.auth.create(
+            choice(identity, "W0012345", display_name="王五"), PROOF, session_seconds=600,
+        )
+        # The lookup folds ASCII case like every other username lookup.
+        result = identity.auth.merge_sso_account(old.id, "w0012345", actor_id="user-local")
+        assert result == {"id": old.id, "username": "W0012345", "status": "active", "removed_user_id": mistaken.id}
+        assert row(identity, "SELECT 1 FROM users WHERE id=?", (mistaken.id,)) is None
+        assert row(identity, "SELECT 1 FROM user_profiles WHERE user_id=?", (mistaken.id,)) is None
+        kept = row(identity, "SELECT * FROM users WHERE id=?", (old.id,))
+        assert (kept["username"], kept["display_name"], kept["auth_revision"]) == ("W0012345", "王五", before + 1)
+        assert kept["sso_linked_at"] is not None
+        assert row(identity, "SELECT count(*) AS n FROM auth_sessions WHERE user_id IN (?,?)", (old.id, mistaken.id))["n"] == 0
+        assert identity.resolve_session(mistaken_token) is None
+        audit = rows(identity, "SELECT actor_id,target_user_id,action FROM auth_identity_audit WHERE action IN ('account_merged','account_removed')")
+        assert sorted((a["actor_id"], a["target_user_id"], a["action"]) for a in audit) == sorted([
+            ("user-local", old.id, "account_merged"), ("user-local", mistaken.id, "account_removed"),
+        ])
+        assert row(identity, "SELECT count(*) AS n FROM users WHERE lower(username)='w0012345'")["n"] == 1
+        signed_in = complete(identity, "W0012345")
+        assert (signed_in["status"], signed_in["user"].id) == ("authenticated", old.id)
+        host.enabled = False
+        assert identity.resolve_session(old_local) is None
+
+    def test_merge_after_an_employee_number_change_keeps_the_first_claim(self, identity):
+        """Scenario 2: the old account was claimed under the previous number;
+        the provider's subject changed with the number, so a new account was
+        created. Merging keeps the old account's first claim time."""
+        host = sso_on(identity)
+        host.enabled = False
+        old, _ = identity.register_user_with_session("h00123456", "pw")
+        host.enabled = True
+        complete(identity, "h00123456", subject="subject-old")
+        first = row(identity, "SELECT sso_linked_at FROM users WHERE id=?", (old.id,))["sso_linked_at"]
+        assert first is not None
+        pending = choice(identity, "h00234567", subject="subject-new")
+        with pytest.raises(AuthStoreError, match="link_target_linked"):
+            identity.auth.link(pending, PROOF, "h00123456", "pw", session_seconds=600)
+        created, _ = identity.auth.create(pending, PROOF, session_seconds=600)
+        result = identity.auth.merge_sso_account(old.id, "h00234567", actor_id="user-local")
+        assert (result["username"], result["removed_user_id"]) == ("h00234567", created.id)
+        assert row(identity, "SELECT sso_linked_at FROM users WHERE id=?", (old.id,))["sso_linked_at"] == first
+        assert complete(identity, "h00234567", subject="subject-new")["user"].id == old.id
+
+    def test_merge_refuses_an_account_with_data_and_writes_nothing(self, identity):
+        host = sso_on(identity)
+        host.enabled = False
+        old, _ = identity.register_user_with_session("a12345678", "pw")
+        host.enabled = True
+        mistaken, token = identity.auth.create(choice(identity, "W0012345"), PROOF, session_seconds=600)
+        now = identity.auth._now()
+        for wish_id in ("wish-1", "wish-2"):
+            execute(
+                identity, "INSERT INTO wishes(id,kind,title,content,author_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                (wish_id, "feature", "标题", "内容", mistaken.id, now, now),
+            )
+        execute(
+            identity, "INSERT INTO retained_user_activity(activity_type,record_id,actor_id,deleted_at,expires_at) VALUES (?,?,?,?,?)",
+            ("ask", "record-1", mistaken.id, now, now),
+        )
+
+        def snapshot():
+            return (
+                rows(identity, "SELECT id,username,display_name,sso_linked_at,auth_revision FROM users WHERE id IN (?,?) ORDER BY id", (old.id, mistaken.id)),
+                rows(identity, "SELECT token FROM auth_sessions WHERE user_id IN (?,?) ORDER BY token", (old.id, mistaken.id)),
+                rows(identity, "SELECT user_id FROM user_profiles WHERE user_id IN (?,?) ORDER BY user_id", (old.id, mistaken.id)),
+                row(identity, "SELECT count(*) AS n FROM auth_identity_audit")["n"],
+            )
+
+        before = snapshot()
+        with pytest.raises(AccountMergeBlocked, match="merge_source_has_data") as caught:
+            identity.auth.merge_sso_account(old.id, "W0012345", actor_id="user-local")
+        assert caught.value.items == [
+            {"label": "许愿墙", "unit": "条", "count": 2},
+            {"label": "历史活动记录", "unit": "条", "count": 1},
+        ]
+        assert snapshot() == before
+        assert identity.resolve_session(token).id == mistaken.id
+
+    def test_merge_rejections(self, identity):
+        host = sso_on(identity)
+        host.enabled = False
+        old, _ = identity.register_user_with_session("a12345678", "pw")
+        never_sso, _ = identity.register_user_with_session("b12345678", "pw")
+        actor, _ = identity.register_user_with_session("c12345678", "pw")
+        host.enabled = True
+        identity.auth.create(choice(identity, "W0012345"), PROOF, session_seconds=600)
+        merge = identity.auth.merge_sso_account
+        with pytest.raises(AuthStoreError, match="admin_required"):
+            merge(old.id, "W0012345", actor_id=actor.id)
+        identity.set_user_role("user-local", actor.id, "admin")
+        for bad in ("", " W0012345", "W00\x0712345"):
+            with pytest.raises(AuthStoreError, match="invalid_username"):
+                merge(old.id, bad, actor_id=actor.id)
+        cases = [
+            ((old.id, "W0099999"), "merge_source_not_found"),
+            ((old.id, "A12345678"), "merge_same_account"),
+            ((old.id, "b12345678"), "merge_source_not_sso"),
+            (("user-missing", "W0012345"), "account_not_found"),
+            ((actor.id, "W0012345"), "self_forbidden"),
+            ((old.id, "c12345678"), "self_forbidden"),
+            (("user-local", "W0012345"), "builtin_account"),
+            ((old.id, "ADMIN"), "builtin_account"),
+        ]
+        for (keep_id, username), code in cases:
+            with pytest.raises(AuthStoreError, match=code):
+                merge(keep_id, username, actor_id=actor.id)
+        identity.auth.set_account_status(old.id, "disabled", actor_id=actor.id)
+        with pytest.raises(AuthStoreError, match="merge_target_inactive"):
+            merge(old.id, "W0012345", actor_id=actor.id)
+        identity.auth.set_account_status(old.id, "active", actor_id=actor.id)
+        identity.auth.set_account_status(actor.id, "disabled", actor_id="user-local")
+        with pytest.raises(AuthStoreError, match="admin_required"):
+            merge(old.id, "W0012345", actor_id=actor.id)
+        assert row(identity, "SELECT username FROM users WHERE id=?", (old.id,))["username"] == "a12345678"
+        assert row(identity, "SELECT count(*) AS n FROM users WHERE username='W0012345'")["n"] == 1
 
     @pytest.mark.parametrize("operation", ["role", "password", "global_limit", "user_limit"])
     def test_admin_mutations_recheck_status_after_request_authentication(self, identity, operation):
