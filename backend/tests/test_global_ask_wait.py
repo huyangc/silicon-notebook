@@ -111,18 +111,86 @@ def test_stop_abandons_the_wait_and_leaves_the_job_alone(setup):
     assert service.store.job(job.job_id, "u").status == "running"
 
 
-def _recording_attach(service) -> list:
-    """Wrap ``attach`` so a test can see the delivery queue ``wait`` used."""
-    queues: list = []
+class _Clock:
+    """A monotonic clock only the test moves, in whole seconds so every sum
+    and difference is exactly representable (no float-equality traps)."""
+
+    def __init__(self, now: float = 1000.0):
+        self._now = now
+        self._lock = threading.Lock()
+
+    def __call__(self) -> float:
+        with self._lock:
+            return self._now
+
+    def advance(self, seconds: float) -> None:
+        with self._lock:
+            self._now += seconds
+
+
+class _Tap:
+    """The delivery queue ``wait`` drains, with a handshake on what it has done.
+
+    ``gets`` counts started polls and ``processed`` counts frames ``wait`` has
+    fully handled (a frame is handled once its next poll starts), so a test
+    waits for the loop instead of sleeping: ``settle`` returns once a poll that
+    began after the call has run to completion -- i.e. ``wait`` has evaluated
+    its stall window against whatever the clock reads now.
+    """
+
+    def __init__(self):
+        self.ready = threading.Event()
+        self.gets = 0
+        self.processed = 0
+        self._holding = False
+        self._cv = threading.Condition()
+        self._queue = None
+
+    def attach(self, events):
+        self._queue = events
+        self.ready.set()
+        return self
+
+    def get(self, timeout=None):
+        with self._cv:
+            if self._holding:
+                self.processed += 1
+                self._holding = False
+            self.gets += 1
+            self._cv.notify_all()
+        item = self._queue.get(timeout=timeout)  # raises queue.Empty
+        with self._cv:
+            self._holding = isinstance(item, dict)
+        return item
+
+    def __getattr__(self, name):  # close / closed / put ... of the real queue
+        return getattr(self._queue, name)
+
+    def wait_until(self, predicate) -> None:
+        with self._cv:
+            assert self._cv.wait_for(predicate, 5), "wait stopped polling"
+
+    def settle(self) -> None:
+        with self._cv:
+            target = self.gets + 2
+        self.wait_until(lambda: self.gets >= target)
+
+
+def _tap_attach(service) -> _Tap:
+    """Route ``attach`` through a :class:`_Tap` and shorten ``wait``'s poll."""
+    tap = _Tap()
     real = service.attach
+    service.attach = lambda *args, **kwargs: tap.attach(real(*args, **kwargs))
+    service.wait_poll_seconds = 0.01
+    return tap
 
-    def attach(*args, **kwargs):
-        events = real(*args, **kwargs)
-        queues.append(events)
-        return events
 
-    service.attach = attach
-    return queues
+def test_wait_defaults_to_the_real_monotonic_clock_and_half_second_poll(setup):
+    """The seams the stall-window tests drive must default to production's
+    behaviour: wall-clock monotonic time and a half-second poll."""
+    service, _, _, _ = setup
+    assert service._clock is time.monotonic
+    assert service.wait_poll_seconds == 0.5
 
 
 def test_a_foreign_job_with_no_progress_ends_the_wait_and_closes_the_follower(
@@ -138,15 +206,22 @@ def test_a_foreign_job_with_no_progress_ends_the_wait_and_closes_the_follower(
     service, _, _, _ = setup
     service.follow_poll_seconds = 0.01
     service.follow_poll_max_seconds = 0.02
-    monkeypatch.setattr(global_ask_module, "ATTACH_STALL_SECONDS", 0.2)
-    queues = _recording_attach(service)
+    clock = _Clock()
+    service._clock = clock
+    monkeypatch.setattr(global_ask_module, "ATTACH_STALL_SECONDS", 10.0)
+    tap = _tap_attach(service)
     job = _store_only_job(service, "gask-stalled")
     thread, box = _in_thread(lambda: service.wait(job.job_id, user_id="u"))
+    assert tap.ready.wait(5)
+    tap.wait_until(lambda: tap.processed >= 2)  # started + the first snapshot
+    clock.advance(9)  # inside the window
+    tap.settle()
+    assert thread.is_alive() and "error" not in box, "gave up inside the window"
+    clock.advance(2)  # 11 s without a frame
     thread.join(5)
     assert not thread.is_alive()
     assert isinstance(box.get("error"), AskExecutorGone)
-    [events] = queues
-    assert events.closed.is_set(), "the store follower was left running"
+    assert tap.closed.is_set(), "the store follower was left running"
     assert service.store.job(job.job_id, "u").status == "running"
 
 
@@ -161,13 +236,19 @@ def test_a_progressing_foreign_job_is_followed_past_the_stall_window(
     service, _, _, _ = setup
     service.follow_poll_seconds = 0.01
     service.follow_poll_max_seconds = 0.02
-    monkeypatch.setattr(global_ask_module, "ATTACH_STALL_SECONDS", 1.0)
+    clock = _Clock()
+    service._clock = clock
+    monkeypatch.setattr(global_ask_module, "ATTACH_STALL_SECONDS", 10.0)
+    tap = _tap_attach(service)
     job = _store_only_job(service, "gask-progressing")
     thread, box = _in_thread(lambda: service.wait(job.job_id, user_id="u"))
-    for step in range(12):  # ~2.4 s of progress, more than twice the window
-        time.sleep(0.2)
+    assert tap.ready.wait(5)
+    tap.wait_until(lambda: tap.processed >= 2)  # started + the first snapshot
+    for step in range(12):  # 72 s of progress, seven times the window
+        clock.advance(6)  # each gap is inside the window; the sum is not
         job.trace.append(TraceStep(step_type="retrieve", summary=f"step {step}"))
         service.store.save(job, "u")
+        tap.wait_until(lambda: tap.processed >= 3 + step)  # this step's frame
         assert thread.is_alive(), "the wait gave up on a job that kept progressing"
     job.status = "done"
     service.store.save(job, "u")
@@ -181,12 +262,18 @@ def test_a_live_in_process_run_is_followed_past_the_stall_window(setup, monkeypa
     from app.services import global_ask as global_ask_module
 
     service, _, _, _ = setup
+    clock = _Clock()
+    service._clock = clock
     monkeypatch.setattr(global_ask_module, "ATTACH_STALL_SECONDS", 0.0)
+    tap = _tap_attach(service)
     parked, resume = _park(service, before=("s0",), after=("s1",))
     job = service.start(GlobalAskRequest(question="q"), user_id="u")
     assert parked.wait(5)
     thread, box = _in_thread(lambda: service.wait(job.job_id, user_id="u"))
-    time.sleep(1.2)  # past the window and at least two empty polls
+    assert tap.ready.wait(5)
+    tap.settle()
+    clock.advance(3600)  # far past the (zero) window, then a few empty polls
+    tap.settle()
     assert thread.is_alive(), "a live local run was given up on"
     resume.set()
     thread.join(5)
