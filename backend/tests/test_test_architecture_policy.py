@@ -483,6 +483,27 @@ def test_session_start_drops_only_the_bytecode_cached_for_temporary_modules(tmp_
     assert own.exists() and interpreter.exists()
 
 
+def test_only_the_top_level_session_prunes(monkeypatch):
+    """Workers and pytest sessions that tests start in a subprocess inherit the
+    marker, so they never prune the outer run's cache mid-run."""
+    from types import SimpleNamespace
+
+    from tests import conftest
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(conftest, "_prune_temporary_bytecode", lambda *a: calls.append(a))
+    monkeypatch.setattr(sys, "pycache_prefix", "/some/prefix")
+    monkeypatch.delenv(conftest._BYTECODE_PRUNED_ENV, raising=False)
+
+    conftest.pytest_configure(SimpleNamespace(workerinput={}))
+    assert calls == []
+    conftest.pytest_configure(SimpleNamespace())
+    assert len(calls) == 1
+    assert os.environ[conftest._BYTECODE_PRUNED_ENV] == "1"
+    conftest.pytest_configure(SimpleNamespace())
+    assert len(calls) == 1
+
+
 def test_the_module_namespace_check_reports_app_splits_and_never_probes_other_modules(
     monkeypatch,
 ):

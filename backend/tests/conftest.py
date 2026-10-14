@@ -393,13 +393,23 @@ def _prune_temporary_bytecode(prefix: Path, temp_dir: Path, repo_root: Path) -> 
     shutil.rmtree(prefix / temp_dir.relative_to(temp_dir.anchor), ignore_errors=True)
 
 
+_BYTECODE_PRUNED_ENV = "SN_TESTS_BYTECODE_PRUNED"
+
+
 def pytest_configure(config):
-    # Once per session, in the controller (or the only process), before any
-    # worker starts compiling.
-    if sys.pycache_prefix and not hasattr(config, "workerinput"):
+    # Once per top-level session, in the controller (or the only process),
+    # before any worker starts compiling. The marker is inherited by the
+    # workers and by the pytest sessions some tests start in a subprocess, so
+    # a nested session does not prune the outer run's cache mid-run.
+    if (
+        sys.pycache_prefix
+        and not hasattr(config, "workerinput")
+        and not os.environ.get(_BYTECODE_PRUNED_ENV)
+    ):
         _prune_temporary_bytecode(
             Path(sys.pycache_prefix), Path(tempfile.gettempdir()), _REPO_ROOT
         )
+        os.environ[_BYTECODE_PRUNED_ENV] = "1"
 
 
 def pytest_collection_finish(session):
