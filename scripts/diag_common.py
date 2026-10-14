@@ -569,6 +569,11 @@ def _authoritative_dotenv_values(path: Path) -> Optional[Dict[str, Any]]:
 
 
 def _dotenv_database_url(path: Path) -> Optional[str]:
+    return _dotenv_setting(path, "DATABASE_URL")
+
+
+def _dotenv_setting(path: Path, name: str) -> Optional[str]:
+    """The last value of the setting ``name`` in the env file, as Settings reads it."""
     values = _authoritative_dotenv_values(path)
     if values is not None:
         found: Optional[str] = None
@@ -576,7 +581,7 @@ def _dotenv_database_url(path: Path) -> Optional[str]:
         # pydantic-settings takes the later declaration, while sorting would
         # let the lowercase spelling win regardless of where it appears.
         for key, value in values.items():
-            if key.upper() == "DATABASE_URL":
+            if key.upper() == name:
                 found = value
         return None if found is None else str(found)
     try:
@@ -598,7 +603,7 @@ def _dotenv_database_url(path: Path) -> Optional[str]:
             key = key[len("export"):].strip()
         # The application's Settings uses `case_sensitive=False`, so
         # `database_url=` is a live spelling too.
-        if key.upper() != "DATABASE_URL":
+        if key.upper() != name:
             continue
         value = _dotenv_value(rest)   # 后出现的覆盖先出现的,与 dotenv 一致
     return value
@@ -735,6 +740,25 @@ def resolve_database_target(root: str) -> DatabaseTarget:
     return DatabaseTarget(
         backend="postgres", url_scheme=identity.scheme, source=source
     )
+
+
+def configured_diagnostics_dir(root: str) -> Optional[Path]:
+    """The service's ``DIAGNOSTICS_DIR`` when one is configured, else ``None``.
+
+    Mirrors ``Settings.diagnostics_dir``: the process variable wins over the
+    env file, a blank value means the default, and a relative path anchors to
+    the repository root. ``None`` leaves the caller on its ``.local`` layout,
+    whose ``diagnostics`` child is that same default.
+    """
+    raw = _environ_case_insensitive("DIAGNOSTICS_DIR")
+    if raw is None:
+        env_file = _env_file_for(root)
+        raw = _dotenv_setting(env_file, "DIAGNOSTICS_DIR") if env_file is not None else None
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    path = Path(value)
+    return path if path.is_absolute() else Path(root).resolve(strict=False) / path
 
 
 def normalize_http_path(path: str) -> str:

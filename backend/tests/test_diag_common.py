@@ -633,3 +633,54 @@ def test_environment_case_collision_follows_insertion_order(tmp_path, monkeypatc
     monkeypatch.setenv("database_url", "sqlite:///./late.db")
     target = common.resolve_database_target(str(tmp_path))
     assert target.is_sqlite and target.sqlite_path.endswith("late.db")
+
+
+def test_configured_diagnostics_dir_mirrors_the_service_setting(tmp_path, monkeypatch):
+    """The incident collector must read the directory the backend writes.
+
+    ``Settings.diagnostics_dir`` takes the process variable over the env file,
+    treats blank as the default and anchors relative paths to the repo root.
+    """
+    common = load_common()
+    monkeypatch.delenv("DIAGNOSTICS_DIR", raising=False)
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
+
+    # Unconfigured: the caller keeps its `.local` layout (the service default).
+    assert common.configured_diagnostics_dir(str(tmp_path)) is None
+
+    (tmp_path / ".env").write_text("DIAGNOSTICS_DIR=var/diag # ops\n", encoding="utf-8")
+    assert common.configured_diagnostics_dir(str(tmp_path)) == tmp_path.resolve() / "var" / "diag"
+
+    monkeypatch.setenv("DIAGNOSTICS_DIR", "/abs/diag")
+    assert common.configured_diagnostics_dir(str(tmp_path)) == Path("/abs/diag")
+
+    # Blank is the default, exactly as Settings falls back.
+    monkeypatch.setenv("DIAGNOSTICS_DIR", "  ")
+    assert common.configured_diagnostics_dir(str(tmp_path)) is None
+
+    # An empty env-file override reads no file, as app.core.config does.
+    monkeypatch.delenv("DIAGNOSTICS_DIR")
+    monkeypatch.setenv("SILICON_NOTEBOOK_ENV_FILE", "")
+    assert common.configured_diagnostics_dir(str(tmp_path)) is None
+
+
+def test_incident_reads_the_configured_diagnostics_dir(tmp_path, monkeypatch):
+    """Explicit flag, then DIAGNOSTICS_DIR, then `<local>/diagnostics`."""
+    load_common()
+    spec = importlib.util.spec_from_file_location("diag_incident", SCRIPTS / "diag_incident.py")
+    incident = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(incident)
+    monkeypatch.delenv("DIAGNOSTICS_DIR", raising=False)
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
+    local = tmp_path / "bundle" / ".local"
+
+    assert incident._diagnostics_dir(tmp_path, local, "") == local / "diagnostics"
+
+    monkeypatch.setenv("DIAGNOSTICS_DIR", str(tmp_path / "configured"))
+    assert incident._diagnostics_dir(tmp_path, local, "") == tmp_path / "configured"
+
+    explicit = tmp_path / "explicit"
+    assert incident._diagnostics_dir(tmp_path, local, str(explicit)) == explicit.resolve()
+    assert incident.build_parser().parse_args(
+        ["--diagnostics-dir", str(explicit)]
+    ).diagnostics_dir == str(explicit)

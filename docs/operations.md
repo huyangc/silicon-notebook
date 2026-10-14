@@ -578,6 +578,15 @@ collector may create, replace, or truncate. The runtime accepts only an owner-co
 files; unsafe pre-existing paths or path replacement degrade diagnostics without following
 links or truncating the hostile target.
 
+`.local/diagnostics/` is the default of `DIAGNOSTICS_DIR` (a relative value anchors to the
+repository root). When a deployment sets it, the backend keeps `runtime.json`,
+`incident.lock`, and `thread-dumps.log` there, and `incident` resolves the same setting the
+way the service does—process environment first, then the env file (`SILICON_NOTEBOOK_ENV_FILE`
+or `.env`)—unless `--diagnostics-dir <path>` names it explicitly. DB snapshot workspaces stay
+in `diagnostics/db-snapshots/` beside the SQLite file being analyzed
+(`<local>/silicon_notebook.db`). The backend test process points `DIAGNOSTICS_DIR` at a
+per-process temporary directory, so test runs never write the checkout's copy.
+
 Read the output in this order:
 
 - `Confidence-ranked diagnoses` lists at most three deterministic hypotheses. `high`,
@@ -611,7 +620,8 @@ The incident path needs no root privileges or third-party Python packages, does 
 `app`, and never restarts or terminates a process. All diagnostic commands are read-only
 with respect to application data: they do not execute deletes or other product writes,
 checkpoint/vacuum/analyze/reindex SQLite, run migrations, or auto-remediate. `incident`
-may only maintain its bounded `.local/diagnostics/` artifacts as described above.
+may only maintain its bounded diagnostics-directory artifacts (default `.local/diagnostics/`)
+as described above.
 
 ### Seven-command diagnostics reference
 

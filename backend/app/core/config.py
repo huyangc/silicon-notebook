@@ -1608,6 +1608,11 @@ class Settings(BaseSettings):
     # transitions. Written to <event_log_dir>/<channel>.jsonl plus the console.
     event_log_enabled: bool = Field(True, validation_alias="EVENT_LOG_ENABLED")
     event_log_dir: str = Field(".local/logs", validation_alias="EVENT_LOG_DIR")
+    # Live-process diagnostics: the runtime.json heartbeat, thread-dumps.log and
+    # incident.lock (see docs/operations.md). Relative paths anchor to the repo
+    # root like storage_dir; blank falls back to this default. The incident
+    # collector resolves the same setting via scripts/diag_common.py.
+    diagnostics_dir: str = Field(".local/diagnostics", validation_alias="DIAGNOSTICS_DIR")
     # Requests slower than this (ms) are flagged SLOW so "stuck" calls stand out.
     slow_request_ms: int = Field(3000, validation_alias="SLOW_REQUEST_MS")
 
@@ -2002,7 +2007,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _anchor_relative_paths_to_repo_root(self) -> "Settings":
-        """storage_dir 与 SQLite database_url 的相对路径统一锚定到仓库根。
+        """storage_dir、diagnostics_dir 与 SQLite database_url 的相对路径统一锚定到仓库根。
 
         - 绝对路径（默认或 env 覆盖）原样保留，不重锚。
         - PostgreSQL URL 在这里仅接受、规范化和保留；正式 backend 仍由后续
@@ -2014,6 +2019,11 @@ class Settings(BaseSettings):
         """
         if self.storage_dir and not Path(self.storage_dir).is_absolute():
             self.storage_dir = str(_ROOT_DIR / self.storage_dir)
+
+        diagnostics_dir = Path(self.diagnostics_dir.strip() or ".local/diagnostics")
+        self.diagnostics_dir = str(
+            diagnostics_dir if diagnostics_dir.is_absolute() else _ROOT_DIR / diagnostics_dir
+        )
 
         if self.model_services_config and not Path(self.model_services_config).is_absolute():
             self.model_services_config = str(_ROOT_DIR / self.model_services_config)
