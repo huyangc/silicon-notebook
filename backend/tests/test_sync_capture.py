@@ -15,8 +15,8 @@
    ``unified_kg_state`` 的 ``kg_reset_epoch`` 变化额外一条 ``kg_epoch``;
    PARENT 表填 ``parent_key`` 不填 ``notebook_id``, GLOBAL 表两者都空。
 
-本模块跑真实迁移阶梯(回滚到 v83 再开库), 因此登记在 conftest 的
-``_REAL_SQLITE_MIGRATION_MODULES`` 里。
+本模块回滚到 v83 再开库: 库文件已存在, 所以 v83 之后的迁移按真实阶梯执行;
+只有从零新建的空库才会复制 conftest 的当前 schema 模板。
 """
 
 from __future__ import annotations

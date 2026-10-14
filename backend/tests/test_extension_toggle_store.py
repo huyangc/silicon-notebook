@@ -37,7 +37,7 @@ def database(tmp_path: Path) -> SqliteDatabase:
     settings = Settings(database_url=f"sqlite:///{tmp_path / 'test.db'}")
     db = SqliteDatabase(settings, tmp_path)
     migrated = SqliteMigrator(db, settings).migrate()
-    assert migrated, "fresh database must actually run the migration ladder"
+    assert migrated, "a fresh database must reach the current schema version"
     return db
 
 
@@ -60,6 +60,7 @@ def _seed_user(database: SqliteDatabase, *, user_id: str, role: str) -> None:
         )
 
 
+@pytest.mark.real_sqlite_migration
 def test_fresh_database_reaches_current_schema_version_with_the_table_present(
     tmp_path: Path,
 ):

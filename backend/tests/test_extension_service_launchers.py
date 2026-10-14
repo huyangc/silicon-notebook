@@ -15,7 +15,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-pytestmark = pytest.mark.xdist_group("extension_launcher_lifecycle")
+pytestmark = [pytest.mark.xdist_group("extension_launcher_lifecycle"), pytest.mark.process_contract]
 
 
 def executable(path: Path, body: str) -> None:

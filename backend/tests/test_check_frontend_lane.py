@@ -15,6 +15,8 @@ import subprocess
 
 import pytest
 
+pytestmark = pytest.mark.process_contract
+
 ROOT = Path(__file__).resolve().parents[2]
 PINNED_NODE_MAJOR = (ROOT / ".nvmrc").read_text(encoding="utf-8").strip()
 

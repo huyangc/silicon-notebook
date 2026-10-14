@@ -14,7 +14,7 @@ import time
 import pytest
 
 
-pytestmark = pytest.mark.xdist_group("prod_script_lifecycle")
+pytestmark = [pytest.mark.xdist_group("prod_script_lifecycle"), pytest.mark.process_contract]
 
 _GIT_ISOLATION = {
     "GIT_CONFIG_GLOBAL": os.devnull,

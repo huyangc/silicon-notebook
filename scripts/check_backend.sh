@@ -36,9 +36,13 @@ unset PYTHONDONTWRITEBYTECODE
 # architecture_contract_heavy (see conftest._ARCHITECTURE_CONTRACT_HEAVY_TESTS)
 # and stay excluded here; the remaining 56 cheap architecture_contract tests
 # now run on every PR/push instead of waiting for the daily G2 lane.
+# process_contract (tests that start a real child process) and
+# legacy_upgrade_contract (old-version upgrade matrix) are G2-only by the
+# 2026-10-14 ruling that set the local warm-gate target to 80 s: those
+# contracts are reported by the daily gate, not on every PR.
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   -m pytest -p no:cacheprovider -n "$BACKEND_PYTEST_WORKERS" \
-  -m "not slow and not architecture_contract_heavy and not graph_index_contract" \
+  -m "not slow and not architecture_contract_heavy and not graph_index_contract and not process_contract and not legacy_upgrade_contract" \
   --ignore="$ROOT_DIR/backend/tests/postgres" \
   --durations=30 --junitxml="$ROOT_DIR/backend/.local/backend-junit.xml" \
   "$ROOT_DIR/backend/tests"

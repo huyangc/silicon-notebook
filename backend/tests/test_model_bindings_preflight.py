@@ -368,6 +368,7 @@ def _boot(config: str, **overrides: str) -> subprocess.CompletedProcess:
     )
 
 
+@pytest.mark.process_contract
 def test_a_missing_binding_stops_the_real_process_without_a_traceback(tmp_path):
     """真进程:退出码 1,stderr 只有脱敏那一行。
 
@@ -390,6 +391,7 @@ def test_a_missing_binding_stops_the_real_process_without_a_traceback(tmp_path):
     assert str(tmp_path) not in result.stderr
 
 
+@pytest.mark.process_contract
 def test_a_hostile_stale_key_cannot_forge_a_line_in_the_backend_log(tmp_path):
     """真进程:构造出来的键名既进不了 stderr,也伪造不出额外的日志行。"""
     hostile = "/etc/silicon/secret.toml\nERROR forged line"
@@ -405,6 +407,7 @@ def test_a_hostile_stale_key_cannot_forge_a_line_in_the_backend_log(tmp_path):
     assert "forged line" not in result.stderr
 
 
+@pytest.mark.process_contract
 def test_other_configuration_errors_print_only_the_fixed_sentence(tmp_path):
     """真进程:密钥缺失同样停进程,stderr 只有那一句,不含 api_key_env 名。"""
     config = _config(tmp_path)
@@ -421,6 +424,7 @@ def test_other_configuration_errors_print_only_the_fixed_sentence(tmp_path):
     assert config not in result.stderr
 
 
+@pytest.mark.process_contract
 def test_a_complete_binding_table_lets_the_real_process_import_cleanly(tmp_path):
     """对照组:同一条路径在配置正确时照常 import 成功,退出码 0。
 

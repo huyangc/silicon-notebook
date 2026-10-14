@@ -113,6 +113,7 @@ def test_ready_probe_open_even_when_not_ready():
         readiness.mark_ready()
 
 
+@pytest.mark.real_sqlite_migration
 def test_run_startup_migrates_warms_and_flips_ready():
     """End-to-end wiring: run_startup constructs the repo (migrate + seed), warms
     the open-path caches, and flips readiness to ready — exactly what the lifespan

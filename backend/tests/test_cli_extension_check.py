@@ -10,6 +10,8 @@ import pytest
 
 from tests.child_env_testkit import BYTECODE_ENV
 
+pytestmark = pytest.mark.process_contract
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "check_cli_extensions.py"

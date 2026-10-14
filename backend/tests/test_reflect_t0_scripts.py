@@ -52,6 +52,7 @@ export = _load("export_reasoning_traces")
 rig = _load("reflect_shadow_rig")
 
 
+@pytest.mark.process_contract
 def test_rig_backend_launch_reads_plugins_from_selected_environment(tmp_path, monkeypatch):
     root = tmp_path / "rig"
     scripts = root / "scripts"
@@ -136,6 +137,7 @@ def test_rig_env_selection_stays_caller_relative_when_backend_changes_directory(
     assert rig.backend_env(args)["SILICON_NOTEBOOK_ENV_FILE"] == str(caller / "chosen.env")
 
 
+@pytest.mark.process_contract
 def test_rig_restart_imports_saved_plugin_instead_of_current_deployment(monkeypatch, tmp_path):
     root = tmp_path / "rig"
     for directory in (root / "scripts", root / "backend", root / "current", root / "saved"):

@@ -503,8 +503,9 @@ def sqlite_table_columns(_sqlite_schema_template) -> dict[str, set[str]]:
     SYNC_MANIFEST declares in mapped_columns/severed_columns/
     target_owned_columns is a real column, not a typo. Reads conftest's
     immutable template instead of running SqliteMigrator itself: the
-    migration ladder is a contract owned by _REAL_SQLITE_MIGRATION_MODULES
-    (tests/test_test_architecture_policy.py), not by this guard."""
+    migration ladder is a contract owned by the tests marked
+    real_sqlite_migration (tests/test_test_architecture_policy.py), not by
+    this guard."""
     conn = sqlite3.connect(f"file:{_sqlite_schema_template}?mode=ro", uri=True)
     try:
         columns: dict[str, set[str]] = {}

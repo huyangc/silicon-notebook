@@ -9,6 +9,7 @@ import sys
 from unittest.mock import patch
 
 from dotenv import dotenv_values
+import pytest
 
 from app.core.config import Settings
 from tests.child_env_testkit import BYTECODE_ENV
@@ -18,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / ".env.example"
 
 
+@pytest.mark.process_contract
 def test_env_example_has_the_same_values_in_shell_and_dotenv():
     expected = dict(dotenv_values(EXAMPLE, interpolate=False))
     # dev.sh/prod.sh source .env. This catches bare multi-word values and

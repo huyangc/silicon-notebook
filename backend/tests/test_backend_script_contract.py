@@ -11,7 +11,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-pytestmark = pytest.mark.xdist_group("backend_script_contract")
+pytestmark = [pytest.mark.xdist_group("backend_script_contract"), pytest.mark.process_contract]
 
 
 def _write_executable(path: Path, body: str) -> None:

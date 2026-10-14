@@ -24,6 +24,8 @@ import pytest
 from app.migration.sync.capture import expected_sqlite_trigger_names
 from tests.sqlite_migration_testkit import rollback_v92
 
+pytestmark = [pytest.mark.legacy_upgrade_contract, pytest.mark.real_sqlite_migration]
+
 
 ROOT = Path(__file__).resolve().parents[2]
 VERIFIER_PATH = ROOT / "scripts" / "verify_repository_snapshot.py"

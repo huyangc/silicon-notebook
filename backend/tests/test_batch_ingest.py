@@ -2450,6 +2450,7 @@ def test_main_vectors_to_blob_requires_notebook_or_all(repo, capsys):
     assert "vectors-to-blob" in capsys.readouterr().err
 
 
+@pytest.mark.process_contract
 def test_main_vectors_to_blob_end_to_end(repo, capsys):
     nb_id = bi.ensure_notebook(repo, None, "nb")
     _seed_node(repo, nb_id, "ko-1")
@@ -2465,6 +2466,7 @@ def test_main_vectors_to_blob_end_to_end(repo, capsys):
     assert ty == "blob"
 
 
+@pytest.mark.process_contract
 def test_main_vectors_to_blob_does_not_require_embedder_configured(repo, tmp_path, monkeypatch, capsys):
     """Pure format conversion — must work even when EMBED_* is unset (no new
     vectors are computed, only re-encoded), unlike ingest/kg/embed phases."""
@@ -2563,6 +2565,7 @@ def _seed_many_json_vectors(repo, table, id_col, nb_id, n, dim=8, bad_every=None
     return rows
 
 
+@pytest.mark.process_contract
 def test_backfill_parallel_output_byte_identical_to_serial(repo):
     """workers=2 must produce byte-identical BLOB rows to the workers=1 (default)
     serial path, on a mixed fixture of valid + corrupt rows."""
@@ -2600,6 +2603,7 @@ def test_backfill_parallel_output_byte_identical_to_serial(repo):
         assert bytes(rows_serial[k]) == bytes(rows_par[k]), f"mismatch at {k}"
 
 
+@pytest.mark.process_contract
 def test_backfill_parallel_idempotent_second_run_converts_zero(repo):
     nb_id = bi.ensure_notebook(repo, None, "nb")
     for i in range(20):
@@ -2638,6 +2642,7 @@ def test_backfill_workers_le_1_never_imports_process_pool_executor(repo, monkeyp
     assert calls == []
 
 
+@pytest.mark.process_contract
 def test_backfill_broken_process_pool_falls_back_to_serial(repo, monkeypatch, capsys):
     """If the pool dies mid-run (BrokenProcessPool), the batch must fall back to
     serial parse/encode for the remaining rows rather than losing the run."""
@@ -2668,6 +2673,7 @@ def test_backfill_broken_process_pool_falls_back_to_serial(repo, monkeypatch, ca
     assert remaining_text == 0
 
 
+@pytest.mark.process_contract
 def test_run_vectors_to_blob_accepts_workers_param(repo):
     nb_id = bi.ensure_notebook(repo, None, "nb")
     _seed_node(repo, nb_id, "ko-1")
@@ -2688,6 +2694,7 @@ def test_arg_parser_vectors_to_blob_workers_default():
     assert args2.workers == 3
 
 
+@pytest.mark.process_contract
 def test_main_vectors_to_blob_passes_workers_through(repo, monkeypatch, capsys):
     nb_id = bi.ensure_notebook(repo, None, "nb")
     _seed_node(repo, nb_id, "ko-1")

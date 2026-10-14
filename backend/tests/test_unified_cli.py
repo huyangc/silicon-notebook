@@ -20,6 +20,7 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(cli)
 
 
+@pytest.mark.process_contract
 @pytest.mark.parametrize("argv", [[], ["--help"], ["maintain"], ["database", "--help"], ["kg", "--help"]])
 def test_catalog_help_is_stdlib_only(argv, tmp_path):
     result = subprocess.run(
@@ -72,6 +73,7 @@ def test_literal_help_after_option_terminator_does_not_change_environment(monkey
     assert calls == [[str(ROOT / "scripts/batch_ingest.py"), "ingest", "--", "--help"]]
 
 
+@pytest.mark.process_contract
 @pytest.mark.parametrize("path", [key for key, command in cli.COMMANDS.items() if command.positional_usage])
 def test_legacy_positional_help_never_imports_app_or_opens_database(path, tmp_path):
     result = subprocess.run(
@@ -145,6 +147,7 @@ def test_selected_file_option_terminator_and_last_value(monkeypatch):
     ) == Path("/last.env")
 
 
+@pytest.mark.process_contract
 @pytest.mark.parametrize("path, script", [
     (("maintain", "selected-source"), "prepare_selected_source_graph.py"),
 ])
@@ -197,6 +200,7 @@ def test_diag_preserves_default_and_subcommands_without_dotenv(monkeypatch, rest
     assert calls == [[str(ROOT / "scripts/diag.py"), *rest]]
 
 
+@pytest.mark.process_contract
 @pytest.mark.parametrize("exit_statement, expected_status", [
     ("raise SystemExit(23)", 23),
     ("os.kill(os.getpid(), 15)", -signal.SIGTERM),
@@ -225,6 +229,7 @@ def test_exec_preserves_cwd_arguments_and_exit_status(tmp_path, exit_statement, 
     }
 
 
+@pytest.mark.process_contract
 def test_diag_help_runs_without_site_packages(tmp_path):
     result = subprocess.run(
         [sys.executable, "-S", str(ROOT / "scripts/cli.py"), "diag", "--help"],
@@ -236,6 +241,7 @@ def test_diag_help_runs_without_site_packages(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.process_contract
 @pytest.mark.parametrize("path", [("batch",), ("scale",), ("extensions", "parity")])
 def test_application_leaf_help_does_not_load_plugins_or_open_database(path, tmp_path):
     invalid_plugins = tmp_path / "extensions.toml"
@@ -251,6 +257,7 @@ def test_application_leaf_help_does_not_load_plugins_or_open_database(path, tmp_
     assert list(tmp_path.iterdir()) == [invalid_plugins]
 
 
+@pytest.mark.process_contract
 @pytest.mark.parametrize("interpreter", ["", "missing-python"])
 def test_shell_rejects_invalid_explicit_interpreter(tmp_path, interpreter):
     result = subprocess.run(
@@ -262,6 +269,7 @@ def test_shell_rejects_invalid_explicit_interpreter(tmp_path, interpreter):
     assert "PYTHON_BIN" in result.stderr
 
 
+@pytest.mark.process_contract
 def test_shell_passes_arguments_and_preserves_cwd(tmp_path):
     interpreter = tmp_path / "python with spaces"
     interpreter.write_text(

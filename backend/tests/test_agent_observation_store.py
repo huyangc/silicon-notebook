@@ -84,7 +84,7 @@ def harness(tmp_path: Path) -> Harness:
     settings = Settings(database_url=f"sqlite:///{tmp_path / 'test.db'}")
     database = SqliteDatabase(settings, tmp_path)
     migrated = SqliteMigrator(database, settings).migrate()
-    assert migrated, "fresh database must actually run the migration ladder"
+    assert migrated, "a fresh database must reach the current schema version"
     _seed_notebooks(database)
 
     counter = {"n": 0}

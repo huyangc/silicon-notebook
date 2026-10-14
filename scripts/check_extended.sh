@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 # Level 2 is intentionally exhaustive and is not subject to the Level 1
-# edit-time Apple Silicon <=60s target. Locally, run it with no arguments: it
+# edit-time Apple Silicon <=80s target. Locally, run it with no arguments: it
 # is G1 (check.sh) followed by everything G2 adds on top.
 #
 # --complement-only skips the G1 step and runs only what G2 adds. It exists for

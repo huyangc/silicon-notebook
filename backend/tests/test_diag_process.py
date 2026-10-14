@@ -31,6 +31,7 @@ def load_process_module():
     return module
 
 
+@pytest.mark.process_contract
 def test_script_is_standalone_stdlib_only_and_help_runs_without_backend_path():
     tree = ast.parse(SCRIPT.read_text())
     imported_roots = set()

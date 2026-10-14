@@ -42,7 +42,7 @@ def store(tmp_path: Path) -> AgentProfileStore:
     settings = Settings(database_url=f"sqlite:///{tmp_path / 'test.db'}")
     database = SqliteDatabase(settings, tmp_path)
     migrated = SqliteMigrator(database, settings).migrate()
-    assert migrated, "fresh database must actually run the migration ladder"
+    assert migrated, "a fresh database must reach the current schema version"
 
     counter = {"n": 0}
 
@@ -632,6 +632,7 @@ def test_the_startup_sweep_strands_every_in_flight_token(
     assert store.job_row(NOTEBOOK_ID, "user-a")["status"] == "failed"
 
 
+@pytest.mark.real_sqlite_migration
 def test_a_deployed_v52_database_gains_the_claim_token_column(tmp_path: Path):
     """已部署库补建:回滚到 v52 再开一次,v53 必须补上这一列。
 

@@ -14,6 +14,8 @@ sys.path.insert(0, str(SCRIPTS))
 import extension_services as manager
 import extension_service_runtime as runtime
 
+pytestmark = pytest.mark.process_contract
+
 
 @pytest.fixture
 def session(tmp_path):

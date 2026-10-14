@@ -153,6 +153,7 @@ def test_patch_ui_mode_is_self_serve_not_admin_gated(client):
 # --------------------------------------------------------------------------- #
 # 4. SQLite v44 -> v45 升级路径
 # --------------------------------------------------------------------------- #
+@pytest.mark.real_sqlite_migration
 def test_sqlite_migration_v44_to_v45_adds_ui_mode_column(tmp_path, monkeypatch):
     from app.repositories.sqlite import migrations as migrations_module
 
