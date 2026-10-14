@@ -20,6 +20,20 @@ os.environ["LLM_CACHE_ENABLED"] = "false"
 # 进程装入真实部署插件，冻结拓扑与 openapi() 契约会随本机配置漂移。
 os.environ["EXTENSIONS_CONFIG"] = ""
 
+# 数据库与存储的进程级默认值，理由与下面日志目录那块相同：收集期、高作用域夹具和
+# `monkeypatch.undo()` 之后都不在逐测试夹具的窗口里，读到「未设置」就回落到
+# Settings 默认值——checkout 的 `.local/silicon_notebook.db` 与 `.local/storage`，在
+# 开发者主 checkout 里那是真实的库和存储——或开发者 shell / `.env` 导出的部署值。
+# 强制覆盖而不是 setdefault，形状沿用 Settings 默认值（SQLite 文件 + 存储目录），只换
+# 根目录；`sqlite:///` 后接绝对路径被 `_anchor_relative_paths_to_repo_root` 原样保留。
+# 显式传 `database_url=` 或在测试里 setenv 的（PG 泳道全是这样）照旧优先。
+# tests/test_collection_time_log_isolation.py 同样守住这两个变量在收集期位于系统
+# 临时目录之下。
+_PROCESS_DATA_DIR = Path(tempfile.mkdtemp(prefix="silicon-notebook-test-data-"))
+atexit.register(shutil.rmtree, _PROCESS_DATA_DIR, ignore_errors=True)
+os.environ["DATABASE_URL"] = f"sqlite:///{_PROCESS_DATA_DIR / 'silicon_notebook.db'}"
+os.environ["SILICON_NOTEBOOK_STORAGE_DIR"] = str(_PROCESS_DATA_DIR / "storage")
+
 # 日志目录的进程级默认值必须在任何测试模块导入前就指向临时目录。下面的 autouse
 # 夹具逐测试改 EVENT_LOG_DIR / LLM_LOG_PATH，但有三类代码不在它生效的窗口里读取
 # 设置并把日志路径固化下来：

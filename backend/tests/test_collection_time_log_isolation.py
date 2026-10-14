@@ -18,6 +18,10 @@ not satisfy them either. The environment is read at module level, i.e. during
 collection, so the first check still holds if the app import below is ever
 moved into a function; keep that import at module level all the same, since
 the second check only exercises a collection-time app because of it.
+
+The last check holds ``DATABASE_URL`` and ``SILICON_NOTEBOOK_STORAGE_DIR`` to
+the same rule: outside the per-test fixture their Settings defaults are the
+checkout's database file and storage directory.
 """
 import os
 import tempfile
@@ -31,6 +35,12 @@ from app.main import app
 _LOG_ENV_NAMES = ("EVENT_LOG_DIR", "LLM_LOG_PATH")
 #: What collection-time code (module-level apps, higher-scoped fixtures) sees.
 _COLLECTION_LOG_ENV = {name: os.environ.get(name) for name in _LOG_ENV_NAMES}
+#: The same window for the database and storage: falling back to the Settings
+#: defaults would reach the checkout's ``.local/silicon_notebook.db`` and
+#: ``.local/storage`` (a developer's real ones in the main checkout).
+_COLLECTION_DATABASE_URL = os.environ.get("DATABASE_URL")
+_COLLECTION_STORAGE_DIR = os.environ.get("SILICON_NOTEBOOK_STORAGE_DIR")
+_SQLITE_PREFIX = "sqlite:///"
 
 
 def _temp_root() -> Path:
@@ -64,3 +74,21 @@ def test_a_collection_time_app_logs_requests_into_the_temp_dir(monkeypatch):
     assert targets, "the request was not logged at all"
     outside = [t for t in targets if not t.resolve().is_relative_to(_temp_root())]
     assert outside == []
+
+
+def test_collection_time_database_and_storage_point_into_the_temp_dir():
+    database_url = _COLLECTION_DATABASE_URL or ""
+    database_path = (
+        database_url[len(_SQLITE_PREFIX):]
+        if database_url.startswith(_SQLITE_PREFIX)
+        else ""
+    )
+    outside = {
+        name: value
+        for name, value, path in (
+            ("DATABASE_URL", database_url, database_path),
+            ("SILICON_NOTEBOOK_STORAGE_DIR", _COLLECTION_STORAGE_DIR, _COLLECTION_STORAGE_DIR),
+        )
+        if not path or not Path(path).resolve().is_relative_to(_temp_root())
+    }
+    assert outside == {}
