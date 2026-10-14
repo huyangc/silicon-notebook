@@ -834,6 +834,10 @@ def _expect_unsafe(obs):
 
 DIRECTIONS = ("寄生电容", "工艺角", "版图规则", "签核流程", "数据库命令", "层定义")
 
+#: More confirmed directions than the first round and the coverage pass can
+#: run, so the uncovered-directions note stays on every turn.
+MANY_DIRECTIONS = tuple(f"版图方向{index:02d}" for index in range(22))
+
 
 @scenario(
     name="add_subquery_directions",
@@ -851,6 +855,10 @@ def _expect_directions(obs):
     disclosure = [s for s in obs.steps("skip")
                   if s["detail"].get("reason") == "intent_coverage_incomplete"]
     assert len(disclosure) == 1
+    # disclosed after the loop and before the close's answer step
+    steps = obs.steps()
+    assert steps.index(disclosure[0]) == len(steps) - 2
+    assert steps[-1]["step_type"] == "answer"
     assert any(row.get("failed") for row in obs.result["attempted"])
 
 
@@ -1171,6 +1179,21 @@ def _expect_overflow_last_step(obs):
     assert obs.reasons()[-1] == "outline_evidence_overflow_unresolved"
 
 
+@scenario(
+    name="both_end_of_run_disclosures",
+    effort="exhaustive", max_steps=4,
+    intent_queries=(QUESTION, *MANY_DIRECTIONS),
+    reflects=_overflow_pair(True) + [ANSWER],
+)
+def _expect_both_disclosures(obs):
+    # the budget leaves both an overflowed outline and uncovered directions:
+    # both are disclosed after the loop, overflow first, then the answer step
+    assert len(obs.steps("reflect")) == 2
+    assert obs.reasons()[-2:] == [
+        "outline_evidence_overflow_unresolved", "intent_coverage_incomplete"]
+    assert [s["step_type"] for s in obs.steps()[-3:]] == ["skip", "skip", "answer"]
+
+
 # --- consult_memory, zero-hit nudges, adoption -------------------------------
 
 
@@ -1308,6 +1331,48 @@ def _expect_consult_disabled(obs):
     assert obs.reasons() == ["consult_memory_disabled"]
 
 
+# --- every block of the candidate summary, in one run ----------------------
+
+@scenario(
+    name="every_summary_block_in_one_run",
+    entry="ask", effort="exhaustive", intent_detail=INTENT_DETAIL,
+    intent_queries=(QUESTION, *MANY_DIRECTIONS),
+    settings={"retrieval_experience_inject_enabled": True,
+              "reasoning_max_steps": 16, "reasoning_stale_limit": 50,
+              "reasoning_max_consult_memory": 3},
+    experiences=(
+        ("expand", "good", "expand 在这类库上通常能找到相邻概念。", 20),
+        ("retrieve", "good", "retrieve 先用整题检索打底。", 19),
+        ("expand_community", "good", "expand_community 适合找同类实体。", 18),
+        ("follow_chain", "good", "follow_chain 能补上两跳关系。", 7),
+        ("exact_lookup", "bad", "按名称查找在这类库上常常空手。", 6),
+    ),
+    profile=(("", "corpus_shape", "这个库主要是版图与签核的中文手册。"),),
+    reflects=[
+        act("enumerate_elements", enumerate={"collection": "sources"}),
+        act("consult_memory"),
+        outline({"id": "s1", "title": "版图要点", "evidence": []}),
+        act("exact_lookup", exact_term="foo_bar"),
+        act("exact_lookup", exact_term="baz_qux"),
+        act("search_papers", search_papers={"query": "版图寄生提取"}),
+        ANSWER,
+    ],
+)
+def _expect_every_block(obs):
+    # the turn after the second dry exact lookup carries every block that can
+    # share a turn (the outline nudge only shows while there is no outline)
+    blocks = [_summary_blocks(text) for text in obs.summaries()]
+    assert [name for name, _ in blocks[5]] == [
+        "evidence", "progress_note", "ledger", "uncovered", "zero_hit_nudge",
+        "enumeration", "outline", "profile", "experience", "consult",
+        "collection_map", "plugin_nudge"]
+    assert [name for name, _ in blocks[1]][:8] == [
+        "evidence", "ledger", "uncovered", "enumeration", "outline_nudge",
+        "profile", "experience", "collection_map"]
+    assert "external" in [name for name, _ in blocks[6]]
+    assert obs.steps("plugin_action")
+
+
 # --- limits=None: the raw limits, not the tier fallback ---------------------
 
 def _ascending_elements(count):
@@ -1381,6 +1446,73 @@ def _expect_cancel(obs):
 
 SCENARIO_IDS = [item.name for item in SCENARIOS]
 
+#: The blocks of a reflect turn's candidate summary, in the order the loop
+#: assembles them (``_reflect_round_ledger_notes``, then
+#: ``_reflect_round_context_blocks``, then the plugin context), each named by
+#: the text its rendering starts with. The outline note and the outline nudge
+#: share one slot and never appear together.
+SUMMARY_BLOCKS = (
+    ("evidence", ("- [",)),
+    ("progress_note", ("（系统提示:首轮检索未命中任何证据", "（系统提示:上一步检索未带来新证据")),
+    ("ledger", ("（已展开过的节点", "（以下节点的关系数超过", "（已执行过的子查询及各自新增证据数",
+                "（已按名称精确查找过及各自结果", "已按篇读取过原文的文档",
+                "本次没有取到原文的文档")),
+    ("uncovered", ("（以下已确认的检索方向因步骤预算不足尚未执行",)),
+    ("zero_hit_nudge", ("」这类动作在当前场景已连续",)),
+    ("enumeration", ("（本轮已枚举的清单",)),
+    ("outline", ("（本轮大纲便签",)),
+    ("outline_nudge", ("（本轮尚未建立大纲",)),
+    ("profile", ("[What the agent knows about this library]",)),
+    ("experience", ("[Search tactics learned from earlier runs]",)),
+    ("consult", ("[Recalled search tactics]",)),
+    ("external", ("[External evidence]",)),
+    ("collection_map", ("[Collections in scope]",)),
+    ("plugin_nudge", ("（系统提示:库内检索已无新证据",)),
+)
+#: Adjacent blocks that never share a turn, so their order is unobservable.
+EXCLUSIVE_BLOCKS = frozenset({("outline", "outline_nudge")})
+
+
+def _summary_blocks(text: str) -> list:
+    """``[(block, start), ...]`` for the blocks present, in text order."""
+    found = []
+    for name, marks in SUMMARY_BLOCKS:
+        starts = [text.find(mark) for mark in marks if mark in text]
+        if starts:
+            found.append((name, min(starts)))
+    return sorted(found, key=lambda item: item[1])
+
+
+def _assert_run_shape(observed: dict) -> None:
+    """What every scenario's run must look like, whatever it was driving at.
+
+    * each reflect turn's candidate summary keeps its blocks in assembly order;
+    * a returned run closes with the answer step, and the two end-of-run
+      disclosures sit between the last reflect turn and that answer step, the
+      outline one first.
+    """
+    order = [name for name, _ in SUMMARY_BLOCKS]
+    for entry in observed["reflect_inputs"]:
+        names = [name for name, _ in _summary_blocks(entry["candidates_summary"])]
+        assert names == sorted(names, key=order.index), names
+    trace = observed["trace"]
+    if not observed["outcome"].get("returned"):
+        return
+    assert trace[-1]["step_type"] == "answer"
+    last_reflect = max(
+        (index for index, step in enumerate(trace) if step["step_type"] == "reflect"),
+        default=-1)
+    closing = [
+        (index, step["detail"].get("reason")) for index, step in enumerate(trace)
+        if step["step_type"] == "skip" and step["detail"].get("reason") in (
+            "outline_evidence_overflow_unresolved", "intent_coverage_incomplete")]
+    assert all(last_reflect < index < len(trace) - 1 for index, _ in closing), closing
+    reasons = [reason for _, reason in closing]
+    assert reasons == sorted(reasons, key=[
+        "outline_evidence_overflow_unresolved", "intent_coverage_incomplete"].index)
+
+
+
 #: Every skip reason the reflect loop itself can record, minus the ones only a
 #: wall clock or a peer-mode run reaches. The scenarios must reach all of them —
 #: a branch no scenario takes is a branch no assertion here vouches for.
@@ -1423,6 +1555,7 @@ def test_reflect_loop_scenario(case, tmp_path, monkeypatch):
     # every log the run writes stays under this test's tmp_path
     assert _checkout_log_files() == before
     assert any((tmp_path / "logs").rglob("*.jsonl"))
+    _assert_run_shape(observed)
     case.expect(Observed(observed))
 
 
@@ -1443,17 +1576,30 @@ def test_scenarios_reach_every_loop_branch_whatever_the_shell_exports(
     """Every scenario keeps its behaviour with deployment variables exported in
     the shell (each run builds its settings from a scrubbed environment), and
     the scenarios are not vacuous: together they take every skip branch of the
-    loop, all four entry shapes, the step kinds only the loop's dispatch
-    produces, and both ways a run can raise."""
+    loop, the step kinds only the loop's dispatch produces, both ways a run can
+    raise, and every pair of neighbouring summary blocks shares at least one
+    turn (so ``_assert_run_shape`` can see either one move past the other).
+    The four entry shapes are checked on the scenario declarations
+    (``case.entry``), not observed.
+
+    Since the split oracle retired, this compares behaviour expectations under
+    exported variables, not the byte-level observation: the expected cost of
+    retiring it."""
     for key, value in _LEAKY_EXPORTS.items():
         monkeypatch.setenv(key, value)
-    reasons, kinds, raised = set(), set(), set()
+    reasons, kinds, raised, neighbours = set(), set(), set(), set()
     for case in SCENARIOS:
         scenario_dir = tmp_path / case.name
         scenario_dir.mkdir()
         with pytest.MonkeyPatch.context() as scoped:
             observed = observe(case, scenario_dir, scoped)
+        _assert_run_shape(observed)
         case.expect(Observed(observed))
+        for entry in observed["reflect_inputs"]:
+            names = {name for name, _ in _summary_blocks(entry["candidates_summary"])}
+            neighbours.update(
+                (a, b) for (a, _), (b, _) in zip(SUMMARY_BLOCKS, SUMMARY_BLOCKS[1:])
+                if a in names and b in names)
         for step in observed["trace"]:
             kinds.add(step["step_type"])
             if step["step_type"] == "skip":
@@ -1465,3 +1611,5 @@ def test_scenarios_reach_every_loop_branch_whatever_the_shell_exports(
             "expand_community"} <= kinds
     assert {"AskCancelled", "RuntimeError"} <= raised
     assert {case.entry for case in SCENARIOS} == {"run", "report", "ask", "knowhow"}
+    pairs = {(a, b) for (a, _), (b, _) in zip(SUMMARY_BLOCKS, SUMMARY_BLOCKS[1:])}
+    assert pairs - EXCLUSIVE_BLOCKS <= neighbours, sorted(pairs - EXCLUSIVE_BLOCKS - neighbours)
