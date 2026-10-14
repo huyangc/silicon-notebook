@@ -1,4 +1,4 @@
-"""Request logs of an app imported at collection time stay out of the checkout.
+"""Request logs of an app imported at collection time go to a temp directory.
 
 ``import app.main`` runs the module-level ``app = create_app()``, and
 ``create_app`` binds the ``requests`` channel's ``EventLogger`` to the event
@@ -7,14 +7,20 @@ module level therefore fixes that directory during collection, before the
 per-test isolation fixture in ``conftest.py`` has set ``EVENT_LOG_DIR``; every
 later request through that app object, from any test in the same worker, then
 appends to whatever directory collection saw. With no process-level default
-that was the checkout's ``.local/logs``, which made tests asserting the
-checkout's logs stay untouched (the reasoning-loop characterization) fail
-whenever such a request ran concurrently in another worker.
+that was the checkout's ``.local/logs`` (or a log directory exported by the
+developer's shell or ``.env``), which made tests asserting the checkout's logs
+stay untouched (the reasoning-loop characterization) fail whenever such a
+request ran concurrently in another worker.
 
-This module imports the app at collection time on purpose, so it holds for
-any worker that collects it: the requests it logs must land outside the
-checkout.
+Both checks below judge against the system temp directory rather than "not
+the checkout", so a developer's own log directory outside the repository does
+not satisfy them either. The environment is read at module level, i.e. during
+collection, so the first check still holds if the app import below is ever
+moved into a function; keep that import at module level all the same, since
+the second check only exercises a collection-time app because of it.
 """
+import os
+import tempfile
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -22,10 +28,25 @@ from fastapi.testclient import TestClient
 from app.core.event_logging import EventLogger
 from app.main import app
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_LOG_ENV_NAMES = ("EVENT_LOG_DIR", "LLM_LOG_PATH")
+#: What collection-time code (module-level apps, higher-scoped fixtures) sees.
+_COLLECTION_LOG_ENV = {name: os.environ.get(name) for name in _LOG_ENV_NAMES}
 
 
-def test_a_collection_time_app_logs_requests_outside_the_checkout(monkeypatch):
+def _temp_root() -> Path:
+    return Path(tempfile.gettempdir()).resolve()
+
+
+def test_collection_time_log_settings_point_into_the_temp_dir():
+    outside = {
+        name: value
+        for name, value in _COLLECTION_LOG_ENV.items()
+        if not value or not Path(value).resolve().is_relative_to(_temp_root())
+    }
+    assert outside == {}
+
+
+def test_a_collection_time_app_logs_requests_into_the_temp_dir(monkeypatch):
     targets: list[Path] = []
     resolve_target = EventLogger._target_path_for_day
 
@@ -41,5 +62,5 @@ def test_a_collection_time_app_logs_requests_outside_the_checkout(monkeypatch):
 
     assert response.status_code == 200
     assert targets, "the request was not logged at all"
-    inside = [t for t in targets if t.resolve().is_relative_to(_REPO_ROOT)]
-    assert inside == []
+    outside = [t for t in targets if not t.resolve().is_relative_to(_temp_root())]
+    assert outside == []

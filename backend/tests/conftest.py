@@ -21,17 +21,21 @@ os.environ["LLM_CACHE_ENABLED"] = "false"
 os.environ["EXTENSIONS_CONFIG"] = ""
 
 # 日志目录的进程级默认值必须在任何测试模块导入前就指向临时目录。下面的 autouse
-# 夹具逐测试改 EVENT_LOG_DIR / LLM_LOG_PATH，但有两类代码早于它读取设置并把日志
-# 路径固化下来：
+# 夹具逐测试改 EVENT_LOG_DIR / LLM_LOG_PATH，但有三类代码不在它生效的窗口里读取
+# 设置并把日志路径固化下来：
 # - 收集期：测试模块在模块级 `from app.main import app`，模块级的
 #   `app = create_app()` 就在收集期执行，requests 通道的 EventLogger 绑定到当时
 #   解析出的目录；之后同一 worker 里任何测试经这个 app 发出的请求都写到那里。
 # - 高作用域夹具：module/session 级夹具先于函数级 autouse 夹具实例化，在里面建的
 #   仓库把 events 通道绑定到当时的目录。
+# - 测试里调 `monkeypatch.undo()`：它连同 autouse 夹具的 setenv 一起撤销，之后新建
+#   的 Settings 回落到这里的进程级值（test_incremental_fusion 的循环就这么做）。
+#   所以 undo() 之后不必为日志目录再 setenv 一次。
 # 没有这层默认值时那个目录就是 checkout 的 `.local/logs`（或开发者 `.env` 里配的
 # 部署日志目录），并行 worker 写进去会让断言 checkout 日志不变的用例（推理循环
 # 表征）间歇变红。强制覆盖而不是 setdefault：开发者 shell 里导出的值同样不该接收
-# 测试日志。tests/test_collection_time_log_isolation.py 守住收集期这条。
+# 测试日志。tests/test_collection_time_log_isolation.py 守住收集期这条：两个变量在
+# 收集期必须位于系统临时目录之下。
 _PROCESS_LOG_DIR = Path(tempfile.mkdtemp(prefix="silicon-notebook-test-logs-"))
 atexit.register(shutil.rmtree, _PROCESS_LOG_DIR, ignore_errors=True)
 os.environ["EVENT_LOG_DIR"] = str(_PROCESS_LOG_DIR)
