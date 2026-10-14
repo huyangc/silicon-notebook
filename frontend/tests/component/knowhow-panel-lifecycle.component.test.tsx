@@ -446,6 +446,31 @@ test("a jump to a row added after the open table loaded refetches that table onc
   ]);
 });
 
+test("a jump to a concept added after the open anchor table loaded opens its matrix after one refetch", async () => {
+  // The routing effect must not route against the superseded detail: there the
+  // new row has no concept group, so it would fall back to the row drawer and
+  // mark the target as routed before the refetched detail arrives.
+  const server = suite.server();
+  const before = anchorDetail();
+  const after = anchorDetail({
+    rows: [...before.rows, { id: "a4", position: 3, projectionStatus: "synced", cells: { "c-anchor": "复位", "c-shared": "看门狗", "c-own": "" } }],
+  });
+  routeTable(server, "nb-1", after);
+  server.once("GET", "/notebooks/nb-1/knowhow/t-anc", { json: wireDetail(before) });
+  const panel = renderPanel({ initialTableId: "t-anc" });
+  expect(await screen.findByRole("button", { name: "时钟" })).toBeInTheDocument();
+
+  panel.update({ ...BASE_PROPS, initialTableId: "t-anc", initialRowId: "a4" });
+  expect(await screen.findByRole("dialog", { name: "概念 复位" })).toBeInTheDocument();
+  await settle();
+  expect(screen.queryByRole("dialog", { name: "复位" })).not.toBeInTheDocument();
+  expect(server.log).toEqual([
+    { method: "GET", path: "/notebooks/nb-1/knowhow" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-anc" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-anc" },
+  ]);
+});
+
 test("a jump to a row of the open table that is really gone refetches once, then shows the notice", async () => {
   const server = suite.server();
   routeTable(server, "nb-1", recordDetail());

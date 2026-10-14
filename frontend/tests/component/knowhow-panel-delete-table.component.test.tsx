@@ -247,3 +247,23 @@ test("a DELETE that fails while the user is still on that table keeps the banner
   expectToolbarUnlocked();
   expect(server.log).toEqual([LIST, DETAIL, DELETE]);
 });
+
+test("the failed-delete notice shown on the list goes away when a table is opened", async () => {
+  const server = routeTwoTables();
+  const release = server.hold("DELETE", "/notebooks/nb-1/knowhow/t-rec");
+  const user = userEvent.setup();
+  renderPanel({ initialTableId: "t-rec" });
+  await user.click(await screen.findByTitle("删除表"));
+  await user.click(screen.getByRole("button", { name: "确认删除" }));
+  expect(await screen.findByRole("button", { name: "删除中…" })).toBeDisabled();
+  await user.click(screen.getByRole("button", { name: "返回" }));
+  await screen.findByRole("button", { name: "打开表格：第二张表" });
+
+  release({ status: 500, json: { detail: "boom" } });
+  expect(await screen.findByRole("alert")).toHaveTextContent("「排障记录」没有删除成功");
+  await user.click(screen.getByRole("button", { name: "打开表格：第二张表" }));
+  await screen.findByRole("heading", { name: "第二张表" });
+  await settle();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(server.log).toEqual([LIST, DETAIL, DELETE, TWIN_DETAIL]);
+});
