@@ -14,6 +14,10 @@ finish() {
 }
 trap finish EXIT
 
+# One supported Node.js major (.nvmrc); see scripts/node_version.sh.
+source "$ROOT_DIR/scripts/node_version.sh"
+require_node_major "$(node -v 2>/dev/null || true)" "the frontend lane" || exit 1
+
 if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
   echo "frontend/node_modules not found; run 'npm install' in frontend/ first" >&2
   exit 1

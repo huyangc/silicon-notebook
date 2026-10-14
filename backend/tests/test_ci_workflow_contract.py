@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
+import sys
 
 import pytest
 import yaml
@@ -77,157 +79,6 @@ def test_ci_events_permissions_and_concurrency_are_bounded() -> None:
     assert "github.ref" in concurrency["group"]
     assert "secrets." not in repr(workflow)
 
-
-def test_standard_ci_lanes_keep_all_wrappers_and_cover_both_backend_shards() -> None:
-    workflow = _load_workflow()
-    jobs = workflow["jobs"]
-    assert isinstance(jobs, dict)
-    assert set(jobs) == {
-        "standard-gate",
-        "standard-backend",
-        "standard-contracts",
-        "standard-frontend",
-        "frontend-node-current",
-        "postgres-integration",
-    }
-    for lane in ("backend", "contracts", "frontend"):
-        job = jobs[f"standard-{lane}"]
-        assert job["runs-on"] == "ubuntu-24.04"
-        assert job["timeout-minutes"] == "20"
-        assert "if" not in job and "continue-on-error" not in job
-        checkout = _uses_step(
-            job, "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
-        )
-        assert checkout["with"] == {"persist-credentials": "false"}
-        commands = [step["run"] for step in job["steps"] if "run" in step]
-        expected_gate = f"bash scripts/check_{lane}.sh"
-        if lane == "backend":
-            expected_gate += " --shard-index ${{ matrix.shard }} --shard-count 2"
-        assert commands == [
-            "npm ci --prefix frontend" if lane == "frontend" else
-            "python -m pip install -r backend/requirements.txt",
-            expected_gate,
-        ]
-        assert all("if" not in step and "continue-on-error" not in step
-                   for step in job["steps"] if "run" in step)
-        if lane != "frontend":
-            python = _uses_step(
-                job, "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
-            )
-            assert python["with"] == {"python-version": "3.13"}
-            upload = _uses_step(
-                job, "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
-            )
-            assert upload["if"] == "always()"
-            assert upload["with"]["retention-days"] == "7"
-            assert upload["with"]["path"] == (
-                "backend/.local/backend-junit-shard-${{ matrix.shard }}.xml"
-                if lane == "backend" else "backend/.local/contracts-junit.xml"
-            )
-    assert jobs["standard-backend"]["strategy"] == {
-        "fail-fast": "false", "matrix": {"shard": ["0", "1"]},
-    }
-    assert _named_step(jobs["standard-backend"], "Run standard backend shard")["env"] == {
-        "PYTHON_BIN": "python", "BACKEND_PYTEST_WORKERS": "4",
-    }
-    assert _named_step(jobs["standard-contracts"], "Run standard contracts lane")["env"] == {
-        "PYTHON_BIN": "python",
-    }
-    node = _uses_step(
-        jobs["standard-frontend"],
-        "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
-    )
-    assert node["with"] == {
-        "node-version": "22",
-        "cache": "npm",
-        "cache-dependency-path": "frontend/package-lock.json",
-    }
-
-
-@pytest.mark.parametrize("lane", ["standard-backend", "standard-contracts", "standard-frontend"])
-@pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped", None])
-def test_standard_aggregate_executes_fail_closed_for_every_lane(lane, result, tmp_path) -> None:
-    """Execute the actual workflow command; skipped/missing jobs must never look green."""
-    job = _load_workflow()["jobs"]["standard-gate"]
-    expected = {"standard-backend", "standard-contracts", "standard-frontend"}
-    assert job["name"] == "level-1-standard"
-    assert set(job["needs"]) == expected
-    assert job["if"] == "${{ always() }}"
-    assert "continue-on-error" not in job
-    assert len(job["steps"]) == 1
-    gate = job["steps"][0]
-    assert "if" not in gate and "continue-on-error" not in gate
-    assert gate["env"] == {"NEEDS_JSON": "${{ toJSON(needs) }}"}
-    needs = {name: {"result": "success"} for name in expected}
-    if result is None:
-        del needs[lane]
-    else:
-        needs[lane]["result"] = result
-    completed = subprocess.run(
-        ["bash", "-e", "-c", gate["run"]], cwd=tmp_path,
-        env={"PATH": os.defpath, "NEEDS_JSON": json.dumps(needs), **BYTECODE_ENV},
-        capture_output=True, text=True, timeout=10,
-    )
-    assert completed.returncode == (0 if result == "success" else 1), completed.stderr
-    assert ("Every standard lane passed." in completed.stdout) == (result == "success")
-
-
-def test_frontend_node_current_job_covers_the_documented_node_ceiling() -> None:
-    """前端泳道必须在 Node.js **当前**大版本上再跑一遍,而不是只跑 G1 钉的 22。
-
-    两份 README 与部署文档承诺「Node.js ≥ 20」,而 `standard-gate` 钉 22 ——
-    没有这条泳道,承诺的上半段就无人验证。真机踩过:Node ≥ 24 自带 Web Storage
-    全局,不给 `--localstorage-file` 时 getter 返回 `undefined`,vitest 的 jsdom
-    环境会让它盖住 jsdom 自己那份,于是每一条读 `localStorage` 的组件测试都在
-    开发者本机红、CI 全绿(修复见 `frontend/test-support/setup.ts`)。
-
-    这条泳道**同时**跑生产构建:那次修复的第一版误引了没有类型声明的 `jsdom`,
-    正是 `next build` 的类型检查当场抓到的。只跑 `npm test` 就漏掉那一类。
-    """
-    workflow = _load_workflow()
-    job = workflow["jobs"]["frontend-node-current"]
-    assert isinstance(job, dict)
-    assert job["name"] == "level-1-frontend-node26"
-    assert job["runs-on"] == "ubuntu-24.04"
-
-    checkout = _uses_step(
-        job,
-        "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
-    )
-    assert checkout["with"] == {"persist-credentials": "false"}
-
-    node = _uses_step(
-        job,
-        "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
-    )
-    # 这条泳道的**全部意义**就是这个版本高于 standard-gate 钉的 22:两者相等时
-    # 它只是把同一份验证跑了两遍,那个缺口会重新变成不可见。
-    standard_node = _uses_step(
-        workflow["jobs"]["standard-frontend"],
-        "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
-    )
-    assert int(node["with"]["node-version"]) > int(
-        standard_node["with"]["node-version"]
-    )
-    assert node["with"]["cache"] == "npm"
-    assert node["with"]["cache-dependency-path"] == "frontend/package-lock.json"
-
-    commands = [
-        step["run"]
-        for step in job["steps"]
-        if isinstance(step, dict) and isinstance(step.get("run"), str)
-    ]
-    # 必须**委派**给 G1 用的同一个 wrapper,而不是把 `npm test`/`npm run build` 抄进
-    # workflow:抄一遍的话,wrapper 将来加一步前置检查,这条泳道会继续绿着跑一份旧清单、
-    # 与 G1 和本地验证悄悄分叉。这条泳道要换的只有 Node 版本。
-    assert commands == [
-        "npm ci --prefix frontend",
-        "bash scripts/check_frontend.sh",
-    ]
-    # 只碰前端:后端门禁归 standard-gate,重复跑既慢又会让「哪条门禁在管什么」变糊。
-    assert not any(
-        command.startswith("bash scripts/check.sh") for command in commands
-    )
 
 
 def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() -> None:
@@ -330,7 +181,9 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
     ]
 
 
-@pytest.mark.parametrize("job_name", ["standard-backend", "standard-contracts", "postgres-integration"])
+@pytest.mark.parametrize(
+    "job_name", ["standard-backend", "standard-contracts-frontend", "postgres-integration"],
+)
 def test_ci_builds_hnswlib_portably_without_reusing_native_wheels(job_name) -> None:
     workflow = _load_workflow()
     job = workflow["jobs"][job_name]
@@ -353,13 +206,254 @@ def test_ci_builds_hnswlib_portably_without_reusing_native_wheels(job_name) -> N
     }
 
 
+PR_JOBS = {
+    "standard-backend": "level-1-backend",
+    "standard-contracts-frontend": "level-1-contracts-frontend",
+    "postgres-integration": "level-3-postgres-integration",
+}
+DAILY_JOBS = {
+    "extended-backend": "level-2-backend",
+    "extended-contracts-frontend": "level-2-contracts-frontend",
+    "extended-complement": "level-2-complement",
+}
+MAX_JOBS_PER_WORKFLOW = 3
+G1_REMAINING_LANES_COMMAND = "bash scripts/check.sh --lane contracts --lane frontend"
+NODE_MAJOR = "26"
+SETUP_NODE = "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e"
+
+
+def _standard_gate_lanes() -> list[str]:
+    """The lanes check.sh (G1) runs, read from its own LANES array."""
+    source = (ROOT / "scripts" / "check.sh").read_text(encoding="utf-8")
+    matches = re.findall(r"^declare -a LANES=\(([^)]*)\)$", source, re.MULTILINE)
+    assert len(matches) == 1
+    return matches[0].split()
+
+
+def _run_commands(job: dict[str, object]) -> list[str]:
+    return [
+        step["run"]
+        for step in job["steps"]
+        if isinstance(step, dict) and isinstance(step.get("run"), str)
+    ]
+
+
+def _lanes_run_by(command: str) -> set[str]:
+    """Which G1 lanes one workflow command runs."""
+    if command == "bash scripts/check.sh":
+        return set(_standard_gate_lanes())
+    if command.startswith("bash scripts/check.sh "):
+        words = command.split()[2:]
+        assert words[0::2] == ["--lane"] * (len(words) // 2), command
+        return set(words[1::2])
+    if command.startswith("bash scripts/check_") and command.endswith(".sh"):
+        lane = command.removeprefix("bash scripts/check_").removesuffix(".sh")
+        return {lane} if lane in _standard_gate_lanes() else set()
+    return set()
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [(WORKFLOW_PATH, PR_JOBS), (DAILY_EXTENDED_WORKFLOW_PATH, DAILY_JOBS)],
+)
+def test_each_workflow_has_at_most_three_jobs_and_no_summary_job(path, expected) -> None:
+    """Every job shows up as a check on a PR, so each workflow keeps at most
+    three and none of them only summarizes the others: a job's name says what
+    it gates, and every job must pass."""
+    jobs = _load_workflow_path(path)["jobs"]
+    assert len(jobs) <= MAX_JOBS_PER_WORKFLOW
+    assert {name: job["name"] for name, job in jobs.items()} == expected
+    for name, job in jobs.items():
+        assert "needs" not in job, name
+        assert "strategy" not in job, name
+        assert job["runs-on"] == "ubuntu-24.04"
+        assert "if" not in job and "continue-on-error" not in job
+        assert all("continue-on-error" not in step for step in job["steps"])
+        checkout = _uses_step(
+            job, "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+        )
+        assert checkout["with"] == {"persist-credentials": "false"}
+        if any("pip install" in command for command in _run_commands(job)):
+            python = _uses_step(
+                job, "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+            )
+            assert python["with"] == {"python-version": "3.13"}
+        if any("npm ci" in command for command in _run_commands(job)):
+            _uses_step(job, SETUP_NODE)
+
+
+def test_pr_ci_runs_every_g1_lane_in_two_jobs() -> None:
+    jobs = _load_workflow()["jobs"]
+
+    backend = jobs["standard-backend"]
+    assert backend["timeout-minutes"] == "30"
+    assert _run_commands(backend) == [
+        "python -m pip install -r backend/requirements.txt",
+        "bash scripts/check_backend.sh",
+    ]
+    assert _named_step(backend, "Run standard backend lane")["env"] == {
+        "PYTHON_BIN": "python", "BACKEND_PYTEST_WORKERS": "4",
+    }
+
+    rest = jobs["standard-contracts-frontend"]
+    assert rest["timeout-minutes"] == "20"
+    assert _run_commands(rest) == [
+        "python -m pip install -r backend/requirements.txt",
+        "npm ci --prefix frontend",
+        G1_REMAINING_LANES_COMMAND,
+    ]
+    assert _named_step(rest, "Run standard contracts and frontend lanes")["env"] == {
+        "PYTHON_BIN": "python",
+    }
+
+    for job in (backend, rest):
+        assert all("if" not in step for step in job["steps"] if "run" in step)
+    covered = [
+        lane
+        for job in (backend, rest)
+        for command in _run_commands(job)
+        for lane in sorted(_lanes_run_by(command))
+    ]
+    # Every lane check.sh runs, each exactly once.
+    assert sorted(covered) == sorted(_standard_gate_lanes())
+
+    for job_name, junit, artifact in (
+        ("standard-backend", "backend-junit.xml", "backend-test-timings"),
+        ("standard-contracts-frontend", "contracts-junit.xml", "contracts-test-timings"),
+    ):
+        upload = _uses_step(
+            jobs[job_name],
+            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        )
+        assert upload["if"] == "always()"
+        assert upload["with"]["name"] == artifact
+        assert upload["with"]["path"] == f"backend/.local/{junit}"
+        assert upload["with"]["retention-days"] == "7"
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ((), ["backend", "contracts", "frontend"]),
+        (("--lane", "frontend", "--lane", "contracts"), ["contracts", "frontend"]),
+        (("--lane", "backend"), ["backend"]),
+    ],
+)
+def test_check_sh_runs_all_lanes_or_exactly_the_selected_ones(
+    arguments, expected, tmp_path,
+) -> None:
+    """Execute the real check.sh against recording stand-in lanes."""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "check.sh").write_text(
+        (ROOT / "scripts" / "check.sh").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    calls = tmp_path / "calls"
+    calls.mkdir()
+    for lane in _standard_gate_lanes():
+        stub = scripts / f"check_{lane}.sh"
+        stub.write_text(f'#!/bin/sh\ntouch "{calls / lane}"\n', encoding="utf-8")
+        stub.chmod(0o755)
+
+    completed = subprocess.run(
+        ["bash", str(scripts / "check.sh"), *arguments],
+        env={
+            "PATH": os.defpath, "PYTHON_BIN": sys.executable,
+            "TMPDIR": str(tmp_path), **BYTECODE_ENV,
+        },
+        capture_output=True, text=True, timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert sorted(path.name for path in calls.iterdir()) == expected
+    printed = [
+        line.strip("= ") for line in completed.stdout.splitlines()
+        if line.startswith("===== ") and line.strip("= ") in _standard_gate_lanes()
+    ]
+    # Printed in check.sh's own LANES order, whatever order --lane named them.
+    assert printed == [lane for lane in _standard_gate_lanes() if lane in expected]
+
+
+@pytest.mark.parametrize("arguments", [("--lane",), ("--lane", "postgres"), ("backend",)])
+def test_check_sh_rejects_unknown_lanes_and_arguments(arguments, tmp_path) -> None:
+    completed = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "check.sh"), *arguments],
+        env={
+            "PATH": os.defpath, "PYTHON_BIN": sys.executable,
+            "TMPDIR": str(tmp_path), **BYTECODE_ENV,
+        },
+        capture_output=True, text=True, timeout=10,
+    )
+    assert completed.returncode == 2
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_every_node_setup_uses_the_single_pinned_major() -> None:
+    """One Node.js major everywhere: .nvmrc is the single pin, every CI Node
+    setup reads it, and npm refuses any other major (engines + engine-strict)."""
+    assert (ROOT / ".nvmrc").read_text(encoding="utf-8") == f"{NODE_MAJOR}\n"
+    engines = {"node": f">={NODE_MAJOR} <{int(NODE_MAJOR) + 1}"}
+    package = json.loads((ROOT / "frontend/package.json").read_text(encoding="utf-8"))
+    assert package["engines"] == engines
+    lock = json.loads(
+        (ROOT / "frontend/package-lock.json").read_text(encoding="utf-8")
+    )
+    assert lock["packages"][""]["engines"] == engines
+    npmrc = (ROOT / "frontend/.npmrc").read_text(encoding="utf-8").splitlines()
+    assert "engine-strict=true" in npmrc
+
+    setups = 0
+    for path in (WORKFLOW_PATH, DAILY_EXTENDED_WORKFLOW_PATH):
+        assert "node-version:" not in path.read_text(encoding="utf-8")
+        for job in _load_workflow_path(path)["jobs"].values():
+            for step in job["steps"]:
+                if str(step.get("uses", "")).startswith("actions/setup-node@"):
+                    assert step["uses"] == SETUP_NODE
+                    assert step["with"] == {
+                        "node-version-file": ".nvmrc",
+                        "cache": "npm",
+                        "cache-dependency-path": "frontend/package-lock.json",
+                    }
+                    setups += 1
+    assert setups == 3
+
+
+@pytest.mark.parametrize(
+    "script", ["check_frontend.sh", "check_sample_plugin.sh", "pack.sh"],
+)
+def test_node_scripts_refuse_another_node_major(script) -> None:
+    source = (ROOT / "scripts" / script).read_text(encoding="utf-8")
+    assert 'source "$ROOT_DIR/scripts/node_version.sh"' in source
+    assert "require_node_major " in source
+
+
+@pytest.mark.parametrize(
+    ("version", "accepted"),
+    [
+        (f"v{NODE_MAJOR}.7.0", True), (NODE_MAJOR, True), ("v22.22.0", False),
+        (f"v{NODE_MAJOR}0.1.0", False), ("", False),
+    ],
+)
+def test_require_node_major_accepts_only_the_pinned_major(version, accepted) -> None:
+    completed = subprocess.run(
+        [
+            "bash", "-c",
+            'source "$1"; require_node_major "$2" "probe"',
+            "_", str(ROOT / "scripts/node_version.sh"), version,
+        ],
+        env={"PATH": os.defpath, **BYTECODE_ENV},
+        capture_output=True, text=True, timeout=10,
+    )
+    assert completed.returncode == (0 if accepted else 1)
+    assert (f"probe needs Node.js {NODE_MAJOR}.x" in completed.stderr) == (not accepted)
+
+
 def test_daily_extended_gate_runs_once_per_day_and_is_manually_dispatchable() -> None:
     workflow = _load_workflow_path(DAILY_EXTENDED_WORKFLOW_PATH)
 
     assert workflow["name"] == "Daily Extended Gate"
-    events = workflow["on"]
-    assert isinstance(events, dict)
-    assert events == {
+    assert workflow["on"] == {
         "schedule": [{"cron": "17 18 * * *"}],
         "workflow_dispatch": {},
     }
@@ -368,87 +462,138 @@ def test_daily_extended_gate_runs_once_per_day_and_is_manually_dispatchable() ->
         "group": "daily-extended-${{ github.ref }}",
         "cancel-in-progress": "true",
     }
+    assert "secrets." not in repr(workflow)
+    for job in workflow["jobs"].values():
+        # G2 keeps pip's wheel cache off (a cached -march=native hnswlib wheel
+        # can SIGILL on another runner), so no daily job restores one.
+        assert not any(
+            str(step.get("uses", "")).startswith("actions/cache@")
+            for step in job["steps"]
+        )
+        assert "env" not in job
+        if any("pip install" in command for command in _run_commands(job)):
+            install = _named_step(job, "Install backend dependencies")
+            assert install["env"] == {"HNSWLIB_NO_NATIVE": "1"}
+            assert install["run"] == (
+                "python -m pip install --no-cache-dir -r backend/requirements.txt"
+            )
 
-    jobs = workflow["jobs"]
-    assert isinstance(jobs, dict)
-    assert set(jobs) == {"extended-gate", "frontend-parallel"}
-    job = jobs["extended-gate"]
-    assert isinstance(job, dict)
-    assert job["name"] == "level-2-extended"
-    assert job["runs-on"] == "ubuntu-24.04"
-    assert job["timeout-minutes"] == "25"
 
-    checkout = _uses_step(
-        job,
-        "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
-    )
-    assert checkout["with"] == {"persist-credentials": "false"}
-    python = _uses_step(
-        job,
-        "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
-    )
-    assert python["with"] == {"python-version": "3.13"}
-    node = _uses_step(
-        job,
-        "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
-    )
-    assert node["with"] == {
-        "node-version": "22",
-        "cache": "npm",
-        "cache-dependency-path": "frontend/package-lock.json",
-    }
+def test_daily_extended_gate_runs_every_g1_lane_exactly_as_pr_ci_does() -> None:
+    """G2 is G1 plus a complement; the daily G1 half must be PR CI's G1, not a
+    copy that drifts. Only the pip install differs (G2 keeps the wheel cache
+    off); the contracts-and-frontend job then also forces the frontend lane's
+    parallel path, which PR CI never takes."""
+    daily = _load_workflow_path(DAILY_EXTENDED_WORKFLOW_PATH)["jobs"]
+    ci = _load_workflow()["jobs"]
 
-    run_steps = [
-        step
-        for step in job["steps"]
-        if isinstance(step, dict) and isinstance(step.get("run"), str)
+    def same_install(commands: list[str]) -> list[str]:
+        return [
+            command.replace("pip install -r", "pip install --no-cache-dir -r")
+            for command in commands
+        ]
+
+    assert daily["extended-backend"]["timeout-minutes"] == "30"
+    assert _run_commands(daily["extended-backend"]) == same_install(
+        _run_commands(ci["standard-backend"])
+    )
+    assert _named_step(daily["extended-backend"], "Run standard backend lane")["env"] == (
+        _named_step(ci["standard-backend"], "Run standard backend lane")["env"]
+    )
+
+    rest = daily["extended-contracts-frontend"]
+    assert rest["timeout-minutes"] == "20"
+    assert _run_commands(rest) == [
+        *same_install(_run_commands(ci["standard-contracts-frontend"])),
+        "bash scripts/check_frontend.sh",
     ]
-    commands = [step["run"] for step in run_steps]
-    assert commands[-1] == "bash scripts/check_extended.sh"
-    assert [command for command in commands if "scripts/check" in command] == [
-        "bash scripts/check_extended.sh"
+    lanes = _named_step(rest, "Run standard contracts and frontend lanes")
+    assert lanes["env"] == _named_step(
+        ci["standard-contracts-frontend"], "Run standard contracts and frontend lanes",
+    )["env"]
+    assert "if" not in lanes
+    parallel = _named_step(rest, "Run frontend lane on its parallel path")
+    assert parallel["env"] == {"FRONTEND_LANE_PARALLEL": "1"}
+    # Runs after a failed G1 step too, so one daily run reports both paths.
+    assert parallel["if"] == "${{ !cancelled() }}"
+
+    # PR CI keeps its timing: no PR workflow job forces the parallel path.
+    for name, ci_job in ci.items():
+        for step in ci_job.get("steps", []):
+            assert "FRONTEND_LANE_PARALLEL" not in (step.get("env") or {}), name
+
+
+def test_daily_extended_complement_job_runs_only_the_complement_wrapper() -> None:
+    job = _load_workflow_path(DAILY_EXTENDED_WORKFLOW_PATH)["jobs"][
+        "extended-complement"
     ]
-    assert run_steps[-1]["env"] == {
+    assert job["name"] == "level-2-complement"
+    commands = _run_commands(job)
+    assert commands == [
+        "python -m pip install --no-cache-dir -r backend/requirements.txt",
+        "npm ci --prefix frontend",
+        "bash scripts/check_extended.sh --complement-only",
+    ]
+    assert _named_step(job, "Run level-2 complement")["env"] == {
         "PYTHON_BIN": "python",
         "BACKEND_PYTEST_WORKERS": "4",
     }
-
-
-def test_daily_frontend_parallel_job_forces_the_parallel_lane_path() -> None:
-    """CI runners have fewer than eight CPUs, so PR CI's frontend lane is always
-    sequential. The daily workflow forces the parallel path through the same
-    wrapper, in a job of its own (not part of level-2-extended's time budget)."""
-    workflow = _load_workflow_path(DAILY_EXTENDED_WORKFLOW_PATH)
-    job = workflow["jobs"]["frontend-parallel"]
-    assert isinstance(job, dict)
-    assert job["name"] == "level-2-frontend-parallel"
-    assert job["runs-on"] == "ubuntu-24.04"
-    assert "needs" not in job
-
-    checkout = _uses_step(
-        job,
-        "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    upload = _uses_step(
+        job, "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
     )
-    assert checkout["with"] == {"persist-credentials": "false"}
-    node = _uses_step(
-        job,
-        "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
-    )
-    assert node["with"]["node-version"] == "22"
-    run_steps = [
-        step
-        for step in job["steps"]
-        if isinstance(step, dict) and isinstance(step.get("run"), str)
-    ]
-    assert [step["run"] for step in run_steps] == [
-        "npm ci --prefix frontend",
-        "bash scripts/check_frontend.sh",
-    ]
-    assert run_steps[-1]["env"] == {"FRONTEND_LANE_PARALLEL": "1"}
+    assert upload["if"] == "always()"
+    assert upload["with"]["path"] == "backend/.local/backend-extended-junit.xml"
+    assert upload["with"]["retention-days"] == "7"
 
-    # PR CI keeps its timing: no PR workflow job forces the parallel path.
-    ci = _load_workflow()
-    for name, ci_job in ci["jobs"].items():
-        for step in ci_job.get("steps", []):
-            if isinstance(step, dict):
-                assert "FRONTEND_LANE_PARALLEL" not in (step.get("env") or {}), name
+
+@pytest.mark.parametrize("arguments", [(), ("--complement-only",)])
+def test_check_extended_runs_g1_first_unless_the_workflow_runs_it_elsewhere(
+    arguments, tmp_path,
+) -> None:
+    """Execute the real check_extended.sh against recording stand-ins.
+
+    Without arguments it is the whole of G2 (check.sh, then the complement in
+    order); --complement-only drops exactly the check.sh step and nothing else.
+    """
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "check_extended.sh").write_text(
+        (ROOT / "scripts" / "check_extended.sh").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    calls = tmp_path / "calls.txt"
+    for name in ("check.sh", "check_backend_extended.sh", "check_sample_plugin.sh"):
+        (scripts / name).write_text(
+            f'echo "{name}" >> "{calls}"\n', encoding="utf-8",
+        )
+    fake_python = tmp_path / "python"
+    fake_python.write_text(
+        f'#!/bin/sh\necho "python $(basename "$1") $2" >> "{calls}"\n',
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    completed = subprocess.run(
+        ["bash", str(scripts / "check_extended.sh"), *arguments],
+        env={"PATH": os.defpath, "PYTHON_BIN": str(fake_python), **BYTECODE_ENV},
+        capture_output=True, text=True, timeout=10,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    complement = [
+        "check_backend_extended.sh",
+        "check_sample_plugin.sh",
+        "python audit_facade_callers.py --assert-no-retire-now",
+    ]
+    expected = complement if arguments else ["check.sh", *complement]
+    assert calls.read_text(encoding="utf-8").splitlines() == expected
+
+
+def test_check_extended_rejects_unknown_arguments(tmp_path) -> None:
+    completed = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "check_extended.sh"), "--shard-index"],
+        env={"PATH": os.defpath, "PYTHON_BIN": str(tmp_path / "absent"), **BYTECODE_ENV},
+        capture_output=True, text=True, timeout=10,
+    )
+    assert completed.returncode == 2
+    assert "Unknown argument: --shard-index" in completed.stderr

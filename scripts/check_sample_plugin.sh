@@ -80,6 +80,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# One supported Node.js major (.nvmrc); see scripts/node_version.sh.
+source "$ROOT_DIR/scripts/node_version.sh"
+require_node_major "$(node -v 2>/dev/null || true)" "the sample plugin lane" || exit 1
+
 cd "$ROOT_DIR/frontend"
 export SILICON_NOTEBOOK_UI_PLUGINS="$PKG"
 node scripts/sync-ui-plugins.mjs

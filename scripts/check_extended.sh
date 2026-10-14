@@ -5,8 +5,27 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 # Level 2 is intentionally exhaustive and is not subject to the Level 1
-# edit-time Apple Silicon <=60s target. CI schedules this wrapper once daily.
-bash "$ROOT_DIR/scripts/check.sh"
+# edit-time Apple Silicon <=60s target. Locally, run it with no arguments: it
+# is G1 (check.sh) followed by everything G2 adds on top.
+#
+# --complement-only skips the G1 step and runs only what G2 adds. It exists for
+# .github/workflows/daily-extended.yml alone, which runs G1's lanes as sibling
+# jobs on their own runners (the backend in the same two shards as PR CI) and
+# fails the day's run unless every one of them and this job succeed. One 4-vCPU
+# runner cannot fit G1 and the complement inside a job timeout: from
+# 2026-10-07 every single-job run was cancelled before reaching the end.
+# A local run with the flag is not a G2 run.
+RUN_STANDARD_GATE=1
+while (( $# )); do
+  case "$1" in
+    --complement-only) RUN_STANDARD_GATE=0; shift ;;
+    *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+
+if (( RUN_STANDARD_GATE )); then
+  bash "$ROOT_DIR/scripts/check.sh"
+fi
 bash "$ROOT_DIR/scripts/check_backend_extended.sh"
 
 # arXiv sample plugin's front-end half: the one lane that synchronizes a UI

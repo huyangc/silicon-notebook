@@ -13,8 +13,21 @@ BACKEND_EXTENDED_PYTEST_WORKERS="${BACKEND_EXTENDED_PYTEST_WORKERS:-${BACKEND_PY
 # this deliberately says architecture_contract_heavy, not architecture_contract
 # — see conftest._ARCHITECTURE_CONTRACT_HEAVY_TESTS for exactly which 8.
 # PostgreSQL has its own authoritative check_postgres.sh lane.
+
+# Same offline isolation as check.sh and check_backend.sh. check_extended.sh
+# runs this after check.sh, whose exports end with its own process, and the
+# daily workflow runs it on a runner of its own, so this lane sets them itself.
+export SILICON_NOTEBOOK_ENV_FILE="" MODEL_SERVICES_CONFIG="" EXTENSIONS_CONFIG=""
+export MINERU_MODE="off" MINERU_API_TOKEN=""
+mkdir -p "$ROOT_DIR/.local/pycache" "$ROOT_DIR/backend/.local"
+export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
+# Bytecode goes to the gitignored prefix above, so write and reuse it even
+# when the calling shell exports PYTHONDONTWRITEBYTECODE=1 (see check.sh).
+unset PYTHONDONTWRITEBYTECODE
+
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   -m pytest -p no:cacheprovider -n "$BACKEND_EXTENDED_PYTEST_WORKERS" \
   -m "slow or architecture_contract_heavy or graph_index_contract" \
   --ignore="$ROOT_DIR/backend/tests/postgres" \
+  --durations=30 --junitxml="$ROOT_DIR/backend/.local/backend-extended-junit.xml" \
   "$ROOT_DIR/backend/tests"

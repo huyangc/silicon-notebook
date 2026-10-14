@@ -4,7 +4,7 @@ The lane is run for real against a fake ``npm`` that records when each script
 starts and ends, so the ordering, concurrency, failure and interruption
 reporting are checked as behaviour, not as text. CI runners take the
 sequential path; the parallel path is forced here (and runs for real in the
-daily ``level-2-frontend-parallel`` job).
+daily ``level-2-contracts-frontend`` job's FRONTEND_LANE_PARALLEL=1 step).
 """
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ import subprocess
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+PINNED_NODE_MAJOR = (ROOT / ".nvmrc").read_text(encoding="utf-8").strip()
 
 # `npm run <script>`: record start/end, then behave as FAKE_NPM_<SCRIPT> says.
 # `test:node` waits for `test:component` to start when FAKE_NPM_OVERLAP is set,
@@ -44,13 +45,24 @@ printf 'end %s\n' "$script" >>"$FAKE_NPM_EVENTS"
 def lane(tmp_path):
     root = tmp_path / "repo"
     (root / "scripts").mkdir(parents=True)
-    shutil.copy2(ROOT / "scripts" / "check_frontend.sh", root / "scripts" / "check_frontend.sh")
+    for name in ("check_frontend.sh", "node_version.sh"):
+        shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+    shutil.copy2(ROOT / ".nvmrc", root / ".nvmrc")
     (root / "frontend" / "node_modules").mkdir(parents=True)
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     npm = fake_bin / "npm"
     npm.write_text(FAKE_NPM, encoding="utf-8")
     npm.chmod(0o755)
+    # The lane refuses any Node.js major but the pinned one before it runs a
+    # step; the fake reports the pinned major unless FAKE_NODE_VERSION says
+    # otherwise, so the lane never depends on the host's (or runner's) node.
+    node = fake_bin / "node"
+    node.write_text(
+        f'#!/bin/sh\necho "${{FAKE_NODE_VERSION:-v{PINNED_NODE_MAJOR}.0.0}}"\n',
+        encoding="utf-8",
+    )
+    node.chmod(0o755)
     events = tmp_path / "events"
 
     def run(**overrides: str) -> tuple[subprocess.CompletedProcess, list[str]]:
@@ -64,6 +76,9 @@ def lane(tmp_path):
         }
         env.pop("CHECK_TIMING_FILE", None)
         env.pop("CHECK_LANE_NAME", None)
+        # check.sh exports ROOT_DIR to its lanes; inherited, it would point
+        # this copy of the lane back at the real checkout.
+        env.pop("ROOT_DIR", None)
         result = subprocess.run(
             ["bash", str(root / "scripts" / "check_frontend.sh")],
             env=env, capture_output=True, text=True, timeout=60,
@@ -75,6 +90,20 @@ def lane(tmp_path):
 
 def _headers(stdout: str) -> list[str]:
     return [line for line in stdout.splitlines() if line.startswith("----- frontend ")]
+
+
+@pytest.mark.parametrize("parallel", ["0", "1"])
+def test_another_node_major_stops_the_lane_before_any_step(lane, parallel):
+    result, events = lane(
+        FRONTEND_LANE_PARALLEL=parallel, FAKE_NODE_VERSION="v22.22.0",
+    )
+
+    assert result.returncode == 1
+    assert events == []
+    assert (
+        f"the frontend lane needs Node.js {PINNED_NODE_MAJOR}.x (pinned in .nvmrc);"
+        " found v22.22.0"
+    ) in result.stderr
 
 
 def test_parallel_runs_the_groups_concurrently_and_typechecks_after_the_build(lane):

@@ -163,7 +163,7 @@ def test_postgres_integration_lane_is_separate_fail_closed_and_pg16_authoritativ
     ):
         assert phrase in workflow
     assert "scripts/check_postgres.sh" not in _between(
-        ".github/workflows/ci.yml", "standard-gate:", "postgres-integration:"
+        ".github/workflows/ci.yml", "\njobs:\n", "  postgres-integration:"
     )
 
 

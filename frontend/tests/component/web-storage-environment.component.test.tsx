@@ -1,6 +1,6 @@
 // 回归门:组件测试环境里的 Web Storage 必须真的可用,且 `Storage` 类与实例同源。
 //
-// 真机踩过(开发者本机 Node 26.7,CI 钉 Node 22 看不见):Node ≥ 24 自带
+// 真机踩过(开发者本机 Node 26.7,当时 CI 钉 Node 22 看不见;现在只支持 Node 26):Node ≥ 24 自带
 // `localStorage`/`sessionStorage` 全局,没给 `--localstorage-file` 时它们的 getter
 // 返回 **undefined**;vitest 的 jsdom 环境按「globalThis 上已有同名 key 就跳过」填充
 // 全局,于是 Node 那份胜出、jsdom 自己那份根本没装上。任何读 localStorage 的组件
